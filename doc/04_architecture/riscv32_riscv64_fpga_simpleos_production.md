@@ -135,6 +135,13 @@ the supported clocked/process boundary. Compiler diagnostics must name the
 unsupported source construct and location. Fallback or partial emission is a
 typed failure.
 
+`@clocked` registers the function's return ports. The compiler emits one
+combinational `next_*` network and one reset-aware output-register process;
+structural composition may wire a registered state output back to the matching
+state input without moving CPU semantics into VHDL. Reset values are recursive
+zero values, so each CPU wrapper owns a one-bit initialization state and calls
+its existing `core*_reset` transition on the first active clock.
+
 Generated VHDL and source maps are outputs, not hand-edited inputs. The bundle
 orchestrator may package them but may not synthesize CPU semantics with string
 templates.

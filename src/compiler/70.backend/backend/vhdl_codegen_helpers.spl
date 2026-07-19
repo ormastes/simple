@@ -4,7 +4,7 @@
 # Extension of VhdlBackend via impl block.
 
 use compiler.mir.mir_data.*
-use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock, MirTerminator}
+use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock, MirTerminator, vhdl_clock_domain_name_from_metadata}
 use compiler.backend.backend_api.*
 use compiler.backend.vhdl.vhdl_builder.{VhdlBuilder}
 use .vhdl.vhdl_builder.{VhdlBuilder}
@@ -298,6 +298,28 @@ impl VhdlBackend:
     fn hardware_call_result_bridge(block_id: i64, inst_index: i64) -> text:
         "{self.hardware_call_bridge_base(block_id, inst_index)}_result"
 
+    fn hardware_clock_domain_display(name: text) -> text:
+        var display = name.trim()
+        if display.starts_with("clk_"):
+            display = display.substring(4, display.len())
+        if display.starts_with("domain_"):
+            display = display.substring(7, display.len())
+        display
+
+    fn hardware_clocked_has_explicit_domain_arg(func: MirFunction) -> bool:
+        if not func.has_vhdl_metadata or not func.vhdl_metadata.has_clocked:
+            return false
+        val clocked = func.vhdl_metadata.clocked
+        val clock_key = clocked.clock_signal.lower()
+        val reset_key = if clocked.has_reset: clocked.reset_signal.lower() else: ""
+        var idx = 0
+        while idx < func.signature.params.len():
+            val arg_key = self.vhdl_arg_local_name(func, idx).lower()
+            if arg_key == clock_key or (reset_key.len() > 0 and arg_key == reset_key):
+                return true
+            idx = idx + 1
+        false
+
     fn emit_hardware_call_bridge_declarations(builder: VhdlBuilder,
                                                 caller: MirFunction) -> Result<(), CompileError>:
         for block in caller.blocks:
@@ -365,7 +387,7 @@ impl VhdlBackend:
                 inst_index = inst_index + 1
         Ok(())
 
-    fn emit_hardware_call_instance(builder: VhdlBuilder, caller_name: text,
+    fn emit_hardware_call_instance(builder: VhdlBuilder, caller: MirFunction,
                                    dest: LocalId?, func: MirOperand,
                                    args: [MirOperand], ordinal: i64,
                                    block_id: i64, inst_index: i64,
@@ -376,8 +398,10 @@ impl VhdlBackend:
         val callee = match callee_option:
             case Some(value): value
             case None: return Ok(())
-        if callee.name == caller_name:
-            return Err(self.backend_error("Synthesizable VHDL backend does not support recursive hardware entity call `{caller_name}`"))
+        if callee.name == caller.name:
+            return Err(self.backend_error("Synthesizable VHDL backend does not support recursive hardware entity call `{caller.name}`"))
+        if self.hardware_clocked_has_explicit_domain_arg(callee):
+            return Err(self.backend_error("Nested @clocked entity `{callee.name}` must use implicit clock/reset ports; explicit clock/reset arguments would create generated clocks through combinational bridges"))
         if args.len() != callee.signature.params.len():
             return Err(self.backend_error("VHDL hardware entity call `{callee.name}` expected {callee.signature.params.len()} arguments, got {args.len()}"))
 
@@ -394,6 +418,29 @@ impl VhdlBackend:
                     case Err(err): return Err(err)
             actuals = actuals.push(actual)
             arg_index = arg_index + 1
+
+        if callee.has_vhdl_metadata and callee.vhdl_metadata.has_clocked:
+            if not caller.has_vhdl_metadata or not caller.vhdl_metadata.has_clocked:
+                return Err(self.backend_error("E0710 clock domain crossing: clocked entity `{callee.name}` cannot be read from a combinational entity"))
+            val source_clocked = callee.vhdl_metadata.clocked
+            val dest_clocked = caller.vhdl_metadata.clocked
+            val source_domain = vhdl_clock_domain_name_from_metadata(source_clocked)
+            val dest_domain = vhdl_clock_domain_name_from_metadata(dest_clocked)
+            if source_domain != dest_domain:
+                val source_name = self.hardware_clock_domain_display(source_domain)
+                val dest_name = self.hardware_clock_domain_display(dest_domain)
+                return Err(self.backend_error("E0710 clock domain crossing from domain `{source_name}` to domain `{dest_name}`"))
+            if (source_clocked.has_reset != dest_clocked.has_reset or
+                source_clocked.reset_polarity != dest_clocked.reset_polarity or
+                source_clocked.reset_synchrony != dest_clocked.reset_synchrony):
+                val domain_name = self.hardware_clock_domain_display(source_domain)
+                return Err(self.backend_error("E0710 clock domain `{domain_name}` has incompatible reset metadata"))
+            if not formals.contains(source_clocked.clock_signal):
+                formals = formals.push(source_clocked.clock_signal)
+                actuals = actuals.push(dest_clocked.clock_signal)
+            if source_clocked.has_reset and not formals.contains(source_clocked.reset_signal):
+                formals = formals.push(source_clocked.reset_signal)
+                actuals = actuals.push(dest_clocked.reset_signal)
 
         val return_abi = match self.vhdl_return_abi(callee):
             case Ok(value): value
@@ -444,7 +491,7 @@ impl VhdlBackend:
                             case Ok(value): value
                             case Err(err): return Err(err)
                         if callee.?:
-                            match self.emit_hardware_call_instance(builder, caller.name,
+                            match self.emit_hardware_call_instance(builder, caller,
                                                                   dest, func, args, ordinal,
                                                                   block.id.id, inst_index,
                                                                   control_process):

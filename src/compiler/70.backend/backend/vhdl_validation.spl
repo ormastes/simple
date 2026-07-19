@@ -698,9 +698,10 @@ impl VhdlBackend:
                 var idx = 0
                 while idx < elements.len():
                     val name = self.vhdl_return_field_name(func, idx)
-                    if used.get(name).?:
+                    val key = name.lower()
+                    if used.get(key).?:
                         return Err(self.backend_error("Duplicate VHDL output port after sanitization: {name}"))
-                    used[name] = true
+                    used[key] = true
                     fields = fields.push(VhdlReturnField(
                         name: name,
                         type_: elements[idx],
@@ -731,25 +732,84 @@ impl VhdlBackend:
 
     fn vhdl_ports_for_function(func: MirFunction) -> Result<[VhdlPortSpec], CompileError>:
         var ports: [VhdlPortSpec] = []
+        var has_clocked = false
+        var clock_signal_key = ""
+        var reset_signal_key = ""
+        if func.has_vhdl_metadata and func.vhdl_metadata.has_clocked:
+            val clocked = func.vhdl_metadata.clocked
+            if not clocked.is_valid:
+                return Err(self.backend_error("Invalid @clocked metadata: {clocked.validation_errors.join(\"; \")}"))
+            has_clocked = true
+            clock_signal_key = clocked.clock_signal.lower()
+            if clocked.has_reset:
+                reset_signal_key = clocked.reset_signal.lower()
+                if clock_signal_key == reset_signal_key:
+                    return Err(self.backend_error("@clocked clock and reset ports must use different VHDL names"))
 
         var idx = 0
         while idx < func.signature.params.len():
             if self.type_has_general_memory(func.signature.params[idx]):
                 return Err(self.backend_error("VHDL-MEM-GENERAL: Array, slice, pointer, and reference ports require an explicit package-level memory ABI before VHDL emission"))
-            val param_type = match self.mir_type_to_vhdl_at(func.signature.params[idx], Some(func.span)):
+            val param_name = self.vhdl_arg_local_name(func, idx)
+            var param_type = match self.mir_type_to_vhdl_at(func.signature.params[idx], Some(func.span)):
                 case Ok(result): result
                 case Err(err): return Err(err)
+            val param_key = param_name.lower()
+            if has_clocked and (param_key == clock_signal_key or
+                                (reset_signal_key.len() > 0 and param_key == reset_signal_key)):
+                if func.signature.params[idx].kind != MirTypeKind.Bool:
+                    return Err(self.backend_error("@clocked clock/reset port `{param_name}` must have type bool"))
+                param_type = "std_logic"
             ports = ports.push(VhdlPortSpec(
-                name: self.vhdl_arg_local_name(func, idx),
+                name: param_name,
                 direction: "in",
                 type_name: param_type
             ))
             idx = idx + 1
 
+        if has_clocked:
+            val clocked = func.vhdl_metadata.clocked
+            val clock_type = "std_logic"
+            var has_clock = false
+            for port in ports:
+                if port.name.lower() == clock_signal_key:
+                    if port.type_name != clock_type:
+                        return Err(self.backend_error("@clocked clock port `{clocked.clock_signal}` must be bool/std_logic"))
+                    has_clock = true
+            if not has_clock:
+                ports = ports.push(VhdlPortSpec(
+                    name: clocked.clock_signal,
+                    direction: "in",
+                    type_name: clock_type
+                ))
+            if clocked.has_reset:
+                var has_reset = false
+                for port in ports:
+                    if port.name.lower() == reset_signal_key:
+                        if port.type_name != clock_type:
+                            return Err(self.backend_error("@clocked reset port `{clocked.reset_signal}` must be bool/std_logic"))
+                        has_reset = true
+                if not has_reset:
+                    ports = ports.push(VhdlPortSpec(
+                        name: clocked.reset_signal,
+                        direction: "in",
+                        type_name: clock_type
+                    ))
+
+        var used_port_names: Dict<text, text> = {}
+        for port in ports:
+            val key = port.name.lower()
+            if used_port_names.has(key):
+                return Err(self.backend_error("Duplicate VHDL input port name (case-insensitive): {port.name}"))
+            used_port_names[key] = port.name
+
         val abi = match self.vhdl_return_abi(func):
             case Ok(result): result
             case Err(err): return Err(err)
         for field in abi.fields:
+            val field_key = field.name.lower()
+            if used_port_names.has(field_key):
+                return Err(self.backend_error("Duplicate VHDL input/output port name (case-insensitive): {field.name}"))
             if self.type_has_general_memory(field.type_):
                 return Err(self.backend_error("VHDL-MEM-GENERAL: Array, slice, pointer, and reference result ports require an explicit package-level memory ABI before VHDL emission"))
             val return_type = match self.mir_type_to_vhdl_at(field.type_, Some(func.span)):
@@ -760,6 +820,16 @@ impl VhdlBackend:
                 direction: "out",
                 type_name: return_type
             ))
+            used_port_names[field_key] = field.name
+
+        if has_clocked:
+            var used_next_names: Dict<text, bool> = {}
+            for field in abi.fields:
+                val next_name = "next_{field.name}"
+                val next_key = next_name.lower()
+                if used_port_names.has(next_key) or used_next_names.has(next_key):
+                    return Err(self.backend_error("Clocked VHDL next-state signal collides with a port or another next-state signal: {next_name}"))
+                used_next_names[next_key] = true
 
         Ok(ports)
 

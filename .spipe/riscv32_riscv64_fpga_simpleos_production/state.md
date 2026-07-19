@@ -284,3 +284,20 @@ implementation-milestone-2-in-progress
   SXL/UXL are fixed RV64, MPP=2 coerces to U, and direct-only mtvec/stvec writes
   are aligned. Focused scenarios cover aliasing, WARL, PMP denial, every atomic
   entry path, and xRET clearing, but remain unexecuted under the CLI blocker.
+
+## 2026-07-19 Registered compiler product boundary
+
+- Preserved structured `@clocked` metadata through MIR and taught the canonical
+  VHDL owner to emit a combinational `next_*` network plus a reset-aware output
+  register process. Metadata-owned clock/reset ports use `std_logic`; port and
+  next-state collisions are rejected case-insensitively.
+- Added `core32_clocked` and `core64_clocked` as initialized, registered product
+  roots over the existing protected `core*_cycle` transitions. Their reset
+  closures are fully `@hardware`-eligible, including RV64 `mmu64_create`.
+- Focused higher-capability re-review closed all four reported P1 findings and
+  returned PASS with no P0/P1 remaining. Regression specs cover clock/reset
+  typing, reset output values, collision rejection, nested generated-clock
+  rejection, first-edge initialization, and canonical GHDL synthesis roots.
+- Execution remains unclaimed: no Simple command was repeated after the known
+  exit-139/stall verification cap. Fresh pure-Simple generation/GHDL evidence
+  is the next gate; Linux login/`ls` and physical FPGA qualification remain open.

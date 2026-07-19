@@ -28,8 +28,8 @@ impl VhdlBackend:
         if self.active_return_abi.is_tuple:
             for field in self.active_return_abi.fields:
                 builder.emit_signal_assign(field.name, "{value_name}.f{field.index}")
-        else:
-            builder.emit_signal_assign("result_out", value_name)
+        elif self.active_return_abi.fields.len() > 0:
+            builder.emit_signal_assign(self.active_return_abi.fields[0].name, value_name)
         Ok(())
 
     me compile_function(builder: VhdlBuilder, func: MirFunction) -> Result<VhdlEntity, CompileError>:
@@ -44,7 +44,22 @@ impl VhdlBackend:
         val return_abi_result = self.vhdl_return_abi(func)
         if return_abi_result.is_err():
             return Err(return_abi_result.unwrap_err())
-        self.active_return_abi = return_abi_result.unwrap()
+        val port_return_abi = return_abi_result.unwrap()
+        val is_clocked = func.has_vhdl_metadata and func.vhdl_metadata.has_clocked
+        if is_clocked:
+            var next_fields: [VhdlReturnField] = []
+            for field in port_return_abi.fields:
+                next_fields = next_fields.push(VhdlReturnField(
+                    name: "next_{field.name}",
+                    type_: field.type_,
+                    index: field.index
+                ))
+            self.active_return_abi = VhdlReturnAbi(
+                is_tuple: port_return_abi.is_tuple,
+                fields: next_fields
+            )
+        else:
+            self.active_return_abi = port_return_abi
 
         for block in func.blocks:
             self.active_blocks[block.id.id] = block
@@ -55,7 +70,7 @@ impl VhdlBackend:
             self.active_local_types[local.id.id] = local.type_
             self.active_local_kinds[local.id.id] = local.kind
 
-        val control_process = self.needs_control_process(func)
+        val control_process = self.needs_control_process(func) or is_clocked
 
         # Process-local values need ordered variable semantics. Concurrent
         # expression inlining is only valid for the signal-only path.
@@ -79,6 +94,13 @@ impl VhdlBackend:
 
         # Emit architecture
         builder.emit_architecture_begin(entity_name, "rtl")
+
+        if is_clocked:
+            for field in port_return_abi.fields:
+                val field_type = match self.mir_type_to_vhdl_at(field.type_, Some(func.span)):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                builder.emit_signal_decl("next_{field.name}", field_type, nil)
 
         # Declare internal signals for local variables
         for local in func.locals:
@@ -122,6 +144,10 @@ impl VhdlBackend:
             val process_result = self.compile_function_control_process(builder, func)
             if process_result.is_err():
                 return Err(process_result.unwrap_err())
+            if is_clocked:
+                val clocked_result = self.compile_clocked_output_process(builder, func, port_return_abi)
+                if clocked_result.is_err():
+                    return Err(clocked_result.unwrap_err())
             builder.emit_architecture_end("rtl")
             return Ok(VhdlEntity(
                 name: entity_name,

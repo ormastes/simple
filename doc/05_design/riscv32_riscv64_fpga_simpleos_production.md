@@ -101,6 +101,13 @@ entry annotations. The stateful entry then owns clock/reset, instruction/data
 bus request/response, and RVFI commit ports and calls the same existing
 combinational/update helpers used by software-model tests.
 
+The entry is an `@clocked` return-register boundary: its combinational process
+computes `next_*`, its output process applies reset or registers those values,
+and the generated SoC feeds the registered state field back to the state input.
+A wrapper-local `initialized` bit converts the compiler's recursive-zero reset
+into the existing architecture-specific `core32_reset`/`core64_reset` value on
+the first non-reset edge. No handwritten VHDL owns CPU state or transitions.
+
 The bundle generator invokes or consumes the canonical compiler output; it
 never embeds VHDL source text for CPU semantics. Generated artifacts include
 source root, compiler hash/version, source map, VHDL hash, and diagnostics.

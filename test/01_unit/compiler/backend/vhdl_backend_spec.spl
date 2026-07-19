@@ -2069,7 +2069,7 @@ bitfield Rv32Instruction(u32):
 
 @hardware
 @clocked(clk, reset_n)
-fn bitfield_opcode(clk: bool, reset_n: bool, imem_rdata: u32) -> u32:
+fn bitfield_opcode(imem_rdata: u32) -> u32:
     val inst = Rv32Instruction(imem_rdata)
     inst.opcode as u32
 """
@@ -2084,6 +2084,8 @@ fn bitfield_opcode(clk: bool, reset_n: bool, imem_rdata: u32) -> u32:
         val mir_funcs = mir_module.functions.values()
         check(mir_funcs.len() > 0)
         val mir_fn = mir_funcs[0]
+        check(mir_fn.has_vhdl_metadata)
+        check(mir_fn.vhdl_metadata.has_clocked)
         var has_opcode_slice = false
         for block in mir_fn.blocks:
             for inst in block.instructions:
@@ -2098,6 +2100,15 @@ fn bitfield_opcode(clk: bool, reset_n: bool, imem_rdata: u32) -> u32:
         val result = make_simple_backend().compile(mir_module)
         check(result.is_ok())
         val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("clk : in std_logic;"))
+        check(vhdl.contains("reset_n : in std_logic;"))
+        check(vhdl.contains("signal next_result_out : unsigned(31 downto 0);"))
+        check(vhdl.contains("next_result_out <="))
+        check(vhdl.contains("p_clk: process(clk, reset_n)"))
+        check(vhdl.contains("if reset_n = '0' then"))
+        check(vhdl.contains("result_out <= to_unsigned(0, 32);"))
+        check(vhdl.contains("elsif rising_edge(clk) then"))
+        check(vhdl.contains("result_out <= next_result_out;"))
         check(vhdl.contains("imem_rdata : in unsigned(31 downto 0);"))
         check(vhdl.contains("imem_rdata(6 downto 0)"))
         check(vhdl.contains("resize(unsigned("))
@@ -2160,7 +2171,65 @@ fn bitfield_write_opcode(clk: bool, reset_n: bool, imem_rdata: u32, next_opcode:
         val result = make_simple_backend().compile(mir_module)
         check(result.is_ok())
         val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("clk : in std_logic;"))
+        check(vhdl.contains("reset_n : in std_logic;"))
         check(vhdl.contains("imem_rdata(31 downto 7) & resize(unsigned(next_opcode), 7)"))
+
+    it "rejects clocked next-state names that collide with ports case-insensitively":
+        val src = """
+@hardware
+@clocked(clk, reset_n)
+fn next_collision(Next_Result_Out: u32) -> u32:
+    Next_Result_Out
+"""
+        val path = "testdata/clocked_next_collision_hw.spl"
+        val log = make_logger()
+        val module = parse_full_frontend(src, path, "clocked_next_collision_hw", log)
+        var hir_lowering = HirLowering.with_filename(path)
+        val hir_module = hir_lowering.lower_module(module)
+        var mir_lowering = MirLowering.new(hir_module.symbols)
+        val result = make_simple_backend().compile(mir_lowering.lower_module(hir_module))
+        check(result.is_err())
+        check(result.unwrap_err().message.contains("next-state signal collides"))
+
+    it "rejects case-insensitive clock and reset name reuse":
+        val src = """
+@hardware
+@clocked(clk, CLK)
+fn reused_clock_name(a: u32) -> u32:
+    a
+"""
+        val path = "testdata/reused_clock_name_hw.spl"
+        val log = make_logger()
+        val module = parse_full_frontend(src, path, "reused_clock_name_hw", log)
+        var hir_lowering = HirLowering.with_filename(path)
+        val hir_module = hir_lowering.lower_module(module)
+        var mir_lowering = MirLowering.new(hir_module.symbols)
+        val result = make_simple_backend().compile(mir_lowering.lower_module(hir_module))
+        check(result.is_err())
+        check(result.unwrap_err().message.contains("clock and reset ports must use different"))
+
+    it "rejects explicit generated-clock arguments on nested clocked entities":
+        val src = """
+@hardware
+@clocked(clk, reset_n)
+fn explicit_clock_child(clk: bool, reset_n: bool, a: u32) -> u32:
+    a
+
+@hardware
+@clocked(clk, reset_n)
+fn implicit_clock_parent(a: u32) -> u32:
+    explicit_clock_child(false, false, a)
+"""
+        val path = "testdata/nested_explicit_clock_hw.spl"
+        val log = make_logger()
+        val module = parse_full_frontend(src, path, "nested_explicit_clock_hw", log)
+        var hir_lowering = HirLowering.with_filename(path)
+        val hir_module = hir_lowering.lower_module(module)
+        var mir_lowering = MirLowering.new(hir_module.symbols)
+        val result = make_simple_backend().compile(mir_lowering.lower_module(hir_module))
+        check(result.is_err())
+        check(result.unwrap_err().message.contains("must use implicit clock/reset ports"))
 
     it "lowers top-edge hardware bitfield writes through MIR concat and slice":
         val src = """

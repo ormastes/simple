@@ -22,6 +22,7 @@ Date: 2026-07-18
 | `rv32_pmp_review` | clocked Sv32 production seam | Reject direct `RamState` translation; port RV64 request/response ownership, preserve 34-bit PA, apply SUM/MXR/Svade, superpage-aware ASID/global TLB, and PMP-check PTE reads | accepted; walker implemented and reviewed |
 | `rv32_pmp_review` | RV32 architectural memory frontend | Reuse RV64 transaction FSM; latch access context, sequence walker/final PMP/physical bus, preserve precise faults, and carry atomic/SC qualifiers | accepted; frontend implemented, reviewed, and integrated |
 | `rv32_pmp_review` | RV32 clock-path integration | Make `CoreState` own RF/MMU/memory, connect SATP/SFENCE and cycle/retire counters, route one response-latched physical request through `soc_tick`, and prove a two-level translated fetch | accepted after legality, IALIGN, trap-stop, halt-drain, and FENCE corrections; primary owns commit |
+| `rv32_pmp_review` | registered VHDL product boundary | Preserve `@clocked` in MIR, emit combinational `next_*` plus reset-aware output registers, reject generated nested clocks, and expose initialized RV32/RV64 roots | accepted after the four P1s and both reset closures passed focused static re-review; primary owns commit |
 
 The collaboration runtime did not expose a Spark/lower-model selector. The
 available sidecars were therefore kept read-only and bounded. Their conclusions
@@ -43,8 +44,9 @@ were reviewed against source by the primary normal/highest-capability model.
 
 The immediate VHDL compiler gate is now executable in
 `test/03_system/compiler/pure_simple_vhdl_source_of_truth_spec.spl`: compile
-the tracked `core32_cycle` and `core64_cycle` roots, require their translated
-MMU/PMP callees in the emitted VHDL, then synthesize each entity with GHDL.
+the tracked `core32_clocked` and `core64_clocked` roots, require their
+registered `p_clk` boundary and translated MMU/PMP callees in the emitted
+VHDL, then synthesize each entity with GHDL.
 The contract bundle stays non-authoritative until both rows pass; packaging is
 not a substitute for this gate.
 

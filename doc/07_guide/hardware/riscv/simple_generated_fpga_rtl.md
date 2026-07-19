@@ -14,8 +14,9 @@ sidecars, VHDL interfaces, SoC scaffolding, formal files, and future acceptance
 metadata. The bundled CPU VHDL remains placeholder text with constant RVFI and
 is not an executable compiler-generated CPU. In Simple source, the RV64 clock
 path now connects Sv39, PMP, M, single-master A, and integer C; RV32 parity and
-MPRV-protected data privilege and status aliasing are also connected. RV32
-parity and compiler-to-VHDL evidence remain open. No generated-RTL or KV260 Linux
+MPRV-protected data privilege and status aliasing are also connected. Both
+tracked cores now expose reset-aware `@clocked` product boundaries, but their
+compiler-to-VHDL evidence remains unexecuted. No generated-RTL or KV260 Linux
 login/`ls` transcript exists.
 
 Accordingly, current bundles report:
@@ -104,12 +105,23 @@ clocked/bus VHDL, source maps, and changing semantic RVFI.
 
 The existing generated RV32 source contains useful scalar `@hardware`
 decode/control helpers, but it is generated text and is not the product core.
-The tracked RV32 `core32_cycle()` and RV64 `core64_cycle()` functions are now
-explicit `@hardware` whole-core transition boundaries. Their compiler/GHDL
-acceptance is pinned in the pure-Simple VHDL source-of-truth spec, but remains
-unexecuted while the pure CLI is blocked. Do not replace the contract
-placeholder or claim authoritative output until both entities compile and
-synthesize from those tracked roots.
+The tracked RV32 `core32_clocked()` and RV64 `core64_clocked()` functions are
+the product roots. Each calls its existing `core*_cycle()` transition, computes
+a `next_result_out` record, and lets `@clocked(clk, reset_n)` register that
+record. Recursive-zero reset clears `initialized`; the first active edge calls
+`core_reset()` or RV64 `core64_init_single_master()`, then later edges execute
+the protected transition. A structural top wires `result_out.initialized` and
+`result_out.cycle.state` back to the matching inputs and routes the cycle bus
+fields; it does not implement CPU behavior. Compiler/GHDL acceptance is pinned
+in the pure-Simple VHDL source-of-truth spec, but remains unexecuted while the
+pure CLI is blocked. Do not replace the contract placeholder or claim
+authoritative output until both clocked entities compile and synthesize from
+those tracked roots.
+
+```bash
+bin/simple compile --backend=vhdl src/lib/hardware/rv32i_rtl/clocked.spl -o build/vhdl/rv32/core32_clocked.vhd
+bin/simple compile --backend=vhdl src/lib/hardware/rv64gc_rtl/clocked.spl -o build/vhdl/rv64/core64_clocked.vhd
+```
 
 ### 2. Exercise Sv32 and Sv39 translation plus PMP protection
 
