@@ -63,6 +63,17 @@ fn local_ghdl_synth(path: text, entity_name: text) -> bool:
     val (_synth_stdout, _synth_stderr, synth_code) = rt_process_run("ghdl", ["--synth", "--std=08", entity_name])
     synth_code == 0
 
+fn architecture_contains(output: text, entity_name: text, needle: text) -> bool:
+    val start_marker = "architecture rtl of {entity_name} is"
+    val start_index = match output.find(start_marker):
+        case Some(value): value
+        case nil: return false
+    val remainder = output.substring(start_index, output.len())
+    val end_index = match remainder.find("end architecture rtl;"):
+        case Some(value): value
+        case nil: return false
+    remainder.substring(0, end_index).contains(needle)
+
 describe "pure Simple VHDL source-of-truth metadata":
     it "preserves @hardware metadata through pure Simple AST HIR and MIR":
         # Fixture: @hardware full_add.
@@ -464,6 +475,43 @@ describe "pure Simple VHDL fixed-width and domains":
         check_msg(output.contains("entity pmp64_gate_access is"), output)
         if local_ghdl_available():
             check_msg(local_ghdl_synth(out_path, "memory64_cycle"), "GHDL rejected compiler-produced RV64 translated memory frontend VHDL")
+
+        delete_file(out_path)
+
+    it "lowers and synthesizes the tracked RV32 protected core cycle":
+        val src_path = "src/lib/hardware/rv32i_rtl/core.spl"
+        val out_path = "/tmp/sml_pure_vhdl_core32_cycle.vhd"
+        delete_file(out_path)
+
+        val output = compile_pure_vhdl(src_path, out_path)
+        check_msg(output.contains("entity core32_cycle is"), output)
+        check_msg(output.contains("entity memory32_cycle is"), output)
+        check_msg(output.contains("entity pmp32_gate_access is"), output)
+        check_msg(output.contains("entity sv32_walker_cycle is"), output)
+        check_msg(architecture_contains(output, "core32_cycle", "entity work.memory32_cycle"), output)
+        check_msg(architecture_contains(output, "memory32_cycle", "entity work.sv32_walker_cycle"), output)
+        check_msg(architecture_contains(output, "sv32_walker_cycle", "entity work.pmp32_gate_access"), output)
+        check_msg(local_ghdl_available(), "GHDL is required for the RV32 production VHDL gate")
+        check_msg(local_ghdl_synth(out_path, "core32_cycle"), "GHDL rejected compiler-produced RV32 protected core cycle VHDL")
+
+        delete_file(out_path)
+
+    it "lowers and synthesizes the tracked RV64 protected core cycle":
+        val src_path = "src/lib/hardware/rv64gc_rtl/core.spl"
+        val out_path = "/tmp/sml_pure_vhdl_core64_cycle.vhd"
+        delete_file(out_path)
+
+        val output = compile_pure_vhdl(src_path, out_path)
+        check_msg(output.contains("entity core64_cycle is"), output)
+        check_msg(output.contains("entity memory64_cycle is"), output)
+        check_msg(output.contains("entity core64_csr_access is"), output)
+        check_msg(output.contains("entity sv39_walker64_cycle is"), output)
+        check_msg(output.contains("entity pmp64_gate_access is"), output)
+        check_msg(architecture_contains(output, "core64_cycle", "entity work.memory64_cycle"), output)
+        check_msg(architecture_contains(output, "memory64_cycle", "entity work.sv39_walker64_cycle"), output)
+        check_msg(architecture_contains(output, "sv39_walker64_cycle", "entity work.pmp64_gate_access"), output)
+        check_msg(local_ghdl_available(), "GHDL is required for the RV64 production VHDL gate")
+        check_msg(local_ghdl_synth(out_path, "core64_cycle"), "GHDL rejected compiler-produced RV64 protected core cycle VHDL")
 
         delete_file(out_path)
 

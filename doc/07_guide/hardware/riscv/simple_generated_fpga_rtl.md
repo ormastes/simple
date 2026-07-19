@@ -103,10 +103,13 @@ RV64 core capsules, a current pure-Simple compiler, deterministic nonempty
 clocked/bus VHDL, source maps, and changing semantic RVFI.
 
 The existing generated RV32 source contains useful scalar `@hardware`
-decode/control helpers, but it is generated text and is not yet the product
-core. The existing RV32/RV64 behavioral core files currently lack a compiler-
-supported whole-core hardware boundary. Do not rename the contract placeholder
-as authoritative output.
+decode/control helpers, but it is generated text and is not the product core.
+The tracked RV32 `core32_cycle()` and RV64 `core64_cycle()` functions are now
+explicit `@hardware` whole-core transition boundaries. Their compiler/GHDL
+acceptance is pinned in the pure-Simple VHDL source-of-truth spec, but remains
+unexecuted while the pure CLI is blocked. Do not replace the contract
+placeholder or claim authoritative output until both entities compile and
+synthesize from those tracked roots.
 
 ### 2. Exercise Sv32 and Sv39 translation plus PMP protection
 

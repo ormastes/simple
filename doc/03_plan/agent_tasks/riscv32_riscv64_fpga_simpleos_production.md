@@ -41,6 +41,13 @@ were reviewed against source by the primary normal/highest-capability model.
 | KV260 | K26 DDR/terminal/constraints/build/program wrappers | physical RV32 and RV64 login/`ls` | RTL Linux |
 | Docs/qualification | architecture, design, guide, manual, tracking/report | reviewed FPGA-language qualification | all lanes |
 
+The immediate VHDL compiler gate is now executable in
+`test/03_system/compiler/pure_simple_vhdl_source_of_truth_spec.spl`: compile
+the tracked `core32_cycle` and `core64_cycle` roots, require their translated
+MMU/PMP callees in the emitted VHDL, then synthesize each entity with GHDL.
+The contract bundle stays non-authoritative until both rows pass; packaging is
+not a substitute for this gate.
+
 ## Shared Names
 
 Reuse `RiscvMmuMode`, `RiscvLinuxProfile`, `RiscvPlatformProfile`, RV32
