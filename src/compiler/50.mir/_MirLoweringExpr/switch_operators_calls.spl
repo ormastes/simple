@@ -1511,11 +1511,53 @@ impl MirLowering:
             val has_named = named_args.has(want)
             if not has_named and pos_i >= positional_args.len():
                 # Declared field omitted at the call site (no named arg, no
-                # positional arg left to consume): zero/nil-fill instead of
-                # bleeding an unrelated arg's value into this slot (matches
-                # the "unsupported initializer" fallback just below).
-                ops = ops.push(MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), MirType.i64())))
-                field_type_names.push("")
+                # positional arg left to consume). If the field has a declared
+                # default (`field: T = <expr>`), lower and store THAT default
+                # so the slot holds the correct value. Bug (jit 0x890 SIGSEGV /
+                # native_struct_omitted_field_default_not_applied): a blanket
+                # `Const(Int(0))` here filled an omitted `= nil` Option field
+                # with raw 0, but nil's flat sentinel is 3 (see NilLit in
+                # expr_dispatch.spl), so `if val Some(x) = field` matched on 0
+                # and dereferenced address 0 -> KERN_INVALID_ADDRESS at the
+                # field offset (observed 0x890 through Engine2D's
+                # `elif Some(vulkan)` branch in draw_rect_filled). Lowering the
+                # real default fixes every default kind uniformly: `nil`->3,
+                # `false`->0, `""`->empty text, `[]`->empty array, `0`->0.
+                var filled_default = false
+                if self.struct_field_has_default.has(struct_name):
+                    val hd_flags = self.struct_field_has_default[struct_name]
+                    if fi < hd_flags.len() and hd_flags[fi]:
+                        val def_exprs = self.struct_field_default_expr[struct_name]
+                        if fi < def_exprs.len():
+                            val def_v = self.lower_expr(def_exprs[fi])
+                            if def_v != nil:
+                                ops = ops.push(mir_operand_copy(def_v))
+                                field_type_names.push(self.struct_value_syms.get(def_v.id) ?? "")
+                                filled_default = true
+                if not filled_default:
+                    # No declared default (or it could not be lowered). For an
+                    # Option-typed field, fill the reserved nil sentinel 3 and
+                    # mark it in nil_locals — raw 0 would read as Some(0). For
+                    # everything else keep the zero fill instead of bleeding an
+                    # unrelated arg's value into this slot (matches the
+                    # "unsupported initializer" fallback just below).
+                    var omitted_is_option = false
+                    val field_hir_types = self.struct_field_hir_type.get(struct_name) ?? []
+                    if fi < field_hir_types.len():
+                        match field_hir_types[fi].kind:
+                            case HirTypeKind.Optional(_):
+                                omitted_is_option = true
+                            case _:
+                                ()
+                    if omitted_is_option:
+                        var omitted_b = self.builder
+                        val raw_nil = omitted_b.emit_const_int(3)
+                        self.builder = omitted_b
+                        self.nil_locals[raw_nil.id] = true
+                        ops = ops.push(mir_operand_copy(raw_nil))
+                    else:
+                        ops = ops.push(MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), MirType.i64())))
+                    field_type_names.push("")
                 fi = fi + 1
                 continue
             val chosen = if has_named: named_args[want] else: positional_args[pos_i]

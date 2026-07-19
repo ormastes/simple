@@ -38,6 +38,19 @@ struct MirLowering:
     # reason bitfield_map keys by .id), which would collapse every struct to one
     # key and make the `>= 0` construction guard skip interception entirely.
     struct_field_order: Dict<text, [text]>
+    # Struct/class NAME -> per-field "has a declared default value" flags,
+    # parallel to struct_field_order. Bug (native_struct_omitted_field_default_
+    # not_applied / jit 0x890 SIGSEGV): when a constructor OMITS a field that
+    # has a `= <expr>` default (e.g. `vulkan_backend: VulkanBackend? = nil`),
+    # the omitted-field fill in switch_operators_calls.spl used a blanket
+    # `Const(Int(0))`. For an Option field, raw 0 is NOT the nil sentinel (3),
+    # so `if val Some(x) = field` matched on 0 and dereferenced address 0 ->
+    # KERN_INVALID_ADDRESS at the field offset (observed 0x890). These two
+    # parallel maps carry the field's real default expression so an omitted
+    # field is filled with its actual default (`nil`->sentinel 3, `false`->0,
+    # `""`->empty, `[]`->empty array) instead of a wrong raw 0.
+    struct_field_has_default: Dict<text, [bool]>
+    struct_field_default_expr: Dict<text, [HirExpr]>
     # Named-aggregate (class) NAME -> true, for types declared with `class`
     # (not `struct`). Populated from `module.classes` alongside
     # `struct_field_order` (fed from both `module.structs` and
@@ -64,6 +77,9 @@ struct MirLowering:
     # Opaque("str"); leaving it as the generic i64 fallback breaks native
     # string equality/interpolation after an otherwise-correct struct load.
     struct_field_repr_name: Dict<text, [text]>
+    # Struct/class NAME -> full declared field HIR types. Optional fields use
+    # this owner to normalize constructor, projection, and assignment values.
+    struct_field_hir_type: Dict<text, [HirType]>
     # Struct NAME -> ordered array-element struct names for fields such as
     # `commands: [DrawIrCommand]`. Field loads use this to preserve both the
     # runtime-array identity and the decoded element layout.
@@ -166,6 +182,10 @@ struct MirLowering:
     array_element_struct_syms: Dict<i64, text>
     # MIR locals whose i64 bits already use the tagged RuntimeValue ABI.
     runtime_value_locals: Dict<i64, bool>
+    # MIR locals that hold the canonical Option enum handle (enum id 1).
+    # Kept separate from runtime_value_locals so other enum/boxed handles are
+    # never mistaken for Option and an existing Option is not double-wrapped.
+    option_value_locals: Dict<i64, bool>
     # Raw nil locals (0) that become tagged RuntimeValue nil (3) at collection boundaries.
     nil_locals: Dict<i64, bool>
     # Enum NAME -> ordered variant names. The variant's index is its runtime
