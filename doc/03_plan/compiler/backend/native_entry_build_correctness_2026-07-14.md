@@ -297,5 +297,16 @@ the shared binary — deploys require explicit user go-ahead).
   line and rejects the slow loop. A focused LLVM execution probe then stopped
   on the separate undeclared `call_type_args` bug recorded in
   `doc/08_tracking/bug/native_entry_closure_call_type_args_undeclared_2026-07-19.md`.
-  A correctly instrumented bounded Stage4 profile remains pending. See
+  The source fix was rebuilt incrementally into LLVM Stage3
+  `745c134062c5d8624f0d6ed871b4a9c308a6e5bd55c4a0a39a32f1e62ac6504b`
+  using 624 cached objects and 33 recompiles; its LLVM capability probe passed.
+  A correctly instrumented six-minute Stage4 run then emitted `compile:start`
+  and `phase1:load_sources:start` but never completed phase one, while RSS stayed
+  near 28 MiB. The exact delimiter loop compiled and ran separately with
+  `quote_count=2`, excluding that path and its Option/string lowering. History
+  inspection found a second post-baseline overwrite: `fa1ee50c35c5` replaced
+  the constant-allocation bucket membership test with `bucket.split("\n")` on
+  every closure lookup and removed its source guards. The retained-good
+  `starts_with`/`contains` check and both regression guards are restored. A
+  bounded profile of that restoration remains pending. See
   `redeploy_stage4_plan_2026-07-09.md` and `stage4_stub_symbol_plan_2026-07-11.md`.
