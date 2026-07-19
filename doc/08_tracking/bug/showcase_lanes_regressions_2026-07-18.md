@@ -62,6 +62,23 @@ current main with the deployed `bin/simple` (v1.0.0-beta, self-hosted).
    interpreter run — meaning the interpreter itself slowed 3-4x since
    (item 6) and BOTH must be fixed for 720p-class showcase evidence.
 
+   **2026-07-19 ROOT-CAUSED + pure-Simple fix chain VERIFIED (IR level).**
+   Cause: struct/class literals that OMIT a defaulted field got the slot
+   blanket-filled (Rust-seed JIT: raw 0 → an omitted `= nil` Option field
+   reads Some(0) → deref 0+field-offset = the 0x890 crash via Engine2D's
+   `elif Some(vulkan)`; self-hosted native: sentinel 3 always). Three dead
+   layers had to be fixed: flat-AST bridge hardcoded `fd=nil` (defaults
+   never left the parser), HirField ctor omitted `has_default:` + wrapped
+   the expr in Some() (type mismatch), MIR omitted-field branch had no
+   default fill. All landed (17526611 + 26a14503 + follow-ups). VERIFIED on
+   the interpreted native-build worker lane: m5's `Cfg(name:"x")` IR now
+   emits `%l2 = add i64 5,0` / `store` for k and `zext i1 true` for flag
+   (was `store i64 0` both). End-to-end binary run of the i32/bool repro is
+   blocked by a SEPARATE pre-existing llc artifact (narrow-field readback
+   mistyped load — native_llvm_narrow_field_load_type_mismatch_2026-07-19).
+   The deployed Rust-seed JIT keeps the crash until the pure-Simple compiler
+   is deployed (policy: no seed codegen edits).
+
 ## Open
 6. **Interpreter throughput regression ~3-4x since 2026-07-14.** Widget
    standalone: 96s (07-14 PASS) → >280s timeout now; 2D 640x480: >280s
