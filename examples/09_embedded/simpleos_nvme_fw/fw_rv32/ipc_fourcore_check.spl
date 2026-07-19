@@ -50,13 +50,17 @@ dispatchers over logic_coro_core.spl's shared state vocabulary, WITHOUT
 changing a single message/ring/pool statement (every dataplane statement
 that used to live directly in those 4 fns now lives, byte-for-byte, in a
 `*_body`/`*_reap` helper called from exactly one dispatch branch). The rv32
-shm layout (logic_ipc_layout_core.spl, COROSTATE_BASE=8448) is a LATER lane
-(W4c) and is intentionally untouched here — this file pre-stages the same
-4 words plus a debug trace ring PURELY in harness-local host memory (see
-HOST_COROSTATE_BASE/HOST_TRACE_* below), never through shm_get/shm_put
-(which stay bound to the landed ipc_shm_words()=8448 ceiling on purpose, so
-any accidental drift would fail loudly rather than silently write past the
-real layout once W4c lands).
+shm layout (logic_ipc_layout_core.spl, COROSTATE_BASE=8448) LANDED in W4c:
+the 4 corostate words themselves now come from the real corostate_base()/
+corostate_idx() fns (host_corostate_idx below just delegates to
+corostate_idx()). The debug trace ring (16 slots + cursor + count) has no
+rv32 counterpart in the design (it is a host-harness-only debug surface, W4c
+deferred the rv32 UART-per-transition trace flag instead — see
+NVME_RV32_CORO_TRACE in entry_smp.spl), so it stays harness-local, living
+PURELY in host memory ABOVE the landed ipc_shm_words()=8452 ceiling (see
+HOST_TRACE_* below), never through shm_get/shm_put (which stay bound to
+ipc_shm_words() on purpose, so any accidental drift would fail loudly rather
+than silently write past the real layout).
 
 Deviations from the design doc's illustrative pattern, documented per the
 same "deviate + report" rule as above:
@@ -99,15 +103,12 @@ use logic_fourcore_core.*
 use logic_coro_core.*
 use std.io_runtime.{exit}
 
-# ── W4b harness-local corostate + trace-ring overlay (pre-stages the W4c
-# layout append; logic_ipc_layout_core.spl is INTENTIONALLY untouched — see
-# file header). Lives past the landed ipc_shm_words()=8448 ceiling, so it
-# uses its own hc_get/hc_put accessors (NOT shm_get/shm_put, which stay
+# ── W4c: corostate words now come from the LANDED real layout fns
+# (corostate_base()/corostate_idx() in logic_ipc_layout_core.spl). Only the
+# debug trace ring stays harness-local, living past ipc_shm_words()=8452
+# using its own hc_get/hc_put accessors (NOT shm_get/shm_put, which stay
 # bound to the landed layout on purpose) and its own bounds check against
 # HOST_SHM_WORDS(). ─────────────────────────────────────────────────────────
-
-fn HOST_COROSTATE_BASE() -> i64:
-    8448
 
 fn HIL_CORE() -> i64:
     0
@@ -121,25 +122,19 @@ fn FIL_CORE() -> i64:
 fn NAND_CORE() -> i64:
     3
 
-fn host_core_valid(core: i64) -> i32:
-    if core < 0:
-        return 0
-    if core > NAND_CORE():
-        return 0
-    1
-
+# Delegates to the real, landed corostate_idx() (logic_ipc_layout_core.spl),
+# which already bounds-checks core 0..3 (else IPC_NULL_IDX) — kept as a
+# thin wrapper so every call site below is unchanged.
 fn host_corostate_idx(core: i64) -> i64:
-    if host_core_valid(core) == 0:
-        return ipc_null_idx()
-    HOST_COROSTATE_BASE() + core
+    corostate_idx(core)
 
-# 16-entry transition trace ring, right after the 4 corostate words: each
-# slot holds one packed (core, cur, next) triple as core*100 + cur*10 +
-# next (core 0..3, state ids 0..8 — both fit single decimal digits, so the
-# packing is lossless and trivially decodable: core = packed/100, cur =
-# (packed/10)%10, next = packed%10).
+# 16-entry transition trace ring, right after the 4 (now-real) corostate
+# words: each slot holds one packed (core, cur, next) triple as
+# core*100 + cur*10 + next (core 0..3, state ids 0..8 — both fit single
+# decimal digits, so the packing is lossless and trivially decodable:
+# core = packed/100, cur = (packed/10)%10, next = packed%10).
 fn HOST_TRACE_BASE() -> i64:
-    HOST_COROSTATE_BASE() + 4
+    ipc_shm_words()
 
 fn HOST_TRACE_DEPTH() -> i64:
     16
@@ -264,8 +259,9 @@ fn hil_seq_check(shm: [i64]) -> i32:
 # wrappers will use) ──────────────────────────────────────────────────────────
 
 fn shm_new() -> [i64]:
-    # HOST_SHM_WORDS() (not ipc_shm_words()) so the harness-local corostate
-    # + trace-ring words past the landed 8448 ceiling exist too. All-zero
+    # HOST_SHM_WORDS() (not ipc_shm_words()) so the real corostate words
+    # (now part of the landed layout) plus the harness-local trace-ring
+    # words past the ipc_shm_words()=8452 ceiling all exist too. All-zero
     # init already gives every corostate word CS_BOOT()==0 and an empty
     # trace ring (cursor=0, count=0) for free — no extra init needed.
     var s: [i64] = [0 for i in 0..HOST_SHM_WORDS()]

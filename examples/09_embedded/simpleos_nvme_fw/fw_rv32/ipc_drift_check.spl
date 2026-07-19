@@ -27,8 +27,9 @@ use std.io_runtime.{exit}
 # ── Design-doc literal assertions (live-derivation style) ──────────────────────
 
 fn _check_shm_words() -> i32:
-    # IPC_SHM_WORDS = 8448 (from design doc §3, total region size)
-    if ipc_shm_words() != 8448:
+    # IPC_SHM_WORDS = 8452 (wave-4 coroutine_statemachine_design.md §1: the
+    # 4-word COROSTATE region appended at the end bumps 8448 -> 8452)
+    if ipc_shm_words() != 8452:
         return 1
     0
 
@@ -149,11 +150,45 @@ fn _check_nand_state_data_continuity() -> i32:
         return 1
     0
 
-fn _check_nand_data_shm_end() -> i32:
-    # NAND_DATA_BASE + 4096 == IPC_SHM_WORDS
-    # Data region is 4096 words, total SHM is 8448 words.
+fn _check_nand_data_corostate_continuity() -> i32:
+    # NAND_DATA_BASE + 4096 == COROSTATE_BASE (wave-4: replaces the old
+    # NAND_DATA_BASE + 4096 == IPC_SHM_WORDS invariant now that the
+    # COROSTATE region sits between the NAND data region and the shm end).
+    # Data region is 4096 words, COROSTATE region starts at 8448.
     val data_end: i64 = nand_data_base() + 4096
-    if data_end != ipc_shm_words():
+    if data_end != corostate_base():
+        return 1
+    0
+
+fn _check_corostate_shm_end() -> i32:
+    # COROSTATE_BASE + 4 == IPC_SHM_WORDS (4 corostate words, core 0..3,
+    # then the region ends).
+    val corostate_end: i64 = corostate_base() + 4
+    if corostate_end != ipc_shm_words():
+        return 1
+    0
+
+fn _check_corostate_idx_0() -> i32:
+    # corostate_idx(0) == 8448 (HIL core's word, at COROSTATE_BASE)
+    if corostate_idx(0) != 8448:
+        return 1
+    0
+
+fn _check_corostate_idx_3() -> i32:
+    # corostate_idx(3) == 8451 (NAND core's word, last valid core)
+    if corostate_idx(3) != 8451:
+        return 1
+    0
+
+fn _check_corostate_idx_4_invalid() -> i32:
+    # corostate_idx(4) == -1 (out of range: only core 0..3 exist)
+    if corostate_idx(4) != -1:
+        return 1
+    0
+
+fn _check_corostate_idx_neg1_invalid() -> i32:
+    # corostate_idx(-1) == -1 (fail-closed: negative core ids rejected too)
+    if corostate_idx(-1) != -1:
         return 1
     0
 
@@ -228,7 +263,19 @@ fn ipc_fw_rv32_drift_selftest() -> i32:
         return 1
     if _check_nand_state_data_continuity() != 0:
         return 1
-    if _check_nand_data_shm_end() != 0:
+    if _check_nand_data_corostate_continuity() != 0:
+        return 1
+    if _check_corostate_shm_end() != 0:
+        return 1
+
+    # COROSTATE bounds (wave-4)
+    if _check_corostate_idx_0() != 0:
+        return 1
+    if _check_corostate_idx_3() != 0:
+        return 1
+    if _check_corostate_idx_4_invalid() != 0:
+        return 1
+    if _check_corostate_idx_neg1_invalid() != 0:
         return 1
 
     # NAND geometry

@@ -35,6 +35,27 @@
 # incorrectly accepted. This is inherent to the L5-frozen dataplane-selftest
 # design (out of L6's scope to redesign); flagged here for the L6 evidence
 # review rather than silently assumed away.
+#
+# ── W4c: corostate dispatch conversion (design contract: doc/05_design/
+# hardware/nvme_fw_coroutine/coroutine_statemachine_design.md §4 authoring
+# convention, §6 lane W4c) ────────────────────────────────────────────────
+# Mirrors ipc_fourcore_check.spl's W4b corostate dispatchers (ftl_step_idle/
+# fil_step_idle/nand_step_idle) exactly, including their documented
+# deviation: workers collapse CS_PUMP_FWD/CS_PUMP_BACK into a same-tick
+# self-loop back to CS_IDLE (the dispatchers still carry explicit
+# CS_PUMP_FWD/CS_PUMP_BACK branches, pass-through to CS_IDLE, for full
+# vocabulary coverage — dead-but-correct, unreached by this selftest, same
+# hardening-honesty convention as nand_step's NOP_ERASE branch).
+# hart0 (HIL) does ONE explicit corostate transition, CS_BOOT->CS_SUBMIT,
+# immediately after the gate write — it does not run a full SUBMIT/REAP/
+# VERIFY dispatch loop like the host harness's HIL dispatcher: hart0's
+# actual work stays the existing scripted rv32_ipc_fourcore_selftest (an
+# L5-frozen procedure, out of this lane's scope to restructure). Workers
+# (harts 1-3) do CS_BOOT->CS_IDLE right after hart_gate_wait, then run a
+# full corostate dispatch loop (CS_IDLE pump / CS_HALT_DRAIN / CS_PARKED)
+# until parked.
+# Deferred (design §5): the optional one-UART-char-per-transition trace
+# behind NVME_RV32_CORO_TRACE=1 is NOT implemented in this lane.
 
 extern fn rt_riscv_uart_put(byte: u64)
 extern fn rt_rv32_shm_load(idx: i64) -> i64
@@ -52,6 +73,7 @@ use logic_ipc_ring_core.*
 use logic_buf_pool_core.*
 use logic_nand_region_core.*
 use logic_fourcore_core.*
+use logic_coro_core.*
 
 # ── UART helpers (mirror entry.spl's byte-at-a-time no-string-runtime style) ─
 
@@ -640,26 +662,128 @@ fn fil_all_empty() -> i32:
 fn nand_all_empty() -> i32:
     ring_empty_at(r_fil2nand())
 
-fn ftl_loop():
-    while true:
+# ── corostate transition helper (design §3: drivers never store a
+# corostate word except through this path; an illegal verdict is fail-
+# closed via ipc_fatal, the rv32 equivalent of the host harness's
+# coro_do_transition + exit(1)). ─────────────────────────────────────────
+fn rv32_coro_transition(hart: i64, cur: i64, next: i64):
+    val verdict: i64 = coro_transition_verdict(cur, next)
+    if verdict == -1:
+        ipc_fatal(hart)
+        return
+    shm_put(corostate_idx(hart), verdict)
+
+# Shared CS_HALT_DRAIN phase (design §3: the ONLY exit is CS_HALT_DRAIN ->
+# CS_PARKED, once THIS core's own rings have drained — mirrors the host
+# harness's coro_halt_drain_phase, using the caller's own *_all_empty()
+# instead of the harness's global all_rings_empty()).
+fn rv32_coro_halt_drain(hart: i64, cs: i64, drained: i32):
+    if drained == 0:
+        return
+    rv32_coro_transition(hart, cs, CS_PARKED())
+
+# FTL corostate dispatch (design §4/§6; mirrors ipc_fourcore_check.spl's
+# ftl_step_idle/ftl_step dispatcher exactly, incl. its documented
+# deviation — see file header "W4c: corostate dispatch conversion").
+fn ftl_dispatch(hart: i64):
+    val cs: i64 = shm_get(corostate_idx(hart))
+    if cs == CS_BOOT():
+        rv32_coro_transition(hart, cs, CS_IDLE())
+        return
+    if cs == CS_IDLE():
+        ftl_step()
         val halt_word: i64 = shm_get(IPC_HALT_IDX())
         if core_should_halt(halt_word, ftl_all_empty()) == 1:
+            rv32_coro_transition(hart, cs, CS_HALT_DRAIN())
             return
-        ftl_step()
+        rv32_coro_transition(hart, cs, CS_IDLE())
+        return
+    if cs == CS_PUMP_FWD():
+        rv32_coro_transition(hart, cs, CS_IDLE())
+        return
+    if cs == CS_PUMP_BACK():
+        rv32_coro_transition(hart, cs, CS_IDLE())
+        return
+    if cs == CS_HALT_DRAIN():
+        rv32_coro_halt_drain(hart, cs, ftl_all_empty())
+        return
+    if cs == CS_PARKED():
+        return
+    ipc_fatal(hart)
 
-fn fil_loop():
-    while true:
+# FIL corostate dispatch — same shape as ftl_dispatch.
+fn fil_dispatch(hart: i64):
+    val cs: i64 = shm_get(corostate_idx(hart))
+    if cs == CS_BOOT():
+        rv32_coro_transition(hart, cs, CS_IDLE())
+        return
+    if cs == CS_IDLE():
+        fil_step()
         val halt_word: i64 = shm_get(IPC_HALT_IDX())
         if core_should_halt(halt_word, fil_all_empty()) == 1:
+            rv32_coro_transition(hart, cs, CS_HALT_DRAIN())
             return
-        fil_step()
+        rv32_coro_transition(hart, cs, CS_IDLE())
+        return
+    if cs == CS_PUMP_FWD():
+        rv32_coro_transition(hart, cs, CS_IDLE())
+        return
+    if cs == CS_PUMP_BACK():
+        rv32_coro_transition(hart, cs, CS_IDLE())
+        return
+    if cs == CS_HALT_DRAIN():
+        rv32_coro_halt_drain(hart, cs, fil_all_empty())
+        return
+    if cs == CS_PARKED():
+        return
+    ipc_fatal(hart)
 
-fn nand_loop():
-    while true:
+# NAND corostate dispatch — same shape as ftl_dispatch/fil_dispatch.
+fn nand_dispatch(hart: i64):
+    val cs: i64 = shm_get(corostate_idx(hart))
+    if cs == CS_BOOT():
+        rv32_coro_transition(hart, cs, CS_IDLE())
+        return
+    if cs == CS_IDLE():
+        nand_step()
         val halt_word: i64 = shm_get(IPC_HALT_IDX())
         if core_should_halt(halt_word, nand_all_empty()) == 1:
+            rv32_coro_transition(hart, cs, CS_HALT_DRAIN())
             return
-        nand_step()
+        rv32_coro_transition(hart, cs, CS_IDLE())
+        return
+    if cs == CS_PUMP_FWD():
+        rv32_coro_transition(hart, cs, CS_IDLE())
+        return
+    if cs == CS_PUMP_BACK():
+        rv32_coro_transition(hart, cs, CS_IDLE())
+        return
+    if cs == CS_HALT_DRAIN():
+        rv32_coro_halt_drain(hart, cs, nand_all_empty())
+        return
+    if cs == CS_PARKED():
+        return
+    ipc_fatal(hart)
+
+# One resume = one dispatch call (design §4). Loop until this hart's own
+# corostate word reaches the terminal CS_PARKED.
+fn ftl_loop(hart: i64):
+    while true:
+        if shm_get(corostate_idx(hart)) == CS_PARKED():
+            return
+        ftl_dispatch(hart)
+
+fn fil_loop(hart: i64):
+    while true:
+        if shm_get(corostate_idx(hart)) == CS_PARKED():
+            return
+        fil_dispatch(hart)
+
+fn nand_loop(hart: i64):
+    while true:
+        if shm_get(corostate_idx(hart)) == CS_PARKED():
+            return
+        nand_dispatch(hart)
 
 # ── per-hart dispatch (called from the SMP _start asm stub) ────────────────
 
@@ -672,6 +796,7 @@ fn rt_rv32_fourcore_main(hart: i64):
         hart0_init_nand()
         rt_rv32_fence()
         shm_put(ipc_gate_idx(), gate_magic())
+        rv32_coro_transition(hart, CS_BOOT(), CS_SUBMIT())
         rt_rv32_ipi_send(1)
         rt_rv32_ipi_send(2)
         rt_rv32_ipi_send(3)
@@ -683,12 +808,12 @@ fn rt_rv32_fourcore_main(hart: i64):
         return
     hart_gate_wait(hart)
     if hart == 1:
-        ftl_loop()
+        ftl_loop(hart)
         return
     if hart == 2:
-        fil_loop()
+        fil_loop(hart)
         return
     if hart == 3:
-        nand_loop()
+        nand_loop(hart)
         return
     ipc_fatal(hart)
