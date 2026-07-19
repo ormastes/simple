@@ -68,8 +68,25 @@ fn value_matches_type(value: &Value, ty: &Type) -> bool {
     match ty {
         Type::Simple(name) | Type::Generic { name, .. } => value_type_matches_name(value, name),
         Type::Array { element, .. } => match value {
-            Value::Array(items) => items.iter().all(|item| value_matches_type(item, element)),
-            Value::FrozenArray(items) => items.iter().all(|item| value_matches_type(item, element)),
+            // Overload scoring runs this per candidate, per call. Simple arrays
+            // are homogeneous (every element of a `[T]` value shares element
+            // type), so the first element is representative — testing it is
+            // equivalent to testing all of them, and an empty array matches any
+            // element type exactly as `.all()` over an empty slice did (true).
+            // The old exhaustive `items.iter().all(..)` walk made overload
+            // dispatch O(array_len) PER CANDIDATE: an Engine2D erased-receiver
+            // method call whose scored values include a large backing buffer (a
+            // framebuffer pixel array) cost 1+ second each and scaled with the
+            // impl/candidate count — the interpreter dispatch cliff
+            // (doc/08_tracking/bug/showcase_lanes_regressions_2026-07-18.md
+            // item 6, bisected to a10935e78a). Bounding this to O(1) removes the
+            // cliff without changing which overload is selected for homogeneous
+            // arrays.
+            Value::Array(items) => items.first().is_none_or(|item| value_matches_type(item, element)),
+            Value::FrozenArray(items) => items.first().is_none_or(|item| value_matches_type(item, element)),
+            // Tuples may be heterogeneous, but are bounded by (small) declared
+            // arity rather than data size, so keep the exhaustive check to
+            // preserve dispatch semantics for tuple-as-array-argument matches.
             Value::Tuple(items) => items.iter().all(|item| value_matches_type(item, element)),
             _ => false,
         },
