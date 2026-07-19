@@ -72,3 +72,29 @@ separate canonical core-C/entry-closure profile builds the one-module probe in
 than a font or linker failure. Promote case 20 to a required PASS when a
 redeployed pure-Simple compiler returns 7; only then spend a fresh canonical
 shaping cycle.
+
+## Clean incremental fix attempt
+
+After the CUDA font readback passed, a detached worktree at `85ace4faa19`
+was given only the candidate `ExistsCheck` change: call
+`rt_unwrap_or_self` for the present branch and preserve the recorded
+`Option::Some` struct identity. This targets the observed boxed-enum handle
+being used as the `Box` receiver while leaving flat nullable payloads intact.
+
+The candidate is not admitted. Three bounded compiler-build attempts stopped
+at the runtime boundary before the existing class-Option probe could run:
+
+- `core-c-bootstrap` linked the pure-Simple compiler objects but lacked the
+  hosted Cranelift/SFFI and directory symbols;
+- the legacy `rust-hosted` bundle is explicitly removed; and
+- `simple-core` reported that no admitted simple-core runtime archive exists.
+
+Logs and the high-level review outcome are retained under
+`build/test-artifacts/shared_multilingual_gpu_fonts/option_class_payload_fix_attempt/`.
+The candidate source hunk was removed after review found three semantic
+blockers: boxed `None` still uses a mismatched discriminant, the global
+`Option::Some` struct-name slot can collide across payload types, and a flat
+`Option<Enum>` payload is ambiguous with the boxed enum handle. Do not claim
+the class payload fixed or promote native-smoke case 20 until a representation
+rule resolves all three, a new pure-Simple compiler builds, and the unchanged
+probe exits exactly 7.
