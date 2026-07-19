@@ -58,6 +58,22 @@ is_protected() {
     return 1
 }
 
+is_simple_run_or_test() {
+    _cmd="$1"
+    _had_noglob=0
+    case $- in *f*) _had_noglob=1 ;; esac
+    set -f
+    set -- $_cmd
+    [ "$_had_noglob" -eq 1 ] || set +f
+    while [ "$#" -gt 1 ]; do
+        case "$1:$2" in
+            */simple:run|*/simple:test|simple:run|simple:test) return 0 ;;
+        esac
+        shift
+    done
+    return 1
+}
+
 safe_kill() {
     _pid="$1"
     case "$_pid" in
@@ -114,8 +130,7 @@ while true; do
             log_proc "$pid" "$rss_mb" "$cmdline"
         fi
 
-        case "$cmdline" in
-            *bin/simple*run*|*bin/simple*test*)
+        if is_simple_run_or_test "$cmdline"; then
                 # bin/simple RSS guard — fires regardless of CPU/age (OOM balloon).
                 if [ "$rss_mb" -ge "$MEM_THRESHOLD_MB" ] 2>/dev/null; then
                     kill_hard "$pid" "rss=${rss_mb}MB>=${MEM_THRESHOLD_MB}MB: $cmdline"
@@ -139,13 +154,11 @@ while true; do
                     continue
                 fi
                 kill_hard "$pid" "cpu=${cpu}% age=${etime}s: $cmdline"
-                ;;
-            *)
+        else
                 # Generic RSS cap for any other owned proc (rogue python/etc).
                 if [ "$rss_mb" -ge "$GENERIC_MEM_THRESHOLD_MB" ] 2>/dev/null; then
                     kill_hard "$pid" "generic rss=${rss_mb}MB>=${GENERIC_MEM_THRESHOLD_MB}MB: $cmdline"
                 fi
-                ;;
-        esac
+        fi
     done
 done
