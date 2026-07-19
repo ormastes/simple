@@ -4973,6 +4973,7 @@ fn test_simple_core_source_tree_emits_partial_runtime_archive() {
         "rt_string_starts_with",
         "rt_string_ends_with",
         "rt_string_trim",
+        "rt_string_trim_start",
         "rt_string_to_int",
         "rt_string_replace",
         "rt_to_string",
@@ -5083,6 +5084,8 @@ int main(void) {
     if (rt_string_len(s) != 5) return 60;
     if (memcmp(rt_string_data(s), " 123 ", 5) != 0) return 61;
     if (rt_len(s) != 5) return 62;
+    int64_t trim_started = rt_string_trim_start(s);
+    if (rt_string_len(trim_started) != 4 || memcmp(rt_string_data(trim_started), "123 ", 4) != 0) return 105;
     int64_t t = rt_string_new((const uint8_t*)"abc", 3);
     SplArray* t_bytes = (SplArray*)rt_string_bytes(t);
     if (rt_array_len(t_bytes) != 3 || rt_value_as_int(rt_array_get(t_bytes, 1)) != 'b') return 77;

@@ -193,6 +193,10 @@ int main(void) {
     int64_t trim_end = rt_string_trim_end(text("  value \t\r\n"));
     assert(rt_string_len(trim_end) == 7);
     assert(memcmp(rt_string_data(trim_end), "  value", 7) == 0);
+    int64_t trim_start = rt_string_trim_start(text(" \t\v\f\r\nvalue  "));
+    assert(rt_string_len(trim_start) == 7);
+    assert(memcmp(rt_string_data(trim_start), "value  ", 7) == 0);
+    assert(rt_cli_run_file(0, 0, 0, 0) != 0);
     assert(rt_string_builder_len(0) == -1);
     assert(rt_string_builder_push(0, built) == 0);
     rt_string_builder_free(0);

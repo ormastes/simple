@@ -254,6 +254,14 @@ SPL_HOSTED_UNAVAILABLE_WEAK void rt_sdl2_present(int64_t handle) {
     (void)handle;
 }
 
+#if defined(SIMPLE_CORE_C_STANDALONE)
+int64_t rt_cli_run_file(int64_t path, int64_t args, uint8_t gc_log, uint8_t gc_off) {
+    (void)path; (void)args; (void)gc_log; (void)gc_off;
+    fprintf(stderr, "simple: --fork requires hosted interpreter support\n");
+    return 1;
+}
+#endif
+
 #undef SPL_HOSTED_UNAVAILABLE_WEAK
 
 /* Core-C fallbacks. Full hosted builds provide stronger implementations. */
@@ -2109,6 +2117,18 @@ int64_t rt_string_trim(int64_t value) {
         end--;
     }
     return rt_string_new((const uint8_t*)s->data + begin, end - begin);
+}
+
+int64_t rt_string_trim_start(int64_t value) {
+    RtCoreString* s = rt_core_as_string(value);
+    if (!s) return value;
+    uint64_t begin = 0;
+    while (begin < s->len && (s->data[begin] == ' ' || s->data[begin] == '\t' ||
+                              s->data[begin] == '\n' || s->data[begin] == '\v' ||
+                              s->data[begin] == '\f' || s->data[begin] == '\r')) {
+        begin++;
+    }
+    return rt_string_new((const uint8_t*)s->data + begin, s->len - begin);
 }
 
 int64_t rt_string_trim_end(int64_t value) {

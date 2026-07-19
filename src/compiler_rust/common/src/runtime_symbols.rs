@@ -164,6 +164,7 @@ pub const CORE_REQUIRED_RUNTIME_SYMBOLS: &[&str] = &[
     "rt_string_ends_with",
     "rt_string_replace",
     "rt_string_trim",
+    "rt_string_trim_start",
     "rt_string_trim_end",
     "rt_string_to_int",
     "rt_string_to_int_lenient",
@@ -468,6 +469,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_string_chars",
     "rt_string_replace",
     "rt_string_trim",
+    "rt_string_trim_start",
     "rt_string_trim_end",
     "rt_string_join",
     "rt_string_to_upper",
@@ -2006,6 +2008,7 @@ mod tests {
         assert_eq!(symbol_class_of("rt_heap_registry_count"), RuntimeSymbolClass::HostedOnly);
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_byte_array_new"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_len"));
+        assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_string_trim_start"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_time_now_unix_micros"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_println_value"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_volatile_read_u64"));
@@ -2025,6 +2028,7 @@ mod tests {
         assert_eq!(symbol_class_of("rt_alloc"), RuntimeSymbolClass::CoreRequired);
         assert_eq!(symbol_class_of("rt_byte_array_new"), RuntimeSymbolClass::CoreRequired);
         assert_eq!(symbol_class_of("rt_stdout_flush"), RuntimeSymbolClass::CoreRequired);
+        assert_eq!(symbol_class_of("rt_string_trim_start"), RuntimeSymbolClass::CoreRequired);
         assert_eq!(symbol_class_of("rt_file_read_text"), RuntimeSymbolClass::HostedOnly);
         assert_eq!(
             symbol_class_of("rt_security_enter_gate"),
