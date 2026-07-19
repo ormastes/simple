@@ -1477,14 +1477,16 @@ describe "VHDL Backend - real backend compilation":
         check(err.has_location)
         expect(err.location).to_equal("7:3-8")
 
-    it "rejects Unit local signal lowering before VHDL emission":
+    it "skips Unit placeholder locals before VHDL emission":
         val ret_local = make_return_local(1, make_i32())
         val unit_local = make_temp_local(2, "unit_tmp", make_unit())
         val block = MirBlock(
             id: BlockId(id: 0),
             label: Some("entry"),
-            instructions: [],
-            terminator: MirTerminator.Ret(nil)
+            instructions: [
+                MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Int(7), make_i32()), span: nil)
+            ],
+            terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))))
         )
         val func = MirFunction(
             symbol: SymbolId(id: 71),
@@ -1505,11 +1507,10 @@ describe "VHDL Backend - real backend compilation":
             driver_manifest_attr: nil
         )
         val result = make_simple_backend().compile(single_block_module("unit_local_mod", func))
-        check(result.is_err())
-        val err = result.unwrap_err()
-        check(err.message.contains("Unit local signal"))
-        check(err.message.contains("no VHDL signal"))
-        check(err.has_location)
+        check(result.is_ok())
+        val vhdl = result.unwrap().vhdl
+        check(not vhdl.contains("unit_tmp"))
+        check(not vhdl.contains("-- void"))
 
     it "rejects pointer constants before package VHDL emission":
         val constant = MirConstant(
@@ -3146,6 +3147,7 @@ fn bitfield_write_enabled_mid(clk: bool, reset_n: bool, control_raw: u8, next_en
         val helper_b = make_arg_local(2, 1, "b", make_i32())
         val helper_ret = make_return_local(3, make_i32())
         val helper_sum = make_temp_local(4, "sum-sig", make_i32())
+        val helper_unit = make_temp_local(5, "unit-placeholder", make_unit())
         val helper_block = MirBlock(
             id: BlockId(id: 0),
             label: Some("entry"),
@@ -3159,7 +3161,7 @@ fn bitfield_write_enabled_mid(clk: bool, reset_n: bool, control_raw: u8, next_en
             symbol: SymbolId(id: 101),
             name: "mix-add",
             signature: MirSignature(params: [make_i32(), make_i32()], return_type: make_i32(), is_variadic: false),
-            locals: [helper_a, helper_b, helper_ret, helper_sum],
+            locals: [helper_a, helper_b, helper_ret, helper_sum, helper_unit],
             blocks: [helper_block],
             entry_block: BlockId.entry(),
             span: empty_span(),
@@ -3217,6 +3219,8 @@ fn bitfield_write_enabled_mid(clk: bool, reset_n: bool, control_raw: u8, next_en
         check(pkg.contains("function mix_add(a : signed(31 downto 0); b : signed(31 downto 0)) return signed(31 downto 0);"))
         check(pkg.contains("package body helper_mod_pkg is"))
         check(pkg.contains("variable sum_sig : signed(31 downto 0);"))
+        check(not pkg.contains("unit_placeholder"))
+        check(not pkg.contains("-- void"))
         check(pkg.contains("sum_sig := a + b;"))
         check(pkg.contains("return return_value;"))
         check(compiled.vhdl.contains("use work.helper_mod_pkg.all;"))

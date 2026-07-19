@@ -1,0 +1,57 @@
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.mir.mir.*
+
+fn lower_match_function(source: text, name: text) -> MirFunction?:
+    val parsed = parse_full_frontend(source, "match_unit.spl", "match_unit", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("match_unit.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    for function in mir.functions.values():
+        if function.name == name or function.name.ends_with(".{name}"):
+            return Some(function)
+    nil
+
+fn local_is_unit(function: MirFunction, id: LocalId) -> bool:
+    for local in function.locals:
+        if local.id.id == id.id:
+            return local.type_.kind == MirTypeKind.Unit
+    false
+
+fn copies_unit_value(function: MirFunction) -> bool:
+    for block in function.blocks:
+        for inst in block.instructions:
+            match inst.kind:
+                case MirInstKind.Copy(_, source):
+                    if local_is_unit(function, source):
+                        return true
+                case _:
+                    ()
+    false
+
+fn has_dispatch(function: MirFunction, dense: bool) -> bool:
+    for block in function.blocks:
+        match block.terminator:
+            case MirTerminator.Switch(_, _, _):
+                if dense:
+                    return true
+            case MirTerminator.If(_, _, _):
+                if not dense:
+                    return true
+            case _:
+                ()
+    false
+
+describe "statement-valued integer match MIR", tag: ["only-compiled"]:
+    it "does not copy Unit placeholders into dense or sparse merge values":
+        val source = "fn dense(n: i64) -> i64:\n    var out = 0\n    match n:\n        case 0: out = 1\n        case 1: out = 2\n        case 2: out = 3\n        case 3: out = 4\n        case _: ()\n    out\n\nfn sparse(n: i64) -> i64:\n    var out = 0\n    match n:\n        case 1: out = 1\n        case 99: out = 2\n        case _: ()\n    out\n"
+        val dense = lower_match_function(source, "dense").unwrap()
+        val sparse = lower_match_function(source, "sparse").unwrap()
+
+        expect(has_dispatch(dense, true)).to_equal(true)
+        expect(has_dispatch(sparse, false)).to_equal(true)
+        expect(copies_unit_value(dense)).to_equal(false)
+        expect(copies_unit_value(sparse)).to_equal(false)
