@@ -20,7 +20,8 @@ Date: 2026-07-18
 | `rv64_mmu_audit` | supervisor interrupt ownership and priority | Canonical `mie`/`mip`/`mideleg`, masked S aliases, independent PLIC M/S contexts, and strict software/external `SEIP` OR semantics | accepted; primary implemented and owns final review |
 | `rv32_pmp_review` | canonical RV32 protection/privilege boundary | Move existing CSR/PMP owners into `CoreState`; gate Bare fetch/load/store once in `soc_tick`; add M/S/U stacks and delegated synchronous traps; keep interrupt/Sv32 controls WARL-zero until connected | reviewed during implementation; primary owns merge and final review |
 | `rv32_pmp_review` | clocked Sv32 production seam | Reject direct `RamState` translation; port RV64 request/response ownership, preserve 34-bit PA, apply SUM/MXR/Svade, superpage-aware ASID/global TLB, and PMP-check PTE reads | accepted; walker implemented and reviewed |
-| `rv32_pmp_review` | RV32 architectural memory frontend | Reuse RV64 transaction FSM; latch access context, sequence walker/final PMP/physical bus, preserve precise faults, and carry atomic/SC qualifiers | accepted; frontend implemented and reviewed; `soc_tick` follows |
+| `rv32_pmp_review` | RV32 architectural memory frontend | Reuse RV64 transaction FSM; latch access context, sequence walker/final PMP/physical bus, preserve precise faults, and carry atomic/SC qualifiers | accepted; frontend implemented, reviewed, and integrated |
+| `rv32_pmp_review` | RV32 clock-path integration | Make `CoreState` own RF/MMU/memory, connect SATP/SFENCE and cycle/retire counters, route one response-latched physical request through `soc_tick`, and prove a two-level translated fetch | accepted after legality, IALIGN, trap-stop, halt-drain, and FENCE corrections; primary owns commit |
 
 The collaboration runtime did not expose a Spark/lower-model selector. The
 available sidecars were therefore kept read-only and bounded. Their conclusions

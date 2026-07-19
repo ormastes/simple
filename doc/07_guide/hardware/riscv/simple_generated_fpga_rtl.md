@@ -119,7 +119,7 @@ faults, A/D policy, TOR/NA4/NAPOT, R/W/X, priority, and locked PMP entries.
 Current standalone MMU modules and bare-metal PMP write plans are not CPU
 integration evidence.
 
-Current source status (2026-07-18): both XLEN lanes have explicit 16-entry PMP
+Current source status (2026-07-19): both XLEN lanes have explicit 16-entry PMP
 match/access-gate and `pmpcfg`/`pmpaddr` CSR owners. RV64 additionally stores
 PMP in `CoreState64`, executes the six Zicsr forms through the M/S/PMP owners,
 synchronizes accepted SATP writes with Sv39 state, suppresses illegal CSR
@@ -135,7 +135,15 @@ Linux acceptance: the old permissive `lsu64_access()` and PC-only
 register file, two-parcel instruction fetch, data stalls, Sv39/PMP faults, and
 commit; `soc_top_64_tick()` routes its single outstanding physical request to
 the RV64 reset ROM, DRAM, CLINT, PLIC, or UART with a one-cycle response latch.
-Supervisor interrupt contexts and RV32 parity remain incomplete. The
+RV32 now owns its register file, MMU, PMP, privilege CSRs, and in-flight
+transaction in `CoreState`. `core32_cycle()` connects SATP/SFENCE, two-level
+Sv32 fetch/data stalls, precise faults, and separate cycle/retire counters;
+`soc_tick()` accepts one protected physical request and returns one latched
+response. Its focused SoC scenario writes SATP in S-mode and executes the next
+instruction through physical page-table bus reads. Reserved RV32I encodings
+and misaligned taken targets trap before side effects, and mailbox EXIT drains
+its response before halt. Supervisor interrupt contexts, RV32 A/C extensions,
+generated VHDL execution, and Linux acceptance remain incomplete. The
 multi-cycle M unit is clocked into commit with exact high
 multiply, signed-overflow, divide-by-zero, and unsigned division semantics, so
 LR/SC and AMO.W/D now reserve translated physical byte ranges and retire through

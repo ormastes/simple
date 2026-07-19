@@ -1,8 +1,11 @@
 use std.spipe.*
 use std.hardware.soc_rtl.soc_top.{SocState, soc_create, soc_tick}
 use std.hardware.soc_rtl.ram.{ram_read, ram_write}
-use std.hardware.soc_rtl.wb_interconnect.RAM_BASE
+use std.hardware.soc_rtl.wb_interconnect.{RAM_BASE, MB_BASE}
 use std.hardware.rv32i_rtl.regfile.{regfile_read, regfile_write}
+use std.hardware.rv32i_rtl.core.{core32_restart_fetch, CORE32_FETCH}
+use std.hardware.rv32i_rtl.memory_access.{MEMORY32_IDLE, MEMORY32_REQUEST}
+use std.hardware.rv32i_rtl.pkg.{MB_CMD_EXIT, MB_TRIGGER_MAGIC}
 use std.hardware.rv32i_rtl.pmp_csr.pmp32_csr_write
 use std.hardware.rv32i_rtl.csr.{MSTATUS_MPP_MASK, MSTATUS_MPRV_MASK}
 use std.hardware.rv32i_rtl.csr.{MSTATUS_MPIE_MASK, MPP_S_MODE, MIP_MSIP_MASK}
@@ -17,6 +20,27 @@ val PMP_UNLOCKED_NONE: u32 = 0x18
 fn csr_instruction(addr: u32, rs1: u32, funct3: u32, rd: u32) -> u32:
     (addr << 20) | (rs1 << 15) | (funct3 << 12) | (rd << 7) | 0x73
 
+fn retire_one(state: SocState) -> SocState:
+    var out = state
+    out.response_valid = false
+    out.response_error = false
+    out.core = core32_restart_fetch(out.core)
+    val retired = out.core.csr_m.minstret
+    val mepc = out.core.csr_m.mepc
+    val sepc = out.core.csr_s.sepc
+    var cycles: u32 = 0
+    while cycles < 32:
+        out = soc_tick(out).state
+        if out.core.csr_m.minstret != retired:
+            return out
+        if out.core.csr_m.mepc != mepc or out.core.csr_s.sepc != sepc:
+            return out
+        if (out.core.pipeline_phase == CORE32_FETCH and
+            out.core.memory.phase == MEMORY32_REQUEST):
+            return out
+        cycles = cycles + 1
+    out
+
 fn protect_ram(state: SocState, cfg: u32) -> SocState:
     var out = state
     out.core.pmp = pmp32_csr_write(out.core.pmp, PMPADDR0,
@@ -30,18 +54,27 @@ describe "RV32 SoC PMP clock-path integration":
         state.core.pc = RAM_BASE
         state.ram = ram_write(state.ram, 0,
             csr_instruction(PMPADDR0, 1, 1, 2), 2)
-        state.regfile = regfile_write(state.regfile, 1, RAM_4K_NAPOT, true)
-        state = soc_tick(state).state
+        state.core.rf = regfile_write(state.core.rf, 1, RAM_4K_NAPOT, true)
+        state = retire_one(state)
         expect(state.core.pmp.addr_0).to_equal(RAM_4K_NAPOT as i64)
-        expect(regfile_read(state.regfile, 2, 0).rs1_data).to_equal(0)
+        expect(regfile_read(state.core.rf, 2, 0).rs1_data).to_equal(0)
 
     it "traps a locked M-mode fetch denial before instruction memory":
         var state = protect_ram(soc_create(64), PMP_LOCKED_RW)
         state.core.pc = RAM_BASE
         state.core.csr_m.mtvec = 0x1000
-        state = soc_tick(state).state
+        state = retire_one(state)
         expect(state.core.csr_m.mcause).to_equal(1)
         expect(state.core.csr_m.mtval).to_equal(RAM_BASE)
+        expect(state.core.pc).to_equal(0x1000)
+
+    it "faults a decoded RAM fetch beyond the allocated memory":
+        var state = soc_create(64)
+        state.core.pc = RAM_BASE + 0x1000
+        state.core.csr_m.mtvec = 0x1000
+        state = retire_one(state)
+        expect(state.core.csr_m.mcause).to_equal(1)
+        expect(state.core.csr_m.mtval).to_equal(RAM_BASE + 0x1000)
         expect(state.core.pc).to_equal(0x1000)
 
     it "traps a locked M-mode load denial without register writeback":
@@ -50,23 +83,23 @@ describe "RV32 SoC PMP clock-path integration":
         state.core.csr_m.mtvec = 0x1000
         state.ram = ram_write(state.ram, 0, 0x0000A183, 2)
         state.ram = ram_write(state.ram, 4, 0xA5A5A5A5, 2)
-        state.regfile = regfile_write(state.regfile, 1, RAM_BASE + 4, true)
-        state.regfile = regfile_write(state.regfile, 3, 0x12345678, true)
+        state.core.rf = regfile_write(state.core.rf, 1, RAM_BASE + 4, true)
+        state.core.rf = regfile_write(state.core.rf, 3, 0x12345678, true)
         state = protect_ram(state, PMP_LOCKED_X)
-        state = soc_tick(state).state
+        state = retire_one(state)
         expect(state.core.csr_m.mcause).to_equal(5)
         expect(state.core.csr_m.mtval).to_equal(RAM_BASE + 4)
-        expect(regfile_read(state.regfile, 3, 0).rs1_data).to_equal(0x12345678)
+        expect(regfile_read(state.core.rf, 3, 0).rs1_data).to_equal(0x12345678)
 
     it "traps a locked M-mode store denial before the RAM side effect":
         var state = soc_create(64)
         state.core.pc = RAM_BASE
         state.core.csr_m.mtvec = 0x1000
         state.ram = ram_write(state.ram, 0, 0x0020A023, 2)
-        state.regfile = regfile_write(state.regfile, 1, RAM_BASE + 4, true)
-        state.regfile = regfile_write(state.regfile, 2, 0xDEADBEEF, true)
+        state.core.rf = regfile_write(state.core.rf, 1, RAM_BASE + 4, true)
+        state.core.rf = regfile_write(state.core.rf, 2, 0xDEADBEEF, true)
         state = protect_ram(state, PMP_LOCKED_X)
-        state = soc_tick(state).state
+        state = retire_one(state)
         expect(state.core.csr_m.mcause).to_equal(7)
         expect(state.core.csr_m.mtval).to_equal(RAM_BASE + 4)
         expect(ram_read(state.ram, 4)).to_equal(0)
@@ -79,7 +112,7 @@ describe "RV32 privilege-aware PMP clock path":
         state.core.csr_m.mepc = RAM_BASE + 4
         state.core.csr_m.mstatus = MSTATUS_MPIE_MASK | MPP_S_MODE |
             MSTATUS_MPRV_MASK
-        state = soc_tick(state).state
+        state = retire_one(state)
         expect(state.core.priv_mode).to_equal(1)
         expect(state.core.pc).to_equal(RAM_BASE + 4)
         expect(state.core.csr_m.mstatus & MSTATUS_MPRV_MASK).to_equal(0)
@@ -92,7 +125,7 @@ describe "RV32 privilege-aware PMP clock path":
         state.core.csr_m.mtvec = 0x1000
         state.ram = ram_write(state.ram, 0, 0x00000073, 2)
         state = protect_ram(state, PMP_LOCKED_X)
-        state = soc_tick(state).state
+        state = retire_one(state)
         expect(state.core.priv_mode).to_equal(3)
         expect(state.core.csr_m.mcause).to_equal(8)
         expect(state.core.csr_m.mepc).to_equal(RAM_BASE)
@@ -103,11 +136,11 @@ describe "RV32 privilege-aware PMP clock path":
         state.core.pc = RAM_BASE
         state.core.csr_m.mtvec = 0x1000
         state.ram = ram_write(state.ram, 0, 0x0020A023, 2)
-        state.regfile = regfile_write(state.regfile, 1, RAM_BASE + 4, true)
-        state.regfile = regfile_write(state.regfile, 2, 0xDEADBEEF, true)
+        state.core.rf = regfile_write(state.core.rf, 1, RAM_BASE + 4, true)
+        state.core.rf = regfile_write(state.core.rf, 2, 0xDEADBEEF, true)
         state = protect_ram(state, PMP_UNLOCKED_NONE)
         state.core.csr_m.mstatus = MPP_S_MODE | MSTATUS_MPRV_MASK
-        state = soc_tick(state).state
+        state = retire_one(state)
         expect(state.core.csr_m.mcause).to_equal(7)
         expect(state.core.csr_m.mtval).to_equal(RAM_BASE + 4)
         expect(ram_read(state.ram, 4)).to_equal(0)
@@ -118,10 +151,10 @@ describe "RV32 privilege-aware PMP clock path":
         state.core.priv_mode = 0
         state.core.csr_m.mtvec = 0x1000
         state.core.csr_m.mie = MIP_MSIP_MASK
-        state.core.csr_m.mip = MIP_MSIP_MASK
+        state.clint.msip = 1
         state.ram = ram_write(state.ram, 0, 0x00000013, 2)
         state = protect_ram(state, PMP_LOCKED_X)
-        state = soc_tick(state).state
+        state = retire_one(state)
         expect(state.core.priv_mode).to_equal(3)
         expect(state.core.csr_m.mcause).to_equal(0x80000003)
         expect(state.core.csr_m.mepc).to_equal(RAM_BASE + 4)
@@ -133,9 +166,9 @@ describe "RV32 privilege-aware PMP clock path":
         state.core.csr_m.mtvec = 0x1000
         state.ram = ram_write(state.ram, 0,
             csr_instruction(0x300, 1, 1, 2), 2)
-        state.regfile = regfile_write(state.regfile, 1, 0xFFFFFFFF, true)
+        state.core.rf = regfile_write(state.core.rf, 1, 0xFFFFFFFF, true)
         state = protect_ram(state, PMP_LOCKED_X)
-        state = soc_tick(state).state
+        state = retire_one(state)
         expect(state.core.priv_mode).to_equal(3)
         expect(state.core.csr_m.mcause).to_equal(2)
         expect(state.core.csr_m.mstatus & MSTATUS_MPRV_MASK).to_equal(0)
@@ -146,14 +179,119 @@ describe "RV32 privilege-aware PMP clock path":
         denied.core.csr_m.mtvec = 0x1000
         denied.ram = ram_write(denied.ram, 0,
             csr_instruction(0xF14, 1, 1, 2), 2)
-        denied.regfile = regfile_write(denied.regfile, 1, 7, true)
-        denied = soc_tick(denied).state
+        denied.core.rf = regfile_write(denied.core.rf, 1, 7, true)
+        denied = retire_one(denied)
         expect(denied.core.csr_m.mcause).to_equal(2)
 
         var allowed = soc_create(64)
         allowed.core.pc = RAM_BASE
         allowed.ram = ram_write(allowed.ram, 0,
             csr_instruction(0xF14, 0, 2, 2), 2)
-        allowed = soc_tick(allowed).state
+        allowed = retire_one(allowed)
         expect(allowed.core.csr_m.mcause).to_equal(0)
         expect(allowed.core.pc).to_equal(RAM_BASE + 4)
+
+describe "RV32 instruction legality and precise control transfer":
+    it "ignores reserved FENCE rd and rs1 fields":
+        var state = soc_create(64)
+        state.core.pc = RAM_BASE
+        state.ram = ram_write(state.ram, 0, 0x0000818F, 2)
+        state.core.rf = regfile_write(state.core.rf, 3, 0x55, true)
+        state = retire_one(state)
+        expect(state.core.pc).to_equal(RAM_BASE + 4)
+        expect(regfile_read(state.core.rf, 3, 0).rs1_data).to_equal(0x55)
+        expect(state.core.csr_m.minstret).to_equal(1)
+
+    it "traps an unknown opcode without retirement":
+        var state = soc_create(64)
+        state.core.pc = RAM_BASE
+        state.core.csr_m.mtvec = 0x1000
+        state.ram = ram_write(state.ram, 0, 0x00000000, 2)
+        state = retire_one(state)
+        expect(state.core.csr_m.mcause).to_equal(2)
+        expect(state.core.csr_m.mtval).to_equal(0)
+        expect(state.core.csr_m.minstret).to_equal(0)
+
+    it "traps a reserved load width before issuing data access":
+        var state = soc_create(64)
+        state.core.pc = RAM_BASE
+        state.core.csr_m.mtvec = 0x1000
+        state.ram = ram_write(state.ram, 0, 0x0000B183, 2)
+        state.core.rf = regfile_write(state.core.rf, 1, RAM_BASE + 4, true)
+        state.core.rf = regfile_write(state.core.rf, 3, 0x55, true)
+        state = retire_one(state)
+        expect(state.core.csr_m.mcause).to_equal(2)
+        expect(state.core.csr_m.mtval).to_equal(0x0000B183)
+        expect(regfile_read(state.core.rf, 3, 0).rs1_data).to_equal(0x55)
+
+    it "traps a reserved shift-immediate funct7":
+        var state = soc_create(64)
+        state.core.pc = RAM_BASE
+        state.core.csr_m.mtvec = 0x1000
+        state.ram = ram_write(state.ram, 0, 0x02009113, 2)
+        state = retire_one(state)
+        expect(state.core.csr_m.mcause).to_equal(2)
+        expect(state.core.csr_m.mtval).to_equal(0x02009113)
+
+    it "traps a JALR with a reserved funct3":
+        var state = soc_create(64)
+        state.core.pc = RAM_BASE
+        state.core.csr_m.mtvec = 0x1000
+        state.ram = ram_write(state.ram, 0, 0x000110E7, 2)
+        state = retire_one(state)
+        expect(state.core.csr_m.mcause).to_equal(2)
+        expect(state.core.csr_m.mtval).to_equal(0x000110E7)
+
+    it "traps a misaligned JAL before link writeback or retirement":
+        var state = soc_create(64)
+        state.core.pc = RAM_BASE
+        state.core.csr_m.mtvec = 0x1000
+        state.ram = ram_write(state.ram, 0, 0x002000EF, 2)
+        state = retire_one(state)
+        expect(state.core.csr_m.mcause).to_equal(0)
+        expect(state.core.csr_m.mepc).to_equal(RAM_BASE)
+        expect(state.core.csr_m.mtval).to_equal(RAM_BASE + 2)
+        expect(regfile_read(state.core.rf, 1, 0).rs1_data).to_equal(0)
+        expect(state.core.csr_m.minstret).to_equal(0)
+
+    it "clears JALR target bit zero before alignment and writeback":
+        var state = soc_create(64)
+        state.core.pc = RAM_BASE
+        state.ram = ram_write(state.ram, 0, 0x000100E7, 2)
+        state.core.rf = regfile_write(state.core.rf, 2, RAM_BASE + 5, true)
+        state = retire_one(state)
+        expect(state.core.csr_m.mcause).to_equal(0)
+        expect(state.core.pc).to_equal(RAM_BASE + 4)
+        expect(regfile_read(state.core.rf, 1, 0).rs1_data).to_equal(
+            RAM_BASE + 4)
+        expect(state.core.csr_m.minstret).to_equal(1)
+
+    it "traps JALR target bit one after clearing bit zero":
+        var state = soc_create(64)
+        state.core.pc = RAM_BASE
+        state.core.csr_m.mtvec = 0x1000
+        state.ram = ram_write(state.ram, 0, 0x000100E7, 2)
+        state.core.rf = regfile_write(state.core.rf, 2, RAM_BASE + 3, true)
+        state = retire_one(state)
+        expect(state.core.csr_m.mcause).to_equal(0)
+        expect(state.core.csr_m.mepc).to_equal(RAM_BASE)
+        expect(state.core.csr_m.mtval).to_equal(RAM_BASE + 2)
+        expect(regfile_read(state.core.rf, 1, 0).rs1_data).to_equal(0)
+        expect(state.core.csr_m.minstret).to_equal(0)
+
+describe "RV32 response-latched completion":
+    it "retires the mailbox EXIT store before halting":
+        var state = soc_create(64)
+        state.core.pc = RAM_BASE
+        state.ram = ram_write(state.ram, 0, 0x0020A023, 2)
+        state.core.rf = regfile_write(state.core.rf, 1, MB_BASE + 0x18, true)
+        state.core.rf = regfile_write(state.core.rf, 2, MB_TRIGGER_MAGIC, true)
+        state.mailbox.cmd = MB_CMD_EXIT
+        state = retire_one(state)
+        expect(state.core.halt).to_equal(true)
+        expect(state.halt_pending).to_equal(false)
+        expect(state.response_valid).to_equal(false)
+        expect(state.core.memory.phase).to_equal(MEMORY32_IDLE)
+        expect(state.core.pc).to_equal(RAM_BASE + 4)
+        expect(state.core.csr_m.minstret).to_equal(1)
+        expect(state.mailbox.seq_id).to_equal(1)

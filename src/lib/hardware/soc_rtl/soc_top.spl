@@ -4,49 +4,21 @@
 #
 # Wires together the RV32I core, CSR file, trap controller, register file,
 # Wishbone interconnect, RAM, boot ROM, UART 16550, CLINT, and mailbox into
-# a complete single-cycle SoC.
+# a complete stalled, response-latched SoC.
 #
 # soc_tick() is THE main simulation entry point.  Each call = 1 clock cycle.
-# The pipeline:
-#   1.  Fetch instruction (via Wishbone: ROM or RAM)
-#   2.  Decode instruction
-#   3.  Read registers
-#   4.  Compute ALU result
-#   5.  Memory access (load/store via Wishbone)
-#   6.  CSR operations (CSRRW/S/C when SYSTEM + funct3!=0)
-#   7.  Trap entry (ECALL/EBREAK) or MRET
-#   8.  Interrupt check and trap entry
-#   9.  Write-back to register file
-#   10. Update PC (next_pc / trap_pc / mret_pc)
-#   11. Tick peripherals (CLINT, UART)
-#   12. Update CSR mip from peripheral interrupts
+# Each request crosses Sv32 translation and PMP before this module routes its
+# physical address to ROM, RAM, CLINT, UART, or mailbox. One response is
+# latched for the following core cycle.
 #
 # VHDL synthesizable subset: u32, bool, [u32], structs only.
 # ============================================================================
 
-# -- Core pipeline
-use std.hardware.rv32i_rtl.pkg.{OP_SYSTEM, OP_LOAD, OP_STORE}
-use std.hardware.rv32i_rtl.decode.{DecodeResult, decode_instruction}
-use std.hardware.rv32i_rtl.alu.{alu_compute}
-use std.hardware.rv32i_rtl.regfile.{RegFile, regfile_create, regfile_read, regfile_write}
-use std.hardware.rv32i_rtl.lsu.lsu_load
-use std.hardware.rv32i_rtl.core.{CoreState, core_reset, core_combinational, core_update}
-use std.hardware.rv32i_rtl.core.core_effective_data_privilege
-
-# -- CSR / Trap
-use std.hardware.rv32i_rtl.csr.{csr_is_known, csr_next_value, csr_write_requested}
-use std.hardware.rv32i_rtl.csr.{csr_rw, csr_tick, csr_update_mip}
-use std.hardware.rv32i_rtl.csr.{FUNCT3_CSRRW, FUNCT3_CSRRS, FUNCT3_CSRRC}
-use std.hardware.rv32i_rtl.csr.{FUNCT3_CSRRWI, FUNCT3_CSRRSI, FUNCT3_CSRRCI}
-use std.hardware.rv32i_rtl.csr_s.{csr_s_is_known, csr_s_read, csr_s_write}
-use std.hardware.rv32i_rtl.csr_s.{csr_s_merge_mstatus, SSTATUS_WRITABLE}
-use std.hardware.rv32i_rtl.trap.{trap_check_interrupt_from_priv, trap_route}
-use std.hardware.rv32i_rtl.trap.{trap_exit_mret, trap_exit_sret}
-use std.hardware.rv32i_rtl.trap.{CAUSE_ECALL_U, CAUSE_ECALL_S, CAUSE_ECALL_M}
-use std.hardware.rv32i_rtl.trap.{CAUSE_BREAKPOINT, CAUSE_ILLEGAL_INSN}
-use std.hardware.rv32i_rtl.pmp.{pmp32_gate_access, PMP32_ACCESS_FETCH}
-use std.hardware.rv32i_rtl.pmp.{PMP32_ACCESS_LOAD, PMP32_ACCESS_STORE}
-use std.hardware.rv32i_rtl.pmp_csr.{pmp32_csr_read, pmp32_csr_write}
+# -- Clocked core
+use std.hardware.rv32i_rtl.core.{CoreState, core_reset, core32_cycle}
+use std.hardware.rv32i_rtl.csr.csr_update_mip
+use std.hardware.rv32i_rtl.mmu_sv32.ACCESS_FETCH
+use std.hardware.rv32i_rtl.memory_access.memory32_reset
 
 # -- Peripherals
 use std.hardware.soc_rtl.bootrom.{bootrom_read, BOOTROM_BASE}
@@ -59,6 +31,7 @@ use std.hardware.soc_rtl.mailbox.{MailboxState, mailbox_create, mailbox_mmio_rea
 use std.hardware.soc_rtl.wb_interconnect.{wb_decode_address, wb_route_read, wb_route_write}
 use std.hardware.soc_rtl.wb_interconnect.{WB_SLAVE_ROM, WB_SLAVE_CLINT, WB_SLAVE_UART}
 use std.hardware.soc_rtl.wb_interconnect.{WB_SLAVE_RAM, WB_SLAVE_MAILBOX}
+use std.hardware.soc_rtl.wb_interconnect.WB_SLAVE_UNMAPPED
 use std.hardware.soc_rtl.wb_interconnect.{RAM_BASE, CLINT_BASE, UART_BASE, MB_BASE}
 
 # ============================================================================
@@ -68,11 +41,14 @@ use std.hardware.soc_rtl.wb_interconnect.{RAM_BASE, CLINT_BASE, UART_BASE, MB_BA
 struct SocState:
     """Full SoC sequential state."""
     core: CoreState
-    regfile: RegFile
     uart: Uart16550State
     clint: ClintState
     mailbox: MailboxState
     ram: RamState
+    response_valid: bool
+    response_error: bool
+    response_data: u32
+    halt_pending: bool
 
 # ============================================================================
 # SoC External Ports
@@ -102,11 +78,14 @@ fn soc_create(ram_size_words: u32) -> SocState:
     """Create and initialize the full SoC.  PC starts at boot ROM (0x1000)."""
     SocState(
         core: core_reset(BOOTROM_BASE),
-        regfile: regfile_create(),
         uart: uart_create(),
         clint: clint_create(),
         mailbox: mailbox_create(),
-        ram: ram_create(ram_size_words)
+        ram: ram_create(ram_size_words),
+        response_valid: false,
+        response_error: false,
+        response_data: 0,
+        halt_pending: false
     )
 
 fn soc_reset(ram_size_words: u32) -> SocState:
@@ -216,371 +195,107 @@ fn soc_mem_write(state: SocState, addr: u32, wdata: u32, width: u32) -> SocWrite
     )
 
 # ============================================================================
-# Helper — is this a CSR instruction?
+# Physical bus adaptation
 # ============================================================================
 
-fn is_csr_funct3(funct3: u32) -> bool:
-    """Return true if funct3 indicates a CSR read-modify-write instruction."""
-    (funct3 == FUNCT3_CSRRW or funct3 == FUNCT3_CSRRS or funct3 == FUNCT3_CSRRC or
-     funct3 == FUNCT3_CSRRWI or funct3 == FUNCT3_CSRRSI or funct3 == FUNCT3_CSRRCI)
-
-fn soc_access_size(width: u32) -> u32:
-    if width == 0:
+fn soc_width_from_size(size_bytes: u32) -> u32:
+    if size_bytes == 1:
+        return 0
+    if size_bytes == 2:
         return 1
-    if width == 1:
-        return 2
-    4
+    2
+
+fn soc_bus_target_valid(slave_idx: u32) -> bool:
+    (slave_idx == WB_SLAVE_ROM or slave_idx == WB_SLAVE_CLINT or
+        slave_idx == WB_SLAVE_UART or slave_idx == WB_SLAVE_RAM or
+        slave_idx == WB_SLAVE_MAILBOX)
+
+fn soc_bus_read(state: SocState, addr: u32, slave_idx: u32,
+                size_bytes: u32) -> u32:
+    val raw = soc_mem_read(state, addr)
+    if slave_idx == WB_SLAVE_ROM or slave_idx == WB_SLAVE_RAM:
+        val shifted = raw >> ((addr & 3) * 8)
+        if size_bytes == 1:
+            return shifted & 0xFF
+        if size_bytes == 2:
+            return shifted & 0xFFFF
+        return shifted
+    raw
 
 # ============================================================================
-# Helper — is this an MRET instruction?
-# ============================================================================
-
-fn is_mret(dec: DecodeResult) -> bool:
-    """Return true if the decoded instruction is MRET.
-    MRET encoding: funct7=0x18 (0011000), rs2=00010, funct3=0, opcode=SYSTEM.
-    The full imm field (bits [31:20]) = 0x302."""
-    (dec.opcode == OP_SYSTEM and dec.funct3 == 0 and
-     dec.funct7 == 0x18 and dec.rs2 == 2 and dec.rs1 == 0 and dec.rd == 0)
-
-fn is_sret(dec: DecodeResult) -> bool:
-    """Return true for the architectural SRET encoding 0x10200073."""
-    (dec.opcode == OP_SYSTEM and dec.funct3 == 0 and
-     dec.funct7 == 0x08 and dec.rs2 == 2 and dec.rs1 == 0 and dec.rd == 0)
-
-# ============================================================================
-# Helper — is this ECALL?
-# ============================================================================
-
-fn is_ecall(dec: DecodeResult) -> bool:
-    """Return true if the decoded instruction is ECALL.
-    ECALL encoding: imm=0, funct3=0, opcode=SYSTEM."""
-    (dec.opcode == OP_SYSTEM and dec.funct3 == 0 and dec.funct7 == 0 and
-     dec.rs2 == 0 and dec.rs1 == 0 and dec.rd == 0)
-
-# ============================================================================
-# Helper — is this EBREAK?
-# ============================================================================
-
-fn is_ebreak(dec: DecodeResult) -> bool:
-    """Return true if the decoded instruction is EBREAK.
-    EBREAK encoding: imm=1 (rs2=1), funct3=0, opcode=SYSTEM."""
-    (dec.opcode == OP_SYSTEM and dec.funct3 == 0 and dec.funct7 == 0 and
-     dec.rs2 == 1 and dec.rs1 == 0 and dec.rd == 0)
-
-# ============================================================================
-# SoC Tick — THE main simulation function
+# SoC Tick — one stalled core/bus/peripheral clock
 # ============================================================================
 
 fn soc_tick(state: SocState) -> SocTickResult:
-    """Execute one clock cycle of the entire SoC.
-
-    This function integrates all modules: core datapath, CSR, traps,
-    register file, Wishbone bus, RAM, ROM, UART, CLINT, and mailbox.
-
-    Returns the updated SoC state and external port values."""
-
-    val pc = state.core.pc
-    var cur_csr = state.core.csr_m
-    var cur_csr_s = state.core.csr_s
-    var cur_pmp = state.core.pmp
-    var next_priv_mode = state.core.priv_mode
-    var cur_rf = state.regfile
-    var cur_state = state
-    var halted = state.core.halt
+    """Advance the clocked RV32 core and latch one physical bus response."""
+    var out = state
     var char_out: u32 = 0
-    var char_valid: bool = false
-    var uart_tx_bit: u32 = 1
+    var char_valid = false
 
-    # If already halted, just tick peripherals and return
-    if halted:
-        # Tick CLINT
-        val ct = clint_tick(cur_state.clint)
-        cur_state.clint = ct.state
-        # Tick UART
-        val ut = uart_tick(cur_state.uart)
-        cur_state.uart = ut.state
-        uart_tx_bit = ut.tx_out
+    val ct = clint_tick(out.clint)
+    out.clint = ct.state
+    val ut = uart_tick(out.uart)
+    out.uart = ut.state
+    out.core.csr_m = csr_update_mip(out.core.csr_m, ct.mtip,
+        ct.msip_out, false)
 
-        val ports = SocPorts(
-            uart_tx: uart_tx_bit != 0,
-            halted: true,
-            char_out: 0,
-            char_valid: false
-        )
-        return SocTickResult(state: cur_state, ports: ports)
+    val drain_halt = out.halt_pending and out.response_valid
+    val request_access = out.core.memory.access_type
+    val core_result = core32_cycle(out.core, true, out.response_valid,
+        out.response_error, out.response_data)
+    out.core = core_result.state
+    out.response_valid = false
+    out.response_error = false
+    out.response_data = 0
 
-    # ── Step 1: Protect and fetch instruction ────────────────────────────
-    # ponytail: Bare mode uses vaddr==paddr; feed the Sv32 walker result
-    # here when its request/response FSM is clocked into this owner.
-    val fetch_gate = pmp32_gate_access(cur_pmp, pc as i64, 4,
-        PMP32_ACCESS_FETCH, state.core.priv_mode, false, 0)
-    var access_fault = fetch_gate.fault
-    var fault_cause = fetch_gate.fault_cause
-    var fault_tval = pc
-    var insn: u32 = 0x00000013
-    if fetch_gate.bus_valid:
-        insn = soc_fetch_instruction(cur_state, pc)
-
-    # ── Step 2: Decode ───────────────────────────────────────────────────
-    val dec = decode_instruction(insn)
-
-    # ── Step 3: Read registers ───────────────────────────────────────────
-    val rr = regfile_read(cur_rf, dec.rs1, dec.rs2)
-    val rs1_data = rr.rs1_data
-    val rs2_data = rr.rs2_data
-
-    # ── Step 4: Core combinational datapath (ALU, branch, next-PC) ──────
-    # First, compute the address, then protect it before any bus read.
-    val comb_prelim = core_combinational(state.core, insn, 0, cur_rf)
-
-    var dmem_rdata: u32 = 0
-    var data_bus_valid: bool = true
-    if access_fault == false and (comb_prelim.dmem_re or comb_prelim.dmem_we):
-        val access_kind = if comb_prelim.dmem_we:
-            PMP32_ACCESS_STORE
+    if core_result.bus_valid:
+        out.response_valid = true
+        if core_result.bus_addr < 0 or core_result.bus_addr > 0xFFFFFFFF:
+            out.response_error = true
         else:
-            PMP32_ACCESS_LOAD
-        val data_gate = pmp32_gate_access(cur_pmp,
-            comb_prelim.dmem_addr as i64,
-            soc_access_size(comb_prelim.dmem_width), access_kind,
-            core_effective_data_privilege(state.core), false, 0)
-        data_bus_valid = data_gate.bus_valid
-        if data_gate.fault:
-            access_fault = true
-            fault_cause = data_gate.fault_cause
-            fault_tval = comb_prelim.dmem_addr
-        else if comb_prelim.dmem_re:
-            dmem_rdata = soc_mem_read(cur_state, comb_prelim.dmem_addr)
-
-    # Re-run combinational with actual memory read data
-    val comb = core_combinational(state.core, insn, dmem_rdata, cur_rf)
-
-    # ── Step 5: Memory write (store instructions) ────────────────────────
-    var next_pc = comb.pc_next
-    var do_rd_write = dec.reg_write
-    var rd_data = comb.rd_data
-    var synchronous_trap = access_fault
-
-    if access_fault == false and data_bus_valid and comb.dmem_we:
-        val wr = soc_mem_write(cur_state, comb.dmem_addr, comb.dmem_wdata, comb.dmem_width)
-        cur_state = wr.state
-        if wr.char_valid:
-            char_out = wr.char_out
-            char_valid = true
-        if wr.halt_request:
-            halted = true
-
-    # Apply read side-effects (UART RX pop on load)
-    if access_fault == false and data_bus_valid and comb.dmem_re:
-        cur_state = soc_mem_read_update(cur_state, comb.dmem_addr)
-
-    # ── Step 6: Synchronous access fault or CSR operation ───────────────
-    if access_fault:
-        val enter_result = trap_route(cur_csr, cur_csr_s, pc, fault_cause,
-            fault_tval, state.core.priv_mode)
-        cur_csr = enter_result.csr
-        cur_csr_s = enter_result.csr_s
-        next_pc = enter_result.trap_pc
-        next_priv_mode = enter_result.target_mode
-        do_rd_write = false
-
-    else if dec.opcode == OP_SYSTEM and is_csr_funct3(dec.funct3):
-        # CSR address is in the immediate field bits [31:20] = dec.imm upper 12
-        val csr_addr = (insn >> 20) & 0xFFF
-        var csr_src = rs1_data
-        if dec.funct3 >= FUNCT3_CSRRWI:
-            csr_src = dec.rs1
-        val pmp_read = pmp32_csr_read(cur_pmp, csr_addr)
-        val required_priv = (csr_addr >> 8) & 0x3
-        val read_only = ((csr_addr >> 10) & 0x3) == 0x3
-        val known = (pmp_read.handled or csr_is_known(csr_addr) or
-            csr_s_is_known(csr_addr))
-        val illegal_access = (state.core.priv_mode < required_priv or
-            known == false or
-            (read_only and csr_write_requested(csr_src, dec.funct3)))
-        if illegal_access:
-            val illegal = trap_route(cur_csr, cur_csr_s, pc,
-                CAUSE_ILLEGAL_INSN, insn, state.core.priv_mode)
-            cur_csr = illegal.csr
-            cur_csr_s = illegal.csr_s
-            next_pc = illegal.trap_pc
-            next_priv_mode = illegal.target_mode
-            synchronous_trap = true
-            do_rd_write = false
-        else:
-            if pmp_read.handled:
-                val pmp_write = pmp32_csr_write(cur_pmp, csr_addr,
-                    csr_next_value(pmp_read.value, csr_src, dec.funct3))
-                cur_pmp = pmp_write.entries
-                rd_data = pmp_read.value
-            else if csr_is_known(csr_addr):
-                val csr_result = csr_rw(cur_csr, csr_addr, csr_src,
-                    dec.funct3)
-                cur_csr = csr_result.csr
-                rd_data = csr_result.old_value
-            else:
-                val old_value = if csr_addr == 0x100:
-                    cur_csr.mstatus & SSTATUS_WRITABLE
+            val addr = core_result.bus_addr as u32
+            val slave_idx = wb_decode_address(addr)
+            if (slave_idx == WB_SLAVE_UNMAPPED or
+                not soc_bus_target_valid(slave_idx)):
+                out.response_error = true
+            else if (slave_idx == WB_SLAVE_RAM and
+                     (addr - RAM_BASE) + core_result.bus_size >
+                        out.ram.size_words * 4):
+                out.response_error = true
+            else if core_result.bus_is_pte and slave_idx != WB_SLAVE_RAM:
+                out.response_error = true
+            else if (request_access == ACCESS_FETCH and
+                     slave_idx != WB_SLAVE_ROM and
+                     slave_idx != WB_SLAVE_RAM):
+                out.response_error = true
+            else if core_result.bus_atomic and slave_idx != WB_SLAVE_RAM:
+                out.response_error = true
+            else if core_result.bus_write:
+                if slave_idx == WB_SLAVE_ROM:
+                    out.response_error = true
                 else:
-                    csr_s_read(cur_csr_s, csr_addr)
-                val next_value = csr_next_value(old_value, csr_src,
-                    dec.funct3)
-                if csr_addr == 0x100:
-                    cur_csr.mstatus = csr_s_merge_mstatus(cur_csr.mstatus,
-                        next_value)
-                else:
-                    cur_csr_s = csr_s_write(cur_csr_s, csr_addr, next_value)
-                rd_data = old_value
-            do_rd_write = true
-            next_pc = pc + 4
-
-    # ── Step 7: ECALL / EBREAK / MRET ───────────────────────────────────
-    else if dec.opcode == OP_SYSTEM and dec.funct3 == 0:
-        if is_mret(dec):
-            if state.core.priv_mode == 3:
-                val mret_result = trap_exit_mret(cur_csr)
-                cur_csr = mret_result.csr
-                next_pc = mret_result.return_pc
-                next_priv_mode = mret_result.target_mode
-                do_rd_write = false
+                    val wr = soc_mem_write(out, addr, core_result.bus_wdata,
+                        soc_width_from_size(core_result.bus_size))
+                    out = wr.state
+                    char_out = wr.char_out
+                    char_valid = wr.char_valid
+                    if wr.halt_request:
+                        out.halt_pending = true
             else:
-                val illegal = trap_route(cur_csr, cur_csr_s, pc,
-                    CAUSE_ILLEGAL_INSN, insn, state.core.priv_mode)
-                cur_csr = illegal.csr
-                cur_csr_s = illegal.csr_s
-                next_pc = illegal.trap_pc
-                next_priv_mode = illegal.target_mode
-                synchronous_trap = true
-                do_rd_write = false
+                out.response_data = soc_bus_read(out, addr, slave_idx,
+                    core_result.bus_size)
+                if request_access != ACCESS_FETCH:
+                    out = soc_mem_read_update(out, addr)
 
-        else if is_sret(dec):
-            if state.core.priv_mode >= 1:
-                val sret_result = trap_exit_sret(cur_csr, cur_csr_s)
-                cur_csr = sret_result.csr
-                cur_csr_s = sret_result.csr_s
-                next_pc = sret_result.return_pc
-                next_priv_mode = sret_result.target_mode
-                do_rd_write = false
-            else:
-                val illegal = trap_route(cur_csr, cur_csr_s, pc,
-                    CAUSE_ILLEGAL_INSN, insn, state.core.priv_mode)
-                cur_csr = illegal.csr
-                cur_csr_s = illegal.csr_s
-                next_pc = illegal.trap_pc
-                next_priv_mode = illegal.target_mode
-                synchronous_trap = true
-                do_rd_write = false
+    if drain_halt:
+        out.core.halt = true
+        out.core.memory = memory32_reset()
+        out.halt_pending = false
 
-        else if is_ecall(dec):
-            var ecall_cause = CAUSE_ECALL_M
-            if state.core.priv_mode == 0:
-                ecall_cause = CAUSE_ECALL_U
-            else if state.core.priv_mode == 1:
-                ecall_cause = CAUSE_ECALL_S
-            val enter_result = trap_route(cur_csr, cur_csr_s, pc,
-                ecall_cause, 0, state.core.priv_mode)
-            cur_csr = enter_result.csr
-            cur_csr_s = enter_result.csr_s
-            next_pc = enter_result.trap_pc
-            next_priv_mode = enter_result.target_mode
-            synchronous_trap = true
-            do_rd_write = false
-
-        else if is_ebreak(dec):
-            # EBREAK outside semihosting sequence — enter trap.  During the
-            # magic sequence core_update consumes the exact EBREAK encoding.
-            if state.core.semi_phase == 0:
-                val enter_result = trap_route(cur_csr, cur_csr_s, pc,
-                    CAUSE_BREAKPOINT, pc, state.core.priv_mode)
-                cur_csr = enter_result.csr
-                cur_csr_s = enter_result.csr_s
-                next_pc = enter_result.trap_pc
-                next_priv_mode = enter_result.target_mode
-                synchronous_trap = true
-                do_rd_write = false
-
-        else:
-            # Unsupported or non-canonical SYSTEM/funct3=0 encodings are
-            # illegal instructions, not retired no-ops.
-            val illegal = trap_route(cur_csr, cur_csr_s, pc,
-                CAUSE_ILLEGAL_INSN, insn, state.core.priv_mode)
-            cur_csr = illegal.csr
-            cur_csr_s = illegal.csr_s
-            next_pc = illegal.trap_pc
-            next_priv_mode = illegal.target_mode
-            synchronous_trap = true
-            do_rd_write = false
-
-    # ── Step 8: Interrupt check ──────────────────────────────────────────
-    # Check for pending interrupts AFTER instruction execution
-    val int_check = trap_check_interrupt_from_priv(cur_csr, next_priv_mode)
-    if synchronous_trap == false and int_check.pending:
-        val int_enter = trap_route(cur_csr, cur_csr_s, next_pc,
-            int_check.cause, 0, next_priv_mode)
-        cur_csr = int_enter.csr
-        cur_csr_s = int_enter.csr_s
-        next_pc = int_enter.trap_pc
-        next_priv_mode = int_enter.target_mode
-
-    # ── Step 9: Write-back to register file ──────────────────────────────
-    cur_rf = regfile_write(cur_rf, dec.rd, rd_data,
-        do_rd_write and synchronous_trap == false)
-
-    # ── Step 10: Update core state (PC, semihosting detection) ───────────
-    # core_update handles the semihosting magic sequence FSM (semi_phase).
-    # It must run for:
-    #   - All non-SYSTEM instructions (normal datapath)
-    #   - SYSTEM instructions when semihosting is active (semi_phase != 0),
-    #     because the EBREAK in the semihosting sequence is OP_SYSTEM
-    var new_core = state.core
-    val need_core_update = (dec.opcode != OP_SYSTEM or state.core.semi_phase != 0)
-    if synchronous_trap:
-        new_core.pc = next_pc
-        new_core.semi_trigger = false
-    else if need_core_update:
-        new_core = core_update(state.core, insn, comb, rr.a0_val, rr.a1_val)
-        # core_update computes its own pc_next; override with our trap-aware pc
-        # unless semihosting consumed it (semi_phase advanced)
-        if state.core.semi_phase == 0:
-            new_core.pc = next_pc
-        if new_core.halt:
-            halted = true
-    else:
-        # SYSTEM instructions outside semihosting — just update PC
-        new_core.pc = next_pc
-        new_core.semi_trigger = false
-
-    if halted:
-        new_core.halt = true
-
-    new_core.csr_m = cur_csr
-    new_core.csr_s = cur_csr_s
-    new_core.pmp = cur_pmp
-    new_core.priv_mode = next_priv_mode
-    cur_state.core = new_core
-    cur_state.regfile = cur_rf
-
-    # ── Step 11: Tick peripherals ────────────────────────────────────────
-    val ct = clint_tick(cur_state.clint)
-    cur_state.clint = ct.state
-
-    val ut = uart_tick(cur_state.uart)
-    cur_state.uart = ut.state
-    uart_tx_bit = ut.tx_out
-
-    # ── Step 12: Update CSR mip from peripheral interrupts ───────────────
-    cur_state.core.csr_m = csr_update_mip(cur_state.core.csr_m,
-        ct.mtip, ct.msip_out, false)
-
-    # Tick CSR counters (mcycle, minstret)
-    cur_state.core.csr_m = csr_tick(cur_state.core.csr_m)
-
-    # ── Build output ─────────────────────────────────────────────────────
     val ports = SocPorts(
-        uart_tx: uart_tx_bit != 0,
-        halted: cur_state.core.halt,
+        uart_tx: ut.tx_out != 0,
+        halted: out.core.halt,
         char_out: char_out,
         char_valid: char_valid
     )
-
-    SocTickResult(state: cur_state, ports: ports)
+    SocTickResult(state: out, ports: ports)

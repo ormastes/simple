@@ -1,14 +1,15 @@
 # ============================================================================
-# RV32I RTL Core — Single-Cycle Datapath
+# RV32I RTL Core — Clocked Datapath
 # ============================================================================
 #
-# Translates rv32i_core.vhd into Simple.  Top-level module that wires the
-# decoder, ALU, register file, and LSU into a single-cycle pipeline.
+# Canonical Simple implementation wiring the decoder, ALU, register file,
+# CSR/PMP state, and translated memory frontend.
 #
 # Architecture:
 #   - core_combinational()  — all combinational datapath logic
 #   - core_update()         — clocked sequential logic (PC, semihosting, halt)
-#   - core_reset()          — initial state at reset
+#   - core_reset()          — initial state and first fetch request
+#   - core32_cycle()        — stalled Sv32/PMP fetch and data path
 #
 # Semihosting: detects the 3-instruction magic sequence
 #   slli zero,zero,0x1f  /  ebreak  /  srai zero,zero,0x7
@@ -17,21 +18,43 @@
 
 use std.hardware.rv32i_rtl.pkg.{OP_LUI, OP_AUIPC, OP_JAL, OP_JALR}
 use std.hardware.rv32i_rtl.pkg.{OP_BRANCH, OP_LOAD, OP_STORE, OP_SYSTEM}
+use std.hardware.rv32i_rtl.pkg.{OP_IMMED, OP_REG, OP_MISC_MEM}
 use std.hardware.rv32i_rtl.pkg.{BR_BEQ, BR_BNE, BR_BLT, BR_BGE, BR_BLTU, BR_BGEU}
 use std.hardware.rv32i_rtl.pkg.{SEMI_ENTRY, SEMI_BREAK, SEMI_EXIT, SYS_EXIT}
 use std.hardware.rv32i_rtl.decode.{DecodeResult, decode_instruction}
 use std.hardware.rv32i_rtl.alu.{AluResult, alu_compute, u32_signed_lt}
-use std.hardware.rv32i_rtl.regfile.{RegFile, RegReadResult, regfile_read}
+use std.hardware.rv32i_rtl.regfile.{RegFile, RegReadResult, regfile_create}
+use std.hardware.rv32i_rtl.regfile.{regfile_read, regfile_write}
 use std.hardware.rv32i_rtl.lsu.{lsu_load}
 use std.hardware.rv32i_rtl.rvfi.{RvfiConfig, RvfiCoreSnapshot, RvfiTrace, rvfi_trace_from_snapshot}
-use std.hardware.rv32i_rtl.csr.{CsrFile, csr_create}
+use std.hardware.rv32i_rtl.csr.{CsrFile, csr_create, csr_is_known}
+use std.hardware.rv32i_rtl.csr.{csr_next_value, csr_write_requested, csr_rw}
+use std.hardware.rv32i_rtl.csr.{csr_cycle_tick, csr_retire_tick}
+use std.hardware.rv32i_rtl.csr.{FUNCT3_CSRRW, FUNCT3_CSRRS, FUNCT3_CSRRC}
+use std.hardware.rv32i_rtl.csr.{FUNCT3_CSRRWI, FUNCT3_CSRRSI, FUNCT3_CSRRCI}
 use std.hardware.rv32i_rtl.csr.{MSTATUS_MPRV_MASK, MSTATUS_MPP_MASK}
 use std.hardware.rv32i_rtl.csr.MSTATUS_MPP_LO_BIT
-use std.hardware.rv32i_rtl.csr_s.{CsrSMode, csr_s_create}
+use std.hardware.rv32i_rtl.csr_s.{CsrSMode, csr_s_create, csr_s_is_known}
+use std.hardware.rv32i_rtl.csr_s.{csr_s_read, csr_s_write, csr_s_merge_mstatus}
+use std.hardware.rv32i_rtl.csr_s.{CSR_ADDR_SSTATUS, CSR_ADDR_SATP}
+use std.hardware.rv32i_rtl.csr_s.{SSTATUS_WRITABLE, SSTATUS_SUM_MASK}
+use std.hardware.rv32i_rtl.csr_s.SSTATUS_MXR_MASK
 use std.hardware.rv32i_rtl.pmp.PmpEntries32
-use std.hardware.rv32i_rtl.pmp_csr.pmp32_entries_reset
-use std.hardware.rv32i_rtl.mmu_sv32.{MmuState, mmu_create}
-use std.hardware.rv32i_rtl.memory_access.{MemoryAccessState32, memory32_reset}
+use std.hardware.rv32i_rtl.pmp_csr.{pmp32_entries_reset, pmp32_csr_read}
+use std.hardware.rv32i_rtl.pmp_csr.pmp32_csr_write
+use std.hardware.rv32i_rtl.mmu_sv32.{MmuState, mmu_create, mmu_set_satp}
+use std.hardware.rv32i_rtl.mmu_sv32.{mmu_satp_value, mmu_flush}
+use std.hardware.rv32i_rtl.mmu_sv32.{ACCESS_FETCH, ACCESS_LOAD, ACCESS_STORE}
+use std.hardware.rv32i_rtl.memory_access.{MemoryAccessState32, memory32_start}
+use std.hardware.rv32i_rtl.memory_access.memory32_cycle
+use std.hardware.rv32i_rtl.trap.{trap_check_interrupt_from_priv, trap_route}
+use std.hardware.rv32i_rtl.trap.{trap_exit_mret, trap_exit_sret}
+use std.hardware.rv32i_rtl.trap.{CAUSE_ECALL_U, CAUSE_ECALL_S, CAUSE_ECALL_M}
+use std.hardware.rv32i_rtl.trap.{CAUSE_BREAKPOINT, CAUSE_ILLEGAL_INSN}
+use std.hardware.rv32i_rtl.trap.CAUSE_MISALIGNED_FETCH
+
+val CORE32_FETCH: u32 = 0
+val CORE32_DATA_ACCESS: u32 = 1
 
 # ============================================================================
 # Core sequential state (clocked registers)
@@ -51,7 +74,20 @@ struct CoreState:
     csr_s: CsrSMode     # Supervisor trap and address-space CSR state
     pmp: PmpEntries32   # Canonical physical protection state
     mmu: MmuState       # Canonical SATP and Sv32 TLB state
+    rf: RegFile         # Architectural integer register file
     memory: MemoryAccessState32  # In-flight translated memory transaction
+    pipeline_phase: u32 # Fetch or stalled data access
+    instruction: u32    # Current instruction during data access
+
+struct Core32CycleResult:
+    state: CoreState
+    bus_valid: bool
+    bus_addr: i64
+    bus_size: u32
+    bus_write: bool
+    bus_wdata: u32
+    bus_is_pte: bool
+    bus_atomic: bool
 
 # ============================================================================
 # Combinational result bundle
@@ -203,7 +239,7 @@ fn core_combinational(state: CoreState, imem_data: u32, dmem_rdata: u32, rf: Reg
     # Next PC mux
     var pc_next: u32 = pc_plus4
     if dec.opcode == OP_JALR:
-        pc_next = alu_res.result
+        pc_next = alu_res.result & 0xFFFFFFFE
     else if branch_taken or dec.jump:
         pc_next = branch_target
 
@@ -309,7 +345,10 @@ fn core_update(state: CoreState, imem_data: u32, comb: CoreCombResult, a0_val: u
         csr_s: state.csr_s,
         pmp: state.pmp,
         mmu: state.mmu,
-        memory: state.memory
+        rf: state.rf,
+        memory: state.memory,
+        pipeline_phase: state.pipeline_phase,
+        instruction: state.instruction
     )
 
 # ============================================================================
@@ -381,6 +420,8 @@ fn core_rvfi_trace(config: RvfiConfig, order: i64, state: CoreState, imem_data: 
 
 fn core_reset(reset_addr: u32) -> CoreState:
     """Create initial core state after reset."""
+    val mmu = mmu_create()
+    val pmp = pmp32_entries_reset()
     CoreState(
         pc: reset_addr,
         halt: false,
@@ -392,7 +433,302 @@ fn core_reset(reset_addr: u32) -> CoreState:
         priv_mode: 3,
         csr_m: csr_create(0),
         csr_s: csr_s_create(),
-        pmp: pmp32_entries_reset(),
-        mmu: mmu_create(),
-        memory: memory32_reset()
+        pmp: pmp,
+        mmu: mmu,
+        rf: regfile_create(),
+        memory: memory32_start(mmu, pmp, reset_addr, ACCESS_FETCH, 4, 3,
+            false, false, 0),
+        pipeline_phase: CORE32_FETCH,
+        instruction: 0
     )
+
+# ============================================================================
+# Clocked translated-memory core path
+# ============================================================================
+
+@hardware
+fn core32_sum_enabled(state: CoreState) -> bool:
+    (state.csr_m.mstatus & SSTATUS_SUM_MASK) != 0
+
+@hardware
+fn core32_mxr_enabled(state: CoreState) -> bool:
+    (state.csr_m.mstatus & SSTATUS_MXR_MASK) != 0
+
+@hardware
+fn core32_data_size(dec: DecodeResult) -> u32:
+    val width = dec.funct3 & 0x3
+    if width == 0:
+        return 1
+    if width == 1:
+        return 2
+    4
+
+@hardware
+fn core32_is_csr_funct3(funct3: u32) -> bool:
+    (funct3 == FUNCT3_CSRRW or funct3 == FUNCT3_CSRRS or
+     funct3 == FUNCT3_CSRRC or funct3 == FUNCT3_CSRRWI or
+     funct3 == FUNCT3_CSRRSI or funct3 == FUNCT3_CSRRCI)
+
+@hardware
+fn core32_is_mret(dec: DecodeResult) -> bool:
+    (dec.opcode == OP_SYSTEM and dec.funct3 == 0 and
+     dec.funct7 == 0x18 and dec.rs2 == 2 and dec.rs1 == 0 and dec.rd == 0)
+
+@hardware
+fn core32_is_sret(dec: DecodeResult) -> bool:
+    (dec.opcode == OP_SYSTEM and dec.funct3 == 0 and
+     dec.funct7 == 0x08 and dec.rs2 == 2 and dec.rs1 == 0 and dec.rd == 0)
+
+@hardware
+fn core32_is_sfence_vma(dec: DecodeResult) -> bool:
+    (dec.opcode == OP_SYSTEM and dec.funct3 == 0 and
+     dec.funct7 == 0x09 and dec.rd == 0)
+
+@hardware
+fn core32_is_ecall(dec: DecodeResult) -> bool:
+    (dec.opcode == OP_SYSTEM and dec.funct3 == 0 and dec.funct7 == 0 and
+     dec.rs2 == 0 and dec.rs1 == 0 and dec.rd == 0)
+
+@hardware
+fn core32_is_ebreak(dec: DecodeResult) -> bool:
+    (dec.opcode == OP_SYSTEM and dec.funct3 == 0 and dec.funct7 == 0 and
+     dec.rs2 == 1 and dec.rs1 == 0 and dec.rd == 0)
+
+@hardware
+fn core32_instruction_legal(instruction: u32, dec: DecodeResult) -> bool:
+    """Fail closed for every encoding accepted by the RV32I datapath."""
+    val op = dec.opcode
+    val f3 = dec.funct3
+    val f7 = dec.funct7
+
+    if op == OP_LUI or op == OP_AUIPC or op == OP_JAL:
+        return true
+    if op == OP_JALR:
+        return f3 == 0
+    if op == OP_BRANCH:
+        return (f3 == 0 or f3 == 1 or f3 == 4 or f3 == 5 or f3 == 6 or
+            f3 == 7)
+    if op == OP_LOAD:
+        return f3 == 0 or f3 == 1 or f3 == 2 or f3 == 4 or f3 == 5
+    if op == OP_STORE:
+        return f3 <= 2
+
+    if op == OP_IMMED:
+        if f3 == 1:
+            return f7 == 0
+        if f3 == 5:
+            return f7 == 0 or f7 == 0x20
+        return (f3 == 0 or f3 == 2 or f3 == 3 or f3 == 4 or f3 == 6 or
+            f3 == 7)
+
+    if op == OP_REG:
+        if f7 == 0:
+            return true
+        return f7 == 0x20 and (f3 == 0 or f3 == 5)
+
+    if op == OP_MISC_MEM:
+        if f3 == 0:
+            return true
+        return instruction == 0x0000100F
+
+    if op == OP_SYSTEM:
+        if core32_is_csr_funct3(f3):
+            return true
+        return (core32_is_mret(dec) or core32_is_sret(dec) or
+            core32_is_sfence_vma(dec) or core32_is_ecall(dec) or
+            core32_is_ebreak(dec))
+    false
+
+@hardware
+fn core32_restart_fetch(state: CoreState) -> CoreState:
+    var out = state
+    out.pipeline_phase = CORE32_FETCH
+    out.instruction = 0
+    out.memory = memory32_start(out.mmu, out.pmp, out.pc, ACCESS_FETCH, 4,
+        out.priv_mode, core32_sum_enabled(out), core32_mxr_enabled(out), 0)
+    out
+
+@hardware
+fn core32_raise_exception(state: CoreState, cause: u32,
+                          tval: u32) -> CoreState:
+    val trap = trap_route(state.csr_m, state.csr_s, state.pc, cause, tval,
+        state.priv_mode)
+    var out = state
+    out.pc = trap.trap_pc
+    out.priv_mode = trap.target_mode
+    out.csr_m = trap.csr
+    out.csr_s = trap.csr_s
+    out.semi_phase = 0
+    out.semi_suppress = false
+    out.semi_trigger = false
+    core32_restart_fetch(out)
+
+@hardware
+fn core32_finish_instruction(state: CoreState) -> CoreState:
+    var out = state
+    out.csr_m = csr_retire_tick(out.csr_m)
+    if out.halt:
+        return out
+    val interrupt = trap_check_interrupt_from_priv(out.csr_m, out.priv_mode)
+    if interrupt.pending:
+        return core32_raise_exception(out, interrupt.cause, 0)
+    core32_restart_fetch(out)
+
+@hardware
+fn core32_execute_instruction(state: CoreState, instruction: u32,
+                              dmem_rdata: u32) -> CoreState:
+    val dec = decode_instruction(instruction)
+    val rr = regfile_read(state.rf, dec.rs1, dec.rs2)
+    val comb = core_combinational(state, instruction, dmem_rdata, state.rf)
+    var out = state
+
+    if dec.opcode == OP_SYSTEM and core32_is_csr_funct3(dec.funct3):
+        val csr_addr = (instruction >> 20) & 0xFFF
+        var csr_src = rr.rs1_data
+        if dec.funct3 >= FUNCT3_CSRRWI:
+            csr_src = dec.rs1
+        val pmp_read = pmp32_csr_read(out.pmp, csr_addr)
+        val required_priv = (csr_addr >> 8) & 0x3
+        val read_only = ((csr_addr >> 10) & 0x3) == 0x3
+        val known = (pmp_read.handled or csr_is_known(csr_addr) or
+            csr_s_is_known(csr_addr))
+        val illegal = (out.priv_mode < required_priv or not known or
+            (read_only and csr_write_requested(csr_src, dec.funct3)))
+        if illegal:
+            return core32_raise_exception(out, CAUSE_ILLEGAL_INSN,
+                instruction)
+
+        var old_value: u32 = 0
+        if pmp_read.handled:
+            old_value = pmp_read.value
+            val write = pmp32_csr_write(out.pmp, csr_addr,
+                csr_next_value(old_value, csr_src, dec.funct3))
+            out.pmp = write.entries
+        else if csr_is_known(csr_addr):
+            val result = csr_rw(out.csr_m, csr_addr, csr_src, dec.funct3)
+            out.csr_m = result.csr
+            old_value = result.old_value
+        else:
+            if csr_addr == CSR_ADDR_SSTATUS:
+                old_value = out.csr_m.mstatus & SSTATUS_WRITABLE
+                val next_value = csr_next_value(old_value, csr_src,
+                    dec.funct3)
+                out.csr_m.mstatus = csr_s_merge_mstatus(out.csr_m.mstatus,
+                    next_value)
+            else if csr_addr == CSR_ADDR_SATP:
+                old_value = mmu_satp_value(out.mmu)
+                if csr_write_requested(csr_src, dec.funct3):
+                    out.mmu = mmu_set_satp(out.mmu,
+                        csr_next_value(old_value, csr_src, dec.funct3))
+            else:
+                old_value = csr_s_read(out.csr_s, csr_addr)
+                out.csr_s = csr_s_write(out.csr_s, csr_addr,
+                    csr_next_value(old_value, csr_src, dec.funct3))
+
+        out.rf = regfile_write(out.rf, dec.rd, old_value, true)
+        out.pc = state.pc + 4
+        out.semi_trigger = false
+        return core32_finish_instruction(out)
+
+    if dec.opcode == OP_SYSTEM and dec.funct3 == 0:
+        if core32_is_mret(dec):
+            if out.priv_mode != 3:
+                return core32_raise_exception(out, CAUSE_ILLEGAL_INSN,
+                    instruction)
+            val result = trap_exit_mret(out.csr_m)
+            out.csr_m = result.csr
+            out.pc = result.return_pc
+            out.priv_mode = result.target_mode
+            return core32_finish_instruction(out)
+
+        if core32_is_sret(dec):
+            if out.priv_mode < 1:
+                return core32_raise_exception(out, CAUSE_ILLEGAL_INSN,
+                    instruction)
+            val result = trap_exit_sret(out.csr_m, out.csr_s)
+            out.csr_m = result.csr
+            out.csr_s = result.csr_s
+            out.pc = result.return_pc
+            out.priv_mode = result.target_mode
+            return core32_finish_instruction(out)
+
+        if core32_is_sfence_vma(dec):
+            if out.priv_mode < 1:
+                return core32_raise_exception(out, CAUSE_ILLEGAL_INSN,
+                    instruction)
+            out.mmu = mmu_flush(out.mmu)
+            out.pc = state.pc + 4
+            return core32_finish_instruction(out)
+
+        if core32_is_ecall(dec):
+            var cause = CAUSE_ECALL_M
+            if out.priv_mode == 0:
+                cause = CAUSE_ECALL_U
+            else if out.priv_mode == 1:
+                cause = CAUSE_ECALL_S
+            return core32_raise_exception(out, cause, 0)
+
+        if core32_is_ebreak(dec):
+            if out.semi_phase == 0:
+                return core32_raise_exception(out, CAUSE_BREAKPOINT, state.pc)
+        else:
+            return core32_raise_exception(out, CAUSE_ILLEGAL_INSN,
+                instruction)
+
+    out = core_update(out, instruction, comb, rr.a0_val, rr.a1_val)
+    out.rf = regfile_write(out.rf, dec.rd, comb.rd_data, dec.reg_write)
+    core32_finish_instruction(out)
+
+@hardware
+fn core32_begin_instruction(state: CoreState,
+                            instruction: u32) -> CoreState:
+    var out = state
+    out.instruction = instruction
+    val dec = decode_instruction(instruction)
+    if not core32_instruction_legal(instruction, dec):
+        return core32_raise_exception(out, CAUSE_ILLEGAL_INSN, instruction)
+    val comb = core_combinational(out, instruction, 0, out.rf)
+    if ((comb.dec.jump or (comb.dec.branch and comb.branch_taken)) and
+        (comb.pc_next & 3) != 0):
+        return core32_raise_exception(out, CAUSE_MISALIGNED_FETCH,
+            comb.pc_next)
+    if comb.dmem_re or comb.dmem_we:
+        val access_type = if comb.dmem_we: ACCESS_STORE else: ACCESS_LOAD
+        out.pipeline_phase = CORE32_DATA_ACCESS
+        out.memory = memory32_start(out.mmu, out.pmp, comb.dmem_addr,
+            access_type, core32_data_size(comb.dec),
+            core_effective_data_privilege(out), core32_sum_enabled(out),
+            core32_mxr_enabled(out), comb.dmem_wdata)
+        return out
+    core32_execute_instruction(out, instruction, 0)
+
+@hardware
+fn core32_cycle(state: CoreState, request_ready: bool, response_valid: bool,
+                response_error: bool,
+                response_data: u32) -> Core32CycleResult:
+    if state.halt:
+        return Core32CycleResult(state: state, bus_valid: false, bus_addr: 0,
+            bus_size: 1, bus_write: false, bus_wdata: 0,
+            bus_is_pte: false, bus_atomic: false)
+
+    var out = state
+    out.semi_trigger = false
+    out.csr_m = csr_cycle_tick(out.csr_m)
+    val mem = memory32_cycle(state.memory, state.mmu, state.pmp,
+        request_ready, response_valid, response_error, response_data)
+    out.memory = mem.state
+    out.mmu = mem.mmu
+
+    if mem.done:
+        if mem.fault:
+            out = core32_raise_exception(out, mem.fault_cause, mem.fault_tval)
+        else if state.pipeline_phase == CORE32_FETCH:
+            out = core32_begin_instruction(out, mem.read_data)
+        else:
+            out = core32_execute_instruction(out, state.instruction,
+                mem.read_data)
+
+    Core32CycleResult(state: out, bus_valid: mem.bus_valid,
+        bus_addr: mem.bus_addr, bus_size: mem.bus_size,
+        bus_write: mem.bus_write, bus_wdata: mem.bus_wdata,
+        bus_is_pte: mem.bus_is_pte, bus_atomic: mem.bus_atomic)

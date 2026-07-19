@@ -133,18 +133,22 @@ checks privilege, implemented addresses, and read-only write intent before
 retirement. `mstatus` is the sole sstatus storage; `medeleg` routes implemented
 U/S synchronous exceptions into `sepc/scause/stval` and the S status stack, and
 SRET restores U/S state while clearing MPRV. `mideleg`, `sie`, and `sip` remain
-WARL-zero until supervisor interrupt delivery is connected. SATP likewise
-reads Bare and ignores Sv32 writes until the request/response walker is wired
-into the clock path; the RAM-backed translation adapter is not used as
-production RTL.
+WARL-zero until supervisor interrupt delivery is connected. The RAM-backed
+translation adapter is not used as production RTL.
 
 The request/response `sv32_walker` and `memory_access` frontend now port the
 proven RV64 ownership pattern. They preserve 34-bit physical addresses, tag TLB
 entries with ASID/leaf level, honor global mappings, apply SUM/MXR and Svade
 fault-on-clear A/D behavior, subject each physical PTE read to S-effective PMP,
 then apply final PMP before exposing one physical request. `CoreState` owns the
-MMU and in-flight memory transaction. `soc_tick`, SATP, and SFENCE plumbing
-remain the next integration slice.
+MMU, integer register file, and in-flight memory transaction. `core32_cycle`
+stalls fetch/data retirement around that frontend, while `soc_tick` executes
+each physical request once and latches its response. SATP CSR writes select
+Sv32 and `SFENCE.VMA` safely flushes the complete TLB. The focused SoC scenario
+writes SATP in S-mode, walks both page-table levels for the next fetch, observes
+a non-mutating SATP read, flushes, and retires mapped code. A single legality
+gate rejects reserved base encodings before memory/writeback; control targets
+are aligned before commit, and mailbox halt waits for store retirement.
 
 ### Translation algorithm
 

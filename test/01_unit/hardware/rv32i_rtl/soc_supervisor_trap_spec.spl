@@ -3,7 +3,10 @@ use std.hardware.soc_rtl.soc_top.{SocState, soc_create, soc_tick}
 use std.hardware.soc_rtl.ram.ram_write
 use std.hardware.soc_rtl.wb_interconnect.RAM_BASE
 use std.hardware.rv32i_rtl.regfile.{regfile_read, regfile_write}
+use std.hardware.rv32i_rtl.core.{core32_restart_fetch, CORE32_FETCH}
+use std.hardware.rv32i_rtl.memory_access.MEMORY32_REQUEST
 use std.hardware.rv32i_rtl.pmp_csr.pmp32_csr_write
+use std.hardware.rv32i_rtl.mmu_sv32.mmu_satp_value
 use std.hardware.rv32i_rtl.csr.{MSTATUS_MPRV_MASK, MEDELEG_SUPPORTED_MASK}
 use std.hardware.rv32i_rtl.csr.{MIDELEG_SUPPORTED_MASK, csr_create, csr_write}
 use std.hardware.rv32i_rtl.csr_s.{SSTATUS_SIE_MASK, SSTATUS_SPIE_MASK}
@@ -12,10 +15,33 @@ use std.hardware.rv32i_rtl.csr_s.{SSTATUS_SPP_MASK, SSTATUS_SUM_MASK}
 val PMPADDR0: u32 = 0x3B0
 val PMPCFG0: u32 = 0x3A0
 val RAM_4K_NAPOT: u32 = 0x200001FF
+val RAM_8K_NAPOT: u32 = 0x200003FF
 val PMP_LOCKED_X: u32 = 0x9C
+val PMP_RWX: u32 = 0x1F
 
 fn csr_instruction(addr: u32, rs1: u32, funct3: u32, rd: u32) -> u32:
     (addr << 20) | (rs1 << 15) | (funct3 << 12) | (rd << 7) | 0x73
+
+fn retire_one(state: SocState) -> SocState:
+    var out = state
+    out.response_valid = false
+    out.response_error = false
+    out.core = core32_restart_fetch(out.core)
+    val retired = out.core.csr_m.minstret
+    val mepc = out.core.csr_m.mepc
+    val sepc = out.core.csr_s.sepc
+    var cycles: u32 = 0
+    while cycles < 32:
+        out = soc_tick(out).state
+        if out.core.csr_m.minstret != retired:
+            return out
+        if out.core.csr_m.mepc != mepc or out.core.csr_s.sepc != sepc:
+            return out
+        if (out.core.pipeline_phase == CORE32_FETCH and
+            out.core.memory.phase == MEMORY32_REQUEST):
+            return out
+        cycles = cycles + 1
+    out
 
 fn executable_ram(state: SocState) -> SocState:
     var out = state
@@ -37,9 +63,9 @@ describe "RV32 supervisor CSR and trap routing":
         state.ram = ram_write(state.ram, 4, 0x00000073, 2)
         state = executable_ram(state)
 
-        state = soc_tick(state).state
+        state = retire_one(state)
         expect(state.core.priv_mode).to_equal(0)
-        state = soc_tick(state).state
+        state = retire_one(state)
         expect(state.core.priv_mode).to_equal(1)
         expect(state.core.pc).to_equal(0x2000)
         expect(state.core.csr_s.scause).to_equal(8)
@@ -54,7 +80,7 @@ describe "RV32 supervisor CSR and trap routing":
         state.core.csr_m.mtvec = 0x1000
         state.core.csr_s.stvec = 0x2000
         state.ram = ram_write(state.ram, 0, 0x00000073, 2)
-        state = soc_tick(state).state
+        state = retire_one(state)
         expect(state.core.priv_mode).to_equal(3)
         expect(state.core.pc).to_equal(0x1000)
         expect(state.core.csr_m.mcause).to_equal(11)
@@ -68,7 +94,7 @@ describe "RV32 supervisor CSR and trap routing":
         state.core.csr_m.mstatus = SSTATUS_SPIE_MASK | MSTATUS_MPRV_MASK
         state.ram = ram_write(state.ram, 0, 0x10200073, 2)
         state = executable_ram(state)
-        state = soc_tick(state).state
+        state = retire_one(state)
         expect(state.core.priv_mode).to_equal(0)
         expect(state.core.pc).to_equal(RAM_BASE + 4)
         expect(state.core.csr_m.mstatus & SSTATUS_SIE_MASK).to_equal(
@@ -83,10 +109,10 @@ describe "RV32 supervisor CSR and trap routing":
         write_state.core.priv_mode = 1
         write_state.ram = ram_write(write_state.ram, 0,
             csr_instruction(0x100, 1, 1, 2), 2)
-        write_state.regfile = regfile_write(write_state.regfile, 1,
+        write_state.core.rf = regfile_write(write_state.core.rf, 1,
             SSTATUS_SIE_MASK | SSTATUS_SUM_MASK, true)
         write_state = executable_ram(write_state)
-        write_state = soc_tick(write_state).state
+        write_state = retire_one(write_state)
         expect(write_state.core.csr_m.mstatus &
             (SSTATUS_SIE_MASK | SSTATUS_SUM_MASK)).to_equal(
             SSTATUS_SIE_MASK | SSTATUS_SUM_MASK)
@@ -98,8 +124,8 @@ describe "RV32 supervisor CSR and trap routing":
         read_state.ram = ram_write(read_state.ram, 0,
             csr_instruction(0x100, 0, 2, 2), 2)
         read_state = executable_ram(read_state)
-        read_state = soc_tick(read_state).state
-        expect(regfile_read(read_state.regfile, 2, 0).rs1_data).to_equal(
+        read_state = retire_one(read_state)
+        expect(regfile_read(read_state.core.rf, 2, 0).rs1_data).to_equal(
             SSTATUS_SUM_MASK)
 
     it "rejects an S-mode machine CSR write without mutating its target":
@@ -111,13 +137,14 @@ describe "RV32 supervisor CSR and trap routing":
         state.core.csr_s.stvec = 0x2000
         state.ram = ram_write(state.ram, 0,
             csr_instruction(0x340, 1, 1, 2), 2)
-        state.regfile = regfile_write(state.regfile, 1, 0xAA, true)
+        state.core.rf = regfile_write(state.core.rf, 1, 0xAA, true)
         state = executable_ram(state)
-        state = soc_tick(state).state
+        state = retire_one(state)
         expect(state.core.priv_mode).to_equal(1)
         expect(state.core.pc).to_equal(0x2000)
         expect(state.core.csr_s.scause).to_equal(2)
         expect(state.core.csr_m.mscratch).to_equal(0x55)
+        expect(state.core.csr_m.mcause).to_equal(0)
 
     it "traps a non-canonical MRET encoding as illegal":
         var state = soc_create(64)
@@ -125,28 +152,59 @@ describe "RV32 supervisor CSR and trap routing":
         state.core.csr_m.mtvec = 0x1000
         # MRET with rd=x1 is reserved rather than an MRET instruction.
         state.ram = ram_write(state.ram, 0, 0x302000F3, 2)
-        state = soc_tick(state).state
+        state = retire_one(state)
         expect(state.core.priv_mode).to_equal(3)
         expect(state.core.pc).to_equal(0x1000)
         expect(state.core.csr_m.mcause).to_equal(2)
         expect(state.core.csr_m.mtval).to_equal(0x302000F3)
 
-    it "keeps interrupt delegation and Sv32 WARL-disabled until connected":
+    it "masks delegation CSRs to implemented causes":
         val delegated = csr_write(csr_create(0), 0x302, 0xFFFFFFFF)
         expect(delegated.medeleg).to_equal(MEDELEG_SUPPORTED_MASK)
         val interrupts = csr_write(delegated, 0x303, 0xFFFFFFFF)
         expect(interrupts.mideleg).to_equal(MIDELEG_SUPPORTED_MASK)
 
-        var state = soc_create(64)
+    it "writes satp, translates fetches, and flushes with SFENCE.VMA":
+        var state = soc_create(2048)
         state.core.pc = RAM_BASE
         state.core.priv_mode = 1
         state.ram = ram_write(state.ram, 0,
             csr_instruction(0x180, 1, 1, 2), 2)
         state.ram = ram_write(state.ram, 4,
             csr_instruction(0x180, 0, 2, 3), 2)
-        state.regfile = regfile_write(state.regfile, 1, 0x80000001, true)
-        state = executable_ram(state)
+        state.ram = ram_write(state.ram, 8, 0x12000073, 2)
+        state.ram = ram_write(state.ram, 12, 0x00700293, 2)
+        # Root VPN[1]=0x200 points to the second RAM page; its first leaf maps
+        # virtual RAM_BASE back to the executable first page.
+        state.ram = ram_write(state.ram, 0x800, 0x20000401, 2)
+        state.ram = ram_write(state.ram, 0x1000, 0x2000004B, 2)
+        state.core.rf = regfile_write(state.core.rf, 1, 0x80080000, true)
+        state.core.pmp = pmp32_csr_write(state.core.pmp, PMPADDR0,
+            RAM_8K_NAPOT).entries
+        state.core.pmp = pmp32_csr_write(state.core.pmp, PMPCFG0,
+            PMP_RWX).entries
+
+        state = retire_one(state)
+        expect(regfile_read(state.core.rf, 2, 0).rs1_data).to_equal(0)
+        expect(mmu_satp_value(state.core.mmu)).to_equal(0x80080000)
+
+        val before_walk_cycle = state.core.csr_m.mcycle
+        val before_walk_retire = state.core.csr_m.minstret
         state = soc_tick(state).state
-        expect(regfile_read(state.regfile, 2, 0).rs1_data).to_equal(0)
-        state = soc_tick(state).state
-        expect(regfile_read(state.regfile, 3, 0).rs1_data).to_equal(0)
+        expect(state.core.csr_m.mcycle).to_equal(before_walk_cycle + 1)
+        expect(state.core.csr_m.minstret).to_equal(before_walk_retire)
+
+        state = retire_one(state)
+        expect(regfile_read(state.core.rf, 3, 0).rs1_data).to_equal(
+            0x80080000)
+        expect(state.core.mmu.tlb_count).to_be_greater_than(0)
+
+        state = retire_one(state)
+        expect(state.core.mmu.tlb_count).to_equal(0)
+
+        state = retire_one(state)
+        expect(regfile_read(state.core.rf, 5, 0).rs1_data).to_equal(7)
+        expect(state.core.pc).to_equal(RAM_BASE + 16)
+        expect(state.core.csr_m.minstret).to_equal(4)
+        expect(state.core.csr_m.mcycle).to_be_greater_than(
+            state.core.csr_m.minstret)

@@ -104,23 +104,22 @@ supervisor `sie`/`sip` are masked views rather than independent interrupt state.
 PLIC M/S contexts produce distinct `MEIP`/`SEIP` signals, while software and
 external `SEIP` latches are ORed so either owner can hold the architectural bit.
 
-Within the RV32 capsule, `CoreState` is now the canonical owner of current
-privilege, machine CSRs, and fixed-field PMP state. The current Bare clock path
-routes PMP CSRs through that owner and gates instruction and data bus calls at
-`soc_tick`; denied requests enter the precise machine trap path without calling
-the bus helper. Trap entry/MRET own M/S/U current-mode transitions, while the
-core derives MPRV/MPP only for explicit data access; fetch retains current
-privilege. The clocked `sv32_walker` now supplies a 34-bit translated physical
-address, refills ASID/global/superpage-aware TLB entries, applies SUM/MXR and
-Svade A/D rules, and protects every PTE read with S-mode PMP. The existing
-`memory_access` now sequences that walker, the final PMP gate, and exactly one
+Within the RV32 capsule, `CoreState` is the canonical owner of privilege,
+machine/supervisor CSRs, fixed-field PMP and MMU state, the integer register
+file, and one in-flight memory transaction. Trap entry/MRET/SRET own M/S/U
+transitions, while the core derives MPRV/MPP only for explicit data access;
+fetch retains current privilege. The clocked `sv32_walker` supplies a 34-bit
+translated physical address, refills ASID/global/superpage-aware TLB entries,
+applies SUM/MXR and Svade A/D rules, and protects every PTE read with S-mode
+PMP. `memory_access` sequences that walker, the final PMP gate, and exactly one
 physical request while preserving precise virtual fault values and 34-bit
-physical addresses. The pending `soc_tick` change connects those physical
-requests to the interconnect. Machine state also canonically owns
-the sstatus alias and delegation masks; the supervisor owner stores only
-trap-vector and trap-context CSRs. S interrupt delegation and SATP remain
-WARL-zero until their delivery and the memory frontend are connected, so Bare
-execution cannot masquerade as protected Sv32.
+physical addresses. `core32_cycle` stalls retirement around that transaction;
+`soc_tick` routes it once and returns a latched response on the following
+clock. SATP selects the canonical MMU and `SFENCE.VMA` performs a safe global
+TLB flush. Decode fails closed before memory or writeback, and taken control
+transfers raise IALIGN=32 faults on the originating instruction. Mailbox EXIT
+is latched until its successful store response retires. Supervisor interrupt
+CSRs remain WARL-zero until delivery exists.
 
 The two capsules deliberately retain `MmuState`/`mmu_*` and
 `MmuState64`/`mmu64_*`. A shared MMU abstraction is prohibited until two real
