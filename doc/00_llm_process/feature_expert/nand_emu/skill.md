@@ -69,6 +69,27 @@ NVMe firmware's FIL seam.
 - Prerequisite seams before implementing: `FilRead.corrected`,
   `fil.read_at_vref`, NandEmu wrapper re-export of vt_histogram/read_margin.
 
+## Implementation status (2026-07-19: v1 engine LIVE)
+
+- All lanes landed green: `fw/nd_types.spl` (typed NAND dimensions — NdChannel/
+  NdWay/NdBank/NdPlane/NdBlock/NdWordline/NdPage value types + NdAddr; only
+  channel/block/page are live in address math, others typed-but-decorative per
+  `doc/01_research/hardware/nand_recovery/typed_nand_addressing_local.md`),
+  `rel_types`, `rel_health`, `rel_vref`, `rel_disturb`, `rel_wear`,
+  `rel_refresh`, `rel_ladder` + per-module `*_check.spl` (absolute oracles).
+- L8 wiring: ladder mounts in `Fil.read_with_ladder` (production reads recover
+  drifted pages: proven depth-2 recovery at cal −16 via `ftl.read`);
+  `rel_tick_select` enforces ONE reclaim-class step/tick (GC>refresh>scrub>WL)
+  in `nvme_controller.io_process` + `firmware.service_tick`; erase-reset trio +
+  retire→`alloc_spare` wired. Gaps A2/A7 of the gap analysis closed;
+  `rel_wiring_check.spl` is the integration oracle set.
+- rv32 port: deliberately deferred with trigger + port shape in
+  `doc/03_plan/hardware/nvme_fw_rel_rv32_port_plan.md` (trigger — rel_* having
+  production callers — is now TRUE, so the port is a live follow-up).
+- Emulator address math consolidated onto geometry.spl canon (ne_block_of/
+  ne_page_in_block/ne_block_first_row); chip.spl `self.` info-lint is a parser
+  FALSE POSITIVE (self.field is the body convention — do not "fix" it).
+
 ## Related
 
 Layer experts: [backend](../../layer_expert/backend/skill.md) (VHDL subset),

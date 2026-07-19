@@ -75,12 +75,21 @@ fn rain_num_stripes() -> i64:
 fn rain_channel_valid(channel: i64) -> bool:
     channel >= 0 and channel < NUM_CHANNELS
 
-# Physical page number for a (group, channel, page) cell.
+# Block index for a (group, channel) cell in the RAID-across-channels grid:
+# block = group·NUM_CHANNELS + channel (the layout documented above). Factored
+# into a single named helper so rain_ppn and ftl.spl's rain_recover_channel
+# share ONE derivation of the channel-grid math instead of each re-computing it
+# raw (typed-addressing migration, research doc §4.3 site 9).
+fn rain_blk(group: i64, channel: i64) -> i64:
+    group * NUM_CHANNELS + channel
+
+# Physical page number for a (group, channel, page) cell. Composes through the
+# canonical nvme_types block_first_ppn helper (research doc §4.3 site 10) rather
+# than re-deriving blk * PAGES_PER_BLOCK raw.
 fn rain_ppn(group: i64, channel: i64, page: i64) -> i64:
     if group < 0 or group >= rain_num_groups() or not rain_channel_valid(channel) or page < 0 or page >= PAGES_PER_BLOCK:
         return UNMAP
-    val blk: i64 = group * NUM_CHANNELS + channel
-    blk * PAGES_PER_BLOCK + page
+    block_first_ppn(rain_blk(group, channel)) + page
 
 # The stripe index a physical page belongs to.
 fn rain_stripe_idx(ppn: i64) -> i64:

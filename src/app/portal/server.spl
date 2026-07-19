@@ -16,7 +16,7 @@ drive it directly without opening a real socket (mirrors
 """
 
 use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
-use std.http_server.response.{build_html, serialize_response}
+use std.http_server.response.{serialize_response}
 use std.http_server.types.{HttpResponseData}
 use std.common.web.html_escape.{html_escape}
 use std.common.markdown.render.{render_markdown_line_html}
@@ -140,23 +140,77 @@ impl PortalServer:
         val clean_path = normalized.0
         val query = normalized.1
 
+        if method == "POST" and clean_path == "/login":
+            return _finalize(self._handle_login(body))
+        if method == "POST" and clean_path == "/logout":
+            return _finalize(_logout_response())
+
         if method != "GET" and method != "HEAD":
             return _finalize(_error_response(405, "Method Not Allowed", "Only GET is supported on this path."))
 
-        if clean_path.starts_with("/css/") or clean_path.starts_with("/js/"):
+        val is_public_asset = clean_path.starts_with("/css/") or clean_path.starts_with("/js/")
+        if self.auth_enabled and clean_path != "/login" and not is_public_asset:
+            if self._session_user(headers) == nil:
+                return _finalize(_redirect_response("/login"))
+
+        if is_public_asset:
             return _finalize(self._serve_static(clean_path))
 
+        if clean_path == "/login":
+            return _finalize(_html_ok(render_login_page("", ""), "text/html; charset=utf-8"))
+
         if clean_path == "/":
-            return _finalize(build_html(render_home_page()))
+            return _finalize(_html_ok(render_home_page(), "text/html; charset=utf-8"))
 
         if clean_path == "/repos":
             val repos = list_repos(self.repo_root)
-            return _finalize(build_html(render_layout("Repositories", render_repos_index(repos, self.repo_root))))
+            return _finalize(_html_ok(
+                render_layout("Repositories", render_repos_index(repos, self.repo_root)),
+                "text/html; charset=utf-8"
+            ))
 
         if clean_path.starts_with("/repos/"):
             return _finalize(self._route_repo(clean_path, query))
 
         _finalize(_error_response(404, "Not Found", "No such page: {clean_path}"))
+
+    fn _session_user(headers_raw: text) -> text?:
+        val cookie = _extract_cookie(headers_raw, SESSION_COOKIE_NAME)
+        if cookie == nil:
+            return nil
+        verify_session_cookie(cookie ?? "", self.auth_secret)
+
+    fn _handle_login(body: text) -> HttpResponseData:
+        """Verify the configured admin credential (bcrypt, via
+        `app.portal.services.auth_service`) and, on success, set a
+        stateless HMAC-signed session cookie.
+
+        NOTE: this repo's pure-Simple bcrypt (src/lib/common/bcrypt) is
+        extremely slow under the interpreted seed binary used for
+        `bin/simple test` today (bcrypt_hash at cost 12 did not finish
+        within 120s in local probing, and even MIN_COST=4 exceeded 90s) —
+        see the TODO below. This handler is therefore implemented but not
+        exercised by an automated POST /login spec; the auth GATE and the
+        signed-cookie verify/forge-rejection path ARE covered (see
+        portal_auth_gate_spec.spl), since those only use hmac_sha256
+        (confirmed fast) and never touch bcrypt.
+        """
+        val params = parse_url_encoded(body)
+        val username = if params.contains_key("username"): params["username"] else: ""
+        val password = if params.contains_key("password"): params["password"] else: ""
+        # TODO(portal-bcrypt-perf): pure-Simple bcrypt (std.bcrypt) is unusably
+        # slow under the current interpreter/seed binary for any interactive
+        # use (cost=12 >120s, cost=4 MIN_COST >90s in local probing). File/fix
+        # before relying on this path in a live deployment; do not raise the
+        # cost further until that is resolved.
+        val pass_hash = hash_password(self.auth_pass)
+        if username == self.auth_user and username != "" and verify_password(password, pass_hash):
+            _redirect_with_cookie("/", sign_session_cookie(username, self.auth_secret))
+        else:
+            _html_ok(
+                render_login_page("Invalid username or password.", username),
+                "text/html; charset=utf-8"
+            )
 
     fn _serve_static(clean_path: text) -> HttpResponseData:
         val full_path = "{PUBLIC_ROOT}{clean_path}"
@@ -207,67 +261,60 @@ impl PortalServer:
                 _html_ok(render_layout(repo.name, render_repo_landing(repo, ref, _render_readme(content), true)), "text/html; charset=utf-8")
 
     fn _repo_tree(repo: RepoInfo, segments: [text]) -> HttpResponseData:
-        val ref = if segments.len() > 3: segments[3] else: repo_default_ref(repo)
-        match sanitize_ref(ref):
+        match _resolve_repo_ref_path(repo, segments):
             Err(msg):
                 return _error_response(400, "Bad Request", msg)
-            Ok(safe_ref):
-                val raw_path = _join_from(segments, 4)
-                match sanitize_path(raw_path):
+            Ok(pair):
+                val safe_ref = pair.0
+                val safe_path = pair.1
+                match git_ls_tree(repo, safe_ref, safe_path):
                     Err(msg):
-                        return _error_response(400, "Bad Request", msg)
-                    Ok(safe_path):
-                        match git_ls_tree(repo, safe_ref, safe_path):
-                            Err(msg):
-                                return _error_response(404, "Not Found", msg)
-                            Ok(entries):
-                                return _html_ok(
-                                    render_layout(repo.name, render_tree(repo, safe_ref, safe_path, entries)),
-                                    "text/html; charset=utf-8"
-                                )
+                        return _error_response(404, "Not Found", msg)
+                    Ok(entries):
+                        return _html_ok(
+                            render_layout(repo.name, render_tree(repo, safe_ref, safe_path, entries)),
+                            "text/html; charset=utf-8"
+                        )
 
     fn _repo_blob(repo: RepoInfo, segments: [text]) -> HttpResponseData:
-        if segments.len() < 5:
+        if segments.len() <= 3:
             return _error_response(400, "Bad Request", "Missing ref/path for blob view.")
-        match sanitize_ref(segments[3]):
+        match resolve_ref_and_path(repo, _slice_from(segments, 3)):
             Err(msg):
                 return _error_response(400, "Bad Request", msg)
-            Ok(safe_ref):
-                val raw_path = _join_from(segments, 4)
-                match sanitize_path(raw_path):
+            Ok(pair):
+                val safe_ref = pair.0
+                val safe_path = pair.1
+                match git_show_blob(repo, safe_ref, safe_path):
                     Err(msg):
-                        return _error_response(400, "Bad Request", msg)
-                    Ok(safe_path):
-                        match git_show_blob(repo, safe_ref, safe_path):
-                            Err(msg):
-                                return _error_response(404, "Not Found", msg)
-                            Ok(content):
-                                val is_binary = content.contains("\0")
-                                return _html_ok(
-                                    render_layout(repo.name, render_blob(repo, safe_ref, safe_path, content, is_binary)),
-                                    "text/html; charset=utf-8"
-                                )
+                        return _error_response(404, "Not Found", msg)
+                    Ok(content):
+                        val is_binary = content.contains("\0")
+                        return _html_ok(
+                            render_layout(repo.name, render_blob(repo, safe_ref, safe_path, content, is_binary)),
+                            "text/html; charset=utf-8"
+                        )
 
     fn _repo_raw(repo: RepoInfo, segments: [text]) -> HttpResponseData:
-        if segments.len() < 5:
+        if segments.len() <= 3:
             return _error_response(400, "Bad Request", "Missing ref/path for raw download.")
-        match sanitize_ref(segments[3]):
+        match resolve_ref_and_path(repo, _slice_from(segments, 3)):
             Err(msg):
                 return _error_response(400, "Bad Request", msg)
-            Ok(safe_ref):
-                val raw_path = _join_from(segments, 4)
-                match sanitize_path(raw_path):
+            Ok(pair):
+                val safe_ref = pair.0
+                val safe_path = pair.1
+                match git_show_blob(repo, safe_ref, safe_path):
                     Err(msg):
-                        return _error_response(400, "Bad Request", msg)
-                    Ok(safe_path):
-                        match git_show_blob(repo, safe_ref, safe_path):
-                            Err(msg):
-                                return _error_response(404, "Not Found", msg)
-                            Ok(content):
-                                return _raw_response(content, _basename_of(safe_path))
+                        return _error_response(404, "Not Found", msg)
+                    Ok(content):
+                        return _raw_response(content, _basename_of(safe_path))
 
     fn _repo_commits(repo: RepoInfo, segments: [text], query: text) -> HttpResponseData:
-        val ref = if segments.len() > 3: segments[3] else: repo_default_ref(repo)
+        # Commits view has no trailing path after the ref, so there is no
+        # ref-vs-path ambiguity to resolve — just join every remaining
+        # segment (supports refs containing `/`, e.g. `feature/x`).
+        val ref = if segments.len() > 3: _join_from(segments, 3) else: repo_default_ref(repo)
         match sanitize_ref(ref):
             Err(msg):
                 return _error_response(400, "Bad Request", msg)
@@ -337,6 +384,34 @@ fn _join_from(segments: [text], start: i64) -> text:
             out = out + "/" + segments[i]
         i = i + 1
     out
+
+fn _slice_from(segments: [text], start: i64) -> [text]:
+    var out: [text] = []
+    var i = start
+    while i < segments.len():
+        out.push(segments[i])
+        i = i + 1
+    out
+
+fn _resolve_repo_ref_path(repo: RepoInfo, segments: [text]) -> Result<(text, text), text>:
+    """Shared ref/path resolution for the tree view: with no ref segment at
+    all, use the repo's default ref at its root; otherwise greedily match
+    the longest known ref (supports refs containing `/`)."""
+    if segments.len() <= 3:
+        return Ok((repo_default_ref(repo), ""))
+    resolve_ref_and_path(repo, _slice_from(segments, 3))
+
+fn _extract_cookie(headers_raw: text, name: text) -> text?:
+    for line in headers_raw.split("\n"):
+        if line.lower().starts_with("cookie:"):
+            val colon = line.index_of(":")
+            val value_part = line[colon + 1:].trim()
+            for pair in value_part.split(";"):
+                val trimmed = pair.trim()
+                val eq = trimmed.index_of("=")
+                if eq > 0 and trimmed[0:eq] == name:
+                    return Some(trimmed[eq + 1:])
+    nil
 
 fn _basename_of(path: text) -> text:
     val parts = path.split("/")
@@ -431,6 +506,53 @@ fn _error_response(status: i64, title: text, message: text) -> HttpResponseData:
         reason: reason,
         headers: [("Content-Type", "text/html; charset=utf-8"), ("Server", "SimplePortal")],
         body: render_error_page(status, title, message),
+        body_bytes: [],
+        body_file: "",
+        body_offset: 0,
+        body_length: 0,
+        chunked: false
+    )
+
+fn _redirect_response(location: text) -> HttpResponseData:
+    HttpResponseData(
+        status: 302,
+        reason: "Found",
+        headers: [("Location", location), ("Server", "SimplePortal")],
+        body: "",
+        body_bytes: [],
+        body_file: "",
+        body_offset: 0,
+        body_length: 0,
+        chunked: false
+    )
+
+fn _redirect_with_cookie(location: text, cookie_value: text) -> HttpResponseData:
+    HttpResponseData(
+        status: 302,
+        reason: "Found",
+        headers: [
+            ("Location", location),
+            ("Set-Cookie", "{SESSION_COOKIE_NAME}={cookie_value}; Path=/; HttpOnly; SameSite=Strict"),
+            ("Server", "SimplePortal")
+        ],
+        body: "",
+        body_bytes: [],
+        body_file: "",
+        body_offset: 0,
+        body_length: 0,
+        chunked: false
+    )
+
+fn _logout_response() -> HttpResponseData:
+    HttpResponseData(
+        status: 302,
+        reason: "Found",
+        headers: [
+            ("Location", "/login"),
+            ("Set-Cookie", "{SESSION_COOKIE_NAME}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict"),
+            ("Server", "SimplePortal")
+        ],
+        body: "",
         body_bytes: [],
         body_file: "",
         body_offset: 0,

@@ -218,14 +218,15 @@ impl Ftl:
         st
 
     # Fold one completed FIL-mount read into the durable observability sink and fire
-    # the DEAR refresh trigger. rel_health_* take the RAW i64 block index (the one
-    # rel_* module that does — coordinator cross-review); the disturb/refresh policies
-    # take the NdBlock newtype. (design §1.4 health discipline, §4 DEAR, §7 rel_health.)
+    # the DEAR refresh trigger. All rel_* policies (health/disturb/refresh/wear) take
+    # the NdBlock newtype at their scalar boundary — rel_health is now harmonized with
+    # the sibling lanes — so the raw i64 `blk` here converts via nd_block() at each
+    # call. (design §1.4 health discipline, §4 DEAR, §7 rel_health.)
     me rel_note_read(blk: i64, res: RelReadResult):
-        me.rel_health = rel_health_note_read(me.rel_health, blk, res.corrected, res.depth)
+        me.rel_health = rel_health_note_read(me.rel_health, nd_block(blk), res.corrected, res.depth)
         if res.ok == 1 and res.depth > 0:
             me.rel_refresh = rel_refresh_enqueue(me.rel_refresh, nd_block(blk))
-            me.rel_health = rel_health_mark_cause(me.rel_health, blk, rel_cause_err())
+            me.rel_health = rel_health_mark_cause(me.rel_health, nd_block(blk), rel_cause_err())
 
     me read_range_status(lba: i64, nblocks: i64) -> i64:
         if nblocks < 0:
@@ -535,7 +536,7 @@ impl Ftl:
         var rebuilt: i64 = 0
         var group: i64 = 0
         while group < rain_num_groups():
-            val blk: i64 = group * NUM_CHANNELS + failed
+            val blk: i64 = rain_blk(group, failed)
             # 1. recovered payload per page = sealed parity XOR the surviving channels' data.
             var rec: [i64] = ftl_fill(PAGES_PER_BLOCK, 0)
             var page: i64 = 0
@@ -559,7 +560,7 @@ impl Ftl:
             val s: i64 = me.next_seq()
             page = 0
             while page < PAGES_PER_BLOCK:
-                val ppn: i64 = blk * PAGES_PER_BLOCK + page
+                val ppn: i64 = block_first_ppn(blk) + page
                 val who: i64 = rev[ppn]
                 if who != UNMAP:
                     val payload: i64 = rec[page]
@@ -849,7 +850,7 @@ impl Ftl:
     me rel_on_erase(blk: i64):
         me.fil.decay_vref_on_erase(nd_block(blk))
         me.rel_disturb = rel_disturb_clear(me.rel_disturb, nd_block(blk))
-        me.rel_health  = rel_health_on_erase(me.rel_health, blk)
+        me.rel_health  = rel_health_on_erase(me.rel_health, nd_block(blk))
         me.rel_wear    = rel_wear_on_erase(me.rel_wear, nd_block(blk), me.total_erases())
         me.rel_refresh = rel_refresh_on_write(me.rel_refresh, nd_block(blk), me.seq)
 

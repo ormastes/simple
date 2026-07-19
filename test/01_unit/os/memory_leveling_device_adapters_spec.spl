@@ -1,11 +1,12 @@
 use std.spec.*
-use os.kernel.memory.memory_leveling_manager.{memory_leveling_manager_new, simpleos_memory_leveling_config_default}
+use std.memory_leveling.{MEMORY_DMA_DIRECTION_BIDIRECTIONAL}
+use os.kernel.memory.memory_leveling_manager.{memory_leveling_manager_new, simpleos_memory_leveling_config_for_physical_capacity, simpleos_memory_leveling_config_validate}
 use os.kernel.memory.memory_leveling_device_adapters.{memory_leveling_device_migration_unavailable}
 
 describe "memory-leveling GPU and NIC adapters":
 
     it "keeps a GPU queue pinned through submission and completion":
-        var config = simpleos_memory_leveling_config_default()
+        var config = simpleos_memory_leveling_config_for_physical_capacity(4 * 1024 * 1024)
         config.gpu_capacity_bytes = 65536
         val manager = memory_leveling_manager_new(config)
         expect(manager.register_gpu_queue(301, 9, 4096, 0x8000).ok).to_equal(true)
@@ -16,9 +17,10 @@ describe "memory-leveling GPU and NIC adapters":
         expect(manager.release(301, 9).reason).to_equal("protected")
 
     it "tracks a temporary NIC buffer and rejects opaque migration":
-        var config = simpleos_memory_leveling_config_default()
+        var config = simpleos_memory_leveling_config_for_physical_capacity(4 * 1024 * 1024)
         config.nic_capacity_bytes = 65536
         config.nic_reserved_bytes = 0
+        expect(simpleos_memory_leveling_config_validate(config)).to_equal("ok")
         val manager = memory_leveling_manager_new(config)
         expect(manager.register_nic_buffer(401, 10, 2048, 0xA000, true).ok).to_equal(true)
         expect(manager.device_submit(401, 10).ok).to_equal(true)
@@ -26,3 +28,19 @@ describe "memory-leveling GPU and NIC adapters":
         expect(manager.device_unmap(401, 10).ok).to_equal(true)
         expect(manager.release(401, 10).ok).to_equal(true)
         expect(memory_leveling_device_migration_unavailable(401).reason).to_equal("migration-unavailable")
+
+    it "rolls back in-flight count when sync-for-cpu fails during completion":
+        val config = simpleos_memory_leveling_config_for_physical_capacity(4 * 1024 * 1024)
+        val manager = memory_leveling_manager_new(config)
+        expect(manager.register_nic_buffer(402, 12, 4096, 0xB000, true).ok).to_equal(true)
+        expect(manager.map_device(402, 12, MEMORY_DMA_DIRECTION_BIDIRECTIONAL, true).ok).to_equal(true)
+        expect(manager.sync_for_device(402, 12).ok).to_equal(true)
+        expect(manager.begin_in_flight(402, 12).ok).to_equal(true)
+        expect(manager.begin_in_flight(402, 12).ok).to_equal(true)
+
+        val completion = manager.device_complete(402, 12)
+        expect(completion.ok).to_equal(false)
+        expect(completion.reason).to_equal("in-flight")
+        val allocation = manager.get(402).unwrap()
+        expect(allocation.in_flight_count).to_equal(2)
+        expect(completion.state).to_equal("device_owned")

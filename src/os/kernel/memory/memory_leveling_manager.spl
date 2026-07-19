@@ -19,6 +19,9 @@ use std.memory_leveling.{
     MEMORY_PAGE_STATE_MIGRATING,
     MEMORY_PAGE_STATE_SWAPPED,
     MEMORY_PAGE_STATE_RELEASED,
+    MEMORY_DMA_DIRECTION_BIDIRECTIONAL,
+    MEMORY_DMA_DIRECTION_TO_DEVICE,
+    MEMORY_DMA_DIRECTION_FROM_DEVICE,
     MEMORY_DMA_DIRECTION_NONE,
     memory_tier_cpu_cold,
     memory_tier_dma_pinned,
@@ -200,6 +203,16 @@ fn _memory_leveling_batch_limit(config: SimpleOsMemoryLevelingConfig) -> u64:
     if config.pressure_batch_limit > MEMORY_LEVELING_MAX_PRESSURE_CANDIDATES:
         return MEMORY_LEVELING_MAX_PRESSURE_CANDIDATES
     config.pressure_batch_limit
+
+fn _memory_leveling_direction_matches(allocation_direction: text, requested_direction: text) -> bool:
+    if requested_direction == MEMORY_DMA_DIRECTION_NONE:
+        return false
+    if allocation_direction == MEMORY_DMA_DIRECTION_BIDIRECTIONAL:
+        return true
+    allocation_direction == requested_direction
+
+fn _memory_leveling_map_device_direction(allocation: MemoryAllocation, direction: text) -> bool:
+    _memory_leveling_direction_matches(allocation.dma_direction, direction)
 
 fn placement_tier_for_cpu(allocation: MemoryAllocation) -> MemoryTier:
     # Swap candidates are cold CPU allocations; hot refault promotion is a
@@ -417,6 +430,8 @@ impl MemoryLevelingManager:
             return _memory_leveling_operation(false, "not-owner", allocation_id, allocation.state.name)
         if allocation.state.name != MEMORY_PAGE_STATE_CPU_OWNED or direction == MEMORY_DMA_DIRECTION_NONE:
             return _memory_leveling_operation(false, "invalid-state", allocation_id, allocation.state.name)
+        if not _memory_leveling_map_device_direction(allocation, direction):
+            return _memory_leveling_operation(false, "invalid-direction", allocation_id, allocation.state.name)
         val syncing = memory_page_state(MEMORY_PAGE_STATE_SYNCING_FOR_DEVICE, false, false)
         me.allocations[index] = _memory_leveling_updated(allocation, allocation.tier, syncing, allocation.pin_count, allocation.in_flight_count, allocation.mapping_count + 1, direction, coherent, allocation.access_epoch, allocation.cooldown_epoch, false, allocation.swap_slot_id)
         me.stats.mapping_count = me.stats.mapping_count + 1
@@ -483,7 +498,7 @@ impl MemoryLevelingManager:
         val cpu_owned = memory_page_state(MEMORY_PAGE_STATE_CPU_OWNED, false, true)
         val mappings = allocation.mapping_count - 1
         val reclaimable = mappings == 0 and allocation.pin_count == 0
-        me.allocations[index] = _memory_leveling_updated(allocation, allocation.tier, cpu_owned, allocation.pin_count, 0, mappings, MEMORY_DMA_DIRECTION_NONE, true, allocation.access_epoch, allocation.cooldown_epoch, reclaimable, allocation.swap_slot_id)
+        me.allocations[index] = _memory_leveling_updated(allocation, allocation.tier, cpu_owned, allocation.pin_count, 0, mappings, allocation.dma_direction, true, allocation.access_epoch, allocation.cooldown_epoch, reclaimable, allocation.swap_slot_id)
         me.stats.mapping_count = me.stats.mapping_count - 1
         me.stats.transition_count = me.stats.transition_count + 1
         if reclaimable:

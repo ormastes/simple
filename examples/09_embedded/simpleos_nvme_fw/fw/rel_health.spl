@@ -49,12 +49,13 @@ Landmines honored (design §0 / guide "Language landmines"):
 - Return-the-object: every mutator copies `h` into `var out = h` and returns
   `out`; arrays are value types so the copy is independent of the input.
 - Per-block state is a dense [i64] array of length NUM_BLOCKS, indexed by the
-  raw block index — the design §7 pseudocode signatures take `blk: i64`
-  (matches rel_types.spl's typed-dims note: the array itself stays [i64]
-  because the block is the ARRAY INDEX, a flat i64; only RelBlockObs.blk and
-  RelLadderState.blk are the typed NdBlock scalar fields). Callers holding an
-  NdBlock convert at this flat-index boundary (`blk.idx`), per the guide's
-  TYPED DIMENSIONS LAW.
+  raw block index. The public fns take the typed NdBlock newtype at their
+  scalar boundary (harmonized with the sibling rel_* lanes and the guide's
+  TYPED DIMENSIONS LAW) and convert to the flat i64 array index (`blk.idx`)
+  immediately — the array itself stays [i64] because the block is the ARRAY
+  INDEX, a flat i64. (The design §7 pseudocode spells the signatures `blk: i64`;
+  this lane takes the NdBlock and folds to `.idx` at the array boundary so
+  every rel_* fn presents one uniform typed-dimension signature.)
 - Cause/kind codes are fn-returning literals, never module-level collection
   initializers (freestanding-safe).
 """
@@ -82,14 +83,15 @@ fn rel_cause_dist() -> i64:
 # coarse corrected bucket into the running sum (RBER numerator), bump the
 # corrected-EVENT counter iff this read needed correction, and track the
 # deepest recovery-ladder rung this block has ever needed.
-fn rel_health_note_read(h: RelHealth, blk: i64, corrected: i64, depth: i64) -> RelHealth:
+fn rel_health_note_read(h: RelHealth, blk: NdBlock, corrected: i64, depth: i64) -> RelHealth:
+    val b: i64 = blk.idx
     var out = h
-    out.reads[blk] = h.reads[blk] + 1
-    out.corrected_sum[blk] = h.corrected_sum[blk] + corrected
+    out.reads[b] = h.reads[b] + 1
+    out.corrected_sum[b] = h.corrected_sum[b] + corrected
     if corrected >= 1:
-        out.corrected_events[blk] = h.corrected_events[blk] + 1
-    if depth > h.retry_depth_max[blk]:
-        out.retry_depth_max[blk] = depth
+        out.corrected_events[b] = h.corrected_events[b] + 1
+    if depth > h.retry_depth_max[b]:
+        out.retry_depth_max[b] = depth
     return out
 
 # RBER estimate: corrected-EVENTS / reads, scaled to ppm (x1_000_000) so the
@@ -97,17 +99,18 @@ fn rel_health_note_read(h: RelHealth, blk: i64, corrected: i64, depth: i64) -> R
 # zero). This is an event-rate estimator (architecture §5 honesty note above),
 # not a modeled bit-rate unless the NandEmu shadow-word seam (prereq 1b) is the
 # backend feeding `corrected`.
-fn rel_health_rber(h: RelHealth, blk: i64) -> i64:
-    if h.reads[blk] == 0:
+fn rel_health_rber(h: RelHealth, blk: NdBlock) -> i64:
+    val b: i64 = blk.idx
+    if h.reads[b] == 0:
         return 0
-    (h.corrected_sum[blk] * 1000000) / h.reads[blk]
+    (h.corrected_sum[b] * 1000000) / h.reads[b]
 
 # Record which cause fired the most recent refresh for this block (one of the
 # rel_cause_* tags above), so a spec/observer can assert *why* a rewrite
 # happened.
-fn rel_health_mark_cause(h: RelHealth, blk: i64, cause: i64) -> RelHealth:
+fn rel_health_mark_cause(h: RelHealth, blk: NdBlock, cause: i64) -> RelHealth:
     var out = h
-    out.refresh_cause[blk] = cause
+    out.refresh_cause[blk.idx] = cause
     return out
 
 # Erase-reset discipline: clear exactly this block's per-cycle reliability
@@ -115,9 +118,10 @@ fn rel_health_mark_cause(h: RelHealth, blk: i64, cause: i64) -> RelHealth:
 # read. reads/corrected_sum (the lifetime RBER estimate) are untouched — call
 # from the erase/reclaim path, parallel to rel_vref_decay_on_erase and
 # rel_disturb_clear (design §7 "Erase-reset discipline").
-fn rel_health_on_erase(h: RelHealth, blk: i64) -> RelHealth:
+fn rel_health_on_erase(h: RelHealth, blk: NdBlock) -> RelHealth:
+    val b: i64 = blk.idx
     var out = h
-    out.corrected_events[blk] = 0
-    out.retry_depth_max[blk] = 0
-    out.refresh_cause[blk] = rel_cause_none()
+    out.corrected_events[b] = 0
+    out.retry_depth_max[b] = 0
+    out.refresh_cause[b] = rel_cause_none()
     return out

@@ -282,6 +282,42 @@ fn dma_scatter_layout(segments: [DmaSegment]) -> DmaLayoutProof:
         contiguity_proven: false
     )
 
+fn _dma_copy_segments(segments: [DmaSegment], segment_count: u64) -> [DmaSegment]:
+    var copied: [DmaSegment] = []
+    var i: u64 = 0
+    while i < segment_count:
+        copied.push(segments[i as i64])
+        i = i + 1
+    copied
+
+fn _dma_copy_layout(layout: DmaLayoutProof) -> DmaLayoutProof:
+    DmaLayoutProof(
+        segments: _dma_copy_segments(layout.segments, layout.segment_count),
+        segment_count: layout.segment_count,
+        is_contiguous: layout.is_contiguous,
+        contiguity_proven: layout.contiguity_proven
+    )
+
+fn _dma_copy_buffer(buffer: SharedDmaBuffer) -> SharedDmaBuffer:
+    SharedDmaBuffer(
+        cpu_virt_addr: buffer.cpu_virt_addr,
+        host_phys_addr: buffer.host_phys_addr,
+        device_addr: buffer.device_addr,
+        byte_len: buffer.byte_len,
+        cache_policy: buffer.cache_policy,
+        owner: buffer.owner,
+        allocation_id: buffer.allocation_id
+    )
+
+fn _dma_copy_mapping(mapping: SharedDmaMapping, state: DmaMappingState) -> SharedDmaMapping:
+    SharedDmaMapping(
+        buffer: _dma_copy_buffer(mapping.buffer),
+        direction: mapping.direction,
+        layout: _dma_copy_layout(mapping.layout),
+        mapping_token: mapping.mapping_token,
+        state: state
+    )
+
 fn dma_shared_mapping(buf: SharedDmaBuffer, direction: DmaDir, layout: DmaLayoutProof, mapping_token: u64) -> Result<SharedDmaMapping, DriverError>:
     if not buf.is_valid() or mapping_token == 0u64 or not layout.is_valid_for(buf):
         return Err(DriverError.BadArg)
@@ -305,45 +341,41 @@ fn dma_mapping_map(mapping: SharedDmaMapping) -> Result<SharedDmaMapping, Driver
         return Err(DriverError.BadArg)
     if not mapping.can_map():
         return Err(DriverError.Busy)
-    var next = mapping
-    next.state = DmaMappingState.CpuOwned
-    Ok(next)
+    Ok(_dma_copy_mapping(mapping, DmaMappingState.CpuOwned))
 
 fn dma_mapping_sync_for_device(mapping: SharedDmaMapping) -> Result<SharedDmaMapping, DriverError>:
     if not mapping.is_valid():
         return Err(DriverError.BadArg)
     if not mapping.can_sync_for_device():
         return Err(DriverError.Busy)
-    var next = mapping
-    next.state = DmaMappingState.DeviceOwned
-    Ok(next)
+    if not dma_mapping_allows_cpu_to_device(mapping):
+        return Err(DriverError.BadArg)
+    dma_shared_sync_cpu_to_device(mapping.buffer)
+    Ok(_dma_copy_mapping(mapping, DmaMappingState.DeviceOwned))
 
 fn dma_mapping_sync_for_cpu(mapping: SharedDmaMapping) -> Result<SharedDmaMapping, DriverError>:
     if not mapping.is_valid():
         return Err(DriverError.BadArg)
     if not mapping.can_sync_for_cpu():
         return Err(DriverError.Busy)
-    var next = mapping
-    next.state = DmaMappingState.CpuOwned
-    Ok(next)
+    if not dma_mapping_allows_device_to_cpu(mapping):
+        return Err(DriverError.BadArg)
+    dma_shared_sync_device_to_cpu(mapping.buffer)
+    Ok(_dma_copy_mapping(mapping, DmaMappingState.CpuOwned))
 
 fn dma_mapping_unmap(mapping: SharedDmaMapping) -> Result<SharedDmaMapping, DriverError>:
     if not mapping.is_valid():
         return Err(DriverError.BadArg)
     if not mapping.can_unmap():
         return Err(DriverError.Busy)
-    var next = mapping
-    next.state = DmaMappingState.Unmapped
-    Ok(next)
+    Ok(_dma_copy_mapping(mapping, DmaMappingState.Unmapped))
 
 fn dma_mapping_release(mapping: SharedDmaMapping) -> Result<SharedDmaMapping, DriverError>:
     if not mapping.is_valid():
         return Err(DriverError.BadArg)
     if not mapping.can_release():
         return Err(DriverError.Busy)
-    var next = mapping
-    next.state = DmaMappingState.Released
-    Ok(next)
+    Ok(_dma_copy_mapping(mapping, DmaMappingState.Released))
 
 # Free-function forms keep capability checks usable from code that does not
 # use method syntax and deliberately return false for invalid metadata.

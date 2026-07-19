@@ -21,9 +21,9 @@
 use std.nogc_sync_mut.io.process_ops.{process_run}
 use std.json.{json_parse, json_object_get, json_array_get, json_array_length, json_serialize, json_get_type}
 use std.common.base_encoding.base64.{base64_encode}
-use std.common.base_encoding.{text_to_bytes}
 use std.common.text_advanced.{escape_json}
 use app.itf.adapter_jira.{JiraIssue}
+use app.itf.retry.{ITF_RETRY_MAX_ATTEMPTS, itf_should_retry, itf_retry_wait}
 
 
 # ---------------------------------------------------------------------------
@@ -41,8 +41,12 @@ class JiraClient:
         if self.email == "" or self.api_token == "":
             return ""
         val credentials = "{self.email}:{self.api_token}"
-        val bytes = text_to_bytes(credentials)
-        val encoded = base64_encode(bytes)
+        # base64_encode(text) already UTF-8-encodes internally (calls
+        # data.bytes()) — passing a pre-encoded [u8] array here (the previous
+        # `text_to_bytes(credentials)` call) crashed with "method `bytes` not
+        # found on type `array`" since base64_encode expects `text`, not
+        # `[u8]`. Found via adapter_jira_curl_spec.spl's auth_header test.
+        val encoded = base64_encode(credentials)
         "Basic {encoded}"
 
 
@@ -73,6 +77,20 @@ fn _build_curl_argv_post(auth: text, url: text, body: text) -> [text]:
     [
         "-s", "-S",
         "-X", "POST",
+        "-H", "Authorization: {auth}",
+        "-H", "Accept: application/json",
+        "-H", "Content-Type: application/json",
+        "-d", body,
+        "-w", "\n%\{http_code\}",
+        url,
+    ]
+
+
+fn _build_curl_argv_put(auth: text, url: text, body: text) -> [text]:
+    """Build argv for an authenticated PUT with JSON body (issue update)."""
+    [
+        "-s", "-S",
+        "-X", "PUT",
         "-H", "Authorization: {auth}",
         "-H", "Accept: application/json",
         "-H", "Content-Type: application/json",
@@ -221,6 +239,13 @@ fn _parse_jira_issue(obj: any) -> JiraIssue:
 # Atlassian Document Format (ADF) helpers
 # ---------------------------------------------------------------------------
 
+fn _json_escape(s: text) -> text:
+    """Alias for std.common.text_advanced.escape_json, kept as a local name
+    so callers/specs in this module don't need a second import for the same
+    escaping rules used by _adf_doc."""
+    escape_json(s)
+
+
 fn _adf_doc(plain: text) -> text:
     """Wrap a plain-text string in a minimal ADF document.
 
@@ -228,7 +253,7 @@ fn _adf_doc(plain: text) -> text:
       \{"type":"doc","version":1,"content":[
         \{"type":"paragraph","content":[\{"type":"text","text":"..."\}]\}]\}
     """
-    val esc = escape_json(plain)
+    val esc = _json_escape(plain)
     "\{\"type\":\"doc\",\"version\":1,\"content\":[\{\"type\":\"paragraph\",\"content\":[\{\"type\":\"text\",\"text\":\"{esc}\"\}]\}]\}"
 
 

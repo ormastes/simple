@@ -1,6 +1,9 @@
 use std.spec.*
 use std.memory_leveling.{
     MEMORY_DMA_DIRECTION_TO_DEVICE,
+    MEMORY_DMA_DIRECTION_FROM_DEVICE,
+    memory_domain,
+    memory_tier_nic_buffer,
     simple_memory_iso_cpu_cold,
     simple_memory_device_gpu,
     simple_memory_placement_config_from_intent,
@@ -89,6 +92,45 @@ describe "SimpleOS memory leveling manager":
         expect(manager.complete_in_flight(requested.allocation_id, 77).ok).to_equal(true)
         expect(manager.sync_for_cpu(requested.allocation_id, 77).state).to_equal("syncing_for_cpu")
         expect(manager.unmap_device(requested.allocation_id, 77).state).to_equal("cpu_owned")
+
+    it "maps allocation IDs returned for implicit allocation-ID requests":
+        val config = simpleos_memory_leveling_config_default()
+        val manager = memory_leveling_manager_new(config)
+        val resolved = manager.register_device_buffer(
+            0,
+            13,
+            1024,
+            1,
+            memory_domain("nic", true),
+            memory_tier_nic_buffer(),
+            MEMORY_DMA_DIRECTION_TO_DEVICE,
+            true,
+            true,
+            0xD000,
+            false
+        )
+        expect(resolved.allocation_id == 0).to_equal(false)
+        expect(manager.map_device(resolved.allocation_id, 13, MEMORY_DMA_DIRECTION_TO_DEVICE, true).ok).to_equal(true)
+
+    it "rejects device-map direction mismatches":
+        val config = simpleos_memory_leveling_config_default()
+        val manager = memory_leveling_manager_new(config)
+        val allocated = manager.register_device_buffer(
+            0,
+            19,
+            1024,
+            1,
+            memory_domain("nic", true),
+            memory_tier_nic_buffer(),
+            MEMORY_DMA_DIRECTION_TO_DEVICE,
+            true,
+            true,
+            0xE000,
+            false
+        )
+        expect(allocated.allocation_id == 0).to_equal(false)
+        expect(manager.map_device(allocated.allocation_id, 19, MEMORY_DMA_DIRECTION_FROM_DEVICE, true).reason).to_equal("invalid-direction")
+        expect(manager.map_device(allocated.allocation_id, 19, MEMORY_DMA_DIRECTION_TO_DEVICE, true).state).to_equal("syncing_for_device")
 
     it "inspects no more than 64 pressure candidates":
         var config = simpleos_memory_leveling_config_default()

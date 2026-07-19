@@ -4,6 +4,7 @@ use std.io.dma.{
     DmaCachePolicy,
     DmaOwner,
     SharedDmaBuffer,
+    DmaMappingState,
     dma_segment,
     dma_contiguous_layout,
     dma_scatter_layout,
@@ -38,6 +39,8 @@ describe "canonical DMA mapping metadata":
         val mapping = dma_shared_mapping(buffer, DmaDir.ToDevice, dma_contiguous_layout(exact), 1).unwrap()
         expect(dma_mapping_can_use_contiguous(mapping)).to_equal(false)
         val mapped = dma_mapping_map(mapping).unwrap()
+        expect(mapping.state).to_equal(DmaMappingState.Unmapped)
+        expect(mapped.state).to_equal(DmaMappingState.CpuOwned)
         expect(dma_mapping_can_use_contiguous(mapped)).to_equal(true)
 
     it "preserves explicit scatter segments and ordered ownership":
@@ -57,3 +60,19 @@ describe "canonical DMA mapping metadata":
         val unmapped = dma_mapping_unmap(cpu).unwrap()
         val released = dma_mapping_release(unmapped).unwrap()
         expect(released.mapping_token).to_equal(2)
+
+    it "rejects sync transitions that violate direction":
+        val buffer = _shared_dma_buffer()
+        val exact = dma_segment(0x1000, 0x8000, 0xA000, 4096)
+        val to_device = dma_shared_mapping(buffer, DmaDir.ToDevice, dma_contiguous_layout(exact), 11).unwrap()
+        val mapped_to_device = dma_mapping_map(to_device).unwrap()
+        expect(dma_mapping_sync_for_cpu(mapped_to_device).is_err()).to_equal(true)
+
+        val from_device = dma_shared_mapping(buffer, DmaDir.FromDevice, dma_contiguous_layout(exact), 12).unwrap()
+        val mapped_from_device = dma_mapping_map(from_device).unwrap()
+        expect(dma_mapping_sync_for_device(mapped_from_device).is_err()).to_equal(true)
+
+        val bidirectional = dma_shared_mapping(buffer, DmaDir.Bidirectional, dma_contiguous_layout(exact), 13).unwrap()
+        val mapped_bidir = dma_mapping_map(bidirectional).unwrap()
+        val sync_bidir_to_device = dma_mapping_sync_for_device(mapped_bidir).unwrap()
+        expect(dma_mapping_sync_for_cpu(sync_bidir_to_device).is_err()).to_equal(false)
