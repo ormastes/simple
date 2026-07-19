@@ -28,10 +28,11 @@
    c. Write the minimum code to make specs pass -- nothing more
    d. Run specs: `set -o pipefail; bin/simple test <spec_file> 2>&1 | tail -40` (pipefail preserves test exit code)
       Interpreter output is diagnostic only: outer PASS/exit can false-green.
-      For focused interpreter evidence reuse the calibrated
-      `src/app/test/font_evidence_runner.spl`, require nonzero executed count
-      and zero spec exit code; it shares `build_interpreter_result_wrapper`
-      with the pure runner. Native acceptance remains authoritative.
+      Focused interpreter evidence must reuse `build_interpreter_result_wrapper`
+      and require nonzero executed count plus zero spec exit code. Focused native
+      font evidence uses `src/app/test/font_evidence_runner.spl` with
+      `preprocess_spipe_native_result_file`; it is not an interpreter wrapper.
+      Native acceptance remains authoritative.
    e. If specs fail and iterations < 5, read error output, fix, repeat
    f. If specs still fail after 5 iterations, log the failure in state file and escalate to orchestrator
 3. After all specs pass, verify no `pass_todo` stubs remain in implementation

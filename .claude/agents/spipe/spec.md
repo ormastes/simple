@@ -45,10 +45,11 @@ Read the existing state file. Append your spec summary. Do not modify earlier se
 8. Every spec MUST fail right now — the code does not exist yet
 9. Run `bin/simple spipe-docgen <spec> --output doc/06_spec --no-index` for each
    changed spec and require complete documentation with `0 stubs`
-   Interpreter diagnostics must reuse calibrated
-   `src/app/test/font_evidence_runner.spl`; never trust outer PASS/exit without
-   executed-count and spec-exit counters. The focused and pure runners share
-   `build_interpreter_result_wrapper`; do not create another harness.
+   Interpreter diagnostics must reuse `build_interpreter_result_wrapper`; never
+   trust outer PASS/exit without executed-count and spec-exit counters. Focused
+   native font evidence uses `src/app/test/font_evidence_runner.spl` and
+   `preprocess_spipe_native_result_file`; it is not an interpreter wrapper. Do
+   not create another harness.
    CUDA font production specs must apply the canonical artifact-trust rule in
    `.claude/skills/spipe.md`.
    Extracted optimization/font source bytes must match their emitter-declared

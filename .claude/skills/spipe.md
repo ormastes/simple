@@ -44,8 +44,10 @@ stale PASS artifact.
 > is never PASS. Calibrate with deliberate-red and zero-executed fixtures, and
 > keep interpreter evidence diagnostic. Tracked:
 > `doc/08_tracking/bug/test_runner_interpreter_file_summary_greenwash_2026-07-03.md`.
-> Reuse the pure test runner or `src/app/test/font_evidence_runner.spl`; do not
-> create another result wrapper.
+> Reuse `build_interpreter_result_wrapper` for interpreter diagnostics. Native
+> font diagnostics use `src/app/test/font_evidence_runner.spl`, which calls
+> `preprocess_spipe_native_result_file`; it is not an interpreter wrapper. Do
+> not create another result wrapper.
 
 The SPipe dev entrypoint lives at:
 
@@ -386,7 +388,7 @@ presentation.
 
 Shared-font SSpec manuals freeze these exact steps: `Load the pinned multilingual
 font manifest`; `Accept exact-face-bound simple-script shaping`; `Prepare one
-shared font batch for 2D and 3D`; `Emit the selected font composite program and
+shared font batch for 2D`; `Emit the selected font composite program and
 plan compilation`; `Prove native submission and device readback`. Engine3D
 HUD/world stays a separate consumer lane. Full rules live in `$sp_dev` under
 “Shared multilingual font work.”

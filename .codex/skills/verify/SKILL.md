@@ -61,7 +61,7 @@ release must not create, rewrite, or weaken SPipe evidence after verification.
   `.codex/skills/system_test/SKILL.md` before PASS.
 - Shared-font interpreter calibration must satisfy `$system_test`: fail and
   empty fixtures each exit 1 with their distinct canonical marker; reject
-  2/124/139 and retain commands, binary SHA-256, and logs at its artifact path.
+  2/124/132/139 and retain commands, binary SHA-256, and logs at its artifact path.
 - Placeholder helpers for shared interfaces or manual setup/checker flow fail
   explicitly with `assert(false)` or `fail(...)` until implemented; silent
   placeholder passes are a FAIL.

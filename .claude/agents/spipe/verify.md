@@ -24,9 +24,10 @@
 3. Run feature specs first: `set -o pipefail; bin/simple test <spec_file> 2>&1 | tail -40` for each spec from Phase 4
 4. Run full test suite with capped output: `set -o pipefail; bin/simple test 2>&1 | tail -60` (pipefail preserves test exit code; check last lines for pass/fail summary)
    Interpreter PASS/exit alone is not evidence. Focused interpreter diagnostics
-   must use calibrated `src/app/test/font_evidence_runner.spl` counters through
-   the shared `build_interpreter_result_wrapper`; native acceptance remains
-   authoritative.
+   must use `build_interpreter_result_wrapper` counters. Focused native font
+   evidence uses `src/app/test/font_evidence_runner.spl` with
+   `preprocess_spipe_native_result_file`; it is not an interpreter wrapper.
+   Native acceptance remains authoritative.
    CUDA font production verification must apply the canonical artifact-trust
    rule in `.claude/skills/spipe.md` before PASS.
    Verify the portable checker aggregates only `PORTABLE_COMPUTE_TARGETS`,
