@@ -476,13 +476,15 @@ impl NvmeController:
             me.qset.cq_post(cqid, cpl)
             n = n + 1
             guard = guard + 1
-            # Mirror firmware.spl's service_tick: at most one background GC step per
-            # iteration whenever free space drops below the low watermark. Without this,
-            # this multi-queue path never drains GC (unlike the sibling Hil/firmware.spl
-            # path), so the FTL's GC reserve exhausts and every write cliffs into
-            # SC_NS_NOT_READY forever.
-            if me.ftl.free_blocks() < GC_LOW_WATERMARK:
-                me.ftl.gc_once()
+            # Mirror firmware.spl's service_tick: at most one background reclaim-class
+            # step per iteration. Pre-L8 this was a bare low-watermark GC; the L8 wiring
+            # routes it through the FTL reliability tick (rel_tick), which keeps GC's
+            # low-watermark priority IDENTICAL (so this multi-queue path still drains the
+            # GC reserve and never cliffs into SC_NS_NOT_READY) and, only when free space
+            # is at/above the watermark, spends the single per-tick reclaim slot on a due
+            # refresh / read-disturb scrub / wear-level step instead (design §7 budget
+            # invariant — one reclaim-class step per tick total).
+            me.ftl.rel_tick(GC_LOW_WATERMARK)
             qid = me.qset.next_pending_sq()
         n
 

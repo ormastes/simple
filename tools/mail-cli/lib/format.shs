@@ -2,6 +2,51 @@
 # mail-cli message formatting — RFC 2822 compose + parse
 # Depends on: config.shs (sourced by main entry point)
 
+# C10: page long listing output. Prints $1 as-is when stdout isn't a tty,
+# --no-pager was passed ($2 = 1), or the content fits within the terminal's
+# row count; otherwise pipes it through ${PAGER:-less -R} (raw mode, so
+# embedded ANSI color codes render correctly instead of showing as escapes).
+_mail_page_output() {
+  local content="$1" no_pager="${2:-0}"
+  [ -z "$content" ] && return 0
+
+  if [ "$no_pager" -eq 1 ] || [ ! -t 1 ]; then
+    printf '%s\n' "$content"
+    return 0
+  fi
+
+  local line_count rows
+  line_count=$(printf '%s\n' "$content" | wc -l | tr -d ' ')
+  rows=$(_mail_term_height)
+  if [ "$line_count" -gt "$rows" ]; then
+    printf '%s\n' "$content" | ${PAGER:-less -R}
+  else
+    printf '%s\n' "$content"
+  fi
+}
+
+# Redirect stdout to a temp file so a multi-statement table render (header
+# line + per-row prints interleaved with network fetches) can be captured
+# as one block and handed to _mail_page_output, without wrapping the block
+# in a command-substitution subshell (which would lose any variables it
+# sets). Pair with _mail_page_capture_end. Not reentrant — callers don't
+# nest these.
+_mail_page_capture_start() {
+  _mail_page_tmp=$(mktemp "${TMPDIR:-/tmp}/mail-cli-page.XXXXXX")
+  exec 4>&1 1>"$_mail_page_tmp"
+}
+
+# Restores stdout, then pages (or prints) the captured content and cleans
+# up. $1 = no_pager (1 to disable paging even on a long listing).
+_mail_page_capture_end() {
+  local no_pager="${1:-0}"
+  exec 1>&4 4>&-
+  local content
+  content=$(cat "$_mail_page_tmp")
+  rm -f "$_mail_page_tmp"
+  _mail_page_output "$content" "$no_pager"
+}
+
 # Generate a unique Message-ID
 mail_format_message_id() {
   local domain

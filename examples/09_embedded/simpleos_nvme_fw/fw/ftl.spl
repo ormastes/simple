@@ -744,6 +744,148 @@ impl Ftl:
             return UNMAP
         me.reclaim_block(target)
 
+    # ── L8 wiring pass: service-tick reclaim-class round-robin (design §7) ─────
+    # Feed observations continuously (reads → rel_disturb/rel_health in read();
+    # erases → rel_vref decay / rel_wear / rel_health clear in reclaim_block; writes
+    # → rel_refresh_on_write in write()), then execute AT MOST ONE reclaim-class step
+    # per tick chosen by rel_tick_select's fixed priority (GC > refresh > scrub > WL).
+    # The single-step-per-tick discipline is the budget invariant: it preserves the
+    # shared GC_RESERVE and the existing write-cliff fix. Returns the selected step
+    # code (rel_step_*) so a test can observe which class fired.
+    me rel_tick(low_wm: i64) -> i64:
+        val step: i64 = me.rel_select_step(low_wm)
+        var did: i64 = UNMAP
+        if step == rel_step_gc():
+            did = me.gc_once()
+        elif step == rel_step_refresh():
+            did = me.rel_drain_refresh()
+        elif step == rel_step_scrub():
+            did = me.scrub_once()
+        elif step == rel_step_wl():
+            did = me.rel_wear_level()
+        if step != rel_step_none() and did != UNMAP:
+            me.rel_reclaim_count = me.rel_reclaim_count + 1
+        step
+
+    # The step rel_tick WOULD take this cycle (without executing it) — lets the
+    # single-queue firmware.service_tick gate its background-owner acquisition so an
+    # idle device does not contend the map-owner token (preserves firmware_selftest's
+    # owner-conflict accounting) while still draining every reclaim class when due.
+    me rel_select_step(low_wm: i64) -> i64:
+        rel_tick_select(me.free_blocks(), low_wm, me.rel_refresh_pending_count(),
+                        me.worst_read_disturb(), READ_DISTURB_THRESHOLD,
+                        me.wl_spread(), WL_THRESHOLD)
+
+    me rel_maintenance_due(low_wm: i64) -> bool:
+        me.rel_select_step(low_wm) != rel_step_none()
+
+    # Refresh queue drain (step 2): reclaim the first refresh-marked CLOSED block that
+    # still holds live data. reclaim_block relocates its (ladder-recovered) live pages
+    # to fresh pages and erases it — the erase-reset then clears the refresh mark.
+    me rel_drain_refresh() -> i64:
+        var b: i64 = 0
+        while b < NUM_BLOCKS:
+            if me.rel_refresh.marked[b] == 1 and me.band.block_state(b) == BLK_CLOSED and me.band.valid_count(b) > 0:
+                return me.reclaim_block(b)
+            b = b + 1
+        UNMAP
+
+    # Static wear leveling (step 4), gated by the SREA-lite dwell verdict: only churn
+    # the coldest block once it has actually rested (dwell >= REL_WL_DWELL_MIN), then
+    # fire the existing wear_level_once. rel_wear_due Accepts (deferral) otherwise.
+    me rel_wear_level() -> i64:
+        val cold: i64 = gc_select_wear_victim(me.band, me.fil)
+        if cold == UNMAP:
+            return UNMAP
+        val verdict: RelAction = rel_wear_due(me.rel_wear, nd_block(cold), me.fil.erase_count(cold), me.max_erase(), me.total_erases())
+        if verdict.kind != rel_act_reclaim():
+            return UNMAP    # SREA deferral: cold block not dwelled enough
+        me.wear_level_once()
+
+    # ── Tick gate inputs (all over CLOSED-with-live blocks: the reclaim candidates) ─
+    me rel_refresh_pending_count() -> i64:
+        var n: i64 = 0
+        var b: i64 = 0
+        while b < NUM_BLOCKS:
+            if me.rel_refresh.marked[b] == 1 and me.band.block_state(b) == BLK_CLOSED and me.band.valid_count(b) > 0:
+                n = n + 1
+            b = b + 1
+        n
+
+    me worst_read_disturb() -> i64:
+        var w: i64 = 0
+        var b: i64 = 0
+        while b < NUM_BLOCKS:
+            if me.band.block_state(b) == BLK_CLOSED and me.band.valid_count(b) > 0:
+                val d: i64 = me.read_disturb_count(b)
+                if d > w:
+                    w = d
+            b = b + 1
+        w
+
+    me wl_spread() -> i64:
+        val cold: i64 = gc_select_wear_victim(me.band, me.fil)
+        if cold == UNMAP:
+            return 0
+        me.max_erase() - me.fil.erase_count(cold)
+
+    # ── Retire / erase-reset shared helpers (design §7) ───────────────────────
+    # Event-driven spare substitution: a data-region block (0..55) was retired on a
+    # media failure -> draw one over-provision spare (56..63, fil_badblock) to backfill
+    # capacity, closing gap A7. Retiring a spare itself does not recurse. Records the
+    # substitution for observability; the OP block is already allocator-visible so this
+    # advances the reserved-pool cursor rather than changing the band's free set.
+    me rel_retire(blk: i64):
+        if blk < 0 or blk >= 56:
+            return
+        val s: i64 = me.fil.alloc_spare()
+        if s != UNMAP:
+            me.rel_spares = me.rel_spares + 1
+            me.rel_last_spare = s
+
+    # Erase-reset discipline: a block's reliability state must not survive a P/E cycle.
+    # Clears the ROR calibration (fil), the disturb hottest-page estimate, the per-cycle
+    # health counters, and stamps the wear dwell snapshot + clears the refresh mark.
+    me rel_on_erase(blk: i64):
+        me.fil.decay_vref_on_erase(nd_block(blk))
+        me.rel_disturb = rel_disturb_clear(me.rel_disturb, nd_block(blk))
+        me.rel_health  = rel_health_on_erase(me.rel_health, blk)
+        me.rel_wear    = rel_wear_on_erase(me.rel_wear, nd_block(blk), me.total_erases())
+        me.rel_refresh = rel_refresh_on_write(me.rel_refresh, nd_block(blk), me.seq)
+
+    # ── Reliability observability accessors (design §5/§7/§10 oracles) ────────
+    me rel_reclaims() -> i64:
+        me.rel_reclaim_count
+
+    me rel_spares_allocated() -> i64:
+        me.rel_spares
+
+    me rel_last_spare_block() -> i64:
+        me.rel_last_spare
+
+    me health_retry_depth(blk: i64) -> i64:
+        if not block_in_range(blk):
+            return 0
+        me.rel_health.retry_depth_max[blk]
+
+    me health_corrected_events(blk: i64) -> i64:
+        if not block_in_range(blk):
+            return 0
+        me.rel_health.corrected_events[blk]
+
+    me refresh_marked(blk: i64) -> i64:
+        if not block_in_range(blk):
+            return 0
+        me.rel_refresh.marked[blk]
+
+    me refresh_cause(blk: i64) -> i64:
+        if not block_in_range(blk):
+            return 0
+        me.rel_health.refresh_cause[blk]
+
+    me calibrated_offset(blk: i64) -> i64:
+        me.fil.calibrated_offset(blk)
+
 # ── Self-test ─────────────────────────────────────────────────────────────────
 
 fn ftl_selftest() -> i64:

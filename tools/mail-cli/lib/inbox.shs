@@ -3,17 +3,18 @@
 # Depends on: config.shs, imap.shs, format.shs (sourced by main entry point)
 
 cmd_inbox() {
-  local folder="INBOX" limit=25 unread_only=0 output_mode="table" threads_mode=0 wide=0
+  local folder="INBOX" limit=25 unread_only=0 output_mode="table" threads_mode=0 wide=0 no_pager=0
 
   while [ $# -gt 0 ]; do
     case "$1" in
-      --account) MAIL_ACCOUNT="$2"; shift 2 ;;
-      --folder)  folder="$2"; shift 2 ;;
-      --limit)   limit="$2"; shift 2 ;;
-      --unread)  unread_only=1; shift ;;
-      --threads) threads_mode=1; shift ;;
-      --wide)    wide=1; shift ;;
-      --json)    output_mode="json"; shift ;;
+      --account)   MAIL_ACCOUNT="$2"; shift 2 ;;
+      --folder)    folder="$2"; shift 2 ;;
+      --limit)     limit="$2"; shift 2 ;;
+      --unread)    unread_only=1; shift ;;
+      --threads)   threads_mode=1; shift ;;
+      --wide)      wide=1; shift ;;
+      --json)      output_mode="json"; shift ;;
+      --no-pager)  no_pager=1; shift ;;
       *) shift ;;
     esac
   done
@@ -110,15 +111,19 @@ cmd_inbox() {
   fi
 
   if [ "$threads_mode" -eq 1 ]; then
+    _mail_page_capture_start
     _mail_inbox_print_threads "$wide"
+    _mail_page_capture_end "$no_pager"
     return 0
   fi
 
+  _mail_page_capture_start
   mail_format_table_header "$wide"
   local i
   for (( i=0; i<${#entry_uid[@]}; i++ )); do
     mail_format_summary_line "${entry_uid[$i]}" "${entry_json[$i]}" "" "$wide"
   done
+  _mail_page_capture_end "$no_pager"
   return 0
 }
 
@@ -245,21 +250,22 @@ cmd_read() {
 }
 
 cmd_search() {
-  local query="" folder="INBOX" from="" subject="" since="" before="" limit=25 output_mode="table" wide=0
+  local query="" folder="INBOX" from="" subject="" since="" before="" limit=25 output_mode="table" wide=0 no_pager=0
 
   while [ $# -gt 0 ]; do
     case "$1" in
-      --account) MAIL_ACCOUNT="$2"; shift 2 ;;
-      --folder)  folder="$2"; shift 2 ;;
-      --from)    from="$2"; shift 2 ;;
-      --subject) subject="$2"; shift 2 ;;
-      --since)   since="$2"; shift 2 ;;
-      --before)  before="$2"; shift 2 ;;
-      --limit)   limit="$2"; shift 2 ;;
-      --wide)    wide=1; shift ;;
-      --json)    output_mode="json"; shift ;;
-      -*)        shift ;;
-      *)         query="$1"; shift ;;
+      --account)   MAIL_ACCOUNT="$2"; shift 2 ;;
+      --folder)    folder="$2"; shift 2 ;;
+      --from)      from="$2"; shift 2 ;;
+      --subject)   subject="$2"; shift 2 ;;
+      --since)     since="$2"; shift 2 ;;
+      --before)    before="$2"; shift 2 ;;
+      --limit)     limit="$2"; shift 2 ;;
+      --wide)      wide=1; shift ;;
+      --json)      output_mode="json"; shift ;;
+      --no-pager)  no_pager=1; shift ;;
+      -*)          shift ;;
+      *)           query="$1"; shift ;;
     esac
   done
 
@@ -291,7 +297,10 @@ cmd_search() {
   local uid_array
   uid_array=($(echo "$uids" | tr ' ' '\n' | tail -n "$limit" | tac))
 
-  [ "$output_mode" = "table" ] && mail_format_table_header "$wide"
+  if [ "$output_mode" = "table" ]; then
+    _mail_page_capture_start
+    mail_format_table_header "$wide"
+  fi
 
   local json_array="[]"
 
@@ -314,6 +323,10 @@ cmd_search() {
     esac
   done
 
-  [ "$output_mode" = "json" ] && echo "$json_array" | jq '.'
+  if [ "$output_mode" = "table" ]; then
+    _mail_page_capture_end "$no_pager"
+  else
+    echo "$json_array" | jq '.'
+  fi
   return 0
 }

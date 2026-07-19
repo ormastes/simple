@@ -53,15 +53,17 @@ fn fil_corrected_of(code: i64) -> i64:
 # both fold into the durable RelFtlMount.health at the FTL read site (design §1.4).
 struct RelReadResult:
     data:      i64
+    lba:       i64   # recovered OOB logical-block tag (for a reclaim/relocation remap)
+    seq:       i64   # recovered OOB sequence tag
     depth:     i64
     corrected: i64
     ok:        i64
 
-fn rel_read_result_ok(data: i64, depth: i64, corrected: i64) -> RelReadResult:
-    RelReadResult(data: data, depth: depth, corrected: corrected, ok: 1)
+fn rel_read_result_ok(data: i64, lba: i64, seq: i64, depth: i64, corrected: i64) -> RelReadResult:
+    RelReadResult(data: data, lba: lba, seq: seq, depth: depth, corrected: corrected, ok: 1)
 
-fn rel_read_result_fail(data: i64, depth: i64) -> RelReadResult:
-    RelReadResult(data: data, depth: depth, corrected: 2, ok: 0)
+fn rel_read_result_fail(data: i64, lba: i64, seq: i64, depth: i64) -> RelReadResult:
+    RelReadResult(data: data, lba: lba, seq: seq, depth: depth, corrected: 2, ok: 0)
 
 # Zero-initialised per-block Vref calibration cache (design §3 RelVrefCache). Built
 # here with the plain struct-literal constructor because rel_types.spl (L1) owns the
@@ -178,11 +180,11 @@ impl Fil:
             val a: RelAction = stp.action
             if a.kind == rel_act_accept():
                 me.emu_set_vref_offset(0)                     # restore the global knob
-                return rel_read_result_ok(rd.data, st.depth, obs.corrected)
+                return rel_read_result_ok(rd.data, rd.lba, rd.seq, st.depth, obs.corrected)
             if a.kind == rel_act_calibrate():
                 me.rel_vref = rel_vref_calibrate(me.rel_vref, blk, st.best_offset)   # persist winner (ROR)
                 me.emu_set_vref_offset(0)
-                return rel_read_result_ok(rd.data, st.depth, obs.corrected)
+                return rel_read_result_ok(rd.data, rd.lba, rd.seq, st.depth, obs.corrected)
             if a.kind == rel_act_retry():
                 me.emu_set_vref_offset(a.arg)                 # chip-global vref = 128 + a.arg
                 rd  = me.read_at_vref(ppn, a.arg)             # seam #2: non-terminal shifted sense
@@ -191,9 +193,9 @@ impl Fil:
                 # rel_act_uncorrectable: table exhausted. Carry the last payload so a
                 # caller ignoring `ok` matches the pre-L8 offset-0 return exactly.
                 me.emu_set_vref_offset(0)
-                return rel_read_result_fail(rd.data, st.depth)
+                return rel_read_result_fail(rd.data, rd.lba, rd.seq, st.depth)
         me.emu_set_vref_offset(0)
-        rel_read_result_fail(rd.data, st.depth)
+        rel_read_result_fail(rd.data, rd.lba, rd.seq, st.depth)
 
     # Erase-reset (design §7): a recycled block must not reuse a stale retention
     # calibration — void this block's ROR offset. Called from the FTL erase/reclaim

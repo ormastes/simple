@@ -69,12 +69,20 @@ pub fn sanitize_repo_name(raw: text) -> Result<text, text>:
     Ok(raw)
 
 pub fn sanitize_ref(raw: text) -> Result<text, text>:
+    """Validate a git ref (branch/tag/HEAD/sha). Unlike `sanitize_repo_name`,
+    a ref MAY contain `/` (e.g. `feature/x`, `release/1.0`) since that is a
+    normal, common shape for git branch names — each `/`-separated segment
+    is still individually checked so `..`, a leading `-` (git-option
+    injection), and empty segments (`//`) stay rejected."""
     if raw == "":
         return Err("empty ref")
-    if raw.contains("..") or raw.starts_with("-"):
+    if raw.contains("..") or raw.starts_with("-") or raw.starts_with("/") or raw.ends_with("/"):
         return Err("invalid ref")
-    if not _all_chars_in(raw, _SAFE_NAME_CHARS):
+    if not _all_chars_in(raw, _SAFE_PATH_CHARS):
         return Err("invalid ref")
+    for seg in raw.split("/"):
+        if seg == "" or seg.starts_with("-"):
+            return Err("invalid ref")
     Ok(raw)
 
 pub fn sanitize_path(raw: text) -> Result<text, text>:
@@ -248,3 +256,74 @@ pub fn git_show_commit(repo: RepoInfo, sha: text) -> Result<text, text>:
     if code != 0:
         return Err(err.trim())
     Ok(out)
+
+# ============================================================================
+# Ref-with-slash resolution
+#
+# A URL like `/repos/{name}/tree/{ref}/{path...}` cannot tell, from the path
+# segments alone, where a ref such as `feature/x` ends and the file path
+# begins (both are just `/`-separated segments once routed). Rather than
+# reinvent URL-encoding for refs (which the existing `_normalize_path`
+# already decodes globally, defeating a per-segment %2F scheme), resolve the
+# ambiguity the same way gitweb/cgit do: ask git for the known ref names and
+# greedily match the longest one against the leading segments.
+# ============================================================================
+
+pub fn git_list_ref_names(repo: RepoInfo) -> [text]:
+    """List short ref names (branches + tags + remotes) for greedy
+    slash-ref matching. Returns [] on error (empty/unborn repo) — callers
+    fall back to treating the first segment alone as the ref."""
+    val (out, err, code) = _git(repo.git_dir, ["for-each-ref", "--format=%(refname:short)"])
+    if code != 0:
+        return []
+    var names: [text] = []
+    for line in out.split("\n"):
+        val trimmed = line.trim()
+        if trimmed != "":
+            names.push(trimmed)
+    names
+
+fn _join_slice(items: [text], start: i64, end: i64) -> text:
+    var out = ""
+    var i = start
+    while i < end:
+        if out == "":
+            out = items[i]
+        else:
+            out = out + "/" + items[i]
+        i = i + 1
+    out
+
+fn _names_contains(names: [text], target: text) -> bool:
+    for n in names:
+        if n == target:
+            return true
+    false
+
+pub fn resolve_ref_and_path(repo: RepoInfo, candidate_segments: [text]) -> Result<(text, text), text>:
+    """Given the URL segments starting at the ref position (e.g. everything
+    after `.../tree/`), greedily match the longest known ref name so refs
+    containing `/` resolve correctly, then treat the remaining segments as
+    the file path. Falls back to a single-segment ref (covers `HEAD`, short
+    or full SHAs, and refs not present in this `for-each-ref` snapshot)."""
+    if candidate_segments.len() == 0:
+        return Err("missing ref")
+    val known = git_list_ref_names(repo)
+    var best_len: i64 = 1
+    var i = candidate_segments.len()
+    while i >= 1:
+        if _names_contains(known, _join_slice(candidate_segments, 0, i)):
+            best_len = i
+            break
+        i = i - 1
+    val ref_part = _join_slice(candidate_segments, 0, best_len)
+    val path_part = _join_slice(candidate_segments, best_len, candidate_segments.len())
+    match sanitize_ref(ref_part):
+        Err(msg):
+            Err(msg)
+        Ok(safe_ref):
+            match sanitize_path(path_part):
+                Err(msg):
+                    Err(msg)
+                Ok(safe_path):
+                    Ok((safe_ref, safe_path))

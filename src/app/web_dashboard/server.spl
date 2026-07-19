@@ -7,6 +7,17 @@ use app.llm_runtime.manifest.{llm_runtime_manifest_from_text}
 use app.dashboard.assistant_bridge.{assistant_bridge_default_policy}
 use app.dashboard.assistant_collectors.{collect_assistant_snapshot_from_root}
 use app.dashboard.assistant_live_view.{assistant_dashboard_live_view_from_snapshot, assistant_dashboard_render_live_view}
+use app.llm_dashboard.data.store.{AgentDashboardStore}
+use app.llm_dashboard.data.project_stats.{collect_project_stats}
+use app.llm_dashboard.data.env_collector.{env_collect, detect_project_dir}
+use app.llm_dashboard.gui.html_views.{generate_agents_html_with_ios}
+use app.llm_dashboard.gui.stats_panel_html.{generate_stats_panel_html}
+use app.llm_dashboard.gui.cache_panel_html.{generate_cache_panel_html}
+use app.llm_dashboard.gui.message_panel_html.{generate_message_panel_html}
+use app.llm_dashboard.gui.mcp_panel_html.{generate_mcp_panel_html}
+use app.llm_dashboard.gui.tasks_panel_html.{generate_tasks_panel_html}
+use app.llm_dashboard.gui.env_panel_html.{generate_env_panel_html}
+use app.llm_dashboard.gui.panel_common_html.{panel_error_html}
 use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
 use app.llm_dashboard.web_login.{
     DashboardAuthSession,
@@ -201,10 +212,18 @@ pub struct DashboardServer:
             if path.starts_with("/api/"):
                 return http_error(401, "Authentication required")
             return http_redirect("/login")
+        if clean_path == "/agents/full":
+            if method != "GET":
+                return http_error(401, "Method not supported")
+            return http_response(200, "text/html", self.render_agents_full_html())
         if _is_agents_path(clean_path):
             if method != "GET":
                 return http_error(401, "Method not supported")
             return http_response(200, "text/html", self.render_agents_html())
+        if path.starts_with("/api/panel/"):
+            if method != "GET":
+                return http_error(401, "Method not supported")
+            return http_response(200, "text/html", self.render_panel_fragment(_panel_name_from_path(clean_path)))
         if path.starts_with("/api/vllm/control"):
             if method != "GET":
                 return http_error(401, "Method not supported")
@@ -214,6 +233,39 @@ pub struct DashboardServer:
         if method != "GET":
             return http_error(401, "Method not supported")
         http_response(200, "text/html", self.render_dashboard_html())
+
+    # Full LLM Agent Dashboard page (stats/cache/message/mcp/tasks/env tabs).
+    # Separate from render_agents_html's minimal assistant-bridge live view
+    # so neither one clobbers the other; both are reachable, /agents/full is
+    # the rich gui/*_panel_html composition.
+    fn render_agents_full_html() -> text:
+        generate_agents_html_with_ios(self._agents_store(), self.is_ios)
+
+    fn _agents_store() -> AgentDashboardStore:
+        if self.agent_dir != "":
+            return AgentDashboardStore.with_dir(self.agent_dir)
+        AgentDashboardStore.new()
+
+    # Serves /api/panel/<name>: the same gui/*_panel_html generator used by
+    # render_agents_full_html, rendered alone so the page's per-panel refresh
+    # JS (10s interval + manual button, see gui/html_views.spl) can swap just
+    # that panel's content in place instead of reloading the whole page.
+    fn render_panel_fragment(name: text) -> text:
+        match name:
+            case "stats":
+                generate_stats_panel_html(collect_project_stats(detect_project_dir()))
+            case "env":
+                generate_env_panel_html(env_collect(detect_project_dir()))
+            case "cache":
+                generate_cache_panel_html(self._agents_store())
+            case "message":
+                generate_message_panel_html(self._agents_store())
+            case "mcp":
+                generate_mcp_panel_html(self._agents_store())
+            case "tasks":
+                generate_tasks_panel_html(self._agents_store())
+            case _:
+                panel_error_html("unknown panel \"{name}\"")
 
     fn render_agents_html() -> text:
         val snapshot = collect_assistant_snapshot_from_root(self.agent_dir)
@@ -256,6 +308,12 @@ fn _clean_path(path: text) -> text:
 
 fn _is_agents_path(path: text) -> bool:
     path == "/agents" or path.starts_with("/agents/")
+
+fn _panel_name_from_path(path: text) -> text:
+    val prefix = "/api/panel/"
+    if not path.starts_with(prefix):
+        return ""
+    path.slice(prefix.len(), path.len())
 
 fn _session_authenticated(session: text?) -> bool:
     if session == nil:

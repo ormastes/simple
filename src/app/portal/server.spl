@@ -24,13 +24,16 @@ use app.portal.git_repo.{
     RepoInfo, TreeEntry, CommitEntry,
     sanitize_repo_name, sanitize_ref, sanitize_path,
     list_repos, find_repo, repo_default_ref,
-    git_ls_tree, git_show_blob, git_log, git_show_commit
+    git_ls_tree, git_show_blob, git_log, git_show_commit,
+    resolve_ref_and_path
 }
 use app.portal.git_views.{
     render_repos_index, render_repo_landing, render_tree,
     render_blob, render_commits, render_commit_diff
 }
-use app.portal.template.{render_layout, render_home_page, render_error_page}
+use app.portal.template.{render_layout, render_home_page, render_error_page, render_login_page}
+use app.portal.services.auth_service.{hash_password, verify_password, sign_session_cookie, verify_session_cookie}
+use std.web_framework.form_parser.{parse_url_encoded}
 
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
@@ -38,6 +41,7 @@ extern fn rt_env_get(key: text) -> text
 
 val PUBLIC_ROOT = "src/app/portal/public"
 val COMMITS_PAGE_SIZE: i64 = 30
+val SESSION_COOKIE_NAME = "portal_session"
 
 fn default_repo_root() -> text:
     val configured = rt_env_get("PORTAL_REPO_ROOT")
@@ -45,6 +49,16 @@ fn default_repo_root() -> text:
         "."
     else:
         configured
+
+fn _env_or(key: text, fallback: text) -> text:
+    val v = rt_env_get(key)
+    if v == nil or v == "":
+        fallback
+    else:
+        v
+
+fn _auth_enabled_from_env() -> bool:
+    _env_or("PORTAL_AUTH", "") == "1"
 
 # ============================================================================
 # PortalServer
@@ -54,13 +68,23 @@ class PortalServer:
     host: text
     port: text
     repo_root: text
+    auth_enabled: bool
+    auth_user: text
+    auth_pass: text
+    auth_secret: text
 
 impl PortalServer:
     static fn new(host: text, port: text) -> PortalServer:
-        PortalServer(host: host, port: port, repo_root: default_repo_root())
+        PortalServer.with_repo_root(host, port, default_repo_root())
 
     static fn with_repo_root(host: text, port: text, repo_root: text) -> PortalServer:
-        PortalServer(host: host, port: port, repo_root: repo_root)
+        PortalServer(
+            host: host, port: port, repo_root: repo_root,
+            auth_enabled: _auth_enabled_from_env(),
+            auth_user: _env_or("PORTAL_AUTH_USER", "admin"),
+            auth_pass: _env_or("PORTAL_AUTH_PASSWORD", "admin"),
+            auth_secret: _env_or("PORTAL_AUTH_SECRET", "portal-session-default-secret")
+        )
 
     fn start():
         print "Starting Simple Portal on http://{self.host}:{self.port}"
@@ -85,11 +109,13 @@ impl PortalServer:
                 val method = parsed.0
                 val raw_path = parsed.1
                 var content_length = 0
+                var headers_raw = ""
                 loop:
                     match stream.read_line():
                         Ok(header_line):
                             if header_line.trim() == "":
                                 break
+                            headers_raw = headers_raw + header_line + "\n"
                             if header_line.lower().starts_with("content-length:"):
                                 val parts = header_line.split(":")
                                 if parts.length() >= 2:
@@ -103,7 +129,7 @@ impl PortalServer:
                             body = data
                         Err(_):
                             body = ""
-                val response = self.route_request(method, raw_path, body, "")
+                val response = self.route_request(method, raw_path, body, headers_raw)
                 val _ = stream.write_text(response)
                 val _ = stream.close()
 

@@ -125,10 +125,18 @@ impl Firmware:
             if processed > 0:
                 me.fg_ticks = counter_next(me.fg_ticks)
             me.release_map_owner(MAP_OWNER_FG)
-        if me.hil.free_blocks() < GC_LOW_WATERMARK:
+        # L8 wiring: route the single background reclaim step through the FTL
+        # reliability tick (rel_tick) instead of a bare low-watermark GC. rel_tick
+        # keeps GC's low-watermark priority identical and, when free space is at/above
+        # the watermark, spends the one per-tick reclaim slot on a due refresh / scrub /
+        # wear-level step (design §7 budget invariant). The map-owner token is acquired
+        # ONLY when a step is actually due (rel_maintenance_due) so an idle device does
+        # not contend the token — preserving the owner-conflict accounting exactly.
+        if me.hil.ftl.rel_maintenance_due(GC_LOW_WATERMARK):
             if me.acquire_map_owner(MAP_OWNER_BG):
-                val v: i64 = me.hil.gc()
-                if v != UNMAP:
+                val before_rc: i64 = me.hil.ftl.rel_reclaims()
+                me.hil.ftl.rel_tick(GC_LOW_WATERMARK)
+                if me.hil.ftl.rel_reclaims() != before_rc:
                     me.bg_ticks = counter_next(me.bg_ticks)
                 me.release_map_owner(MAP_OWNER_BG)
         processed

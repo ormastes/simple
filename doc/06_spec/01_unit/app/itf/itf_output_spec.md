@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 13 | 13 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -152,6 +152,77 @@ expect(widths[0]).to_equal(19)
 
 </details>
 
+### _visible_len / _pad_visible (ANSI-aware table alignment)
+
+#### counts an ANSI-colored word by its visible characters, not its byte length
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val colored = "\u{001b}[32mOPEN\u{001b}[0m"
+expect(_visible_len(colored)).to_equal(4)
+```
+
+</details>
+
+#### matches plain-text length when there is no escape code
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_visible_len("CLOSED")).to_equal(6)
+```
+
+</details>
+
+#### _table_col_widths measures colored cells by visible width, not byte length
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val colored_open = "\u{001b}[32mOPEN\u{001b}[0m"
+val colored_closed = "\u{001b}[2mCLOSED\u{001b}[0m"
+val widths = _table_col_widths(["STATE"], [[colored_open], [colored_closed]])
+# Visible widths are 4 ("OPEN") and 6 ("CLOSED"); header "STATE" is 5.
+# Max visible width must be 6 — not the byte-inflated 13/14 that
+# `.len()` would have measured before this fix.
+expect(widths[0]).to_equal(6)
+```
+
+</details>
+
+#### _pad_visible pads a colored cell to the same visible width as a plain one
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val colored = "\u{001b}[32mOPEN\u{001b}[0m"
+val padded_colored = _pad_visible(colored, 6)
+val padded_plain = _pad_visible("AB", 6)
+# Both should have 4 trailing spaces after their visible content —
+# i.e. same total visible width once the escape codes are stripped.
+expect(_visible_len(padded_colored)).to_equal(6)
+expect(_visible_len(padded_plain)).to_equal(6)
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -167,13 +238,14 @@ expect(widths[0]).to_equal(19)
 Tests covering:
 - format_size
 - _table_col_widths (dynamic-width table sizing)
+- _visible_len / _pad_visible (ANSI-aware table alignment)
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 13 |
+| Active scenarios | 13 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
