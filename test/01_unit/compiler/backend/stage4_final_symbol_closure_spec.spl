@@ -734,6 +734,30 @@ not-an-address W rt_malformed
         expect(malformed.is_err()).to_be(true)
         expect(duplicate.is_err()).to_be(true)
 
+    it "binds production Stage4 linking to a separate exact profile receipt":
+        val linker = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
+        val owners = linker.find("stage4_resolve_requested_archive_owners(stage4_requested_symbols") ?? -1
+        val profile = linker.find("stage4_link_profile_fingerprint_input(stage4_target, stage4_backend") ?? -1
+        val projection = linker.find("val (projected_capsule, projected_dir) = match llvm_stage4_project_selected_archives(candidate_labels") ?? -1
+        val final_link = linker.find("link_to_native(all_objects, output, link_config)") ?? -1
+        val receipt_write = linker.find("stage4-link-profile-receipt-v1") ?? -1
+        expect(profile).to_be_greater_than(owners)
+        expect(projection).to_be_greater_than(profile)
+        expect(final_link).to_be_greater_than(projection)
+        expect(receipt_write).to_be_greater_than(final_link)
+        expect(linker.contains("Stage4 link-profile cache hit")).to_be(false)
+        expect(linker).to_contain("rows.push(\"source_")
+        expect(linker.contains("rows.push(path + \"=\" + digest)")).to_be(false)
+        expect(linker).to_contain("\"/stage4-link-profiles/\" + stage4_profile_hash")
+        expect(linker).to_contain("val stage4_target = if hosted_target == \"\"")
+
+        val driver = rt_file_read_text("src/compiler/80.driver/driver_aot_output.spl") ?? ""
+        val bootstrap = rt_file_read_text("src/compiler/80.driver/driver_bootstrap.spl") ?? ""
+        expect(driver).to_contain("stage4_backend: effective_backend")
+        expect(driver).to_contain("stage4_compiler_hash: native_build_compiler_identity()")
+        expect(bootstrap).to_contain("stage4_backend: \"llvm\"")
+        expect(bootstrap).to_contain("stage4_compiler_hash: native_build_compiler_identity()")
+
     it "accepts explicit Unix and Windows static archive inventories":
         val unix = stage4_validate_candidate_archive_inputs(
             ["compiler", "timestamp", "sqlite", "memtrack"],

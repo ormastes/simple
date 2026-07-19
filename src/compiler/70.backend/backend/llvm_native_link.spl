@@ -18,12 +18,13 @@ use compiler.backend.backend.llvm_capability.{find_archive_portable, find_nm_por
 use compiler.backend.backend.backend_types.{CodegenTarget, OptimizationLevel}
 use compiler.backend.backend.runtime_compiler.{compile_runtime_objects, cleanup_runtime_objects, find_c_compiler, hosted_c_compiler_plan, _get_temp_dir, _obj_ext, _is_windows, _is_mingw, _is_msvc_cc}
 use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig, hosted_native_link_arch_supported, hosted_native_link_unsupported_arch_error}
-use compiler.backend.backend.stage4_symbol_closure.{stage4_compiler_backfill_archive_file, stage4_compiler_backfill_object_format, stage4_derive_compiler_backfill_manifest, stage4_compiler_backfill_localization_symbols, stage4_validate_compiler_backfill_symbol_envelope, stage4_compiler_backfill_symbol_table_fingerprint, stage4_validate_compiler_backfill_provider_disjoint, stage4_projection_localization_symbols, stage4_validate_projection_symbol_contract, stage4_runtime_native_archive_file, stage4_runtime_native_object_format, stage4_runtime_native_localization_symbols, stage4_validate_runtime_native_core_symbol_contract, stage4_runtime_legacy_compat_archive_file, stage4_runtime_legacy_compat_object_format, stage4_runtime_legacy_compat_localization_symbols, stage4_validate_runtime_legacy_compat_symbol_contract, stage4_process_provider_archive_file, stage4_process_provider_object_format, stage4_validate_process_provider_symbol_contract, stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_time_provider_archive_file, stage4_time_provider_object_format, stage4_fork_provider_archive_file, stage4_fork_provider_object_format, stage4_windows_c_object_uses_msvc_abi, stage4_runtime_provider_object_matches, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_resolve_requested_archive_owners, stage4_validate_candidate_archive_inputs_for_platform, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_validate_time_provider_symbol_contract, stage4_validate_fork_provider_symbol_contract}
+use compiler.backend.backend.stage4_symbol_closure.{stage4_compiler_backfill_archive_file, stage4_compiler_backfill_object_format, stage4_derive_compiler_backfill_manifest, stage4_compiler_backfill_localization_symbols, stage4_validate_compiler_backfill_symbol_envelope, stage4_compiler_backfill_symbol_table_fingerprint, stage4_validate_compiler_backfill_provider_disjoint, stage4_projection_localization_symbols, stage4_validate_projection_symbol_contract, stage4_runtime_native_archive_file, stage4_runtime_native_object_format, stage4_runtime_native_localization_symbols, stage4_validate_runtime_native_core_symbol_contract, stage4_runtime_legacy_compat_archive_file, stage4_runtime_legacy_compat_object_format, stage4_runtime_legacy_compat_localization_symbols, stage4_validate_runtime_legacy_compat_symbol_contract, stage4_process_provider_archive_file, stage4_process_provider_object_format, stage4_validate_process_provider_symbol_contract, stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_time_provider_archive_file, stage4_time_provider_object_format, stage4_fork_provider_archive_file, stage4_fork_provider_object_format, stage4_windows_c_object_uses_msvc_abi, stage4_runtime_provider_object_matches, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs_for_platform, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_validate_time_provider_symbol_contract, stage4_validate_fork_provider_symbol_contract}
 use std.platform.{host_arch, host_os, is_macos}
+use std.common.crypto.sha256.{sha256_u8_hex}
 # Routed through the canonical std.nogc_sync_mut.io_runtime facade (same
 # facade already used by the sibling llvm_backend_tools.spl for process_run);
 # resolves doc/08_tracking/bug/compiler_native_link_direct_runtime_facade_2026-07-12.md.
-use std.nogc_sync_mut.io_runtime.{env_get, file_copy, file_delete, file_exists, file_write, remove_file_if_exists, process_run, dir_create_all, dir_exists, dir_remove_all}
+use std.nogc_sync_mut.io_runtime.{env_get, file_copy, file_delete, file_exists, file_read, file_write, file_hash_sha256, remove_file_if_exists, process_run, dir_create_all, dir_exists, dir_remove_all}
 
 fn llvm_link_trace_enabled() -> bool:
     (env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
@@ -44,6 +45,55 @@ fn llvm_stage4_final_requested_symbols(objects: [text]) -> Result<[text], text>:
     if requested.len() == 0:
         return Err("Stage4 final runtime symbol request closure is empty")
     Ok(requested)
+
+fn llvm_stage4_file_hash_rows(paths: [text]) -> Result<[text], text>:
+    var rows: [text] = []
+    var index = 0
+    for path in paths:
+        val digest = file_hash_sha256(path)
+        if digest.len() != 64:
+            return Err("Stage4 link profile could not hash input '" + path + "'")
+        rows = rows.push("source_{index}=" + digest)
+        index = index + 1
+    Ok(rows)
+
+fn llvm_stage4_selected_archive_hash_rows(labels: [text], paths: [text], selected: [i64]) -> Result<[text], text>:
+    var rows: [text] = []
+    for index in selected:
+        if index < 0 or index >= labels.len() or index >= paths.len():
+            return Err("Stage4 link profile selected archive index is out of bounds")
+        val digest = file_hash_sha256(paths[index])
+        if digest.len() != 64:
+            return Err("Stage4 link profile could not hash archive '" + paths[index] + "'")
+        rows = rows.push(labels[index] + "=" + digest)
+    Ok(rows)
+
+fn llvm_stage4_cleanup_candidate_inputs(paths: [text], compiler_stage_dir: text, bootstrap_support_obj: text) -> bool:
+    var clean = true
+    for path in paths:
+        if not remove_file_if_exists(path):
+            clean = false
+    if not dir_remove_all(compiler_stage_dir):
+        clean = false
+    if bootstrap_support_obj != "" and not remove_file_if_exists(bootstrap_support_obj):
+        clean = false
+    clean
+
+fn llvm_stage4_profile_failure(runtime_objects: [text], entry_obj_path: text, candidate_paths: [text], compiler_stage_dir: text, bootstrap_support_obj: text, message: text) -> Result<text, text>:
+    cleanup_runtime_objects(runtime_objects)
+    val clean_entry = remove_file_if_exists(entry_obj_path)
+    val clean_candidates = llvm_stage4_cleanup_candidate_inputs(candidate_paths, compiler_stage_dir, bootstrap_support_obj)
+    if not clean_entry or not clean_candidates:
+        return Err(message + "; Stage4 link-profile cleanup failed")
+    Err(message)
+
+fn llvm_stage4_receipt_failure(output: text, profile_dir: text, receipt_path: text, clean_profile: bool, clean_receipt: bool, message: text) -> Result<text, text>:
+    val output_ok = remove_file_if_exists(output)
+    val receipt_ok = if clean_receipt: remove_file_if_exists(receipt_path) else: true
+    val profile_ok = if clean_profile: dir_remove_all(profile_dir) else: true
+    if not output_ok or not receipt_ok or not profile_ok:
+        return Err(message + "; cleanup failed")
+    Err(message)
 
 pub fn llvm_stage4_candidate_archive_inventory(labels: [text], paths: [text]) -> Result<[text], text>:
     match stage4_validate_candidate_archive_inputs_for_platform(labels, paths, host_os() == "windows"):
@@ -761,6 +811,8 @@ struct NativeLinkOptions:
     pie: bool
     bare_metal: bool
     opt_level: i64
+    stage4_backend: text
+    stage4_compiler_hash: text
 
 impl NativeLinkOptions:
     static fn default() -> NativeLinkOptions:
@@ -769,7 +821,9 @@ impl NativeLinkOptions:
             verbose: false,
             pie: true,
             bare_metal: false,
-            opt_level: 3
+            opt_level: 3,
+            stage4_backend: "llvm",
+            stage4_compiler_hash: ""
         )
 
 fn hosted_c_target_matches_host(target: text, host_os_name: text, host_arch_name: text) -> bool:
@@ -1097,6 +1151,10 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
     var stage4_requested_symbols: [text] = []
     var stage4_projection_capsule = ""
     var stage4_projection_dir = ""
+    var stage4_profile_input = ""
+    var stage4_profile_hash = ""
+    var stage4_profile_dir = ""
+    var stage4_profile_receipt_path = ""
     if stage4_requested:
         if bootstrap_native_all != "":
             cleanup_runtime_objects(runtime_objects)
@@ -1298,6 +1356,23 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
                 return llvm_stage4_compiler_backfill_failure(compiler_backfill_stage_dir, compiler_backfill_capsule, "Stage4 requested-owner resolution failed: " + err)
         if trace:
             print "[LLVM-LINK] Stage4 selected archives: {selected_archive_indices.len()}, owners: {owner_rows.len()}"
+        val source_hash_rows = match llvm_stage4_file_hash_rows(final_simple_objects):
+            case Ok(rows): rows
+            case Err(err): return llvm_stage4_profile_failure(runtime_objects, entry_obj_path, candidate_paths, compiler_backfill_stage_dir, bootstrap_support_obj, err)
+        val archive_hash_rows = match llvm_stage4_selected_archive_hash_rows(candidate_labels, candidate_paths, selected_archive_indices):
+            case Ok(rows): rows
+            case Err(err): return llvm_stage4_profile_failure(runtime_objects, entry_obj_path, candidate_paths, compiler_backfill_stage_dir, bootstrap_support_obj, err)
+        val stage4_target = if hosted_target == "": "{hosted_arch}-{hosted_os}" else: hosted_target
+        val stage4_backend = if options.stage4_backend == "": "llvm" else: options.stage4_backend
+        val stage4_link_options = "debug={options.debug},pie={options.pie},bare_metal={options.bare_metal},opt_level={options.opt_level},duplicate_definitions=false,cc_fallback=false"
+        stage4_profile_input = match stage4_link_profile_fingerprint_input(stage4_target, stage4_backend, stage4_link_options, options.stage4_compiler_hash, source_hash_rows, archive_hash_rows, owner_rows):
+            case Ok(input): input
+            case Err(err): return llvm_stage4_profile_failure(runtime_objects, entry_obj_path, candidate_paths, compiler_backfill_stage_dir, bootstrap_support_obj, err)
+        stage4_profile_hash = sha256_u8_hex(stage4_profile_input.bytes())
+        val configured_cache_root = env_get("SIMPLE_NATIVE_BUILD_CACHE_DIR") ?? ""
+        val stage4_cache_root = if configured_cache_root == "": "build/native_cache" else: configured_cache_root
+        stage4_profile_dir = stage4_cache_root + "/stage4-link-profiles/" + stage4_profile_hash
+        stage4_profile_receipt_path = stage4_profile_dir + "/receipt"
         val (projected_capsule, projected_dir) = match llvm_stage4_project_selected_archives(candidate_labels, candidate_paths, selected_archive_indices, stage4_requested_symbols, hosted_os, hosted_cc, pid, output):
             case Ok(value): value
             case Err(err):
@@ -1318,15 +1393,7 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
         stage4_projection_capsule = projected_capsule
         stage4_projection_dir = projected_dir
         cleanup_runtime_objects(runtime_objects)
-        var candidate_cleanup_ok = true
-        for path in candidate_paths:
-            if not remove_file_if_exists(path):
-                candidate_cleanup_ok = false
-        if not dir_remove_all(compiler_backfill_stage_dir):
-            candidate_cleanup_ok = false
-        if bootstrap_support_obj != "":
-            if not remove_file_if_exists(bootstrap_support_obj):
-                candidate_cleanup_ok = false
+        val candidate_cleanup_ok = llvm_stage4_cleanup_candidate_inputs(candidate_paths, compiler_backfill_stage_dir, bootstrap_support_obj)
         if not candidate_cleanup_ok:
             dir_remove_all(stage4_projection_dir)
             file_delete(entry_obj_path)
@@ -1398,6 +1465,23 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
                 if not remove_file_if_exists(path):
                     return Err("Stage4 selected-archive projection cleanup failed after linking; output cleanup also failed")
                 return Err("Stage4 selected-archive projection cleanup failed after linking")
+            if stage4_requested:
+                val output_hash = file_hash_sha256(path)
+                if output_hash.len() != 64:
+                    return llvm_stage4_receipt_failure(path, "", "", false, false, "Stage4 link-profile output hash failed")
+                val receipt = "stage4-link-profile-receipt-v1\nprofile=" + stage4_profile_hash + "\noutput=" + output_hash + "\n"
+                val profile_input_path = stage4_profile_dir + "/profile.input"
+                val profile_dir_existed = dir_exists(stage4_profile_dir)
+                if stage4_profile_dir == "" or stage4_profile_receipt_path == "" or not dir_create_all(stage4_profile_dir):
+                    return llvm_stage4_receipt_failure(path, stage4_profile_dir, stage4_profile_receipt_path, not profile_dir_existed, false, "Stage4 link-profile receipt directory creation failed")
+                if profile_dir_existed and not file_exists(profile_input_path):
+                    return llvm_stage4_receipt_failure(path, stage4_profile_dir, stage4_profile_receipt_path, true, true, "Stage4 link-profile namespace is incomplete")
+                if file_exists(profile_input_path) and file_read(profile_input_path) != stage4_profile_input:
+                    return llvm_stage4_receipt_failure(path, stage4_profile_dir, stage4_profile_receipt_path, false, false, "Stage4 link-profile hash collision")
+                if not file_exists(profile_input_path) and not file_write(profile_input_path, stage4_profile_input):
+                    return llvm_stage4_receipt_failure(path, stage4_profile_dir, stage4_profile_receipt_path, not profile_dir_existed, false, "Stage4 link-profile input write failed")
+                if not file_write(stage4_profile_receipt_path, receipt):
+                    return llvm_stage4_receipt_failure(path, stage4_profile_dir, stage4_profile_receipt_path, not profile_dir_existed, true, "Stage4 link-profile receipt write failed")
             if verbose:
                 print "[llvm-link] Native executable: {path}"
             Ok(path)

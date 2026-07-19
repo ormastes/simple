@@ -239,6 +239,17 @@ invalid for the strict profile, and provider ownership needs a separate link
 profile digest/cache namespace from the canonical input rather than changing
 per-module object keys.
 
+As of 2026-07-19, the production strict path hashes ordered Simple-object
+content, selected archive content, target, effective backend (default LLVM or
+explicit Cranelift), link options, compiler identity, and resolved owner rows.
+After a successful strict link it writes the canonical input and output-hash
+receipt under a separate `stage4-link-profiles/<digest>` namespace. These
+receipts are evidence only: cache-hit reuse is deliberately disabled until the
+resolved linker executable, CRT, dynamic linker, SDK/system libraries, and
+executable mode are also part of an atomic cache identity. Thus the remaining
+"production hash/cache wiring" work is cache reuse and invalidation proof, not
+the canonical profile or receipt production path.
+
 Raw `runtime_legacy_core.o` is also rejected even though it names current
 missing symbols: its legacy array/split ABI and no-op dictionary exports are
 not valid canonical owners. The reachable `rt_bytes_from_raw` and `rt_strsplit`
