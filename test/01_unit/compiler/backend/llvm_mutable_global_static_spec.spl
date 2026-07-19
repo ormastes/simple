@@ -107,7 +107,7 @@ fn translate_literal_globals() -> text:
     MirToLlvm.create("test.llvm.literal_globals", CodegenTarget.X86_64, nil).translate_module(mir)
 
 fn runtime_initializer_store_names() -> [text]:
-    val source = "fn init_value() -> i64: 4\nfn init_next(value: i64) -> i64: value + 1\nval first = init_value()\nval second = init_next(first)\n"
+    val source = "struct InitContract:\n    pointer_bits: i64\n\nfn init_value() -> i64: 4\nfn init_contract() -> InitContract: InitContract(pointer_bits: 64)\nval first = init_value()\nval second: i64 = first + 1\nval word_bytes: i64 = init_contract().pointer_bits / 8\nval call_plt: i64 = init_contract().pointer_bits\nval absent: i64? = nil\nfn read_word_bytes() -> i64: word_bytes + call_plt\n"
     val ast = parse_full_frontend(source, "runtime_globals.spl", "runtime_globals.spl", Logger(level: 0))
     var hir_lowering = HirLowering.with_filename("runtime_globals.spl")
     val hir = hir_lowering.lower_module(ast)
@@ -137,6 +137,7 @@ fn runtime_initializer_store_names() -> [text]:
     var mir_lowering = MirLowering.new(hir.symbols)
     val mir = mir_lowering.lower_module(hir)
     var names: [text] = []
+    var saw_word_load = false
     for function in mir.functions.values():
         if function.name.starts_with("__module_init_"):
             for block in function.blocks:
@@ -144,6 +145,22 @@ fn runtime_initializer_store_names() -> [text]:
                     match inst.kind:
                         case MirInstKind.StoreGlobal(symbol, _): names.push(mir.statics[symbol].name)
                         case _: ()
+        if function.name == "read_word_bytes" or function.name.ends_with(".read_word_bytes"):
+            for block in function.blocks:
+                for inst in block.instructions:
+                    match inst.kind:
+                        case MirInstKind.LoadGlobal(_, symbol):
+                            if mir.statics[symbol].name == "word_bytes": saw_word_load = true
+                        case _: ()
+    var errors = ""
+    for err in mir_lowering.errors:
+        errors = errors + err.message + "\n"
+    var saw_unsupported_static = false
+    for static_ in mir.statics.values():
+        if static_.name == "absent": saw_unsupported_static = true
+    expect(errors).to_equal("")
+    expect(saw_word_load).to_equal(true)
+    expect(saw_unsupported_static).to_equal(false)
     names
 
 describe "LLVM mutable global static (mutglobal lane)":
@@ -175,4 +192,4 @@ describe "LLVM mutable global static (mutglobal lane)":
         expect(output.contains("global i64 getelementptr")).to_equal(false)
 
     it "stores dependent runtime globals in declaration order", tag: ["only-compiled"]:
-        expect(runtime_initializer_store_names()).to_equal(["first", "second"])
+        expect(runtime_initializer_store_names()).to_equal(["first", "second", "word_bytes", "call_plt"])

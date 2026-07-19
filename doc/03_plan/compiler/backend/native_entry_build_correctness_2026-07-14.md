@@ -503,7 +503,9 @@ the shared binary — deploys require explicit user go-ahead).
   `cranelift_runtime_initialized_float_global_2026-07-19.md`.
 - Multiple call-initialized module globals now reuse their preserved HIR source
   spans to order the existing sequential runtime stores. The shared fixture
-  makes its second initializer depend on the first and expects `45`; hosted and
+  makes its second initializer depend on the first and expects `45`; it also
+  checks that a call wrapped in arithmetic is runtime-initialized instead of
+  being dropped by the former root-`Call` whitelist. Hosted and
   FreeBSD gates already own that fixture. The cross-target fixture repeats the
   dependent `4 -> 5 -> 45` oracle for AArch64/RV64 LLVM+Cranelift execution and
   ARM32/RV32/Windows-ARM64 object gates. Rebuilt execution remains pending.

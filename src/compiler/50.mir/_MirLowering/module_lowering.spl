@@ -54,12 +54,22 @@ use compiler.mir.mir_lowering_expr.*
 use compiler.mir.mir_lowering_stmts.*
 use compiler.mir.mir_lowering_ml.*
 
+fn runtime_module_initializer_supported(const_: HirConst) -> bool:
+    match const_.value.kind:
+        case IntLit(_, _) | FloatLit(_, _) | BoolLit(_) | StringLit(_, _): false
+        # Preserve the pre-existing call path; additionally admit wrapped
+        # expressions only when every native backend can declare the scalar.
+        case Call(_, _, _): true
+        case _:
+            match const_.type_.kind:
+                case Int(_, _) | Float(_) | Bool: true
+                case _: false
+
 fn runtime_module_initializers_in_declaration_order(consts: [HirConst]) -> [HirConst]:
     var dynamic: [HirConst] = []
     for const_ in consts:
-        match const_.value.kind:
-            case Call(_, _, _): dynamic.push(const_)
-            case _: ()
+        if runtime_module_initializer_supported(const_):
+            dynamic.push(const_)
     array_sort_by(dynamic, \a, b:
         if a.span.start < b.span.start: -1
         elif a.span.start > b.span.start: 1
@@ -827,18 +837,15 @@ impl MirLowering:
     # `MirModule.statics` real and populated; wiring an actual read/write
     # through it is the documented follow-up.
     me lower_static(const_: HirConst):
-        """Lower a mutable (`var`) module-level HIR binding into a MIR
-        static-storage slot (MirModule.statics), independent of the
-        always-populated `MirModule.constants` entry `lower_const` already
-        produces for the same binding."""
+        """Lower a module-level HIR binding that needs storage into a MIR
+        static. Literal immutable bindings remain compile-time constants;
+        non-folded bindings receive runtime initialization."""
         val folded = self.lower_const_expr(const_.value)
         if folded.?:
             if not const_.is_mutable:
                 return
-        else:
-            match const_.value.kind:
-                case Call(_, _, _): ()
-                case _: return
+        elif not runtime_module_initializer_supported(const_):
+            return
         val static_type = match const_.type_.kind:
             case Infer(_, _): MirType.i64()
             case _: self.lower_type(const_.type_)
