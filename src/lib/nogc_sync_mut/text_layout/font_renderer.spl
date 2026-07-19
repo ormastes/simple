@@ -245,6 +245,16 @@ fn _browser_default_for_family_cached(family: text) -> (FontRenderer, bool):
         _browser_default_font_lock_release()
     (loaded, false)
 
+# GLYPH-FIX-3 (2026-07-19): gated producer-side atlas probe. Prints the
+# nonzero-coverage-byte count for the first quad's atlas region right before
+# the batch (containing atlas_pixels: [u32]) crosses the nogc_sync_mut ->
+# gc_async_mut module/layer boundary into Engine2D. Compared against the
+# mirrored consumer-side probe in engine.spl to localize whether atlas
+# coverage is lost before or during that cross-layer struct transfer.
+val _VEC_ATLAS_PROBE: bool = false
+var _vec_atlas_probe_count: i32 = 0
+var _vec_glyph_probe_count: i32 = 0
+
 val FONT_ATLAS_WIDTH: i32 = 1024
 val FONT_ATLAS_HEIGHT: i32 = 1024
 # The scalar stays literal-initialized for freestanding startup. Its dedicated
@@ -653,6 +663,17 @@ class FontRenderer:
     # Get glyph (cached) — returns rasterized alpha bitmap
     # -----------------------------------------------------------------------
     fn glyph_with_cache(codepoint: i32, font_size: i32, initial_cache: GlyphCache) -> (CachedGlyph, GlyphCache):
+        # GLYPH-FIX-4 diagnostic: cache state on entry, printed before any
+        # other call in this function (the safest possible read -- a first
+        # touch of the `initial_cache` parameter, not a re-read after an
+        # intervening call). Discriminates whether a same-codepoint second
+        # call re-rasterizes because the cache is genuinely empty (miss is
+        # legitimate/expected) or because it holds a stale entry that
+        # lookup() rejects (a cache-key bug, fixable without touching the
+        # rasterize path at all).
+        if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
+            _vec_glyph_probe_count = _vec_glyph_probe_count + 1
+            print("[vec-glyph-probe] gwc-entry cp={codepoint} font_size={font_size} cache_entries={initial_cache.entries.len()} cache_rcfg_id_len={initial_cache.observed_render_config_identity.len()}")
         if codepoint < 0 or codepoint > 1114111 or font_size <= 0 or font_size > 512:
             return (CachedGlyph.empty(codepoint, font_size), initial_cache)
         val active_rasterizer = self.ttf_rasterizer
@@ -676,10 +697,57 @@ class FontRenderer:
         # `!= nil` rather than `if val Some(x) =` destructuring.
         var handled = false
         val rast = active_rasterizer
-        if rast != nil and rast.has_glyph(codepoint.to_i64()):
+        val rast_has_glyph = rast != nil and rast.has_glyph(codepoint.to_i64())
+        if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
+            _vec_glyph_probe_count = _vec_glyph_probe_count + 1
+            print("[vec-glyph-probe] gwc-pre-rasterize cp={codepoint} rast_nil={rast == nil} has_glyph={rast_has_glyph}")
+        if rast_has_glyph:
             val gb = rast.rasterize(codepoint.to_i64(), font_size.to_i64())
-            if gb != nil:
-                glyph = _sffi_glyph_to_cached(gb, codepoint, font_size)
+            val gb_is_nil = gb == nil
+            if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
+                _vec_glyph_probe_count = _vec_glyph_probe_count + 1
+                print("[vec-glyph-probe] gwc-post-rasterize cp={codepoint} gb_nil={gb_is_nil}")
+            if not gb_is_nil:
+                val raw_glyph = _sffi_glyph_to_cached(gb, codepoint, font_size)
+                # ROOT CAUSE (GLYPH-FIX-4, 2026-07-19): raw_glyph was built in
+                # font_rasterizer.spl (a different module) and crosses back
+                # into this module on return. Boot serial (build/os/_wkheap/
+                # serial-ovmf.log, cr2=0 null deref) shows the fault lands
+                # AFTER this call's own first-read probe below succeeds but
+                # BEFORE the next get_glyph probe -- i.e. inside the OLD tail
+                # of this function, which re-read glyph.width/glyph.height/
+                # glyph.pixels.len() a SECOND time (once here for the probe,
+                # again down in the expected_pixels/cache.insert block) after
+                # the print() call had already run in between. That is the
+                # exact "field read after an intervening call resolves to
+                # unrelated heap memory" landmine already fixed once in
+                # spl_fonts.spl's _rasterize_selected_outline (see the
+                # `val gadv = metrics[2]`-style snapshot-to-locals comment
+                # there, 2026-07-19). Fix: read every field exactly ONCE,
+                # immediately, before any further call, into locals -- then
+                # rebuild `glyph` as a fresh same-module struct literal and
+                # never touch raw_glyph again.
+                val gw = raw_glyph.width
+                val gh = raw_glyph.height
+                val gadv_raw = raw_glyph.advance
+                val gbx = raw_glyph.bearing_x
+                val gby = raw_glyph.bearing_y
+                val gpixels = raw_glyph.pixels
+                val gplen = gpixels.len()
+                val gadv = if gadv_raw > 0: gadv_raw else: gw + 1
+                if gw <= 0 or gh <= 0:
+                    # Degenerate (0x0) glyph: cache an advance-only entry.
+                    # Use a fresh empty literal (not gpixels) so no
+                    # pixel-buffer deref or atlas insert is even reachable
+                    # for this entry downstream.
+                    glyph = CachedGlyph(codepoint: codepoint, face_id: 0, face_generation: 0, glyph_index: -1, font_size: font_size, width: 0, height: 0, advance: gadv, bearing_x: gbx, bearing_y: gby, pixels: [])
+                else if gplen == gw.to_i64() * gh.to_i64():
+                    glyph = CachedGlyph(codepoint: codepoint, face_id: 0, face_generation: 0, glyph_index: -1, font_size: font_size, width: gw, height: gh, advance: gadv, bearing_x: gbx, bearing_y: gby, pixels: gpixels)
+                else:
+                    glyph = CachedGlyph.empty(codepoint, font_size)
+                if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
+                    _vec_glyph_probe_count = _vec_glyph_probe_count + 1
+                    print("[vec-glyph-probe] gwc-post-to_cached cp={codepoint} w={gw} h={gh} pixels_len={gplen}")
                 handled = true
 
         if not handled:
@@ -694,6 +762,17 @@ class FontRenderer:
             else if self.use_bitmap:
                 glyph = rasterize_bitmap(codepoint, font_size)
 
+        # GLYPH-FIX-4 checkpoint probe: last print before cache.insert(glyph)
+        # / the (glyph, cache) tuple return / get_glyph's unpack. `glyph`
+        # here is a same-module local (freshly reconstructed above for the
+        # SFFI path, or freshly returned by rasterize_ttf/vector/bitmap for
+        # the fallback path) so this read is not expected to hit the
+        # cross-module landmine above -- if the fault still reproduces AFTER
+        # this probe prints, it names cache.insert/the tuple return/
+        # get_glyph's unpack as the real site instead.
+        if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
+            _vec_glyph_probe_count = _vec_glyph_probe_count + 1
+            print("[vec-glyph-probe] gwc-pre-insert cp={codepoint} w={glyph.width} h={glyph.height} adv={glyph.advance} plen={glyph.pixels.len()}")
         val expected_pixels = glyph.width.to_i64() * glyph.height.to_i64()
         if glyph.advance > 0 and expected_pixels == glyph.pixels.len().to_i64():
             cache.insert(glyph)
@@ -932,13 +1011,19 @@ class FontRenderer:
         if y + padded_height > FONT_ATLAS_HEIGHT:
             return -1
         var row = 0
+        var _probe_glyph_nz = 0
         while row < glyph.height:
             var col = 0
             while col < glyph.width:
                 val alpha = glyph.pixels[row * glyph.width + col].to_u32()
+                if alpha > 0u32:
+                    _probe_glyph_nz = _probe_glyph_nz + 1
                 self.atlas_pixels[(y + row) * FONT_ATLAS_WIDTH + x + col] = (alpha << 24) | 0x00FFFFFFu32
                 col = col + 1
             row = row + 1
+        if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
+            _vec_glyph_probe_count = _vec_glyph_probe_count + 1
+            print("[vec-glyph-probe] insert cp={glyph.codepoint} w={glyph.width} h={glyph.height} src_pixels_len={glyph.pixels.len()} src_nz={_probe_glyph_nz} ax={x} ay={y}")
         self.atlas_codepoints.push(glyph.codepoint)
         self.atlas_face_ids.push(glyph.face_id)
         self.atlas_face_generations.push(glyph.face_generation)
@@ -978,12 +1063,38 @@ class FontRenderer:
         if self.atlas_face_generation != face_generation or self.atlas_font_identity != font_identity:
             self._reset_font_atlas(face_generation, font_identity)
         var layout = self.layout_text(content, font_size, 0)
+        if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
+            _vec_glyph_probe_count = _vec_glyph_probe_count + 1
+            print("[vec-glyph-probe] active-after-layout_text layout_len={layout.len()} use_vector={self.use_vector} use_bitmap={self.use_bitmap} content_len={content.len()}")
         if layout.len() == 0 and (self.use_vector or self.use_bitmap):
             var fallback_x: i64 = 0
             var fallback_byte_offset: i64 = 0
+            # GLYPH-FIX-3 (2026-07-19): NOT a fix -- diagnostic only. An
+            # earlier attempt here read `content.bytes()[offset]` in place of
+            # `ch.char_code_at(0)`, hoping to route around a suspected
+            # char_code_at bug (cp printed as 0 for a command that can't
+            # legitimately be U+0000). That "fix" is retracted: the raw byte
+            # read back 11 while `glyph_with_cache` further downstream showed
+            # the SAME logical value as 88 (11 << 3) -- i.e. char_code_at's 0
+            # (88 & 7), bytes()'s 11 (88 >> 3), and 88 itself are three
+            # tag-shifted views of one pervasive integer-boxing codegen
+            # defect (matches the campaign's documented "BoxInt <<3 mangles
+            # values through ANY/boxed channels" landmine), not independently
+            # correct/incorrect reads. Patching this call site further would
+            # only be choosing which shifted view happens to cancel out
+            # downstream -- not a real fix. See doc/08_tracking/bug/ for the
+            # writeup; the crash proven live in this function is unrelated to
+            # this codepoint value (get_glyph returns a valid glyph either
+            # way) and is timeboxed via the probes immediately below instead.
             for ch in content:
                 val codepoint = ch.char_code_at(0)
+                if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
+                    _vec_glyph_probe_count = _vec_glyph_probe_count + 1
+                    print("[vec-glyph-probe] active-before-get_glyph cp={codepoint} font_size={font_size}")
                 val glyph = self.get_glyph(codepoint, font_size)
+                if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
+                    _vec_glyph_probe_count = _vec_glyph_probe_count + 1
+                    print("[vec-glyph-probe] active-after-get_glyph cp={codepoint} w={glyph.width} h={glyph.height} adv={glyph.advance} pixels_len={glyph.pixels.len()}")
                 layout.push(LayoutGlyph(
                     codepoint: codepoint.to_i64(), x: fallback_x, y: 0,
                     width: glyph.width.to_i64(), height: glyph.height.to_i64(),
@@ -1002,11 +1113,20 @@ class FontRenderer:
             while i < layout.len():
                 val positioned = layout[i]
                 val glyph = self.get_glyph(positioned.codepoint.to_i32(), font_size)
+                if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
+                    _vec_glyph_probe_count = _vec_glyph_probe_count + 1
+                    print("[vec-glyph-probe] quadloop-after-reget i={i} cp={positioned.codepoint} w={glyph.width} h={glyph.height} face_id={glyph.face_id} face_gen={glyph.face_generation} glyph_index={glyph.glyph_index}")
                 if glyph.width > 0 and glyph.height > 0:
                     var atlas_index = self._font_atlas_entry_index(glyph.face_id, glyph.face_generation, glyph.glyph_index, glyph.codepoint, font_size)
+                    if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
+                        _vec_glyph_probe_count = _vec_glyph_probe_count + 1
+                        print("[vec-glyph-probe] quadloop-after-entry_index i={i} atlas_index={atlas_index}")
                     var inserted = false
                     if atlas_index < 0:
                         atlas_index = self._insert_font_atlas_glyph(glyph)
+                        if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
+                            _vec_glyph_probe_count = _vec_glyph_probe_count + 1
+                            print("[vec-glyph-probe] quadloop-after-insert i={i} atlas_index={atlas_index}")
                         inserted = atlas_index >= 0
                     if atlas_index < 0:
                         overflow = true
@@ -1039,8 +1159,44 @@ class FontRenderer:
                         end_generation = end_snapshot.0
                         end_identity = end_snapshot.1
                     if end_generation != face_generation or end_identity != font_identity:
+                        if _VEC_ATLAS_PROBE and _vec_atlas_probe_count < 8:
+                            _vec_atlas_probe_count = _vec_atlas_probe_count + 1
+                            print("[vec-atlas-probe] producer identity-mismatch-reset end_gen={end_generation} face_gen={face_generation} end_id_len={end_identity.len()} font_id_len={font_identity.len()}")
                         self._reset_font_atlas(end_generation, end_identity)
                         return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, font_identity: end_identity, face_generation: end_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: [], quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
+                if _VEC_ATLAS_PROBE and _vec_atlas_probe_count < 8:
+                    _vec_atlas_probe_count = _vec_atlas_probe_count + 1
+                    # GLYPH-FIX-5 (2026-07-19): ROOT CAUSE of the residual
+                    # boot-time "field access on nil receiver" fault. This
+                    # probe block is a SIBLING of `if quads.len() > 0:`
+                    # above (same indent), not nested inside it, so `quads[0]`
+                    # ran unconditionally whenever the probe budget allowed --
+                    # including when `quads` is empty (every glyph in this
+                    # run was degenerate/advance-only, e.g. no rasterized
+                    # face). Empty-array index returns the nil sentinel;
+                    # the very next field read (`fq.height`) is exactly the
+                    # native "field access on nil receiver" panic seen at
+                    # `_prepare_text_active`+0x360e. Guard on `quads.len()`
+                    # so the probe never dereferences past an empty array,
+                    # and log the empty case too so the len/overflow signal
+                    # isn't lost (log retention: convert, don't delete).
+                    if quads.len() > 0:
+                        val fq = quads[0]
+                        var nz = 0
+                        var row = 0
+                        while row < fq.height:
+                            var col = 0
+                            while col < fq.width:
+                                val idx = (fq.atlas_y + row) * FONT_ATLAS_WIDTH + fq.atlas_x + col
+                                if idx.to_i64() >= 0 and idx.to_i64() < self.atlas_pixels.len():
+                                    val px = self.atlas_pixels[idx]
+                                    if ((px >> 24) & 0xFFu32) > 0u32:
+                                        nz = nz + 1
+                                col = col + 1
+                            row = row + 1
+                        print("[vec-atlas-probe] producer n_quads={quads.len()} atlas_len={self.atlas_pixels.len()} first_w={fq.width} first_h={fq.height} first_ax={fq.atlas_x} first_ay={fq.atlas_y} first_cov_nz={nz} color_a={(fq.color >> 24) & 0xFFu32}")
+                    else:
+                        print("[vec-atlas-probe] producer-empty n_quads=0 overflow={overflow} content_len={content.len()}")
                 return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, font_identity: font_identity, face_generation: face_generation, valid: true, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: quads, atlas_generation: self.atlas_generation, dirty_rects: dirty)
             self._reset_font_atlas(face_generation, font_identity)
             attempt = attempt + 1

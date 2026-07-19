@@ -22,6 +22,13 @@ use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.backend.{Engine2DReadback, engine2d_readback}
 use std.common.gpu.font_atlas_composite.{font_atlas_subrect_pixels, font_destination_origin}
 
+# Level-gated serial probe for TEXT command dispatch (shaped/resolved/plain
+# branch selection) — doc/08_tracking/bug/native_char_code_at_tag_shift_2026-07-19.md
+# investigation. Flip to false to silence at land time. Capped to the first 8
+# TEXT commands so a busy desktop frame can't flood serial.
+val _E2D_TEXT_PROBE: bool = false
+var _e2d_text_probe_count: i32 = 0
+
 struct Engine2dDrawIrAdvResult:
     schema: text
     unit_id: text
@@ -536,6 +543,7 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
             var font_ready = true
             val shaped = _engine2d_draw_ir_shaping_requested(command)
             var font_failure_kind = if shaped: "text-font-shaping" else: "text-font-identity"
+            val probe_this = _E2D_TEXT_PROBE and _e2d_text_probe_count < 8
             if font_identity != "":
                 font_ready = eng.select_font_identity(font_identity)
             else if shaped:
@@ -552,6 +560,11 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
                         eng.draw_text_with_advances(x, y, command.text_value, advances, command.color, _engine2d_draw_ir_text_font_size(command.computed_style))
                     else:
                         false
+                    if probe_this:
+                        _e2d_text_probe_count = _e2d_text_probe_count + 1
+                        val branch_kind = if shaped and payload_valid: "shaped" else if not shaped: "resolved" else: "shaped-invalid"
+                        val glyph_count = command.glyph_run.glyph_ids.len()
+                        print("[e2d-text-probe] ir kind={branch_kind} shaped={shaped} payload_valid={payload_valid} glyphs={glyph_count} advances={advances.len()} drawn={drawn}")
                     if drawn:
                         rendered = rendered + 1
                     else:
@@ -560,6 +573,9 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
                     font_ready = false
                     font_failure_kind = if shaped: "text-font-shaping" else: "text-font-advances"
                 else:
+                    if probe_this:
+                        _e2d_text_probe_count = _e2d_text_probe_count + 1
+                        print("[e2d-text-probe] ir kind=plain len={command.text_value.len()}")
                     eng.draw_text(x, y, command.text_value, command.color, _engine2d_draw_ir_text_font_size(command.computed_style))
                     rendered = rendered + 1
             if not font_ready:

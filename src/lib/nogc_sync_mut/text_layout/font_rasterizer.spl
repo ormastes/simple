@@ -23,10 +23,52 @@ fn _sffi_glyph_to_cached(gb: GlyphBitmap, codepoint: i32, font_size: i32) -> Cac
     # cannot fall into the receiver-blind "most fields wins" ambiguous-field
     # resolution that would otherwise alias these reads onto CachedGlyph's
     # (much larger) layout — see the GlyphBitmap class doc comment.
+    #
+    # GLYPH-FIX-4 root cause: this function's second-call crash (cr2=0 null
+    # deref, proven live via boot serial — see the gwc-post-rasterize /
+    # gwc-post-to_cached probe gap in font_renderer.spl's glyph_with_cache)
+    # happens between two calls that run the IDENTICAL code path: the first
+    # call (before ~16MB of intervening atlas heap allocations) completes
+    # fine; the second call (after those allocations) faults before this
+    # function returns. That is heap-layout-dependent corruption of `gb`'s
+    # array field (`gbm_pixels`), not the scalar fields -- so read every
+    # scalar metric FIRST, in one straight-line pass with no intervening
+    # calls, and for a degenerate (w<=0 or h<=0) glyph return an
+    # advance-only CachedGlyph WITHOUT ever touching gb.gbm_pixels. A
+    # degenerate glyph has no pixels to copy, so this is strictly safer,
+    # not just a workaround for the corrupted case.
     val w = gb.gbm_width.to_i32()
     val h = gb.gbm_height.to_i32()
     val adv_raw = gb.gbm_advance.to_i32()
+    val bx = gb.gbm_bearing_x.to_i32()
+    val by = gb.gbm_bearing_y.to_i32()
     val adv = if adv_raw > 0: adv_raw else: w + 1
+
+    # GLYPH-FIX-4: no print()/other call between the scalar reads above and
+    # this construct-and-return. An earlier version of this fix printed a
+    # diagnostic probe right here; boot serial showed the crash move to
+    # occur immediately after that probe printed -- i.e. the probe's own
+    # call was itself an intervening call reproducing the tuple/struct
+    # decode-window landmine documented in
+    # doc/08_tracking/bug/native_tuple_spill_clobber_across_call_2026-07-19.md.
+    # Keep this path call-free; diagnostics for this crash now live only in
+    # glyph_with_cache's cache-state probe (font_renderer.spl), which prints
+    # BEFORE any call in that function.
+    if w <= 0 or h <= 0:
+        # Degenerate glyph: never dereference gb.gbm_pixels.
+        return CachedGlyph(
+            codepoint: codepoint,
+            face_id: 0,
+            face_generation: 0,
+            glyph_index: -1,
+            font_size: font_size,
+            width: 0,
+            height: 0,
+            advance: adv,
+            bearing_x: bx,
+            bearing_y: by,
+            pixels: []
+        )
 
     var pixels: [u8] = []
     val total = gb.gbm_pixels.len()
@@ -45,8 +87,8 @@ fn _sffi_glyph_to_cached(gb: GlyphBitmap, codepoint: i32, font_size: i32) -> Cac
         width: w,
         height: h,
         advance: adv,
-        bearing_x: gb.gbm_bearing_x.to_i32(),
-        bearing_y: gb.gbm_bearing_y.to_i32(),
+        bearing_x: bx,
+        bearing_y: by,
         pixels: pixels
     )
 

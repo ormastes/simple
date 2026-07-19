@@ -41,6 +41,13 @@ use std.gpu.engine2d.backend_emu.{
 # walk into a runaway loop.
 val BM_MAX_DRAW_DIM: i32 = 20000
 
+# Level-gated serial probe for the bitmap glyph blit path (doc/08_tracking/bug/
+# native_char_code_at_tag_shift_2026-07-19.md investigation). Flip to false to
+# silence at land time. Capped to the first 8 draw_text calls so a busy
+# desktop frame can't flood serial.
+val _E2D_TEXT_PROBE: bool = false
+var _e2d_text_probe_count: i32 = 0
+
 class BaremetalBackend:
     """RenderBackend implementation that delegates to FramebufferDriver.
 
@@ -324,6 +331,15 @@ impl RenderBackend for BaremetalBackend:
         val buf_size = text_w * text_h
         var buf: [u32] = [0u32; buf_size]
         buf = render_text_to_buffer(buf, text_w, text_h, 0, 0, text_val, color, font_size)
+        if _E2D_TEXT_PROBE and _e2d_text_probe_count < 8:
+            _e2d_text_probe_count = _e2d_text_probe_count + 1
+            var nz = 0
+            var pi = 0
+            while pi < buf.len():
+                if buf[pi] != 0u32:
+                    nz = nz + 1
+                pi = pi + 1
+            print("[e2d-text-probe] bm len={buf.len()} tw={text_w} th={text_h} nz={nz}")
         self.draw_image(x, y, text_w, text_h, buf)
 
     me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):

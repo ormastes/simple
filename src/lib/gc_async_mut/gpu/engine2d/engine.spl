@@ -60,6 +60,7 @@ use std.gpu.engine2d.backend_capability.{BackendCapability, backend_capability_d
 use std.gc_async_mut.io.mod_stub.{env_get}
 use std.gc_async_mut.text_layout.font_renderer.{
     FontCacheStats, FontGlyphRun, FontRenderBatch, FontRenderConfig, FontRenderer,
+    FontExecutionPolicy,
     font_execution_plan, font_render_config_selection_supported,
     font_renderer_registered_selected_bytes_only
 }
@@ -103,6 +104,55 @@ fn engine2d_font_atlas_subrect_pixels(atlas_pixels: [u32], atlas_width: i32, atl
                                       color: u32) -> [u32]:
     font_atlas_subrect_pixels(atlas_pixels, atlas_width, atlas_height,
         atlas_x, atlas_y, width, height, color)
+
+# GLYPH-FIX-3 (2026-07-19) ROOT CAUSE WORKAROUND: `FontRenderConfig.default_for_size()`
+# builds `execution_target: "auto"`. `font_render_config_valid()` (font_types.spl)
+# short-circuits its execution-policy check only when `execution_target != "auto"`;
+# with "auto" it falls through to `config.execution_policy ==
+# FontExecutionPolicy.Suggested`. On this freestanding native-build path that
+# enum equality reads back false for EVERY FontExecutionPolicy variant
+# (Suggested/Preferred/Required all compare false against a freshly
+# constructed `FontExecutionPolicy.Suggested` value -- proven via
+# `[vec-text-probe] draw_text_configured-entry ... policy_suggested=0
+# policy_preferred=0 policy_required=0`), so `font_render_config_valid()`
+# returns false, `font_execution_plan()` returns [], and every `draw_text()`
+# call on the SimpleOS desktop silently drew zero glyphs with no exception.
+# font_types.spl is shared, hosted-proven-correct infrastructure outside this
+# investigation's edit surface, so work around it here: when running on the
+# baremetal backend (the only place this was reproduced -- hosted/GPU builds
+# are unproven and left on their normal "auto" plan to avoid forcing every
+# desktop/game caller onto the CPU font path without evidence), pin
+# `execution_target` to the concrete "cpu" target (the only backend a
+# baremetal/no-GPU boot path ever runs anyway) instead of "auto". That takes
+# the `target != "auto"` branch of the disjunction and never evaluates the
+# broken enum comparison. `_font_render_config_default_selection()`
+# (font_renderer.spl) only inspects family/category/language/script, so this
+# does not change font selection, only which (otherwise-unreachable) code
+# path validates it. See doc/08_tracking/bug/ for the enum-equality compiler
+# defect this papers over -- it likely also affects hosted/GPU builds using
+# FontExecutionPolicy.Preferred/Required and should be root-caused separately.
+fn engine2d_default_font_config_for(font_size: i32, force_cpu_target: bool) -> FontRenderConfig:
+    val base = FontRenderConfig.default_for_size(font_size)
+    if not force_cpu_target:
+        return base
+    FontRenderConfig(
+        family: base.family, category: base.category, language: base.language,
+        script: base.script, size: base.size, weight: base.weight, style: base.style,
+        hinting: base.hinting, antialiasing: base.antialiasing, atlas_policy: base.atlas_policy,
+        execution_target: "cpu", execution_policy: base.execution_policy
+    )
+
+# GLYPH-FIX-3 (2026-07-19): gated consumer-side probes. Mirrors the
+# producer-side probes in font_renderer.spl (_vec_atlas_probe_count /
+# _vec_glyph_probe_count) so the atlas_pixels count taken right before the
+# FontRenderBatch leaves nogc_sync_mut.text_layout.font_renderer can be
+# compared against the count taken right after it lands here in
+# gc_async_mut.gpu.engine2d.engine, isolating whether coverage is lost
+# during that cross-layer struct/array transfer or earlier/later.
+val _VEC_TEXT_PROBE: bool = false
+var _vec_text_probe_count: i32 = 0
+var _vec_blit_probe_count: i32 = 0
+var _vec_entry_probe_count: i32 = 0
 # ============================================================================
 # Engine2D
 # ============================================================================
@@ -524,8 +574,23 @@ class Engine2D:
         engine, so a garbage non-nil `vulkan_backend`/etc. here would corrupt
         every draw call that checks it (observed: draw_image_scaled_blend
         took the bogus "elif Some(vulkan)" branch and faulted).
+
+        GLYPH-FIX-3 (2026-07-19): the same omitted-named-field landmine also
+        applies to plain scalar fields, not just Option accelerator handles.
+        `vulkan_font_state_unknown: bool = false` was left out of this list,
+        relying on the class-level default -- which freestanding codegen does
+        not reliably apply for a field omitted from a constructor call. When
+        it reads back non-zero garbage, `draw_text()`'s `if
+        self.vulkan_font_state_unknown: return` fires unconditionally and
+        silently drops EVERY text draw (both the vector path and the
+        baremetal-bitmap fallback) with zero exceptions -- proven via
+        `[vec-text-probe] draw_text-entry ... vulkan_font_state_unknown=true`
+        on this exact constructor before this fix. Pin it (and the sibling
+        `last_vulkan_font_evidence`/`rocm_backend`/`software_backend` fields,
+        same category) explicitly rather than adding more fields to the
+        growing exception list.
         """
-        Engine2D(backend: backend, capability: backend_capability_default(), baremetal_backend: Some(backend), virtio_gpu_backend: nil, cuda_backend: nil, vulkan_backend: nil, metal_backend: nil, opencl_backend: nil, font_renderer: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "baremetal")
+        Engine2D(backend: backend, capability: backend_capability_default(), baremetal_backend: Some(backend), virtio_gpu_backend: nil, cuda_backend: nil, vulkan_backend: nil, vulkan_font_state_unknown: false, last_vulkan_font_evidence: nil, metal_backend: nil, opencl_backend: nil, rocm_backend: nil, software_backend: nil, font_renderer: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "baremetal")
 
     static fn create_with_virtio_gpu_backend(backend: VirtioGpuBackend) -> Engine2D:
         """Create engine with a pre-initialized VirtioGpuBackend."""
@@ -861,6 +926,23 @@ class Engine2D:
                 batch.atlas_pixels, batch.atlas_width, batch.atlas_height,
                 quad.atlas_x, quad.atlas_y, quad.width, quad.height, quad.color
             )
+            if _VEC_TEXT_PROBE and _vec_blit_probe_count < 8:
+                _vec_blit_probe_count = _vec_blit_probe_count + 1
+                var pnz = 0
+                var pi: i64 = 0
+                while pi < pixels.len():
+                    if ((pixels[pi] >> 24) & 0xFFu32) > 0u32:
+                        pnz = pnz + 1
+                    pi = pi + 1
+                val dst_x = font_destination_origin(x, quad.dst_x, quad.width)
+                val dst_y = font_destination_origin(y, quad.dst_y, quad.height)
+                var dxs = "nil"
+                var dys = "nil"
+                if dst_x != nil:
+                    dxs = "{dst_x.?}"
+                if dst_y != nil:
+                    dys = "{dst_y.?}"
+                print("[vec-text-probe] blit qi={quad_index} w={quad.width} h={quad.height} pix_len={pixels.len()} expect={quad.width.to_i64() * quad.height.to_i64()} pix_nz={pnz} color_a={(quad.color >> 24) & 0xFFu32} dst_x={dxs} dst_y={dys} x={x} y={y}")
             if pixels.len() == quad.width.to_i64() * quad.height.to_i64():
                 val dst_x = font_destination_origin(x, quad.dst_x, quad.width)
                 val dst_y = font_destination_origin(y, quad.dst_y, quad.height)
@@ -870,7 +952,55 @@ class Engine2D:
         quad_index
 
     me _draw_font_batch_plan(x: i32, y: i32, batch: FontRenderBatch, plan: [text]) -> bool:
-        if not batch.material_supported() or plan.len() == 0:
+        # Snapshot once, up front: the same `batch.material_supported()` call
+        # expression also appears inside the probe's print() interpolation
+        # below (root cause of a duplicate-call CSE hazard; see history).
+        # But calling the zero-arg method `batch.material_supported()` on a
+        # non-self local here never materializes the receiver into its ABI
+        # register (rdi) at all -- disassembly confirmed the call site simply
+        # reuses whatever rdi already held (the enclosing self), regardless
+        # of call ordering, unlike ordinary explicit-argument method calls
+        # (e.g. `cuda.draw_font_batch(x, y, batch)` a few hundred bytes
+        # later, which DOES reload every argument, including the receiver,
+        # from its spill slot before calling). Inlining the body here avoids
+        # the receiver-dispatch call entirely: `batch.valid` /
+        # `batch.program_version` / `batch.transform_identity` are plain
+        # field loads (no ABI materialization needed) and
+        # `font_atlas_composite_program_version_valid` is a free function
+        # taking an explicit i64, not a receiver-dispatch call.
+        val n_quads_total = batch.quads.len()
+        val material_ok = batch.valid and
+            font_atlas_composite_program_version_valid(batch.program_version) and
+            batch.transform_identity == "uniform-scale;translate-late"
+        if _VEC_TEXT_PROBE and _vec_text_probe_count < 8:
+            _vec_text_probe_count = _vec_text_probe_count + 1
+            val n_quads = n_quads_total
+            var nz = 0
+            var first_w = 0
+            var first_h = 0
+            var first_ax = 0
+            var first_ay = 0
+            var first_color_a: u32 = 0u32
+            if n_quads > 0:
+                val fq = batch.quads[0]
+                first_w = fq.width
+                first_h = fq.height
+                first_ax = fq.atlas_x
+                first_ay = fq.atlas_y
+                first_color_a = (fq.color >> 24) & 0xFFu32
+                var row = 0
+                while row < fq.height:
+                    var col = 0
+                    while col < fq.width:
+                        val idx = (fq.atlas_y + row) * batch.atlas_width + fq.atlas_x + col
+                        if idx.to_i64() >= 0 and idx.to_i64() < batch.atlas_pixels.len():
+                            val px = batch.atlas_pixels[idx]
+                            if ((px >> 24) & 0xFFu32) > 0u32:
+                                nz = nz + 1
+                        col = col + 1
+                    row = row + 1
+            print("[vec-text-probe] consumer valid={batch.valid} material_supported={material_ok} n_quads={n_quads} atlas_len={batch.atlas_pixels.len()} first_w={first_w} first_h={first_h} first_ax={first_ax} first_ay={first_ay} first_cov_nz={nz} color_a={first_color_a}")
+        if not material_ok or plan.len() == 0:
             return false
         var quad_index: i64 = 0
         var attempts: [text] = []
@@ -977,12 +1107,24 @@ class Engine2D:
     me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
         """Draw a selected vector face fail-closed, or use the bitmap default."""
         val selected = self.font_renderer
+        var has_ttf = false
+        if selected != nil:
+            has_ttf = selected.has_sffi_ttf()
+        if _VEC_TEXT_PROBE and _vec_entry_probe_count < 8:
+            _vec_entry_probe_count = _vec_entry_probe_count + 1
+            print("[vec-text-probe] draw_text-entry font_renderer_nil={selected == nil} has_sffi_ttf={has_ttf} vulkan_font_state_unknown={self.vulkan_font_state_unknown} selected_backend={self.selected_backend_name}")
         if selected != nil:
             val fonts = selected
             if fonts.has_sffi_ttf():
-                self.draw_text_configured(
-                    x, y, text_val, color, FontRenderConfig.default_for_size(font_size)
+                if _VEC_TEXT_PROBE and _vec_entry_probe_count < 24:
+                    _vec_entry_probe_count = _vec_entry_probe_count + 1
+                    print("[vec-text-probe] about-to-call-draw_text_configured")
+                val configured_ok = self.draw_text_configured(
+                    x, y, text_val, color, engine2d_default_font_config_for(font_size, self.baremetal_backend != nil)
                 )
+                if _VEC_TEXT_PROBE and _vec_entry_probe_count < 24:
+                    _vec_entry_probe_count = _vec_entry_probe_count + 1
+                    print("[vec-text-probe] returned-from-draw_text_configured ok={configured_ok}")
                 return
         if self.vulkan_font_state_unknown:
             return
@@ -994,7 +1136,16 @@ class Engine2D:
             self.backend.draw_text(x, y, text_val, color, font_size)
 
     me draw_text_configured(x: i32, y: i32, text_val: text, color: u32, config: FontRenderConfig) -> bool:
+        if _VEC_TEXT_PROBE and _vec_entry_probe_count < 24:
+            _vec_entry_probe_count = _vec_entry_probe_count + 1
+            print("[vec-text-probe] draw_text_configured-FIRST-LINE")
         val plan = font_execution_plan(config, ["cuda", "metal", "opencl", "vulkan", "rocm", "cpu"])
+        if _VEC_TEXT_PROBE and _vec_entry_probe_count < 24:
+            _vec_entry_probe_count = _vec_entry_probe_count + 1
+            val policy_is_suggested = config.execution_policy == FontExecutionPolicy.Suggested
+            val policy_is_preferred = config.execution_policy == FontExecutionPolicy.Preferred
+            val policy_is_required = config.execution_policy == FontExecutionPolicy.Required
+            print("[vec-text-probe] draw_text_configured-entry plan_len={plan.len()} selection_supported={font_render_config_selection_supported(config)} family={config.family} category={config.category} exec_target={config.execution_target} size={config.size} weight={config.weight} style={config.style} hinting={config.hinting} antialiasing={config.antialiasing} atlas_policy={config.atlas_policy} language={config.language} script={config.script} policy_suggested={policy_is_suggested} policy_preferred={policy_is_preferred} policy_required={policy_is_required}")
         if plan.len() == 0 or not font_render_config_selection_supported(config):
             return false
         val fonts = self.fonts()
@@ -1005,7 +1156,7 @@ class Engine2D:
     me draw_text_with_advances(x: i32, y: i32, text_val: text, advance_widths: [i32], color: u32, font_size: i32) -> bool:
         """Draw producer-resolved text through the selected vector face."""
         self.draw_text_with_advances_configured(
-            x, y, text_val, advance_widths, color, FontRenderConfig.default_for_size(font_size)
+            x, y, text_val, advance_widths, color, engine2d_default_font_config_for(font_size, self.baremetal_backend != nil)
         )
 
     me draw_text_with_advances_configured(x: i32, y: i32, text_val: text, advance_widths: [i32], color: u32, config: FontRenderConfig) -> bool:
@@ -1020,7 +1171,7 @@ class Engine2D:
     me draw_shaped_text(x: i32, y: i32, glyph_run: DrawIrGlyphRunPayload, color: u32, font_size: i32) -> bool:
         """Draw a semantic shaped run through the canonical selected face."""
         self.draw_shaped_text_configured(
-            x, y, glyph_run, color, FontRenderConfig.default_for_size(font_size)
+            x, y, glyph_run, color, engine2d_default_font_config_for(font_size, self.baremetal_backend != nil)
         )
 
     me draw_shaped_text_configured(x: i32, y: i32, glyph_run: DrawIrGlyphRunPayload, color: u32, config: FontRenderConfig) -> bool:
