@@ -17,7 +17,7 @@ use app.itf.adapter_minio.{
     load_minio_config,
     minio_list_buckets, minio_list_objects, minio_get_object, minio_stat_object,
     minio_put_text, minio_presign_get, minio_presign_put, minio_health_live,
-    minio_download, minio_create_bucket, minio_delete_bucket
+    minio_download, minio_create_bucket, minio_delete_bucket, minio_delete_object
 }
 use app.itf.flags.{_extract_flag, _has_flag, _positional_args}
 use app.itf.output.{print_error, print_success, print_info, print_dim, print_table_dynamic, format_json_output, wants_json, format_size, format_transfer_summary, set_no_pager}
@@ -232,11 +232,12 @@ fn _storage_mb(args: [text]) -> i64:
 fn _storage_rb(args: [text]) -> i64:
     """`storage rb alias/bucket [--force]`
 
-    `--force` (recursive empty-then-delete) is a documented gap
-    (facade_storage.md §3 rb row): it depends on the same missing
-    object-level DELETE that blocks `storage rm` below, so it prints the
-    same not-yet-implemented message instead of silently ignoring --force
-    or attempting a partial recursive delete.
+    `--force`: list every object under the bucket and delete each one before
+    deleting the bucket itself (mirrors mc's `rb --force` recursive
+    empty-then-delete). Bounded: refuses with a clear message — no partial
+    delete attempted — if the bucket holds more than 1000 objects, since
+    adapter_minio.spl has no batch DeleteObjects call, only single-object
+    DELETE (minio_delete_object), so --force is a plain per-object loop.
     """
     val pos = _positional_args(args)
     if pos.len() < 1:
@@ -246,13 +247,23 @@ fn _storage_rb(args: [text]) -> i64:
     if not addr.valid or not addr.is_remote or addr.bucket == "":
         print_error("usage: storage rb alias/bucket — TARGET must be alias/bucket (got '{pos[0]}')")
         return 1
-    if _has_flag(args, "--force"):
-        print_error("storage rb --force: not yet implemented — recursive empty-then-delete needs object-level DELETE, which adapter_minio.spl doesn't expose yet (same gap as `storage rm`). Workaround: empty the bucket with the real `mc rm --recursive` CLI, then retry `storage rb` without --force.")
-        return 1
     val (auth_ok, cfg, auth_err) = resolve_alias_config(addr.alias)
     if not auth_ok:
         print_error(auth_err)
         return 1
+    if _has_flag(args, "--force"):
+        val (list_ok, objects, list_err) = minio_list_objects(cfg, addr.bucket, "")
+        if not list_ok:
+            print_error(list_err)
+            return 1
+        if objects.len() > 1000:
+            print_error("storage rb --force: refusing — {addr.alias}/{addr.bucket} has {objects.len()} objects, over the 1000-object safety cap for per-object delete (adapter_minio.spl has no batch DeleteObjects call). Empty it with the real `mc rm --recursive` CLI first, then retry `storage rb`.")
+            return 1
+        for o in objects:
+            val (del_ok, del_err) = minio_delete_object(cfg, addr.bucket, o.key)
+            if not del_ok:
+                print_error("storage rb --force: failed deleting {addr.alias}/{addr.bucket}/{o.key}: {del_err}")
+                return 1
     val (ok, err) = minio_delete_bucket(cfg, addr.bucket)
     if not ok:
         print_error(err)
@@ -262,24 +273,37 @@ fn _storage_rb(args: [text]) -> i64:
 
 
 # ---------------------------------------------------------------------------
-# rm — GAP (facade_storage.md §3/§7): no object-level DELETE in either
-# adapter today. adapter_minio.spl would need a new signed DELETE call
-# (out of this worker's scope — read-only import boundary), so this prints
-# the spec's defined not-yet-supported error rather than a silent no-op.
+# rm — confirmation-free single-object delete (mirrors mc's default
+# non-interactive `rm`). `--recursive`/`-r` (multi-object prefix delete)
+# stays not-yet-implemented: it needs its own bounded list+delete-many loop
+# with different semantics than `rb --force`'s bucket-emptying use of the
+# same minio_delete_object primitive, out of scope for this pass — see
+# doc/05_design/app/devhub/facade_storage.md §3 (rm row).
 # ---------------------------------------------------------------------------
 
 fn _storage_rm(args: [text]) -> i64:
-    """`storage rm alias/bucket/key [-r]` — not yet implemented, see docstring above."""
+    """`storage rm alias/bucket/key [-r|--recursive]`"""
     val pos = _positional_args(args)
     if pos.len() < 1:
-        print_error("usage: storage rm alias/bucket/key [-r]")
+        print_error("usage: storage rm alias/bucket/key [-r|--recursive]")
+        return 1
+    if _has_flag(args, "-r") or _has_flag(args, "--recursive"):
+        print_error("storage rm --recursive: not yet implemented — multi-object prefix delete needs its own bounded list+delete-many loop; see doc/05_design/app/devhub/facade_storage.md §3 (rm row). Workaround: delete objects one at a time with `storage rm alias/bucket/key`, or use the real `mc rm --recursive` CLI if installed.")
         return 1
     val addr = parse_storage_addr(pos[0])
     if not addr.valid or not addr.is_remote or addr.bucket == "" or addr.key == "":
         print_error("usage: storage rm alias/bucket/key — TARGET must be a full alias/bucket/key (got '{pos[0]}')")
         return 1
-    print_error("storage rm: not yet implemented — adapter_minio.spl has no object-level DELETE call yet (only minio_delete_bucket exists at the bucket level); see doc/05_design/app/devhub/facade_storage.md §3 (rm row). Workaround: `mc rm {addr.alias}/{addr.bucket}/{addr.key}` with the real mc CLI if installed.")
-    1
+    val (auth_ok, cfg, auth_err) = resolve_alias_config(addr.alias)
+    if not auth_ok:
+        print_error(auth_err)
+        return 1
+    val (ok, err) = minio_delete_object(cfg, addr.bucket, addr.key)
+    if not ok:
+        print_error(err)
+        return 1
+    print_success("deleted {addr.alias}/{addr.bucket}/{addr.key}")
+    0
 
 
 # ---------------------------------------------------------------------------
@@ -572,8 +596,8 @@ fn _print_storage_help():
     print "  cat alias/bucket/key             Print object body to stdout (--range R)"
     print "  stat alias/bucket/key            Size/etag/last-modified (via ListObjectsV2 — see NOTE)"
     print "  mb alias/bucket                  Create a bucket"
-    print "  rb alias/bucket                  Delete an (empty) bucket (--force: not yet implemented)"
-    print "  rm alias/bucket/key              Delete an object — NOT YET IMPLEMENTED (see below)"
+    print "  rb alias/bucket                  Delete a bucket (--force: delete objects first, bounded to 1000)"
+    print "  rm alias/bucket/key              Delete an object (--recursive/-r: not yet implemented)"
     print "  presign alias/bucket/key         Generate a presigned GET URL (--expires SECONDS)"
     print "  presign-put alias/bucket/key     Generate a presigned PUT URL (binary-upload workaround)"
     print "  du alias/bucket[/prefix]         Aggregate object sizes under a prefix (--depth N)"
@@ -595,7 +619,8 @@ fn _print_storage_help():
     print ""
     print "NOTE: `stat`/`ls` cannot use a real HEAD for size/etag/last-modified — the"
     print "  underlying HTTP transport exposes no response headers, so these fall back"
-    print "  to ListObjectsV2. `rm` and `mirror` are documented gaps, not silent no-ops."
+    print "  to ListObjectsV2. `mirror` and `rm --recursive` are documented gaps, not"
+    print "  silent no-ops."
     print ""
     print "Config: ~/.config/itf/auth.sdn"
     print "  [minio]"

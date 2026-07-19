@@ -16,11 +16,12 @@
 # key "test.txt", access key AKIAIOSFODNN7EXAMPLE, date 20130524T000000Z,
 # region us-east-1, service s3, expires 86400.
 
-use app.itf.adapter_minio.{epoch_to_amz_datetime}
+use app.itf.adapter_minio.{epoch_to_amz_datetime, _build_object_path}
 use std.nogc_sync_mut.aws_sigv4.{
     sigv4_sha256_hex, SIGV4_EMPTY_SHA256,
     sigv4_credential_scope, sigv4_string_to_sign, sigv4_compute_signature,
-    sigv4_presign_url, sigv4_presign_get_url
+    sigv4_presign_url, sigv4_presign_get_url,
+    SigV4Header, sigv4_canonical_headers, sigv4_authorization_header
 }
 
 val VEC_ACCESS_KEY = "AKIAIOSFODNN7EXAMPLE"
@@ -42,6 +43,32 @@ val VEC_STRING_TO_SIGN = "AWS4-HMAC-SHA256\n20130524T000000Z\n20130524/us-east-1
 val VEC_SIGNATURE = "aeeed9bbccd4d02ee5c0109b86d86835f995330da4c265957d157751f604d404"
 
 val VEC_PRESIGNED_URL = "https://examplebucket.s3.amazonaws.com/test.txt?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20130524%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20130524T000000Z&X-Amz-Expires=86400&X-Amz-SignedHeaders=host&X-Amz-Signature=aeeed9bbccd4d02ee5c0109b86d86835f995330da4c265957d157751f604d404"
+
+# --- DELETE (header-auth) golden vector — SELF-DERIVED, not AWS-published ---
+#
+# AWS's own SigV4 docs only publish query-string/presigned-URL examples (the
+# GET vector above); there is no published header-auth DELETE example. This
+# vector was independently computed offline from the raw inputs with
+# Python's stdlib hashlib/hmac (same method the GET vector's header
+# describes), reusing this file's existing test credentials/date/region/
+# service/host so a mismatch here can't be blamed on different fixture data.
+# It is the first coverage of sigv4_authorization_header/
+# sigv4_canonical_headers (the header-auth signing mode) — adapter_minio.spl
+# uses this exact mode for every live call (GET/HEAD/PUT/DELETE), whereas the
+# vector above only covers the presigned-URL (query-string) signing mode.
+# If this fails, suspect the canonical request's blank line around an empty
+# canonical_query or header sort order first, not the HMAC chain (already
+# pinned correct by the vectors above).
+
+val VEC_DELETE_BUCKET = "examplebucket"
+val VEC_DELETE_KEY = "test.txt"
+val VEC_DELETE_CANONICAL_URI = "/examplebucket/test.txt"
+val VEC_DELETE_HEADER_BLOCK = "host:examplebucket.s3.amazonaws.com\nx-amz-content-sha256:{SIGV4_EMPTY_SHA256}\nx-amz-date:{VEC_AMZ_DATE}\n"
+val VEC_DELETE_SIGNED_HEADERS = "host;x-amz-content-sha256;x-amz-date"
+val VEC_DELETE_CANONICAL_REQUEST = "DELETE\n/examplebucket/test.txt\n\nhost:examplebucket.s3.amazonaws.com\nx-amz-content-sha256:{SIGV4_EMPTY_SHA256}\nx-amz-date:{VEC_AMZ_DATE}\n\nhost;x-amz-content-sha256;x-amz-date\n{SIGV4_EMPTY_SHA256}"
+val VEC_DELETE_CANONICAL_REQUEST_HASH = "8054bafe402bc5ae41ea5ccf25ab7bfa2d2ac1d1c78899906139c6f3d9316d84"
+val VEC_DELETE_SIGNATURE = "39f5491c3313922e32c203ecfc681b19e9bf9949ffb086758a6769d6c2446238"
+val VEC_DELETE_AUTH_HEADER = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=39f5491c3313922e32c203ecfc681b19e9bf9949ffb086758a6769d6c2446238"
 
 
 describe "AWS SigV4 golden vector (AWS-published GET Object example)":
@@ -85,3 +112,35 @@ describe "AWS SigV4 golden vector (AWS-published GET Object example)":
         it "matches the vector's date for the epoch second AWS's example date corresponds to":
             # 2013-05-24T00:00:00Z = 1369353600 (also asserted in adapter_minio_spec.spl)
             expect(epoch_to_amz_datetime(1369353600)).to_equal(VEC_AMZ_DATE)
+
+    context "DELETE request, header-auth mode (self-derived golden vector — see comment above)":
+
+        it "_build_object_path (adapter_minio's canonical-URI builder) produces the expected path-style URI":
+            expect(_build_object_path(VEC_DELETE_BUCKET, VEC_DELETE_KEY)).to_equal(VEC_DELETE_CANONICAL_URI)
+
+        it "sigv4_canonical_headers sorts host/x-amz-content-sha256/x-amz-date and builds the signed-headers list adapter_minio relies on":
+            var headers: [SigV4Header] = []
+            headers = headers + [SigV4Header(name: "host", value: VEC_HOST)]
+            headers = headers + [SigV4Header(name: "x-amz-content-sha256", value: SIGV4_EMPTY_SHA256)]
+            headers = headers + [SigV4Header(name: "x-amz-date", value: VEC_AMZ_DATE)]
+            val (block, signed) = sigv4_canonical_headers(headers)
+            expect(block).to_equal(VEC_DELETE_HEADER_BLOCK)
+            expect(signed).to_equal(VEC_DELETE_SIGNED_HEADERS)
+
+        it "hashes the self-derived DELETE canonical request to the independently-computed hash":
+            expect(sigv4_sha256_hex(VEC_DELETE_CANONICAL_REQUEST)).to_equal(VEC_DELETE_CANONICAL_REQUEST_HASH)
+
+        it "computes the independently-derived final signature from the DELETE canonical request":
+            val sig = sigv4_compute_signature(VEC_SECRET_KEY, VEC_DATE, VEC_REGION, VEC_SERVICE, VEC_AMZ_DATE, VEC_DELETE_CANONICAL_REQUEST)
+            expect(sig).to_equal(VEC_DELETE_SIGNATURE)
+
+        it "sigv4_authorization_header (adapter_minio.minio_delete_object's exact entry point) reproduces the full Authorization header":
+            var headers: [SigV4Header] = []
+            headers = headers + [SigV4Header(name: "host", value: VEC_HOST)]
+            headers = headers + [SigV4Header(name: "x-amz-content-sha256", value: SIGV4_EMPTY_SHA256)]
+            headers = headers + [SigV4Header(name: "x-amz-date", value: VEC_AMZ_DATE)]
+            val auth = sigv4_authorization_header(
+                "DELETE", VEC_DELETE_CANONICAL_URI, "", headers, SIGV4_EMPTY_SHA256,
+                VEC_ACCESS_KEY, VEC_SECRET_KEY, VEC_REGION, VEC_SERVICE, VEC_AMZ_DATE
+            )
+            expect(auth).to_equal(VEC_DELETE_AUTH_HEADER)

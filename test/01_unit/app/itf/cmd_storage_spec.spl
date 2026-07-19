@@ -18,8 +18,12 @@
 #   (b) the alias used is a deliberately-fake, never-registered name (e.g.
 #       "unknownalias"), which resolve_alias_config's "unknown alias"
 #       short-circuit rejects before touching any file or network at all, or
-#   (c) the verb (rm, mirror, rb --force) prints its documented gap message
-#       and returns before any config resolution happens at all.
+#   (c) the verb (mirror; rm/rb with --recursive/--force flag variants that
+#       are still documented gaps) prints its message and returns before any
+#       config resolution happens at all — note `rm` (single-object delete)
+#       and `rb --force` (bounded list+delete-then-delete-bucket) are now
+#       real implementations, so their success/live-delete paths are NOT
+#       covered here; only their pre-network validation/error paths are.
 # This means real end-to-end behavior (successful ls/cp/stat/... against a
 # live MinIO endpoint) is NOT covered here — only dispatch/validation/error
 # paths are, per the task's explicit fallback instruction.
@@ -78,16 +82,28 @@ describe "cmd_storage dispatch":
         it "rb missing TARGET is a usage error":
             expect(handle_storage(["rb"])).to_equal(1)
 
-        it "rb --force prints the documented gap and returns 1 before any config access":
-            expect(handle_storage(["rb", "minio/bucket", "--force"])).to_equal(1)
+        it "rb with no bucket segment is rejected before any config access":
+            expect(handle_storage(["rb", "minio"])).to_equal(1)
 
-    context "rm — documented gap, never reaches config resolution":
+        it "rb --force with unknown alias is rejected pre-network (the list+delete-then-delete-bucket loop never runs)":
+            expect(handle_storage(["rb", "unknownalias/bucket", "--force"])).to_equal(1)
 
-        it "valid-shaped TARGET still returns the not-yet-implemented gap":
-            expect(handle_storage(["rm", "minio/bucket/key.bin"])).to_equal(1)
+    context "rm — arg validation + error paths, all pre-network":
 
         it "missing TARGET is a usage error":
             expect(handle_storage(["rm"])).to_equal(1)
+
+        it "bucket-only TARGET (no key) is rejected before touching config":
+            expect(handle_storage(["rm", "minio/bucket"])).to_equal(1)
+
+        it "unknown alias with full bucket/key is rejected pre-network":
+            expect(handle_storage(["rm", "unknownalias/bucket/key.bin"])).to_equal(1)
+
+        it "--recursive prints the not-yet-implemented message before any config access, even with a real alias-shaped TARGET (the flag check runs before resolve_alias_config)":
+            expect(handle_storage(["rm", "minio/bucket/key.bin", "--recursive"])).to_equal(1)
+
+        it "-r (short form) also short-circuits pre-network":
+            expect(handle_storage(["rm", "minio/bucket/key.bin", "-r"])).to_equal(1)
 
     context "mirror — documented gap, ignores args entirely":
 

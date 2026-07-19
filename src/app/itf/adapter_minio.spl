@@ -595,6 +595,59 @@ fn minio_stat_object(cfg: MinioConfig, bucket: text, key: text) -> (bool, HeadOb
 
 
 # ---------------------------------------------------------------------------
+# DeleteObject
+# ---------------------------------------------------------------------------
+
+fn minio_delete_object(cfg: MinioConfig, bucket: text, key: text) -> (bool, text):
+    """DELETE /{bucket}/{key} — deletes a single object.
+
+    S3/MinIO returns 204 No Content on success (200 is also accepted
+    defensively, mirrors map_s3_error's 2xx-is-ok range); deleting a key that
+    doesn't exist is idempotent (S3 still returns 204). Mirrors
+    minio_delete_bucket's signed-DELETE plumbing exactly, but against the
+    object path (_build_object_path) instead of the bucket root.
+    """
+    val canonical_uri = _build_object_path(bucket, key)
+    val amz_dt = _amz_datetime_now()
+    val host = _host_from_url(cfg.url)
+    val payload_hash = SIGV4_EMPTY_SHA256
+
+    var sig_headers: [SigV4Header] = []
+    sig_headers = sig_headers + [SigV4Header(name: "host", value: host)]
+    sig_headers = sig_headers + [SigV4Header(name: "x-amz-content-sha256", value: payload_hash)]
+    sig_headers = sig_headers + [SigV4Header(name: "x-amz-date", value: amz_dt)]
+
+    val auth = sigv4_authorization_header(
+        "DELETE", canonical_uri, "", sig_headers, payload_hash,
+        cfg.access_key, cfg.secret_key, cfg.region, MINIO_SERVICE, amz_dt
+    )
+
+    var sffi: [text] = []
+    sffi = sffi + ["Host: {host}"]
+    sffi = sffi + ["x-amz-content-sha256: {payload_hash}"]
+    sffi = sffi + ["x-amz-date: {amz_dt}"]
+    sffi = sffi + ["Authorization: {auth}"]
+
+    var attempt = 0
+    var status = 0
+    var resp_body = ""
+    var err = ""
+    while attempt < ITF_RETRY_MAX_ATTEMPTS:
+        val r = rt_http_request("DELETE", "{cfg.url}{canonical_uri}", sffi, "")
+        status = r.0
+        resp_body = r.1
+        err = r.2
+        attempt = attempt + 1
+        if not itf_should_retry(status, err) or attempt >= ITF_RETRY_MAX_ATTEMPTS:
+            break
+        itf_retry_wait(attempt - 1, "")
+    val mapped = map_s3_error(status, resp_body, err)
+    if mapped.kind != "ok":
+        return (false, mapped.message)
+    (true, "")
+
+
+# ---------------------------------------------------------------------------
 # PutObject
 #
 # IMPORTANT LIMITATION (recorded per issue #10 follow-up):
