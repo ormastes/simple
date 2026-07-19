@@ -4,6 +4,23 @@ Date: 2026-07-18
 
 Status: open
 
+## 2026-07-19 compiled-dispatch repair
+
+The full CLI no longer routes `spipe-docgen` through `cli_run_file`.  Its
+entry closure now includes `run_spipe_docgen`, and command dispatch calls that
+function directly.  The doc generator's directory creation also no longer
+imports the CLI process facade, avoiding the module cycle and subprocess ABI
+that direct dispatch would otherwise pull back into the tool.
+
+Stage-4 essential-tool admission now requires two focused behaviors from the
+fresh candidate: one SPipe manual generated into an isolated output directory,
+and one VHDL compile containing both a labeled-tuple helper and an `@clocked`
+root.  The latter must emit its entity, `next_result_out`, and the reset-aware
+clock process without a placeholder or `Result.unwrap*` escape.
+
+This is a static repair only in the current capped session.  The bug remains
+open until a fresh pure-Simple candidate passes those admission probes.
+
 ## 2026-07-19 VHDL Result escape repair
 
 The static root-cause candidate for the reported `Result.unwrap_err` escape is

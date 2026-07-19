@@ -60,6 +60,32 @@ run_probe test_runner_empty 1 "$SIMPLE_BINARY" test "$repo_root/scripts/check/fi
 grep -Eq 'no executed BDD examples|--assert-ran' "$work_dir/test_runner_empty.out" || { echo 'error=test_runner_empty_refusal_missing'; exit 1; }
 echo 'essential_test_runner_smoke=true'
 
+# SPipe docgen must dispatch compiled code in-process. Dynamic interpretation
+# of the full tool source previously stalled, while driver delegation could
+# recurse or corrupt the process argument ABI.
+run_probe spipe_docgen 0 "$SIMPLE_BINARY" spipe-docgen \
+    "$repo_root/test/fixtures/pure_simple_tooling/sibling_describe_green_fixture.spl" \
+    --output "$work_dir/doc" --no-index
+grep -Fq 'DONE Generated 1 docs' "$work_dir/spipe_docgen.out" || { echo 'error=spipe_docgen_summary_missing'; exit 1; }
+test -s "$work_dir/doc/fixtures/pure_simple_tooling/sibling_describe_green_fixture.md" || { echo 'error=spipe_docgen_manual_missing'; exit 1; }
+echo 'essential_spipe_docgen_smoke=true'
+
+# The deployed full CLI must lower the labeled-tuple + @clocked shape used by
+# the RV32/RV64 product roots without escaping a synthetic Result operation.
+vhdl_output="$work_dir/clocked_labeled_tuple.vhd"
+run_probe vhdl_clocked_labeled_tuple 0 "$SIMPLE_BINARY" compile --backend=vhdl \
+    "$repo_root/test/fixtures/pure_simple_tooling/clocked_labeled_tuple.spl" \
+    -o "$vhdl_output"
+test -s "$vhdl_output" || { echo 'error=vhdl_clocked_output_missing'; exit 1; }
+grep -Fq 'entity clocked_labeled_tuple is' "$vhdl_output" || { echo 'error=vhdl_clocked_entity_missing'; exit 1; }
+grep -Fq 'signal next_result_out' "$vhdl_output" || { echo 'error=vhdl_clocked_next_signal_missing'; exit 1; }
+grep -Fq 'p_clk: process(clk, reset_n)' "$vhdl_output" || { echo 'error=vhdl_clocked_process_missing'; exit 1; }
+if grep -Eq 'GENERATED_RTL_NOT_IMPLEMENTED|Result\.unwrap(_err)?' "$vhdl_output"; then
+    echo 'error=vhdl_clocked_placeholder_or_result_escape'
+    exit 1
+fi
+echo 'essential_vhdl_clocked_smoke=true'
+
 # Lint: prove a clean file and one real deny rule, not help or missing-file paths.
 run_probe lint_clean 0 "$SIMPLE_BINARY" lint "$repo_root/test/fixtures/pure_simple_tooling/clean.spl"
 grep -Fq 'Lint passed: all files clean' "$work_dir/lint_clean.out" || { echo 'error=lint_clean_marker_missing'; exit 1; }

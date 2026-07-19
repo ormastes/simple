@@ -911,7 +911,7 @@ fi
 run_logged stage4-redeploy-gate run_timeout_kill 180 sh \
   scripts/check/cert/redeploy_gate/redeploy_gate.shs "${full_bin}"
 
-run_logged stage4-essential-tools-smoke run_timeout_kill 180 env \
+run_logged stage4-essential-tools-smoke run_timeout_kill 360 env \
   SIMPLE_BINARY="$(absolute_path "${full_bin}")" \
   sh scripts/check/check-bootstrap-essential-tools-smoke.shs
 
