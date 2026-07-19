@@ -25,7 +25,7 @@
 # Sessions persist to ~/.llm_caret/sessions/<id>.json (session.spl) so
 # --resume restores a prior transcript + provider session id across runs.
 
-use app.io.mod.{env_get, home, file_exists}
+use app.io.mod.{env_get, file_exists, current_time_ms}
 use std.nogc_sync_mut.cli.cli_util.{get_cli_args}
 use std.nogc_sync_mut.http_server.{SimpleHttpServer, Router, HttpRequest, HttpResponse}
 use std.nogc_sync_mut.http_server.types.{HttpStatus, http_method_to_text}
@@ -37,20 +37,16 @@ use app.llm_caret.config.{load_config, config_loaded,
     config_claude_api_key, config_claude_api_base_url, config_claude_api_model,
     config_openai_api_key, config_openai_base_url, config_openai_model,
     config_compat_base_url, config_compat_model, config_compat_api_key}
-use app.llm_caret.provider.{LLMResponse, dispatch_send, is_valid_provider, list_providers, new_llm_error}
-use app.llm_caret.tools.{PermissionPolicy, ToolCall, ModelResponse,
+use app.llm_caret.provider.{LLMResponse, dispatch_send, is_valid_provider, list_providers}
+use app.llm_caret.tools.{PermissionPolicy, ModelResponse,
     default_policy, allow_all_policy, parse_tool_use_blocks, new_model_text, new_model_tools}
-use app.llm_caret.types.{Message, new_user_message, new_assistant_message}
-use app.llm_caret.chat.{AgentResult, run_agent_loop}
-use app.llm_caret.chat_tui.{ChatTui, make_chat_tui, caret_chat, caret_is_tty}
+use app.llm_caret.types.{Message}
+use app.llm_caret.chat_tui.{make_chat_tui_with_status, caret_chat, SessionHooks}
 use app.llm_caret.json_helpers.{build_message_json, ja}
 use app.llm_caret.server.{handle_route, build_error_response,
     build_chat_completion_response, build_anthropic_response,
     parse_chat_request_content, parse_chat_request_model}
-use app.llm_caret.session.{
-    Session, new_session, session_path, save_session, load_session,
-    list_session_ids, gen_session_id
-}
+use app.llm_caret.session.{Session, save_session, load_session, list_session_ids, gen_session_id}
 
 # ============================================================================
 # Argument parsing (pure - unit-testable without a live process)
@@ -316,14 +312,14 @@ fn main_responder(msgs: [Message]) -> ModelResponse:
 # HTTP proxy (--server)
 # ============================================================================
 
-fn _status_for_path(path: text) -> HttpStatus:
+fn _status_for_path(path: text) -> i64:
     if path == "/v1/health" or path == "/v1/models":
-        return HttpStatus.Ok
-    HttpStatus.NotFound
+        return 200
+    404
 
 # Pure core of the proxy request handler: no sockets, fully unit-testable by
-# passing a fake dispatch fn. Real production dispatch is provider.dispatch_send
-# via main_responder's sibling below; tests inject a canned one.
+# passing a fake dispatch fn. Real production dispatch is _proxy_dispatch
+# (provider.dispatch_send) below; tests inject a canned one.
 fn proxy_handle(method: text, path: text, body: text,
                 dispatch: fn(text, text) -> LLMResponse) -> (i64, text):
     if method == "POST" and (path == "/v1/chat/completions" or path == "/v1/messages"):
@@ -338,8 +334,7 @@ fn proxy_handle(method: text, path: text, body: text,
             return (200, build_anthropic_response(resp.content, resp.model, resp.stop_reason))
         return (200, build_chat_completion_response(resp.content, resp.model, resp.stop_reason))
     val body_text = handle_route(method, path, body)
-    val status = _status_for_path(path)
-    (status.http_status_code_i64(), body_text)
+    (_status_for_path(path), body_text)
 
 fn _proxy_dispatch(content: text, model: text) -> LLMResponse:
     var use_model = model
@@ -352,14 +347,108 @@ fn _proxy_dispatch(content: text, model: text) -> LLMResponse:
 fn _to_http_status(code: i64) -> HttpStatus:
     if code == 200: return HttpStatus.Ok
     if code == 400: return HttpStatus.BadRequest
+    if code == 401: return HttpStatus.Unauthorized
     if code == 404: return HttpStatus.NotFound
+    if code == 413: return HttpStatus.PayloadTooLarge
+    if code == 429: return HttpStatus.TooManyRequests
     if code == 502: return HttpStatus.BadGateway
     HttpStatus.InternalError
 
+# ============================================================================
+# Server hardening: bearer auth, request size cap, per-client rate limit.
+# All pure/testable (guard_request takes now_ms + required_token explicitly);
+# only the in-memory rate-limit table is module state (parallel arrays - this
+# stdlib slice's Dict has documented quirks on erased keys, see
+# .claude/memory - a small linear scan over "concurrent client count" entries
+# is simpler and correctness-safe).
+# ============================================================================
+
+val MAX_BODY_BYTES: i64 = 1000000
+val RATE_LIMIT_PER_MIN: i64 = 60
+val RATE_WINDOW_MS: i64 = 60000
+
+var RATE_KEYS: [text] = []
+var RATE_STARTS: [i64] = []
+var RATE_COUNTS: [i64] = []
+
+fn rate_limit_reset():
+    RATE_KEYS = []
+    RATE_STARTS = []
+    RATE_COUNTS = []
+
+fn rate_limit_check(key: text, now_ms: i64) -> bool:
+    var new_keys: [text] = []
+    var new_starts: [i64] = []
+    var new_counts: [i64] = []
+    var allowed = true
+    var found = false
+    var i = 0
+    while i < RATE_KEYS.len():
+        if RATE_KEYS[i] == key:
+            found = true
+            var start = RATE_STARTS[i]
+            var count = RATE_COUNTS[i]
+            if now_ms - start > RATE_WINDOW_MS:
+                start = now_ms
+                count = 1
+            elif count >= RATE_LIMIT_PER_MIN:
+                allowed = false
+            else:
+                count = count + 1
+            new_keys = new_keys + [RATE_KEYS[i]]
+            new_starts = new_starts + [start]
+            new_counts = new_counts + [count]
+        else:
+            new_keys = new_keys + [RATE_KEYS[i]]
+            new_starts = new_starts + [RATE_STARTS[i]]
+            new_counts = new_counts + [RATE_COUNTS[i]]
+        i = i + 1
+    if not found:
+        new_keys = new_keys + [key]
+        new_starts = new_starts + [now_ms]
+        new_counts = new_counts + [1]
+    RATE_KEYS = new_keys
+    RATE_STARTS = new_starts
+    RATE_COUNTS = new_counts
+    allowed
+
+fn required_token() -> text:
+    env_get("LLM_CARET_TOKEN") ?? ""
+
+fn bearer_ok(auth_header: text, required: text) -> bool:
+    if required == "":
+        return true
+    val prefix = "Bearer "
+    if not auth_header.starts_with(prefix):
+        return false
+    auth_header.substring(prefix.len()) == required
+
+# Pure gate: auth -> size cap -> rate limit, ahead of routing. Returns
+# (allowed, status_code, body); status/body only meaningful when allowed is
+# false. `rate_limit_key` isolates the mutable rate-limit table from the pure
+# decision so this stays unit-testable (inject a fresh key per test).
+fn guard_request(auth_header: text, body: text, required: text,
+                  rate_limit_key: text, now_ms: i64) -> (bool, i64, text):
+    if not bearer_ok(auth_header, required):
+        return (false, 401, build_error_response("missing or invalid bearer token", 401))
+    if body.len() > MAX_BODY_BYTES:
+        return (false, 413, build_error_response("request body too large (max " + MAX_BODY_BYTES.to_text() + " bytes)", 413))
+    if not rate_limit_check(rate_limit_key, now_ms):
+        return (false, 429, build_error_response("rate limit exceeded (" + RATE_LIMIT_PER_MIN.to_text() + " req/min)", 429))
+    (true, 200, "")
+
 fn _http_handle(req: HttpRequest) -> HttpResponse:
     val method = http_method_to_text(req.method)
-    val (code, body) = proxy_handle(method, req.path, req.body, _proxy_dispatch)
-    log_info("llm_caret.server", method + " " + req.path + " -> " + code.to_text())
+    val guard = guard_request(req.header("Authorization"), req.body, required_token(), req.remote_addr, current_time_ms())
+    var code = guard.1
+    var body = guard.2
+    if guard.0:
+        val result = proxy_handle(method, req.path, req.body, _proxy_dispatch)
+        code = result.0
+        body = result.1
+    # Access log: level-gated via SIMPLE_LOG (default off - std.log's
+    # documented behavior), so this costs ~nothing when not enabled.
+    log_info("llm_caret.server", method + " " + req.path + " " + req.remote_addr + " -> " + code.to_text())
     HttpResponse(
         status: _to_http_status(code),
         headers: [("Content-Type", "application/json; charset=utf-8")],
@@ -371,7 +460,9 @@ fn run_server(port: i64):
     router.mount("/v1", _http_handle)
     router.set_not_found(_http_handle)
     print "llm_caret HTTP proxy listening on 127.0.0.1:{port}"
-    var server = SimpleHttpServer.new("127.0.0.1", port, router)
+    if required_token() != "":
+        print "  auth: bearer token required (LLM_CARET_TOKEN set)"
+    var server = SimpleHttpServer.new("127.0.0.1", port.to_i32(), router)
     server.start()
 
 # ============================================================================
@@ -390,6 +481,55 @@ fn _build_policy(args: MainArgs, workspace_root: text) -> PermissionPolicy:
     if args.allow_all:
         return allow_all_policy(workspace_root)
     default_policy(workspace_root)
+
+# ============================================================================
+# SessionHooks wiring - the slash-command effects that need main.spl's
+# runtime state (RT_* vars) or session.spl's disk I/O. Kept thin: each just
+# mutates/reads RT_* or calls session.spl; chat_tui.spl's dispatch_slash owns
+# all the /command parsing + control-flow decisions.
+# ============================================================================
+
+fn _slash_on_model(name: text) -> text:
+    RT_MODEL = name
+    "model set to " + name
+
+fn _slash_on_provider(name: text) -> text:
+    if not is_valid_provider(name):
+        return "unknown provider: " + name + " (valid: " + list_providers().join(", ") + ")"
+    RT_PROVIDER = name
+    "provider set to " + name
+
+fn _slash_on_sessions() -> text:
+    val ids = list_session_ids()
+    if ids.len() == 0:
+        return "No saved sessions."
+    "Sessions:\n  " + ids.join("\n  ")
+
+fn _slash_on_resume(id: text) -> (bool, text, [Message]):
+    val loaded = load_session(id)
+    match loaded:
+        Some(sess):
+            RT_SESSION_ID = sess.provider_session_id
+            return (true, "resumed session " + id, sess.messages)
+        nil:
+            return (false, "no saved session '" + id + "'", [])
+
+fn _on_persist(session_id: text, conv: [Message]):
+    save_session(Session(
+        id: session_id, provider: RT_PROVIDER, model: RT_MODEL,
+        provider_session_id: RT_SESSION_ID, messages: conv,
+        updated_at_ms: current_time_ms()
+    ))
+
+fn _build_session_hooks(active_session_id: text) -> SessionHooks:
+    SessionHooks(
+        session_id: active_session_id,
+        on_model: _slash_on_model,
+        on_provider: _slash_on_provider,
+        on_sessions: _slash_on_sessions,
+        on_resume: _slash_on_resume,
+        on_persist: _on_persist
+    )
 
 # ============================================================================
 # main()
@@ -434,20 +574,24 @@ fn main() -> i64:
         run_server(_effective_port(args))
         return 0
 
-    var session_id = ""
+    var active_session_id = gen_session_id()
+    var provider_session_id = ""
     var conv: [Message] = []
     if args.resume_id != "":
         val loaded = load_session(args.resume_id)
         match loaded:
             Some(sess):
-                session_id = sess.provider_session_id
+                active_session_id = sess.id
+                provider_session_id = sess.provider_session_id
                 conv = sess.messages
             nil:
                 print "Error: no saved session '{args.resume_id}'"
                 return 2
 
-    main_configure(provider, model, api_key, base_url, cli_path, args.system_prompt, session_id, 0)
+    main_configure(provider, model, api_key, base_url, cli_path, args.system_prompt, provider_session_id, 0)
 
-    val ui = make_chat_tui("llm_caret - {provider}")
-    caret_chat(ui, policy, main_responder, args.ui_mode)
+    val status_text = "provider=" + provider + " model=" + model + " session=" + active_session_id
+    val ui = make_chat_tui_with_status("llm_caret - {provider}", status_text)
+    val hooks = _build_session_hooks(active_session_id)
+    caret_chat(ui, policy, main_responder, args.ui_mode, hooks, conv)
     0

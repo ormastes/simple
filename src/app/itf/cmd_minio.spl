@@ -4,9 +4,9 @@ use std.nogc_sync_mut.file_system.file_ops.{file_read_text}
 use app.itf.adapter_minio.{
     MinioConfig, BucketInfo, ObjectInfo, GetObjectResult, HeadObjectResult,
     load_minio_config, check_minio_auth,
-    minio_list_buckets, minio_list_objects, minio_get_object, minio_head_object,
-    minio_put_text, minio_put_object, minio_presign_get, minio_health_live,
-    minio_download
+    minio_list_buckets, minio_list_objects, minio_get_object, minio_stat_object,
+    minio_put_text, minio_put_object, minio_presign_get, minio_presign_put, minio_health_live,
+    minio_download, minio_create_bucket, minio_delete_bucket
 }
 use app.itf.flags.{_extract_flag, _has_flag, _positional_args}
 use app.itf.output.{print_error, print_success, print_info, print_table_header, print_table_row, format_json_output, wants_json}
@@ -32,6 +32,12 @@ fn handle_minio(args: [text]) -> i64:
             _minio_stat(action_args)
         "presign":
             _minio_presign(action_args)
+        "presign-put":
+            _minio_presign_put(action_args)
+        "mb":
+            _minio_mb(action_args)
+        "rb":
+            _minio_rb(action_args)
         "health":
             _minio_health(action_args)
         "-h" | "--help" | "help":
@@ -172,7 +178,8 @@ fn _minio_put(args: [text]) -> i64:
             return 1
         print_success("uploaded {bucket}/{key} ({content.len()} bytes, text path)")
         return 0
-    # Fallthrough — binary path (currently surfaces a clear error).
+    # Fallthrough — binary path (currently surfaces a clear error + workaround;
+    # the message names `itf minio presign-put`, the real escape hatch).
     val (ok, etag, raw) = minio_put_object(cfg, bucket, key, file_path)
     if not ok:
         print_error(raw)
@@ -182,7 +189,10 @@ fn _minio_put(args: [text]) -> i64:
 
 
 fn _minio_stat(args: [text]) -> i64:
-    """`itf minio stat <bucket> <key>`"""
+    """`itf minio stat <bucket> <key>` — size/etag/last-modified via ListObjectsV2
+
+    (rt_http_request exposes no response headers, so a real HEAD can't
+    populate these fields — see minio_stat_object's docstring)."""
     val cfg = load_minio_config()
     if not _require_auth(cfg):
         return 1
@@ -190,16 +200,52 @@ fn _minio_stat(args: [text]) -> i64:
     if pos.len() < 2:
         print_error("usage: itf minio stat <bucket> <key>")
         return 1
-    val (ok, head, raw) = minio_head_object(cfg, pos[0], pos[1])
+    val bucket = pos[0]
+    val key = pos[1]
+    val (ok, head, raw) = minio_stat_object(cfg, bucket, key)
     if not ok:
         print_error(raw)
         return 1
     if wants_json(args):
-        print format_json_output(raw, args)
+        print "{{\"key\":\"{key}\",\"size\":{head.content_length},\"etag\":\"{head.etag}\",\"last_modified\":\"{head.last_modified}\"}}"
         return 0
     print_info("Size", "{head.content_length}")
     print_info("ETag", head.etag)
     print_info("Last-Modified", head.last_modified)
+    0
+
+
+fn _minio_mb(args: [text]) -> i64:
+    """`itf minio mb <bucket>` — create a bucket."""
+    val cfg = load_minio_config()
+    if not _require_auth(cfg):
+        return 1
+    val pos = _positional_args(args)
+    if pos.len() < 1:
+        print_error("usage: itf minio mb <bucket>")
+        return 1
+    val (ok, err) = minio_create_bucket(cfg, pos[0])
+    if not ok:
+        print_error(err)
+        return 1
+    print_success("bucket created: {pos[0]}")
+    0
+
+
+fn _minio_rb(args: [text]) -> i64:
+    """`itf minio rb <bucket>` — delete an (empty) bucket."""
+    val cfg = load_minio_config()
+    if not _require_auth(cfg):
+        return 1
+    val pos = _positional_args(args)
+    if pos.len() < 1:
+        print_error("usage: itf minio rb <bucket>")
+        return 1
+    val (ok, err) = minio_delete_bucket(cfg, pos[0])
+    if not ok:
+        print_error(err)
+        return 1
+    print_success("bucket deleted: {pos[0]}")
     0
 
 
@@ -214,6 +260,30 @@ fn _minio_presign(args: [text]) -> i64:
         return 1
     val expires = _parse_int(_extract_flag(args, "--expires", "86400"), 86400)
     val (ok, url, err) = minio_presign_get(cfg, pos[0], pos[1], expires)
+    if not ok:
+        print_error(err)
+        return 1
+    print url
+    0
+
+
+fn _minio_presign_put(args: [text]) -> i64:
+    """`itf minio presign-put <bucket> <key> [--expires SECONDS]`
+
+    Generates a presigned PUT URL — the workaround for binary uploads until
+    rt_http_request gains a raw-bytes body (see minio_put_object). PUT the
+    file's bytes straight to the printed URL with curl or any HTTP client,
+    e.g.: curl -X PUT --data-binary @file.bin "<url>"
+    """
+    val cfg = load_minio_config()
+    if not _require_auth(cfg):
+        return 1
+    val pos = _positional_args(args)
+    if pos.len() < 2:
+        print_error("usage: itf minio presign-put <bucket> <key> [--expires SECONDS]")
+        return 1
+    val expires = _parse_int(_extract_flag(args, "--expires", "86400"), 86400)
+    val (ok, url, err) = minio_presign_put(cfg, pos[0], pos[1], expires)
     if not ok:
         print_error(err)
         return 1
@@ -252,9 +322,12 @@ fn _print_minio_help():
     print "Commands:"
     print "  ls [bucket [--prefix P]]    List buckets, or objects under a bucket"
     print "  get <bucket> <key>          Fetch object body or stream to --out PATH"
-    print "  put <bucket> <key>          Upload --file PATH (text/JSON/XML; binary blocked)"
-    print "  stat <bucket> <key>         HEAD object (size/etag/last-modified)"
+    print "  put <bucket> <key>          Upload --file PATH (text/JSON/XML; binary blocked, see presign-put)"
+    print "  stat <bucket> <key>         Size/etag/last-modified (via ListObjectsV2 — see NOTE below)"
     print "  presign <bucket> <key>      Generate a presigned GET URL (--expires SECONDS, max 604800)"
+    print "  presign-put <bucket> <key>  Generate a presigned PUT URL (binary-upload workaround)"
+    print "  mb <bucket>                 Create a bucket"
+    print "  rb <bucket>                 Delete an (empty) bucket"
     print "  health                      Probe /minio/health/live"
     print ""
     print "Flags:"
@@ -262,9 +335,13 @@ fn _print_minio_help():
     print "  --out PATH        For `get`: stream body to a local file (presigned download)"
     print "  --range R         For `get`: HTTP Range header value (e.g. bytes=0-1023)"
     print "  --prefix P        For `ls`: filter objects under the given key prefix"
-    print "  --expires N       For `presign`: URL validity in seconds (default 86400)"
+    print "  --expires N       For `presign`/`presign-put`: URL validity in seconds (default 86400)"
     print "  --file PATH       For `put`: local file to upload"
     print "  --content-type CT For `put`: response Content-Type (default application/octet-stream)"
+    print ""
+    print "NOTE: `stat` cannot use a real HEAD for size/etag/last-modified — the"
+    print "  underlying HTTP transport (rt_http_request) doesn't expose response"
+    print "  headers, so this falls back to ListObjectsV2 with an exact-key filter."
     print ""
     print "Config: ~/.config/itf/auth.sdn"
     print "  [minio]"

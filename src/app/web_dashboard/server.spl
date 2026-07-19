@@ -8,7 +8,6 @@ use app.dashboard.assistant_bridge.{assistant_bridge_default_policy}
 use app.dashboard.assistant_collectors.{collect_assistant_snapshot_from_root}
 use app.dashboard.assistant_live_view.{assistant_dashboard_live_view_from_snapshot, assistant_dashboard_render_live_view}
 use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
-use std.text.{to_int_or}
 use app.llm_dashboard.web_login.{
     DashboardAuthSession,
     auth_session_from_headers,
@@ -97,11 +96,15 @@ pub struct DashboardServer:
                 loop:
                     match listener.accept():
                         Ok(stream):
-                            self.handle_connection(stream)
+                            self.dash_handle_connection(stream)
                         Err(e):
                             print "Error accepting connection: {e}"
 
-    fn handle_connection(stream: TcpStream):
+    # Named dash_* (not handle_connection/route_request) to avoid colliding
+    # with LoginOnlyServer's identically-shaped methods in the interpreter's
+    # method dispatch (verified empirically: same name+signature on a
+    # different struct otherwise resolves to the wrong class's method body).
+    fn dash_handle_connection(stream: TcpStream):
         match stream.read_line():
             Err(_):
                 val _ = stream.close()
@@ -124,7 +127,7 @@ pub struct DashboardServer:
                                 break
                             headers = "{headers}{header_line}\n"
                             if header_line.starts_with("Content-Length:"):
-                                content_length = to_int_or(header_line[15:].trim(), 0)
+                                content_length = header_line[15:].trim().to_i64() ?? 0
                         Err(_):
                             break
 
@@ -136,14 +139,14 @@ pub struct DashboardServer:
                         Err(_):
                             pass_dn
 
-                val response = self.route_request(method, path, body, headers)
+                val response = self.dash_route_request(method, path, body, headers)
                 val _ = stream.write_text(response)
                 val _ = stream.close()
 
     # Auth-aware wrapper around route_http. Off by default (DASH_AUTH unset)
     # so localhost dev needs no login; set DASH_AUTH=1 to require the
     # web_login cookie session before any /agents or /api/ route resolves.
-    fn route_request(method: text, path: text, body: text, headers: text) -> text:
+    fn dash_route_request(method: text, path: text, body: text, headers: text) -> text:
         if not _dash_auth_enabled():
             return self.route_http(method, path, body, "local-dev")
 
@@ -151,7 +154,7 @@ pub struct DashboardServer:
         val session = auth_session_from_headers(headers)
 
         if clean_path == "/login":
-            return self._handle_login(method, body, session)
+            return self.dash_handle_login(method, body, session)
         if clean_path == "/logout":
             if val active = session:
                 auth_delete_session(active.session_id)
@@ -163,7 +166,7 @@ pub struct DashboardServer:
             case nil:
                 http_redirect("/login")
 
-    fn _handle_login(method: text, body: text, session: DashboardAuthSession?) -> text:
+    fn dash_handle_login(method: text, body: text, session: DashboardAuthSession?) -> text:
         if method == "GET":
             if session != nil:
                 return http_redirect("/")
@@ -255,11 +258,11 @@ fn _is_agents_path(path: text) -> bool:
     path == "/agents" or path.starts_with("/agents/")
 
 fn _session_authenticated(session: text?) -> bool:
-    match session:
-        case Some(value):
-            value.trim() != ""
-        case nil:
-            false
+    if session == nil:
+        return false
+    if val value = session:
+        return value.trim() != ""
+    false
 
 fn _html_escape(value: text) -> text:
     var escaped = value.split("&").join("&amp;")

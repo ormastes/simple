@@ -12,7 +12,7 @@ use std.nogc_sync_mut.aws_sigv4.{
     SIGV4_EMPTY_SHA256, SIGV4_UNSIGNED_PAYLOAD,
     SigV4Header, SigV4QueryParam,
     sigv4_sha256_hex, sigv4_uri_encode, sigv4_canonical_query,
-    sigv4_authorization_header, sigv4_presign_get_url,
+    sigv4_authorization_header, sigv4_presign_get_url, sigv4_presign_url,
     parse_s3_error, S3ErrorInfo
 }
 use app.itf.errors.{ItfError}
@@ -571,10 +571,27 @@ fn minio_head_object(cfg: MinioConfig, bucket: text, key: text) -> (bool, HeadOb
     val empty = HeadObjectResult(content_length: -1, last_modified: "", etag: "")
     if mapped.kind != "ok":
         return (false, empty, mapped.message)
-    # TODO(issue #10 follow-up): rt_http_request doesn't expose response headers;
-    # to populate Content-Length / ETag / Last-Modified we need a richer SFFI or
-    # a one-byte ranged GET fallback. Surface success only for now.
+    # rt_http_request doesn't expose response headers, so a real HEAD can't
+    # populate Content-Length/ETag/Last-Modified here (existence + error
+    # mapping only). Callers that need those fields use minio_stat_object
+    # below, which gets them via ListObjectsV2 instead.
     (true, empty, body)
+
+
+fn minio_stat_object(cfg: MinioConfig, bucket: text, key: text) -> (bool, HeadObjectResult, text):
+    """`stat` via ListObjectsV2 prefix match — the fallback for the fact
+    that rt_http_request doesn't expose response headers (so a real HEAD
+    can't surface Content-Length/ETag/Last-Modified; see minio_head_object).
+    Filters the paginated prefix=key results down to an exact key match.
+    """
+    val (ok, objects, raw) = minio_list_objects(cfg, bucket, key)
+    val empty = HeadObjectResult(content_length: -1, last_modified: "", etag: "")
+    if not ok:
+        return (false, empty, raw)
+    for o in objects:
+        if o.key == key:
+            return (true, HeadObjectResult(content_length: o.size, last_modified: o.last_modified, etag: o.etag), raw)
+    (false, empty, "not found: {bucket}/{key}")
 
 
 # ---------------------------------------------------------------------------
@@ -641,6 +658,96 @@ fn minio_put_text(cfg: MinioConfig, bucket: text, key: text, body: text, content
     (true, "", resp_body)
 
 
+fn minio_create_bucket(cfg: MinioConfig, bucket: text) -> (bool, text):
+    """PUT /{bucket} — create a bucket (empty body; MinIO accepts this
+    regardless of region — a LocationConstraint body is only required by
+    stock AWS S3 outside us-east-1, which is out of scope for a MinIO CLI)."""
+    val canonical_uri = "/" + bucket
+    val amz_dt = _amz_datetime_now()
+    val host = _host_from_url(cfg.url)
+    val payload_hash = SIGV4_EMPTY_SHA256
+
+    var sig_headers: [SigV4Header] = []
+    sig_headers = sig_headers + [SigV4Header(name: "host", value: host)]
+    sig_headers = sig_headers + [SigV4Header(name: "x-amz-content-sha256", value: payload_hash)]
+    sig_headers = sig_headers + [SigV4Header(name: "x-amz-date", value: amz_dt)]
+
+    val auth = sigv4_authorization_header(
+        "PUT", canonical_uri, "", sig_headers, payload_hash,
+        cfg.access_key, cfg.secret_key, cfg.region, MINIO_SERVICE, amz_dt
+    )
+
+    var sffi: [text] = []
+    sffi = sffi + ["Host: {host}"]
+    sffi = sffi + ["x-amz-content-sha256: {payload_hash}"]
+    sffi = sffi + ["x-amz-date: {amz_dt}"]
+    sffi = sffi + ["Authorization: {auth}"]
+
+    var attempt = 0
+    var status = 0
+    var resp_body = ""
+    var err = ""
+    while attempt < ITF_RETRY_MAX_ATTEMPTS:
+        val r = rt_http_request("PUT", "{cfg.url}{canonical_uri}", sffi, "")
+        status = r.0
+        resp_body = r.1
+        err = r.2
+        attempt = attempt + 1
+        if not itf_should_retry(status, err) or attempt >= ITF_RETRY_MAX_ATTEMPTS:
+            break
+        itf_retry_wait(attempt - 1, "")
+    val mapped = map_s3_error(status, resp_body, err)
+    if mapped.kind != "ok":
+        return (false, mapped.message)
+    (true, "")
+
+
+fn minio_delete_bucket(cfg: MinioConfig, bucket: text) -> (bool, text):
+    """DELETE /{bucket} — S3/MinIO refuses with 409 BucketNotEmpty if the
+    bucket still has objects; that error is passed through with a clear
+    "not empty" prefix rather than a bare HTTP 409."""
+    val canonical_uri = "/" + bucket
+    val amz_dt = _amz_datetime_now()
+    val host = _host_from_url(cfg.url)
+    val payload_hash = SIGV4_EMPTY_SHA256
+
+    var sig_headers: [SigV4Header] = []
+    sig_headers = sig_headers + [SigV4Header(name: "host", value: host)]
+    sig_headers = sig_headers + [SigV4Header(name: "x-amz-content-sha256", value: payload_hash)]
+    sig_headers = sig_headers + [SigV4Header(name: "x-amz-date", value: amz_dt)]
+
+    val auth = sigv4_authorization_header(
+        "DELETE", canonical_uri, "", sig_headers, payload_hash,
+        cfg.access_key, cfg.secret_key, cfg.region, MINIO_SERVICE, amz_dt
+    )
+
+    var sffi: [text] = []
+    sffi = sffi + ["Host: {host}"]
+    sffi = sffi + ["x-amz-content-sha256: {payload_hash}"]
+    sffi = sffi + ["x-amz-date: {amz_dt}"]
+    sffi = sffi + ["Authorization: {auth}"]
+
+    var attempt = 0
+    var status = 0
+    var resp_body = ""
+    var err = ""
+    while attempt < ITF_RETRY_MAX_ATTEMPTS:
+        val r = rt_http_request("DELETE", "{cfg.url}{canonical_uri}", sffi, "")
+        status = r.0
+        resp_body = r.1
+        err = r.2
+        attempt = attempt + 1
+        if not itf_should_retry(status, err) or attempt >= ITF_RETRY_MAX_ATTEMPTS:
+            break
+        itf_retry_wait(attempt - 1, "")
+    val mapped = map_s3_error(status, resp_body, err)
+    if mapped.kind != "ok":
+        if mapped.kind == "conflict":
+            return (false, "bucket not empty: {mapped.message}")
+        return (false, mapped.message)
+    (true, "")
+
+
 fn minio_put_object(cfg: MinioConfig, bucket: text, key: text, local_path: text) -> (bool, text, text):
     """PUT a local file as an object.
 
@@ -652,11 +759,11 @@ fn minio_put_object(cfg: MinioConfig, bucket: text, key: text, local_path: text)
     """
     if not file_exists(local_path):
         return (false, "", "local file not found: {local_path}")
-    (false, "", "minio_put_object: binary PUT not yet implemented — needs raw-bytes HTTP SFFI (issue #10 follow-up). Use minio_put_text for ≤64 MiB text bodies.")
+    (false, "", "minio_put_object: binary PUT not yet implemented — needs raw-bytes HTTP SFFI (issue #10 follow-up). Workaround: `itf minio presign-put {bucket} {key}` then PUT the file's raw bytes to that URL with curl/any HTTP client. Use minio_put_text for ≤64 MiB text bodies instead.")
 
 
 # ---------------------------------------------------------------------------
-# Presign GET (client-side, no network)
+# Presign GET / PUT (client-side, no network)
 # ---------------------------------------------------------------------------
 
 fn minio_presign_get(cfg: MinioConfig, bucket: text, key: text, expires: i64) -> (bool, text, text):
@@ -668,6 +775,23 @@ fn minio_presign_get(cfg: MinioConfig, bucket: text, key: text, expires: i64) ->
     val amz_dt = _amz_datetime_now()
     val host = _host_from_url(cfg.url)
     val url = sigv4_presign_get_url(cfg.url, host, bucket, key, cfg.access_key, cfg.secret_key, cfg.region, MINIO_SERVICE, amz_dt, expires)
+    (true, url, url)
+
+
+fn minio_presign_put(cfg: MinioConfig, bucket: text, key: text, expires: i64) -> (bool, text, text):
+    """Generate a presigned PUT URL for an object. expires capped at 7 days.
+
+    This is the real, working escape hatch for binary uploads: PUT raw bytes
+    straight to this URL with curl/any HTTP client, bypassing rt_http_request's
+    text-only body limitation (see minio_put_object).
+    """
+    if expires <= 0:
+        return (false, "", "expires must be > 0")
+    if expires > MINIO_MAX_PRESIGN_EXPIRES:
+        return (false, "", "expires must be ≤ {MINIO_MAX_PRESIGN_EXPIRES} (7 days)")
+    val amz_dt = _amz_datetime_now()
+    val host = _host_from_url(cfg.url)
+    val url = sigv4_presign_url("PUT", cfg.url, host, bucket, key, cfg.access_key, cfg.secret_key, cfg.region, MINIO_SERVICE, amz_dt, expires)
     (true, url, url)
 
 

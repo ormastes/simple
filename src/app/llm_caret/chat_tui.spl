@@ -54,6 +54,17 @@ extern fn rt_stdin_read_line() -> text
 # AgentResult.final_transcript instead.
 var TUI_TRANSCRIPT: [StyledLine] = []
 
+# Scroll state: -1 = auto-follow (always show the tail, the default); >= 0 =
+# the absolute transcript-line index currently at the top of the viewport (a
+# fixed point, so appending new messages while scrolled does NOT move the
+# view - the guide's "new message while scrolled does not yank view").
+var SCROLL_TOP: i64 = -1
+
+# Status-bar state: turn count (shown next to provider/model/session) and a
+# transient "waiting for response" flag toggled around the responder call.
+var TURN_COUNT: i64 = 0
+var AWAITING_RESPONSE: bool = false
+
 # ============================================================================
 # ChatTui - owns the session's widgets (transcript panel title, prompt input,
 # hint line). Turn/tool styling is applied by the free tui_role_style /
@@ -64,19 +75,25 @@ struct ChatTui:
     title: text
     hint: text
     input: InputWidget
+    status: text     # e.g. "provider=claude_cli model=claude-sonnet-4-20250514" - set once by main.spl
 
 fn make_chat_tui(title: text) -> ChatTui:
+    make_chat_tui_with_status(title, "")
+
+fn make_chat_tui_with_status(title: text, status: text) -> ChatTui:
     ChatTui(
         title: title,
-        hint: " Enter=send   /exit=quit   Ctrl-C/Ctrl-D=abort ",
-        input: make_input_widget("> ", fg_style(COLOR_WHITE))
+        hint: " Enter=send   /exit,Ctrl-C,Ctrl-D=quit   Ctrl-P/Ctrl-N=scroll ",
+        input: make_input_widget("> ", fg_style(COLOR_WHITE)),
+        status: status
     )
 
 fn _ui_set_input(ui: ChatTui, inp: InputWidget) -> ChatTui:
     ChatTui(
         title: ui.title,
         hint: ui.hint,
-        input: inp
+        input: inp,
+        status: ui.status
     )
 
 # ============================================================================
@@ -108,6 +125,81 @@ fn tui_tool_style(status: text) -> Style:
         return fg_style(COLOR_RED)
     fg_style(COLOR_YELLOW)
 
+# ============================================================================
+# Markdown-lite line rendering (no full markdown parser - line-based only):
+#   - fenced ``` blocks render dim, indentation preserved verbatim
+#   - `inline code` spans render in a distinct color within a normal line
+#   - "- "/"* " bullet lines get an extra indent
+# ============================================================================
+
+fn _dim_style() -> Style:
+    make_style(COLOR_NONE, COLOR_NONE, false, false, false, true)
+
+fn _code_span_style() -> Style:
+    fg_style(COLOR_MAGENTA)
+
+fn is_fence_line(line: text) -> bool:
+    line.trim().starts_with("```")
+
+fn bullet_indent(line: text) -> text:
+    if line.starts_with("- ") or line.starts_with("* "):
+        return "  " + line
+    line
+
+# Splits `line` into styled segments, rendering `inline code` spans in
+# _code_span_style() and everything else in `base_style`. Unmatched/odd
+# backtick counts just render the remainder as plain text (best-effort, no
+# parser errors surface to the user).
+fn inline_code_segments(line: text, base_style: Style) -> [StyledSegment]:
+    var segs: [StyledSegment] = []
+    var buf = ""
+    var in_code = false
+    var i = 0
+    while i < line.len():
+        val ch = line[i]
+        if ch == "`":
+            if buf != "":
+                if in_code:
+                    segs = segs + [make_segment(buf, _code_span_style())]
+                else:
+                    segs = segs + [make_segment(buf, base_style)]
+                buf = ""
+            in_code = not in_code
+        else:
+            buf = buf + ch
+        i = i + 1
+    if buf != "":
+        if in_code:
+            segs = segs + [make_segment(buf, _code_span_style())]
+        else:
+            segs = segs + [make_segment(buf, base_style)]
+    if segs.len() == 0:
+        segs = [make_segment("", base_style)]
+    segs
+
+# Renders one turn's (possibly multi-line) content as multiple StyledLines:
+# the role label prefixes the first line only, fenced code blocks render dim
+# with indentation preserved, bullet lines get an extra indent, and inline
+# `code` spans within normal lines render in a distinct color.
+fn markdown_turn_lines(role: text, content: text) -> [StyledLine]:
+    val base_style = tui_role_style(role)
+    var lines: [StyledLine] = []
+    var in_fence = false
+    var first = true
+    for raw_line in content.split("\n"):
+        var line = raw_line
+        if first:
+            line = tui_role_label(role) + ": " + line
+            first = false
+        if is_fence_line(line):
+            in_fence = not in_fence
+            lines = lines + [make_styled_line(line, _dim_style())]
+        elif in_fence:
+            lines = lines + [make_styled_line(line, _dim_style())]
+        else:
+            lines = lines + [make_line(inline_code_segments(bullet_indent(line), base_style))]
+    lines
+
 # Renderer-seam selection. The explicit flag is the PRIMARY gate; "auto" (the
 # default) falls back to a tty probe.
 #   ui_mode == "plain" -> always plain print path
@@ -122,10 +214,17 @@ fn select_renderer_mode(ui_mode: text, is_tty: bool) -> text:
         return "tui"
     "plain"
 
-# Best-effort tty probe. NOTE: the stdlib exposes no isatty extern; this mirrors
-# cli_output/progress.spl and gates on $TERM. LIMITATION: $TERM is inherited even
-# when stdout is piped, so "auto" can wrongly pick TUI under a pipe with $TERM
-# set - always pass an explicit ui_mode ("plain"/"tui") in CI/servers.
+# Best-effort tty probe. Checked for a real isatty extern before falling back
+# to this heuristic: src/compiler_rust/compiler/src/interpreter_native_io.rs
+# has `native_is_tty` (real libc::isatty) but it is NOT wired into the
+# EXTERN_DISPATCH table, so no `rt_*` name reaches Simple code - dead code in
+# the seed today. Wiring it is a Rust-seed + bootstrap change, out of this
+# module's scope (see doc/08_tracking/bug - file as: "native_is_tty defined
+# but unregistered, no isatty extern reachable from Simple"). Until then this
+# mirrors cli_output/progress.spl and gates on $TERM. LIMITATION: $TERM is
+# inherited even when stdout is piped, so "auto" can wrongly pick TUI under a
+# pipe with $TERM set - always pass an explicit --plain/--tui in CI/servers
+# (main.spl's --plain/--tui flags override this heuristic entirely).
 fn caret_is_tty() -> bool:
     val term = rt_env_get("TERM")
     if term == nil or term == "" or term == "dumb":
@@ -222,6 +321,9 @@ fn dispatch_slash(cmd: text, arg: text, hooks: SessionHooks) -> SlashResult:
 
 fn tui_transcript_reset():
     TUI_TRANSCRIPT = []
+    SCROLL_TOP = -1
+    TURN_COUNT = 0
+    AWAITING_RESPONSE = false
 
 fn tui_transcript_len() -> i64:
     TUI_TRANSCRIPT.len()
@@ -242,9 +344,11 @@ fn tui_transcript_line_text(idx: i64) -> text:
     _line_plain_text(TUI_TRANSCRIPT[idx])
 
 # Append a styled conversation turn (user vs assistant visually distinct).
+# Multi-line content (markdown-lite: fenced code / bullets / inline code) is
+# split into one StyledLine per source line - see markdown_turn_lines.
 fn render_turn(role: text, content: text):
-    val line = make_styled_line(format_turn_line(role, content), tui_role_style(role))
-    TUI_TRANSCRIPT = TUI_TRANSCRIPT + [line]
+    for line in markdown_turn_lines(role, content):
+        TUI_TRANSCRIPT = TUI_TRANSCRIPT + [line]
 
 # Append a styled tool-call line. This is what replaces the raw print that was
 # at chat.spl:172 when a TUI session is active.
@@ -258,29 +362,100 @@ fn tui_tool_renderer(call: ToolCall, result: ToolResult):
     render_tool_call(call.name, tool_call_status(result), tool_call_summary(result))
 
 # ============================================================================
-# Frame rendering
+# Frame rendering + scrollback
 # ============================================================================
 
+# Pure window computation - the only part of scrolling worth unit-testing
+# without a live terminal. Returns (start, end) [end exclusive] into a
+# transcript of `len` lines for a viewport `inner_h` tall.
+#   scroll_top < 0  -> auto-follow: always the last inner_h lines
+#   scroll_top >= 0 -> a fixed absolute start index, clamped to valid range
+fn visible_window(len: i64, inner_h: i64, scroll_top: i64) -> (i64, i64):
+    if scroll_top < 0:
+        var start = len - inner_h
+        if start < 0:
+            start = 0
+        return (start, len)
+    var max_start = len - inner_h
+    if max_start < 0:
+        max_start = 0
+    var start = scroll_top
+    if start > max_start:
+        start = max_start
+    if start < 0:
+        start = 0
+    (start, start + inner_h)
+
+fn is_scrolled() -> bool:
+    SCROLL_TOP >= 0
+
+# Ctrl-P: page toward older lines (PageUp-equivalent - see caret_is_tty's
+# comment for why real PageUp/Home/End ANSI sequences aren't wired: parsing
+# them needs a bounded-wait byte read to disambiguate a bare ESC from a
+# sequence prefix, and terminal_read_byte() has no timeout variant).
+fn scroll_page_up(len: i64, inner_h: i64):
+    var start = SCROLL_TOP
+    if start < 0:
+        val w = visible_window(len, inner_h, -1)
+        start = w.0
+    start = start - inner_h
+    if start < 0:
+        start = 0
+    SCROLL_TOP = start
+
+# Ctrl-N: page toward newer lines (PageDown-equivalent); resumes auto-follow
+# once the window reaches the tail.
+fn scroll_page_down(len: i64, inner_h: i64):
+    if SCROLL_TOP < 0:
+        return
+    var max_start = len - inner_h
+    if max_start < 0:
+        max_start = 0
+    val start = SCROLL_TOP + inner_h
+    if start >= max_start:
+        SCROLL_TOP = -1
+    else:
+        SCROLL_TOP = start
+
 fn _visible_content(inner_h: i64) -> [StyledLine]:
+    val len = TUI_TRANSCRIPT.len()
+    val window = visible_window(len, inner_h, SCROLL_TOP)
+    val start = window.0
+    val end = window.1
     var lines: [StyledLine] = []
-    var start = 0
-    if TUI_TRANSCRIPT.len() > inner_h:
-        start = TUI_TRANSCRIPT.len() - inner_h
     var i = start
-    while i < TUI_TRANSCRIPT.len():
+    while i < end and i < len:
         lines = lines + [TUI_TRANSCRIPT[i]]
         i = i + 1
     lines
+
+fn _inner_height() -> i64:
+    val rows = terminal_get_size().rows
+    var box_h = rows - 3
+    if box_h < 3:
+        box_h = 3
+    box_h - 2
+
+fn _status_line(ui: ChatTui, turn: i64, awaiting: bool) -> text:
+    var line = ui.status
+    if line != "":
+        line = line + "  "
+    line = line + "turn " + turn.to_text()
+    if awaiting:
+        line = line + "  (waiting for response...)"
+    line
+
+fn _hint_line(ui: ChatTui) -> text:
+    if is_scrolled():
+        return ui.hint + " [scrolled - Ctrl-N to follow]"
+    ui.hint
 
 fn _draw_frame(ui: ChatTui):
     terminal_clear_screen()
     val size = terminal_get_size()
     val cols = size.cols
-    val rows = size.rows
-    var box_h = rows - 2
-    if box_h < 3:
-        box_h = 3
-    val inner_h = box_h - 2
+    val inner_h = _inner_height()
+    val box_h = inner_h + 2
     val content = _visible_content(inner_h)
     val box = make_box_widget_with_content(ui.title, fg_style(COLOR_CYAN), content)
     val box_area = make_rect(0, 0, cols, box_h)
@@ -294,7 +469,8 @@ fn _draw_frame(ui: ChatTui):
     if input_lines.len() > 0:
         terminal_draw_at(box_h, 0, render_line(input_lines[0]))
     val hint_style = make_style(COLOR_NONE, COLOR_NONE, false, false, false, true)
-    terminal_draw_at(box_h + 1, 0, styled(pad_or_truncate(ui.hint, cols), hint_style))
+    terminal_draw_at(box_h + 1, 0, styled(pad_or_truncate(_hint_line(ui), cols), hint_style))
+    terminal_draw_at(box_h + 2, 0, styled(pad_or_truncate(_status_line(ui, TURN_COUNT, AWAITING_RESPONSE), cols), hint_style))
     terminal_flush()
 
 # ============================================================================
@@ -321,6 +497,10 @@ fn _read_line(ui0: ChatTui) -> (ChatTui, text, i64):
             done = true
         elif b == KEY_BACKSPACE or b == 8:
             ui = _ui_set_input(ui, input_delete_back(ui.input))
+        elif b == 16:  # Ctrl-P: scroll toward older lines
+            scroll_page_up(tui_transcript_len(), _inner_height())
+        elif b == 14:  # Ctrl-N: scroll toward newer lines / resume auto-follow
+            scroll_page_down(tui_transcript_len(), _inner_height())
         elif b >= 32 and b <= 126:
             ui = _ui_set_input(ui, input_insert_char(ui.input, (b as char).to_text()))
     (ui, result_text, status)
@@ -335,26 +515,41 @@ fn _render_history(conv: [Message]):
     for m in conv:
         render_turn(m.role, m.content)
 
-# Applies a dispatched SlashResult to the running (ui, conv, session_id,
-# running) state. Returns the updated triple; shared by the TUI and plain
-# loops so both surfaces apply /commands identically.
-fn _apply_slash(result: SlashResult, conv: [Message], session_id: text) -> ([Message], text, bool):
+# Applies a dispatched SlashResult's new_conv/replace_conv effect to the
+# running (conv, session_id) state (exit/message are handled by the caller).
+# Shared by the TUI loop; run_chat_plain inlines the same two branches since
+# it has no transcript panel to reset.
+fn _apply_slash(result: SlashResult, conv: [Message], session_id: text) -> ([Message], text):
     if result.new_conv:
         tui_transcript_reset()
-        return ([], session_id, true)
+        return ([], session_id)
     if result.replace_conv:
         tui_transcript_reset()
         _render_history(result.loaded_messages)
-        return (result.loaded_messages, result.new_session_id, true)
-    (conv, session_id, true)
+        return (result.loaded_messages, result.new_session_id)
+    (conv, session_id)
 
 # The full-screen interactive chat loop. Sets up the alt screen + raw mode per
 # editor/tui_shell.spl, reads a prompt, runs one agent turn (threading the
 # whole conversation - including tool_result turns, via AgentResult's
 # final_transcript - for real multi-turn memory), renders the reply + any
 # tool-call lines, persists the session after every turn, and loops until
-# /exit or Ctrl-C/Ctrl-D. Restores the terminal on exit (also on a panic - see
-# run_chat_tui_guarded below).
+# /exit or Ctrl-C/Ctrl-D. Restores the terminal at the end of the loop.
+#
+# ponytail: no guard restores the terminal on a hard runtime panic mid-loop.
+# Checked for an existing repo idiom first: editor/tui_shell.spl (the pattern
+# this module already mirrors) has the identical gap - enter_raw_mode/
+# enter_alt_screen with teardown only at the function's natural end, no
+# panic guard anywhere. Simple's error model is Result<T,E> + `?` only (no
+# try/catch/throw by design - .claude/rules/language.md), which covers
+# explicit Err returns but not interpreter-level panics (e.g. an out-of-bounds
+# index), so there is no in-language way to intercept those and restore the
+# terminal. A real fix needs either a runtime atexit/signal-handler extern
+# (Rust-seed + bootstrap change) or restructuring every fallible call in this
+# loop through Result/`?` (moot today - none of them return Result). Filing
+# as a bug rather than adding a no-op wrapper that wouldn't actually catch a
+# panic: "chat_tui/editor raw-mode not restored on interpreter panic - needs
+# atexit-style runtime hook, no in-language guard is possible today".
 fn run_chat_tui(ui0: ChatTui, policy: PermissionPolicy, responder: fn([Message]) -> ModelResponse, hooks: SessionHooks, initial_conv: [Message]):
     tui_transcript_reset()
     var conv = initial_conv
@@ -391,9 +586,14 @@ fn run_chat_tui(ui0: ChatTui, policy: PermissionPolicy, responder: fn([Message])
                     session_id = applied.1
                 ui = _ui_set_input(ui, input_clear(ui.input))
             else:
+                SCROLL_TOP = -1  # a message the user just sent should snap to the tail
                 render_turn("user", trimmed)
                 conv = conv + [new_user_message(trimmed)]
+                TURN_COUNT = TURN_COUNT + 1
+                AWAITING_RESPONSE = true
+                _draw_frame(ui)
                 val result = run_agent_loop_rendered(policy, conv, responder, 25, tui_tool_renderer)
+                AWAITING_RESPONSE = false
                 conv = result.final_transcript
                 render_turn("assistant", result.final_text)
                 hooks.on_persist(session_id, conv)
