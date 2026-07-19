@@ -30,3 +30,17 @@ Either load the slot as i64 and truncate (`trunc i64 -> i32/i1`) before the
 widening, or emit typed loads matching the declared field width. The
 mismatch is in the field-access lowering's readback of sub-64-bit fields
 (struct slots are uniformly 8 bytes).
+
+## Verification-lane notes (2026-07-19 evening)
+Two additional infra findings while attempting the all-i64 end-to-end run:
+1. **native cache writer does not `mkdir -p`**: after a cache clear
+   (`build/native_cache` removed), object write fails with "Failed to write
+   ELF bytes to build/native_cache/backend=llvm;...;/sources-.../object...o"
+   — pre-creating the exact directory lets the write proceed. The writer
+   should create parent dirs.
+2. The interpreted native-build worker lane compiles the LIVE `src/compiler`
+   tree; under concurrent agent sessions rewriting compiler source, each run
+   can fail differently (lint-class aborts, transient semantic errors).
+   End-to-end verification on this lane needs a quiescent tree or a pinned
+   worktree. The defaulted-field fix's IR-level verification (store 5/true)
+   was captured on a coherent tree and stands.
