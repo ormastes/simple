@@ -20,9 +20,13 @@ use app.llm_caret.chat_tui.{
     format_turn_line, format_tool_line, tui_role_label,
     tui_role_style, tui_tool_style, select_renderer_mode,
     render_turn, render_tool_call, tui_tool_renderer,
-    tui_transcript_reset, tui_transcript_len, tui_transcript_line_text
+    tui_transcript_reset, tui_transcript_len, tui_transcript_line_text,
+    SessionHooks, SlashResult,
+    is_slash_command, parse_slash_command, slash_help_text, dispatch_slash,
+    is_fence_line, bullet_indent, inline_code_segments, markdown_turn_lines,
+    visible_window, is_scrolled, scroll_page_up, scroll_page_down
 }
-use std.tui.style.{Style, COLOR_CYAN, COLOR_GREEN, COLOR_RED, COLOR_YELLOW}
+use std.tui.style.{Style, COLOR_CYAN, COLOR_GREEN, COLOR_RED, COLOR_YELLOW, tui_default_style}
 
 val WS_ROOT = "build/tmp/llm_caret_tui_test"
 
@@ -101,3 +105,201 @@ describe "Agent-loop renderer seam":
         val result = run_agent_loop(p, [new_user_message("go")], _one_tool, 25)
         expect(result.tool_calls_made).to_equal(1)
         expect(tui_transcript_len()).to_equal(0)
+
+    it "threads tool_result turns back into final_transcript (M2 fix)":
+        val p = default_policy(WS_ROOT)
+        val result = run_agent_loop(p, [new_user_message("go")], _one_tool, 25)
+        # initial user turn + tool_result turn + final assistant turn = 3.
+        # Before the fix, callers only had `initial + [final_text]` (len 2)
+        # and the tool_result turn was silently dropped between top-level
+        # calls - this is the exact gap the guide's M2 milestone flagged.
+        expect(result.final_transcript.len()).to_equal(3)
+        expect(result.final_transcript[1].content).to_contain("tool_result")
+
+# ============================================================================
+# Markdown-lite rendering (M3)
+# ============================================================================
+describe "Markdown-lite rendering":
+    it "renders a plain single-line turn exactly as format_turn_line would":
+        tui_transcript_reset()
+        render_turn("assistant", "hi")
+        expect(tui_transcript_len()).to_equal(1)
+        expect(tui_transcript_line_text(0)).to_equal("Claude: hi")
+
+    it "splits multi-line content into one transcript line per source line":
+        tui_transcript_reset()
+        render_turn("assistant", "line one\nline two")
+        expect(tui_transcript_len()).to_equal(2)
+        expect(tui_transcript_line_text(0)).to_equal("Claude: line one")
+        expect(tui_transcript_line_text(1)).to_equal("line two")
+
+    it "detects fenced code block markers":
+        assert_true(is_fence_line("```"))
+        assert_true(is_fence_line("```python"))
+        assert_false(is_fence_line("plain text"))
+
+    it "indents bullet lines and leaves others untouched":
+        expect(bullet_indent("- item")).to_equal("  - item")
+        expect(bullet_indent("* item")).to_equal("  * item")
+        expect(bullet_indent("plain")).to_equal("plain")
+
+    it "renders a fenced code block dim with indentation preserved":
+        tui_transcript_reset()
+        render_turn("assistant", "```\n  indented code\n```")
+        expect(tui_transcript_len()).to_equal(3)
+        expect(tui_transcript_line_text(1)).to_equal("  indented code")
+
+    it "splits inline code spans into separate segments":
+        val segs = inline_code_segments("run `cmd` now", tui_default_style())
+        expect(segs.len()).to_equal(3)
+        expect(segs[0].content).to_equal("run ")
+        expect(segs[1].content).to_equal("cmd")
+        expect(segs[2].content).to_equal(" now")
+
+    it "markdown_turn_lines prefixes only the first line with the role label":
+        val lines = markdown_turn_lines("user", "a\nb")
+        expect(lines.len()).to_equal(2)
+
+# ============================================================================
+# Scrollback (M3)
+# ============================================================================
+describe "Scrollback window (visible_window)":
+    it "auto-follow (-1) shows the tail when content exceeds the viewport":
+        val (start, end) = visible_window(10, 4, -1)
+        expect(start).to_equal(6)
+        expect(end).to_equal(10)
+
+    it "auto-follow shows everything when content fits the viewport":
+        val (start, end) = visible_window(3, 4, -1)
+        expect(start).to_equal(0)
+        expect(end).to_equal(3)
+
+    it "a fixed scroll_top clamps to the valid range":
+        val (start, end) = visible_window(10, 4, 100)
+        expect(start).to_equal(6)
+
+    it "a fixed scroll_top of 0 shows the very top":
+        val (start, end) = visible_window(10, 4, 0)
+        expect(start).to_equal(0)
+        expect(end).to_equal(4)
+
+describe "Scroll paging (Ctrl-P/Ctrl-N)":
+    it "is not scrolled by default":
+        tui_transcript_reset()
+        assert_false(is_scrolled())
+
+    it "pages up away from auto-follow, and enough pages down resume it":
+        tui_transcript_reset()
+        var i = 0
+        while i < 20:
+            render_turn("user", "line " + i.to_text())
+            i = i + 1
+        val len = tui_transcript_len()
+        scroll_page_up(len, 5)
+        scroll_page_up(len, 5)
+        scroll_page_up(len, 5)
+        assert_true(is_scrolled())
+        scroll_page_down(len, 5)
+        scroll_page_down(len, 5)
+        scroll_page_down(len, 5)
+        assert_false(is_scrolled())
+
+# ============================================================================
+# Slash commands (M2)
+# ============================================================================
+
+fn _noop_persist(session_id: text, msgs: [Message]):
+    ()
+
+fn _hooks_model(name: text) -> text:
+    "model set to " + name
+
+fn _hooks_provider(name: text) -> text:
+    "provider set to " + name
+
+fn _hooks_sessions() -> text:
+    "Sessions:\n  s1\n  s2"
+
+fn _hooks_resume_found(id: text) -> (bool, text, [Message]):
+    (true, "resumed " + id, [new_user_message("restored")])
+
+fn _hooks_resume_missing(id: text) -> (bool, text, [Message]):
+    (false, "no saved session '" + id + "'", [])
+
+fn _test_hooks() -> SessionHooks:
+    SessionHooks(
+        session_id: "s0", on_model: _hooks_model, on_provider: _hooks_provider,
+        on_sessions: _hooks_sessions, on_resume: _hooks_resume_found, on_persist: _noop_persist
+    )
+
+fn _test_hooks_missing() -> SessionHooks:
+    SessionHooks(
+        session_id: "s0", on_model: _hooks_model, on_provider: _hooks_provider,
+        on_sessions: _hooks_sessions, on_resume: _hooks_resume_missing, on_persist: _noop_persist
+    )
+
+describe "Slash command parsing":
+    it "recognizes lines starting with /":
+        assert_true(is_slash_command("/help"))
+        assert_false(is_slash_command("hello"))
+
+    it "splits a command and its argument":
+        val (cmd, arg) = parse_slash_command("/model gpt-4o")
+        expect(cmd).to_equal("model")
+        expect(arg).to_equal("gpt-4o")
+
+    it "splits a command with no argument":
+        val (cmd, arg) = parse_slash_command("/help")
+        expect(cmd).to_equal("help")
+        expect(arg).to_equal("")
+
+describe "Slash command dispatch":
+    it "/help returns the help text":
+        val r = dispatch_slash("help", "", _test_hooks())
+        expect(r.message).to_contain("/model <name>")
+
+    it "/exit sets exit=true":
+        val r = dispatch_slash("exit", "", _test_hooks())
+        assert_true(r.exit)
+
+    it "/quit is an alias for /exit":
+        val r = dispatch_slash("quit", "", _test_hooks())
+        assert_true(r.exit)
+
+    it "/new clears the conversation":
+        val r = dispatch_slash("new", "", _test_hooks())
+        assert_true(r.new_conv)
+
+    it "/model with no argument is a usage error":
+        val r = dispatch_slash("model", "", _test_hooks())
+        expect(r.message).to_contain("Usage")
+
+    it "/model <name> calls hooks.on_model":
+        val r = dispatch_slash("model", "gpt-4o", _test_hooks())
+        expect(r.message).to_equal("model set to gpt-4o")
+
+    it "/provider <name> calls hooks.on_provider":
+        val r = dispatch_slash("provider", "openai", _test_hooks())
+        expect(r.message).to_equal("provider set to openai")
+
+    it "/sessions calls hooks.on_sessions":
+        val r = dispatch_slash("sessions", "", _test_hooks())
+        expect(r.message).to_contain("s1")
+
+    it "/resume <id> found: replaces the conversation":
+        val r = dispatch_slash("resume", "abc", _test_hooks())
+        assert_true(r.replace_conv)
+        expect(r.new_session_id).to_equal("abc")
+        expect(r.loaded_messages.len()).to_equal(1)
+
+    it "/resume <id> not found: reports it, does not replace":
+        val r = dispatch_slash("resume", "missing-id", _test_hooks_missing())
+        assert_false(r.replace_conv)
+        expect(r.message).to_contain("no saved session")
+
+    it "unknown /commands are reported, never silently sent to the model":
+        val r = dispatch_slash("bogus", "", _test_hooks())
+        expect(r.message).to_contain("Unknown command")
+        assert_false(r.exit)
+        assert_false(r.new_conv)
+        assert_false(r.replace_conv)

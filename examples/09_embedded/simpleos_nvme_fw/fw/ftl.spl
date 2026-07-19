@@ -11,6 +11,7 @@ Composes the FIL (fil), the DFTL map cache (ftl_map), the log-structured allocat
 """
 
 use nvme_types.*
+use nd_types.*
 use fil.*
 use ftl_map.*
 use ftl_band.*
@@ -19,6 +20,11 @@ use ftl_gc.*
 use sandbox.*
 use hooks.*
 use rain.*
+use rel_types.*         # RelHealth / RelRefreshState / RelDisturbState / RelWearState + RelAction
+use rel_health.*        # durable observability sink (design §7)
+use rel_refresh.*       # FCR/DEAR-lite refresh verdict + queue (design §4)
+use rel_disturb.*       # STRAW-lite read-disturb hottest-page estimate (design §5)
+use rel_wear.*          # SREA-lite dwell-aware static wear verdict (design §6)
 
 struct Ftl:
     fil:       Fil
@@ -29,8 +35,68 @@ struct Ftl:
     rd_disturb: [i64]      # per-block read counter (volatile) driving read-disturb scrub
     hooks:     PolicyHooks  # sandboxed dynamic policy hooks (req 7)
     rain_parity: [i64]     # one XOR parity word per RAIN stripe (gap-closure P8), maintained live
+    # ── L8 FTL reliability mount (RelFtlMount fields, design §1.4) ────────────
+    # The FIL mount's durable RelVrefCache lives inside me.fil (fil.spl); here is
+    # the map-owning FTL mount: the refresh queue, the disturb hottest-page estimate,
+    # the dwell-aware wear state, and the DURABLE health sink (design §1.4 health
+    # discipline — the FIL read result's (corrected, depth) fold into rel_health here).
+    rel_health:  RelHealth
+    rel_refresh: RelRefreshState
+    rel_disturb: RelDisturbState
+    rel_wear:    RelWearState
+    # Observability counters (design §7/§10 budget + spare oracles). rel_reclaim_count
+    # increments by AT MOST ONE per rel_tick — the one-reclaim-class-step-per-tick budget
+    # invariant is directly observable through it. rel_spares/rel_last_spare record the
+    # event-driven spare substitutions drawn from the OP pool on the retire path.
+    rel_reclaim_count: i64
+    rel_spares:        i64
+    rel_last_spare:    i64
 
 val FTL_MAX_SEQ: i64 = 1000000000000000000
+
+# ── L8 wiring pass: service-tick reclaim-class budget selector (design §7) ─────
+# The critical budget invariant: gc_once, a refresh rewrite, scrub_once, and
+# wear_level_once ALL drain the shared GC_RESERVE via reclaim_block, so firing
+# several per tick can exhaust the reserve and thrash. The faithful extension is
+# ONE reclaim-class step per tick total, chosen by fixed priority among gated
+# candidates (architecture §4 table). GC keeps priority (preserves the existing
+# write-cliff fix); low_wm is passed in because GC_LOW_WATERMARK lives in
+# firmware.spl (ftl.spl must not import it — no cycle).
+fn rel_step_none() -> i64:
+    0
+
+fn rel_step_gc() -> i64:
+    1
+
+fn rel_step_refresh() -> i64:
+    2
+
+fn rel_step_scrub() -> i64:
+    3
+
+fn rel_step_wl() -> i64:
+    4
+
+fn rel_tick_select(free_blocks: i64, low_wm: i64, refresh_pending: i64,
+                   worst_disturb: i64, disturb_thr: i64,
+                   erase_spread: i64, wl_thr: i64) -> i64:
+    if free_blocks < low_wm:
+        return rel_step_gc()        # 1: reclaim free space (existing low-watermark GC)
+    if refresh_pending > 0:
+        return rel_step_refresh()   # 2: drain a MarkForRefresh (FCR/DEAR rewrite)
+    if worst_disturb > disturb_thr:
+        return rel_step_scrub()     # 3: read-disturb scrub (STRAW)
+    if erase_spread > wl_thr:
+        return rel_step_wl()        # 4: static wear leveling (SREA)
+    rel_step_none()
+
+# Zero-initialised durable health sink (design §7 RelHealth). Built with the plain
+# struct-literal constructor + ftl_fill because rel_health.spl (L2) owns the mutators
+# but rel_types.spl (L1) deliberately provides no per-policy *_new (module-boundary law).
+fn ftl_rel_health_new() -> RelHealth:
+    RelHealth(reads: ftl_fill(NUM_BLOCKS, 0), corrected_sum: ftl_fill(NUM_BLOCKS, 0),
+              corrected_events: ftl_fill(NUM_BLOCKS, 0), retry_depth_max: ftl_fill(NUM_BLOCKS, 0),
+              refresh_cause: ftl_fill(NUM_BLOCKS, 0))
 
 fn read_disturb_counter_next(v: i64) -> i64:
     if v < 0:
@@ -40,7 +106,7 @@ fn read_disturb_counter_next(v: i64) -> i64:
     v + 1
 
 fn ftl_new() -> Ftl:
-    Ftl(fil: fil_new(), map: ftl_map_new(), band: ftl_band_new(), journal: ftl_journal_new(), seq: 0, rd_disturb: ftl_fill(NUM_BLOCKS, 0), hooks: policy_hooks_new(), rain_parity: ftl_fill(rain_num_stripes(), 0))
+    Ftl(fil: fil_new(), map: ftl_map_new(), band: ftl_band_new(), journal: ftl_journal_new(), seq: 0, rd_disturb: ftl_fill(NUM_BLOCKS, 0), hooks: policy_hooks_new(), rain_parity: ftl_fill(rain_num_stripes(), 0), rel_health: ftl_rel_health_new(), rel_refresh: rel_refresh_new(), rel_disturb: rel_disturb_new(), rel_wear: rel_wear_new(), rel_reclaim_count: 0, rel_spares: 0, rel_last_spare: UNMAP)
 
 # Opt-in: the full FTL stack running on the Vt-physics NeChip emulator (via
 # fil_new_emu) instead of the behavioural NAND. Host-level FTL traffic then hits
@@ -48,7 +114,7 @@ fn ftl_new() -> Ftl:
 # a genuine (unmasked) ECC failure through read_status. Default ftl_new() is
 # unchanged. See fil_nand_emu_e2e_check.spl.
 fn ftl_new_emu() -> Ftl:
-    Ftl(fil: fil_new_emu(), map: ftl_map_new(), band: ftl_band_new(), journal: ftl_journal_new(), seq: 0, rd_disturb: ftl_fill(NUM_BLOCKS, 0), hooks: policy_hooks_new(), rain_parity: ftl_fill(rain_num_stripes(), 0))
+    Ftl(fil: fil_new_emu(), map: ftl_map_new(), band: ftl_band_new(), journal: ftl_journal_new(), seq: 0, rd_disturb: ftl_fill(NUM_BLOCKS, 0), hooks: policy_hooks_new(), rain_parity: ftl_fill(rain_num_stripes(), 0), rel_health: ftl_rel_health_new(), rel_refresh: rel_refresh_new(), rel_disturb: rel_disturb_new(), rel_wear: rel_wear_new(), rel_reclaim_count: 0, rel_spares: 0, rel_last_spare: UNMAP)
 
 fn ftl_host_lba_valid(lba: i64) -> bool:
     lba >= 0 and lba < LBA_COUNT
@@ -88,6 +154,7 @@ impl Ftl:
         val pc: i64 = me.fil.program(ppn, lba, s, data)
         if pc != NAND_OK:
             me.band.set_bad(ppn_block(ppn))
+            me.rel_retire(ppn_block(ppn))    # program-fail retire -> event-driven spare substitution
             return SC_INTERNAL
         me.ensure_journal_room()
         val before_wal: i64 = me.journal.wal_len()
@@ -96,6 +163,9 @@ impl Ftl:
         me.rain_update_page(ppn, 0, data)
         me.map.update(lba, ppn)
         me.band.mark_valid(ppn)
+        # Fresh data on this block: reset the FCR age-proxy clock and clear any stale
+        # refresh mark (design §4 rel_refresh_on_write).
+        me.rel_refresh = rel_refresh_on_write(me.rel_refresh, nd_block(ppn_block(ppn)), s)
         if old_ppn != UNMAP:
             me.band.mark_invalid(old_ppn)
         SC_SUCCESS
@@ -106,7 +176,16 @@ impl Ftl:
         me.band.host_writable_pages(GC_RESERVE) >= nblocks
 
     # Read one logical block; an unmapped (never-written / trimmed) LBA reads 0.
-    # Each read accumulates read-disturb on the backing block (drives scrub_once).
+    # Each read accumulates read-disturb on the backing block (drives scrub_once) and
+    # feeds the STRAW-lite hottest-page estimate. The read is driven through the L8 FIL
+    # recovery-ladder mount (me.fil.read_with_ladder): a retention-drifted page that
+    # FAILS a plain sense is recovered via the bounded Vref retry table when the media
+    # backend supports it (Vt-physics emu), transparently — no host retry logic. The
+    # (corrected, retry-depth) observability folds into the durable rel_health sink,
+    # and a read that needed a retry (depth > 0) enqueues a DEAR MarkForRefresh (design
+    # §4 trigger 1). On the default backend read_with_ladder returns the same offset-0
+    # payload as the pre-L8 plain read (no recovery actuator), so this is behaviour-
+    # preserving there.
     me read(lba: i64) -> i64:
         if not ftl_host_lba_valid(lba):
             return 0
@@ -115,21 +194,38 @@ impl Ftl:
             return 0
         val blk: i64 = ppn_block(ppn)
         me.bump_read_disturb(blk)
-        val rd: FilRead = me.fil.read(ppn)
-        rd.data
+        me.rel_disturb = rel_disturb_observe(me.rel_disturb, nd_block(blk), nd_page(ppn_page(ppn)))
+        val res: RelReadResult = me.fil.read_with_ladder(ppn, nd_block(blk))
+        me.rel_note_read(blk, res)
+        res.data
 
-    # Read status: SC_MEDIA_ERR if ECC could not recover the page, else SC_SUCCESS.
+    # Read status: SC_MEDIA_ERR if the recovery ladder could not recover the page, else
+    # SC_SUCCESS. Consistent with read(): a drifted page the ladder recovers reports
+    # SC_SUCCESS (not a false media error). Does NOT fold health/refresh or bump disturb
+    # — a status probe (and read_range_status loops it) must not inflate the observability
+    # counters; only the data read() path does.
     me read_status(lba: i64) -> i64:
         if not ftl_host_lba_valid(lba):
             return SC_LBA_RANGE
         val ppn: i64 = me.map.lookup(lba)
         if ppn == UNMAP:
             return SC_SUCCESS
-        val rd: FilRead = me.fil.read(ppn)
+        val blk: i64 = ppn_block(ppn)
+        val res: RelReadResult = me.fil.read_with_ladder(ppn, nd_block(blk))
         var st: i64 = SC_SUCCESS
-        if rd.code == NAND_ECC_FAIL:
+        if res.ok == 0:
             st = SC_MEDIA_ERR
         st
+
+    # Fold one completed FIL-mount read into the durable observability sink and fire
+    # the DEAR refresh trigger. rel_health_* take the RAW i64 block index (the one
+    # rel_* module that does — coordinator cross-review); the disturb/refresh policies
+    # take the NdBlock newtype. (design §1.4 health discipline, §4 DEAR, §7 rel_health.)
+    me rel_note_read(blk: i64, res: RelReadResult):
+        me.rel_health = rel_health_note_read(me.rel_health, blk, res.corrected, res.depth)
+        if res.ok == 1 and res.depth > 0:
+            me.rel_refresh = rel_refresh_enqueue(me.rel_refresh, nd_block(blk))
+            me.rel_health = rel_health_mark_cause(me.rel_health, blk, rel_cause_err())
 
     me read_range_status(lba: i64, nblocks: i64) -> i64:
         if nblocks < 0:

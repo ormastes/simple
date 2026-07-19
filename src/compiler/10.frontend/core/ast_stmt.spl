@@ -42,8 +42,6 @@ var stmt_name: [text] = []
 var stmt_type_tag: [i64] = []
 var stmt_body: [[i64]] = []
 var stmt_if_val_marker: [bool] = []
-var stmt_count_slot: [i64] = [0]
-var stmt_env_mirror_slot: [bool] = []
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_env_set(key: text, value: text) -> bool
@@ -101,42 +99,11 @@ fn stmt_i64_list_split(raw: text) -> [i64]:
             result.push(stmt_parse_i64(part))
     result
 
-fn stmt_env_mirror_enabled() -> bool:
-    if stmt_env_mirror_slot != nil and stmt_env_mirror_slot.len() > 0:
-        return stmt_env_mirror_slot[0]
-    # Interpreter module variables may not persist between calls. Preserve its
-    # compatibility mirror while compiled Stage4 uses the cached fast path.
-    (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (rt_env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? "") != "1"
-
-fn stmt_env_read(idx: i64, field: text) -> text:
-    if not stmt_env_mirror_enabled():
-        return ""
-    rt_env_get(stmt_key(idx, field)) ?? ""
-
-fn stmt_mode_slots_refresh():
-    if stmt_env_mirror_slot == nil or stmt_env_mirror_slot.len() == 0:
-        stmt_env_mirror_slot = [false]
-    val native_arena = (rt_env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? "") == "1"
-    stmt_env_mirror_slot[0] = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and not native_arena
-
-fn stmt_count_slot_ensure():
-    if stmt_count_slot == nil or stmt_count_slot.len() == 0:
-        stmt_count_slot = [0]
-
 fn stmt_count_env() -> i64:
-    stmt_count_slot_ensure()
-    if not stmt_env_mirror_enabled():
-        return stmt_count_slot[0]
-    val env_count = stmt_parse_i64(rt_env_get("SIMPLE_BOOTSTRAP_STMT_COUNT") ?? "")
-    if env_count > 0:
-        return env_count
-    stmt_count_slot[0]
+    stmt_parse_i64(rt_env_get("SIMPLE_BOOTSTRAP_STMT_COUNT") ?? "")
 
 fn stmt_count_set(value: i64):
-    stmt_count_slot_ensure()
-    stmt_count_slot[0] = value
-    if stmt_env_mirror_enabled():
-        rt_env_set("SIMPLE_BOOTSTRAP_STMT_COUNT", int_to_str(value))
+    rt_env_set("SIMPLE_BOOTSTRAP_STMT_COUNT", int_to_str(value))
 
 fn stmt_key(idx: i64, field: text) -> text:
     "SIMPLE_BOOTSTRAP_STMT_" + int_to_str(idx) + "_" + field
@@ -150,15 +117,15 @@ fn stmt_key(idx: i64, field: text) -> text:
 # are env-first/array-fallback, so skipping the env write here makes them fall
 # back to the (correct) arrays. See bug ast_env_var_quadratic_parse_2026-06-13.
 fn stmt_i64_set(idx: i64, field: text, value: i64):
-    if stmt_env_mirror_enabled():
+    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
         rt_env_set(stmt_key(idx, field), int_to_str(value))
 
 fn stmt_text_set(idx: i64, field: text, value: text):
-    if stmt_env_mirror_enabled():
+    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
         rt_env_set(stmt_key(idx, field), value)
 
 fn stmt_list_set(idx: i64, field: text, values: [i64]):
-    if stmt_env_mirror_enabled():
+    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
         rt_env_set(stmt_key(idx, field), stmt_i64_list_join(values))
 
 fn stmt_count() -> i64:
@@ -169,9 +136,16 @@ fn stmt_count() -> i64:
 
 fn stmt_reset():
     # Bootstrap nil-guard: native binaries zero-initialize module-level vars
-    # instead of running the initializer code. Allocate once, then clear in
-    # place so repeated no-GC Stage4 parses reuse arena capacity.
-    stmt_mode_slots_refresh()
+    # instead of running the initializer code. Ensure they're valid containers.
+    stmt_tag = []
+    stmt_span = []
+    stmt_expr = []
+    stmt_name = []
+    stmt_type_tag = []
+    stmt_body = []
+    stmt_if_val_marker = []
+    stmt_gpu_grid_exprs = []
+    stmt_gpu_block_exprs = []
     if stmt_tag == nil:
         stmt_tag = []
     if stmt_span == nil:
@@ -186,10 +160,6 @@ fn stmt_reset():
         stmt_body = []
     if stmt_if_val_marker == nil:
         stmt_if_val_marker = []
-    if stmt_gpu_grid_exprs == nil:
-        stmt_gpu_grid_exprs = []
-    if stmt_gpu_block_exprs == nil:
-        stmt_gpu_block_exprs = []
     stmt_tag.clear()
     stmt_span.clear()
     stmt_expr.clear()
@@ -197,8 +167,6 @@ fn stmt_reset():
     stmt_type_tag.clear()
     stmt_body.clear()
     stmt_if_val_marker.clear()
-    stmt_gpu_grid_exprs.clear()
-    stmt_gpu_block_exprs.clear()
     stmt_count_set(0)
 
 fn stmt_alloc(tag: i64, span_id: i64) -> i64:
@@ -249,9 +217,9 @@ fn stmt_if_val_decl(name: text, init_expr: i64, span_id: i64) -> i64:
     idx
 
 fn stmt_is_if_val_decl(idx: i64) -> bool:
-    if not stmt_env_mirror_enabled():
-        return idx >= 0 and idx < stmt_if_val_marker.len() and stmt_if_val_marker[idx]
-    stmt_env_read(idx, "IF_VAL") == "1"
+    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        return (rt_env_get(stmt_key(idx, "IF_VAL")) ?? "") == "1"
+    idx >= 0 and idx < stmt_if_val_marker.len() and stmt_if_val_marker[idx]
 
 fn stmt_lazy_val_decl(name: text, type_tag: i64, init_expr: i64, span_id: i64) -> i64:
     val idx = stmt_alloc(STMT_LAZY_VAL_DECL, span_id)
@@ -480,7 +448,7 @@ fn stmt_get_gpu_block(idx: i64) -> [i64]:
 # ===== Statement Accessors =====
 
 fn stmt_get_tag(idx: i64) -> i64:
-    val direct = stmt_env_read(idx, "TAG")
+    val direct = rt_env_get(stmt_key(idx, "TAG")) ?? ""
     if direct != "":
         val parsed = stmt_parse_i64(direct)
         val trace_stmt_tags = rt_env_get("SIMPLE_TRACE_STMT_TAGS") ?? ""
@@ -502,31 +470,31 @@ fn stmt_get_tag(idx: i64) -> i64:
     fallback
 
 fn stmt_get_span(idx: i64) -> i64:
-    val direct = stmt_env_read(idx, "SPAN")
+    val direct = rt_env_get(stmt_key(idx, "SPAN")) ?? ""
     if direct != "":
         return stmt_parse_i64(direct)
     stmt_span[idx]
 
 fn stmt_get_expr(idx: i64) -> i64:
-    val direct = stmt_env_read(idx, "EXPR")
+    val direct = rt_env_get(stmt_key(idx, "EXPR")) ?? ""
     if direct != "":
         return stmt_parse_i64(direct)
     stmt_expr[idx]
 
 fn stmt_get_name(idx: i64) -> text:
-    val direct = stmt_env_read(idx, "NAME")
+    val direct = rt_env_get(stmt_key(idx, "NAME")) ?? ""
     if direct != "":
         return direct
     stmt_name[idx]
 
 fn stmt_get_type(idx: i64) -> i64:
-    val direct = stmt_env_read(idx, "TYPE")
+    val direct = rt_env_get(stmt_key(idx, "TYPE")) ?? ""
     if direct != "":
         return stmt_parse_i64(direct)
     stmt_type_tag[idx]
 
 fn stmt_get_body(idx: i64) -> [i64]:
-    val direct = stmt_env_read(idx, "BODY")
+    val direct = rt_env_get(stmt_key(idx, "BODY")) ?? ""
     if direct != "":
         return stmt_i64_list_split(direct)
     stmt_body[idx]

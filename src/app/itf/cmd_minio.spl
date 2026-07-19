@@ -9,7 +9,7 @@ use app.itf.adapter_minio.{
     minio_download, minio_create_bucket, minio_delete_bucket
 }
 use app.itf.flags.{_extract_flag, _has_flag, _positional_args}
-use app.itf.output.{print_error, print_success, print_info, print_table_header, print_table_row, format_json_output, wants_json}
+use app.itf.output.{print_error, print_success, print_info, print_table_header, print_table_row, format_json_output, wants_json, format_size}
 
 
 fn handle_minio(args: [text]) -> i64:
@@ -111,9 +111,11 @@ fn _minio_ls(args: [text]) -> i64:
     if wants_json(args):
         print format_json_output(raw, args)
         return 0
+    val raw_bytes = _has_flag(args, "--bytes")
     print_table_header(["KEY", "SIZE", "MODIFIED"])
     for o in objects:
-        print_table_row([o.key, "{o.size}", o.last_modified])
+        val size_text = if raw_bytes: "{o.size}" else: format_size(o.size)
+        print_table_row([o.key, size_text, o.last_modified])
     0
 
 
@@ -209,7 +211,8 @@ fn _minio_stat(args: [text]) -> i64:
     if wants_json(args):
         print "{{\"key\":\"{key}\",\"size\":{head.content_length},\"etag\":\"{head.etag}\",\"last_modified\":\"{head.last_modified}\"}}"
         return 0
-    print_info("Size", "{head.content_length}")
+    val size_text = if _has_flag(args, "--bytes"): "{head.content_length}" else: format_size(head.content_length)
+    print_info("Size", size_text)
     print_info("ETag", head.etag)
     print_info("Last-Modified", head.last_modified)
     0
@@ -299,17 +302,17 @@ fn _minio_health(args: [text]) -> i64:
     if cfg.url == "":
         print_error("MinIO URL not configured")
         return 1
-    val (ok, alive, raw) = minio_health_live(cfg)
+    val (ok, alive, latency_ms, raw) = minio_health_live(cfg)
     if not ok:
         print_error(raw)
         return 1
     if wants_json(args):
-        print "{{\"alive\":{alive},\"status\":\"{raw}\"}}"
+        print "{{\"alive\":{alive},\"status\":\"{raw}\",\"latency_ms\":{latency_ms},\"endpoint\":\"{cfg.url}\"}}"
         return 0
     if alive:
-        print_success("alive ({raw})")
+        print_success("OK — {cfg.url} ({latency_ms}ms, {raw})")
         return 0
-    print_error("not alive ({raw})")
+    print_error("FAIL — {cfg.url} ({latency_ms}ms): {raw}")
     1
 
 
@@ -335,6 +338,7 @@ fn _print_minio_help():
     print "  --out PATH        For `get`: stream body to a local file (presigned download)"
     print "  --range R         For `get`: HTTP Range header value (e.g. bytes=0-1023)"
     print "  --prefix P        For `ls`: filter objects under the given key prefix"
+    print "  --bytes           For `ls`/`stat`: show raw byte counts instead of KiB/MiB/GiB"
     print "  --expires N       For `presign`/`presign-put`: URL validity in seconds (default 86400)"
     print "  --file PATH       For `put`: local file to upload"
     print "  --content-type CT For `put`: response Content-Type (default application/octet-stream)"

@@ -57,7 +57,6 @@ extern fn rt_text_copy_to_phys(s: text, phys: u64) -> i64
 # by real programs (clang); the trivial FDR test payload's syscall-60/exit go
 # through the same path.
 extern fn rt_user_heap_init(base: u64, size: u64)
-extern fn rt_user_heap_init_returning(base: u64, size: u64)
 # Multi-command SSH: rt_x86_enter_user_first saves a kernel savepoint before
 # iretq'ing to CPL3; on the ring-3 program's exit(2) syscall the kernel longjmps
 # back here (so arch_x86_64_enter_user_task RETURNS) and stashes the exit status.
@@ -310,7 +309,7 @@ fn _map_pt_loads(space: AddressSpace, blob: u64, hdr_len: u64, file_len: u64, us
     serial_println("[spawn] PT_LOAD segments mapped")
     1
 
-fn _x86_64_fs_exec_enter_ring3(binary_path: text, blob: u64, hdr_len: u64, file_len: u64, use_stream: bool, map_heap: bool, halt_on_exit: bool, argv: [text], envp: [text]) -> i64:
+fn _x86_64_fs_exec_enter_ring3(binary_path: text, blob: u64, hdr_len: u64, file_len: u64, use_stream: bool, map_heap: bool, argv: [text], envp: [text]) -> i64:
     # Parse the ELF from the identity-mapped RAW file buffer `blob` (mmio), NOT the
     # [u8] image.file_bytes channel — freestanding native-build stores [u8] as boxed
     # RuntimeValues so byte_utils reads stride-1 garbage (phoff=16). Guard that the
@@ -393,9 +392,13 @@ fn _x86_64_fs_exec_enter_ring3(binary_path: text, blob: u64, hdr_len: u64, file_
         return -4
     serial_println("[spawn] user stack mapped top=0x{STACK_TOP} pages={STACK_PAGES} rsp=0x{user_rsp_u}")
 
-    # Pre-map a fixed anonymous user heap for libc mmap/brk. Normal filesystem
-    # spawn resumes the kernel on exit; the explicit smoke lane may halt QEMU.
-    # 64 MiB (16384 pages);
+    # OPT-IN anonymous user heap (map_heap=true, i.e. the *_heap_ring3 entry
+    # only): pre-map a fixed high-canonical RW region and register its bounds
+    # with the boot user-exec syscall dispatcher (rt_user_heap_init). Real libc
+    # programs (clang) mmap/brk off it. CAUTION: rt_user_heap_init also flips
+    # the bare-exec dispatch flag, which reroutes exit(0) to isa-debug-exit —
+    # QEMU halts at payload exit instead of longjmp-resuming, so the default
+    # SSH multi-command spawn path must NOT set map_heap. 64 MiB (16384 pages);
     # disjoint from clang's link range (0x40000000..) and stack (0x8000200000).
     if map_heap:
         val HEAP_VA: u64 = 0x9000000000
@@ -405,23 +408,19 @@ fn _x86_64_fs_exec_enter_ring3(binary_path: text, blob: u64, hdr_len: u64, file_
         # through .to_u64() evaluates to 0, which silently mapped every page to the
         # same VA and set the heap size to 0 (clang then OOM'd on its first mmap).
         # See doc/08_tracking/bug for the .to_u64()-returns-zero codegen bug.
-        val HEAP_PAGE_SIZE: u64 = 4096
-        val HEAP_SIZE: u64 = 67108864
+        val HEAP_PAGE_SZ: u64 = 4096
         var hp: u64 = 0
         while hp < HEAP_PAGES:
             val hph = pmm_alloc_page_raw()
             if hph == 0:
                 serial_println("[spawn] FAIL heap alloc page={hp}")
                 return -5
-            vmm_zero_phys_range(hph, HEAP_PAGE_SIZE)
-            if not vmm_map_user_low_page(space, VirtAddr(addr: HEAP_VA + (hp * HEAP_PAGE_SIZE)), PhysAddr(addr: hph), VmFlags.user_rw()):
+            vmm_zero_phys_range(hph, HEAP_PAGE_SZ)
+            if not vmm_map_user_low_page(space, VirtAddr(addr: HEAP_VA + (hp * HEAP_PAGE_SZ)), PhysAddr(addr: hph), VmFlags.user_rw()):
                 serial_println("[spawn] FAIL heap map page={hp}")
                 return -6
             hp = hp + 1
-        if halt_on_exit:
-            rt_user_heap_init(HEAP_VA, HEAP_SIZE)
-        else:
-            rt_user_heap_init_returning(HEAP_VA, HEAP_SIZE)
+        rt_user_heap_init(HEAP_VA, HEAP_PAGES * HEAP_PAGE_SZ)
         serial_println("[spawn] user heap mapped base=0x{HEAP_VA} pages={HEAP_PAGES}")
 
     val ctx = TaskContext(
@@ -462,7 +461,7 @@ pub fn x86_64_fs_exec_enter_stream_ring3(binary_path: text, header_blob: u64, hd
     `file_len` is not capped by the 4 MiB path-read buffer.
     """
     serial_println("[spawn] stream path={binary_path} hdr_len={hdr_len} file_len={file_len}")
-    _x86_64_fs_exec_enter_ring3(binary_path, header_blob, hdr_len, file_len, true, true, false, argv, envp)
+    _x86_64_fs_exec_enter_ring3(binary_path, header_blob, hdr_len, file_len, true, false, argv, envp)
 
 pub fn x86_64_fs_exec_enter_stream_heap_ring3(binary_path: text, header_blob: u64, hdr_len: u64, file_len: u64, argv: [text], envp: [text]) -> i64:
     """Stream + a 64 MiB anonymous user heap (rt_user_heap_init) for real libc
@@ -470,7 +469,7 @@ pub fn x86_64_fs_exec_enter_stream_heap_ring3(binary_path: text, header_blob: u6
     exit(0) halt QEMU instead of longjmp-resuming the kernel — the default SSH
     multi-command spawn must use x86_64_fs_exec_enter_stream_ring3."""
     serial_println("[spawn] stream+heap path={binary_path} hdr_len={hdr_len} file_len={file_len}")
-    _x86_64_fs_exec_enter_ring3(binary_path, header_blob, hdr_len, file_len, true, true, true, argv, envp)
+    _x86_64_fs_exec_enter_ring3(binary_path, header_blob, hdr_len, file_len, true, true, argv, envp)
 
 pub fn x86_64_fs_exec_enter_image_ring3(image: UserProcessImage, blob: u64, argv: [text], envp: [text]) -> i64:
     """Map a general-built UserProcessImage into a fresh user AS and enter ring 3."""
@@ -481,4 +480,4 @@ pub fn x86_64_fs_exec_enter_image_ring3(image: UserProcessImage, blob: u64, argv
     val builder_top = user_process_image_stack_top(image)
     val stk_bytes = user_process_image_initial_stack_bytes(image)
     serial_println("[spawn] image path={image.binary_path} entry=0x{img_entry} segments={seg_count} builder_top=0x{builder_top} builder_sp=0x{builder_sp} stk_bytes={stk_bytes.len()} file_len={fb.len()}")
-    _x86_64_fs_exec_enter_ring3(image.binary_path, blob, fb.len().to_u64(), fb.len().to_u64(), false, false, false, argv, envp)
+    _x86_64_fs_exec_enter_ring3(image.binary_path, blob, fb.len().to_u64(), fb.len().to_u64(), false, false, argv, envp)

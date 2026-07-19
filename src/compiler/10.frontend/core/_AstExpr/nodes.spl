@@ -92,8 +92,6 @@ var expr_extra: [i64] = []
 var expr_args: [[i64]] = []
 var expr_arg_names: [[text]] = []
 var expr_stmts: [[i64]] = []
-var expr_count_slot: [i64] = [0]
-var expr_env_mirror_slot: [bool] = []
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_env_set(key: text, value: text) -> bool
@@ -151,42 +149,11 @@ fn expr_i64_list_split(raw: text) -> [i64]:
             result.push(expr_parse_i64(part))
     result
 
-fn expr_env_mirror_enabled() -> bool:
-    if expr_env_mirror_slot != nil and expr_env_mirror_slot.len() > 0:
-        return expr_env_mirror_slot[0]
-    # Interpreter module variables may not persist between calls. Preserve its
-    # compatibility mirror while compiled Stage4 uses the cached fast path.
-    (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (rt_env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? "") != "1"
-
-fn expr_env_read(idx: i64, field: text) -> text:
-    if not expr_env_mirror_enabled():
-        return ""
-    rt_env_get(expr_key(idx, field)) ?? ""
-
-fn expr_mode_slots_refresh():
-    if expr_env_mirror_slot == nil or expr_env_mirror_slot.len() == 0:
-        expr_env_mirror_slot = [false]
-    val native_arena = (rt_env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? "") == "1"
-    expr_env_mirror_slot[0] = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and not native_arena
-
-fn expr_count_slot_ensure():
-    if expr_count_slot == nil or expr_count_slot.len() == 0:
-        expr_count_slot = [0]
-
 fn expr_count_env() -> i64:
-    expr_count_slot_ensure()
-    if not expr_env_mirror_enabled():
-        return expr_count_slot[0]
-    val env_count = expr_parse_i64(rt_env_get("SIMPLE_BOOTSTRAP_EXPR_COUNT") ?? "")
-    if env_count > 0:
-        return env_count
-    expr_count_slot[0]
+    expr_parse_i64(rt_env_get("SIMPLE_BOOTSTRAP_EXPR_COUNT") ?? "")
 
 fn expr_count_set(value: i64):
-    expr_count_slot_ensure()
-    expr_count_slot[0] = value
-    if expr_env_mirror_enabled():
-        rt_env_set("SIMPLE_BOOTSTRAP_EXPR_COUNT", int_to_str(value))
+    rt_env_set("SIMPLE_BOOTSTRAP_EXPR_COUNT", int_to_str(value))
 
 fn expr_key(idx: i64, field: text) -> text:
     "SIMPLE_BOOTSTRAP_EXPR_" + int_to_str(idx) + "_" + field
@@ -199,28 +166,28 @@ fn expr_key(idx: i64, field: text) -> text:
 # the env write makes them fall back to the (correct) arrays. See bug
 # ast_env_var_quadratic_parse_2026-06-13.
 fn expr_i64_set(idx: i64, field: text, value: i64):
-    if expr_env_mirror_enabled():
+    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
         rt_env_set(expr_key(idx, field), int_to_str(value))
 
 fn expr_i64_get(idx: i64, field: text) -> i64:
-    expr_parse_i64(expr_env_read(idx, field))
+    expr_parse_i64(rt_env_get(expr_key(idx, field)) ?? "")
 
 fn expr_text_set(idx: i64, field: text, value: text):
-    if expr_env_mirror_enabled():
+    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
         rt_env_set(expr_key(idx, field), value)
 
 fn expr_text_get(idx: i64, field: text) -> text:
-    expr_env_read(idx, field)
+    rt_env_get(expr_key(idx, field)) ?? ""
 
 fn expr_list_set(idx: i64, field: text, values: [i64]):
-    if expr_env_mirror_enabled():
+    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
         rt_env_set(expr_key(idx, field), expr_i64_list_join(values))
 
 fn expr_list_get(idx: i64, field: text) -> [i64]:
-    expr_i64_list_split(expr_env_read(idx, field))
+    expr_i64_list_split(rt_env_get(expr_key(idx, field)) ?? "")
 
 fn expr_text_list_set(idx: i64, field: text, values: [text]):
-    if expr_env_mirror_enabled():
+    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
         rt_env_set(expr_key(idx, field), values.join("\n"))
 
 fn expr_call_args_set(idx: i64, call_args: [i64], arg_names: [text]):
@@ -237,9 +204,28 @@ fn expr_count() -> i64:
 
 fn expr_reset():
     # Bootstrap nil-guard: native binaries zero-initialize module-level vars
-    # instead of running the initializer code. Allocate once, then clear in
-    # place so repeated no-GC Stage4 parses reuse arena capacity.
-    expr_mode_slots_refresh()
+    # instead of running the initializer code. Ensure they're valid containers.
+    expr_tag = []
+    expr_span = []
+    expr_i_val = []
+    expr_f_val = []
+    expr_s_val = []
+    expr_left = []
+    expr_right = []
+    expr_extra = []
+    expr_args = []
+    expr_arg_names = []
+    expr_stmts = []
+    asm_arm_archs = []
+    asm_arm_os = []
+    asm_arm_abi = []
+    asm_arm_backend = []
+    asm_arm_ver_ops = []
+    asm_arm_ver_vals = []
+    asm_arm_asm_text = []
+    asm_arm_is_compile_error = []
+    asm_arm_error_msg = []
+    asm_arm_is_wildcard = []
     if expr_tag == nil:
         expr_tag = []
     if expr_span == nil:

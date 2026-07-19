@@ -641,27 +641,10 @@ impl MirLowering:
                         ()
         nil
 
-    me resolved_call_hir_param_types(symbol: SymbolId) -> [HirType]:
-        val sym = self.symbols.get_symbol(symbol)
-        if val found_sym = sym:
-            if val sym_type = found_sym.type_:
-                match sym_type.kind:
-                    case HirTypeKind.Function(params, _, _):
-                        return params
-                    case _:
-                        ()
-        []
-
     me remember_call_hir_return(local: LocalId, symbol: SymbolId):
         val return_type = self.resolved_call_hir_return_type(symbol)
         if val found_type = return_type:
             self.local_hir_types[local.id] = found_type
-            match found_type.kind:
-                case HirTypeKind.Optional(_):
-                    self.option_value_locals[local.id] = true
-                    self.runtime_value_locals[local.id] = true
-                case _:
-                    ()
 
     me resolved_call_return_type(symbol: SymbolId) -> MirType:
         val hir_return_type = self.resolved_call_hir_return_type(symbol)
@@ -818,18 +801,6 @@ impl MirLowering:
                     # element type directly; no separate local_hir_types
                     # registration is needed here.)
                     self.remember_field_projection_provenance(base, base_local, field_idx, field_result)
-                    if val field_owner = projected_struct_name:
-                        if self.struct_field_hir_type.has(field_owner):
-                            val field_types = self.struct_field_hir_type[field_owner]
-                            if field_idx >= 0 and field_idx < field_types.len():
-                                val declared_field_type = field_types[field_idx]
-                                match declared_field_type.kind:
-                                    case HirTypeKind.Optional(_):
-                                        self.option_value_locals[field_result.id] = true
-                                        self.runtime_value_locals[field_result.id] = true
-                                        self.local_hir_types[field_result.id] = declared_field_type
-                                    case _:
-                                        ()
                     return field_result
                 case _:
                     pass
@@ -1654,10 +1625,8 @@ impl MirLowering:
                 unary_result
 
             case If(cond, then_, else_):
-                var expected_if_type: HirType? = nil
-                if expr.has_type_:
-                    expected_if_type = Some(expr.type_)
-                self.lower_if(cond, then_, else_, expected_if_type)
+
+                self.lower_if(cond, then_, else_)
 
             case MethodCall(receiver, method, args, resolution):
                 self.lower_method_call(receiver, method, args, resolution)
@@ -2060,19 +2029,13 @@ impl MirLowering:
             case Return(value):
 
                 # Return's payload is HirExpr? (Optional): Some(expr) for
-                # `return expr`, nil for a bare `return`. Bind the present
-                # payload before lowering; a bare return has no operand.
-                if val rv = value:
+                # `return expr`, nil for a bare `return`. Unwrap before lowering
+                # — passing the Optional straight to lower_expr nil-derefs on
+                # `expr.kind`.
+                if value.is_some():
+                    val rv: HirExpr = value.unwrap()
                     var br = self.builder
-                    var result = self.lower_expr(rv)
-                    if val active_fn = self.builder.current_function:
-                        val declared_return = self.resolved_call_hir_return_type(active_fn.symbol)
-                        if val found_return = declared_return:
-                            match found_return.kind:
-                                case HirTypeKind.Optional(_):
-                                    result = self.ensure_option_handle(result, found_return)
-                                case _:
-                                    ()
+                    val result = self.lower_expr(rv)
                     br = self.builder
                     br.terminate_return(Some(mir_operand_copy(result)))
                     self.builder = br
@@ -2260,10 +2223,7 @@ impl MirLowering:
                 self.lower_enum_lit(type_, variant, payload)
 
             case MatchCase(scrutinee, arms):
-                var expected_match_type: HirType? = nil
-                if expr.has_type_:
-                    expected_match_type = Some(expr.type_)
-                self.lower_match_case(scrutinee, arms, expected_match_type)
+                self.lower_match_case(scrutinee, arms)
 
             case _:
 
@@ -2274,7 +2234,7 @@ impl MirLowering:
     # B5b Phase 1 — MatchCase lowering (integer-literal patterns only)
     # ========================================================================
 
-    me lower_match_case(scrutinee: HirExpr, arms: [HirMatchArm], expected_type: HirType?) -> LocalId:
+    me lower_match_case(scrutinee: HirExpr, arms: [HirMatchArm]) -> LocalId:
         """Lower a `match` expression on integer-literal patterns.
 
         Phase 1 supports:
@@ -2362,7 +2322,7 @@ impl MirLowering:
                     ()
             scan_i = scan_i + 1
         if has_enum_arm:
-            return self.lower_enum_match(scrutinee, norm_arms, expected_type)
+            return self.lower_enum_match(scrutinee, norm_arms)
 
         # Phase 1+2a gate: every arm must be (Wildcard | Binding |
         # Literal(IntLit) | Or(of IntLit)) with no guard. If anything else
@@ -2548,6 +2508,6 @@ impl MirLowering:
         val default_binding = if has_default_binding: Some(default_binding_value) else: nil
 
         if use_switch:
-            self.emit_switch_dispatch(scrut_local, int_cases, default_body_value, default_binding, expected_type)
+            self.emit_switch_dispatch(scrut_local, int_cases, default_body_value, default_binding)
         else:
-            self.emit_if_chain_dispatch(scrut_local, int_cases, default_body_value, default_binding, expected_type)
+            self.emit_if_chain_dispatch(scrut_local, int_cases, default_body_value, default_binding)

@@ -5,7 +5,7 @@
 
 use simple_runtime::RuntimeValue;
 
-use crate::value::{enum_names, Value};
+use crate::value::Value;
 use crate::value_bridge::{bridge_tags, BridgeValue};
 
 // ============================================================================
@@ -106,30 +106,6 @@ pub fn value_to_runtime(v: &Value) -> RuntimeValue {
         // dict is a fresh, uniquely-owned object with no other alias, so a
         // deep copy loses no shared-mutation semantics.
         Value::Dict(map) | Value::FrozenDict(map) => values_to_runtime_dict(map.iter()),
-        Value::Enum {
-            enum_name,
-            variant,
-            payload,
-        } => {
-            let (enum_id, discriminant) = if enum_name == enum_names::OPTION {
-                let ordinal = match variant.as_str() {
-                    enum_names::SOME => 0,
-                    enum_names::NONE => 1,
-                    _ => panic!("unsupported Option variant at runtime bridge: {variant}"),
-                };
-                (1, ordinal)
-            } else if enum_name == enum_names::RESULT {
-                match variant.as_str() {
-                    enum_names::OK | enum_names::ERR => {}
-                    _ => panic!("unsupported Result variant at runtime bridge: {variant}"),
-                }
-                (0, simple_runtime::value::hash_variant_discriminant(variant))
-            } else {
-                panic!("unsupported enum at runtime bridge: {enum_name}::{variant}")
-            };
-            let payload = payload.as_deref().map_or(RuntimeValue::NIL, value_to_runtime);
-            simple_runtime::value::rt_enum_new(enum_id, discriminant, payload)
-        }
         _ => RuntimeValue::NIL,
     }
 }
@@ -282,43 +258,6 @@ pub fn runtime_to_value(rv: RuntimeValue) -> Value {
                         }
 
                         Value::Dict(std::sync::Arc::new(map))
-                    }
-                    HeapObjectType::Enum => {
-                        use simple_runtime::value::{
-                            hash_variant_discriminant, rt_enum_discriminant, rt_enum_id, rt_enum_payload,
-                        };
-
-                        let enum_id = rt_enum_id(rv);
-                        let discriminant = rt_enum_discriminant(rv) as u32;
-                        if enum_id == 1 {
-                            match discriminant {
-                                0 => Value::Enum {
-                                    enum_name: enum_names::OPTION.to_string(),
-                                    variant: enum_names::SOME.to_string(),
-                                    payload: Some(Box::new(runtime_to_value(rt_enum_payload(rv)))),
-                                },
-                                1 => Value::Enum {
-                                    enum_name: enum_names::OPTION.to_string(),
-                                    variant: enum_names::NONE.to_string(),
-                                    payload: None,
-                                },
-                                _ => panic!("unsupported Option discriminant at runtime bridge: {discriminant}"),
-                            }
-                        } else if enum_id == 0 && discriminant == hash_variant_discriminant(enum_names::OK) {
-                            Value::Enum {
-                                enum_name: enum_names::RESULT.to_string(),
-                                variant: enum_names::OK.to_string(),
-                                payload: Some(Box::new(runtime_to_value(rt_enum_payload(rv)))),
-                            }
-                        } else if enum_id == 0 && discriminant == hash_variant_discriminant(enum_names::ERR) {
-                            Value::Enum {
-                                enum_name: enum_names::RESULT.to_string(),
-                                variant: enum_names::ERR.to_string(),
-                                payload: Some(Box::new(runtime_to_value(rt_enum_payload(rv)))),
-                            }
-                        } else {
-                            panic!("unsupported runtime enum at bridge: id={enum_id}, discriminant={discriminant}")
-                        }
                     }
                     _ => {
                         // Other heap types not yet supported
@@ -492,57 +431,5 @@ mod tests {
         let runtime = value_to_runtime(&value);
         assert_ne!(runtime, RuntimeValue::NIL);
         assert_eq!(simple_runtime::value::rt_dict_len(runtime), 1);
-    }
-
-    #[test]
-    fn option_bridge_uses_canonical_id_and_ordinals() {
-        let some = Value::Enum {
-            enum_name: enum_names::OPTION.to_string(),
-            variant: enum_names::SOME.to_string(),
-            payload: Some(Box::new(Value::Int(3))),
-        };
-        let none = Value::Enum {
-            enum_name: enum_names::OPTION.to_string(),
-            variant: enum_names::NONE.to_string(),
-            payload: None,
-        };
-
-        let some_runtime = value_to_runtime(&some);
-        let none_runtime = value_to_runtime(&none);
-        assert_eq!(simple_runtime::value::rt_enum_id(some_runtime), 1);
-        assert_eq!(simple_runtime::value::rt_enum_discriminant(some_runtime), 0);
-        assert_eq!(simple_runtime::value::rt_enum_payload(some_runtime).as_int(), 3);
-        assert_eq!(simple_runtime::value::rt_enum_id(none_runtime), 1);
-        assert_eq!(simple_runtime::value::rt_enum_discriminant(none_runtime), 1);
-        assert_eq!(runtime_to_value(some_runtime), some);
-        assert_eq!(runtime_to_value(none_runtime), none);
-    }
-
-    #[test]
-    fn result_bridge_keeps_hashed_variants() {
-        let ok = Value::Enum {
-            enum_name: enum_names::RESULT.to_string(),
-            variant: enum_names::OK.to_string(),
-            payload: Some(Box::new(Value::Int(7))),
-        };
-        assert_eq!(runtime_to_value(value_to_runtime(&ok)), ok);
-    }
-
-    #[test]
-    #[should_panic(expected = "unsupported Option variant at runtime bridge")]
-    fn malformed_option_fails_loudly() {
-        let malformed = Value::Enum {
-            enum_name: enum_names::OPTION.to_string(),
-            variant: "Maybe".to_string(),
-            payload: None,
-        };
-        let _ = value_to_runtime(&malformed);
-    }
-
-    #[test]
-    #[should_panic(expected = "unsupported runtime enum at bridge")]
-    fn unknown_runtime_enum_fails_loudly() {
-        let unknown = simple_runtime::value::rt_enum_new(99, 7, RuntimeValue::NIL);
-        let _ = runtime_to_value(unknown);
     }
 }

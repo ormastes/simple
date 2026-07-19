@@ -5,8 +5,8 @@
 
 use std.platform (is_windows, normalize_path, join_path)
 use compiler.backend.linker.link (LinkConfig, LinkError, LinkErrorKind, Linker)
-use std.nogc_sync_mut.io_runtime.{process_run}
 
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_env_get(key: text) -> text
 
@@ -23,7 +23,7 @@ struct MsvcShellResult:
 # `extern fn shell` declared here to shadow ANY same-named local function
 # in ANY module, anywhere in the program (see msvc_shell_naming bug).
 fn msvc_shell(cmd: text) -> MsvcShellResult:
-    val (stdout, stderr, code) = process_run("cmd", ["/C", cmd])
+    val (stdout, stderr, code) = rt_process_run("cmd", ["/C", cmd])
     MsvcShellResult(stdout: stdout, stderr: stderr, exit_code: code)
 
 # ===========================================================================
@@ -130,9 +130,14 @@ impl MsvcLinker:
 
         # Build arguments
         val args = self.config.build_args(output, object_files)
-        val (_, stderr, code) = process_run(link_exe, args)
-        if code != 0:
-            return Err(LinkError(kind: LinkErrorKind.OutputFailed, message: stderr, symbol: nil, location: nil))
+        val args_str = args.join(" ")
+
+        # Execute linker
+        val cmd = "\"{link_exe}\" {args_str}"
+        val result = msvc_shell(cmd)
+
+        if result.exit_code != 0:
+            return Err(LinkError(kind: LinkErrorKind.OutputFailed, message: result.stderr, symbol: nil, location: nil))
 
         Ok(())
 

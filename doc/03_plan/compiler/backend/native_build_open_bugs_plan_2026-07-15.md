@@ -57,8 +57,8 @@ source fixes from executable proof.
 | 4 | Enum text-payload source fix landed; strict default-LLVM + explicit-Cranelift callback/match/field-assignment proof added, execution pending. |
 | 5 | Subject-enum variant precedence implemented for expression and statement match; focused Rust tests pending execution. |
 | 6 | Old two-slot `Any` premise is superseded by the one-word ABI; strict default-LLVM + explicit-Cranelift wrapper-to-extern forwarding proof added, execution pending. |
-| 7 | Source implemented at the contained MIR enum-bind owner; the cross-module `Result<[u8], E>` fixture now routes both Ok and Err through `?`, with flagless default-LLVM and explicit-Cranelift execution scheduled on FreeBSD x86_64 plus AArch64/RISC-V64 QEMU, flagless-LLVM ARM32/RV32 objects, and Windows ARM64 LLVM/Cranelift objects. Execution is pending. |
-| 8 | Open for execution proof; typed local/direct/method Option `?`, enum-id-1 producer boundaries, true function-value `f(3)`/`f(nil)` arguments, and early-`?` canonical None returns are source-implemented. Hosted Linux/macOS/Windows and FreeBSD x86_64 schedule annotated/direct/unresolved-method checks under flagless LLVM and explicit Cranelift; ARM32 LLVM and Windows ARM64 LLVM/Cranelift require target objects. The full uniform ABI matrix remains opt-in pending current-source LLVM/Cranelift execution; genuinely unknown late dispatch, nested/float payload proof, the separate `.?` consumer, and the legacy Cranelift generic-call shortcut remain unproved. Flat text unwrap is source-implemented with staged execution pending. |
+| 7 | Source implemented at the contained MIR enum-bind owner; the cross-module `Result<[u8], E>` fixture now routes both Ok and Err through `?`, with LLVM and Cranelift execution scheduled on FreeBSD x86_64 plus AArch64/RISC-V64 QEMU and a flagless-LLVM RV32 bare-metal correctness object gate. Execution is pending. |
+| 8 | Open/partial; typed local/direct-call Option `?` support, resolved/unresolved-method provenance, and additive `rt_enum_id` surfaces are source-implemented. Hosted Linux/macOS/Windows and FreeBSD x86_64 schedule annotated/direct/unresolved-method native-authoritative checks under flagless LLVM and explicit Cranelift; ARM32 LLVM and Windows ARM64 LLVM/Cranelift require successful nonempty target objects without the retired diagnostic. Execution is pending and genuinely unknown late dispatch remains unguessed. The flat payload-3 collision and uniform tagged Option ABI remain open; flat text unwrap is implemented but unexecuted. |
 | 9 | Capturing and non-capturing stored/passed lambda values implemented with a membership-checked closure ABI; strict hosted/simple-core default-LLVM + explicit-Cranelift proof added, execution pending. |
 | 10 | Captured scalar/struct closure storage implemented through the same closure ABI; strict dual-runtime/backend proof added, execution pending. |
 | 11 | Fixed by Unit-arm merge suppression and backend void-spill protection. |
@@ -68,8 +68,8 @@ source fixes from executable proof.
 | 15 | Seed cache-key source fix and focused regression implemented; fresh executable cache proof pending. |
 | 16 | Target-aware global cfg selection implemented across native, driver/JIT, imports, and module loading; AArch64/RISC-V LLVM object regressions added, execution pending. |
 | 17 | Module+owner-qualified method identity implemented through imports, HIR, MIR, bootstrap, trait defaults, and static methods; the empirically resolved strict LLVM+Cranelift dispatch case is scheduled on Linux, macOS arm64/x64, Windows x64, and FreeBSD x86_64. First staged non-Linux execution is pending. |
-| 18 | Pure-Simple Cranelift dynload globals now declare, initialize, load, and store writable scalar data. The strict LLVM+Cranelift init/mutation case runs in Linux's full parity gate and is selected on macOS arm64/x64, Windows x64, and FreeBSD x86_64; first staged execution is pending. |
-| 19 | Open/partial; dispatch/spin, compiler backfill/provider slices, private vendored font symbols, conditional pure-C dynamic-loader ownership with shared LLVM/Cranelift hosted-platform regression, target-explicit dynamic-loader archive/symbol policy, pure-Simple aggregate final-request derivation, deterministic unique-owner archive selection, canonical link-profile fingerprint input, cross-platform candidate-path/native-all discovery and hosted transitive link policy, explicit-entry dispatch, exact requested-root projection and strict final-link routing, fail-fast rejection of Stage4 emit-object bypass, native-host-only compiler-capsule admission, deterministic exact-ABI production staging for dynload, font, memtrack, time/progress, POSIX fork isolation, and process/editor transport, plus localized runtime-native dependency ownership and transitive requested-owner resolution are source-implemented. The fork provider requires the exact three memtrack dependencies on Linux/macOS/FreeBSD; Windows fork stubs are rejected as non-providers. Hosted Windows candidate validation now case-normalizes relative `.a`/`.lib` paths while Unix remains case-sensitive. Windows provider object ABI is now derived from the once-resolved C driver, kept separate from linker/archive flavor and path semantics, with contradictory or unknown Stage4 toolchains rejected. MSVC selected owners now project through a per-executable exact-export DLL/import library, with hash-verified Stage4 and SQLite neighbors; MinGW retains the exact static-capsule path. Hosted Linux+macOS arm64/x64+FreeBSD x86_64+Windows MSVC x64+MinGW x64 dynamic-loader compile/archive/scan proof is source-scheduled; first execution is pending. It checks independent rebuild determinism, exact one-member composition, forbidden sections, and measured ELF/Mach-O/COFF-MSVC/COFF-MinGW symbols through the existing pure-Simple validators. All current hosted formats are source-scheduled but pending first execution; none remains unscheduled. Remaining duplicate-free core/CLI owners, production hash/cache wiring, cross-target compiler capsules, and strict execution remain. The existing strict LLVM/Cranelift `dynload_tagged_text` proof is selected on macOS arm64/x64, Windows x64, and FreeBSD x86_64, with backend XFAIL forbidden; first staged execution is pending. |
+| 18 | Pure-Simple Cranelift dynload globals now declare, initialize, load, and store writable scalar data; strict LLVM+Cranelift init/mutation proof pending. |
+| 19 | Open/partial; dispatch/spin, compiler backfill/provider slices, private vendored font symbols, conditional pure-C dynamic-loader ownership with shared LLVM/Cranelift hosted-platform regression, target-explicit dynamic-loader archive/symbol policy, pure-Simple aggregate final-request derivation, deterministic unique-owner archive selection, canonical link-profile fingerprint input, cross-platform candidate-path/native-all discovery and hosted transitive link policy, explicit-entry dispatch, exact requested-root projection and strict final-link routing, fail-fast rejection of Stage4 emit-object bypass, native-host-only compiler-capsule admission, deterministic exact-ABI production staging for dynload, font, memtrack, time/progress, POSIX fork isolation, and process/editor transport, plus localized runtime-native dependency ownership and transitive requested-owner resolution are source-implemented. The fork provider requires the exact three memtrack dependencies on Linux/macOS/FreeBSD; Windows fork stubs are rejected as non-providers. Hosted Windows candidate validation now case-normalizes relative `.a`/`.lib` paths while Unix remains case-sensitive. Windows provider object ABI is now derived from the once-resolved C driver, kept separate from linker/archive flavor and path semantics, with contradictory or unknown Stage4 toolchains rejected. Hosted Linux+macOS arm64/x64+FreeBSD x86_64+Windows MSVC x64+MinGW x64 dynamic-loader compile/archive/scan proof is source-scheduled; first execution is pending. It checks independent rebuild determinism, exact one-member composition, forbidden sections, and measured ELF/Mach-O/COFF-MSVC/COFF-MinGW symbols through the existing pure-Simple validators. All current hosted formats are source-scheduled but pending first execution; none remains unscheduled. Remaining duplicate-free core/CLI owners, production hash/cache wiring, cross-target compiler capsules, and strict execution remain. The existing strict LLVM/Cranelift `dynload_tagged_text` proof is selected on macOS arm64/x64, Windows x64, and FreeBSD x86_64, with backend XFAIL forbidden; first staged execution is pending. |
 | 20 | C-owned host-GPU queue facade and fail-closed archive ownership checks implemented; native queue execution proof remains. |
 | 21 | Rust-seed inline-continuation fix and focused chained-inline regression are verified (`simple-parser` control-flow test: 19 passed); real inspector execution remains pending behind the unrelated pure-Simple `rt_cli_arg_count` bootstrap failure. |
 
@@ -106,9 +106,7 @@ FreeBSD QEMU `--full` now runs the complete 15-case default-LLVM native-entry
 matrix after the focused explicit-Cranelift probe and requires zero codegen
 fallback hits. Its cross-module Result control now covers Ok payload extraction
 and Err propagation through `?` under both backends. The same fixture is wired
-for AArch64/RISC-V QEMU and also asserts that an Option `.map` receiver mutates
-exactly once. ARM32/RV32 and Windows ARM64 compile that same control to target
-objects; execution is pending.
+for AArch64/RISC-V QEMU; execution is pending.
 
 The existing Linux x86_64 LLVM bootstrap CI leg now enables canonical Stage 5,
 which builds both pure-Simple MCP servers and runs their fresh-artifact
@@ -169,12 +167,12 @@ A wrong-but-silent result is the worst failure class; these go first.
 | 5 | `native_const_pattern_lowers_irrefutably` | `case CONST:` match arm lowers as irrefutable (always taken), skipping the equality test. Emit the `rt_native_eq`/`icmp` guard for const patterns. | `expressions.spl` (build_match) | S |
 | 6 | `native_any_param_forwarding_corruption` (High) | Forwarding an `Any` parameter corrupts the pointer (tag/box mismatch on pass-through). Preserve the tagged handle across the call boundary; no re-box. | `core_codegen.spl` call lowering | M |
 | 7 | `native_codegen_crossmodule_generic_result_u8_erasure` | Imported function signatures already retain concrete `Result<[u8],E>` through HIR and the no-op monomorphization pass; MIR `rt_enum_payload` binding dropped the existing runtime-array marker. Recover the selected Result payload type in `lower_enum_match` and preserve array provenance. | `switch_operators_calls.spl` (`lower_enum_match`) | S |
-| 8 | Option ABI pair: `native_try_op_on_option_silent_wrong` + `native_text_option_unwrap_pointer_value` | The enum-id-1 source migration removes the flat payload-3 producer collision across typed boundaries; the focused strict-dual matrix, nested/float payloads, and ARM32 constructor ABI still require execution proof. | HIR Optional canon + MIR + runtime | L |
+| 8 | Option ABI pair: `native_try_op_on_option_silent_wrong` + `native_text_option_unwrap_pointer_value` | Flat `i64?` payload `3` collides with the nil sentinel; `?`/unwrap on Option mis-dispatch. Needs a uniform tagged Option handle (`OPTION_ENUM_ID=1`, `Some=0/None=1`), `rt_enum_id` in both runtimes, and declared-type provenance for locals/calls. Design already recorded in the two bug docs. | HIR Optional canon + MIR + runtime | L |
 
-**Note on #8:** source-implemented and blocked on a runnable pure-Simple
-`native-build` verification gate (source-only checks cannot prove absence of
-double-wrapping, payload-3 collisions, or Result regressions). Run the ABI
-acceptance matrix from the bug docs before promotion. It must also prove level-aware nested Option
+**Note on #8:** blocked on a runnable pure-Simple `native-build` verification gate
+(source-only landing cannot prove absence of double-wrapping / payload-3 collision
+/ Result regressions). Do this last in Wave 1, with the ABI acceptance matrix from
+the bug docs as the gate. That matrix must also prove level-aware nested Option
 wrapping, bit-preserving float payloads, and the ARM32 constructor ABI; a runtime
 ID check alone cannot distinguish `Option<T>` from `Option<Option<T>>`.
 
@@ -232,15 +230,7 @@ path now stages, inventories, and exact-ABI validates the dedicated font archive
 with vendored STB exports held translation-unit-local and the dedicated
 memtrack archive with its 15-global ABI. It also compiles and stages the
 dedicated 14-export time/progress archive with target-specific core clock
-dependencies. The strict owner path also has a separate exact 27-export SQLite
-provider with audited runtime/external dependencies and conditional `sqlite3`
-link input; its C result encoding now matches the public Simple/interpreter
-integer `1`/`0` ABI. Windows SQLite neighbor staging is source-implemented with
-SHA-256 equality checks; hosted execution and native artifact receipts remain
-pending. Non-vcpkg override/PATH builds still need explicit import-library/DLL
-pair validation; see
-`doc/08_tracking/bug/stage4_windows_sqlite_import_dll_pairing_2026-07-18.md`.
-GPU, window,
+dependencies; execution proof remains pending. GPU, window,
 remaining HTTP helper/server, thread, SMF/CUDA, and other CLI owners remain. The remaining
 core-C split has 31 runtime/runtime-native overlaps plus the thread-sleep weak
 fallback and cannot use raw aggregate linking. Raw
@@ -260,28 +250,22 @@ closure, validates the exact raw and localized envelopes for every hosted
 object-format contract, and admits only those exact names for direct or
 transitive ownership.
 Exact selected-archive projection/linking is now source-implemented for native
-Linux/macOS/FreeBSD/Windows. Unix and MinGW selected archives are partial-linked
-cycle-safely, all non-root globals are localized, and the deterministic capsule
-is rescanned. MSVC instead links each output's selected archives once into a
-per-executable `<stem>_stage4_<fingerprint>.dll`, validates its named export table
-against the exact requested runtime ABI, and feeds the generated import library to the strict
-final link. Both paths disable duplicate forgiveness and compiler-driver
-fallback. Execution and complete requested-owner evidence remain pending.
+Linux/macOS: selected one-member archives are partial-linked cycle-safely, all
+non-root globals are localized, the deterministic capsule is rescanned, and
+strict final linking disables duplicate forgiveness and cc fallback. Execution
+and complete requested-owner evidence remain pending. Strict execution therefore
+requires successful direct-linker and CRT discovery; it does not silently
+change semantics through the compiler-driver fallback.
 
 Windows bootstrap artifact discovery now distinguishes MSVC `.lib` from MinGW
 `lib*.a`: explicit linker flavor wins, then canonical `PLATFORM_ABI` preserves
-the public `--msvc`/`--mingw` selection. Static source coverage is present. The
-Windows LLVM/Cranelift full-CLI matrix now requires the final executable,
-Stage4 projection DLL, and `sqlite3.dll`; the first native artifact receipts
-remain pending.
+the public `--msvc`/`--mingw` selection. Static source coverage is present;
+native Windows artifact receipts remain pending.
 
 Strict Stage4 now bypasses raw `native_all` and treats the Cargo backfill as a
 read-only input. Pure-Simple derives its manifest without a hardcoded count,
 uses the portable `objcopy` resolver, and builds a transaction-owned localized
-Linux/FreeBSD ELF or macOS Mach-O one-member capsule. MSVC stages the raw
-compiler `.lib` only inside the same transaction, reduces its inventory to the
-derived exact manifest for owner resolution, and validates the final DLL export
-table instead of attempting a GNU relocatable link. Final inventory checks exact
+Linux ELF or macOS Mach-O one-member capsule. Final inventory checks exact
 localized-object/archive global symbol-table equality and canonical disjointness
 from every staged exact C provider and the localized runtime-native dependency
 owner. The process provider uses one exact platform-specific ABI archive while
@@ -340,9 +324,9 @@ their implementation order.
 1. Run each row's recorded focused/native/parity gate for execution-proof-only
    rows #2–#7, #9–#10, #12–#18, and #20–#21. Native/parity gates wait for a
    valid pure-Simple executable; do not reimplement landed source fixes.
-2. Run #8's opt-in strict LLVM/Cranelift matrix. If it fails, repair the
-   producer/consumer boundary atomically with the full Result-preservation
-   matrix; do not start a second representation migration.
+2. Implement #8 as one atomic uniform tagged Option ABI change, including every
+   producer/consumer boundary and the full Result-preservation matrix. Do not
+   land another partial representation change.
 3. Finish #19's provider inventory, production archive selection/link wiring,
    and canonical-input digest/cache namespace with invalidation proof before
    its strict execution gate.

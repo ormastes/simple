@@ -1,0 +1,87 @@
+# @cover src/lib/nogc_sync_mut/aws_sigv4.spl 60%
+#
+# SigV4 golden-vector specs — the signing path had ZERO test coverage before
+# this (see STORAGE_GUIDE M4). The vector below is AWS's own published
+# "GET Object" query-string-auth example
+# (https://docs.aws.amazon.com/AmazonS3/latest/API/sigv4-query-string-auth.html,
+# also recorded in doc/01_research/infra/spipe_infra/minio_s3_2026.md §2.5),
+# and was independently re-derived offline from the raw inputs with Python's
+# stdlib hashlib/hmac (not just recomputed with this repo's own
+# implementation) before being pinned here — so a match here is not a
+# tautology against our own code.
+#
+# Fixed inputs: bucket "examplebucket" (AWS virtual-host style — reproduced
+# here with bucket="" + host="examplebucket.s3.amazonaws.com", since
+# sigv4_presign_url builds path-style "/bucket/key" only when bucket != ""),
+# key "test.txt", access key AKIAIOSFODNN7EXAMPLE, date 20130524T000000Z,
+# region us-east-1, service s3, expires 86400.
+
+use app.itf.adapter_minio.{epoch_to_amz_datetime}
+use std.nogc_sync_mut.aws_sigv4.{
+    sigv4_sha256_hex, SIGV4_EMPTY_SHA256,
+    sigv4_credential_scope, sigv4_string_to_sign, sigv4_compute_signature,
+    sigv4_presign_url, sigv4_presign_get_url
+}
+
+val VEC_ACCESS_KEY = "AKIAIOSFODNN7EXAMPLE"
+val VEC_SECRET_KEY = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+val VEC_AMZ_DATE = "20130524T000000Z"
+val VEC_DATE = "20130524"
+val VEC_REGION = "us-east-1"
+val VEC_SERVICE = "s3"
+val VEC_HOST = "examplebucket.s3.amazonaws.com"
+val VEC_ENDPOINT = "https://examplebucket.s3.amazonaws.com"
+
+# Canonical request exactly as published by AWS for this example.
+val VEC_CANONICAL_REQUEST = "GET\n/test.txt\nX-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20130524%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20130524T000000Z&X-Amz-Expires=86400&X-Amz-SignedHeaders=host\nhost:examplebucket.s3.amazonaws.com\n\nhost\nUNSIGNED-PAYLOAD"
+
+val VEC_CANONICAL_REQUEST_HASH = "3bfa292879f6447bbcda7001decf97f4a54dc650c8942174ae0a9121cf58ad04"
+
+val VEC_STRING_TO_SIGN = "AWS4-HMAC-SHA256\n20130524T000000Z\n20130524/us-east-1/s3/aws4_request\n3bfa292879f6447bbcda7001decf97f4a54dc650c8942174ae0a9121cf58ad04"
+
+val VEC_SIGNATURE = "aeeed9bbccd4d02ee5c0109b86d86835f995330da4c265957d157751f604d404"
+
+val VEC_PRESIGNED_URL = "https://examplebucket.s3.amazonaws.com/test.txt?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20130524%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20130524T000000Z&X-Amz-Expires=86400&X-Amz-SignedHeaders=host&X-Amz-Signature=aeeed9bbccd4d02ee5c0109b86d86835f995330da4c265957d157751f604d404"
+
+
+describe "AWS SigV4 golden vector (AWS-published GET Object example)":
+
+    context "building blocks":
+
+        it "hashes the empty string to the well-known SHA256(\"\") constant":
+            expect(sigv4_sha256_hex("")).to_equal(SIGV4_EMPTY_SHA256)
+
+        it "builds the credential scope: date/region/service/aws4_request":
+            expect(sigv4_credential_scope(VEC_DATE, VEC_REGION, VEC_SERVICE)).to_equal("20130524/us-east-1/s3/aws4_request")
+
+        it "hashes the AWS-published canonical request to the AWS-published hash":
+            expect(sigv4_sha256_hex(VEC_CANONICAL_REQUEST)).to_equal(VEC_CANONICAL_REQUEST_HASH)
+
+        it "builds the AWS-published string-to-sign from the canonical request":
+            val scope = sigv4_credential_scope(VEC_DATE, VEC_REGION, VEC_SERVICE)
+            expect(sigv4_string_to_sign(VEC_AMZ_DATE, scope, VEC_CANONICAL_REQUEST)).to_equal(VEC_STRING_TO_SIGN)
+
+        it "computes the AWS-published final signature from the canonical request":
+            val sig = sigv4_compute_signature(VEC_SECRET_KEY, VEC_DATE, VEC_REGION, VEC_SERVICE, VEC_AMZ_DATE, VEC_CANONICAL_REQUEST)
+            expect(sig).to_equal(VEC_SIGNATURE)
+
+    context "end-to-end presigned URL (locks canonical request + string-to-sign + signature together)":
+
+        it "reproduces the exact AWS-published presigned GET URL":
+            val url = sigv4_presign_url("GET", VEC_ENDPOINT, VEC_HOST, "", "test.txt", VEC_ACCESS_KEY, VEC_SECRET_KEY, VEC_REGION, VEC_SERVICE, VEC_AMZ_DATE, 86400)
+            expect(url).to_equal(VEC_PRESIGNED_URL)
+
+        it "sigv4_presign_get_url (adapter_minio's entry point) matches sigv4_presign_url(\"GET\", ...)":
+            val via_get = sigv4_presign_get_url(VEC_ENDPOINT, VEC_HOST, "", "test.txt", VEC_ACCESS_KEY, VEC_SECRET_KEY, VEC_REGION, VEC_SERVICE, VEC_AMZ_DATE, 86400)
+            expect(via_get).to_equal(VEC_PRESIGNED_URL)
+
+        it "sigv4_presign_url(\"PUT\", ...) changes the signature (method is part of the canonical request)":
+            val put_url = sigv4_presign_url("PUT", VEC_ENDPOINT, VEC_HOST, "", "test.txt", VEC_ACCESS_KEY, VEC_SECRET_KEY, VEC_REGION, VEC_SERVICE, VEC_AMZ_DATE, 86400)
+            expect(put_url.contains("X-Amz-Signature={VEC_SIGNATURE}")).to_equal(false)
+            expect(put_url.starts_with("https://examplebucket.s3.amazonaws.com/test.txt?")).to_equal(true)
+
+    context "epoch_to_amz_datetime (used to build amz_datetime for every live call)":
+
+        it "matches the vector's date for the epoch second AWS's example date corresponds to":
+            # 2013-05-24T00:00:00Z = 1369353600 (also asserted in adapter_minio_spec.spl)
+            expect(epoch_to_amz_datetime(1369353600)).to_equal(VEC_AMZ_DATE)

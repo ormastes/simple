@@ -571,42 +571,6 @@ pub(crate) fn exec_assignment(
             }
         }
 
-        // Implicit-self field write: inside a `me`/`fn` method, a bare-name LHS
-        // assignment (`flag = true`) that matches a declared field of `self`
-        // performs the field write instead of silently shadowing it with a new
-        // local. This mirrors the implicit-self field READ (see the
-        // `Expr::Identifier` fallback in `interpreter/expr/literals.rs`) and is
-        // exactly the pattern the "self is implicit in methods" lint steers
-        // users toward. An existing local variable of the same name always
-        // shadows the field — only first-time bare-name assignments route to
-        // `self`. See bug interp_implicit_self_field_assignment_silent_noop_2026-07-17.
-        if is_first_assignment {
-            let self_has_field = matches!(
-                env.get("self"),
-                Some(Value::Object { fields, .. }) if fields.contains_key(name)
-            );
-            if self_has_field {
-                let (value, update) =
-                    handle_method_call_with_self_update(&assign.value, env, functions, classes, enums, impl_methods)?;
-                if let Some((obj_name, new_self)) = update {
-                    env.insert(obj_name, new_self);
-                }
-                if let Some(Value::Object { class, mut fields }) = env.remove("self") {
-                    let bf_check = Value::Object {
-                        class: class.clone(),
-                        fields: Arc::clone(&fields),
-                    };
-                    if let Some(updated) = super::update_bitfield_field(&bf_check, name, value.clone()) {
-                        env.insert("self".to_string(), updated);
-                    } else {
-                        Arc::make_mut(&mut fields).insert(name.clone(), value);
-                        env.insert("self".to_string(), Value::Object { class, fields });
-                    }
-                }
-                return Ok(Control::Next);
-            }
-        }
-
         // Fast path: `arr = arr + [e1, e2, ...]` on a Value::Array — push elements
         // in place instead of allocating a fresh array and copying both sides.
         // Mirrors the `arr += [..]` AugAssign fast path so the plain-assign form

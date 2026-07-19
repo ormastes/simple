@@ -58,7 +58,6 @@ impl MirLowering:
         self.runtime_array_locals = {}
         self.runtime_dict_locals = {}
         self.runtime_value_locals = {}
-        self.option_value_locals = {}
         self.nil_locals = {}
         if bootstrap_trace:
             print "[mir-lower] real-lower:start {fn_.name}"
@@ -184,13 +183,6 @@ impl MirLowering:
             val is_me_receiver = fn_.is_mutable and pli == 0 and (param.name == "self" or param.name == "me")
             val is_mut_param = param.is_mutable
             match param.type_.kind:
-                case Optional(_):
-                    # Typed callers cross the ABI with a canonical handle.
-                    # Callee-side raw-sentinel inference cannot distinguish
-                    # `Some(3)` from nil because both legacy payloads are 3.
-                    self.option_value_locals[local.id] = true
-                    self.runtime_value_locals[local.id] = true
-                    self.local_hir_types[local.id] = param.type_
                 case Array(element_type, _):
                     # Preserve the same runtime-array and element-struct
                     # metadata for typed function parameters that array
@@ -317,13 +309,7 @@ impl MirLowering:
             print "[mir-lower] lower_function:body-start {fn_.name}"
         if bootstrap_trace:
             print "[mir-lower] real-lower:body {fn_.name}"
-        var result = self.lower_block_expected(fn_.body, Some(fn_.return_type))
-        if result.? and fn_.return_type.?:
-            match fn_.return_type.kind:
-                case Optional(_):
-                    result = Some(self.ensure_option_handle(result ?? LocalId(id: 0), fn_.return_type))
-                case _:
-                    ()
+        val result = self.lower_block(fn_.body)
         if trace_enabled:
             print "[mir-lower] lower_function:body-done {fn_.name}"
         if bootstrap_trace:
@@ -488,8 +474,11 @@ impl MirLowering:
             case Ptr(inner, mutable):
                 MirType.ptr(self.lower_type(inner), mutable)
             case Optional(inner):
-                # Canonical Option ABI is one tagged rt_enum_new handle.
-                MirType.i64()
+                # Optional is enum { nil, Some(T) }
+                MirType(kind: MirTypeKind.Tuple([
+                    MirType(kind: MirTypeKind.Bool),  # has_value
+                    self.lower_type(inner)
+                ]))
             case Result(_, _):
                 # Result is a tagged runtime handle; retain its generic HIR
                 # payload type separately in local_hir_types.
@@ -517,9 +506,6 @@ impl MirLowering:
                 MirType(kind: MirTypeKind.I64)
 
     me lower_block(block: HirBlock) -> LocalId?:
-        self.lower_block_expected(block, nil)
-
-    me lower_block_expected(block: HirBlock, expected_type: HirType?) -> LocalId?:
         """Lower HIR block to MIR, return result local if any."""
         # Use struct fields directly. A `val` declared without an initializer and
         # then assigned inside a match case is not bound in the outer scope by the
@@ -560,20 +546,7 @@ impl MirLowering:
                 print "[mir-lower] block:value-read"
             if bootstrap_trace:
                 print "[mir-lower] block:value-unwrapped"
-            var local = LocalId(id: 0)
-            match value.kind:
-                case HirExprKind.If(cond, then_, else_):
-                    local = self.lower_if(cond, then_, else_, expected_type)
-                case HirExprKind.MatchCase(scrutinee, arms):
-                    local = self.lower_match_case(scrutinee, arms, expected_type)
-                case _:
-                    local = self.lower_expr(value)
-            if val found_expected = expected_type:
-                match found_expected.kind:
-                    case HirTypeKind.Optional(_):
-                        local = self.ensure_option_handle(local, found_expected)
-                    case _:
-                        ()
+            val local = self.lower_expr(value)
             if trace_enabled:
                 print "[mir-lower] block:value-lowered"
             if bootstrap_trace:

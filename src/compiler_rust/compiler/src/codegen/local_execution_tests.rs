@@ -42,34 +42,6 @@ fn test_cranelift_jit_with_args() {
 }
 
 #[test]
-fn test_cranelift_jit_hashes_rust_runtime_string() {
-    let mut em = LocalExecutionManager::cranelift().expect("cranelift init");
-    let mir = source_to_mir(
-        "extern fn rt_hash_text(value: text) -> i64\n\
-         fn hash_text(value: text) -> i64:\n\
-         \x20   rt_hash_text(value)\n",
-    );
-    em.compile_module(&mir).expect("compile");
-
-    let bytes = b"abc";
-    let value = simple_runtime::value::rt_string_new(bytes.as_ptr(), bytes.len() as u64);
-    let runtime_result = em
-        .execute("hash_text", &[value.to_raw() as i64])
-        .expect("execute runtime string");
-
-    assert_eq!(runtime_result, simple_runtime::value::rt_hash_text(value));
-
-    let mut core_string = [0u64; 3];
-    core_string[0] = 0x5354_5231;
-    core_string[1] = bytes.len() as u64;
-    unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), core_string.as_mut_ptr().add(2).cast(), bytes.len()) };
-    let core_value = core_string.as_ptr() as i64 | 1;
-    let core_result = em.execute("hash_text", &[core_value]).expect("execute core string");
-
-    assert_eq!(core_result, simple_runtime::value::rt_hash_text(value));
-}
-
-#[test]
 fn test_cranelift_jit_unsigned_compare_uses_unsigned_ordering() {
     let mut em = LocalExecutionManager::cranelift().expect("cranelift init");
     let mir = source_to_mir(

@@ -334,7 +334,8 @@ pub use sffi::{rt_clear_stdin, rt_has_mock_stdin, rt_read_stdin_char, rt_read_st
 pub use sffi::{
     rt_eprint_str, rt_eprint_value, rt_eprintln_str, rt_eprintln_value, rt_print_str, rt_print_value, rt_println_str,
     rt_println_value, rt_raw_i64_to_string, rt_raw_u64_to_string, rt_stderr_flush, rt_stderr_write, rt_stdout_flush,
-    rt_stdout_write, rt_value_format_string, rt_value_to_string,
+    rt_stdout_write,
+    rt_value_format_string, rt_value_to_string,
 };
 
 // Re-export log SFFI functions
@@ -353,8 +354,7 @@ pub use sffi::{
     rt_env_home, rt_env_remove, rt_env_set, rt_env_temp, rt_env_vars, rt_exit, rt_get_env, rt_lexer_source_set,
     rt_lexer_source_slice, rt_path_probe, rt_platform_name, rt_process_execute, rt_process_is_running, rt_process_kill,
     rt_process_run, rt_process_run_bounded, rt_process_run_inherit, rt_process_run_timeout, rt_process_spawn,
-    rt_process_spawn_async, rt_process_spawn_inherit, rt_process_wait, rt_set_env, rt_term_enable_ansi,
-    rt_term_get_size,
+    rt_process_spawn_async, rt_process_spawn_inherit, rt_process_wait, rt_set_env, rt_term_enable_ansi, rt_term_get_size,
 };
 
 // Re-export runtime configuration SFFI functions
@@ -367,8 +367,8 @@ pub use cli_sffi::{
     rt_cli_print_version, rt_cli_read_file, rt_cli_run_check, rt_cli_run_code, rt_cli_run_sffi_gen, rt_cli_run_file,
     rt_cli_run_fix, rt_cli_run_fmt, rt_cli_run_gen_lean, rt_cli_run_lex, rt_cli_run_lint, rt_cli_run_migrate,
     rt_cli_run_query, rt_cli_run_repl, rt_cli_run_tests, rt_cli_run_tests_process_args, rt_cli_run_verify,
-    rt_cli_version, rt_cli_watch_file, rt_compile_to_llvm_ir, rt_compile_to_native, rt_compile_to_native_with_opt,
-    rt_exec, rt_exec_output,
+    rt_cli_version, rt_cli_watch_file, rt_compile_to_llvm_ir, rt_compile_to_native,
+    rt_compile_to_native_with_opt, rt_exec, rt_exec_output,
 };
 
 // Re-export dynamic-loading / WFFI SFFI functions.
@@ -1106,7 +1106,6 @@ pub fn clear_all_runtime_registries() {
 
     // Clear heap allocation registry
     heap::clear_heap_allocation_registry();
-    collections::reregister_short_string_cache();
 
     // Clear memory-mapped file registry
     file_io::clear_mmap_registry();

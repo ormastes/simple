@@ -316,14 +316,25 @@ pub extern "C" fn rt_enum_payload(value: RuntimeValue) -> RuntimeValue {
 
 /// Check if a value is None/nil.
 /// Returns true if:
-/// - value is the canonical nil sentinel
-/// - value is an Option enum (id 1) with ordinal None discriminant 1
+/// - value is nil (raw 0 / TAG_SPECIAL with SPECIAL_NIL)
+/// - value is an enum with discriminant hash("None")
 #[no_mangle]
 pub extern "C" fn rt_is_none(value: RuntimeValue) -> bool {
+    // Check for raw nil (value == 0 or TAG_SPECIAL with NIL)
+    if value.0 == 0 || value.0 == super::tags::TAG_SPECIAL {
+        return true;
+    }
     if value.is_nil() {
         return true;
     }
-    rt_enum_id(value) == 1 && rt_enum_discriminant(value) == 1
+    // Check for enum None variant
+    rt_enum_check_discriminant(value, {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        "None".hash(&mut hasher);
+        (hasher.finish() & 0xFFFFFFFF) as i64
+    })
 }
 
 /// Check if a value is Some (not None/nil).
@@ -357,7 +368,8 @@ pub extern "C" fn rt_option_map(value: RuntimeValue, closure: RuntimeValue) -> R
     let result = func(closure, payload);
 
     // Wrap result in Some
-    rt_enum_new(1, 0, result)
+    let some_disc = hash_variant_discriminant("Some");
+    rt_enum_new(0, some_disc, result)
 }
 
 // ============================================================================

@@ -13,7 +13,6 @@ for script in \
   scripts/bootstrap/bootstrap-from-scratch.sh \
   scripts/check/check-bootstrap-essential-tools-smoke.shs \
   scripts/check/check-freebsd-bootstrap-qemu.shs \
-  scripts/check/check-native-runtime-queue.shs \
   scripts/check/check-stage4-hosted-dynload-provider-archive.shs \
   scripts/setup/platform-detect.shs \
   scripts/setup/setup.shs; do
@@ -25,11 +24,6 @@ help=$(sh scripts/bootstrap/bootstrap-from-scratch.sh --help)
 printf '%s\n' "${help}" | grep -q -- '--full-cli' || fail "missing --full-cli help"
 printf '%s\n' "${help}" | grep -q -- '--full-bootstrap' || fail "missing --full-bootstrap help"
 printf '%s\n' "${help}" | grep -q -- 'default: llvm; cranelift also supported' || fail "LLVM default/backend support missing from help"
-printf '%s\n' "${help}" | grep -Fq -- 'supported on native Linux, macOS, FreeBSD, and Windows hosts' || fail "full CLI host support help is stale"
-grep -Fq 'Linux|Darwin|FreeBSD|MINGW*|MSYS*|CYGWIN*|Windows*) ;;' scripts/bootstrap/bootstrap-from-scratch.sh || fail "full CLI host gate omits a supported native host"
-if grep -Fq 'Stage 4 full-CLI capsule preparation requires native Linux or macOS' scripts/bootstrap/bootstrap-from-scratch.sh; then
-  fail "stale Linux/macOS-only full CLI rejection remains"
-fi
 
 grep -q 'command -v shasum' scripts/bootstrap/bootstrap-from-scratch.sh || fail "missing macOS SHA-256 fallback"
 grep -q 'command -v gtimeout' scripts/bootstrap/bootstrap-from-scratch.sh || fail "missing macOS timeout fallback"
@@ -64,52 +58,7 @@ if grep -q 'bootstrap-freebsd-seed.sh' scripts/bootstrap/bootstrap-from-scratch.
 fi
 
 multiplatform=.github/workflows/rust-bootstrap-multiplatform.yml
-stage4_symbols=src/compiler/70.backend/backend/stage4_symbol_closure.spl
-stage4_final_spec=test/01_unit/compiler/backend/stage4_final_symbol_closure_spec.spl
-stage4_projection_spec=test/01_unit/compiler/backend/stage4_selected_archive_projection_spec.spl
-
-[ "$(grep -Fc "test/01_unit/compiler/backend/stage4_*_spec.spl" "${multiplatform}")" -eq 2 ] || fail "Stage4 unit contracts do not trigger push and pull-request portability CI"
-for required in \
-  'fn stage4_provider_symbol(name: text, object_format: text, import_reference: bool)' \
-  'if import_reference and symbol.starts_with("__imp_")' \
-  'stage4_is_coff_feature_symbol(raw_symbol, object_format)' \
-  'return Ok(if msvc_linker: "simple_compiler_backfill.lib" else: "libsimple_compiler_backfill.a")' \
-  'stage4_hosted_provider_object_format(target_os_name, msvc_objects)'; do
-  grep -Fq -- "${required}" "${stage4_symbols}" || fail "Stage4 COFF compiler contract missing: ${required}"
-done
-for required in \
-  'stage4_compiler_backfill_archive_file("windows", false)' \
-  'stage4_compiler_backfill_archive_file("windows", true)' \
-  'stage4_compiler_backfill_object_format("windows", false)' \
-  'stage4_compiler_backfill_object_format("windows", true)' \
-  'U __imp_rt_hidden'; do
-  grep -Fq -- "${required}" "${stage4_final_spec}" || fail "Stage4 COFF final-symbol regression missing: ${required}"
-done
-grep -Fq '"coff-msvc", ["rt_root"]' "${stage4_projection_spec}" || fail "Stage4 MSVC projection contract missing"
-grep -Fq '"coff-mingw", ["rt_root"]' "${stage4_projection_spec}" || fail "Stage4 MinGW projection contract missing"
 freebsd_workflow=.github/workflows/freebsd-build.yml
-runtime_compiler=src/compiler/70.backend/backend/runtime_compiler.spl
-native_linker=src/compiler/70.backend/backend/llvm_native_link.spl
-sqlite_spec=test/01_unit/compiler/backend/stage4_sqlite_provider_spec.spl
-
-grep -Fq 'libsqlite3-dev' "${multiplatform}" || fail "Linux Stage4 SQLite development package missing"
-grep -Fq 'sqlite3:x64-windows' "${multiplatform}" || fail "Windows Stage4 SQLite package missing"
-grep -Fq '"INCLUDE=$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/include;$env:INCLUDE"' "${multiplatform}" || fail "Windows Stage4 SQLite include path missing"
-grep -Fq '"LIB=$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/lib;$env:LIB"' "${multiplatform}" || fail "Windows Stage4 SQLite library path missing"
-grep -Fq '"$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin"' "${multiplatform}" || fail "Windows Stage4 SQLite DLL path missing"
-grep -Fq 'pkg install -y curl bash freetype2 sqlite3' "${multiplatform}" || fail "FreeBSD Stage4 SQLite package missing"
-grep -Fq 'pkgconf sqlite3' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD QEMU SQLite package missing"
-grep -Fq 'sources = sources.push("runtime_sqlite")' "${runtime_compiler}" || fail "Stage4 runtime compiler omits SQLite provider"
-grep -Fq 'comp_args.push("-fno-stack-protector")' "${runtime_compiler}" || fail "SQLite provider permits compiler-added stack helpers"
-grep -Fq 'comp_args.push("-fno-builtin")' "${runtime_compiler}" || fail "SQLite provider permits compiler-added builtin helpers"
-grep -Fq 'comp_args.push("/usr/local/include")' "${runtime_compiler}" || fail "FreeBSD Stage4 SQLite include path missing"
-grep -Fq 'candidate_labels = ["compiler_backfill", "runtime_native", "runtime_legacy_compat", "runtime_process", "runtime_dynload", "runtime_font", "runtime_memtrack", "runtime_timestamp", "runtime_sqlite"]' "${native_linker}" || fail "strict Stage4 owner inventory omits SQLite"
-grep -Fq 'stage4_system_libraries = ["sqlite3"]' "${native_linker}" || fail "selected SQLite provider omits system library"
-grep -Fq 'stage4_system_library_paths = ["/usr/local/lib"]' "${native_linker}" || fail "FreeBSD Stage4 SQLite library path missing"
-grep -Fq 'stage4_validate_sqlite_provider_symbol_contract' "${sqlite_spec}" || fail "Stage4 SQLite provider regression spec missing"
-grep -Fq '"coff-mingw"' "${sqlite_spec}" || fail "Stage4 SQLite MinGW contract regression missing"
-grep -Fq '"coff-msvc"' "${sqlite_spec}" || fail "Stage4 SQLite MSVC contract regression missing"
-grep -Fq 'U _fltused' "${sqlite_spec}" || fail "Stage4 SQLite MSVC float-helper regression missing"
 matrix_backends_for() {
   awk -v name="$1" '
     {
@@ -140,51 +89,10 @@ grep -q 'os: macos-15-intel' "${multiplatform}" || fail "active macOS Intel runn
 [ "$(grep -Fc "scripts/check/check-native-seed-parity.shs" "${freebsd_workflow}")" -eq 2 ] || fail "FreeBSD Option parity trigger missing"
 [ "$(grep -Fc "test/fixtures/compiler/native_option_try_*_loud.spl" "${freebsd_workflow}")" -eq 2 ] || fail "FreeBSD Option fixture trigger missing"
 [ "$(grep -Fc "test/fixtures/native_crossmodule_result_u8/**" "${freebsd_workflow}")" -eq 2 ] || fail "FreeBSD Result try fixture trigger missing"
-grep -Fq 'mcp_flag=--full-cli' "${multiplatform}" || fail "full CLI bootstrap lane missing"
+grep -Fq 'mcp_flag=--full-cli' "${multiplatform}" || fail "Linux LLVM fresh MCP bootstrap lane missing"
 grep -Fq 'mcp_flag=--no-mcp' "${multiplatform}" || fail "non-proof bootstrap lanes do not skip duplicate MCP builds"
+grep -Fq 'if [ "$RUNNER_OS" = "Linux" ] && [ "${{ matrix.backend }}" = "llvm" ]; then' "${multiplatform}" || fail "fresh MCP proof is not scoped to Linux LLVM"
 grep -Fq '"$mcp_flag" \' "${multiplatform}" || fail "bootstrap does not receive the selected MCP mode"
-windows_dependencies_body=$(awk '
-$0 == "      - name: Install dependencies (Windows)" { inside=1; print; next }
-inside && /^      - (name:|uses:)/ { exit }
-inside { print }
-' "${multiplatform}")
-for required in \
-  'choco install llvm --version=18.1.8 -y --no-progress --allow-downgrade' \
-  '"LLVM_SYS_180_PREFIX=C:\Program Files\LLVM" >> $env:GITHUB_ENV' \
-  '"C:\Program Files\LLVM\bin" >> $env:GITHUB_PATH'; do
-  printf '%s\n' "${windows_dependencies_body}" | grep -Fq -- "${required}" || fail "Windows LLVM companion tools missing: ${required}"
-done
-if printf '%s\n' "${windows_dependencies_body}" | grep -Fq 'matrix.backend'; then
-  fail "Windows LLVM companion tools remain backend-conditional"
-fi
-seed_build_body=$(awk '
-$0 == "      - name: Build seed and native_all library" { inside=1; print; next }
-inside && /^      - (name:|uses:)/ { exit }
-inside { print }
-' "${multiplatform}")
-printf '%s\n' "${seed_build_body}" | grep -Fq 'if [ "$RUNNER_OS" = "Windows" ] || [ "${{ matrix.backend }}" = "llvm" ]; then' || fail "Windows Cranelift compiler backfill build gate missing"
-printf '%s\n' "${seed_build_body}" | grep -Fq 'cargo build --profile bootstrap -p simple-compiler-backfill' || fail "compiler backfill build missing"
-bootstrap_body=$(awk '
-$0 == "      - name: Build and sanity-check pure-Simple stages" { inside=1; print; next }
-inside && /^      - (name:|uses:)/ { exit }
-inside { print }
-' "${multiplatform}")
-for required in \
-  'if [ "$RUNNER_OS" = "Windows" ]; then' \
-  'export SIMPLE_LINKER_FLAVOR=msvc' \
-  'export SIMPLE_WINDOWS_ABI=msvc' \
-  'mcp_flag=--full-cli' \
-  'full_dir=build/bootstrap/full/x86_64-pc-windows-msvc' \
-  'test -s "$full_dir/simple.exe"' \
-  'set -- "$full_dir"/simple_stage4_*.dll' \
-  '[ "$#" -eq 1 ]' \
-  'test -s "$1"' \
-  'test -s "$full_dir/sqlite3.dll"'; do
-  printf '%s\n' "${bootstrap_body}" | grep -Fq -- "${required}" || fail "Windows Stage4 execution receipt missing: ${required}"
-done
-if printf '%s\n' "${bootstrap_body}" | grep -Eq 'continue-on-error:[[:space:]]*true|\|\|[[:space:]]*true'; then
-  fail "Windows Stage4 execution evidence is optional"
-fi
 [ "$(grep -c "scripts/check/check-mcp-native-smoke.shs" "${multiplatform}")" -eq 2 ] || fail "fresh MCP smoke workflow triggers missing"
 [ "$(grep -c "src/app/mcp/\\*\\*" "${multiplatform}")" -eq 2 ] || fail "MCP source workflow triggers missing"
 [ "$(grep -c "src/app/simple_lsp_mcp/\\*\\*" "${multiplatform}")" -eq 2 ] || fail "LSP MCP source workflow triggers missing"
@@ -422,72 +330,10 @@ grep -Fq 'NATIVE_PARITY_BACKEND=${PARITY_BACKEND}' scripts/check/check-freebsd-b
 grep -Fq "NATIVE_PARITY_CASES='option_try_annotated_loud option_try_direct_loud option_try_unresolved_method_loud'" scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD Option parity cases missing"
 grep -Fq 'for PARITY_BACKEND in llvm cranelift; do' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD Option parity does not cover both backends"
 grep -Fq '[ "$PARITY_EXIT" = "0" ]' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD Option parity exit status is not enforced"
-[ "$(grep -Fc "grep -qx 'native_seed_parity=true'" scripts/check/check-freebsd-bootstrap-qemu.shs)" -eq 2 ] || fail "FreeBSD Option and selected parity success receipts missing"
-grep -Fq "NATIVE_PARITY_CASES='class_array_field_mutation nested_struct_value_copy text_option_unwrap_present text_ordering text_bracket_index raw_string_interpolation_contract new_keyword_identifier bool_array_element_interp mixed_numeric_comparison mixed_unsigned_float_comparison mixed_signed_unsigned_ordering unsigned_div_rem_shift method_owner_dispatch method_builtin_name_ownership dynload_tagged_text module_global_static_init option_is_none_map'" scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD selected parity cases missing"
+grep -Fq 'total=3 pass=3 fail=0 xfail=0' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD Option parity strict summary missing"
+grep -Fq "NATIVE_PARITY_CASES='class_array_field_mutation nested_struct_value_copy text_ordering text_bracket_index raw_string_interpolation_contract new_keyword_identifier bool_array_element_interp method_owner_dispatch dynload_tagged_text option_is_none_map'" scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD selected parity cases missing"
 grep -Fq '[ "$SELECTED_EXIT" = "0" ]' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD selected parity exit status is not enforced"
-runtime_queue_check=scripts/check/check-native-runtime-queue.shs
-for required in \
-  'SOURCE=test/01_unit/lib/nogc_async_mut/gpu/engine2d/runtime_queue_probe.spl' \
-  'run_bounded interpreter "$INTERPRETER_TIMEOUT_S"' \
-  '"$SIMPLE_BIN" run "$SOURCE" --mode=interpreter' \
-  'run_bounded build "$BUILD_TIMEOUT_S"' \
-  'run_bounded native-run "$RUN_TIMEOUT_S"' \
-  'COMPILER_ID=$(cksum "$SIMPLE_BIN"' \
-  '--source src/lib --entry-closure' \
-  '--runtime-bundle host-gpu --runtime-path "$RUNTIME_PATH"' \
-  '--backend=cranelift' \
-  'cmp "$WORK_DIR/oracle.out" "$WORK_DIR/native.out"' \
-  'test ! -s "$WORK_DIR/native.err"' \
-  "'queue_nonzero_backend_last_backend_handle=7'" \
-  "'queue_nonzero_backend_last_payload_hash=98765'" \
-  "'queue_nonzero_backend_last_payload_text=queue probe payload command=draw_ir_rect id=runtime-backend'" \
-  "'queue_overflow_capacity=1024'" \
-  "'queue_overflow_accepted=1024'" \
-  "'queue_overflow_packet_id=0'" \
-  "'queue_overflow_drained=1024'" \
-  "'queue_draw_ir_dispatched=true'" \
-  "'queue_draw_ir_backend_handle=7'" \
-  "'queue_draw_ir_payload_nonempty=true'" \
-  "'queue_draw_ir_payload_has_schema=true'" \
-  "'queue_draw_ir_runtime_payload_has_schema=true'"; do
-  grep -Fq -- "${required}" "${runtime_queue_check}" || fail "native runtime queue gate missing: ${required}"
-done
-[ "$(grep -Fc -- '--backend=' "${runtime_queue_check}")" -eq 1 ] || fail "native runtime queue gate must keep LLVM flagless and select only Cranelift explicitly"
-draw_ir_sdn=src/lib/common/ui/draw_ir_sdn.spl
-grep -Fq 'fn _draw_ir_sdn_join_lines(lines: [text]) -> text:' "${draw_ir_sdn}" || fail "Draw IR SDN lacks the native-safe dynamic line join owner"
-[ "$(grep -Fc '_draw_ir_sdn_join_lines(lines)' "${draw_ir_sdn}")" -eq 2 ] || fail "Draw IR SDN emitters do not share the native-safe line join"
-if grep -Fq 'lines.join("\n")' "${draw_ir_sdn}"; then
-  fail "Draw IR SDN still routes dynamic text arrays through unsupported bootstrap join lowering"
-fi
-queue_probe=test/01_unit/lib/nogc_async_mut/gpu/engine2d/runtime_queue_probe.spl
-if grep -Fq '    print(' "${queue_probe}"; then
-  fail "runtime queue probe must use backend-stable println records"
-fi
-for required in \
-  'engine2d_draw_ir_runtime_queue_dispatch_only(draw_batch, true, draw_queue)' \
-  'queue_draw_ir_payload_nonempty=' \
-  'queue_draw_ir_payload_has_schema=' \
-  'queue_draw_ir_runtime_payload_has_schema='; do
-  grep -Fq -- "${required}" "${queue_probe}" || fail "runtime queue probe lacks production Draw IR oracle: ${required}"
-done
-grep -Fq 'for QUEUE_BACKEND in llvm cranelift; do' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD runtime queue gate does not cover both backends"
-grep -Fq 'NATIVE_RUNTIME_QUEUE_BACKEND=${QUEUE_BACKEND}' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD runtime queue backend selection missing"
-grep -Fq 'native_runtime_queue=true backend=${QUEUE_BACKEND}' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD runtime queue success receipt missing"
-grep -Fq '[ "$QUEUE_EXIT" = "0" ]' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD runtime queue exit status is not enforced"
-grep -Fq 'timeout 900 sh scripts/check/check-native-runtime-queue.shs' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD runtime queue gate is not independently bounded"
-[ "$(grep -Fc "'scripts/check/check-native-runtime-queue.shs'" "${multiplatform}")" -eq 2 ] || fail "hosted runtime queue checker must trigger push and pull-request matrices"
-[ "$(grep -Fc "'test/01_unit/lib/nogc_async_mut/gpu/engine2d/runtime_queue_probe.spl'" "${multiplatform}")" -eq 2 ] || fail "runtime queue probe must trigger push and pull-request matrices"
-grep -Fq 'NATIVE_RUNTIME_QUEUE_BACKEND=${{ matrix.backend }}' "${multiplatform}" || fail "hosted runtime queue matrix backend selection missing"
-for required in \
-  'timeout-minutes: 15' \
-  'SIMPLE_BIN="$stage3"' \
-  'SIMPLE_RUNTIME_PATH="$PWD/src/compiler_rust/target/bootstrap"' \
-  'sh scripts/check/check-native-runtime-queue.shs'; do
-  grep -Fq -- "${required}" "${multiplatform}" || fail "hosted runtime queue invocation missing: ${required}"
-done
-freebsd_workflow=.github/workflows/freebsd-build.yml
-[ "$(grep -Fc "'scripts/check/check-native-runtime-queue.shs'" "${freebsd_workflow}")" -eq 2 ] || fail "FreeBSD runtime queue checker must trigger push and pull-request workflows"
-[ "$(grep -Fc "'test/01_unit/lib/nogc_async_mut/gpu/engine2d/runtime_queue_probe.spl'" "${freebsd_workflow}")" -eq 2 ] || fail "FreeBSD runtime queue probe must trigger push and pull-request workflows"
+grep -Fq 'total=20 pass=20 fail=0 xfail=0' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD selected parity strict summary missing"
 [ "$(grep -c "test/fixtures/compiler/llvm_simd_row_native_probe.spl" "${multiplatform}")" -eq 2 ] || fail "native architecture probe trigger missing"
 [ "$(grep -c "test/fixtures/compiler/stage4_struct_enum_array_probe.spl" "${multiplatform}")" -eq 2 ] || fail "Cranelift aggregate probe trigger missing"
 core_pipeline=.github/workflows/core-mcp-dev-pipeline.yml
@@ -535,8 +381,6 @@ grep -q 'name: bootstrap-Linux x86_64-llvm-' "${multiplatform}" || fail "native 
 grep -q 'chmod +x "$compiler"' "${multiplatform}" || fail "downloaded pure-Simple compiler executable mode is not restored"
 grep -q 'SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_BIN="$compiler"' "${multiplatform}" || fail "native architecture gate permits stub fallback"
 grep -Fq 'binutils-arm-linux-gnueabihf' "${multiplatform}" || fail "ARM32 object inspection toolchain missing"
-grep -Fq 'gcc-arm-linux-gnueabihf' "${multiplatform}" || fail "ARM32 cross C compiler missing"
-grep -Fq 'libc6-dev-armhf-cross' "${multiplatform}" || fail "ARM32 cross sysroot missing"
 grep -Fq 'check_unsupported_arm32' scripts/check/check-cranelift-aot-aggregate-cross.shs || fail "Cranelift ARM32 rejection gate missing"
 grep -Fq "Backend cranelift does not support target arm" scripts/check/check-cranelift-aot-aggregate-cross.shs || fail "Cranelift ARM32 rejection diagnostic is not checked"
 grep -Fq 'if [ "$NATIVE_SMOKE_BACKEND" = cranelift ]; then' scripts/check/native-smoke-matrix.shs || fail "native smoke lacks explicit Cranelift branch"
@@ -544,17 +388,6 @@ grep -Fq 'set -- "$@" --backend=cranelift' scripts/check/native-smoke-matrix.shs
 if grep -Fq -- '--backend "$NATIVE_SMOKE_BACKEND"' scripts/check/native-smoke-matrix.shs; then
   fail "native smoke does not exercise default LLVM"
 fi
-unknown_smoke_dir="${TMPDIR:-/tmp}/native-smoke-unknown-selector.$$"
-unknown_smoke_rc=0
-unknown_smoke_output=$(SIMPLE_BINARY=false \
-  NATIVE_SMOKE_CASES=__unknown_native_smoke_case__ \
-  NATIVE_SMOKE_WORK_DIR="${unknown_smoke_dir}" \
-  sh scripts/check/native-smoke-matrix.shs 2>&1) || unknown_smoke_rc=$?
-rm -rf "${unknown_smoke_dir}"
-[ "${unknown_smoke_rc}" -ne 0 ] || fail "native smoke accepts an unknown selected case"
-printf '%s\n' "${unknown_smoke_output}" | grep -Fq \
-  'native_smoke_matrix=false (unknown requested case: __unknown_native_smoke_case__)' ||
-  fail "native smoke unknown-case diagnostic missing"
 grep -Fq 'record_id="$1"; record_mode="$2"; record_status="$3"; record_detail="$4"' scripts/check/check-native-seed-parity.shs || fail "native parity result recording clobbers caller state"
 grep -Fq 'NATIVE_PARITY_BACKEND="${NATIVE_PARITY_BACKEND:-llvm}"' scripts/check/check-native-seed-parity.shs || fail "native parity backend default missing"
 parity_build_native=$(sed -n '/^build_native() {$/,/^}$/p' scripts/check/check-native-seed-parity.shs)
@@ -575,64 +408,15 @@ done
 if printf '%s\n' "${brace_literal_scope_body}" | grep -Eq 'fn main\(\) -> i64:|^[[:space:]]+return 0$'; then
   fail "brace-literal scope reproduction was adapted away from the original trigger"
 fi
-text_option_unwrap_body=$(sed -n '/^write_case_text_option_unwrap_present() {$/,/^}$/p' scripts/check/check-native-seed-parity.shs)
-for required in \
-  '    val value: text? = "opt"' \
-  '    print(value.unwrap())'; do
-  printf '%s\n' "${text_option_unwrap_body}" | grep -Fxq -- "${required}" || fail "text Option unwrap reproduction missing: ${required}"
-done
-grep -Fq 'run_strict_dual_backend_case text_option_unwrap_present write_case_text_option_unwrap_present "opt"' scripts/check/check-native-seed-parity.shs || fail "text Option unwrap strict-dual registration missing"
 open_bug_repros=$(sed -n '/^if \[ "${NATIVE_OPEN_BUG_REPROS:-0}" = 1 \]; then$/,/^fi$/p' scripts/check/check-native-seed-parity.shs)
 for required in \
-  'run_strict_dual_backend_case option_uniform_tagged_abi test/fixtures/compiler/native_option_uniform_tagged_abi_repro.spl "337777770033377703377737773777377737771"'; do
+  'run_strict_dual_backend_case option_uniform_tagged_abi test/fixtures/compiler/native_option_uniform_tagged_abi_repro.spl "3377777700"'; do
   printf '%s\n' "${open_bug_repros}" | grep -Fq -- "${required}" || fail "known-red native reproduction escaped its opt-in block: ${required}"
   [ "$(grep -Fc -- "${required}" scripts/check/check-native-seed-parity.shs)" -eq 1 ] || fail "known-red native reproduction must be registered exactly once: ${required}"
 done
-option_uniform_fixture=test/fixtures/compiler/native_option_uniform_tagged_abi_repro.spl
-for required in \
-  'fn through_function_value(f: fn(i64?) -> i64, present: bool) -> i64:' \
-  '        f(3)' \
-  '        f(nil)' \
-  'fn through_try(value: i64?) -> i64?:' \
-  'print(through_try(3).unwrap_or(777))' \
-  'print(through_try(nil).unwrap_or(777))' \
-  'extern fn rt_enum_id(value: i64) -> i64' \
-  'print(rt_enum_id(through_try(nil)))'; do
-  grep -Fq -- "${required}" "${option_uniform_fixture}" || fail "uniform Option ABI fixture missing: ${required}"
-done
-option_uniform_lowering=src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl
-for required in \
-  'val none_handle = self.ensure_option_handle(nil_result, base_type)' \
-  'if mir_expr_symbol_id_value(direct_symbol) >= 0:' \
-  'if call_param_types.len() == 0 and callee.has_type_:' \
-  'case MethodCall(receiver, method, _, resolution):' \
-  'if val method_id = resolution.get_symbol_id():' \
-  'val receiver_type = self.receiver_declared_type(receiver)' \
-  'if self.struct_method_syms != nil and self.struct_method_syms.has(method_key):' \
-  'me receiver_declared_type(receiver: HirExpr) -> HirType?:' \
-  'if receiver == nil:'; do
-  grep -Fq -- "${required}" "${option_uniform_lowering}" || fail "uniform Option ABI lowering missing: ${required}"
-done
-grep -Fq '337777770033377703377737773777377737771' test/01_unit/compiler/mir/option_variant_order_source_spec.spl || fail "uniform Option ABI source spec expected output is stale"
 printf '%s\n' "${open_bug_repros}" | grep -Fq 'run_parity_case brace_literal_scope_exact write_case_brace_literal_scope_exact "RULE:[.a{color:red}]"' || fail "exact brace-literal scope reproduction is not an opt-in known-red case"
 [ "$(grep -Fc 'run_parity_case brace_literal_scope_exact write_case_brace_literal_scope_exact "RULE:[.a{color:red}]"' scripts/check/check-native-seed-parity.shs)" -eq 1 ] || fail "exact brace-literal scope reproduction must be registered exactly once"
 grep -Fq 'run_parity_case brace_literal_scope write_case_brace_literal_scope "RULE:[.a{color:red}]"' scripts/check/check-native-seed-parity.shs || fail "adapted brace-literal scope parity registration missing"
-method_owner_fixture=test/fixtures/compiler/native_method_builtin_name_ownership.spl
-for required in \
-  'fn is_some(self) -> bool:' \
-  'fn is_none(self) -> bool:' \
-  'fn unwrap(self) -> i64:' \
-  'fn unwrap_or(self, fallback: i64) -> i64:' \
-  'fn unwrap_err(self) -> text:' \
-  'fn map(self, transform: fn(i64) -> i64) -> i64:' \
-  'print(text_error().unwrap_err())' \
-  'print(make_names().unwrap())'; do
-  grep -Fq -- "${required}" "${method_owner_fixture}" || fail "builtin-name method ownership fixture missing: ${required}"
-done
-grep -Fq 'run_strict_dual_backend_case method_builtin_name_ownership write_case_method_builtin_name_ownership "falsetrue712custom8boom71"' scripts/check/check-native-seed-parity.shs || fail "builtin-name method ownership strict-dual registration missing"
-if grep -Fq 'if (method == "unwrap" or method == "unwrap_err" or method == "unwrap_or") and arg_vals.len() > 0:' src/compiler/70.backend/backend/cranelift_codegen_adapter.spl; then
-  fail "Cranelift still dispatches unwrap-family calls by leaf name"
-fi
 case_table=$(sed -n '/^# Case table\.$/,$p' scripts/check/check-native-seed-parity.shs)
 all_cases=$(printf '%s\n' "${case_table}" | grep -Ec '^[[:space:]]*run_(strict_dual_backend_case|parity_case|native_authoritative_case|loud_fail_case|runtime_fail_case) ')
 all_strict=$(printf '%s\n' "${case_table}" | grep -c '^[[:space:]]*run_strict_dual_backend_case ')
@@ -670,7 +454,7 @@ selected_parity_body=$(sed -n '/- name: Run strict selected native parity/,/- na
 for required in \
   "if: runner.os != 'Linux' && matrix.backend == 'llvm'" \
   'SIMPLE_BINARY="$stage3"' \
-  'NATIVE_PARITY_CASES="class_array_field_mutation nested_struct_value_copy text_option_unwrap_present text_ordering text_bracket_index raw_string_interpolation_contract new_keyword_identifier bool_array_element_interp mixed_numeric_comparison mixed_unsigned_float_comparison mixed_signed_unsigned_ordering unsigned_div_rem_shift method_owner_dispatch method_builtin_name_ownership module_global_static_init option_is_none_map"' \
+  'NATIVE_PARITY_CASES="class_array_field_mutation nested_struct_value_copy text_ordering text_bracket_index raw_string_interpolation_contract new_keyword_identifier bool_array_element_interp mixed_numeric_comparison mixed_unsigned_float_comparison mixed_signed_unsigned_ordering unsigned_div_rem_shift method_owner_dispatch option_is_none_map"' \
   'NATIVE_PARITY_FAIL_ON_XFAIL=1' \
   'sh scripts/check/check-native-seed-parity.shs'; do
   printf '%s\n' "${selected_parity_body}" | grep -Fq -- "${required}" || fail "hosted selected parity gate missing: ${required}"
@@ -709,28 +493,12 @@ fi
 arch_gate=scripts/check/check-llvm-simd-row-native-arch.shs
 for invocation in \
   'build_object_arch arm32 armv7-unknown-linux-gnueabihf' \
-  'build_crossmodule_arch arm32 armv7-unknown-linux-gnueabihf' \
   'build_arch x86_64 x86_64-unknown-linux-gnu' \
   'build_arch aarch64 aarch64-unknown-linux-gnu' \
   'build_crossmodule_arch aarch64 aarch64-unknown-linux-gnu' \
   'build_arch riscv64_rvv riscv64-unknown-linux-gnu' \
   'build_crossmodule_arch riscv64_rvv riscv64-unknown-linux-gnu'; do
   grep -Fq "${invocation}" "${arch_gate}" || fail "native architecture invocation missing: ${invocation}"
-done
-llvm_arch_body=$(sed -n '/^build_arch() {$/,/^}$/p' "${arch_gate}")
-if printf '%s\n' "${llvm_arch_body}" | grep -Fq -- '--backend'; then
-  fail "LLVM architecture execution gate does not exercise the default backend"
-fi
-llvm_crossmodule_body=$(sed -n '/^build_crossmodule_arch() {$/,/^}$/p' "${arch_gate}")
-if printf '%s\n' "${llvm_crossmodule_body}" | grep -Fq -- '--backend'; then
-  fail "LLVM crossmodule execution gate does not exercise the default backend"
-fi
-grep -Fq 'arm-linux-gnueabihf-gcc qemu-arm' "${arch_gate}" || fail "ARM32 execution tools missing"
-for required in \
-  'arm32)' \
-  'timeout 30 qemu-arm -cpu max -L /usr/arm-linux-gnueabihf "$out"' \
-  '[ "$actual" = "result-u8-ok" ]'; do
-  printf '%s\n' "${llvm_crossmodule_body}" | grep -Fq -- "${required}" || fail "ARM32 execution gate missing: ${required}"
 done
 grep -qx 'check_unsupported_riscv32_hosted' "${arch_gate}" || fail "hosted RV32 rejection invocation missing"
 grep -qx 'build_riscv32_baremetal_object' "${arch_gate}" || fail "bare-metal RV32 recovery invocation missing"
@@ -838,10 +606,8 @@ for required in \
   'test/fixtures/compiler/native_option_try_annotated_loud.spl' \
   'test/fixtures/compiler/native_option_try_direct_loud.spl' \
   'test/fixtures/compiler/native_option_try_unresolved_method_loud.spl' \
-  'test/fixtures/native_crossmodule_result_u8/main.spl' \
   '"$SIMPLE_BIN" native-build --backend cranelift --emit-object' \
   '"$SIMPLE_BIN" native-build --emit-object --target "$TARGET"' \
-  '--source test/fixtures --entry-closure' \
   '[ "$status" -eq 0 ]' \
   '[ -s "$out" ]' \
   'if grep -qF "$DIAGNOSTIC" "$log"; then'; do
@@ -850,7 +616,6 @@ done
 if grep -Eq -- '--backend([=[:space:]]+)(llvm|"\$BACKEND")|\|\|[[:space:]]*true' "${option_target_gate}"; then
   fail "target Option compile gate does not preserve flagless LLVM or is optional"
 fi
-grep -Fq 'check_arm32_object "$BUILD_DIR/arm32-option-try/main.o" arm32_crossmodule_object' "${arch_gate}" || fail "ARM32 shared Result object inspection missing"
 grep -Fq 'cp test/fixtures/compiler/native_option_try_annotated_loud.spl "$1"' scripts/check/check-native-seed-parity.shs || fail "annotated Option parity fixture drift"
 grep -Fq 'cp test/fixtures/compiler/native_option_try_direct_loud.spl "$1"' scripts/check/check-native-seed-parity.shs || fail "direct Option parity fixture drift"
 grep -Fq 'cp test/fixtures/compiler/native_option_try_unresolved_method_loud.spl "$1"' scripts/check/check-native-seed-parity.shs || fail "unresolved-method Option parity fixture drift"
@@ -878,58 +643,6 @@ for required in \
   'negative >> unsigned_count != -1' \
   'signed_dividend / 2 != -4' \
   'signed_dividend % 2 != -1' \
-  'var option_receiver_calls = 0' \
-  'option_receiver_calls = option_receiver_calls + 1' \
-  'val mapped = next_cross_target_option().map(\x: x + 1).unwrap_or(99)' \
-  'mapped == 6 and option_receiver_calls == 1' \
-  'if not cross_target_option_map_once_ok():' \
-  'struct CrossInnerCopy:' \
-  'class CrossSharedRef:' \
-  'struct CrossOuterCopy:' \
-  'var local_copy = original' \
-  'local_copy.inner.n = 2' \
-  'local_copy.shared.n = 4' \
-  'original.inner.n != 1 or original.shared.n != 4' \
-  'value.inner.n = 9' \
-  'value.shared.n = 5' \
-  'mutate_cross_copy(original)' \
-  'original.inner.n == 1 and original.shared.n == 5' \
-  'if not cross_target_nested_copy_ok():' \
-  'class CrossArrayContainer:' \
-  'var marker: i64' \
-  'var items: [i64]' \
-  'c.items.push(42)' \
-  'c.items[0] = 7' \
-  'val alias = container.items' \
-  'mutate_cross_array(container)' \
-  'container.items.len() != 2 or alias.len() != 2' \
-  'container.items[0] != 7 or container.items[1] != 42' \
-  'alias[0] == 7 and alias[1] == 42 and container.marker == 99' \
-  'if not cross_target_class_array_ok():' \
-  'struct CrossFlagBox:' \
-  'class CrossNameBox:' \
-  'fn cross_target_bool_array_interp_ok() -> bool:' \
-  'val val_true = flags[0]' \
-  'var var_false = flags[1]' \
-  'val box = CrossFlagBox(bits: [false, true])' \
-  'val field_bool = box.bits[1]' \
-  'val names = CrossNameBox(marker: 99, values: ["left", "right"])' \
-  'val field_text = names.values[1]' \
-  'val actual = "{flags[0]}/{flags[1]};{val_true}/{var_false};{box.bits[0]}/{field_bool};{names.values[0]}/{field_text}/{names.marker}"' \
-  'actual == "true/false;true/false;false/true;left/right/99"' \
-  'if not cross_target_bool_array_interp_ok():' \
-  'fn cross_target_text_option_unwrap_ok() -> bool:' \
-  'val value: text? = "opt"' \
-  'val rendered = "{value.unwrap()}"' \
-  'rendered == "opt"' \
-  'if not cross_target_text_option_unwrap_ok():' \
-  'return 10' \
-  'struct CrossNames:' \
-  'impl CrossNames:' \
-  'fn unwrap(self) -> i64:' \
-  'CrossNames(value: 6).unwrap() == 7' \
-  'if not cross_target_custom_unwrap_ok():' \
-  'return 11' \
   'print("result-u8-ok")'; do
   grep -Fq -- "${required}" "${result_try_fixture}" || fail "cross-architecture Result try fixture missing: ${required}"
 done

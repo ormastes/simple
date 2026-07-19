@@ -1191,18 +1191,13 @@ fn compile_inline_hash_text<M: Module>(
     builder.switch_to_block(kind_block);
     let kind = builder.ins().load(types::I64, MemFlags::new(), ptr, 0);
     let masked_kind = builder.ins().band_imm(kind, 0xFFFF_FFFF);
-    let is_core_string = builder.ins().icmp_imm(IntCC::Equal, masked_kind, 1398034993);
-    let object_type = builder.ins().band_imm(kind, 0xFF);
-    let is_runtime_string = builder.ins().icmp_imm(IntCC::Equal, object_type, 1);
-    let is_string = builder.ins().bor(is_core_string, is_runtime_string);
+    let is_string = builder.ins().icmp_imm(IntCC::Equal, masked_kind, 1398034993);
     builder.ins().brif(is_string, len_block, &[], done_block, &[zero]);
     builder.seal_block(kind_block);
 
     builder.switch_to_block(len_block);
     let len = builder.ins().load(types::I64, MemFlags::new(), ptr, 8);
-    let core_data = builder.ins().iadd_imm(ptr, 16);
-    let runtime_data = builder.ins().iadd_imm(ptr, 24);
-    let data = builder.ins().select(is_runtime_string, runtime_data, core_data);
+    let data = builder.ins().iadd_imm(ptr, 16);
     builder.ins().jump(loop_block, &[hash_seed, zero]);
     builder.seal_block(len_block);
 
@@ -2804,28 +2799,20 @@ pub fn compile_call<M: Module>(
         .unwrap_or(func_name);
     if matches!(variant_name, "Ok" | "Err" | "Some" | "None") {
         if let Some(d) = dest {
-            let is_option = matches!(variant_name, "Some" | "None");
-            let disc = if variant_name == "Some" {
-                0
-            } else if variant_name == "None" {
-                1
-            } else {
+            // Use hashed discriminants consistently with pattern matching
+            let disc = {
                 use std::collections::hash_map::DefaultHasher;
                 use std::hash::{Hash, Hasher};
                 let mut hasher = DefaultHasher::new();
                 variant_name.hash(&mut hasher);
                 (hasher.finish() & 0xFFFFFFFF) as i64
             };
-            let enum_id_val = builder.ins().iconst(types::I32, if is_option { 1 } else { 0 });
+            let enum_id_val = builder.ins().iconst(types::I32, 0);
             let disc_val = builder.ins().iconst(types::I32, disc);
             let payload_val = if !args.is_empty() {
                 // Tag scalar payloads (Ok/Err/Some) to match the multi-arg /
                 // extraction convention; heap payloads pass through. Task #117.
-                if is_option {
-                    get_vreg_or_default(ctx, builder, &args[0])
-                } else {
-                    runtime_payload_value(ctx, builder, args[0])
-                }
+                runtime_payload_value(ctx, builder, args[0])
             } else {
                 // Empty payload uses tagged nil (3), not raw 0
                 builder.ins().iconst(types::I64, 3)

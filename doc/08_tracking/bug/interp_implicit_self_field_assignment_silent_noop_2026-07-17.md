@@ -39,3 +39,32 @@ Filed per the CLAUDE.md rule: a short, safe form that fails must be fixed
 or recorded, never silently worked around. Discovered as a landmine note by
 the fix-guide selector lane; confirmed with a direct seed repro by the opus
 review lane (see scratchpad fixguides/REVIEW.md of session 487db31f).
+
+## Update 2026-07-18: reads fail hard too (struct+impl, not just class+me)
+
+Reproduced with a `pub struct Foo: / impl Foo:` block (not `class`) on the
+current `bin/simple` (Rust seed, per its WARNING banner) — worse than the
+documented silent no-op:
+
+```simple
+pub struct Foo:
+    x: i64
+impl Foo:
+    fn get_x() -> i64:
+        x          # HARD semantic error, not silent no-op
+```
+
+Result: `error: semantic: variable `x` not found` / `HIR lowering error:
+Unknown variable: x while lowering Foo.get_x` — a plain field READ, no
+assignment involved. Confirmed by attempting the task-instructed "mechanical"
+fix (drop `self.` in `src/lib/hardware/nand_emu/chip.spl`'s `data_out`,
+`read_status`, `read_margin` methods): all became `variable not found` /
+`function not found` and every `chip_spec.spl` example went red; reverted.
+`.claude/memory/ref_coding.md`'s "Methods (implicit self)" section already
+states the correct convention is `self.field in body` — "implicit self"
+means omitting `self` from the parameter list, not omitting it from field
+access. The lint hint (`error_recovery.rs:414-422`, fires unconditionally on
+any `self.` token) is a parser-level false positive independent of whether
+the surrounding construct even supports the implicit form it recommends.
+`chip.spl` keeps its `self.` usages; removing them is not safe on this
+binary.

@@ -394,8 +394,7 @@ pub(crate) fn generate_stub_object_freestanding(
                  __stub_i64* p = (__stub_i64*)((((unsigned long long)val) & ~0x7ULL));\n\
                  if (!p) return 0;\n\
                  if (((unsigned int)p[0]) != 7U) return 0;\n\
-                 unsigned int* fields = (unsigned int*)p;\n\
-                 return fields[2] == 1U && fields[3] == 1U ? 1 : 0;\n\
+                 return p[2] == 3 ? 1 : 0;\n\
              }\n\n",
         );
     }

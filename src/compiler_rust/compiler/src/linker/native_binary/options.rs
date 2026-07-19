@@ -311,16 +311,6 @@ impl NativeBinaryOptions {
             if exists(&candidate) {
                 return candidate.canonicalize().ok();
             }
-            // Pure-Simple self-hosted deploys (`bin/release/<triple>/simple`)
-            // ship their runtime static lib under `build/simple-core`, not a
-            // cargo `target/release` dir (no release cargo profile is built
-            // by the default self-hosted bootstrap). Check it too so a
-            // deployed self-hosted binary can auto-discover rt_alloc et al.
-            // without requiring an explicit SIMPLE_RUNTIME_PATH override.
-            let simple_core_candidate = path.join("build/simple-core");
-            if exists(&simple_core_candidate) {
-                return simple_core_candidate.canonicalize().ok();
-            }
             dir = path.parent();
         }
         None
@@ -378,7 +368,6 @@ impl NativeBinaryOptions {
         }
 
         let cargo_target_paths = [
-            "build/simple-core",
             "target/debug",
             "target/debug/deps",
             "target/release",

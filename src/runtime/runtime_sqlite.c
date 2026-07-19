@@ -17,8 +17,12 @@
 
 /* Tagged value helpers — must match runtime.h / runtime_native.c */
 #define TAG_MASK     0x7ULL
+#define TAG_INT      0x0ULL
 #define TAG_HEAP     0x1ULL
+#define TAG_SPECIAL  0x3ULL
 #define SPECIAL_NIL  3ULL   /* 0 << 3 | 0b011 */
+#define SPECIAL_TRUE 11ULL  /* 1 << 3 | 0b011 */
+#define SPECIAL_FALSE 19ULL /* 2 << 3 | 0b011 */
 
 typedef int64_t RtValue;
 
@@ -72,21 +76,21 @@ RtValue rt_sqlite_open_memory(void) {
 }
 
 RtValue rt_sqlite_close(RtValue handle) {
-    if (is_nil(handle)) return from_int(0);
+    if (is_nil(handle)) return from_int(1);
     sqlite3 *db = (sqlite3 *)as_ptr(handle);
     int rc = sqlite3_close(db);
-    return from_int(rc == SQLITE_OK ? 1 : 0);
+    return from_int(rc == SQLITE_OK ? 0 : 1);
 }
 
 RtValue rt_sqlite_execute(RtValue conn, RtValue sql) {
-    if (is_nil(conn)) return from_int(0);
+    if (is_nil(conn)) return from_int(-1);
     sqlite3 *db = (sqlite3 *)as_ptr(conn);
     const char *s = get_string(sql);
-    if (!s) return from_int(0);
+    if (!s) return from_int(-1);
     char *err = NULL;
     int rc = sqlite3_exec(db, s, NULL, NULL, &err);
     if (err) sqlite3_free(err);
-    return from_int(rc == SQLITE_OK ? 1 : 0);
+    return from_int(rc == SQLITE_OK ? 0 : -1);
 }
 
 RtValue rt_sqlite_execute_batch(RtValue conn, RtValue sql) {
@@ -105,10 +109,10 @@ RtValue rt_sqlite_query(RtValue conn, RtValue sql) {
 }
 
 RtValue rt_sqlite_query_next(RtValue stmt_val) {
-    if (is_nil(stmt_val)) return from_int(0);
+    if (is_nil(stmt_val)) return (RtValue)SPECIAL_FALSE;
     sqlite3_stmt *stmt = (sqlite3_stmt *)as_ptr(stmt_val);
     int rc = sqlite3_step(stmt);
-    return from_int(rc == SQLITE_ROW ? 1 : 0);
+    return (rc == SQLITE_ROW) ? (RtValue)SPECIAL_TRUE : (RtValue)SPECIAL_FALSE;
 }
 
 void rt_sqlite_query_done(RtValue stmt_val) {
@@ -174,39 +178,39 @@ RtValue rt_sqlite_prepare(RtValue conn, RtValue sql) {
 }
 
 RtValue rt_sqlite_bind_text(RtValue stmt_val, RtValue idx, RtValue value) {
-    if (is_nil(stmt_val)) return from_int(0);
+    if (is_nil(stmt_val)) return from_int(-1);
     sqlite3_stmt *stmt = (sqlite3_stmt *)as_ptr(stmt_val);
     const char *s = get_string(value);
     int rc = sqlite3_bind_text(stmt, (int)as_int(idx), s ? s : "", -1, SQLITE_TRANSIENT);
-    return from_int(rc == SQLITE_OK ? 1 : 0);
+    return from_int(rc == SQLITE_OK ? 0 : -1);
 }
 
 RtValue rt_sqlite_bind_int(RtValue stmt_val, RtValue idx, RtValue value) {
-    if (is_nil(stmt_val)) return from_int(0);
+    if (is_nil(stmt_val)) return from_int(-1);
     sqlite3_stmt *stmt = (sqlite3_stmt *)as_ptr(stmt_val);
     int rc = sqlite3_bind_int64(stmt, (int)as_int(idx), as_int(value));
-    return from_int(rc == SQLITE_OK ? 1 : 0);
+    return from_int(rc == SQLITE_OK ? 0 : -1);
 }
 
 RtValue rt_sqlite_bind_float(RtValue stmt_val, RtValue idx, double value) {
-    if (is_nil(stmt_val)) return from_int(0);
+    if (is_nil(stmt_val)) return from_int(-1);
     sqlite3_stmt *stmt = (sqlite3_stmt *)as_ptr(stmt_val);
     int rc = sqlite3_bind_double(stmt, (int)as_int(idx), value);
-    return from_int(rc == SQLITE_OK ? 1 : 0);
+    return from_int(rc == SQLITE_OK ? 0 : -1);
 }
 
 RtValue rt_sqlite_bind_null(RtValue stmt_val, RtValue idx) {
-    if (is_nil(stmt_val)) return from_int(0);
+    if (is_nil(stmt_val)) return from_int(-1);
     sqlite3_stmt *stmt = (sqlite3_stmt *)as_ptr(stmt_val);
     int rc = sqlite3_bind_null(stmt, (int)as_int(idx));
-    return from_int(rc == SQLITE_OK ? 1 : 0);
+    return from_int(rc == SQLITE_OK ? 0 : -1);
 }
 
 RtValue rt_sqlite_reset(RtValue stmt_val) {
-    if (is_nil(stmt_val)) return from_int(0);
+    if (is_nil(stmt_val)) return from_int(-1);
     sqlite3_stmt *stmt = (sqlite3_stmt *)as_ptr(stmt_val);
     int rc = sqlite3_reset(stmt);
-    return from_int(rc == SQLITE_OK ? 1 : 0);
+    return from_int(rc == SQLITE_OK ? 0 : -1);
 }
 
 void rt_sqlite_finalize(RtValue stmt_val) {

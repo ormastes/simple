@@ -35,23 +35,6 @@ current main with the deployed `bin/simple` (v1.0.0-beta, self-hosted).
    return value (landed for graphics_2d_showcase: 320x240 now renders
    76789/76800 nonzero, semantic gate 4/4, 217s interpret). The widget
    showcase's ~15 `w_*(b: Engine2D, ...)` helpers have the same exposure.
-
-   **2026-07-19 REASSESSED — NOT an interpreter bug; not reproducible on
-   current main.** A dedicated agent sweep built 14 escalating repros
-   (scalar/array fields, direct/method mutation, depth-2 calls, val/var,
-   no-mut, trait dispatch, nested classes, whole-field reassign, real
-   Engine2D, and an exact revert of the pre-fix `draw_showcase`/`label`
-   at 320x240): ALL pass on the deployed interpret lane, and seed /
-   newer-build / JIT-auto oracles agree — class mut-params have correct
-   reference semantics in every lane. The reverted pre-fix showcase code
-   now renders 76789/76800 + semantic 4/4, identical to the "fixed"
-   numbers. Interpreter source confirms no clone on param bind
-   (`70.backend/backend/interpreter_calls.spl` env.define, ObjectStore
-   handles). Probable historical cause: same-day engine2d library defects
-   (nil `software_backend` read in the opacity/readback path `77acb3e4b8`,
-   ctor crash `a157afe890`) mimicking param-detach. The landed
-   return-threading refactors are harmless and stay. Repro suite:
-   session scratchpad `pdetach/` + `param_detach_report.md`.
 10. **JIT SIGSEGV on the 2D showcase** (exit 101 via isolated child; direct:
    SIGSEGV KERN_INVALID_ADDRESS at 0x890 inside JIT-generated code, frame
    `simple_compiler::codegen::jit::JitCompiler::call_i64_void` — macOS
@@ -80,22 +63,6 @@ current main with the deployed `bin/simple` (v1.0.0-beta, self-hosted).
    module-global). Native standalone showcase binaries unavailable until
    the hosted native runtime bundle exports rt_alloc and the const-method
    mangling is fixed.
-
-   **2026-07-19 LINK STEP FIXED.** Root causes: (a) macOS classified as
-   generic Gnu flavor → picks plain `ld.lld` (ELF front-end, not
-   `ld64.lld`) whenever lld is on PATH; (b) runtime-archive discovery never
-   checked `build/simple-core/` where the self-hosted deploy ships
-   `libsimple_runtime.a` (contains `_rt_alloc`). Source fixes (seed linker
-   module `src/compiler_rust/compiler/src/linker/native.rs` +
-   `native_binary/options.rs`: skip Lld for macOS host/target, add
-   build/simple-core to discovery) — take effect on next seed rebuild.
-   WORKS TODAY with the deployed binary via env:
-   `SIMPLE_RUNTIME_PATH=$PWD/build/simple-core SIMPLE_LINKER=ld
-   bin/simple compile --native <app> -o <out>` → valid ad-hoc-signed
-   runnable Mach-O. Follow-on blocker (separate, filed):
-   `native_aot_missing_program_body_exit3_2026-07-19.md` — the linked
-   binary omits the program body (~22 T syms regardless of program; call
-   into missing code yields NIL sentinel exit 3).
 8. **Web showcase HTML/CSS layout is interpreter-bound** (>280s at every
    resolution, no completion) — unchanged from 07-14; the compiled lane
    (#7) is its unblocking dependency.

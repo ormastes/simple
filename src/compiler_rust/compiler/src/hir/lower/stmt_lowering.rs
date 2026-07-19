@@ -403,98 +403,15 @@ impl Lowerer {
             }
 
             Node::While(while_stmt) => {
-                if let Some(pattern) = &while_stmt.let_pattern {
-                    // B10: `while val v = expr.?:` / `while val Some(v) = expr:`.
-                    // Prior to this fix, `let_pattern` was silently dropped here —
-                    // NOT just the ExistsCheck-unwrap bug N6 fixed for `if val`/
-                    // `elif val` (b1ee7fbaad1), but the *entire* pattern binding:
-                    // `while_stmt.condition` was lowered verbatim as a bare bool,
-                    // so `v` was never added to `ctx.locals` and any body reference
-                    // to it failed HIR lowering with `LowerError::UnknownVariable`
-                    // (or, worse, silently resolved to an unrelated outer-scope
-                    // binding of the same name).
-                    //
-                    // Fix: desugar to the same subject/condition/binding machinery
-                    // as `Node::If`'s let-pattern branch above, wrapped in a
-                    // `Loop` + `If`-with-`break`-in-the-else, since `HirStmt::While`
-                    // has no pattern-binding slot:
-                    //   loop:
-                    //       $while_let_subject = <unwrapped expr>
-                    //       if <pattern-match($while_let_subject)>:
-                    //           v = $while_let_subject   # + any payload extraction
-                    //           <original body>
-                    //       else:
-                    //           break
-                    // including the same one-layer ExistsCheck unwrap (`expr.?`
-                    // parses to `Expr::ExistsCheck`, which must be unwrapped to the
-                    // Option/Result-typed subject itself, not lowered as a bool).
-                    //
-                    // NOTE: loop invariants (`while ...: invariant: ...`) have no
-                    // home on the resulting `HirStmt::Loop` (it carries no
-                    // `invariants` field, unlike `HirStmt::While`/`HirStmt::For`).
-                    // This is a pre-existing, orthogonal gap — while-let was
-                    // entirely non-functional before this fix, so no invariant on
-                    // a while-let loop could have been honored either way — and is
-                    // intentionally left unaddressed here; only the pattern-binding
-                    // bug is in scope for this fix.
-                    let condition_expr = match &while_stmt.condition {
-                        Expr::ExistsCheck(inner) => inner.as_ref(),
-                        other => other,
-                    };
-                    let subject_hir = self.lower_expr(condition_expr, ctx)?;
-                    let subject_ty = subject_hir.ty;
-                    let subject_idx = ctx.locals.len();
-                    ctx.add_local("$while_let_subject".to_string(), subject_ty, Mutability::Immutable);
-                    let store_stmt = HirStmt::Let {
-                        local_index: subject_idx,
-                        ty: subject_ty,
-                        value: Some(subject_hir),
-                    };
-
-                    let condition = self.if_let_pattern_condition(subject_idx, subject_ty, pattern, ctx)?;
-
-                    let bindings = self.extract_pattern_bindings(pattern, subject_ty);
-                    let mutability = if matches!(pattern, Pattern::MutIdentifier(_)) {
-                        Mutability::Mutable
-                    } else {
-                        Mutability::Immutable
-                    };
-                    for (name, ty) in &bindings {
-                        ctx.add_local(name.clone(), *ty, mutability);
-                    }
-
-                    let mut then_block =
-                        self.build_pattern_binding_stmts(pattern, subject_idx, subject_ty, &bindings, ctx);
-                    then_block.extend(self.lower_block(&while_stmt.body, ctx)?);
-
-                    for (name, _) in &bindings {
-                        ctx.local_map.remove(name);
-                    }
-
-                    let loop_body = vec![
-                        store_stmt,
-                        HirStmt::If {
-                            condition,
-                            then_block,
-                            else_block: Some(vec![HirStmt::Break]),
-                        },
-                    ];
-
-                    Ok(vec![HirStmt::Loop {
-                        body: loop_body,
-                        simd_requested: while_stmt.simd_requested,
-                    }])
-                } else {
-                    let condition = self.lower_expr(&while_stmt.condition, ctx)?;
-                    let body = self.lower_block(&while_stmt.body, ctx)?;
-                    let invariants = self.lower_contract_clauses(&while_stmt.invariants, ctx)?;
-                    Ok(vec![HirStmt::While {
-                        condition,
-                        body,
-                        simd_requested: while_stmt.simd_requested,
-                        invariants,
-                    }])
-                }
+                let condition = self.lower_expr(&while_stmt.condition, ctx)?;
+                let body = self.lower_block(&while_stmt.body, ctx)?;
+                let invariants = self.lower_contract_clauses(&while_stmt.invariants, ctx)?;
+                Ok(vec![HirStmt::While {
+                    condition,
+                    body,
+                    simd_requested: while_stmt.simd_requested,
+                    invariants,
+                }])
             }
 
             Node::For(for_stmt) => {
@@ -1376,11 +1293,7 @@ impl Lowerer {
     /// `if val x = none_option:` always take the then-branch and bind nil).
     /// Constructor patterns (`Some(x)`, `Ok(v)`, …) still go through the shared
     /// pattern-condition logic (rt_is_some / discriminant checks).
-    // B10: pub(crate) (was private) so expression-position if-let
-    // (`hir/lower/expr/control.rs::lower_if`) can reuse the exact same
-    // Identifier-vs-constructor-pattern condition logic instead of
-    // duplicating it — see that call site for the sibling bug this closes.
-    pub(crate) fn if_let_pattern_condition(
+    fn if_let_pattern_condition(
         &mut self,
         subject_idx: usize,
         subject_ty: TypeId,

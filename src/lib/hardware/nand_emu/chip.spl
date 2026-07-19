@@ -36,6 +36,7 @@ use std.hardware.nand_emu.nand_types.{ne_id_maker, ne_id_device, ne_id_3rd, ne_i
 use std.hardware.nand_emu.geometry.{ne_profile_geometry, ne_cell_index}
 use std.hardware.nand_emu.geometry.{ne_decode_address, ne_decode_address_erase}
 use std.hardware.nand_emu.geometry.{ne_col_effective, ne_row_effective, NeAddress}
+use std.hardware.nand_emu.geometry.{ne_block_of, ne_page_in_block, ne_block_first_row}
 use std.hardware.nand_emu.vt_array.{ne_vt_array_new, ne_cell_seed}
 use std.hardware.nand_emu.vt_array.{ne_page_meta_get, ne_page_meta_set}
 use std.hardware.nand_emu.vt_array.{ne_block_meta_get, ne_block_meta_set}
@@ -167,10 +168,6 @@ fn ne_chip_clamp(x: i64) -> i64:
         255
     else:
         x
-
-fn ne_block_of(row: i64, geo: NeGeometry) -> i64:
-    """The block containing a row (Appendix A layout: blocks of pages_per_block)."""
-    row / geo.pages_per_block
 
 fn ne_id_byte_at(idx: i64) -> i64:
     """The Read-ID byte at stream position idx (doc §1.5: EC D3 10 A6 64). Positions
@@ -380,7 +377,7 @@ fn ne_chip_do_program(chip: NeChip) -> NeChip:
     val geo = nc.geometry
     val row = nc.cur_row
     val blk_idx = ne_block_of(row, geo)
-    val page_in_blk = row - (blk_idx * geo.pages_per_block)
+    val page_in_blk = ne_page_in_block(row, geo)
     val last_prog = nc.blk_last_prog[blk_idx]
     if page_in_blk != last_prog and not ne_check_page_order(page_in_blk, last_prog):
         nc.violation_count = nc.violation_count + 1
@@ -449,7 +446,7 @@ fn ne_chip_do_erase(chip: NeChip) -> NeChip:
         return nc
     var blk = ne_block_meta_get(nc.block_metas, blk_idx)
     val pe = blk.pe_cycles
-    val first_page = blk_idx * geo.pages_per_block
+    val first_page = ne_block_first_row(blk_idx, geo)
     var vt = nc.vt
     var p = 0
     while p < geo.pages_per_block:
@@ -774,7 +771,7 @@ impl NeChip:
             if bad[blk] and mcol < geo.page_bytes:
                 var pg = 0
                 while pg < 2 and pg < geo.pages_per_block:
-                    val row = blk * geo.pages_per_block + pg
+                    val row = ne_block_first_row(blk, geo) + pg
                     var bit = 0
                     while bit < 8:
                         val idx = ne_cell_index(row, mcol, bit, geo.page_bytes)

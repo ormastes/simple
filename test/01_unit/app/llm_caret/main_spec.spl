@@ -1,0 +1,238 @@
+# LLM Caret Main Entry Point Specification
+#
+# Exercises the REAL module (app.llm_caret.main):
+#   - CLI arg parsing (pure)
+#   - LLMResponse -> ModelResponse mapping (pure - the tool_use bridge)
+#   - a scripted multi-turn conversation end-to-end through
+#     chat.run_agent_loop + build_model_response (no live network/CLI)
+#   - the HTTP proxy's pure route/dispatch core (proxy_handle) with a fake
+#     dispatch fn
+#   - server hardening: bearer auth, size cap, rate limit (guard_request)
+
+use app.llm_caret.types.{Message, new_user_message}
+use app.llm_caret.provider.{LLMResponse, new_llm_error}
+use app.llm_caret.tools.{ModelResponse, default_policy}
+use app.llm_caret.chat.{run_agent_loop}
+use app.llm_caret.main.{
+    MainArgs, parse_main_args, build_model_response,
+    main_configure, main_session_id,
+    proxy_handle, status_for_path,
+    guard_request, bearer_ok, rate_limit_check, rate_limit_reset,
+    build_error_response
+}
+
+val WS_ROOT = "build/tmp/llm_caret_main_test"
+
+fn _llm_ok(content: text, raw: text) -> LLMResponse:
+    LLMResponse(
+        content: content, model: "test-model", provider: "test",
+        session_id: "sess-1", stop_reason: "end_turn",
+        input_tokens: 1, output_tokens: 1, error: "", is_error: false, raw: raw
+    )
+
+# ============================================================================
+describe "parse_main_args":
+    it "defaults to auto ui mode, claude_cli-less provider, no server":
+        val a = parse_main_args([])
+        expect(a.provider).to_equal("")
+        expect(a.ui_mode).to_equal("auto")
+        expect(a.server_mode).to_equal(false)
+        expect(a.help).to_equal(false)
+        expect(a.unknown).to_equal("")
+
+    it "parses --provider and --model (space form)":
+        val a = parse_main_args(["--provider", "claude_api", "--model", "claude-opus-4-20250514"])
+        expect(a.provider).to_equal("claude_api")
+        expect(a.model).to_equal("claude-opus-4-20250514")
+
+    it "parses --provider= and --model= (equals form)":
+        val a = parse_main_args(["--provider=openai", "--model=gpt-4o"])
+        expect(a.provider).to_equal("openai")
+        expect(a.model).to_equal("gpt-4o")
+
+    it "parses --plain and --tui":
+        expect(parse_main_args(["--plain"]).ui_mode).to_equal("plain")
+        expect(parse_main_args(["--tui"]).ui_mode).to_equal("tui")
+
+    it "parses --server and --port":
+        val a = parse_main_args(["--server", "--port", "9000"])
+        expect(a.server_mode).to_equal(true)
+        expect(a.port).to_equal(9000)
+
+    it "parses --port= form":
+        expect(parse_main_args(["--port=1234"]).port).to_equal(1234)
+
+    it "parses --resume, --config, --system, --workspace":
+        val a = parse_main_args(["--resume", "sess-9", "--config", "cfg.sdn", "--system", "be nice", "--workspace", "/tmp/ws"])
+        expect(a.resume_id).to_equal("sess-9")
+        expect(a.config_path).to_equal("cfg.sdn")
+        expect(a.system_prompt).to_equal("be nice")
+        expect(a.workspace_root).to_equal("/tmp/ws")
+
+    it "parses --dangerously-allow-all":
+        expect(parse_main_args(["--dangerously-allow-all"]).allow_all).to_equal(true)
+
+    it "parses -h/--help":
+        expect(parse_main_args(["-h"]).help).to_equal(true)
+        expect(parse_main_args(["--help"]).help).to_equal(true)
+
+    it "records the first unrecognized flag":
+        val a = parse_main_args(["--bogus-flag", "--another"])
+        expect(a.unknown).to_equal("--bogus-flag")
+
+describe "main_configure / main_session_id":
+    it "round-trips the session id set by main_configure":
+        main_configure("claude_cli", "m", "", "", "claude", "", "seeded-session", 0)
+        expect(main_session_id()).to_equal("seeded-session")
+
+describe "build_model_response":
+    it "maps a plain-text response with no tool_use blocks":
+        val mr = build_model_response(_llm_ok("hello there", "{}"))
+        expect(mr.text).to_equal("hello there")
+        expect(mr.tool_calls.len()).to_equal(0)
+
+    it "maps an error response to an ERROR-prefixed text turn":
+        val mr = build_model_response(new_llm_error("test", "boom"))
+        expect(mr.text).to_contain("ERROR: boom")
+        expect(mr.tool_calls.len()).to_equal(0)
+
+    it "extracts a tool_use block from the raw wire response":
+        val raw = "{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"bash\",\"input\":{\"command\":\"echo hi\"}}"
+        val mr = build_model_response(_llm_ok("", raw))
+        expect(mr.tool_calls.len()).to_equal(1)
+        expect(mr.tool_calls[0].name).to_equal("bash")
+        expect(mr.tool_calls[0].id).to_equal("t1")
+
+# ============================================================================
+# Scripted plain-mode conversation end-to-end (M1's "runnable entrypoint"
+# requirement): a fake 2-turn "network" builds real LLMResponse values, which
+# build_model_response maps into ModelResponse, which chat.run_agent_loop (the
+# same production agent loop main_responder drives) executes to completion -
+# no live network/CLI, fully deterministic.
+# ============================================================================
+
+var SCRIPT_TURN = 0
+
+fn _scripted_responder(msgs: [Message]) -> ModelResponse:
+    SCRIPT_TURN = SCRIPT_TURN + 1
+    if SCRIPT_TURN == 1:
+        val raw = "{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"bash\",\"input\":{\"command\":\"echo hi\"}}"
+        return build_model_response(_llm_ok("", raw))
+    build_model_response(_llm_ok("final answer", "{}"))
+
+describe "scripted plain-mode conversation (end-to-end via chat.run_agent_loop)":
+    it "runs a scripted 2-turn tool-call conversation to completion":
+        SCRIPT_TURN = 0
+        val p = default_policy(WS_ROOT)
+        val result = run_agent_loop(p, [new_user_message("do the thing")], _scripted_responder, 10)
+        expect(result.tool_calls_made).to_equal(1)
+        expect(result.final_text).to_equal("final answer")
+        expect(result.stopped_reason).to_equal("end_turn")
+        # the tool_result turn must be threaded into final_transcript (the
+        # M2 gap this campaign closed) - not just the initial + final text.
+        assert_true(result.final_transcript.len() > 2)
+
+fn _fake_dispatch_ok(content: text, model: text) -> LLMResponse:
+    _llm_ok("echo: " + content, "{}")
+
+fn _fake_dispatch_err(content: text, model: text) -> LLMResponse:
+    new_llm_error("test", "upstream down")
+
+# ============================================================================
+describe "HTTP proxy pure core (proxy_handle)":
+    it "health and models routes return 200":
+        expect(status_for_path("/v1/health")).to_equal(200)
+        expect(status_for_path("/v1/models")).to_equal(200)
+
+    it "unknown routes return 404":
+        expect(status_for_path("/nope")).to_equal(404)
+
+    it "GET /v1/health is routed through proxy_handle end to end":
+        val (code, body) = proxy_handle("GET", "/v1/health", "", _fake_dispatch_ok)
+        expect(code).to_equal(200)
+        expect(body).to_contain("ok")
+
+    it "GET on an unknown path is a 404 through proxy_handle":
+        val (code, body) = proxy_handle("GET", "/nope", "", _fake_dispatch_ok)
+        expect(code).to_equal(404)
+
+    it "chat completions with empty content is a 400":
+        val (code, body) = proxy_handle("POST", "/v1/chat/completions", "", _fake_dispatch_ok)
+        expect(code).to_equal(400)
+        expect(body).to_contain("messages required")
+
+    it "chat completions dispatches and returns 200 on success":
+        val body_in = "{\"content\":\"hi\"}"
+        val (code, body) = proxy_handle("POST", "/v1/chat/completions", body_in, _fake_dispatch_ok)
+        expect(code).to_equal(200)
+        expect(body).to_contain("echo: hi")
+
+    it "chat completions returns 502 when the backend errors":
+        val body_in = "{\"content\":\"hi\"}"
+        val (code, body) = proxy_handle("POST", "/v1/chat/completions", body_in, _fake_dispatch_err)
+        expect(code).to_equal(502)
+        expect(body).to_contain("upstream down")
+
+    it "/v1/messages dispatches through the anthropic-shaped response":
+        val body_in = "{\"content\":\"hi\"}"
+        val (code, body) = proxy_handle("POST", "/v1/messages", body_in, _fake_dispatch_ok)
+        expect(code).to_equal(200)
+        expect(body).to_contain("\"message\"")
+
+# ============================================================================
+describe "Server hardening (guard_request)":
+    it "bearer_ok always allows when no token is required":
+        assert_true(bearer_ok("", ""))
+        assert_true(bearer_ok("garbage", ""))
+
+    it "bearer_ok rejects a missing/garbage header when a token is required":
+        assert_false(bearer_ok("", "secret"))
+        assert_false(bearer_ok("Bearer wrong", "secret"))
+
+    it "bearer_ok accepts the exact configured token":
+        assert_true(bearer_ok("Bearer secret", "secret"))
+
+    it "guard_request returns 401 without a token when one is required":
+        rate_limit_reset()
+        val (allowed, code, body) = guard_request("", "{}", "secret", "client-a", 1000)
+        assert_false(allowed)
+        expect(code).to_equal(401)
+
+    it "guard_request allows a matching bearer token":
+        rate_limit_reset()
+        val (allowed, code, body) = guard_request("Bearer secret", "{}", "secret", "client-b", 1000)
+        assert_true(allowed)
+
+    it "guard_request rejects an oversized body with 413":
+        rate_limit_reset()
+        # Double up to exceed MAX_BODY_BYTES (1_000_000) in O(log n) instead
+        # of an O(n) append loop - a naive 100k-iteration `+=` loop over a
+        # megabyte string is needlessly slow under the interpreter.
+        var big = "0123456789"
+        while big.len() < 1000001:
+            big = big + big
+        val (allowed, code, body) = guard_request("", big, "", "client-c", 1000)
+        assert_false(allowed)
+        expect(code).to_equal(413)
+
+    it "rate_limit_check allows the first N requests then rejects the N+1th":
+        rate_limit_reset()
+        var i = 0
+        var last_ok = true
+        while i < 60:
+            last_ok = rate_limit_check("client-rl", 1000)
+            i = i + 1
+        assert_true(last_ok)
+        val over_limit = rate_limit_check("client-rl", 1000)
+        assert_false(over_limit)
+
+    it "rate_limit_check resets after the window elapses":
+        rate_limit_reset()
+        var i = 0
+        while i < 60:
+            rate_limit_check("client-window", 1000)
+            i = i + 1
+        assert_false(rate_limit_check("client-window", 1000))
+        # 60s+ later, same client should be allowed again
+        assert_true(rate_limit_check("client-window", 1000 + 60001))
+        rate_limit_reset()

@@ -143,34 +143,6 @@ impl LlvmEmitter<'_> {
             .into()
     }
 
-    fn call_enum_new(
-        &self,
-        enum_id: i32,
-        discriminant: i32,
-        payload: BasicValueEnum<'static>,
-    ) -> Result<BasicValueEnum<'static>, String> {
-        let i32_type = self.backend.context_ref().i32_type();
-        let i64_type = self.backend.runtime_int_type();
-        let func = self.module.get_function("rt_enum_new").unwrap_or_else(|| {
-            self.module.add_function(
-                "rt_enum_new",
-                i64_type.fn_type(&[i32_type.into(), i32_type.into(), i64_type.into()], false),
-                None,
-            )
-        });
-        let args: [BasicMetadataValueEnum; 3] = [
-            self.i32_const(enum_id).into(),
-            self.i32_const(discriminant).into(),
-            payload.into(),
-        ];
-        self.builder
-            .build_call(func, &args, "rt_enum_new")
-            .map_err(|e| format!("LLVM call to 'rt_enum_new' failed: {}", e))?
-            .try_as_basic_value()
-            .left()
-            .ok_or_else(|| "'rt_enum_new' did not return a value".to_string())
-    }
-
     fn method_leaf_name(func_name: &str) -> &str {
         func_name.rsplit('.').next().unwrap_or(func_name)
     }
@@ -1708,13 +1680,13 @@ impl CodegenEmitter for LlvmEmitter<'_> {
 
     fn emit_option_some(&mut self, dest: VReg, value: VReg) -> Result<(), String> {
         let val = self.get(value)?;
-        let result = self.call_enum_new(1, 0, val)?;
+        let result = self.call_runtime("rt_option_some", &[val])?;
         self.set(dest, result);
         Ok(())
     }
 
     fn emit_option_none(&mut self, dest: VReg) -> Result<(), String> {
-        let result = self.call_enum_new(1, 1, self.i64_const(3))?;
+        let result = self.call_runtime("rt_option_none", &[])?;
         self.set(dest, result);
         Ok(())
     }

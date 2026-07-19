@@ -1,5 +1,5 @@
 # codex-system-test
-use compiler.backend.backend.stage4_symbol_closure.{stage4_projection_localization_symbols, stage4_validate_projection_symbol_contract, stage4_requested_from_nm_output, stage4_requested_from_nm_output_for_format}
+use compiler.backend.backend.stage4_symbol_closure.{stage4_projection_localization_symbols, stage4_validate_projection_symbol_contract, stage4_requested_from_nm_output}
 use std.spec.{describe, it, expect}
 
 extern fn rt_file_read_text(path: text) -> text
@@ -14,13 +14,6 @@ describe "Stage4 selected archive projection":
         expect(stage4_requested_from_nm_output(macho, true)).to_equal([
             "__simple_pow", "__simple_runtime_init", "__simple_runtime_shutdown", "g_memtrack_enabled"
         ])
-        val mingw = elf + "00000000 A @feat.00\n"
-        expect(stage4_requested_from_nm_output_for_format(mingw, "coff-mingw")).to_equal([
-            "__simple_pow", "__simple_runtime_init", "__simple_runtime_shutdown", "g_memtrack_enabled"
-        ])
-        val msvc = "00000000 T __simple_main\n         U __imp___simple_pow\n"
-        expect(stage4_requested_from_nm_output_for_format(msvc, "coff-msvc")).to_equal(["__simple_pow"])
-        expect(stage4_requested_from_nm_output_for_format(msvc, "coff-mingw")).to_equal(["__simple_pow"])
 
     it "localizes every transitive and non-runtime definition outside the requested roots":
         val nm = "00000000 T rt_root\n00000010 T rt_dependency\n00000020 T helper_private\n         U malloc\n"
@@ -32,83 +25,9 @@ describe "Stage4 selected archive projection":
         val symbols = stage4_projection_localization_symbols(nm, "macho", ["spl_root"]).unwrap()
         expect(symbols).to_equal(["_helper_private", "_rt_dependency"])
 
-    it "accepts MSVC and MinGW COFF symbol projection contracts":
-        val msvc = "00000000 T rt_root\n00000010 T helper_private\n00000020 T __imp_rt_shadow\n00000000 A @feat.00\n00000000 A @feat.00\n         U __imp_malloc\n"
-        val mingw = "00000000 T _rt_root\n00000010 T _helper_private\n00000000 A @feat.00\n         U __imp__malloc\n"
-        expect(stage4_projection_localization_symbols(msvc, "coff-msvc", ["rt_root"]).unwrap()).to_equal(["__imp_rt_shadow", "helper_private"])
-        expect(stage4_projection_localization_symbols(mingw, "coff-mingw", ["rt_root"]).unwrap()).to_equal(["_helper_private"])
-        expect(stage4_validate_projection_symbol_contract(msvc.replace("00000010 T helper_private\n", "").replace("00000020 T __imp_rt_shadow\n", ""), "coff-msvc", ["rt_root"]).is_ok()).to_be(true)
-        expect(stage4_validate_projection_symbol_contract(mingw.replace("00000010 T _helper_private\n", ""), "coff-mingw", ["rt_root"]).is_ok()).to_be(true)
-        expect(stage4_projection_localization_symbols("00000000 T rt_root\n         U __imp_rt_missing\n", "coff-msvc", ["rt_root"]).is_err()).to_be(true)
-        expect(stage4_projection_localization_symbols("00000000 T __imp_rt_root\n", "coff-msvc", ["rt_root"]).is_err()).to_be(true)
-
-    it "projects MSVC owners through a validated DLL and stages Windows neighbors":
-        val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
-        val shared_link_source = rt_file_read_text("src/compiler/70.backend/linker/_LinkerWrapper/shared_linking.spl") ?? ""
-        val msvc_link_source = rt_file_read_text("src/compiler/70.backend/linker/msvc.spl") ?? ""
-        expect(source).to_contain("fn llvm_stage4_projection_failure(stage_dir: text, message: text) -> Result<(text, text, text, text), text>:")
-        expect(source).to_contain("fn llvm_stage4_project_selected_archives_msvc(selected_paths: [text], requested_symbols: [text], stage_dir: text, projection_name: text, link_libraries: [text], link_library_paths: [text], sqlite_dll_source: text) -> Result<(text, text, text, text), text>:")
-        expect(source).to_contain("fn llvm_stage4_project_selected_archives(candidate_labels: [text], candidate_paths: [text], selected_indices: [i64], requested_symbols: [text], target_os_name: text, hosted_cc: text, msvc_objects: bool, msvc_linker: bool, link_libraries: [text], link_library_paths: [text], pid: i64, output_path: text) -> Result<(text, text, text, text), text>:")
-        expect(source).to_contain("fn llvm_stage4_find_windows_dll(file_name: text, override_key: text) -> text:")
-        expect(source).to_contain("fn llvm_stage4_copy_verified_neighbor(source: text, destination: text) -> Result<bool, text>:")
-        expect(source).to_contain("fn llvm_stage4_combined_candidate_inventory(labels: [text], paths: [text], object_format: text, msvc_linker: bool) -> Result<[text], text>:")
-        expect(source).to_contain("llvm_stage4_candidate_archive_inventory(labels[1:], paths[1:])")
-        expect(source).to_contain("llvm_stage4_combined_candidate_inventory(candidate_labels, candidate_paths, stage4_object_format, stage4_msvc_linker)")
-        expect(source).to_contain("val fingerprint = match llvm_stage4_projection_fingerprint(selected_paths, requested_symbols, stage_dir):")
-        expect(source).to_contain("val projection_name = stem(output_path.replace(\"\\\\\", \"/\")) + \"_stage4_\" + fingerprint")
-        expect(source).to_contain("val dll_path = stage_dir + \"/\" + projection_name + \".dll\"")
-        expect(source).to_contain("val import_lib = stage_dir + \"/\" + projection_name + \".lib\"")
-        expect(source).to_contain("var extra_flags = [\"/NOENTRY\", \"/INCREMENTAL:NO\", \"/Brepro\", \"/IMPLIB:\" + import_lib]")
-        expect(source).to_contain("extra_flags = extra_flags.push(\"/EXPORT:\" + export_name)")
-        expect(source).to_contain("if symbol == \"g_memtrack_enabled\": symbol + \",DATA\"")
-        expect(source).to_contain("extra_flags = extra_flags.push(\"/INCLUDE:\" + symbol)")
-        expect(source).to_contain("match link_to_shared(selected_paths, dll_path, config):")
-        expect(shared_link_source).to_contain("msvc_config.entry_point = \"\"")
-        expect(shared_link_source).to_contain("msvc_config.extra_args.push(\"/DLL\")")
-        expect(msvc_link_source).to_contain("process_run(link_exe, args)")
-        expect(msvc_link_source.contains("val args_str = args.join(\" \")")).to_be(false)
-        expect(source).to_contain("stage4_validate_coff_dll_export_contract(exports_out, requested_symbols)")
-        expect(source).to_contain("llvm_stage4_find_windows_dll(\"sqlite3.dll\", \"SIMPLE_SQLITE3_DLL\")")
-        expect(source).to_contain("process_run(\"sha256sum\", [path])")
-        expect(source).to_contain("process_run(\"shasum\", [\"-a\", \"256\", path])")
-        expect(source).to_contain("process_run(\"sha256\", [\"-q\", path])")
-        expect(source).to_contain("process_run(\"openssl\", [\"dgst\", \"-sha256\", path])")
-        expect(source).to_contain("process_run(\"certutil\", [\"-hashfile\", path, \"SHA256\"])")
-        expect(source).to_contain("val temporary = destination + \".stage4.tmp\"")
-        expect(source).to_contain("file_size(temporary) <= 0 or llvm_stage4_file_sha256(temporary) != source_hash")
-        expect(source).to_contain("llvm_stage4_promote_artifact(temporary, destination)")
-        expect(source).to_contain("val output_dir = parent_dir(output.replace(\"\\\\\", \"/\"))")
-        expect(source).to_contain("stage4_dll_destination = join2(output_dir, basename(stage4_projection_dll_source))")
-        expect(source).to_contain("sqlite_dll_destination = join2(output_dir, \"sqlite3.dll\")")
-        expect(source).to_contain("llvm_stage4_copy_verified_neighbor(stage4_projection_dll_source, stage4_dll_destination)")
-        expect(source).to_contain("llvm_stage4_copy_verified_neighbor(stage4_sqlite_dll_source, sqlite_dll_destination)")
-        expect(source).to_contain("if stage4_dll_created:\n                            remove_file_if_exists(stage4_dll_destination)")
-        expect(source).to_contain("Ok((import_lib, stage_dir, dll_path, sqlite_dll_source))")
-        expect(source).to_contain("Ok((capsule_path, stage_dir, \"\", sqlite_dll_source))")
-        expect(source).to_contain("val (projected_capsule, projected_dir, projected_dll_source, sqlite_dll_source) = match llvm_stage4_project_selected_archives")
-        expect(source).to_contain("stage4_projection_dll_source = projected_dll_source")
-        expect(source).to_contain("stage4_sqlite_dll_source = sqlite_dll_source")
-        expect(source.contains("requires the MSVC DLL/import-library path")).to_be(false)
-        expect(source.contains("requires sqlite3.dll neighbor staging")).to_be(false)
-        val copy_start = source.find("fn llvm_stage4_copy_verified_neighbor") ?? -1
-        val copy_end = source.find("fn llvm_stage4_project_selected_archives_msvc") ?? -1
-        val copy_source = if copy_start >= 0 and copy_end > copy_start: source.substring(copy_start, copy_end) else: ""
-        val temporary_copy = copy_source.find("file_copy(source, temporary)") ?? -1
-        val temporary_hash = copy_source.find("llvm_stage4_file_sha256(temporary)") ?? -1
-        val atomic_promotion = copy_source.find("llvm_stage4_promote_artifact(temporary, destination)") ?? -1
-        expect(temporary_copy).to_be_greater_than(-1)
-        expect(temporary_hash).to_be_greater_than(temporary_copy)
-        expect(atomic_promotion).to_be_greater_than(temporary_hash)
-
     it "accepts an exact projected global ABI with system dependencies only":
         val nm = "00000000 T rt_root\n00000010 T spl_other_root\n         U malloc\n"
         expect(stage4_validate_projection_symbol_contract(nm, "elf", ["rt_root", "spl_other_root"]).is_ok()).to_be(true)
-
-    it "restores POSIX executable mode after Stage4 artifact promotion or reuse":
-        val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
-        expect(source).to_contain("if _is_windows():\n        return Ok(())\n    val (_, chmod_err, chmod_code) = process_run(\"chmod\", [\"+x\", path])")
-        expect(source.split("llvm_stage4_ensure_executable(destination)").len() - 1).to_equal(2)
-        expect(source).to_contain("if not llvm_stage4_rollback_replacement(receipt):\n                return Err(err + \"; Stage4 executable rollback also failed\")")
 
     it "rejects missing duplicate repeated and non-runtime roots":
         val missing = stage4_projection_localization_symbols("00000000 T rt_other\n", "elf", ["rt_root"])
@@ -122,7 +41,7 @@ describe "Stage4 selected archive projection":
 
     it "rejects unresolved runtime dependencies and unsupported object formats":
         val unresolved = stage4_projection_localization_symbols("00000000 T rt_root\n         U spl_missing\n", "elf", ["rt_root"])
-        val unsupported = stage4_projection_localization_symbols("00000000 T rt_root\n", "wasm", ["rt_root"])
+        val unsupported = stage4_projection_localization_symbols("00000000 T rt_root\n", "coff-msvc", ["rt_root"])
         val empty = stage4_projection_localization_symbols("00000000 T rt_root\n", "elf", [])
         expect(unresolved.is_err()).to_be(true)
         expect(unsupported.is_err()).to_be(true)
@@ -136,27 +55,18 @@ describe "Stage4 selected archive projection":
         val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
         val project_pos = source.find("llvm_stage4_project_selected_archives(candidate_labels, candidate_paths, selected_archive_indices, stage4_requested_symbols") ?? -1
         val step3_pos = source.find("# Step 3: Combine all objects and link") ?? -1
-        val link_pos = source.find("val link_result = link_to_native(all_objects, final_link_output, link_config)") ?? -1
+        val link_pos = source.find("val link_result = link_to_native(all_objects, output, link_config)") ?? -1
         expect(project_pos).to_be_greater_than(-1)
         expect(step3_pos).to_be_greater_than(project_pos)
         expect(link_pos).to_be_greater_than(step3_pos)
         expect(source).to_contain("closure_args = closure_args.push(\"-Wl,--start-group\")")
         expect(source).to_contain("closure_args = closure_args.push(\"-Wl,--end-group\")")
-        expect(source).to_contain("target_os_name != \"freebsd\" and target_os_name != \"windows\"")
-        expect(source.split("if target_os_name == \"linux\" or target_os_name == \"freebsd\" or target_os_name == \"windows\":").len() - 1).to_be_greater_than(1)
-        expect(source).to_contain("if target_os_name != \"windows\":\n            closure_args = closure_args.push(\"-no-pie\")")
         expect(source).to_contain("closure_args = closure_args.push(\"-Wl,-u,_{symbol}\")")
         expect(source).to_contain("closure_args = closure_args.push(\"-Wl,-force_load,\" + path)")
         expect(source).to_contain("stage4_projection_localization_symbols(closure_nm_out, object_format, requested_symbols)")
         expect(source).to_contain("stage4_validate_projection_symbol_contract(scans[0], object_format, requested_symbols)")
         expect(source).to_contain("members_out.replace(\"\\r\", \"\").trim() != \"stage4_selected_local.o\"")
-        for prefix in [".CRT$XI*", ".CRT$XC*", ".CRT$XP*", ".CRT$XT*", ".CRT$XL*"]:
-            expect(source).to_contain("--remove-section=" + prefix)
-        expect(source).to_contain("llvm_stage4_project_selected_archives(candidate_labels, candidate_paths, selected_archive_indices, stage4_requested_symbols, hosted_os, hosted_cc, stage4_msvc_objects, stage4_msvc_linker, stage4_system_libraries, stage4_system_library_paths, pid, output)")
         expect(source).to_contain("all_objects = all_objects.push(entry_obj_path)\n        all_objects = all_objects.push(stage4_projection_capsule)")
         expect(source).to_contain("allow_duplicate_definitions: not stage4_requested")
         expect(source).to_contain("allow_cc_fallback: not stage4_requested")
-        expect(source).to_contain("val final_link_output = if stage4_requested: join2(stage4_projection_dir, basename(output.replace(\"\\\\\", \"/\"))) else: output")
-        expect(source).to_contain("llvm_stage4_replace_verified_artifact(path, output)")
-        expect(source).to_contain("llvm_stage4_recover_replacement(output)")
         expect(source.contains("Stage4 strict archive projection is unavailable")).to_be(false)

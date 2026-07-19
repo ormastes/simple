@@ -1,0 +1,150 @@
+# @cover src/app/itf/cmd_github.spl 60%
+#
+# `itf github` (J5): fake-binary fixture spec. Drives handle_github()
+# end-to-end against a stub `gh` script on PATH (records argv to a log file,
+# emits canned JSON) — NEVER contacts real GitHub. Mirrors the
+# write-shim-and-override-PATH recipe already used by
+# test/01_unit/os/qemu_runner_desktop_extended_spec.spl
+# (write_shell_shim / install_failing_simple_shim).
+#
+# Assertions cover exit codes + the argv actually passed to `gh` (proves
+# subcommand routing, --json field selection, and flag passthrough); the
+# rendered table itself goes straight to stdout via `print` with no return
+# value to capture in-process, so the pure JSON-extraction helpers
+# (_gh_field/_gh_login/_default_fields) are covered directly instead.
+
+use app.itf.cmd_github.{handle_github, _gh_field, _gh_login, _default_fields}
+use std.json.{json_parse}
+
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_env_get(key: text) -> text?
+extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+val FIXTURE_DIR = "build/test-itf-github-fixture"
+val ARGV_LOG = "{FIXTURE_DIR}/argv.log"
+
+
+fn shell_ok(cmd: text) -> bool:
+    val (_stdout, _stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", cmd], 5000)
+    exit_code == 0
+
+
+fn install_fake_gh(script_body: text) -> text:
+    """Write build/test-itf-github-fixture/gh (chmod +x) and return its dir."""
+    val _mk = rt_dir_create_all(FIXTURE_DIR)
+    val _rm = rt_file_delete(ARGV_LOG)
+    val path = "{FIXTURE_DIR}/gh"
+    val _write = rt_file_write_text(path, script_body)
+    val _chmod = shell_ok("/bin/chmod +x \"{path}\"")
+    FIXTURE_DIR
+
+
+fn run_github_with_fake_gh(dir: text, args: [text]) -> (i64, text):
+    """Run handle_github(args) with `dir` prepended to PATH; always restores
+    PATH afterward. Returns (exit_code, argv_log_contents)."""
+    val original_path = rt_env_get("PATH") ?? ""
+    val _set = rt_env_set("PATH", "{dir}:{original_path}")
+    val code = handle_github(args)
+    val _restore = rt_env_set("PATH", original_path)
+    val log = rt_file_read_text(ARGV_LOG)
+    (code, log)
+
+
+val FAKE_GH_LIST_OK = "#!/bin/sh\necho \"$@\" >> \"{ARGV_LOG}\"\ncase \"$1\" in\n  --version) echo 'gh version 2.0.0 (fake)'; exit 0 ;;\nesac\nif [ \"$1\" = issue ] && [ \"$2\" = list ]; then\n  echo '[{{\"number\":42,\"title\":\"fixture issue\",\"state\":\"OPEN\",\"author\":{{\"login\":\"alice\"}},\"updatedAt\":\"2026-07-01T00:00:00Z\"}}]'\n  exit 0\nfi\nif [ \"$1\" = pr ] && [ \"$2\" = list ]; then\n  echo '[]'\n  exit 0\nfi\nexit 1\n"
+
+val FAKE_GH_NOT_FOUND = "#!/bin/sh\nexit 127\n"
+
+val FAKE_GH_UNAUTHED = "#!/bin/sh\necho \"$@\" >> \"{ARGV_LOG}\"\ncase \"$1\" in\n  --version) echo 'gh version 2.0.0 (fake)'; exit 0 ;;\nesac\necho 'To use GitHub CLI in a script, run: gh auth login' >&2\nexit 1\n"
+
+
+describe "itf github (fake-binary fixture)":
+
+    context "issue list — success path":
+
+        it "exits 0 and forwards the default --json fields to gh":
+            val dir = install_fake_gh(FAKE_GH_LIST_OK)
+            val (code, log) = run_github_with_fake_gh(dir, ["issue", "list"])
+            expect(code).to_equal(0)
+            expect(log.contains("issue list --json number,title,state,author,updatedAt")).to_equal(true)
+
+        it "forwards extra gh-native flags (e.g. --state, --limit) verbatim":
+            val dir = install_fake_gh(FAKE_GH_LIST_OK)
+            val (code, log) = run_github_with_fake_gh(dir, ["issue", "list", "--state", "open", "--limit", "5"])
+            expect(code).to_equal(0)
+            expect(log.contains("--state open --limit 5")).to_equal(true)
+
+    context "pr list — empty result":
+
+        it "exits 0 on an empty array (no issues/PRs is not an error)":
+            val dir = install_fake_gh(FAKE_GH_LIST_OK)
+            val (code, _log) = run_github_with_fake_gh(dir, ["pr", "list"])
+            expect(code).to_equal(0)
+
+    context "gh missing":
+
+        it "exits 1 with an actionable 'not found' error (never a bare crash)":
+            val dir = install_fake_gh(FAKE_GH_NOT_FOUND)
+            val (code, _log) = run_github_with_fake_gh(dir, ["issue", "list"])
+            expect(code).to_equal(1)
+
+    context "gh unauthenticated":
+
+        it "exits 1 and does not fall through to a bare exit code":
+            val dir = install_fake_gh(FAKE_GH_UNAUTHED)
+            val (code, log) = run_github_with_fake_gh(dir, ["issue", "list"])
+            expect(code).to_equal(1)
+            expect(log.contains("issue list")).to_equal(true)
+
+    context "unknown subcommand":
+
+        it "exits 1 for an unknown top-level command without touching gh":
+            expect(handle_github(["bogus"])).to_equal(1)
+
+        it "exits 1 for an unknown issue subcommand":
+            expect(handle_github(["issue", "bogus"])).to_equal(1)
+
+
+describe "cmd_github pure JSON-extraction helpers":
+
+    context "_gh_field":
+
+        it "extracts a string field, stripping quotes":
+            val obj = json_parse("{\"title\":\"hello\"}")
+            expect(_gh_field(obj, "title")).to_equal("hello")
+
+        it "extracts a numeric field as text":
+            val obj = json_parse("{\"number\":42}")
+            expect(_gh_field(obj, "number")).to_equal("42")
+
+        it "returns empty text for a missing field":
+            val obj = json_parse("{\"title\":\"hello\"}")
+            expect(_gh_field(obj, "missing")).to_equal("")
+
+    context "_gh_login":
+
+        it "extracts the nested login field gh uses for author/assignee":
+            # NOTE: braces must be doubled ({{/}}) here even though this is a
+            # plain val, not a print — Simple's string-interpolation scanner
+            # treats bare `{`/`}` as interpolation delimiters in ANY string
+            # literal once they're nested two levels deep (a single flat
+            # `{"a":"b"}` literal is tolerated as-is, as the other _gh_field
+            # cases above show, but `{"a":{"b":"c"}}` is not — found while
+            # writing this spec; compiler quirk, reported, not fixed here).
+            val obj = json_parse("{{\"author\":{{\"login\":\"alice\"}}}}")
+            expect(_gh_login(obj, "author")).to_equal("alice")
+
+        it "returns empty text when the nested object is absent":
+            val obj = json_parse("{}")
+            expect(_gh_login(obj, "author")).to_equal("")
+
+    context "_default_fields":
+
+        it "uses the pr field set (includes headRefName) for entity=pr":
+            expect(_default_fields("pr")).to_equal("number,title,state,author,headRefName,updatedAt")
+
+        it "uses the issue field set for entity=issue":
+            expect(_default_fields("issue")).to_equal("number,title,state,author,updatedAt")

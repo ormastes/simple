@@ -36,12 +36,6 @@ fn gen_session_id() -> text:
 fn new_session(id: text, provider: text, model: text) -> Session:
     Session(id: id, provider: provider, model: model, provider_session_id: "", messages: [], updated_at_ms: 0)
 
-fn session_with_messages(sess: Session, messages: [Message], provider_session_id: text, now_ms: i64) -> Session:
-    Session(
-        id: sess.id, provider: sess.provider, model: sess.model,
-        provider_session_id: provider_session_id, messages: messages, updated_at_ms: now_ms
-    )
-
 # ============================================================================
 # JSON encode
 # ============================================================================
@@ -94,6 +88,39 @@ fn _extract_object_at(json: text, start: i64) -> text:
         i = i + 1
     json.substring(start)
 
+# extract_json_string returns the RAW escaped slice between quotes (it does
+# not unescape) - fine for content with no JSON-special chars, but message
+# content routinely contains quotes/backslashes (tool output, code). Undo
+# the json_helpers.build_message_json / std.mcp.helpers.js() escaping here so
+# round-tripping is lossless. Mirrors tools.spl's proven _json_unescape.
+fn _json_unescape(s: text) -> text:
+    var out = ""
+    var i = 0
+    while i < s.len():
+        val ch = s[i]
+        if ch == "\\" and i + 1 < s.len():
+            val nx = s[i + 1]
+            if nx == "n":
+                out = out + "\n"
+            elif nx == "t":
+                out = out + "\t"
+            elif nx == "r":
+                out = out + "\r"
+            elif nx == "\"":
+                out = out + "\""
+            elif nx == "\\":
+                out = out + "\\"
+            else:
+                out = out + nx
+            i = i + 2
+        else:
+            out = out + ch
+            i = i + 1
+    out
+
+fn _extract_json_string_unescaped(json: text, key: text) -> text:
+    _json_unescape(extract_json_string(json, key))
+
 fn parse_messages_array(json: text) -> [Message]:
     val key = "\"messages\":"
     val idx = json_find(json, key)
@@ -112,8 +139,8 @@ fn parse_messages_array(json: text) -> [Message]:
             break
         if ch == "{":
             val obj = _extract_object_at(json, i)
-            val role = extract_json_string(obj, "role")
-            val content = extract_json_string(obj, "content")
+            val role = _extract_json_string_unescaped(obj, "role")
+            val content = _extract_json_string_unescaped(obj, "content")
             msgs = msgs + [Message(role: role, content: content)]
             i = i + obj.len()
         else:
@@ -122,10 +149,10 @@ fn parse_messages_array(json: text) -> [Message]:
 
 fn session_from_json(raw: text) -> Session:
     Session(
-        id: extract_json_string(raw, "id"),
-        provider: extract_json_string(raw, "provider"),
-        model: extract_json_string(raw, "model"),
-        provider_session_id: extract_json_string(raw, "provider_session_id"),
+        id: _extract_json_string_unescaped(raw, "id"),
+        provider: _extract_json_string_unescaped(raw, "provider"),
+        model: _extract_json_string_unescaped(raw, "model"),
+        provider_session_id: _extract_json_string_unescaped(raw, "provider_session_id"),
         messages: parse_messages_array(raw),
         updated_at_ms: extract_json_int(raw, "updated_at_ms")
     )

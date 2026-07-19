@@ -624,8 +624,6 @@ static int rt_core_dict_del(RtCoreDict* d, int64_t key);
 static RtCoreString** rt_core_string_registry = NULL;
 static size_t rt_core_string_registry_len = 0;
 static size_t rt_core_string_registry_cap = 0;
-static RtCoreString* rt_core_short_string_cache[257] = {0};
-static atomic_flag rt_core_short_string_cache_lock = ATOMIC_FLAG_INIT;
 static RtCoreArray** rt_core_array_registry = NULL;
 static size_t rt_core_array_registry_len = 0;
 static size_t rt_core_array_registry_cap = 0;
@@ -1091,7 +1089,7 @@ int64_t rt_interp_call(const uint8_t* name, uint64_t len, int64_t argc, int64_t 
     return rt_function_not_found(name, len);
 }
 
-static int64_t rt_string_new_uncached(const uint8_t* bytes, uint64_t len) {
+int64_t rt_string_new(const uint8_t* bytes, uint64_t len) {
     if (!bytes && len > 0) return rt_core_nil();
     if (len > SIZE_MAX - sizeof(RtCoreString) - 1) return rt_core_nil();
 
@@ -1106,24 +1104,6 @@ static int64_t rt_string_new_uncached(const uint8_t* bytes, uint64_t len) {
     s->data[len] = '\0';
     rt_core_register_string(s);
     return (int64_t)(((uint64_t)(uintptr_t)s) | RT_VALUE_TAG_HEAP);
-}
-
-int64_t rt_string_new(const uint8_t* bytes, uint64_t len) {
-    if (!bytes && len > 0) return rt_core_nil();
-    if (len > 1) return rt_string_new_uncached(bytes, len);
-
-    size_t index = len == 0 ? 0 : (size_t)bytes[0] + 1;
-    while (atomic_flag_test_and_set_explicit(&rt_core_short_string_cache_lock, memory_order_acquire)) { }
-    RtCoreString* cached = rt_core_short_string_cache[index];
-    if (!cached) {
-        int64_t value = rt_string_new_uncached(bytes, len);
-        cached = rt_core_as_string(value);
-        if (cached) rt_core_short_string_cache[index] = cached;
-    }
-    atomic_flag_clear_explicit(&rt_core_short_string_cache_lock, memory_order_release);
-    return cached
-        ? (int64_t)(((uint64_t)(uintptr_t)cached) | RT_VALUE_TAG_HEAP)
-        : rt_core_nil();
 }
 
 int64_t rt_string_len(int64_t string) {
@@ -1967,11 +1947,20 @@ int64_t rt_unwrap_or_self(int64_t value) {
 }
 
 int8_t rt_is_none(int64_t value) {
-    /* Keep the raw nil sentinel as a migration fallback. Canonical typed
-     * Options use enum id 1 with ordinal Some=0 / None=1, so raw zero remains
-     * a valid present payload and other enum types are never classified nil. */
+    /* Bug (native_i64opt_some0_collapses_to_nil): the `value == 0` fallback
+     * used to treat ANY raw zero as None, colliding with a real `Some(0)`
+     * payload on the flat (non-boxed) primitive `i64?`/`bool?` lane, where
+     * ints/bools are passed through as their bare bit pattern (not the
+     * NaN-boxed RT_VALUE_TAG_INT scheme -- a boxed int 0 would also be 0,
+     * so a bare `value == 0` check can never safely stand in for "is this
+     * the nil sentinel" once nil itself is *not* 0). The MIR-side NilLit
+     * materialization (expr_dispatch.spl `case NilLit:`) now emits the
+     * runtime's actual reserved nil sentinel (`rt_core_nil()`, bit pattern
+     * 3) instead of a bare 0, so nil and Some(0) are now distinct raw
+     * values -- test ONLY against rt_core_nil(); a properly-constructed
+     * Option never legitimately carries raw 0 as its nil marker anymore. */
     if (value == rt_core_nil()) return 1;
-    return rt_enum_id(value) == 1 && rt_enum_discriminant(value) == 1;
+    return rt_enum_discriminant(value) == (int64_t)(uint32_t)2371748697u;
 }
 int8_t rt_is_some(int64_t value) {
     return !rt_is_none(value);

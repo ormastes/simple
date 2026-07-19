@@ -3,7 +3,6 @@
 
 use std::cell::RefCell;
 use std::cmp::Ordering;
-use std::sync::OnceLock;
 
 use super::byte_kernels::{
     avx2_byte_find, avx2_byte_rfind, byte_split_ranges_for_tier, neon_byte_find, neon_byte_rfind, scalar_byte_find,
@@ -11,9 +10,7 @@ use super::byte_kernels::{
 };
 use super::core::RuntimeValue;
 use super::dict::RuntimeDict;
-use super::heap::{
-    gc_flags, get_typed_ptr, get_typed_ptr_mut, register_heap_ptr, unregister_heap_ptr, HeapHeader, HeapObjectType,
-};
+use super::heap::{gc_flags, get_typed_ptr, get_typed_ptr_mut, unregister_heap_ptr, HeapHeader, HeapObjectType};
 use super::objects::rt_closure_func_ptr;
 use super::primitive_sort;
 use simple_simd::{active_simd_tier, SimdTier};
@@ -200,47 +197,6 @@ pub(crate) unsafe fn alloc_runtime_string(len: u64) -> Option<*mut RuntimeString
     (*ptr).header = HeapHeader::new(HeapObjectType::String, size as u32);
     (*ptr).len = len;
     Some(ptr)
-}
-
-static SHORT_STRING_CACHE: OnceLock<[RuntimeValue; 257]> = OnceLock::new();
-
-fn rt_string_new_uncached(bytes: *const u8, len: u64) -> RuntimeValue {
-    unsafe {
-        let Some(ptr) = alloc_runtime_string(len) else {
-            return RuntimeValue::NIL;
-        };
-
-        if len > 0 {
-            let data_ptr = ptr.add(1) as *mut u8;
-            std::ptr::copy_nonoverlapping(bytes, data_ptr, len as usize);
-            (*ptr).hash = fnv1a_hash(std::slice::from_raw_parts(bytes, len as usize));
-        } else {
-            (*ptr).hash = 0;
-        }
-
-        RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader)
-    }
-}
-
-fn short_string_cache() -> &'static [RuntimeValue; 257] {
-    SHORT_STRING_CACHE.get_or_init(|| {
-        std::array::from_fn(|index| {
-            if index == 0 {
-                rt_string_new_uncached(std::ptr::null(), 0)
-            } else {
-                let byte = [(index - 1) as u8];
-                rt_string_new_uncached(byte.as_ptr(), 1)
-            }
-        })
-    })
-}
-
-pub(crate) fn reregister_short_string_cache() {
-    if let Some(cache) = SHORT_STRING_CACHE.get() {
-        for value in cache {
-            register_heap_ptr(value.as_heap_ptr());
-        }
-    }
 }
 
 /// A heap-allocated array.
@@ -1545,15 +1501,22 @@ pub extern "C" fn rt_string_new(bytes: *const u8, len: u64) -> RuntimeValue {
         return RuntimeValue::NIL;
     }
 
-    if len == 0 {
-        return short_string_cache()[0];
-    }
-    if len == 1 {
-        let byte = unsafe { *bytes };
-        return short_string_cache()[byte as usize + 1];
-    }
+    unsafe {
+        let Some(ptr) = alloc_runtime_string(len) else {
+            return RuntimeValue::NIL;
+        };
 
-    rt_string_new_uncached(bytes, len)
+        // Copy string data and compute hash
+        if len > 0 {
+            let data_ptr = ptr.add(1) as *mut u8;
+            std::ptr::copy_nonoverlapping(bytes, data_ptr, len as usize);
+            (*ptr).hash = fnv1a_hash(std::slice::from_raw_parts(bytes, len as usize));
+        } else {
+            (*ptr).hash = 0;
+        }
+
+        RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader)
+    }
 }
 
 pub(crate) fn rt_string_new_with_len_hash(bytes: *const u8, len: u64) -> RuntimeValue {

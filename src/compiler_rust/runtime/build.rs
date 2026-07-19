@@ -7,7 +7,6 @@ fn main() {
     println!("cargo:rerun-if-changed=../common/src/runtime_symbols.rs");
     println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=../../runtime/runtime_memory.c");
-    println!("cargo:rerun-if-changed=../../runtime/runtime_signal.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_time.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_timestamp.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_pool.c");
@@ -119,7 +118,6 @@ fn compile_c_runtime_sources() {
     let runtime_c_dir = manifest_dir.join("../../runtime");
     let c_sources = [
         "runtime_memory.c",
-        "runtime_signal.c",
         "runtime_time.c",
         "runtime_timestamp.c",
         "runtime_db.c",
@@ -189,7 +187,6 @@ fn collect_defined_runtime_symbols(root: &Path, c_root: &Path, runtime_regex: bo
 fn collect_c_runtime_exports(root: &Path, exported: &mut HashSet<String>) {
     const LINKED_C_SOURCES: &[&str] = &[
         "runtime_memory.c",
-        "runtime_signal.c",
         "runtime_time.c",
         "runtime_timestamp.c",
         "runtime_db.c",
