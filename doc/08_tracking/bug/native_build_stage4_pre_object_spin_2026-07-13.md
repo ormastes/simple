@@ -989,3 +989,15 @@ process-global clear. The native-arena test now uses canonical bootstrap-entry
 fixture paths and asserts that the first converted Module still contains value
 7 after a second parse/reset; all three examples pass. Scoped rustfmt and
 `git diff --check` also pass.
+
+### CoreLexer character-slice allocation amplifier
+
+`CoreLexer.char_slice` retained every immutable prefix while rebuilding token
+text one character at a time. In the no-GC Stage4 runtime that makes each span
+O(span^2) allocation/copy work, with triple strings permitting spans up to one
+million characters. The lexer now keeps the SimpleOS-safe indexed reads but
+collects characters into one array and calls `join("")` once, matching the
+existing ordinary/raw string scanners. The focused triple-string source
+contract prevents prefix concatenation from returning; the next bounded
+Stage4 profile must measure the remaining registry slope before this broader
+memory blocker can be closed.

@@ -285,7 +285,12 @@ the shared binary — deploys require explicit user go-ahead).
   it is a regression restoration, not full retention closure. The remaining
   owner is the no-GC runtime's process-lifetime registry for parser temporary
   strings/arrays/dicts; a parse scratch-allocation domain with explicit
-  promotion of rich Module data remains the next bottom-up item. A capped
+  promotion of rich Module data remains the next bottom-up item. Before that
+  larger lifetime change, `CoreLexer.char_slice` now preserves indexed guest
+  access but collects characters and joins once instead of retaining every
+  immutable prefix, removing an O(span^2) allocation amplifier. Its focused
+  triple-string/source contract is updated; a bounded Stage4 profile remains
+  pending. The capped
   incremental native probe now parses sequential modules with stale declaration,
   expression, and statement mirrors under the restored arena path (exit 0,
   2,816 KiB RSS). Full Stage4 execution proof remains pending: the broad parser
