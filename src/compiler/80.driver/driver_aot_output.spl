@@ -10,6 +10,7 @@
 
 # Backend helpers for module compilation and backend resolution
 use compiler.backend.backend.backend_helpers.{compile_module_with_backend, get_effective_backend_name}
+use compiler.backend.backend.vhdl_design_codegen.{compile_vhdl_design_source}
 use compiler.backend.llvm_backend_tools.{llvm_bootstrap_last_object_path}
 use compiler.backend.backend_types.{CompiledModule}
 use compiler.backend.linker.linker_wrapper.{link_to_native, link_to_smf, link_to_self_contained, NativeLinkConfig, SelfContainedConfig, write_elf_bytes_to_file}
@@ -632,20 +633,10 @@ impl CompilerDriver:
         val driver_opt_level = driver_effective_mir_opt_level(ctx)
         driver_log_debug(log, "AOT VHDL: generating VHDL to {output}")
 
-        var all_vhdl = ""
-        val keys: [text] = rt_dict_keys(ctx.mir_modules)
-        for name in keys:
-            driver_log_trace(log, "translating module to VHDL: {name}")
-            val mir_module = ctx.mir_modules[name]
-            val compiled = compile_module_with_backend("vhdl", mir_module, is_release, driver_opt_level)
-            if compiled.is_err():
-                val err = compiled.unwrap_err()
-                return CompileResult.CodegenError("VHDL compile error in {name}: {err}")
-            val module_result: CompiledModule = compiled.unwrap()
-            val vhdl = module_result.assembly ?? ""
-            if all_vhdl != "" and vhdl != "":
-                all_vhdl = all_vhdl + "\n\n"
-            all_vhdl = all_vhdl + vhdl
+        val design_result = compile_vhdl_design_source(ctx.mir_modules, is_release, driver_opt_level)
+        if design_result.is_err():
+            return CompileResult.CodegenError("VHDL design compile error: {design_result.unwrap_err()}")
+        val all_vhdl = design_result.unwrap()
 
         if not rt_file_write_text(output, all_vhdl):
             return CompileResult.CodegenError("Failed to write VHDL to {output}")

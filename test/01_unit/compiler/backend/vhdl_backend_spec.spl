@@ -260,6 +260,41 @@ fn make_named_hardware_adder_function(symbol: SymbolId, name: text) -> MirFuncti
     f.vhdl_metadata = make_hardware_meta()
     f
 
+fn make_hardware_caller_function(symbol: SymbolId, name: text, callee: text) -> MirFunction:
+    val a_local = make_arg_local(11, 0, "left_in", make_i32())
+    val b_local = make_arg_local(12, 1, "right_in", make_i32())
+    val ret_local = make_return_local(13, make_i32())
+    val call_local = make_temp_local(14, "call_result", make_i32())
+    val block = MirBlock(
+        id: BlockId(id: 0),
+        label: Some("entry"),
+        instructions: [
+            MirInst(kind: MirInstKind.Call(Some(LocalId(id: 14)), make_func_operand(callee), [MirOperand(kind: MirOperandKind.Copy(LocalId(id: 11))), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 12)))]), span: nil),
+            MirInst(kind: MirInstKind.Copy(LocalId(id: 13), LocalId(id: 14)), span: nil)
+        ],
+        terminator: MirTerminator.Ret(nil)
+    )
+    MirFunction(
+        symbol: symbol,
+        name: name,
+        signature: MirSignature(params: [make_i32(), make_i32()], return_type: make_i32(), is_variadic: false),
+        locals: [a_local, b_local, ret_local, call_local],
+        blocks: [block],
+        entry_block: BlockId.entry(),
+        span: empty_span(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: false,
+        is_export_c: false,
+        export_name: "",
+        driver_manifest_attr: nil,
+        has_vhdl_metadata: true,
+        vhdl_metadata: make_hardware_meta()
+    )
+
 # ============================================================================
 # Backend Registration
 # ============================================================================
@@ -725,6 +760,33 @@ describe "VHDL Backend - real backend compilation":
         check(compiled.vhdl.contains("out0 <= return_value.f0;"))
         check(compiled.vhdl.contains("out1 <= return_value.f1;"))
 
+    it "emits package record dependencies before their users":
+        val leaf_symbol = SymbolId(id: 2041)
+        val wrapper_symbol = SymbolId(id: 2042)
+        val leaf = MirTypeDef(
+            symbol: leaf_symbol,
+            name: "leaf_record_t",
+            kind: MirTypeDefKind.Struct([MirFieldDef(name: "value", type_: make_i32(), offset: 0, has_bits_attr: false, bits_width: 0)]),
+            is_export_c: false,
+            export_name: ""
+        )
+        val wrapper = MirTypeDef(
+            symbol: wrapper_symbol,
+            name: "a_wrapper_record_t",
+            kind: MirTypeDefKind.Struct([MirFieldDef(name: "leaf", type_: MirType(kind: MirTypeKind.Struct(leaf_symbol)), offset: 0, has_bits_attr: false, bits_width: 0)]),
+            is_export_c: false,
+            export_name: ""
+        )
+        var types: Dict<SymbolId, MirTypeDef> = {}
+        types[wrapper_symbol] = wrapper
+        types[leaf_symbol] = leaf
+        val result = make_simple_backend().compile_package(MirModule(name: "type_order", functions: {}, statics: {}, constants: {}, types: types))
+        check(result.is_ok())
+        val vhdl = result.unwrap()
+        val leaf_position = vhdl.index_of("type leaf_record_t is record") ?? -1
+        val wrapper_position = vhdl.index_of("type a_wrapper_record_t is record") ?? -1
+        check(leaf_position >= 0 and leaf_position < wrapper_position)
+
     it "rejects anonymous hardware tuple outputs before VHDL emission":
         var func = make_named_hardware_adder_function(SymbolId(id: 42), "anonymous_hardware_outputs")
         func.signature = MirSignature(params: [], return_type: make_tuple_i32_bool(), is_variadic: false)
@@ -885,6 +947,24 @@ describe "VHDL Backend - real backend compilation":
         check(package_vhdl.contains("type maybe_t is record"))
         check(package_vhdl.contains("tag : maybe_t_tag_t;"))
         check(package_vhdl.contains("Some_payload : signed(31 downto 0);"))
+
+    it "rejects named enum tuple payloads before package emission":
+        val payload_symbol = SymbolId(id: 60)
+        val payload_enum = MirTypeDef(
+            symbol: payload_symbol,
+            name: "tuple_payload_t",
+            kind: MirTypeDefKind.Enum([
+                MirVariantDef(name: "Empty", discriminant: 0, payload: nil),
+                MirVariantDef(name: "Pair", discriminant: 1, payload: Some(make_tuple_i32_bool()))
+            ]),
+            is_export_c: false,
+            export_name: ""
+        )
+        var types: Dict<SymbolId, MirTypeDef> = {}
+        types[payload_symbol] = payload_enum
+        val result = make_simple_backend().compile(MirModule(name: "tuple_payload_enum_mod", functions: {}, statics: {}, constants: {}, types: types))
+        check(result.is_err())
+        check(result.unwrap_err().message.contains("cannot contain tuple payload `Pair` yet"))
 
     it "lowers payload-free variants of payload enums with default payload fields":
         val payload_symbol = SymbolId(id: 61)
@@ -3135,6 +3215,58 @@ fn bitfield_write_enabled_mid(clk: bool, reset_n: bool, control_raw: u8, next_en
         check(compiled.vhdl.contains("entity top_entity is"))
         check(not compiled.vhdl.contains("entity mix-add is"))
         check(compiled.vhdl.contains("call_result <= mix_add(left_in, right_in);"))
+
+    it "lowers direct hardware calls to named entity instances":
+        val child = make_named_hardware_adder_function(SymbolId(id: 131), "z_child_add")
+        val top = make_hardware_caller_function(SymbolId(id: 132), "a_hardware_top", "z_child_add")
+        var functions: Dict<SymbolId, MirFunction> = {}
+        # Caller-first insertion proves the backend, not Dict insertion order,
+        # establishes the dependency-safe VHDL analysis order.
+        functions[top.symbol] = top
+        functions[child.symbol] = child
+
+        val result = make_simple_backend().compile(MirModule(name: "hardware_call_mod", functions: functions, statics: {}, constants: {}, types: {}))
+        check(result.is_ok())
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("u_z_child_add_0: entity work.z_child_add"))
+        check(vhdl.contains("a => left_in,"))
+        check(vhdl.contains("b => right_in,"))
+        check(vhdl.contains("result_out => call_result"))
+        check(vhdl.contains("result_out <= call_result;"))
+        val child_position = vhdl.index_of("entity z_child_add is") ?? -1
+        val top_position = vhdl.index_of("entity a_hardware_top is") ?? -1
+        check(child_position >= 0 and child_position < top_position)
+
+    it "lowers cross-module hardware calls in dependency order":
+        val child = make_named_hardware_adder_function(SymbolId(id: 141), "z_external_child")
+        val top = make_hardware_caller_function(SymbolId(id: 142), "a_external_top", "child_mod.z_external_child")
+        var child_functions: Dict<SymbolId, MirFunction> = {}
+        child_functions[child.symbol] = child
+        var top_functions: Dict<SymbolId, MirFunction> = {}
+        top_functions[top.symbol] = top
+        var modules: Dict<text, MirModule> = {}
+        modules["top_mod"] = MirModule(name: "top_mod", functions: top_functions, statics: {}, constants: {}, types: {})
+        modules["child_mod"] = MirModule(name: "child_mod", functions: child_functions, statics: {}, constants: {}, types: {})
+
+        val result = make_simple_backend().compile_design(modules)
+        check(result.is_ok())
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("u_z_external_child_0: entity work.z_external_child"))
+        val child_position = vhdl.index_of("entity z_external_child is") ?? -1
+        val top_position = vhdl.index_of("entity a_external_top is") ?? -1
+        check(child_position >= 0 and child_position < top_position)
+
+    it "rejects indirect hardware entity recursion":
+        val a = make_hardware_caller_function(SymbolId(id: 151), "cycle_a", "cycle_b")
+        val b = make_hardware_caller_function(SymbolId(id: 152), "cycle_b", "cycle_a")
+        var functions: Dict<SymbolId, MirFunction> = {}
+        functions[a.symbol] = a
+        functions[b.symbol] = b
+        val result = make_simple_backend().compile(MirModule(name: "cycle_mod", functions: functions, statics: {}, constants: {}, types: {}))
+        check(result.is_err())
+        val message = result.unwrap_err().message
+        check(message.contains("Recursive VHDL hardware entity hierarchy"))
+        check(message.contains("cycle_a") and message.contains("cycle_b"))
 
     it "rejects helper name collisions after sanitization":
         val b = make_named_adder_function(SymbolId(id: 111), "dup-helper")

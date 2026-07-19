@@ -92,14 +92,23 @@ impl VhdlBackend:
         match type_def.kind:
             case Struct(fields):
                 for field in fields:
+                    if self.vhdl_type_contains_tuple(field.type_):
+                        # ponytail: one-way type ordering; add a unified named/
+                        # tuple dependency graph when hardware needs tuple fields.
+                        return Err(self.backend_error("VHDL named record `{type_def.name}` cannot contain tuple field `{field.name}` yet"))
                     match self.validate_vhdl_value_type_supported(field.type_, "field `{type_def.name}.{field.name}`", nil):
                         case Ok(_): ()
                         case Err(err): return Err(err)
                 Ok(())
+
             case Enum(variants):
                 for variant in variants:
                     match variant.payload:
                         case Some(payload):
+                            if self.vhdl_type_contains_tuple(payload):
+                                # ponytail: one-way type ordering; add a unified
+                                # named/tuple dependency graph when needed.
+                                return Err(self.backend_error("VHDL named enum `{type_def.name}` cannot contain tuple payload `{variant.name}` yet"))
                             match self.validate_vhdl_value_type_supported(payload, "payload `{type_def.name}.{variant.name}`", nil):
                                 case Ok(_): ()
                                 case Err(err): return Err(err)
@@ -112,6 +121,28 @@ impl VhdlBackend:
                         case Ok(_): ()
                         case Err(err): return Err(err)
                 Ok(())
+
+    fn vhdl_type_contains_tuple(root: MirType) -> bool:
+        var pending: [MirType] = [root]
+        while pending.len() > 0:
+            val popped = pending.pop()
+            val current = popped.unwrap()
+            match current.kind:
+                case Tuple(_): return true
+                case Ptr(inner, _) | Ref(inner, _) | Array(inner, _) | Slice(inner) | ScalableVec(inner, _) | Promise(inner) | ActorType(inner): pending = pending.push(inner)
+                case Dict(key, value):
+                    pending = pending.push(key)
+                    pending = pending.push(value)
+                case Union(elements): pending = pending.concat(elements)
+                case FuncPtr(signature):
+                    pending = pending.concat(signature.params)
+                    pending = pending.push(signature.return_type)
+                case Generator(yield_type, return_type):
+                    pending = pending.push(yield_type)
+                    pending = pending.push(return_type)
+                case _:
+                    ()
+        false
 
     me validate_vhdl_value_type_supported(ty: MirType, context: text, span: Span?) -> Result<(), CompileError>:
         match self.unsupported_type_error(ty, context, span):
@@ -230,13 +261,13 @@ impl VhdlBackend:
         val target = match self.call_target_name(func):
             case Ok(result): result
             case Err(err): return Err(err)
-        val helper_name = self.active_helper_name_by_source.get(target)
+        val helper_name = self.helper_name_for_call_target(target)
         if not helper_name.?:
             val known = self.active_function_by_name.get(target)
             match known:
                 case Some(func_def):
                     if vhdl_function_is_hardware_entity(func_def):
-                        return Err(self.backend_error("VHDL helper call `{target}` targets a hardware entity; instantiate entities with VhdlPortMap instead of subprogram calls"))
+                        return Ok(())
                 case None:
                     ()
             return Err(self.backend_error("Synthesizable VHDL backend does not support generic Call lowering for `{target}`; only planned pure combinational helpers can be called"))
@@ -288,30 +319,95 @@ impl VhdlBackend:
             case _:
                 self.backend_error("Synthesizable VHDL backend does not support MIR instruction: {inst.kind}")
 
-    me compile_package_into(mut builder: VhdlBuilder, module: MirModule) -> Result<(), CompileError>:
-        """Compile type and constant definitions into a VHDL package."""
-        builder.emit_package_begin(module.name)
+    fn vhdl_referenced_type_symbols(root: MirType) -> [i64]:
+        var pending: [MirType] = [root]
+        var dependencies: [i64] = []
+        while pending.len() > 0:
+            val popped = pending.pop()
+            val current = popped.unwrap()
+            match current.kind:
+                case Struct(symbol) | Enum(symbol):
+                    if not dependencies.contains(symbol.id):
+                        dependencies = dependencies.push(symbol.id)
+                case Ptr(inner, _) | Ref(inner, _) | Array(inner, _) | Slice(inner) | ScalableVec(inner, _) | Promise(inner) | ActorType(inner):
+                    pending = pending.push(inner)
+                case Dict(key, value):
+                    pending = pending.push(key)
+                    pending = pending.push(value)
+                case Tuple(elements) | Union(elements):
+                    pending = pending.concat(elements)
+                case FuncPtr(signature):
+                    pending = pending.concat(signature.params)
+                    pending = pending.push(signature.return_type)
+                case Generator(yield_type, return_type):
+                    pending = pending.push(yield_type)
+                    pending = pending.push(return_type)
+                case _:
+                    ()
+        dependencies
 
-        for tuple_key in self.active_tuple_type_order:
-            val tuple_name = self.active_tuple_type_names[tuple_key]
-            val tuple_elements = self.active_tuple_type_shapes[tuple_key]
-            if tuple_elements.len() == 0:
-                return Err(self.backend_error("Empty tuple types are not supported by the VHDL backend"))
-            var tuple_fields: [(text, text)] = []
-            var tuple_idx = 0
-            for tuple_element in tuple_elements:
-                val tuple_type = match self.mir_type_to_vhdl(tuple_element):
-                    case Ok(result): result
-                    case Err(err): return Err(err)
-                tuple_fields = tuple_fields.push(("f{tuple_idx}", tuple_type))
-                tuple_idx = tuple_idx + 1
-            val tuple_def = self.type_mapper.map_record(tuple_fields)
-            builder.emit_type_decl(tuple_name, tuple_def)
+    fn vhdl_type_definition_dependencies(type_def: MirTypeDef) -> [i64]:
+        var roots: [MirType] = []
+        match type_def.kind:
+            case Struct(fields):
+                for field in fields:
+                    roots = roots.push(field.type_)
+            case Enum(variants):
+                for variant in variants:
+                    match variant.payload:
+                        case Some(payload): roots = roots.push(payload)
+                        case None: ()
+            case Union(variants):
+                roots = roots.concat(variants)
+        var dependencies: [i64] = []
+        for root in roots:
+            for dependency in self.vhdl_referenced_type_symbols(root):
+                if dependency != type_def.symbol.id and not dependencies.contains(dependency):
+                    dependencies = dependencies.push(dependency)
+        dependencies
 
-        # Emit type definitions
-        # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
+    fn ordered_vhdl_type_definitions(module: MirModule) -> Result<[MirTypeDef], CompileError>:
+        var names: [text] = []
+        var by_name: Dict<text, MirTypeDef> = {}
         for symbol in module.types.keys():
             val type_def = module.types[symbol]
+            names = names.push(type_def.name)
+            by_name[type_def.name] = type_def
+        names = self.sorted_vhdl_entity_names(names)
+        var emitted_symbols: Dict<i64, bool> = {}
+        var ordered: [MirTypeDef] = []
+        while ordered.len() < names.len():
+            var made_progress = false
+            for name in names:
+                val type_def = by_name[name]
+                if emitted_symbols.has(type_def.symbol.id):
+                    continue
+                var ready = true
+                for dependency in self.vhdl_type_definition_dependencies(type_def):
+                    if self.active_type_defs.has(dependency) and not emitted_symbols.has(dependency):
+                        ready = false
+                if ready:
+                    emitted_symbols[type_def.symbol.id] = true
+                    ordered = ordered.push(type_def)
+                    made_progress = true
+            if not made_progress:
+                var cycle: [text] = []
+                for name in names:
+                    if not emitted_symbols.has(by_name[name].symbol.id):
+                        cycle = cycle.push(name)
+                return Err(self.backend_error("Recursive VHDL package type dependency: {cycle.join(\" -> \")}"))
+        Ok(ordered)
+
+    me compile_package_into(mut builder: VhdlBuilder, module: MirModule) -> Result<(), CompileError>:
+        """Compile type and constant definitions into a VHDL package."""
+        val package_base_name = self.sanitize_vhdl_identifier(module.name)
+        builder.emit_package_begin(package_base_name)
+
+        # Emit type definitions
+        val ordered_types = match self.ordered_vhdl_type_definitions(module):
+            case Ok(value): value
+            case Err(err): return Err(err)
+        for type_def in ordered_types:
             match type_def.kind:
                 case Struct(fields):
                     var field_pairs: [(text, text)] = []
@@ -333,6 +429,22 @@ impl VhdlBackend:
                         "Unsupported VHDL package type definition: {type_def.name}"
                     ))
 
+        # Named records are available before tuple records that reference them.
+        for tuple_key in self.active_tuple_type_order:
+            val tuple_name = self.active_tuple_type_names[tuple_key]
+            val tuple_elements = self.active_tuple_type_shapes[tuple_key]
+            if tuple_elements.len() == 0:
+                return Err(self.backend_error("Empty tuple types are not supported by the VHDL backend"))
+            var tuple_fields: [(text, text)] = []
+            var tuple_idx = 0
+            for tuple_element in tuple_elements:
+                val tuple_type = match self.mir_type_to_vhdl(tuple_element):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                tuple_fields = tuple_fields.push(("f{tuple_idx}", tuple_type))
+                tuple_idx = tuple_idx + 1
+            builder.emit_type_decl(tuple_name, self.type_mapper.map_record(tuple_fields))
+
         # Emit constants
         # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
         for symbol in module.constants.keys():
@@ -353,11 +465,11 @@ impl VhdlBackend:
                 case Ok(_): ()
                 case Err(err): return Err(err)
 
-        builder.emit_package_end(module.name)
+        builder.emit_package_end(package_base_name)
 
         if self.active_helper_name_by_source.len() > 0:
             builder.emit_library_header()
-            builder.emit_line("package body {module.name}_pkg is")
+            builder.emit_line("package body {package_base_name}_pkg is")
             builder.indent_level = builder.indent_level + 1
             for source_name in self.active_helper_name_by_source.keys():
                 val func = match self.helper_function_by_name(source_name):
@@ -367,7 +479,7 @@ impl VhdlBackend:
                     case Ok(_): ()
                     case Err(err): return Err(err)
             builder.indent_level = builder.indent_level - 1
-            builder.emit_line("end package body {module.name}_pkg;")
+            builder.emit_line("end package body {package_base_name}_pkg;")
             builder.emit_raw("")
 
         Ok(())

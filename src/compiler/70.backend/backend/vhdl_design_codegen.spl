@@ -1,0 +1,41 @@
+# Whole-design VHDL compilation for cross-module @hardware entity graphs.
+
+use compiler.mir.mir_data.{MirModule}
+use compiler.backend.backend.backend_types.{CodegenTarget, OptimizationLevel, CompileOptions, CompileError}
+use compiler.backend.backend.vhdl_backend.{VhdlBackend}
+use compiler.mir_opt.mir_opt.mod.{target_opt_context_default}
+
+fn vhdl_design_optimization_level(level: i64) -> OptimizationLevel:
+    if level <= 0:
+        return OptimizationLevel.None_
+    if level == 1:
+        return OptimizationLevel.Size
+    if level == 2:
+        return OptimizationLevel.Speed
+    OptimizationLevel.Aggressive
+
+fn compile_vhdl_design_source(modules: Dict<text, MirModule>, is_release: bool,
+                              opt_level: i64) -> Result<text, CompileError>:
+    val backend_opt = vhdl_design_optimization_level(opt_level)
+    val options = CompileOptions(
+        target: CodegenTarget.Host,
+        opt_level: backend_opt,
+        debug_info: not is_release,
+        emit_assembly: false,
+        emit_llvm_ir: false,
+        emit_mir: false,
+        verify_output: true,
+        target_opt_ctx: target_opt_context_default(),
+        backend_kind: nil
+    )
+    val backend = VhdlBackend.create(CodegenTarget.Host, options)
+    # @hardware boundaries are RTL hierarchy, so generic MIR inlining must
+    # not erase them before the VHDL design planner runs.
+    match backend.compile_design(modules):
+        case Ok(design):
+            var output = design.vhdl
+            match design.package_vhdl:
+                case Some(package): output = package + "\n\n" + output
+                case None: ()
+            Ok(output)
+        case Err(err): Err(err)

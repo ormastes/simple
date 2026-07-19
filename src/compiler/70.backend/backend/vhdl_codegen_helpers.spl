@@ -194,6 +194,177 @@ impl VhdlBackend:
             case _:
                 Err(self.backend_error("Synthesizable VHDL backend does not support generic Call lowering; only direct planned pure combinational helpers can be called"))
 
+    fn hardware_entity_callee_for_call(func: MirOperand) -> Result<MirFunction?, CompileError>:
+        val target = match self.call_target_name(func):
+            case Ok(value): value
+            case Err(err): return Err(err)
+        match self.active_function_by_name.get(target):
+            case Some(callee):
+                if vhdl_function_is_hardware_entity(callee):
+                    return Ok(Some(callee))
+                Ok(nil)
+            case None:
+                Ok(nil)
+
+    fn helper_name_for_call_target(target: text) -> text?:
+        val direct = self.active_helper_name_by_source.get(target)
+        if direct.?:
+            return direct
+        val known = self.active_function_by_name.get(target)
+        match known:
+            case Some(func): self.active_helper_name_by_source.get(func.name)
+            case None: nil
+
+    fn sorted_vhdl_entity_names(values: [text]) -> [text]:
+        # Keep design-unit order deterministic on deployed compilers where the
+        # built-in text-array sort is not implemented.
+        var sorted: [text] = []
+        for value in values:
+            var inserted = false
+            var next: [text] = []
+            for current in sorted:
+                if not inserted and value < current:
+                    next = next.push(value)
+                    inserted = true
+                next = next.push(current)
+            if not inserted:
+                next = next.push(value)
+            sorted = next
+        sorted
+
+    fn hardware_entity_dependencies(func: MirFunction) -> Result<[text], CompileError>:
+        var dependencies: [text] = []
+        for block in func.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case Call(_, target_operand, _):
+                        val callee = match self.hardware_entity_callee_for_call(target_operand):
+                            case Ok(value): value
+                            case Err(err): return Err(err)
+                        match callee:
+                            case Some(target):
+                                if not dependencies.contains(target.name):
+                                    dependencies = dependencies.push(target.name)
+                            case None:
+                                ()
+                    case _:
+                        ()
+        Ok(self.sorted_vhdl_entity_names(dependencies))
+
+    fn plan_hardware_entity_order() -> Result<[text], CompileError>:
+        var names: [text] = []
+        for name in self.active_function_by_name.keys():
+            val func = self.active_function_by_name[name]
+            if vhdl_function_is_hardware_entity(func) and not names.contains(func.name):
+                names = names.push(func.name)
+        names = self.sorted_vhdl_entity_names(names)
+
+        var emitted: Dict<text, bool> = {}
+        var order: [text] = []
+        while order.len() < names.len():
+            var made_progress = false
+            for name in names:
+                if emitted.has(name):
+                    continue
+                val dependencies = match self.hardware_entity_dependencies(self.active_function_by_name[name]):
+                    case Ok(value): value
+                    case Err(err): return Err(err)
+                var ready = true
+                for dependency in dependencies:
+                    if not emitted.has(dependency):
+                        ready = false
+                if ready:
+                    emitted[name] = true
+                    order = order.push(name)
+                    made_progress = true
+            if not made_progress:
+                var cycle: [text] = []
+                for name in names:
+                    if not emitted.has(name):
+                        cycle = cycle.push(name)
+                if cycle.len() > 0:
+                    cycle = cycle.push(cycle[0])
+                return Err(self.backend_error("Recursive VHDL hardware entity hierarchy: {cycle.join(\" -> \")}"))
+        Ok(order)
+
+    fn emit_hardware_call_instance(builder: VhdlBuilder, caller_name: text,
+                                   dest: LocalId?, func: MirOperand,
+                                   args: [MirOperand], ordinal: i64) -> Result<(), CompileError>:
+        val callee_option = match self.hardware_entity_callee_for_call(func):
+            case Ok(value): value
+            case Err(err): return Err(err)
+        val callee = match callee_option:
+            case Some(value): value
+            case None: return Ok(())
+        if callee.name == caller_name:
+            return Err(self.backend_error("Synthesizable VHDL backend does not support recursive hardware entity call `{caller_name}`"))
+        if args.len() != callee.signature.params.len():
+            return Err(self.backend_error("VHDL hardware entity call `{callee.name}` expected {callee.signature.params.len()} arguments, got {args.len()}"))
+
+        var formals: [text] = []
+        var actuals: [text] = []
+        var arg_index = 0
+        while arg_index < args.len():
+            formals = formals.push(self.vhdl_arg_local_name(callee, arg_index))
+            val actual = match self.operand_to_vhdl(args[arg_index]):
+                case Ok(value): value
+                case Err(err): return Err(err)
+            actuals = actuals.push(actual)
+            arg_index = arg_index + 1
+
+        val return_abi = match self.vhdl_return_abi(callee):
+            case Ok(value): value
+            case Err(err): return Err(err)
+        var dest_name = "open"
+        match dest:
+            case Some(dest_id):
+                dest_name = match self.local_to_vhdl(dest_id):
+                    case Ok(value): value
+                    case Err(err): return Err(err)
+            case None:
+                ()
+        for field in return_abi.fields:
+            formals = formals.push(field.name)
+            if dest_name == "open":
+                actuals = actuals.push("open")
+            elif return_abi.is_tuple:
+                actuals = actuals.push("{dest_name}.f{field.index}")
+            else:
+                actuals = actuals.push(dest_name)
+
+        val instance_name = "u_{vhdl_sanitize_identifier(callee.name)}_{ordinal}"
+        if formals.len() == 0:
+            builder.emit_line("{instance_name}: entity work.{callee.name};")
+            return Ok(())
+        builder.emit_instance_begin(instance_name, callee.name)
+        builder.emit_port_map_begin()
+        var port_index = 0
+        while port_index < formals.len():
+            builder.emit_port_map_entry(formals[port_index], actuals[port_index],
+                port_index == formals.len() - 1)
+            port_index = port_index + 1
+        builder.emit_port_map_end()
+        Ok(())
+
+    fn emit_hardware_call_instances(builder: VhdlBuilder, caller: MirFunction) -> Result<(), CompileError>:
+        var ordinal = 0
+        for block in caller.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case Call(dest, func, args):
+                        val callee = match self.hardware_entity_callee_for_call(func):
+                            case Ok(value): value
+                            case Err(err): return Err(err)
+                        if callee.?:
+                            match self.emit_hardware_call_instance(builder, caller.name,
+                                                                  dest, func, args, ordinal):
+                                case Ok(_): ()
+                                case Err(err): return Err(err)
+                            ordinal = ordinal + 1
+                    case _:
+                        ()
+        Ok(())
+
     fn helper_call_expr(func: MirOperand, args: [MirOperand], in_helper: bool) -> Result<text, CompileError>:
         match self.validate_call_supported_before_emit(func):
             case Ok(_): pass
@@ -201,7 +372,7 @@ impl VhdlBackend:
         val target = match self.call_target_name(func):
             case Ok(value): value
             case Err(err): return Err(err)
-        val helper_lookup = self.active_helper_name_by_source.get(target)
+        val helper_lookup = self.helper_name_for_call_target(target)
         var helper_name = ""
         if helper_lookup == nil:
             val known = self.active_function_by_name.get(target)
@@ -222,6 +393,11 @@ impl VhdlBackend:
             Ok("{helper_name}({arg_exprs.join(\", \")})")
 
     fn emit_entity_helper_call(builder: VhdlBuilder, dest: LocalId?, func: MirOperand, args: [MirOperand]) -> Result<(), CompileError>:
+        val hardware_callee = match self.hardware_entity_callee_for_call(func):
+            case Ok(value): value
+            case Err(err): return Err(err)
+        if hardware_callee.?:
+            return Ok(())
         val expr = match self.helper_call_expr(func, args, false):
             case Ok(value): value
             case Err(err): return Err(err)

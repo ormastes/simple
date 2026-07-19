@@ -133,37 +133,52 @@ class VhdlBackend:
             active_inline_exprs: {}
         )
 
-    me compile(module: MirModule) -> Result<VhdlCompiledModule, CompileError>:
-        """Compile MIR module to VHDL."""
-        val builder: VhdlBuilder = VhdlBuilder.create(module.name)
+    fn activate_module(module: MirModule, function_registry: Dict<text, MirFunction>,
+                       hardware_mode: bool) -> Result<(), CompileError>:
         self.active_type_defs = {}
-        self.active_function_by_name = {}
+        self.active_function_by_name = function_registry
         self.active_helper_name_by_source = {}
         for symbol in module.types.keys():
             val type_def = module.types[symbol]
             self.active_type_defs[type_def.symbol.id] = type_def
-        for symbol in module.functions.keys():
-            val func = module.functions[symbol]
-            self.active_function_by_name[func.name] = func
         self.prepare_tuple_types_for_module(module)
-        val hardware_mode = self.module_has_vhdl_hardware(module)
         if hardware_mode:
             val helper_plan_result = self.prepare_helper_subprograms(module)
             if helper_plan_result.is_err():
                 return Err(helper_plan_result.unwrap_err())
-        val supported_result = self.validate_module_supported_before_emit(module, hardware_mode)
+        self.validate_module_supported_before_emit(module, hardware_mode)
+
+    fn module_uses_package(module: MirModule) -> bool:
+        module.types.len() > 0 or module.constants.len() > 0 or
+            self.active_tuple_type_order.len() > 0 or
+            self.active_helper_name_by_source.len() > 0
+
+    fn compile_with_aliases(module: MirModule,
+                            aliases: Dict<text, text>) -> Result<VhdlCompiledModule, CompileError>:
+        """Compile MIR module to VHDL."""
+        val builder: VhdlBuilder = VhdlBuilder.create(module.name)
+        var registry: Dict<text, MirFunction> = {}
+        for symbol in module.functions.keys():
+            val func = module.functions[symbol]
+            registry[func.name] = func
+        for alias in aliases.keys():
+            val target_name = aliases[alias]
+            if registry.has(target_name):
+                registry[alias] = registry[target_name]
+        val hardware_mode = self.module_has_vhdl_hardware(module)
+        val supported_result = self.activate_module(module, registry, hardware_mode)
         if supported_result.is_err():
             return Err(supported_result.unwrap_err())
 
         # Emit library header
         builder.emit_library_header()
-        if module.types.len() > 0 or module.constants.len() > 0 or self.active_tuple_type_order.len() > 0 or self.active_helper_name_by_source.len() > 0:
-            builder.emit_use_package("work", "{module.name}_pkg")
+        if self.module_uses_package(module):
+            builder.emit_use_package("work", "{self.sanitize_vhdl_identifier(module.name)}_pkg")
             builder.emit_raw("")
 
         # Generate package for types/constants
         var pkg_vhdl = ""
-        if module.types.len() > 0 or module.constants.len() > 0 or self.active_tuple_type_order.len() > 0 or self.active_helper_name_by_source.len() > 0:
+        if self.module_uses_package(module):
             val pkg_builder = VhdlBuilder.create(module.name)
             pkg_builder.emit_library_header()
             val pkg_result = self.compile_package_into(pkg_builder, module)
@@ -171,13 +186,21 @@ class VhdlBackend:
                 return Err(pkg_result.unwrap_err())
             pkg_vhdl = pkg_builder.build()
 
-        # Compile each function as an entity/architecture
+        # Compile each function as an entity/architecture. Hardware entities
+        # are emitted bottom-up so direct entity instantiations are analyzable.
         var entities: [VhdlEntity] = []
-        # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
-        for symbol in module.functions.keys():
-            val func = module.functions[symbol]
-            if hardware_mode and not vhdl_function_is_hardware_entity(func):
-                continue
+        var entity_names: [text] = []
+        if hardware_mode:
+            val order_result = self.plan_hardware_entity_order()
+            if order_result.is_err():
+                return Err(order_result.unwrap_err())
+            entity_names = order_result.unwrap()
+        else:
+            for symbol in module.functions.keys():
+                entity_names = entity_names.push(module.functions[symbol].name)
+            entity_names = self.sorted_vhdl_entity_names(entity_names)
+        for entity_name in entity_names:
+            val func = self.active_function_by_name[entity_name]
             val result = self.compile_function(builder, func)
             match result:
                 case Ok(entity):
@@ -193,6 +216,168 @@ class VhdlBackend:
             package_vhdl: if pkg_vhdl.len() > 0: Some(pkg_vhdl) else: nil,
             entities: entities
         ))
+
+    me compile(module: MirModule) -> Result<VhdlCompiledModule, CompileError>:
+        self.compile_with_aliases(module, {})
+
+    me compile_design(modules: Dict<text, MirModule>) -> Result<VhdlCompiledModule, CompileError>:
+        """Compile a multi-module design through one collision-safe MIR view.
+
+        MIR Dict keys are module-local, so the design view rekeys values instead
+        of naively concatenating the source dictionaries. The MIR values retain
+        their resolved symbols and types while the backend gets one function and
+        type registry, one package, and one entity dependency graph.
+        """
+        var module_names = self.sorted_vhdl_entity_names(modules.keys())
+        var has_hardware = false
+        for module_name in module_names:
+            val module = modules[module_name]
+            if self.module_has_vhdl_hardware(module):
+                has_hardware = true
+        if not has_hardware:
+            var output = ""
+            var entities: [VhdlEntity] = []
+            for module_name in module_names:
+                val compiled = match self.compile(modules[module_name]):
+                    case Ok(value): value
+                    case Err(err): return Err(err)
+                var module_output = compiled.vhdl
+                match compiled.package_vhdl:
+                    case Some(package): module_output = package + "\n\n" + module_output
+                    case None: ()
+                if output != "" and module_output != "":
+                    output = output + "\n\n"
+                output = output + module_output
+                entities = entities.concat(compiled.entities)
+            return Ok(VhdlCompiledModule(name: "vhdl_design", vhdl: output,
+                                         package_vhdl: nil, entities: entities))
+
+        var all_functions: Dict<text, MirFunction> = {}
+        var function_module: Dict<text, text> = {}
+        var unique_function_by_bare_name: Dict<text, text> = {}
+        var ambiguous_bare_name: Dict<text, bool> = {}
+        for module_name in module_names:
+            val module = modules[module_name]
+            for symbol in module.functions.keys():
+                val func = module.functions[symbol]
+                val qualified_name = "{module_name}.{func.name}"
+                all_functions[qualified_name] = func
+                function_module[qualified_name] = module_name
+                if unique_function_by_bare_name.has(func.name):
+                    ambiguous_bare_name[func.name] = true
+                else:
+                    unique_function_by_bare_name[func.name] = qualified_name
+
+        # Retain only the hardware graph and pure helpers it actually calls.
+        # Imported modules routinely contain unrelated host/runtime functions.
+        var selected: Dict<text, bool> = {}
+        val all_function_names = self.sorted_vhdl_entity_names(all_functions.keys())
+        for qualified_name in all_function_names:
+            if vhdl_function_is_hardware_entity(all_functions[qualified_name]):
+                selected[qualified_name] = true
+        var changed = true
+        while changed:
+            changed = false
+            for qualified_name in all_function_names:
+                if not selected.has(qualified_name):
+                    continue
+                for block in all_functions[qualified_name].blocks:
+                    for inst in block.instructions:
+                        match inst.kind:
+                            case Call(_, target_operand, _):
+                                val raw_target = match self.call_target_name(target_operand):
+                                    case Ok(value): value
+                                    case Err(err): return Err(err)
+                                var target = ""
+                                if all_functions.has(raw_target):
+                                    target = raw_target
+                                else:
+                                    val same_module_target = "{function_module[qualified_name]}.{raw_target}"
+                                    if all_functions.has(same_module_target):
+                                        target = same_module_target
+                                    elif unique_function_by_bare_name.has(raw_target) and not ambiguous_bare_name.has(raw_target):
+                                        target = unique_function_by_bare_name[raw_target]
+                                if target != "" and not selected.has(target):
+                                    selected[target] = true
+                                    changed = true
+                            case _:
+                                ()
+
+        var functions: Dict<SymbolId, MirFunction> = {}
+        var aliases: Dict<text, text> = {}
+        var selected_bare_names: Dict<text, text> = {}
+        var types: Dict<SymbolId, MirTypeDef> = {}
+        var all_types_by_symbol: Dict<i64, MirTypeDef> = {}
+        var type_names: Dict<text, bool> = {}
+        var function_key = 0
+        var type_key = 0
+        for qualified_name in all_function_names:
+            if selected.has(qualified_name):
+                val func = all_functions[qualified_name]
+                if selected_bare_names.has(func.name):
+                    return Err(self.backend_error("Selected VHDL functions share entity/helper name `{func.name}`: `{selected_bare_names[func.name]}` and `{qualified_name}`"))
+                selected_bare_names[func.name] = qualified_name
+                aliases[qualified_name] = func.name
+                functions[SymbolId(id: function_key)] = func
+                function_key = function_key + 1
+        for module_name in module_names:
+            val module = modules[module_name]
+            for symbol in module.types.keys():
+                val type_def = module.types[symbol]
+                val prior = all_types_by_symbol.get(type_def.symbol.id)
+                if prior.? and prior.unwrap().name != type_def.name:
+                    return Err(self.backend_error("Conflicting VHDL design type symbol {type_def.symbol.id}: `{prior.unwrap().name}` and `{type_def.name}`"))
+                all_types_by_symbol[type_def.symbol.id] = type_def
+
+        var needed_type_symbols: Dict<i64, bool> = {}
+        for qualified_name in all_function_names:
+            if not selected.has(qualified_name):
+                continue
+            val func = all_functions[qualified_name]
+            for param in func.signature.params:
+                for type_symbol in self.vhdl_referenced_type_symbols(param):
+                    needed_type_symbols[type_symbol] = true
+            for type_symbol in self.vhdl_referenced_type_symbols(func.signature.return_type):
+                needed_type_symbols[type_symbol] = true
+            for local in func.locals:
+                for type_symbol in self.vhdl_referenced_type_symbols(local.type_):
+                    needed_type_symbols[type_symbol] = true
+
+        changed = true
+        while changed:
+            changed = false
+            val needed_snapshot = needed_type_symbols.keys()
+            for type_symbol in needed_snapshot:
+                if not all_types_by_symbol.has(type_symbol):
+                    return Err(self.backend_error("No VHDL design type definition for symbol {type_symbol}"))
+                for dependency in self.vhdl_type_definition_dependencies(all_types_by_symbol[type_symbol]):
+                    if not needed_type_symbols.has(dependency):
+                        needed_type_symbols[dependency] = true
+                        changed = true
+
+        var needed_type_names: [text] = []
+        var needed_type_by_name: Dict<text, MirTypeDef> = {}
+        for type_symbol in needed_type_symbols.keys():
+            val type_def = all_types_by_symbol[type_symbol]
+            if type_names.has(type_def.name):
+                return Err(self.backend_error("Duplicate VHDL design type name `{type_def.name}`"))
+            type_names[type_def.name] = true
+            needed_type_names = needed_type_names.push(type_def.name)
+            needed_type_by_name[type_def.name] = type_def
+        needed_type_names = self.sorted_vhdl_entity_names(needed_type_names)
+        for type_name in needed_type_names:
+            types[SymbolId(id: type_key)] = needed_type_by_name[type_name]
+            type_key = type_key + 1
+
+        self.compile_with_aliases(MirModule(
+            name: "vhdl_design",
+            functions: functions,
+            # Constant operands are already materialized in MIR; unrelated
+            # module statics/constants are not part of the selected RTL graph.
+            statics: {},
+            constants: {},
+            types: types
+        ), aliases)
 
 # ============================================================================
 # VHDL Compilation Results
