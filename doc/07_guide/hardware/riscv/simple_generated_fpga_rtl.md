@@ -165,8 +165,8 @@ product DT, WFI/Zicntr policy, and pin-level bidirectional 16550 behavior are
 implemented and independently source-reviewed. The Simple-owned
 `soc32_clocked` source root now adds a registered external-DDR boundary and
 fixed-storage peripherals, while the DT reserves the in-RAM mailbox page.
-RV32C, executed compiler/GHDL proof, the K26 AXI adapter, and Linux acceptance
-remain incomplete. The
+RV32C, executed compiler/GHDL proof, the K26 structural shell, and Linux
+acceptance remain incomplete. The
 multi-cycle M unit is clocked into commit with exact high
 multiply, signed-overflow, divide-by-zero, and unsigned division semantics, so
 LR/SC and AMO.W/D now reserve translated physical byte ranges and retire through
@@ -188,9 +188,14 @@ holds requests stable, preserves PTE/atomic qualifiers, aligns subword lanes,
 and excludes dynamic RAM from the hardware root. Its external memory must be
 exclusive/noncoherent for LR/SC correctness. The compiler/GHDL gate for this
 root has not run, so no emitted product VHDL is claimed. The embedded-RAM
-`soc_tick()` model, hand-rendered FPGA bundle VHDL, and bridge-only K26 wrapper
-also remain outside product evidence until simulation and K26 adapt this same
-contract.
+`soc_tick()` model remains compatibility-only, but `run_soc_boot_sim` now uses
+`soc32_sim_tick`, a dynamic-RAM consumer of the same DDR contract. The source
+`k26_soc32_clocked` root also composes `soc32_transition` with a reviewed
+single-outstanding AXI-HP adapter. Neither source result is generated-RTL or
+board evidence yet: run the compiler/GHDL gate, then add the thin Vivado shell
+that feeds registered state back, flattens AXI/UART records, connects PS DDR,
+and prevents PS/DMA access to the softcore's atomic RAM range. Hand-rendered
+bundle VHDL and the legacy VexRiscv generator remain non-authoritative.
 
 The focused pure-Simple source check currently exits 139 before diagnostics;
 see `build/test-artifacts/riscv-f1n3/rv64_core_pmp_csr_check.log`. Do not rerun

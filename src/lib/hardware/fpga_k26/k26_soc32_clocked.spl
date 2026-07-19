@@ -1,0 +1,68 @@
+# ==========================================================================
+# K26 clocked RV32 product boundary
+# ==========================================================================
+#
+# This is a thin composition of the canonical RV32 SoC transition and the
+# single-outstanding AXI-HP adapter.  CPU, MMU, interrupt, UART, and MMIO
+# semantics remain owned by `soc32_transition`.
+# ==========================================================================
+
+use std.hardware.soc_rtl.soc32_clocked.Soc32ClockedState
+use std.hardware.soc_rtl.soc32_clocked.{soc32_clocked_init, soc32_transition}
+use std.hardware.fpga_k26.k26_axi_hp_bridge.{AxiHpMaster, AxiHpSlave}
+use std.hardware.fpga_k26.k26_axi_hp_bridge.Soc32DdrAxiState
+use std.hardware.fpga_k26.k26_axi_hp_bridge.{soc32_ddr_axi_create, soc32_ddr_axi_tick}
+
+struct K26Soc32ClockedState:
+    soc: Soc32ClockedState
+    ddr: Soc32DdrAxiState
+
+struct K26Soc32ClockedResult:
+    initialized: bool
+    state: K26Soc32ClockedState
+    uart_tx: bool
+    halted: bool
+    axi: AxiHpMaster
+
+@hardware
+fn k26_soc32_clocked_init() -> K26Soc32ClockedState:
+    K26Soc32ClockedState(
+        soc: soc32_clocked_init(),
+        ddr: soc32_ddr_axi_create()
+    )
+
+@clocked(clk, reset_n)
+@hardware
+fn k26_soc32_clocked(initialized: bool, state: K26Soc32ClockedState,
+                     uart_rx: bool,
+                     hp: AxiHpSlave) -> K26Soc32ClockedResult:
+    """Register one RV32 SoC/AXI transition for K26 structural feedback."""
+    if not initialized:
+        val reset_state = k26_soc32_clocked_init()
+        val idle = soc32_ddr_axi_tick(reset_state.ddr, false, 0, 1,
+            false, 0, 0, false, false, hp)
+        return K26Soc32ClockedResult(
+            initialized: true,
+            state: reset_state,
+            uart_tx: true,
+            halted: false,
+            axi: idle.axi
+        )
+
+    val ddr = soc32_ddr_axi_tick(state.ddr, state.soc.ddr_pending,
+        state.soc.ddr_addr, state.soc.ddr_size, state.soc.ddr_write,
+        state.soc.ddr_wdata, state.soc.ddr_byte_enable,
+        state.soc.ddr_is_pte, state.soc.ddr_atomic, hp)
+    val soc = soc32_transition(true, state.soc, uart_rx,
+        ddr.request_ready, ddr.response_valid, ddr.response_error,
+        ddr.response_data)
+    K26Soc32ClockedResult(
+        initialized: true,
+        state: K26Soc32ClockedState(soc: soc.state, ddr: ddr.state),
+        uart_tx: soc.uart_tx,
+        halted: soc.halted,
+        axi: ddr.axi
+    )
+
+export K26Soc32ClockedState, K26Soc32ClockedResult
+export k26_soc32_clocked_init, k26_soc32_clocked

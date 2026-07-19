@@ -1,0 +1,140 @@
+use std.spipe.*
+use std.hardware.fpga_k26.k26_axi_hp_bridge.{AxiHpSlave, soc32_ddr_axi_create}
+use std.hardware.fpga_k26.k26_axi_hp_bridge.soc32_ddr_axi_tick
+use std.hardware.fpga_k26.k26_soc32_clocked.{k26_soc32_clocked_init}
+use std.hardware.fpga_k26.k26_soc32_clocked.k26_soc32_clocked
+
+fn idle_hp() -> AxiHpSlave:
+    AxiHpSlave(
+        awready: false,
+        wready: false,
+        bid: 0,
+        bresp: 0,
+        bvalid: false,
+        arready: false,
+        rdata_lo: 0,
+        rdata_hi: 0,
+        rid: 0,
+        rresp: 0,
+        rlast: false,
+        rvalid: false
+    )
+
+describe "K26 RV32 single-outstanding AXI-HP adapter":
+    it "holds independent AW and W channels and accepts B with the last beat":
+        val accepted = soc32_ddr_axi_tick(soc32_ddr_axi_create(), true,
+            0x80000004, 1, true, 0x0000AB00, 0x2, false, false,
+            idle_hp())
+        expect(accepted.request_ready).to_equal(true)
+        expect(accepted.axi.awvalid).to_equal(true)
+        expect(accepted.axi.wvalid).to_equal(true)
+        expect(accepted.axi.wdata_lo).to_equal(0x0000AB0000000000)
+        expect(accepted.axi.wstrb).to_equal(0x20)
+        expect(accepted.axi.bready).to_equal(true)
+        expect(accepted.axi.awid).to_equal(0)
+        expect(accepted.axi.awcache).to_equal(3)
+        expect(accepted.axi.awprot).to_equal(0)
+
+        var aw_only_hp = idle_hp()
+        aw_only_hp.awready = true
+        val aw_only = soc32_ddr_axi_tick(accepted.state, false, 0, 1,
+            false, 0, 0, false, false, aw_only_hp)
+        expect(aw_only.axi.awvalid).to_equal(false)
+        expect(aw_only.axi.wvalid).to_equal(true)
+
+        var finish_hp = idle_hp()
+        finish_hp.wready = true
+        finish_hp.bvalid = true
+        val completed = soc32_ddr_axi_tick(aw_only.state, false, 0, 1,
+            false, 0, 0, false, false, finish_hp)
+        expect(completed.response_valid).to_equal(true)
+        expect(completed.response_error).to_equal(false)
+        expect(completed.state.busy).to_equal(false)
+
+    it "extracts lane three when AR and R complete together":
+        val accepted = soc32_ddr_axi_tick(soc32_ddr_axi_create(), true,
+            0x8000000C, 4, false, 0, 0xF, false, false, idle_hp())
+        expect(accepted.axi.arvalid).to_equal(true)
+        expect(accepted.axi.rready).to_equal(true)
+
+        var response_hp = idle_hp()
+        response_hp.arready = true
+        response_hp.rdata_hi = 0x1122334455667788
+        response_hp.rlast = true
+        response_hp.rvalid = true
+        val completed = soc32_ddr_axi_tick(accepted.state, false, 0, 1,
+            false, 0, 0, false, false, response_hp)
+        expect(completed.response_valid).to_equal(true)
+        expect(completed.response_error).to_equal(false)
+        expect(completed.response_data).to_equal(0x11223344)
+
+    it "fails malformed AXI read and write responses":
+        val read = soc32_ddr_axi_tick(soc32_ddr_axi_create(), true,
+            0x80000000, 4, false, 0, 0xF, false, false, idle_hp())
+        var bad_read_hp = idle_hp()
+        bad_read_hp.arready = true
+        bad_read_hp.rid = 1
+        bad_read_hp.rresp = 2
+        bad_read_hp.rlast = false
+        bad_read_hp.rvalid = true
+        val bad_read = soc32_ddr_axi_tick(read.state, false, 0, 1,
+            false, 0, 0, false, false, bad_read_hp)
+        expect(bad_read.response_valid).to_equal(true)
+        expect(bad_read.response_error).to_equal(true)
+
+        val write = soc32_ddr_axi_tick(soc32_ddr_axi_create(), true,
+            0x80000000, 4, true, 0, 0xF, false, false, idle_hp())
+        var bad_write_hp = idle_hp()
+        bad_write_hp.awready = true
+        bad_write_hp.wready = true
+        bad_write_hp.bid = 1
+        bad_write_hp.bvalid = true
+        val bad_write = soc32_ddr_axi_tick(write.state, false, 0, 1,
+            false, 0, 0, false, false, bad_write_hp)
+        expect(bad_write.response_valid).to_equal(true)
+        expect(bad_write.response_error).to_equal(true)
+
+    it "rejects malformed strobes and qualifier shapes before AXI":
+        val bad_mask = soc32_ddr_axi_tick(soc32_ddr_axi_create(), true,
+            0x80000000, 2, true, 0xA5A5, 0x5, false, false, idle_hp())
+        expect(bad_mask.response_valid).to_equal(true)
+        expect(bad_mask.response_error).to_equal(true)
+        expect(bad_mask.state.busy).to_equal(false)
+
+        val bad_pte = soc32_ddr_axi_tick(soc32_ddr_axi_create(), true,
+            0x80000000, 4, true, 0, 0xF, true, false, idle_hp())
+        expect(bad_pte.response_error).to_equal(true)
+
+        val bad_atomic = soc32_ddr_axi_tick(soc32_ddr_axi_create(), true,
+            0x80000000, 2, false, 0, 0xF, false, true, idle_hp())
+        expect(bad_atomic.response_error).to_equal(true)
+
+        val outside_ram = soc32_ddr_axi_tick(soc32_ddr_axi_create(), true,
+            0x90000000, 4, false, 0, 0xF, false, false, idle_hp())
+        expect(outside_ram.response_error).to_equal(true)
+
+    it "composes the current product request into the K26 clocked root":
+        var state = k26_soc32_clocked_init()
+        state.soc.ddr_pending = true
+        state.soc.ddr_addr = 0x80000008
+        state.soc.ddr_size = 4
+        state.soc.ddr_write = false
+        state.soc.ddr_byte_enable = 0xF
+
+        val out = k26_soc32_clocked(true, state, true, idle_hp())
+        expect(out.state.soc.ddr_pending).to_equal(false)
+        expect(out.state.soc.ddr_waiting).to_equal(true)
+        expect(out.state.ddr.busy).to_equal(true)
+        expect(out.axi.arvalid).to_equal(true)
+        expect(out.axi.araddr).to_equal(0x80000008)
+
+    it "resets the K26 root to idle registered outputs":
+        val out = k26_soc32_clocked(false, k26_soc32_clocked_init(), false,
+            idle_hp())
+        expect(out.initialized).to_equal(true)
+        expect(out.uart_tx).to_equal(true)
+        expect(out.halted).to_equal(false)
+        expect(out.state.ddr.busy).to_equal(false)
+        expect(out.axi.awvalid).to_equal(false)
+        expect(out.axi.wvalid).to_equal(false)
+        expect(out.axi.arvalid).to_equal(false)

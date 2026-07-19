@@ -70,6 +70,8 @@ struct Soc32ClockedResult:
     state: Soc32ClockedState
     uart_tx: bool
     halted: bool
+    char_out: u32
+    char_valid: bool
     ddr_valid: bool
     ddr_addr: i64
     ddr_size: u32
@@ -104,12 +106,11 @@ fn soc32_clocked_init() -> Soc32ClockedState:
         ddr_atomic: false
     )
 
-@clocked(clk, reset_n)
 @hardware
-fn soc32_clocked(initialized: bool, state: Soc32ClockedState,
-                 uart_rx: bool, ddr_request_ready: bool,
-                 ddr_response_valid: bool, ddr_response_error: bool,
-                 ddr_response_data: u32) -> Soc32ClockedResult:
+fn soc32_transition(initialized: bool, state: Soc32ClockedState,
+                    uart_rx: bool, ddr_request_ready: bool,
+                    ddr_response_valid: bool, ddr_response_error: bool,
+                    ddr_response_data: u32) -> Soc32ClockedResult:
     """Advance the SoC and its one-entry external DRAM request channel.
 
     `ddr_valid` remains asserted with stable payload until a cycle presented
@@ -126,6 +127,8 @@ fn soc32_clocked(initialized: bool, state: Soc32ClockedState,
             state: reset_state,
             uart_tx: true,
             halted: false,
+            char_out: 0,
+            char_valid: false,
             ddr_valid: false,
             ddr_addr: 0,
             ddr_size: 1,
@@ -137,6 +140,8 @@ fn soc32_clocked(initialized: bool, state: Soc32ClockedState,
         )
 
     var out = state
+    var char_out: u32 = 0
+    var char_valid = false
 
     # Peripheral time and interrupt inputs are sampled before the core step.
     val ct = clint_tick(out.clint)
@@ -260,6 +265,8 @@ fn soc32_clocked(initialized: bool, state: Soc32ClockedState,
                     val mb = mailbox_mmio_write(out.mailbox, wr.offset,
                         core_result.bus_wdata)
                     out.mailbox = mb.state
+                    char_out = mb.char_out
+                    char_valid = mb.char_valid
                     if mb.halt_request:
                         out.halt_pending = true
             else:
@@ -300,6 +307,8 @@ fn soc32_clocked(initialized: bool, state: Soc32ClockedState,
         state: out,
         uart_tx: ut.tx_out != 0,
         halted: out.core.halt,
+        char_out: char_out,
+        char_valid: char_valid,
         ddr_valid: out.ddr_pending,
         ddr_addr: out.ddr_addr,
         ddr_size: out.ddr_size,
@@ -310,5 +319,15 @@ fn soc32_clocked(initialized: bool, state: Soc32ClockedState,
         ddr_atomic: out.ddr_atomic
     )
 
+@clocked(clk, reset_n)
+@hardware
+fn soc32_clocked(initialized: bool, state: Soc32ClockedState,
+                 uart_rx: bool, ddr_request_ready: bool,
+                 ddr_response_valid: bool, ddr_response_error: bool,
+                 ddr_response_data: u32) -> Soc32ClockedResult:
+    """Register the canonical RV32 SoC transition at the product boundary."""
+    soc32_transition(initialized, state, uart_rx, ddr_request_ready,
+        ddr_response_valid, ddr_response_error, ddr_response_data)
+
 export Soc32ClockedState, Soc32ClockedResult
-export soc32_clocked_init, soc32_clocked
+export soc32_clocked_init, soc32_transition, soc32_clocked

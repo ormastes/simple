@@ -1,10 +1,10 @@
 # SoC Boot Simulation — Behavioral model boot runner
 #
-# Loads a test prog into the SoC behavioral model (soc_rtl/soc_top.spl),
+# Loads a test prog behind the compiler-owned RV32 product SoC DDR seam,
 # runs tick-by-tick, and captures semihosting output from the mailbox.
 # Proves end-to-end: boot ROM → prog entry → UART/mailbox output → halt.
 
-use std.hardware.soc_rtl.soc_top.{SocState, SocTickResult, soc_create, soc_tick}
+use std.hardware.soc_rtl.soc32_sim.{soc32_sim_create, soc32_sim_tick}
 use std.hardware.soc_rtl.ram.{ram_load_elf, ram_load_bytes}
 use std.hardware.soc_rtl.bootrom.DTB_BASE
 use std.hardware.soc_rtl.wb_interconnect.RAM_BASE
@@ -107,7 +107,7 @@ pub fn run_soc_boot_sim(prog: [u32], max_cycles: u32) -> BootSimResult:
     Returns the collected output string, cycle count, and success status.
     """
     val ram_words: u32 = 512 * 1024
-    var soc = soc_create(ram_words)
+    var soc = soc32_sim_create(ram_words)
 
     # Load prog into RAM at offset 0 (byte address 0 relative to RAM base)
     soc.ram = ram_load_elf(soc.ram, 0, prog)
@@ -117,17 +117,17 @@ pub fn run_soc_boot_sim(prog: [u32], max_cycles: u32) -> BootSimResult:
     var halted = false
 
     while cycle < max_cycles and not halted:
-        val result = soc_tick(soc)
+        val result = soc32_sim_tick(soc, true)
         soc = result.state
 
-        if result.ports.char_valid:
-            val ch = result.ports.char_out & 0xFF
+        if result.char_valid:
+            val ch = result.char_out & 0xFF
             if ch >= 0x20 and ch < 0x7F:
                 output = output + chr(ch)
             else if ch == 0x0A:
                 output = output + "\n"
 
-        halted = result.ports.halted
+        halted = result.halted
         cycle = cycle + 1
 
     BootSimResult(

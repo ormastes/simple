@@ -293,8 +293,21 @@ latched core interface. The external memory system must remain exclusive and
 noncoherent so LR/SC reservations cannot be invalidated invisibly. The product
 map is deliberately 32-bit and rejects wider physical addresses. Because the
 mailbox occupies a page inside the DRAM aperture, the canonical DT reserves
-that page with `no-map`. Static review is complete; compiler emission, the
-shared simulation adapter, and the K26 AXI adapter remain later gates.
+that page with `no-map`. Static review is complete; compiler emission,
+structural-shell integration, and executable simulation/board evidence remain
+later gates.
+
+The source adapters now exist without adding another CPU or bus abstraction.
+`soc32_transition` is the common combinational owner; `soc32_clocked` only
+registers it. `soc32_sim_tick` places dynamic `RamState` behind the DDR
+handshake, and the boot simulator consumes that path. `k26_soc32_clocked`
+combines the same transition with a one-entry AXI-HP state machine whose AW/W
+channels complete independently and whose B/R responses fail closed. Fixed
+ID/sideband values and 32-in-128-bit lane mapping live at that board boundary.
+The generated structural shell must still feed registered state/initialized
+outputs back to their inputs, flatten AXI/UART records, and enforce exclusive
+PS/DMA ownership of the RV32 RAM range; source adapters alone are not FPGA
+evidence.
 
 ## Dependency and change boundaries
 

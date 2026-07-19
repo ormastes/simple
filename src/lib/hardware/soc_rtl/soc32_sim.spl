@@ -1,0 +1,111 @@
+# ==========================================================================
+# RV32 product-SoC simulation RAM adapter
+# ==========================================================================
+#
+# Dynamic RAM stays outside the synthesizable `soc32_transition` owner.  This
+# adapter accepts every visible DDR request and returns one aligned word on the
+# following transition, exercising the same request/response contract used by
+# an FPGA memory controller.
+# ==========================================================================
+
+use std.hardware.soc_rtl.soc32_clocked.{Soc32ClockedState, soc32_clocked_init}
+use std.hardware.soc_rtl.soc32_clocked.soc32_transition
+use std.hardware.soc_rtl.ram.{RamState, ram_create, ram_read, ram_write}
+use std.hardware.soc_rtl.wb_interconnect.RAM_BASE
+
+struct Soc32SimState:
+    initialized: bool
+    soc: Soc32ClockedState
+    ram: RamState
+
+struct Soc32SimResult:
+    state: Soc32SimState
+    uart_tx: bool
+    halted: bool
+    char_out: u32
+    char_valid: bool
+
+fn soc32_sim_create(ram_size_words: u32) -> Soc32SimState:
+    Soc32SimState(
+        initialized: true,
+        soc: soc32_clocked_init(),
+        ram: ram_create(ram_size_words)
+    )
+
+fn soc32_sim_write_masked(state: RamState, addr: u32, wdata: u32,
+                          byte_enable: u32) -> RamState:
+    var mask: u32 = 0
+    if (byte_enable & 0x1) != 0:
+        mask = mask | 0x000000FF
+    if (byte_enable & 0x2) != 0:
+        mask = mask | 0x0000FF00
+    if (byte_enable & 0x4) != 0:
+        mask = mask | 0x00FF0000
+    if (byte_enable & 0x8) != 0:
+        mask = mask | 0xFF000000
+    val old_word = ram_read(state, addr)
+    val merged = (old_word & (mask ^ 0xFFFFFFFF)) | (wdata & mask)
+    ram_write(state, addr, merged, 2)
+
+fn soc32_sim_tick(state: Soc32SimState, uart_rx: bool) -> Soc32SimResult:
+    var out = state
+    var response_valid = false
+    var response_error = false
+    var response_data: u32 = 0
+
+    # Only a request visible at the start of this transition is accepted.
+    # A newly queued request remains registered until the following tick.
+    if state.soc.ddr_pending:
+        response_valid = true
+        val ram_begin = RAM_BASE as i64
+        val ram_end = ram_begin + (state.ram.size_words as i64) * 4
+        val address_valid = (state.soc.ddr_addr >= ram_begin and
+            state.soc.ddr_addr <= 0xFFFFFFFF and
+            (state.soc.ddr_addr & 3) == 0 and
+            state.soc.ddr_addr + 4 <= ram_end)
+        val size_valid = (state.soc.ddr_size == 1 or
+            state.soc.ddr_size == 2 or state.soc.ddr_size == 4)
+        var write_mask_valid = true
+        if state.soc.ddr_write:
+            if state.soc.ddr_size == 1:
+                write_mask_valid = (state.soc.ddr_byte_enable == 0x1 or
+                    state.soc.ddr_byte_enable == 0x2 or
+                    state.soc.ddr_byte_enable == 0x4 or
+                    state.soc.ddr_byte_enable == 0x8)
+            else if state.soc.ddr_size == 2:
+                write_mask_valid = (state.soc.ddr_byte_enable == 0x3 or
+                    state.soc.ddr_byte_enable == 0xC)
+            else if state.soc.ddr_size == 4:
+                write_mask_valid = state.soc.ddr_byte_enable == 0xF
+            else:
+                write_mask_valid = false
+        val qualifier_valid = ((not state.soc.ddr_is_pte or
+            (not state.soc.ddr_write and state.soc.ddr_size == 4)) and
+            (not state.soc.ddr_atomic or state.soc.ddr_size == 4) and
+            not (state.soc.ddr_is_pte and state.soc.ddr_atomic))
+        if (not address_valid or not size_valid or not write_mask_valid or
+            not qualifier_valid):
+            response_error = true
+        else:
+            val offset = (state.soc.ddr_addr - ram_begin) as u32
+            if state.soc.ddr_write:
+                out.ram = soc32_sim_write_masked(out.ram, offset,
+                    state.soc.ddr_wdata, state.soc.ddr_byte_enable)
+            else:
+                response_data = ram_read(out.ram, offset)
+
+    val soc_result = soc32_transition(state.initialized, state.soc, uart_rx,
+        true, response_valid, response_error, response_data)
+    out.initialized = soc_result.initialized
+    out.soc = soc_result.state
+
+    Soc32SimResult(
+        state: out,
+        uart_tx: soc_result.uart_tx,
+        halted: soc_result.halted,
+        char_out: soc_result.char_out,
+        char_valid: soc_result.char_valid
+    )
+
+export Soc32SimState, Soc32SimResult
+export soc32_sim_create, soc32_sim_tick

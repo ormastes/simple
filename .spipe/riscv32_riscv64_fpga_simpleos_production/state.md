@@ -110,7 +110,7 @@ Do not invent a second RISC-V core, bootloader, or FPGA framework. Reuse the exi
 - Unchosen options were deleted rather than archived.
 
 ## Phase
-implementation-clocked-boundary-complete-generated-rtl-and-board-evidence-pending
+implementation-rv32-product-adapters-source-complete-generated-rtl-and-board-evidence-pending
 
 ## Log
 - dev: Created production-readiness lane and fixed existing smoke wrappers to expose both RV32/RV64 missing smoke artifacts.
@@ -322,6 +322,28 @@ implementation-clocked-boundary-complete-generated-rtl-and-board-evidence-pendin
   evidence, not a compiler-generated RV32/RV64 product. AC-10 and AC-11 remain
   open until new provenance-bound bitstreams produce board-origin bidirectional
   Linux login and `ls` transcripts for both XLEN lanes.
+
+## 2026-07-19 RV32 product simulation and K26 adapter
+
+- Extracted `soc32_transition` as the one combinational SoC semantic owner;
+  `soc32_clocked` remains the registered compiler boundary.
+- Added `soc32_sim_tick`, keeping dynamic RAM outside hardware and accepting
+  only previously visible DDR requests. The existing boot simulator now uses
+  this path and preserves mailbox PUTC/EXIT through product result sidebands.
+- Added the single-outstanding K26 AXI-HP adapter and `k26_soc32_clocked` source
+  root. Focused cases cover independent AW/W, same-cycle final-channel/B and
+  AR/R completion, 128-bit lanes/strobes, input and response failures, and
+  reset/root composition.
+- Bounded simulation and AXI sidecars both returned static-review PASS; the
+  primary reviewed the merged source. The collaboration runtime still exposed
+  no selectable Spark model.
+- No Simple/GHDL command was run because the session's pure-Simple retry cap is
+  exhausted. The updated compiler system scenario and generated SPipe manual
+  remain unexecuted/stale until a fresh uncapped pure-Simple CLI session.
+- Vivado still needs a thin structural shell to feed registered state and the
+  initialized bit back, flatten AXI/UART records, connect PS DDR, and enforce
+  exclusive PS/DMA ownership of the softcore RAM range. No RTL/FPGA/Linux PASS
+  is claimed.
 
 ## 2026-07-19 Linux media lock boundary
 

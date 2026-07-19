@@ -53,11 +53,14 @@ board-origin login evidence.
   fixed synthesizable priority storage, a binding-complete product DT that
   reserves the in-DRAM mailbox page, WFI/Zicntr policy, CLINT-backed time,
   synchronized bidirectional 16550 pins, and a Simple-owned `soc32_clocked`
-  root with a held single-outstanding external-DDR seam. This is source-level
+  root with a held single-outstanding external-DDR seam. The boot simulator now
+  consumes that seam through dynamic RAM, and a reviewed `k26_soc32_clocked`
+  source root adds independent-channel AXI-HP adaptation with fixed IDs,
+  sidebands, lane packing, and fail-closed responses. This is source-level
   progress, not generated-VHDL evidence: the compiler/GHDL gate was not run,
-  simulation still uses its older embedded-RAM composition, the K26 AXI
-  adapter is absent, and physical Linux boot remains outstanding. RV64 DT
-  generation remains fail-closed.
+  the Vivado registered-feedback/record-flattening shell is absent, and
+  physical Linux boot remains outstanding. RV64 DT generation remains
+  fail-closed.
 
 Physical F1/N3 execution remains **BLOCKED**, not passed. Restore the FTDI
 interface before touching JTAG, then produce new compiler-provenance-bound

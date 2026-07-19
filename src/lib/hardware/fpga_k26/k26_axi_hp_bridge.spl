@@ -1,56 +1,15 @@
 # ============================================================================
-# K26 AXI-HP Bridge — VexRiscv-SMP AXI4 to PS S_AXI_HP0
+# K26 AXI-HP Bridge — Simple RV32 product DDR to PS S_AXI_HP0
 # ============================================================================
 #
-# Bridges the VexRiscv-SMP core's AXI4 master (iBus/dBus) to the Zynq
-# UltraScale+ PS S_AXI_HP0 high-performance slave port for DDR access.
-#
-# AXI4 master side (from VexRiscv-SMP):
-#   - 64-bit data, 32-bit address, burst-capable
-#
-# AXI-HP slave side (to PS DDR controller):
-#   - 128-bit data, 49-bit address, burst-capable
-#   - Directly accesses DDR4 via PS memory controller
+# Adapts the compiler-owned one-request RV32 DDR seam to single-beat AXI4 on
+# the Zynq UltraScale+ PS high-performance DDR port. The legacy VexRiscv text
+# generator remains compatibility-only below and is never product evidence.
 #
 # VHDL synthesizable subset: i64, u32, bool, structs only.
 # ============================================================================
 
-# ============================================================================
-# AXI4 Master Signals (from VexRiscv-SMP core)
-# ============================================================================
-
-struct Axi4MasterWrite:
-    awaddr: i64
-    awlen: u32
-    awsize: u32
-    awburst: u32
-    awvalid: bool
-    wdata: i64
-    wstrb: u32
-    wlast: bool
-    wvalid: bool
-    bready: bool
-
-struct Axi4MasterRead:
-    araddr: i64
-    arlen: u32
-    arsize: u32
-    arburst: u32
-    arvalid: bool
-    rready: bool
-
-struct Axi4SlaveWriteResp:
-    awready: bool
-    wready: bool
-    bresp: u32
-    bvalid: bool
-
-struct Axi4SlaveReadResp:
-    arready: bool
-    rdata: i64
-    rresp: u32
-    rlast: bool
-    rvalid: bool
+use std.hardware.soc_rtl.wb_interconnect.{RAM_BASE, RAM_END}
 
 # ============================================================================
 # AXI-HP Port Signals (to PS)
@@ -58,9 +17,14 @@ struct Axi4SlaveReadResp:
 
 struct AxiHpMaster:
     awaddr: i64
+    awid: u32
     awlen: u32
     awsize: u32
     awburst: u32
+    awlock: bool
+    awcache: u32
+    awprot: u32
+    awqos: u32
     awvalid: bool
     wdata_lo: i64
     wdata_hi: i64
@@ -69,105 +33,258 @@ struct AxiHpMaster:
     wvalid: bool
     bready: bool
     araddr: i64
+    arid: u32
     arlen: u32
     arsize: u32
     arburst: u32
+    arlock: bool
+    arcache: u32
+    arprot: u32
+    arqos: u32
     arvalid: bool
     rready: bool
 
 struct AxiHpSlave:
     awready: bool
     wready: bool
+    bid: u32
     bresp: u32
     bvalid: bool
     arready: bool
     rdata_lo: i64
     rdata_hi: i64
+    rid: u32
     rresp: u32
     rlast: bool
     rvalid: bool
 
-# ============================================================================
-# Bridge State
-# ============================================================================
+# ==========================================================================
+# Simple RV32 product-DDR to AXI-HP adapter
+# ==========================================================================
 
-struct AxiHpBridge:
-    pending_write: bool
-    pending_read: bool
-    addr_offset: i64
+struct Soc32DdrAxiState:
+    """One accepted Simple DDR request and its outstanding AXI channels."""
+    busy: bool
+    write: bool
+    addr: i64
+    size: u32
+    wdata: u32
+    byte_enable: u32
+    is_pte: bool
+    atomic: bool
+    aw_pending: bool
+    w_pending: bool
+    ar_pending: bool
 
-# ============================================================================
-# Bridge Operations
-# ============================================================================
+struct Soc32DdrAxiResult:
+    state: Soc32DdrAxiState
+    request_ready: bool
+    response_valid: bool
+    response_error: bool
+    response_data: u32
+    axi: AxiHpMaster
 
-fn axi_hp_bridge_create() -> AxiHpBridge:
-    return AxiHpBridge(
-        pending_write: false,
-        pending_read: false,
-        addr_offset: 0
+@hardware
+fn soc32_ddr_axi_create() -> Soc32DdrAxiState:
+    Soc32DdrAxiState(
+        busy: false,
+        write: false,
+        addr: 0,
+        size: 1,
+        wdata: 0,
+        byte_enable: 0,
+        is_pte: false,
+        atomic: false,
+        aw_pending: false,
+        w_pending: false,
+        ar_pending: false
     )
 
-fn axi_hp_bridge_forward_write(wr: Axi4MasterWrite) -> AxiHpMaster:
-    return AxiHpMaster(
-        awaddr: wr.awaddr,
-        awlen: wr.awlen,
-        awsize: wr.awsize,
-        awburst: wr.awburst,
-        awvalid: wr.awvalid,
-        wdata_lo: wr.wdata,
-        wdata_hi: 0,
-        wstrb: wr.wstrb,
-        wlast: wr.wlast,
-        wvalid: wr.wvalid,
-        bready: wr.bready,
-        araddr: 0,
-        arlen: 0,
-        arsize: 0,
-        arburst: 0,
-        arvalid: false,
-        rready: false
-    )
-
-fn axi_hp_bridge_forward_read(rd: Axi4MasterRead) -> AxiHpMaster:
-    return AxiHpMaster(
+@hardware
+fn soc32_ddr_axi_idle_master() -> AxiHpMaster:
+    AxiHpMaster(
         awaddr: 0,
+        awid: 0,
         awlen: 0,
-        awsize: 0,
-        awburst: 0,
+        awsize: 2,
+        awburst: 1,
+        awlock: false,
+        awcache: 3,
+        awprot: 0,
+        awqos: 0,
         awvalid: false,
         wdata_lo: 0,
         wdata_hi: 0,
         wstrb: 0,
-        wlast: false,
+        wlast: true,
         wvalid: false,
         bready: false,
-        araddr: rd.araddr,
-        arlen: rd.arlen,
-        arsize: rd.arsize,
-        arburst: rd.arburst,
-        arvalid: rd.arvalid,
-        rready: rd.rready
+        araddr: 0,
+        arid: 0,
+        arlen: 0,
+        arsize: 2,
+        arburst: 1,
+        arlock: false,
+        arcache: 3,
+        arprot: 0,
+        arqos: 0,
+        arvalid: false,
+        rready: false
     )
 
-fn axi_hp_bridge_write_resp(hp: AxiHpSlave) -> Axi4SlaveWriteResp:
-    return Axi4SlaveWriteResp(
-        awready: hp.awready,
-        wready: hp.wready,
-        bresp: hp.bresp,
-        bvalid: hp.bvalid
+@hardware
+fn soc32_ddr_axi_master(state: Soc32DdrAxiState) -> AxiHpMaster:
+    if not state.busy:
+        return soc32_ddr_axi_idle_master()
+    val word_lane = ((state.addr as u32) >> 2) & 3
+    var data_lo: i64 = 0
+    var data_hi: i64 = 0
+    if word_lane == 0:
+        data_lo = state.wdata as i64
+    else if word_lane == 1:
+        data_lo = (state.wdata as i64) << 32
+    else if word_lane == 2:
+        data_hi = state.wdata as i64
+    else:
+        data_hi = (state.wdata as i64) << 32
+    AxiHpMaster(
+        awaddr: state.addr,
+        awid: 0,
+        awlen: 0,
+        awsize: 2,
+        awburst: 1,
+        awlock: false,
+        awcache: 3,
+        awprot: 0,
+        awqos: 0,
+        awvalid: state.write and state.aw_pending,
+        wdata_lo: data_lo,
+        wdata_hi: data_hi,
+        wstrb: state.byte_enable << (word_lane * 4),
+        wlast: true,
+        wvalid: state.write and state.w_pending,
+        bready: state.write,
+        araddr: state.addr,
+        arid: 0,
+        arlen: 0,
+        arsize: 2,
+        arburst: 1,
+        arlock: false,
+        arcache: 3,
+        arprot: 0,
+        arqos: 0,
+        arvalid: not state.write and state.ar_pending,
+        rready: not state.write
     )
 
-fn axi_hp_bridge_read_resp(hp: AxiHpSlave) -> Axi4SlaveReadResp:
-    return Axi4SlaveReadResp(
-        arready: hp.arready,
-        rdata: hp.rdata_lo,
-        rresp: hp.rresp,
-        rlast: hp.rlast,
-        rvalid: hp.rvalid
+@hardware
+fn soc32_ddr_axi_read_word(addr: i64, hp: AxiHpSlave) -> u32:
+    val word_lane = ((addr as u32) >> 2) & 3
+    if word_lane == 0:
+        return hp.rdata_lo as u32
+    if word_lane == 1:
+        return ((hp.rdata_lo >> 32) & 0xFFFFFFFF) as u32
+    if word_lane == 2:
+        return hp.rdata_hi as u32
+    ((hp.rdata_hi >> 32) & 0xFFFFFFFF) as u32
+
+@hardware
+fn soc32_ddr_axi_tick(state: Soc32DdrAxiState, request_valid: bool,
+                      request_addr: i64, request_size: u32,
+                      request_write: bool, request_wdata: u32,
+                      request_byte_enable: u32, request_is_pte: bool,
+                      request_atomic: bool,
+                      hp: AxiHpSlave) -> Soc32DdrAxiResult:
+    """Advance one single-beat, single-outstanding AXI transaction.
+
+    AW and W complete independently. B/R readiness remains asserted for the
+    whole accepted transaction, so a legal zero-gap response is not lost.
+    The PS DDR range must be exclusive from other masters while RV32 atomics
+    are enabled; the adapter deliberately does not invent coherence.
+    """
+    var out = state
+    val request_ready = not state.busy
+    var response_valid = false
+    var response_error = false
+    var response_data: u32 = 0
+
+    if state.busy:
+        val aw_done = state.aw_pending and hp.awready
+        val w_done = state.w_pending and hp.wready
+        val ar_done = state.ar_pending and hp.arready
+        if aw_done:
+            out.aw_pending = false
+        if w_done:
+            out.w_pending = false
+        if ar_done:
+            out.ar_pending = false
+
+        val write_address_done = not state.aw_pending or aw_done
+        val write_data_done = not state.w_pending or w_done
+        val read_address_done = not state.ar_pending or ar_done
+        if state.write and write_address_done and write_data_done and hp.bvalid:
+            response_valid = true
+            response_error = hp.bresp > 1 or hp.bid != 0
+            out = soc32_ddr_axi_create()
+        else if (not state.write and read_address_done and hp.rvalid):
+            response_valid = true
+            response_error = hp.rresp > 1 or not hp.rlast or hp.rid != 0
+            response_data = soc32_ddr_axi_read_word(state.addr, hp)
+            out = soc32_ddr_axi_create()
+    else if request_valid:
+        val address_valid = (request_addr >= (RAM_BASE as i64) and
+            request_addr + 3 <= (RAM_END as i64) and
+            request_addr <= 0xFFFFFFFF and (request_addr & 3) == 0)
+        val size_valid = (request_size == 1 or request_size == 2 or
+            request_size == 4)
+        var mask_valid = true
+        if request_write:
+            if request_size == 1:
+                mask_valid = (request_byte_enable == 0x1 or
+                    request_byte_enable == 0x2 or
+                    request_byte_enable == 0x4 or
+                    request_byte_enable == 0x8)
+            else if request_size == 2:
+                mask_valid = (request_byte_enable == 0x3 or
+                    request_byte_enable == 0xC)
+            else if request_size == 4:
+                mask_valid = request_byte_enable == 0xF
+            else:
+                mask_valid = false
+        val qualifier_valid = ((not request_is_pte or
+            (not request_write and request_size == 4)) and
+            (not request_atomic or request_size == 4) and
+            not (request_is_pte and request_atomic))
+        if (not address_valid or not size_valid or not mask_valid or
+            not qualifier_valid):
+            response_valid = true
+            response_error = true
+        else:
+            out = Soc32DdrAxiState(
+                busy: true,
+                write: request_write,
+                addr: request_addr,
+                size: request_size,
+                wdata: request_wdata,
+                byte_enable: request_byte_enable,
+                is_pte: request_is_pte,
+                atomic: request_atomic,
+                aw_pending: request_write,
+                w_pending: request_write,
+                ar_pending: not request_write
+            )
+
+    Soc32DdrAxiResult(
+        state: out,
+        request_ready: request_ready,
+        response_valid: response_valid,
+        response_error: response_error,
+        response_data: response_data,
+        axi: soc32_ddr_axi_master(out)
     )
 
 # ============================================================================
-# SystemVerilog Generation
+# Legacy VexRiscv SystemVerilog generation — compatibility only
 # ============================================================================
 
 fn generate_axi_hp_bridge_sv() -> text:
@@ -264,3 +381,7 @@ fn axi_hp_bridge_port_map() -> text:
     tcl = tcl + "set_property CONFIG.PSU__USE__S_AXI_HP0 {1} [get_bd_cells zynq_ultra_ps_e]\n"
     tcl = tcl + "set_property CONFIG.PSU__CRL_APB__S_AXI_HP0_FREQ {100} [get_bd_cells zynq_ultra_ps_e]\n"
     return tcl
+
+export AxiHpMaster, AxiHpSlave
+export Soc32DdrAxiState, Soc32DdrAxiResult
+export soc32_ddr_axi_create, soc32_ddr_axi_tick

@@ -262,8 +262,26 @@ The external DDR consumer must be the sole coherent master while atomics are
 enabled. The canonical DT excludes the mailbox page at `0x80ff0000` from Linux
 with a 4 KiB `reserved-memory`/`no-map` node. The compiler/GHDL scenario covers
 the new root but remains unexecuted under the exhausted pure-Simple CLI retry
-cap. Factoring `soc_tick` onto this seam and adding the thin K26 AXI adapter are
-still required; the K26 shell must not own CPU behavior.
+cap. Source simulation and K26 AXI consumers now reuse the seam; compiler
+execution and the thin Vivado feedback/flattening shell remain required. The
+K26 shell must not own CPU behavior.
+
+The shared adapters are now source-complete. `soc32_sim_tick` accepts only a
+DDR request visible at the start of a tick, applies byte-enable writes once,
+returns a full aligned read word for product-side lane extraction, and rejects
+requests outside its configured dynamic RAM. Mailbox characters and EXIT drain
+through the product result, so `run_soc_boot_sim` no longer depends on the
+legacy embedded-RAM SoC transition.
+
+The K26 adapter latches one request, holds address/data/strobes, permits AW and
+W to handshake independently, keeps B/R ready during the transaction, and
+accepts a response with the final request-channel handshake. It issues one
+four-byte AXI beat, maps the selected 32-bit word and strobes into the correct
+128-bit lane, uses ID 0 and fixed non-cacheable sidebands, and rejects invalid
+RAM range/alignment, size/strobe, PTE, atomic, response-ID, response-code, and
+RLAST states. `k26_soc32_clocked` composes this with `soc32_transition`; the
+remaining Vivado shell owns only registered feedback, record flattening,
+clock/reset, PS block connection, and exclusive DDR-range enforcement.
 
 Sv39 rejects noncanonical addresses, supports three-level walks and aligned
 1 GiB/2 MiB/4 KiB leaves, applies U/S/SUM/MXR and A/D rules, refills the TLB,

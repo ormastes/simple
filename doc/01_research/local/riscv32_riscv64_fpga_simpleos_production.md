@@ -342,7 +342,12 @@ and the DT reserves the mailbox page inside the advertised DRAM range with
 `no-map`. Independent high-capability static review reports PASS.
 
 This is still source-level readiness. The compiler/GHDL gate was not executed
-because the pure-Simple CLI retry cap is exhausted; `soc_tick` still needs to
-be factored onto the same fabric contract, and the K26 wrapper still needs a
-thin AXI/DDR adapter. No generated-VHDL, RTL-Linux, or FPGA claim follows from
-this slice.
+because the pure-Simple CLI retry cap is exhausted. A dynamic-RAM
+`soc32_sim_tick` consumer now exercises the same registered DDR seam and the
+existing boot simulator uses it, including mailbox PUTC/EXIT. A separate
+`k26_soc32_clocked` root composes the same SoC transition with a reviewed
+single-outstanding AXI-HP adapter that handles independent AW/W, 32-in-128-bit
+lanes, fixed IDs/sidebands, response faults, and fail-closed request shapes.
+The legacy `soc_tick` and VexRiscv text generator remain compatibility-only.
+Vivado structural feedback/record flattening is still missing, so no
+generated-VHDL, RTL-Linux, or FPGA claim follows from this slice.

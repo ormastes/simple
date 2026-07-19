@@ -1,0 +1,63 @@
+use std.spipe.*
+use std.hardware.rv32i_rtl.mmu_sv32.{ACCESS_LOAD, ACCESS_STORE}
+use std.hardware.rv32i_rtl.memory_access.MEMORY32_REQUEST
+use std.hardware.soc_rtl.ram.ram_write
+use std.hardware.soc_rtl.soc32_sim.{soc32_sim_create, soc32_sim_tick}
+use std.hardware.soc_rtl.wb_interconnect.RAM_BASE
+use std.hardware.fpga_linux.soc_boot_sim.run_simpleos_boot_test
+
+describe "RV32 product-SoC simulation RAM adapter":
+    it "applies one lane-masked store and returns one response":
+        var sim = soc32_sim_create(4)
+        sim.soc.core.memory.phase = MEMORY32_REQUEST
+        sim.soc.core.memory.paddr = (RAM_BASE + 1) as i64
+        sim.soc.core.memory.size_bytes = 1
+        sim.soc.core.memory.access_type = ACCESS_STORE
+        sim.soc.core.memory.bus_write = true
+        sim.soc.core.memory.write_data = 0xAB
+
+        val queued = soc32_sim_tick(sim, true)
+        expect(queued.state.ram.data[0]).to_equal(0)
+        expect(queued.state.soc.ddr_pending).to_equal(true)
+
+        val completed = soc32_sim_tick(queued.state, true)
+        expect(completed.state.ram.data[0]).to_equal(0x0000AB00)
+        expect(completed.state.soc.ddr_pending).to_equal(false)
+        expect(completed.state.soc.ddr_waiting).to_equal(false)
+        expect(completed.state.soc.response_valid).to_equal(true)
+        expect(completed.state.soc.response_error).to_equal(false)
+
+    it "returns an aligned word for product-boundary lane extraction":
+        var sim = soc32_sim_create(4)
+        sim.ram = ram_write(sim.ram, 0, 0xAABBCCDD, 2)
+        sim.soc.core.memory.phase = MEMORY32_REQUEST
+        sim.soc.core.memory.paddr = (RAM_BASE + 2) as i64
+        sim.soc.core.memory.size_bytes = 1
+        sim.soc.core.memory.access_type = ACCESS_LOAD
+
+        val queued = soc32_sim_tick(sim, true)
+        expect(queued.state.soc.ddr_pending).to_equal(true)
+
+        val completed = soc32_sim_tick(queued.state, true)
+        expect(completed.state.soc.response_valid).to_equal(true)
+        expect(completed.state.soc.response_data).to_equal(0xBB)
+
+    it "fails a product-map request outside the configured simulation RAM":
+        var sim = soc32_sim_create(1)
+        sim.soc.core.memory.phase = MEMORY32_REQUEST
+        sim.soc.core.memory.paddr = (RAM_BASE + 4) as i64
+        sim.soc.core.memory.size_bytes = 4
+        sim.soc.core.memory.access_type = ACCESS_LOAD
+
+        val queued = soc32_sim_tick(sim, true)
+        expect(queued.state.soc.ddr_pending).to_equal(true)
+
+        val completed = soc32_sim_tick(queued.state, true)
+        expect(completed.state.soc.response_valid).to_equal(true)
+        expect(completed.state.soc.response_error).to_equal(true)
+
+    it "boots the mailbox fixture through the product SoC boundary":
+        val boot = run_simpleos_boot_test()
+        expect(boot.output).to_start_with("SimpleOS")
+        expect(boot.halted).to_equal(true)
+        expect(boot.success).to_equal(true)

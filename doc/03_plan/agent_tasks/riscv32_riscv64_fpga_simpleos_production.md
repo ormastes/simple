@@ -37,6 +37,8 @@ Date: 2026-07-18
 | `rv32_a_design` | clocked RV32 SoC boundary | Own CPU/peripherals/response state, expose a held single-outstanding DDR seam, preserve lane/PTE/atomic metadata, and exclude dynamic RAM | accepted after independent high-capability review PASS; primary owns merge |
 | `linux_media_audit` | synthesizable PLIC priority storage | Replace the dynamic priority array with fixed bitplanes while preserving source-zero, selection, claim, completion, and re-pend behavior | accepted after bounded read-only review PASS; primary owns merge |
 | `rv32_dtb_impl` | mailbox DT reservation | Reserve the 4 KiB product mailbox page inside DRAM and mark it `no-map` in binary DT and DTS output | accepted after independent high-capability review PASS; primary owns merge |
+| `soc32_sim_audit` | product-seam simulation adapter | Keep dynamic RAM outside hardware, respond only to visible requests, preserve lane masks/mailbox output, and migrate the boot simulator | accepted after independent bounded re-review PASS; primary owns merge |
+| `k26_axi_audit` | K26 single-outstanding AXI-HP adapter | Preserve independent AW/W and R/B handshakes, pack 32-bit words into 128-bit lanes, validate trust inputs, and compose the canonical SoC transition | accepted after independent bounded re-review PASS; Vivado feedback/flattening remains open |
 
 The collaboration runtime did not expose a Spark/lower-model selector. The
 available sidecars were therefore kept read-only and bounded. Their conclusions
