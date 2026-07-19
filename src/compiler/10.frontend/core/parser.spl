@@ -401,7 +401,7 @@ fn parser_absorb_optional_suffix(base: i64) -> i64:
             kind = par_kind_get()
         else:
             break
-    TYPE_OPTION
+    14
 
 fn parser_parse_type() -> i64:
     parser_parse_type_impl(true)
@@ -420,6 +420,9 @@ fn parser_parse_tuple_element_type() -> i64:
     candidate
 
 fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
+    # Fixed type tags are a cross-module wire protocol. Keep 0..33 literal in
+    # this compiled parser path: Stage3 has misread imported TYPE_* module vals
+    # and silently emitted [text] as tag 5 ([i64]).
     # dyn Trait -- dynamic dispatch type (parsed as named type)
     var kind = par_kind_get()
     # Prefix optional shorthand `?T` is not documented/legal syntax (the
@@ -448,8 +451,8 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
         # Return as named type (interpreter uses structural subtyping anyway)
         val dyn_id = named_type_find(dyn_name)
         if dyn_id >= 0:
-            return TYPE_NAMED_BASE + dyn_id
-        return TYPE_ANY
+            return 10000 + dyn_id
+        return 12
     var type_name = par_text_get()
     if kind == 6:
         var type_name_end = lex_token_end_get()
@@ -497,24 +500,24 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
             parser_expect(TOK_GT)
             # Handle Option<T>
             if type_name == "Option":
-                if inner_type == TYPE_I64:
-                    return parser_absorb_optional_suffix(TYPE_OPTION_I64)
-                if inner_type == TYPE_F64:
-                    return parser_absorb_optional_suffix(TYPE_OPTION_F64)
-                if inner_type == TYPE_TEXT:
-                    return parser_absorb_optional_suffix(TYPE_OPTION_TEXT)
-                if inner_type == TYPE_BOOL:
-                    return parser_absorb_optional_suffix(TYPE_OPTION_BOOL)
-                return parser_absorb_optional_suffix(TYPE_OPTION)
+                if inner_type == 2:
+                    return parser_absorb_optional_suffix(15)
+                if inner_type == 3:
+                    return parser_absorb_optional_suffix(16)
+                if inner_type == 4:
+                    return parser_absorb_optional_suffix(17)
+                if inner_type == 1:
+                    return parser_absorb_optional_suffix(18)
+                return parser_absorb_optional_suffix(14)
             # Preserve Result<T,E> generic args for match payload typing.
             if type_name == "Result":
                 if has_extra_type:
                     val result_tag = result_type_register(inner_type, extra_type)
                     if result_tag < 0:
                         parser_error("too many distinct Result<T,E> annotations")
-                        return parser_absorb_optional_suffix(TYPE_RESULT)
+                        return parser_absorb_optional_suffix(19)
                     return parser_absorb_optional_suffix(result_tag)
-                return parser_absorb_optional_suffix(TYPE_RESULT)
+                return parser_absorb_optional_suffix(19)
             # Dict<K,V> -> register the key/value tags (bug: dicttype -- this
             # used to unconditionally return the bare TYPE_DICT sentinel,
             # silently dropping K/V so every dict-typed param/local arrived at
@@ -524,39 +527,39 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
                     val dict_tag = dict_type_register(inner_type, extra_type)
                     if dict_tag < 0:
                         parser_error("too many distinct Dict<K,V> annotations")
-                        return parser_absorb_optional_suffix(TYPE_DICT)
+                        return parser_absorb_optional_suffix(9)
                     return parser_absorb_optional_suffix(dict_tag)
-                return parser_absorb_optional_suffix(TYPE_DICT)
+                return parser_absorb_optional_suffix(9)
             # Unknown generic type - check if base is a named struct
             val gid = named_type_find(type_name)
             if gid >= 0:
-                return parser_absorb_optional_suffix(TYPE_NAMED_BASE + gid)
-            return parser_absorb_optional_suffix(TYPE_VOID)
+                return parser_absorb_optional_suffix(10000 + gid)
+            return parser_absorb_optional_suffix(0)
         # Check for postfix ? for Option shorthand: i64? -> Option<i64>
         kind = par_kind_get()
         if kind == 130:
             parser_advance()
             kind = par_kind_get()
             # Check for additional ? marks (i64?? = Option<Option<i64>>)
-            var opt_result = TYPE_OPTION
+            var opt_result = 14
             if type_name == "i64":
-                opt_result = TYPE_OPTION_I64
+                opt_result = 15
             elif type_name == "f64":
-                opt_result = TYPE_OPTION_F64
+                opt_result = 16
             elif type_name == "text":
-                opt_result = TYPE_OPTION_TEXT
+                opt_result = 17
             elif type_name == "bool":
-                opt_result = TYPE_OPTION_BOOL
+                opt_result = 18
             # Loop for additional ? marks (i64?? or i64???)
             for qi in 0..10:
                 if kind == 130:
                     parser_advance()
                     kind = par_kind_get()
-                    opt_result = TYPE_OPTION
+                    opt_result = 14
                 elif kind == 132:
                     parser_advance()
                     kind = par_kind_get()
-                    opt_result = TYPE_OPTION
+                    opt_result = 14
                 else:
                     break
             return opt_result
@@ -575,24 +578,24 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
                     kind = par_kind_get()
                 else:
                     break
-            return TYPE_OPTION
+            return 14
         # Simple primitive types
         if type_name == "i64":
-            return TYPE_I64
+            return 2
         if type_name == "f64":
-            return TYPE_F64
+            return 3
         if type_name == "text":
-            return TYPE_TEXT
+            return 4
         if type_name == "bool":
-            return TYPE_BOOL
+            return 1
         if type_name == "Option":
-            return TYPE_OPTION
+            return 14
         if type_name == "Result":
-            return TYPE_RESULT
+            return 19
         # Check for struct type
         val sid = named_type_find(type_name)
         if sid >= 0:
-            return TYPE_NAMED_BASE + sid
+            return 10000 + sid
         # Fixed-width integer primitives (u8/u16/u32/u64/i8/i16/i32/...) have
         # no dedicated type tag and are never registered as named types, so
         # without this they fell through to TYPE_VOID -- silently producing
@@ -602,25 +605,25 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
         # signedness survive into the AST bridge -> HIR Int(bits, signed) -> MIR
         # -> backend type mappers (e.g. VHDL unsigned/signed(W-1 downto 0)).
         if type_name == "u8":
-            return TYPE_U8
+            return 27
         if type_name == "u16":
-            return TYPE_U16
+            return 28
         if type_name == "u32":
-            return TYPE_U32
+            return 29
         if type_name == "u64":
-            return TYPE_U64
+            return 30
         if type_name == "i8":
-            return TYPE_I8
+            return 31
         if type_name == "i16":
-            return TYPE_I16
+            return 32
         if type_name == "i32":
-            return TYPE_I32
+            return 33
         # Non-standard widths (u7, u3, ...) have no dedicated tag; keep the i64
         # register lane. Callers needing the exact width re-derive it from the
         # type name text via primitive_integer_bit_width_from_name.
         if primitive_integer_bit_width_from_name(type_name) > 0:
-            return TYPE_I64
-        return TYPE_VOID
+            return 2
+        return 0
     if kind == 144:
         # Array type: [i64], [text], etc.
         parser_advance()
@@ -636,20 +639,20 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
                 parser_advance()
         parser_expect(145)
         # Nested array types [[T]] -> TYPE_ARRAY_ANY
-        val is_nested = elem_type == TYPE_ARRAY_I64
-        val is_nested2 = elem_type == TYPE_ARRAY_TEXT
-        val is_nested3 = elem_type == TYPE_ARRAY_BOOL
-        val is_nested4 = elem_type == TYPE_ARRAY_ANY
+        val is_nested = elem_type == 5
+        val is_nested2 = elem_type == 6
+        val is_nested3 = elem_type == 7
+        val is_nested4 = elem_type == 8
         val any_nested = is_nested or is_nested2
         val any_nested2 = any_nested or is_nested3
         val any_nested3 = any_nested2 or is_nested4
-        var arr_type = TYPE_ARRAY_I64
+        var arr_type = 5
         if any_nested3:
-            arr_type = TYPE_ARRAY_ANY
-        elif elem_type == TYPE_TEXT:
-            arr_type = TYPE_ARRAY_TEXT
-        elif elem_type == TYPE_BOOL:
-            arr_type = TYPE_ARRAY_BOOL
+            arr_type = 8
+        elif elem_type == 4:
+            arr_type = 6
+        elif elem_type == 1:
+            arr_type = 7
         # absorb optional suffix: [T]? -> Option
         return parser_absorb_optional_suffix(arr_type)
     # Function type: fn(T, T) -> T
@@ -669,7 +672,7 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
         if par_kind_get() == 167:
             parser_advance()
             parser_parse_type()
-        return parser_absorb_optional_suffix(TYPE_FN)
+        return parser_absorb_optional_suffix(11)
     # Tuple type: (T, T)
     if par_kind_get() == 140:
         parser_advance()
@@ -702,13 +705,13 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
         if par_kind_get() == 167:
             parser_advance()
             parser_parse_type()
-            return parser_absorb_optional_suffix(TYPE_FN)
+            return parser_absorb_optional_suffix(11)
         # A real tuple (2+ elements) carries its element tags via the
         # registry; a 0/1-element paren group keeps the old TYPE_ANY
         # behavior (a `(T)` paren-grouped single type is not a tuple).
         if tuple_elem_tags.len() >= 2:
             return parser_absorb_optional_suffix(tuple_type_register(tuple_elem_tags))
-        return parser_absorb_optional_suffix(TYPE_ANY)
+        return parser_absorb_optional_suffix(12)
     # Dict type: {K: V}
     if par_kind_get() == 142:
         parser_advance()
@@ -718,9 +721,9 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
                 parser_advance()
                 parser_parse_type()
         parser_expect(143)
-        return parser_absorb_optional_suffix(TYPE_DICT)
+        return parser_absorb_optional_suffix(9)
     parser_error("expected type annotation")
-    TYPE_VOID
+    0
 
 # Parses a type that may be a union: A | B | C
 fn parser_parse_type_with_union() -> i64:
