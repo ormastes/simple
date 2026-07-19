@@ -2,7 +2,7 @@
 
 - **Date:** 2026-07-03
 - **Severity:** P1 (trust — second greenwash mode, distinct from the fixed summary-sum bug)
-- **Status:** open, needs minimal repro
+- **Status:** open for fresh Stage 4 qualification; bounded helper-built repro now guarded
 
 ## Observed (by P0c encoder agent, worktree agent-a170cd9758e16d60e)
 
@@ -31,6 +31,17 @@ Minimal repro by bisecting the wav spec's failing-assert shape: u8 literal vs
 i64, direct buffer vs helper-returned buffer, inside/outside closure capture.
 Fix in the matcher/runner, add the shape to the greenwash regression contract
 spec (test_runner_single_example_failure_contract_spec.spl).
+
+## 2026-07-19 bounded evidence
+
+The current bootstrap runtime correctly rejects a helper-built indexed `[u8]`
+mismatch with exit `1` and `1 example, 1 failure`. The deliberately-red fixture
+now runs in the fresh Stage 4 essential-tools smoke and requires exit `1`, the
+exact failed aggregate, a `FAIL` marker, and the matcher-specific diagnostic so
+a normalized child crash cannot satisfy the gate. UInt-aware equality and
+structured BDD failure evidence are present in current source (landed after the
+original report). Keep this bug open until an admitted fresh Stage 4 passes that
+smoke; the original WAV sabotage has not been repeated.
 
 ## Workaround (used for the P0c evidence)
 
