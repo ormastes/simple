@@ -37,6 +37,28 @@ each one-byte character handle within a conversion, retaining at most 256
 distinct one-byte string objects plus unchanged multibyte objects. The O(N)
 outer character-reference array and Stage4 RSS acceptance remain open.
 
+### 2026-07-19 bounded follow-up
+
+A current-source, cache-preserving self-host refresh compiled past the cached
+frontend objects but hit its single 180-second cap before linking an artifact;
+it was not retried. A smaller `Lexer.new` RSS probe emitted an archive with one
+compile and 20 cache hits, but the preserved Stage3 executable wrapper could
+not select the supplied pure-Simple runtime archive. Its `core-c-bootstrap`
+fallback selected an incomplete archive and stopped on missing
+`rt_heap_registry_count`; direct archive linking exposed the same incomplete
+owner projection. No RSS baseline is claimed from these failed link paths.
+
+Source review also rules out freeing `previous.source_chars` before replacing
+the active lexer slot: `CoreLexer` copies array fields shallowly, so that order
+creates a use-after-free window. The minimum safe lifecycle is construct the
+fresh lexer, retain the old array handle, replace the slot, and only then
+shallow-release the old handle. That release is not yet a shared runtime
+surface: pure `simple-core` has a shallow unregister/free implementation, but
+the hosted C runtime lacks it and interpreter arrays use managed values rather
+than tagged native handles. Implement and verify the shared lifecycle before
+adding the two-batch `Lexer.new` RSS plateau probe; do not add a raw
+`make_core_lexer` probe because it bypasses the slot-replacement owner.
+
 ## Reproduction
 
 Use the constructor-preserving Stage 3 compiler to build only the full CLI with
