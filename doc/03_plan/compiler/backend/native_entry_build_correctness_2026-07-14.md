@@ -461,9 +461,11 @@ the shared binary — deploys require explicit user go-ahead).
   `native_module_init_symbol_path_sanitization_2026-07-19.md`; focused LLVM and
   Cranelift execution pass.
 - The Cranelift direct adapter now calls its shared function-definition wrapper
-  with the wrapper's two-argument `(module, context)` contract. The focused
-  function-initialized module-global case now gets zero-backed MIR storage, a
-  runtime init/store function, and a hosted startup call before `main`.
-  Multiple runtime initializers fail loudly until HIR preserves declaration
-  order. The focused case is a normal platform-matrix PASS; see
+  with the wrapper's two-argument `(module, context)` contract. Fixing that
+  exposed the shared MIR/startup gap: the focused function-initialized module
+  global now gets zero-backed storage, a runtime init/store function, and a
+  hosted startup call before `main`. Multiple runtime initializers fail loudly
+  until HIR preserves declaration order. The hosted matrix now requires a real
+  PASS, and FreeBSD schedules a scoped Cranelift execution after its default
+  LLVM matrix; broader platform-gate receipts remain pending. See
   `cranelift_module_global_initializer_arity_2026-07-19.md`.

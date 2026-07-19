@@ -1,7 +1,7 @@
-# Cranelift module-global initializer fails before code generation
+# Cranelift rejected a function-initialized module global
 
 - **ID:** cranelift_module_global_initializer_arity_2026-07-19
-- **Status:** FIXED
+- **Status:** FIXED (focused LLVM/Cranelift smoke PASS; broader platform receipts pending)
 - **Severity:** high
 - **Backend:** Cranelift trigger; shared pure-Simple MIR/startup follow-on
 
@@ -22,15 +22,22 @@ The build failed before code generation with
 
 ## Root cause and fix
 
-The pure-Simple Cranelift adapter first passed `(module, name, context)` to a
-two-argument `(module, context)` wrapper. Fixing that exposed the shared MIR
-gap: a non-foldable module binding had no storage or runtime initializer, and
-the hosted entry shim never called module-init symbols. The adapter now uses
-the wrapper contract; MIR emits a zero-backed global plus runtime init/store
-function; and the hosted entry calls discovered init symbols before `main`.
+The pure-Simple Cranelift adapter passed `(module, emit_name, finished)` to the
+two-argument `(module, context)` wrapper. The wrapper already expands that call
+to the four-argument runtime ABI, whose name fields are intentionally unused;
+the SFFI generator spec now pins that ABI. Fixing the call exposed the shared
+MIR gap: a non-foldable module binding had no storage or runtime initializer,
+and the hosted entry shim never called module-init symbols. MIR now emits a
+zero-backed global plus runtime init/store function, and hosted entry calls
+discovered init symbols before `main`.
 
 ## Verification
 
 - `hyphenated_module_init`: LLVM PASS, return code 4, no fallback.
 - `hyphenated_module_init`: Cranelift PASS, return code 4, no fallback.
 - `scripts/check/check-bootstrap-portability.shs`: PASS.
+
+`native_module_global_initializer.spl` is the shared strict fixture. FreeBSD
+schedules it as a scoped Cranelift smoke after the default LLVM matrix. The
+aggregate ABI unit spec and portability gate pin its wrapper and fixture wiring;
+broader staged platform receipts remain pending.

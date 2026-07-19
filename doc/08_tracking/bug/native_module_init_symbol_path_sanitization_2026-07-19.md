@@ -1,7 +1,7 @@
 # Native module-init symbols retain source-path punctuation
 
 - **ID:** native_module_init_symbol_path_sanitization_2026-07-19
-- **Status:** FIXED (LLVM and Cranelift smoke PASS)
+- **Status:** FIXED (focused LLVM/Cranelift smoke PASS; broader platform receipts pending)
 - **Severity:** high (valid native builds fail at generated C compilation)
 - **Lane:** pure-Simple bootstrap plus Rust seed native-project linking
 
@@ -36,8 +36,9 @@ caller would break linkage to the defining object.
 The existing hosted native smoke matrix now builds and reads a function-initialized
 module global
 from its already-hyphenated work directory under default LLVM and explicit
-Cranelift on Linux, macOS, and Windows; FreeBSD exercises LLVM. Both backends
-pass the focused hosted case.
+Cranelift on Linux, macOS, and Windows; FreeBSD exercises the default LLVM
+matrix plus this scoped Cranelift case. Both backends pass the focused hosted
+case and require a real PASS; broader staged platform receipts remain pending.
 Focused Rust tests pin normalization and collision rejection. The available
 pure-Simple release binary still hits the already-tracked lexer SIGSEGV, so its
 source-level parity assertions remain staged.
