@@ -44,7 +44,10 @@ The lint system operates at three layers:
 
 ### 1. AST-Based Semantic Lints (`src/compiler/35.semantics/lint/`)
 
-Deep analysis using the arena-based AST. Runs during compilation.
+Deep analysis using the arena-based AST. Query/LSP diagnostics currently dispatch
+the ARG, COLL, DTYP, STUB, wildcard-import/export, and wide-public leaves through
+`src/app/cli/query_lint.spl`. Production `simple lint` runs a different
+source/EasyFix adapter; semantic-leaf parity is tracked as an open bug.
 
 | Code | Category | Severity | Description |
 |------|----------|----------|-------------|
@@ -499,6 +502,7 @@ and emit a `lint-fix-summary` JSON line instead of human progress.
 | Argument count lint (AST) | `src/compiler/35.semantics/lint/argument_count.spl` |
 | Argument count lint (Rust) | `src/compiler_rust/compiler/src/lint/checker.rs` |
 | Stub impl lint (AST) | `src/compiler/35.semantics/lint/stub_impl.spl` |
+| Query AST lint adapter | `src/app/cli/query_lint.spl` |
 | Stub impl lint (text) | `src/compiler/90.tools/fix/rules/impl/lint_stub.spl` |
 | EasyFix registry | `src/compiler/90.tools/fix/rules/registry.spl` |
 | Semantic linter + LintConfig | `src/compiler/90.tools/lint/main.spl` |

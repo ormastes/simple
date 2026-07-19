@@ -1,0 +1,32 @@
+use app.cli.query_lint.{_collect_lint_diagnostics_json}
+
+extern fn rt_exit(code: i32)
+
+# Direct top-level oracle because query diagnostic collection uses module-level
+# state that the interpreter does not reliably share with BDD `it` closures.
+# Run: bin/simple run test/01_unit/compiler/lint/query_lint_ast_dispatch_check.spl
+
+val source = "fn ast_stub_probe() -> i64:\n    0\n\nfn ast_arg_probe(a: i8, b: i16, c: i32, d: i64, e: u8, f: u16, g: u32, h: u64) -> i8:\n    a\n"
+val result = _collect_lint_diagnostics_json("/tmp/query_lint_ast_dispatch_probe.spl", source)
+val diagnostics = result.1.join("\n")
+
+if result.0 != 2 or result.1.len() != 2 or not diagnostics.contains("\"code\":\"STUB002\"") or not diagnostics.contains("\"code\":\"ARG001\""):
+    print "FAIL: query lint did not run the AST-backed lint suite exactly once"
+    rt_exit(1)
+
+val allowed = _collect_lint_diagnostics_json(
+    "/tmp/query_lint_ast_dispatch_allow.spl",
+    "@allow(stub_impl)\nfn allowed_stub() -> i64:\n    0\n")
+if allowed.0 != 0 or allowed.1.len() != 0:
+    print "FAIL: suppressed AST lint changed the diagnostic count"
+    rt_exit(1)
+
+val malformed = _collect_lint_diagnostics_json(
+    "/tmp/query_lint_ast_dispatch_malformed.spl",
+    "fn broken(\n")
+if malformed.0 != 0 or malformed.1.len() != 0:
+    print "FAIL: malformed source leaked partial AST diagnostics"
+    rt_exit(1)
+
+print "PASS: query lint runs and governs AST-backed diagnostics"
+rt_exit(0)

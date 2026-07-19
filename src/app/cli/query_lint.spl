@@ -14,7 +14,7 @@ use compiler.tools.lint._LintMain.config_and_model.{LintConfig, LintLevel, map_l
 
 # AST-based lint pass imports
 use compiler.core.ast.{ast_reset, module_get_decls}
-use compiler.core.parser.{parse_module}
+use compiler.core.parser.{parse_module_silent, parser_has_errors}
 use compiler.semantics.lint.argument_count.{check_argument_count}
 use compiler.semantics.lint.collection_patterns.{check_collection_patterns}
 use compiler.semantics.lint.duplicate_typed_args.{check_duplicate_typed_args}
@@ -84,6 +84,9 @@ fn _load_lint_config_for(file: text, source: text):
 fn _clear_lint_config_overrides():
     _LINT_TIER_ACTIVE = false
     _DIAG_SEVERITY_OVERRIDE = {}
+
+fn _lint_code_suppressed(code: text) -> bool:
+    _DIAG_SEVERITY_OVERRIDE.has(code) and _DIAG_SEVERITY_OVERRIDE[code] < 0
 
 # Reliable-mode R2: surface bare-primitive public-API usage on the LSP/build path.
 # Mirrors the canonical compiled-engine check in
@@ -196,9 +199,8 @@ fn _emit_source_lint_diagnostics(file: text, source: text, format: text) -> i64:
     - W0406: star import warnings
     - W0407: star export warnings
     - W0404: wide public API warnings
-    - CFG001/CFG002: critical file guard (project-level)
-    - PTAG001: pub fn with ≥2 same-type primitive params and no @tag annotation
-    - PTAG002: pub fn with different @tag roles on same-type params
+    PTAG001/002 run in the preceding text pass. The project-level critical-file
+    guard has a separate entry point.
 
     Returns the number of diagnostics emitted.
     """
@@ -213,6 +215,7 @@ fn _emit_source_lint_diagnostics(file: text, source: text, format: text) -> i64:
         count = count + _emit_basic_line_lints(lines, file, format)
         count = count + _emit_text_heuristic_lints(lines, file, format)
         count = count + _emit_primitive_api_text(lines, file, format)
+    count = count + _run_ast_lint_passes(source, file, format)
     _clear_lint_config_overrides()
     count
 
@@ -574,6 +577,8 @@ fn _find_fn_line_in_source(lines: [text], fn_name: text) -> i64:
 fn _emit_wildcard_warnings(warnings: [StarWildcardWarning], lines: [text], file: text, format: text, keyword: text) -> i64:
     var count = 0
     for w in warnings:
+        if _lint_code_suppressed(w.code):
+            continue
         val line_num = _find_decl_line_in_source(lines, keyword, w.module_path)
         if format == "json":
             val msg = _escape_json(w.message)
@@ -633,7 +638,9 @@ fn _run_ast_lint_passes(source: text, file: text, format: text) -> i64:
 
     # Parse source into AST arena
     ast_reset()
-    parse_module(source, file)
+    parse_module_silent(source, file)
+    if parser_has_errors():
+        return 0
     val decl_indices = module_get_decls()
 
     if decl_indices.len() == 0:
@@ -642,6 +649,8 @@ fn _run_ast_lint_passes(source: text, file: text, format: text) -> i64:
     # --- C1: ARG001/ARG002 — argument count checks ---
     val arg_warnings = check_argument_count(decl_indices)
     for w in arg_warnings:
+        if _lint_code_suppressed(w.code):
+            continue
         val line_num = _find_fn_line_in_source(lines, w.fn_name)
         val sev = _severity_text_to_json(w.severity)
         if format == "json":
@@ -654,6 +663,8 @@ fn _run_ast_lint_passes(source: text, file: text, format: text) -> i64:
     # --- C2: COLL001-008 — collection efficiency patterns ---
     val coll_warnings = check_collection_patterns(decl_indices)
     for w in coll_warnings:
+        if _lint_code_suppressed(w.code):
+            continue
         val line_num = _find_fn_line_in_source(lines, w.item_name)
         val sev = _severity_text_to_json(w.severity)
         if format == "json":
@@ -666,6 +677,8 @@ fn _run_ast_lint_passes(source: text, file: text, format: text) -> i64:
     # --- C3: DTYP001 — duplicate typed argument detection ---
     val dtyp_warnings = check_duplicate_typed_args(decl_indices)
     for w in dtyp_warnings:
+        if _lint_code_suppressed(w.code):
+            continue
         val line_num = _find_fn_line_in_source(lines, w.fn_name)
         val sev = _severity_text_to_json(w.severity)
         if format == "json":
@@ -678,6 +691,8 @@ fn _run_ast_lint_passes(source: text, file: text, format: text) -> i64:
     # --- C4: STUB001/002 — stub implementation detection ---
     val stub_warnings = check_stub_impl(decl_indices)
     for w in stub_warnings:
+        if _lint_code_suppressed(w.code):
+            continue
         val line_num = _find_fn_line_in_source(lines, w.fn_name)
         val sev = _severity_text_to_json(w.severity)
         # STUB warnings get Unnecessary tag (faded rendering in IDE)
@@ -697,6 +712,8 @@ fn _run_ast_lint_passes(source: text, file: text, format: text) -> i64:
     # --- C5b: Wide public API warnings (W0404) ---
     val wide_warnings = check_wide_public_file(decl_indices, file)
     for w in wide_warnings:
+        if _lint_code_suppressed(w.code):
+            continue
         # Module-level warning, report on line 1
         if format == "json":
             val msg = _escape_json(w.message)
