@@ -85,7 +85,8 @@ for required_symbol in \
     rt_atexit_check rt_signal_check rt_thread_sleep \
     rt_atomic_int_new rt_atomic_int_load rt_atomic_int_compare_exchange \
     rt_process_spawn_async rt_process_wait rt_process_is_running rt_process_kill \
-    spl_thread_cpu_count text_dot_from_char_code rt_u32s_from_raw; do
+    spl_thread_cpu_count text_dot_from_char_code rt_u32s_from_raw \
+    rt_cstring_to_text rt_file_hash_sha256 rt_file_rename rt_range; do
     if ! archive_has_symbol "$required_symbol"; then
         echo "simple_core_archive_complete=false"
         echo "error=missing_required_symbol:$required_symbol"
@@ -97,6 +98,67 @@ if archive_has_symbol "__simple_call_module_inits"; then
     echo "simple_core_archive_complete=false"
     echo "error=unexpected_entry_init_aggregator"
     exit 1
+fi
+
+if [ -z "$TARGET" ]; then
+    PROVIDER_PROBE_C="$BUILD_DIR/simple_core_compiler_provider_probe.c"
+    PROVIDER_PROBE_BIN="$BUILD_DIR/simple_core_compiler_provider_probe"
+    cat >"$PROVIDER_PROBE_C" <<'EOF'
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+extern int64_t rt_cstring_to_text(const char *);
+extern int64_t rt_file_hash_sha256(const char *, int64_t);
+extern int8_t rt_file_rename(const char *, int64_t, const char *, int64_t);
+extern int64_t rt_range(int64_t, int64_t);
+extern int64_t rt_array_len(int64_t);
+extern int64_t rt_array_get(int64_t, int64_t);
+
+static int text_eq(int64_t value, const char *expected) {
+    if ((value & 7) != 1) return 0;
+    const unsigned char *ptr = (const unsigned char *)(uintptr_t)(value & -8);
+    int64_t len = *(const int64_t *)(ptr + 8);
+    return len == (int64_t)strlen(expected) &&
+           memcmp(ptr + 16, expected, (size_t)len) == 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc != 2) return 1;
+    char from[4096], to[4096], missing[4096];
+    if (snprintf(from, sizeof(from), "%s/hash-me", argv[1]) >= (int)sizeof(from) ||
+        snprintf(to, sizeof(to), "%s/hash-moved", argv[1]) >= (int)sizeof(to) ||
+        snprintf(missing, sizeof(missing), "%s/missing", argv[1]) >= (int)sizeof(missing)) return 2;
+    remove(from);
+    remove(to);
+    remove(missing);
+    FILE *file = fopen(from, "wb");
+    if (!file || fwrite("abc", 1, 3, file) != 3 || fclose(file) != 0) return 3;
+    if (!text_eq(rt_cstring_to_text("abc"), "abc")) return 4;
+    if (!text_eq(rt_file_hash_sha256(from, (int64_t)strlen(from)),
+                 "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")) return 5;
+    if (rt_file_hash_sha256(missing, (int64_t)strlen(missing)) != 3) return 6;
+    const char embedded_nul[] = {'x', 0, 'y'};
+    if (rt_file_hash_sha256(embedded_nul, 3) != 3) return 7;
+    int64_t values = rt_range(2, 5);
+    if (rt_array_len(values) != 3 || (rt_array_get(values, 0) >> 3) != 2 ||
+        (rt_array_get(values, 1) >> 3) != 3 || (rt_array_get(values, 2) >> 3) != 4) return 8;
+    if (!rt_file_rename(from, (int64_t)strlen(from), to, (int64_t)strlen(to))) return 9;
+    if (rt_file_rename(from, (int64_t)strlen(from), missing, (int64_t)strlen(missing))) return 10;
+    file = fopen(to, "rb");
+    if (!file) return 11;
+    fclose(file);
+    remove(to);
+    puts("simple_core_compiler_providers=true");
+    return 0;
+}
+EOF
+    set -- "${CC:-cc}" -O2 "$PROVIDER_PROBE_C" "$CORE_ARCHIVE" -lm -lpthread -o "$PROVIDER_PROBE_BIN"
+    case "$(uname -s)" in
+        Linux|FreeBSD) set -- "$@" -ldl ;;
+    esac
+    "$@"
+    "$PROVIDER_PROBE_BIN" "$BUILD_DIR"
 fi
 
 case "$CORE_ARCHIVE" in
