@@ -246,6 +246,10 @@ the shared binary — deploys require explicit user go-ahead).
   a source-fixed fixture. Its direct LLVM-IR regression is present; the bounded
   current-source mini build hit its 240-second cap, so native execution remains
   pending and was not retried.
+- LLVM aggregate reads now load uniform native-width field slots into a fresh
+  SSA temporary and truncate to the declared narrow integer/bool width. The
+  focused IR regression covers `i32` and `i1`, preventing the former
+  load-i64-then-sext/zext type mismatch; full worker execution remains pending.
 - `local_mir_type_of` now honors its nilable contract by returning a bare
   `MirType` or `nil`; its two wrapper-dependent consumers were converted in
   the same owner. The focused regression reproduces the former plain

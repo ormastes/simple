@@ -1,6 +1,6 @@
 # LLVM backend: narrow struct-field readback emits mistyped load → llc rejects
 
-**Filed:** 2026-07-19 · **Status:** OPEN · **Area:** LLVM backend / struct field access
+**Filed:** 2026-07-19 · **Status:** SOURCE FIXED / FOCUSED LLVM-IR REGRESSION ADDED · **Area:** LLVM backend / struct field access
 **Lane:** interpreted native-build worker (`SIMPLE_NATIVE_BUILD_WORKER=1
 bin/simple run src/app/cli/native_build_worker.spl --backend llvm ...`,
 llc from /opt/homebrew/opt/llvm/bin). Pre-existing; surfaced while verifying
@@ -30,6 +30,14 @@ Either load the slot as i64 and truncate (`trunc i64 -> i32/i1`) before the
 widening, or emit typed loads matching the declared field width. The
 mismatch is in the field-access lowering's readback of sub-64-bit fields
 (struct slots are uniformly 8 bytes).
+
+## Resolution
+
+Commit `09bee48d1a5d` loads the physical native-width slot into a fresh SSA
+temporary, then truncates it to the field's declared `i32`/`i16`/`i8`/`i1`
+width. This keeps later sign/zero extension well typed without changing the
+uniform aggregate layout. The focused LLVM-IR regression covers `i32` and
+`bool` and rejects direct native-word definitions of the narrow destinations.
 
 ## Verification-lane notes (2026-07-19 evening)
 Two additional infra findings while attempting the all-i64 end-to-end run:
