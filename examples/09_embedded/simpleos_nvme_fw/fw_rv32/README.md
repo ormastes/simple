@@ -86,3 +86,51 @@ Verified output:
 `boot.shs --self-test` also passes the wrapper contract. Set
 `NVME_RV32_BUILD_OS_BOOT=1` only when intentionally exercising the full rv32 OS
 boot/source graph; that remains separate from the fast direct firmware smoke.
+
+## 4-core SMP mode (wave-3/4, 2026-07-19): index-handles, SPSC IPC, coroutines
+
+The firmware now runs on four cores with a clean partition: hart0=HIL (host
+interface), hart1=FTL (flash translation layer), hart2=FIL (NAND flash
+interface), hart3=NAND emulation. All inter-core references use typed indices
+into fixed pools; communication is via SPSC ring queues and CLINT IPI
+doorbells. Each core's loop state is explicit and legality-checked.
+
+**Build and boot:**
+
+```sh
+NVME_RV32_SMP=1 sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs
+sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/boot.shs --smp build/nvme_fw_rv32.elf
+```
+
+Expected final marker: `ALL RV32 4CORE IPC CHECKS PASS` (replaces the single-hart
+marker when SMP mode is enabled).
+
+**Shared-memory layout** (index base, no raw pointers):
+- Words 0–3: boot gate + census + error count
+- Words 4–219: six SPSC rings (HIL↔FTL, FTL↔FIL, FIL↔NAND) with payloads
+- Words 220–253: 16-slot buffer pool (allocator, free-list stored in pool)
+- Words 256–8447: NAND state (4096 words) + NAND data (4096 words)
+- Words 8448–8451: four coroutine state words (hart0..3 resume states)
+
+Design docs: `doc/05_design/hardware/nvme_fw_multicore/fourcore_ipc_index_handle_design.md`
+(shm layout §3, SPSC ring algebra §4, pool allocator §5, boot protocol §6);
+`doc/05_design/hardware/nvme_fw_coroutine/coroutine_statemachine_design.md`
+(statement-like discipline §4, legality table §3, debug surface §5).
+
+**Host-verified checks** (all rc-calibrated, run via `bin/simple run`):
+- `ipc_ring_check.spl` — SPSC ring algebra (full/empty/wrap)
+- `ipc_msg_check.spl` — message pack/unpack round-trip
+- `ipc_drift_check.spl` — layout constants (IPC_SHM_WORDS=8448)
+- `buf_pool_check.spl` — alloc/free state machine + double-free guard
+- `nand_region_check.spl` — geometry (NUM_BLOCKS=64, PAGES_PER_BLOCK=64)
+- `coro_check.spl` — state legality table + transition verdicts
+- `ipc_fourcore_check.spl` — end-to-end 3-LBA write/read/verify cycle with
+  bounds-check + pool-exhaustion tests; simulates round-robin on-host shm
+
+**Evidence status:** Host-proven (all 7 checks pass on host via full-link
+validation). RV32 ELF/QEMU boot evidence is currently blocked by two compiler
+bugs: (1) emit-object stage4 MIR error (smp-flatten seed regression), tracked
+`doc/08_tracking/bug/nvme_rv32_smp_flatten_seed_object_to_int_2026-07-19.md`;
+(2) LLVM gen/yield silent no-op on bare-metal, which makes coroutine resume
+unsafe (tracked `doc/08_tracking/bug/llvm_backend_yield_silent_noop_2026-07-19.md`
+— the workaround is explicit state dispatch in `entry_smp.spl`, not gen/yield).

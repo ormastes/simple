@@ -90,6 +90,26 @@ NVMe firmware's FIL seam.
   ne_page_in_block/ne_block_first_row); chip.spl `self.` info-lint is a parser
   FALSE POSITIVE (self.field is the body convention — do not "fix" it).
 
+## Four-core rv32 + coroutine discipline (2026-07-19)
+
+Wave-3/4 wave delivers 4-core partition (hart0=HIL, hart1=FTL, hart2=FIL,
+hart3=NAND-emu) with typed-index IPC and explicit coroutine-like resume
+states. Related docs:
+
+- Design: `doc/05_design/hardware/nvme_fw_multicore/fourcore_ipc_index_handle_design.md`
+  (shm layout, SPSC rings, pool allocator, boot gate)
+- Coroutine discipline: `doc/05_design/hardware/nvme_fw_coroutine/coroutine_statemachine_design.md`
+  (9 states, legality rules, statement-like authoring pattern)
+- Research: `doc/01_research/hardware/nvme_fw_coroutine/embedded_coroutine_statemachine_research.md`
+  (gen/yield evaluation — both are broken on baremetal)
+
+Host checks landed green (all 7 rc-calibrated). QEMU proof blocked by:
+- Compiler bug 1: emit-object stage4 MIR error on smp-flatten (seed regression),
+  `doc/08_tracking/bug/nvme_rv32_smp_flatten_seed_object_to_int_2026-07-19.md`.
+- Compiler bug 2: LLVM Yield silent no-op on bare-metal, making gen/yield
+  unusable (workaround: explicit state dispatch in entry_smp.spl),
+  `doc/08_tracking/bug/llvm_backend_yield_silent_noop_2026-07-19.md`.
+
 ## Related
 
 Layer experts: [backend](../../layer_expert/backend/skill.md) (VHDL subset),

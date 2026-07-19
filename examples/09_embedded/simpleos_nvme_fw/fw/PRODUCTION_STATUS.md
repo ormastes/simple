@@ -144,6 +144,33 @@ literals; adversarial/corruption-probe `-1` values used deliberately in
 self-tests to exercise fail-closed clamping (e.g. `b.cap = -1`,
 `p.gen[slot] = -1`) are untouched, since they are not sentinel construction.
 
+## Four-core rv32 SMP + coroutine discipline (wave-3/4, 2026-07-19)
+
+Firmware now partitions across four cores (hart0=HIL, hart1=FTL, hart2=FIL,
+hart3=NAND-emu) with index-based IPC and explicit state-machine dispatch:
+
+- **Shared-memory region** (8448 words, NOLOAD): boot gate word, census, six
+  SPSC rings, 16-slot buffer pool, NAND state/data, four coroutine resume words.
+  Design: `doc/05_design/hardware/nvme_fw_multicore/fourcore_ipc_index_handle_design.md`.
+- **SPSC rings** (6 rings, 8-deep, 4-word messages): pure algebra in
+  `logic_ipc_ring_core.spl` (tested in `ipc_ring_check.spl`), drivers manage
+  head/tail atomics.
+- **Index pool allocator** (16 slots, O(1), intrusive free-list):
+  `logic_buf_pool_core.spl`, tested in `buf_pool_check.spl`.
+- **Coroutine state discipline** (9 named states, 3 legality checks):
+  `logic_coro_core.spl`, tested in `coro_check.spl`. Each core loops on its
+  resume state; state transition is the yield point. No locals survive a yield
+  (protothread rule).
+- **Boot protocol** (hart0 gate/startup, harts 1–3 park/spin, IPI wake):
+  `entry_smp.spl`, asm stubs in `build.shs`.
+
+**Host-verified end-to-end** (7 checks, all rc-calibrated):
+`ipc_ring_check`, `ipc_msg_check`, `ipc_drift_check`, `buf_pool_check`,
+`nand_region_check`, `coro_check`, `ipc_fourcore_check` (3-LBA write/read
+cycle, bounds violations, pool exhaustion). **QEMU evidence currently blocked**
+(emit-object smp-flatten bug, llvm Yield silent no-op — both filed and
+deferred).
+
 ## Reliability engine (rel_* v1, 2026-07-19) — LIVE
 
 A dedicated reliability-engine module family (`fw/rel_types.spl`, `rel_health.spl`,
