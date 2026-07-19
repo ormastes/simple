@@ -33,7 +33,7 @@ cranelift), generics erasure (#158 Phase B), Option ABI full implementation.
 - Native output must equal the oracle, **or** be correct-by-construction where the
   oracle is provably broken. A loud build failure is **never** silently converted
   to a wrong answer.
-- Gates: `native-smoke-matrix.shs` = `15/15 codegen_fallback_hits=0`;
+- Gates: `native-smoke-matrix.shs` = `native_smoke_matrix=true`;
   `check-native-seed-parity.shs` = `native_seed_parity=true`. Every fix adds a
   parity case (inline, not via a sub-lane).
 - Land via FF-replay onto the `ls-remote` tip; verify with `ls-remote` +
@@ -102,11 +102,11 @@ asm fails diagnostically instead of comparing against a fabricated version. Runt
   verification contract above; the historical exit 139 has no retained current
   reproducer.
 
-FreeBSD QEMU `--full` now runs the complete 15-case default-LLVM native-entry
-matrix after the focused explicit-Cranelift probe and requires zero codegen
-fallback hits. Its cross-module Result control now covers Ok payload extraction
-and Err propagation through `?` under both backends. The same fixture is wired
-for AArch64/RISC-V QEMU; execution is pending.
+FreeBSD QEMU `--full` now runs the complete default-LLVM native-entry matrix
+after the focused explicit-Cranelift probe and requires its count-independent
+`native_smoke_matrix=true` receipt. Its cross-module Result control now covers
+Ok payload extraction and Err propagation through `?` under both backends. The
+same fixture is wired for AArch64/RISC-V QEMU; execution is pending.
 
 The existing Linux x86_64 LLVM bootstrap CI leg now enables canonical Stage 5,
 which builds both pure-Simple MCP servers and runs their fresh-artifact
