@@ -5,8 +5,8 @@
 # output. Replaces the previously-unwired `github_passthrough` stub — there
 # was no `github` case in main.spl's dispatch before this.
 #
-# Subcommands: issue {list,view,create,comment,close}, pr {list,view,merge,checkout},
-# repo view.
+# Subcommands: issue {list,view,create,edit,comment,close}, pr {list,view,create,merge,review,checkout},
+# repo {view,clone}.
 
 use std.json.{json_parse, json_object_get, json_array_get, json_array_length, json_serialize, json_get_type}
 use app.itf.adapter_github.{gh_run, gh_available, gh_actionable_error}
@@ -41,7 +41,7 @@ fn handle_github(args: [text]) -> i64:
 
 fn _github_issue(args: [text]) -> i64:
     if args.len() == 0:
-        print_error("usage: itf github issue <list|view|create|comment|close> ...")
+        print_error("usage: itf github issue <list|view|create|edit|comment|close> ...")
         return 1
     val sub = args[0]
     val rest = if args.len() > 1: args[1:] else: []
@@ -52,6 +52,8 @@ fn _github_issue(args: [text]) -> i64:
             _github_passthrough(["issue", "view"] + rest)
         "create":
             _github_passthrough(["issue", "create"] + rest)
+        "edit":
+            _github_passthrough(["issue", "edit"] + rest)
         "comment":
             _github_passthrough(["issue", "comment"] + rest)
         "close":
@@ -63,6 +65,7 @@ fn _github_issue(args: [text]) -> i64:
             print "  list              List issues (--state, --limit, --assignee, --label pass through to gh)"
             print "  view <number>     View an issue"
             print "  create            Create an issue (--title T --body B; interactive prompts are not supported)"
+            print "  edit <number>     Edit an issue (--title, --body, --add-label, --remove-label, --add-assignee, --remove-assignee)"
             print "  comment <number>  Add a comment (--body B)"
             print "  close <number>    Close an issue"
             0
@@ -73,7 +76,7 @@ fn _github_issue(args: [text]) -> i64:
 
 fn _github_pr(args: [text]) -> i64:
     if args.len() == 0:
-        print_error("usage: itf github pr <list|view|merge|checkout> ...")
+        print_error("usage: itf github pr <list|view|create|merge|review|checkout> ...")
         return 1
     val sub = args[0]
     val rest = if args.len() > 1: args[1:] else: []
@@ -82,8 +85,12 @@ fn _github_pr(args: [text]) -> i64:
             _github_list("pr", rest)
         "view":
             _github_passthrough(["pr", "view"] + rest)
+        "create":
+            _github_passthrough(["pr", "create"] + rest)
         "merge":
             _github_passthrough(["pr", "merge"] + rest)
+        "review":
+            _github_passthrough(["pr", "review"] + rest)
         "checkout":
             _github_passthrough(["pr", "checkout"] + rest)
         "-h" | "--help" | "help":
@@ -92,7 +99,9 @@ fn _github_pr(args: [text]) -> i64:
             print "Commands:"
             print "  list              List pull requests (--state, --limit, --base pass through to gh)"
             print "  view <number>     View a pull request"
+            print "  create            Create a pull request (--title T --body B --base B; --fill/--draft supported)"
             print "  merge <number>    Merge a pull request (--squash/--rebase/--merge)"
+            print "  review <number>   Review a pull request (--approve/--request-changes/--comment, --body B)"
             print "  checkout <number> Check out a pull request locally"
             0
         _:
@@ -102,15 +111,21 @@ fn _github_pr(args: [text]) -> i64:
 
 fn _github_repo(args: [text]) -> i64:
     if args.len() == 0:
-        print_error("usage: itf github repo view [name]")
+        print_error("usage: itf github repo <view|clone> [name]")
         return 1
     val sub = args[0]
     val rest = if args.len() > 1: args[1:] else: []
     match sub:
         "view":
             _github_passthrough(["repo", "view"] + rest)
+        "clone":
+            _github_passthrough(["repo", "clone"] + rest)
         "-h" | "--help" | "help":
-            print "Usage: itf github repo view [name] [flags]"
+            print "Usage: itf github repo <command> [flags]"
+            print ""
+            print "Commands:"
+            print "  view [name]           View a repository"
+            print "  clone <repo> [dir]    Clone a repository (gh-native args after `--` pass to git clone)"
             0
         _:
             print_error("unknown github repo command: {sub}")
@@ -120,9 +135,10 @@ fn _github_repo(args: [text]) -> i64:
 fn _github_passthrough(gh_args: [text]) -> i64:
     """Run gh with the given args and print its output verbatim.
 
-    Used for single-item / mutating commands (view, create, comment, close,
-    merge, checkout, repo view) where gh's own text formatting is already
-    good — only `list` gets itf table/JSON reformatting.
+    Used for single-item / mutating commands (view, create, edit, comment,
+    close, merge, review, checkout, repo view, repo clone) where gh's own
+    text formatting is already good — only `list` gets itf table/JSON
+    reformatting.
     """
     if not gh_available():
         print_error(gh_actionable_error(""))
@@ -221,9 +237,9 @@ fn _print_github_help():
     print "Usage: itf github <command> [flags]"
     print ""
     print "Commands:"
-    print "  issue   list, view, create, comment, close"
-    print "  pr      list, view, merge, checkout"
-    print "  repo    view"
+    print "  issue   list, view, create, edit, comment, close"
+    print "  pr      list, view, create, merge, review, checkout"
+    print "  repo    view, clone"
     print ""
     print "Flags:"
     print "  --json [FIELDS]   Output as JSON (optionally selecting gh --json fields)"
@@ -232,7 +248,11 @@ fn _print_github_help():
     print "Examples:"
     print "  itf github issue list --state open --limit 20"
     print "  itf github issue view 123"
+    print "  itf github issue edit 123 --add-label bug"
     print "  itf github pr list --state open"
+    print "  itf github pr create --title T --body B --base main"
     print "  itf github pr merge 42 --squash"
+    print "  itf github pr review 42 --approve"
+    print "  itf github repo clone owner/name"
     print ""
     print "Requires: gh CLI installed and authenticated (gh auth login)."

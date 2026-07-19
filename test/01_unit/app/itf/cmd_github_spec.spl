@@ -60,6 +60,8 @@ val FAKE_GH_NOT_FOUND = "#!/bin/sh\nexit 127\n"
 
 val FAKE_GH_UNAUTHED = "#!/bin/sh\necho \"$@\" >> \"{ARGV_LOG}\"\ncase \"$1\" in\n  --version) echo 'gh version 2.0.0 (fake)'; exit 0 ;;\nesac\necho 'To use GitHub CLI in a script, run: gh auth login' >&2\nexit 1\n"
 
+val FAKE_GH_PASSTHROUGH_OK = "#!/bin/sh\necho \"$@\" >> \"{ARGV_LOG}\"\ncase \"$1\" in\n  --version) echo 'gh version 2.0.0 (fake)'; exit 0 ;;\nesac\necho 'ok'\nexit 0\n"
+
 
 describe "itf github (fake-binary fixture)":
 
@@ -99,6 +101,46 @@ describe "itf github (fake-binary fixture)":
             expect(code).to_equal(1)
             expect(log.contains("issue list")).to_equal(true)
 
+    context "issue edit — passthrough":
+
+        it "exits 0 and forwards the number and flags verbatim to gh":
+            val dir = install_fake_gh(FAKE_GH_PASSTHROUGH_OK)
+            val (code, log) = run_github_with_fake_gh(dir, ["issue", "edit", "123", "--add-label", "bug"])
+            expect(code).to_equal(0)
+            expect(log.contains("issue edit 123 --add-label bug")).to_equal(true)
+
+    context "repo clone — passthrough":
+
+        it "exits 0 and forwards the repo name and directory verbatim to gh":
+            val dir = install_fake_gh(FAKE_GH_PASSTHROUGH_OK)
+            val (code, log) = run_github_with_fake_gh(dir, ["repo", "clone", "owner/name", "dest"])
+            expect(code).to_equal(0)
+            expect(log.contains("repo clone owner/name dest")).to_equal(true)
+
+    context "pr create — passthrough":
+
+        it "exits 0 and forwards --title/--body/--base verbatim to gh":
+            val dir = install_fake_gh(FAKE_GH_PASSTHROUGH_OK)
+            val (code, log) = run_github_with_fake_gh(dir, ["pr", "create", "--title", "T", "--body", "B", "--base", "main"])
+            expect(code).to_equal(0)
+            expect(log.contains("pr create --title T --body B --base main")).to_equal(true)
+
+    context "pr review — passthrough":
+
+        it "exits 0 and forwards the number and review flag verbatim to gh":
+            val dir = install_fake_gh(FAKE_GH_PASSTHROUGH_OK)
+            val (code, log) = run_github_with_fake_gh(dir, ["pr", "review", "42", "--approve"])
+            expect(code).to_equal(0)
+            expect(log.contains("pr review 42 --approve")).to_equal(true)
+
+    context "issue edit — gh unauthenticated":
+
+        it "exits 1 and surfaces an actionable auth error, not a bare crash":
+            val dir = install_fake_gh(FAKE_GH_UNAUTHED)
+            val (code, log) = run_github_with_fake_gh(dir, ["issue", "edit", "123", "--add-label", "bug"])
+            expect(code).to_equal(1)
+            expect(log.contains("issue edit 123 --add-label bug")).to_equal(true)
+
     context "unknown subcommand":
 
         it "exits 1 for an unknown top-level command without touching gh":
@@ -106,6 +148,12 @@ describe "itf github (fake-binary fixture)":
 
         it "exits 1 for an unknown issue subcommand":
             expect(handle_github(["issue", "bogus"])).to_equal(1)
+
+        it "exits 1 for an unknown pr subcommand":
+            expect(handle_github(["pr", "bogus"])).to_equal(1)
+
+        it "exits 1 for an unknown repo subcommand":
+            expect(handle_github(["repo", "bogus"])).to_equal(1)
 
 
 describe "cmd_github pure JSON-extraction helpers":
