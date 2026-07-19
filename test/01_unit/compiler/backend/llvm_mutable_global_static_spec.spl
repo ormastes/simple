@@ -6,8 +6,10 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_types.{SymbolId}
+use compiler.hir.hir_definitions.{HirConst}
 use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.*
+use compiler.mir.mir_lowering.{runtime_module_initializers_in_declaration_order}
 use compiler.mir.mir_lowering_types.{MirLowering}
 
 # mutglobal lane (module-level `var` mutation storage, see
@@ -104,6 +106,38 @@ fn translate_literal_globals() -> text:
     val mir = mir_lowering.lower_module(hir)
     MirToLlvm.create("test.llvm.literal_globals", CodegenTarget.X86_64, nil).translate_module(mir)
 
+fn runtime_initializer_store_names() -> [text]:
+    val source = "fn init_value() -> i64: 4\nfn init_next(value: i64) -> i64: value + 1\nval first = init_value()\nval second = init_next(first)\n"
+    val ast = parse_full_frontend(source, "runtime_globals.spl", "runtime_globals.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("runtime_globals.spl")
+    val hir = hir_lowering.lower_module(ast)
+    var first_constants: [HirConst] = []
+    var second_constants: [HirConst] = []
+    for const_ in hir.constants.values():
+        if const_.name == "first": first_constants.push(const_)
+        if const_.name == "second": second_constants.push(const_)
+    expect(first_constants.len()).to_equal(1)
+    expect(second_constants.len()).to_equal(1)
+    val first = first_constants[0]
+    val second = second_constants[0]
+    expect(first.span.start).to_be_less_than(second.span.start)
+    val reversed = [second, first]
+    expect(reversed[0].name).to_equal("second")
+    val ordered = runtime_module_initializers_in_declaration_order(reversed)
+    expect(ordered[0].name).to_equal("first")
+    expect(ordered[1].name).to_equal("second")
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var names: [text] = []
+    for function in mir.functions.values():
+        if function.name.starts_with("__module_init_"):
+            for block in function.blocks:
+                for inst in block.instructions:
+                    match inst.kind:
+                        case MirInstKind.StoreGlobal(symbol, _): names.push(mir.statics[symbol].name)
+                        case _: ()
+    names
+
 describe "LLVM mutable global static (mutglobal lane)":
     it "emits a real @global declaration with the static's initializer":
         val translator = MirToLlvm.create("test.llvm.mutable_global", CodegenTarget.X86_64, nil)
@@ -131,3 +165,6 @@ describe "LLVM mutable global static (mutglobal lane)":
         expect(output).to_contain("@g_flag = global i1 0")
         expect(output).to_contain("@g_name = global ptr getelementptr inbounds")
         expect(output.contains("global i64 getelementptr")).to_equal(false)
+
+    it "stores dependent runtime globals in declaration order", tag: ["only-compiled"]:
+        expect(runtime_initializer_store_names()).to_equal(["first", "second"])

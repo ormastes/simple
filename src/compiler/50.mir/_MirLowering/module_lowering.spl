@@ -24,6 +24,7 @@ use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_boots
 use compiler.common.diagnostics.span.{Span}
 use compiler.blocks.value.BlockValue
 use compiler.types.type_layout.{compute_struct_layout, layoutattr_default_, FieldLayout}
+use std.array.{array_sort_by}
 
 extern fn rt_env_get(key: text) -> text
 
@@ -52,6 +53,20 @@ use compiler.common.mir_target_context.{MirTargetContext, mir_target_context_fro
 use compiler.mir.mir_lowering_expr.*
 use compiler.mir.mir_lowering_stmts.*
 use compiler.mir.mir_lowering_ml.*
+
+fn runtime_module_initializers_in_declaration_order(consts: [HirConst]) -> [HirConst]:
+    var dynamic: [HirConst] = []
+    for const_ in consts:
+        match const_.value.kind:
+            case Call(_, _, _): dynamic.push(const_)
+            case _: ()
+    array_sort_by(dynamic, \a, b:
+        if a.span.start < b.span.start: -1
+        elif a.span.start > b.span.start: 1
+        elif a.symbol.id < b.symbol.id: -1
+        elif a.symbol.id > b.symbol.id: 1
+        else: 0
+    )
 
 impl MirLowering:
     static fn new(symbols: SymbolTable) -> MirLowering:
@@ -850,17 +865,8 @@ impl MirLowering:
         self.builder = bldr
 
     me lower_runtime_module_initializers(module: HirModule, consts: [HirConst]):
-        var dynamic: [HirConst] = []
-        for const_ in consts:
-            match const_.value.kind:
-                case Call(_, _, _): dynamic.push(const_)
-                case _: ()
+        val dynamic = runtime_module_initializers_in_declaration_order(consts)
         if dynamic.len() == 0:
-            return
-        # ponytail: HIR stores globals in an unordered Dict; carry declaration
-        # order before supporting dependent runtime initializers.
-        if dynamic.len() > 1:
-            self.error("multiple runtime module initializers require declaration-order metadata", Some(dynamic[1].span))
             return
 
         val module_name = module.name.replace(".", "_").replace("/", "_").replace("-", "_")

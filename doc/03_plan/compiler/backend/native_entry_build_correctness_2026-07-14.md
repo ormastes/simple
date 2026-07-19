@@ -473,3 +473,8 @@ the shared binary — deploys require explicit user go-ahead).
   PASS, and FreeBSD schedules a scoped Cranelift execution after its default
   LLVM matrix; broader platform-gate receipts remain pending. See
   `cranelift_module_global_initializer_arity_2026-07-19.md`.
+- Multiple call-initialized module globals now reuse their preserved HIR source
+  spans to order the existing sequential runtime stores. The shared fixture
+  makes its second initializer depend on the first and expects `45`; hosted and
+  FreeBSD gates already own that fixture. Rebuilt execution remains pending.
+  See `native_multiple_module_initializers_declaration_order_2026-07-19.md`.

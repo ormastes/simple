@@ -12,9 +12,11 @@ with `NATIVE_SMOKE_BACKEND=cranelift`. Its source is:
 
 ```simple
 fn init_value() -> i64: 4
+fn init_next(value: i64) -> i64: value + 1
 val module_value = init_value()
+val next_value = init_next(module_value)
 
-fn main() -> i64: module_value
+fn main() -> i64: module_value * 10 + next_value
 ```
 
 The build failed before code generation with
@@ -33,9 +35,15 @@ discovered init symbols before `main`.
 
 ## Verification
 
-- `hyphenated_module_init`: LLVM PASS, return code 4, no fallback.
-- `hyphenated_module_init`: Cranelift PASS, return code 4, no fallback.
+- Original single-initializer fixture: LLVM PASS, return code 4, no fallback.
+- Original single-initializer fixture: Cranelift PASS, return code 4, no fallback.
 - `scripts/check/check-bootstrap-portability.shs`: PASS.
+
+The Pure binding parser and flat bridge now preserve module-global source spans;
+the shared MIR owner orders multiple dynamic globals by those spans before
+emitting sequential stores. The dependent fixture returns
+`45` when rebuilt, proving the second initializer observes the first global's
+stored value; current-source native execution remains pending.
 
 `native_module_global_initializer.spl` is the shared strict fixture. FreeBSD
 schedules it as a scoped Cranelift smoke after the default LLVM matrix. The
