@@ -22,6 +22,7 @@ use compiler.mir.mir_lowering.{MirLowering}
 use lib.hardware.fpga_linux.riscv_fpga_linux.{RiscvFpgaLane}
 use compiler.hir.hir_types.{SymbolId}
 use compiler.common.diagnostics.span.{Span}
+use app.io.vhdl_ffi.{ghdl_available, ghdl_analyze, ghdl_synth, vhdl_write_file}
 
 extern fn rt_file_read_text(path: text) -> text
 
@@ -921,7 +922,8 @@ describe "VHDL Backend - real backend compilation":
         check(result.is_ok())
         val compiled = result.unwrap()
         check(compiled.package_vhdl.unwrap().contains("type process_state_t is (Needs_Reset, Ready_State);"))
-        check(compiled.vhdl.contains("result_out <= Needs_Reset;"))
+        check(compiled.vhdl.contains("v_result_out := Needs_Reset;"))
+        check(compiled.vhdl.contains("result_out <= v_result_out;"))
 
     it "emits payload enum package records with tag and payload fields":
         val payload_symbol = SymbolId(id: 57)
@@ -1221,7 +1223,7 @@ describe "VHDL Backend - real backend compilation":
         val result = backend.compile_function(builder, func)
         check(result.is_ok())
         val vhdl = builder.build()
-        check(vhdl.contains("payload_sig <= state.Some_payload;"))
+        check(vhdl.contains("v_payload_sig := state.Some_payload;"))
         check(vhdl.contains("state.tag = Some"))
 
     it "lowers unit-return hardware entities without result ports":
@@ -1350,7 +1352,8 @@ describe "VHDL Backend - real backend compilation":
         val vhdl = builder.build()
         check(vhdl.contains("process(state)"))
         check(vhdl.contains("if state.tag = Some then"))
-        check(vhdl.contains("payload_sig <= state.Some_payload;"))
+        check(vhdl.contains("v_payload_sig := state.Some_payload;"))
+        check(vhdl.contains("result_out <= v_result_out;"))
 
     it "lowers payload-free variants of payload enums inside processes":
         val payload_symbol = SymbolId(id: 63)
@@ -1416,7 +1419,8 @@ describe "VHDL Backend - real backend compilation":
         val result = backend.compile_function(builder, func)
         check(result.is_ok())
         val vhdl = builder.build()
-        check(vhdl.contains("result_out <= (tag => None, Some_payload => to_signed(0, 32));"))
+        check(vhdl.contains("v_result_out := (tag => None, Some_payload => to_signed(0, 32));"))
+        check(vhdl.contains("result_out <= v_result_out;"))
 
     it "rejects enum literal VHDL name collisions after sanitization":
         val enum_symbol = SymbolId(id: 58)
@@ -1638,7 +1642,10 @@ describe "VHDL Backend - real backend compilation":
             label: Some("proc_body"),
             instructions: [
                 MirInst(
-                    kind: MirInstKind.Copy(LocalId(id: 2), LocalId(id: 1)),
+                    kind: MirInstKind.VhdlVarAssign(
+                        MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2))),
+                        MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))
+                    ),
                     span: nil
                 )
             ],
@@ -1683,7 +1690,8 @@ describe "VHDL Backend - real backend compilation":
         val compiled = result.unwrap()
 
         check(compiled.vhdl.contains("process(src_in)"))
-        check(compiled.vhdl.contains("result_out <= src_in;"))
+        check(compiled.vhdl.contains("v_result_out := src_in;"))
+        check(compiled.vhdl.contains("result_out <= v_result_out;"))
 
     it "rejects ambiguous fixed-width integer mismatches for bitwise operations":
         val left_local = make_arg_local(1, 0, "a", make_i32())
@@ -3236,6 +3244,92 @@ fn bitfield_write_enabled_mid(clk: bool, reset_n: bool, control_raw: u8, next_en
         val child_position = vhdl.index_of("entity z_child_add is") ?? -1
         val top_position = vhdl.index_of("entity a_hardware_top is") ?? -1
         check(child_position >= 0 and child_position < top_position)
+
+    it "bridges hardware calls without signal feedback inside control processes":
+        val child = make_named_hardware_adder_function(SymbolId(id: 161), "z_process_child")
+        val flag = make_arg_local(21, 0, "choose_child", make_bool())
+        val left = make_arg_local(22, 1, "left_in", make_i32())
+        val right = make_arg_local(23, 2, "right_in", make_i32())
+        val ret = make_return_local(24, make_i32())
+        val child_result = make_temp_local(25, "child_result", make_i32())
+        val fallback = make_temp_local(26, "fallback", make_i32())
+        val entry = MirBlock(
+            id: BlockId(id: 0),
+            label: Some("entry"),
+            instructions: [],
+            terminator: MirTerminator.If(
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 21))),
+                BlockId(id: 1),
+                BlockId(id: 2)
+            )
+        )
+        val then_block = MirBlock(
+            id: BlockId(id: 1),
+            label: Some("then"),
+            instructions: [
+                MirInst(kind: MirInstKind.Call(Some(LocalId(id: 25)), make_func_operand("z_process_child"), [MirOperand(kind: MirOperandKind.Copy(LocalId(id: 22))), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 23)))]), span: nil),
+                MirInst(kind: MirInstKind.Copy(LocalId(id: 24), LocalId(id: 25)), span: nil)
+            ],
+            terminator: MirTerminator.Ret(nil)
+        )
+        val else_block = MirBlock(
+            id: BlockId(id: 2),
+            label: Some("else"),
+            instructions: [
+                MirInst(kind: MirInstKind.BinOp(LocalId(id: 26), MirBinOp.Sub, MirOperand(kind: MirOperandKind.Copy(LocalId(id: 22))), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 23)))), span: nil),
+                MirInst(kind: MirInstKind.Copy(LocalId(id: 24), LocalId(id: 26)), span: nil)
+            ],
+            terminator: MirTerminator.Ret(nil)
+        )
+        val top = MirFunction(
+            symbol: SymbolId(id: 162),
+            name: "a_process_top",
+            signature: MirSignature(params: [make_bool(), make_i32(), make_i32()], return_type: make_i32(), is_variadic: false),
+            locals: [flag, left, right, ret, child_result, fallback],
+            blocks: [entry, then_block, else_block],
+            entry_block: BlockId.entry(),
+            span: empty_span(),
+            generic_params: [],
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {},
+            layout_phase: nil,
+            is_kernel: false,
+            is_export_c: false,
+            export_name: "",
+            driver_manifest_attr: nil,
+            has_vhdl_metadata: true,
+            vhdl_metadata: make_hardware_meta()
+        )
+        var functions: Dict<SymbolId, MirFunction> = {}
+        functions[child.symbol] = child
+        functions[top.symbol] = top
+
+        val result = make_simple_backend().compile(MirModule(name: "process_bridge_mod", functions: functions, statics: {}, constants: {}, types: {}))
+        check(result.is_ok())
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("signal hwcall_b1_i0_arg0 : signed(31 downto 0);"))
+        check(vhdl.contains("signal hwcall_b1_i0_result : signed(31 downto 0);"))
+        check(vhdl.contains("a => hwcall_b1_i0_arg0,"))
+        check(vhdl.contains("result_out => hwcall_b1_i0_result"))
+        check(vhdl.contains("variable v_child_result : signed(31 downto 0);"))
+        check(vhdl.contains("hwcall_b1_i0_arg0 <= to_signed(0, 32);"))
+        check(vhdl.contains("hwcall_b1_i0_arg0 <= left_in;"))
+        check(vhdl.contains("v_child_result := hwcall_b1_i0_result;"))
+        check(not vhdl.contains("child_result <= hwcall_b1_i0_result"))
+        val default_position = vhdl.index_of("hwcall_b1_i0_arg0 <= to_signed(0, 32);") ?? -1
+        val branch_position = vhdl.index_of("if choose_child = '1' then") ?? -1
+        val override_position = vhdl.index_of("hwcall_b1_i0_arg0 <= left_in;") ?? -1
+        check(default_position >= 0 and default_position < branch_position and branch_position < override_position)
+        if ghdl_available():
+            val path = "/tmp/simple_vhdl_process_bridge.vhd"
+            check(vhdl_write_file(path, vhdl))
+            val analyze = ghdl_analyze(path)
+            check(analyze.success)
+            val synth = ghdl_synth("a_process_top")
+            check(synth.success)
+            check(not synth.stderr.contains("latch"))
+            check(not synth.stdout.contains("latch"))
 
     it "lowers cross-module hardware calls in dependency order":
         val child = make_named_hardware_adder_function(SymbolId(id: 141), "z_external_child")

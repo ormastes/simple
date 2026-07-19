@@ -40,6 +40,7 @@ impl VhdlBackend:
         self.active_local_kinds = {}
         self.active_blocks = {}
         self.active_local_memory_type_names = {}
+        self.active_inline_exprs = {}
         val return_abi_result = self.vhdl_return_abi(func)
         if return_abi_result.is_err():
             return Err(return_abi_result.unwrap_err())
@@ -54,9 +55,12 @@ impl VhdlBackend:
             self.active_local_types[local.id.id] = local.type_
             self.active_local_kinds[local.id.id] = local.kind
 
-        # Pick single-use side-effect-free temps to inline into their consumer
-        # (must run after names/types are resolved above).
-        self.compute_inline_exprs(func)
+        val control_process = self.needs_control_process(func)
+
+        # Process-local values need ordered variable semantics. Concurrent
+        # expression inlining is only valid for the signal-only path.
+        if not control_process:
+            self.compute_inline_exprs(func)
 
         val ports_result = self.vhdl_ports_for_function(func)
         if ports_result.is_err():
@@ -80,6 +84,8 @@ impl VhdlBackend:
         for local in func.locals:
             match local.kind:
                 case Var | Temp:
+                    if control_process:
+                        continue
                     # Inlined temps have no intermediate signal; their defining
                     # expression is substituted at each use site.
                     if not self.active_inline_exprs.has(local.id.id):
@@ -92,20 +98,25 @@ impl VhdlBackend:
                     # before splitting it across the per-field output ports
                     # below; that signal needs its own declaration since it
                     # isn't one of the entity's ports.
-                    if self.active_return_abi.is_tuple:
+                    if self.active_return_abi.is_tuple and not control_process:
                         val declare_result = self.emit_local_signal_declaration(builder, local, Some(func.span))
                         if declare_result.is_err():
                             return Err(declare_result.unwrap_err())
                 case _:
                     ()
 
+        if control_process:
+            val bridge_result = self.emit_hardware_call_bridge_declarations(builder, func)
+            if bridge_result.is_err():
+                return Err(bridge_result.unwrap_err())
+
         builder.emit_architecture_body_begin()
 
-        val hardware_calls_result = self.emit_hardware_call_instances(builder, func)
+        val hardware_calls_result = self.emit_hardware_call_instances(builder, func, control_process)
         if hardware_calls_result.is_err():
             return Err(hardware_calls_result.unwrap_err())
 
-        if self.needs_control_process(func):
+        if control_process:
             val process_result = self.compile_function_control_process(builder, func)
             if process_result.is_err():
                 return Err(process_result.unwrap_err())
@@ -496,6 +507,30 @@ impl VhdlBackend:
             Err(self.backend_error("VHDL process references unknown block BB{id.id}"))
 
     fn needs_control_process(func: MirFunction) -> bool:
+        var explicit_process_blocks: Dict<i64, bool> = {}
+        for block in func.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case VhdlProcess(_, body_block):
+                        explicit_process_blocks = self.mark_process_body_chain_handled(body_block, explicit_process_blocks)
+                    case _:
+                        ()
+        var definitions: Dict<i64, i64> = {}
+        for block in func.blocks:
+            if explicit_process_blocks.has(block.id.id):
+                continue
+            for inst in block.instructions:
+                match inst.kind:
+                    case SetField(_, _, _) | VhdlVarAssign(_, _):
+                        return true
+                    case _:
+                        ()
+                val defined = self.inst_def_id(inst)
+                if defined >= 0:
+                    val count = (definitions.get(defined) ?? 0) + 1
+                    if count > 1:
+                        return true
+                    definitions[defined] = count
         val entry = self.block_by_id(func.entry_block)
         if entry.is_err():
             return false

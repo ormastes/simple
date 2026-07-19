@@ -424,6 +424,61 @@ impl VhdlBackend:
                     Ok("to_signed(0, {width})")
                 else:
                     Ok("to_unsigned(0, {width})")
+            case Tuple(elements):
+                var entries: [text] = []
+                var index = 0
+                for element in elements:
+                    val value = match self.default_vhdl_value(element, span):
+                        case Ok(result): result
+                        case Err(err): return Err(err)
+                    entries = entries.push("f{index} => {value}")
+                    index = index + 1
+                Ok("({entries.join(\", \")})")
+            case Struct(symbol):
+                val type_def = match self.type_def_by_symbol(symbol):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                match type_def.kind:
+                    case Struct(fields):
+                        var entries: [text] = []
+                        for field in fields:
+                            val value = match self.default_vhdl_value(field.type_, span):
+                                case Ok(result): result
+                                case Err(err): return Err(err)
+                            entries = entries.push("{field.name} => {value}")
+                        Ok("({entries.join(\", \")})")
+                    case _:
+                        Err(self.backend_error_at("VHDL default record value requires a struct type", span))
+            case Enum(symbol):
+                val type_def = match self.type_def_by_symbol(symbol):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                match type_def.kind:
+                    case Enum(variants):
+                        if variants.len() == 0:
+                            return Err(self.backend_error_at("VHDL default enum value requires at least one variant", span))
+                        if not self.enum_has_payload(variants):
+                            return Ok(self.sanitize_vhdl_identifier(variants[0].name))
+                        var entries: [text] = ["tag => {self.sanitize_vhdl_identifier(variants[0].name)}"]
+                        for variant in variants:
+                            match variant.payload:
+                                case Some(payload):
+                                    val value = match self.default_vhdl_value(payload, span):
+                                        case Ok(result): result
+                                        case Err(err): return Err(err)
+                                    entries = entries.push("{self.payload_enum_field_name(variant)} => {value}")
+                                case None:
+                                    ()
+                        Ok("({entries.join(\", \")})")
+                    case _:
+                        Err(self.backend_error_at("VHDL default enum value requires an enum type", span))
+            case Array(element, size):
+                if size <= 0:
+                    return Err(self.backend_error_at("VHDL default array value requires a positive size", span))
+                val value = match self.default_vhdl_value(element, span):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                Ok("(others => {value})")
             case _:
                 Err(self.backend_error_at("Payload enum default value is not defined for payload type `{ty.kind}`", span))
 
@@ -643,4 +698,3 @@ pub fn vhdl_compile_u64_or() -> text:
 pub fn vhdl_compile_u64_compare() -> text:
     """Return a VHDL 64-bit equality comparison expression (test helper)."""
     "eq <= '1' when a = b else '0';"
-

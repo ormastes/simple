@@ -32,18 +32,20 @@ impl VhdlBackend:
                 false
 
     fn process_local_name(local: LocalId) -> Result<text, CompileError>:
-        # Var/Temp locals are already declared as architecture-level signals
-        # by compile_function's "Declare internal signals" pass (see
-        # emit_local_signal_declaration), so process bodies reference them
-        # by their plain signal name via signal assignment (`<=`), not as
-        # separate "v_"-prefixed process variables. See
-        # doc/08_tracking/bug/vhdl_backend_spec_remaining_failures_2026-07-02.md.
-        self.local_to_vhdl(local)
+        val name = match self.local_to_vhdl(local):
+            case Ok(value): value
+            case Err(err): return Err(err)
+        val kind = match self.local_kind(local):
+            case Ok(value): value
+            case Err(err): return Err(err)
+        match kind:
+            case Arg(_): Ok(name)
+            case Return | Var | Temp: Ok("v_{name}")
 
     fn process_operand_to_vhdl(operand: MirOperand) -> Result<text, CompileError>:
         match operand.kind:
             case Copy(local) | Move(local):
-                self.local_operand_expr(local)
+                self.process_local_name(local)
             case Const(value, ty):
                 self.const_value_to_vhdl(value, ty)
 
@@ -58,30 +60,68 @@ impl VhdlBackend:
             case Ok(result): result
             case Err(err): return Err(err)
         match kind:
-            case Return:
-                builder.emit_signal_assign("result_out", expr)
-            case Var | Temp:
-                # Var/Temp locals are declared as architecture-level signals
-                # (see emit_local_signal_declaration), so assign to them with
-                # `<=`, not as separate process-local `variable`s.
+            case Return | Var | Temp:
                 val dest_name = match self.process_local_name(dest):
                     case Ok(result): result
                     case Err(err): return Err(err)
-                builder.emit_signal_assign(dest_name, expr)
+                builder.emit_var_assign(dest_name, expr)
             case Arg(_):
                 return Err(self.backend_error("Synthesizable VHDL process cannot assign function argument local {dest.id}"))
         Ok(())
 
+    fn emit_active_process_variables(builder: VhdlBuilder) -> Result<(), CompileError>:
+        for local_id in self.active_local_kinds.keys():
+            val kind = self.active_local_kinds[local_id]
+            match kind:
+                case Return | Var | Temp:
+                    if kind == LocalKind.Return and self.active_return_abi.fields.len() == 0:
+                        continue
+                    val local = LocalId(id: local_id)
+                    val name = match self.process_local_name(local):
+                        case Ok(value): value
+                        case Err(err): return Err(err)
+                    val ty = match self.local_type(local):
+                        case Ok(value): value
+                        case Err(err): return Err(err)
+                    val vhdl_type = match self.mir_type_to_vhdl(ty):
+                        case Ok(value): value
+                        case Err(err): return Err(err)
+                    builder.emit_process_var(name, vhdl_type, nil)
+                case _:
+                    ()
+        Ok(())
+
+    fn process_return_local_id() -> Result<LocalId, CompileError>:
+        for local_id in self.active_local_kinds.keys():
+            if self.active_local_kinds[local_id] == LocalKind.Return:
+                return Ok(LocalId(id: local_id))
+        Err(self.backend_error("VHDL control process has no MIR return local"))
+
+    fn emit_active_process_return(builder: VhdlBuilder) -> Result<(), CompileError>:
+        if self.active_return_abi.fields.len() == 0:
+            return Ok(())
+        val return_local = match self.process_return_local_id():
+            case Ok(value): value
+            case Err(err): return Err(err)
+        val value = match self.process_local_name(return_local):
+            case Ok(result): result
+            case Err(err): return Err(err)
+        self.emit_return_expr(builder, value)
+
     fn compile_function_control_process(builder: VhdlBuilder, func: MirFunction) -> Result<(), CompileError>:
-        # Var/Temp locals already got a `signal ... : ...;` declaration in
-        # the architecture's declarative region from compile_function's
-        # "Declare internal signals" pass, so this process body does not
-        # redeclare them as process-local variables (see
-        # process_local_name/emit_process_dest_assign).
         builder.emit_process_begin(Some("comb"), ["all"])
+        match self.emit_active_process_variables(builder):
+            case Ok(_): ()
+            case Err(err): return Err(err)
         builder.emit_process_body_begin()
+        match self.emit_hardware_call_bridge_defaults(builder, func):
+            case Ok(_): ()
+            case Err(err): return Err(err)
         match self.compile_control_block(builder, func.entry_block, []):
             case Ok(_): pass
+            case Err(err): return Err(err)
+        match self.emit_active_process_return(builder):
+            case Ok(_): ()
             case Err(err): return Err(err)
         builder.emit_process_end(Some("comb"))
         Ok(())
@@ -95,10 +135,12 @@ impl VhdlBackend:
             case Err(err): return Err(err)
         var next_seen = seen
         next_seen = next_seen.push(block_id.id)
+        var inst_index = 0
         for inst in block.instructions:
-            match self.compile_process_instruction(builder, inst):
+            match self.compile_process_instruction(builder, inst, block.id.id, inst_index):
                 case Ok(_): pass
                 case Err(err): return Err(err)
+            inst_index = inst_index + 1
         if block.terminator != nil:
             match block.terminator:
                 case Ret(value):
@@ -107,9 +149,13 @@ impl VhdlBackend:
                             val value_expr = match self.process_operand_to_vhdl(operand):
                                 case Ok(result): result
                                 case Err(err): return Err(err)
-                            match self.emit_return_expr(builder, value_expr):
-                                case Ok(_): pass
-                                case Err(err): return Err(err)
+                            if self.active_return_abi.fields.len() > 0:
+                                val return_local = match self.process_return_local_id():
+                                    case Ok(result): result
+                                    case Err(err): return Err(err)
+                                match self.emit_process_dest_assign(builder, return_local, value_expr):
+                                    case Ok(_): ()
+                                    case Err(err): return Err(err)
                         case None: ()
                     Ok(())
                 case Goto(target):
@@ -168,7 +214,9 @@ impl VhdlBackend:
         else:
             Ok(())
 
-    fn compile_process_instruction(builder: VhdlBuilder, inst: MirInst) -> Result<(), CompileError>:
+    fn compile_process_instruction(builder: VhdlBuilder, inst: MirInst,
+                                   block_id: i64,
+                                   inst_index: i64) -> Result<(), CompileError>:
         match inst.kind:
             case Const(dest, value, ty):
                 val value_expr = match self.const_value_to_vhdl_at(value, ty, inst.span):
@@ -255,10 +303,8 @@ impl VhdlBackend:
                             case Err(err): return Err(err)
                         val target = "{base_name}.{field_name}"
                         match kind:
-                            case Var | Temp:
-                                builder.emit_signal_assign(target, value_name)
-                            case Return:
-                                builder.emit_signal_assign(target, value_name)
+                            case Var | Temp | Return:
+                                builder.emit_var_assign(target, value_name)
                             case Arg(_):
                                 return Err(self.backend_error("Synthesizable VHDL process cannot set field on argument local {local.id}"))
                     case _:
@@ -292,21 +338,39 @@ impl VhdlBackend:
                 self.emit_process_dest_assign(builder, dest, cast)
 
             case VhdlConcat(dest, parts):
-                val joined = match self.concat_parts_to_vhdl(parts):
-                    case Ok(result): result
-                    case Err(err): return Err(err)
-                self.emit_process_dest_assign(builder, dest, joined)
+                var rendered: [text] = []
+                for part in parts:
+                    val value = match self.process_operand_to_vhdl(part):
+                        case Ok(result): result
+                        case Err(err): return Err(err)
+                    rendered = rendered.push(value)
+                self.emit_process_dest_assign(builder, dest, rendered.join(" & "))
 
             case VhdlSignalAssign(target, value, delay_ns):
                 if delay_ns.?:
                     return Err(self.backend_error("Synthesizable VHDL process signal assignment does not support delayed assignment"))
-                val target_name = match self.process_operand_to_vhdl(target):
-                    case Ok(result): result
-                    case Err(err): return Err(err)
                 val value_name = match self.process_operand_to_vhdl(value):
                     case Ok(result): result
                     case Err(err): return Err(err)
-                builder.emit_signal_assign(target_name, value_name)
+                match target.kind:
+                    case Copy(local) | Move(local):
+                        val kind = match self.local_kind(local):
+                            case Ok(result): result
+                            case Err(err): return Err(err)
+                        match kind:
+                            case Return:
+                                val target_name = match self.local_to_vhdl(local):
+                                    case Ok(result): result
+                                    case Err(err): return Err(err)
+                                builder.emit_signal_assign(target_name, value_name)
+                                val variable_name = match self.process_local_name(local):
+                                    case Ok(result): result
+                                    case Err(err): return Err(err)
+                                builder.emit_var_assign(variable_name, value_name)
+                            case _:
+                                return Err(self.backend_error("Synthesizable VHDL process signal assignment requires an output signal target"))
+                    case _:
+                        return Err(self.backend_error("Synthesizable VHDL process signal assignment requires a local target"))
 
             case VhdlVarAssign(target, value):
                 val target_name = match self.process_operand_to_vhdl(target):
@@ -327,7 +391,22 @@ impl VhdlBackend:
                 self.emit_process_dest_assign(builder, dest, expr)
 
             case Call(dest, func, args):
-                self.emit_entity_helper_call(builder, dest, func, args)
+                val hardware_callee = match self.hardware_entity_callee_for_call(func):
+                    case Ok(value): value
+                    case Err(err): return Err(err)
+                if hardware_callee.?:
+                    self.emit_process_hardware_call(builder, dest, func, args,
+                        block_id, inst_index)
+                else:
+                    val expr = match self.process_helper_call_expr(func, args):
+                        case Ok(value): value
+                        case Err(err): return Err(err)
+                    match dest:
+                        case Some(dest_id):
+                            self.emit_process_dest_assign(builder, dest_id, expr)
+                        case None:
+                            builder.emit_line("{expr};")
+                            Ok(())
 
             case Nop:
                 ()
@@ -398,9 +477,15 @@ impl VhdlBackend:
         match kind:
             case Combinational(sensitivity):
                 builder.emit_process_begin(Some(label), sensitivity)
+                match self.emit_active_process_variables(builder):
+                    case Ok(_): ()
+                    case Err(err): return Err(err)
                 builder.emit_process_body_begin()
                 match self.compile_control_block(builder, block.id, []):
                     case Ok(_): pass
+                    case Err(err): return Err(err)
+                match self.emit_active_process_return(builder):
+                    case Ok(_): ()
                     case Err(err): return Err(err)
                 builder.emit_process_end(Some(label))
             case Clocked(domain):

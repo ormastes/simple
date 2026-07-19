@@ -287,9 +287,87 @@ impl VhdlBackend:
                 return Err(self.backend_error("Recursive VHDL hardware entity hierarchy: {cycle.join(\" -> \")}"))
         Ok(order)
 
+    fn hardware_call_bridge_base(block_id: i64, inst_index: i64) -> text:
+        "hwcall_b{block_id}_i{inst_index}"
+
+    fn hardware_call_arg_bridge(block_id: i64, inst_index: i64, arg_index: i64) -> text:
+        "{self.hardware_call_bridge_base(block_id, inst_index)}_arg{arg_index}"
+
+    fn hardware_call_result_bridge(block_id: i64, inst_index: i64) -> text:
+        "{self.hardware_call_bridge_base(block_id, inst_index)}_result"
+
+    fn emit_hardware_call_bridge_declarations(builder: VhdlBuilder,
+                                                caller: MirFunction) -> Result<(), CompileError>:
+        for block in caller.blocks:
+            var inst_index = 0
+            for inst in block.instructions:
+                match inst.kind:
+                    case Call(dest, func, args):
+                        val callee = match self.hardware_entity_callee_for_call(func):
+                            case Ok(value): value
+                            case Err(err): return Err(err)
+                        match callee:
+                            case Some(target):
+                                var arg_index = 0
+                                while arg_index < target.signature.params.len():
+                                    val arg_type = match self.mir_type_to_vhdl_at(target.signature.params[arg_index], inst.span):
+                                        case Ok(value): value
+                                        case Err(err): return Err(err)
+                                    builder.emit_signal_decl(self.hardware_call_arg_bridge(block.id.id, inst_index, arg_index), arg_type, nil)
+                                    arg_index = arg_index + 1
+                                val return_abi = match self.vhdl_return_abi(target):
+                                    case Ok(value): value
+                                    case Err(err): return Err(err)
+                                if return_abi.fields.len() > 0:
+                                    match dest:
+                                        case Some(dest_id):
+                                            val result_type = match self.local_type(dest_id):
+                                                case Ok(value): value
+                                                case Err(err): return Err(err)
+                                            val result_vhdl_type = match self.mir_type_to_vhdl_at(result_type, inst.span):
+                                                case Ok(value): value
+                                                case Err(err): return Err(err)
+                                            builder.emit_signal_decl(self.hardware_call_result_bridge(block.id.id, inst_index), result_vhdl_type, nil)
+                                        case None:
+                                            return Err(self.backend_error("VHDL hardware entity call `{target.name}` drops a non-unit result"))
+                            case None:
+                                ()
+                    case _:
+                        ()
+                inst_index = inst_index + 1
+        Ok(())
+
+    fn emit_hardware_call_bridge_defaults(builder: VhdlBuilder,
+                                           caller: MirFunction) -> Result<(), CompileError>:
+        for block in caller.blocks:
+            var inst_index = 0
+            for inst in block.instructions:
+                match inst.kind:
+                    case Call(_, func, _):
+                        val callee = match self.hardware_entity_callee_for_call(func):
+                            case Ok(value): value
+                            case Err(err): return Err(err)
+                        match callee:
+                            case Some(target):
+                                var arg_index = 0
+                                while arg_index < target.signature.params.len():
+                                    val value = match self.default_vhdl_value(target.signature.params[arg_index], inst.span):
+                                        case Ok(result): result
+                                        case Err(err): return Err(err)
+                                    builder.emit_signal_assign(self.hardware_call_arg_bridge(block.id.id, inst_index, arg_index), value)
+                                    arg_index = arg_index + 1
+                            case None:
+                                ()
+                    case _:
+                        ()
+                inst_index = inst_index + 1
+        Ok(())
+
     fn emit_hardware_call_instance(builder: VhdlBuilder, caller_name: text,
                                    dest: LocalId?, func: MirOperand,
-                                   args: [MirOperand], ordinal: i64) -> Result<(), CompileError>:
+                                   args: [MirOperand], ordinal: i64,
+                                   block_id: i64, inst_index: i64,
+                                   control_process: bool) -> Result<(), CompileError>:
         val callee_option = match self.hardware_entity_callee_for_call(func):
             case Ok(value): value
             case Err(err): return Err(err)
@@ -306,9 +384,12 @@ impl VhdlBackend:
         var arg_index = 0
         while arg_index < args.len():
             formals = formals.push(self.vhdl_arg_local_name(callee, arg_index))
-            val actual = match self.operand_to_vhdl(args[arg_index]):
-                case Ok(value): value
-                case Err(err): return Err(err)
+            val actual = if control_process:
+                self.hardware_call_arg_bridge(block_id, inst_index, arg_index)
+            else:
+                match self.operand_to_vhdl(args[arg_index]):
+                    case Ok(value): value
+                    case Err(err): return Err(err)
             actuals = actuals.push(actual)
             arg_index = arg_index + 1
 
@@ -318,9 +399,12 @@ impl VhdlBackend:
         var dest_name = "open"
         match dest:
             case Some(dest_id):
-                dest_name = match self.local_to_vhdl(dest_id):
-                    case Ok(value): value
-                    case Err(err): return Err(err)
+                if control_process:
+                    dest_name = self.hardware_call_result_bridge(block_id, inst_index)
+                else:
+                    dest_name = match self.local_to_vhdl(dest_id):
+                        case Ok(value): value
+                        case Err(err): return Err(err)
             case None:
                 ()
         for field in return_abi.fields:
@@ -346,9 +430,11 @@ impl VhdlBackend:
         builder.emit_port_map_end()
         Ok(())
 
-    fn emit_hardware_call_instances(builder: VhdlBuilder, caller: MirFunction) -> Result<(), CompileError>:
+    fn emit_hardware_call_instances(builder: VhdlBuilder, caller: MirFunction,
+                                    control_process: bool) -> Result<(), CompileError>:
         var ordinal = 0
         for block in caller.blocks:
+            var inst_index = 0
             for inst in block.instructions:
                 match inst.kind:
                     case Call(dest, func, args):
@@ -357,12 +443,15 @@ impl VhdlBackend:
                             case Err(err): return Err(err)
                         if callee.?:
                             match self.emit_hardware_call_instance(builder, caller.name,
-                                                                  dest, func, args, ordinal):
+                                                                  dest, func, args, ordinal,
+                                                                  block.id.id, inst_index,
+                                                                  control_process):
                                 case Ok(_): ()
                                 case Err(err): return Err(err)
                             ordinal = ordinal + 1
                     case _:
                         ()
+                inst_index = inst_index + 1
         Ok(())
 
     fn helper_call_expr(func: MirOperand, args: [MirOperand], in_helper: bool) -> Result<text, CompileError>:
@@ -411,10 +500,62 @@ impl VhdlBackend:
                 builder.emit_line("{expr};")
         Ok(())
 
+    fn process_helper_call_expr(func: MirOperand,
+                                args: [MirOperand]) -> Result<text, CompileError>:
+        match self.validate_call_supported_before_emit(func):
+            case Ok(_): ()
+            case Err(err): return Err(err)
+        val target = match self.call_target_name(func):
+            case Ok(value): value
+            case Err(err): return Err(err)
+        val helper_name = self.helper_name_for_call_target(target)
+        if not helper_name.?:
+            return Err(self.backend_error("Synthesizable VHDL process call `{target}` is not a planned helper subprogram"))
+        val resolved_helper_name = helper_name.unwrap()
+        var arg_exprs: [text] = []
+        for arg in args:
+            val arg_expr = match self.process_operand_to_vhdl(arg):
+                case Ok(value): value
+                case Err(err): return Err(err)
+            arg_exprs = arg_exprs.push(arg_expr)
+        if arg_exprs.len() == 0:
+            Ok(resolved_helper_name)
+        else:
+            Ok("{resolved_helper_name}({arg_exprs.join(\", \")})")
+
+    fn emit_process_hardware_call(builder: VhdlBuilder, dest: LocalId?,
+                                  func: MirOperand, args: [MirOperand],
+                                  block_id: i64,
+                                  inst_index: i64) -> Result<(), CompileError>:
+        val callee = match self.hardware_entity_callee_for_call(func):
+            case Ok(value): value
+            case Err(err): return Err(err)
+        if not callee.?:
+            return Err(self.backend_error("VHDL process hardware bridge requested for a non-hardware call"))
+        val target = callee.unwrap()
+        var arg_index = 0
+        while arg_index < args.len():
+            val value = match self.process_operand_to_vhdl(args[arg_index]):
+                case Ok(result): result
+                case Err(err): return Err(err)
+            builder.emit_signal_assign(self.hardware_call_arg_bridge(block_id, inst_index, arg_index), value)
+            arg_index = arg_index + 1
+        val return_abi = match self.vhdl_return_abi(target):
+            case Ok(value): value
+            case Err(err): return Err(err)
+        if return_abi.fields.len() == 0:
+            return Ok(())
+        match dest:
+            case Some(dest_id):
+                self.emit_process_dest_assign(builder, dest_id,
+                    self.hardware_call_result_bridge(block_id, inst_index))
+            case None:
+                Err(self.backend_error("VHDL hardware entity call `{target.name}` drops a non-unit result"))
+
     fn compile_helper_instruction(builder: VhdlBuilder, inst: MirInst) -> Result<(), CompileError>:
         match inst.kind:
             case Const(dest, value, ty):
-                val value_expr = match self.const_value_to_vhdl_at(value, ty, Some(inst.span)):
+                val value_expr = match self.const_value_to_vhdl_at(value, ty, inst.span):
                     case Ok(result): result
                     case Err(err): return Err(err)
                 self.emit_helper_dest_assign(builder, dest, value_expr)
@@ -463,7 +604,7 @@ impl VhdlBackend:
                 val dest_type = match self.local_type(dest):
                     case Ok(result): result
                     case Err(err): return Err(err)
-                val expr = match self.aggregate_to_vhdl_helper(kind, operands, dest_type, Some(inst.span)):
+                val expr = match self.aggregate_to_vhdl_helper(kind, operands, dest_type, inst.span):
                     case Ok(result): result
                     case Err(err): return Err(err)
                 self.emit_helper_dest_assign(builder, dest, expr)
