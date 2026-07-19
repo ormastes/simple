@@ -393,3 +393,101 @@ fn graph_archive_folder_id() -> text:
     dest_folder_id. Graph's own move semantics (copy to dest, delete
     source) already match archive 1:1, no facade-level compromise needed."""
     "archive"
+
+
+# ============================================================================
+# Gmail query parsing — pure tokenizer + operator classifier
+#
+# Turns a raw Gmail query string into a list of (op, value, negated) terms so
+# the per-operator translation functions above can actually be applied to a
+# real query. This is the seam cmd_email.spl drives: for each parsed term it
+# picks whichever of the imap_*/kql_*/filter_* functions above matches `op`,
+# and falls back to a warning when the *current* mail-cli/Graph adapter CLI
+# surface has no flag/fn to carry that term yet (a narrower gap than what
+# the protocol itself supports — see cmd_email.spl).
+# ============================================================================
+
+class GmailQueryTerm:
+    """One parsed unit of a Gmail query string."""
+    op: text        # "from"|"to"|"cc"|"bcc"|"subject"|"text"|"is"|"has"|
+                     # "after"|"before"|"newer_than"|"older_than"|"label"|
+                     # "in"|"category"|"filename"|"larger"|"smaller"|"or"
+    value: text
+    negated: bool
+
+
+val _GMAIL_QUERY_KEYS: [text] = [
+    "from", "to", "cc", "bcc", "subject", "is", "has", "after", "before",
+    "newer_than", "older_than", "label", "in", "category", "filename",
+    "larger", "smaller",
+]
+
+
+fn _is_known_query_key(key: text) -> bool:
+    for k in _GMAIL_QUERY_KEYS:
+        if k == key:
+            return true
+    false
+
+
+fn _strip_quotes(s: text) -> text:
+    if s.starts_with("\"") and s.ends_with("\"") and s.len() >= 2:
+        return s[1:s.len() - 1]
+    s
+
+
+fn tokenize_gmail_query(query: text) -> [text]:
+    """Whitespace-split, treating a double-quoted span (even one containing
+    a `key:` prefix, e.g. `subject:"hello world"`) as a single token."""
+    var tokens: [text] = []
+    var current = ""
+    var in_quotes = false
+    var i = 0
+    val n = query.len()
+    while i < n:
+        val ch = query.char_at(i)
+        if ch == "\"":
+            in_quotes = not in_quotes
+            current = current + ch
+        else if ch == " " and not in_quotes:
+            if current != "":
+                tokens.push(current)
+                current = ""
+        else:
+            current = current + ch
+        i = i + 1
+    if current != "":
+        tokens.push(current)
+    tokens
+
+
+fn _classify_query_token(t: text) -> (text, text):
+    """(op, value) for one non-negated, non-OR token."""
+    if t.contains(":"):
+        val parts = t.split(":", 2)
+        val key = parts[0].lower()
+        if _is_known_query_key(key):
+            return (key, _strip_quotes(parts[1]))
+        return ("text", _strip_quotes(t))
+    ("text", _strip_quotes(t))
+
+
+fn parse_gmail_query(query: text) -> [GmailQueryTerm]:
+    """Parse a raw Gmail query string into GmailQueryTerm entries, one per
+    token. `-term` sets `negated`; a bare `OR` token becomes op="or" (Gmail's
+    n-ary OR — see imap_term_or_nary/kql_term_or for folding two at a time)."""
+    var terms: [GmailQueryTerm] = []
+    for tok in tokenize_gmail_query(query):
+        if tok == "":
+            pass_dn
+        else if tok == "OR":
+            terms.push(GmailQueryTerm(op: "or", value: "", negated: false))
+        else:
+            var t = tok
+            var negated = false
+            if t.starts_with("-") and t.len() > 1:
+                negated = true
+                t = t[1:]
+            val (op, value) = _classify_query_token(t)
+            terms.push(GmailQueryTerm(op: op, value: value, negated: negated))
+    terms

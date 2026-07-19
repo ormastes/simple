@@ -103,6 +103,47 @@ silicon. The simulation boundary is deliberate and unchanged:
       `bin/simple test`; `doc/06_spec` regenerated at 0 stubs; this doc + `README`/`BUILD_STATUS`
       state the silicon boundary.
 
+## Index-handle law (fw/, audited 2026-07-19)
+
+All internal state in `fw/` is referenced by **typed indices / generation
+handles**, never raw addresses: the object-pool `Handle{pool,index,generation}`
+(`nvme_types.spl`, consumed by `fw_pool.TaskPool`), the flat `ppn`/`lba`
+integers bounds-checked against `NUM_PAGES`/`LBA_COUNT`
+(`ppn_in_range`/`block_in_range`), the `DramSpan{base,len,ok}` arena handle
+(`dram.spl`), and the `nd_types.spl` typed physical-coordinate newtypes
+(`NdChannel`/`NdWay`/`NdBank`/`NdPlane`/`NdBlock`/`NdWordline`/`NdPage`). Array
+subscripts seen in the sources (`span.base + index`, `base + tail`, …) are
+plain offset-into-a-typed-array math on bounds-checked Simple `[i64]` arrays —
+the pool/ring-slot pattern the law expects — not raw memory addressing.
+
+**Null sentinels are named constants**, defined once in `nvme_types.spl` and
+reused (never a bare `-1` for a handle/index return or comparison):
+
+- `UNMAP` — unmapped L2P entry / invalid ppn or block index (the FTL map +
+  block-allocation domain: `ftl_map.spl`, `ftl_band.spl`, `rain.spl`).
+- `NO_PPN` — invalid physical page number (ppn-return alias of `UNMAP`).
+- `NULL_IDX` — generic invalid index/handle outside the L2P/ppn domain:
+  object-pool handles (`handle_invalid()`, `fw_pool.TaskPool` slot search +
+  invalid-handle getters), the DRAM span alloc-fail sentinel (`dram.spl`), the
+  NAND-device "no address latched" sentinel (`fil_nand_device.spl`), the
+  outstanding-AER / last-Abort id fields and Identify "kind" default
+  (`nvme_controller.spl`, `nvme_admin_types.spl`), and SQ round-robin
+  not-found search (`nvme_qset.spl`). Same underlying value as `UNMAP` by
+  construction (`NULL_IDX = UNMAP`), so there is one canonical -1, three
+  domain-scoped names.
+
+**Address math is forbidden in fw code.** A 2026-07-19 survey of `fw/*.spl`
+found zero `extern fn` raw-pointer declarations, zero `unsafe` blocks, and no
+address/DMA arithmetic outside the simulated i64 PRP tags already documented
+above (Segmented PRP host writes) — every "index math" site found
+(`span.base + index`, ring `base + head/tail`, …) is plain offset arithmetic
+into a bounds-checked, typed `[i64]` array, matching the index-base-pointer
+law in `doc/05_design/hardware/nvme_fw_multicore/fourcore_ipc_index_handle_design.md`
+§2. This audit made **no behavior change** — it only named existing sentinel
+literals; adversarial/corruption-probe `-1` values used deliberately in
+self-tests to exercise fail-closed clamping (e.g. `b.cap = -1`,
+`p.gen[slot] = -1`) are untouched, since they are not sentinel construction.
+
 ## Reliability engine (rel_* v1, 2026-07-19) — LIVE
 
 A dedicated reliability-engine module family (`fw/rel_types.spl`, `rel_health.spl`,

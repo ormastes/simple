@@ -1,0 +1,330 @@
+# @cover src/app/itf/email_translate.spl 80%
+#
+# Golden-table spec for the devhub `email` facade's Gmail-operator
+# translation tables (doc/05_design/app/devhub/facade_email.md §5/§6).
+# Every row of §5b (generic IMAP SEARCH), §5c (Graph KQL + $filter), and §6
+# (label/star/archive verb mapping) gets at least one assertion here,
+# including the documented untranslatable-fallback cases. All functions
+# under test are pure (no I/O, no clock, no env) — this spec never touches
+# a network or a real mail-cli/Graph process.
+
+use app.itf.email_translate.{
+    translate_query_gm_raw,
+    imap_term_from, imap_term_to, imap_term_cc, imap_term_bcc,
+    imap_term_subject, imap_term_text,
+    imap_term_is_unread, imap_term_is_read, imap_term_is_starred,
+    imap_warning_is_important,
+    imap_term_has_attachment, imap_warning_has_attachment,
+    imap_warning_category, imap_warning_filename, imap_warning_larger_smaller,
+    imap_term_negate, imap_term_or, imap_term_or_nary,
+    imap_label_to_folder, imap_folder_for_in, imap_gmail_folder_for_in,
+    parse_gmail_date, imap_date_from_gmail, iso_date_from_gmail,
+    relative_window_days,
+    kql_term_from, kql_term_to, kql_term_cc, kql_term_bcc, kql_term_subject,
+    kql_warning_bcc, kql_term_is_important, kql_term_has_attachment,
+    kql_term_received_after, kql_term_received_before,
+    kql_term_size_larger, kql_term_size_smaller, kql_term_filename,
+    kql_term_negate, kql_term_or, kql_warning_category,
+    kql_warning_larger_smaller_filter,
+    filter_term_is_unread, filter_term_is_read, filter_term_is_starred,
+    filter_term_has_attachment, filter_term_importance_high,
+    filter_term_from, filter_term_to, filter_term_cc,
+    filter_term_subject_contains, filter_term_received_after,
+    filter_term_received_before, filter_term_category,
+    filter_term_negate, filter_term_or, filter_term_attachment_filename,
+    graph_well_known_folder_for_label,
+    is_archive_equivalent_label_removal, is_system_label_starred,
+    imap_star_flag_term, graph_flag_status, archive_folder_for_provider,
+    graph_archive_folder_id,
+    tokenize_gmail_query, parse_gmail_query, GmailQueryTerm,
+}
+
+
+describe "5a: Gmail X-GM-RAW passthrough":
+
+    it "returns the query verbatim, zero translation":
+        expect(translate_query_gm_raw("from:alice is:unread newer_than:2d")).to_equal("from:alice is:unread newer_than:2d")
+
+
+describe "5b: generic IMAP SEARCH per-operator translation":
+
+    it "from:X -> FROM \"X\"":
+        expect(imap_term_from("alice")).to_equal("FROM \"alice\"")
+
+    it "to:X -> TO \"X\"":
+        expect(imap_term_to("bob")).to_equal("TO \"bob\"")
+
+    it "cc:X -> CC \"X\"":
+        expect(imap_term_cc("carol")).to_equal("CC \"carol\"")
+
+    it "bcc:X -> BCC \"X\"":
+        expect(imap_term_bcc("dave")).to_equal("BCC \"dave\"")
+
+    it "subject:X -> SUBJECT \"X\"":
+        expect(imap_term_subject("invoice")).to_equal("SUBJECT \"invoice\"")
+
+    it "free text -> TEXT \"X\"":
+        expect(imap_term_text("hello world")).to_equal("TEXT \"hello world\"")
+
+    it "is:unread -> UNSEEN":
+        expect(imap_term_is_unread()).to_equal("UNSEEN")
+
+    it "is:read -> SEEN":
+        expect(imap_term_is_read()).to_equal("SEEN")
+
+    it "is:starred -> FLAGGED":
+        expect(imap_term_is_starred()).to_equal("FLAGGED")
+
+    it "is:important has no IMAP equivalent - documented drop warning":
+        expect(imap_warning_is_important().contains("no IMAP equivalent")).to_equal(true)
+
+    it "has:attachment -> lossy Content-Type heuristic":
+        expect(imap_term_has_attachment()).to_equal("HEADER \"Content-Type\" \"multipart/mixed\"")
+        expect(imap_warning_has_attachment().contains("lossy")).to_equal(true)
+
+    it "after:YYYY/MM/DD -> SINCE dd-Mon-yyyy":
+        expect(imap_date_from_gmail("2026/07/05")).to_equal("05-Jul-2026")
+
+    it "before:YYYY/MM/DD -> BEFORE dd-Mon-yyyy (reuses the same date conversion)":
+        expect(imap_date_from_gmail("2025/12/31")).to_equal("31-Dec-2025")
+
+    it "newer_than:Nd parses to N days":
+        expect(relative_window_days("7d")).to_equal(7)
+
+    it "newer_than:Nm parses to N*30 days":
+        expect(relative_window_days("2m")).to_equal(60)
+
+    it "older_than:Ny parses to N*365 days":
+        expect(relative_window_days("1y")).to_equal(365)
+
+    it "malformed newer_than/older_than value returns -1":
+        expect(relative_window_days("bogus")).to_equal(-1)
+
+    it "label:X -> select IMAP folder X instead of INBOX (identity seam)":
+        expect(imap_label_to_folder("Work")).to_equal("Work")
+
+    it "in:trash/in:spam -> generic provider folder names":
+        expect(imap_folder_for_in("trash")).to_equal("Trash")
+        expect(imap_folder_for_in("spam")).to_equal("Spam")
+
+    it "in:trash/in:spam -> Gmail-specific [Gmail]/... folder names":
+        expect(imap_gmail_folder_for_in("trash")).to_equal("[Gmail]/Trash")
+        expect(imap_gmail_folder_for_in("spam")).to_equal("[Gmail]/Spam")
+
+    it "category:X has no IMAP equivalent - documented error":
+        expect(imap_warning_category().contains("no IMAP equivalent")).to_equal(true)
+
+    it "filename:X is unsupported without a MIME-structure fetch":
+        expect(imap_warning_filename().contains("BODYSTRUCTURE")).to_equal(true)
+
+    it "larger:/smaller: has no IMAP SEARCH equivalent":
+        expect(imap_warning_larger_smaller().contains("RFC822.SIZE")).to_equal(true)
+
+    it "-term -> NOT term":
+        expect(imap_term_negate("FROM \"alice\"")).to_equal("NOT FROM \"alice\"")
+
+    it "OR -> OR term1 term2 (2-ary)":
+        expect(imap_term_or("FROM \"a\"", "FROM \"b\"")).to_equal("OR FROM \"a\" FROM \"b\"")
+
+    it "n-ary Gmail OR right-folds into nested 2-ary IMAP OR":
+        expect(imap_term_or_nary(["A", "B", "C"])).to_equal("OR A OR B C")
+
+    it "n-ary OR with a single term is the term itself":
+        expect(imap_term_or_nary(["A"])).to_equal("A")
+
+
+describe "5c: Outlook/Graph $search KQL (primary) + $filter (structured listing)":
+
+    it "from:X -> KQL from:X":
+        expect(kql_term_from("alice")).to_equal("from:alice")
+
+    it "to:X -> KQL to:X":
+        expect(kql_term_to("bob")).to_equal("to:bob")
+
+    it "cc:X -> KQL cc:X":
+        expect(kql_term_cc("carol")).to_equal("cc:carol")
+
+    it "bcc:X -> KQL bcc:X (documented as possibly unpopulated)":
+        expect(kql_term_bcc("dave")).to_equal("bcc:dave")
+        expect(kql_warning_bcc().contains("unclear if populated")).to_equal(true)
+
+    it "subject:X -> KQL subject:X":
+        expect(kql_term_subject("invoice")).to_equal("subject:invoice")
+
+    it "is:unread/is:read/is:starred are NOT in the KQL property set - route through $filter":
+        expect(filter_term_is_unread()).to_equal("isRead eq false")
+        expect(filter_term_is_read()).to_equal("isRead eq true")
+        expect(filter_term_is_starred()).to_equal("flag/flagStatus eq 'flagged'")
+
+    it "is:important -> KQL importance:high":
+        expect(kql_term_is_important()).to_equal("importance:high")
+
+    it "is:important -> $filter importance eq 'high'":
+        expect(filter_term_importance_high()).to_equal("importance eq 'high'")
+
+    it "has:attachment -> KQL hasattachment:true":
+        expect(kql_term_has_attachment()).to_equal("hasattachment:true")
+
+    it "has:attachment -> $filter hasAttachments eq true (direct field)":
+        expect(filter_term_has_attachment()).to_equal("hasAttachments eq true")
+
+    it "after:YYYY/MM/DD -> KQL received:YYYY-MM-DD..":
+        expect(kql_term_received_after(iso_date_from_gmail("2026/07/05"))).to_equal("received:2026-07-05..")
+
+    it "before:YYYY/MM/DD -> KQL received:..YYYY-MM-DD":
+        expect(kql_term_received_before(iso_date_from_gmail("2026/07/05"))).to_equal("received:..2026-07-05")
+
+    it "after:/before: -> $filter receivedDateTime ge/le":
+        expect(filter_term_received_after("2026-07-05")).to_equal("receivedDateTime ge 2026-07-05T00:00:00Z")
+        expect(filter_term_received_before("2026-07-05")).to_equal("receivedDateTime le 2026-07-05T00:00:00Z")
+
+    it "from:/to:/cc:/subject: -> $filter fallback forms":
+        expect(filter_term_from("alice")).to_equal("from/emailAddress/address eq 'alice'")
+        expect(filter_term_to("bob")).to_equal("toRecipients/any(r:r/emailAddress/address eq 'bob')")
+        expect(filter_term_cc("carol")).to_equal("ccRecipients/any(r:r/emailAddress/address eq 'carol')")
+        expect(filter_term_subject_contains("invoice")).to_equal("contains(subject,'invoice')")
+
+    it "label:X -> well-known folder routing for system labels":
+        expect(graph_well_known_folder_for_label("INBOX")).to_equal("inbox")
+        expect(graph_well_known_folder_for_label("SENT")).to_equal("sentitems")
+        expect(graph_well_known_folder_for_label("DRAFT")).to_equal("drafts")
+        expect(graph_well_known_folder_for_label("TRASH")).to_equal("deleteditems")
+
+    it "label:X -> non-system label falls back to category (no well-known folder)":
+        expect(graph_well_known_folder_for_label("Work")).to_equal("")
+
+    it "label:X -> category KQL term / $filter categories/any fallback":
+        expect(kql_term_filename("Work") != "").to_equal(true)
+        expect(filter_term_category("Work")).to_equal("categories/any(c:c eq 'Work')")
+
+    it "category:X (Gmail auto categories) has no Graph equivalent":
+        expect(kql_warning_category().contains("no Graph equivalent")).to_equal(true)
+
+    it "filename:X -> KQL attachment:X":
+        expect(kql_term_filename("report.pdf")).to_equal("attachment:report.pdf")
+
+    it "filename:X -> $filter attachments/any fallback":
+        expect(filter_term_attachment_filename("report.pdf")).to_equal("attachments/any(a:a/name eq 'report.pdf')")
+
+    it "larger:N/smaller:N -> KQL size:N.. / size:..N":
+        expect(kql_term_size_larger("1000000")).to_equal("size:1000000..")
+        expect(kql_term_size_smaller("1000")).to_equal("size:..1000")
+
+    it "larger:/smaller: has no $filter equivalent - search verb (KQL) only":
+        expect(kql_warning_larger_smaller_filter().contains("$filter")).to_equal(true)
+
+    it "-term -> KQL NOT term":
+        expect(kql_term_negate("subject:invoice")).to_equal("NOT subject:invoice")
+
+    it "-term -> $filter not(...)":
+        expect(filter_term_negate("isRead eq false")).to_equal("not(isRead eq false)")
+
+    it "OR -> KQL A OR B (native, n-ary)":
+        expect(kql_term_or("from:a", "from:b")).to_equal("from:a OR from:b")
+
+    it "OR -> $filter (A) or (B)":
+        expect(filter_term_or("isRead eq true", "isRead eq false")).to_equal("(isRead eq true) or (isRead eq false)")
+
+
+describe "6: label/star/archive verb -> backend action mapping":
+
+    it "removing the INBOX label IS archive on Gmail (label --remove INBOX == archive)":
+        expect(is_archive_equivalent_label_removal("INBOX")).to_equal(true)
+        expect(is_archive_equivalent_label_removal("inbox")).to_equal(true)
+        expect(is_archive_equivalent_label_removal("Work")).to_equal(false)
+
+    it "STARRED is a system label handled specially, not a folder copy":
+        expect(is_system_label_starred("STARRED")).to_equal(true)
+        expect(is_system_label_starred("starred")).to_equal(true)
+        expect(is_system_label_starred("Work")).to_equal(false)
+
+    it "star on -> +FLAGS (\\Flagged), star --off -> -FLAGS (\\Flagged)":
+        expect(imap_star_flag_term(true)).to_equal("+FLAGS (\\Flagged)")
+        expect(imap_star_flag_term(false)).to_equal("-FLAGS (\\Flagged)")
+
+    it "Graph flag.flagStatus mirrors star on/off":
+        expect(graph_flag_status(true)).to_equal("flagged")
+        expect(graph_flag_status(false)).to_equal("notFlagged")
+
+    it "archive folder is provider-aware: gmail -> [Gmail]/All Mail, else Archive":
+        expect(archive_folder_for_provider("gmail")).to_equal("[Gmail]/All Mail")
+        expect(archive_folder_for_provider("outlook_imap")).to_equal("Archive")
+        expect(archive_folder_for_provider("yahoo")).to_equal("Archive")
+
+    it "Graph archive resolves via the well-known 'archive' folder id":
+        expect(graph_archive_folder_id()).to_equal("archive")
+
+
+describe "Gmail query tokenizer + operator classifier":
+
+    it "splits on whitespace":
+        val tokens = tokenize_gmail_query("from:alice is:unread")
+        expect(tokens.len()).to_equal(2)
+        expect(tokens[0]).to_equal("from:alice")
+        expect(tokens[1]).to_equal("is:unread")
+
+    it "keeps a quoted phrase (including an embedded key: prefix) as one token":
+        val tokens = tokenize_gmail_query("subject:\"hello world\" is:unread")
+        expect(tokens.len()).to_equal(2)
+        expect(tokens[0]).to_equal("subject:\"hello world\"")
+
+    it "parses recognized key:value operators into typed terms":
+        val terms = parse_gmail_query("from:alice subject:invoice")
+        expect(terms.len()).to_equal(2)
+        expect(terms[0].op).to_equal("from")
+        expect(terms[0].value).to_equal("alice")
+        expect(terms[1].op).to_equal("subject")
+        expect(terms[1].value).to_equal("invoice")
+
+    it "strips quotes from a quoted operator value":
+        val terms = parse_gmail_query("subject:\"hello world\"")
+        expect(terms[0].value).to_equal("hello world")
+
+    it "parses free text (no key:) as op=text":
+        val terms = parse_gmail_query("hello")
+        expect(terms[0].op).to_equal("text")
+        expect(terms[0].value).to_equal("hello")
+
+    it "parses -term as negated":
+        val terms = parse_gmail_query("-from:alice")
+        expect(terms[0].op).to_equal("from")
+        expect(terms[0].value).to_equal("alice")
+        expect(terms[0].negated).to_equal(true)
+
+    it "parses a bare OR token":
+        val terms = parse_gmail_query("from:a OR from:b")
+        expect(terms.len()).to_equal(3)
+        expect(terms[1].op).to_equal("or")
+
+    it "an unrecognized key:value shape falls back to free text":
+        val terms = parse_gmail_query("weirdkey:value")
+        expect(terms[0].op).to_equal("text")
+        expect(terms[0].value).to_equal("weirdkey:value")
+
+    it "parses every recognized operator key from the §5 tables":
+        val terms = parse_gmail_query("to:a cc:b bcc:c has:attachment after:2026/01/01 before:2026/02/01 newer_than:7d older_than:30d label:Work in:trash category:promotions filename:x.pdf larger:1000 smaller:100")
+        expect(terms.len()).to_equal(14)
+        expect(terms[0].op).to_equal("to")
+        expect(terms[13].op).to_equal("smaller")
+
+
+describe "date parsing helpers":
+
+    it "parse_gmail_date splits YYYY/MM/DD into (year, month, day)":
+        val (y, m, d) = parse_gmail_date("2026/07/05")
+        expect(y).to_equal(2026)
+        expect(m).to_equal(7)
+        expect(d).to_equal(5)
+
+    it "parse_gmail_date returns (-1,-1,-1) on malformed input":
+        val (y, _m, _d) = parse_gmail_date("not-a-date")
+        expect(y).to_equal(-1)
+
+    it "iso_date_from_gmail converts YYYY/MM/DD -> YYYY-MM-DD":
+        expect(iso_date_from_gmail("2026/07/05")).to_equal("2026-07-05")
+
+    it "iso_date_from_gmail returns empty text on malformed input":
+        expect(iso_date_from_gmail("bogus")).to_equal("")
+
+    it "imap_date_from_gmail returns empty text on malformed input":
+        expect(imap_date_from_gmail("bogus")).to_equal("")
