@@ -1,5 +1,9 @@
 use std.spec.*
+use std.io_runtime.{file_write, file_delete, getpid, time_now_unix_micros}
 use compiler.tools.lint._LintMain.config_and_model.{map_lint_code_to_config_name, profile_default_levels, parse_lint_profile, LintConfig, LintProfile, LintLevel}
+use compiler.tools.lint.main.{run_lint_file}
+
+val WARN_ALL_FIXTURE_PATH = "/tmp/simple_lint_warn_all_spec_{getpid()}_{time_now_unix_micros()}.spl"
 
 # P0 of the reliable-mode plan: the moderate|lib|reliable strictness-tier selector
 # on the CLI lint engine, plus a complete lint-code -> config-name map.
@@ -73,6 +77,22 @@ describe "lint strictness profiles (reliable-mode P0)":
         var cfg = LintConfig.new()
         cfg.apply_file_attributes("@lint_profile(reliable)\n\nfn main():\n    print(\"x\")\n")
         expect(level_name(cfg.get_level("memory_safety"))).to_equal("deny")
+
+    it "promotes allowed style diagnostics with warn-all":
+        step("ST001 stays allowed by default, then becomes an error under --warn-all --deny-all")
+        val dirty_written = file_write(WARN_ALL_FIXTURE_PATH, "fn CamelCase() -> i64:\n    1\n")
+        val baseline_exit = run_lint_file(WARN_ALL_FIXTURE_PATH, ["--json"])
+        val dirty_exit = run_lint_file(WARN_ALL_FIXTURE_PATH, ["--warn-all", "--deny-all", "--json"])
+        val clean_written = file_write(WARN_ALL_FIXTURE_PATH, "fn clean_name() -> i64:\n    1\n")
+        val clean_exit = run_lint_file(WARN_ALL_FIXTURE_PATH, ["--warn-all", "--deny-all", "--json"])
+        val removed = file_delete(WARN_ALL_FIXTURE_PATH)
+
+        expect(dirty_written).to_equal(true)
+        expect(baseline_exit).to_equal(0)
+        expect(dirty_exit).to_equal(1)
+        expect(clean_written).to_equal(true)
+        expect(clean_exit).to_equal(0)
+        expect(removed).to_equal(true)
 
 fn level_name(level: LintLevel) -> String:
     match level:
