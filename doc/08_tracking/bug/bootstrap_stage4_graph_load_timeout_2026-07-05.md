@@ -200,3 +200,54 @@ impl/class-body mutable-parameter source gap is fixed and covered by
 `collection_opt_core.spl` to avoid the old symptom. The remaining root task is
 still item 1 above: route this frontend work through compiled execution rather
 than raising the timeout or adding another cache/wrapper.
+
+## Compiled-route correction and restored lexer fix — 2026-07-19
+
+The preceding dispatch diagnosis is superseded. Current Stage2 and Stage3
+execute the frontend as native compiled code: both binaries contain strong
+symbols for `compiler_driver_run_compile`, `parse_full_frontend`,
+`parse_and_build_module`, and `parse_module_body`; bounded debugger probes hit
+that chain in order. `bootstrap_main.spl` also calls the compiled driver
+directly for the explicit Stage4 path. No interpreter-wrapper fix is needed.
+
+The retained Stage4 profile is not linear in source size. Across 86 completed
+files, normalized parse cost rose by chronological quartile from about 300 to
+729, 1175, and 2427 ms/KiB. That cumulative degradation is consistent with the
+no-GC allocation registry growing during repeated parses.
+
+History identified an already-reviewed fix in `cfd3cf7778`: `CoreLexer` keeps
+SimpleOS-safe indexed character reads but collects a token span and joins it
+once, avoiding immutable prefix growth in `char_slice`. The unrelated
+`fd51a8dd6d` sweep later restored the quadratic concatenation and removed its
+regression scenario. The original two-file implementation and scenario are
+restored; the focused lexer spec passes 5/5 under the explicitly bounded Rust
+repair runner and regenerated its SPipe manual. Product optimizer and runtime
+evidence remain pending because no admitted pure-Simple `bin/simple` exists.
+The next permitted step is one incremental Stage2/Stage3 rebuild followed by
+one bounded Stage4 profile; do not add another dispatch layer.
+
+That incremental rebuild passed Stage2/Stage3 sanity and Stage2 native-build
+capability in 16:32 at 317,880 KiB peak RSS. The resulting compiler hashes are
+`c57e3126ce2f4ef9cf5f32464cc46c7d1d0d5f553696452efdfda3d1ac3dbf93`
+(Stage2) and
+`af1265e4860ee91216be8b98f0b545ebb92ea34d8e412b41a70f491929be9e8f`
+(Stage3).
+
+The single refreshed Stage4 profile then reached the 1,200-second cap during
+active phase-two parsing. It completed 116 of 1,283 files, versus 86 of 1,282
+before the lexer restoration, and peaked at 2,006,488 KiB versus 3,263,384 KiB.
+The last completed file was
+`src/lib/nogc_async_mut/test_runner/test_runner_config.spl`; the active file was
+`src/app/test_daemon/session_scheduler.spl`. No parser error, arena OOB,
+missing-tag, allocation-failure, or phase-failure signature appeared. This
+proves material progress and lower retained memory, but not Stage4 completion
+or full-CLI admission; another focused cumulative-allocation fix is required
+before the next permitted Stage4 attempt.
+
+Concurrent server-contract repair restored `/health` JSON, `/` HTML, canonical
+listener markers, the socket-facade readiness guard, and same-boot database
+evidence. Bounded seed diagnostics passed the route spec 11/11, database specs
+32/32, and HTTP integration spec 7/7. The RV64 system spec reached its mandatory
+three-cycle cap at 21/22 on a test-only literal-brace construction; that source
+assertion is corrected but intentionally not rerun in this session. Its manual
+therefore remains stale, and no live QEMU web/DB claim is made.
