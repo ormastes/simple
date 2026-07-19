@@ -18,7 +18,7 @@ use os.kernel.arch.riscv64.cpu.{csrw_stvec, csrs_sie, csrc_sie, SIE_SEIE, SIE_ST
 use os.kernel.arch.riscv64.console.{serial_writeln}
 use os.kernel.arch.riscv64.timer.{rv64_handle_timer_interrupt}
 use os.kernel.arch.riscv64.trap_runtime.{Rv64TrapRuntime}
-use os.kernel.arch.riscv64.trap_model.{Rv64TrapKind, classify_rv64_trap, rv64_syscall_args_from_context, rv64_apply_syscall_result}
+use os.kernel.arch.riscv64.trap_model.{RV64_CONTEXT_BYTES, Rv64TrapKind, classify_rv64_trap, rv64_syscall_args_from_context, rv64_apply_syscall_result, rv64_prepare_kernel_exit_context}
 use os.kernel.arch.arch_context.{Riscv64Context}
 use os.kernel.arch.riscv64.syscall.{rv64_syscall_handler, rv64_syscall_handler_state}
 use os.kernel.scheduler.scheduler.{Scheduler}
@@ -208,6 +208,10 @@ impl Rv64Interrupt:
         """
         rv64_install_trap_runtime(scheduler, ipc, klog)
 
+    static fn install_scheduler(scheduler: Scheduler) -> bool:
+        """Replace only the Scheduler in an installed trap runtime."""
+        rv64_install_trap_scheduler(scheduler)
+
     static fn install_runtime_bundle(runtime: Rv64TrapRuntime):
         """Install a precomposed runtime bundle for trap dispatch."""
         rv64_install_runtime_bundle(runtime)
@@ -317,6 +321,14 @@ fn rv64_install_trap_runtime(scheduler: Scheduler, ipc: IpcManager, klog: Kernel
     g_trap_runtime = Some(Rv64TrapRuntime.new(scheduler, ipc, klog))
     g_trap_runtime_installed = true
 
+fn rv64_install_trap_scheduler(scheduler: Scheduler) -> bool:
+    """Replace the trap Scheduler while preserving installed IPC and log state."""
+    if not g_trap_runtime_installed or g_trap_runtime == nil:
+        return false
+    g_trap_scheduler = scheduler
+    _sync_trap_runtime_state()
+    true
+
 fn rv64_install_runtime_bundle(runtime: Rv64TrapRuntime):
     """Install a precomposed runtime bundle for RV64 trap dispatch."""
     g_trap_scheduler = runtime.scheduler
@@ -382,6 +394,27 @@ fn rv64_dispatch_trap_frame_ptr(ctx_addr: u64) -> i64:
     unsafe:
         val ctx_ptr = ctx_addr as *mut Riscv64Context
         val current = *ctx_ptr
+
+        # A blocking exit resumes the kernel from the one saved frame placed
+        # immediately above this live trap frame by _rv64_enter_user.
+        if classify_rv64_trap(current.scause) == Rv64TrapKind.UserEcall:
+            val args = rv64_syscall_args_from_context(current)
+            if args.id == 0u64:
+                val saved_ptr = (ctx_addr + RV64_CONTEXT_BYTES) as *mut Riscv64Context
+                val prepared = rv64_prepare_kernel_exit_context(*saved_ptr, args.arg0.to_i32())
+                if prepared.is_err():
+                    val error = prepared.err()
+                    _log_trap_failure(error.unwrap())
+                    return -1
+
+                # Validate before this call: syscall 0 mutates the installed
+                # Scheduler by marking its exact current task Zombie.
+                val dispatched = rv64_dispatch_installed_trap(current)
+                if dispatched.is_err():
+                    return -1
+                *ctx_ptr = prepared.unwrap()
+                return 0
+
         val result = rv64_dispatch_installed_trap(current)
         if result.is_err():
             return -1
