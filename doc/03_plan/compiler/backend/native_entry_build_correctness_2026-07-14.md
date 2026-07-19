@@ -421,7 +421,14 @@ the shared binary — deploys require explicit user go-ahead).
   instead of the generic all-i64 import signature. Focused MIR/source
   regressions pin both aliases and the typed import. Strict dual-backend
   scenarios also cover a side-effecting custom-owner `.to_string()` collision
-  plus bool/f64/i64/u64/text primitive output. The
+  plus bool/f64/i64/u64/text primitive output. Unresolved custom owners named
+  `starts_with`, `ends_with`, or `contains` now also win before the text
+  fallback for both instance and static dispatch; focused MIR and strict-dual
+  cases pin all three. The shared
+  cross-target fixture covers positive/negative builtin predicates and both
+  conversion aliases for bool/f64/i64/u64/text, so existing FreeBSD,
+  AArch64/RV64 execution and ARM32/RV32/Windows-ARM64 object gates inherit the
+  oracle. The
   available pure-Simple test artifacts either crash before scenario output or
   lack the `test` command, so native execution remains pending.
   Pure-Simple text `.char_code_at(index)` now lowers after custom-owner

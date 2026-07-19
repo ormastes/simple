@@ -554,6 +554,26 @@ impl MirLowering:
         if method == "unwrap_err":
             result_err_type = self.result_err_hir_type(receiver)
 
+        # Resolve a type-valued receiver once. The Unresolved arm below uses
+        # this for static custom methods; predicate fallbacks also need it
+        # before they consider lowering the receiver as a text value.
+        var static_receiver_name = ""
+        if resolution_is_unresolved:
+            match receiver.kind:
+                case NamedVar(static_symbol, static_name):
+                    val static_def = self.symbols.get_symbol(static_symbol)
+                    if static_def != nil:
+                        match static_def.kind:
+                            case Class | Struct | Enum: static_receiver_name = static_name
+                            case _: ()
+                case Var(static_symbol):
+                    val static_def = self.symbols.get_symbol(static_symbol)
+                    if static_def != nil:
+                        match static_def.kind:
+                            case Class | Struct | Enum: static_receiver_name = static_def.name
+                            case _: ()
+                case _: ()
+
         # Native entry lowering commonly has no MethodResolution, so probe
         # Option-like receivers once and reuse that local in the Unresolved
         # owner fallback. This keeps builtin names type-directed and prevents
@@ -573,6 +593,24 @@ impl MirLowering:
             prelowered_method_receiver = self.lower_expr(receiver)
             has_prelowered_method_receiver = true
             option_method_receiver = self.method_receiver_is_option(receiver, prelowered_method_receiver)
+
+        # Flat/native HIR can leave custom predicate methods unresolved. Probe
+        # their owner before the text fallbacks below so a struct method named
+        # starts_with/ends_with/contains keeps normal custom-method precedence.
+        var predicate_has_custom_owner = false
+        val predicate_method_shape =
+            (method == "starts_with" or method == "ends_with" or method == "contains") and args.len() == 1
+        if resolution_is_unresolved and predicate_method_shape:
+            val static_predicate_key = "static::{static_receiver_name}::{method}"
+            if static_receiver_name != "" and self.struct_method_syms.has(static_predicate_key):
+                predicate_has_custom_owner = true
+            else:
+                if not has_prelowered_method_receiver:
+                    prelowered_method_receiver = self.lower_expr(receiver)
+                    has_prelowered_method_receiver = true
+                val predicate_owner = self.struct_value_syms.get(prelowered_method_receiver.id)
+                if predicate_owner != nil and predicate_owner != "":
+                    predicate_has_custom_owner = self.struct_method_syms.has("{predicate_owner}::{method}")
 
         if method == "is_some" and args.len() == 0 and option_method_receiver:
             val receiver_local = prelowered_method_receiver
@@ -1451,7 +1489,7 @@ impl MirLowering:
         # this without the double-tag corruption risk an unconditional
         # strlen+rt_string_new (like the prefix's own tagging just below)
         # would have on an ALREADY-tagged receiver (e.g. a concat result).
-        if method == "starts_with" and args.len() == 1 and resolution_is_unresolved:
+        if method == "starts_with" and args.len() == 1 and resolution_is_unresolved and not predicate_has_custom_owner:
             # Bug (native_string_method_var_arg lane, 2026-07-14): un-nest through
             # an intermediate val, exactly like the `join` fix above documents --
             # the seed interpreter drops/misevaluates a self-method call nested
@@ -1465,7 +1503,7 @@ impl MirLowering:
             # 0, producing a self-referencing SSA value (`%l0 = call ptr
             # @rt_interp_cstr(ptr %l0)`), an LLVM verifier fault ("Only PHI nodes
             # may reference their own value!").
-            val sw_receiver_raw = self.lower_expr(receiver)
+            val sw_receiver_raw = prelowered_method_receiver
             val sw_receiver = self.ensure_tagged_str(sw_receiver_raw)
             val sw_prefix_ptr = self.lower_expr(args[0].value)
             val strlen_op = MirOperand(kind: MirOperandKind.Const(
@@ -1521,10 +1559,10 @@ impl MirLowering:
         # tagged, so tag a raw string-literal suffix via rt_string_new first.
         # Also mirrors task #178's receiver-tagging fix above (same silent
         # always-false bug for a raw-literal receiver).
-        if method == "ends_with" and args.len() == 1 and resolution_is_unresolved:
+        if method == "ends_with" and args.len() == 1 and resolution_is_unresolved and not predicate_has_custom_owner:
             # Same un-nesting fix as starts_with above (native_string_method_var_arg
             # lane, 2026-07-14) -- avoid `self.X(self.lower_expr(receiver))`.
-            val ew_receiver_raw = self.lower_expr(receiver)
+            val ew_receiver_raw = prelowered_method_receiver
             val ew_receiver = self.ensure_tagged_str(ew_receiver_raw)
             val ew_suffix_ptr = self.lower_expr(args[0].value)
             val ew_strlen_op = MirOperand(kind: MirOperandKind.Const(
@@ -1745,7 +1783,7 @@ impl MirLowering:
         # convention for .pop()/.first()/.last()) instead of a silent wrong
         # answer.
         var contains_recv_is_array = false
-        if method == "contains":
+        if method == "contains" and args.len() == 1 and resolution_is_unresolved and not predicate_has_custom_owner:
             if val contains_recv_ty = receiver.type_:
                 match contains_recv_ty.kind:
                     case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
@@ -1764,7 +1802,7 @@ impl MirLowering:
                 # receiver, which this probe deliberately does NOT touch).
                 match receiver.kind:
                     case Var(_) | NamedVar(_, _):
-                        val contains_recv_probe = self.lower_expr(receiver)
+                        val contains_recv_probe = if has_prelowered_method_receiver: prelowered_method_receiver else: self.lower_expr(receiver)
                         if self.local_is_runtime_array(contains_recv_probe):
                             contains_recv_is_array = true
                     case _: ()
@@ -1798,7 +1836,7 @@ impl MirLowering:
         # rt_string_parse_f64") -- still a LOUD failure, not silent-wrong,
         # just one layer later than before. Out of scope for this lane (the
         # bug doc only reproduces/covers the default LLVM native-build path).
-        if (method == "trim" or method == "strip" or method == "lower" or method == "to_lower" or method == "to_upper" or method == "split" or method == "replace" or method == "rfind" or method == "find" or method == "contains" or method == "parse_f64") and resolution_is_unresolved and not contains_recv_is_array:
+        if (method == "trim" or method == "strip" or method == "lower" or method == "to_lower" or method == "to_upper" or method == "split" or method == "replace" or method == "rfind" or method == "find" or method == "contains" or method == "parse_f64") and resolution_is_unresolved and not contains_recv_is_array and not predicate_has_custom_owner:
             val ts_arity_ok = match method:
                 case "split": args.len() == 1
                 case "rfind": args.len() == 1
@@ -1830,7 +1868,7 @@ impl MirLowering:
                 # entirely and is safe for an already-tagged input too (no
                 # double-tag risk), so it is correct for both the literal and
                 # variable cases this arm has to serve.
-                val ts_recv_raw = self.lower_expr(receiver)
+                val ts_recv_raw = if method == "contains": prelowered_method_receiver else: self.lower_expr(receiver)
                 val ts_recv = self.ensure_tagged_str(ts_recv_raw)
                 var ts_ops: [MirOperand] = [mir_operand_copy(ts_recv)]
                 for ts_arg in args:
@@ -2099,21 +2137,6 @@ impl MirLowering:
                 # ONCE here (reused below by the `push` special-case, which
                 # previously re-lowered it) to avoid double-evaluating a
                 # side-effecting receiver expression.
-                var static_receiver_name = ""
-                match receiver.kind:
-                    case NamedVar(static_symbol, static_name):
-                        val static_def = self.symbols.get_symbol(static_symbol)
-                        if static_def != nil:
-                            match static_def.kind:
-                                case Class | Struct | Enum: static_receiver_name = static_name
-                                case _: ()
-                    case Var(static_symbol):
-                        val static_def = self.symbols.get_symbol(static_symbol)
-                        if static_def != nil:
-                            match static_def.kind:
-                                case Class | Struct | Enum: static_receiver_name = static_def.name
-                                case _: ()
-                    case _: ()
                 val static_method_key = "static::{static_receiver_name}::{method}"
                 if static_receiver_name != "" and self.struct_method_syms.has(static_method_key):
                     val static_method_id = self.struct_method_syms[static_method_key]

@@ -62,3 +62,18 @@ describe "Text char_code_at MIR lowering", tag: ["only-compiled"]:
         expect(mir.split("__simple_rt_string_char_code_at").len() - 1).to_equal(2)
         expect(mir).to_contain("\"name\":\"rt_string_char_code_at\"")
         expect(mir.contains("rt_strlen")).to_equal(false)
+
+describe "Text predicate custom-owner MIR lowering", tag: ["only-compiled"]:
+    it "keeps custom predicate methods ahead of text fallbacks":
+        val source = "struct PredicateOwner:\n    marker: i64\n\nimpl PredicateOwner:\n    fn starts_with(self, value: text) -> bool: self.marker == value.len()\n    fn ends_with(self, value: text) -> bool: self.marker != value.len()\n    fn contains(self, value: text) -> bool: self.marker > value.len()\n\nstruct StaticPredicates:\n    marker: i64\n\nimpl StaticPredicates:\n    static fn starts_with(value: text) -> bool: value.len() == 1\n    static fn ends_with(value: text) -> bool: value.len() == 2\n    static fn contains(value: text) -> bool: value.len() == 3\n\nfn predicate_calls(owner: PredicateOwner) -> bool:\n    owner.starts_with(\"a\") and owner.ends_with(\"bb\") and owner.contains(\"ccc\") and StaticPredicates.starts_with(\"a\") and StaticPredicates.ends_with(\"bb\") and StaticPredicates.contains(\"ccc\")\n"
+        val mir = lower_text_method_mir(source, "predicate_owner")
+
+        expect(mir.split("PredicateOwner::starts_with").len() - 1).to_be_greater_than(1)
+        expect(mir.split("PredicateOwner::ends_with").len() - 1).to_be_greater_than(1)
+        expect(mir.split("PredicateOwner::contains").len() - 1).to_be_greater_than(1)
+        expect(mir.split("StaticPredicates::starts_with").len() - 1).to_be_greater_than(1)
+        expect(mir.split("StaticPredicates::ends_with").len() - 1).to_be_greater_than(1)
+        expect(mir.split("StaticPredicates::contains").len() - 1).to_be_greater_than(1)
+        expect(mir.contains("rt_string_starts_with")).to_equal(false)
+        expect(mir.contains("rt_string_ends_with")).to_equal(false)
+        expect(mir.contains("rt_string_contains")).to_equal(false)

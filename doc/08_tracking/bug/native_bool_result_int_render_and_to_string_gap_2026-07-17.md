@@ -132,6 +132,17 @@ Native execution remains pending because the
 available pure-Simple test artifacts either crash before scenario output or
 lack the `test` command.
 
+### Custom predicate owner follow-up (2026-07-19)
+
+Flat/native HIR also left custom struct methods named `starts_with`,
+`ends_with`, or `contains` unresolved. Their text fallbacks ran before the
+name-keyed custom-owner recovery and could steal those calls. MIR now probes
+the receiver once, recognizes static type owners before value lowering, skips
+the text fallback when either owner owns the method, and reuses instance locals
+in owner dispatch. The focused MIR regression covers all three instance/static
+collisions; the strict-dual owner fixture and shared cross-target fixture cover
+custom precedence plus builtin predicates and both primitive conversion aliases.
+
 ## Expected
 
 - Bool-returning string methods (`starts_with`, `ends_with`, `contains`, and
