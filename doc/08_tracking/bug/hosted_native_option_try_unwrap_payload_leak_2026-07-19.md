@@ -1,8 +1,8 @@
 # HOSTED native `.?` / if-val Option unwrap leaks the Some tag instead of the payload
 
 **Date:** 2026-07-19
-**Status:** OPEN — origin-base regression, reproduces on pristine origin, not a
-local-branch defect.
+**Status:** SOURCE FIXED — focused source regression passes; rebuilt native
+execution remains pending.
 **Severity:** P1 — silent miscompile (wrong value, no diagnostic) on a
 first-class language construct.
 **Component:** compiler codegen — Option/`.?` (try-op) + `if val` binding
@@ -50,6 +50,13 @@ ABI`** (first present at base `eb3a695b185`). Evidence:
 `through_try` (which *returns* an `Option`), but **not** the
 `if val v = x.?: return v` shape that unwraps to a bare payload — that shape is
 the blind spot that regressed.
+
+## Current source fix
+
+`ExistsCheck` now unwraps a canonical Option handle through the existing
+`option_payload_or_self` owner before the generic runtime-value decoder. The
+exact `i64?` binding is pinned in the hosted matrix and shared cross-target
+fixture. Bool/float/text siblings and rebuilt executable proof remain open.
 
 ## Related / class
 

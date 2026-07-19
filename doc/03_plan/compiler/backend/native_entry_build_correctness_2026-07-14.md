@@ -234,6 +234,11 @@ the shared binary — deploys require explicit user go-ahead).
   `Err(text).unwrap_err()`, and single receiver evaluation in Linux's full gate
   plus the selected macOS, Windows, and FreeBSD gates. First staged execution
   is pending.
+- Hosted canonical `i64?` `.?`/`if val` binding is source-fixed at the shared
+  `ExistsCheck` payload boundary: the outer `Some` handle is unwrapped before
+  generic runtime decoding. Hosted and cross-target fixtures pin `7`, not the
+  former handle-derived `84`; rebuilt executable proof remains pending. See
+  `doc/08_tracking/bug/hosted_native_option_try_unwrap_payload_leak_2026-07-19.md`.
 - `local_mir_type_of` now honors its nilable contract by returning a bare
   `MirType` or `nil`; its two wrapper-dependent consumers were converted in
   the same owner. The focused regression reproduces the former plain
