@@ -1,7 +1,7 @@
 #!/bin/sh
 # codex-run-guard.shs — operational backstop around `codex` launches.
 #
-# Wraps the real `codex` binary and enforces three caps that the AGENTS.md
+# Wraps the real `codex` binary and enforces process/session guards that AGENTS.md
 # "Termination & Runaway Guard" rules ask agents to self-enforce — here as a
 # process-level backstop that fires even when an agent ignores those rules:
 #
@@ -20,6 +20,9 @@
 #      enormous waste — this cap kills it directly. The active rollout is found
 #      via /proc/<pid>/fd over our own codex tree, so it never reads or acts on
 #      another concurrent session's rollout. Like cap 1, it always runs.
+#   5. Explicit-resume lock: refuse a second `resume <id>` while the first
+#      guarded process still owns that session, preventing shared SQLite/WAL
+#      contention and duplicate writes to one rollout.
 #
 # Caps 2 and 3 use the tightest generous defaults for an unattended bypass flag
 # (--dangerously-bypass-approvals-and-sandbox / --yolo) and a looser-but-present
@@ -97,21 +100,32 @@ else
     MAX_RSS_MB="${CODEX_GUARD_MAX_RSS_MB:-32768}"       # 32 GiB tree RSS backstop
 fi
 
-# --- cap 1: pre-flight poison-rollout refusal -----------------------------------
-if [ "$RESUME" = 1 ] && [ -n "$SID" ] && [ "$MAX_RESUME_TOKENS" -gt 0 ] 2>/dev/null; then
+# --- explicit session ownership + cap 1 poison-rollout refusal -----------------
+ROLLOUT=""
+if [ "$RESUME" = 1 ] && [ -n "$SID" ]; then
     ROLLOUT=$(find "$HOME/.codex/sessions" -name "rollout-*$SID*.jsonl" 2>/dev/null | head -1 || true)
-    if [ -n "$ROLLOUT" ]; then
-        PEAK=$(grep -o '"input_tokens":[0-9]\{1,\}' "$ROLLOUT" 2>/dev/null \
-               | grep -o '[0-9]\{1,\}' | sort -n | tail -1 || true)
-        [ -z "$PEAK" ] && PEAK=0
-        if [ "$PEAK" -gt "$MAX_RESUME_TOKENS" ] 2>/dev/null; then
-            log "REFUSING resume of $SID: rollout peaked at ${PEAK} input tokens"
-            log "  (> CODEX_GUARD_MAX_RESUME_TOKENS=${MAX_RESUME_TOKENS}). This is a runaway/"
-            log "  poison rollout — reloading it re-triggers the loop. Start a fresh session,"
-            log "  or set CODEX_GUARD_FORCE=1 to override."
-            [ "${CODEX_GUARD_FORCE:-0}" = 1 ] || exit 3
-            log "  CODEX_GUARD_FORCE=1 set — proceeding against advice."
-        fi
+fi
+
+if [ -n "$ROLLOUT" ]; then
+    command -v flock >/dev/null 2>&1 || { log "FATAL: flock is required for resume ownership"; exit 127; }
+    exec 9>>"$ROLLOUT.resume.lock"
+    if ! flock -n 9; then
+        log "REFUSING concurrent resume of $SID: another guarded Codex process owns this session"
+        exit 4
+    fi
+fi
+
+if [ -n "$ROLLOUT" ] && [ "$MAX_RESUME_TOKENS" -gt 0 ] 2>/dev/null; then
+    PEAK=$(grep -o '"input_tokens":[0-9]\{1,\}' "$ROLLOUT" 2>/dev/null \
+           | grep -o '[0-9]\{1,\}' | sort -n | tail -1 || true)
+    [ -z "$PEAK" ] && PEAK=0
+    if [ "$PEAK" -gt "$MAX_RESUME_TOKENS" ] 2>/dev/null; then
+        log "REFUSING resume of $SID: rollout peaked at ${PEAK} input tokens"
+        log "  (> CODEX_GUARD_MAX_RESUME_TOKENS=${MAX_RESUME_TOKENS}). This is a runaway/"
+        log "  poison rollout — reloading it re-triggers the loop. Start a fresh session,"
+        log "  or set CODEX_GUARD_FORCE=1 to override."
+        [ "${CODEX_GUARD_FORCE:-0}" = 1 ] || exit 3
+        log "  CODEX_GUARD_FORCE=1 set — proceeding against advice."
     fi
 fi
 
