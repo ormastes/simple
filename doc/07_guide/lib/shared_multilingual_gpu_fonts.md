@@ -455,19 +455,33 @@ SIMPLE_BIN="$PURE_SIMPLE_BIN" SIMPLE_RUNTIME_BIN="$PURE_SIMPLE_BIN" \
 ```
 
 Both variable paths must be defined by the operator and name current, admitted
-binaries; this host does not currently provide a `PINNED_GLSLC` value. The
+binaries. This host provides the package-owned Android NDK r26b compiler at
+`/usr/lib/android-sdk/ndk/26.2.11394342/shader-tools/linux-x86_64/glslc`
+(`shaderc v2022.3 ndk-r26b`, SHA-256
+`2f00c0017d229c844b9da018e3c5170f8ada6db786d9e49cce002d483d9c05bd`). The
 authoritative result is
 `build/portable_compute_toolchains-semantics2/evidence.env`, not the checker
 exit alone. The Vulkan compiler and `spirv-val` run through bounded timeouts,
 and the requested-target aggregate ignores unrequested toolchains.
 On ELF/glibc hosts, a resolved native-ELF `glslc` candidate runs `--version`
-under a clean `LD_DEBUG=libs` loader environment, records the actually initialized
-`libshaderc` real path and SHA-256 plus the loader-log SHA-256, and rejects an
-operator-supplied `VULKAN_GLSLC_LIBRARY_PATH` mismatch. The exact canonical
+under a clean `LD_DEBUG=libs` loader environment. A dynamically linked producer
+records the initialized `libshaderc` real path and SHA-256 and rejects an
+operator-supplied `VULKAN_GLSLC_LIBRARY_PATH` mismatch. A statically linked
+producer is admitted only when ELF linkage records no `libshaderc` dependency,
+neither compile loads one, and the compiler SHA-256 remains unchanged before
+and after both compiles. Both modes retain loader-log SHA-256 evidence. The exact canonical
 GLSL is compiled independently to A/B SPIR-V files; unequal SHA-256 values or
 bytes reject the candidate before validation or pin comparison. Other host
 loaders fail closed until they have an equivalent tracer; `glslangValidator`
 is diagnostic-only and cannot produce an admitted Vulkan font candidate.
+
+The retained semantics-revision-2 candidate uses source SHA-256
+`ee0e8a35748553891fc82013b09e96abf569072630fed0333e469f20cc1c1162`.
+The NDK compiler produces byte-identical 10,884-byte SPIR-V twice with SHA-256
+`ca5a3d644e5d4dd1c3b6d453be4db252f8ed7b9d65b78e2f7ae37c17769dc55d`;
+`spirv-val --target-env vulkan1.1` passes. This is candidate evidence only:
+the retained revision-1 pins remain authoritative until device-origin font
+readback and CPU-oracle parity pass.
 
 Admission has two explicit phases. Candidate generation requires semantics
 revision 2, `candidate_compiled=true`, and `artifact_validated=true`, including
