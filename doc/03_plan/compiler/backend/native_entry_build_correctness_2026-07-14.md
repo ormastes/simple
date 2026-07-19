@@ -444,7 +444,9 @@ the shared binary — deploys require explicit user go-ahead).
   remain compile-only. First staged platform execution is pending.
 - Custom enum `==`/`!=` now uses declared-type provenance to route same-type
   handles through structural runtime equality instead of pointer comparison.
-  The pure runtime compares discriminants and recursively compares payloads;
+  Custom constructors now carry stable qualified-type runtime IDs (with
+  Result/Option retaining reserved IDs 0/1), and Pure/C structural
+  equality checks the ID before discriminants and recursively compares payloads.
   pointer registries reject false heap tags before dereference, and numeric
   arrays compare across generic, byte-packed, and u64-packed storage. A
   64-level guard bounds malformed nesting. The shared fixture covers a
@@ -452,7 +454,9 @@ the shared binary — deploys require explicit user go-ahead).
   heap-tag-collision integers, and generic-versus-packed array payloads so
   hosted interning cannot false-green. Hosted LLVM/Cranelift and AArch64/RV64
   execution are scheduled; ARM32/RV32 remain default-LLVM compile receipts.
-  The original x86_64-unknown-none QEMU proof is pending.
+  The shared fixture also rejects cross-type enums nested behind `Any`; see
+  `native_enum_runtime_type_identity_2026-07-19.md`. The original
+  x86_64-unknown-none QEMU proof is pending.
 - Module-init symbols now exclude punctuation inherited from absolute or
   hyphenated source paths in both the pure-Simple bootstrap MIR mirror and the
   Rust seed's owning module-prefix derivation. The existing hosted native smoke

@@ -42,6 +42,7 @@ fn mir_lower_trace_enabled() -> bool:
 use compiler.core.types.{TYPE_BOOL, TYPE_I64, TYPE_F64}
 use compiler.mir.synthetic_driver_codegen.{apply_synthetic_driver_codegen}
 use compiler.frontend.core.types.{custom_primitive_underlying_type_tag_by_symbol}
+use compiler.core.interpreter.hashmap.{hm_hash_text}
 
 # Import struct definitions from types module
 use compiler.mir.mir_lowering_types.{MirLowering, MirError}
@@ -94,6 +95,8 @@ impl MirLowering:
             option_value_locals: {},
             nil_locals: {},
             enum_variant_index: {},
+            enum_runtime_id_index: {},
+            enum_runtime_id_names: {},
             lambda_bindings: {},
             lambda_capture_snapshot: {},
             current_has_vhdl_metadata: false,
@@ -105,6 +108,20 @@ impl MirLowering:
         match symbol:
             case SymbolId(id): id
             case _: -1
+
+    me register_enum_runtime_name(runtime_name: text, enum_name: text, span: Span?):
+        val runtime_id = (hm_hash_text(runtime_name) % 2147483646) + 2
+        val id_key = "{runtime_id}"
+        val existing = self.enum_runtime_id_names.get(id_key)
+        if existing != nil and existing != runtime_name:
+            val prior_name = existing ?? "<unknown>"
+            self.error("enum runtime ID collision: '{prior_name}' and '{runtime_name}'", span)
+            return
+        self.enum_runtime_id_names[id_key] = runtime_name
+        self.enum_runtime_id_index[enum_name] = runtime_id
+
+    me register_enum_runtime_id(enum_def: HirEnum):
+        self.register_enum_runtime_name(enum_def.runtime_name, enum_def.name, Some(enum_def.span))
 
     fn hir_bitfield_fields(bitfield_def: HirBitfield) -> [HirBitfieldField]:
         match bitfield_def:
@@ -479,6 +496,8 @@ impl MirLowering:
         if bootstrap_trace:
             print "[mir-lower] builder-assign"
         self.builder = builder
+        if not bootstrap_mode:
+            self.enum_runtime_id_index = {}
         if bootstrap_trace:
             print "[mir-lower] builder-done"
 
@@ -556,6 +575,7 @@ impl MirLowering:
                 variant_names.push(enum_def.variants[vi].name)
                 vi = vi + 1
             self.enum_variant_index[enum_def.name] = variant_names
+            self.register_enum_runtime_id(enum_def)
             ei = ei + 1
 
         # Register the built-in Result enum so bare-variant construction
@@ -565,6 +585,8 @@ impl MirLowering:
         # to an undefined callee. Skip if user code shadows the name.
         if not self.enum_variant_index.has("Result"):
             self.enum_variant_index["Result"] = ["Ok", "Err"]
+        if not self.enum_runtime_id_index.has("Result"):
+            self.enum_runtime_id_index["Result"] = 0
 
         # Register the built-in Option enum so bare-variant construction
         # (`Some(v)` / `None`) and `match o: case Some(v)/None` resolve the same
@@ -573,6 +595,8 @@ impl MirLowering:
         # user code shadows the name.
         if not self.enum_variant_index.has("Option"):
             self.enum_variant_index["Option"] = ["Some", "None"]
+        if not self.enum_runtime_id_index.has("Option"):
+            self.enum_runtime_id_index["Option"] = 1
 
         # Build (struct NAME, method name) -> method SymbolId lookup from
         # module.impls. Bug #138/#156: a receiver with no HIR type inference

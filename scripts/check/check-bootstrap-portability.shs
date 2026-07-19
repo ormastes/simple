@@ -764,7 +764,12 @@ for required in \
   'val bytes_left = CrossAnyArrayPolicy.Values(packed_bytes_left)' \
   'val bytes_right = CrossAnyArrayPolicy.Values(packed_bytes_right)' \
   'bytes_left == bytes_right' \
+  'val left = CrossIdentityBox.Wrapped(CrossIdentityLeft.Same)' \
+  'val right = CrossIdentityBox.Wrapped(CrossIdentityRight.Same)' \
+  'val imported = provider_identity()' \
+  'left != right and imported == CrossProviderIdentity.Same' \
   'if not cross_target_enum_field_equality_ok():' \
+  'if not cross_target_enum_type_identity_ok():' \
   'print("result-u8-ok")'; do
   grep -Fq -- "${required}" "${result_try_fixture}" || fail "cross-architecture Result try fixture missing: ${required}"
 done
@@ -775,10 +780,29 @@ for required in \
   'MirConstValue.Str("rt_native_eq")'; do
   grep -Fq -- "${required}" "${enum_eq_mir}" || fail "native enum equality lowering missing: ${required}"
 done
+grep -Fq 'runtime_name: text' src/compiler/20.hir/hir_definitions.spl || fail "HIR enum runtime identity missing"
+grep -Fq 'lower_enum_owners[imported_name] = hir_module_logical_name_from_path(imported_mod.name)' src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl || fail "imported enum owner identity missing"
+enum_identity_mir=src/compiler/50.mir/_MirLowering/module_lowering.spl
+for required in \
+  'me register_enum_runtime_id(enum_def: HirEnum):' \
+  'me register_enum_runtime_name(runtime_name: text, enum_name: text, span: Span?):' \
+  'enum runtime ID collision:' \
+  'self.enum_runtime_id_index[enum_name] = runtime_id'; do
+  grep -Fq -- "${required}" "${enum_identity_mir}" || fail "enum runtime identity lowering missing: ${required}"
+done
+grep -Fq '_bootstrap_enum_runtime_id_names = lw.enum_runtime_id_names' src/compiler/50.mir/_MirLowering/bootstrap_globals.spl || fail "bootstrap enum collision registry sharing missing"
+grep -Fq 'error: bootstrap MIR type registration failed:' src/compiler/50.mir/_MirLowering/bootstrap_globals.spl || fail "bootstrap enum collision rejection missing"
+grep -Fq 'collision.Type255081' test/fixtures/compiler/enum_runtime_identity_guard.spl || fail "enum runtime ID collision regression missing"
+driver_mir_pipeline=src/compiler/80.driver/driver_pipeline.spl
+driver_mir_literals=$(grep -Fc 'MirLowering(' "${driver_mir_pipeline}")
+test "${driver_mir_literals}" -eq "$(grep -Fc 'enum_runtime_id_index: {}' "${driver_mir_pipeline}")" || fail "direct MIR lowering runtime ID map initialization missing"
+test "${driver_mir_literals}" -eq "$(grep -Fc 'enum_runtime_id_names: {}' "${driver_mir_pipeline}")" || fail "direct MIR lowering collision map initialization missing"
+grep -Fq 'self.enum_runtime_id(enum_name)' src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl || fail "enum constructor runtime identity missing"
 enum_eq_runtime=src/runtime/simple_core/core_string.spl
 for required in \
   'fn rt_native_eq_inner(left: i64, right: i64, depth: i64) -> i64:' \
   'val left_disc = rt_enum_discriminant(left)' \
+  'rt_enum_id(left) != rt_enum_id(right)' \
   'return rt_native_eq_inner(rt_enum_payload(left), rt_enum_payload(right), depth + 1)' \
   'val left_ptr = registered_string_ptr(left)' \
   'val left_array = array_is_valid(left) > 0' \
@@ -799,9 +823,11 @@ for required in \
 done
 result_try_provider=test/fixtures/native_crossmodule_result_u8/provider.spl
 for required in \
+  'enum CrossProviderIdentity:' \
+  'fn provider_identity() -> CrossProviderIdentity:' \
   'class CrossZeroArgReceiver:' \
   'fn read(self) -> i64:' \
-  'export BytesError, CrossZeroArgReceiver, load_bytes, fail_bytes'; do
+  'export BytesError, CrossProviderIdentity, CrossZeroArgReceiver, load_bytes, fail_bytes, provider_identity'; do
   grep -Fq -- "${required}" "${result_try_provider}" || fail "cross-module zero-arg receiver provider missing: ${required}"
 done
 grep -Fq 'CROSSMODULE_PROBE="test/fixtures/native_crossmodule_result_u8/main.spl"' "${arch_gate}" || fail "LLVM cross-architecture Result try fixture missing"

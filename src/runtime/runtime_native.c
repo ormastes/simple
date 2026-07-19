@@ -1618,7 +1618,8 @@ static int rt_core_enum_eq(
     RtCoreEnum* right,
     RtCoreEqPair* visited,
     size_t visited_len) {
-    return left && right && left->discriminant == right->discriminant &&
+    return left && right && left->enum_id == right->enum_id &&
+        left->discriminant == right->discriminant &&
         rt_core_value_eq_inner(left->payload, right->payload, visited, visited_len);
 }
 
@@ -3318,12 +3319,10 @@ int64_t rt_tuple_len(int64_t tuple) {
  * mutation API (only rt_enum_discriminant/rt_enum_payload readers exist),
  * so sharing one allocation across equal constructions is safe.
  *
- * Known caveat (pre-existing, not introduced here): every call site passes
- * enum_id=0 (see switch_operators_calls.spl), so two DIFFERENT enum types
- * whose colliding variant shares the same discriminant ordinal would also
- * collide in this cache. No probe this round exercises cross-enum-type
- * comparison; fixing enum_id assignment is out of this lane's scope
- * (shared MIR construction-site logic). */
+ * Custom enum call sites pass a stable qualified-type ID; Result and Option
+ * retain their reserved IDs 0 and 1. Structural equality checks the ID too,
+ * so distinct enum types cannot compare equal merely because their variant
+ * ordinal and payload match. */
 #define RT_ENUM_INTERN_MAX 4096
 typedef struct RtEnumInternEntry {
     int32_t enum_id;

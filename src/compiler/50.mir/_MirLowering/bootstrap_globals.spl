@@ -93,6 +93,7 @@ fn bootstrap_hir_accumulator_name(module: HirModule, func: HirFunction) -> text:
 var _bootstrap_mir_functions: [MirFunction] = []
 var _bootstrap_mir_function_names: [text] = []
 var _bootstrap_function_value_names: [text] = []
+var _bootstrap_enum_runtime_id_names: Dict<text, text> = {}
 
 fn bootstrap_function_value_names_reset():
     _bootstrap_function_value_names = []
@@ -121,6 +122,7 @@ fn bootstrap_mir_functions_add(name: text, fn_: MirFunction):
 var _bootstrap_entry_hir_module: HirModule? = nil
 
 fn bootstrap_set_entry_hir_module(m: HirModule):
+    _bootstrap_enum_runtime_id_names = {}
     _bootstrap_entry_hir_module = Some(m)
 
 fn bootstrap_clear_entry_hir_module():
@@ -186,6 +188,7 @@ fn bootstrap_register_hir_type_defs(lowering: MirLowering, hir_module: HirModule
     with no structs/enums/classes of its own (the common case) makes every
     loop below a no-op, so this is additive only."""
     var lw = lowering
+    lw.enum_runtime_id_names = _bootstrap_enum_runtime_id_names
     val struct_values = hir_module.structs.values()
     var si = 0
     while si < struct_values.len():
@@ -216,7 +219,19 @@ fn bootstrap_register_hir_type_defs(lowering: MirLowering, hir_module: HirModule
         var evi = lw.enum_variant_index
         evi[enum_def.name] = variant_names
         lw.enum_variant_index = evi
+        lw.register_enum_runtime_id(enum_def)
         ei = ei + 1
+
+    if lw.errors.len() > 0:
+        val first_error = lw.errors[0]
+        eprint("error: bootstrap MIR type registration failed: {first_error.message}\n")
+        rt_exit(1)
+
+    if not lw.enum_runtime_id_index.has("Result"):
+        lw.enum_runtime_id_index["Result"] = 0
+    if not lw.enum_runtime_id_index.has("Option"):
+        lw.enum_runtime_id_index["Option"] = 1
+    _bootstrap_enum_runtime_id_names = lw.enum_runtime_id_names
 
     val class_values = hir_module.classes.values()
     var ci = 0

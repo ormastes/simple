@@ -287,7 +287,9 @@ int main(void) {
                         (int64_t)(uintptr_t)float_right));
     int64_t enum_left = rt_enum_new(7, 3, rt_value_int(42));
     int64_t enum_right = rt_enum_new(9, 3, rt_value_int(42));
-    assert(rt_native_eq(enum_left, enum_right));
+    int64_t enum_same = rt_enum_new(7, 3, rt_value_int(42));
+    assert(!rt_native_eq(enum_left, enum_right));
+    assert(rt_native_eq(enum_left, enum_same));
     SplArray* generic_words = rt_array_new(1);
     for (int64_t i = 0; i < 12; i++) {
         assert(rt_typed_words_u64_push(generic_words, 0x200000 + i * 8));
