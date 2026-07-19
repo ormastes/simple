@@ -1,0 +1,88 @@
+# Reject direct by-value struct cycles before MIR recursively copies values.
+
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.{HirStruct}
+use compiler.hir.hir_lowering.items.{hir_module_logical_name_from_path}
+
+struct ValueStructLayoutWalk:
+    node_key: text
+    path: text
+
+fn value_layout_named_symbol(type_: HirType) -> SymbolId?:
+    match type_.kind:
+        case HirTypeKind.Named(symbol, args):
+            if args.len() == 0:
+                return Some(symbol)
+        case _:
+            pass
+    nil
+
+fn value_layout_symbol_is_struct(symbol: HirSymbol) -> bool:
+    match symbol.kind:
+        case SymbolKind.Struct: true
+        case _: false
+
+fn value_layout_node_key(module_name: text, struct_name: text) -> text:
+    hir_module_logical_name_from_path(module_name) + "|" + struct_name
+
+fn validate_value_struct_layouts(modules: Dict<text, HirModule>) -> [text]:
+    """Return the first resolved direct by-value struct cycle, if any."""
+    var structs: Dict<text, HirStruct> = {}
+    var owners: Dict<text, HirModule> = {}
+    var canonical_by_alias: Dict<text, text> = {}
+    var roots: [text] = []
+
+    for module_key in modules.keys():
+        val module: HirModule = modules[module_key]
+        for struct_ in module.structs.values():
+            if struct_.type_params.len() > 0 or struct_.is_generic_template:
+                continue
+            val canonical = value_layout_node_key(module.name, struct_.name)
+            structs[canonical] = struct_
+            owners[canonical] = module
+            canonical_by_alias[canonical] = canonical
+            canonical_by_alias[value_layout_node_key(module_key, struct_.name)] = canonical
+            if not roots.contains(canonical):
+                roots.push(canonical)
+
+    # ponytail: per-root walks are simplest for today's sparse type graphs;
+    # replace with a color-map DFS only if dense graphs make this measurable.
+    for root in roots:
+        var pending: [ValueStructLayoutWalk] = [ValueStructLayoutWalk(node_key: root, path: "")]
+        var visited: [text] = []
+        var pending_idx = 0
+        while pending_idx < pending.len():
+            val walk = pending[pending_idx]
+            pending_idx = pending_idx + 1
+            if visited.contains(walk.node_key):
+                continue
+            visited.push(walk.node_key)
+
+            val struct_ = structs[walk.node_key]
+            val owner = owners[walk.node_key]
+            for field in struct_.fields:
+                val named_symbol = value_layout_named_symbol(field.type_)
+                if not named_symbol.?:
+                    continue
+                val symbol: HirSymbol? = owner.symbols.symbols.get(named_symbol.unwrap().id)
+                if not symbol.?:
+                    continue
+                val resolved = symbol.unwrap()
+                if not value_layout_symbol_is_struct(resolved):
+                    continue
+
+                val defining_module = resolved.defining_module ?? owner.name
+                val unresolved_key = value_layout_node_key(defining_module, resolved.name)
+                val target = canonical_by_alias.get(unresolved_key) ?? unresolved_key
+                if not structs.has(target):
+                    continue
+
+                val edge = struct_.name + "." + field.name
+                val next_path = if walk.path == "": edge else: walk.path + " -> " + edge
+                if target == root:
+                    return ["recursive by-value struct layout: " + next_path + " -> " + structs[root].name]
+                if not visited.contains(target):
+                    pending.push(ValueStructLayoutWalk(node_key: target, path: next_path))
+    []
+
+export validate_value_struct_layouts

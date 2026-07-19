@@ -11,7 +11,9 @@
 
 use std.spec
 
-use compiler.driver.driver_api.{check_file, compile_to_smf}
+use compiler.driver.driver_api.{compile_to_smf}
+use compiler.driver.driver_api_compile_single.{check_file, compile_files}
+use compiler.common.driver_core_types.{CompileMode}
 
 val NL = "\n"
 
@@ -67,7 +69,89 @@ fn refinement_syntax_program() -> text:
     "fn positive(x: i64 where x > 0) -> i64:" + NL +
     "    x"
 
+fn direct_value_cycle_program() -> text:
+    "struct Direct:" + NL +
+    "    next: Direct" + NL + NL +
+    "fn main() -> i64:" + NL +
+    "    0"
+
+fn mutual_value_cycle_program() -> text:
+    "struct Left:" + NL +
+    "    right: Right" + NL + NL +
+    "struct Right:" + NL +
+    "    left: Left" + NL + NL +
+    "fn main() -> i64:" + NL +
+    "    0"
+
+fn reference_cycle_program() -> text:
+    "class RefNode:" + NL +
+    "    next: RefNode" + NL + NL +
+    "fn main() -> i64:" + NL +
+    "    0"
+
+fn array_cycle_program() -> text:
+    "struct ArrayNode:" + NL +
+    "    next: [ArrayNode]" + NL + NL +
+    "fn main() -> i64:" + NL +
+    "    0"
+
+fn cross_module_left_program() -> text:
+    "use build.sml_value_layout_right.{Right}" + NL + NL +
+    "struct Left:" + NL +
+    "    right: Right" + NL + NL +
+    "fn main() -> i64:" + NL +
+    "    0"
+
+fn cross_module_right_program() -> text:
+    "use build.sml_value_layout_left.{Left}" + NL + NL +
+    "struct Right:" + NL +
+    "    left: Left"
+
 describe "Advanced Type Integration via Compiler Facade":
+
+    it "rejects recursive value layouts but permits class and array indirection":
+        val direct_path = "/tmp/sml_advanced_types_direct_value_cycle.spl"
+        val mutual_path = "/tmp/sml_advanced_types_mutual_value_cycle.spl"
+        val reference_path = "/tmp/sml_advanced_types_reference_cycle.spl"
+        val array_path = "/tmp/sml_advanced_types_array_value_cycle.spl"
+        write_file(direct_path, direct_value_cycle_program())
+        write_file(mutual_path, mutual_value_cycle_program())
+        write_file(reference_path, reference_cycle_program())
+        write_file(array_path, array_cycle_program())
+
+        val direct = check_file(direct_path)
+        val mutual = check_file(mutual_path)
+        val reference = check_file(reference_path)
+        val array = check_file(array_path)
+
+        expect(direct.is_success()).to_equal(false)
+        expect(direct.get_errors().join("\n")).to_contain("recursive by-value struct layout: Direct.next -> Direct")
+        expect(mutual.is_success()).to_equal(false)
+        expect(mutual.get_errors().join("\n")).to_contain("recursive by-value struct layout:")
+        expect(mutual.get_errors().join("\n")).to_contain("Left")
+        expect(mutual.get_errors().join("\n")).to_contain("Right")
+        expect(reference.is_success()).to_equal(true)
+        expect(array.is_success()).to_equal(true)
+
+        delete_file(direct_path)
+        delete_file(mutual_path)
+        delete_file(reference_path)
+        delete_file(array_path)
+
+    it "rejects a recursive value layout split across imported modules":
+        val left_path = "build/sml_value_layout_left.spl"
+        val right_path = "build/sml_value_layout_right.spl"
+        write_file(left_path, cross_module_left_program())
+        write_file(right_path, cross_module_right_program())
+
+        val result = compile_files([left_path, right_path], CompileMode.Check)
+
+        expect(result.is_success()).to_equal(false)
+        expect(result.get_errors().join("\n")).to_contain("recursive by-value struct layout:")
+        expect(result.get_errors().join("\n")).to_contain("Left")
+        expect(result.get_errors().join("\n")).to_contain("Right")
+        delete_file(left_path)
+        delete_file(right_path)
 
     context "when checking supported advanced type forms":
         it "accepts unions with payloads and pattern matching":

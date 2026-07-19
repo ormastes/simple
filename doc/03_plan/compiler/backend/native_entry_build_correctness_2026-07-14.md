@@ -193,7 +193,13 @@ the shared binary — deploys require explicit user go-ahead).
     execution is pending. The shared cross-target fixture repeats the local and
     parameter isolation plus embedded-class sharing oracle for AArch64/RISC-V64
     execution and ARM32/RV32/Windows ARM64 target objects. Array-of-class boxing
-    and cyclic value layouts remain separate.
+    remains separate. Direct resolved non-generic
+    by-value struct cycles, including cross-module cycles, are now rejected by
+    one target-independent post-HIR validator before MIR; class/reference and
+    wrapped Option/array shapes remain valid indirection boundaries. The
+    in-process compiler integration spec covers direct, local-mutual, and
+    cross-module value cycles plus allowed self-referential class and array
+    indirection boundaries. First staged execution is pending.
   - Hosted `riscv32-unknown-linux-gnu` remains intentionally unsupported until
     a verified ILP32D linker/sysroot/CRT owner exists. The existing Linux
     architecture gate now exercises the original hosted target boundary with a
