@@ -272,11 +272,60 @@ compiler hashes are
 `9013f8d0c0b4681d9347a428832e3a42f9e0859eb3e05672b6a850dbec339f5a`
 (Stage3).
 
-A source-matched Stage4 profile was intentionally stopped after 380.08 seconds:
-43 files completed and `src/compiler/10.frontend/core/parser.spl` was active.
-The chronological position is not materially better than the cache-less run,
-so the older 344-file/163-second log cannot be attributed to this cache alone.
-That older tree also contained arena-preferred declaration accessors and
-integer environment reads later removed by the same broad snapshot. Restore
-and test those existing fast paths as the next single frontend fix before
-another Stage4 attempt. No Stage4 completion or full-CLI claim is made.
+The source-matched Stage4 profile did not stop cleanly at 380.08 seconds. The
+outer timeout exited while its compiler child survived, and the orphaned child
+continued at 99.9% CPU until it was found and terminated at about 749 seconds.
+Only 43 files had completed. While parsing
+`src/compiler/10.frontend/core/parser.spl`, the valid nested
+`if tc > mc:` at line 331 produced `expected :, got Ident ''`; the process then
+made no phase progress for roughly 373 seconds, reached 8,372,380 KiB RSS, and
+expanded `build/native_probe/stage4-short-cache-restore.log` to about 16 MiB
+with approximately 15.78 million blank lines. This is a genuine frontend
+resource-corruption/runaway failure, not a termination-signal artifact.
+
+The older 344-file/163-second cache-bearing tree cannot be attributed to the
+short-string cache alone: it also contained the `f0a5601842`/`ee4d21b4bf`
+arena-owner fast paths. The unrelated `fa1ee50c35` snapshot removed cached
+expression/statement arena modes and counts, arena-preferred declaration
+accessors, integer environment reads, and their focused stale-environment
+test. Restore that reviewed bundle and pass its focused tests before the next
+single bounded Stage4 attempt. No Stage4 completion or full-CLI claim is made.
+
+## Frontend arena-owner restoration — 2026-07-19
+
+The reviewed `f0a5601842`/`ee4d21b4bf` arena-owner bundle is restored without
+reverting later reset, parser, or field-default fixes. Expression and statement
+counts/mode flags are cached; native arena mode no longer mirrors every node
+through the process environment; declaration and module reads stay within their
+arena and use integer environment reads only for mode gates. The deleted native
+arena isolation spec is restored, the stale declaration/interpreter mirror
+cases are reinstated, and an exact `parser.spl` self-parse regression is added.
+Bounded seed diagnostics pass the arena isolation spec 3/3, both reinstated
+mirror cases, and the parser self-parse 1/1. The broader declaration-count spec
+is 7/9 under the seed: its direct imported-array large/small assertion and
+GPU/asm side-arena reset scenario still fail across seed interpreter module
+boundaries. The seed's generic `test` wrapper reports no examples and
+`check src/compiler` delegates to the absent admitted `bin/simple`, so those
+are not product-admission claims or an overall green test claim.
+
+One incremental pure-Simple Stage2/Stage3 rebuild passed both compiler sanity
+checks and Stage2 native-build capability. Its hashes are
+`33e0c7b6852a01497b1fd29d46af2d4241a1218d64bf1a3013701b7620dbe814`
+(Stage2) and
+`3599de8c8711b6a3a0582e1d03191e6c5997352161c889c6b3401fcc07f30850`
+(Stage3).
+
+The single bounded Stage4 profile proves a large improvement and exposes the
+next blocker. `parser.spl` parsed cleanly; the run completed 50 files in about
+59 seconds, versus 43 files in 380 seconds before restoration. It then reached
+the 8 GiB address-space ceiling while starting
+`src/lib/nogc_async_mut/database/bug.spl`: glibc failed to register a TLS
+destructor and aborted at 63.51 seconds with 8,370,968 KiB peak RSS. The timeout
+directly owned the compiler PID and the full process chain exited, so no orphan
+remained. Evidence is retained in
+`build/native_probe/stage4-arena-restore.{log,time}`. The parser corruption and
+per-node environment wall are fixed; retained allocation growth remains the
+next focused blocker. This profile used Stage3, while every retained
+long-progress profile used Stage2, so the next diagnostic must first isolate a
+generation-specific miscompile/runtime difference with one bounded Stage2 A/B;
+do not select another source allocation patch from these unlike generations.

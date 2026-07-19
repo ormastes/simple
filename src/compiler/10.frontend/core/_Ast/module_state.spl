@@ -20,6 +20,7 @@ use compiler.core.ast_stmt.*
 use compiler.core.ast_types.{CoreExpr, CoreStmt, CoreDecl}
 
 extern fn rt_env_get(key: text) -> text
+extern fn rt_env_get_i64(key: text, default_value: i64) -> i64
 extern fn rt_env_set(key: text, value: text) -> bool
 
 var lexer_state_core_col_slot: [text] = ["1"]
@@ -282,7 +283,7 @@ fn module_add_decl(decl_idx: i64):
     # (grow past the old 128 cap via push). module_decl_at is env-first/array-fallback
     # and only reads index < count, so the array is always the populated truth in
     # compiled stage4. See bug ast_env_var_quadratic_parse_2026-06-13.
-    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (rt_env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? "") != "1":
+    if rt_env_get_i64("SIMPLE_BOOTSTRAP", 0) == 1 and rt_env_get_i64("SIMPLE_NATIVE_ARENA_DECLS", 0) != 1:
         rt_env_set("SIMPLE_BOOTSTRAP_MODULE_DECL_" + int_to_str(count), int_to_str(decl_idx))
     if count < module_decl_slots.len():
         module_decl_slots[count] = decl_idx
@@ -307,7 +308,9 @@ fn module_decl_count_get() -> i64:
 fn module_decl_at(index: i64) -> i64:
     if index < 0 or index >= ast_module_decl_count_get():
         return -1
-    if (rt_env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? "") == "1":
+    if rt_env_get_i64("SIMPLE_NATIVE_ARENA_DECLS", 0) == 1:
+        if index >= module_decl_slots.len():
+            return -1
         return module_decl_slots[index]
     val env_value = rt_env_get("SIMPLE_BOOTSTRAP_MODULE_DECL_" + int_to_str(index)) ?? ""
     if env_value != "":
@@ -321,7 +324,7 @@ fn ast_reset():
     # every reset with the pre-reset arena sizes so an interleaved reset that
     # clobbers a still-in-flight conversion can be pinpointed. Guarded by an
     # env var so it is inert unless explicitly enabled.
-    if (rt_env_get("SIMPLE_TRACE_AST_RESET") ?? "") == "1":
+    if rt_env_get_i64("SIMPLE_TRACE_AST_RESET", 0) == 1:
         ast_reset_seq = ast_reset_seq + 1
         print "[ast_reset] seq={ast_reset_seq}"
     # Native binaries may zero-initialize module arrays. Allocate once when
