@@ -1,3 +1,14 @@
+> **UPDATE 2026-07-19 — interp/JIT path FIXED (heap-box).** The seed
+> interpreter / cranelift-JIT path (`run`, `test`) now heap-boxes container
+> floats (`Value::from_float` → `HeapFloat`), so `[0.1][0] == 0.1` there. See
+> `fix(runtime): heap-box f64 in tagged RuntimeValue slots`. **native-build
+> remains open** — it self-hosts the pure-Simple compiler (`src/compiler/*.spl`)
+> + links `runtime_native.c`, neither of which the heap-box fix touches; that
+> parallel port is the remaining work described below. Regression guard for the
+> fixed path: `test/01_unit/compiler/codegen/array_f64_element_precision_spec.spl`.
+
+---
+
 # f64 loses low 3 mantissa bits through a RuntimeValue tagged slot (arrays/dicts) — inline tagged-float box
 
 - **id:** seed_f64_array_element_precision_mask_2026-07-19

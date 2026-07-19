@@ -77,6 +77,15 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
                         names.insert("rt_value_bool".to_string());
                         names.insert("rt_value_as_float".to_string());
                     }
+                    MirInst::BoxFloat { .. } => {
+                        // Container floats are heap-boxed losslessly via a
+                        // runtime call (see cranelift/llvm emit_box_float).
+                        names.insert("rt_value_float".to_string());
+                    }
+                    MirInst::UnboxFloat { .. } => {
+                        // Reading a boxed float back calls rt_value_as_float.
+                        names.insert("rt_value_as_float".to_string());
+                    }
                     MirInst::DictLit { .. } => {
                         names.insert("rt_dict_new".to_string());
                         names.insert("rt_dict_set".to_string());

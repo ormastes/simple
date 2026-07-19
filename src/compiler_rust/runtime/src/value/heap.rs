@@ -37,6 +37,11 @@ pub enum HeapObjectType {
     BTreeSet = 0x1A,
     // SFFI-wrapped Rust objects (object-based SFFI system)
     FfiObject = 0x1B,
+    // Heap-boxed f64. The inline TAG_FLOAT representation stores only the upper
+    // 61 bits of the mantissa (`bits >> 3`), silently zeroing the low 3 bits, so
+    // a container/Any float loses precision ([0.1][0] != 0.1). Container floats
+    // are boxed here instead, preserving the full double losslessly.
+    Float = 0x1C,
 }
 
 /// Header for all heap-allocated objects
@@ -51,6 +56,18 @@ pub struct HeapHeader {
     pub reserved: u16,
     /// Size of the object in bytes (including header)
     pub size: u32,
+}
+
+/// Heap-boxed f64 (see `HeapObjectType::Float`). A leaf object: the full
+/// double is stored verbatim so container/Any floats round-trip exactly.
+/// Discrimination is O(1): the pointer is validated against the shared
+/// `HEAP_ALLOCATION_REGISTRY` HashSet (a pure membership test, performed
+/// before any `->value`/`->header` dereference), so a stray i64 that merely
+/// aliases TAG_HEAP is never dereferenced.
+#[repr(C)]
+pub struct HeapFloat {
+    pub header: HeapHeader,
+    pub value: f64,
 }
 
 /// GC flag bits stored in HeapHeader::gc_flags
@@ -290,6 +307,8 @@ impl From<HeapObjectType> for ValueKind {
             HeapObjectType::HashSet => ValueKind::HashSet,
             HeapObjectType::BTreeSet => ValueKind::BTreeSet,
             HeapObjectType::FfiObject => ValueKind::FfiObject,
+            // Heap-boxed float presents as a plain float to the value system.
+            HeapObjectType::Float => ValueKind::Float,
         }
     }
 }

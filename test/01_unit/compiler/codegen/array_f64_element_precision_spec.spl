@@ -1,0 +1,39 @@
+# Array / Container f64 Element Precision Regression Spec
+#
+# Regression coverage for the 2026-07-19 heap-box fix: an `f64` stored into a
+# heterogeneous RuntimeValue slot (array element, dict value, Any) used to lose
+# its low 3 mantissa bits because the value was inline-tagged
+# (`(bits >> 3) << 3 | TAG_FLOAT`) at box time, so `[0.1][0] != 0.1`.
+#
+# Fix (src/compiler_rust/runtime/src/value/{core,heap}.rs + codegen
+# BoxFloat/UnboxFloat): container floats are now HEAP-BOXED (a `HeapFloat`
+# carrying the raw f64), so they round-trip exactly. This runs on the seed
+# interpreter / cranelift-JIT path, where `rt_value_float` heap-boxes.
+#
+# NOTE: uses the store-to-local form (`val x = a[0]` then compare), NOT
+# `if some_fn_returning_f64(...) == 0.1`. The latter stays wrong via a SEPARATE,
+# orthogonal bug — `build_vreg_types` does not type user-fn f64 call returns
+# (doc/08_tracking/bug/native_call_return_f64_untyped_binop_2026-07-19.md) — so a
+# spec using that form would go red for the wrong reason.
+#
+# native-build (self-hosted pure-Simple compiler + runtime_native.c) still loses
+# precision — a separate port, tracked in
+# doc/08_tracking/bug/seed_f64_array_element_precision_mask_2026-07-19.md.
+
+use std.spec.*
+
+describe "f64 container element precision":
+    it "reads a fractional f64 array element back without precision loss":
+        val a = [0.1, 0.2, 0.3]
+        val x = a[0]
+        expect(x == 0.1).to_equal(true)
+
+    it "reads a fractional f64 dict value back without precision loss":
+        val d = {"k": 0.1}
+        val x = d["k"]
+        expect(x == 0.1).to_equal(true)
+
+    it "keeps boxed 0.0 falsy and equal to scalar 0.0":
+        val a = [0.0]
+        val x = a[0]
+        expect(x == 0.0).to_equal(true)

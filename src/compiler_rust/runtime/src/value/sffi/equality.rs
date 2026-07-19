@@ -82,6 +82,17 @@ fn value_hash_inner(v: RuntimeValue, depth: u32) -> u64 {
         // `keys_equal` probe -- it never causes a false negative.
         return 0x9e3779b97f4a7c15;
     }
+    // Floats (inline or heap-boxed) hash by VALUE, consistent with the
+    // value-based float equality in `value_eq_inner`. Without this, a heap-boxed
+    // float key would hash its pointer and a dict lookup with an equal-but-
+    // distinct float box would miss. Normalize -0.0 to 0.0 (they are ==).
+    if v.is_float() {
+        let mut d = v.as_float();
+        if d == 0.0 {
+            d = 0.0;
+        }
+        return fnv1a_bits(d.to_bits());
+    }
     if v.tag() != tags::TAG_HEAP {
         return fnv1a_bits(v.to_raw());
     }
@@ -139,6 +150,13 @@ fn value_hash_inner(v: RuntimeValue, depth: u32) -> u64 {
 fn value_eq_inner(a: RuntimeValue, b: RuntimeValue, visited: &mut Vec<(usize, usize)>) -> bool {
     if a.to_raw() == b.to_raw() {
         return true;
+    }
+
+    // Floats (inline TAG_FLOAT or heap-boxed with TAG_HEAP) compare by VALUE.
+    // Two heap-boxed floats of the same double are distinct pointers, so the
+    // raw-eq fast path above misses them; handle them here before the tag match.
+    if a.is_float() || b.is_float() {
+        return a.is_float() && b.is_float() && a.as_float() == b.as_float();
     }
 
     match (a.tag(), b.tag()) {
@@ -350,6 +368,23 @@ fn generic_int_eq(value: RuntimeValue, expected: i64) -> bool {
 fn value_compare(a: RuntimeValue, b: RuntimeValue) -> i64 {
     if a.to_raw() == b.to_raw() {
         return 0;
+    }
+
+    // Heap-boxed floats carry TAG_HEAP, so the tag-based arms below would sort
+    // them by pointer. Compare a heap-boxed float (and any int/float mix that
+    // involves one) by numeric value instead. The legacy inline TAG_FLOAT arms
+    // are left intact for backward compatibility.
+    if (a.is_float() && a.is_heap()) || (b.is_float() && b.is_heap()) {
+        if a.is_float() && b.is_float() {
+            return compare_f64(a.as_float(), b.as_float());
+        }
+        if a.is_float() && b.is_int() {
+            return compare_f64(a.as_float(), b.as_int() as f64);
+        }
+        if a.is_int() && b.is_float() {
+            return compare_f64(a.as_int() as f64, b.as_float());
+        }
+        // Float vs non-numeric heap/special: fall through to tag ordering.
     }
 
     match (a.tag(), b.tag()) {

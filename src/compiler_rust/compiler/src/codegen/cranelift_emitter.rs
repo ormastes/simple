@@ -736,17 +736,21 @@ impl<M: Module> CodegenEmitter for CraneliftEmitter<'_, '_, M> {
             .get(&value)
             .copied()
             .unwrap_or_else(|| self.builder.ins().f64const(0.0));
-        // f32 VRegs (e.g. struct fields typed f32) flow into BoxFloat too;
-        // bitcasting f32 straight to i64 is a 32-vs-64-bit verifier error.
-        if self.builder.func.dfg.value_type(val) == types::F32 {
+        // Normalize to an f64 argument for rt_value_float(f64).
+        // f32 VRegs (e.g. struct fields typed f32) flow into BoxFloat too and
+        // must be promoted; a raw i64 bit-pattern (defensive) is bitcast back.
+        let vt = self.builder.func.dfg.value_type(val);
+        if vt == types::F32 {
             val = self.builder.ins().fpromote(types::F64, val);
+        } else if vt == types::I64 {
+            val = self.builder.ins().bitcast(types::F64, MemFlags::new(), val);
         }
-        let bits = self.builder.ins().bitcast(types::I64, MemFlags::new(), val);
-        let three = self.builder.ins().iconst(types::I64, 3);
-        let shifted = self.builder.ins().ushr(bits, three);
-        let payload = self.builder.ins().ishl(shifted, three);
-        let tag = self.builder.ins().iconst(types::I64, 2);
-        let boxed = self.builder.ins().bor(payload, tag);
+        // Heap-box for LOSSLESS container floats: rt_value_float(f64) allocates a
+        // HeapFloat holding the full double and returns a tagged heap pointer.
+        // The old inline (bits>>3)<<3|TAG_FLOAT zeroed the low 3 mantissa bits,
+        // so [0.1][0] != 0.1. Scalar f64 in native registers is unaffected.
+        let boxed =
+            super::instr::helpers::call_runtime_1(self.ctx, self.builder, "rt_value_float", val);
         self.ctx.vreg_values.insert(dest, boxed);
         Ok(())
     }
@@ -780,10 +784,10 @@ impl<M: Module> CodegenEmitter for CraneliftEmitter<'_, '_, M> {
             .get(&value)
             .copied()
             .unwrap_or_else(|| self.builder.ins().iconst(types::I64, 0));
-        let three = self.builder.ins().iconst(types::I64, 3);
-        let shifted = self.builder.ins().ushr(val, three);
-        let bits = self.builder.ins().ishl(shifted, three);
-        let unboxed = self.builder.ins().bitcast(types::F64, MemFlags::new(), bits);
+        // rt_value_as_float(RuntimeValue) -> f64 reads the heap-boxed float (or a
+        // legacy inline TAG_FLOAT) losslessly, mirroring emit_box_float.
+        let unboxed =
+            super::instr::helpers::call_runtime_1(self.ctx, self.builder, "rt_value_as_float", val);
         self.ctx.vreg_values.insert(dest, unboxed);
         Ok(())
     }

@@ -427,6 +427,10 @@ fn heap_value_to_display_string(v: RuntimeValue) -> String {
         HeapObjectType::Object => format!("<object@{ptr:p}>"),
         HeapObjectType::Closure => format!("<closure@{ptr:p}>"),
         HeapObjectType::Enum => format!("<enum@{ptr:p}>"),
+        HeapObjectType::Float => match v.as_heap_float_ptr() {
+            Some(fp) => format_float_display(unsafe { (*fp).value }),
+            None => format!("<heap@{ptr:p}>"),
+        },
         _ => format!("<heap@{ptr:p}>"),
     }
 }

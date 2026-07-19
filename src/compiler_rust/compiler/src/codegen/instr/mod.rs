@@ -1386,23 +1386,23 @@ pub fn compile_instruction<M: Module>(
         }
 
         MirInst::BoxFloat { dest, value } => {
-            // Box float as RuntimeValue: (bits >> 3) << 3 | TAG_FLOAT
-            // TAG_FLOAT is 2 (0b010)
+            // Heap-box for LOSSLESS container floats via rt_value_float(f64),
+            // which allocates a HeapFloat storing the full double and returns a
+            // tagged heap pointer. The old inline (bits>>3)<<3|TAG_FLOAT zeroed
+            // the low 3 mantissa bits, so [0.1][0] != 0.1.
             let mut val = ctx.vreg_values.get(value).copied().unwrap_or_else(|| {
                 // Missing VReg, use default 0
                 builder.ins().f64const(0.0)
             });
-            // f32 VRegs (e.g. struct fields typed f32) flow into BoxFloat too;
-            // bitcasting f32 straight to i64 is a 32-vs-64-bit verifier error.
-            if builder.func.dfg.value_type(val) == types::F32 {
+            // f32 VRegs (e.g. struct fields typed f32) flow into BoxFloat too and
+            // must be promoted; a raw i64 bit-pattern (defensive) is bitcast back.
+            let vt = builder.func.dfg.value_type(val);
+            if vt == types::F32 {
                 val = builder.ins().fpromote(types::F64, val);
+            } else if vt == types::I64 {
+                val = builder.ins().bitcast(types::F64, MemFlags::new(), val);
             }
-            let bits = builder.ins().bitcast(types::I64, MemFlags::new(), val);
-            let three = builder.ins().iconst(types::I64, 3);
-            let shifted = builder.ins().ushr(bits, three);
-            let payload = builder.ins().ishl(shifted, three);
-            let tag = builder.ins().iconst(types::I64, 2); // TAG_FLOAT
-            let boxed = builder.ins().bor(payload, tag);
+            let boxed = helpers::call_runtime_1(ctx, builder, "rt_value_float", val);
             ctx.vreg_values.insert(*dest, boxed);
         }
 
@@ -1437,15 +1437,14 @@ pub fn compile_instruction<M: Module>(
         }
 
         MirInst::UnboxFloat { dest, value } => {
-            // Unbox RuntimeValue to float: extract bits and shift back
+            // Unbox RuntimeValue to float via rt_value_as_float(RuntimeValue) ->
+            // f64, which reads the heap-boxed float (or a legacy inline
+            // TAG_FLOAT) losslessly, mirroring BoxFloat above.
             let val = ctx.vreg_values.get(value).copied().unwrap_or_else(|| {
                 // Missing VReg, use default 0
                 builder.ins().iconst(types::I64, 0)
             });
-            let three = builder.ins().iconst(types::I64, 3);
-            let shifted = builder.ins().ushr(val, three);
-            let bits = builder.ins().ishl(shifted, three);
-            let unboxed = builder.ins().bitcast(types::F64, MemFlags::new(), bits);
+            let unboxed = helpers::call_runtime_1(ctx, builder, "rt_value_as_float", val);
             ctx.vreg_values.insert(*dest, unboxed);
         }
     }

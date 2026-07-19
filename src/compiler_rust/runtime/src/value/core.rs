@@ -45,6 +45,10 @@ pub struct RuntimeValue(pub(crate) u64);
 
 impl std::fmt::Debug for RuntimeValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Heap-boxed floats carry TAG_HEAP; surface them as floats, not pointers.
+        if self.is_float() {
+            return write!(f, "RuntimeValue::Float({})", self.as_float());
+        }
         match self.tag() {
             tags::TAG_INT => write!(f, "RuntimeValue::Int({})", self.as_int()),
             tags::TAG_FLOAT => write!(f, "RuntimeValue::Float({})", self.as_float()),
@@ -65,12 +69,14 @@ impl std::fmt::Debug for RuntimeValue {
 
 impl PartialEq for RuntimeValue {
     fn eq(&self, other: &Self) -> bool {
-        // For floats, need to handle NaN specially
-        if self.tag() == tags::TAG_FLOAT && other.tag() == tags::TAG_FLOAT {
-            self.as_float() == other.as_float()
-        } else {
-            self.0 == other.0
+        // Floats (inline TAG_FLOAT or heap-boxed) compare by VALUE, not by raw
+        // bits: two heap-boxed floats holding the same double are distinct
+        // pointers, so a raw-bits compare would wrongly report them unequal.
+        // (IEEE semantics: NaN != NaN, -0.0 == 0.0.)
+        if self.is_float() || other.is_float() {
+            return self.is_float() && other.is_float() && self.as_float() == other.as_float();
         }
+        self.0 == other.0
     }
 }
 
@@ -78,12 +84,20 @@ impl Eq for RuntimeValue {}
 
 impl std::hash::Hash for RuntimeValue {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        // Hash the raw bits directly
-        // This is safe because:
-        // - For floats: same float value -> same bits -> same hash
-        // - For everything else: equality is based on raw bits anyway
-        // - Consistent with Eq: if a == b, then hash(a) == hash(b)
-        self.0.hash(state);
+        // Floats must hash by VALUE to stay consistent with the value-based Eq
+        // above: two heap-boxed floats of the same double are distinct pointers,
+        // so hashing raw bits would break the `a == b => hash(a) == hash(b)`
+        // invariant (dict/HashMap float-key misses). Normalize -0.0 to 0.0 so
+        // the two IEEE-equal zeros hash identically.
+        if self.is_float() {
+            let mut d = self.as_float();
+            if d == 0.0 {
+                d = 0.0;
+            }
+            d.to_bits().hash(state);
+        } else {
+            self.0.hash(state);
+        }
     }
 }
 
@@ -95,6 +109,12 @@ impl PartialOrd for RuntimeValue {
 
 impl Ord for RuntimeValue {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Floats (inline or heap-boxed) order by VALUE using IEEE total order,
+        // regardless of pointer identity or tag form. Non-float values keep the
+        // tag-then-payload ordering below.
+        if self.is_float() && other.is_float() {
+            return self.as_float().total_cmp(&other.as_float());
+        }
         // Order by tag first, then by payload
         // This provides a total ordering for BTreeMap/BTreeSet
         match self.tag().cmp(&other.tag()) {
@@ -200,24 +220,67 @@ impl RuntimeValue {
     // Float operations
     // =========================================================================
 
-    /// Create a float value
+    /// Create a float value.
+    ///
+    /// Floats are HEAP-BOXED (lossless): the old inline `TAG_FLOAT` form stored
+    /// only `bits >> 3`, silently zeroing the low 3 mantissa bits, so a
+    /// container/Any float lost precision ([0.1][0] != 0.1). We now allocate a
+    /// `HeapFloat` leaf object that stores the full double and return a tagged
+    /// heap pointer. Scalar f64 held in native registers is unaffected — only
+    /// values that enter the tagged RuntimeValue representation box here.
     #[inline]
     pub fn from_float(f: f64) -> Self {
-        // Store float bits in the upper 61 bits
-        // We lose 3 bits of precision but that's acceptable for most uses
-        let bits = f.to_bits();
-        Self::from_tag_payload(tags::TAG_FLOAT, bits >> 3)
+        let size = std::mem::size_of::<super::heap::HeapFloat>();
+        let layout = match std::alloc::Layout::from_size_align(size, 8) {
+            Ok(l) => l,
+            Err(_) => {
+                let bits = f.to_bits();
+                return Self::from_tag_payload(tags::TAG_FLOAT, bits >> 3);
+            }
+        };
+        unsafe {
+            let ptr = std::alloc::alloc(layout) as *mut super::heap::HeapFloat;
+            if ptr.is_null() {
+                // OOM: fall back to the legacy lossy inline form rather than crash.
+                let bits = f.to_bits();
+                return Self::from_tag_payload(tags::TAG_FLOAT, bits >> 3);
+            }
+            (*ptr).header = super::heap::HeapHeader::new(HeapObjectType::Float, size as u32);
+            (*ptr).value = f;
+            Self::from_heap_ptr(ptr as *mut HeapHeader)
+        }
     }
 
-    /// Check if this is a float
+    /// Pointer to the boxed `HeapFloat` if this value is a heap-boxed float,
+    /// else `None`. The registry membership check (inside `heap_type`) is a pure
+    /// O(1) HashSet lookup performed BEFORE any dereference, so a stray i64 that
+    /// aliases TAG_HEAP is never dereferenced.
     #[inline]
-    pub const fn is_float(self) -> bool {
-        self.tag() == tags::TAG_FLOAT
+    pub fn as_heap_float_ptr(self) -> Option<*const super::heap::HeapFloat> {
+        if matches!(self.heap_type(), Some(HeapObjectType::Float)) {
+            Some(self.as_heap_ptr() as *const super::heap::HeapFloat)
+        } else {
+            None
+        }
     }
 
-    /// Get the float value (undefined behavior if not a float)
+    /// Check if this is a float (heap-boxed, or a legacy inline `TAG_FLOAT`).
+    #[inline]
+    pub fn is_float(self) -> bool {
+        self.tag() == tags::TAG_FLOAT || self.as_heap_float_ptr().is_some()
+    }
+
+    /// Get the float value (undefined behavior if not a float).
     #[inline]
     pub fn as_float(self) -> f64 {
+        if self.tag() == tags::TAG_FLOAT {
+            // Legacy inline form (low 3 mantissa bits already lost at box time).
+            return f64::from_bits(self.payload() << 3);
+        }
+        if let Some(ptr) = self.as_heap_float_ptr() {
+            return unsafe { (*ptr).value };
+        }
+        // Defensive: not a float. Preserve the old inline interpretation.
         f64::from_bits(self.payload() << 3)
     }
 
@@ -332,6 +395,11 @@ impl RuntimeValue {
     /// Check if this value is "truthy" (non-zero, non-nil, non-empty)
     #[inline]
     pub fn truthy(self) -> bool {
+        // Heap-boxed floats carry TAG_HEAP; a boxed 0.0 must be falsy, not
+        // "truthy because the pointer exists".
+        if self.is_float() {
+            return self.as_float() != 0.0;
+        }
         match self.tag() {
             tags::TAG_INT => self.as_int() != 0,
             tags::TAG_FLOAT => self.as_float() != 0.0,
@@ -386,6 +454,10 @@ impl RuntimeValue {
 
     /// Get a string representation of this value's type
     pub fn type_name(self) -> &'static str {
+        // Heap-boxed floats carry TAG_HEAP; report them as floats.
+        if self.is_float() {
+            return "float";
+        }
         match self.tag() {
             tags::TAG_INT => "int",
             tags::TAG_FLOAT => "float",
@@ -425,6 +497,9 @@ impl RuntimeValue {
                 Some(HeapObjectType::HashSet) => "hashset",
                 Some(HeapObjectType::BTreeSet) => "btreeset",
                 Some(HeapObjectType::FfiObject) => "sffi_object",
+                // Unreachable in practice: the early `is_float()` guard above
+                // handles heap-boxed floats before this match.
+                Some(HeapObjectType::Float) => "float",
                 None => "null",
             },
             _ => "unknown",
@@ -435,6 +510,10 @@ impl RuntimeValue {
     ///
     /// This provides a unified type abstraction shared with the interpreter.
     pub fn value_kind(self) -> ValueKind {
+        // Heap-boxed floats carry TAG_HEAP; report them as floats.
+        if self.is_float() {
+            return ValueKind::Float;
+        }
         match self.tag() {
             tags::TAG_INT => ValueKind::Int,
             tags::TAG_FLOAT => ValueKind::Float,
@@ -474,6 +553,9 @@ impl RuntimeValue {
                 Some(HeapObjectType::HashSet) => ValueKind::HashSet,
                 Some(HeapObjectType::BTreeSet) => ValueKind::BTreeSet,
                 Some(HeapObjectType::FfiObject) => ValueKind::FfiObject,
+                // Unreachable in practice: the early `is_float()` guard above
+                // handles heap-boxed floats before this match.
+                Some(HeapObjectType::Float) => ValueKind::Float,
                 None => ValueKind::Nil,
             },
             _ => ValueKind::Nil,
