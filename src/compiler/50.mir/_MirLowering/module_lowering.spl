@@ -101,6 +101,8 @@ impl MirLowering:
             lambda_bindings: {},
             lambda_capture_snapshot: {},
             current_has_vhdl_metadata: false,
+            canonical_type_symbols: {},
+            next_canonical_type_symbol: 1000000000,
             global_symbol_ids: {},
             target_context: target_context
         )
@@ -109,6 +111,27 @@ impl MirLowering:
         match symbol:
             case SymbolId(id): id
             case _: -1
+
+    me canonical_mir_type_symbol(symbol: SymbolId) -> SymbolId:
+        val symbol_info = self.symbols.get_symbol(symbol)
+        match symbol_info:
+            case Some(info):
+                val defining_module = match info.defining_module:
+                    case Some(value): value
+                    case None: ""
+                if defining_module == "":
+                    return symbol
+                val key = "{defining_module}.{info.name}"
+                val existing = self.canonical_type_symbols.get(key)
+                match existing:
+                    case Some(id): return SymbolId(id: id)
+                    case None: ()
+                val id = self.next_canonical_type_symbol
+                self.next_canonical_type_symbol = id + 1
+                self.canonical_type_symbols[key] = id
+                SymbolId(id: id)
+            case None:
+                symbol
 
     fn hir_bitfield_fields(bitfield_def: HirBitfield) -> [HirBitfieldField]:
         match bitfield_def:
@@ -839,8 +862,9 @@ impl MirLowering:
         var bldr = self.builder
         var module = bldr.module
         var types = module.types
-        types[struct_def.symbol] = MirTypeDef(
-            symbol: struct_def.symbol,
+        val canonical_symbol = self.canonical_mir_type_symbol(struct_def.symbol)
+        types[canonical_symbol] = MirTypeDef(
+            symbol: canonical_symbol,
             name: struct_def.name,
             kind: MirTypeDefKind.Struct(fields),
             is_export_c: false,
@@ -882,8 +906,9 @@ impl MirLowering:
         var bldr = self.builder
         var module = bldr.module
         var types = module.types
-        types[class_def.symbol] = MirTypeDef(
-            symbol: class_def.symbol,
+        val canonical_symbol = self.canonical_mir_type_symbol(class_def.symbol)
+        types[canonical_symbol] = MirTypeDef(
+            symbol: canonical_symbol,
             name: class_def.name,
             kind: MirTypeDefKind.Struct(fields),
             is_export_c: is_export_c,
