@@ -1,6 +1,6 @@
 # Native entry closure references undeclared `call_type_args`
 
-Status: OPEN (recorded 2026-07-19)
+Status: SOURCE FIXED (2026-07-19); incremental Stage4 execution pending
 
 ## Reproduction
 
@@ -27,3 +27,11 @@ Expected: the entry closure either declares the referenced local or does not
 emit the load, then links the focused probe. Cranelift and cross-target status
 are not yet measured. This is separate from the restored phase-one import scan;
 `entry_closure_physical_source_dedup_spec.spl` remains its regression owner.
+
+## Root cause and fix
+
+`HirExprKind.Call` binds `type_args` directly as `[HirType]`, but a later sync
+reintroduced an obsolete optional `call_type_args` conversion. Call inference
+now passes its bound `type_args` directly to
+`generate_obligations_for_function_call`; the regression spec rejects any
+undeclared `call_type_args` reference.

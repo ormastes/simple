@@ -297,7 +297,10 @@ the shared binary — deploys require explicit user go-ahead).
   line and rejects the slow loop. A focused LLVM execution probe then stopped
   on the separate undeclared `call_type_args` bug recorded in
   `doc/08_tracking/bug/native_entry_closure_call_type_args_undeclared_2026-07-19.md`.
-  The source fix was rebuilt incrementally into LLVM Stage3
+  A later sync reintroduced that invalid optional conversion; current source
+  again passes the Call arm's bound `[HirType]` values directly, and the
+  entry-closure regression spec rejects the undeclared name. The earlier source
+  fix was rebuilt incrementally into LLVM Stage3
   `745c134062c5d8624f0d6ed871b4a9c308a6e5bd55c4a0a39a32f1e62ac6504b`
   using 624 cached objects and 33 recompiles; its LLVM capability probe passed.
   A correctly instrumented six-minute Stage4 run then emitted `compile:start`
