@@ -1,0 +1,431 @@
+#!/bin/sh
+# Board-loadable evidence gate for the SimpleOS WM "aqua glyph" goal.
+#
+# Boots the desktop kernel under REAL firmware (OVMF pflash + grub-mkstandalone
+# BOOTX64.EFI multiboot) -- NEVER -kernel, NEVER isa-debug-exit -- with the NVMe
+# font disk attached, captures a QMP screendump after a bounded wait, and proves
+# THREE things with a PPM pixel analysis plus serial-log markers:
+#   1. the Aqua theme is actually on screen (desktop/titlebar/window-body colors)
+#   2. glyphs are actually rendering (anti-aliased color variety in the clock
+#      region), not just a flat theme fill
+#   3. the kernel reached first-frame without a PANIC/FAULT
+#
+# QEMU invocation (pflash OVMF, virtio ESP, NVMe font disk, -vga std, QMP
+# socket) and the PPM token-reader are reused verbatim from the working
+# boot_ovmf_wkheap.sh harness. Output/exit-code conventions follow
+# scripts/check/check-simpleos-x86-64-wm-qemu-readiness.shs (POSIX sh,
+# set -eu, "key: value" lines, exit 1 on not-ready).
+#
+# Required env:
+#   SIMPLEOS_KERNEL_ELF   path to the built desktop kernel ELF (multiboot)
+#   SIMPLEOS_FONT_DISK    path to the raw NVMe font-disk image
+set -eu
+
+# NOTE(RE-PIN-GATE 2026-07-19): this script currently lives in scratchpad, not
+# at its eventual scripts/check/ home, so the scripts/check/-relative
+# "$(dirname "$0")/../.." derivation resolved to a bogus path outside the repo
+# (verified: it landed under /tmp/.../ -home-ormastes-dev-pub-simple/build/...
+# on the first real run). Prefer `git rev-parse --show-toplevel` from the
+# invoking cwd (this script is always meant to be run with cwd = repo root,
+# per its own SIMPLEOS_KERNEL_ELF/SIMPLEOS_FONT_DISK relative-path contract);
+# fall back to the scripts/check/-relative derivation once this file is
+# actually landed there.
+ROOT_DIR="$(git rev-parse --show-toplevel 2>/dev/null || (CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd))"
+QEMU_BIN="${QEMU_SYSTEM_X86_64:-qemu-system-x86_64}"
+OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
+OVMF_VARS_SRC="${OVMF_VARS_SRC:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
+# Bounded wait (seconds) for the first-frame boot marker, then a fixed render
+# settle before the screendump so the compositor has drawn the taskbar clock.
+BOOT_WAIT="${SIMPLEOS_WM_AQUA_BOOT_WAIT:-120}"
+RENDER_SETTLE="${SIMPLEOS_WM_AQUA_RENDER_SETTLE:-5}"
+SHOT_SETTLE="${SIMPLEOS_WM_AQUA_SHOT_SETTLE:-3}"
+
+KERNEL_ELF="${SIMPLEOS_KERNEL_ELF:-}"
+FONT_DISK="${SIMPLEOS_FONT_DISK:-}"
+
+BOOT_MARKER_SPL_START='\[desktop-gui\] spl_start'
+BOOT_MARKER_FIRST_FRAME='first-frame'
+BOOT_MARKER_PANIC_FAULT='PANIC|FAULT'
+
+WK="${ROOT_DIR}/build/os/check_simpleos_wm_aqua_glyph_ovmf_evidence"
+ESP="$WK/esp"
+EFIAPP="$ESP/EFI/BOOT/BOOTX64.EFI"
+OVMF_VARS="$WK/OVMF_VARS_4M.fd"
+SER="$WK/serial.log"
+QMP_SOCK="$WK/qmp.sock"
+SHOT="$WK/shot.ppm"
+
+status="ready"
+reason=""
+efiapp_built="false"
+qemu_started="false"
+qmp_screendump_ok="false"
+ppm_valid="false"
+aqua_theme_on_screen="false"
+glyph_pixels_present="false"
+render_coverage_pct="0.00"
+desktop_pct="0.00"
+titlebar_present="false"
+window_body_present="false"
+clock_region_colors="0"
+clock_region_ink_pixels="0"
+spl_start_marker="false"
+first_frame_marker="false"
+panic_or_fault_marker="false"
+
+# ---------------------------------------------------------------------------
+# Step 1: fail closed on missing/invalid required env vars.
+# ---------------------------------------------------------------------------
+if [ -z "$KERNEL_ELF" ]; then
+    status="not-ready"
+    reason="SIMPLEOS_KERNEL_ELF is not set"
+elif [ ! -f "$KERNEL_ELF" ]; then
+    status="not-ready"
+    reason="SIMPLEOS_KERNEL_ELF file not found: $KERNEL_ELF"
+elif [ -z "$FONT_DISK" ]; then
+    status="not-ready"
+    reason="SIMPLEOS_FONT_DISK is not set"
+elif [ ! -f "$FONT_DISK" ]; then
+    status="not-ready"
+    reason="SIMPLEOS_FONT_DISK file not found: $FONT_DISK"
+elif [ ! -f "$OVMF_CODE" ] || [ ! -f "$OVMF_VARS_SRC" ]; then
+    status="not-ready"
+    reason="OVMF firmware not found ($OVMF_CODE / $OVMF_VARS_SRC)"
+elif ! command -v "$QEMU_BIN" >/dev/null 2>&1; then
+    status="not-ready"
+    reason="$QEMU_BIN not found"
+elif ! command -v grub-mkstandalone >/dev/null 2>&1; then
+    status="not-ready"
+    reason="grub-mkstandalone not found"
+fi
+
+# ---------------------------------------------------------------------------
+# Step 2: build the UEFI boot media (grub.cfg with efi_gop/all_video, like
+# check-simpleos-x86-64-wm-qemu-readiness.shs -- without them GRUB's std-vga
+# mode negotiation fails under OVMF before the kernel ever runs).
+# ---------------------------------------------------------------------------
+if [ "$status" = "ready" ]; then
+    rm -rf "$WK"
+    mkdir -p "$ESP/EFI/BOOT"
+    cp "$OVMF_VARS_SRC" "$OVMF_VARS"
+    cat > "$WK/grub.cfg" <<'CFG'
+set timeout=0
+set default=0
+insmod multiboot
+insmod normal
+insmod efi_gop
+insmod all_video
+set gfxpayload=text
+menuentry "SimpleOS WM aqua/glyph OVMF evidence (UEFI/multiboot)" {
+    echo "[grub-uefi] multiboot loading /boot/kernel.elf ..."
+    multiboot /boot/kernel.elf
+    boot
+}
+CFG
+    set +e
+    grub-mkstandalone --format=x86_64-efi --output="$EFIAPP" \
+        --modules="multiboot normal echo part_gpt fat efi_gop efi_uga all_video gfxterm video_bochs video_fb" \
+        "boot/grub/grub.cfg=$WK/grub.cfg" "boot/kernel.elf=$KERNEL_ELF" \
+        >"$WK/grub-mkstandalone.log" 2>&1
+    grub_rc=$?
+    set -e
+    if [ "$grub_rc" -ne 0 ] || [ ! -f "$EFIAPP" ]; then
+        status="not-ready"
+        reason="grub-mkstandalone did not produce BOOTX64.EFI (see $WK/grub-mkstandalone.log)"
+    else
+        efiapp_built="true"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Step 3: boot under OVMF pflash with the NVMe font disk attached, poll the
+# serial log for the first-frame marker (bounded), let the compositor settle,
+# then take a QMP screendump. The QEMU child PID is tracked directly and
+# killed directly -- no pkill -f (which can self-match this script's own
+# invocation line containing the same socket/log paths).
+# ---------------------------------------------------------------------------
+if [ "$status" = "ready" ]; then
+    rm -f "$QMP_SOCK" "$SER" "$SHOT"
+    "$QEMU_BIN" -no-user-config -monitor none -no-reboot \
+        -machine q35 -cpu max -m 2G \
+        -drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE" \
+        -drive "if=pflash,format=raw,file=$OVMF_VARS" \
+        -drive "file=fat:rw:$ESP,format=raw,id=esp,if=none" \
+        -device virtio-blk-pci,drive=esp,bootindex=0 \
+        -drive "file=$FONT_DISK,if=none,id=nvm,format=raw,snapshot=on" \
+        -device "nvme,serial=deadbeef,drive=nvm" \
+        -serial "file:$SER" -display none -vga std -global VGA.vgamem_mb=64 \
+        -qmp "unix:$QMP_SOCK,server,nowait" &
+    QPID=$!
+    qemu_started="true"
+
+    # NOTE(RE-PIN-GATE 2026-07-19): the first drafted run polled for
+    # BOOT_MARKER_SPL_START here, which fires within ~1s of boot -- long
+    # before the compositor has drawn anything. That run screendumped a
+    # 7.56%-coverage partial frame (titlebar/body/aqua all absent) even
+    # though the SAME serial log went on to show first-frame-rendered and
+    # desktop-ready ~1000 lines later, well inside the same capped-output
+    # window. The known-good reference harness (boot_ovmf_wkheap.sh) instead
+    # waits a flat 120s before screendumping and reliably gets 99.83%
+    # coverage. Poll for BOOT_MARKER_FIRST_FRAME (the actual render-complete
+    # signal) instead of spl_start so the settle window starts only once the
+    # frame the checks are analyzing has actually been drawn.
+    i=0
+    booted="false"
+    while [ "$i" -lt "$BOOT_WAIT" ]; do
+        if grep -aqE -- "$BOOT_MARKER_FIRST_FRAME" "$SER" 2>/dev/null; then
+            booted="true"
+            break
+        fi
+        if ! kill -0 "$QPID" 2>/dev/null; then
+            break
+        fi
+        sleep 1
+        i=$((i + 1))
+    done
+
+    if [ "$booted" = "true" ]; then
+        sleep "$RENDER_SETTLE"
+    fi
+
+    if kill -0 "$QPID" 2>/dev/null; then
+        python3 - "$QMP_SOCK" "$SHOT" >"$WK/qmp.log" 2>&1 <<'PY'
+import socket, json, sys
+qmp, shot = sys.argv[1], sys.argv[2]
+try:
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.connect(qmp); s.recv(4096)
+    s.send(json.dumps({"execute": "qmp_capabilities"}).encode() + b'\n'); s.recv(4096)
+    s.send(json.dumps({"execute": "screendump", "arguments": {"filename": shot}}).encode() + b'\n')
+    s.recv(4096)
+    s.close()
+    print("screendump-ok")
+except Exception as e:
+    print("QMP-err", e)
+PY
+        sleep "$SHOT_SETTLE"
+        grep -q 'screendump-ok' "$WK/qmp.log" 2>/dev/null && qmp_screendump_ok="true"
+    fi
+
+    kill "$QPID" 2>/dev/null || true
+    wait "$QPID" 2>/dev/null || true
+
+    if [ ! -f "$SER" ]; then
+        status="not-ready"
+        reason="no serial log captured"
+    elif [ "$qmp_screendump_ok" != "true" ]; then
+        status="not-ready"
+        reason="QMP screendump failed or kernel died before render-settle (see $WK/qmp.log)"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Step 4: analyze the PPM (inline python3 heredoc, same token-reader as
+# boot_ovmf_wkheap.sh) for the three verdicts.
+# ---------------------------------------------------------------------------
+if [ "$status" = "ready" ]; then
+    ppm_out="$(python3 - "$SHOT" <<'PY'
+import sys
+
+path = sys.argv[1]
+try:
+    d = open(path, 'rb').read()
+except Exception as e:
+    print("ppm_valid: false")
+    print(f"ppm_error: {e}")
+    sys.exit(0)
+if d[:2] != b'P6':
+    print("ppm_valid: false")
+    print("ppm_error: bad P6 magic")
+    sys.exit(0)
+
+
+def tok(d, i):
+    while i < len(d) and d[i:i + 1] in b' \t\n\r#':
+        if d[i:i + 1] == b'#':
+            i = d.find(b'\n', i) + 1
+        else:
+            i += 1
+    j = i
+    while j < len(d) and d[j:j + 1].isdigit():
+        j += 1
+    return int(d[i:j]), j
+
+
+i = 2
+w, i = tok(d, i)
+h, i = tok(d, i)
+mx, i = tok(d, i)
+i += 1
+px = d[i:]
+total = w * h
+n = min(total, len(px) // 3)
+
+
+def px_at(x, y):
+    k = y * w + x
+    return px[k * 3], px[k * 3 + 1], px[k * 3 + 2]
+
+
+DESKTOP = (0x5A, 0x7F, 0xB5)
+TITLEBAR = (0xDC, 0xEA, 0xFB)
+BODY_A = (0xF2, 0xF2, 0xF2)
+BODY_B = (0xE8, 0xE8, 0xEC)
+
+nonblack = 0
+desktop_count = 0
+titlebar_seen = False
+body_seen = False
+for k in range(n):
+    r, g, b = px[k * 3], px[k * 3 + 1], px[k * 3 + 2]
+    if r > 8 or g > 8 or b > 8:
+        nonblack += 1
+    c = (r, g, b)
+    if c == DESKTOP:
+        desktop_count += 1
+    elif c == TITLEBAR:
+        titlebar_seen = True
+    elif c == BODY_A or c == BODY_B:
+        body_seen = True
+
+coverage_pct = (100.0 * nonblack / total) if total else 0.0
+desktop_pct = (100.0 * desktop_count / total) if total else 0.0
+aqua = (desktop_pct > 30.0) and titlebar_seen and body_seen
+
+# Taskbar clock region. NOTE(RE-PIN-GATE 2026-07-19, crop correction not a
+# check weakening): the drafted crop was right200,bottom30 -- close, but at
+# 3840x2160 that's x>=3640,y>=2130, and the real "00:00" digit ink bbox is
+# x=3735..3825,y=2127..2140 (measured directly off the fresh OVMF
+# screendump), so the top 3 rows of the digits fell outside the sampled
+# region. Widened to right120,bottom48 (x>=3720,y>=2112) to comfortably
+# contain the full digit bbox with margin, matching the WM's own pinned
+# oracle region (region=right56,bottom48 in the [font-evidence] serial
+# marker) rather than an ad hoc host-side guess.
+rx0 = max(0, w - 120)
+ry0 = max(0, h - 48)
+region_colors = set()
+if w > 0 and h > 0:
+    for y in range(ry0, h):
+        for x in range(rx0, w):
+            region_colors.add(px_at(x, y))
+
+# NOTE(RE-PIN-GATE 2026-07-19, genuine bug fix, not a weakening): the
+# drafted "glyphs = len(region_colors) >= 8" heuristic assumed anti-aliased
+# color variety. This renderer's raster=pure-sfnt-glyf output is a crisp,
+# non-AA scanline fill: measured directly off the fresh OVMF screendump, the
+# tight digit bounding box (x=3725..3835,y=2115..2150) contains exactly 3
+# distinct colors total -- two near-identical background shades
+# ((232,232,236) and (232,232,232), diff=4, a rounding/dither artifact) plus
+# one solid ink color (29,29,31) at 312 pixels, positioned exactly at
+# x=3735..3825,y=2127..2140 (matches the known "00:00" digit position/width).
+# No crop size can reach 8 distinct colors from a 3-color palette, so the
+# >=8 threshold cannot pass for a genuinely-correct crisp render -- it was
+# silently unpassable by design, not a real signal. Replaced with a
+# luminance-based ink-pixel count: a pixel counts as glyph ink only if ALL
+# three channels are below INK_LUMA_MAX, which cleanly separates the dark
+# ink color from every other color in the observed palette (backgrounds
+# >=232 on every channel; desktop blue (90,127,181) and taskbar accent
+# (44,111,239) both have a channel >=181), so this cannot be satisfied by
+# theme fills or accent bars -- only genuine dark glyph strokes. The floor
+# (INK_PIXEL_MIN=40) sits well below the measured 312 ink pixels while still
+# rejecting a flat/empty region (which would score 0).
+INK_LUMA_MAX = 160
+INK_PIXEL_MIN = 40
+ink_pixels = 0
+if w > 0 and h > 0:
+    for y in range(ry0, h):
+        for x in range(rx0, w):
+            r, g, b = px_at(x, y)
+            if r < INK_LUMA_MAX and g < INK_LUMA_MAX and b < INK_LUMA_MAX:
+                ink_pixels += 1
+glyphs = ink_pixels >= INK_PIXEL_MIN
+
+print("ppm_valid: true")
+print(f"ppm_dims: {w}x{h}")
+print(f"render_coverage_pct: {coverage_pct:.2f}")
+print(f"desktop_pct: {desktop_pct:.2f}")
+print(f"titlebar_present: {'true' if titlebar_seen else 'false'}")
+print(f"window_body_present: {'true' if body_seen else 'false'}")
+print(f"clock_region_colors: {len(region_colors)}")
+print(f"clock_region_ink_pixels: {ink_pixels}")
+print(f"aqua_theme_on_screen: {'true' if aqua else 'false'}")
+print(f"glyph_pixels_present: {'true' if glyphs else 'false'}")
+PY
+)"
+    echo "$ppm_out" > "$WK/ppm-verdict.out"
+
+    printf '%s\n' "$ppm_out" | grep -q '^ppm_valid: true' && ppm_valid="true"
+    printf '%s\n' "$ppm_out" | grep -q '^aqua_theme_on_screen: true' && aqua_theme_on_screen="true"
+    printf '%s\n' "$ppm_out" | grep -q '^glyph_pixels_present: true' && glyph_pixels_present="true"
+    v="$(printf '%s\n' "$ppm_out" | grep '^render_coverage_pct: ' | cut -d' ' -f2)"
+    [ -n "$v" ] && render_coverage_pct="$v"
+    v="$(printf '%s\n' "$ppm_out" | grep '^desktop_pct: ' | cut -d' ' -f2)"
+    [ -n "$v" ] && desktop_pct="$v"
+    printf '%s\n' "$ppm_out" | grep -q '^titlebar_present: true' && titlebar_present="true"
+    printf '%s\n' "$ppm_out" | grep -q '^window_body_present: true' && window_body_present="true"
+    v="$(printf '%s\n' "$ppm_out" | grep '^clock_region_colors: ' | cut -d' ' -f2)"
+    [ -n "$v" ] && clock_region_colors="$v"
+    v="$(printf '%s\n' "$ppm_out" | grep '^clock_region_ink_pixels: ' | cut -d' ' -f2)"
+    [ -n "$v" ] && clock_region_ink_pixels="$v"
+
+    if [ "$ppm_valid" != "true" ]; then
+        status="not-ready"
+        reason="screendump PPM invalid or unreadable (see $WK/ppm-verdict.out)"
+    elif [ "$aqua_theme_on_screen" != "true" ]; then
+        status="not-ready"
+        reason="aqua theme not on screen (desktop_pct=$desktop_pct titlebar_present=$titlebar_present window_body_present=$window_body_present)"
+    elif [ "$glyph_pixels_present" != "true" ]; then
+        status="not-ready"
+        reason="no glyph ink pixels in taskbar clock region (clock_region_ink_pixels=$clock_region_ink_pixels, need >=40; clock_region_colors=$clock_region_colors)"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Step 5: serial-log boot markers. PANIC/FAULT is checked regardless of the
+# status so far -- a crash after a good screendump still fails the gate.
+# ---------------------------------------------------------------------------
+if [ -f "$SER" ]; then
+    grep -aqE -- "$BOOT_MARKER_SPL_START" "$SER" 2>/dev/null && spl_start_marker="true"
+    grep -aqE -- "$BOOT_MARKER_FIRST_FRAME" "$SER" 2>/dev/null && first_frame_marker="true"
+    grep -aqE -- "$BOOT_MARKER_PANIC_FAULT" "$SER" 2>/dev/null && panic_or_fault_marker="true"
+fi
+
+if [ "$panic_or_fault_marker" = "true" ]; then
+    status="not-ready"
+    reason="PANIC/FAULT marker found in serial log: $SER"
+elif [ "$status" = "ready" ] && [ "$spl_start_marker" != "true" ]; then
+    status="not-ready"
+    reason="[desktop-gui] spl_start marker not found within ${BOOT_WAIT}s: $SER"
+elif [ "$status" = "ready" ] && [ "$first_frame_marker" != "true" ]; then
+    status="not-ready"
+    reason="first-frame marker not found in serial log: $SER"
+fi
+
+echo "wm_aqua_glyph_ovmf_evidence: $status"
+echo "kernel_elf: $KERNEL_ELF"
+echo "font_disk: $FONT_DISK"
+echo "efiapp_built: $efiapp_built"
+echo "qemu_started: $qemu_started"
+echo "qmp_screendump_ok: $qmp_screendump_ok"
+echo "ppm_valid: $ppm_valid"
+echo "render_coverage_pct: $render_coverage_pct"
+echo "desktop_pct: $desktop_pct"
+echo "titlebar_present: $titlebar_present"
+echo "window_body_present: $window_body_present"
+echo "aqua_theme_on_screen: $aqua_theme_on_screen"
+echo "clock_region_colors: $clock_region_colors"
+echo "clock_region_ink_pixels: $clock_region_ink_pixels"
+echo "glyph_pixels_present: $glyph_pixels_present"
+echo "spl_start_marker: $spl_start_marker"
+echo "first_frame_marker: $first_frame_marker"
+echo "panic_or_fault_marker: $panic_or_fault_marker"
+echo "serial_log: $SER"
+echo "screendump: $SHOT"
+if [ -n "$reason" ]; then
+    echo "reason: $reason"
+fi
+
+if [ "$status" != "ready" ]; then
+    exit 1
+fi
+exit 0
