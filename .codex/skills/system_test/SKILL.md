@@ -212,7 +212,8 @@ describe "<Feature Name>":
   Engine2D, and Engine3D material. Assert `Suggested` named-target/remaining-
   canonical-GPUs/CPU, `Preferred` named-target/CPU, and `Required` named-target-
   only behavior. Assert `Suggested(auto)` uses the engine's executable adapter
-  order; Preferred/Required with `auto` and unknown targets reject before any
+  order. Spell the canonical target `rocm` and separately prove the `hip` alias
+  selects identical HIP emission; Preferred/Required with `auto` and unknown targets reject before any
   cache, counter, upload, framebuffer, or backend mutation.
   Unsupported rendering modes or CTM must fail before cache generation,
   telemetry, upload, or backend state changes.

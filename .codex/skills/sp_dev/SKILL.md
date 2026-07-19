@@ -563,7 +563,9 @@ font GPU emission, or GUI/Web/2D/3D text.
     3D paths. `Suggested` tries the named target first, then the remaining
     canonical GPU order, then CPU; `Preferred` tries the named target then CPU;
     `Required` tries the named target only. Unsupported modes/CTM reject before
-    cache/backend mutation. `Suggested(auto)` uses the engine's executable
+    cache/backend mutation. Use canonical target name `rocm`; accept `hip` only
+    as its compatibility alias at configuration and emitter boundaries.
+    `Suggested(auto)` uses the engine's executable
     font-adapter order; Preferred/Required with `auto` and unknown targets
     reject before mutation. Batch evidence carries config identity, target,
     and policy; the config object never crosses WebIR or Draw IR.

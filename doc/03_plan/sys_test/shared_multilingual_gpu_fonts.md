@@ -38,7 +38,7 @@ Planned executable/manual pairs:
 | `test/03_system/app/simple_2d/feature/cuda_generated_font_handoff_spec.spl` | `doc/06_spec/03_system/app/simple_2d/feature/cuda_generated_font_handoff_spec.md` |
 | `test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl` | `doc/06_spec/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.md` |
 
-Focused exact-face unit gates (execution and manual generation pending):
+Focused exact-face unit gates (execution pending; per-row manual status):
 
 | Executable SSpec | Generated manual |
 |---|---|
@@ -138,7 +138,7 @@ behavior.
 | REQ-011 | `shared_font_surfaces_spec.spl`, `legacy_web_gui_wm_font_route_spec.spl`, production host route contract, and SimpleOS QEMU pixel oracle | Engine2D API compatibility; DrawIR/batch evidence; production Web/GUI/WM ownership; canonical-owner legacy atlas/pipeline dependency exclusion; canonical SimpleOS pixels | canonical-owner dependency exclusion, canonical `taskbar-clock` WM DrawIR source route, 56x48 dynamic crop, pinned cross-verified pixel hash, and wrapper/kernel/FAT32 hash recomputation are source-covered; hosted image/motion/nested parity and a current retained QEMU PASS remain pending |
 | REQ-012 | `native_gpu_font_readback_spec.spl` | HUD transform; world depth/transform; texture-to-readback chain | 3/3 source gates with facade selection, distinct HUD/world pipelines, atlas owner/generation/hash, fenced submission, and readback checks; native execution pending |
 | REQ-013 | `native_gpu_font_readback_spec.spl` | promoted backend pass; unavailable classification; fake proof rejection | 3/3 source gate: live tuple promotion, controlled unavailable classification, and forged-proof rejection are wired; retained native PASS is pending |
-| REQ-014 | eleven executable/manual pairs | zero-stub manuals; guide/notice freshness; evidence-recipe audit | 0/11 canonical manual regenerations accepted: two manuals are missing, six are source-newer/stale, and three are present noncanonical drafts; no retained candidate currently reaches valid runner/docgen completion |
+| REQ-014 | eleven executable/manual pairs | zero-stub manuals; guide/notice freshness; evidence-recipe audit | 2/11 canonical manuals now regenerate with zero stubs, but their executable specs remain unadmitted, so 0/11 pairs are accepted; six manuals are source-newer/stale and three remain noncanonical drafts |
 | REQ-015 | `font_render_config_spec.spl`, `shared_font_surfaces_spec.spl`, and focused Engine2D/Engine3D font specs | validation and length-delimited identity; canonical `rocm` target with `hip` alias; bitmap/vector/shaped propagation; Suggested/Preferred/Required behavior; unsupported mode/CTM rejects before cache/backend mutation; legacy default equivalence | source includes ROCm/HIP identity and policy-plan cases; no admitted pure-Simple runner currently reaches test results; the pre-bridge full CLI is not acceptance evidence |
 
 | NFR | Evidence | Pass condition | Current evidence |
