@@ -2,9 +2,18 @@
 
 ## Status
 
-Open. The bounded incremental Stage 4 build was stopped deliberately before
-host/session failure; no Stage 4 artifact was produced, so the canonical
-essential test/lint/duplication gate remains pending.
+Source plumbing fixed; executable acceptance remains open. The bounded
+incremental Stage 4 build was stopped deliberately before host/session failure;
+no Stage 4 artifact was produced, so the canonical essential
+test/lint/duplication gate remains pending.
+
+The canonical wrapper passed `--low-memory`, but the Stage4 branch bypasses the
+ordinary argument parser and rebuilt `CompileOptions` through the fixed-arity
+pure-Simple API. That API left `low_memory` at its default `false`, disabling
+all existing source/AST/HIR/MIR eviction points. Its sole source caller is the
+canonical Stage4 branch, so the fixed-arity owner now enables low-memory mode
+directly. The source regression pins the option; bounded RSS and artifact
+evidence are still required.
 
 ## Reproduction
 
