@@ -110,7 +110,7 @@ Do not invent a second RISC-V core, bootloader, or FPGA framework. Reuse the exi
 - Unchosen options were deleted rather than archived.
 
 ## Phase
-implementation-milestone-2-in-progress
+implementation-clocked-boundary-complete-generated-rtl-and-board-evidence-pending
 
 ## Log
 - dev: Created production-readiness lane and fixed existing smoke wrappers to expose both RV32/RV64 missing smoke artifacts.
@@ -301,3 +301,24 @@ implementation-milestone-2-in-progress
 - Execution remains unclaimed: no Simple command was repeated after the known
   exit-139/stall verification cap. Fresh pure-Simple generation/GHDL evidence
   is the next gate; Linux login/`ls` and physical FPGA qualification remain open.
+
+## 2026-07-19 Full-CLI source repair and connected-board inventory
+
+- Replaced `spipe-docgen` process delegation/dynamic interpretation with direct
+  compiled full-CLI dispatch. The Stage-4 essential smoke now retains real
+  SPipe docgen and focused clocked labeled-tuple VHDL compile gates. Source and
+  shell portability checks passed; fresh pure-Simple build/deploy execution is
+  still unclaimed under the exhausted three-cycle guard.
+- `Program each FPGA image and capture board-origin evidence`: **BLOCKED**.
+  The connected `0403:6011` / `XFL1OSWWFM2B` FT4232H identifies the K26/KV260
+  lane, and Vivado 2025.2, GHDL, Yosys/SBY, OpenOCD, openFPGALoader, and both
+  RISC-V 64 GNU toolchains are installed. The MLK-S02/Artix-7 board is absent.
+- A read-only cable probe detached FTDI interface `3-2:1.2`; no bitstream or
+  memory write occurred. if00, if01, and if03 remain bound while if02 is
+  missing. Restore by replugging USB or binding `3-2:1.2` through the
+  `ftdi_sio` sysfs owner with root authority before any later JTAG work.
+- No external PL UART adapter or authoritative network identity is present.
+  The retained 2026-05-21 KV260 bitstream is stale external-core/ILA marker
+  evidence, not a compiler-generated RV32/RV64 product. AC-10 and AC-11 remain
+  open until new provenance-bound bitstreams produce board-origin bidirectional
+  Linux login and `ls` transcripts for both XLEN lanes.

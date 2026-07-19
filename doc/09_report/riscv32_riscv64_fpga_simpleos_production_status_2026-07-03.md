@@ -11,7 +11,37 @@ audit supersedes the old production-ready label: generated CPU bundles are
 pass architecture/formal gates, boot pinned Linux, and retain bidirectional
 board-origin login evidence.
 
-## Fresh Evidence
+## Connected-Host Refresh — 2026-07-19
+
+- The connected device is the Xilinx ML Carrier FT4232H (`0403:6011`, serial
+  `XFL1OSWWFM2B`), consistent with the Kria K26/KV260 lane. The separate
+  MLK-S02/Artix-7 board is not connected.
+- Vivado 2025.2, GHDL 4.1.0, Yosys 0.67, SBY 0.67, OpenOCD 0.12.0,
+  openFPGALoader 0.12.0, and both RISC-V 64 GNU toolchains are installed.
+  This supersedes the historical `yosys is not installed` row below.
+- FTDI interfaces 0, 1, and 3 are bound to `ftdi_sio`. Interface 2 is
+  currently unbound, so its stable `if02` serial link is missing; the visible
+  stable links are if00 -> `ttyUSB0`, if01 -> `ttyUSB1`, and if03 ->
+  `ttyUSB2`. This supersedes the historical `JTAG interface is free` and
+  fixed-`ttyUSB` claims below.
+- Restore interface 2 by replugging the board USB cable or binding
+  `3-2:1.2` through `/sys/bus/usb/drivers/ftdi_sio/bind` with root authority.
+  No programming or memory write occurred during the probe that detached it.
+- No external 3.3 V PMOD UART adapter and no authoritative board network
+  identity are present. Merged Xilinx USB serial ports remain transport/PS
+  diagnostics, not bidirectional PL terminal evidence.
+- The ignored 4,522,254-byte bitstream at
+  `/home/ormastes/dev/pub/simple/build/build/xilinx_kv260/gateware/xilinx_kv260.bit`
+  has SHA-256
+  `e66263f73d2a23548f6011a1b6936eb11c2041ce8833cc83051517f047300887`
+  and a 2026-05-21 timestamp. It is stale, non-authoritative marker evidence;
+  it cannot prove Simple-compiler RTL, Linux boot, login, or `ls`.
+
+Physical F1/N3 execution remains **BLOCKED**, not passed. Restore the FTDI
+interface before touching JTAG, then produce new compiler-provenance-bound
+RV32 and RV64 bitstreams and a genuinely bidirectional terminal path.
+
+## Historical 2026-07-03 Evidence
 
 `SIMPLE_BINARY=bin/release/simple sh scripts/check/check-riscv64-fpga-simpleos-preflight.shs --local-only`
 

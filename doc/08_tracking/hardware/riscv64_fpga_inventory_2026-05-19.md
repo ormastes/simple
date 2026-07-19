@@ -6,6 +6,59 @@
 
 ---
 
+## Live Refresh — 2026-07-19
+
+The numbered sections below retain the 2026-05-19 inventory. Device numbers
+such as `ttyUSB2` are historical and must not be used as stable identifiers.
+The current read-only host snapshot is:
+
+| Item | Current observation |
+|---|---|
+| Connected USB bridge | `0403:6011` FT4232H, serial `XFL1OSWWFM2B` |
+| udev identity | `Xilinx_ML_Carrier_Card_XFL1OSWWFM2B` |
+| Board lane | Kria K26/KV260 ML carrier |
+| Other FPGA board | No `0403:6010` MLK-S02/Artix-7 bridge is connected |
+| External PL UART | No non-Xilinx `/dev/serial/by-id` adapter is present |
+| Network identity | No authoritative board neighbor or address is established |
+
+Current stable serial links and driver ownership are:
+
+| FTDI interface | Stable link | Driver state |
+|---|---|---|
+| `3-2:1.0` / if00 | `...XFL1OSWWFM2B-if00-port0` -> `ttyUSB0` | `ftdi_sio` |
+| `3-2:1.1` / if01 | `...XFL1OSWWFM2B-if01-port0` -> `ttyUSB1` | `ftdi_sio` |
+| `3-2:1.2` / if02 | missing | **unbound** |
+| `3-2:1.3` / if03 | `...XFL1OSWWFM2B-if03-port0` -> `ttyUSB2` | `ftdi_sio` |
+
+A read-only `openFPGALoader` channel probe detached interface 2; the probe was
+stopped and no bitstream or board memory was written. A USB bridge reset did
+not rebind it. Restore the interface by physically replugging the board USB
+cable, or run:
+
+```sh
+printf '%s' '3-2:1.2' | sudo tee /sys/bus/usb/drivers/ftdi_sio/bind >/dev/null
+```
+
+Before a later JTAG operation, free interface 0 with the existing
+`scripts/fpga/jtag-ftdi-unbind.shs` helper and rebind it afterward. Do not run
+another channel scan. The merged FTDI ports are PS/transport interfaces; they
+do not prove the generated tops' PL UART, which is routed to PMOD H12/E10.
+
+Installed host tools are Vivado 2025.2, GHDL 4.1.0, Yosys 0.67, SBY 0.67,
+OpenOCD 0.12.0, openFPGALoader 0.12.0, GCC 13.3.0
+(`riscv64-linux-gnu`) and GCC 13.2.0 (`riscv64-unknown-elf`). There is no
+RV32-named compiler executable. Vivado, `hw_server`, and XSDB are installed
+under `/home/ormastes/Xilinx/2025.2/Vivado/bin`.
+
+The ignored bitstream at
+`/home/ormastes/dev/pub/simple/build/build/xilinx_kv260/gateware/xilinx_kv260.bit`
+is 4,522,254 bytes, dated 2026-05-21, and has SHA-256
+`e66263f73d2a23548f6011a1b6936eb11c2041ce8833cc83051517f047300887`.
+It is stale external-core/marker evidence, not an authoritative F1/N3
+Simple-compiled RV32/RV64 product or Linux login/`ls` artifact.
+
+---
+
 ## 1. Board Identification
 
 | Field          | Value                                         |

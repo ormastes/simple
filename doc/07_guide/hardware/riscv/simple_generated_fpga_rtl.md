@@ -1,6 +1,6 @@
 # Simple-Generated RV32/RV64 FPGA RTL
 
-Date: 2026-07-18
+Last reviewed: 2026-07-19
 Status: **contract-not-ready**
 
 This guide is the operator path for the selected compiler-first RV32/RV64
@@ -53,12 +53,14 @@ Successful production generation must also create the backend source map
 `entity.vhd.map.json`, identify the compiler binary/hash, and reject unsupported
 hardware constructs without fallback.
 
-At the time of this guide update, the workspace `bin/simple` resolves to a Rust
-bootstrap. An isolated pure Stage3 compiler can build the current full CLI, but
-the resulting link contains unresolved startup/path stubs and source-oriented
-commands such as `spipe-docgen` crash with exit 139. An older isolated pure
-release CLI reproduces the same crash. Fix and qualify the full-CLI runtime
-before treating any source execution, testing, or doc generation as acceptance.
+The source repair now dispatches `spipe-docgen` directly inside the compiled
+full CLI, removing the corrupt process-delegation and dynamic interpretation
+path. The bounded Stage-4 essential smoke also requires real doc generation and
+a focused clocked labeled-tuple VHDL compile. This repair is committed, but a
+fresh pure-Simple binary has not been built and accepted after the session's
+three-cycle crash/stall cap. The deployed CLI is therefore still unqualified;
+do not treat source execution, tests, generation, or docgen as acceptance until
+that one fresh build passes the retained smoke.
 
 ## Generate the contract bundle
 
@@ -204,6 +206,21 @@ The current host sees the KV260 Xilinx FTDI devices but no external PL UART
 adapter. Use an attached 3.3 V PMOD UART or prove a bidirectional PS/PL serial
 bridge. ILA-only markers and zero-byte UART captures are diagnostic evidence,
 not login/`ls` proof.
+
+As of 2026-07-19, the FT4232H (`0403:6011`, serial `XFL1OSWWFM2B`) is present,
+but interface `3-2:1.2`/if02 is unbound and its stable serial link is missing.
+Restore it by replugging the USB cable or, with root authority:
+
+```sh
+printf '%s' '3-2:1.2' | sudo tee /sys/bus/usb/drivers/ftdi_sio/bind >/dev/null
+```
+
+Interface 0 is currently bound to `ftdi_sio`; use the existing unbind/rebind
+helper only when a later programming step actually needs JTAG. Do not repeat
+blind channel scans. Vivado 2025.2, GHDL, Yosys/SBY, OpenOCD,
+openFPGALoader, and the RISC-V 64 GNU toolchains are installed, but no external
+PMOD UART adapter or authoritative board network identity is present. The old
+2026-05-21 KV260 bitstream is explicitly non-authoritative for this lane.
 
 ## Evidence planes
 
