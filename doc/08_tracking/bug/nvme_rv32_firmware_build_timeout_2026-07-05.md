@@ -1661,3 +1661,21 @@ Terminated
 This is still not a firmware logic failure: the scalar logic and production
 simulation gates remain green. The remaining blocker is the self-hosted native
 build/parse path for the generated RV32 firmware entry.
+
+## 2026-07-19 datapoints (regression is now also on the bootstrap binary)
+
+- `src/compiler_rust/target/bootstrap/simple` (the 5.2s differential path
+  above) now ALSO times out: default closure rc=124 at 300s, SMP closure
+  (`NVME_RV32_SMP=1`, 187 files) rc=124 at 580s. Disk-full was ruled out
+  (117G free at test time; an earlier same-day stall was a genuine ENOSPC —
+  root filesystem hit 100% from stale `build/worktrees/*` artifacts, since
+  reclaimed).
+- The SMP run is NOT a single-file hang: `[BOOTSTRAP-PHASE]` markers show
+  steady progress at ~2.6s per ~600-char file (e.g. `+280963ms → +283551ms`
+  for `logic_dram_alloc_cases.spl`, chars=535). That is per-FILE overhead
+  (plausibly whole-prelude re-work per file in the module loader), so a
+  187-file closure needs ~10-15 min. Whether it completes at 1800s is being
+  measured; regardless, ~2.6s per 535-char file is a defect on its own —
+  the 2026-07-05 run parsed the whole set in 5.2s total.
+- Evidence logs: session scratchpad `wave3/L6/smp_build_orch2.log`,
+  `default_build_orch2.log` (not committed).
