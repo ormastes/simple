@@ -46,7 +46,7 @@ use std.common.encoding.font_registry.{selected_font_asset_candidate_for_path, v
 #       val mg = fr.rasterize(65, 16)   # 'A' at 16px
 #       match mg:
 #         case Some(g):
-#           print("width={g.width} height={g.height} advance={g.advance}")
+#           print("width={g.gbm_width} height={g.gbm_height} advance={g.gbm_advance}")
 #           val a = g.alpha_at(5, 5)
 #         case None:
 #           pass
@@ -75,13 +75,26 @@ extern fn rt_array_data_ptr_u8(bytes: [u8]) -> i64
 # clobber this glyph's bitmap. `handle` is retained only for diagnostics.
 
 class GlyphBitmap:
-    width: i64
-    height: i64
-    advance: i64
-    bearing_x: i64
-    bearing_y: i64
+    # Field names are prefixed (`gbm_*`) to stay GLOBALLY unique rather than
+    # reusing `width`/`height`/`advance`/`bearing_x`/`bearing_y`/`pixels` —
+    # those exact names are also declared (at different indices) by the much
+    # larger CachedGlyph (font_types.spl) and by SfntGlyfBitmap
+    # (sfnt_glyf.spl). The native/bootstrap MIR path resolves field access on
+    # an ANY-erased cross-module receiver via a receiver-blind "struct
+    # declaring this name with the MOST fields wins" scan (see
+    # doc/08_tracking/bug/simpleos_native_build_framebufferdriver_crossmodule_field_offset_shift_2026-07-14.md),
+    # so a GlyphBitmap value passed as a typed param across a module boundary
+    # (e.g. `_sffi_glyph_to_cached(gb: GlyphBitmap, ...)`) silently reads
+    # CachedGlyph's field offsets instead of its own — root cause of the
+    # 2026-07-19 pure-sfnt-glyf rasterizer pointer-corruption fault. `handle`
+    # is left unprefixed: it is never read across a module boundary here.
+    gbm_width: i64
+    gbm_height: i64
+    gbm_advance: i64
+    gbm_bearing_x: i64
+    gbm_bearing_y: i64
     handle: i64
-    pixels: [u8]
+    gbm_pixels: [u8]
 
 impl GlyphBitmap:
     # Alpha coverage (0..255) at pixel (x,y) in the rasterized glyph.
@@ -89,10 +102,10 @@ impl GlyphBitmap:
     fn alpha_at(x: i64, y: i64) -> i64:
         if x < 0 or y < 0:
             return 0
-        if x >= self.width or y >= self.height:
+        if x >= self.gbm_width or y >= self.gbm_height:
             return 0
-        val idx = y * self.width + x
-        self.pixels[idx].to_i64()
+        val idx = y * self.gbm_width + x
+        self.gbm_pixels[idx].to_i64()
 
 class LayoutGlyph:
     codepoint: i64
@@ -301,13 +314,13 @@ impl FontRasterizer:
             return nil
         val metrics: [i64] = parts.1
         GlyphBitmap(
-            width: metrics[0],
-            height: metrics[1],
-            advance: metrics[2],
-            bearing_x: metrics[3],
-            bearing_y: metrics[4],
+            gbm_width: metrics[0],
+            gbm_height: metrics[1],
+            gbm_advance: metrics[2],
+            gbm_bearing_x: metrics[3],
+            gbm_bearing_y: metrics[4],
             handle: 0,
-            pixels: parts.0,
+            gbm_pixels: parts.0,
         )
 
     # Rasterize the given Unicode codepoint at the given pixel size.
@@ -355,13 +368,13 @@ impl FontRasterizer:
         if not self.is_current():
             return nil
         GlyphBitmap(
-            width: w,
-            height: h,
-            advance: adv,
-            bearing_x: bx,
-            bearing_y: by,
+            gbm_width: w,
+            gbm_height: h,
+            gbm_advance: adv,
+            gbm_bearing_x: bx,
+            gbm_bearing_y: by,
             handle: 0,
-            pixels: pixels,
+            gbm_pixels: pixels,
         )
 
     # Rasterize a producer-shaped glyph ID from this exact selected face.
@@ -378,13 +391,13 @@ impl FontRasterizer:
             return nil
         val metrics: [i64] = parts.1
         GlyphBitmap(
-            width: metrics[0],
-            height: metrics[1],
-            advance: metrics[2],
-            bearing_x: metrics[3],
-            bearing_y: metrics[4],
+            gbm_width: metrics[0],
+            gbm_height: metrics[1],
+            gbm_advance: metrics[2],
+            gbm_bearing_x: metrics[3],
+            gbm_bearing_y: metrics[4],
             handle: 0,
-            pixels: parts.0,
+            gbm_pixels: parts.0,
         )
 
     fn has_glyph(codepoint: i64) -> bool:

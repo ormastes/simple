@@ -20,12 +20,24 @@ class SfntGlyfOutline:
     components: i64
 
 class SfntGlyfBitmap:
-    width: i64
-    height: i64
-    advance: i64
-    bearing_x: i64
-    bearing_y: i64
-    pixels: [u8]
+    # Field names are prefixed (not `width`/`height`/`pixels`/...) to stay
+    # GLOBALLY unique. The native/bootstrap MIR path resolves field access on
+    # an ANY-erased or match-arm-bound receiver via a receiver-blind "struct
+    # declaring this name with the MOST fields wins" scan (documented in
+    # doc/08_tracking/bug/simpleos_native_build_framebufferdriver_crossmodule_field_offset_shift_2026-07-14.md);
+    # `width`/`height`/`advance`/`bearing_x`/`bearing_y`/`pixels` are also
+    # declared (at different indices) by GlyphBitmap (spl_fonts.spl) and the
+    # much-larger CachedGlyph (font_types.spl), so an ambiguous name here
+    # silently resolves to a WRONG struct's field offset — root cause of the
+    # 2026-07-19 pure-sfnt-glyf rasterizer pointer-corruption fault
+    # (cr2 landed inside the font's sha256 identity text). Unique names make
+    # the scan unambiguous regardless of receiver-type erasure.
+    sgb_width: i64
+    sgb_height: i64
+    sgb_advance: i64
+    sgb_bearing_x: i64
+    sgb_bearing_y: i64
+    sgb_pixels: [u8]
 
 fn _table_is_bounded(font: OtFont, table: OtTable, minimum: i64) -> bool:
     val start = table.offset as i64
@@ -547,10 +559,10 @@ fn rasterize_sfnt_glyf(font: OtFont, glyph_id: u32, size_px: i64) -> Option<Sfnt
         # arm as nil -> "field access on nil receiver" panic at bounds.right,
         # 2026-07-18; first WM label glyph was a space).
         return Some(SfntGlyfBitmap(
-            width: 0, height: 0,
-            advance: _round_glyf_metric(horizontal[0] as f64 * scale),
-            bearing_x: _round_glyf_metric(horizontal[1] as f64 * scale),
-            bearing_y: 0, pixels: []))
+            sgb_width: 0, sgb_height: 0,
+            sgb_advance: _round_glyf_metric(horizontal[0] as f64 * scale),
+            sgb_bearing_x: _round_glyf_metric(horizontal[1] as f64 * scale),
+            sgb_bearing_y: 0, sgb_pixels: []))
     val bounds = match _outline_bounds(commands):
         Some(value): value
         None: return None
@@ -572,12 +584,12 @@ fn rasterize_sfnt_glyf(font: OtFont, glyph_id: u32, size_px: i64) -> Option<Sfnt
             x = x + 1
         y = y + 1
     Some(SfntGlyfBitmap(
-        width: width,
-        height: height,
-        advance: _round_glyf_metric(horizontal[0] as f64 * scale),
-        bearing_x: _round_glyf_metric(horizontal[1] as f64 * scale),
-        bearing_y: _round_glyf_metric(bounds.top * scale),
-        pixels: pixels
+        sgb_width: width,
+        sgb_height: height,
+        sgb_advance: _round_glyf_metric(horizontal[0] as f64 * scale),
+        sgb_bearing_x: _round_glyf_metric(horizontal[1] as f64 * scale),
+        sgb_bearing_y: _round_glyf_metric(bounds.top * scale),
+        sgb_pixels: pixels
     ))
 
 # ===== Flat cross-module rasterization API =====
@@ -612,12 +624,12 @@ fn _sfnt_rasterize_glyph_parts(font: OtFont, glyph_id: u32, size_px: i64) -> ([u
     val bitmap = match rasterize_sfnt_glyf(font, glyph_id, size_px):
         Some(value): value
         None: return ([], [], false)
-    val bm_width: i64 = bitmap.width
-    val bm_height: i64 = bitmap.height
-    val bm_advance: i64 = bitmap.advance
-    val bm_bearing_x: i64 = bitmap.bearing_x
-    val bm_bearing_y: i64 = bitmap.bearing_y
-    val bm_pixels: [u8] = bitmap.pixels
+    val bm_width: i64 = bitmap.sgb_width
+    val bm_height: i64 = bitmap.sgb_height
+    val bm_advance: i64 = bitmap.sgb_advance
+    val bm_bearing_x: i64 = bitmap.sgb_bearing_x
+    val bm_bearing_y: i64 = bitmap.sgb_bearing_y
+    val bm_pixels: [u8] = bitmap.sgb_pixels
     (bm_pixels, [bm_width, bm_height, bm_advance, bm_bearing_x, bm_bearing_y], true)
 
 fn sfnt_blob_glyph_exists(blob: [u8], codepoint: i64) -> bool:
