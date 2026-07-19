@@ -11,6 +11,7 @@ if [ "$SIMPLE_BIN" = "bin/simple" ] && [ ! -e "$SIMPLE_BIN" ] && [ -e "bin/relea
     SIMPLE_BIN="bin/release/simple"
 fi
 SIMPLE_RUNTIME_BIN="${SIMPLE_RUNTIME_BIN:-}"
+PORTABLE_COMPUTE_EMITTER_BIN="${PORTABLE_COMPUTE_EMITTER_BIN:-}"
 NVCC_TOOL="${NVCC_TOOL:-nvcc}"
 HIPCC_TOOL="${HIPCC_TOOL:-hipcc}"
 OPENCL_SPIRV_TOOL="${OPENCL_SPIRV_TOOL:-opencl-c-to-spirv}"
@@ -128,6 +129,7 @@ tool_path() {
 
 resolve_symlink_path() {
     current="$1"
+    [ "$current" != "" ] || return 1
     depth=0
     while [ -L "$current" ]; do
         depth=$((depth + 1))
@@ -140,6 +142,7 @@ resolve_symlink_path() {
             *) current="$(dirname "$current")/$link" ;;
         esac
     done
+    [ -e "$current" ] || return 1
     directory="$(CDPATH= cd -- "$(dirname -- "$current")" && pwd -P)" || return 1
     printf '%s/%s\n' "$directory" "$(basename -- "$current")"
 }
@@ -279,6 +282,85 @@ record_simple_provenance() {
         echo "simple_bin_path=$(printf '%s' "$runtime_path" | one_line)"
         echo "simple_bin_sha256=$runtime_sha"
     } >>"$BUILD_DIR/evidence.env"
+}
+
+record_portable_compute_emitter_provenance() {
+    PORTABLE_COMPUTE_EMITTER_EXEC=""
+    if [ "$PORTABLE_COMPUTE_EMITTER_BIN" = "" ]; then
+        emitter_source="$ROOT_DIR/src/app/portable_compute_emit/main.spl"
+        emitter_source_sha="$(sha256_file "$emitter_source" || true)"
+        if ! sha256_valid "$emitter_source_sha"; then
+            echo "Portable compute emitter source provenance is unavailable" >&2
+            return 1
+        fi
+        {
+            echo "portable_compute_emitter_mode=source-cli"
+            echo "portable_compute_emitter_requested=$emitter_source"
+            echo "portable_compute_emitter_path=$emitter_source"
+            echo "portable_compute_emitter_sha256=$emitter_source_sha"
+            echo "portable_compute_emitter_format=source"
+        } >>"$BUILD_DIR/evidence.env"
+        record_simple_provenance
+        return
+    fi
+    emitter_path="$(tool_path "$PORTABLE_COMPUTE_EMITTER_BIN" || true)"
+    emitter_path="$(resolve_symlink_path "$emitter_path" || true)"
+    if [ "$emitter_path" = "" ]; then
+        echo "Cached portable compute emitter is unavailable or non-native: $PORTABLE_COMPUTE_EMITTER_BIN" >&2
+        return 1
+    fi
+    emitter_format="$(native_executable_format "$emitter_path" || true)"
+    emitter_sha="$(sha256_file "$emitter_path" || true)"
+    if [ "$emitter_format" = "" ] || ! sha256_valid "$emitter_sha"; then
+        echo "Cached portable compute emitter is unavailable or non-native: $PORTABLE_COMPUTE_EMITTER_BIN" >&2
+        return 1
+    fi
+    PORTABLE_COMPUTE_EMITTER_EXEC="$emitter_path"
+    {
+        echo "portable_compute_emitter_mode=cached-native"
+        echo "portable_compute_emitter_requested=$(printf '%s' "$PORTABLE_COMPUTE_EMITTER_BIN" | one_line)"
+        echo "portable_compute_emitter_path=$(printf '%s' "$emitter_path" | one_line)"
+        echo "portable_compute_emitter_sha256=$emitter_sha"
+        echo "portable_compute_emitter_format=$emitter_format"
+    } >>"$BUILD_DIR/evidence.env"
+}
+
+portable_compute_emitter_command() {
+    target="$1"
+    if [ "$PORTABLE_COMPUTE_EMITTER_EXEC" != "" ]; then
+        printf '%s %s\n' "$PORTABLE_COMPUTE_EMITTER_EXEC" "$target"
+    else
+        printf '%s run src/app/portable_compute_emit/main.spl %s\n' "$SIMPLE_EXEC_BIN" "$target"
+    fi
+}
+
+run_portable_compute_emitter() {
+    program="$1"
+    target="$2"
+    if [ "$PORTABLE_COMPUTE_EMITTER_EXEC" != "" ]; then
+        run_with_timeout "$PORTABLE_COMPUTE_EMITTER_EXEC" "$target"
+    else
+        SIMPLE_LIB="${SIMPLE_LIB:-src}" run_with_timeout "$SIMPLE_EXEC_BIN" run "$program" "$target"
+    fi
+}
+
+record_portable_compute_emitter_command() {
+    target="$1"
+    field="$2"
+    command_line="$(portable_compute_emitter_command "$target")"
+    printf '%s=%s\n' "$field" "$(printf '%s' "$command_line" | one_line)" >>"$BUILD_DIR/evidence.env"
+}
+
+fail_if_explicit_emitter_rejected() {
+    error_path="$1"
+    if [ "$PORTABLE_COMPUTE_EMITTER_EXEC" = "" ]; then
+        return
+    fi
+    echo "Explicit cached portable compute emitter failed protocol validation: $PORTABLE_COMPUTE_EMITTER_EXEC" >&2
+    if [ -s "$error_path" ]; then
+        sed -n '1,20p' "$error_path" >&2
+    fi
+    exit 1
 }
 
 field_from_stream() {
@@ -663,7 +745,8 @@ write_generated_sources() {
     program="src/app/portable_compute_emit/main.spl"
     raw_output="$BUILD_DIR/${target}_source.raw"
     rm -f "$raw_output" "$BUILD_DIR/${target}_source.err"
-    if ! SIMPLE_LIB="${SIMPLE_LIB:-src}" run_with_timeout "$SIMPLE_EXEC_BIN" run "$program" "$target" >"$raw_output" 2>"$BUILD_DIR/${target}_source.err"; then
+    record_portable_compute_emitter_command "$target" "${target}_emitter_command"
+    if ! run_portable_compute_emitter "$program" "$target" >"$raw_output" 2>"$BUILD_DIR/${target}_source.err"; then
         return 1
     fi
     rm -f "$path"
@@ -721,7 +804,8 @@ write_generated_vulkan_font_source() {
     program="src/app/portable_compute_emit/main.spl"
     raw_output="$BUILD_DIR/vulkan_font_source.raw"
     rm -f "$raw_output" "$BUILD_DIR/vulkan_font_source.err"
-    if ! SIMPLE_LIB="${SIMPLE_LIB:-src}" run_with_timeout "$SIMPLE_EXEC_BIN" run "$program" vulkan >"$raw_output" 2>"$BUILD_DIR/vulkan_font_source.err"; then
+    record_portable_compute_emitter_command vulkan vulkan_font_emitter_command
+    if ! run_portable_compute_emitter "$program" vulkan >"$raw_output" 2>"$BUILD_DIR/vulkan_font_source.err"; then
         return 1
     fi
     rm -f "$path"
@@ -931,7 +1015,8 @@ run_cuda() {
     font_out="$BUILD_DIR/simple_2d_optimization_font_atlas.ptx"
     rm -f "$out" "$font_out"
     if ! write_generated_sources cuda "$src" "$font_src"; then
-        cmd="$SIMPLE_EXEC_BIN run <cuda portable emitter> > $src"
+        fail_if_explicit_emitter_rejected "$BUILD_DIR/cuda_source.err"
+        cmd="$(portable_compute_emitter_command cuda)"
         emit_result cuda generated_source_failed generated-source-failed 0 "$cmd" "$out"
         emit_font_result cuda generated_source_failed generated-source-failed 0 "$cmd" "$font_out"
         return
@@ -1011,7 +1096,8 @@ run_hip() {
     font_out="$BUILD_DIR/simple_2d_optimization_font_atlas.hsaco"
     rm -f "$out" "$font_out"
     if ! write_generated_sources hip "$src" "$font_src"; then
-        cmd="$SIMPLE_EXEC_BIN run <hip portable emitter> > $src"
+        fail_if_explicit_emitter_rejected "$BUILD_DIR/hip_source.err"
+        cmd="$(portable_compute_emitter_command hip)"
         emit_result hip generated_source_failed generated-source-failed 0 "$cmd" "$out"
         emit_font_result hip generated_source_failed generated-source-failed 0 "$cmd" "$font_out"
         return
@@ -1060,7 +1146,8 @@ run_opencl() {
     font_out="$BUILD_DIR/simple_2d_optimization_font_atlas.spirv"
     rm -f "$out" "$font_out"
     if ! write_generated_sources opencl "$src" "$font_src"; then
-        cmd="$SIMPLE_EXEC_BIN run <opencl portable emitter> > $src"
+        fail_if_explicit_emitter_rejected "$BUILD_DIR/opencl_source.err"
+        cmd="$(portable_compute_emitter_command opencl)"
         emit_result opencl generated_source_failed generated-source-failed 0 "$cmd" "$out"
         emit_font_result opencl generated_source_failed generated-source-failed 0 "$cmd" "$font_out"
         return
@@ -1111,7 +1198,8 @@ run_metal() {
     font_out="$BUILD_DIR/simple_2d_optimization_font_atlas.metallib"
     rm -f "$air" "$out" "$font_air" "$font_out"
     if ! write_generated_sources metal "$src" "$font_src"; then
-        cmd="$SIMPLE_EXEC_BIN run <metal portable emitter> > $src"
+        fail_if_explicit_emitter_rejected "$BUILD_DIR/metal_source.err"
+        cmd="$(portable_compute_emitter_command metal)"
         emit_result metal generated_source_failed generated-source-failed 0 "$cmd" "$out"
         emit_font_result metal generated_source_failed generated-source-failed 0 "$cmd" "$font_out"
         return
@@ -1170,7 +1258,8 @@ run_vulkan_font() {
     VULKAN_FONT_SOURCE_EQUIVALENT=false
     rm -f "$out" "$out_repro"
     if ! write_generated_vulkan_font_source "$src"; then
-        cmd="$SIMPLE_EXEC_BIN run <vulkan font emitter> > $src"
+        fail_if_explicit_emitter_rejected "$BUILD_DIR/vulkan_font_source.err"
+        cmd="$(portable_compute_emitter_command vulkan)"
         emit_font_result vulkan generated_source_failed generated-source-failed 0 "$cmd" "$out"
         return
     fi
@@ -1309,13 +1398,36 @@ EOF
     fi
 }
 
+if [ "${1:-}" = "--explicit-emitter-self-test" ]; then
+    self_build="$BUILD_DIR/explicit-emitter-self-test"
+    self_report="$self_build/report.md"
+    self_stderr="$self_build/stderr.log"
+    mkdir -p "$self_build"
+    if PORTABLE_COMPUTE_TARGETS=cuda \
+        PORTABLE_COMPUTE_REQUIRE_VERIFIED=0 \
+        PORTABLE_COMPUTE_EMITTER_BIN=/bin/true \
+        BUILD_DIR="$self_build/run" \
+        REPORT_PATH="$self_report" \
+        sh "$ROOT_DIR/scripts/check/check-portable-compute-toolchains.shs" \
+        >"$self_build/stdout.log" 2>"$self_stderr"; then
+        echo "explicit cached emitter self-test accepted a non-emitter executable" >&2
+        exit 1
+    fi
+    if ! grep -F "Explicit cached portable compute emitter failed protocol validation:" "$self_stderr" >/dev/null 2>&1; then
+        echo "explicit cached emitter self-test missed the fail-closed diagnostic" >&2
+        exit 1
+    fi
+    echo "explicit cached emitter self-test passed"
+    exit 0
+fi
+
 rm -f "$BUILD_DIR/evidence.env"
 {
     echo "portable_compute_targets=$PORTABLE_COMPUTE_TARGETS"
     echo "portable_compute_expected_semantics=$PORTABLE_COMPUTE_EXPECTED_SEMANTICS"
 } >"$BUILD_DIR/evidence.env"
 assert_evidence_parser_contract
-record_simple_provenance
+record_portable_compute_emitter_provenance
 if target_requested cuda; then run_cuda; fi
 if target_requested hip; then run_hip; fi
 if target_requested opencl; then run_opencl; fi
@@ -1355,13 +1467,17 @@ rm -f "$REPORT_PATH"
     echo
     for target in cuda hip opencl metal; do
         if ! target_requested "$target"; then continue; fi
+        emitter_command="$(field_of "${target}_emitter_command" "$BUILD_DIR/evidence.env")"
         command_line="$(field_of "${target}_command" "$BUILD_DIR/evidence.env")"
         font_command="$(field_of "${target}_font_command" "$BUILD_DIR/evidence.env")"
+        echo "- $target source emitter: \`$emitter_command\`"
         echo "- $target optimization: \`$command_line\`"
         echo "- $target font-atlas: \`$font_command\`"
     done
     if target_requested vulkan; then
+        vulkan_font_emitter_command="$(field_of vulkan_font_emitter_command "$BUILD_DIR/evidence.env")"
         vulkan_font_command="$(field_of vulkan_font_command "$BUILD_DIR/evidence.env")"
+        echo "- vulkan font source emitter: \`$vulkan_font_emitter_command\`"
         echo "- vulkan font-atlas: \`$vulkan_font_command\`"
     fi
 } >"$REPORT_PATH"

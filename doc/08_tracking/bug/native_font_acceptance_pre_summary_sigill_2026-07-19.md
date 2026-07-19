@@ -37,6 +37,8 @@ all three specs.
 - `build/test-artifacts/shared_multilingual_gpu_fonts/runner-calibration/fail_fast_return_helper_v3.log`
 - `build/test-artifacts/shared_multilingual_gpu_fonts/vulkan_provenance_self_test.log`
 - `build/test-artifacts/shared_multilingual_gpu_fonts/unit/font_identity_free_function_spec_cycle3.log`
+- `build/test-artifacts/shared_multilingual_gpu_fonts/option_class_payload_probe_bounded/results.tsv`
+- `build/test-artifacts/shared_multilingual_gpu_fonts/option_class_payload_probe_bounded/option-class-profile.log`
 
 ## Next fix targets
 
@@ -59,3 +61,14 @@ optional-class payload lowering and deployed-compiler freshness; the current
 `ExistsCheck` source already states that the base payload must be preserved.
 Inspect emission's final cached `spl_main` object in a fresh session; do not
 rerun either capped spec unchanged.
+
+The uncapped native smoke case `option_class_payload` now isolates the shaping
+construct (`Box?` followed by `pending.?` and a field read). The retained font
+compiler produced no build diagnostics for more than five minutes; the bounded
+30-second generic rerun records an XFAIL instead of hanging the matrix. A
+separate canonical core-C/entry-closure profile builds the one-module probe in
+0.8 seconds, but its binary reports `field access on nil receiver` at
+`owned.value` and exits 132. This proves class-Option payload corruption rather
+than a font or linker failure. Promote case 20 to a required PASS when a
+redeployed pure-Simple compiler returns 7; only then spend a fresh canonical
+shaping cycle.

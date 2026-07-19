@@ -21,7 +21,8 @@
 # Env:   SIMPLE_BINARY (default bin/simple), NATIVE_SMOKE_BACKEND (default
 #        llvm), NATIVE_SMOKE_WORK_DIR (default /tmp/native-smoke-matrix.$$),
 #        NATIVE_SMOKE_CASES (space-separated subset of case ids to run,
-#        default = all).
+#        default = all). NATIVE_SMOKE_BUILD_TIMEOUT_SECS and
+#        NATIVE_SMOKE_RUN_TIMEOUT_SECS bound each build and execution.
 set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
@@ -30,12 +31,23 @@ cd "$ROOT_DIR"
 SIMPLE_BINARY="${SIMPLE_BINARY:-bin/simple}"
 NATIVE_SMOKE_BACKEND="${NATIVE_SMOKE_BACKEND:-llvm}"
 WORK_DIR="${NATIVE_SMOKE_WORK_DIR:-/tmp/native-smoke-matrix.$$}"
+BUILD_TIMEOUT_SECS="${NATIVE_SMOKE_BUILD_TIMEOUT_SECS:-180}"
+RUN_TIMEOUT_SECS="${NATIVE_SMOKE_RUN_TIMEOUT_SECS:-30}"
 mkdir -p "$WORK_DIR"
 
 case "$NATIVE_SMOKE_BACKEND" in
     llvm|cranelift) ;;
     *) echo "unsupported native smoke backend: $NATIVE_SMOKE_BACKEND" >&2; exit 2 ;;
 esac
+
+if command -v timeout >/dev/null 2>&1; then
+    TIMEOUT_TOOL="$(command -v timeout)"
+elif command -v gtimeout >/dev/null 2>&1; then
+    TIMEOUT_TOOL="$(command -v gtimeout)"
+else
+    echo "native smoke matrix requires timeout or gtimeout" >&2
+    exit 2
+fi
 
 STAMP="$(date +%s)_$$"
 RESULTS_FILE="$WORK_DIR/results.tsv"
@@ -47,6 +59,12 @@ FAIL_N=0
 XFAIL_N=0
 XPASS_N=0
 FALLBACK_TOTAL=0
+
+run_with_timeout() {
+    seconds="$1"
+    shift
+    "$TIMEOUT_TOOL" -k 5s "${seconds}s" "$@"
+}
 
 # ---------------------------------------------------------------------------
 # Case source writers — one tiny .spl program per language feature.
@@ -234,6 +252,22 @@ fn main() -> i64:
 EOF
 }
 
+write_case_option_class_payload() {
+    cat >"$1" <<'EOF'
+class Box:
+    value: i64
+
+fn get_box() -> Box?:
+    return Some(Box(value: 7))
+
+fn main() -> i64:
+    val pending = get_box()
+    if pending == nil: return 0
+    val owned = pending.?
+    return owned.value
+EOF
+}
+
 write_case_result_try() {
     cat >"$1" <<'EOF'
 fn get() -> Result<i64, text>:
@@ -347,7 +381,7 @@ run_case() {
         set -- "$@" --backend=cranelift
     fi
     build_ok=1
-    if ! env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 \
+    if ! run_with_timeout "$BUILD_TIMEOUT_SECS" env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 \
         "$@" --entry "$src" -o "$bin" --clean >"$build_log" 2>&1; then
         build_ok=0
     fi
@@ -359,7 +393,7 @@ run_case() {
     got_rc="build-failed"
     if [ "$build_ok" -eq 1 ] && [ -x "$bin" ]; then
         set +e
-        "$bin" >/dev/null 2>>"$build_log"
+        run_with_timeout "$RUN_TIMEOUT_SECS" "$bin" >/dev/null 2>>"$build_log"
         got_rc=$?
         set -e
     fi
@@ -418,6 +452,7 @@ match_value_position|(16) value-position match (val r = match n)|write_case_matc
 match_value_position_return|(17) value-position match, arm returns|write_case_match_value_return|7|no
 trait_default|(18) trait default method dispatch (#157)|write_case_trait_default|42|no
 dict_struct_value|(19) struct-valued Dict m[k].field + keys() text (#189)|write_case_dict_struct_value|73|no
+option_class_payload|(20) Option class payload (x.?)|write_case_option_class_payload|7|yes
 "
 
 # NOTE: read from a file (not a pipe) so the loop body runs in THIS shell,
@@ -456,7 +491,7 @@ if [ "$XPASS_N" -gt 0 ]; then
     echo "NOTE: $XPASS_N case(s) marked XFAIL now PASS — promote them to real PASS cases."
 fi
 
-if [ "$FAIL_N" -gt 0 ] || [ "$FALLBACK_TOTAL" -gt 0 ]; then
+if [ "$FAIL_N" -gt 0 ] || [ "$XPASS_N" -gt 0 ] || [ "$FALLBACK_TOTAL" -gt 0 ]; then
     echo "native_smoke_matrix=false"
     exit 1
 fi
