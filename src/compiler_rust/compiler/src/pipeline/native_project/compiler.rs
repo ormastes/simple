@@ -1,5 +1,6 @@
 //! File compilation pipeline: parse, lower, codegen, parallel/sequential dispatch.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -17,6 +18,21 @@ use super::{effective_target, is_entry_file, safe_canonicalize, source_root_for_
 use super::imports::{build_suffix_index, build_use_map_from_ast};
 use super::mangle::mangle_mir;
 use super::module_global_init::inject_freestanding_module_global_init;
+
+fn persist_compiled_object(cache_path: &Path, object: &[u8]) -> Result<(), String> {
+    let parent = cache_path
+        .parent()
+        .ok_or_else(|| format!("cache object has no parent: {}", cache_path.display()))?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(|e| format!("create cache temp: {e}"))?;
+    temp.write_all(object).map_err(|e| format!("write cache temp: {e}"))?;
+    match temp.persist(cache_path) {
+        Ok(_) => Ok(()),
+        Err(e) => match std::fs::read(cache_path) {
+            Ok(existing) if existing == object => Ok(()),
+            _ => Err(format!("persist cache object: {}", e.error)),
+        },
+    }
+}
 
 fn is_script_statement(node: &Node) -> bool {
     matches!(
@@ -184,7 +200,7 @@ impl NativeProjectBuilder {
     /// setup is needed here.
     pub(crate) fn compile_entries_parallel(
         &self,
-        entries: &[(usize, PathBuf, String)],
+        entries: &[(usize, PathBuf, String, Option<PathBuf>)],
         temp_dir: &Path,
         canonical_entry: &Option<PathBuf>,
         imports: &ModuleImports,
@@ -205,7 +221,7 @@ impl NativeProjectBuilder {
         entries
             .par_iter()
             .enumerate()
-            .map(|(progress_i, (idx, path, source))| {
+            .map(|(progress_i, (idx, path, source, cache_path))| {
                 let is_entry = is_entry_file(path, &canonical_entry);
                 if verbose && is_entry {
                     eprintln!("  [entry] {}", path.display());
@@ -226,6 +242,9 @@ impl NativeProjectBuilder {
                     Ok(obj_code) => {
                         let obj_path = temp_dir.join(format!("mod_{}.o", idx));
                         std::fs::write(&obj_path, &obj_code).map_err(|e| (path.clone(), format!("write .o: {e}")))?;
+                        if let Some(cache_path) = cache_path {
+                            persist_compiled_object(cache_path, &obj_code).map_err(|e| (path.clone(), e))?;
+                        }
                         if verbose && (progress_i + 1) % 50 == 0 {
                             eprintln!("  [{}/{}] compiled", progress_i + 1, total);
                         }
@@ -243,7 +262,7 @@ impl NativeProjectBuilder {
     /// Compile entries sequentially (fallback).
     pub(crate) fn compile_entries_sequential(
         &self,
-        entries: &[(usize, PathBuf, String)],
+        entries: &[(usize, PathBuf, String, Option<PathBuf>)],
         temp_dir: &Path,
         canonical_entry: &Option<PathBuf>,
         imports: &ModuleImports,
@@ -252,7 +271,7 @@ impl NativeProjectBuilder {
         entries
             .iter()
             .enumerate()
-            .map(|(progress_i, (idx, path, source))| {
+            .map(|(progress_i, (idx, path, source, cache_path))| {
                 let is_entry = is_entry_file(path, canonical_entry);
                 if self.config.verbose && is_entry {
                     eprintln!("  [entry] {}", path.display());
@@ -273,6 +292,9 @@ impl NativeProjectBuilder {
                     Ok(obj_code) => {
                         let obj_path = temp_dir.join(format!("mod_{}.o", idx));
                         std::fs::write(&obj_path, &obj_code).map_err(|e| (path.clone(), format!("write .o: {e}")))?;
+                        if let Some(cache_path) = cache_path {
+                            persist_compiled_object(cache_path, &obj_code).map_err(|e| (path.clone(), e))?;
+                        }
                         if self.config.verbose && (progress_i + 1) % 10 == 0 {
                             eprintln!("  [{}/{}] compiled", progress_i + 1, total);
                         }

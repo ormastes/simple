@@ -702,8 +702,15 @@ impl NativeProjectBuilder {
         };
         let global_fp_combined: u64 = global_fp.as_ref().map(GlobalBuildFingerprint::combined).unwrap_or(0);
 
+        // compile_file_to_object selects LLVM only for this exact override.
+        let effective_backend = if std::env::var("SIMPLE_BACKEND").as_deref() == Ok("llvm") {
+            "llvm"
+        } else {
+            "cranelift"
+        };
+
         // Determine which files need recompilation via content hash
-        let mut to_compile: Vec<(usize, PathBuf, String)> = Vec::new();
+        let mut to_compile: Vec<(usize, PathBuf, String, Option<PathBuf>)> = Vec::new();
         let mut cached_objects: Vec<(usize, PathBuf)> = Vec::new();
 
         if use_incremental {
@@ -716,15 +723,18 @@ impl NativeProjectBuilder {
                 }
                 // Always recompile the entry file (its main->spl_main renaming depends on is_entry)
                 let is_entry = is_entry_file(path, &canon_entry_for_cache);
-                if !is_entry && !source_may_emit_inline_asm_sidecar(source) {
+                let cache_eligible = !is_entry && !source_may_emit_inline_asm_sidecar(source);
+                let mut immediate_cache = None;
+                if cache_eligible {
                     let per_file_root = self.effective_source_root_for(path);
                     let module_prefix = crate::codegen::common_backend::module_prefix_from_path(path, &per_file_root);
                     let base_hash = object_cache_key(
                         source,
                         is_entry,
-                        &self.config.backend,
+                        effective_backend,
                         self.config.no_mangle,
                         &module_prefix,
+                        self.config.opt_level,
                     );
                     // Safe-incremental path folds in the global build fingerprint so
                     // any cross-module structural change misses the cache; legacy
@@ -743,8 +753,11 @@ impl NativeProjectBuilder {
                             continue;
                         }
                     }
+                    if self.config.no_mangle {
+                        immediate_cache = Some(cached_o);
+                    }
                 }
-                to_compile.push((i, path.clone(), source.clone()));
+                to_compile.push((i, path.clone(), source.clone(), immediate_cache));
             }
         } else {
             for (i, (path, source)) in file_sources.iter().enumerate() {
@@ -752,7 +765,7 @@ impl NativeProjectBuilder {
                 if !compile_indices.contains(&i) {
                     continue;
                 }
-                to_compile.push((i, path.clone(), source.clone()));
+                to_compile.push((i, path.clone(), source.clone(), None));
             }
         }
 
@@ -764,7 +777,7 @@ impl NativeProjectBuilder {
                 to_compile.len(),
                 use_incremental
             );
-            for (idx, path, _) in to_compile.iter().take(12) {
+            for (idx, path, _, _) in to_compile.iter().take(12) {
                 eprintln!("  compile[{idx}]={}", path.display());
             }
         }
@@ -857,14 +870,18 @@ impl NativeProjectBuilder {
             for (idx, obj_path) in &freshly_compiled {
                 if let Some((path, source)) = file_sources.get(*idx) {
                     let is_entry = is_entry_file(path, &canonical_entry);
+                    if self.config.no_mangle && !is_entry && !source_may_emit_inline_asm_sidecar(source) {
+                        continue;
+                    }
                     let per_file_root = self.effective_source_root_for(path);
                     let module_prefix = crate::codegen::common_backend::module_prefix_from_path(path, &per_file_root);
                     let base_hash = object_cache_key(
                         source,
                         is_entry,
-                        &self.config.backend,
+                        effective_backend,
                         self.config.no_mangle,
                         &module_prefix,
+                        self.config.opt_level,
                     );
                     // Must mirror the read-loop key exactly (see above) or a fresh
                     // object would be cached under a key the next build never looks up.
@@ -1205,6 +1222,7 @@ pub(crate) fn object_cache_key(
     backend: &str,
     no_mangle: bool,
     module_prefix: &str,
+    opt_level: NativeOptimizationLevel,
 ) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -1213,6 +1231,7 @@ pub(crate) fn object_cache_key(
     backend.hash(&mut hasher);
     no_mangle.hash(&mut hasher);
     module_prefix.hash(&mut hasher);
+    opt_level.as_str().hash(&mut hasher);
     std::env::var("SIMPLE_NATIVE_CPU").unwrap_or_default().hash(&mut hasher);
     active_simd_tier_name().hash(&mut hasher);
     compiler_fingerprint().hash(&mut hasher);

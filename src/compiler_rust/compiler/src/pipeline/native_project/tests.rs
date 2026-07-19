@@ -590,13 +590,71 @@ sandbox plugin_sandbox:
 #[test]
 fn test_object_cache_key_separates_simd_tiers() {
     let scalar = with_simd_tier_env("scalar", || {
-        object_cache_key("fn main(): return 42", true, "cranelift", false, "app__main")
+        object_cache_key(
+            "fn main(): return 42",
+            true,
+            "cranelift",
+            false,
+            "app__main",
+            NativeOptimizationLevel::Standard,
+        )
     });
     let avx2 = with_simd_tier_env("x86_64_avx2", || {
-        object_cache_key("fn main(): return 42", true, "cranelift", false, "app__main")
+        object_cache_key(
+            "fn main(): return 42",
+            true,
+            "cranelift",
+            false,
+            "app__main",
+            NativeOptimizationLevel::Standard,
+        )
     });
 
     assert_ne!(scalar, avx2);
+}
+
+#[test]
+fn test_object_cache_key_separates_optimization_levels() {
+    let standard = object_cache_key(
+        "fn main(): return 42",
+        true,
+        "cranelift",
+        false,
+        "app__main",
+        NativeOptimizationLevel::Standard,
+    );
+    let aggressive = object_cache_key(
+        "fn main(): return 42",
+        true,
+        "cranelift",
+        false,
+        "app__main",
+        NativeOptimizationLevel::Aggressive,
+    );
+
+    assert_ne!(standard, aggressive);
+}
+
+#[test]
+fn test_object_cache_key_separates_backends() {
+    let cranelift = object_cache_key(
+        "fn main(): return 42",
+        true,
+        "cranelift",
+        false,
+        "app__main",
+        NativeOptimizationLevel::Standard,
+    );
+    let llvm = object_cache_key(
+        "fn main(): return 42",
+        true,
+        "llvm",
+        false,
+        "app__main",
+        NativeOptimizationLevel::Standard,
+    );
+
+    assert_ne!(cranelift, llvm);
 }
 
 #[test]
@@ -626,10 +684,24 @@ fn test_object_cache_key_separates_configured_active_tiers_without_override() {
     }
 
     let high = with_simd_envs(None, Some(&high_path), || {
-        object_cache_key("fn main(): return 42", true, "cranelift", false, "app__main")
+        object_cache_key(
+            "fn main(): return 42",
+            true,
+            "cranelift",
+            false,
+            "app__main",
+            NativeOptimizationLevel::Standard,
+        )
     });
     let low = with_simd_envs(None, Some(&low_path), || {
-        object_cache_key("fn main(): return 42", true, "cranelift", false, "app__main")
+        object_cache_key(
+            "fn main(): return 42",
+            true,
+            "cranelift",
+            false,
+            "app__main",
+            NativeOptimizationLevel::Standard,
+        )
     });
 
     assert_ne!(high, low);
@@ -666,13 +738,21 @@ fn test_object_cache_key_includes_compiler_fingerprint() {
     backend.hash(&mut legacy_hasher);
     no_mangle.hash(&mut legacy_hasher);
     module_prefix.hash(&mut legacy_hasher);
+    NativeOptimizationLevel::Standard.as_str().hash(&mut legacy_hasher);
     std::env::var("SIMPLE_NATIVE_CPU")
         .unwrap_or_default()
         .hash(&mut legacy_hasher);
     active_simd_tier_name().hash(&mut legacy_hasher);
     let legacy_key = legacy_hasher.finish();
 
-    let real_key = object_cache_key(content, is_entry, backend, no_mangle, module_prefix);
+    let real_key = object_cache_key(
+        content,
+        is_entry,
+        backend,
+        no_mangle,
+        module_prefix,
+        NativeOptimizationLevel::Standard,
+    );
 
     // A real process's compiler_fingerprint() is a SipHash over actual exe
     // bytes (or exe metadata), astronomically unlikely to be exactly zero,
@@ -685,7 +765,14 @@ fn test_object_cache_key_includes_compiler_fingerprint() {
 
     // Cache hits for an unchanged binary must still work: identical inputs in
     // the same process produce identical keys.
-    let real_key_again = object_cache_key(content, is_entry, backend, no_mangle, module_prefix);
+    let real_key_again = object_cache_key(
+        content,
+        is_entry,
+        backend,
+        no_mangle,
+        module_prefix,
+        NativeOptimizationLevel::Standard,
+    );
     assert_eq!(real_key, real_key_again);
 }
 
@@ -5363,6 +5450,53 @@ fn test_compile_failure_does_not_link_cached_objects() {
     assert!(error.contains("native-build aborted: 1 file(s) failed to compile"));
     assert!(error.contains("failing.spl"));
     assert!(!archive.exists(), "cached objects were linked after a module failed");
+}
+
+/// Successful independent objects must survive a later module failure so a
+/// bounded retry can converge instead of recompiling the whole dirty batch.
+#[cfg(target_os = "linux")]
+#[test]
+fn test_compile_failure_preserves_completed_objects_for_retry() {
+    for parallel in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let source_dir = temp.path().join("src");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::write(source_dir.join("good.spl"), "fn good_probe() -> i64:\n    return 101\n").unwrap();
+        let failing = source_dir.join("failing.spl");
+        fs::write(&failing, "fn failing_probe() -> i64:\n    return )\n").unwrap();
+
+        let cache_dir = temp.path().join("cache");
+        let archive = temp.path().join("libretry.a");
+        let config = || NativeBuildConfig {
+            emit_archive: true,
+            incremental: true,
+            parallel,
+            no_mangle: true,
+            cache_dir: Some(cache_dir.clone()),
+            ..NativeBuildConfig::default()
+        };
+
+        NativeProjectBuilder::new(temp.path().to_path_buf(), archive.clone())
+            .config(config())
+            .source_dir(source_dir.clone())
+            .build()
+            .unwrap_err();
+
+        let completed = fs::read_dir(cache_dir.join("objects"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "o"))
+            .count();
+        assert_eq!(completed, 1, "successful object was discarded with failed batch");
+
+        fs::write(&failing, "fn failing_probe() -> i64:\n    return 202\n").unwrap();
+        let result = NativeProjectBuilder::new(temp.path().to_path_buf(), archive)
+            .config(config())
+            .source_dir(source_dir)
+            .build()
+            .unwrap();
+        assert_eq!(result.cached, 1, "retry did not reuse the completed object");
+    }
 }
 
 /// Regression test for a suspected cache hit/miss mix bug (issue #64): when an
