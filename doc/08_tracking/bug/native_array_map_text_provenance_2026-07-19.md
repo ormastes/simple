@@ -1,6 +1,6 @@
 # Native array map loses text ownership and provenance
 
-Status: OPEN
+Status: SOURCE FIXED; native execution pending
 
 ## Reproduction
 

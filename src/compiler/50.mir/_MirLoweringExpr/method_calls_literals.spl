@@ -322,6 +322,8 @@ impl MirLowering:
         nil
 
     me method_receiver_is_option(receiver: HirExpr, local: LocalId) -> bool:
+        if self.local_is_runtime_array(local):
+            return false
         if self.option_inner_hir_type_for_local(receiver, local) != nil:
             return true
         self.nil_locals.has(local.id)
@@ -2289,9 +2291,11 @@ impl MirLowering:
                 # can't be misdispatched as an array op.
                 if self.local_is_runtime_array(unresolved_receiver_local):
                     if method == "map" and args.len() == 1:
-                        val map_lambda_operand = self.lower_lambda_value(args[0].value)
-                        if val map_lam_op = map_lambda_operand:
-                            return self.lower_array_map(unresolved_receiver_local, map_lam_op)
+                        match args[0].value.kind:
+                            case Lambda(map_params, map_body, _):
+                                if map_params.len() == 1:
+                                    return self.lower_array_map(unresolved_receiver_local, map_params, map_body)
+                            case _: ()
                     if method == "filter" and args.len() == 1:
                         val filter_lambda_operand = self.lower_lambda_value(args[0].value)
                         if val filter_lam_op = filter_lambda_operand:
@@ -2874,19 +2878,23 @@ impl MirLowering:
             )))
         ))
 
-    me lower_array_map(arr: LocalId, lam_op: MirOperand) -> LocalId:
+    me lower_array_map(arr: LocalId, map_params: [HirParam], map_body: HirExpr) -> LocalId:
         """Lower `arr.map(\\x: expr)` for a runtime `[i64]` array.
 
         Emits a counted index loop (same shape as
         mir_lowering_stmts.lower_for_array_indexed): builds a fresh result
-        array via rt_array_new/rt_array_push, calling the #165-lifted lambda
-        fnptr once per element. `rt_array_get` returns a TAGGED runtime value
-        (decode_runtime_value untags it to raw i64 -- the lambda's forced ABI,
-        see lower_lambda_value); the lambda's raw i64 result is re-tagged
-        (box_runtime_value) before rt_array_push, matching how the existing
-        `push` intercept above tags its argument.
+        array via rt_array_new/rt_array_push. Inline the callback so its input
+        and result keep their MIR types instead of losing text tags through a
+        forced i64 function-pointer ABI.
         """
         val loop_ty = MirType.i64()
+        var elem_type = MirType.i64()
+        var mapped_elem_type = MirType.i64()
+        if val arr_type = self.local_mir_type_of(arr):
+            match arr_type.kind:
+                case MirTypeKind.Array(found_elem_type, _): elem_type = found_elem_type
+                case MirTypeKind.Slice(found_elem_type): elem_type = found_elem_type
+                case _: ()
 
         var b_len = self.builder
         val len_call = b_len.emit_call(self.rt_array_len_operand(), [mir_operand_copy(arr)], MirType.i64())
@@ -2936,12 +2944,10 @@ impl MirLowering:
         val get_call = b_get.emit_call(self.rt_array_get_operand(), [mir_operand_copy(arr), mir_operand_copy(counter)], MirType.i64())
         val elem_tagged = get_call ?? b_get.new_temp(MirType.i64())
         self.builder = b_get
-        val elem_raw = self.decode_runtime_value(elem_tagged, MirType.i64())
-
-        var b_call = self.builder
-        val call_result = b_call.emit_call(lam_op, [mir_operand_copy(elem_raw)], MirType.i64())
-        val mapped_raw = call_result ?? b_call.new_temp(MirType.i64())
-        self.builder = b_call
+        val elem_raw = self.decode_runtime_value(elem_tagged, elem_type)
+        val mapped_raw = self.lower_inline_lambda_with_locals(map_params, map_body, [elem_raw])
+        if val found_mapped_type = self.local_mir_type_of(mapped_raw):
+            mapped_elem_type = found_mapped_type
         val mapped_tagged = self.box_runtime_value(mapped_raw)
 
         var b_push = self.builder
@@ -2964,8 +2970,13 @@ impl MirLowering:
 
         var b_exit = self.builder
         b_exit.switch_to_block(exit_block)
+        val mapped_array_type = MirType(kind: MirTypeKind.Array(mapped_elem_type, 0))
+        val typed_result_arr = b_exit.new_temp(mapped_array_type)
+        b_exit.emit_copy(typed_result_arr, result_arr)
         self.builder = b_exit
-        result_arr
+        self.runtime_array_locals[typed_result_arr.id] = true
+        self.runtime_value_locals[typed_result_arr.id] = true
+        typed_result_arr
 
     me lower_array_filter(arr: LocalId, lam_op: MirOperand) -> LocalId:
         """Lower `arr.filter(\\x: predicate)` for a runtime `[i64]` array.

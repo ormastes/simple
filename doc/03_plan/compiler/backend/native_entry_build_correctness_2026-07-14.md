@@ -15,9 +15,9 @@ failure is **never** silently converted to a wrong answer.
   case passed, with zero FAIL/XFAIL/XPASS/codegen-fallback results.
 - **Gate 2 — parity:** `scripts/check/check-native-seed-parity.shs` (dual-backend
   regression harness) must report `native_seed_parity=true`. By default it
-  defines **92 logical cases / 126 recorded checks** because strict-dual cases
+  defines **93 logical cases / 128 recorded checks** because strict-dual cases
   record LLVM and Cranelift separately. `NATIVE_OPEN_BUG_REPROS=1` expands this
-  to **93 logical cases / 127 recorded checks**; execution is opt-in because
+  to **94 logical cases / 129 recorded checks**; execution is opt-in because
   the exact brace-literal reproduction remains known-red. Execution of the
   expanded matrix is pending.
   The full unfiltered gate is now scheduled on Linux x86_64 LLVM (STRICT-DUAL
@@ -211,12 +211,14 @@ the shared binary — deploys require explicit user go-ahead).
 - Option `.map` now evaluates a side-effecting receiver exactly once and
   inlines its literal lambda with the decoded payload, preserving primitive
   text/float/bool/integer results through the tagged runtime-value merge.
-  Array `filter`/`fold` retain their existing lifted i64 ABI. Array `map` is a
-  separate open correctness bug: missing owner metadata can select Option map,
-  while its forced-i64 fallback loses text tags and result element provenance.
-  The exact known-red fixture and acceptance contract are tracked in
+  Array `filter`/`fold` retain their existing lifted i64 ABI. Array `map` is
+  source-fixed: proven runtime arrays cannot be claimed by Option ownership,
+  and the existing unresolved-array fallback now inlines its one-parameter
+  callback while preserving input/result MIR types and returned-array element
+  provenance. Resolved custom/static map owners remain untouched. The exact
+  fixture and acceptance contract are tracked in
   `doc/08_tracking/bug/native_array_map_text_provenance_2026-07-19.md`. Linux runs
-  the strict dual-backend typed-output/filter control in the full gate; that
+  the strict dual-backend typed-output control in the full gate; that
   control now also observes the receiver's mutation count so duplicate
   evaluation cannot pass. macOS
   arm64/x64, Windows x64, and FreeBSD x86_64 select it explicitly. First staged
