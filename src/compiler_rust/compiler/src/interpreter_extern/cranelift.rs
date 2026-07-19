@@ -123,6 +123,20 @@ pub fn rt_cranelift_new_aot_module(args: &[Value]) -> Result<Value, CompileError
     Ok(Value::Int(handle))
 }
 
+/// Create a new AOT module for an exact target triple.
+pub fn rt_cranelift_new_aot_module_triple(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 4 {
+        return Ok(Value::Int(0));
+    }
+    let name_ptr = value_to_i64(&args[0]);
+    let name_len = value_to_i64(&args[1]);
+    let target_ptr = value_to_i64(&args[2]);
+    let target_len = value_to_i64(&args[3]);
+    let handle =
+        unsafe { cranelift_sffi::rt_cranelift_new_aot_module_triple(name_ptr, name_len, target_ptr, target_len) };
+    Ok(Value::Int(handle))
+}
+
 /// Finalize module (JIT: compile; AOT: finalize)
 pub fn rt_cranelift_finalize_module(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {

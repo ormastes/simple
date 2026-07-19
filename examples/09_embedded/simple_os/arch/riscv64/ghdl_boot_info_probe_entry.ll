@@ -696,6 +696,7 @@ declare i64 @rt_cranelift_module_new(i64, i64)
 declare i64 @rt_cranelift_new_module(i64, i64, i64)
 
 declare i64 @rt_cranelift_new_aot_module(i64, i64, i64)
+declare i64 @rt_cranelift_new_aot_module_triple(i64, i64, i64, i64)
 
 declare i64 @rt_cranelift_finalize_module(i64)
 

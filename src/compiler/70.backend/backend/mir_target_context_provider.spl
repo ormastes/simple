@@ -1,10 +1,49 @@
 # Backend boundary for immutable MIR target state.
 
-use compiler.common.mir_target_context.{MirTargetContext, mir_target_context_from}
+use compiler.common.mir_target_context.{MirTargetContext, mir_target_context_from, mir_target_context_normalize_arch}
 use compiler.backend.backend.llvm_capability.{get_llvm_capabilities}
 use std.platform.{host_arch, host_os}
 
 extern fn rt_env_get(key: text) -> text
+
+fn backend_aot_simpleos_target_triple(target: text) -> text:
+    val value = target.trim().lower()
+    if value == "simpleos" or value.starts_with("simpleos-x86_64"):
+        return "x86_64-unknown-none-elf"
+    if not value.contains("simpleos"):
+        return ""
+    match mir_target_context_normalize_arch(value.split("-")[0]):
+        case "x86_64": "x86_64-unknown-none-elf"
+        case "aarch64": "aarch64-unknown-none-elf"
+        case "riscv64": "riscv64gc-unknown-none-elf"
+        case _: ""
+
+fn backend_normalize_requested_aot_target(target: text) -> text:
+    val value = target.trim().lower()
+    val simpleos_target = backend_aot_simpleos_target_triple(value)
+    if simpleos_target != "":
+        return simpleos_target
+    if value == "host" or value == "native": "" else: value
+
+fn backend_requested_target_triple() -> text:
+    val value = (rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? "").trim().lower()
+    if value == "host" or value == "native": "" else: value
+
+fn backend_requested_aot_target_triple(target_arch: text) -> text:
+    val configured = (rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? "").trim().lower()
+    if configured != "":
+        return backend_normalize_requested_aot_target(configured)
+    val simpleos_target = backend_aot_simpleos_target_triple(target_arch)
+    if simpleos_target != "":
+        return simpleos_target
+    val arch = mir_target_context_normalize_arch(target_arch)
+    if arch == "" or arch == "host" or arch == "native" or arch == mir_target_context_normalize_arch(host_arch()):
+        return ""
+    match arch:
+        case "x86_64": "x86_64-unknown-linux-gnu"
+        case "aarch64": "aarch64-unknown-linux-gnu"
+        case "riscv64": "riscv64gc-unknown-linux-gnu"
+        case _: ""
 
 fn backend_mir_target_context(backend: text) -> MirTargetContext:
     var version = -1
@@ -17,7 +56,7 @@ fn backend_mir_target_context(backend: text) -> MirTargetContext:
 
     val known_version = if version > 0: version else: -1
     mir_target_context_from(
-        rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? "",
+        backend_requested_target_triple(),
         host_arch(),
         host_os(),
         backend,
