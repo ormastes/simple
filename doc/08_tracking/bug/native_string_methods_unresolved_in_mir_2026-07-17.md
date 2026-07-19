@@ -3,7 +3,7 @@
 **Date:** 2026-07-17
 **Severity:** Medium (loud build failure, not silent-wrong; but a real
 functionality gap vs. the oracle)
-**Status:** open
+**Status:** SOURCE FIXED (current Cranelift execution pending)
 **Task:** #178 native text interpolation + string ops verification round 2 (lane S47)
 
 ## Symptom 1 — `.parse_f64()`
@@ -97,3 +97,19 @@ mirroring exactly how `to_lower` is already wired in the same arm.
   `env -u SIMPLE_BOOTSTRAP bin/simple run` (oracle) and
   `env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUNTIME_PATH bin/simple native-build`
   (native).
+
+## Resolution update (2026-07-19)
+
+The shared MIR dispatch and hosted LLVM runtime were already fixed. Cranelift's
+remaining failure was an ABI mismatch: its generic external-call fallback
+declared `rt_string_parse_f64` as i64-to-i64 even though MIR expects a raw f64
+result. The Pure runtime now owns `rt_string_parse_f64(i64) -> f64`, and the
+Cranelift adapter uses a dedicated i64-to-f64 import signature before local or
+generic call lookup. Cranelift function definitions, indirect calls, and
+runtime imports now request the platform calling convention rather than
+hardcoding SystemV, so native-hosted Windows uses its required ABI too.
+
+The existing C9 system fixture is now part of the strict LLVM/Cranelift hosted
+matrix, the focused FreeBSD Cranelift selection, and AArch64/RISC-V64 Cranelift
+QEMU execution. Source/ABI checks pass review; execution with a rebuilt current
+Pure Stage3 remains pending.

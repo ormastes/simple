@@ -8,6 +8,7 @@ SIMPLE_BIN="${SIMPLE_BIN:-bin/release/x86_64-unknown-linux-gnu/simple}"
 BUILD_DIR="${BUILD_DIR:-build/check/cranelift-aot-aggregate-cross}"
 FIXTURE="test/fixtures/compiler/stage4_struct_enum_array_probe.spl"
 EXEC_FIXTURE="test/fixtures/native_crossmodule_result_u8/main.spl"
+TEXT_FIXTURE="test/03_system/native/c9_string_parse_f64_to_upper.spl"
 READELF="${READELF:-$(command -v llvm-readelf || command -v readelf)}"
 test -x "$SIMPLE_BIN"
 mkdir -p "$BUILD_DIR"
@@ -63,6 +64,26 @@ check_execution() {
     test ! -s "$stderr"
 }
 
+check_text_methods_execution() {
+    target="$1"
+    runner="$2"
+    sysroot="$3"
+    out="$BUILD_DIR/$target-text-methods"
+    log="$BUILD_DIR/$target-text-methods.log"
+    actual="$BUILD_DIR/$target-text-methods.actual"
+    stderr="$BUILD_DIR/$target-text-methods.stderr"
+    rm -rf "$BUILD_DIR/$target-text-methods-cache" "$out" "$log" "$actual" "$stderr"
+    env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 "$SIMPLE_BIN" native-build \
+        --backend cranelift --target "$target" --mode one-binary \
+        --source test/03_system/native --source src/lib --entry-closure --entry "$TEXT_FIXTURE" \
+        --cache-dir "$BUILD_DIR/$target-text-methods-cache" -o "$out" >"$log" 2>&1
+    status=0
+    timeout 30 "$runner" -L "$sysroot" "$out" >"$actual" 2>"$stderr" || status=$?
+    [ "$status" -eq 42 ]
+    test ! -s "$actual"
+    test ! -s "$stderr"
+}
+
 check_unsupported_32bit armv7-unknown-linux-gnueabihf arm
 check_unsupported_32bit riscv32-unknown-linux-gnu riscv32
 if [ "$#" -eq 0 ]; then
@@ -74,12 +95,14 @@ for target in "$@"; do
             check_target "$target" AArch64
             if [ "${CRANELIFT_CROSS_EXECUTE:-0}" = 1 ]; then
                 check_execution "$target" qemu-aarch64 /usr/aarch64-linux-gnu
+                check_text_methods_execution "$target" qemu-aarch64 /usr/aarch64-linux-gnu
             fi
             ;;
         riscv64-unknown-linux-gnu)
             check_target "$target" RISC-V
             if [ "${CRANELIFT_CROSS_EXECUTE:-0}" = 1 ]; then
                 check_execution "$target" qemu-riscv64 /usr/riscv64-linux-gnu
+                check_text_methods_execution "$target" qemu-riscv64 /usr/riscv64-linux-gnu
             fi
             ;;
         *) echo "unsupported target: $target" >&2; exit 2 ;;

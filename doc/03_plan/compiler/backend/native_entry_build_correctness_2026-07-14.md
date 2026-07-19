@@ -487,3 +487,11 @@ the shared binary — deploys require explicit user go-ahead).
   dependent `4 -> 5 -> 45` oracle for AArch64/RV64 LLVM+Cranelift execution and
   ARM32/RV32/Windows-ARM64 object gates. Rebuilt execution remains pending.
   See `native_multiple_module_initializers_declaration_order_2026-07-19.md`.
+- Cranelift text `.parse_f64()` now uses a Pure-runtime raw-f64 owner and an
+  explicit i64-argument/f64-result import signature instead of the generic
+  all-i64 fallback. Direct Cranelift signatures and runtime imports now select
+  the native platform calling convention instead of hardcoding SystemV. The
+  existing C9 fixture expects `42` and is scheduled on
+  hosted LLVM/Cranelift, FreeBSD LLVM/Cranelift, and Cranelift AArch64/RISC-V64
+  QEMU gates. Rebuilt current-source execution remains pending. See
+  `native_string_methods_unresolved_in_mir_2026-07-17.md`.
