@@ -1,5 +1,9 @@
 """Regression contract for Cranelift aggregate runtime representation."""
 
+use compiler.backend.backend.cranelift_codegen_adapter.{cranelift_static_init_supported}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.*
 use std.io_runtime.{file_read}
 use std.spec.*
 
@@ -130,6 +134,7 @@ describe "Cranelift aggregate runtime ABI":
         expect(llvm_calls.contains("\"rt_cranelift_new_module\" | \"rt_cranelift_new_aot_module\" => Some(&[0])")).to_equal(false)
         expect(wrapper).to_contain("rt_cranelift_aot_define_function(module, 0, 0, ctx)")
         expect(adapter).to_contain("cranelift_aot_define_function(cl_module, finished)")
+        expect(adapter.contains("cranelift_aot_define_function(cl_module, emit_name, finished)")).to_equal(false)
         expect(generator).to_contain("FFIParamSpec.simple(\"name_len\", \"i64\")")
         expect(module_init_fixture).to_contain("val module_value = init_value()")
         expect(module_init_fixture).to_contain("val next_value = init_next(module_value)")
@@ -139,6 +144,31 @@ describe "Cranelift aggregate runtime ABI":
         expect(sffi).to_contain("ctx.func_ids.iter().find_map")
         expect(sffi).to_contain("let name = finished.name;")
         expect(sffi.contains("let name = string_from_ptr(name_ptr, name_len);")).to_equal(false)
+
+    it "accepts runtime-backed float statics but rejects literal float statics":
+        val symbol = SymbolId(id: 42)
+        val f32_type = MirType(kind: MirTypeKind.F32)
+        val f64_type = MirType.f64()
+        val runtime_f32 = MirStatic(symbol: symbol, name: "runtime_f32", type_: f32_type, init: nil, is_mutable: false)
+        val runtime_f64 = MirStatic(symbol: symbol, name: "runtime_f64", type_: f64_type, init: nil, is_mutable: false)
+        val literal_f64 = MirStatic(
+            symbol: symbol,
+            name: "literal_f64",
+            type_: f64_type,
+            init: Some(MirConstant(symbol: symbol, name: "literal_f64", type_: f64_type, value: MirConstValue.Float(3.5))),
+            is_mutable: false
+        )
+        val integer_bits_f64 = MirStatic(
+            symbol: symbol,
+            name: "integer_bits_f64",
+            type_: f64_type,
+            init: Some(MirConstant(symbol: symbol, name: "integer_bits_f64", type_: f64_type, value: MirConstValue.Int(3))),
+            is_mutable: false
+        )
+        expect(cranelift_static_init_supported(runtime_f32)).to_equal(true)
+        expect(cranelift_static_init_supported(runtime_f64)).to_equal(true)
+        expect(cranelift_static_init_supported(literal_f64)).to_equal(false)
+        expect(cranelift_static_init_supported(integer_bits_f64)).to_equal(false)
 
     it "types backend compilation results for driver unwrapping":
         val helpers = file_read("src/compiler/70.backend/backend/backend_helpers.spl")

@@ -478,8 +478,14 @@ the shared binary — deploys require explicit user go-ahead).
   hosted startup call before `main`. Multiple runtime initializers fail loudly
   until HIR preserves declaration order. The hosted matrix now requires a real
   PASS, and FreeBSD schedules a scoped Cranelift execution after its default
-  LLVM matrix; broader platform-gate receipts remain pending. See
-  `cranelift_module_global_initializer_arity_2026-07-19.md`.
+  LLVM matrix. The shared cross-target `4 -> 5 -> 45` oracle exercises the same
+  startup path on AArch64/RV64 LLVM+Cranelift and pins ARM32/RV32/Windows-ARM64
+  objects. Cranelift now also accepts the already-supported F32/F64 storage
+  types when a runtime initializer supplies their value, while literal float
+  statics remain fail-closed; the shared fixture pins function-initialized F32
+  and F64 globals. Fresh staged receipts remain pending. See
+  `cranelift_module_global_initializer_arity_2026-07-19.md` and
+  `cranelift_runtime_initialized_float_global_2026-07-19.md`.
 - Multiple call-initialized module globals now reuse their preserved HIR source
   spans to order the existing sequential runtime stores. The shared fixture
   makes its second initializer depend on the first and expects `45`; hosted and

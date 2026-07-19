@@ -1,7 +1,7 @@
 # Cranelift rejected a function-initialized module global
 
 - **ID:** cranelift_module_global_initializer_arity_2026-07-19
-- **Status:** FIXED (focused LLVM/Cranelift smoke PASS; broader platform receipts pending)
+- **Status:** FIXED (focused LLVM/Cranelift smoke PASS; cross-target gates scheduled)
 - **Severity:** high
 - **Backend:** Cranelift trigger; shared pure-Simple MIR/startup follow-on
 
@@ -47,5 +47,7 @@ stored value; current-source native execution remains pending.
 
 `native_module_global_initializer.spl` is the shared strict fixture. FreeBSD
 schedules it as a scoped Cranelift smoke after the default LLVM matrix. The
-aggregate ABI unit spec and portability gate pin its wrapper and fixture wiring;
-broader staged platform receipts remain pending.
+aggregate ABI unit spec rejects the former three-argument adapter call. The
+shared `native_crossmodule_result_u8` fixture repeats the dependent `4 -> 5 ->
+45` startup oracle for AArch64/RV64 LLVM+Cranelift execution and
+ARM32/RV32/Windows-ARM64 object gates. Fresh staged receipts remain pending.
