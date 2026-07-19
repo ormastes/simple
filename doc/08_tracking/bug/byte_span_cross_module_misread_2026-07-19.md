@@ -42,3 +42,14 @@ has all chunk CRCs valid per python zlib oracle).
 Small arrays use an inline/SSO representation that does not survive being
 stored into an imported struct's field (representation tag lost or pointer
 into a moved temporary); large arrays are heap-normalized and survive.
+
+## Perf note on the workaround (2026-07-19)
+Flat-array free functions are correct but the interpreted lane pays per-byte
+call/loop overhead: `gzip_crc32`+`adler32` over png_encode's MB-scale IDAT
+(1.5MB at 960x540) blew a 850s conversion budget that previously fit in
+~420s with the incremental span path (which is only empirically-correct for
+LARGE arrays). Practical guidance until the root ByteSpan fix: for bulk
+image export prefer formats without checksums (BMP + host `sips -s format
+png`; see build/tmp/ppm2bmp.spl) or keep png_encode for small images. The
+ROOT fix (interpreter representation of small arrays stored into imported
+struct fields) removes the dilemma.
