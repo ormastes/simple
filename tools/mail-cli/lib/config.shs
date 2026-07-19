@@ -5,6 +5,54 @@
 MAIL_CONFIG_DIR="${HOME}/.config/mail-cli"
 MAIL_CONFIG_FILE="${MAIL_CONFIG_DIR}/config.json"
 
+# Shared curl wrapper: bounded timeout + backoff retry on transient network
+# failures only. Passthrough — does not merge stderr or alter stdout framing,
+# so callers keep their own -o/-w/redirection semantics unchanged.
+# Override retryable codes per-call-site with: local _mail_curl_retry_codes="..."
+_mail_curl_retry_codes_default="6 7 28 52 55 56"
+
+_mail_curl() {
+  local codes="${_mail_curl_retry_codes:-$_mail_curl_retry_codes_default}"
+  local max="${MAIL_CURL_MAX_RETRIES:-3}" delay="${MAIL_CURL_RETRY_DELAY:-1}"
+  local attempt=1 rc tmp
+  tmp=$(mktemp "${TMPDIR:-/tmp}/mail-cli-curl.XXXXXX")
+  while :; do
+    curl --connect-timeout 10 --max-time 60 "$@" >"$tmp"
+    rc=$?
+    case " ${codes} " in
+      *" ${rc} "*)
+        if [ "$attempt" -ge "$max" ]; then break; fi
+        sleep "$delay"
+        delay=$((delay * 2))
+        attempt=$((attempt + 1))
+        continue
+        ;;
+    esac
+    break
+  done
+  cat "$tmp"
+  rm -f "$tmp"
+  return "$rc"
+}
+
+# Map a curl exit code to an actionable message. Falls back to a generic
+# message with the raw code for anything not explicitly known.
+_mail_curl_error_message() {
+  local rc="$1"
+  case "$rc" in
+    6)  echo "could not resolve host — check the server hostname in 'mail auth status'" ;;
+    7)  echo "could not connect — check host/port and network connectivity" ;;
+    28) echo "connection timed out — check network or try again later" ;;
+    35) echo "TLS/SSL handshake failed — check the port and TLS mode (implicit vs starttls)" ;;
+    60|51) echo "TLS certificate verification failed — check server hostname/certificate" ;;
+    67) echo "login denied — check email/password; Gmail/Yahoo/Fastmail require an App Password" ;;
+    9)  echo "access denied by server — check mailbox/folder permissions" ;;
+    52) echo "server returned an empty reply" ;;
+    55|56) echo "network send/receive failure — check connection stability" ;;
+    *)  echo "curl exit code ${rc} — run 'mail auth status' to verify connectivity" ;;
+  esac
+}
+
 # Provider presets — function-based for bash 3.x compatibility
 mail_preset() {
   local provider="$1" field="$2"
@@ -128,6 +176,20 @@ mail_resolve_account() {
   MAIL_ACCT_IMAP_PORT=$(echo "$acc" | jq -r '.imap_port')
   MAIL_ACCT_SMTP_SERVER=$(echo "$acc" | jq -r '.smtp_server')
   MAIL_ACCT_SMTP_PORT=$(echo "$acc" | jq -r '.smtp_port')
-  MAIL_ACCT_PASSWORD=$(echo "$acc" | jq -r '.password')
   MAIL_ACCT_TLS=$(echo "$acc" | jq -r '.tls // "implicit"')
+
+  # Password resolution: password_cmd (if set) takes priority over the
+  # stored plaintext password. This keeps the secret out of config.json —
+  # e.g. a password manager CLI or `pass show mail/gmail`.
+  local password_cmd
+  password_cmd=$(echo "$acc" | jq -r '.password_cmd // empty')
+  if [ -n "$password_cmd" ]; then
+    MAIL_ACCT_PASSWORD=$(bash -c "$password_cmd" 2>/dev/null)
+    if [ -z "$MAIL_ACCT_PASSWORD" ]; then
+      echo "error: password_cmd for account '${name}' produced no output" >&2
+      return 1
+    fi
+  else
+    MAIL_ACCT_PASSWORD=$(echo "$acc" | jq -r '.password // empty')
+  fi
 }

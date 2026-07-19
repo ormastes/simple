@@ -351,15 +351,55 @@ fn sfnt_debug_selected_names(blob: [u8]) -> text:
     val values = match collected:
         Some(v): v
         None: return "<collect-fail>"
+    # Fixed-index while-loop instead of `for pair in [(16,1),(17,2),...]:`
+    # over an inline array-of-tuples literal (H1 hardening): this file's
+    # other native-lane defects (see _sfnt_collect_names, _sfnt_char_from_code
+    # above) are all in the same "array/struct iteration variable on the
+    # native backend" class, and the boot symptom (all five slots return
+    # nameID 5's value -- the LAST pair in the literal) is exactly the
+    # fingerprint of a for-loop that binds its iteration variable to the
+    # final element on every pass. Not host-reproduced on seed --native
+    # (wrong backend: boot is freestanding x86_64-unknown-simpleos), so this
+    # is defensive hardening pending QEMU-boot confirmation, not a proven fix
+    # -- kept behavior-identical on the interpreter (see sfnt_spec.spl).
     var out = ""
-    for pair in [(16, 1), (17, 2), (4, -1), (6, -1), (5, -1)]:
-        val primary: i64 = pair.0
-        val fallback: i64 = pair.1
+    val primaries: [i64] = [16, 17, 4, 6, 5]
+    val fallbacks: [i64] = [1, 2, -1, -1, -1]
+    var pi: i64 = 0
+    while pi < primaries.len():
+        val primary: i64 = primaries[pi]
+        val fallback: i64 = fallbacks[pi]
         val sel = _sfnt_selected_name(values, primary, fallback)
         val piece: text = match sel:
             Some(v): v
             None: "<none>"
         out = out + "|" + piece
+        pi = pi + 1
+    out
+
+fn sfnt_debug_collected_values(blob: [u8]) -> text:
+    """Diagnostic for the H1 (loop-selection) vs H2 (storage-aliasing) split
+    on a real boot: dumps every collected name_id/seen/valid/value, one
+    'id=..,seen=..,valid=..,value=..' group per ';'. If every id's value
+    differs appropriately (family/style/full/postscript/version look
+    distinct) collection is fine and the bug is in selection (H1). If every
+    id's value is the SAME (e.g. all equal the version string), the bug is
+    in storage/aliasing inside _sfnt_collect_names (H2). Not wired into any
+    boot entry point by this change -- callers add the serial_println."""
+    val collected = _sfnt_collect_names(blob)
+    val values = match collected:
+        Some(v): v
+        None: return "<collect-fail>"
+    var out = ""
+    var vi: i64 = 0
+    while vi < values.len():
+        val entry = values[vi]
+        val nid: i64 = entry.name_id
+        val seen: bool = entry.seen
+        val valid: bool = entry.valid
+        val value: text = entry.value
+        out = out + ";id=" + nid.to_text() + ",seen=" + seen.to_text() + ",valid=" + valid.to_text() + ",value=" + value
+        vi = vi + 1
     out
 
 fn sfnt_manifest_names_match(blob: [u8], family: text, style: text, full_name: text,
