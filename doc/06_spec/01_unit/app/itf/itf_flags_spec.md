@@ -2,29 +2,6 @@
 
 > <details>
 
-<!-- sdn-diagram:id=itf_flags_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=itf_flags_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-itf_flags_spec -> app
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=itf_flags_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 10 | 10 | 0 | 0 |
@@ -213,7 +190,7 @@ expect(result[0]).to_equal("view")
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/itf/itf_flags_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-19 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview

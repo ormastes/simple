@@ -2,29 +2,6 @@
 
 > <details>
 
-<!-- sdn-diagram:id=adapter_minio_mc_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=adapter_minio_mc_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-adapter_minio_mc_spec -> app
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=adapter_minio_mc_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 31 | 31 | 0 | 0 |
@@ -49,14 +26,14 @@ Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val argv = _argv_alias_set("myaistor", "https://x:9000", "AKIA--", "SECRET")
+val argv = _argv_alias_set("myaistor", "https://x:9000", "AKIA-", "SECRET")
 expect(argv.len()).to_equal(7)
 expect(argv[0]).to_equal("--json")
 expect(argv[1]).to_equal("alias")
 expect(argv[2]).to_equal("set")
 expect(argv[3]).to_equal("myaistor")
 expect(argv[4]).to_equal("https://x:9000")
-expect(argv[5]).to_equal("AKIA--")
+expect(argv[5]).to_equal("AKIA-")
 expect(argv[6]).to_equal("SECRET")
 ```
 
@@ -552,7 +529,7 @@ expect(client.alias_name).to_equal("myaistor")
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/itf/adapter_minio_mc_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-19 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview

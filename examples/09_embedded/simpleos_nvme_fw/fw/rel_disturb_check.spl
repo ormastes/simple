@@ -11,6 +11,7 @@ constructor and read back through its fields HERE, exercising the same
 module-boundary round-trip the L1 gate proved for RelAction.
 
 Oracles:
+  0. rel_disturb_new() zero-initializes both arrays to length NUM_BLOCKS.
   1. Boyer-Moore finds the TRUE majority page: a scripted 6-read sequence on
      one block where page 3 is a strict majority (5 of 6 reads) settles on
      hot_page == 3 (the classic Boyer-Moore guarantee: a true majority always
@@ -41,16 +42,6 @@ use nd_types.*
 use rel_types.*
 use rel_disturb.*
 
-# Dense zero array (rel_types/rel_disturb own no array constructor). Mirrors
-# rel_types_check.spl's zeros() idiom.
-fn zeros(n: i64) -> [i64]:
-    var a: [i64] = []
-    var i: i64 = 0
-    while i < n:
-        a.push(0)
-        i = i + 1
-    a
-
 # Dense array of length n, all 0 except index `idx` which is `v`.
 fn at_val(n: i64, idx: i64, v: i64) -> [i64]:
     var a: [i64] = []
@@ -77,9 +68,6 @@ fn at_val2(n: i64, idx1: i64, v1: i64, idx2: i64, v2: i64) -> [i64]:
         i = i + 1
     a
 
-fn fresh_state() -> RelDisturbState:
-    RelDisturbState(hot_page: zeros(NUM_BLOCKS), hot_count: zeros(NUM_BLOCKS))
-
 fn kind_of(a: RelAction) -> i64:
     a.kind
 
@@ -89,11 +77,18 @@ fn arg_of(a: RelAction) -> i64:
 fn main():
     var fail: i64 = 0
 
+    # ── Oracle 0: rel_disturb_new() zero-initializes both arrays ──────────────
+    val fresh: RelDisturbState = rel_disturb_new()
+    fail = fail + expect_eq(fresh.hot_page.len(), NUM_BLOCKS, "rel_disturb_new: hot_page length == NUM_BLOCKS")
+    fail = fail + expect_eq(fresh.hot_count.len(), NUM_BLOCKS, "rel_disturb_new: hot_count length == NUM_BLOCKS")
+    fail = fail + expect_eq(fresh.hot_page[0], 0, "rel_disturb_new: hot_page[0] defaults 0")
+    fail = fail + expect_eq(fresh.hot_count[63], 0, "rel_disturb_new: hot_count[63] (last block) defaults 0")
+
     # ── Oracle 1: Boyer-Moore finds the TRUE majority page ─────────────────────
     # Block 2, page sequence [3,3,3,3,3,7] — page 3 is a strict majority
     # (5 of 6). Hand trace: obs(3)->cnt=1,pg=3; obs(3)->2; obs(3)->3; obs(3)->4;
     # obs(3)->5; obs(7) mismatch -> cnt=4, pg stays 3.
-    var maj: RelDisturbState = fresh_state()
+    var maj: RelDisturbState = rel_disturb_new()
     val blk_maj: NdBlock = nd_block(2)
     maj = rel_disturb_observe(maj, blk_maj, nd_page(3))
     maj = rel_disturb_observe(maj, blk_maj, nd_page(3))
@@ -111,7 +106,7 @@ fn main():
     # obs(1) mismatch->cnt=0,pg stays 3; obs(2)->cnt=1,pg=2 (cnt was 0);
     # obs(3) mismatch->cnt=0,pg stays 2. Final: hot_page=2, hot_count=0 — an
     # EXACT deterministic outcome, not "no result"/garbage.
-    var nomaj: RelDisturbState = fresh_state()
+    var nomaj: RelDisturbState = rel_disturb_new()
     val blk_nomaj: NdBlock = nd_block(4)
     nomaj = rel_disturb_observe(nomaj, blk_nomaj, nd_page(1))
     nomaj = rel_disturb_observe(nomaj, blk_nomaj, nd_page(2))
@@ -127,7 +122,7 @@ fn main():
     fail = fail + expect_eq(kind_of(nomaj_verdict), rel_act_accept(), "no-majority block with rd_disturb=0 stays Accept")
 
     # ── Oracle 3a: block-wide rd_disturb gate fires EXACTLY at the threshold ──
-    val gate_state: RelDisturbState = fresh_state()
+    val gate_state: RelDisturbState = rel_disturb_new()
     val blk_gate: NdBlock = nd_block(10)
     val at_thresh: RelAction = rel_disturb_due(gate_state, blk_gate, READ_DISTURB_THRESHOLD)
     fail = fail + expect_eq(kind_of(at_thresh), rel_act_accept(), "rd_disturb == READ_DISTURB_THRESHOLD (50) does NOT fire (> not >=)")
@@ -148,7 +143,7 @@ fn main():
 
     # ── Oracle 4: per-block isolation ──────────────────────────────────────────
     # Drive block 30 hard (way past both gates); block 31 must stay untouched.
-    var iso: RelDisturbState = fresh_state()
+    var iso: RelDisturbState = rel_disturb_new()
     val blk_hot: NdBlock = nd_block(30)
     val blk_cold: NdBlock = nd_block(31)
     var i: i64 = 0

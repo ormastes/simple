@@ -2,30 +2,6 @@
 
 > <details>
 
-<!-- sdn-diagram:id=adapter_minio_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=adapter_minio_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-adapter_minio_spec -> std
-adapter_minio_spec -> app
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=adapter_minio_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 17 | 17 | 0 | 0 |
@@ -50,11 +26,11 @@ Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val sdn = "[bitbucket]\nurl = x\n[minio]\nurl = https://minio.corp:9000\nregion = us-east-1\naccess_key = AKIA--\nsecret_key = SECRET\ntls_skip_verify = false\n"
+val sdn = "[bitbucket]\nurl = x\n[minio]\nurl = https://minio.corp:9000\nregion = us-east-1\naccess_key = AKIA-\nsecret_key = SECRET\ntls_skip_verify = false\n"
 val cfg = _parse_minio_section(sdn)
 expect(cfg.url).to_equal("https://minio.corp:9000")
 expect(cfg.region).to_equal("us-east-1")
-expect(cfg.access_key).to_equal("AKIA--")
+expect(cfg.access_key).to_equal("AKIA-")
 expect(cfg.secret_key).to_equal("SECRET")
 expect(cfg.tls_skip_verify).to_equal(false)
 ```
@@ -273,7 +249,7 @@ Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val cfg = MinioConfig(url: "https://minio.corp:9000", region: "us-east-1", access_key: "AKIA--", secret_key: "SECRET", tls_skip_verify: false)
+val cfg = MinioConfig(url: "https://minio.corp:9000", region: "us-east-1", access_key: "AKIA-", secret_key: "SECRET", tls_skip_verify: false)
 val (ok, url, _err) = minio_presign_get(cfg, "firmware-images", "zynq/v1/fw.bin", 3600)
 expect(ok).to_equal(true)
 expect(url.starts_with("https://minio.corp:9000/firmware-images/zynq/v1/fw.bin?")).to_equal(true)
@@ -338,7 +314,7 @@ expect(epoch_to_amz_datetime(1369353600)).to_equal("20130524T000000Z")
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/itf/adapter_minio_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-19 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview

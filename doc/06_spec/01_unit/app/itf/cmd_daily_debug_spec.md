@@ -2,30 +2,6 @@
 
 > <details>
 
-<!-- sdn-diagram:id=cmd_daily_debug_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=cmd_daily_debug_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-cmd_daily_debug_spec -> std
-cmd_daily_debug_spec -> app
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=cmd_daily_debug_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 15 | 15 | 0 | 0 |
@@ -306,7 +282,7 @@ expect(rc).to_equal(0)
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/itf/cmd_daily_debug_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-19 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
