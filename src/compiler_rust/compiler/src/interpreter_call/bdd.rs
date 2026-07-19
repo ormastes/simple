@@ -8,6 +8,7 @@ use crate::value::*;
 use simple_parser::ast::{Argument, BinOp, ClassDef, EnumDef, Expr, FunctionDef, UnaryOp};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
 type Enums = HashMap<String, Arc<EnumDef>>;
@@ -81,6 +82,30 @@ thread_local! {
 
     // Track individual test results: (describe_path, test_name, passed, skipped)
     pub(crate) static BDD_TEST_RESULTS: RefCell<Vec<(String, String, bool, bool)>> = const { RefCell::new(Vec::new()) };
+}
+
+fn write_test_result_evidence(path: &Path) {
+    let (passed, failed) = BDD_TEST_RESULTS.with(|cell| {
+        cell.borrow().iter().fold((0, 0), |(passed, failed), (_, _, ok, skipped)| {
+            if *skipped {
+                (passed, failed)
+            } else if *ok {
+                (passed + 1, failed)
+            } else {
+                (passed, failed + 1)
+            }
+        })
+    });
+    let _ = std::fs::write(path, format!("simple-bdd-v1\n{passed}\n{failed}\n"));
+}
+
+fn record_test_result(describe_path: String, test_name: String, passed: bool, skipped: bool) {
+    BDD_TEST_RESULTS.with(|cell| cell.borrow_mut().push((describe_path, test_name, passed, skipped)));
+    if let Ok(path) = std::env::var("SIMPLE_TEST_RESULT_FILE") {
+        if !path.is_empty() {
+            write_test_result_evidence(Path::new(&path));
+        }
+    }
 }
 
 /// Create an ExampleGroup Value object
@@ -710,7 +735,7 @@ pub(super) fn eval_bdd_builtin(
                     println!("{}  \x1b[31m{}\x1b[0m", indent_str, e);
                     BDD_COUNTS.with(|cell| cell.borrow_mut().1 += 1);
                     let desc_path = get_current_describe_path();
-                    BDD_TEST_RESULTS.with(|cell| cell.borrow_mut().push((desc_path, name_str.clone(), false, false)));
+                    record_test_result(desc_path, name_str.clone(), false, false);
                     // Don't propagate the error - allow other tests to run
                     Ok(Some(Value::Nil))
                 }
@@ -739,7 +764,7 @@ pub(super) fn eval_bdd_builtin(
                         BDD_COUNTS.with(|cell| cell.borrow_mut().0 += 1);
                     }
                     let desc_path = get_current_describe_path();
-                    BDD_TEST_RESULTS.with(|cell| cell.borrow_mut().push((desc_path, name_str.clone(), !failed, false)));
+                    record_test_result(desc_path, name_str.clone(), !failed, false);
 
                     // Reset lazy value caches after each test so they are
                     // re-evaluated for the next test (fresh values per test).
@@ -766,7 +791,7 @@ pub(super) fn eval_bdd_builtin(
             BDD_IGNORED_TESTS.with(|cell| cell.borrow_mut().push(name_str.clone()));
 
             let desc_path = get_current_describe_path();
-            BDD_TEST_RESULTS.with(|cell| cell.borrow_mut().push((desc_path, name_str.clone(), true, true)));
+            record_test_result(desc_path, name_str.clone(), true, true);
 
             BDD_COUNTS.with(|cell| cell.borrow_mut().0 += 1);
 
@@ -1773,6 +1798,29 @@ pub fn get_ignored_tests() -> Vec<String> {
 /// Get individual test results: (describe_path, test_name, passed, skipped)
 pub fn get_test_results() -> Vec<(String, String, bool, bool)> {
     BDD_TEST_RESULTS.with(|cell| cell.borrow().clone())
+}
+
+#[cfg(test)]
+mod test_result_evidence_tests {
+    use super::*;
+
+    #[test]
+    fn serializes_authoritative_snapshot() {
+        clear_bdd_state();
+        BDD_TEST_RESULTS.with(|cell| {
+            let mut results = cell.borrow_mut();
+            results.push(("group".to_string(), "pass".to_string(), true, false));
+            results.push(("group".to_string(), "fail".to_string(), false, false));
+            results.push(("group".to_string(), "skip".to_string(), true, true));
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("result.txt");
+
+        write_test_result_evidence(&path);
+
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "simple-bdd-v1\n1\n1\n");
+        clear_bdd_state();
+    }
 }
 
 // Lane C10 regression coverage: the standalone `assert_true`/`assert_false`
