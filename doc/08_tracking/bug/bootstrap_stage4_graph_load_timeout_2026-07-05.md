@@ -176,3 +176,27 @@ The misleading timeout hint in `native_build_main.spl`
 ("use the in-process backend for cross-target builds") is DEBUNKED — in-process
 shares the same interpreted parse. (File was under concurrent edit; not
 patched here to avoid a clobber.)
+
+## Linux confirmation 2026-07-19 — source fix landed, parse wall remains
+
+A fresh cache-preserving Stage2/3 rebuild from `ac4d2094bd` passed compiler
+sanity and Stage2 native-build capability. One bounded Stage2-driven Stage4
+attempt then reached the 1200-second cap while still in phase 2 parse:
+
+- reachable sources: 1764 collected / 1282 unique;
+- elapsed: 20:00.51; peak RSS: 3,263,384 KiB;
+- no `mut counts` parser failure, statement-tag OOB, missing-tag marker, failed
+  module, or stub fallback was emitted; the bounded attempt completed 86 files
+  and did not reach `collection_opt_core.spl`, so this is non-reproduction, not
+  independent end-to-end proof;
+- examples of the remaining linear interpreter wall include
+  `src/std/log.spl` at about 97 seconds and
+  `src/app/mcp_t32/session_tools.spl` at about 118 seconds.
+
+Evidence is retained in
+`build/native_probe/stage4-current-stage2.{log,time}`. The
+impl/class-body mutable-parameter source gap is fixed and covered by
+`test/01_unit/compiler/parser/impl_method_mut_param_spec.spl`; do not edit
+`collection_opt_core.spl` to avoid the old symptom. The remaining root task is
+still item 1 above: route this frontend work through compiled execution rather
+than raising the timeout or adding another cache/wrapper.

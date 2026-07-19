@@ -7,6 +7,213 @@ cd "$ROOT_DIR"
 SRC="scripts/os/make_os_disk.c"
 BIN="build/os/make_os_disk"
 
+sha256_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        echo "missing SHA-256 tool (sha256sum or shasum)" >&2
+        return 1
+    fi
+}
+
+validate_simple_payload() {
+    simple_path="$1"
+    expected_machine="$2"
+    if [ ! -f "$simple_path" ]; then
+        echo "missing SimpleOS Simple payload: $simple_path" >&2
+        return 1
+    fi
+    elf_magic="$(od -An -tx1 -N 4 "$simple_path" 2>/dev/null | tr -d ' \n')"
+    if [ "$elf_magic" != "7f454c46" ]; then
+        echo "invalid SimpleOS Simple payload (not ELF): $simple_path" >&2
+        return 1
+    fi
+    set -- $(od -An -tu1 -j 4 -N 2 "$simple_path" 2>/dev/null)
+    if [ "$#" -ne 2 ] || [ "$1" -ne 2 ] || [ "$2" -ne 1 ]; then
+        echo "invalid SimpleOS Simple payload (expected little-endian ELF64): $simple_path" >&2
+        return 1
+    fi
+    set -- $(od -An -tu1 -j 18 -N 2 "$simple_path" 2>/dev/null)
+    if [ "$#" -ne 2 ] || [ "$(( $1 + 256 * $2 ))" -ne "$expected_machine" ]; then
+        echo "invalid SimpleOS Simple payload machine (expected $expected_machine): $simple_path" >&2
+        return 1
+    fi
+}
+
+stamp_value() {
+    awk -F= -v key="$1" '
+        $1 == key { count++; value = substr($0, length(key) + 2) }
+        END { if (count == 1) print value; else exit 1 }
+    ' "$2"
+}
+
+validate_simple_payload_provenance() {
+    simple_path="$1"
+    stamp_path="${simple_path}.build_stamp"
+    if [ ! -f "$stamp_path" ]; then
+        echo "missing SimpleOS Simple payload build stamp: $stamp_path" >&2
+        return 1
+    fi
+    if [ ! "$stamp_path" -nt "$simple_path" ]; then
+        echo "stale SimpleOS Simple payload build stamp: $stamp_path" >&2
+        return 1
+    fi
+    for field in \
+        "target=x86_64-unknown-simpleos" \
+        "entry=src/app/simpleos_tool/main.spl" \
+        "entry_closure=true"
+    do
+        key="${field%%=*}"
+        expected="${field#*=}"
+        if ! actual="$(stamp_value "$key" "$stamp_path")" || [ "$actual" != "$expected" ]; then
+            echo "invalid SimpleOS Simple payload build stamp $key: $stamp_path" >&2
+            return 1
+        fi
+    done
+    if ! backend="$(stamp_value backend "$stamp_path")"; then
+        echo "missing SimpleOS Simple payload build stamp backend: $stamp_path" >&2
+        return 1
+    fi
+    case "$backend" in
+        llvm|cranelift) ;;
+        *)
+            echo "invalid SimpleOS Simple payload build stamp backend: $stamp_path" >&2
+            return 1
+            ;;
+    esac
+    if ! compiler="$(stamp_value compiler "$stamp_path")"; then
+        echo "missing SimpleOS Simple payload build stamp compiler: $stamp_path" >&2
+        return 1
+    fi
+    case "$compiler" in
+        ""|*compiler_rust*|*simple_seed*)
+            echo "invalid SimpleOS Simple payload build stamp compiler: $stamp_path" >&2
+            return 1
+            ;;
+    esac
+    if ! stamped_sha256="$(stamp_value artifact_sha256 "$stamp_path")"; then
+        echo "missing SimpleOS Simple payload build stamp artifact_sha256: $stamp_path" >&2
+        return 1
+    fi
+    if ! printf '%s\n' "$stamped_sha256" | grep -Eq '^[0-9a-f]{64}$'; then
+        echo "invalid SimpleOS Simple payload build stamp artifact_sha256: $stamp_path" >&2
+        return 1
+    fi
+    actual_sha256="$(sha256_file "$simple_path")" || return 1
+    if [ "$stamped_sha256" != "$actual_sha256" ]; then
+        echo "SimpleOS Simple payload SHA-256 mismatch: $simple_path" >&2
+        return 1
+    fi
+}
+
+make_self_test_elf() {
+    elf_path="$1"
+    machine_low="$2"
+    {
+        printf '\177ELF\002\001'
+        dd if=/dev/zero bs=12 count=1 2>/dev/null
+        printf "\\$(printf '%03o' "$machine_low")\000"
+    } > "$elf_path"
+}
+
+write_self_test_stamp() {
+    payload="$1"
+    target="$2"
+    entry="$3"
+    closure="$4"
+    backend="$5"
+    compiler="$6"
+    artifact_sha256="$7"
+    stamp="${payload}.build_stamp"
+    {
+        printf 'target=%s\n' "$target"
+        printf 'entry=%s\n' "$entry"
+        printf 'entry_closure=%s\n' "$closure"
+        printf 'backend=%s\n' "$backend"
+        printf 'compiler=%s\n' "$compiler"
+        if [ "$artifact_sha256" != "-" ]; then
+            printf 'artifact_sha256=%s\n' "$artifact_sha256"
+        fi
+    } > "$stamp"
+    touch -t 200001010000.00 "$payload"
+    touch -t 200001010001.00 "$stamp"
+}
+
+self_test_fail() {
+    echo "FAIL make_os_disk simple payload validation self-test: $1" >&2
+    exit 1
+}
+
+self_test_expect_pass() {
+    label="$1"
+    shift
+    "$@" >/dev/null 2>&1 || self_test_fail "$label"
+}
+
+self_test_expect_fail() {
+    label="$1"
+    shift
+    if "$@" >/dev/null 2>&1; then
+        self_test_fail "$label"
+    fi
+}
+
+run_self_test() {
+    tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/make_os_disk_self_test.XXXXXX")"
+    trap 'rm -rf "$tmp_dir"' EXIT HUP INT TERM
+    payload="$tmp_dir/simple"
+    make_self_test_elf "$payload" 62
+    digest="$(sha256_file "$payload")" || self_test_fail "sha256 tool"
+
+    self_test_expect_pass "valid ELF shape" validate_simple_payload "$payload" 62
+    write_self_test_stamp "$payload" x86_64-unknown-simpleos src/app/simpleos_tool/main.spl true cranelift bin/release/host/simple "$digest"
+    self_test_expect_pass "valid provenance" validate_simple_payload_provenance "$payload"
+
+    self_test_expect_fail "missing payload" validate_simple_payload "$tmp_dir/missing" 62
+    printf 'not ELF\n' > "$tmp_dir/not-elf"
+    self_test_expect_fail "non-ELF payload" validate_simple_payload "$tmp_dir/not-elf" 62
+    cp "$payload" "$tmp_dir/elf32"
+    printf '\001' | dd of="$tmp_dir/elf32" bs=1 seek=4 conv=notrunc 2>/dev/null
+    self_test_expect_fail "ELF32 payload" validate_simple_payload "$tmp_dir/elf32" 62
+    cp "$payload" "$tmp_dir/big-endian"
+    printf '\002' | dd of="$tmp_dir/big-endian" bs=1 seek=5 conv=notrunc 2>/dev/null
+    self_test_expect_fail "big-endian payload" validate_simple_payload "$tmp_dir/big-endian" 62
+    make_self_test_elf "$tmp_dir/wrong-machine" 63
+    self_test_expect_fail "wrong machine" validate_simple_payload "$tmp_dir/wrong-machine" 62
+
+    rm -f "${payload}.build_stamp"
+    self_test_expect_fail "missing stamp" validate_simple_payload_provenance "$payload"
+    write_self_test_stamp "$payload" x86_64-unknown-simpleos src/app/simpleos_tool/main.spl true cranelift bin/release/host/simple "$digest"
+    touch -t 200001010002.00 "$payload"
+    self_test_expect_fail "stale stamp" validate_simple_payload_provenance "$payload"
+
+    write_self_test_stamp "$payload" bad-target src/app/simpleos_tool/main.spl true cranelift bin/release/host/simple "$digest"
+    self_test_expect_fail "wrong target" validate_simple_payload_provenance "$payload"
+    write_self_test_stamp "$payload" x86_64-unknown-simpleos bad-entry true cranelift bin/release/host/simple "$digest"
+    self_test_expect_fail "wrong entry" validate_simple_payload_provenance "$payload"
+    write_self_test_stamp "$payload" x86_64-unknown-simpleos src/app/simpleos_tool/main.spl false cranelift bin/release/host/simple "$digest"
+    self_test_expect_fail "wrong entry closure" validate_simple_payload_provenance "$payload"
+    write_self_test_stamp "$payload" x86_64-unknown-simpleos src/app/simpleos_tool/main.spl true bad-backend bin/release/host/simple "$digest"
+    self_test_expect_fail "wrong backend" validate_simple_payload_provenance "$payload"
+    write_self_test_stamp "$payload" x86_64-unknown-simpleos src/app/simpleos_tool/main.spl true llvm src/compiler_rust/target/bootstrap/simple "$digest"
+    self_test_expect_fail "seed compiler" validate_simple_payload_provenance "$payload"
+    write_self_test_stamp "$payload" x86_64-unknown-simpleos src/app/simpleos_tool/main.spl true llvm bin/release/host/simple -
+    self_test_expect_fail "missing hash" validate_simple_payload_provenance "$payload"
+    write_self_test_stamp "$payload" x86_64-unknown-simpleos src/app/simpleos_tool/main.spl true llvm bin/release/host/simple NOT-LOWERCASE-SHA256
+    self_test_expect_fail "malformed hash" validate_simple_payload_provenance "$payload"
+    write_self_test_stamp "$payload" x86_64-unknown-simpleos src/app/simpleos_tool/main.spl true llvm bin/release/host/simple 0000000000000000000000000000000000000000000000000000000000000000
+    self_test_expect_fail "mismatched hash" validate_simple_payload_provenance "$payload"
+
+    echo "PASS make_os_disk simple payload validation self-test"
+}
+
+if [ "${1:-}" = "--self-test" ]; then
+    run_self_test
+    exit 0
+fi
+
 if [ "$#" -lt 2 ]; then
     echo "usage: make_os_disk.shs SIZE_BITS IMAGE [KERNEL] [PLATFORM]" >&2
     exit 2
@@ -22,6 +229,25 @@ image_path="$2"
 kernel_path="${3:-}"
 platform="${4:-x86_64}"
 
+EXPLICIT_SIMPLE_BINARY="${SIMPLEOS_SIMPLE_BINARY:-}"
+SIMPLEOS_SIMPLE_BINARY="$EXPLICIT_SIMPLE_BINARY"
+case "$platform" in
+    x86_64)
+        if [ -n "$EXPLICIT_SIMPLE_BINARY" ]; then
+            validate_simple_payload "$SIMPLEOS_SIMPLE_BINARY" 62
+            validate_simple_payload_provenance "$SIMPLEOS_SIMPLE_BINARY"
+        fi
+        ;;
+    arm64)
+        SIMPLEOS_SIMPLE_BINARY="${SIMPLEOS_SIMPLE_BINARY:-bin/release/aarch64-unknown-simpleos/simple}"
+        validate_simple_payload "$SIMPLEOS_SIMPLE_BINARY" 183
+        ;;
+    riscv64)
+        SIMPLEOS_SIMPLE_BINARY="${SIMPLEOS_SIMPLE_BINARY:-bin/release/riscv64-unknown-simpleos/simple}"
+        validate_simple_payload "$SIMPLEOS_SIMPLE_BINARY" 243
+        ;;
+esac
+
 SIMPLEOS_CLANG_BINARY="${SIMPLEOS_CLANG_BINARY:-build/os/clang_static/bin/clang_static}"
 SIMPLEOS_LLC_BINARY="${SIMPLEOS_LLC_BINARY:-build/os/llc_static/bin/llc_static}"
 SIMPLEOS_LLD_BINARY="${SIMPLEOS_LLD_BINARY:-build/os/lld_static/bin/lld_static}"
@@ -33,6 +259,10 @@ SIMPLEOS_SIMPLE_ENTRY_OBJECT="${SIMPLEOS_SIMPLE_ENTRY_OBJECT:-build/os/sysroot/l
 SIMPLEOS_HELLO_OBJECT="${SIMPLEOS_HELLO_OBJECT:-}"
 SIMPLEOS_HELLO_IR="${SIMPLEOS_HELLO_IR:-}"
 SIMPLEOS_FSEXEC_BINARY="${SIMPLEOS_FSEXEC_BINARY:-}"
+if [ "$platform" = "arm64" ] && [ -z "$SIMPLEOS_FSEXEC_BINARY" ]; then
+    sh scripts/os/build_arm64_fsexec_payload.shs
+    SIMPLEOS_FSEXEC_BINARY="build/os/arm64_fsexec/mounted_elf.elf"
+fi
 SIMPLEOS_FONT_ASSET_NSANSSC="assets/fonts/google-fonts/ofl/notosanssc/NotoSansSC[wght].ttf"
 SIMPLEOS_FONT_ASSET_NSANSDEV="assets/fonts/google-fonts/ofl/notosansdevanagari/NotoSansDevanagari[wdth,wght].ttf"
 SIMPLEOS_FONT_ASSET_NSANSARB="assets/fonts/google-fonts/ofl/notosansarabic/NotoSansArabic[wdth,wght].ttf"
@@ -101,7 +331,7 @@ fi
 if [ "$size_bits" -lt 128 ]; then
     size_bits=128
 fi
-export SIMPLEOS_CLANG_BINARY SIMPLEOS_LLC_BINARY SIMPLEOS_LLD_BINARY
+export SIMPLEOS_SIMPLE_BINARY SIMPLEOS_CLANG_BINARY SIMPLEOS_LLC_BINARY SIMPLEOS_LLD_BINARY
 export SIMPLEOS_CRT0_OBJECT SIMPLEOS_RUNTIME_ARCHIVE SIMPLEOS_LIBC_ARCHIVE SIMPLEOS_LINKER_SCRIPT
 export SIMPLEOS_SIMPLE_ENTRY_OBJECT SIMPLEOS_HELLO_OBJECT SIMPLEOS_HELLO_IR SIMPLEOS_FSEXEC_BINARY
 export SIMPLEOS_FONT_ASSET_NSANSSC SIMPLEOS_FONT_ASSET_NSANSDEV SIMPLEOS_FONT_ASSET_NSANSARB
