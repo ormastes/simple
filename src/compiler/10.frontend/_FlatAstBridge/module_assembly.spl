@@ -206,6 +206,7 @@ fn flat_ast_to_module(path: text) -> Module:
             val f_names = decl_get_fields(idx)
             val f_types = decl_get_field_types(idx)
             val f_bits = decl_get_field_bits(idx)
+            val f_defaults = decl_get_field_defaults(idx)
             val s_visibility = convert_decl_visibility(idx)
             var is_packed = false
             if idx < decl_is_packed.len():
@@ -266,13 +267,22 @@ fn flat_ast_to_module(path: text) -> Module:
                     var ft = Type(kind: TypeKind.Infer, span: span)
                     if fi < f_types.len():
                         ft = convert_flat_type(f_types[fi])
-                    val fd = nil
+                    # Field default: the flat AST records a default expr id per
+                    # field (-1 = none; ast_types.spl `field_defaults`). This
+                    # was `val fd = nil` — hardcoded ABSENT — so `has_default`
+                    # was false for every struct/class field and omitted-field
+                    # construction could never apply declared defaults
+                    # (jit-0x890 defaulted-field bug chain).
+                    var fd_id: i64 = -1
+                    if fi < f_defaults.len():
+                        fd_id = f_defaults[fi]
+                    val field_has_default = fd_id >= 0
                     var fb: i64 = -1
                     if fi < f_bits.len():
                         fb = f_bits[fi]
                     var field_default = Expr(kind: ExprKind.NilLit, span: span)
-                    if fd != nil:
-                        field_default = fd
+                    if field_has_default:
+                        field_default = convert_flat_expr(fd_id)
                     var field_bits: i64 = 0
                     if fb > 0:
                         field_bits = fb
@@ -287,7 +297,7 @@ fn flat_ast_to_module(path: text) -> Module:
                     fields.push(Field(
                         name: f_names[fi],
                         type_: ft,
-                        has_default: fd != nil,
+                        has_default: field_has_default,
                         default: field_default,
                         visibility: Visibility.Private,
                         is_public: false,

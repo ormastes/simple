@@ -585,15 +585,24 @@ impl HirLowering:
         # receiver" SIGILL (bug doc iteration 20 #86; same class as the iter14
         # eval_block trailing-value fix). Gate on has_default + use default
         # directly.
-        val lowered_default = if fld.has_default:
-            Some(self.lower_hir_expr(fld.default))
+        # `HirField.default` is likewise a DESUGARED plain HirExpr gated by
+        # its own `has_default` (hir_definitions.spl:151), NOT an Optional:
+        # the old code wrapped the lowered expr in Some(...) (type mismatch,
+        # silently erased) and — decisively — OMITTED `has_default:` in the
+        # ctor below, so it defaulted false downstream and MIR's
+        # omitted-field default fill (switch_operators_calls.spl) never
+        # fired (jit-0x890 defaulted-field bug chain).
+        val fld_has_default = fld.has_default
+        val lowered_default = if fld_has_default:
+            self.lower_hir_expr(fld.default)
         else:
-            nil
+            HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: fld.span), span: fld.span)
 
         HirField(
             symbol: symbol,
             name: fld.name,
             type_: type_,
+            has_default: fld_has_default,
             default: lowered_default,
             visibility: fld.visibility,
             is_public: fld.is_public,
