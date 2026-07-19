@@ -88,6 +88,7 @@
 #        NATIVE_OPEN_BUG_REPROS=1 (opt in to the remaining known-red repro),
 #        NATIVE_PARITY_FAIL_ON_XFAIL=1 (optional strict gate),
 #        SEED_TIMEOUT_S (default 20), and NATIVE_RUN_TIMEOUT_S (default 20)
+# Requires `timeout` (Linux/FreeBSD/Windows) or `gtimeout` (macOS).
 set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
@@ -102,6 +103,14 @@ case "$NATIVE_PARITY_BACKEND" in
     llvm|cranelift) ;;
     *) echo "unsupported NATIVE_PARITY_BACKEND: $NATIVE_PARITY_BACKEND" >&2; exit 2 ;;
 esac
+if command -v timeout >/dev/null 2>&1; then
+    TIMEOUT_BIN=$(command -v timeout)
+elif command -v gtimeout >/dev/null 2>&1; then
+    TIMEOUT_BIN=$(command -v gtimeout)
+else
+    echo "error: timeout or gtimeout is required" >&2
+    exit 2
+fi
 mkdir -p "$WORK_DIR"
 
 STAMP="$(date +%s)_$$"
@@ -1731,7 +1740,7 @@ run_seed() {
     # oracle run block the gate. rc is ignored; callers treat the seed as
     # a best-effort oracle only.
     src="$1"; out="$2"
-    timeout "$SEED_TIMEOUT_S" env -u SIMPLE_BOOTSTRAP "$SIMPLE_BINARY" run "$src" \
+    "$TIMEOUT_BIN" "$SEED_TIMEOUT_S" env -u SIMPLE_BOOTSTRAP "$SIMPLE_BINARY" run "$src" \
         >"$out" 2>"$out.stderr" || true
 }
 
@@ -1837,7 +1846,7 @@ run_strict_dual_backend_case() {
         fi
         if [ "$build_ok" -eq 1 ]; then
             native_rc=0
-            native_raw="$(timeout "$NATIVE_RUN_TIMEOUT_S" "$bin" 2>"$build_log.run.stderr")" || native_rc=$?
+            native_raw="$("$TIMEOUT_BIN" "$NATIVE_RUN_TIMEOUT_S" "$bin" 2>"$build_log.run.stderr")" || native_rc=$?
             native_norm="$(printf '%s' "$native_raw" | norm)"
             if [ "$native_rc" -ne 0 ]; then
                 record "${id}_${backend}" "strict-$backend" "FAIL" \
@@ -1871,7 +1880,7 @@ run_parity_case() {
 
     if build_native "$src" "$bin" "$build_log"; then
         native_rc=0
-        native_raw="$(timeout "$NATIVE_RUN_TIMEOUT_S" "$bin" 2>"$build_log.run.stderr")" || native_rc=$?
+        native_raw="$("$TIMEOUT_BIN" "$NATIVE_RUN_TIMEOUT_S" "$bin" 2>"$build_log.run.stderr")" || native_rc=$?
         native_norm="$(printf '%s' "$native_raw" | norm)"
         if [ "$native_rc" -ne 0 ]; then
             record "$id" "parity" "FAIL" "native run rc=$native_rc; stderr=$build_log.run.stderr"
@@ -1915,7 +1924,7 @@ run_native_authoritative_case() {
     fi
     if [ "$build_ok" -eq 1 ]; then
         native_rc=0
-        native_raw="$(timeout "$NATIVE_RUN_TIMEOUT_S" "$bin" 2>"$build_log.run.stderr")" || native_rc=$?
+        native_raw="$("$TIMEOUT_BIN" "$NATIVE_RUN_TIMEOUT_S" "$bin" 2>"$build_log.run.stderr")" || native_rc=$?
         native_norm="$(printf '%s' "$native_raw" | norm)"
         if [ "$native_rc" -ne 0 ]; then
             record "$id" "native-authoritative" "FAIL" \
@@ -1977,7 +1986,7 @@ run_runtime_fail_case() {
         return
     fi
     run_rc=0
-    timeout "$NATIVE_RUN_TIMEOUT_S" "$bin" >"$run_out" 2>"$run_err" || run_rc=$?
+    "$TIMEOUT_BIN" "$NATIVE_RUN_TIMEOUT_S" "$bin" >"$run_out" 2>"$run_err" || run_rc=$?
     if [ "$run_rc" -eq 0 ]; then
         record "$id" "runtime-fail" "FAIL" "native run unexpectedly succeeded"
     elif grep -qF "$expected_diag" "$run_err"; then

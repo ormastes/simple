@@ -13,6 +13,7 @@ for script in \
   scripts/bootstrap/bootstrap-from-scratch.sh \
   scripts/check/check-bootstrap-essential-tools-smoke.shs \
   scripts/check/check-freebsd-bootstrap-qemu.shs \
+  scripts/check/check-native-seed-parity.shs \
   scripts/check/check-stage4-hosted-dynload-provider-archive.shs \
   scripts/setup/platform-detect.shs \
   scripts/setup/setup.shs; do
@@ -425,7 +426,7 @@ case_table=$(sed -n '/^# Case table\.$/,$p' scripts/check/check-native-seed-pari
 all_cases=$(printf '%s\n' "${case_table}" | grep -Ec '^[[:space:]]*run_(strict_dual_backend_case|parity_case|native_authoritative_case|loud_fail_case|runtime_fail_case) ')
 all_strict=$(printf '%s\n' "${case_table}" | grep -c '^[[:space:]]*run_strict_dual_backend_case ')
 open_cases=$(printf '%s\n' "${open_bug_repros}" | grep -Ec '^[[:space:]]*run_(strict_dual_backend_case|parity_case|native_authoritative_case|loud_fail_case|runtime_fail_case) ')
-open_strict=$(printf '%s\n' "${open_bug_repros}" | grep -c '^[[:space:]]*run_strict_dual_backend_case ')
+open_strict=$(printf '%s\n' "${open_bug_repros}" | grep -c '^[[:space:]]*run_strict_dual_backend_case ' || true)
 default_cases=$((all_cases - open_cases))
 default_strict=$((all_strict - open_strict))
 default_checks=$((default_cases + default_strict))
@@ -447,6 +448,17 @@ printf '%s\n' "${parity_loud_fail}" | grep -Fq 'if [ "$NATIVE_PARITY_BACKEND" = 
 printf '%s\n' "${parity_loud_fail}" | grep -Fq 'build_native "$src" "$bin" "$build_log" cranelift' || fail "loud-fail parity does not select Cranelift explicitly"
 printf '%s\n' "${parity_loud_fail}" | grep -Fq 'build_native "$src" "$bin" "$build_log" || build_rc=$?' || fail "loud-fail parity does not preserve flagless LLVM"
 parity_native_authoritative=$(sed -n '/^run_native_authoritative_case() {$/,/^}$/p' scripts/check/check-native-seed-parity.shs)
+for required in \
+  'if command -v timeout >/dev/null 2>&1; then' \
+  'elif command -v gtimeout >/dev/null 2>&1; then' \
+  'echo "error: timeout or gtimeout is required" >&2'; do
+  grep -Fq -- "${required}" scripts/check/check-native-seed-parity.shs || fail "native parity timeout resolver missing: ${required}"
+done
+[ "$(grep -Fc '"$TIMEOUT_BIN" "$SEED_TIMEOUT_S"' scripts/check/check-native-seed-parity.shs)" -eq 1 ] || fail "seed parity timeout resolver wiring drift"
+[ "$(grep -Fc '"$TIMEOUT_BIN" "$NATIVE_RUN_TIMEOUT_S"' scripts/check/check-native-seed-parity.shs)" -eq 4 ] || fail "native parity timeout resolver wiring drift"
+if grep -Eq 'g?timeout "\$(SEED_TIMEOUT_S|NATIVE_RUN_TIMEOUT_S)"' scripts/check/check-native-seed-parity.shs; then
+  fail "native parity bypasses the portable timeout resolver"
+fi
 printf '%s\n' "${parity_native_authoritative}" | grep -Fq 'if [ "$NATIVE_PARITY_BACKEND" = cranelift ]; then' || fail "native-authoritative parity backend selection missing"
 printf '%s\n' "${parity_native_authoritative}" | grep -Fq 'build_native "$src" "$bin" "$build_log" cranelift' || fail "native-authoritative parity does not select Cranelift explicitly"
 printf '%s\n' "${parity_native_authoritative}" | grep -Fq 'elif build_native "$src" "$bin" "$build_log"; then' || fail "native-authoritative parity does not preserve flagless LLVM"
