@@ -216,16 +216,58 @@ fn print_table_row(values: [text]):
     print row
 
 
+fn _visible_len(s: text) -> i64:
+    """Length of `s` excluding ANSI SGR escape sequences (`\x1b[...m`).
+
+    Table column-width math must use this (not `.len()`) whenever a cell may
+    have gone through colorize_state()/ansi_*() — otherwise the escape bytes
+    inflate the measured width and every colored cell misaligns from its
+    plain-text header (found via review: colorize_state fed straight into
+    _table_col_widths/pad_right, which count bytes, before this fix).
+    """
+    var count = 0
+    var i = 0
+    val n = s.len()
+    while i < n:
+        val c = s.char_code_at(i)
+        if c == 27 and i + 1 < n and s.char_code_at(i + 1) == 91:  # ESC '['
+            var j = i + 2
+            while j < n and s.char_code_at(j) != 109:  # until 'm'
+                j = j + 1
+            i = j + 1  # skip the 'm' too
+        else:
+            count = count + 1
+            i = i + 1
+    count
+
+
+fn _pad_visible(s: text, target_width: i64) -> text:
+    """Right-pad `s` with spaces so its VISIBLE width reaches target_width —
+    ANSI SGR codes in `s` don't count, so colored and plain cells still line
+    up in the same column."""
+    val vlen = _visible_len(s)
+    if vlen >= target_width:
+        return s
+    var pad = ""
+    var i = vlen
+    while i < target_width:
+        pad = pad + " "
+        i = i + 1
+    s + pad
+
+
 fn _table_col_widths(headers: [text], rows: [[text]]) -> [i64]:
-    """Max content width per column, seeded with the header width."""
+    """Max content width per column (visible width, ANSI-aware), seeded
+    with the header width."""
     var widths: [i64] = []
     for h in headers:
-        widths.push(h.len())
+        widths.push(_visible_len(h))
     for row in rows:
         var i = 0
         while i < row.len() and i < widths.len():
-            if row[i].len() > widths[i]:
-                widths[i] = row[i].len()
+            val vlen = _visible_len(row[i])
+            if vlen > widths[i]:
+                widths[i] = vlen
             i = i + 1
     widths
 
@@ -235,15 +277,17 @@ fn print_table_dynamic(headers: [text], rows: [[text]]):
 
     Unlike print_table_header/print_table_row (fixed pad_right(20), used by
     minio/jira listings), this does not truncate long titles/keys — used for
-    github issue/PR listings where titles vary widely in length.
+    github issue/PR listings where titles vary widely in length. Padding is
+    visible-width-aware (see _pad_visible) so colorize_state()'d cells still
+    align with plain headers/columns.
     """
     val widths = _table_col_widths(headers, rows)
     val color = should_use_color()
     var header_line = ""
     var i = 0
     while i < headers.len():
-        val w = if i < widths.len(): widths[i] else: headers[i].len()
-        header_line = header_line + headers[i].pad_right(w + 2)
+        val w = if i < widths.len(): widths[i] else: _visible_len(headers[i])
+        header_line = header_line + _pad_visible(headers[i], w + 2)
         i = i + 1
     if color:
         print "{ansi_bold()}{header_line}{ansi_reset()}"
@@ -254,7 +298,7 @@ fn print_table_dynamic(headers: [text], rows: [[text]]):
         var j = 0
         while j < row.len():
             val w = if j < widths.len(): widths[j] else: 0
-            line = line + row[j].pad_right(w + 2)
+            line = line + _pad_visible(row[j], w + 2)
             j = j + 1
         print line
 

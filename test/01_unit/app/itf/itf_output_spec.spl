@@ -3,7 +3,7 @@
 # output.spl helpers that don't need a tty/network: size formatting and the
 # dynamic-width table column-sizing used by `itf github` listings.
 
-use app.itf.output.{format_size, _table_col_widths}
+use app.itf.output.{format_size, _table_col_widths, _visible_len, _pad_visible}
 
 
 describe "format_size":
@@ -46,3 +46,36 @@ describe "_table_col_widths (dynamic-width table sizing)":
     it "takes the max across multiple rows":
         val widths = _table_col_widths(["K"], [["short"], ["a much longer value"]])
         expect(widths[0]).to_equal(19)
+
+
+describe "_visible_len / _pad_visible (ANSI-aware table alignment)":
+    # Regression coverage for a real bug found in review: colorize_state()
+    # wraps a word in `\x1b[32m...\x1b[0m`, and feeding that straight into
+    # _table_col_widths/pad_right (both byte-length-based) inflated the
+    # measured width by the escape-code bytes — misaligning STATE/AUTHOR/
+    # UPDATED columns in `itf github issue list` whenever color was on.
+
+    it "counts an ANSI-colored word by its visible characters, not its byte length":
+        val colored = "\u{001b}[32mOPEN\u{001b}[0m"
+        expect(_visible_len(colored)).to_equal(4)
+
+    it "matches plain-text length when there is no escape code":
+        expect(_visible_len("CLOSED")).to_equal(6)
+
+    it "_table_col_widths measures colored cells by visible width, not byte length":
+        val colored_open = "\u{001b}[32mOPEN\u{001b}[0m"
+        val colored_closed = "\u{001b}[2mCLOSED\u{001b}[0m"
+        val widths = _table_col_widths(["STATE"], [[colored_open], [colored_closed]])
+        # Visible widths are 4 ("OPEN") and 6 ("CLOSED"); header "STATE" is 5.
+        # Max visible width must be 6 — not the byte-inflated 13/14 that
+        # `.len()` would have measured before this fix.
+        expect(widths[0]).to_equal(6)
+
+    it "_pad_visible pads a colored cell to the same visible width as a plain one":
+        val colored = "\u{001b}[32mOPEN\u{001b}[0m"
+        val padded_colored = _pad_visible(colored, 6)
+        val padded_plain = _pad_visible("AB", 6)
+        # Both should have 4 trailing spaces after their visible content —
+        # i.e. same total visible width once the escape codes are stripped.
+        expect(_visible_len(padded_colored)).to_equal(6)
+        expect(_visible_len(padded_plain)).to_equal(6)
