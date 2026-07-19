@@ -56,3 +56,9 @@ the call boundary; hosted Cranelift also uses aggressive optimization. Existing
 gates run this on hosted Linux/macOS/Windows/FreeBSD and AArch64/RV64 QEMU;
 ARM32/RV32 and Windows ARM64 retain compile-only receipts. Output succeeds only
 when the first tuple survives the intervening call.
+
+Local verification on 2026-07-19 linked and ran the preserved focused
+Cranelift object successfully (`run_rc=1`, the probe's true result). A bounded
+current-source one-case rebuild with a newer pure-Simple Stage3 compiler hit
+its 180-second cap with an empty build log and no artifact, so it was not
+retried and is not counted as staged platform execution.
