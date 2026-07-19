@@ -343,7 +343,13 @@ the shared binary — deploys require explicit user go-ahead).
   Per-file AST resets now retain and clear declaration/expression/statement
   arena storage plus scalar lexer/module slots instead of registering fresh
   outer arrays for every parsed source. Omitted trait/mutability and GPU pools
-  are reset with their siblings. Current-source object emission reached the
+  are reset with their siblings. Parser diagnostics, struct-name scratch, and
+  token/cache singleton storage now reuse the same owners, and the lexer only
+  replaces its source-specific payload instead of its outer active slot.
+  Warning collection also retains every warning from the current parse instead
+  of discarding the previous one. The lexer's per-source `source.chars()`
+  materialization remains a separate Unicode-sensitive retention candidate.
+  Current-source object emission reached the
   existing hosted `path_join` provider gap, so bounded RSS and executable proof
   remain pending. See
   `redeploy_stage4_plan_2026-07-09.md` and `stage4_stub_symbol_plan_2026-07-11.md`.

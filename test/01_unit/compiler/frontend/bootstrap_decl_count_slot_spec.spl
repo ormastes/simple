@@ -10,8 +10,9 @@ use compiler.core.ast.{
     decl_set_trait, decl_get_is_trait, decl_set_param_muts, decl_get_param_muts, module_add_decl,
     module_decl_at, module_decl_count_get
 }
-use compiler.core.ast_stmt.{stmt_gpu_launch, stmt_get_gpu_grid, stmt_get_gpu_block}
+use compiler.core.ast_stmt.{stmt_gpu_launch, stmt_get_gpu_grid, stmt_get_gpu_block, stmt_tag}
 use compiler.core.ast_expr.{
+    expr_tag,
     asm_arm_new, asm_arm_archs, asm_arm_os, asm_arm_abi, asm_arm_backend,
     asm_arm_ver_ops, asm_arm_ver_vals, asm_arm_asm_text, asm_arm_is_compile_error,
     asm_arm_error_msg, asm_arm_is_wildcard
@@ -38,6 +39,49 @@ describe "bootstrap AST declaration count slots":
         expect(expr_reset).to_not_contain("    expr_tag = []\n    expr_span = []")
         expect(stmt_reset).to_contain("stmt_gpu_grid_exprs.clear()")
         expect(stmt_reset).to_not_contain("    stmt_tag = []\n    stmt_span = []")
+
+    it "reuses parser and lexer state containers across file parses":
+        val parser_source = rt_file_read_text("src/compiler/10.frontend/core/parser.spl") ?? ""
+        val lexer_source = rt_file_read_text("src/compiler/10.frontend/core/lexer.spl") ?? ""
+        val parser_init_start = parser_source.index_of("fn parser_init_with_path(source: text, path: text):") ?? -1
+        val parser_advance_start = parser_source.index_of("fn parser_advance():") ?? -1
+        val lexer_init_start = lexer_source.index_of("fn lex_init_with_path(source: text, source_path: text):") ?? -1
+        val lexer_state_start = lexer_source.index_of("fn lex_state_get(key: text, fallback: text)") ?? -1
+        expect(parser_init_start).to_be_greater_than(-1)
+        expect(parser_advance_start).to_be_greater_than(parser_init_start)
+        expect(lexer_init_start).to_be_greater_than(-1)
+        expect(lexer_state_start).to_be_greater_than(lexer_init_start)
+        val parser_init_body = parser_source.substring(parser_init_start, parser_advance_start)
+        val lexer_init_body = lexer_source.substring(lexer_init_start, lexer_state_start)
+
+        expect(parser_init_body).to_contain("par_errors.clear()")
+        expect(parser_init_body).to_contain("par_warnings.clear()")
+        expect(parser_init_body).to_contain("par_struct_names.clear()")
+        expect(parser_init_body).to_contain("par_kind_slot[0] = 0")
+        expect(parser_init_body).to_contain("par_text_slot[0] = \"\"")
+        expect(parser_init_body).to_contain("par_line_slot[0] = 0")
+        expect(parser_init_body).to_contain("par_col_slot[0] = 0")
+        expect(parser_init_body).to_contain("par_src_cache_slot[0] = \"\"")
+        expect(parser_init_body).to_contain("par_src_cache_gen_slot[0] = -1")
+        for name in ["par_errors", "par_warnings", "par_struct_names", "par_kind_slot", "par_text_slot", "par_line_slot", "par_col_slot", "par_src_cache_slot", "par_src_cache_gen_slot"]:
+            expect(parser_init_body).to_not_contain("\n    {name} =")
+        expect(lexer_init_body).to_contain("current_core_lexer_slot[0] = fresh_core_lexer")
+        expect(lexer_init_body).to_not_contain("\n    current_core_lexer_slot =")
+
+        val large_module = parse_and_build_module("fn stale_large() -> i64:\n" + "    0\n".repeat(256), "large_state_probe.spl")
+        val large_expr_count = expr_tag.len()
+        val large_stmt_count = stmt_tag.len()
+        expect(large_module.functions.contains("stale_large")).to_equal(true)
+        expect(large_expr_count).to_be_greater_than(100)
+        expect(large_stmt_count).to_be_greater_than(100)
+
+        val small_module = parse_and_build_module("fn only_small() -> i64:\n    1\n", "small_state_probe.spl")
+        expect(small_module.functions.contains("only_small")).to_equal(true)
+        expect(small_module.functions.contains("stale_large")).to_equal(false)
+        expect(small_module.functions.len()).to_equal(1)
+        expect(decl_count()).to_equal(1)
+        expect(expr_tag.len()).to_be_less_than(large_expr_count)
+        expect(stmt_tag.len()).to_be_less_than(large_stmt_count)
 
     it "clears GPU and asm metadata between parses":
         ast_reset()

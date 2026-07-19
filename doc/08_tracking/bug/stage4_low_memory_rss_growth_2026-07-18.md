@@ -29,6 +29,13 @@ changed compiler objects; final linking stopped on the separately known
 `nogc_async_mut__path__join` provider gap, so no RSS or executable PASS is
 claimed.
 
+Parser initialization now follows the same ownership rule: it clears the
+current-parse diagnostics and struct-name lists, overwrites token/cache
+singletons, and reuses the lexer's outer active-lexer slot. The source-specific
+`CoreLexer` payload is still replaced. Its `source.chars()` allocation remains
+a larger Unicode-sensitive retention candidate, so this bounded container fix
+does not claim to close the RSS acceptance item.
+
 ## Reproduction
 
 Use the constructor-preserving Stage 3 compiler to build only the full CLI with
