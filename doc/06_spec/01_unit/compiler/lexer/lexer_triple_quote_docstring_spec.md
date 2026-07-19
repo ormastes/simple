@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -157,6 +157,34 @@ expect(found).to_equal("abc")
 
 </details>
 
+#### keeps a long UTF-8 triple-quoted token exact through EOF
+
+- chunks push
+- lex init
+   - Expected: lex_next() equals `3`
+   - Expected: lex_token_text() equals `payload`
+   - Expected: lex_next() equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var chunks: [text] = []
+for i in 0..512:
+    chunks.push("abcdefgh")
+val payload = chunks.join("") + "世界🚀"
+lex_init("\"\"\"" + payload + "\"\"\"")
+expect(lex_next()).to_equal(3)
+expect(lex_token_text()).to_equal(payload)
+expect(lex_next()).to_equal(0)
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -176,8 +204,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

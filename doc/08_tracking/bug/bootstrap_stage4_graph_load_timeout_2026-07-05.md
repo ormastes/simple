@@ -223,6 +223,10 @@ regression scenario. The original two-file implementation and scenario are
 restored; the focused lexer spec passes 5/5 under the explicitly bounded Rust
 repair runner and regenerated its SPipe manual. Product optimizer and runtime
 evidence remain pending because no admitted pure-Simple `bin/simple` exists.
+The manual now also carries a sixth bounded scenario for exact long UTF-8
+triple-string text and EOF. A current pure-Simple run was stopped before the
+scenario body when the test runner traversed 600+ library files and grew past
+820 MiB; it is not recorded as execution proof.
 The next permitted step is one incremental Stage2/Stage3 rebuild followed by
 one bounded Stage4 profile; do not add another dispatch layer.
 
