@@ -32,6 +32,22 @@ PID_FILE="$LOG_DIR/nvme_fw_rv32_build.pid"
 BG_OUT_LOG="$LOG_DIR/nvme_fw_rv32_background.out"
 BG_ERR_LOG="$LOG_DIR/nvme_fw_rv32_background.err"
 
+# Wave-3 4-core SMP mode (design contract: doc/05_design/hardware/
+# nvme_fw_multicore/fourcore_ipc_index_handle_design.md §9, lane spec L6b).
+# NVME_RV32_SMP=1 selects an ADDITIVE branch below: it compiles entry_smp.spl
+# (+ its real `use` imports, multi-file, NOT the flattened DIRECT_ENTRY concat
+# the default mode below uses) and links a 4-hart _start stub instead of the
+# default single-hart direct-firmware path. The default path (SMP_MODE unset)
+# is completely unchanged by this branch.
+SMP_MODE="${NVME_RV32_SMP:-0}"
+SMP_OUT="build/nvme_fw_rv32_smp.elf"
+SMP_ENTRY_DIR="build/os/generated_smp"
+SMP_OBJ="build/test-artifacts/nvme_fw_rv32_smp.o"
+SMP_START_OBJ="build/test-artifacts/nvme_fw_rv32_smp_start.o"
+SMP_START_ASM="build/test-artifacts/nvme_fw_rv32_smp_start.S"
+SMP_OUT_LOG="$LOG_DIR/nvme_fw_rv32_smp_build.out"
+SMP_ERR_LOG="$LOG_DIR/nvme_fw_rv32_smp_build.err"
+
 if ! grep -q "rt_rv32_boot_optional_nvme_fw_selftest" "$BOOT"; then
   echo "NVME_RV32_BOOT_NOT_WIRED: add rt_rv32_boot_optional_nvme_fw_selftest() to $BOOT before building $OUT"
   exit 2
@@ -67,6 +83,166 @@ if [ "$MODE" = "--background" ]; then
   setsid sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs >"$BG_OUT_LOG" 2>"$BG_ERR_LOG" < /dev/null &
   echo $! >"$PID_FILE"
   echo "NVME_RV32_BUILD_BACKGROUND pid=$(cat "$PID_FILE") out=$BG_OUT_LOG err=$BG_ERR_LOG"
+  exit 0
+fi
+
+if [ "$SMP_MODE" = "1" ]; then
+  rm -rf "$SMP_ENTRY_DIR"
+  mkdir -p "$SMP_ENTRY_DIR"
+  for logic_src in examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic*.spl; do
+    case "$(basename "$logic_src")" in
+      logic_check.spl) continue ;;
+    esac
+    cp "$logic_src" "$SMP_ENTRY_DIR/$(basename "$logic_src")"
+  done
+  cp examples/09_embedded/simpleos_nvme_fw/fw_rv32/entry.spl "$SMP_ENTRY_DIR/entry.spl"
+  cp examples/09_embedded/simpleos_nvme_fw/fw_rv32/entry_smp.spl "$SMP_ENTRY_DIR/entry_smp.spl"
+
+  rm -f "$SMP_OUT" "$SMP_OBJ" "$SMP_START_OBJ" "$SMP_START_ASM"
+  {
+    echo "NVME_RV32_SMP_BUILD_START timeout=${TIMEOUT_SECS}s out=$SMP_OUT"
+    echo "compiler=$SIMPLE_BIN"
+    echo "sources=$SMP_ENTRY_DIR"
+    echo "entry=$SMP_ENTRY_DIR/entry_smp.spl target=riscv32-unknown-none mode=smp_firmware"
+  } >"$SMP_OUT_LOG"
+  : >"$SMP_ERR_LOG"
+  if command -v timeout >/dev/null 2>&1; then
+    BUILD_RUNNER="timeout -k 10s ${TIMEOUT_SECS}s"
+  else
+    BUILD_RUNNER=""
+  fi
+
+  BUILD_START_EPOCH=$(date +%s)
+  set +e
+  $BUILD_RUNNER env SIMPLE_COMPILER_PHASE_PROFILE=1 SIMPLE_NATIVE_BUILD_EMIT_OBJECT=1 "$SIMPLE_BIN" native-build --backend llvm \
+    --source "$SMP_ENTRY_DIR" \
+    --entry "$SMP_ENTRY_DIR/entry_smp.spl" --entry-closure \
+    --target riscv32-unknown-none \
+    --emit-object -o "$SMP_OBJ" >>"$SMP_OUT_LOG" 2>>"$SMP_ERR_LOG"
+  rc=$?
+  BUILD_END_EPOCH=$(date +%s)
+  BUILD_ELAPSED_SECS=$((BUILD_END_EPOCH - BUILD_START_EPOCH))
+  set -e
+  if [ "$rc" -ne 0 ]; then
+    BUILD_REASON="native-build-failed"
+    if [ "$rc" -eq 124 ]; then
+      BUILD_REASON="native-build-timeout"
+    fi
+    if [ "$rc" -eq 143 ] && [ "$BUILD_ELAPSED_SECS" -lt "$TIMEOUT_SECS" ]; then
+      BUILD_REASON="external-termination-before-timeout"
+    fi
+    echo "NVME_RV32_SMP_BUILD_FAILED code=$rc reason=$BUILD_REASON timeout=${TIMEOUT_SECS}s elapsed=${BUILD_ELAPSED_SECS}s out=$SMP_OUT_LOG err=$SMP_ERR_LOG" >&2
+    tail -n 40 "$SMP_OUT_LOG" >&2 || true
+    tail -n 40 "$SMP_ERR_LOG" >&2 || true
+    exit "$rc"
+  fi
+  echo "NVME_RV32_SMP_BUILD_DONE elapsed=${BUILD_ELAPSED_SECS}s" >>"$SMP_OUT_LOG"
+
+  # 4-hart _start stub + externs (design §7 extern surface, lane spec L6b asm
+  # sketch, verified against this file's own default-mode putc/uart sequence
+  # and rt_riscv_uart_put's real consumption: byte arg in a0 only, ilp32 pairs
+  # an i64 as a0=lo/a1=hi so every extern below reads/writes the lo half and
+  # sign- or zero-fills the hi half as documented per-extern).
+  cat >"$SMP_START_ASM" <<'EOF_SMP_START'
+    .section .text.entry, "ax"
+    .globl _start
+_start:
+    csrr    t0, mhartid
+    la      sp, _fw_stacks + 65536
+    slli    t1, t0, 14
+    sub     sp, sp, t1
+    la      t2, _ipc_shm
+    addi    t2, t2, 4
+    li      t3, 1
+    amoadd.w zero, t3, (t2)
+    mv      a0, t0
+    li      a1, 0
+    call    rt_rv32_fourcore_main
+1:  wfi
+    j       1b
+
+    .globl rt_rv32_shm_load
+rt_rv32_shm_load:
+    slli    a0, a0, 2
+    la      t0, _ipc_shm
+    add     t0, t0, a0
+    lw      a0, 0(t0)
+    srai    a1, a0, 31
+    ret
+
+    .globl rt_rv32_shm_store
+rt_rv32_shm_store:
+    slli    a0, a0, 2
+    la      t0, _ipc_shm
+    add     t0, t0, a0
+    sw      a2, 0(t0)
+    ret
+
+    .globl rt_rv32_fence
+rt_rv32_fence:
+    fence   rw, rw
+    ret
+
+    .globl rt_rv32_hartid
+rt_rv32_hartid:
+    csrr    a0, mhartid
+    li      a1, 0
+    ret
+
+    .globl rt_rv32_ipi_send
+rt_rv32_ipi_send:
+    slli    a0, a0, 2
+    li      t0, 0x02000000
+    add     t0, t0, a0
+    li      t1, 1
+    sw      t1, 0(t0)
+    ret
+
+    .globl rt_rv32_ipi_clear
+rt_rv32_ipi_clear:
+    csrr    t0, mhartid
+    slli    t0, t0, 2
+    li      t1, 0x02000000
+    add     t1, t1, t0
+    sw      zero, 0(t1)
+    ret
+
+    .globl rt_rv32_wfi
+rt_rv32_wfi:
+    wfi
+    ret
+
+    .globl rt_riscv_uart_put
+rt_riscv_uart_put:
+    lui     t0, 0x10000
+1:  lbu     t1, 5(t0)
+    andi    t1, t1, 0x20
+    beqz    t1, 1b
+    sb      a0, 0(t0)
+    ret
+
+    .section .bss
+    .align 4
+    .globl _ipc_shm
+_ipc_shm:
+    .space 33792
+    .globl _fw_stacks
+_fw_stacks:
+    .space 65536
+EOF_SMP_START
+  if ! riscv64-unknown-elf-gcc -march=rv32imafdc -mabi=ilp32d -c "$SMP_START_ASM" -o "$SMP_START_OBJ" >>"$SMP_OUT_LOG" 2>>"$SMP_ERR_LOG"; then
+    echo "NVME_RV32_SMP_BUILD_FAILED start-stub out=$SMP_OUT_LOG err=$SMP_ERR_LOG" >&2
+    tail -n 40 "$SMP_ERR_LOG" >&2 || true
+    exit 1
+  fi
+  llvm-objcopy --redefine-sym _start=__simple_unused_start "$SMP_OBJ" >>"$SMP_OUT_LOG" 2>>"$SMP_ERR_LOG" || true
+  if ! ld.lld -m elf32lriscv -T src/os/kernel/arch/riscv32/linker.ld --no-relax --gc-sections -o "$SMP_OUT" "$SMP_START_OBJ" "$SMP_OBJ" >>"$SMP_OUT_LOG" 2>>"$SMP_ERR_LOG"; then
+    echo "NVME_RV32_SMP_BUILD_FAILED link out=$SMP_OUT_LOG err=$SMP_ERR_LOG" >&2
+    tail -n 40 "$SMP_ERR_LOG" >&2 || true
+    exit 1
+  fi
+  echo "smp build exit=0"
+  ls -la "$SMP_OUT" 2>/dev/null && file "$SMP_OUT" 2>/dev/null
   exit 0
 fi
 
