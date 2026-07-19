@@ -1865,6 +1865,7 @@ static spl_i64 g_boot_tcp_bound = 0;
 static spl_i64 g_boot_tcp_client_ready = 0;
 static spl_i64 g_boot_tcp_client_open = 0;
 static spl_i64 g_boot_tcp_client_announced = 0;
+static spl_i64 g_boot_tcp_fin_sent = 0;
 static spl_u16 g_boot_tcp_listen_port = 8080U;
 static spl_u8 g_boot_tcp_peer_mac[6];
 static spl_u32 g_boot_tcp_peer_ip = 0;
@@ -2049,6 +2050,14 @@ static void rt_send_tcp_packet(spl_u8 flags, const spl_u8 *payload, spl_u16 payl
     }
 }
 
+static void rt_boot_tcp_send_fin_once(void) {
+    if (!g_boot_tcp_client_open || g_boot_tcp_fin_sent) {
+        return;
+    }
+    rt_send_tcp_packet(0x11U, (const spl_u8 *)0, 0);
+    g_boot_tcp_fin_sent = 1;
+}
+
 static void rt_process_tcp(const spl_u8 *frame, spl_u64 len) {
     const spl_u8 *ip = frame + 14;
     spl_u16 ip_total;
@@ -2097,6 +2106,7 @@ static void rt_process_tcp(const spl_u8 *frame, spl_u64 len) {
         g_boot_tcp_recv_next = seq + 1U;
         g_boot_tcp_client_open = 1;
         g_boot_tcp_client_announced = 0;
+        g_boot_tcp_fin_sent = 0;
         rt_send_tcp_packet(0x12U, (const spl_u8 *)0, 0);
         return;
     }
@@ -2632,6 +2642,7 @@ spl_i64 rt_boot_tcp_bind_port(spl_i64 port) {
     g_boot_tcp_client_ready = 0;
     g_boot_tcp_client_open = 0;
     g_boot_tcp_client_announced = 0;
+    g_boot_tcp_fin_sent = 0;
     g_boot_tcp_send_next = 0x10203040U;
     g_boot_tcp_rx_len = 0;
     g_boot_tcp_rx_off = 0;
@@ -2687,16 +2698,16 @@ spl_i64 rt_boot_tcp_write_text(spl_i64 fd, spl_i64 data) {
     text = rt_as_string(data);
     if (text) {
         rt_send_tcp_packet(0x18U, (const spl_u8 *)text->data, (spl_u16)text->len);
-        rt_send_tcp_packet(0x11U, (const spl_u8 *)0, 0);
+        rt_boot_tcp_send_fin_once();
         return (spl_i64)text->len;
     }
     if (g_boot_tcp_response_kind == 2) {
         rt_send_tcp_packet(0x18U, fallback_html_response, (spl_u16)(sizeof(fallback_html_response) - 1ULL));
-        rt_send_tcp_packet(0x11U, (const spl_u8 *)0, 0);
+        rt_boot_tcp_send_fin_once();
         return (spl_i64)(sizeof(fallback_html_response) - 1ULL);
     }
     rt_send_tcp_packet(0x18U, fallback_json_response, (spl_u16)(sizeof(fallback_json_response) - 1ULL));
-    rt_send_tcp_packet(0x11U, (const spl_u8 *)0, 0);
+    rt_boot_tcp_send_fin_once();
     return (spl_i64)(sizeof(fallback_json_response) - 1ULL);
 }
 
@@ -2932,6 +2943,7 @@ spl_i64 rt_boot_tcp_take_version_bytes(spl_i64 fd) {
 
 spl_i64 rt_boot_tcp_close(spl_i64 fd) {
     if (fd == 200) {
+        rt_boot_tcp_send_fin_once();
         g_boot_tcp_client_open = 0;
         g_boot_tcp_client_announced = 0;
         g_boot_tcp_rx_len = 0;
@@ -3340,18 +3352,6 @@ static spl_i64 rt_gpu_cmd_transfer_flush(void) {
     rt_put_le32(cmd + 40, RT_GPU_RESOURCE_ID);
     rt_put_le32(cmd + 44, 0U);
     return rt_gpu_send_command(RT_GPU_CMD_RESOURCE_FLUSH, 48U, 24U) == RT_GPU_RESP_OK_NODATA ? 0 : -1;
-}
-
-static void rt_gpu_fill_test_pattern(void) {
-    volatile spl_u32 *fb = (volatile spl_u32 *)g_rt_gpu_fb;
-    for (spl_u32 y = 0; y < RT_GPU_HEIGHT; y = y + 1U) {
-        for (spl_u32 x = 0; x < RT_GPU_WIDTH; x = x + 1U) {
-            spl_u8 r = (spl_u8)(x & 0xffU);
-            spl_u8 g = (spl_u8)(y & 0xffU);
-            spl_u8 b = (spl_u8)((x ^ y) & 0xffU);
-            fb[(spl_u64)y * RT_GPU_WIDTH + x] = 0xff000000U | ((spl_u32)r << 16) | ((spl_u32)g << 8) | (spl_u32)b;
-        }
-    }
 }
 
 static void rt_gpu_fill_rect(spl_u32 x, spl_u32 y, spl_u32 w, spl_u32 h, spl_u32 color) {

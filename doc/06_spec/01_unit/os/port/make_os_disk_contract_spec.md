@@ -20,20 +20,29 @@
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val script = file_read("scripts/os/make_os_disk.shs")
-expect(script).to_contain("validate_simple_payload \"$SIMPLEOS_SIMPLE_BINARY\" 62")
+expect(script).to_contain("validate_elf_payload \"$SIMPLEOS_SIMPLE_BINARY\" 62 Simple")
 expect(script).to_contain("validate_simple_payload_provenance \"$SIMPLEOS_SIMPLE_BINARY\"")
 expect(script).to_contain("target=x86_64-unknown-simpleos")
 expect(script).to_contain("artifact_sha256")
 expect(script).to_contain("bin/release/aarch64-unknown-simpleos/simple")
-expect(script).to_contain("validate_simple_payload \"$SIMPLEOS_SIMPLE_BINARY\" 183")
+expect(script).to_contain("validate_elf_payload \"$SIMPLEOS_SIMPLE_BINARY\" 183 Simple")
 expect(script).to_contain("bin/release/riscv64-unknown-simpleos/simple")
-expect(script).to_contain("validate_simple_payload \"$SIMPLEOS_SIMPLE_BINARY\" 243")
-expect(script).to_contain("invalid SimpleOS Simple payload (not ELF)")
+expect(script).to_contain("validate_elf_payload \"$SIMPLEOS_SIMPLE_BINARY\" 243 Simple")
+expect(script).to_contain("validate_elf_payload \"$SIMPLEOS_CLANG_BINARY\" 62 Clang")
+expect(script).to_contain("validate_elf_payload \"$SIMPLEOS_CLANG_BINARY\" 183 Clang")
+expect(script).to_contain("validate_elf_payload \"$SIMPLEOS_CLANG_BINARY\" 243 Clang")
+expect(script).to_contain("validate_elf_payload \"$SIMPLEOS_LLC_BINARY\" 62 LLC")
+expect(script).to_contain("validate_elf_payload \"$SIMPLEOS_LLC_BINARY\" 183 LLC")
+expect(script).to_contain("validate_elf_payload \"$SIMPLEOS_LLC_BINARY\" 243 LLC")
+expect(script).to_contain("validate_elf_payload \"$SIMPLEOS_LLD_BINARY\" 62 LLD")
+expect(script).to_contain("validate_elf_payload \"$SIMPLEOS_LLD_BINARY\" 183 LLD")
+expect(script).to_contain("validate_elf_payload \"$SIMPLEOS_LLD_BINARY\" 243 LLD")
+expect(script).to_contain("invalid SimpleOS $payload_name payload (not ELF)")
 expect(script).to_contain("od -An -tu1 -j 4 -N 2")
 expect(script).to_contain("[ \"$1\" -ne 2 ] || [ \"$2\" -ne 1 ]")
 expect(script).to_contain("expected little-endian ELF64")
@@ -56,7 +65,7 @@ val (payload_out, payload_err, payload_rc) = rt_process_run_timeout(
     "/bin/sh", ["scripts/os/make_os_disk.shs", "--self-test"], 30000)
 expect(payload_rc).to_equal(0)
 expect(payload_err).to_equal("")
-expect(payload_out).to_contain("PASS make_os_disk simple payload validation self-test")
+expect(payload_out).to_contain("PASS make_os_disk target payload validation self-test")
 
 val (kernel_out, kernel_err, kernel_rc) = rt_process_run_timeout(
     "/bin/sh", ["scripts/check/check-simpleos-x86-kernel-elf.shs", "--self-test"], 30000)

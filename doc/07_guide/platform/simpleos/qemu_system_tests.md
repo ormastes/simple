@@ -406,6 +406,9 @@ within one boot only: `SimpleDbService` stores rows in module memory and the
 wrapper recreates the attached storage image. Filesystem and reboot persistence
 remain unproven.
 
+The host-configuration matrix therefore checks `/db` on the HTTP listener's
+8080 forward; it does not require a separate database port.
+
 Without `--allow-prebuilt-artifact`, the wrapper also requires a build stamp
 newer than the ELF and rejects `simple_bin` provenance naming `compiler_rust`
 or `simple_seed`. Seed-built and stale-stamp kernels remain diagnostic only.
