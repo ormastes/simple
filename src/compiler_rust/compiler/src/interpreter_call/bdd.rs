@@ -900,8 +900,22 @@ pub(super) fn eval_bdd_builtin(
                             return Ok(Some(value));
                         }
                     };
+                    // Same rationale as the ordered-comparison arm above: a
+                    // false `==`/`!=` is only a PROVISIONAL failure, never a
+                    // hard one, because a chained matcher like
+                    // `expect(a == b).to_be(false)` is authoritative — the
+                    // `.to_*()` arm clears the provisional flag and records
+                    // its own (passing) result. Hard-failing here false-
+                    // reddened every `expect(a == b).to_be(false)` /
+                    // `expect(a != b).to_be(true)` even though the assertion
+                    // legitimately passes, because a passing matcher does NOT
+                    // clear a hard BDD_EXPECT_FAILED (see
+                    // interpreter_method/mod.rs). A bare `expect a == b` with
+                    // no matcher still fails: at example end a standing
+                    // provisional with no matcher_ran counts as a failure
+                    // (mirrors the ordered-comparison and call-expr paths).
                     if !matched {
-                        BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
+                        BDD_EXPECT_PROVISIONAL.with(|cell| *cell.borrow_mut() = true);
                         BDD_FAILURE_MSG.with(|cell| {
                             *cell.borrow_mut() = Some(format!(
                                 "expected {} to {} {}",
