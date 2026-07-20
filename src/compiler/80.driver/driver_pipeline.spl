@@ -17,7 +17,7 @@ use compiler.backend.codegen.{CodegenPipeline, CompiledModule}
 use compiler.backend.backend_types.{BackendResult}
 use compiler.borrow.borrow_check.*
 use compiler.tools.async_integration.{AsyncIntegration, AsyncStateMachine, process_async_mir}
-use compiler.mir_opt.mir_opt_integration.{OptimizationConfig, optimize_mir_module, optimizationconfig_speed}
+use compiler.mir_opt.mir_opt_integration.{OptimizationConfig, optimize_mir_module, optimize_mir_module_for_backend, optimizationconfig_speed}
 use compiler.frontend.core.aop.{weave_function, weavingconfig_all_rules, WeavingConfig, MirBlockInfo, InstructionInfo}
 use compiler.frontend.core.aop_log_policy.{AopLogInstrumentationConfig, aop_log_weaving_rules, aop_log_with_compile_level, aop_log_with_runtime_level}
 use compiler.mir.mir_aop_injection.{extract_mir_block_info, apply_weaving_result}
@@ -273,13 +273,24 @@ impl CompilerDriver:
     # --------------------------------------------------------------------------
 
     me optimize_mir(config: OptimizationConfig):
-        """Apply MIR optimization passes to all modules."""
+        """Apply MIR optimization passes to all modules.
+
+        Routes through the backend-aware pipeline (self.ctx.options.backend)
+        so passes the target backend already runs itself are skipped instead
+        of duplicated -- e.g. LLVM builds skip `inline_functions` because
+        llc's own -O3 inliner pipeline already covers it (see
+        mir_pass_backend_skip_reason_fast in compiler.mir_opt.mod). Backend
+        names other than "llvm" see no filtering (mir_backend_is_llvm gates
+        every skip reason), so this is behavior-identical to the previous
+        backend-unaware optimize_mir_module call for every non-LLVM backend.
+        """
         val log = self.ctx.logger
         log_debug("optimizing MIR modules")
+        val backend_name = self.ctx.options.backend
 
         for name in self.ctx.mir_modules.keys():
             val mir_module = self.ctx.mir_modules[name]
-            val optimized = optimize_mir_module(mir_module, config)
+            val optimized = optimize_mir_module_for_backend(mir_module, config, backend_name)
             # Direct mutation (avoids copy-modify-reassign bug in compiled mode)
             self.ctx.mir_modules[name] = optimized
 
@@ -469,12 +480,9 @@ impl CompilerDriver:
                 bitfield_map: {},
                 bitfield_value_syms: {},
                 struct_field_order: {},
-                struct_field_has_default: {},
-                struct_field_default_expr: {},
                 class_type_names: {},
                 struct_field_type_name: {},
                 struct_field_repr_name: {},
-                struct_field_hir_type: {},
                 struct_field_array_element_type_name: {},
                 struct_field_array_elem_type: {},
                 struct_value_syms: {},
@@ -486,12 +494,7 @@ impl CompilerDriver:
                 runtime_array_locals: {},
                 runtime_dict_locals: {},
                 array_element_struct_syms: {},
-                runtime_value_locals: {},
-                option_value_locals: {},
-                nil_locals: {},
                 enum_variant_index: {},
-                enum_runtime_id_index: {},
-                enum_runtime_id_names: {},
                 lambda_bindings: {},
                 lambda_capture_snapshot: {},
                 current_has_vhdl_metadata: false,
@@ -569,12 +572,9 @@ impl CompilerDriver:
             bitfield_map: {},
             bitfield_value_syms: {},
             struct_field_order: {},
-            struct_field_has_default: {},
-            struct_field_default_expr: {},
             class_type_names: {},
             struct_field_type_name: {},
             struct_field_repr_name: {},
-            struct_field_hir_type: {},
             struct_field_array_element_type_name: {},
             struct_field_array_elem_type: {},
             struct_value_syms: {},
@@ -586,12 +586,7 @@ impl CompilerDriver:
             runtime_array_locals: {},
             runtime_dict_locals: {},
             array_element_struct_syms: {},
-            runtime_value_locals: {},
-            option_value_locals: {},
-            nil_locals: {},
             enum_variant_index: {},
-            enum_runtime_id_index: {},
-            enum_runtime_id_names: {},
             lambda_bindings: {},
             lambda_capture_snapshot: {},
             current_has_vhdl_metadata: false,

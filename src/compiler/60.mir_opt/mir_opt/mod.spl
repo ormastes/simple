@@ -620,7 +620,19 @@ fn mir_pass_backend_skip_reason_fast(pass_name: text, backend_name: text) -> tex
     nil
 
 fn mir_pass_applies_to_backend(pass_name: text, backend_name: text) -> bool:
-    mir_pass_backend_skip_reason_fast(pass_name, backend_name).? == false
+    # NOTE: explicit match, not `... .? == false`. Pinned via instrumentation
+    # while wiring optimize_mir to this (previously-dead, never-exercised)
+    # backend-aware pipeline: `Option.? ` chained directly into a `==`
+    # comparison universally evaluates to `false` in the bootstrap seed
+    # interpreter -- even for the `nil` (no skip reason) case where it
+    # should be `true` -- so every pass was reported as "does not apply"
+    # and the whole pipeline emptied out. Same landmine class already
+    # documented in _Inline/driver.spl (extract_func_symbol_id lookup):
+    # `.?` truthiness/chaining is unreliable here, use an explicit match.
+    # See doc/08_tracking/bug/nvme_rv32_smp_flatten_seed_object_to_int_2026-07-19.md.
+    match mir_pass_backend_skip_reason_fast(pass_name, backend_name):
+        case Some(_): false
+        case nil: true
 
 fn mir_pass_applies_to_backend_budget(pass_name: text, backend_name: text, max_cost_class: text) -> bool:
     mir_pass_applies_to_backend(pass_name, backend_name) and mir_pass_cost_allowed(mir_pass_cost_class(pass_name), max_cost_class)

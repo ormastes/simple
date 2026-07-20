@@ -35,6 +35,17 @@ class LlvmIRBuilder:
     debug_counter: i64
     size_type: text            # "i32" for 32-bit targets, "i64" for 64-bit
     tbaa_counter: i64          # Counter for TBAA metadata nodes
+    header_emitted: bool       # set by emit_module_header(); see emit_baremetal_attributes
+    # Bare-metal attribute lines queued by emit_baremetal_attributes() when it
+    # is called before emit_module_header() (the normal construction order:
+    # MirToLlvm.create_baremetal() calls emit_baremetal_attributes() at
+    # builder-construction time, before translate_module() later calls
+    # emit_module_header()). Flushed by emit_module_header() right after the
+    # header. Ordering matters: `llc` requires `source_filename`/`target
+    # datalayout`/`target triple` to precede standalone `!N = ...` metadata
+    # definitions, or it fails with "expected top-level entity" on the header
+    # line. See doc/08_tracking/bug/nvme_rv32_smp_flatten_seed_object_to_int_2026-07-19.md.
+    pending_baremetal_attrs: [text]
 
     static fn create(name: text, target: LlvmTargetTriple) -> LlvmIRBuilder:
         val st = if target.is_32bit(): "i32" else: "i64"
@@ -46,7 +57,9 @@ class LlvmIRBuilder:
             local_counter: 0,
             debug_counter: 10,
             size_type: st,
-            tbaa_counter: 100
+            tbaa_counter: 100,
+            header_emitted: false,
+            pending_baremetal_attrs: []
         )
 
     me emit(line: text):
@@ -64,21 +77,53 @@ class LlvmIRBuilder:
         """Emit module header."""
         self.emit("; ModuleID = '{self.module_name}'")
         self.emit("source_filename = \"{self.module_name}.spl\"")
-        val target = self.target
         if _llvm_simpleos_header:
             self.emit("target datalayout = \"e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128\"")
             self.emit("target triple = \"x86_64-unknown-simpleos\"")
         else:
-            self.emit("target datalayout = \"{target.datalayout()}\"")
-            self.emit("target triple = \"{target.to_text()}\"")
+            self.emit("target datalayout = \"{self.target.datalayout()}\"")
+            self.emit("target triple = \"{self.target.to_text()}\"")
         self.emit("")
+        self.header_emitted = true
+        # Flush any bare-metal attributes queued before the header existed
+        # (see emit_baremetal_attributes) now that it's safe to emit them.
+        if self.pending_baremetal_attrs.len() > 0:
+            for line in self.pending_baremetal_attrs:
+                self.emit(line)
+            self.pending_baremetal_attrs = []
 
     me emit_baremetal_attributes():
-        """Emit bare-metal module attributes (no stdlib, panic=abort, etc.)."""
-        self.emit("; Bare-metal attributes")
-        self.emit("!0 = !{!\"no-builtins\"}")
-        self.emit("!1 = !{!\"trap-func-name\", !\"abort\"}")
-        self.emit("")
+        """Emit bare-metal module attributes (no stdlib, panic=abort, etc.).
+
+        Callers (MirToLlvm.create_baremetal) invoke this at builder
+        construction time, BEFORE emit_module_header() runs (that happens
+        later, from translate_module()). `llc` requires the module header
+        (source_filename/target datalayout/target triple) to precede
+        standalone `!N = ...` metadata definitions -- emitting these first
+        produces "expected top-level entity" on the header line. So: queue
+        the lines here and let emit_module_header() flush them in the
+        correct position; if the header has already been emitted (future
+        caller with a different order), emit immediately instead.
+        """
+        var lines: [text] = []
+        lines = lines.push("; Bare-metal attributes")
+        # NOTE: braces doubled (`{{`/`}}`) to escape Simple's string
+        # interpolation. A single `!{!\"no-builtins\"}` is not just literal
+        # text here: the compiler's string-interpolation parser tries to
+        # parse the `{...}` body as an expression, and `!"no-builtins"`
+        # parses as a valid unary-not-of-string expression (non-empty
+        # string is truthy, so `!"no-builtins"` -> `false`), silently
+        # rewriting the emitted line to the invalid `!0 = !false`. See
+        # doc/08_tracking/bug/nvme_rv32_smp_flatten_seed_object_to_int_2026-07-19.md.
+        lines = lines.push("!0 = !{{!\"no-builtins\"}}")
+        lines = lines.push("!1 = !{{!\"trap-func-name\", !\"abort\"}}")
+        lines = lines.push("")
+        if self.header_emitted:
+            for line in lines:
+                self.emit(line)
+        else:
+            for line in lines:
+                self.pending_baremetal_attrs = self.pending_baremetal_attrs.push(line)
 
     me start_function(name: text, params: [text], return_type: text):
         """Start a function definition with nounwind (Simple has no exceptions)."""

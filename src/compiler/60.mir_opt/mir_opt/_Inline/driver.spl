@@ -310,7 +310,23 @@ impl ModuleInliner:
                 var new_locals = func.locals
                 for local in generated_locals:
                     new_locals = new_locals.push(local)
-                val updated_func = MirFunction(..func, locals: new_locals, blocks: optimized_blocks)
+                # NOTE: build via struct-copy + field mutation, NOT
+                # `MirFunction(..func, locals: ..., blocks: ...)`. Pinned via
+                # print-instrumentation bisection: that spread-update
+                # constructor call (overriding 2 of MirFunction's 24 fields)
+                # is the exact statement that raises "semantic: type
+                # mismatch: cannot convert object to int" inside
+                # `aot:optimize_mir` for ANY module under `--emit-object`
+                # (repro: 2-fn `f`/`main`) — a bootstrap seed interpreter
+                # landmine in struct-spread-copy for this field/struct
+                # combination. Rewriting as `var updated_func = func` +
+                # explicit `.locals =`/`.blocks =` assignment (same idiom
+                # already used for `caller_with_generated_locals` a few
+                # lines above) avoids the buggy interpreter path entirely.
+                # See doc/08_tracking/bug/nvme_rv32_smp_flatten_seed_object_to_int_2026-07-19.md.
+                var updated_func = func
+                updated_func.locals = new_locals
+                updated_func.blocks = optimized_blocks
                 optimized_functions[updated_func.symbol] = updated_func
                 self.inlined_total = self.inlined_total + 1
 
