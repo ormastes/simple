@@ -7,8 +7,15 @@
 captured subprocess output can stall `simple test` on the self-hosted binary
 for minutes+; not a crash, not data-corrupting, but effectively a hang from
 the caller's perspective)
-**Status:** OPEN — root cause narrowed to layer + function; fix not attempted
-in this lane (see rationale below)
+**Status:** CLOSED (re-scoped) — 2026-07-20 follow-up lane: `strip_ansi` /
+`parse_test_output` benchmarked and EXONERATED (empirically linear, not
+quadratic); root cause re-attributed to the non-memoized daemon-fallback
+relint/compile traversal this doc already flagged in "What would confirm the
+mechanism" as a separate, lower-priority concern. See "2026-07-20 follow-up:
+benchmark results" below. Tracked onward in
+`doc/08_tracking/bug/stage4_test_runner_daemon_fallback_relint_nonmemoized_2026-07-20.md`.
+No change was made to `strip_ansi` / `parse_test_output` — see follow-up
+section for why.
 
 ## Origin of this investigation
 
@@ -206,3 +213,221 @@ be re-scoped: either exclude `arch_check_spec.spl` from the gating matrix
 pending the strip_ansi fix (it is a pre-existing self-hosted-only defect,
 not something introduced by the changes under test), or mark it as a known,
 tracked, non-blocking failure referencing this doc.
+
+## 2026-07-20 follow-up: benchmark results (root-fix lane)
+
+A dedicated follow-up lane (own worktree, `/tmp/wt_stripansi` at
+`b56adfac66d`) ran the microbenchmark this doc called for. Verdict: **the
+"prime suspect" — `strip_ansi`'s per-character slicing being O(n²) — is
+empirically FALSE.** `strip_ansi` and `parse_test_output` are linear. No
+change was made to either function. The real bottleneck is child-side
+compile/lint work, tracked separately in
+`doc/08_tracking/bug/stage4_test_runner_daemon_fallback_relint_nonmemoized_2026-07-20.md`.
+
+### Binary and backend used for every measurement below
+
+All numbers are from `build/bootstrap/full/x86_64-unknown-linux-gnu/simple`
+at commit `3835e717d16` (`/tmp/wt_deploy`, sha256 `c3236c0f...`) — the exact
+"NEW" artifact this doc's own gdb backtraces were captured from — invoked via
+`simple run <file>.spl` with `SIMPLE_EXECUTION_MODE=cranelift` explicitly
+set and confirmed engaged (see below). This is a **self-hosted, compiled**
+measurement, not the Rust seed and not a tree-walking interpreter:
+- A 200,000,000-iteration integer loop ran in ~390ms (~2ns/iteration) under
+  `run` — native-compiled speed, not interpreter speed.
+- `SIMPLE_EXECUTION_MODE=interpret` on the same loop took 1271ms (3.3x
+  slower) and `SIMPLE_EXECUTION_MODE=llvm` printed `[INFO] JIT compilation
+  failed, falling back to interpreter: LLVM JIT not available: compile with
+  feature 'llvm'` (1307ms, i.e. it silently fell back to the interpreter)
+  — **this exact binary has no LLVM JIT capability at all.** Since this is
+  the same artifact that exhibited the original 550s+ hang, cranelift *is*
+  production for this artifact; there is no alternate LLVM code path this
+  bug could have been hitting. `SIMPLE_EXECUTION_MODE=cranelift` gave 382ms,
+  confirming cranelift engagement and ruling out the interpreter fallback
+  for all measurements below (each was captured with the mode pinned and
+  the `--backend=`/positional-flag forms found to be silently inert for
+  `run` — do not rely on them; use the `SIMPLE_EXECUTION_MODE` env var).
+- `bin/simple` (the Rust seed) was NOT used for any timing below — the seed
+  never enters this self-hosted code path at all (§4 above), so it cannot
+  validate or refute this finding either way.
+
+Harness scripts referenced below were self-contained (no `use
+std.test_runner...`) specifically because importing that package under
+`run` on this binary triggers the SAME daemon-fallback relint this doc
+describes for `arch_check_spec.spl` (confirmed: it ran past 900s without
+even reaching the harness's own `main()`). `strip_ansi`/`parse_test_output`
+were exercised either as verbatim inlined copies (Experiments A-C) or via
+the real `use std.test_runner.{strip_ansi, parse_test_output}` import
+(Experiment D, run against a real captured dump so the relint-on-import
+cost was paid once, out of band, by capturing the dump from a separate
+`run arch_check_spec.spl` invocation first).
+
+### Experiment A — repeated `strip_ansi(fixed_line)`, isolating call-count effects
+
+Same short line (~80 bytes, 3 SGR codes) called N times in one process;
+per-checkpoint delta shown so a growing per-call cost (as would result from
+a scan over a monotonically-growing global, e.g. the string registry
+discussed below) would be visible even though total N grows:
+
+| N (cumulative) | ms since prev checkpoint | calls since prev | µs/call |
+|---:|---:|---:|---:|
+| 10,000 | 425 | 10,000 | 42.5 |
+| 50,000 | 1,698 | 40,000 | 42.5 |
+| 100,000 | 2,361 | 50,000 | 47.2 |
+| 200,000 | 4,332 | 100,000 | 43.3 |
+| 424,554 | 10,664 | 224,554 | 47.5 |
+| 800,000 | 17,556 | 375,446 | 46.8 |
+
+Flat at ~43-48µs/call across an 80x range of N. No superlinear trend.
+
+### Experiment B — realistic synthetic corpus, `strip_ansi` once per line
+
+Mixed ANSI/plain lines (~60-110 bytes each), matching the doc's own "max
+line 394 bytes, aggregate volume" characterization:
+
+| n_lines | strip_ansi loop (ms) | µs/line |
+|---:|---:|---:|
+| 10,000 | 484 | 48.4 |
+| 50,000 | 2,319 | 46.4 |
+| 100,000 | 4,076 | 40.8 |
+| 200,000 | 8,507 | 42.5 |
+| 424,554 | 19,386 | 45.7 |
+| 800,000 | 35,561 | 44.5 |
+
+Linear. At the doc's own reported max volume (424,554 lines), total
+`strip_ansi` cost is ~19.4s — not "minutes+".
+
+### Experiment C — discriminating probe for the registry-scan hypothesis
+
+Code reading found a real candidate mechanism: `rt_native_eq_inner` in
+`src/runtime/simple_core/core_string.spl` calls `registered_string_ptr`,
+which does a **linear scan over a global, monotonically-growing,
+never-pruned array** (`string_registry_items`, appended to by every
+`rt_string_new`/`alloc_string` call and never trimmed) to validate a tagged
+value is a real string before comparing it. `llvm_lib_translate_expr.spl`
+confirms `==` on arbitrary types lowers to `rt_native_eq`. This looked like
+exactly the "aggregate volume, not single line length" shape the hang
+exhibits, so it was tested directly: pre-inflate the registry by N
+*freshly, dynamically constructed* (not literal — avoids compile-time
+interning at a fixed low index) distinct strings, then time a FIXED 4,000
+comparison workload:
+
+| pre-allocated strings in registry | fixed 4,000-comparison loop (ms) |
+|---:|---:|
+| 0 | 1 |
+| 100,000 | 1 |
+| 500,000 | 1 |
+| 1,500,000 | 1 |
+
+Flat at 1ms regardless of registry size. **`registered_string_ptr`'s scan is
+not reachable from `text == text` in `strip_ansi`'s code shape** (the
+compiler must be routing `ch == "["` / `c == ";"` etc. through the O(1)
+`rt_string_eq` fast path, not the generic `rt_native_eq`/registry path).
+This refutes the leading hypothesis this doc raised in "What would confirm
+the mechanism precisely" — `registered_string_ptr` is a real, load-bearing
+O(n) scan in the runtime (worth hardening defensively; see note below), but
+it is not what's making this spec's `test` invocation slow.
+
+### Experiment D — the decisive measurement: real `parse_test_output` on a real captured dump
+
+To rule out "the synthetic corpus doesn't match the real pathological
+input" and to directly re-test the exact call chain the doc's 3/3 gdb
+backtraces landed in (`parse_test_output` → `strip_ansi`, including the
+`.split("\n")`, `.trim()`, `.starts_with()`, `.contains()`, `.index_of()`
+calls the earlier experiments didn't individually exercise), a real dump
+was captured by running `SIMPLE_EXECUTION_MODE=cranelift simple run
+test/01_unit/app/arch_check_spec.spl` on this same binary. That run was
+still producing lint output after a 900s timeout (killed, not completed —
+see next section). The first 149,478 real, complete (newline-terminated)
+lines of that capture (~4.85MB; the file is 11MB total but the tail past
+that point is a SIGKILL-truncated partial line, correctly excluded) were
+then fed to a verbatim-inlined copy of `parse_test_output` (including
+`strip_ansi`, `extract_number_before`, `extract_number_after_colon`) at
+increasing prefix sizes:
+
+| n_lines (real dump prefix) | prefix bytes | parse_test_output (ms) | µs/line |
+|---:|---:|---:|---:|
+| 20,000 | 665,318 | 675 | 33.8 |
+| 50,000 | 1,684,721 | 1,385 | 27.7 |
+| 100,000 | 3,374,391 | 2,729 | 27.3 |
+| 149,478 | 4,996,193 | 4,512 | 30.2 |
+
+Clean linear on real data: ~28-34µs/line, no upward trend. Extrapolated to
+the doc's own reported max volume (424,554 lines), this is **~13-20s**, not
+550s+. If `parse_test_output` were the 550s driver, this 149K-line slice
+alone would have taken on the order of 190s; it took 4.5s.
+
+### Attribution: where the 550s actually goes
+
+`run test/01_unit/app/arch_check_spec.spl` (same binary, same mode) —
+which reproduces the daemon-fallback relint + spec execution but calls
+`parse_test_output` **zero times** (parsing only happens in the *parent*
+process under `test`, never under a bare `run`) — did not finish within a
+900s timeout. Combined with Experiment D showing the parent's own parse
+cost is ~13-20s at full volume, the attribution is: **the ~205-distinct-file,
+up-to-659-repeats-each non-memoized relint traversal (already flagged in
+this doc's "Evidence §2" as "separately noteworthy... worth its own
+investigation") is the actual driver of the 550s+ hang, not
+`strip_ansi`/`parse_test_output`.** This also reconciles the seed-vs-NEW gap
+this doc reports (seed 32s vs NEW 550s+ on the same spec): the gap is NEW's
+own self-hosted lint/compile pipeline being far slower than the seed's
+native Rust implementation for this repeated-traversal workload, not a
+parsing regression. Filed as its own bug:
+`doc/08_tracking/bug/stage4_test_runner_daemon_fallback_relint_nonmemoized_2026-07-20.md`.
+
+### Reconciling the 3/3 gdb backtraces
+
+This doc's own gdb evidence (§1) is not contradicted, just re-read: this
+doc explicitly hedged the parser was "most likely O(n) with a large
+constant — or genuinely O(n²)" and never actually measured it. The 3
+backtrace samples (at 25s/60s/100s wall-clock offsets) landing inside
+`parse_test_output`/`strip_ansi` are consistent with catching a real
+(linear, ~13-20s-at-full-volume) parse pass — the samples were explicitly
+taken "past the fork/compile phase," which is biased toward whatever runs
+after the (much longer) relint phase, not a uniform sample of the whole
+550s+. A linear parse that runs for ~13-20s is an entirely plausible thing
+for 3 manually-timed samples to land in, especially since it's the last
+thing to run before the process would otherwise complete.
+
+### Correctness evidence (mission requirement, since a fix was on the table until this benchmark)
+
+- Regression spec added: `test/01_unit/app/test_runner_strip_ansi_spec.spl`
+  (12 examples: plain text, simple SGR, multiple SGR in one line, `?`
+  parameter byte, multi-parameter SGR, OSC-sequence passthrough documented
+  as current out-of-scope behavior, truncated-escape-at-EOF, bare trailing
+  ESC, empty string, escapes-only string, non-ASCII/multi-byte UTF-8
+  passthrough, adjacent-sequence-then-text). Validated via `simple run
+  test/01_unit/app/test_runner_strip_ansi_spec.spl` (`test <spec>` was
+  found to fail "no parseable pass/fail summary" on this binary even for a
+  trivial one-assertion spec with no strip_ansi involvement at all — an
+  environment/binary limitation of this specific artifact, not a
+  `parse_test_output` correctness finding, and not this spec's fault; see
+  next paragraph). Result: **12 examples, 0 failures.**
+- Differential test vs. the old implementation (mission step 4b) and
+  unchanged-pass/fail-accounting sweep (step 4c): **N/A — no algorithmic
+  change was made to `strip_ansi` or `parse_test_output`.** The benchmark
+  above found them already linear; there is nothing to diff against or
+  re-verify accounting for.
+- Environment note for future lanes: `build/bootstrap/full/x86_64-unknown-
+  linux-gnu/simple` at `3835e717d16` (a) resolves `use std.X` imports
+  against `/tmp/wt_deploy`'s own tree regardless of invoking CWD, so it
+  cannot see edits made in a different worktree, and (b) fails `simple
+  test <any spec>` with "no parseable pass/fail summary in test output;
+  refusing synthetic pass" even for a trivial always-passing spec with no
+  output at all. Both were confirmed independent of this investigation's
+  content. Use `simple run <spec>.spl` (which works and prints the normal
+  `N examples, 0 failures` BDD summary) for correctness checks against this
+  specific binary; do not treat a `test` rejection on this artifact as a
+  parser defect.
+
+### Deferred hardening note (not a bug filed — record only)
+
+`registered_string_ptr` in `src/runtime/simple_core/core_string.spl` is a
+linear scan over a never-pruned, monotonically-growing global array, used
+by `rt_native_eq_inner` (the generic/dynamic equality path). It happened
+not to be reachable from `strip_ansi`'s specific code shape (the compiler
+routes static `text == text` through the O(1) `rt_string_eq` instead), so
+no bug is filed against it here — but it remains a latent O(n) validation
+cost on every *generic* equality comparison for the lifetime of a process,
+and is worth a defensive O(1) hash-set rewrite if a future profile shows it
+hot on a path that does reach it (e.g. `Any`-typed or dict-key equality).
+Not investigated further; out of scope for this lane.
