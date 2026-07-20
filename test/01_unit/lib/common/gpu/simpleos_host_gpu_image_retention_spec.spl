@@ -1,14 +1,33 @@
 # @cover src/lib/common/gpu/simpleos_host_gpu_draw_ir.spl 80%
-"""Image-resource revision retention: additive, capability-gated codec on
+"""
+# SimpleOS host-GPU image-resource revision retention
+
+## Overview
+
+Image-resource revision retention: an additive, capability-gated codec on
 top of the existing bounded image-resource wire format. Covers slice item
 8 of doc/03_plan/ui/unified_2d_engine/web_wm_gpu_3d_review_2026-07-20.md
-(host-side-first resource-revision retention). Proves: (a) a first submit
-carries full pixel bytes, (b) an unchanged resource on the next submit
-carries only an id+checksum reference and the host resolves it
-byte-identically from its retained table, (c) a changed resource re-sends
-full bytes, (d) a reference to an unknown or stale id fails CLOSED — never
-resolved, never rendered — and (e) the untouched legacy (non-retained)
-encode/decode path is unaffected.
+(host-side-first resource-revision retention). Without it, every frame
+re-sends full pixel bytes for every image resource even when nothing
+changed; this codec lets the guest send a small id+checksum reference
+instead once the host has already retained the pixels.
+
+Proves: (a) a first submit carries full pixel bytes, (b) an unchanged
+resource on the next submit carries only an id+checksum reference and the
+host resolves it byte-identically from its retained table, (c) a changed
+resource re-sends full bytes and the retained table adopts the new
+content, (d) a reference to an unknown or stale id fails CLOSED — never
+resolved, never rendered, and the retained table stays unchanged — and
+(e) the untouched legacy (non-retained) encode/decode path is unaffected.
+
+## Examples
+
+A 2x2 solid-color icon round-trips through encode/decode as a FULL entry
+on first submit, then as a REFERENCE (checksum only, no pixel bytes) once
+the host has retained it; the reference wire form is far smaller and
+resolves to byte-identical pixels. A representative 64x64 icon case
+reports the actual bytes-saved ratio (reference stays under 200 bytes vs.
+16384+ for the full transfer).
 """
 
 use std.spec.*
@@ -87,9 +106,9 @@ describe "SimpleOS host-GPU image-resource revision retention":
         expect(frame2.resolved[0].height).to_equal(2)
 
     it "(c) changed resource re-sends full bytes and the retained table adopts the new content":
+        step("Frame 1: establish the retained table with an original icon")
         val pixels_a = _solid_pixels(4, 0xff112233u32)
-        val frame1 = simpleos_host_gpu_resolve_retained_images(
-            [simpleos_host_gpu_image_resource_full("asset://icon", 2, 2, pixels_a)], [])
+        val frame1 = simpleos_host_gpu_resolve_retained_images([simpleos_host_gpu_image_resource_full("asset://icon", 2, 2, pixels_a)], [])
         expect(frame1.ok).to_be(true)
 
         step("Content changes: a new full entry (not a reference) must be sent")
@@ -117,8 +136,8 @@ describe "SimpleOS host-GPU image-resource revision retention":
 
         step("Reference whose asserted checksum no longer matches the retained table (desync)")
         val pixels_a = _solid_pixels(4, 0xff112233u32)
-        val frame1 = simpleos_host_gpu_resolve_retained_images(
-            [simpleos_host_gpu_image_resource_full("asset://icon", 2, 2, pixels_a)], [])
+        step("Establish the retained table with the original icon")
+        val frame1 = simpleos_host_gpu_resolve_retained_images([simpleos_host_gpu_image_resource_full("asset://icon", 2, 2, pixels_a)], [])
         val stale_ref = simpleos_host_gpu_image_resource_ref("asset://icon", 2, 2, 987654321)
         val stale_resolution = simpleos_host_gpu_resolve_retained_images([stale_ref], frame1.retained)
         expect(stale_resolution.ok).to_be(false)

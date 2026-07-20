@@ -5,6 +5,35 @@
 # instead of solid contacts, on BOTH the bruteforce (<=4 colliders) and
 # BVH (>4 colliders) broadphase paths. See doc/03_plan/ui/unified_2d_engine/
 # unified_2d_interaction_2026-07-20.md defect [C11].
+"""
+# PhysicsWorld2D collision filters + triggers
+
+## Overview
+
+`PhysicsWorld2D.detect_contacts()` must honor two per-collider settings
+that gameplay code relies on: a `CollisionFilter` (category/mask bits)
+that can suppress contact generation entirely between two overlapping
+shapes, and an `is_sensor` flag that turns a solid contact into a
+non-physical trigger event (the shapes overlap freely; only an event
+fires, bodies are never pushed apart). This spec proves both settings are
+respected, that they compose correctly with default (unfiltered,
+non-trigger) behavior, and that they hold on BOTH broadphase paths — the
+brute-force path used for <=4 colliders and the BVH path used above that
+threshold — since [C11] was a regression where the BVH path silently
+dropped this wiring.
+
+## Examples
+
+Two default-filtered overlapping dynamic bodies produce exactly one solid
+contact and zero trigger events (baseline). Giving them incompatible
+category/mask filters drops the contact to zero and leaves both bodies'
+positions unmoved. Marking one collider `is_sensor` instead produces zero
+solid contacts, exactly one trigger event, and still leaves positions
+unmoved (a trigger never separates bodies). A 6-collider scene (past the
+4-collider BVH threshold) runs all three pairings — trigger, masked-out,
+and default-solid — simultaneously and proves the BVH path resolves each
+pair identically to the brute-force path.
+"""
 
 use std.io_runtime
 use std.spec.*
@@ -27,6 +56,7 @@ fn zero_gravity_config() -> PhysicsConfig2D:
 describe "PhysicsWorld2D collision filters + triggers":
 
     it "backward compat: default filters/no-trigger produce the same contact as unfiltered behavior":
+        step("Overlap two default-filtered dynamic circles")
         var world = PhysicsWorld2D.create(zero_gravity_config())
         val a = make_node(1)
         val b = make_node(2)
@@ -35,11 +65,13 @@ describe "PhysicsWorld2D collision filters + triggers":
         world.add_dynamic_body(b, 0.2, 0.0, 1.0)
         world.add_circle_collider(b, 0.3)
         world.step(world.config.fixed_timestep)
+        step("Default settings must produce one solid contact and no trigger events")
         expect(world.contact_count()).to_equal(1)
         expect(world.get_trigger_events().len()).to_equal(0)
         world.destroy()
 
     it "masks-reject-pair: an incompatible category/mask pair produces NO contact":
+        step("Overlap two circles with incompatible category/mask filters")
         var world = PhysicsWorld2D.create(zero_gravity_config())
         val a = make_node(1)
         val b = make_node(2)
@@ -52,6 +84,7 @@ describe "PhysicsWorld2D collision filters + triggers":
         val pos_a_before = world.get_position(a)
         val pos_b_before = world.get_position(b)
         world.step(world.config.fixed_timestep)
+        step("The filter must suppress the contact entirely and leave both bodies unmoved")
         expect(world.contact_count()).to_equal(0)
         val pos_a_after = world.get_position(a)
         val pos_b_after = world.get_position(b)
@@ -62,6 +95,7 @@ describe "PhysicsWorld2D collision filters + triggers":
         world.destroy()
 
     it "trigger-pair: an is_sensor collider emits a trigger event and does not push bodies apart":
+        step("Overlap two circles, marking one as a sensor (trigger)")
         var world = PhysicsWorld2D.create(zero_gravity_config())
         val a = make_node(1)
         val b = make_node(2)
@@ -73,6 +107,7 @@ describe "PhysicsWorld2D collision filters + triggers":
         val pos_a_before = world.get_position(a)
         val pos_b_before = world.get_position(b)
         world.step(world.config.fixed_timestep)
+        step("A sensor pair must fire a trigger event with zero solid contacts and no separation")
         expect(world.contact_count()).to_equal(0)
         expect(world.get_trigger_events().len()).to_equal(1)
         val pos_a_after = world.get_position(a)
@@ -84,6 +119,7 @@ describe "PhysicsWorld2D collision filters + triggers":
         world.destroy()
 
     it "BVH broadphase path (>4 colliders) applies the same filter/trigger wiring":
+        step("Build 6 colliders (past the 4-collider BVH threshold): one trigger pair, one masked-out pair, one default-solid pair")
         var world = PhysicsWorld2D.create(zero_gravity_config())
         val a = make_node(1)
         val b = make_node(2)
@@ -112,6 +148,7 @@ describe "PhysicsWorld2D collision filters + triggers":
         # 6 colliders > 4 => detect_contacts() routes through detect_contacts_bvh()
         expect(world.colliders.count > 4).to_equal(true)
         world.step(world.config.fixed_timestep)
+        step("Each pair must resolve identically to the brute-force path: 1 solid contact, 1 trigger, e/f pushed apart")
         expect(world.contact_count()).to_equal(1)
         expect(world.get_trigger_events().len()).to_equal(1)
         val pos_e = world.get_position(e)

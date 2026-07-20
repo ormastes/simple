@@ -1,5 +1,32 @@
 # @cover src/lib/common/ui/draw_ir_patch.spl 80%
 # @tag: unit, ui, draw_ir, patch
+"""
+# Draw IR incremental patch generation
+
+## Overview
+
+Backends normally re-receive a whole `DrawIrComposition` every frame and
+diff it themselves. This spec covers the incremental patch companion
+(`common.ui.draw_ir_patch`): computing a compact list of per-component
+operations (Insert / Remove / UpdateGeometry / UpdateText / UpdateStyle /
+Reorder) between two composition revisions, and applying that patch back
+onto the baseline to reproduce the target composition exactly,
+command-by-command — so a renderer can repaint only the changed regions
+instead of the whole frame.
+
+## Examples
+
+A new sibling component emits an Insert op carrying only `new_bounds`;
+removing one emits a Remove op carrying only `old_bounds`. A pure
+position/size change emits UpdateGeometry; a text-only or style-only
+change emits its own narrow op instead of a blanket replace. A component
+that keeps its content but moves emits Reorder — unless content ALSO
+changed at the new position, in which case the content-change op wins and
+Reorder is suppressed. The round-trip contract holds on every case,
+including a ~30-command mixed composition exercising every op kind at
+once: `apply(old, patch_between(old, new))` always equals `new`,
+command-by-command.
+"""
 
 use std.spec
 use common.ui.draw_ir.{
@@ -114,16 +141,12 @@ describe "Draw IR patch generation":
     it "emits an UpdateStyle op when computed_style changes":
         val baseline = draw_ir_composition("rev-1", "scene", DRAW_IR_BACKEND_CPU, [
             draw_ir_batch("batch", DRAW_IR_BACKEND_CPU, _embedding(), [
-                draw_ir_box_with_style("box", 10, 10, 50, 20, 1u32,
-                    draw_ir_no_rect(), draw_ir_no_rect(), draw_ir_no_rect(), draw_ir_no_rect(),
-                    [draw_ir_style_prop("fill", "blue")])
+                draw_ir_box_with_style("box", 10, 10, 50, 20, 1u32, draw_ir_no_rect(), draw_ir_no_rect(), draw_ir_no_rect(), draw_ir_no_rect(), [draw_ir_style_prop("fill", "blue")])
             ])
         ])
         val current = draw_ir_composition("rev-2", "scene", DRAW_IR_BACKEND_CPU, [
             draw_ir_batch("batch", DRAW_IR_BACKEND_CPU, _embedding(), [
-                draw_ir_box_with_style("box", 10, 10, 50, 20, 1u32,
-                    draw_ir_no_rect(), draw_ir_no_rect(), draw_ir_no_rect(), draw_ir_no_rect(),
-                    [draw_ir_style_prop("fill", "red")])
+                draw_ir_box_with_style("box", 10, 10, 50, 20, 1u32, draw_ir_no_rect(), draw_ir_no_rect(), draw_ir_no_rect(), draw_ir_no_rect(), [draw_ir_style_prop("fill", "red")])
             ])
         ])
         val patch = draw_ir_patch_between(baseline, "rev-1", current, "rev-2")
@@ -276,12 +299,8 @@ describe "Draw IR patch generation":
         i = 0
         while i < 5:
             val id = "style{i}"
-            baseline_cmds.push(draw_ir_box_with_style(id, i, i, 10, 10, 1u32,
-                draw_ir_no_rect(), draw_ir_no_rect(), draw_ir_no_rect(), draw_ir_no_rect(),
-                [draw_ir_style_prop("fill", "blue")]))
-            current_cmds.push(draw_ir_box_with_style(id, i, i, 10, 10, 1u32,
-                draw_ir_no_rect(), draw_ir_no_rect(), draw_ir_no_rect(), draw_ir_no_rect(),
-                [draw_ir_style_prop("fill", "red")]))
+            baseline_cmds.push(draw_ir_box_with_style(id, i, i, 10, 10, 1u32, draw_ir_no_rect(), draw_ir_no_rect(), draw_ir_no_rect(), draw_ir_no_rect(), [draw_ir_style_prop("fill", "blue")]))
+            current_cmds.push(draw_ir_box_with_style(id, i, i, 10, 10, 1u32, draw_ir_no_rect(), draw_ir_no_rect(), draw_ir_no_rect(), draw_ir_no_rect(), [draw_ir_style_prop("fill", "red")]))
             i = i + 1
 
         # c15..c21: unchanged
