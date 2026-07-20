@@ -399,7 +399,7 @@ describe "HostWmHandle loop behavior":
         expect(_capture_white_count).to_be_greater_than(0)
         # Direct-draw fallback rasterizes chrome via fill_rect, not blit.
         expect(_capture_blit_count).to_equal(0)
-        expect(_capture_clear_color).to_equal(0xFF0F172Au32)
+        expect(_capture_clear_color).to_equal(0xff5a7fb5u32)
 
     it "records compositor resize dimensions":
         val backend = FakeCompositorBackend(w: 320, h: 240)
@@ -668,13 +668,45 @@ describe "SimpleOS GUI adapter proof":
         expect(adapter.compositor.windows[0].h).to_be_greater_than(92)
         expect(_capture_present_count).to_equal(1)
         expect(_capture_blue_count).to_be_greater_than(0)
-        expect(_capture_clear_color).to_equal(0xFF0F172Au32)
+        expect(_capture_clear_color).to_equal(0xff5a7fb5u32)
 
 fn _spec_argb_hex(color: u32) -> text:
     val r = ((color / 65536u32) % 256u32).to_i64()
     val g = ((color / 256u32) % 256u32).to_i64()
     val b = (color % 256u32).to_i64()
     "#" + int_to_hex(r) + int_to_hex(g) + int_to_hex(b)
+
+# Mirrors host_compositor_core.spl's private _host_argb_shade (not exported,
+# so the oracle is duplicated here) so this spec can compute the exact
+# titlebar gloss top/bottom shades host_chrome_scene_html paints, instead of
+# hardcoding a hex the source could silently drift away from.
+fn _spec_argb_shade(color: u32, delta: i64) -> u32:
+    val r = ((color / 65536u32) % 256u32).to_i64()
+    val g = ((color / 256u32) % 256u32).to_i64()
+    val b = (color % 256u32).to_i64()
+    val cr = if r + delta < 0: 0 elif r + delta > 255: 255 else: r + delta
+    val cg = if g + delta < 0: 0 elif g + delta > 255: 255 else: g + delta
+    val cb = if b + delta < 0: 0 elif b + delta > 255: 255 else: b + delta
+    0xFF000000u32 | (cr.to_u32() << 16) | (cg.to_u32() << 8) | cb.to_u32()
+
+# Mirrors emu_draw_gradient_rect's per-row vertical lerp
+# (gpu/engine2d/backend_emu.spl — the CPU/emu oracle every gradient backend is
+# kept bit-for-bit identical to, see backend_software.spl's comment on
+# kernel_draw_gradient_rect) so a pixel-level assertion on the titlebar gloss
+# gradient computes the exact value the rasterizer paints at a given row,
+# instead of assuming row 0 (the flat top color).
+fn _spec_gradient_row_color(top: u32, bottom: u32, row: i64, height: i64) -> u32:
+    val tr = ((top / 65536u32) % 256u32).to_i64()
+    val tg = ((top / 256u32) % 256u32).to_i64()
+    val tb = (top % 256u32).to_i64()
+    val br = ((bottom / 65536u32) % 256u32).to_i64()
+    val bg = ((bottom / 256u32) % 256u32).to_i64()
+    val bb = (bottom % 256u32).to_i64()
+    val denom = if height - 1 > 1: height - 1 else: 1
+    val r = tr + (br - tr) * row / denom
+    val g = tg + (bg - tg) * row / denom
+    val b = tb + (bb - tb) * row / denom
+    0xFF000000u32 | (r.to_u32() << 16) | (g.to_u32() << 8) | b.to_u32()
 
 fn _spec_window(id: i64, title: text, x: i32, y: i32, w: i32, h: i32, content: text) -> HostedWindow:
     HostedWindow(id: id, owner_port: 0, title: title, x: x, y: y, w: w, h: h, content: content, process_id: 0, app_id: "/sys/apps/x", minimized: false, focused: true)
@@ -691,7 +723,13 @@ describe "host chrome CSS/GUI-web lane":
         val theme = wm_chrome_theme()
         val win = _spec_window(1, "Terminal", 10, 12, 120, 80, "hi")
         val html = host_chrome_scene_html([win], 200, 150)
-        expect(html.contains(_spec_argb_hex(theme.accent))).to_equal(true)
+        # Not theme.accent: host_chrome_scene_html never paints accent into a
+        # window (accent is reserved for thin stripes/underlines that never
+        # carry text — see that function's doc comment). The titlebar is a
+        # linear-gradient of title_focused shaded +/-14; check for the top
+        # shade's CSS hex instead, which is what the gradient div's
+        # background-image string actually contains.
+        expect(html.contains(_spec_argb_hex(_spec_argb_shade(theme.title_focused, 14)))).to_equal(true)
         expect(html.contains(_spec_argb_hex(theme.host_window_body))).to_equal(true)
         expect(html.contains(_spec_argb_hex(theme.close_button))).to_equal(true)
         expect(html.contains(_spec_argb_hex(theme.compositor_bg))).to_equal(true)
@@ -714,8 +752,19 @@ describe "host chrome CSS/GUI-web lane":
         val html = host_chrome_scene_html([win], w, h)
         val px = simple_web_layout_render_html_pixels_engine2d(html, w, h, "metal")
         expect(px.len()).to_equal(w * h)
-        # Titlebar interior (left of the title text) rasterizes to the accent color.
-        expect(px[(win.y + 2) * w + (win.x + 2)]).to_equal(theme.accent)
+        # Titlebar interior (win.y+2 is row 2 of the 23px linear-gradient gloss
+        # div running title_focused shaded +14 at the top to -14 at the
+        # bottom — see host_chrome_scene_html and _host_argb_shade). NOT
+        # theme.accent: host_chrome_scene_html never paints accent into a
+        # window's titlebar (accent is reserved for thin stripes/underlines
+        # that never carry text) — this assertion only passed before because
+        # the pre-Aqua palette happened to alias accent with the titlebar
+        # color. _spec_gradient_row_color replicates emu_draw_gradient_rect's
+        # exact per-row lerp so this stays correct if the shade deltas or
+        # gloss height ever change.
+        val titlebar_gloss_top = _spec_argb_shade(theme.title_focused, 14)
+        val titlebar_gloss_bottom = _spec_argb_shade(theme.title_focused, 0 - 14)
+        expect(px[(win.y + 2) * w + (win.x + 2)]).to_equal(_spec_gradient_row_color(titlebar_gloss_top, titlebar_gloss_bottom, 2, 23))
         # Window body below the titlebar rasterizes to host_window_body.
         expect(px[(win.y + 40) * w + (win.x + 2)]).to_equal(theme.host_window_body)
         # Desktop backdrop outside any window rasterizes to compositor_bg.
