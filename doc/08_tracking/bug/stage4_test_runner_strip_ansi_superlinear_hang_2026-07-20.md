@@ -378,15 +378,34 @@ parsing regression. Filed as its own bug:
 
 This doc's own gdb evidence (§1) is not contradicted, just re-read: this
 doc explicitly hedged the parser was "most likely O(n) with a large
-constant — or genuinely O(n²)" and never actually measured it. The 3
-backtrace samples (at 25s/60s/100s wall-clock offsets) landing inside
-`parse_test_output`/`strip_ansi` are consistent with catching a real
-(linear, ~13-20s-at-full-volume) parse pass — the samples were explicitly
-taken "past the fork/compile phase," which is biased toward whatever runs
-after the (much longer) relint phase, not a uniform sample of the whole
-550s+. A linear parse that runs for ~13-20s is an entirely plausible thing
-for 3 manually-timed samples to land in, especially since it's the last
-thing to run before the process would otherwise complete.
+constant — or genuinely O(n²)" and never actually measured it.
+
+The initial concern raised against the "linear, ~13-20s" reading was: a
+75-second spread across the 3 samples (25s/60s/100s) cannot fit inside a
+single ~13-20s call — so either `parse_test_output` is invoked repeatedly
+(e.g. re-parsing a growing captured buffer, a classic caller-side O(n²)
+distinct from `strip_ansi` itself), or the reconciliation is wrong. This
+was checked directly by reading the actual caller,
+`run_test_file_interpreter` (`test_runner_execute.spl:58`, frame #5 in the
+original backtraces) rather than assuming: it calls `process_run_bounded`
+**once** to capture the child's full stdout/stderr, then calls
+`make_result_from_structured_evidence` **once** (`test_executor_parsing.spl:392`),
+which itself calls `parse_test_output` **exactly once** on the full
+combined output (`test_executor_parsing.spl:398`). There is no loop, no
+chunked/streaming re-parse, no growing-buffer re-scan anywhere in this call
+path. `parse_test_output` genuinely runs once per test file.
+
+Given that, the 25s/60s/100s figures are not 3 samples within one process's
+timeline (a single ~13-20s call cannot span 75s) — per the original doc's
+own wording ("under different system load"), they are 3 *separate*
+reproduction runs, each independently attached at some point after that
+run's own (load-variable-duration) relint phase finished and its one
+`parse_test_output` call was in flight. Different runs hit different
+absolute wall-clock offsets because the preceding relint phase's duration
+varies with system load, not because parsing itself was slow or repeated.
+This is fully consistent with "parse_test_output is per-call linear,
+called exactly once, taking ~13-20s at full volume" — no caller-side
+re-parse loop exists to second-guess.
 
 ### Correctness evidence (mission requirement, since a fix was on the table until this benchmark)
 
@@ -418,6 +437,19 @@ thing to run before the process would otherwise complete.
   `N examples, 0 failures` BDD summary) for correctness checks against this
   specific binary; do not treat a `test` rejection on this artifact as a
   parser defect.
+- **Handoff caveat, explicit:** `test_runner_strip_ansi_spec.spl` was only
+  verified under `simple run` (see above) — never under `simple test`, the
+  SSpec evaluator this repo's CI/tooling actually uses day to day (and
+  which this doc's own investigation notes is a *different* evaluator from
+  `run`). Whichever lane lands this commit must confirm `simple test
+  test/01_unit/app/test_runner_strip_ansi_spec.spl` also passes (12
+  examples, 0 failures) on a healthy self-hosted binary before treating it
+  as landed/verified on its real execution path.
+- **Commit:** this investigation (doc updates + the new regression spec)
+  was committed in a detached-HEAD worktree at `/tmp/wt_stripansi`,
+  **SHA `a8f3a5e68fa`**, based on `main@b56adfac66d`. Not pushed (per this
+  lane's instructions — a separate review+landing lane handles that). The
+  landing lane should cherry-pick/land by this SHA.
 
 ### Deferred hardening note (not a bug filed — record only)
 
