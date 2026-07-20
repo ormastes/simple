@@ -1,15 +1,25 @@
-# font_renderer: SIGSEGV in simple_runtime::value::heap after glyph layout, on the Rust seed
+# font_renderer: SIGSEGV in simple_runtime::value::heap after glyph layout, on the Rust seed's `run` evaluator
 
-**Status:** OPEN 2026-07-20 — found while root-fixing
-`font_renderer_resolve_metrics_nil_receiver_seed_2026-07-20.md` (that bug is now
-fixed; this is what surfaced immediately behind it).
-**Severity:** Blocking for seed-run font specs — `font_renderer_spec` still
-cannot reach a `Passed:`/`Failed:` summary that covers more than its first
-example.
+**Status:** OPEN 2026-07-20 — found while root-fixing the mutex crash in
+`font_renderer_resolve_metrics_nil_receiver_seed_2026-07-20.md` (that mutex
+bug's hard-crash half is mitigated on `bin/simple run`; this SIGSEGV is what
+surfaced immediately behind it on that same `run`-based standalone repro).
+**IMPORTANT SCOPE NOTE:** this bug was found and is reproducible **only via
+`bin/simple run`** on a standalone script. It is **not confirmed** to be what
+blocks the real `font_renderer_spec` under `bin/simple test` — that harness
+uses a different evaluator and, per probe evidence in the sibling doc, dies
+at an earlier and different call site (`validate_selected_font_asset`, not
+the glyph layout loop this doc covers). Do not treat fixing this SIGSEGV as
+sufficient to turn `font_renderer_spec` green; see
+`font_renderer_resolve_metrics_nil_receiver_seed_2026-07-20.md` for the
+actual `test`-path blocker.
+**Severity:** Confirmed real Rust-seed runtime heap corruption (gdb-verified),
+but its relevance to unblocking the tracked spec is unconfirmed pending the
+above.
 **Affected surface:** Rust seed only (`bin/simple` built from
-`src/compiler_rust`, self-labeled "bootstrap seed only"). Not yet evaluated on
-the pure-Simple self-hosted binary (none was deployed in this worktree — see
-"Self-hosted timeout" below).
+`src/compiler_rust`, self-labeled "bootstrap seed only"), via `bin/simple run`.
+Not yet evaluated on the pure-Simple self-hosted binary (none was deployed in
+this worktree — see "Self-hosted timeout" below).
 **Path:** `bug` track.
 
 ## Symptom
@@ -88,16 +98,16 @@ now-fixed mutex bug and is not avoided by working around it.
 
 ## Investigation notes (for whoever picks this up)
 
-- Trigger condition appears to scale with overall loaded-module footprint,
-  not just the font code path: a 6-line standalone script exercising the
-  exact same `prepare_text("A", ...)` call crashes; whereas an
-  even-more-minimal `prepare_text("", ...)` (skips the glyph loop) does NOT
-  crash standalone but DOES crash once embedded inside the full
-  `std.spec`-based `describe`/`it`/`expect` test-runner harness (much larger
-  loaded-module set). This is consistent with a heap-allocation-registry
-  sizing/indexing bug rather than anything specific to glyph structs — but
-  that is a hypothesis, not confirmed; do not assume it without further
-  bisection.
+- An earlier draft of this doc hypothesized the trigger scales with overall
+  loaded-module footprint, based on `prepare_text("", ...)` (skips this
+  bug's glyph loop) crashing only when embedded in the full `std.spec`-based
+  test-runner harness but not standalone. That observation is better
+  explained by the sibling doc's finding: under `bin/simple test`, the
+  process actually dies earlier and elsewhere (inside
+  `validate_selected_font_asset`, before font loading even completes) —
+  so the harness-embedded `prepare_text("", ...)` crash was never reaching
+  this SIGSEGV's code path at all; it hit the *other* bug first. Treat the
+  footprint-scaling idea as retracted, not confirmed.
 - `rt_native_neq` is a generic native `!=` comparison hook, not
   font-specific; whatever value flows into it here is the actual corrupt
   object. Worth instrumenting `_prepare_text_active`'s loop
@@ -127,13 +137,18 @@ checking).
   example ("rejects nil or stale rasterizers through is_current") reliably
   passes when run through the real `bin/simple test` harness; it prints `✓`
   and the run then aborts (0 passed / 1 failed at the file level) with no
-  further `✓`/`✗` markers. The new regression example added in this pass
-  ("activates a render config after loading a real face without crashing")
-  passes when run as a tiny standalone `bin/simple run` script (proving the
-  mutex nil-receiver bug from the sibling doc is fixed), but the *same*
-  assertion, executed inside the full `std.spec`-based test-runner harness,
-  still hits this SIGSEGV before printing its own `✓` — the harness's larger
-  loaded-module footprint is enough to trigger the corruption even for the
-  empty-content case that avoids it standalone. The pre-existing "renders a
+  further `✓`/`✗` markers. **Correction (superseding an earlier draft of this
+  doc):** probe-localized evidence in the sibling doc
+  (`font_renderer_resolve_metrics_nil_receiver_seed_2026-07-20.md`, "Actual
+  `bin/simple test` blocker" section) shows the real `test`-path crash is
+  NOT this glyph-loop SIGSEGV — it happens earlier, inside
+  `validate_selected_font_asset`, before `_prepare_text_active` (where this
+  SIGSEGV lives) is ever reached. A regression example added and then
+  removed during this pass proved its own body never executed under
+  `bin/simple test` (crashed at font *loading*, one step before its first
+  real assertion) — it provided no verification value and was reverted
+  rather than left in with a misleading claim. The pre-existing "renders a
   selected face from owned bytes..." example (real glyph rasterize + sha256
-  pixel check) cannot run to completion either way until this bug is fixed.
+  pixel check) is blocked by whichever of these two bugs is reached first on
+  a given evaluator; on `bin/simple test` specifically, that is the
+  `validate_selected_font_asset` crash, not this one.
