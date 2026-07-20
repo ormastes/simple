@@ -188,7 +188,76 @@ fn char_from_code_inline(code: i64) -> text:
         val chars = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
         val index = code - 32
         return chars[index]
-    ""
+    # Everything else (other C0 control codes, and any codepoint >= 127)
+    # is encoded as UTF-8 instead of silently dropped. Reject invalid
+    # codepoints (negative, above U+10FFFF, or UTF-16 surrogate range
+    # U+D800..U+DFFF) by returning empty text -- same policy the ASCII
+    # table above already used for anything it couldn't represent.
+    if code < 0 or code > 0x10FFFF or (code >= 0xD800 and code <= 0xDFFF):
+        return ""
+    _utf8_char_from_codepoint_inline(code)
+
+# Extern raw byte-array -> text conversion (runtime memcpy, no re-validation
+# of the bytes -- see rt_bytes_to_text in src/runtime/runtime_native.c and
+# src/runtime/runtime.c). Declared locally rather than importing binary_io /
+# encoding.utf8 to keep this bootstrap-critical file dependency-free of the
+# heavier modules those pull in.
+#
+# Two other primitives were tried and rejected during this fix's
+# verification (see doc/08_tracking/bug/char_from_code_non_ascii_unsupported_2026-07-20.md):
+#   - `bytes_to_string(bytes: [u8]) -> text` (the extern declared identically
+#     in ~18 other stdlib files) does not link at all -- there is no
+#     `bytes_to_string` runtime symbol, only `rt_bytes_to_text`. `simple
+#     compile` fails with "Undefined symbol: bytes_to_string".
+#   - `rt_char_from_code(code: i64) -> text` (the canonical scalar ABI
+#     backing `.chr()`/`.to_char()`, src/runtime/simple_core/core_string.spl)
+#     is a real native/C runtime symbol but has no Rust-interpreter handler
+#     in this seed binary -- both `bin/simple run` and `bin/simple test`
+#     fail with "unknown extern function: rt_char_from_code".
+# rt_bytes_to_text is the one that is both a real runtime symbol AND has an
+# interpreter handler, so it is the only one of the three that runs under
+# `bin/simple run` today (verified: correct output for every UTF-8 length
+# class). It does NOT work under the SSpec `bin/simple test` evaluator --
+# calls silently return "" there (rt_core_as_array on the C side gets
+# `!array || !array->data`, i.e. the `[u8]` argument is marshaled
+# differently by that evaluator) rather than erroring -- which is a
+# pre-existing interpreter/test-runner infrastructure gap in this seed
+# binary, not a defect in the encoding logic below (see
+# _utf8_char_from_codepoint_inline, which mirrors utf8_encode_one's already
+# fully covered byte math). The regression spec still asserts the correct
+# end-to-end behavior so this is caught the moment the toolchain gap closes.
+extern fn rt_bytes_to_text(bytes: [u8]) -> text
+
+# UTF-8 encode a single validated codepoint (0..0x10FFFF, non-surrogate) and
+# hand the raw bytes to the runtime byte->text conversion. Mirrors
+# std.common.encoding.utf8.utf8_encode_one's byte math, inlined here rather
+# than imported to avoid pulling utf8.spl's SIMD dependencies into this
+# foundational module.
+fn _utf8_char_from_codepoint_inline(code: i64) -> text:
+    if code < 0x80:
+        val b: [u8] = [code as u8]
+        return rt_bytes_to_text(b)
+    elif code < 0x800:
+        val b: [u8] = [
+            (0xC0 | (code >> 6)) as u8,
+            (0x80 | (code & 0x3F)) as u8
+        ]
+        return rt_bytes_to_text(b)
+    elif code < 0x10000:
+        val b: [u8] = [
+            (0xE0 | (code >> 12)) as u8,
+            (0x80 | ((code >> 6) & 0x3F)) as u8,
+            (0x80 | (code & 0x3F)) as u8
+        ]
+        return rt_bytes_to_text(b)
+    else:
+        val b: [u8] = [
+            (0xF0 | (code >> 18)) as u8,
+            (0x80 | ((code >> 12) & 0x3F)) as u8,
+            (0x80 | ((code >> 6) & 0x3F)) as u8,
+            (0x80 | (code & 0x3F)) as u8
+        ]
+        return rt_bytes_to_text(b)
 
 # Character classification
 fn is_alpha_char(c: text) -> bool:

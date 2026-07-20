@@ -12,7 +12,7 @@ Tests for char_code_inline, char_from_code_inline, and character classification
 functions (is_alpha_char, is_digit_char, is_alnum_char).
 """
 
-use common.string_core.{char_code_inline, char_from_code_inline}
+use common.string_core.{char_code_inline, char_from_code_inline, char_from_code}
 use common.string_core.{is_alpha_char, is_digit_char, is_alnum_char}
 
 
@@ -306,18 +306,38 @@ describe "string_core - char_from_code_inline":
         it "returns z for 122":
             expect(char_from_code_inline(122)).to_equal("z")
 
-    context "unknown codes":
-        it "returns empty for 0":
-            expect(char_from_code_inline(0)).to_equal("")
+    context "codes outside the fast ASCII table (now UTF-8 encoded, not dropped)":
+        """
+        Regression coverage for the char_from_code_inline / char_from_code
+        non-ASCII bug (doc/08_tracking/bug/char_from_code_non_ascii_unsupported_2026-07-20.md).
 
-        it "returns empty for 999":
-            expect(char_from_code_inline(999)).to_equal("")
+        code 0, 1 and 127 are valid single-byte codepoints that the old ASCII
+        lookup table did not cover (it only handled the 5 named controls
+        plus 32..126) and used to fall through to "". They now round-trip
+        through char_code_inline like any other code in its 0..127 range.
+        code 999 is a genuinely non-ASCII codepoint (U+03E7) that used to be
+        dropped to "" and must now produce its real 2-byte UTF-8 character.
+        """
+        it "round-trips code 0 (NUL) instead of dropping it":
+            val c0 = char_from_code_inline(0)
+            expect(c0.len()).to_equal(1)
+            expect(char_code_inline(c0)).to_equal(0)
+
+        it "round-trips code 1 (SOH) instead of dropping it":
+            val c1 = char_from_code_inline(1)
+            expect(c1.len()).to_equal(1)
+            expect(char_code_inline(c1)).to_equal(1)
+
+        it "round-trips code 127 (DEL) instead of dropping it":
+            val c127 = char_from_code_inline(127)
+            expect(c127.len()).to_equal(1)
+            expect(char_code_inline(c127)).to_equal(127)
+
+        it "encodes 999 as its real 2-byte UTF-8 character instead of dropping it":
+            expect(char_from_code_inline(999)).to_equal("ϧ")
 
         it "returns empty for negative code":
             expect(char_from_code_inline(-1)).to_equal("")
-
-        it "returns empty for code 1":
-            expect(char_from_code_inline(1)).to_equal("")
 
 
 # ============================================================================
@@ -416,3 +436,88 @@ describe "string_core - Character Classification":
 
         it "returns false for underscore":
             expect(is_alnum_char("_")).to_equal(false)
+
+
+# ============================================================================
+# Test Group 9: char_from_code_inline non-ASCII regression
+# ============================================================================
+#
+# doc/08_tracking/bug/char_from_code_non_ascii_unsupported_2026-07-20.md
+#
+# chr() / to_char() (which both compile down to a bare char_from_code call
+# resolved to char_from_code_inline) used to be unable to produce ANY
+# non-ASCII character: the old implementation was a plain ASCII table that
+# silently returned "" for every codepoint above U+007F. This block covers
+# one representative codepoint per UTF-8 length class plus the boundary
+# values right at each length transition, and locks in the invalid-input
+# policy: reject surrogates (U+D800..U+DFFF) and anything above U+10FFFF by
+# returning empty text -- the same "can't represent it" fallback the ASCII
+# table already used, applied consistently to the full Unicode range.
+# ============================================================================
+
+describe "string_core - char_from_code_inline non-ASCII (bug fix regression)":
+    context "one representative codepoint per UTF-8 length class":
+        it "encodes Latin-1 U+00E9 (e-acute) as a 2-byte character":
+            val ch = char_from_code_inline(0xE9)
+            expect(ch.len()).to_equal(2)
+            expect(ch).to_equal("é")
+
+        it "encodes CJK U+4E2D as a 3-byte character":
+            val ch = char_from_code_inline(0x4E2D)
+            expect(ch.len()).to_equal(3)
+            expect(ch).to_equal("中")
+
+        it "encodes emoji U+1F600 (outside the BMP) as a 4-byte character":
+            val ch = char_from_code_inline(0x1F600)
+            expect(ch.len()).to_equal(4)
+            expect(ch).to_equal("😀")
+
+    context "UTF-8 length-class boundaries":
+        it "encodes U+007F (last 1-byte codepoint)":
+            val ch = char_from_code_inline(0x7F)
+            expect(ch.len()).to_equal(1)
+            expect(char_code_inline(ch)).to_equal(0x7F)
+
+        it "encodes U+0080 (first 2-byte codepoint)":
+            expect(char_from_code_inline(0x80).len()).to_equal(2)
+
+        it "encodes U+07FF (last 2-byte codepoint)":
+            expect(char_from_code_inline(0x7FF).len()).to_equal(2)
+
+        it "encodes U+0800 (first 3-byte codepoint)":
+            expect(char_from_code_inline(0x800).len()).to_equal(3)
+
+        it "encodes U+FFFF (last 3-byte codepoint, non-surrogate)":
+            expect(char_from_code_inline(0xFFFF).len()).to_equal(3)
+
+        it "encodes U+10000 (first 4-byte codepoint)":
+            expect(char_from_code_inline(0x10000).len()).to_equal(4)
+
+        it "encodes U+10FFFF (last valid Unicode codepoint)":
+            expect(char_from_code_inline(0x10FFFF).len()).to_equal(4)
+
+    context "invalid-input policy: reject surrogates and out-of-range codepoints":
+        it "returns empty text for the first UTF-16 surrogate (U+D800)":
+            expect(char_from_code_inline(0xD800)).to_equal("")
+
+        it "returns empty text for the last UTF-16 surrogate (U+DFFF)":
+            expect(char_from_code_inline(0xDFFF)).to_equal("")
+
+        it "returns empty text for a mid-range surrogate (U+DEAD)":
+            expect(char_from_code_inline(0xDEAD)).to_equal("")
+
+        it "returns empty text for one past the max Unicode codepoint (U+110000)":
+            expect(char_from_code_inline(0x110000)).to_equal("")
+
+        it "returns empty text for a codepoint far out of range":
+            expect(char_from_code_inline(0x100000041)).to_equal("")
+
+        it "returns empty text for a negative codepoint":
+            expect(char_from_code_inline(-1)).to_equal("")
+
+    context "char_from_code (public alias) matches char_from_code_inline":
+        it "encodes non-ASCII the same way as the inline implementation":
+            expect(char_from_code(0x4E2D)).to_equal(char_from_code_inline(0x4E2D))
+
+        it "rejects invalid codepoints the same way as the inline implementation":
+            expect(char_from_code(0xD800)).to_equal("")

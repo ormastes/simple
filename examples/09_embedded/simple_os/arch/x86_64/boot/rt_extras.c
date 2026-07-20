@@ -4182,10 +4182,37 @@ RuntimeValue rt_webgpu_present(void) { return NIL_VALUE; }
 RuntimeValue rt_webgpu_shutdown(void) { return NIL_VALUE; }
 RuntimeValue rt_webgpu_upload_pixels(void) { return NIL_VALUE; }
 RuntimeValue text_dot_from_char_code(RuntimeValue code) {
-    char buf[2];
-    buf[0] = (char)(DECODE_INT(code) & 0x7F);
-    buf[1] = '\0';
-    return rt_string_from_cstr(buf);
+    int64_t cp = DECODE_INT(code);
+    /* Reject invalid codepoints: negative, above U+10FFFF, or a UTF-16
+       surrogate (U+D800..U+DFFF). Same "can't represent it" empty-string
+       policy as std.common.string_core.char_from_code_inline on the
+       pure-Simple side (see
+       doc/08_tracking/bug/char_from_code_non_ascii_unsupported_2026-07-20.md). */
+    if (cp < 0 || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) {
+        return rt_string_new((RuntimeValue)(uintptr_t)0, (RuntimeValue)0);
+    }
+    uint8_t buf[4];
+    uint64_t len;
+    if (cp < 0x80) {
+        buf[0] = (uint8_t)cp;
+        len = 1;
+    } else if (cp < 0x800) {
+        buf[0] = (uint8_t)(0xC0 | (cp >> 6));
+        buf[1] = (uint8_t)(0x80 | (cp & 0x3F));
+        len = 2;
+    } else if (cp < 0x10000) {
+        buf[0] = (uint8_t)(0xE0 | (cp >> 12));
+        buf[1] = (uint8_t)(0x80 | ((cp >> 6) & 0x3F));
+        buf[2] = (uint8_t)(0x80 | (cp & 0x3F));
+        len = 3;
+    } else {
+        buf[0] = (uint8_t)(0xF0 | (cp >> 18));
+        buf[1] = (uint8_t)(0x80 | ((cp >> 12) & 0x3F));
+        buf[2] = (uint8_t)(0x80 | ((cp >> 6) & 0x3F));
+        buf[3] = (uint8_t)(0x80 | (cp & 0x3F));
+        len = 4;
+    }
+    return rt_string_new((RuntimeValue)(uintptr_t)buf, (RuntimeValue)len);
 }
 
 /* End of rt_extras.c */

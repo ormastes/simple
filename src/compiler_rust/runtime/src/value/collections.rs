@@ -1846,8 +1846,23 @@ pub extern "C" fn rt_string_char_code_at(string: RuntimeValue, index: i64) -> i6
 }
 
 /// Compiled symbol for `text.from_char_code(code)`.
+///
+/// NOTE: currently dead code on main -- codegen for `.chr()` / `.to_char()`
+/// routes to the pure-Simple side (see
+/// doc/08_tracking/bug/char_from_code_non_ascii_unsupported_2026-07-20.md),
+/// so this function is not reached by a normal build today. Fixed anyway
+/// for class completeness in case it is ever brought back into service.
 #[no_mangle]
 pub extern "C" fn text_dot_from_char_code(code: i64) -> RuntimeValue {
+    // `code as u32` truncates without this guard: a value like
+    // 0x1_0000_0041 (outside i64's low 32 bits) would silently truncate to
+    // 0x41 ('A') instead of being rejected, because the truncation happens
+    // *before* char::from_u32 ever sees the value. Reject out-of-range
+    // codepoints on the untruncated i64 first; char::from_u32 still handles
+    // the UTF-16 surrogate range (U+D800..U+DFFF) rejection on its own.
+    if !(0..=0x10FFFF).contains(&code) {
+        return RuntimeValue::NIL;
+    }
     let Some(ch) = char::from_u32(code as u32) else {
         return RuntimeValue::NIL;
     };

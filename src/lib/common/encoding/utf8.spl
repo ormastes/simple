@@ -15,6 +15,7 @@ extern fn rt_utf8_count_codepoints(bytes: [i64]) -> i64
 extern fn rt_utf8_validate(bytes: [i64]) -> bool
 extern fn rt_utf8_find_invalid(bytes: [i64]) -> i64
 extern fn rt_text_count_codepoints(s: text) -> i64
+extern fn rt_bytes_to_text(bytes: [u8]) -> text  # raw-byte-copy primitive; see std.common.string_core for why this (not bytes_to_string / rt_char_from_code) was chosen
 
 use std.encoding.simd_text_ffi.{
     rt_text_count_codepoints_cached,
@@ -294,19 +295,28 @@ fn text_from_codepoints(cps: [i64]) -> text:
 
 fn char_from_codepoint(cp: i64) -> text:
     """Convert a Unicode codepoint to a single-character text string.
-    Delegates to runtime .ord() inverse."""
-    # Use \u escape or runtime built-in
+    Invalid codepoints (surrogates, or above U+10FFFF) yield U+FFFD, matching
+    utf8_encode_one's replacement-character policy elsewhere in this file."""
     if cp < 128:
         return char_from_code(cp)
-    # For non-ASCII, encode to UTF-8 bytes and create string
+    # Bug: this used to assemble the codepoint's UTF-8 bytes and route each
+    # individual byte back through char_from_code(byte), but every
+    # continuation/lead byte of a multi-byte UTF-8 sequence is itself >= 0x80
+    # and not valid UTF-8 in isolation, so char_from_code(byte) returned
+    # U+FFFD per byte instead of the intended character (e.g.
+    # char_from_codepoint(0x4E2D) produced three replacement characters
+    # instead of "中"). Fix: hand the whole encoded byte array to
+    # rt_bytes_to_text in one call instead of decoding it one (invalid, in
+    # isolation) byte at a time. utf8_encode_one already replaces invalid
+    # codepoints (surrogates, > U+10FFFF) with the U+FFFD byte sequence, so
+    # the array handed to rt_bytes_to_text is always well-formed UTF-8.
     val bytes = utf8_encode_one(cp)
-    # Runtime will handle byte-to-string via built-in
-    var result = ""
+    var byte_arr: [u8] = []
     var i: i64 = 0
     while i < bytes.len():
-        result = result + char_from_code(bytes[i])
+        byte_arr.push(bytes[i] as u8)
         i = i + 1
-    result
+    rt_bytes_to_text(byte_arr)
 
 fn char_from_code(code: i64) -> text:
     """Convert a byte value (0-255) to a single-byte text character.
