@@ -61,19 +61,68 @@ pegged CPU = spinning over bounded data, not producing output.
 - **Missing externs.** `rt_string_builder_*` resolve fine (a missing
   EXTERN_DISPATCH entry would fail in minutes, not hours).
 
-## Prime remaining hypothesis (untested)
+## Leading suspect: O(N²) parallel-array "maps" in the SSA prep pass
 
-A **function-local** quadratic — an accumulator or re-scan whose N is one
-function's own instruction count — inside `translate_function` or its
-per-instruction helpers. This was explicitly deprioritized during the scan as
-"tolerable", which is wrong: the SMP firmware plausibly contains a very large
-generated/unrolled function (4-hart tables), and a per-instruction re-scan
-quadratic in a single multi-thousand-instruction function reproduces every
-observation here (one thread, superlinear, flat module-level output, no `.ll`).
+**Location (NOT in the backend — this is why a backend-only scan missed it):**
+`src/compiler/60.mir_opt/mir_opt/var_reassign_analysis.spl:32-93`
+(`local_count_index` / `local_count_increment` / `local_alias_root` /
+`local_alias_set`) and `src/compiler/60.mir_opt/mir_opt/var_reassign_ssa.spl:106-126,
+913-940` (`ssa_local_map_get` / `ssa_local_map_set` and the instruction-rewrite
+loop in `ssa_var_transform_blocks`).
 
-**Next step for whoever picks this up:** rank the SMP module's functions by MIR
-instruction count and check whether `translate_function` re-scans any list that
-grows per emitted instruction.
+These implement associative maps as **parallel `[i64]` arrays**: a linear scan
+to look up, then a full array rebuild via `.push()` on every write.
+
+**Why that is quadratic here — the load-bearing seed fact:** `.push()` in this
+interpreter is *unconditionally* `arr.to_vec()`, a full clone
+(`src/compiler_rust/compiler/src/interpreter_method/collections.rs:67-72`).
+There is **no unique-ownership fast path** for method-call rebuilds — unlike
+direct index-assignment `arr[i] = v`, which *does* have an Arc-uniqueness fast
+path (`interpreter/node_exec.rs:1140-1184`, benchmarked near-linear to
+N=160,000). So the idiomatic-looking `arr = arr.push(v)` is O(N) per write.
+
+**Measured** (standalone reproduction of the `local_count_increment` pattern
+under the seed): N=8,000 → 0.44s; N=16,000 → 2.02s (4.6×); N=32,000 → 8.69s
+(4.3×). Clean O(N²).
+
+**Reached from the hang site:** `llvm_bootstrap_ssa_function`
+(`_MirToLlvm/core_codegen.spl:23-61`) calls `ssa_var_transform_blocks(fn_.blocks)`
+per function during emission — matching exactly where all the wall time goes.
+
+### Honest caveat — not yet proven sufficient
+
+A source survey of the SMP-only files found **no giant function** (max 180
+lines; ~12 lines/fn across ~265 added functions), and SMP's function count
+(479) is only ~2.24× the single-hart baseline (~214). A per-function quadratic
+over modestly-sized functions does not obviously extrapolate to the observed
+**24×+** wall-clock ratio. So the original "one huge generated function"
+hypothesis is **disproven**, and this suspect explains the mechanism but not yet
+the full magnitude. Settling it requires a per-function emission trace — note
+that `print`-based probes do NOT work here (see the instrumentation landmine
+below); use file-append.
+
+### Recommended fix
+
+Replace the parallel-array maps in `var_reassign_analysis.spl` /
+`var_reassign_ssa.spl` with genuine `Dict<i64,i64>` (real hash lookup, no
+rebuild-per-write). Routing note: that file lives under `60.mir_opt`, owned
+separately from the backend.
+
+## Secondary (real, smaller): module-lifetime string accumulator
+
+`add_string_global` (`_MirToLlvm/asm_constraints_helpers.spl:319-334`) keeps two
+never-reset module-lifetime accumulators — `self.string_globals.push(decl)` and
+`self.string_global_text = "{prev}\n{decl}"` — both O(S) per call over S total
+string constants; same class as the already-fixed `LlvmIRBuilder.instructions`
+bug. SMP-only files carry ~3× the string-literal density (~118 vs ~55).
+
+The `string_globals` array specifically is **dead**: its only consumer is an
+`elif self.string_globals.len() > 0` branch that can never fire, because
+`string_global_text` is populated in the same call and is tested first in the
+same `elif` chain. Removing the array is a zero-risk constant-factor win.
+Converting `string_global_text` itself to `rt_string_builder_*` is NOT
+drop-in: `test/01_unit/compiler/backend/llvm_pointer_return_null_spec.spl:30-31`
+reads it directly as a `text` field with no finish step.
 
 ## Instrumentation landmine
 
