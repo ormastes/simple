@@ -52,23 +52,28 @@ to `nil` instead of a malformed event.
 
 - Translate a left-button press at (120, 240)
 - UIEvent TouchPress
+- fail test
+- fail test
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Translate a left-button press at (120, 240)")
-val ev = translate_mouse_event(120, 240, 0, "press")
-match ev:
-    UIEvent.TouchPress(x, y) =>
-        expect(x == 120).to_be_true()
-        expect(y == 240).to_be_true()
-    _ =>
-        expect(false).to_be_true()
+val raw = translate_mouse_event(120, 240, 0, "press")
+if val ev = raw.?:
+    match ev:
+        UIEvent.TouchPress(x, y) =>
+            expect(x == 120).to_be_true()
+            expect(y == 240).to_be_true()
+        _ =>
+            fail_test("expected TouchPress(120, 240), got a different UIEvent variant")
+else:
+    fail_test("expected TouchPress(120, 240) but translate_mouse_event returned nil")
 ```
 
 </details>
@@ -77,23 +82,28 @@ match ev:
 
 - Translate a left-button release at (120, 240)
 - UIEvent TouchRelease
+- fail test
+- fail test
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Translate a left-button release at (120, 240)")
-val ev = translate_mouse_event(120, 240, 0, "release")
-match ev:
-    UIEvent.TouchRelease(x, y) =>
-        expect(x == 120).to_be_true()
-        expect(y == 240).to_be_true()
-    _ =>
-        expect(false).to_be_true()
+val raw = translate_mouse_event(120, 240, 0, "release")
+if val ev = raw.?:
+    match ev:
+        UIEvent.TouchRelease(x, y) =>
+            expect(x == 120).to_be_true()
+            expect(y == 240).to_be_true()
+        _ =>
+            fail_test("expected TouchRelease(120, 240), got a different UIEvent variant")
+else:
+    fail_test("expected TouchRelease(120, 240) but translate_mouse_event returned nil")
 ```
 
 </details>
@@ -102,25 +112,30 @@ match ev:
 
 - Translate a middle-button press at (50, 60)
 - UIEvent MouseEvent
+- fail test
+- fail test
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Translate a middle-button press at (50, 60)")
-val ev = translate_mouse_event(50, 60, 1, "press")
-match ev:
-    UIEvent.MouseEvent(x, y, button, kind) =>
-        expect(x == 50.0).to_be_true()
-        expect(y == 60.0).to_be_true()
-        expect(button == "middle").to_be_true()
-        expect(kind == "down").to_be_true()
-    _ =>
-        expect(false).to_be_true()
+val raw = translate_mouse_event(50, 60, 1, "press")
+if val ev = raw.?:
+    match ev:
+        UIEvent.MouseEvent(x, y, button, kind) =>
+            expect(x == 50.0).to_be_true()
+            expect(y == 60.0).to_be_true()
+            expect(button == "middle").to_be_true()
+            expect(kind == "down").to_be_true()
+        _ =>
+            fail_test("expected MouseEvent(button: middle, kind: down), got a different UIEvent variant")
+else:
+    fail_test("expected MouseEvent(button: middle, kind: down) but translate_mouse_event returned nil")
 ```
 
 </details>
@@ -129,23 +144,28 @@ match ev:
 
 - Translate a middle-button release at (50, 60)
 - UIEvent MouseEvent
+- fail test
+- fail test
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Translate a middle-button release at (50, 60)")
-val ev = translate_mouse_event(50, 60, 1, "release")
-match ev:
-    UIEvent.MouseEvent(x, y, button, kind) =>
-        expect(button == "middle").to_be_true()
-        expect(kind == "up").to_be_true()
-    _ =>
-        expect(false).to_be_true()
+val raw = translate_mouse_event(50, 60, 1, "release")
+if val ev = raw.?:
+    match ev:
+        UIEvent.MouseEvent(x, y, button, kind) =>
+            expect(button == "middle").to_be_true()
+            expect(kind == "up").to_be_true()
+        _ =>
+            fail_test("expected MouseEvent(button: middle, kind: up), got a different UIEvent variant")
+else:
+    fail_test("expected MouseEvent(button: middle, kind: up) but translate_mouse_event returned nil")
 ```
 
 </details>
@@ -154,25 +174,30 @@ match ev:
 
 - Translate a right-button press at (10, 20)
 - UIEvent MouseEvent
+- fail test
+- fail test
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Translate a right-button press at (10, 20)")
-val ev = translate_mouse_event(10, 20, 2, "press")
-match ev:
-    UIEvent.MouseEvent(x, y, button, kind) =>
-        expect(x == 10.0).to_be_true()
-        expect(y == 20.0).to_be_true()
-        expect(button == "right").to_be_true()
-        expect(kind == "down").to_be_true()
-    _ =>
-        expect(false).to_be_true()
+val raw = translate_mouse_event(10, 20, 2, "press")
+if val ev = raw.?:
+    match ev:
+        UIEvent.MouseEvent(x, y, button, kind) =>
+            expect(x == 10.0).to_be_true()
+            expect(y == 20.0).to_be_true()
+            expect(button == "right").to_be_true()
+            expect(kind == "down").to_be_true()
+        _ =>
+            fail_test("expected MouseEvent(button: right, kind: down), got a different UIEvent variant")
+else:
+    fail_test("expected MouseEvent(button: right, kind: down) but translate_mouse_event returned nil")
 ```
 
 </details>
@@ -181,23 +206,28 @@ match ev:
 
 - Translate a right-button release at (10, 20)
 - UIEvent MouseEvent
+- fail test
+- fail test
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Translate a right-button release at (10, 20)")
-val ev = translate_mouse_event(10, 20, 2, "release")
-match ev:
-    UIEvent.MouseEvent(x, y, button, kind) =>
-        expect(button == "right").to_be_true()
-        expect(kind == "up").to_be_true()
-    _ =>
-        expect(false).to_be_true()
+val raw = translate_mouse_event(10, 20, 2, "release")
+if val ev = raw.?:
+    match ev:
+        UIEvent.MouseEvent(x, y, button, kind) =>
+            expect(button == "right").to_be_true()
+            expect(kind == "up").to_be_true()
+        _ =>
+            fail_test("expected MouseEvent(button: right, kind: up), got a different UIEvent variant")
+else:
+    fail_test("expected MouseEvent(button: right, kind: up) but translate_mouse_event returned nil")
 ```
 
 </details>
@@ -206,23 +236,28 @@ match ev:
 
 - Translate a move action while the left button is held
 - UIEvent TouchMove
+- fail test
+- fail test
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Translate a move action while the left button is held")
-val ev = translate_mouse_event(5, 6, 0, "move")
-match ev:
-    UIEvent.TouchMove(x, y) =>
-        expect(x == 5).to_be_true()
-        expect(y == 6).to_be_true()
-    _ =>
-        expect(false).to_be_true()
+val raw = translate_mouse_event(5, 6, 0, "move")
+if val ev = raw.?:
+    match ev:
+        UIEvent.TouchMove(x, y) =>
+            expect(x == 5).to_be_true()
+            expect(y == 6).to_be_true()
+        _ =>
+            fail_test("expected TouchMove(5, 6), got a different UIEvent variant")
+else:
+    fail_test("expected TouchMove(5, 6) but translate_mouse_event returned nil")
 ```
 
 </details>
@@ -235,17 +270,13 @@ match ev:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Translate a press with a button code the engine does not recognize")
-val ev = translate_mouse_event(1, 1, 3, "press")
-match ev:
-    nil =>
-        expect(true).to_be_true()
-    _ =>
-        expect(false).to_be_true()
+val raw = translate_mouse_event(1, 1, 3, "press")
+expect(raw == nil).to_be_true()
 ```
 
 </details>
@@ -258,17 +289,13 @@ match ev:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Translate an action string the engine does not recognize")
-val ev = translate_mouse_event(1, 1, 0, "drag")
-match ev:
-    nil =>
-        expect(true).to_be_true()
-    _ =>
-        expect(false).to_be_true()
+val raw = translate_mouse_event(1, 1, 0, "drag")
+expect(raw == nil).to_be_true()
 ```
 
 </details>

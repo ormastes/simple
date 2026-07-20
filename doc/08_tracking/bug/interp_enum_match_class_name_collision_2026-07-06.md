@@ -68,3 +68,61 @@ distinct `Logger` classes exist (`js_error`, `browser_engine/shared/logging`,
 load-order dependent. Workaround used in probes: avoid importing `app.io.mod`
 into graphs that load the JS engine (raw `rt_file_read_text` extern instead).
 Real fix should make interpreter class resolution module-scoped.
+
+## New instance (2026-07-20): `Fat32Core` import-alias vs. real class — `unknown static method new`
+
+Found while repairing `test/01_unit/os/desktop/wm_pointer_decode_spec.spl`
+(SPEC-REPAIR lane). Any spec that transitively compiles the full
+`src/os/desktop/shell.spl` module graph (e.g.
+`test/01_unit/os/desktop/shell_wm_runtime_loop_spec.spl`) fails at semantic
+analysis with:
+
+```
+error: semantic: unknown static method new on class Fat32Core
+error: test-runner: no examples executed
+```
+
+with no file:line attached to the diagnostic. Root cause is the same
+duplicate-symbol-name class as above, via an **import alias** rather than two
+same-named classes:
+
+- `src/os/services/vfs/vfs_boot_init.spl:21` imports
+  `use os.services.fat32.shared_fat32_driver.{SharedFat32Driver as Fat32Core}`
+  and calls `Fat32Core.new(g_adapter)` at lines 97, 379, 1289 — here
+  `Fat32Core` is an **alias** for `SharedFat32Driver`
+  (`src/os/services/fat32/shared_fat32_driver.spl:13`, which does have
+  `static fn new(device: BlockDevice) -> SharedFat32Driver` at line 21).
+- `src/lib/nogc_sync_mut/fs_driver/fat32_stub.spl:14` (and the
+  `nogc_async_mut` sibling) imports the **real, unaliased**
+  `use std.fs_driver.fat32_core.{Fat32Core, OpenFile}` — the actual
+  `Fat32Core` class (`src/lib/nogc_sync_mut/fs_driver/fat32_core.spl:74`,
+  `static fn new(device: BlockDevice) -> Fat32Core` at line 100) — and calls
+  `Fat32Core.new(device)` itself (lines 27, 35, 43, 387, 396).
+
+Both files are reachable in the same compiled program from
+`shell.spl` → `os.services.launcher.launcher` / VFS init → `vfs_boot_init.spl`
++ `fat32_stub.spl`. The global (non-module-scoped) class/static-method
+registry collides the alias binding `Fat32Core = SharedFat32Driver` with the
+real `class Fat32Core`, and the merged entry's static-method table does not
+resolve `new` — even though **both** underlying types genuinely have a
+`static fn new`. This is not a missing method; it's the same
+alias-vs-real-class collision bug as the `Logger` case above, one level
+removed (via `as Fat32Core` rather than two files independently defining
+`class Fat32Core`).
+
+**Verified NOT caused by the SPEC-REPAIR module split**: `shell.spl` was only
+touched to remove two pure decode helpers (`wm_pointer_button_from_code`,
+`wm_pointer_kind_from_code`, previously at shell.spl:224-250) into a new
+standalone `src/os/desktop/wm_pointer_decode.spl`, replacing them with an
+`use os.desktop.wm_pointer_decode.{...}` import at shell.spl:48 — nothing
+touching VFS/Fat32/launcher. `wm_pointer_decode_spec.spl` now imports only
+the new standalone module and is unaffected (11/11 green, no VFS in its
+import graph). `shell_wm_runtime_loop_spec.spl` (and presumably other specs
+that pull in the full `shell.spl` graph) remain blocked by this pre-existing
+collision, independent of and unrelated to the module split.
+
+Suggested fix: same as above (module-scoped class/static-method resolution),
+plus specifically: alias bindings (`use X.{Y as Z}`) must not merge into the
+global symbol table under the alias name `Z` if a real `class Z` exists
+elsewhere in the compiled graph — alias resolution should stay lexically
+scoped to the importing file.
