@@ -216,6 +216,11 @@ class FontRenderBatch:
     quads: [FontRenderQuad]
     atlas_generation: i64
     dirty_rects: [FontRenderQuad]
+    # Overrides face_generation in atlas_owner_identity()/atlas_cache_identity()
+    # when multiple faces (e.g. synthesized weights/styles of one family) share
+    # one atlas and must key ownership by the shared owner's generation instead
+    # of each face's own generation. -1 means "no override; use face_generation".
+    atlas_owner_generation: i64 = -1
     render_config_identity: text = "coverage8;hint=none;subpixel=none"
     transform_identity: text = "uniform-scale;translate-late"
     execution_target: text = "auto"
@@ -228,14 +233,35 @@ class FontRenderBatch:
         self.valid and font_atlas_composite_program_version_valid(self.program_version) and
             self.transform_identity == "uniform-scale;translate-late"
 
+    # NOTE: the body lives in the free function font_render_batch_atlas_owner_identity()
+    # below (same free-function-holds-the-logic pattern as
+    # font_render_config_default_for_size()/FontRenderConfig.default_for_size() above);
+    # this method only delegates so both call forms stay identical. See that free
+    # function's comment for why the logic isn't inlined here as `self.field` reads.
     fn atlas_owner_identity() -> text:
-        val identity = self.font_identity
-        "font-atlas-v1|" + identity.len().to_string() + ":" + identity +
-            "|face-generation=" + self.face_generation.to_string() +
-            "|program=" + self.program_version.to_string() +
-            "|config=" + self.render_config_identity.len().to_string() + ":" + self.render_config_identity +
-            "|transform=" + self.transform_identity.len().to_string() + ":" + self.transform_identity +
-            "|size=" + self.atlas_width.to_string() + "x" + self.atlas_height.to_string()
+        font_render_batch_atlas_owner_identity(self)
 
     fn atlas_cache_identity() -> text:
-        self.atlas_owner_identity() + "|generation=" + self.atlas_generation.to_string()
+        font_render_batch_atlas_cache_identity(self)
+
+# NOTE: font_render_batch_atlas_owner_identity()/font_render_batch_atlas_cache_identity()
+# are FREE-FUNCTION forms of FontRenderBatch.atlas_owner_identity()/atlas_cache_identity()
+# above, for the same reason as font_render_config_identity() (see the NOTE(2026-07-18)
+# above): the entry-closure freestanding native path miscompiles instance method calls
+# (self.method()), passing the callee's own code address as `self` instead of the
+# receiver. To stay native-safe these free functions read `batch.<field>` directly and
+# do NOT call back into the instance methods (self.method()) — the class methods above
+# delegate to these, not the other way around.
+
+fn font_render_batch_atlas_owner_identity(batch: FontRenderBatch) -> text:
+    val identity = batch.font_identity
+    val owner_generation = if batch.atlas_owner_generation != -1: batch.atlas_owner_generation else: batch.face_generation
+    "font-atlas-v1|" + identity.len().to_string() + ":" + identity +
+        "|face-generation=" + owner_generation.to_string() +
+        "|program=" + batch.program_version.to_string() +
+        "|config=" + batch.render_config_identity.len().to_string() + ":" + batch.render_config_identity +
+        "|transform=" + batch.transform_identity.len().to_string() + ":" + batch.transform_identity +
+        "|size=" + batch.atlas_width.to_string() + "x" + batch.atlas_height.to_string()
+
+fn font_render_batch_atlas_cache_identity(batch: FontRenderBatch) -> text:
+    font_render_batch_atlas_owner_identity(batch) + "|generation=" + batch.atlas_generation.to_string()
