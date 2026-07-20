@@ -124,6 +124,78 @@ Converting `string_global_text` itself to `rt_string_builder_*` is NOT
 drop-in: `test/01_unit/compiler/backend/llvm_pointer_return_null_spec.spl:30-31`
 reads it directly as a `text` field with no finish step.
 
+## Candidate fix written but UNVERIFIED (2026-07-20)
+
+A fix for the suspect above exists and is **not landed**, because it could not be
+functionally validated on this machine (see the environment blocker below).
+
+**Change** (3 sites, no signature or call-site changes):
+`var_reassign_analysis.spl` `local_count_increment` + `local_alias_set`, and
+`var_reassign_ssa.spl` `ssa_local_map_set` each replaced a *rebuild loop*
+
+```simple
+var updated: [i64] = []
+while i < values.len():
+    updated = updated.push(if i == idx: new_value else: values[i])
+```
+
+with an index assignment:
+
+```simple
+var updated = values
+updated[idx] = new_value
+```
+
+This matters more than it looks: the rebuild loop calls `.push()` N times and
+each push clones the whole array, so **one update was O(N²) by itself** — and it
+runs per instruction. Index assignment has the uniqueness fast path.
+
+**Validation status — read before trusting it:**
+- Both related specs match pristine-origin baselines EXACTLY:
+  `var_reassign_analysis_spec.spl` 18 examples/4 failures, and
+  `runtime_array_assignment_ssa_spec.spl` 7 examples/1 failure, **identical with
+  and without the change** (baselines captured by stashing the fix).
+- Those baseline failures are **pre-existing on origin**, not caused by this.
+- **NOT verified:** that it cures the SMP hang, and that it does not alter
+  codegen. Spec parity against a suite with pre-existing failures is weak
+  evidence for an SSA transform, and a subtly wrong SSA rewrite miscompiles
+  silently. **Do not land without a functional gate.**
+
+Fix text preserved at `scratchpad/fix_emit/MIROPT/` for whoever resumes.
+
+## Environment blocker: builds cannot complete on this host
+
+Eleven build attempts; **not one failed for a reason connected to the fix**:
+
+| cause | attempts |
+|---|---|
+| `unknown extern function: rt_heap_registry_count` (see the phase-profile bug doc) | 3 |
+| **killed by `earlyoom` (SIGTERM, rc=143)** | 4 |
+| emission hang (the original defect) | 3 |
+| link failures (ABI/libgcc, since fixed) | 1 |
+
+The OOM kills are host contention, not this workload: `earlyoom` logged
+4 kills in 10 minutes with **swap fully exhausted (0 of 8191 MiB)**, available
+memory swinging 47 GB → 12 GB in ~13 minutes, driven by another session's
+repeated `./bin/simple replay` jobs (3 concurrent, ~1.4 GB each, respawning).
+`earlyoom` selected this build at badness ~973 (VmRSS ~1.4 GB). Even a
+~15-minute single-hart build was killed. Disk was also at 99%.
+
+**Resume recipe** (needs a quiet host, or `oom_score_adj` arranged with whoever
+owns the competing jobs):
+
+```sh
+# in a worktree at a seed-compatible base, with the fix from scratchpad/fix_emit/MIROPT/
+NVME_RV32_SIMPLE_BIN=src/compiler_rust/target/bootstrap/simple NVME_RV32_SMP=1 \
+  NVME_RV32_BUILD_TIMEOUT_SECS=10800 \
+  sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs
+```
+
+Note the build scripts force `SIMPLE_COMPILER_PHASE_PROFILE=1`, so on pristine
+sources this fails immediately until the seed is rebuilt — see
+`phase_profile_flag_unusable_seed_missing_rt_heap_registry_count_2026-07-20.md`.
+Validate with the single-hart gate FIRST (cheaper, same SSA path), then SMP.
+
 ## Instrumentation landmine
 
 Do **not** diagnose this with `print`: under `native-build` stdout is redirected
