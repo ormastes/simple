@@ -165,3 +165,21 @@ bin/release/x86_64-unknown-linux-gnu/simple run  <repro (1)/(2)/(3) above>
 ```
 All reproduce the described "unknown static method" errors / silent
 first-wins overload behavior identically.
+
+## Update 2026-07-20 — empirical: coercion fix built + validated, 0/19 under `test`
+
+Implemented the numeric-widening fix in `constructor_overload_score` /
+`constructor_value_matches_type` (int/float widen to a float param; strict match
+keeps a +50 tie-break so exact overloads still win), rebuilt the seed, and ran all
+19 scilib specs against it: **0/19 turned green.** Under `bin/simple test` (SSpec)
+the error is `unknown static method new on class Float32` — which fires BEFORE any
+overload scoring, i.e. the static method is never even resolved on the imported
+numeric-tower class. So this is primarily a **static-method RESOLUTION gap on
+imported classes under the SSpec test evaluator** (same family as
+`enum_impl_static_fn_method_call_path_skips_impl_methods` and
+`generic_class_static_method_unresolved_under_test_2026-07-20.md`), NOT the
+overload-coercion gap. The coercion fix is correct for the `run` path (where the
+library's own `Float32.new(2.0)` fails) but does not address the test-path
+failures. Real fix = resolve imported class static methods under SSpec, THEN the
+coercion gap becomes reachable. Source fix was NOT landed (fixes nothing measurable
+on the test path; regression-risky on a hot path for zero suite benefit).
