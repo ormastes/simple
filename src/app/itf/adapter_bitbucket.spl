@@ -13,9 +13,20 @@
 #   DELETE /repositories/{ws}/{repo}/pullrequests/{id}/approve
 #   POST   /repositories/{ws}/{repo}/pullrequests/{id}/merge
 #   GET    /repositories/{ws}/{repo}/pullrequests/{id}/statuses
+#   GET    /repositories/{ws}                              (bb_list_repos)
+#   GET    /repositories/{ws}/{repo}                        (bb_repo_view)
+#   GET    /repositories/{ws}/{repo}/pullrequests?state=X   (bb_list_prs)
 #
 # All public endpoint functions return (success: bool, parsed: T, raw_json: text)
 # matching the jira_view_issue / jira_search shape.
+#
+# Pagination (bb_list_repos / bb_list_prs): Bitbucket paginates collection
+# endpoints via a `next` URL embedded in the response body (`{"values": [...],
+# "next": "https://...?page=2"}`). These adapter fns fetch and parse the FIRST
+# PAGE ONLY — `next` is not followed. This mirrors the honest-gap style of the
+# http_client TODO below rather than silently truncating results: callers that
+# need more than one page currently have no adapter-level way to get there
+# (tracked gap, same class as the real-network-send TODO).
 
 use std.json.{json_parse, json_object_get, json_array_get, json_array_length, json_serialize, json_get_type}
 use std.nogc_sync_mut.http_client.{http_get, http_post, http_delete, create_headers, add_header, response_get_status_code, response_get_body, response_get_header}
@@ -45,6 +56,19 @@ class BbPr:
     author: text
     web_url: text
     merge_commit: text
+    updated_on: text
+
+
+class BbRepo:
+    """A Bitbucket Cloud repository (from GET /2.0/repositories/{ws}[/{repo}])."""
+    slug: text
+    name: text
+    full_name: text
+    description: text
+    is_private: bool
+    updated_on: text
+    main_branch: text
+    web_url: text
 
 
 class BbComment:
@@ -116,6 +140,52 @@ fn bb_pr_url(ws: text, repo: text, pr_id: i64) -> text:
 fn bb_pr_sub_url(ws: text, repo: text, pr_id: i64, sub: text) -> text:
     """Build URL for a sub-resource of a PR (comments, approve, merge, statuses)."""
     bb_pr_url(ws, repo, pr_id) + "/" + sub
+
+
+fn bb_repo_collection_url(ws: text) -> text:
+    """Build URL for the repository collection of a workspace."""
+    BB_API_BASE + "/repositories/" + ws
+
+
+fn bb_repo_url(ws: text, repo: text) -> text:
+    """Build URL for an individual repository resource."""
+    bb_repo_collection_url(ws) + "/" + repo
+
+
+fn _bb_clamp_pagelen(limit: i64) -> i64:
+    """Clamp a requested page size to Bitbucket's [1, 100] pagelen range.
+
+    limit <= 0 falls back to a sane default (30, matching common CLI list
+    defaults elsewhere in this codebase).
+    """
+    if limit <= 0:
+        return 30
+    if limit > 100:
+        return 100
+    limit
+
+
+fn bb_repo_list_url(ws: text, limit: i64) -> text:
+    """Build URL for GET /repositories/{ws} with a pagelen query param.
+
+    First page only — see the pagination note at the top of this file.
+    """
+    bb_repo_collection_url(ws) + "?pagelen=" + _bb_clamp_pagelen(limit).to_string()
+
+
+fn bb_pr_list_url(ws: text, repo: text, state: text, limit: i64) -> text:
+    """Build URL for GET .../pullrequests with optional state filter + pagelen.
+
+    state: "OPEN" | "MERGED" | "DECLINED" | "SUPERSEDED" | "all" (case
+    insensitive; "" or "all" omits the state filter entirely, returning PRs
+    in every state). First page only — see the pagination note at the top of
+    this file.
+    """
+    val base = bb_pr_collection_url(ws, repo)
+    val n = _bb_clamp_pagelen(limit).to_string()
+    if state == "" or state.lower() == "all":
+        return base + "?pagelen=" + n
+    base + "?state=" + state.upper() + "&pagelen=" + n
 
 
 # ============================================================================
@@ -319,9 +389,19 @@ fn _bb_int(obj: any, key: text) -> i64:
     result
 
 
-fn _bb_parse_pr(obj: any) -> BbPr:
+fn _bb_bool(obj: any, key: text) -> bool:
+    """Safely extract a boolean field from JSON object. Missing/non-bool -> false."""
+    if obj == nil:
+        return false
+    val value = json_object_get(obj, key)
+    if value == nil:
+        return false
+    json_serialize(value) == "true"
+
+
+fn bb_parse_pr(obj: any) -> BbPr:
     """Parse a Bitbucket PR JSON object."""
-    val empty = BbPr(id: 0, title: "", state: "", source_branch: "", dest_branch: "", author: "", web_url: "", merge_commit: "")
+    val empty = BbPr(id: 0, title: "", state: "", source_branch: "", dest_branch: "", author: "", web_url: "", merge_commit: "", updated_on: "")
     if obj == nil:
         return empty
     val id = _bb_int(obj, "id")
@@ -353,7 +433,32 @@ fn _bb_parse_pr(obj: any) -> BbPr:
     val mc = json_object_get(obj, "merge_commit")
     if mc != nil:
         merge_commit = _bb_str(mc, "hash")
-    BbPr(id: id, title: title, state: state, source_branch: source_branch, dest_branch: dest_branch, author: author, web_url: web_url, merge_commit: merge_commit)
+    val updated_on = _bb_str(obj, "updated_on")
+    BbPr(id: id, title: title, state: state, source_branch: source_branch, dest_branch: dest_branch, author: author, web_url: web_url, merge_commit: merge_commit, updated_on: updated_on)
+
+
+fn bb_parse_repo(obj: any) -> BbRepo:
+    """Parse a Bitbucket repository JSON object (list or view response)."""
+    val empty = BbRepo(slug: "", name: "", full_name: "", description: "", is_private: false, updated_on: "", main_branch: "", web_url: "")
+    if obj == nil:
+        return empty
+    val slug = _bb_str(obj, "slug")
+    val name = _bb_str(obj, "name")
+    val full_name = _bb_str(obj, "full_name")
+    val description = _bb_str(obj, "description")
+    val is_private = _bb_bool(obj, "is_private")
+    val updated_on = _bb_str(obj, "updated_on")
+    var main_branch = ""
+    val mb = json_object_get(obj, "mainbranch")
+    if mb != nil:
+        main_branch = _bb_str(mb, "name")
+    var web_url = ""
+    val links = json_object_get(obj, "links")
+    if links != nil:
+        val html = json_object_get(links, "html")
+        if html != nil:
+            web_url = _bb_str(html, "href")
+    BbRepo(slug: slug, name: name, full_name: full_name, description: description, is_private: is_private, updated_on: updated_on, main_branch: main_branch, web_url: web_url)
 
 
 fn _bb_parse_comment(obj: any) -> BbComment:
@@ -465,7 +570,7 @@ fn bb_eval_ready_to_merge(pr_parsed: any, statuses_parsed: any) -> (bool, text):
 
 fn bb_create_pr(client: BbClient, ws: text, repo: text, title: text, source_branch: text, dest_branch: text, reviewers: [text]) -> (bool, BbPr, text):
     """POST /repositories/{ws}/{repo}/pullrequests."""
-    val empty = BbPr(id: 0, title: "", state: "", source_branch: "", dest_branch: "", author: "", web_url: "", merge_commit: "")
+    val empty = BbPr(id: 0, title: "", state: "", source_branch: "", dest_branch: "", author: "", web_url: "", merge_commit: "", updated_on: "")
     if not client.is_configured():
         return (false, empty, "blocked-auth: no Bitbucket token configured")
     val url = bb_pr_collection_url(ws, repo)
@@ -477,12 +582,12 @@ fn bb_create_pr(client: BbClient, ws: text, repo: text, title: text, source_bran
     val parsed = json_parse(body)
     if parsed == nil:
         return (false, empty, "invalid JSON response")
-    (true, _bb_parse_pr(parsed), body)
+    (true, bb_parse_pr(parsed), body)
 
 
 fn bb_get_pr(client: BbClient, ws: text, repo: text, pr_id: i64) -> (bool, BbPr, text):
     """GET /repositories/{ws}/{repo}/pullrequests/{id}."""
-    val empty = BbPr(id: 0, title: "", state: "", source_branch: "", dest_branch: "", author: "", web_url: "", merge_commit: "")
+    val empty = BbPr(id: 0, title: "", state: "", source_branch: "", dest_branch: "", author: "", web_url: "", merge_commit: "", updated_on: "")
     if not client.is_configured():
         return (false, empty, "blocked-auth: no Bitbucket token configured")
     val url = bb_pr_url(ws, repo, pr_id)
@@ -493,7 +598,7 @@ fn bb_get_pr(client: BbClient, ws: text, repo: text, pr_id: i64) -> (bool, BbPr,
     val parsed = json_parse(body)
     if parsed == nil:
         return (false, empty, "invalid JSON response")
-    (true, _bb_parse_pr(parsed), body)
+    (true, bb_parse_pr(parsed), body)
 
 
 fn bb_list_pr_comments(client: BbClient, ws: text, repo: text, pr_id: i64) -> (bool, [BbComment], text):
@@ -565,7 +670,7 @@ fn bb_merge_pr(client: BbClient, ws: text, repo: text, pr_id: i64, strategy: tex
 
     strategy must be 'merge_commit' | 'squash' | 'fast_forward'.
     """
-    val empty = BbPr(id: 0, title: "", state: "", source_branch: "", dest_branch: "", author: "", web_url: "", merge_commit: "")
+    val empty = BbPr(id: 0, title: "", state: "", source_branch: "", dest_branch: "", author: "", web_url: "", merge_commit: "", updated_on: "")
     if not client.is_configured():
         return (false, empty, "blocked-auth: no Bitbucket token configured")
     if strategy != "merge_commit" and strategy != "squash" and strategy != "fast_forward":
@@ -579,7 +684,7 @@ fn bb_merge_pr(client: BbClient, ws: text, repo: text, pr_id: i64, strategy: tex
     val parsed = json_parse(body)
     if parsed == nil:
         return (false, empty, "invalid JSON response")
-    (true, _bb_parse_pr(parsed), body)
+    (true, bb_parse_pr(parsed), body)
 
 
 fn bb_get_pr_statuses(client: BbClient, ws: text, repo: text, pr_id: i64) -> (bool, [BbStatus], text):
@@ -623,3 +728,66 @@ fn bb_check_ready_to_merge(client: BbClient, ws: text, repo: text, pr_id: i64) -
     if st_parsed == nil:
         return (false, "invalid statuses JSON")
     bb_eval_ready_to_merge(pr_parsed, st_parsed)
+
+
+fn bb_list_repos(client: BbClient, ws: text, limit: i64) -> (bool, [BbRepo], text):
+    """GET /repositories/{ws} — list repositories in a workspace.
+
+    First page only (up to `limit`, clamped to Bitbucket's 100 max pagelen);
+    see the pagination note at the top of this file for the `next`-link gap.
+    """
+    if not client.is_configured():
+        return (false, [], "blocked-auth: no Bitbucket token configured")
+    val url = bb_repo_list_url(ws, limit)
+    val (status, body, _retry) = _bb_get(client, url)
+    if status != 200:
+        val err = bb_map_http_error(status, body, BB_OP_GENERAL)
+        return (false, [], err.display())
+    val parsed = json_parse(body)
+    if parsed == nil:
+        return (false, [], "invalid JSON response")
+    val raw = _bb_parse_values_array(parsed)
+    var out: [BbRepo] = []
+    for v in raw:
+        out = out + [bb_parse_repo(v)]
+    (true, out, body)
+
+
+fn bb_repo_view(client: BbClient, ws: text, repo: text) -> (bool, BbRepo, text):
+    """GET /repositories/{ws}/{repo} — view a single repository."""
+    val empty = BbRepo(slug: "", name: "", full_name: "", description: "", is_private: false, updated_on: "", main_branch: "", web_url: "")
+    if not client.is_configured():
+        return (false, empty, "blocked-auth: no Bitbucket token configured")
+    val url = bb_repo_url(ws, repo)
+    val (status, body, _retry) = _bb_get(client, url)
+    if status != 200:
+        val err = bb_map_http_error(status, body, BB_OP_GENERAL)
+        return (false, empty, err.display())
+    val parsed = json_parse(body)
+    if parsed == nil:
+        return (false, empty, "invalid JSON response")
+    (true, bb_parse_repo(parsed), body)
+
+
+fn bb_list_prs(client: BbClient, ws: text, repo: text, state: text, limit: i64) -> (bool, [BbPr], text):
+    """GET /repositories/{ws}/{repo}/pullrequests?state=X — list pull requests.
+
+    state: "OPEN" | "MERGED" | "DECLINED" | "SUPERSEDED" | "all". First page
+    only (up to `limit`, clamped to Bitbucket's 100 max pagelen); see the
+    pagination note at the top of this file for the `next`-link gap.
+    """
+    if not client.is_configured():
+        return (false, [], "blocked-auth: no Bitbucket token configured")
+    val url = bb_pr_list_url(ws, repo, state, limit)
+    val (status, body, _retry) = _bb_get(client, url)
+    if status != 200:
+        val err = bb_map_http_error(status, body, BB_OP_GENERAL)
+        return (false, [], err.display())
+    val parsed = json_parse(body)
+    if parsed == nil:
+        return (false, [], "invalid JSON response")
+    val raw = _bb_parse_values_array(parsed)
+    var out: [BbPr] = []
+    for v in raw:
+        out = out + [bb_parse_pr(v)]
+    (true, out, body)

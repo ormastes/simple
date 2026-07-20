@@ -17,6 +17,10 @@ use app.itf.adapter_bitbucket.{
     bb_pr_collection_url,
     bb_pr_url,
     bb_pr_sub_url,
+    bb_repo_collection_url,
+    bb_repo_url,
+    bb_repo_list_url,
+    bb_pr_list_url,
     bb_build_create_pr_body,
     bb_build_comment_body,
     bb_build_merge_body,
@@ -24,10 +28,16 @@ use app.itf.adapter_bitbucket.{
     bb_should_retry,
     bb_eval_ready_to_merge,
     bb_auth_header,
+    bb_parse_pr,
+    bb_parse_repo,
+    BbClient,
+    bb_list_repos,
+    bb_repo_view,
+    bb_list_prs,
     BB_OP_GENERAL,
     BB_OP_MERGE
 }
-use std.common.json.{json_parse}
+use std.common.json.{json_parse, json_object, json_string, json_boolean}
 
 
 # ============================================================================
@@ -58,6 +68,57 @@ describe "bb URL builders":
     it "PR statuses sub URL":
         val u = bb_pr_sub_url("acme", "widgets", 7, "statuses")
         expect(u).to_end_with("/pullrequests/7/statuses")
+
+    it "repo collection URL":
+        val u = bb_repo_collection_url("acme")
+        expect(u).to_equal("https://api.bitbucket.org/2.0/repositories/acme")
+
+    it "repo resource URL appends slug":
+        val u = bb_repo_url("acme", "widgets")
+        expect(u).to_equal("https://api.bitbucket.org/2.0/repositories/acme/widgets")
+
+
+# ============================================================================
+# List URL builders (pagination: first page + --limit, no `next` follow)
+# ============================================================================
+
+describe "bb_repo_list_url":
+    it "defaults to pagelen=30 when limit <= 0":
+        val u = bb_repo_list_url("acme", 0)
+        expect(u).to_equal("https://api.bitbucket.org/2.0/repositories/acme?pagelen=30")
+
+    it "honors a positive --limit":
+        val u = bb_repo_list_url("acme", 10)
+        expect(u).to_contain("?pagelen=10")
+
+    it "clamps limit above 100 to the Bitbucket max":
+        val u = bb_repo_list_url("acme", 500)
+        expect(u).to_contain("?pagelen=100")
+
+
+describe "bb_pr_list_url":
+    it "OPEN state adds an uppercased state filter + pagelen":
+        val u = bb_pr_list_url("acme", "widgets", "OPEN", 20)
+        expect(u).to_contain("/pullrequests?state=OPEN&pagelen=20")
+
+    it "lowercase state input is normalized to uppercase":
+        val u = bb_pr_list_url("acme", "widgets", "merged", 20)
+        expect(u).to_contain("state=MERGED")
+
+    it "\"all\" omits the state filter entirely":
+        val u = bb_pr_list_url("acme", "widgets", "all", 20)
+        val has_state = u.contains("state=")
+        expect(has_state).to_equal(false)
+        expect(u).to_contain("?pagelen=20")
+
+    it "empty state also omits the filter":
+        val u = bb_pr_list_url("acme", "widgets", "", 20)
+        val has_state = u.contains("state=")
+        expect(has_state).to_equal(false)
+
+    it "limit <= 0 defaults to pagelen=30":
+        val u = bb_pr_list_url("acme", "widgets", "OPEN", 0)
+        expect(u).to_contain("pagelen=30")
 
 
 # ============================================================================
@@ -294,3 +355,121 @@ describe "bb_eval_ready_to_merge":
         val (ready, reason) = bb_eval_ready_to_merge(pr, st)
         expect(ready).to_equal(false)
         expect(reason).to_contain("no participants")
+
+
+# ============================================================================
+# Response parsing: bb_parse_repo (canned JSON fixtures, no network)
+# ============================================================================
+
+val FIXTURE_REPO_PRIVATE_MINIMAL = "{\"slug\": \"secret\", \"name\": \"Secret\", \"is_private\": true}"
+
+
+fn _mk_repo_json_with_nested() -> any:
+    """Build a full repo JSON node with nested mainbranch/links objects via
+    the json_object/json_string builders rather than json_parse(<string>).
+
+    NOTE: json_parse's recursive-descent parser cannot currently parse a JSON
+    object literal nested directly as another object's field value (verified:
+    `json_parse("{\"a\": {\"b\": 1}}")` -> nil on this interpreter, while the
+    same nesting through an intermediate array -- `{"a": [{"b": 1}]}` --
+    parses fine). That's a pre-existing bug in src/lib/common/json (or its
+    execution on the bootstrap seed), independent of this adapter; using the
+    builder API here tests bb_parse_repo's own field-extraction logic without
+    tripping over it. Filed for follow-up; not fixed here (out of scope for
+    the bitbucket adapter).
+    """
+    var mainbranch: {text: any} = {}
+    mainbranch["name"] = json_string("main")
+    var html: {text: any} = {}
+    html["href"] = json_string("https://bitbucket.org/acme/widgets")
+    var links: {text: any} = {}
+    links["html"] = json_object(html)
+    var repo_obj: {text: any} = {}
+    repo_obj["slug"] = json_string("widgets")
+    repo_obj["name"] = json_string("Widgets")
+    repo_obj["full_name"] = json_string("acme/widgets")
+    repo_obj["description"] = json_string("Widget factory")
+    repo_obj["is_private"] = json_boolean(false)
+    repo_obj["updated_on"] = json_string("2026-07-01T12:00:00.000000+00:00")
+    repo_obj["mainbranch"] = json_object(mainbranch)
+    repo_obj["links"] = json_object(links)
+    json_object(repo_obj)
+
+
+describe "bb_parse_repo":
+    it "parses a full repo object":
+        val repo = bb_parse_repo(_mk_repo_json_with_nested())
+        expect(repo.slug).to_equal("widgets")
+        expect(repo.name).to_equal("Widgets")
+        expect(repo.full_name).to_equal("acme/widgets")
+        expect(repo.description).to_equal("Widget factory")
+        expect(repo.is_private).to_equal(false)
+        expect(repo.updated_on).to_equal("2026-07-01T12:00:00.000000+00:00")
+        expect(repo.main_branch).to_equal("main")
+        expect(repo.web_url).to_equal("https://bitbucket.org/acme/widgets")
+
+    it "is_private true is preserved":
+        val repo = bb_parse_repo(json_parse(FIXTURE_REPO_PRIVATE_MINIMAL))
+        expect(repo.is_private).to_equal(true)
+
+    it "missing optional fields (description/mainbranch/links) default to empty":
+        val repo = bb_parse_repo(json_parse(FIXTURE_REPO_PRIVATE_MINIMAL))
+        expect(repo.description).to_equal("")
+        expect(repo.main_branch).to_equal("")
+        expect(repo.web_url).to_equal("")
+
+    it "nil input returns an empty repo, not a crash":
+        val repo = bb_parse_repo(nil)
+        expect(repo.slug).to_equal("")
+        expect(repo.is_private).to_equal(false)
+
+
+# ============================================================================
+# Response parsing: bb_parse_pr now carries updated_on (for `pr list`'s
+# UPDATED column)
+# ============================================================================
+
+val FIXTURE_PR_WITH_UPDATED = "{\"id\": 5, \"title\": \"Add foo\", \"state\": \"OPEN\", \"updated_on\": \"2026-07-10T09:30:00.000000+00:00\"}"
+
+
+describe "bb_parse_pr updated_on":
+    it "captures updated_on from the PR JSON":
+        val pr = bb_parse_pr(json_parse(FIXTURE_PR_WITH_UPDATED))
+        expect(pr.updated_on).to_equal("2026-07-10T09:30:00.000000+00:00")
+
+    it "missing updated_on defaults to empty":
+        val pr = bb_parse_pr(json_parse("{\"id\": 1, \"title\": \"T\", \"state\": \"OPEN\"}"))
+        expect(pr.updated_on).to_equal("")
+
+
+# ============================================================================
+# bb_list_repos / bb_repo_view / bb_list_prs — blocked-auth guard (no network)
+# ============================================================================
+#
+# These public fns check client.is_configured() BEFORE making any HTTP call
+# and return early on failure. That guard path is pure and safe to test
+# directly; the actual-request path is intentionally NOT exercised here
+# (same restraint as the rest of this file — see file header).
+
+fn _mk_unconfigured_client() -> BbClient:
+    BbClient(token: "", base_url: "https://api.bitbucket.org/2.0")
+
+
+describe "bb_list_repos / bb_repo_view / bb_list_prs auth guard":
+    it "bb_list_repos fails closed with no token configured":
+        val (ok, repos, msg) = bb_list_repos(_mk_unconfigured_client(), "acme", 30)
+        expect(ok).to_equal(false)
+        expect(repos.len()).to_equal(0)
+        expect(msg).to_contain("blocked-auth")
+
+    it "bb_repo_view fails closed with no token configured":
+        val (ok, repo, msg) = bb_repo_view(_mk_unconfigured_client(), "acme", "widgets")
+        expect(ok).to_equal(false)
+        expect(repo.slug).to_equal("")
+        expect(msg).to_contain("blocked-auth")
+
+    it "bb_list_prs fails closed with no token configured":
+        val (ok, prs, msg) = bb_list_prs(_mk_unconfigured_client(), "acme", "widgets", "OPEN", 30)
+        expect(ok).to_equal(false)
+        expect(prs.len()).to_equal(0)
+        expect(msg).to_contain("blocked-auth")

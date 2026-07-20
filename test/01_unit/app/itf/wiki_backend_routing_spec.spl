@@ -4,11 +4,19 @@
 # doc/05_design/app/devhub/devhub_overview.md; command table in
 # doc/05_design/app/devhub/facade_tasks_git_wiki.md §4).
 #
-# Confluence stays the untouched default backend — proven here by asserting
-# the no-flag and explicit `--backend confluence` paths produce IDENTICAL
-# exit codes (not a hardcoded exit code, since whether Confluence happens
-# to be configured on the machine running this spec is environment-
-# dependent — see _require_confluence_auth in cmd_wiki.spl).
+# Confluence stays the untouched default backend when nothing configures a
+# different one — proven here by asserting the no-flag and explicit
+# `--backend confluence` paths produce IDENTICAL exit codes (not a
+# hardcoded exit code, since whether Confluence happens to be configured
+# on the machine running this spec is environment-dependent — see
+# _require_confluence_auth in cmd_wiki.spl). Gap G6 is now closed for wiki
+# (ItfConfig.wiki_default_backend, D1 precedence step 2) — a real
+# `wiki: default_backend: github` in the machine's OWN ~/.config/itf would
+# make the two paths diverge (no-flag routes github, explicit-confluence
+# stays confluence), so this first test pins HOME at FIXTURE_HOME with no
+# wiki config (_clear_wiki_config()) to keep the equality deterministic;
+# the config-driven divergence itself is proven separately below in
+# "devhub wiki wiki.default_backend config".
 #
 # GitHub routing is exercised end-to-end against a local fixture
 # `.wiki.git` bare repo (same local-only style as wiki_git_spec.spl),
@@ -22,10 +30,15 @@
 
 use std.spec
 use std.nogc_sync_mut.io.process_ops.{process_run}
-use app.itf.cmd_wiki.{handle_wiki}
+use app.itf.cmd_wiki.{handle_wiki, _wiki_edit_write_temp, _wiki_edit_read_temp}
 
 extern fn rt_env_get(key: text) -> text?
 extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+
+val FIXTURE_HOME = "build/test-itf-wiki-routing-fixture/home"
 
 
 fn _fixture_bare_wiki_repo() -> text:
@@ -68,13 +81,65 @@ fn _run_wiki_github(bare_repo: text, cache_root: text, args: [text]) -> i64:
     code
 
 
+# ----------------------------------------------------------------------------
+# wiki.default_backend config fixture (D1 precedence step 2, gap G6) — a
+# fixture ~/.config/itf/config.sdn under a temp HOME, so load_config() sees
+# the fixture's `wiki: default_backend:` instead of the real machine config.
+# No confluence/jira credentials are ever written here, so
+# _require_confluence_auth() deterministically fails (exit 4) whenever the
+# confluence backend is actually reached — used below to prove which
+# backend a no-flag call actually routed to, without depending on whether
+# Confluence happens to be configured on the machine running this spec.
+# ----------------------------------------------------------------------------
+
+fn _write_wiki_config(default_backend: text):
+    """Write FIXTURE_HOME/.config/itf/config.sdn with (or, for "", without)
+    a `wiki: default_backend:` value."""
+    val dir = "{FIXTURE_HOME}/.config/itf"
+    val _mk = rt_dir_create_all(dir)
+    val config_body = if default_backend != "": "wiki:\n    default_backend: {default_backend}\n" else: ""
+    val _cfg = rt_file_write_text("{dir}/config.sdn", config_body)
+    rt_file_delete("{dir}/auth.sdn")
+
+
+fn _clear_wiki_config():
+    val dir = "{FIXTURE_HOME}/.config/itf"
+    val _a = rt_file_delete("{dir}/config.sdn")
+    rt_file_delete("{dir}/auth.sdn")
+
+
+fn _run_wiki_with_home(args: [text]) -> i64:
+    """Run handle_wiki(args) with HOME pointed at FIXTURE_HOME (so
+    load_config() reads the fixture config.sdn instead of the real
+    ~/.config/itf). Always restores HOME afterward."""
+    val original_home = rt_env_get("HOME") ?? ""
+    val _set_home = rt_env_set("HOME", FIXTURE_HOME)
+    val code = handle_wiki(args)
+    val _restore_home = rt_env_set("HOME", original_home)
+    code
+
+
+fn _run_wiki_github_with_home(bare_repo: text, cache_root: text, args: [text]) -> i64:
+    """_run_wiki_github, plus HOME pointed at FIXTURE_HOME for the config-
+    default-backend end-to-end case below."""
+    val original_home = rt_env_get("HOME") ?? ""
+    val _set_home = rt_env_set("HOME", FIXTURE_HOME)
+    val code = _run_wiki_github(bare_repo, cache_root, args)
+    val _restore_home = rt_env_set("HOME", original_home)
+    code
+
+
 describe "devhub wiki --backend routing":
 
     context "confluence (default, untouched)":
 
         it "routes the default (no --backend) identically to explicit --backend confluence":
-            val code_default = handle_wiki(["list"])
-            val code_explicit = handle_wiki(["list", "--backend", "confluence"])
+            # Pinned to FIXTURE_HOME with no wiki config so this holds
+            # deterministically even on a machine whose real ~/.config/itf
+            # sets `wiki: default_backend: github` (see header comment).
+            _clear_wiki_config()
+            val code_default = _run_wiki_with_home(["list"])
+            val code_explicit = _run_wiki_with_home(["list", "--backend", "confluence"])
             expect(code_default).to_equal(code_explicit)
 
     context "unknown --backend":
@@ -143,3 +208,72 @@ describe "devhub wiki --backend routing":
             val cache_root_b = _fresh_temp_dir()
             val verify_code = _run_wiki_github(bare_repo, cache_root_b, ["view", "NeverPushed", "--backend", "github", "--repo", "acme/demo"])
             expect(verify_code).to_equal(1)
+
+
+describe "devhub wiki wiki.default_backend config (D1 precedence step 2, gap G6)":
+
+    context "no wiki config at all":
+
+        it "falls back to confluence — pre-existing default, verbatim (exit 4: no confluence auth in the fixture HOME)":
+            _clear_wiki_config()
+            val code = _run_wiki_with_home(["list"])
+            expect(code).to_equal(4)
+
+    context "default_backend: github, no --backend flag":
+
+        it "routes to github from config alone (missing --repo -> exit 1, not confluence's auth-required exit 4)":
+            _write_wiki_config("github")
+            val code = _run_wiki_with_home(["list"])
+            _clear_wiki_config()
+            expect(code).to_equal(1)
+
+        it "end to end against a local fixture wiki repo: list exits 0 via config default alone":
+            _write_wiki_config("github")
+            val bare_repo = _fixture_bare_wiki_repo()
+            val cache_root = _fresh_temp_dir()
+            val code = _run_wiki_github_with_home(bare_repo, cache_root, ["list", "--repo", "acme/demo"])
+            _clear_wiki_config()
+            expect(code).to_equal(0)
+
+    context "default_backend: github, explicit --backend confluence":
+
+        it "explicit flag still wins over the configured default (D1) -> confluence's auth-required exit 4":
+            _write_wiki_config("github")
+            val code = _run_wiki_with_home(["list", "--backend", "confluence"])
+            _clear_wiki_config()
+            expect(code).to_equal(4)
+
+    context "default_backend: bogus":
+
+        it "an invalid configured value is still routed to _wiki_unknown_backend -> exit 1":
+            _write_wiki_config("bogus")
+            val code = _run_wiki_with_home(["list"])
+            _clear_wiki_config()
+            expect(code).to_equal(1)
+
+
+describe "_wiki_edit_write_temp / _wiki_edit_read_temp (real file I/O, bug wiki-confluence-mock-file-io)":
+    """The confluence `wiki edit` $EDITOR round-trip used to go through
+    std.nogc_sync_mut.file_system.file_ops, a mock that never touched the
+    real filesystem (file_exists_mock() just checks whether the path
+    string starts with "/" or "."; file_read_text() always returns
+    "mock file content: " + path). These two tests exercise the extracted
+    helpers directly against a real temp dir — no editor, no Confluence
+    auth, no network — and assert on the EXACT written content, which the
+    mock could never produce, so they fail if this ever regresses back
+    onto the mock."""
+
+    it "writes then reads back real content from a temp path":
+        val dir = _fresh_temp_dir()
+        val tmp_path = "{dir}/itf_wiki_edit_roundtrip.html"
+        val content = "<p>Hello from the wiki edit round-trip spec.</p>"
+        val _write_ok = _wiki_edit_write_temp(tmp_path, content)
+        val (read_ok, read_back) = _wiki_edit_read_temp(tmp_path)
+        expect(read_ok).to_equal(true)
+        expect(read_back).to_equal(content)
+
+    it "reports not-ok for a path that was never written":
+        val dir = _fresh_temp_dir()
+        val missing_path = "{dir}/never-written.html"
+        val (read_ok, _read_back) = _wiki_edit_read_temp(missing_path)
+        expect(read_ok).to_equal(false)

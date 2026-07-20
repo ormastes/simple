@@ -16,12 +16,15 @@ use app.ui.render.ansi.{ansi_bold, ansi_reset, ansi_dim, ansi_cyan}
 use app.itf.wiki_git.{sanitize_owner_repo_slug, wiki_git_ensure_synced, wiki_git_list, wiki_git_read, wiki_git_write, wiki_git_delete, wiki_git_push, wiki_git_search, wiki_git_page_modified, WikiGrepMatch}
 use std.common.text_advanced.{escape_json}
 
-# Real (non-mocked) file I/O for the github-backend functions below —
-# std.nogc_sync_mut.file_system.file_ops (used by the pre-existing
-# confluence _wiki_edit/_wiki_create functions further down, kept
-# untouched) is a mock that never touches the real filesystem; see the
-# note in app.itf.wiki_git for detail. Real git-tracked page files need
-# real reads/writes, so the github functions go straight to these externs.
+# Real (non-mocked) file I/O, used by both backends' edit/create $EDITOR
+# temp-file round-trips below. std.nogc_sync_mut.file_system.file_ops is a
+# mock that never touches the real filesystem ("Mock implementations for
+# pure Simple demonstration", per its own header — file_exists_mock() just
+# checks whether the path string starts with "/" or "."); see the note in
+# app.itf.wiki_git for detail. The confluence _wiki_edit/_wiki_create
+# functions used to go through that mock (bug wiki-confluence-mock-file-io:
+# the $EDITOR round-trip never actually read/wrote the edited page) — fixed
+# by switching them onto these same externs the github functions already used.
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
@@ -94,12 +97,21 @@ fn handle_wiki(args: [text]) -> i64:
             1
 
 
+fn _wiki_backend_default() -> text:
+    """D1 precedence, step 2: the configured `wiki: default_backend:` in
+    config.sdn (ItfConfig.wiki_default_backend, gap G6), else "confluence"
+    (matches pre-existing behavior verbatim when unset)."""
+    val configured = load_config().wiki_default_backend
+    if configured != "": configured else: "confluence"
+
+
 fn _wiki_dispatch_backend(args: [text]) -> text:
-    """Resolve --backend, validated against the two supported values (D1:
-    explicit flag only — wiki has no configured default-backend field yet,
-    see devhub_overview.md gap G6). Returns "" for an unsupported value —
-    callers route that to _wiki_unknown_backend()."""
-    val backend = _extract_flag(args, "--backend", "confluence")
+    """Resolve --backend, validated against the two supported values.
+    D1 precedence: explicit `--backend` flag always wins; otherwise falls
+    back to the configured wiki.default_backend (_wiki_backend_default()).
+    Returns "" for an unsupported value — callers route that to
+    _wiki_unknown_backend()."""
+    val backend = _extract_flag(args, "--backend", _wiki_backend_default())
     if backend == "confluence" or backend == "github":
         backend
     else:
@@ -107,7 +119,7 @@ fn _wiki_dispatch_backend(args: [text]) -> text:
 
 
 fn _wiki_unknown_backend(args: [text]) -> i64:
-    val backend = _extract_flag(args, "--backend", "")
+    val backend = _extract_flag(args, "--backend", _wiki_backend_default())
     print_error("unknown --backend '{backend}'; supported: confluence, github")
     1
 
@@ -264,12 +276,13 @@ fn _wiki_edit(args: [text]) -> i64:
     val version = content.ref.version
     val title = content.ref.title
 
-    # Write to temp file
-    use std.nogc_sync_mut.file_system.file_ops.{file_write_text, file_read_text}
+    # Write to temp file via the extracted _wiki_edit_write_temp/
+    # _wiki_edit_read_temp helpers below (real file I/O; see bug
+    # wiki-confluence-mock-file-io)
     use std.nogc_sync_mut.io.process_ops.{process_run}
 
     val tmp_path = "/tmp/itf_edit_{page_id}.html"
-    file_write_text(tmp_path, content.body_storage)
+    val _write_tmp = _wiki_edit_write_temp(tmp_path, content.body_storage)
 
     # Open editor
     val editor = _resolve_editor(config)
@@ -279,8 +292,8 @@ fn _wiki_edit(args: [text]) -> i64:
         return 2
 
     # Read edited content
-    val edited = file_read_text(tmp_path)
-    if edited == nil:
+    val (read_ok, edited) = _wiki_edit_read_temp(tmp_path)
+    if not read_ok:
         print_error("could not read edited file")
         return 1
 
@@ -302,6 +315,35 @@ fn _wiki_edit(args: [text]) -> i64:
     0
 
 
+fn _wiki_read_file_if_exists(path: text) -> (bool, text):
+    """Real (non-mocked) file read: returns (ok, content); ok is false if
+    `path` does not exist. Shared by _wiki_create's --from-file read and
+    _wiki_edit_read_temp below — both used to go through the
+    std.nogc_sync_mut.file_system.file_ops mock (bug
+    wiki-confluence-mock-file-io: file_exists_mock only checks the path
+    prefix, so the $EDITOR round-trip never touched the real file), now
+    fixed onto the same rt_file_* externs app.itf.wiki_git already uses."""
+    if not rt_file_exists(path):
+        return (false, "")
+    (true, rt_file_read_text(path))
+
+
+fn _wiki_edit_write_temp(tmp_path: text, content: text) -> bool:
+    """Write the current page body to the $EDITOR temp file (real file
+    I/O — rt_file_write_text). Extracted out of _wiki_edit so
+    wiki_backend_routing_spec.spl can exercise the write/read round-trip
+    directly against a temp path, without invoking a real editor or
+    Confluence auth."""
+    rt_file_write_text(tmp_path, content)
+
+
+fn _wiki_edit_read_temp(tmp_path: text) -> (bool, text):
+    """Read the edited $EDITOR temp file back. Returns (ok, content); ok
+    is false if the file no longer exists (e.g. the editor process
+    deleted it or never wrote it)."""
+    _wiki_read_file_if_exists(tmp_path)
+
+
 fn _wiki_create(args: [text]) -> i64:
     """Create a wiki page. Usage: itf wiki create --space KEY --title T [--parent ID] [--from-file PATH]"""
     val (ok, config) = _require_confluence_auth()
@@ -320,15 +362,15 @@ fn _wiki_create(args: [text]) -> i64:
         print_error("--space required (or set confluence.default_space in config)")
         return 1
 
-    # Read body from file or empty
+    # Read body from file or empty (real file I/O — see
+    # _wiki_read_file_if_exists above / bug wiki-confluence-mock-file-io)
     var body = "<p></p>"
     if from_file != "":
-        use std.nogc_sync_mut.file_system.file_ops.{file_read_text}
-        val content = file_read_text(from_file)
-        if content == nil:
+        val (read_ok, file_content) = _wiki_read_file_if_exists(from_file)
+        if not read_ok:
             print_error("could not read file: {from_file}")
             return 1
-        body = content
+        body = file_content
 
     val (success, ref, raw_json) = confluence_create_page(config, space, title, body, parent)
     if not success:
@@ -694,7 +736,7 @@ fn _print_wiki_help():
     print "  search       Search pages by title"
     print ""
     print "Common flags:"
-    print "  --backend confluence|github  Wiki backend (default: confluence)"
+    print "  --backend confluence|github  Wiki backend (default: confluence, or wiki.default_backend in config)"
     print "  --space KEY  Confluence space (or set default in config)"
     print "  --repo, -R OWNER/NAME  GitHub repo whose .wiki.git to use (--backend github)"
     print "  --json       Output as JSON"
