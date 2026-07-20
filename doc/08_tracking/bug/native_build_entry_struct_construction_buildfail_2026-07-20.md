@@ -1,7 +1,31 @@
+> **RESOLVED 2026-07-20 — root-fixed.** The driver's native-build MIR path
+> (`driver_pipeline.spl`, `direct_lowering`) built its `MirLowering` from a
+> **hand-duplicated copy** of the canonical `MirLowering.new_for_target`
+> constructor that had drifted out of sync — it **omitted 8 fields**
+> (`struct_field_has_default`, `struct_field_default_expr`, `struct_field_hir_type`,
+> `runtime_value_locals`, `option_value_locals`, `nil_locals`,
+> `enum_runtime_id_index`, `enum_runtime_id_names`). The seed interpreter
+> **silently nil-fills** any struct-init field omitted from a constructor call
+> (it does not error at construction — see the documented landmine in
+> `mir_lowering_types.spl` for `global_static_ids`), so those 8 fields read back
+> as `nil`, and the first `.has(...)`/index on one crashed MIR lowering with
+> `method has not found on type nil`. It reproduced on **every** struct
+> construction (construct-only, i64 or f64 field) but ONLY on native-build,
+> because `run`/`test` use the Rust HIR/MIR lowering, not this pure-Simple path.
+>
+> Fix: add the 8 missing fields to the inline constructor + a sync-guard comment
+> warning the copy must track `new_for_target` (ideally collapse into a
+> `new_for_target` call). Regression guard:
+> `test/03_system/native/struct_construct_native.spl`. This also unblocks the
+> struct-field-f64 case of the container-f64 heap-box fix on native-build (see
+> seed_f64_array_element_precision_mask).
+
+---
+
 # `native-build --entry` BUILDFAILs on any local struct construction — `method has not found on nil`
 
 - **id:** native_build_entry_struct_construction_buildfail_2026-07-20
-- **status:** open
+- **status:** resolved 2026-07-20 (root-fixed — driver_pipeline.spl duplicated-constructor drift; see top banner)
 - **severity:** high (a first-class construct — defining and constructing a
   struct — cannot be single-file native-built at all)
 - **component:** compiler — `native-build --entry` single-file mode; the

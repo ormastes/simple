@@ -452,6 +452,20 @@ impl CompilerDriver:
             # tried to compile on its own (e.g. std.io_runtime).
             val native_entry_closure_mir = (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
             var direct_idx = 0
+            # WARNING: this is a hand-duplicated copy of MirLowering's canonical
+            # constructor (`MirLowering.new_for_target`, module_lowering.spl). It
+            # MUST list EVERY field the class declares: the seed interpreter
+            # silently nil-fills any struct-init field omitted here (it does NOT
+            # error at construction), so an omitted `Dict`/list field reads back
+            # as `nil` and the first `.has(...)`/index on it crashes MIR lowering
+            # with `method has not found on type nil` -- but ONLY on native-build
+            # (`run`/`test` use the Rust HIR/MIR lowering, not this .spl path), so
+            # it hid until native --entry hit it on every struct construction.
+            # This exact drift (8 fields missing here) was
+            # native_build_entry_struct_construction_buildfail_2026-07-20. When
+            # adding a field to MirLowering, add it in BOTH places (prefer
+            # collapsing this into a new_for_target call). Guard:
+            # test/03_system/native/struct_construct_native.spl.
             var direct_lowering = MirLowering(
                 builder: MirBuilder(
                     module: MirModule(
@@ -480,9 +494,12 @@ impl CompilerDriver:
                 bitfield_map: {},
                 bitfield_value_syms: {},
                 struct_field_order: {},
+                struct_field_has_default: {},
+                struct_field_default_expr: {},
                 class_type_names: {},
                 struct_field_type_name: {},
                 struct_field_repr_name: {},
+                struct_field_hir_type: {},
                 struct_field_array_element_type_name: {},
                 struct_field_array_elem_type: {},
                 struct_value_syms: {},
@@ -494,7 +511,12 @@ impl CompilerDriver:
                 runtime_array_locals: {},
                 runtime_dict_locals: {},
                 array_element_struct_syms: {},
+                runtime_value_locals: {},
+                option_value_locals: {},
+                nil_locals: {},
                 enum_variant_index: {},
+                enum_runtime_id_index: {},
+                enum_runtime_id_names: {},
                 lambda_bindings: {},
                 lambda_capture_snapshot: {},
                 current_has_vhdl_metadata: false,
