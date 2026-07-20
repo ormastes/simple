@@ -308,6 +308,18 @@ int64_t rt_fork_parent_wait_bounded(int64_t child_pid, int64_t timeout_ms,
         deadline_ms = (ts_start.tv_sec * 1000 + ts_start.tv_nsec / 1000000) + timeout_ms;
     }
 
+    /* Grace polls after the tracked child_pid is reaped: a delegated driver
+     * binary (e.g. bin/simple execing/inheriting fds down to bin/simple_seed)
+     * can still hold the pipe write end open via an inherited fd for a few
+     * scheduler ticks after the directly-forked process (sh/timeout) exits
+     * and is reaped. Breaking on the very next poll cycle after child_exited
+     * silently drops whatever a still-writing descendant produces after that
+     * point -- verified via strace that the descendant DOES write its full
+     * output to the pipe, yet callers observed truncated captures. Cap the
+     * grace period so a genuinely stuck descendant can't hang the caller. */
+    int exited_grace_polls = 0;
+    const int FORK_EXIT_GRACE_POLLS = 40; /* ~2s at the 50ms poll_timeout below */
+
     while (stdout_open || stderr_open) {
         if (!child_exited) {
             pid_t waited = waitpid_nointr((pid_t)child_pid, &child_status, WNOHANG);
@@ -352,11 +364,15 @@ int64_t rt_fork_parent_wait_bounded(int64_t child_pid, int64_t timeout_ms,
         }
         if (ret == 0) {
             if (child_exited) {
-                cleanup_descendants = stdout_open || stderr_open;
-                break;
+                exited_grace_polls++;
+                if (exited_grace_polls >= FORK_EXIT_GRACE_POLLS) {
+                    cleanup_descendants = stdout_open || stderr_open;
+                    break;
+                }
             }
             continue;
         }
+        exited_grace_polls = 0;
 
         /* Process events */
         for (int i = 0; i < nfds; i++) {
@@ -396,10 +412,12 @@ int64_t rt_fork_parent_wait_bounded(int64_t child_pid, int64_t timeout_ms,
                 else stderr_open = 0;
             }
         }
-        if (child_exited) {
-            cleanup_descendants = stdout_open || stderr_open;
-            break;
-        }
+        /* Do NOT break here just because child_exited: this poll cycle just
+         * made progress (ret > 0), so a descendant may still be writing.
+         * Let the outer `while (stdout_open || stderr_open)` loop continue
+         * driving reads until both streams hit real EOF, or the grace-poll
+         * counter above (for the no-progress case) or the overall timeout
+         * deadline bounds the wait. */
     }
 
     int forced_cleanup = cleanup_descendants || timed_out || wait_failed;
