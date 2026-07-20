@@ -331,6 +331,7 @@ int8_t   rt_array_clear(SplArray* array);
 int8_t   rt_array_push_i64_raw(SplArray* array, int64_t value);
 int64_t  rt_array_get_i64_raw(SplArray* array, int64_t index);
 SplArray* rt_array_concat(SplArray* a, SplArray* b);
+SplArray* rt_array_copy(SplArray* a);
 SplArray* rt_array_repeat(int64_t value, int64_t count);
 int64_t  rt_array_data_ptr(SplArray* array);
 int64_t  rt_array_data_ptr_text(SplArray* array);

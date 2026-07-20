@@ -3217,6 +3217,38 @@ SplArray* rt_array_concat(SplArray* a, SplArray* b) {
     out->len = total;
     return result;
 }
+
+/* rt_array_copy: private shallow copy of an existing array's backing buffer,
+ * matching simple_runtime::value::collections::rt_array_copy's semantics
+ * ("allocates a new array of the same length, copies every element").
+ * Needed on the core-c-bootstrap runtime lane because MIR lowering's
+ * array-place-alias-copy fix (`var c = arr` -> rt_array_copy(vreg), commit
+ * 8cccc7b70bc) has no C-runtime sibling: without this, the linker's
+ * C-preferred symbol resolution (native_project/linker.rs) only has the Rust
+ * implementation to route the call to, which expects a Rust-registered
+ * RuntimeValue (via get_typed_ptr/is_registered_heap_ptr) and silently
+ * returns a bogus sentinel for the plain RtCoreArray-backed SplArray handles
+ * this lane's cranelift-compiled array ops (rt_array_new, rt_array_push,
+ * rt_array_len, all defined in this file) actually produce -- corrupting
+ * files.len() to 0 in test_runner_main.spl's "var files = all_files". */
+SplArray* rt_array_copy(SplArray* a) {
+    RtCoreArray* src = rt_core_array_ptr(a);
+    if (!src) return a;
+    int is_bytes = (src->flags & RT_CORE_ARRAY_FLAG_BYTES) != 0;
+    int is_u64 = (src->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) != 0;
+    SplArray* result = is_bytes
+        ? rt_byte_array_new((uint64_t)src->len)
+        : (is_u64 ? rt_array_new_with_cap_u64(src->len) : rt_array_new(src->len));
+    RtCoreArray* out = rt_core_array_ptr(result);
+    if (!out) return result;
+    if (src->len > 0) {
+        size_t elem_size = is_bytes ? sizeof(uint8_t) : sizeof(int64_t);
+        memcpy(out->data, src->data, (size_t)src->len * elem_size);
+    }
+    out->len = src->len;
+    return result;
+}
+
 /* FR-COMPILER-012: array-repeat for `[value; count]` syntax in JIT.
  * Creates a new array with `count` copies of `value`. */
 SplArray* rt_array_repeat(int64_t value, int64_t count) {
