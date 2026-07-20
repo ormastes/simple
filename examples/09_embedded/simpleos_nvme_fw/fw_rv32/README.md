@@ -105,6 +105,15 @@ sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/boot.shs --smp build/nvme_fw_rv
 Expected final marker: `ALL RV32 4CORE IPC CHECKS PASS` (replaces the single-hart
 marker when SMP mode is enabled).
 
+**Gate status (2026-07-20).** Single-hart: **10/10 PASS**
+(`ALL RV32 NVME FW CHECKS PASS`, 104 KB soft-float rv32 ELF). SMP: **cannot be
+built** — `native-build --emit-object` never completes IR emission for the
+larger SMP module (runs killed at 1h/3h/6h with no output; single-hart from the
+same flattened base emits in under 15 min). Tracked in
+`doc/08_tracking/bug/seed_emit_object_superlinear_hang_large_module_2026-07-20.md`.
+The SMP firmware sources are unaffected — this is a compiler throughput defect,
+not a firmware defect.
+
 **Shared-memory layout** (index base, no raw pointers):
 - Words 0–3: boot gate + census + error count
 - Words 4–219: six SPSC rings (HIL↔FTL, FTL↔FIL, FIL↔NAND) with payloads

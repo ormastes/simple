@@ -13,6 +13,16 @@
 set -e
 cd "$(git rev-parse --show-toplevel 2>/dev/null || echo .)"
 MODE="${1:-}"
+# Simple's default integer is i64, so 64-bit `/` and `%` in firmware logic lower
+# to the libgcc soft-arithmetic helpers (__divdi3/__moddi3). Bare-metal rv32 has
+# no implicit libgcc, so link the ABI-matching archive explicitly; as an archive
+# only the referenced members are pulled in, and --gc-sections drops the rest.
+# The compiler's emitted firmware object is soft-float (ilp32, no f/d ext) --
+# verified via `readlink -f build/test-artifacts/nvme_fw_rv32.o | riscv64-unknown-elf-readelf -A -`
+# -> Tag_RISCV_arch: rv32i2p1_m2p0_a2p1_c2p0. The libgcc archive AND the start
+# stub below must match this ABI or ld.lld rejects the link ("cannot link
+# object files with different floating-point ABI").
+LIBGCC="$(riscv64-unknown-elf-gcc -march=rv32imac -mabi=ilp32 -print-libgcc-file-name)"
 OUT="build/nvme_fw_rv32.elf"
 OBJ="build/test-artifacts/nvme_fw_rv32.o"
 START_OBJ="build/test-artifacts/nvme_fw_rv32_start.o"
@@ -344,13 +354,13 @@ _ipc_shm:
 _fw_stacks:
     .space 65536
 EOF_SMP_START
-  if ! riscv64-unknown-elf-gcc -march=rv32imafdc -mabi=ilp32d -c "$SMP_START_ASM" -o "$SMP_START_OBJ" >>"$SMP_OUT_LOG" 2>>"$SMP_ERR_LOG"; then
+  if ! riscv64-unknown-elf-gcc -march=rv32imac -mabi=ilp32 -c "$SMP_START_ASM" -o "$SMP_START_OBJ" >>"$SMP_OUT_LOG" 2>>"$SMP_ERR_LOG"; then
     echo "NVME_RV32_SMP_BUILD_FAILED start-stub out=$SMP_OUT_LOG err=$SMP_ERR_LOG" >&2
     tail -n 40 "$SMP_ERR_LOG" >&2 || true
     exit 1
   fi
   llvm-objcopy --redefine-sym _start=__simple_unused_start "$SMP_OBJ" >>"$SMP_OUT_LOG" 2>>"$SMP_ERR_LOG" || true
-  if ! ld.lld -m elf32lriscv -T src/os/kernel/arch/riscv32/linker.ld --no-relax --gc-sections -o "$SMP_OUT" "$SMP_START_OBJ" "$SMP_OBJ" >>"$SMP_OUT_LOG" 2>>"$SMP_ERR_LOG"; then
+  if ! ld.lld -m elf32lriscv -T src/os/kernel/arch/riscv32/linker.ld --no-relax --gc-sections -o "$SMP_OUT" "$SMP_START_OBJ" "$SMP_OBJ" "$LIBGCC" >>"$SMP_OUT_LOG" 2>>"$SMP_ERR_LOG"; then
     echo "NVME_RV32_SMP_BUILD_FAILED link out=$SMP_OUT_LOG err=$SMP_ERR_LOG" >&2
     tail -n 40 "$SMP_ERR_LOG" >&2 || true
     exit 1
@@ -511,7 +521,7 @@ done:
 1:  wfi
     j       1b
 EOF_START
-  if ! riscv64-unknown-elf-gcc -march=rv32imafdc -mabi=ilp32d -c "$START_ASM" -o "$START_OBJ" >>"$OUT_LOG" 2>>"$ERR_LOG"; then
+  if ! riscv64-unknown-elf-gcc -march=rv32imac -mabi=ilp32 -c "$START_ASM" -o "$START_OBJ" >>"$OUT_LOG" 2>>"$ERR_LOG"; then
     echo "NVME_RV32_BUILD_FAILED start-stub out=$OUT_LOG err=$ERR_LOG" >&2
     tail -n 40 "$ERR_LOG" >&2 || true
     exit 1
@@ -542,7 +552,7 @@ EOF_START
   fi
   echo "NVME_RV32_BUILD_DONE elapsed=${BUILD_ELAPSED_SECS}s" >>"$OUT_LOG"
   llvm-objcopy --redefine-sym _start=__simple_unused_start "$OBJ" >>"$OUT_LOG" 2>>"$ERR_LOG" || true
-  if ! ld.lld -m elf32lriscv -T src/os/kernel/arch/riscv32/linker.ld --no-relax --gc-sections -o "$OUT" "$START_OBJ" "$OBJ" >>"$OUT_LOG" 2>>"$ERR_LOG"; then
+  if ! ld.lld -m elf32lriscv -T src/os/kernel/arch/riscv32/linker.ld --no-relax --gc-sections -o "$OUT" "$START_OBJ" "$OBJ" "$LIBGCC" >>"$OUT_LOG" 2>>"$ERR_LOG"; then
     echo "NVME_RV32_BUILD_FAILED link out=$OUT_LOG err=$ERR_LOG" >&2
     tail -n 40 "$ERR_LOG" >&2 || true
     exit 1
