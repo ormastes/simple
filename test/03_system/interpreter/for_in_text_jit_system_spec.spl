@@ -1,0 +1,68 @@
+# System-level guard for the for-loop-over-text JIT corruption bug
+# (doc/08_tracking/bug/for_loop_over_text_char_code_at_zero_len_crash_2026-07-19.md).
+#
+# `for ch in <text>:` binds `ch` correctly under the tree-walking
+# interpreter, AND under SSpec's `describe`/`it` blocks (which always run
+# their bodies via the interpreter, even inside a `bin/simple run` process).
+# It was corrupted ONLY on the Cranelift-JIT path that plain, non-SSpec
+# `fn main()` programs take by default. To actually exercise that path from
+# a test, this spec spawns a subprocess running the plain probe script
+# (`for_in_text_jit_probe.spl`) via `run` and asserts on its stdout — the
+# same subprocess pattern used by `lazy_shb_system_spec.spl`.
+extern fn rt_process_run(program: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_exists(path: text) -> bool
+
+fn find_simple_binary() -> text:
+    if rt_file_exists("src/compiler_rust/target/release/simple"):
+        return "src/compiler_rust/target/release/simple"
+    if rt_file_exists("src/compiler_rust/target/bootstrap/simple"):
+        return "src/compiler_rust/target/bootstrap/simple"
+    if rt_file_exists("bin/simple"):
+        return "bin/simple"
+    if rt_file_exists("bin/release/aarch64-apple-darwin-macho/simple"):
+        return "bin/release/aarch64-apple-darwin-macho/simple"
+    if rt_file_exists("bin/release/macos-arm64/simple"):
+        return "bin/release/macos-arm64/simple"
+    if rt_file_exists("bin/release/darwin-aarch64/simple"):
+        return "bin/release/darwin-aarch64/simple"
+    if rt_file_exists("bin/release/macos-x86_64/simple"):
+        return "bin/release/macos-x86_64/simple"
+    if rt_file_exists("bin/release/linux-x86_64/simple"):
+        return "bin/release/linux-x86_64/simple"
+    "bin/simple"
+
+fn _is_windows() -> bool:
+    val (uname_out, _, _) = rt_process_run("uname", ["-s"])
+    val os = uname_out.trim()
+    os.starts_with("MINGW") or os.starts_with("MSYS") or os.starts_with("CYGWIN") or os.starts_with("Windows")
+
+fn _check_binary_runnable() -> bool:
+    if _is_windows():
+        return false
+    val simple_bin = find_simple_binary()
+    if simple_bin == "" or not rt_file_exists(simple_bin):
+        return false
+    val (stdout, stderr, code) = rt_process_run("file", [simple_bin])
+    if stdout == "" or stdout == nil:
+        return false
+    if stdout.contains("ELF") and not stdout.contains("Mach-O"):
+        val (uname_out, _, _) = rt_process_run("uname", [])
+        if uname_out.trim() == "Darwin":
+            return false
+    true
+
+val _can_run = _check_binary_runnable()
+
+fn run_probe() -> (text, text, i64):
+    rt_process_run(
+        find_simple_binary(),
+        ["run", "test/03_system/interpreter/for_in_text_jit_probe.spl"]
+    )
+
+describe "for-loop-over-text JIT regression (subprocess)":
+    it "binds ch correctly under the default (JIT) run path":
+        if not _can_run:
+            expect(_can_run).to_equal(false)
+        else:
+            val (stdout, stderr, code) = run_probe()
+            expect(stdout.trim()).to_equal("ok")

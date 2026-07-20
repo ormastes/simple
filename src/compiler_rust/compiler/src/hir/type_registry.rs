@@ -173,14 +173,25 @@ impl TypeRegistry {
     ///
     /// Handles multiple iterable types:
     /// - Arrays [T] → element type T
-    /// - Strings → element type is u8 (byte iteration)
+    /// - Strings → element type is String (character iteration; `for ch in
+    ///   text:` binds `ch` to a single-character text value, matching the
+    ///   tree-walking interpreter's `iter_to_vec` behavior and the language's
+    ///   "characters are 1-length text" convention — explicit byte access
+    ///   remains available via `.bytes()`). Byte-width TypeId::U8 was tried
+    ///   previously but disagreed with the interpreter's char-per-iteration
+    ///   semantics AND wasn't matched by the MIR for-loop lowering's own
+    ///   element-type re-derivation (which only recognizes `HirType::Array`),
+    ///   so a full 8-byte tagged Str RuntimeValue got stored into a 1-byte
+    ///   `u8`-declared loop-variable slot — corrupting the loop variable
+    ///   (see doc/08_tracking/bug/for_loop_over_text_char_code_at_zero_len_crash_2026-07-19.md).
     /// - Other types (Range, custom iterators) → None (caller should fallback)
     pub fn get_iterable_element(&self, id: TypeId) -> Option<TypeId> {
         match self.types.get(&id) {
             // Arrays: element type is T
             Some(HirType::Array { element, .. }) => Some(*element),
-            // Strings: iterate as bytes (u8)
-            Some(HirType::String) => Some(TypeId::U8),
+            // Strings: iterate as characters (single-char text), matching
+            // interpreter semantics. See doc comment above.
+            Some(HirType::String) => Some(TypeId::STRING),
             // Tuples: not typically iterable, but could be
             Some(HirType::Tuple(elements)) if !elements.is_empty() => {
                 // For tuples, check if all elements have the same type

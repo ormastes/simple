@@ -1,0 +1,188 @@
+"""
+# for-in text character iteration Specification
+
+**Feature IDs:** N/A
+**Category:** Runtime
+**Difficulty:** 3/5
+**Status:** Fixed
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** doc/08_tracking/bug/for_loop_over_text_char_code_at_zero_len_crash_2026-07-19.md
+
+## Overview
+
+Verifies that `for ch in <text>:` binds `ch` to the correct single-character
+text value on every iteration, matching indexed access
+(`text.char_at(i)`/`text.char_code_at(i)`).
+
+Previously (JIT / default `bin/simple run` path only — the tree-walking
+interpreter, `SIMPLE_EXECUTION_MODE=interpret`, was never affected):
+`ch` was bound to garbage (a heap-pointer low byte, non-deterministic across
+builds/runs), `ch.char_code_at(0)` always returned 0, and `ch.len()` could
+segfault. Root cause: `HirTypeRegistry::get_iterable_element` typed
+string iteration elements as `u8` (1 byte), but the MIR for-loop lowering's
+own (redundant) element-type re-derivation only recognizes
+`HirType::Array { .. }`, so it fell back to `TypeId::ANY` and skipped
+unboxing — storing the full 8-byte tagged `Str` `RuntimeValue` returned by
+`rt_index_get`/`rt_string_char_at` into a 1-byte-wide `u8`-declared loop
+local. A later narrow read of that local surfaced only the pointer's low
+byte. Fixed by typing string-iteration elements as `TypeId::STRING`
+(matching the tree-walking interpreter's `iter_to_vec`, which already
+produces one-character `text` values per iteration), so the loop variable's
+declared width matches what's actually stored.
+
+## Syntax
+
+```simple
+for ch in "abc":
+    print(ch)              # "a", "b", "c"
+    print(ch.char_code_at(0))  # 97, 98, 99
+```
+
+"""
+
+use std.spec
+
+
+# ============================================================================
+# Test Group 1: ASCII text iteration (literal)
+# ============================================================================
+
+describe "for ch in <text literal>":
+    """
+    ## Literal Text Iteration
+
+    Each loop-bound `ch` must be the correct single-character text, and
+    `char_code_at(0)` on it must return the correct codepoint.
+    """
+
+    it "yields correct characters in order":
+        var collected = ""
+        for ch in "abc":
+            collected = collected + ch
+        expect(collected).to_equal("abc")
+
+    it "yields correct char codes in order":
+        var codes: [i64] = []
+        for ch in "abc":
+            codes.push(ch.char_code_at(0))
+        expect(codes).to_equal([97, 98, 99])
+
+    it "matches indexed char_at() access for each position":
+        val s = "hello"
+        var i = 0
+        for ch in s:
+            expect(ch).to_equal(s.char_at(i))
+            i = i + 1
+        expect(i).to_equal(5)
+
+    it "matches indexed char_code_at() access for each position":
+        val s = "hello"
+        var i = 0
+        for ch in s:
+            expect(ch.char_code_at(0)).to_equal(s.char_code_at(i))
+            i = i + 1
+        expect(i).to_equal(5)
+
+    it "loop-bound char len() is 1":
+        for ch in "xyz":
+            expect(ch.len()).to_equal(1)
+
+
+# ============================================================================
+# Test Group 2: Iteration over a variable-held text
+# ============================================================================
+
+describe "for ch in <variable-held text>":
+    """
+    ## Variable Text Iteration
+
+    Iterating a `val`-bound text variable (not a literal) must behave
+    identically to iterating a literal directly.
+    """
+
+    it "yields correct characters from a val binding":
+        val held: text = "xyz"
+        var collected = ""
+        for ch in held:
+            collected = collected + ch
+        expect(collected).to_equal("xyz")
+
+    it "yields correct char codes from a val binding":
+        val held: text = "xyz"
+        var codes: [i64] = []
+        for ch in held:
+            codes.push(ch.char_code_at(0))
+        expect(codes).to_equal([120, 121, 122])
+
+    it "works with a text built via concatenation":
+        val a = "ab"
+        val b = "cd"
+        val combined = a + b
+        var collected = ""
+        for ch in combined:
+            collected = collected + ch
+        expect(collected).to_equal("abcd")
+
+    it "works with a text built via interpolation":
+        val n = 5
+        val combined = "n={n}"
+        var collected = ""
+        for ch in combined:
+            collected = collected + ch
+        expect(collected).to_equal("n=5")
+
+
+# ============================================================================
+# Test Group 3: Empty text
+# ============================================================================
+
+describe "for ch in <empty text>":
+    """
+    ## Empty Text Iteration
+
+    Iterating an empty string must run zero iterations, not crash.
+    """
+
+    it "runs zero iterations for an empty literal":
+        var count = 0
+        for ch in "":
+            count = count + 1
+        expect(count).to_equal(0)
+
+    it "runs zero iterations for an empty variable":
+        val empty: text = ""
+        var count = 0
+        for ch in empty:
+            count = count + 1
+        expect(count).to_equal(0)
+
+
+# ============================================================================
+# Test Group 4: Single-char text
+# ============================================================================
+
+describe "for ch in <single-char text>":
+    """
+    ## Single-Character Text Iteration
+
+    Iterating a one-character string must run exactly one iteration with
+    the correct value.
+    """
+
+    it "yields the single character exactly once":
+        var collected = ""
+        var count = 0
+        for ch in "q":
+            collected = collected + ch
+            count = count + 1
+        expect(count).to_equal(1)
+        expect(collected).to_equal("q")
+
+    it "yields the correct char code for a single-char variable":
+        val single: text = "Z"
+        var code = -1
+        for ch in single:
+            code = ch.char_code_at(0)
+        expect(code).to_equal(90)
