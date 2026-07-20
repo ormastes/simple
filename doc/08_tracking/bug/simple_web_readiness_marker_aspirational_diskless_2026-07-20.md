@@ -39,3 +39,30 @@ doc/08_tracking/bug/browser_demo_frozen_loading_placeholder_2026-07-12.md
   materialize in evidence boots; then re-verify web content on screen.
 - Re-baseline the js-bitmap parity scene against the Aqua+AA renderer once
   intentional-change review confirms the deltas are all theme/AA.
+
+## 2026-07-20 BROWSER-FS update — root cause found, mount PROVEN, next blocker isolated
+
+The `blockdevice-dispatch-codegen-bug` skip
+(`vfs_boot_init.spl:375`) that makes evidence boots diskless is a **stale-seed
+artifact and is now RESOLVED at its named cause.** With the current fixed seed
+the `BlockDevice` dispatch resolves to real vtable slots (`sector_size`->2,
+`read_sector`->0, `write_sector`->1); the C8 fault does NOT recur. In a scratch
+build with the skip lifted, the hosted FAT32 mount runs end-to-end:
+
+  `[vfs-init] hosted fat32 mount ENABLED` -> `shared FAT32 root mounted` ->
+  `required desktop app payloads cached` ->
+  `executable load probe ok path=/sys/apps/browser_demo.smf bytes=4096` ->
+  `[vfs] mounted fat32 provider=pure-simple-direct` -> `VFS ready`.
+
+**Success ladder reached: (a) mount succeeds — PROVEN (serial above).** Did not
+reach (b) materialize: enabling the mount sets `g_vfs_initialized=true`, which
+routes the desktop font read into the hosted FileSystem-trait path, which hits
+a SEPARATE still-open dispatch sentinel (`open`/`stat`/`read` -> ud2). Details
++ evidence: **doc/08_tracking/bug/simpleos_filesystem_trait_dispatch_sentinel_2026-07-20.md**.
+The interim vfs-read guard workaround is source-correct but could not be
+verified due to a build/module-resolution issue (same doc). The skip was
+restored (kept) — a lifted-but-broken mount is a black-screen regression vs the
+diskless System Console. Net: the readiness marker stays aspirational until the
+FS-trait sentinel is fixed AND the render-loop sentinels
+(`frame_for_time`/`next_frame_due_micros`) and the frozen-placeholder bug are
+cleared.
