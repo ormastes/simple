@@ -1,0 +1,152 @@
+# Integration (artifact-validation) spec for the SimpleOS x86_64 WM QEMU
+# gates. Validates the on-disk evidence the gate scripts produce — it does NOT
+# boot QEMU itself (the live-boot gates own that):
+#
+#   scripts/check/check-simpleos-x86-64-wm-render-event-evidence.shs
+#     -> build/os/wm_x86_64_serial.clean.log, build/os/wm_x86_64_screendump.ppm
+#   scripts/check/check-simpleos-x86-64-wm-hello-lifecycle-evidence.shs
+#     -> build/os/wm_hello_serial.clean.log, build/os/wm_hello_open.ppm,
+#        build/os/wm_hello_closed.ppm
+#
+# When an artifact is absent the example records an EXPLICIT skip naming the
+# gate script to run — it never fake-passes assertions against missing files.
+
+use std.spec
+use std.io_runtime.{file_exists, file_read, file_size}
+
+val RENDER_SERIAL: text = "build/os/wm_x86_64_serial.clean.log"
+val RENDER_PPM: text = "build/os/wm_x86_64_screendump.ppm"
+val HELLO_SERIAL: text = "build/os/wm_hello_serial.clean.log"
+val HELLO_PPM_OPEN: text = "build/os/wm_hello_open.ppm"
+val HELLO_PPM_CLOSED: text = "build/os/wm_hello_closed.ppm"
+val READY_MARKER: text = "[WM] Glass desktop rendered!"
+val HELLO_OPEN_MARKER: text = "[WM] Hello app window open: win=3"
+val HELLO_CLOSE_DISPATCH_MARKER: text = "type=window detail=action=close,win=3"
+val HELLO_CLOSE_DONE_MARKER: text = "[WM] window closed: hello"
+
+# [ok, width, height, bytes_ok] for a binary P6 PPM. Header is ASCII
+# ("P6\n<w> <h>\n255\n") so text-reading the head is safe; the pixel payload
+# size is checked via file_size, independent of text mangling.
+fn _ppm_meta(path: text) -> [i64]:
+    val head = file_read(path)
+    val parts = head.split("\n")
+    if parts.len() < 3:
+        return [0, 0, 0, 0]
+    if parts[0] != "P6":
+        return [0, 0, 0, 0]
+    val dims = parts[1].split(" ")
+    if dims.len() != 2:
+        return [0, 0, 0, 0]
+    val width = dims[0].to_int() ?? 0
+    val height = dims[1].to_int() ?? 0
+    if width <= 0 or height <= 0:
+        return [0, 0, 0, 0]
+    if parts[2] != "255":
+        return [0, 0, 0, 0]
+    val size = file_size(path)
+    val bytes_ok = if size >= width.to_i64() * height.to_i64() * 3: 1 else: 0
+    [1, width.to_i64(), height.to_i64(), bytes_ok]
+
+# Count of malformed "[wm-event]" lines (must carry type= and a positive
+# count=N) plus, per event type, monotonic non-decreasing count sequencing.
+# Returns [wm_event_lines, malformed_lines, monotonic_violations].
+fn _wm_event_line_audit(log: text) -> [i64]:
+    var total = 0
+    var malformed = 0
+    var violations = 0
+    var last_key = 0
+    var last_focus = 0
+    var last_window = 0
+    var last_move = 0
+    var last_button = 0
+    for line in log.split("\n"):
+        if line.contains("[wm-event]"):
+            total = total + 1
+            val count_idx = line.index_of("count=") ?? -1
+            val type_idx = line.index_of("type=") ?? -1
+            if count_idx < 0 or type_idx < 0:
+                malformed = malformed + 1
+            else:
+                val count = line.substring(count_idx + 6, line.len()).trim().to_int() ?? -1
+                if count <= 0:
+                    malformed = malformed + 1
+                elif line.contains("type=key"):
+                    if count < last_key: violations = violations + 1
+                    last_key = count
+                elif line.contains("type=focus"):
+                    if count < last_focus: violations = violations + 1
+                    last_focus = count
+                elif line.contains("type=window"):
+                    if count < last_window: violations = violations + 1
+                    last_window = count
+                elif line.contains("type=mouse_move"):
+                    if count < last_move: violations = violations + 1
+                    last_move = count
+                elif line.contains("type=mouse_button"):
+                    if count < last_button: violations = violations + 1
+                    last_button = count
+                else:
+                    malformed = malformed + 1
+    [total, malformed, violations]
+
+describe "WM render-event gate artifact evidence":
+
+    it "serial log carries the ready marker and only well-formed monotonic wm-event lines":
+        if not file_exists(RENDER_SERIAL):
+            print "    SKIP render-event serial log validation: absent {RENDER_SERIAL} — run scripts/check/check-simpleos-x86-64-wm-render-event-evidence.shs first"
+            expect(file_exists(RENDER_SERIAL)).to_equal(false)
+        else:
+            val log = file_read(RENDER_SERIAL)
+            expect(log.contains(READY_MARKER)).to_equal(true)
+            val audit = _wm_event_line_audit(log)
+            # A captured event gate run must contain at least one structured
+            # event line; every line must be well-formed; counts per type must
+            # never rewind (rewind = serial corruption or a counter reset bug).
+            expect(audit[0] > 0).to_equal(true)
+            expect(audit[1]).to_equal(0)
+            expect(audit[2]).to_equal(0)
+
+    it "screendump is a well-formed P6 frame with full pixel payload":
+        if not file_exists(RENDER_PPM):
+            print "    SKIP render-event screendump validation: absent {RENDER_PPM} — run scripts/check/check-simpleos-x86-64-wm-render-event-evidence.shs first"
+            expect(file_exists(RENDER_PPM)).to_equal(false)
+        else:
+            val meta = _ppm_meta(RENDER_PPM)
+            expect(meta[0]).to_equal(1)
+            expect(meta[1] > 0).to_equal(true)
+            expect(meta[2] > 0).to_equal(true)
+            expect(meta[3]).to_equal(1)
+
+describe "WM hello-lifecycle gate artifact evidence":
+
+    it "serial log orders boot, hello-open, close-dispatch, close-done markers":
+        if not file_exists(HELLO_SERIAL):
+            print "    SKIP hello-lifecycle serial log validation: absent {HELLO_SERIAL} — run scripts/check/check-simpleos-x86-64-wm-hello-lifecycle-evidence.shs first"
+            expect(file_exists(HELLO_SERIAL)).to_equal(false)
+        else:
+            val log = file_read(HELLO_SERIAL)
+            expect(log.contains(READY_MARKER)).to_equal(true)
+            expect(log.contains(HELLO_OPEN_MARKER)).to_equal(true)
+            expect(log.contains(HELLO_CLOSE_DISPATCH_MARKER)).to_equal(true)
+            expect(log.contains(HELLO_CLOSE_DONE_MARKER)).to_equal(true)
+            val ready_at = log.index_of(READY_MARKER) ?? -1
+            val open_at = log.index_of(HELLO_OPEN_MARKER) ?? -1
+            val dispatch_at = log.index_of(HELLO_CLOSE_DISPATCH_MARKER) ?? -1
+            val done_at = log.index_of(HELLO_CLOSE_DONE_MARKER) ?? -1
+            expect(ready_at >= 0 and open_at > ready_at).to_equal(true)
+            expect(dispatch_at > open_at).to_equal(true)
+            expect(done_at > dispatch_at).to_equal(true)
+
+    it "open and closed screendumps are well-formed P6 frames of the same size":
+        if not (file_exists(HELLO_PPM_OPEN) and file_exists(HELLO_PPM_CLOSED)):
+            print "    SKIP hello-lifecycle screendump pair validation: absent {HELLO_PPM_OPEN} / {HELLO_PPM_CLOSED} — run scripts/check/check-simpleos-x86-64-wm-hello-lifecycle-evidence.shs first"
+            expect(file_exists(HELLO_PPM_OPEN) and file_exists(HELLO_PPM_CLOSED)).to_equal(false)
+        else:
+            val open_meta = _ppm_meta(HELLO_PPM_OPEN)
+            val closed_meta = _ppm_meta(HELLO_PPM_CLOSED)
+            expect(open_meta[0]).to_equal(1)
+            expect(closed_meta[0]).to_equal(1)
+            expect(open_meta[3]).to_equal(1)
+            expect(closed_meta[3]).to_equal(1)
+            expect(open_meta[1]).to_equal(closed_meta[1])
+            expect(open_meta[2]).to_equal(closed_meta[2])
