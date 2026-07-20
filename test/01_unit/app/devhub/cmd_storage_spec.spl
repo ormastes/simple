@@ -18,22 +18,34 @@
 #   (b) the alias used is a deliberately-fake, never-registered name (e.g.
 #       "unknownalias"), which resolve_alias_config's "unknown alias"
 #       short-circuit rejects before touching any file or network at all, or
-#   (c) the verb (mirror, still a documented gap; rm --recursive/-r and
-#       rb --force, both real bounded list+delete-many implementations) hits
-#       a pure validation refusal (empty prefix, non-remote/no-bucket
-#       target, or unknown alias) that returns before resolve_alias_config
-#       or any list/delete call runs — note `rm` (single-object delete),
-#       `rm --recursive` (list+delete-many over a prefix) and `rb --force`
-#       (bounded list+delete-then-delete-bucket) are now real
-#       implementations, so their success/live-delete paths, the >1000
-#       refusal, and the 0-objects branch are NOT covered here (all require
-#       a live list against a real endpoint); only their pre-network
+#   (c) the verb (mirror, rm --recursive/-r, rb --force — all real bounded
+#       list+delete-many or list+copy-many implementations) hits a pure
+#       validation refusal (empty prefix, non-remote/no-bucket target, or
+#       unknown alias) that returns before resolve_alias_config or any
+#       list/copy/delete call runs — note `rm` (single-object delete),
+#       `rm --recursive` (list+delete-many over a prefix), `rb --force`
+#       (bounded list+delete-then-delete-bucket) and `mirror` (list+diff+
+#       copy/delete over local<->remote) are all real implementations, so
+#       their success/live-list paths, the >1000 refusal, and the 0-objects
+#       branch are NOT covered at the `handle_storage` level here (all
+#       require a live list against a real endpoint); only their pre-network
 #       validation/error paths are.
 # This means real end-to-end behavior (successful ls/cp/stat/... against a
 # live MinIO endpoint) is NOT covered here — only dispatch/validation/error
 # paths are, per the task's explicit fallback instruction.
+#
+# `mirror`'s deeper behavior (new+changed-only copy, dry-run no-op, --remove
+# deleting extras, the >1000 bound, the --json shape) IS covered, but through
+# `_mirror_diff`/`_mirror_bound_exceeded`/`_mirror_json_summary` directly —
+# these are pure functions with no I/O (see cmd_storage.spl), so they're
+# exercised with synthetic MirrorEntry lists/counts instead of a live list
+# call, while still proving the exact semantics `_storage_mirror_upload`/
+# `_storage_mirror_download` build their execution loop on top of.
 
-use app.devhub.cmd_storage.{handle_storage}
+use app.devhub.cmd_storage.{
+    handle_storage,
+    MirrorEntry, MirrorPlan, _mirror_diff, _mirror_bound_exceeded, _mirror_json_summary
+}
 
 
 describe "cmd_storage dispatch":
@@ -116,11 +128,97 @@ describe "cmd_storage dispatch":
         it "-r with unknown-alias-shaped full TARGET is rejected pre-network (parses as a local path, never remote)":
             expect(handle_storage(["rm", "unknownalias/bucket/key.bin", "-r"])).to_equal(1)
 
-    context "mirror — documented gap, ignores args entirely":
+    context "mirror — validation-only paths, all pre-network":
 
-        it "always returns the not-yet-implemented gap":
+        it "fewer than 2 positional args is a usage error":
             expect(handle_storage(["mirror"])).to_equal(1)
-            expect(handle_storage(["mirror", "src", "dst"])).to_equal(1)
+            expect(handle_storage(["mirror", "src"])).to_equal(1)
+
+        it "local -> local is rejected (mirror requires exactly one local side)":
+            expect(handle_storage(["mirror", "/tmp/a", "/tmp/b"])).to_equal(1)
+
+        it "remote -> remote is rejected (mirror requires exactly one local side)":
+            expect(handle_storage(["mirror", "minio/bucket/a", "minio/bucket/b"])).to_equal(1)
+
+        it "upload direction with unknown-alias DST is rejected pre-network":
+            expect(handle_storage(["mirror", "/tmp/a", "unknownalias/bucket"])).to_equal(1)
+
+        it "download direction with unknown-alias SRC is rejected pre-network":
+            expect(handle_storage(["mirror", "unknownalias/bucket", "/tmp/a"])).to_equal(1)
+
+        it "upload direction with bucket-less DST is rejected before config access":
+            expect(handle_storage(["mirror", "/tmp/a", "minio"])).to_equal(1)
+
+        it "download direction with bucket-less SRC is rejected before config access":
+            expect(handle_storage(["mirror", "minio", "/tmp/a"])).to_equal(1)
+
+    context "_mirror_diff — pure size-only diff, no I/O (covers copy/skip/remove semantics both directions)":
+
+        it "copies entries missing at the destination":
+            val source = [MirrorEntry(name: "a.txt", size: 10)]
+            val dest: [MirrorEntry] = []
+            val plan = _mirror_diff(source, dest, false)
+            expect(plan.to_copy).to_contain("a.txt")
+            expect(plan.skipped).to_equal(0)
+
+        it "copies entries present at the destination with a differing size":
+            val source = [MirrorEntry(name: "a.txt", size: 20)]
+            val dest = [MirrorEntry(name: "a.txt", size: 10)]
+            val plan = _mirror_diff(source, dest, false)
+            expect(plan.to_copy).to_contain("a.txt")
+
+        it "skips entries already in sync (same name, same size)":
+            val source = [MirrorEntry(name: "a.txt", size: 10)]
+            val dest = [MirrorEntry(name: "a.txt", size: 10)]
+            val plan = _mirror_diff(source, dest, false)
+            expect(plan.to_copy.len()).to_equal(0)
+            expect(plan.skipped).to_equal(1)
+
+        it "never populates to_remove without --remove (destination-only entries kept)":
+            val source: [MirrorEntry] = []
+            val dest = [MirrorEntry(name: "extra.txt", size: 5)]
+            val plan = _mirror_diff(source, dest, false)
+            expect(plan.to_remove.len()).to_equal(0)
+
+        it "--remove deletes destination entries absent from the source":
+            val source = [MirrorEntry(name: "keep.txt", size: 1)]
+            val dest = [MirrorEntry(name: "keep.txt", size: 1), MirrorEntry(name: "extra.txt", size: 5)]
+            val plan = _mirror_diff(source, dest, true)
+            expect(plan.to_remove).to_contain("extra.txt")
+            expect(plan.to_copy.len()).to_equal(0)
+            expect(plan.skipped).to_equal(1)
+
+        it "works symmetrically for the remote -> local direction (remote as source, local as dest)":
+            val remote_side = [MirrorEntry(name: "r.bin", size: 30), MirrorEntry(name: "same.bin", size: 4)]
+            val local_side = [MirrorEntry(name: "same.bin", size: 4)]
+            val plan = _mirror_diff(remote_side, local_side, false)
+            expect(plan.to_copy).to_contain("r.bin")
+            expect(plan.skipped).to_equal(1)
+
+    context "_mirror_bound_exceeded — pure >1000 safety-cap check, no I/O":
+
+        it "false when both sides are within the cap":
+            expect(_mirror_bound_exceeded(5, 5)).to_equal(false)
+
+        it "true when the source side alone exceeds 1000":
+            expect(_mirror_bound_exceeded(1001, 5)).to_equal(true)
+
+        it "true when the destination side alone exceeds 1000":
+            expect(_mirror_bound_exceeded(5, 1001)).to_equal(true)
+
+        it "false exactly at the 1000 boundary":
+            expect(_mirror_bound_exceeded(1000, 1000)).to_equal(false)
+
+    context "_mirror_json_summary — --json summary shape, built via concatenation":
+
+        it "renders the full non-dry-run shape":
+            expect(_mirror_json_summary(3, 1, 2, false)).to_equal("{\"copied\":3,\"removed\":1,\"skipped\":2,\"dry_run\":false}")
+
+        it "renders dry_run:true when planning only":
+            expect(_mirror_json_summary(3, 1, 2, true)).to_equal("{\"copied\":3,\"removed\":1,\"skipped\":2,\"dry_run\":true}")
+
+        it "renders zeros when nothing needed action":
+            expect(_mirror_json_summary(0, 0, 0, false)).to_equal("{\"copied\":0,\"removed\":0,\"skipped\":0,\"dry_run\":false}")
 
     context "presign / presign-put — validation-only paths":
 

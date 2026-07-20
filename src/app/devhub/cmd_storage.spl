@@ -11,10 +11,10 @@
 # §6): 0 success, 1 failure — no other codes in use anywhere in itf/storage.
 
 use std.nogc_sync_mut.file_system.file_ops.{file_read_text}
-use std.io_runtime.{time_now_unix_micros}
+use std.io_runtime.{time_now_unix_micros, file_read, file_size, file_delete, dir_walk, dir_create_all, is_dir}
 use app.devhub.storage_addr.{StorageAddr, parse_storage_addr, infer_cp_direction, resolve_alias_config, is_known_alias}
 use app.devhub.adapter_minio.{
-    load_minio_config,
+    load_minio_config, ObjectInfo,
     minio_list_buckets, minio_list_objects, minio_get_object, minio_stat_object,
     minio_put_text, minio_presign_get, minio_presign_put, minio_health_live,
     minio_download, minio_create_bucket, minio_delete_bucket, minio_delete_object
@@ -499,15 +499,300 @@ fn _storage_du(args: [text]) -> i64:
 
 
 # ---------------------------------------------------------------------------
-# mirror — GAP, explicitly out of scope for this pass (facade_storage.md §3
-# mirror row + §7): needs either a new ls+cp loop in the facade layer or an
-# `mc mirror` argv wrapper, neither of which is implemented here.
+# mirror — mc-style local-dir <-> remote-prefix sync (facade_storage.md §3
+# mirror row). Reuses minio_list_objects/minio_put_text/minio_download/
+# minio_delete_object exactly (no new transport code); the diffing itself
+# (_mirror_diff) is a pure function so it's testable without ever hitting a
+# real MinIO endpoint (see cmd_storage_spec.spl's NETWORK SAFETY note).
+#
+# ponytail: the sync rule is size-only (missing at destination OR differing
+# size). Real `mc mirror` also compares mtime; this facade has no portable
+# local-mtime <-> S3-LastModified comparison wired up, so that's a
+# documented ceiling, not an oversight — see facade_storage.md §3/§7.
 # ---------------------------------------------------------------------------
 
+val MIRROR_BOUND = 1000  # same object-count safety cap as `rb --force`/`rm -r`
+                         # (adapter_minio.spl has no batch DeleteObjects call)
+
+
+class MirrorEntry:
+    name: text  # path/key relative to the local dir / remote prefix
+    size: i64
+
+
+class MirrorPlan:
+    to_copy: [text]    # relative names present in source, missing/differing in dest
+    to_remove: [text]  # relative names present in dest, absent from source (only if remove)
+    skipped: i64       # relative names already in sync (same size both sides)
+
+
+fn _mirror_entry_index(entries: [MirrorEntry], name: text) -> i64:
+    var i = 0
+    while i < entries.len():
+        if entries[i].name == name:
+            return i
+        i = i + 1
+    -1
+
+
+fn _mirror_diff(source: [MirrorEntry], dest: [MirrorEntry], remove: bool) -> MirrorPlan:
+    """Pure size-only diff, no I/O (see ponytail note above the mirror
+    section). Works for either direction — callers just decide which side
+    is `source` and which is `dest`.
+    """
+    var to_copy: [text] = []
+    var skipped = 0
+    for s in source:
+        val idx = _mirror_entry_index(dest, s.name)
+        if idx < 0 or dest[idx].size != s.size:
+            to_copy.push(s.name)
+        else:
+            skipped = skipped + 1
+    var to_remove: [text] = []
+    if remove:
+        for d in dest:
+            if _mirror_entry_index(source, d.name) < 0:
+                to_remove.push(d.name)
+    MirrorPlan(to_copy: to_copy, to_remove: to_remove, skipped: skipped)
+
+
+fn _mirror_bound_exceeded(source_count: i64, dest_count: i64) -> bool:
+    """Whether either side's entry count is over the per-object-delete safety
+    cap (same MIRROR_BOUND as `rb --force`/`rm -r`) — checked before any
+    `--remove` delete loop runs. Pure/no I/O so it's testable with synthetic
+    counts."""
+    source_count > MIRROR_BOUND or dest_count > MIRROR_BOUND
+
+
+fn _mirror_json_summary(copied: i64, removed: i64, skipped: i64, dry_run: bool) -> text:
+    """Build the `--json` summary object via concatenation, not one nested
+    literal (}}-collapse landmine — doc/08_tracking/bug/
+    interp_brace_literal_collides_with_string_interpolation_2026-07-03.md)."""
+    val lb = "{"
+    val rb = "}"
+    val dry_text = if dry_run: "true" else: "false"
+    lb + "\"copied\":{copied},\"removed\":{removed},\"skipped\":{skipped},\"dry_run\":" + dry_text + rb
+
+
+fn _mirror_join_prefix(prefix: text, rel: text) -> text:
+    """Join a remote prefix (bucket-relative, may be "") with a relative name."""
+    if prefix == "":
+        return rel
+    if prefix.ends_with("/"):
+        return prefix + rel
+    prefix + "/" + rel
+
+
+fn _mirror_local_entries(local_dir: text) -> [MirrorEntry]:
+    """Real recursive local-file listing via std.io_runtime (NOT
+    std.nogc_sync_mut.file_system.file_ops/dir_ops — those are documented
+    mocks, see wiki_git.spl / bug wiki-confluence-mock-file-io). dir_walk
+    (rt_dir_walk, src/runtime/runtime.c) already returns files only, full
+    paths joined with a single "/" — no extra is_file filtering needed."""
+    var entries: [MirrorEntry] = []
+    val prefix_len = if local_dir.ends_with("/"): local_dir.len() else: local_dir.len() + 1
+    for p in dir_walk(local_dir):
+        val rel = if p.len() > prefix_len: p[prefix_len:] else: p
+        entries.push(MirrorEntry(name: rel, size: file_size(p)))
+    entries
+
+
+fn _mirror_remote_entries(objects: [ObjectInfo], prefix: text) -> [MirrorEntry]:
+    """Object keys relative to `prefix` (mirrors _mirror_local_entries' relative names)."""
+    var entries: [MirrorEntry] = []
+    for o in objects:
+        var rel = o.key
+        if prefix != "" and rel.starts_with(prefix):
+            rel = rel[prefix.len():]
+            if rel.starts_with("/"):
+                rel = rel[1:]
+        entries.push(MirrorEntry(name: rel, size: o.size))
+    entries
+
+
+fn _mirror_ensure_parent_dir(full_path: text):
+    """Create the parent directory of `full_path` if needed. Only needed on
+    the download side: minio_download -> rt_http_download writes straight to
+    `dest_path` with no auto-mkdir (unlike std.io_runtime.file_write, which
+    already retries-with-mkdir)."""
+    val parts = full_path.split("/")
+    if parts.len() <= 1:
+        return
+    var dir_parts: [text] = []
+    var i = 0
+    while i < parts.len() - 1:
+        dir_parts.push(parts[i])
+        i = i + 1
+    val dir_path = dir_parts.join("/")
+    if dir_path != "":
+        dir_create_all(dir_path)
+
+
 fn _storage_mirror(args: [text]) -> i64:
-    """`storage mirror SRC TARGET [--dry-run]` — not yet implemented, see docstring above."""
-    print_error("storage mirror: not yet implemented — needs a new ls+cp loop or an `mc mirror` wrapper (out of scope for this pass); see doc/05_design/app/devhub/facade_storage.md §3/§7. Workaround: run `storage cp` per object, or use the real `mc mirror` CLI if installed.")
-    1
+    """`storage mirror SRC DST [--dry-run] [--remove] [--json]`
+
+    Direction is inferred exactly like `cp` (infer_cp_direction) — exactly
+    one side must be a local path; remote->remote and local->local are
+    usage errors ("mirror requires exactly one local side"). Default sync
+    rule: copy entries missing at the destination or with a differing size
+    (see _mirror_diff's ponytail note). `--remove` additionally deletes
+    destination entries absent from the source, bounded the same way as
+    `rm -r`/`rb --force` (MIRROR_BOUND).
+    """
+    val pos = _positional_args(args)
+    if pos.len() < 2:
+        print_error("usage: storage mirror SRC DST [--dry-run] [--remove] [--json]")
+        return 1
+    val src = parse_storage_addr(pos[0])
+    val dst = parse_storage_addr(pos[1])
+    if not src.valid:
+        print_error("storage mirror: invalid SRC '{pos[0]}': {src.error}")
+        return 1
+    if not dst.valid:
+        print_error("storage mirror: invalid DST '{pos[1]}': {dst.error}")
+        return 1
+    val direction = infer_cp_direction(src, dst)
+    if direction == "error_remote_remote" or direction == "error_local_local":
+        print_error("storage mirror: mirror requires exactly one local side (got '{pos[0]}' -> '{pos[1]}')")
+        return 1
+
+    val dry_run = _has_flag(args, "--dry-run")
+    val remove = _has_flag(args, "--remove")
+    if direction == "upload":
+        return _storage_mirror_upload(src, dst, dry_run, remove, args)
+    _storage_mirror_download(src, dst, dry_run, remove, args)
+
+
+fn _storage_mirror_upload(src: StorageAddr, dst: StorageAddr, dry_run: bool, remove: bool, args: [text]) -> i64:
+    """local-dir -> remote-prefix."""
+    if dst.bucket == "":
+        print_error("storage mirror: upload DST must be alias/bucket[/prefix] (got '{dst.raw}')")
+        return 1
+    if not is_dir(src.local_path):
+        print_error("storage mirror: SRC directory not found: '{src.local_path}'")
+        return 1
+    val (auth_ok, cfg, auth_err) = resolve_alias_config(dst.alias)
+    if not auth_ok:
+        print_error(auth_err)
+        return 1
+    val (list_ok, objects, list_err) = minio_list_objects(cfg, dst.bucket, dst.key)
+    if not list_ok:
+        print_error(list_err)
+        return 1
+    val local_entries = _mirror_local_entries(src.local_path)
+    val remote_entries = _mirror_remote_entries(objects, dst.key)
+    if remove and _mirror_bound_exceeded(local_entries.len(), remote_entries.len()):
+        print_error("storage mirror --remove: refusing — {src.local_path} has {local_entries.len()} local files, {dst.alias}/{dst.bucket}/{dst.key} has {remote_entries.len()} objects, over the {MIRROR_BOUND}-object safety cap for per-object delete (adapter_minio.spl has no batch DeleteObjects call). Narrow the prefix, or retry without --remove.")
+        return 1
+    val plan = _mirror_diff(local_entries, remote_entries, remove)
+
+    if dry_run:
+        for name in plan.to_copy:
+            print "would copy: {src.local_path}/{name} -> {dst.alias}/{dst.bucket}/{_mirror_join_prefix(dst.key, name)}"
+        for name in plan.to_remove:
+            print "would remove: {dst.alias}/{dst.bucket}/{_mirror_join_prefix(dst.key, name)}"
+        if wants_json(args):
+            print _mirror_json_summary(plan.to_copy.len(), plan.to_remove.len(), plan.skipped, true)
+            return 0
+        print_success("Mirrored (dry-run): {src.local_path} -> {dst.alias}/{dst.bucket}/{dst.key} ({plan.to_copy.len()} to copy, {plan.to_remove.len()} to remove, {plan.skipped} skipped)")
+        return 0
+
+    var copied = 0
+    var failed = false
+    for name in plan.to_copy:
+        val full_path = if src.local_path.ends_with("/"): src.local_path + name else: src.local_path + "/" + name
+        val key = _mirror_join_prefix(dst.key, name)
+        # ponytail: text-body upload only, same ceiling as `storage cp`'s
+        # upload path (adapter_minio.minio_put_text/minio_put_object) — a
+        # binary file round-trips lossily here; the presign-put escape hatch
+        # documented on `cp` applies equally to a per-file mirror workaround.
+        val content = file_read(full_path)
+        val (ok, _etag, put_err) = minio_put_text(cfg, dst.bucket, key, content, "")
+        if not ok:
+            print_error("storage mirror: failed to copy '{full_path}': {put_err}")
+            failed = true
+        else:
+            print_dim("copied {full_path} -> {dst.alias}/{dst.bucket}/{key}")
+            copied = copied + 1
+
+    var removed = 0
+    for name in plan.to_remove:
+        val key = _mirror_join_prefix(dst.key, name)
+        val (ok, del_err) = minio_delete_object(cfg, dst.bucket, key)
+        if not ok:
+            print_error("storage mirror: failed to remove '{dst.alias}/{dst.bucket}/{key}': {del_err}")
+            failed = true
+        else:
+            print_dim("removed {dst.alias}/{dst.bucket}/{key}")
+            removed = removed + 1
+
+    if wants_json(args):
+        print _mirror_json_summary(copied, removed, plan.skipped, false)
+    else:
+        print_success("Mirrored: {src.local_path} -> {dst.alias}/{dst.bucket}/{dst.key} ({copied} copied, {removed} removed, {plan.skipped} skipped)")
+    if failed: 1 else: 0
+
+
+fn _storage_mirror_download(src: StorageAddr, dst: StorageAddr, dry_run: bool, remove: bool, args: [text]) -> i64:
+    """remote-prefix -> local-dir."""
+    if src.bucket == "":
+        print_error("storage mirror: download SRC must be alias/bucket[/prefix] (got '{src.raw}')")
+        return 1
+    val (auth_ok, cfg, auth_err) = resolve_alias_config(src.alias)
+    if not auth_ok:
+        print_error(auth_err)
+        return 1
+    val (list_ok, objects, list_err) = minio_list_objects(cfg, src.bucket, src.key)
+    if not list_ok:
+        print_error(list_err)
+        return 1
+    val remote_entries = _mirror_remote_entries(objects, src.key)
+    val local_entries = if is_dir(dst.local_path): _mirror_local_entries(dst.local_path) else: []
+    if remove and _mirror_bound_exceeded(remote_entries.len(), local_entries.len()):
+        print_error("storage mirror --remove: refusing — {src.alias}/{src.bucket}/{src.key} has {remote_entries.len()} objects, {dst.local_path} has {local_entries.len()} local files, over the {MIRROR_BOUND}-object safety cap for per-object delete (adapter_minio.spl has no batch DeleteObjects call). Narrow the prefix, or retry without --remove.")
+        return 1
+    val plan = _mirror_diff(remote_entries, local_entries, remove)
+
+    if dry_run:
+        for name in plan.to_copy:
+            print "would copy: {src.alias}/{src.bucket}/{_mirror_join_prefix(src.key, name)} -> {dst.local_path}/{name}"
+        for name in plan.to_remove:
+            print "would remove: {dst.local_path}/{name}"
+        if wants_json(args):
+            print _mirror_json_summary(plan.to_copy.len(), plan.to_remove.len(), plan.skipped, true)
+            return 0
+        print_success("Mirrored (dry-run): {src.alias}/{src.bucket}/{src.key} -> {dst.local_path} ({plan.to_copy.len()} to copy, {plan.to_remove.len()} to remove, {plan.skipped} skipped)")
+        return 0
+
+    var copied = 0
+    var failed = false
+    for name in plan.to_copy:
+        val key = _mirror_join_prefix(src.key, name)
+        val full_path = if dst.local_path.ends_with("/"): dst.local_path + name else: dst.local_path + "/" + name
+        _mirror_ensure_parent_dir(full_path)
+        val (ok, _bytes, err) = minio_download(cfg, src.bucket, key, full_path, 3600)
+        if not ok:
+            print_error("storage mirror: failed to copy '{src.alias}/{src.bucket}/{key}': {err}")
+            failed = true
+        else:
+            print_dim("copied {src.alias}/{src.bucket}/{key} -> {full_path}")
+            copied = copied + 1
+
+    var removed = 0
+    for name in plan.to_remove:
+        val full_path = if dst.local_path.ends_with("/"): dst.local_path + name else: dst.local_path + "/" + name
+        if file_delete(full_path):
+            print_dim("removed {full_path}")
+            removed = removed + 1
+        else:
+            print_error("storage mirror: failed to remove '{full_path}'")
+            failed = true
+
+    if wants_json(args):
+        print _mirror_json_summary(copied, removed, plan.skipped, false)
+    else:
+        print_success("Mirrored: {src.alias}/{src.bucket}/{src.key} -> {dst.local_path} ({copied} copied, {removed} removed, {plan.skipped} skipped)")
+    if failed: 1 else: 0
 
 
 # ---------------------------------------------------------------------------
@@ -652,7 +937,7 @@ fn _print_storage_help():
     print "  presign alias/bucket/key         Generate a presigned GET URL (--expires SECONDS)"
     print "  presign-put alias/bucket/key     Generate a presigned PUT URL (binary-upload workaround)"
     print "  du alias/bucket[/prefix]         Aggregate object sizes under a prefix (--depth N)"
-    print "  mirror SRC DST                   NOT YET IMPLEMENTED (see below)"
+    print "  mirror SRC DST                   Sync a local dir <-> alias/bucket[/prefix] (--dry-run, --remove)"
     print "  health [alias]                   Probe /minio/health/live"
     print ""
     print "Flags:"
@@ -662,6 +947,9 @@ fn _print_storage_help():
     print "  --expires N       For `presign`/`presign-put`: URL validity in seconds (default 86400)"
     print "  --depth N         For `du`: truncate the grouped summary to N path segments"
     print "  --content-type CT For `cp` (upload): response Content-Type"
+    print "  --dry-run         For `mirror`: print what would be copied/removed, do nothing"
+    print "  --remove          For `mirror`: also delete destination entries absent from source"
+    print "                    (bounded to 1000 entries per side, same cap as `rm -r`/`rb --force`)"
     print "  --no-pager        Never page long `ls` output"
     print ""
     print "Addressing: every TARGET is either a local filesystem path, or"
@@ -670,7 +958,8 @@ fn _print_storage_help():
     print ""
     print "NOTE: `stat`/`ls` cannot use a real HEAD for size/etag/last-modified — the"
     print "  underlying HTTP transport exposes no response headers, so these fall back"
-    print "  to ListObjectsV2. `mirror` is a documented gap, not a silent no-op."
+    print "  to ListObjectsV2. `mirror` compares size only, not mtime (documented ceiling,"
+    print "  see facade_storage.md §3)."
     print ""
     print "Config: ~/.config/itf/auth.sdn"
     print "  [minio]"
