@@ -91,3 +91,39 @@ next step for whoever picks this up.
   documented here. The spec is left RED (not weakened) against this
   remaining runtime bug — it is not in the triage pass's FIXED list because
   it does not go green.
+
+## Addendum 2026-07-20 (cluster `cl_scilib` triage) — confirms the "likely sibling" hypothesis
+
+The same bare-`f64`-literal-into-`f32`-param stale-API pattern (and the same
+literal-suffix fix) was independently hit across 6 more `test/feature/scilib/`
+specs. After the `f32` suffix fix unblocks compilation, all 6 now fail with
+this exact runtime bug (confirming the original "likely sibling
+`rt_simd_{add,sub,div,fma}_f32x4`" hypothesis, PLUS a previously-unlisted
+8-lane instance):
+
+```
+runtime: rt_simd_add_f32x4: field x must be a float, got Float32(1.0)
+runtime: rt_simd_sub_f32x4: field x must be a float, got Float32(...)
+runtime: rt_simd_mul_f32x4: field x must be a float, got Float32(...)
+runtime: rt_simd_div_f32x4: field x must be a float, got Float32(...)
+runtime: rt_simd_fma_f32x4: field x must be a float, got Float32(...)
+runtime: rt_simd_fma_f32x8: field e0 must be a float, got Float32(1.0)
+```
+
+The `f32x8` (`Vec8f`) hit is new scope beyond the `Vec4f` externs this doc
+originally covered — same class of bug, `Vec8f`'s `static fn splat` /
+`rt_simd_fma_f32x8`, not previously listed.
+
+Newly affected specs (literal-suffix fix landed in each file as-is, left
+RED against this runtime bug, NOT in the triage pass's FIXED list):
+- test/feature/scilib/linalg_simd_spec.spl (`rt_simd_mul_f32x4`, `rt_simd_fma_f32x4`)
+- test/feature/scilib/ndarray_broadcast_spec.spl (`rt_simd_{add,sub,mul,div}_f32x4`)
+- test/feature/scilib/ndarray_reduction_spec.spl (`rt_simd_add_f32x4`)
+- test/feature/scilib/ndarray_simd_spec.spl (`rt_simd_{add,mul}_f32x4`)
+- test/feature/scilib/ndarray_ufunc_spec.spl (`rt_simd_{sub,mul}_f32x4`)
+- test/feature/scilib/simd_f32_spec.spl (`rt_simd_fma_f32x8`)
+
+One additional spec in this cluster hit the identical stale-literal issue
+but has NO remaining runtime dependency on the boxed-`Float32` SIMD path
+after the suffix fix, so it goes fully green and IS in the triage pass's
+FIXED list: `test/feature/scilib/ndarray_dtype_spec.spl`.
