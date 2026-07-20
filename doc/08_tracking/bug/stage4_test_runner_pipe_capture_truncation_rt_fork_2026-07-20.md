@@ -253,3 +253,71 @@ binary containing the `runtime_fork.c` fix has been produced or tested yet.
   (fixed a >900s hang caused by `app.io.mod` transitively pulling in the whole
   compiler; unrelated to the truncation bug documented here, which persists
   after that fix).
+- Held fix commit: `9543d6f1aa3`. This commit lives in a **detached commit in
+  `/tmp/wt_deploy`** — if that worktree is ever removed, the commit becomes
+  unreachable and eligible for git GC. Do not treat this reference alone as a
+  durable recovery path; the full patch is embedded below for exactly that
+  reason.
+
+### Full patch (embedded for durability — do not depend on the worktree commit or scratchpad above)
+
+Copied verbatim from the semantic diff saved during the original (unverified)
+fix session. Still **WRITTEN, NOT VERIFIED** — see the Status line at the top
+of this doc. Applies to `src/runtime/runtime_fork.c`,
+`rt_fork_parent_wait_bounded`, against the pre-fix baseline at
+`src/runtime/runtime_fork.c` index `41cc9536cea`:
+
+```diff
+diff --git a/src/runtime/runtime_fork.c b/src/runtime/runtime_fork.c
+index 41cc9536cea..e310e0170b4 100644
+--- a/src/runtime/runtime_fork.c
++++ b/src/runtime/runtime_fork.c
+@@ -309,4 +309,16 @@ int64_t rt_fork_parent_wait_bounded(int64_t child_pid, int64_t timeout_ms,
+     }
+ 
++    /* Grace polls after the tracked child_pid is reaped: a delegated driver
++     * binary (e.g. bin/simple execing/inheriting fds down to bin/simple_seed)
++     * can still hold the pipe write end open via an inherited fd for a few
++     * scheduler ticks after the directly-forked process (sh/timeout) exits
++     * and is reaped. Breaking on the very next poll cycle after child_exited
++     * silently drops whatever a still-writing descendant produces after that
++     * point -- verified via strace that the descendant DOES write its full
++     * output to the pipe, yet callers observed truncated captures. Cap the
++     * grace period so a genuinely stuck descendant can't hang the caller. */
++    int exited_grace_polls = 0;
++    const int FORK_EXIT_GRACE_POLLS = 40; /* ~2s at the 50ms poll_timeout below */
++
+     while (stdout_open || stderr_open) {
+         if (!child_exited) {
+@@ -353,9 +365,13 @@ int64_t rt_fork_parent_wait_bounded(int64_t child_pid, int64_t timeout_ms,
+         if (ret == 0) {
+             if (child_exited) {
+-                cleanup_descendants = stdout_open || stderr_open;
+-                break;
++                exited_grace_polls++;
++                if (exited_grace_polls >= FORK_EXIT_GRACE_POLLS) {
++                    cleanup_descendants = stdout_open || stderr_open;
++                    break;
++                }
+             }
+             continue;
+         }
++        exited_grace_polls = 0;
+ 
+         /* Process events */
+@@ -397,8 +413,10 @@ int64_t rt_fork_parent_wait_bounded(int64_t child_pid, int64_t timeout_ms,
+             }
+         }
+-        if (child_exited) {
+-            cleanup_descendants = stdout_open || stderr_open;
+-            break;
+-        }
++        /* Do NOT break here just because child_exited: this poll cycle just
++         * made progress (ret > 0), so a descendant may still be writing.
++         * Let the outer `while (stdout_open || stderr_open)` loop continue
++         * driving reads until both streams hit real EOF, or the grace-poll
++         * counter above (for the no-progress case) or the overall timeout
++         * deadline bounds the wait. */
+     }
+ 
+```
