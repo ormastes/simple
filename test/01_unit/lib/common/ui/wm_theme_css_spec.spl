@@ -1,0 +1,79 @@
+use std.spec.*
+use common.ui.wm_theme_css.{
+    WmThemeCssTokens,
+    wm_theme_tokens_from_css,
+    wm_theme_tokens_from_html,
+    wm_chrome_colors_from_css_text
+}
+use common.ui.wm_chrome_theme.{wm_chrome_theme_defaults}
+
+describe "WM theme CSS/HTML parser":
+    """A user drops a .css or .html file with 6 --wm-* custom properties and
+    points SIMPLE_WM_THEME_FILE at it; wm_theme_css.spl turns that text into
+    a full WmChromeColors palette, defaulting any slot whose token is
+    missing or unparseable."""
+
+    it "parses all 6 --wm-* custom properties from raw CSS":
+        val css = "--wm-bg: #112233; --wm-fg: #445566; --wm-accent: #778899; --wm-surface: #aabbcc; --wm-surface-hover: #ddeeff; --wm-error: #ff0000;"
+        val tokens = wm_theme_tokens_from_css(css)
+        expect(tokens.wtc_bg).to_equal("#112233")
+        expect(tokens.wtc_fg).to_equal("#445566")
+        expect(tokens.wtc_accent).to_equal("#778899")
+        expect(tokens.wtc_surface).to_equal("#aabbcc")
+        expect(tokens.wtc_surface_hover).to_equal("#ddeeff")
+        expect(tokens.wtc_error).to_equal("#ff0000")
+
+        val colors = wm_chrome_colors_from_css_text(css)
+        expect(colors.desktop_bg).to_equal(0xFF112233u32)
+        expect(colors.text_primary).to_equal(0xFF445566u32)
+        expect(colors.accent).to_equal(0xFF778899u32)
+        expect(colors.command_lane).to_equal(0xFFAABBCCu32)
+        expect(colors.title_unfocused).to_equal(0xFFDDEEFFu32)
+        expect(colors.close_button).to_equal(0xFFFF0000u32)
+
+    it "disambiguates --wm-surface from the longer --wm-surface-hover":
+        val css = "--wm-surface: #101010; --wm-surface-hover: #202020;"
+        val tokens = wm_theme_tokens_from_css(css)
+        expect(tokens.wtc_surface).to_equal("#101010")
+        expect(tokens.wtc_surface_hover).to_equal("#202020")
+
+    it "extracts tokens from a <style> block inside an HTML document":
+        val html = "<html><head><style>\n  --wm-bg: #123456;\n  --wm-accent: #abcdef;\n</style></head><body></body></html>"
+        val tokens = wm_theme_tokens_from_html(html)
+        expect(tokens.wtc_bg).to_equal("#123456")
+        expect(tokens.wtc_accent).to_equal("#abcdef")
+        expect(tokens.wtc_fg).to_equal("")
+
+    it "falls back to defaults for any missing token":
+        val css = "--wm-accent: #010203;"
+        val defaults = wm_chrome_theme_defaults()
+        val colors = wm_chrome_colors_from_css_text(css)
+        expect(colors.desktop_bg).to_equal(defaults.desktop_bg)
+        expect(colors.close_button).to_equal(defaults.close_button)
+        expect(colors.command_lane).to_equal(defaults.command_lane)
+        expect(colors.accent).to_equal(0xFF010203u32)
+        expect(colors.title_focused).to_equal(0xFF010203u32)
+
+    it "expands 3-digit hex shorthand":
+        val css = "--wm-error: #f0a;"
+        val tokens = wm_theme_tokens_from_css(css)
+        expect(tokens.wtc_error).to_equal("#f0a")
+        val colors = wm_chrome_colors_from_css_text(css)
+        expect(colors.close_button).to_equal(0xFFFF00AAu32)
+
+    it "treats garbage input as all-defaults, never a crash":
+        val defaults = wm_chrome_theme_defaults()
+        val garbage = "this is not a stylesheet at all { nonsense: yes }"
+        val tokens = wm_theme_tokens_from_css(garbage)
+        expect(tokens.wtc_bg).to_equal("")
+        expect(tokens.wtc_error).to_equal("")
+        val colors = wm_chrome_colors_from_css_text(garbage)
+        expect(colors.desktop_bg).to_equal(defaults.desktop_bg)
+        expect(colors.close_button).to_equal(defaults.close_button)
+        expect(colors.background_hex).to_equal(defaults.background_hex)
+
+    it "treats an empty string as all-defaults":
+        val defaults = wm_chrome_theme_defaults()
+        val colors = wm_chrome_colors_from_css_text("")
+        expect(colors.desktop_bg).to_equal(defaults.desktop_bg)
+        expect(colors.accent).to_equal(defaults.accent)

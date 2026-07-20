@@ -23,6 +23,7 @@ Configuration files for build, test, packaging, and tooling.
 | `simple.test.sdn` | Test configuration |
 | `t32` | TRACE32 configurations |
 | `t32_stm_linux_hidden.t32` | TRACE32 STM configuration |
+| `theme` | Standalone WM/GUI theme CSS files (SIMPLE_WM_THEME_FILE) |
 | `themes` | Theme definitions |
 | `traceability.sdn` | Traceability configuration |
 | `FILE.md` | This manifest |

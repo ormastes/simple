@@ -1,0 +1,180 @@
+# WM theme CSS/HTML parser — lets a user-provided stylesheet drive the WM
+# chrome palette (titlebars, taskbar, desktop, close button) without editing
+# any .spl source.
+#
+# Contract: 6 CSS custom properties, scoped to the WM chrome (distinct from
+# the GUI widget theme's --ui-*/--app-* tokens resolved by SimpleTheme in
+# common.ui.simple_theme — that pipeline stays untouched):
+#   --wm-bg             desktop/compositor background
+#   --wm-fg              titlebar/taskbar text color
+#   --wm-accent           focused-titlebar / accent fill
+#   --wm-surface          command lane / taskbar / window body fill
+#   --wm-surface-hover     unfocused titlebar fill
+#   --wm-error             close-button fill
+#
+# Any custom property missing or unparseable keeps the byte-identical
+# default for that slot — see wm_chrome_colors_from_gui_tokens in
+# wm_chrome_theme.spl, which this module hands its extracted tokens to
+# rather than re-deriving WmChromeColors itself.
+#
+# Freestanding-safe: pure text scanning, no fs/env/allocator-heavy imports,
+# so this module can be pulled into the in-guest/baremetal build too.
+#
+# Design note (in-guest consumption, not wired this pass): once the guest
+# VFS/module-init path is stable, the boot sequence would read a well-known
+# path (e.g. /theme.css) off the mounted FAT32 disk after mount, pass its
+# text straight to wm_chrome_colors_from_css_text(), and
+# register_wm_chrome_theme() the result — the exact same two calls the host
+# lane below makes from SIMPLE_WM_THEME_FILE. Not wired here because the
+# guest module-init and VFS read-before-mount ordering are still landmines
+# tracked separately; the host lane (this pass) exercises the parser and
+# bridge end-to-end so the in-guest wiring is a pure plumbing change later.
+
+use common.ui.wm_chrome_theme.{WmChromeColors, wm_chrome_colors_from_gui_tokens}
+
+# Unique `wtc_` field prefix dodges the most-fields-wins struct-inference
+# landmine when multiple small text-only structs are in scope.
+struct WmThemeCssTokens:
+    wtc_bg: text
+    wtc_fg: text
+    wtc_accent: text
+    wtc_surface: text
+    wtc_surface_hover: text
+    wtc_error: text
+
+fn _wm_theme_is_ws(c: text) -> bool:
+    if c == " ":
+        return true
+    if c == "\t":
+        return true
+    if c == "\n":
+        return true
+    if c == "\r":
+        return true
+    false
+
+fn _wm_theme_skip_ws(css: text, pos: i64) -> i64:
+    var i = pos
+    val n = css.len()
+    while i < n:
+        if _wm_theme_is_ws(css.char_at(i)):
+            i = i + 1
+        else:
+            return i
+    i
+
+fn _wm_theme_find_terminator(css: text, pos: i64) -> i64:
+    # First of ';' or '}' at/after pos; end-of-text if neither appears.
+    val rest = css.substring(pos, css.len())
+    val semi = rest.index_of(";") ?? -1
+    val brace = rest.index_of("}") ?? -1
+    if semi < 0 and brace < 0:
+        return css.len()
+    if semi < 0:
+        return pos + brace
+    if brace < 0:
+        return pos + semi
+    if semi < brace:
+        return pos + semi
+    pos + brace
+
+fn _wm_theme_css_value(css: text, prop: text) -> text:
+    # Scans for `prop` followed (after optional whitespace) by ':'. This
+    # ordering also disambiguates prefix collisions for free — e.g. a scan
+    # for "--wm-surface" that lands on "--wm-surface-hover: ..." finds '-'
+    # (not ':') right after the name and keeps searching past it, so it
+    # never mismatches onto the longer property.
+    var search_from = 0
+    val css_len = css.len()
+    while search_from < css_len:
+        val remaining = css.substring(search_from, css_len)
+        val rel = remaining.index_of(prop) ?? -1
+        if rel < 0:
+            return ""
+        val name_start = search_from + rel
+        val after_name = name_start + prop.len()
+        val colon_pos = _wm_theme_skip_ws(css, after_name)
+        if colon_pos < css_len and css.char_at(colon_pos) == ":":
+            val value_start = colon_pos + 1
+            val term = _wm_theme_find_terminator(css, value_start)
+            return css.substring(value_start, term).trim()
+        search_from = after_name
+    ""
+
+fn _wm_theme_strip_css_comments(css: text) -> text:
+    # Comment-tolerant: `/* ... */` spans are dropped before scanning so a
+    # commented-out `--wm-bg: #000;` never shadows the real declaration.
+    var out = ""
+    var rest = css
+    while true:
+        val start = rest.index_of("/*") ?? -1
+        if start < 0:
+            return out + rest
+        out = out + rest.substring(0, start)
+        val after = rest.substring(start + 2, rest.len())
+        val end = after.index_of("*/") ?? -1
+        if end < 0:
+            return out
+        rest = after.substring(end + 2, after.len())
+    out
+
+fn wm_theme_tokens_from_css(css: text) -> WmThemeCssTokens:
+    """Scan raw CSS text for the 6 --wm-* custom properties. Absent/garbage
+    tokens come back as "" — callers (wm_chrome_colors_from_gui_tokens) fall
+    back to the default color for that slot."""
+    val clean = _wm_theme_strip_css_comments(css)
+    WmThemeCssTokens(
+        wtc_bg: _wm_theme_css_value(clean, "--wm-bg"),
+        wtc_fg: _wm_theme_css_value(clean, "--wm-fg"),
+        wtc_accent: _wm_theme_css_value(clean, "--wm-accent"),
+        wtc_surface: _wm_theme_css_value(clean, "--wm-surface"),
+        wtc_surface_hover: _wm_theme_css_value(clean, "--wm-surface-hover"),
+        wtc_error: _wm_theme_css_value(clean, "--wm-error")
+    )
+
+fn _wm_theme_extract_style_blocks(html: text) -> text:
+    # Concatenates the contents of every <style>...</style> block. Simple
+    # lowercase tag match (no full HTML/XML parsing needed for this).
+    val lower = html.lower()
+    val n = html.len()
+    var out = ""
+    var search_from = 0
+    while search_from < n:
+        val open_rel = lower.substring(search_from, n).index_of("<style") ?? -1
+        if open_rel < 0:
+            return out
+        val open_abs = search_from + open_rel
+        val gt_rel = lower.substring(open_abs, n).index_of(">") ?? -1
+        if gt_rel < 0:
+            return out
+        val content_start = open_abs + gt_rel + 1
+        val close_rel = lower.substring(content_start, n).index_of("</style") ?? -1
+        if close_rel < 0:
+            return out + html.substring(content_start, n)
+        val content_end = content_start + close_rel
+        out = out + html.substring(content_start, content_end) + "\n"
+        search_from = content_end
+    out
+
+fn wm_theme_tokens_from_html(html: text) -> WmThemeCssTokens:
+    """Extract <style> block contents and parse those as CSS. A file with no
+    <style> tags is treated as raw CSS, so plain .css files also work
+    through this entry point."""
+    val css = _wm_theme_extract_style_blocks(html)
+    if css == "":
+        return wm_theme_tokens_from_css(html)
+    wm_theme_tokens_from_css(css)
+
+fn wm_chrome_colors_from_css_text(content: text) -> WmChromeColors:
+    """Top-level entry: user-provided .css or .html theme file text -> a
+    full WmChromeColors palette, via the existing GUI-token bridge
+    (wm_chrome_colors_from_gui_tokens) so per-slot default fallback stays in
+    exactly one place."""
+    val tokens = wm_theme_tokens_from_html(content)
+    wm_chrome_colors_from_gui_tokens(
+        tokens.wtc_bg,
+        tokens.wtc_fg,
+        tokens.wtc_accent,
+        tokens.wtc_surface,
+        tokens.wtc_surface_hover,
+        tokens.wtc_error)
