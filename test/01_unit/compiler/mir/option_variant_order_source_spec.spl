@@ -64,6 +64,25 @@ describe "MIR Option variant order":
         expect(source).to_contain("if result_struct_name != \"\":")
         expect(source).to_contain("self.struct_value_syms[result_local.id] = result_struct_name")
 
+    it "registers struct-name provenance on a null-coalesce (??) result too":
+        # `.?`/ExistsCheck and `??`/NullCoalesce share the exact same
+        # option_payload_or_self/decode_runtime_value/enum_payload_value
+        # helpers (this file, adjacent case arms) and were PROVEN to share
+        # the identical struct field-misread symptom: `x ?? default` on a
+        # struct Option returned 33 (both fields read as field 0) on BOTH
+        # the Some-branch (x present) and the None-branch (the `default`
+        # expression itself), before this fix. Mirrors the ExistsCheck fix:
+        # try the Option-declared inner struct name via
+        # option_inner_hir_type_for_local on the LEFT operand first, then
+        # struct_value_syms on left_local (raw migration form), then
+        # struct_value_syms on right_local (the default expression's own
+        # fresh construction, checked once right_local exists).
+        val source = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl") ?? ""
+
+        expect(source).to_contain("if val nc_inner_type = self.option_inner_hir_type_for_local(left, left_local):")
+        expect(source).to_contain("val nc_fallback_sym = self.struct_value_syms.get(left_local.id)")
+        expect(source).to_contain("val nc_right_fallback_sym = self.struct_value_syms.get(right_local.id)")
+
     it "preserves unresolved method Option return provenance":
         val fixture = rt_file_read_text("test/fixtures/compiler/native_option_try_unresolved_method_loud.spl") ?? ""
         val method_source = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl") ?? ""

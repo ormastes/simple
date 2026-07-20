@@ -2023,6 +2023,39 @@ impl MirLowering:
                 var result_type = MirType.i64()
                 if val expr_type = expr_value.type_:
                     result_type = self.lower_type(expr_type)
+                # Struct-typed payload: same gap as ExistsCheck (`.?`) just
+                # below, and proven to reproduce identically here (both
+                # `x ?? default` and its None-branch default silently
+                # defaulted every `v.x`/`v.y` field to index 0 -- see
+                # hosted_native_option_try_unwrap_payload_leak_2026-07-19).
+                # `enum_payload_value`'s default arm hands back the raw
+                # ptrtoint'd handle untouched (correct bits) but with no
+                # struct-name provenance on the merged result_local. Look up
+                # the left operand's Option-declared inner struct name the
+                # same way ExistsCheck does; the right (default) operand's
+                # own fresh construction is checked as an additional
+                # fallback once right_local exists, below.
+                var result_struct_name = ""
+                if val nc_inner_type = self.option_inner_hir_type_for_local(left, left_local):
+                    match nc_inner_type.kind:
+                        case HirTypeKind.Named(nc_struct_symbol, _):
+                            val nc_type_symbol = self.symbols.get_symbol(nc_struct_symbol)
+                            if nc_type_symbol != nil:
+                                match nc_type_symbol.kind:
+                                    case Struct:
+                                        result_struct_name = nc_type_symbol.name
+                                    case _: ()
+                        case _: ()
+                if result_struct_name == "":
+                    # Same "raw migration form" fallback as ExistsCheck: a
+                    # struct pointer bound straight to `T?` without ever
+                    # calling ensure_option_handle leaves left_local with no
+                    # local_hir_types/option_value_locals entry, but struct
+                    # construction itself always registers struct_value_syms
+                    # on the raw pointer.
+                    val nc_fallback_sym = self.struct_value_syms.get(left_local.id)
+                    if nc_fallback_sym != nil:
+                        result_struct_name = nc_fallback_sym ?? ""
                 var b_nc = self.builder
                 val is_some_func = MirOperand(kind: MirOperandKind.Const(
                     MirConstValue.Str("rt_is_some"),
@@ -2069,6 +2102,15 @@ impl MirLowering:
                 b_right.emit_copy(result_local, right_value)
                 b_right.terminate_goto(merge_block)
                 self.builder = b_right
+                if result_struct_name == "":
+                    # The right (default) operand is a fresh, non-Option
+                    # expression -- its own construction registers
+                    # struct_value_syms on right_local directly, independent
+                    # of any Option-unwrap machinery. Use it if the left
+                    # (Option) side's lookup above found nothing.
+                    val nc_right_fallback_sym = self.struct_value_syms.get(right_local.id)
+                    if nc_right_fallback_sym != nil:
+                        result_struct_name = nc_right_fallback_sym ?? ""
 
                 if self.runtime_value_locals.has(left_value.id) or self.runtime_value_locals.has(right_value.id):
                     self.runtime_value_locals[result_local.id] = true
@@ -2076,6 +2118,8 @@ impl MirLowering:
                     self.runtime_array_locals[result_local.id] = true
                 if self.runtime_dict_locals.has(left_value.id) or self.runtime_dict_locals.has(right_value.id):
                     self.runtime_dict_locals[result_local.id] = true
+                if result_struct_name != "":
+                    self.struct_value_syms[result_local.id] = result_struct_name
 
                 var b_merge = self.builder
                 b_merge.switch_to_block(merge_block)

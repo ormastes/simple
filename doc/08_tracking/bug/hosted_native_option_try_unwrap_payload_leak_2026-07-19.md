@@ -102,6 +102,73 @@ non-nil-ness already distinguishes Some/None for `rt_is_some`/
 `rt_unwrap_or_self`, so the canonical enum-id-1 wrap is skippable and IS
 skipped). Verified: `v.x * 10 + v.y` now returns **34**.
 
+### 3. `NullCoalesce` (`??`) shares the same struct gap — FIXED
+
+Cross-lane question (2026-07-20): does `??` share a lowering path with `.?`,
+and does either explain a THIRD independent Option-unwrap defect found the
+same day (`current ?? mutex_new(0)` on a `Mutex?` in
+`src/lib/nogc_sync_mut/text_layout/font_renderer.spl`, reports `== nil` false
+but SIGILLs/faults `cr2=0x0` on the first method call — doc
+`font_renderer_resolve_metrics_nil_receiver_seed_2026-07-20.md`)? Investigated
+directly, not assumed:
+
+- **`.?`/`??` DO share a lowering path — proven, not inferred.**
+  `NullCoalesce` (`expr_dispatch.spl`, the case arm immediately above
+  `ExistsCheck` in the same file, with an explicit "Mirror the ExistsCheck
+  fix" comment already in place) calls the exact same
+  `option_payload_or_self` / `decode_runtime_value` / `enum_payload_value`
+  helpers. A direct probe confirmed `??` has the IDENTICAL struct
+  field-misread symptom `.?` had: `val v = x ?? P(x: 7, y: 8)` returned
+  **33** (both fields read as field 0) instead of **42**, on BOTH the
+  Some-branch and the None-branch (the `default` expression's own fresh
+  construction — an initial same-field-value probe gave a false-negative
+  99/99, corrected by re-testing with distinct field values, 77 not 78).
+  **Fixed** the same way as `ExistsCheck`: register the merged struct name
+  onto `NullCoalesce`'s `result_local` too, trying
+  `option_inner_hir_type_for_local` on the left/Option operand, then
+  `struct_value_syms` on `left_local`, then `struct_value_syms` on
+  `right_local` (the default expression's own construction). Verified both
+  branches now return 42/34/78 correctly. See
+  `test/03_system/native/option_nullcoalesce_struct*.spl`.
+
+- **This does NOT prove it explains the Mutex/font_renderer crash (#3) —
+  evidence points the other way.** Three concrete reasons:
+  1. `Mutex` is declared `class Mutex:` (`src/lib/nogc_sync_mut/concurrent/
+     mutex.spl:21`), i.e. `SymbolKind.Class`, a DISTINCT enum variant from
+     `SymbolKind.Struct` (`src/compiler/20.hir/hir_types.spl:93`). The fix's
+     `match ... case Struct:` arm does not fire for a class, in either
+     `ExistsCheck` or `NullCoalesce` — an analogous class-provenance gap, if
+     one exists, is NOT closed by this fix.
+  2. A minimal, isolated class-through-`??`-then-method-call probe on the
+     HOSTED path (`class NcC: handle: i64` / `fn get() -> i64: self.handle`,
+     `val active = (nil: NcC?) ?? new_ncc(42); active.get()`) returned the
+     CORRECT **42** — no crash, no misread — so the struct-provenance gap
+     does not obviously generalize to a single-field class on this pipeline.
+  3. Most importantly: `_font_mutex_acquire`'s own comment says the fault
+     occurs "under freestanding/entry-closure/aggressive-opt **kernel**
+     builds" — i.e. the BAREMETAL pipeline, not hosted native-build. This
+     bug doc's own header already distinguishes "**HOSTED** native..." from
+     the separate `baremetal_option_field_unwrap_faults_class_2026-07-18.md`
+     locus ("same family", explicitly NOT the same fix site). Bug #3 is
+     baremetal-pipeline; this fix is hosted-pipeline.
+  - **Conclusion: adjacent, not proven identical.** Same general symptom
+    family (an Option-derived value that looks present but is unusable/wrong
+    once actually consumed), but bug #3 most plausibly has its own root in
+    the baremetal/kernel codegen path (already root-caused and landed by its
+    own lane, commits `b65e09d8eb0`/`e2664d96bdf`, with a documented
+    workaround). Do not close bug #3 against this fix.
+
+- **Bug #2** (`text.to_i64() ?? default` + print-interpolation showing
+  `n=<value:0x3039>`, doc
+  `native_to_i64_nil_coalesce_print_tagbox_leak_2026-07-20.md`) is, per that
+  doc's own description, a value that is "correctly boxed" but "never
+  unboxed for **display**" — i.e. the `??` lowering itself produced a
+  correct value; the gap is in the print-interpolation consumer's own
+  decode step, a different code path from anything in `expr_dispatch.spl`'s
+  `NullCoalesce`/`ExistsCheck` arms. No shared chokepoint found. Adjacent,
+  not identical, same conclusion as this doc's existing f64-decode
+  cross-reference below.
+
 ### Why text/bool/struct never needed a decode fix inside ExistsCheck
 
 `expr_dispatch.spl`'s `ExistsCheck` arm derives its merged result-slot's MIR
@@ -180,8 +247,13 @@ fix does not cover it).
   short-circuit, expects **42**, PASS.
 - `test/03_system/native/option_try_unwrap_ifval_f64_XFAIL.spl` — f64,
   expects **42**, currently **1** (XFAIL, see "f64/f32 decode — OPEN").
-- `test/01_unit/compiler/mir/option_variant_order_source_spec.spl` — two new
-  source-text pin cases guarding both root fixes.
+- `test/03_system/native/option_nullcoalesce_struct.spl` — `??` struct,
+  Some-branch, expects **42**, PASS.
+- `test/03_system/native/option_nullcoalesce_struct_none.spl` — `??` struct,
+  None-branch (default expr), expects **42**, PASS.
+- `test/01_unit/compiler/mir/option_variant_order_source_spec.spl` — three
+  new source-text pin cases guarding all three root fixes (f64/f32 encode,
+  `.?` struct provenance, `??` struct provenance).
 
 ## Repro
 

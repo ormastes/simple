@@ -27,6 +27,8 @@ env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 <self-hosted-simple> native-bu
 | `option_try_unwrap_ifval_struct.spl` | `.?` + `if val` payload unwrap (struct) | see below | **42** | **PASS** | fields misread (both default to index 0) |
 | `option_try_unwrap_ifval_none.spl` | `.?` + `if val` None short-circuit (i64) | see below | **42** | **PASS** | None wrongly treated as Some |
 | `option_try_unwrap_ifval_f64_XFAIL.spl` | `.?` + `if val` payload unwrap (f64) | — | **42** | **XFAIL** (gets 1) | consumer-side decode gap, see below |
+| `option_nullcoalesce_struct.spl` | `??` payload struct field-name provenance (Some side) | see below | **42** | **PASS** | fields misread (both default to index 0) |
+| `option_nullcoalesce_struct_none.spl` | `??` default-expr struct field-name provenance (None side) | see below | **42** | **PASS** | fields misread (both default to index 0) |
 | `enum_f64_payload_precision.spl` | LLVM enum f64 payload-word ABI | — | **30** | SOURCE FIX / execution pending | f64 bits numerically converted |
 | `struct_array_push_i64_field_tagshift.spl` | struct pushed into an empty-literal `[]`-declared array (i64 fields) | (this fix) | **30** | PASS | SIGSEGV, or a specific 11x rc marking which field/element mismatched |
 
@@ -62,6 +64,23 @@ Root-fixed 2026-07-20 with two independent defects:
 (now PASS, rc=7). Same "Some payload not extracted" family as the recurring
 class in `doc/08_tracking/bug/baremetal_option_field_unwrap_faults_class_2026-07-18.md`
 (see `feedback_recurring_problem_team_analysis_and_tests`).
+
+## RESOLVED: `option_nullcoalesce_struct*.spl` (`??` shares the ExistsCheck struct gap)
+
+`NullCoalesce` (`x ?? default`, `expr_dispatch.spl`, the case arm immediately
+above `ExistsCheck` in the same file) uses the EXACT SAME
+`option_payload_or_self`/`decode_runtime_value`/`enum_payload_value` helper
+chain as `ExistsCheck`, and was proven — by direct probe, not assumption — to
+share the identical struct field-misread defect: `val v = x ?? P(x: 7, y: 8)`
+on a struct `Option` returned **33** (`v.x`/`v.y` both read field 0) instead
+of **42**, on BOTH the Some-branch (`x` present) and the None-branch (the
+`default` expression's own fresh construction — confirmed by re-testing with
+DISTINCT field values after an initial same-value probe gave a false
+negative). Fixed the same way as `ExistsCheck`: register the merged struct
+name onto `result_local`, trying (1) `option_inner_hir_type_for_local` on the
+left/Option operand, (2) `struct_value_syms` on `left_local` (raw migration
+form), (3) `struct_value_syms` on `right_local` (the default expression's own
+construction) once it exists.
 
 ## XFAIL: `option_try_unwrap_ifval_f64_XFAIL.spl`
 
