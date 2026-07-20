@@ -35,7 +35,9 @@ use app.devhub.adapter_bitbucket.{
     bb_repo_view,
     bb_list_prs,
     BB_OP_GENERAL,
-    BB_OP_MERGE
+    BB_OP_MERGE,
+    BB_MAX_PAGES,
+    _bb_collect_pages
 }
 use std.common.json.{json_parse, json_object, json_string, json_boolean}
 
@@ -457,10 +459,11 @@ fn _mk_unconfigured_client() -> BbClient:
 
 describe "bb_list_repos / bb_repo_view / bb_list_prs auth guard":
     it "bb_list_repos fails closed with no token configured":
-        val (ok, repos, msg) = bb_list_repos(_mk_unconfigured_client(), "acme", 30)
+        val (ok, repos, msg, capped) = bb_list_repos(_mk_unconfigured_client(), "acme", 30)
         expect(ok).to_equal(false)
         expect(repos.len()).to_equal(0)
         expect(msg).to_contain("blocked-auth")
+        expect(capped).to_equal(false)
 
     it "bb_repo_view fails closed with no token configured":
         val (ok, repo, msg) = bb_repo_view(_mk_unconfigured_client(), "acme", "widgets")
@@ -469,7 +472,108 @@ describe "bb_list_repos / bb_repo_view / bb_list_prs auth guard":
         expect(msg).to_contain("blocked-auth")
 
     it "bb_list_prs fails closed with no token configured":
-        val (ok, prs, msg) = bb_list_prs(_mk_unconfigured_client(), "acme", "widgets", "OPEN", 30)
+        val (ok, prs, msg, capped) = bb_list_prs(_mk_unconfigured_client(), "acme", "widgets", "OPEN", 30)
         expect(ok).to_equal(false)
         expect(prs.len()).to_equal(0)
         expect(msg).to_contain("blocked-auth")
+        expect(capped).to_equal(false)
+
+
+# ============================================================================
+# Pagination loop: _bb_collect_pages (fixture-driven, no network)
+# ============================================================================
+#
+# The adapter's real fetch_page (_bb_fetch_list_page) does an HTTP GET, so it
+# is deliberately NOT exercised here (same restraint as the rest of this
+# file). Instead these fixture fns implement the exact fetch_page signature
+# (fn(BbClient, text) -> (bool, [any], text, text)) with canned in-memory
+# pages, keyed by a synthetic "next" url string ("p1", "p2", ...) -- no
+# network, no mocking, just plain data. This is the "pure helper boundary"
+# _bb_collect_pages is designed around: the loop itself never touches HTTP.
+
+fn _fx_fetch_2pages(client: BbClient, url: text) -> (bool, [any], text, text):
+    """Fixture: page 1 has 2 values + next="p2"; page 2 has 1 value + no next."""
+    if url == "p1":
+        return (true, [json_string("a"), json_string("b")], "p2", "")
+    if url == "p2":
+        return (true, [json_string("c")], "", "")
+    (false, [], "", "unexpected fixture url: " + url)
+
+
+fn _fx_fetch_fails_on_page2(client: BbClient, url: text) -> (bool, [any], text, text):
+    """Fixture: page 1 succeeds with a next link; page 2 fails."""
+    if url == "p1":
+        return (true, [json_string("a")], "p2", "")
+    (false, [], "", "boom")
+
+
+fn _fx_fetch_infinite(client: BbClient, url: text) -> (bool, [any], text, text):
+    """Fixture: an unbounded `next` chain (p1 -> p2 -> ... -> p11 -> ...)
+    that never runs out on its own -- used to prove the hard BB_MAX_PAGES
+    cap stops a runaway pagination loop instead of looping forever."""
+    if url == "p1":
+        return (true, [json_string("i1")], "p2", "")
+    if url == "p2":
+        return (true, [json_string("i2")], "p3", "")
+    if url == "p3":
+        return (true, [json_string("i3")], "p4", "")
+    if url == "p4":
+        return (true, [json_string("i4")], "p5", "")
+    if url == "p5":
+        return (true, [json_string("i5")], "p6", "")
+    if url == "p6":
+        return (true, [json_string("i6")], "p7", "")
+    if url == "p7":
+        return (true, [json_string("i7")], "p8", "")
+    if url == "p8":
+        return (true, [json_string("i8")], "p9", "")
+    if url == "p9":
+        return (true, [json_string("i9")], "p10", "")
+    if url == "p10":
+        return (true, [json_string("i10")], "p11", "")
+    (true, [json_string("overflow")], "pnext", "")
+
+
+describe "_bb_collect_pages (pagination loop, fixture-driven, no network)":
+    it "accumulates values across multiple pages until next is empty":
+        val (ok, values, err, capped) = _bb_collect_pages(_mk_unconfigured_client(), _fx_fetch_2pages, "p1", 100)
+        expect(ok).to_equal(true)
+        expect(values.len()).to_equal(3)
+        expect(err).to_equal("")
+        expect(capped).to_equal(false)
+
+    it "stops as soon as --limit is reached, even mid-page":
+        val (ok, values, err, capped) = _bb_collect_pages(_mk_unconfigured_client(), _fx_fetch_2pages, "p1", 1)
+        expect(ok).to_equal(true)
+        expect(values.len()).to_equal(1)
+        expect(capped).to_equal(false)
+
+    it "a single page with no next returns immediately, not capped":
+        val (ok, values, err, capped) = _bb_collect_pages(_mk_unconfigured_client(), _fx_fetch_2pages, "p2", 100)
+        expect(ok).to_equal(true)
+        expect(values.len()).to_equal(1)
+        expect(capped).to_equal(false)
+
+    it "propagates a page-fetch failure instead of silently truncating":
+        val (ok, values, err, capped) = _bb_collect_pages(_mk_unconfigured_client(), _fx_fetch_fails_on_page2, "p1", 100)
+        expect(ok).to_equal(false)
+        expect(err).to_equal("boom")
+        expect(capped).to_equal(false)
+
+    it "hard-caps at BB_MAX_PAGES fetches on a runaway next chain":
+        val (ok, values, err, capped) = _bb_collect_pages(_mk_unconfigured_client(), _fx_fetch_infinite, "p1", 1000)
+        expect(ok).to_equal(true)
+        expect(values.len()).to_equal(BB_MAX_PAGES)
+        expect(capped).to_equal(true)
+
+    it "is not capped when limit is satisfied before the page cap":
+        val (ok, values, err, capped) = _bb_collect_pages(_mk_unconfigured_client(), _fx_fetch_infinite, "p1", 2)
+        expect(ok).to_equal(true)
+        expect(values.len()).to_equal(2)
+        expect(capped).to_equal(false)
+
+    it "not capped when limit is met exactly on the last allowed page (success, not truncation)":
+        val (ok, values, err, capped) = _bb_collect_pages(_mk_unconfigured_client(), _fx_fetch_infinite, "p1", 10)
+        expect(ok).to_equal(true)
+        expect(values.len()).to_equal(10)
+        expect(capped).to_equal(false)

@@ -21,10 +21,11 @@ use app.devhub.adapter_bitbucket.{
     bb_check_ready_to_merge,
     bb_list_repos,
     bb_repo_view,
-    bb_list_prs
+    bb_list_prs,
+    BB_MAX_PAGES
 }
 use app.devhub.flags.{_extract_flag, _has_flag, _positional_args}
-use app.devhub.output.{print_error, print_success, print_info, print_table_header, print_table_row, print_table_dynamic, colorize_state, relative_time, format_json_output, wants_json, should_use_color}
+use app.devhub.output.{print_error, print_success, print_info, print_dim, print_table_header, print_table_row, print_table_dynamic, colorize_state, relative_time, format_json_output, wants_json, should_use_color}
 use std.nogc_sync_mut.env.{env_get}
 
 
@@ -106,6 +107,14 @@ fn _bb_resolve_limit(args: [text]) -> i64:
     val flag = _extract_flag(args, "--limit", "")
     val flag2 = if flag != "": flag else: _extract_flag(args, "-L", "")
     _bb_parse_int(flag2, 30)
+
+
+fn _bb_print_cap_note():
+    """Print the "no silent truncation" note when the adapter's pagination
+    loop hit its hard page cap (BB_MAX_PAGES) before satisfying --limit or
+    exhausting `next`. Human-readable output only — --json callers get the
+    raw fetched data without an extra non-JSON line mixed into stdout."""
+    print_dim("note: hit the " + BB_MAX_PAGES.to_string() + "-page pagination safety cap; results may be truncated. Narrow --limit or add filters to see fewer items per page.")
 
 
 # ============================================================================
@@ -211,13 +220,15 @@ fn _bb_pr_list(args: [text]) -> i64:
     val state_flag = _extract_flag(args, "--state", "open")
     val state = if state_flag == "all": "all" else: state_flag.upper()
     val limit = _bb_resolve_limit(args)
-    val (ok, prs, raw) = bb_list_prs(client, ws, repo, state, limit)
+    val (ok, prs, raw, capped) = bb_list_prs(client, ws, repo, state, limit)
     if not ok:
         print_error(raw)
         return 1
     if wants_json(args):
         print format_json_output(raw, args)
         return 0
+    if capped:
+        _bb_print_cap_note()
     if prs.len() == 0:
         print "No pull requests found. Try --state all or check --workspace/--repo."
         return 0
@@ -273,13 +284,15 @@ fn _bb_repo_list(args: [text]) -> i64:
         print_error("--workspace is required (or set BB_WORKSPACE)")
         return 1
     val limit = _bb_resolve_limit(args)
-    val (ok, repos, raw) = bb_list_repos(client, ws, limit)
+    val (ok, repos, raw, capped) = bb_list_repos(client, ws, limit)
     if not ok:
         print_error(raw)
         return 1
     if wants_json(args):
         print format_json_output(raw, args)
         return 0
+    if capped:
+        _bb_print_cap_note()
     if repos.len() == 0:
         print "No repositories found. Try a different --workspace."
         return 0

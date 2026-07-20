@@ -18,15 +18,20 @@
 #   GET    /repositories/{ws}/{repo}/pullrequests?state=X   (bb_list_prs)
 #
 # All public endpoint functions return (success: bool, parsed: T, raw_json: text)
-# matching the jira_view_issue / jira_search shape.
+# matching the jira_view_issue / jira_search shape, except bb_list_repos /
+# bb_list_prs which return a 4th `capped: bool` element (see Pagination below).
 #
 # Pagination (bb_list_repos / bb_list_prs): Bitbucket paginates collection
 # endpoints via a `next` URL embedded in the response body (`{"values": [...],
-# "next": "https://...?page=2"}`). These adapter fns fetch and parse the FIRST
-# PAGE ONLY — `next` is not followed. This mirrors the honest-gap style of the
-# http_client TODO below rather than silently truncating results: callers that
-# need more than one page currently have no adapter-level way to get there
-# (tracked gap, same class as the real-network-send TODO).
+# "next": "https://...?page=2"}`). These adapter fns now follow `next` via the
+# shared _bb_collect_pages loop (see below), accumulating values until
+# `--limit` items are collected or there is no further `next` page. As a
+# safety net against a runaway `next` chain (server bug, or a workspace/repo
+# far larger than any CLI list command should page through unbounded), the
+# loop hard-caps at BB_MAX_PAGES fetches regardless of `limit`. Callers get a
+# `capped` flag back (4th element of the returned tuple) so the CLI layer
+# (cmd_bb.spl) can print an explicit dim note instead of silently truncating
+# results — see the repo's "no silent truncation" rule.
 
 use std.json.{json_parse, json_object_get, json_array_get, json_array_length, json_serialize, json_get_type}
 use std.nogc_sync_mut.http_client.{http_get, http_post, http_delete, create_headers, add_header, response_get_status_code, response_get_body, response_get_header}
@@ -41,6 +46,7 @@ use app.devhub.errors.{ItfError, ITF_ERR_AUTH, ITF_ERR_NOT_FOUND, ITF_ERR_API, I
 val BB_API_BASE = "https://api.bitbucket.org/2.0"
 val BB_OP_GENERAL = "general"
 val BB_OP_MERGE = "merge"
+val BB_MAX_PAGES = 10  # hard safety cap on `next`-link follows per list call
 
 
 # ============================================================================
@@ -165,21 +171,38 @@ fn _bb_clamp_pagelen(limit: i64) -> i64:
     limit
 
 
-fn bb_repo_list_url(ws: text, limit: i64) -> text:
-    """Build URL for GET /repositories/{ws} with a pagelen query param.
+fn _bb_resolve_total_limit(limit: i64) -> i64:
+    """Resolve the TOTAL accumulation limit across all pages for a `bb list`
+    call: defaults to 30 when limit is unset/non-positive (matching the
+    default pagelen), otherwise the caller's requested value uncapped.
 
-    First page only — see the pagination note at the top of this file.
+    This is distinct from _bb_clamp_pagelen: pagelen is the per-HTTP-request
+    page size (clamped to Bitbucket's 100 max), while the total limit here
+    may legitimately exceed 100 and be satisfied across several pages.
+    """
+    if limit <= 0:
+        return 30
+    limit
+
+
+fn bb_repo_list_url(ws: text, limit: i64) -> text:
+    """Build URL for the FIRST page of GET /repositories/{ws} with a pagelen
+    query param. Subsequent pages are followed via the response's `next`
+    link — see _bb_collect_pages and the pagination note at the top of this
+    file.
     """
     bb_repo_collection_url(ws) + "?pagelen=" + _bb_clamp_pagelen(limit).to_string()
 
 
 fn bb_pr_list_url(ws: text, repo: text, state: text, limit: i64) -> text:
-    """Build URL for GET .../pullrequests with optional state filter + pagelen.
+    """Build URL for the FIRST page of GET .../pullrequests with optional
+    state filter + pagelen.
 
     state: "OPEN" | "MERGED" | "DECLINED" | "SUPERSEDED" | "all" (case
     insensitive; "" or "all" omits the state filter entirely, returning PRs
-    in every state). First page only — see the pagination note at the top of
-    this file.
+    in every state). Subsequent pages are followed via the response's `next`
+    link — see _bb_collect_pages and the pagination note at the top of this
+    file.
     """
     val base = bb_pr_collection_url(ws, repo)
     val n = _bb_clamp_pagelen(limit).to_string()
@@ -519,6 +542,77 @@ fn _bb_parse_values_array(parsed: any) -> [any]:
 
 
 # ============================================================================
+# Pagination loop (shared by bb_list_repos / bb_list_prs)
+# ============================================================================
+
+fn _bb_fetch_list_page(client: BbClient, url: text) -> (bool, [any], text, text):
+    """Fetch + parse one page of a Bitbucket paginated list endpoint.
+
+    Repositories and pull-requests list responses share the same shape
+    (`{"values": [...], "next": "..."}`) and the same error-mapping op
+    (BB_OP_GENERAL), so both bb_list_repos and bb_list_prs drive
+    _bb_collect_pages with this one fetch-page implementation.
+
+    Returns (ok, page_values, next_url, err_msg). `next_url` is "" when the
+    response has no further page.
+    """
+    val (status, body, _retry) = _bb_get(client, url)
+    if status != 200:
+        val err = bb_map_http_error(status, body, BB_OP_GENERAL)
+        return (false, [], "", err.display())
+    val parsed = json_parse(body)
+    if parsed == nil:
+        return (false, [], "", "invalid JSON response")
+    val values = _bb_parse_values_array(parsed)
+    val next = _bb_str(parsed, "next")
+    (true, values, next, "")
+
+
+fn _bb_collect_pages(client: BbClient, fetch_page: fn(BbClient, text) -> (bool, [any], text, text), first_url: text, limit: i64) -> (bool, [any], text, bool):
+    """Follow a Bitbucket `next`-link chain, accumulating parsed JSON value
+    nodes until `limit` items are collected or there is no further page.
+
+    `fetch_page(client, url) -> (ok, page_values, next_url, err_msg)` is an
+    explicit parameter rather than a closure, so this loop does no I/O and
+    holds no captured state of its own: specs drive it directly with a
+    fixture fetch_page (see adapter_bitbucket_spec.spl), no network or
+    mocking required.
+
+    Hard-capped at BB_MAX_PAGES fetches regardless of `limit`/`next`, to
+    protect against a runaway `next` chain. Returns (ok, collected_values,
+    err_msg, capped); `capped` is true only when the page cap is the
+    *binding* reason collection stopped short — i.e. `limit` was NOT yet
+    satisfied AND a `next` page was still pending. If the cap is reached on
+    exactly the page that also satisfies `limit`, that's a success, not a
+    truncation — `capped` stays false.
+    """
+    var out: [any] = []
+    var url = first_url
+    var page: i64 = 0
+    while url != "" and out.len() < limit and page < BB_MAX_PAGES:
+        val (ok, values, next_url, err) = fetch_page(client, url)
+        if not ok:
+            return (false, out, err, false)
+        for v in values:
+            if out.len() < limit:
+                out = out + [v]
+        url = next_url
+        page = page + 1
+    val capped = page >= BB_MAX_PAGES and url != "" and out.len() < limit
+    (true, out, "", capped)
+
+
+fn _bb_combine_values_json(values: [any]) -> text:
+    """Re-serialize accumulated multi-page value nodes as a single
+    {"values": [...]} JSON body, for --json output when more than one page
+    was fetched."""
+    var parts: [text] = []
+    for v in values:
+        parts = parts + [json_serialize(v)]
+    _bb_lbrace() + "\"values\": [" + parts.join(", ") + "]" + _bb_rbrace()
+
+
+# ============================================================================
 # Ready-to-merge logic (pure — covered by unit tests)
 # ============================================================================
 
@@ -730,27 +824,25 @@ fn bb_check_ready_to_merge(client: BbClient, ws: text, repo: text, pr_id: i64) -
     bb_eval_ready_to_merge(pr_parsed, st_parsed)
 
 
-fn bb_list_repos(client: BbClient, ws: text, limit: i64) -> (bool, [BbRepo], text):
+fn bb_list_repos(client: BbClient, ws: text, limit: i64) -> (bool, [BbRepo], text, bool):
     """GET /repositories/{ws} — list repositories in a workspace.
 
-    First page only (up to `limit`, clamped to Bitbucket's 100 max pagelen);
-    see the pagination note at the top of this file for the `next`-link gap.
+    Follows Bitbucket's `next` pagination link (via _bb_collect_pages) until
+    `limit` items are collected (clamped to Bitbucket's 100 max pagelen per
+    page) or there is no further page, hard-capped at BB_MAX_PAGES fetches.
+    Returns (ok, repos, raw_json, capped).
     """
     if not client.is_configured():
-        return (false, [], "blocked-auth: no Bitbucket token configured")
-    val url = bb_repo_list_url(ws, limit)
-    val (status, body, _retry) = _bb_get(client, url)
-    if status != 200:
-        val err = bb_map_http_error(status, body, BB_OP_GENERAL)
-        return (false, [], err.display())
-    val parsed = json_parse(body)
-    if parsed == nil:
-        return (false, [], "invalid JSON response")
-    val raw = _bb_parse_values_array(parsed)
+        return (false, [], "blocked-auth: no Bitbucket token configured", false)
+    val n = _bb_resolve_total_limit(limit)
+    val first_url = bb_repo_list_url(ws, limit)
+    val (ok, raw, err, capped) = _bb_collect_pages(client, _bb_fetch_list_page, first_url, n)
+    if not ok:
+        return (false, [], err, false)
     var out: [BbRepo] = []
     for v in raw:
         out = out + [bb_parse_repo(v)]
-    (true, out, body)
+    (true, out, _bb_combine_values_json(raw), capped)
 
 
 fn bb_repo_view(client: BbClient, ws: text, repo: text) -> (bool, BbRepo, text):
@@ -769,25 +861,22 @@ fn bb_repo_view(client: BbClient, ws: text, repo: text) -> (bool, BbRepo, text):
     (true, bb_parse_repo(parsed), body)
 
 
-fn bb_list_prs(client: BbClient, ws: text, repo: text, state: text, limit: i64) -> (bool, [BbPr], text):
+fn bb_list_prs(client: BbClient, ws: text, repo: text, state: text, limit: i64) -> (bool, [BbPr], text, bool):
     """GET /repositories/{ws}/{repo}/pullrequests?state=X — list pull requests.
 
-    state: "OPEN" | "MERGED" | "DECLINED" | "SUPERSEDED" | "all". First page
-    only (up to `limit`, clamped to Bitbucket's 100 max pagelen); see the
-    pagination note at the top of this file for the `next`-link gap.
+    state: "OPEN" | "MERGED" | "DECLINED" | "SUPERSEDED" | "all". Follows
+    Bitbucket's `next` pagination link (via _bb_collect_pages) until `limit`
+    items are collected or there is no further page, hard-capped at
+    BB_MAX_PAGES fetches. Returns (ok, prs, raw_json, capped).
     """
     if not client.is_configured():
-        return (false, [], "blocked-auth: no Bitbucket token configured")
-    val url = bb_pr_list_url(ws, repo, state, limit)
-    val (status, body, _retry) = _bb_get(client, url)
-    if status != 200:
-        val err = bb_map_http_error(status, body, BB_OP_GENERAL)
-        return (false, [], err.display())
-    val parsed = json_parse(body)
-    if parsed == nil:
-        return (false, [], "invalid JSON response")
-    val raw = _bb_parse_values_array(parsed)
+        return (false, [], "blocked-auth: no Bitbucket token configured", false)
+    val n = _bb_resolve_total_limit(limit)
+    val first_url = bb_pr_list_url(ws, repo, state, limit)
+    val (ok, raw, err, capped) = _bb_collect_pages(client, _bb_fetch_list_page, first_url, n)
+    if not ok:
+        return (false, [], err, false)
     var out: [BbPr] = []
     for v in raw:
         out = out + [bb_parse_pr(v)]
-    (true, out, body)
+    (true, out, _bb_combine_values_json(raw), capped)
