@@ -1,0 +1,119 @@
+# hit_test.spl — Unified 2D interaction core: ordered hit stack.
+#
+# hit_stack() consumes the SAME flattened paint-order key HitProxy2D carries
+# (paint order == hit order, per
+# doc/03_plan/ui/unified_2d_engine/unified_2d_interaction_2026-07-20.md) and
+# returns a HitTestResult: primary target, full front-to-back hit list, and
+# the root-to-primary ancestor path (walked via a caller-supplied parent
+# map -- this core owns no tree structure of its own).
+
+use std.common.engine.interaction.hit_proxy.{HitProxy2D, POINTER_POLICY_NONE}
+
+struct HitRecord:
+    """One hit-test candidate. Carries just enough paint-key data to
+    re-derive front-to-back order without re-touching the source
+    HitProxy2D array -- keeps hit_stack's candidate list a plain
+    snapshot, never re-reading through a proxy reference mid-sort."""
+    node_id: i64
+    stacking_context_order: i32
+    render_layer: i32
+    z_index: i32
+    tree_order: i32
+    insertion_sequence: i32
+
+struct HitTestResult:
+    """primary/ancestor_path use -1 / [] to mean "nothing hit" instead of
+    an Option<i64> field -- avoids depending on Option-in-struct behavior
+    and matches the sentinel-id convention already used by
+    src/lib/common/engine/ids.spl's NodeId.invalid()."""
+    primary: i64
+    hits: [HitRecord]
+    ancestor_path: [i64]
+
+fn _hit_record_less(a: HitRecord, b: HitRecord) -> bool:
+    """True if `a` paints strictly BELOW `b` (b is more on-top). Same field
+    priority as hit_proxy.paint_key_less."""
+    if a.stacking_context_order != b.stacking_context_order:
+        return a.stacking_context_order < b.stacking_context_order
+    if a.render_layer != b.render_layer:
+        return a.render_layer < b.render_layer
+    if a.z_index != b.z_index:
+        return a.z_index < b.z_index
+    if a.tree_order != b.tree_order:
+        return a.tree_order < b.tree_order
+    a.insertion_sequence < b.insertion_sequence
+
+fn _sort_front_to_back(items: [HitRecord]) -> [HitRecord]:
+    """Insertion sort by paint key, DESCENDING (topmost/front first). Small
+    N expected (hit candidates at a single point) -- O(n^2) is fine here,
+    matching the add_layer() insertion-sort convention already shipped in
+    gc_async_mut/gpu/engine2d/compositor.spl."""
+    var out: [HitRecord] = []
+    var i = 0
+    while i < items.len():
+        out.push(items[i])
+        i = i + 1
+    var j = 1
+    while j < out.len():
+        val key = out[j]
+        var k = j - 1
+        while k >= 0 and _hit_record_less(out[k], key):
+            out[k + 1] = out[k]
+            k = k - 1
+        out[k + 1] = key
+        j = j + 1
+    out
+
+fn ancestor_path_of(parents: Dict<i64, i64>, node_id: i64) -> [i64]:
+    """Root-to-node path via a child -> parent map (absent key = no
+    parent / root). Guarded against cycles. Public so pointer_capture.spl
+    (and future adapters) can rebuild the path for a pointer-capture
+    substitution target that the current hit-test point never touched."""
+    var chain: [i64] = []
+    var cur = node_id
+    var guard = 0
+    while cur != -1 and guard < 100000:
+        chain.push(cur)
+        var next: i64 = -1
+        if parents.contains_key(cur):
+            next = parents[cur]
+        cur = next
+        guard = guard + 1
+    var out: [i64] = []
+    var i = chain.len() - 1
+    while i >= 0:
+        out.push(chain[i])
+        i = i - 1
+    out
+
+fn hit_stack(proxies: [HitProxy2D], parents: Dict<i64, i64>, x: i32, y: i32) -> HitTestResult:
+    """Ordered front-to-back hit stack at (x, y). PointerPolicy.None
+    proxies are skipped entirely: hit-test pass-through means they never
+    appear in the stack AND never block a proxy below them. Every other
+    policy hit-tests on the proxy's AABB (see
+    hit_proxy.HitProxy2D.hit_tests_by_bounds)."""
+    var candidates: [HitRecord] = []
+    var i = 0
+    while i < proxies.len():
+        val p = proxies[i]
+        if p.enabled and p.visible and p.pointer_policy != POINTER_POLICY_NONE:
+            if p.contains_point(x, y):
+                candidates.push(HitRecord(
+                    node_id: p.node_id,
+                    stacking_context_order: p.stacking_context_order,
+                    render_layer: p.render_layer,
+                    z_index: p.z_index,
+                    tree_order: p.tree_order,
+                    insertion_sequence: p.insertion_sequence
+                ))
+        i = i + 1
+    val ordered = _sort_front_to_back(candidates)
+    var primary: i64 = -1
+    if ordered.len() > 0:
+        primary = ordered[0].node_id
+    var path: [i64] = []
+    if primary != -1:
+        path = ancestor_path_of(parents, primary)
+    HitTestResult(primary: primary, hits: ordered, ancestor_path: path)
+
+export HitRecord, HitTestResult, ancestor_path_of, hit_stack

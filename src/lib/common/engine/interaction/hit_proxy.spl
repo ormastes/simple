@@ -1,0 +1,95 @@
+# hit_proxy.spl — Unified 2D interaction core: per-node hit-test proxy.
+#
+# HitProxy2D carries the SAME flattened paint-order key used for rendering
+# (PaintOrderKey in the unified interaction plan,
+# doc/03_plan/ui/unified_2d_engine/unified_2d_interaction_2026-07-20.md) so
+# paint order == hit order: stacking_context_order, render_layer, z_index,
+# tree_order, insertion_sequence. Bounds are half-open [left, right) x
+# [top, bottom) -- the Phase-0 standardized convention (GUI's existing
+# widget_hit.spl rule; browser hit test's inclusive-edge convention is the
+# one that must migrate, not this core).
+
+val POINTER_POLICY_AUTO: i32 = 0
+val POINTER_POLICY_NONE: i32 = 1
+val POINTER_POLICY_BOUNDING_BOX: i32 = 2
+val POINTER_POLICY_PAINTED: i32 = 3
+val POINTER_POLICY_FILL: i32 = 4
+val POINTER_POLICY_STROKE: i32 = 5
+val POINTER_POLICY_SELF_ONLY: i32 = 6
+val POINTER_POLICY_CHILDREN_ONLY: i32 = 7
+val POINTER_POLICY_TRANSLUCENT: i32 = 8
+
+class HitProxy2D:
+    """Hit-test proxy for one node: half-open world AABB + flattened paint
+    key + pointer policy + enabled/visible gates. Rendering opacity is
+    deliberately NOT a field here -- rendering transparency and event
+    transparency are independent per the interaction plan; opacity lives on
+    the render-side component, pointer_policy is the only thing hit_test.spl
+    consults."""
+    node_id: i64
+    left: i32
+    top: i32
+    right: i32
+    bottom: i32
+    stacking_context_order: i32
+    render_layer: i32
+    z_index: i32
+    tree_order: i32
+    insertion_sequence: i32
+    pointer_policy: i32
+    enabled: bool
+    visible: bool
+
+    static fn create(node_id: i64, left: i32, top: i32, right: i32, bottom: i32) -> HitProxy2D:
+        """Default proxy: paint-key fields zeroed, PointerPolicy.Auto,
+        enabled + visible. Callers set the paint-key fields and policy
+        explicitly when they matter for a scenario."""
+        HitProxy2D(
+            node_id: node_id,
+            left: left,
+            top: top,
+            right: right,
+            bottom: bottom,
+            stacking_context_order: 0,
+            render_layer: 0,
+            z_index: 0,
+            tree_order: 0,
+            insertion_sequence: 0,
+            pointer_policy: POINTER_POLICY_AUTO,
+            enabled: true,
+            visible: true
+        )
+
+    fn contains_point(px: i32, py: i32) -> bool:
+        px >= self.left and px < self.right and py >= self.top and py < self.bottom
+
+    # ponytail: Painted/Fill/Stroke are reserved policy codes with no
+    # distinct behavior yet -- this core has no rasterized-content sampling
+    # (no alpha/coverage buffer to test against), so hit_test.spl treats
+    # Auto/BoundingBox/Painted/Fill/Stroke identically: hit-test against
+    # this proxy's AABB. Only None (skip entirely) is distinguished today;
+    # SelfOnly/ChildrenOnly/Translucent are defined for future adapters
+    # (widget/DOM/Node2D, slice item 6) but not yet interpreted here.
+    fn hit_tests_by_bounds() -> bool:
+        self.pointer_policy != POINTER_POLICY_NONE
+
+fn paint_key_less(a: HitProxy2D, b: HitProxy2D) -> bool:
+    """True if `a` paints (and hit-test-ranks) strictly BELOW `b` -- i.e.
+    `b` is more on-top. Shared flattened order: stacking_context_order,
+    render_layer, z_index, tree_order, insertion_sequence (all ascending =
+    later/on top). Exported so a future renderer can sort with the exact
+    same key hit_test.spl uses, keeping paint order == hit order."""
+    if a.stacking_context_order != b.stacking_context_order:
+        return a.stacking_context_order < b.stacking_context_order
+    if a.render_layer != b.render_layer:
+        return a.render_layer < b.render_layer
+    if a.z_index != b.z_index:
+        return a.z_index < b.z_index
+    if a.tree_order != b.tree_order:
+        return a.tree_order < b.tree_order
+    a.insertion_sequence < b.insertion_sequence
+
+export POINTER_POLICY_AUTO, POINTER_POLICY_NONE, POINTER_POLICY_BOUNDING_BOX
+export POINTER_POLICY_PAINTED, POINTER_POLICY_FILL, POINTER_POLICY_STROKE
+export POINTER_POLICY_SELF_ONLY, POINTER_POLICY_CHILDREN_ONLY, POINTER_POLICY_TRANSLUCENT
+export HitProxy2D, paint_key_less

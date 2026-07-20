@@ -1,0 +1,98 @@
+# pointer_event.spl — Unified 2D interaction core: normalized pointer event.
+#
+# Part of the shared interaction core (Phase 1,
+# doc/03_plan/ui/unified_2d_engine/unified_2d_interaction_2026-07-20.md).
+# `kind` and `phase` are plain i32 codes, NOT enum-typed fields: an
+# enum-typed struct field with a default is left uninitialized by the
+# interpreter on some construction paths (campaign landmine, see
+# .claude/memory/ref_coding.md / the interpreter dict-and-value-quirks
+# reference). Every construction site in this package sets every field
+# explicitly, so this guards a future caller that might rely on a default.
+
+# ---- pointer event kind codes ----
+val POINTER_DOWN: i32 = 0
+val POINTER_UP: i32 = 1
+val POINTER_MOVE: i32 = 2
+val POINTER_ENTER: i32 = 3
+val POINTER_LEAVE: i32 = 4
+val POINTER_OVER: i32 = 5
+val POINTER_OUT: i32 = 6
+val POINTER_CANCEL: i32 = 7
+
+# ---- dispatch phase codes (mirrors DOM Event.eventPhase) ----
+val PHASE_NONE: i32 = 0
+val PHASE_CAPTURE: i32 = 1
+val PHASE_TARGET: i32 = 2
+val PHASE_BUBBLE: i32 = 3
+
+class PointerEvent2D:
+    """Normalized pointer input event routed through the interaction core.
+
+    `target` is the node id the hit stack resolved (or the pointer-capture
+    substitution -- see pointer_capture.spl); it does not change as
+    dispatch walks capture/bubble ancestors (matches DOM Event.target).
+    `phase` is updated by event_route.dispatch() as it moves through
+    capture -> target -> bubble.
+
+    stop_flag/stop_immediate_flag/default_prevented are informational
+    fields. event_route.dispatch()'s own control flow does NOT depend on a
+    listener mutating them via a cross-module `me` call while dispatch is
+    mid-loop -- listeners instead communicate stop/prevent-default by
+    RETURNING an action code (see event_route.ACTION_*), which keeps
+    dispatch's correctness independent of cross-call mutation-visibility
+    assumptions. dispatch() writes the final state onto these fields itself
+    (a same-function, same-module assignment) before it returns, so they
+    are safe to read once dispatch() has returned."""
+    pointer_id: i64
+    kind: i32
+    x: i32
+    y: i32
+    buttons: i32
+    target: i64
+    phase: i32
+    bubbles: bool
+    cancelable: bool
+    stop_flag: bool
+    stop_immediate_flag: bool
+    default_prevented: bool
+
+    static fn create(pointer_id: i64, kind: i32, x: i32, y: i32, buttons: i32, target: i64) -> PointerEvent2D:
+        """Construct a fresh event: default phase (none), bubbling +
+        cancelable, no stop/prevent flags set."""
+        PointerEvent2D(
+            pointer_id: pointer_id,
+            kind: kind,
+            x: x,
+            y: y,
+            buttons: buttons,
+            target: target,
+            phase: PHASE_NONE,
+            bubbles: true,
+            cancelable: true,
+            stop_flag: false,
+            stop_immediate_flag: false,
+            default_prevented: false
+        )
+
+    me stop_propagation():
+        self.stop_flag = true
+
+    me stop_immediate_propagation():
+        self.stop_flag = true
+        self.stop_immediate_flag = true
+
+    me prevent_default():
+        self.default_prevented = true
+
+    fn is_propagation_stopped() -> bool:
+        self.stop_flag
+
+    fn is_immediate_stopped() -> bool:
+        self.stop_immediate_flag
+
+    fn is_default_prevented() -> bool:
+        self.default_prevented
+
+export POINTER_DOWN, POINTER_UP, POINTER_MOVE, POINTER_ENTER, POINTER_LEAVE, POINTER_OVER, POINTER_OUT, POINTER_CANCEL
+export PHASE_NONE, PHASE_CAPTURE, PHASE_TARGET, PHASE_BUBBLE
+export PointerEvent2D

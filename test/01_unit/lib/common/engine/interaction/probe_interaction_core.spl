@@ -1,0 +1,258 @@
+# probe_interaction_core.spl — runnable smoke mirror of the unified 2D
+# interaction core conformance suite (interaction_core_spec.spl covers the
+# same cases via std.spec). `simple test` is currently unreliable per the
+# campaign notes, so this probe is the primary evidence path: run with
+#   timeout 300 bin/simple run test/01_unit/lib/common/engine/interaction/probe_interaction_core.spl
+# Prints PASS/FAIL per case, a summary line, and exits non-zero on any FAIL.
+#
+# LANDMINE (found while writing this probe): a top-level `fn` mutating a
+# top-level (module-scope) `var` does NOT propagate the mutation back --
+# confirmed empirically here (a first draft used a shared `pass_count`/
+# `fail_count` incremented from inside a `check()` helper; every individual
+# PASS/FAIL line printed correctly, but the final summary read back 0/0).
+# This matches the documented "nested closure capture can READ outer vars,
+# CANNOT MODIFY" rule (.claude/rules/language.md) applied to a plain
+# function reaching into module scope. Fix: every case_*() function
+# threads its own LOCAL `Tally` value through `tally()` calls and RETURNS
+# it; only plain top-level statements (not inside any function) accumulate
+# the grand total, which is a normal in-scope var reassignment, not a
+# cross-function mutation.
+
+use std.nogc_sync_mut.io_runtime.{exit}
+use std.common.engine.interaction.hit_proxy.{HitProxy2D, POINTER_POLICY_NONE}
+use std.common.engine.interaction.hit_test.{hit_stack, ancestor_path_of}
+use std.common.engine.interaction.pointer_event.{PointerEvent2D, POINTER_DOWN}
+use std.common.engine.interaction.event_route.{
+    EventListener2D, dispatch, ACTION_NONE, ACTION_STOP_PROPAGATION, ACTION_STOP_IMMEDIATE
+}
+use std.common.engine.interaction.pointer_capture.{PointerRouter, effective_target, hover_diff}
+
+struct Tally:
+    pass_n: i32
+    fail_n: i32
+
+fn tally_zero() -> Tally:
+    Tally(pass_n: 0, fail_n: 0)
+
+fn tally_merge(a: Tally, b: Tally) -> Tally:
+    Tally(pass_n: a.pass_n + b.pass_n, fail_n: a.fail_n + b.fail_n)
+
+fn check(prev: Tally, name: text, cond: bool) -> Tally:
+    if cond:
+        print "PASS {name}"
+        return Tally(pass_n: prev.pass_n + 1, fail_n: prev.fail_n)
+    print "FAIL {name}"
+    Tally(pass_n: prev.pass_n, fail_n: prev.fail_n + 1)
+
+fn _count_i64(arr: [i64], v: i64) -> i32:
+    var c = 0
+    var i = 0
+    while i < arr.len():
+        if arr[i] == v:
+            c = c + 1
+        i = i + 1
+    c
+
+# ---------------------------------------------------------------------
+# 1. Topmost-by-paint-key wins.
+# ---------------------------------------------------------------------
+fn case_topmost_wins() -> Tally:
+    var t = tally_zero()
+    var low = HitProxy2D.create(1, 0, 0, 100, 100)
+    low.z_index = 0
+    var high = HitProxy2D.create(2, 0, 0, 100, 100)
+    high.z_index = 5
+    val proxies = [low, high]
+    val parents: Dict<i64, i64> = {}
+    val result = hit_stack(proxies, parents, 50, 50)
+    t = check(t, "topmost-by-paint-key wins on z_index", result.primary == 2)
+
+    # Higher-priority key field (stacking_context_order) overrides a lower
+    # z_index -- proves full key precedence, not just the last field.
+    var a = HitProxy2D.create(10, 0, 0, 100, 100)
+    a.stacking_context_order = 1
+    a.z_index = 0
+    var b = HitProxy2D.create(11, 0, 0, 100, 100)
+    b.stacking_context_order = 0
+    b.z_index = 999
+    val proxies2 = [a, b]
+    val result2 = hit_stack(proxies2, parents, 50, 50)
+    t = check(t, "stacking_context_order outranks z_index", result2.primary == 10)
+    t
+
+# ---------------------------------------------------------------------
+# 2. PointerPolicy.None passes through to the box below.
+# ---------------------------------------------------------------------
+fn case_none_passes_through() -> Tally:
+    var t = tally_zero()
+    var top = HitProxy2D.create(20, 0, 0, 100, 100)
+    top.z_index = 99
+    top.pointer_policy = POINTER_POLICY_NONE
+    var below = HitProxy2D.create(21, 0, 0, 100, 100)
+    below.z_index = 0
+    val proxies = [top, below]
+    val parents: Dict<i64, i64> = {}
+    val result = hit_stack(proxies, parents, 50, 50)
+    t = check(t, "PointerPolicy.None passes through to the box below", result.primary == 21)
+    t = check(t, "PointerPolicy.None proxy absent from hits list", result.hits.len() == 1)
+    t
+
+# ---------------------------------------------------------------------
+# 3/4/5. capture -> target -> bubble ordering, stopPropagation,
+# stopImmediatePropagation.
+# ---------------------------------------------------------------------
+fn handler_none(e: PointerEvent2D) -> i32:
+    ACTION_NONE
+
+fn handler_stop_propagation(e: PointerEvent2D) -> i32:
+    ACTION_STOP_PROPAGATION
+
+fn handler_stop_immediate(e: PointerEvent2D) -> i32:
+    ACTION_STOP_IMMEDIATE
+
+fn case_capture_target_bubble_order() -> Tally:
+    var t = tally_zero()
+    # Chain: root(100) -> mid(101) -> target(102).
+    val path: [i64] = [100, 101, 102]
+    val listeners = [
+        EventListener2D.create(100, -1, true, false, handler_none),   # capture, root
+        EventListener2D.create(101, -1, true, false, handler_none),   # capture, mid
+        EventListener2D.create(102, -1, false, false, handler_none),  # target
+        EventListener2D.create(101, -1, false, false, handler_none),  # bubble, mid
+        EventListener2D.create(100, -1, false, false, handler_none)   # bubble, root
+    ]
+    val event = PointerEvent2D.create(1, POINTER_DOWN, 5, 5, 1, 102)
+    val outcome = dispatch(event, listeners, path)
+    val fired = outcome.fired_node_ids
+    t = check(t, "capture/target/bubble fires all 5 listeners", fired.len() == 5)
+    t = check(t, "capture phase root fires first", fired.len() > 0 and fired[0] == 100)
+    t = check(t, "capture phase mid fires second", fired.len() > 1 and fired[1] == 101)
+    t = check(t, "target fires third", fired.len() > 2 and fired[2] == 102)
+    t = check(t, "bubble phase mid fires fourth", fired.len() > 3 and fired[3] == 101)
+    t = check(t, "bubble phase root fires fifth", fired.len() > 4 and fired[4] == 100)
+    t = check(t, "no stop -> not stopped", not outcome.stopped)
+    t
+
+fn case_stop_propagation_blocks_ancestors() -> Tally:
+    var t = tally_zero()
+    val path: [i64] = [200, 201, 202]
+    val listeners = [
+        EventListener2D.create(202, -1, false, false, handler_stop_propagation),  # target: stop
+        EventListener2D.create(201, -1, false, false, handler_none),               # bubble mid -- must NOT fire
+        EventListener2D.create(200, -1, false, false, handler_none)                # bubble root -- must NOT fire
+    ]
+    val event = PointerEvent2D.create(1, POINTER_DOWN, 5, 5, 1, 202)
+    val outcome = dispatch(event, listeners, path)
+    t = check(t, "stopPropagation at target fires only target", outcome.fired_node_ids.len() == 1)
+    t = check(t, "stopPropagation sets stopped", outcome.stopped)
+    t = check(t, "stopPropagation does not set stopped_immediate", not outcome.stopped_immediate)
+    t = check(t, "event.stop_flag reflects dispatch result", event.stop_flag)
+    t
+
+fn case_stop_immediate_blocks_same_node() -> Tally:
+    var t = tally_zero()
+    # Two listeners on the SAME node (target); the first stops immediate --
+    # the second must never fire.
+    val path: [i64] = [300, 301]
+    val listeners = [
+        EventListener2D.create(301, -1, false, false, handler_stop_immediate),
+        EventListener2D.create(301, -1, false, false, handler_none)
+    ]
+    val event = PointerEvent2D.create(1, POINTER_DOWN, 5, 5, 1, 301)
+    val outcome = dispatch(event, listeners, path)
+    t = check(t, "stopImmediate: target node fires exactly once", _count_i64(outcome.fired_node_ids, 301) == 1)
+    t = check(t, "stopImmediate sets stopped_immediate", outcome.stopped_immediate)
+    t = check(t, "stopImmediate: second (unfired) listener stays registered", outcome.remaining_listeners.len() == 2)
+    t
+
+fn case_once_listener_removed_after_fire() -> Tally:
+    var t = tally_zero()
+    val path: [i64] = [400]
+    val listeners = [
+        EventListener2D.create(400, -1, false, true, handler_none)
+    ]
+    val event = PointerEvent2D.create(1, POINTER_DOWN, 5, 5, 1, 400)
+    val outcome = dispatch(event, listeners, path)
+    t = check(t, "once listener fired", outcome.fired_node_ids.len() == 1)
+    t = check(t, "once listener removed from remaining_listeners", outcome.remaining_listeners.len() == 0)
+    t
+
+# ---------------------------------------------------------------------
+# 6. Pointer capture keeps routing outside bounds until release.
+# ---------------------------------------------------------------------
+fn case_pointer_capture_outside_bounds() -> Tally:
+    var t = tally_zero()
+    val proxy = HitProxy2D.create(500, 0, 0, 10, 10)
+    val proxies = [proxy]
+    val parents: Dict<i64, i64> = {}
+    val far_hit = hit_stack(proxies, parents, 999, 999)
+    t = check(t, "sanity: far point misses the proxy", far_hit.primary == -1)
+
+    var router = PointerRouter.create()
+    router.capture_pointer(1, 500)
+    t = check(t, "has_pointer_capture reports the captured node", router.has_pointer_capture(1, 500))
+    val target_while_captured = effective_target(router, 1, far_hit)
+    t = check(t, "capture substitutes the target outside bounds", target_while_captured == 500)
+
+    router.release_pointer(1)
+    t = check(t, "release clears has_pointer_capture", not router.has_pointer_capture(1, 500))
+    val target_after_release = effective_target(router, 1, far_hit)
+    t = check(t, "after release, effective_target falls back to hit-test primary", target_after_release == -1)
+    t
+
+# ---------------------------------------------------------------------
+# 7. Hover diff emits enter/leave correctly.
+# ---------------------------------------------------------------------
+fn case_hover_diff() -> Tally:
+    var t = tally_zero()
+    val old_path: [i64] = [1, 2, 3]
+    val new_path: [i64] = [1, 4, 5]
+    val diff = hover_diff(old_path, new_path)
+    t = check(t, "hover_diff entered has 2 nodes", diff.entered.len() == 2)
+    t = check(t, "hover_diff entered contains 4", _count_i64(diff.entered, 4) == 1)
+    t = check(t, "hover_diff entered contains 5", _count_i64(diff.entered, 5) == 1)
+    t = check(t, "hover_diff left has 2 nodes", diff.left.len() == 2)
+    t = check(t, "hover_diff left contains 2", _count_i64(diff.left, 2) == 1)
+    t = check(t, "hover_diff left contains 3", _count_i64(diff.left, 3) == 1)
+    t = check(t, "hover_diff over_target is new primary", diff.over_target == 5)
+    t = check(t, "hover_diff out_target is old primary", diff.out_target == 3)
+
+    # Unchanged primary -> no over/out.
+    val same_path: [i64] = [1, 2, 3]
+    val diff2 = hover_diff(old_path, same_path)
+    t = check(t, "hover_diff: unchanged path has no entered", diff2.entered.len() == 0)
+    t = check(t, "hover_diff: unchanged path has no left", diff2.left.len() == 0)
+    t = check(t, "hover_diff: unchanged primary -> over_target -1", diff2.over_target == -1)
+    t = check(t, "hover_diff: unchanged primary -> out_target -1", diff2.out_target == -1)
+    t
+
+# ---------------------------------------------------------------------
+# ancestor_path_of sanity (used internally by hit_stack; checked directly
+# too since it is a public seam for pointer_capture's captured-target path).
+# ---------------------------------------------------------------------
+fn case_ancestor_path_of() -> Tally:
+    var t = tally_zero()
+    var parents: Dict<i64, i64> = {}
+    parents[2] = 1
+    parents[3] = 2
+    val path = ancestor_path_of(parents, 3)
+    t = check(t, "ancestor_path_of returns root-to-node order", path.len() == 3 and path[0] == 1 and path[1] == 2 and path[2] == 3)
+    t
+
+var total = tally_zero()
+total = tally_merge(total, case_topmost_wins())
+total = tally_merge(total, case_none_passes_through())
+total = tally_merge(total, case_capture_target_bubble_order())
+total = tally_merge(total, case_stop_propagation_blocks_ancestors())
+total = tally_merge(total, case_stop_immediate_blocks_same_node())
+total = tally_merge(total, case_once_listener_removed_after_fire())
+total = tally_merge(total, case_pointer_capture_outside_bounds())
+total = tally_merge(total, case_hover_diff())
+total = tally_merge(total, case_ancestor_path_of())
+
+print ""
+print "SUMMARY pass={total.pass_n} fail={total.fail_n}"
+
+if total.fail_n > 0:
+    exit(1)
+exit(0)
