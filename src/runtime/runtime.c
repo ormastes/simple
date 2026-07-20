@@ -793,9 +793,38 @@ char* spl_file_read(const char* path) {
     int fd = open(path, O_RDONLY);
     if (fd < 0) return SPL_STRDUP("", "file");
     struct stat st;
-    if (fstat(fd, &st) != 0 || st.st_size <= 0) {
+    if (fstat(fd, &st) != 0) {
         close(fd);
         return SPL_STRDUP("", "file");
+    }
+    /* st_size <= 0 does NOT mean "empty" or "unreadable": pseudo-filesystems
+     * (procfs, sysfs) report 0 for files that generate content on read
+     * (e.g. /proc/meminfo), so treating <= 0 as failure silently returned
+     * "" for real, non-empty content. Fall back to a growable-buffer
+     * read-to-EOF instead of assuming failure. */
+    if (st.st_size <= 0) {
+        size_t cap = 4096;
+        size_t len = 0;
+        char* out = (char*)SPL_MALLOC(cap, "file");
+        for (;;) {
+            if (len >= cap - 1) {
+                size_t new_cap = cap * 2;
+                char* new_out = (char*)SPL_REALLOC(out, new_cap, "file");
+                if (!new_out) {
+                    SPL_FREE(out);
+                    close(fd);
+                    return SPL_STRDUP("", "file");
+                }
+                out = new_out;
+                cap = new_cap;
+            }
+            ssize_t n = read(fd, out + len, cap - 1 - len);
+            if (n <= 0) break;
+            len += (size_t)n;
+        }
+        close(fd);
+        out[len] = '\0';
+        return out;
     }
     size_t len = (size_t)st.st_size;
     if (len >= 4096) {
@@ -820,16 +849,32 @@ char* spl_file_read(const char* path) {
     close(fd);
     return buf;
 #else
-    /* Windows / Emscripten: use fopen/fread */
+    /* Windows / Emscripten: use fopen/fread. Do not size the buffer from
+     * ftell() (see the POSIX branch's comment above for why: it's 0 for
+     * pseudo-filesystem files) — read to EOF into a growable buffer. */
     FILE* f = fopen(path, "rb");
     if (!f) return SPL_STRDUP("", "file");
-    fseek(f, 0, SEEK_END);
-    long len = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    char* buf = (char*)SPL_MALLOC(len + 1, "file");
-    size_t read_len = fread(buf, 1, len, f);
-    buf[read_len] = '\0';
+    size_t cap = 4096;
+    size_t len = 0;
+    char* buf = (char*)SPL_MALLOC(cap, "file");
+    for (;;) {
+        if (len >= cap - 1) {
+            size_t new_cap = cap * 2;
+            char* new_buf = (char*)SPL_REALLOC(buf, new_cap, "file");
+            if (!new_buf) {
+                SPL_FREE(buf);
+                fclose(f);
+                return SPL_STRDUP("", "file");
+            }
+            buf = new_buf;
+            cap = new_cap;
+        }
+        size_t n = fread(buf + len, 1, cap - 1 - len, f);
+        len += n;
+        if (n == 0) break;
+    }
     fclose(f);
+    buf[len] = '\0';
     return buf;
 #endif
 }
