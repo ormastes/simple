@@ -144,7 +144,7 @@ only entry-point wiring differs, confirm which before coding.
 | Verb | Grammar | Adapter mapping | Status |
 |---|---|---|---|
 | `ls` | `storage ls [alias[/bucket[/prefix]]] [-r\|--recursive] [--bytes] [--json]` | no-arg → `minio_list_buckets`; with bucket → `minio_list_objects` (SigV4 path); `-r` on a prefix → **gap**, `minio_list_objects` has no recursion knob, would need to fall back to `mc_ls(recursive: true)` via the mc adapter (wire it in) | Partial — bucket-level ls exists; recursive needs the mc-adapter fallback wired in |
-| `cp` | `storage cp SRC DST [-r] [--content-type CT]` (direction inferred from which side has a local path vs `alias/bucket/key`) | local→remote text: `minio_put_text`; local→remote binary: **gap**, `minio_put_object` is a hard stub → auto-fallback to `mc_put` (mc adapter, wire in) or print the `presign-put` workaround if `mc` absent; remote→local: `minio_download`/`minio_get_object` | Partial — text upload + all downloads work; binary upload needs the mc fallback or presign-put workaround |
+| `cp` | `storage cp SRC DST [-r] [--content-type CT]` (direction inferred from which side has a local path vs `alias/bucket/key`) | local→remote: reads REAL file bytes via `std.io_runtime` `file_read` (mock `file_ops` removed 2026-07-20, same class as `wiki-confluence-mock-file-io`) then `minio_put_text`; binary upload ceiling: use `storage presign-put` (`ponytail:` comment in `_storage_cp_upload`, same ceiling as `mirror`); remote→local: `minio_download`/`minio_get_object` | Works with real content; binary upload via presign-put (documented ceiling) |
 | `cat` | `storage cat alias/bucket/key [--range R]` | `minio_get_object` (print `.body`, same as `itf minio get` without `--out`) | Exists (already how `cmd_minio._minio_get` behaves sans `--out`) |
 | `stat` | `storage stat alias/bucket/key [--bytes] [--json]` | `minio_stat_object` — **note**: not a real HEAD; approximated via ListObjectsV2 exact-key filter because `rt_http_request` exposes no response headers, so ETag/Last-Modified come from the LIST body, not a HEAD response | Exists, with a documented fidelity caveat |
 | `mb` | `storage mb alias/bucket` | `minio_create_bucket` | Exists |
@@ -152,7 +152,7 @@ only entry-point wiring differs, confirm which before coding.
 | `rm` | `storage rm alias/bucket/key [-r]` | **gap** — no `minio_delete_object` in either adapter today; needs new SigV4 `DELETE` call in `adapter_minio.spl` (sign+send `DELETE` to the object path, S3 returns 204) or an `mc_rm` argv builder added to the mc adapter | Gap — smallest net-new addition needed for the facade to be useful day one |
 | `presign` (mc: `share download`) | `storage presign alias/bucket/key [--expires N]` | `minio_presign_get` (client-side, no network round-trip) or `mc_share_download` | Exists |
 | `presign-put` (mc: `share upload`, different mechanism — see §1) | `storage presign-put alias/bucket/key [--expires N]` | `minio_presign_put` — a bare presigned PUT URL, deliberately simpler than mc's multi-field POST-policy form; keep this repo's simpler shape rather than copying mc's `curl -F` output, say so in `--help` | Exists, intentionally divergent from mc |
-| `mirror` | `storage mirror SRC DST [--dry-run] [--remove] [--json]` | Implemented — a facade-layer diff loop over `minio_list_objects` (both sides) + `minio_put_text`/`minio_download` (copy) + `minio_delete_object` (`--remove`); no new transport code. Direction inferred like `cp` (`infer_cp_direction`); local↔local and remote↔remote refused ("mirror requires exactly one local side") | Done — size-only sync (see below), `--remove` bounded to 1000 entries/side like `rm -r`/`rb --force` |
+| `mirror` | `storage mirror SRC TARGET [--dry-run]` | **gap** — no equivalent in either adapter; would need either a new loop of `ls` + `cp` calls in the facade layer itself (simplest, reuses existing primitives) or an `mc mirror` argv wrapper | Gap |
 | `du` | `storage du alias/bucket[/prefix] [--depth N]` | **gap** — no equivalent in either adapter; simplest implementation is client-side: page through `minio_list_objects` and sum `size`, no new SFFI needed | Gap, but cheap to close (pure aggregation over existing `ls`) |
 | `health` | `storage health [alias] [--json]` | `minio_health_live` or `mc_health_ready` | Exists |
 
@@ -231,20 +231,6 @@ end-to-end; (2) client-side `du` — pure aggregation over existing
 `minio_list_objects`, no new SFFI; (3) wiring `adapter_minio_mc.spl` into
 dispatch at all (currently zero callers) so binary `cp`/recursive `ls` can
 fall back to it instead of dead-ending on `minio_put_object`'s stub.
-
-**`mirror` (landed)**: client-side diff loop, no new adapter functions —
-`_mirror_diff` in `cmd_storage.spl` is a pure size-only comparison (no I/O),
-fed by real local listing (`std.io_runtime.dir_walk`/`file_size` — NOT
-`std.nogc_sync_mut.file_system.file_ops`/`dir_ops`, which are documented
-mocks, see `wiki_git.spl`) and `minio_list_objects` on the remote side.
-**Documented ceiling**: the sync rule is size-only — missing at the
-destination, or present with a different size, gets copied; matching
-name+size is skipped. Real `mc mirror` also compares mtime; this facade has
-no portable local-mtime ↔ S3-`LastModified` comparison wired up yet, so a
-file with the same size but different content and an unchanged size won't
-be re-copied. `--remove` deletes destination-only entries, bounded to 1000
-entries per side (same cap and rationale as `rm -r`/`rb --force`: no batch
-`DeleteObjects` call exists in `adapter_minio.spl`).
 
 **Structural decision needed before real multi-alias support**: single vs.
 multi-endpoint config (§4) — today's `auth.sdn` models exactly one MinIO

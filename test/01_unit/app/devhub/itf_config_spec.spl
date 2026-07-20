@@ -1,7 +1,49 @@
 # @cover src/app/devhub/config.spl 60%
 
-use app.devhub.config.{ItfConfig, resolve_editor, _apply_config_value}
+use app.devhub.config.{ItfConfig, resolve_editor, _apply_config_value, load_config, save_auth_token, load_auth_token}
 use app.devhub.errors.{ItfError}
+
+extern fn rt_env_get(key: text) -> text?
+extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+
+# Fixture-HOME harness (same pattern as wiki_backend_routing_spec.spl /
+# cmd_jira_spec.spl / cmd_tasks_spec.spl): points HOME at a throwaway
+# build/ directory so load_config()/load_auth_token()/save_auth_token()
+# never touch the real ~/.config/itf, and always restores HOME afterward.
+val FIXTURE_HOME = "build/test-itf-config-colon-fixture/home"
+
+
+fn _load_config_with_fixture_config(config_body: text) -> ItfConfig:
+    """Write FIXTURE_HOME/.config/itf/config.sdn with `config_body` (via the
+    real rt_file_write_text extern — NOT save_config, so this isolates the
+    READ side while reproducing bug itf-config-colon-value-split), then call
+    load_config() with HOME pointed at the fixture. Always restores HOME."""
+    val dir = "{FIXTURE_HOME}/.config/itf"
+    val _mk = rt_dir_create_all(dir)
+    val _cfg = rt_file_write_text("{dir}/config.sdn", config_body)
+    val _no_auth = rt_file_delete("{dir}/auth.sdn")
+    val original_home = rt_env_get("HOME") ?? ""
+    val _set_home = rt_env_set("HOME", FIXTURE_HOME)
+    val config = load_config()
+    val _restore_home = rt_env_set("HOME", original_home)
+    config
+
+
+fn _auth_token_roundtrip(provider: text, token: text) -> text:
+    """save_auth_token(provider, token) then load_auth_token(provider), with
+    HOME pointed at the fixture. Always restores HOME."""
+    val dir = "{FIXTURE_HOME}/.config/itf"
+    val _mk = rt_dir_create_all(dir)
+    val original_home = rt_env_get("HOME") ?? ""
+    val _set_home = rt_env_set("HOME", FIXTURE_HOME)
+    val _saved = save_auth_token(provider, token)
+    val loaded = load_auth_token(provider)
+    val _restore_home = rt_env_set("HOME", original_home)
+    loaded
+
 
 describe "ITF configuration":
 
@@ -38,6 +80,29 @@ describe "ITF configuration":
         it "leaves tasks_default_backend untouched when only tasks.jira_done_status is set":
             val config = _apply_config_value(ItfConfig.default(), "tasks", "jira_done_status", "Resolved")
             expect(config.tasks_default_backend).to_equal("")
+
+    context "load_config colon-split (bug itf-config-colon-value-split)":
+        it "a URL value containing its own colon round-trips through load_config unchanged":
+            val config = _load_config_with_fixture_config("confluence:\n    url: https://x.atlassian.net/wiki\n")
+            expect(config.confluence_url).to_equal("https://x.atlassian.net/wiki")
+
+        it "a plain single-word value is unaffected by the first-colon-only split":
+            val config = _load_config_with_fixture_config("output:\n    format: json\n")
+            expect(config.default_output).to_equal("json")
+
+        it "a token_cmd value containing its own colon (e.g. a URI-shaped command) round-trips unchanged":
+            val config = _load_config_with_fixture_config("token_cmd:\n    jira: op read op://vault/item/token\n")
+            expect(config.token_cmds.len()).to_equal(1)
+            expect(config.token_cmds[0].1).to_equal("op read op://vault/item/token")
+
+    context "load_auth_token colon-split (bug itf-config-colon-value-split)":
+        it "a token value containing its own colon round-trips through save_auth_token/load_auth_token unchanged":
+            val loaded = _auth_token_roundtrip("confluence", "user:pass:extra")
+            expect(loaded).to_equal("user:pass:extra")
+
+        it "a plain token without a colon is unaffected":
+            val loaded = _auth_token_roundtrip("jira", "plaintoken123")
+            expect(loaded).to_equal("plaintoken123")
 
     context "ItfError":
         it "auth error has exit code 4":

@@ -88,9 +88,17 @@ fn load_config() -> ItfConfig:
             # Section header like "confluence:"
             section = trimmed.replace(":", "")
         else if trimmed.contains(":"):
-            val parts = trimmed.split(":", 2)
-            val key = parts[0].trim()
-            val value = parts[1].trim()
+            # First-colon-only split (bug itf-config-colon-value-split):
+            # `.split(":", 2)` splits on EVERY colon, not just the first two,
+            # so a value containing its own colon (a URL like
+            # `https://x.atlassian.net/wiki`, or a token_cmd shell command
+            # with `://` in it) was truncated at the SECOND colon. `.find`
+            # locates only the first colon; everything after it is the value,
+            # verbatim (bug_db.sdn: FIXED 2026-07-20 first-colon split +
+            # round-trip specs).
+            val colon_idx = trimmed.find(":").unwrap_or(-1)
+            val key = trimmed[0:colon_idx].trim()
+            val value = trimmed[colon_idx + 1:].trim()
             config = _apply_config_value(config, section, key, value)
 
     config
@@ -221,7 +229,12 @@ fn load_auth_token(provider: text) -> text:
         else if trimmed.ends_with(":") and not trimmed.contains(" "):
             section = trimmed.replace(":", "")
         else if section == provider and trimmed.starts_with("token:"):
-            val token = trimmed.split(":", 2)[1].trim()
+            # Same first-colon-only fix as load_config() above (bug
+            # itf-config-colon-value-split) — a token value containing its
+            # own colon (e.g. a "user:pass" style secret) was truncated at
+            # the second colon by `.split(":", 2)`.
+            val colon_idx = trimmed.find(":").unwrap_or(-1)
+            val token = trimmed[colon_idx + 1:].trim()
             # Strip surrounding quotes if present
             if token.starts_with("\"") and token.ends_with("\""):
                 return token[1:token.len() - 1]

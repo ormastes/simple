@@ -10,8 +10,7 @@
 # Exit codes mirror cmd_minio.spl's existing convention (facade_storage.md
 # §6): 0 success, 1 failure — no other codes in use anywhere in itf/storage.
 
-use std.nogc_sync_mut.file_system.file_ops.{file_read_text}
-use std.io_runtime.{time_now_unix_micros, file_read, file_size, file_delete, dir_walk, dir_create_all, is_dir}
+use std.io_runtime.{time_now_unix_micros, file_read, file_size, file_exists, file_delete, dir_walk, dir_create_all, is_dir}
 use app.devhub.storage_addr.{StorageAddr, parse_storage_addr, infer_cp_direction, resolve_alias_config, is_known_alias}
 use app.devhub.adapter_minio.{
     load_minio_config, ObjectInfo,
@@ -830,36 +829,41 @@ fn _storage_cp(args: [text]) -> i64:
 
 
 fn _storage_cp_upload(src: StorageAddr, dst: StorageAddr, args: [text]) -> i64:
-    """local→remote. Text bodies (UTF-8 decodable) go through minio_put_text
-    directly; binary bodies get a real, ready-to-run presigned-PUT curl
-    command (the actual working escape hatch — see adapter_minio.minio_put_object's
-    docstring for why a direct binary PUT isn't supported yet)."""
+    """local→remote. Real file content via std.io_runtime (file_exists +
+    file_read) — the same real-IO pattern `storage mirror`'s upload path
+    already uses (see _mirror_local_entries' docstring above), NOT the mock
+    std.nogc_sync_mut.file_system.file_ops this function used before (its
+    file_read_text always returned a fixed "mock file content: <path>"
+    string regardless of the real file's bytes — uploads never carried real
+    content; same mock-file-ops class of bug as wiki-confluence-mock-file-io
+    in cmd_wiki.spl. Fixed 2026-07-20).
+
+    ponytail: text-body upload only, same documented ceiling as `storage
+    mirror` (adapter_minio.minio_put_text/minio_put_object — no raw-bytes
+    HTTP SFFI for a real binary PUT yet, so a binary file round-trips
+    lossily here). Use `storage presign-put` for a binary upload instead.
+    """
     if dst.bucket == "" or dst.key == "":
         print_error("storage cp: upload DST must be a full alias/bucket/key (got '{dst.raw}')")
+        return 1
+    if not file_exists(src.local_path):
+        print_error("storage cp: SRC file not found: '{src.local_path}'")
         return 1
     val (auth_ok, cfg, auth_err) = resolve_alias_config(dst.alias)
     if not auth_ok:
         print_error(auth_err)
         return 1
     val ct = _extract_flag(args, "--content-type", "")
-    val content = file_read_text(src.local_path)
-    if content != nil:
-        val started = time_now_unix_micros()
-        val (ok, _etag, raw) = minio_put_text(cfg, dst.bucket, dst.key, content, ct)
-        val elapsed_ms = (time_now_unix_micros() - started) / 1000
-        if not ok:
-            print_error(raw)
-            return 1
-        print_success("uploaded {dst.alias}/{dst.bucket}/{dst.key} ({content.len()} bytes, text path)")
-        print_dim(format_transfer_summary("uploaded", content.len(), elapsed_ms))
-        return 0
-    val (ok, url, err) = minio_presign_put(cfg, dst.bucket, dst.key, 86400)
+    val content = file_read(src.local_path)
+    val started = time_now_unix_micros()
+    val (ok, _etag, raw) = minio_put_text(cfg, dst.bucket, dst.key, content, ct)
+    val elapsed_ms = (time_now_unix_micros() - started) / 1000
     if not ok:
-        print_error("storage cp: binary upload needs the presign-put escape hatch, and generating it failed: {err}")
+        print_error(raw)
         return 1
-    print_error("storage cp: '{src.local_path}' isn't valid UTF-8 (binary body) — direct binary PUT isn't supported yet (needs a raw-bytes HTTP SFFI; see adapter_minio.minio_put_object). Run this instead:")
-    print "  curl -X PUT --data-binary @{src.local_path} \"{url}\""
-    1
+    print_success("uploaded {dst.alias}/{dst.bucket}/{dst.key} ({content.len()} bytes)")
+    print_dim(format_transfer_summary("uploaded", content.len(), elapsed_ms))
+    0
 
 
 fn _storage_cp_download(src: StorageAddr, dst: StorageAddr, args: [text]) -> i64:
