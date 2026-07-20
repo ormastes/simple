@@ -391,6 +391,30 @@ impl MirLowering:
             val vt_disc = rt_enum_discriminant(vt.kind)
             if vt_disc == rt_enum_discriminant(MirTypeKind.F64) or vt_disc == rt_enum_discriminant(MirTypeKind.F32):
                 self.runtime_elem_value_type[container.id] = vt
+        # Bug (layoutglyph_struct_array_i64_field_tag_shift_readback):
+        # lower_array_lit captures a struct-typed element's name into
+        # array_element_struct_syms (keyed by the ARRAY's own local id) so
+        # expr_dispatch's Index-read case can decode a re-read element as
+        # Opaque(struct_name) -- a no-op passthrough, matching
+        # box_runtime_value's own no-op for MirTypeKind.Struct. But a
+        # container built via an initially-EMPTY `[]`/`{}` literal (fixed at
+        # the i64 default, e.g. `var glyphs: [LayoutGlyph] = []`) that is
+        # only ever populated via `.push(...)` or `arr[i] = ...` NEVER goes
+        # through lower_array_lit's per-element loop, so
+        # array_element_struct_syms is never populated for it. The Index-read
+        # case then falls through decode_runtime_value's is_integer default
+        # (raw >> 3), shredding the struct's heap pointer into a wild address
+        # -- the next field access on it (a plain emit_get_field load) then
+        # SIGSEGVs, or -- for scalar-looking bit patterns -- silently reads
+        # back tag-shifted/masked garbage in every i64 field. Mirror
+        # lower_array_lit's capture here (this helper already runs at every
+        # push/index-assign call site, before box_runtime_value renames
+        # nothing for Struct-kind values) so the read side learns the real
+        # element type regardless of how the container was declared.
+        val struct_name = self.struct_value_syms.get(value_local.id)
+        if val sn = struct_name:
+            if sn != "":
+                self.array_element_struct_syms[container.id] = sn
 
     me decode_runtime_value(raw: LocalId, result_type: MirType) -> LocalId:
         var b = self.builder

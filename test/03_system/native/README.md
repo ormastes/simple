@@ -24,6 +24,7 @@ env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 <self-hosted-simple> native-bu
 | `match_value.spl` | match value binding | (batch) | **7** | PASS | wrong value |
 | `option_try_unwrap_ifval_XFAIL.spl` | `.?` + `if val` payload unwrap | — | **7** | **XFAIL** (gets 84) | origin Option-ABI regression |
 | `enum_f64_payload_precision.spl` | LLVM enum f64 payload-word ABI | — | **30** | SOURCE FIX / execution pending | f64 bits numerically converted |
+| `struct_array_push_i64_field_tagshift.spl` | struct pushed into an empty-literal `[]`-declared array (i64 fields) | (this fix) | **30** | PASS | SIGSEGV, or a specific 11x rc marking which field/element mismatched |
 
 ## XFAIL: `option_try_unwrap_ifval_XFAIL.spl`
 
