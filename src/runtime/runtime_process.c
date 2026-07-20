@@ -769,3 +769,36 @@ bool rt_process_is_alive(int64_t pid) {
 }
 
 #endif /* POSIX */
+
+/* Backfill: runtime.h prototype with no C definition (caught by the Stage4
+   runtime-capsule gate). Mirrors env_process.rs rt_process_wait semantics:
+   returns child exit code, -1 on error, -2 on timeout (child keeps running). */
+#ifdef _WIN32
+int64_t rt_process_wait(int64_t pid, int64_t timeout_ms) {
+    (void)pid; (void)timeout_ms;
+    return -1;
+}
+#else
+int64_t rt_process_wait(int64_t pid, int64_t timeout_ms) {
+    if (pid <= 0) return -1;
+    if (timeout_ms <= 0) {
+        int status = 0;
+        if (waitpid((pid_t)pid, &status, 0) < 0) return -1;
+        if (WIFEXITED(status)) return (int64_t)WEXITSTATUS(status);
+        return -1;
+    }
+    int64_t waited_ms = 0;
+    for (;;) {
+        int status = 0;
+        pid_t r = waitpid((pid_t)pid, &status, WNOHANG);
+        if (r < 0) return -1;
+        if (r > 0) {
+            if (WIFEXITED(status)) return (int64_t)WEXITSTATUS(status);
+            return -1;
+        }
+        if (waited_ms >= timeout_ms) return -2;
+        usleep(10 * 1000);
+        waited_ms += 10;
+    }
+}
+#endif
