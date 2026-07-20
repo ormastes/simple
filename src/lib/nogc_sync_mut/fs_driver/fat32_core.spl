@@ -9,7 +9,8 @@ use std.fs_driver.block_device.{BlockDevice}
 use std.fs_driver.types.{FileHandle, DirEntry, Inode}
 use std.fs_driver.direct_io.{DirectIoExtent}
 use std.fs_driver.fat32_parsers.{
-    _to_lower_byte, _read_u32_le, _read_u16_le, _parse_short_name, _parse_lfn_slot, _split_path, _lower_text
+    _to_lower_byte, _read_u32_le, _read_u16_le, _parse_short_name, _parse_lfn_slot,
+    _lfn_slot_metadata_valid, _lfn_short_name_checksum, _split_path, _lower_text
 }
 use std.fs_driver.fat32_dir_ops.{fat32_create_file, fat32_mkdir, fat32_unlink, fat32_rename, fat32_truncate_path}
 use std.fs_driver.fat32_cache.{FatSectorCache, ChainCache, PathCache, ClusterDataCache}
@@ -394,6 +395,9 @@ impl Fat32Core:
         var dc = self.dir_cache
         dc = {}
         self.dir_cache = dc
+        var dni = self.dir_name_index
+        dni = {}
+        self.dir_name_index = dni
         self.cluster_data_cache.clear()
         self.next_free_hint = 2
         self.cached_free_count = -1
@@ -891,6 +895,17 @@ impl Fat32Core:
         self.invalidate_chain(first_cluster)
         Ok(first_cluster)
 
+    me fn _cache_dir_entries(dir_cluster: u32, entries: [DirEntry]):
+        var dc = self.dir_cache
+        if dc.keys().len() >= 128:
+            dc = {}
+            var dni = self.dir_name_index
+            dni = {}
+            self.dir_name_index = dni
+        dc[dir_cluster] = entries
+        self.dir_cache = dc
+        self._build_name_index(dir_cluster, entries)
+
     me fn read_dir_entries(dir_cluster: u32) -> Result<[DirEntry], text>:
         if not self.mounted:
             return Err("filesystem not mounted")
@@ -908,6 +923,9 @@ impl Fat32Core:
             Err(err): return Err(err)
         var entries: [DirEntry] = []
         var pending_lfn = ""
+        var pending_lfn_checksum: i32 = -1
+        var pending_lfn_next_sequence: i32 = 0
+        var pending_lfn_valid = false
         var ci = 0
         while ci < chain.len():
             val cluster_data_rc = self.read_cluster(chain[ci])
@@ -924,26 +942,45 @@ impl Fat32Core:
                 val off = (ei * FAT32_DIR_ENTRY_SIZE).to_i32()
                 val first_byte = cluster_data[off]
                 if first_byte == 0x00:
-                    var dc = self.dir_cache
-                    if dc.keys().len() >= 128:
-                        dc = {}
-                        self.dir_name_index = {}
-                    dc[dir_cluster] = entries
-                    self.dir_cache = dc
-                    self._build_name_index(dir_cluster, entries)
+                    self._cache_dir_entries(dir_cluster, entries)
                     return Ok(entries)
                 if first_byte == 0xE5:
                     pending_lfn = ""
+                    pending_lfn_checksum = -1
+                    pending_lfn_next_sequence = 0
+                    pending_lfn_valid = false
                     ei = ei + 1
                     continue
                 val attr = cluster_data[off + 11]
                 if attr == FAT32_ATTR_LONG_NAME:
-                    pending_lfn = _parse_lfn_slot(cluster_data, off) + pending_lfn
+                    val sequence = (first_byte & 0x1Fu8).to_i32()
+                    val starts_chain = (first_byte & 0x40u8) != 0u8
+                    if starts_chain:
+                        pending_lfn = ""
+                        pending_lfn_checksum = cluster_data[off + 13].to_i32()
+                        pending_lfn_next_sequence = sequence
+                        pending_lfn_valid = _lfn_slot_metadata_valid(cluster_data, off)
+                    if (pending_lfn_valid and _lfn_slot_metadata_valid(cluster_data, off) and
+                            sequence == pending_lfn_next_sequence and
+                            cluster_data[off + 13].to_i32() == pending_lfn_checksum):
+                        pending_lfn = _parse_lfn_slot(cluster_data, off) + pending_lfn
+                        pending_lfn_next_sequence = sequence - 1
+                    else:
+                        pending_lfn = ""
+                        pending_lfn_checksum = -1
+                        pending_lfn_next_sequence = 0
+                        pending_lfn_valid = false
                     ei = ei + 1
                     continue
                 val short_name = _parse_short_name(cluster_data, off)
-                val name = if pending_lfn != "": pending_lfn else: short_name
+                val use_lfn = (pending_lfn_valid and pending_lfn_next_sequence == 0 and
+                    pending_lfn != "" and pending_lfn.len() <= 255 and
+                    _lfn_short_name_checksum(cluster_data, off).to_i32() == pending_lfn_checksum)
+                val name = if use_lfn: pending_lfn else: short_name
                 pending_lfn = ""
+                pending_lfn_checksum = -1
+                pending_lfn_next_sequence = 0
+                pending_lfn_valid = false
                 if name == "." or name == "..":
                     ei = ei + 1
                     continue
@@ -966,10 +1003,7 @@ impl Fat32Core:
                 ))
                 ei = ei + 1
             ci = ci + 1
-        var dc2 = self.dir_cache
-        dc2[dir_cluster] = entries
-        self.dir_cache = dc2
-        self._build_name_index(dir_cluster, entries)
+        self._cache_dir_entries(dir_cluster, entries)
         Ok(entries)
 
     me fn _build_name_index(dir_cluster: u32, entries: [DirEntry]):
@@ -982,33 +1016,40 @@ impl Fat32Core:
         dni[dir_cluster] = idx
         self.dir_name_index = dni
 
-    me fn _short_alias_for_lookup(name: text) -> text:
-        var base_part = name
-        var ext_part = ""
-        var di: i64 = 0
-        while di < name.len():
-            var db: u8 = name.char_at(di) as u8
-            if db == 0x2E:
-                base_part = name.slice(0, di)
-                ext_part = name.slice(di + 1, name.len())
-            di = di + 1
-
-        var result = ""
-        var ci: i64 = 0
-        while ci < base_part.len() and ci < 8:
-            result = result + base_part.char_at(ci)
+    me fn _find_short_entry_in_dir(dir_cluster: u32, target_name: text) -> Result<DirEntry, text>:
+        val target = _lower_text(target_name)
+        val chain_rc = self.follow_chain(dir_cluster)
+        if chain_rc.is_err():
+            return Err(chain_rc.unwrap_err())
+        val chain = chain_rc.unwrap()
+        var ci = 0
+        while ci < chain.len():
+            val data_rc = self.read_cluster(chain[ci])
+            if data_rc.is_err():
+                return Err(data_rc.unwrap_err())
+            val data = data_rc.unwrap()
+            val entry_count = (self.bytes_per_sector * self.sectors_per_cluster) / FAT32_DIR_ENTRY_SIZE
+            var ei: u32 = 0
+            while ei < entry_count:
+                val off = (ei * FAT32_DIR_ENTRY_SIZE).to_i32()
+                if data[off] == 0x00u8:
+                    return Err("file not found")
+                val attr = data[off + 11]
+                if (data[off] != 0xE5u8 and attr != FAT32_ATTR_LONG_NAME and
+                        _parse_short_name(data, off) == target):
+                    val hi = _read_u16_le(data, off + 20).to_u32()
+                    val lo = _read_u16_le(data, off + 26).to_u32()
+                    return Ok(DirEntry(
+                        name: _parse_short_name(data, off),
+                        inode: Inode(id: ((hi << 16) | lo).to_u64()),
+                        is_dir: (attr & FAT32_ATTR_DIRECTORY) != 0,
+                        size: _read_u32_le(data, off + 28).to_i64()))
+                ei = ei + 1
             ci = ci + 1
-        if ext_part.len() > 0:
-            result = result + "."
-            var exi: i64 = 0
-            while exi < ext_part.len() and exi < 3:
-                result = result + ext_part.char_at(exi)
-                exi = exi + 1
-        _lower_text(result)
+        Err("file not found")
 
     me fn find_entry_in_dir(dir_cluster: u32, target_name: text) -> Result<DirEntry, text>:
         val lower_target = _lower_text(target_name)
-        val short_alias = self._short_alias_for_lookup(target_name)
         val cached_idx = self.dir_name_index.get(dir_cluster)
         match cached_idx:
             Some(idx):
@@ -1016,12 +1057,7 @@ impl Fat32Core:
                 match found:
                     Some(entry): return Ok(entry)
                     nil: pass_dn
-                if short_alias != lower_target:
-                    val alias_found = idx.get(short_alias)
-                    match alias_found:
-                        Some(entry): return Ok(entry)
-                        nil: pass_dn
-                return Err("file not found")
+                return self._find_short_entry_in_dir(dir_cluster, target_name)
             nil: pass_dn
         val entries_rc = self.read_dir_entries(dir_cluster)
         if entries_rc.is_err():
@@ -1034,10 +1070,10 @@ impl Fat32Core:
         var i = 0
         while i < entries.len():
             val entry_name = _lower_text(entries[i].name)
-            if entry_name == lower_target or entry_name == short_alias:
+            if entry_name == lower_target:
                 return Ok(entries[i])
             i = i + 1
-        Err("file not found")
+        self._find_short_entry_in_dir(dir_cluster, target_name)
 
     # --- Path resolution ---
 

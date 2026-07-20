@@ -59,46 +59,63 @@ fn _decode_lfn_code_unit(entry: [u8], offset: i32) -> text:
 
 fn _parse_lfn_slot(entry: [u8], offset: i32) -> text:
     var name = ""
-    val c1 = _decode_lfn_code_unit(entry, offset + 1)
-    if c1 != "":
-        name = name + c1
-    val c2 = _decode_lfn_code_unit(entry, offset + 3)
-    if c2 != "":
-        name = name + c2
-    val c3 = _decode_lfn_code_unit(entry, offset + 5)
-    if c3 != "":
-        name = name + c3
-    val c4 = _decode_lfn_code_unit(entry, offset + 7)
-    if c4 != "":
-        name = name + c4
-    val c5 = _decode_lfn_code_unit(entry, offset + 9)
-    if c5 != "":
-        name = name + c5
-    val c6 = _decode_lfn_code_unit(entry, offset + 14)
-    if c6 != "":
-        name = name + c6
-    val c7 = _decode_lfn_code_unit(entry, offset + 16)
-    if c7 != "":
-        name = name + c7
-    val c8 = _decode_lfn_code_unit(entry, offset + 18)
-    if c8 != "":
-        name = name + c8
-    val c9 = _decode_lfn_code_unit(entry, offset + 20)
-    if c9 != "":
-        name = name + c9
-    val c10 = _decode_lfn_code_unit(entry, offset + 22)
-    if c10 != "":
-        name = name + c10
-    val c11 = _decode_lfn_code_unit(entry, offset + 24)
-    if c11 != "":
-        name = name + c11
-    val c12 = _decode_lfn_code_unit(entry, offset + 28)
-    if c12 != "":
-        name = name + c12
-    val c13 = _decode_lfn_code_unit(entry, offset + 30)
-    if c13 != "":
-        name = name + c13
+    val char_offsets: [i32] = [1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30]
+    var i = 0
+    while i < char_offsets.len():
+        val ch = _decode_lfn_code_unit(entry, offset + char_offsets[i])
+        if ch == "":
+            return name
+        name = name + ch
+        i = i + 1
     name
+
+fn _lfn_slot_metadata_valid(entry: [u8], offset: i32) -> bool:
+    val sequence = entry[offset]
+    val ordinal = sequence & 0x1Fu8
+    if not (ordinal > 0u8 and ordinal <= 20u8 and
+        (sequence & 0xA0u8) == 0u8 and
+        entry[offset + 11] == 0x0Fu8 and
+        entry[offset + 12] == 0u8 and
+        entry[offset + 26] == 0u8 and
+        entry[offset + 27] == 0u8):
+        return false
+    val allow_padding = (sequence & 0x40u8) != 0u8
+    val char_offsets: [i32] = [1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30]
+    var ended = false
+    var has_character = false
+    var i = 0
+    while i < char_offsets.len():
+        val char_offset = offset + char_offsets[i]
+        val lo = entry[char_offset]
+        val hi = entry[char_offset + 1]
+        if ended:
+            if lo != 0xFFu8 or hi != 0xFFu8:
+                return false
+        else:
+            if lo == 0u8 and hi == 0u8:
+                if not allow_padding:
+                    return false
+                ended = true
+            else:
+                if lo == 0xFFu8 and hi == 0xFFu8:
+                    return false
+                if (hi != 0u8 or lo < 0x20u8 or lo >= 0x7Fu8 or
+                        lo == 0x22u8 or lo == 0x2Au8 or lo == 0x2Fu8 or
+                        lo == 0x3Au8 or lo == 0x3Cu8 or lo == 0x3Eu8 or
+                        lo == 0x3Fu8 or lo == 0x5Cu8 or lo == 0x7Cu8):
+                    return false
+                has_character = true
+        i = i + 1
+    has_character
+
+fn _lfn_short_name_checksum(entry: [u8], offset: i32) -> u8:
+    var sum: u32 = 0u32
+    var i = 0
+    while i < 11:
+        val carry: u32 = if (sum & 1u32) != 0u32: 0x80u32 else: 0u32
+        sum = (carry + (sum >> 1) + entry[offset + i].to_u32()) & 0xFFu32
+        i = i + 1
+    sum.to_u8()
 
 fn _lower_text(s: text) -> text:
     var result = ""

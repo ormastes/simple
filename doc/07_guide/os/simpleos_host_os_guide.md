@@ -1,6 +1,6 @@
 # SimpleOS Host-OS Guide — what exists and how the userland works
 
-Updated 2026-07-13. Companion plan:
+Updated 2026-07-14. Companion plan:
 `doc/03_plan/os/simpleos/host_os_completeness_plan.md`.
 
 ## Userland model (FreeBSD-referenced)
@@ -47,7 +47,10 @@ Updated 2026-07-13. Companion plan:
   (`src/os/services/{devfs,procfs,pipefs}_service.spl`) awaiting trait
   mounts. Production FAT32 boot still bypasses the trait (recorded
   follow-up). Boot root order: NVFS → DBFS → FAT32 fallback (`boot_fs.spl`).
-- FAT32: LFN read both stacks; in-guest creation 8.3-only (root dir).
+- FAT32: the shared SimpleOS adapter reads case-insensitive ASCII VFAT LFNs
+  from prebuilt media, including nested and cross-cluster chains; malformed
+  chains fall back to their exact 8.3 aliases. In-guest mutation remains
+  8.3-only.
   DBFS: POSIX shim (D10), no modes/symlinks (fail-closed Errs).
 
 ## Terminal stack

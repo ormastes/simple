@@ -407,10 +407,12 @@ Manual fake-sysfs one-shot preflight checks
      image. It now passes as a focused shared `FsFat32Driver` mount-table
      registration and DBFS coexistence guard, and its path-migration conflict
      has been resolved toward the shared-driver surface.
-   - 2026-05-29 follow-up: shared `Fat32Core` now parses single-slot LFN
-     directory entries and resolves them case-insensitively, with
-     `test/01_unit/lib/fs_driver/fat32_core_lfn_spec.spl` covering the shared
-     behavior that used to be exercised only through the legacy driver.
+   - 2026-07-14 follow-up: shared `Fat32Core` validates ordered multi-slot LFN
+     chains, the 8.3 checksum, reserved metadata, ASCII code units, and the
+     255-character ceiling before exposing a case-insensitive long name.
+     Malformed chains retain exact 8.3 alias access. The focused shared-driver
+     spec covers nested and cross-cluster names plus SimpleOS adapter
+     `readdir`/`stat`/`open`/`read`/`close`; mutation remains 8.3-only.
 
 4. Finish performance proof for Simple FAT vs C/VFAT on 4K random read/write.
    - Keep `scripts/perf/run-fat32-4k-cfat-baseline.shs` as the focused gate.

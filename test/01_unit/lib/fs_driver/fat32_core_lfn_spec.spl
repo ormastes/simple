@@ -1,6 +1,8 @@
 use std.spec.{describe, it, expect}
 use std.fs_driver.block_device.{BlockDevice}
 use std.fs_driver.fat32_core.{Fat32Core}
+use os.services.fat32.shared_fat32_driver.{SharedFat32Driver}
+use os.kernel.types.fs_types.{FileFlags, FsNodeKind}
 
 val FAT32_EOC: u32 = 0x0FFFFFF8
 val FAT32_ATTR_ARCHIVE: u8 = 0x20
@@ -9,6 +11,10 @@ val FAT32_ATTR_LFN: u8 = 0x0F
 struct SectorImage:
     lba: u64
     bytes: [u8]
+
+struct TwoClusterDirectory:
+    first: [u8]
+    second: [u8]
 
 class Fat32LfnMockBlockDevice:
     boot_sector: [u8]
@@ -70,46 +76,159 @@ fn _fat_sector() -> [u8]:
     var bytes = _zero_sector()
     _write_u32_le(bytes, 8, FAT32_EOC)
     _write_u32_le(bytes, 20, FAT32_EOC)
+    _write_u32_le(bytes, 24, FAT32_EOC)
     bytes
+
+fn _fat_sector_with_root_chain() -> [u8]:
+    var bytes = _fat_sector()
+    _write_u32_le(bytes, 8, 3u32)
+    _write_u32_le(bytes, 12, FAT32_EOC)
+    bytes
+
+fn _short_name_checksum(bytes: [u8], offset: i32) -> u8:
+    var sum: u32 = 0u32
+    var i = 0
+    while i < 11:
+        val carry: u32 = if (sum & 1u32) != 0u32: 0x80u32 else: 0u32
+        sum = (carry + (sum >> 1) + bytes[offset + i].to_u32()) & 0xFFu32
+        i = i + 1
+    sum.to_u8()
+
+fn _write_short_entry(bytes: [u8], offset: i32, name83: text, cluster: u8, size: u32, attr: u8) -> [u8]:
+    var out = bytes
+    var i = 0
+    while i < 11:
+        out[offset + i] = name83.char_at(i) as u8
+        i = i + 1
+    out[offset + 11] = attr
+    out[offset + 26] = cluster
+    _write_u32_le(out, offset + 28, size)
+    out
+
+fn _write_lfn_slot(bytes: [u8], offset: i32, sequence: u8, fragment: text, checksum: u8) -> [u8]:
+    var out = bytes
+    val char_offsets: [i32] = [1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30]
+    out[offset] = sequence
+    out[offset + 11] = FAT32_ATTR_LFN
+    out[offset + 12] = 0u8
+    out[offset + 13] = checksum
+    out[offset + 26] = 0u8
+    out[offset + 27] = 0u8
+    var i = 0
+    while i < 13:
+        val char_offset = offset + char_offsets[i]
+        if i < fragment.len():
+            out[char_offset] = fragment.char_at(i) as u8
+            out[char_offset + 1] = 0u8
+        else:
+            val padding: u8 = if i == fragment.len(): 0u8 else: 0xFFu8
+            out[char_offset] = padding
+            out[char_offset + 1] = padding
+        i = i + 1
+    out
+
+fn _ascii_name(length: i64) -> text:
+    var name = ""
+    var i: i64 = 0
+    while i < length:
+        name = name + "a"
+        i = i + 1
+    name
+
+fn _twenty_slot_root(name: text) -> TwoClusterDirectory:
+    var first = _zero_sector()
+    var second = _zero_sector()
+    second = _write_short_entry(second, 128, "LONGNA~1TXT", 5u8, 5u32, FAT32_ATTR_ARCHIVE)
+    val checksum = _short_name_checksum(second, 128)
+    var ordinal: i32 = 20
+    while ordinal > 0:
+        val fragment_start = ((ordinal - 1) * 13).to_i64()
+        var fragment_end = fragment_start + 13
+        if fragment_end > name.len():
+            fragment_end = name.len()
+        var sequence = ordinal.to_u8()
+        if ordinal == 20:
+            sequence = sequence | 0x40u8
+        val directory_offset = (20 - ordinal) * 32
+        if directory_offset < 512:
+            first = _write_lfn_slot(first, directory_offset, sequence,
+                name.slice(fragment_start, fragment_end), checksum)
+        else:
+            second = _write_lfn_slot(second, directory_offset - 512, sequence,
+                name.slice(fragment_start, fragment_end), checksum)
+        ordinal = ordinal - 1
+    TwoClusterDirectory(first: first, second: second)
 
 fn _root_with_browser_demo_lfn() -> [u8]:
     var bytes = _zero_sector()
-    bytes[0] = 0x41u8
-    bytes[1] = 'b' as u8
-    bytes[3] = 'r' as u8
-    bytes[5] = 'o' as u8
-    bytes[7] = 'w' as u8
-    bytes[9] = 's' as u8
-    bytes[11] = FAT32_ATTR_LFN
-    bytes[14] = 'e' as u8
-    bytes[16] = 'r' as u8
-    bytes[18] = '_' as u8
-    bytes[20] = 'd' as u8
-    bytes[22] = 'e' as u8
-    bytes[24] = 'm' as u8
-    bytes[28] = 'o' as u8
-    bytes[30] = 0x00u8
-    bytes[31] = 0x00u8
-
-    bytes[32] = 'B' as u8
-    bytes[33] = 'R' as u8
-    bytes[34] = 'O' as u8
-    bytes[35] = 'W' as u8
-    bytes[36] = 'S' as u8
-    bytes[37] = 'E' as u8
-    bytes[38] = '~' as u8
-    bytes[39] = '1' as u8
-    bytes[43] = FAT32_ATTR_ARCHIVE
-    bytes[58] = 0x05u8
-    _write_u32_le(bytes, 60, 12345u32)
+    bytes = _write_short_entry(bytes, 32, "BROWSE~1   ", 5u8, 5u32, FAT32_ATTR_ARCHIVE)
+    val checksum = _short_name_checksum(bytes, 32)
+    bytes = _write_lfn_slot(bytes, 0, 0x41u8, "browser_demo", checksum)
     bytes
 
-fn _mounted_lfn_driver() -> Fat32Core:
+fn _root_with_two_slot_lfn() -> [u8]:
+    var bytes = _zero_sector()
+    bytes = _write_short_entry(bytes, 64, "BROWSE~1SPL", 5u8, 5u32, FAT32_ATTR_ARCHIVE)
+    val checksum = _short_name_checksum(bytes, 64)
+    bytes = _write_lfn_slot(bytes, 0, 0x42u8, "spl", checksum)
+    bytes = _write_lfn_slot(bytes, 32, 0x01u8, "browser_demo.", checksum)
+    bytes
+
+fn _root_with_editor_lfn() -> [u8]:
+    var bytes = _zero_sector()
+    bytes = _write_short_entry(bytes, 32, "EDITOR~1   ", 6u8, 5u32, FAT32_ATTR_ARCHIVE)
+    val checksum = _short_name_checksum(bytes, 32)
+    _write_lfn_slot(bytes, 0, 0x41u8, "editor_notes", checksum)
+
+fn _payload_sector() -> [u8]:
+    var bytes = _zero_sector()
+    bytes[0] = 'h' as u8
+    bytes[1] = 'e' as u8
+    bytes[2] = 'l' as u8
+    bytes[3] = 'l' as u8
+    bytes[4] = 'o' as u8
+    bytes
+
+fn _deleted_directory_sector() -> [u8]:
+    var bytes = _zero_sector()
+    var offset = 0
+    while offset < 512:
+        bytes[offset] = 0xE5u8
+        offset = offset + 32
+    bytes
+
+fn _root_with_nested_lfn_dir() -> [u8]:
+    var bytes = _zero_sector()
+    bytes = _write_short_entry(bytes, 32, "SYSTEM~1   ", 5u8, 0u32, 0x10u8)
+    val checksum = _short_name_checksum(bytes, 32)
+    _write_lfn_slot(bytes, 0, 0x41u8, "system_tools", checksum)
+
+fn _nested_lfn_leaf_dir() -> [u8]:
+    var bytes = _zero_sector()
+    bytes = _write_short_entry(bytes, 64, "BROWSE~1SPL", 6u8, 5u32, FAT32_ATTR_ARCHIVE)
+    val checksum = _short_name_checksum(bytes, 64)
+    bytes = _write_lfn_slot(bytes, 0, 0x42u8, "spl", checksum)
+    _write_lfn_slot(bytes, 32, 0x01u8, "browser_demo.", checksum)
+
+fn _mounted_with_root(root: [u8]) -> Fat32Core:
     var dev = Fat32LfnMockBlockDevice.new()
     dev = dev.with_sector(32u64, _fat_sector())
-    dev = dev.with_sector(2048u64, _root_with_browser_demo_lfn())
+    dev = dev.with_sector(2048u64, root)
     var driver = Fat32Core.new(dev)
     val mounted = driver.mount()
+    expect(mounted.is_ok()).to_equal(true)
+    driver
+
+fn _mounted_lfn_driver() -> Fat32Core:
+    _mounted_with_root(_root_with_browser_demo_lfn())
+
+fn _mounted_simpleos_lfn_driver(root: [u8]) -> SharedFat32Driver:
+    var dev = Fat32LfnMockBlockDevice.new()
+    dev = dev.with_sector(32u64, _fat_sector())
+    dev = dev.with_sector(2048u64, root)
+    dev = dev.with_sector(2051u64, _payload_sector())
+    var driver = SharedFat32Driver.new(dev)
+    val mounted = driver.mount("fat32-test", "read-only")
     expect(mounted.is_ok()).to_equal(true)
     driver
 
@@ -122,7 +241,7 @@ describe "shared Fat32Core long filename directory reads":
         expect(listed.len()).to_equal(1)
         expect(listed[0].name).to_equal("browser_demo")
         expect(listed[0].inode.id).to_equal(5u64)
-        expect(listed[0].size).to_equal(12345)
+        expect(listed[0].size).to_equal(5)
 
     it "resolves the LFN case-insensitively through shared Fat32Core":
         var driver = _mounted_lfn_driver()
@@ -132,3 +251,155 @@ describe "shared Fat32Core long filename directory reads":
         expect(upper.is_ok()).to_equal(true)
         expect(lower.unwrap().name).to_equal("browser_demo")
         expect(upper.unwrap().inode.id).to_equal(5u64)
+
+    it "assembles and resolves an ordered two-slot LFN chain":
+        var driver = _mounted_with_root(_root_with_two_slot_lfn())
+        val entry = driver.resolve_path("/browser_demo.spl")
+        expect(entry.is_ok()).to_equal(true)
+        expect(entry.unwrap().name).to_equal("browser_demo.spl")
+        expect(driver.resolve_path("/browse~1.spl").is_ok()).to_equal(true)
+
+    it "assembles an ordered LFN chain split across directory clusters":
+        var second = _zero_sector()
+        second = _write_short_entry(second, 32, "BROWSE~1SPL", 5u8, 5u32, FAT32_ATTR_ARCHIVE)
+        val checksum = _short_name_checksum(second, 32)
+        second = _write_lfn_slot(second, 0, 0x01u8, "browser_demo.", checksum)
+        var first = _deleted_directory_sector()
+        first = _write_lfn_slot(first, 480, 0x42u8, "spl", checksum)
+        var dev = Fat32LfnMockBlockDevice.new()
+        dev = dev.with_sector(32u64, _fat_sector_with_root_chain())
+        dev = dev.with_sector(2048u64, first)
+        dev = dev.with_sector(2049u64, second)
+        var driver = Fat32Core.new(dev)
+        expect(driver.mount().is_ok()).to_equal(true)
+        val entry = driver.resolve_path("/browser_demo.spl")
+        expect(entry.is_ok()).to_equal(true)
+        expect(entry.unwrap().inode.id).to_equal(5u64)
+
+    it "accepts the FAT32 maximum 255-character LFN":
+        val name = _ascii_name(255)
+        val directory = _twenty_slot_root(name)
+        var dev = Fat32LfnMockBlockDevice.new()
+        dev = dev.with_sector(32u64, _fat_sector_with_root_chain())
+        dev = dev.with_sector(2048u64, directory.first)
+        dev = dev.with_sector(2049u64, directory.second)
+        var driver = Fat32Core.new(dev)
+        expect(driver.mount().is_ok()).to_equal(true)
+        val entry = driver.resolve_path("/" + name)
+        expect(entry.is_ok()).to_equal(true)
+        expect(entry.unwrap().name.len()).to_equal(255)
+
+    it "rejects a 260-character LFN and keeps its 8.3 alias":
+        val directory = _twenty_slot_root(_ascii_name(260))
+        var dev = Fat32LfnMockBlockDevice.new()
+        dev = dev.with_sector(32u64, _fat_sector_with_root_chain())
+        dev = dev.with_sector(2048u64, directory.first)
+        dev = dev.with_sector(2049u64, directory.second)
+        var driver = Fat32Core.new(dev)
+        expect(driver.mount().is_ok()).to_equal(true)
+        expect(driver.resolve_path("/" + _ascii_name(260)).is_err()).to_equal(true)
+        expect(driver.resolve_path("/longna~1.txt").is_ok()).to_equal(true)
+
+    it "resolves a nested LFN directory and LFN leaf":
+        var dev = Fat32LfnMockBlockDevice.new()
+        dev = dev.with_sector(32u64, _fat_sector())
+        dev = dev.with_sector(2048u64, _root_with_nested_lfn_dir())
+        dev = dev.with_sector(2051u64, _nested_lfn_leaf_dir())
+        var driver = Fat32Core.new(dev)
+        expect(driver.mount().is_ok()).to_equal(true)
+        val entry = driver.resolve_path("/SYSTEM_TOOLS/Browser_Demo.SPL")
+        expect(entry.is_ok()).to_equal(true)
+        expect(entry.unwrap().name).to_equal("browser_demo.spl")
+
+    it "drops cached LFN names across unmount and media replacement":
+        var driver = _mounted_lfn_driver()
+        expect(driver.resolve_path("/browser_demo").is_ok()).to_equal(true)
+        expect(driver.unmount().is_ok()).to_equal(true)
+        var replacement = Fat32LfnMockBlockDevice.new()
+        replacement = replacement.with_sector(32u64, _fat_sector())
+        replacement = replacement.with_sector(2048u64, _root_with_editor_lfn())
+        driver.device = replacement
+        expect(driver.mount().is_ok()).to_equal(true)
+        expect(driver.resolve_path("/browser_demo").is_err()).to_equal(true)
+        expect(driver.resolve_path("/editor_notes").is_ok()).to_equal(true)
+
+    it "falls back to the 8.3 alias when the LFN checksum is wrong":
+        var root = _root_with_browser_demo_lfn()
+        root[13] = root[13] + 1u8
+        var driver = _mounted_with_root(root)
+        expect(driver.resolve_path("/browser_demo").is_err()).to_equal(true)
+        expect(driver.resolve_path("/browse~1").is_ok()).to_equal(true)
+
+    it "falls back to the 8.3 alias when LFN slots are out of order":
+        var root = _root_with_two_slot_lfn()
+        root[32] = 0x02u8
+        var driver = _mounted_with_root(root)
+        expect(driver.resolve_path("/browser_demo.spl").is_err()).to_equal(true)
+        expect(driver.resolve_path("/browse~1.spl").is_ok()).to_equal(true)
+
+    it "rejects missing LAST markers and reserved sequence bits":
+        var missing_last = _root_with_two_slot_lfn()
+        missing_last[0] = 0x02u8
+        var missing_last_driver = _mounted_with_root(missing_last)
+        expect(missing_last_driver.resolve_path("/browser_demo.spl").is_err()).to_equal(true)
+        expect(missing_last_driver.resolve_path("/browse~1.spl").is_ok()).to_equal(true)
+        var reserved_bit = _root_with_two_slot_lfn()
+        reserved_bit[0] = 0xC2u8
+        var reserved_bit_driver = _mounted_with_root(reserved_bit)
+        expect(reserved_bit_driver.resolve_path("/browser_demo.spl").is_err()).to_equal(true)
+        expect(reserved_bit_driver.resolve_path("/browse~1.spl").is_ok()).to_equal(true)
+
+    it "falls back to the 8.3 alias when one LFN slot checksum differs":
+        var root = _root_with_two_slot_lfn()
+        root[45] = root[45] + 1u8
+        var driver = _mounted_with_root(root)
+        expect(driver.resolve_path("/browser_demo.spl").is_err()).to_equal(true)
+        expect(driver.resolve_path("/browse~1.spl").is_ok()).to_equal(true)
+
+    it "falls back to the 8.3 alias when an LFN chain is interrupted":
+        var root = _root_with_two_slot_lfn()
+        root[32] = 0xE5u8
+        var driver = _mounted_with_root(root)
+        expect(driver.resolve_path("/browser_demo.spl").is_err()).to_equal(true)
+        expect(driver.resolve_path("/browse~1.spl").is_ok()).to_equal(true)
+
+    it "rejects a redundant empty highest LFN slot":
+        var root = _root_with_two_slot_lfn()
+        val checksum = root[13]
+        root = _write_lfn_slot(root, 0, 0x42u8, "", checksum)
+        var driver = _mounted_with_root(root)
+        expect(driver.resolve_path("/browser_demo.spl").is_err()).to_equal(true)
+        expect(driver.resolve_path("/browse~1.spl").is_ok()).to_equal(true)
+
+    it "falls back to the 8.3 alias when LFN reserved metadata is malformed":
+        var root = _root_with_browser_demo_lfn()
+        root[26] = 0x01u8
+        var driver = _mounted_with_root(root)
+        expect(driver.resolve_path("/browser_demo").is_err()).to_equal(true)
+        expect(driver.resolve_path("/browse~1").is_ok()).to_equal(true)
+
+    it "falls back to the 8.3 alias for unsupported non-ASCII code units":
+        var root = _root_with_browser_demo_lfn()
+        root[2] = 0x01u8
+        var driver = _mounted_with_root(root)
+        expect(driver.resolve_path("/?rowser_demo").is_err()).to_equal(true)
+        expect(driver.resolve_path("/browse~1").is_ok()).to_equal(true)
+
+describe "SimpleOS shared FAT32 adapter long filename reads":
+    it "uses the validated shared LFN for readdir, stat, open, read, and close":
+        var driver = _mounted_simpleos_lfn_driver(_root_with_two_slot_lfn())
+        val entries = driver.readdir("/")
+        expect(entries.is_ok()).to_equal(true)
+        expect(entries.unwrap().len()).to_equal(1)
+        expect(entries.unwrap()[0].name).to_equal("browser_demo.spl")
+        val stat = driver.stat("/BROWSER_DEMO.SPL")
+        expect(stat.is_ok()).to_equal(true)
+        expect(stat.unwrap().kind).to_equal(FsNodeKind.File)
+        expect(stat.unwrap().size).to_equal(5u64)
+        val opened = driver.open("/browser_demo.spl", FileFlags.read_only())
+        expect(opened.is_ok()).to_equal(true)
+        val handle = opened.unwrap()
+        val payload = driver.read(handle, 5u64)
+        expect(payload.is_ok()).to_equal(true)
+        expect(payload.unwrap()).to_equal([104u8, 101u8, 108u8, 108u8, 111u8])
+        expect(driver.close(handle).is_ok()).to_equal(true)

@@ -524,9 +524,12 @@ directories. The writer emits checksummed 13-code-unit LFN slots before a
 unique 8.3 alias, grows nested directories across FAT cluster chains, and
 rejects invalid names or fixed-root overflow. On x86_64, the post-bootstrap
 non-optional shared FAT driver must mount after direct bootstrap, then resolves
-LFNs and multi-cluster files first; the raw 8.3 reader remains the early-boot
-fallback. Non-ASCII UTF-16 LFNs are not
-yet supported.
+LFNs and multi-cluster files first. It accepts an LFN only when every slot is
+ordered and structurally valid and its checksum matches the following 8.3
+entry; malformed chains safely expose only the 8.3 alias. The raw 8.3 reader
+remains the early-boot fallback. Non-ASCII UTF-16 LFNs are not yet supported.
+This contract covers prebuilt-media `readdir`/`stat`/`open`/`read`; in-guest
+create/mkdir/rename remains 8.3-only.
 
 `x64-gpu-2d` routes to
 `examples/09_embedded/simple_os/arch/x86_64/gpu_test_entry.spl`, emits
@@ -539,7 +542,7 @@ yet supported.
 `NUMBERS.TXT`, and `HELLO.SPL`. The SPipe wrapper for filesystem variants is:
 
 ```bash
-bin/simple test test/03_system/os_filesystem_variants_spec.spl
+bin/simple test test/03_system/os/os_filesystem_variants_spec.spl
 ```
 
 That spec treats FAT32 as a QEMU-backed target variation and NVFS as an
