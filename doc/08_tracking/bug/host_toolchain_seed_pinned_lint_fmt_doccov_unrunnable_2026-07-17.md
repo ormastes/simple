@@ -317,6 +317,24 @@ change required, out of scope here) — filing here rather than a new doc since
 it is the same "seed interpreter mode is not the real tool" family as this
 bug's title.
 
+## 2026-07-20 addendum: `test/feature/plugin/runtime_api_plugin_spec.spl`
+
+Newly confirmed affected (whole-suite triage campaign, `test/feature/plugin/`
+cluster). This spec's fixture (`test/feature/plugin/fixtures/demo.so` /
+`demo.sdn`) was simply missing (never built in this checkout) — building it
+via `sh test/feature/plugin/fixtures/build_fixtures.shs` (needs `cc`, present
+on this host) brought all 8 examples to green
+("8 examples, 0 failures", every `✓`). However the file-level verdict is
+still `FAIL` under `bin/simple test`, with the same stray
+`Usage: simple_lint <file.spl> [options]` text printed just before the
+`Test Summary` block and `Passed: 8, Failed: 1` (one phantom failure with no
+corresponding example) — the exact symptom already described above under
+"Runnable pure-Simple fmt/doc-coverage path 2026-07-17" /
+"Known interpreter limitation, not a lint defect". Reproduced 3x in a row
+(deterministic, not a race). No spec or product changes made; this is the
+same pre-existing, already-diagnosed exit-code-taint/registry-collision class,
+not a new bug.
+
 ## Status (2026-07-18)
 
 OPEN. Redeploy path advanced: stage1-3 GREEN (cargo bootstrap clean), stage4 blocked by flat-AST-bridge/cranelift issue (cross-ref stage3_selfhost_parser_case_multielem_pattern doc). Pure-Simple fmt/lint/doc-coverage paths confirmed runnable via standalone entry points; 3 root-cause bugs fixed in those tools (read_file collision, cli_run_* collision, missing run_lint_file). Self-hosted redeploy remains the strategic fix; do not race it.
