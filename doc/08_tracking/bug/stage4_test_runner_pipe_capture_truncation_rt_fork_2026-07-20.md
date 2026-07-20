@@ -1,8 +1,14 @@
 # stage4 test-runner silently under-reports example counts — root cause: premature loop exit in `rt_fork_parent_wait_bounded` (runtime_fork.c)
 
-Status: **root cause PROVEN via strace evidence; fix WRITTEN but NOT YET
-VERIFIED** (rebuild died in the same session — see "Build breakage
-encountered" below). Do not treat this as landed/closed.
+Status: **root cause PROVEN via strace evidence; fix WRITTEN and VERIFIED at
+the C-function level** (direct differential test of `rt_fork_parent_wait_bounded`
+against the unpatched vs. patched source, see "C-level differential-test
+verification" below). **NOT YET verified end-to-end** — no self-hosted
+stage-4 binary containing this fix has been built or run (the `--full-bootstrap`
+rebuild needed for that is still blocked by the separate Stage 4 parser
+regression described below). Do not treat this as landed/closed until an
+end-to-end `simple test test/01_unit/app/arch_check_spec.spl` run confirms
+`74 total, 74 passed`.
 
 ## Summary
 
@@ -222,6 +228,70 @@ failed` on `test test/01_unit/app/arch_check_spec.spl`, re-confirmed just now)
 — so the repro environment is intact for a future verification pass, but no
 binary containing the `runtime_fork.c` fix has been produced or tested yet.
 
+## C-level differential-test verification (2026-07-20, second session)
+
+Full stage-4 `--full-bootstrap` rebuild was still blocked by the Stage 4
+parser regression (unrelated, see above) and multi-hour/one-attempt-already-
+died per the verification task. Since `rt_fork_parent_wait_bounded` and its
+`SPL_MALLOC`/`SPL_FREE` dependency (`runtime_memtrack.h`) are fully
+self-contained (`spl_rt_malloc`/`spl_rt_free` are `static inline` in the
+header; only `g_memtrack_enabled`/`spl_memtrack_record`/`spl_memtrack_unrecord`
+need external symbols, stubbed trivially since the flag stays 0), the fix was
+instead verified directly at the C-function level: `src/runtime/runtime_fork.c`
+compiles and links standalone with `gcc -Isrc/runtime` and no cargo/Rust
+involvement at all.
+
+**Method**: a standalone C harness (`harness.c`) calls the real
+`rt_fork_child_setup()` + `rt_fork_parent_wait_bounded()` + `rt_fork_parent_stdout()`
+API — the exact same entry points `process_run_bounded`/
+`process_run_with_limits_bounded` use — against adversarial `sh -c` child
+commands that replicate the real bug's generational structure (a directly-forked
+process that exits while a backgrounded descendant, inheriting the same pipe
+write-end fd, keeps writing). Built two binaries from identical harness code:
+`harness_baseline` (linked against the pre-fix `runtime_fork.c`, index
+`41cc9536cea`) and `harness_fixed` (linked against the patched source, the
+same three hunks embedded in the "Full patch" section above, diff-verified
+hunk-for-hunk identical modulo the pre-existing CRLF/LF noise). Full harness,
+case scripts, driver, and raw output live in `_forkverify/` at the repo root
+of the verification worktree (see Files section below).
+
+**Results** (bytes captured vs. arithmetically-known bytes written, not
+trusting any file the child under test could itself lose):
+
+| Case | Scenario | Baseline (pre-fix) | Fixed | Verdict |
+|---|---|---|---|---|
+| 1 | Delayed grandchild, direct child exits before writer starts (site-A repro) | `CAPTURED=0` / expected `141000` | `CAPTURED=141000` (exact) | pre-fix: **total loss**; fixed: **exact** |
+| 2 | Streaming grandchild, direct child exits mid-write (site-B repro) | `CAPTURED=9800` / expected `147000` (93% lost) | `CAPTURED=147000` (exact) | pre-fix: **majority loss**; fixed: **exact** |
+| 3 | Immediate exit, no output (control) | `CAPTURED=0` | `CAPTURED=0` | both correct |
+| 4 | Huge burst (~960000 B), single generation, no descendant (control) | `CAPTURED=960000` (exact) | `CAPTURED=960000` (exact) | both correct — confirms single-hop never triggers this bug, matching the original hand-repro finding |
+| 5 | Descendant outlives the overall `timeout_ms` (risk case for the fix) | `TIMED_OUT=0`, exits early via the bug at `ELAPSED_MS=55` (accidental side effect of the truncation bug) | `TIMED_OUT=1`, `EXIT=-1`, `ELAPSED_MS=1500` (== `timeout_ms`) | fixed correctly hits the pre-existing deadline, does **not** hang; 0 leftover processes after, confirmed both by the runtime's own process-group `SIGKILL` and an independent `pgrep` check |
+| 6 | Fast-exit latency, N=5 each | 5-6 ms per run | 5-6 ms per run | **no measurable latency cost** added to the common case — the grace-period machinery only engages when a real post-exit empty poll occurs, which a clean single-hop exit never produces (true pipe EOF fires first) |
+
+Case 1 and 2 independently reproduce both break sites (A: first empty poll
+after exit; B: break right after a successful read while data is still
+flowing) described in the root-cause section above, on the **unpatched**
+source, with dramatic, unambiguous loss (0/141000 and 9800/147000) — proving
+the test can fail before the fix. Both cases capture byte-for-byte exact
+counts on the **patched** source. Case 5 directly addresses the fix's
+stated risk (a stuck descendant hanging the caller): it does not — the
+pre-existing `deadline_ms` check, unmodified by this fix, still bounds total
+wait time to `timeout_ms` regardless of grace-period state.
+
+**What this verifies**: the C-level control-flow fix in
+`rt_fork_parent_wait_bounded` is correct for the exact adversarial pattern
+that causes the real bug (a descendant inheriting pipe fds and outliving the
+directly-tracked child), does not regress the timeout/kill safety net, and
+adds no latency to the common case.
+
+**What this does NOT verify** (still open): an end-to-end run through the
+actual self-hosted stage-4 binary (`simple test test/01_unit/app/arch_check_spec.spl`
+reporting `74 total, 74 passed`) — that requires the blocked
+`--full-bootstrap` rebuild past the unrelated Stage 4 parser regression. This
+C-level test exercises the exact function and API surface the real bug path
+uses, but not the full `sh -c 'ulimit ...; exec timeout ... bin/simple run ...'`
+→ `bin/simple` → `bin/simple_seed` chain itself, nor the Simple-side caller
+(`test_runner_execute.spl`) that consumes the captured string.
+
 ## Verification still required (not done)
 
 1. A successful stage-4 rebuild containing the `runtime_fork.c` fix (blocked
@@ -243,6 +313,11 @@ binary containing the `runtime_fork.c` fix has been produced or tested yet.
 ## Files
 
 - Fix: `src/runtime/runtime_fork.c` (`rt_fork_parent_wait_bounded`)
+- C-level verification harness (throwaway, not product code): `_forkverify/`
+  in this commit (`harness.c`, `runtime_fork_baseline.c`/`runtime_fork_fixed.c`,
+  `case_*.sh` adversarial children, `run_matrix.sh` driver, `results.txt` raw
+  output) — reproduces this doc's byte-count table above; rerun via
+  `bash _forkverify/run_matrix.sh` from the repo root.
 - Evidence: strace logs and manual repro logs under
   `/tmp/claude-1000/-home-ormastes-dev-pub-simple/52b25380-3721-4826-b457-e1371d8b4cb5/scratchpad/`
   (`strace_full.log`, `strace_execve.log`, `seed_direct.log`,
