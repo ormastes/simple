@@ -283,6 +283,54 @@ heavy names were the three files above (plus `app/io/__init__.spl`, which
 already imported `cli_compile`/`cli_run_*` from `app.io.cli_compile`/
 `app.io.cli_commands` directly and needed no change).
 
+### `--entry-closure` check (the deleted block's own comment claimed a live purpose — verified, not just assumed)
+
+The removed block's header comment read: `# Exports — re-export CLI
+functions so `use app.io.cli_ops.{X}` resolves for --entry-closure` — a
+present-tense functional claim, not an obviously-dead comment, and
+`--entry-closure` is `native-build`'s own reachable-module BFS
+(`_native_build_entry_closure` in
+`src/app/io/_CliCompile/compile_targets.spl:424`) — the actual deploy
+mechanism. Deleting something that feeds the deploy path to fix a test hang
+would be the wrong trade, so this was checked directly rather than assumed
+safe:
+
+1. Read `_native_build_entry_closure` and `_nb_module_path_from_use`
+   (`compile_targets.spl:314-345`): the BFS walks **textual** `use`/`export
+   use` lines only (`_nb_module_path_from_use` explicitly strips both the
+   `"use "` and `"export use "` prefixes identically) — it has no notion of
+   "export surface"; it just enqueues whatever module path string appears
+   in a `use`/`export use` line, wherever that line lives.
+2. Since this fix only *edited the `use` statements themselves* in the
+   three real consumers (repointing them at `app.io.cli_compile`/
+   `app.io.cli_commands` instead of `app.io.cli_ops`), and left
+   `cli_compile.spl`'s/`cli_commands.spl`'s own `export use
+   app.io._CliCompile.*` lines untouched, the BFS finds the exact same
+   destination files — one hop more directly, via `cli_compile.spl`/
+   `cli_commands.spl` instead of via `cli_ops.spl`'s now-removed
+   redirection.
+3. Grepped for any *string-path* reference to the removed re-exports
+   outside of `use` statements (build configs, `.sdn` files, docs) that a
+   plain `use`-statement grep could miss: `grep -rn "cli_ops\.cli_compile\|
+   cli_ops\.cli_native_build\|cli_ops\.cli_run\|cli_ops\.cli_handle"` and
+   `grep -rln "cli_ops" --include="*.sdn"` across `src/`, `test/`,
+   `scripts/`, `config/` — zero hits.
+4. Empirically confirmed with the real mechanism: `SIMPLE_NATIVE_BUILD_TRACE_CLOSURE=1
+   ./bin/simple native-build --entry-closure --entry <a file importing
+   app.build.cli_entry, post-fix> --source src -o /tmp/entry_probe_out`
+   — the closure's own diagnostic trace shows it visiting
+   `src/app/io/cli_commands.spl` and `src/app/io/cli_compile.spl`, with
+   `cli_compile.spl`'s `export use app.io._CliCompile.compile_opt_and_driver.*`
+   / `compile_targets.*` lines appearing in the parsed output — i.e. the
+   closure reaches `_CliCompile.*` via the new path, same as it did via the
+   old one.
+
+Verdict: `--entry-closure` discovery is unaffected. The deleted comment's
+claim was true but the role it described was already redundantly served by
+`cli_compile.spl`/`cli_commands.spl` (which the closure BFS treats
+identically) — nothing beyond the three `use`-statement repoints was
+needed to preserve it.
+
 ### Verification
 
 - **Before:** `bin/simple test test/01_unit/app/arch_check_spec.spl` — bounded
