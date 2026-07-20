@@ -118,3 +118,16 @@ only the Rust seed interpreter (the path `bin/simple test` exercises) was
 probed. Not fixed here per task scope (source-level fix in
 `interpreter_method/mod.rs` needs a full rebuild to validate, which this pass
 is scoped to avoid).
+
+## Update 2026-07-20 — empirical (dispatch-arm patch had NO effect on the test path)
+
+Adding the `impl_methods`/`GLOBAL_IMPL_METHODS` lookup to the `Value::EnumType`
+arm of `interpreter_method/mod.rs` (the "suggested fix" above), rebuilding the
+seed, and re-running THIS spec via `bin/simple test` changed nothing — identical
+"unknown variant or method" error. So EITHER the SSpec `test` path does not go
+through that arm (test-path ≠ run-path — confirmed separately for `?`), OR the
+`impl Direction:` static methods are **never registered** into
+`impl_methods`/`GLOBAL_IMPL_METHODS` under the `test` path (a registration gap),
+so the lookup finds nothing. Next fixer: first locate WHERE the SSpec `it`-block
+call is evaluated and whether impl-block methods are registered there — do NOT
+re-apply the dispatch-arm patch blindly (it compiles clean and does nothing).

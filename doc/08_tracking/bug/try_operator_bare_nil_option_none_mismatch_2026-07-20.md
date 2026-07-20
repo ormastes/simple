@@ -109,3 +109,18 @@ legitimate/idiomatic Simple for an `Option`-returning function elsewhere in
 the same file's sibling helpers and across the codebase generally) rather than
 rewritten to `return None`, since rewriting the test would mask a real
 interpreter defect rather than fix it.
+
+## Update 2026-07-20 — empirical (seed patch attempted, disproven)
+
+A seed fix was attempted and revealed two things future fixers MUST know:
+- **`bin/simple test` (SSpec) uses a DIFFERENT evaluator than `bin/simple run`.**
+  Patching the `Expr::Try` arm in `interpreter/expr.rs` (the run-path evaluator)
+  removed the "got nil" error on the `run` path, but the `test` path — where this
+  spec runs — errors identically. The root-cause location named above is only the
+  run-path site; the test-path `?` evaluator is elsewhere and was NOT located.
+- **Consumer-side patching is insufficient.** Converting `nil`→`None` at the `?`
+  site (run path) produced `is_none=false` (still wrong) — the propagated value is
+  not a valid `Option::None`. The path-independent fix is at the **value boundary**:
+  make `return nil` in an `Option<T>`-typed fn *produce* a canonical `Option::None`
+  value, fixing EVERY consumer (`?`, `match`, `.is_none()`) regardless of evaluator.
+  Fix the return/nil-literal coercion, not the `?` operator.
