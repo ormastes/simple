@@ -642,6 +642,93 @@ fn shared_wm_focus_window_by_window_id(scene: SharedWmScene, window_id: text) ->
         idx = idx + 1
     SharedWmScene(width: scene.width, height: scene.height, backend: scene.backend, windows: focused, background: scene.background)
 
+# Window-local titlebar button geometry. MUST stay in lockstep with the rects
+# emitted by _wm_draw_ir_window_batch (window_scene_draw_ir.spl) and the pixel
+# chrome painters — the dispatch hit regions below ARE those drawn rects.
+val WM_TITLEBAR_CLOSE_X_OFFSET_FROM_RIGHT: i32 = 24
+val WM_TITLEBAR_CLOSE_Y: i32 = 2
+val WM_TITLEBAR_CLOSE_SIZE: i32 = 20
+val WM_TITLEBAR_TRAFFIC_Y: i32 = 9
+val WM_TITLEBAR_TRAFFIC_SIZE: i32 = 10
+val WM_TITLEBAR_TRAFFIC_RED_X: i32 = 12
+val WM_TITLEBAR_TRAFFIC_YELLOW_X: i32 = 30
+val WM_TITLEBAR_TRAFFIC_GREEN_X: i32 = 48
+
+fn _shared_wm_window_with_state(window: SharedWmWindow, minimized: bool, focused: bool) -> SharedWmWindow:
+    SharedWmWindow(
+        surface_id: window.surface_id,
+        window_id: window.window_id,
+        surface_kind: window.surface_kind,
+        process_id: window.process_id,
+        app_id: window.app_id,
+        title: window.title,
+        language: window.language,
+        x: window.x,
+        y: window.y,
+        width: window.width,
+        height: window.height,
+        tree: window.tree,
+        html: window.html,
+        minimized: minimized,
+        focused: focused,
+        z_index: window.z_index,
+        chrome_kind: window.chrome_kind
+    )
+
+# Topmost visible window id under the same rule pointer dispatch uses to pick
+# a click target: highest z_index wins, first window wins among equal z.
+fn shared_wm_topmost_visible_window_id(scene: SharedWmScene) -> text:
+    var best_id = ""
+    var best_z = -1
+    for window in scene.windows:
+        if not window.minimized and window.z_index > best_z:
+            best_id = window.window_id
+            best_z = window.z_index
+    best_id
+
+# Close = remove the window from the scene entirely. If the closed window was
+# focused, focus falls to the topmost remaining visible window so the desktop
+# never ends up with a hidden focus owner. Unknown ids are a structural no-op.
+fn shared_wm_close_window_by_window_id(scene: SharedWmScene, window_id: text) -> SharedWmScene:
+    var closed_had_focus = false
+    var remaining: [SharedWmWindow] = []
+    for window in scene.windows:
+        if window.window_id == window_id:
+            if window.focused and not window.minimized:
+                closed_had_focus = true
+        else:
+            remaining.push(window)
+    val next_scene = SharedWmScene(width: scene.width, height: scene.height, backend: scene.backend, windows: remaining, background: scene.background)
+    if not closed_had_focus:
+        return next_scene
+    val next_focus = shared_wm_topmost_visible_window_id(next_scene)
+    if next_focus == "":
+        return next_scene
+    shared_wm_focus_window_by_window_id(next_scene, next_focus)
+
+# Minimize keeps the window in the scene but hides it and releases focus to
+# the topmost remaining visible window (mirrors taskbar-restore semantics).
+fn shared_wm_minimize_window_by_window_id(scene: SharedWmScene, window_id: text) -> SharedWmScene:
+    var minimized_had_focus = false
+    var updated: [SharedWmWindow] = []
+    for window in scene.windows:
+        if window.window_id == window_id:
+            if window.focused and not window.minimized:
+                minimized_had_focus = true
+            updated.push(_shared_wm_window_with_state(window, true, false))
+        else:
+            updated.push(window)
+    val next_scene = SharedWmScene(width: scene.width, height: scene.height, backend: scene.backend, windows: updated, background: scene.background)
+    if not minimized_had_focus:
+        return next_scene
+    val next_focus = shared_wm_topmost_visible_window_id(next_scene)
+    if next_focus == "":
+        return next_scene
+    shared_wm_focus_window_by_window_id(next_scene, next_focus)
+
+fn _shared_wm_local_in_button(local_x: i32, local_y: i32, button_x: i32, button_y: i32, button_size: i32) -> bool:
+    local_x >= button_x and local_x < button_x + button_size and local_y >= button_y and local_y < button_y + button_size
+
 fn _shared_wm_dispatch_result(action: text, target_id: text, app_id: text, window_id: text, scene: SharedWmScene) -> SharedWmDispatchResult:
     SharedWmDispatchResult(action: action, target_id: target_id, app_id: app_id, window_id: window_id, scene: scene)
 
@@ -693,12 +780,22 @@ fn _shared_wm_content_dispatch(scene: SharedWmScene, x: i32, y: i32) -> SharedWm
         return _shared_wm_dispatch_result("desktop_background", "background", "", "", scene)
     val window = scene.windows[best_index]
     val focused_scene = shared_wm_focus_window_by_window_id(scene, window.window_id)
+    if window.chrome_kind != WM_CHROME_KIND_BORDERLESS:
+        # Titlebar buttons are hit-tested against the exact rects the Draw IR
+        # window batch emits; a drawn close button MUST dispatch as a close.
+        val local_x = x - window.x
+        val local_y = y - window.y
+        val close_x = window.width - WM_TITLEBAR_CLOSE_X_OFFSET_FROM_RIGHT
+        if _shared_wm_local_in_button(local_x, local_y, close_x, WM_TITLEBAR_CLOSE_Y, WM_TITLEBAR_CLOSE_SIZE) or _shared_wm_local_in_button(local_x, local_y, WM_TITLEBAR_TRAFFIC_RED_X, WM_TITLEBAR_TRAFFIC_Y, WM_TITLEBAR_TRAFFIC_SIZE):
+            return _shared_wm_dispatch_result("close_window", window.surface_id, window.app_id, window.window_id, shared_wm_close_window_by_window_id(scene, window.window_id))
+        if _shared_wm_local_in_button(local_x, local_y, WM_TITLEBAR_TRAFFIC_YELLOW_X, WM_TITLEBAR_TRAFFIC_Y, WM_TITLEBAR_TRAFFIC_SIZE):
+            return _shared_wm_dispatch_result("minimize_window", window.surface_id, window.app_id, window.window_id, shared_wm_minimize_window_by_window_id(scene, window.window_id))
     if y < window.y + _shared_wm_scale_px(28, 1000):
         return _shared_wm_dispatch_result("begin_drag_window", window.surface_id, window.app_id, window.window_id, focused_scene)
     _shared_wm_dispatch_result("focus_window", window.window_id, window.app_id, window.window_id, focused_scene)
 
 fn _shared_wm_component_kind(action: text) -> text:
-    if action == "begin_drag_window" or action == "focus_window":
+    if action == "begin_drag_window" or action == "focus_window" or action == "close_window" or action == "minimize_window":
         return "window"
     if action == "launch_app":
         return "taskbar"

@@ -20,6 +20,8 @@ struct WmRuntimeShellState:
     command_lane_target: text
     background_click_count: i32
     last_command_kind: text
+    closed_window_ids: [text]
+    minimized_window_ids: [text]
 
 fn wm_runtime_shell_state_empty() -> WmRuntimeShellState:
     WmRuntimeShellState(
@@ -28,7 +30,21 @@ fn wm_runtime_shell_state_empty() -> WmRuntimeShellState:
         dragging_surface_id: "",
         command_lane_target: "",
         background_click_count: 0,
-        last_command_kind: ""
+        last_command_kind: "",
+        closed_window_ids: [],
+        minimized_window_ids: []
+    )
+
+fn _wm_runtime_state(launched_apps: [text], focused_window_id: text, dragging_surface_id: text, command_lane_target: text, background_click_count: i32, last_command_kind: text, closed_window_ids: [text], minimized_window_ids: [text]) -> WmRuntimeShellState:
+    WmRuntimeShellState(
+        launched_apps: launched_apps,
+        focused_window_id: focused_window_id,
+        dragging_surface_id: dragging_surface_id,
+        command_lane_target: command_lane_target,
+        background_click_count: background_click_count,
+        last_command_kind: last_command_kind,
+        closed_window_ids: closed_window_ids,
+        minimized_window_ids: minimized_window_ids
     )
 
 fn wm_runtime_dispatch_command(kind: text, target_id: text, app_id: text, window_id: text, payload: text, handled: bool) -> WmRuntimeDispatchCommand:
@@ -63,6 +79,24 @@ fn wm_runtime_command_from_shared_dispatch(result: SharedWmDispatchResult) -> Wm
     if result.action == "begin_drag_window":
         return wm_runtime_dispatch_command(
             "window_drag_begin",
+            result.target_id,
+            result.app_id,
+            result.window_id,
+            "surface_id={result.target_id};window_id={result.window_id}",
+            true
+        )
+    if result.action == "close_window":
+        return wm_runtime_dispatch_command(
+            "window_close",
+            result.target_id,
+            result.app_id,
+            result.window_id,
+            "surface_id={result.target_id};window_id={result.window_id}",
+            true
+        )
+    if result.action == "minimize_window":
+        return wm_runtime_dispatch_command(
+            "window_minimize",
             result.target_id,
             result.app_id,
             result.window_id,
@@ -127,69 +161,32 @@ fn wm_runtime_dispatch_wire(command: WmRuntimeDispatchCommand) -> text:
 
 fn wm_runtime_apply_command(state: WmRuntimeShellState, command: WmRuntimeDispatchCommand) -> WmRuntimeShellState:
     if not command.handled:
-        return WmRuntimeShellState(
-            launched_apps: state.launched_apps,
-            focused_window_id: state.focused_window_id,
-            dragging_surface_id: state.dragging_surface_id,
-            command_lane_target: state.command_lane_target,
-            background_click_count: state.background_click_count,
-            last_command_kind: "ignored"
-        )
+        return _wm_runtime_state(state.launched_apps, state.focused_window_id, state.dragging_surface_id, state.command_lane_target, state.background_click_count, "ignored", state.closed_window_ids, state.minimized_window_ids)
     if command.kind == "launcher_launch":
         var launched = state.launched_apps
         launched = launched.push(command.app_id)
-        return WmRuntimeShellState(
-            launched_apps: launched,
-            focused_window_id: state.focused_window_id,
-            dragging_surface_id: state.dragging_surface_id,
-            command_lane_target: state.command_lane_target,
-            background_click_count: state.background_click_count,
-            last_command_kind: command.kind
-        )
+        return _wm_runtime_state(launched, state.focused_window_id, state.dragging_surface_id, state.command_lane_target, state.background_click_count, command.kind, state.closed_window_ids, state.minimized_window_ids)
     if command.kind == "window_focus":
-        return WmRuntimeShellState(
-            launched_apps: state.launched_apps,
-            focused_window_id: command.window_id,
-            dragging_surface_id: "",
-            command_lane_target: state.command_lane_target,
-            background_click_count: state.background_click_count,
-            last_command_kind: command.kind
-        )
+        return _wm_runtime_state(state.launched_apps, command.window_id, "", state.command_lane_target, state.background_click_count, command.kind, state.closed_window_ids, state.minimized_window_ids)
     if command.kind == "window_drag_begin":
-        return WmRuntimeShellState(
-            launched_apps: state.launched_apps,
-            focused_window_id: command.window_id,
-            dragging_surface_id: command.target_id,
-            command_lane_target: state.command_lane_target,
-            background_click_count: state.background_click_count,
-            last_command_kind: command.kind
-        )
+        return _wm_runtime_state(state.launched_apps, command.window_id, command.target_id, state.command_lane_target, state.background_click_count, command.kind, state.closed_window_ids, state.minimized_window_ids)
+    if command.kind == "window_close":
+        var closed = state.closed_window_ids
+        closed = closed.push(command.window_id)
+        val focus_after_close = if state.focused_window_id == command.window_id: "" else: state.focused_window_id
+        val drag_after_close = if state.dragging_surface_id == command.target_id: "" else: state.dragging_surface_id
+        return _wm_runtime_state(state.launched_apps, focus_after_close, drag_after_close, state.command_lane_target, state.background_click_count, command.kind, closed, state.minimized_window_ids)
+    if command.kind == "window_minimize":
+        var minimized = state.minimized_window_ids
+        minimized = minimized.push(command.window_id)
+        val focus_after_min = if state.focused_window_id == command.window_id: "" else: state.focused_window_id
+        val drag_after_min = if state.dragging_surface_id == command.target_id: "" else: state.dragging_surface_id
+        return _wm_runtime_state(state.launched_apps, focus_after_min, drag_after_min, state.command_lane_target, state.background_click_count, command.kind, state.closed_window_ids, minimized)
     if command.kind == "command_lane_clock" or command.kind == "command_lane_icon" or command.kind == "command_lane":
-        return WmRuntimeShellState(
-            launched_apps: state.launched_apps,
-            focused_window_id: state.focused_window_id,
-            dragging_surface_id: state.dragging_surface_id,
-            command_lane_target: command.target_id,
-            background_click_count: state.background_click_count,
-            last_command_kind: command.kind
-        )
+        return _wm_runtime_state(state.launched_apps, state.focused_window_id, state.dragging_surface_id, command.target_id, state.background_click_count, command.kind, state.closed_window_ids, state.minimized_window_ids)
     if command.kind == "desktop_background":
-        return WmRuntimeShellState(
-            launched_apps: state.launched_apps,
-            focused_window_id: "",
-            dragging_surface_id: "",
-            command_lane_target: state.command_lane_target,
-            background_click_count: state.background_click_count + 1,
-            last_command_kind: command.kind
-        )
-    WmRuntimeShellState(
-        launched_apps: state.launched_apps,
-        focused_window_id: state.focused_window_id,
-        dragging_surface_id: state.dragging_surface_id,
-        command_lane_target: state.command_lane_target,
-        background_click_count: state.background_click_count,
-        last_command_kind: "ignored"
-    )
+        return _wm_runtime_state(state.launched_apps, "", "", state.command_lane_target, state.background_click_count + 1, command.kind, state.closed_window_ids, state.minimized_window_ids)
+    _wm_runtime_state(state.launched_apps, state.focused_window_id, state.dragging_surface_id, state.command_lane_target, state.background_click_count, "ignored", state.closed_window_ids, state.minimized_window_ids)
 
 fn wm_runtime_apply_shared_dispatch(state: WmRuntimeShellState, result: SharedWmDispatchResult) -> WmRuntimeShellState:
     wm_runtime_apply_command(state, wm_runtime_command_from_shared_dispatch(result))
