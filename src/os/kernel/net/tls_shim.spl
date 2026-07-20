@@ -28,8 +28,10 @@ use os.kernel.net.embedded_certs.{
     get_embedded_cert_der, get_embedded_key_der, has_embedded_certs
 }
 
-@cfg(riscv64)
-use os.kernel.arch_adapt.riscv64_entropy_time.{riscv64_boot_elapsed_us, riscv64_csr_entropy_seed}
+# NOTE(cross-arch import leak): riscv64 entropy/time imports live INSIDE
+# the @cfg(riscv64) fn bodies below — the seed's cfg strip does not strip
+# @cfg-gated top-level `use` lines, and this chain reaches RV64-only
+# inline asm (csrr) that breaks x86_64 kernel builds at clang.
 
 # ============================================================================
 # File I/O Stub
@@ -54,6 +56,7 @@ var g_fake_time_us: i64 = 1_000_000_000  # Start at ~1000 seconds in micros
 @export("C")
 fn rt_time_now_unix_micros() -> i64:
     """Return RISC-V boot-relative microseconds from the hardware timer."""
+    use os.kernel.arch_adapt.riscv64_entropy_time.{riscv64_boot_elapsed_us}
     riscv64_boot_elapsed_us().to_i64()
 
 @cfg(riscv64)
@@ -145,6 +148,7 @@ fn rt_riscv_seed() -> u64:
     This is stronger than the old deterministic LCG placeholder, but it is not
     a production entropy source. Replace with SBI/hardware RNG once available.
     """
+    use os.kernel.arch_adapt.riscv64_entropy_time.{riscv64_csr_entropy_seed}
     riscv64_csr_entropy_seed(rt_time_now_unix_micros().to_u64())
 
 @cfg(baremetal)

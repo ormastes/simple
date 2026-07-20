@@ -13,7 +13,7 @@
 #
 # S-mode context for hart N = N*2 + 1 (M-mode=N*2, S-mode=N*2+1)
 
-use os.kernel.boot.mmio.{mmio_read32, mmio_write32}
+use os.kernel.boot.mmio.{mmio_read32, mmio_write32, mmio_write64, mmio_write8}
 use os.kernel.arch.riscv64.cpu.{csrw_stvec, csrs_sie, csrc_sie, SIE_SEIE, SIE_STIE, SIE_SSIE}
 use os.kernel.arch.riscv64.console.{serial_writeln}
 use os.kernel.arch.riscv64.timer.{rv64_handle_timer_interrupt}
@@ -380,6 +380,57 @@ fn rv64_dispatch_installed_trap(ctx: Riscv64Context) -> Result<Riscv64Context, t
         _log_trap_failure(result.err().unwrap())
     result
 
+fn _rv64_ctx_store(addr: u64, ctx: Riscv64Context):
+    """Field-wise @repr(C) store of a Riscv64Context to a raw trap frame.
+
+    Replaces `*(addr as *mut Riscv64Context) = ctx`: a whole-struct store
+    through a Deref lvalue is rejected by the seed MIR lowering ("complex
+    lvalue: Deref"), which aborts every kernel build that pulls this file
+    in (x86_64 desktop builds reach it via user_entry_bridge because
+    @cfg-gated `use` lines are not arch-stripped by the seed import
+    scanner). Offsets are the @repr("C") layout asm contract already
+    fixed by RV64_CONTEXT_BYTES (544 = 34*8 GPR/CSR + 264 FP + 8 pad).
+    """
+    mmio_write64(addr + 0, ctx.ra)
+    mmio_write64(addr + 8, ctx.sp)
+    mmio_write64(addr + 16, ctx.gp)
+    mmio_write64(addr + 24, ctx.tp)
+    mmio_write64(addr + 32, ctx.t0)
+    mmio_write64(addr + 40, ctx.t1)
+    mmio_write64(addr + 48, ctx.t2)
+    mmio_write64(addr + 56, ctx.s0)
+    mmio_write64(addr + 64, ctx.s1)
+    mmio_write64(addr + 72, ctx.a0)
+    mmio_write64(addr + 80, ctx.a1)
+    mmio_write64(addr + 88, ctx.a2)
+    mmio_write64(addr + 96, ctx.a3)
+    mmio_write64(addr + 104, ctx.a4)
+    mmio_write64(addr + 112, ctx.a5)
+    mmio_write64(addr + 120, ctx.a6)
+    mmio_write64(addr + 128, ctx.a7)
+    mmio_write64(addr + 136, ctx.s2)
+    mmio_write64(addr + 144, ctx.s3)
+    mmio_write64(addr + 152, ctx.s4)
+    mmio_write64(addr + 160, ctx.s5)
+    mmio_write64(addr + 168, ctx.s6)
+    mmio_write64(addr + 176, ctx.s7)
+    mmio_write64(addr + 184, ctx.s8)
+    mmio_write64(addr + 192, ctx.s9)
+    mmio_write64(addr + 200, ctx.s10)
+    mmio_write64(addr + 208, ctx.s11)
+    mmio_write64(addr + 216, ctx.t3)
+    mmio_write64(addr + 224, ctx.t4)
+    mmio_write64(addr + 232, ctx.t5)
+    mmio_write64(addr + 240, ctx.t6)
+    mmio_write64(addr + 248, ctx.sepc)
+    mmio_write64(addr + 256, ctx.sstatus)
+    mmio_write64(addr + 264, ctx.scause)
+    var fp_i: u64 = 0
+    while fp_i < 264:
+        mmio_write8(addr + 272 + fp_i, ctx.fp_state.bytes[fp_i])
+        fp_i = fp_i + 1
+    mmio_write64(addr + 536, ctx.fp_pad)
+
 fn rv64_dispatch_trap_frame_ptr(ctx_addr: u64) -> i64:
     """Dispatch an installed RV64 trap using an in-place trap-frame pointer.
 
@@ -401,7 +452,14 @@ fn rv64_dispatch_trap_frame_ptr(ctx_addr: u64) -> i64:
             val args = rv64_syscall_args_from_context(current)
             if args.id == 0u64:
                 val saved_ptr = (ctx_addr + RV64_CONTEXT_BYTES) as *mut Riscv64Context
-                val prepared = rv64_prepare_kernel_exit_context(*saved_ptr, args.arg0.to_i32())
+                # Hoist the deref into a local before the call: passing
+                # `*saved_ptr` directly as a by-value struct argument needs an
+                # address-of on a Deref lvalue, which the seed MIR lowering
+                # rejects ("complex lvalue: Deref") and that aborts every
+                # x86_64 kernel build that pulls this file in via
+                # user_entry_bridge. Same pattern as `val current = *ctx_ptr`.
+                val saved = *saved_ptr
+                val prepared = rv64_prepare_kernel_exit_context(saved, args.arg0.to_i32())
                 if prepared.is_err():
                     val error = prepared.err()
                     _log_trap_failure(error.unwrap())
@@ -412,11 +470,11 @@ fn rv64_dispatch_trap_frame_ptr(ctx_addr: u64) -> i64:
                 val dispatched = rv64_dispatch_installed_trap(current)
                 if dispatched.is_err():
                     return -1
-                *ctx_ptr = prepared.unwrap()
+                _rv64_ctx_store(ctx_addr, prepared.unwrap())
                 return 0
 
         val result = rv64_dispatch_installed_trap(current)
         if result.is_err():
             return -1
-        *ctx_ptr = result.unwrap()
+        _rv64_ctx_store(ctx_addr, result.unwrap())
         0

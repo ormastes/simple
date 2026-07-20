@@ -44,8 +44,8 @@ use os.services.launcher.launcher.{launcher_init, launcher_get_app_count, launch
 use os.services.vfs.vfs_init.{vfs_boot_init, g_vfs_read_executable_bytes}
 use os.kernel.arch.x86_64.interrupt.{X86Interrupt}
 use os.kernel.arch.x86_64.arch_init.{arch_x86_64_early_init}
-use os.kernel.memory.pmm.{pmm_init_identity_range, g_pmm}
-use os.kernel.memory.vmm.{vmm_init}
+use os.kernel.memory.pmm.{pmm_init_identity_range}
+use os.kernel.memory.vmm.{vmm_init_from_global_pmm}
 # Pull syscall shim into the build graph so its @export("C", name: "spl_handle_*")
 # strong definitions override the weak -ENOSYS stubs in baremetal_stubs.c.
 use os.kernel.abi.syscall_shim.{shim_init}
@@ -263,8 +263,20 @@ fn _emit_qemu_guest_simple_perf_marker():
 
 fn _direct_qemu_memory_bootstrap():
     # Kernel end = 0x18000000 (384 MiB bound for 128 MB base + ~118 MB RW extent).
+    #
+    # NOTE(paging crash fix): call vmm_core's vmm_init_from_global_pmm — the
+    # SAME init the production desktop entry (gui_entry_desktop.spl) boots
+    # with — instead of the ambiguous `vmm_init(g_pmm, 0)`. `vmm_init` with an
+    # identical signature exists in BOTH os.kernel.memory.vmm_core AND
+    # os.kernel.arch.x86_64.paging; the call bound to the arch-paging copy,
+    # whose _alloc_table_page used the Option<PageFrame> API that miscompiles
+    # on the baremetal native lane (if-val-then-field nil-receiver panic —
+    # see doc/08_tracking/bug/baremetal_option_field_unwrap_faults_class and
+    # desktop_e2e_entry_paging_alloc_crash_no_hhdm bug docs). hhdm_offset=0
+    # stays correct on this lane: GRUB/multiboot boot identity-maps low
+    # memory, so table pages are written at virt==phys.
     if pmm_init_identity_range(0x20000000, 0x100000, 0x18000000):
-        vmm_init(g_pmm, 0)
+        vmm_init_from_global_pmm(0)
         serial_println("[desktop-e2e] memory-bootstrap:ok")
     else:
         serial_println("[desktop-e2e] memory-bootstrap:failed")

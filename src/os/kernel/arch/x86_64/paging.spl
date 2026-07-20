@@ -24,7 +24,7 @@
 
 use os.kernel.types.memory_types.{PhysAddr, VirtAddr, PageFrame, VmFlags, VM_NO_EXECUTE}
 use os.kernel.boot.mmio.{mmio_read64, mmio_write64, mmio_invalidate_tlb}
-use os.kernel.memory.pmm.{PhysMemManager, pmm_alloc_page, pmm_free_page}
+use os.kernel.memory.pmm.{PhysMemManager, pmm_alloc_page_raw, pmm_free_page}
 
 extern fn rt_read_cr3() -> u64
 extern fn rt_write_cr3(value: u64)
@@ -149,22 +149,29 @@ fn _alloc_table_page() -> u64:
     """Allocate a zeroed page for a new page table.
 
     Returns physical address of the new table, or 0 on failure.
+
+    Uses the scalar pmm_alloc_page_raw ABI, NOT pmm_alloc_page's
+    Option<PageFrame>: the if-val-Some-then-field shape miscompiles on the
+    baremetal native lane (nil-receiver panic trap on `f.pfn` — the
+    desktop_e2e boot crash; see
+    doc/08_tracking/bug/baremetal_option_field_unwrap_faults_class_2026-07-18.md
+    and desktop_e2e_entry_paging_alloc_crash_no_hhdm_2026-07-20.md).
+    vmm_core's _alloc_table_page already uses the raw ABI for the same
+    reason ("scalar ABI owner used by freestanding bootstrap paths").
     """
-    val frame = pmm_alloc_page()
-    if val Some(f) = frame:
-        val phys = f.pfn * PAGE_SIZE
-        val virt = _phys_to_virt(phys)
+    val phys = pmm_alloc_page_raw()
+    if phys == 0:
+        # Allocation failed
+        return 0
+    val virt = _phys_to_virt(phys)
 
-        # Zero the page table
-        var i: u64 = 0
-        while i < ENTRIES_PER_TABLE:
-            _write_pte(virt, i, 0)
-            i = i + 1
+    # Zero the page table
+    var i: u64 = 0
+    while i < ENTRIES_PER_TABLE:
+        _write_pte(virt, i, 0)
+        i = i + 1
 
-        return phys
-
-    # Allocation failed
-    0
+    phys
 
 # ============================================================================
 # Page Table Walk & Mapping
