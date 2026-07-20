@@ -1,0 +1,72 @@
+# Browser hit-test half-open bounds evidence probe (BOUNDS-P0, 2026-07-20).
+#
+# Runtime-verifies (via `bin/simple run`, not the walled test daemon) the
+# same fixture/assertions as hit_bounds_halfopen_spec.spl: `_box_contains`
+# (src/lib/gc_async_mut/gpu/browser_engine/layout.spl) is half-open on the
+# right/bottom edge, so a point on a shared border between two adjacent
+# boxes hits exactly the box whose interval contains it.
+#
+# Model: test/01_unit/lib/gpu/engine2d/probe_layer_overlap_hit_test.spl.
+# Unlike that model (which prints per-case pass/fail lines but never
+# aggregates them), this probe also tracks total/failed counts, prints a
+# final summary line, and exits non-zero on any failure so it can gate a
+# CI/redeploy check without a human reading every line.
+
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.layout_box.{BeLayoutBox}
+use std.gc_async_mut.gpu.browser_engine.layout.{hit_test}
+
+struct HitFixture:
+    box: BeLayoutBox
+    node: BeDomNode
+
+var total_checks = 0
+var failed_checks = 0
+
+fn report_text(key: text, actual: text, expected: text):
+    val ok = actual == expected
+    total_checks = total_checks + 1
+    if not ok:
+        failed_checks = failed_checks + 1
+    print(key + "=" + actual + " expected=" + expected + " pass=" + ok.to_text())
+
+fn _fixture() -> HitFixture:
+    """30x20 root, two adjacent 10x10 children sharing the x=10 edge:
+    `left` spans x:[0,10), `right` spans x:[10,20). The root is wider/
+    taller than the children so a miss on both still lands on the root
+    (hit_test's Some(node) fallback) instead of a total miss, letting each
+    edge case name exactly which node absorbed the point."""
+    val node_left = BeDomNode.element(1, "left")
+    val node_right = BeDomNode.element(2, "right")
+    var node_root = BeDomNode.element(0, "root")
+    node_root.children = [node_left, node_right]
+
+    val box_left = BeLayoutBox.block_for(node_left, 0.0, 0.0, 10.0, 10.0)
+    val box_right = BeLayoutBox.block_for(node_right, 10.0, 0.0, 10.0, 10.0)
+    var box_root = BeLayoutBox.block_for(node_root, 0.0, 0.0, 30.0, 20.0)
+    box_root.children = [box_left, box_right]
+
+    HitFixture(box: box_root, node: node_root)
+
+fn _tag_at(fx: HitFixture, x: f64, y: f64) -> text:
+    if val hit = hit_test(fx.box, fx.node, x, y):
+        hit.tag_name
+    else:
+        "MISS"
+
+fn main() -> i32:
+    print("=== browser hit-test: half-open bounds ([x,x+w) x [y,y+h)) ===")
+    val fx = _fixture()
+
+    report_text("interior_left_hit", _tag_at(fx, 5.0, 5.0), "left")
+    report_text("interior_right_hit", _tag_at(fx, 15.0, 5.0), "right")
+    report_text("shared_vertical_edge_x10_hits_right_not_left", _tag_at(fx, 10.0, 5.0), "right")
+    report_text("right_box_own_right_edge_x20_misses_falls_to_root", _tag_at(fx, 20.0, 5.0), "root")
+    report_text("left_box_own_bottom_edge_y10_misses_falls_to_root", _tag_at(fx, 5.0, 10.0), "root")
+    report_text("far_outside_root_is_clear_miss", _tag_at(fx, 1000.0, 1000.0), "MISS")
+
+    print("=== probe complete: " + total_checks.to_text() + " checks, " + failed_checks.to_text() + " failed ===")
+    if failed_checks > 0:
+        1
+    else:
+        0
