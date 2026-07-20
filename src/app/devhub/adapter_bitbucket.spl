@@ -602,14 +602,24 @@ fn _bb_collect_pages(client: BbClient, fetch_page: fn(BbClient, text) -> (bool, 
     (true, out, "", capped)
 
 
-fn _bb_combine_values_json(values: [any]) -> text:
+fn _bb_combine_values_json(values: [any], capped: bool) -> text:
     """Re-serialize accumulated multi-page value nodes as a single
     {"values": [...]} JSON body, for --json output when more than one page
-    was fetched."""
+    was fetched.
+
+    When `capped` is true (the BB_MAX_PAGES hard cap was the binding reason
+    pagination stopped short — see _bb_collect_pages), adds a `"_capped":
+    true` field to the envelope so --json consumers get the same truncation
+    signal human output already prints via _bb_print_cap_note(). Absent
+    entirely when not capped, so existing --json consumers see no shape
+    change in the common case."""
     var parts: [text] = []
     for v in values:
         parts = parts + [json_serialize(v)]
-    _bb_lbrace() + "\"values\": [" + parts.join(", ") + "]" + _bb_rbrace()
+    var body = "\"values\": [" + parts.join(", ") + "]"
+    if capped:
+        body = body + ", \"_capped\": true"
+    _bb_lbrace() + body + _bb_rbrace()
 
 
 # ============================================================================
@@ -842,7 +852,7 @@ fn bb_list_repos(client: BbClient, ws: text, limit: i64) -> (bool, [BbRepo], tex
     var out: [BbRepo] = []
     for v in raw:
         out = out + [bb_parse_repo(v)]
-    (true, out, _bb_combine_values_json(raw), capped)
+    (true, out, _bb_combine_values_json(raw, capped), capped)
 
 
 fn bb_repo_view(client: BbClient, ws: text, repo: text) -> (bool, BbRepo, text):
@@ -879,4 +889,4 @@ fn bb_list_prs(client: BbClient, ws: text, repo: text, state: text, limit: i64) 
     var out: [BbPr] = []
     for v in raw:
         out = out + [bb_parse_pr(v)]
-    (true, out, _bb_combine_values_json(raw), capped)
+    (true, out, _bb_combine_values_json(raw, capped), capped)

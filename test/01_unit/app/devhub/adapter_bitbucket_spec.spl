@@ -37,7 +37,8 @@ use app.devhub.adapter_bitbucket.{
     BB_OP_GENERAL,
     BB_OP_MERGE,
     BB_MAX_PAGES,
-    _bb_collect_pages
+    _bb_collect_pages,
+    _bb_combine_values_json
 }
 use std.common.json.{json_parse, json_object, json_string, json_boolean}
 
@@ -139,6 +140,17 @@ describe "bb auth header":
 # PR create body shape
 # ============================================================================
 
+fn _mk_uuid_literal(id: text) -> text:
+    """Build a "{...}"-braced fake-UUID test value via concatenation.
+
+    A plain `"{u1}"` string literal in source is parsed as a real string
+    interpolation placeholder (looking up a variable named `u1`), not
+    literal text — see
+    doc/08_tracking/bug/interp_brace_literal_collides_with_string_interpolation_2026-07-03.md.
+    Concatenating single unmatched-brace literals sidesteps that collision."""
+    "{" + id + "}"
+
+
 describe "bb_build_create_pr_body":
     it "minimum body has title and source branch":
         val body = bb_build_create_pr_body("My PR", "feat-x", "", [])
@@ -161,13 +173,15 @@ describe "bb_build_create_pr_body":
         expect(body).to_contain("\"name\": \"main\"")
 
     it "includes reviewers as uuid objects":
-        val body = bb_build_create_pr_body("T", "src", "main", ["{u1}", "{u2}"])
+        val u1 = _mk_uuid_literal("u1")
+        val u2 = _mk_uuid_literal("u2")
+        val body = bb_build_create_pr_body("T", "src", "main", [u1, u2])
         expect(body).to_contain("\"reviewers\":")
-        expect(body).to_contain("\"uuid\": \"{u1}\"")
-        expect(body).to_contain("\"uuid\": \"{u2}\"")
+        expect(body).to_contain("\"uuid\": \"" + u1 + "\"")
+        expect(body).to_contain("\"uuid\": \"" + u2 + "\"")
 
     it "produces parseable JSON":
-        val body = bb_build_create_pr_body("Add foo", "feat/foo", "develop", ["{abc-uuid}"])
+        val body = bb_build_create_pr_body("Add foo", "feat/foo", "develop", [_mk_uuid_literal("abc-uuid")])
         val parsed = json_parse(body)
         expect(parsed != nil).to_equal(true)
 
@@ -575,3 +589,24 @@ describe "_bb_collect_pages (pagination loop, fixture-driven, no network)":
         expect(ok).to_equal(true)
         expect(values.len()).to_equal(10)
         expect(capped).to_equal(false)
+
+
+describe "_bb_combine_values_json (--json envelope _capped signal)":
+    it "omits _capped for a single-page (not capped) result":
+        val (ok, values, err, capped) = _bb_collect_pages(_mk_unconfigured_client(), _fx_fetch_2pages, "p2", 100)
+        expect(ok).to_equal(true)
+        expect(capped).to_equal(false)
+        val envelope = _bb_combine_values_json(values, capped)
+        val has_capped = envelope.contains("\"_capped\"")
+        expect(has_capped).to_equal(false)
+        val parsed = json_parse(envelope)
+        expect(parsed != nil).to_equal(true)
+
+    it "adds \"_capped\": true when the BB_MAX_PAGES cap is hit (>10 pages served)":
+        val (ok, values, err, capped) = _bb_collect_pages(_mk_unconfigured_client(), _fx_fetch_infinite, "p1", 1000)
+        expect(ok).to_equal(true)
+        expect(capped).to_equal(true)
+        val envelope = _bb_combine_values_json(values, capped)
+        expect(envelope).to_contain("\"_capped\": true")
+        val parsed = json_parse(envelope)
+        expect(parsed != nil).to_equal(true)
