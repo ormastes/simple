@@ -13,7 +13,7 @@
 
 use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
 use std.gc_async_mut.gpu.engine2d.backend_cpu.{CpuBackend}
-use std.gc_async_mut.gpu.engine2d.compositor.{Layer, Compositor}
+use std.gc_async_mut.gpu.engine2d.compositor.{Layer, Compositor, compositor_pick_topmost, layer_rects_overlap}
 use std.common.engine.rect.{Rect2}
 
 val RED: u32 = 0xFFFF0000u32
@@ -36,6 +36,10 @@ fn report_bool(key: text, actual: bool, expected: bool):
     val ok = actual == expected
     print(key + "=" + actual.to_text() + " expected=" + expected.to_text() + " pass=" + ok.to_text())
 
+fn report_i64(key: text, actual: i64, expected: i64):
+    val ok = actual == expected
+    print(key + "=" + actual.to_text() + " expected=" + expected.to_text() + " pass=" + ok.to_text())
+
 fn pick_topmost(rects: [Rect2], z_orders: [i32], px: f64, py: f64) -> i32:
     var best_index = -1
     var best_z = 0
@@ -48,6 +52,29 @@ fn pick_topmost(rects: [Rect2], z_orders: [i32], px: f64, py: f64) -> i32:
                 best_z = z_orders[i]
         i = i + 1
     best_index
+
+fn build_compositor(rects: [Rect2], z_orders: [i32]) -> Compositor:
+    var comp = Compositor.create()
+    var i = 0
+    val n = rects.len()
+    while i < n:
+        val r = rects[i]
+        val w = r.width as i32
+        val h = r.height as i32
+        val total = w * h
+        val layer = Layer(
+            pixels: [0u32; total],
+            x: r.x as i32,
+            y: r.y as i32,
+            width: w,
+            height: h,
+            z_order: z_orders[i],
+            opacity: 1.0,
+            visible: true
+        )
+        comp.add_layer(layer)
+        i = i + 1
+    comp
 
 fn make_dst(size: i32) -> [u32]:
     var dst = [0u32; size]
@@ -105,7 +132,7 @@ fn main() -> i32:
     else:
         print("reversed_init=FAILED")
 
-    print("=== compositor: KNOWN BUG discriminator (3 out-of-order insertions) ===")
+    print("=== compositor: bug-fix discriminator (3 out-of-order insertions) ===")
     print("# see doc/08_tracking/bug/engine2d_compositor_add_layer_insertion_sort_double_decrement_2026-07-20.md")
     var a_be = SoftwareBackend.create()
     var b_be = SoftwareBackend.create()
@@ -127,9 +154,26 @@ fn main() -> i32:
         var dst3 = make_dst(256)
         comp3.composite_to_buffer(dst3, 16, 16)
         # Documented contract expects GREEN (A, z=2, higher than C's z=1).
-        # Current buggy source is expected to print RED here (pass=false) —
-        # that FAIL is the evidence, not a probe defect.
+        # Fixed source (single decrement per swap in add_layer) now sorts
+        # comp3.layers ascending as [C(z=1), A(z=2), B(z=3)] and this passes;
+        # the prior buggy source printed RED (pass=false) here — that was the
+        # bug evidence, not a probe defect.
         report_u32("three_layer_topmost_pixel_CONTRACT", dst3[8 * 16 + 8], GREEN)
+
+        print("=== compositor: production spatial API (compositor_pick_topmost, layer_rects_overlap) ===")
+        # comp3.layers is sorted ascending by z_order: [C(z=1,idx0), A(z=2,idx1), B(z=3,idx2)].
+        # (8,8) is covered by C and A but not B (B is a 4x4 corner at 12,12) -> topmost is A, index 1.
+        report_i64("pick_topmost_three_layer_a_over_c", compositor_pick_topmost(comp3, 8, 8), 1i64)
+        # (13,13) is covered by all three -> topmost is B (highest z_order), index 2.
+        report_i64("pick_topmost_three_layer_b_over_all", compositor_pick_topmost(comp3, 13, 13), 2i64)
+        # (100,100) is outside every layer's bounds -> no hit.
+        report_i64("pick_topmost_three_layer_miss", compositor_pick_topmost(comp3, 100, 100), -1i64)
+        # A (0,0,16,16) and B (12,12,4,4): B's bounds are fully inside A's -> overlap.
+        report_bool("layer_rects_overlap_a_b_true", layer_rects_overlap(layer_a, layer_b), true)
+        # A far layer at (200,200,4,4) does not overlap A (0,0,16,16).
+        val far_layer = Layer.create(200, 200, 4, 4)
+        report_bool("layer_rects_overlap_a_far_false", layer_rects_overlap(layer_a, far_layer), false)
+
         a_be.shutdown()
         b_be.shutdown()
         c_be.shutdown()
@@ -174,11 +218,14 @@ fn main() -> i32:
     report_bool("contains_point_bottom_edge_excluded", rc.contains_point(5.0, 10.0), false)
     report_bool("contains_point_outside", rc.contains_point(50.0, 50.0), false)
 
-    print("=== hit-test: pick_topmost (test-local; no shipped Engine2D API) ===")
+    print("=== hit-test: pick_topmost oracle (test-local) cross-checked against compositor_pick_topmost (shipped API) ===")
     val single_rects: [Rect2] = [Rect2(x: 0.0, y: 0.0, width: 10.0, height: 10.0)]
     val single_zs: [i32] = [0]
     report_i32("pick_single_hit", pick_topmost(single_rects, single_zs, 5.0, 5.0), 0)
     report_i32("pick_single_miss", pick_topmost(single_rects, single_zs, 50.0, 50.0), -1)
+    val comp_single = build_compositor(single_rects, single_zs)
+    report_i64("compositor_pick_single_hit", compositor_pick_topmost(comp_single, 5, 5), 0i64)
+    report_i64("compositor_pick_single_miss", compositor_pick_topmost(comp_single, 50, 50), -1i64)
 
     val overlap_rects: [Rect2] = [
         Rect2(x: 0.0, y: 0.0, width: 10.0, height: 10.0),
@@ -187,6 +234,9 @@ fn main() -> i32:
     val overlap_zs: [i32] = [0, 1]
     report_i32("pick_overlap_topmost", pick_topmost(overlap_rects, overlap_zs, 7.0, 7.0), 1)
     report_i32("pick_overlap_lower_only_region", pick_topmost(overlap_rects, overlap_zs, 1.0, 1.0), 0)
+    val comp_overlap = build_compositor(overlap_rects, overlap_zs)
+    report_i64("compositor_pick_overlap_topmost", compositor_pick_topmost(comp_overlap, 7, 7), 1i64)
+    report_i64("compositor_pick_overlap_lower_only_region", compositor_pick_topmost(comp_overlap, 1, 1), 0i64)
 
     val shuffled_rects: [Rect2] = [
         Rect2(x: 5.0, y: 5.0, width: 10.0, height: 10.0),
@@ -194,6 +244,8 @@ fn main() -> i32:
     ]
     val shuffled_zs: [i32] = [1, 5]
     report_i32("pick_overlap_topmost_array_order_independent", pick_topmost(shuffled_rects, shuffled_zs, 7.0, 7.0), 1)
+    val comp_shuffled = build_compositor(shuffled_rects, shuffled_zs)
+    report_i64("compositor_pick_overlap_topmost_array_order_independent", compositor_pick_topmost(comp_shuffled, 7, 7), 1i64)
 
     val three_rects: [Rect2] = [
         Rect2(x: 0.0, y: 0.0, width: 20.0, height: 20.0),
@@ -202,6 +254,14 @@ fn main() -> i32:
     ]
     val three_zs: [i32] = [1, 9, 5]
     report_i32("pick_three_middle_topmost", pick_topmost(three_rects, three_zs, 8.0, 8.0), 1)
+    # compositor_pick_topmost's returned index is into `c.layers` in
+    # z_order-sorted order (add_layer keeps it sorted), NOT insertion order,
+    # so it differs from the oracle's index-1 answer here: build_compositor
+    # inserts [z=1, z=9, z=5] and add_layer sorts them ascending to
+    # [z=1(idx0), z=5(idx1), z=9(idx2)] -> the highest-z (z=9) layer lands at
+    # sorted index 2, not insertion index 1.
+    val comp_three = build_compositor(three_rects, three_zs)
+    report_i64("compositor_pick_three_middle_topmost", compositor_pick_topmost(comp_three, 8, 8), 2i64)
 
     val edge_rects: [Rect2] = [
         Rect2(x: 0.0, y: 0.0, width: 10.0, height: 10.0),
@@ -209,6 +269,8 @@ fn main() -> i32:
     ]
     val edge_zs: [i32] = [0, 1]
     report_i32("pick_shared_edge_exclusive_convention", pick_topmost(edge_rects, edge_zs, 10.0, 5.0), 1)
+    val comp_edge = build_compositor(edge_rects, edge_zs)
+    report_i64("compositor_pick_shared_edge_exclusive_convention", compositor_pick_topmost(comp_edge, 10, 5), 1i64)
 
     print("=== probe complete ===")
     0

@@ -2,8 +2,8 @@
 
 @tag: gpu, engine2d, hit-test, pick, click-routing
 
-Audit tranche (E2D-AUDIT, 2026-07-20): Engine2D has NO hit-testing, point
-picking, or click-routing API. Confirmed by grep across
+Audit tranche (E2D-AUDIT, 2026-07-20) found Engine2D had NO hit-testing,
+point picking, or click-routing API. Confirmed by grep across
 src/lib/gc_async_mut/gpu/engine2d/*.spl (no `hit_test`/`pick`/`point_in`/
 `click` function) and the WM services tree
 (src/os/services/wm/{wm_service,wm_world,wm_action}.spl — window bookkeeping
@@ -13,24 +13,29 @@ functions in the repo are unrelated: browser-engine DOM layout
 gizmo (src/lib/nogc_sync_mut/editor/gizmo.spl) — neither is reachable from
 Engine2D's compositor/backend layer.
 
-This spec therefore builds and tests the minimal "topmost object wins" pick
-algorithm a real Engine2D hit-test API would need, directly on `Rect2`
+Fix tranche (E2D-FIX, 2026-07-20): the minimal production API now ships —
+`compositor_pick_topmost(c: Compositor, x: i32, y: i32) -> i64` in
+src/lib/gc_async_mut/gpu/engine2d/compositor.spl, built on `Rect2`
 (src/lib/common/engine/rect.spl) — the same primitive the overlap-detection
-tranche (rect2_overlap_detection_spec.spl) locks down. `pick_topmost` below
-is test-local (not part of any shipped API) and exists to prove the
-primitives are sufficient; it is NOT a substitute for the missing
-production API. See the gap list in this audit's report for the concrete
-recommendation (add a `HitTestable`/`pick_topmost` seam to Engine2D or a new
-`hit_test.spl` module, and wire mouse events through it from the WM side).
+tranche (rect2_overlap_detection_spec.spl) locks down. Every `it` block below
+exercises the shipped `compositor_pick_topmost` via `build_compositor`
+(constructs a `Compositor` of trivial `Layer`s from the scenario's rects/
+z_orders) and cross-checks it against `pick_topmost`, a test-local oracle
+kept only as an independent-implementation sanity check — it is NOT the
+production path. WM mouse-event wiring is a separate, larger tranche (not
+in scope here).
 """
 
 use std.spec.{describe, context, it, expect}
 use std.common.engine.rect.{Rect2}
+use std.gc_async_mut.gpu.engine2d.compositor.{Layer, Compositor, compositor_pick_topmost}
 
 fn pick_topmost(rects: [Rect2], z_orders: [i32], px: f64, py: f64) -> i32:
-    """Return the index of the highest-z_order rect containing (px, py), or
-    -1 if no rect contains the point. Ties are broken by first-seen index
-    (stable), matching "topmost wins" semantics for a z-ordered object list."""
+    """Independent-implementation oracle: return the index of the highest-
+    z_order rect containing (px, py), or -1 if no rect contains the point.
+    Ties are broken by first-seen index (stable), matching "topmost wins"
+    semantics for a z-ordered object list. Not the production path — see
+    `compositor_pick_topmost` in compositor.spl for that."""
     var best_index = -1
     var best_z = 0
     var i = 0
@@ -43,16 +48,46 @@ fn pick_topmost(rects: [Rect2], z_orders: [i32], px: f64, py: f64) -> i32:
         i = i + 1
     best_index
 
+fn build_compositor(rects: [Rect2], z_orders: [i32]) -> Compositor:
+    """Build a Compositor of trivial (zero-filled) Layers whose bounds match
+    `rects`, so the shipped `compositor_pick_topmost` API can be exercised
+    with the same rect/z_order fixtures as the oracle above."""
+    var comp = Compositor.create()
+    var i = 0
+    val n = rects.len()
+    while i < n:
+        val r = rects[i]
+        val w = r.width as i32
+        val h = r.height as i32
+        val total = w * h
+        val layer = Layer(
+            pixels: [0u32; total],
+            x: r.x as i32,
+            y: r.y as i32,
+            width: w,
+            height: h,
+            z_order: z_orders[i],
+            opacity: 1.0,
+            visible: true
+        )
+        comp.add_layer(layer)
+        i = i + 1
+    comp
+
 describe "Hit-test: topmost object wins under overlapping rects":
     it "click inside a single, non-overlapping object hits that object":
         val rects: [Rect2] = [Rect2(x: 0.0, y: 0.0, width: 10.0, height: 10.0)]
         val zs: [i32] = [0]
         expect(pick_topmost(rects, zs, 5.0, 5.0)).to_equal(0)
+        val comp = build_compositor(rects, zs)
+        expect(compositor_pick_topmost(comp, 5, 5)).to_equal(0)
 
     it "click outside every object hits nothing":
         val rects: [Rect2] = [Rect2(x: 0.0, y: 0.0, width: 10.0, height: 10.0)]
         val zs: [i32] = [0]
         expect(pick_topmost(rects, zs, 50.0, 50.0)).to_equal(-1)
+        val comp = build_compositor(rects, zs)
+        expect(compositor_pick_topmost(comp, 50, 50)).to_equal(-1)
 
     it "click in the overlap of two objects picks the higher z_order object":
         val rects: [Rect2] = [
@@ -61,6 +96,8 @@ describe "Hit-test: topmost object wins under overlapping rects":
         ]
         val zs: [i32] = [0, 1]
         expect(pick_topmost(rects, zs, 7.0, 7.0)).to_equal(1)
+        val comp = build_compositor(rects, zs)
+        expect(compositor_pick_topmost(comp, 7, 7)).to_equal(1)
 
     it "click in the overlap picks the higher z_order object regardless of array order":
         val rects: [Rect2] = [
@@ -70,6 +107,8 @@ describe "Hit-test: topmost object wins under overlapping rects":
         # Index 0 has the LOWER z_order this time (array order != z order).
         val zs: [i32] = [1, 5]
         expect(pick_topmost(rects, zs, 7.0, 7.0)).to_equal(1)
+        val comp = build_compositor(rects, zs)
+        expect(compositor_pick_topmost(comp, 7, 7)).to_equal(1)
 
     it "click in a region covered by only the lower object picks the lower object":
         val rects: [Rect2] = [
@@ -78,6 +117,8 @@ describe "Hit-test: topmost object wins under overlapping rects":
         ]
         val zs: [i32] = [0, 1]
         expect(pick_topmost(rects, zs, 1.0, 1.0)).to_equal(0)
+        val comp = build_compositor(rects, zs)
+        expect(compositor_pick_topmost(comp, 1, 1)).to_equal(0)
 
     it "three overlapping objects: topmost among ALL that contain the point wins, not just the last two":
         val rects: [Rect2] = [
@@ -88,6 +129,14 @@ describe "Hit-test: topmost object wins under overlapping rects":
         # Middle object (index 1) has the highest z_order.
         val zs: [i32] = [1, 9, 5]
         expect(pick_topmost(rects, zs, 8.0, 8.0)).to_equal(1)
+        # compositor_pick_topmost's index is into `c.layers` in its
+        # z_order-sorted order (add_layer keeps it sorted), not insertion
+        # order: build_compositor inserts [z=1, z=9, z=5] and add_layer
+        # sorts them ascending to [z=1(idx0), z=5(idx1), z=9(idx2)], so the
+        # highest-z (z=9) layer lands at sorted index 2, not insertion
+        # index 1 as the oracle above reports.
+        val comp = build_compositor(rects, zs)
+        expect(compositor_pick_topmost(comp, 8, 8)).to_equal(2)
 
     it "click exactly on a shared right/bottom edge respects Rect2's exclusive-edge convention":
         val rects: [Rect2] = [
@@ -98,3 +147,5 @@ describe "Hit-test: topmost object wins under overlapping rects":
         # x=10.0 is outside rect 0 (right() is exclusive) and on rect 1's
         # left edge (inclusive) -> only rect 1 contains this point.
         expect(pick_topmost(rects, zs, 10.0, 5.0)).to_equal(1)
+        val comp = build_compositor(rects, zs)
+        expect(compositor_pick_topmost(comp, 10, 5)).to_equal(1)

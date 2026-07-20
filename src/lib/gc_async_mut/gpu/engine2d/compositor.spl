@@ -8,6 +8,7 @@
 #   use std.gpu.engine2d.compositor.{Layer, Compositor}
 
 use std.gpu.engine2d.color.{color_r, color_g, color_b, color_a, rgba, blend}
+use std.common.engine.rect.{Rect2}
 
 # ============================================================================
 # Layer
@@ -101,16 +102,15 @@ class Compositor:
     me add_layer(layer: Layer):
         """Add a layer to the compositor. Maintains z_order sort."""
         self.layers.push(layer)
-        # Insertion sort by z_order (stable, efficient for small N)
+        # Insertion sort by z_order (stable, efficient for small N).
+        # Standard indexed insertion sort: decrement exactly once per swap,
+        # via the while-condition itself, so the newly-placed element is
+        # always compared against its new left neighbor before stopping.
         var i = self.layers.len() - 1
-        while i > 0:
-            if self.layers[i].z_order < self.layers[i - 1].z_order:
-                val tmp = self.layers[i]
-                self.layers[i] = self.layers[i - 1]
-                self.layers[i - 1] = tmp
-                i = i - 1
-            else:
-                return
+        while i > 0 and self.layers[i].z_order < self.layers[i - 1].z_order:
+            val tmp = self.layers[i]
+            self.layers[i] = self.layers[i - 1]
+            self.layers[i - 1] = tmp
             i = i - 1
 
     me remove_layer(index: i32):
@@ -182,6 +182,57 @@ class Compositor:
                     lx = lx + 1
                 ly = ly + 1
             li = li + 1
+
+# ============================================================================
+# Spatial queries (overlap + hit-test)
+# ============================================================================
+#
+# Minimal engine2d-scoped seam over the generic Rect2 primitive
+# (src/lib/common/engine/rect.spl). Not wired to WM mouse routing yet — see
+# doc/08_tracking/bug/engine2d_compositor_add_layer_insertion_sort_double_decrement_2026-07-20.md
+# for the next tranche.
+
+fn _layer_bounds(layer: Layer) -> Rect2:
+    Rect2(
+        x: layer.x as f64,
+        y: layer.y as f64,
+        width: layer.width as f64,
+        height: layer.height as f64
+    )
+
+fn layer_rects_overlap(a: Layer, b: Layer) -> bool:
+    """Thin engine2d wrapper over Rect2.intersects for two Layers' screen-space
+    bounds (position + width/height, ignoring pixel content)."""
+    val ra = _layer_bounds(a)
+    val rb = _layer_bounds(b)
+    ra.intersects(rb)
+
+fn compositor_pick_topmost(c: Compositor, x: i32, y: i32) -> i64:
+    """Return the index (into `c.layers`, used as the layer id — Layer has no
+    dedicated id field) of the topmost visible layer whose bounds contain
+    (x, y), or -1 if none.
+
+    "Topmost" = highest z_order; among equal z_order, the layer added later
+    wins (matches composite_to_buffer's draw order, where later array entries
+    paint over earlier ones). `c.layers` is kept sorted ascending by z_order
+    by `add_layer`, so a single forward scan with a `>=` tiebreak is
+    sufficient."""
+    var best_index: i64 = -1
+    var best_z = 0
+    val px = x as f64
+    val py = y as f64
+    var i = 0
+    val n = c.layers.len()
+    while i < n:
+        val layer = c.layers[i]
+        if layer.visible:
+            val bounds = _layer_bounds(layer)
+            if bounds.contains_point(px, py):
+                if best_index == -1 or layer.z_order >= best_z:
+                    best_index = i as i64
+                    best_z = layer.z_order
+        i = i + 1
+    best_index
 
 # ============================================================================
 # Conversion Helpers

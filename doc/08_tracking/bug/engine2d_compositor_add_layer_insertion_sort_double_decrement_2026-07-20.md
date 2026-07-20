@@ -94,3 +94,12 @@ exactly once per iteration regardless of branch, i.e. move a single `i = i -
 1` so it always executes exactly once per swap and zero times on `return`).
 Not applied in this pass — audit findings feed a separate fix lane per
 mission scope (do not modify engine source in the audit pass).
+
+## Status update 2026-07-20 (later): FIXED
+add_layer's insertion sort now decrements its scan index exactly once per
+swap (comparison folded into the while condition). The zorder spec's XFAIL
+case is now a positive assertion; probe_layer_overlap_hit_test's
+three_layer_topmost_pixel_CONTRACT passes (38/38 overall). Minimal spatial
+API (compositor_pick_topmost — returns post-sort layer index, documented —
+and layer_rects_overlap) added to compositor.spl per the audit gap list.
+WM mouse-event routing deliberately NOT wired — next tranche.
