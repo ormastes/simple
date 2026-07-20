@@ -2520,6 +2520,7 @@ pub fn text_cstr_arg_indices(func_name: &str) -> Option<&'static [usize]> {
 fn process_c_runtime_arg_indices(func_name: &str) -> Option<(&'static [usize], &'static [usize])> {
     match func_name {
         "rt_process_run"
+        | "rt_process_run_inherit"
         | "rt_process_spawn"
         | "rt_process_execute"
         | "rt_process_run_timeout"
