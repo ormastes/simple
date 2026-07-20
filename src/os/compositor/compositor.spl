@@ -15,6 +15,22 @@ use os.compositor.shared_mdi_framebuffer_scene.{
 }
 use os.compositor.simple_web_window_renderer.{render_simple_web_content}
 
+fn _ps2_wm_pointer_button_code(left_btn: bool, right_btn: bool, middle_btn: bool) -> i32:
+    """Map PS/2 mouse status-byte button bits (status byte bits 0/1/2) to
+    the pending_wm_pointer_button_code contract shared with shell.spl's
+    decode (see Compositor.pending_wm_pointer_button_code doc comment):
+    0 = none, 1 = left, 2 = middle, 3 = right. At most one code is
+    reported per packet; when multiple bits are set simultaneously, left
+    takes priority, then right, then middle (left already took priority
+    over any simultaneous button before this decode was widened)."""
+    if left_btn:
+        return 1
+    if right_btn:
+        return 3
+    if middle_btn:
+        return 2
+    return 0
+
 class WindowSurface:
     id: i32
     title: text
@@ -60,9 +76,17 @@ class Compositor:
     pending_wm_pointer_y: i32
     # i32 codes, not text: text stored through this struct field arrived at
     # rt_string_eq as a raw integer on baremetal (cr2=-114 fault class,
-    # 2026-07-18 input-correlation lane). 1=left / 1=down; 0=none.
+    # 2026-07-18 input-correlation lane).
+    # button_code: 0=none, 1=left, 2=middle, 3=right (see
+    # _ps2_wm_pointer_button_code). kind_code: 0=none, 1=down, 2=up,
+    # 3=move. Decoded back to text in shell.spl's
+    # wm_pointer_button_from_code / wm_pointer_kind_from_code (see
+    # handle_pending_wm_pointer_step) — keep both ends in sync.
     pending_wm_pointer_button_code: i32
     pending_wm_pointer_kind_code: i32
+    # Button code held as of the previous PS/2 packet, used only to detect
+    # the release (down -> none) edge and report which button went up.
+    prev_wm_pointer_button_code: i32
     input_sequence: i64
     pending_fullscreen_sequence: i64
 
@@ -89,6 +113,7 @@ class Compositor:
             pending_wm_pointer_y: 0,
             pending_wm_pointer_button_code: 0,
             pending_wm_pointer_kind_code: 0,
+            prev_wm_pointer_button_code: 0,
             input_sequence: 0,
             pending_fullscreen_sequence: 0
         )
@@ -489,8 +514,18 @@ class Compositor:
                     cursor_ref.y = new_y
                     self.cursor = cursor_ref
                     val left_btn = ((b0 as i32) & 0x01) != 0
+                    val right_btn = ((b0 as i32) & 0x02) != 0
+                    val middle_btn = ((b0 as i32) & 0x04) != 0
+                    val cur_wm_pointer_button_code = _ps2_wm_pointer_button_code(left_btn, right_btn, middle_btn)
+                    val prev_wm_pointer_button_code = self.prev_wm_pointer_button_code
+                    if cur_wm_pointer_button_code != 0:
+                        self.note_pending_wm_pointer_step(new_x, new_y, cur_wm_pointer_button_code, 1)
+                    elif prev_wm_pointer_button_code != 0:
+                        self.note_pending_wm_pointer_step(new_x, new_y, prev_wm_pointer_button_code, 2)
+                    else:
+                        self.note_pending_wm_pointer_step(new_x, new_y, 0, 3)
+                    self.prev_wm_pointer_button_code = cur_wm_pointer_button_code
                     if left_btn:
-                        self.note_pending_wm_pointer_step(new_x, new_y, 1, 1)
                         if self.dragging:
                             val new_win_x = new_x - self.drag_offset_x
                             val new_win_y = new_y - self.drag_offset_y
