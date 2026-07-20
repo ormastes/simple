@@ -25,6 +25,7 @@ use std.nogc_sync_mut.engine.physics.backend_cpu.simd_solver.{CpuSimdSolver}
 use std.nogc_sync_mut.engine.physics.broadphase.bvh2d.{DynamicBvh2D, AABB2D}
 use std.nogc_sync_mut.engine.physics.graph.island_manager.{IslandManager}
 use std.nogc_sync_mut.engine.physics.graph.sleeping.{update_sleeping}
+use std.nogc_sync_mut.engine.physics.collision_layers.{CollisionFilter, CollisionMatrix}
 
 struct Transform2D:
     node_id: NodeId
@@ -37,6 +38,13 @@ struct InterpolatedTransform2D:
     x: f64
     y: f64
     rotation: f64
+
+# A collider pair rejected as a solid contact because one (or both) side is
+# marked as a trigger/sensor (Collider2D.is_sensor). Emitted instead of a
+# solver constraint — see detect_contacts_bvh/detect_contacts_bruteforce.
+struct TriggerContactEvent:
+    node_a: NodeId
+    node_b: NodeId
 
 class PhysicsWorld2D:
     config: PhysicsConfig2D
@@ -53,6 +61,8 @@ class PhysicsWorld2D:
     node_to_collider: [i64]
     max_node_index: i64
     use_bvh: bool
+    collision_matrix: CollisionMatrix
+    trigger_events: [TriggerContactEvent]
 
 impl PhysicsWorld2D:
 
@@ -72,7 +82,9 @@ impl PhysicsWorld2D:
             node_to_body: [],
             node_to_collider: [],
             max_node_index: 0,
-            use_bvh: true
+            use_bvh: true,
+            collision_matrix: CollisionMatrix.all_collide(),
+            trigger_events: []
         )
 
     me add_dynamic_body(node_id: NodeId, x: f64, y: f64, mass: f64) -> i64:
@@ -107,6 +119,45 @@ impl PhysicsWorld2D:
         self.node_to_collider[node_id.to_index()] = idx
         idx
 
+    # Set the collision filter (category/mask bits) for an existing collider.
+    # Pairs are rejected before narrowphase when self.collision_matrix says
+    # they should not collide (bitmask test, plus any explicit override
+    # rules registered on self.collision_matrix).
+    me set_collider_filter(node_id: NodeId, filter: CollisionFilter):
+        val idx = self.node_to_collider[node_id.to_index()]
+        val c = self.colliders.colliders[idx]
+        self.colliders.colliders[idx] = Collider2D(
+            body_index: c.body_index,
+            node_id: c.node_id,
+            shape_type: c.shape_type,
+            radius: c.radius,
+            half_width: c.half_width,
+            half_height: c.half_height,
+            is_sensor: c.is_sensor,
+            offset_x: c.offset_x,
+            offset_y: c.offset_y,
+            filter: filter
+        )
+
+    # Mark/unmark an existing collider as a trigger (sensor). Trigger pairs
+    # are reported via get_trigger_events() instead of being pushed into the
+    # solver as solid contacts.
+    me set_trigger(node_id: NodeId, is_trigger: bool):
+        val idx = self.node_to_collider[node_id.to_index()]
+        val c = self.colliders.colliders[idx]
+        self.colliders.colliders[idx] = Collider2D(
+            body_index: c.body_index,
+            node_id: c.node_id,
+            shape_type: c.shape_type,
+            radius: c.radius,
+            half_width: c.half_width,
+            half_height: c.half_height,
+            is_sensor: is_trigger,
+            offset_x: c.offset_x,
+            offset_y: c.offset_y,
+            filter: c.filter
+        )
+
     me step(dt: f64):
         self.accumulator = self.accumulator + dt
         val fixed_dt = self.config.fixed_timestep
@@ -127,6 +178,7 @@ impl PhysicsWorld2D:
 
     me detect_contacts():
         self.constraints.clear()
+        self.trigger_events = []
         if self.use_bvh and self.colliders.count > 4:
             self.detect_contacts_bvh()
         else:
@@ -159,22 +211,28 @@ impl PhysicsWorld2D:
             if self.bodies.inv_mass[ai] == 0.0 and self.bodies.inv_mass[bi] == 0.0:
                 pi = pi + 1
                 continue
+            if not self.collision_matrix.should_collide(ca.filter, cb.filter):
+                pi = pi + 1
+                continue
             val ax = self.bodies.pos_x[ai]
             val ay = self.bodies.pos_y[ai]
             val bx = self.bodies.pos_x[bi]
             val by = self.bodies.pos_y[bi]
             val contact = collide_pair(ca, ax, ay, cb, bx, by)
             if contact.has_contact:
-                self.constraints.add(
-                    ai, bi,
-                    contact.normal_x, contact.normal_y,
-                    contact.point_x, contact.point_y,
-                    contact.penetration,
-                    self.config.restitution,
-                    self.config.friction,
-                    contact.feature_id_a,
-                    contact.feature_id_b
-                )
+                if ca.is_sensor or cb.is_sensor:
+                    self.trigger_events.push(TriggerContactEvent(node_a: ca.node_id, node_b: cb.node_id))
+                else:
+                    self.constraints.add(
+                        ai, bi,
+                        contact.normal_x, contact.normal_y,
+                        contact.point_x, contact.point_y,
+                        contact.penetration,
+                        self.config.restitution,
+                        self.config.friction,
+                        contact.feature_id_a,
+                        contact.feature_id_b
+                    )
             pi = pi + 1
 
     me detect_contacts_bruteforce():
@@ -189,22 +247,28 @@ impl PhysicsWorld2D:
                 if self.bodies.inv_mass[ai] == 0.0 and self.bodies.inv_mass[bi] == 0.0:
                     j = j + 1
                     continue
+                if not self.collision_matrix.should_collide(ca.filter, cb.filter):
+                    j = j + 1
+                    continue
                 val ax = self.bodies.pos_x[ai]
                 val ay = self.bodies.pos_y[ai]
                 val bx = self.bodies.pos_x[bi]
                 val by = self.bodies.pos_y[bi]
                 val contact = collide_pair(ca, ax, ay, cb, bx, by)
                 if contact.has_contact:
-                    self.constraints.add(
-                        ai, bi,
-                        contact.normal_x, contact.normal_y,
-                        contact.point_x, contact.point_y,
-                        contact.penetration,
-                        self.config.restitution,
-                        self.config.friction,
-                        contact.feature_id_a,
-                        contact.feature_id_b
-                    )
+                    if ca.is_sensor or cb.is_sensor:
+                        self.trigger_events.push(TriggerContactEvent(node_a: ca.node_id, node_b: cb.node_id))
+                    else:
+                        self.constraints.add(
+                            ai, bi,
+                            contact.normal_x, contact.normal_y,
+                            contact.point_x, contact.point_y,
+                            contact.penetration,
+                            self.config.restitution,
+                            self.config.friction,
+                            contact.feature_id_a,
+                            contact.feature_id_b
+                        )
                 j = j + 1
             i = i + 1
 
@@ -364,6 +428,12 @@ impl PhysicsWorld2D:
 
     me body_count() -> i64:
         self.bodies.body_count
+
+    me contact_count() -> i64:
+        self.constraints.count
+
+    me get_trigger_events() -> [TriggerContactEvent]:
+        self.trigger_events
 
     me destroy():
         pass_dn

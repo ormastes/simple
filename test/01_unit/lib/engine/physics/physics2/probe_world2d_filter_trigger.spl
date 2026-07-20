@@ -1,0 +1,143 @@
+# Probe — PhysicsWorld2D collision filter + trigger wiring
+#
+# Mirrors world2d_filter_trigger_spec.spl as a standalone `bin/simple run`
+# script (per-case PASS/FAIL + summary, nonzero rc on any failure).
+
+use std.common.engine.ids.{NodeId}
+use std.common.engine.math2d.{Vec2}
+use std.nogc_sync_mut.engine.physics.config.{default_physics_config_2d, PhysicsConfig2D}
+use std.nogc_sync_mut.engine.physics.backend.{PhysicsBackend}
+use std.nogc_sync_mut.engine.physics.world2d.{PhysicsWorld2D}
+use std.nogc_sync_mut.engine.physics.collision_layers.{CollisionFilter}
+
+extern fn rt_exit(code: i64)
+
+# NOTE: fn-to-fn writes of a shared module-level `var` do not reliably
+# propagate on the interpreter (nested closure capture can READ outer vars
+# but not MODIFY them — see .claude/rules/language.md). Each case_* fn below
+# therefore accumulates its OWN local fail count and returns it; the
+# top-level script sums the return values directly (same-scope var writes,
+# not cross-fn writes) instead of relying on a shared counter.
+
+fn make_node(idx: i64) -> NodeId:
+    NodeId(raw: idx)
+
+fn zero_gravity_config() -> PhysicsConfig2D:
+    var config = default_physics_config_2d()
+    config.backend = PhysicsBackend.CpuScalar
+    config.gravity = Vec2(x: 0.0, y: 0.0)
+    config
+
+fn check(name: text, ok: bool) -> i64:
+    if ok:
+        print("PASS - " + name)
+        0
+    else:
+        print("FAIL - " + name)
+        1
+
+fn case_default_backward_compat() -> i64:
+    var world = PhysicsWorld2D.create(zero_gravity_config())
+    val a = make_node(1)
+    val b = make_node(2)
+    world.add_dynamic_body(a, 0.0, 0.0, 1.0)
+    world.add_circle_collider(a, 0.3)
+    world.add_dynamic_body(b, 0.2, 0.0, 1.0)
+    world.add_circle_collider(b, 0.3)
+    world.step(world.config.fixed_timestep)
+    var fails = 0
+    fails = fails + check("default filters: contact_count == 1", world.contact_count() == 1)
+    fails = fails + check("default filters: trigger_events == 0", world.get_trigger_events().len() == 0)
+    world.destroy()
+    fails
+
+fn case_mask_reject() -> i64:
+    var world = PhysicsWorld2D.create(zero_gravity_config())
+    val a = make_node(1)
+    val b = make_node(2)
+    world.add_dynamic_body(a, 0.0, 0.0, 1.0)
+    world.add_circle_collider(a, 0.3)
+    world.add_dynamic_body(b, 0.2, 0.0, 1.0)
+    world.add_circle_collider(b, 0.3)
+    world.set_collider_filter(a, CollisionFilter.with_mask(2, 2))
+    world.set_collider_filter(b, CollisionFilter.with_mask(4, 1))
+    val pos_a_before = world.get_position(a)
+    val pos_b_before = world.get_position(b)
+    world.step(world.config.fixed_timestep)
+    var fails = 0
+    fails = fails + check("mask reject: contact_count == 0", world.contact_count() == 0)
+    val pos_a_after = world.get_position(a)
+    val pos_b_after = world.get_position(b)
+    fails = fails + check("mask reject: a unmoved", pos_a_after.x == pos_a_before.x and pos_a_after.y == pos_a_before.y)
+    fails = fails + check("mask reject: b unmoved", pos_b_after.x == pos_b_before.x and pos_b_after.y == pos_b_before.y)
+    world.destroy()
+    fails
+
+fn case_trigger_pair() -> i64:
+    var world = PhysicsWorld2D.create(zero_gravity_config())
+    val a = make_node(1)
+    val b = make_node(2)
+    world.add_dynamic_body(a, 0.0, 0.0, 1.0)
+    world.add_circle_collider(a, 0.3)
+    world.add_dynamic_body(b, 0.2, 0.0, 1.0)
+    world.add_circle_collider(b, 0.3)
+    world.set_trigger(b, true)
+    val pos_a_before = world.get_position(a)
+    val pos_b_before = world.get_position(b)
+    world.step(world.config.fixed_timestep)
+    var fails = 0
+    fails = fails + check("trigger pair: contact_count == 0", world.contact_count() == 0)
+    fails = fails + check("trigger pair: trigger_events == 1", world.get_trigger_events().len() == 1)
+    val pos_a_after = world.get_position(a)
+    val pos_b_after = world.get_position(b)
+    fails = fails + check("trigger pair: a unmoved", pos_a_after.x == pos_a_before.x and pos_a_after.y == pos_a_before.y)
+    fails = fails + check("trigger pair: b unmoved", pos_b_after.x == pos_b_before.x and pos_b_after.y == pos_b_before.y)
+    world.destroy()
+    fails
+
+fn case_bvh_path() -> i64:
+    var world = PhysicsWorld2D.create(zero_gravity_config())
+    val a = make_node(1)
+    val b = make_node(2)
+    val c = make_node(3)
+    val d = make_node(4)
+    val e = make_node(5)
+    val f = make_node(6)
+    world.add_dynamic_body(a, 0.0, 0.0, 1.0)
+    world.add_circle_collider(a, 0.3)
+    world.add_dynamic_body(b, 0.2, 0.0, 1.0)
+    world.add_circle_collider(b, 0.3)
+    world.set_trigger(b, true)
+    world.add_dynamic_body(c, 10.0, 0.0, 1.0)
+    world.add_circle_collider(c, 0.3)
+    world.add_dynamic_body(d, 10.2, 0.0, 1.0)
+    world.add_circle_collider(d, 0.3)
+    world.set_collider_filter(c, CollisionFilter.with_mask(2, 2))
+    world.set_collider_filter(d, CollisionFilter.with_mask(4, 1))
+    world.add_dynamic_body(e, 20.0, 0.0, 1.0)
+    world.add_circle_collider(e, 0.3)
+    world.add_dynamic_body(f, 20.2, 0.0, 1.0)
+    world.add_circle_collider(f, 0.3)
+    var fails = 0
+    fails = fails + check("bvh path: colliders.count > 4", world.colliders.count > 4)
+    world.step(world.config.fixed_timestep)
+    fails = fails + check("bvh path: contact_count == 1", world.contact_count() == 1)
+    fails = fails + check("bvh path: trigger_events == 1", world.get_trigger_events().len() == 1)
+    val pos_e = world.get_position(e)
+    val pos_f = world.get_position(f)
+    fails = fails + check("bvh path: e,f separated (solid contact solved)", pos_e.x != pos_f.x)
+    world.destroy()
+    fails
+
+var total_fail = 0
+total_fail = total_fail + case_default_backward_compat()
+total_fail = total_fail + case_mask_reject()
+total_fail = total_fail + case_trigger_pair()
+total_fail = total_fail + case_bvh_path()
+
+print("---")
+print("SUMMARY: fail=" + total_fail.to_text())
+if total_fail > 0:
+    rt_exit(1)
+else:
+    rt_exit(0)

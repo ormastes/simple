@@ -1,0 +1,121 @@
+# Physics2 World2D — Collision Filter + Trigger wiring — Unit Tests
+#
+# Verifies detect_contacts() applies CollisionFilter/CollisionMatrix
+# (collision_layers.spl) and routes is_sensor colliders to trigger events
+# instead of solid contacts, on BOTH the bruteforce (<=4 colliders) and
+# BVH (>4 colliders) broadphase paths. See doc/03_plan/ui/unified_2d_engine/
+# unified_2d_interaction_2026-07-20.md defect [C11].
+
+use std.io_runtime
+use std.spec.*
+use std.common.engine.ids.{NodeId}
+use std.nogc_sync_mut.engine.physics.config.{default_physics_config_2d, PhysicsConfig2D}
+use std.nogc_sync_mut.engine.physics.backend.{PhysicsBackend}
+use std.nogc_sync_mut.engine.physics.world2d.{PhysicsWorld2D}
+use std.common.engine.math2d.{Vec2}
+use std.nogc_sync_mut.engine.physics.collision_layers.{CollisionFilter}
+
+fn make_node(idx: i64) -> NodeId:
+    NodeId(raw: idx)
+
+fn zero_gravity_config() -> PhysicsConfig2D:
+    var config = default_physics_config_2d()
+    config.backend = PhysicsBackend.CpuScalar
+    config.gravity = Vec2(x: 0.0, y: 0.0)
+    config
+
+describe "PhysicsWorld2D collision filters + triggers":
+
+    it "backward compat: default filters/no-trigger produce the same contact as unfiltered behavior":
+        var world = PhysicsWorld2D.create(zero_gravity_config())
+        val a = make_node(1)
+        val b = make_node(2)
+        world.add_dynamic_body(a, 0.0, 0.0, 1.0)
+        world.add_circle_collider(a, 0.3)
+        world.add_dynamic_body(b, 0.2, 0.0, 1.0)
+        world.add_circle_collider(b, 0.3)
+        world.step(world.config.fixed_timestep)
+        expect(world.contact_count()).to_equal(1)
+        expect(world.get_trigger_events().len()).to_equal(0)
+        world.destroy()
+
+    it "masks-reject-pair: an incompatible category/mask pair produces NO contact":
+        var world = PhysicsWorld2D.create(zero_gravity_config())
+        val a = make_node(1)
+        val b = make_node(2)
+        world.add_dynamic_body(a, 0.0, 0.0, 1.0)
+        world.add_circle_collider(a, 0.3)
+        world.add_dynamic_body(b, 0.2, 0.0, 1.0)
+        world.add_circle_collider(b, 0.3)
+        world.set_collider_filter(a, CollisionFilter.with_mask(2, 2))
+        world.set_collider_filter(b, CollisionFilter.with_mask(4, 1))
+        val pos_a_before = world.get_position(a)
+        val pos_b_before = world.get_position(b)
+        world.step(world.config.fixed_timestep)
+        expect(world.contact_count()).to_equal(0)
+        val pos_a_after = world.get_position(a)
+        val pos_b_after = world.get_position(b)
+        expect(pos_a_after.x).to_equal(pos_a_before.x)
+        expect(pos_a_after.y).to_equal(pos_a_before.y)
+        expect(pos_b_after.x).to_equal(pos_b_before.x)
+        expect(pos_b_after.y).to_equal(pos_b_before.y)
+        world.destroy()
+
+    it "trigger-pair: an is_sensor collider emits a trigger event and does not push bodies apart":
+        var world = PhysicsWorld2D.create(zero_gravity_config())
+        val a = make_node(1)
+        val b = make_node(2)
+        world.add_dynamic_body(a, 0.0, 0.0, 1.0)
+        world.add_circle_collider(a, 0.3)
+        world.add_dynamic_body(b, 0.2, 0.0, 1.0)
+        world.add_circle_collider(b, 0.3)
+        world.set_trigger(b, true)
+        val pos_a_before = world.get_position(a)
+        val pos_b_before = world.get_position(b)
+        world.step(world.config.fixed_timestep)
+        expect(world.contact_count()).to_equal(0)
+        expect(world.get_trigger_events().len()).to_equal(1)
+        val pos_a_after = world.get_position(a)
+        val pos_b_after = world.get_position(b)
+        expect(pos_a_after.x).to_equal(pos_a_before.x)
+        expect(pos_a_after.y).to_equal(pos_a_before.y)
+        expect(pos_b_after.x).to_equal(pos_b_before.x)
+        expect(pos_b_after.y).to_equal(pos_b_before.y)
+        world.destroy()
+
+    it "BVH broadphase path (>4 colliders) applies the same filter/trigger wiring":
+        var world = PhysicsWorld2D.create(zero_gravity_config())
+        val a = make_node(1)
+        val b = make_node(2)
+        val c = make_node(3)
+        val d = make_node(4)
+        val e = make_node(5)
+        val f = make_node(6)
+        # pair (a,b): trigger — overlapping, b is a sensor
+        world.add_dynamic_body(a, 0.0, 0.0, 1.0)
+        world.add_circle_collider(a, 0.3)
+        world.add_dynamic_body(b, 0.2, 0.0, 1.0)
+        world.add_circle_collider(b, 0.3)
+        world.set_trigger(b, true)
+        # pair (c,d): masked-out — overlapping, incompatible category/mask
+        world.add_dynamic_body(c, 10.0, 0.0, 1.0)
+        world.add_circle_collider(c, 0.3)
+        world.add_dynamic_body(d, 10.2, 0.0, 1.0)
+        world.add_circle_collider(d, 0.3)
+        world.set_collider_filter(c, CollisionFilter.with_mask(2, 2))
+        world.set_collider_filter(d, CollisionFilter.with_mask(4, 1))
+        # pair (e,f): default — overlapping, solid contact expected
+        world.add_dynamic_body(e, 20.0, 0.0, 1.0)
+        world.add_circle_collider(e, 0.3)
+        world.add_dynamic_body(f, 20.2, 0.0, 1.0)
+        world.add_circle_collider(f, 0.3)
+        # 6 colliders > 4 => detect_contacts() routes through detect_contacts_bvh()
+        expect(world.colliders.count > 4).to_equal(true)
+        world.step(world.config.fixed_timestep)
+        expect(world.contact_count()).to_equal(1)
+        expect(world.get_trigger_events().len()).to_equal(1)
+        val pos_e = world.get_position(e)
+        val pos_f = world.get_position(f)
+        val e_f_differ = pos_e.x != pos_f.x
+        expect(e_f_differ).to_equal(true)
+        world.destroy()
