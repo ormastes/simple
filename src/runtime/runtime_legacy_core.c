@@ -312,24 +312,37 @@ char* spl_file_read(const char* path) {
     if (!path) return spl_str_new("");
     FILE* f = fopen(path, "rb");
     if (!f) return spl_str_new("");
-    if (fseek(f, 0, SEEK_END) != 0) {
-        fclose(f);
-        return spl_str_new("");
-    }
-    long len = ftell(f);
-    if (len < 0) len = 0;
-    if (fseek(f, 0, SEEK_SET) != 0) {
-        fclose(f);
-        return spl_str_new("");
-    }
-    char* out = (char*)malloc((size_t)len + 1);
+    /* Do NOT size the buffer from fseek(SEEK_END)/ftell(): pseudo-filesystems
+     * (procfs, sysfs, etc.) report length 0 for files that generate content
+     * on read, so a stat/seek-sized buffer reads zero bytes and silently
+     * "succeeds" with an empty string instead of the real content (e.g.
+     * spl_file_read("/proc/meminfo") always returned "" rather than the
+     * meminfo text). Read to EOF into a growable buffer instead. */
+    size_t cap = 4096;
+    size_t len = 0;
+    char* out = (char*)malloc(cap);
     if (!out) {
         fclose(f);
         return NULL;
     }
-    size_t n = fread(out, 1, (size_t)len, f);
+    for (;;) {
+        if (len >= cap - 1) {
+            size_t new_cap = cap * 2;
+            char* new_out = (char*)realloc(out, new_cap);
+            if (!new_out) {
+                free(out);
+                fclose(f);
+                return NULL;
+            }
+            out = new_out;
+            cap = new_cap;
+        }
+        size_t n = fread(out + len, 1, cap - 1 - len, f);
+        len += n;
+        if (n == 0) break;
+    }
     fclose(f);
-    out[n] = '\0';
+    out[len] = '\0';
     return out;
 }
 

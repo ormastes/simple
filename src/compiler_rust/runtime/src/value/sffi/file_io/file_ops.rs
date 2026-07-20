@@ -284,17 +284,20 @@ pub unsafe extern "C" fn rt_file_read_text(path_ptr: *const u8, path_len: u64) -
 
     match File::open(path) {
         Ok(mut file) => {
-            let len = stamp.len;
-            let Some(ptr) = alloc_runtime_string(len) else {
-                return RuntimeValue::NIL;
-            };
-            let data_ptr = ptr.add(1) as *mut u8;
-            let buf = std::slice::from_raw_parts_mut(data_ptr, len as usize);
-            if file.read_exact(buf).is_err() || std::str::from_utf8(buf).is_err() {
+            // Do NOT size the read buffer from `stamp.len` (stat(2) st_size):
+            // pseudo-filesystems (procfs, sysfs, etc.) report st_size == 0 for
+            // files that generate content on read, so a stat-sized buffer
+            // reads zero bytes and silently "succeeds" with an empty string
+            // instead of the real content (e.g. rt_file_read_text("/proc/meminfo")
+            // always returned "" rather than the meminfo text). Read to EOF
+            // instead, using the stat length only as a capacity hint.
+            let mut raw = Vec::with_capacity(stamp.len as usize);
+            if file.read_to_end(&mut raw).is_err() || std::str::from_utf8(&raw).is_err() {
                 return RuntimeValue::NIL;
             }
-            if buf.contains(&b'\r') {
-                let normalized: Vec<u8> = buf.iter().copied().filter(|byte| *byte != b'\r').collect();
+            let len = raw.len() as u64;
+            if raw.contains(&b'\r') {
+                let normalized: Vec<u8> = raw.iter().copied().filter(|byte| *byte != b'\r').collect();
                 let value = rt_string_new_with_len_hash(normalized.as_ptr(), normalized.len() as u64);
                 if let Ok(mut guard) = read_text_cache().lock() {
                     *guard = Some(ReadTextCache {
@@ -305,6 +308,11 @@ pub unsafe extern "C" fn rt_file_read_text(path_ptr: *const u8, path_len: u64) -
                 }
                 return value;
             }
+            let Some(ptr) = alloc_runtime_string(len) else {
+                return RuntimeValue::NIL;
+            };
+            let data_ptr = ptr.add(1) as *mut u8;
+            std::ptr::copy_nonoverlapping(raw.as_ptr(), data_ptr, len as usize);
             (*ptr).hash = len;
             let value = RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader);
             if let Ok(mut guard) = read_text_cache().lock() {
