@@ -146,3 +146,93 @@ duplicates already covered by the same numeric range — i.e. every
 `test/unit/app/branch_coverage_N_spec.spl` file in the repo (50 files at time
 of writing, all byte-identical). 3 failures each, 150 failures total, one
 root cause.
+
+## Third affected cluster: `test/unit/lib/database/database_core_spec.spl` (whole-suite unit triage, 2026-07-20)
+
+Same root confirmed via minimal isolated repro (`bin/simple test` on a
+throwaway spec with a local `fn lookup(has: bool): if has: return
+Some("hello") \n nil` + `expect(r.?).to_equal(true/false)` — passes under
+`bin/simple run` printing `true`/`false` correctly, fails under `bin/simple
+test` with `expected hello to equal true` / `expected nil to equal false`).
+Confirms the defect is specifically `test`-evaluator-scoped, not just
+scale-dependent as originally hedged above.
+
+`database_core_spec.spl` locally defines `StringInterner`/`SdnRow`/
+`SdnTable`/`SdnDatabase` stub classes whose `lookup`/`get`/`get_row`/
+`get_table` methods return `Some(x)` or bare `nil` (the same
+loop-or-if/fall-through-to-nil idiom). Every `it` block that asserts
+`expect(result.?).to_equal(true/false)` then `expect(result?).to_equal(...)`
+fails the first assertion with the identity-passthrough symptom (e.g.
+`expected lookup_test to equal true`, `expected nil to equal false`,
+`expected 42 to equal true`, `expected SdnRow(...) to equal true`) — 18+ of
+the file's examples across 5 sub-groups. Left unmodified per the "never
+weaken an assertion" rule; all assertions are the officially-prescribed `.?`
+idiom and correct as written.
+
+**Sibling specs likely sharing this root (same `test/unit/lib/database/`
+directory, not individually re-verified in this pass — check for the same
+`.?`-after-Option-return idiom before filing separately):**
+`database_feature_utils_spec.spl`, `sql/sql_codec_spec.spl`,
+`sql/sql_connection_spec.spl`, `sql/sql_interceptor_spec.spl`,
+`sql/sql_migration_spec.spl`, `sql/sql_repository_spec.spl`,
+`sql/sql_statement_spec.spl`, `sql/sql_stmt_cache_spec.spl`,
+`sql/sql_transaction_spec.spl`, `sql/sql_types_spec.spl`.
+
+Directly re-verified: `test/unit/lib/database/sql/sql_codec_spec.spl`
+("encodes entity to DbValue array" — `expect(age_val.?).to_equal(true)` sees
+`30`, matches the same identity-passthrough symptom).
+
+## Fourth affected cluster: `test/unit/lib/common/auto_comprehensive_N_spec.spl` (whole-suite `lib/common` triage, 2026-07-20)
+
+All 30 files (`auto_comprehensive_1_spec.spl` .. `auto_comprehensive_30_spec.spl`)
+are byte-identical (`md5sum` confirms 1 unique hash across all 30). Each
+fails the identical 2 of 30 examples, same root:
+- `"dict coverage 2"` (line 79): `check(d.get("key").? == true)` —
+  `.?` on the present-key lookup passes the string `"value"` through instead
+  of converting to `true` → `expected false to equal true` (the `== true`
+  comparison against the passed-through string evaluates false).
+- `"option coverage 1"` (line 84): `check(opt.?)` on `Some(42)` → `expected
+  42 to equal true`.
+
+Left unmodified (both are the officially-prescribed `.?` idiom, correct as
+written) per the "never weaken an assertion" rule.
+
+**Affected specs:** every `test/unit/lib/common/auto_comprehensive_N_spec.spl`
+for N in 1..30 (30 files, 2 failures each, 60 failures total, one root
+cause).
+
+## Fifth affected cluster: `test/unit/lib/common/hpack/static_table_spec.spl`
+
+2 of 18 examples, same root: `"index 1 is :authority with empty value"`
+(`expect(e.?).to_equal(true)` on `hpack_static_lookup(1)` returning
+`Some(StaticEntry(...))` → `expected StaticEntry(value: , name: :authority)
+to equal true`) and `"out-of-range indices return nil"`
+(`expect(hpack_static_lookup(0).?).to_equal(false)` → `expected nil to
+equal false`). Left unmodified.
+
+### Related second symptom, same root cause: `?` Try-operator on a
+propagated bare-`nil` throws instead of short-circuiting
+
+`sql_codec_spec.spl`'s "returns error for missing columns" example fails
+differently — not `.?`, but a hard error:
+`semantic: invalid operation: ? operator requires Result or Option type, got
+nil`. Traced to `src/lib/nogc_sync_mut/database/sql/types.spl:137-139`:
+
+```simple
+fn get_text(column: text) -> text?:
+    val v = self.get(column)?
+    v.as_text()
+```
+
+where `DbRow.get(column)` (line 131-135) is the exact same
+loop-return-Some-or-fall-through-to-`nil` idiom already implicated above. When
+`get(column)` falls through to bare `nil`, the interpreter's `nil` here has
+lost its Option tag by the time `get_text`'s `?` Try-operator inspects it, so
+instead of short-circuiting `get_text` to `nil` (the correct Option
+propagation semantics), the Try-operator's type check rejects it outright.
+Same underlying defect class (bare-`nil` fallthrough not retaining Option
+identity under the `test` evaluator) as the `.?` passthrough above, just a
+different consumer operator surfacing a harder failure (semantic error
+instead of a silently wrong boolean). Not re-filed as a separate doc — same
+root, needs the same interpreter-side fix. `src/lib/**` not modified (out of
+triage scope; this is upstream stdlib code, not a test-spec edit).
