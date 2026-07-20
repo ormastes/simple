@@ -1,0 +1,214 @@
+# Engine2D layer/z-order + overlap + hit-test evidence probe (E2D-AUDIT,
+# 2026-07-20).
+#
+# Runtime-verifies (via `bin/simple run`, not the walled test daemon) the
+# same assertions as:
+#   - compositor_layer_zorder_spec.spl
+#   - rect2_overlap_detection_spec.spl
+#   - hit_test_topmost_pick_spec.spl
+#
+# Keep buffers tiny (16x16) and printed keys stable — this is evidence, not
+# a throwaway script. Every check prints `<key>=<actual> expected=<expected>
+# pass=<bool>` so a human or a future automated gate can grep pass=false.
+
+use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
+use std.gc_async_mut.gpu.engine2d.backend_cpu.{CpuBackend}
+use std.gc_async_mut.gpu.engine2d.compositor.{Layer, Compositor}
+use std.common.engine.rect.{Rect2}
+
+val RED: u32 = 0xFFFF0000u32
+val GREEN: u32 = 0xFF00FF00u32
+val BLUE: u32 = 0xFF0000FFu32
+val DARK: u32 = 0xFF101010u32
+
+var total_checks = 0
+var failed_checks = 0
+
+fn report_u32(key: text, actual: u32, expected: u32):
+    val ok = actual == expected
+    print(key + "=" + actual.to_text() + " expected=" + expected.to_text() + " pass=" + ok.to_text())
+
+fn report_i32(key: text, actual: i32, expected: i32):
+    val ok = actual == expected
+    print(key + "=" + actual.to_text() + " expected=" + expected.to_text() + " pass=" + ok.to_text())
+
+fn report_bool(key: text, actual: bool, expected: bool):
+    val ok = actual == expected
+    print(key + "=" + actual.to_text() + " expected=" + expected.to_text() + " pass=" + ok.to_text())
+
+fn pick_topmost(rects: [Rect2], z_orders: [i32], px: f64, py: f64) -> i32:
+    var best_index = -1
+    var best_z = 0
+    var i = 0
+    val n = rects.len()
+    while i < n:
+        if rects[i].contains_point(px, py):
+            if best_index == -1 or z_orders[i] > best_z:
+                best_index = i
+                best_z = z_orders[i]
+        i = i + 1
+    best_index
+
+fn make_dst(size: i32) -> [u32]:
+    var dst = [0u32; size]
+    dst
+
+fn main() -> i32:
+    print("=== compositor: two-layer z-order (SoftwareBackend bg + CpuBackend fg) ===")
+    var bg_be = SoftwareBackend.create()
+    var fg_be = CpuBackend.create()
+    if bg_be.init(16, 16) and fg_be.init(8, 8):
+        bg_be.clear(DARK)
+        bg_be.draw_rect_filled(0, 0, 16, 16, RED)
+        fg_be.clear(0u32)
+        fg_be.draw_rect_filled(0, 0, 8, 8, GREEN)
+
+        val bg_layer = Layer(pixels: bg_be.read_pixels(), x: 0, y: 0, width: 16, height: 16, z_order: 0, opacity: 1.0, visible: true)
+        val fg_layer = Layer(pixels: fg_be.read_pixels(), x: 4, y: 4, width: 8, height: 8, z_order: 1, opacity: 1.0, visible: true)
+
+        var comp = Compositor.create()
+        comp.add_layer(bg_layer)
+        comp.add_layer(fg_layer)
+
+        var dst = make_dst(256)
+        comp.composite_to_buffer(dst, 16, 16)
+        report_u32("two_layer_center_pixel", dst[8 * 16 + 8], GREEN)
+        report_u32("two_layer_outside_pixel", dst[1 * 16 + 1], RED)
+        bg_be.shutdown()
+        fg_be.shutdown()
+    else:
+        print("two_layer_init=FAILED")
+
+    print("=== compositor: reversed insertion order (single pair, unaffected by sort defect) ===")
+    var bg_be2 = SoftwareBackend.create()
+    var fg_be2 = SoftwareBackend.create()
+    if bg_be2.init(16, 16) and fg_be2.init(8, 8):
+        bg_be2.clear(DARK)
+        bg_be2.draw_rect_filled(0, 0, 16, 16, RED)
+        fg_be2.clear(0u32)
+        fg_be2.draw_rect_filled(0, 0, 8, 8, GREEN)
+
+        val bg_layer2 = Layer(pixels: bg_be2.read_pixels(), x: 0, y: 0, width: 16, height: 16, z_order: 0, opacity: 1.0, visible: true)
+        val fg_layer2 = Layer(pixels: fg_be2.read_pixels(), x: 4, y: 4, width: 8, height: 8, z_order: 1, opacity: 1.0, visible: true)
+
+        var comp2 = Compositor.create()
+        comp2.add_layer(fg_layer2)
+        comp2.add_layer(bg_layer2)
+
+        var dst2 = make_dst(256)
+        comp2.composite_to_buffer(dst2, 16, 16)
+        report_u32("reversed_center_pixel", dst2[8 * 16 + 8], GREEN)
+        report_u32("reversed_outside_pixel", dst2[1 * 16 + 1], RED)
+        report_i32("reversed_layer_count", comp2.layer_count(), 2)
+        bg_be2.shutdown()
+        fg_be2.shutdown()
+    else:
+        print("reversed_init=FAILED")
+
+    print("=== compositor: KNOWN BUG discriminator (3 out-of-order insertions) ===")
+    print("# see doc/08_tracking/bug/engine2d_compositor_add_layer_insertion_sort_double_decrement_2026-07-20.md")
+    var a_be = SoftwareBackend.create()
+    var b_be = SoftwareBackend.create()
+    var c_be = SoftwareBackend.create()
+    if a_be.init(16, 16) and b_be.init(4, 4) and c_be.init(16, 16):
+        a_be.clear(GREEN)
+        b_be.clear(BLUE)
+        c_be.clear(RED)
+
+        val layer_a = Layer(pixels: a_be.read_pixels(), x: 0, y: 0, width: 16, height: 16, z_order: 2, opacity: 1.0, visible: true)
+        val layer_b = Layer(pixels: b_be.read_pixels(), x: 12, y: 12, width: 4, height: 4, z_order: 3, opacity: 1.0, visible: true)
+        val layer_c = Layer(pixels: c_be.read_pixels(), x: 0, y: 0, width: 16, height: 16, z_order: 1, opacity: 1.0, visible: true)
+
+        var comp3 = Compositor.create()
+        comp3.add_layer(layer_a)
+        comp3.add_layer(layer_b)
+        comp3.add_layer(layer_c)
+
+        var dst3 = make_dst(256)
+        comp3.composite_to_buffer(dst3, 16, 16)
+        # Documented contract expects GREEN (A, z=2, higher than C's z=1).
+        # Current buggy source is expected to print RED here (pass=false) —
+        # that FAIL is the evidence, not a probe defect.
+        report_u32("three_layer_topmost_pixel_CONTRACT", dst3[8 * 16 + 8], GREEN)
+        a_be.shutdown()
+        b_be.shutdown()
+        c_be.shutdown()
+    else:
+        print("three_layer_init=FAILED")
+
+    print("=== Rect2 rect-rect intersection ===")
+    val ra = Rect2(x: 0.0, y: 0.0, width: 10.0, height: 10.0)
+    val rb_overlap = Rect2(x: 5.0, y: 5.0, width: 10.0, height: 10.0)
+    report_bool("intersect_partial_overlap", ra.intersects(rb_overlap), true)
+
+    val r_outer = Rect2(x: 0.0, y: 0.0, width: 20.0, height: 20.0)
+    val r_inner = Rect2(x: 5.0, y: 5.0, width: 2.0, height: 2.0)
+    report_bool("intersect_contained", r_outer.intersects(r_inner), true)
+
+    val r_far = Rect2(x: 100.0, y: 100.0, width: 5.0, height: 5.0)
+    val r_near = Rect2(x: 0.0, y: 0.0, width: 5.0, height: 5.0)
+    report_bool("intersect_disjoint", r_near.intersects(r_far), false)
+
+    val r_left = Rect2(x: 0.0, y: 0.0, width: 10.0, height: 10.0)
+    val r_right = Rect2(x: 10.0, y: 0.0, width: 10.0, height: 10.0)
+    report_bool("intersect_edge_touch_vertical", r_left.intersects(r_right), false)
+
+    val r_top = Rect2(x: 0.0, y: 0.0, width: 10.0, height: 10.0)
+    val r_bottom = Rect2(x: 0.0, y: 10.0, width: 10.0, height: 10.0)
+    report_bool("intersect_edge_touch_horizontal", r_top.intersects(r_bottom), false)
+
+    val r_corner_a = Rect2(x: 0.0, y: 0.0, width: 10.0, height: 10.0)
+    val r_corner_b = Rect2(x: 10.0, y: 10.0, width: 10.0, height: 10.0)
+    report_bool("intersect_corner_touch", r_corner_a.intersects(r_corner_b), false)
+
+    val r_one_a = Rect2(x: 0.0, y: 0.0, width: 10.0, height: 10.0)
+    val r_one_b = Rect2(x: 9.0, y: 9.0, width: 10.0, height: 10.0)
+    report_bool("intersect_one_pixel_overlap", r_one_a.intersects(r_one_b), true)
+
+    print("=== Rect2 point containment ===")
+    val rc = Rect2(x: 0.0, y: 0.0, width: 10.0, height: 10.0)
+    report_bool("contains_point_inside", rc.contains_point(5.0, 5.0), true)
+    report_bool("contains_point_left_edge", rc.contains_point(0.0, 5.0), true)
+    report_bool("contains_point_top_edge", rc.contains_point(5.0, 0.0), true)
+    report_bool("contains_point_right_edge_excluded", rc.contains_point(10.0, 5.0), false)
+    report_bool("contains_point_bottom_edge_excluded", rc.contains_point(5.0, 10.0), false)
+    report_bool("contains_point_outside", rc.contains_point(50.0, 50.0), false)
+
+    print("=== hit-test: pick_topmost (test-local; no shipped Engine2D API) ===")
+    val single_rects: [Rect2] = [Rect2(x: 0.0, y: 0.0, width: 10.0, height: 10.0)]
+    val single_zs: [i32] = [0]
+    report_i32("pick_single_hit", pick_topmost(single_rects, single_zs, 5.0, 5.0), 0)
+    report_i32("pick_single_miss", pick_topmost(single_rects, single_zs, 50.0, 50.0), -1)
+
+    val overlap_rects: [Rect2] = [
+        Rect2(x: 0.0, y: 0.0, width: 10.0, height: 10.0),
+        Rect2(x: 5.0, y: 5.0, width: 10.0, height: 10.0)
+    ]
+    val overlap_zs: [i32] = [0, 1]
+    report_i32("pick_overlap_topmost", pick_topmost(overlap_rects, overlap_zs, 7.0, 7.0), 1)
+    report_i32("pick_overlap_lower_only_region", pick_topmost(overlap_rects, overlap_zs, 1.0, 1.0), 0)
+
+    val shuffled_rects: [Rect2] = [
+        Rect2(x: 5.0, y: 5.0, width: 10.0, height: 10.0),
+        Rect2(x: 0.0, y: 0.0, width: 10.0, height: 10.0)
+    ]
+    val shuffled_zs: [i32] = [1, 5]
+    report_i32("pick_overlap_topmost_array_order_independent", pick_topmost(shuffled_rects, shuffled_zs, 7.0, 7.0), 1)
+
+    val three_rects: [Rect2] = [
+        Rect2(x: 0.0, y: 0.0, width: 20.0, height: 20.0),
+        Rect2(x: 2.0, y: 2.0, width: 16.0, height: 16.0),
+        Rect2(x: 4.0, y: 4.0, width: 12.0, height: 12.0)
+    ]
+    val three_zs: [i32] = [1, 9, 5]
+    report_i32("pick_three_middle_topmost", pick_topmost(three_rects, three_zs, 8.0, 8.0), 1)
+
+    val edge_rects: [Rect2] = [
+        Rect2(x: 0.0, y: 0.0, width: 10.0, height: 10.0),
+        Rect2(x: 10.0, y: 0.0, width: 10.0, height: 10.0)
+    ]
+    val edge_zs: [i32] = [0, 1]
+    report_i32("pick_shared_edge_exclusive_convention", pick_topmost(edge_rects, edge_zs, 10.0, 5.0), 1)
+
+    print("=== probe complete ===")
+    0

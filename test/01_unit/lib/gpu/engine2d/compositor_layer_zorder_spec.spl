@@ -1,0 +1,136 @@
+"""Engine2D Compositor Layer Z-Order Specification
+
+@tag: gpu, engine2d, compositor, layers, z-order
+
+Audit tranche (E2D-AUDIT, 2026-07-20): first hosted-runnable coverage for
+`std.gc_async_mut.gpu.engine2d.compositor.{Layer, Compositor}` — the only
+layer/z-order compositing primitive in the Engine2D tree. No prior spec
+covered this file (grep of test/ found zero `compositor_spec.spl` before this
+tranche).
+
+Layer pixel buffers are produced by real `SoftwareBackend` and `CpuBackend`
+`RenderBackend` implementations (`draw_rect_filled` + `read_pixels()`), then
+handed to `Compositor` for layer compositing — so this also exercises the
+CPU/Software backend raster path feeding into layer compositing. Note:
+`CpuBackend` delegates internally to `SoftwareBackend` (same raster code), so
+this is NOT independent two-backend coverage; it documents that both façades
+produce identical, compositor-consumable pixel buffers.
+
+All colors used are fully opaque (alpha=0xFF) so `blend()` reduces to
+`return src` (Porter-Duff src-over degenerates to a plain overwrite at
+alpha=255) — pixel asserts below are exact overwrite checks, not
+alpha-math checks.
+
+The third `it` block is an honest XFAIL: it asserts the *documented* z-order
+contract (higher z_order visually on top) against a 3-layer, out-of-order
+insertion sequence that trips a real defect in `Compositor.add_layer`'s
+insertion sort (double-decrements the scan index on every swap, skipping a
+comparison). See
+doc/08_tracking/bug/engine2d_compositor_add_layer_insertion_sort_double_decrement_2026-07-20.md.
+Under current source this assertion does NOT hold — this is intentional and
+documents the contract, not the bug. Verified by hand-trace and by the
+companion runtime probe
+(test/01_unit/lib/gpu/engine2d/probe_layer_overlap_hit_test.spl); the spec
+`it` block itself could not be executed via the walled test daemon this pass
+(recorded as DAEMON-TIMEOUT).
+"""
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
+use std.gc_async_mut.gpu.engine2d.backend_cpu.{CpuBackend}
+use std.gc_async_mut.gpu.engine2d.compositor.{Layer, Compositor}
+
+val RED: u32 = 0xFFFF0000u32
+val GREEN: u32 = 0xFF00FF00u32
+val BLUE: u32 = 0xFF0000FFu32
+val DARK: u32 = 0xFF101010u32
+
+fn make_dst(size: i32) -> [u32]:
+    var dst = [0u32; size]
+    dst
+
+describe "Compositor layer z-order compositing":
+    it "two layers: higher z_order wins in the overlap region (SoftwareBackend bg + CpuBackend fg)":
+        var bg_be = SoftwareBackend.create()
+        var fg_be = CpuBackend.create()
+        if bg_be.init(16, 16) and fg_be.init(8, 8):
+            bg_be.clear(DARK)
+            bg_be.draw_rect_filled(0, 0, 16, 16, RED)
+            fg_be.clear(0u32)
+            fg_be.draw_rect_filled(0, 0, 8, 8, GREEN)
+
+            val bg_layer = Layer(pixels: bg_be.read_pixels(), x: 0, y: 0, width: 16, height: 16, z_order: 0, opacity: 1.0, visible: true)
+            val fg_layer = Layer(pixels: fg_be.read_pixels(), x: 4, y: 4, width: 8, height: 8, z_order: 1, opacity: 1.0, visible: true)
+
+            var comp = Compositor.create()
+            comp.add_layer(bg_layer)
+            comp.add_layer(fg_layer)
+
+            var dst = make_dst(256)
+            comp.composite_to_buffer(dst, 16, 16)
+
+            expect(dst[8 * 16 + 8]).to_equal(GREEN)
+            expect(dst[1 * 16 + 1]).to_equal(RED)
+            bg_be.shutdown()
+            fg_be.shutdown()
+
+    it "two layers: reversed add_layer order still sorts correctly (single-pair insertion is not affected by the sort defect)":
+        var bg_be = SoftwareBackend.create()
+        var fg_be = SoftwareBackend.create()
+        if bg_be.init(16, 16) and fg_be.init(8, 8):
+            bg_be.clear(DARK)
+            bg_be.draw_rect_filled(0, 0, 16, 16, RED)
+            fg_be.clear(0u32)
+            fg_be.draw_rect_filled(0, 0, 8, 8, GREEN)
+
+            val bg_layer = Layer(pixels: bg_be.read_pixels(), x: 0, y: 0, width: 16, height: 16, z_order: 0, opacity: 1.0, visible: true)
+            val fg_layer = Layer(pixels: fg_be.read_pixels(), x: 4, y: 4, width: 8, height: 8, z_order: 1, opacity: 1.0, visible: true)
+
+            var comp = Compositor.create()
+            # Added in DESCENDING z_order this time (fg before bg).
+            comp.add_layer(fg_layer)
+            comp.add_layer(bg_layer)
+
+            var dst = make_dst(256)
+            comp.composite_to_buffer(dst, 16, 16)
+
+            expect(dst[8 * 16 + 8]).to_equal(GREEN)
+            expect(dst[1 * 16 + 1]).to_equal(RED)
+            expect(comp.layer_count()).to_equal(2)
+            bg_be.shutdown()
+            fg_be.shutdown()
+
+    it "XFAIL bug engine2d_compositor_add_layer_insertion_sort_double_decrement: three out-of-order insertions break topmost-wins":
+        var a_be = SoftwareBackend.create()
+        var b_be = SoftwareBackend.create()
+        var c_be = SoftwareBackend.create()
+        if a_be.init(16, 16) and b_be.init(4, 4) and c_be.init(16, 16):
+            a_be.clear(GREEN)
+            b_be.clear(BLUE)
+            c_be.clear(RED)
+
+            # A: z_order=2, full 16x16 GREEN.
+            val layer_a = Layer(pixels: a_be.read_pixels(), x: 0, y: 0, width: 16, height: 16, z_order: 2, opacity: 1.0, visible: true)
+            # B: z_order=3, 4x4 BLUE tucked in the far corner — never covers
+            # the (8,8) test pixel, isolating the A/C interaction below.
+            val layer_b = Layer(pixels: b_be.read_pixels(), x: 12, y: 12, width: 4, height: 4, z_order: 3, opacity: 1.0, visible: true)
+            # C: z_order=1, full 16x16 RED (lower z_order than A; per the
+            # documented contract A should render on top of C everywhere).
+            val layer_c = Layer(pixels: c_be.read_pixels(), x: 0, y: 0, width: 16, height: 16, z_order: 1, opacity: 1.0, visible: true)
+
+            var comp = Compositor.create()
+            # Insertion order A, B, C is the exact trace in the bug doc that
+            # leaves C behind A instead of in front of it.
+            comp.add_layer(layer_a)
+            comp.add_layer(layer_b)
+            comp.add_layer(layer_c)
+
+            var dst = make_dst(256)
+            comp.composite_to_buffer(dst, 16, 16)
+
+            # Contract: A (z=2) is above C (z=1) everywhere they overlap, so
+            # (8,8) — covered by both A and C, not by B — must be GREEN.
+            expect(dst[8 * 16 + 8]).to_equal(GREEN)
+            a_be.shutdown()
+            b_be.shutdown()
+            c_be.shutdown()
