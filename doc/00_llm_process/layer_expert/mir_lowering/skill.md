@@ -74,6 +74,20 @@ registry hunk presence. After any expr_dispatch refactor, re-verify:
    body). Local dict indexing erases to ANY. See
    [doc/00_llm_process/feature_expert/codegen_ambiguous_method/skill.md](../../feature_expert/codegen_ambiguous_method/skill.md).
 
+3. **Empty-literal element-type erasure:** `var d = {}` / `var a = []` fix the
+   container's MIR element type at the i64 default; stores box by VALUE type
+   but reads/print/`==` decode by CONTAINER type, so a later f64 store leaked
+   the heap-box pointer as an int. `runtime_elem_value_type` (id-keyed, reset
+   with `runtime_dict_locals`) records the store-observed F64/F32 type; reads
+   consult it only when the static element type is the erased i64 default
+   (see `note_container_elem_type` in expr_dispatch.spl). Text values through
+   the same path SIGSEGV — pre-existing, see
+   `doc/08_tracking/bug/native_empty_dict_text_value_sigsegv_2026-07-20.md`.
+4. **Never hand-duplicate the `MirLowering(...)` ctor** (driver_pipeline did,
+   twice): the seed interpreter silently nil-fills omitted struct-init fields,
+   so a drifted copy crashes with `method has not found on type nil` — native
+   path only. Always call `MirLowering.new_for_target`.
+
 ## Update Rule
 
 After changes to method lowering, array handling, or runtime_array_locals

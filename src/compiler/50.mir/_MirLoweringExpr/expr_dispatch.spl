@@ -381,6 +381,17 @@ impl MirLowering:
             self.runtime_value_locals[boxed.id] = true
         boxed
 
+    # Record the f64/f32 type of a value stored into a container whose
+    # declared element type may be the erased i64 default (empty `{}`/`[]`
+    # literal). Reads consult runtime_elem_value_type so decode takes the
+    # rt_value_as_float arm instead of shredding the heap-box ptr via `>>3`.
+    me note_container_elem_type(container: LocalId, value_local: LocalId):
+        val vt = self.local_mir_type_of(value_local)
+        if vt != nil:
+            val vt_disc = rt_enum_discriminant(vt.kind)
+            if vt_disc == rt_enum_discriminant(MirTypeKind.F64) or vt_disc == rt_enum_discriminant(MirTypeKind.F32):
+                self.runtime_elem_value_type[container.id] = vt
+
     me decode_runtime_value(raw: LocalId, result_type: MirType) -> LocalId:
         var b = self.builder
         val disc = rt_enum_discriminant(result_type.kind)
@@ -1794,6 +1805,12 @@ impl MirLowering:
                             case Dict(_, value_type):
                                 dict_result_type = self.lower_type(value_type)
                             case _: ()
+                    # Store-side refinement: an empty `{}` literal fixes the
+                    # declared value type at the i64 default, so an f64 stored
+                    # later would decode via the integer `>>3` arm and leak the
+                    # heap-box POINTER. Use the store-observed type instead.
+                    if rt_enum_discriminant(dict_result_type.kind) == rt_enum_discriminant(MirTypeKind.I64) and self.runtime_elem_value_type.has(base_local.id):
+                        dict_result_type = self.runtime_elem_value_type[base_local.id]
                     val get_op = MirOperand(kind: MirOperandKind.Const(
                         MirConstValue.Str("rt_dict_get"),
                         MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
@@ -1892,6 +1909,12 @@ impl MirLowering:
                     if val expr_type = expr_value.type_:
                         if expr_type != nil:
                             result_type = self.lower_type(expr_type)
+                # Store-side refinement (mirror of the dict read above): an
+                # empty `[]` literal fixes the element type at the i64 default;
+                # a later `a.push(0.1)` / `a[i] = 0.1` heap-boxes, so decoding
+                # as i64 would shred the box pointer via `>>3`.
+                if rt_enum_discriminant(result_type.kind) == rt_enum_discriminant(MirTypeKind.I64) and self.runtime_elem_value_type.has(base_local.id):
+                    result_type = self.runtime_elem_value_type[base_local.id]
                 val runtime_array = self.local_is_runtime_array(base_local)
                 if runtime_array or (mir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
                     val getter = MirOperand(kind: MirOperandKind.Const(

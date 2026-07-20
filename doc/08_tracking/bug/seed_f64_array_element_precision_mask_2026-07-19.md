@@ -15,16 +15,36 @@
 > and `test/03_system/native/array_f64_element_precision.spl` (native-build,
 > array element + dict value).
 >
-> **Two native-build cases stay open — blocked by SEPARATE pre-existing defects,
-> NOT by float precision** (each verified to fail identically on a clean
+> **UPDATE 2026-07-20 (later):** the struct-f64-field native case is now
+> RESOLVED — the blocking struct-construct BUILDFAIL was root-fixed in
+> `0faa51502fd`
+> ([native_build_entry_struct_construction_buildfail_2026-07-20](native_build_entry_struct_construction_buildfail_2026-07-20.md)),
+> and `Q(v: 0.1); q.v == 0.1` → rc 30 verified on native-build at origin tip.
+>
+> **One native-build case stays open — blocked by a SEPARATE pre-existing
+> defect, NOT by float precision** (verified to fail identically on a clean
 > origin-tip worktree without the port):
-> - struct with an f64 field: `native-build --entry` BUILDFAILs on any local
->   struct construction (`method has not found on nil`); reproduces with an i64
->   field too, so not float-related —
->   [native_build_entry_struct_construction_buildfail_2026-07-20](native_build_entry_struct_construction_buildfail_2026-07-20.md).
 > - `f64?` Option payload via `.?`: the native `.?`/if-val unwrap leaks the Some
 >   tag, not the payload (wrong for `i64? = 7` too) —
 >   [hosted_native_option_try_unwrap_payload_leak_2026-07-19](hosted_native_option_try_unwrap_payload_leak_2026-07-19.md).
+>
+> **UPDATE 2026-07-20 (hardening sweep):** two store-side gaps found:
+> - NATIVE (FIXED): empty `{}`/`[]` literals fix the element type at the i64
+>   default, so a later f64 store heap-boxed but the read decoded via the
+>   integer `>>3` arm and leaked the box POINTER (`var d = {}; d["k"] = 0.1`
+>   printed 13668775811778). Fixed via `MirLowering.runtime_elem_value_type`
+>   store-observed-type side-table (`expr_dispatch.spl` / `mir_lowering_stmts.spl`
+>   / `method_calls_literals.spl`); guarded by rc-30 repros for f64 + i64 +
+>   mixed-order f64/int through the same path. (A TEXT value through the same
+>   empty-dict path SIGSEGVs — pre-existing at clean origin tip, same fault
+>   site, unrelated to this fix:
+>   [native_empty_dict_text_value_sigsegv_2026-07-20](native_empty_dict_text_value_sigsegv_2026-07-20.md).)
+> - INTERP (`run`/`test`, Rust `simple_runtime` — STILL OPEN, needs seed
+>   rebuild/redeploy): `a.push(0.1)` and `a[i] = 0.1` still inline-BoxFloat and
+>   mask the low 3 mantissa bits (read back 0.09999999999999998, rc 40); dict
+>   literal AND `d[k] = 0.1` store are lossless there. The `aa7ae5506c6`
+>   heap-box covered literal construction and reads but not these two array
+>   store sites.
 >
 > The historical root analysis below is retained for reference.
 
@@ -47,7 +67,7 @@
 # f64 loses low 3 mantissa bits through a RuntimeValue tagged slot (arrays/dicts) — inline tagged-float box
 
 - **id:** seed_f64_array_element_precision_mask_2026-07-19
-- **status:** resolved 2026-07-20 (both paths, array/dict/scalar/for-in/print; struct-field & Option-payload native cases blocked by separate pre-existing bugs — see top banner)
+- **status:** resolved 2026-07-20 (both paths, array/dict/scalar/for-in/print/struct-field; only the Option-payload native case remains blocked by a separate pre-existing bug — see top banner)
 - **severity:** high (silent miscompile — any `[f64]` element read back wrong)
 - **class:** tag-box `<<3`/`>>3` — the **store-side, representation-level** cousin
   of the enum-payload f64 mask fixed in `fc7cdcb0b90`. NOT the same shape of fix.
