@@ -34,12 +34,28 @@ struct DrawIrDiffReport:
     removed_count: i32
     diffs: [DrawIrNodeDiff]
 
-fn _draw_ir_find_command(composition: DrawIrComposition, component_id: text) -> DrawIrCommand?:
+# Stable component_id -> flat-index map for a composition, built once so
+# repeated by-id lookups (diff, patch) are O(1) instead of a nested
+# batch/command linear scan. First occurrence wins on duplicate ids, which
+# matches the prior linear-scan-in-iteration-order semantics.
+struct DrawIrCommandIndex:
+    commands: [DrawIrCommand]
+    id_to_index: Dict<text, i64>
+
+fn draw_ir_build_command_index(composition: DrawIrComposition) -> DrawIrCommandIndex:
+    var commands: [DrawIrCommand] = []
+    var id_to_index: Dict<text, i64> = {}
     for batch in composition.batches:
         for command in batch.commands:
-            if command.component_id == component_id:
-                return command
-    nil
+            if not id_to_index.has(command.component_id):
+                id_to_index[command.component_id] = commands.len()
+            commands.push(command)
+    DrawIrCommandIndex(commands: commands, id_to_index: id_to_index)
+
+fn draw_ir_command_index_find(index: DrawIrCommandIndex, component_id: text) -> DrawIrCommand?:
+    if not index.id_to_index.has(component_id):
+        return nil
+    index.commands[index.id_to_index[component_id]]
 
 fn _draw_ir_rect_changed(a: DrawIrRect, b: DrawIrRect) -> bool:
     if a.present != b.present:
@@ -161,14 +177,11 @@ fn _draw_ir_diff_placeholder() -> DrawIrNodeDiff:
         text_bounds_changed: false
     )
 
-fn _draw_ir_diff_count(baseline: DrawIrComposition, current: DrawIrComposition) -> i32:
-    var count = 0
-    for batch in current.batches:
-        for command in batch.commands:
-            count = count + 1
+fn _draw_ir_diff_count(baseline: DrawIrComposition, current_index: DrawIrCommandIndex) -> i32:
+    var count = current_index.commands.len()
     for batch in baseline.batches:
         for command in batch.commands:
-            if _draw_ir_find_command(current, command.component_id) == nil:
+            if draw_ir_command_index_find(current_index, command.component_id) == nil:
                 count = count + 1
     count
 
@@ -217,7 +230,9 @@ fn _draw_ir_diff_report(
     )
 
 fn draw_ir_diff_compositions(baseline: DrawIrComposition, current: DrawIrComposition) -> DrawIrDiffReport:
-    val diff_count = _draw_ir_diff_count(baseline, current)
+    val baseline_index = draw_ir_build_command_index(baseline)
+    val current_index = draw_ir_build_command_index(current)
+    val diff_count = _draw_ir_diff_count(baseline, current_index)
     if diff_count == 0:
         return DrawIrDiffReport(
             baseline_id: baseline.composition_id,
@@ -235,7 +250,7 @@ fn draw_ir_diff_compositions(baseline: DrawIrComposition, current: DrawIrComposi
     var removed_count = 0
     for batch in current.batches:
         for command in batch.commands:
-            val base = _draw_ir_find_command(baseline, command.component_id)
+            val base = draw_ir_command_index_find(baseline_index, command.component_id)
             val diff = if base == nil:
                 _draw_ir_added_diff(command)
             else:
@@ -250,7 +265,7 @@ fn draw_ir_diff_compositions(baseline: DrawIrComposition, current: DrawIrComposi
             write_idx = write_idx + 1
     for batch in baseline.batches:
         for command in batch.commands:
-            if _draw_ir_find_command(current, command.component_id) == nil:
+            if draw_ir_command_index_find(current_index, command.component_id) == nil:
                 val diff = _draw_ir_removed_diff(command)
                 removed_count = removed_count + 1
                 if write_idx >= diff_count:
