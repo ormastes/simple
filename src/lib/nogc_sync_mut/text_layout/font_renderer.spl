@@ -22,10 +22,13 @@ use std.common.encoding.utf8.{text_codepoints}
 use std.common.ui.draw_ir.{DrawIrGlyphRunPayload, draw_ir_empty_glyph_run_payload, draw_ir_glyph_run_payload}
 use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new}
 
-# Hosted module initialization eagerly creates these facade mutexes before
-# worker threads start. Freestanding native-builds leave function-call module
-# initializers nil, so the same optional slots initialize on first use after the
-# heap is ready; that path is single-core.
+# These facade mutexes are declared nil and lazily created by
+# _font_mutex_acquire on first use, on every target (hosted and freestanding
+# native-build alike) -- see the ROOT CAUSE comment on _font_mutex_acquire.
+# Eager `= mutex_new(0)` module-init-time allocation used to be the hosted
+# behavior here; it produced a Rust-seed heap object that read as non-nil but
+# corrupted on first real use, so it was removed in favor of matching the
+# freestanding path's always-lazy, single-core-safe initialization.
 use std.skia.entity.font.{sk_font_new, sk_font_style_normal, sk_typeface_from_attached_font}
 use std.skia.feature.glyph.ot_parser.{parse_offset_table}
 use std.skia.feature.shaper.font_fallback.{fallback_chain_new}
@@ -68,18 +71,50 @@ val RESOLVED_FONT_METRICS_CACHE_CONTENT_LIMIT: i64 = 4096
 var _resolved_font_metric_keys: [text] = []
 var _resolved_font_metric_values: [ResolvedFontMetrics] = []
 var _resolved_font_metric_cursor: i64 = 0
-var _resolved_font_metric_lock: Mutex? = mutex_new(0)
+var _resolved_font_metric_lock: Mutex? = nil
 
 fn _font_mutex_acquire(current: Mutex?) -> Mutex:
-    # No `if val` binding here: under freestanding/entry-closure/aggressive-opt
-    # kernel builds, real Mutex.lock()/unlock() calls on these facade locks
-    # fault (cr2=0x0) on their very first use during boot (verified: fault RIP
-    # resolves inside Mutex.lock/unlock, backtrace through this function and
+    # ROOT CAUSE (font_renderer_resolve_metrics_nil_receiver_seed_2026-07-20):
+    # These facade locks used to be eagerly allocated at module-init time
+    # (`var ..._lock: Mutex? = mutex_new(0)` as the declaration's own
+    # initializer). Under the Rust seed, a `mutex_new(0)` call made during
+    # module init (before the runtime heap/allocator is fully up) produces a
+    # Some-payload that LOOKS valid (`== nil` reports false) but is not a
+    # properly heap-registered object: any later read/unwrap/compare of it
+    # corrupts, surfacing differently depending on the call site -- "field
+    # access on nil receiver" via `??`, "Function 'bool.lock' not found" via
+    # `.?` (a bogus runtime type tag), or a raw SIGSEGV inside
+    # simple_runtime::value::heap::validate_heap_obj reached from an
+    # unrelated later `!=` comparison (gdb-confirmed heap corruption, not an
+    # operator-specific bug -- multiple unwrap styles were tried and all
+    # propagated the same corrupt value). Fix: leave the module var `nil` at
+    # declaration and let `_font_mutex_acquire` lazily create the real Mutex
+    # on first use, at runtime, after the heap is ready -- this already
+    # matches the freestanding/native-build path's existing behavior (see
+    # the module-init comment at the top of this file). NOTE: this closes
+    # the *mutex* nil/bad-receiver crash specifically (isolated repro clean,
+    # confirmed via gdb) but a SEPARATE, still-open Rust seed heap-corruption
+    # bug (SIGSEGV inside simple_runtime::value::heap::validate_heap_obj,
+    # reached from an unrelated `!=` deeper in the glyph layout/rasterize
+    # loop once a real face is active) still aborts the full font spec --
+    # see doc/08_tracking/bug/font_renderer_glyph_loop_heap_corruption_segv_2026-07-20.md.
+    # Do not read "font spec reaches Passed" as evidence either bug is fully
+    # closed until that second bug is fixed too.
+    # No `if val` destructuring binding here for a separate, older reason:
+    # under freestanding/entry-closure/aggressive-opt kernel builds, real
+    # Mutex.lock()/unlock() calls on these facade locks fault (cr2=0x0) on
+    # their very first use during boot (verified: fault RIP resolves inside
+    # Mutex.lock/unlock, backtrace through this function and
     # font_renderer_use_registered_selected_bytes_only -> spl_start). This
     # facade is only used single-threaded there (kernel boot / one browser
     # process — see font_renderer_use_registered_selected_bytes_only), so once
     # that mode is active we skip the real lock/unlock syscalls entirely.
-    val active = current ?? mutex_new(0)
+    if current == nil:
+        val fresh = mutex_new(0)
+        if not _registered_selected_fonts_only:
+            fresh.lock()
+        return fresh
+    val active = current.?
     if not _registered_selected_fonts_only:
         active.lock()
     active
@@ -87,7 +122,7 @@ fn _font_mutex_acquire(current: Mutex?) -> Mutex:
 fn _font_mutex_release(current: Mutex?):
     if current == nil:
         return
-    val active = current ?? mutex_new(0)
+    val active = current.?
     if not _registered_selected_fonts_only:
         active.unlock(0)
 
@@ -158,7 +193,7 @@ var _browser_default_font_renderers: [FontRenderer] = []
 var _registered_selected_font_paths: [text] = []
 var _registered_selected_font_blobs: [[u8]] = []
 var _registered_selected_fonts_only: bool = false
-var _browser_default_font_lock: Mutex? = mutex_new(0)
+var _browser_default_font_lock: Mutex? = nil
 
 fn _browser_default_font_lock_acquire():
     _browser_default_font_lock = _font_mutex_acquire(_browser_default_font_lock)
@@ -268,10 +303,12 @@ val FONT_RENDER_TRANSFORM_IDENTITY: text = "uniform-scale;translate-late"
 val FONT_ATLAS_WIDTH: i32 = 1024
 val FONT_ATLAS_HEIGHT: i32 = 1024
 # The scalar stays literal-initialized for freestanding startup. Its dedicated
-# facade mutex is eager on hosted builds and lazy on the single-core baremetal
-# path, matching the cache locks above.
+# facade mutex is now lazily created on first use on every target (matching
+# the cache locks above) -- see the ROOT CAUSE comment on _font_mutex_acquire
+# for why eager `= mutex_new(0)` at module-init time was unsafe on the
+# hosted/Rust-seed path too, not just baremetal.
 var _font_atlas_dependency_generation_counter: i64 = 0
-var _font_atlas_dependency_generation_lock: Mutex? = mutex_new(0)
+var _font_atlas_dependency_generation_lock: Mutex? = nil
 
 fn _font_render_batch_with_config(batch: FontRenderBatch, config: FontRenderConfig) -> FontRenderBatch:
     FontRenderBatch(

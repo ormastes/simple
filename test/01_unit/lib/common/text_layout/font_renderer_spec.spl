@@ -56,6 +56,26 @@ describe "SFFI font liveness":
         val source = rt_file_read_text("src/lib/nogc_sync_mut/text_layout/font_renderer.spl")
         expect(source).to_contain("fn has_sffi_ttf() -> bool:\n        val rasterizer = self.ttf_rasterizer\n        if rasterizer == nil:\n            return false\n        rasterizer.is_current()")
 
+    it "activates a render config after loading a real face without crashing (regression: font_renderer_resolve_metrics_nil_receiver_seed_2026-07-20)":
+        # Regression coverage for the "field access on nil receiver" +
+        # SIGILL crash that used to fire on the FIRST call to
+        # prepare_text()/prepare_text_configured() after loading any real
+        # font: _activate_render_config -> _reset_font_atlas ->
+        # _next_font_atlas_dependency_generation -> _font_mutex_acquire
+        # dereferenced a corrupt receiver produced by `current ?? mutex_new(0)`
+        # unwrapping a module-level-initialized `Mutex?`. Empty content is
+        # used deliberately: _prepare_text_active returns before the glyph
+        # layout/rasterize loop, isolating this regression from the
+        # still-open, separately tracked heap-corruption SIGSEGV reached
+        # deeper in that loop (see
+        # doc/08_tracking/bug/font_renderer_glyph_loop_heap_corruption_segv_2026-07-20.md).
+        val path = "assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf"
+        var renderer = FontRenderer.new()
+        expect(renderer.try_load_selected_bytes(path, file_read_bytes(path))).to_be(true)
+        val batch = renderer.prepare_text("", 0xffffffffu32, 16)
+        expect(batch.valid).to_be(true)
+        renderer.clear_ttf()
+
     it "renders a selected face from owned bytes without a hosted dylib":
         val path = "assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf"
         var renderer = FontRenderer.new()

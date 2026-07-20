@@ -1,5 +1,45 @@
 # font_renderer: resolve_font_metrics_with_language nil-receiver crash under seed (blocks WM Draw IR composition + widget_draw_ir)
 
+**Status:** FIXED 2026-07-20 (root-fix lane, worktree `/tmp/wt_ttfcrash`, pinned
+base `42ebf97e577268703098d7c17d862e74cc15c86a`). Root cause confirmed and
+fixed in `src/lib/nogc_sync_mut/text_layout/font_renderer.spl`
+(`_font_mutex_acquire`/`_font_mutex_release`), NOT in
+`resolve_font_metrics_with_language`/`_resolve_font_metrics_with_language_config`
+directly — see "Actual root cause" below. A SEPARATE, still-open bug
+(`font_renderer_glyph_loop_heap_corruption_segv_2026-07-20.md`) now blocks the
+full `font_renderer_spec` from reaching a complete green summary; this doc's
+own crash no longer reproduces.
+
+## Actual root cause (2026-07-20 update)
+
+Not `resolve_font_metrics_with_language`/`_resolve_font_metrics_with_language_config`
+directly — the fault is one level down, in the shared mutex-facade helpers
+`_font_mutex_acquire`/`_font_mutex_release` (top of
+`src/lib/nogc_sync_mut/text_layout/font_renderer.spl`), used by every lock in
+this file (`_resolved_font_metric_lock`, `_browser_default_font_lock`,
+`_font_atlas_dependency_generation_lock`). They used to unwrap their `Mutex?`
+parameter with `current ?? mutex_new(0)` into a single `val`. Under the Rust
+seed, when the module-level `Mutex?` var's Some-payload came from the
+declaration's own `mutex_new(0)` initializer (module-init time), the `??`
+operator produced a value that reports `== nil` as `false` but crashes as
+"field access on nil receiver" the instant a method (`.lock()`) is called on
+it. Minimal isolated repros (no font code) confirmed this precisely: a
+local-var-initialized `Mutex?` source unwraps fine via `??`; the identical
+module-var-initialized source faults every time. `resolve_font_metrics_with_language`
+just happens to be the first public entry point that reaches
+`_activate_render_config` -> `_reset_font_atlas` ->
+`_next_font_atlas_dependency_generation` -> `_font_mutex_acquire`, so it was
+the symptom's face, not its cause.
+
+Fix: the three lock module vars now initialize to `nil` at declaration
+(matching the file's own already-documented freestanding/native-build lazy-init
+intent) and `_font_mutex_acquire`/`_font_mutex_release` unwrap via a guard
+clause + `.?` instead of `??`. Verified via a from-scratch minimal standalone
+repro (`FontRenderer.new()` + real TTF load + `prepare_text("", ...)`, which
+exercises exactly this call chain and used to SIGILL — now exits 0).
+
+**Old text below is the original 2026-07-20 filing, kept for history.**
+
 **Status:** OPEN 2026-07-20 — found while adding WM close-lifecycle specs (G2 lane).
 **Severity:** Blocking for seed-run WM/GUI specs — `shared_wm_scene_draw_ir_composition` cannot execute at all under the Rust seed; origin/main's own `test/01_unit/lib/common/ui/window_scene_draw_ir_spec.spl` currently aborts at its second example (1 pass printed, then process death, Test Summary `Passed: 0 / Failed: 1`).
 **Affected file:** `src/lib/nogc_sync_mut/text_layout/font_renderer.spl` (`resolve_font_metrics_with_language`, line ~1635)
