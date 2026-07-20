@@ -119,17 +119,17 @@ Deferred to avoid parallel-agent conflicts on a widely-imported path during
 active development. Tracked as explicit TODOs rather than silently left
 implicit:
 
-- `TODO(devhub-rename)`: move `src/app/itf/` → `src/app/devhub/` (directory
+- `DONE(devhub-rename, 2026-07-20)`: move `src/app/itf/` → `src/app/devhub/` (directory
   rename, all files carried over verbatim as a first pass — no logic changes
   in the same commit).
-- `TODO(devhub-rename)`: update every `use app.itf.*` import path repo-wide
+- `DONE(devhub-rename, 2026-07-20)`: update every `use app.itf.*` import path repo-wide
   to `use app.devhub.*` (grep-and-replace pass; must be its own commit,
   separated from any functional change, to keep the diff reviewable).
-- `TODO(devhub-rename)`: update `main.spl`'s dispatcher so both `devhub` and
+- `DONE(devhub-rename, 2026-07-20)`: update `main.spl`'s dispatcher so both `devhub` and
   `itf` invocation names resolve to the same match arms (today only `itf`
   exists as the binary name); add `bin/devhub` wrapper alongside the existing
   `bin/itf` wrapper, both pointing at the same compiled artifact.
-- `TODO(devhub-rename)`: update `.claude/skills/*.md` references that
+- `DONE(devhub-rename, 2026-07-20)`: update `.claude/skills/*.md` references that
   currently say `itf` (e.g. `minio.md`, `repo_and_pull_req` sub-skills) to
   document `devhub` as primary with `itf` noted as the compat alias.
   Skill-name-based routing/dispatch strings must not break.
@@ -140,10 +140,10 @@ implicit:
   Note: the code-style table lists `simple-mcp`/`simple-lsp-mcp`/`t32-*` MCP
   servers, none of which are itf-derived — no change needed there beyond
   double-checking no stray `itf` cross-reference exists.
-- `TODO(devhub-rename)`: update `doc/` cross-references that link into
+- `DONE(devhub-rename, 2026-07-20)`: update `doc/` cross-references that link into
   `src/app/itf/*.spl` paths (architecture docs, any existing itf guide) once
   the move lands, so links don't 404.
-- `TODO(devhub-rename)`: after the move, confirm `ItfConfig`/`auth.sdn`
+- `DONE(devhub-rename, 2026-07-20)`: after the move, confirm `ItfConfig`/`auth.sdn`
   naming — decide whether the config struct/file names also rename
   (`ItfConfig` → `DevhubConfig`, `~/.config/itf/` → `~/.config/devhub/`) or
   stay as a stable on-disk/struct name independent of the source-folder
