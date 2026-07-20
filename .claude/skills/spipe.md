@@ -935,6 +935,59 @@ test runner can't execute the `it` blocks (e.g. it segfaults importing a heavy
 module graph), run the same assertions through a `bin/simple run …` harness and
 keep the absolute oracle in it — don't downgrade to "files load".
 
+## Spec-source landmines (the spec fails, the code is fine)
+
+Some spec failures come from how the **spec source itself** is lexed, not from the
+code under test. Recognize these before you "fix" working product code — the
+2026-07-20 devhub sweep lost a full wave to one of them (a JSON parser was filed
+as broken; the parser was correct and the *test fixture* was being truncated
+by the lexer).
+
+- **`}}` collapses to `}` inside a string literal.** Any nested-JSON fixture
+  written as one escaped literal (`"{\"a\":{\"b\":1}}"`) silently arrives at the
+  parser truncated, so the assertion fails for a reason that has nothing to do
+  with the parser. Build nested fixtures by **concatenation or a small builder
+  fn** (`"{\"a\":" + inner + "}"`), never as a single literal. Bug:
+  `doc/08_tracking/bug/string_literal_double_brace_collapse_2026-06-16.md`.
+- **`{name}` in a plain string is parsed as interpolation.** A fixture containing
+  literal braces (a UUID like `{u1}`, a help string like `{a|b}`) resolves `name`
+  as a variable and dies with "variable not found" — or crashes outright for the
+  alternation form. Use a helper that concatenates the braces
+  (`fn brace(s) -> "{" + s + "}"`), or `<a|b>` in help text. Bug:
+  `doc/08_tracking/bug/interp_brace_literal_collides_with_string_interpolation_2026-07-03.md`.
+- **`match` on a bare identifier naming a `val` constant is an irrefutable
+  capture** — it always takes the first arm, so a spec that exercises every
+  branch passes only the first one. Compare with `==` in an `if/elif` chain
+  instead. Bug: `doc/08_tracking/bug/match_bare_ident_const_irrefutable_2026-07-20.md`.
+- **`.split(sep, N)` ignores `N`** on the live seed (splits on every occurrence).
+  A fixture parsing `key: https://host/path` this way keeps only `https`. Find
+  the first separator explicitly. Bug: `text-split-limit-ignored` in `bug_db.sdn`.
+
+Rule of thumb: when an assertion fails on a value that *looks* mangled rather
+than merely wrong (truncated at a brace, a URL cut at a colon, an empty string
+where text was expected), suspect the literal before the logic — print the
+fixture and compare it to what you wrote.
+
+## Fixtures that lie (mock stdlib on a real-IO path)
+
+`std.nogc_sync_mut.file_system.file_ops` is a **mock**: `file_read_text` returns
+`"mock file content: <path>"`, `file_exists` answers without touching disk. A
+spec written against it is green while the product silently uploads placeholder
+text (found twice: `wiki-confluence-mock-file-io`, and `storage cp` uploading the
+mock string instead of file bytes). For any path that must touch the real
+filesystem, use `std.io_runtime` (`file_read`, `file_size`, `file_exists`,
+`dir_walk`, …) or the `rt_file_*` externs, and assert on **content round-trip**,
+not just "the call returned ok". Grep a spec's imports for `file_ops` before
+trusting it as evidence of real IO.
+
+## Reproduce-first for bug-fix specs
+
+A regression spec that was written *after* the fix is unproven — it may assert
+something that was already true. Write the example first, **run it, watch it
+fail with the exact symptom in the bug report**, then fix the code and re-run.
+Report both observations (`3 failed → 21/0`, with the failing values quoted);
+"added a spec, suite green" is not evidence the spec covers the defect.
+
 ## GUI sanity tests (pure-Simple lane)
 
 After any GUI / engine2d / web-render change, sanity-check the **three main GUI
