@@ -1073,6 +1073,9 @@ class FontRenderer:
         _font_render_batch_with_config(self._prepare_text_active(content, color, config.size), config)
 
     me _prepare_text_active(content: text, color: u32, font_size: i32) -> FontRenderBatch:
+        if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 24:
+            _vec_glyph_probe_count = _vec_glyph_probe_count + 1
+            print("[vec-glyph-probe] prepare-entry content_len={content.len()} font_size={font_size}")
         val cache_stats = self.cache.stats()
         var face_generation = cache_stats.generation
         var font_identity = cache_stats.font_identity
@@ -1088,6 +1091,18 @@ class FontRenderer:
         if self.atlas_face_generation != face_generation or self.atlas_font_identity != font_identity:
             self._reset_font_atlas(face_generation, font_identity)
         var layout = self.layout_text(content, font_size, 0)
+        # Scalar mirrors of the fallback layout entries. On the freestanding
+        # native lane, an i64 field written into a struct pushed into an
+        # array reads back tag-shifted (probe: push cp=83/w=5/h=12 ->
+        # re-read cp=0 w=0 h=0 glyph_index=0x1FFFFFFFFFFFFFFF nil sentinel),
+        # which emptied every quad batch and killed all glyph text (taskbar
+        # clock ink=0). Same "BoxInt <<3 / tag-shifted view" codegen family
+        # as GLYPH-FIX-3's retraction note above. Scalar arrays of
+        # primitives (see PMM refcounts) round-trip correctly, so the quad
+        # loop below prefers these mirrors over re-reading the LayoutGlyph
+        # structs whenever the fallback produced them.
+        var fallback_cps: [i32] = []
+        var fallback_xs: [i64] = []
         if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
             _vec_glyph_probe_count = _vec_glyph_probe_count + 1
             print("[vec-glyph-probe] active-after-layout_text layout_len={layout.len()} use_vector={self.use_vector} use_bitmap={self.use_bitmap} content_len={content.len()}")
@@ -1128,6 +1143,8 @@ class FontRenderer:
                     width: glyph.width.to_i64(), height: glyph.height.to_i64(),
                     byte_offset: fallback_byte_offset
                 ))
+                fallback_cps.push(codepoint)
+                fallback_xs.push(fallback_x)
                 fallback_x = fallback_x + glyph.advance.to_i64()
                 fallback_byte_offset = fallback_byte_offset + 1
                 ci = ci + 1
@@ -1141,7 +1158,21 @@ class FontRenderer:
             var i = 0
             while i < layout.len():
                 val positioned = layout[i]
-                val glyph = self.get_glyph(positioned.codepoint.to_i32(), font_size)
+                # Prefer the scalar mirrors over the LayoutGlyph fields: the
+                # struct-in-array i64 round-trip reads back tag-shifted on
+                # the freestanding native lane (cp=0/w=0/h=0 + nil-sentinel
+                # glyph_index), which produced n_quads=0 for every draw and
+                # zero glyph ink on screen. See the mirror declaration above.
+                var requad_cp = positioned.codepoint.to_i32()
+                var quad_dst_x: i64 = positioned.x
+                var quad_dst_y: i64 = positioned.y
+                var quad_byte_offset: i64 = positioned.byte_offset
+                if i < fallback_cps.len():
+                    requad_cp = fallback_cps[i]
+                    quad_dst_x = fallback_xs[i]
+                    quad_dst_y = 0
+                    quad_byte_offset = i.to_i64()
+                val glyph = self.get_glyph(requad_cp, font_size)
                 if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
                     _vec_glyph_probe_count = _vec_glyph_probe_count + 1
                     print("[vec-glyph-probe] quadloop-after-reget i={i} cp={positioned.codepoint} w={glyph.width} h={glyph.height} face_id={glyph.face_id} face_gen={glyph.face_generation} glyph_index={glyph.glyph_index}")
@@ -1162,8 +1193,8 @@ class FontRenderer:
                     else:
                         val quad = FontRenderQuad(
                             codepoint: glyph.codepoint,
-                            byte_offset: positioned.byte_offset,
-                            dst_x: positioned.x.to_i32(), dst_y: positioned.y.to_i32(),
+                            byte_offset: quad_byte_offset,
+                            dst_x: quad_dst_x.to_i32(), dst_y: quad_dst_y.to_i32(),
                             width: self.atlas_widths[atlas_index], height: self.atlas_heights[atlas_index],
                             atlas_x: self.atlas_xs[atlas_index], atlas_y: self.atlas_ys[atlas_index],
                             color: color
