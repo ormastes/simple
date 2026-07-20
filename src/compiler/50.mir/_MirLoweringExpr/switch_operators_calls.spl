@@ -169,6 +169,30 @@ impl MirLowering:
         var payload_local = local
         if disc == 1:
             payload_local = b.emit_const_int(3)
+        elif disc == 0:
+            # rt_enum_new's payload parameter is declared i64. A float-typed
+            # payload_local passed straight into that i64-typed call slot is
+            # coerced by the generic call-argument path (value_as_type ->
+            # select_cast_instruction), which picks `fptosi` for
+            # double/float -> i64 -- a NUMERIC truncation (3.5 -> 3), not a
+            # bit-preserving transfer. The matching unbox
+            # (enum_payload_value's F64 arm, just above) does a plain
+            # `bitcast` back to double, so it read back a denormal
+            # near-zero garbage value instead of 3.5 (bug
+            # hosted_native_option_try_unwrap_payload_leak_2026-07-19).
+            # Bitcast explicitly here -- mirroring box_runtime_value's F64/F32
+            # arms (expr_dispatch.spl) -- so the payload word always carries
+            # an untouched bit pattern the decode side can recover exactly.
+            val payload_ty = self.local_mir_type_of(payload_local)
+            if val pt = payload_ty:
+                match pt.kind:
+                    case MirTypeKind.F64:
+                        payload_local = b.emit_bitcast(mir_operand_copy(payload_local), MirType.i64())
+                    case MirTypeKind.F32:
+                        val promoted = b.emit_cast(mir_operand_copy(payload_local), MirType.f64())
+                        payload_local = b.emit_bitcast(mir_operand_copy(promoted), MirType.i64())
+                    case _:
+                        ()
         val ctor = MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Str("rt_enum_new"),
             MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType(kind: MirTypeKind.I32), MirType(kind: MirTypeKind.I32), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))

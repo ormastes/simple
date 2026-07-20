@@ -29,6 +29,41 @@ describe "MIR Option variant order":
         expect(source).to_contain("var some_value = self.option_payload_or_self(base_local)")
         expect(source).to_contain("and not self.option_value_locals.has(base_local.id)")
 
+    it "bitcasts a float Option payload before rt_enum_new instead of numerically truncating it":
+        # ROOT-FIX guard (hosted_native_option_try_unwrap_payload_leak_2026-07-19,
+        # f64/f32 encode half): `ensure_option_handle` passed a float-typed
+        # payload straight into rt_enum_new's i64-declared parameter, so the
+        # generic call-argument coercion picked `fptosi` (numeric truncation,
+        # e.g. 3.5 -> 3) instead of a bit-preserving transfer. The matching
+        # decode (`enum_payload_value`'s F64 arm, same file) does a plain
+        # `bitcast` back to double -- encode and decode must agree on
+        # representation, or a real f64 payload decodes as a denormal
+        # near-zero garbage value. Pin the explicit bitcast so this
+        # asymmetry cannot silently regress back in.
+        val source = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl") ?? ""
+
+        expect(source).to_contain("me ensure_option_handle(local: LocalId, option_type: HirType) -> LocalId:")
+        expect(source).to_contain("payload_local = b.emit_bitcast(mir_operand_copy(payload_local), MirType.i64())")
+        expect(source).to_contain("val promoted = b.emit_cast(mir_operand_copy(payload_local), MirType.f64())")
+
+    it "registers struct-name provenance on an exists-check result for later field access":
+        # ROOT-FIX guard (hosted_native_option_try_unwrap_payload_leak_2026-07-19,
+        # struct-payload half): the ExistsCheck (`.?`) merged result local had
+        # no struct_value_syms/HIR-type registration, so a later `v.x`/`v.y`
+        # field access (resolve_field_index) silently defaulted EVERY field
+        # name to index 0 -- `if val v = x.?: v.x * 10 + v.y` returned 33
+        # instead of 34 (both fields read as field 0). Prefer the Option's
+        # declared inner struct name (canonical tagged handle); fall back to
+        # struct_value_syms on base_local directly for the "raw migration
+        # form" (a struct pointer assigned straight to a `T?` binding without
+        # ever going through ensure_option_handle).
+        val source = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl") ?? ""
+
+        expect(source).to_contain("if val exists_inner_type = self.option_inner_hir_type_for_local(base, base_local):")
+        expect(source).to_contain("val fallback_struct_sym = self.struct_value_syms.get(base_local.id)")
+        expect(source).to_contain("if result_struct_name != \"\":")
+        expect(source).to_contain("self.struct_value_syms[result_local.id] = result_struct_name")
+
     it "preserves unresolved method Option return provenance":
         val fixture = rt_file_read_text("test/fixtures/compiler/native_option_try_unresolved_method_loud.spl") ?? ""
         val method_source = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl") ?? ""

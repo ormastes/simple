@@ -2108,6 +2108,50 @@ impl MirLowering:
                 var result_type = MirType.i64()
                 if val expr_type = expr_value.type_:
                     result_type = self.lower_type(expr_type)
+                # Struct-typed payload: `enum_payload_value`'s default arm
+                # (just below) hands back the raw ptrtoint'd handle
+                # untouched -- correct bits, but with no struct-name
+                # provenance attached to the merged result local. A later
+                # `v.x`/`v.y` field access (resolve_field_index) then has
+                # neither an HIR type annotation on `v` nor a
+                # struct_value_syms entry to consult and silently defaults
+                # EVERY field name to index 0 (same landmine documented at
+                # struct_value_syms's other call sites in this file/module --
+                # "array-of-structs field misread", "chained access"). Look
+                # up the Option's declared inner struct name up front so it
+                # can be attached to result_local once, mirroring how
+                # lower_result_unwrap/emit_resolved_direct_call register
+                # struct_value_syms for their own freshly-produced locals.
+                var result_struct_name = ""
+                if val exists_inner_type = self.option_inner_hir_type_for_local(base, base_local):
+                    match exists_inner_type.kind:
+                        case HirTypeKind.Named(exists_struct_symbol, _):
+                            val exists_type_symbol = self.symbols.get_symbol(exists_struct_symbol)
+                            if exists_type_symbol != nil:
+                                match exists_type_symbol.kind:
+                                    case Struct:
+                                        result_struct_name = exists_type_symbol.name
+                                    case _: ()
+                        case _: ()
+                if result_struct_name == "":
+                    # Struct-typed Option locals may use the "raw migration
+                    # form" (see `.unwrap()`'s own doc comment a few hundred
+                    # lines up): a plain struct pointer assigned straight to
+                    # a `T?` binding without ever going through
+                    # ensure_option_handle's canonical enum-id-1 wrap (the
+                    # pointer's own non-nil-ness already distinguishes
+                    # Some/None for rt_is_some/rt_unwrap_or_self, so the
+                    # wrap is skippable). That leaves base_local with no
+                    # local_hir_types/option_value_locals entry for the
+                    # lookup above to find -- but struct construction itself
+                    # always registers struct_value_syms on the raw pointer,
+                    # so fall back to that direct, already-reliable source
+                    # (same fallback resolve_field_index/
+                    # resolve_base_struct_name use for the identical
+                    # no-HIR-type-info situation).
+                    val fallback_struct_sym = self.struct_value_syms.get(base_local.id)
+                    if fallback_struct_sym != nil:
+                        result_struct_name = fallback_struct_sym ?? ""
                 var b_ec = self.builder
                 val is_some_func = MirOperand(kind: MirOperandKind.Const(
                     MirConstValue.Str("rt_is_some"),
@@ -2163,6 +2207,8 @@ impl MirLowering:
                     self.runtime_array_locals[result_local.id] = true
                 if self.runtime_dict_locals.has(some_value.id):
                     self.runtime_dict_locals[result_local.id] = true
+                if result_struct_name != "":
+                    self.struct_value_syms[result_local.id] = result_struct_name
 
                 var b_merge = self.builder
                 b_merge.switch_to_block(merge_block)
