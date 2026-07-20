@@ -402,3 +402,41 @@ hardcodes `optimizationconfig_speed()`, ignoring `ctx.options.opt_level`
 entirely. Every build (debug or release, any `-O` level) always runs the
 Speed-level MIR optimization pipeline. Independent of the fixes above; not
 expanded into this change's scope.
+
+---
+
+## 2026-07-20 addendum: layers 2 and 3 of the onion (post-fix)
+
+The inline_functions fix above unmasked two further defects on the same
+emit-object path, both now fixed on the clean-cache 2-fn repro
+(`SIMPLE_NATIVE_BUILD_CLEAN=1`, riscv32 ELF relocatable, rc=0):
+
+**Layer 2 — Option-wrapped llc bytes → misleading "unknown static method
+object on class CodegenOutput".** After llc already produced a valid .o,
+`compile_ir_to_object`'s `rt_file_read_bytes` result (Some-wrapped under the
+seed interpreter) flowed unwrapped into `CodegenOutput.object`'s `[u8]` param;
+`constructor_overload_score` rejects `Some(_)` vs Array and the dispatcher
+misreports it as a missing method. Fixed in
+`llvm_backend_tools.spl` (`val byte_arr: [u8] = bytes ?? []` after the nil
+guard). Seed-side diagnostic/scoring defect filed separately:
+`seed_overload_score_option_bytes_misleading_unknown_static_2026-07-20.md`.
+
+**Layer 3 — O(M²) IR-text accumulation = the 50-minute "silent phase".**
+`LlvmIRBuilder.emit()` accumulated the module IR as
+`self.instructions = self.instructions.push(line)` — a value-type array the
+seed interpreter clones per push (`interpreter_method/collections.rs:67-72`),
+O(M²) over M IR lines. Invisible on a 2-fn repro; a 479-fn flattened module
+spent >50 min after `aot:format:done` producing zero output (llc never
+reached — no `/tmp/simple_llvm_<pid>.ll` existed) until the 3600s wrapper
+timeout. Fixed by switching the accumulator to the amortized-O(1)
+`rt_string_builder_*` runtime builder (same externs as
+`src/lib/common/string_builder.spl`, bug rt_string_concat_quadratic_2026-06-12;
+handle consumed exactly once by `llvm_ir_builder_build`). Known smaller
+sibling left unfixed (k << M): `string_global_text` quadratic concat in
+`mir_to_llvm_helpers.spl:41-44` / `asm_constraints_helpers.spl:329-333` plus a
+dead `string_globals.push` accumulator — flagged for follow-up.
+
+Verification method note: a shared main WC repeatedly gave false greens via
+native-build **cache replays** and false reds via other sessions' in-flight
+edits; all layer-2/3 evidence above was produced in a pristine detached
+worktree at origin tip with `SIMPLE_NATIVE_BUILD_CLEAN=1`.

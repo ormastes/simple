@@ -11,6 +11,12 @@ use compiler.backend.llvm_target.{LlvmTargetTriple}
 use compiler.common.attributes.FunctionAttr
 
 extern fn rt_env_get(key: text) -> text
+# Amortized-O(1) string accumulation (same runtime builder as
+# src/lib/common/string_builder.spl; bug rt_string_concat_quadratic_2026-06-12).
+extern fn rt_string_builder_new() -> i64
+extern fn rt_string_builder_push(handle: i64, s: text) -> i64
+extern fn rt_string_builder_finish(handle: i64) -> text
+extern fn rt_string_builder_len(handle: i64) -> i64
 
 var _llvm_bootstrap_ir_text: text = ""
 var _llvm_simpleos_header = false
@@ -29,7 +35,13 @@ class LlvmIRBuilder:
     """Builds LLVM IR from MIR."""
     module_name: text
     target: LlvmTargetTriple
-    instructions: [text]
+    # IR text accumulator: rt_string_builder handle, NOT a [text] array.
+    # Arrays are value types — `self.x = self.x.push(line)` re-copies the
+    # whole array per emitted line under the seed interpreter, O(M^2) over
+    # M IR lines (a 479-fn module spent >50min here). The runtime builder
+    # appends in amortized O(1). Consumed exactly once by build()/
+    # llvm_ir_builder_build (rt_string_builder_finish releases the handle).
+    sb: i64
     current_function: text?
     local_counter: i64
     debug_counter: i64
@@ -52,7 +64,7 @@ class LlvmIRBuilder:
         LlvmIRBuilder(
             module_name: name,
             target: target,
-            instructions: [],
+            sb: rt_string_builder_new(),
             current_function: nil,
             local_counter: 0,
             debug_counter: 10,
@@ -71,7 +83,9 @@ class LlvmIRBuilder:
             else:
                 _llvm_bootstrap_ir_text = "{current}\n{line}"
             return
-        self.instructions = self.instructions.push(line)
+        if rt_string_builder_len(self.sb) > 0:
+            rt_string_builder_push(self.sb, "\n")
+        rt_string_builder_push(self.sb, line)
 
     me emit_module_header():
         """Emit module header."""
@@ -532,7 +546,7 @@ class LlvmIRBuilder:
         val bootstrap_ir = _llvm_bootstrap_ir_text ?? ""
         if bootstrap_ir != "":
             return bootstrap_ir
-        self.instructions.join("\n")
+        rt_string_builder_finish(self.sb)
 
 # ============================================================================
 # Helper Functions
@@ -543,7 +557,7 @@ pub fn llvm_ir_builder_build(builder: LlvmIRBuilder) -> text:
     val bootstrap_ir = _llvm_bootstrap_ir_text ?? ""
     if bootstrap_ir != "":
         return bootstrap_ir
-    return builder.instructions.join("\n")
+    return rt_string_builder_finish(builder.sb)
 
 fn natural_alignment(ty: text) -> i64:
     """Return natural alignment in bytes for an LLVM type."""
