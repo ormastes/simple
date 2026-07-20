@@ -3,11 +3,13 @@
 
 ## Scope
 
-Seven SSpec files cover manifest/assets, exact-face shaping, shared 2D/3D batch,
-Web/GUI/WM routing, portable emission, generated CUDA handoff, and native
-graphics readback. The first five exercise host-available contracts; the sixth
-is a focused conditional CUDA gate, and the seventh is a fail-closed promotion
-gate whose three independent live evidence rows remain unavailable.
+Eleven executable/manual pairs comprise seven system SSpecs for manifest/assets,
+exact-face shaping, shared 2D/3D batch, Web/GUI/WM routing, portable emission,
+generated CUDA handoff, and native graphics readback, plus four focused unit
+gates for selected Arabic/Devanagari faces and release asset layout. Among the
+system SSpecs, the first five exercise host-available contracts; the sixth is a
+focused conditional CUDA gate, and the seventh is a fail-closed promotion gate
+whose three independent live evidence rows remain unavailable.
 Unit/integration suites for the
 existing shaper, Engine2D, Engine3D texture path, emitter, and backend readback
 remain supporting evidence; they do not replace these end-to-end scenarios.
@@ -36,7 +38,7 @@ Planned executable/manual pairs:
 | `test/03_system/app/simple_2d/feature/cuda_generated_font_handoff_spec.spl` | `doc/06_spec/03_system/app/simple_2d/feature/cuda_generated_font_handoff_spec.md` |
 | `test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl` | `doc/06_spec/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.md` |
 
-Focused exact-face unit gates (execution and manual generation pending):
+Focused exact-face unit gates (execution pending; per-row manual status):
 
 | Executable SSpec | Generated manual |
 |---|---|
@@ -57,7 +59,7 @@ Visible primary steps:
 
 - `step("Load the pinned multilingual font manifest")`
 - `step("Accept exact-face-bound simple-script shaping")`
-- `step("Prepare one shared font batch for 2D and 3D")`
+- `step("Prepare one shared font batch for 2D")`
 - `step("Emit the selected font composite program and plan compilation")`
 - `step("Prove native submission and device readback")`
 
@@ -71,12 +73,15 @@ Completion steps:
 
 - `step("Render legacy Web GUI and WM text through DrawIR")`
 - `step("Shape selected Unicode scripts with the pinned face")`
+- `step("Verify immutable font assets and notices in release layouts")`
+- `step("Verify release archives expose the installed runtime layout")`
 - `step("Render Engine3D HUD and world text on the promoted backend")`
 - `step("Capture SimpleOS pinned-font pixels")`
 - `step("Measure warm font rendering and resource bounds")`
 
 Secondary detail steps remain folded beneath those manual-facing flows:
 
+- `step("Verify canonical selected-font owners do not depend on the legacy game font atlas")`
 - `step("Regenerate the top eleven twice from the exact pinned XML bytes")`
 - `step("Reject a stale global-face wrapper after loading a second selected face")`
 - `step("Check every candidate against its exact CORPUS codepoints and accepted-simple policy")`
@@ -107,7 +112,7 @@ Shared helpers are `setup_shared_font_fixture`, `setup_selected_shaping_face`,
 assert their named oracle; any pending helper fails explicitly. New assertions
 use built-in matchers only.
 
-REQ-015 reuses `step("Prepare one shared font batch for 2D and 3D")` and
+REQ-015 reuses `step("Prepare one shared font batch for 2D")` and
 `expect_shared_font_batch`. The checker exercises
 `prepare_text_configured`, `prepare_text_with_advances_configured`,
 `prepare_glyph_run_configured`, and `prepare_selected_glyph_run_configured`
@@ -125,21 +130,21 @@ behavior.
 | REQ-003 | `shared_font_manifest_spec.spl` / `shared_font_manifest_spec.md` | complete sparse cells; honest fallback; unavailable/not-designed distinction | 3 source cases; fresh regeneration and native execution pending |
 | REQ-004 | `shared_font_manifest_spec.spl` / `shared_font_manifest_spec.md`, `font_asset_manifest_spec.spl`, `install_font_assets_spec.spl`, `release_archive_layout_spec.spl`, `simpleos_font_bundle_spec.spl`, `simpleos_font_asset_staging_spec.spl` | complete license metadata; checksum/table validation; installed-prefix asset/notice resolution; nested portable/full archive runtime discovery; 53-file SimpleOS legal projection; missing/stale field rejection | repository, host release, archive-layout, and SimpleOS source/unit cases present; temp-prefix, package, and admitted SimpleOS execution remain pending |
 | REQ-005 | `shared_font_manifest_spec.spl` / `shared_font_manifest_spec.md` | pinned catalog revision; unchanged accepted bytes; corpus rejection | 3 source cases; current pure-Simple corpus execution pending |
-| REQ-006 | `shared_font_surfaces_spec.spl` / `shared_font_surfaces_spec.md` | one owner; identical batch identity; no duplicate material cache | 3 source cases; interpreter diagnostic and native route execution pending |
-| REQ-007 | `shared_font_shaping_acceptance_spec.spl` plus focused unit, SimpleOS source-contract, and renderer oracles | exact-face simple-script oracle; exact Hindi `dev2` and bounded Arabic/Urdu vectors on sans; registered-only handle-zero shaping and selected-byte batch materialization; explicit hi/ar/ur mono fallback; exact monochrome Noto Emoji `U+1F600` corpus tuple under all ten selected language tags; pending exact Serif Devanagari/Naskh default-instance probes | registered-only source regression added; sans and exact-corpus Emoji source policy promoted; serif probes remain unavailable; pinned release SHA `04a38e21…` exits 139 before assertions, while the latest retained candidate reaches a separate recursion guard; sequence/color Emoji remains fail-closed |
+| REQ-006 | `shared_font_surfaces_spec.spl` / manual plus `font_compat_spec.spl` | one font owner; identical batch identity; no duplicate material cache; dedicated Engine3D consumer | the confirmed mutex receiver fault is fixed, but all three 2D core-C cycles still exit 132 before a summary; focused Engine3D CPU cases remain supporting evidence |
+| REQ-007 | `shared_font_shaping_acceptance_spec.spl` plus focused unit, SimpleOS source-contract, and renderer oracles | exact-face simple-script oracle; exact Hindi `dev2` and bounded Arabic/Urdu vectors on sans; registered-only handle-zero shaping and selected-byte batch materialization; explicit hi/ar/ur mono fallback; exact monochrome Noto Emoji `U+1F600` corpus tuple under all ten selected language tags; pending exact Serif Devanagari/Naskh default-instance probes | source policy is present and the selected-identity Option fault is fixed, but all three focused native cycles still exit 132 before a BDD summary; no PASS claimed |
 | REQ-008 | `shared_font_manifest_spec.spl` plus focused sfnt/bitmap unit specs | compound/default-glyf corpus reconstruction; unsupported-format/axis rejection; literal default-variable + bitmap fixtures | 3/3 source; refreshed literal variable oracle execution blocked |
 | REQ-009 | `font_renderer_spec.spl`, backend font unit specs, `shared_font_surfaces_spec.spl`, `check-runtime-rocm-provider.shs`, and `check-rocm-engine2d-font-readback.shs` | live font-identity separation; bounded glyph-cache counters; backend-local atlas owner + generation; shared program-version/transform rejection; ROCm reject-to-CPU replay; hosted HIP/HIPRTC ABI, UUID identity, transfer/sync failure gates; exact straight-ARGB transparent/translucent pixels; admitted configured-font device readback; warm/dirty regions | source gate includes GPU-less ROCm invalid/uninitialized rejection and quad-zero CPU replay; mock libraries prove provider ABI plus exact C pixels but remain non-real; configured harness uses strict Engine2D, Required ROCm, exact CPU parity, immutable hashes, and retained provider/device provenance; rotation/skew/subpixel/nonuniform CTM stay unsupported and retained native AMD execution remains pending |
-| REQ-010 | `gpu_font_emission_spec.spl`, `cuda_generated_font_handoff_spec.spl`, plus portable toolchain checker | five source targets; exact shared HIP source identity; Vulkan contract; deterministic failures/hashes; selected-target bounded compilation; explicit candidate/validation/pin states; semantics revision; provenance-bound SPIR-V validation; native artifact exports the versioned font entry; source-tracked CUDA PTX binds immutable source/version/artifact hashes, ABI version, and compositor semantics revision; canonical construction rejects stale semantics without disabling primitive CUDA; tampering rejects before mutation; regenerated device readback matches the CPU oracle | static readiness separates validated semantics-2 CUDA/Vulkan candidates from pin admission and ignores unrequested toolchains; retained revision-1 pins remain fail-closed; admitted runner/glslc paths, regeneration, independent pin update, and CUDA/AMD device-readback PASS remain pending |
-| REQ-011 | `shared_font_surfaces_spec.spl`, `legacy_web_gui_wm_font_route_spec.spl`, production host route contract, and SimpleOS QEMU pixel oracle | Engine2D API compatibility; DrawIR/batch evidence; production Web/GUI/WM ownership; canonical SimpleOS pixels | canonical `taskbar-clock` WM DrawIR source route, 56x48 dynamic crop, and wrapper/kernel/FAT32 hash recomputation are source-covered; expected pixel hash, hosted image/motion/nested parity, and retained QEMU PASS pending |
+| REQ-010 | `gpu_font_emission_spec.spl`, `cuda_generated_font_handoff_spec.spl`, portable toolchain checker, and CUDA device readback checker | five source targets; exact shared HIP source identity; Vulkan contract; deterministic failures/hashes; selected-target bounded compilation; explicit candidate/validation/pin states; semantics revision; provenance-bound SPIR-V validation; strict final aggregate exit; native artifact exports the versioned font entry; source-tracked CUDA PTX binds immutable source/version/artifact hashes, ABI version, and compositor semantics revision; canonical construction rejects stale semantics without disabling primitive CUDA; tampering rejects before mutation; regenerated device readback matches the CPU oracle | current-host CUDA source generation is bound to a pure-Simple cached emitter, `nvcc` compiles and validates both artifacts, and exact device readback passes for the primitive kernels plus the four-pixel straight-ARGB font oracle with immutable PTX hashes and zero tolerance; retained font pin identity remains false, Vulkan compilation is unavailable on this host, and all three focused native spec cycles still exit 132 before a summary |
+| REQ-011 | `shared_font_surfaces_spec.spl`, `legacy_web_gui_wm_font_route_spec.spl`, production host route contract, and SimpleOS QEMU pixel oracle | Engine2D API compatibility; DrawIR/batch evidence; production Web/GUI/WM ownership; canonical-owner legacy atlas/pipeline dependency exclusion; canonical SimpleOS pixels | canonical-owner dependency exclusion, canonical `taskbar-clock` WM DrawIR source route, 56x48 dynamic crop, pinned cross-verified pixel hash, and wrapper/kernel/FAT32 hash recomputation are source-covered; hosted image/motion/nested parity and a current retained QEMU PASS remain pending |
 | REQ-012 | `native_gpu_font_readback_spec.spl` | HUD transform; world depth/transform; texture-to-readback chain | 3/3 source gates with facade selection, distinct HUD/world pipelines, atlas owner/generation/hash, fenced submission, and readback checks; native execution pending |
 | REQ-013 | `native_gpu_font_readback_spec.spl` | promoted backend pass; unavailable classification; fake proof rejection | 3/3 source gate: live tuple promotion, controlled unavailable classification, and forged-proof rejection are wired; retained native PASS is pending |
-| REQ-014 | seven present specs/manuals | zero-stub manuals; guide/notice freshness; evidence-recipe audit | 0/7 canonical manual regenerations accepted; seven drafts exist; no retained candidate currently reaches valid runner/docgen completion |
-| REQ-015 | `font_render_config_spec.spl`, `shared_font_surfaces_spec.spl`, and focused Engine2D/Engine3D font specs | validation and length-delimited identity; canonical `rocm` target with `hip` alias; bitmap/vector/shaped propagation; Suggested/Preferred/Required behavior; unsupported mode/CTM rejects before cache/backend mutation; legacy default equivalence | source includes ROCm/HIP identity and policy-plan cases; no admitted pure-Simple runner currently reaches test results; the pre-bridge full CLI is not acceptance evidence |
+| REQ-014 | eleven executable/manual pairs | zero-stub manuals; guide/notice freshness; evidence-recipe audit | 11/11 canonical manuals now regenerate with zero stubs and preserve module scope prose, but their executable specs remain unadmitted, so 0/11 pairs are accepted |
+| REQ-015 | `font_render_config_spec.spl`, `shared_font_surfaces_spec.spl`, and focused Engine2D/Engine3D font specs | validation and length-delimited identity; canonical `rocm` target with `hip` alias; bitmap/vector/shaped propagation; Suggested/Preferred/Required behavior; unsupported mode/CTM rejects before cache/backend mutation; legacy default equivalence | source includes ROCm/HIP identity and policy-plan cases; the reduced 2D spec links and the mutex receiver fault is fixed, but all three cycles still exit 132 before results |
 
 | NFR | Evidence | Pass condition | Current evidence |
 |---|---|---|---|
 | NFR-001 | `shared_font_manifest_spec.spl`, `simpleos_font_bundle_spec.spl`, and `scripts/os/simpleos_font_bundle_companion.sha256` | all immutable and byte-identical; host and SimpleOS corruption fail closed | source gates present; current pure-Simple execution pending |
-| NFR-002 | `native_gpu_font_readback_spec.spl` comparator | exact integer-alpha RGBA8; bounded documented AA edges | Vulkan promotion now requires exact packed-ARGB pixel-array equality; FNV64 remains a runtime diagnostic. v5 pins the exact comparator plus viewport, color/alpha/rounding, warmup, percentile, current host OS/architecture, and device/driver; retained native readback remains pending |
+| NFR-002 | `native_gpu_font_readback_spec.spl` comparator | exact integer-alpha RGBA8; bounded documented AA edges | Vulkan promotion now requires exact packed-ARGB pixel-array equality, including two same-position translucent HUD layers so the second blend exercises a translucent destination; FNV64 remains a runtime diagnostic. v5 pins the exact comparator plus viewport, color/alpha/rounding, warmup, percentile, current host OS/architecture, and device/driver; retained native readback remains pending |
 | NFR-003 | `shared_font_manifest_spec.spl` host total plus SimpleOS bundle/capacity checks | core fonts plus notices `<= 80 MiB`; SimpleOS projection fits FAT directory/image | source gates pin 59 host files and the 53-file/91-of-128-entry SimpleOS projection; current execution pending |
 | NFR-004 | `build/shared_multilingual_gpu_fonts_perf/evidence.env` | warm hits `>=95%`; p95 `<=4 ms` 1080p and `<=8 ms` 4K | record missing; pending |
 | NFR-005 | `build/shared_multilingual_gpu_fonts_perf/evidence.env` | 4,096 glyph end-to-end p95 `>=1.25x` CPU | record missing; pending |
@@ -183,9 +188,11 @@ collector produces a passing durable record.
 
 ## Environment and order
 
-Use the self-hosted release binary. Run the seven feature specs in this order:
-manifest, shaping, shared surfaces, legacy Web/GUI/WM route, emission, CUDA
-generated handoff, and native readback. Native specs require a declared promoted
+Use the self-hosted release binary. Run the eleven specs in this order: manifest,
+shaping, shared surfaces, legacy Web/GUI/WM route, emission, CUDA generated
+handoff, native readback, `selected_devanagari_spec.spl`,
+`selected_arabic_spec.spl`, `install_font_assets_spec.spl`, and
+`release_archive_layout_spec.spl`. Native specs require a declared promoted
 graphics backend/driver; other backends may provide compile-only rows. Pin
 fixtures, viewport, premultiplication, rounding, warmups, samples, and percentile
 method.
@@ -197,19 +204,22 @@ SIMPLE_NO_STUB_FALLBACK=1 bin/simple test <spec> --mode=native
 bin/simple spipe-docgen <spec> --output doc/06_spec --no-index
 ```
 
-Focused interpreter execution must reuse `build_interpreter_result_wrapper`
-through the pure test runner or `src/app/test/font_evidence_runner.spl`. The
-focused runner requires the selected pure-Simple binary as its first argument
-and invokes it on that wrapper instead of embedding a second compiler closure.
-The wrapper inspects the canonical spec module's `get_executed_test_count` and
-`get_exit_code` after execution.
-`CompileResult.Success` alone is inadmissible. The deliberate failing fixture
-must exit 1 with `test-runner: spec failed`; the zero-executed fixture must exit
-1 with `test-runner: no examples executed`. Reject 2/124/139 and retain exact
+Run that canonical `spipe-docgen` command for every executable/manual pair and
+accept a manual only when the command completes and reports zero stubs.
+
+Focused native execution must reuse `preprocess_spipe_native_result_file`
+through `src/app/test/font_evidence_runner.spl`. Supply the selected pure-Simple
+compiler path/SHA, core-C directory/archive SHA, and spec path. The runner must
+atomically create and hash a compiler-safe wrapper, recheck providers and the
+wrapper after build, and accept one exact native summary/completion marker.
+The deliberate failing fixture must exit 1 with exact
+`error: test-runner: spec failed`; the zero-executed fixture must exit 1 with
+`test-runner: no examples executed` and no completion marker. Reject
+2/124/132/139 and retain exact
 commands, runner SHA-256, and both logs under
 `build/test-artifacts/shared_multilingual_gpu_fonts/runner-calibration/` before
-any focused result counts. The runner remains `interpret-diagnostic` and cannot
-satisfy native or performance rows. Pinned release-artifact crash provenance
+any focused result counts. Runner calibration cannot satisfy canonical native
+or performance rows. Pinned release-artifact crash provenance
 and the distinct retained-candidate result are recorded in
 `doc/08_tracking/bug/deployed_selfhost_env_set_miscompile_segv_2026-07-14.md`.
 
@@ -228,7 +238,7 @@ compatibility bitmap renderers as supporting evidence rather than PASS.
 
 ## Pass/fail
 
-Pass requires every REQ/NFR row above, seven zero-stub manuals, one real promoted
+Pass requires every REQ/NFR row above, eleven zero-stub manuals, one real promoted
 graphics backend for both 2D and 3D, and all selected thresholds. Missing
 hardware is not a failure for non-promoted rows, but no promoted native row is a
 release failure. Placeholder assertions, environment-only payloads, mirrors, or

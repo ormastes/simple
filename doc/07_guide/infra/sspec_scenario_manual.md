@@ -425,7 +425,7 @@ diagram manually using the `<!-- sdn-diagram:id=... -->` format. See
 
 After writing or changing a scenario:
 
-1. Generate the doc with `bin/simple spipe-docgen <spec> --output doc/06_spec`.
+1. Generate the doc with `bin/simple spipe-docgen <spec> --output doc/06_spec --no-index`.
 2. Run `bin/simple md-diagram-update` to render diagram placeholders.
 3. Read the generated doc as if it were a hand-written manual.
 4. Check that the summary card (title, overview, diagram, stats) is readable

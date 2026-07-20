@@ -10,8 +10,9 @@ use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus}
 use std.gc_async_mut.gpu.engine2d.opencl_session.{OpenClSession}
 use std.gpu.engine2d.sffi_opencl.{OpenClFfi}
 use std.gpu.engine2d.helpers_text.{text_blit_buffer, text_transparent_blit_buffer}
-use std.common.gpu.font_atlas_composite.{font_atlas_composite_opencl_source, font_atlas_composite_program_version_valid}
-use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch}
+use std.common.gpu.font_atlas_composite.{font_atlas_composite_opencl_source, font_atlas_composite_program_version_valid, font_atlas_composite_cache_identity}
+use std.common.crypto.sha256.{sha256_text}
+use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, font_render_batch_atlas_owner_identity}
 use std.gpu.engine2d.backend_emu.{
     emu_draw_ellipse, emu_draw_ellipse_filled,
     emu_draw_arc, emu_draw_bezier,
@@ -321,6 +322,7 @@ class OpenClBackend:
     font_atlas_bytes: i64
     font_atlas_generation: i64
     font_atlas_owner_identity: text
+    font_artifact_sha256: text
     device_current: bool
     mirror_current: bool
     last_probe: BackendProbeResult
@@ -341,6 +343,7 @@ class OpenClBackend:
             font_atlas_bytes: 0,
             font_atlas_generation: -1,
             font_atlas_owner_identity: "",
+            font_artifact_sha256: "",
             device_current: false,
             mirror_current: true,
             last_probe: BackendProbeResult.unavailable("opencl", "not probed")
@@ -420,6 +423,7 @@ class OpenClBackend:
         self.font_atlas_bytes = 0
         self.font_atlas_generation = -1
         self.font_atlas_owner_identity = ""
+        self.font_artifact_sha256 = ""
         self.framebuffer_bytes = 0
         self.device_current = false
         self.mirror_current = true
@@ -523,7 +527,25 @@ class OpenClBackend:
             return false
         val pixel_count = pixel_count_i64 as i32
         val required_bytes = pixel_count_i64 * 4
-        val owner_identity = batch.atlas_owner_identity()
+        val device_features = if self.session.platform > 0:
+            "platform=" + self.session.platform.to_string()
+        else: ""
+        if self.font_artifact_sha256 == "" and self.session.program > 0:
+            val source_sha256 = sha256_text(opencl_2d_generated_source())
+            if source_sha256.len() == 64:
+                self.font_artifact_sha256 = source_sha256
+        val artifact_identity = if self.session.program > 0 and self.font_artifact_sha256.len() == 64:
+            "source-sha256=" + self.font_artifact_sha256 + ";program=" + self.session.program.to_string()
+        else: ""
+        val dependency_identity = if self.session.context > 0 and self.session.queue > 0 and self.session.generation > 0:
+            "context=" + self.session.context.to_string() + ";queue=" + self.session.queue.to_string() +
+                ";generation=" + self.session.generation.to_string()
+        else: ""
+        val owner_identity = font_atlas_composite_cache_identity(
+            font_render_batch_atlas_owner_identity(batch), "opencl", device_features,
+            artifact_identity, dependency_identity)
+        if owner_identity == "":
+            return false
         var allocated = false
         if self.font_atlas_buffer == 0 or self.font_atlas_host_ptr == 0 or self.font_atlas_bytes != required_bytes:
             val new_host = opencl_host_alloc(required_bytes)

@@ -86,7 +86,7 @@ and two rank-eleven Bengali faces remain candidates.
 49 paths derived from the 16 candidate binary/metadata/license/notice fields,
 plus `CORPUS.sdn` and seven pinned CLDR resources. The distribution-size gate
 requires that exact 57-path set, then counts root `LICENSE` and
-`THIRD_PARTY_NOTICES.md`: 59 files and 53,433,272 bytes against the 80 MiB
+`THIRD_PARTY_NOTICES.md`: 59 files and 53,433,279 bytes against the 80 MiB
 ceiling.
 Before its first font copy, the release installer rejects a wrong pin count,
 missing or extra source paths, missing bytes, or a source hash mismatch. It
@@ -105,7 +105,7 @@ registry-owned relative asset path; unmanaged paths are never redirected.
 Installed paths do not create a second catalog or change pinned identities.
 SimpleOS images use the OS-owned `simpleos_font_bundle_entries()` projection:
 all 50 Google Fonts files, the CLDR license, root `LICENSE`, and
-`THIRD_PARTY_NOTICES.md` (53 files / 51,932,523 bytes). The six CLDR
+`THIRD_PARTY_NOTICES.md` (53 files / 51,932,530 bytes). The six CLDR
 XML/tag/source/ranking inputs stay host-build evidence because the guest uses
 the compiled ranking, not those inputs. Existing TTF long paths and 8.3 aliases
 remain unchanged; metadata, licenses, corpus, and notices use unique 8.3
@@ -275,6 +275,8 @@ ROCm keeps its atlas inside one backend lifetime and releases it with the HIP
 module at shutdown.
 Configuration identity now invalidates and keys canonical glyph material and
 is length-delimited into shaped-run keys and every configured batch/atlas owner.
+Shared multi-face batches carry the renderer's explicit atlas-owner generation;
+a caller-supplied `font-faces-v1` string cannot claim shared ownership.
 `FontRenderBatch.material_supported()` rejects unknown atlas-composite program
 versions and noncanonical transforms before Engine2D or Engine3D mutation.
 Remaining REQ-009 gaps are runtime compiled-artifact identity, resolved-run and
@@ -439,14 +441,13 @@ not copy them into a package, pass their adjacent self-reported hash as trust,
 or configure a production process to load them directly. A future external
 package route must authenticate its own manifest and bytes before calling the
 same installer.
-On the current promotion host, a fresh semantics-revision-2 CUDA/Vulkan
-candidate generation attempt is bounded to one invocation:
+On the current promotion host, a fresh semantics-revision-2 Vulkan candidate
+generation attempt is bounded to one invocation:
 
 ```sh
-CUDA_ARCH=compute_75 \
-  SIMPLE_BIN="$PURE_SIMPLE_BIN" SIMPLE_RUNTIME_BIN="$PURE_SIMPLE_BIN" \
+SIMPLE_BIN="$PURE_SIMPLE_BIN" SIMPLE_RUNTIME_BIN="$PURE_SIMPLE_BIN" \
   VULKAN_GLSLC_TOOL="$PINNED_GLSLC" \
-  PORTABLE_COMPUTE_TARGETS=cuda,vulkan \
+  PORTABLE_COMPUTE_TARGETS=vulkan \
   PORTABLE_COMPUTE_EXPECTED_SEMANTICS=2 \
   BUILD_DIR=build/portable_compute_toolchains-semantics2 \
   REPORT_PATH=build/portable_compute_toolchains-semantics2/report.md \
@@ -454,11 +455,33 @@ CUDA_ARCH=compute_75 \
 ```
 
 Both variable paths must be defined by the operator and name current, admitted
-binaries; this host does not currently provide a `PINNED_GLSLC` value. The
+binaries. This host provides the package-owned Android NDK r26b compiler at
+`/usr/lib/android-sdk/ndk/26.2.11394342/shader-tools/linux-x86_64/glslc`
+(`shaderc v2022.3 ndk-r26b`, SHA-256
+`2f00c0017d229c844b9da018e3c5170f8ada6db786d9e49cce002d483d9c05bd`). The
 authoritative result is
 `build/portable_compute_toolchains-semantics2/evidence.env`, not the checker
-exit alone. CUDA and Vulkan compilers plus `spirv-val` run through bounded
-timeouts, and the requested-target aggregate ignores unrequested toolchains.
+exit alone. The Vulkan compiler and `spirv-val` run through bounded timeouts,
+and the requested-target aggregate ignores unrequested toolchains.
+On ELF/glibc hosts, a resolved native-ELF `glslc` candidate runs `--version`
+under a clean `LD_DEBUG=libs` loader environment. A dynamically linked producer
+records the initialized `libshaderc` real path and SHA-256 and rejects an
+operator-supplied `VULKAN_GLSLC_LIBRARY_PATH` mismatch. A statically linked
+producer is admitted only when ELF linkage records no `libshaderc` dependency,
+neither compile loads one, and the compiler SHA-256 remains unchanged before
+and after both compiles. Both modes retain loader-log SHA-256 evidence. The exact canonical
+GLSL is compiled independently to A/B SPIR-V files; unequal SHA-256 values or
+bytes reject the candidate before validation or pin comparison. Other host
+loaders fail closed until they have an equivalent tracer; `glslangValidator`
+is diagnostic-only and cannot produce an admitted Vulkan font candidate.
+
+The retained semantics-revision-2 candidate uses source SHA-256
+`ee0e8a35748553891fc82013b09e96abf569072630fed0333e469f20cc1c1162`.
+The NDK compiler produces byte-identical 10,884-byte SPIR-V twice with SHA-256
+`ca5a3d644e5d4dd1c3b6d453be4db252f8ed7b9d65b78e2f7ae37c17769dc55d`;
+`spirv-val --target-env vulkan1.1` passes. This is candidate evidence only:
+the retained revision-1 pins remain authoritative until device-origin font
+readback and CPU-oracle parity pass.
 
 Admission has two explicit phases. Candidate generation requires semantics
 revision 2, `candidate_compiled=true`, and `artifact_validated=true`, including
@@ -466,8 +489,21 @@ revision 2, `candidate_compiled=true`, and `artifact_validated=true`, including
 the retained revision-1 pins, the expected result is
 `pinned_verified=false`; that is a reviewable candidate, not promotion. After
 independent review updates the tracked source/artifact pins and embedded
-companions, a fresh run must reproduce the same tuple and set
+companion, a fresh run must reproduce the same tuple and set
 `pinned_verified=true`. Never update pins merely to make the first run green.
+After the reviewed Vulkan pins and embedded companion are updated, rerun with
+both `PORTABLE_COMPUTE_TARGETS=vulkan` and
+`PORTABLE_COMPUTE_REQUIRE_VERIFIED=1`. Strict mode still writes the
+report and `evidence.env`, then exits nonzero unless both candidate validation
+and pin verification are true. Its zero-tool predicate check is:
+
+```sh
+sh scripts/check/check-portable-compute-toolchains.shs --strict-result-self-test
+```
+
+If `PORTABLE_COMPUTE_TARGETS=cuda,vulkan` is requested instead, strict mode
+requires validated, pinned companions for both targets.
+
 Metal compiles the exact common MSL helper as an optional separate pipeline,
 uses the fixed 13-word/52-byte parameter block, full-uploads changed atlas
 generations, and dispatches completed 64-thread groups per quad. Only native
@@ -547,7 +583,10 @@ This source path is implemented but not promoted as native evidence until the
 conditional device test runs and reports device-origin readback.
 
 Vulkan has a canonical `FontRenderBatch` adapter beside the other Engine2D
-adapters. Session initialization examines the 10,772-byte embedded SPIR-V for
+adapters. The public Vulkan backend initializes and retains the existing
+`VulkanSession`; that one owner supplies the established primitive pipelines,
+font pipeline, selected device type, and driver identity. Session initialization
+examines the 10,772-byte embedded SPIR-V for
 the common GLSL `main` entry (SHA-256
 `e25d25b8157fc2554822637603471a442f678eb58e20da167bfb023d7577880a`), but its
 semantics revision 1 is stale and installation rejects it before native
@@ -692,14 +731,22 @@ and a host-side image hash are not guest rendering evidence.
 The pure-Simple builders own the canonical path. The still-live C image writer
 mirrors the readable names and fixed short aliases for compatibility with its
 existing toolchain/evidence image callers.
-The x86_64 SimpleOS witness is now the existing 12 px `taskbar-clock` command in the
+On AArch64 the canonical desktop source route attaches that existing VirtIO-BLK
+FAT32 image, resets stale VFS state, and attempts to mount it and register the
+selected catalog before Engine2D creation. A failed mount or post-mount
+executable probe clears VFS readiness. Host image acceptance requires `mtype` extraction plus
+an exact 1,708,408-byte SHA-256 check; missing tools fail closed. RV64 remains
+on its existing bitmap path because the initializer is ARM-only and the current
+64 KiB runtime heap cannot carry this vector-font bootstrap. Both canonical ARM
+scenario contracts require the exact successful registration marker; bitmap
+fallback cannot satisfy them.
+The x86_64 SimpleOS witness is the existing 12 px `taskbar-clock` command in the
 real `SharedWmScene -> DrawIrComposition -> Engine2D` frame; the private
-post-frame `A`/32 px draw was deleted. The fullscreen QEMU wrapper captures the
-dynamic rightmost 56x48 slot (8,064 RGB bytes) and retains the candidate hash,
-and retained consumers now require the canonical wrapper, kernel ELF, and
-FAT32 image paths with independently recomputed SHA-256 values. The expected
-pixel hash is intentionally unset until a trusted QEMU run records it. Source
-routing and artifact binding are complete; REQ-011 pixel promotion remains unavailable.
+post-frame `A`/32 px draw was deleted. The fullscreen QEMU wrapper is configured
+to capture the dynamic rightmost 56x48 slot (8,064 RGB bytes), and retained
+consumers require the canonical wrapper, kernel ELF, and FAT32 image paths with
+independently recomputed SHA-256 values. No current retained guest/`pmemsave`
+PASS bundle proves the crop, so REQ-011 pixel promotion remains unavailable.
 Do not add another font draw path or reuse Engine3D HUD/world.
 
 ## Completion workflow
@@ -758,7 +805,7 @@ native device-loss injection remains the NFR-007 execution gate.
 
 Keep the five primary SSpec steps exact: `Load the pinned multilingual
 font manifest`; `Accept exact-face-bound simple-script shaping`; `Prepare one
-shared font batch for 2D and 3D`; `Emit the selected font composite program and
+shared font batch for 2D`; `Emit the selected font composite program and
 plan compilation`; `Prove native submission and device readback`. Resolved-host,
 completion, and folded secondary detail steps use the vocabulary recorded in
 the authoritative system-test plan below.
@@ -772,28 +819,37 @@ SIMPLE_NO_STUB_FALLBACK=1 bin/simple test test/03_system/app/simple_2d/feature/s
 SIMPLE_NO_STUB_FALLBACK=1 bin/simple test test/03_system/app/simple_2d/feature/gpu_font_emission_spec.spl --mode=native
 ```
 
+For each of the 11 pairs in the authoritative plan, generate its mirrored
+scenario manual after that executable spec passes with
+`bin/simple spipe-docgen <spec> --output doc/06_spec --no-index`. Accept the
+manual only when docgen reports completion with `0 stubs`, it reads as a useful
+operator manual, and `find doc/06_spec -name '*_spec.spl' | wc -l` prints `0`.
+
 Interpreter runs are diagnostics only. These native source gates still do not
 substitute for submission, SimpleOS pixel, Engine3D, or performance gates.
 
-A focused runner invoking a selected pure-Simple runtime is trustworthy only
-when its wrapper checks `get_executed_test_count` and `get_exit_code` inside the
-interpreted source;
-`CompileResult.Success` by itself is false green for matcher failures. The fail
-fixture must exit 1 with `test-runner: spec failed`; the empty fixture must exit
-1 with `test-runner: no examples executed`. Reject 2/124/139 and retain exact
-commands, runner SHA-256, and both logs under
+A focused runner is trustworthy only when it receives the admitted pure-Simple
+compiler path and SHA-256, core-C runtime directory and archive SHA-256, and the
+spec path. `font_evidence_runner.spl` atomically creates a compiler-safe native
+wrapper, verifies its hash and the provider identities before and after build,
+and admits one exact summary/completion marker. The fail fixture must exit 1
+with the exact `error: test-runner: spec failed` suffix; the empty fixture must
+exit 1 with `test-runner: no examples executed` and no completion marker.
+Reject 2/124/132/139 and retain exact commands, runner SHA-256, and logs under
 `build/test-artifacts/shared_multilingual_gpu_fonts/runner-calibration/`.
-The result may be labeled only
-`interpret-diagnostic`; it cannot promote manifest, native GPU, SimpleOS pixel,
-Engine3D, or performance evidence. Use the two calibration fixtures under
-`scripts/check/fixtures/font_evidence_runner_{fail,empty}_spec.spl`.
-The pure runner and focused runner share
-`std.test_runner.test_result_wrapper.build_interpreter_result_wrapper`; do not
-fork another harness or bypass its summary and fail-closed checks.
-Pass the exact admitted pure-Simple CLI as the focused runner's first argument;
-the second argument is the spec path. It deliberately has no implicit binary
-fallback. The runner preserves child stdout/stderr, maps only an explicit
-timeout marker to 124, and reports launch failure as 1.
+Calibration alone may be labeled only `native-runner-calibration`; it cannot
+promote manifest, native GPU, SimpleOS pixel, Engine3D, or performance evidence.
+The generated native `fail(...)` helper records the assertion and immediately
+exits 1. Falling through from a return-valued helper can otherwise replace an
+ordinary missing-fixture failure with a nil-field SIGILL, which is never valid
+test evidence.
+Use the pass/fail/empty calibration fixtures under
+`scripts/check/fixtures/font_evidence_runner_{pass,fail,empty}_spec.spl`.
+The focused runner uses
+`std.test_runner.test_result_wrapper.preprocess_spipe_native_result_file`; do
+not fork another harness or bypass its summary and fail-closed checks. It has no
+implicit compiler/runtime fallback, preserves child stdout/stderr, maps timeout
+to 124, and reports launch/build failure as nonzero.
 
 Run each acceptance gate once per session. Unavailable hardware or the stale
 self-hosted runtime is a blocker record, never a synthetic PASS.

@@ -5,6 +5,8 @@ use std.gpu.engine3d.vulkan_font_adapter.{vulkan_font_atlas_upload_required}
 use std.gpu.engine3d.font_vulkan_spirv.{font_vulkan_fragment_spirv}
 use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad}
 use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.gpu.font_atlas_composite.{font_atlas_composite_cache_identity}
+use std.io_runtime.{file_read}
 
 fn _u32_le(bytes: [u8], offset: i64) -> u32:
     bytes[offset].to_u32() | (bytes[offset + 1].to_u32() << 8u32) |
@@ -15,23 +17,44 @@ fn _hud_batch(quad: FontRenderQuad) -> FontRenderBatch:
         atlas_pixels: [0u32; 8], quads: [quad], atlas_generation: 1, dirty_rects: [])
 
 describe "Engine3D Vulkan font atlas identity":
+    it "fences the atlas cache with Vulkan graphics target and session identity":
+        val source = file_read("src/lib/gc_async_mut/gpu/engine3d/vulkan_font_adapter.spl")
+        expect source to_contain "font_atlas_composite_cache_identity("
+        expect source to_contain "font_render_batch_atlas_owner_identity(batch), \"vulkan3d\", device_features"
+        expect source to_contain "if (self.font_artifact_sha256 == \"\""
+        expect(source.index_of("if (self.font_artifact_sha256 == \"\"") < source.index_of("sha256_u8_hex(font_hud_vulkan_vertex_spirv())")).to_equal(true)
+        expect(source.split("sha256_u8_hex(font_hud_vulkan_vertex_spirv())").len()).to_equal(2)
+        expect(source.split("sha256_u8_hex(font_world_vulkan_vertex_spirv())").len()).to_equal(2)
+        expect(source.split("sha256_u8_hex(font_vulkan_fragment_spirv())").len()).to_equal(2)
+        expect source to_contain "sha256_u8_hex(font_hud_vulkan_vertex_spirv())"
+        expect source to_contain "sha256_u8_hex(font_world_vulkan_vertex_spirv())"
+        expect source to_contain "sha256_u8_hex(font_vulkan_fragment_spirv())"
+        expect source to_contain "self.font_artifact_sha256 + \";hud=\""
+        expect source to_contain "artifact_identity, dependency_identity"
+        expect source to_contain "self.font_artifact_sha256 = \"\""
+        expect(source.contains("val artifact_identity = if self.backend.pipeline_native_handle(self.hud_pipeline) > 0 and self.backend.pipeline_native_handle(self.world_pipeline) > 0:\n            \"hud=\"")).to_equal(false)
+
     it "pins the fragment shader that discards zero-coverage depth fragments":
         val fragment = font_vulkan_fragment_spirv()
         expect fragment.len() to_equal 1180
         expect sha256_u8_hex(fragment) to_equal "f4d2dd66dc65502c94a9c90bae1cb4681fa3b55d2fd8ea34605960fde9312ab4"
 
-    it "reuploads when owner or dependency generation changes":
+    it "reuploads when any target identity component or generation changes":
         val batch = FontRenderBatch(program_version: 1, font_identity: "face-a", face_generation: 3,
             valid: true, atlas_width: 2, atlas_height: 4,
             atlas_pixels: [0u32; 8], quads: [], atlas_generation: 7, dirty_rects: [])
-        val owner = batch.atlas_owner_identity()
+        val material = batch.atlas_owner_identity()
+        val owner = font_atlas_composite_cache_identity(material, "vulkan3d", "device", "artifact", "dependency")
         val other = FontRenderBatch(program_version: 1, font_identity: "face-b", face_generation: 3,
             valid: true, atlas_width: 2, atlas_height: 4,
             atlas_pixels: [0u32; 8], quads: [], atlas_generation: 7, dirty_rects: [])
-        expect vulkan_font_atlas_upload_required(owner, 7, batch) to_equal false
-        expect vulkan_font_atlas_upload_required(owner, 6, batch) to_equal true
-        expect vulkan_font_atlas_upload_required(other.atlas_owner_identity(), 7, batch) to_equal true
-        expect vulkan_font_atlas_upload_required("", -1, batch) to_equal true
+        expect vulkan_font_atlas_upload_required(owner, 7, owner, batch) to_equal false
+        expect vulkan_font_atlas_upload_required(owner, 6, owner, batch) to_equal true
+        expect vulkan_font_atlas_upload_required(owner, 7, font_atlas_composite_cache_identity(other.atlas_owner_identity(), "vulkan3d", "device", "artifact", "dependency"), batch) to_equal true
+        expect vulkan_font_atlas_upload_required(owner, 7, font_atlas_composite_cache_identity(material, "vulkan3d", "device-2", "artifact", "dependency"), batch) to_equal true
+        expect vulkan_font_atlas_upload_required(owner, 7, font_atlas_composite_cache_identity(material, "vulkan3d", "device", "artifact-2", "dependency"), batch) to_equal true
+        expect vulkan_font_atlas_upload_required(owner, 7, font_atlas_composite_cache_identity(material, "vulkan3d", "device", "artifact", "dependency-2"), batch) to_equal true
+        expect vulkan_font_atlas_upload_required("", -1, "", batch) to_equal true
 
 describe "Engine3D Metal font HUD material":
     it "shares one canonical vertex stream across native backends":

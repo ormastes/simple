@@ -44,8 +44,17 @@ Bypass temporarily: `--no-cover-check`
 
 ## Spec Doc Generation
 
-`bin/simple spec-gen [path]` extracts doc comments from `*_spec.spl` files into `doc/06_spec/`.
-Generated specs preserve source path hierarchy and always end with `_spec.md`.
+`bin/simple spec-gen [path]` is the legacy extractor for doc comments in
+`*_spec.spl` files. Scenario-based SSpec manuals use the canonical generator:
+
+```bash
+bin/simple spipe-docgen <spec> --output doc/06_spec --no-index
+```
+
+Accept an SSpec manual only when generation completes with 0 stubs, then review
+the rendered manual for operator-flow quality. Generated specs preserve source
+path hierarchy and normally end with `_spec.md`; the suffix alone does not say
+which generator owns the file.
 Path mapping: `test/01_unit/compiler/parser/x_spec.spl` -> `doc/06_spec/01_unit/compiler/parser/x_spec.md`
 See `doc/06_spec/FILE.md` for generated-vs-manual rules.
 

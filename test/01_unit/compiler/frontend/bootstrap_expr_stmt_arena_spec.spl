@@ -1,0 +1,241 @@
+# Bootstrap expression/statement native-arena regression.
+#
+# @cover src/compiler/10.frontend/core/_AstExpr/nodes.spl
+# @cover src/compiler/10.frontend/core/_AstExpr/accessors.spl
+# @cover src/compiler/10.frontend/core/ast_stmt.spl
+
+use compiler.core.ast.{
+    ast_reset,
+    EXPR_IDENT, EXPR_INT_LIT, EXPR_METHOD_CALL, EXPR_PASS, EXPR_STRING_LIT, expr_count, expr_int_lit, expr_get_args, expr_get_int, expr_get_left, expr_get_str, expr_get_tag,
+    STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, stmt_count, stmt_expr_stmt, stmt_get_expr, stmt_get_name, stmt_get_tag,
+    DECL_IMPL, arm_get_body, decl_get_body, decl_get_param_muts, decl_get_param_names,
+    decl_get_tag, module_get_decls
+}
+use compiler.core.parser.{parser_has_errors, parser_init_with_path}
+use compiler.core.parser_decls.{parse_module_body}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value: text) -> bool
+
+describe "bootstrap expression and statement native arenas":
+    it "ignores stale environment counters and fields":
+        val old_bootstrap = rt_env_get("SIMPLE_BOOTSTRAP") ?? ""
+        val old_native_arena = rt_env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? ""
+        val old_expr_count = rt_env_get("SIMPLE_BOOTSTRAP_EXPR_COUNT") ?? ""
+        val old_expr_tag = rt_env_get("SIMPLE_BOOTSTRAP_EXPR_0_TAG") ?? ""
+        val old_expr_int = rt_env_get("SIMPLE_BOOTSTRAP_EXPR_0_I") ?? ""
+        val old_stmt_count = rt_env_get("SIMPLE_BOOTSTRAP_STMT_COUNT") ?? ""
+        val old_stmt_tag = rt_env_get("SIMPLE_BOOTSTRAP_STMT_0_TAG") ?? ""
+        val old_stmt_expr = rt_env_get("SIMPLE_BOOTSTRAP_STMT_0_EXPR") ?? ""
+
+        expect(rt_env_set("SIMPLE_BOOTSTRAP", "1")).to_equal(true)
+        expect(rt_env_set("SIMPLE_NATIVE_ARENA_DECLS", "1")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_EXPR_COUNT", "1706")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_EXPR_0_TAG", "999")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_EXPR_0_I", "999")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_STMT_COUNT", "1756")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_STMT_0_TAG", "999")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_STMT_0_EXPR", "999")).to_equal(true)
+
+        ast_reset()
+        val expression = expr_int_lit(42, 7)
+        val statement = stmt_expr_stmt(expression, 8)
+
+        expect(expression).to_equal(0)
+        expect(statement).to_equal(0)
+        expect(expr_count()).to_equal(1)
+        expect(stmt_count()).to_equal(1)
+        expect(expr_get_tag(expression)).to_equal(EXPR_INT_LIT)
+        expect(expr_get_int(expression)).to_equal(42)
+        expect(stmt_get_tag(statement)).to_equal(STMT_EXPR)
+        expect(stmt_get_expr(statement)).to_equal(expression)
+        expect(rt_env_get("SIMPLE_BOOTSTRAP_EXPR_COUNT")).to_equal("1706")
+        expect(rt_env_get("SIMPLE_BOOTSTRAP_STMT_COUNT")).to_equal("1756")
+
+        ast_reset()
+        expect(expr_int_lit(7, 0)).to_equal(0)
+        expect(stmt_expr_stmt(0, 0)).to_equal(0)
+
+        ast_reset()
+        expect(rt_env_set("SIMPLE_BOOTSTRAP", old_bootstrap)).to_equal(true)
+        expect(rt_env_set("SIMPLE_NATIVE_ARENA_DECLS", old_native_arena)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_EXPR_COUNT", old_expr_count)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_EXPR_0_TAG", old_expr_tag)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_EXPR_0_I", old_expr_int)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_STMT_COUNT", old_stmt_count)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_STMT_0_TAG", old_stmt_tag)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_STMT_0_EXPR", old_stmt_expr)).to_equal(true)
+
+describe "bootstrap declaration arena ownership", tag: ["only-compiled"]:
+    it "does not retain a prior module body across reset":
+        val large_source = "fn large_body():\n" +
+            "    1\n    2\n    3\n    4\n" +
+            "    5\n    6\n    7\n    8\n"
+        val large_module = parse_and_build_module(large_source, "large_body.spl")
+        val large_fn = large_module.functions["large_body"] ?? panic("missing large_body")
+        expect(large_fn.body.stmts.len()).to_equal(8)
+
+        val small_source = "fn small_body():\n    9\n"
+        val small_module = parse_and_build_module(small_source, "small_body.spl")
+        val small_fn = small_module.functions["small_body"] ?? panic("missing small_body")
+        expect(small_fn.body.stmts.len()).to_equal(1)
+
+    it "ignores a stale mirrored declaration tag in the bridge":
+        val old_bootstrap = rt_env_get("SIMPLE_BOOTSTRAP") ?? ""
+        val old_native_arena = rt_env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? ""
+        val old_decl_tag = rt_env_get("SIMPLE_BOOTSTRAP_DECL_TAG_0") ?? ""
+        expect(rt_env_set("SIMPLE_BOOTSTRAP", "1")).to_equal(true)
+        expect(rt_env_set("SIMPLE_NATIVE_ARENA_DECLS", "1")).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_DECL_TAG_0", "1")).to_equal(true)
+
+        val source = "trait CurrentTrait:\n" +
+            "    fn current_method() -> i64:\n" +
+            "        42\n"
+        val module = parse_and_build_module(source, "current_trait.spl")
+        expect(module.traits.contains("CurrentTrait")).to_equal(true)
+        expect(module.functions.contains("CurrentTrait")).to_equal(false)
+
+        ast_reset()
+        expect(rt_env_set("SIMPLE_BOOTSTRAP", old_bootstrap)).to_equal(true)
+        expect(rt_env_set("SIMPLE_NATIVE_ARENA_DECLS", old_native_arena)).to_equal(true)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP_DECL_TAG_0", old_decl_tag)).to_equal(true)
+
+describe "fat-arrow match arm arenas":
+    it "stores arrow expressions as statement nodes":
+        val source = "enum Mode:\n    A\n    B\n" +
+            "fn mode_name(mode: Mode) -> text:\n" +
+            "    return match mode:\n" +
+            "        Mode.A => \"A\"\n" +
+            "        Mode.B => \"B\"\n"
+        parser_init_with_path(source, "fat_arrow_match.spl")
+        parse_module_body()
+
+        val declarations = module_get_decls()
+        val function_body = decl_get_body(declarations[1])
+        val match_expr = stmt_get_expr(function_body[0])
+        val arms = expr_get_args(match_expr)
+        val first_arm_body = arm_get_body(arms[0])
+        val second_arm_body = arm_get_body(arms[1])
+
+        expect(first_arm_body.len()).to_equal(1)
+        expect(second_arm_body.len()).to_equal(1)
+        expect(stmt_get_tag(first_arm_body[0])).to_equal(STMT_EXPR)
+        expect(stmt_get_tag(second_arm_body[0])).to_equal(STMT_EXPR)
+        expect(expr_get_tag(stmt_get_expr(first_arm_body[0]))).to_equal(EXPR_STRING_LIT)
+        expect(expr_get_tag(stmt_get_expr(second_arm_body[0]))).to_equal(EXPR_STRING_LIT)
+        ast_reset()
+
+describe "bootstrap impl-method mutable parameters":
+    it "parses and aligns a later mut parameter after implicit self":
+        val source = "class MutCounter:\n" +
+            "    marker: i64\n" +
+            "impl MutCounter:\n" +
+            "    fn count(inst: i64, mut counts: Dict<i64, i64>):\n" +
+            "        counts[inst] = self.marker\n"
+        parser_init_with_path(source, "mut_method_param.spl")
+        parse_module_body()
+
+        expect(parser_has_errors()).to_equal(false)
+        val declarations = module_get_decls()
+        expect(declarations.len()).to_equal(2)
+        expect(decl_get_tag(declarations[1])).to_equal(DECL_IMPL)
+        val methods = decl_get_body(declarations[1])
+        expect(methods.len()).to_equal(1)
+        val names = decl_get_param_names(methods[0])
+        val muts = decl_get_param_muts(methods[0])
+        expect(names.len()).to_equal(3)
+        expect(names[0]).to_equal("self")
+        expect(names[1]).to_equal("inst")
+        expect(names[2]).to_equal("counts")
+        expect(muts.len()).to_equal(3)
+        expect(muts[0]).to_equal(0)
+        expect(muts[1]).to_equal(0)
+        expect(muts[2]).to_equal(1)
+        ast_reset()
+
+describe "bootstrap keyword-named parameters":
+    it "uses loop as an identifier unless a colon starts a loop expression":
+        val source = "class LoopProbe:\n" +
+            "    header: i64\n" +
+            "fn loop_header(loop: LoopProbe) -> i64:\n" +
+            "    loop.header\n"
+        parser_init_with_path(source, "loop_keyword_param.spl")
+        parse_module_body()
+
+        expect(parser_has_errors()).to_equal(false)
+        ast_reset()
+
+describe "bootstrap mutable method spellings":
+    it "accepts the established explicit me fn spelling":
+        val source = "class MutFnProbe:\n" +
+            "    value: i64\n" +
+            "    me fn set(value: i64):\n" +
+            "        self.value = value\n"
+        parser_init_with_path(source, "me_fn_method.spl")
+        parse_module_body()
+
+        expect(parser_has_errors()).to_equal(false)
+        ast_reset()
+
+describe "bootstrap Some destructuring bindings":
+    it "desugars an irrefutable Some payload to unwrap":
+        val source = "fn unwrap_present(maybe: i64?) -> i64:\n" +
+            "    if not maybe.?:\n" +
+            "        return 0\n" +
+            "    val Some(value) = maybe\n" +
+            "    value\n"
+        parser_init_with_path(source, "some_destructure_binding.spl")
+        parse_module_body()
+
+        expect(parser_has_errors()).to_equal(false)
+        val declarations = module_get_decls()
+        val body = decl_get_body(declarations[0])
+        expect(stmt_get_tag(body[1])).to_equal(STMT_VAL_DECL)
+        expect(stmt_get_name(body[1])).to_equal("value")
+        val unwrapped = stmt_get_expr(body[1])
+        expect(expr_get_tag(unwrapped)).to_equal(EXPR_METHOD_CALL)
+        expect(expr_get_str(unwrapped)).to_equal("unwrap")
+        expect(expr_get_tag(expr_get_left(unwrapped))).to_equal(EXPR_IDENT)
+        expect(expr_get_str(expr_get_left(unwrapped))).to_equal("maybe")
+        ast_reset()
+
+    it "preserves mutable Some payload bindings":
+        val source = "fn unwrap_mutable(maybe: i64?) -> i64:\n" +
+            "    var Some(value) = maybe\n" +
+            "    value\n"
+        parser_init_with_path(source, "some_mutable_binding.spl")
+        parse_module_body()
+
+        expect(parser_has_errors()).to_equal(false)
+        val body = decl_get_body(module_get_decls()[0])
+        expect(stmt_get_tag(body[0])).to_equal(STMT_VAR_DECL)
+        expect(stmt_get_name(body[0])).to_equal("value")
+        ast_reset()
+
+    it "recovers malformed Some bindings without reparsing the initializer":
+        val source = "fn invalid_some(maybe: i64?) -> i64:\n" +
+            "    val Some() = maybe\n" +
+            "    42\n"
+        parser_init_with_path(source, "invalid_some_binding.spl")
+        parse_module_body()
+
+        expect(parser_has_errors()).to_equal(true)
+        val body = decl_get_body(module_get_decls()[0])
+        expect(body.len()).to_equal(2)
+        expect(stmt_get_tag(body[0])).to_equal(STMT_EXPR)
+        expect(expr_get_tag(stmt_get_expr(body[0]))).to_equal(EXPR_PASS)
+        ast_reset()
+
+    it "keeps Some as an ordinary binding name without parentheses":
+        val source = "fn bind_some_name(maybe: i64?) -> i64?:\n" +
+            "    val Some = maybe\n" +
+            "    Some\n"
+        parser_init_with_path(source, "some_name_binding.spl")
+        parse_module_body()
+
+        expect(parser_has_errors()).to_equal(false)
+        val body = decl_get_body(module_get_decls()[0])
+        expect(stmt_get_tag(body[0])).to_equal(STMT_VAL_DECL)
+        expect(stmt_get_name(body[0])).to_equal("Some")
+        ast_reset()

@@ -1521,3 +1521,178 @@ which currently blocks `<seed> test/run` on anything importing the
 pure-Simple compiler tree. Known seed-grammar-gap family
 (see bootstrap parser-fix chain); filed here so it isn't silently
 worked around.
+
+## PURE-SIMPLE ENTRY-CLOSURE grammar/ABI lane (2026-07-18) — current evidence, verification pending
+
+The next Stage3 failures were source/ABI defects rather than evidence that a
+managed Simple value was a usable C pointer. The pure parser's unary-expression
+path does not accept prefix `&`, so forms such as `&buf as u64` fail before
+codegen. Even where another compiler accepted the syntax, an array/text value
+is a managed handle, not its payload address. Proven byte/word arrays now use
+`rt_array_data_ptr_u8` / `rt_array_data_ptr`; text ABI slots use
+`rt_string_data`. Wrappers whose current handlers ignore text payloads are
+restricted to the exact kernel-equivalent value (empty log text or unveil
+`"/"` + `"r"`) and otherwise fail closed. Syscall-written word
+arrays are re-read through `rt_typed_words_u64_raw_data_at`. Direct handles and
+`unsafe_addr_of` are not substitutes for array/text payload pointers.
+
+The pointer-return migrations use explicit staging layouts already written by
+the kernel: TaskInfo and its name use `[u64]` plus `[u8]` staging; DeviceInfo
+uses two words, DeviceGrant uses fifteen words, and DMA results use two words.
+Their userlib decoders consume raw staged storage rather than pretending a
+tagged object is a packed userspace ABI struct.
+
+Three free-function names also tokenized as reserved keywords and could not be
+declared by the pure parser: `cli`, `bind`, and `spawn`. The live names are now
+`disable_interrupts`, `socket_bind`, and `spawn_task`, with imports/callers
+updated. This is a bounded source migration, not a parser change permitting
+arbitrary keywords as free-function identifiers.
+
+Kernel-handler audit found several wrappers whose previous success values were
+not backed by payload behavior. They now fail closed at the userlib boundary:
+
+- syscall 77's network forwarding path returns ENOSYS and defines no
+  `NetIfInfo` output layout, so `ifconfig` passes no object pointer and reports
+  the missing ABI;
+- syscall 95 returns CPU count in `SyscallResult.value`, but Memory has no
+  payload and Uptime is an explicit zero placeholder; syscall 96 returns only
+  hostname length and syscall 97 does not copy/update the name. CPU uses the
+  scalar result; the unsupported system APIs and aggregate `sysinfo` propagate
+  errors;
+- pledge implements only an empty capability list, unveil only the kernel's
+  exact `"/"` + `"r"` behavior, and cap-grant has no canonical text encoding;
+- log-write has separate level/facility slots but does not copy message bytes,
+  and log-read returns only a count, not entries. Only an empty log message is
+  representable; entry reads report unsupported;
+- legacy VFS/mount wrappers do not match a completed kernel IPC/output
+  contract and report unsupported instead of fabricating responses.
+
+Focused regression coverage now includes
+`test/01_unit/os/userlib/{device_syscall_result_buffer_spec,
+process_syscall_result_buffer_spec,net_syscall_pointer_contract_spec,
+system_syscall_result_buffer_spec,security_log_syscall_contract_spec,
+syscall_pointer_marshalling_spec}.spl`, plus the Stage4 source-grammar contract.
+The syscall-13 live fast path and its compact argv/priority ABI are covered by
+the byte-identical mirrors
+`test/{01_unit,unit}/os/kernel/ipc/spawn_binary_kernel_abi_spec.spl` and
+`test/{01_unit,unit}/os/process_spawn_abi_spec.spl`. These mirrors currently
+have scoped source checks and identity evidence only; executable Simple test
+PASS remains pending.
+On 2026-07-18 both
+`scripts/check/check-simple-stage4-source-grammar.shs --self-test` and the live
+source scan printed PASS. This is source-lint evidence only: the fresh full CLI,
+focused specs, broader test suite, native kernel build, and boot/render evidence
+remain pending while bootstrap continues. Do not promote this checkpoint to a
+full verification PASS.
+
+The first diagnostic full-CLI rebuild advanced past the userlib pointer/name
+failures and stopped on eight multiline final-lambda arguments in
+`test_executor_composite_jit_generic.spl`. Each call now has the trailing comma
+required before the closing parenthesis, with a Stage4 smoke regression; the
+stable-source rebuild is the next admission gate.
+
+## Distinct generic registry and HIR array-pattern follow-up (2026-07-18)
+
+The next full-closure parse stopped at the 1,000-entry `Result<T,E>` registry
+limit even though many annotations repeated the same structural pair. Dict and
+Result registration now intern an existing pair before testing capacity. The
+focused registry spec covers 1,100 duplicate registrations, the exact 1,000th
+distinct boundary, duplicate lookup after capacity, metadata reset, and stable
+tag restart. High review found the change semantics-preserving.
+
+A refreshed pure-Simple `bootstrap_main.spl` compiler built and passed the
+candidate frontend admission gate. Its full-CLI build passed the former GHDL
+parse tripwire, then crashed independently in HIR lowering. Kernel RIP and
+`addr2line` placed the fault in the second `rt_for_iterable` inside
+`HirLowering.lower_pattern`, the `PatternKind.Array` payload loop. The flat AST
+bridge has no `PatternKind.Array` constructor, so this arm is unreachable on
+the current frontend and is a seed-codegen false match. The arm was removed and
+a source-contract regression was added.
+
+The post-fix bootstrap compiler again built and passed candidate admission.
+The bounded Vulkan reducer did not reach HIR before its 20-minute diagnostic
+trace timeout, so it is inconclusive. The registry SSpec, HIR source contract,
+full test-capable CLI, and full closure remain unverified; do not report this
+lane or the wider font/SimpleOS goal as PASS and do not publish it yet.
+
+Follow-up RIP evidence showed that deleting the unreachable Array arm only
+moved the false match to the next shadowed arm, `PatternKind.Struct`. Struct
+and Enum lowering now use the same runtime-discriminant predispatch pattern as
+the established ExprKind Field/Block fix. The refreshed bootstrap compiler
+built and passed admission, and the full closure advanced from 19 completed
+HIR unit blocks to 956. It then exposed the same seed false-arm class in
+`HirLowering.pattern_test_condition`: RIP `0x5fa8e4` is the iterable payload
+read in its bare `case Struct(_, fields)` arm. This is the next bounded root
+fix. The current checkpoint is still FAIL and must not be pushed.
+
+## HIR false-dispatch follow-up (2026-07-18) — hard-cap stop
+
+The PatternKind Struct/Enum family fix remains effective: three subsequent
+full-CLI attempts completed HIR traversal without SIGSEGV or general-protection
+fault. They then converged on the same ordinary diagnostic set instead of a
+crash: 56,207 HIR errors, including 40,141 `unresolved type`, 15,321
+`unresolved name`, and 728 untyped-return diagnostics.
+
+Two high-reviewed sibling protections were admitted into refreshed
+pure-Simple Stage3 compilers. Return scanning now discriminant-gates Stmt Expr
+and Expr Return/Block/Field, and guards its Cast traversal/inference payloads.
+The main expression lowerer also discriminant-gates its colliding Cast arm
+while preserving real-Cast lowering with the former nil wrapper type.
+
+Both refreshed compilers built and passed candidate frontend admission, but
+each canonical full-CLI rebuild reproduced the exact same 40,141 unresolved
+types. Binary hashes and changed-function disassembly proved the new source was
+present; the first guarded run's only diagnostic delta was five extra
+`return_scan_empty` references from the new guards. Therefore neither guard is
+the root of the 40,141-error cascade. They remain preventive dispatch
+contracts, not completion evidence.
+
+The three-cycle session cap is exhausted. No candidate full CLI exists, font
+specs/docgen remain blocked, and the branch must not be pushed. The next fresh
+session must instrument the actual `lower_type` caller (or preserve a native
+stack at `lower_named_kind`) before changing another dispatch arm; do not rerun
+the same full build without new causal evidence.
+
+## Fixed flat-type tag root cause (2026-07-19)
+
+The next session instrumented the compiled-Stage3 full entry closure with
+`SIMPLEOS_FOCUSED_HIR_DIAG=1`; retained evidence is in
+`build/native_probe/hir-type-caller/full.log`. Bounded extraction with
+`rg --pcre2 -o '\[(?:simpleos-flat-ret|flat-function-roundtrip)\][^\[]*'`
+showed `_next_value` entering the bridge with raw fixed tag 4 (`text`) but
+leaving as `i16`. `copy_cli_args_from` and `get_cli_args` entered with tag 5
+(`[i64]`) but left as the unrelated arena identifier `print`. Corruption was
+therefore inside flat-type conversion, before Module cache transport or HIR
+symbol lookup.
+
+Compiled Stage3 was misreading imported `TYPE_*` module values. The prior
+literal workaround covered only tag 2; unmatched fixed tags could still enter
+the expression-arena fallback, where slot 5 containing `Ident("print")` became
+`TypeKind.Named("print")`. `parser_parse_type_impl` and
+`parser_absorb_optional_suffix` now use the literal 0..33 wire protocol, so
+`[text]` emits 6 instead of the observed 5. `convert_flat_type` decodes all
+fixed tags literally, starts encoded dispatch at literal 500, and permits
+expression access only for in-bounds tags in 34..499.
+
+The canonical admission fixture now exercises `bool`, `text`, `[i64]`, and
+`[text]` returns while preserving exact stdout `5`; it passed with the retained
+pure-Simple Stage3 compiler. A focused compiled unit spec also checks raw tags
+1/4/5/6/32 and their rich types.
+
+The post-fix full closure completed HIR with zero `HIR lowering error`,
+`unresolved type`, or `unresolved name` records and reached native link. This
+removes the former 40,141-error cascade as the active blocker. The three
+bounded link configurations then exposed runtime-bundle availability rather
+than compiler semantics:
+
+- `core-c-bootstrap` lacks hosted SDL2/Win32 runtime symbols;
+- the compiler rejects removed `rust-hosted` and directs callers to
+  `simple-core` or `core-c-bootstrap`;
+- `simple-core` is not installed on this host and requests
+  `SIMPLE_SIMPLE_CORE_PATH`/`SIMPLE_CORE_RUNTIME_PATH`.
+
+Logs are retained under `build/native_probe/hir-fixed-cli/`. The mandatory
+three-cycle cap is reached. No test-capable CLI was produced, so the focused
+compiled unit spec, canonical font specs, docgen, full bootstrap, and live
+render evidence remain pending. Do not publish this branch as verified until a
+pure-Simple `simple-core` runtime archive is supplied and those gates pass.

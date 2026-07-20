@@ -25,14 +25,19 @@ IR or a carrier for atlas/device material. Host Web executes its WebIR Draw IR;
 `ui.browser` executes one canonical widget composition and does not fabricate
 queue dispatch evidence. Unstyled
 legacy commands remain bitmap-compatible.
-SimpleOS reuses `FontAssetCandidate` and must stage pinned Noto Sans Mono bytes
-through every existing image-builder path before guest WM startup. Its canonical
+SimpleOS reuses the full selected `FontAssetCandidate` catalog and is configured
+to stage every pinned face through each existing image-builder path before guest
+WM startup; this is a source/staging contract, not retained guest proof.
+Desktop bootstrap attempts each long VFS path, then its FAT32 8.3 fallback,
+attempts to register every readable face before Engine2D creation, and reports
+whether the whole catalog was admitted without making partial registration
+transactional. Its canonical
 desktop already executes `SharedWmScene -> DrawIrComposition -> Engine2D` through
 `Engine2dWmFrameExecutor`, and canonical ARM64/x86_64 runner/readiness targets
 select that entry. Direct legacy `wm_entry.spl` files remain compatibility-only.
-On x86_64 the pinned face is registered before that frame and the existing
-`taskbar-clock` DrawIR slot is the witness; its 56x48 QEMU hash remains unset
-until retained capture evidence exists.
+On x86_64 and ARM64 registration of the selected catalog is attempted before
+that frame and the existing `taskbar-clock` DrawIR slot is the witness; its
+56x48 QEMU hash remains unset until retained capture evidence exists.
 Hosted color-background frames now lower through the same Draw IR/Engine2D
 route with one persistent raster session. Image/motion backgrounds and nested
 content retain an immediate compatibility retry; source routing is not runtime proof.

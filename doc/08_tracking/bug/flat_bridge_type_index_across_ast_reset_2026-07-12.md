@@ -1,11 +1,11 @@
 # Flat AST Bridge: type-expr index goes stale across an interleaved `ast_reset()`
 
-**Status:** FIXED 2026-07-12 — bounds-check added in `convert_flat_type` before the
-expr-arena fallback read; falls back to `TypeKind.Infer` when the index is out
-of range (restores pre-#146 behavior for the unrecoverable case).
-**Severity:** Blocking — stage-4 native build of the full compiler (`native_build_main.spl`,
-`--mode dynload`) dies with `error: semantic: array index out of bounds: index is 48
-but length is 13`.
+**Status:** FIX IMPLEMENTED; STAGE-4 ADMISSION PENDING 2026-07-17 — the original
+type bounds check remains, and native Stage-4 statement/expression stores now
+ignore stale bootstrap environment mirrors.
+**Severity:** Blocking — the authorized Stage-4 build of `src/app/cli/main.spl`
+(`--mode one-binary`, one thread) read statement indices 1706 through 1756
+against an arena of length 462 and failed to produce the CLI.
 **Affected file:** `src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl` (`convert_flat_type`, ~line 176)
 **Path:** `bug` track.
 
@@ -19,7 +19,37 @@ at line 8) raised, from the Rust seed's `collections.rs:479` bounds check:
 error: semantic: array index out of bounds: index is 48 but length is 13
 ```
 
-## Root Cause
+## 2026-07-17 correction: fat-arrow match arms crossed AST arenas
+
+A compiled, single-thread Stage-4 run disproved concurrency as a requirement
+for this failure class. After native arena ownership and stale declaration-tag
+precedence were repaired, Cycle 5 still reproduced the exact OOB sequences.
+Reset tracing localized the first sequence to
+`src/lib/common/ui/widget.spl`: its four single-expression fat-arrow match
+arms produced expression IDs 204, 207, 210, and 213 while the statement arena
+contained 64 nodes.
+
+The root defect was in `parse_match_arms_common`: for `Pattern => expression`,
+it appended the raw expression ID to `arm_body`. Match-arm bodies are declared
+and consumed as statement-ID lists, so the bridge later called
+`convert_flat_stmt_in_list` with an expression-arena index. The fix uses the
+existing `stmt_expr_stmt(expression, 0)` constructor, matching the already
+correct nearby if/match lowering path. The arena and declaration-tag repairs
+remain useful hardening, but they did not remove this reproduced OOB. The
+regression inspects the parser arena directly and requires `STMT_EXPR` in each
+fat-arrow arm body.
+
+Cycle 6 confirmation: a rebuilt pure-Simple bootstrap candidate passed every
+previous OOB location without a `stmt_get_tag` or missing-tag diagnostic. The
+run stopped later on an unrelated `mut`-parameter parse error in
+`collection_opt_core.spl:470`.
+
+## Original 2026-07-12 hypothesis (superseded)
+
+This section records the initial diagnosis. The 2026-07-17 correction above
+is authoritative: the reproduced single-thread failure needs no sibling parse
+race because persistent environment mirrors can diverge from reset arrays
+across sequential module parses.
 
 `convert_flat_type(type_expr_idx)` handles the fixed `TYPE_*` tag constants
 (≈1-33) and anything `>= TYPE_UNION_BASE` as pre-resolved type tags. Any other

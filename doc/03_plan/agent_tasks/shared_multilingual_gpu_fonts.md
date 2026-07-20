@@ -39,7 +39,7 @@ raw `rt_*` shortcuts, a new dependency, or a fake device-success path.
 | B — shared material | implementation agent; small sidecar may review shaping fixtures | canonical text-layout types/renderer/rasterizer and existing shaper/BiDi | REQ-006–009 and REQ-015 shared-surface/configuration scenarios and cache counters |
 | C — emission | implementation agent; Spark-style sidecar may inspect target markers read-only | existing compiler portable-compute/generated-artifact files | REQ-010 deterministic emission/compile scenarios |
 | D — 2D/3D native | implementation agent; small sidecar may audit evidence completeness read-only | existing Engine2D/Engine3D adapters and backend facade only | REQ-011–013 plus NFR-002/004–008 native evidence |
-| E — specs/manuals/docs | test/doc owner; small sidecar may review generated-manual readability | seven planned SSpecs/manuals, affected guides, SPipe recipe | REQ-014, zero stubs, freshness audits |
+| E — specs/manuals/docs | test/doc owner; small sidecar may review generated-manual readability | eleven planned executable/manual pairs, affected guides, SPipe recipe | REQ-014, zero stubs, freshness audits |
 | F — resolved UI fonts | Spark metric sidecar + Spark Draw IR sidecar | `ResolvedFontMetrics`, Web layout advances, Draw IR identity verification; no font material in IR | legacy + WebRender IR/Draw IR parity |
 | G — SimpleOS font host | Spark image-builder sidecar | existing `FontAssetCandidate`, four existing image payload paths, verified-byte startup | guest path/hash/glyph/framebuffer evidence |
 | H — final verification | primary/best available reviewer only | verification report; fixes returned to owning lane | requirement-by-requirement PASS/WARN/FAIL |
@@ -85,7 +85,7 @@ checking source and executable evidence.
   claims.
 - D: one real graphics backend with texture/bind/draw/fence/device-readback proof
   for both 2D and 3D, plus selected performance/resource evidence.
-- E: seven SSpecs, seven mirrored zero-stub manuals, updated guides/notices,
+- E: eleven executable SSpecs, eleven mirrored zero-stub manuals, updated guides/notices,
   and no executable spec under `doc/06_spec`.
 - F: legacy WebIR, GUI, and WM text preserve resolved face identity through
   DrawIR and the canonical Engine2D font path.

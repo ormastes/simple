@@ -10,12 +10,16 @@ BUILD_DIR="${BUILD_DIR:-build/cuda_generated_2d_readback}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/cuda_generated_2d_readback_$(date -u +%F).md}"
 TOOLCHAIN_BUILD_DIR="${TOOLCHAIN_BUILD_DIR:-$BUILD_DIR/toolchains}"
 PTX_PATH="${PTX_PATH:-$TOOLCHAIN_BUILD_DIR/simple_2d_optimization.ptx}"
+FONT_PTX_PATH="${FONT_PTX_PATH:-}"
 CC_TOOL="${CC_TOOL:-cc}"
 CUDA_ELEMENT_COUNT="${CUDA_ELEMENT_COUNT:-64}"
 CUDA_FILL_VALUE="${CUDA_FILL_VALUE:-16909060}"
 EXPECTED_PIXELS_PATH="$BUILD_DIR/expected-u32.json"
 ACTUAL_PIXELS_PATH="$BUILD_DIR/actual-u32.json"
+FONT_EXPECTED_PIXELS_PATH="$BUILD_DIR/font-expected-u32.json"
+FONT_ACTUAL_PIXELS_PATH="$BUILD_DIR/font-actual-u32.json"
 PTX_SHA256_BEFORE=""
+FONT_PTX_SHA256_BEFORE=""
 
 mkdir -p "$BUILD_DIR" "$TOOLCHAIN_BUILD_DIR" "$(dirname "$REPORT_PATH")"
 
@@ -31,6 +35,12 @@ emit_unavailable() {
         echo "cuda_generated_2d_readback_device_identity=0"
         echo "cuda_generated_2d_readback_expected_checksum=0"
         echo "cuda_generated_2d_readback_actual_checksum=0"
+        if [ "$FONT_PTX_PATH" != "" ]; then
+            echo "cuda_generated_2d_readback_font_status=unavailable"
+            echo "cuda_generated_2d_readback_font_reason=$reason"
+            echo "cuda_generated_2d_readback_font_submit_attempted=false"
+            echo "cuda_generated_2d_readback_font_readback_available=false"
+        fi
     } >"$BUILD_DIR/evidence.env"
 }
 
@@ -72,6 +82,15 @@ cuda_append_artifact_hashes() {
         echo "cuda_generated_2d_readback_expected_pixels_sha256=$(cuda_artifact_sha256 "$EXPECTED_PIXELS_PATH")"
         echo "cuda_generated_2d_readback_actual_pixels_sha256=$(cuda_artifact_sha256 "$ACTUAL_PIXELS_PATH")"
     } >>"$BUILD_DIR/evidence.env"
+    if [ "$FONT_PTX_PATH" != "" ]; then
+        {
+            echo "cuda_generated_2d_readback_font_ptx_path=$FONT_PTX_PATH"
+            echo "cuda_generated_2d_readback_font_ptx_sha256_before=$FONT_PTX_SHA256_BEFORE"
+            echo "cuda_generated_2d_readback_font_ptx_sha256_after=$(cuda_artifact_sha256 "$FONT_PTX_PATH")"
+            echo "cuda_generated_2d_readback_font_expected_pixels_sha256=$(cuda_artifact_sha256 "$FONT_EXPECTED_PIXELS_PATH")"
+            echo "cuda_generated_2d_readback_font_actual_pixels_sha256=$(cuda_artifact_sha256 "$FONT_ACTUAL_PIXELS_PATH")"
+        } >>"$BUILD_DIR/evidence.env"
+    fi
 }
 
 cuda_identity_inventory_valid() {
@@ -128,6 +147,15 @@ cuda_validate_evidence() {
                 return 0
             fi
         done
+        if [ "$FONT_PTX_PATH" != "" ]; then
+            for field in status reason entry oracle_semantics_revision submit_attempted readback_available fixture kernel_args atlas_pixels dst_initial_pixels expected_pixels expected_checksum actual_checksum mismatch_count blur_or_tolerance_used expected_pixels_path actual_pixels_path ptx_path ptx_sha256_before ptx_sha256_after expected_pixels_sha256 actual_pixels_sha256; do
+                count="$(grep -c "^cuda_generated_2d_readback_font_${field}=" "$BUILD_DIR/evidence.env" || true)"
+                if [ "$count" -gt 1 ]; then
+                    cuda_mark_claimed_pass_failed "duplicate-font-evidence-field"
+                    return 0
+                fi
+            done
+        fi
     fi
     status="$(cuda_env_value cuda_generated_2d_readback_status)"
     [ "$status" = "pass" ] || return 0
@@ -178,6 +206,44 @@ cuda_validate_evidence() {
                 break
             fi
         done
+    fi
+
+    if [ "$(cuda_env_value cuda_generated_2d_readback_status)" = "pass" ] && [ "$FONT_PTX_PATH" != "" ]; then
+        font_status="$(cuda_env_value cuda_generated_2d_readback_font_status)"
+        font_submit="$(cuda_env_value cuda_generated_2d_readback_font_submit_attempted)"
+        font_readback="$(cuda_env_value cuda_generated_2d_readback_font_readback_available)"
+        font_expected="$(cuda_env_value cuda_generated_2d_readback_font_expected_checksum)"
+        font_actual="$(cuda_env_value cuda_generated_2d_readback_font_actual_checksum)"
+        font_mismatches="$(cuda_env_value cuda_generated_2d_readback_font_mismatch_count)"
+        font_ptx_sha256_before="$(cuda_env_value cuda_generated_2d_readback_font_ptx_sha256_before)"
+        font_ptx_sha256_after="$(cuda_env_value cuda_generated_2d_readback_font_ptx_sha256_after)"
+        font_expected_pixels_sha256="$(cuda_env_value cuda_generated_2d_readback_font_expected_pixels_sha256)"
+        font_actual_pixels_sha256="$(cuda_env_value cuda_generated_2d_readback_font_actual_pixels_sha256)"
+        if [ "$font_status" != "pass" ] || [ "$font_submit" != "true" ] || [ "$font_readback" != "true" ]; then
+            cuda_mark_claimed_pass_failed "font-submit-readback-missing"
+        elif [ "$(cuda_env_value cuda_generated_2d_readback_font_reason)" != "straight-argb-pixels-matched" ] \
+            || [ "$(cuda_env_value cuda_generated_2d_readback_font_entry)" != "simple_font_atlas_composite_v1_u32" ] \
+            || [ "$(cuda_env_value cuda_generated_2d_readback_font_oracle_semantics_revision)" != "2" ] \
+            || [ "$(cuda_env_value cuda_generated_2d_readback_font_fixture)" != "straight-argb-v2-4x1" ] \
+            || [ "$(cuda_env_value cuda_generated_2d_readback_font_kernel_args)" != "4,1,4,0,0,4,1,4,1,4,0,0,0x80402010" ] \
+            || [ "$(cuda_env_value cuda_generated_2d_readback_font_atlas_pixels)" != "0x00000000,0x80ffffff,0xffffffff,0xffffffff" ] \
+            || [ "$(cuda_env_value cuda_generated_2d_readback_font_dst_initial_pixels)" != "0xff102030,0xff102030,0xff102030,0x00000000" ] \
+            || [ "$(cuda_env_value cuda_generated_2d_readback_font_expected_pixels)" != "0xff102030,0xff1c2027,0xff28201f,0x80402010" ] \
+            || [ "$(cuda_env_value cuda_generated_2d_readback_font_expected_pixels_path)" != "$FONT_EXPECTED_PIXELS_PATH" ] \
+            || [ "$(cuda_env_value cuda_generated_2d_readback_font_actual_pixels_path)" != "$FONT_ACTUAL_PIXELS_PATH" ] \
+            || [ "$(cuda_env_value cuda_generated_2d_readback_font_ptx_path)" != "$FONT_PTX_PATH" ] \
+            || [ "$(cuda_env_value cuda_generated_2d_readback_font_blur_or_tolerance_used)" != "false" ]; then
+            cuda_mark_claimed_pass_failed "font-semantics-evidence-invalid"
+        elif ! cuda_sha256_valid "$font_ptx_sha256_before" \
+            || ! cuda_sha256_valid "$font_ptx_sha256_after" \
+            || [ "$font_ptx_sha256_before" != "$font_ptx_sha256_after" ] \
+            || ! cuda_sha256_valid "$font_expected_pixels_sha256" \
+            || ! cuda_sha256_valid "$font_actual_pixels_sha256"; then
+            cuda_mark_claimed_pass_failed "font-artifact-provenance-invalid"
+        elif ! cuda_positive_decimal "$font_expected" || ! cuda_positive_decimal "$font_actual" \
+            || [ "$font_expected" != "$font_actual" ] || [ "$font_mismatches" != "0" ]; then
+            cuda_mark_claimed_pass_failed "font-straight-argb-pixel-mismatch"
+        fi
     fi
 }
 
@@ -364,12 +430,60 @@ EOF
         exit 1
     fi
 
+    FONT_PTX_PATH="$BUILD_DIR/font.ptx"
+    FONT_EXPECTED_PIXELS_PATH="$BUILD_DIR/font-expected-u32.json"
+    FONT_ACTUAL_PIXELS_PATH="$BUILD_DIR/font-actual-u32.json"
+    cp "$valid_inventory" "$BUILD_DIR/evidence.env"
+    cat >>"$BUILD_DIR/evidence.env" <<EOF
+cuda_generated_2d_readback_font_status=pass
+cuda_generated_2d_readback_font_reason=straight-argb-pixels-matched
+cuda_generated_2d_readback_font_entry=simple_font_atlas_composite_v1_u32
+cuda_generated_2d_readback_font_oracle_semantics_revision=2
+cuda_generated_2d_readback_font_submit_attempted=true
+cuda_generated_2d_readback_font_readback_available=true
+cuda_generated_2d_readback_font_fixture=straight-argb-v2-4x1
+cuda_generated_2d_readback_font_kernel_args=4,1,4,0,0,4,1,4,1,4,0,0,0x80402010
+cuda_generated_2d_readback_font_atlas_pixels=0x00000000,0x80ffffff,0xffffffff,0xffffffff
+cuda_generated_2d_readback_font_dst_initial_pixels=0xff102030,0xff102030,0xff102030,0x00000000
+cuda_generated_2d_readback_font_expected_pixels=0xff102030,0xff1c2027,0xff28201f,0x80402010
+cuda_generated_2d_readback_font_expected_checksum=14991786118
+cuda_generated_2d_readback_font_actual_checksum=14991786118
+cuda_generated_2d_readback_font_mismatch_count=0
+cuda_generated_2d_readback_font_blur_or_tolerance_used=false
+cuda_generated_2d_readback_font_expected_pixels_path=$FONT_EXPECTED_PIXELS_PATH
+cuda_generated_2d_readback_font_actual_pixels_path=$FONT_ACTUAL_PIXELS_PATH
+cuda_generated_2d_readback_font_ptx_path=$FONT_PTX_PATH
+cuda_generated_2d_readback_font_ptx_sha256_before=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+cuda_generated_2d_readback_font_ptx_sha256_after=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+cuda_generated_2d_readback_font_expected_pixels_sha256=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+cuda_generated_2d_readback_font_actual_pixels_sha256=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+EOF
+    cuda_validate_evidence
+    if ! grep -q '^cuda_generated_2d_readback_status=pass$' "$BUILD_DIR/evidence.env"; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=valid-font-readback-rejected"
+        exit 1
+    fi
+    cp "$BUILD_DIR/evidence.env" "$BUILD_DIR/evidence.font.valid.env"
+    sed 's/^cuda_generated_2d_readback_font_expected_pixels=.*/cuda_generated_2d_readback_font_expected_pixels=0x00000000/' \
+        "$BUILD_DIR/evidence.font.valid.env" >"$BUILD_DIR/evidence.env"
+    cuda_validate_evidence
+    if ! grep -q '^cuda_generated_2d_readback_status=fail$' "$BUILD_DIR/evidence.env" \
+        || ! grep -q '^cuda_generated_2d_readback_reason=font-semantics-evidence-invalid$' "$BUILD_DIR/evidence.env"; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=font-fixture-tamper-accepted"
+        exit 1
+    fi
+
     echo "self_test_status=pass"
-    echo "self_test_reason=cuda-submit-readback-identity-checksum-gate"
+    echo "self_test_reason=cuda-submit-readback-identity-checksum-font-gate"
     exit 0
 fi
 
 rm -f "$EXPECTED_PIXELS_PATH" "$ACTUAL_PIXELS_PATH"
+if [ "$FONT_PTX_PATH" != "" ]; then
+    rm -f "$FONT_EXPECTED_PIXELS_PATH" "$FONT_ACTUAL_PIXELS_PATH"
+fi
 
 if ! generated_2d_module_verified "$PTX_PATH"; then
     REPORT_PATH="$BUILD_DIR/toolchains.md" BUILD_DIR="$TOOLCHAIN_BUILD_DIR" sh scripts/check/check-portable-compute-toolchains.shs >/dev/null
@@ -377,8 +491,13 @@ fi
 
 if ! generated_2d_module_verified "$PTX_PATH"; then
     emit_unavailable "missing-verified-ptx"
+elif [ "$FONT_PTX_PATH" != "" ] && ! generated_2d_contains_symbol "$FONT_PTX_PATH" simple_font_atlas_composite_v1_u32; then
+    emit_unavailable "missing-verified-font-ptx"
 else
     PTX_SHA256_BEFORE="$(cuda_artifact_sha256 "$PTX_PATH")"
+    if [ "$FONT_PTX_PATH" != "" ]; then
+        FONT_PTX_SHA256_BEFORE="$(cuda_artifact_sha256 "$FONT_PTX_PATH")"
+    fi
     cat >"$BUILD_DIR/cuda_generated_2d_readback.c" <<'C_EOF'
 #include <cuda.h>
 #include <dlfcn.h>
@@ -415,6 +534,14 @@ static void fail(const char *reason, int code, uint64_t expected, uint64_t actua
     printf("cuda_generated_2d_readback_device_identity=0\n");
     printf("cuda_generated_2d_readback_expected_checksum=%llu\n", (unsigned long long)expected);
     printf("cuda_generated_2d_readback_actual_checksum=%llu\n", (unsigned long long)actual);
+}
+
+static void font_fail(const char *reason, int code) {
+    fail(reason, code, 0, 0);
+    printf("cuda_generated_2d_readback_font_status=fail\n");
+    printf("cuda_generated_2d_readback_font_reason=%s\n", reason);
+    printf("cuda_generated_2d_readback_font_submit_attempted=true\n");
+    printf("cuda_generated_2d_readback_font_readback_available=false\n");
 }
 
 static uint64_t cuda_uuid_identity(const CUuuid *uuid) {
@@ -473,8 +600,20 @@ static uint32_t alpha_pixel(uint32_t s, uint32_t d, uint32_t alpha) {
     return 0xff000000u | (rb & 0x00ff00ffu) | (g & 0x0000ff00u);
 }
 
+static uint32_t font_straight_argb_pixel(uint32_t mask, uint32_t d, uint32_t color) {
+    uint32_t sa = (((mask >> 24u) & 255u) * (color >> 24u) + 127u) / 255u;
+    if (sa == 0u) return d;
+    uint32_t da = d >> 24u;
+    uint32_t dst_weight = (da * (255u - sa)) / 255u;
+    uint32_t out_a = sa + dst_weight;
+    uint32_t out_r = ((((color >> 16u) & 255u) * sa) + (((d >> 16u) & 255u) * dst_weight)) / out_a;
+    uint32_t out_g = ((((color >> 8u) & 255u) * sa) + (((d >> 8u) & 255u) * dst_weight)) / out_a;
+    uint32_t out_b = (((color & 255u) * sa) + ((d & 255u) * dst_weight)) / out_a;
+    return (out_a << 24u) | (out_r << 16u) | (out_g << 8u) | out_b;
+}
+
 int main(int argc, char **argv) {
-    if (argc != 6) {
+    if (argc != 6 && argc != 9) {
         fail("invalid-argv", -1, 0, 0);
         return 2;
     }
@@ -483,6 +622,9 @@ int main(int argc, char **argv) {
     unsigned int value = (unsigned int)strtoul(argv[3], NULL, 10);
     const char *expected_pixels_path = argv[4];
     const char *actual_pixels_path = argv[5];
+    const char *font_ptx_path = argc == 9 ? argv[6] : NULL;
+    const char *font_expected_pixels_path = argc == 9 ? argv[7] : NULL;
+    const char *font_actual_pixels_path = argc == 9 ? argv[8] : NULL;
     if (count == 0) {
         fail("invalid-count", -1, 0, 0);
         return 2;
@@ -494,7 +636,6 @@ int main(int argc, char **argv) {
         fail("missing-ptx", -1, 0, 0);
         return 2;
     }
-
     CUresult rc = cuInit(0);
     if (rc != CUDA_SUCCESS) { fail("cuInit-failed", (int)rc, 0, 0); free(ptx); return 3; }
 
@@ -662,10 +803,87 @@ int main(int argc, char **argv) {
     uint64_t expected = fill_expected + copy_expected + alpha_expected + scroll_expected;
     uint64_t mismatches = fill_mismatches + copy_mismatches + alpha_mismatches + scroll_mismatches;
 
+    uint64_t font_actual = 0;
+    uint64_t font_expected = 0;
+    uint64_t font_mismatches = 0;
+    int font_wrote_expected = 1;
+    int font_wrote_actual = 1;
+    if (font_ptx_path) {
+        size_t font_ptx_size = 0;
+        char *font_ptx = read_file(font_ptx_path, &font_ptx_size);
+        CUmodule font_module = NULL;
+        CUdeviceptr font_atlas_device = 0;
+        CUdeviceptr font_dst_device = 0;
+#define CUDA_FONT_FAIL(reason, code) do { \
+    font_fail((reason), (int)(code)); \
+    if (font_atlas_device) cuMemFree(font_atlas_device); \
+    if (font_dst_device) cuMemFree(font_dst_device); \
+    if (font_module) cuModuleUnload(font_module); \
+    free(font_ptx); free(host); free(expected_buf); free(expected_all); free(actual_all); \
+    cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); \
+    return 3; \
+} while (0)
+        if (!font_ptx) CUDA_FONT_FAIL("missing-font-ptx", -1);
+        rc = cuModuleLoadData(&font_module, font_ptx);
+        if (rc != CUDA_SUCCESS) CUDA_FONT_FAIL("cuModuleLoadData-font-failed", rc);
+        CUfunction font_fn;
+        rc = cuModuleGetFunction(&font_fn, font_module, "simple_font_atlas_composite_v1_u32");
+        if (rc != CUDA_SUCCESS) CUDA_FONT_FAIL("cuModuleGetFunction-font-failed", rc);
+
+        const unsigned int font_count = 4u;
+        const size_t font_bytes = font_count * sizeof(uint32_t);
+        uint32_t font_atlas[] = {0x00000000u, 0x80ffffffu, 0xffffffffu, 0xffffffffu};
+        uint32_t font_initial[] = {0xff102030u, 0xff102030u, 0xff102030u, 0x00000000u};
+        uint32_t font_expected_pixels[4];
+        uint32_t font_actual_pixels[4];
+        uint32_t font_color = 0x80402010u;
+        for (unsigned int i = 0; i < font_count; i++) {
+            font_expected_pixels[i] = font_straight_argb_pixel(font_atlas[i], font_initial[i], font_color);
+        }
+
+        rc = cuMemAlloc(&font_atlas_device, font_bytes);
+        if (rc != CUDA_SUCCESS) CUDA_FONT_FAIL("cuMemAlloc-font-atlas-failed", rc);
+        rc = cuMemAlloc(&font_dst_device, font_bytes);
+        if (rc != CUDA_SUCCESS) CUDA_FONT_FAIL("cuMemAlloc-font-dst-failed", rc);
+        rc = cuMemcpyHtoD(font_atlas_device, font_atlas, font_bytes);
+        if (rc != CUDA_SUCCESS) CUDA_FONT_FAIL("cuMemcpyHtoD-font-atlas-failed", rc);
+        rc = cuMemcpyHtoD(font_dst_device, font_initial, font_bytes);
+        if (rc != CUDA_SUCCESS) CUDA_FONT_FAIL("cuMemcpyHtoD-font-dst-failed", rc);
+
+        unsigned int atlas_width = 4u, atlas_height = 1u, atlas_count = 4u;
+        unsigned int atlas_x = 0u, atlas_y = 0u, quad_width = 4u, quad_height = 1u;
+        unsigned int dst_width = 4u, dst_height = 1u, dst_count = 4u;
+        int dst_x = 0, dst_y = 0;
+        void *font_args[] = {
+            &font_atlas_device, &font_dst_device, &atlas_width, &atlas_height, &atlas_count,
+            &atlas_x, &atlas_y, &quad_width, &quad_height, &dst_width, &dst_height,
+            &dst_count, &dst_x, &dst_y, &font_color
+        };
+        rc = cuLaunchKernel(font_fn, 1, 1, 1, 64, 1, 1, 0, 0, font_args, 0);
+        if (rc != CUDA_SUCCESS) CUDA_FONT_FAIL("cuLaunchKernel-font-failed", rc);
+        rc = cuCtxSynchronize();
+        if (rc != CUDA_SUCCESS) CUDA_FONT_FAIL("cuCtxSynchronize-font-failed", rc);
+        rc = cuMemcpyDtoH(font_actual_pixels, font_dst_device, font_bytes);
+        if (rc != CUDA_SUCCESS) CUDA_FONT_FAIL("cuMemcpyDtoH-font-failed", rc);
+
+        font_expected = checksum_u32(font_expected_pixels, font_count);
+        font_actual = checksum_u32(font_actual_pixels, font_count);
+        font_mismatches = mismatch_u32(font_actual_pixels, font_expected_pixels, font_count);
+        font_wrote_expected = write_json_u32(font_expected_pixels_path, font_expected_pixels, font_count, "cuda-font-straight-argb-expected");
+        font_wrote_actual = write_json_u32(font_actual_pixels_path, font_actual_pixels, font_count, "cuda-font-straight-argb-readback");
+        cuMemFree(font_atlas_device);
+        cuMemFree(font_dst_device);
+        cuModuleUnload(font_module);
+        free(font_ptx);
+#undef CUDA_FONT_FAIL
+    }
+
     int wrote_expected = write_json_u32(expected_pixels_path, expected_all, count * 4u, "cuda-generated-2d-expected");
     int wrote_actual = write_json_u32(actual_pixels_path, actual_all, count * 4u, "cuda-generated-2d-readback");
+    int base_ok = actual == expected && mismatches == 0 && wrote_expected && wrote_actual;
+    int font_ok = !font_ptx_path || (font_actual == font_expected && font_mismatches == 0 && font_wrote_expected && font_wrote_actual);
 
-    if (actual == expected && mismatches == 0 && wrote_expected && wrote_actual) {
+    if (base_ok && font_ok) {
         printf("cuda_generated_2d_readback_status=pass\n");
         printf("cuda_generated_2d_readback_reason=readback-pixels-matched\n");
         printf("cuda_generated_2d_readback_backend_name=cuda\n");
@@ -694,8 +912,29 @@ int main(int argc, char **argv) {
         printf("cuda_generated_2d_readback_value=%u\n", value);
         printf("cuda_generated_2d_readback_expected_pixels_path=%s\n", expected_pixels_path);
         printf("cuda_generated_2d_readback_actual_pixels_path=%s\n", actual_pixels_path);
-    } else {
+        if (font_ptx_path) {
+            printf("cuda_generated_2d_readback_font_status=pass\n");
+            printf("cuda_generated_2d_readback_font_reason=straight-argb-pixels-matched\n");
+            printf("cuda_generated_2d_readback_font_entry=simple_font_atlas_composite_v1_u32\n");
+            printf("cuda_generated_2d_readback_font_oracle_semantics_revision=2\n");
+            printf("cuda_generated_2d_readback_font_submit_attempted=true\n");
+            printf("cuda_generated_2d_readback_font_readback_available=true\n");
+            printf("cuda_generated_2d_readback_font_fixture=straight-argb-v2-4x1\n");
+            printf("cuda_generated_2d_readback_font_kernel_args=4,1,4,0,0,4,1,4,1,4,0,0,0x80402010\n");
+            printf("cuda_generated_2d_readback_font_atlas_pixels=0x00000000,0x80ffffff,0xffffffff,0xffffffff\n");
+            printf("cuda_generated_2d_readback_font_dst_initial_pixels=0xff102030,0xff102030,0xff102030,0x00000000\n");
+            printf("cuda_generated_2d_readback_font_expected_pixels=0xff102030,0xff1c2027,0xff28201f,0x80402010\n");
+            printf("cuda_generated_2d_readback_font_expected_checksum=%llu\n", (unsigned long long)font_expected);
+            printf("cuda_generated_2d_readback_font_actual_checksum=%llu\n", (unsigned long long)font_actual);
+            printf("cuda_generated_2d_readback_font_mismatch_count=%llu\n", (unsigned long long)font_mismatches);
+            printf("cuda_generated_2d_readback_font_blur_or_tolerance_used=false\n");
+            printf("cuda_generated_2d_readback_font_expected_pixels_path=%s\n", font_expected_pixels_path);
+            printf("cuda_generated_2d_readback_font_actual_pixels_path=%s\n", font_actual_pixels_path);
+        }
+    } else if (!base_ok) {
         fail(wrote_expected && wrote_actual ? "readback-pixel-mismatch" : "readback-artifact-write-failed", 0, expected, actual);
+    } else {
+        font_fail(font_wrote_expected && font_wrote_actual ? "font-straight-argb-pixel-mismatch" : "font-readback-artifact-write-failed", 0);
     }
 #undef CUDA_FAIL_BUFFERS
 
@@ -708,7 +947,7 @@ int main(int argc, char **argv) {
     cuModuleUnload(module);
     cuDevicePrimaryCtxRelease(dev);
     free(ptx);
-    return (actual == expected && mismatches == 0 && wrote_expected && wrote_actual) ? 0 : 4;
+    return (base_ok && font_ok) ? 0 : 4;
 }
 C_EOF
 
@@ -716,6 +955,12 @@ C_EOF
         emit_unavailable "missing-c-compiler"
     elif ! "$CC_TOOL" "$BUILD_DIR/cuda_generated_2d_readback.c" -lcuda -ldl -o "$BUILD_DIR/cuda_generated_2d_readback" >"$BUILD_DIR/cc.out" 2>"$BUILD_DIR/cc.err"; then
         emit_unavailable "cuda-driver-compile-failed"
+    elif [ "$FONT_PTX_PATH" != "" ]; then
+        if "$BUILD_DIR/cuda_generated_2d_readback" "$PTX_PATH" "$CUDA_ELEMENT_COUNT" "$CUDA_FILL_VALUE" "$EXPECTED_PIXELS_PATH" "$ACTUAL_PIXELS_PATH" "$FONT_PTX_PATH" "$FONT_EXPECTED_PIXELS_PATH" "$FONT_ACTUAL_PIXELS_PATH" >"$BUILD_DIR/evidence.env" 2>"$BUILD_DIR/run.err"; then
+            :
+        elif [ ! -s "$BUILD_DIR/evidence.env" ]; then
+            emit_unavailable "cuda-font-readback-run-failed"
+        fi
     elif "$BUILD_DIR/cuda_generated_2d_readback" "$PTX_PATH" "$CUDA_ELEMENT_COUNT" "$CUDA_FILL_VALUE" "$EXPECTED_PIXELS_PATH" "$ACTUAL_PIXELS_PATH" >"$BUILD_DIR/evidence.env" 2>"$BUILD_DIR/run.err"; then
         :
     else
@@ -741,9 +986,17 @@ cuda_validate_evidence
     echo "| ptx_path | $PTX_PATH |"
     echo "| expected_pixels_path | $EXPECTED_PIXELS_PATH |"
     echo "| actual_pixels_path | $ACTUAL_PIXELS_PATH |"
+    if [ "$FONT_PTX_PATH" != "" ]; then
+        echo "| font_ptx_path | $FONT_PTX_PATH |"
+        echo "| font_expected_pixels_path | $FONT_EXPECTED_PIXELS_PATH |"
+        echo "| font_actual_pixels_path | $FONT_ACTUAL_PIXELS_PATH |"
+    fi
 } >"$REPORT_PATH"
 
 echo "report_path=$REPORT_PATH"
 echo "cuda_generated_2d_readback_ptx=$PTX_PATH"
+if [ "$FONT_PTX_PATH" != "" ]; then
+    echo "cuda_generated_2d_readback_font_ptx=$FONT_PTX_PATH"
+fi
 cat "$BUILD_DIR/evidence.env"
 [ "$(cuda_env_value cuda_generated_2d_readback_status)" = "pass" ]

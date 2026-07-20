@@ -14,7 +14,7 @@ Usage:
 
 use std.sffi.dynamic.{DynLib}
 use std.gpu.engine2d.sffi_dispatch.{GpuFfiMode, FfiDispatchBase, try_load_gpu_lib}
-use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new}
+use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_lock, mutex_unlock}
 
 # ============================================================================
 # Static extern declarations (resolved at link time against Rust runtime)
@@ -453,19 +453,19 @@ fn vulkan_sffi_quarantine_dependencies(descriptor: i64, buffer: i64, pipeline: i
     """Transfer uniquely owned dependencies; native runtime owns commands/fences."""
     if descriptor <= 0 and buffer <= 0 and pipeline <= 0 and shader <= 0:
         return
-    _vulkan_sffi_dependency_quarantine_lock.lock()
+    mutex_lock(_vulkan_sffi_dependency_quarantine_lock)
     val unique = vulkan_sffi_dependency_without_duplicates(
         VulkanSffiDependencyQuarantine(descriptor: descriptor, buffer: buffer, pipeline: pipeline, shader: shader),
         _vulkan_sffi_dependency_quarantine)
     if not vulkan_sffi_dependency_quarantine_empty(unique):
         _vulkan_sffi_dependency_quarantine.push(unique)
-    _vulkan_sffi_dependency_quarantine_lock.unlock(0)
+    mutex_unlock(_vulkan_sffi_dependency_quarantine_lock, 0)
 
 fn vulkan_sffi_quarantine_unsubmitted_command(command: i64, descriptor: i64, buffer: i64):
     """Own a command only when native submission never accepted it."""
     if command <= 0:
         return
-    _vulkan_sffi_dependency_quarantine_lock.lock()
+    mutex_lock(_vulkan_sffi_dependency_quarantine_lock)
     var duplicate = false
     var i: i64 = 0
     while i < _vulkan_sffi_orphan_commands.len():
@@ -475,7 +475,7 @@ fn vulkan_sffi_quarantine_unsubmitted_command(command: i64, descriptor: i64, buf
     if not duplicate:
         _vulkan_sffi_orphan_commands.push(VulkanSffiOrphanCommand(
             command: command, descriptor: descriptor, buffer: buffer))
-    _vulkan_sffi_dependency_quarantine_lock.unlock(0)
+    mutex_unlock(_vulkan_sffi_dependency_quarantine_lock, 0)
 
 fn _vulkan_sffi_reap_dependency_quarantine_locked_after_idle() -> bool:
     var orphan_remaining: [VulkanSffiOrphanCommand] = []
@@ -512,25 +512,25 @@ fn _vulkan_sffi_reap_dependency_quarantine_locked_after_idle() -> bool:
 
 fn vulkan_sffi_reap_dependency_quarantine() -> bool:
     """Release queued ownership only after device-idle is proven."""
-    _vulkan_sffi_dependency_quarantine_lock.lock()
+    mutex_lock(_vulkan_sffi_dependency_quarantine_lock)
     if _vulkan_sffi_dependency_quarantine.len() == 0 and _vulkan_sffi_orphan_commands.len() == 0:
-        _vulkan_sffi_dependency_quarantine_lock.unlock(0)
+        mutex_unlock(_vulkan_sffi_dependency_quarantine_lock, 0)
         return true
     if not rt_vulkan_wait_idle():
-        _vulkan_sffi_dependency_quarantine_lock.unlock(0)
+        mutex_unlock(_vulkan_sffi_dependency_quarantine_lock, 0)
         return false
     val complete = _vulkan_sffi_reap_dependency_quarantine_locked_after_idle()
-    _vulkan_sffi_dependency_quarantine_lock.unlock(0)
+    mutex_unlock(_vulkan_sffi_dependency_quarantine_lock, 0)
     complete
 
 fn vulkan_sffi_recover_dependency_quarantine() -> bool:
     """Always prove device-idle before an unknown-completion owner shuts down."""
-    _vulkan_sffi_dependency_quarantine_lock.lock()
+    mutex_lock(_vulkan_sffi_dependency_quarantine_lock)
     if not rt_vulkan_wait_idle():
-        _vulkan_sffi_dependency_quarantine_lock.unlock(0)
+        mutex_unlock(_vulkan_sffi_dependency_quarantine_lock, 0)
         return false
     val complete = _vulkan_sffi_reap_dependency_quarantine_locked_after_idle()
-    _vulkan_sffi_dependency_quarantine_lock.unlock(0)
+    mutex_unlock(_vulkan_sffi_dependency_quarantine_lock, 0)
     complete
 
 fn vulkan_sffi_shutdown_reaped() -> bool:

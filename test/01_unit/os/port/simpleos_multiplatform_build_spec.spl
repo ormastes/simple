@@ -54,6 +54,7 @@ use os.port.simpleos_native_build_config.{
     simpleos_target_needs_soft_float_runtime
 }
 use os.kernel.arch.arch_context.{Architecture}
+use app.io.mod.{file_read}
 
 describe "SimpleOS multi-platform build catalog":
     it "exposes 32-bit x86 as a first-class supported target":
@@ -136,6 +137,27 @@ describe "SimpleOS multi-platform build catalog":
         expect(backlog).to_contain("examples/09_embedded/simple_os/arch/x86_64/boot/syscall_entry.s")
         expect(backlog).to_contain("examples/09_embedded/simple_os/arch/x86_64/boot/auto_stubs.c")
         expect(backlog).to_contain("examples/09_embedded/simple_os/arch/x86_64/boot/rt_extras.c")
+
+    it "shares the Unicode scalar text constructor across every SimpleOS target":
+        for name in simpleos_platform_target_names():
+            expect(simpleos_platform_runtime_impl_kind(name)).to_equal(SimpleOsNativeImplementationKind.Simple)
+        val source = file_read("src/runtime/simple_core/core_string.spl")
+        expect(source).to_contain("pub fn text_dot_from_char_code(code: i64) -> i64:")
+        expect(source).to_contain("code > 1114111 or (code >= 55296 and code <= 57343)")
+        expect(source).to_contain("spl_store_u8(data, 3, 128 | (code & 63))")
+        expect(source).to_contain("val out = rt_string_new(data, len)")
+        val provider = file_read("examples/09_embedded/simple_os/arch/common/boot/text_codepoint_runtime.h")
+        expect(provider).to_contain("RuntimeValue text_dot_from_char_code(int64_t code)")
+        expect(provider).to_contain("scalar >= 0xd800 && scalar <= 0xdfff")
+        expect(provider).to_contain("return rt_string_new((RuntimeValue)(uintptr_t)utf8, len)")
+        expect(file_read("examples/09_embedded/simple_os/arch/x86_64/boot/rt_extras.c")).to_contain("../../common/boot/text_codepoint_runtime.h")
+        expect(file_read("examples/09_embedded/simple_os/arch/x86_32/boot/baremetal_stubs.c")).to_contain("../../common/boot/text_codepoint_runtime.h")
+        expect(file_read("examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c")).to_contain("../../common/boot/text_codepoint_runtime.h")
+        expect(file_read("examples/09_embedded/simple_os/arch/arm32/boot/baremetal_stubs.c")).to_contain("../../common/boot/text_codepoint_runtime.h")
+        expect(file_read("examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_stubs.c")).to_contain("../../common/boot/text_codepoint_runtime.h")
+        expect(file_read("examples/09_embedded/simple_os/arch/riscv32/boot/baremetal_stubs.c")).to_contain("../../common/boot/text_codepoint_runtime.h")
+        val staged_qemu = file_read("scripts/check/check-simpleos-memory-leveling-qemu.shs")
+        expect(staged_qemu).to_contain("arch/common/boot/text_codepoint_runtime.h")
 
     it "tracks ARM C and assembly boot support sources":
         val arm64_c_sources = simpleos_platform_boot_c_sources("arm64")

@@ -1,0 +1,49 @@
+# @cover src/compiler/10.frontend/core/parser.spl 5%
+# @cover src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl 5%
+# @tag: unit, compiler, bootstrap, only-compiled
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
+use compiler.core.ast.{decl_get_name, decl_get_ret_type, module_decl_at, module_decl_count_get}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.frontend.parser_types_expr.{TypeKind, parser_type_kind_named_name}
+
+fn raw_return_tag(name: text) -> i64:
+    for i in 0..module_decl_count_get():
+        val decl = module_decl_at(i)
+        if decl_get_name(decl) == name:
+            return decl_get_ret_type(decl)
+    -1
+
+fn array_element_name(kind: TypeKind) -> text:
+    match kind:
+        case TypeKind.Array(element, _):
+            parser_type_kind_named_name(element.kind)
+        case _:
+            ""
+
+describe "compiled flat fixed type tag protocol":
+    it "keeps parser tags and rich return types distinct":
+        val source = "fn flag() -> bool:\n    true\n\nfn word() -> text:\n    \"ok\"\n\nfn ints() -> [i64]:\n    [2, 3]\n\nfn words() -> [text]:\n    [\"o\", \"k\"]\n\nfn signed() -> i16:\n    7\n"
+        val module = parse_and_build_module(source, "flat_fixed_type_tag_protocol.spl")
+
+        expect(raw_return_tag("flag")).to_equal(1)
+        expect(raw_return_tag("word")).to_equal(4)
+        expect(raw_return_tag("ints")).to_equal(5)
+        expect(raw_return_tag("words")).to_equal(6)
+        expect(raw_return_tag("signed")).to_equal(32)
+
+        val flag = module.functions["flag"] ?? panic("missing flag")
+        val word = module.functions["word"] ?? panic("missing word")
+        val ints = module.functions["ints"] ?? panic("missing ints")
+        val words = module.functions["words"] ?? panic("missing words")
+        val signed = module.functions["signed"] ?? panic("missing signed")
+        expect(parser_type_kind_named_name(flag.return_type.kind)).to_equal("bool")
+        expect(parser_type_kind_named_name(word.return_type.kind)).to_equal("text")
+        expect(array_element_name(ints.return_type.kind)).to_equal("i64")
+        expect(array_element_name(words.return_type.kind)).to_equal("text")
+        expect(parser_type_kind_named_name(signed.return_type.kind)).to_equal("i16")
+
+    it "guards expression arena access behind the literal tag hole":
+        val source = file_read("src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl")
+        expect(source).to_contain("if type_expr_idx < 34 or type_expr_idx >= 500 or type_expr_idx >= expr_count():")

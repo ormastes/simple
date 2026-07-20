@@ -11,6 +11,7 @@ if [ "$SIMPLE_BIN" = "bin/simple" ] && [ ! -e "$SIMPLE_BIN" ] && [ -e "bin/relea
     SIMPLE_BIN="bin/release/simple"
 fi
 SIMPLE_RUNTIME_BIN="${SIMPLE_RUNTIME_BIN:-}"
+PORTABLE_COMPUTE_EMITTER_BIN="${PORTABLE_COMPUTE_EMITTER_BIN:-}"
 NVCC_TOOL="${NVCC_TOOL:-nvcc}"
 HIPCC_TOOL="${HIPCC_TOOL:-hipcc}"
 OPENCL_SPIRV_TOOL="${OPENCL_SPIRV_TOOL:-opencl-c-to-spirv}"
@@ -18,11 +19,13 @@ METAL_TOOL="${METAL_TOOL:-metal}"
 METALLIB_TOOL="${METALLIB_TOOL:-metallib}"
 VULKAN_GLSL_TOOL="${VULKAN_GLSL_TOOL:-glslangValidator}"
 VULKAN_GLSLC_TOOL="${VULKAN_GLSLC_TOOL:-glslc}"
+VULKAN_GLSLC_LIBRARY_PATH="${VULKAN_GLSLC_LIBRARY_PATH:-}"
 SPIRV_VAL_TOOL="${SPIRV_VAL_TOOL:-spirv-val}"
 CUDA_ARCH="${CUDA_ARCH:-}"
 HIP_ARCH="${HIP_ARCH:-gfx1100}"
 PORTABLE_COMPUTE_TARGETS="${PORTABLE_COMPUTE_TARGETS:-cuda,hip,opencl,metal,vulkan}"
 PORTABLE_COMPUTE_EXPECTED_SEMANTICS="${PORTABLE_COMPUTE_EXPECTED_SEMANTICS:-2}"
+PORTABLE_COMPUTE_REQUIRE_VERIFIED="${PORTABLE_COMPUTE_REQUIRE_VERIFIED:-0}"
 TIMEOUT_SECS="${PORTABLE_COMPUTE_TOOLCHAIN_TIMEOUT_SECS:-180}"
 KILL_SECS="${PORTABLE_COMPUTE_TOOLCHAIN_TIMEOUT_KILL_SECS:-10}"
 PINNED_VULKAN_FONT_SOURCE_SHA256="c94b13736bdf7022835c008c09d714507da4cd0b6ef4607a5eadc9a23549cd2c"
@@ -30,6 +33,35 @@ PINNED_VULKAN_FONT_ARTIFACT_SHA256="e25d25b8157fc2554822637603471a442f678eb58e20
 PINNED_CUDA_FONT_SOURCE_SHA256="bf34912f7e1bad76e9178d5ac39640a60f1075d7b017708688aa8efa2dad8291"
 PINNED_CUDA_FONT_VERSION_SHA256="e1f58dd9ee7237bc5cc556dda8563f596ccc2e1a1f61ffdd824b90d90ccec68a"
 PINNED_CUDA_FONT_ARTIFACT_SHA256="40afab945e6c40c239a6859d63723e76599758ea50e120e0edf7a058aa6922b4"
+
+portable_compute_tuple_verified() {
+    [ "$1" = true ] && [ "$2" = true ]
+}
+
+portable_compute_strict_result() {
+    [ "$1" != 1 ] || portable_compute_tuple_verified "$2" "$3"
+}
+
+if [ "${1:-}" = "--strict-result-self-test" ]; then
+    portable_compute_strict_result 0 false false
+    portable_compute_strict_result 1 true true
+    if portable_compute_strict_result 1 false true ||
+       portable_compute_strict_result 1 true false ||
+       portable_compute_strict_result 1 false false; then
+        echo "portable compute strict-result self-test failed" >&2
+        exit 1
+    fi
+    echo "portable compute strict-result self-test passed"
+    exit 0
+fi
+
+case "$PORTABLE_COMPUTE_REQUIRE_VERIFIED" in
+    0|1) ;;
+    *)
+        echo "PORTABLE_COMPUTE_REQUIRE_VERIFIED must be 0 or 1" >&2
+        exit 2
+        ;;
+esac
 
 case "$PORTABLE_COMPUTE_EXPECTED_SEMANTICS" in
     ''|*[!0-9]*)
@@ -97,6 +129,7 @@ tool_path() {
 
 resolve_symlink_path() {
     current="$1"
+    [ "$current" != "" ] || return 1
     depth=0
     while [ -L "$current" ]; do
         depth=$((depth + 1))
@@ -109,6 +142,7 @@ resolve_symlink_path() {
             *) current="$(dirname "$current")/$link" ;;
         esac
     done
+    [ -e "$current" ] || return 1
     directory="$(CDPATH= cd -- "$(dirname -- "$current")" && pwd -P)" || return 1
     printf '%s/%s\n' "$directory" "$(basename -- "$current")"
 }
@@ -250,6 +284,85 @@ record_simple_provenance() {
     } >>"$BUILD_DIR/evidence.env"
 }
 
+record_portable_compute_emitter_provenance() {
+    PORTABLE_COMPUTE_EMITTER_EXEC=""
+    if [ "$PORTABLE_COMPUTE_EMITTER_BIN" = "" ]; then
+        emitter_source="$ROOT_DIR/src/app/portable_compute_emit/main.spl"
+        emitter_source_sha="$(sha256_file "$emitter_source" || true)"
+        if ! sha256_valid "$emitter_source_sha"; then
+            echo "Portable compute emitter source provenance is unavailable" >&2
+            return 1
+        fi
+        {
+            echo "portable_compute_emitter_mode=source-cli"
+            echo "portable_compute_emitter_requested=$emitter_source"
+            echo "portable_compute_emitter_path=$emitter_source"
+            echo "portable_compute_emitter_sha256=$emitter_source_sha"
+            echo "portable_compute_emitter_format=source"
+        } >>"$BUILD_DIR/evidence.env"
+        record_simple_provenance
+        return
+    fi
+    emitter_path="$(tool_path "$PORTABLE_COMPUTE_EMITTER_BIN" || true)"
+    emitter_path="$(resolve_symlink_path "$emitter_path" || true)"
+    if [ "$emitter_path" = "" ]; then
+        echo "Cached portable compute emitter is unavailable or non-native: $PORTABLE_COMPUTE_EMITTER_BIN" >&2
+        return 1
+    fi
+    emitter_format="$(native_executable_format "$emitter_path" || true)"
+    emitter_sha="$(sha256_file "$emitter_path" || true)"
+    if [ "$emitter_format" = "" ] || ! sha256_valid "$emitter_sha"; then
+        echo "Cached portable compute emitter is unavailable or non-native: $PORTABLE_COMPUTE_EMITTER_BIN" >&2
+        return 1
+    fi
+    PORTABLE_COMPUTE_EMITTER_EXEC="$emitter_path"
+    {
+        echo "portable_compute_emitter_mode=cached-native"
+        echo "portable_compute_emitter_requested=$(printf '%s' "$PORTABLE_COMPUTE_EMITTER_BIN" | one_line)"
+        echo "portable_compute_emitter_path=$(printf '%s' "$emitter_path" | one_line)"
+        echo "portable_compute_emitter_sha256=$emitter_sha"
+        echo "portable_compute_emitter_format=$emitter_format"
+    } >>"$BUILD_DIR/evidence.env"
+}
+
+portable_compute_emitter_command() {
+    target="$1"
+    if [ "$PORTABLE_COMPUTE_EMITTER_EXEC" != "" ]; then
+        printf '%s %s\n' "$PORTABLE_COMPUTE_EMITTER_EXEC" "$target"
+    else
+        printf '%s run src/app/portable_compute_emit/main.spl %s\n' "$SIMPLE_EXEC_BIN" "$target"
+    fi
+}
+
+run_portable_compute_emitter() {
+    program="$1"
+    target="$2"
+    if [ "$PORTABLE_COMPUTE_EMITTER_EXEC" != "" ]; then
+        run_with_timeout "$PORTABLE_COMPUTE_EMITTER_EXEC" "$target"
+    else
+        SIMPLE_LIB="${SIMPLE_LIB:-src}" run_with_timeout "$SIMPLE_EXEC_BIN" run "$program" "$target"
+    fi
+}
+
+record_portable_compute_emitter_command() {
+    target="$1"
+    field="$2"
+    command_line="$(portable_compute_emitter_command "$target")"
+    printf '%s=%s\n' "$field" "$(printf '%s' "$command_line" | one_line)" >>"$BUILD_DIR/evidence.env"
+}
+
+fail_if_explicit_emitter_rejected() {
+    error_path="$1"
+    if [ "$PORTABLE_COMPUTE_EMITTER_EXEC" = "" ]; then
+        return
+    fi
+    echo "Explicit cached portable compute emitter failed protocol validation: $PORTABLE_COMPUTE_EMITTER_EXEC" >&2
+    if [ -s "$error_path" ]; then
+        sed -n '1,20p' "$error_path" >&2
+    fi
+    exit 1
+}
+
 field_from_stream() {
     key="$1"
     awk -v k="$key" 'index($0, k "=") == 1 { print substr($0, length(k) + 2); exit }'
@@ -272,6 +385,379 @@ run_with_timeout() {
         "$@"
     fi
 }
+
+vulkan_glslc_provenance_result() {
+    vulkan_provenance_initial="$1"
+    vulkan_provenance_version="$2"
+    vulkan_provenance_compiler_sha="$3"
+    vulkan_provenance_loaded_path="$4"
+    vulkan_provenance_loaded_sha="$5"
+    vulkan_provenance_loader_sha="$6"
+    vulkan_provenance_expected_path="$7"
+    vulkan_provenance_mode="${8:-dynamic}"
+    if [ "$vulkan_provenance_initial" != pass ]; then
+        echo "$vulkan_provenance_initial"
+    elif [ "$vulkan_provenance_version" = "" ] || ! sha256_valid "$vulkan_provenance_compiler_sha" ||
+         ! sha256_valid "$vulkan_provenance_loader_sha"; then
+        echo missing-loaded-library-provenance
+    elif [ "$vulkan_provenance_mode" = embedded ]; then
+        if [ "$vulkan_provenance_expected_path" != "" ]; then
+            echo loaded-library-path-mismatch
+        elif [ "$vulkan_provenance_loaded_path" = "" ] && [ "$vulkan_provenance_loaded_sha" = "" ]; then
+            echo pass
+        else
+            echo unexpected-loaded-library-provenance
+        fi
+    elif [ "$vulkan_provenance_loaded_path" = "" ] || ! sha256_valid "$vulkan_provenance_loaded_sha"; then
+        echo missing-loaded-library-provenance
+    elif [ "$vulkan_provenance_expected_path" != "" ] &&
+         [ "$vulkan_provenance_loaded_path" != "$vulkan_provenance_expected_path" ]; then
+        echo loaded-library-path-mismatch
+    else
+        echo pass
+    fi
+}
+
+vulkan_artifact_tuple_deterministic() {
+    sha256_valid "$1" && [ "$1" = "$2" ] && [ "$3" = true ]
+}
+
+font_artifact_evidence_matches() {
+    [ "$1" = "" ] || [ "$1" = "$2" ]
+}
+
+vulkan_glslc_compiler_status() {
+    if [ "$1" = "" ]; then
+        echo missing-compiler-path
+    elif [ "$2" != elf ]; then
+        echo non-elf-compiler
+    else
+        echo pass
+    fi
+}
+
+vulkan_glslc_loaded_library_path() {
+    log_path="$1"
+    [ -f "$log_path" ] || return 1
+    raw_paths="$(awk '/calling init: .*libshaderc.*\.so/ { sub(/^.*calling init: /, ""); sub(/[[:space:]]*$/, ""); print }' "$log_path" | sort -u)"
+    [ "$raw_paths" != "" ] || return 1
+    resolved_paths=""
+    resolved_count=0
+    old_ifs="$IFS"
+    IFS='
+'
+    for raw_path in $raw_paths; do
+        resolved_path="$(resolve_symlink_path "$raw_path" || true)"
+        if [ "$resolved_path" = "" ] || [ ! -f "$resolved_path" ]; then
+            IFS="$old_ifs"
+            return 1
+        fi
+        if ! printf '%s\n' "$resolved_paths" | grep -F -x -e "$resolved_path" >/dev/null 2>&1; then
+            if [ "$resolved_paths" = "" ]; then
+                resolved_paths="$resolved_path"
+            else
+                resolved_paths="$resolved_paths
+$resolved_path"
+            fi
+            resolved_count=$((resolved_count + 1))
+        fi
+    done
+    IFS="$old_ifs"
+    [ "$resolved_count" -eq 1 ] || return 2
+    printf '%s\n' "$resolved_paths"
+}
+
+write_vulkan_glslc_provenance_evidence() {
+    {
+        echo "vulkan_font_compiler_requested=$(printf '%s' "$VULKAN_GLSLC_REQUESTED" | one_line)"
+        echo "vulkan_font_compiler_path=$(printf '%s' "$VULKAN_GLSLC_EXEC_PATH" | one_line)"
+        echo "vulkan_font_compiler_version=$VULKAN_GLSLC_VERSION"
+        echo "vulkan_font_compiler_sha256=$VULKAN_GLSLC_COMPILER_SHA_BEFORE"
+        echo "vulkan_font_compiler_sha256_after_a=$VULKAN_GLSLC_COMPILER_SHA_A"
+        echo "vulkan_font_compiler_sha256_after_b=$VULKAN_GLSLC_COMPILER_SHA_B"
+        echo "vulkan_font_compiler_format=$VULKAN_GLSLC_COMPILER_FORMAT"
+        echo "vulkan_font_compiler_producer_mode=$VULKAN_GLSLC_PRODUCER_MODE"
+        echo "vulkan_font_compiler_loader_host=$(printf '%s' "$VULKAN_GLSLC_HOST_LIBC" | one_line)"
+        echo "vulkan_font_compiler_clean_home=$(printf '%s' "$VULKAN_GLSLC_CLEAN_HOME" | one_line)"
+        echo "vulkan_font_compiler_library_expected_path=$(printf '%s' "$VULKAN_GLSLC_EXPECTED_PATH" | one_line)"
+        echo "vulkan_font_compiler_library_path=$(printf '%s' "$VULKAN_GLSLC_LIBRARY_PATH_A" | one_line)"
+        echo "vulkan_font_compiler_library_path_repro=$(printf '%s' "$VULKAN_GLSLC_LIBRARY_PATH_B" | one_line)"
+        echo "vulkan_font_compiler_library_sha256=$VULKAN_GLSLC_LIBRARY_SHA_A"
+        echo "vulkan_font_compiler_library_sha256_repro=$VULKAN_GLSLC_LIBRARY_SHA_B"
+        echo "vulkan_font_compiler_loader_log=$(printf '%s' "$VULKAN_GLSLC_LOADER_LOG_A" | one_line)"
+        echo "vulkan_font_compiler_loader_log_sha256=$VULKAN_GLSLC_LOADER_SHA_A"
+        echo "vulkan_font_compiler_loader_log_repro=$(printf '%s' "$VULKAN_GLSLC_LOADER_LOG_B" | one_line)"
+        echo "vulkan_font_compiler_loader_log_repro_sha256=$VULKAN_GLSLC_LOADER_SHA_B"
+        echo "vulkan_font_compiler_library_provenance_status=$VULKAN_GLSLC_PROVENANCE_STATUS"
+    } >>"$BUILD_DIR/evidence.env"
+}
+
+record_vulkan_glslc_library_provenance() {
+    VULKAN_GLSLC_REQUESTED="$1"
+    VULKAN_GLSLC_EXEC_PATH="$(tool_path "$1" || true)"
+    VULKAN_GLSLC_EXEC_PATH="$(resolve_symlink_path "$VULKAN_GLSLC_EXEC_PATH" || true)"
+    VULKAN_GLSLC_COMPILER_FORMAT="$(native_executable_format "$VULKAN_GLSLC_EXEC_PATH" || true)"
+    VULKAN_GLSLC_PRODUCER_MODE=""
+    VULKAN_GLSLC_EXPECTED_PATH=""
+    VULKAN_GLSLC_LIBDIR=""
+    VULKAN_GLSLC_VERSION=""
+    VULKAN_GLSLC_COMPILER_SHA_BEFORE=""
+    VULKAN_GLSLC_COMPILER_SHA_A=""
+    VULKAN_GLSLC_COMPILER_SHA_B=""
+    VULKAN_GLSLC_LIBRARY_PATH_A=""
+    VULKAN_GLSLC_LIBRARY_PATH_B=""
+    VULKAN_GLSLC_LIBRARY_SHA_A=""
+    VULKAN_GLSLC_LIBRARY_SHA_B=""
+    VULKAN_GLSLC_LOADER_LOG_A="$BUILD_DIR/vulkan_font_compiler_loader_a.log"
+    VULKAN_GLSLC_LOADER_LOG_B="$BUILD_DIR/vulkan_font_compiler_loader_b.log"
+    VULKAN_GLSLC_LOADER_SHA_A=""
+    VULKAN_GLSLC_LOADER_SHA_B=""
+    VULKAN_GLSLC_HOST_LIBC="$(getconf GNU_LIBC_VERSION 2>/dev/null || true)"
+    VULKAN_GLSLC_CLEAN_HOME="$BUILD_DIR/vulkan_glslc_home"
+    VULKAN_GLSLC_PROVENANCE_STATUS=pass
+    if [ "$VULKAN_GLSLC_LIBRARY_PATH" != "" ]; then
+        VULKAN_GLSLC_EXPECTED_PATH="$(resolve_symlink_path "$VULKAN_GLSLC_LIBRARY_PATH" || true)"
+        if [ "$VULKAN_GLSLC_EXPECTED_PATH" = "" ]; then
+            VULKAN_GLSLC_PROVENANCE_STATUS=expected-path-invalid
+        else
+            VULKAN_GLSLC_LIBDIR="$(dirname -- "$VULKAN_GLSLC_EXPECTED_PATH")"
+        fi
+    fi
+    rm -rf "$VULKAN_GLSLC_CLEAN_HOME"
+    mkdir -p "$VULKAN_GLSLC_CLEAN_HOME"
+    chmod 700 "$VULKAN_GLSLC_CLEAN_HOME"
+    vulkan_glslc_version_out="$BUILD_DIR/vulkan_font_compiler_version.out"
+    rm -f "$vulkan_glslc_version_out" "$VULKAN_GLSLC_LOADER_LOG_A" "$VULKAN_GLSLC_LOADER_LOG_B"
+    if [ "$VULKAN_GLSLC_PROVENANCE_STATUS" = pass ]; then
+        VULKAN_GLSLC_PROVENANCE_STATUS="$(vulkan_glslc_compiler_status "$VULKAN_GLSLC_EXEC_PATH" "$VULKAN_GLSLC_COMPILER_FORMAT")"
+    fi
+    if [ "$VULKAN_GLSLC_PROVENANCE_STATUS" = pass ]; then
+        vulkan_glslc_dynamic="$BUILD_DIR/vulkan_font_compiler_dynamic.txt"
+        if ! command -v readelf >/dev/null 2>&1 ||
+           ! readelf -d "$VULKAN_GLSLC_EXEC_PATH" >"$vulkan_glslc_dynamic" 2>/dev/null; then
+            VULKAN_GLSLC_PROVENANCE_STATUS=missing-linkage-provenance
+        elif grep -E 'NEEDED.*libshaderc[^]]*\.so' "$vulkan_glslc_dynamic" >/dev/null 2>&1; then
+            VULKAN_GLSLC_PRODUCER_MODE=dynamic
+        else
+            VULKAN_GLSLC_PRODUCER_MODE=embedded
+        fi
+    fi
+    if [ "$VULKAN_GLSLC_PROVENANCE_STATUS" != pass ]; then
+        :
+    elif [ "${VULKAN_GLSLC_HOST_LIBC#glibc }" = "$VULKAN_GLSLC_HOST_LIBC" ]; then
+        VULKAN_GLSLC_PROVENANCE_STATUS=unsupported-loader-provenance-host
+    elif ! run_with_timeout env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME="$VULKAN_GLSLC_CLEAN_HOME" LC_ALL=C \
+             LD_LIBRARY_PATH="$VULKAN_GLSLC_LIBDIR" "$VULKAN_GLSLC_EXEC_PATH" --version \
+             >"$vulkan_glslc_version_out" 2>/dev/null; then
+        VULKAN_GLSLC_PROVENANCE_STATUS=version-probe-failed
+    fi
+    if [ -f "$vulkan_glslc_version_out" ]; then
+        VULKAN_GLSLC_VERSION="$(sed -n '/[^[:space:]]/ { p; q; }' "$vulkan_glslc_version_out" | one_line)"
+    fi
+    VULKAN_GLSLC_COMPILER_SHA_BEFORE="$(sha256_file "$VULKAN_GLSLC_EXEC_PATH" || true)"
+    if [ "$VULKAN_GLSLC_PROVENANCE_STATUS" = pass ] &&
+       { [ "$VULKAN_GLSLC_VERSION" = "" ] || ! sha256_valid "$VULKAN_GLSLC_COMPILER_SHA_BEFORE"; }; then
+        VULKAN_GLSLC_PROVENANCE_STATUS=missing-compiler-provenance
+    fi
+    if [ "$VULKAN_GLSLC_PROVENANCE_STATUS" != pass ]; then
+        write_vulkan_glslc_provenance_evidence || true
+        return 1
+    fi
+}
+
+run_vulkan_glslc_compile() {
+    output="$1"
+    source="$2"
+    stdout_log="$3"
+    loader_log="$4"
+    run_with_timeout env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME="$VULKAN_GLSLC_CLEAN_HOME" LC_ALL=C \
+        LD_LIBRARY_PATH="$VULKAN_GLSLC_LIBDIR" LD_DEBUG=libs "$VULKAN_GLSLC_EXEC_PATH" \
+        --target-env=vulkan1.1 -fshader-stage=compute -o "$output" "$source" \
+        >"$stdout_log" 2>"$loader_log"
+}
+
+capture_vulkan_glslc_compile_provenance() {
+    capture_label="$1"
+    capture_log="$2"
+    capture_path=""
+    if [ "$VULKAN_GLSLC_PRODUCER_MODE" = embedded ]; then
+        if grep -E 'calling init: .*libshaderc.*\.so' "$capture_log" >/dev/null 2>&1; then
+            VULKAN_GLSLC_PROVENANCE_STATUS=unexpected-loaded-library-provenance
+            return 1
+        fi
+    elif capture_path="$(vulkan_glslc_loaded_library_path "$capture_log")"; then
+        :
+    else
+        capture_status=$?
+        if [ "$capture_status" -eq 2 ]; then
+            VULKAN_GLSLC_PROVENANCE_STATUS=multiple-loaded-library-provenance
+        else
+            VULKAN_GLSLC_PROVENANCE_STATUS=missing-loaded-library-provenance
+        fi
+        return 1
+    fi
+    capture_compiler_sha="$(sha256_file "$VULKAN_GLSLC_EXEC_PATH" || true)"
+    capture_library_sha="$(sha256_file "$capture_path" 2>/dev/null || true)"
+    capture_loader_sha="$(sha256_file "$capture_log" || true)"
+    if ! sha256_valid "$capture_compiler_sha" || ! sha256_valid "$capture_loader_sha"; then
+        VULKAN_GLSLC_PROVENANCE_STATUS=missing-compiler-provenance
+        return 1
+    fi
+    if [ "$VULKAN_GLSLC_PRODUCER_MODE" != embedded ] && ! sha256_valid "$capture_library_sha"; then
+        VULKAN_GLSLC_PROVENANCE_STATUS=missing-loaded-library-provenance
+        return 1
+    fi
+    if [ "$capture_label" = a ]; then
+        VULKAN_GLSLC_COMPILER_SHA_A="$capture_compiler_sha"
+        VULKAN_GLSLC_LIBRARY_PATH_A="$capture_path"
+        VULKAN_GLSLC_LIBRARY_SHA_A="$capture_library_sha"
+        VULKAN_GLSLC_LOADER_SHA_A="$capture_loader_sha"
+    else
+        VULKAN_GLSLC_COMPILER_SHA_B="$capture_compiler_sha"
+        VULKAN_GLSLC_LIBRARY_PATH_B="$capture_path"
+        VULKAN_GLSLC_LIBRARY_SHA_B="$capture_library_sha"
+        VULKAN_GLSLC_LOADER_SHA_B="$capture_loader_sha"
+    fi
+}
+
+finalize_vulkan_glslc_compile_provenance() {
+    if [ "$VULKAN_GLSLC_COMPILER_SHA_BEFORE" != "$VULKAN_GLSLC_COMPILER_SHA_A" ] ||
+       [ "$VULKAN_GLSLC_COMPILER_SHA_A" != "$VULKAN_GLSLC_COMPILER_SHA_B" ]; then
+        VULKAN_GLSLC_PROVENANCE_STATUS=compiler-changed-during-compile
+    elif [ "$VULKAN_GLSLC_LIBRARY_PATH_A" != "$VULKAN_GLSLC_LIBRARY_PATH_B" ]; then
+        VULKAN_GLSLC_PROVENANCE_STATUS=producer-library-path-mismatch
+    elif [ "$VULKAN_GLSLC_LIBRARY_SHA_A" != "$VULKAN_GLSLC_LIBRARY_SHA_B" ]; then
+        VULKAN_GLSLC_PROVENANCE_STATUS=producer-library-changed-during-compile
+    else
+        VULKAN_GLSLC_PROVENANCE_STATUS="$(vulkan_glslc_provenance_result pass \
+            "$VULKAN_GLSLC_VERSION" "$VULKAN_GLSLC_COMPILER_SHA_B" \
+            "$VULKAN_GLSLC_LIBRARY_PATH_B" "$VULKAN_GLSLC_LIBRARY_SHA_B" \
+            "$VULKAN_GLSLC_LOADER_SHA_B" "$VULKAN_GLSLC_EXPECTED_PATH" \
+            "$VULKAN_GLSLC_PRODUCER_MODE")"
+    fi
+    write_vulkan_glslc_provenance_evidence || {
+        VULKAN_GLSLC_PROVENANCE_STATUS=evidence-write-failed
+        return 1
+    }
+    [ "$VULKAN_GLSLC_PROVENANCE_STATUS" = pass ]
+}
+
+if [ "${1:-}" = "--vulkan-provenance-self-test" ]; then
+    vulkan_self_test_sha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    [ "$(vulkan_glslc_compiler_status /tmp/compiler script)" = non-elf-compiler ]
+    [ "$(vulkan_glslc_compiler_status /tmp/compiler elf)" = pass ]
+    [ "$(vulkan_glslc_provenance_result pass v "$vulkan_self_test_sha" "" "" "$vulkan_self_test_sha" "")" = missing-loaded-library-provenance ]
+    [ "$(vulkan_glslc_provenance_result pass v "$vulkan_self_test_sha" /actual/libshaderc.so.1 "$vulkan_self_test_sha" "$vulkan_self_test_sha" /expected/libshaderc.so.1)" = loaded-library-path-mismatch ]
+    [ "$(vulkan_glslc_provenance_result pass v "$vulkan_self_test_sha" /actual/libshaderc.so.1 "$vulkan_self_test_sha" "$vulkan_self_test_sha" /actual/libshaderc.so.1)" = pass ]
+    [ "$(vulkan_glslc_provenance_result pass v "$vulkan_self_test_sha" "" "" "$vulkan_self_test_sha" "" embedded)" = pass ]
+    [ "$(vulkan_glslc_provenance_result pass v "$vulkan_self_test_sha" /actual/libshaderc.so.1 "$vulkan_self_test_sha" "$vulkan_self_test_sha" "" embedded)" = unexpected-loaded-library-provenance ]
+    vulkan_self_test_root="${TMPDIR:-/tmp}/simple-vulkan-provenance-self-test-$$"
+    rm -rf "$vulkan_self_test_root"
+    mkdir -p "$vulkan_self_test_root/real" "$vulkan_self_test_root/clean-home"
+    trap 'rm -rf "$vulkan_self_test_root"' EXIT HUP INT TERM
+    printf 'shaderc-a\n' >"$vulkan_self_test_root/real/libshaderc-a.so.1"
+    printf 'shaderc-b\n' >"$vulkan_self_test_root/real/libshaderc-b.so.1"
+    ln -s "real/libshaderc-a.so.1" "$vulkan_self_test_root/libshaderc.so.1"
+    printf '1: calling init: %s\n' "$vulkan_self_test_root/libshaderc.so.1" >"$vulkan_self_test_root/one.log"
+    [ "$(vulkan_glslc_loaded_library_path "$vulkan_self_test_root/one.log")" = "$vulkan_self_test_root/real/libshaderc-a.so.1" ]
+    printf '1: calling init: %s\n2: calling init: %s\n' \
+        "$vulkan_self_test_root/real/libshaderc-a.so.1" \
+        "$vulkan_self_test_root/real/libshaderc-b.so.1" >"$vulkan_self_test_root/multiple.log"
+    if vulkan_glslc_loaded_library_path "$vulkan_self_test_root/multiple.log" >/dev/null 2>&1; then
+        echo "Vulkan provenance self-test accepted multiple shaderc libraries" >&2
+        exit 1
+    fi
+    printf '1: calling init: %s\n' "$vulkan_self_test_root/libshaderc-missing.so.1" >"$vulkan_self_test_root/dangling.log"
+    if vulkan_glslc_loaded_library_path "$vulkan_self_test_root/dangling.log" >/dev/null 2>&1; then
+        echo "Vulkan provenance self-test accepted a missing shaderc library" >&2
+        exit 1
+    fi
+    vulkan_self_test_home_out="$vulkan_self_test_root/home.out"
+    cat >"$vulkan_self_test_root/fake-glslc" <<EOF
+#!/bin/sh
+printf '%s\n' "\$HOME" >"$vulkan_self_test_home_out"
+exit 0
+EOF
+    chmod +x "$vulkan_self_test_root/fake-glslc"
+    VULKAN_GLSLC_EXEC_PATH="$vulkan_self_test_root/fake-glslc"
+    VULKAN_GLSLC_LIBDIR=""
+    VULKAN_GLSLC_CLEAN_HOME="$vulkan_self_test_root/clean-home"
+    run_vulkan_glslc_compile "$vulkan_self_test_root/out.spv" "$vulkan_self_test_root/in.comp" \
+        "$vulkan_self_test_root/fake.out" "$vulkan_self_test_root/fake.loader"
+    [ "$(cat "$vulkan_self_test_home_out")" = "$VULKAN_GLSLC_CLEAN_HOME" ]
+    VULKAN_GLSLC_PRODUCER_MODE=embedded
+    VULKAN_GLSLC_PROVENANCE_STATUS=pass
+    if capture_vulkan_glslc_compile_provenance a "$vulkan_self_test_root/multiple.log"; then
+        echo "Vulkan provenance self-test accepted embedded shaderc loader records" >&2
+        exit 1
+    fi
+    [ "$VULKAN_GLSLC_PROVENANCE_STATUS" = unexpected-loaded-library-provenance ]
+
+    BUILD_DIR="$vulkan_self_test_root/build"
+    mkdir -p "$BUILD_DIR"
+    vulkan_self_test_reset_finalize_state() {
+        : >"$BUILD_DIR/evidence.env"
+        VULKAN_GLSLC_REQUESTED=glslc
+        VULKAN_GLSLC_EXEC_PATH="$vulkan_self_test_root/fake-glslc"
+        VULKAN_GLSLC_VERSION=test-version
+        VULKAN_GLSLC_COMPILER_FORMAT=elf
+        VULKAN_GLSLC_PRODUCER_MODE=dynamic
+        VULKAN_GLSLC_HOST_LIBC="glibc test"
+        VULKAN_GLSLC_CLEAN_HOME="$vulkan_self_test_root/clean-home"
+        VULKAN_GLSLC_EXPECTED_PATH=""
+        VULKAN_GLSLC_LOADER_LOG_A="$vulkan_self_test_root/one.log"
+        VULKAN_GLSLC_LOADER_LOG_B="$vulkan_self_test_root/one.log"
+        VULKAN_GLSLC_LOADER_SHA_A="$vulkan_self_test_sha"
+        VULKAN_GLSLC_LOADER_SHA_B="$vulkan_self_test_sha"
+        VULKAN_GLSLC_LIBRARY_PATH_A="$vulkan_self_test_root/real/libshaderc-a.so.1"
+        VULKAN_GLSLC_LIBRARY_PATH_B="$VULKAN_GLSLC_LIBRARY_PATH_A"
+        VULKAN_GLSLC_LIBRARY_SHA_A="$vulkan_self_test_sha"
+        VULKAN_GLSLC_LIBRARY_SHA_B="$vulkan_self_test_sha"
+        VULKAN_GLSLC_COMPILER_SHA_BEFORE="$vulkan_self_test_sha"
+        VULKAN_GLSLC_COMPILER_SHA_A="$vulkan_self_test_sha"
+        VULKAN_GLSLC_COMPILER_SHA_B="$vulkan_self_test_sha"
+        VULKAN_GLSLC_PROVENANCE_STATUS=pass
+    }
+    vulkan_self_test_reset_finalize_state
+    finalize_vulkan_glslc_compile_provenance
+    [ "$VULKAN_GLSLC_PROVENANCE_STATUS" = pass ]
+    vulkan_self_test_reset_finalize_state
+    VULKAN_GLSLC_COMPILER_SHA_B="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    if finalize_vulkan_glslc_compile_provenance; then
+        echo "Vulkan provenance self-test accepted compiler drift" >&2
+        exit 1
+    fi
+    [ "$VULKAN_GLSLC_PROVENANCE_STATUS" = compiler-changed-during-compile ]
+    vulkan_self_test_reset_finalize_state
+    VULKAN_GLSLC_LIBRARY_PATH_B="$vulkan_self_test_root/real/libshaderc-b.so.1"
+    if finalize_vulkan_glslc_compile_provenance; then
+        echo "Vulkan provenance self-test accepted producer library path drift" >&2
+        exit 1
+    fi
+    [ "$VULKAN_GLSLC_PROVENANCE_STATUS" = producer-library-path-mismatch ]
+    vulkan_self_test_reset_finalize_state
+    VULKAN_GLSLC_LIBRARY_SHA_B="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    if finalize_vulkan_glslc_compile_provenance; then
+        echo "Vulkan provenance self-test accepted producer library content drift" >&2
+        exit 1
+    fi
+    [ "$VULKAN_GLSLC_PROVENANCE_STATUS" = producer-library-changed-during-compile ]
+
+    vulkan_artifact_tuple_deterministic "$vulkan_self_test_sha" "$vulkan_self_test_sha" true
+    font_artifact_evidence_matches "$vulkan_self_test_sha" "$vulkan_self_test_sha"
+    if font_artifact_evidence_matches "$vulkan_self_test_sha" \
+       "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"; then
+        echo "Vulkan provenance self-test accepted final artifact drift" >&2
+        exit 1
+    fi
+    if vulkan_artifact_tuple_deterministic "$vulkan_self_test_sha" "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" true ||
+       vulkan_artifact_tuple_deterministic "$vulkan_self_test_sha" "$vulkan_self_test_sha" false; then
+        echo "Vulkan provenance self-test failed" >&2
+        exit 1
+    fi
+    echo "Vulkan provenance self-test passed"
+    exit 0
+fi
 
 bytes_of() {
     if [ -f "$1" ]; then
@@ -301,7 +787,8 @@ write_generated_sources() {
     program="src/app/portable_compute_emit/main.spl"
     raw_output="$BUILD_DIR/${target}_source.raw"
     rm -f "$raw_output" "$BUILD_DIR/${target}_source.err"
-    if ! SIMPLE_LIB="${SIMPLE_LIB:-src}" run_with_timeout "$SIMPLE_EXEC_BIN" run "$program" "$target" >"$raw_output" 2>"$BUILD_DIR/${target}_source.err"; then
+    record_portable_compute_emitter_command "$target" "${target}_emitter_command"
+    if ! run_portable_compute_emitter "$program" "$target" >"$raw_output" 2>"$BUILD_DIR/${target}_source.err"; then
         return 1
     fi
     rm -f "$path"
@@ -359,7 +846,8 @@ write_generated_vulkan_font_source() {
     program="src/app/portable_compute_emit/main.spl"
     raw_output="$BUILD_DIR/vulkan_font_source.raw"
     rm -f "$raw_output" "$BUILD_DIR/vulkan_font_source.err"
-    if ! SIMPLE_LIB="${SIMPLE_LIB:-src}" run_with_timeout "$SIMPLE_EXEC_BIN" run "$program" vulkan >"$raw_output" 2>"$BUILD_DIR/vulkan_font_source.err"; then
+    record_portable_compute_emitter_command vulkan vulkan_font_emitter_command
+    if ! run_portable_compute_emitter "$program" vulkan >"$raw_output" 2>"$BUILD_DIR/vulkan_font_source.err"; then
         return 1
     fi
     rm -f "$path"
@@ -509,6 +997,7 @@ emit_font_result() {
     command_line="$5"
     artifact="$6"
     pinned_verified="${7:-false}"
+    expected_artifact_sha="${8:-}"
     artifact_sha=""
     required_symbols="simple_font_atlas_composite_v1_u32"
     if [ "$target" = "vulkan" ]; then
@@ -522,6 +1011,10 @@ emit_font_result() {
             if [ "${#artifact_sha}" -ne 64 ]; then
                 status="invalid"
                 reason="artifact-sha256-unavailable"
+                pinned_verified=false
+            elif ! font_artifact_evidence_matches "$expected_artifact_sha" "$artifact_sha"; then
+                status="invalid"
+                reason="artifact-changed-before-evidence"
                 pinned_verified=false
             fi
             ;;
@@ -564,7 +1057,8 @@ run_cuda() {
     font_out="$BUILD_DIR/simple_2d_optimization_font_atlas.ptx"
     rm -f "$out" "$font_out"
     if ! write_generated_sources cuda "$src" "$font_src"; then
-        cmd="$SIMPLE_EXEC_BIN run <cuda portable emitter> > $src"
+        fail_if_explicit_emitter_rejected "$BUILD_DIR/cuda_source.err"
+        cmd="$(portable_compute_emitter_command cuda)"
         emit_result cuda generated_source_failed generated-source-failed 0 "$cmd" "$out"
         emit_font_result cuda generated_source_failed generated-source-failed 0 "$cmd" "$font_out"
         return
@@ -644,7 +1138,8 @@ run_hip() {
     font_out="$BUILD_DIR/simple_2d_optimization_font_atlas.hsaco"
     rm -f "$out" "$font_out"
     if ! write_generated_sources hip "$src" "$font_src"; then
-        cmd="$SIMPLE_EXEC_BIN run <hip portable emitter> > $src"
+        fail_if_explicit_emitter_rejected "$BUILD_DIR/hip_source.err"
+        cmd="$(portable_compute_emitter_command hip)"
         emit_result hip generated_source_failed generated-source-failed 0 "$cmd" "$out"
         emit_font_result hip generated_source_failed generated-source-failed 0 "$cmd" "$font_out"
         return
@@ -693,7 +1188,8 @@ run_opencl() {
     font_out="$BUILD_DIR/simple_2d_optimization_font_atlas.spirv"
     rm -f "$out" "$font_out"
     if ! write_generated_sources opencl "$src" "$font_src"; then
-        cmd="$SIMPLE_EXEC_BIN run <opencl portable emitter> > $src"
+        fail_if_explicit_emitter_rejected "$BUILD_DIR/opencl_source.err"
+        cmd="$(portable_compute_emitter_command opencl)"
         emit_result opencl generated_source_failed generated-source-failed 0 "$cmd" "$out"
         emit_font_result opencl generated_source_failed generated-source-failed 0 "$cmd" "$font_out"
         return
@@ -744,7 +1240,8 @@ run_metal() {
     font_out="$BUILD_DIR/simple_2d_optimization_font_atlas.metallib"
     rm -f "$air" "$out" "$font_air" "$font_out"
     if ! write_generated_sources metal "$src" "$font_src"; then
-        cmd="$SIMPLE_EXEC_BIN run <metal portable emitter> > $src"
+        fail_if_explicit_emitter_rejected "$BUILD_DIR/metal_source.err"
+        cmd="$(portable_compute_emitter_command metal)"
         emit_result metal generated_source_failed generated-source-failed 0 "$cmd" "$out"
         emit_font_result metal generated_source_failed generated-source-failed 0 "$cmd" "$font_out"
         return
@@ -799,36 +1296,62 @@ EOF
 run_vulkan_font() {
     src="$BUILD_DIR/simple_2d_optimization_font_atlas.comp"
     out="$BUILD_DIR/simple_2d_optimization_font_atlas.spv"
+    out_repro="$BUILD_DIR/simple_2d_optimization_font_atlas.repro.spv"
     VULKAN_FONT_SOURCE_EQUIVALENT=false
-    rm -f "$out"
+    rm -f "$out" "$out_repro"
     if ! write_generated_vulkan_font_source "$src"; then
-        cmd="$SIMPLE_EXEC_BIN run <vulkan font emitter> > $src"
+        fail_if_explicit_emitter_rejected "$BUILD_DIR/vulkan_font_source.err"
+        cmd="$(portable_compute_emitter_command vulkan)"
         emit_font_result vulkan generated_source_failed generated-source-failed 0 "$cmd" "$out"
         return
     fi
     echo "vulkan_font_pinned_artifact_sha256=$PINNED_VULKAN_FONT_ARTIFACT_SHA256" >>"$BUILD_DIR/evidence.env"
     if have "$VULKAN_GLSLC_TOOL"; then
-        if ! record_tool_provenance vulkan_font compiler "$VULKAN_GLSLC_TOOL"; then
-            emit_font_result vulkan unavailable missing-compiler-provenance 0 "$VULKAN_GLSLC_TOOL --target-env=vulkan1.1 -fshader-stage=compute -o $out $src" "$out"
+        if ! record_vulkan_glslc_library_provenance "$VULKAN_GLSLC_TOOL"; then
+            emit_font_result vulkan unavailable "$VULKAN_GLSLC_PROVENANCE_STATUS" 0 "$VULKAN_GLSLC_TOOL --target-env=vulkan1.1 -fshader-stage=compute -o $out $src" "$out"
             return
         fi
-        cmd="$VULKAN_GLSLC_TOOL --target-env=vulkan1.1 -fshader-stage=compute -o $out $src"
-        rm -f "$out" "$BUILD_DIR/vulkan_font.out" "$BUILD_DIR/vulkan_font.err"
-        if ! run_with_timeout "$VULKAN_GLSLC_TOOL" --target-env=vulkan1.1 -fshader-stage=compute -o "$out" "$src" >"$BUILD_DIR/vulkan_font.out" 2>"$BUILD_DIR/vulkan_font.err"; then
+        cmd="env -i HOME=$VULKAN_GLSLC_CLEAN_HOME PATH=/usr/bin:/bin:/usr/sbin:/sbin LC_ALL=C LD_LIBRARY_PATH=$VULKAN_GLSLC_LIBDIR LD_DEBUG=libs $VULKAN_GLSLC_EXEC_PATH --target-env=vulkan1.1 -fshader-stage=compute -o $out $src"
+        rm -f "$out" "$out_repro" "$BUILD_DIR/vulkan_font.out" "$BUILD_DIR/vulkan_font_repro.out" \
+            "$VULKAN_GLSLC_LOADER_LOG_A" "$VULKAN_GLSLC_LOADER_LOG_B"
+        if ! run_vulkan_glslc_compile "$out" "$src" "$BUILD_DIR/vulkan_font.out" "$VULKAN_GLSLC_LOADER_LOG_A"; then
+            VULKAN_GLSLC_PROVENANCE_STATUS=compile-a-failed
+            write_vulkan_glslc_provenance_evidence || true
             emit_font_result vulkan toolchain_failed toolchain_failed 0 "$cmd" "$out"
+            return
+        fi
+        if ! capture_vulkan_glslc_compile_provenance a "$VULKAN_GLSLC_LOADER_LOG_A"; then
+            write_vulkan_glslc_provenance_evidence || true
+            emit_font_result vulkan unavailable "$VULKAN_GLSLC_PROVENANCE_STATUS" 0 "$cmd" "$out"
+            return
+        fi
+        if ! run_vulkan_glslc_compile "$out_repro" "$src" "$BUILD_DIR/vulkan_font_repro.out" "$VULKAN_GLSLC_LOADER_LOG_B"; then
+            VULKAN_GLSLC_PROVENANCE_STATUS=compile-b-failed
+            write_vulkan_glslc_provenance_evidence || true
+            emit_font_result vulkan toolchain_failed toolchain_failed 0 "$cmd" "$out"
+            return
+        fi
+        if ! capture_vulkan_glslc_compile_provenance b "$VULKAN_GLSLC_LOADER_LOG_B" ||
+           ! finalize_vulkan_glslc_compile_provenance; then
+            if [ "$VULKAN_GLSLC_LOADER_SHA_B" = "" ]; then
+                write_vulkan_glslc_provenance_evidence || true
+            fi
+            emit_font_result vulkan unavailable "$VULKAN_GLSLC_PROVENANCE_STATUS" 0 "$cmd" "$out"
             return
         fi
     elif have "$VULKAN_GLSL_TOOL"; then
-        if ! record_tool_provenance vulkan_font compiler "$VULKAN_GLSL_TOOL"; then
-            emit_font_result vulkan unavailable missing-compiler-provenance 0 "$VULKAN_GLSL_TOOL --target-env vulkan1.1 -V -S comp -o $out $src" "$out"
-            return
-        fi
+        record_tool_provenance vulkan_font compiler "$VULKAN_GLSL_TOOL" || true
+        {
+            echo "vulkan_font_compiler_library_expected_path="
+            echo "vulkan_font_compiler_library_path="
+            echo "vulkan_font_compiler_library_sha256="
+            echo "vulkan_font_compiler_loader_log="
+            echo "vulkan_font_compiler_loader_log_sha256="
+            echo "vulkan_font_compiler_library_provenance_status=glslang-diagnostic-only"
+        } >>"$BUILD_DIR/evidence.env"
         cmd="$VULKAN_GLSL_TOOL --target-env vulkan1.1 -V -S comp -o $out $src"
-        rm -f "$out" "$BUILD_DIR/vulkan_font.out" "$BUILD_DIR/vulkan_font.err"
-        if ! run_with_timeout "$VULKAN_GLSL_TOOL" --target-env vulkan1.1 -V -S comp -o "$out" "$src" >"$BUILD_DIR/vulkan_font.out" 2>"$BUILD_DIR/vulkan_font.err"; then
-            emit_font_result vulkan toolchain_failed toolchain_failed 0 "$cmd" "$out"
-            return
-        fi
+        emit_font_result vulkan unavailable glslang-diagnostic-only-missing-clean-loader-provenance 0 "$cmd" "$out"
+        return
     else
         record_tool_provenance vulkan_font compiler "$VULKAN_GLSL_TOOL" || true
         record_tool_provenance vulkan_font fallback_compiler "$VULKAN_GLSLC_TOOL" || true
@@ -836,11 +1359,42 @@ run_vulkan_font() {
         emit_font_result vulkan unavailable missing-primary-tool 0 "$cmd" "$out"
         return
     fi
+    if ! have cmp; then
+        echo "vulkan_font_compile_deterministic=false" >>"$BUILD_DIR/evidence.env"
+        emit_font_result vulkan unavailable missing-byte-comparator "$(bytes_of "$out")" "$cmd" "$out" false
+        return
+    fi
+    artifact_sha_a="$(sha256_file "$out" || true)"
+    artifact_sha_b="$(sha256_file "$out_repro" || true)"
+    compile_bytes_equal=false
+    if cmp -s "$out" "$out_repro"; then
+        compile_bytes_equal=true
+    fi
+    compile_deterministic=false
+    if vulkan_artifact_tuple_deterministic "$artifact_sha_a" "$artifact_sha_b" "$compile_bytes_equal"; then
+        compile_deterministic=true
+    fi
+    {
+        echo "vulkan_font_repro_artifact=$out_repro"
+        echo "vulkan_font_repro_artifact_sha256=$artifact_sha_b"
+        echo "vulkan_font_repro_artifact_bytes=$(bytes_of "$out_repro")"
+        echo "vulkan_font_compile_deterministic=$compile_deterministic"
+    } >>"$BUILD_DIR/evidence.env"
+    if [ "$compile_deterministic" != true ]; then
+        emit_font_result vulkan invalid nondeterministic-compiler-output "$(bytes_of "$out")" "$cmd" "$out" false
+        return
+    fi
     IFS=: read -r valid reason bytes <<EOF
 $(status_for_artifact vulkan "$out" main)
 EOF
     if [ "$valid" != "valid" ]; then
         emit_font_result vulkan invalid "$reason" "$bytes" "$cmd" "$out" false
+        return
+    fi
+    artifact_sha_before_validation="$(sha256_file "$out" || true)"
+    echo "vulkan_font_validated_input_sha256=$artifact_sha_before_validation" >>"$BUILD_DIR/evidence.env"
+    if [ "$artifact_sha_before_validation" != "$artifact_sha_a" ]; then
+        emit_font_result vulkan invalid artifact-changed-before-validation "$bytes" "$cmd" "$out" false
         return
     fi
     if ! have "$SPIRV_VAL_TOOL"; then
@@ -862,6 +1416,11 @@ EOF
     fi
     echo "vulkan_font_validator_result=pass" >>"$BUILD_DIR/evidence.env"
     artifact_sha="$(sha256_file "$out" || true)"
+    echo "vulkan_font_final_artifact_sha256=$artifact_sha" >>"$BUILD_DIR/evidence.env"
+    if [ "$artifact_sha" != "$artifact_sha_a" ]; then
+        emit_font_result vulkan invalid artifact-changed-during-validation "$(bytes_of "$out")" "$cmd" "$out" false
+        return
+    fi
     vulkan_font_pinned_verified=false
     if [ "$artifact_sha" = "$PINNED_VULKAN_FONT_ARTIFACT_SHA256" ]; then
         echo "vulkan_font_artifact_equivalent=true" >>"$BUILD_DIR/evidence.env"
@@ -873,13 +1432,36 @@ EOF
         vulkan_font_pinned_verified=true
     fi
     if [ "$vulkan_font_pinned_verified" = true ]; then
-        emit_font_result vulkan compiled_artifact_verified "$reason" "$bytes" "$cmd" "$out" true
+        emit_font_result vulkan compiled_artifact_verified "$reason" "$bytes" "$cmd" "$out" true "$artifact_sha"
     elif [ "$artifact_sha" != "$PINNED_VULKAN_FONT_ARTIFACT_SHA256" ]; then
-        emit_font_result vulkan candidate_compiled pinned-artifact-hash-mismatch "$bytes" "$cmd" "$out" false
+        emit_font_result vulkan candidate_compiled pinned-artifact-hash-mismatch "$bytes" "$cmd" "$out" false "$artifact_sha"
     else
-        emit_font_result vulkan candidate_compiled pinned-source-hash-mismatch "$bytes" "$cmd" "$out" false
+        emit_font_result vulkan candidate_compiled pinned-source-hash-mismatch "$bytes" "$cmd" "$out" false "$artifact_sha"
     fi
 }
+
+if [ "${1:-}" = "--explicit-emitter-self-test" ]; then
+    self_build="$BUILD_DIR/explicit-emitter-self-test"
+    self_report="$self_build/report.md"
+    self_stderr="$self_build/stderr.log"
+    mkdir -p "$self_build"
+    if PORTABLE_COMPUTE_TARGETS=cuda \
+        PORTABLE_COMPUTE_REQUIRE_VERIFIED=0 \
+        PORTABLE_COMPUTE_EMITTER_BIN=/bin/true \
+        BUILD_DIR="$self_build/run" \
+        REPORT_PATH="$self_report" \
+        sh "$ROOT_DIR/scripts/check/check-portable-compute-toolchains.shs" \
+        >"$self_build/stdout.log" 2>"$self_stderr"; then
+        echo "explicit cached emitter self-test accepted a non-emitter executable" >&2
+        exit 1
+    fi
+    if ! grep -F "Explicit cached portable compute emitter failed protocol validation:" "$self_stderr" >/dev/null 2>&1; then
+        echo "explicit cached emitter self-test missed the fail-closed diagnostic" >&2
+        exit 1
+    fi
+    echo "explicit cached emitter self-test passed"
+    exit 0
+fi
 
 rm -f "$BUILD_DIR/evidence.env"
 {
@@ -887,7 +1469,7 @@ rm -f "$BUILD_DIR/evidence.env"
     echo "portable_compute_expected_semantics=$PORTABLE_COMPUTE_EXPECTED_SEMANTICS"
 } >"$BUILD_DIR/evidence.env"
 assert_evidence_parser_contract
-record_simple_provenance
+record_portable_compute_emitter_provenance
 if target_requested cuda; then run_cuda; fi
 if target_requested hip; then run_hip; fi
 if target_requested opencl; then run_opencl; fi
@@ -927,13 +1509,17 @@ rm -f "$REPORT_PATH"
     echo
     for target in cuda hip opencl metal; do
         if ! target_requested "$target"; then continue; fi
+        emitter_command="$(field_of "${target}_emitter_command" "$BUILD_DIR/evidence.env")"
         command_line="$(field_of "${target}_command" "$BUILD_DIR/evidence.env")"
         font_command="$(field_of "${target}_font_command" "$BUILD_DIR/evidence.env")"
+        echo "- $target source emitter: \`$emitter_command\`"
         echo "- $target optimization: \`$command_line\`"
         echo "- $target font-atlas: \`$font_command\`"
     done
     if target_requested vulkan; then
+        vulkan_font_emitter_command="$(field_of vulkan_font_emitter_command "$BUILD_DIR/evidence.env")"
         vulkan_font_command="$(field_of vulkan_font_command "$BUILD_DIR/evidence.env")"
+        echo "- vulkan font source emitter: \`$vulkan_font_emitter_command\`"
         echo "- vulkan font-atlas: \`$vulkan_font_command\`"
     fi
 } >"$REPORT_PATH"
@@ -975,3 +1561,7 @@ echo "all_portable_compute_pins_verified=$all_portable_compute_pins_verified"
 echo "all_portable_compute_toolchains_verified=$all_portable_compute_pins_verified"
 echo "report_path=$REPORT_PATH"
 cat "$BUILD_DIR/evidence.env"
+if ! portable_compute_strict_result "$PORTABLE_COMPUTE_REQUIRE_VERIFIED" "$all_portable_compute_candidates_validated" "$all_portable_compute_pins_verified"; then
+    echo "portable compute strict admission failed; inspect $BUILD_DIR/evidence.env" >&2
+    exit 1
+fi

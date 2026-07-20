@@ -1,183 +1,428 @@
-# Shared Multilingual Font Manifest Specification
+# Shared Multilingual Font Manifest
 
-> **Hand-maintained mirror — pending canonical `spipe-docgen`.** The executable
-> SSpec changed after the recorded run; this file does not claim current PASS.
+> Checks the selected CLDR ranking, immutable bundled assets, and complete sparse
 
-Status: **PENDING post-change execution and docgen**.
-
-Executed command:
-
-```text
-bin/release/simple test test/03_system/app/simple_2d/feature/shared_font_manifest_spec.spl --mode=interpreter
-```
-
-That recorded run predates the current asset hashes and coverage counts. The
-post-change self-hosted rerun timed out without output, so no current scenario
-PASS is inferred.
-
-Executable source:
-`test/03_system/app/simple_2d/feature/shared_font_manifest_spec.spl`
-
-## Scope
-
-This scenario checks the repository-owned pinned CLDR bytes and hashes,
-independent contribution arithmetic, byte-identical double regeneration, the
-selected top-ten/rank-eleven boundary, 16 unchanged font assets with adjacent
-metadata/licenses, all 100 sparse language/category cells, and a fail-closed
-rasterizer witness gate. It does not claim that all 16 candidates have passed
-corpus acceptance, or claim GPU/native execution.
-
-The source covers REQ-001/REQ-002 source hashes,
-contribution replay, deterministic ranking, script subtotals, and cutoff;
-remaining coverage is REQ-003, static/hash portions of REQ-004/005 and NFR-001,
-plus the NFR-003 font-byte limit. It does not prove complete REQ-007
-complex shaping, complete REQ-008 format behavior, or GPU execution.
-
-## Operator flow
-
-### Load the pinned multilingual font manifest
-
-1. Run the executable SSpec with the self-hosted pure-Simple runtime.
-2. Observe the visible step: **Load the pinned multilingual font manifest**.
-3. Confirm the scenario completes without skipped or pending examples.
-4. Retain the exit status and output as the evidence record; this mirror alone
-   is not executable evidence.
-
-## Expected evidence
-
-### CLDR ranking and cutoff
-
-- Release: `release-48-2`
-- Annotated tag object: `fc1fd058cc6f50544a450a3b15a4bba0e0c1e653`
-- Source commit: `11299982335beb974c1c63c45265184e759c0f41`
-- License: `Unicode-3.0`
-- The three pinned source-document SHA-256 values are recomputed from bundled
-  CLDR bytes and match exactly; license, tag witness, source manifest, and
-  derived ranking ledger hashes are also exact.
-- Two real-input generations are byte-identical to `RANKING.sdn`, and all
-  eleven language totals plus script subtotals match the registry.
-- All 1,589 territory/language contributions are independently recomputed from
-  their fixed-decimal source fields with the specified half-up rule.
-- Selected order: `en, zh, es, hi, ar, fr, pt, ru, ur, id`.
-- Boundary row: `bn` is eleventh; Indonesian total `167542007` is greater
-  than Bengali total `167485664`.
-
-### Bundled assets and notices
-
-- The registry derives one closed 57-path/SHA-256 bundle: 49 candidate binary,
-  metadata, license, and notice files; one `CORPUS.sdn`; and seven CLDR files.
-  The executable scenario rejects duplicate pins, missing or extra tree paths,
-  and any byte/hash mismatch. CLDR and corpus checks consume these owner pins
-  rather than repeating their hash literals.
-- Exactly 16 unique font paths and 16 unique SHA-256 values.
-- Every binary, adjacent `METADATA.pb`, and adjacent license file exists below
-  `assets/fonts/google-fonts/`, and the metadata/license text is nonempty.
-- Every binary's SHA-256 is recomputed through the package facade and equals
-  `sha256:` plus its pinned manifest digest.
-- Every font is unchanged, records `cmap` and `glyf`, and has nonempty
-  copyright text, RFN state, and script metadata. The manifest also pins
-  extracted style, full/PostScript names, version, default axes, and a closed
-  fallback role.
-- Every binary replays its pinned family, subfamily, full, PostScript, and
-  version identity directly from the sfnt `name` table; Noto Emoji's embedded
-  full name is `Noto Emoji Regular`.
-- Every candidate references the same immutable multilingual witness corpus;
-  `CORPUS.sdn` is recomputed as
-  `sha256:c7cffbf3e1a29c75dcd481593c6880d071966c5cbf0611e2185fe0d73e0c83f6`.
-- Allowed licenses are `OFL-1.1` and `Apache-2.0`.
-- Roboto Slab's separate `apache/robotoslab/COPYRIGHT.txt` exists, is nonempty,
-  and names the 2018 Roboto Slab Project Authors.
-- Exact binary total: `51,764,704` bytes. The distribution gate sums all 57
-  files under `assets/fonts` plus root `LICENSE` and
-  `THIRD_PARTY_NOTICES.md`: 59 files and `53,433,272` bytes, below 80 MiB.
-
-### Sparse coverage
-
-- 10 languages × 10 categories = exactly 100 unique cells.
-- Current source-policy totals are 67 `native`, 4 `fallback`, 26
-  `not-designed-for-script`, and 3 `unavailable`.
-- Chinese mono falls back to Noto Sans SC; Hindi, Arabic, and Urdu mono fall
-  back to their accepted script sans faces. Hindi, Arabic, and Urdu serif remain
-  unavailable pending executable proof of their existing exact per-face
-  oracles. Exact monochrome Noto Emoji
-  `U+1F600` corpus tuples are native for all ten selected language tags;
-  sequences and color remain unsupported.
-  Russian display remains not designed for that script.
-
-### Corpus and accepted-simple policy gate
-
-- Twelve manifest entries are accepted: nine identity-profile families plus the
-  sans Devanagari/Arabic selected-shaping faces and exact-corpus Noto Emoji. The
-  two serif script faces and two Bengali rank-eleven faces remain `candidate:`. Cmap
-  metadata or raster diagnostics alone still cannot accept a cell; the shaping
-  gate adds exact Hindi `hi` through the `हिन्दी` `dev2` witness for Noto Sans
-  Devanagari and the exact pinned Arabic `العربية` / Urdu `اردو` lookup-vector
-  witnesses for Noto Sans Arabic.
-- The existing `FontRasterizer` facade loads every pinned face and exercises its
-  exact applicable `CORPUS.sdn` codepoints across Latin, Han, Devanagari,
-  Arabic, Urdu, Cyrillic, Bengali rank 11, and Common `U+1F600` emoji.
-- Every witness codepoint must exist and rasterize, and each whole witness must
-  produce a nonempty diagnostic layout. That layout is not shaping acceptance.
-  A missing rasterizer library is a failure, not a synthetic pass.
-- Before those diagnostics, the scenario reads each binary once and checks the
-  shared typed sfnt validator, the complete recorded table set, and the exact
-  static/default-variable axis metadata. It also replays the five pinned sfnt
-  names from each real binary. Both native loader owners call the
-  structural bool preflight before native state mutation; typed reasons are
-  retained as scenario evidence.
-- The bound shaping gate promotes 54 identity native cells, three selected-script
-  sans cells, and ten exact-corpus Emoji cells, for 67 `native`, 4 explicit
-  script-sans mono `fallback` cells, 26 `not-designed-for-script`, and 3
-  `unavailable`. This manifest validates that
-  source policy but adds no shaping rows beyond the shaping gate.
-- The focused shaping SSpec preserves exact CORPUS
-  source/cluster/language/script metadata for the 54-cell identity subset and
-  separately checks exact Hindi `हिन्दी` and Arabic/Urdu witnesses through the
-  accepted sans faces, plus exact single-`U+1F600` material; other complex and emoji
-  sequences remain incomplete. This manifest does not extend that evidence or
-  substitute for the shaping spec's current run.
-- A test-only raw sfnt oracle independently identifies 14 compound-bearing
-  faces and the exact 76 compound corpus roots/124 direct components. Every
-  mapped root must produce a nonempty Pure Simple outline; this adds no native
-  production owner and does not promote the matrix.
-- Focused supporting specs now reject color/CFF/SVG/current and legacy bitmap
-  strike tables, accept only static or exact default-axis requests, repeat the
-  pinned Pixelify Sans `wght=400` Pure Simple raster, and pin the built-in 8×16
-  monochrome fallback glyph. No admitted pure-Simple runner currently executes
-  these refreshed specs, so this manual does not upgrade REQ-008 to runtime PASS
-  or claim non-default `gvar` interpolation.
-
-### Global-face wrapper invalidation
-
-- The conditional native scenario loads selected face A, then selected face B
-  through the same available rasterizer dylib without closing A first.
-- B must remain current and expose exactly
-  `sha256=<manifest digest>;axes=<manifest defaults>`. A must become stale,
-  expose an empty cache identity, reject glyph lookup, alpha/subpixel material,
-  layout, kerning, and line metrics, and never read B through A's wrapper.
-- Closing stale A must not invalidate B; B must still find and rasterize `A`
-  before it is closed.
-- If no candidate rasterizer dylib exists, the scenario fails explicitly as
-  `unavailable`; missing native evidence is not a synthetic PASS.
-
-The expanded scenario source is current, but its post-change execution and
-canonical doc generation are pending after the recorded timeouts.
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 7 | 7 | 0 | 0 |
 
 <details>
-<summary>Folded executable detail</summary>
+<summary>Full Scenario Manual</summary>
 
-The SSpec calls the canonical registry helpers, hashes real files through
-`package_sha256`, reads notices through the owned file facade, sums immutable
-byte lengths, rejects duplicate paths/hashes, and validates every matrix key
-and status with built-in matchers. Consult the executable source for exact
-assertions; no copied source block is maintained here.
+# Shared Multilingual Font Manifest
+
+Checks the selected CLDR ranking, immutable bundled assets, and complete sparse
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/03_system/app/simple_2d/feature/shared_font_manifest_spec.spl` |
+| Updated | 2026-07-19 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+Checks the selected CLDR ranking, immutable bundled assets, and complete sparse
+coverage matrix through the canonical Simple registry. No renderer or native
+GPU claim is made here.
+
+## Scenarios
+
+### shared multilingual font manifest
+
+#### should pin the CLDR source, selected top ten, and cutoff evidence
+
+- Load the pinned multilingual font manifest
+   - Expected: source.release equals `release-48-2`
+   - Expected: source.tag_object equals `fc1fd058cc6f50544a450a3b15a4bba0e0c1e653`
+   - Expected: source.source_commit equals `11299982335beb974c1c63c45265184e759c0f41`
+   - Expected: source.supplemental_data_sha256 equals `font_bundle_pin_sha256(bundle_pins, CLDR_DATA)`
+   - Expected: source.supplemental_metadata_sha256 equals `font_bundle_pin_sha256(bundle_pins, CLDR_METADATA)`
+   - Expected: source.likely_subtags_sha256 equals `font_bundle_pin_sha256(bundle_pins, CLDR_LIKELY)`
+   - Expected: package_sha256(path) equals `"sha256:" + font_bundle_pin_sha256(bundle_pins, path)`
+   - Expected: source.license equals `Unicode-3.0`
+   - Expected: selected.len() equals `10`
+   - Expected: evidence.len() equals `11`
+   - Expected: selected[0].language equals `en`
+   - Expected: selected[8].language equals `ur`
+   - Expected: selected[9].language equals `id`
+   - Expected: evidence[10].language equals `bn`
+- Regenerate the top eleven twice from the exact pinned XML bytes
+   - Expected: rows.len() equals `1589`
+   - Expected: row.contribution equals `expected_cldr_contribution(row)`
+- fail
+   - Expected: first_bytes equals `second_bytes`
+   - Expected: first_bytes equals `file_read_text(CLDR_RANKING)`
+   - Expected: first_rows[i].language equals `evidence[i].language`
+   - Expected: first_rows[i].likely_script equals `evidence[i].likely_script`
+   - Expected: first_rows[i].total equals `evidence[i].literate_functional_total`
+- script totals = script totals + script script + "=" + script total to text
+   - Expected: script_totals equals `evidence[i].script_totals`
+- fail
+- fail
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 64 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Load the pinned multilingual font manifest")
+val source = selected_font_language_ranking_source()
+val bundle_pins = selected_font_bundle_asset_pins()
+val selected = selected_font_language_ranks()
+val evidence = font_language_ranking_evidence()
+expect(source.release).to_equal("release-48-2")
+expect(source.tag_object).to_equal("fc1fd058cc6f50544a450a3b15a4bba0e0c1e653")
+expect(source.source_commit).to_equal("11299982335beb974c1c63c45265184e759c0f41")
+expect(source.supplemental_data_sha256).to_equal(font_bundle_pin_sha256(bundle_pins, CLDR_DATA))
+expect(source.supplemental_metadata_sha256).to_equal(font_bundle_pin_sha256(bundle_pins, CLDR_METADATA))
+expect(source.likely_subtags_sha256).to_equal(font_bundle_pin_sha256(bundle_pins, CLDR_LIKELY))
+for path in [CLDR_DATA, CLDR_METADATA, CLDR_LIKELY, CLDR_ROOT + "LICENSE", CLDR_ROOT + "TAG.txt", CLDR_ROOT + "SOURCE.sdn", CLDR_RANKING]:
+    expect(package_sha256(path)).to_equal("sha256:" + font_bundle_pin_sha256(bundle_pins, path))
+expect(file_read_text(CLDR_ROOT + "TAG.txt")).to_contain("object " + source.source_commit)
+expect(source.license).to_equal("Unicode-3.0")
+expect(selected.len()).to_equal(10)
+expect(evidence.len()).to_equal(11)
+expect(selected[0].language).to_equal("en")
+expect(selected[8].language).to_equal("ur")
+expect(selected[9].language).to_equal("id")
+expect(evidence[10].language).to_equal("bn")
+expect(selected[9].literate_functional_total).to_be_greater_than(evidence[10].literate_functional_total)
+
+step("Regenerate the top eleven twice from the exact pinned XML bytes")
+val population_xml = file_read_text(CLDR_DATA)
+val metadata_xml = file_read_text(CLDR_METADATA)
+val likely_xml = file_read_text(CLDR_LIKELY)
+val first = cldr_rank_languages(population_xml, metadata_xml, likely_xml)
+val second = cldr_rank_languages(population_xml, metadata_xml, likely_xml)
+val contributions = cldr_scan_language_population(population_xml)
+match contributions:
+    case Ok(rows):
+        expect(rows.len()).to_equal(1589)
+        for row in rows:
+            expect(row.contribution).to_equal(expected_cldr_contribution(row))
+    case Err(message):
+        fail("pinned CLDR contribution replay failed: {message}")
+match first:
+    case Ok(first_rows):
+        match second:
+            case Ok(second_rows):
+                val first_bytes = cldr_serialize_language_totals(first_rows, 11)
+                val second_bytes = cldr_serialize_language_totals(second_rows, 11)
+                expect(first_bytes).to_equal(second_bytes)
+                expect(first_bytes).to_equal(file_read_text(CLDR_RANKING))
+                var i: i64 = 0
+                while i < 11:
+                    expect(first_rows[i].language).to_equal(evidence[i].language)
+                    expect(first_rows[i].likely_script).to_equal(evidence[i].likely_script)
+                    expect(first_rows[i].total).to_equal(evidence[i].literate_functional_total)
+                    var script_totals = ""
+                    var j: i64 = 0
+                    while j < first_rows[i].script_totals.len():
+                        if j > 0:
+                            script_totals = script_totals + ","
+                        val script = first_rows[i].script_totals[j]
+                        script_totals = script_totals + script.script + "=" + script.total.to_text()
+                        j = j + 1
+                    expect(script_totals).to_equal(evidence[i].script_totals)
+                    i = i + 1
+            case Err(message):
+                fail("second pinned CLDR regeneration failed: {message}")
+    case Err(message):
+        fail("first pinned CLDR regeneration failed: {message}")
+```
 
 </details>
 
-## Claim boundary
+#### should verify every immutable bundled font and adjacent notice
 
-The source specifies manifest and embedded-name identity, current sparse
-policy, and codepoint/raster evidence. Pending execution means it does not yet
-establish a current PASS, and it does not independently prove the
-accepted-simple shaping rows, complete complex shaping, GPU compilation,
-submission, readback, or display.
+- expect font bundle
+   - Expected: package_sha256(FONT_CORPUS_PATH) equals `"sha256:" + corpus_sha256`
+- expect font license
+- var distribution bytes =
+- file read bytes
+- distribution bytes = distribution bytes + file read bytes
+   - Expected: total_bytes equals `51764704`
+   - Expected: distribution_paths.len() equals `57`
+   - Expected: distribution_paths.len() + 2 equals `59`
+   - Expected: distribution_bytes equals `53433272`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 27 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val assets = setup_shared_font_fixture()
+val bundle_pins = selected_font_bundle_asset_pins()
+val corpus_sha256 = font_bundle_pin_sha256(bundle_pins, FONT_CORPUS_PATH)
+val corpus_ref = FONT_CORPUS_PATH + "#sha256:" + corpus_sha256
+expect_font_bundle(bundle_pins)
+expect(file_exists(FONT_CORPUS_PATH)).to_be(true)
+expect(package_sha256(FONT_CORPUS_PATH)).to_equal("sha256:" + corpus_sha256)
+var total_bytes: i64 = 0
+var paths = "|"
+var hashes = "|"
+for asset in assets:
+    expect_font_license(asset, corpus_ref)
+    expect(paths.contains("|" + asset.upstream_path + "|")).to_be(false)
+    expect(hashes.contains("|" + asset.sha256 + "|")).to_be(false)
+    paths = paths + asset.upstream_path + "|"
+    hashes = hashes + asset.sha256 + "|"
+    total_bytes = total_bytes + asset.byte_len
+val distribution_paths = dir_walk("assets/fonts")
+var distribution_bytes = (file_read_bytes("LICENSE").len() +
+    file_read_bytes("THIRD_PARTY_NOTICES.md").len())
+for path in distribution_paths:
+    distribution_bytes = distribution_bytes + file_read_bytes(path).len()
+expect(total_bytes).to_equal(51764704)
+expect(distribution_paths.len()).to_equal(57)
+expect(distribution_paths.len() + 2).to_equal(59)
+expect(distribution_bytes).to_equal(53433272)
+expect(distribution_bytes).to_be_less_than(80 * 1024 * 1024 + 1)
+```
+
+</details>
+
+#### should fail closed when a second selected face stales the first wrapper
+
+- Reject a stale global-face wrapper after loading a second selected face
+- fail
+- first close
+   - Expected: first.cache_identity() equals `sha256={first_asset.sha256};axes={first_asset.default_axes}`
+- first close
+- fail
+- second close
+   - Expected: second.cache_identity() equals `sha256={second_asset.sha256};axes={second_asset.default_axes}`
+   - Expected: first.cache_identity() equals ``
+   - Expected: first.layout_text("A", 24, 0).len() equals `0`
+   - Expected: first.horizontal_kern(65, 86, 24) equals `0`
+   - Expected: first.horizontal_line_metric(24, 0) equals `0`
+- first close
+- assert not equal
+- second close
+- fail
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 46 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Reject a stale global-face wrapper after loading a second selected face")
+val assets = setup_shared_font_fixture()
+val first_asset = assets[13]
+val second_asset = assets[14]
+var dylib_available = false
+var exercised = false
+for dylib_path in browser_font_dylib_candidates():
+    if file_exists(dylib_path) and not exercised:
+        dylib_available = true
+        val first_loaded = FontRasterizer.load(dylib_path, first_asset.local_path)
+        if first_loaded == nil:
+            fail("font rasterizer dylib exists but selected face A could not load")
+        var first = first_loaded.?
+        defer:
+            if first.lib_handle != 0:
+                first.close()
+        expect(first.is_current()).to_be(true)
+        expect(first.cache_identity()).to_equal("sha256={first_asset.sha256};axes={first_asset.default_axes}")
+
+        val second_loaded = FontRasterizer.load(dylib_path, second_asset.local_path)
+        if second_loaded == nil:
+            first.close()
+            fail("font rasterizer dylib exists but selected face B could not load")
+        var second = second_loaded.?
+        defer:
+            if second.lib_handle != 0:
+                second.close()
+        expect(second.is_current()).to_be(true)
+        expect(second.cache_identity()).to_equal("sha256={second_asset.sha256};axes={second_asset.default_axes}")
+        expect(first.is_current()).to_be(false)
+        expect(first.cache_identity()).to_equal("")
+        expect(first.has_glyph(65)).to_be(false)
+        expect(first.rasterize(65, 24)).to_be_nil()
+        expect(first.rasterize_subpixel(65, 24)).to_be_nil()
+        expect(first.layout_text("A", 24, 0).len()).to_equal(0)
+        expect(first.horizontal_kern(65, 86, 24)).to_equal(0)
+        expect(first.horizontal_line_metric(24, 0)).to_equal(0)
+        first.close()
+        expect(second.is_current()).to_be(true)
+        expect(second.has_glyph(65)).to_be(true)
+        assert_not_equal(second.rasterize(65, 24), nil)
+        second.close()
+        exercised = true
+if not dylib_available:
+    fail("unavailable: no font rasterizer dylib exists; stale-wrapper evidence did not run")
+expect(exercised).to_be(true)
+```
+
+</details>
+
+#### should bind accepted-simple policy to the exact candidate corpus
+
+- Check every candidate against its exact CORPUS codepoints and accepted-simple policy
+- fail
+   - Expected: accepted_simple equals `12`
+   - Expected: candidate equals `4`
+- expect candidate witness
+- expect candidate witness
+- expect candidate witness
+- expect candidate witness
+- expect candidate witness
+- expect candidate witness
+- expect candidate witness
+- expect candidate witness
+- expect candidate witness
+- expect candidate witness
+- expect candidate witness
+- expect candidate witness
+- expect candidate witness
+- expect candidate witness
+- expect candidate witness
+- expect candidate witness
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 29 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Check every candidate against its exact CORPUS codepoints and accepted-simple policy")
+val assets = setup_shared_font_fixture()
+var accepted_simple: i64 = 0
+var candidate: i64 = 0
+for asset in assets:
+    if asset.coverage_state.starts_with("accepted-simple:"):
+        accepted_simple = accepted_simple + 1
+    elif asset.coverage_state.starts_with("candidate:"):
+        candidate = candidate + 1
+    else:
+        fail("unknown coverage state: " + asset.coverage_state)
+expect(accepted_simple).to_equal(12)
+expect(candidate).to_equal(4)
+expect_candidate_witness(assets, "Noto Sans SC", "English中文EspañolfrançaisPortuguêsРусскийIndonesia")
+expect_candidate_witness(assets, "Noto Sans Devanagari", "EnglishEspañolहिन्दीfrançaisPortuguêsIndonesia")
+expect_candidate_witness(assets, "Noto Sans Arabic", "EnglishEspañolالعربيةfrançaisPortuguêsاردوIndonesia")
+expect_candidate_witness(assets, "Noto Sans Bengali", "বাংলা")
+expect_candidate_witness(assets, "Noto Serif SC", "English中文EspañolfrançaisPortuguêsРусскийIndonesia")
+expect_candidate_witness(assets, "Noto Serif Devanagari", "EnglishEspañolहिन्दीfrançaisPortuguêsIndonesia")
+expect_candidate_witness(assets, "Noto Naskh Arabic", "EnglishEspañolالعربيةfrançaisPortuguêsاردوIndonesia")
+expect_candidate_witness(assets, "Noto Serif Bengali", "বাংলা")
+expect_candidate_witness(assets, "Noto Sans Mono", "EnglishEspañolfrançaisPortuguêsРусскийIndonesia")
+expect_candidate_witness(assets, "Bungee", "EnglishEspañolfrançaisPortuguêsIndonesia")
+expect_candidate_witness(assets, "Nunito", "EnglishEspañolfrançaisPortuguêsРусскийIndonesia")
+expect_candidate_witness(assets, "Caveat", "EnglishEspañolfrançaisPortuguêsРусскийIndonesia")
+expect_candidate_witness(assets, "Roboto Slab", "EnglishEspañolfrançaisPortuguêsРусскийIndonesia")
+expect_candidate_witness(assets, "UnifrakturCook", "EnglishEspañolfrançaisPortuguêsIndonesia")
+expect_candidate_witness(assets, "Pixelify Sans", "EnglishEspañolfrançaisPortuguêsРусскийIndonesia")
+expect_candidate_witness(assets, "Noto Emoji", "😀")
+```
+
+</details>
+
+#### should reconstruct every compound outline reached by exact corpus mappings
+
+- Replay exact CORPUS mappings through the bounded Pure Simple glyf parser
+- expect compound corpus
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Replay exact CORPUS mappings through the bounded Pure Simple glyf parser")
+expect_compound_corpus(setup_shared_font_fixture())
+```
+
+</details>
+
+#### should preserve the separate Roboto Slab copyright notice
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val copyright_path = FONT_ASSET_ROOT + "apache/robotoslab/COPYRIGHT.txt"
+expect(file_exists(copyright_path)).to_be(true)
+val copyright_text = file_read_text(copyright_path)
+expect(copyright_text.len()).to_be_greater_than(0)
+expect(copyright_text).to_contain("Copyright 2018 The Roboto Slab Project Authors")
+```
+
+</details>
+
+#### should provide one honest status for all one hundred sparse cells
+
+- expect language coverage
+   - Expected: cells[10].status equals `native`
+   - Expected: cells[10].witness_family equals `Noto Sans SC`
+   - Expected: cells[31].status equals `unavailable`
+   - Expected: cells[32].status equals `fallback`
+   - Expected: cells[32].witness_family equals `Noto Sans Devanagari`
+   - Expected: cells[41].status equals `unavailable`
+   - Expected: cells[42].status equals `fallback`
+   - Expected: cells[42].witness_family equals `Noto Sans Arabic`
+   - Expected: cells[73].status equals `not-designed-for-script`
+   - Expected: cells[81].status equals `unavailable`
+   - Expected: cells[82].status equals `fallback`
+   - Expected: cells[82].witness_family equals `Noto Sans Arabic`
+   - Expected: cells[9].status equals `native`
+   - Expected: cells[9].witness_family equals `Noto Emoji`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val cells = selected_font_coverage_matrix()
+expect_language_coverage(cells)
+expect(cells[10].status).to_equal("native")
+expect(cells[10].witness_family).to_equal("Noto Sans SC")
+expect(cells[31].status).to_equal("unavailable")
+expect(cells[32].status).to_equal("fallback")
+expect(cells[32].witness_family).to_equal("Noto Sans Devanagari")
+expect(cells[41].status).to_equal("unavailable")
+expect(cells[42].status).to_equal("fallback")
+expect(cells[42].witness_family).to_equal("Noto Sans Arabic")
+expect(cells[73].status).to_equal("not-designed-for-script")
+expect(cells[81].status).to_equal("unavailable")
+expect(cells[82].status).to_equal("fallback")
+expect(cells[82].witness_family).to_equal("Noto Sans Arabic")
+expect(cells[9].status).to_equal("native")
+expect(cells[9].witness_family).to_equal("Noto Emoji")
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 7 |
+| Active scenarios | 7 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>

@@ -32,7 +32,7 @@ not create, rewrite, or weaken SPipe after verification.
   `scripts/check/fixtures/font_evidence_runner_fail_spec.spl` must exit 1 with
   `test-runner: spec failed`, and
   `scripts/check/fixtures/font_evidence_runner_empty_spec.spl` must exit 1 with
-  `test-runner: no examples executed`; reject 2/124/139 and retain commands,
+  `test-runner: no examples executed`; reject 2/124/132/139 and retain commands,
   binary SHA-256, and logs. Native evidence remains authoritative.
 - Scenario-oriented generated docs read as manuals: primary steps visible,
   inline/previous setup expanded, executable SPipe folded by default, detailed

@@ -7,13 +7,14 @@ use std.nogc_sync_mut.engine.render.backend3d.{
 use std.nogc_sync_mut.engine.render.vulkan_backend3d.{
     VulkanRenderBackend3D, VulkanBackend3DDeviceEvidence
 }
-use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch}
+use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, font_render_batch_atlas_owner_identity}
 use std.gpu.engine3d.font_hud_material.{font_hud_vertices, font_world_vertices}
 use std.gpu.engine3d.font_vulkan_spirv.{
     font_hud_vulkan_vertex_spirv, font_world_vulkan_vertex_spirv,
     font_vulkan_fragment_spirv
 }
 use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.gpu.font_atlas_composite.{font_atlas_composite_cache_identity}
 
 class VulkanFontAdapter3DEvidence:
     ready: bool
@@ -30,8 +31,9 @@ class VulkanFontAdapter3DEvidence:
     world_draws: i64
     pixels_rgba8: [u8]
 
-fn vulkan_font_atlas_upload_required(cached_owner: text, cached_generation: i64, batch: FontRenderBatch) -> bool:
-    cached_owner != batch.atlas_owner_identity() or cached_generation != batch.atlas_generation
+fn vulkan_font_atlas_upload_required(cached_owner: text, cached_generation: i64,
+                                     target_owner: text, batch: FontRenderBatch) -> bool:
+    target_owner == "" or cached_owner != target_owner or cached_generation != batch.atlas_generation
 
 class VulkanFontAdapter3D:
     backend: VulkanRenderBackend3D
@@ -46,6 +48,7 @@ class VulkanFontAdapter3D:
     atlas_generation: i64
     atlas_owner_identity: text
     atlas_payload_sha256: text
+    font_artifact_sha256: text
     pass_handle: RenderPassHandle
     width: i32
     height: i32
@@ -89,6 +92,7 @@ class VulkanFontAdapter3D:
             atlas_generation: -1,
             atlas_owner_identity: "",
             atlas_payload_sha256: "",
+            font_artifact_sha256: "",
             pass_handle: RenderPassHandle.invalid(),
             width: width,
             height: height,
@@ -122,6 +126,30 @@ class VulkanFontAdapter3D:
         if (not batch.material_supported() or batch.atlas_width <= 0 or batch.atlas_height <= 0 or
             batch.atlas_pixels.len() != batch.atlas_width.to_i64() * batch.atlas_height.to_i64()):
             return false
+        val device_features = if self.backend.device_name != "" and self.backend.device_type != "" and self.backend.driver_identity != "":
+            "name=" + self.backend.device_name + ";type=" + self.backend.device_type + ";driver=" + self.backend.driver_identity
+        else: ""
+        if (self.font_artifact_sha256 == "" and self.backend.pipeline_native_handle(self.hud_pipeline) > 0 and
+            self.backend.pipeline_native_handle(self.world_pipeline) > 0):
+            val hud_sha256 = sha256_u8_hex(font_hud_vulkan_vertex_spirv())
+            val world_sha256 = sha256_u8_hex(font_world_vulkan_vertex_spirv())
+            val fragment_sha256 = sha256_u8_hex(font_vulkan_fragment_spirv())
+            if hud_sha256.len() == 64 and world_sha256.len() == 64 and fragment_sha256.len() == 64:
+                self.font_artifact_sha256 = "hud-sha256=" + hud_sha256 +
+                    ";world-sha256=" + world_sha256 + ";fragment-sha256=" + fragment_sha256
+        val artifact_identity = if (self.backend.pipeline_native_handle(self.hud_pipeline) > 0 and
+            self.backend.pipeline_native_handle(self.world_pipeline) > 0 and self.font_artifact_sha256 != ""):
+            self.font_artifact_sha256 + ";hud=" + self.backend.pipeline_native_handle(self.hud_pipeline).to_string() +
+                ";world=" + self.backend.pipeline_native_handle(self.world_pipeline).to_string()
+        else: ""
+        val dependency_identity = if self.backend.device_handle > 0 and self.backend.sampler_handle > 0:
+            "device=" + self.backend.device_handle.to_string() + ";sampler=" + self.backend.sampler_handle.to_string()
+        else: ""
+        val owner_identity = font_atlas_composite_cache_identity(
+            font_render_batch_atlas_owner_identity(batch), "vulkan3d", device_features,
+            artifact_identity, dependency_identity)
+        if owner_identity == "":
+            return false
         if (self.atlas.id < 0 or self.atlas_width != batch.atlas_width or
             self.atlas_height != batch.atlas_height):
             self.atlas = self.backend.create_texture(
@@ -132,7 +160,7 @@ class VulkanFontAdapter3D:
             self.atlas_generation = -1
             self.atlas_owner_identity = ""
             self.atlas_payload_sha256 = ""
-        if vulkan_font_atlas_upload_required(self.atlas_owner_identity, self.atlas_generation, batch):
+        if vulkan_font_atlas_upload_required(self.atlas_owner_identity, self.atlas_generation, owner_identity, batch):
             var alpha: [u8] = []
             for pixel in batch.atlas_pixels:
                 alpha.push(((pixel >> 24u32) & 255u32).to_u8())
@@ -142,7 +170,7 @@ class VulkanFontAdapter3D:
                 self.atlas_payload_sha256 = ""
                 return false
             self.atlas_generation = batch.atlas_generation
-            self.atlas_owner_identity = batch.atlas_owner_identity()
+            self.atlas_owner_identity = owner_identity
             self.atlas_payload_sha256 = sha256_u8_hex(alpha)
         self.atlas.id >= 0
 
@@ -219,6 +247,7 @@ class VulkanFontAdapter3D:
         self.atlas_generation = -1
         self.atlas_owner_identity = ""
         self.atlas_payload_sha256 = ""
+        self.font_artifact_sha256 = ""
         self.ready = false
         self.frame_active = false
 

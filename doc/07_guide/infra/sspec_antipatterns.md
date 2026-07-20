@@ -1,7 +1,7 @@
 # SSpec Anti-Patterns — What Makes an Amateur Manual
 
 SSpec `.spl` specs are the source of truth *and* the source text for the
-generated scenario manual (`bin/simple spipe-docgen <spec> --output doc/06_spec`).
+generated scenario manual (`bin/simple spipe-docgen <spec> --output doc/06_spec --no-index`).
 The generator assembles; it never invents prose. A lazy spec yields a lazy manual
 — machine noise instead of a product manual like
 [`scenario_manual_example.md`](../app/spipe/scenario_manual_example.md).
