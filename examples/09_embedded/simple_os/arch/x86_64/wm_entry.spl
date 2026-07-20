@@ -201,6 +201,12 @@ val WIN1_W: u64 = 380
 val WIN1_H: u64 = 260
 val WIN2_W: u64 = 340
 val WIN2_H: u64 = 220
+val WIN3_W: u64 = 300
+val WIN3_H: u64 = 200
+
+# Number of windows managed by the WM (0=Terminal, 1=Editor, 2=Browser,
+# 3=Hello app). Also used as the "no window" sentinel from hit testing.
+val WIN_COUNT: u64 = 4
 
 # Window positions (mutable — draggable)
 var WIN0_X: u64 = 60
@@ -209,6 +215,8 @@ var WIN1_X: u64 = 300
 var WIN1_Y: u64 = 160
 var WIN2_X: u64 = 540
 var WIN2_Y: u64 = 300
+var WIN3_X: u64 = 700
+var WIN3_Y: u64 = 80
 
 # === App State ===
 # Terminal (Window 0) state
@@ -310,6 +318,9 @@ var g_open_win: u64 = 0              # which window
 var g_close_active: u64 = 0           # 1 if close animation running
 var g_close_progress: u64 = 0         # 0-100
 var g_close_win: u64 = 0              # which window
+var g_closed_states: u64 = 0          # bitmask of CLOSED windows (distinct from
+                                      # minimized: R/restore does not resurrect
+                                      # a closed window)
 
 var g_dock_bounce_active: u64 = 0    # 1 if dock bounce running
 var g_dock_bounce_progress: u64 = 0  # 0-100
@@ -3076,6 +3087,190 @@ fn draw_single_window(win: u64, boff: u64, is_active: u64, theme: u64):
                     else:
                         draw_win2_normal(boff, is_active, theme)
 
+# ===========================================================================
+# Generic Window Accessors (index-based window set: 0..WIN_COUNT-1)
+# ===========================================================================
+
+fn win_x(win: u64) -> u64:
+    if win == 0: WIN0_X
+    else:
+        if win == 1: WIN1_X
+        else:
+            if win == 2: WIN2_X
+            else: WIN3_X
+
+fn win_y(win: u64) -> u64:
+    if win == 0: WIN0_Y
+    else:
+        if win == 1: WIN1_Y
+        else:
+            if win == 2: WIN2_Y
+            else: WIN3_Y
+
+fn win_w(win: u64) -> u64:
+    if win == 0: WIN0_W
+    else:
+        if win == 1: WIN1_W
+        else:
+            if win == 2: WIN2_W
+            else: WIN3_W
+
+fn win_h(win: u64) -> u64:
+    if win == 0: WIN0_H
+    else:
+        if win == 1: WIN1_H
+        else:
+            if win == 2: WIN2_H
+            else: WIN3_H
+
+fn set_win_pos(win: u64, nx: u64, ny: u64):
+    if win == 0:
+        WIN0_X = nx
+        WIN0_Y = ny
+    if win == 1:
+        WIN1_X = nx
+        WIN1_Y = ny
+    if win == 2:
+        WIN2_X = nx
+        WIN2_Y = ny
+    if win == 3:
+        WIN3_X = nx
+        WIN3_Y = ny
+
+fn win_title_chars(win: u64) -> u64:
+    # Terminal / Editor / Browser / Hello
+    if win == 0: pack8(84, 101, 114, 109, 105, 110, 97, 108)
+    else:
+        if win == 1: pack8(69, 100, 105, 116, 111, 114, 0, 0)
+        else:
+            if win == 2: pack8(66, 114, 111, 119, 115, 101, 114, 0)
+            else: pack8(72, 101, 108, 108, 111, 0, 0, 0)
+
+fn win_title_len(win: u64) -> u64:
+    if win == 0: 8
+    else:
+        if win == 1: 6
+        else:
+            if win == 2: 7
+            else: 5
+
+# 1 if the window is not part of the visible scene (minimized OR closed).
+fn win_hidden(win: u64) -> u64:
+    val hidden_mask = g_minimize_states | g_closed_states
+    (hidden_mask >> win) & 1
+
+# Next visible window after `cur` (wrapping); falls back to `cur` when no
+# other window is visible.
+fn next_visible_win(cur: u64) -> u64:
+    var cand: u64 = (cur + 1) % WIN_COUNT
+    var res: u64 = cur
+    var found: u64 = 0
+    var tries: u64 = 0
+    while tries < WIN_COUNT:
+        if found == 0:
+            if win_hidden(cand) == 0:
+                res = cand
+                found = 1
+        cand = (cand + 1) % WIN_COUNT
+        tries = tries + 1
+    res
+
+fn win_contains(win: u64, mx: u64, my: u64) -> u64:
+    var hit: u64 = 0
+    val wx = win_x(win)
+    val wy = win_y(win)
+    if mx >= wx:
+        if mx < wx + win_w(win):
+            if my >= wy:
+                if my < wy + win_h(win):
+                    hit = 1
+    hit
+
+# Topmost-first hit test. draw_desktop paints inactive windows back-to-front
+# (index WIN_COUNT-1 first, index 0 last) with the active window on top, so
+# the matching test order is: active window, then index 0..WIN_COUNT-1.
+# Hidden (minimized/closed) windows are never hit. Returns WIN_COUNT if the
+# click landed on no window.
+fn hit_test_top_window(mx: u64, my: u64, active: u64) -> u64:
+    var hw: u64 = WIN_COUNT
+    if win_hidden(active) == 0:
+        if win_contains(active, mx, my) == 1:
+            hw = active
+    var w: u64 = 0
+    while w < WIN_COUNT:
+        if hw >= WIN_COUNT:
+            if (w - active) != 0:
+                if win_hidden(w) == 0:
+                    if win_contains(w, mx, my) == 1:
+                        hw = w
+        w = w + 1
+    hw
+
+# Traffic-light button hit test inside a window's title bar.
+# Returns 0 = no button, 1 = close (left dot), 2 = minimize (middle dot).
+# Dots are drawn by draw_window_card at centers (x+BTN_MARGIN_X, y+BTN_MARGIN_Y)
+# and (x+BTN_MARGIN_X+BTN_GAP+10, y+BTN_MARGIN_Y), diameter 12; use a 16x16
+# clickable box around each center.
+fn title_button_hit(win: u64, mx: u64, my: u64) -> u64:
+    var btn: u64 = 0
+    val cx = win_x(win) + BTN_MARGIN_X
+    val cy = win_y(win) + BTN_MARGIN_Y
+    if my + 8 >= cy:
+        if my <= cy + 8:
+            if mx + 8 >= cx:
+                if mx <= cx + 8:
+                    btn = 1
+            if btn == 0:
+                val cx2 = cx + BTN_GAP + 10
+                if mx + 8 >= cx2:
+                    if mx <= cx2 + 8:
+                        btn = 2
+    btn
+
+# ===========================================================================
+# Hello App (window 3) — body content, vector-font text path
+# ===========================================================================
+
+# Draw one continuous vector-text run of up to 16 chars (two packed words).
+# rt_gui_set_text_buf supports byte offsets into its 256-char buffer, and
+# rt_gui_draw_text_vector advances per-glyph proportionally, so a single run
+# has no chunk seams (unlike chained 8-char draw_label_vector calls).
+fn draw_label_vector16(x: u64, y: u64, color: u64, alpha: u64, chars_a: u64, chars_b: u64, len: u64, pixel_height: u64):
+    rt_gui_set_text_buf(chars_a, 0, 0, 0)
+    rt_gui_set_text_buf(chars_b, 8, 0, 0)
+    val size_and_len = (pixel_height << 16) | (len & 0xFFFF)
+    rt_gui_draw_text_vector(pack(x, y), pack(color, size_and_len), alpha, 0)
+
+fn draw_hello_app_body(x: u64, y: u64, w: u64, h: u64, theme: u64):
+    # "Hello, SimpleOS!" rendered through the vector text path as one
+    # 16-glyph run (proportional advance ~90px total at 18px).
+    val tx = x + (w - 90) / 2
+    val ty = y + TITLE_BAR_H + (h - TITLE_BAR_H - 18) / 2
+    # Soft shadow pass for contrast, then primary text
+    draw_label_vector16(tx + 1, ty + 1, 0x00000000, 60, pack8(72, 101, 108, 108, 111, 44, 32, 83), pack8(105, 109, 112, 108, 101, 79, 83, 33), 16, 18)
+    draw_label_vector16(tx, ty, text_c(theme), 240, pack8(72, 101, 108, 108, 111, 44, 32, 83), pack8(105, 109, 112, 108, 101, 79, 83, 33), 16, 18)
+
+# Draw one window card honoring per-window scene state: hidden (minimized or
+# closed) windows are skipped, a window mid-close shrinks toward its center
+# (ease-in) until the closed bit lands, and the Hello app window gets its
+# body content on top of the card shell.
+fn draw_card_for(win: u64, boff: u64, is_active: u64, theme: u64):
+    if win_hidden(win) == 0:
+        var wx = win_x(win)
+        var wy = win_y(win) - boff
+        var ww = win_w(win)
+        var wh = win_h(win)
+        if g_close_active != 0 and (g_close_win - win) == 0:
+            val eased = ease_in_cubic(g_close_progress)
+            val shrink = eased * 15 / 100
+            wx = wx + shrink * ww / 200
+            wy = wy + shrink * wh / 200
+            ww = ww - shrink * ww / 100
+            wh = wh - shrink * wh / 100
+        draw_window_card(wx, wy, ww, wh, is_active, theme, win_title_chars(win), win_title_len(win))
+        if win == 3:
+            draw_hello_app_body(wx, wy, ww, wh, theme)
+
 fn draw_desktop(active: u64, theme: u64):
     # Begin frame
     rt_gui_begin_frame(SCREEN_W, SCREEN_H, 0, 0)
@@ -3096,19 +3291,17 @@ fn draw_desktop(active: u64, theme: u64):
 
     # Lightweight window shells keep the WM usable on x86 while richer
     # content views are validated separately.
-    if active == 0:
-        draw_window_card(WIN2_X, WIN2_Y, WIN2_W, WIN2_H, 0, theme, pack8(66, 114, 111, 119, 115, 101, 114, 0), 7)
-        draw_window_card(WIN1_X, WIN1_Y, WIN1_W, WIN1_H, 0, theme, pack8(69, 100, 105, 116, 111, 114, 0, 0), 6)
-        draw_window_card(WIN0_X, WIN0_Y - boff, WIN0_W, WIN0_H, 1, theme, pack8(84, 101, 114, 109, 105, 110, 97, 108), 8)
-    else:
-        if active == 1:
-            draw_window_card(WIN2_X, WIN2_Y, WIN2_W, WIN2_H, 0, theme, pack8(66, 114, 111, 119, 115, 101, 114, 0), 7)
-            draw_window_card(WIN0_X, WIN0_Y, WIN0_W, WIN0_H, 0, theme, pack8(84, 101, 114, 109, 105, 110, 97, 108), 8)
-            draw_window_card(WIN1_X, WIN1_Y - boff, WIN1_W, WIN1_H, 1, theme, pack8(69, 100, 105, 116, 111, 114, 0, 0), 6)
-        else:
-            draw_window_card(WIN0_X, WIN0_Y, WIN0_W, WIN0_H, 0, theme, pack8(84, 101, 114, 109, 105, 110, 97, 108), 8)
-            draw_window_card(WIN1_X, WIN1_Y, WIN1_W, WIN1_H, 0, theme, pack8(69, 100, 105, 116, 111, 114, 0, 0), 6)
-            draw_window_card(WIN2_X, WIN2_Y - boff, WIN2_W, WIN2_H, 1, theme, pack8(66, 114, 111, 119, 115, 101, 114, 0), 7)
+    # Compose the window set generically, back-to-front (index WIN_COUNT-1
+    # first, index 0 last) with the active window painted on top. Per-window
+    # scene state (minimized/closed/closing) is honored by draw_card_for, so
+    # a closed window really leaves the scene on the next recomposite.
+    var zi: u64 = WIN_COUNT
+    while zi > 0:
+        val wv = zi - 1
+        if (wv - active) != 0:
+            draw_card_for(wv, 0, 0, theme)
+        zi = zi - 1
+    draw_card_for(active, boff, 1, theme)
 
     # Present — bulk-copy shadow buffer to MMIO framebuffer
     rt_gui_present(0, 0, 0, 0)
@@ -3168,6 +3361,15 @@ fn spl_start():
     g_close_active = 0
     g_close_progress = 0
     g_close_win = 0
+    g_closed_states = 0
+    WIN0_X = 60
+    WIN0_Y = 60
+    WIN1_X = 300
+    WIN1_Y = 160
+    WIN2_X = 540
+    WIN2_Y = 300
+    WIN3_X = 700
+    WIN3_Y = 80
     g_dock_bounce_active = 0
     g_dock_bounce_progress = 0
     g_dock_bounce_icon = 0
@@ -3270,8 +3472,9 @@ fn spl_start():
     serial_println("[WM] Rendering glass desktop (dark theme)...")
     draw_desktop(active_win, theme)
 
+    serial_println("[WM] Hello app window open: win=3")
     serial_println("[WM] Glass desktop rendered!")
-    serial_println("[WM] Controls: Tab=cycle, 1/2/3=focus, T=theme, M=minimize, R=restore, Q=quit")
+    serial_println("[WM] Controls: Tab=cycle, 1/2/3/4=focus, T=theme, M=minimize, R=restore, Q=quit, click traffic lights=close/min")
 
     # 4. Continuous render loop with animation
     var running: u64 = 1
@@ -3304,6 +3507,7 @@ fn spl_start():
                 if scancode == 0x02: wm_shortcut = 2  # 1 always works
                 if scancode == 0x03: wm_shortcut = 3  # 2 always works
                 if scancode == 0x04: wm_shortcut = 4  # 3 always works
+                if scancode == 0x05: wm_shortcut = 10 # 4 always works (Hello)
                 # T/Q/M/W/R only work as shortcuts when NOT typing in terminal or editor
                 if g_term_input_active == 0 and g_ed_editing == 0:
                     if scancode == 0x14: wm_shortcut = 5  # T = theme
@@ -3314,8 +3518,8 @@ fn spl_start():
 
                 # Process WM shortcuts
                 if wm_shortcut == 1:
-                    # Tab = cycle focus
-                    active_win = (active_win + 1) % 3
+                    # Tab = cycle focus (skips minimized/closed windows)
+                    active_win = next_visible_win(active_win)
                     animating = 1
                     anim_start = anim_frame
                     g_anim_progress = 0
@@ -3344,6 +3548,15 @@ fn spl_start():
                     serial_println("[wm-event] type=focus detail=action=select,win={active_win} count={ev_focus_n}")
                 if wm_shortcut == 4:
                     active_win = 2
+                    animating = 1
+                    anim_start = anim_frame
+                    g_anim_progress = 0
+                    needs_redraw = 1
+                    val ev_focus_n: u64 = g_evt_focus + 1
+                    g_evt_focus = ev_focus_n
+                    serial_println("[wm-event] type=focus detail=action=select,win={active_win} count={ev_focus_n}")
+                if wm_shortcut == 10:
+                    active_win = 3
                     animating = 1
                     anim_start = anim_frame
                     g_anim_progress = 0
@@ -3544,118 +3757,80 @@ fn spl_start():
                         val mb_y: u64 = g_mouse_y & 0xFFFF
                         serial_println("[wm-event] type=mouse_button detail=left={left_pressed},x={mb_x},y={mb_y} count={ev_mouse_button_n}")
 
-                    # Button just pressed — hit test for focus + start drag
+                    # Button just pressed — generic topmost-first dispatch.
+                    # Order inside the hit window: traffic-light buttons
+                    # (close/minimize) first, then title-bar drag, then
+                    # content click forwarded to the app. Hidden windows are
+                    # never hit (hit_test_top_window skips them).
                     if left_pressed == 1:
                         if left_was == 0:
                             serial_println("[WM] Mouse click")
-                            # Hit test windows back-to-front (win2, win1, win0)
-                            # Window 2 (Browser)
-                            if g_mouse_x >= WIN2_X:
-                                if g_mouse_x < WIN2_X + WIN2_W:
-                                    if g_mouse_y >= WIN2_Y:
-                                        if g_mouse_y < WIN2_Y + WIN2_H:
-                                            if active_win != 2:
-                                                active_win = 2
-                                                animating = 1
-                                                anim_start = anim_frame
-                                                g_anim_progress = 0
-                                            # Start drag if in title bar
-                                            if g_mouse_y < WIN2_Y + TITLE_BAR_H:
-                                                g_dragging = 3
-                                                g_drag_offset_x = g_mouse_x - WIN2_X
-                                                g_drag_offset_y = g_mouse_y - WIN2_Y
-                            # Window 1 (Editor)
-                            if g_dragging == 0:
-                                if g_mouse_x >= WIN1_X:
-                                    if g_mouse_x < WIN1_X + WIN1_W:
-                                        if g_mouse_y >= WIN1_Y:
-                                            if g_mouse_y < WIN1_Y + WIN1_H:
-                                                if active_win != 1:
-                                                    active_win = 1
-                                                    animating = 1
-                                                    anim_start = anim_frame
-                                                    g_anim_progress = 0
-                                                if g_mouse_y < WIN1_Y + TITLE_BAR_H:
-                                                    g_dragging = 2
-                                                    g_drag_offset_x = g_mouse_x - WIN1_X
-                                                    g_drag_offset_y = g_mouse_y - WIN1_Y
-                            # Window 0 (Terminal)
-                            if g_dragging == 0:
-                                if g_mouse_x >= WIN0_X:
-                                    if g_mouse_x < WIN0_X + WIN0_W:
-                                        if g_mouse_y >= WIN0_Y:
-                                            if g_mouse_y < WIN0_Y + WIN0_H:
-                                                if active_win != 0:
-                                                    active_win = 0
-                                                    animating = 1
-                                                    anim_start = anim_frame
-                                                    g_anim_progress = 0
-                                                if g_mouse_y < WIN0_Y + TITLE_BAR_H:
-                                                    g_dragging = 1
-                                                    g_drag_offset_x = g_mouse_x - WIN0_X
-                                                    g_drag_offset_y = g_mouse_y - WIN0_Y
+                            val mx_now: u64 = g_mouse_x & 0xFFFF
+                            val my_now: u64 = g_mouse_y & 0xFFFF
+                            val hw = hit_test_top_window(mx_now, my_now, active_win)
+                            if hw <= 3:
+                                val hwx = win_x(hw)
+                                val hwy = win_y(hw)
+                                val btn = title_button_hit(hw, mx_now, my_now)
+                                if btn == 1:
+                                    # Close button — same dispatch as the W shortcut
+                                    if g_close_active == 0:
+                                        g_close_active = 1
+                                        g_close_progress = 0
+                                        g_close_win = hw
+                                        needs_redraw = 1
+                                        serial_println("[WM] Closing window")
+                                        val ev_window_n: u64 = g_evt_window + 1
+                                        g_evt_window = ev_window_n
+                                        serial_println("[wm-event] type=window detail=action=close,win={hw} count={ev_window_n}")
+                                if btn == 2:
+                                    # Minimize button — same dispatch as the M shortcut
+                                    val already_minimized = (g_minimize_states >> hw) & 1
+                                    if g_minimize_active == 0 and already_minimized == 0:
+                                        g_minimize_active = 1
+                                        g_minimize_progress = 0
+                                        g_minimize_win = hw
+                                        needs_redraw = 1
+                                        serial_println("[WM] Minimizing window")
+                                        val ev_window_n: u64 = g_evt_window + 1
+                                        g_evt_window = ev_window_n
+                                        serial_println("[wm-event] type=window detail=action=minimize,win={hw} count={ev_window_n}")
+                                if btn == 0:
+                                    if (hw - active_win) != 0:
+                                        active_win = hw
+                                        animating = 1
+                                        anim_start = anim_frame
+                                        g_anim_progress = 0
+                                        needs_redraw = 1
+                                    if my_now < hwy + TITLE_BAR_H:
+                                        # Title bar (outside the buttons) — start drag
+                                        g_dragging = hw + 1
+                                        g_drag_offset_x = mx_now - hwx
+                                        g_drag_offset_y = my_now - hwy
+                                    else:
+                                        # Content click — forward to the app
+                                        val local_x = mx_now - hwx
+                                        val local_y = my_now - (hwy + TITLE_BAR_H)
+                                        if hw == 0:
+                                            handle_terminal_click(local_x, local_y)
+                                        if hw == 1:
+                                            handle_editor_click(local_x, local_y)
+                                        if hw == 2:
+                                            handle_browser_click(local_x, local_y)
+                                        needs_redraw = 1
 
-                    # Dragging — update window position
+                    # Dragging — update window position (generic: window index
+                    # is g_dragging - 1, position written via set_win_pos)
                     if g_dragging != 0:
                         if left_pressed == 1:
-                            if g_dragging == 1:
-                                if g_mouse_x >= g_drag_offset_x:
-                                    WIN0_X = g_mouse_x - g_drag_offset_x
-                                if g_mouse_y >= g_drag_offset_y:
-                                    WIN0_Y = g_mouse_y - g_drag_offset_y
-                            if g_dragging == 2:
-                                if g_mouse_x >= g_drag_offset_x:
-                                    WIN1_X = g_mouse_x - g_drag_offset_x
-                                if g_mouse_y >= g_drag_offset_y:
-                                    WIN1_Y = g_mouse_y - g_drag_offset_y
-                            if g_dragging == 3:
-                                if g_mouse_x >= g_drag_offset_x:
-                                    WIN2_X = g_mouse_x - g_drag_offset_x
-                                if g_mouse_y >= g_drag_offset_y:
-                                    WIN2_Y = g_mouse_y - g_drag_offset_y
-
-                    # Propagate click to active window's content area
-                    if g_dragging == 0:
-                        if left_pressed == 1:
-                            if left_was == 0:
-                                # Compute local coordinates within the active window
-                                var local_x: u64 = 0
-                                var local_y: u64 = 0
-                                var in_content: u64 = 0
-
-                                if active_win == 0:
-                                    if g_mouse_x >= WIN0_X:
-                                        if g_mouse_x < WIN0_X + WIN0_W:
-                                            if g_mouse_y >= WIN0_Y + TITLE_BAR_H:
-                                                if g_mouse_y < WIN0_Y + WIN0_H:
-                                                    local_x = g_mouse_x - WIN0_X
-                                                    local_y = g_mouse_y - (WIN0_Y + TITLE_BAR_H)
-                                                    in_content = 1
-                                if active_win == 1:
-                                    if g_mouse_x >= WIN1_X:
-                                        if g_mouse_x < WIN1_X + WIN1_W:
-                                            if g_mouse_y >= WIN1_Y + TITLE_BAR_H:
-                                                if g_mouse_y < WIN1_Y + WIN1_H:
-                                                    local_x = g_mouse_x - WIN1_X
-                                                    local_y = g_mouse_y - (WIN1_Y + TITLE_BAR_H)
-                                                    in_content = 1
-                                if active_win == 2:
-                                    if g_mouse_x >= WIN2_X:
-                                        if g_mouse_x < WIN2_X + WIN2_W:
-                                            if g_mouse_y >= WIN2_Y + TITLE_BAR_H:
-                                                if g_mouse_y < WIN2_Y + WIN2_H:
-                                                    local_x = g_mouse_x - WIN2_X
-                                                    local_y = g_mouse_y - (WIN2_Y + TITLE_BAR_H)
-                                                    in_content = 1
-
-                                if in_content == 1:
-                                    if active_win == 0:
-                                        handle_terminal_click(local_x, local_y)
-                                    if active_win == 1:
-                                        handle_editor_click(local_x, local_y)
-                                    if active_win == 2:
-                                        handle_browser_click(local_x, local_y)
-                                    needs_redraw = 1
+                            val dwin: u64 = g_dragging - 1
+                            var drag_nx = win_x(dwin)
+                            var drag_ny = win_y(dwin)
+                            if g_mouse_x >= g_drag_offset_x:
+                                drag_nx = g_mouse_x - g_drag_offset_x
+                            if g_mouse_y >= g_drag_offset_y:
+                                drag_ny = g_mouse_y - g_drag_offset_y
+                            set_win_pos(dwin, drag_nx, drag_ny)
 
                     # Button released — stop dragging
                     if left_pressed == 0:
@@ -3686,17 +3861,9 @@ fn spl_start():
                 g_minimize_active = 0
                 # Mark window as minimized
                 g_minimize_states = g_minimize_states | (1 << g_minimize_win)
-                # Cycle to next non-minimized window
-                var next_win: u64 = (active_win + 1) % 3
-                var search: u64 = 0
-                while search < 3:
-                    val next_min = (g_minimize_states >> next_win) & 1
-                    if next_min == 0:
-                        search = 3  # break
-                    else:
-                        next_win = (next_win + 1) % 3
-                    search = search + 1
-                active_win = next_win
+                # Move focus off a window that just left the scene
+                if win_hidden(active_win) != 0:
+                    active_win = next_visible_win(active_win)
                 serial_println("[WM] Window minimized to dock")
             needs_redraw = 1
 
@@ -3706,9 +3873,25 @@ fn spl_start():
             if g_close_progress >= 100:
                 g_close_progress = 100
                 g_close_active = 0
-                # Mark window as minimized (same as minimize for now)
-                g_minimize_states = g_minimize_states | (1 << g_close_win)
-                active_win = (active_win + 1) % 3
+                # Remove the window from the scene: closed set is distinct
+                # from minimized (R/restore does not resurrect it). The next
+                # recomposite drops the card entirely.
+                g_closed_states = g_closed_states | (1 << g_close_win)
+                # Hoist through arithmetic into a local: comparing a re-read
+                # module global directly arrives boxed on the native dynload
+                # path (see the mouse-poll note above).
+                val closed_w: u64 = g_close_win & 0xFF
+                if closed_w == 0:
+                    serial_println("[WM] window closed: terminal")
+                if closed_w == 1:
+                    serial_println("[WM] window closed: editor")
+                if closed_w == 2:
+                    serial_println("[WM] window closed: browser")
+                if closed_w == 3:
+                    serial_println("[WM] window closed: hello")
+                # Move focus off a window that just left the scene
+                if win_hidden(active_win) != 0:
+                    active_win = next_visible_win(active_win)
             needs_redraw = 1
 
         # Redraw if needed
