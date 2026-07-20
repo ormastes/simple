@@ -105,6 +105,42 @@ CSS.
 - **Concurrent editing:** multiple agent sessions edit this file; back up each
   edit and re-verify content after any pause.
 
+## Session update 2026-07-20 (half-open hit-test bounds — SECOND engine in this directory, not the parity renderer)
+
+- **This directory holds TWO separate browser engines — don't conflate
+  them.** Everything else in this skill (public contract, paint order,
+  CSS-parse perf) describes the monolithic
+  `simple_web_html_layout_renderer.spl` pipeline (owned here, consumed by
+  [web_render_css_parity](../../feature_expert/web_render_css_parity/skill.md)
+  and `wm_gui_window_drawing`). `layout.spl` (`BeDomNode`, `BeLayoutBox`,
+  `hit_test`) plus `browser_renderer.spl` (`BrowserRenderer`,
+  `BeRenderResult`) are a SEPARATE, modular "Be*"-prefixed engine in the
+  same `src/lib/gc_async_mut/gpu/browser_engine/` directory, consumed by
+  `src/os/compositor/browser_backend.spl`, `src/os/apps/browser_sample/`,
+  and `src/app/ui.chromium/engine_merge.spl` — not by the CSS-parity
+  pipeline. A change to one does not imply anything about the other; check
+  which engine a caller actually imports before assuming impact.
+- **`_box_contains` (`layout.spl`, the Be* engine) is now half-open on the
+  right/bottom edge** (`x < box.x+w`, `y < box.y+h` — was `<=`) to match
+  the GUI reference convention (`common.ui.widget_hit._contains`) and the
+  new shared interaction core's `HitProxy2D.contains_point`: a point on a
+  shared border between two adjacent boxes now hits exactly one box, never
+  both. `compositor_pick_topmost`/`layer_rects_overlap` are now exported
+  from `engine2d/__init__.spl` and `engine2d/mod.spl` (previously internal
+  to `compositor.spl`) so callers outside this layer can pick the topmost
+  hit layer without reimplementing it. Conformance spec
+  `hit_bounds_halfopen_spec.spl` (6/6) + `probe_hit_bounds_halfopen.spl`
+  (6/6), both under `test/01_unit/lib/gpu/browser/`. This does NOT touch
+  paint/CSS pixels — the parity gate is unaffected (see
+  [web_render_css_parity](../../feature_expert/web_render_css_parity/skill.md)'s
+  2026-07-20 note).
+- See the new
+  [interaction_input_routing](../../feature_expert/interaction_input_routing/skill.md)
+  feature expert for the broader half-open-bounds standardization and the
+  pointer-event/hit-test/dispatch core this fix feeds into — the Be*
+  engine's own event handling has NOT adopted that core yet; this landing
+  is the bounds-convention fix only.
+
 ## Update Rule
 
 When this layer's public contract, source ownership, tests, architecture, or

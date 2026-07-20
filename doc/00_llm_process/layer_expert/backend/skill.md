@@ -134,6 +134,29 @@ standing gate for this layer: construct each enum variant and
 `==`-compare it against itself inside a `--target x86_64-unknown-none`
 build.
 
+## Session update 2026-07-20 (5th freestanding miscompile — scalar spill across loop calls)
+
+- **Outer-scope scalar `val`s corrupt inside a `while` loop with
+  intervening calls**
+  ([native_scalar_spill_clobber_loop_intervening_calls_2026-07-20.md](../../../../doc/08_tracking/bug/native_scalar_spill_clobber_loop_intervening_calls_2026-07-20.md),
+  same family as the 2026-07-19 tuple-spill bug above, generalized from
+  tuples to plain u32 scalars and from one straight-line intervening call
+  to repeated calls across loop iterations): a u32 computed once before a
+  loop read back as pure black (`0xFF000000`) inside the loop body on
+  every iteration but one, while the SAME producer call made once OUTSIDE
+  the loop was correct. Discriminating evidence: the pushed command was
+  well-formed (`cmd_present=1`, right height) — only the computed color
+  was wrong, ruling out the render/push path; a spill-slot lifetime defect
+  (slot reused by intervening calls, reloaded wrong on later iterations)
+  is the leading theory. Found in `_wm_draw_ir_window_batch`
+  (`window_scene_draw_ir.spl`, WM titlebar gradient); workaround direction
+  (untried): recompute inside the loop each iteration instead of hoisting.
+  `--target x86_64-unknown-none --entry-closure --mode dynload` only, does
+  not reproduce hosted. Cross-linked from
+  [wm_gui_window_drawing](../../feature_expert/wm_gui_window_drawing/skill.md)
+  (the feature that hit it) — file a repro here alongside the other 4 if
+  one lands.
+
 ## Update Rule
 
 After backend regressions, FFI fixes, or linker changes, refresh this skill

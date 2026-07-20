@@ -568,6 +568,77 @@ the broken enum `==`, see
 glyph-cache null-deref fix are still IN FLIGHT as of this update — check
 origin before citing either as shipped.
 
+## Session update 2026-07-20 (theme token derivation, THEME.CSS boot path, host-GPU image retention, cpu_simd honesty)
+
+- **Aqua chrome palette now derives from `AQUA_LIGHT_*` tokens (single
+  source, `e62ea541c93`):** `wm_chrome_theme_defaults()` in
+  [src/lib/common/ui/wm_chrome_theme.spl](../../../../src/lib/common/ui/wm_chrome_theme.spl)
+  no longer hand-copies hex literals — every field routes through a new
+  `_wm_argb(rgb: u64, alpha: u64) -> u32` helper over
+  `AQUA_LIGHT_DESKTOP_BG/TASKBAR/TEXT/TITLEBAR_FOCUSED/TITLEBAR_UNFOCUSED/
+  SHADOW_A/SURFACE/ELEVATED/ACCENT` + `GLASS_BTN_CLOSE`
+  (`common/ui/glass/numeric_tokens.spl`), probe-verified byte-identical to
+  the 2026-07-19 Aqua landing. One field, `command_lane`, has NO
+  `AQUA_LIGHT_*` counterpart and stays a literal by design — don't "fix"
+  that by inventing a token.
+- **THEME.CSS boot allowlist landed (`021b88ba0fd`), but application is
+  still dead in-guest:** the VFS boot loader now allowlists `/THEME.CSS` in
+  BOTH places it must appear — `_vfs_boot_dirent_matches_short_name_raw`
+  (raw FAT32 dirent byte match) AND `_vfs_boot_short_name_for_path`
+  (path→short-name map) in
+  [src/os/services/vfs/vfs_boot_init.spl](../../../../src/os/services/vfs/vfs_boot_init.spl).
+  Missing either one silently fails the load. OVMF-verified the file now
+  loads (`theme bytes=1276 loaded=1`), but the parsed theme never reaches
+  the render path — filed as
+  `doc/08_tracking/bug/wm_theme_css_loaded_not_applied_2026-07-20.md`
+  (OPEN; suspects: `wm_chrome_colors_from_css_text` parse falling back to
+  defaults in-guest, or a stale pre-registration snapshot of
+  `wm_chrome_theme()`).
+- **Titlebar gradient attempt REVERTED, root cause filed, not fixed:** a
+  per-row DrawIR gradient in `_wm_draw_ir_window_batch`
+  (`window_scene_draw_ir.spl`) produced the correct color OUTSIDE a
+  `while` loop but a wrong (pure black) color INSIDE it, despite identical
+  source values each iteration — a freestanding-lane scalar-spill codegen
+  bug, not a logic bug in this function. Filed
+  `doc/08_tracking/bug/native_scalar_spill_clobber_loop_intervening_calls_2026-07-20.md`
+  (same family as the 2026-07-19 tuple-spill bug, generalized from tuples
+  to plain u32 scalars and from one intervening call to repeated calls
+  across loop iterations — also indexed in the
+  [backend](../../layer_expert/backend/skill.md) layer expert). Current
+  code is back to the single flat titlebar box (unchanged behavior) with
+  an in-code comment recording the investigation — do not re-attempt the
+  gradient without new pixel evidence.
+- **Host-GPU image-resource retention (`42de88d527c`):**
+  capability-negotiated over the existing SimpleOS host-GPU IVSHMEM
+  protocol
+  ([src/lib/common/gpu/simpleos_host_gpu_protocol.spl](../../../../src/lib/common/gpu/simpleos_host_gpu_protocol.spl),
+  wire offsets 280/288 = `REQUESTED_CAPABILITY_MASK`/
+  `NEGOTIATED_CAPABILITY_MASK`, both sides clear-before-read so a stale
+  nonzero from an old binary can never leak in). When negotiated, the
+  guest sends a 72-byte reference (id + checksum, no pixels) for an
+  unchanged image instead of the full bitmap (99.6% saved on a 64x64
+  icon); the host keeps a revision table and FAILS CLOSED
+  (`SIMPLEOS_HOST_GPU_REASON_UNKNOWN_IMAGE_RESOURCE`) on an unrecognized
+  ref. A capability is honored ONLY when both sides freshly asserted it in
+  the SAME HELLO round — an old/new protocol mix falls back to the full
+  path automatically, never a silent corruption. Consumed by
+  [src/os/compositor/engine2d_wm_frame_executor.spl](../../../../src/os/compositor/engine2d_wm_frame_executor.spl)
+  (also noted in the [os_compositor](../../layer_expert/os_compositor/skill.md)
+  layer expert).
+- **`cpu_simd` is an honest scalar alias, not a SIMD backend
+  (`04b3dddb3c0`):** probe/display/gate text for the `cpu_simd` Engine2D
+  backend now says so explicitly (`backend_probe.spl`, `engine.spl`,
+  `helpers_availability.spl` under
+  [src/lib/gc_async_mut/gpu/engine2d/](../../../../src/lib/gc_async_mut/gpu/engine2d/))
+  — `CpuBackend.create_simd()` builds the identical scalar `CpuBackend`;
+  the x86 SSE2/AVX2 row externs exist in the runtime but are unwired
+  (orphaned `CpuSimdSession`). Bug doc
+  `doc/08_tracking/bug/cpu_simd_mutable_array_extern_wiring_2026-05-31.md`
+  stays OPEN with a dated status note — this landing is a
+  truth-in-messaging fix only, not a functional fix. Do not cite
+  `cpu_simd` as a perf lever (e.g. for the `SIMPLE_GUI_BACKEND` knob above)
+  until that bug is closed.
+
 ## Update Rule
 
 After research, requirements, architecture, design, implementation,

@@ -86,6 +86,60 @@ should log frame provenance (CPU software paint vs GPU device readback) using
 level-gated probes. See log-retention policy 
 [doc/07_guide/infra/logging/log_retention_policy.md](../../../../doc/07_guide/infra/logging/log_retention_policy.md).
 
+## Session update 2026-07-20 (DrawIR incremental patch, host-GPU retention crosslink)
+
+- **DrawIR diff is now O(N), not a nested rescan (`4da2a2b4eb9`):**
+  `draw_ir_diff.spl` builds a `DrawIrCommandIndex` (component_id -> flat
+  index, first-occurrence-wins on duplicate ids) once per composition
+  instead of scanning every batch per lookup; `DrawIrDiffReport` output is
+  byte-identical to before (verified). New companion
+  [src/lib/common/ui/draw_ir_patch.spl](../../../../src/lib/common/ui/draw_ir_patch.spl)
+  is purely additive — it does NOT change `DrawIrCommand`/
+  `DrawIrDiffReport` semantics: `draw_ir_patch_between(old, old_rev, new,
+  new_rev) -> DrawIrPatch` (insert/remove/update-geometry/update-style/
+  update-text/reorder ops + damage rects) and `draw_ir_patch_apply(
+  composition, patch) -> DrawIrPatchApplyResult`, revision-gated on
+  `composition.composition_id == patch.base_revision` (DrawIrComposition
+  has no dedicated revision field by design — `composition_id` doubles as
+  the revision key). `draw_ir_patch_commands_equal` is the round-trip
+  oracle. Documented, non-silent limitation: only kind/component_id/
+  parent_id/geometry/color/text_value/computed_style are diffed/compared —
+  border_rect/content_rect/hit_rect/clip_rect/image_uri/edge/points/
+  glyph_run are not yet patchable; `apply()` collapses the result into the
+  base composition's first batch (multi-batch structural preservation is
+  out of scope this slice). Spec: `draw_ir_patch_spec.spl` (12/12).
+- **`simple test` vs `simple run` divergence on `text?`-lookup + equality
+  (bug filed, workaround applied in new code only):** a "loop, return
+  first match as `T?`, compare with `== nil`" pattern gives a DIFFERENT
+  result under the `simple test` daemon evaluator than under `simple run`
+  at ~20-30 element scale (both agree at small scale, which is why this
+  went unnoticed for so long). `draw_ir_patch.spl`'s style-compare avoids
+  the pattern entirely (raw double-loop membership check, no optional in
+  the comparison path); `draw_ir_diff.spl`'s pre-existing
+  `_draw_ir_style_changed` carries the SAME latent defect and was
+  deliberately left untouched (additive-only constraint on that file's
+  report semantics this slice). Filed
+  `doc/08_tracking/bug/bug_sspec_daemon_optional_lookup_equality_divergence_2026-07-20.md`
+  (OPEN). Any new code in this layer doing by-id lookup + equality should
+  default to the raw-loop pattern, not `T?` + `== nil`, until this is
+  fixed.
+- **Host-GPU image-resource retention** (capability-negotiated, wire
+  offsets 280/288, fail-closed on an unknown ref) lands in the GPU-offload
+  path consumed by
+  [src/os/compositor/engine2d_wm_frame_executor.spl](../../../../src/os/compositor/engine2d_wm_frame_executor.spl)
+  — full detail lives in the
+  [wm_gui_window_drawing](../../feature_expert/wm_gui_window_drawing/skill.md)
+  feature expert's 2026-07-20 session update (that gate is the
+  consumer/regression check; this layer entry just notes the executor is a
+  call site).
+- **Not yet wired into this layer:** the new
+  [engine_physics](../../feature_expert/engine_physics/skill.md) and
+  [interaction_input_routing](../../feature_expert/interaction_input_routing/skill.md)
+  feature experts (unified_2d_engine plan Phase 1 slice) ship
+  surface-agnostic primitives only — no compositor adapter consumes them
+  yet. Don't assume WM pointer dispatch or physics has moved onto the new
+  core until an adapter lands here.
+
 ## Historical Handoff Notes (2026-07-03)
 
 - At that point both WM lanes routed through the shared CSS/GUI-web renderer

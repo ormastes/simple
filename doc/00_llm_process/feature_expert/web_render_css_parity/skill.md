@@ -129,6 +129,32 @@ histogramming Simple-vs-Chrome mismatches by row band and color:
   page/root fill, or lift the skip for the top/bottom body bands) or it will
   have no effect.
 
+## Session update 2026-07-20 (not affected by the interaction/hit-test campaign — confirm engine boundary before assuming otherwise)
+
+- The 2026-07-20 hardening campaign changed hit-test bounds semantics
+  (`ea2e187c394`, inclusive → half-open `[l,r)x[t,b)`) in
+  `src/lib/gc_async_mut/gpu/browser_engine/layout.spl`. **That file belongs
+  to a SEPARATE "Be*"-prefixed browser engine** (`BeDomNode`, `BeLayoutBox`,
+  `hit_test`, consumed by `browser_renderer.spl` /
+  `os/compositor/browser_backend.spl` / `os/apps/browser_sample/` /
+  `app/ui.chromium/engine_merge.spl`) that happens to live in the same
+  directory as this gate's renderer
+  (`simple_web_html_layout_renderer.spl`) but shares no code path with it
+  — `simple_web_html_layout_renderer.spl` has no `BeDomNode`/`BeLayoutBox`
+  reference. **No paint/CSS pixels changed; this gate's residual metrics
+  and thresholds are unaffected.** See the
+  [browser_engine](../../layer_expert/browser_engine/skill.md) layer
+  expert's 2026-07-20 note for the two-engines-in-one-directory landmine
+  in full, and the new
+  [interaction_input_routing](../interaction_input_routing/skill.md)
+  feature expert for the broader half-open-bounds standardization (which
+  this renderer has not adopted — it still uses its own paint-order/hit
+  logic, untouched by this campaign).
+- None of the other 9 commits in the 2026-07-20 hardening campaign touched
+  `simple_web_html_layout_renderer.spl`, `generate_css`, or the
+  cross-engine widget-shell gate — this entry's prior residuals/gate state
+  (window 97.17%, taskbar 92.37%) stand unchanged.
+
 ## Update Rule
 
 After research, requirements, architecture, design, implementation,
