@@ -1,0 +1,73 @@
+# Physics2 — Buffered 3D Contact Events
+#
+# Begin/Stay/End contact-phase events for PhysicsWorld3D. Computed once per
+# fixed step by diffing the step's deduped contact-pair set against the
+# previous fixed step's set — buffered and consumed via world.events()
+# after step() returns, never dispatched as callbacks during the solve.
+#
+# Not the stale Gen-1 physics/types3d.spl CollisionEvent3D — this is the
+# active-world event type, keyed by SolverBodyStore3D indices.
+
+val CONTACT_PHASE_BEGIN: i64 = 0
+val CONTACT_PHASE_STAY: i64 = 1
+val CONTACT_PHASE_END: i64 = 2
+
+struct ContactEvent3D:
+    body_a: i64
+    body_b: i64
+    phase: i64
+
+struct PairIdentity3D:
+    a: i64
+    b: i64
+
+class ContactPairTracker3D:
+    prev_pairs: Dict<i64, PairIdentity3D>
+
+impl ContactPairTracker3D:
+    static fn create() -> ContactPairTracker3D:
+        ContactPairTracker3D(prev_pairs: {})
+
+    fn pair_key(a: i64, b: i64) -> i64:
+        val lo = if a < b: a else: b
+        val hi = if a < b: b else: a
+        lo * 1000000000 + hi
+
+    # Diffs the current fixed step's (body_a, body_b) contact list — as
+    # produced by ContactConstraint3DSoA, one entry per contact point, so
+    # pairs are deduped here — against the pair set seen last call. Returns
+    # Begin for newly-touching pairs, Stay for pairs seen both times, and
+    # End for pairs that dropped out. Updates internal state for the next
+    # call.
+    me diff(body_a: [i64], body_b: [i64], n: i64) -> [ContactEvent3D]:
+        var curr_pairs: Dict<i64, PairIdentity3D> = {}
+        var events: [ContactEvent3D] = []
+        var i = 0
+        while i < n:
+            val a = body_a[i]
+            val b = body_b[i]
+            val key = self.pair_key(a, b)
+            if not curr_pairs.contains_key(key):
+                val lo = if a < b: a else: b
+                val hi = if a < b: b else: a
+                curr_pairs[key] = PairIdentity3D(a: lo, b: hi)
+                if self.prev_pairs.contains_key(key):
+                    events.push(ContactEvent3D(body_a: lo, body_b: hi, phase: CONTACT_PHASE_STAY))
+                else:
+                    events.push(ContactEvent3D(body_a: lo, body_b: hi, phase: CONTACT_PHASE_BEGIN))
+            i = i + 1
+
+        val prev_keys = self.prev_pairs.keys()
+        var pi = 0
+        while pi < prev_keys.len():
+            val key = prev_keys[pi]
+            if not curr_pairs.contains_key(key):
+                val ident = self.prev_pairs[key]
+                events.push(ContactEvent3D(body_a: ident.a, body_b: ident.b, phase: CONTACT_PHASE_END))
+            pi = pi + 1
+
+        self.prev_pairs = curr_pairs
+        events
+
+    me clear():
+        self.prev_pairs = {}

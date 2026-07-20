@@ -2,13 +2,27 @@
 #
 # 3D physics world with the same backend dispatch as world2d.
 # Uses quaternion rotation, 3D collision detection, and TGS solver.
+#
+# [C29 fix] Contacts are detected in full 3D (NarrowContact3D carries xyz
+# point/normal) and now resolved in full 3D too: ContactConstraint3DSoA
+# carries a 3D normal, two tangents, and three accumulated lambdas; the
+# solver applies linear + angular impulses on all three axes for both the
+# normal and both tangent directions.
+#
+# ponytail: SolverBodyStore3D only carries a diagonal inverse inertia
+# (inv_inertia_x/y/z, body-local axes never re-derived from rotation), so
+# angular_term_3d() uses that diagonal directly rather than a full 3x3
+# world-space inertia tensor. Matches the diagonal-tensor approach already
+# used by physics/contact3d.spl elsewhere in this tree. Upgrade to a
+# world-space tensor when OBB/general rotation lands (Phase 6).
 
 use std.common.engine.ids.{NodeId}
 use std.common.math.{math_sqrt, math_abs}
 use std.nogc_sync_mut.engine.physics.config.{PhysicsConfig3D, Vec3}
 use std.nogc_sync_mut.engine.physics.backend.{PhysicsBackend, select_backend}
 use std.nogc_sync_mut.engine.physics.data.solver_body3d.{SolverBodyStore3D}
-use std.nogc_sync_mut.engine.physics.data.constraint.{ContactConstraintSoA}
+use std.nogc_sync_mut.engine.physics.data.constraint3d.{ContactConstraint3DSoA}
+use std.nogc_sync_mut.engine.physics.events3d.{ContactEvent3D, ContactPairTracker3D}
 use std.nogc_sync_mut.engine.physics.narrowphase.collision3d.{collide_sphere_sphere, collide_aabb_aabb_3d, collide_sphere_aabb_3d, NarrowContact3D}
 
 enum ShapeType3D:
@@ -35,13 +49,21 @@ struct Transform3D:
     rot_y: f64
     rot_z: f64
 
+# 3D cross product, returned as a 3-element array [x, y, z]. Not a tuple —
+# an ordinary value-typed array, matching get_all_dynamic_transforms()'s
+# array-return style elsewhere in this file.
+fn vec3_cross(ax: f64, ay: f64, az: f64, bx: f64, by: f64, bz: f64) -> [f64]:
+    [ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx]
+
 class PhysicsWorld3D:
     config: PhysicsConfig3D
     active_backend: PhysicsBackend
     bodies: SolverBodyStore3D
     colliders: [Collider3D]
     collider_count: i64
-    constraints: ContactConstraintSoA
+    constraints: ContactConstraint3DSoA
+    pair_tracker: ContactPairTracker3D
+    last_events: [ContactEvent3D]
     accumulator: f64
     node_to_body: [i64]
     max_node_index: i64
@@ -55,7 +77,9 @@ impl PhysicsWorld3D:
             bodies: SolverBodyStore3D.create(),
             colliders: [],
             collider_count: 0,
-            constraints: ContactConstraintSoA.create(),
+            constraints: ContactConstraint3DSoA.create(),
+            pair_tracker: ContactPairTracker3D.create(),
+            last_events: [],
             accumulator: 0.0,
             node_to_body: [],
             max_node_index: 0
@@ -98,6 +122,7 @@ impl PhysicsWorld3D:
         idx
 
     me step(dt: f64):
+        self.last_events = []
         self.accumulator = self.accumulator + dt
         val fixed_dt = self.config.fixed_timestep
         while self.accumulator >= fixed_dt:
@@ -113,6 +138,18 @@ impl PhysicsWorld3D:
             self.detect_contacts()
             self.solve_contacts()
             sub = sub + 1
+        # Contact events are frame-level (once per fixed step), not
+        # per-substep — substepping is an internal solver detail.
+        val step_events = self.pair_tracker.diff(self.constraints.body_a, self.constraints.body_b, self.constraints.count)
+        var ei = 0
+        while ei < step_events.len():
+            self.last_events.push(step_events[ei])
+            ei = ei + 1
+
+    # Buffered Begin/Stay/End contact events produced by the most recent
+    # step() call. Never dispatched as callbacks during the solve.
+    me events() -> [ContactEvent3D]:
+        self.last_events
 
     me detect_contacts():
         self.constraints.clear()
@@ -131,8 +168,8 @@ impl PhysicsWorld3D:
                 if contact.has_contact:
                     self.constraints.add(
                         ai, bi,
-                        contact.normal_x, contact.normal_y,
-                        contact.point_x, contact.point_y,
+                        contact.normal_x, contact.normal_y, contact.normal_z,
+                        contact.point_x, contact.point_y, contact.point_z,
                         contact.penetration,
                         self.config.restitution,
                         self.config.friction,
@@ -180,6 +217,26 @@ impl PhysicsWorld3D:
         self.solve_velocity_inline_3d(self.config.velocity_iterations)
         self.solve_position_inline_3d(self.config.position_iterations, self.config.baumgarte_factor, self.config.slop)
 
+    # Velocity at the contact point for body `idx`, given the lever arm r
+    # (contact point minus body center): v_linear + omega x r. Returned as
+    # a 3-element array, read immediately by the caller.
+    me contact_velocity_3d(idx: i64, rx: f64, ry: f64, rz: f64) -> [f64]:
+        val wx = self.bodies.ang_vel_x[idx]
+        val wy = self.bodies.ang_vel_y[idx]
+        val wz = self.bodies.ang_vel_z[idx]
+        val c = vec3_cross(wx, wy, wz, rx, ry, rz)
+        [self.bodies.vel_x[idx] + c[0], self.bodies.vel_y[idx] + c[1], self.bodies.vel_z[idx] + c[2]]
+
+    # Angular contribution to the effective mass along direction d for
+    # body `idx`: d . ((Iinv * (r x d)) x r), diagonal inertia tensor.
+    me angular_term_3d(idx: i64, rx: f64, ry: f64, rz: f64, dx: f64, dy: f64, dz: f64) -> f64:
+        val r_cross_d = vec3_cross(rx, ry, rz, dx, dy, dz)
+        val ix = self.bodies.inv_inertia_x[idx] * r_cross_d[0]
+        val iy = self.bodies.inv_inertia_y[idx] * r_cross_d[1]
+        val iz = self.bodies.inv_inertia_z[idx] * r_cross_d[2]
+        val ang = vec3_cross(ix, iy, iz, rx, ry, rz)
+        ang[0] * dx + ang[1] * dy + ang[2] * dz
+
     me solve_velocity_inline_3d(iterations: i64):
         var iter = 0
         while iter < iterations:
@@ -189,71 +246,128 @@ impl PhysicsWorld3D:
                 val b = self.constraints.body_b[ci]
                 val nx = self.constraints.normal_x[ci]
                 val ny = self.constraints.normal_y[ci]
+                val nz = self.constraints.normal_z[ci]
                 val px = self.constraints.point_x[ci]
                 val py = self.constraints.point_y[ci]
+                val pz = self.constraints.point_z[ci]
                 val ra_x = px - self.bodies.pos_x[a]
                 val ra_y = py - self.bodies.pos_y[a]
+                val ra_z = pz - self.bodies.pos_z[a]
                 val rb_x = px - self.bodies.pos_x[b]
                 val rb_y = py - self.bodies.pos_y[b]
-                val va_x = self.bodies.vel_x[a] + (-self.bodies.ang_vel_z[a] * ra_y)
-                val va_y = self.bodies.vel_y[a] + (self.bodies.ang_vel_z[a] * ra_x)
-                val vb_x = self.bodies.vel_x[b] + (-self.bodies.ang_vel_z[b] * rb_y)
-                val vb_y = self.bodies.vel_y[b] + (self.bodies.ang_vel_z[b] * rb_x)
-                val rel_vx = vb_x - va_x
-                val rel_vy = vb_y - va_y
-                val vn = rel_vx * nx + rel_vy * ny
-                val ra_cross_n = ra_x * ny - ra_y * nx
-                val rb_cross_n = rb_x * ny - rb_y * nx
-                val eff_mass = self.bodies.inv_mass[a] + self.bodies.inv_mass[b] + (ra_cross_n * ra_cross_n * self.bodies.inv_inertia_z[a]) + (rb_cross_n * rb_cross_n * self.bodies.inv_inertia_z[b])
+                val rb_z = pz - self.bodies.pos_z[b]
+
+                val va = self.contact_velocity_3d(a, ra_x, ra_y, ra_z)
+                val vb = self.contact_velocity_3d(b, rb_x, rb_y, rb_z)
+                val rel_vx = vb[0] - va[0]
+                val rel_vy = vb[1] - va[1]
+                val rel_vz = vb[2] - va[2]
+                val vn = rel_vx * nx + rel_vy * ny + rel_vz * nz
+
+                val ang_a_n = self.angular_term_3d(a, ra_x, ra_y, ra_z, nx, ny, nz)
+                val ang_b_n = self.angular_term_3d(b, rb_x, rb_y, rb_z, nx, ny, nz)
+                val eff_mass = self.bodies.inv_mass[a] + self.bodies.inv_mass[b] + ang_a_n + ang_b_n
+
                 if eff_mass > 0.0:
                     val restitution = self.constraints.restitution[ci]
                     val bias = if vn < -1.0: restitution * vn else: 0.0
                     val lambda_raw = -(vn + bias) / eff_mass
-                    val old_lambda = self.constraints.lambda_n[ci]
+                    val old_lambda = self.constraints.lambda_normal[ci]
                     var new_lambda = old_lambda + lambda_raw
                     if new_lambda < 0.0:
                         new_lambda = 0.0
-                    self.constraints.lambda_n[ci] = new_lambda
+                    self.constraints.lambda_normal[ci] = new_lambda
                     val j = new_lambda - old_lambda
                     val jx = nx * j
                     val jy = ny * j
+                    val jz = nz * j
+
                     self.bodies.vel_x[a] = self.bodies.vel_x[a] - jx * self.bodies.inv_mass[a]
                     self.bodies.vel_y[a] = self.bodies.vel_y[a] - jy * self.bodies.inv_mass[a]
-                    self.bodies.ang_vel_z[a] = self.bodies.ang_vel_z[a] - ra_cross_n * j * self.bodies.inv_inertia_z[a]
+                    self.bodies.vel_z[a] = self.bodies.vel_z[a] - jz * self.bodies.inv_mass[a]
                     self.bodies.vel_x[b] = self.bodies.vel_x[b] + jx * self.bodies.inv_mass[b]
                     self.bodies.vel_y[b] = self.bodies.vel_y[b] + jy * self.bodies.inv_mass[b]
-                    self.bodies.ang_vel_z[b] = self.bodies.ang_vel_z[b] + rb_cross_n * j * self.bodies.inv_inertia_z[b]
-                    val tx = rel_vx - vn * nx
-                    val ty = rel_vy - vn * ny
-                    val t_len_sq = tx * tx + ty * ty
-                    if t_len_sq > 0.0000001:
-                        val t_len = math_sqrt(t_len_sq)
-                        val tnx = tx / t_len
-                        val tny = ty / t_len
-                        val vt = rel_vx * tnx + rel_vy * tny
-                        val ra_cross_t = ra_x * tny - ra_y * tnx
-                        val rb_cross_t = rb_x * tny - rb_y * tnx
-                        val eff_mass_t = self.bodies.inv_mass[a] + self.bodies.inv_mass[b] + (ra_cross_t * ra_cross_t * self.bodies.inv_inertia_z[a]) + (rb_cross_t * rb_cross_t * self.bodies.inv_inertia_z[b])
-                        if eff_mass_t > 0.0:
-                            val friction = self.constraints.friction[ci]
-                            val max_friction = math_abs(new_lambda) * friction
-                            val jt_raw = -vt / eff_mass_t
-                            val old_lambda_t = self.constraints.lambda_t[ci]
-                            var new_lambda_t = old_lambda_t + jt_raw
-                            if new_lambda_t > max_friction:
-                                new_lambda_t = max_friction
-                            if new_lambda_t < -max_friction:
-                                new_lambda_t = -max_friction
-                            self.constraints.lambda_t[ci] = new_lambda_t
-                            val jt = new_lambda_t - old_lambda_t
-                            self.bodies.vel_x[a] = self.bodies.vel_x[a] - tnx * jt * self.bodies.inv_mass[a]
-                            self.bodies.vel_y[a] = self.bodies.vel_y[a] - tny * jt * self.bodies.inv_mass[a]
-                            self.bodies.ang_vel_z[a] = self.bodies.ang_vel_z[a] - ra_cross_t * jt * self.bodies.inv_inertia_z[a]
-                            self.bodies.vel_x[b] = self.bodies.vel_x[b] + tnx * jt * self.bodies.inv_mass[b]
-                            self.bodies.vel_y[b] = self.bodies.vel_y[b] + tny * jt * self.bodies.inv_mass[b]
-                            self.bodies.ang_vel_z[b] = self.bodies.ang_vel_z[b] + rb_cross_t * jt * self.bodies.inv_inertia_z[b]
+                    self.bodies.vel_z[b] = self.bodies.vel_z[b] + jz * self.bodies.inv_mass[b]
+
+                    val ra_cross_j = vec3_cross(ra_x, ra_y, ra_z, jx, jy, jz)
+                    self.bodies.ang_vel_x[a] = self.bodies.ang_vel_x[a] - ra_cross_j[0] * self.bodies.inv_inertia_x[a]
+                    self.bodies.ang_vel_y[a] = self.bodies.ang_vel_y[a] - ra_cross_j[1] * self.bodies.inv_inertia_y[a]
+                    self.bodies.ang_vel_z[a] = self.bodies.ang_vel_z[a] - ra_cross_j[2] * self.bodies.inv_inertia_z[a]
+
+                    val rb_cross_j = vec3_cross(rb_x, rb_y, rb_z, jx, jy, jz)
+                    self.bodies.ang_vel_x[b] = self.bodies.ang_vel_x[b] + rb_cross_j[0] * self.bodies.inv_inertia_x[b]
+                    self.bodies.ang_vel_y[b] = self.bodies.ang_vel_y[b] + rb_cross_j[1] * self.bodies.inv_inertia_y[b]
+                    self.bodies.ang_vel_z[b] = self.bodies.ang_vel_z[b] + rb_cross_j[2] * self.bodies.inv_inertia_z[b]
+
+                    val max_friction = math_abs(new_lambda) * self.constraints.friction[ci]
+
+                    val t1x = self.constraints.tangent1_x[ci]
+                    val t1y = self.constraints.tangent1_y[ci]
+                    val t1z = self.constraints.tangent1_z[ci]
+                    self.solve_tangent_3d(ci, a, b, ra_x, ra_y, ra_z, rb_x, rb_y, rb_z, t1x, t1y, t1z, max_friction, true)
+
+                    val t2x = self.constraints.tangent2_x[ci]
+                    val t2y = self.constraints.tangent2_y[ci]
+                    val t2z = self.constraints.tangent2_z[ci]
+                    self.solve_tangent_3d(ci, a, b, ra_x, ra_y, ra_z, rb_x, rb_y, rb_z, t2x, t2y, t2z, max_friction, false)
+
                 ci = ci + 1
             iter = iter + 1
+
+    # Applies one tangent-direction friction impulse (Coulomb, clamped to
+    # +/- max_friction) for contact `ci`. `is_t1` selects which of the two
+    # accumulated tangent lambdas to read/update — each tangent axis is
+    # clamped independently (box friction, not a combined friction cone).
+    me solve_tangent_3d(ci: i64, a: i64, b: i64, ra_x: f64, ra_y: f64, ra_z: f64, rb_x: f64, rb_y: f64, rb_z: f64, tx: f64, ty: f64, tz: f64, max_friction: f64, is_t1: bool):
+        val va = self.contact_velocity_3d(a, ra_x, ra_y, ra_z)
+        val vb = self.contact_velocity_3d(b, rb_x, rb_y, rb_z)
+        val rel_vx = vb[0] - va[0]
+        val rel_vy = vb[1] - va[1]
+        val rel_vz = vb[2] - va[2]
+        val vt = rel_vx * tx + rel_vy * ty + rel_vz * tz
+
+        val ang_a_t = self.angular_term_3d(a, ra_x, ra_y, ra_z, tx, ty, tz)
+        val ang_b_t = self.angular_term_3d(b, rb_x, rb_y, rb_z, tx, ty, tz)
+        val eff_mass_t = self.bodies.inv_mass[a] + self.bodies.inv_mass[b] + ang_a_t + ang_b_t
+        if eff_mass_t <= 0.0:
+            return
+
+        val jt_raw = 0.0 - vt / eff_mass_t
+        var old_lambda_t = 0.0
+        if is_t1:
+            old_lambda_t = self.constraints.lambda_tangent1[ci]
+        else:
+            old_lambda_t = self.constraints.lambda_tangent2[ci]
+        var new_lambda_t = old_lambda_t + jt_raw
+        if new_lambda_t > max_friction:
+            new_lambda_t = max_friction
+        if new_lambda_t < 0.0 - max_friction:
+            new_lambda_t = 0.0 - max_friction
+        if is_t1:
+            self.constraints.lambda_tangent1[ci] = new_lambda_t
+        else:
+            self.constraints.lambda_tangent2[ci] = new_lambda_t
+        val jt = new_lambda_t - old_lambda_t
+        val jx = tx * jt
+        val jy = ty * jt
+        val jz = tz * jt
+
+        self.bodies.vel_x[a] = self.bodies.vel_x[a] - jx * self.bodies.inv_mass[a]
+        self.bodies.vel_y[a] = self.bodies.vel_y[a] - jy * self.bodies.inv_mass[a]
+        self.bodies.vel_z[a] = self.bodies.vel_z[a] - jz * self.bodies.inv_mass[a]
+        self.bodies.vel_x[b] = self.bodies.vel_x[b] + jx * self.bodies.inv_mass[b]
+        self.bodies.vel_y[b] = self.bodies.vel_y[b] + jy * self.bodies.inv_mass[b]
+        self.bodies.vel_z[b] = self.bodies.vel_z[b] + jz * self.bodies.inv_mass[b]
+
+        val ra_cross_j = vec3_cross(ra_x, ra_y, ra_z, jx, jy, jz)
+        self.bodies.ang_vel_x[a] = self.bodies.ang_vel_x[a] - ra_cross_j[0] * self.bodies.inv_inertia_x[a]
+        self.bodies.ang_vel_y[a] = self.bodies.ang_vel_y[a] - ra_cross_j[1] * self.bodies.inv_inertia_y[a]
+        self.bodies.ang_vel_z[a] = self.bodies.ang_vel_z[a] - ra_cross_j[2] * self.bodies.inv_inertia_z[a]
+
+        val rb_cross_j = vec3_cross(rb_x, rb_y, rb_z, jx, jy, jz)
+        self.bodies.ang_vel_x[b] = self.bodies.ang_vel_x[b] + rb_cross_j[0] * self.bodies.inv_inertia_x[b]
+        self.bodies.ang_vel_y[b] = self.bodies.ang_vel_y[b] + rb_cross_j[1] * self.bodies.inv_inertia_y[b]
+        self.bodies.ang_vel_z[b] = self.bodies.ang_vel_z[b] + rb_cross_j[2] * self.bodies.inv_inertia_z[b]
 
     me solve_position_inline_3d(iterations: i64, baumgarte: f64, slop: f64):
         var iter = 0
@@ -266,13 +380,16 @@ impl PhysicsWorld3D:
                     val b = self.constraints.body_b[ci]
                     val nx = self.constraints.normal_x[ci]
                     val ny = self.constraints.normal_y[ci]
+                    val nz = self.constraints.normal_z[ci]
                     val inv_mass_sum = self.bodies.inv_mass[a] + self.bodies.inv_mass[b]
                     if inv_mass_sum > 0.0:
                         val correction = (pen - slop) * baumgarte / inv_mass_sum
                         self.bodies.pos_x[a] = self.bodies.pos_x[a] - nx * correction * self.bodies.inv_mass[a]
                         self.bodies.pos_y[a] = self.bodies.pos_y[a] - ny * correction * self.bodies.inv_mass[a]
+                        self.bodies.pos_z[a] = self.bodies.pos_z[a] - nz * correction * self.bodies.inv_mass[a]
                         self.bodies.pos_x[b] = self.bodies.pos_x[b] + nx * correction * self.bodies.inv_mass[b]
                         self.bodies.pos_y[b] = self.bodies.pos_y[b] + ny * correction * self.bodies.inv_mass[b]
+                        self.bodies.pos_z[b] = self.bodies.pos_z[b] + nz * correction * self.bodies.inv_mass[b]
                 ci = ci + 1
             iter = iter + 1
 
@@ -283,6 +400,10 @@ impl PhysicsWorld3D:
     me get_velocity(node_id: NodeId) -> Vec3:
         val idx = self.node_to_body[node_id.to_index()]
         self.bodies.get_velocity(idx)
+
+    me get_angular_velocity(node_id: NodeId) -> Vec3:
+        val idx = self.node_to_body[node_id.to_index()]
+        Vec3(x: self.bodies.ang_vel_x[idx], y: self.bodies.ang_vel_y[idx], z: self.bodies.ang_vel_z[idx])
 
     me apply_force(node_id: NodeId, fx: f64, fy: f64, fz: f64):
         val idx = self.node_to_body[node_id.to_index()]

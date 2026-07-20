@@ -1,0 +1,127 @@
+# Physics2 World3D — 3D Contact Constraint / Solver Unit Tests
+#
+# Covers the [C29] fix: contacts were detected in full 3D (NarrowContact3D
+# carries xyz) but resolved as if 2D (ContactConstraintSoA had no z fields,
+# solver only touched vel_x/vel_y/ang_vel_z/pos_x/pos_y). Now
+# ContactConstraint3DSoA + the full 3D impulse solver resolve all three
+# axes, with buffered Begin/Stay/End contact events.
+
+use std.io_runtime
+use std.spec.{describe, it, expect}
+use std.common.math.{math_abs}
+use std.common.engine.ids.{NodeId}
+use std.nogc_sync_mut.engine.physics.config.{default_physics_config_3d, PhysicsConfig3D, Vec3}
+use std.nogc_sync_mut.engine.physics.backend.{PhysicsBackend}
+use std.nogc_sync_mut.engine.physics.world3d.{PhysicsWorld3D}
+use std.nogc_sync_mut.engine.physics.events3d.{CONTACT_PHASE_BEGIN, CONTACT_PHASE_STAY, CONTACT_PHASE_END}
+
+fn make_node(idx: i64) -> NodeId:
+    NodeId(raw: idx)
+
+fn z_gravity_config() -> PhysicsConfig3D:
+    var config = default_physics_config_3d()
+    config.backend = PhysicsBackend.CpuScalar
+    config.gravity = Vec3(x: 0.0, y: 0.0, z: -9.81)
+    config
+
+describe "PhysicsWorld3D — 3D contact constraint (C29)":
+    it "sphere falling along z onto a static box resolves penetration and kills z relative velocity":
+        var world = PhysicsWorld3D.create(z_gravity_config())
+        val floor = make_node(0)
+        world.add_static_body(floor, 0.0, 0.0, 0.0)
+        world.add_box_collider(floor, 10.0, 10.0, 0.5)
+        val ball = make_node(1)
+        world.add_dynamic_body(ball, 0.0, 0.0, 2.0, 1.0)
+        world.add_sphere_collider(ball, 0.5)
+        var step = 0
+        while step < 200:
+            world.step(0.016)
+            step = step + 1
+        val pos = world.get_position(ball)
+        val vel = world.get_velocity(ball)
+        # Pre-fix: z was never corrected by the solver (only x/y/ang_z were
+        # touched), so the sphere free-falls through the floor forever and
+        # |vel.z| grows without bound (~31 m/s after 3.2s of gravity).
+        expect(pos.z > -1.0).to_equal(true)
+        expect(math_abs(vel.z) < 5.0).to_equal(true)
+        world.destroy()
+
+    it "off-axis oblique impact produces angular velocity on a non-z axis":
+        var world = PhysicsWorld3D.create(z_gravity_config())
+        val floor = make_node(0)
+        world.add_static_body(floor, 0.0, 0.0, 0.0)
+        world.add_box_collider(floor, 10.0, 10.0, 0.5)
+        val ball = make_node(1)
+        world.add_dynamic_body(ball, 0.0, 0.0, 2.0, 1.0)
+        world.add_sphere_collider(ball, 0.5)
+        var step = 0
+        while step < 200:
+            # Persistent sideways force: sliding contact on a z-normal
+            # floor produces friction torque about the Y axis (r along z,
+            # force along x -> r x F has a y component), never Z.
+            world.apply_force(ball, 3.0, 0.0, 0.0)
+            world.step(0.016)
+            step = step + 1
+        val pos = world.get_position(ball)
+        val ang = world.get_angular_velocity(ball)
+        # Pre-fix: the solver never wrote ang_vel_x/ang_vel_y at all, so
+        # ang.y would be exactly 0.0 here regardless of impact geometry.
+        expect(pos.z > -1.0).to_equal(true)
+        expect(math_abs(ang.y) > 0.001).to_equal(true)
+        world.destroy()
+
+    it "xy-plane scene (all z=0) matches pre-fix behavior — regression":
+        var world = PhysicsWorld3D.create(default_physics_config_3d())
+        val floor = make_node(0)
+        world.add_static_body(floor, 0.0, 0.0, 0.0)
+        world.add_box_collider(floor, 10.0, 0.5, 10.0)
+        val ball = make_node(1)
+        world.add_dynamic_body(ball, 0.0, 2.0, 0.0, 1.0)
+        world.add_sphere_collider(ball, 0.5)
+        var step = 0
+        while step < 200:
+            world.step(0.016)
+            step = step + 1
+        val pos = world.get_position(ball)
+        expect(pos.y > -1.0).to_equal(true)
+        expect(pos.x).to_equal(0.0)
+        expect(pos.z).to_equal(0.0)
+        world.destroy()
+
+    it "Begin -> Stay -> End contact event sequence over 3 steps":
+        var config = default_physics_config_3d()
+        config.backend = PhysicsBackend.CpuScalar
+        config.gravity = Vec3(x: 0.0, y: 0.0, z: 0.0)
+        config.fixed_timestep = 0.1
+        config.sub_steps = 1
+        config.velocity_iterations = 1
+        config.position_iterations = 1
+        config.baumgarte_factor = 0.0
+        config.slop = 0.0
+        config.restitution = 0.0
+        config.friction = 0.0
+        var world = PhysicsWorld3D.create(config)
+        val anchor = make_node(0)
+        world.add_static_body(anchor, 0.0, 0.0, 0.0)
+        world.add_sphere_collider(anchor, 0.5)
+        val mover = make_node(1)
+        world.add_dynamic_body(mover, 0.6, 0.0, 0.0, 1.0)
+        world.add_sphere_collider(mover, 0.5)
+
+        world.step(0.1)
+        val events1 = world.events()
+        expect(events1.len()).to_equal(1)
+        expect(events1[0].phase).to_equal(CONTACT_PHASE_BEGIN)
+
+        world.step(0.1)
+        val events2 = world.events()
+        expect(events2.len()).to_equal(1)
+        expect(events2[0].phase).to_equal(CONTACT_PHASE_STAY)
+
+        world.apply_force(mover, 100.0, 0.0, 0.0)
+        world.step(0.1)
+        val events3 = world.events()
+        expect(events3.len()).to_equal(1)
+        expect(events3[0].phase).to_equal(CONTACT_PHASE_END)
+
+        world.destroy()
