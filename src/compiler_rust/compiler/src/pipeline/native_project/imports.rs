@@ -536,7 +536,16 @@ pub(crate) fn build_import_map(
             map.insert(raw.clone(), mangled_list[0].clone());
         } else {
             ambiguous.insert(raw.clone());
-            map.insert(raw.clone(), mangled_list[0].clone());
+            // Never serve a private (underscore-prefixed) helper across modules
+            // on an ambiguous bare name: first-wins here bound test_config's
+            // `.index_of() ?? -1` lowering to devhub__cmd_storage___index_of
+            // (wrong module, wrong signature: ([text],text) walked a text as an
+            // array) and SIGSEGV'd every `simple test` on the stage-4 full CLI.
+            // Public ambiguous names keep first-wins until all consumers check
+            // the `ambiguous` set.
+            if !raw.starts_with('_') {
+                map.insert(raw.clone(), mangled_list[0].clone());
+            }
         }
     }
 

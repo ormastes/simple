@@ -21,7 +21,17 @@ fn resolve_unique_module_qualified_func<M: Module>(ctx: &InstrContext<'_, M>, na
     let suffix = format!("__{}", tail);
     let mut ids: Vec<FuncId> = Vec::new();
     for (candidate, id) in ctx.func_ids.iter() {
-        if candidate.ends_with(&suffix) && !ids.contains(id) {
+        // Suffix match must respect the mangling boundary: a private helper
+        // `_index_of` mangles to `<module>___index_of`, which ends_with
+        // "__index_of" and used to false-positive-match method `index_of`
+        // dynamic dispatch (SIGSEGV: test_config `.index_of` bound to
+        // devhub__cmd_storage___index_of). Require the candidate's own tail
+        // (after its LAST `__`) to equal the probed tail exactly.
+        if candidate
+            .strip_suffix(&suffix)
+            .is_some_and(|prefix| !prefix.is_empty() && !prefix.ends_with('_'))
+            && !ids.contains(id)
+        {
             ids.push(*id);
         }
     }
@@ -39,7 +49,12 @@ fn resolve_unique_module_qualified_import<M: Module>(ctx: &InstrContext<'_, M>, 
     let mut names: Vec<String> = Vec::new();
     for candidate in ctx.use_map.values().chain(ctx.import_map.values()) {
         let candidate_sanitized = candidate.replace('.', "_dot_");
-        if candidate_sanitized.ends_with(&suffix) && !names.iter().any(|n| n == candidate) {
+        // Same mangling-boundary rule as resolve_unique_module_qualified_func.
+        if candidate_sanitized
+            .strip_suffix(&suffix)
+            .is_some_and(|prefix| !prefix.is_empty() && !prefix.ends_with('_'))
+            && !names.iter().any(|n| n == candidate)
+        {
             names.push(candidate.clone());
         }
     }
