@@ -1,0 +1,403 @@
+#!/bin/sh
+# check-simpleos-x86-64-wm-hello-lifecycle-evidence.shs
+#
+# Default-runnable (NEVER silently skips) QEMU evidence lane for the Hello
+# app window lifecycle in the x86_64 bare-metal glass window manager
+# (examples/09_embedded/simple_os/arch/x86_64/wm_entry.spl). Proves, under
+# REAL firmware (OVMF pflash -> GRUB standalone EFI -> multiboot; never
+# QEMU -kernel, never isa-debug-exit):
+#
+#   1. BOOT:  the WM boots and composites the desktop WITH the Hello window
+#             (window 3): serial marker chain + screendump 1 validated for
+#             Hello title ink, body "Hello, SimpleOS!" vector-text ink, and
+#             the rose traffic-light close dot (real pixel counts printed).
+#   2. RUN:   the Hello body text is rendered by the vector text path
+#             (rt_gui_draw_text_vector) — a 4x zoom crop PNG of the body
+#             text region is emitted as inspectable evidence.
+#   3. CLOSE: a synthetic pointer click is injected over QMP
+#             input-send-event onto the Hello window's close button (the
+#             same input mechanism as the render-event gate), driven
+#             adaptively using the WM's own [wm-event] mouse_move markers;
+#             the WM must dispatch the close ([wm-event] type=window
+#             detail=action=close,win=3), complete it ([WM] window closed:
+#             hello), and recomposite; screendump 2 must show the window
+#             GONE (no title/body ink, no rose dot, large pixel delta over
+#             the former region) while the rest of the scene stays intact.
+#
+# Any missing tool or failed step prints a named blocker and exits nonzero.
+set -u
+
+ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SIMPLE_BIN="$ROOT_DIR/bin/simple"
+ENTRY="examples/09_embedded/simple_os/arch/x86_64/wm_entry.spl"
+LINKER_SCRIPT="examples/09_embedded/simple_os/arch/x86_64/linker.ld"
+KERNEL_OUTPUT="build/os/simpleos_wm_x86_64.elf"
+HELLO_VALIDATOR="scripts/check/validate_simpleos_x86_64_wm_hello_ppm.spl"
+SCENE_VALIDATOR="scripts/check/validate_simpleos_x86_64_wm_ppm.spl"
+PPM_OPEN="build/os/wm_hello_open.ppm"
+PPM_CLOSED="build/os/wm_hello_closed.ppm"
+ZOOM_PNG="build/os/wm_hello_body_zoom.png"
+SERIAL_LOG="build/os/wm_hello_serial.log"
+SERIAL_CLEAN="build/os/wm_hello_serial.clean.log"
+QMP_SOCKET="build/os/wm_hello_qmp.sock"
+QEMU_STDERR="build/os/wm_hello_qemu.stderr.log"
+BUILD_LOG="build/os/wm_hello_build.log"
+READY_MARKER="[WM] Glass desktop rendered!"
+HELLO_MARKER="[WM] Hello app window open: win=3"
+CLOSE_DISPATCH_MARKER="type=window detail=action=close,win=3"
+CLOSE_DONE_MARKER="[WM] window closed: hello"
+READY_TIMEOUT_MS="${WM_HELLO_READY_TIMEOUT_MS:-120000}"
+CLOSE_TIMEOUT_MS="${WM_HELLO_CLOSE_TIMEOUT_MS:-30000}"
+
+# Hello window boot geometry (must match wm_entry.spl WIN3_* + BTN_MARGIN_*)
+CLOSE_BTN_X=712
+CLOSE_BTN_Y=90
+
+QEMU_PID=""
+boot_gate=FAIL
+open_gate=FAIL
+close_gate=FAIL
+
+fail_blocker() {
+    echo "simpleos_x86_64_wm_hello_lifecycle_status=fail"
+    echo "simpleos_x86_64_wm_hello_lifecycle_blocker=$1"
+    echo "RESULT: FAIL (blocker: $1)"
+    exit 1
+}
+
+cleanup() {
+    if [ -n "$QEMU_PID" ] && kill -0 "$QEMU_PID" 2>/dev/null; then
+        kill "$QEMU_PID" 2>/dev/null
+        wait "$QEMU_PID" 2>/dev/null
+    fi
+    rm -f "$QMP_SOCKET"
+}
+trap cleanup EXIT INT TERM
+
+refresh_clean_serial() {
+    tr -cd '\11\12\15\40-\176' <"$SERIAL_LOG" >"$SERIAL_CLEAN" 2>/dev/null || true
+}
+
+wait_serial_marker() {
+    # $1 = literal marker, $2 = timeout ms. Returns 0 when found.
+    _waited=0
+    while [ "$_waited" -le "$2" ]; do
+        if [ -f "$SERIAL_LOG" ]; then
+            refresh_clean_serial
+            if grep -qF "$1" "$SERIAL_CLEAN" 2>/dev/null; then
+                return 0
+            fi
+        fi
+        if [ -n "$QEMU_PID" ] && ! kill -0 "$QEMU_PID" 2>/dev/null; then
+            return 1
+        fi
+        sleep 0.2
+        _waited=$((_waited + 200))
+    done
+    return 1
+}
+
+qmp() {
+    # $1 = python QMP body (uses pre-opened QMP file object `f`).
+    python3 - "$QMP_SOCKET" <<PY
+import json, socket, sys
+
+def write_qmp(f, obj):
+    f.write(json.dumps(obj).encode() + b"\n")
+    f.flush()
+    return f.readline()
+
+s = socket.socket(socket.AF_UNIX)
+s.settimeout(10)
+s.connect(sys.argv[1])
+f = s.makefile("rwb", buffering=0)
+f.readline()
+write_qmp(f, {"execute": "qmp_capabilities"})
+$1
+PY
+}
+
+# --- Preflight: named blockers, never a silent skip -------------------------
+command -v qemu-system-x86_64 >/dev/null 2>&1 || fail_blocker "qemu-system-x86_64-not-on-PATH"
+command -v python3 >/dev/null 2>&1 || fail_blocker "python3-not-on-PATH(needed-for-QMP)"
+[ -x "$SIMPLE_BIN" ] || fail_blocker "bin/simple-missing-or-not-executable"
+[ -f "$ENTRY" ] || fail_blocker "wm-entry-source-missing:$ENTRY"
+[ -f "$LINKER_SCRIPT" ] || fail_blocker "linker-script-missing:$LINKER_SCRIPT"
+[ -f "$HELLO_VALIDATOR" ] || fail_blocker "hello-validator-missing:$HELLO_VALIDATOR"
+[ -f "$SCENE_VALIDATOR" ] || fail_blocker "scene-validator-missing:$SCENE_VALIDATOR"
+OBJCOPY_PREFIX=""
+for candidate_dir in /opt/homebrew/opt/llvm/bin /usr/local/opt/llvm/bin /usr/lib/llvm-20/bin /usr/lib/llvm-19/bin /usr/lib/llvm-18/bin /usr/lib/llvm-17/bin /usr/bin; do
+    if [ -x "$candidate_dir/llvm-objcopy" ]; then
+        OBJCOPY_PREFIX="$candidate_dir"
+        break
+    fi
+done
+[ -n "$OBJCOPY_PREFIX" ] || fail_blocker "llvm-objcopy-not-found"
+command -v grub-mkstandalone >/dev/null 2>&1 || fail_blocker "grub-mkstandalone-not-on-PATH"
+OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
+OVMF_VARS_SRC="${OVMF_VARS_SRC:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
+[ -f "$OVMF_CODE" ] || fail_blocker "OVMF_CODE-not-found:$OVMF_CODE"
+[ -f "$OVMF_VARS_SRC" ] || fail_blocker "OVMF_VARS-not-found:$OVMF_VARS_SRC"
+
+mkdir -p build/os
+
+# --- 1. Build the WM kernel (reuse if newer than the entry source) ----------
+if [ ! -f "$KERNEL_OUTPUT" ] || [ "$ENTRY" -nt "$KERNEL_OUTPUT" ]; then
+    mkdir -p build/os/generated/generated
+    cat >build/os/generated/generated/simpleos_log_config.spl <<'SPL'
+val SIMPLEOS_LOG_COMPILED: bool = false
+
+fn simpleos_log_compile_enabled() -> bool:
+    SIMPLEOS_LOG_COMPILED
+
+fn simpleos_log_compile_mode_name() -> text:
+    if SIMPLEOS_LOG_COMPILED:
+        return "on"
+    "off"
+SPL
+    echo "building: $KERNEL_OUTPUT (log: $BUILD_LOG)"
+    SIMPLE_BOOTSTRAP=1 SIMPLE_LIB="$ROOT_DIR/src" SIMPLE_OS_LOG_MODE=off \
+    SIMPLE_ALLOW_FREESTANDING_STUBS=1 \
+    PATH="$OBJCOPY_PREFIX:$PATH" \
+        "$SIMPLE_BIN" native-build \
+        --source build/os/generated --source src/os --source src/lib \
+        --source examples/09_embedded/simple_os/arch/x86_64 \
+        --backend cranelift --cpu x86-64-v1 --opt-level=aggressive --log off \
+        --mode dynload \
+        --entry-closure --entry "$ENTRY" \
+        --target x86_64-unknown-none -o "$KERNEL_OUTPUT" \
+        --linker-script "$LINKER_SCRIPT" \
+        >"$BUILD_LOG" 2>&1
+    build_code=$?
+    if [ "$build_code" -ne 0 ] || [ ! -f "$KERNEL_OUTPUT" ]; then
+        echo "--- build log tail ---"
+        tail -20 "$BUILD_LOG"
+        fail_blocker "wm-kernel-build-failed(exit=$build_code,log=$BUILD_LOG)"
+    fi
+fi
+echo "kernel: $KERNEL_OUTPUT ($(wc -c <"$KERNEL_OUTPUT") bytes)"
+
+# --- 2. Package the kernel as a self-contained UEFI boot app (OVMF pflash) --
+# Board-runnable rule (.claude/rules/board-runnable.md) forbids QEMU `-kernel`
+# fast-path semantics: grub-mkstandalone builds a self-contained BOOTX64.EFI
+# so OVMF -> GRUB -> multiboot -> kernel _start runs the full real-firmware
+# handoff (same proven path as the render-event gate).
+UEFI_BUILD="build/os/wm_hello_uefi"
+ESP="$UEFI_BUILD/esp"
+EFIAPP="$ESP/EFI/BOOT/BOOTX64.EFI"
+OVMF_VARS="$UEFI_BUILD/OVMF_VARS_4M.fd"
+rm -rf "$UEFI_BUILD"
+mkdir -p "$ESP/EFI/BOOT"
+cp "$OVMF_VARS_SRC" "$OVMF_VARS"
+cat > "$UEFI_BUILD/grub.cfg" <<'CFG'
+set timeout=0
+set default=0
+insmod multiboot
+insmod normal
+menuentry "SimpleOS WM hello lifecycle (UEFI/multiboot)" {
+    echo "[grub-uefi] multiboot loading /boot/kernel.elf ..."
+    multiboot /boot/kernel.elf
+    boot
+}
+CFG
+grub-mkstandalone \
+    --format=x86_64-efi \
+    --output="$EFIAPP" \
+    --modules="multiboot normal echo part_gpt fat" \
+    "boot/grub/grub.cfg=$UEFI_BUILD/grub.cfg" \
+    "boot/kernel.elf=$KERNEL_OUTPUT"
+[ -f "$EFIAPP" ] || fail_blocker "grub-mkstandalone-did-not-produce-BOOTX64.EFI"
+
+# --- 3. Boot under REAL UEFI firmware (OVMF pflash) with QMP ----------------
+rm -f "$QMP_SOCKET" "$SERIAL_LOG" "$SERIAL_CLEAN" "$QEMU_STDERR" \
+      "$PPM_OPEN" "$PPM_CLOSED" "$ZOOM_PNG"
+qemu-system-x86_64 \
+    -no-user-config -monitor none -net none \
+    -machine q35 -cpu qemu64 -m 2G \
+    -drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE" \
+    -drive "if=pflash,format=raw,file=$OVMF_VARS" \
+    -drive "file=fat:rw:$ESP,format=raw,id=esp,if=none" \
+    -device virtio-blk-pci,drive=esp,bootindex=0 \
+    -serial "file:$SERIAL_LOG" \
+    -display none \
+    -no-reboot \
+    -vga std \
+    -qmp "unix:$QMP_SOCKET,server,nowait" \
+    2>"$QEMU_STDERR" &
+QEMU_PID=$!
+
+waited=0
+while [ "$waited" -le 15000 ]; do
+    [ -S "$QMP_SOCKET" ] && break
+    kill -0 "$QEMU_PID" 2>/dev/null || break
+    sleep 0.1
+    waited=$((waited + 100))
+done
+[ -S "$QMP_SOCKET" ] || { tail -5 "$QEMU_STDERR" 2>/dev/null; fail_blocker "qmp-socket-missing"; }
+kill -0 "$QEMU_PID" 2>/dev/null || { tail -5 "$QEMU_STDERR" 2>/dev/null; fail_blocker "qemu-exited-early"; }
+
+# --- 4. BOOT GATE: marker chain (firmware handoff + WM up + Hello open) -----
+if ! wait_serial_marker "$READY_MARKER" "$READY_TIMEOUT_MS"; then
+    echo "--- serial tail ---"
+    refresh_clean_serial
+    tail -20 "$SERIAL_CLEAN" 2>/dev/null
+    fail_blocker "wm-ready-marker-missing:$READY_MARKER"
+fi
+rung() { grep -qa "$1" "$SERIAL_CLEAN" 2>/dev/null && { echo "  [ok]   $2"; return 0; } || { echo "  [MISS] $2"; return 1; }; }
+echo "===== UEFI boot ladder ====="
+boot_ok=1
+rung "\[grub-uefi\] multiboot loading" "GRUB EFI app ran (OVMF -> bootloader OK)" || boot_ok=0
+rung "\[BOOT64\] call _start"           "multiboot handoff -> kernel _start (shared crt0.s)" || boot_ok=0
+rung "\[WM\] Hello app window open: win=3" "Hello app window registered in the scene" || boot_ok=0
+rung "\[WM\] Glass desktop rendered"    "WM composited the desktop" || boot_ok=0
+[ "$boot_ok" -eq 1 ] && boot_gate=PASS
+sleep 1  # paint settle
+
+# --- 5. OPEN GATE: screendump 1 -> Hello window pixel evidence --------------
+qmp "write_qmp(f, {\"execute\": \"screendump\", \"arguments\": {\"filename\": \"$ROOT_DIR/$PPM_OPEN\"}})" >/dev/null 2>&1
+[ -s "$PPM_OPEN" ] || fail_blocker "screendump-1-empty:$PPM_OPEN"
+open_out="$(HELLO_PPM="$ROOT_DIR/$PPM_OPEN" HELLO_MODE=open "$SIMPLE_BIN" run "$HELLO_VALIDATOR" --mode=interpreter 2>/dev/null)"
+echo "--- hello OPEN validation (screendump 1) ---"
+printf '%s\n' "$open_out"
+if printf '%s\n' "$open_out" | grep -q "simpleos_x86_64_wm_hello_ppm_status=pass"; then
+    open_gate=PASS
+fi
+
+# RUN evidence: 4x zoom crop PNG of the Hello body text region (vector path)
+python3 - "$ROOT_DIR/$PPM_OPEN" "$ROOT_DIR/$ZOOM_PNG" <<'PY'
+import sys, zlib, struct
+src, out = sys.argv[1], sys.argv[2]
+d = open(src, 'rb').read()
+parts = d.split(b'\n', 3)
+w, h = map(int, parts[1].split())
+pix = parts[3]
+x0, y0, cw, ch, z = 795, 185, 110, 34, 4
+rows = []
+for y in range(y0, y0 + ch):
+    row = pix[(y * w + x0) * 3:(y * w + x0 + cw) * 3]
+    for _ in range(z):
+        zr = bytearray()
+        for x in range(cw):
+            zr += row[x * 3:x * 3 + 3] * z
+        rows.append(b'\x00' + bytes(zr))
+raw = b''.join(rows)
+W, H = cw * z, ch * z
+def chunk(t, data):
+    c = t + data
+    return struct.pack('>I', len(data)) + c + struct.pack('>I', zlib.crc32(c))
+png = b'\x89PNG\r\n\x1a\n'
+png += chunk(b'IHDR', struct.pack('>IIBBBBB', W, H, 8, 2, 0, 0, 0))
+png += chunk(b'IDAT', zlib.compress(raw, 6))
+png += chunk(b'IEND', b'')
+open(out, 'wb').write(png)
+print("zoom crop: %s (%dx%d)" % (out, W, H))
+PY
+
+# --- 6. CLOSE: drive the pointer onto the Hello close button and click ------
+# Uses the same QMP input-send-event mechanism as the render-event gate.
+# The WM's own [wm-event] mouse_move markers echo the cursor position, so
+# the drive loop is adaptive: read position, send clamped rel delta, repeat.
+python3 - "$QMP_SOCKET" "$SERIAL_LOG" "$CLOSE_BTN_X" "$CLOSE_BTN_Y" <<'PY'
+import json, re, socket, sys, time
+
+sock_path, serial_path = sys.argv[1], sys.argv[2]
+tx, ty = int(sys.argv[3]), int(sys.argv[4])
+
+s = socket.socket(socket.AF_UNIX)
+s.settimeout(10)
+s.connect(sock_path)
+f = s.makefile("rwb", buffering=0)
+f.readline()
+
+def write_qmp(obj):
+    f.write(json.dumps(obj).encode() + b"\n")
+    f.flush()
+    return f.readline()
+
+write_qmp({"execute": "qmp_capabilities"})
+
+def cur_pos():
+    try:
+        raw = open(serial_path, "rb").read()
+    except OSError:
+        return None
+    text = bytes(b for b in raw if b in (9, 10, 13) or 32 <= b <= 126).decode()
+    ms = re.findall(r"type=mouse_move detail=x=(\d+),y=(\d+)", text)
+    if not ms:
+        return None
+    return int(ms[-1][0]), int(ms[-1][1])
+
+def clamp(v, lim=100):
+    return max(-lim, min(lim, v))
+
+start = cur_pos() or (512, 384)  # WM re-seeds the cursor to screen center
+pos = start
+ok = False
+for _ in range(40):
+    dx, dy = tx - pos[0], ty - pos[1]
+    if dx == 0 and dy == 0:
+        ok = True
+        break
+    write_qmp({"execute": "input-send-event", "arguments": {"events": [
+        {"type": "rel", "data": {"axis": "x", "value": clamp(dx)}},
+        {"type": "rel", "data": {"axis": "y", "value": clamp(dy)}}]}})
+    time.sleep(0.5)
+    pos = cur_pos() or pos
+print("cursor: start=%s final=%s target=(%d,%d) reached=%s" % (start, pos, tx, ty, ok))
+if not ok:
+    sys.exit(1)
+write_qmp({"execute": "input-send-event", "arguments": {"events": [
+    {"type": "btn", "data": {"down": True, "button": "left"}}]}})
+time.sleep(0.5)
+write_qmp({"execute": "input-send-event", "arguments": {"events": [
+    {"type": "btn", "data": {"down": False, "button": "left"}}]}})
+print("close click injected at (%d,%d)" % (tx, ty))
+PY
+[ $? -eq 0 ] || fail_blocker "cursor-drive-or-click-failed"
+
+# --- 7. CLOSE GATE: dispatch + completion markers, then screendump 2 --------
+close_ok=1
+wait_serial_marker "$CLOSE_DISPATCH_MARKER" "$CLOSE_TIMEOUT_MS" || close_ok=0
+wait_serial_marker "$CLOSE_DONE_MARKER" "$CLOSE_TIMEOUT_MS" || close_ok=0
+refresh_clean_serial
+echo "--- close event serial evidence ---"
+grep -E "\[WM\] (Mouse click|Closing window|window closed)|type=window|type=mouse_button" "$SERIAL_CLEAN" | tail -10
+if [ "$close_ok" -ne 1 ]; then
+    echo "close markers missing (dispatch: $CLOSE_DISPATCH_MARKER / done: $CLOSE_DONE_MARKER)"
+fi
+sleep 2  # close animation (6 frames) + recomposite settle
+
+qmp "write_qmp(f, {\"execute\": \"screendump\", \"arguments\": {\"filename\": \"$ROOT_DIR/$PPM_CLOSED\"}})" >/dev/null 2>&1
+[ -s "$PPM_CLOSED" ] || fail_blocker "screendump-2-empty:$PPM_CLOSED"
+closed_out="$(HELLO_PPM="$ROOT_DIR/$PPM_CLOSED" HELLO_MODE=closed HELLO_PPM_PREV="$ROOT_DIR/$PPM_OPEN" \
+    "$SIMPLE_BIN" run "$HELLO_VALIDATOR" --mode=interpreter 2>/dev/null)"
+echo "--- hello CLOSED validation (screendump 2 vs 1) ---"
+printf '%s\n' "$closed_out"
+printf '%s\n' "$closed_out" | grep -q "simpleos_x86_64_wm_hello_ppm_status=pass" || close_ok=0
+
+# The rest of the scene must still be intact after the recomposite
+scene_out="$(SIMPLEOS_X86_64_WM_PPM="$ROOT_DIR/$PPM_CLOSED" "$SIMPLE_BIN" run "$SCENE_VALIDATOR" --mode=interpreter 2>/dev/null)"
+echo "--- scene-intact validation (screendump 2) ---"
+printf '%s\n' "$scene_out"
+printf '%s\n' "$scene_out" | grep -q "simpleos_x86_64_wm_ppm_status=pass" || close_ok=0
+[ "$close_ok" -eq 1 ] && close_gate=PASS
+
+# --- Verdicts ----------------------------------------------------------------
+echo ""
+echo "=== simpleos x86_64 WM hello lifecycle evidence ==="
+echo "kernel: $KERNEL_OUTPUT"
+echo "serial log: $SERIAL_LOG (clean: $SERIAL_CLEAN)"
+echo "screendump 1 (open):   $PPM_OPEN"
+echo "screendump 2 (closed): $PPM_CLOSED"
+echo "body text zoom crop:   $ZOOM_PNG"
+echo "GATE boot (marker chain):        $boot_gate"
+echo "GATE hello-open (pixel proof):   $open_gate"
+echo "GATE hello-close (click->gone):  $close_gate"
+if [ "$boot_gate" = PASS ] && [ "$open_gate" = PASS ] && [ "$close_gate" = PASS ]; then
+    echo "RESULT: PASS"
+    exit 0
+fi
+echo "RESULT: FAIL"
+exit 1
