@@ -33,10 +33,17 @@ Bootstrap script's own seed-compiled stage-4 fallback lane (which then hit its
 own separate crash — see bootstrap_stage4_seed_compiled_full_cli_run_test_crash_2026-07-20).
 
 ## UPDATE 2026-07-20 (root-fix lane): reproduced on the real path with the real
-## binary; two leading hypotheses tested and REFUTED with direct evidence; the
-## surviving, evidence-backed lead is a per-file O(n²) lexer/parser cost, not a
-## classic retention leak. No validated in-tree fix landed — see "why no fix
-## shipped" below.
+## binary; three specific hypotheses tested and REFUTED with direct evidence
+## (array-clear-no-op, Dict-insert-O(n), env-mirror-active-in-prod). Two
+## mechanisms remain live and UNDISCRIMINATED: (a) per-file O(n²) lexer/parser
+## cost driving allocator high-water-mark churn, and (b) genuine cross-file
+## retention — the real-corpus run's own ~36MB/file *steady* climb across
+## wildly-varying file sizes (377–25717 chars) cuts toward (b), not (a) (a
+## pure-churn mechanism would step only when a new largest-so-far file
+## appears, not climb steadily regardless of size — see "leading hypothesis"
+## below for the full discussion). No validated in-tree fix landed — see "why
+## no fix shipped" below. **Next session: run the cheap discriminator
+## (heap_registry-instrumented rebuild) before investing in a lexer rewrite.**
 
 ### Binaries used (state explicitly per the landmine)
 - **Diagnosis binary:** `build/bootstrap/stage3/x86_64-unknown-linux-gnu/simple`
@@ -175,11 +182,23 @@ frozen binary's own compiled-in logic** (see the size-sweep below, which
 directly — no self-hosting indirection).
 
 ### Leading hypothesis (evidence-backed, NOT yet fixed): per-file O(n²)
-### lexer/parser cost, not a classic retention leak
-This is a genuinely different mechanism than "AST held live too long" and
-matches a pre-existing, independently-noted landmine
-(`feedback`/project memory: "Lexer O(n²) parse perf ... char_at re-fetches
-whole source + O(n) slice per peek").
+### lexer/parser cost — candidate mechanism, NOT confirmed to be the whole
+### story; a genuine retention component has NOT been ruled out
+This single-file measurement below is a genuinely different mechanism than
+"AST held live too long" and matches a pre-existing, independently-noted
+landmine (`feedback`/project memory: "Lexer O(n²) parse perf ... char_at
+re-fetches whole source + O(n) slice per peek"). But it answers a narrower
+question than the bug: each size-sweep point below is a **separate process**,
+so it can only show a single file's own peak-RSS-vs-size relationship — it is
+structurally blind to whether RSS given back between files in a *multi-file*
+run. The real-corpus measurement above (~36MB/file steady climb over 17 files
+ranging 377–25717 chars, not correlated with each file's own size) is the
+only multi-file evidence collected, and it leans toward accumulation, not
+pure high-water-mark churn: churn-from-transient-allocation would produce a
+step function (RSS jumps when a new largest-so-far file is parsed, flat
+otherwise), not an approximately-constant per-file add regardless of size.
+Treat "O(n²) lexer churn" and "cross-file retention" as two open candidates,
+not a settled conclusion — the discriminator neither rules in nor out below.
 
 **Decisive, cheap, real-binary measurement** (no rebuild needed — exercises
 the *existing* stage3 binary's own compiled lexer/parser directly on
@@ -213,23 +232,29 @@ growth on its own. This cleanly separates two different symptom classes:
   practice), a lexer making ~N such calls over an N-character file is O(N²).
   This matches the measured ms/char trend growing with file size in the
   real-corpus run above.
-- **Memory:** since a single file's *own* transient parse cost is
-  ~O(file_size) and is not, by itself, unbounded, the multi-file 64GB crash
-  is most consistent with **heap fragmentation / high-water-mark RSS from
-  the O(n²) allocation churn**, not live-object retention: each file's parse
-  makes a very large number of small-to-large transient allocations (from
-  the repeated slicing), and even if all of them are correctly freed back to
-  this runtime's allocator between files (consistent with finding #1 above —
-  the tracked arenas genuinely reset), most allocators do not return freed
-  pages to the OS, so **RSS reflects the high-water mark of allocator churn,
-  not current live data** — and across ~1777 files, each contributing its
-  own (size-dependent, sometimes large) transient peak, the OS-visible RSS
-  can climb file-by-file even with zero true retention. This would explain
-  why the *average* 160MB/file (measured over 403 files, this bug's original
-  number) is larger than the ~36MB/file marginal measured over the first 17
-  (smaller) files here — later files in the real `main.spl` closure include
-  much larger compiler source files than these first ~20, and per-file churn
-  scales with file size.
+- **Memory — candidate explanation, weaker evidence than the time finding
+  above, and in tension with the multi-file data:** a single file's *own*
+  transient parse cost is ~O(file_size) and not, by itself, unbounded, so one
+  *possible* explanation for the multi-file 64GB crash is **heap
+  fragmentation / high-water-mark RSS from O(n²) allocation churn** rather
+  than live-object retention — each file's parse makes many transient
+  allocations (from the repeated slicing), and even if all are correctly
+  freed back to the allocator between files (consistent with finding #1
+  above — the tracked arenas genuinely reset), most allocators do not return
+  freed pages to the OS, so RSS could reflect a churn high-water-mark rather
+  than current live data. **However**, this predicts a *step function* across
+  files (RSS rises only when a new largest-so-far file is parsed, flat
+  otherwise) — and that is NOT what the real-corpus run shows: RSS climbed
+  by a roughly constant ~36MB over each of the first 17 files despite those
+  files ranging 377 to 25,717 chars (a 68x size spread with no corresponding
+  step pattern in the sampled deltas). A roughly-constant per-file add
+  regardless of size is the classic signature of **accumulation
+  (retention)**, not size-dependent transient churn. The synthetic
+  size-sweep cannot adjudicate between these because each point is a
+  separate process (see header note above) — it only rules out "a single
+  file's own parse is unbounded," it says nothing about what carries over
+  between files. Both mechanisms remain open; do not treat "O(n²) churn" as
+  confirmed over retention.
 
 **This was not confirmed with an object-count signal** (e.g. `rt_heap_registry_count()`, already threaded into every
 `log_phase()` call via `driver_log_helpers.spl`) that would prove "flat
@@ -312,7 +337,24 @@ In `src/compiler/80.driver/driver.spl`, `parse_all_impl()`:
 
 </details>
 
-### Diagnostic instrumentation landed (safe, level-gated, kept)
+### Diagnostic instrumentation landed (safe, level-gated, kept) — compile
+### status: NOT independently re-verified after the eviction-fix revert
+The (now-committed) probe-only diff is a strict subset of an earlier combined
+diff (probe + the reverted per-file eviction change from item 2 above) that
+did compile cleanly end-to-end via the stage3 binary. But no separate
+compile run was done on the final, probe-only `driver.spl` by itself after
+the eviction code was removed — a standalone syntax re-check attempted late
+in this session (`native-build --source src/compiler/80.driver --entry
+driver.spl --entry-closure`) hung/timed out (import closure pulls in most of
+the compiler; scoping `--source` to only `80.driver` doesn't contain it, and
+a full closure build is the same expensive operation this bug is about — see
+"Methodology pitfall"). Landing lane / next session: treat this as unverified
+until either a full stage3→stage4 rebuild succeeds with it in the tree, or a
+narrower standalone syntax check is found. Risk is judged low (the added code
+is a plain `fn`, an `extern`, and `print` calls, matching already-compiling
+patterns elsewhere in this file and `driver_source_loading.spl`), but "low
+risk" is not "verified."
+
 `driver.spl` gained an env-gated (`SIMPLE_PARSE_RSS_PROBE=1`, default off)
 per-file RSS probe in both `parse_all_impl` branches, printing to **stdout**
 (`print`, not `eprint`/`log_phase`) since worker stderr is unreliable on some
@@ -320,11 +362,16 @@ native-build shapes. Shells out to `grep VmRSS /proc/self/status` rather than
 using `rt_heap_registry_count()`/timing internals, because `text.to_i64()` was
 found to be **broken on this native/cranelift path** — `"12345".trim().to_i64()`
 returned `675995905`, not `12345`, when compiled and run via the stage3
-binary (isolated repro: `rt_run_test/t.spl`). This looks like a real codegen
-defect (a separate, tangential bug — not filed as its own doc yet; flagging
-here since it was found in the course of this investigation and blocks
-`to_i64()`-based instrumentation on this code path). The probe therefore
-returns/prints the raw grep text rather than a parsed `i64`.
+binary (isolated repro: `rt_run_test/t.spl`). This is a real codegen defect,
+now filed on its own:
+[native_to_i64_nil_coalesce_print_tagbox_leak_2026-07-20](native_to_i64_nil_coalesce_print_tagbox_leak_2026-07-20.md)
+(confirmed reproducible with a bare 2-line `main()`, no `rt_process_run`
+involved — `n=<value:0x3039>` for the un-trimmed literal, i.e. the correct
+integer 12345 is inside a tagged box that print-interpolation fails to
+unwrap; a second, non-constant wrong value for the `.trim()`-routed variant).
+Same family as `hosted_native_option_try_unwrap_payload_leak_2026-07-19.md`.
+The probe therefore returns/prints the raw grep text rather than a parsed
+`i64`, sidestepping this defect rather than depending on it.
 
 ### Secondary finding (not this bug, filed for record)
 `SIMPLE_NATIVE_ARENA_DECLS` is only set to `1` by the two call sites in
