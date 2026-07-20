@@ -1,18 +1,53 @@
+> **RESOLVED 2026-07-20 — container f64 is now heap-boxed (lossless) on BOTH
+> compiler paths for the array/dict/scalar/for-in/print cases:**
+> - interp / cranelift-JIT (`run`, `test`): `aa7ae5506c6` (Rust `simple_runtime`
+>   crate) — also lossless for struct fields and Option payloads there.
+> - native-build (self-hosted pure-Simple compiler + `runtime_native.c`): the
+>   heap-box port — `rt_value_float` heap-boxes into an `RtCoreFloat`, O(1)
+>   HashSet discrimination, `rt_value_as_float` dual-aware read, float dict keys
+>   canonicalized to the inline form; the pure-Simple codegen
+>   (`expr_dispatch.spl`) routes float box/unbox through those runtime calls.
+>
+> Verified on native-build: `[0.1][0]==0.1`, dict value/key, scalar, for-in,
+> `print([0.1][0])`→`0.1`; int/string arrays, `0.0`/`-0.0` unaffected.
+> Regression guards:
+> `test/01_unit/compiler/codegen/array_f64_element_precision_spec.spl` (interp)
+> and `test/03_system/native/array_f64_element_precision.spl` (native-build,
+> array element + dict value).
+>
+> **Two native-build cases stay open — blocked by SEPARATE pre-existing defects,
+> NOT by float precision** (each verified to fail identically on a clean
+> origin-tip worktree without the port):
+> - struct with an f64 field: `native-build --entry` BUILDFAILs on any local
+>   struct construction (`method has not found on nil`); reproduces with an i64
+>   field too, so not float-related —
+>   [native_build_entry_struct_construction_buildfail_2026-07-20](native_build_entry_struct_construction_buildfail_2026-07-20.md).
+> - `f64?` Option payload via `.?`: the native `.?`/if-val unwrap leaks the Some
+>   tag, not the payload (wrong for `i64? = 7` too) —
+>   [hosted_native_option_try_unwrap_payload_leak_2026-07-19](hosted_native_option_try_unwrap_payload_leak_2026-07-19.md).
+>
+> The historical root analysis below is retained for reference.
+
+---
+
 > **UPDATE 2026-07-19 — interp/JIT path FIXED (heap-box).** The seed
 > interpreter / cranelift-JIT path (`run`, `test`) now heap-boxes container
 > floats (`Value::from_float` → `HeapFloat`), so `[0.1][0] == 0.1` there. See
-> `fix(runtime): heap-box f64 in tagged RuntimeValue slots`. **native-build
-> remains open** — it self-hosts the pure-Simple compiler (`src/compiler/*.spl`)
-> + links `runtime_native.c`, neither of which the heap-box fix touches; that
-> parallel port is the remaining work described below. Regression guard for the
-> fixed path: `test/01_unit/compiler/codegen/array_f64_element_precision_spec.spl`.
+> `fix(runtime): heap-box f64 in tagged RuntimeValue slots`. **native-build is
+> now also fixed** (2026-07-20 heap-box port — array/dict/scalar/for-in/print;
+> see the RESOLVED banner at the top). It self-hosts the pure-Simple compiler
+> (`src/compiler/*.spl`) + links `runtime_native.c`; the port heap-boxes in
+> `runtime_native.c` and routes float box/unbox in `expr_dispatch.spl` through
+> `rt_value_float`/`rt_value_as_float`. Regression guards:
+> `test/01_unit/compiler/codegen/array_f64_element_precision_spec.spl` (interp)
+> and `test/03_system/native/array_f64_element_precision.spl` (native-build).
 
 ---
 
 # f64 loses low 3 mantissa bits through a RuntimeValue tagged slot (arrays/dicts) — inline tagged-float box
 
 - **id:** seed_f64_array_element_precision_mask_2026-07-19
-- **status:** open
+- **status:** resolved 2026-07-20 (both paths, array/dict/scalar/for-in/print; struct-field & Option-payload native cases blocked by separate pre-existing bugs — see top banner)
 - **severity:** high (silent miscompile — any `[f64]` element read back wrong)
 - **class:** tag-box `<<3`/`>>3` — the **store-side, representation-level** cousin
   of the enum-payload f64 mask fixed in `fc7cdcb0b90`. NOT the same shape of fix.

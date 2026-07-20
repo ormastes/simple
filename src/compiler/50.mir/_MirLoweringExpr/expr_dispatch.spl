@@ -349,18 +349,31 @@ impl MirLowering:
                 val scaled = b.emit_binop(MirBinOp.Mul, mir_operand_copy(widened), mir_operand_copy(minus_eight), MirType.i64())
                 b.emit_binop(MirBinOp.Add, mir_operand_copy(scaled), mir_operand_copy(nineteen), MirType.i64())
             case MirTypeKind.F32:
+                # Widen to f64, then heap-box losslessly (see the F64 arm).
                 val promoted = b.emit_cast(mir_operand_copy(local), MirType.f64())
                 val bits = b.emit_bitcast(mir_operand_copy(promoted), MirType.i64())
-                val mask = b.emit_const_int(-8)
-                val tag = b.emit_const_int(2)
-                val payload = b.emit_binop(MirBinOp.BitAnd, mir_operand_copy(bits), mir_operand_copy(mask), MirType.i64())
-                b.emit_binop(MirBinOp.BitOr, mir_operand_copy(payload), mir_operand_copy(tag), MirType.i64())
+                val box_fn = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_value_float"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                ))
+                val boxed_opt = b.emit_call(box_fn, [mir_operand_copy(bits)], MirType.i64())
+                boxed_opt ?? bits
             case MirTypeKind.F64:
+                # Heap-box the f64 losslessly: rt_value_float allocates an
+                # RtCoreFloat holding the full double and returns a TAG_HEAP ptr.
+                # The old inline `(bits & ~7) | TAG_FLOAT` dropped the low 3
+                # mantissa bits, so a container/Any float lost precision
+                # ([0.1][0] != 0.1). Passing the raw i64 bits matches the C
+                # `rt_value_float(int64_t raw_bits)` ABI; the mirror unbox is
+                # decode_runtime_value's F64 arm (rt_value_as_float). A heap alloc
+                # cannot be const-folded, so this now materializes at runtime.
                 val bits = b.emit_bitcast(mir_operand_copy(local), MirType.i64())
-                val mask = b.emit_const_int(-8)
-                val tag = b.emit_const_int(2)
-                val payload = b.emit_binop(MirBinOp.BitAnd, mir_operand_copy(bits), mir_operand_copy(mask), MirType.i64())
-                b.emit_binop(MirBinOp.BitOr, mir_operand_copy(payload), mir_operand_copy(tag), MirType.i64())
+                val box_fn = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_value_float"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                ))
+                val boxed_opt = b.emit_call(box_fn, [mir_operand_copy(bits)], MirType.i64())
+                boxed_opt ?? bits
             case _:
                 local
         self.builder = b
@@ -384,12 +397,35 @@ impl MirLowering:
             self.builder = b
             return decoded
         if disc == rt_enum_discriminant(MirTypeKind.F64):
+            # Unbox via rt_value_as_float (dual-aware: heap-boxed lossless form,
+            # or legacy inline TAG_FLOAT). Mirrors box_runtime_value's F64 heap
+            # box. The old inline `raw & ~7` reinterpret dropped the low 3
+            # mantissa bits at read time (a[0] != 0.1). Fallback below keeps the
+            # legacy inline decode should the call fail to materialize.
+            val unbox_fn = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_value_as_float"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.f64(), is_variadic: false)))
+            ))
+            val call_res = b.emit_call(unbox_fn, [mir_operand_copy(raw)], result_type)
+            if val decoded_call = call_res:
+                self.builder = b
+                return decoded_call
             val mask = b.emit_const_int(-8)
             val bits = b.emit_binop(MirBinOp.BitAnd, mir_operand_copy(raw), mir_operand_copy(mask), MirType.i64())
             val decoded = b.emit_bitcast(mir_operand_copy(bits), result_type)
             self.builder = b
             return decoded
         if disc == rt_enum_discriminant(MirTypeKind.F32):
+            # Unbox to f64 via rt_value_as_float, then narrow to f32.
+            val unbox_fn = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_value_as_float"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.f64(), is_variadic: false)))
+            ))
+            val call_res = b.emit_call(unbox_fn, [mir_operand_copy(raw)], MirType.f64())
+            if val f64_local = call_res:
+                val decoded = b.emit_cast(mir_operand_copy(f64_local), result_type)
+                self.builder = b
+                return decoded
             val mask = b.emit_const_int(-8)
             val bits = b.emit_binop(MirBinOp.BitAnd, mir_operand_copy(raw), mir_operand_copy(mask), MirType.i64())
             val float64 = b.emit_bitcast(mir_operand_copy(bits), MirType.f64())

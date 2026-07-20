@@ -103,6 +103,13 @@ bool rt_dir_create(const char* path, bool recursive) {
 #define RT_VALUE_HEAP_ENUM 0x04U
 #define RT_VALUE_HEAP_DICT 0x06U
 #define RT_VALUE_HEAP_MUTEX 0x09U
+/* Heap-boxed f64 (lossless container float). The inline TAG_FLOAT form stored
+ * only (bits & ~7) | TAG_FLOAT, silently zeroing the low 3 mantissa bits, so a
+ * container/Any float lost precision ([0.1][0] != 0.1). Container floats are now
+ * boxed as an RtCoreFloat holding the full double. Distinct magic "FLT1" (like
+ * RT_VALUE_HEAP_STRING's "STR1") so a validated pointer's kind read is
+ * unambiguous. */
+#define RT_VALUE_HEAP_FLOAT 0x464C5431U
 #define RT_CORE_ARRAY_FLAG_BYTES 0x08U
 #define RT_CORE_ARRAY_FLAG_U64_PACKED 0x10U
 #define RT_CORE_ARRAY_MAX_CAP 100000000LL
@@ -623,6 +630,17 @@ typedef struct RtCoreDict {
     RtCoreDictEntry* entries;
 } RtCoreDict;
 
+/* Heap-boxed f64 (see RT_VALUE_HEAP_FLOAT). A leaf object: the full double is
+ * stored verbatim so container/Any floats round-trip exactly. Discrimination is
+ * O(1): the pointer is validated against rt_core_float_registry (a HashSet
+ * membership test performed BEFORE any ->value/->kind dereference), so a stray
+ * i64 that merely aliases TAG_HEAP is never dereferenced. */
+typedef struct RtCoreFloat {
+    uint32_t kind;      /* RT_VALUE_HEAP_FLOAT */
+    uint32_t reserved;
+    double value;
+} RtCoreFloat;
+
 static RtCoreDict* rt_core_as_dict(int64_t value);
 static int64_t rt_core_dict_lookup(RtCoreDict* d, int64_t key);
 static int rt_core_dict_put(RtCoreDict* d, int64_t key, int64_t value);
@@ -825,6 +843,121 @@ static RtCoreClosure* rt_core_as_closure(int64_t value) {
     return NULL;
 }
 
+/* ----------------------------------------------------------------------------
+ * Heap-boxed float registry (O(1) discrimination).
+ *
+ * The existing string/enum/closure/mutex registries above are LINEAR SCANS,
+ * fine because those objects are relatively few. Container floats are numerous,
+ * so a linear registry would make float discrimination O(n) per check and the
+ * whole program O(n^2). This is instead an open-addressing HashSet of registered
+ * RtCoreFloat pointers: register-on-alloc, O(1) amortized membership. Membership
+ * is a pure pointer comparison performed BEFORE any dereference, so a flat i64
+ * that merely aliases RT_VALUE_TAG_HEAP (see the tag-collision SEGV note above
+ * rt_core_register_enum) is never dereferenced -- it simply isn't a member.
+ *
+ * Leak model: entries are never removed. Heap-floats live for the process
+ * lifetime (no-GC: arrays/dicts free their backing buffer but not the tagged
+ * element values), exactly like the transient short strings above, so their
+ * addresses are never reused and stale-membership false positives cannot occur.
+ * -------------------------------------------------------------------------- */
+static uintptr_t* rt_core_float_registry = NULL; /* open-addressing table, 0 = empty */
+static size_t rt_core_float_registry_cap = 0;    /* power of two, or 0 */
+static size_t rt_core_float_registry_len = 0;
+static atomic_flag rt_core_float_registry_lock = ATOMIC_FLAG_INIT;
+
+static void rt_core_float_registry_acquire(void) {
+    while (atomic_flag_test_and_set_explicit(&rt_core_float_registry_lock, memory_order_acquire)) {}
+}
+static void rt_core_float_registry_release(void) {
+    atomic_flag_clear_explicit(&rt_core_float_registry_lock, memory_order_release);
+}
+
+static inline size_t rt_core_float_hash_ptr(uintptr_t p) {
+    uint64_t x = (uint64_t)p;
+    x ^= x >> 33;
+    x *= 0xff51afd7ed558ccdULL;
+    x ^= x >> 33;
+    return (size_t)x;
+}
+
+/* caller holds the lock; table has a free slot */
+static void rt_core_float_registry_insert_raw(uintptr_t p) {
+    size_t mask = rt_core_float_registry_cap - 1;
+    size_t i = rt_core_float_hash_ptr(p) & mask;
+    for (;;) {
+        if (rt_core_float_registry[i] == 0) {
+            rt_core_float_registry[i] = p;
+            rt_core_float_registry_len++;
+            return;
+        }
+        if (rt_core_float_registry[i] == p) return; /* already present */
+        i = (i + 1) & mask;
+    }
+}
+
+/* caller holds the lock */
+static int rt_core_float_registry_grow(void) {
+    size_t new_cap = rt_core_float_registry_cap == 0 ? 256 : rt_core_float_registry_cap * 2;
+    if (new_cap > SIZE_MAX / sizeof(uintptr_t)) return 0;
+    uintptr_t* fresh = (uintptr_t*)calloc(new_cap, sizeof(uintptr_t));
+    if (!fresh) return 0;
+    uintptr_t* old = rt_core_float_registry;
+    size_t old_cap = rt_core_float_registry_cap;
+    rt_core_float_registry = fresh;
+    rt_core_float_registry_cap = new_cap;
+    rt_core_float_registry_len = 0;
+    for (size_t i = 0; i < old_cap; i++) {
+        if (old[i] != 0) rt_core_float_registry_insert_raw(old[i]);
+    }
+    free(old);
+    return 1;
+}
+
+static void rt_core_register_float(RtCoreFloat* f) {
+    if (!f) return;
+    rt_core_float_registry_acquire();
+    /* grow at 70% load */
+    if ((rt_core_float_registry_len + 1) * 10 >= rt_core_float_registry_cap * 7) {
+        if (!rt_core_float_registry_grow()) {
+            rt_core_float_registry_release();
+            return;
+        }
+    }
+    rt_core_float_registry_insert_raw((uintptr_t)f);
+    atomic_fetch_add_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
+    rt_core_float_registry_release();
+}
+
+static int rt_core_is_registered_float(RtCoreFloat* f) {
+    if (!f) return 0;
+    int found = 0;
+    rt_core_float_registry_acquire();
+    if (rt_core_float_registry_cap != 0) {
+        size_t mask = rt_core_float_registry_cap - 1;
+        size_t i = rt_core_float_hash_ptr((uintptr_t)f) & mask;
+        for (;;) {
+            uintptr_t e = rt_core_float_registry[i];
+            if (e == 0) break;
+            if (e == (uintptr_t)f) { found = 1; break; }
+            i = (i + 1) & mask;
+        }
+    }
+    rt_core_float_registry_release();
+    return found;
+}
+
+/* Return the boxed RtCoreFloat if `value` is a registered heap-float, else NULL.
+ * The registry membership test is done BEFORE reading ->kind, guarding the
+ * tag-collision SEGV class. */
+static inline RtCoreFloat* rt_core_as_heap_float(int64_t value) {
+    if ((((uint64_t)value) & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_HEAP) return NULL;
+    RtCoreFloat* f = (RtCoreFloat*)(uintptr_t)(((uint64_t)value) & ~RT_VALUE_TAG_MASK);
+    if (!f) return NULL;
+    if (!rt_core_is_registered_float(f)) return NULL;
+    if (f->kind != RT_VALUE_HEAP_FLOAT) return NULL;
+    return f;
+}
+
 static inline int64_t rt_core_from_special(uint64_t payload) {
     return (int64_t)((payload << 3) | RT_VALUE_TAG_SPECIAL);
 }
@@ -842,7 +975,9 @@ static inline int rt_core_is_heap(int64_t value) {
 }
 
 static inline int rt_core_is_float(int64_t value) {
-    return (((uint64_t)value) & RT_VALUE_TAG_MASK) == RT_VALUE_TAG_FLOAT;
+    /* Heap-boxed (new, lossless) or legacy inline TAG_FLOAT. */
+    if ((((uint64_t)value) & RT_VALUE_TAG_MASK) == RT_VALUE_TAG_FLOAT) return 1;
+    return rt_core_as_heap_float(value) != NULL;
 }
 
 static inline int rt_core_is_special(int64_t value) {
@@ -854,6 +989,10 @@ static inline int64_t rt_core_as_int(int64_t value) {
 }
 
 static inline double rt_core_as_float(int64_t value) {
+    /* Heap-boxed float: return the full stored double (lossless). */
+    RtCoreFloat* f = rt_core_as_heap_float(value);
+    if (f) return f->value;
+    /* Legacy inline TAG_FLOAT (low 3 mantissa bits already lost at box time). */
     uint64_t bits = ((uint64_t)value) & ~RT_VALUE_TAG_MASK;
     double result;
     memcpy(&result, &bits, sizeof(result));
@@ -1091,8 +1230,35 @@ int64_t rt_value_as_int(int64_t value) {
     return value >> 3;
 }
 
+/* Box an f64 (passed as its raw i64 bit pattern) into the tagged RuntimeValue
+ * representation. Floats are HEAP-BOXED (lossless): the old inline TAG_FLOAT
+ * form kept only (bits & ~7), zeroing the low 3 mantissa bits, so a container/Any
+ * float lost precision. We allocate an RtCoreFloat leaf holding the full double
+ * and return a TAG_HEAP pointer. Scalar/arithmetic f64 held in native registers
+ * never reaches here -- only values that enter the tagged representation box. */
 int64_t rt_value_float(int64_t raw_bits) {
-    return (int64_t)(((uint64_t)raw_bits & ~RT_VALUE_TAG_MASK) | RT_VALUE_TAG_FLOAT);
+    RtCoreFloat* f = (RtCoreFloat*)malloc(sizeof(RtCoreFloat));
+    if (!f) {
+        /* OOM: fall back to the legacy lossy inline form rather than crash. */
+        return (int64_t)(((uint64_t)raw_bits & ~RT_VALUE_TAG_MASK) | RT_VALUE_TAG_FLOAT);
+    }
+    f->kind = RT_VALUE_HEAP_FLOAT;
+    f->reserved = 0;
+    memcpy(&f->value, &raw_bits, sizeof(f->value));
+    rt_core_register_float(f);
+    return (int64_t)(((uint64_t)(uintptr_t)f) | RT_VALUE_TAG_HEAP);
+}
+
+/* Unbox a tagged RuntimeValue to its f64. Dual-aware: reads the heap-boxed form
+ * (lossless) and the legacy inline TAG_FLOAT form. This is the runtime target of
+ * the codegen float-unbox at the container boundary (decode_runtime_value). */
+double rt_value_as_float(int64_t value) {
+    return rt_core_as_float(value);
+}
+
+/* Detect a float (heap-boxed or legacy inline TAG_FLOAT). */
+int8_t rt_value_is_float(int64_t value) {
+    return rt_core_is_float(value) ? 1 : 0;
 }
 
 int64_t rt_value_bool(int64_t value) {
@@ -3569,6 +3735,20 @@ static RtCoreDict* rt_core_as_dict(int64_t value) {
  * content via rt_native_eq. */
 static int64_t rt_core_dict_canon_key(int64_t k) {
     if (rt_core_as_string(k)) return k;
+    /* A heap-boxed float key is a fresh pointer per value, so two keys of the
+     * same double would land in different buckets. Canonicalize to the inline
+     * tagged form (value-based, -0.0 normalized to 0.0) so equal-valued float
+     * keys collapse to one key -- the same identity float dict keys had before
+     * heap-boxing (keys keep the pre-existing low-3-bit fold; dict VALUES are
+     * lossless via the heap box). */
+    RtCoreFloat* f = rt_core_as_heap_float(k);
+    if (f) {
+        double d = f->value;
+        if (d == 0.0) d = 0.0; /* fold -0.0 -> +0.0 so both zeros hash alike */
+        uint64_t bits;
+        memcpy(&bits, &d, sizeof(bits));
+        return (int64_t)((bits & ~RT_VALUE_TAG_MASK) | RT_VALUE_TAG_FLOAT);
+    }
     if (rt_core_is_heap(k)) return k;
     return rt_value_int(rt_core_numeric_arg(k));
 }

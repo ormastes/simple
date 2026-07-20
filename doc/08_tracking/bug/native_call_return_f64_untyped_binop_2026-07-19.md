@@ -1,7 +1,19 @@
+> **RESOLVED 2026-07-20 — fixed on origin by `c8f5af510b8` "fix(seed): preserve
+> direct-call return types".** `build_vreg_types`
+> (`src/compiler_rust/compiler/src/codegen/instr/body.rs`) now takes a
+> `function_return_types` map and stamps a `Call`'s dest VReg with the callee's
+> declared return type (body.rs:226), so an F64-returning user call is coerced
+> via `reinterpret_f64` (bitcast) instead of `fcvt_from_sint`. `if fn() == 0.1`
+> now returns the correct value in all execution modes; white-box test
+> `build_vreg_types_uses_direct_callee_return_type` (body.rs:1223) guards it.
+> This doc was filed before that commit landed; kept as a record.
+
+---
+
 # User-fn f64 return is untyped in JIT binop coercion → garbage compare
 
 - **id:** native_call_return_f64_untyped_binop_2026-07-19
-- **status:** fixed (seed JIT/local Cranelift calls)
+- **status:** resolved 2026-07-20 (fixed on origin by `c8f5af510b8` — see top banner)
 - **severity:** medium (silent wrong result for `f(...) <cmp> <f64>` when `f` is a user fn returning f64)
 - **backend:** seed cranelift-JIT / `run` path (build_vreg_types). Orthogonal to the f64 heap-box precision fix.
 
