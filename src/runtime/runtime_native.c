@@ -240,6 +240,157 @@ int64_t rt_intel_engine2d_upload_pixels(int64_t dst, int64_t pixels, int64_t cou
     (void)dst; (void)pixels; (void)count;
     return -3;
 }
+int64_t rt_intel_engine2d_upload_host_buf(int64_t dst, int64_t host_buf, int64_t byte_size) {
+    (void)dst; (void)host_buf; (void)byte_size;
+    return -3;
+}
+int64_t rt_intel_engine2d_download_pixels(int64_t src, int64_t pixels, int64_t byte_size) {
+    (void)src; (void)pixels; (void)byte_size;
+    return -3;
+}
+bool rt_intel_engine2d_set_args_clear(int64_t fb, int64_t color, int64_t width, int64_t height) {
+    (void)fb; (void)color; (void)width; (void)height;
+    return false;
+}
+bool rt_intel_engine2d_set_args_rect(int64_t fb, int64_t x, int64_t y, int64_t w, int64_t h,
+                                     int64_t color, int64_t fb_w, int64_t fb_h, int64_t filled) {
+    (void)fb; (void)x; (void)y; (void)w; (void)h;
+    (void)color; (void)fb_w; (void)fb_h; (void)filled;
+    return false;
+}
+bool rt_intel_engine2d_set_args_line(int64_t fb, int64_t x1, int64_t y1, int64_t x2, int64_t y2,
+                                     int64_t color, int64_t thickness, int64_t fb_w, int64_t fb_h) {
+    (void)fb; (void)x1; (void)y1; (void)x2; (void)y2;
+    (void)color; (void)thickness; (void)fb_w; (void)fb_h;
+    return false;
+}
+bool rt_intel_engine2d_set_args_circle(int64_t fb, int64_t cx, int64_t cy, int64_t r,
+                                       int64_t color, int64_t fb_w, int64_t fb_h, int64_t filled) {
+    (void)fb; (void)cx; (void)cy; (void)r;
+    (void)color; (void)fb_w; (void)fb_h; (void)filled;
+    return false;
+}
+bool rt_intel_engine2d_set_args_rounded_rect(int64_t fb, int64_t x, int64_t y, int64_t w, int64_t h,
+                                             int64_t radius, int64_t color, int64_t fb_w, int64_t fb_h) {
+    (void)fb; (void)x; (void)y; (void)w; (void)h;
+    (void)radius; (void)color; (void)fb_w; (void)fb_h;
+    return false;
+}
+bool rt_intel_engine2d_set_args_triangle(int64_t fb, int64_t x1, int64_t y1, int64_t x2, int64_t y2,
+                                         int64_t x3, int64_t y3, int64_t color, int64_t fb_w,
+                                         int64_t fb_h, int64_t min_x, int64_t min_y) {
+    (void)fb; (void)x1; (void)y1; (void)x2; (void)y2;
+    (void)x3; (void)y3; (void)color; (void)fb_w;
+    (void)fb_h; (void)min_x; (void)min_y;
+    return false;
+}
+bool rt_intel_engine2d_set_args_gradient(int64_t fb, int64_t x, int64_t y, int64_t w, int64_t h,
+                                         int64_t top_color, int64_t bottom_color, int64_t fb_w,
+                                         int64_t fb_h) {
+    (void)fb; (void)x; (void)y; (void)w; (void)h;
+    (void)top_color; (void)bottom_color; (void)fb_w; (void)fb_h;
+    return false;
+}
+
+/* oneAPI backfill (extern decls added .spl-side; unavailable in core C runtime). */
+bool rt_oneapi_queue_wait(int64_t queue) { (void)queue; return false; }
+bool rt_oneapi_unload_module(int64_t module) { (void)module; return false; }
+
+/* OpenGL backfill (unavailable in core C runtime; fail closed like the block above). */
+bool rt_opengl_clear_scissor(int64_t ctx) { (void)ctx; return false; }
+bool rt_opengl_set_scissor(int64_t ctx, int64_t x, int64_t y, int64_t w, int64_t h) {
+    (void)ctx; (void)x; (void)y; (void)w; (void)h;
+    return false;
+}
+bool rt_opengl_draw_rect(int64_t ctx, int64_t x, int64_t y, int64_t w, int64_t h,
+                         int64_t color, int64_t filled) {
+    (void)ctx; (void)x; (void)y; (void)w; (void)h; (void)color; (void)filled;
+    return false;
+}
+bool rt_opengl_draw_rounded_rect(int64_t ctx, int64_t x, int64_t y, int64_t w, int64_t h,
+                                 int64_t radius, int64_t color) {
+    (void)ctx; (void)x; (void)y; (void)w; (void)h; (void)radius; (void)color;
+    return false;
+}
+bool rt_opengl_draw_gradient_rect(int64_t ctx, int64_t x, int64_t y, int64_t w, int64_t h,
+                                  int64_t top_color, int64_t bottom_color) {
+    (void)ctx; (void)x; (void)y; (void)w; (void)h; (void)top_color; (void)bottom_color;
+    return false;
+}
+bool rt_opengl_draw_line(int64_t ctx, int64_t x1, int64_t y1, int64_t x2, int64_t y2,
+                         int64_t color, int64_t thickness) {
+    (void)ctx; (void)x1; (void)y1; (void)x2; (void)y2; (void)color; (void)thickness;
+    return false;
+}
+bool rt_opengl_draw_circle(int64_t ctx, int64_t cx, int64_t cy, int64_t radius,
+                           int64_t color, int64_t filled) {
+    (void)ctx; (void)cx; (void)cy; (void)radius; (void)color; (void)filled;
+    return false;
+}
+bool rt_opengl_draw_triangle(int64_t ctx, int64_t x1, int64_t y1, int64_t x2, int64_t y2,
+                             int64_t x3, int64_t y3, int64_t color) {
+    (void)ctx; (void)x1; (void)y1; (void)x2; (void)y2; (void)x3; (void)y3; (void)color;
+    return false;
+}
+bool rt_opengl_flush(int64_t ctx) { (void)ctx; return false; }
+bool rt_opengl_read_pixels(int64_t ctx, int64_t pixels, int64_t width, int64_t height) {
+    (void)ctx; (void)pixels; (void)width; (void)height;
+    return false;
+}
+
+/* WebGPU backfill (hosted wgpu backend lives in the Rust runtime only). */
+bool rt_webgpu_is_available(void) { return false; }
+bool rt_webgpu_init(void) { return false; }
+int64_t rt_webgpu_create_surface(int32_t width, int32_t height) {
+    (void)width; (void)height;
+    return 0;
+}
+
+/* Real POSIX fd helpers (mirror interpreter_extern/qmp_socket.rs semantics). */
+int64_t rt_fd_write(int64_t fd, const char* data, int64_t len) {
+#if defined(_WIN32)
+    (void)fd; (void)data; (void)len;
+    return -1;
+#else
+    if (fd < 0 || !data || len < 0) return -1;
+    ssize_t written = 0;
+    while (written < (ssize_t)len) {
+        ssize_t n = write((int)fd, data + written, (size_t)(len - written));
+        if (n <= 0) return written > 0 ? (int64_t)written : -1;
+        written += n;
+    }
+    return (int64_t)written;
+#endif
+}
+const char* rt_fd_read_until(int64_t fd, uint8_t stop_byte, int64_t max) {
+#if defined(_WIN32)
+    (void)fd; (void)stop_byte; (void)max;
+    return "";
+#else
+    if (fd < 0 || max <= 0) return "";
+    char* buf = (char*)malloc((size_t)max + 1);
+    if (!buf) return "";
+    int64_t count = 0;
+    while (count < max) {
+        char ch = 0;
+        ssize_t n = read((int)fd, &ch, 1);
+        if (n <= 0) break;
+        buf[count++] = ch;
+        if ((unsigned char)ch == stop_byte) break;
+    }
+    buf[count] = '\0';
+    return buf;
+#endif
+}
+bool rt_fd_close(int64_t fd) {
+#if defined(_WIN32)
+    (void)fd;
+    return false;
+#else
+    if (fd < 0) return false;
+    return close((int)fd) == 0;
+#endif
+}
 
 /* Hosted SDL2 compositor surface. The title is unused while unavailable. */
 SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_sdl2_init(void) { return 0; }
