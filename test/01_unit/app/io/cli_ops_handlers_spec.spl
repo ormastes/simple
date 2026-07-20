@@ -4,6 +4,7 @@ use app.io.cli_ops.{
     fault_set_timeout, fault_set_execution_limit,
     get_args, cli_get_args
 }
+use std.io_runtime.{file_read}
 
 describe "Cli Ops Ext":
     it "reports missing context generation output for absent files":
@@ -37,3 +38,24 @@ describe "Cli Ops Ext":
 
         expect(args.len()).to_be_greater_than(-1)
         expect(cli_args.len()).to_be_greater_than(-1)
+
+    it "does not re-export the compiler-heavy CLI dispatch surface (regression guard)":
+        # cli_ops.spl is documented as "Pure Simple I/O" and is imported by
+        # light, broadly-used consumers like `app.io.mod` for basic helpers
+        # (shell, settlement_main, context_generate, ...). It previously ALSO
+        # re-exported `_CliCommands.run_commands`/`_CliCommands.handler_commands`/
+        # `_CliCompile.*` (cli_run_lint, cli_compile, cli_native_build, etc.) —
+        # duplicating what `app.io.cli_commands`/`app.io.cli_compile` already
+        # provide. Because the module loader's `export use` flattening pulls
+        # in a re-exported target's full transitive closure regardless of
+        # which names a caller actually requested, that duplication forced
+        # every consumer of `app.io.mod`/`app.io.cli_ops` — including simple
+        # test specs — to also compile the *entire* compiler (driver, lexer,
+        # HIR, MIR, every backend: ~250 files) on every invocation. See
+        # doc/08_tracking/bug/stage4_test_runner_daemon_fallback_relint_nonmemoized_2026-07-20.md.
+        # Guard: keep the compiler-dispatch re-exports out of this file so
+        # this regression can't silently come back.
+        val source = file_read("src/app/io/cli_ops.spl")
+        expect(source.contains("export use app.io._CliCompile")).to_equal(false)
+        expect(source.contains("export use app.io._CliCommands.run_commands")).to_equal(false)
+        expect(source.contains("export use app.io._CliCommands.handler_commands")).to_equal(false)
