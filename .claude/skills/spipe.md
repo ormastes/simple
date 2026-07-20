@@ -369,6 +369,30 @@ in `diag.spl`'s header and `diag_spec.spl`'s header comment):
    own accessor functions (e.g. `dbg_last_emit()`, `dbg_timer_stats(label)`),
    never by reading a module-level `var` directly from the spec.
 
+**Two more spec-authoring landmines proved by the 2026-07-20 web/GUI/WM/GPU/
+DrawIR/3D hardening campaign** (found independently by four separate lanes —
+treat both as default assumptions when writing a spec or probe):
+3. **A top-level `fn` mutating a top-level module `var` does not persist** —
+   not just when read from an `it` block (landmine 2 above) but between the
+   function's own calls. A probe that increments a shared `pass_count`/
+   `fail_count` inside a `check()` helper prints every PASS/FAIL line
+   correctly and then reports `0/0` in its summary — a silent false green
+   in the exact place you look for the verdict. Thread an immutable tally
+   struct (or a small class mutated via `me`) through the case functions and
+   return it; never accumulate through module scope. Always prove the
+   failure path is real with a deliberate-red run (expect nonzero rc) before
+   trusting a probe's `fail=0`.
+4. **The `simple test` daemon evaluator and `simple run` diverge on
+   optional-returning lookups compared with `== nil` / `!=`** — a helper
+   returning `text?` and compared that way passed under `run` and in 10 of 11
+   daemon examples, then mis-evaluated equal values as changed only in the
+   larger (~20+ element) daemon case. Avoid optionals in comparison paths in
+   spec-support helpers; use a membership check or `.has()` + `[]`. Tracked:
+   `doc/08_tracking/bug/bug_sspec_daemon_optional_lookup_equality_divergence_2026-07-20.md`.
+   Corollary: a spec that is green under ONE runner is not proven — the
+   campaign's convention of shipping a `bin/simple run` probe mirror
+   alongside each spec exists precisely to surface this class.
+
 **UI interaction (Playwright-like `UiTest`/`locator`) is designed, not yet
 implemented.** See `doc/05_design/ui/testing/ui_test_infra_design.md` (the
 `UiSession`/`Locator`/`Lane` API) and `doc/03_plan/ui/testing/ui_test_infra_plan.md`
