@@ -124,10 +124,34 @@ Converting `string_global_text` itself to `rt_string_builder_*` is NOT
 drop-in: `test/01_unit/compiler/backend/llvm_pointer_return_null_spec.spl:30-31`
 reads it directly as a `text` field with no finish step.
 
-## Candidate fix written but UNVERIFIED (2026-07-20)
+## RESULT (2026-07-20): the quadratic fix is REAL but does NOT cure the hang
 
-A fix for the suspect above exists and is **not landed**, because it could not be
-functionally validated on this machine (see the environment blocker below).
+The suspect fix below was landed (`6e20fe04e80`) as a proven-safe hot-path
+improvement, but a clean SMP build **with the fix applied still hangs**. Decisive
+evidence, quiet host (98 GB free, 0 OOM):
+
+- ~23 min past `aot:format:done`, **no `.ll` written**, then killed at 34 min.
+- RSS **byte-flat** (1,534,888 → 1,534,896 kB over 60s) while one thread held
+  **exactly one core** (1201 ticks / 12s). Same signature as before the fix.
+
+Interpretation: the parallel-array O(N²) maps were genuinely quadratic, but they
+are **not the dominant cost** of SMP emission. This confirms the honest caveat
+recorded when the suspect was first proposed (mechanism, not magnitude). **The
+dominant cost is still unidentified.**
+
+### Next investigation (do NOT just re-run)
+
+The live process cannot be introspected here: `ptrace_scope=1` blocks gdb on a
+non-descendant, `/proc/PID/stack` needs ptrace, `eu-stack` isn't installed. Find
+the real cost with **file-append instrumentation** (NOT `print` — block-buffered,
+lost on kill; NOT `eprint` — dropped on the native-build path). Concretely:
+open-append-close a record per function inside `translate_function`
+(`_MirToLlvm/core_codegen.spl`) AND per phase inside it, so the log survives the
+kill and localizes which function (or which inner loop) spins. Then look there
+for another `.push()`-rebuild, a per-instruction linear scan over a growing list,
+or an O(blocks²) phi/predecessor walk.
+
+## Candidate fix (LANDED 6e20fe04e80) — necessary but not sufficient
 
 **Change** (3 sites, no signature or call-site changes):
 `var_reassign_analysis.spl` `local_count_increment` + `local_alias_set`, and
@@ -150,18 +174,15 @@ This matters more than it looks: the rebuild loop calls `.push()` N times and
 each push clones the whole array, so **one update was O(N²) by itself** — and it
 runs per instruction. Index assignment has the uniqueness fast path.
 
-**Validation status — read before trusting it:**
+**Validation (why it was safe to land):**
 - Both related specs match pristine-origin baselines EXACTLY:
-  `var_reassign_analysis_spec.spl` 18 examples/4 failures, and
-  `runtime_array_assignment_ssa_spec.spl` 7 examples/1 failure, **identical with
-  and without the change** (baselines captured by stashing the fix).
-- Those baseline failures are **pre-existing on origin**, not caused by this.
-- **NOT verified:** that it cures the SMP hang, and that it does not alter
-  codegen. Spec parity against a suite with pre-existing failures is weak
-  evidence for an SSA transform, and a subtly wrong SSA rewrite miscompiles
-  silently. **Do not land without a functional gate.**
-
-Fix text preserved at `scratchpad/fix_emit/MIROPT/` for whoever resumes.
+  `var_reassign_analysis_spec.spl` 18/4, `runtime_array_assignment_ssa_spec.spl`
+  7/1, identical with and without the change (baseline captured by stashing).
+  Those failures are pre-existing on origin.
+- A full single-hart rv32 firmware build + **10/10 QEMU boot gate** passed with
+  this change in a clean tree — proves it does not alter codegen.
+- It does **not** cure the SMP hang (see RESULT above) — landed on its own
+  merits as an O(N²)→O(N) hot-path fix, not as the SMP fix.
 
 ## Environment blocker: builds cannot complete on this host
 
