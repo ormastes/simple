@@ -114,3 +114,90 @@ row fill callers, but it does not close the full-frame 8K performance blocker:
 the mutable typed-array write-back bridge is still required before browser
 layout can safely bulk-fill a full framebuffer through the native mutable
 extern.
+
+## 2026-07-20: re-audit + re-applied honesty fix (previous 2026-07-06 text lost)
+
+Re-audited per lane SIMD-HONESTY (`doc/03_plan/ui/wm_aqua_glyph/next_wave_2026-07-20.md`
+item #6(a)). The 2026-07-06 "honesty fix" entry above claimed `engine.spl`'s
+`cpu_simd` probe text had been changed to "CPU renderer (alias of cpu; no live
+SIMD dispatch) always available", but the current tree still had the original
+dishonest "CPU SIMD row provider available" — the earlier fix was reverted at
+some point (this repo has documented sync/rebase clobber incidents; not worth
+bisecting, the fix is small and reapplied here with a spec regression guard).
+
+**Confirmed still true**: no real SIMD implementation is wired for the plain
+`cpu_simd` render lane. `CpuBackend.create_simd()` (`backend_cpu.spl`) builds
+the identical scalar `SoftwareBackend` as `CpuBackend.create()`; its
+`RenderBackend.name()` already honestly returns `"cpu"`. The x86 SSE2/AVX2 row
+externs exist in the runtime (`common/src/runtime_symbols.rs`,
+`runtime_simd_dispatch.c`, `engine2d_simd_ops.rs`) but remain unused —
+genuinely wiring them is out of scope here (touches `src/runtime`/the Rust
+seed, which this fix does not touch) and is not a small contained change per
+the 2026-07-06 audit (d). **Chose the honest-alias path, not the wire path.**
+
+Changed (pure-Simple, `src/lib/**` only):
+
+- `src/lib/gc_async_mut/gpu/engine2d/engine.spl` — `probe_backend("cpu_simd")`
+  success message restored to honestly say "CPU renderer (alias of cpu; no
+  live SIMD dispatch) always available" (was "CPU SIMD row provider
+  available").
+- `src/lib/gc_async_mut/gpu/engine2d/backend_probe.spl` —
+  `_strict_probe_backend(BACKEND_CPU_SIMD)` (used by `BackendProber`/
+  `compute_dispatch.spl`) no longer implies the detected host SIMD feature is
+  actively dispatched; message now: "CPU renderer (alias of cpu; no live SIMD
+  dispatch); host feature detected=<level>" (was "CPU SIMD row ABI available;
+  active feature=<level>").
+- `src/lib/gc_async_mut/gpu/engine2d/helpers_availability.spl` —
+  `backend_display_name("cpu_simd")` now returns "CPU (SIMD alias, no live
+  SIMD dispatch)" (was bare "CPU SIMD"); `feature_gate_description("cpu_simd")`
+  now returns "No external dependencies; scalar CPU path (no live SIMD
+  dispatch)" (was "...uses CPU SIMD when available").
+- The `"cpu_simd"` name itself is kept as an accepted config/env alias
+  (`SIMPLE_2D_BACKEND=cpu_simd` still resolves and initializes) for backward
+  compatibility — only the reported provenance text changed.
+
+Spec extended (not weakened — two new discriminating cases, all existing cases
+kept): `test/01_unit/lib/gc_async_mut/gpu/engine2d/engine2d_env_backend_select_spec.spl`
+adds:
+1. "requested+honored" — `SIMPLE_2D_BACKEND=cpu_simd` is honored (name kept for
+   compat) and `backend_display_name`/`feature_gate_description` of the
+   resolved name must contain "no live SIMD dispatch" and must not equal/contain
+   the old dishonest strings.
+2. "requested+fallback" — `SIMPLE_2D_BACKEND=cpu_simd_x86` (an arch-specific
+   variant Engine2D's own `probe_backend` does not implement) always falls
+   back through auto-probe; the shared `cpu_simd` descriptor queried directly
+   must still report honestly regardless of which backend wins the fallback.
+
+Evidence: `bin/simple test <spec>` single-file runs currently hang/timeout
+system-wide on the deployed release binary (`bin/release/x86_64-unknown-linux-gnu/simple`,
+a stale Rust seed — "WARNING: this Rust-built Simple binary is a bootstrap
+seed only", `Simple Language v1.0.0-beta`) — this is the pre-existing,
+already-documented `deployed_seed_test_runner_init_hang_2026-07-17.md` defect,
+unrelated to this change (confirmed by letting one single-file `simple test`
+invocation for this exact spec run for 2m17s to an internal
+`ERROR: test daemon timed out`). Per that bug's own note, `bin/simple run` is
+unaffected, so it was used as the fallback runner:
+
+```
+SIMPLE_LIB=src bin/simple run test/01_unit/lib/gc_async_mut/gpu/engine2d/engine2d_env_backend_select_spec.spl
+```
+
+Verbatim result:
+
+```
+Engine2D config/environment backend selection
+  ✓ reads the SIMPLE_2D_BACKEND override
+  ✓ honors an available override backend (software always initializes)
+  ✓ falls through to auto-probe when the override is unavailable
+  ✓ auto-selects a non-empty backend with no override
+  ✓ requested+honored: SIMPLE_2D_BACKEND=cpu_simd is honored by name (compat) but reports itself honestly as a scalar-CPU alias
+  ✓ requested+fallback: an arch-specific SIMD request the engine cannot honor falls back without ever claiming live SIMD
+
+6 examples, 0 failures
+```
+
+**Status remains Open.** This is a provenance-honesty fix only — the
+underlying SIMD wiring gap (mutable typed-array write-back bridge, orphaned
+`CpuSimdSession`, unused x86 SSE2/AVX2 externs) is still unaddressed and
+tracked by this same doc and sibling
+`bug_simd_bulk_copy_blocked_by_spl_array_layout_2026-05-02.md`.

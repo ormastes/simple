@@ -8,6 +8,7 @@
 
 use std.spec.{describe, it, expect}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D, engine2d_env_backend_override}
+use std.gpu.engine2d.helpers_availability.{backend_display_name, feature_gate_description}
 
 extern fn rt_env_set(key: text, value: text) -> bool
 
@@ -35,3 +36,43 @@ describe "Engine2D config/environment backend selection":
     it "auto-selects a non-empty backend with no override":
         rt_env_set("SIMPLE_2D_BACKEND", "")
         expect(Engine2D.detect_best_backend().len()).to_be_greater_than(0)
+
+    # cpu_simd honesty (doc/08_tracking/bug/cpu_simd_mutable_array_extern_wiring_2026-05-31.md):
+    # "cpu_simd" is a real, always-honored config/env selection (CpuBackend always
+    # inits), but it is a scalar-CPU alias — no live SIMD dispatch exists on this
+    # path (unwired externs, orphaned CpuSimdSession, NEON-only kernel gating).
+    # These two specs discriminate the claim in both branches instead of just
+    # observing a pass: before the honesty fix, both assertions below fail
+    # because the reported text falsely implied a live SIMD backend.
+    it "requested+honored: SIMPLE_2D_BACKEND=cpu_simd is honored by name (compat) but reports itself honestly as a scalar-CPU alias":
+        rt_env_set("SIMPLE_2D_BACKEND", "cpu_simd")
+        val selected = Engine2D.detect_best_backend()
+        # Config compat: the alias name is still accepted and honored.
+        expect(selected).to_equal("cpu_simd")
+        val display = backend_display_name(selected)
+        val gate = feature_gate_description(selected)
+        # Positive: the report must state there is no live SIMD dispatch.
+        expect(display).to_contain("no live SIMD dispatch")
+        expect(gate).to_contain("no live SIMD dispatch")
+        # Negative: the old dishonest bare claims must be gone.
+        expect(display).to_not_equal("CPU SIMD")
+        expect(gate).to_not_contain("uses CPU SIMD when available")
+        rt_env_set("SIMPLE_2D_BACKEND", "")
+
+    it "requested+fallback: an arch-specific SIMD request the engine cannot honor falls back without ever claiming live SIMD":
+        # "cpu_simd_x86" is not a distinct render backend in Engine2D's own
+        # create_requested_backend/probe_backend (only backend_probe.spl's
+        # separate compute-dispatch prober models the arch-specific variants),
+        # so requesting it here is always unavailable and forces the auto-probe
+        # fallback path — mirroring the existing "falls through" case above.
+        rt_env_set("SIMPLE_2D_BACKEND", "cpu_simd_x86")
+        val selected = Engine2D.detect_best_backend()
+        expect(selected).to_not_equal("cpu_simd_x86")
+        expect(selected.len()).to_be_greater_than(0)
+        # Whatever backend actually wins the fallback, the shared cpu_simd
+        # descriptor itself (queried directly, so this is host-independent and
+        # not just an incidental pass) must never claim live SIMD dispatch.
+        expect(backend_display_name("cpu_simd")).to_contain("no live SIMD dispatch")
+        expect(feature_gate_description("cpu_simd")).to_contain("no live SIMD dispatch")
+        expect(backend_display_name("cpu_simd")).to_not_equal("CPU SIMD")
+        rt_env_set("SIMPLE_2D_BACKEND", "")
