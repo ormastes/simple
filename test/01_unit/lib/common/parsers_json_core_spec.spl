@@ -238,6 +238,74 @@ describe "JSON Parser":
             else:
                 expect(result).to_be_nil()
 
+    context "nested object parsing (regression: json-parser-nested-object-nil)":
+        """
+        Regression coverage for bug `json-parser-nested-object-nil`: a directly
+        nested object value (`{"a": {"b": 1}}`) was observed returning nil from
+        json_parse, while the same nesting through an intermediate array
+        (`{"a": [{"b": 1}]}`) parsed fine. This broke bb_get_pr-style
+        source/destination/author parsing in the Bitbucket adapter.
+
+        Root-caused: json_parse's recursive-descent parser (json_parse_object_at
+        / json_parse_value_at) is NOT the defect -- manual step-through and the
+        cases below confirm it handles arbitrary object nesting correctly. The
+        `nil` was produced because the .spl *string literal* used to reproduce
+        the bug was corrupted before json_parse ever ran: Simple's string
+        literal lexer treats `{{` / `}}` as escapes for a literal `{` / `}`
+        (needed because a bare `{expr}` means interpolation), and it silently
+        collapses ANY `}}` (or `{{`) pair to a single brace -- even with no
+        interpolation intent anywhere in the literal. A directly-nested JSON
+        object naturally ends in `}}`, so the hand-written literal
+        `"{\"a\": {\"b\": 1}}"` loses its final `}` at lex time, and
+        json_parse correctly reports the (now-truncated) input as unparseable.
+        Array-wrapped nesting (`{"a": [{"b": 1}]}`) happens to end in `]}"`,
+        never triggering the collapse -- which is why it "worked" and made the
+        parser look inconsistent.
+
+        This is a known, separately-filed language/interpreter defect:
+        doc/08_tracking/bug/string_literal_double_brace_collapse_2026-06-16.md
+        (open; not fixable from this stdlib module). The specs below build
+        every nested-brace JSON text via `+` concatenation (never a raw `}}`/
+        `{{` literal) specifically so the tests don't re-trigger the landmine
+        while proving json_parse's real, correct recursive-descent behavior.
+        """
+
+        it "parses a directly-nested object, one level deep":
+            val text = "{" + "\"a\": " + "{" + "\"b\": 1" + "}" + "}"
+            val result = json_parse(text)
+            expect(json_is_object(result)).to_equal(true)
+            val inner = json_object_get(result, "a")
+            expect(json_is_object(inner)).to_equal(true)
+            # json_parse always produces f64 numbers -- compare against a
+            # float literal, not an int literal (1 != 1.0 in this interpreter).
+            expect(json_to_number(json_object_get(inner, "b"))).to_equal(1.0)
+
+        it "parses a directly-nested object, two levels deep":
+            val text = "{" + "\"a\": " + "{" + "\"b\": " + "{" + "\"c\": 2" + "}" + "}" + "}"
+            val result = json_parse(text)
+            expect(json_is_object(result)).to_equal(true)
+            val a = json_object_get(result, "a")
+            val b = json_object_get(a, "b")
+            expect(json_is_object(b)).to_equal(true)
+            expect(json_to_number(json_object_get(b, "c"))).to_equal(2.0)
+
+        it "parses object-in-array-in-object":
+            val text = "{" + "\"items\": [" + "{" + "\"id\": 1" + "}" + "]" + "}"
+            val result = json_parse(text)
+            expect(json_is_object(result)).to_equal(true)
+            val items = json_to_array(json_object_get(result, "items"))
+            expect(items.len()).to_equal(1)
+            expect(json_to_number(json_object_get(items[0], "id"))).to_equal(1.0)
+
+        it "parses the bitbucket-shaped source/branch/name fixture":
+            val text = "{" + "\"source\": " + "{" + "\"branch\": " + "{" + "\"name\": \"x\"" + "}" + "}" + "}"
+            val result = json_parse(text)
+            expect(json_is_object(result)).to_equal(true)
+            val source = json_object_get(result, "source")
+            val branch = json_object_get(source, "branch")
+            expect(json_is_object(branch)).to_equal(true)
+            expect(json_to_string(json_object_get(branch, "name"))).to_equal("x")
+
     context "parsing invalid JSON":
         """json_parse returns nil for invalid input."""
 
