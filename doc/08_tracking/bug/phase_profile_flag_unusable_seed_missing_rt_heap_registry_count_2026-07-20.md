@@ -1,33 +1,53 @@
-# `SIMPLE_COMPILER_PHASE_PROFILE=1` breaks any build: calls `rt_heap_registry_count`, which the seed lacks
+# Phase-profile tracing breaks every rv32 firmware build: `rt_heap_registry_count` missing from the seed
 
 - **Date:** 2026-07-20
 - **Status:** open
-- **Severity:** medium (the flag is a primary diagnostic for slow builds, and it
-  fails the build outright instead of degrading)
-- **Area:** `src/compiler/80.driver/driver_log_helpers.spl:9,46`
+- **Severity:** high (blocks **all** `fw_rv32` firmware builds on pristine
+  sources — the scripts enable the triggering flag unconditionally)
+- **Area:** `src/compiler/80.driver/driver_log_helpers.spl:9,45`
 
-> **CORRECTION (same day).** This doc first claimed the failure was triggered by
-> `SIMPLE_COMPILER_PHASE_PROFILE=1` and that builds without the flag proceed
-> normally. **That is wrong** — a subsequent build with the flag removed failed
-> identically. The title is kept for continuity; the real scope is broader and
-> worse, as described below.
+> **Revision history (read this before trusting an earlier revision).** v1 said
+> the failure was gated by `SIMPLE_COMPILER_PHASE_PROFILE=1` — **correct**. v2
+> "corrected" that to unconditional/semantic — **that was wrong**, and this
+> revision retracts it. The v2 error came from testing via `build.shs`, which
+> sets the flag itself (below), so removing it from my environment changed
+> nothing and I misread the result as flag-independent. Isolated A/B on a
+> two-line program now settles it.
 
 ## Symptom
-
-**Every** `native-build` against pristine compiler sources dies early with:
 
 ```
 error: semantic: unknown extern function: rt_heap_registry_count
 ```
 
-This is **not** flag-dependent. Verified: a build with
-`SIMPLE_COMPILER_PHASE_PROFILE=1` and an otherwise identical build **without**
-it fail the same way at the same point.
+## Isolated A/B (pristine `driver_log_helpers.spl`, two-line probe program)
+
+| run | result |
+|---|---|
+| `native-build --target riscv32 --emit-object` | no extern error |
+| same, with `SIMPLE_COMPILER_PHASE_PROFILE=1` | **`unknown extern function: rt_heap_registry_count`** |
+
+So the failure **is** gated by the flag.
+
+## Why it nonetheless breaks every firmware build
+
+`examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs` sets the flag itself
+on **all three** `native-build` invocations — lines **241** (SMP), **437**, and
+**531** (default):
+
+```sh
+$BUILD_RUNNER env SIMPLE_COMPILER_PHASE_PROFILE=1 SIMPLE_NATIVE_BUILD_EMIT_OBJECT=1 "$SIMPLE_BIN" native-build --backend llvm ...
+```
+
+Callers cannot opt out by unsetting the variable. So in practice **every
+fw_rv32 build on pristine sources fails**, even though the underlying defect is
+flag-gated. Both facts matter: the gate explains the mechanism, the scripts
+explain the blast radius.
 
 ## Mechanism
 
-`driver_log_helpers.spl:9` declares `extern fn rt_heap_registry_count() -> i64`,
-and `log_phase` (line 46) calls it inside a trace-gated branch:
+`driver_log_helpers.spl:9` declares `extern fn rt_heap_registry_count() -> i64`;
+`log_phase` (line 45) calls it inside the trace-gated branch:
 
 ```simple
 pub fn log_phase(msg: text):
@@ -35,13 +55,12 @@ pub fn log_phase(msg: text):
         eprint("[BOOTSTRAP-PHASE] +{_phase_elapsed_ms()}ms {msg} heap_registry={rt_heap_registry_count()}")
 ```
 
-The runtime gate is irrelevant: `unknown extern function` is a **semantic**
-diagnostic raised while compiling the module, so the mere presence of the
-declaration/reference fails the build whether or not the branch ever executes.
+`driver_phase_trace_enabled()` is true for `SIMPLE_COMPILER_PHASE_PROFILE=1`
+**or** `SIMPLE_COMPILER_TRACE=1` (line 13), so either variable triggers it.
 
 The symbol is registered on the Rust side
 (`src/compiler_rust/common/src/runtime_symbols.rs:271,370`) but is **absent from
-every seed binary present on this machine**:
+every seed binary on this machine**:
 
 | seed binary | has symbol |
 |---|---|
@@ -49,36 +68,27 @@ every seed binary present on this machine**:
 | `src/compiler_rust/target/release/simple` (Jul 19 23:52) | no |
 | `bin/release/x86_64-unknown-linux-gnu/simple` (Jul 19 14:21) | no |
 
-This is the standard "extern additions need a bootstrap rebuild" trap
-(`.claude/rules/bootstrap.md`): the `.spl` + Rust registration landed without a
-seed rebuild, so the deployed seeds cannot resolve it.
+Standard "extern added without a seed rebuild" trap (`.claude/rules/bootstrap.md`).
 
-## Severity: `native-build` is broken on pristine sources
+## Why it stayed hidden
 
-Because the failure is unconditional, **no one can `native-build` from a clean
-checkout with any seed binary on this machine.** Everything that still appears
-to work is being built in a worktree whose `driver_log_helpers.spl` is **locally
-modified** to remove the declaration (confirmed: `build/worktrees/perffix` has
-the file modified with zero occurrences and builds fine; a pristine checkout of
-the *same commit* fails instantly).
-
-That divergence is the reason this went unnoticed, and it is a trap in its own
-right: two trees at the same commit behave differently, so a "working" build
-proves nothing about what the committed source does.
+Worktrees used for this work have `driver_log_helpers.spl` **locally modified**
+to drop the declaration (confirmed: `build/worktrees/perffix`, zero occurrences,
+builds fine there). A pristine checkout of the *same commit* fails. Two trees at
+one commit behaving differently is its own trap — a green build in a modified
+tree proves nothing about committed source.
 
 ## Fix options
 
-1. Rebuild and redeploy the seed so the registered symbol actually resolves
-   (the standing rule for extern additions).
-2. Make the diagnostic degrade instead of aborting — a heap-registry count
-   inside a log line must not be able to fail compilation. Drop it from the
-   message or route it through an already-resolvable symbol.
+1. Rebuild and redeploy the seed so the registered symbol resolves (the standing
+   rule for extern additions).
+2. Make the diagnostic degrade rather than abort — a heap-registry count inside
+   a log line must not be able to fail compilation.
 
-Option 2 is worth doing regardless of 1: a diagnostic that hard-fails the build
-is a bad failure mode, and it costs a confusing detour every time the seed
-drifts from the registered symbol table.
+Option 2 is worth doing regardless: a diagnostic that hard-fails the build it
+exists to diagnose is a bad failure mode, and here it is wired on by default in
+the firmware scripts, so it fails builds nobody asked to profile.
 
 ## Related
 
 - `doc/08_tracking/bug/seed_emit_object_superlinear_hang_large_module_2026-07-20.md`
-  — this flag was being used to instrument that hang, and cost a build cycle.
