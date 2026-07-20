@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
     evaluate_expr, exec_block_fn, find_and_exec_method, Control, Enums, ImplMethods, BLOCK_SCOPED_ENUMS,
-    GLOBAL_ENUMS,
+    GLOBAL_ENUMS, TRAIT_IMPLS,
 };
 use crate::value::{Env, OptionVariant, ResultVariant, SpecialEnumType, Value};
 use simple_parser::ast::{Argument, ClassDef, FunctionDef, Type};
@@ -18,7 +18,19 @@ use crate::interpreter::IN_NEW_METHOD;
 
 fn constructor_value_type_matches_name(value: &Value, expected: &str) -> bool {
     match value {
-        Value::Object { class, .. } => class == expected,
+        // A concrete object's class name rarely equals the declared parameter
+        // type verbatim when the parameter is a trait/interface (e.g. `fn
+        // new(device: BlockDevice)` called with a `Fat32LfnMockBlockDevice`
+        // that does `impl BlockDevice for Fat32LfnMockBlockDevice`). Fall back
+        // to TRAIT_IMPLS so trait-typed constructor params accept any
+        // concrete type that implements the trait, instead of only a class
+        // literally named after the trait. Without this, EVERY static
+        // constructor taking a trait-typed parameter fails overload scoring
+        // (see bug doc fat32_core_lfn_static_new_trait_param_2026-07-20.md).
+        Value::Object { class, .. } => {
+            class == expected
+                || TRAIT_IMPLS.with(|cell| cell.borrow().contains_key(&(expected.to_string(), class.clone())))
+        }
         Value::Enum { enum_name, .. } => enum_name == expected,
         Value::Str(_) => matches!(expected, "str" | "text" | "String" | "Str"),
         _ => value.type_name() == expected || value.matches_type(expected),
@@ -337,6 +349,44 @@ main = Probe.make(5)
 "#,
         );
         assert_eq!(result, 5, "make(5) should use default b=0, returning 5");
+    }
+
+    // Regression: a static constructor taking a trait-typed parameter must
+    // accept any concrete argument that implements the trait, not only a
+    // value whose class is literally named after the trait. Before this fix,
+    // `constructor_value_type_matches_name` compared `class == expected`
+    // directly for `Value::Object` with no TRAIT_IMPLS fallback, so EVERY
+    // static `new` with a trait-typed param failed overload scoring and
+    // reported "unknown static method new on class ...". See bug doc
+    // fat32_core_lfn_static_new_trait_param_2026-07-20.md.
+    #[test]
+    fn static_constructor_accepts_trait_typed_argument() {
+        let result = eval_exit(
+            r#"
+trait Speaker:
+    fn speak() -> i64
+
+class Dog:
+    x: i64
+
+impl Speaker for Dog:
+    fn speak() -> i64:
+        1
+
+class Handler:
+    d: Speaker
+
+impl Handler:
+    static fn new(d: Speaker) -> i64:
+        42
+
+main = Handler.new(Dog(x: 0))
+"#,
+        );
+        assert_eq!(
+            result, 42,
+            "Handler.new(Dog(..)) should resolve via the Speaker trait impl, not fail with unknown static method"
+        );
     }
 
     // Exact-count call still works and is preferred over default-fill overload.

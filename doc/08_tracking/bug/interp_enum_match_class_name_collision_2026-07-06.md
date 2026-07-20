@@ -126,3 +126,20 @@ plus specifically: alias bindings (`use X.{Y as Z}`) must not merge into the
 global symbol table under the alias name `Z` if a real `class Z` exists
 elsewhere in the compiled graph — alias resolution should stay lexically
 scoped to the importing file.
+
+**Not to be confused with** (2026-07-20): a *second, unrelated* root cause
+also emits the exact string `unknown static method new on class Fat32Core` —
+`constructor_value_type_matches_name` requiring an argument's literal class
+name to equal a trait-typed constructor parameter's name (fixed in
+`src/compiler_rust/compiler/src/interpreter_method/special/objects.rs`; see
+`fat32_core_lfn_static_new_trait_param_2026-07-20.md`). That fix took
+`test/01_unit/lib/fs_driver/fat32_core_lfn_spec.spl` from 0/17 to 17/17 and
+does **not** touch alias resolution, so it does not resolve *this*
+alias-vs-real-class collision — `shell_wm_runtime_loop_spec.spl` (and anything
+else pulling the full `shell.spl` → `vfs_boot_init.spl` graph) is still
+expected to be blocked by the collision documented above. The identical error
+text for two different root causes is itself a diagnostic-quality gap: the
+"unknown static method" message doesn't distinguish "no candidate method
+found" from "candidates found but none scored" from "alias collision
+clobbered the registry entry" — worth tightening if this class of bug keeps
+recurring.
