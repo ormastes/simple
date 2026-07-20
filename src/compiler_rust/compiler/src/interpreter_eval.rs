@@ -1328,7 +1328,17 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                                 if let Value::Dict(exports) = &value {
                                     for (name, export_value) in exports.iter() {
                                         if let Value::Function { def, .. } = export_value {
-                                            functions.insert(name.clone(), Arc::clone(def));
+                                            // Don't add "main" from an imported module
+                                            // to the entry program's flat `functions` map
+                                            // -- it would leak into the `entry_main`/
+                                            // `main_to_run` fallback below and get
+                                            // auto-invoked instead of (or in place of)
+                                            // the entry script's own main. Matches the
+                                            // guard in evaluation_helpers.rs::process_use_stmt
+                                            // and register_definitions.
+                                            if name != "main" {
+                                                functions.insert(name.clone(), Arc::clone(def));
+                                            }
                                         }
                                         env.insert(name.clone(), export_value.clone());
                                         MODULE_GLOBALS.with(|cell| {

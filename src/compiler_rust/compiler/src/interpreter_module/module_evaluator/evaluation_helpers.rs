@@ -525,7 +525,22 @@ fn process_use_stmt(
             if let Value::Dict(module_exports) = &value {
                 for (name, export_value) in module_exports.iter() {
                     if let Value::Function { def, .. } = export_value {
-                        global_functions.insert(name.clone(), Arc::clone(def));
+                        // Don't add "main" from an imported module's exports to
+                        // global_functions -- this is the runtime `use`-statement
+                        // unpacking path (reached when a `UseStmt` node survives
+                        // pipeline flattening, e.g. `use lazy`), and unlike every
+                        // other merge site (register_definitions above,
+                        // merge_cached_module_definitions in module_cache.rs, and
+                        // the fresh-load merge in module_loader.rs::load_and_merge_module)
+                        // this loop had no guard, so a transitively-loaded module's
+                        // own CLI-entry `main` could clobber `functions["main"]` and
+                        // get auto-invoked instead of the entry script's own (absent)
+                        // main -- see interpreter_eval.rs's `entry_main`/`main_to_run`
+                        // fallback and bug doc
+                        // test_runner_daemon_fallback_private_import_exit_code_corruption_2026-07-20.md.
+                        if name != "main" {
+                            global_functions.insert(name.clone(), Arc::clone(def));
+                        }
                         // `def` may already have an equivalent entry in
                         // FUNCTION_OVERLOADS from an earlier registration pass for
                         // this same module (FUNCTION_OVERLOADS is a process-wide
