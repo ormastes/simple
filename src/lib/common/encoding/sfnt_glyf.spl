@@ -488,18 +488,28 @@ fn _outline_edges(commands: [SfntGlyfCommand], scale: f64, left: f64, top: f64) 
     edges
 
 fn _coverage(edges: [_SfntEdge], x: f64, y: f64) -> u8:
+    # 4x4 supersample grid (was 4 y-only samples with a single x point test
+    # per scanline): 16 sub-pixel samples -> 17 coverage levels vs 5, and
+    # isotropic (both axes supersampled) instead of anisotropic. This is
+    # rasterize-time only cost — glyph bitmaps are atlas-cached, so per-frame
+    # draw cost is unchanged; only cache-miss rasterize cost rises (~4x more
+    # inner-loop samples), which is acceptable.
     var hits: i64 = 0
-    var sample: i64 = 0
-    while sample < 4:
-        val sy = y + (sample as f64 * 2.0 + 1.0) / 8.0
-        var winding: i64 = 0
-        for edge in edges:
-            if edge.y_top <= sy and sy < edge.y_bottom:
-                val crossing = edge.x_top + edge.dx_dy * (sy - edge.y_top)
-                if crossing <= x + 0.5: winding = winding + edge.direction
-        if winding != 0: hits = hits + 1
-        sample = sample + 1
-    (hits * 255 / 4) as u8
+    var sample_y: i64 = 0
+    while sample_y < 4:
+        val sy = y + (sample_y as f64 * 2.0 + 1.0) / 8.0
+        var sample_x: i64 = 0
+        while sample_x < 4:
+            val sx = x + (sample_x as f64 * 2.0 + 1.0) / 8.0
+            var winding: i64 = 0
+            for edge in edges:
+                if edge.y_top <= sy and sy < edge.y_bottom:
+                    val crossing = edge.x_top + edge.dx_dy * (sy - edge.y_top)
+                    if crossing <= sx: winding = winding + edge.direction
+            if winding != 0: hits = hits + 1
+            sample_x = sample_x + 1
+        sample_y = sample_y + 1
+    (hits * 255 / 16) as u8
 
 fn _hmtx(font: OtFont, long_metrics: i64, glyph_id: u32) -> Option<[i64]>:
     if long_metrics <= 0: return None
