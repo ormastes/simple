@@ -9,7 +9,7 @@
 # existing `handle_github`/`handle_jira` dispatchers (both already handle
 # their own table/JSON formatting, acli-vs-curl fallback, actionable errors,
 # etc.) so this file only adds:
-#   - backend resolution (D1: --backend flag > config `tasks: backend:` >
+#   - backend resolution (D1: --backend flag > config `tasks: default_backend:` >
 #     "github" default) and id-shape auto-detection (PROJ-123 -> jira) for
 #     single-item verbs.
 #   - G1: `_jira_build_list_jql` — synthesizes JQL from gh-shaped list flags
@@ -26,11 +26,13 @@
 #     support (`acli`'s mutation surface for this is undocumented/unscoped)
 #     — this prints the defined not-yet-supported error rather than
 #     guessing at an `acli`/REST call that might not exist.
-#   - G6 workaround: `ItfConfig` (config.spl) has no `tasks` section fields
-#     yet — rather than editing that file (out of scope here), `tasks:
-#     backend:`/`tasks: jira_done_status:` are read directly off
-#     config.sdn by `_tasks_config_value`, mirroring `load_config()`'s own
-#     line-scanning loop.
+#   - G6 (partially resolved): `ItfConfig` (config.spl) now has a real
+#     `tasks_default_backend` field (`tasks: default_backend:`), mirroring
+#     `wiki_default_backend`'s pattern exactly — `_tasks_backend_default()`
+#     reads it via `load_config()`. `tasks: jira_done_status:` still has no
+#     ItfConfig field (separate, unscoped part of gap G6), so it remains
+#     read directly off config.sdn by `_tasks_config_value`, mirroring
+#     `load_config()`'s own line-scanning loop.
 #
 # NOT implemented (out of this file's scope, noted per gap):
 #   - `--milestone` filtering on `list` — the facade doc's G1 gap summary
@@ -103,10 +105,12 @@ fn _tasks_internal_error(backend: text) -> i64:
 
 fn _tasks_config_value(section: text, key: text) -> text:
     """Read a single `section:\n    key: value` pair directly from
-    config.sdn. `ItfConfig` (config.spl) has no `tasks` section fields yet
-    (gap G6) — adding them means editing config.spl, out of scope for this
-    file, so this reads the raw file instead. Mirrors load_config()'s own
-    line-scanning loop (config.spl)."""
+    config.sdn. Only remaining caller: `_tasks_jira_done_status()` — the
+    backend-default reader (`_tasks_backend_default()`) now uses the real
+    `ItfConfig.tasks_default_backend` field instead (gap G6, backend half).
+    `tasks: jira_done_status:` still has no ItfConfig field of its own
+    (gap G6, unscoped remainder), so it stays on this raw reader. Mirrors
+    load_config()'s own line-scanning loop (config.spl)."""
     val path = config_path()
     if not file_exists(path):
         return ""
@@ -130,12 +134,13 @@ fn _tasks_config_value(section: text, key: text) -> text:
 
 
 fn _tasks_backend_default() -> text:
-    """D1 precedence, step 2: configured `tasks: backend:` in config.sdn,
-    else "github" (step 3 of the full D1 rule — listing configured
-    backends and erroring on ambiguity — is simplified to this fixed
-    default per this facade's brief)."""
-    val v = _tasks_config_value("tasks", "backend")
-    if v == "": "github" else: v
+    """D1 precedence, step 2: the configured `tasks: default_backend:` in
+    config.sdn (ItfConfig.tasks_default_backend, gap G6 — mirrors
+    cmd_wiki.spl's `_wiki_backend_default()`), else "github" (step 3 of the
+    full D1 rule — listing configured backends and erroring on ambiguity —
+    is simplified to this fixed default per this facade's brief)."""
+    val configured = load_config().tasks_default_backend
+    if configured != "": configured else: "github"
 
 
 fn _tasks_jira_done_status() -> text:
@@ -670,7 +675,7 @@ fn _print_tasks_help():
     print "  search <query>       Alias for `list --search <query>`"
     print ""
     print "Flags:"
-    print "  --backend jira|github|all   Select backend (default: config `tasks: backend:` or github)"
+    print "  --backend jira|github|all   Select backend (default: config `tasks: default_backend:` or github)"
     print "  --assignee VALUE             Filter by assignee (`@me` for the authenticated user)"
     print "  --label VALUE                 Filter by label"
     print "  --state open|closed|all      Filter by state (default: open)"
@@ -679,7 +684,7 @@ fn _print_tasks_help():
     print "  --json / --jq EXPR           JSON output / jq-style filter"
     print "  --web                         Open in browser (github: native passthrough; jira: `view` only)"
     print ""
-    print "Config: ~/.config/itf/config.sdn — tasks: backend: jira|github, tasks: jira_done_status: Done"
+    print "Config: ~/.config/itf/config.sdn — tasks: default_backend: jira|github, tasks: jira_done_status: Done"
     print ""
     print "Examples:"
     print "  itf tasks list --assignee @me --state open"

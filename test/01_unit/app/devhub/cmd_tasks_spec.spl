@@ -47,13 +47,17 @@ fn write_fixture_config(backend: text, jira_done_status: text, jira_url: text, j
     FIXTURE_HOME/.config/itf so load_config()/_tasks_config_value() see
     fixture values once HOME is overridden. Empty `backend`/
     `jira_done_status` omit those keys (so _tasks_backend_default()/
-    _tasks_jira_done_status() fall back to their built-in defaults)."""
+    _tasks_jira_done_status() fall back to their built-in defaults).
+    `backend` writes the real `tasks: default_backend:` ItfConfig field
+    (ItfConfig.tasks_default_backend); `jira_done_status` still writes the
+    raw-parsed `tasks: jira_done_status:` key (no ItfConfig field yet,
+    unscoped remainder of gap G6)."""
     val dir = "{FIXTURE_HOME}/.config/itf"
     val _mk = rt_dir_create_all(dir)
     var config_body = "jira:\n    url: {jira_url}\n    acli_path: acli\n    email: {jira_email}\n"
     config_body = config_body + "\ntasks:\n"
     if backend != "":
-        config_body = config_body + "    backend: {backend}\n"
+        config_body = config_body + "    default_backend: {backend}\n"
     if jira_done_status != "":
         config_body = config_body + "    jira_done_status: {jira_done_status}\n"
     val _cfg = rt_file_write_text("{dir}/config.sdn", config_body)
@@ -297,7 +301,7 @@ describe "itf tasks (fake-binary fixture)":
             expect(code).to_equal(0)
             expect(log.contains("jira workitem view PROJ-1")).to_equal(true)
 
-        it "a bare number with configured tasks:backend=github routes to gh":
+        it "a bare number with configured tasks:default_backend=github routes to gh":
             reset_fixture()
             clear_fixture_config()
             write_fixture_config("github", "", "", "", "")
@@ -305,6 +309,21 @@ describe "itf tasks (fake-binary fixture)":
             val (code, log) = run_tasks(["view", "42"])
             expect(code).to_equal(0)
             expect(log.contains("issue view 42")).to_equal(true)
+
+        it "D1: an explicit --backend flag overrides a configured tasks:default_backend":
+            # Uses a bare number (not a PROJ-123-shaped id) so id-shape
+            # auto-detection can't also explain a jira result: config
+            # default is "github" here, so only an honored --backend flag
+            # routes this to jira (an ignored flag would fall through to
+            # "42" -> not jira-shaped -> configured "github" -> gh, which
+            # isn't installed in this fixture and would fail).
+            reset_fixture()
+            clear_fixture_config()
+            write_fixture_config("github", "", "", "", "")
+            install_fake_bin("acli", FAKE_ACLI_OK)
+            val (code, log) = run_tasks(["view", "42", "--backend", "jira"])
+            expect(code).to_equal(0)
+            expect(log.contains("jira workitem view 42")).to_equal(true)
 
         it "--backend all is rejected for a single-item verb":
             reset_fixture()
