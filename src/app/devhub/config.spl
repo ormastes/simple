@@ -1,0 +1,256 @@
+# ITF CLI — Configuration (SDN format)
+#
+# Config: ~/.config/itf/config.sdn
+# Auth:   ~/.config/itf/auth.sdn
+
+use std.nogc_sync_mut.env.{env_get, env_has}
+use std.nogc_sync_mut.file_system.file_ops.{file_read_text, file_write_text, file_exists}
+use std.nogc_sync_mut.io.process_ops.{process_run}
+use std.json.{json_parse, json_object_get, json_serialize}
+use app.devhub.errors.{ItfError}
+
+
+class ItfConfig:
+    confluence_url: text
+    confluence_user: text
+    confluence_default_space: text
+    jira_url: text
+    jira_acli_path: text
+    jira_email: text
+    default_output: text
+    color_mode: text
+    editor_override: text
+    pager_override: text
+    token_cmds: [(text, text)]  # (provider, shell command) pairs from [token_cmd] section
+    wiki_default_backend: text  # [wiki] default_backend: confluence|github (D1 in devhub_overview.md; gap G6) — "" means unset, cmd_wiki.spl falls back to "confluence"
+
+    static fn default() -> ItfConfig:
+        ItfConfig(
+            confluence_url: "",
+            confluence_user: "",
+            confluence_default_space: "",
+            jira_url: "",
+            jira_acli_path: "acli",
+            jira_email: "",
+            default_output: "text",
+            color_mode: "auto",
+            editor_override: "",
+            pager_override: "",
+            token_cmds: [],
+            wiki_default_backend: ""
+        )
+
+
+fn config_dir() -> text:
+    """Get config directory path."""
+    val home = env_get("HOME")
+    if home == "":
+        val userprofile = env_get("USERPROFILE")
+        if userprofile != "":
+            return "{userprofile}/.config/itf"
+    "{home}/.config/itf"
+
+
+fn config_path() -> text:
+    """Get main config file path."""
+    "{config_dir()}/config.sdn"
+
+
+fn auth_path() -> text:
+    """Get auth token file path."""
+    "{config_dir()}/auth.sdn"
+
+
+fn load_config() -> ItfConfig:
+    """Load config from SDN file, returning defaults if not found."""
+    val path = config_path()
+    if not file_exists(path):
+        return ItfConfig.default()
+
+    val content = file_read_text(path)
+    if content == nil:
+        return ItfConfig.default()
+
+    # Parse as simple key: value pairs (SDN subset)
+    var config = ItfConfig.default()
+    val lines = content.split("\n")
+    var section = ""
+
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            pass_dn
+        else if trimmed.ends_with(":") and not trimmed.contains(" "):
+            # Section header like "confluence:"
+            section = trimmed.replace(":", "")
+        else if trimmed.contains(":"):
+            val parts = trimmed.split(":", 2)
+            val key = parts[0].trim()
+            val value = parts[1].trim()
+            config = _apply_config_value(config, section, key, value)
+
+    config
+
+
+fn _with(config: ItfConfig, confluence_url: text, confluence_user: text, confluence_default_space: text, jira_url: text, jira_acli_path: text, jira_email: text, default_output: text, color_mode: text, editor_override: text, pager_override: text, token_cmds: [(text, text)]) -> ItfConfig:
+    """Rebuild an ItfConfig with the given field values (helper so each
+    _apply_config_value branch only needs to name the ONE field it changes,
+    instead of re-listing all 11 — added when jira_email/token_cmds landed;
+    the older branches below already existed as fully-spelled-out copies and
+    still work, this just gives new/edited branches a shorter form)."""
+    ItfConfig(
+        confluence_url: confluence_url, confluence_user: confluence_user, confluence_default_space: confluence_default_space,
+        jira_url: jira_url, jira_acli_path: jira_acli_path, jira_email: jira_email,
+        default_output: default_output, color_mode: color_mode,
+        editor_override: editor_override, pager_override: pager_override, token_cmds: token_cmds,
+        wiki_default_backend: config.wiki_default_backend
+    )
+
+
+fn _apply_config_value(config: ItfConfig, section: text, key: text, value: text) -> ItfConfig:
+    """Apply a single config key-value to the config struct."""
+    val full_key = if section != "": "{section}.{key}" else: key
+
+    if section == "token_cmd":
+        # [token_cmd] section: provider -> shell command that prints the
+        # token on stdout, e.g. `jira: pass show jira/api-token`. Resolved
+        # by resolve_auth_token() instead of reading auth.sdn plaintext.
+        return _with(config, config.confluence_url, config.confluence_user, config.confluence_default_space, config.jira_url, config.jira_acli_path, config.jira_email, config.default_output, config.color_mode, config.editor_override, config.pager_override, config.token_cmds + [(key, value)])
+
+    match full_key:
+        "confluence.url":
+            _with(config, value, config.confluence_user, config.confluence_default_space, config.jira_url, config.jira_acli_path, config.jira_email, config.default_output, config.color_mode, config.editor_override, config.pager_override, config.token_cmds)
+        "confluence.user":
+            _with(config, config.confluence_url, value, config.confluence_default_space, config.jira_url, config.jira_acli_path, config.jira_email, config.default_output, config.color_mode, config.editor_override, config.pager_override, config.token_cmds)
+        "confluence.default_space":
+            _with(config, config.confluence_url, config.confluence_user, value, config.jira_url, config.jira_acli_path, config.jira_email, config.default_output, config.color_mode, config.editor_override, config.pager_override, config.token_cmds)
+        "jira.url":
+            _with(config, config.confluence_url, config.confluence_user, config.confluence_default_space, value, config.jira_acli_path, config.jira_email, config.default_output, config.color_mode, config.editor_override, config.pager_override, config.token_cmds)
+        "jira.acli_path":
+            _with(config, config.confluence_url, config.confluence_user, config.confluence_default_space, config.jira_url, value, config.jira_email, config.default_output, config.color_mode, config.editor_override, config.pager_override, config.token_cmds)
+        "jira.email":
+            _with(config, config.confluence_url, config.confluence_user, config.confluence_default_space, config.jira_url, config.jira_acli_path, value, config.default_output, config.color_mode, config.editor_override, config.pager_override, config.token_cmds)
+        "output.format":
+            _with(config, config.confluence_url, config.confluence_user, config.confluence_default_space, config.jira_url, config.jira_acli_path, config.jira_email, value, config.color_mode, config.editor_override, config.pager_override, config.token_cmds)
+        "output.color":
+            _with(config, config.confluence_url, config.confluence_user, config.confluence_default_space, config.jira_url, config.jira_acli_path, config.jira_email, config.default_output, value, config.editor_override, config.pager_override, config.token_cmds)
+        "editor":
+            _with(config, config.confluence_url, config.confluence_user, config.confluence_default_space, config.jira_url, config.jira_acli_path, config.jira_email, config.default_output, config.color_mode, value, config.pager_override, config.token_cmds)
+        "pager":
+            _with(config, config.confluence_url, config.confluence_user, config.confluence_default_space, config.jira_url, config.jira_acli_path, config.jira_email, config.default_output, config.color_mode, config.editor_override, value, config.token_cmds)
+        "wiki.default_backend":
+            # Not routed through _with() — that helper always re-reads
+            # config.wiki_default_backend itself (see its body), so it
+            # cannot be used to CHANGE this one field. Spelled out fully
+            # instead, matching this file's own mixed style (docstring on
+            # _with() above).
+            ItfConfig(
+                confluence_url: config.confluence_url, confluence_user: config.confluence_user, confluence_default_space: config.confluence_default_space,
+                jira_url: config.jira_url, jira_acli_path: config.jira_acli_path, jira_email: config.jira_email,
+                default_output: config.default_output, color_mode: config.color_mode,
+                editor_override: config.editor_override, pager_override: config.pager_override, token_cmds: config.token_cmds,
+                wiki_default_backend: value
+            )
+        _:
+            config
+
+
+fn save_config(config: ItfConfig) -> bool:
+    """Save config to SDN file."""
+    val dir = config_dir()
+    var content = "# ITF Configuration\n\nconfluence:\n    url: {config.confluence_url}\n    user: {config.confluence_user}\n    default_space: {config.confluence_default_space}\n\njira:\n    url: {config.jira_url}\n    acli_path: {config.jira_acli_path}\n    email: {config.jira_email}\n\nwiki:\n    default_backend: {config.wiki_default_backend}\n\noutput:\n    format: {config.default_output}\n    color: {config.color_mode}\n\neditor: {config.editor_override}\npager: {config.pager_override}\n"
+    if config.token_cmds.len() > 0:
+        content = content + "\ntoken_cmd:\n"
+        for pair in config.token_cmds:
+            content = content + "    {pair.0}: {pair.1}\n"
+    file_write_text(config_path(), content)
+
+
+fn load_auth_token(provider: text) -> text:
+    """Load auth token for a provider (confluence, jira, bitbucket, minio, outlook)."""
+    val path = auth_path()
+    if not file_exists(path):
+        return ""
+
+    val content = file_read_text(path)
+    if content == nil:
+        return ""
+
+    # Simple SDN parsing for auth tokens
+    var section = ""
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            pass_dn
+        else if trimmed.ends_with(":") and not trimmed.contains(" "):
+            section = trimmed.replace(":", "")
+        else if section == provider and trimmed.starts_with("token:"):
+            val token = trimmed.split(":", 2)[1].trim()
+            # Strip surrounding quotes if present
+            if token.starts_with("\"") and token.ends_with("\""):
+                return token[1:token.len() - 1]
+            return token
+
+    ""
+
+
+fn save_auth_token(provider: text, token: text) -> bool:
+    """Save auth token for a provider, preserving all other known providers' tokens.
+
+    Known providers: confluence, jira, bitbucket, minio, outlook.
+    """
+    val path = auth_path()
+    val known = ["confluence", "jira", "bitbucket", "minio", "outlook"]
+    var content = "# ITF Auth Tokens (do not share)\n\n"
+    for p in known:
+        val tok = if p == provider: token else: load_auth_token(p)
+        if tok != "":
+            content = content + "{p}:\n    token: \"{tok}\"\n\n"
+    file_write_text(path, content)
+
+
+fn _token_cmd_for(config: ItfConfig, provider: text) -> text:
+    """Look up a configured token_cmd for `provider`; "" if none set."""
+    for pair in config.token_cmds:
+        if pair.0 == provider:
+            return pair.1
+    ""
+
+
+fn resolve_auth_token(config: ItfConfig, provider: text) -> text:
+    """Resolve a provider's auth token: run its configured `token_cmd` (from
+    the [token_cmd] config section) if set, otherwise fall back to the
+    plaintext token in auth.sdn via load_auth_token(). Never prints the
+    token — callers must not log this return value.
+
+    token_cmd avoids storing the secret at rest at all (e.g. `pass show
+    jira/api-token`, `op read op://vault/item/token`); the command's stdout,
+    trimmed, is used verbatim as the token.
+    """
+    val cmd = _token_cmd_for(config, provider)
+    if cmd == "":
+        return load_auth_token(provider)
+    val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", cmd])
+    if code != 0:
+        return ""
+    stdout.trim()
+
+
+fn resolve_editor(config: ItfConfig) -> text:
+    """Resolve editor from config/env vars. ITF_EDITOR > GH_EDITOR > EDITOR > VISUAL > vi"""
+    if config.editor_override != "":
+        return config.editor_override
+    val itf_editor = env_get("ITF_EDITOR")
+    if itf_editor != "":
+        return itf_editor
+    val gh_editor = env_get("GH_EDITOR")
+    if gh_editor != "":
+        return gh_editor
+    val editor = env_get("EDITOR")
+    if editor != "":
+        return editor
+    val visual = env_get("VISUAL")
+    if visual != "":
+        return visual
+    "vi"

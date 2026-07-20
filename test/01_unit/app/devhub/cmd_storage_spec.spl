@@ -1,0 +1,170 @@
+# cmd_storage.spl specs — `storage`/`web_storage` dispatcher.
+#
+# Feature: web_storage facade — verb dispatch, argument validation, error paths.
+# Category: App | ITF | cmd_storage
+# Status: Implementation
+#
+# NETWORK SAFETY (read before adding cases): `handle_storage` ultimately calls
+# real `adapter_minio.spl` functions that issue live HTTP requests once a
+# TARGET resolves through the "minio" alias's real config
+# (resolve_alias_config("minio") -> load_minio_config() reads this machine's
+# actual ~/.config/itf/auth.sdn). This repo documents `itf minio` as an
+# actively-used tool, so a real, working [minio] section may genuinely be
+# present on whatever box runs this suite. Per this worker's "no network"
+# constraint, every case below is chosen so the handler returns from a pure
+# argument-validation or dispatch error BEFORE ever calling
+# resolve_alias_config with the real "minio" alias — either because:
+#   (a) validation fails first (bad/missing/local-only args), or
+#   (b) the alias used is a deliberately-fake, never-registered name (e.g.
+#       "unknownalias"), which resolve_alias_config's "unknown alias"
+#       short-circuit rejects before touching any file or network at all, or
+#   (c) the verb (mirror, still a documented gap; rm --recursive/-r and
+#       rb --force, both real bounded list+delete-many implementations) hits
+#       a pure validation refusal (empty prefix, non-remote/no-bucket
+#       target, or unknown alias) that returns before resolve_alias_config
+#       or any list/delete call runs — note `rm` (single-object delete),
+#       `rm --recursive` (list+delete-many over a prefix) and `rb --force`
+#       (bounded list+delete-then-delete-bucket) are now real
+#       implementations, so their success/live-delete paths, the >1000
+#       refusal, and the 0-objects branch are NOT covered here (all require
+#       a live list against a real endpoint); only their pre-network
+#       validation/error paths are.
+# This means real end-to-end behavior (successful ls/cp/stat/... against a
+# live MinIO endpoint) is NOT covered here — only dispatch/validation/error
+# paths are, per the task's explicit fallback instruction.
+
+use app.devhub.cmd_storage.{handle_storage}
+
+
+describe "cmd_storage dispatch":
+
+    context "help and unknown verb":
+
+        it "no args prints help and returns 0":
+            expect(handle_storage([])).to_equal(0)
+
+        it "--help returns 0":
+            expect(handle_storage(["--help"])).to_equal(0)
+
+        it "unknown verb returns 1":
+            expect(handle_storage(["frobnicate"])).to_equal(1)
+
+    context "ls — validation-only paths":
+
+        it "local TARGET is rejected (ls only accepts alias/bucket[/prefix])":
+            expect(handle_storage(["ls", "/tmp/somepath"])).to_equal(1)
+
+        it "unknown alias is rejected before any config/network access":
+            expect(handle_storage(["ls", "unknownalias/bucket"])).to_equal(1)
+
+    context "cat — validation-only paths":
+
+        it "missing TARGET is a usage error":
+            expect(handle_storage(["cat"])).to_equal(1)
+
+        it "local TARGET is rejected":
+            expect(handle_storage(["cat", "/tmp/somefile"])).to_equal(1)
+
+        it "bucket-only TARGET (no key) is rejected before touching config":
+            expect(handle_storage(["cat", "minio/bucket"])).to_equal(1)
+
+    context "stat — validation-only paths":
+
+        it "alias-only TARGET (no bucket/key) is rejected":
+            expect(handle_storage(["stat", "minio"])).to_equal(1)
+
+        it "unknown alias with full bucket/key is rejected pre-network":
+            expect(handle_storage(["stat", "unknownalias/bucket/key.bin"])).to_equal(1)
+
+    context "mb / rb — validation-only paths":
+
+        it "mb with no bucket segment is rejected":
+            expect(handle_storage(["mb", "minio"])).to_equal(1)
+
+        it "mb with unknown alias is rejected pre-network":
+            expect(handle_storage(["mb", "unknownalias/bucket"])).to_equal(1)
+
+        it "rb missing TARGET is a usage error":
+            expect(handle_storage(["rb"])).to_equal(1)
+
+        it "rb with no bucket segment is rejected before any config access":
+            expect(handle_storage(["rb", "minio"])).to_equal(1)
+
+        it "rb --force with unknown alias is rejected pre-network (the list+delete-then-delete-bucket loop never runs)":
+            expect(handle_storage(["rb", "unknownalias/bucket", "--force"])).to_equal(1)
+
+    context "rm — arg validation + error paths, all pre-network":
+
+        it "missing TARGET is a usage error":
+            expect(handle_storage(["rm"])).to_equal(1)
+
+        it "bucket-only TARGET (no key) is rejected before touching config":
+            expect(handle_storage(["rm", "minio/bucket"])).to_equal(1)
+
+        it "unknown alias with full bucket/key is rejected pre-network":
+            expect(handle_storage(["rm", "unknownalias/bucket/key.bin"])).to_equal(1)
+
+        it "--recursive with no prefix (bare alias/bucket) refuses before any config access, even with a real alias-shaped TARGET, and names the rb --force escape hatch":
+            expect(handle_storage(["rm", "minio/bucket", "--recursive"])).to_equal(1)
+
+        it "-r (short form) with no prefix also short-circuits pre-network with the same refusal":
+            expect(handle_storage(["rm", "minio/bucket", "-r"])).to_equal(1)
+
+        it "-r with a non-remote/no-bucket TARGET is a usage error pre-network":
+            expect(handle_storage(["rm", "minio", "-r"])).to_equal(1)
+
+        it "-r with unknown-alias-shaped full TARGET is rejected pre-network (parses as a local path, never remote)":
+            expect(handle_storage(["rm", "unknownalias/bucket/key.bin", "-r"])).to_equal(1)
+
+    context "mirror — documented gap, ignores args entirely":
+
+        it "always returns the not-yet-implemented gap":
+            expect(handle_storage(["mirror"])).to_equal(1)
+            expect(handle_storage(["mirror", "src", "dst"])).to_equal(1)
+
+    context "presign / presign-put — validation-only paths":
+
+        it "presign missing TARGET is a usage error":
+            expect(handle_storage(["presign"])).to_equal(1)
+
+        it "presign bucket-only TARGET (no key) is rejected":
+            expect(handle_storage(["presign", "minio/bucket"])).to_equal(1)
+
+        it "presign-put bucket-only TARGET (no key) is rejected":
+            expect(handle_storage(["presign-put", "minio/bucket"])).to_equal(1)
+
+    context "du — validation-only paths":
+
+        it "missing TARGET is a usage error":
+            expect(handle_storage(["du"])).to_equal(1)
+
+        it "alias-only TARGET (no bucket) is rejected":
+            expect(handle_storage(["du", "minio"])).to_equal(1)
+
+        it "unknown alias with bucket is rejected pre-network":
+            expect(handle_storage(["du", "unknownalias/bucket"])).to_equal(1)
+
+    context "health — validation-only paths":
+
+        it "unknown alias is rejected before touching config at all":
+            expect(handle_storage(["health", "unknownalias"])).to_equal(1)
+
+    context "cp — direction inference + validation, all pre-network":
+
+        it "fewer than 2 positional args is a usage error":
+            expect(handle_storage(["cp", "onlyone"])).to_equal(1)
+
+        it "local -> local is rejected (error_local_local)":
+            expect(handle_storage(["cp", "/tmp/a.bin", "/tmp/b.bin"])).to_equal(1)
+
+        it "remote -> remote is rejected (error_remote_remote)":
+            expect(handle_storage(["cp", "minio/bucket/a.bin", "minio/bucket/b.bin"])).to_equal(1)
+
+        it "upload direction with unknown-alias DST is rejected pre-network":
+            expect(handle_storage(["cp", "/tmp/a.bin", "unknownalias/bucket/key.bin"])).to_equal(1)
+
+        it "download direction with unknown-alias SRC is rejected pre-network":
+            expect(handle_storage(["cp", "unknownalias/bucket/key.bin", "/tmp/out.bin"])).to_equal(1)
+
+        it "upload direction with bucket-only DST (no key) is rejected before config access":
+            expect(handle_storage(["cp", "/tmp/a.bin", "minio/bucket"])).to_equal(1)

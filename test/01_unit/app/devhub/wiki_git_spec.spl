@@ -1,0 +1,236 @@
+# @cover src/app/devhub/wiki_git.spl 60%
+#
+# app.devhub.wiki_git (GitHub wiki `.wiki.git` git-shell backend, gaps
+# G14-G16 in doc/05_design/app/devhub/facade_tasks_git_wiki.md §4).
+#
+# Sanitizer tests mirror test/02_integration/app/portal/portal_git_sanitize_spec.spl
+# (the app.portal.git_repo precedent this module's sanitizers are modeled
+# on). The fixture tests build a REAL bare `<repo>.wiki.git` + seed clone in
+# a temp dir (all local — no network, matching the style already used by
+# test/02_integration/app/portal/portal_server_spec.spl's _fixture_repo_root()),
+# then exercise clone/list/read/write/delete/search against it end-to-end.
+# wiki_git_push() is deliberately never called from this spec (or any
+# spec) — pushing is only ever invoked by cmd_wiki.spl when the user passes
+# --push explicitly.
+
+use std.spec
+use std.nogc_sync_mut.io.process_ops.{process_run}
+use app.devhub.wiki_git.{sanitize_wiki_page_name, sanitize_owner_or_repo, sanitize_owner_repo_slug, wiki_git_clone_or_pull, wiki_git_list, wiki_git_read, wiki_git_write, wiki_git_delete, wiki_git_search, wiki_git_page_modified, WikiGrepMatch}
+
+
+fn _rejects_page_name(raw: text) -> bool:
+    match sanitize_wiki_page_name(raw):
+        Err(_msg):
+            true
+        Ok(_safe):
+            false
+
+
+fn _rejects_owner_or_repo(raw: text) -> bool:
+    match sanitize_owner_or_repo(raw):
+        Err(_msg):
+            true
+        Ok(_safe):
+            false
+
+
+fn _list_contains(items: [text], target: text) -> bool:
+    for item in items:
+        if item == target:
+            return true
+    false
+
+
+fn _fixture_bare_wiki_repo() -> text:
+    """Create a bare `demo.wiki.git` seeded with Home.md + Setup.md through
+    a temp clone (all local; the bare repo path stands in for a real
+    `https://github.com/<owner>/<repo>.wiki.git` remote in these specs).
+    Returns the bare repo's path."""
+    val script = "set -eu\n" +
+        "ROOT=$(mktemp -d /tmp/devhub-wiki-git-fixture.XXXXXX)\n" +
+        "BARE=\"$ROOT/demo.wiki.git\"\n" +
+        "SEED=\"$ROOT/seed\"\n" +
+        "git init -q --bare \"$BARE\"\n" +
+        "git clone -q \"$BARE\" \"$SEED\"\n" +
+        "cd \"$SEED\"\n" +
+        "git config user.email test@example.invalid\n" +
+        "git config user.name 'Wiki Fixture'\n" +
+        "printf '# Home\\n\\nWelcome to the wiki.\\n' > Home.md\n" +
+        "printf '# Setup\\n\\nHow to set things up.\\n' > Setup.md\n" +
+        "git add -A\n" +
+        "git commit -q -m 'seed wiki'\n" +
+        "BRANCH=$(git symbolic-ref --short HEAD)\n" +
+        "git push -q origin \"$BRANCH\"\n" +
+        "printf '%s' \"$BARE\"\n"
+    val (out, _err, _code) = process_run("/bin/sh", ["-c", script])
+    out.trim()
+
+
+fn _fresh_temp_dir() -> text:
+    val (out, _err, _code) = process_run("/bin/sh", ["-c", "mktemp -d /tmp/devhub-wiki-git-cache.XXXXXX\n"])
+    out.trim()
+
+
+describe "wiki_git sanitizers (mirrors app.portal.git_repo's sanitizer style)":
+
+    context "sanitize_wiki_page_name":
+
+        it "accepts a normal page name":
+            expect(_rejects_page_name("Home")).to_equal(false)
+            expect(_rejects_page_name("Getting-Started")).to_equal(false)
+
+        it "rejects an empty page name":
+            expect(_rejects_page_name("")).to_equal(true)
+
+        it "rejects parent-directory traversal":
+            expect(_rejects_page_name("../../etc/passwd")).to_equal(true)
+
+        it "rejects a page name that looks like a git option":
+            expect(_rejects_page_name("--upload-pack=/bin/sh")).to_equal(true)
+
+        it "rejects a page name with a path separator (flat namespace only)":
+            expect(_rejects_page_name("a/b")).to_equal(true)
+
+        it "rejects a page name with shell metacharacters":
+            expect(_rejects_page_name("page; rm -rf /")).to_equal(true)
+            expect(_rejects_page_name("page$(whoami)")).to_equal(true)
+
+        it "rejects a leading dot":
+            expect(_rejects_page_name(".hidden")).to_equal(true)
+
+    context "sanitize_owner_or_repo":
+
+        it "accepts a normal segment":
+            expect(_rejects_owner_or_repo("simple")).to_equal(false)
+
+        it "rejects traversal, option-looking, and empty values":
+            expect(_rejects_owner_or_repo("..")).to_equal(true)
+            expect(_rejects_owner_or_repo("-x")).to_equal(true)
+            expect(_rejects_owner_or_repo("")).to_equal(true)
+
+    context "sanitize_owner_repo_slug":
+
+        it "splits and validates a valid owner/repo":
+            match sanitize_owner_repo_slug("acme/widgets"):
+                Err(_msg):
+                    expect(true).to_equal(false)
+                Ok(pair):
+                    expect(pair.0).to_equal("acme")
+                    expect(pair.1).to_equal("widgets")
+
+        it "rejects a slug without exactly one slash":
+            match sanitize_owner_repo_slug("bogus"):
+                Err(_msg):
+                    expect(true).to_equal(true)
+                Ok(_pair):
+                    expect(true).to_equal(false)
+            match sanitize_owner_repo_slug("a/b/c"):
+                Err(_msg):
+                    expect(true).to_equal(true)
+                Ok(_pair):
+                    expect(true).to_equal(false)
+
+
+describe "wiki_git against a local fixture wiki repo":
+
+    it "clones a fresh cache dir":
+        val bare_repo = _fixture_bare_wiki_repo()
+        val cache_dir = _fresh_temp_dir() + "/clone"
+        val (ok, _err) = wiki_git_clone_or_pull(bare_repo, cache_dir)
+        expect(ok).to_equal(true)
+
+    it "pulls without error on a second clone_or_pull against the same cache dir":
+        val bare_repo = _fixture_bare_wiki_repo()
+        val cache_dir = _fresh_temp_dir() + "/clone"
+        val (ok1, _e1) = wiki_git_clone_or_pull(bare_repo, cache_dir)
+        expect(ok1).to_equal(true)
+        val (ok2, _e2) = wiki_git_clone_or_pull(bare_repo, cache_dir)
+        expect(ok2).to_equal(true)
+
+    it "lists the seeded pages":
+        val bare_repo = _fixture_bare_wiki_repo()
+        val cache_dir = _fresh_temp_dir() + "/clone"
+        val (_ok, _err) = wiki_git_clone_or_pull(bare_repo, cache_dir)
+        val pages = wiki_git_list(cache_dir)
+        expect(_list_contains(pages, "Home")).to_equal(true)
+        expect(_list_contains(pages, "Setup")).to_equal(true)
+
+    it "reads an existing page's content":
+        val bare_repo = _fixture_bare_wiki_repo()
+        val cache_dir = _fresh_temp_dir() + "/clone"
+        val (_ok, _err) = wiki_git_clone_or_pull(bare_repo, cache_dir)
+        match wiki_git_read(cache_dir, "Home"):
+            Err(_msg):
+                expect(true).to_equal(false)
+            Ok(content):
+                expect(content.contains("Welcome to the wiki")).to_equal(true)
+
+    it "returns an error for a page that does not exist":
+        val bare_repo = _fixture_bare_wiki_repo()
+        val cache_dir = _fresh_temp_dir() + "/clone"
+        val (_ok, _err) = wiki_git_clone_or_pull(bare_repo, cache_dir)
+        match wiki_git_read(cache_dir, "NoSuchPage"):
+            Err(_msg):
+                expect(true).to_equal(true)
+            Ok(_content):
+                expect(true).to_equal(false)
+
+    it "writes a new page and commits it locally, visible in a subsequent list":
+        val bare_repo = _fixture_bare_wiki_repo()
+        val cache_dir = _fresh_temp_dir() + "/clone"
+        val (_ok, _err) = wiki_git_clone_or_pull(bare_repo, cache_dir)
+        val (write_ok, _write_err) = wiki_git_write(cache_dir, "NewPage", "# New Page\n\nBody.\n", "add NewPage")
+        expect(write_ok).to_equal(true)
+        expect(_list_contains(wiki_git_list(cache_dir), "NewPage")).to_equal(true)
+        match wiki_git_read(cache_dir, "NewPage"):
+            Err(_msg):
+                expect(true).to_equal(false)
+            Ok(content):
+                expect(content.contains("Body.")).to_equal(true)
+
+    it "rejects writing an invalid page name before touching the filesystem":
+        val cache_dir = _fresh_temp_dir()
+        val (ok, _err) = wiki_git_write(cache_dir, "../escape", "malicious", "")
+        expect(ok).to_equal(false)
+
+    it "deletes a page and commits the removal locally":
+        val bare_repo = _fixture_bare_wiki_repo()
+        val cache_dir = _fresh_temp_dir() + "/clone"
+        val (_ok, _err) = wiki_git_clone_or_pull(bare_repo, cache_dir)
+        val (delete_ok, _delete_err) = wiki_git_delete(cache_dir, "Setup", "remove Setup")
+        expect(delete_ok).to_equal(true)
+        expect(_list_contains(wiki_git_list(cache_dir), "Setup")).to_equal(false)
+
+    it "returns an error deleting a page that does not exist":
+        val bare_repo = _fixture_bare_wiki_repo()
+        val cache_dir = _fresh_temp_dir() + "/clone"
+        val (_ok, _err) = wiki_git_clone_or_pull(bare_repo, cache_dir)
+        val (delete_ok, _delete_err) = wiki_git_delete(cache_dir, "NoSuchPage", "")
+        expect(delete_ok).to_equal(false)
+
+    it "searches for a term present in one page":
+        val bare_repo = _fixture_bare_wiki_repo()
+        val cache_dir = _fresh_temp_dir() + "/clone"
+        val (_ok, _err) = wiki_git_clone_or_pull(bare_repo, cache_dir)
+        match wiki_git_search(cache_dir, "Welcome"):
+            Err(_msg):
+                expect(true).to_equal(false)
+            Ok(matches):
+                expect(matches.len()).to_be_greater_than(0)
+                expect(matches[0].page).to_equal("Home")
+
+    it "search returns an empty (not error) result when no page matches":
+        val bare_repo = _fixture_bare_wiki_repo()
+        val cache_dir = _fresh_temp_dir() + "/clone"
+        val (_ok, _err) = wiki_git_clone_or_pull(bare_repo, cache_dir)
+        match wiki_git_search(cache_dir, "ThisTermDoesNotExistAnywhereAtAll"):
+            Err(_msg):
+                expect(true).to_equal(false)
+            Ok(matches):
+                expect(matches.len()).to_equal(0)
+
+    it "reports a non-empty last-modified string for a page with history":
+        val bare_repo = _fixture_bare_wiki_repo()
+        val cache_dir = _fresh_temp_dir() + "/clone"
+        val (_ok, _err) = wiki_git_clone_or_pull(bare_repo, cache_dir)
+        expect(wiki_git_page_modified(cache_dir, "Home") != "").to_equal(true)

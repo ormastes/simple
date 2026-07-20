@@ -1,0 +1,115 @@
+# ITF CLI — Bitbucket command dispatch (cmd_bb.spl) unit tests
+#
+# Feature: bitbucket `repo list/view` + `pr list` (devhub git backend gap G7/G7b/G10)
+# Category: ITF, CLI, Bitbucket
+# Status: Implemented
+#
+# Covers dispatch/usage-error paths for handle_bb without any network access:
+# every path exercised here returns before an HTTP call is ever made (either
+# a help/usage print, or the --workspace/--repo/slug/PR-id validation guard).
+# The adapter's own network-touching functions are covered separately in
+# adapter_bitbucket_spec.spl (URL builders, response parsing, auth guard).
+#
+# This file also regression-guards a real bug found while writing it: a
+# literal `{alt|alt}` inside a plain double-quoted `print "..."` string is
+# parsed as Simple string interpolation (an embedded expression), and a bare
+# alternation like `{list|view}` crashes at runtime as "variable `list` not
+# found" the first time that help text is ever printed. Triple-quoted
+# docstrings are unaffected (never evaluated as expressions), which is why
+# this had never been caught before -- no prior spec called the cmd_bb help
+# functions. Fixed by using `<alt|alt>` instead of `{alt|alt}` in cmd_bb.spl's
+# usage strings; the tests below call every help path so a regression to `{}`
+# fails loudly instead of silently.
+
+use app.devhub.cmd_bb.{handle_bb, _bb_pr_row, _bb_repo_row}
+use app.devhub.adapter_bitbucket.{BbPr, BbRepo}
+
+
+describe "itf bb (dispatch, no network)":
+    describe "top-level":
+        it "no args prints help, rc 0":
+            expect(handle_bb([])).to_equal(0)
+
+        it "--help prints help, rc 0":
+            expect(handle_bb(["--help"])).to_equal(0)
+
+        it "unknown top-level command exits 1":
+            expect(handle_bb(["bogus"])).to_equal(1)
+
+    describe "repo":
+        it "--help exits 0":
+            expect(handle_bb(["repo", "--help"])).to_equal(0)
+
+        it "no subcommand prints help, rc 0":
+            expect(handle_bb(["repo"])).to_equal(0)
+
+        it "list without --workspace/BB_WORKSPACE exits 1 with a usage error":
+            expect(handle_bb(["repo", "list"])).to_equal(1)
+
+        it "view without a slug exits 1":
+            expect(handle_bb(["repo", "view", "--workspace", "acme"])).to_equal(1)
+
+        it "view without --workspace exits 1":
+            expect(handle_bb(["repo", "view", "widgets"])).to_equal(1)
+
+        it "unknown repo subcommand exits 1":
+            expect(handle_bb(["repo", "bogus"])).to_equal(1)
+
+    describe "pr":
+        it "--help exits 0":
+            expect(handle_bb(["pr", "--help"])).to_equal(0)
+
+        it "list without --workspace/--repo exits 1 with a usage error":
+            expect(handle_bb(["pr", "list"])).to_equal(1)
+
+        it "view without --workspace/--repo exits 1":
+            expect(handle_bb(["pr", "view", "5"])).to_equal(1)
+
+        it "unknown pr subcommand exits 1":
+            expect(handle_bb(["pr", "bogus"])).to_equal(1)
+
+    describe "comment / approve / merge / status help (unaffected siblings)":
+        it "comment --help exits 0":
+            expect(handle_bb(["comment", "--help"])).to_equal(0)
+
+
+# ============================================================================
+# Row formatting (pure — no client/network needed)
+# ============================================================================
+#
+# `pr list` / `repo list` build their table rows via _bb_pr_row / _bb_repo_row,
+# which take an already-parsed BbPr/BbRepo and do no I/O. Testing them
+# directly (rather than only exercising the full bb_list_prs/bb_list_repos
+# network path) catches formatting bugs -- e.g. the print-string interpolation
+# bug documented above -- without needing a live Bitbucket connection.
+
+describe "_bb_pr_row":
+    it "formats id/title/state/author/branch/updated":
+        val pr = BbPr(id: 7, title: "Add foo", state: "OPEN", source_branch: "feat/foo", dest_branch: "main", author: "Ada", web_url: "", merge_commit: "", updated_on: "2026-07-01T00:00:00.000000+00:00")
+        val row = _bb_pr_row(pr)
+        expect(row[0]).to_equal("#7")
+        expect(row[1]).to_equal("Add foo")
+        expect(row[3]).to_equal("Ada")
+        expect(row[4]).to_equal("feat/foo")
+
+    it "row has exactly 6 columns":
+        val pr = BbPr(id: 1, title: "T", state: "OPEN", source_branch: "s", dest_branch: "d", author: "a", web_url: "", merge_commit: "", updated_on: "")
+        expect(_bb_pr_row(pr).len()).to_equal(6)
+
+
+describe "_bb_repo_row":
+    it "formats name/description/visibility/updated for a public repo":
+        val r = BbRepo(slug: "widgets", name: "Widgets", full_name: "acme/widgets", description: "Widget factory", is_private: false, updated_on: "2026-07-01T00:00:00.000000+00:00", main_branch: "main", web_url: "")
+        val row = _bb_repo_row(r)
+        expect(row[0]).to_equal("Widgets")
+        expect(row[1]).to_equal("Widget factory")
+        expect(row[2]).to_equal("public")
+
+    it "marks a private repo as private":
+        val r = BbRepo(slug: "secret", name: "Secret", full_name: "acme/secret", description: "", is_private: true, updated_on: "", main_branch: "", web_url: "")
+        val row = _bb_repo_row(r)
+        expect(row[2]).to_equal("private")
+
+    it "row has exactly 4 columns":
+        val r = BbRepo(slug: "s", name: "S", full_name: "a/s", description: "", is_private: false, updated_on: "", main_branch: "", web_url: "")
+        expect(_bb_repo_row(r).len()).to_equal(4)

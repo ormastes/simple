@@ -1,0 +1,555 @@
+# ITF CLI — gh-compatible output formatting
+#
+# Supports: --json <fields>, --jq <expr>, --web, --no-pager
+# Respects: NO_COLOR, ITF_FORCE_COLOR, ITF_PAGER, PAGER
+
+use std.nogc_sync_mut.env.{env_get, env_has}
+use app.ui.render.ansi.{ansi_red, ansi_green, ansi_yellow, ansi_bold, ansi_reset, ansi_dim}
+use std.json.{json_parse, json_serialize, json_pretty, json_object_get, json_object_keys, json_object_has, json_object, json_string, json_array, json_array_get, json_array_length, json_get_type}
+use app.devhub.flags.{_extract_flag, _has_flag}
+use std.tui.terminal.{terminal_get_size}
+use std.io_runtime.{time_now_unix_micros}
+use std.nogc_sync_mut.file_system.file_ops.{file_write_text, file_delete}
+use std.nogc_sync_mut.io.process_ops.{process_run}
+
+extern fn rt_process_run_inherit(cmd: text, args: [text]) -> i64
+
+
+fn should_use_color() -> bool:
+    """Check if color output should be used."""
+    if env_has("NO_COLOR"):
+        return false
+    val force = env_get("ITF_FORCE_COLOR")
+    if force == "1":
+        return true
+    true
+
+
+fn format_size(bytes: i64) -> text:
+    """Human-readable size: B / KiB / MiB / GiB / TiB, 1 decimal place
+    (bytes shown as a bare integer). Uses scaled-integer math (value*10 /
+    divisor, split into whole.frac) rather than float formatting, since
+    that keeps rounding behavior exact and independent of float-to-text
+    precision. Negative input (unknown size, e.g. -1) passes through as-is.
+    """
+    if bytes < 0:
+        return "{bytes}"
+    if bytes < 1024:
+        return "{bytes} B"
+    val kib = 1024
+    val mib = kib * 1024
+    val gib = mib * 1024
+    val tib = gib * 1024
+    val (scaled, unit) = if bytes < mib:
+        (bytes * 10 / kib, "KiB")
+    else if bytes < gib:
+        (bytes * 10 / mib, "MiB")
+    else if bytes < tib:
+        (bytes * 10 / gib, "GiB")
+    else:
+        (bytes * 10 / tib, "TiB")
+    val whole = scaled / 10
+    val frac = scaled % 10
+    "{whole}.{frac} {unit}"
+
+
+fn _digits_to_i64(s: text, start: i64, count: i64) -> i64:
+    """Parse `count` ASCII digits starting at `start`; -1 if any isn't 0-9
+    or the range runs past the end of `s`."""
+    if start + count > s.len():
+        return -1
+    var n: i64 = 0
+    var i = start
+    val stop = start + count
+    while i < stop:
+        val c = s.char_code_at(i)
+        if c < 48 or c > 57:
+            return -1
+        n = n * 10 + (c - 48)
+        i = i + 1
+    n
+
+
+fn _is_leap_year(y: i64) -> bool:
+    (y % 4 == 0 and y % 100 != 0) or y % 400 == 0
+
+
+fn _days_in_month(y: i64, m: i64) -> i64:
+    if m == 2:
+        if _is_leap_year(y): 29 else: 28
+    else if m == 4 or m == 6 or m == 9 or m == 11:
+        30
+    else:
+        31
+
+
+fn _days_since_epoch(year: i64, month: i64, day: i64) -> i64:
+    """Days between 1970-01-01 and the given UTC date (proleptic Gregorian,
+    year >= 1970 only — adequate range for relative-time display)."""
+    var days: i64 = 0
+    var y = 1970
+    while y < year:
+        days = days + (if _is_leap_year(y): 366 else: 365)
+        y = y + 1
+    var m = 1
+    while m < month:
+        days = days + _days_in_month(year, m)
+        m = m + 1
+    days + (day - 1)
+
+
+fn _epoch_seconds_from_iso(iso: text) -> i64:
+    """Parse the fixed `YYYY-MM-DDTHH:MM:SS` prefix of an ISO8601 timestamp
+    into approximate UTC epoch seconds. Any trailing fractional seconds or
+    timezone offset (`.000+0000`, `Z`, ...) is ignored — adequate for
+    bucketed "Xh ago" display, not exact-instant math. -1 if the prefix
+    doesn't parse as digits in the expected positions.
+    """
+    if iso.len() < 19:
+        return -1
+    val year = _digits_to_i64(iso, 0, 4)
+    val month = _digits_to_i64(iso, 5, 2)
+    val day = _digits_to_i64(iso, 8, 2)
+    val hour = _digits_to_i64(iso, 11, 2)
+    val minute = _digits_to_i64(iso, 14, 2)
+    val second = _digits_to_i64(iso, 17, 2)
+    if year < 0 or month < 1 or month > 12 or day < 1 or hour < 0 or minute < 0 or second < 0:
+        return -1
+    _days_since_epoch(year, month, day) * 86400 + hour * 3600 + minute * 60 + second
+
+
+fn relative_time_at(iso: text, now_epoch_secs: i64) -> text:
+    """Format an ISO8601 timestamp as a relative string ("3h ago") relative
+    to an explicit `now_epoch_secs` — pure and deterministic, so specs can
+    pin a fixed "now" instead of flaking on wall-clock time. Returns `iso`
+    unchanged if it doesn't parse (never hides a raw value silently as "").
+    """
+    val ts = _epoch_seconds_from_iso(iso)
+    if ts < 0:
+        return iso
+    var delta = now_epoch_secs - ts
+    if delta < 0:
+        delta = 0
+    if delta < 60:
+        return "just now"
+    if delta < 3600:
+        return "{delta / 60}m ago"
+    if delta < 86400:
+        return "{delta / 3600}h ago"
+    if delta < 86400 * 30:
+        return "{delta / 86400}d ago"
+    if delta < 86400 * 365:
+        return "{delta / (86400 * 30)}mo ago"
+    "{delta / (86400 * 365)}y ago"
+
+
+fn relative_time(iso: text) -> text:
+    """relative_time_at() against the real current time (jira/github listings)."""
+    relative_time_at(iso, time_now_unix_micros() / 1000000)
+
+
+fn _format_elapsed_secs(elapsed_ms: i64) -> text:
+    """"1.2s" from milliseconds, one decimal place, scaled-integer math
+    (same rationale as format_size: exact, no float-to-text rounding)."""
+    val ms = if elapsed_ms < 0: 0 else: elapsed_ms
+    val whole = ms / 1000
+    val frac = (ms % 1000) / 100
+    "{whole}.{frac}s"
+
+
+fn format_transfer_summary(verb: text, bytes: i64, elapsed_ms: i64) -> text:
+    """Build a one-line transfer summary: "downloaded 12.3 MiB in 1.2s,
+    10.2 MiB/s". Used by `itf minio get --out` / `put` so a data-plane
+    operation reports elapsed time + throughput without needing a
+    byte-level progress bar (the SFFI transport doesn't report progress
+    mid-transfer). Omits the throughput clause when elapsed_ms is too small
+    to divide by meaningfully.
+    """
+    val size_text = format_size(bytes)
+    val elapsed_text = _format_elapsed_secs(elapsed_ms)
+    if elapsed_ms <= 0 or bytes <= 0:
+        return "{verb} {size_text} in {elapsed_text}"
+    val bytes_per_sec = bytes * 1000 / elapsed_ms
+    "{verb} {size_text} in {elapsed_text}, {format_size(bytes_per_sec)}/s"
+
+
+fn print_error(msg: text):
+    """Print error message to stderr (red if color enabled)."""
+    if should_use_color():
+        print "{ansi_red()}error:{ansi_reset()} {msg}"
+    else:
+        print "error: {msg}"
+
+
+fn print_success(msg: text):
+    """Print success message (green if color enabled)."""
+    if should_use_color():
+        print "{ansi_green()}{msg}{ansi_reset()}"
+    else:
+        print msg
+
+
+fn print_warning(msg: text):
+    """Print warning message (yellow if color enabled)."""
+    if should_use_color():
+        print "{ansi_yellow()}warning:{ansi_reset()} {msg}"
+    else:
+        print "warning: {msg}"
+
+
+fn print_info(label: text, value: text):
+    """Print a label: value pair with colored label."""
+    if should_use_color():
+        print "{ansi_bold()}{label}:{ansi_reset()} {value}"
+    else:
+        print "{label}: {value}"
+
+
+fn print_dim(msg: text):
+    """Print dimmed text."""
+    if should_use_color():
+        print "{ansi_dim()}{msg}{ansi_reset()}"
+    else:
+        print msg
+
+
+fn format_json_output(data: text, args: [text]) -> text:
+    """Apply --json field filtering and --jq queries to JSON data.
+
+    Args:
+        data: Raw JSON string from API
+        args: CLI args to check for --json and --jq flags
+
+    Returns:
+        Formatted output string
+    """
+    val json_fields = _extract_flag(args, "--json", "")
+    val jq_expr = _extract_flag(args, "--jq", "")
+
+    if json_fields != "":
+        return _filter_json_fields(data, json_fields)
+
+    if jq_expr != "":
+        return _apply_jq(data, jq_expr)
+
+    # Default: pretty-print the JSON
+    val parsed = json_parse(data)
+    if parsed != nil:
+        return json_pretty(parsed)
+    data
+
+
+fn wants_json(args: [text]) -> bool:
+    """Check if user requested JSON output."""
+    _has_flag(args, "--json") or _extract_flag(args, "--format", "") == "json"
+
+
+fn _filter_json_fields(data: text, fields: text) -> text:
+    """Filter JSON to only include specified fields."""
+    val parsed = json_parse(data)
+    if parsed == nil:
+        return data
+
+    val field_list = fields.split(",")
+    val data_type = json_get_type(parsed)
+
+    if data_type == "array":
+        # Filter each item in array
+        var items: [text] = []
+        var i = 0
+        val arr_len = json_array_length(parsed)
+        while i < arr_len:
+            val item = json_array_get(parsed, i)
+            val filtered = _filter_object_fields(item, field_list)
+            items = items + [json_serialize(filtered)]
+            i = i + 1
+        return "[" + items.join(", ") + "]"
+    else if data_type == "object":
+        val filtered = _filter_object_fields(parsed, field_list)
+        return json_pretty(filtered)
+
+    data
+
+
+fn _filter_object_fields(obj: any, fields: [text]) -> any:
+    """Keep only specified fields from a JSON object."""
+    var pairs: [(text, any)] = []
+    for field in fields:
+        val trimmed = field.trim()
+        if json_object_has(obj, trimmed):
+            val value = json_object_get(obj, trimmed)
+            pairs = pairs + [(trimmed, value)]
+    json_object(pairs)
+
+
+fn _apply_jq(data: text, expr: text) -> text:
+    """Simple jq-like path query. Supports .field, .[].field, .[N]."""
+    val parsed = json_parse(data)
+    if parsed == nil:
+        return data
+
+    # Simple path navigation
+    val path = expr.trim()
+    if path == ".":
+        return json_pretty(parsed)
+
+    # Strip leading dot
+    val clean_path = if path.starts_with("."): path[1:] else: path
+
+    # Handle .[].field pattern (array iteration)
+    if clean_path.starts_with("[]."):
+        val field = clean_path[3:]
+        val arr_len = json_array_length(parsed)
+        var results: [text] = []
+        var i = 0
+        while i < arr_len:
+            val item = json_array_get(parsed, i)
+            val value = json_object_get(item, field)
+            results = results + [json_serialize(value)]
+            i = i + 1
+        return results.join("\n")
+
+    # Simple field access
+    val value = json_object_get(parsed, clean_path)
+    if value != nil:
+        val vtype = json_get_type(value)
+        if vtype == "string":
+            return json_serialize(value)
+        return json_pretty(value)
+
+    ""
+
+
+fn print_table_header(columns: [text]):
+    """Print a table header row with formatting."""
+    if should_use_color():
+        var header = ""
+        for col in columns:
+            header = header + "{ansi_bold()}{col.pad_right(20)}{ansi_reset()}"
+        print header
+    else:
+        var header = ""
+        for col in columns:
+            header = header + col.pad_right(20)
+        print header
+
+
+fn print_table_row(values: [text]):
+    """Print a table data row."""
+    var row = ""
+    for val_text in values:
+        row = row + val_text.pad_right(20)
+    print row
+
+
+fn _visible_len(s: text) -> i64:
+    """Length of `s` excluding ANSI SGR escape sequences (`\x1b[...m`).
+
+    Table column-width math must use this (not `.len()`) whenever a cell may
+    have gone through colorize_state()/ansi_*() — otherwise the escape bytes
+    inflate the measured width and every colored cell misaligns from its
+    plain-text header (found via review: colorize_state fed straight into
+    _table_col_widths/pad_right, which count bytes, before this fix).
+    """
+    var count = 0
+    var i = 0
+    val n = s.len()
+    while i < n:
+        val c = s.char_code_at(i)
+        if c == 27 and i + 1 < n and s.char_code_at(i + 1) == 91:  # ESC '['
+            var j = i + 2
+            while j < n and s.char_code_at(j) != 109:  # until 'm'
+                j = j + 1
+            i = j + 1  # skip the 'm' too
+        else:
+            count = count + 1
+            i = i + 1
+    count
+
+
+fn _pad_visible(s: text, target_width: i64) -> text:
+    """Right-pad `s` with spaces so its VISIBLE width reaches target_width —
+    ANSI SGR codes in `s` don't count, so colored and plain cells still line
+    up in the same column."""
+    val vlen = _visible_len(s)
+    if vlen >= target_width:
+        return s
+    var pad = ""
+    var i = vlen
+    while i < target_width:
+        pad = pad + " "
+        i = i + 1
+    s + pad
+
+
+fn _table_col_widths(headers: [text], rows: [[text]]) -> [i64]:
+    """Max content width per column (visible width, ANSI-aware), seeded
+    with the header width."""
+    var widths: [i64] = []
+    for h in headers:
+        widths.push(_visible_len(h))
+    for row in rows:
+        var i = 0
+        while i < row.len() and i < widths.len():
+            val vlen = _visible_len(row[i])
+            if vlen > widths[i]:
+                widths[i] = vlen
+            i = i + 1
+    widths
+
+
+fn print_table_dynamic(headers: [text], rows: [[text]]):
+    """Print a table with per-column widths computed from content (2-space gap).
+
+    Unlike print_table_header/print_table_row (fixed pad_right(20), used by
+    minio/jira listings), this does not truncate long titles/keys — used for
+    github issue/PR listings where titles vary widely in length. Padding is
+    visible-width-aware (see _pad_visible) so colorize_state()'d cells still
+    align with plain headers/columns.
+
+    Output goes through _emit_lines(), which pages long output through
+    $ITF_PAGER/$PAGER/less -R when stdout looks like an interactive
+    terminal and the table is taller than it (see should_page()/set_no_pager()).
+    """
+    val widths = _table_col_widths(headers, rows)
+    val color = should_use_color()
+    var lines: [text] = []
+    var header_line = ""
+    var i = 0
+    while i < headers.len():
+        val w = if i < widths.len(): widths[i] else: _visible_len(headers[i])
+        header_line = header_line + _pad_visible(headers[i], w + 2)
+        i = i + 1
+    if color:
+        lines.push("{ansi_bold()}{header_line}{ansi_reset()}")
+    else:
+        lines.push(header_line)
+    for row in rows:
+        var line = ""
+        var j = 0
+        while j < row.len():
+            val w = if j < widths.len(): widths[j] else: 0
+            line = line + _pad_visible(row[j], w + 2)
+            j = j + 1
+        lines.push(line)
+    _emit_lines(lines)
+
+
+# ---------------------------------------------------------------------------
+# Pager (J4): $ITF_PAGER / $PAGER / less -R for output taller than the
+# terminal, when stdout looks like an interactive terminal. --no-pager
+# (set_no_pager) always wins.
+# ---------------------------------------------------------------------------
+
+var _no_pager: bool = false
+
+
+fn set_no_pager(value: bool):
+    """Set/clear the --no-pager override. Callers parse --no-pager from
+    their own args and call this once before any print_table_dynamic() —
+    a module-level flag (rather than threading a param through every table
+    call site) keeps existing signatures/call sites stable."""
+    _no_pager = value
+
+
+fn _is_interactive_terminal() -> bool:
+    """Heuristic tty check: a real terminal sets TERM to something other
+    than empty/"dumb". Mirrors std.nogc_sync_mut.cli_output.progress's
+    _check_tty — nogc_sync_mut exposes no isatty() extern to check stdout
+    directly, so this is the same approximation already used elsewhere in
+    this codebase for the same reason."""
+    val term = env_get("TERM")
+    term != "" and term != "dumb"
+
+
+fn should_page(line_count: i64, term_rows: i64, no_pager: bool, is_tty: bool) -> bool:
+    """Pure pager decision — no env/subprocess access, so specs can drive it
+    directly without any risk of spawning a real pager. True only when NOT
+    suppressed, the terminal looks interactive, and the content is taller
+    than the terminal."""
+    if no_pager or not is_tty:
+        return false
+    line_count > term_rows
+
+
+fn resolve_pager_cmd() -> text:
+    """${ITF_PAGER:-${PAGER:-less -R}}."""
+    val itf_pager = env_get("ITF_PAGER")
+    if itf_pager != "":
+        return itf_pager
+    val pager = env_get("PAGER")
+    if pager != "":
+        return pager
+    "less -R"
+
+
+fn _split_pager_cmd(cmd_line: text) -> (text, [text]):
+    """Split a pager command line ("less -R", "bat --paging=always") into
+    (binary, argv) on whitespace. Falls back to `less -R` if empty."""
+    var parts: [text] = []
+    for part in cmd_line.trim().split(" "):
+        if part != "":
+            parts.push(part)
+    if parts.len() == 0:
+        return ("less", ["-R"])
+    (parts[0], parts[1:])
+
+
+fn _emit_lines(lines: [text]):
+    """Print `lines`, routing through the resolved pager when
+    should_page() says to. Falls back to a plain print (never silently
+    drops output) if the pager can't be spawned.
+
+    NEVER call this from a spec with lines.len() > terminal rows unless
+    ITF_PAGER is overridden to a non-interactive command (e.g. "cat") or
+    --no-pager (set_no_pager(true)) is set first — a real interactive
+    pager reading from this process's inherited stdin could hang the test
+    runner. should_page() itself is pure and safe to unit-test directly.
+    """
+    val rows = terminal_get_size().rows
+    if not should_page(lines.len(), rows, _no_pager, _is_interactive_terminal()):
+        for line in lines:
+            print line
+        return
+
+    val tmp_path = "/tmp/itf_pager_output.txt"
+    file_write_text(tmp_path, lines.join("\n") + "\n")
+    val (pager_bin, pager_args) = _split_pager_cmd(resolve_pager_cmd())
+    val code = rt_process_run_inherit(pager_bin, pager_args + [tmp_path])
+    file_delete(tmp_path)
+    if code < 0:
+        # Pager binary missing/unspawnable — never drop the output.
+        for line in lines:
+            print line
+
+
+fn colorize_state(state: text) -> text:
+    """Color a status word: open=green, closed/merged/done=dim, in-progress/review=yellow.
+
+    Used by github issue/PR listings and jira status columns. No-op when
+    color is disabled (NO_COLOR / non-tty) or the state doesn't match a
+    known bucket.
+    """
+    if not should_use_color():
+        return state
+    val lower = state.lower()
+    if lower == "open" or lower == "opened" or lower == "to do" or lower == "todo":
+        return "{ansi_green()}{state}{ansi_reset()}"
+    if lower == "closed" or lower == "merged" or lower == "done" or lower == "resolved":
+        return "{ansi_dim()}{state}{ansi_reset()}"
+    if lower.contains("progress") or lower == "review" or lower == "in review":
+        return "{ansi_yellow()}{state}{ansi_reset()}"
+    state
+
+
+fn open_in_browser(url: text) -> i64:
+    """Open URL in browser (--web flag handler)."""
+    # Try platform-specific openers
+    val (_, _, code) = process_run("xdg-open", [url])
+    if code == 0:
+        return 0
+    val (_, _, code2) = process_run("open", [url])
+    if code2 == 0:
+        return 0
+    print_error("could not open browser for: {url}")
+    1
