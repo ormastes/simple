@@ -3,9 +3,14 @@
 use common.gpu.simpleos_host_gpu_protocol.*
 use common.gpu.simpleos_host_gpu_draw_ir.{
     SimpleOsHostGpuImageResource,
+    SimpleOsHostGpuImageResourceEntry,
+    SimpleOsHostGpuImageResourceRevision,
     simpleos_host_gpu_draw_ir_encode,
     simpleos_host_gpu_image_resource_coverage_reason,
-    simpleos_host_gpu_image_resources_encode
+    simpleos_host_gpu_image_resource_full,
+    simpleos_host_gpu_image_resource_ref,
+    simpleos_host_gpu_image_resources_encode,
+    simpleos_host_gpu_image_resources_encode_retained
 }
 use common.ui.draw_ir.{DrawIrComposition}
 use os.kernel.boot.mmio_hardware.{mmio_read64, mmio_write64, mmio_write8, mmio_memory_barrier}
@@ -42,6 +47,16 @@ struct HostGpuIvshmemHelloReceipt:
     max_readback_bytes: i64
     version: i64
     elapsed_us: i64
+    capability_mask: i64
+
+# Image-resource retention result: the receipt plus the revision table the
+# caller must retain and pass back into the NEXT
+# host_gpu_ivshmem_submit_draw_ir_retained call. Empty on any non-PASS
+# receipt so the following frame re-sends full resources (fail closed —
+# never keeps assuming the host still has what it last accepted).
+struct HostGpuIvshmemDrawIrResult:
+    receipt: HostGpuIvshmemReceipt
+    sent_resources: [SimpleOsHostGpuImageResourceRevision]
 
 fn _host_gpu_error_receipt(status: i64, reason: i64, generation: i64) -> HostGpuIvshmemReceipt:
     HostGpuIvshmemReceipt(completed: false, status: status, reason: reason, generation: generation, native_handle: 0, output_addr: 0u64, output_bytes: 0, output_checksum: 0, elapsed_us: 0, readback_source: 0, device_identity: 0, run_id_hash: 0, frame_id: 0, backend_code: 0)
@@ -144,10 +159,10 @@ fn _host_gpu_publish_payload(base: u64, generation: i64, completion: i64, run_id
 fn host_gpu_ivshmem_negotiate(base: u64, generation: i64, guest_isa: text, render_backend: text, processing_mask: i64, timeout_polls: i64, deadline_us: i64) -> HostGpuIvshmemHelloReceipt:
     val started_now = boot_monotonic_now_us()
     if deadline_us <= 0 or started_now <= 0 or started_now >= deadline_us:
-        return HostGpuIvshmemHelloReceipt(published: false, completed: false, status: SIMPLEOS_HOST_GPU_STATUS_FAIL, reason: SIMPLEOS_HOST_GPU_REASON_TIMEOUT, generation: generation, render_mask: 0, processing_mask: 0, max_payload_bytes: 0, max_readback_bytes: 0, version: 0, elapsed_us: 0)
+        return HostGpuIvshmemHelloReceipt(published: false, completed: false, status: SIMPLEOS_HOST_GPU_STATUS_FAIL, reason: SIMPLEOS_HOST_GPU_REASON_TIMEOUT, generation: generation, render_mask: 0, processing_mask: 0, max_payload_bytes: 0, max_readback_bytes: 0, version: 0, elapsed_us: 0, capability_mask: 0)
     val completion = if base == 0u64: generation else: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_COMPLETION_GENERATION)
     if base == 0u64 or not simpleos_host_gpu_generation_is_fresh(generation, completion) or not _host_gpu_slot_is_idle(base, completion):
-        return HostGpuIvshmemHelloReceipt(published: false, completed: false, status: SIMPLEOS_HOST_GPU_STATUS_FAIL, reason: SIMPLEOS_HOST_GPU_REASON_STALE_GENERATION, generation: generation, render_mask: 0, processing_mask: 0, max_payload_bytes: 0, max_readback_bytes: 0, version: 0, elapsed_us: 0)
+        return HostGpuIvshmemHelloReceipt(published: false, completed: false, status: SIMPLEOS_HOST_GPU_STATUS_FAIL, reason: SIMPLEOS_HOST_GPU_REASON_STALE_GENERATION, generation: generation, render_mask: 0, processing_mask: 0, max_payload_bytes: 0, max_readback_bytes: 0, version: 0, elapsed_us: 0, capability_mask: 0)
     val backend_code = simpleos_host_gpu_backend_code(render_backend)
     _host_gpu_write(base, SIMPLEOS_HOST_GPU_WIRE_MAGIC, SIMPLEOS_HOST_GPU_PROTOCOL_MAGIC)
     _host_gpu_write(base, SIMPLEOS_HOST_GPU_WIRE_VERSION, SIMPLEOS_HOST_GPU_PROTOCOL_VERSION)
@@ -159,6 +174,13 @@ fn host_gpu_ivshmem_negotiate(base: u64, generation: i64, guest_isa: text, rende
     _host_gpu_write(base, SIMPLEOS_HOST_GPU_WIRE_IMAGE_RESOURCE_COUNT, 0)
     _host_gpu_write(base, SIMPLEOS_HOST_GPU_WIRE_IMAGE_RESOURCE_BYTES, 0)
     _host_gpu_write(base, SIMPLEOS_HOST_GPU_WIRE_IMAGE_RESOURCE_CHECKSUM, 0)
+    # This guest build supports image-resource retention; advertise it. Also
+    # pre-clear the response slot ourselves so a host that predates this
+    # capability (and therefore never writes it) hands back a clean 0
+    # instead of a byte left over from an earlier, newer host on a reused
+    # backing file.
+    _host_gpu_write(base, SIMPLEOS_HOST_GPU_WIRE_REQUESTED_CAPABILITY_MASK, SIMPLEOS_HOST_GPU_CAPABILITY_IMAGE_RESOURCE_RETENTION)
+    _host_gpu_write(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_CAPABILITY_MASK, 0)
     mmio_memory_barrier()
     _host_gpu_write(base, SIMPLEOS_HOST_GPU_WIRE_REQUEST_GENERATION, generation)
     var polls: i64 = 0
@@ -169,9 +191,9 @@ fn host_gpu_ivshmem_negotiate(base: u64, generation: i64, guest_isa: text, rende
         observed = _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_COMPLETION_GENERATION)
         now_us = boot_monotonic_now_us()
     if observed != generation or now_us <= 0 or now_us > deadline_us:
-        return HostGpuIvshmemHelloReceipt(published: true, completed: false, status: SIMPLEOS_HOST_GPU_STATUS_FAIL, reason: if observed > generation: SIMPLEOS_HOST_GPU_REASON_STALE_GENERATION else: SIMPLEOS_HOST_GPU_REASON_TIMEOUT, generation: generation, render_mask: 0, processing_mask: 0, max_payload_bytes: 0, max_readback_bytes: 0, version: 0, elapsed_us: 0)
+        return HostGpuIvshmemHelloReceipt(published: true, completed: false, status: SIMPLEOS_HOST_GPU_STATUS_FAIL, reason: if observed > generation: SIMPLEOS_HOST_GPU_REASON_STALE_GENERATION else: SIMPLEOS_HOST_GPU_REASON_TIMEOUT, generation: generation, render_mask: 0, processing_mask: 0, max_payload_bytes: 0, max_readback_bytes: 0, version: 0, elapsed_us: 0, capability_mask: 0)
     mmio_memory_barrier()
-    HostGpuIvshmemHelloReceipt(published: true, completed: true, status: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_STATUS), reason: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_REASON), generation: generation, render_mask: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_RENDER_MASK), processing_mask: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_PROCESSING_MASK), max_payload_bytes: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_MAX_PAYLOAD), max_readback_bytes: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_MAX_READBACK), version: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_VERSION), elapsed_us: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_ELAPSED_US))
+    HostGpuIvshmemHelloReceipt(published: true, completed: true, status: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_STATUS), reason: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_REASON), generation: generation, render_mask: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_RENDER_MASK), processing_mask: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_PROCESSING_MASK), max_payload_bytes: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_MAX_PAYLOAD), max_readback_bytes: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_MAX_READBACK), version: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_VERSION), elapsed_us: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_ELAPSED_US), capability_mask: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_CAPABILITY_MASK))
 
 fn host_gpu_ivshmem_submit(
     base: u64,
@@ -204,6 +226,17 @@ fn host_gpu_ivshmem_submit(
     val checksum = _host_gpu_write_commands(base, commands)
     _host_gpu_publish_payload(base, generation, completion, run_id_hash, frame_id, kind, backend_code, width, height, element_count, payload_bytes, checksum, 0, 0, 0, timeout_polls)
 
+# Shared publish tail for the DRAW_IR kind: writes the already-encoded Draw
+# IR payload + already-encoded image-resource bytes (full or retained
+# format — this helper does not care which) and runs the generation
+# handshake. Pulled out of host_gpu_ivshmem_submit_draw_ir unchanged (same
+# statements, same order) so the retained variant below can reuse it
+# without duplicating the MMIO write/publish sequence.
+fn _host_gpu_submit_draw_ir_common(base: u64, generation: i64, completion: i64, run_id_hash: i64, frame_id: i64, backend_code: i64, width: i64, height: i64, payload_bytes_data: [u8], payload_bytes: i64, command_count: i64, payload_checksum: i64, resource_bytes: [u8], resource_count: i64, resource_checksum: i64, timeout_polls: i64) -> HostGpuIvshmemReceipt:
+    _host_gpu_write_bytes_at(base, simpleos_host_gpu_wire_readback_offset(), resource_bytes)
+    _host_gpu_write_bytes_at(base, simpleos_host_gpu_wire_payload_offset(), payload_bytes_data)
+    _host_gpu_publish_payload(base, generation, completion, run_id_hash, frame_id, SIMPLEOS_HOST_GPU_KIND_DRAW_IR, backend_code, width, height, command_count, payload_bytes, payload_checksum, resource_count, resource_bytes.len().to_i64(), resource_checksum, timeout_polls)
+
 fn host_gpu_ivshmem_submit_draw_ir(base: u64, generation: i64, run_id_hash: i64, frame_id: i64, backend: text, width: i64, height: i64, composition: DrawIrComposition, image_resources: [SimpleOsHostGpuImageResource], timeout_polls: i64) -> HostGpuIvshmemReceipt:
     val completion = if base == 0u64: generation else: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_COMPLETION_GENERATION)
     if base == 0u64 or not simpleos_host_gpu_generation_is_fresh(generation, completion) or not _host_gpu_slot_is_idle(base, completion):
@@ -229,17 +262,83 @@ fn host_gpu_ivshmem_submit_draw_ir(base: u64, generation: i64, run_id_hash: i64,
     val resources = simpleos_host_gpu_image_resources_encode(image_resources, negotiated_max_readback, SIMPLEOS_HOST_GPU_MAX_DRAW_IR_COMMANDS)
     if not resources.ok:
         return _host_gpu_error_receipt(SIMPLEOS_HOST_GPU_STATUS_FAIL, SIMPLEOS_HOST_GPU_REASON_INVALID_REQUEST, generation)
-    val payload_bytes = payload.bytes.len().to_i64()
-    val command_count = payload.command_count
-    val checksum = payload.checksum
-    _host_gpu_write_bytes_at(base, simpleos_host_gpu_wire_readback_offset(), resources.bytes)
-    _host_gpu_write_bytes_at(base, simpleos_host_gpu_wire_payload_offset(), payload.bytes)
-    _host_gpu_publish_payload(base, generation, completion, run_id_hash, frame_id, SIMPLEOS_HOST_GPU_KIND_DRAW_IR, backend_code, width, height, command_count, payload_bytes, checksum, resources.resource_count, resources.bytes.len().to_i64(), resources.checksum, timeout_polls)
+    _host_gpu_submit_draw_ir_common(base, generation, completion, run_id_hash, frame_id, backend_code, width, height, payload.bytes, payload.bytes.len().to_i64(), payload.command_count, payload.checksum, resources.bytes, resources.resource_count, resources.checksum, timeout_polls)
+
+fn _host_gpu_revision_for(sent: [SimpleOsHostGpuImageResourceRevision], image_uri: text) -> i64:
+    for entry in sent:
+        if entry.image_uri == image_uri:
+            return entry.pixel_checksum
+    0
+
+# Retention-aware DRAW_IR submit. Only reachable behavior change vs
+# host_gpu_ivshmem_submit_draw_ir above: when the session negotiated
+# SIMPLEOS_HOST_GPU_CAPABILITY_IMAGE_RESOURCE_RETENTION (read straight off
+# the wire, never cached), each image resource whose content checksum
+# matches what `sent_resources` says was last accepted is sent as a small
+# id+checksum reference instead of full pixel bytes. When retention was NOT
+# negotiated this delegates straight to host_gpu_ivshmem_submit_draw_ir —
+# byte-identical wire output to the pre-retention behavior. The returned
+# sent_resources is empty on any non-PASS receipt so the caller's next
+# frame re-sends everything full (fail closed, no assumption the host
+# still has what it last accepted).
+fn host_gpu_ivshmem_submit_draw_ir_retained(base: u64, generation: i64, run_id_hash: i64, frame_id: i64, backend: text, width: i64, height: i64, composition: DrawIrComposition, image_resources: [SimpleOsHostGpuImageResource], sent_resources: [SimpleOsHostGpuImageResourceRevision], timeout_polls: i64) -> HostGpuIvshmemDrawIrResult:
+    val completion = if base == 0u64: generation else: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_COMPLETION_GENERATION)
+    if base == 0u64 or not simpleos_host_gpu_generation_is_fresh(generation, completion) or not _host_gpu_slot_is_idle(base, completion):
+        return HostGpuIvshmemDrawIrResult(receipt: _host_gpu_error_receipt(SIMPLEOS_HOST_GPU_STATUS_FAIL, SIMPLEOS_HOST_GPU_REASON_STALE_GENERATION, generation), sent_resources: [])
+    if not simpleos_host_gpu_wire_correlation_valid(run_id_hash, frame_id):
+        return HostGpuIvshmemDrawIrResult(receipt: _host_gpu_error_receipt(SIMPLEOS_HOST_GPU_STATUS_FAIL, SIMPLEOS_HOST_GPU_REASON_INVALID_REQUEST, generation), sent_resources: [])
+    if _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_VERSION) != SIMPLEOS_HOST_GPU_PROTOCOL_VERSION:
+        return HostGpuIvshmemDrawIrResult(receipt: _host_gpu_error_receipt(SIMPLEOS_HOST_GPU_STATUS_FAIL, SIMPLEOS_HOST_GPU_REASON_HELLO_REQUIRED, generation), sent_resources: [])
+    val retention_active = (_host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_CAPABILITY_MASK) & SIMPLEOS_HOST_GPU_CAPABILITY_IMAGE_RESOURCE_RETENTION) != 0
+    if not retention_active:
+        val receipt = host_gpu_ivshmem_submit_draw_ir(base, generation, run_id_hash, frame_id, backend, width, height, composition, image_resources, timeout_polls)
+        return HostGpuIvshmemDrawIrResult(receipt: receipt, sent_resources: [])
+    val negotiated_max_payload = _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_MAX_PAYLOAD)
+    if negotiated_max_payload <= 0 or negotiated_max_payload > SIMPLEOS_HOST_GPU_MAX_PAYLOAD_BYTES:
+        return HostGpuIvshmemDrawIrResult(receipt: _host_gpu_error_receipt(SIMPLEOS_HOST_GPU_STATUS_FAIL, SIMPLEOS_HOST_GPU_REASON_INVALID_REQUEST, generation), sent_resources: [])
+    val backend_code = simpleos_host_gpu_backend_code(backend)
+    if backend_code == 0:
+        return HostGpuIvshmemDrawIrResult(receipt: _host_gpu_error_receipt(SIMPLEOS_HOST_GPU_STATUS_UNSUPPORTED, SIMPLEOS_HOST_GPU_REASON_UNSUPPORTED_BACKEND, generation), sent_resources: [])
+    val negotiated_max_readback = _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_MAX_READBACK)
+    if negotiated_max_readback <= 0 or negotiated_max_readback > simpleos_host_gpu_max_readback_bytes():
+        return HostGpuIvshmemDrawIrResult(receipt: _host_gpu_error_receipt(SIMPLEOS_HOST_GPU_STATUS_FAIL, SIMPLEOS_HOST_GPU_REASON_INVALID_REQUEST, generation), sent_resources: [])
+    val payload = simpleos_host_gpu_draw_ir_encode(composition, negotiated_max_payload, SIMPLEOS_HOST_GPU_MAX_DRAW_IR_COMMANDS)
+    if not payload.ok:
+        return HostGpuIvshmemDrawIrResult(receipt: _host_gpu_error_receipt(SIMPLEOS_HOST_GPU_STATUS_UNSUPPORTED, SIMPLEOS_HOST_GPU_REASON_INVALID_REQUEST, generation), sent_resources: [])
+    if simpleos_host_gpu_image_resource_coverage_reason(composition, image_resources) != "":
+        return HostGpuIvshmemDrawIrResult(receipt: _host_gpu_error_receipt(SIMPLEOS_HOST_GPU_STATUS_UNSUPPORTED, SIMPLEOS_HOST_GPU_REASON_INVALID_REQUEST, generation), sent_resources: [])
+
+    var entries: [SimpleOsHostGpuImageResourceEntry] = []
+    var next_sent: [SimpleOsHostGpuImageResourceRevision] = []
+    for resource in image_resources:
+        # Snapshot fields to locals once before the calls below use them —
+        # freestanding guest lane convention.
+        val image_uri = resource.image_uri
+        val res_width = resource.width
+        val res_height = resource.height
+        val pixels = resource.pixels
+        val pixel_count = pixels.len().to_i64()
+        val resource_checksum = simpleos_host_gpu_readback_checksum(pixels, pixel_count)
+        val prior = _host_gpu_revision_for(sent_resources, image_uri)
+        if prior > 0 and prior == resource_checksum:
+            entries.push(simpleos_host_gpu_image_resource_ref(image_uri, res_width, res_height, resource_checksum))
+        else:
+            entries.push(simpleos_host_gpu_image_resource_full(image_uri, res_width, res_height, pixels))
+        next_sent.push(SimpleOsHostGpuImageResourceRevision(image_uri: image_uri, pixel_checksum: resource_checksum))
+
+    val resources = simpleos_host_gpu_image_resources_encode_retained(entries, negotiated_max_readback, SIMPLEOS_HOST_GPU_MAX_DRAW_IR_COMMANDS)
+    if not resources.ok:
+        return HostGpuIvshmemDrawIrResult(receipt: _host_gpu_error_receipt(SIMPLEOS_HOST_GPU_STATUS_FAIL, SIMPLEOS_HOST_GPU_REASON_INVALID_REQUEST, generation), sent_resources: [])
+    val receipt = _host_gpu_submit_draw_ir_common(base, generation, completion, run_id_hash, frame_id, backend_code, width, height, payload.bytes, payload.bytes.len().to_i64(), payload.command_count, payload.checksum, resources.bytes, resources.resource_count, resources.checksum, timeout_polls)
+    val expected_bytes = width * height * 4
+    val ok = host_gpu_ivshmem_device_receipt_valid(receipt, generation, run_id_hash, frame_id, backend_code, expected_bytes)
+    HostGpuIvshmemDrawIrResult(receipt: receipt, sent_resources: if ok: next_sent else: [])
 
 fn host_gpu_ivshmem_fill_u32(base: u64, generation: i64, run_id_hash: i64, frame_id: i64, backend: text, element_count: i64, value: u32, timeout_polls: i64) -> HostGpuIvshmemReceipt:
     val command = SimpleOsHostGpuWireCommand(op: SIMPLEOS_HOST_GPU_COMMAND_FILL_U32, x: 0, y: 0, width: 0, height: 0, value: value.to_i64())
     host_gpu_ivshmem_submit(base, generation, run_id_hash, frame_id, SIMPLEOS_HOST_GPU_KIND_PROCESSING, backend, 0, 0, element_count, [command], timeout_polls)
 
-export HostGpuIvshmemReceipt, HostGpuIvshmemHelloReceipt, host_gpu_ivshmem_device_receipt_valid
+export HostGpuIvshmemReceipt, HostGpuIvshmemHelloReceipt, HostGpuIvshmemDrawIrResult, host_gpu_ivshmem_device_receipt_valid
 export HOST_GPU_IVSHMEM_DEFAULT_TIMEOUT_POLLS, host_gpu_ivshmem_next_generation
 export host_gpu_ivshmem_negotiate, host_gpu_ivshmem_submit, host_gpu_ivshmem_submit_draw_ir, host_gpu_ivshmem_fill_u32
+export host_gpu_ivshmem_submit_draw_ir_retained

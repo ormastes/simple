@@ -1,6 +1,6 @@
 # Canonical Shared WM -> Draw IR -> Engine2D production frame executor.
 
-use common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource, simpleos_host_gpu_image_resource}
+use common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource, SimpleOsHostGpuImageResourceRevision, simpleos_host_gpu_image_resource}
 use common.gpu.simpleos_host_gpu_protocol.{
     SIMPLEOS_HOST_GPU_PROTOCOL_VERSION,
     SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US,
@@ -40,7 +40,8 @@ use os.lib.gpu_bridge.host_gpu_ivshmem.{
     host_gpu_ivshmem_device_receipt_valid,
     host_gpu_ivshmem_negotiate,
     host_gpu_ivshmem_next_generation,
-    host_gpu_ivshmem_submit_draw_ir
+    host_gpu_ivshmem_submit_draw_ir,
+    host_gpu_ivshmem_submit_draw_ir_retained
 }
 
 extern fn serial_println(msg: text)
@@ -60,9 +61,14 @@ class Engine2dWmFrameExecutor:
     # (arm64/riscv64 callers that pass no dims — unchanged behavior).
     fb_w: i64
     fb_h: i64
+    # Cross-frame image-resource retention table (revision-keyed by
+    # image_uri, no pixel bytes). Threaded through host_gpu_ivshmem_submit_draw_ir_retained;
+    # empty whenever retention isn't negotiated with the host, or after any
+    # non-PASS receipt (fail closed — next frame re-sends full resources).
+    image_resource_revisions: [SimpleOsHostGpuImageResourceRevision]
 
     static fn create(engine: Engine2D, framebuffer: FramebufferDriver, fb_w: i64 = 0, fb_h: i64 = 0) -> Engine2dWmFrameExecutor:
-        Engine2dWmFrameExecutor(engine: engine, framebuffer: framebuffer, host_gpu_base: 0u64, host_gpu_run_id_hash: 0, host_gpu_backend: "", host_gpu_backend_code: 0, fb_w: fb_w, fb_h: fb_h)
+        Engine2dWmFrameExecutor(engine: engine, framebuffer: framebuffer, host_gpu_base: 0u64, host_gpu_run_id_hash: 0, host_gpu_backend: "", host_gpu_backend_code: 0, fb_w: fb_w, fb_h: fb_h, image_resource_revisions: [])
 
     static fn create_host_gpu(engine: Engine2D, framebuffer: FramebufferDriver, base: u64, guest_isa_code: i64, backend_code: i64, fb_width: i64, fb_height: i64, negotiation_started_us: i64) -> Engine2dWmFrameExecutor:
         var executor = Engine2dWmFrameExecutor.create(engine, framebuffer, fb_width, fb_height)
@@ -163,11 +169,13 @@ class Engine2dWmFrameExecutor:
         val present_w = if self.fb_w > 0: self.fb_w.to_u32() else: self.framebuffer.width
         val present_h = if self.fb_h > 0: self.fb_h.to_u32() else: self.framebuffer.height
         val expected_bytes = render_w * render_h * 4
-        val receipt = host_gpu_ivshmem_submit_draw_ir(
+        val result = host_gpu_ivshmem_submit_draw_ir_retained(
             self.host_gpu_base, generation, self.host_gpu_run_id_hash, generation,
             self.host_gpu_backend, render_w, render_h,
-            composition, resources, HOST_GPU_IVSHMEM_DEFAULT_TIMEOUT_POLLS
+            composition, resources, self.image_resource_revisions, HOST_GPU_IVSHMEM_DEFAULT_TIMEOUT_POLLS
         )
+        self.image_resource_revisions = result.sent_resources
+        val receipt = result.receipt
         if not host_gpu_ivshmem_device_receipt_valid(receipt, generation, self.host_gpu_run_id_hash, generation, self.host_gpu_backend_code, expected_bytes):
             serial_println("[wm-frame] host-gpu-fallback reason=receipt status={receipt.status} detail={receipt.reason}")
             return false

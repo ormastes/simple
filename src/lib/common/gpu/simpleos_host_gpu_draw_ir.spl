@@ -10,8 +10,9 @@ use std.common.ui.draw_ir_sdn.{draw_ir_to_sdn, sdn_to_draw_ir}
 use std.common.base_encoding.utilities.{text_to_bytes, bytes_to_text}
 use std.common.bytes.{ByteSpan, U32le, U64le}
 use std.common.gpu.simpleos_host_gpu_protocol.{
-    SIMPLEOS_HOST_GPU_IMAGE_RESOURCE_HEADER_BYTES, SIMPLEOS_HOST_GPU_MAX_HEIGHT,
-    SIMPLEOS_HOST_GPU_MAX_IMAGE_URI_BYTES, SIMPLEOS_HOST_GPU_MAX_WIDTH
+    SIMPLEOS_HOST_GPU_IMAGE_RESOURCE_HEADER_BYTES, SIMPLEOS_HOST_GPU_IMAGE_RESOURCE_ENTRY_HEADER_BYTES,
+    SIMPLEOS_HOST_GPU_MAX_HEIGHT, SIMPLEOS_HOST_GPU_MAX_IMAGE_URI_BYTES, SIMPLEOS_HOST_GPU_MAX_WIDTH,
+    simpleos_host_gpu_readback_checksum
 }
 
 struct SimpleOsHostGpuDrawIrPayload:
@@ -44,6 +45,34 @@ struct SimpleOsHostGpuImageResourcesDecode:
     reason: text
     resources: [SimpleOsHostGpuImageResource]
 
+# Retention extension (additive, capability-gated — see
+# SIMPLEOS_HOST_GPU_CAPABILITY_IMAGE_RESOURCE_RETENTION). An entry is either
+# a FULL record (identical payload shape to SimpleOsHostGpuImageResource) or
+# a REFERENCE record that carries only the id (image_uri) + the pixel
+# checksum the sender believes the receiver already retains — no pixel
+# bytes. This is a distinct wire record type from the plain image-resource
+# codec above; the plain encode/decode functions are never touched by this
+# extension so their byte output is unaffected.
+struct SimpleOsHostGpuImageResourceEntry:
+    image_uri: text
+    width: i32
+    height: i32
+    pixels: [u32]
+    is_reference: bool
+    pixel_checksum: i64
+
+struct SimpleOsHostGpuImageResourceEntryDecode:
+    ok: bool
+    reason: text
+    entries: [SimpleOsHostGpuImageResourceEntry]
+
+# Guest-side bookkeeping of what was last accepted by the host for a given
+# image_uri, so it can decide full-vs-reference on the next frame. Carries
+# no pixel bytes — only the id + revision checksum.
+struct SimpleOsHostGpuImageResourceRevision:
+    image_uri: text
+    pixel_checksum: i64
+
 fn _simpleos_host_gpu_draw_ir_empty() -> DrawIrComposition:
     draw_ir_composition("", "", "", [])
 
@@ -74,6 +103,12 @@ fn _simpleos_host_gpu_image_resources_reject(reason: text) -> SimpleOsHostGpuIma
 
 fn _simpleos_host_gpu_image_resources_decode_reject(reason: text) -> SimpleOsHostGpuImageResourcesDecode:
     SimpleOsHostGpuImageResourcesDecode(ok: false, reason: reason, resources: [])
+
+fn _simpleos_host_gpu_image_entries_reject(reason: text) -> SimpleOsHostGpuImageResourcesPayload:
+    SimpleOsHostGpuImageResourcesPayload(ok: false, reason: reason, bytes: [], checksum: 0, resource_count: 0)
+
+fn _simpleos_host_gpu_image_entries_decode_reject(reason: text) -> SimpleOsHostGpuImageResourceEntryDecode:
+    SimpleOsHostGpuImageResourceEntryDecode(ok: false, reason: reason, entries: [])
 
 fn _simpleos_host_gpu_align8(value: i64) -> i64:
     ((value + 7) / 8) * 8
@@ -415,8 +450,272 @@ fn simpleos_host_gpu_image_resource_coverage_reason(composition: DrawIrCompositi
                     return "missing-image-resource"
     ""
 
+fn simpleos_host_gpu_image_resource_full(image_uri: text, width: i32, height: i32, pixels: [u32]) -> SimpleOsHostGpuImageResourceEntry:
+    SimpleOsHostGpuImageResourceEntry(image_uri: image_uri, width: width, height: height, pixels: pixels, is_reference: false, pixel_checksum: 0)
+
+fn simpleos_host_gpu_image_resource_ref(image_uri: text, width: i32, height: i32, pixel_checksum: i64) -> SimpleOsHostGpuImageResourceEntry:
+    SimpleOsHostGpuImageResourceEntry(image_uri: image_uri, width: width, height: height, pixels: [], is_reference: true, pixel_checksum: pixel_checksum)
+
+fn _simpleos_host_gpu_entry_uri_seen(entries: [SimpleOsHostGpuImageResourceEntry], limit: i64, image_uri: text) -> bool:
+    var i: i64 = 0
+    while i < limit:
+        if entries[i].image_uri == image_uri:
+            return true
+        i = i + 1
+    false
+
+fn _simpleos_host_gpu_image_entry_reason(entry: SimpleOsHostGpuImageResourceEntry) -> text:
+    val uri_bytes = text_to_bytes(entry.image_uri)
+    val uri_len = uri_bytes.len()
+    val uri_count = uri_len.to_i64()
+    if entry.image_uri == "":
+        return "missing-image-uri"
+    if uri_len == 0 or uri_count > SIMPLEOS_HOST_GPU_MAX_IMAGE_URI_BYTES or bytes_to_text(uri_bytes) != entry.image_uri:
+        return "invalid-image-uri"
+    if entry.width <= 0 or entry.height <= 0 or entry.width.to_i64() > SIMPLEOS_HOST_GPU_MAX_WIDTH or entry.height.to_i64() > SIMPLEOS_HOST_GPU_MAX_HEIGHT:
+        return "invalid-image-dimensions"
+    if entry.is_reference:
+        if entry.pixels.len() != 0:
+            return "reference-carries-pixels"
+        if entry.pixel_checksum <= 0:
+            return "invalid-reference-checksum"
+        return ""
+    val pixel_count = entry.width.to_i64() * entry.height.to_i64()
+    val pixels_len = entry.pixels.len()
+    if pixels_len.to_i64() != pixel_count:
+        return "pixel-count-mismatch"
+    ""
+
+# Encode a mix of full and reference image-resource entries. Only reachable
+# once both ends have negotiated SIMPLEOS_HOST_GPU_CAPABILITY_IMAGE_RESOURCE_RETENTION;
+# callers on a plain/legacy session keep using simpleos_host_gpu_image_resources_encode
+# above, whose bytes this function never touches or influences.
+#
+# ponytail: the content-revision key for a full entry is
+# simpleos_host_gpu_readback_checksum (reused from the existing readback
+# path, not a new hash) — a plain additive sum mod 2^31 that is order-
+# insensitive and collision-weak: a genuinely changed image whose pixels
+# happen to sum to the same value would be (mis)treated as unchanged both
+# here (guest decides full-vs-reference by this checksum) and by
+# simpleos_host_gpu_resolve_retained_images below (host's stale-check
+# compares the same checksum, so it would not catch the collision either).
+# Sanctioned for this slice (shared code path, low real-content collision
+# rate, real proof is OVMF-gated); a position-sensitive hash is required
+# before this checksum is trusted as a production content-revision key.
+fn simpleos_host_gpu_image_resources_encode_retained(entries: [SimpleOsHostGpuImageResourceEntry], max_bytes: i64, max_resources: i64) -> SimpleOsHostGpuImageResourcesPayload:
+    if max_bytes < 0 or max_resources < 0:
+        return _simpleos_host_gpu_image_entries_reject("invalid-limits")
+    val entries_len = entries.len()
+    val entry_count = entries_len.to_i64()
+    if entry_count > max_resources:
+        return _simpleos_host_gpu_image_entries_reject("too-many-resources")
+    var total_bytes: i64 = 0
+    var entry_index: i64 = 0
+    while entry_index < entry_count:
+        val entry = entries[entry_index]
+        val reason = _simpleos_host_gpu_image_entry_reason(entry)
+        if reason != "":
+            return _simpleos_host_gpu_image_entries_reject(reason)
+        if _simpleos_host_gpu_entry_uri_seen(entries, entry_index, entry.image_uri):
+            return _simpleos_host_gpu_image_entries_reject("duplicate-image-uri")
+        val uri = text_to_bytes(entry.image_uri)
+        val uri_bytes = uri.len().to_i64()
+        val pixel_bytes = if entry.is_reference: 0 else: entry.pixels.len().to_i64() * 4
+        val record_bytes = SIMPLEOS_HOST_GPU_IMAGE_RESOURCE_ENTRY_HEADER_BYTES + _simpleos_host_gpu_align8(uri_bytes) + _simpleos_host_gpu_align8(pixel_bytes)
+        if record_bytes < SIMPLEOS_HOST_GPU_IMAGE_RESOURCE_ENTRY_HEADER_BYTES or total_bytes > max_bytes - record_bytes:
+            return _simpleos_host_gpu_image_entries_reject("payload-too-large")
+        total_bytes = total_bytes + record_bytes
+        entry_index = entry_index + 1
+
+    var bytes: [u8] = []
+    for entry in entries:
+        val uri = text_to_bytes(entry.image_uri)
+        val kind: i64 = if entry.is_reference: 1 else: 0
+        var pixel_bytes: [u8] = []
+        var pixel_checksum = entry.pixel_checksum
+        var pixel_count: i64 = 0
+        if not entry.is_reference:
+            for pixel in entry.pixels:
+                pixel_bytes = _simpleos_host_gpu_append_u32le(pixel_bytes, pixel.to_i64())
+            pixel_checksum = simpleos_host_gpu_readback_checksum(entry.pixels, entry.pixels.len().to_i64())
+            pixel_count = entry.pixels.len().to_i64()
+        val uri_len = uri.len()
+        val uri_count = uri_len.to_i64()
+        val pixel_bytes_len = pixel_bytes.len()
+        val pixel_byte_count = pixel_bytes_len.to_i64()
+        val record_bytes = SIMPLEOS_HOST_GPU_IMAGE_RESOURCE_ENTRY_HEADER_BYTES + _simpleos_host_gpu_align8(uri_count) + _simpleos_host_gpu_align8(pixel_byte_count)
+        bytes = _simpleos_host_gpu_append_u64le(bytes, record_bytes)
+        bytes = _simpleos_host_gpu_append_u64le(bytes, kind)
+        bytes = _simpleos_host_gpu_append_u64le(bytes, uri_count)
+        bytes = _simpleos_host_gpu_append_u64le(bytes, entry.width.to_i64())
+        bytes = _simpleos_host_gpu_append_u64le(bytes, entry.height.to_i64())
+        bytes = _simpleos_host_gpu_append_u64le(bytes, pixel_count)
+        bytes = _simpleos_host_gpu_append_u64le(bytes, pixel_checksum)
+        for byte in uri:
+            bytes.push(byte)
+        bytes = _simpleos_host_gpu_append_zeroes(bytes, _simpleos_host_gpu_align8(uri_count) - uri_count)
+        for byte in pixel_bytes:
+            bytes.push(byte)
+        bytes = _simpleos_host_gpu_append_zeroes(bytes, _simpleos_host_gpu_align8(pixel_byte_count) - pixel_byte_count)
+    SimpleOsHostGpuImageResourcesPayload(ok: true, reason: "ok", bytes: bytes, checksum: _simpleos_host_gpu_image_resources_checksum(bytes), resource_count: entry_count)
+
+fn simpleos_host_gpu_image_resources_decode_retained(bytes: [u8], expected_count: i64, expected_checksum: i64, max_bytes: i64, max_resources: i64) -> SimpleOsHostGpuImageResourceEntryDecode:
+    if max_bytes < 0 or max_resources < 0 or expected_count < 0:
+        return _simpleos_host_gpu_image_entries_decode_reject("invalid-limits")
+    if expected_count > max_resources:
+        return _simpleos_host_gpu_image_entries_decode_reject("too-many-resources")
+    val bytes_len = bytes.len()
+    val byte_count = bytes_len.to_i64()
+    if byte_count > max_bytes:
+        return _simpleos_host_gpu_image_entries_decode_reject("payload-too-large")
+    if _simpleos_host_gpu_image_resources_checksum(bytes) != expected_checksum:
+        return _simpleos_host_gpu_image_entries_decode_reject("checksum-mismatch")
+
+    val span = ByteSpan.new(bytes)
+    var image_uris: [text] = []
+    var offset: i64 = 0
+    var record_index: i64 = 0
+    while record_index < expected_count:
+        if offset > byte_count - SIMPLEOS_HOST_GPU_IMAGE_RESOURCE_ENTRY_HEADER_BYTES:
+            return _simpleos_host_gpu_image_entries_decode_reject("truncated-header")
+        val record_bytes = _simpleos_host_gpu_load_u64le(span, offset)
+        val kind = _simpleos_host_gpu_load_u64le(span, offset + 8)
+        val uri_count = _simpleos_host_gpu_load_u64le(span, offset + 16)
+        val width = _simpleos_host_gpu_load_u64le(span, offset + 24)
+        val height = _simpleos_host_gpu_load_u64le(span, offset + 32)
+        val pixel_count = _simpleos_host_gpu_load_u64le(span, offset + 40)
+        val pixel_checksum = _simpleos_host_gpu_load_u64le(span, offset + 48)
+        if kind != 0 and kind != 1:
+            return _simpleos_host_gpu_image_entries_decode_reject("invalid-entry-kind")
+        if record_bytes < SIMPLEOS_HOST_GPU_IMAGE_RESOURCE_ENTRY_HEADER_BYTES or record_bytes > max_bytes or record_bytes > byte_count - offset:
+            return _simpleos_host_gpu_image_entries_decode_reject("invalid-record-bytes")
+        if uri_count <= 0 or uri_count > SIMPLEOS_HOST_GPU_MAX_IMAGE_URI_BYTES:
+            return _simpleos_host_gpu_image_entries_decode_reject("invalid-image-uri")
+        if width <= 0 or height <= 0 or width > SIMPLEOS_HOST_GPU_MAX_WIDTH or height > SIMPLEOS_HOST_GPU_MAX_HEIGHT:
+            return _simpleos_host_gpu_image_entries_decode_reject("invalid-image-dimensions")
+        if kind == 1 and pixel_count != 0:
+            return _simpleos_host_gpu_image_entries_decode_reject("reference-carries-pixels")
+        if kind == 0 and pixel_count != width * height:
+            return _simpleos_host_gpu_image_entries_decode_reject("pixel-count-mismatch")
+        if kind == 1 and pixel_checksum <= 0:
+            return _simpleos_host_gpu_image_entries_decode_reject("invalid-reference-checksum")
+        val uri_padded = _simpleos_host_gpu_align8(uri_count)
+        val pixel_bytes = pixel_count * 4
+        val pixel_padded = _simpleos_host_gpu_align8(pixel_bytes)
+        val canonical_record_bytes = SIMPLEOS_HOST_GPU_IMAGE_RESOURCE_ENTRY_HEADER_BYTES + uri_padded + pixel_padded
+        if record_bytes != canonical_record_bytes or canonical_record_bytes > byte_count - offset:
+            return _simpleos_host_gpu_image_entries_decode_reject("invalid-record-bytes")
+        val uri_start = offset + SIMPLEOS_HOST_GPU_IMAGE_RESOURCE_ENTRY_HEADER_BYTES
+        val pixel_start = uri_start + uri_padded
+        if not _simpleos_host_gpu_zero_range(bytes, uri_start + uri_count, uri_padded - uri_count) or not _simpleos_host_gpu_zero_range(bytes, pixel_start + pixel_bytes, pixel_padded - pixel_bytes):
+            return _simpleos_host_gpu_image_entries_decode_reject("nonzero-padding")
+        val uri_span = span.slice(uri_start, uri_count)
+        val uri_raw = uri_span.to_bytes()
+        val image_uri = bytes_to_text(uri_raw)
+        if image_uri == "" or not _simpleos_host_gpu_draw_ir_bytes_equal(uri_raw, text_to_bytes(image_uri)):
+            return _simpleos_host_gpu_image_entries_decode_reject("invalid-image-uri")
+        if _simpleos_host_gpu_text_seen(image_uris, image_uri):
+            return _simpleos_host_gpu_image_entries_decode_reject("duplicate-image-uri")
+        image_uris.push(image_uri)
+        offset = offset + record_bytes
+        record_index = record_index + 1
+    if offset != byte_count:
+        return _simpleos_host_gpu_image_entries_decode_reject("trailing-bytes")
+
+    var entries: [SimpleOsHostGpuImageResourceEntry] = []
+    offset = 0
+    var entry_index: i64 = 0
+    while entry_index < expected_count:
+        val record_bytes = _simpleos_host_gpu_load_u64le(span, offset)
+        val kind = _simpleos_host_gpu_load_u64le(span, offset + 8)
+        val uri_count = _simpleos_host_gpu_load_u64le(span, offset + 16)
+        val width = _simpleos_host_gpu_load_u64le(span, offset + 24)
+        val height = _simpleos_host_gpu_load_u64le(span, offset + 32)
+        val pixel_count = _simpleos_host_gpu_load_u64le(span, offset + 40)
+        val pixel_checksum = _simpleos_host_gpu_load_u64le(span, offset + 48)
+        val pixel_start = offset + SIMPLEOS_HOST_GPU_IMAGE_RESOURCE_ENTRY_HEADER_BYTES + _simpleos_host_gpu_align8(uri_count)
+        var pixels: [u32] = []
+        if kind == 0:
+            var pixel_index: i64 = 0
+            while pixel_index < pixel_count:
+                val pixel = _simpleos_host_gpu_load_u32le(span, pixel_start + pixel_index * 4)
+                pixels.push(pixel)
+                pixel_index = pixel_index + 1
+            val actual_checksum = simpleos_host_gpu_readback_checksum(pixels, pixel_count)
+            if actual_checksum != pixel_checksum:
+                return _simpleos_host_gpu_image_entries_decode_reject("pixel-checksum-mismatch")
+        entries.push(SimpleOsHostGpuImageResourceEntry(
+            image_uri: image_uris[entry_index],
+            width: width.to_i32(),
+            height: height.to_i32(),
+            pixels: pixels,
+            is_reference: kind == 1,
+            pixel_checksum: pixel_checksum
+        ))
+        offset = offset + record_bytes
+        entry_index = entry_index + 1
+    SimpleOsHostGpuImageResourceEntryDecode(ok: true, reason: "ok", entries: entries)
+
+struct SimpleOsHostGpuRetainedResolution:
+    ok: bool
+    reason: text
+    resolved: [SimpleOsHostGpuImageResource]
+    retained: [SimpleOsHostGpuImageResource]
+
+fn _simpleos_host_gpu_retained_reject(reason: text, retained: [SimpleOsHostGpuImageResource]) -> SimpleOsHostGpuRetainedResolution:
+    SimpleOsHostGpuRetainedResolution(ok: false, reason: reason, resolved: [], retained: retained)
+
+# Host-side table resolution: turns decoded entries (full or reference)
+# into concrete resources by resolving references against the host's
+# retained table. A reference whose uri is missing from the table, or
+# whose checksum no longer matches what the table holds, fails CLOSED —
+# `ok: false` and the input `retained` table is returned UNCHANGED so the
+# caller can finish the request with a resubmit-requested error instead of
+# ever rendering with a missing or stale resource. A full entry is
+# resolved as given and upserted into the returned table so later frames
+# in the same session can reference it.
+fn simpleos_host_gpu_resolve_retained_images(entries: [SimpleOsHostGpuImageResourceEntry], retained: [SimpleOsHostGpuImageResource]) -> SimpleOsHostGpuRetainedResolution:
+    var resolved: [SimpleOsHostGpuImageResource] = []
+    var next_retained = retained
+    for entry in entries:
+        if entry.is_reference:
+            var found = false
+            var cached_index: i64 = 0
+            var i: i64 = 0
+            while i < next_retained.len():
+                if next_retained[i].image_uri == entry.image_uri:
+                    found = true
+                    cached_index = i
+                i = i + 1
+            if not found:
+                return _simpleos_host_gpu_retained_reject("unknown-image-resource", retained)
+            val cached = next_retained[cached_index]
+            val cached_checksum = simpleos_host_gpu_readback_checksum(cached.pixels, cached.pixels.len().to_i64())
+            if cached_checksum != entry.pixel_checksum or cached.width != entry.width or cached.height != entry.height:
+                return _simpleos_host_gpu_retained_reject("stale-image-resource", retained)
+            resolved.push(cached)
+        else:
+            val full = simpleos_host_gpu_image_resource(entry.image_uri, entry.width, entry.height, entry.pixels)
+            resolved.push(full)
+            var replaced = false
+            var upserted: [SimpleOsHostGpuImageResource] = []
+            for existing in next_retained:
+                if existing.image_uri == entry.image_uri:
+                    upserted.push(full)
+                    replaced = true
+                else:
+                    upserted.push(existing)
+            if not replaced:
+                upserted.push(full)
+            next_retained = upserted
+    SimpleOsHostGpuRetainedResolution(ok: true, reason: "ok", resolved: resolved, retained: next_retained)
+
 export SimpleOsHostGpuDrawIrPayload, SimpleOsHostGpuDrawIrDecode
 export SimpleOsHostGpuImageResource, SimpleOsHostGpuImageResourcesPayload, SimpleOsHostGpuImageResourcesDecode
+export SimpleOsHostGpuImageResourceEntry, SimpleOsHostGpuImageResourceEntryDecode, SimpleOsHostGpuImageResourceRevision
 export simpleos_host_gpu_draw_ir_encode, simpleos_host_gpu_draw_ir_decode
 export simpleos_host_gpu_image_resource, simpleos_host_gpu_image_resources_encode, simpleos_host_gpu_image_resources_decode
 export simpleos_host_gpu_image_resource_coverage_reason
+export simpleos_host_gpu_image_resource_full, simpleos_host_gpu_image_resource_ref
+export simpleos_host_gpu_image_resources_encode_retained, simpleos_host_gpu_image_resources_decode_retained
+export SimpleOsHostGpuRetainedResolution, simpleos_host_gpu_resolve_retained_images
