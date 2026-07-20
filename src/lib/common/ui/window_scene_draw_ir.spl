@@ -730,6 +730,28 @@ fn _wm_draw_ir_window_batch(scene: SharedWmScene, window: SharedWmWindow, backen
     if window.chrome_kind == WM_CHROME_KIND_BORDERLESS:
         return draw_ir_batch_with_source("window-{window.window_id}", backend_target, embedding, [], _wm_draw_ir_source("wm.window.{window.window_id}", "wm.window", _wm_draw_ir_window_revision(window)))
     val title_color = if window.focused: theme.title_focused else: theme.title_unfocused
+    # DrawIR-native Aqua titlebar gloss — ATTEMPTED 2026-07-20, REVERTED, root
+    # cause filed (not fixed here; out of this change's scope). Per-row boxes
+    # reusing _wm_titlebar_shade/_wm_titlebar_lerp (the exact same math as
+    # SharedWmPixelBufferBackend._px_fill_titlebar_gradient /
+    # _wm_draw_titlebar_gradient) were pushed in a `while` loop, one 1px-high
+    # draw_ir_box_with_style per row, ending in a 1px darker border row —
+    # structurally correct and confirmed by real OVMF boot pixel evidence to
+    # NOT be a rendering/skip problem: a one-shot serial probe on row 1 showed
+    # the pushed DrawIrCommand was present (`cmd_present=1`) with the right
+    # height (1) but a wrongly-computed color of 0xFF000000 (pure black),
+    # while the *exact same* _wm_titlebar_shade call made once, OUTSIDE the
+    # loop, for the border row computed correctly (title_color-40, verified
+    # pixel-for-pixel on screen). That points at outer `val`s
+    # (titlebar_top/titlebar_bottom, bound before the loop) reading back
+    # wrong from inside the while-loop body — a codegen bug, not a logic bug
+    # in this function. Binding the loop's DrawIrCommand to a typed `val`
+    # before `.push()` (the fix pattern used for the erased-receiver bug in
+    # vfs_boot_init.spl) made no difference. Painting the flat box first and
+    # the (buggy) gradient rows on top did not help either, since the wrong
+    # rows are actually black and DO render, painting over the safe fallback.
+    # Restored to the single flat box below until the underlying compiler bug
+    # is fixed; do not re-attempt this pattern without new pixel evidence.
     draw_ir_batch_with_source(
         "window-{window.window_id}",
         backend_target,
