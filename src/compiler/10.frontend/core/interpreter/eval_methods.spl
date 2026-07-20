@@ -373,8 +373,39 @@ fn eval_text_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
             if eval_had_error: return -1
             val sep = val_get_text(sep_val)
             val parts = s.split(sep)
+            # Bug (text-split-limit-ignored, 2026-07-20): a second `limit`
+            # arg (`.split(sep, N)`) was silently ignored here -- this
+            # handler always split on every occurrence of `sep`. splitn
+            # semantics: keep the first `limit - 1` parts as-is, then rejoin
+            # the remaining parts with `sep` to form the final element
+            # (mirrors Rust's str::splitn). NOTE: unverified against a live
+            # run -- the currently-deployed bin/simple is a Rust seed binary
+            # whose own dispatch (interpreter_method/string.rs,
+            # interpreter_helpers/method_dispatch.rs) has the identical bug
+            # and is intentionally NOT touched here (never edit Rust seed
+            # code); this .spl path only takes effect once a self-hosted
+            # redeploy replaces the pinned seed. See bug_db.sdn:
+            # text-split-limit-ignored.
+            var limited: [text] = parts
+            if arg_eids.len() > 1:
+                val limit_val = eval_expr(arg_eids[1])
+                if eval_had_error: return -1
+                val limit = val_get_int(limit_val)
+                if limit > 0 and parts.len() > limit:
+                    var head: [text] = []
+                    var i = 0
+                    while i < limit - 1:
+                        head.push(parts[i])
+                        i = i + 1
+                    var tail: [text] = []
+                    var j = limit - 1
+                    while j < parts.len():
+                        tail.push(parts[j])
+                        j = j + 1
+                    head.push(tail.join(sep))
+                    limited = head
             var result: [i64] = []
-            for p in parts:
+            for p in limited:
                 result.push(val_make_text(p))
             return val_make_array(result)
         return val_make_array([val_make_text(s)])
