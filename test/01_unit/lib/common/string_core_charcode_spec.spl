@@ -317,25 +317,23 @@ describe "string_core - char_from_code_inline":
         through char_code_inline like any other code in its 0..127 range.
         code 999 is a genuinely non-ASCII codepoint (U+03E7) that used to be
         dropped to "" and must now produce its real 2-byte UTF-8 character.
+
+        The actual round-trip/UTF-8-encoding assertions for code 0, 1, 127
+        and 999 live in the subprocess probe
+        (test/03_system/interpreter/char_from_code_non_ascii_probe.spl +
+        char_from_code_non_ascii_system_spec.spl), not here: they all route
+        through _utf8_char_from_codepoint_inline -> rt_bytes_to_text, and
+        that extern call returns empty text when invoked from inside an
+        SSpec `it` block (see
+        doc/08_tracking/bug/sspec_extern_array_arg_marshaling_empty_result_2026-07-20.md)
+        -- asserting the real value in-place here would be red for a
+        toolchain reason unrelated to this fix; asserting the wrong
+        (empty) value would be an assertion that actively breaks the
+        moment that toolchain gap closes. Only the negative-code case
+        stays here: it returns "" via the guard clause *before* ever
+        reaching rt_bytes_to_text, so it is genuinely, meaningfully green
+        under both `run` and `test` today.
         """
-        it "round-trips code 0 (NUL) instead of dropping it":
-            val c0 = char_from_code_inline(0)
-            expect(c0.len()).to_equal(1)
-            expect(char_code_inline(c0)).to_equal(0)
-
-        it "round-trips code 1 (SOH) instead of dropping it":
-            val c1 = char_from_code_inline(1)
-            expect(c1.len()).to_equal(1)
-            expect(char_code_inline(c1)).to_equal(1)
-
-        it "round-trips code 127 (DEL) instead of dropping it":
-            val c127 = char_from_code_inline(127)
-            expect(c127.len()).to_equal(1)
-            expect(char_code_inline(c127)).to_equal(127)
-
-        it "encodes 999 as its real 2-byte UTF-8 character instead of dropping it":
-            expect(char_from_code_inline(999)).to_equal("ϧ")
-
         it "returns empty for negative code":
             expect(char_from_code_inline(-1)).to_equal("")
 
@@ -447,55 +445,24 @@ describe "string_core - Character Classification":
 # chr() / to_char() (which both compile down to a bare char_from_code call
 # resolved to char_from_code_inline) used to be unable to produce ANY
 # non-ASCII character: the old implementation was a plain ASCII table that
-# silently returned "" for every codepoint above U+007F. This block covers
-# one representative codepoint per UTF-8 length class plus the boundary
-# values right at each length transition, and locks in the invalid-input
-# policy: reject surrogates (U+D800..U+DFFF) and anything above U+10FFFF by
-# returning empty text -- the same "can't represent it" fallback the ASCII
-# table already used, applied consistently to the full Unicode range.
+# silently returned "" for every codepoint above U+007F.
+#
+# The non-ASCII encoding coverage itself (one representative codepoint per
+# UTF-8 length class, plus the boundary value at each length transition)
+# lives in the subprocess probe
+# (test/03_system/interpreter/char_from_code_non_ascii_probe.spl +
+# char_from_code_non_ascii_system_spec.spl), NOT here -- see the "codes
+# outside the fast ASCII table" context above for why: those assertions
+# route through rt_bytes_to_text, which returns empty text when called from
+# inside an SSpec `it` block
+# (doc/08_tracking/bug/sspec_extern_array_arg_marshaling_empty_result_2026-07-20.md).
+#
+# The invalid-input policy below does NOT need that treatment: it returns
+# "" via a guard clause before ever reaching rt_bytes_to_text, so it is
+# genuinely green under both `run` and `test`.
 # ============================================================================
 
 describe "string_core - char_from_code_inline non-ASCII (bug fix regression)":
-    context "one representative codepoint per UTF-8 length class":
-        it "encodes Latin-1 U+00E9 (e-acute) as a 2-byte character":
-            val ch = char_from_code_inline(0xE9)
-            expect(ch.len()).to_equal(2)
-            expect(ch).to_equal("é")
-
-        it "encodes CJK U+4E2D as a 3-byte character":
-            val ch = char_from_code_inline(0x4E2D)
-            expect(ch.len()).to_equal(3)
-            expect(ch).to_equal("中")
-
-        it "encodes emoji U+1F600 (outside the BMP) as a 4-byte character":
-            val ch = char_from_code_inline(0x1F600)
-            expect(ch.len()).to_equal(4)
-            expect(ch).to_equal("😀")
-
-    context "UTF-8 length-class boundaries":
-        it "encodes U+007F (last 1-byte codepoint)":
-            val ch = char_from_code_inline(0x7F)
-            expect(ch.len()).to_equal(1)
-            expect(char_code_inline(ch)).to_equal(0x7F)
-
-        it "encodes U+0080 (first 2-byte codepoint)":
-            expect(char_from_code_inline(0x80).len()).to_equal(2)
-
-        it "encodes U+07FF (last 2-byte codepoint)":
-            expect(char_from_code_inline(0x7FF).len()).to_equal(2)
-
-        it "encodes U+0800 (first 3-byte codepoint)":
-            expect(char_from_code_inline(0x800).len()).to_equal(3)
-
-        it "encodes U+FFFF (last 3-byte codepoint, non-surrogate)":
-            expect(char_from_code_inline(0xFFFF).len()).to_equal(3)
-
-        it "encodes U+10000 (first 4-byte codepoint)":
-            expect(char_from_code_inline(0x10000).len()).to_equal(4)
-
-        it "encodes U+10FFFF (last valid Unicode codepoint)":
-            expect(char_from_code_inline(0x10FFFF).len()).to_equal(4)
-
     context "invalid-input policy: reject surrogates and out-of-range codepoints":
         it "returns empty text for the first UTF-16 surrogate (U+D800)":
             expect(char_from_code_inline(0xD800)).to_equal("")
@@ -516,8 +483,10 @@ describe "string_core - char_from_code_inline non-ASCII (bug fix regression)":
             expect(char_from_code_inline(-1)).to_equal("")
 
     context "char_from_code (public alias) matches char_from_code_inline":
-        it "encodes non-ASCII the same way as the inline implementation":
-            expect(char_from_code(0x4E2D)).to_equal(char_from_code_inline(0x4E2D))
-
+        # The non-ASCII agreement check (both sides route through
+        # rt_bytes_to_text) lives in the subprocess probe alongside the
+        # rest of the non-ASCII coverage -- under SSpec both sides would
+        # silently collapse to "" and the comparison would pass vacuously
+        # without actually checking anything. See the header comment above.
         it "rejects invalid codepoints the same way as the inline implementation":
             expect(char_from_code(0xD800)).to_equal("")

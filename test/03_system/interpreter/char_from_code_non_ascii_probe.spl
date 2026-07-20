@@ -1,0 +1,147 @@
+# Plain (non-SSpec) probe for the char_from_code_inline / char_from_code /
+# char_from_codepoint non-ASCII fix, guarded by
+# char_from_code_non_ascii_system_spec.spl. Deliberately NOT a `_spec.spl`
+# file: SSpec `describe`/`it` block bodies always execute via the
+# tree-walking interpreter (even when the enclosing process is launched
+# with plain `bin/simple run`), and that interpreter marshals `[u8]`
+# array-typed extern arguments differently than a plain `run` process does:
+# `rt_bytes_to_text(bytes: [u8])` (the primitive both fixes route through)
+# silently returns empty text under SSpec instead of the real conversion, so
+# an SSpec-only test can never exercise this path. See
+# doc/08_tracking/bug/sspec_extern_array_arg_marshaling_empty_result_2026-07-20.md
+# for the marshaling gap itself, and
+# doc/08_tracking/bug/char_from_code_non_ascii_unsupported_2026-07-20.md for
+# the fix this probe guards.
+#
+# Run directly: `bin/simple run test/03_system/interpreter/char_from_code_non_ascii_probe.spl`
+# Prints "ok" on success, or "fail:<detail>" describing the mismatch.
+
+use std.common.string_core.{char_from_code, char_from_code_inline, char_code_inline}
+use std.common.encoding.utf8.{char_from_codepoint}
+
+fn check_text(label: text, actual: text, expected: text) -> text:
+    if actual != expected:
+        val actual_len = actual.len()
+        val expected_len = expected.len()
+        return "fail:{label} expected_len={expected_len} actual_len={actual_len} actual=[{actual}]"
+    ""
+
+fn check_len(label: text, actual: text, expected_len: i64) -> text:
+    val actual_len = actual.len()
+    if actual_len != expected_len:
+        return "fail:{label} expected_len={expected_len} actual_len={actual_len}"
+    ""
+
+fn check_round_trip(label: text, code: i64) -> text:
+    val ch = char_from_code_inline(code)
+    val ch_len = ch.len()
+    if ch_len != 1:
+        return "fail:{label} len expected=1 actual={ch_len}"
+    val back = char_code_inline(ch)
+    if back != code:
+        return "fail:{label} round-trip expected={code} actual={back}"
+    ""
+
+fn main():
+    # char_from_code_inline / char_from_code -- single-byte control codes
+    # that used to be dropped to "" (outside the old ASCII table's coverage:
+    # only the 5 named controls + 32..126 were handled).
+    var err = check_round_trip("code0", 0)
+    if err != "":
+        print(err)
+        return
+    err = check_round_trip("code1", 1)
+    if err != "":
+        print(err)
+        return
+    err = check_round_trip("code127", 127)
+    if err != "":
+        print(err)
+        return
+
+    # Representative non-ASCII codepoint per UTF-8 length class.
+    err = check_text("code999", char_from_code_inline(999), "ϧ")
+    if err != "":
+        print(err)
+        return
+    err = check_text("eacute", char_from_code_inline(0xE9), "é")
+    if err != "":
+        print(err)
+        return
+    err = check_text("zhong", char_from_code_inline(0x4E2D), "中")
+    if err != "":
+        print(err)
+        return
+    err = check_text("emoji", char_from_code_inline(0x1F600), "😀")
+    if err != "":
+        print(err)
+        return
+
+    # UTF-8 length-class boundaries.
+    err = check_len("U+007F", char_from_code_inline(0x7F), 1)
+    if err != "":
+        print(err)
+        return
+    err = check_len("U+0080", char_from_code_inline(0x80), 2)
+    if err != "":
+        print(err)
+        return
+    err = check_len("U+07FF", char_from_code_inline(0x7FF), 2)
+    if err != "":
+        print(err)
+        return
+    err = check_len("U+0800", char_from_code_inline(0x800), 3)
+    if err != "":
+        print(err)
+        return
+    err = check_len("U+FFFF", char_from_code_inline(0xFFFF), 3)
+    if err != "":
+        print(err)
+        return
+    err = check_len("U+10000", char_from_code_inline(0x10000), 4)
+    if err != "":
+        print(err)
+        return
+    err = check_len("U+10FFFF", char_from_code_inline(0x10FFFF), 4)
+    if err != "":
+        print(err)
+        return
+
+    # char_from_code (public alias) actually agrees with char_from_code_inline
+    # on non-ASCII input -- meaningful here (both sides non-empty), unlike
+    # under SSpec where both sides silently collapse to "" and the
+    # comparison would pass vacuously.
+    val alias_val = char_from_code(0x4E2D)
+    val inline_val = char_from_code_inline(0x4E2D)
+    if alias_val != inline_val:
+        print("fail:alias mismatch")
+        return
+    if alias_val == "":
+        print("fail:alias-empty (marshaling bug would hide as a false pass here)")
+        return
+
+    # char_from_codepoint (encoding/utf8.spl) -- independent instance of the
+    # same bug class, fixed the same way (see the bug doc's "second live
+    # instance" note).
+    err = check_text("codepoint-eacute", char_from_codepoint(0xE9), "é")
+    if err != "":
+        print(err)
+        return
+    err = check_text("codepoint-zhong", char_from_codepoint(0x4E2D), "中")
+    if err != "":
+        print(err)
+        return
+    err = check_text("codepoint-emoji", char_from_codepoint(0x1F600), "😀")
+    if err != "":
+        print(err)
+        return
+    err = check_text("codepoint-surrogate", char_from_codepoint(0xD800), "�")
+    if err != "":
+        print(err)
+        return
+    err = check_text("codepoint-out-of-range", char_from_codepoint(0x110000), "�")
+    if err != "":
+        print(err)
+        return
+
+    print("ok")
