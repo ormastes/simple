@@ -1,5 +1,23 @@
 # Formal Verification Section Test Failures (106/274)
 
+**UPDATE 2026-07-20:** This doc's core premise ("the specification modules
+themselves do not exist in the codebase") is now false — re-triaged on
+2026-07-20 against the same section and the `verification.*` modules are
+present and substantially implemented (real classes/enums/functions, not
+stubs). Only 11 of the original 16 specs still fail, with much smaller
+per-spec failure counts, and the actual causes are narrow, specific defects
+(a wildcard-symbol propagation bug, a missing `use` in a package `__init__`,
+an alias-scoping bug, a member-resolution gap, a missing theorem, plus
+several stale test-side `.?`/Option-unwrap misuses) — not "feature doesn't
+exist." See the individual 2026-07-20-dated bug docs in this directory
+(`verification_cache_invalidate_dependents_wildcard_symbol_`,
+`verification_lean_init_missing_use_before_export_`,
+`interp_use_as_alias_not_visible_in_function_body_`,
+`contract_expr_forall_ge_call_member_not_found_`,
+`lean_regen_memory_capabilities_missing_conversion_theorem_`) for current,
+specific findings. Section is no longer purely "aspirational" — treat future
+failures here as regular bugs, not as an accepted future-feature gap.
+
 **Date:** 2026-07-18  
 **Impact:** 106 test failures (all in 00_formal_verification section)  
 **Pass Rate:** 168/274 (61.3%)  
