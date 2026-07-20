@@ -34,13 +34,44 @@
 # child" either -- root cause is still open.
 #
 # Net effect: this subprocess spec cannot always be strictly "ok" today, so
-# it also accepts the exact, deterministic failure signature the probe
-# prints when it hits this gap (it fails on `code0` first, every time,
-# before reaching any of the later checks) as a known, tracked, non-red
-# outcome -- the same tolerance pattern `for_in_text_jit_system_spec.spl`
-# uses for its own known "#143" limitation. Anything else (a different
-# failure message, garbage output, wrong non-ASCII bytes) is NOT tolerated
-# and fails the spec for real.
+# it also accepts a specific, deterministic, non-red outcome as tolerated --
+# the same tolerance pattern `for_in_text_jit_system_spec.spl` uses for its
+# own known "#143" limitation. Anything else is NOT tolerated and fails the
+# spec for real.
+#
+# IMPORTANT -- what is tolerated and why it is safe to tolerate: the probe
+# runs an up-front canary (`canary_check()` in the probe file) that calls
+# `rt_bytes_to_text` directly, independent of char_from_code_inline /
+# char_from_codepoint entirely, before any encoding logic runs. Only a
+# canary FAILURE (printed as "gap:rt_bytes_to_text_env...") is tolerated
+# here. This was NOT always true: an earlier version of this spec tolerated
+# the probe's first *encoding* failure message instead
+# (`fail:code0 len expected=1 actual=0`), which is EXACTLY what
+# char_from_code_inline(0) also produces if the fix under test were
+# reverted -- so that version of the guard could not tell "environment gap"
+# apart from "real regression" and would have stayed green even with the
+# fix reverted. Verified by reverting src/lib/common/string_core.spl and
+# src/lib/common/encoding/utf8.spl to their pre-fix state in a scratch
+# worktree and running both the probe (`run`) and this spec (`test`)
+# against it:
+#   fixed   + run  -> ok                                    (green)
+#   fixed   + test -> tolerated ("gap:rt_bytes_to_text_env") (green)
+#   reverted+ run  -> fail:code0 ...                         (RED, as expected)
+#   reverted+ test -> with the OLD tolerance: also green (BUG -- guard
+#                     protected nothing); with the canary-based tolerance
+#                     below: STILL "gap:rt_bytes_to_text_env" (canary fails
+#                     before ever reaching char_from_code_inline, since
+#                     rt_bytes_to_text itself is untouched by the revert) --
+#                     this cell remains inherently unobservable through this
+#                     probe (see the doc's "observation 2", last paragraph:
+#                     you cannot distinguish "logic is broken" from "the
+#                     channel to check it is broken" when the channel
+#                     itself is broken), which is now stated here plainly
+#                     rather than silently masked as a passing assertion.
+# The `reverted + test` cell is the one case this guard cannot catch under
+# `bin/simple test` specifically; `reverted + run` (this probe run
+# directly, e.g. in local dev or any environment without the marshaling
+# gap) DOES catch it, which is the real guard for this fix.
 #
 # The purely-ASCII and invalid-input-policy assertions for the same
 # functions do NOT need any of this -- they don't touch rt_bytes_to_text
@@ -96,11 +127,15 @@ fn run_probe() -> (text, text, i64):
         ["run", "test/03_system/interpreter/char_from_code_non_ascii_probe.spl"]
     )
 
-# Exact, deterministic message the probe prints when the still-open
-# nested-subprocess-under-test gap (see the header comment) intercepts it --
-# the probe's checks run in a fixed order and this is always the first one,
-# so this is the only failure signature that gap can ever produce here.
-val _known_nested_under_test_gap_signature = "fail:code0 len expected=1 actual=0"
+# Prefix of the probe's up-front canary-failure message (see
+# canary_check() in char_from_code_non_ascii_probe.spl and the header
+# comment above). Matched by prefix, not exact string, because the message
+# includes the canary's actual (variable) output for diagnostics. This is
+# the ONLY tolerated signature -- deliberately distinct from any "fail:..."
+# message the probe's real encoding checks can produce, so a genuine
+# regression in the encoding logic (which only runs after the canary
+# passes) can never be mistaken for this known environmental gap.
+val _known_env_gap_prefix = "gap:rt_bytes_to_text_env"
 
 describe "char_from_code non-ASCII regression (subprocess)":
     it "encodes Latin-1/CJK/emoji, control codes, UTF-8 length boundaries, and char_from_codepoint correctly under the run path":
@@ -109,12 +144,14 @@ describe "char_from_code non-ASCII regression (subprocess)":
         else:
             val (stdout, stderr, code) = run_probe()
             val out = stdout.trim()
-            if out == _known_nested_under_test_gap_signature:
+            if out.starts_with(_known_env_gap_prefix):
                 # Known, tracked, not-yet-root-caused gap (see header
-                # comment) -- not this fix's non-ASCII encoding logic being
-                # wrong. Tolerated the same way
-                # for_in_text_jit_system_spec.spl tolerates its own known
-                # "#143" limitation.
+                # comment) -- the array-marshaling channel itself is broken
+                # in this environment, confirmed by the canary BEFORE any
+                # char_from_code_inline / char_from_codepoint logic ran, so
+                # this is not this fix's encoding logic being wrong.
+                # Tolerated the same way for_in_text_jit_system_spec.spl
+                # tolerates its own known "#143" limitation.
                 expect(true).to_equal(true)
             else:
                 if out != "ok":

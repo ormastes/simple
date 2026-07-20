@@ -255,6 +255,65 @@ the same defensive `rt_core_as_array` guard clause for unrelated reasons.
 **Do not merge this into observation 1's fix without independently
 confirming the mechanism.**
 
+**The important framing point for whoever picks up observation 2**: since
+the failing process is a genuinely, cleanly `exec`'d child (no shared
+address space, no shared interpreter instance with its parent), the
+trigger CANNOT be an in-process interpreter-evaluator quirk. It has to be
+something the child inherits or observes from its environment at
+`exec`-time. `SIMPLE_COVERAGE` / `SIMPLE_TEST_FILTER` / `SIMPLE_TEST_SHOW_TAGS`
+were checked and ruled out (see above), but that was three specific
+variables, not an exhaustive comparison. Remaining, unchecked candidates,
+roughly in order of how cheap they are to check:
+- **Full env delta.** Have the probe itself dump its entire `env` (or read
+  `/proc/self/environ` if there's no stdlib env-dump primitive handy) under
+  all three parent contexts (standalone, nested-under-`run`,
+  nested-under-`test`) and diff them. This is the most direct way to either
+  confirm or rule out "environment" as a category in one pass, rather than
+  guessing at variable names one at a time.
+- **Working directory.** Confirm the child's actual `cwd` (e.g. via
+  `pwd`/`getcwd`) is identical in the nested-under-`run` and
+  nested-under-`test` cases — `rt_process_run`'s cwd-inheritance behavior
+  was assumed, not directly verified, in this investigation.
+- **stdin/stdout/stderr being a pipe vs. a tty**, and generally which file
+  descriptors are open/inherited. `bin/simple test` necessarily captures
+  its own stdout differently than an interactive shell does (it has to
+  collect SSpec output for the summary report), and that could easily
+  propagate to how it sets up a spawned child's descriptors even though
+  `rt_process_run`'s own basic stdout-capture was independently confirmed
+  to work (see "A basic subprocess+stdout-capture sanity check passes" in
+  the sibling nested-subprocess doc referenced above) — that check used a
+  trivial `/bin/sh -c` command, not a nested `bin/simple run`, so it does
+  not rule this out for a nested Simple child specifically.
+- **Inherited resource limits.** `bin/simple test` running a large,
+  memory-heavy test suite could plausibly have adjusted (or hit) `ulimit`
+  values (open file descriptors, memory, stack) that a spawned child then
+  inherits, in a way that changes how the child's own runtime initializes
+  or allocates the heap that backs `RtCoreArray`/`rt_core_as_array`.
+
+A **full `env` dump diff** between the nested-under-`run` and
+nested-under-`test` cases (first bullet above) is the single fastest way to
+either name the trigger outright or eliminate "environment" as a category
+entirely, and was not done in this investigation — recommended as the
+actual next step, ahead of instrumenting the C runtime (below).
+
+**Four-cell verification of the subprocess-probe guard that found this**
+(`test/03_system/interpreter/char_from_code_non_ascii_probe.spl` +
+`char_from_code_non_ascii_system_spec.spl`, guarding
+`char_from_code_non_ascii_unsupported_2026-07-20.md`): with the fix's
+source reverted (`char_from_code_inline` / `char_from_codepoint` restored
+to their pre-fix, ASCII-only behavior) in a scratch worktree —
+- fix present + `run` → `ok` (correct)
+- fix present + `test` → tolerated (`gap:rt_bytes_to_text_env...`)
+- fix **reverted** + `run` → `fail:code0 len expected=1 actual=0` (correctly
+  RED — this is the real guard)
+- fix **reverted** + `test` → tolerated (`gap:rt_bytes_to_text_env...`,
+  same as fix-present) — the canary that produces this message runs BEFORE
+  any of the reverted encoding logic, and is itself blocked by this
+  observation-2 gap regardless of whether the fix is present or reverted,
+  so this specific cell is unobservable through this probe until
+  observation 2 itself is fixed. Documented plainly in the spec's own
+  header comment rather than left implicit.
+
 ## Suggested next step for whoever picks this up
 
 **Observation 1:** instrument `rt_bytes_to_text` (or `rt_core_as_array`) to

@@ -19,6 +19,27 @@
 use std.common.string_core.{char_from_code, char_from_code_inline, char_code_inline}
 use std.common.encoding.utf8.{char_from_codepoint}
 
+extern fn rt_bytes_to_text(bytes: [u8]) -> text
+
+fn canary_check() -> text:
+    # Direct, independent probe of rt_bytes_to_text -- NOT routed through
+    # char_from_code_inline / char_from_codepoint at all -- run first so a
+    # caller can tell "the array-marshaling channel itself is broken in
+    # this environment" (see
+    # doc/08_tracking/bug/sspec_extern_array_arg_marshaling_empty_result_2026-07-20.md,
+    # "observation 2") apart from "the encoding logic below is wrong". The
+    # two failure modes print different, non-overlapping messages
+    # ("gap:..." vs "fail:...") on purpose: char_from_code_non_ascii_system_spec.spl
+    # tolerates the former as a known environmental gap but must NOT
+    # tolerate the latter, or a genuine regression in the encoding logic
+    # would be indistinguishable from the environmental gap and the guard
+    # would protect nothing under `bin/simple test`.
+    val t = rt_bytes_to_text([65u8, 66u8])
+    if t != "AB":
+        val t_len = t.len()
+        return "gap:rt_bytes_to_text_env actual_len={t_len} actual=[{t}]"
+    ""
+
 fn check_text(label: text, actual: text, expected: text) -> text:
     if actual != expected:
         val actual_len = actual.len()
@@ -43,6 +64,16 @@ fn check_round_trip(label: text, code: i64) -> text:
     ""
 
 fn main():
+    # Run the canary FIRST, before anything that depends on
+    # char_from_code_inline / char_from_codepoint. If this environment's
+    # array-marshaling channel is broken, every later check would fail with
+    # a misleading "the encoding is wrong"-shaped message even though the
+    # encoding logic was never actually exercised.
+    val canary_err = canary_check()
+    if canary_err != "":
+        print(canary_err)
+        return
+
     # char_from_code_inline / char_from_code -- single-byte control codes
     # that used to be dropped to "" (outside the old ASCII table's coverage:
     # only the 5 named controls + 32..126 were handled).
