@@ -81,9 +81,24 @@ Full audit: session scratchpad `riscv_docs/w1c_claim_audit.md`.
   distinct MIR types + VHDL widths; unspecialized generic = compile error).
 - W2-B: audit VHDL source-subset path for AOP/decorator silent-skip; add loud
   failure + `aop_weave_count` in generation manifest.
-- W2-C (launched with Wave 1): wire `core64_step` to the already-tested
-  `core64_combinational`/`core64_update` path; existing integration/RVFI specs
-  are the gate; keep every `core64_step` caller working.
+- W2-C **DROPPED — SUPERSEDED UPSTREAM** (revert guard caught it at land
+  time): while the lane was in flight, parallel-session commit `81d904de4b5`
+  re-landed the full July-18-lineage implementation into `core.spl` (+435
+  lines: PMP, MMU-phased memory pipeline, trap entry, interrupts, compressed
+  parcels, bus-protocol `core64_cycle`) — strictly more complete than this
+  lane's single-cycle wiring, which would have reverted it. The reviewed
+  W2-C diff (behavior-probed: ADD → x1=42) is retained in session scratchpad
+  `w2c/` as reference only. The upstream reland left a dangling
+  `core64_step` export + 4 spec call sites — filed as
+  `doc/08_tracking/bug/rv64gc_core64_step_removed_dangling_export_2026-07-21.md`
+  (owner: the reland session; masked today by the stale-seed runner outage).
+- W2-D (re-scoped after upstream reland): `soc_rtl/soc_top_64.spl:91`
+  `soc_top_64_tick` still bypasses the core (`out.core.pc = out.core.pc + 4`)
+  — wire the SoC tick through upstream `core64_cycle` (request_ready/
+  response_valid protocol), and resolve which function the VHDL generator
+  treats as the rv64 synthesis top. Coordinate with the `81d904de4b5`
+  session before starting; blocked on their spec migration for
+  `core64_step`.
 
 ## Wave 3 — Phase 2 shared core skeleton (after Wave 2 green)
 
