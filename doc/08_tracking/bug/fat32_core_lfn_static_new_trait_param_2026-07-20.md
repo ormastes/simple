@@ -180,33 +180,40 @@ this fix's relanded SHA `6b793e5d2b2`):
   also **predates** this fix's landing (2026-07-20 11:02), so it cannot speak
   to post-fix behavior either way.
   Running `bin/simple test test/01_unit/lib/fs_driver/fat32_core_lfn_spec.spl`
-  through the normal wrapper (not a direct seed invocation) produced a THIRD,
-  different shape of result: no per-example `✓`/`✗` lines at all, one generic
-  `error: test-runner: spec failed`, and a summary block reading `Files: 1 /
-  Passed: 0 / Failed: 2` — 2 does not match the file's 17 static `it` blocks
-  under any itemized accounting. This is the pre-fix "unknown static method"
-  bug (expected, given the binary's age) but surfaced through
-  `test_runner_client.spl`'s daemon-unavailable fallback (`ensure_daemon()`
-  fails -> spawns `bin/simple test --no-session-daemon <path>` as a
-  subprocess via `process_run_bounded` and re-parses its captured
-  out/err/code) rather than a clean single-process run. A **direct** seed
-  invocation (bypassing that recursive wrapper entirely, as done above) gives
-  a clean itemized 0/17 or 17/17; going *through* the wrapper's
-  subprocess-capture path visibly distorts the reported count. This is an
-  observed instance of exactly the discovery/pipe-capture-truncation count
-  distortion class flagged as a candidate explanation for "0/6" — captured
-  here on the pre-fix binary, but the same wrapper code path applies
-  regardless of which binary/fix state it wraps.
-- **Conclusion:** the FAT32 LFN driver logic is confirmed correct (17/17,
-  deterministic, direct invocation of a fix-verified binary); sync/async
-  `fat32_parsers.spl` are byte-identical (no divergence to fix); the
-  pure-Simple compiler has no analog of the fixed bug. No binary or invocation
-  path available in this session both (a) contains the 2026-07-20 fix and (b)
-  goes through the standard `bin/simple test` wrapper, so "0/6" itself was not
-  literally reproduced — but the wrapper's subprocess-capture layer was caught
-  in the act of distorting a result count on this exact spec file, which is
-  strong corroborating evidence that "0/6" is a wrapper/discovery artifact
-  rather than a FAT32 regression. Re-run against a `bin/simple` confirmed to
-  have cleared Stage 4 (`bootstrap_stage2_empty_mir_bodies` fixed) — ideally
-  bypassing the daemon-fallback subprocess wrapper for the first diagnostic
-  pass — before treating any FAT32-spec failure count as ground truth.
+  through the normal wrapper there (daemon-unavailable fallback:
+  `ensure_daemon()` fails -> `test_runner_client.spl` spawns `bin/simple test
+  --no-session-daemon <path>` as a subprocess and re-parses its captured
+  out/err/code) produced a THIRD, different result shape on this **pre-fix**
+  binary: no per-example lines, one generic `error: test-runner: spec
+  failed`, `Files: 1 / Passed: 0 / Failed: 2`. **Correction to an earlier
+  version of this note:** this is not evidence the wrapper itself distorts
+  counts — the fix-verified seed run above (`Follow-up`, first bullet) went
+  through this *exact same* daemon-fallback wrapper path (the "WARNING: test
+  daemon unavailable; running directly" line appears in that transcript too)
+  and still reported a clean, itemized 17/17. The variable that changed
+  between the two runs was the **binary version** (pre-fix vs. fix-verified),
+  not the wrapper. So the wrapper faithfully reports what the underlying
+  evaluator gives it; the pre-fix binary's 0/2 here is just the old
+  "unknown static method" failure mode reported at whole-spec granularity
+  instead of per-example, not a capture bug.
+- **Conclusion:** the FAT32 LFN driver logic is confirmed correct **on the
+  Rust-seed evaluator** (17/17, deterministic, both direct and through the
+  daemon-fallback wrapper, using a binary content-hash-verified to include
+  the 2026-07-20 fix); sync/async `fat32_parsers.spl` are byte-identical (no
+  divergence to fix); the pure-Simple compiler's static-call resolution has
+  no analog of the fixed constructor-overload bug (name-only resolution,
+  never inspects argument types). **"0/6" itself was never reproduced in
+  this session** — no available binary both contains the fix and is a
+  genuine pure-Simple self-hosted build; Stage 4 full-CLI relink is blocked
+  by the tracked `bootstrap_stage2_empty_mir_bodies_2026-07-05` bug. Two
+  hypotheses remain open and are **not distinguished** by anything gathered
+  here:
+  (a) a discovery/registration under-count specific to the self-hosted
+      evaluator (the file has 17 static `it` blocks; only 6 reported), or
+  (b) a genuine self-hosted-only execution bug in the LFN assertions
+      (checksum / slot-order / UCS-2 decode differing between the
+      tree-walking seed interpreter and the self-hosted compiled/MIR-interp
+      path) that the seed's tree-walker does not share.
+  Do not treat "0/6" as confirmed-artifact or confirmed-regression from this
+  doc alone. Re-run against a `bin/simple` confirmed to have cleared Stage 4
+  before drawing either conclusion.
