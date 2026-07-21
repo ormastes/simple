@@ -130,6 +130,16 @@ before accepting regeneration-safe PASS. For RISC-V evidence that spans
 generated RTL sidecars plus Lean/BYL, cite
 `sh scripts/check/check-riscv-formal-dual-track.shs` so SPipe evidence covers
 the sidecar self-test, normal sidecar contract, and manual proof gate together.
+RISC-V RTL artifact evidence must additionally cite
+`sh scripts/check/check-riscv-rtl-truth.shs`: it fails closed on fake-CPU
+evidence (empty architecture, `smoke_handoff` step-counter core, decode-free
+core, wrapper instantiating an undefined entity) and classifies each lane as
+`reference-handwritten`/`fixture`/`generated-contract`/`generated-real`. A
+declared `generated-real` or FPGA/Linux RISC-V lane whose SPipe evidence does
+not name this checker is not release evidence; a VIOLATION is a finding to file,
+never a rule to relax. Also treat advertised profiles as capability claims:
+`GC` march or hard-float `*d` ABI strings require implemented+tested F/D
+hardware — soft-float lanes must advertise `imac_zicsr_zifencei`/`ilp32`/`lp64`.
 BYL is a backend/interchange surface, not the proof result. It is helpful when
 SPipe needs cheap regenerated facts, but added proof intent belongs in the
 manual Lean theorem or constraint file and the generated contract must name any

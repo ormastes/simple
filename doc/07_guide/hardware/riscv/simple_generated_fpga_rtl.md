@@ -36,6 +36,33 @@ GENERATED_RTL_NOT_IMPLEMENTED lane=rv64
 This is intentional. It prevents the old time-zero PASS reports from becoming
 Linux, MMU, formal, or product evidence.
 
+## Advertised profiles are soft-float (no F/D hardware exists)
+
+The bundle now advertises **honest** ISA/ABI metadata: `rv32imac_zicsr_zifencei`
+/ `ilp32` and `rv64imac_zicsr_zifencei` / `lp64`. The former `rv32gc`/`rv64gc`
+and hard-float `ilp32d`/`lp64d` strings were false — an audit of 108 hardware
+source files found zero F/D floating-point decode or FPU. Do not re-introduce a
+`GC` march string or a `*d` ABI until F and D are implemented, connected, tested
+(ACT4 + differential), and reflected in `mstatus.FS` context save/restore.
+`GC` is a display alias, never an internal capability boolean.
+
+VHDL **entity/file/package** names that still contain `rv32gc`/`rv64gc` (e.g.
+`simple_rv32gc_core.vhd`, `*.debug.json`) are identifiers, not capability
+claims, and are renamed only in a coordinated pass with the `simple-riscv`
+child repo — do not confuse them with the metadata above.
+
+## Artifact-truth gate
+
+`scripts/check/check-riscv-rtl-truth.shs` classifies every `.vhd` lane
+(`reference-handwritten` / `fixture` / `generated-contract` / `generated-real`
+/ `absent`) and **fails closed** on fake-CPU evidence: empty architecture, a
+`smoke_handoff` step-counter "core", a decode-free / PC-only-incrementer core
+(dependency-aware, so a legitimate `core.vhd`+`decode.vhd` split is not a false
+positive), and a wrapper instantiating an entity defined in no tracked file. It
+ships with a deliberate-red fixture so the gate itself is proven able to fail.
+Run it before trusting any generated-RTL claim; a RED result is a finding to
+file, not a rule to relax.
+
 ## Required compiler
 
 Use a current pure-Simple self-hosted CLI. A binary that prints the Rust
@@ -196,6 +223,9 @@ product bitstream, or board-origin login stays blocked.
 
 - `GENERATED_RTL_NOT_IMPLEMENTED`: expected until a canonical compiled CPU
   slice replaces the placeholder. Do not suppress or reinterpret it.
+- `check-riscv-rtl-truth.shs` VIOLATION: a real reproducibility/fake-CPU
+  finding — file it (see the tracked `soc_top_rv64` dangling-entity bug for the
+  pattern), never weaken the checker rule to make the tree green.
 - Rust bootstrap warning: restore the current pure-Simple CLI; do not use the
   seed for normal tooling.
 - Full CLI exits 139 after a successful Stage3 link: inspect unresolved startup
