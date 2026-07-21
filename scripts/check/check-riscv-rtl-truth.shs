@@ -1,0 +1,387 @@
+#!/bin/sh
+# RISC-V RTL truth checker — fails closed on fake-CPU evidence.
+#
+# Context: .spipe/rv64-ghdl-fpga-boot/state.md (D-2) documents a real
+# landmine — `simple_rv64gc_core.vhd` (architecture `smoke_handoff`) was a
+# hardcoded step-counter that bit-bangs fixed UART bytes and does NOT fetch,
+# decode, or execute any real RISC-V instruction. A DUT like that can pass a
+# "boots and prints something" smoke test while proving nothing about the
+# CPU. This gate exists so that class of fake evidence cannot slip back in
+# unnoticed.
+#
+# For every `*.vhd` file found under the lane directories that exist among:
+#   src/lib/hardware/rv32i_rtl/            (Simple RTL DSL source; VHDL is a
+#                                            backend-generated artifact here)
+#   src/lib/hardware/rv64gc_rtl/           (same)
+#   examples/09_embedded/fpga_riscv/rtl/   (hand-authored GHDL reference DUTs)
+#   build/os/rtl/                          (backend build output, if present)
+# this prints one line:
+#   lane=<path> class=<reference-handwritten|fixture|generated-contract|generated-real|unknown>
+#
+# Missing lane directories (e.g. a submodule not checked out) print
+#   lane=<dir> class=absent
+# and lane directories that exist but contain zero .vhd files print
+#   lane=<dir> class=empty
+# — never a crash, never a silent skip either way.
+#
+# Classification heuristic (path + testbench-name based, documented so it is
+# auditable rather than a black box):
+#   fixture              — basename starts with `tb_` (a simulation-only
+#                           testbench/smoke harness, not a DUT in its own
+#                           right).
+#   generated-contract /
+#   generated-real        — path is under one of the backend-generated-output
+#                           lane roots (rv32i_rtl/, rv64gc_rtl/, build/os/rtl/).
+#                           Split by whether real instruction-decode evidence
+#                           (see below) was found: generated-real if yes,
+#                           generated-contract (interface/wiring only, no
+#                           execution) if no.
+#   reference-handwritten — everything else under a recognized lane (today:
+#                           examples/09_embedded/fpga_riscv/rtl/*), i.e. hand
+#                           authored reference RTL kept for GHDL bring-up.
+#   unknown               — anything not matched above (defensive default;
+#                           update the heuristic, don't silently bucket new
+#                           lanes as one of the above).
+#
+# Reject rules — ANY hit prints `VIOLATION <reason> <path>` and the script
+# exits nonzero after scanning everything (fail closed, not fail fast, so one
+# run shows every problem):
+#   1. Empty architecture body (no `architecture ... is` block found at all,
+#      OR the block has no process, no signal assignment (`<=`), and no
+#      component/entity instantiation). Applies to every scanned file.
+#   2. Scripted step-counter core (the `smoke_handoff` pattern): a
+#      step/step_q/step_ctr/phase_ctr signal or variable declared as an
+#      integer-ish type. Scoped to files whose basename contains `core`
+#      (mirrors the task's own framing: a *SoC wrapper* or *testbench* has no
+#      business containing instruction-decode logic in the first place, so
+#      this rule — and rule 3 — only fire on files that are themselves
+#      claiming to BE a CPU core).
+#   3. Constant-output / PC-only-incrementer "core": no opcode case/if over
+#      an instruction field found anywhere in the file. Same `*core*` name
+#      scoping as rule 2, for the same reason.
+#   4. A wrapper instantiates `entity work.NAME` where NAME is not defined
+#      (`entity NAME is`) in ANY of the files scanned this run (the combined
+#      "artifact set" across all present lanes). Applies to every scanned
+#      file. NOTE: if you run this script with `--lane` pointed at a subset
+#      of the tree, a real cross-lane definition can look "dangling" — this
+#      is a known scoping limitation, not a bug; run with no args for the
+#      authoritative full-tree check.
+#
+# Decode-evidence heuristic (grep/awk-structural, like
+# check-cpu-hotloop-idiom.shs — NOT a VHDL parser, documented limitation):
+# a `case <name> is` where <name> starts with op/opcode/instr/insn/ins/funct/ir
+# (an instruction-field-shaped identifier), OR a `case <name>(X downto Y) is`
+# (a case over a bit-sliced expression — state-machine enums are essentially
+# never bit-sliced, so this is a fair proxy for "decoding an instruction
+# field" without false-triggering on an ordinary `case state_q is` FSM). This
+# can theoretically miss an obfuscated decode or flag a coincidental match;
+# it is intentionally conservative in the "assume real unless it looks fake"
+# direction for rule 3, because rule 3 is scoped to `*core*` files only.
+#
+# Self-calibration (mandatory — a checker that cannot fail is not evidence):
+#   sh scripts/check/check-riscv-rtl-truth.shs --lane test/fixtures/riscv_truth
+# MUST exit nonzero. test/fixtures/riscv_truth/fake_step_counter_core.vhd is
+# a deliberately fake step-counter DUT reproducing the smoke_handoff pattern.
+#
+# Usage:
+#   sh scripts/check/check-riscv-rtl-truth.shs
+#   sh scripts/check/check-riscv-rtl-truth.shs --lane <dir> [--lane <dir> ...]
+# `--lane` (repeatable) REPLACES the default 4-lane list; it exists so the
+# self-calibration run above can point the same logic at a fixture directory
+# instead of the real tree.
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$ROOT_DIR"
+
+if ! command -v rg >/dev/null 2>&1; then
+    echo "check-riscv-rtl-truth: ripgrep (rg) is required but was not found on PATH" >&2
+    exit 2
+fi
+if ! command -v awk >/dev/null 2>&1; then
+    echo "check-riscv-rtl-truth: awk is required but was not found on PATH" >&2
+    exit 2
+fi
+
+DEFAULT_LANES="src/lib/hardware/rv32i_rtl
+src/lib/hardware/rv64gc_rtl
+examples/09_embedded/fpga_riscv/rtl
+build/os/rtl"
+
+LANE_OVERRIDE=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --lane)
+            [ $# -ge 2 ] || {
+                echo "check-riscv-rtl-truth: --lane requires an argument" >&2
+                exit 2
+            }
+            LANE_OVERRIDE="${LANE_OVERRIDE}${2}
+"
+            shift 2
+            ;;
+        --lane=*)
+            LANE_OVERRIDE="${LANE_OVERRIDE}${1#--lane=}
+"
+            shift
+            ;;
+        *)
+            echo "check-riscv-rtl-truth: unknown arg: $1" >&2
+            exit 2
+            ;;
+    esac
+done
+
+if [ -n "$LANE_OVERRIDE" ]; then
+    LANES="$LANE_OVERRIDE"
+else
+    LANES="$DEFAULT_LANES
+"
+fi
+
+SCRATCH_DIR="$(mktemp -d)"
+trap 'rm -rf "$SCRATCH_DIR"' EXIT INT TERM
+
+ALL_FILES="$SCRATCH_DIR/all_files.txt"
+ENTITY_DEFS="$SCRATCH_DIR/entity_defs.txt"
+AWK_PROG="$SCRATCH_DIR/analyze.awk"
+: >"$ALL_FILES"
+
+# ---------------------------------------------------------------------------
+# Step 1: resolve lanes -> file list, printing absent/empty as we go.
+# ---------------------------------------------------------------------------
+
+echo "$LANES" | while IFS= read -r lane; do
+    [ -n "$lane" ] || continue
+    if [ ! -d "$lane" ]; then
+        echo "lane=$lane class=absent"
+        continue
+    fi
+    lane_files=$(find "$lane" -name '*.vhd' | sort)
+    if [ -z "$lane_files" ]; then
+        echo "lane=$lane class=empty"
+        continue
+    fi
+    printf '%s\n' "$lane_files" >>"$ALL_FILES"
+done >"$SCRATCH_DIR/lane_report.txt"
+cat "$SCRATCH_DIR/lane_report.txt"
+
+if [ ! -s "$ALL_FILES" ]; then
+    echo "check-riscv-rtl-truth: no .vhd files found in any present lane"
+    echo "riscv_rtl_truth_ok=true (nothing to check)"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Step 2: per-file structural analyzer (single pass, gawk word-boundary
+# extensions; assumes one architecture per file, true of every file in the
+# current tree and the deliberate-red fixture — documented simplification).
+# Written before any consumer so later steps can invoke it right away.
+# ---------------------------------------------------------------------------
+
+cat >"$AWK_PROG" <<'AWK_EOF'
+BEGIN {
+    arch_seen = 0
+    saw_process = 0
+    saw_assign = 0
+    saw_instantiation = 0
+    decode_present = 0
+    stepcounter_hit = 0
+}
+{
+    line = $0
+    sub(/--.*/, "", line)
+    low = tolower(line)
+
+    if (!arch_seen) {
+        if (match(low, /^[ \t]*architecture[ \t]+[a-z_][a-z0-9_]*[ \t]+of[ \t]+[a-z_][a-z0-9_]*[ \t]+is/)) {
+            arch_seen = 1
+        }
+        next
+    }
+
+    if (match(low, /process[ \t]*\(/)) saw_process = 1
+    if (index(line, "<=") > 0) saw_assign = 1
+    if (match(low, /:[ \t]*entity[ \t]+work\./)) saw_instantiation = 1
+    if (match(low, /port[ \t]+map/)) saw_instantiation = 1
+    if (match(low, /case[ \t]+(op|opcode|instr|insn|ins|funct|ir)[a-z0-9_]*[ \t(]/)) decode_present = 1
+    if (match(low, /case[ \t]+[a-z_][a-z0-9_]*\([^()]*downto[^()]*\)[ \t]+is/)) decode_present = 1
+    if (match(low, /\<(step|step_q|step_ctr|phase_ctr)\>[ \t]*:[ \t]*(natural|integer|unsigned|std_logic_vector)/)) stepcounter_hit = 1
+}
+END {
+    printf "arch_seen=%d\n", arch_seen
+    printf "empty_body=%d\n", (arch_seen && !saw_process && !saw_assign && !saw_instantiation) ? 1 : 0
+    printf "decode_present=%d\n", decode_present
+    printf "stepcounter_hit=%d\n", stepcounter_hit
+}
+AWK_EOF
+
+# ---------------------------------------------------------------------------
+# Step 3: global entity-definition set ("same artifact set" = all lanes
+# scanned this run) for the rule-4 dangling-instantiation check. `--` comments
+# are stripped first so a commented-out `entity work.X` line can never forge
+# a definition.
+# ---------------------------------------------------------------------------
+
+: >"$ENTITY_DEFS"
+while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    sed -E 's/--.*//' "$f" \
+        | rg -oNI -i '^[[:space:]]*entity[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]+is' 2>/dev/null \
+        | sed -E 's/^[Ee][Nn][Tt][Ii][Tt][Yy][[:space:]]+//; s/[[:space:]]+[Ii][Ss].*$//' \
+        >>"$ENTITY_DEFS"
+done <"$ALL_FILES"
+sort -u "$ENTITY_DEFS" -o "$ENTITY_DEFS"
+
+# ---------------------------------------------------------------------------
+# Step 4: entity-name -> decode-evidence map. A generated backend emits one
+# VHDL entity per Simple RTL DSL function (vhdl_entity_compile.spl:
+# `entity_name = func.name`), so a generated `core.vhd` can legitimately wire
+# together a separately-generated `decode.vhd` instead of containing the
+# `case`-over-opcode itself. Rule 3 below must therefore treat "does this
+# *core* file's OWN instantiated dependencies contain decode evidence" as
+# passing, not just "does this file contain it inline" — otherwise a real,
+# correctly-decomposed generated core would false-positive as fake. This map
+# is what makes that dependency-aware check possible.
+# ---------------------------------------------------------------------------
+
+ENTITY_DECODE_MAP="$SCRATCH_DIR/entity_decode_map.txt"
+: >"$ENTITY_DECODE_MAP"
+while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    stripped_first_entity=$(sed -E 's/--.*//' "$f" \
+        | rg -oNI -i '^[[:space:]]*entity[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]+is' 2>/dev/null \
+        | head -n 1 \
+        | sed -E 's/^[Ee][Nn][Tt][Ii][Tt][Yy][[:space:]]+//; s/[[:space:]]+[Ii][Ss].*$//')
+    [ -n "$stripped_first_entity" ] || continue
+    file_decode=$(awk -f "$AWK_PROG" "$f" | sed -n 's/^decode_present=//p')
+    printf '%s\t%s\n' "$stripped_first_entity" "$file_decode" >>"$ENTITY_DECODE_MAP"
+done <"$ALL_FILES"
+
+# ---------------------------------------------------------------------------
+# Step 5: classify + reject-rule check, one file at a time.
+# ---------------------------------------------------------------------------
+
+VIOLATIONS="$SCRATCH_DIR/violations.txt"
+: >"$VIOLATIONS"
+
+count_reference=0
+count_fixture=0
+count_generated_contract=0
+count_generated_real=0
+count_unknown=0
+
+while IFS= read -r f; do
+    [ -n "$f" ] || continue
+
+    analysis=$(awk -f "$AWK_PROG" "$f")
+    arch_seen=$(printf '%s\n' "$analysis" | sed -n 's/^arch_seen=//p')
+    empty_body=$(printf '%s\n' "$analysis" | sed -n 's/^empty_body=//p')
+    decode_present=$(printf '%s\n' "$analysis" | sed -n 's/^decode_present=//p')
+    stepcounter_hit=$(printf '%s\n' "$analysis" | sed -n 's/^stepcounter_hit=//p')
+
+    base=$(basename "$f")
+    is_core=0
+    case "$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]')" in
+        *core*) is_core=1 ;;
+    esac
+
+    # --- classification ---
+    class="unknown"
+    case "$base" in
+        [Tt][Bb]_*) class="fixture" ;;
+        *)
+            case "$f" in
+                src/lib/hardware/rv32i_rtl/*|src/lib/hardware/rv64gc_rtl/*|build/os/rtl/*)
+                    if [ "$decode_present" = "1" ]; then
+                        class="generated-real"
+                    else
+                        class="generated-contract"
+                    fi
+                    ;;
+                examples/*)
+                    class="reference-handwritten"
+                    ;;
+            esac
+            ;;
+    esac
+    case "$class" in
+        reference-handwritten) count_reference=$((count_reference + 1)) ;;
+        fixture) count_fixture=$((count_fixture + 1)) ;;
+        generated-contract) count_generated_contract=$((count_generated_contract + 1)) ;;
+        generated-real) count_generated_real=$((count_generated_real + 1)) ;;
+        *) count_unknown=$((count_unknown + 1)) ;;
+    esac
+    echo "lane=$f class=$class"
+
+    # entity references this file instantiates (`label : entity work.NAME`),
+    # comment-stripped, shared by rule 3's dependency check and rule 4.
+    refs=$(sed -E 's/--.*//' "$f" \
+        | rg -oNI -i ':[[:space:]]*entity[[:space:]]+work\.[A-Za-z_][A-Za-z0-9_]*' 2>/dev/null \
+        | sed -E 's/^.*[Ww][Oo][Rr][Kk]\.//')
+
+    # --- rule 1: empty architecture body (all files) ---
+    if [ "$arch_seen" != "1" ]; then
+        echo "no architecture block found $f" >>"$VIOLATIONS"
+    elif [ "$empty_body" = "1" ]; then
+        echo "empty architecture body (no process/assignment/instantiation) $f" >>"$VIOLATIONS"
+    fi
+
+    # --- rules 2/3: scoped to *core*-named files ---
+    if [ "$is_core" = "1" ]; then
+        if [ "$stepcounter_hit" = "1" ] && [ "$decode_present" != "1" ]; then
+            echo "scripted step-counter core (smoke_handoff pattern), no instruction decode $f" >>"$VIOLATIONS"
+        fi
+        if [ "$decode_present" != "1" ]; then
+            # A generated core may legitimately wire in a separately
+            # generated decode module rather than decoding inline (see Step
+            # 4) — only violate rule 3 if none of this file's OWN
+            # instantiated dependencies carry decode evidence either.
+            decode_via_dep=0
+            if [ -n "$refs" ]; then
+                decode_via_dep=$(awk -F'\t' -v refs="$refs" '
+                    BEGIN {
+                        n = split(refs, want_list, "\n")
+                        for (i = 1; i <= n; i++) want[want_list[i]] = 1
+                    }
+                    ($1 in want) && $2 == "1" { found = 1 }
+                    END { print (found ? 1 : 0) }
+                ' "$ENTITY_DECODE_MAP")
+            fi
+            if [ "$decode_via_dep" != "1" ]; then
+                echo "constant-output or PC-only-incrementer core: no opcode case/if over an instruction field (self or direct dependencies) $f" >>"$VIOLATIONS"
+            fi
+        fi
+    fi
+
+    # --- rule 4: dangling entity instantiation (all files) ---
+    if [ -n "$refs" ]; then
+        printf '%s\n' "$refs" | while IFS= read -r ref_name; do
+            [ -n "$ref_name" ] || continue
+            if ! grep -qxi "$ref_name" "$ENTITY_DEFS"; then
+                echo "wrapper instantiates undefined entity work.$ref_name $f" >>"$VIOLATIONS"
+            fi
+        done
+    fi
+done <"$ALL_FILES"
+
+echo "riscv_rtl_truth_reference_handwritten=$count_reference"
+echo "riscv_rtl_truth_fixture=$count_fixture"
+echo "riscv_rtl_truth_generated_contract=$count_generated_contract"
+echo "riscv_rtl_truth_generated_real=$count_generated_real"
+echo "riscv_rtl_truth_unknown=$count_unknown"
+
+# ---------------------------------------------------------------------------
+# Step 6: final verdict.
+# ---------------------------------------------------------------------------
+
+if [ -s "$VIOLATIONS" ]; then
+    while IFS= read -r reason; do
+        [ -n "$reason" ] || continue
+        echo "VIOLATION $reason"
+    done <"$VIOLATIONS"
+    echo "riscv_rtl_truth_ok=false"
+    exit 1
+fi
+
+echo "riscv_rtl_truth_ok=true"

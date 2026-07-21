@@ -55,6 +55,26 @@ disconnected by call graph. Two structural findings:
 
 Full audit: session scratchpad `riscv_docs/w1c_claim_audit.md`.
 
+### Lane status (2026-07-21)
+
+- **W1-A LANDED** `61fb4f0d884` — honest profiles in `riscv_fpga_linux.spl`
+  (+6 pinned spec assertions). Gate BLOCKED environmental: deployed binary is
+  a stale seed (spec run hangs in main repo, `no examples executed` in
+  worktrees, identical on untouched discriminator spec —
+  `doc/08_tracking/bug/deployed_seed_test_runner_init_hang_2026-07-17.md`).
+  Compensating static consumer check passed. Resume: rerun the fpga_linux
+  spec after self-hosted redeploy.
+- **W1-B LANDED** — `scripts/check/check-riscv-rtl-truth.shs` + deliberate-red
+  fixture. Calibration: fake step-counter core FAILS, legit split
+  core/decode passes, absent lanes report `class=absent`. Current tree is
+  correctly RED: real finding filed as
+  `doc/08_tracking/bug/rv64_smoke_tb_dangling_soc_top_rv64_entity_2026-07-21.md`
+  (tb instantiates `soc_top_rv64`, defined nowhere tracked; `soc_top_rv64_k26`
+  is the unrelated VexRiscv Vivado top). Do not wire into pre-commit until
+  that bug is resolved or explicitly gated.
+- **W1-C DONE** — audit above; no diff (read-only lane).
+- **W2-C in flight** — core64_step wiring seam.
+
 ## Wave 2 — Phase 1 hardware generics + RV64 seam (W1-C scope confirmed)
 
 - W2-A: fail-closed width-specialization spec (32/64 generic scalar module →
