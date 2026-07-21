@@ -59,3 +59,12 @@ creep beyond this campaign's mandate.
 - Production: `src/lib/skia/feature/stroke/dash.spl` (`dash_path`,
   `dash_pattern_new`, and every helper touching `pattern.intervals`,
   `input.segments`, or `seg.pts` via `.at()`).
+- `test/01_unit/lib/blink/css_tokenizer_spec.spl` — 7 of 8 examples fail with
+  the identical `method \`at\` not found on type \`array\`` error. Root cause
+  confirmed identical: the spec doesn't call `.at(` itself; production source
+  `src/lib/blink/css_parser/tokenizer.spl:92` does
+  `val opt = bytes.at(pos)` (also an `Option`-returning safe-indexed-get
+  pattern, same shape as the `dash.spl` call sites above). Also reproduced
+  under `bin/simple run` on a 3-line standalone repro
+  (`val bytes: [i64] = [99, 111, 108]; bytes.at(1)`), confirming this is a
+  missing builtin, not a test-vs-run evaluator divergence.
