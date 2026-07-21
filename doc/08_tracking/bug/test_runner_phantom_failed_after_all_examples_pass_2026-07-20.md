@@ -41,8 +41,13 @@ as a failure).
 | `test/02_integration/app/model3d/model3d_nested_nodes_spec.spl` | `3+2+3=8 examples, 0 failures` (per describe block) | `Passed: 8, Failed: 1` |
 | `test/02_integration/app/restaurant_webapp_spec.spl` | `7+4+3+2=42 examples (aggregated), 0 failures` (per describe block) | `Passed: 42, Failed: 1` |
 | `test/02_integration/app/scv_cli_dispatch_spec.spl` | `1 example, 0 failures` (single `✓`) | `Passed: 1, Failed: 1` |
+| `test/feature/usage/arch_check_error_cases_spec.spl` | `6+6+10+5+5+2+4+5=43 examples (per describe block)` | `Passed: 43, Failed: 1` |
+| `test/unit/app/dashboard_framework_policy_spec.spl` | `9 examples, 0 failures` | `Passed: 9, Failed: 1` |
+| `test/unit/app/duplicate_check/detector_grouping_spec.spl` | `3 examples, 0 failures` | `Passed: 3, Failed: 1` (noise between the tally and the phantom failure includes a `Usage: simple_lint <file.spl> [options]` help-text dump — an apparent malformed `simple_lint` subprocess invocation triggered while loading `compiler.tools.duplicate_check.*`, consistent with the "late second pass over the whole dependency graph" hypothesis above) |
+| `test/unit/compiler/linker/lib_smf_format_spec.spl` | `4 examples, 0 failures` | `Passed: 4, Failed: 1` |
 
-All five: rerun individually via
+All five (plus the `feature/usage` instance added by a later triage pass):
+rerun individually via
 `SIMPLE_RUST_SEED_WARNING=0 timeout 90/180 bin/release/x86_64-unknown-linux-gnu/simple test <spec> --no-session-daemon`
 — reproduces deterministically, not a WALLED-sweep contention artifact (each
 was re-verified with no other `simple test` process running concurrently).
