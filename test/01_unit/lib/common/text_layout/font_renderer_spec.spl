@@ -56,6 +56,31 @@ describe "SFFI font liveness":
         val source = rt_file_read_text("src/lib/nogc_sync_mut/text_layout/font_renderer.spl")
         expect(source).to_contain("fn has_sffi_ttf() -> bool:\n        val rasterizer = self.ttf_rasterizer\n        if rasterizer == nil:\n            return false\n        rasterizer.is_current()")
 
+    it "rejects a truncated selected-asset blob with a clean failure, not a crash":
+        # Regression for font_renderer_resolve_metrics_nil_receiver_seed_2026-07-20:
+        # a corrupt/short blob for a MANAGED font path must fail through the
+        # byte-length check in font_registry._validate_selected_font_asset
+        # (short-circuits before the sha256 hash pass) and surface as a clean
+        # `false`, never as a process crash. Bug doc has evidence that a
+        # same-length corrupted blob (or the raw valid blob) instead reaches
+        # sha256_u8_hex's compression-round loop, which dies under the Rust
+        # seed interpreter for this file's call depth -- kept truncated (not
+        # same-length) here specifically to stay on the pre-hash short-circuit
+        # and exercise the real error path this bug asked for.
+        val path = "assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf"
+        val full_blob = file_read_bytes(path)
+        var truncated: [u8] = []
+        var ti = 0
+        while ti < 16:
+            truncated.push(full_blob[ti])
+            ti = ti + 1
+        var renderer = FontRenderer.new()
+        expect(renderer.try_load_selected_bytes(path, truncated)).to_be(false)
+
+    it "rejects an unmanaged/missing font path with a clean failure, not a crash":
+        var renderer = FontRenderer.new()
+        expect(renderer.try_load_selected_bytes("tmp/does-not-exist.ttf", [])).to_be(false)
+
     it "renders a selected face from owned bytes without a hosted dylib":
         val path = "assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf"
         var renderer = FontRenderer.new()
