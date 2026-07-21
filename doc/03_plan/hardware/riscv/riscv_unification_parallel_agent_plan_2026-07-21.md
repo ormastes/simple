@@ -31,12 +31,39 @@ model before landing; push to GitHub after every landed lane.
 | W1-B truth-checker | sonnet | New `scripts/check/check-riscv-rtl-truth.shs`: classify each RTL lane (`reference-handwritten` / `fixture` / `compiler-generated-*`); reject empty architecture, scripted step-counter core, constant PC incrementer, wrapper instantiating a missing entity | run the script; deliberate-red fixture must FAIL |
 | W1-C claim audit | sonnet | Verify research-doc §3 claims against current head: uncalled `mul_div_start`/`csr64_rw`/`amo_compute`/`mmu64_translate`, `core64_step` depth, presence of historical `2ef16f58` integration; reconcile with `riscv_rtl_disconnect_audited_bugs_2026-07-21.md` | findings file (read-only lane, no diff) |
 
-## Wave 2 — Phase 1 hardware generics (after W1-C confirms scope)
+### Wave 1 results — W1-C claim audit (2026-07-21, verified at be5f80c81a0)
+
+All research-doc §3 claims **CONFIRMED**: RV32 core disconnected from exported
+csr/mmu/trap (no `pmp.spl` exists at all); RV64 helpers `mul_div_start`/
+`csr64_rw`/`amo_compute`/`mmu64_translate` have zero production callers;
+`core64_step` is a PC step; commit `2ef16f5869` (ancestor, 1003 vs 419 lines,
+compressed decode + PMP + bus-protocol `core64_cycle`) is the re-land
+reference; zero F/D hits across 108 hardware files. Reconciliation with the
+narrower plan: modules are *substantial-but-uncalled* — substantial by LOC,
+disconnected by call graph. Two structural findings:
+
+1. **One-seam fix:** `core64_combinational`/`core64_update` (real MRET/SRET/
+   SFENCE.VMA logic) are called only by `core64_integration_spec.spl` and
+   `rvfi_spec.spl` — wiring `core64_step` to them closes the RV64 gap with an
+   existing regression net. → promoted to lane W2-C below.
+2. **`riscv_common/` already exists** (xlen/csr_defs/decode/alu/registers/
+   platform) and is imported by both `rv32i_rtl/pkg.spl` and
+   `rv64gc_rtl/pkg.spl`. Wave 3 must audit it as the unification target before
+   creating any new `riscv_rtl/common/` — do not build a second competing
+   common layer. Dead ends for Phase-0 cleanup: `rv32gc/top/rv32_machine.spl`,
+   `rv64gc/top/rv64_machine.spl` (import riscv_common, zero importers).
+
+Full audit: session scratchpad `riscv_docs/w1c_claim_audit.md`.
+
+## Wave 2 — Phase 1 hardware generics + RV64 seam (W1-C scope confirmed)
 
 - W2-A: fail-closed width-specialization spec (32/64 generic scalar module →
   distinct MIR types + VHDL widths; unspecialized generic = compile error).
 - W2-B: audit VHDL source-subset path for AOP/decorator silent-skip; add loud
   failure + `aop_weave_count` in generation manifest.
+- W2-C (launched with Wave 1): wire `core64_step` to the already-tested
+  `core64_combinational`/`core64_update` path; existing integration/RVFI specs
+  are the gate; keep every `core64_step` caller working.
 
 ## Wave 3 — Phase 2 shared core skeleton (after Wave 2 green)
 
