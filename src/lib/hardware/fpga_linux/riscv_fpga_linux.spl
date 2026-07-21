@@ -79,14 +79,52 @@ impl Xlen:
             case Rv64: "rv64gc_core.vhd"
 
     fn isa_string() -> text:
+        """
+        Returns the honest ISA string for the production FPGA cores.
+        Cores implement I+M+C+Zicsr (no F/D, no G, no A, no Zifencei).
+        Verified against examples/09_embedded/fpga_riscv/rtl/{rv32,rv64}_exec_core.vhd
+        - I: Base integer ISA
+        - M: Mul/Div (divider FSM for div/divu/rem/remu and *w variants)
+        - C: Compressed (c_addi4spn, c_addi, c_lw, c_sw, c_lui, c_addi16sp)
+        - Zicsr: CSR operations (mhartid, mstatus, mtvec, mie, mip)
+        """
         match self:
-            case Rv32: "rv32imac_zicsr_zifencei"
-            case Rv64: "rv64imac_zicsr_zifencei"
+            case Rv32: "rv32imc_zicsr"
+            case Rv64: "rv64imc_zicsr"
 
     fn linux_abi() -> text:
+        """
+        Returns the honest Linux ABI for the production FPGA cores.
+        Cores have NO floating-point hardware (no F/D unit, no FP regfile, no mstatus.FS).
+        Must use soft-float ABI (ilp32/lp64), not hard-float (ilp32d/lp64d).
+        """
         match self:
             case Rv32: "ilp32"
             case Rv64: "lp64"
+
+    fn validate_isa_abi_consistency(isa: text, abi: text) -> Result<(), text>:
+        """
+        Validates that ISA and ABI are consistent and reject unsupported combos.
+        Returns Ok if consistent, Err with explanation if not.
+        """
+        val has_f = isa.contains("_f") or (isa.contains("g") and not isa.contains("_g"))
+        val has_d = isa.contains("_d")
+
+        # Rule: D requires F (double-precision requires single-precision)
+        if has_d and not has_f:
+            return Err("ISA has D extension but missing F extension (D requires F)")
+
+        # Rule: Hard-float ABI (ilp32d/lp64d) requires F extension
+        val abi_is_hard_float = abi == "ilp32d" or abi == "lp64d"
+        if abi_is_hard_float and not has_f:
+            return Err("ABI is hard-float ({abi}) but ISA lacks F extension (no FP hardware)")
+
+        # Rule: Reject hard-float binaries when F/D absent from current cores
+        val current_has_fp = has_f  # Our current cores don't have F
+        if abi_is_hard_float and not current_has_fp:
+            return Err("Hard-float ABI ({abi}) rejected: current FPGA cores have no FP unit (no F/D)")
+
+        Ok(())
 
     fn linux_mmu() -> text:
         match self:
