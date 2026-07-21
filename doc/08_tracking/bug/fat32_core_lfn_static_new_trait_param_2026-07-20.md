@@ -129,3 +129,55 @@ this doc's fix does not resolve the alias-collision case.
   before this fix. This is likely why `fat32_file_io_spec.spl` and
   `fat32_core_test.spl` still show pre-existing failures above — not
   confirmed to be the same bug class, not triaged in this lane.
+
+## Follow-up (2026-07-21): "mirrored gap" hypothesis checked and ruled out; 0/6 not reproduced
+
+A later report described `fat32_core_lfn_spec.spl` as **0 passed / 6 failed**
+on "the newer self-hosted binary" (vs. the 0/17 this doc fixed on the Rust
+seed). Investigated in a fresh worktree at commit `26a5e7394074` (descendant of
+this fix's relanded SHA `6b793e5d2b2`):
+
+- **Re-verified the seed fix is solid.** Copied the Rust seed +
+  `libsimple_native_all.a` from a sibling checkout; its
+  `simple.inputs.sha256` stamp content-hash-matched this worktree's current
+  `src/compiler_rust`/`src/runtime` sources exactly (no rebuild triggered),
+  confirming the seed binary genuinely reflects this fix. Ran
+  `fat32_core_lfn_spec.spl` twice: **17/17 passing, deterministic**, matching
+  this doc's own Verification section. Static `it` count also 17
+  (`grep -c '^\s*it '`), so the spec file itself is not the problem and the
+  seed's discovery is not under-counting.
+- **Checked the "mirrored gap" follow-up above directly — it does not apply.**
+  Traced the pure-Simple compiler's own static-call resolution:
+  `HirExprKind.StaticCall` → `35.semantics/resolve_strategies.spl`
+  `resolve_static_method()` (line ~314) → `self.symbols.lookup_static_method
+  (type_id, method)`. This resolves **by name + type only**; the `args`
+  parameter is accepted but never inspected, so there is no argument-type-based
+  overload scoring at all in this path (unlike the Rust seed's
+  `constructor_overload_score` chain). `70.backend/backend/interpreter.spl`
+  (lines ~507, ~551) just dispatches on the already-resolved `method_id` from
+  `MethodResolution.StaticMethod`, again with no type re-check. **The
+  trait-typed-constructor bug class this doc fixed cannot occur in the
+  pure-Simple compiler** — there's no equivalent unguarded `class == expected`
+  check to have a gap in. The follow-up bullet above is superseded by this
+  finding; no mirror fix is needed there.
+- **Could not reproduce 0/6 directly** — building a genuine pure-Simple
+  self-hosted `bin/simple` (native-compiled, not the Rust seed) in this
+  worktree to run the exact same test-path evaluator hit the tracked,
+  `IN_PROGRESS` `bootstrap_stage2_empty_mir_bodies_2026-07-05` bug at Stage 4
+  (full-CLi relink of `main.spl`): repeated `[stmt_get_tag] OOB idx=N
+  arena_len=13` / `[flat-bridge] missing stmt tag idx=N` errors, the same
+  symptom class that doc tracks, just hit on the much larger `main.spl` surface
+  (thousands of functions) rather than the already-fixed 6-function
+  `bootstrap_main.spl` case. Stage 2/3 (`bootstrap_main.spl`) build and pass
+  bootstrap sanity fine; Stage 4 (full CLI) does not complete in either
+  `llvm` or `cranelift` backend within this session.
+- **Conclusion:** the FAT32 LFN driver logic is confirmed correct (17/17,
+  deterministic); sync/async `fat32_parsers.spl` are byte-identical (no
+  divergence to fix); the pure-Simple compiler has no analog of the fixed bug.
+  The reported 0/6 is very likely an artifact of whatever self-hosted binary
+  build produced it — either it went through the still-broken Stage 4 full-CLI
+  relink above, or it hit the separately-tracked SSpec discovery
+  under-count/truncation class (mentioned in the 2026-07-20 whole-suite-pass
+  session notes) rather than a FAT32 defect. Re-run against a `bin/simple`
+  that is confirmed to have cleared Stage 4 (`bootstrap_stage2_empty_mir_bodies`
+  fixed) before treating any FAT32-spec failure count as ground truth.
