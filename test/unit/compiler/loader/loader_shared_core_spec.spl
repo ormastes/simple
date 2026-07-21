@@ -7,13 +7,8 @@
 # **Category:** Compiler / Loader
 # **Design:** doc/05_design/graphics_backend_acceleration.md
 
-use std.io_runtime
-
-fn check(label: text, ok: bool):
-    if ok:
-        print("PASS: " + label)
-    else:
-        print("FAIL: " + label)
+use std.spec
+use std.spec.{expect}
 
 # ============================================================================
 # UnloadPolicy — tracks metadata vs heuristic removal counts
@@ -154,138 +149,91 @@ class ScenarioResult:
     static fn fail_it(name: text, reason: text) -> ScenarioResult:
         ScenarioResult(scenario: name, passed: false, reason: reason)
 
-# ============================================================================
-# UnloadPolicy tests (1-4)
-# ============================================================================
+describe "Loader Shared-Core Refactor Invariants — AC-10":
+    context "UnloadPolicy":
+        it "empty policy is noop":
+            val p = UnloadPolicy.create("foo")
+            assert_true(p.is_noop())
 
-fn test_empty_policy_is_noop():
-    val p = UnloadPolicy.create("foo")
-    check("empty_policy_is_noop", p.is_noop())
+        it "policy with metadata not noop":
+            val p = UnloadPolicy.create("foo").with_metadata(3)
+            assert_false(p.is_noop())
 
-fn test_policy_with_metadata_not_noop():
-    val p = UnloadPolicy.create("foo").with_metadata(3)
-    check("policy_with_metadata_not_noop", p.is_noop() == false)
+        it "metadata beats heuristic":
+            val p = UnloadPolicy.create("foo").with_metadata(2).with_heuristic(5)
+            assert_true(p.metadata_beats_heuristic())
 
-fn test_metadata_beats_heuristic():
-    val p = UnloadPolicy.create("foo").with_metadata(2).with_heuristic(5)
-    check("metadata_beats_heuristic", p.metadata_beats_heuristic())
+        it "heuristic only has no metadata priority":
+            val p = UnloadPolicy.create("foo").with_heuristic(3)
+            assert_false(p.metadata_beats_heuristic())
 
-fn test_heuristic_only_no_metadata_priority():
-    val p = UnloadPolicy.create("foo").with_heuristic(3)
-    check("heuristic_only_no_metadata_priority", p.metadata_beats_heuristic() == false)
+    context "InvariantCheck":
+        it "unknown path noop passes":
+            val ic = InvariantCheck.unknown_path_noop(0)
+            assert_true(ic.passed)
 
-# ============================================================================
-# InvariantCheck tests (5-9)
-# ============================================================================
+        it "unknown path noop fails":
+            val ic = InvariantCheck.unknown_path_noop(2)
+            assert_false(ic.passed)
 
-fn test_unknown_path_noop_passes():
-    val ic = InvariantCheck.unknown_path_noop(0)
-    check("unknown_path_noop_passes", ic.passed)
+        it "metadata cleanup passes":
+            val ic = InvariantCheck.metadata_cleanup(3, 5)
+            assert_true(ic.passed)
 
-fn test_unknown_path_noop_fails():
-    val ic = InvariantCheck.unknown_path_noop(2)
-    check("unknown_path_noop_fails", ic.passed == false)
+        it "metadata priority with metadata":
+            val ic = InvariantCheck.metadata_priority(true, false)
+            assert_true(ic.passed)
 
-fn test_metadata_cleanup_passes():
-    val ic = InvariantCheck.metadata_cleanup(3, 5)
-    check("metadata_cleanup_passes", ic.passed)
+        it "metadata priority violated":
+            val ic = InvariantCheck.metadata_priority(true, true)
+            assert_false(ic.passed)
 
-fn test_metadata_priority_with_metadata():
-    val ic = InvariantCheck.metadata_priority(true, false)
-    check("metadata_priority_with_metadata", ic.passed)
+    context "MetadataEntry":
+        it "belongs to its module path":
+            val e = MetadataEntry.create("sym_a", "mod.spl")
+            assert_true(e.belongs_to("mod.spl"))
 
-fn test_metadata_priority_violated():
-    val ic = InvariantCheck.metadata_priority(true, true)
-    check("metadata_priority_violated", ic.passed == false)
+        it "does not belong to another path":
+            val e = MetadataEntry.create("sym_a", "mod.spl")
+            assert_false(e.belongs_to("other.spl"))
 
-# ============================================================================
-# MetadataEntry tests (10-12)
-# ============================================================================
+        it "keeps its symbol name field":
+            val e = MetadataEntry.create("mangled_foo", "path/bar.spl")
+            expect e.sym_name to eq "mangled_foo"
 
-fn test_metadata_entry_belongs():
-    val e = MetadataEntry.create("sym_a", "mod.spl")
-    check("metadata_entry_belongs", e.belongs_to("mod.spl"))
+    context "GlobalOwnership":
+        it "is owned by its owner":
+            val g = GlobalOwnership.create("global_init", "main.spl")
+            assert_true(g.is_owned_by("main.spl"))
 
-fn test_metadata_entry_not_belongs():
-    val e = MetadataEntry.create("sym_a", "mod.spl")
-    check("metadata_entry_not_belongs", e.belongs_to("other.spl") == false)
+        it "is not owned by another module":
+            val g = GlobalOwnership.create("global_init", "main.spl")
+            assert_false(g.is_owned_by("other.spl"))
 
-fn test_metadata_entry_fields():
-    val e = MetadataEntry.create("mangled_foo", "path/bar.spl")
-    check("metadata_entry_fields", e.sym_name == "mangled_foo")
+    context "JitState reload":
+        it "tracked state is not resolvable":
+            val j = JitState.tracked("sym")
+            assert_false(j.is_resolvable())
 
-# ============================================================================
-# GlobalOwnership tests (13-14)
-# ============================================================================
+        it "resolvable after reload":
+            val j = JitState.tracked("sym").after_unload(true).after_reload(true)
+            assert_true(j.is_resolvable())
 
-fn test_global_owned_by():
-    val g = GlobalOwnership.create("global_init", "main.spl")
-    check("global_owned_by", g.is_owned_by("main.spl"))
+        it "lost after unload without reload":
+            val j = JitState.tracked("sym").after_unload(false).after_reload(false)
+            assert_false(j.is_resolvable())
 
-fn test_global_not_owned():
-    val g = GlobalOwnership.create("global_init", "main.spl")
-    check("global_not_owned", g.is_owned_by("other.spl") == false)
+    context "Deterministic rebuild":
+        it "passes when after == before - removed":
+            val ic = InvariantCheck.deterministic_rebuild(10, 3, 7)
+            assert_true(ic.passed)
 
-# ============================================================================
-# JitState reload tests (15-17)
-# ============================================================================
+        it "fails when after != before - removed":
+            val ic = InvariantCheck.deterministic_rebuild(10, 3, 8)
+            assert_false(ic.passed)
 
-fn test_jit_tracked_not_resolvable():
-    val j = JitState.tracked("sym")
-    check("jit_tracked_not_resolvable", j.is_resolvable() == false)
-
-fn test_jit_after_reload_resolvable():
-    val j = JitState.tracked("sym").after_unload(true).after_reload(true)
-    check("jit_after_reload_resolvable", j.is_resolvable())
-
-fn test_jit_lost_after_unload():
-    val j = JitState.tracked("sym").after_unload(false).after_reload(false)
-    check("jit_lost_after_unload", j.is_resolvable() == false)
-
-# ============================================================================
-# Deterministic rebuild tests (18-19)
-# ============================================================================
-
-fn test_deterministic_rebuild_passes():
-    val ic = InvariantCheck.deterministic_rebuild(10, 3, 7)
-    check("deterministic_rebuild_passes", ic.passed)
-
-fn test_deterministic_rebuild_fails():
-    val ic = InvariantCheck.deterministic_rebuild(10, 3, 8)
-    check("deterministic_rebuild_fails", ic.passed == false)
-
-# ============================================================================
-# ScenarioResult test (20)
-# ============================================================================
-
-fn test_scenario_pass_fail():
-    val p = ScenarioResult.pass_it("my_scenario", "all good")
-    val f = ScenarioResult.fail_it("my_scenario", "something broke")
-    check("scenario_pass_fail", p.passed and (f.passed == false))
-
-# ============================================================================
-# Entry point
-# ============================================================================
-
-fn main():
-    test_empty_policy_is_noop()
-    test_policy_with_metadata_not_noop()
-    test_metadata_beats_heuristic()
-    test_heuristic_only_no_metadata_priority()
-    test_unknown_path_noop_passes()
-    test_unknown_path_noop_fails()
-    test_metadata_cleanup_passes()
-    test_metadata_priority_with_metadata()
-    test_metadata_priority_violated()
-    test_metadata_entry_belongs()
-    test_metadata_entry_not_belongs()
-    test_metadata_entry_fields()
-    test_global_owned_by()
-    test_global_not_owned()
-    test_jit_tracked_not_resolvable()
-    test_jit_after_reload_resolvable()
-    test_jit_lost_after_unload()
-    test_deterministic_rebuild_passes()
-    test_deterministic_rebuild_fails()
-    test_scenario_pass_fail()
-    print("DONE")
+    context "ScenarioResult":
+        it "distinguishes pass from fail":
+            val p = ScenarioResult.pass_it("my_scenario", "all good")
+            val f = ScenarioResult.fail_it("my_scenario", "something broke")
+            assert_true(p.passed and (f.passed == false))
