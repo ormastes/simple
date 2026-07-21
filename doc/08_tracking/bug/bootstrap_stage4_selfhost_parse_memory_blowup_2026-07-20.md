@@ -417,3 +417,258 @@ to this bug — not investigated further here (out of this task's scope), but
 it currently blocks running this guard script against its own documented
 default binary. Filed as a TODO in the script itself; use
 `STAGE4_PARSE_MEM_BINARY=<a working self-hosted binary>` until it's fixed.
+
+## UPDATE 2026-07-20/21 (discriminator lane): RETENTION, confirmed via a real
+## live-object counter — not allocator churn. Two lexer-side hypotheses
+## (`lex_source_char_at`/`lex_source_slice` re-slicing; `lex_state_get`/
+## `lex_state_set` getenv/setenv-per-char) were implemented and BOTH measured
+## ~0% improvement — both turned out to be on a dead code path the real
+## `SIMPLE_BOOTSTRAP_STAGE4=1` build never exercises (see "CORRECTION" below).
+## Root mechanism is actually localized to `parse_module_body` (flat-array
+## core-parser AST node construction) via per-sub-phase `heap_registry`
+## markers — see "Actual dominant mechanism" below for the table.
+
+### Discriminator result (the "next step" the prior update asked for)
+Built a fresh self-hosted binary containing `log_phase()`'s
+`heap_registry=rt_heap_registry_count()` field (absent from every binary
+available at session start — none post-dated commit `43a219d2889`, which
+added it) and re-ran the exact real production command from this doc's own
+"Reproduction" section above (`SIMPLE_BOOTSTRAP_STAGE4=1`,
+`--runtime-bundle core-c-bootstrap`, `--entry src/app/cli/main.spl`,
+`--mode one-binary`, `--low-memory`), killing early instead of letting it
+run to the 1777-file/64GB crash.
+
+**Binary provenance:** stage2 (seed-compiled, NOT stage3) built from worktree
+HEAD `26a5e7394074836c2e2741d4b97f0a1ebb6ddd82`. Stage2 is a valid proxy here
+because the bug is about the *behavior of compiled Simple code* (driver.spl/
+lexer.spl running as native cranelift output), not about which stage compiled
+it — confirmed empirically: this stage2 run reproduces the same growth
+profile the doc's earlier stage3-binary measurements found. The Rust runtime
+lib (`--runtime-path`) was borrowed **read-only** from a sibling lane's
+worktree (`/tmp/wt_fat32lfn`) that happened to be built from the exact same
+commit — avoided a from-scratch Rust rebuild (~9GB target dir, infeasible
+under this session's disk budget). Seed binary used only to drive the
+`native-build` invocation; the seed itself is never the thing being measured.
+
+**First `rt_heap_registry_count()` semantics check (prerequisite before
+trusting the discriminator at all):** read
+`src/compiler_rust/runtime/src/value/heap.rs:186-212`. The registry is a real
+`HashSet`-backed live-pointer set with `insert`/`remove` on
+`register_heap_ptr`/`unregister_heap_ptr`; `rt_heap_registry_count()` returns
+`registry.len()`, i.e. **current live objects**, not a monotonic
+allocation total. A climbing count is therefore a genuine retention signal,
+not an artifact of the counter's own design. (The same file's own doc
+comment: *"most no-GC compiler temporaries stay registered for the process
+lifetime"* — i.e. this runtime tier has no generic reclaim; something must
+explicitly `unregister_heap_ptr`/free, or it lives until process exit.)
+
+**Per-file table** (binary: stage2 built from this session's worktree,
+`build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple`, run via
+`SIMPLE_BINARY=<itself>`, entry `src/app/cli/main.spl`, killed after 345
+files rather than let it reach the 1777-file/64GB crash):
+
+| file # | t (ms) | heap_registry | path |
+|---|---|---|---|
+| 1 | 5,958 | 515,083 | src/app/cli/main.spl |
+| 5 | 9,235 | 873,392 | src/app/io/env_ops.spl |
+| 10 | 11,299 | 1,148,611 | src/app/io/_CliCommands/handler_commands.spl |
+| 20 | 18,621 | 1,924,067 | src/app/play/main.spl |
+| 50 | 71,700 | 5,142,304 | src/lib/nogc_async_mut/database/test.spl |
+| 100 | 137,443 | 9,985,123 | src/app/devhub/cmd_email.spl |
+| 150 | 146,933 | 11,406,328 | src/std/nogc_sync_mut/io/volatile_ops.spl |
+| 345 (killed) | 450,357 | 29,384,462 | src/compiler/backend/backend_port.spl |
+
+Delta: +28,869,379 live objects over 345 files = **83,923 objects/file
+average**, essentially linear (not step-function, not size-correlated —
+matches the prior update's own "constant per-file add regardless of size"
+observation, now confirmed against a true live-object count instead of just
+RSS). RSS was independently sampled via `/proc/<pid>/status` and tracked
+`heap_registry` closely (tens of GB by the time the process was OOM-killed
+mid-file, same failure mode as the original 64GB/403-file report, just
+reached faster here because this run wasn't `--threads 4`-throttled the same
+way and had no competing safety margin). This **directly answers the prior
+update's open question**: live object count climbs monotonically and
+steadily → **RETENTION**, not allocator high-water-mark churn from transient
+per-call slicing.
+
+### Root-cause localization: it is NOT `lex_source_char_at`/`lex_source_slice`
+The prior update's leading (but explicitly unconfirmed) hypothesis was
+`lex_source_char_at`/`lex_source_slice` (`lexer.spl:191-207`) re-slicing the
+full source `text` per call — confirmed real and O(N) per call (UTF-8 char
+indexing rescans from byte 0;
+`src/compiler_rust/runtime/src/value/collections.rs:1803`
+`rt_string_char_at` does `s.chars().nth(index)`), and each call allocates a
+fresh heap-registered string. This was **fixed** (see `lexer.spl`,
+`lex_source_char_at`/`lex_source_slice` now index
+`current_core_lexer_slot[0].source_chars`/`.char_slice()` — an existing,
+already-correct, O(1)-indexed, per-file, UTF-8-safe structure built by
+`make_core_lexer()`, `lexer_struct.spl:104-201`, that the codebase already
+had but the legacy free-function lexer never used) and **verified hot**
+(confirmed via a one-shot debug print that the new code path fires on the
+real corpus, not a vestigial branch — `lex_peek`/`lex_peek_next`/
+`lex_peek_at`/`lex_advance` all route through `lex_source_char_at`).
+
+**But it made ~no measurable difference**: rebuilding stage2 from the fixed
+source and re-running the identical discriminator produced **86,809
+objects/file** over 334 files — statistically the same slope as the 83,923
+baseline above, not a reduction. Conclusion: the O(N) re-slice was real and
+worth removing (it's still a legitimate, if minor, algorithmic fix — kept in
+tree), but it is **not the dominant contributor** to the retained-object
+count. Do not re-attempt this fix path expecting a different result; the
+data says no.
+
+**CORRECTION (same session, before this doc was first saved to disk): the
+next hypothesis below was ALSO tested and ALSO produced ~0% improvement —
+101,082 -> 104,996 objects/file over the identical first-40-files window.
+The reason both "fixes" did nothing is that they were edited on a DEAD
+CODE PATH.** `lex_next()` (`lexer.spl:786-798`, the function `parser_advance`
+actually calls to get each token) does `loaded.next_token()` where
+`loaded = current_core_lexer_slot[0]` — the `CoreLexer` **struct's own**
+`next_token()` method (`lexer_struct.spl`), not the free-function scanners
+(`lex_scan_token`/`lex_scan_ident`/etc., `lexer_scanners.spl`) that call
+`lex_peek`/`lex_advance`/`lex_source_char_at`. Grepped: `lex_scan_token`,
+`lex_peek`, `lex_advance` have **no callers outside `lexer_scanners.spl`
+and `lexer.spl` themselves** — the entire free-function lexer (including
+both "fixes" above) is vestigial on the real `SIMPLE_BOOTSTRAP_STAGE4=1`
+build path. `current_core_lexer_save()`, which would mirror `CoreLexer`
+state back into the env vars the free functions read, is itself gated
+`if not lex_env_save_enabled[0]: return` and that flag defaults false. This
+is why the one-shot debug print "proved hot" (it *was* called — once, at
+whatever incidental call site still reaches it — just not on the
+per-character path that dominates object count) and why both rebuilds
+moved nothing. **Both edits are kept in tree** (real, harmless, honestly
+worthless for this bug — see the corrected status below) rather than
+reverted, since a mid-session revert would have cost another rebuild this
+session's disk budget (final free space: ~3.4GB, shared host, actively
+falling) could not safely afford.
+
+### Actual dominant mechanism: `parse_module_body` (flat-arena AST node
+### construction), not the lexer at all
+Added env-gated (`SIMPLE_COMPILER_PHASE_PROFILE=1`) `heap_registry`
+sub-phase markers inside `parse_full_frontend` (`frontend.spl`) and inside
+`parse_and_build_module` (`module_assembly.spl`), splitting each file's
+parse into `preprocess` / `reset_all_pools` / `parser_init_with_path` /
+`parse_module_body` / `flat_ast_to_module` / `desugar_module` /
+`desugar_collections`. Re-ran the real corpus (same binary-provenance
+method as above — stage2 rebuilt from this source, killed after 20 files).
+Per-file delta by sub-phase (objects; `chars` = source size):
+
+| file | chars | preprocess | reset_pools | parser_init | **parse_module_body** | flat_ast_to_module | desugar | total |
+|---|---|---|---|---|---|---|---|---|
+| main.spl | 773 | 23 | 13 | 82 | **1,584** | 93 | 30 | 1,861 |
+| log_modes.spl | 5,747 | 23 | 15 | 76 | **56,404** | 7,816 | 74 | 64,447 |
+| args_and_os_commands.spl | 11,437 | 23 | 15 | 80 | **71,455** | 7,982 | 108 | 79,702 |
+| main_and_help.spl | 21,837 | 23 | 15 | 91 | **179,884** | 17,095 | 90 | 197,237 |
+| env_ops.spl | 2,735 | 23 | 15 | 79 | **18,452** | 2,270 | 90 | 20,968 |
+| cli_ops.spl | 13,512 | 23 | 15 | 85 | **85,539** | 7,917 | 244 | 93,839 |
+
+`parse_module_body` is **85-95% of every file's total** and scales with
+source size (~6-10 objects/char, consistent across a 773-21,837 char
+range); `flat_ast_to_module` is a distant second (~10% of
+`parse_module_body`'s size, still size-correlated); `preprocess`,
+`reset_all_pools`, `parser_init_with_path`, `desugar_module`,
+`desugar_collections` are all flat, tiny, and irrelevant (tens to low
+hundreds of objects regardless of file size). This is the same flat-array
+core parser (`stmt_*`/`expr_*`/`decl_*`, `compiler.core.parser_decls`) the
+very first "ruled out" item in this doc examined for its `.clear()`
+behavior — that investigation confirmed the arrays' *length* resets
+correctly per file, but never checked whether the *heap objects the
+cleared slots used to point to* get unregistered, and per
+`heap.rs`'s own doc comment ("most no-GC compiler temporaries stay
+registered for the process lifetime") they do not unless something
+explicitly calls `unregister_heap_ptr`/frees them — matching
+`rt_array_free(retired.source_chars)` at `lexer.spl:179`, which is exactly
+that explicit free, just not applied to the parser's own arenas.
+
+**Status: localized, not fixed — a real fix here needs two more answers
+this session's disk budget (final free space ~3.4GB, shared host, falling)
+could not safely afford to get via rebuild-and-measure:**
+
+1. **Copy vs. alias — partially read this session, leans ALIASED, not
+   conclusively resolved.** `flat_ast_to_module` (`module_assembly.spl:114+`)
+   walks flat decls via `module_decl_at(di)` and calls converters
+   (`convert_decl_fn(idx)` etc., `convert_nodes.spl:1431+`) that build
+   `Function`/`Struct`/`Stmt`/`Expr` values from arena getters. Read
+   `decl_get_name` (`_Ast/decl_nodes.spl:664-668`): `return decl_name[idx]`
+   — returns the array-indexed value directly, no explicit clone. Read
+   `convert_decl_fn` (`convert_nodes.spl:1432`): `val name =
+   decl_get_name(idx)`, then this flows straight into the built `Function`
+   — again no explicit clone anywhere in the chain. **This does not by
+   itself prove aliasing** (Simple's `text` is a value type at the language
+   level; whether `val name = decl_get_name(idx)` is a real memcpy-backed
+   copy or a shared-pointer copy is a property of the *runtime's* value
+   assignment for heap-backed `text`, not of this `.spl` code, and that
+   wasn't checked this session — it's the one remaining fact that would
+   flip this from "leans aliased" to "actually determined"). Given: (a) no
+   explicit clone/copy call anywhere in the getter-to-converter-to-Function
+   chain, (b) this runtime has no refcounting (`heap_allocation_registry`
+   is a plain insert/remove set, not a refcounted map — see the `heap.rs`
+   citation above), and (c) the doc's own earlier finding that
+   `rt_array_free` does a **real** `std::alloc::dealloc` (not registry-only
+   bookkeeping) — the risk-weighted read is: **treat this as aliased
+   (architectural) unless a future session finds a real memcpy at the
+   `text` assignment boundary that contradicts it.** Do not attempt an
+   arena-free fix without first finding that memcpy, or proving its
+   absence some other way (e.g. a targeted repro: build a `Function`, free
+   the source arena element via the runtime's `text`-level free primitive
+   if one exists, and see whether the `Function`'s field is still valid).
+2. **`rt_array_free` frees the array's own backing buffer, not its
+   elements' own allocations.** Checked `src/compiler_rust/runtime/src/
+   value/collections.rs:1438-1454`: `rt_array_free` does
+   `std::alloc::dealloc` on the array's data buffer and header (a REAL
+   free — a wrong call here is a genuine crash/corruption bug, not just a
+   missed optimization) and calls `unregister_heap_ptr` for the array
+   object itself, but does **not** recurse into unregistering each
+   element's own heap allocation. For a `[text]` array (e.g.
+   `current_core_lexer_slot[0].source_chars`, freed today at
+   `lexer.spl:179`), this frees the N-pointer-slot buffer but leaves each
+   of the N individual character-`text` objects registered/leaked. This
+   means even the codebase's own existing "known-good" per-file free
+   pattern is a partial win at best for that case, and any fix for the
+   flat-AST arenas (`stmt_*`/`expr_*`/`decl_*` — many of which are almost
+   certainly `[text]`/mixed-type arrays holding per-node string data) would
+   need to free every element's own allocation, not just call
+   `rt_array_free` on the outer array, to actually collapse the
+   `heap_registry` growth this doc measures.
+
+Given both of these are unresolved and `ast_reset()`/`stmt_reset()`/
+`expr_reset()`/decl-array resets are **hot-path code shared by every parse
+in the whole compiler** (interpreter, tooling, everything — a wrong answer
+is a silent-wrong-binary or use-after-free class defect, not a perf
+regression), and the prior update in this same doc already recorded two
+separate adjacent attempts in this neighborhood that looked safe and were
+not (`stage3_selfhost_parser_case_multielem_pattern_2026-07-17.md`), no fix
+was attempted at this level this session. Next session: answer (1) via
+read, then (2) via read of the arena field types (`compiler.core.ast*`
+decl/stmt/expr field declarations), then validate any fix with a fresh
+binary + the sub-phase markers already landed here (env-gated
+`SIMPLE_COMPILER_PHASE_PROFILE=1`, zero cost when off) — not by guessing.
+
+### Guard script #2: multi-file (the gap the original guard's own header
+### flagged)
+`scripts/check/check-stage4-selfhost-parse-memory-multifile.shs` — new,
+lands alongside this update. The original guard script
+(`check-stage4-selfhost-parse-memory.shs`) only exercises the single-file
+O(N^2) time mechanism and explicitly documents that it does **not** catch
+multi-file accumulation. This one does: generates a fixed, deterministic
+chain of N synthetic files (`mod0` imported by `mod1` imported by `mod2`
+... entry = `mod(N-1)`, so `--entry-closure` transitively reaches exactly N
+files, no repo-root scan, no real-corpus dependency) and fails if whole-
+build peak RSS (`/usr/bin/time -f %M`, same technique as the sibling
+script) exceeds a documented ceiling. Same `bin/simple`-is-currently-broken
+landmine applies — override with `STAGE4_PARSE_MEM_MULTI_BINARY=<a working
+self-hosted binary>`.
+
+**Calibrated and validated 2026-07-21** against the stage2 probe binary
+built for the sub-phase localization above (self-hosted, not the seed):
+40 files x 20 funcs/file, pass path measured **135,576-135,968 KiB peak**
+(default ceiling 409,600 KiB, ~3x headroom — a defect-class tripwire, not a
+tight budget); fail path (artificially tight 1000 KiB ceiling) correctly
+reports `error=peak_rss_kib:135808 exceeds ceiling 1000 over 40 files` and
+exits 1. This is a coarse whole-build signal (one peak-RSS number), not a
+per-file slope — if it regresses, re-run with
+`SIMPLE_COMPILER_PHASE_PROFILE=1` and grep `FRONTEND-SUBPHASE`/
+`BOOTSTRAP-PHASE` output (both landed in this same update) to see which
+sub-phase and which file(s) moved, rather than guessing from the aggregate
+number alone. Not wired into CI — land + document only, per this session's
+scope.

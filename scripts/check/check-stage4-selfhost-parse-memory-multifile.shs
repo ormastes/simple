@@ -1,0 +1,118 @@
+#!/bin/sh
+# Multi-file regression guard for
+# doc/08_tracking/bug/bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20.md
+#
+# The sibling script (check-stage4-selfhost-parse-memory.shs) targets the
+# CONFIRMED single-file O(N^2) time mechanism (one large synthetic file).
+# This script targets the mission's other, DECISIVE finding: real-corpus
+# per-file `rt_heap_registry_count()` (a genuine live-object set, not a
+# monotonic counter -- see the bug doc) climbs ~85-105K objects/file,
+# essentially linearly, and does NOT flatten across files -- i.e. the
+# self-hosted compiler's own flat-AST arenas (stmt_*/expr_*/decl_*,
+# compiler.core.parser_decls) are retained forever instead of being freed
+# once a file's Module is built and its arena slots are no longer needed.
+# A single huge file cannot catch this: it's a MULTI-file accumulation, so
+# this guard compiles a FIXED, small, deterministic N-file *chain*
+# (mod0 imported by mod1 imported by mod2 ... entry = mod(N-1)) via
+# --entry-closure and samples one peak-RSS number for the whole build.
+#
+# This is deliberately a coarse tripwire (whole-build peak RSS, not a
+# per-file slope) -- proving the slope itself requires the
+# SIMPLE_COMPILER_PHASE_PROFILE=1 heap_registry markers landed in this same
+# commit (frontend.spl's frontend_subphase_mark, module_assembly.spl's
+# _module_assembly_subphase_mark, driver_log_helpers.spl's log_phase) and a
+# binary built to contain them -- out of scope for a fast CI-shaped check.
+# If this guard's peak RSS regresses, correlate against those markers
+# (SIMPLE_COMPILER_PHASE_PROFILE=1 SIMPLE_BINARY=<binary> <binary>
+# native-build ... 2>&1 | grep FRONTEND-SUBPHASE) before assuming which
+# sub-phase moved.
+#
+# Ceilings are calibrated with generous headroom (defect-class tripwire,
+# not a tight perf budget). Override via env for local tuning.
+set -eu
+
+ROOT="${STAGE4_PARSE_MEM_MULTI_ROOT:-build/check-stage4-parse-memory-multifile}"
+FILE_COUNT="${STAGE4_PARSE_MEM_MULTI_FILES:-40}"
+FUNCS_PER_FILE="${STAGE4_PARSE_MEM_MULTI_FUNCS_PER_FILE:-20}"
+TIME_MAX_S="${STAGE4_PARSE_MEM_MULTI_TIME_MAX_S:-120}"
+# Calibrated 2026-07-21 against a real self-hosted binary (stage2 built from
+# this doc's own worktree HEAD): 40 files x 20 funcs/file -> ~132-136MB peak
+# RSS. ~3x headroom, not a tight budget -- this is a defect-class tripwire
+# (catch a 64GB-class blowup, or any multi-x regression), not a benchmark.
+RSS_MAX_KIB="${STAGE4_PARSE_MEM_MULTI_RSS_MAX_KIB:-409600}"
+# Same landmine as the sibling script: bin/simple's ad-hoc
+# `native-build --entry <file>` path was broken as of 2026-07-20
+# (content-independent "function expects 2 argument(s)" error) -- override
+# with a known-working self-hosted binary until that's fixed. Must NOT be
+# the Rust seed (bin/simple_seed): this bug is self-hosted-binary-only, the
+# seed's own Rust parser does not reproduce it.
+SIMPLE_BIN="${STAGE4_PARSE_MEM_MULTI_BINARY:-bin/simple}"
+
+case "$FILE_COUNT" in ''|*[!0-9]*) echo "error=invalid_file_count"; exit 2 ;; esac
+[ "$FILE_COUNT" -gt 1 ] || { echo "error=invalid_file_count (need >1 to exercise cross-file accumulation)"; exit 2; }
+case "$FUNCS_PER_FILE" in ''|*[!0-9]*) echo "error=invalid_funcs_per_file"; exit 2 ;; esac
+[ "$FUNCS_PER_FILE" -gt 0 ] || { echo "error=invalid_funcs_per_file"; exit 2; }
+[ -x /usr/bin/time ] || { echo "error=gnu_time_required"; exit 2; }
+command -v timeout >/dev/null 2>&1 || { echo "error=timeout_required"; exit 2; }
+[ -x "$SIMPLE_BIN" ] || { echo "error=binary_missing:$SIMPLE_BIN"; exit 2; }
+
+rm -rf "$ROOT"
+mkdir -p "$ROOT/gen"
+
+# mod0 has no imports; mod(i) for i>0 imports mod(i-1) and re-exposes one of
+# its functions, so --entry-closure from the last file transitively reaches
+# exactly $FILE_COUNT files -- deterministic, no repo-root scan.
+i=0
+while [ "$i" -lt "$FILE_COUNT" ]; do
+  f="$ROOT/gen/mod${i}.spl"
+  : > "$f"
+  if [ "$i" -gt 0 ]; then
+    prev=$((i - 1))
+    printf 'use gen.mod%d.{parsemem_multi_f_%d_0}\n' "$prev" "$prev" >>"$f"
+  fi
+  j=0
+  while [ "$j" -lt "$FUNCS_PER_FILE" ]; do
+    printf 'fn parsemem_multi_f_%d_%d() -> i64:\n    val a = %d\n    val b = %d\n    a + b\n\n' "$i" "$j" "$j" "$j" >>"$f"
+    j=$((j + 1))
+  done
+  i=$((i + 1))
+done
+last=$((FILE_COUNT - 1))
+printf 'fn main() -> i64:\n    parsemem_multi_f_%d_0()\n' "$last" >>"$ROOT/gen/mod${last}.spl"
+
+set +e
+/usr/bin/time -f "%M" -o "$ROOT/max-rss-kib" \
+  timeout "$TIME_MAX_S" "$SIMPLE_BIN" native-build \
+    --target x86_64-unknown-linux-gnu --backend cranelift --runtime-bundle core-c-bootstrap \
+    --source "$ROOT/gen" --entry-closure --threads 1 --mode dynload \
+    --cache-dir "$ROOT/cache" \
+    --entry "$ROOT/gen/mod${last}.spl" -o "$ROOT/out.bin" \
+    >"$ROOT/output.log" 2>"$ROOT/error.log"
+status=$?
+set -e
+
+if [ "$status" -eq 124 ]; then
+  echo "error=timed_out_after_${TIME_MAX_S}s (multi-file parse-memory regression signature -- see doc/08_tracking/bug/bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20.md)"
+  tail -n 20 "$ROOT/error.log" || true
+  exit 1
+fi
+
+max_rss_kib="$(sed -n '1p' "$ROOT/max-rss-kib" 2>/dev/null || echo 0)"
+case "$max_rss_kib" in ''|*[!0-9]*) max_rss_kib=0 ;; esac
+[ "$max_rss_kib" -gt 0 ] || { echo "error=no_rss_sample"; cat "$ROOT/error.log" || true; exit 2; }
+
+if [ "$status" -ne 0 ]; then
+  echo "error=native_build_failed:$status (peak_rss_kib=$max_rss_kib -- if this is a compile error unrelated to memory, the guard's synthetic chain may need updating, not the ceilings)"
+  tail -n 20 "$ROOT/error.log" || true
+  exit 1
+fi
+
+[ "$max_rss_kib" -lt "$RSS_MAX_KIB" ] || {
+  echo "error=peak_rss_kib:$max_rss_kib exceeds ceiling $RSS_MAX_KIB over $FILE_COUNT files"
+  exit 1
+}
+
+echo "stage4_parse_memory_multifile_file_count=$FILE_COUNT"
+echo "stage4_parse_memory_multifile_funcs_per_file=$FUNCS_PER_FILE"
+echo "stage4_parse_memory_multifile_max_rss_kib=$max_rss_kib"
+echo "stage4_parse_memory_multifile_status=pass"
