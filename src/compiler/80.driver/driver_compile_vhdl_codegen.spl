@@ -45,10 +45,61 @@ fn _simple_join_text(items: [text], sep: text) -> text:
         i = i + 1
     out
 
+fn _simple_vhdl_detect_aop_decorators(source: text) -> text:
+    """Detect AOP/decorator usage in source. Returns error message if found, empty string otherwise."""
+    val lines = source.split("\n")
+    var detected_decorators: [text] = []
+    var i = 0
+    while i < lines.len():
+        val line = lines[i].trim()
+        if line.starts_with("@"):
+            # Skip supported decorators
+            if line == "@hardware":
+                i = i + 1
+                continue
+            if line.starts_with("@generic("):
+                i = i + 1
+                continue
+            if line.starts_with("@clocked("):
+                i = i + 1
+                continue
+
+            # Extract decorator name
+            val decorator_text = if line.contains("("):
+                line.substring(1, line.find("(").unwrap())
+            else:
+                line.substring(1, line.len())
+
+            # Check if this is an AOP or decorator keyword
+            if decorator_text == "advice" or decorator_text == "pointcut" or decorator_text == "before" or decorator_text == "after" or decorator_text == "around":
+                detected_decorators = detected_decorators.push(line)
+            elif decorator_text != "type" and decorator_text != "enum":
+                # Unknown decorator - might be AOP-related
+                detected_decorators = detected_decorators.push(line)
+        i = i + 1
+
+    if detected_decorators.len() == 0:
+        return ""
+
+    # Build error message with detected decorators
+    var msg = "Found unsupported decorators that require AOP weaving: "
+    var first = true
+    for dec in detected_decorators:
+        if not first:
+            msg = msg + ", "
+        msg = msg + dec
+        first = false
+    msg
+
 fn _simple_vhdl_source_to_text(source: text) -> Result<text, text>:
     val unsupported_gap = _simple_vhdl_unsupported_parity_gap(source)
     if unsupported_gap != "":
         return Err(unsupported_gap)
+
+    # COMPILER-002: Reject AOP/decorators in VHDL subset path
+    val aop_check = _simple_vhdl_detect_aop_decorators(source)
+    if aop_check != "":
+        return Err("VHDL subset path does not support AOP/decorators. {aop_check} Use the full compiler pipeline (source → HIR → MIR → AOP weaving → RTL IR → VHDL) instead. Direct VHDL emission is only supported for: @hardware, @generic, @clocked.")
 
     val aliases = _simple_type_aliases_for_source(source)
     val multi_result = _simple_multi_hardware_vhdl_source_to_text(source)
@@ -175,6 +226,11 @@ fn _simple_vhdl_source_to_text(source: text) -> Result<text, text>:
     Ok(out)
 
 fn _simple_multi_hardware_vhdl_source_to_text(source: text) -> Result<text, text>:
+    # COMPILER-002: Reject AOP/decorators in multi-hardware path
+    val aop_check = _simple_vhdl_detect_aop_decorators(source)
+    if aop_check != "":
+        return Err("VHDL subset path does not support AOP/decorators. {aop_check} Use the full compiler pipeline (source → HIR → MIR → AOP weaving → RTL IR → VHDL) instead.")
+
     val aliases = _simple_type_aliases_for_source(source)
     val parse_result = _simple_parse_vhdl_functions(source)
     if parse_result.is_err():
@@ -261,6 +317,14 @@ fn _simple_parse_vhdl_functions(source: text) -> Result<[[text]], text>:
             elif line == "@hardware":
                 pending_hardware = "hardware"
             elif line.starts_with("@"):
+                # COMPILER-002: Detect unsupported decorators
+                val decorator_text = if line.contains("("):
+                    line.substring(1, line.find("(").unwrap())
+                else:
+                    line.substring(1, line.len())
+                if decorator_text == "advice" or decorator_text == "pointcut" or decorator_text == "before" or decorator_text == "after" or decorator_text == "around":
+                    return Err("VHDL subset path does not support AOP/decorators. Found decorator '{line}' which requires AOP weaving. Use the full compiler pipeline instead.")
+                # Silently skip other unsupported decorators (for now)
                 pass
             elif line.starts_with("fn "):
                 current_header = line

@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+if [ -z "${BASH_VERSION:-}" ]; then
+    exec bash "$0" "$@"
+fi
+set -euo pipefail
+
+VIVADO_SETTINGS="${VIVADO_SETTINGS:-$HOME/Xilinx/2025.2/Vivado/settings64.sh}"
+BUILD_DIR="build/fpga/k26_rv64"
+LOCK_DIR="$BUILD_DIR.lock"
+RTL_DIR="build/vhdl/rv64"
+TCL_FILE="$BUILD_DIR/build_rv64.tcl"
+XDC_FILE="$BUILD_DIR/k26_uart.xdc"
+OUT_BIT="build/build/rv64_fpga/gateware/rv64_fpga.bit"
+SYNTH_ONLY=0
+if [ "${1:-}" = "--synth-only" ]; then
+    SYNTH_ONLY=1
+fi
+
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    echo "ERROR: RV64 K26 Vivado build already running ($LOCK_DIR)" >&2
+    exit 75
+fi
+trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
+
+if [ ! -f "$VIVADO_SETTINGS" ]; then
+    echo "ERROR: Vivado not found at $VIVADO_SETTINGS"
+    exit 1
+fi
+
+# shellcheck disable=SC1090
+. "$VIVADO_SETTINGS"
+
+mkdir -p "$BUILD_DIR"
+
+# Check for required RTL files. The rv64 payload lives at build/vhdl/rv64/
+# and is consumed by rv64_exec_core (instantiated by soc_top_rv64).
+for f in soc_top_rv64.vhd rv64_exec_core.vhd rv64_payload.mem; do
+    if [ ! -s "$RTL_DIR/$f" ]; then
+        echo "ERROR: missing $RTL_DIR/$f" >&2
+        exit 2
+    fi
+done
+if ! grep -q 'entity soc_top_rv64 is' "$RTL_DIR/soc_top_rv64.vhd"; then
+    echo "ERROR: $RTL_DIR/soc_top_rv64.vhd has no entity declaration" >&2
+    exit 2
+fi
+if ! grep -q 'entity rv64_exec_core is' "$RTL_DIR/rv64_exec_core.vhd"; then
+    echo "ERROR: $RTL_DIR/rv64_exec_core.vhd has no entity declaration" >&2
+    exit 2
+fi
+
+cat > "$XDC_FILE" <<XDC
+## K26 ML Carrier PMOD J2 serial pins (3.3V LVCMOS33).
+##   pin 1 = TX -> H12   pin 2 = RX <- E10   pin 5 = GND
+## Per doc/07_guide/hardware/fpga/kria_k26_ml_carrier_bringup.md.
+set_property PACKAGE_PIN H12 [get_ports uart_tx]
+set_property IOSTANDARD LVCMOS33 [get_ports uart_tx]
+set_property PACKAGE_PIN E10 [get_ports uart_rx]
+set_property IOSTANDARD LVCMOS33 [get_ports uart_rx]
+## pl_clk0 (100 MHz) is auto-constrained by the zynq_ultra_ps_e IP;
+## no manual create_clock here (the old cfgmclk clock is gone).
+XDC
+
+cat > "$TCL_FILE" <<TCL
+set simple_synth_only $SYNTH_ONLY
+set enable_uart_ila ${ENABLE_UART_ILA:-0}
+set ila_reset_release_count ${ILA_RESET_RELEASE_COUNT:-500000000}
+set ila_data_depth ${ILA_DATA_DEPTH:-4096}
+
+create_project k26_rv64 $BUILD_DIR/k26_rv64 -part xck26-sfvc784-2lv-c -force
+
+# ---------------------------------------------------------------------------
+# Zynq UltraScale+ PS block design. Only pl_clk0 + pl_resetn0 are made
+# external, so the BD wrapper port set stays small and version-stable.
+# ---------------------------------------------------------------------------
+create_bd_design k26_ps_bd
+create_bd_cell -type ip -vlnv xilinx.com:ip:zynq_ultra_ps_e:3.5 zynq_ultra_ps_e_0
+# Default IP exposes pl_clk0 @ 100 MHz + pl_resetn0; disable the unused PL
+# clocks/resets to keep the design small.
+set_property -dict [list \\
+  CONFIG.PSU__FPGA_PL1_ENABLE {0} \\
+  CONFIG.PSU__FPGA_PL2_ENABLE {0} \\
+  CONFIG.PSU__FPGA_PL3_ENABLE {0} \\
+] [get_bd_cells zynq_ultra_ps_e_0]
+
+make_bd_pins_external -name pl_clk0    [get_bd_pins zynq_ultra_ps_e_0/pl_clk0]
+make_bd_pins_external -name pl_resetn0 [get_bd_pins zynq_ultra_ps_e_0/pl_resetn0]
+
+# The default IP exposes PS AXI HPM masters whose _aclk pins must be tied to
+# a clock for BD validation. We don't use those masters, so fan out pl_clk0
+# to the known AXI clock pins (catch'd so an absent pin doesn't fail the build).
+foreach clkpin {maxihpm0_fpd_aclk maxihpm0_lpd_aclk maxihpm1_fpd_aclk maxihpm1_lpd_aclk} {
+  catch {connect_bd_net [get_bd_pins zynq_ultra_ps_e_0/pl_clk0] [get_bd_pins zynq_ultra_ps_e_0/\$clkpin]}
+}
+
+validate_bd_design
+save_bd_design
+
+# Generate BD targets and import the auto-generated wrapper (entity
+# k26_ps_bd_wrapper) into the sources fileset. make_wrapper -top generates
+# the wrapper HDL but does NOT auto-add it when the BD is not the design
+# top, so we locate it explicitly and add it as a regular source.
+generate_target all [get_files k26_ps_bd.bd]
+make_wrapper -top [get_files k26_ps_bd.bd]
+add_files -norecurse [get_files k26_ps_bd.bd]
+set proj_dir [get_property DIRECTORY [current_project]]
+set wrapper_files [glob -nocomplain -directory \$proj_dir \\
+  k26_rv64.gen/sources_1/bd/k26_ps_bd/hdl/k26_ps_bd_wrapper.vhd \\
+  k26_rv64.srcs/sources_1/bd/k26_ps_bd/hdl/k26_ps_bd_wrapper.vhd \\
+  k26_rv64.gen/sources_1/bd/k26_ps_bd/hdl/k26_ps_bd_wrapper.v \\
+  k26_rv64.srcs/sources_1/bd/k26_ps_bd/hdl/k26_ps_bd_wrapper.v \\
+  k26_rv64.gen/sources_1/bd/k26_ps_bd/synth/k26_ps_bd_wrapper.vhd]
+if {[llength \$wrapper_files] == 0} {
+  puts "ERROR: k26_ps_bd_wrapper HDL not found under \$proj_dir"
+  exit 5
+}
+add_files -norecurse \$wrapper_files
+puts "BD_WRAPPER=[lindex \$wrapper_files 0]"
+
+# PL RTL: soc_top_rv64 instantiates rv64_exec_core + the PS BD wrapper.
+add_files [list $RTL_DIR/soc_top_rv64.vhd $RTL_DIR/rv64_exec_core.vhd]
+add_files -fileset constrs_1 $XDC_FILE
+
+set_property top soc_top_rv64 [current_fileset]
+update_compile_order -fileset sources_1
+
+launch_runs synth_1 -jobs ${VIVADO_SYNTH_JOBS:-4}
+wait_on_run synth_1
+open_run synth_1
+report_utilization -file $BUILD_DIR/k26_rv64/k26_rv64.runs/synth_1/soc_top_rv64_utilization_synth.rpt
+report_timing_summary -file $BUILD_DIR/k26_rv64/k26_rv64.runs/synth_1/soc_top_rv64_timing_summary_synth.rpt
+
+if {\$simple_synth_only} { exit }
+
+launch_runs impl_1 -to_step write_bitstream
+wait_on_run impl_1
+file mkdir [file dirname $OUT_BIT]
+file copy -force $BUILD_DIR/k26_rv64/k26_rv64.runs/impl_1/soc_top_rv64.bit $OUT_BIT
+TCL
+
+timeout ${VIVADO_TIMEOUT_S:-1800} vivado -mode batch -source "$TCL_FILE" \\
+    -journal "$BUILD_DIR/vivado.jou" -log "$BUILD_DIR/vivado.log" 2>&1 | tail -40
+vivado_rc="${PIPESTATUS[0]}"
+
+if [ "$vivado_rc" -ne 0 ]; then
+    echo "ERROR: Vivado failed (exit $vivado_rc); see $BUILD_DIR/vivado.log"
+    exit "$vivado_rc"
+fi
+
+if [ "$SYNTH_ONLY" = "1" ]; then
+    sh scripts/check/convert-riscv-vivado-reports.shs rv64 \\
+        "$BUILD_DIR/k26_rv64/k26_rv64.runs/synth_1/soc_top_rv64_utilization_synth.rpt" \\
+        "$BUILD_DIR/k26_rv64/k26_rv64.runs/synth_1/soc_top_rv64_timing_summary_synth.rpt" \\
+        "${RISCV_RV64_MHZ:-50}" \\
+        "${RISCV_SYNTH_REPORT_DIR:-build/riscv_synth_reports}"
+    echo "SUCCESS: RV64 synthesis checkpoint at $BUILD_DIR/k26_rv64/k26_rv64.runs/synth_1/soc_top_rv64.dcp"
+else
+    test -f "$OUT_BIT"
+    echo "SUCCESS: RV64 bitstream at $OUT_BIT"
+fi

@@ -1,0 +1,153 @@
+# ============================================================================
+# RISC-V RTL Load/Store Unit — XLEN-Parameterized
+# ============================================================================
+#
+# Unified LSU supporting both RV32 (XLEN=32) and RV64 (XLEN=64).
+# Handles data memory interface for load and store instructions.
+# Computes memory address, formats store data, and sign/zero-extends
+# loaded data according to funct3.
+# ============================================================================
+
+use std.hardware.riscv_rtl.common.pkg.{FUNCT3_LB, FUNCT3_LH, FUNCT3_LW, FUNCT3_LD}
+use std.hardware.riscv_rtl.common.pkg.{FUNCT3_LBU, FUNCT3_LHU, FUNCT3_LWU}
+use std.hardware.riscv_rtl.common.pkg.{MEM_WIDTH_BYTE, MEM_WIDTH_HALF, MEM_WIDTH_WORD, MEM_WIDTH_DWORD}
+
+# ============================================================================
+# Store result bundles
+# ============================================================================
+
+struct LsuStoreResult:
+    """Data memory interface signals for a store operation (i64 backend)."""
+    dmem_addr: i64     # Effective address (base + offset)
+    dmem_wdata: i64    # Data to write
+    dmem_we: bool      # Write enable
+    dmem_width: u32    # Access width (byte/half/word/dword)
+
+struct LsuStoreResult32:
+    """RV32 store result."""
+    dmem_addr: u32
+    dmem_wdata: u32
+    dmem_we: bool
+    dmem_width: u32
+
+struct LsuStoreResult64:
+    """RV64 store result."""
+    dmem_addr: i64
+    dmem_wdata: i64
+    dmem_we: bool
+    dmem_width: u32
+
+# ============================================================================
+# Store address/data computation
+# ============================================================================
+
+fn lsu_store(base: i64, offset: i64, rs2_data: i64, funct3: u32) -> LsuStoreResult:
+    """Compute store address and format write data.
+    funct3[1:0] selects byte/half/word/dword width."""
+    val addr = base + offset
+    val width = funct3 & 0x3
+    LsuStoreResult(dmem_addr: addr, dmem_wdata: rs2_data, dmem_we: true, dmem_width: width)
+
+fn lsu32_store(base: u32, offset: u32, rs2_data: u32, funct3: u32) -> LsuStoreResult32:
+    """RV32 store computation."""
+    val addr = base + offset
+    val width = funct3 & 0x3
+    LsuStoreResult32(dmem_addr: addr, dmem_wdata: rs2_data, dmem_we: true, dmem_width: width)
+
+fn lsu64_store(base: i64, offset: i64, rs2_data: i64, funct3: u32) -> LsuStoreResult64:
+    """RV64 store computation."""
+    val addr = base + offset
+    val width = funct3 & 0x3
+    LsuStoreResult64(dmem_addr: addr, dmem_wdata: rs2_data, dmem_we: true, dmem_width: width)
+
+# ============================================================================
+# Load data sign/zero extension
+# ============================================================================
+
+fn lsu_load(rdata: i64, funct3: u32, xlen: u32) -> i64:
+    """Sign- or zero-extend loaded data according to funct3.
+    Handles LB, LH, LW, LD, LBU, LHU, LWU."""
+
+    if funct3 == FUNCT3_LB:
+        # Load byte, sign-extend from bit 7
+        val byte_val = rdata & 0xFF
+        if (byte_val & 0x80) != 0:
+            byte_val | 0xFFFFFFFFFFFFFF00
+        else:
+            byte_val
+
+    else if funct3 == FUNCT3_LH:
+        # Load halfword, sign-extend from bit 15
+        val half_val = rdata & 0xFFFF
+        if (half_val & 0x8000) != 0:
+            half_val | 0xFFFFFFFFFFFF0000
+        else:
+            half_val
+
+    else if funct3 == FUNCT3_LW:
+        # Load word, sign-extend from bit 31
+        val word_val = rdata & 0xFFFFFFFF
+        if (word_val & 0x80000000) != 0:
+            word_val | 0xFFFFFFFF00000000
+        else:
+            word_val
+
+    else if funct3 == FUNCT3_LD:
+        # Load doubleword — no extension needed (RV64 only)
+        rdata
+
+    else if funct3 == FUNCT3_LBU:
+        # Load byte unsigned — zero-extend
+        rdata & 0xFF
+
+    else if funct3 == FUNCT3_LHU:
+        # Load halfword unsigned — zero-extend
+        rdata & 0xFFFF
+
+    else if funct3 == FUNCT3_LWU:
+        # Load word unsigned — zero-extend (RV64 only)
+        rdata & 0xFFFFFFFF
+
+    else:
+        # Default: pass through
+        rdata
+
+fn lsu32_load(rdata: u32, funct3: u32) -> u32:
+    """RV32 load with sign/zero extension (u32)."""
+    if funct3 == FUNCT3_LB:
+        val byte_val = rdata & 0xFF
+        if (byte_val & 0x80) != 0:
+            byte_val | 0xFFFFFF00
+        else:
+            byte_val
+
+    else if funct3 == FUNCT3_LH:
+        val half_val = rdata & 0xFFFF
+        if (half_val & 0x8000) != 0:
+            half_val | 0xFFFF0000
+        else:
+            half_val
+
+    else if funct3 == FUNCT3_LW:
+        rdata
+
+    else if funct3 == FUNCT3_LBU:
+        rdata & 0xFF
+
+    else if funct3 == FUNCT3_LHU:
+        rdata & 0xFFFF
+
+    else:
+        rdata
+
+fn lsu64_load(rdata: i64, funct3: u32) -> i64:
+    """RV64 load with sign/zero extension (i64)."""
+    lsu_load(rdata, funct3, 64)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export LsuStoreResult, lsu_store, lsu_load
+export LsuStoreResult32, lsu32_store, lsu32_load
+export LsuStoreResult64, lsu64_store, lsu64_load

@@ -1,0 +1,508 @@
+# ============================================================================
+# RISC-V RTL CSR File — XLEN-Parameterized M-Mode Control/Status Registers
+# ============================================================================
+#
+# Unified M-mode CSR file supporting both RV32 (XLEN=32) and RV64 (XLEN=64).
+# All operations are pure functions returning new state.
+#
+# Supported CSRs:
+#   Trap Setup:    mstatus, misa, mie, mtvec
+#   Trap Handling: mscratch, mepc, mcause, mtval, mip
+#   Counters:      mcycle/h, minstret/h (RV32: split, RV64: native 64-bit)
+#   Info:          mhartid (read-only)
+#   Delegation:    medeleg, mideleg (for S-mode)
+# ============================================================================
+
+use std.hardware.riscv_rtl.common.pkg.{CSR_ADDR_MSTATUS, CSR_ADDR_MISA, CSR_ADDR_MIE}
+use std.hardware.riscv_rtl.common.pkg.{CSR_ADDR_MTVEC, CSR_ADDR_MSCRATCH, CSR_ADDR_MEPC}
+use std.hardware.riscv_rtl.common.pkg.{CSR_ADDR_MCAUSE, CSR_ADDR_MTVAL, CSR_ADDR_MIP}
+use std.hardware.riscv_rtl.common.pkg.{CSR_ADDR_MCYCLE, CSR_ADDR_MCYCLEH}
+use std.hardware.riscv_rtl.common.pkg.{CSR_ADDR_MINSTRET, CSR_ADDR_MINSTRETH}
+use std.hardware.riscv_rtl.common.pkg.{CSR_ADDR_MEDELEG, CSR_ADDR_MIDELEG, CSR_ADDR_MHARTID}
+use std.hardware.riscv_rtl.common.pkg.{mstatus_mie_mask, mstatus_mpie_mask, mstatus_mpp_mask, mpp_m_mode}
+use std.hardware.riscv_rtl.common.pkg.{MIP_MSIP_MASK, MIP_MTIP_MASK, MIP_MEIP_MASK}
+use std.hardware.riscv_rtl.common.pkg.{misa_rv32i, misa_rv64imac}
+use std.hardware.riscv_rtl.common.pkg.{FUNCT3_CSRRW, FUNCT3_CSRRS, FUNCT3_CSRRC}
+use std.hardware.riscv_rtl.common.pkg.{FUNCT3_CSRRWI, FUNCT3_CSRRSI, FUNCT3_CSRRCI}
+
+# ============================================================================
+# CSR File Structs
+# ============================================================================
+
+struct CsrFile:
+    """M-mode CSR register file (i64 backend for both RV32 and RV64)."""
+    mstatus: i64
+    misa: i64
+    mie: i64
+    mtvec: i64
+    mscratch: i64
+    mepc: i64
+    mcause: i64
+    mtval: i64
+    mip: i64
+    medeleg: i64
+    mideleg: i64
+    mcycle: i64       # Full 64-bit cycle counter
+    minstret: i64     # Full 64-bit instruction counter
+    mhartid: i64
+
+struct CsrFile32:
+    """RV32 M-mode CSR register file with split high/low counters."""
+    mstatus: u32
+    misa: u32
+    mie: u32
+    mtvec: u32
+    mscratch: u32
+    mepc: u32
+    mcause: u32
+    mtval: u32
+    mip: u32
+    mcycle: u32
+    mcycleh: u32
+    minstret: u32
+    minstreth: u32
+    mhartid: u32
+
+struct CsrFile64:
+    """RV64 M-mode CSR register file."""
+    mstatus: i64
+    misa: i64
+    mie: i64
+    mtvec: i64
+    mscratch: i64
+    mepc: i64
+    mcause: i64
+    mtval: i64
+    mip: i64
+    medeleg: i64
+    mideleg: i64
+    mcycle: i64
+    minstret: i64
+    mhartid: i64
+
+# ============================================================================
+# CSR Read/Write Results
+# ============================================================================
+
+struct CsrRwResult:
+    """Result of a CSR read-modify-write operation."""
+    csr: CsrFile
+    old_value: i64
+
+struct CsrRwResult32:
+    """RV32 CSR read/write result."""
+    csr: CsrFile32
+    old_value: u32
+
+struct CsrRwResult64:
+    """RV64 CSR read/write result."""
+    csr: CsrFile64
+    old_value: i64
+
+# ============================================================================
+# CSR bit constants (for backward compatibility)
+# ============================================================================
+
+val MSTATUS_MIE_BIT: u32  = 3
+val MSTATUS_MPIE_BIT: u32 = 7
+val MSTATUS_MPP_LO_BIT: u32 = 11
+
+# ============================================================================
+# CSR Create — initial CSR state after reset
+# ============================================================================
+
+fn csr_create(hartid: i64, xlen: u32) -> CsrFile:
+    """Create initial CSR state for a given hart."""
+    val misa = if xlen == 32: misa_rv32i() as i64 else: misa_rv64imac()
+    CsrFile(
+        mstatus: 0,
+        misa: misa,
+        mie: 0,
+        mtvec: 0,
+        mscratch: 0,
+        mepc: 0,
+        mcause: 0,
+        mtval: 0,
+        mip: 0,
+        medeleg: 0,
+        mideleg: 0,
+        mcycle: 0,
+        minstret: 0,
+        mhartid: hartid
+    )
+
+fn csr32_create(hartid: u32) -> CsrFile32:
+    """Create RV32 initial CSR state."""
+    CsrFile32(
+        mstatus: 0,
+        misa: 0x40000100,   # RV32I
+        mie: 0,
+        mtvec: 0,
+        mscratch: 0,
+        mepc: 0,
+        mcause: 0,
+        mtval: 0,
+        mip: 0,
+        mcycle: 0,
+        mcycleh: 0,
+        minstret: 0,
+        minstreth: 0,
+        mhartid: hartid as i64
+    )
+
+fn csr64_create(hartid: i64) -> CsrFile64:
+    """Create RV64 initial CSR state."""
+    CsrFile64(
+        mstatus: 0,
+        misa: misa_rv64imac(),
+        mie: 0,
+        mtvec: 0,
+        mscratch: 0,
+        mepc: 0,
+        mcause: 0,
+        mtval: 0,
+        mip: 0,
+        medeleg: 0,
+        mideleg: 0,
+        mcycle: 0,
+        minstret: 0,
+        mhartid: hartid
+    )
+
+# ============================================================================
+# CSR Read — read by 12-bit address
+# ============================================================================
+
+fn csr_read(csr: CsrFile, addr: u32) -> i64:
+    """Read a CSR by its 12-bit address. Unknown addresses return 0."""
+    if addr == CSR_ADDR_MSTATUS:
+        return csr.mstatus
+    if addr == CSR_ADDR_MISA:
+        return csr.misa
+    if addr == CSR_ADDR_MIE:
+        return csr.mie
+    if addr == CSR_ADDR_MTVEC:
+        return csr.mtvec
+    if addr == CSR_ADDR_MSCRATCH:
+        return csr.mscratch
+    if addr == CSR_ADDR_MEPC:
+        return csr.mepc
+    if addr == CSR_ADDR_MCAUSE:
+        return csr.mcause
+    if addr == CSR_ADDR_MTVAL:
+        return csr.mtval
+    if addr == CSR_ADDR_MIP:
+        return csr.mip
+    if addr == CSR_ADDR_MEDELEG:
+        return csr.medeleg
+    if addr == CSR_ADDR_MIDELEG:
+        return csr.mideleg
+    if addr == CSR_ADDR_MCYCLE:
+        return csr.mcycle & 0xFFFFFFFF
+    if addr == CSR_ADDR_MCYCLEH:
+        return (csr.mcycle >> 32) & 0xFFFFFFFF
+    if addr == CSR_ADDR_MINSTRET:
+        return csr.minstret & 0xFFFFFFFF
+    if addr == CSR_ADDR_MINSTRETH:
+        return (csr.minstret >> 32) & 0xFFFFFFFF
+    if addr == CSR_ADDR_MHARTID:
+        return csr.mhartid
+    0
+
+fn csr32_read(csr: CsrFile32, addr: u32) -> u32:
+    """RV32 CSR read."""
+    if addr == CSR_ADDR_MSTATUS:
+        return csr.mstatus
+    if addr == CSR_ADDR_MISA:
+        return csr.misa
+    if addr == CSR_ADDR_MIE:
+        return csr.mie
+    if addr == CSR_ADDR_MTVEC:
+        return csr.mtvec
+    if addr == CSR_ADDR_MSCRATCH:
+        return csr.mscratch
+    if addr == CSR_ADDR_MEPC:
+        return csr.mepc
+    if addr == CSR_ADDR_MCAUSE:
+        return csr.mcause
+    if addr == CSR_ADDR_MTVAL:
+        return csr.mtval
+    if addr == CSR_ADDR_MIP:
+        return csr.mip
+    if addr == CSR_ADDR_MCYCLE:
+        return csr.mcycle
+    if addr == CSR_ADDR_MCYCLEH:
+        return csr.mcycleh
+    if addr == CSR_ADDR_MINSTRET:
+        return csr.minstret
+    if addr == CSR_ADDR_MINSTRETH:
+        return csr.minstreth
+    if addr == CSR_ADDR_MHARTID:
+        return csr.mhartid as u32
+    0
+
+fn csr64_read(csr: CsrFile64, addr: u32) -> i64:
+    """RV64 CSR read."""
+    if addr == CSR_ADDR_MSTATUS:
+        return csr.mstatus
+    if addr == CSR_ADDR_MISA:
+        return csr.misa
+    if addr == CSR_ADDR_MIE:
+        return csr.mie
+    if addr == CSR_ADDR_MTVEC:
+        return csr.mtvec
+    if addr == CSR_ADDR_MSCRATCH:
+        return csr.mscratch
+    if addr == CSR_ADDR_MEPC:
+        return csr.mepc
+    if addr == CSR_ADDR_MCAUSE:
+        return csr.mcause
+    if addr == CSR_ADDR_MTVAL:
+        return csr.mtval
+    if addr == CSR_ADDR_MIP:
+        return csr.mip
+    if addr == CSR_ADDR_MEDELEG:
+        return csr.medeleg
+    if addr == CSR_ADDR_MIDELEG:
+        return csr.mideleg
+    if addr == CSR_ADDR_MCYCLE:
+        return csr.mcycle
+    if addr == CSR_ADDR_MINSTRET:
+        return csr.minstret
+    if addr == CSR_ADDR_MHARTID:
+        return csr.mhartid
+    0
+
+# ============================================================================
+# CSR Write — write by 12-bit address
+# ============================================================================
+
+fn csr_write(csr: CsrFile, addr: u32, value: i64, xlen: u32) -> CsrFile:
+    """Write a value to a CSR. Read-only CSRs are silently ignored."""
+    var out = csr
+    if addr == CSR_ADDR_MSTATUS:
+        val writable_mask = mstatus_mie_mask(xlen) | mstatus_mpie_mask(xlen) | mstatus_mpp_mask(xlen)
+        out.mstatus = value & writable_mask
+    else if addr == CSR_ADDR_MIE:
+        out.mie = value
+    else if addr == CSR_ADDR_MTVEC:
+        out.mtvec = value
+    else if addr == CSR_ADDR_MSCRATCH:
+        out.mscratch = value
+    else if addr == CSR_ADDR_MEPC:
+        out.mepc = value & (-4)
+    else if addr == CSR_ADDR_MCAUSE:
+        out.mcause = value
+    else if addr == CSR_ADDR_MTVAL:
+        out.mtval = value
+    else if addr == CSR_ADDR_MIP:
+        out.mip = (csr.mip & (MIP_MTIP_MASK | MIP_MEIP_MASK)) | (value & MIP_MSIP_MASK)
+    else if addr == CSR_ADDR_MEDELEG:
+        out.medeleg = value
+    else if addr == CSR_ADDR_MIDELEG:
+        out.mideleg = value
+    # misa, mhartid, mcycle, minstret — read-only or counter
+    out
+
+fn csr32_write(csr: CsrFile32, addr: u32, value: u32) -> CsrFile32:
+    """RV32 CSR write."""
+    var out = csr
+    if addr == CSR_ADDR_MSTATUS:
+        val writable_mask: u32 = 0x00000008 | 0x00000080 | 0x00001800
+        out.mstatus = value & writable_mask
+    else if addr == CSR_ADDR_MIE:
+        out.mie = value
+    else if addr == CSR_ADDR_MTVEC:
+        out.mtvec = value
+    else if addr == CSR_ADDR_MSCRATCH:
+        out.mscratch = value
+    else if addr == CSR_ADDR_MEPC:
+        out.mepc = value & 0xFFFFFFFC
+    else if addr == CSR_ADDR_MCAUSE:
+        out.mcause = value
+    else if addr == CSR_ADDR_MTVAL:
+        out.mtval = value
+    else if addr == CSR_ADDR_MIP:
+        out.mip = (csr.mip & (MIP_MTIP_MASK as u32 | MIP_MEIP_MASK as u32)) | (value & (MIP_MSIP_MASK as u32))
+    out
+
+fn csr64_write(csr: CsrFile64, addr: u32, value: i64) -> CsrFile64:
+    """RV64 CSR write."""
+    var out = csr
+    if addr == CSR_ADDR_MSTATUS:
+        val writable_mask = 0x00000008 | 0x00000080 | 0x00001800
+        out.mstatus = value & writable_mask
+    else if addr == CSR_ADDR_MIE:
+        out.mie = value
+    else if addr == CSR_ADDR_MTVEC:
+        out.mtvec = value
+    else if addr == CSR_ADDR_MSCRATCH:
+        out.mscratch = value
+    else if addr == CSR_ADDR_MEPC:
+        out.mepc = value & 0xFFFFFFFFFFFFFFFC
+    else if addr == CSR_ADDR_MCAUSE:
+        out.mcause = value
+    else if addr == CSR_ADDR_MTVAL:
+        out.mtval = value
+    else if addr == CSR_ADDR_MIP:
+        out.mip = (csr.mip & (MIP_MTIP_MASK | MIP_MEIP_MASK)) | (value & MIP_MSIP_MASK)
+    else if addr == CSR_ADDR_MEDELEG:
+        out.medeleg = value
+    else if addr == CSR_ADDR_MIDELEG:
+        out.mideleg = value
+    out
+
+# ============================================================================
+# CSR Read-Modify-Write — CSRRW, CSRRS, CSRRC
+# ============================================================================
+
+fn csr_rw(csr: CsrFile, addr: u32, rs1_val: i64, funct3: u32, xlen: u32) -> CsrRwResult:
+    """Perform a CSR read-modify-write operation."""
+    val old_value = csr_read(csr, addr)
+    var new_value = old_value
+
+    val op = funct3 & 0x3
+    if op == 1:
+        new_value = rs1_val
+    else if op == 2:
+        if rs1_val != 0:
+            new_value = old_value | rs1_val
+    else if op == 3:
+        if rs1_val != 0:
+            new_value = old_value & (rs1_val ^ -1)
+
+    val new_csr = csr_write(csr, addr, new_value, xlen)
+    CsrRwResult(csr: new_csr, old_value: old_value)
+
+fn csr32_rw(csr: CsrFile32, addr: u32, rs1_val: u32, funct3: u32) -> CsrRwResult32:
+    """RV32 CSR read-modify-write."""
+    val old_value = csr32_read(csr, addr)
+    var new_value = old_value
+
+    val op = funct3 & 0x3
+    if op == 1:
+        new_value = rs1_val
+    else if op == 2:
+        if rs1_val != 0:
+            new_value = old_value | rs1_val
+    else if op == 3:
+        if rs1_val != 0:
+            new_value = old_value & (rs1_val ^ 0xFFFFFFFF)
+
+    val new_csr = csr32_write(csr, addr, new_value)
+    CsrRwResult32(csr: new_csr, old_value: old_value)
+
+fn csr64_rw(csr: CsrFile64, addr: u32, rs1_val: i64, funct3: u32) -> CsrRwResult64:
+    """RV64 CSR read-modify-write."""
+    val old_value = csr64_read(csr, addr)
+    var new_value = old_value
+
+    val op = funct3 & 0x3
+    if op == 1:
+        new_value = rs1_val
+    else if op == 2:
+        if rs1_val != 0:
+            new_value = old_value | rs1_val
+    else if op == 3:
+        if rs1_val != 0:
+            new_value = old_value & (rs1_val ^ -1)
+
+    val new_csr = csr64_write(csr, addr, new_value)
+    CsrRwResult64(csr: new_csr, old_value: old_value)
+
+# ============================================================================
+# CSR Tick — increment cycle and instruction counters
+# ============================================================================
+
+fn csr_tick(csr: CsrFile) -> CsrFile:
+    """Increment mcycle and minstret counters."""
+    var out = csr
+    out.mcycle = csr.mcycle + 1
+    out.minstret = csr.minstret + 1
+    out
+
+fn csr32_tick(csr: CsrFile32) -> CsrFile32:
+    """RV32 tick with overflow handling."""
+    var out = csr
+    val new_mcycle = csr.mcycle + 1
+    out.mcycle = new_mcycle
+    if new_mcycle == 0:
+        out.mcycleh = csr.mcycleh + 1
+
+    val new_minstret = csr.minstret + 1
+    out.minstret = new_minstret
+    if new_minstret == 0:
+        out.minstreth = csr.minstreth + 1
+    out
+
+fn csr64_tick(csr: CsrFile64) -> CsrFile64:
+    """RV64 tick (native 64-bit, no overflow handling)."""
+    var out = csr
+    out.mcycle = csr.mcycle + 1
+    out.minstret = csr.minstret + 1
+    out
+
+# ============================================================================
+# Update MIP — set interrupt pending bits from external sources
+# ============================================================================
+
+fn csr_update_mip(csr: CsrFile, mtip: bool, msip: bool, meip: bool) -> CsrFile:
+    """Update the interrupt-pending register from external sources."""
+    var new_mip: i64 = 0
+    if msip:
+        new_mip = new_mip | MIP_MSIP_MASK
+    if mtip:
+        new_mip = new_mip | MIP_MTIP_MASK
+    if meip:
+        new_mip = new_mip | MIP_MEIP_MASK
+    var out = csr
+    out.mip = new_mip
+    out
+
+fn csr32_update_mip(csr: CsrFile32, mtip: bool, msip: bool, meip: bool) -> CsrFile32:
+    """RV32 MIP update."""
+    var new_mip: u32 = 0
+    if msip:
+        new_mip = new_mip | (MIP_MSIP_MASK as u32)
+    if mtip:
+        new_mip = new_mip | (MIP_MTIP_MASK as u32)
+    if meip:
+        new_mip = new_mip | (MIP_MEIP_MASK as u32)
+    var out = csr
+    out.mip = new_mip
+    out
+
+fn csr64_update_mip(csr: CsrFile64, mtip: bool, msip: bool, meip: bool) -> CsrFile64:
+    """RV64 MIP update."""
+    var new_mip: i64 = 0
+    if msip:
+        new_mip = new_mip | MIP_MSIP_MASK
+    if mtip:
+        new_mip = new_mip | MIP_MTIP_MASK
+    if meip:
+        new_mip = new_mip | MIP_MEIP_MASK
+    var out = csr
+    out.mip = new_mip
+    out
+
+# ============================================================================
+# Spec-facing aliases
+# ============================================================================
+
+fn csr32_init() -> CsrFile32:
+    csr32_create(0)
+
+fn csr64_init() -> CsrFile64:
+    csr64_create(0)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export CsrFile, csr_create, csr_read, csr_write, csr_rw, csr_tick, csr_update_mip
+export CsrFile32, csr32_create, csr32_read, csr32_write, csr32_rw, csr32_tick, csr32_update_mip
+export CsrFile64, csr64_create, csr64_read, csr64_write, csr64_rw, csr64_tick, csr64_update_mip
+export CsrRwResult, CsrRwResult32, CsrRwResult64
+export csr32_init, csr64_init
+export MSTATUS_MIE_BIT, MSTATUS_MPIE_BIT, MSTATUS_MPP_LO_BIT
+export MISA_RV32I = 0x40000100
