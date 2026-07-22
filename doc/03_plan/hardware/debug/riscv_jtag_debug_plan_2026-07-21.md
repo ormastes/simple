@@ -189,7 +189,16 @@ Current stub interface:
 - GPR read/write via GDB (`info registers`, `set $x5=0x123`)
 - Memory read/write via GDB (`x/10 0x8000`)
 
-**Estimated effort**: 7-10 days
+**STATUS: LANDED `eb2f1734655` (2026-07-22).** Live gdb-multiarch 15.1 session
+over OpenOCD 0.12.0 bitbang + GHDL sim, reviewer-reproduced `GDB_E2E: ALL PASS`:
+native RSP attach, `info registers`, GPR write + readback, SBA memory
+read/write, dpc write, `continue` + Ctrl-C halt, clean detach. `step` is
+`monitor step` (dcsr.step via qRcmd), honestly labeled: native `stepi` is
+impossible against the tb fake hart (GDB riscv-tdep plants a software
+breakpoint at next-pc, which a non-fetching fake hart never hits; GDB's insn
+probe also issues 16-bit reads the 32/64-bit SBA rejects). Both limits
+dissolve at hart integration. Files: `src/lib/hardware/debug/gdb_e2e.gdb`,
+`run_gdb_e2e.shs`, `gdb_e2e.md` (full transcript).
 
 ---
 
