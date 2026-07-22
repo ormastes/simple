@@ -77,7 +77,7 @@ Wall removed (interpreter, this host):
 allocates a fresh state per call and is unsuitable for a 2 MiB blob; it was not
 benchmarked at 128 MiB scale. The ~39 s "before" is the byte-mode RMW loader,
 the honest baseline the word-packing fast path replaced.)
-| `soc_top_64_tick` rate | — | **~300 (shallow) / ~675–800 (deep) ticks/s** |
+| `soc_top_64_tick` rate (honest 128 MiB) | ~29 ticks/s (per-tick RAM CoW copy) | **~665 ticks/s via `soc_top_64_run` (copy eliminated)** |
 
 ### Frontier update (2026-07-22, Lane QQ) — boots trap-free into `fw_platform_init`
 
@@ -104,19 +104,33 @@ are hard-asserted in Case 3. Measured: 18 000 / 28 000 ticks both `mcause==0`,
 no trap; `max_pc` reaches `0x8000_e4d6` (`semihosting_init`, an sbi_init callee),
 so execution continues past `fw_platform_init` into sbi_init-era code.
 
+**Throughput (Lane RR, 2026-07-22): the per-tick RAM value-copy is eliminated.**
+`soc_top_64_tick` threads the whole `SocTop64State` (incl. the 128 MiB DRAM
+`[i64]`) by value; on a store the interpreter copy-on-writes the whole array
+(~315 ms/store, ~29 ticks/s on the honest map) because the driver binding is a
+competing reference. `soc_top_64_run(soc, max_ticks) -> SocRunResult` keeps the
+tick loop in one call and stores into DRAM with a drop-ref in-place mutation (one
+copy amortized over the run), lifting the **honest full 128 MiB** map from ~29 to
+**~665 ticks/s (≈23x)** — parity with the old compacted map, with no read-trimming.
+Case 3 now boots the honest map and prints BEFORE/AFTER (~31 → ~628 ticks/s).
+
+**Compacted-map caveat RESOLVED:** a 2 MiB and a 128 MiB map reach the identical
+`max_pc` (`0x8001_3fd6`, in the OpenSBI FDT walk `fdt_next_tag`/`fdt_find_match`)
+through `fw_platform_init`, so the in-region loop is not a trimmed-RAM artifact.
+
 **Current frontier: the banner is not reached within a single run** (it is ~10⁵
-instructions further: `sbi_init` → console init). The **likely** blocker is
-simulation throughput — the `soc_top_64` core runs interpreted (core64 JIT
-falls back: `Unknown variable: lsu64_load`) at ~600 ticks/s with a per-tick RAM
-copy, under the host's ~60 s per-process CPU cap. **Not yet distinguished** from
-a compacted-map artifact (the observability harness trims RAM to 0x70000, so
-firmware reads ≥0x70000 return 0) or a loop in other-owned code — the next owner
-must confirm forward progress on the honest 128 MiB map. Filed:
+instructions further: `sbi_init` → console init). The **true wall** is a hard
+~60 s wall-clock process watchdog (SIGTERM, verified independent of RSS — a
+220 MB run and a 3.3 GB run are both killed at ~60 s) that bounds a single
+process to ~35 k datapath ticks at ~665 ticks/s. Crossing it needs
+checkpoint/resume across processes, the core64 `lsu64_load` JIT-lowering fix
+(Rust-side, `Unknown variable: lsu64_load`), or lifting the watchdog — **not**
+faster per-tick throughput, which is now solved. Filed:
 `doc/08_tracking/bug/rv64_opensbi_fw_platform_init_throughput_frontier_2026-07-22.md`.
 
 ### Remaining blockers (past the throughput frontier, unexercised)
 
-Not yet reached — execution is throughput-bound inside `fw_platform_init`:
+Not yet reached — bounded by the ~60 s process watchdog past `fw_platform_init`:
 
 1. **S-mode / `mret` drop** — OpenSBI's purpose; delegation path present
    (`csr64_update_mip_s`, Sv39) but unexercised by a real firmware run.

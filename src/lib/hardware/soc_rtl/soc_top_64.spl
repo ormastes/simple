@@ -63,7 +63,7 @@ use std.hardware.rv64gc_rtl.mmu.{SV39_SATP_MODE, SV39_ACCESS_FETCH, SV39_ACCESS_
 # -- Peripherals
 use std.hardware.soc_rtl.clint.{ClintState, clint_create, clint_tick, clint_mmio_read, clint_mmio_write}
 use std.hardware.soc_rtl.plic.{PlicState, plic_create, plic_mmio_read, plic_mmio_read_update, plic_mmio_write, plic_set_pending, plic_check_interrupt, plic_check_interrupt_s}
-use std.hardware.soc_rtl.ram64.{Ram64State, ram64_init, ram64_read, ram64_write}
+use std.hardware.soc_rtl.ram64.{Ram64State, ram64_init, ram64_read, ram64_write, ram64_logical_shr}
 use std.hardware.soc_rtl.bootrom.{bootrom_read64, bootrom_dtb_byte, DTB_HEADER_SIZE}
 
 # -- Wishbone64 interconnect
@@ -470,3 +470,190 @@ fn soc_top_64_tick(soc: SocTop64State) -> SocTop64State:
             out.core.priv_mode = ie.target_mode
 
     out
+
+# ============================================================================
+# SoC Run — batched multi-cycle driver (per-tick RAM value-copy eliminated)
+# ============================================================================
+#
+# WHY THIS EXISTS (perf, not new semantics):
+#   soc_top_64_tick threads the whole SocTop64State — including the DRAM word
+#   array ram.data — by value.  In the interpreter, a struct copy shares the
+#   [i64] array by a refcounted handle (proven: passing SocTop64State by value
+#   and returning a scalar-changed copy are BOTH independent of RAM size).  The
+#   ONE operation that scales with RAM size is a store `data[i] = v` on a
+#   NON-unique array: `arr[i]=` copy-on-writes the whole array when another live
+#   binding references it.  Every store-cycle of a per-call `soc = tick(soc)`
+#   loop pays that copy, because the driver's `soc` binding is the competing
+#   reference — measured 315 ms per store on a 128 MiB DRAM (29 ticks/s).
+#
+#   soc_top_64_run keeps the ENTIRE tick loop inside a SINGLE call.  The RAM
+#   store is done with the "drop-ref" pattern JJ used in ram64_load_bytes:
+#   lift ram.data into a bare local `d`, clear the struct field
+#   (`out.ram.data = []`) so `d` becomes the sole holder, mutate `d` in place
+#   (interpreter arr[i]= uniqueness fast path: one copy-on-write on the first
+#   store of the call, then O(1) per store), and write `d` back.  The driver's
+#   competing reference points at the pre-run array, which is abandoned after
+#   that single first copy — so the whole run pays ONE array copy, not one per
+#   store.  Measured: 3000 stores on 128 MiB drop from ~945 s to ~0.35 s.
+#
+#   SEMANTICS ARE IDENTICAL to running soc_top_64_tick in a loop: every step
+#   (1-8) calls the exact same helpers in the same order; only the step-6 DRAM
+#   store is inlined (mirroring ram64_write's dword-crossing RMW) instead of
+#   routed through soc64_mem_write, purely to keep ram.data uniquely held.
+#   CLINT / PLIC / UART / DTB stores still route through soc64_mem_write (small
+#   state, no big-array mutation, so no copy).  Not part of the synthesizable
+#   subset — a sim-only fast driver, like ram64_load_bytes.
+
+struct SocRunResult:
+    """Outcome of a batched soc_top_64_run call."""
+    soc: SocTop64State   # SoC state after the run (ram.data shared, not copied)
+    ticks: i64           # cycles actually executed this call
+    trapped: bool        # a trap fired (mcause became nonzero) during the run
+    hit_a4: bool         # PC reached 0x800000a4 (ELF relocate loop done)
+    hit_cc: bool         # PC reached 0x800000cc (bss-zero loop entered)
+    hit_fw: bool         # PC reached 0x800048ba (fw_platform_init entered)
+    max_pc: i64          # highest PC observed during the run
+
+fn soc_top_64_run(soc: SocTop64State, max_ticks: i64) -> SocRunResult:
+    """Run up to max_ticks cycles in one call, eliminating the per-tick DRAM
+    value-copy (see the block comment above).  Stops early on core halt or on
+    the first trap (mcause != 0).  Watches the three OpenSBI boot milestones and
+    tracks max_pc so a chunked driver keeps full observability between calls."""
+    var out = soc
+    var ran: i64 = 0
+    var trapped = false
+    var hit_a4 = false
+    var hit_cc = false
+    var hit_fw = false
+    var max_pc = out.core.pc
+
+    while ran < max_ticks and not trapped:
+        # --- Step 1: CLINT tick ---
+        val ct = clint_tick(out.clint)
+        out.clint = ct.state
+
+        # --- Step 1b: UART RX level into PLIC ---
+        val uart_irq = (out.uart_ier & 0x1) != 0 and out.uart_rx.len() > 0
+        out.plic = plic_set_pending(out.plic, SOC64_PLIC_SRC_UART, uart_irq)
+
+        # --- Step 1c: interrupt levels into mip ---
+        val pchk = plic_check_interrupt(out.plic)
+        val pchk_s = plic_check_interrupt_s(out.plic)
+        out.core.csr_m = csr64_update_mip_s(out.core.csr_m, ct.mtip, ct.msip_out, pchk.meip, pchk_s.meip)
+
+        # --- Step 1d: S-mode sip mirror ---
+        val sip_soft = out.core.csr_s.sip & SIP_SSIP_MASK_64
+        val sip_lvl = out.core.csr_m.mip & (SIP_STIP_MASK_64 | SIP_SEIP_MASK_64) & out.core.csr_m.mideleg
+        var csr_s_mir = out.core.csr_s
+        csr_s_mir.sip = sip_soft | sip_lvl
+        out.core.csr_s = csr_s_mir
+
+        if out.core.halt:
+            ran = ran + 1
+            return SocRunResult(soc: out, ticks: ran, trapped: trapped,
+                hit_a4: hit_a4, hit_cc: hit_cc, hit_fw: hit_fw, max_pc: max_pc)
+
+        # --- Step 2: fetch (Sv39-translated) ---
+        val fx = soc64_translate(out, out.core.pc, SV39_ACCESS_FETCH)
+        if fx.fault:
+            out = soc64_raise_trap(out, fx.cause, out.core.pc, out.core.pc)
+        else:
+            val insn = soc64_fetch(out, fx.pa)
+
+            # --- Step 3: prelim comb pass ---
+            val comb_prelim = core64_combinational(out.core, insn, 0, out.core.rf)
+            val width_bytes = soc64_width_bytes(comb_prelim.dmem_width)
+
+            # --- Step 4: load dispatch + read side-effects ---
+            var dmem_rdata: i64 = 0
+            var load_faulted = false
+            if comb_prelim.dmem_re:
+                val lx = soc64_translate(out, comb_prelim.dmem_addr, SV39_ACCESS_LOAD)
+                if lx.fault:
+                    out = soc64_raise_trap(out, lx.cause, comb_prelim.dmem_addr, out.core.pc)
+                    load_faulted = true
+                else:
+                    dmem_rdata = soc64_mem_read(out, lx.pa, width_bytes)
+                    out = soc64_mem_read_update(out, lx.pa)
+
+            if not load_faulted:
+                # --- Step 5: final comb pass ---
+                val comb = core64_combinational(out.core, insn, dmem_rdata, out.core.rf)
+
+                # --- Step 6: store dispatch ---
+                var store_faulted = false
+                if comb.dmem_we:
+                    val sx = soc64_translate(out, comb.dmem_addr, SV39_ACCESS_STORE)
+                    if sx.fault:
+                        out = soc64_raise_trap(out, sx.cause, comb.dmem_addr, out.core.pc)
+                        store_faulted = true
+                    else if soc64_in_dtb(sx.pa):
+                        pass    # DTB header overlay is read-only (mirrors soc64_mem_write)
+                    else if soc64_in_ram(out, sx.pa):
+                        # In-place DRAM store: drop-ref so ram.data stays unique
+                        # and arr[i]= is O(1) (no per-store 128 MiB copy).  RMW
+                        # math mirrors ram64_write EXACTLY (dword store + sub-word
+                        # dword-crossing split with logical shifts).
+                        val raddr = sx.pa - SOC64_RAM_BASE
+                        val word_idx = raddr >> 3
+                        val nw = (out.ram.size + 7) >> 3
+                        if word_idx < nw:
+                            var d = out.ram.data
+                            out.ram.data = []
+                            val byte_offset = raddr & 7
+                            if width_bytes == 8:
+                                d[word_idx] = comb.dmem_wdata
+                            else:
+                                val nbits = width_bytes * 8
+                                val shift = byte_offset * 8
+                                val v = comb.dmem_wdata & ((1 << nbits) - 1)
+                                val low_avail = 64 - shift
+                                var low_w = nbits
+                                if low_avail < nbits:
+                                    low_w = low_avail
+                                val low_field_mask = ((1 << low_w) - 1) << shift
+                                val old_low = d[word_idx]
+                                d[word_idx] = (old_low & (low_field_mask ^ -1)) | ((v << shift) & low_field_mask)
+                                if nbits > low_avail:
+                                    val high_w = nbits - low_avail
+                                    val high_field_mask = (1 << high_w) - 1
+                                    val hi_idx = word_idx + 1
+                                    if hi_idx < nw:
+                                        val old_hi = d[hi_idx]
+                                        val hi_bits = ram64_logical_shr(v, low_avail) & high_field_mask
+                                        d[hi_idx] = (old_hi & (high_field_mask ^ -1)) | hi_bits
+                            out.ram.data = d
+                    else:
+                        out = soc64_mem_write(out, sx.pa, width_bytes, comb.dmem_wdata)
+
+                if not store_faulted:
+                    # --- Step 7: clocked core update ---
+                    out.core = core64_update(out.core, insn, comb, comb.a0_val, comb.a1_val)
+
+                    # --- Step 8: interrupt take at instruction boundary ---
+                    if out.core.halt == false and out.core.semi_phase == 0:
+                        val ic = trap64_check_interrupt_deleg(out.core.priv_mode, out.core.csr_m, out.core.csr_s)
+                        if ic.pending:
+                            val ie = trap64_enter(trap64_state_init(), ic.cause, 0,
+                                out.core.pc, out.core.priv_mode, out.core.csr_m, out.core.csr_s)
+                            out.core.csr_m = ie.csr
+                            out.core.csr_s = ie.csr_s
+                            out.core.pc = ie.trap_pc
+                            out.core.priv_mode = ie.target_mode
+
+        # --- observe milestones / max_pc / trap ---
+        val pc = out.core.pc
+        if pc == 0x800000a4:
+            hit_a4 = true
+        if pc == 0x800000cc:
+            hit_cc = true
+        if pc == 0x800048ba:
+            hit_fw = true
+        if pc > max_pc:
+            max_pc = pc
+        if out.core.csr_m.mcause != 0:
+            trapped = true
+        ran = ran + 1
+
+    SocRunResult(soc: out, ticks: ran, trapped: trapped,
+        hit_a4: hit_a4, hit_cc: hit_cc, hit_fw: hit_fw, max_pc: max_pc)

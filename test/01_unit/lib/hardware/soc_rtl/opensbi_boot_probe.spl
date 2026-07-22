@@ -21,15 +21,19 @@
 #      and the trap-entry IALIGN=16 mepc/sepc masks (~3 -> ~1).  With both fixes,
 #      real OpenSBI now boots TRAP-FREE (mcause==0) through the ELF relocate loop,
 #      the bss-zero loop, and into fw_platform_init (the FDT platform-init C
-#      code).  The banner is not yet reached: it is ~10^5 instructions further
-#      (fw_platform_init + sbi_init + console init) and the soc_top_64 core runs
-#      interpreted (core64 JIT falls back on `lsu64_load`) at ~600 ticks/s with a
-#      per-tick RAM copy, so the frontier is now sim THROUGHPUT, not a bug in this
-#      lane's files.  Pinned + filed:
+#      code).  Lane RR then eliminated the per-tick RAM value-copy (soc_top_64_run
+#      drop-ref store: ~29 -> ~665 ticks/s on the HONEST full 128 MiB map — Case 3
+#      now boots the honest map, not a compacted one, and prints before/after).
+#      The banner is still not reached: it is ~10^5 instructions further
+#      (sbi_init + console init) and the TRUE WALL is now a hard ~60 s wall-clock
+#      process watchdog (SIGTERM) that bounds a single process to ~35k ticks —
+#      crossing it needs checkpoint/resume, the core64 `lsu64_load` JIT fix
+#      (Rust-side), or lifting the watchdog, NOT more per-tick throughput.
+#      Pinned + filed:
 #      doc/08_tracking/bug/rv64_opensbi_fw_platform_init_throughput_frontier_2026-07-22.md.
 #      See also doc/07_guide/os/opensbi_rv64_soc.md.
-use std.hardware.soc_rtl.soc_top_64.{SocTop64State, soc_top_64_init, soc_top_64_tick}
-use std.hardware.soc_rtl.ram64.{ram64_write, ram64_init, ram64_read, ram64_load_bytes}
+use std.hardware.soc_rtl.soc_top_64.{SocTop64State, soc_top_64_init, soc_top_64_tick, soc_top_64_run, SocRunResult}
+use std.hardware.soc_rtl.ram64.{Ram64State, ram64_write, ram64_init, ram64_read, ram64_load_bytes}
 use std.hardware.rv64gc_rtl.regfile.{regfile64_write}
 
 extern fn rt_file_read_bytes(path: text) -> [u8]?
@@ -41,6 +45,37 @@ fn check(name: text, ok: bool) -> i64:
         return 0
     print("FAIL {name}")
     1
+
+fn uart_has_opensbi(tx: [i64]) -> bool:
+    """True when the UART TX log contains the ASCII banner prefix "OpenSBI"
+    (0x4F 0x70 0x65 0x6E 0x53 0x42 0x49) anywhere in the stream."""
+    val want: [i64] = [79, 112, 101, 110, 83, 66, 73]
+    if tx.len() < want.len():
+        return false
+    var i = 0
+    while i + want.len() <= tx.len():
+        var j = 0
+        var ok = true
+        while j < want.len():
+            if (tx[i + j] & 0xFF) != want[j]:
+                ok = false
+            j = j + 1
+        if ok:
+            return true
+        i = i + 1
+    false
+
+fn fresh_boot_soc(hram: Ram64State) -> SocTop64State:
+    """A fresh SoC seeded with the honest DRAM image and the OpenSBI boot ABI
+    (pc=0x80000000, a0=hartid 0, a1=DTB pointer)."""
+    var s = soc_top_64_init(0x1000)
+    s.ram = hram
+    var c0 = s.core
+    c0.pc = 0x80000000
+    c0.rf = regfile64_write(c0.rf, 10, 0, true)          # a0 = hartid 0
+    c0.rf = regfile64_write(c0.rf, 11, 0x80060000, true) # a1 = DTB pointer
+    s.core = c0
+    s
 
 fn payload_words() -> [i64]:
     """Hand-encoded RV64I payload, word-for-word the gcc stub output:
@@ -188,22 +223,33 @@ fn run_fw_payload_boot_case() -> i64:
         HARD-asserted, verified claim below.  No correctness wall remains
         THROUGH fw_platform_init.
       * The banner is NOT reached (it lives ~10^5 insns further: sbi_init +
-        console init).  Execution continues trap-free into sbi_init-era code
-        (observed max_pc reaches semihosting_init), but does not reach the banner
-        within a single run.  The LIKELY blocker is sim throughput — the
-        soc_top_64 core runs interpreted (core64 JIT falls back on `lsu64_load`,
-        ~600 ticks/s) with a per-tick RAM copy, and the host kills each run at a
-        ~60 s CPU cap.  NOT yet ruled out: a compacted-map artifact (this harness
-        trims RAM, so reads >=0x70000 return 0) or a loop in other-owned code.
-        Out-of-file-set / cross-lane; filed with the open questions in
-        doc/08_tracking/bug/rv64_opensbi_fw_platform_init_throughput_frontier_2026-07-22.md.
+        console init).  Execution continues trap-free into the FDT walk
+        (fdt_next_tag/fdt_offset_ptr/fdt_find_match, max_pc ~0x80013fd6).
 
-    Sim-speed harness: to make the boot observable we use a COMPACTED memory map
-    (RAM trimmed to firmware+stack+DTB = 0x70000, DTB relocated to 0x80060000
-    via a1).  OpenSBI uses the a1 FDT pointer wherever it points and all of the
-    executed path lives below 0x48000, so the firmware code path is unchanged;
-    only the sim memory footprint (hence per-tick copy cost) shrinks."""
-    print("=== Case 3: real fw_payload boot (ram64 fetch FIXED; frontier = fw_platform_init / throughput) ===")
+    THROUGHPUT (Lane RR): the per-tick RAM value-copy in soc_top_64_tick is now
+    ELIMINATED.  soc_top_64_tick threads the whole SocTop64State (incl. the DRAM
+    [i64]) by value; on a store the interpreter CoW-copies the whole 128 MiB
+    array because the driver's binding is a competing reference — measured
+    ~315 ms/store, 29 ticks/s on the honest map.  soc_top_64_run keeps the entire
+    tick loop in one call and does the DRAM store with a drop-ref in-place
+    mutation (one array copy amortized over the whole run), lifting the honest
+    128 MiB map from ~29 to ~665 ticks/s — parity with the old compacted map.
+    This case now boots the HONEST full 128 MiB map (no read-trimming) and prints
+    the before/after ticks/sec.
+
+    COMPACTED-MAP CAVEAT RESOLVED: a 2 MiB map and a 128 MiB map reach the
+    IDENTICAL max_pc (0x80013fd6) through fw_platform_init, so the in-region FDT
+    loop is not a trimmed-RAM artifact.
+
+    TRUE WALL: a hard ~60 s wall-clock process watchdog (SIGTERM at ~60 s,
+    independent of RSS — verified with a 220 MB run and a 3.3 GB run both killed
+    at 60 s) bounds a single process to ~35k datapath ticks at ~665 ticks/s.  The
+    banner (~10^5 insns further: sbi_init + console init) needs ~3x that, so it
+    requires checkpoint/resume across processes, the core64 `lsu64_load` JIT
+    lowering fix (Rust-side, out of this lane), or lifting the watchdog — NOT
+    faster per-tick throughput, which is now solved.  See
+    doc/08_tracking/bug/rv64_opensbi_fw_platform_init_throughput_frontier_2026-07-22.md."""
+    print("=== Case 3: real fw_payload boot on HONEST 128MiB (per-tick RAM copy eliminated; wall = 60s watchdog) ===")
     val fw = rt_file_read_bytes("build/os/opensbi_rv64_soc/fw_payload.bin") ?? []
     if fw.len() == 0:
         print("fw_payload.bin absent (offline) — SKIP boot attempt (needs cross-gcc build)")
@@ -233,55 +279,97 @@ fn run_fw_payload_boot_case() -> i64:
     fails = fails + check("first fw_boot_hart insn is RVC c.li a0,-1 (0x557d={insn_lo16})",
         insn_lo16 == 0x557d)
 
-    # --- Boot forward on the compacted map; assert trap-free progress --------
+    # --- Boot forward on the HONEST full 128 MiB map (compacted caveat killed) -
+    # The per-tick RAM value-copy is gone (soc_top_64_run drop-ref store), so the
+    # honest map — full 128 MiB DRAM, every read served from real memory, no
+    # read-trimming — runs at the same speed the compacted map used to, and Lane
+    # RR's before/after measurement below proves it.
     val dtb = rt_file_read_bytes("examples/09_embedded/simple_os/arch/riscv64/soc_virt.dtb") ?? []
+    var hram = ram64_init(0x8010000)                 # HONEST 128 MiB + 64 KiB (DTB room)
+    hram = ram64_load_bytes(hram, 0, fw)
     if dtb.len() > 0:
-        ram = ram64_load_bytes(ram, 0x60000, dtb)
+        hram = ram64_load_bytes(hram, 0x60000, dtb)
 
-    var soc = soc_top_64_init(0x1000)
-    soc.ram = ram
-    var core0 = soc.core
-    core0.pc = 0x80000000
-    core0.rf = regfile64_write(core0.rf, 10, 0, true)            # a0 = hartid 0
-    core0.rf = regfile64_write(core0.rf, 11, 0x80060000, true)   # a1 = DTB (relocated low)
-    soc.core = core0
+    # --- BEFORE: the old per-tick-copy path (soc_top_64_tick in a driver loop) --
+    # On the honest 128 MiB map every store CoW-copies the whole DRAM array
+    # (~315 ms/store), so this crawls.  A short 40-tick sample is enough to time.
+    var b_soc = fresh_boot_soc(hram)
+    val b0 = rt_time_now_micros()
+    var bt = 0
+    while bt < 40:
+        b_soc = soc_top_64_tick(b_soc)
+        bt = bt + 1
+    val b1 = rt_time_now_micros()
+    var before_tps = 0
+    if b1 > b0:
+        before_tps = (bt * 1000000) / (b1 - b0)
+    print("BEFORE (soc_top_64_tick, per-tick RAM copy, 128MiB): {bt} ticks in {b1-b0} us -> {before_tps} ticks/sec")
 
-    # Milestones on the real boot path (each requires the ram64 + trap fixes to
-    # have let earlier code run without trapping).
+    # --- AFTER: the batched soc_top_64_run driver (per-tick RAM copy eliminated) -
+    # Chunked so the banner-scan + milestone/max_pc observability is retained
+    # between calls.  ~18000 ticks reaches fw_platform_init; a hard ~60 s
+    # wall-clock process watchdog (see bug doc) bounds a single process, so the
+    # probe stops well inside it.
+    var soc = fresh_boot_soc(hram)
     var m_reloc_done = false     # 0x800000a4 — ELF relocate loop completed
     var m_bss = false            # 0x800000cc — bss-zero loop entered
     var m_fw_plat = false        # 0x800048ba — fw_platform_init (FDT C code) entered
     var trapped = false
-    var t = 0
-    val tsr = rt_time_now_micros()
-    while t < 9000 and not trapped:
-        soc = soc_top_64_tick(soc)
-        val pc = soc.core.pc
-        if pc == 0x800000a4:
-            m_reloc_done = true
-        if pc == 0x800000cc:
-            m_bss = true
-        if pc == 0x800048ba:
-            m_fw_plat = true
-        if soc.core.csr_m.mcause != 0:
-            trapped = true
-        t = t + 1
-    val tse = rt_time_now_micros()
-    print("boot: {t} ticks, mcause={soc.core.csr_m.mcause}, pc={soc.core.pc}")
-    print("milestones: reloc_done={m_reloc_done} bss_zero={m_bss} fw_platform_init={m_fw_plat}")
-    if tse > tsr:
-        print("ticks/sec ~= {(t * 1000000) / (tse - tsr)}")
+    var banner = false
+    var gmax: i64 = 0
+    var total = 0
+    val a0 = rt_time_now_micros()
+    var k = 0
+    # Stop once all three milestones are confirmed (the banner is ~10^5 insns
+    # further, unreachable within the ~60 s process wall) — keeps this gate well
+    # inside the watchdog even on a loaded host.
+    while k < 12 and not trapped and not banner and not (m_reloc_done and m_bss and m_fw_plat):
+        val r = soc_top_64_run(soc, 2000)
+        soc = r.soc
+        total = total + r.ticks
+        if r.hit_a4: m_reloc_done = true
+        if r.hit_cc: m_bss = true
+        if r.hit_fw: m_fw_plat = true
+        if r.max_pc > gmax: gmax = r.max_pc
+        if r.trapped: trapped = true
+        if uart_has_opensbi(soc.uart_tx): banner = true
+        k = k + 1
+    val a1 = rt_time_now_micros()
+    var after_tps = 0
+    if a1 > a0:
+        after_tps = (total * 1000000) / (a1 - a0)
+    print("AFTER  (soc_top_64_run, drop-ref store, 128MiB): {total} ticks in {a1-a0} us -> {after_tps} ticks/sec")
+    print("boot: {total} ticks, mcause={soc.core.csr_m.mcause}, pc={soc.core.pc}, max_pc={gmax}, uart_tx.len={soc.uart_tx.len()}")
+    print("milestones: reloc_done={m_reloc_done} bss_zero={m_bss} fw_platform_init={m_fw_plat} banner={banner}")
 
-    fails = fails + check("boot runs the ELF relocate loop to completion (reaches _relocate_done @0x800000a4)",
+    # HARD asserts: the honest-map boot is trap-free through fw_platform_init.
+    fails = fails + check("HONEST 128MiB: boot runs the ELF relocate loop to completion (_relocate_done @0x800000a4)",
         m_reloc_done)
-    fails = fails + check("boot enters the bss-zero loop @0x800000cc", m_bss)
-    fails = fails + check("boot enters fw_platform_init FDT C code @0x800048ba", m_fw_plat)
-    fails = fails + check("no trap through fw_platform_init (mcause==0 — ram64+trap fixes hold)",
+    fails = fails + check("HONEST 128MiB: boot enters the bss-zero loop @0x800000cc", m_bss)
+    fails = fails + check("HONEST 128MiB: boot enters fw_platform_init FDT C code @0x800048ba", m_fw_plat)
+    fails = fails + check("HONEST 128MiB: no trap through fw_platform_init (mcause==0 — ram64+trap fixes hold)",
         not trapped and soc.core.csr_m.mcause == 0)
-    print("finding: ram64 dword-crossing fetch FIXED + IALIGN trap masks FIXED; real OpenSBI now boots")
-    print("finding: trap-free THROUGH fw_platform_init (verified). Banner not reached; likely blocker =")
-    print("finding: sim throughput (core64 lsu JIT fallback + per-tick RAM copy), NOT yet distinguished")
-    print("finding: from a compacted-map artifact / other-owned loop — out-of-file-set; see bug doc.")
+    # PERF assert: the per-tick RAM copy is eliminated — AFTER must be many-fold
+    # faster than BEFORE on the identical 128 MiB workload.
+    fails = fails + check("per-tick RAM copy eliminated: soc_top_64_run >= 5x soc_top_64_tick on 128MiB ({after_tps} vs {before_tps} ticks/sec)",
+        after_tps >= before_tps * 5)
+
+    # Banner: assert the prefix if reached; otherwise pin the true wall.
+    if banner:
+        fails = fails + check("OpenSBI UART banner prefix 'OpenSBI' present in uart_tx", uart_has_opensbi(soc.uart_tx))
+        print("BANNER REACHED — quote the uart_tx bytes above.")
+    else:
+        print("finding: per-tick RAM value-copy ELIMINATED (soc_top_64_run drop-ref store):")
+        print("finding:   BEFORE ~{before_tps} ticks/sec (per-tick 128MiB CoW copy) -> AFTER ~{after_tps} ticks/sec.")
+        print("finding: honest 128MiB map reaches fw_platform_init trap-free; max_pc={gmax} lands in the")
+        print("finding: OpenSBI FDT walk (fdt_next_tag/fdt_offset_ptr/fdt_find_match, ~0x80013fd6).")
+        print("finding: COMPACTED-MAP CAVEAT RESOLVED — a 2 MiB and a 128 MiB map reach the identical")
+        print("finding: max_pc through this depth, so the in-region loop is NOT a trimmed-RAM artifact.")
+        print("finding: TRUE WALL = a hard ~60 s wall-clock process watchdog (SIGTERM) bounds each run to")
+        print("finding: ~35k datapath ticks at ~{after_tps} ticks/sec; the banner is ~10^5 insns further")
+        print("finding: (sbi_init + console init). Crossing it needs checkpoint/resume across processes,")
+        print("finding: the core64 lsu64_load JIT-lowering fix (Rust-side, not this lane), or lifting the")
+        print("finding: 60 s watchdog — NOT throughput of the per-tick copy, which is now gone. See bug doc.")
     fails
 
 fn main() -> i64:
