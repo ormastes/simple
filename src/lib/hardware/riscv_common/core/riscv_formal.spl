@@ -1,17 +1,80 @@
-# RISC-V formal verification stubs — hardware.riscv_common.core.riscv_formal
+# RISC-V formal verification contracts — hardware.riscv_common.core.riscv_formal
 #
-# Provides formal verification contract functions for GHDL RV32 simulation.
+# HONESTY NOTE on scope: the rt_ghdl_* functions below are RUNTIME contract
+# checks over one observed simulation run (exit codes / constraint probes).
+# They are NOT proofs over all executions. The only concrete, self-checking
+# theorem in this module is check_retire_chain(), which validates RVFI
+# retire-trace invariants over a concrete trace and FAILS CLOSED on vacuous
+# input (fewer than 2 valid retires never reports success).
 # Consumers: nogc_sync_mut/debug/remote/exec/adapter_ghdl_rv32.spl,
-#            nogc_async_mut/debug/remote/exec/adapter_ghdl_rv32.spl
+#            nogc_async_mut/debug/remote/exec/adapter_ghdl_rv32.spl,
+#            test/01_unit/lib/hardware/*/rvfi* probes
 
 extern fn rt_ghdl_verify_vhdl_constraints(arch: text) -> i64
 extern fn rt_ghdl_verify_return_zero_contract(code_start: i64, exit_code: i64, arch: text) -> i64
 
 use std.nogc_sync_mut.debug.remote.exec.capability_report.{CapabilityReport, probe_external_formal}
 
+# ============================================================================
+# Concrete retire-chain theorem (XLEN-agnostic, non-vacuous)
+# ============================================================================
+
+struct RetireChainReport:
+    """Result of the retire-chain check over one concrete RVFI trace."""
+    ok: bool
+    checked_retires: i64
+    vacuous: bool
+    violations: [text]
+
+fn check_retire_chain(orders: [i64], pc_rdata: [i64], pc_wdata: [i64], traps: [bool]) -> RetireChainReport:
+    """Concrete retire-chain theorem over a collected RVFI trace.
+
+    Inputs are parallel arrays, one entry per VALID retire, XLEN-agnostic
+    (rv32 pcs zero-extend into i64). Checks:
+      1. order strictly monotonic: orders[N+1] > orders[N]
+      2. pc chaining: pc_wdata[N] == pc_rdata[N+1] unless traps[N]
+    FAILS CLOSED: mismatched array lengths or fewer than 2 retires yield
+    ok=false with vacuous=true — a vacuous run is never a PASS.
+    """
+    val n = orders.len()
+    if pc_rdata.len() != n or pc_wdata.len() != n or traps.len() != n:
+        return RetireChainReport(
+            ok: false, checked_retires: 0, vacuous: true,
+            violations: ["mismatched trace array lengths"])
+    if n < 2:
+        return RetireChainReport(
+            ok: false, checked_retires: n, vacuous: true,
+            violations: ["vacuous: fewer than 2 valid retires ({n})"])
+    var violations: [text] = []
+    var i = 1
+    while i < n:
+        if orders[i] <= orders[i - 1]:
+            violations = violations.push("retire {i}: order not monotonic ({orders[i]} after {orders[i - 1]})")
+        if not traps[i - 1] and pc_wdata[i - 1] != pc_rdata[i]:
+            violations = violations.push("retire {i}: pc chain broken (pc_rdata={pc_rdata[i]} expected {pc_wdata[i - 1]})")
+        i = i + 1
+    RetireChainReport(
+        ok: violations.len() == 0,
+        checked_retires: n,
+        vacuous: false,
+        violations: violations)
+
+fn render_retire_chain_report(report: RetireChainReport) -> text:
+    """Human-readable one-line-per-issue rendering of a RetireChainReport."""
+    if report.ok:
+        return "retire-chain: PASS ({report.checked_retires} retires checked, non-vacuous)"
+    var out = "retire-chain: FAIL"
+    if report.vacuous:
+        out = out + " (vacuous)"
+    out = out + " ({report.checked_retires} retires)\n"
+    for v in report.violations:
+        out = out + "- " + v + "\n"
+    out
+
 fn verify_rv32_default_vhdl_constraints() -> Result<text, text>:
     """Run default VHDL constraint checks for a GHDL RV32 simulation.
 
+    RUNTIME CHECK, not a proof: validates one observed simulation run.
     Returns Ok("passed") if all constraints pass, Err with diagnostic on failure.
     """
     val result = rt_ghdl_verify_vhdl_constraints("rv32")
@@ -22,6 +85,8 @@ fn verify_rv32_default_vhdl_constraints() -> Result<text, text>:
 
 fn verify_rv32_ghdl_return_zero_contract(code_start: i64, exit_code: i64) -> Result<text, text>:
     """Verify that an RV32 program under GHDL returned exit code 0.
+
+    RUNTIME CHECK, not a proof: validates one observed simulation run.
 
     Args:
         code_start: Base address of the code segment in the memory map.
@@ -37,6 +102,9 @@ fn verify_rv32_ghdl_return_zero_contract(code_start: i64, exit_code: i64) -> Res
 
 fn verify_rv64_qemu_user_proof_contract(code_start: i64, exit_code: i64) -> Result<text, text>:
     """Verify that an RV64 program under QEMU user-mode returned exit code 0.
+
+    RUNTIME CHECK, not a proof: despite the legacy name, this validates the
+    exit code of one observed QEMU run only.
 
     Args:
         code_start: Base address of the code segment.

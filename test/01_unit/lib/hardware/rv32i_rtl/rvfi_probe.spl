@@ -1,0 +1,122 @@
+# RV32I RVFI self-check probe.
+# Runs a small program through the real rv32 core, collects the RVFI retire
+# trace, and asserts the retire-chain invariants plus per-retire arch results:
+#   - pc_wdata[N] == pc_rdata[N+1] (except traps)
+#   - rvfi_order strictly monotonic
+#   - rd_wdata matches the architectural result
+#   - mem rmask/wmask/addr/data match the store/load performed
+# Non-vacuous: fails if fewer than 2 valid retires were collected.
+# Run: bin/simple run test/01_unit/lib/hardware/rv32i_rtl/rvfi_probe.spl
+use std.hardware.rv32i_rtl.core.{core_reset, core_combinational, core_update, core_rvfi_trace}
+use std.hardware.rv32i_rtl.regfile.{regfile_create, regfile_write}
+use std.hardware.rv32i_rtl.rvfi.{RvfiTrace, rvfi_enabled_config, rvfi_check_traces, rvfi_valid_retire_count}
+use std.hardware.riscv_common.core.riscv_formal.{check_retire_chain, render_retire_chain_report}
+
+fn check(name: text, ok: bool) -> i64:
+    if ok:
+        print("PASS {name}")
+        return 0
+    print("FAIL {name}")
+    1
+
+fn main() -> i64:
+    var fails: i64 = 0
+
+    # Program (reset vector 0):
+    #   0x00 addi x1, x0, 42     -> x1 = 42
+    #   0x04 addi x2, x1, 1      -> x2 = 43
+    #   0x08 sw   x2, 64(x0)     -> mem[64] = 43
+    #   0x0C lw   x3, 64(x0)     -> x3 = 43
+    #   0x10 jal  x0, 0          (park)
+    val prog = [0x02A00093u32, 0x00108113u32, 0x04202023u32, 0x04002183u32, 0x0000006Fu32]
+
+    var state = core_reset(0)
+    var rf = regfile_create()
+    var mem_slot: u32 = 0
+    var traces: [RvfiTrace] = []
+    val config = rvfi_enabled_config(0)
+
+    var cycle: i64 = 0
+    while cycle < 8:
+        val idx = (state.pc / 4) as i64
+        var insn: u32 = 0x0000006Fu32
+        if idx >= 0 and idx < 5:
+            insn = prog[idx]
+        var comb = core_combinational(state, insn, 0, rf)
+        var dmem_rdata: u32 = 0
+        if comb.dmem_re:
+            dmem_rdata = mem_slot
+            comb = core_combinational(state, insn, dmem_rdata, rf)
+        if comb.dmem_we:
+            mem_slot = comb.dmem_wdata
+        traces = traces.push(core_rvfi_trace(config, cycle, state, insn, dmem_rdata, comb))
+        rf = regfile_write(rf, comb.dec.rd, comb.rd_data, comb.dec.reg_write)
+        state = core_update(state, insn, comb, comb.a0_val, comb.a1_val)
+        cycle = cycle + 1
+
+    # --- Invariant self-check (rvfi-level) ---
+    val violations = rvfi_check_traces(traces)
+    for v in violations:
+        print("VIOLATION {v}")
+    fails = fails + check("rvfi invariants hold (0 violations)", violations.len() == 0)
+
+    # --- Non-vacuity guard ---
+    val retires = rvfi_valid_retire_count(traces)
+    print("valid retires: {retires}")
+    fails = fails + check("non-vacuous (>= 2 valid retires)", retires >= 2)
+
+    # --- Shared retire-chain theorem (riscv_common.core.riscv_formal) ---
+    var orders: [i64] = []
+    var pc_r: [i64] = []
+    var pc_w: [i64] = []
+    var traps: [bool] = []
+    for t in traces:
+        if t.rvfi_valid:
+            orders = orders.push(t.rvfi_order)
+            pc_r = pc_r.push(t.rvfi_pc_rdata as i64)
+            pc_w = pc_w.push(t.rvfi_pc_wdata as i64)
+            traps = traps.push(t.rvfi_trap)
+    val report = check_retire_chain(orders, pc_r, pc_w, traps)
+    print(render_retire_chain_report(report))
+    fails = fails + check("retire-chain theorem PASS non-vacuous", report.ok and not report.vacuous)
+
+    # --- Per-retire architectural results ---
+    fails = fails + check("retire 0: addi x1 rd_wdata == 42",
+        traces[0].rvfi_rd_addr == 1 and traces[0].rvfi_rd_wdata == 42)
+    fails = fails + check("retire 1: addi x2 rd_wdata == 43",
+        traces[1].rvfi_rd_addr == 2 and traces[1].rvfi_rd_wdata == 43)
+    fails = fails + check("retire 2: sw wmask 0xF addr 64 wdata 43",
+        traces[2].rvfi_mem_wmask == 0xF and traces[2].rvfi_mem_addr == 64
+        and traces[2].rvfi_mem_wdata == 43 and traces[2].rvfi_mem_rmask == 0)
+    fails = fails + check("retire 3: lw rmask 0xF rd_wdata 43 mem_rdata 43",
+        traces[3].rvfi_mem_rmask == 0xF and traces[3].rvfi_rd_addr == 3
+        and traces[3].rvfi_rd_wdata == 43 and traces[3].rvfi_mem_rdata == 43)
+    fails = fails + check("retire 4: jal park pc_wdata == 0x10",
+        traces[4].rvfi_pc_rdata == 0x10 and traces[4].rvfi_pc_wdata == 0x10)
+    fails = fails + check("insn field carries fetched instruction",
+        traces[0].rvfi_insn == 0x02A00093u32 and traces[3].rvfi_insn == 0x04002183u32)
+
+    # --- Negative check: a corrupted trace must be rejected (no greenwash) ---
+    var bad = traces
+    val t1 = traces[1]
+    bad[1] = RvfiTrace(
+        rvfi_valid: t1.rvfi_valid, rvfi_order: t1.rvfi_order, rvfi_insn: t1.rvfi_insn,
+        rvfi_trap: t1.rvfi_trap, rvfi_rs1_addr: t1.rvfi_rs1_addr, rvfi_rs2_addr: t1.rvfi_rs2_addr,
+        rvfi_rs1_rdata: t1.rvfi_rs1_rdata, rvfi_rs2_rdata: t1.rvfi_rs2_rdata,
+        rvfi_rd_addr: t1.rvfi_rd_addr, rvfi_rd_wdata: t1.rvfi_rd_wdata,
+        rvfi_pc_rdata: 0xDEAD0000u32, rvfi_pc_wdata: t1.rvfi_pc_wdata,
+        rvfi_mem_addr: t1.rvfi_mem_addr, rvfi_mem_rmask: t1.rvfi_mem_rmask,
+        rvfi_mem_wmask: t1.rvfi_mem_wmask, rvfi_mem_rdata: t1.rvfi_mem_rdata,
+        rvfi_mem_wdata: t1.rvfi_mem_wdata)
+    fails = fails + check("checker rejects broken pc chain",
+        rvfi_check_traces(bad).len() > 0)
+
+    # --- Negative check: vacuous run must not PASS ---
+    val vac = check_retire_chain([0], [0], [4], [false])
+    fails = fails + check("vacuous 1-retire run is rejected", not vac.ok and vac.vacuous)
+
+    if fails == 0:
+        print("RV32 RVFI PROBE: ALL PASS")
+        return 0
+    print("RV32 RVFI PROBE: {fails} FAILURES")
+    1

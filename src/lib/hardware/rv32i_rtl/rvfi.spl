@@ -116,6 +116,60 @@ fn rvfi_trace_from_snapshot(config: RvfiConfig, order: i64, snapshot: RvfiCoreSn
         rvfi_mem_wdata: snapshot.dmem_wdata
     )
 
+# ============================================================================
+# RVFI trace self-check (retire-chain invariants)
+# ============================================================================
+
+fn rvfi_check_traces(traces: [RvfiTrace]) -> [text]:
+    """Check retire-chain invariants over a collected RVFI trace.
+
+    Invariants (riscv-formal insn_check / reg_check core subset):
+      1. rvfi_order strictly increasing across valid retires.
+      2. pc chaining: pc_wdata of retire N == pc_rdata of retire N+1,
+         except when retire N trapped.
+      3. x0 gating: rd_addr == 0 implies rd_wdata == 0.
+      4. mem masks: rmask/wmask nonzero only with a mem_addr latched
+         is not asserted (address 0 is legal) — but a nonzero wmask and
+         nonzero rmask on the same retire is rejected (single-port core).
+
+    Returns a list of violation strings; empty list == all invariants hold.
+    The caller must additionally reject vacuous runs (fewer than 2 valid
+    retires) — see check_retire_chain in riscv_common.core.riscv_formal.
+    """
+    var violations: [text] = []
+    var have_prev = false
+    var prev_order: i64 = 0
+    var prev_pc_wdata: u32 = 0
+    var prev_trap = false
+    var idx = 0
+    for t in traces:
+        if not t.rvfi_valid:
+            idx = idx + 1
+            continue
+        if t.rvfi_rd_addr == 0 and t.rvfi_rd_wdata != 0:
+            violations = violations.push("retire {idx}: x0 write nonzero rd_wdata")
+        if t.rvfi_mem_rmask != 0 and t.rvfi_mem_wmask != 0:
+            violations = violations.push("retire {idx}: simultaneous rmask and wmask")
+        if have_prev:
+            if t.rvfi_order <= prev_order:
+                violations = violations.push("retire {idx}: order not monotonic ({t.rvfi_order} after {prev_order})")
+            if not prev_trap and t.rvfi_pc_rdata != prev_pc_wdata:
+                violations = violations.push("retire {idx}: pc chain broken (pc_rdata != prev pc_wdata)")
+        prev_order = t.rvfi_order
+        prev_pc_wdata = t.rvfi_pc_wdata
+        prev_trap = t.rvfi_trap
+        have_prev = true
+        idx = idx + 1
+    violations
+
+fn rvfi_valid_retire_count(traces: [RvfiTrace]) -> i64:
+    """Count valid retires in a trace (vacuity guard input)."""
+    var n: i64 = 0
+    for t in traces:
+        if t.rvfi_valid:
+            n = n + 1
+    n
+
 fn rvfi_vhdl_type(width: i32) -> text:
     if width == 1:
         return "std_logic"
