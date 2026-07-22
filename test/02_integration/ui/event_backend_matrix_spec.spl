@@ -1,0 +1,221 @@
+# @tag: ui, io, events, backend, integration, ci
+# @cover src/lib/nogc_async_mut/io/platform_event.spl 40%
+# @cover src/lib/nogc_async_mut/io/event_loop.spl 30%
+# @cover src/lib/common/engine/interaction/hit_test.spl 20%
+# @cover src/lib/common/engine/interaction/event_route.spl 20%
+# @cover src/lib/common/engine/interaction/pointer_capture.spl 20%
+# @cover src/lib/nogc_sync_mut/io/window_winit.spl 5%
+# @cover src/lib/nogc_sync_mut/ui/session.spl 5%
+#
+# EVENT-HANDLING backend matrix (integration angle), headless-safe:
+#   1. Host platform event backend detection (fd/network events).
+#   2. EventLoop create/poll/close smoke on the detected backend.
+#   3. Surface-agnostic interaction core composed END TO END in ONE
+#      scenario (hit_stack -> ancestor_path -> capture/target/bubble
+#      dispatch -> pointer-capture redirect). Dispatch MECHANICS in depth
+#      already live in
+#      test/01_unit/lib/common/engine/interaction/interaction_core_spec.spl
+#      and are deliberately NOT duplicated here.
+#   4. Window event backends (winit/SDL2) probed honestly on a headless
+#      host: winit constant pinning only — no real window is opened.
+#      HONEST GAP: no safe headless availability probe exists today.
+#      winit_loop_new() spawns a real event-loop thread via
+#      rt_winit_event_loop_new (window_winit_wrapper_spec.spl deliberately
+#      avoids calling it for the same reason), and window_sffi.spl (SDL2)
+#      exposes no named event-type constants — the rt_sdl2_poll_event type
+#      codes (0=none, 1=quit, 2=keydown, ... 9=textinput) exist only as a
+#      comment, so there is nothing importable to pin without inventing
+#      values.
+#   5. UISession event path smoke (synthetic keypress -> state update),
+#      both through the pure reducer and through a live session.
+
+use std.spec.*
+use std.io.platform_event.{EventBackend, detect_backend, PlatformEvent}
+use std.io.event_loop.{EventLoop}
+use std.common.engine.interaction.hit_proxy.{HitProxy2D}
+use std.common.engine.interaction.hit_test.{hit_stack, ancestor_path_of}
+use std.common.engine.interaction.pointer_event.{PointerEvent2D, POINTER_DOWN}
+use std.common.engine.interaction.event_route.{EventListener2D, dispatch, ACTION_NONE}
+use std.common.engine.interaction.pointer_capture.{PointerRouter, effective_target}
+use std.io.window_winit.{EVT_CLOSE, EVT_KEYBOARD, EVT_MOUSE_BUTTON, EVT_MOUSE_MOVED, EVT_MOUSE_WHEEL}
+use common.ui.widget.{UITree, UIState, UIEvent}
+use common.ui.builder.{text_widget}
+use common.ui.event.{process_event}
+use nogc_sync_mut.ui.session.{UISession, new_session}
+
+# Same os gate platform_event.spl itself consults inside detect_backend().
+# Redeclared here so the backend assertion can be EXACT per-OS instead of a
+# weakened "any valid variant" check, while staying honest off-Linux.
+extern fn rt_platform_name() -> text
+
+fn _backend_name_of(backend: EventBackend) -> text:
+    match backend:
+        case EventBackend.Epoll: "epoll"
+        case EventBackend.Kqueue: "kqueue"
+        case EventBackend.Iocp: "iocp"
+        case EventBackend.EventPorts: "event_port"
+        case EventBackend.Poll: "poll"
+
+fn _handler_none(e: PointerEvent2D) -> i32:
+    ACTION_NONE
+
+fn _proxy(node_id: i64, left: i32, top: i32, right: i32, bottom: i32, order: i32) -> HitProxy2D:
+    var p = HitProxy2D.create(node_id, left, top, right, bottom)
+    p.tree_order = order
+    p
+
+# EventLoop smoke WITHOUT poll: create / backend-match / close.
+# poll() CANNOT be asserted under any sspec `it` in the interpreter — the
+# extern's empty [i64] return degrades to i64 0 inside the spec-runner
+# context (passes from a plain `fn main`), so `raw.len()` inside
+# EventLoop.poll faults. Bug:
+# doc/08_tracking/bug/interp_empty_event_array_result_match_erasure_2026-07-21.md
+# Full smoke INCLUDING poll(0)/poll_one(0) lives in the runnable mirror
+# probe_event_loop_smoke.spl (same directory) per the
+# probe_interaction_core.spl pattern.
+fn _event_loop_smoke_mask() -> i64:
+    var mask = 0
+    val r = EventLoop.new()
+    match r:
+        case Ok(el):
+            var lp = el
+            if lp.loop_fd >= 0:
+                mask = mask + 1
+            if lp.platform() == PlatformEvent.new().backend_name():
+                mask = mask + 2
+            val cr = lp.close()
+            if cr.is_ok():
+                mask = mask + 4
+        case Err(e):
+            mask = 0
+    mask
+
+describe "host platform event backend detection":
+
+    it "returns a valid EventBackend variant":
+        val name = _backend_name_of(detect_backend())
+        val valid = name == "epoll" or name == "kqueue" or name == "iocp" or name == "event_port" or name == "poll"
+        assert_true(valid)
+
+    it "matches the running OS exactly (Epoll on this Linux host)":
+        # Conditional on the module's own os gate (rt_platform_name), NOT a
+        # weakened assert: on the Linux CI host the "linux" branch runs and
+        # pins Epoll exactly; every other platform pins its own exact
+        # backend per the documented contract in platform_event.spl.
+        val platform = rt_platform_name()
+        var expected = "poll"
+        if platform == "linux":
+            expected = "epoll"
+        else if platform == "macos" or platform == "freebsd":
+            expected = "kqueue"
+        else if platform == "windows":
+            expected = "iocp"
+        else if platform == "solaris" or platform == "illumos":
+            expected = "event_port"
+        val name = _backend_name_of(detect_backend())
+        expect(name).to_equal(expected)
+
+    it "PlatformEvent.new() adopts the detected backend":
+        val pe = PlatformEvent.new()
+        expect(pe.backend_name()).to_equal(_backend_name_of(detect_backend()))
+
+describe "EventLoop smoke on the native backend":
+
+    it "creates on the detected backend and closes cleanly":
+        # bit0 created, bit1 platform matches PlatformEvent, bit2 close ok.
+        # poll coverage is in probe_event_loop_smoke.spl — see the helper's
+        # comment for the interp bug that forces the split.
+        expect(_event_loop_smoke_mask()).to_equal(7)
+
+describe "interaction backend composition":
+
+    it "composes hit_stack, capture/target/bubble dispatch, and pointer-capture redirect":
+        # Three nested rects: root(1) > mid(2) > inner(3); inner paints on
+        # top via tree_order (same stacking context / layer / z).
+        val proxies = [
+            _proxy(1, 0, 0, 100, 100, 0),
+            _proxy(2, 10, 10, 90, 90, 1),
+            _proxy(3, 20, 20, 80, 80, 2)
+        ]
+        var parents: Dict<i64, i64> = {}
+        parents[2] = 1
+        parents[3] = 2
+
+        # Hit inside the innermost rect resolves the root-to-target path.
+        val hit = hit_stack(proxies, parents, 50, 50)
+        expect(hit.primary).to_equal(3)
+        expect(hit.ancestor_path.len()).to_equal(3)
+        expect(hit.ancestor_path[0]).to_equal(1)
+        expect(hit.ancestor_path[1]).to_equal(2)
+        expect(hit.ancestor_path[2]).to_equal(3)
+
+        # POINTER_DOWN through capture -> target -> bubble. Handlers RETURN
+        # action masks (never mutate the event from inside a callback — the
+        # documented cross-module landmine); dispatch itself records the
+        # visit order in the returned DispatchOutcome.
+        val listeners = [
+            EventListener2D.create(1, -1, true, false, _handler_none),
+            EventListener2D.create(2, -1, true, false, _handler_none),
+            EventListener2D.create(3, -1, false, false, _handler_none),
+            EventListener2D.create(2, -1, false, false, _handler_none),
+            EventListener2D.create(1, -1, false, false, _handler_none)
+        ]
+        val event = PointerEvent2D.create(7, POINTER_DOWN, 50, 50, 1, hit.primary)
+        val outcome = dispatch(event, listeners, hit.ancestor_path)
+        expect(outcome.fired_node_ids.len()).to_equal(5)
+        expect(outcome.fired_node_ids[0]).to_equal(1)   # capture: root
+        expect(outcome.fired_node_ids[1]).to_equal(2)   # capture: mid
+        expect(outcome.fired_node_ids[2]).to_equal(3)   # target
+        expect(outcome.fired_node_ids[3]).to_equal(2)   # bubble: mid
+        expect(outcome.fired_node_ids[4]).to_equal(1)   # bubble: root
+        expect(outcome.stopped).to_equal(false)
+        expect(outcome.default_prevented).to_equal(false)
+
+        # Capture pointer 7 on the mid ancestor: a point OUTSIDE every proxy
+        # must keep routing to node 2 until release, with the redirected
+        # ancestor path rebuilt via ancestor_path_of (not hit.ancestor_path).
+        var router = PointerRouter.create()
+        router.capture_pointer(7, 2)
+        val hit_outside = hit_stack(proxies, parents, 500, 500)
+        expect(hit_outside.primary).to_equal(-1)
+        expect(effective_target(router, 7, hit_outside)).to_equal(2)
+        val redirected_path = ancestor_path_of(parents, 2)
+        expect(redirected_path.len()).to_equal(2)
+        expect(redirected_path[0]).to_equal(1)
+        expect(redirected_path[1]).to_equal(2)
+        router.release_pointer(7)
+        expect(effective_target(router, 7, hit_outside)).to_equal(-1)
+
+describe "window event backends on a headless host":
+
+    it "pins the winit event type codes against drift":
+        # Constants only — no window, no event loop thread. See the header
+        # note for why no availability probe is exercised (and the SDL2
+        # named-constant gap).
+        expect(EVT_CLOSE).to_equal(3)
+        expect(EVT_KEYBOARD).to_equal(10)
+        expect(EVT_MOUSE_BUTTON).to_equal(20)
+        expect(EVT_MOUSE_MOVED).to_equal(21)
+        expect(EVT_MOUSE_WHEEL).to_equal(22)
+
+describe "UISession event path smoke":
+
+    it "processes a synthetic keypress through the pure reducer":
+        val root = text_widget("evt_matrix_root", "Events")
+        val tree = UITree.new(root)
+        var s0 = UIState.new(tree)
+        expect(s0.mode_name()).to_equal("NORMAL")
+        var s1 = process_event(s0, UIEvent.KeyPress(key: "i"))
+        expect(s1.mode_name()).to_equal("INSERT")
+        var s2 = process_event(s1, UIEvent.NormalMode)
+        expect(s2.mode_name()).to_equal("NORMAL")
+
+    it "routes a synthetic keypress through a live session":
+        val root = text_widget("evt_matrix_sess_root", "Session")
+        val tree = UITree.new(root)
+        var session = new_session(tree)
+        var before = session.current_state()
+        expect(before.mode_name()).to_equal("NORMAL")
+        session.dispatch(UIEvent.KeyPress(key: "i"))
+        var after = session.current_state()
+        expect(after.mode_name()).to_equal("INSERT")

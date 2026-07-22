@@ -1930,6 +1930,8 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     );
     insert_simple!("rt_vulkan_get_last_error", gpu::rt_vulkan_get_last_error_fn);
     insert_simple!("rt_vulkan_init", gpu::rt_vulkan_init_fn);
+    insert_simple!("rt_opengl_is_available", gpu::rt_opengl_is_available_fn);
+    insert_simple!("rt_oneapi_is_available", gpu::rt_oneapi_is_available_fn);
     insert_simple!("rt_renderdoc_available", gpu::rt_renderdoc_available_fn);
     insert_simple!(
         "rt_renderdoc_set_capture_file_path_template",

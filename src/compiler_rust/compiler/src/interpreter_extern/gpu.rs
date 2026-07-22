@@ -2381,7 +2381,7 @@ mod vulkan_dlopen {
         pub flags: u32,
     }
 
-    #[repr(C)]
+    #[repr(C, align(8))]
     pub(super) struct VkPhysicalDeviceProperties {
         pub(super) api_version: u32,
         pub(super) driver_version: u32,
@@ -2390,9 +2390,15 @@ mod vulkan_dlopen {
         pub(super) device_type: u32,
         pub(super) device_name: [u8; 256],
         pub(super) pipeline_cache_uuid: [u8; 16],
-        // VkPhysicalDeviceLimits (504 bytes) + VkPhysicalDeviceSparseProperties (20 bytes)
-        // Both are written by vkGetPhysicalDeviceProperties; we only read device_name above.
-        pub(super) _limits_and_sparse: [u8; 524],
+        // Opaque tail written by vkGetPhysicalDeviceProperties: 4 bytes padding
+        // (VkPhysicalDeviceLimits is 8-aligned, header ends at 292) + limits
+        // (504) + VkPhysicalDeviceSparseProperties (20) + 4 bytes tail padding
+        // = 532, for the C sizeof of 824. Was 524 (= 504+20 without either
+        // pad): the driver wrote 4-8 bytes past this stack struct and smashed
+        // the frame — SIGSEGV in rt_vulkan_device_type on NVIDIA hosts
+        // (doc/08_tracking/bug/engine2d_backend_matrix_vulkan_probe_segfault_2026-07-21.md).
+        // align(8) keeps the driver's u64 stores into limits aligned.
+        pub(super) _limits_and_sparse: [u8; 532],
     }
 
     pub struct VkFns {
@@ -2718,6 +2724,25 @@ pub fn rt_vulkan_is_available_fn(_args: &[Value]) -> Result<Value, CompileError>
     Ok(Value::Int(if check_vulkan_available() { 1 } else { 0 }))
 }
 
+/// `rt_opengl_is_available() -> i64`
+/// The interpreter has no headless GL context support; report unavailable so
+/// OpenGLBackend.init() bails before touching the other rt_opengl_* externs
+/// (none of which are registered here). Without this, Engine2D.list_backends()
+/// dies with "unknown extern function" as soon as the priority walk reaches
+/// opengl — previously masked by the vulkan probe segfault one slot earlier.
+pub fn rt_opengl_is_available_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// `rt_oneapi_is_available() -> bool`
+/// Same contract as rt_opengl_is_available above: no Intel oneAPI runtime
+/// support in the interpreter, so the intel backend probe bails coherently
+/// instead of dying with "unknown extern function" during the
+/// list_backends() priority walk.
+pub fn rt_oneapi_is_available_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Bool(false))
+}
+
 /// `rt_vulkan_init() -> bool`
 pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
     use vulkan_dlopen::*;
@@ -2992,7 +3017,7 @@ pub fn rt_vulkan_device_name_fn(args: &[Value]) -> Result<Value, CompileError> {
                 device_type: 0,
                 device_name: [0u8; 256],
                 pipeline_cache_uuid: [0u8; 16],
-                _limits_and_sparse: [0u8; 524],
+                _limits_and_sparse: [0u8; 532],
             };
             unsafe {
                 (s.fns.get_physical_device_properties)(pd, &mut props);
@@ -3019,7 +3044,7 @@ fn vulkan_device_properties(index: usize) -> Option<vulkan_dlopen::VkPhysicalDev
         device_type: 0,
         device_name: [0; 256],
         pipeline_cache_uuid: [0; 16],
-        _limits_and_sparse: [0; 524],
+        _limits_and_sparse: [0; 532],
     };
     unsafe { (s.fns.get_physical_device_properties)(pd, &mut props) };
     Some(props)
