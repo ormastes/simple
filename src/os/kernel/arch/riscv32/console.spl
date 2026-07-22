@@ -1,10 +1,17 @@
 # RISC-V 32 Serial Console — 16550 UART via MMIO
 #
-# Implements early serial output over MMIO-mapped 16550 UART.
-# QEMU virt machine (riscv32) maps the UART at 0x10000000 — identical
-# to the riscv64 virt machine. 115200 baud, 8N1 configuration.
+# Serial output AND input over MMIO-mapped 16550 UART. QEMU virt machine
+# (riscv32) maps the UART at 0x10000000 — identical to the riscv64 virt
+# machine. 115200 baud, 8N1 configuration.
+#
+# serial_shell_main is the boot→login→shell management fallback reached from
+# boot_main when os_main() reports no network. Mirrors the rv64 console.
 
-use os.kernel.arch.riscv.console_common.{RISCV_VIRT_UART_BASE, riscv_uart_init, riscv_uart_write_byte, riscv_uart_write, riscv_uart_writeln}
+use os.kernel.arch.riscv.console_common.{RISCV_VIRT_UART_BASE, riscv_uart_init, riscv_uart_read_byte, riscv_uart_write_byte, riscv_uart_write, riscv_uart_writeln}
+use os.kernel.arch.riscv32.shell_lite.{rv32_shell_banner, rv32_shell_prompt, rv32_shell_dispatch, rv32_shell_format_dir_entries}
+use os.apps.sshd.ssh_auth.{SshUserDb, sshd_create_default_users}
+use os.services.vfs.vfs_write_ops.{g_vfs_readdir}
+use os.kernel.loader.fs_exec_spawn.{fs_exec_spawn}
 
 # ============================================================================
 # UART 16550 MMIO Addresses (QEMU virt riscv32)
@@ -19,10 +26,9 @@ val UART_BASE: u64 = RISCV_VIRT_UART_BASE
 struct Rv32Console:
     """RISC-V 32-bit serial console via 16550 UART MMIO.
 
-    Provides early debug output before framebuffer or full terminal
-    drivers are available. Uses MMIO-mapped 16550 UART at the standard
-    QEMU virt address 0x10000000.
-    """
+    Provides early debug output before framebuffer or full terminal drivers
+    are available. Uses memory-mapped I/O at the standard QEMU virt UART
+    address 0x10000000."""
     pass_dn
 
 var g_uart_ready: bool = false
@@ -47,6 +53,10 @@ impl Rv32Console:
         if not g_uart_ready:
             self.init()
         riscv_uart_writeln(UART_BASE, msg)
+
+    fn read_byte() -> u8?:
+        """Read a byte from UART if available, or nil."""
+        riscv_uart_read_byte(UART_BASE)
 
     fn base_addr() -> u64:
         """Return the MMIO base address for this console."""
@@ -75,3 +85,149 @@ fn uart_writeln(msg: text):
     """Write string + newline to UART (module-level convenience)."""
     val console = Rv32Console()
     console.writeln(msg)
+
+fn uart_read_byte() -> u8?:
+    """Read one byte from UART if available (module-level convenience)."""
+    val console = Rv32Console()
+    console.read_byte()
+
+fn serial_read_byte() -> i64:
+    """Read one UART byte, or -1 when none is available (non-blocking)."""
+    match uart_read_byte():
+        case Some(v): (v as i64)
+        case _: -1
+
+# ============================================================================
+# Serial management shell — UART fallback when network is down
+# ============================================================================
+
+fn serial_shell_main(network_ok: i64):
+    """Interactive UART command loop — boot→login→shell management fallback.
+
+    Reached from boot_main when os_main() returns true (no network). Requires a
+    real login (SshUserDb — same credentials as the SSH daemon) before dropping
+    to the operator shell; `ls` enumerates the mounted root FS via g_vfs_readdir
+    and formats via the pure shell_lite formatter."""
+    uart_init()
+    uart_writeln(rv32_shell_banner())
+
+    if not _serial_login():
+        uart_writeln("login denied - management shell unavailable")
+        loop:
+            pass
+
+    var buf: [u8] = []
+    uart_write(rv32_shell_prompt())
+    loop:
+        val ch = serial_read_byte()
+        if ch < 0:
+            continue
+        val byte = ch as u8
+        if byte == 0x0D or byte == 0x0A:
+            uart_write_byte(0x0D)
+            uart_write_byte(0x0A)
+            if buf.len() > 0:
+                val line = _bytes_to_text(buf)
+                if line == "ls":
+                    val listing = _shell_ls()
+                    if listing.len() > 0:
+                        uart_writeln(listing)
+                else if line.starts_with("launch "):
+                    # exec an on-filesystem tool via the real ELF FS-exec loader
+                    val lresp = _shell_launch(line)
+                    if lresp.len() > 0:
+                        uart_writeln(lresp)
+                else:
+                    val resp = rv32_shell_dispatch(line, network_ok)
+                    if resp.len() > 0:
+                        uart_writeln(resp)
+                buf = []
+            uart_write(rv32_shell_prompt())
+            continue
+        if byte == 0x7F or byte == 0x08:
+            if buf.len() > 0:
+                buf.pop()
+                uart_write_byte(0x08)
+                uart_write_byte(0x20)
+                uart_write_byte(0x08)
+            continue
+        if buf.len() < 128:
+            buf.push(byte)
+            uart_write_byte(byte)
+
+fn _read_serial_line(echo_on: bool) -> text:
+    """Read one CR/LF-terminated line from UART; suppresses echo when echo_on
+    is false (password prompt). 128-byte cap, backspace aware."""
+    var buf: [u8] = []
+    loop:
+        val ch = serial_read_byte()
+        if ch < 0:
+            continue
+        val byte = ch as u8
+        if byte == 0x0D or byte == 0x0A:
+            uart_write_byte(0x0D)
+            uart_write_byte(0x0A)
+            return _bytes_to_text(buf)
+        if byte == 0x7F or byte == 0x08:
+            if buf.len() > 0:
+                buf.pop()
+                if echo_on:
+                    uart_write_byte(0x08)
+                    uart_write_byte(0x20)
+                    uart_write_byte(0x08)
+            continue
+        if buf.len() < 128:
+            buf.push(byte)
+            if echo_on:
+                uart_write_byte(byte)
+    ""
+
+# Real serial login gate: reuses the SSH daemon's credential store
+# (sshd_create_default_users -> SshUserDb) with its constant-time password
+# compare, so serial and SSH enforce a single user database (root/simpleos,
+# user/password by default). No duplicated inline credentials.
+fn _serial_login() -> bool:
+    val db = sshd_create_default_users()
+    val max_attempts: i64 = 3
+    var attempts: i64 = 0
+    while attempts < max_attempts:
+        uart_write("login: ")
+        val user = _read_serial_line(true)
+        uart_write("password: ")
+        val pw = _read_serial_line(false)
+        if db.authenticate_password(user, pw):
+            return true
+        uart_writeln("login incorrect")
+        attempts = attempts + 1
+    false
+
+# `ls` — enumerate the mounted root filesystem via the real VFS readdir and
+# format entry names through the pure shell_lite formatter.
+fn _shell_ls() -> text:
+    rv32_shell_format_dir_entries(g_vfs_readdir("/"))
+
+# `launch <path> [args...]` — exec an on-filesystem tool (clang/llvm/rust or the
+# pure-Simple compiler/interpreter/loader at /sys/apps/<name>) through the real
+# ELF FS-exec loader. argv[0] is the path; trailing tokens become argv[1..].
+# Returns a one-line pid/errno status to the UART.
+fn _shell_launch(line: text) -> text:
+    val parts = line.split(" ")
+    if parts.len() < 2 or parts[1].len() == 0:
+        return "usage: launch <path> [args...]"
+    val path = parts[1]
+    var argv: [text] = [path]
+    var i: u64 = 2
+    while i < parts.len():
+        argv.push(parts[i])
+        i = i + 1
+    val pid = fs_exec_spawn(path, argv, [])
+    if pid > 0:
+        return "launched " + path + " pid=" + pid.to_text()
+    return "launch failed errno=" + pid.to_text()
+
+fn _bytes_to_text(buf: [u8]) -> text:
+    # rt_string_from_byte_array is linked in the RV64 freestanding runtime
+    # (freestanding_runtime.c). The rv32 freestanding runtime must also export
+    # it for serial_shell_main to build — see rv32 emission/runtime blocker bug.
+    extern fn rt_string_from_byte_array(arr: [u8]) -> text
+    rt_string_from_byte_array(buf)

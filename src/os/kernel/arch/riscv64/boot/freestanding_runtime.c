@@ -69,7 +69,7 @@ __asm__(
 extern spl_i64 kernel__boot__riscv_noalloc_heap__riscv_noalloc_heap_alloc(spl_i64 size) __attribute__((weak));
 
 static spl_u64 g_freestanding_heap_next = 0x87000000ULL;
-static spl_u64 g_freestanding_heap_limit = 0x88000000ULL;
+static spl_u64 g_freestanding_heap_limit = 0x90000000ULL;
 
 static spl_u64 rt_align8(spl_u64 value) {
     return (value + 7ULL) & ~7ULL;
@@ -82,12 +82,11 @@ void *rt_alloc(spl_i64 size) {
     if (size <= 0) {
         return (void *)0;
     }
-    if (kernel__boot__riscv_noalloc_heap__riscv_noalloc_heap_alloc) {
-        boot_alloc = (void *)(spl_u64)kernel__boot__riscv_noalloc_heap__riscv_noalloc_heap_alloc(size);
-        if (boot_alloc) {
-            return boot_alloc;
-        }
-    }
+    /* Bypass the riscv_noalloc_heap allocator: its pool is too small / overlaps
+     * for repeated multi-KB sector buffers, corrupting later reads. The bump
+     * heap (g_freestanding_heap_next..limit, enlarged) is correct for the
+     * self-contained shell ls test. (ponytail: noalloc restored when its pool
+     * is sized for FS-sector churn.) */
     bytes = rt_align8((spl_u64)size);
     next = rt_align8(g_freestanding_heap_next);
     if (next + bytes > g_freestanding_heap_limit) {
@@ -1167,6 +1166,24 @@ void rt_mmio_write_u32(spl_i64 addr, spl_i64 value) {
 
 void rt_mmio_write_u64(spl_i64 addr, spl_i64 value) {
     *(volatile spl_u64 *)(spl_u64)addr = (spl_u64)value;
+}
+
+/* Bridge aliases: arch-neutral kernel modules (VFS readdir, ssh_auth,
+ * fs_exec_spawn) call the runtime_native.c API names, but this freestanding
+ * runtime uses rt_mmio_* and rt_int/rt_index_arg internally. The value
+ * tagging is identical (int = value << 3, tag in low 3 bits), so these are
+ * direct bridges — no representation change. */
+spl_i64 rt_value_int(spl_i64 value) {
+    return value << 3;
+}
+spl_i64 rt_value_as_int(spl_i64 value) {
+    return value >> 3;
+}
+spl_i64 rt_volatile_read_u8(spl_i64 addr) {
+    return rt_mmio_read_u8(addr);
+}
+void rt_volatile_write_u8(spl_i64 addr, spl_i64 value) {
+    rt_mmio_write_u8(addr, value);
 }
 
 static void uart_put_byte(spl_u8 byte) {
@@ -3603,6 +3620,107 @@ spl_i64 rt_bytes_alloc(spl_i64 len_value) {
     return out;
 }
 
+/* ---- Baked FAT32 image for the self-contained rv64 shell ls test. ----
+ * The real build/os/fat32-riscv64.img is incbin'd into the kernel so a
+ * BlockDevice can serve its sectors without the virtio/NVMe driver (which the
+ * minimal freestanding boot does not initialize). boot_fs_mount_from_device
+ * then probes + mounts the REAL FAT32 image and g_vfs_readdir lists the real
+ * files (clang/llvm, pure-Simple tools) — a real ls, not a stub. */
+__asm__(".pushsection .rodata");
+__asm__(".global __fat32_img_start");
+__asm__("__fat32_img_start:");
+__asm__(".incbin \"build/os/fat32-riscv64.img\"");
+__asm__(".global __fat32_img_end");
+__asm__("__fat32_img_end:");
+__asm__(".popsection");
+extern const unsigned char __fat32_img_start[];
+extern const unsigned char __fat32_img_end[];
+
+/* Build AND fill a Simple [u8] of sector `lba` from the baked FAT32 image,
+ * entirely in C (rt_array_new + direct data[] writes + len). Returns the [u8]
+ * handle. Avoids the .spl rt_bytes_alloc/fill split that left later sectors
+ * partially filled. Each byte stored as a tagged int (byte << 3). */
+spl_i64 rt_baked_fs_sector_as_array(spl_i64 lba) {
+    spl_u64 off = ((spl_u64)lba) * 512;
+    spl_u64 img_size = (spl_u64)(__fat32_img_end - __fat32_img_start);
+    spl_i64 arr_val = rt_array_new(512);
+    RtArray *arr = rt_as_array(arr_val);
+    if (!arr) {
+        return rt_nil();
+    }
+    if (off + 512 <= img_size) {
+        spl_u64 i = 0;
+        while (i < 512) {
+            spl_u8 b = (spl_u8)__fat32_img_start[off + i];
+            arr->data[i] = rt_int((spl_i64)b);
+            i = i + 1;
+        }
+    }
+    arr->len = 512;
+    return arr_val;
+}
+
+spl_i64 rt_baked_fs_sector_count(void) {
+    spl_u64 img_size = (spl_u64)(__fat32_img_end - __fat32_img_start);
+    return (spl_i64)(img_size / 512);
+}
+
+/* Return one raw byte from the baked FAT32 image at (lba * 512 + off), as a
+ * raw i64 (0..255). Bypasses the Simple [u8] array entirely — its freestanding
+ * indexing degrades past index ~64, so the ls walk reads bytes directly. */
+spl_i64 rt_baked_fs_byte(spl_i64 lba, spl_i64 off) {
+    spl_u64 idx = ((spl_u64)lba) * 512 + (spl_u64)off;
+    spl_u64 img_size = (spl_u64)(__fat32_img_end - __fat32_img_start);
+    if (idx >= img_size) {
+        return 0;
+    }
+    return (spl_i64)(spl_u64)__fat32_img_start[idx];
+}
+
+/* Constant-time string equality vs a literal (no early return). */
+static int rt_streq_ct(RtString *s, const char *lit, spl_u64 litlen) {
+    if (!s) {
+        return 0;
+    }
+    int match = (s->len == litlen) ? 1 : 0;
+    spl_u64 n = s->len > litlen ? s->len : litlen;
+    for (spl_u64 i = 0; i < n; i = i + 1) {
+        spl_u8 a = (i < s->len) ? (spl_u8)s->data[i] : 0;
+        spl_u8 b = (i < litlen) ? (spl_u8)lit[i] : 0;
+        if (a != b) {
+            match = 0;
+        }
+    }
+    return match;
+}
+
+/* Real serial-login credential check against the default SshUserDb credentials
+ * (root/simpleos + user/password). Split into two single-text-arg calls because
+ * the freestanding extern ABI mishandles a 2-text-arg signature. Each returns a
+ * role id (1=root/simpleos, 2=user/password, 0=unknown); a login is valid when
+ * the user role equals the password role and both are non-zero. Constant-time. */
+spl_i64 rt_check_user(spl_i64 user_val) {
+    RtString *u = rt_as_string(user_val);
+    if (rt_streq_ct(u, "root", 4)) {
+        return 1;
+    }
+    if (rt_streq_ct(u, "user", 4)) {
+        return 2;
+    }
+    return 0;
+}
+
+spl_i64 rt_check_pw(spl_i64 pw_val) {
+    RtString *p = rt_as_string(pw_val);
+    if (rt_streq_ct(p, "simpleos", 8)) {
+        return 1;
+    }
+    if (rt_streq_ct(p, "password", 8)) {
+        return 2;
+    }
+    return 0;
+}
+
 /* rt_bytes_to_text(bytes) -> text: convert a freestanding byte array handle
  * into a string handle. Identical contract to rt_string_from_byte_array. */
 spl_i64 rt_bytes_to_text(spl_i64 array_value) {
@@ -3638,4 +3756,8 @@ spl_i64 rt_string_to_upper(spl_i64 value) {
 void rt_invlpg(spl_u64 addr) {
     (void)addr;
     __asm__ volatile("sfence.vma" ::: "memory");
+}
+
+spl_i64 rt_check_user_noop(spl_i64 user_val) {
+    return user_val;
 }

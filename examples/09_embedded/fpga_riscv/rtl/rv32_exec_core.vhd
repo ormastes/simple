@@ -28,13 +28,16 @@ architecture rtl of rv32_exec_core is
   constant BASE_ADDR : unsigned(31 downto 0) := x"80000000";
   constant UART_ADDR : unsigned(31 downto 0) := x"10000000";
   constant BAUD_DIV : natural := CLK_FREQ / BAUD_RATE;
-  constant ROM_WORDS : natural := 32803;
-  constant SCRATCH_BASE_WORD : natural := 43728;
-  constant SCRATCH_WORDS : natural := 20;
+  -- 64KB code ROM (14 bits = 16384 words), increased for full payload
+  constant ROM_WORDS : natural := 16384;
+  constant DATA_ROM_WORDS : natural := 16384;
+  constant SCRATCH_BASE_WORD : natural := 16384;
+  constant SCRATCH_WORDS : natural := 512;
   type regs_t is array(0 to 31) of unsigned(31 downto 0);
   type rom_t is array(0 to ROM_WORDS - 1) of std_logic_vector(31 downto 0);
+  type data_rom_t is array(0 to DATA_ROM_WORDS - 1) of std_logic_vector(31 downto 0);
   type scratch_t is array(0 to SCRATCH_WORDS - 1) of std_logic_vector(31 downto 0);
-  type state_t is (S_EXEC, S_UART);
+  type state_t is (S_EXEC, S_UART, S_DIVIDE);
 
   impure function init_rom return rom_t is
     file f : text open read_mode is "rv32_payload.mem";
@@ -54,9 +57,46 @@ architecture rtl of rv32_exec_core is
     return mem_v;
   end function;
 
+  impure function init_data_rom return data_rom_t is
+    file f : text open read_mode is "rv32_fat32.mem";
+    variable line_v : line;
+    variable word_v : std_logic_vector(31 downto 0);
+    variable mem_v : data_rom_t := (others => x"00000000");
+    variable idx : natural := 0;
+  begin
+    while not endfile(f) loop
+      readline(f, line_v);
+      hread(line_v, word_v);
+      if idx < DATA_ROM_WORDS then
+        mem_v(idx) := word_v;
+      end if;
+      idx := idx + 1;
+    end loop;
+    return mem_v;
+  end function;
+
   signal rom : rom_t := init_rom;
+  signal data_rom : data_rom_t := init_data_rom;
   signal scratch : scratch_t := (others => (others => '0'));
   signal scratch_bytes : scratch_t := (others => (others => '0'));
+  -- CSR file: minimal set for zicsr (mhartid=0, mstatus, mtvec, mie, mip)
+  signal csr_mhartid : unsigned(31 downto 0) := x"00000000";
+  signal csr_mstatus : unsigned(31 downto 0) := x"00000000";
+  signal csr_mtvec : unsigned(31 downto 0) := x"00000000";
+  signal csr_mie : unsigned(31 downto 0) := x"00000000";
+  signal csr_mip : unsigned(31 downto 0) := x"00000000";
+  -- Divider FSM state (multi-cycle for div/divu/rem/remu)
+  signal div_op_q : std_logic_vector(2 downto 0) := (others => '0');
+  signal div_running_q : std_logic := '0';
+  signal div_sign_q : std_logic := '0';
+  signal div_rem_q : std_logic := '0';
+  signal div_neg_result_q : std_logic := '0';
+  signal div_dividend_q : signed(63 downto 0) := (others => '0');
+  signal div_divisor_q : signed(63 downto 0) := (others => '0');
+  signal div_quotient_q : signed(31 downto 0) := (others => '0');
+  signal div_count_q : unsigned(5 downto 0) := (others => '0');
+  signal div_rd_q : natural range 0 to 31 := 0;
+  signal div_result_q : unsigned(31 downto 0) := (others => '0');
   attribute rom_style : string;
   attribute ram_style : string;
   attribute rom_style of rom : signal is "block";
@@ -174,19 +214,39 @@ architecture rtl of rv32_exec_core is
     variable off : unsigned(31 downto 0);
   begin
     off := addr - BASE_ADDR;
-    return to_integer(off(RAM_ADDR_BITS + 1 downto 2));
+    return to_integer(off(15 downto 2));
+  end function;
+
+  function data_rom_index(addr : unsigned(31 downto 0)) return natural is
+    variable off : unsigned(31 downto 0);
+  begin
+    off := addr - x"40000000";
+    return to_integer(off(15 downto 2));
   end function;
 
   impure function load_word(addr : unsigned(31 downto 0)) return unsigned is
     variable idx : natural;
   begin
-    idx := word_index(addr);
-    if idx < ROM_WORDS then
-      return unsigned(rom(idx));
-    elsif idx >= SCRATCH_BASE_WORD and idx < SCRATCH_BASE_WORD + SCRATCH_WORDS then
-      return unsigned(scratch(idx - SCRATCH_BASE_WORD));
+    if addr(31 downto 28) = x"4" then
+      -- DATA ROM at 0x40000000
+      idx := data_rom_index(addr);
+      if idx < DATA_ROM_WORDS then
+        return unsigned(data_rom(idx));
+      else
+        return to_unsigned(0, 32);
+      end if;
+    elsif addr(31 downto 28) = x"8" then
+      -- RAM at 0x80000000
+      idx := word_index(addr);
+      if idx < ROM_WORDS then
+        return unsigned(rom(idx));
+      elsif idx >= SCRATCH_BASE_WORD and idx < SCRATCH_BASE_WORD + SCRATCH_WORDS then
+        return unsigned(scratch(idx - SCRATCH_BASE_WORD));
+      else
+        return to_unsigned(16#13#, 32);
+      end if;
     else
-      return to_unsigned(16#13#, 32);
+      return to_unsigned(0, 32);
     end if;
   end function;
 
@@ -195,11 +255,24 @@ architecture rtl of rv32_exec_core is
     variable lane : natural range 0 to 3;
     variable idx : natural;
   begin
-    idx := word_index(addr);
-    if idx < ROM_WORDS then
-      w := rom(idx);
-    elsif idx >= SCRATCH_BASE_WORD and idx < SCRATCH_BASE_WORD + SCRATCH_WORDS then
-      w := scratch_bytes(idx - SCRATCH_BASE_WORD);
+    if addr(31 downto 28) = x"4" then
+      -- DATA ROM at 0x40000000
+      idx := data_rom_index(addr);
+      if idx < DATA_ROM_WORDS then
+        w := data_rom(idx);
+      else
+        return to_unsigned(0, 32);
+      end if;
+    elsif addr(31 downto 28) = x"8" then
+      -- RAM at 0x80000000
+      idx := word_index(addr);
+      if idx < ROM_WORDS then
+        w := rom(idx);
+      elsif idx >= SCRATCH_BASE_WORD and idx < SCRATCH_BASE_WORD + SCRATCH_WORDS then
+        w := scratch_bytes(idx - SCRATCH_BASE_WORD);
+      else
+        return to_unsigned(0, 32);
+      end if;
     else
       return to_unsigned(0, 32);
     end if;
@@ -236,6 +309,12 @@ begin
     variable crs2 : natural range 0 to 31;
     variable mem_idx : natural;
     variable load_addr : unsigned(31 downto 0);
+    variable mul_result : signed(31 downto 0);
+    variable mul_result_full : signed(63 downto 0);
+    variable rs1_signed : signed(31 downto 0);
+    variable rs2_signed : signed(31 downto 0);
+    variable dvd : signed(63 downto 0);
+    variable res32 : unsigned(31 downto 0);
   begin
     if rising_edge(clk) then
       debug_uart_valid_q <= debug_uart_valid_next_q;
@@ -280,10 +359,69 @@ begin
         stack_ra_ab5c_q <= (others => '0');
         stack_ra_ab6c_q <= (others => '0');
         stack_ra_ab8c_q <= (others => '0');
+        csr_mhartid <= (others => '0');
+        csr_mstatus <= (others => '0');
+        csr_mtvec <= (others => '0');
+        csr_mie <= (others => '0');
+        csr_mip <= (others => '0');
+        div_running_q <= '0';
+        div_op_q <= (others => '0');
+        div_sign_q <= '0';
+        div_rem_q <= '0';
+        div_neg_result_q <= '0';
+        div_dividend_q <= (others => '0');
+        div_divisor_q <= (others => '0');
+        div_quotient_q <= (others => '0');
+        div_count_q <= (others => '0');
+        div_rd_q <= 0;
+        div_result_q <= (others => '0');
       elsif state_q = S_UART then
         if uart_busy_q = '0' then
           pc_q <= next_pc_q;
           state_q <= S_EXEC;
+        end if;
+      elsif state_q = S_DIVIDE then
+        -- Multi-cycle divider FSM
+        if div_count_q /= 0 then
+          div_count_q <= div_count_q - 1;
+          -- Shift first, then compare/subtract the SHIFTED remainder (restoring division)
+          dvd := shift_left(div_dividend_q, 1);
+          -- restoring division: UNSIGNED compare of the 32-bit partial remainder
+          -- (high half, after shift) vs the 32-bit divisor magnitude.
+          if unsigned(dvd(63 downto 32)) >= unsigned(div_divisor_q(31 downto 0)) then
+            dvd(63 downto 32) := dvd(63 downto 32) - div_divisor_q(31 downto 0);
+            div_quotient_q <= shift_left(div_quotient_q, 1) + 1;
+          else
+            div_quotient_q <= shift_left(div_quotient_q, 1);
+          end if;
+          div_dividend_q <= dvd;
+        else
+          div_running_q <= '0';
+          state_q <= S_EXEC;
+          -- Compute the final result into res32, then write it DIRECTLY to the
+          -- register file here (signal assignment, effective the cycle S_EXEC
+          -- resumes). This makes the result visible to the next instruction via
+          -- r:=regs_q, avoiding the load-use hazard where the post-div/rem
+          -- instruction would otherwise read the stale register.
+          if div_rem_q = '1' then
+            -- After 32 left-shifts, remainder is in bits 63:32
+            if div_neg_result_q = '1' then
+              res32 := unsigned(-signed(div_dividend_q(63 downto 32)));
+            else
+              res32 := unsigned(div_dividend_q(63 downto 32));
+            end if;
+          else
+            if div_neg_result_q = '1' then
+              res32 := unsigned(-div_quotient_q);
+            else
+              res32 := unsigned(div_quotient_q);
+            end if;
+          end if;
+          div_result_q <= res32;
+          if div_rd_q /= 0 then
+            regs_q(div_rd_q) <= res32;
+          end if;
+          div_rd_q <= 0;
         end if;
       else
         r := regs_q;
@@ -385,16 +523,11 @@ begin
               rs2 := 8 + to_integer(unsigned(h(4 downto 2)));
               eff := r(rs1) + c_lw_imm(h);
               mem_idx := word_index(eff);
-              if mem_idx >= SCRATCH_BASE_WORD and mem_idx < SCRATCH_BASE_WORD + SCRATCH_WORDS then
+              if mem_idx < ROM_WORDS then
+                rom(mem_idx) <= std_logic_vector(r(rs2));
+              elsif mem_idx >= SCRATCH_BASE_WORD and mem_idx < SCRATCH_BASE_WORD + SCRATCH_WORDS then
                 scratch(mem_idx - SCRATCH_BASE_WORD) <= std_logic_vector(r(rs2));
                 scratch_bytes(mem_idx - SCRATCH_BASE_WORD) <= std_logic_vector(r(rs2));
-                if rs2 = 1 and eff = x"8002AB5C" then
-                  stack_ra_ab5c_q <= r(rs2);
-                elsif rs2 = 1 and eff = x"8002AB6C" then
-                  stack_ra_ab6c_q <= r(rs2);
-                elsif rs2 = 1 and eff = x"8002AB8C" then
-                  stack_ra_ab8c_q <= r(rs2);
-                end if;
               end if;
             end if;
           elsif h(1 downto 0) = "10" then
@@ -426,31 +559,34 @@ begin
               rd := to_integer(unsigned(h(11 downto 7)));
               rs2 := to_integer(unsigned(h(6 downto 2)));
               if h(12) = '0' then
+                -- c.jr rs1 (rs2=0) / c.mv rd,rs2 (rs2/=0)
                 if rs2 = 0 then
-                  pc_next := r(rd);
+                  if rd /= 0 then
+                    pc_next := r(rd);
+                  end if;
                 elsif rd /= 0 then
                   r(rd) := r(rs2);
                 end if;
               else
-                if rd /= 0 then
-                  pc_next := r(rd);
-                  r(1) := pc_q + 2;
+                -- c.jalr rs1 (rs2=0): ra=pc+2, pc=rs1  /  c.add rd,rs2 (rs2/=0): rd+=rs2
+                if rs2 = 0 then
+                  if rd /= 0 then
+                    pc_next := r(rd);
+                    r(1) := pc_q + 2;
+                  end if;
+                elsif rd /= 0 then
+                  r(rd) := r(rd) + r(rs2);
                 end if;
               end if;
             elsif h(15 downto 13) = "110" then
               rs2 := to_integer(unsigned(h(6 downto 2)));
               eff := r(2) + c_swsp_imm(h);
               mem_idx := word_index(eff);
-              if mem_idx >= SCRATCH_BASE_WORD and mem_idx < SCRATCH_BASE_WORD + SCRATCH_WORDS then
+              if mem_idx < ROM_WORDS then
+                rom(mem_idx) <= std_logic_vector(r(rs2));
+              elsif mem_idx >= SCRATCH_BASE_WORD and mem_idx < SCRATCH_BASE_WORD + SCRATCH_WORDS then
                 scratch(mem_idx - SCRATCH_BASE_WORD) <= std_logic_vector(r(rs2));
                 scratch_bytes(mem_idx - SCRATCH_BASE_WORD) <= std_logic_vector(r(rs2));
-                if rs2 = 1 and eff = x"8002AB5C" then
-                  stack_ra_ab5c_q <= r(rs2);
-                elsif rs2 = 1 and eff = x"8002AB6C" then
-                  stack_ra_ab6c_q <= r(rs2);
-                elsif rs2 = 1 and eff = x"8002AB8C" then
-                  stack_ra_ab8c_q <= r(rs2);
-                end if;
               end if;
             end if;
           end if;
@@ -479,16 +615,149 @@ begin
               end if;
             when "0110011" =>
               if rd /= 0 then
-                case ins(14 downto 12) is
-                  when "000" => if ins(30) = '1' then r(rd) := r(rs1) - r(rs2); else r(rd) := r(rs1) + r(rs2); end if;
-                  when "001" => r(rd) := shift_left(r(rs1), to_integer(r(rs2)(4 downto 0)));
-                  when "010" => if signed(r(rs1)) < signed(r(rs2)) then r(rd) := to_unsigned(1, 32); else r(rd) := (others => '0'); end if;
-                  when "011" => if r(rs1) < r(rs2) then r(rd) := to_unsigned(1, 32); else r(rd) := (others => '0'); end if;
-                  when "100" => r(rd) := r(rs1) xor r(rs2);
-                  when "101" => if ins(30) = '1' then r(rd) := unsigned(shift_right(signed(r(rs1)), to_integer(r(rs2)(4 downto 0)))); else r(rd) := shift_right(r(rs1), to_integer(r(rs2)(4 downto 0))); end if;
-                  when "110" => r(rd) := r(rs1) or r(rs2);
-                  when others => r(rd) := r(rs1) and r(rs2);
-                end case;
+                if ins(31 downto 25) = "0000001" then
+                  -- M-extension (funct7=0000001)
+                  case ins(14 downto 12) is
+                    when "000" => -- mul (full 32-bit multiply, take low 32 bits)
+                      mul_result_full := signed(unsigned(r(rs1))) * signed(unsigned(r(rs2)));
+                      r(rd) := unsigned(mul_result_full(31 downto 0));
+                    when "001" => -- mulh (signed * signed, high 32 bits)
+                      mul_result_full := signed(r(rs1)) * signed(r(rs2));
+                      r(rd) := unsigned(mul_result_full(63 downto 32));
+                    when "010" => -- mulhsu (signed * unsigned, high 32 bits)
+                      -- correction form (all 64-bit, synth-safe): for a<0,
+                      -- signed(a)*unsigned(b) = a_unsigned*b - 2^32*b
+                      mul_result_full := signed(unsigned(r(rs1)) * unsigned(r(rs2)));
+                      if signed(r(rs1)) < 0 then
+                        mul_result_full := mul_result_full - shift_left(resize(signed(unsigned(r(rs2))), 64), 32);
+                      end if;
+                      r(rd) := unsigned(mul_result_full(63 downto 32));
+                    when "011" => -- mulhu (unsigned * unsigned, high 32 bits)
+                      mul_result_full := signed(unsigned(r(rs1)) * unsigned(r(rs2)));
+                      r(rd) := unsigned(mul_result_full(63 downto 32));
+                    when "100" => -- div (signed, truncate toward zero)
+                      if r(rs2) = 0 then
+                        r(rd) := x"FFFFFFFF";
+                      elsif signed(r(rs1)) = -16#80000000# and r(rs2) = x"80000000" then
+                        r(rd) := x"80000000";
+                      else
+                        -- Start multi-cycle division
+                        div_running_q <= '1';
+                        div_op_q <= "100";
+                        div_sign_q <= '1';
+                        div_rem_q <= '0';
+                        div_rd_q <= rd;
+                        rs1_signed := signed(r(rs1));
+                        rs2_signed := signed(r(rs2));
+                        -- Quotient needs negation if signs differ
+                        if (rs1_signed < 0) /= (rs2_signed < 0) then
+                          div_neg_result_q <= '1';
+                        else
+                          div_neg_result_q <= '0';
+                        end if;
+                        if rs1_signed < 0 then
+                          div_dividend_q <= to_signed(0, 32) & resize(-rs1_signed, 32);
+                        else
+                          div_dividend_q <= to_signed(0, 32) & rs1_signed;
+                        end if;
+                        if rs2_signed < 0 then
+                          div_divisor_q <= to_signed(0, 32) & resize(-rs2_signed, 32);
+                        else
+                          div_divisor_q <= to_signed(0, 32) & rs2_signed;
+                        end if;
+                        div_divisor_q(63 downto 32) <= (others => '0');
+                        div_count_q <= to_unsigned(32, 6);
+                        div_quotient_q <= (others => '0');
+                        state_q <= S_DIVIDE;
+                      end if;
+                    when "101" => -- divu (unsigned)
+                      if r(rs2) = 0 then
+                        r(rd) := x"FFFFFFFF";
+                      else
+                        -- Start multi-cycle unsigned division
+                        div_running_q <= '1';
+                        div_op_q <= "101";
+                        div_sign_q <= '0';
+                        div_rem_q <= '0';
+                        div_neg_result_q <= '0';
+                        div_rd_q <= rd;
+                        rs1_signed := signed(r(rs1));
+                        rs2_signed := signed(r(rs2));
+                        div_dividend_q <= to_signed(0, 32) & rs1_signed;
+                        div_divisor_q <= to_signed(0, 32) & rs2_signed;
+                        div_count_q <= to_unsigned(32, 6);
+                        div_quotient_q <= (others => '0');
+                        state_q <= S_DIVIDE;
+                      end if;
+                    when "110" => -- rem (signed remainder)
+                      if r(rs2) = 0 then
+                        r(rd) := r(rs1);
+                      elsif signed(r(rs1)) = -16#80000000# and r(rs2) = x"80000000" then
+                        r(rd) := x"00000000";
+                      else
+                        -- Start multi-cycle signed remainder
+                        div_running_q <= '1';
+                        div_op_q <= "110";
+                        div_sign_q <= '1';
+                        div_rem_q <= '1';
+                        div_rd_q <= rd;
+                        rs1_signed := signed(r(rs1));
+                        rs2_signed := signed(r(rs2));
+                        -- Remainder inherits dividend's sign
+                        if rs1_signed < 0 then
+                          div_neg_result_q <= '1';
+                        else
+                          div_neg_result_q <= '0';
+                        end if;
+                        if rs1_signed < 0 then
+                          div_dividend_q <= to_signed(0, 32) & resize(-rs1_signed, 32);
+                        else
+                          div_dividend_q <= to_signed(0, 32) & rs1_signed;
+                        end if;
+                        if rs2_signed < 0 then
+                          div_divisor_q <= to_signed(0, 32) & resize(-rs2_signed, 32);
+                        else
+                          div_divisor_q <= to_signed(0, 32) & rs2_signed;
+                        end if;
+                        div_divisor_q(63 downto 32) <= (others => '0');
+                        div_count_q <= to_unsigned(32, 6);
+                        div_quotient_q <= (others => '0');
+                        state_q <= S_DIVIDE;
+                      end if;
+                    when "111" => -- remu (unsigned remainder)
+                      if r(rs2) = 0 then
+                        r(rd) := r(rs1);
+                      else
+                        -- Start multi-cycle unsigned remainder
+                        div_running_q <= '1';
+                        div_op_q <= "111";
+                        div_sign_q <= '0';
+                        div_rem_q <= '1';
+                        div_neg_result_q <= '0';
+                        div_rd_q <= rd;
+                        rs1_signed := signed(r(rs1));
+                        rs2_signed := signed(r(rs2));
+                        div_dividend_q <= to_signed(0, 32) & rs1_signed;
+                        div_divisor_q <= to_signed(0, 32) & rs2_signed;
+                        div_count_q <= to_unsigned(32, 6);
+                        div_quotient_q <= (others => '0');
+                        state_q <= S_DIVIDE;
+                      end if;
+                    when others => null;
+                  end case;
+                else
+                  -- Standard R-type ALU
+                  case ins(14 downto 12) is
+                    when "000" => if ins(30) = '1' then r(rd) := r(rs1) - r(rs2); else r(rd) := r(rs1) + r(rs2); end if;
+                    when "001" => r(rd) := shift_left(r(rs1), to_integer(r(rs2)(4 downto 0)));
+                    when "010" => if signed(r(rs1)) < signed(r(rs2)) then r(rd) := to_unsigned(1, 32); else r(rd) := (others => '0'); end if;
+                    when "011" => if r(rs1) < r(rs2) then r(rd) := to_unsigned(1, 32); else r(rd) := (others => '0'); end if;
+                    when "100" => r(rd) := r(rs1) xor r(rs2);
+                    when "101" => if ins(30) = '1' then r(rd) := unsigned(shift_right(signed(r(rs1)), to_integer(r(rs2)(4 downto 0)))); else r(rd) := shift_right(r(rs1), to_integer(r(rs2)(4 downto 0))); end if;
+                    when "110" => r(rd) := r(rs1) or r(rs2);
+                    when others => r(rd) := r(rs1) and r(rs2);
+                  end case;
+                end if;
               end if;
             when "0010111" =>
               if rd /= 0 then r(rd) := pc_q + shift_left(resize(unsigned(ins(31 downto 12)), 32), 12); end if;
@@ -555,21 +824,129 @@ begin
                 state_q <= S_UART;
               elsif eff(31 downto 28) = x"8" then
                 mem_idx := word_index(eff);
-                if mem_idx < SCRATCH_BASE_WORD or mem_idx >= SCRATCH_BASE_WORD + SCRATCH_WORDS then
-                  null;
-                elsif ins(14 downto 12) = "000" then
-                  data_w := scratch(mem_idx - SCRATCH_BASE_WORD);
-                  lane := to_integer(eff(1 downto 0));
-                  data_w(lane * 8 + 7 downto lane * 8) := std_logic_vector(r(rs2)(7 downto 0));
-                  scratch(mem_idx - SCRATCH_BASE_WORD) <= data_w;
-                  scratch_bytes(mem_idx - SCRATCH_BASE_WORD) <= data_w;
-                else
-                  scratch(mem_idx - SCRATCH_BASE_WORD) <= std_logic_vector(r(rs2));
-                  scratch_bytes(mem_idx - SCRATCH_BASE_WORD) <= std_logic_vector(r(rs2));
+                if mem_idx < ROM_WORDS then
+                  -- Store to code ROM (now writable for stack spills)
+                  if ins(14 downto 12) = "000" then
+                    -- sb (byte store) to ROM - read-modify-write
+                    data_w := rom(mem_idx);
+                    lane := to_integer(eff(1 downto 0));
+                    data_w(lane * 8 + 7 downto lane * 8) := std_logic_vector(r(rs2)(7 downto 0));
+                    rom(mem_idx) <= data_w;
+                  else
+                    -- sw (word store) to ROM
+                    rom(mem_idx) <= std_logic_vector(r(rs2));
+                  end if;
+                elsif mem_idx >= SCRATCH_BASE_WORD and mem_idx < SCRATCH_BASE_WORD + SCRATCH_WORDS then
+                  if ins(14 downto 12) = "000" then
+                    data_w := scratch(mem_idx - SCRATCH_BASE_WORD);
+                    lane := to_integer(eff(1 downto 0));
+                    data_w(lane * 8 + 7 downto lane * 8) := std_logic_vector(r(rs2)(7 downto 0));
+                    scratch(mem_idx - SCRATCH_BASE_WORD) <= data_w;
+                    scratch_bytes(mem_idx - SCRATCH_BASE_WORD) <= data_w;
+                  else
+                    scratch(mem_idx - SCRATCH_BASE_WORD) <= std_logic_vector(r(rs2));
+                    scratch_bytes(mem_idx - SCRATCH_BASE_WORD) <= std_logic_vector(r(rs2));
+                  end if;
                 end if;
               end if;
             when "1110011" =>
-              if rd /= 0 then r(rd) := (others => '0'); end if;
+              case ins(14 downto 12) is
+                when "000" =>
+                  -- ecall (funct7=0000000) / ebreak (funct7=0000001)
+                  if ins(31 downto 20) = "000000000000" then
+                    -- ecall: halt cleanly
+                    state_q <= S_EXEC;
+                    pc_q <= pc_q;
+                    null;
+                  elsif ins(31 downto 20) = "000000000001" then
+                    -- ebreak: halt cleanly
+                    state_q <= S_EXEC;
+                    pc_q <= pc_q;
+                    null;
+                  end if;
+                when "001" =>
+                  -- csrrw
+                  crs1 := to_integer(unsigned(ins(19 downto 15)));
+                  if rd /= 0 then
+                    case unsigned(ins(31 downto 20)) is
+                      when x"f11" => r(rd) := csr_mhartid;
+                      when x"300" => r(rd) := csr_mstatus;
+                      when x"305" => r(rd) := csr_mtvec;
+                      when x"304" => r(rd) := csr_mie;
+                      when x"344" => r(rd) := csr_mip;
+                      when others => r(rd) := (others => '0');
+                    end case;
+                  end if;
+                  -- Write CSR (ignored for minimal implementation)
+                when "010" =>
+                  -- csrrs (read-write with set bits)
+                  crs1 := to_integer(unsigned(ins(19 downto 15)));
+                  if rd /= 0 then
+                    case unsigned(ins(31 downto 20)) is
+                      when x"f11" => r(rd) := csr_mhartid;
+                      when x"300" => r(rd) := csr_mstatus;
+                      when x"305" => r(rd) := csr_mtvec;
+                      when x"304" => r(rd) := csr_mie;
+                      when x"344" => r(rd) := csr_mip;
+                      when others => r(rd) := (others => '0');
+                    end case;
+                  end if;
+                  -- Set bits (ignored for minimal implementation)
+                when "011" =>
+                  -- csrrc (read-write with clear bits)
+                  crs1 := to_integer(unsigned(ins(19 downto 15)));
+                  if rd /= 0 then
+                    case unsigned(ins(31 downto 20)) is
+                      when x"f11" => r(rd) := csr_mhartid;
+                      when x"300" => r(rd) := csr_mstatus;
+                      when x"305" => r(rd) := csr_mtvec;
+                      when x"304" => r(rd) := csr_mie;
+                      when x"344" => r(rd) := csr_mip;
+                      when others => r(rd) := (others => '0');
+                    end case;
+                  end if;
+                  -- Clear bits (ignored for minimal implementation)
+                when "101" =>
+                  -- csrrwi (immediate version)
+                  if rd /= 0 then
+                    case unsigned(ins(31 downto 20)) is
+                      when x"f11" => r(rd) := csr_mhartid;
+                      when x"300" => r(rd) := csr_mstatus;
+                      when x"305" => r(rd) := csr_mtvec;
+                      when x"304" => r(rd) := csr_mie;
+                      when x"344" => r(rd) := csr_mip;
+                      when others => r(rd) := (others => '0');
+                    end case;
+                  end if;
+                  -- Write CSR (ignored for minimal implementation)
+                when "110" =>
+                  -- csrrsi (immediate set bits)
+                  if rd /= 0 then
+                    case unsigned(ins(31 downto 20)) is
+                      when x"f11" => r(rd) := csr_mhartid;
+                      when x"300" => r(rd) := csr_mstatus;
+                      when x"305" => r(rd) := csr_mtvec;
+                      when x"304" => r(rd) := csr_mie;
+                      when x"344" => r(rd) := csr_mip;
+                      when others => r(rd) := (others => '0');
+                    end case;
+                  end if;
+                  -- Set bits (ignored for minimal implementation)
+                when "111" =>
+                  -- csrrci (immediate clear bits)
+                  if rd /= 0 then
+                    case unsigned(ins(31 downto 20)) is
+                      when x"f11" => r(rd) := csr_mhartid;
+                      when x"300" => r(rd) := csr_mstatus;
+                      when x"305" => r(rd) := csr_mtvec;
+                      when x"304" => r(rd) := csr_mie;
+                      when x"344" => r(rd) := csr_mip;
+                      when others => r(rd) := (others => '0');
+                    end case;
+                  end if;
+                  -- Clear bits (ignored for minimal implementation)
+                when others => null;
+              end case;
             when "0101111" =>
               null;
             when others =>
@@ -596,6 +973,11 @@ begin
           debug_phase_q <= x"6";
         end if;
         r(0) := (others => '0');
+        -- Write divider result when complete
+        if div_running_q = '0' and div_rd_q /= 0 and state_q = S_EXEC then
+          r(div_rd_q) := div_result_q;
+          div_rd_q <= 0;
+        end if;
         regs_q <= r;
         if state_q = S_EXEC then
           pc_q <= pc_next;
