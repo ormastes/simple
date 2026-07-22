@@ -1,0 +1,56 @@
+# Standalone probe for the RV64 core in-tree load + execution gate.
+# Exercises core64_init + core64_combinational + core64_update directly
+# (no SoC wrapper): addi / taken-bne poison skip / jal self-loop park and a
+# sw/lw round-trip through a one-slot data memory.
+# Run: bin/simple run test/01_unit/lib/hardware/rv64gc_rtl/core64_probe.spl
+use std.hardware.rv64gc_rtl.core.{CoreState64, core64_init, core64_combinational, core64_update}
+
+fn check(name: text, ok: bool) -> i64:
+    if ok:
+        print("PASS {name}")
+        return 0
+    print("FAIL {name}")
+    1
+
+fn main() -> i64:
+    var fails: i64 = 0
+
+    # Program (reset vector 0):
+    #   0x00 addi x1, x0, 42
+    #   0x04 addi x2, x1, 1      (x2 = 43)
+    #   0x08 bne  x1, x2, +8     (taken -> skips poison)
+    #   0x0C addi x1, x0, 0      (poison, must be skipped)
+    #   0x10 sw   x1, 64(x0)
+    #   0x14 lw   x6, 64(x0)
+    #   0x18 jal  x0, 0          (park)
+    val prog = [0x02A00093u32, 0x00108113u32, 0x00209463u32, 0x00000093u32,
+                0x04102023u32, 0x04002303u32, 0x0000006Fu32]
+
+    var st = core64_init(0)
+    var mem64: i64 = -1
+    var i = 0
+    while i < 20:
+        val idx = st.pc / 4
+        var insn: u32 = 0x0000006Fu32
+        if idx >= 0 and idx < 7:
+            insn = prog[idx]
+        var comb = core64_combinational(st, insn, 0, st.rf)
+        if comb.dmem_re:
+            comb = core64_combinational(st, insn, mem64, st.rf)
+        if comb.dmem_we:
+            mem64 = comb.dmem_wdata
+        st = core64_update(st, insn, comb, comb.a0_val, comb.a1_val)
+        i = i + 1
+
+    print("core64 pc={st.pc} x1={st.rf.regs[1]} x2={st.rf.regs[2]} x6={st.rf.regs[6]} mem64={mem64}")
+    fails = fails + check("pc parked at jal self-loop 0x18", st.pc == 0x18)
+    fails = fails + check("x1 == 42 (poison skipped by taken bne)", st.rf.regs[1] == 42)
+    fails = fails + check("x2 == 43", st.rf.regs[2] == 43)
+    fails = fails + check("sw stored 42 to data memory", mem64 == 42)
+    fails = fails + check("lw read 42 back into x6", st.rf.regs[6] == 42)
+
+    if fails == 0:
+        print("CORE64 PROBE: ALL PASS")
+        return 0
+    print("CORE64 PROBE: {fails} FAILURES")
+    1

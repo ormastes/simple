@@ -1,7 +1,15 @@
 # rv64gc_rtl/core.spl unloadable at origin tip (3 stacked defects)
 
 **Filed:** 2026-07-22 (lane W2-D, verified at origin tip during soc_top_64 wiring)
-**Status:** OPEN
+**Status:** FIXED (lane A, 2026-07-22) — (1) `@hardware` removed, matching the
+decorator-free rv32i_rtl/core.spl pattern. (2) Clocked `core64_cycle`/phased-
+memory path and PMP state REMOVED pending re-land together with real
+`memory_access`/`pmp`/`pmp_csr` modules (removal route; no speculative
+modules; deferred re-land tracked here). (3) `is_csr`/`csr_addr` added to
+`DecodeResult64`, populated in decode (SYSTEM opcode, f3&0x3!=0;
+insn[31:20]). Gate: in-tree `bin/simple run` core64_probe + soc_top_64_probe
+ALL PASS; rv32 probe regression-clean. SSpec runner still blocked by the
+deployed-seed runner defect (separate bug).
 **Severity:** blocker for any in-tree execution of the RV64 core path
 
 `bin/simple run` on ANY importer of `std.hardware.rv64gc_rtl.core` fails. Three
