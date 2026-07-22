@@ -18,8 +18,10 @@ state, and goals databases; state/goals quick checks returned `ok`.
 
 The repo Codex launcher now resolves an explicit resume ID to its rollout and
 takes a nonblocking `flock` on that rollout before launching Codex. A concurrent
-resume exits 4 without reaching Codex. Ownership releases automatically after
-the owning process tree exits, and different sessions remain independent.
+guarded resume exits 4 without reaching Codex. It also refuses a launch when a
+legacy/direct Codex process is already resuming the same ID. Ownership releases
+automatically after the owning process tree exits, and different sessions
+remain independent.
 
 Direct invocations that bypass `bin/codex` cannot be protected by this repo
 guard; keep repo `bin/` first on `PATH` as required by `AGENTS.md`.

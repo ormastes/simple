@@ -13,6 +13,7 @@ cat > "$TMP/fake-codex" <<'EOF'
 sleep "${CODEX_FAKE_SLEEP:-0}"
 EOF
 chmod +x "$TMP/fake-codex"
+cp "$TMP/fake-codex" "$TMP/codex"
 mkdir -p "$TMP/.codex/sessions/2026/07/19"
 : > "$TMP/.codex/sessions/2026/07/19/rollout-test-session-1.jsonl"
 : > "$TMP/.codex/sessions/2026/07/19/rollout-test-session-2.jsonl"
@@ -22,6 +23,27 @@ run_guard() {
         CODEX_GUARD_MAX_RESUME_TOKENS=0 CODEX_GUARD_MAX_SESSION_TOKENS=0 \
         CODEX_GUARD_MAX_SECONDS=0 CODEX_GUARD_MAX_RSS_MB=0 "$GUARD" "$@"
 }
+
+terminate_tree() {
+    for child in $(ps -o pid= --ppid "$1" 2>/dev/null); do
+        terminate_tree "$child"
+    done
+    kill -TERM "$1" 2>/dev/null || true
+}
+
+CODEX_FAKE_MARKER="$TMP/direct" CODEX_FAKE_SLEEP=30 "$TMP/codex" resume session-1 &
+direct=$!
+i=0
+while [ ! -e "$TMP/direct" ] && [ "$i" -lt 20 ]; do sleep 0.1; i=$((i + 1)); done
+[ -e "$TMP/direct" ] || { echo 'FAIL: direct resume fixture did not start'; exit 1; }
+set +e
+legacy=$(run_guard resume session-1 2>&1)
+legacy_rc=$?
+set -e
+[ "$legacy_rc" -eq 4 ] || { echo "FAIL: live direct resume exit=$legacy_rc"; exit 1; }
+printf '%s\n' "$legacy" | grep -Fq 'live unguarded Codex process' || { echo 'FAIL: direct owner refusal missing'; exit 1; }
+terminate_tree "$direct"
+wait "$direct" 2>/dev/null || true
 
 CODEX_FAKE_MARKER="$TMP/started" CODEX_FAKE_SLEEP=30 run_guard resume session-1 &
 owner=$!
@@ -40,12 +62,6 @@ printf '%s\n' "$second" | grep -Fq 'REFUSING concurrent resume of session-1' || 
 CODEX_FAKE_MARKER="$TMP/other" run_guard resume session-2
 [ "$(wc -c < "$TMP/other")" -eq 1 ] || { echo 'FAIL: independent session was blocked'; exit 1; }
 
-terminate_tree() {
-    for child in $(ps -o pid= --ppid "$1" 2>/dev/null); do
-        terminate_tree "$child"
-    done
-    kill -TERM "$1" 2>/dev/null || true
-}
 terminate_tree "$owner"
 wait "$owner" 2>/dev/null || true
 i=0
@@ -58,4 +74,4 @@ done
 CODEX_FAKE_MARKER="$TMP/started" run_guard resume session-1
 [ "$(wc -c < "$TMP/started")" -eq 2 ] || { echo 'FAIL: released session lock stayed stale'; exit 1; }
 
-echo 'PASS codex-run-guard: concurrent explicit resume refused and lock released after tree termination'
+echo 'PASS codex-run-guard: direct/guarded duplicate resumes refused and lock released after tree termination'
