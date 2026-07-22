@@ -45,6 +45,7 @@ use std.hardware.soc_rtl.bootrom.{bootrom_read, BOOTROM_BASE}
 use std.hardware.soc_rtl.uart16550.{Uart16550State, uart_create, uart_mmio_read, uart_mmio_read_update, uart_mmio_write, uart_tick}
 use std.hardware.soc_rtl.clint.{ClintState, clint_create, clint_mmio_read, clint_mmio_write, clint_tick}
 use std.hardware.soc_rtl.ram.{RamState, ram_create, ram_read, ram_write}
+use std.hardware.soc_rtl.ram_sparse.{SparseRam, sparse_create, sparse_read, sparse_write, sparse_pages_allocated}
 use std.hardware.soc_rtl.mailbox.{MailboxState, mailbox_create, mailbox_mmio_read, mailbox_mmio_write}
 
 # -- Wishbone interconnect
@@ -58,7 +59,16 @@ use std.hardware.soc_rtl.wb_interconnect.{RAM_BASE, CLINT_BASE, UART_BASE, MB_BA
 # ============================================================================
 
 struct SocState:
-    """Full SoC sequential state."""
+    """Full SoC sequential state.
+
+    RAM is two-tier so the SoC addresses the full 4 GiB space:
+      * `ram`     — dense synthesizable [u32] window (BRAM model, low addresses)
+      * `sparse`  — page-backed sim model covering the rest of the 4 GiB DRAM
+    An access with word index < `ram.size_words` is served by the dense window;
+    everything else in the DRAM range is served by `sparse`.  `dram_size` is the
+    configured DRAM byte size (u32, up to 0xFFFF_FFFF) that bounds the RAM
+    region for address dispatch — it replaces the hard-wired 128 MiB RAM_END
+    cap in wb_interconnect for RAM membership."""
     core: CoreState
     csr: CsrFile
     regfile: RegFile
@@ -66,6 +76,8 @@ struct SocState:
     clint: ClintState
     mailbox: MailboxState
     ram: RamState
+    sparse: SparseRam
+    dram_size: u32
 
 # ============================================================================
 # SoC External Ports
@@ -91,8 +103,15 @@ struct SocTickResult:
 # Create / Reset
 # ============================================================================
 
+# Legacy DRAM window: 128 MiB, matching the historic RAM_BASE..RAM_END range.
+val RAM_LEGACY_SIZE: u32 = 0x08000000
+
 fn soc_create(ram_size_words: u32) -> SocState:
-    """Create and initialize the full SoC.  PC starts at boot ROM (0x1000)."""
+    """Create and initialize the full SoC.  PC starts at boot ROM (0x1000).
+
+    The dense window holds `ram_size_words` words; the DRAM region spans the
+    legacy 128 MiB so existing behavior (and the rv32 regression probe) is
+    byte-identical.  Use `soc_create_bytes` for a full 4 GiB-capable DRAM."""
     SocState(
         core: core_reset(BOOTROM_BASE),
         csr: csr_create(0),
@@ -100,12 +119,82 @@ fn soc_create(ram_size_words: u32) -> SocState:
         uart: uart_create(),
         clint: clint_create(),
         mailbox: mailbox_create(),
-        ram: ram_create(ram_size_words)
+        ram: ram_create(ram_size_words),
+        sparse: sparse_create(RAM_LEGACY_SIZE),
+        dram_size: RAM_LEGACY_SIZE
+    )
+
+fn soc_create_bytes(dram_bytes: u32) -> SocState:
+    """Create a SoC whose DRAM spans [RAM_BASE, RAM_BASE + dram_bytes), backed
+    entirely by the sparse 4 GiB-capable model.  The dense window is sized to
+    zero words so EVERY RAM access routes to `sparse`.  `dram_bytes` may be up
+    to 0xFFFF_FFFF (full 4 GiB).  This is the entry point for addressing the
+    high (>= 0x8000_0000) space that the dense array cannot physically hold."""
+    SocState(
+        core: core_reset(BOOTROM_BASE),
+        csr: csr_create(0),
+        regfile: regfile_create(),
+        uart: uart_create(),
+        clint: clint_create(),
+        mailbox: mailbox_create(),
+        ram: ram_create(0),
+        sparse: sparse_create(dram_bytes),
+        dram_size: dram_bytes
     )
 
 fn soc_reset(ram_size_words: u32) -> SocState:
     """Reset the SoC — alias for soc_create."""
     soc_create(ram_size_words)
+
+# ============================================================================
+# RAM address dispatch — 4 GiB-safe (extends wb_interconnect's 128 MiB cap)
+# ============================================================================
+
+fn soc_addr_in_ram(addr: u32, dram_size: u32) -> bool:
+    """True when `addr` is inside the configured DRAM window
+    [RAM_BASE, RAM_BASE + dram_size).
+
+    The offset (`addr - RAM_BASE`) is computed ONLY after the lower-bound check,
+    so a 4 GiB `dram_size` (where RAM_BASE + dram_size overflows u32) never
+    wraps — this comparison is unsigned-safe for the full 0x8000_0000 ..
+    0xFFFF_FFFF range.  This is the fix for the historic 128 MiB RAM_END cap:
+    high addresses (>= 0x8000_0000, which sign-extend to negative under a naive
+    i32 model) are dispatched to RAM instead of decoding as unmapped."""
+    if addr < RAM_BASE:
+        return false
+    (addr - RAM_BASE) < dram_size
+
+fn soc_route(addr: u32, dram_size: u32) -> u32:
+    """Decode `addr` to a Wishbone slave index, extending RAM membership to the
+    full `dram_size` window.  Peripherals (ROM/CLINT/UART/ETH/Mailbox) keep
+    their fixed wb_interconnect ranges — the Mailbox aperture inside RAM is
+    honored because wb_decode_address checks it first.  Only the RAM-vs-unmapped
+    decision is widened past wb_interconnect's 128 MiB RAM_END."""
+    val idx = wb_decode_address(addr)
+    if idx == WB_SLAVE_RAM or idx == WB_SLAVE_UNMAPPED:
+        if soc_addr_in_ram(addr, dram_size):
+            return WB_SLAVE_RAM
+        return WB_SLAVE_UNMAPPED
+    idx
+
+fn soc_ram_read(state: SocState, offset: u32) -> u32:
+    """Read a RAM word by byte offset (addr - RAM_BASE).  The dense BRAM window
+    serves word indices below its size; the sparse model serves the rest."""
+    val word_idx = offset >> 2
+    if word_idx < state.ram.size_words:
+        return ram_read(state.ram, offset)
+    sparse_read(state.sparse, offset)
+
+fn soc_ram_write(state: SocState, offset: u32, wdata: u32, width: u32) -> SocState:
+    """Write a RAM word/half/byte by byte offset (addr - RAM_BASE).  Routes to
+    the dense window (low addresses) or the sparse model (rest of 4 GiB)."""
+    var out = state
+    val word_idx = offset >> 2
+    if word_idx < state.ram.size_words:
+        out.ram = ram_write(state.ram, offset, wdata, width)
+    else:
+        out.sparse = sparse_write(state.sparse, offset, wdata, width)
+    out
 
 # ============================================================================
 # Instruction Fetch — route through Wishbone address map
@@ -114,12 +203,12 @@ fn soc_reset(ram_size_words: u32) -> SocState:
 fn soc_fetch_instruction(state: SocState, pc: u32) -> u32:
     """Fetch a 32-bit instruction word at the given PC.
     Routes through the Wishbone address decoder to ROM or RAM."""
-    val slave_idx = wb_decode_address(pc)
+    val slave_idx = soc_route(pc, state.dram_size)
     if slave_idx == WB_SLAVE_ROM:
         return bootrom_read(pc)
     if slave_idx == WB_SLAVE_RAM:
         val ram_offset = pc - RAM_BASE
-        return ram_read(state.ram, ram_offset)
+        return soc_ram_read(state, ram_offset)
     # Fetching from unmapped/peripheral space returns NOP
     0x00000013
 
@@ -129,7 +218,7 @@ fn soc_fetch_instruction(state: SocState, pc: u32) -> u32:
 
 fn soc_mem_read(state: SocState, addr: u32) -> u32:
     """Read a 32-bit word from the data bus via Wishbone address decode."""
-    val slave_idx = wb_decode_address(addr)
+    val slave_idx = soc_route(addr, state.dram_size)
 
     var rom_data: u32 = 0
     var clint_data: u32 = 0
@@ -144,7 +233,7 @@ fn soc_mem_read(state: SocState, addr: u32) -> u32:
     else if slave_idx == WB_SLAVE_UART:
         uart_data = uart_mmio_read(state.uart, addr - UART_BASE)
     else if slave_idx == WB_SLAVE_RAM:
-        ram_data = ram_read(state.ram, addr - RAM_BASE)
+        ram_data = soc_ram_read(state, addr - RAM_BASE)
     else if slave_idx == WB_SLAVE_MAILBOX:
         mb_data = mailbox_mmio_read(state.mailbox, addr - MB_BASE)
 
@@ -177,7 +266,7 @@ struct SocWriteResult:
 
 fn soc_mem_write(state: SocState, addr: u32, wdata: u32, width: u32) -> SocWriteResult:
     """Write to data memory via Wishbone address decode."""
-    val slave_idx = wb_decode_address(addr)
+    val slave_idx = soc_route(addr, state.dram_size)
     val wr = wb_route_write(slave_idx, addr, wdata)
     var out = state
     var char_out: u32 = 0
@@ -191,7 +280,11 @@ fn soc_mem_write(state: SocState, addr: u32, wdata: u32, width: u32) -> SocWrite
         out.uart = uart_mmio_write(state.uart, wr.offset, wdata)
 
     else if slave_idx == WB_SLAVE_RAM:
-        out.ram = ram_write(state.ram, wr.offset, wdata, width)
+        # Compute the RAM offset directly from addr (not wr.offset): wb_route_write
+        # only knows the 128 MiB RAM_END window, so its offset is unreliable for
+        # extended (>= RAM_END) addresses.  addr - RAM_BASE is exact for the full
+        # 4 GiB range.
+        out = soc_ram_write(out, addr - RAM_BASE, wdata, width)
 
     else if slave_idx == WB_SLAVE_MAILBOX:
         val mb_result = mailbox_mmio_write(state.mailbox, wr.offset, wdata)
