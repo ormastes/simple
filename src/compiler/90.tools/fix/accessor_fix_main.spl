@@ -28,7 +28,7 @@
 
 use compiler.tools.fix.accessor_fix_core.*
 use compiler.tools.fix.accessor_fix_rewrite.*
-use std.nogc_sync_mut.io.file_ops.{file_read, file_write}
+use std.nogc_sync_mut.io.file_ops.{file_read, file_atomic_write}
 use std.nogc_sync_mut.io.dir_ops.{dir_walk}
 use std.sffi.cli.{cli_get_args}
 
@@ -54,7 +54,7 @@ fn acc_defines_accessor(source: text) -> bool:
 fn acc_file_relevant(source: text) -> bool:
     acc_defines_accessor(source) or source.contains(".get_") or source.contains(".set_") or source.contains(".is_")
 
-fn main():
+fn main() -> i64:
     val args = cli_get_args()
     var apply = false
     var include_tier2 = true
@@ -142,7 +142,6 @@ fn main():
     var defs_removed = 0
     var calls_rewritten = 0
     var tier2_calls = 0
-    var written = 0
     for path in files:
         val content = file_read(path)
         if content == "" or not acc_file_relevant(content):
@@ -155,11 +154,9 @@ fn main():
         calls_rewritten = calls_rewritten + fr.rewritten
         tier2_calls = tier2_calls + fr.tier2
         if apply:
-            val ok = file_write(path, fr.source)
-            if ok:
-                written = written + 1
-            else:
+            if not file_atomic_write(path, fr.source):
                 print "[accessor-fix] ERROR: failed to write {path}"
+                return 1
         if not quiet:
             print "  {path}  (-{fr.removed} def, ~{fr.rewritten} call, ~{fr.tier2} self)"
 
@@ -167,3 +164,4 @@ fn main():
     print "[accessor-fix] {mode}: {files_changed} file(s), {defs_removed} wrapper(s) removed, {calls_rewritten} cross-file call(s) rewritten, {tier2_calls} same-file call(s) simplified"
     if not apply:
         print "[accessor-fix] re-run with --apply to write changes"
+    0
