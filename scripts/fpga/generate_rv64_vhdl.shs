@@ -1,23 +1,28 @@
-#!/bin/bash
-# generate_rv64_vhdl.shs — Generate all RV64GC SoC VHDL files
+#!/bin/sh
+# generate_rv64_vhdl.shs — Generate all RV64GC SoC VHDL files.
 #
-# Usage: bash scripts/fpga/generate_rv64_vhdl.shs [--output-dir build/vhdl/rv64]
+# Usage: sh scripts/fpga/generate_rv64_vhdl.shs [--output-dir=build/vhdl/rv64]
 #
-# Calls bin/simple to run the VHDL generation pipeline:
-# 1. generate_soc_top_vhdl_rv64()  -> soc_top_rv64.vhd
-# 2. compile_to_vhdl_module()      -> per-module .vhd stubs
-# 3. Peripheral VHDL from soc_vhdl_gen pipeline
-
-set -eo pipefail
+# Contract: this script NEVER silently reports success on a partial pipeline.
+# It always ends in exactly one of:
+#   RV64_VHDL_GEN: PASS      (all expected .vhd emitted AND ghdl -a --std=08 clean)
+#   RV64_VHDL_GEN: BLOCKED   (one or more precise reasons printed, non-zero exit)
+#
+# Known status as of 2026-07-22 (see
+# doc/03_plan/hardware/riscv/rv64_fpga_synthesis_plan_2026-07-22.md):
+# the driver crashes on a phantom API — scripts/fpga/rv64_vhdl_driver.spl
+# imports `compile_to_vhdl_module` from std.hardware.fpga_linux.riscv_fpga_linux,
+# a function that is never defined anywhere in src/ (grep confirms zero `fn
+# compile_to_vhdl_module` definitions repo-wide). This script surfaces that as
+# BLOCKED with the exact compiler error, instead of counting whatever partial
+# .vhd files happened to be written before the crash and calling it done.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 OUTPUT_DIR="build/vhdl/rv64"
 SIMPLE_BINARY="${SIMPLE_BINARY:-bin/release/simple}"
 RV64_PAYLOAD_ELF="${RV64_PAYLOAD_ELF:-build/os/simpleos_riscv64_fpga.elf}"
-RV64_PAYLOAD_BIN="${RV64_PAYLOAD_BIN:-$OUTPUT_DIR/simpleos_riscv64_fpga.bin}"
 
-# Parse args
 for arg in "$@"; do
     case "$arg" in
         --output-dir=*) OUTPUT_DIR="${arg#--output-dir=}" ;;
@@ -31,40 +36,98 @@ echo "=== RV64GC VHDL Generation Pipeline ==="
 echo "Output directory: $OUTPUT_DIR"
 echo ""
 
-# Step 1: Generate all VHDL via the Simple driver script
-echo "[1/1] Running VHDL generation driver..."
-"$SIMPLE_BINARY" run scripts/fpga/rv64_vhdl_driver.spl 2>&1 | tail -40
+# POSIX sh (no arrays): blockers accumulate as newline-separated lines.
+BLOCKERS=""
+add_blocker() {
+    if [ -z "$BLOCKERS" ]; then BLOCKERS="$1"; else BLOCKERS="$BLOCKERS
+$1"; fi
+}
+
+# --- Step 1: run the .spl driver (soc tops + per-module stubs + core + peripherals) ---
+DRIVER_LOG="$OUTPUT_DIR/driver.log"
+echo "[1/3] Running VHDL generation driver..."
+"$SIMPLE_BINARY" run scripts/fpga/rv64_vhdl_driver.spl >"$DRIVER_LOG" 2>&1
 DRIVER_EXIT=$?
+tail -20 "$DRIVER_LOG"
 
 if [ $DRIVER_EXIT -ne 0 ]; then
-    echo "ERROR: VHDL generation driver failed (exit $DRIVER_EXIT)"
+    reason="$(grep -m1 -E '^error(\[|:)' "$DRIVER_LOG")"
+    if [ -z "$reason" ]; then
+        reason="driver exited $DRIVER_EXIT with no 'error' line — check for a native crash (segfault seen intermittently on this exact failure in prior runs); see $DRIVER_LOG"
+    fi
+    add_blocker "driver (rv64_vhdl_driver.spl) failed: $reason"
+fi
+
+# --- Step 2: verify every module the driver is supposed to emit actually landed ---
+# (never trust a raw .vhd file count — check the exact expected set by name)
+EXPECTED_FILES="soc_top_rv64 soc_top_rv64_k26 pkg alu regfile csr_s csr decode lsu mmu_sv39 mul_div atomics trap rv64gc_core clint plic uart ram bootrom wb_interconnect"
+EXPECTED_COUNT=0
+for f in $EXPECTED_FILES; do EXPECTED_COUNT=$((EXPECTED_COUNT + 1)); done
+echo ""
+echo "[2/3] Checking expected VHDL outputs..."
+MISSING=""
+MISSING_COUNT=0
+for f in $EXPECTED_FILES; do
+    if [ -s "$OUTPUT_DIR/$f.vhd" ]; then
+        echo "  OK: $f.vhd"
+    else
+        echo "  MISSING: $f.vhd"
+        MISSING="$MISSING $f.vhd"
+        MISSING_COUNT=$((MISSING_COUNT + 1))
+    fi
+done
+if [ $MISSING_COUNT -gt 0 ]; then
+    add_blocker "missing expected VHDL files ($MISSING_COUNT/$EXPECTED_COUNT):$MISSING"
+fi
+
+# --- Step 3: ghdl -a --std=08 on whatever .vhd files exist, one at a time ---
+# soc_top_rv64_k26.vhd needs the Xilinx `unisim` library (STARTUPE3/BUFGCE_DIV
+# primitives) which raw GHDL does not ship; that is an expected/known
+# elaboration-only dependency, not a generation defect, so its ghdl failure is
+# reported but does not by itself flip an otherwise-clean run to BLOCKED.
+echo ""
+echo "[3/3] Running ghdl -a --std=08 on generated VHDL..."
+GHDL_WORKDIR="$OUTPUT_DIR/.ghdl_work"
+mkdir -p "$GHDL_WORKDIR"
+GHDL_FAILS=""
+for f in "$OUTPUT_DIR"/*.vhd; do
+    [ -e "$f" ] || continue
+    base="$(basename "$f" .vhd)"
+    err_file="$GHDL_WORKDIR/$base.ghdl_err.txt"
+    if ghdl -a --std=08 --workdir="$GHDL_WORKDIR" "$f" >"$err_file" 2>&1; then
+        echo "  GHDL PASS: $base"
+    else
+        echo "  GHDL FAIL: $base — $(head -1 "$err_file")"
+        if [ "$base" = "soc_top_rv64_k26" ]; then
+            echo "    (expected: needs Xilinx unisim library, only available under Vivado)"
+        else
+            GHDL_FAILS="$GHDL_FAILS $base:$(head -1 "$err_file" | tr -d '\n')"
+        fi
+    fi
+done
+if [ -n "$GHDL_FAILS" ]; then
+    add_blocker "ghdl -a --std=08 failed on:$GHDL_FAILS"
+fi
+
+# --- Verdict ---
+echo ""
+echo "=== Generation Summary ==="
+VHD_COUNT=$(find "$OUTPUT_DIR" -maxdepth 1 -name '*.vhd' 2>/dev/null | wc -l | tr -d ' ')
+echo "VHDL files present: $VHD_COUNT/$EXPECTED_COUNT expected"
+
+if [ -z "$BLOCKERS" ]; then
+    if [ -f "$RV64_PAYLOAD_ELF" ] && command -v riscv64-unknown-elf-objcopy >/dev/null 2>&1; then
+        riscv64-unknown-elf-objcopy -O binary "$RV64_PAYLOAD_ELF" "$OUTPUT_DIR/simpleos_riscv64_fpga.bin"
+        od -An -v -tx8 -w8 "$OUTPUT_DIR/simpleos_riscv64_fpga.bin" | tr -d ' ' | awk 'NF { print }' >"$OUTPUT_DIR/rv64_payload.mem"
+    fi
+    echo "RV64_VHDL_GEN: PASS"
+    exit 0
+else
+    echo "RV64_VHDL_GEN: BLOCKED"
+    echo "$BLOCKERS" | while IFS= read -r b; do
+        echo "  - $b"
+    done
+    echo ""
+    echo "See doc/03_plan/hardware/riscv/rv64_fpga_synthesis_plan_2026-07-22.md for the full analysis and ordered unblock lanes."
     exit 1
 fi
-
-if [ -f "$RV64_PAYLOAD_ELF" ] && command -v riscv64-unknown-elf-readelf >/dev/null 2>&1; then
-    entry_hex="$(riscv64-unknown-elf-readelf -h "$RV64_PAYLOAD_ELF" | awk '/Entry point address:/ { print $4 }')"
-    entry_hex="${entry_hex#0x}"
-    entry_hex="$(printf '%016s' "$entry_hex" | tr ' ' '0')"
-    sed -i "s/0000000080000000/$entry_hex/g" "$OUTPUT_DIR/rv64gc_core.vhd"
-    echo "Reset PC: 0x$entry_hex from $RV64_PAYLOAD_ELF"
-else
-    echo "WARNING: RV64 ELF entry unavailable, keeping generated reset PC" >&2
-fi
-
-if [ -f "$RV64_PAYLOAD_ELF" ] && command -v riscv64-unknown-elf-objcopy >/dev/null 2>&1; then
-    riscv64-unknown-elf-objcopy -O binary "$RV64_PAYLOAD_ELF" "$RV64_PAYLOAD_BIN"
-    echo "Payload ELF: $RV64_PAYLOAD_ELF -> $RV64_PAYLOAD_BIN"
-fi
-
-# Count generated files
-VHD_COUNT=$(find "$OUTPUT_DIR" -name '*.vhd' 2>/dev/null | wc -l)
-echo ""
-echo "=== Generation Complete ==="
-echo "Generated $VHD_COUNT .vhd files in $OUTPUT_DIR"
-if [ -f "$RV64_PAYLOAD_BIN" ]; then
-    od -An -v -tx8 -w8 "$RV64_PAYLOAD_BIN" | tr -d ' ' | awk 'NF { print }' >"$OUTPUT_DIR/rv64_payload.mem"
-    echo "Preload: $OUTPUT_DIR/rv64_payload.mem words=$(wc -l <"$OUTPUT_DIR/rv64_payload.mem" | tr -d ' ')"
-else
-    echo "WARNING: RV64 payload binary missing, preload not generated: $RV64_PAYLOAD_BIN" >&2
-fi
-ls -la "$OUTPUT_DIR"/*.vhd 2>/dev/null || echo "No .vhd files found"
