@@ -146,3 +146,43 @@ The per-tick RAM copy exit criterion is MET. To reach the banner: land a
 checkpoint/resume driver (or the core64 `lsu64_load` JIT fix, or a lifted
 watchdog), re-run the honest-map boot to the banner, and promote Case 3's
 `uart_has_opensbi` scan from a soft finding to a hard assert.
+
+## CORRECTION (2026-07-22, reviewer long-run experiment) — the wall is NOT throughput
+
+The "banner is ~3× past the 60 s budget, throughput-only" conclusion above is
+**superseded**. A reviewer long-run with the watchdog defeated ran the honest
+128 MiB map for **300,000 ticks / 457 s** to completion (no kill). Result:
+`ticks=300000 trapped=false banner=false mcause=0 uart_len=0`.
+
+**Watchdog defeat (reusable):** the ~60 s SIGTERM is the seed's built-in
+`start_watchdog(60)` (`src/compiler_rust/compiler/src/watchdog.rs`), armed for
+paths under `examples/` unless `SIMPLE_TIMEOUT_SECONDS` is set. Disable with
+`SIMPLE_TIMEOUT_SECONDS=0` (env) and run the payload from a non-`examples/`
+path; a `setsid` + renamed binary also dodges any name-matching outer reaper.
+So a single process CAN run unboundedly — throughput was never the true wall.
+
+**What actually happens (disassembly-anchored):** OpenSBI runs trap-free FAR
+past `fw_platform_init` — through `sbi_init` into `sbi_hsm_hart_start` + FDT
+phandle resolution (`fdt_node_offset_by_phandle`, `max_pc 0x8001411E`, well
+beyond the old `0x80013fd6`). Then `max_pc` freezes for the final ~125k ticks
+(pc pinned ~`0x8000C1B4` in `sbi_hsm_hart_start`; `sbi_hart_hang` @`0x8000B8DE`
+sits in the same region) — a bounded spin, still `mcause==0`.
+
+**Root cause (leading, evidence-backed): the OpenSBI ns16550a console never
+drives our SoC UART, so ALL `sbi_printf` output — including the banner — is
+silently dropped** (`uart_len==0` after 300k ticks proves zero bytes ever
+reached `uart_tx`). OpenSBI does not check console-write success, so it proceeds
+to HSM/domain setup and parks. The lever is **UART/console bring-up**, not
+checkpoint/resume, not the `lsu64_load` JIT fix, not the watchdog:
+- `soc_top_64.spl`'s UART MMIO is the minimal THR/LSR model; Lane Y's full
+  ns16550a `uart16550.spl` is NOT wired into `soc_top_64` (Y's own integration
+  note). OpenSBI's 8250 driver polls **LSR.THRE** at the DTB-derived MMIO
+  offset (reg-shift/reg-io-width from `soc_virt.dts`) before every byte.
+- Fix path: wire the full 16550 (or make the minimal UART present THRE=1 +
+  the exact register offsets the ns16550a driver computes) so writes land in
+  `uart_tx`; confirm the "OpenSBI v1.4" banner bytes appear.
+
+**New exit criterion:** OpenSBI banner bytes present in `uart_tx` on the honest
+map — promote Case 3's `uart_has_opensbi` scan to a hard assert. Assigned to a
+UART/console bring-up lane. The throughput/CoW work stands; it was necessary
+(the boot now runs unboundedly) but not sufficient.
