@@ -55,11 +55,13 @@
 >   typed `[f64]` param boundary, plus `Reading.Temp(v: 0.1)` enum payload.
 >   Guard `test/03_system/native/array_f64_element_precision.spl` upgraded
 >   from mask-immune 0.25/0.5 to mask-sensitive 0.1 for push/element-store
->   and gained a typed-`[f64]`-push case; rc=30 on run+interp. (Native-build
->   re-verification of the guard was blocked by an unrelated WC-wide
->   native-build outage — `_driver_module_name_collision not found` even for
->   hello-world, conflict-storm damage in the pure-Simple driver tree; the
->   fix does not touch the native lowering path.)
+>   and gained a typed-`[f64]`-push case; rc=30 on run+interp. Native-build
+>   re-verification was briefly blocked by a WC-wide outage
+>   (`_driver_module_name_collision not found` — a parallel-session clobber
+>   left ~41 src/compiler files as stale rewinds missing origin symbols);
+>   after restoring the stale files from origin the strengthened guard also
+>   passes NATIVE: rc=30. All three paths (native / JIT / interp) verified
+>   lossless 2026-07-22.
 >
 > The historical root analysis below is retained for reference.
 
