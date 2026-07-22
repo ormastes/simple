@@ -5,6 +5,8 @@
 -- Stage 3 adds abstract register access (DATA0/DATA1, COMMAND access-
 -- register, ABSTRACTCS busy/cmderr) with a stub-level GPR port toward the
 -- hart; the abstract-command engine itself lives in debug_registers.
+-- Stage 4 adds DM-resident debug CSRs dpc (0x7B1) / dcsr (0x7B0) with
+-- stub-level hart ports (pc_i/prv_i/ebreak_i in, dpc_o/step_o out).
 --
 -- Hart-side integration is DEFERRED (Stage 2 scope): only stub ports are
 -- exposed — haltreq_o / resumereq_o / ndmreset_o outputs, halted_i /
@@ -57,7 +59,18 @@ entity riscv_debug_module is
     gpr_regno_o : out std_logic_vector(4 downto 0);
     gpr_wdata_o : out std_logic_vector(63 downto 0);
     gpr_rdata_i : in  std_logic_vector(63 downto 0) := (others => '0');
-    gpr_ack_i   : in  std_logic := '0'
+    gpr_ack_i   : in  std_logic := '0';
+
+    -- Stage-4 debug-CSR hart stub ports (dpc/dcsr live in the DM): pc_i is
+    -- captured into dpc on halt, dpc_o is the resume address, prv_i is
+    -- captured into dcsr.prv on halt, ebreak_i marks an ebreak-caused halt
+    -- (dcsr.cause=1), step_o exports dcsr.step for single-step modeling.
+    -- Defaults let pre-Stage-4 instantiations leave these unconnected.
+    pc_i     : in  std_logic_vector(63 downto 0) := (others => '0');
+    prv_i    : in  std_logic_vector(1 downto 0)  := "11";
+    ebreak_i : in  std_logic := '0';
+    dpc_o    : out std_logic_vector(63 downto 0);
+    step_o   : out std_logic
   );
 end entity riscv_debug_module;
 
@@ -97,6 +110,12 @@ begin
       gpr_wdata_o => gpr_wdata_o,
       gpr_rdata_i => gpr_rdata_i,
       gpr_ack_i   => gpr_ack_i,
+
+      pc_i     => pc_i,
+      prv_i    => prv_i,
+      ebreak_i => ebreak_i,
+      dpc_o    => dpc_o,
+      step_o   => step_o,
 
       halted_i    => halted_i,
       running_i   => running_i,

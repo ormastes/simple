@@ -5,13 +5,17 @@
 -- (op: 1 = read, 2 = write). One clock later the target asserts `ready`
 -- for one clock with rdata (for reads) and resp (0 = success, 2 = failed).
 --
--- Stage 1 backing store: 8 x 32-bit registers at addresses 0x00..0x07.
--- Stage 2: addresses 0x10..0x1F are forwarded to the Debug Module over the
--- dm_* port (same valid/ready protocol). The dm_* inputs have safe defaults
--- so Stage-1 instantiations (no DM attached) still compile; with no DM
--- attached an access to 0x10..0x1F never completes (dm_ready defaults '0'),
--- which the Stage-1 testbench never does. All other addresses outside
--- 0x00..0x07 and 0x10..0x1F respond `failed` (resp = 2).
+-- Stage 1 backing store: 4 x 32-bit scratch registers at 0x00..0x03
+-- (shrunk from 8 in Stage 4 to free the abstract-data window).
+-- Stage 2: addresses 0x10..0x1F (DM control/status) are forwarded to the
+-- Debug Module over the dm_* port (same valid/ready protocol).
+-- Stage 4: the abstract-data window 0x04..0x0B (DATA0..DATA7 per spec;
+-- this DM implements DATA0/DATA1, the rest read 0) is forwarded to the DM
+-- as well, so DATA0/DATA1 are reachable through the real bus. The dm_*
+-- inputs have safe defaults so Stage-1 instantiations (no DM attached)
+-- still compile; with no DM attached an access to a forwarded address
+-- never completes (dm_ready defaults '0'), which the Stage-1 testbench
+-- never does. All other addresses respond `failed` (resp = 2).
 
 library ieee;
 use ieee.std_logic_1164.all;
@@ -31,7 +35,7 @@ entity dmi_bus is
     resp  : out std_logic_vector(1 downto 0);
     ready : out std_logic;
 
-    -- Stage-2 Debug Module forwarding port (DMI addresses 0x10..0x1F).
+    -- Debug Module forwarding port (DMI addresses 0x04..0x0B and 0x10..0x1F).
     -- Defaults let Stage-1 instantiations leave these unconnected.
     dm_valid : out std_logic;
     dm_addr  : out std_logic_vector(6 downto 0);
@@ -45,7 +49,7 @@ end entity dmi_bus;
 
 architecture rtl of dmi_bus is
 
-  type regfile_t is array (0 to 7) of std_logic_vector(31 downto 0);
+  type regfile_t is array (0 to 3) of std_logic_vector(31 downto 0);
   signal regs : regfile_t := (others => (others => '0'));
 
   signal rdata_r : std_logic_vector(31 downto 0) := (others => '0');
@@ -57,8 +61,11 @@ architecture rtl of dmi_bus is
 
 begin
 
-  -- Address decode: 0x10..0x1F -> Debug Module.
-  is_dm <= '1' when addr(6 downto 4) = "001" else '0';
+  -- Address decode: 0x10..0x1F (DM regs) and 0x04..0x0B (abstract data
+  -- window) -> Debug Module.
+  is_dm <= '1' when addr(6 downto 4) = "001"
+                 or (unsigned(addr) >= 4 and unsigned(addr) <= 11)
+           else '0';
 
   dm_valid <= valid and is_dm;
   dm_addr  <= addr;
@@ -79,9 +86,9 @@ begin
       if valid = '1' then
         if is_dm = '1' then
           sel_dm_r <= '1';  -- DM supplies rdata/resp/ready for this request
-        elsif unsigned(addr) <= 7 then
+        elsif unsigned(addr) <= 3 then
           sel_dm_r <= '0';
-          idx := to_integer(unsigned(addr(2 downto 0)));
+          idx := to_integer(unsigned(addr(1 downto 0)));
           if op = "10" then
             regs(idx) <= wdata;
           elsif op = "01" then

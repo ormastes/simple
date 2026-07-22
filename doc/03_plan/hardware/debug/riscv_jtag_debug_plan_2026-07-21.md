@@ -302,9 +302,22 @@ Current stub interface:
    only 0x10–0x1F, so the tb drives the DM's DMI port directly; DATA0/1
    unreachable through dmi_bus until the scratch collision is resolved
    (Stage-4 prerequisite #1).
-5. Begin Stage 4 (dpc/dcsr): (a) dmi_bus forward 0x04–0x0B to DM (resolve
-   scratch collision), (b) regno 0x0000–0x0FFF CSR decode + hart CSR port
-   (dpc=0x7B1, dcsr=0x7B0), (c) hart halt-cause/prv exposure for dcsr,
-   (d) real hart integration of the GPR port.
-6. Hart integration still gated on BRAM stability (coordinate before touching
+5. ✅ **Stage 4 LANDED 2026-07-22** — dmi_bus forwards 0x04–0x0B + 0x10–0x1F
+   (scratch shrunk to 0x00–0x03); CSR regno decode with dpc 0x7B1 (halt-pc
+   capture, resume-at-dpc, aarsize 2/3) + dcsr 0x7B0 (xdebugver=4, cause
+   1/3/4 priority ebreak>haltreq>step, step→step_o with step_pending armed
+   on resumereq, prv WARL 0/1/3); other CSRs cmderr=2.
+   `tb_debug_csrs.vhd` 6/6 (incl. resume-at-dpc + exactly-one-instruction
+   step) and Stage-3 tb re-pointed through the REAL dmi_bus (direct-drive
+   dropped — DATA0/1 now proven through the bus); all 4 tbs PASS exit 0,
+   reviewer re-ran. tb bring-up finding recorded: poll latched allresumeack
+   before allhalted after a step-resume (2-cycle running window race).
+6. Begin Stage 5 (SBA + OpenOCD): (a) SBCS 0x38/SBADDRESS0-1/SBDATA0-1 +
+   dmi_bus forward 0x38–0x3D, (b) DM system-bus master port + stub memory
+   target (sbaccess 2/3, sbreadonaddr/sbreadondata/sbautoincrement,
+   sberror), (c) DTMCS busy/dmistall semantics exercised (currently 1-cycle
+   completion), (d) OpenOCD attach glue: remote-bitbang or JTAG-VPI socket
+   around jtag_tap in GHDL sim; verify hartinfo/haltsum/abstractauto read-0
+   against the riscv-013 driver.
+7. Hart integration still gated on BRAM stability (coordinate before touching
    rv32_exec_core.vhd / rv64 core)

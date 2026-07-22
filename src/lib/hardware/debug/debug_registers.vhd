@@ -8,12 +8,10 @@
 -- Implemented registers:
 --   0x04 DATA0     — abstract command data, low word (r/w).
 --   0x05 DATA1     — abstract command data, high word (r/w).
---                    NOTE: in the full JTAG chain dmi_bus currently keeps
---                    0x00..0x07 as its Stage-1 scratch regfile and forwards
---                    only 0x10..0x1F here. Forwarding 0x04..0x05 (data0/1)
---                    to the DM is a Stage-4 integration prerequisite —
---                    dmi_bus is frozen in this stage. The DM decodes them
---                    for direct-DMI integrations and the Stage-3 testbench.
+--                    Stage 4: dmi_bus now forwards the abstract-data window
+--                    0x04..0x0B here (scratch shrunk to 0x00..0x03), so
+--                    DATA0/DATA1 are reachable through the real bus.
+--                    0x06..0x0B read 0 / write ignored (datacount=2).
 --   0x10 DMCONTROL  — dmactive(0), ndmreset(1), ackhavereset(28, W1),
 --                     resumereq(30, W1 pulse), haltreq(31, level).
 --                     Single hart: hasel/hartsello/hartselhi ignored, read 0.
@@ -28,7 +26,15 @@
 --   0x17 COMMAND    — cmdtype 0 (access register) only:
 --                       aarsize(22:20): 2 = 32-bit, 3 = 64-bit;
 --                       transfer(17), write(16), regno(15:0).
---                     Supported regno: 0x1000..0x101F (GPRs x0..x31).
+--                     Supported regno: 0x1000..0x101F (GPRs x0..x31), and
+--                     (Stage 4) CSR space 0x0000..0x0FFF with exactly two
+--                     debug CSRs implemented INSIDE the DM:
+--                       0x7B0 dcsr (aarsize=2 only; aarsize=3 -> cmderr=2)
+--                       0x7B1 dpc  (aarsize=2 or 3; aarsize=2 accesses the
+--                                   low 32 bits, write zero-extends)
+--                     Any other CSR regno -> cmderr=2 (not supported).
+--                     dcsr/dpc accesses complete immediately (no busy
+--                     window — the registers live in the DM itself).
 --                     cmderr encoding (sticky; new COMMAND writes while
 --                     cmderr /= 0 are ignored; W1C via ABSTRACTCS):
 --                       1 = busy violation: COMMAND/DATA0/DATA1 written
@@ -55,6 +61,20 @@
 -- held stable until the hart pulses gpr_ack_i for one clock; busy is set for
 -- the whole window. On read-ack, gpr_rdata_i is captured into DATA0 (and
 -- DATA1 when aarsize=3).
+--
+-- Stage-4 debug CSRs (v0.13), DM-resident, hart-stub-level:
+--   dcsr (0x7B0): xdebugver(31:28)=4 (RO), ebreakm(15)/ebreaks(13)/
+--     ebreaku(12) (RW), cause(8:6) (RO: 1=ebreak, 3=haltreq, 4=step),
+--     step(2) (RW), prv(1:0) (RW, WARL — legal values 0/1/3; a write of 2
+--     is ignored and the previous value kept). All other bits read 0.
+--   dpc (0x7B1): 64-bit. Captured from pc_i on the halted_i rising edge;
+--     driven out on dpc_o so the hart resumes at dpc.
+--   cause capture on halt (priority): ebreak_i=1 -> 1; else pending
+--     DMCONTROL.haltreq -> 3; else a step-resume was in flight -> 4;
+--     default 3. prv is captured from prv_i on the same edge.
+--   step: dcsr.step is exported on step_o; when a resumereq is written
+--     while step=1 the DM arms step_pending, and the hart (stub/tb model)
+--     runs one instruction and re-halts, which is then reported cause=4.
 --
 -- dmactive semantics: writing DMCONTROL with dmactive=0 resets ALL DM state
 -- (including DATA0/1, busy, cmderr and any in-flight GPR access). While
@@ -98,6 +118,14 @@ entity debug_registers is
     gpr_rdata_i : in  std_logic_vector(63 downto 0) := (others => '0');
     gpr_ack_i   : in  std_logic := '0';
 
+    -- Stage-4 debug-CSR hart stub ports. Defaults let pre-Stage-4
+    -- instantiations leave these unconnected.
+    pc_i     : in  std_logic_vector(63 downto 0) := (others => '0');
+    prv_i    : in  std_logic_vector(1 downto 0)  := "11";
+    ebreak_i : in  std_logic := '0';
+    dpc_o    : out std_logic_vector(63 downto 0);
+    step_o   : out std_logic;
+
     -- Status inputs (from DM core / hart)
     halted_i    : in  std_logic;
     running_i   : in  std_logic;
@@ -134,6 +162,17 @@ architecture rtl of debug_registers is
   signal gpr_regno_r   : std_logic_vector(4 downto 0) := (others => '0');
   signal gpr_wdata_r   : std_logic_vector(63 downto 0) := (others => '0');
 
+  -- Stage-4 debug CSR state
+  signal dpc_r          : std_logic_vector(63 downto 0) := (others => '0');
+  signal dcsr_ebreakm_r : std_logic := '0';
+  signal dcsr_ebreaks_r : std_logic := '0';
+  signal dcsr_ebreaku_r : std_logic := '0';
+  signal dcsr_step_r    : std_logic := '0';
+  signal dcsr_cause_r   : std_logic_vector(2 downto 0) := "000";
+  signal dcsr_prv_r     : std_logic_vector(1 downto 0) := "11";
+  signal step_pending_r : std_logic := '0';
+  signal halted_q       : std_logic := '0';
+
   signal rdata_r : std_logic_vector(31 downto 0) := (others => '0');
   signal ready_r : std_logic := '0';
 
@@ -142,6 +181,8 @@ begin
   process (clk, rst_n)
     variable dmstatus_v : std_logic_vector(31 downto 0);
     variable cmd_supported_v : boolean;
+    variable is_gpr_v, is_dcsr_v, is_dpc_v : boolean;
+    variable dcsr_v : std_logic_vector(31 downto 0);
   begin
     if rst_n = '0' then
       dmactive_r     <= '0';
@@ -159,11 +200,37 @@ begin
       gpr_we_r       <= '0';
       gpr_regno_r    <= (others => '0');
       gpr_wdata_r    <= (others => '0');
+      dpc_r          <= (others => '0');
+      dcsr_ebreakm_r <= '0';
+      dcsr_ebreaks_r <= '0';
+      dcsr_ebreaku_r <= '0';
+      dcsr_step_r    <= '0';
+      dcsr_cause_r   <= "000";
+      dcsr_prv_r     <= "11";
+      step_pending_r <= '0';
+      halted_q       <= '0';
       rdata_r        <= (others => '0');
       ready_r        <= '0';
     elsif rising_edge(clk) then
       ready_r        <= '0';
       resume_pulse_r <= '0';
+
+      -- Stage 4: capture dpc/dcsr.cause/dcsr.prv on the halted rising edge.
+      halted_q <= halted_i;
+      if halted_i = '1' and halted_q = '0' then
+        dpc_r      <= pc_i;
+        dcsr_prv_r <= prv_i;
+        if ebreak_i = '1' then
+          dcsr_cause_r <= "001";  -- 1 = ebreak
+        elsif haltreq_r = '1' then
+          dcsr_cause_r <= "011";  -- 3 = haltreq
+        elsif step_pending_r = '1' then
+          dcsr_cause_r <= "100";  -- 4 = step
+        else
+          dcsr_cause_r <= "011";
+        end if;
+        step_pending_r <= '0';
+      end if;
 
       -- Abstract command completion: hart acknowledged the GPR access.
       if abusy_r = '1' and gpr_ack_i = '1' then
@@ -195,6 +262,14 @@ begin
               abusy_r     <= '0';
               gpr_re_r    <= '0';
               gpr_we_r    <= '0';
+              dpc_r          <= (others => '0');
+              dcsr_ebreakm_r <= '0';
+              dcsr_ebreaks_r <= '0';
+              dcsr_ebreaku_r <= '0';
+              dcsr_step_r    <= '0';
+              dcsr_cause_r   <= "000";
+              dcsr_prv_r     <= "11";
+              step_pending_r <= '0';
             else
               dmactive_r <= '1';
               if dmactive_r = '1' then
@@ -202,6 +277,9 @@ begin
                 haltreq_r  <= dmi_wdata(31);
                 if dmi_wdata(30) = '1' then
                   resume_pulse_r <= '1';
+                  if dcsr_step_r = '1' then
+                    step_pending_r <= '1';  -- arm single-step re-halt cause
+                  end if;
                 end if;
                 if dmi_wdata(1) = '1' and ndmreset_r = '0' then
                   havereset_r <= '1';  -- ndmreset 0->1: hart has been reset
@@ -246,32 +324,74 @@ begin
                 null;  -- sticky: command ignored until cmderr cleared (W1C)
               else
                 -- Decode access-register command.
+                is_gpr_v  := dmi_wdata(15 downto 5) = "00010000000"; -- 0x1000..0x101F
+                is_dcsr_v := dmi_wdata(15 downto 0) = x"07B0";       -- dcsr
+                is_dpc_v  := dmi_wdata(15 downto 0) = x"07B1";       -- dpc
                 cmd_supported_v :=
                   dmi_wdata(31 downto 24) = x"00"                -- cmdtype 0
                   and (dmi_wdata(22 downto 20) = "010"           -- aarsize 2
                        or dmi_wdata(22 downto 20) = "011")       -- aarsize 3
                   and (dmi_wdata(17) = '0'                       -- no transfer
-                       or dmi_wdata(15 downto 5) = "00010000000"); -- 0x1000..0x101F
+                       or is_gpr_v
+                       or (is_dcsr_v
+                           and dmi_wdata(22 downto 20) = "010")  -- dcsr 32-bit
+                       or is_dpc_v);
                 if not cmd_supported_v then
                   cmderr_r <= "010";  -- 2 = not supported
                 elsif halted_i = '0' then
                   cmderr_r <= "100";  -- 4 = hart not halted
                 elsif dmi_wdata(17) = '1' then
-                  -- Launch GPR access (transfer=0 is a successful no-op).
-                  abusy_r       <= '1';
-                  exec_size64_r <= dmi_wdata(20);  -- '0'=32-bit, '1'=64-bit
-                  gpr_regno_r   <= dmi_wdata(4 downto 0);
-                  if dmi_wdata(16) = '1' then
-                    exec_write_r <= '1';
-                    gpr_we_r     <= '1';
-                    if dmi_wdata(20) = '1' then
-                      gpr_wdata_r <= data1_r & data0_r;
+                  if is_gpr_v then
+                    -- Launch GPR access (transfer=0 is a successful no-op).
+                    abusy_r       <= '1';
+                    exec_size64_r <= dmi_wdata(20);  -- '0'=32-bit, '1'=64-bit
+                    gpr_regno_r   <= dmi_wdata(4 downto 0);
+                    if dmi_wdata(16) = '1' then
+                      exec_write_r <= '1';
+                      gpr_we_r     <= '1';
+                      if dmi_wdata(20) = '1' then
+                        gpr_wdata_r <= data1_r & data0_r;
+                      else
+                        gpr_wdata_r <= x"00000000" & data0_r;  -- zero-extend
+                      end if;
                     else
-                      gpr_wdata_r <= x"00000000" & data0_r;  -- zero-extend
+                      exec_write_r <= '0';
+                      gpr_re_r     <= '1';
                     end if;
-                  else
-                    exec_write_r <= '0';
-                    gpr_re_r     <= '1';
+                  elsif is_dcsr_v then
+                    -- DM-resident CSR: completes immediately, no busy.
+                    if dmi_wdata(16) = '1' then
+                      dcsr_ebreakm_r <= data0_r(15);
+                      dcsr_ebreaks_r <= data0_r(13);
+                      dcsr_ebreaku_r <= data0_r(12);
+                      dcsr_step_r    <= data0_r(2);
+                      if data0_r(1 downto 0) /= "10" then
+                        dcsr_prv_r <= data0_r(1 downto 0);  -- WARL 0/1/3
+                      end if;
+                    else
+                      dcsr_v := (others => '0');
+                      dcsr_v(31 downto 28) := "0100";  -- xdebugver = 4
+                      dcsr_v(15)           := dcsr_ebreakm_r;
+                      dcsr_v(13)           := dcsr_ebreaks_r;
+                      dcsr_v(12)           := dcsr_ebreaku_r;
+                      dcsr_v(8 downto 6)   := dcsr_cause_r;
+                      dcsr_v(2)            := dcsr_step_r;
+                      dcsr_v(1 downto 0)   := dcsr_prv_r;
+                      data0_r <= dcsr_v;
+                    end if;
+                  else  -- is_dpc_v
+                    if dmi_wdata(16) = '1' then
+                      if dmi_wdata(20) = '1' then
+                        dpc_r <= data1_r & data0_r;
+                      else
+                        dpc_r <= x"00000000" & data0_r;  -- zero-extend
+                      end if;
+                    else
+                      data0_r <= dpc_r(31 downto 0);
+                      if dmi_wdata(20) = '1' then
+                        data1_r <= dpc_r(63 downto 32);
+                      end if;
+                    end if;
                   end if;
                 end if;
               end if;
@@ -329,5 +449,8 @@ begin
   gpr_we_o    <= gpr_we_r;
   gpr_regno_o <= gpr_regno_r;
   gpr_wdata_o <= gpr_wdata_r;
+
+  dpc_o  <= dpc_r;
+  step_o <= dcsr_step_r;
 
 end architecture rtl;
