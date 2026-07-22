@@ -56,6 +56,7 @@ val MPP_M_MODE: i64          = 0x00001800   # 3 << 11
 val MIP_MSIP_MASK: i64 = 0x00000008   # bit 3 — Machine Software Interrupt
 val MIP_MTIP_MASK: i64 = 0x00000080   # bit 7 — Machine Timer Interrupt
 val MIP_MEIP_MASK: i64 = 0x00000800   # bit 11 — Machine External Interrupt
+val MIP_SEIP_MASK: i64 = 0x00000200   # bit 9 — Supervisor External Interrupt (PLIC ctx1)
 
 # ============================================================================
 # MISA for RV64IMAC: MXL=2 (bits [63:62]) + I(8) + M(12) + A(0) + C(2)
@@ -201,8 +202,9 @@ fn csr64_write(csr: CsrFile64, addr: u32, value: i64) -> CsrFile64:
     else if addr == CSR_ADDR_MTVAL:
         out.mtval = value
     else if addr == CSR_ADDR_MIP:
-        # Only MSIP is software-writable in mip
-        out.mip = (csr.mip & (MIP_MTIP_MASK | MIP_MEIP_MASK)) | (value & MIP_MSIP_MASK)
+        # Only MSIP is software-writable in mip; hardware-driven levels
+        # (MTIP, MEIP, SEIP) are preserved
+        out.mip = (csr.mip & (MIP_MTIP_MASK | MIP_MEIP_MASK | MIP_SEIP_MASK)) | (value & MIP_MSIP_MASK)
     else if addr == CSR_ADDR_MEDELEG:
         out.medeleg = value
     else if addr == CSR_ADDR_MIDELEG:
@@ -265,6 +267,14 @@ fn csr64_update_mip(csr: CsrFile64, mtip: bool, msip: bool, meip: bool) -> CsrFi
     out.mip = new_mip
     out
 
+fn csr64_update_mip_s(csr: CsrFile64, mtip: bool, msip: bool, meip: bool, seip: bool) -> CsrFile64:
+    """Update the interrupt-pending register including the S-mode external
+    interrupt level (mip.SEIP, bit 9 — driven from PLIC context 1)."""
+    var out = csr64_update_mip(csr, mtip, msip, meip)
+    if seip:
+        out.mip = out.mip | MIP_SEIP_MASK
+    out
+
 # ============================================================================
 # Spec-facing alias
 # ============================================================================
@@ -274,6 +284,7 @@ fn csr64_init() -> CsrFile64:
 
 export CsrFile64, CsrRwResult64
 export csr64_create, csr64_read, csr64_write, csr64_rw, csr64_tick, csr64_update_mip
+export csr64_update_mip_s
 export misa_rv64imac, csr64_init
 export CSR_ADDR_MSTATUS, CSR_ADDR_MISA, CSR_ADDR_MIE, CSR_ADDR_MTVEC
 export CSR_ADDR_MSCRATCH, CSR_ADDR_MEPC, CSR_ADDR_MCAUSE, CSR_ADDR_MTVAL
@@ -281,6 +292,6 @@ export CSR_ADDR_MIP, CSR_ADDR_MCYCLE, CSR_ADDR_MINSTRET, CSR_ADDR_MHARTID
 export CSR_ADDR_MEDELEG, CSR_ADDR_MIDELEG
 export MSTATUS_MIE_MASK, MSTATUS_MPIE_MASK, MSTATUS_MPP_MASK
 export MSTATUS_MIE_BIT, MSTATUS_MPIE_BIT, MSTATUS_MPP_LO_BIT, MPP_M_MODE
-export MIP_MSIP_MASK, MIP_MTIP_MASK, MIP_MEIP_MASK
+export MIP_MSIP_MASK, MIP_MTIP_MASK, MIP_MEIP_MASK, MIP_SEIP_MASK
 export FUNCT3_CSRRW, FUNCT3_CSRRS, FUNCT3_CSRRC
 export FUNCT3_CSRRWI, FUNCT3_CSRRSI, FUNCT3_CSRRCI

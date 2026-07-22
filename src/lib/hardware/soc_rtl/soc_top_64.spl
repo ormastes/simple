@@ -51,12 +51,13 @@
 
 # -- Core
 use std.hardware.rv64gc_rtl.core.{CoreState64, core64_init, core64_combinational, core64_update}
-use std.hardware.rv64gc_rtl.csr.csr64_update_mip
-use std.hardware.rv64gc_rtl.trap.{trap64_check_interrupt, trap64_enter_m_only}
+use std.hardware.rv64gc_rtl.csr.{csr64_update_mip_s}
+use std.hardware.rv64gc_rtl.csr_s.{SIP_SSIP_MASK_64, SIP_STIP_MASK_64, SIP_SEIP_MASK_64}
+use std.hardware.rv64gc_rtl.trap.{trap64_check_interrupt_deleg, trap64_enter, trap64_state_init}
 
 # -- Peripherals
 use std.hardware.soc_rtl.clint.{ClintState, clint_create, clint_tick, clint_mmio_read, clint_mmio_write}
-use std.hardware.soc_rtl.plic.{PlicState, plic_create, plic_mmio_read, plic_mmio_read_update, plic_mmio_write, plic_set_pending, plic_check_interrupt}
+use std.hardware.soc_rtl.plic.{PlicState, plic_create, plic_mmio_read, plic_mmio_read_update, plic_mmio_write, plic_set_pending, plic_check_interrupt, plic_check_interrupt_s}
 use std.hardware.soc_rtl.ram64.{Ram64State, ram64_init, ram64_read, ram64_write}
 use std.hardware.soc_rtl.bootrom.bootrom_read64
 
@@ -229,8 +230,9 @@ fn soc64_mem_read_update(soc: SocTop64State, addr: i64) -> SocTop64State:
     queue head. All other addresses are no-ops."""
     var out = soc
     if soc64_in_plic(addr):
-        if addr - WB64_PLIC_BASE == SOC64_PLIC_OFF_CLAIM:
-            out.plic = plic_mmio_read_update(out.plic, (addr - WB64_PLIC_BASE) as u32)
+        # plic_mmio_read_update only mutates on the ctx0/ctx1 claim
+        # offsets; all other PLIC reads are no-ops inside it.
+        out.plic = plic_mmio_read_update(out.plic, (addr - WB64_PLIC_BASE) as u32)
     else if soc64_in_uart(addr):
         if addr - WB64_UART_BASE == SOC64_UART_OFF_RBR and out.uart_rx.len() > 0:
             out.uart_rx = soc64_rx_pop(out.uart_rx)
@@ -307,10 +309,21 @@ fn soc_top_64_tick(soc: SocTop64State) -> SocTop64State:
 
     # Step 1c: Deliver interrupt levels into the core's mip CSR.
     # MTIP tracks mtime >= mtimecmp, MSIP tracks the msip MMIO register,
-    # MEIP tracks the PLIC gateway: any enabled pending source whose
-    # priority exceeds the context-0 threshold.
+    # MEIP tracks PLIC context 0 (M-mode), SEIP (mip bit 9) tracks PLIC
+    # context 1 (S-mode) — each context evaluates the shared pending
+    # bitmap against its own enable/threshold registers.
     val pchk = plic_check_interrupt(out.plic)
-    out.core.csr_m = csr64_update_mip(out.core.csr_m, ct.mtip, ct.msip_out, pchk.meip)
+    val pchk_s = plic_check_interrupt_s(out.plic)
+    out.core.csr_m = csr64_update_mip_s(out.core.csr_m, ct.mtip, ct.msip_out, pchk.meip, pchk_s.meip)
+
+    # Step 1d: Mirror the S-mode view into sip: SSIP is software-owned
+    # (kept from the CSR file), STIP/SEIP mirror the delegated mip levels
+    # (masked by mideleg — sip only shows interrupts delegated to S).
+    val sip_soft = out.core.csr_s.sip & SIP_SSIP_MASK_64
+    val sip_lvl = out.core.csr_m.mip & (SIP_STIP_MASK_64 | SIP_SEIP_MASK_64) & out.core.csr_m.mideleg
+    var csr_s_mir = out.core.csr_s
+    csr_s_mir.sip = sip_soft | sip_lvl
+    out.core.csr_s = csr_s_mir
 
     # Halted core: peripherals keep ticking, datapath is frozen
     if out.core.halt:
@@ -340,17 +353,21 @@ fn soc_top_64_tick(soc: SocTop64State) -> SocTop64State:
     # Step 7: Clocked core update — PC, regfile, CSR, traps, semihosting
     out.core = core64_update(out.core, insn, comb, comb.a0_val, comb.a1_val)
 
-    # Step 8: Interrupt take at the instruction boundary (minimal M-mode).
-    # When mstatus.MIE and (mie & mip) select a pending machine interrupt,
-    # vector to mtvec: mepc <- next PC, mcause <- interrupt cause, MIE
-    # saved to MPIE and cleared (trap64_enter_m_only). No delegation /
-    # S-mode interrupt routing yet. Suppressed mid-semihosting-sequence
-    # and when the core halted this cycle.
+    # Step 8: Interrupt take at the instruction boundary, with mideleg
+    # delegation. M-destined interrupts (mideleg bit clear) vector to
+    # mtvec in M-mode (mepc/mcause, MIE -> MPIE, MPP records the
+    # interrupted privilege). S-destined interrupts (mideleg bit set,
+    # taken when priv <= S per the sstatus.SIE gate) vector to stvec in
+    # S-mode (sepc/scause, SIE -> SPIE, SPP records the interrupted
+    # privilege). Suppressed mid-semihosting-sequence and when the core
+    # halted this cycle.
     if out.core.halt == false and out.core.semi_phase == 0:
-        val ic = trap64_check_interrupt(out.core.csr_m)
+        val ic = trap64_check_interrupt_deleg(out.core.priv_mode, out.core.csr_m, out.core.csr_s)
         if ic.pending:
-            val ie = trap64_enter_m_only(out.core.csr_m, out.core.pc, ic.cause, 0)
+            val ie = trap64_enter(trap64_state_init(), ic.cause, 0,
+                out.core.pc, out.core.priv_mode, out.core.csr_m, out.core.csr_s)
             out.core.csr_m = ie.csr
+            out.core.csr_s = ie.csr_s
             out.core.pc = ie.trap_pc
             out.core.priv_mode = ie.target_mode
 

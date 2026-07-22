@@ -17,8 +17,9 @@ use std.hardware.rv64gc_rtl.csr.{MSTATUS_MIE_MASK, MSTATUS_MPIE_MASK, MSTATUS_MP
 use std.hardware.rv64gc_rtl.csr.{MSTATUS_MIE_BIT, MSTATUS_MPIE_BIT, MSTATUS_MPP_LO_BIT}
 use std.hardware.rv64gc_rtl.csr.{MPP_M_MODE}
 use std.hardware.rv64gc_rtl.csr.{MIP_MSIP_MASK, MIP_MTIP_MASK, MIP_MEIP_MASK}
-use std.hardware.rv64gc_rtl.csr_s.{CsrSMode64}
-use std.hardware.rv64gc_rtl.csr_s.{SSTATUS_SPP_MASK_64, SSTATUS_SPP_BIT_64}
+use std.hardware.rv64gc_rtl.csr_s.{CsrSMode64, csr_s64_create}
+use std.hardware.rv64gc_rtl.csr_s.{SSTATUS_SPP_MASK_64, SSTATUS_SPP_BIT_64, SSTATUS_SIE_MASK_64}
+use std.hardware.rv64gc_rtl.csr_s.{SIP_SSIP_MASK_64, SIP_STIP_MASK_64, SIP_SEIP_MASK_64}
 use std.hardware.rv64gc_rtl.csr_s.{csr_s64_is_exception_delegated, csr_s64_is_interrupt_delegated}
 
 # ============================================================================
@@ -60,6 +61,21 @@ fn cause_mei() -> i64:
     val int_bit: i64 = 1 << 63
     int_bit | 11
 
+fn cause_ssi() -> i64:
+    """Supervisor Software Interrupt cause (bit63 | 1)."""
+    val int_bit: i64 = 1 << 63
+    int_bit | 1
+
+fn cause_sti() -> i64:
+    """Supervisor Timer Interrupt cause (bit63 | 5)."""
+    val int_bit: i64 = 1 << 63
+    int_bit | 5
+
+fn cause_sei() -> i64:
+    """Supervisor External Interrupt cause (bit63 | 9)."""
+    val int_bit: i64 = 1 << 63
+    int_bit | 9
+
 # ============================================================================
 # Trap State
 # ============================================================================
@@ -74,8 +90,10 @@ struct TrapState64:
 
 struct TrapEnterResult64:
     """Result of entering a trap."""
-    csr: CsrFile64    # Updated CSR file (mepc, mcause, mtval, mstatus saved)
-    trap_pc: i64       # Target PC (from mtvec, direct mode)
+    csr: CsrFile64     # Updated M CSR file (mepc, mcause, mtval, mstatus saved)
+    csr_s: CsrSMode64  # Updated S CSR file (sepc/scause/stval/sstatus on
+                       # delegated entry; pass-through on an M-mode entry)
+    trap_pc: i64       # Target PC (from mtvec/stvec, direct mode)
     target_mode: i64   # Target privilege mode: M=3, S=1
 
 # ============================================================================
@@ -121,6 +139,52 @@ fn trap64_check_interrupt(csr: CsrFile64) -> InterruptCheckResult64:
     InterruptCheckResult64(pending: false, cause: 0)
 
 # ============================================================================
+# Delegation-aware Interrupt Check (M-destined first, then S-destined)
+# ============================================================================
+
+fn trap64_check_interrupt_deleg(priv_mode: i64, csr_m: CsrFile64, csr_s: CsrSMode64) -> InterruptCheckResult64:
+    """Check for a pending interrupt with mideleg-based S-mode routing.
+
+    M-destined interrupts (mideleg bit clear): gated by mie & mip; taken
+    whenever priv < M, or in M when mstatus.MIE is set. Priority
+    MEI > MSI > MTI. M-destined interrupts always outrank S-destined ones.
+
+    S-destined interrupts (mideleg bit set): gated by sie & sip & mideleg
+    (sip is the per-tick mirror of the delegated mip level bits plus the
+    software SSIP bit); taken whenever priv == U, or in S when sstatus.SIE
+    is set; never taken while in M. Priority SEI > SSI > STI."""
+
+    val mideleg = csr_m.mideleg
+
+    # ── M-destined ──
+    val pending_m = csr_m.mie & csr_m.mip & (mideleg ^ -1)
+    var m_gate = priv_mode < 3
+    if priv_mode == 3:
+        m_gate = (csr_m.mstatus & MSTATUS_MIE_MASK) != 0
+    if m_gate:
+        if (pending_m & MIP_MEIP_MASK) != 0:
+            return InterruptCheckResult64(pending: true, cause: cause_mei())
+        if (pending_m & MIP_MSIP_MASK) != 0:
+            return InterruptCheckResult64(pending: true, cause: cause_msi())
+        if (pending_m & MIP_MTIP_MASK) != 0:
+            return InterruptCheckResult64(pending: true, cause: cause_mti())
+
+    # ── S-destined ──
+    val pending_s = csr_s.sie & csr_s.sip & mideleg
+    var s_gate = priv_mode == 0
+    if priv_mode == 1:
+        s_gate = (csr_s.sstatus & SSTATUS_SIE_MASK_64) != 0
+    if s_gate:
+        if (pending_s & SIP_SEIP_MASK_64) != 0:
+            return InterruptCheckResult64(pending: true, cause: cause_sei())
+        if (pending_s & SIP_SSIP_MASK_64) != 0:
+            return InterruptCheckResult64(pending: true, cause: cause_ssi())
+        if (pending_s & SIP_STIP_MASK_64) != 0:
+            return InterruptCheckResult64(pending: true, cause: cause_sti())
+
+    InterruptCheckResult64(pending: false, cause: 0)
+
+# ============================================================================
 # Trap Entry
 # ============================================================================
 
@@ -152,7 +216,10 @@ fn trap64_enter_m_only(csr: CsrFile64, pc: i64, cause: i64, tval: i64) -> TrapEn
     # Compute trap handler PC from mtvec (direct mode)
     val trap_pc = csr.mtvec & 0xFFFFFFFFFFFFFFFC
 
-    TrapEnterResult64(csr: new_csr, trap_pc: trap_pc, target_mode: 3)
+    # csr_s is a zeroed placeholder here — the M-only entry does not touch
+    # S state. Delegation-aware callers must use trap64_enter, which passes
+    # the live S CSR file through.
+    TrapEnterResult64(csr: new_csr, csr_s: csr_s64_create(), trap_pc: trap_pc, target_mode: 3)
 
 # ============================================================================
 # Trap Exit (mret)
@@ -203,14 +270,17 @@ fn trap64_enter(ts: TrapState64, cause: i64, tval: i64, pc: i64, priv_mode: i64,
     val int_bit: i64 = 1 << 63
     val is_interrupt = (cause & int_bit) != 0
 
+    # Delegation only applies to traps taken from priv <= S: a trap that
+    # occurs while already in M-mode is never delegated (RISC-V priv spec).
     var delegated: bool = false
-    if is_interrupt:
-        val irq_num = cause & (int_bit ^ -1)
-        val deleg_bit = (csr_m.mideleg >> irq_num) & 1
-        delegated = deleg_bit == 1
-    else:
-        val deleg_bit = (csr_m.medeleg >> cause) & 1
-        delegated = deleg_bit == 1
+    if priv_mode <= 1:
+        if is_interrupt:
+            val irq_num = cause & (int_bit ^ -1)
+            val deleg_bit = (csr_m.mideleg >> irq_num) & 1
+            delegated = deleg_bit == 1
+        else:
+            val deleg_bit = (csr_m.medeleg >> cause) & 1
+            delegated = deleg_bit == 1
 
     if delegated:
         # Route to S-mode: write sepc, scause, stval
@@ -232,10 +302,17 @@ fn trap64_enter(ts: TrapState64, cause: i64, tval: i64, pc: i64, priv_mode: i64,
         new_csr_s.sstatus = new_sstatus
 
         val trap_pc = csr_s.stvec & 0xFFFFFFFFFFFFFFFC
-        TrapEnterResult64(csr: csr_m, trap_pc: trap_pc, target_mode: 1)
+        TrapEnterResult64(csr: csr_m, csr_s: new_csr_s, trap_pc: trap_pc, target_mode: 1)
     else:
-        # Route to M-mode via existing logic
-        trap64_enter_m_only(csr_m, pc, cause, tval)
+        # Route to M-mode via existing logic, then record the interrupted
+        # privilege in mstatus.MPP (m_only hardwires MPP=M) so mret returns
+        # to the mode the trap came from. S CSRs pass through unchanged.
+        val m_only = trap64_enter_m_only(csr_m, pc, cause, tval)
+        var new_csr_m = m_only.csr
+        var fixed_mstatus = new_csr_m.mstatus & (MSTATUS_MPP_MASK ^ -1)
+        fixed_mstatus = fixed_mstatus | (priv_mode << MSTATUS_MPP_LO_BIT)
+        new_csr_m.mstatus = fixed_mstatus
+        TrapEnterResult64(csr: new_csr_m, csr_s: csr_s, trap_pc: m_only.trap_pc, target_mode: 3)
 
 # ============================================================================
 # Trap Exit Aliases
@@ -275,9 +352,10 @@ fn trap64_sret(csr_s: CsrSMode64) -> TrapExitResult64:
     TrapExitResult64(csr: dummy_csr_m, return_pc: csr_s.sepc, target_mode: spp)
 
 export TrapState64, TrapEnterResult64, TrapExitResult64, InterruptCheckResult64
-export trap64_check_interrupt, trap64_enter, trap64_enter_m_only, trap64_exit_mret
+export trap64_check_interrupt, trap64_check_interrupt_deleg
+export trap64_enter, trap64_enter_m_only, trap64_exit_mret
 export trap64_state_init, trap64_mret, trap64_sret, trap64_sret_csr
 export TRAP_NORMAL, TRAP_ENTER, TRAP_EXIT
 export CAUSE_MISALIGNED_FETCH, CAUSE_ILLEGAL_INSN, CAUSE_BREAKPOINT
 export CAUSE_LOAD_MISALIGNED, CAUSE_STORE_MISALIGNED, CAUSE_ECALL_M
-export cause_msi, cause_mti, cause_mei
+export cause_msi, cause_mti, cause_mei, cause_ssi, cause_sti, cause_sei

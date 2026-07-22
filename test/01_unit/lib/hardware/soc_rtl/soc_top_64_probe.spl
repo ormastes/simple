@@ -388,6 +388,197 @@ fn main() -> i64:
     fails = fails + check("casee mepc == wfi+4 (0x80000034) — resume after wfi", soce.core.rf.regs[13] == 0x8000_0034)
     fails = fails + check("casee pc parks in handler at 0x80000110", soce.core.pc == 0x8000_0110)
 
+    # ── Case f: delegated UART external interrupt lands in S-mode ──
+    # M setup: stvec -> S handler, mideleg bit 9 (SEI), sie.SEIE,
+    # sstatus.SIE, PLIC priority[10]=1 + ctx1 enable src10 + ctx1
+    # threshold 0, UART IER.ERBFI, then mepc=S spin + mstatus.MPP=S + mret.
+    # Host pushes 'A' while the guest spins in S-mode: SEIP (mip bit 9)
+    # must pend from PLIC ctx1, the take must vector to stvec in S-mode
+    # (scause=int|9, sepc=spin pc, priv==S in handler), the handler claims
+    # via ctx1 claim (expect 10), drains RBR (expect 65), completes, and
+    # sret resumes the spin with sstatus.SIE restored.
+    var socf = soc_top_64_init(0x1000)
+    var ramf = socf.ram
+    ramf = ram64_write(ramf, 0x000, 4, 0x800002B7)   # lui  x5, 0x80000
+    ramf = ram64_write(ramf, 0x004, 4, 0x02029293)   # slli x5, x5, 32
+    ramf = ram64_write(ramf, 0x008, 4, 0x0202D293)   # srli x5, x5, 32  (x5 = 0x8000_0000)
+    ramf = ram64_write(ramf, 0x00C, 4, 0x10028313)   # addi x6, x5, 0x100 (S handler)
+    ramf = ram64_write(ramf, 0x010, 4, 0x10531073)   # csrrw x0, stvec, x6
+    ramf = ram64_write(ramf, 0x014, 4, 0x20000393)   # addi x7, x0, 0x200 (bit 9)
+    ramf = ram64_write(ramf, 0x018, 4, 0x30339073)   # csrrw x0, mideleg, x7
+    ramf = ram64_write(ramf, 0x01C, 4, 0x1043A073)   # csrrs x0, sie, x7  (SEIE)
+    ramf = ram64_write(ramf, 0x020, 4, 0x00200393)   # addi x7, x0, 2
+    ramf = ram64_write(ramf, 0x024, 4, 0x1003A073)   # csrrs x0, sstatus, x7 (SIE)
+    ramf = ram64_write(ramf, 0x028, 4, 0x0C000437)   # lui  x8, 0xC000  (PLIC base)
+    ramf = ram64_write(ramf, 0x02C, 4, 0x00100393)   # addi x7, x0, 1
+    ramf = ram64_write(ramf, 0x030, 4, 0x02742423)   # sw   x7, 0x28(x8)  priority[10]=1
+    ramf = ram64_write(ramf, 0x034, 4, 0x000024B7)   # lui  x9, 0x2
+    ramf = ram64_write(ramf, 0x038, 4, 0x08048493)   # addi x9, x9, 0x80  (0x2080 enable ctx1)
+    ramf = ram64_write(ramf, 0x03C, 4, 0x009404B3)   # add  x9, x8, x9
+    ramf = ram64_write(ramf, 0x040, 4, 0x00100393)   # addi x7, x0, 1
+    ramf = ram64_write(ramf, 0x044, 4, 0x00A39393)   # slli x7, x7, 10  (1<<10)
+    ramf = ram64_write(ramf, 0x048, 4, 0x0074A023)   # sw   x7, 0(x9)   enable ctx1 src10
+    ramf = ram64_write(ramf, 0x04C, 4, 0x002014B7)   # lui  x9, 0x201   (0x201000 threshold ctx1)
+    ramf = ram64_write(ramf, 0x050, 4, 0x009404B3)   # add  x9, x8, x9
+    ramf = ram64_write(ramf, 0x054, 4, 0x0004A023)   # sw   x0, 0(x9)   threshold ctx1 = 0
+    ramf = ram64_write(ramf, 0x058, 4, 0x10000E37)   # lui  x28, 0x10000 (UART base)
+    ramf = ram64_write(ramf, 0x05C, 4, 0x00100393)   # addi x7, x0, 1
+    ramf = ram64_write(ramf, 0x060, 4, 0x007E00A3)   # sb   x7, 1(x28)  IER = 1 (ERBFI)
+    ramf = ram64_write(ramf, 0x064, 4, 0x08028313)   # addi x6, x5, 0x80 (S spin)
+    ramf = ram64_write(ramf, 0x068, 4, 0x34131073)   # csrrw x0, mepc, x6
+    ramf = ram64_write(ramf, 0x06C, 4, 0x00100393)   # addi x7, x0, 1
+    ramf = ram64_write(ramf, 0x070, 4, 0x00B39393)   # slli x7, x7, 11  (MPP = S)
+    ramf = ram64_write(ramf, 0x074, 4, 0x3003A073)   # csrrs x0, mstatus, x7
+    ramf = ram64_write(ramf, 0x078, 4, 0x30200073)   # mret -> S-mode spin
+    ramf = ram64_write(ramf, 0x080, 4, 0x0000006F)   # jal  x0, 0  (S spin)
+    # S handler at 0x8000_0100
+    ramf = ram64_write(ramf, 0x100, 4, 0x14202673)   # csrrs x12, scause, x0
+    ramf = ram64_write(ramf, 0x104, 4, 0x141026F3)   # csrrs x13, sepc, x0
+    ramf = ram64_write(ramf, 0x108, 4, 0x0C201737)   # lui  x14, 0xC201 (ctx1 claim block)
+    ramf = ram64_write(ramf, 0x10C, 4, 0x00472783)   # lw   x15, 4(x14)  claim ctx1 -> x15
+    ramf = ram64_write(ramf, 0x110, 4, 0x10000837)   # lui  x16, 0x10000
+    ramf = ram64_write(ramf, 0x114, 4, 0x00084883)   # lbu  x17, 0(x16)  RBR -> x17 (drain)
+    ramf = ram64_write(ramf, 0x118, 4, 0x00F72223)   # sw   x15, 4(x14)  complete ctx1
+    ramf = ram64_write(ramf, 0x11C, 4, 0x32100593)   # addi x11, x0, 0x321 (marker)
+    ramf = ram64_write(ramf, 0x120, 4, 0x40B2A023)   # sw   x11, 0x400(x5)
+    ramf = ram64_write(ramf, 0x124, 4, 0x10200073)   # sret -> resume S spin
+    socf.ram = ramf
+    socf.core.pc = 0x8000_0000
+    var pf = 0
+    while pf < 45:
+        socf = soc_top_64_tick(socf)
+        pf = pf + 1
+    val priv_before_irq = socf.core.priv_mode
+    socf = soc64_uart_push_rx(socf, 65)
+    var handler_priv: i64 = -1
+    pf = 0
+    while pf < 40:
+        socf = soc_top_64_tick(socf)
+        if socf.core.pc >= 0x8000_0100 and socf.core.pc < 0x8000_0128 and handler_priv == -1:
+            handler_priv = socf.core.priv_mode
+        pf = pf + 1
+    val fmarker = ram64_read(socf.ram, 0x400, 4)
+    val f_cause: i64 = (1 << 63) | 9
+    print("casef priv_pre={priv_before_irq} hpriv={handler_priv} scause(x12)={socf.core.rf.regs[12]} sepc(x13)={socf.core.rf.regs[13]} claim={socf.core.rf.regs[15]} rbr={socf.core.rf.regs[17]} marker={fmarker} pc={socf.core.pc} priv={socf.core.priv_mode} sstatus={socf.core.csr_s.sstatus} mip={socf.core.csr_m.mip}")
+    fails = fails + check("casef mret entered S-mode (priv==1 pre-irq)", priv_before_irq == 1)
+    fails = fails + check("casef handler ran in S-mode (priv==1)", handler_priv == 1)
+    fails = fails + check("casef scause == supervisor external interrupt (bit63|9)", socf.core.rf.regs[12] == f_cause)
+    fails = fails + check("casef sepc == S spin pc 0x80000080", socf.core.rf.regs[13] == 0x8000_0080)
+    fails = fails + check("casef ctx1 claim returned source 10 (UART)", socf.core.rf.regs[15] == 10)
+    fails = fails + check("casef RBR read == 65 ('A')", socf.core.rf.regs[17] == 65)
+    fails = fails + check("casef handler wrote marker 0x321", fmarker == 0x321)
+    fails = fails + check("casef sret resumed S spin at 0x80000080", socf.core.pc == 0x8000_0080)
+    fails = fails + check("casef priv back to S after sret", socf.core.priv_mode == 1)
+    fails = fails + check("casef sstatus.SIE restored by sret (bit 1)", (socf.core.csr_s.sstatus & 0x2) != 0)
+    fails = fails + check("casef SEIP deasserted after RX drain (mip bit 9 clear)", (socf.core.csr_m.mip & 0x200) == 0)
+
+    # ── Case g1: ecall-from-U delegated to S via medeleg bit 8 ──
+    var socg = soc_top_64_init(0x1000)
+    var ramg = socg.ram
+    ramg = ram64_write(ramg, 0x000, 4, 0x800002B7)   # lui  x5, 0x80000
+    ramg = ram64_write(ramg, 0x004, 4, 0x02029293)   # slli x5, x5, 32
+    ramg = ram64_write(ramg, 0x008, 4, 0x0202D293)   # srli x5, x5, 32
+    ramg = ram64_write(ramg, 0x00C, 4, 0x10028313)   # addi x6, x5, 0x100 (S handler)
+    ramg = ram64_write(ramg, 0x010, 4, 0x10531073)   # csrrw x0, stvec, x6
+    ramg = ram64_write(ramg, 0x014, 4, 0x10000393)   # addi x7, x0, 0x100 (bit 8)
+    ramg = ram64_write(ramg, 0x018, 4, 0x30239073)   # csrrw x0, medeleg, x7
+    ramg = ram64_write(ramg, 0x01C, 4, 0x08028313)   # addi x6, x5, 0x80  (U code)
+    ramg = ram64_write(ramg, 0x020, 4, 0x34131073)   # csrrw x0, mepc, x6
+    ramg = ram64_write(ramg, 0x024, 4, 0x30200073)   # mret (MPP=0 -> U-mode)
+    ramg = ram64_write(ramg, 0x080, 4, 0x00000073)   # ecall (from U)
+    ramg = ram64_write(ramg, 0x084, 4, 0x0000006F)   # jal x0, 0
+    # S handler at 0x8000_0100
+    ramg = ram64_write(ramg, 0x100, 4, 0x14202673)   # csrrs x12, scause, x0
+    ramg = ram64_write(ramg, 0x104, 4, 0x141026F3)   # csrrs x13, sepc, x0
+    ramg = ram64_write(ramg, 0x108, 4, 0x32100593)   # addi x11, x0, 0x321
+    ramg = ram64_write(ramg, 0x10C, 4, 0x40B2A023)   # sw x11, 0x400(x5)
+    ramg = ram64_write(ramg, 0x110, 4, 0x0000006F)   # jal x0, 0 (park)
+    socg.ram = ramg
+    socg.core.pc = 0x8000_0000
+    var pg = 0
+    while pg < 30:
+        socg = soc_top_64_tick(socg)
+        pg = pg + 1
+    val gmarker = ram64_read(socg.ram, 0x400, 4)
+    print("caseg1 scause(x12)={socg.core.rf.regs[12]} sepc(x13)={socg.core.rf.regs[13]} marker={gmarker} pc={socg.core.pc} priv={socg.core.priv_mode} sstatus={socg.core.csr_s.sstatus}")
+    fails = fails + check("caseg1 delegated ecall-from-U: scause == 8", socg.core.rf.regs[12] == 8)
+    fails = fails + check("caseg1 sepc == U ecall pc 0x80000080", socg.core.rf.regs[13] == 0x8000_0080)
+    fails = fails + check("caseg1 handler in S-mode (priv==1)", socg.core.priv_mode == 1)
+    fails = fails + check("caseg1 sstatus.SPP == U (bit 8 clear)", (socg.core.csr_s.sstatus & 0x100) == 0)
+    fails = fails + check("caseg1 marker written, parks at 0x80000110", gmarker == 0x321 and socg.core.pc == 0x8000_0110)
+
+    # ── Case g2: ecall-from-U NOT delegated -> M handler (mcause=8) ──
+    var socg2 = soc_top_64_init(0x1000)
+    var ramg2 = socg2.ram
+    ramg2 = ram64_write(ramg2, 0x000, 4, 0x800002B7)  # lui  x5, 0x80000
+    ramg2 = ram64_write(ramg2, 0x004, 4, 0x02029293)  # slli x5, x5, 32
+    ramg2 = ram64_write(ramg2, 0x008, 4, 0x0202D293)  # srli x5, x5, 32
+    ramg2 = ram64_write(ramg2, 0x00C, 4, 0x10028313)  # addi x6, x5, 0x100 (M handler)
+    ramg2 = ram64_write(ramg2, 0x010, 4, 0x30531073)  # csrrw x0, mtvec, x6
+    ramg2 = ram64_write(ramg2, 0x014, 4, 0x08028313)  # addi x6, x5, 0x80  (U code)
+    ramg2 = ram64_write(ramg2, 0x018, 4, 0x34131073)  # csrrw x0, mepc, x6
+    ramg2 = ram64_write(ramg2, 0x01C, 4, 0x30200073)  # mret (MPP=0 -> U-mode)
+    ramg2 = ram64_write(ramg2, 0x080, 4, 0x00000073)  # ecall (from U)
+    ramg2 = ram64_write(ramg2, 0x084, 4, 0x0000006F)  # jal x0, 0
+    # M handler at 0x8000_0100
+    ramg2 = ram64_write(ramg2, 0x100, 4, 0x34202673)  # csrrs x12, mcause, x0
+    ramg2 = ram64_write(ramg2, 0x104, 4, 0x341026F3)  # csrrs x13, mepc, x0
+    ramg2 = ram64_write(ramg2, 0x108, 4, 0x32100593)  # addi x11, x0, 0x321
+    ramg2 = ram64_write(ramg2, 0x10C, 4, 0x40B2A023)  # sw x11, 0x400(x5)
+    ramg2 = ram64_write(ramg2, 0x110, 4, 0x0000006F)  # jal x0, 0 (park)
+    socg2.ram = ramg2
+    socg2.core.pc = 0x8000_0000
+    var pg2 = 0
+    while pg2 < 30:
+        socg2 = soc_top_64_tick(socg2)
+        pg2 = pg2 + 1
+    val g2marker = ram64_read(socg2.ram, 0x400, 4)
+    print("caseg2 mcause(x12)={socg2.core.rf.regs[12]} mepc(x13)={socg2.core.rf.regs[13]} marker={g2marker} pc={socg2.core.pc} priv={socg2.core.priv_mode} mstatus={socg2.core.csr_m.mstatus}")
+    fails = fails + check("caseg2 undelegated ecall-from-U: mcause == 8", socg2.core.rf.regs[12] == 8)
+    fails = fails + check("caseg2 mepc == U ecall pc 0x80000080", socg2.core.rf.regs[13] == 0x8000_0080)
+    fails = fails + check("caseg2 handler in M-mode (priv==3)", socg2.core.priv_mode == 3)
+    fails = fails + check("caseg2 mstatus.MPP records U (bits 12:11 == 0)", (socg2.core.csr_m.mstatus & 0x1800) == 0)
+    fails = fails + check("caseg2 marker written, parks at 0x80000110", g2marker == 0x321 and socg2.core.pc == 0x8000_0110)
+
+    # ── Case h: satp store/readback + sret roundtrip from M into S ──
+    # satp is store-only this lane (no MMU activation on fetch/load path):
+    # write Sv39|ppn, read it back. Then sepc + sstatus.SPIE|SPP=S + sret:
+    # pc <- sepc, priv <- SPP (S), SIE <- SPIE, SPP -> U, SPIE -> 1.
+    var soch = soc_top_64_init(0x1000)
+    var ramh = soch.ram
+    ramh = ram64_write(ramh, 0x000, 4, 0x800002B7)   # lui  x5, 0x80000
+    ramh = ram64_write(ramh, 0x004, 4, 0x02029293)   # slli x5, x5, 32
+    ramh = ram64_write(ramh, 0x008, 4, 0x0202D293)   # srli x5, x5, 32
+    ramh = ram64_write(ramh, 0x00C, 4, 0x00100393)   # addi x7, x0, 1
+    ramh = ram64_write(ramh, 0x010, 4, 0x03F39393)   # slli x7, x7, 63  (MODE=8 -> bit 63)
+    ramh = ram64_write(ramh, 0x014, 4, 0x12300413)   # addi x8, x0, 0x123 (ppn)
+    ramh = ram64_write(ramh, 0x018, 4, 0x0083E3B3)   # or   x7, x7, x8
+    ramh = ram64_write(ramh, 0x01C, 4, 0x18039073)   # csrrw x0, satp, x7
+    ramh = ram64_write(ramh, 0x020, 4, 0x18002A73)   # csrrs x20, satp, x0 (readback)
+    ramh = ram64_write(ramh, 0x024, 4, 0x08028313)   # addi x6, x5, 0x80 (resume point)
+    ramh = ram64_write(ramh, 0x028, 4, 0x14131073)   # csrrw x0, sepc, x6
+    ramh = ram64_write(ramh, 0x02C, 4, 0x12000393)   # addi x7, x0, 0x120 (SPIE|SPP)
+    ramh = ram64_write(ramh, 0x030, 4, 0x10039073)   # csrrw x0, sstatus, x7
+    ramh = ram64_write(ramh, 0x034, 4, 0x10200073)   # sret -> S-mode at sepc
+    ramh = ram64_write(ramh, 0x080, 4, 0x05500493)   # addi x9, x0, 0x55
+    ramh = ram64_write(ramh, 0x084, 4, 0x0000006F)   # jal x0, 0 (park)
+    soch.ram = ramh
+    soch.core.pc = 0x8000_0000
+    var ph = 0
+    while ph < 20:
+        soch = soc_top_64_tick(soch)
+        ph = ph + 1
+    val h_satp: i64 = (1 << 63) | 0x123
+    print("caseh x20(satp)={soch.core.rf.regs[20]} satp={soch.core.csr_s.satp} pc={soch.core.pc} x9={soch.core.rf.regs[9]} priv={soch.core.priv_mode} sstatus={soch.core.csr_s.sstatus}")
+    fails = fails + check("caseh satp readback == Sv39|0x123", soch.core.rf.regs[20] == h_satp)
+    fails = fails + check("caseh satp CSR holds written value", soch.core.csr_s.satp == h_satp)
+    fails = fails + check("caseh sret jumped to sepc, executed S code (x9==0x55)", soch.core.rf.regs[9] == 0x55)
+    fails = fails + check("caseh parks at 0x80000084", soch.core.pc == 0x8000_0084)
+    fails = fails + check("caseh priv == S after sret (SPP was 1)", soch.core.priv_mode == 1)
+    fails = fails + check("caseh sret: SIE <- SPIE (bit 1 set)", (soch.core.csr_s.sstatus & 0x2) != 0)
+    fails = fails + check("caseh sret: SPP cleared to U (bit 8 clear)", (soch.core.csr_s.sstatus & 0x100) == 0)
+    fails = fails + check("caseh sret: SPIE set to 1 (bit 5)", (soch.core.csr_s.sstatus & 0x20) != 0)
+
     if fails == 0:
         print("SOC64 PROBE: ALL PASS")
         return 0
