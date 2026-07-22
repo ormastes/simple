@@ -49,35 +49,70 @@ Pin: OpenSBI tag `v1.4`, peeled commit
 bin/simple run test/01_unit/lib/hardware/soc_rtl/opensbi_boot_probe.spl
 ```
 
-Reads `payload_mmode_uart.bin`, writes it into `soc_top_64` DRAM at
-`0x8000_0000` via `ram64_write`, sets `pc`, ticks 300 cycles, then asserts
-`uart_tx == "OSBI-PAYLOAD-OK" + '+' + '\n'` and the spin-loop park PC.
-Prints `OPENSBI BOOT PROBE: ALL PASS` on success. Falls back to the embedded
-payload when the build artifact is absent (source is printed either way).
+Three cases (all must pass; final line `OPENSBI BOOT PROBE: ALL PASS`):
 
-## Gap to booting real OpenSBI on soc_top_64
+1. **M-mode stub** — writes `payload_mmode_uart.bin` into DRAM via
+   `ram64_write`, ticks 300 cycles, asserts `uart_tx ==
+   "OSBI-PAYLOAD-OK" + '+' + '\n'` and the spin-loop park PC. Falls back to the
+   embedded payload when the build artifact is absent. 100% 32-bit encodings.
+2. **Throughput wall removed** — allocates a real 128 MiB DRAM
+   (`ram64_init`, doubling fill) and bulk-loads the 2 MiB `fw_payload.bin`
+   (`ram64_load_bytes`, word-packing), asserting both complete in seconds and
+   the RAM round-trips the first word. Prints the measured numbers.
+3. **Real fw_payload boot** — loads `fw_payload.bin` at `0x8000_0000` and the
+   SoC DTB (`soc_virt.dtb`) at `a1=0x8800_0000`, sets the boot ABI
+   (`a0=0`, `a1=0x8800_0000`), and ticks. Asserts the exact first divergence
+   (see below).
 
-The sim boots the M-mode stub, not `fw_payload.bin`. Blockers, in order:
+## Real-boot result: measured (2026-07-22)
 
-1. **S-mode**: `soc_top_64` interrupt/trap routing is M-mode-only
-   (`trap64_enter_m_only`; no delegation, no `sret` path exercised). OpenSBI's
-   entire purpose is dropping to S-mode via `mret`.
-2. **PMP**: OpenSBI generic programs PMP CSRs at init; the runnable core path
-   has no PMP (`memory_access`/`pmp`/`pmp_csr` modules absent — see
-   `soc_top_64.spl` header).
-3. **DTB**: `PLATFORM=generic` parses a device tree passed in `a1`; the sim
-   provides none. A minimal baked DTB (RAM+CLINT+PLIC+UART) is needed.
-4. **ISA breadth**: OpenSBI uses CSRs/fences/compressed insns well beyond the
-   stub's RV64I subset; needs difftest-grade coverage before a 2 MB firmware
-   run is debuggable.
-5. **Sim throughput**: `fw_payload.bin` is 2,097,256 bytes; byte-wise
-   `ram64_write` loading plus millions of boot cycles in the interpreter is
-   impractical today — a bulk RAM-load helper and a faster tick path would be
-   prerequisites.
+Wall removed (interpreter, this host):
 
-When those close, the built `fw_payload.elf/.bin` from this script is the
-artifact to boot — no build-side changes should be needed.
+| Step | Before | After |
+|------|--------|-------|
+| `ram64_init` 128 MiB (16.78 M words) | O(N²) `data = data + [0]` append: minutes/impractical | doubling fill: **~3–4.5 s** |
+| Load 2 MiB `fw_payload` | byte-wise RMW loop (per-byte, no word-packing): **~39 s** (measured) | `ram64_load_bytes` word-packing (8 bytes/store): **~2.9–3.7 s** |
 
-Board note (board-runnable rule): this is a sim-RTL bring-up lane; the same
-`fw_payload.bin` is the artifact a physical RV64 board would flash once the
-core gaps above close. No board claim is made here.
+(`ram64_write` driven one byte at a time — as Case 1 does for the 88-byte stub —
+allocates a fresh state per call and is unsuitable for a 2 MiB blob; it was not
+benchmarked at 128 MiB scale. The ~39 s "before" is the byte-mode RMW loader,
+the honest baseline the word-packing fast path replaced.)
+| `soc_top_64_tick` rate | — | **~300 (shallow) / ~675–800 (deep) ticks/s** |
+
+At ~700 ticks/s a UART banner (OpenSBI needs ~10⁵–10⁶ insns for BSS/FDT/console
+init) is minutes-to-hours away — but the boot **diverges long before that**, at
+instruction ~5.
+
+**First divergence — no RV64C (compressed) support.** The core runs the 32-bit
+`_fw_start` prologue correctly (`add s0,a0` … `jal fw_boot_hart`), then at
+**`pc=0x8000_0548`** meets the first compressed instruction **`0x557d`
+(`c.li a0,-1`)**. `soc_top_64`'s datapath has **no C-extension decode** and only
+a `pc+4` path (`rv64gc_rtl/core.spl` `pc_plus4`; `decode.spl` decodes no
+compressed forms), so it advances `pc` by **4 (→`0x8000_054c`)** instead of
+**2 (→`0x8000_054a`)**, skipping the `c.ret` and desyncing the fetch stream.
+`misa` advertises RV64IMA**C** but no C is implemented. Execution then wanders
+misaligned RVC-dense code until `pc` lands in the trap-handler region
+(`_trap_handler` `0x8000_03f8`) and loops there indefinitely (`mcause` stays 0 —
+it is not a trap, it is a decode/PC-width divergence).
+
+Filed: `doc/08_tracking/bug/rv64_core_no_c_extension_opensbi_stall_2026-07-22.md`.
+
+### Remaining blockers (only reachable AFTER C-extension lands)
+
+These were never exercised — execution stalls at insn ~5, before any of them:
+
+1. **RV64C decode + IALIGN=16 PC stepping** — the actual first blocker above.
+2. **S-mode / `mret` drop** — OpenSBI's purpose; delegation path present
+   (`csr64_update_mip_s`, Sv39) but unexercised by a real firmware run.
+3. **PMP** — `sbi_hart_pmp_configure` (`0x9_1be`) writes `pmpcfg0`/`pmpaddr0`
+   (`0x3A0`/`0x3B0`), both **unknown** to `core64_machine_csr_known` → would
+   fail-closed to an illegal-insn trap. **Predicted next divergence** once C
+   lands. `menvcfg` (`0x30A`) and `mcounteren` (`0x306`) are likewise unknown.
+4. **DTB**: now supplied — `examples/09_embedded/simple_os/arch/riscv64/soc_virt.dtb`
+   (1495 B) matches this SoC (memory@80000000/128 MiB, clint@2000000,
+   uart@10000000, model `simple-soc-rv64`). The 40-byte `bootrom_dtb`
+   header-only placeholder is insufficient for `PLATFORM=generic`.
+
+Board note (board-runnable rule): sim-RTL bring-up lane; the same
+`fw_payload.bin` is the artifact a physical RV64 board would flash once the core
+gaps above close. No board claim is made here.

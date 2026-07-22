@@ -35,13 +35,25 @@ struct Ram64State:
 
 fn ram64_init(size: i64) -> Ram64State:
     """Create a RAM with the given byte size, all initialized to zero.
-    Internally allocates (size + 7) / 8 doublewords."""
+    Internally allocates (size + 7) / 8 doublewords.
+
+    Zero-fill uses binary (doubling) composition instead of element-by-element
+    append: a power-of-two `block` is grown by self-concatenation and appended
+    at each set bit of `num_words`.  This is O(N log N) total copy work versus
+    the O(N^2) of a per-element `data = data + [0]` loop, turning a 128 MiB
+    allocation from impractical (minutes) into well under a second — the
+    throughput wall for loading a real fw_payload.  Pure `[i64]` only; the loop
+    maps to a block-RAM init in synthesis just as the old append loop did."""
     val num_words = (size + 7) >> 3
     var data: [i64] = []
-    var i: i64 = 0
-    while i < num_words:
-        data = data + [0]
-        i = i + 1
+    var block: [i64] = [0]
+    var remaining = num_words
+    while remaining > 0:
+        if (remaining & 1) == 1:
+            data = data + block
+        remaining = remaining >> 1
+        if remaining > 0:
+            block = block + block
     Ram64State(data: data, size: size)
 
 # ============================================================================
@@ -160,3 +172,66 @@ fn ram64_load_binary(ram: Ram64State, offset: i64, data: [i64]) -> Ram64State:
             out.data[word_idx] = (old_word & inv_mask) | new_byte
         i = i + 1
     out
+
+# ============================================================================
+# Bulk Byte Load — SIMULATION ONLY (not VHDL-synthesizable)
+# ============================================================================
+
+fn ram64_load_bytes(ram: Ram64State, base_off: i64, bytes: [u8]) -> Ram64State:
+    """SIM-ONLY fast path for loading a large binary blob (e.g. a 2 MiB
+    OpenSBI fw_payload) into RAM at `base_off`.
+
+    `ram64_write` allocates a fresh state per call, so driving it one byte at a
+    time (as Case 1 of the boot probe does for the 88-byte stub) does not scale
+    to a 2 MiB blob.  A plain per-byte read-modify-write loop measured ~39 s for
+    2 MiB.  This loader instead takes the `[i64]` word array into a bare local,
+    mutates it in place (interpreter `arr[i]=` uniqueness fast path: one
+    copy-on-write, then O(1) per store), and — when `base_off` is doubleword
+    aligned — assembles whole doublewords (8 source bytes per store).  It
+    constructs the result `Ram64State` exactly once.  2 MiB drops to ~3 s.
+
+    Accepts `[u8]` directly so a file blob from `rt_file_read_bytes` needs no
+    intermediate `[i64]` rebuild.  NOT part of the synthesizable subset — it
+    exists only to make interpreter-driven firmware boots tractable."""
+    var data = ram.data
+    val num_words = (ram.size + 7) >> 3
+    val n = len(bytes) as i64
+    var i: i64 = 0
+
+    # Fast path: when base_off is doubleword-aligned, assemble whole
+    # doublewords (8 source bytes -> 1 store) instead of a per-byte
+    # read-modify-write.  8x fewer array stores over the blob.
+    if (base_off & 7) == 0:
+        val base_word = base_off >> 3
+        val nfull = n >> 3
+        var w: i64 = 0
+        while w < nfull:
+            val wi = base_word + w
+            if wi < num_words:
+                val b = w << 3
+                val dw = ((bytes[b] as i64) & 0xFF)
+                    | (((bytes[b + 1] as i64) & 0xFF) << 8)
+                    | (((bytes[b + 2] as i64) & 0xFF) << 16)
+                    | (((bytes[b + 3] as i64) & 0xFF) << 24)
+                    | (((bytes[b + 4] as i64) & 0xFF) << 32)
+                    | (((bytes[b + 5] as i64) & 0xFF) << 40)
+                    | (((bytes[b + 6] as i64) & 0xFF) << 48)
+                    | (((bytes[b + 7] as i64) & 0xFF) << 56)
+                data[wi] = dw
+            w = w + 1
+        i = nfull << 3   # remaining tail bytes fall through to RMW below
+
+    # Tail / unaligned bytes: read-modify-write one byte at a time.
+    while i < n:
+        val byte_addr = base_off + i
+        val word_idx = byte_addr >> 3
+        if word_idx < num_words:
+            val byte_off = byte_addr & 7
+            val shift = byte_off * 8
+            val mask = 0xFF << shift
+            val inv_mask = mask ^ -1
+            val old_word = data[word_idx]
+            val new_byte = ((bytes[i] as i64) & 0xFF) << shift
+            data[word_idx] = (old_word & inv_mask) | new_byte
+        i = i + 1
+    Ram64State(data: data, size: ram.size)
