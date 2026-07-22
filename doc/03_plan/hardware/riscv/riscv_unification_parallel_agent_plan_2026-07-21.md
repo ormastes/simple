@@ -130,8 +130,24 @@ Full audit: session scratchpad `riscv_docs/w1c_claim_audit.md`.
   stepper provably fails cases 1–2. Bonus: bootrom is RV32-encoded (lui
   sign-extends on RV64) — filed
   `doc/08_tracking/bug/soc64_bootrom_rv32_encoded_sext_misjump_2026-07-22.md`.
-- **W2-B + JTAG Stage 2 in flight (this session)** — AOP silent-skip audit
-  lane and Debug Module halt/resume lane running in parallel worktrees.
+- **JTAG Stage 2 LANDED (this session)** `c7cd8f01450` — Debug Module
+  halt/resume + DMI 0x10–0x1F routing, GHDL STAGE2 6/6 + STAGE1 regression
+  PASS (see JTAG plan doc).
+- **W2-B LANDED (this session)** — VHDL AOP silent-skip audit complete.
+  Subset path (`driver_compile_vhdl_*`): 2 SILENTLY-DROPPED sites (bare
+  `@`-line skip in source_to_text; "silently skip other unsupported
+  decorators" in parse_vhdl_functions) converted to hard Err naming
+  decorator + site; implicit `@type`/`@enum` exemption made an explicit
+  allowlist (`_simple_vhdl_erasable_decorators`, fail-closed default). Full
+  pipeline: `weave_aop` gained requested-vs-woven accounting — advices
+  requested but 0 woven → CodegenError, refuse to emit RTL. Manifests:
+  subset `.vhd.map.json` now carries `aop_weave_count`; full pipeline gains
+  `.gen.json` (aop_advices_requested + aop_weave_count). Evidence: RED 3/3
+  loud (incl. `@jtag_hook` fixture — the Phase-3 AOP hart-hook case),
+  GREEN 2/2 + accounting requested=3/woven=2; spec runner failure is
+  identical on unmodified main (deployed-runner landmine, noted). Observed
+  (not fixed): pipeline_fn.spl dead AOP scaffold; HIR-level unknown
+  non-AOP attributes outside VHDL lane may still be ignored.
 
 ## Wave 3 — Phase 2 shared core skeleton (after Wave 2 green)
 

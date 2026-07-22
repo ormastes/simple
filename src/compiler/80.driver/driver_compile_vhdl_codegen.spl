@@ -45,6 +45,14 @@ fn _simple_join_text(items: [text], sep: text) -> text:
         i = i + 1
     out
 
+fn _simple_vhdl_erasable_decorators() -> [text]:
+    """W2-B fail-closed allowlist: decorator names (without '@') that direct
+    VHDL emission may legitimately erase. Anything not listed here and not in
+    the supported set (@hardware, @generic, @clocked) is a hard generation
+    error — a silently dropped decorator could remove woven AOP/debug logic
+    from synthesized RTL."""
+    ["type", "enum"]
+
 fn _simple_vhdl_detect_aop_decorators(source: text) -> text:
     """Detect AOP/decorator usage in source. Returns error message if found, empty string otherwise."""
     val lines = source.split("\n")
@@ -73,8 +81,8 @@ fn _simple_vhdl_detect_aop_decorators(source: text) -> text:
             # Check if this is an AOP or decorator keyword
             if decorator_text == "advice" or decorator_text == "pointcut" or decorator_text == "before" or decorator_text == "after" or decorator_text == "around":
                 detected_decorators = detected_decorators.push(line)
-            elif decorator_text != "type" and decorator_text != "enum":
-                # Unknown decorator - might be AOP-related
+            elif not _text_list_contains(_simple_vhdl_erasable_decorators(), decorator_text):
+                # Unknown decorator - fail closed (might carry AOP-woven logic)
                 detected_decorators = detected_decorators.push(line)
         i = i + 1
 
@@ -136,6 +144,15 @@ fn _simple_vhdl_source_to_text(source: text) -> Result<text, text>:
                 i = i + 1
                 continue
             if line.starts_with("@"):
+                # W2-B fail-closed: only allowlisted-erasable decorators may
+                # be skipped here; anything else must fail loudly instead of
+                # being silently dropped from the emitted RTL.
+                val skipped_decorator = if line.contains("("):
+                    line.substring(1, line.find("(").unwrap())
+                else:
+                    line.substring(1, line.len())
+                if not _text_list_contains(_simple_vhdl_erasable_decorators(), skipped_decorator):
+                    return Err("VHDL generation error: decorator '@{skipped_decorator}' would be silently dropped during VHDL emission (site: _simple_vhdl_source_to_text). Supported: @hardware, @generic, @clocked; erasable allowlist: @type, @enum.")
                 i = i + 1
                 continue
             if header == "":
@@ -324,8 +341,10 @@ fn _simple_parse_vhdl_functions(source: text) -> Result<[[text]], text>:
                     line.substring(1, line.len())
                 if decorator_text == "advice" or decorator_text == "pointcut" or decorator_text == "before" or decorator_text == "after" or decorator_text == "around":
                     return Err("VHDL subset path does not support AOP/decorators. Found decorator '{line}' which requires AOP weaving. Use the full compiler pipeline instead.")
-                # Silently skip other unsupported decorators (for now)
-                pass
+                # W2-B fail-closed: no silent decorator skips. Only the
+                # explicit erasable allowlist may pass through.
+                if not _text_list_contains(_simple_vhdl_erasable_decorators(), decorator_text):
+                    return Err("VHDL generation error: decorator '{line}' would be silently dropped by the VHDL subset parser (site: _simple_parse_vhdl_functions). Supported: @hardware, @generic, @clocked; erasable allowlist: @type, @enum.")
             elif line.starts_with("fn "):
                 current_header = line
                 generic_text = pending_generic

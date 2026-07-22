@@ -25,6 +25,7 @@ use compiler.driver.driver_bootstrap.{bootstrap_entry_module_name}
 use compiler.common.config.{Logger}
 use compiler.common.attributes.{DriverManifestAttr, DriverManifestAttrKind}
 use compiler.mir.mir_data.{MirModule}
+use compiler.mir.mir_aop_injection.{aop_advices_requested, aop_weave_count}
 use compiler.frontend.parser_types.{Module}
 use compiler.driver.driver_build.incremental.{BuildCache, FileFingerprint, native_build_cache_scope_key, native_build_compiler_identity}
 use compiler.driver.driver_build.parallel.{ParallelBuilder, ParallelBuildConfig, BuildResult}
@@ -651,8 +652,25 @@ impl CompilerDriver:
                 all_vhdl = all_vhdl + "\n\n"
             all_vhdl = all_vhdl + vhdl
 
+        # W2-B fail-closed: if aspects/advices were requested but zero weaves
+        # were applied before VHDL emission, the woven logic (e.g. JTAG hart
+        # debug hooks) would silently be missing from the emitted RTL.
+        val vhdl_aop_requested = aop_advices_requested()
+        val vhdl_aop_woven = aop_weave_count()
+        if vhdl_aop_requested > 0 and vhdl_aop_woven == 0:
+            return CompileResult.CodegenError("VHDL generation error: {vhdl_aop_requested} AOP advice declaration(s) were requested but 0 weaves were applied before VHDL emission — refusing to emit RTL with silently dropped aspects")
+
         if not rt_file_write_text(output, all_vhdl):
             return CompileResult.CodegenError("Failed to write VHDL to {output}")
+        # W2-B: generation manifest with AOP weave accounting.
+        var vhdl_manifest = "{\n"
+        vhdl_manifest = vhdl_manifest + "  \"version\": 1,\n"
+        vhdl_manifest = vhdl_manifest + "  \"generated\": \"" + output + "\",\n"
+        vhdl_manifest = vhdl_manifest + "  \"backend\": \"vhdl\",\n"
+        vhdl_manifest = vhdl_manifest + "  \"aop_advices_requested\": " + vhdl_aop_requested.to_text() + ",\n"
+        vhdl_manifest = vhdl_manifest + "  \"aop_weave_count\": " + vhdl_aop_woven.to_text() + "\n"
+        vhdl_manifest = vhdl_manifest + "}\n"
+        rt_file_write_text(output + ".gen.json", vhdl_manifest)
         driver_log_info(log, "VHDL source written to {output}")
         CompileResult.Success(output)
 
