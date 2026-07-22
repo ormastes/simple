@@ -1,0 +1,75 @@
+#!/bin/sh
+set -eu
+
+# Truthfulness gate for SSpec `.spl` specs run via `simple test`.
+#
+# Guards against the false-green class where `simple test` prints
+# "All tests passed!" while having executed only a PREFIX of the spec's
+# declared `it` examples (observed on the self-hosted binary for specs whose
+# import graph reaches app.io.mod: reported 18/66 vs 74 declared, exit 0).
+#
+# The check is deliberately independent of the runner's own count: it compares
+# the STATIC declared `it` count (grepped from source) against the total the
+# runner REPORTS. Any mismatch fails — a runner that under-reports can never
+# again read as green through this gate.
+#
+# Usage:
+#   sh scripts/check/check-sspec-count-truthful.shs <spec.spl> [<spec.spl> ...]
+#   SIMPLE_BIN=/path/to/simple sh scripts/check/check-sspec-count-truthful.shs <spec.spl>
+#
+# Env knobs:
+#   SIMPLE_BIN   simple binary to test with (default: bin/simple)
+#   SSPEC_CLEAN  set to 0 to run warm (default: 1 => pass --clean, the worse case)
+
+BIN="${SIMPLE_BIN:-bin/simple}"
+CLEAN="${SSPEC_CLEAN:-1}"
+
+if [ "$#" -eq 0 ]; then
+  echo "usage: $0 <spec.spl> [<spec.spl> ...]" >&2
+  exit 2
+fi
+
+clean_flag=""
+[ "$CLEAN" = "1" ] && clean_flag="--clean"
+
+rc=0
+for spec in "$@"; do
+  if [ ! -f "$spec" ]; then
+    echo "MISSING  $spec (not a file)" >&2
+    rc=1
+    continue
+  fi
+
+  # Declared examples: `it "..."` at statement position (leading whitespace only).
+  declared=$(grep -cE '^[[:space:]]*it ' "$spec" || true)
+
+  out=$("$BIN" test "$spec" $clean_flag 2>&1 || true)
+
+  # Reported total from the SSpec summary block ("Results: N total, ...").
+  reported=$(printf '%s\n' "$out" \
+    | grep -oE 'Results:[[:space:]]*[0-9]+[[:space:]]+total' \
+    | grep -oE '[0-9]+' \
+    | head -1)
+
+  if [ -z "${reported:-}" ]; then
+    echo "FAIL     $spec — declared=$declared reported=<no Results: summary> (runner produced no verdict)"
+    rc=1
+    continue
+  fi
+
+  if [ "$reported" -ne "$declared" ]; then
+    # Distinguish the dangerous case (under-reported yet claims success) from an
+    # honest failure the runner already surfaced.
+    if [ "$reported" -lt "$declared" ] && printf '%s\n' "$out" | grep -qiE 'all tests passed'; then
+      label="FALSE-GREEN (claims pass on a prefix)"
+    else
+      label="MISMATCH declared!=reported"
+    fi
+    echo "FAIL     $spec — declared=$declared reported=$reported — $label"
+    rc=1
+  else
+    echo "OK       $spec — declared=$declared reported=$reported"
+  fi
+done
+
+exit "$rc"
