@@ -18,8 +18,19 @@ the spec's declared `it` examples while claiming success:
 `--interpret-optimized`): 74/74 and 28/28. The defect is exclusively in the
 `test` command path.
 
-## Root cause (pinned 2026-07-22, disassembly-confirmed)
-The native backend miscompiles `text` ordering comparisons (`<` `>` `<=` `>=`)
+## Root cause (pinned 2026-07-22, disassembly-confirmed; LAYER CORRECTED same day)
+**COMPILER-LAYER ATTRIBUTION (correction)**: the affected binary was built by
+the **Rust seed stage4 pipeline** (`SIMPLE_BOOTSTRAP=1` +
+`src/compiler_rust/target/bootstrap/simple`), NOT the self-hosted MIR/Cranelift
+path. The pointer-cmp lowering therefore lives in the SEED
+(`src/compiler_rust/`). The self-hosted MIR path has correct content-aware
+guards (rt_text_eq_any / rt_text_cmp_any, expr_dispatch.spl ~1432–1519) — the
+affected binary contains ZERO of those symbols precisely because the seed
+built it and the seed has no such lowering. Every stage4/seed-built artifact
+is suspect; self-hosted `native-build --backend cranelift` output is expected
+unaffected (verification build in flight).
+
+The (seed) backend miscompiles `text` ordering comparisons (`<` `>` `<=` `>=`)
 into **raw pointer/handle `cmp`** on the string handles. Chain of evidence:
 
 1. `extract_number_before` / `extract_number_after_colon`
