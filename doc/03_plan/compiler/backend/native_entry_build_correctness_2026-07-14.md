@@ -531,5 +531,10 @@ the shared binary — deploys require explicit user go-ahead).
   against the pure runtime. The observed bare-metal text `.replace` sibling now
   uses replace-all semantics on x86_64, ARM64, and both RISC-V64 runtime owners;
   focused C behavior and SSpec ownership contracts prevent first-match-only
-  regressions. Rebuilt current-source execution remains pending. See
+  regressions. ARM32, ARM64, and x86_32 text bracket indexing now shares the
+  hosted/x86_64/RISC-V64 ABI: raw length/index results and tagged one-character
+  text, with generic `rt_index_get` decoding its tagged index before forwarding.
+  Typed-parameter literal and dynamic-text oracles run in hosted/FreeBSD parity
+  and the shared cross-target fixture; 32-bit lanes remain object-only.
+  Rebuilt current-source execution remains pending. See
   `native_chr_builtin_no_lowering_2026-07-18.md`.

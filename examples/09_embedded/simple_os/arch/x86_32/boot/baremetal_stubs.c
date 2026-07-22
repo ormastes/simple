@@ -412,19 +412,19 @@ RuntimeValue rt_string_from_cstr(const char *cstr)
 
 RuntimeValue rt_string_len(RuntimeValue str)
 {
-    if (!IS_HEAP(str)) return ENCODE_INT(0);
+    if (!IS_HEAP(str)) return 0;
     RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
-    if (!s) return ENCODE_INT(0);
-    return ENCODE_INT(s->len);
+    if (!s) return 0;
+    return (RuntimeValue)s->len;
 }
 
 RuntimeValue rt_string_char_at(RuntimeValue str, RuntimeValue idx)
 {
-    if (!IS_HEAP(str)) return ENCODE_INT(0);
+    if (!IS_HEAP(str)) return NIL_VALUE;
     RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
-    int32_t i = DECODE_INT(idx);
-    if (!s || i < 0 || (uint32_t)i >= s->len) return ENCODE_INT(0);
-    return ENCODE_INT((int32_t)(unsigned char)s->data[i]);
+    int32_t i = (int32_t)idx;
+    if (!s || i < 0 || (uint32_t)i >= s->len) return NIL_VALUE;
+    return rt_string_new((RuntimeValue)(uintptr_t)(s->data + i), 1);
 }
 
 RuntimeValue rt_string_concat(RuntimeValue a, RuntimeValue b)
@@ -545,11 +545,12 @@ RuntimeValue rt_index_get(RuntimeValue v, RuntimeValue idx)
     if (!IS_HEAP(v)) return NIL_VALUE;
     HeapHeader *h = (HeapHeader *)DECODE_PTR(v);
     if (!h) return NIL_VALUE;
-    int32_t i = DECODE_INT(idx);
     if (h->type == HEAP_STRING) {
-        return rt_string_char_at(v, idx);
+        if (!IS_INT(idx)) return NIL_VALUE;
+        return rt_string_char_at(v, (RuntimeValue)DECODE_INT(idx));
     }
     if (h->type == HEAP_ARRAY) {
+        int32_t i = DECODE_INT(idx);
         RuntimeArray *a = (RuntimeArray *)h;
         if (i < 0 || (uint32_t)i >= a->len) return NIL_VALUE;
         return a->items[i];

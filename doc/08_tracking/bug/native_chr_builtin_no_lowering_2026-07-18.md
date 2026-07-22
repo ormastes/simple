@@ -88,16 +88,21 @@ crash risk.** Workarounds landed: flat `(arrays..., bool)` cross-module APIs
 font_registry, match unwraps only on always-Some paths, and making
 whitespace glyphs a valid Some(0x0 bitmap) instead of None.
 
-## Sibling defect: text char-extraction loop faults on baremetal
+## Sibling defect: text char-extraction loop faults on baremetal (source-fixed)
 First workaround attempt for the `.replace` defect (a `str_char_at(family, i)`
 loop stripping spaces, running during font candidate construction) produced a
 guest EXCEPTION FRAME (`rip=0x8a2bc01` in the
 `FontRasterizer.load_selected_bytes` → candidate-construction path, right
 after `font read alias bytes=1708408`, stray `51984207` printed). `s[idx]`
-text indexing on a text *parameter* is implicated (the same op on a LOCAL
-literal receiver works — `char_from_code_inline`'s ASCII table). Replaced
-with a literal lookup table (`_font_candidate_no_space_family`). Not
-root-caused; same erased/typed-receiver builtin family as above.
+text indexing on a text *parameter* exposed an ABI split: MIR passes a raw
+index and expects tagged one-character text, but the ARM32, ARM64, and x86_32
+hardware owners decoded the raw index as tagged and returned a tagged integer.
+Those owners now match the hosted/x86_64/RISC-V64 raw-index/text-result ABI;
+their generic `rt_index_get` paths decode their tagged index before forwarding.
+Hosted LLVM/Cranelift and the shared cross-target fixture now cover literal and
+dynamic text through a typed parameter. ARM32/RV32/Windows ARM64 remain
+object-only checks; rebuilt bare-metal execution is pending. The separate
+`for ch in text` iteration fault remains open.
 
 ## Perf gap: pure-Simple glyf rasterization slows 4K WM re-render past 90s
 With real fonts active, the F11-maximize re-render (full-4K window + text via
