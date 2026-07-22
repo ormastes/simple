@@ -59,13 +59,20 @@ fn main() -> i64:
     fails = fails + check("case2 sw wrote 55 to RAM", stored == 55)
     fails = fails + check("case2 lw read 55 back into x6", soc2.core.rf.regs[6] == 55)
 
-    # ── Case 3: first tick executes the real bootrom lui at reset vector ──
+    # ── Case 3: full RV64 bootrom sequence — reset vector to DRAM handoff ──
+    # bootrom_read64 zero-extends each lui with slli/srli-32 (fixes the
+    # lui-sext misjump bug); after 11 insns the core lands at 0x80000000
+    # with sp/a1/t0 zero-extended and executes from RAM (NOP park loop).
     var soc3 = soc_top_64_init(0x1000)
-    soc3 = soc_top_64_tick(soc3)
-    val lui_sp_sext = 0x8010_0000 - 0x1_0000_0000
-    print("case3 pc={soc3.core.pc} sp={soc3.core.rf.regs[2]}")
-    fails = fails + check("case3 pc == 0x1004 after bootrom lui", soc3.core.pc == 0x1004)
-    fails = fails + check("case3 sp == sext(0x80100000)", soc3.core.rf.regs[2] == lui_sp_sext)
+    var k = 0
+    while k < 11:
+        soc3 = soc_top_64_tick(soc3)
+        k = k + 1
+    print("case3 pc={soc3.core.pc} sp={soc3.core.rf.regs[2]} a1={soc3.core.rf.regs[11]} t0={soc3.core.rf.regs[5]}")
+    fails = fails + check("case3 boot handoff lands at 0x80000000", soc3.core.pc == 0x8000_0000)
+    fails = fails + check("case3 sp == 0x80100000 zero-extended", soc3.core.rf.regs[2] == 0x8010_0000)
+    fails = fails + check("case3 a1 == 0x88000000 zero-extended (DTB)", soc3.core.rf.regs[11] == 0x8800_0000)
+    fails = fails + check("case3 t0 == 0x80000000 zero-extended (entry)", soc3.core.rf.regs[5] == 0x8000_0000)
 
     # ── Case 4: MMIO — UART THR/LSR + CLINT mtime via the core ──
     # Stores 'H','I','\n' to UART THR (0x1000_0000), reads LSR into x28
