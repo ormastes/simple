@@ -16,8 +16,15 @@
 --      (proves a step both advances pc AND updates a real x-register)
 --   C  resume -> real hart free-runs -> haltreq halts it (clock-gated)
 --   D  abstract-command GPR readback: x10 == 42, x1 == 7 (REAL values)
+--   D+ (Lane KK) FULL x0..x31 abstract-command readback through the additive
+--      rv32_exec_core dbg_reg_addr/dbg_reg_data port: x1=7, x10=42 carry real
+--      computed values through the SAME path; x0 is hardwired 0 and every other
+--      regno reads its true committed value (0), proving the port addresses the
+--      whole file — not just the 3 regnos the old narrow bridge special-cased.
 --   E  single-step in the NOP sled: dcsr.step=1, resume -> exactly one
 --      instruction retires, dpc advances by exactly 4
+-- Lane KK also proves FULL-WIDTH pc readback: dpc now carries the real
+-- 0x8000_00xx pc (bit31 set) via the additive dbg_pc port, not a 16-bit slice.
 --
 -- Prints `HART-INT <STAGE> PASS` markers and `JTAG HART E2E: ALL PASS`.
 
@@ -63,6 +70,9 @@ architecture sim of tb_hart_integration is
   signal o_dbg_a0   : std_logic_vector(7 downto 0);
   signal o_dbg_ra   : std_logic_vector(15 downto 0);
   signal o_dbg_sp   : std_logic_vector(15 downto 0);
+  -- Lane KK: full-width pc + full-regfile readback observation taps
+  signal o_dbg_pc_full  : std_logic_vector(31 downto 0);
+  signal o_dbg_reg_data : std_logic_vector(31 downto 0);
 
   -- DMI register addresses (RISC-V debug v0.13)
   constant A_DATA0      : std_logic_vector(6 downto 0) := "0000100";  -- 0x04
@@ -94,7 +104,8 @@ begin
       dmi_rdata => dm_rdata, dmi_resp => dm_resp, dmi_ready => dm_ready,
       o_halted => o_halted, o_running => o_running, o_step => o_step,
       o_core_run => o_core_run, o_debug_pc => o_dbg_pc,
-      o_debug_a0 => o_dbg_a0, o_debug_ra => o_dbg_ra, o_debug_sp => o_dbg_sp);
+      o_debug_a0 => o_dbg_a0, o_debug_ra => o_dbg_ra, o_debug_sp => o_dbg_sp,
+      o_dbg_pc_full => o_dbg_pc_full, o_dbg_reg_data => o_dbg_reg_data);
 
   stim : process
     variable rd, dpc_lo, dpc_hi : std_logic_vector(31 downto 0);
@@ -207,6 +218,16 @@ begin
       severity failure;
     read_dpc(dpc_lo, dpc_hi);
     pc_before := unsigned(dpc_lo);
+    -- Lane KK: prove FULL-WIDTH pc readback — the real reset pc is 0x80000000
+    -- (bit31 set), reachable only via the additive dbg_pc port (the old 16-bit
+    -- debug_pc slice would report 0x0000_0000 here).
+    assert pc_before(31) = '1' and dpc_hi = x"00000000"
+      report "STAGE B FAIL: dpc not full-width pc (expected 0x8000_00xx), got 0x"
+             & to_hstring(dpc_hi) & "_" & to_hstring(std_logic_vector(pc_before))
+      severity failure;
+    assert o_dbg_pc_full(31) = '1'
+      report "STAGE B FAIL: observed full pc bit31 clear, got 0x"
+             & to_hstring(o_dbg_pc_full) severity failure;
     -- dcsr.step = 1
     dmi_write(A_DATA0, x"00000007");       -- step=1, prv=3
     dmi_write(A_COMMAND, x"002307B0");     -- write dcsr, aarsize=2
@@ -277,6 +298,38 @@ begin
       severity failure;
     report "HART-INT STAGE D PASS: abstract-cmd GPR readback x10==42, x1==7 (real hart)"
       severity note;
+
+    --------------------------------------------------------------------------
+    -- STAGE D+ (Lane KK): FULL x0..x31 readback through the additive core
+    -- dbg_reg_addr/dbg_reg_data port.  x1=7 and x10=42 already proved the path
+    -- carries REAL data above; here we sweep the ENTIRE file to prove the DM
+    -- regno addresses every register (previously only x1/x2/x10 were bridged;
+    -- all other regnos returned a hardcoded 0).  x0 must read hardwired zero.
+    --------------------------------------------------------------------------
+    read_gpr(0, rd);
+    assert rd = x"00000000"
+      report "STAGE D+ FAIL: x0 not hardwired 0, got 0x" & to_hstring(rd)
+      severity failure;
+    for reg in 2 to 31 loop
+      read_gpr(reg, rd);
+      if reg = 10 then
+        assert rd = x"0000002A"
+          report "STAGE D+ FAIL: x10 (a0) /= 42 via full path, got 0x" & to_hstring(rd)
+          severity failure;
+      else
+        assert rd = x"00000000"
+          report "STAGE D+ FAIL: x" & integer'image(reg)
+                 & " expected 0 (uninitialized by program), got 0x" & to_hstring(rd)
+          severity failure;
+      end if;
+    end loop;
+    -- Re-read x1 through the sweep path as well (was checked in STAGE D).
+    read_gpr(1, rd);
+    assert rd = x"00000007"
+      report "STAGE D+ FAIL: x1 (ra) /= 7 via full path, got 0x" & to_hstring(rd)
+      severity failure;
+    report "HART-INT STAGE D+ PASS: full x0..x31 abstract-command readback via "
+           & "additive core port (x0=0, x1=7, x10=42, all other regs=0)" severity note;
 
     --------------------------------------------------------------------------
     -- STAGE E: single-step in the NOP sled -> clean pc += 4 (pc-advance only).

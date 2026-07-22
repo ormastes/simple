@@ -20,7 +20,16 @@ entity rv32_exec_core is
     debug_a0 : out std_logic_vector(7 downto 0);
     debug_ra : out std_logic_vector(15 downto 0);
     debug_sp : out std_logic_vector(15 downto 0);
-    debug_phase : out std_logic_vector(3 downto 0)
+    debug_phase : out std_logic_vector(3 downto 0);
+    -- Lane KK: ADDITIVE external debug read ports for the JTAG Debug Module.
+    -- dbg_reg_addr selects x0..x31; dbg_reg_data returns the full 32-bit
+    -- committed register value; dbg_pc exposes the full-width program counter.
+    -- The input has a safe default so existing instantiations that do not
+    -- connect it stay byte-identical; the outputs are pure read-only taps of
+    -- regs_q / pc_q and cannot perturb execution.
+    dbg_reg_addr : in std_logic_vector(4 downto 0) := (others => '0');
+    dbg_reg_data : out std_logic_vector(31 downto 0);
+    dbg_pc : out std_logic_vector(31 downto 0)
   );
 end entity rv32_exec_core;
 
@@ -267,6 +276,9 @@ begin
   debug_ra <= debug_ra_q;
   debug_sp <= debug_sp_q;
   debug_phase <= debug_phase_q;
+  -- Lane KK: additive read-only debug taps (combinational, no state added).
+  dbg_reg_data <= std_logic_vector(regs_q(to_integer(unsigned(dbg_reg_addr))));
+  dbg_pc <= std_logic_vector(pc_q);
 
   process(clk)
     variable r : regs_t;

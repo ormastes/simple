@@ -16,12 +16,14 @@
 --   On real silicon this maps to a clock-enable / BUFGCE (the core has no CE
 --   port) — a board-bring-up note, not a functional change.
 --
--- GPR READBACK is bridged from the core's real committed registers, but the
--- core only exposes x1(ra,16b) / x2(sp,16b) / x10(a0,8b) / pc(16b) as debug
--- ports — NOT the full regs_q. So abstract-command GPR reads are faithful for
--- those regnos (real computed values) and return 0 for others. Arbitrary-GPR
--- readback and SBA-into-instruction-fetch both need core-side ports the core
--- does not expose; see doc/08_tracking/bug/ for the filed core-gap request.
+-- GPR READBACK is bridged from the core's real committed registers.  Lane KK
+-- added ADDITIVE dbg_reg_addr/dbg_reg_data/dbg_pc ports to rv32_exec_core, so
+-- abstract-command GPR reads now return the FULL 32-bit committed value of any
+-- x0..x31 (dbg_reg_addr is driven by the DM's gpr_regno; the core is
+-- clock-gated during readback so the combinational tap is stable) and the DM's
+-- pc_i/dpc is fed by the full-width pc.  SBA-into-instruction-fetch still needs
+-- the ROM to be writable RAM (the core fetches from internal ROM); see
+-- doc/08_tracking/bug/ for that remaining core-gap request.
 --
 -- SBA master is wired to a wrapper-owned sba_test_mem so the DM's system-bus
 -- path is exercised through the glue; the core fetches from its OWN internal
@@ -54,7 +56,10 @@ entity hart_core_glue is
     o_debug_pc  : out std_logic_vector(15 downto 0);
     o_debug_a0  : out std_logic_vector(7 downto 0);
     o_debug_ra  : out std_logic_vector(15 downto 0);
-    o_debug_sp  : out std_logic_vector(15 downto 0)
+    o_debug_sp  : out std_logic_vector(15 downto 0);
+    -- Lane KK: full-width PC + full-regfile readback observation taps
+    o_dbg_pc_full   : out std_logic_vector(31 downto 0);
+    o_dbg_reg_data  : out std_logic_vector(31 downto 0)
   );
 end entity hart_core_glue;
 
@@ -92,7 +97,7 @@ architecture rtl of hart_core_glue is
   signal core_run_lat   : std_logic := '0';  -- falling-edge latched enable
   signal halted_r       : std_logic := '1';  -- start halted (awaiting resume)
   signal step_pending   : std_logic := '0';
-  signal step_pc_prev   : std_logic_vector(15 downto 0) := (others => '0');
+  signal step_pc_prev   : std_logic_vector(31 downto 0) := (others => '0');
   signal resumereq_d    : std_logic := '0';
   signal core_rst       : std_logic;
   signal core_clk_en    : std_logic;
@@ -108,6 +113,9 @@ architecture rtl of hart_core_glue is
   signal c_dbg_ra     : std_logic_vector(15 downto 0);
   signal c_dbg_sp     : std_logic_vector(15 downto 0);
   signal c_dbg_phase  : std_logic_vector(3 downto 0);
+  -- Lane KK: full-regfile + full-pc debug taps from the core
+  signal c_dbg_reg_data : std_logic_vector(31 downto 0);
+  signal c_dbg_pc_full  : std_logic_vector(31 downto 0);
 begin
   ----------------------------------------------------------------------------
   -- Debug Module (landed, unmodified)
@@ -152,7 +160,12 @@ begin
       clk => core_clk, rst => core_rst, uart_tx => c_uart_tx,
       debug_uart_valid => c_dbg_valid, debug_uart_byte => c_dbg_byte,
       debug_pc => c_dbg_pc, debug_ins => c_dbg_ins, debug_a0 => c_dbg_a0,
-      debug_ra => c_dbg_ra, debug_sp => c_dbg_sp, debug_phase => c_dbg_phase);
+      debug_ra => c_dbg_ra, debug_sp => c_dbg_sp, debug_phase => c_dbg_phase,
+      -- Lane KK: additive debug ports — DM regno selects the register; full
+      -- committed value and full pc come straight back out combinationally.
+      dbg_reg_addr => gpr_regno_s,
+      dbg_reg_data => c_dbg_reg_data,
+      dbg_pc => c_dbg_pc_full);
 
   ----------------------------------------------------------------------------
   -- Wrapper-owned SBA exec memory (DM system-bus path exercise)
@@ -181,7 +194,7 @@ begin
           -- Running: single-step auto-halt after exactly one retire, else honor
           -- the DM level haltreq.
           if step_pending = '1' then
-            if c_dbg_pc /= step_pc_prev then
+            if c_dbg_pc_full /= step_pc_prev then
               core_run     <= '0';
               halted_r     <= '1';
               step_pending <= '0';
@@ -197,7 +210,7 @@ begin
             halted_r <= '0';
             if step_o_s = '1' then
               step_pending <= '1';
-              step_pc_prev <= c_dbg_pc;
+              step_pc_prev <= c_dbg_pc_full;
             else
               step_pending <= '0';
             end if;
@@ -209,7 +222,7 @@ begin
 
   halted_s  <= halted_r;
   running_s <= not halted_r;
-  pc_i_s    <= x"000000000000" & c_dbg_pc;  -- real pc (low 16 bits) into dpc
+  pc_i_s    <= x"00000000" & c_dbg_pc_full;  -- Lane KK: real full-width pc into dpc
 
   ----------------------------------------------------------------------------
   -- Abstract-command GPR readback bridge (real committed registers).
@@ -234,12 +247,11 @@ begin
             cnt := 0;
             gpr_ack_s <= '1';
             if gpr_re_s = '1' then
-              case to_integer(unsigned(gpr_regno_s)) is
-                when 1  => gpr_rdata_s <= x"000000000000" & c_dbg_ra;   -- ra
-                when 2  => gpr_rdata_s <= x"000000000000" & c_dbg_sp;   -- sp
-                when 10 => gpr_rdata_s <= x"00000000000000" & c_dbg_a0; -- a0
-                when others => gpr_rdata_s <= (others => '0');
-              end case;
+              -- Lane KK: FULL x0..x31 readback.  dbg_reg_addr is driven by
+              -- gpr_regno_s, so c_dbg_reg_data already holds the requested
+              -- register's full 32-bit committed value (core clock-gated =>
+              -- stable).  rv32 => upper 32 bits of the 64-bit DM word are 0.
+              gpr_rdata_s <= x"00000000" & c_dbg_reg_data;
             end if;
             -- GPR writes are accepted (ack) but not written back: the core
             -- exposes no register write port (read-only debug observation).
@@ -262,4 +274,6 @@ begin
   o_debug_a0 <= c_dbg_a0;
   o_debug_ra <= c_dbg_ra;
   o_debug_sp <= c_dbg_sp;
+  o_dbg_pc_full  <= c_dbg_pc_full;
+  o_dbg_reg_data <= c_dbg_reg_data;
 end architecture rtl;
