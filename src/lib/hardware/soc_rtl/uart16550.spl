@@ -11,7 +11,10 @@
 #   0x1: IER (read/write) / DLM (if DLAB=1)
 #   0x2: IIR (read) / FCR (write)
 #   0x3: LCR (line control, DLAB in bit 7)
+#   0x4: MCR (modem control)
 #   0x5: LSR (line status, read-only)
+#   0x6: MSR (modem status, read-only; delta bits cleared on read)
+#   0x7: SCR (scratch)
 #
 # VHDL synthesizable subset: u32, bool, fixed-size arrays, structs only.
 # ============================================================================
@@ -29,16 +32,43 @@ val LSR_TEMT: u32  = 0x40   # bit 6: Transmitter Empty
 
 # LCR bit masks
 val LCR_DLAB: u32  = 0x80   # bit 7: Divisor Latch Access Bit
+val LCR_WLEN_MASK: u32 = 0x03  # bits 1:0: word length (5 + value)
 
 # IER bit masks
 val IER_RDI: u32   = 0x01   # bit 0: Received Data Available Interrupt
 val IER_THRI: u32  = 0x02   # bit 1: THR Empty Interrupt
+val IER_RLSI: u32  = 0x04   # bit 2: Receiver Line Status Interrupt
+val IER_MSI: u32   = 0x08   # bit 3: Modem Status Interrupt
 
 # IIR values
 val IIR_NO_INT: u32     = 0x01   # No interrupt pending
+val IIR_MSI: u32        = 0x00   # Modem status change
 val IIR_THRI: u32       = 0x02   # THR empty
 val IIR_RDI: u32        = 0x04   # Received data available
 val IIR_FIFO_ENABLED: u32 = 0xC0 # FIFO enabled bits [7:6]
+
+# FCR bit masks
+val FCR_FIFO_EN: u32   = 0x01   # bit 0: FIFO enable
+val FCR_RX_RESET: u32  = 0x02   # bit 1: RX FIFO reset (self-clearing)
+val FCR_TX_RESET: u32  = 0x04   # bit 2: TX FIFO reset (self-clearing)
+val FCR_TRIGGER_MASK: u32 = 0xC0  # bits 7:6: RX trigger level
+
+# MCR bit masks
+val MCR_DTR: u32   = 0x01   # bit 0: Data Terminal Ready
+val MCR_RTS: u32   = 0x02   # bit 1: Request To Send
+val MCR_OUT1: u32  = 0x04   # bit 2: Aux output 1
+val MCR_OUT2: u32  = 0x08   # bit 3: Aux output 2 (irq gate on PC hw; not gated here)
+val MCR_LOOP: u32  = 0x10   # bit 4: Loopback mode
+
+# MSR bit masks
+val MSR_DCTS: u32  = 0x01   # bit 0: Delta CTS
+val MSR_DDSR: u32  = 0x02   # bit 1: Delta DSR
+val MSR_TERI: u32  = 0x04   # bit 2: Trailing Edge RI (modeled as delta RI)
+val MSR_DDCD: u32  = 0x08   # bit 3: Delta DCD
+val MSR_CTS: u32   = 0x10   # bit 4: Clear To Send
+val MSR_DSR: u32   = 0x20   # bit 5: Data Set Ready
+val MSR_RI: u32    = 0x40   # bit 6: Ring Indicator
+val MSR_DCD: u32   = 0x80   # bit 7: Data Carrier Detect
 
 # ============================================================================
 # UART State
@@ -96,6 +126,11 @@ struct Uart16550State:
     lcr: u32
     ier: u32
     iir: u32
+    fcr: u32          # FIFO control (bit0 enable, bits 7:6 trigger; reset bits self-clear)
+    mcr: u32          # Modem control (DTR/RTS/OUT1/OUT2/LOOP)
+    scr: u32          # Scratch register
+    msr_inputs: u32   # External modem input lines (MSR_CTS/DSR/RI/DCD bit positions)
+    msr_delta: u32    # Latched MSR delta bits 3:0, cleared on MSR read
 
     # TX shift register state
     tx_shift: u32
@@ -218,6 +253,7 @@ fn uart_create() -> Uart16550State:
         rx_head: 0, rx_tail: 0, rx_count: 0,
         dll: 1, dlm: 0,
         lcr: 0, ier: 0, iir: IIR_NO_INT,
+        fcr: 0, mcr: 0, scr: 0, msr_inputs: 0, msr_delta: 0,
         tx_shift: 0, tx_busy: false, tx_bit_count: 0, baud_counter: 0
     )
 
@@ -231,8 +267,8 @@ fn uart_compute_lsr(state: Uart16550State) -> u32:
     # Data Ready: RX FIFO not empty
     if state.rx_count > 0:
         lsr = lsr | LSR_DR
-    # TX Holding Register Empty: TX FIFO not full
-    if state.tx_count < UART_FIFO_SIZE:
+    # TX Holding Register Empty: TX holding/FIFO empty (16550 FIFO-mode semantics)
+    if state.tx_count == 0:
         lsr = lsr | LSR_THRE
     # Transmitter Empty: TX FIFO empty and shift register idle
     if state.tx_count == 0 and state.tx_busy == false:
@@ -240,17 +276,90 @@ fn uart_compute_lsr(state: Uart16550State) -> u32:
     lsr
 
 # ============================================================================
+# Compute MSR (Modem Status Register)
+# ============================================================================
+
+fn uart_compute_msr_lines(state: Uart16550State) -> u32:
+    """Compute the live MSR line bits (7:4).  In loopback mode (MCR bit 4)
+    the modem outputs are folded back: RTS->CTS, DTR->DSR, OUT1->RI, OUT2->DCD.
+    Otherwise the external msr_inputs lines are reported."""
+    if (state.mcr & MCR_LOOP) != 0:
+        var lines: u32 = 0
+        if (state.mcr & MCR_RTS) != 0:
+            lines = lines | MSR_CTS
+        if (state.mcr & MCR_DTR) != 0:
+            lines = lines | MSR_DSR
+        if (state.mcr & MCR_OUT1) != 0:
+            lines = lines | MSR_RI
+        if (state.mcr & MCR_OUT2) != 0:
+            lines = lines | MSR_DCD
+        return lines
+    state.msr_inputs & 0xF0
+
+fn uart_compute_msr(state: Uart16550State) -> u32:
+    """Compute the MSR value: live lines (7:4) | latched delta bits (3:0)."""
+    uart_compute_msr_lines(state) | (state.msr_delta & 0x0F)
+
+fn uart_latch_msr_delta(new_state: Uart16550State, old_lines: u32) -> Uart16550State:
+    """Latch MSR delta bits for any line (7:4) that changed vs old_lines
+    (capture old_lines via uart_compute_msr_lines BEFORE mutating state).
+    TERI is modeled as any RI change (simplification of trailing-edge-only)."""
+    val new_lines = uart_compute_msr_lines(new_state)
+    var out = new_state
+    out.msr_delta = new_state.msr_delta | (((old_lines ^ new_lines) >> 4) & 0x0F)
+    out
+
+fn uart_set_modem_inputs(state: Uart16550State, inputs: u32) -> Uart16550State:
+    """Drive the external modem input lines (MSR_CTS/DSR/RI/DCD bit positions).
+    Latches delta bits for changed lines."""
+    val old_lines = uart_compute_msr_lines(state)
+    var out = state
+    out.msr_inputs = inputs & 0xF0
+    out = uart_latch_msr_delta(out, old_lines)
+    out
+
+# ============================================================================
+# Divisor / Baud
+# ============================================================================
+
+fn uart_divisor(state: Uart16550State) -> u32:
+    """Current 16-bit baud divisor (DLM:DLL), minimum 1."""
+    val d = state.dll | (state.dlm << 8)
+    if d == 0:
+        return 1
+    d
+
+fn uart_baud(state: Uart16550State, clock_hz: u32) -> u32:
+    """Computed baud rate = clock / (16 * divisor)."""
+    clock_hz / (16 * uart_divisor(state))
+
+fn uart_word_length(state: Uart16550State) -> u32:
+    """Programmed word length in bits (5..8) from LCR bits 1:0."""
+    5 + (state.lcr & LCR_WLEN_MASK)
+
+# ============================================================================
 # Compute IIR (Interrupt Identification Register)
 # ============================================================================
 
 fn uart_compute_iir(state: Uart16550State) -> u32:
-    """Compute the IIR from current state and interrupt enables."""
-    # RX data available has higher priority than TX empty
+    """Compute the IIR from current state and interrupt enables.
+    Priority: RX data available > THR empty > modem status.
+    Bits 7:6 report FIFO-enabled only when FCR bit 0 is set."""
+    var fifo_bits: u32 = 0
+    if (state.fcr & FCR_FIFO_EN) != 0:
+        fifo_bits = IIR_FIFO_ENABLED
     if (state.ier & IER_RDI) != 0 and state.rx_count > 0:
-        return IIR_RDI | IIR_FIFO_ENABLED
+        return IIR_RDI | fifo_bits
     if (state.ier & IER_THRI) != 0 and state.tx_count == 0:
-        return IIR_THRI | IIR_FIFO_ENABLED
-    IIR_NO_INT | IIR_FIFO_ENABLED
+        return IIR_THRI | fifo_bits
+    if (state.ier & IER_MSI) != 0 and (state.msr_delta & 0x0F) != 0:
+        return IIR_MSI | fifo_bits
+    IIR_NO_INT | fifo_bits
+
+fn uart_irq_line(state: Uart16550State) -> bool:
+    """Level interrupt output: asserted when IIR reports a pending interrupt
+    (IIR bit 0 = 0 means pending)."""
+    (uart_compute_iir(state) & 0x01) == 0
 
 # ============================================================================
 # MMIO Read
@@ -262,7 +371,10 @@ fn uart_mmio_read(state: Uart16550State, offset: u32) -> u32:
     offset=1: IER or DLM (if DLAB set)
     offset=2: IIR
     offset=3: LCR
-    offset=5: LSR"""
+    offset=4: MCR
+    offset=5: LSR
+    offset=6: MSR
+    offset=7: SCR"""
     val dlab = (state.lcr & LCR_DLAB) != 0
 
     if offset == 0:
@@ -284,8 +396,17 @@ fn uart_mmio_read(state: Uart16550State, offset: u32) -> u32:
     if offset == 3:
         return state.lcr
 
+    if offset == 4:
+        return state.mcr
+
     if offset == 5:
         return uart_compute_lsr(state)
+
+    if offset == 6:
+        return uart_compute_msr(state)
+
+    if offset == 7:
+        return state.scr
 
     0
 
@@ -294,13 +415,18 @@ fn uart_mmio_read(state: Uart16550State, offset: u32) -> u32:
 # ============================================================================
 
 fn uart_mmio_read_update(state: Uart16550State, offset: u32) -> Uart16550State:
-    """Update state after an MMIO read (pops RX FIFO on RBR read)."""
+    """Update state after an MMIO read (pops RX FIFO on RBR read;
+    clears MSR delta bits on MSR read)."""
     val dlab = (state.lcr & LCR_DLAB) != 0
     if offset == 0 and dlab == false and state.rx_count > 0:
         var out = state
         out.rx_head = (state.rx_head + 1) & 0xF
         out.rx_count = state.rx_count - 1
         return out
+    if offset == 6:
+        var out2 = state
+        out2.msr_delta = 0
+        return out2
     state
 
 # ============================================================================
@@ -311,7 +437,10 @@ fn uart_mmio_write(state: Uart16550State, offset: u32, value: u32) -> Uart16550S
     """Write a UART register by byte offset.
     offset=0: THR (tx data) or DLL (if DLAB set)
     offset=1: IER or DLM (if DLAB set)
-    offset=3: LCR"""
+    offset=2: FCR (FIFO control; reset bits self-clear)
+    offset=3: LCR
+    offset=4: MCR (loopback change latches MSR deltas)
+    offset=7: SCR (offsets 5/6 are read-only, writes ignored)"""
     val dlab = (state.lcr & LCR_DLAB) != 0
     var out = state
 
@@ -333,8 +462,33 @@ fn uart_mmio_write(state: Uart16550State, offset: u32, value: u32) -> Uart16550S
             out.ier = value & 0x0F
         return out
 
+    if offset == 2:
+        # FCR — store enable + trigger bits; RX/TX reset bits act then self-clear
+        out.fcr = value & (FCR_FIFO_EN | FCR_TRIGGER_MASK)
+        if (value & FCR_RX_RESET) != 0:
+            out.rx_head = 0
+            out.rx_tail = 0
+            out.rx_count = 0
+        if (value & FCR_TX_RESET) != 0:
+            out.tx_head = 0
+            out.tx_tail = 0
+            out.tx_count = 0
+        return out
+
     if offset == 3:
         out.lcr = value & 0xFF
+        return out
+
+    if offset == 4:
+        # Entering/leaving loopback can change the reflected MSR lines;
+        # capture the old lines BEFORE mutating (struct copies can alias in interp)
+        val old_lines = uart_compute_msr_lines(state)
+        out.mcr = value & 0x1F
+        out = uart_latch_msr_delta(out, old_lines)
+        return out
+
+    if offset == 7:
+        out.scr = value & 0xFF
         return out
 
     out
@@ -406,3 +560,24 @@ fn uart_rx_push(state: Uart16550State, byte_val: u32) -> Uart16550State:
     out.rx_tail = (state.rx_tail + 1) & 0xF
     out.rx_count = state.rx_count + 1
     out
+
+# ============================================================================
+# TX Pop — drain one byte from the TX FIFO (host/testbench side)
+# ============================================================================
+
+struct UartTxPopResult:
+    """Result of popping one byte from the TX FIFO."""
+    state: Uart16550State
+    byte_val: u32
+    valid: bool
+
+fn uart_tx_pop(state: Uart16550State) -> UartTxPopResult:
+    """Pop one byte from the TX FIFO without running the serializer.
+    valid=false when the FIFO is empty."""
+    if state.tx_count == 0:
+        return UartTxPopResult(state: state, byte_val: 0, valid: false)
+    val b = tx_fifo_get(state, state.tx_head) & 0xFF
+    var out = state
+    out.tx_head = (state.tx_head + 1) & 0xF
+    out.tx_count = state.tx_count - 1
+    UartTxPopResult(state: out, byte_val: b, valid: true)
