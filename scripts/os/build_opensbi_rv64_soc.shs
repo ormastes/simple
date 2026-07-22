@@ -1,0 +1,135 @@
+#!/bin/sh
+# ============================================================================
+# build_opensbi_rv64_soc.shs — reproducible OpenSBI fw_payload build for the
+# RV64 SoC RTL sim (soc_top_64) memory map:
+#   RAM  @ 0x8000_0000   CLINT @ 0x0200_0000
+#   PLIC @ 0x0C00_0000   UART16550 @ 0x1000_0000   (QEMU virt layout)
+#
+# Outputs (under build/os/opensbi_rv64_soc/):
+#   payload_mmode_uart.elf/.bin/.dis  — M-mode bare payload stub: prints
+#       "OSBI-PAYLOAD-OK" to UART THR, reads CLINT mtime and prints '+'
+#       (nonzero) or '-' (zero), then spins. RV64I-only, position-independent.
+#       This is what the soc_top_64 loader probe boots (see
+#       test/01_unit/lib/hardware/soc_rtl/opensbi_boot_probe.spl).
+#   fw_payload.elf/.bin — real OpenSBI v1.4 (PLATFORM=generic, FW_PAYLOAD=y,
+#       payload = the stub above). Built for the day soc_top_64 grows
+#       S-mode/PMP/mret coverage; NOT bootable on today's sim subset.
+#
+# Usage:
+#   sh scripts/os/build_opensbi_rv64_soc.shs                 # stub + OpenSBI
+#   sh scripts/os/build_opensbi_rv64_soc.shs --payload-only  # stub only (offline)
+#
+# Toolchain: riscv64-unknown-elf-gcc preferred, riscv64-linux-gnu-gcc fallback.
+# OpenSBI pin: tag v1.4, peeled commit a2b255b88918715173942f2c5e1f97ac9e90c877.
+# ============================================================================
+set -eu
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+OUT="$ROOT/build/os/opensbi_rv64_soc"
+OPENSBI_TAG="v1.4"
+OPENSBI_SHA="a2b255b88918715173942f2c5e1f97ac9e90c877"   # v1.4 peeled commit
+OPENSBI_URL="https://github.com/riscv-software-src/opensbi.git"
+PAYLOAD_ONLY=0
+[ "${1:-}" = "--payload-only" ] && PAYLOAD_ONLY=1
+
+mkdir -p "$OUT"
+
+# ---- toolchain detect -------------------------------------------------------
+CROSS=""
+if command -v riscv64-unknown-elf-gcc >/dev/null 2>&1; then
+    CROSS="riscv64-unknown-elf-"
+elif command -v riscv64-linux-gnu-gcc >/dev/null 2>&1; then
+    CROSS="riscv64-linux-gnu-"
+else
+    echo "ERROR: no riscv64 cross-gcc (riscv64-unknown-elf-gcc / riscv64-linux-gnu-gcc)." >&2
+    echo "The loader probe falls back to its embedded hand-encoded payload." >&2
+    exit 2
+fi
+echo "CROSS_COMPILE (stub) = $CROSS"
+
+# OpenSBI link needs an ld that accepts --exclude-libs; Ubuntu's
+# riscv64-unknown-elf ld 2.42 rejects it (packaging defect), the linux-gnu
+# binutils accept it. Prefer linux-gnu for the OpenSBI build.
+OPENSBI_CROSS="$CROSS"
+if command -v riscv64-linux-gnu-gcc >/dev/null 2>&1; then
+    OPENSBI_CROSS="riscv64-linux-gnu-"
+fi
+echo "CROSS_COMPILE (opensbi) = $OPENSBI_CROSS"
+
+# ---- M-mode UART/CLINT payload stub (RV64I only, PIC) -----------------------
+# soc_top_64's runnable subset is M-mode-only (no S-mode trap routing / MMU /
+# PMP yet — see soc_top_64.spl header), so the sim payload is this bare stub,
+# not full OpenSBI. RV64I-only: no compressed insns, no CSR reads.
+cat > "$OUT/payload_mmode_uart.S" <<'EOF'
+    .section .text
+    .globl _start
+_start:
+    lui   t0, 0x10000        # t0 = 0x1000_0000  UART16550 base (THR @ +0)
+    lui   t2, 0x200C         # t2 = 0x0200_C000  (CLINT mtime = t2 - 8)
+    la    a2, msg            # auipc+addi (position-independent)
+putc:
+    lbu   t1, 0(a2)
+    beq   t1, zero, clint
+    sb    t1, 0(t0)          # UART THR write
+    addi  a2, a2, 1
+    j     putc
+clint:
+    ld    t3, -8(t2)         # CLINT mtime @ 0x0200_BFF8
+    beq   t3, zero, dead
+    addi  t1, zero, 0x2B     # '+' : mtime is ticking
+    j     flag
+dead:
+    addi  t1, zero, 0x2D     # '-' : mtime stuck at zero
+flag:
+    sb    t1, 0(t0)
+    addi  t1, zero, 10
+    sb    t1, 0(t0)          # newline
+spin:
+    j     spin               # spin (sim asserts on uart_tx log)
+msg:
+    .ascii "OSBI-PAYLOAD-OK"
+    .byte 0
+EOF
+
+"${CROSS}gcc" -march=rv64i -mabi=lp64 -nostdlib -nostartfiles -static \
+    -Wl,-Ttext=0x80000000 -Wl,--build-id=none \
+    -o "$OUT/payload_mmode_uart.elf" "$OUT/payload_mmode_uart.S"
+"${CROSS}objcopy" -O binary "$OUT/payload_mmode_uart.elf" "$OUT/payload_mmode_uart.bin"
+"${CROSS}objdump" -d "$OUT/payload_mmode_uart.elf" > "$OUT/payload_mmode_uart.dis"
+echo "payload stub: $OUT/payload_mmode_uart.bin ($(wc -c < "$OUT/payload_mmode_uart.bin") bytes)"
+
+if [ "$PAYLOAD_ONLY" = "1" ]; then
+    sha256sum "$OUT/payload_mmode_uart.bin"
+    echo "DONE (payload only)"
+    exit 0
+fi
+
+# ---- OpenSBI v1.4 fw_payload (generic platform) -----------------------------
+SRC="$OUT/opensbi-src"
+if [ ! -d "$SRC/.git" ]; then
+    git clone --depth 1 --branch "$OPENSBI_TAG" "$OPENSBI_URL" "$SRC"
+fi
+GOT_SHA=$(git -C "$SRC" rev-parse HEAD)
+if [ "$GOT_SHA" != "$OPENSBI_SHA" ]; then
+    echo "ERROR: OpenSBI pin mismatch: got $GOT_SHA want $OPENSBI_SHA" >&2
+    exit 3
+fi
+
+# FW_TEXT_START=0x80000000 (SoC RAM base); payload lands at the fw_payload
+# default offset 0x200000 → 0x8020_0000, standard S-mode entry address.
+make -C "$SRC" -j"$(nproc)" \
+    CROSS_COMPILE="$OPENSBI_CROSS" PLATFORM=generic \
+    FW_TEXT_START=0x80000000 \
+    FW_PAYLOAD=y FW_PAYLOAD_PATH="$OUT/payload_mmode_uart.bin" \
+    FW_JUMP=n FW_DYNAMIC=n \
+    >"$OUT/opensbi_build.log" 2>&1 || {
+        echo "ERROR: OpenSBI build failed — see $OUT/opensbi_build.log" >&2
+        tail -20 "$OUT/opensbi_build.log" >&2
+        exit 4
+    }
+
+cp "$SRC/build/platform/generic/firmware/fw_payload.elf" "$OUT/fw_payload.elf"
+cp "$SRC/build/platform/generic/firmware/fw_payload.bin" "$OUT/fw_payload.bin"
+echo "fw_payload: $OUT/fw_payload.bin ($(wc -c < "$OUT/fw_payload.bin") bytes)"
+sha256sum "$OUT/payload_mmode_uart.bin" "$OUT/fw_payload.bin"
+echo "DONE"

@@ -1,0 +1,106 @@
+# Probe: OpenSBI-lane M-mode payload boots in the soc_top_64 sim RAM.
+#
+# Loads the payload built by scripts/os/build_opensbi_rv64_soc.shs
+# (build/os/opensbi_rv64_soc/payload_mmode_uart.bin) into DRAM @ 0x8000_0000
+# via ram64_write, runs the real core64 datapath, and asserts the UART marker
+# "OSBI-PAYLOAD-OK" plus the CLINT-mtime flag '+' appears in the uart_tx log.
+#
+# Fallback: when the build artifact is absent (no cross-gcc / offline), an
+# embedded hand-encoded copy of the same RV64I payload runs instead — byte
+# identical to the gcc output (verified against payload_mmode_uart.dis).
+#
+# Scope note: full OpenSBI fw_payload is NOT booted here — soc_top_64's
+# runnable subset is M-mode-only (no S-mode trap routing / PMP / MMU), so the
+# gate exercises the M-mode UART+CLINT payload; see
+# doc/07_guide/os/opensbi_rv64_soc.md for the gap list.
+use std.hardware.soc_rtl.soc_top_64.{SocTop64State, soc_top_64_init, soc_top_64_tick}
+use std.hardware.soc_rtl.ram64.{ram64_write}
+
+extern fn rt_file_read_bytes(path: text) -> [u8]?
+
+fn check(name: text, ok: bool) -> i64:
+    if ok:
+        print("PASS {name}")
+        return 0
+    print("FAIL {name}")
+    1
+
+fn payload_words() -> [i64]:
+    """Hand-encoded RV64I payload, word-for-word the gcc stub output:
+    print "OSBI-PAYLOAD-OK" to UART THR @ 0x1000_0000, read CLINT mtime
+    @ 0x0200_BFF8, print '+' (nonzero) / '-' (zero) + NL, spin @ +0x44."""
+    [
+        0x100002B7,  # lui   t0, 0x10000      UART base
+        0x0200C3B7,  # lui   t2, 0x200C       CLINT mtime+8
+        0x00000617,  # auipc a2, 0
+        0x04060613,  # addi  a2, a2, 64       a2 = &msg
+        0x00064303,  # putc: lbu t1, 0(a2)
+        0x00030863,  # beqz  t1, clint
+        0x00628023,  # sb    t1, 0(t0)        UART THR write
+        0x00160613,  # addi  a2, a2, 1
+        0xFF1FF06F,  # j     putc
+        0xFF83BE03,  # clint: ld t3, -8(t2)   CLINT mtime read
+        0x000E0663,  # beqz  t3, dead
+        0x02B00313,  # li    t1, '+'
+        0x0080006F,  # j     flag
+        0x02D00313,  # dead: li t1, '-'
+        0x00628023,  # flag: sb t1, 0(t0)
+        0x00A00313,  # li    t1, 10
+        0x00628023,  # sb    t1, 0(t0)
+        0x0000006F,  # spin: j spin
+        0x4942534F,  # msg: "OSBI"
+        0x5941502D,  #      "-PAY"
+        0x44414F4C,  #      "LOAD"
+        0x004B4F2D   #      "-OK\0"
+    ]
+
+fn main() -> i64:
+    val path = "build/os/opensbi_rv64_soc/payload_mmode_uart.bin"
+    val bytes = rt_file_read_bytes(path) ?? []
+    var soc = soc_top_64_init(0x1000)
+    var ram = soc.ram
+    var nbytes = 0
+    if bytes.len() > 0:
+        print("payload source: built .bin ({path}, {bytes.len()} bytes)")
+        var i = 0
+        while i < bytes.len():
+            ram = ram64_write(ram, i, 1, bytes[i] as i64)
+            i = i + 1
+        nbytes = bytes.len()
+    else:
+        print("payload source: embedded hand-encoded fallback (build artifact missing)")
+        val words = payload_words()
+        var i = 0
+        while i < words.len():
+            ram = ram64_write(ram, i * 4, 4, words[i])
+            i = i + 1
+        nbytes = words.len() * 4
+    soc.ram = ram
+    soc.core.pc = 0x8000_0000
+
+    var t = 0
+    while t < 300:
+        soc = soc_top_64_tick(soc)
+        t = t + 1
+
+    # Expected UART transcript: "OSBI-PAYLOAD-OK" + '+' (mtime ticking) + NL
+    val expected: [i64] = [79, 83, 66, 73, 45, 80, 65, 89, 76, 79, 65, 68, 45, 79, 75, 43, 10]
+    print("uart_tx.len={soc.uart_tx.len()} pc={soc.core.pc}")
+    var fails = 0
+    fails = fails + check("payload loaded into RAM @ 0x80000000 ({nbytes} bytes)", nbytes > 0)
+    fails = fails + check("uart_tx has 17 bytes", soc.uart_tx.len() == expected.len())
+    var all_eq = soc.uart_tx.len() == expected.len()
+    if all_eq:
+        var j = 0
+        while j < expected.len():
+            if soc.uart_tx[j] != expected[j]:
+                all_eq = false
+                print("  uart_tx[{j}] = {soc.uart_tx[j]} want {expected[j]}")
+            j = j + 1
+    fails = fails + check("uart marker 'OSBI-PAYLOAD-OK' + CLINT '+' flag + NL", all_eq)
+    fails = fails + check("payload parked in spin loop @ 0x80000044", soc.core.pc == 0x8000_0044)
+    if fails == 0:
+        print("OPENSBI BOOT PROBE: ALL PASS")
+        return 0
+    print("OPENSBI BOOT PROBE: {fails} FAIL")
+    1
