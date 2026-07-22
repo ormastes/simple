@@ -367,10 +367,33 @@ pub(crate) fn compile_binop<M: Module>(
                 };
                 let cmp_i8 = builder.ins().fcmp(cc, lhs, rhs);
                 ensure_i64(builder, cmp_i8)
+            } else if vreg_is_text(ctx, left_vreg) && vreg_is_text(ctx, right_vreg) {
+                // P0 fix (2026-07-22): text ordering compare. Mirrors the
+                // vreg_is_text fast path BinOp::Eq already has just below
+                // (compile_text_eq_with_identity_fast_path / rt_string_eq) --
+                // previously only Eq/NotEq special-cased text operands here;
+                // Lt/Gt/LtEq/GtEq fell straight into the raw-integer icmp arm
+                // below, comparing string HANDLE/pointer values instead of
+                // content (e.g. `"foo" < "bar"` was address-dependent, not
+                // alphabetical). rt_text_cmp_any (runtime_native.c) returns a
+                // strcmp-style signed result; compare that against 0 with the
+                // requested predicate. See
+                // doc/08_tracking/bug/sspec_test_path_false_green_undercount_2026-07-20.md.
+                let cmp = call_runtime_2(ctx, builder, "rt_text_cmp_any", lhs, rhs);
+                let zero = builder.ins().iconst(types::I64, 0);
+                let cc = match op {
+                    BinOp::Lt => IntCC::SignedLessThan,
+                    BinOp::Gt => IntCC::SignedGreaterThan,
+                    BinOp::LtEq => IntCC::SignedLessThanOrEqual,
+                    BinOp::GtEq => IntCC::SignedGreaterThanOrEqual,
+                    _ => unreachable!(),
+                };
+                let cmp_i8 = builder.ins().icmp(cc, cmp, zero);
+                ensure_i64(builder, cmp_i8)
             } else {
                 // Native integer comparison. Works correctly for raw untagged
                 // integers (which is what native codegen uses). String ordering
-                // via < > operators is handled by explicit runtime calls in source.
+                // via < > operators is handled by the vreg_is_text arm above.
                 let use_unsigned = lhs_signed == Some(false) || vreg_is_signed(ctx, right_vreg) == Some(false);
                 let lhs = ensure_i64_typed(builder, pre_lhs, Some(!use_unsigned));
                 let rhs = ensure_i64_typed(builder, pre_rhs, Some(!use_unsigned));

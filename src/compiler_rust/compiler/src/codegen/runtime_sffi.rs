@@ -373,6 +373,15 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_hash_text", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_str_hash", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_eq", &[I64, I64], &[I64]),
+    // P0 fix (2026-07-22): text ordering compares (`<` `>` `<=` `>=`) need this
+    // registered so codegen/instr/core.rs's Lt/Gt/LtEq/GtEq text fast path can
+    // call it. Runtime side (rt_text_cmp_any, runtime_native.c) already existed
+    // for the self-hosted .spl MIR lowering path (rt_text_cmp_any doc comment,
+    // "Task #178 text3 lane") but was never wired into the Rust seed's cranelift
+    // codegen -- unlike rt_string_eq/Eq's vreg_is_text fast path just above,
+    // there was no equivalent for ordering, so string `<`/`>` fell through to a
+    // raw pointer/handle icmp. See doc/08_tracking/bug/sspec_test_path_false_green_undercount_2026-07-20.md.
+    RuntimeFuncSpec::new("rt_text_cmp_any", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_len", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_data", &[I64], &[I64]), // RuntimeValue string -> raw ptr
     RuntimeFuncSpec::new("rt_string_char_at", &[I64, I64], &[I64]),

@@ -217,6 +217,14 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             | "rt_enum_id"
             | "rt_enum_payload"
             | "rt_string_eq"
+            // P0 fix (2026-07-22): rt_text_cmp_any backs the codegen/instr/core.rs
+            // vreg_is_text fast path for BinOp::Lt/Gt/LtEq/GtEq (mirrors rt_string_eq
+            // just above, which backs the same fast path for BinOp::Eq). Like
+            // rt_string_eq it is emitted directly by codegen from a raw BinOp node,
+            // never via a MIR call node, so it must be a codegen root here or it is
+            // absent from `runtime_funcs` and call_runtime_2 panics with "missing
+            // runtime fn". See doc/08_tracking/bug/sspec_test_path_false_green_undercount_2026-07-20.md.
+            | "rt_text_cmp_any"
             | "rt_hash_text"
             | "rt_value_bool"
             | "rt_interp_call"

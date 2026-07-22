@@ -1796,6 +1796,55 @@ pub extern "C" fn rt_string_eq(string1: RuntimeValue, string2: RuntimeValue) -> 
     }
 }
 
+/// P0 fix (2026-07-22): lexicographic (byte-wise) ordering comparison for two
+/// strings. Backs native `<`/`<=`/`>`/`>=` on text operands -- mirrors
+/// rt_string_eq just above (which backs `==`/`!=` for the same
+/// codegen/instr/core.rs vreg_is_text fast path). Returns a strcmp-style
+/// signed result: <0 if string1 < string2, 0 if equal, >0 if string1 >
+/// string2 (shorter-common-prefix sorts first, matching runtime_native.c's
+/// C-side rt_text_cmp_any used by the self-hosted .spl MIR lowering path --
+/// see doc/08_tracking/bug/sspec_test_path_false_green_undercount_2026-07-20.md).
+/// Before this fix, `<`/`>` on text fell through to a raw pointer/handle
+/// `icmp`, comparing heap ADDRESSES instead of content.
+#[no_mangle]
+pub extern "C" fn rt_text_cmp_any(string1: RuntimeValue, string2: RuntimeValue) -> i64 {
+    let len1 = rt_string_len(string1);
+    let len2 = rt_string_len(string2);
+
+    if len1 <= 0 && len2 <= 0 {
+        return 0;
+    }
+    if len1 <= 0 {
+        return -1;
+    }
+    if len2 <= 0 {
+        return 1;
+    }
+
+    let data1 = rt_string_data(string1);
+    let data2 = rt_string_data(string2);
+
+    if data1.is_null() && data2.is_null() {
+        return 0;
+    }
+    if data1.is_null() {
+        return -1;
+    }
+    if data2.is_null() {
+        return 1;
+    }
+
+    unsafe {
+        let slice1 = std::slice::from_raw_parts(data1, len1 as usize);
+        let slice2 = std::slice::from_raw_parts(data2, len2 as usize);
+        match slice1.cmp(slice2) {
+            std::cmp::Ordering::Less => -1,
+            std::cmp::Ordering::Equal => 0,
+            std::cmp::Ordering::Greater => 1,
+        }
+    }
+}
+
 /// Get a single character from a string at the given index.
 /// Returns the character as a new single-character string (RuntimeValue).
 /// Returns nil (TAG_SPECIAL 3) if index is out of bounds.
