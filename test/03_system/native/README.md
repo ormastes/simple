@@ -26,7 +26,7 @@ env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 <self-hosted-simple> native-bu
 | `option_try_unwrap_ifval_text.spl` | `.?` + `if val` payload unwrap (text) | see below | **42** | **PASS** | payload leaks/misdecodes |
 | `option_try_unwrap_ifval_struct.spl` | `.?` + `if val` payload unwrap (struct) | see below | **42** | **PASS** | fields misread (both default to index 0) |
 | `option_try_unwrap_ifval_none.spl` | `.?` + `if val` None short-circuit (i64) | see below | **42** | **PASS** | None wrongly treated as Some |
-| `option_try_unwrap_ifval_f64_XFAIL.spl` | `.?` + `if val` payload unwrap (f64) | — | **42** | **XFAIL** (gets 1) | consumer-side decode gap, see below |
+| `option_try_unwrap_ifval_float.spl` | `.?` + `if val` payload unwrap (f64/f32) | source update | **42** | SOURCE FIX / execution pending | raw payload bits reached a numeric cast instead of a bitcast |
 | `option_nullcoalesce_struct.spl` | `??` payload struct field-name provenance (Some side) | see below | **42** | **PASS** | fields misread (both default to index 0) |
 | `option_nullcoalesce_struct_none.spl` | `??` default-expr struct field-name provenance (None side) | see below | **42** | **PASS** | fields misread (both default to index 0) |
 | `enum_f64_payload_precision.spl` | LLVM enum f64 payload-word ABI | — | **30** | SOURCE FIX / execution pending | f64 bits numerically converted |
@@ -82,9 +82,9 @@ left/Option operand, (2) `struct_value_syms` on `left_local` (raw migration
 form), (3) `struct_value_syms` on `right_local` (the default expression's own
 construction) once it exists.
 
-## XFAIL: `option_try_unwrap_ifval_f64_XFAIL.spl`
+## SOURCE FIX: `option_try_unwrap_ifval_float.spl`
 
-Returns **1**, expected **42** (i.e. `v == 3.5` is false). The f64 **encode**
+Previously returned **1**, expected **42** (i.e. `v == 3.5` was false). The f64/f32 **encode**
 side is fixed (see above — verified bit-correct in the LLVM IR). The
 **decode/consumption** side is a *separate*, deeper defect: `ExistsCheck`'s
 merged result local is intentionally kept i64-typed (`alloca i64`, uniform
@@ -97,10 +97,11 @@ backend's argument/copy coercion otherwise picks. Attempting to make
 `ExistsCheck`'s own result local F64-typed breaks the None-branch sentinel
 emission (`emit_const(result_local, Int(3), F64)` is invalid LLVM IR: "add
 double 3, 0") and desyncs from the outer sentinel comparison, which is not
-type-aware. The real fix belongs at the *consumer* (the `v == 3.5` comparison
-lowering, or the `if val` bind site that materializes `v`) — a distinct,
-unlocated subsystem from `ExistsCheck` itself. Not fixed in this pass; filed
-in the bug doc.
+type-aware. The consumer fix keeps that raw sentinel comparison unchanged,
+then temporarily binds `v` to the existing typed payload decoder while
+lowering the present branch. Existing `local_hir_types` provenance carries
+the f64/f32 inner type; no parallel Option representation was added. Rebuilt
+execution is pending.
 
 ## SOURCE FIX: `enum_f64_payload_precision.spl`
 

@@ -1202,6 +1202,48 @@ impl MirLowering:
         """Lower if expression."""
         val cond_local = self.lower_expr(cond)
 
+        # `if val v = option.?:` is parser-desugared to a raw binding followed
+        # by `v != nil`. Float payload bits must stay in that raw i64 binding
+        # until the sentinel comparison has run, then become a real f32/f64
+        # only while lowering the present branch.
+        var if_val_symbol_id = -1
+        var if_val_raw_local = LocalId(id: 0)
+        var if_val_payload_type = MirType.i64()
+        var has_if_val_float_binding = false
+        match cond.kind:
+            case HirExprKind.Binary(HirBinOp.NotEq, left, right):
+                var right_is_nil = false
+                match right.kind:
+                    case HirExprKind.NilLit:
+                        right_is_nil = true
+                    case _:
+                        ()
+                if right_is_nil:
+                    match left.kind:
+                        case HirExprKind.Var(symbol) | HirExprKind.NamedVar(symbol, _):
+                            if self.local_map.has(symbol.id):
+                                val candidate = self.local_map[symbol.id]
+                                val candidate_type = self.local_mir_type_of(candidate)
+                                if val found_candidate_type = candidate_type:
+                                    match found_candidate_type.kind:
+                                        case MirTypeKind.I64:
+                                            if self.local_hir_types.has(candidate.id):
+                                                val semantic_type = self.local_hir_types[candidate.id]
+                                                match semantic_type.kind:
+                                                    case HirTypeKind.Float(_):
+                                                        if_val_symbol_id = symbol.id
+                                                        if_val_raw_local = candidate
+                                                        if_val_payload_type = self.lower_type(semantic_type)
+                                                        has_if_val_float_binding = true
+                                                    case _:
+                                                        ()
+                                        case _:
+                                            ()
+                        case _:
+                            ()
+            case _:
+                ()
+
         var b = self.builder
         val then_block = b.new_block(Some("then"))
         val else_block = b.new_block(Some("else"))
@@ -1214,7 +1256,12 @@ impl MirLowering:
         var b2 = self.builder
         b2.switch_to_block(then_block)
         self.builder = b2
+        if has_if_val_float_binding:
+            val decoded_if_val = self.enum_payload_value(if_val_raw_local, if_val_payload_type)
+            self.local_map[if_val_symbol_id] = decoded_if_val
         val then_result = self.lower_block_expected(then_, expected_type)
+        if has_if_val_float_binding:
+            self.local_map[if_val_symbol_id] = if_val_raw_local
         var b3 = self.builder
         var result_defined = false
         if not b3.current_block_has_explicit_terminator():

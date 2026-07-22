@@ -237,7 +237,12 @@ the shared binary — deploys require explicit user go-ahead).
 - Hosted canonical `i64?` `.?`/`if val` binding is source-fixed at the shared
   `ExistsCheck` payload boundary: the outer `Some` handle is unwrapped before
   generic runtime decoding. Hosted and cross-target fixtures pin `7`, not the
-  former handle-derived `84`; rebuilt executable proof remains pending. See
+  former handle-derived `84`. The same raw merge now records f64/f32 inner
+  provenance: `lower_if` performs the nil-sentinel test before remapping only
+  the present branch through the existing bit-preserving payload decoder.
+  The selected `option_is_none_map` strict dual-backend case covers both float
+  widths on Linux, macOS, Windows, and FreeBSD; rebuilt executable proof
+  remains pending. See
   `doc/08_tracking/bug/hosted_native_option_try_unwrap_payload_leak_2026-07-19.md`.
 - LLVM enum f64 payloads now preserve the runtime payload-word ABI in both
   directions: `rt_enum_new` receives the f64 bits as i64, while MIR lowering

@@ -4,9 +4,9 @@
 **Status:** RESOLVED 2026-07-20 for i64/text/struct/None — root-fixed and
 verified on a REBUILT, RUN native-build executable (not just source-text
 regression). f64/f32 payload **encode** is also root-fixed and verified
-bit-correct in the emitted LLVM IR; f64/f32 payload **decode/consumption**
-through `if val` remains open as a distinct, deeper defect (see "f64/f32
-decode — OPEN" below). Bool was already correct (never affected).
+bit-correct in the emitted LLVM IR; f64/f32 payload **decode/consumption** is
+source-fixed at the `if val` binding boundary, with rebuilt execution pending
+(see "f64/f32 decode" below). Bool was already correct (never affected).
 **Severity:** P1 — silent miscompile (wrong value, no diagnostic) on a
 first-class language construct.
 **Component:** compiler codegen — Option/`.?` (try-op) + `if val` binding
@@ -195,18 +195,19 @@ invalid LLVM IR (`add ptr 3, 0` / `add double 3, 0`) and desynced from the
 outer sentinel check. **This was reverted** — `ExistsCheck`'s own result slot
 must stay i64-uniform; a per-type decode belongs at the consumer, not here.
 
-## f64/f32 decode — OPEN
+## f64/f32 decode — SOURCE FIXED (2026-07-22), rebuilt execution pending
 
 With the encode fix landed, the f64 payload's raw bits are now correct
 end-to-end through `ExistsCheck`'s i64-uniform slot — but nothing decodes
 those bits back to a real `double` before `v` is used in a float context
-(e.g. `v == 3.5`). The repro (`test/03_system/native/option_try_unwrap_ifval_f64_XFAIL.spl`)
-returns **1** (comparison false) instead of **42**. The fix belongs at
-whichever subsystem materializes `v`'s real, typed value from the raw
-i64-sentinel-tested slot — the `if val` bind site, or the float comparison
-lowering itself deciding it must `bitcast` an Option-sourced i64 operand
-before an `fcmp` — a distinct, unlocated subsystem from `ExistsCheck`. Not
-fixed in this pass. Tracked as XFAIL in the native gate; flip once fixed.
+(e.g. `v == 3.5`). The former repro returned **1** (comparison false) instead
+of **42**. `ExistsCheck` now records its inner semantic type on the raw merge
+local. `lower_if` keeps the generated `v != nil` sentinel comparison raw, then
+temporarily remaps the present-branch binding through `enum_payload_value`.
+That existing decoder bitcasts f64 and now reverses the established f32
+promotion by bitcasting to f64 before narrowing. The renamed fixture covers
+both widths; the already-selected `option_is_none_map` strict dual-backend
+case carries the same oracle on Linux, macOS, Windows, and FreeBSD.
 
 Cross-reference: a sibling lane independently found an ADJACENT-but-DIFFERENT
 instance in the same general "Option payload value escapes with its tag/raw
@@ -245,15 +246,15 @@ fix does not cover it).
   fields), expects **42**, PASS.
 - `test/03_system/native/option_try_unwrap_ifval_none.spl` — None
   short-circuit, expects **42**, PASS.
-- `test/03_system/native/option_try_unwrap_ifval_f64_XFAIL.spl` — f64,
-  expects **42**, currently **1** (XFAIL, see "f64/f32 decode — OPEN").
+- `test/03_system/native/option_try_unwrap_ifval_float.spl` — f64/f32,
+  expects **42**, source-fixed; rebuilt execution pending.
 - `test/03_system/native/option_nullcoalesce_struct.spl` — `??` struct,
   Some-branch, expects **42**, PASS.
 - `test/03_system/native/option_nullcoalesce_struct_none.spl` — `??` struct,
   None-branch (default expr), expects **42**, PASS.
-- `test/01_unit/compiler/mir/option_variant_order_source_spec.spl` — three
-  new source-text pin cases guarding all three root fixes (f64/f32 encode,
-  `.?` struct provenance, `??` struct provenance).
+- `test/01_unit/compiler/mir/option_variant_order_source_spec.spl` — source
+  pins guard float encode/decode, raw sentinel ordering, `.?` struct
+  provenance, and `??` struct provenance.
 
 ## Repro
 

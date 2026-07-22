@@ -2149,9 +2149,10 @@ impl MirLowering:
                 # `lower_if` (mir_lowering_stmts.spl) sidesteps it exactly
                 # this way, so mirror that proven pattern.
                 val base_local = self.lower_expr(base)
-                var result_type = MirType.i64()
-                if val expr_type = expr_value.type_:
-                    result_type = self.lower_type(expr_type)
+                # This slot is the raw payload-or-nil sentinel regardless of
+                # the HIR annotation. The generated outer `v != nil` must test
+                # it before lower_if materializes a typed present-branch value.
+                val result_type = MirType.i64()
                 # Struct-typed payload: `enum_payload_value`'s default arm
                 # (just below) hands back the raw ptrtoint'd handle
                 # untouched -- correct bits, but with no struct-name
@@ -2166,9 +2167,10 @@ impl MirLowering:
                 # can be attached to result_local once, mirroring how
                 # lower_result_unwrap/emit_resolved_direct_call register
                 # struct_value_syms for their own freshly-produced locals.
+                val exists_inner_type = self.option_inner_hir_type_for_local(base, base_local)
                 var result_struct_name = ""
-                if val exists_inner_type = self.option_inner_hir_type_for_local(base, base_local):
-                    match exists_inner_type.kind:
+                if val found_exists_inner_type = exists_inner_type:
+                    match found_exists_inner_type.kind:
                         case HirTypeKind.Named(exists_struct_symbol, _):
                             val exists_type_symbol = self.symbols.get_symbol(exists_struct_symbol)
                             if exists_type_symbol != nil:
@@ -2253,6 +2255,12 @@ impl MirLowering:
                     self.runtime_dict_locals[result_local.id] = true
                 if result_struct_name != "":
                     self.struct_value_syms[result_local.id] = result_struct_name
+                if val found_exists_inner_type = exists_inner_type:
+                    # Keep the merge slot raw-i64 so the generated `v != nil`
+                    # test can compare the nil sentinel. lower_if uses this
+                    # semantic type only after that test, while lowering the
+                    # present branch's bound value.
+                    self.local_hir_types[result_local.id] = found_exists_inner_type
 
                 var b_merge = self.builder
                 b_merge.switch_to_block(merge_block)

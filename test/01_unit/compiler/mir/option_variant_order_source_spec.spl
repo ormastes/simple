@@ -59,10 +59,25 @@ describe "MIR Option variant order":
         # ever going through ensure_option_handle).
         val source = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl") ?? ""
 
-        expect(source).to_contain("if val exists_inner_type = self.option_inner_hir_type_for_local(base, base_local):")
+        expect(source).to_contain("val exists_inner_type = self.option_inner_hir_type_for_local(base, base_local)")
         expect(source).to_contain("val fallback_struct_sym = self.struct_value_syms.get(base_local.id)")
         expect(source).to_contain("if result_struct_name != \"\":")
         expect(source).to_contain("self.struct_value_syms[result_local.id] = result_struct_name")
+
+    it "decodes float exists-check bindings only after the nil-sentinel test":
+        val dispatch = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl") ?? ""
+        val statements = rt_file_read_text("src/compiler/50.mir/mir_lowering_stmts.spl") ?? ""
+        val calls = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl") ?? ""
+        val cond_pos = statements.index_of("val cond_local = self.lower_expr(cond)") ?? -1
+        val decode_pos = statements.index_of("val decoded_if_val = self.enum_payload_value(if_val_raw_local, if_val_payload_type)") ?? -1
+        val restore_pos = statements.index_of("self.local_map[if_val_symbol_id] = if_val_raw_local") ?? -1
+
+        expect(dispatch).to_contain("self.local_hir_types[result_local.id] = found_exists_inner_type")
+        expect(dispatch).to_contain("val result_type = MirType.i64()")
+        expect(decode_pos).to_be_greater_than(cond_pos)
+        expect(restore_pos).to_be_greater_than(decode_pos)
+        expect(calls).to_contain("case MirTypeKind.F32:")
+        expect(calls).to_contain("val wide = b.emit_bitcast(mir_operand_copy(raw), MirType.f64())")
 
     it "registers struct-name provenance on a null-coalesce (??) result too":
         # `.?`/ExistsCheck and `??`/NullCoalesce share the exact same
