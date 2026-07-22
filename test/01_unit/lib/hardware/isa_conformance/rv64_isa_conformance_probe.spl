@@ -13,6 +13,7 @@
 #   XPASS [class] name    — expected failure that unexpectedly passed
 # Run: bin/simple run test/01_unit/lib/hardware/isa_conformance/rv64_isa_conformance_probe.spl
 use std.hardware.rv64gc_rtl.core.{CoreState64, core64_init, core64_combinational, core64_update}
+use std.hardware.rv64gc_rtl.decode.{RvcExpansion, rvc_expand}
 
 # ============================================================================
 # Check helpers
@@ -444,7 +445,24 @@ fn class_csr() -> i64:
     f = f + chk("csr", "csrrwi reads cleared value 8", r.st.rf.regs[6] == 8)
     f = f + chk("csr", "csrrwi wrote 31 (readback)", r.st.rf.regs[9] == 31)
     f = f + chk("csr", "mhartid == 0", r.st.rf.regs[7] == 0)
+    f = f + class_csr_mepc_align()
     f = f + class_csr_trap()
+    f
+
+fn class_csr_mepc_align() -> i64:
+    # IALIGN=16 (C implemented): `csrw mepc` must clear only bit 0, preserving
+    # bit 1 so a 2-byte-aligned compressed return address survives. Writing
+    # 0xB must read back 0xA (bit0 cleared, bit1 kept); the old & ~3 mask would
+    # wrongly yield 0x8.
+    var p: [u32] = []
+    p = p.push(addi(1, 0, 0xB))                  #  0: x1 = 0xB
+    p = p.push(enc_i(0x341, 1, 1, 0, 0x73))      #  1: csrrw x0, mepc, x1
+    p = p.push(enc_i(0x341, 0, 2, 2, 0x73))      #  2: csrr  x2, mepc
+    p = p.push(park())                           #  3
+    val r = run64(p, 20)
+    var f: i64 = 0
+    f = f + chk("csr", "csrw mepc keeps bit1, clears bit0 (0xB -> 0xA, IALIGN=16)",
+        r.st.rf.regs[2] == 0xA)
     f
 
 fn class_csr_trap() -> i64:
@@ -469,15 +487,123 @@ fn class_csr_trap() -> i64:
     f
 
 # ============================================================================
+# Byte-addressed fetch harness for RV64C (mixed 16/32-bit code)
+# ============================================================================
+# run64's `pc/4` index cannot fetch compressed streams (it re-reads the same
+# word after pc+=2). run64c fetches a real little-endian 32-bit word at the
+# byte-granular pc, so a c.* parcel occupies the low 16 bits exactly as the
+# core (and a real SoC) sees it. Beyond program end returns a park word so pc
+# settles instead of decoding zero-fill as an illegal 0x0000 parcel.
+
+fn pw(b: [i64], w: i64) -> [i64]:
+    """Append a 32-bit word as 4 little-endian bytes."""
+    var out = b
+    out = out.push(w & 0xFF)
+    out = out.push((w >> 8) & 0xFF)
+    out = out.push((w >> 16) & 0xFF)
+    out = out.push((w >> 24) & 0xFF)
+    out
+
+fn ph(b: [i64], h: i64) -> [i64]:
+    """Append a 16-bit compressed parcel as 2 little-endian bytes."""
+    var out = b
+    out = out.push(h & 0xFF)
+    out = out.push((h >> 8) & 0xFF)
+    out
+
+fn fetch32c(bytes: [i64], pc: i64) -> u32:
+    """Little-endian 32-bit fetch at a byte-granular pc; park beyond end."""
+    if pc < 0 or pc >= bytes.len():
+        return park()
+    var w: i64 = 0
+    var j = 0
+    while j < 4:
+        val a = pc + j
+        var by: i64 = 0
+        if a >= 0 and a < bytes.len():
+            by = bytes[a] & 0xFF
+        w = w | (by << (8 * j))
+        j = j + 1
+    w as u32
+
+fn run64c(bytes: [i64], steps: i64) -> IsaRun64:
+    """Tick the core over a byte-addressed mixed 16/32-bit program."""
+    var st = core64_init(0)
+    var mem = mem_new()
+    var i = 0
+    while i < steps and st.halt == false:
+        val insn = fetch32c(bytes, st.pc)
+        var comb = core64_combinational(st, insn, 0, st.rf)
+        if comb.dmem_re:
+            val rdata = mem_rd64(mem, comb.dmem_addr)
+            comb = core64_combinational(st, insn, rdata, st.rf)
+        if comb.dmem_we:
+            mem = mem_wr(mem, comb.dmem_addr, comb.dmem_wdata, comb.dmem_width)
+        st = core64_update(st, insn, comb, comb.a0_val, comb.a1_val)
+        i = i + 1
+    IsaRun64(st: st, mem: mem)
+
+# ============================================================================
+# RVC expander cross-check vs riscv64-linux-gnu-gcc -march=rv64gc + objdump.
+# Each (parcel -> expansion) pair below was produced by assembling the C insn
+# and its 32-bit equivalent and diffing objdump output (see report). c.mv /
+# c.add / c.jr / c.jalr assert the spec §16.3 canonical expansion (add rd,x0,
+# rs2 / jalr) which is also gcc-verified.
+# ============================================================================
+
+fn ckx(name: text, parcel: i64, want: i64) -> i64:
+    val e = rvc_expand(parcel as u32)
+    val got = e.insn as i64
+    chk("rvc_xcheck", "{name} 0x{parcel} -> 0x{want}", e.compressed and e.legal and got == want)
+
+fn class_rvc_crosscheck() -> i64:
+    var f: i64 = 0
+    # Quadrant 0
+    f = f + ckx("c.addi4spn", 0x0040, 0x00410413)
+    f = f + ckx("c.lw",       0x4080, 0x0004a403)
+    f = f + ckx("c.ld",       0x6480, 0x0084b403)
+    f = f + ckx("c.sw",       0xc0c0, 0x0084a223)
+    f = f + ckx("c.sd",       0xe880, 0x0084b823)
+    # Quadrant 1
+    f = f + ckx("c.addi",     0x0505, 0x00150513)
+    f = f + ckx("c.addiw",    0x35fd, 0xfff5859b)
+    f = f + ckx("c.li",       0x557d, 0xfff00513)
+    f = f + ckx("c.addi16sp", 0x6105, 0x02010113)
+    f = f + ckx("c.lui",      0x6605, 0x00001637)
+    f = f + ckx("c.srli",     0x8005, 0x00145413)
+    f = f + ckx("c.srai",     0x947d, 0x43f45413)
+    f = f + ckx("c.andi",     0x9861, 0xff847413)
+    f = f + ckx("c.sub",      0x8c05, 0x40940433)
+    f = f + ckx("c.subw",     0x9c05, 0x4094043b)
+    f = f + ckx("c.addw",     0x9c25, 0x0094043b)
+    # Quadrant 2
+    f = f + ckx("c.slli",     0x050e, 0x00351513)
+    f = f + ckx("c.lwsp",     0x4512, 0x00412503)
+    f = f + ckx("c.ldsp",     0x6522, 0x00813503)
+    f = f + ckx("c.jr",       0x8502, 0x00050067)
+    f = f + ckx("c.mv",       0x852e, 0x00b00533)
+    f = f + ckx("c.jalr",     0x9502, 0x000500e7)
+    f = f + ckx("c.add",      0x952e, 0x00b50533)
+    f = f + ckx("c.swsp",     0xc22a, 0x00a12223)
+    f = f + ckx("c.sdsp",     0xe42a, 0x00a13423)
+    f = f + ckx("c.ebreak",   0x9002, 0x00100073)
+    # Reserved / unsupported patterns must be flagged illegal (fail-closed).
+    var g: i64 = 0
+    if rvc_expand(0x0000u32).legal == false: g = 0 else: g = 1
+    f = f + chk("rvc_xcheck", "0x0000 all-zero parcel is illegal", g == 0)
+    if rvc_expand(0x9002u32).legal: g = 0 else: g = 1   # ebreak IS legal (sanity)
+    f = f + chk("rvc_xcheck", "c.ebreak legal (sanity vs illegal path)", g == 0)
+    f
+
+# ============================================================================
 # Class: traps_rvc:
 #  * misaligned load: WIRED (Lane DD) — core64_combinational suppresses the
 #    unaligned access and core64_update raises CAUSE_LOAD_MISALIGNED (4).
 #    Real assert (x3==99 handler reached AND mcause==4).
-#  * compressed (RVC): KNOWN GAP, honest XFAIL —
-#    16-bit parcel reassembly lives in the SoC fetch path
-#    (pipeline_phase/fetch_low), not in the direct core64_combinational
-#    interface; a raw c.addi word decodes as illegal/NOP here. (rv32 PL core
-#    c.add decode bug precedent: commit a9a344e96a3.)
+#  * compressed (RVC): NOW WIRED (Lane PP) — decode.spl rvc_expand maps each
+#    16-bit parcel to its 32-bit equivalent before the decoder; core64
+#    advances pc by 2 (link = pc+2). Real asserts: c.addi/c.li/c.add executed
+#    through the core with pc+2 checks, plus an illegal parcel -> cause 2.
 # ============================================================================
 
 fn class_traps_rvc() -> i64:
@@ -506,14 +632,55 @@ fn class_traps_rvc() -> i64:
     f = f + chk("traps_rvc", "misaligned lw mcause == 4 (load address misaligned)",
         r.st.rf.regs[4] == 4)
 
-    # Compressed c.addi x10, 1 fed through the direct 32-bit fetch interface.
-    var p2: [u32] = []
-    p2 = p2.push(0x00000505u32)                # 0: c.addi x10, 1 (16-bit parcel)
-    p2 = p2.push(park())                       # 1
-    val r2 = run64(p2, 10)
-    f = f + chk_x("traps_rvc", "compressed c.addi executes at core interface",
-        r2.st.rf.regs[10] == 1)
-    f
+    # Executed compressed sequence (all gcc-assembled parcels), byte-fetched:
+    #   0: c.li  a0,-1   2: c.addi a0,1   4: c.li a1,5   6: c.add a0,a1
+    #   8: c.slli a1,3  10: c.mv a2,a1   -> park @ 12
+    # Correct RV64C: 6 parcels * 2 bytes => final pc == 12 (pc+=2, not +=4).
+    var c: [i64] = []
+    c = ph(c, 0x557d)   # c.li   a0, -1
+    c = ph(c, 0x0505)   # c.addi a0, 1     -> a0 = 0
+    c = ph(c, 0x4595)   # c.li   a1, 5
+    c = ph(c, 0x952e)   # c.add  a0, a1    -> a0 = 5
+    c = ph(c, 0x058e)   # c.slli a1, 3     -> a1 = 40
+    c = ph(c, 0x862e)   # c.mv   a2, a1    -> a2 = 40
+    c = pw(c, 0x0000006F)  # park @ 12
+    val rc = run64c(c, 30)
+    # Isolated c.li + c.addi (2 parcels): a0 = -1 + 1 = 0, pc parks at 4.
+    var c2: [i64] = []
+    c2 = ph(c2, 0x557d)   # c.li   a0, -1
+    c2 = ph(c2, 0x0505)   # c.addi a0, 1
+    c2 = pw(c2, 0x0000006F)  # park @ 4
+    val rc2 = run64c(c2, 20)
+    f = f + chk("traps_rvc", "c.li a0,-1 then c.addi a0,1 -> a0 == 0 (imm sign-ext)",
+        rc2.st.rf.regs[10] == 0)
+    f = f + chk("traps_rvc", "isolated 2 parcels park at pc == 4 (pc+=2 twice)",
+        rc2.st.pc == 4)
+    f = f + chk("traps_rvc", "c.add a0,a1 -> a0 == 5 (register-register RVC)",
+        rc.st.rf.regs[10] == 5)
+    f = f + chk("traps_rvc", "c.slli a1,3 -> a1 == 40 (shamt via bit12|[6:2])",
+        rc.st.rf.regs[11] == 40)
+    f = f + chk("traps_rvc", "c.mv a2,a1 -> a2 == 40 (add rd,x0,rs2 form)",
+        rc.st.rf.regs[12] == 40)
+    f = f + chk("traps_rvc", "6 compressed parcels advance pc by 2 each (pc == 12)",
+        rc.st.pc == 12)
+
+    # Illegal 16-bit parcel 0x0000 must trap to mtvec with cause 2, fail-closed.
+    var ic: [i64] = []
+    ic = pw(ic, 0x03000413)   #  0: li s0, 48         (handler addr)
+    ic = pw(ic, 0x30541073)   #  4: csrw mtvec, s0
+    ic = ph(ic, 0x0000)       #  8: illegal compressed parcel
+    ic = ph(ic, 0x0000)       # 10: pad
+    var k = 12
+    while k < 48:
+        ic = pw(ic, 0x0000006F)   # park pad up to handler @ 48
+        k = k + 4
+    ic = pw(ic, 0x34202273)   # 48: csrr x4 (tp), mcause
+    ic = pw(ic, 0x0000006F)   # 52: park
+    val ri = run64c(ic, 40)
+    f = f + chk("traps_rvc", "illegal 0x0000 parcel traps: mcause == 2 (illegal insn)",
+        ri.st.rf.regs[4] == 2)
+
+    f + class_rvc_crosscheck()
 
 # ============================================================================
 # Main

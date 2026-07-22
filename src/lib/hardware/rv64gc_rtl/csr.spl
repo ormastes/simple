@@ -195,8 +195,10 @@ fn csr64_write(csr: CsrFile64, addr: u32, value: i64) -> CsrFile64:
     else if addr == CSR_ADDR_MSCRATCH:
         out.mscratch = value
     else if addr == CSR_ADDR_MEPC:
-        # mepc must be aligned to 4 bytes (IALIGN=32)
-        out.mepc = value & 0xFFFFFFFFFFFFFFFC
+        # IALIGN=16 (C implemented): only mepc[0] is forced 0; mepc[1] is
+        # writable, so a trap on / mret to a 2-byte-aligned compressed insn
+        # returns to the exact pc. (Was & ~3, which truncated compressed pcs.)
+        out.mepc = value & 0xFFFFFFFFFFFFFFFE
     else if addr == CSR_ADDR_MCAUSE:
         out.mcause = value
     else if addr == CSR_ADDR_MTVAL:
@@ -276,6 +278,135 @@ fn csr64_update_mip_s(csr: CsrFile64, mtip: bool, msip: bool, meip: bool, seip: 
     out
 
 # ============================================================================
+# Extended CSR storage — PMP + menvcfg/mcounteren/scounteren
+# ============================================================================
+#
+# Readable/writable STORAGE ONLY (no enforcement).  OpenSBI's early boot
+# programs PMP (pmpcfg0/pmpaddr0..) and the counter-enable CSRs; without
+# somewhere to land those writes the core would trap and stall.  These are
+# kept in a separate struct (not CsrFile64) so the M-mode trap machinery in
+# trap.spl — which full-literal-constructs CsrFile64 — is unaffected.
+#
+# Addresses:
+#   pmpcfg0-3   0x3A0-0x3A3  (pmpcfg1/pmpcfg3 are RV64-reserved in real HW —
+#                             stored here anyway, storage-only, no fault)
+#   pmpaddr0-15 0x3B0-0x3BF
+#   menvcfg     0x30A        mcounteren 0x306   scounteren 0x106
+#
+# NOTE: no address matching / access enforcement is performed.  A future lane
+# wiring real PMP checks must add it in the fetch/load/store path.
+# VHDL synth subset: i64/bool/struct only — individual fields, no arrays.
+# ============================================================================
+
+val CSR_ADDR_PMPCFG0: u32    = 0x3A0
+val CSR_ADDR_PMPCFG2: u32    = 0x3A2
+val CSR_ADDR_PMPADDR0: u32   = 0x3B0
+val CSR_ADDR_PMPADDR15: u32  = 0x3BF
+val CSR_ADDR_MENVCFG: u32    = 0x30A
+val CSR_ADDR_MCOUNTEREN: u32 = 0x306
+val CSR_ADDR_SCOUNTEREN: u32 = 0x106
+
+struct CsrExt64:
+    """PMP + counter-enable CSR storage (no enforcement)."""
+    pmpcfg0: i64
+    pmpcfg1: i64
+    pmpcfg2: i64
+    pmpcfg3: i64
+    pmpaddr0: i64
+    pmpaddr1: i64
+    pmpaddr2: i64
+    pmpaddr3: i64
+    pmpaddr4: i64
+    pmpaddr5: i64
+    pmpaddr6: i64
+    pmpaddr7: i64
+    pmpaddr8: i64
+    pmpaddr9: i64
+    pmpaddr10: i64
+    pmpaddr11: i64
+    pmpaddr12: i64
+    pmpaddr13: i64
+    pmpaddr14: i64
+    pmpaddr15: i64
+    menvcfg: i64
+    mcounteren: i64
+    scounteren: i64
+
+fn csr_ext64_create() -> CsrExt64:
+    """All extended CSRs reset to 0."""
+    CsrExt64(
+        pmpcfg0: 0, pmpcfg1: 0, pmpcfg2: 0, pmpcfg3: 0,
+        pmpaddr0: 0, pmpaddr1: 0, pmpaddr2: 0, pmpaddr3: 0,
+        pmpaddr4: 0, pmpaddr5: 0, pmpaddr6: 0, pmpaddr7: 0,
+        pmpaddr8: 0, pmpaddr9: 0, pmpaddr10: 0, pmpaddr11: 0,
+        pmpaddr12: 0, pmpaddr13: 0, pmpaddr14: 0, pmpaddr15: 0,
+        menvcfg: 0, mcounteren: 0, scounteren: 0
+    )
+
+fn csr_ext64_known(addr: u32) -> bool:
+    """True for every extended-CSR address (PMP + counter-enable)."""
+    if addr >= CSR_ADDR_PMPADDR0 and addr <= CSR_ADDR_PMPADDR15:
+        return true
+    if addr == CSR_ADDR_PMPCFG0 or addr == 0x3A1 or addr == CSR_ADDR_PMPCFG2 or addr == 0x3A3:
+        return true
+    addr == CSR_ADDR_MENVCFG or addr == CSR_ADDR_MCOUNTEREN or addr == CSR_ADDR_SCOUNTEREN
+
+fn csr_ext64_read(ext: CsrExt64, addr: u32) -> i64:
+    """Read an extended CSR by address.  Unknown -> 0."""
+    if addr == CSR_ADDR_PMPCFG0: return ext.pmpcfg0
+    if addr == 0x3A1: return ext.pmpcfg1
+    if addr == CSR_ADDR_PMPCFG2: return ext.pmpcfg2
+    if addr == 0x3A3: return ext.pmpcfg3
+    if addr == 0x3B0: return ext.pmpaddr0
+    if addr == 0x3B1: return ext.pmpaddr1
+    if addr == 0x3B2: return ext.pmpaddr2
+    if addr == 0x3B3: return ext.pmpaddr3
+    if addr == 0x3B4: return ext.pmpaddr4
+    if addr == 0x3B5: return ext.pmpaddr5
+    if addr == 0x3B6: return ext.pmpaddr6
+    if addr == 0x3B7: return ext.pmpaddr7
+    if addr == 0x3B8: return ext.pmpaddr8
+    if addr == 0x3B9: return ext.pmpaddr9
+    if addr == 0x3BA: return ext.pmpaddr10
+    if addr == 0x3BB: return ext.pmpaddr11
+    if addr == 0x3BC: return ext.pmpaddr12
+    if addr == 0x3BD: return ext.pmpaddr13
+    if addr == 0x3BE: return ext.pmpaddr14
+    if addr == 0x3BF: return ext.pmpaddr15
+    if addr == CSR_ADDR_MENVCFG: return ext.menvcfg
+    if addr == CSR_ADDR_MCOUNTEREN: return ext.mcounteren
+    if addr == CSR_ADDR_SCOUNTEREN: return ext.scounteren
+    0
+
+fn csr_ext64_write(ext: CsrExt64, addr: u32, value: i64) -> CsrExt64:
+    """Write an extended CSR by address.  Unknown -> unchanged."""
+    var out = ext
+    if addr == CSR_ADDR_PMPCFG0: out.pmpcfg0 = value
+    else if addr == 0x3A1: out.pmpcfg1 = value
+    else if addr == CSR_ADDR_PMPCFG2: out.pmpcfg2 = value
+    else if addr == 0x3A3: out.pmpcfg3 = value
+    else if addr == 0x3B0: out.pmpaddr0 = value
+    else if addr == 0x3B1: out.pmpaddr1 = value
+    else if addr == 0x3B2: out.pmpaddr2 = value
+    else if addr == 0x3B3: out.pmpaddr3 = value
+    else if addr == 0x3B4: out.pmpaddr4 = value
+    else if addr == 0x3B5: out.pmpaddr5 = value
+    else if addr == 0x3B6: out.pmpaddr6 = value
+    else if addr == 0x3B7: out.pmpaddr7 = value
+    else if addr == 0x3B8: out.pmpaddr8 = value
+    else if addr == 0x3B9: out.pmpaddr9 = value
+    else if addr == 0x3BA: out.pmpaddr10 = value
+    else if addr == 0x3BB: out.pmpaddr11 = value
+    else if addr == 0x3BC: out.pmpaddr12 = value
+    else if addr == 0x3BD: out.pmpaddr13 = value
+    else if addr == 0x3BE: out.pmpaddr14 = value
+    else if addr == 0x3BF: out.pmpaddr15 = value
+    else if addr == CSR_ADDR_MENVCFG: out.menvcfg = value
+    else if addr == CSR_ADDR_MCOUNTEREN: out.mcounteren = value
+    else if addr == CSR_ADDR_SCOUNTEREN: out.scounteren = value
+    out
+
+# ============================================================================
 # Spec-facing alias
 # ============================================================================
 
@@ -286,6 +417,9 @@ export CsrFile64, CsrRwResult64
 export csr64_create, csr64_read, csr64_write, csr64_rw, csr64_tick, csr64_update_mip
 export csr64_update_mip_s
 export misa_rv64imac, csr64_init
+export CsrExt64, csr_ext64_create, csr_ext64_read, csr_ext64_write, csr_ext64_known
+export CSR_ADDR_PMPCFG0, CSR_ADDR_PMPCFG2, CSR_ADDR_PMPADDR0, CSR_ADDR_PMPADDR15
+export CSR_ADDR_MENVCFG, CSR_ADDR_MCOUNTEREN, CSR_ADDR_SCOUNTEREN
 export CSR_ADDR_MSTATUS, CSR_ADDR_MISA, CSR_ADDR_MIE, CSR_ADDR_MTVEC
 export CSR_ADDR_MSCRATCH, CSR_ADDR_MEPC, CSR_ADDR_MCAUSE, CSR_ADDR_MTVAL
 export CSR_ADDR_MIP, CSR_ADDR_MCYCLE, CSR_ADDR_MINSTRET, CSR_ADDR_MHARTID

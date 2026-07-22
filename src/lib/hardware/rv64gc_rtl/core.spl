@@ -22,6 +22,7 @@ use std.hardware.rv64gc_rtl.pkg.{OP_IMMED, OP_REG, OP_OP_IMM_32, OP_OP_32, OP_AM
 use std.hardware.rv64gc_rtl.pkg.{BR_BEQ, BR_BNE, BR_BLT, BR_BGE, BR_BLTU, BR_BGEU}
 use std.hardware.rv64gc_rtl.pkg.{SEMI_ENTRY, SEMI_BREAK, SEMI_EXIT, SYS_EXIT}
 use std.hardware.rv64gc_rtl.decode.{DecodeResult64, decode_instruction_64, sign_extend_to_64}
+use std.hardware.rv64gc_rtl.decode.{RvcExpansion, rvc_expand}
 use std.hardware.rv64gc_rtl.alu.{AluResult64, alu64_compute, i64_signed_lt}
 use std.hardware.rv64gc_rtl.regfile.{RegFile64, RegReadResult64, regfile64_create, regfile64_read, regfile64_write}
 use std.hardware.rv64gc_rtl.lsu.lsu64_load
@@ -30,6 +31,7 @@ use std.hardware.rv64gc_rtl.atomics.{AtomicsState, atomics_create, atomics_lr, a
 use std.hardware.rv64gc_rtl.pkg.{AMO_LR, AMO_SC, AMO_SWAP, AMO_ADD, AMO_XOR, AMO_AND, AMO_OR}
 use std.hardware.rv64gc_rtl.pkg.{AMO_MIN, AMO_MAX, AMO_MINU, AMO_MAXU}
 use std.hardware.rv64gc_rtl.csr.{CsrFile64, csr64_create, csr64_read, csr64_write}
+use std.hardware.rv64gc_rtl.csr.{CsrExt64, csr_ext64_create, csr_ext64_read, csr_ext64_write, csr_ext64_known}
 use std.hardware.rv64gc_rtl.csr.{MSTATUS_MIE_MASK, MIP_MEIP_MASK, MIP_MSIP_MASK, MIP_MTIP_MASK}
 use std.hardware.rv64gc_rtl.csr_s.{CsrSMode64, csr_s64_create, csr_s64_read, csr_s64_write}
 use std.hardware.rv64gc_rtl.trap.{trap64_mret, trap64_sret, trap64_sret_csr}
@@ -61,6 +63,7 @@ struct CoreState64:
     atomics: AtomicsState # A extension state
     priv_mode: i64      # Current privilege mode: M=3, S=1, U=0
     csr_m: CsrFile64    # M-mode CSR file
+    csr_ext: CsrExt64   # PMP + counter-enable CSR storage (no enforcement)
     csr_s: CsrSMode64   # S-mode CSR file
     mmu: MmuState64      # Sv39 MMU state, including TLB
     rf: RegFile64         # Architectural integer register file
@@ -73,6 +76,7 @@ struct CoreCsrAccess64:
     valid: bool
     old_value: i64
     csr_m: CsrFile64
+    csr_ext: CsrExt64
     csr_s: CsrSMode64
     mmu: MmuState64
 
@@ -324,7 +328,7 @@ fn core64_csr_next_value(old_value: i64, source: i64, funct3: u32) -> i64:
 
 fn core64_invalid_csr_access(state: CoreState64) -> CoreCsrAccess64:
     CoreCsrAccess64(valid: false, old_value: 0, csr_m: state.csr_m,
-        csr_s: state.csr_s, mmu: state.mmu)
+        csr_ext: state.csr_ext, csr_s: state.csr_s, mmu: state.mmu)
 
 fn core64_csr_access(state: CoreState64, addr: u32, source: i64, funct3: u32) -> CoreCsrAccess64:
     """Route one Zicsr operation to M, S, or PMP state and fail closed."""
@@ -344,7 +348,18 @@ fn core64_csr_access(state: CoreState64, addr: u32, source: i64, funct3: u32) ->
         if write_requested:
             new_csr_m = csr64_write(state.csr_m, addr, core64_csr_next_value(old_value, source, funct3))
         return CoreCsrAccess64(valid: true, old_value: old_value,
-            csr_m: new_csr_m, csr_s: state.csr_s, mmu: state.mmu)
+            csr_m: new_csr_m, csr_ext: state.csr_ext, csr_s: state.csr_s, mmu: state.mmu)
+
+    # PMP + counter-enable CSRs: readable/writable storage, no enforcement.
+    # (required_priv already gated above from the address bits — PMP/menvcfg/
+    # mcounteren need M, scounteren needs S, which the check enforces.)
+    if csr_ext64_known(addr):
+        val old_value = csr_ext64_read(state.csr_ext, addr)
+        var new_ext = state.csr_ext
+        if write_requested:
+            new_ext = csr_ext64_write(state.csr_ext, addr, core64_csr_next_value(old_value, source, funct3))
+        return CoreCsrAccess64(valid: true, old_value: old_value,
+            csr_m: state.csr_m, csr_ext: new_ext, csr_s: state.csr_s, mmu: state.mmu)
 
     if core64_supervisor_csr_known(addr):
         val old_value = csr_s64_read(state.csr_s, addr)
@@ -355,7 +370,7 @@ fn core64_csr_access(state: CoreState64, addr: u32, source: i64, funct3: u32) ->
             if addr == 0x180 and new_csr_s.satp != state.csr_s.satp:
                 new_mmu = mmu64_set_satp(mmu64_flush(state.mmu), new_csr_s.satp)
         return CoreCsrAccess64(valid: true, old_value: old_value,
-            csr_m: state.csr_m, csr_s: new_csr_s, mmu: new_mmu)
+            csr_m: state.csr_m, csr_ext: state.csr_ext, csr_s: new_csr_s, mmu: new_mmu)
 
     core64_invalid_csr_access(state)
 
@@ -367,12 +382,22 @@ fn core64_combinational(state: CoreState64, imem_data: u32, dmem_rdata: i64, rf:
     """Compute all combinational signals for one cycle."""
 
     val pc = state.pc
-    val pc_plus4 = pc + 4
+
+    # RV64C: if the fetched word is a 16-bit parcel (low 2 bits != 0b11),
+    # expand it to its 32-bit equivalent and advance pc by 2 (link = pc+2);
+    # otherwise it is a normal 32-bit instruction (pc += 4).  IALIGN=16 when C
+    # is implemented, so 2-byte-aligned fetch/branch targets are legal.
+    val exp = rvc_expand(imem_data)
+    val eff_insn = exp.insn
+    val pc_incr: i64 = if exp.compressed: 2 else: 4
+    # pc_plus4 carries the sequential-next PC (= link value); named for the
+    # historical RV32 field.  For a compressed insn this is pc+2.
+    val pc_plus4 = pc + pc_incr
 
     val imem_addr = pc
 
-    # Decode
-    val dec = decode_instruction_64(imem_data)
+    # Decode the (possibly expanded) 32-bit instruction
+    val dec = decode_instruction_64(eff_insn)
 
     # Register file read
     val rr = regfile64_read(rf, dec.rs1, dec.rs2)
@@ -513,6 +538,16 @@ fn core64_update(state: CoreState64, imem_data: u32, comb: CoreCombResult64, a0_
     """Update sequential state on rising clock edge.
     Handles PC advancement, semihosting detection, and halt."""
 
+    # RV64C: re-derive the expansion so SYSTEM literal matches see the EXPANDED
+    # 32-bit insn (e.g. c.ebreak -> 0x00100073 -> BREAKPOINT), and so a
+    # reserved 16-bit parcel raises illegal-instruction (cause 2) fail-closed.
+    # eff_insn == imem_data for a normal 32-bit instruction.
+    val exp = rvc_expand(imem_data)
+    val eff_insn = exp.insn
+    # Illegal-instruction tval: the 16-bit parcel for a compressed insn, else
+    # the full 32-bit word (RISC-V mtval carries the faulting instruction).
+    val ill_tval: i64 = if exp.compressed: (imem_data as i64) & 0xFFFF else: eff_insn as i64
+
     var new_pc = state.pc
     var new_halt = state.halt
     var new_semi_phase = state.semi_phase
@@ -524,6 +559,7 @@ fn core64_update(state: CoreState64, imem_data: u32, comb: CoreCombResult64, a0_
     var new_atomics = state.atomics
     var new_priv_mode = state.priv_mode
     var new_csr_m = state.csr_m
+    var new_csr_ext = state.csr_ext
     var new_csr_s = state.csr_s
     var new_mmu = state.mmu
     var new_rf = state.rf
@@ -549,6 +585,21 @@ fn core64_update(state: CoreState64, imem_data: u32, comb: CoreCombResult64, a0_
                 new_halt = true
             else:
                 new_pc = comb.pc_plus4
+
+        else if exp.compressed and (exp.legal == false) and state.semi_phase == 0:
+            # Reserved / unsupported (F/D) 16-bit parcel: raise illegal-
+            # instruction (cause 2) with the 16-bit parcel as mtval.  Fail
+            # closed — never a silent NOP.  pc stays at the faulting insn
+            # (trap sets mepc = pc).
+            val trap = trap64_enter(trap64_state_init(), CAUSE_ILLEGAL_INSN,
+                ill_tval, state.pc, state.priv_mode, state.csr_m, state.csr_s)
+            new_pc = trap.trap_pc
+            new_priv_mode = trap.target_mode
+            new_csr_m = trap.csr
+            new_csr_s = trap.csr_s
+            new_semi_phase = 0
+            new_semi_suppress = false
+            new_atomics = atomics_create()
 
         else if comb.dec.is_mret and state.semi_phase == 0:
             val result = trap64_mret(state.csr_m)
@@ -578,13 +629,14 @@ fn core64_update(state: CoreState64, imem_data: u32, comb: CoreCombResult64, a0_
             if csr_access.valid:
                 new_pc = comb.pc_plus4
                 new_csr_m = csr_access.csr_m
+                new_csr_ext = csr_access.csr_ext
                 new_csr_s = csr_access.csr_s
                 new_mmu = csr_access.mmu
                 new_semi_phase = 0
                 new_semi_suppress = false
             else:
                 val trap = trap64_enter(trap64_state_init(), CAUSE_ILLEGAL_INSN,
-                    imem_data as i64, state.pc, state.priv_mode, state.csr_m, state.csr_s)
+                    ill_tval, state.pc, state.priv_mode, state.csr_m, state.csr_s)
                 new_pc = trap.trap_pc
                 new_priv_mode = trap.target_mode
                 new_csr_m = trap.csr
@@ -615,12 +667,14 @@ fn core64_update(state: CoreState64, imem_data: u32, comb: CoreCombResult64, a0_
             # else: new_pc stays state.pc — architectural stall
 
         else if comb.dec.opcode == OP_SYSTEM and state.semi_phase == 0:
+            # Compare the EXPANDED insn so c.ebreak (-> 0x00100073) is a
+            # breakpoint, not an illegal instruction.
             var cause = CAUSE_ILLEGAL_INSN
-            var tval = imem_data as i64
-            if imem_data == 0x00000073:
+            var tval = ill_tval
+            if eff_insn == 0x00000073:
                 cause = if state.priv_mode == 0: 8 else if state.priv_mode == 1: 9 else: 11
                 tval = 0
-            else if imem_data == 0x00100073:
+            else if eff_insn == 0x00100073:
                 cause = CAUSE_BREAKPOINT
                 tval = 0
             val trap = trap64_enter(trap64_state_init(), cause, tval,
@@ -687,6 +741,7 @@ fn core64_update(state: CoreState64, imem_data: u32, comb: CoreCombResult64, a0_
         atomics: new_atomics,
         priv_mode: new_priv_mode,
         csr_m: new_csr_m,
+        csr_ext: new_csr_ext,
         csr_s: new_csr_s,
         mmu: new_mmu,
         rf: new_rf,
@@ -722,6 +777,7 @@ fn core64_reset(reset_addr: i64) -> CoreState64:
         atomics: AtomicsState(reservation_valid: false, reservation_addr: 0),
         priv_mode: 3,
         csr_m: csr64_create(0),
+        csr_ext: csr_ext64_create(),
         csr_s: csr_s64_create(),
         mmu: mmu,
         rf: regfile64_create(),
@@ -750,6 +806,7 @@ fn core64_init(reset_vec: i64) -> CoreState64:
         atomics: AtomicsState(reservation_valid: false, reservation_addr: 0),
         priv_mode: 3,
         csr_m: csr64_create(0),
+        csr_ext: csr_ext64_create(),
         csr_s: csr_s64_create(),
         mmu: mmu,
         rf: regfile64_create(),
