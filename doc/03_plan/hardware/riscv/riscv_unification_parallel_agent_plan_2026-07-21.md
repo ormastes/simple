@@ -169,6 +169,36 @@ Full audit: session scratchpad `riscv_docs/w1c_claim_audit.md`.
 - **JTAG Stage 3 LANDED** `801109c06ba` — abstract commands + GPR access
   (see JTAG plan doc; Stages 1–3 of 5 now landed).
 
+### Session update 3 (2026-07-22, third wave — FPGA + Linux-path + JTAG-complete)
+
+- **JTAG plan COMPLETE (5/5 stages)** — Stage 4 `355fdf4ead0` (dpc/dcsr,
+  single-step), Stage 5 `f6a691ca9f7` (SBA + **live OpenOCD 0.12.0 attach**
+  against the GHDL stack: TAP 0x15350067, hart examined, SBA mdd/mww,
+  halt/step/resume rc=0). Remaining: hart integration (BRAM-gated).
+- **AOP hart hooks LANDED** `a318432b214` — debug_hooks module (halt/step/
+  trace via seams + aspect declarations), weave-count gate; 2 compiler AOP
+  gaps filed (entry-module-only run-path weaving; execution(...) predicate
+  matcher gap — fail-closed by W2-B).
+- **RV64 Linux-path stack completed in-tree:** timer interrupts `8e8d8d8117b`
+  (CLINT→mip + M-mode take + Zicsr writeback bug fix), external interrupts
+  `13e91fe718b` (PLIC data path→MEIP + UART RX claim/complete), wfi +
+  A-extension `483b213e4e1` (pc-hold wfi, LR/SC with fail path, all AMO).
+  Remaining for OpenSBI/Linux: S-mode + delegation (mideleg), PLIC ctx1/
+  SEIP, misalign/illegal-AMO exceptions, UART IIR/FCR/DLAB, and an actual
+  OpenSBI payload run.
+- **FIRST K26 BITSTREAM + PHYSICAL BOARD PROGRAM** `41f6fa7454d` — placer
+  failure (57k LUTRAMs) fixed via replicated-BRAM banking (rom_a/rom_b,
+  registered single reads, fetch/load/store defer states); GHDL boot proof
+  re-ran BIT-IDENTICAL (297/297 UART bytes, TEST PASSED). Vivado: 0 impl
+  errors, 38/144 BRAM tiles, bit at build/build/rv32_fpga/gateware/.
+  **Board: KV260 (XFL1OSWWFM2B) programmed OK, DONE=HIGH** (run log
+  build/fpga/rv32/rv32_simpleos_run.log). UART capture 0 bytes — blocked on
+  physical 3v3 PMOD UART adapter at H12/E10 (carrier USB UARTs are
+  PS-side) + filed timing/baud bug
+  `k26_rv32_no_timing_constraints_wns_neg17_2026-07-22.md` (no
+  create_clock in flow; ~36.9 MHz max @ probe; baud divisor mismatch).
+  Board serial output is the explicit next hardware step.
+
 ## Wave 3 — Phase 2 shared core skeleton (after Wave 2 green)
 
 - `RiscvXlenSpec` + common decode/ALU/regfile extraction per the companion
