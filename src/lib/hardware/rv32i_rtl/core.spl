@@ -22,7 +22,8 @@ use std.hardware.rv32i_rtl.pkg.{SEMI_ENTRY, SEMI_BREAK, SEMI_EXIT, SYS_EXIT}
 use std.hardware.rv32i_rtl.decode.{DecodeResult, decode_instruction}
 use std.hardware.rv32i_rtl.alu.{AluResult, alu_compute, u32_signed_lt}
 use std.hardware.rv32i_rtl.regfile.{RegFile, RegReadResult, regfile_read}
-use std.hardware.rv32i_rtl.lsu.{lsu_load}
+use std.hardware.rv32i_rtl.lsu.{lsu_load, amo32_compute}
+use std.hardware.rv32i_rtl.lsu.{AMO_LR, AMO_SC}
 use std.hardware.rv32i_rtl.rvfi.{RvfiConfig, RvfiCoreSnapshot, RvfiTrace, rvfi_trace_from_snapshot}
 
 # ============================================================================
@@ -38,6 +39,8 @@ struct CoreState:
     semi_param: u32     # Latched semihosting parameter (a1)
     semi_suppress: bool # Suppress normal execution during semihost sequence
     semi_trigger: bool  # One-cycle pulse when semihosting completes
+    res_valid: bool     # A-extension: LR reservation active
+    res_addr: u32       # A-extension: reserved address (valid if res_valid)
 
 # ============================================================================
 # Combinational result bundle
@@ -192,10 +195,42 @@ fn core_combinational(state: CoreState, imem_data: u32, dmem_rdata: u32, rf: Reg
 
     # Data memory interface
     val dmem_addr = alu_res.result
-    val dmem_wdata = rs2_data
-    val dmem_we = dec.mem_write and (state.semi_suppress == false)
-    val dmem_re = dec.mem_read
+    var dmem_wdata = rs2_data
+    var dmem_we = dec.mem_write and (state.semi_suppress == false)
+    var dmem_re = dec.mem_read
     val dmem_width = dec.funct3 & 0x3
+
+    # ── A extension (OP_AMO): LR.W / SC.W / AMO*.W ──
+    # Address = rs1 (decode routes imm=0 through the ALU for OP_AMO, so
+    # dmem_addr already equals rs1). funct3=2 → .W. The SoC tick reads old
+    # memory before the final combinational pass and writes dmem_wdata in
+    # the SAME cycle, so an AMO is a true single-cycle atomic RMW (mirrors
+    # the rv64 core shape).
+    if dec.is_amo:
+        val amo_funct5 = dec.funct7 >> 2
+        if amo_funct5 == AMO_LR:
+            # LR.W: plain load + reservation set (reservation is sequential
+            # state — core_update marks it).
+            dmem_re = true
+            rd_data = lsu_load(dmem_rdata, dec.funct3)
+        else if amo_funct5 == AMO_SC:
+            # SC.W: store rs2 iff the reservation is valid and matches this
+            # address; rd = 0 on success, 1 on failure.
+            val sc_ok = state.res_valid and state.res_addr == dmem_addr
+            dmem_we = sc_ok and (state.semi_suppress == false)
+            if sc_ok:
+                rd_data = 0
+            else:
+                rd_data = 1
+        else:
+            # AMOSWAP/ADD/XOR/AND/OR/MIN/MAX/MINU/MAXU: rd gets the old
+            # value, memory gets the computed new value.
+            dmem_re = true
+            dmem_we = state.semi_suppress == false
+            val amo_old = lsu_load(dmem_rdata, dec.funct3)
+            val amo = amo32_compute(amo_funct5, amo_old, rs2_data)
+            dmem_wdata = amo.new_value
+            rd_data = amo_old
 
     CoreCombResult(
         dec: dec,
@@ -234,6 +269,8 @@ fn core_update(state: CoreState, imem_data: u32, comb: CoreCombResult, a0_val: u
     var new_semi_param = state.semi_param
     var new_semi_suppress = state.semi_suppress
     var new_semi_trigger: bool = false   # Pulse — cleared every cycle by default
+    var new_res_valid = state.res_valid
+    var new_res_addr = state.res_addr
 
     if state.halt == false:
         # Semihosting magic sequence detection
@@ -270,6 +307,27 @@ fn core_update(state: CoreState, imem_data: u32, comb: CoreCombResult, a0_val: u
             new_semi_phase = 0
             new_semi_suppress = false
             new_pc = comb.pc_next
+            # A-extension reservation tracking (single-hart rule, mirrors
+            # the rv64 core): LR sets the reservation on its address; SC
+            # ALWAYS clears it (success or fail); any other store — plain
+            # SB/SH/SW or an AMO — to the reserved address clears it. A
+            # store to a DIFFERENT address leaves the reservation intact,
+            # which is architecturally sound on a single hart (the
+            # reserved location cannot have changed).
+            if comb.dec.is_amo:
+                val amo_funct5 = comb.dec.funct7 >> 2
+                if amo_funct5 == AMO_LR:
+                    new_res_valid = true
+                    new_res_addr = comb.dmem_addr
+                else if amo_funct5 == AMO_SC:
+                    new_res_valid = false
+                    new_res_addr = 0
+                else:
+                    if new_res_valid and new_res_addr == comb.dmem_addr:
+                        new_res_valid = false
+            else if comb.dec.mem_write:
+                if new_res_valid and new_res_addr == comb.dmem_addr:
+                    new_res_valid = false
 
     CoreState(
         pc: new_pc,
@@ -278,7 +336,9 @@ fn core_update(state: CoreState, imem_data: u32, comb: CoreCombResult, a0_val: u
         semi_op: new_semi_op,
         semi_param: new_semi_param,
         semi_suppress: new_semi_suppress,
-        semi_trigger: new_semi_trigger
+        semi_trigger: new_semi_trigger,
+        res_valid: new_res_valid,
+        res_addr: new_res_addr
     )
 
 # ============================================================================
@@ -357,5 +417,7 @@ fn core_reset(reset_addr: u32) -> CoreState:
         semi_op: 0,
         semi_param: 0,
         semi_suppress: false,
-        semi_trigger: false
+        semi_trigger: false,
+        res_valid: false,
+        res_addr: 0
     )

@@ -1,0 +1,221 @@
+# Standalone probe for soc_top rv32 parity: CLINT timer interrupt delivery,
+# Zicsr rd-writeback, A-extension (LR.W/SC.W + AMO*.W), and WFI pc-hold —
+# mirrors the rv64 soc_top_64_probe cases for XLEN=32.
+# The SSpec runner daemon hangs on this tree (known deployed-seed bug:
+# doc/08_tracking/bug/deployed_seed_test_runner_init_hang_2026-07-17.md), so
+# this probe prints PASS/FAIL.
+# Run: bin/simple run test/01_unit/lib/hardware/soc_rtl/soc_top_rv32_probe.spl
+use std.hardware.soc_rtl.soc_top.{SocState, soc_create, soc_tick}
+use std.hardware.soc_rtl.ram.{ram_read, ram_write}
+
+fn check(name: text, ok: bool) -> i64:
+    if ok:
+        print("PASS {name}")
+        return 0
+    print("FAIL {name}")
+    1
+
+fn run_ticks(soc_in: SocState, n: i64) -> SocState:
+    var soc = soc_in
+    var i = 0
+    while i < n:
+        val t = soc_tick(soc)
+        soc = t.state
+        i = i + 1
+    soc
+
+fn main() -> i64:
+    var fails: i64 = 0
+
+    # ── Case 1: baseline ALU/branch/jal — existing rv32 behavior clean ──
+    var soc1 = soc_create(4096)
+    var ram1 = soc1.ram
+    ram1 = ram_write(ram1, 0x00, 0x02A00093, 2)   # addi x1, x0, 42
+    ram1 = ram_write(ram1, 0x04, 0x00108113, 2)   # addi x2, x1, 1   (x2 = 43)
+    ram1 = ram_write(ram1, 0x08, 0x00209463, 2)   # bne  x1, x2, +8  (taken)
+    ram1 = ram_write(ram1, 0x0C, 0x00000093, 2)   # addi x1, x0, 0   (poison, skipped)
+    ram1 = ram_write(ram1, 0x10, 0x00700193, 2)   # addi x3, x0, 7
+    ram1 = ram_write(ram1, 0x14, 0x0000006F, 2)   # jal  x0, 0       (park)
+    soc1.ram = ram1
+    soc1.core.pc = 0x8000_0000
+    soc1 = run_ticks(soc1, 20)
+    print("case1 pc={soc1.core.pc} x1={soc1.regfile.regs[1]} x2={soc1.regfile.regs[2]} x3={soc1.regfile.regs[3]}")
+    fails = fails + check("case1 pc parks at 0x80000014", soc1.core.pc == 0x8000_0014)
+    fails = fails + check("case1 x1 == 42 (poison skipped by taken bne)", soc1.regfile.regs[1] == 42)
+    fails = fails + check("case1 x2 == 43", soc1.regfile.regs[2] == 43)
+    fails = fails + check("case1 x3 == 7", soc1.regfile.regs[3] == 7)
+
+    # ── Case 2: store/load round-trip through RAM via the core ──
+    var soc2 = soc_create(4096)
+    var ram2 = soc2.ram
+    ram2 = ram_write(ram2, 0x00, 0x03700093, 2)   # addi x1, x0, 55
+    ram2 = ram_write(ram2, 0x04, 0x800002B7, 2)   # lui  x5, 0x80000 (x5 = 0x8000_0000)
+    ram2 = ram_write(ram2, 0x08, 0x0412A023, 2)   # sw   x1, 64(x5)
+    ram2 = ram_write(ram2, 0x0C, 0x0402A303, 2)   # lw   x6, 64(x5)
+    ram2 = ram_write(ram2, 0x10, 0x0000006F, 2)   # jal  x0, 0       (park)
+    soc2.ram = ram2
+    soc2.core.pc = 0x8000_0000
+    soc2 = run_ticks(soc2, 12)
+    val stored2 = ram_read(soc2.ram, 0x40)
+    print("case2 pc={soc2.core.pc} x6={soc2.regfile.regs[6]} mem[0x40]={stored2}")
+    fails = fails + check("case2 pc parks at 0x80000010", soc2.core.pc == 0x8000_0010)
+    fails = fails + check("case2 sw wrote 55 to RAM", stored2 == 55)
+    fails = fails + check("case2 lw read 55 back into x6", soc2.regfile.regs[6] == 55)
+
+    # ── Case 3: Zicsr rd-writeback — csrrs must write rd (rv64 latent-bug check) ──
+    var soc3 = soc_create(4096)
+    var ram3 = soc3.ram
+    ram3 = ram_write(ram3, 0x00, 0x05500293, 2)   # addi  x5, x0, 0x55
+    ram3 = ram_write(ram3, 0x04, 0x34029073, 2)   # csrrw x0, mscratch, x5
+    ram3 = ram_write(ram3, 0x08, 0x34002373, 2)   # csrrs x6, mscratch, x0  (rd <- 0x55)
+    ram3 = ram_write(ram3, 0x0C, 0x0000006F, 2)   # jal   x0, 0     (park)
+    soc3.ram = ram3
+    soc3.core.pc = 0x8000_0000
+    soc3 = run_ticks(soc3, 8)
+    print("case3 pc={soc3.core.pc} x6={soc3.regfile.regs[6]} mscratch={soc3.csr.mscratch}")
+    fails = fails + check("case3 csrrw wrote mscratch = 0x55", soc3.csr.mscratch == 0x55)
+    fails = fails + check("case3 csrrs wrote rd (x6 == 0x55)", soc3.regfile.regs[6] == 0x55)
+    fails = fails + check("case3 csrrs with rs1=x0 did not clobber mscratch", soc3.csr.mscratch == 0x55)
+
+    # ── Case 4: CLINT machine timer interrupt — real CSR writes + MMIO arm ──
+    # mtvec -> handler, mtimecmp=64 via sw lo/hi to CLINT MMIO (0x200_4000),
+    # mie.MTIE + mstatus.MIE via csrrs, spin. Handler stores marker 0x123,
+    # reads mcause/mepc into x12/x13.
+    var soc4 = soc_create(4096)
+    var ram4 = soc4.ram
+    ram4 = ram_write(ram4, 0x000, 0x800002B7, 2)   # lui   x5, 0x80000
+    ram4 = ram_write(ram4, 0x004, 0x10028293, 2)   # addi  x5, x5, 0x100 (handler)
+    ram4 = ram_write(ram4, 0x008, 0x30529073, 2)   # csrrw x0, mtvec, x5
+    ram4 = ram_write(ram4, 0x00C, 0x02004337, 2)   # lui   x6, 0x2004  (x6 = 0x200_4000 mtimecmp)
+    ram4 = ram_write(ram4, 0x010, 0x04000393, 2)   # addi  x7, x0, 64
+    ram4 = ram_write(ram4, 0x014, 0x00732023, 2)   # sw    x7, 0(x6)   mtimecmp_lo = 64
+    ram4 = ram_write(ram4, 0x018, 0x00032223, 2)   # sw    x0, 4(x6)   mtimecmp_hi = 0
+    ram4 = ram_write(ram4, 0x01C, 0x08000393, 2)   # addi  x7, x0, 128
+    ram4 = ram_write(ram4, 0x020, 0x3043A073, 2)   # csrrs x0, mie, x7  (MTIE)
+    ram4 = ram_write(ram4, 0x024, 0x00800393, 2)   # addi  x7, x0, 8
+    ram4 = ram_write(ram4, 0x028, 0x3003A073, 2)   # csrrs x0, mstatus, x7 (MIE)
+    ram4 = ram_write(ram4, 0x02C, 0x0000006F, 2)   # jal   x0, 0       (spin)
+    # Handler at 0x8000_0100
+    ram4 = ram_write(ram4, 0x100, 0x80000537, 2)   # lui   x10, 0x80000
+    ram4 = ram_write(ram4, 0x104, 0x12300593, 2)   # addi  x11, x0, 0x123 (marker)
+    ram4 = ram_write(ram4, 0x108, 0x20B52023, 2)   # sw    x11, 0x200(x10)
+    ram4 = ram_write(ram4, 0x10C, 0x34202673, 2)   # csrrs x12, mcause, x0
+    ram4 = ram_write(ram4, 0x110, 0x341026F3, 2)   # csrrs x13, mepc, x0
+    ram4 = ram_write(ram4, 0x114, 0x0000006F, 2)   # jal   x0, 0       (park)
+    soc4.ram = ram4
+    soc4.core.pc = 0x8000_0000
+    soc4 = run_ticks(soc4, 150)
+    val marker4 = ram_read(soc4.ram, 0x200)
+    print("case4 pc={soc4.core.pc} marker={marker4} x12(mcause)={soc4.regfile.regs[12]} x13(mepc)={soc4.regfile.regs[13]} mip={soc4.csr.mip} mtvec={soc4.csr.mtvec}")
+    fails = fails + check("case4 csrrw wrote mtvec (csr write path executed)", soc4.csr.mtvec == 0x8000_0100)
+    fails = fails + check("case4 handler wrote marker 0x123 to RAM", marker4 == 0x123)
+    fails = fails + check("case4 mcause == machine timer interrupt (0x80000007)", soc4.regfile.regs[12] == 0x8000_0007)
+    fails = fails + check("case4 mepc == spin pc 0x8000002C", soc4.regfile.regs[13] == 0x8000_002C)
+    fails = fails + check("case4 mip.MTIP delivered from CLINT (bit 7)", (soc4.csr.mip & 0x80) != 0)
+    fails = fails + check("case4 pc parks in handler at 0x80000114", soc4.core.pc == 0x8000_0114)
+
+    # ── Case 5: AMOADD.W — rd gets old value, memory gets old+rs2 (5 -> 12) ──
+    var soc5 = soc_create(4096)
+    var ram5 = soc5.ram
+    ram5 = ram_write(ram5, 0x40, 5, 2)             # mem[0x40] = 5
+    ram5 = ram_write(ram5, 0x00, 0x800002B7, 2)    # lui  x5, 0x80000
+    ram5 = ram_write(ram5, 0x04, 0x04028293, 2)    # addi x5, x5, 0x40
+    ram5 = ram_write(ram5, 0x08, 0x00700393, 2)    # addi x7, x0, 7
+    ram5 = ram_write(ram5, 0x0C, 0x0072A32F, 2)    # amoadd.w x6, x7, (x5)
+    ram5 = ram_write(ram5, 0x10, 0x0000006F, 2)    # jal  x0, 0 (park)
+    soc5.ram = ram5
+    soc5.core.pc = 0x8000_0000
+    soc5 = run_ticks(soc5, 10)
+    val amem5 = ram_read(soc5.ram, 0x40)
+    print("case5 pc={soc5.core.pc} x6={soc5.regfile.regs[6]} mem[0x40]={amem5}")
+    fails = fails + check("case5 amoadd.w rd == old value 5", soc5.regfile.regs[6] == 5)
+    fails = fails + check("case5 amoadd.w memory == 12 (5+7)", amem5 == 12)
+
+    # ── Case 6: LR.W/SC.W success path — sc rd=0, memory updated ──
+    var soc6 = soc_create(4096)
+    var ram6 = soc6.ram
+    ram6 = ram_write(ram6, 0x60, 11, 2)            # mem[0x60] = 11
+    ram6 = ram_write(ram6, 0x00, 0x800002B7, 2)    # lui  x5, 0x80000
+    ram6 = ram_write(ram6, 0x04, 0x06028293, 2)    # addi x5, x5, 0x60
+    ram6 = ram_write(ram6, 0x08, 0x1002A32F, 2)    # lr.w x6, (x5)
+    ram6 = ram_write(ram6, 0x0C, 0x04D00393, 2)    # addi x7, x0, 77
+    ram6 = ram_write(ram6, 0x10, 0x1872A42F, 2)    # sc.w x8, x7, (x5)
+    ram6 = ram_write(ram6, 0x14, 0x0000006F, 2)    # jal  x0, 0 (park)
+    soc6.ram = ram6
+    soc6.core.pc = 0x8000_0000
+    soc6 = run_ticks(soc6, 12)
+    val cmem6 = ram_read(soc6.ram, 0x60)
+    print("case6 x6={soc6.regfile.regs[6]} x8={soc6.regfile.regs[8]} mem[0x60]={cmem6} resv={soc6.core.res_valid}")
+    fails = fails + check("case6 lr.w loaded 11", soc6.regfile.regs[6] == 11)
+    fails = fails + check("case6 sc.w succeeded (rd == 0)", soc6.regfile.regs[8] == 0)
+    fails = fails + check("case6 sc.w wrote 77", cmem6 == 77)
+    fails = fails + check("case6 reservation cleared after sc", soc6.core.res_valid == false)
+
+    # ── Case 7: SC.W fail path — intervening store clears the reservation ──
+    var soc7 = soc_create(4096)
+    var ram7 = soc7.ram
+    ram7 = ram_write(ram7, 0x70, 1, 2)             # mem[0x70] = 1
+    ram7 = ram_write(ram7, 0x00, 0x800002B7, 2)    # lui  x5, 0x80000
+    ram7 = ram_write(ram7, 0x04, 0x07028293, 2)    # addi x5, x5, 0x70
+    ram7 = ram_write(ram7, 0x08, 0x1002A32F, 2)    # lr.w x6, (x5)
+    ram7 = ram_write(ram7, 0x0C, 0x06300393, 2)    # addi x7, x0, 99
+    ram7 = ram_write(ram7, 0x10, 0x0072A023, 2)    # sw   x7, 0(x5)   (intervening store)
+    ram7 = ram_write(ram7, 0x14, 0x03700393, 2)    # addi x7, x0, 55
+    ram7 = ram_write(ram7, 0x18, 0x1872A42F, 2)    # sc.w x8, x7, (x5)
+    ram7 = ram_write(ram7, 0x1C, 0x0000006F, 2)    # jal  x0, 0 (park)
+    soc7.ram = ram7
+    soc7.core.pc = 0x8000_0000
+    soc7 = run_ticks(soc7, 14)
+    val dmem7 = ram_read(soc7.ram, 0x70)
+    print("case7 x6={soc7.regfile.regs[6]} x8={soc7.regfile.regs[8]} mem[0x70]={dmem7}")
+    fails = fails + check("case7 lr.w loaded 1", soc7.regfile.regs[6] == 1)
+    fails = fails + check("case7 sc.w failed (rd == 1)", soc7.regfile.regs[8] == 1)
+    fails = fails + check("case7 mem kept intervening 99 (sc did NOT write 55)", dmem7 == 99)
+
+    # ── Case 8: WFI + timer wake — pc holds at wfi, then handler with ──
+    # ── mepc == wfi+4 (wfi retires as NOP on wake, take uses next pc) ──
+    var soc8 = soc_create(4096)
+    var ram8 = soc8.ram
+    ram8 = ram_write(ram8, 0x000, 0x800002B7, 2)   # lui   x5, 0x80000
+    ram8 = ram_write(ram8, 0x004, 0x10028293, 2)   # addi  x5, x5, 0x100 (handler)
+    ram8 = ram_write(ram8, 0x008, 0x30529073, 2)   # csrrw x0, mtvec, x5
+    ram8 = ram_write(ram8, 0x00C, 0x02004337, 2)   # lui   x6, 0x2004  (mtimecmp)
+    ram8 = ram_write(ram8, 0x010, 0x03C00393, 2)   # addi  x7, x0, 60
+    ram8 = ram_write(ram8, 0x014, 0x00732023, 2)   # sw    x7, 0(x6)   mtimecmp_lo = 60
+    ram8 = ram_write(ram8, 0x018, 0x00032223, 2)   # sw    x0, 4(x6)   mtimecmp_hi = 0
+    ram8 = ram_write(ram8, 0x01C, 0x08000393, 2)   # addi  x7, x0, 0x80 (MTIE)
+    ram8 = ram_write(ram8, 0x020, 0x3043A073, 2)   # csrrs x0, mie, x7
+    ram8 = ram_write(ram8, 0x024, 0x00800393, 2)   # addi  x7, x0, 8   (MIE)
+    ram8 = ram_write(ram8, 0x028, 0x3003A073, 2)   # csrrs x0, mstatus, x7
+    ram8 = ram_write(ram8, 0x02C, 0x10500073, 2)   # wfi
+    ram8 = ram_write(ram8, 0x030, 0x07700493, 2)   # addi  x9, x0, 0x77 (post-wfi)
+    ram8 = ram_write(ram8, 0x034, 0x0000006F, 2)   # jal   x0, 0
+    # Handler at 0x8000_0100
+    ram8 = ram_write(ram8, 0x100, 0x32100593, 2)   # addi  x11, x0, 0x321
+    ram8 = ram_write(ram8, 0x104, 0x20B2A023, 2)   # sw    x11, 0x200(x5) -> 0x8000_0300
+    ram8 = ram_write(ram8, 0x108, 0x34202673, 2)   # csrrs x12, mcause, x0
+    ram8 = ram_write(ram8, 0x10C, 0x341026F3, 2)   # csrrs x13, mepc, x0
+    ram8 = ram_write(ram8, 0x110, 0x0000006F, 2)   # jal   x0, 0 (park)
+    soc8.ram = ram8
+    soc8.core.pc = 0x8000_0000
+    soc8 = run_ticks(soc8, 30)
+    val held_pc_30 = soc8.core.pc
+    val held_x9_30 = soc8.regfile.regs[9]
+    soc8 = run_ticks(soc8, 20)
+    val held_pc_50 = soc8.core.pc
+    soc8 = run_ticks(soc8, 70)
+    val emarker8 = ram_read(soc8.ram, 0x300)
+    print("case8 held30={held_pc_30} held50={held_pc_50} pc={soc8.core.pc} mcause(x12)={soc8.regfile.regs[12]} mepc(x13)={soc8.regfile.regs[13]} marker={emarker8} x9={soc8.regfile.regs[9]}")
+    fails = fails + check("case8 pc held at wfi (0x8000002C) at tick 30", held_pc_30 == 0x8000_002C)
+    fails = fails + check("case8 pc still held at wfi at tick 50 (pre-timer)", held_pc_50 == 0x8000_002C)
+    fails = fails + check("case8 post-wfi insn NOT executed during hold (x9==0)", held_x9_30 == 0)
+    fails = fails + check("case8 timer wake entered handler (marker 0x321)", emarker8 == 0x321)
+    fails = fails + check("case8 mcause == machine timer interrupt (0x80000007)", soc8.regfile.regs[12] == 0x8000_0007)
+    fails = fails + check("case8 mepc == wfi+4 (0x80000030) — resume after wfi", soc8.regfile.regs[13] == 0x8000_0030)
+    fails = fails + check("case8 pc parks in handler at 0x80000110", soc8.core.pc == 0x8000_0110)
+
+    if fails == 0:
+        print("SOC_RV32 PROBE: ALL PASS")
+        return 0
+    print("SOC_RV32 PROBE: {fails} FAILURES")
+    1

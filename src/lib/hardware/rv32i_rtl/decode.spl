@@ -16,6 +16,17 @@ use std.hardware.rv32i_rtl.pkg.{ALU_XOR, ALU_SRL, ALU_SRA, ALU_OR, ALU_AND}
 use std.hardware.rv32i_rtl.pkg.ALU_PASS_B
 
 # ============================================================================
+# A-extension opcode (RV32A: LR.W / SC.W / AMO*.W)
+# ============================================================================
+# pkg.spl predates the A extension; the opcode lives here (decoder-owned)
+# to keep the change local. funct5 constants live in lsu.spl next to the
+# AMO compute helper.
+
+val OP_AMO: u32 = 0x2F    # Atomic memory operations (funct3=2 for .W)
+
+export OP_AMO
+
+# ============================================================================
 # Decode result — all decoder output signals
 # ============================================================================
 
@@ -36,6 +47,8 @@ struct DecodeResult:
     alu_src: bool     # true = ALU op_b from immediate; false = from rs2
     branch: bool      # Conditional branch instruction
     jump: bool        # JAL or JALR
+    is_amo: bool      # A-extension memory operation (opcode 0x2F)
+    is_wfi: bool      # WFI — Wait For Interrupt (0x10500073)
 
 # ============================================================================
 # Sign-extension helper (32-bit)
@@ -169,14 +182,22 @@ fn decode_instruction(instruction: u32) -> DecodeResult:
     # ALU operation
     val alu_op = select_alu_op(op, f3, f7)
 
+    # A-extension / WFI detection (mirrors the rv64 decoder shape)
+    val amo = op == OP_AMO
+    val wfi = instruction == 0x10500073u32
+
     # Control signals (matching VHDL concurrent assignments)
+    # OP_AMO writes rd (LR load value / SC status / AMO old value) and uses
+    # the ALU as an address unit: imm stays 0, so rs1 + 0 = address.
     val reg_w = (op == OP_REG or op == OP_IMMED or op == OP_LOAD or
-                 op == OP_LUI or op == OP_AUIPC or op == OP_JAL or op == OP_JALR)
+                 op == OP_LUI or op == OP_AUIPC or op == OP_JAL or op == OP_JALR or
+                 op == OP_AMO)
     val m_read = op == OP_LOAD
     val m_write = op == OP_STORE
     val m_to_reg = op == OP_LOAD
     val a_src = (op == OP_IMMED or op == OP_LOAD or op == OP_STORE or
-                 op == OP_LUI or op == OP_AUIPC or op == OP_JAL or op == OP_JALR)
+                 op == OP_LUI or op == OP_AUIPC or op == OP_JAL or op == OP_JALR or
+                 op == OP_AMO)
     val br = op == OP_BRANCH
     val jmp = op == OP_JAL or op == OP_JALR
 
@@ -195,5 +216,7 @@ fn decode_instruction(instruction: u32) -> DecodeResult:
         mem_to_reg: m_to_reg,
         alu_src: a_src,
         branch: br,
-        jump: jmp
+        jump: jmp,
+        is_amo: amo,
+        is_wfi: wfi
     )

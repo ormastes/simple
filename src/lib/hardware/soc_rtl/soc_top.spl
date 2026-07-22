@@ -34,6 +34,7 @@ use std.hardware.rv32i_rtl.core.{CoreState, core_reset, core_combinational, core
 
 # -- CSR / Trap
 use std.hardware.rv32i_rtl.csr.{CsrFile, CsrRwResult, csr_create, csr_read, csr_rw, csr_tick, csr_update_mip}
+use std.hardware.rv32i_rtl.csr.{MSTATUS_MIE_MASK}
 use std.hardware.rv32i_rtl.csr.{FUNCT3_CSRRW, FUNCT3_CSRRS, FUNCT3_CSRRC}
 use std.hardware.rv32i_rtl.csr.{FUNCT3_CSRRWI, FUNCT3_CSRRSI, FUNCT3_CSRRCI}
 use std.hardware.rv32i_rtl.trap.{trap_check_interrupt, trap_enter, trap_exit_mret}
@@ -265,6 +266,7 @@ fn soc_tick(state: SocState) -> SocTickResult:
     var char_out: u32 = 0
     var char_valid: bool = false
     var uart_tx_bit: u32 = 1
+    var trap_clears_res: bool = false   # sync trap entry clears LR/SC reservation
 
     # If already halted, just tick peripherals and return
     if halted:
@@ -341,9 +343,29 @@ fn soc_tick(state: SocState) -> SocTickResult:
         do_rd_write = true
         next_pc = pc + 4
 
-    # ── Step 7: ECALL / EBREAK / MRET ───────────────────────────────────
+    # ── Step 7: WFI / ECALL / EBREAK / MRET ─────────────────────────────
     else if dec.opcode == OP_SYSTEM and dec.funct3 == 0:
-        if is_mret(dec):
+        if dec.is_wfi:
+            # WFI — wait for interrupt. Same semantics as the rv64 core:
+            #   * retire as a NOP (pc <- pc+4) when an enabled interrupt is
+            #     already pending (mie & mip != 0) — the step-8 interrupt
+            #     take then fires with mepc = wfi+4, so mret resumes AFTER
+            #     the wfi (RISC-V: mepc = next instruction);
+            #   * retire as a NOP when mstatus.MIE = 0 — the spec allows
+            #     WFI to be a no-op, and this avoids a permanent hang when
+            #     interrupts are globally disabled;
+            #   * otherwise hold pc (architectural stall). Peripherals keep
+            #     ticking (steps 11-12), so a future mie&mip match wakes
+            #     the core on the cycle it pends.
+            val wfi_mie_on = (cur_csr.mstatus & MSTATUS_MIE_MASK) != 0
+            val wfi_pending = (cur_csr.mie & cur_csr.mip) != 0
+            if wfi_pending or wfi_mie_on == false:
+                next_pc = pc + 4
+            else:
+                next_pc = pc
+            do_rd_write = false
+
+        else if is_mret(dec):
             # MRET — restore context from CSRs
             val mret_result = trap_exit_mret(cur_csr)
             cur_csr = mret_result.csr
@@ -356,6 +378,7 @@ fn soc_tick(state: SocState) -> SocTickResult:
             cur_csr = enter_result.csr
             next_pc = enter_result.trap_pc
             do_rd_write = false
+            trap_clears_res = true
 
         else if is_ebreak(dec) and state.core.semi_phase == 0:
             # EBREAK outside semihosting sequence — enter trap
@@ -365,6 +388,7 @@ fn soc_tick(state: SocState) -> SocTickResult:
             cur_csr = enter_result.csr
             next_pc = enter_result.trap_pc
             do_rd_write = false
+            trap_clears_res = true
 
     # ── Step 8: Interrupt check ──────────────────────────────────────────
     # Check for pending interrupts AFTER instruction execution
@@ -400,6 +424,12 @@ fn soc_tick(state: SocState) -> SocTickResult:
 
     if halted:
         new_core.halt = true
+
+    # Synchronous trap entry (ECALL/EBREAK) clears the LR/SC reservation
+    # (mirrors the rv64 core, which resets atomics state on sync traps).
+    if trap_clears_res:
+        new_core.res_valid = false
+        new_core.res_addr = 0
 
     cur_state.core = new_core
     cur_state.csr = cur_csr
