@@ -16,6 +16,10 @@ end entity soc_top_rv32;
 architecture rtl of soc_top_rv32 is
   signal cfgclk  : std_logic;
   signal cfgmclk : std_logic;
+  -- Core clock: cfgmclk (~50 MHz nominal) divided by 2 via BUFGCE_DIV.
+  -- The rv32 core cannot close timing at 50 MHz (WNS probe => ~37 MHz max),
+  -- so the whole design runs in the 25 MHz clk_core domain.
+  signal clk_core : std_logic;
   signal di      : std_logic_vector(3 downto 0);
   signal eos     : std_logic;
   signal preq    : std_logic;
@@ -74,9 +78,13 @@ begin
       USRDONEO => '1', USRDONETS => '1'
     );
 
-  process(cfgmclk)
+  u_clkdiv : BUFGCE_DIV
+    generic map (BUFGCE_DIVIDE => 2)
+    port map (I => cfgmclk, CE => '1', CLR => '0', O => clk_core);
+
+  process(clk_core)
   begin
-    if rising_edge(cfgmclk) then
+    if rising_edge(clk_core) then
       if rst_cnt < to_unsigned(RESET_RELEASE_COUNT, rst_cnt'length) then
         rst_cnt <= rst_cnt + 1;
         rst_q <= '1';
@@ -86,9 +94,9 @@ begin
     end if;
   end process;
 
-  process(cfgmclk)
+  process(clk_core)
   begin
-    if rising_edge(cfgmclk) then
+    if rising_edge(clk_core) then
       if rst_q = '1' then
         marker_idx <= 0;
         marker_seen <= '0';
@@ -110,8 +118,14 @@ begin
   end process;
 
   u_core : entity work.rv32_exec_core
+    generic map (
+      -- Must equal the real clk_core frequency or the UART baud divisor is
+      -- wrong: cfgmclk is ~50 MHz nominal, divided by 2 => 25 MHz.
+      CLK_FREQ => 25_000_000,
+      BAUD_RATE => 115_200
+    )
     port map (
-      clk => cfgmclk, rst => rst_q, uart_tx => uart_tx_core,
+      clk => clk_core, rst => rst_q, uart_tx => uart_tx_core,
       debug_uart_valid => debug_uart_valid,
       debug_uart_byte => debug_uart_byte,
       debug_pc => debug_pc,
