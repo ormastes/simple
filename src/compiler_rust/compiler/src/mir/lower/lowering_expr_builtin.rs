@@ -1,7 +1,7 @@
 //! Built-in call expression lowering (rt_* and print/println family).
 
 use super::lowering_core::{MirLowerResult, MirLowerer};
-use crate::hir::{HirExpr, TypeId};
+use crate::hir::{HirExpr, HirType, TypeId};
 use crate::mir::effects::CallTarget;
 use crate::mir::instructions::{MirInst, UnitOverflowBehavior, VReg};
 
@@ -323,6 +323,65 @@ impl<'a> MirLowerer<'a> {
                     })?;
                     boxed_arg_regs.push(stringified);
                     continue;
+                }
+                // P1 fix (2026-07-22): flat-optional (i64?/bool?/f64?/...) print
+                // args. `T?` lowers to `HirType::Pointer { inner: T }` and is
+                // represented at runtime as a RAW payload -- the bare inner
+                // value, or the nil sentinel (rt_core_nil() == 3) -- never a
+                // tagged RuntimeValue (no BoxInt/BoxFloat/(v<<3)|TAG_INT
+                // wrapping is ever applied to it; see the obstacle report for
+                // the full site-enumeration this was scoped down from). Generic
+                // print (rt_println_value) assumes every argument is already a
+                // validly-tagged RuntimeValue and misreads these raw low bits
+                // as tag bits (payload 1 -> "nil", 2 -> "0.0", 4 ->
+                // "<value:0x4>", ...). Route through a raw-to-string bypass the
+                // same way the I64/U64 case above does. NOTE: a genuine payload
+                // equal to the nil sentinel (3) is indistinguishable from real
+                // nil at this representation -- documented limitation, not
+                // fixed here (full tagging was scoped out as a 7-site,
+                // hot-path, bootstrap-only-engine change). See
+                // doc/08_tracking/bug/interp_index_of_digit_leading_literal_2026-07-22.md.
+                if let Some(registry) = self.type_registry {
+                    if let Some(HirType::Pointer { inner, .. }) = registry.get(arg.ty) {
+                        let inner = *inner;
+                        let opt_to_string_fn = if inner == TypeId::BOOL {
+                            Some("rt_opt_bool_to_string")
+                        } else if matches!(
+                            inner,
+                            TypeId::I64
+                                | TypeId::U64
+                                | TypeId::I32
+                                | TypeId::U32
+                                | TypeId::I16
+                                | TypeId::U16
+                                | TypeId::U8
+                        ) {
+                            Some("rt_opt_i64_to_string")
+                        } else if matches!(inner, TypeId::F32 | TypeId::F64) {
+                            Some("rt_opt_f64_to_string")
+                        } else {
+                            None
+                        };
+                        if let Some(fn_name) = opt_to_string_fn {
+                            let stringified = self.with_func(|func, current_block| {
+                                let stringified = func.new_vreg();
+                                let block = func.block_mut(current_block).unwrap();
+                                block.instructions.push(MirInst::Call {
+                                    dest: Some(stringified),
+                                    target: CallTarget::from_name(fn_name),
+                                    args: vec![arg_reg],
+                                });
+                                stringified
+                            })?;
+                            boxed_arg_regs.push(stringified);
+                            continue;
+                        }
+                        // Other inner types (heap types: text?, struct?, ...)
+                        // fall through unchanged -- those already carry a real
+                        // heap-boxed RuntimeEnum, not a raw payload, and
+                        // rt_println_value already handles them correctly
+                        // (confirmed: text? print was clean in every probe).
+                    }
                 }
                 // I64/U64 are handled above via the raw-to-string bypass (both can
                 // exceed the 61-bit boxed-int range); this list only covers widths

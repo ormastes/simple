@@ -225,6 +225,14 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             // absent from `runtime_funcs` and call_runtime_2 panics with "missing
             // runtime fn". See doc/08_tracking/bug/sspec_test_path_false_green_undercount_2026-07-20.md.
             | "rt_text_cmp_any"
+            // P1 fix (2026-07-22): flat-optional print helpers (see
+            // codegen/runtime_sffi.rs for the full rationale). Inserted as a
+            // genuine MIR Call node (mirrors rt_raw_i64_to_string), so this
+            // entry is likely redundant with referenced_call_names, but kept
+            // for parity/safety with the explicit call-site pattern.
+            | "rt_opt_i64_to_string"
+            | "rt_opt_bool_to_string"
+            | "rt_opt_f64_to_string"
             | "rt_hash_text"
             | "rt_value_bool"
             | "rt_interp_call"

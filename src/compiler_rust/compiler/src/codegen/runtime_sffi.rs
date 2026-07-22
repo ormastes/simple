@@ -443,6 +443,14 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_value_raw_i64", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_raw_u64_to_string", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_raw_i64_to_string", &[I64], &[I64]),
+    // P1 fix (2026-07-22): flat-optional (i64?/bool?/f64?) print/println args
+    // lower as HirType::Pointer{inner} raw payloads, not tagged RuntimeValues
+    // -- generic print misreads them via tag-bit dispatch. These mirror
+    // rt_raw_i64_to_string's raw-scalar bypass for the optional-primitive
+    // print path. See doc/08_tracking/bug/interp_index_of_digit_leading_literal_2026-07-22.md.
+    RuntimeFuncSpec::new("rt_opt_i64_to_string", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_opt_bool_to_string", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_opt_f64_to_string", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_value_to_string", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_value_format_string", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_value_eq", &[I64, I64], &[I64]),

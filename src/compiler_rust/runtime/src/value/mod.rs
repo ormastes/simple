@@ -336,6 +336,7 @@ pub use sffi::{
     rt_println_value, rt_raw_i64_to_string, rt_raw_u64_to_string, rt_stderr_flush, rt_stderr_write, rt_stdout_flush,
     rt_stdout_write,
     rt_value_format_string, rt_value_to_string,
+    rt_opt_bool_to_string, rt_opt_f64_to_string, rt_opt_i64_to_string,
 };
 
 // Re-export log SFFI functions

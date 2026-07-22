@@ -86,6 +86,15 @@ static SIMPLE_KEEP_RT_RAW_U64_TO_STRING: extern "C" fn(i64) -> RuntimeValue = va
 static SIMPLE_KEEP_RT_RAW_I64_TO_STRING: extern "C" fn(i64) -> RuntimeValue = value::rt_raw_i64_to_string;
 #[cfg(feature = "runtime-symbol-table")]
 #[used]
+static SIMPLE_KEEP_RT_OPT_I64_TO_STRING: extern "C" fn(i64) -> RuntimeValue = value::rt_opt_i64_to_string;
+#[cfg(feature = "runtime-symbol-table")]
+#[used]
+static SIMPLE_KEEP_RT_OPT_BOOL_TO_STRING: extern "C" fn(i64) -> RuntimeValue = value::rt_opt_bool_to_string;
+#[cfg(feature = "runtime-symbol-table")]
+#[used]
+static SIMPLE_KEEP_RT_OPT_F64_TO_STRING: extern "C" fn(i64) -> RuntimeValue = value::rt_opt_f64_to_string;
+#[cfg(feature = "runtime-symbol-table")]
+#[used]
 static SIMPLE_KEEP_RT_HEAP_REGISTRY_COUNT: extern "C" fn() -> i64 = value::heap::rt_heap_registry_count;
 #[cfg(feature = "runtime-symbol-table")]
 #[used]
@@ -649,6 +658,9 @@ pub use value::{
 pub use value::RuntimeDict;
 pub use value::rt_raw_u64_to_string;
 pub use value::rt_raw_i64_to_string;
+pub use value::rt_opt_i64_to_string;
+pub use value::rt_opt_bool_to_string;
+pub use value::rt_opt_f64_to_string;
 
 // Re-export network SFFI functions used by compiled host SMFs.
 pub use value::{

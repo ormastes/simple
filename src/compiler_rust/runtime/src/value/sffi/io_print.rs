@@ -355,6 +355,65 @@ pub extern "C" fn rt_raw_i64_to_string(raw: i64) -> RuntimeValue {
     unsafe { crate::value::collections::rt_string_new(s.as_ptr(), s.len() as u64) }
 }
 
+/// Convert a flat (non-boxed) `i64?`/`u64?` optional payload to a string
+/// RuntimeValue for print/println/etc.
+///
+/// Optional primitives (`i64?`, `bool?`, `f64?`, ...) lower to
+/// `HirType::Pointer { inner }` and are represented at runtime as a RAW,
+/// UNTAGGED payload carrying either the bare inner value or the nil sentinel
+/// (`RuntimeValue::NIL` == 3) -- never a tagged `RuntimeValue` (no `(v<<3)|
+/// TAG_INT`). Generic print (`rt_println_value`) assumes every argument is
+/// already a validly-tagged `RuntimeValue` and misreads these raw low bits as
+/// tag bits (payload 1 prints as "nil", 2 as "0.0", 4 as "<value:0x4>", ...).
+/// This helper special-cases the flat-optional print path the same way
+/// `rt_raw_i64_to_string` already special-cases raw (non-optional) i64/u64
+/// scalars. NOTE: a genuine payload equal to the nil sentinel (3) is
+/// indistinguishable from real nil at this representation -- documented
+/// limitation, not fixed here; see
+/// doc/08_tracking/bug/interp_index_of_digit_leading_literal_2026-07-22.md.
+#[no_mangle]
+pub extern "C" fn rt_opt_i64_to_string(raw: i64) -> RuntimeValue {
+    if raw == RuntimeValue::NIL.0 as i64 {
+        let s = "nil";
+        return unsafe { crate::value::collections::rt_string_new(s.as_ptr(), s.len() as u64) };
+    }
+    let s = raw.to_string();
+    unsafe { crate::value::collections::rt_string_new(s.as_ptr(), s.len() as u64) }
+}
+
+/// Convert a flat (non-boxed) `bool?` optional payload to a string
+/// RuntimeValue. See `rt_opt_i64_to_string` for the representation rationale;
+/// the flat payload here is a raw 0/1 (or the nil sentinel), not a tagged
+/// bool RuntimeValue.
+#[no_mangle]
+pub extern "C" fn rt_opt_bool_to_string(raw: i64) -> RuntimeValue {
+    let s = if raw == RuntimeValue::NIL.0 as i64 {
+        "nil"
+    } else if raw != 0 {
+        "true"
+    } else {
+        "false"
+    };
+    unsafe { crate::value::collections::rt_string_new(s.as_ptr(), s.len() as u64) }
+}
+
+/// Convert a flat (non-boxed) `f64?`/`f32?` optional payload to a string
+/// RuntimeValue. The flat payload arrives as the f64 bit pattern reinterpreted
+/// as i64 (or the nil sentinel, which is not a valid f64 bit pattern that
+/// collides with a legitimate value in practice at this raw-int comparison
+/// stage -- checked before the bitcast). See `rt_opt_i64_to_string` for the
+/// representation rationale.
+#[no_mangle]
+pub extern "C" fn rt_opt_f64_to_string(raw: i64) -> RuntimeValue {
+    if raw == RuntimeValue::NIL.0 as i64 {
+        let s = "nil";
+        return unsafe { crate::value::collections::rt_string_new(s.as_ptr(), s.len() as u64) };
+    }
+    let f = f64::from_bits(raw as u64);
+    let s = format_float_display(f);
+    unsafe { crate::value::collections::rt_string_new(s.as_ptr(), s.len() as u64) }
+}
+
 /// Format a RuntimeValue using a format specifier string.
 /// The format spec follows Python conventions: [[fill]align][sign][#][0][width][grouping][.precision][type]
 ///

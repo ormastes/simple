@@ -1741,6 +1741,42 @@ int64_t rt_raw_i64_to_string(int64_t raw) {
     return rt_string_new((const uint8_t*)buf, len > 0 ? (uint64_t)len : 0);
 }
 
+/* rt_opt_i64_to_string / rt_opt_bool_to_string / rt_opt_f64_to_string — P1
+ * fix (2026-07-22), C-runtime parity mirrors of the Cranelift-path helpers
+ * added in compiler_rust/runtime/src/value/sffi/io_print.rs (see that file
+ * for the full representation rationale). A flat optional (`i64?`/`bool?`/
+ * `f64?`) lowers to HirType::Pointer{inner} and is represented at runtime as
+ * a RAW payload carrying either the bare inner value or the nil sentinel
+ * (rt_core_nil() == 3) -- never a tagged RuntimeValue. NOT YET WIRED to any
+ * C-backend call site here (the self-hosted .spl compiler's own print
+ * lowering lives in switch_operators_calls.spl, out of scope for this
+ * change) -- added for parity with the existing rt_raw_i64_to_string /
+ * rt_raw_bool_to_string / rt_raw_f64_to_string pattern only. See
+ * doc/08_tracking/bug/interp_index_of_digit_leading_literal_2026-07-22.md.
+ */
+/* Forward decl: rt_raw_f64_to_string is defined further below in this file. */
+int64_t rt_raw_f64_to_string(double v);
+
+int64_t rt_opt_i64_to_string(int64_t raw) {
+    if (raw == rt_core_nil()) return rt_string_new((const uint8_t*)"nil", 3);
+    char buf[32];
+    int len = snprintf(buf, sizeof(buf), "%lld", (long long)raw);
+    return rt_string_new((const uint8_t*)buf, len > 0 ? (uint64_t)len : 0);
+}
+
+int64_t rt_opt_bool_to_string(int64_t raw) {
+    if (raw == rt_core_nil()) return rt_string_new((const uint8_t*)"nil", 3);
+    if (raw != 0) return rt_string_new((const uint8_t*)"true", 4);
+    return rt_string_new((const uint8_t*)"false", 5);
+}
+
+int64_t rt_opt_f64_to_string(int64_t raw) {
+    if (raw == rt_core_nil()) return rt_string_new((const uint8_t*)"nil", 3);
+    double v;
+    memcpy(&v, &raw, sizeof(double));
+    return rt_raw_f64_to_string(v);
+}
+
 /* rt_raw_bool_to_string — same "raw operand, no tag check" contract as
  * rt_raw_i64_to_string (see its callers in switch_operators_calls.spl's
  * lower_bootstrap_print_call), but for a bool-typed MIR local: those are

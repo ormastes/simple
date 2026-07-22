@@ -310,6 +310,12 @@ int64_t  rt_len(int64_t value);
 int64_t  rt_to_string(int64_t value);
 int64_t  rt_raw_u64_to_string(int64_t raw);
 int64_t  rt_raw_i64_to_string(int64_t raw);
+/* P1 fix (2026-07-22): flat-optional print helpers, parity mirrors of the
+ * Cranelift-path (compiler_rust) helpers of the same name. See
+ * runtime_native.c for the definitions and rationale. */
+int64_t  rt_opt_i64_to_string(int64_t raw);
+int64_t  rt_opt_bool_to_string(int64_t raw);
+int64_t  rt_opt_f64_to_string(int64_t raw);
 int64_t  rt_value_to_string(int64_t value);
 int64_t  rt_function_not_found(const uint8_t* name, uint64_t len);
 int64_t  rt_interp_call(const uint8_t* name, uint64_t len, int64_t argc, int64_t argv);
@@ -427,7 +433,7 @@ int64_t  rt_closure_new(int64_t func_ptr, int64_t capture_count);
 int64_t  rt_closure_set_capture(int64_t closure, int64_t index, int64_t value);
 int64_t  rt_closure_get_capture(int64_t closure, int64_t index);
 int64_t  rt_closure_func_ptr(int64_t closure);
-int8_t   rt_enum_check_discriminant(int64_t value, int64_t expected);
+bool     rt_enum_check_discriminant(int64_t value, int64_t expected);
 int64_t  rt_hash_text(int64_t value);
 int64_t  rt_text_eq_fast(int64_t left, int64_t right);
 int64_t  rt_index_get(int64_t collection, int64_t idx);
