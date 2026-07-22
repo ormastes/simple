@@ -1434,3 +1434,29 @@ there for the next investigation. Never gate a probe whose output an
 evidence/gate script asserts on. See
 `doc/07_guide/os/baremetal/baremetal_simple_codegen_landmines.md` § "Probe
 caveats".
+
+## Hardware / RISC-V RTL sanity — not SSpec, use the dedicated gates
+
+Synthesizable hardware cores (`src/lib/hardware/{rv32i_rtl,rv64gc_rtl,soc_rtl}`,
+`examples/09_embedded/fpga_riscv/rtl`) are **not** validated through SSpec
+matchers — they run as GHDL simulations and as interpreter-driven `.spl` boot
+probes. When a spec or task touches RISC-V/SoC hardware, the sanity anchors are
+(both ≤ 10 min, offline):
+
+- **RV64 privileged boot** — `SIMPLE_TIMEOUT_SECONDS=0
+  SIMPLE_EXECUTION_MODE=interpreter bin/simple run
+  test/01_unit/lib/hardware/soc_rtl/soc_top_64_probe.spl` → `SOC64 PROBE: ALL
+  PASS` (S-mode/Sv39/trap-delegation/`sret`). Run under the **interpreter**: the
+  JIT has a sim-only 61-bit boxed-int defect on full-64-bit array state (see
+  `doc/08_tracking/bug/seed_jit_boxed_int_61bit_drops_high_bits_2026-07-22.md`).
+- **RV32 FPGA load path** — `sh scripts/fpga/check_linux_loading_rv32.shs` →
+  `CHECK_LINUX_LOADING_RV32: PASS` (core-vs-host checksum over a 64 KB payload).
+- Guide + full-Linux-boot reproduction: `doc/07_guide/os/rv64_soc_linux_boot.md`
+  § "Sanity tests".
+
+**Working-copy caveat:** these gates compile the hardware sources directly, so
+leaked jj conflict markers / half-finished parallel-session edits fail them at
+parse/analyse time (`TripleLt`, `AluResult32 not found`, VHDL `missing
+entity/architecture`) — a WC-pollution symptom, not a code regression. Restore
+the landed state first: `git checkout origin/main -- src/lib/hardware/
+examples/09_embedded/fpga_riscv/`.

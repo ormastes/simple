@@ -140,3 +140,66 @@ or hand-crafting the cpio `newc` header bytes without `mknod`.
 
 ### `/init` binary
 Verified `ELF 64-bit UCB RISC-V, RVC, soft-float ABI, statically linked`.
+
+## Sanity tests (≤ 10 min, no kernel build)
+
+Two fast gates prove the Simple RISC-V 32/64 cores are Linux-capable without
+building or booting a full kernel. Both run offline and finish in well under ten
+minutes. Run them after any change to `src/lib/hardware/{rv32i_rtl,rv64gc_rtl,soc_rtl}`
+or `examples/09_embedded/fpga_riscv/rtl`.
+
+### RV64 — privileged-mode boot probe (interpreter)
+```sh
+SIMPLE_TIMEOUT_SECONDS=0 SIMPLE_EXECUTION_MODE=interpreter \
+  bin/simple run test/01_unit/lib/hardware/soc_rtl/soc_top_64_probe.spl
+```
+Expected last line: **`SOC64 PROBE: ALL PASS`** (runs in ~2–4 min). Proves the
+`soc_top_64` core executes the full privileged sequence a Linux boot needs:
+bootrom ABI + zero-extension, M/S/U privilege transitions, `ecall` trap
+delegation (`medeleg`), `sret`/`mret`, and Sv39 `satp` write/read-back + address
+translation. Run under the **interpreter** — the JIT backend has a known
+simulation-only 61-bit boxed-int defect that corrupts full-64-bit array state
+(`doc/08_tracking/bug/seed_jit_boxed_int_61bit_drops_high_bits_2026-07-22.md`);
+it does **not** affect the VHDL→FPGA path (that backend never uses `RuntimeValue`).
+
+### RV32 — FPGA load-path integrity gate (GHDL)
+```sh
+sh scripts/fpga/check_linux_loading_rv32.shs
+```
+Expected last line: **`CHECK_LINUX_LOADING_RV32: PASS`** (~15 s). Carries a
+full-capacity 64 KB payload through the *real* BRAM `.mem` load path the
+bitstream uses on hardware and checks that a checksum computed **by the core**
+over the loaded region equals the host checksum (e.g. `883FEE27 == 883FEE27`).
+RV32 has no MMU, so "load a Linux Image" is scoped honestly to load-path
+integrity, not a boot (64 KB BRAM cap — see the results doc for the DRAM
+blocker). Needs `ghdl` + `riscv64-unknown-elf-gcc`.
+
+### Combined generated-RTL smoke
+```sh
+sh scripts/check/check-riscv-rtl-linux-smoke.shs [--rv32-only|--rv64-only]
+```
+Wraps the generated rv32/rv64 RTL Linux-handoff lanes. Note: the generated
+handoff lane is more fragile than the two gates above (it re-runs the
+`fpga_linux` bundle generator); prefer the two direct gates as the day-to-day
+sanity anchors.
+
+### Full Linux boot (heavier, needs a kernel build)
+The real OpenSBI v1.4 → Linux 6.6 → `/init` boot (documented in the QEMU-oracle
+sections above, `Platform Name: simple-soc-rv64`) requires the boot assets, which
+are **not** checked in (`build/` is per-environment):
+```sh
+sh scripts/os/build_rv64_linux_assets.shs --all   # dtb+initramfs+opensbi+kernel (kernel build is slow, >10 min, needs net)
+```
+Then run the QEMU-oracle command in the section above. This exceeds the 10-minute
+sanity budget because of the from-source kernel build; the two gates above are the
+fast anchors.
+
+### Note on the working tree
+These gates compile the RISC-V hardware `.spl`/RTL directly, so a working copy
+with leaked jj conflict markers or half-finished edits will fail them at
+parse/analyse time (not a real regression). If a gate fails with `TripleLt`,
+`AluResult32 not found`, or VHDL `missing entity/architecture`, first restore the
+affected tree to the landed state:
+```sh
+git checkout origin/main -- src/lib/hardware/ examples/09_embedded/fpga_riscv/
+```
