@@ -11,9 +11,10 @@
 
 use std.hardware.rv32i_rtl.pkg.{OP_LUI, OP_AUIPC, OP_JAL, OP_JALR}
 use std.hardware.rv32i_rtl.pkg.{OP_BRANCH, OP_LOAD, OP_STORE, OP_IMMED, OP_REG, OP_SYSTEM}
-use std.hardware.rv32i_rtl.pkg.{ALU_ADD, ALU_SUB, ALU_SLL, ALU_SLT, ALU_SLTU}
-use std.hardware.rv32i_rtl.pkg.{ALU_XOR, ALU_SRL, ALU_SRA, ALU_OR, ALU_AND}
-use std.hardware.rv32i_rtl.pkg.ALU_PASS_B
+# Shared XLEN-neutral bit-assembly + ALU-op base (Wave-3 W3-2/W3-3). rv32 wraps
+# the raw bits with its u32-domain sign-extend; width is fixed at compile time.
+use std.hardware.riscv_common.rtl_decode.{rtl_i_imm_bits, rtl_s_imm_bits, rtl_b_imm_bits}
+use std.hardware.riscv_common.rtl_decode.{rtl_u_imm_bits, rtl_j_imm_bits, rtl_select_alu_op_base}
 
 # ============================================================================
 # A-extension opcode (RV32A: LR.W / SC.W / AMO*.W)
@@ -67,39 +68,29 @@ fn sign_extend_u32(value: u32, width: u32) -> u32:
 # Immediate extraction
 # ============================================================================
 
+# Thin rv32 shims: shared bit-assembly (rtl_*_imm_bits, non-negative) narrowed
+# to u32, then the 32-bit sign-extend. `bits as u32` is exact (bits are always
+# non-negative, so no seed-JIT negative-cast hazard).
+
 fn extract_i_imm_u32(insn: u32) -> u32:
     """I-type immediate: bits [31:20], sign-extended to 32 bits."""
-    val raw = (insn >> 20) & 0xFFF
-    sign_extend_u32(raw, 12)
+    sign_extend_u32(rtl_i_imm_bits(insn as i64) as u32, 12)
 
 fn extract_s_imm_u32(insn: u32) -> u32:
     """S-type immediate: [31:25] | [11:7], sign-extended to 32 bits."""
-    val hi = (insn >> 25) & 0x7F
-    val lo = (insn >> 7) & 0x1F
-    val raw = (hi << 5) | lo
-    sign_extend_u32(raw, 12)
+    sign_extend_u32(rtl_s_imm_bits(insn as i64) as u32, 12)
 
 fn extract_b_imm_u32(insn: u32) -> u32:
     """B-type immediate: 13-bit, sign-extended, bit[0]=0."""
-    val bit12 = (insn >> 31) & 0x1
-    val bit10_5 = (insn >> 25) & 0x3F
-    val bit4_1 = (insn >> 8) & 0xF
-    val bit11 = (insn >> 7) & 0x1
-    val raw = (bit12 << 12) | (bit11 << 11) | (bit10_5 << 5) | (bit4_1 << 1)
-    sign_extend_u32(raw, 13)
+    sign_extend_u32(rtl_b_imm_bits(insn as i64) as u32, 13)
 
 fn extract_u_imm_u32(insn: u32) -> u32:
-    """U-type immediate: bits [31:12] shifted left by 12."""
-    insn & 0xFFFFF000
+    """U-type immediate: bits [31:12] in place (not sign-extended on RV32)."""
+    rtl_u_imm_bits(insn as i64) as u32
 
 fn extract_j_imm_u32(insn: u32) -> u32:
     """J-type immediate: 21-bit, sign-extended, bit[0]=0."""
-    val bit20 = (insn >> 31) & 0x1
-    val bit10_1 = (insn >> 21) & 0x3FF
-    val bit11 = (insn >> 20) & 0x1
-    val bit19_12 = (insn >> 12) & 0xFF
-    val raw = (bit20 << 20) | (bit19_12 << 12) | (bit11 << 11) | (bit10_1 << 1)
-    sign_extend_u32(raw, 21)
+    sign_extend_u32(rtl_j_imm_bits(insn as i64) as u32, 21)
 
 # ============================================================================
 # ALU operation selection
@@ -107,48 +98,9 @@ fn extract_j_imm_u32(insn: u32) -> u32:
 
 fn select_alu_op(opcode: u32, funct3: u32, funct7: u32) -> i64:
     """Select ALU operation based on opcode, funct3, and funct7.
-    Mirrors the VHDL decoder ALU-op process."""
-
-    if opcode == OP_REG:
-        if funct3 == 0x0:
-            # ADD / SUB — funct7 bit 5 disambiguates
-            if (funct7 & 0x20) != 0:
-                return ALU_SUB
-            else:
-                return ALU_ADD
-        if funct3 == 0x1: return ALU_SLL
-        if funct3 == 0x2: return ALU_SLT
-        if funct3 == 0x3: return ALU_SLTU
-        if funct3 == 0x4: return ALU_XOR
-        if funct3 == 0x5:
-            if (funct7 & 0x20) != 0:
-                return ALU_SRA
-            else:
-                return ALU_SRL
-        if funct3 == 0x6: return ALU_OR
-        if funct3 == 0x7: return ALU_AND
-        return ALU_ADD
-
-    else if opcode == OP_IMMED:
-        if funct3 == 0x0: return ALU_ADD
-        if funct3 == 0x1: return ALU_SLL
-        if funct3 == 0x2: return ALU_SLT
-        if funct3 == 0x3: return ALU_SLTU
-        if funct3 == 0x4: return ALU_XOR
-        if funct3 == 0x5:
-            if (funct7 & 0x20) != 0:
-                return ALU_SRA
-            else:
-                return ALU_SRL
-        if funct3 == 0x6: return ALU_OR
-        if funct3 == 0x7: return ALU_AND
-        return ALU_ADD
-
-    else if opcode == OP_LUI:
-        return ALU_PASS_B
-
-    # Default: ADD (used for load/store address calculation, AUIPC, JAL, JALR)
-    ALU_ADD
+    RV32I uses only the shared base mapping (OP_REG / OP_IMMED / OP_LUI plus the
+    ADD default); there are no RV32-specific ALU ops."""
+    rtl_select_alu_op_base(opcode, funct3, funct7)
 
 # ============================================================================
 # Main decode function

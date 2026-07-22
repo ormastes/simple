@@ -13,10 +13,13 @@
 use std.hardware.rv64gc_rtl.pkg.{OP_LUI, OP_AUIPC, OP_JAL, OP_JALR}
 use std.hardware.rv64gc_rtl.pkg.{OP_BRANCH, OP_LOAD, OP_STORE, OP_IMMED, OP_REG, OP_SYSTEM}
 use std.hardware.rv64gc_rtl.pkg.{OP_OP_IMM_32, OP_OP_32, OP_AMO}
-use std.hardware.rv64gc_rtl.pkg.{ALU_ADD, ALU_SUB, ALU_SLL, ALU_SLT, ALU_SLTU}
-use std.hardware.rv64gc_rtl.pkg.{ALU_XOR, ALU_SRL, ALU_SRA, ALU_OR, ALU_AND}
-use std.hardware.rv64gc_rtl.pkg.ALU_PASS_B
+# ALU_ADD is the M-ext placeholder; the RV64-only W-suffix codes stay local.
+use std.hardware.rv64gc_rtl.pkg.ALU_ADD
 use std.hardware.rv64gc_rtl.pkg.{ALU_ADDW, ALU_SUBW, ALU_SLLW, ALU_SRLW, ALU_SRAW}
+# Shared XLEN-neutral bit-assembly + ALU-op base (Wave-3 W3-2/W3-3). rv64 wraps
+# the raw bits with its own 64-bit sign-extend; width is fixed at compile time.
+use std.hardware.riscv_common.rtl_decode.{rtl_i_imm_bits, rtl_s_imm_bits, rtl_b_imm_bits}
+use std.hardware.riscv_common.rtl_decode.{rtl_u_imm_bits, rtl_j_imm_bits, rtl_select_alu_op_base}
 
 # ============================================================================
 # Decode result — all decoder output signals
@@ -66,41 +69,28 @@ fn sign_extend_to_64(value: i64, width: u32) -> i64:
 # Immediate extraction (all produce i64 sign-extended to 64 bits)
 # ============================================================================
 
+# Thin rv64 shims: shared bit-assembly (rtl_*_imm_bits, i64) then the 64-bit
+# sign-extend. `sign_extend_to_64` is kept here (core.spl imports it).
+
 fn extract_i_imm_64(insn: u32) -> i64:
     """I-type immediate: bits [31:20], sign-extended to 64 bits."""
-    val raw: i64 = ((insn >> 20) & 0xFFF) as i64
-    sign_extend_to_64(raw, 12)
+    sign_extend_to_64(rtl_i_imm_bits(insn as i64), 12)
 
 fn extract_s_imm_64(insn: u32) -> i64:
     """S-type immediate: [31:25] | [11:7], sign-extended to 64 bits."""
-    val hi = (insn >> 25) & 0x7F
-    val lo = (insn >> 7) & 0x1F
-    val raw: i64 = ((hi << 5) | lo) as i64
-    sign_extend_to_64(raw, 12)
+    sign_extend_to_64(rtl_s_imm_bits(insn as i64), 12)
 
 fn extract_b_imm_64(insn: u32) -> i64:
     """B-type immediate: 13-bit, sign-extended, bit[0]=0."""
-    val bit12 = (insn >> 31) & 0x1
-    val bit10_5 = (insn >> 25) & 0x3F
-    val bit4_1 = (insn >> 8) & 0xF
-    val bit11 = (insn >> 7) & 0x1
-    val raw: i64 = ((bit12 << 12) | (bit11 << 11) | (bit10_5 << 5) | (bit4_1 << 1)) as i64
-    sign_extend_to_64(raw, 13)
+    sign_extend_to_64(rtl_b_imm_bits(insn as i64), 13)
 
 fn extract_u_imm_64(insn: u32) -> i64:
-    """U-type immediate: bits [31:12] shifted left by 12, sign-extended to 64."""
-    val raw32 = insn & 0xFFFFF000
-    val raw: i64 = raw32 as i64
-    sign_extend_to_64(raw, 32)
+    """U-type immediate: bits [31:12] in place, sign-extended to 64."""
+    sign_extend_to_64(rtl_u_imm_bits(insn as i64), 32)
 
 fn extract_j_imm_64(insn: u32) -> i64:
     """J-type immediate: 21-bit, sign-extended, bit[0]=0."""
-    val bit20 = (insn >> 31) & 0x1
-    val bit10_1 = (insn >> 21) & 0x3FF
-    val bit11 = (insn >> 20) & 0x1
-    val bit19_12 = (insn >> 12) & 0xFF
-    val raw: i64 = ((bit20 << 20) | (bit19_12 << 12) | (bit11 << 11) | (bit10_1 << 1)) as i64
-    sign_extend_to_64(raw, 21)
+    sign_extend_to_64(rtl_j_imm_bits(insn as i64), 21)
 
 # ============================================================================
 # ALU operation selection
@@ -109,51 +99,19 @@ fn extract_j_imm_64(insn: u32) -> i64:
 fn select_alu_op_64(opcode: u32, funct3: u32, funct7: u32) -> i64:
     """Select ALU operation based on opcode, funct3, and funct7."""
 
-    if opcode == OP_REG:
-        # Check for M extension (funct7 == 0x01)
-        # M extension is handled separately; return ALU_ADD as placeholder
-        if funct7 == 0x01:
-            return ALU_ADD
+    # RV64-only arms handled first, then delegate the 10 shared opcodes to the
+    # base mapping (Wave-3 W3-3). Width is compile-time (this file = XLEN 64).
 
-        if funct3 == 0x0:
-            if (funct7 & 0x20) != 0:
-                return ALU_SUB
-            else:
-                return ALU_ADD
-        if funct3 == 0x1: return ALU_SLL
-        if funct3 == 0x2: return ALU_SLT
-        if funct3 == 0x3: return ALU_SLTU
-        if funct3 == 0x4: return ALU_XOR
-        if funct3 == 0x5:
-            if (funct7 & 0x20) != 0:
-                return ALU_SRA
-            else:
-                return ALU_SRL
-        if funct3 == 0x6: return ALU_OR
-        if funct3 == 0x7: return ALU_AND
+    # M extension (OP_REG, funct7 == 0x01) is handled separately downstream;
+    # return ALU_ADD as a placeholder — matches the base ADD default too.
+    if opcode == OP_REG and funct7 == 0x01:
         return ALU_ADD
 
-    else if opcode == OP_IMMED:
-        if funct3 == 0x0: return ALU_ADD
-        if funct3 == 0x1: return ALU_SLL
-        if funct3 == 0x2: return ALU_SLT
-        if funct3 == 0x3: return ALU_SLTU
-        if funct3 == 0x4: return ALU_XOR
-        if funct3 == 0x5:
-            if (funct7 & 0x20) != 0:
-                return ALU_SRA
-            else:
-                return ALU_SRL
-        if funct3 == 0x6: return ALU_OR
-        if funct3 == 0x7: return ALU_AND
-        return ALU_ADD
-
-    else if opcode == OP_OP_32:
+    if opcode == OP_OP_32:
         # W-suffix register-register
         if funct7 == 0x01:
             # M extension W-suffix — handled separately
             return ALU_ADDW
-
         if funct3 == 0x0:
             if (funct7 & 0x20) != 0:
                 return ALU_SUBW
@@ -167,7 +125,7 @@ fn select_alu_op_64(opcode: u32, funct3: u32, funct7: u32) -> i64:
                 return ALU_SRLW
         return ALU_ADDW
 
-    else if opcode == OP_OP_IMM_32:
+    if opcode == OP_OP_IMM_32:
         # W-suffix register-immediate
         if funct3 == 0x0: return ALU_ADDW
         if funct3 == 0x1: return ALU_SLLW
@@ -178,11 +136,8 @@ fn select_alu_op_64(opcode: u32, funct3: u32, funct7: u32) -> i64:
                 return ALU_SRLW
         return ALU_ADDW
 
-    else if opcode == OP_LUI:
-        return ALU_PASS_B
-
-    # Default: ADD (used for load/store address calculation, AUIPC, JAL, JALR)
-    ALU_ADD
+    # Shared opcodes (OP_REG w/ funct7!=1, OP_IMMED, OP_LUI) + ADD default.
+    rtl_select_alu_op_base(opcode, funct3, funct7)
 
 # ============================================================================
 # Main decode function
