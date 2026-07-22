@@ -718,3 +718,9 @@ implementation
 - Shell syntax for `make_os_disk.shs`, `build_fsexec_prod_ring3.shs`, `build_clang_disk.shs`, and `simpleos-native-build.shs` passes. `make_os_disk.shs --self-test` and `check-simpleos-x86-kernel-elf.shs --self-test` each pass once on current source.
 - An active 24-GiB Stage4 build belongs to stale July 18 source in `/tmp/simple-memory-sync-resume`; it is isolated and cannot admit this worktree even if it succeeds. No competing compiler, target, image, or QEMU build was started under current memory pressure.
 - Next current-source chain: isolated Cranelift Stage2/3 refresh; at most one bounded Stage4 candidate; current-source validation, canonical redeploy, and `bootstrap_essential_tools_smoke=true`; then one stamped x86 CPL3 `emit-llvm` filesystem profile before LLC, LLD, Clang, Simple filesystem, or RV64 web/DB live gates.
+
+### 2026-07-22 portability guard convergence
+
+- Rebase brought in the ARM32/ARM64/x86_32 bare-metal text-index ABI repair. The low-resource portability contract initially failed because its July 19 assertion still expected hand-written `MirLowering(...)` field maps after July 20 collapsed both driver copies into `MirLowering.new_for_target`.
+- The guard now rejects every non-comment direct driver constructor, requires both active driver paths to use the canonical constructor, and pins both enum runtime-ID maps in that owner. The final bounded portability check passes, shell syntax/diff whitespace pass, and the stale struct-construction bug record now describes the canonical-owner contract.
+- This is static current-source evidence only. The LLVM/Cranelift cross-module text ABI execution gate and all Stage2/3, Stage4, target, image, and QEMU gates remain pending while the unrelated stale-source Stage4 process consumes roughly 35 GiB RSS with swap exhausted.

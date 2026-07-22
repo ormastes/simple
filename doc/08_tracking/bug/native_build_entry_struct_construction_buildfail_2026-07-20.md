@@ -13,9 +13,10 @@
 > construction (construct-only, i64 or f64 field) but ONLY on native-build,
 > because `run`/`test` use the Rust HIR/MIR lowering, not this pure-Simple path.
 >
-> Fix: add the 8 missing fields to the inline constructor + a sync-guard comment
-> warning the copy must track `new_for_target` (ideally collapse into a
-> `new_for_target` call). Regression guard:
+> Fix: collapse both driver copies into the canonical `new_for_target` call.
+> `check-bootstrap-portability.shs` rejects any new direct driver constructor,
+> requires both active driver paths to use `new_for_target`, and pins the enum
+> runtime-ID maps in that canonical owner. Behavioral regression guard:
 > `test/03_system/native/struct_construct_native.spl`. This also unblocks the
 > struct-field-f64 case of the container-f64 heap-box fix on native-build (see
 > seed_f64_array_element_precision_mask).
@@ -83,10 +84,9 @@ itself) are **not** exercised by this repro and are out of scope for this entry.
 - Sibling native-build Option defect (also blocks a container-f64 case):
   [hosted_native_option_try_unwrap_payload_leak_2026-07-19](hosted_native_option_try_unwrap_payload_leak_2026-07-19.md).
 
-## Next step
+## Verification
 
-Trace the interpreted compiler's struct-construction lowering under
-`native-build --entry` to the `nil` receiver of the `.has` call (likely a struct
-type/layout lookup returning `nil` in single-file `--entry` mode where the full
-pipeline populates it). Add a `native-build --entry` struct-construct probe to
-the native smoke matrix once fixed.
+Run `sh scripts/check/check-bootstrap-portability.shs` for the constructor-owner
+contract and `test/03_system/native/struct_construct_native.spl` through an
+admitted pure-Simple runner for behavior. The static contract is not a
+substitute for the native execution probe.

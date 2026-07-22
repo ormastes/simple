@@ -920,9 +920,17 @@ grep -Fq '_bootstrap_enum_runtime_id_names = lw.enum_runtime_id_names' src/compi
 grep -Fq 'error: bootstrap MIR type registration failed:' src/compiler/50.mir/_MirLowering/bootstrap_globals.spl || fail "bootstrap enum collision rejection missing"
 grep -Fq 'collision.Type255081' test/fixtures/compiler/enum_runtime_identity_guard.spl || fail "enum runtime ID collision regression missing"
 driver_mir_pipeline=src/compiler/80.driver/driver_pipeline.spl
-driver_mir_literals=$(grep -Fc 'MirLowering(' "${driver_mir_pipeline}")
-test "${driver_mir_literals}" -eq "$(grep -Fc 'enum_runtime_id_index: {}' "${driver_mir_pipeline}")" || fail "direct MIR lowering runtime ID map initialization missing"
-test "${driver_mir_literals}" -eq "$(grep -Fc 'enum_runtime_id_names: {}' "${driver_mir_pipeline}")" || fail "direct MIR lowering collision map initialization missing"
+if grep -Ev '^[[:space:]]*#' "${driver_mir_pipeline}" | grep -Fq 'MirLowering('; then
+  fail "driver bypasses canonical MIR lowering constructor"
+fi
+test "$(grep -Fc 'MirLowering.new_for_target(SymbolTable.new(), target_context)' "${driver_mir_pipeline}")" -eq 2 || fail "driver MIR lowering paths do not use canonical constructor"
+mir_lowering_constructor=src/compiler/50.mir/_MirLowering/module_lowering.spl
+for required in \
+  'static fn new_for_target(symbols: SymbolTable, target_context: MirTargetContext) -> MirLowering:' \
+  'enum_runtime_id_index: {},' \
+  'enum_runtime_id_names: {},'; do
+  grep -Fq -- "${required}" "${mir_lowering_constructor}" || fail "canonical MIR constructor misses enum collision map initialization: ${required}"
+done
 grep -Fq 'self.enum_runtime_id(enum_name)' src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl || fail "enum constructor runtime identity missing"
 enum_eq_runtime=src/runtime/simple_core/core_string.spl
 for required in \
