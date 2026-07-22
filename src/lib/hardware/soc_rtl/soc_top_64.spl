@@ -23,13 +23,19 @@
 # real-core path today.
 #
 # MMIO scope: instruction fetch from bootrom/RAM. Loads/stores dispatch to
-# RAM, CLINT (msip/mtimecmp/mtime @ 0x200_0000) and UART16550 (@ 0x1000_0000).
-# UART model is TX-only: THR writes append the byte to the uart_tx sim log
-# (synthesis maps this to the real UART TX FIFO; sim collects it so specs can
-# assert on printed bytes), LSR reads 0x60 (THRE|TEMT — TX drains instantly),
-# RBR reads 0 (no RX path wired yet). Loads from unmapped space return 0,
-# stores to unmapped space are ignored (PLIC data-path routing is a follow-up
-# lane).
+# RAM, CLINT (msip/mtimecmp/mtime @ 0x200_0000), PLIC (@ 0xC00_0000) and
+# UART16550 (@ 0x1000_0000).
+# UART model: THR writes append the byte to the uart_tx sim log (synthesis
+# maps this to the real UART TX FIFO; sim collects it so specs can assert on
+# printed bytes) — TX drains instantly so LSR always reports THRE|TEMT (0x60).
+# RX: soc64_uart_push_rx() (sim host API; synthesis: RX shift register)
+# appends to the uart_rx queue; RBR reads pop the queue head; LSR bit 0 (DR)
+# tracks queue non-empty; IER bit 0 (ERBFI) + non-empty queue asserts UART
+# interrupt into PLIC source 10 (QEMU virt convention), level-sensitive.
+# PLIC: full minimal data path via std.hardware.soc_rtl.plic (priority /
+# pending / enable ctx0 / threshold ctx0 / claim-complete ctx0); the winning
+# enabled pending source above threshold drives mip.MEIP each tick.
+# Loads from unmapped space return 0, stores to unmapped space are ignored.
 #
 # Dependencies:
 #   - std.hardware.rv64gc_rtl.core: CoreState64, core64_init,
@@ -50,12 +56,13 @@ use std.hardware.rv64gc_rtl.trap.{trap64_check_interrupt, trap64_enter_m_only}
 
 # -- Peripherals
 use std.hardware.soc_rtl.clint.{ClintState, clint_create, clint_tick, clint_mmio_read, clint_mmio_write}
+use std.hardware.soc_rtl.plic.{PlicState, plic_create, plic_mmio_read, plic_mmio_read_update, plic_mmio_write, plic_set_pending, plic_check_interrupt}
 use std.hardware.soc_rtl.ram64.{Ram64State, ram64_init, ram64_read, ram64_write}
 use std.hardware.soc_rtl.bootrom.bootrom_read64
 
 # -- Wishbone64 interconnect
 use std.hardware.soc_rtl.wb64_interconnect.{WbRegion64, Wb64Interconnect, wb64_qemu_virt_regions, wb64_init}
-use std.hardware.soc_rtl.wb64_interconnect.{WB64_CLINT_BASE, WB64_CLINT_SIZE, WB64_UART_BASE, WB64_UART_SIZE}
+use std.hardware.soc_rtl.wb64_interconnect.{WB64_CLINT_BASE, WB64_CLINT_SIZE, WB64_UART_BASE, WB64_UART_SIZE, WB64_PLIC_BASE, WB64_PLIC_SIZE}
 
 # Reset vector matches QEMU virt boot ROM base
 val SOC64_RESET_VECTOR: i64 = 0x1000
@@ -72,9 +79,14 @@ struct SocTop64State:
     core:  CoreState64     # RV64GC core (pc, priv_mode, halt, rf, ...)
     ram:   Ram64State      # DRAM
     clint: ClintState      # CLINT (mtime, mtimecmp, msip)
+    plic:  PlicState       # PLIC (priority/pending/enable/threshold/claim)
     ic:    Wb64Interconnect  # Address decode table (read-only after init)
     uart_tx: [i64]         # UART TX byte log (sim: assertion sink; synthesis:
                            # maps to the real UART16550 TX FIFO)
+    uart_rx: [i64]         # UART RX queue (sim: host pushes via
+                           # soc64_uart_push_rx; synthesis: RX FIFO)
+    uart_ier: i64          # UART IER register (bit 0 = ERBFI: RX data
+                           # available interrupt enable)
 
 # ============================================================================
 # Create / Reset
@@ -89,12 +101,16 @@ fn soc_top_64_init(dram_size: i64) -> SocTop64State:
     - clint initialized with mtime = 0, mtimecmp = max"""
     val regions = wb64_qemu_virt_regions()
     val tx_log: [i64] = []
+    val rx_queue: [i64] = []
     SocTop64State(
         core:  core64_init(SOC64_RESET_VECTOR),
         ram:   ram64_init(dram_size),
         clint: clint_create(),
+        plic:  plic_create(),
         ic:    wb64_init(regions),
-        uart_tx: tx_log
+        uart_tx: tx_log,
+        uart_rx: rx_queue,
+        uart_ier: 0
     )
 
 # ============================================================================
@@ -131,6 +147,10 @@ fn soc64_in_uart(addr: i64) -> bool:
     """True when the byte address falls inside the UART16550 MMIO region."""
     addr >= WB64_UART_BASE and addr < WB64_UART_BASE + WB64_UART_SIZE
 
+fn soc64_in_plic(addr: i64) -> bool:
+    """True when the byte address falls inside the PLIC MMIO region."""
+    addr >= WB64_PLIC_BASE and addr < WB64_PLIC_BASE + WB64_PLIC_SIZE
+
 fn soc64_clint_read(soc: SocTop64State, addr: i64, width_bytes: i64) -> i64:
     """CLINT load: 8-byte (RV64 ld, the normal kernel access width for
     mtime/mtimecmp) assembles the {hi,lo} u32 register pair; 4-byte (lw)
@@ -145,38 +165,90 @@ fn soc64_clint_read(soc: SocTop64State, addr: i64, width_bytes: i64) -> i64:
 # LSR value: THRE|TEMT — the TX log drains instantly, transmitter always idle
 val SOC64_UART_LSR_IDLE: i64 = 0x60
 
-# UART16550 register offsets served by the SoC64 TX-only model
+# UART16550 register offsets served by the SoC64 model
+val SOC64_UART_OFF_RBR: i64 = 0x0   # read: RX buffer register (pops queue)
 val SOC64_UART_OFF_THR: i64 = 0x0   # write: TX holding register
+val SOC64_UART_OFF_IER: i64 = 0x1   # read/write: interrupt enable register
 val SOC64_UART_OFF_LSR: i64 = 0x5   # read: line status
 
-fn soc64_uart_read(addr: i64) -> i64:
-    """UART16550 load (TX-only model): LSR reads 0x60 (THR empty +
-    transmitter empty), RBR reads 0 (no RX path wired yet — documented
-    gap), all other registers read 0."""
-    if addr - WB64_UART_BASE == SOC64_UART_OFF_LSR:
+# PLIC source id for UART0 (QEMU virt convention)
+val SOC64_PLIC_SRC_UART: u32 = 10
+
+# PLIC claim/complete byte offset for context 0 (mirrors PLIC_CLAIM_OFF)
+val SOC64_PLIC_OFF_CLAIM: i64 = 0x200004
+
+fn soc64_uart_read(soc: SocTop64State, addr: i64) -> i64:
+    """UART16550 load: RBR reads the RX queue head (0 when empty; the pop is
+    applied by soc64_mem_read_update), IER reads back the enable register,
+    LSR reads 0x60 (THRE|TEMT — TX drains instantly) plus bit 0 (DR) when
+    the RX queue is non-empty, all other registers read 0."""
+    val off = addr - WB64_UART_BASE
+    if off == SOC64_UART_OFF_RBR:
+        if soc.uart_rx.len() > 0:
+            return soc.uart_rx[0] & 0xFF
+        return 0
+    if off == SOC64_UART_OFF_IER:
+        return soc.uart_ier
+    if off == SOC64_UART_OFF_LSR:
+        if soc.uart_rx.len() > 0:
+            return SOC64_UART_LSR_IDLE | 0x1
         return SOC64_UART_LSR_IDLE
     0
 
+fn soc64_plic_read(soc: SocTop64State, addr: i64) -> i64:
+    """PLIC load: 32-bit register read by byte offset (priority / pending /
+    enable / threshold / claim). Claim-read pending-clear is applied by
+    soc64_mem_read_update."""
+    val off = addr - WB64_PLIC_BASE
+    (plic_mmio_read(soc.plic, off as u32) as i64) & 0xFFFF_FFFF
+
 fn soc64_mem_read(soc: SocTop64State, addr: i64, width_bytes: i64) -> i64:
-    """Data load dispatch: DRAM, CLINT, UART16550; unmapped space reads 0."""
+    """Data load dispatch: DRAM, CLINT, PLIC, UART16550; unmapped reads 0."""
     if soc64_in_ram(soc, addr):
         return ram64_read(soc.ram, addr - SOC64_RAM_BASE, width_bytes)
     if soc64_in_clint(addr):
         return soc64_clint_read(soc, addr, width_bytes)
+    if soc64_in_plic(addr):
+        return soc64_plic_read(soc, addr)
     if soc64_in_uart(addr):
-        return soc64_uart_read(addr)
+        return soc64_uart_read(soc, addr)
     0
 
+fn soc64_rx_pop(queue: [i64]) -> [i64]:
+    """Return the RX queue with its head element removed."""
+    var out: [i64] = []
+    var i = 1
+    while i < queue.len():
+        out = out.push(queue[i])
+        i = i + 1
+    out
+
+fn soc64_mem_read_update(soc: SocTop64State, addr: i64) -> SocTop64State:
+    """Apply load side-effects: a PLIC claim read atomically claims the
+    winning source (clears its pending bit), a UART RBR read pops the RX
+    queue head. All other addresses are no-ops."""
+    var out = soc
+    if soc64_in_plic(addr):
+        if addr - WB64_PLIC_BASE == SOC64_PLIC_OFF_CLAIM:
+            out.plic = plic_mmio_read_update(out.plic, (addr - WB64_PLIC_BASE) as u32)
+    else if soc64_in_uart(addr):
+        if addr - WB64_UART_BASE == SOC64_UART_OFF_RBR and out.uart_rx.len() > 0:
+            out.uart_rx = soc64_rx_pop(out.uart_rx)
+    out
+
 fn soc64_mem_write(soc: SocTop64State, addr: i64, width_bytes: i64, wdata: i64) -> SocTop64State:
-    """Data store dispatch: DRAM, CLINT (msip/mtimecmp), UART16550 THR.
+    """Data store dispatch: DRAM, CLINT (msip/mtimecmp), PLIC, UART16550.
 
     CLINT: an 8-byte store (RV64 sd) splits into the {lo,hi} 32-bit
     register writes; 4-byte stores hit a single register. The clint.mtime
     i64 mirror is re-synced from lo/hi after every CLINT write so direct
     mtime stores cannot desync it.
+    PLIC: 32-bit register writes by byte offset (priority / enable /
+    threshold / complete) via plic_mmio_write.
     UART: a THR store appends the low byte to the uart_tx sim log
-    (synthesis: real UART TX FIFO); other UART register stores are
-    accepted and dropped. Stores to unmapped space are ignored."""
+    (synthesis: real UART TX FIFO); an IER store latches the interrupt
+    enable register; other UART register stores are accepted and dropped.
+    Stores to unmapped space are ignored."""
     var out = soc
     if soc64_in_ram(out, addr):
         out.ram = ram64_write(out.ram, addr - SOC64_RAM_BASE, width_bytes, wdata)
@@ -186,9 +258,27 @@ fn soc64_mem_write(soc: SocTop64State, addr: i64, width_bytes: i64, wdata: i64) 
         if width_bytes == 8:
             out.clint = clint_mmio_write(out.clint, (off + 4) as u32, ((wdata >> 32) & 0xFFFF_FFFF) as u32)
         out.clint.mtime = ((out.clint.mtime_hi as i64) << 32) | ((out.clint.mtime_lo as i64) & 0xFFFF_FFFF)
+    else if soc64_in_plic(addr):
+        val off = addr - WB64_PLIC_BASE
+        out.plic = plic_mmio_write(out.plic, off as u32, (wdata & 0xFFFF_FFFF) as u32)
     else if soc64_in_uart(addr):
-        if addr - WB64_UART_BASE == SOC64_UART_OFF_THR:
+        val off = addr - WB64_UART_BASE
+        if off == SOC64_UART_OFF_THR:
             out.uart_tx = out.uart_tx.push(wdata & 0xFF)
+        else if off == SOC64_UART_OFF_IER:
+            out.uart_ier = wdata & 0xF
+    out
+
+# ============================================================================
+# UART RX host API
+# ============================================================================
+
+fn soc64_uart_push_rx(soc: SocTop64State, byte_val: i64) -> SocTop64State:
+    """Push a received byte into the UART RX queue (sim host API; synthesis:
+    RX shift register load). The byte becomes readable at RBR, sets LSR.DR,
+    and — with IER.ERBFI set — asserts PLIC source 10 on the next tick."""
+    var out = soc
+    out.uart_rx = out.uart_rx.push(byte_val & 0xFF)
     out
 
 # ============================================================================
@@ -208,10 +298,19 @@ fn soc_top_64_tick(soc: SocTop64State) -> SocTop64State:
     val ct = clint_tick(out.clint)
     out.clint = ct.state
 
-    # Step 1b: Deliver CLINT interrupt levels into the core's mip CSR.
-    # Level-sensitive: MTIP tracks mtime >= mtimecmp, MSIP tracks the msip
-    # MMIO register. MEIP stays 0 until the PLIC data path is wired.
-    out.core.csr_m = csr64_update_mip(out.core.csr_m, ct.mtip, ct.msip_out, false)
+    # Step 1b: Route the UART RX level into the PLIC. Level-sensitive:
+    # source 10 pends while IER.ERBFI is set and the RX queue is non-empty
+    # (a claim clears the pending bit; the level re-pends it until the guest
+    # drains RBR — standard 16550-behind-PLIC behavior).
+    val uart_irq = (out.uart_ier & 0x1) != 0 and out.uart_rx.len() > 0
+    out.plic = plic_set_pending(out.plic, SOC64_PLIC_SRC_UART, uart_irq)
+
+    # Step 1c: Deliver interrupt levels into the core's mip CSR.
+    # MTIP tracks mtime >= mtimecmp, MSIP tracks the msip MMIO register,
+    # MEIP tracks the PLIC gateway: any enabled pending source whose
+    # priority exceeds the context-0 threshold.
+    val pchk = plic_check_interrupt(out.plic)
+    out.core.csr_m = csr64_update_mip(out.core.csr_m, ct.mtip, ct.msip_out, pchk.meip)
 
     # Halted core: peripherals keep ticking, datapath is frozen
     if out.core.halt:
@@ -224,10 +323,12 @@ fn soc_top_64_tick(soc: SocTop64State) -> SocTop64State:
     val comb_prelim = core64_combinational(out.core, insn, 0, out.core.rf)
     val width_bytes = soc64_width_bytes(comb_prelim.dmem_width)
 
-    # Step 4: Data memory read dispatch
+    # Step 4: Data memory read dispatch (+ read side-effects: PLIC claim
+    # pending-clear, UART RBR queue pop)
     var dmem_rdata: i64 = 0
     if comb_prelim.dmem_re:
         dmem_rdata = soc64_mem_read(out, comb_prelim.dmem_addr, width_bytes)
+        out = soc64_mem_read_update(out, comb_prelim.dmem_addr)
 
     # Step 5: Final combinational pass with real load data
     val comb = core64_combinational(out.core, insn, dmem_rdata, out.core.rf)

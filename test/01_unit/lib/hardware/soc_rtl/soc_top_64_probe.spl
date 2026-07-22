@@ -3,7 +3,7 @@
 # doc/08_tracking/bug/deployed_seed_test_runner_init_hang_2026-07-17.md), so
 # this probe mirrors the "SocTop64 Program Execution" spec cases and prints
 # PASS/FAIL. Run: bin/simple run test/01_unit/lib/hardware/soc_rtl/soc_top_64_probe.spl
-use std.hardware.soc_rtl.soc_top_64.{SocTop64State, soc_top_64_init, soc_top_64_tick}
+use std.hardware.soc_rtl.soc_top_64.{SocTop64State, soc_top_64_init, soc_top_64_tick, soc64_uart_push_rx}
 use std.hardware.soc_rtl.ram64.{ram64_read, ram64_write}
 
 fn check(name: text, ok: bool) -> i64:
@@ -158,6 +158,79 @@ fn main() -> i64:
     fails = fails + check("case5 mepc == spin pc 0x80000030", soc5.core.rf.regs[13] == 0x8000_0030)
     fails = fails + check("case5 mip.MTIP delivered from CLINT (bit 7)", (soc5.core.csr_m.mip & 0x80) != 0)
     fails = fails + check("case5 pc parks in handler at 0x8000011C", soc5.core.pc == 0x8000_011C)
+
+    # ── Case 6: PLIC + UART RX external interrupt end-to-end ──
+    # Guest: mtvec -> handler, PLIC priority[10]=1, enable ctx0 bit 10,
+    # threshold ctx0 = 0, UART IER.ERBFI, mie.MEIE + mstatus.MIE, spin.
+    # Host pushes 'A' into the UART RX queue -> PLIC source 10 pends ->
+    # mip.MEIP -> vector to handler. Handler: claim (expect 10), RBR read
+    # (expect 65, pops queue), complete, second claim (expect 0), marker,
+    # mcause into x12, park.
+    var soc6 = soc_top_64_init(0x1000)
+    var ram6 = soc6.ram
+    ram6 = ram64_write(ram6, 0x000, 4, 0x800002B7)   # lui  x5, 0x80000
+    ram6 = ram64_write(ram6, 0x004, 4, 0x02029293)   # slli x5, x5, 32
+    ram6 = ram64_write(ram6, 0x008, 4, 0x0202D293)   # srli x5, x5, 32   (x5 = 0x8000_0000)
+    ram6 = ram64_write(ram6, 0x00C, 4, 0x10028293)   # addi x5, x5, 0x100 (handler)
+    ram6 = ram64_write(ram6, 0x010, 4, 0x30529073)   # csrrw x0, mtvec, x5
+    ram6 = ram64_write(ram6, 0x014, 4, 0x0C000337)   # lui  x6, 0xC000   (x6 = 0xC00_0000 PLIC)
+    ram6 = ram64_write(ram6, 0x018, 4, 0x00100393)   # addi x7, x0, 1
+    ram6 = ram64_write(ram6, 0x01C, 4, 0x02732423)   # sw   x7, 0x28(x6)  priority[10] = 1
+    ram6 = ram64_write(ram6, 0x020, 4, 0x00002437)   # lui  x8, 0x2      (x8 = 0x2000)
+    ram6 = ram64_write(ram6, 0x024, 4, 0x00830433)   # add  x8, x6, x8   (enable ctx0)
+    ram6 = ram64_write(ram6, 0x028, 4, 0x00100393)   # addi x7, x0, 1
+    ram6 = ram64_write(ram6, 0x02C, 4, 0x00A39393)   # slli x7, x7, 10   (x7 = 1<<10)
+    ram6 = ram64_write(ram6, 0x030, 4, 0x00742023)   # sw   x7, 0(x8)    enable source 10
+    ram6 = ram64_write(ram6, 0x034, 4, 0x002004B7)   # lui  x9, 0x200    (x9 = 0x200000)
+    ram6 = ram64_write(ram6, 0x038, 4, 0x009304B3)   # add  x9, x6, x9   (threshold ctx0)
+    ram6 = ram64_write(ram6, 0x03C, 4, 0x0004A023)   # sw   x0, 0(x9)    threshold = 0
+    ram6 = ram64_write(ram6, 0x040, 4, 0x10000E37)   # lui  x28, 0x10000 (UART base)
+    ram6 = ram64_write(ram6, 0x044, 4, 0x00100393)   # addi x7, x0, 1
+    ram6 = ram64_write(ram6, 0x048, 4, 0x007E00A3)   # sb   x7, 1(x28)   IER = 1 (ERBFI)
+    ram6 = ram64_write(ram6, 0x04C, 4, 0x00100393)   # addi x7, x0, 1
+    ram6 = ram64_write(ram6, 0x050, 4, 0x00B39393)   # slli x7, x7, 11   (x7 = 0x800 MEIE)
+    ram6 = ram64_write(ram6, 0x054, 4, 0x3043A073)   # csrrs x0, mie, x7
+    ram6 = ram64_write(ram6, 0x058, 4, 0x00800393)   # addi x7, x0, 8
+    ram6 = ram64_write(ram6, 0x05C, 4, 0x3003A073)   # csrrs x0, mstatus, x7 (MIE)
+    ram6 = ram64_write(ram6, 0x060, 4, 0x0000006F)   # jal  x0, 0        (spin)
+    # Handler at 0x8000_0100
+    ram6 = ram64_write(ram6, 0x100, 4, 0x0C200737)   # lui  x14, 0xC200  (claim block base)
+    ram6 = ram64_write(ram6, 0x104, 4, 0x00472783)   # lw   x15, 4(x14)  claim -> x15
+    ram6 = ram64_write(ram6, 0x108, 4, 0x10000837)   # lui  x16, 0x10000 (UART base)
+    ram6 = ram64_write(ram6, 0x10C, 4, 0x00084883)   # lbu  x17, 0(x16)  RBR -> x17
+    ram6 = ram64_write(ram6, 0x110, 4, 0x00F72223)   # sw   x15, 4(x14)  complete
+    ram6 = ram64_write(ram6, 0x114, 4, 0x00472903)   # lw   x18, 4(x14)  second claim -> x18
+    ram6 = ram64_write(ram6, 0x118, 4, 0x80000537)   # lui  x10, 0x80000
+    ram6 = ram64_write(ram6, 0x11C, 4, 0x02051513)   # slli x10, x10, 32
+    ram6 = ram64_write(ram6, 0x120, 4, 0x02055513)   # srli x10, x10, 32 (x10 = 0x8000_0000)
+    ram6 = ram64_write(ram6, 0x124, 4, 0x32100593)   # addi x11, x0, 0x321 (marker)
+    ram6 = ram64_write(ram6, 0x128, 4, 0x30B52023)   # sw   x11, 0x300(x10)
+    ram6 = ram64_write(ram6, 0x12C, 4, 0x34202673)   # csrrs x12, mcause, x0
+    ram6 = ram64_write(ram6, 0x130, 4, 0x0000006F)   # jal  x0, 0        (park)
+    soc6.ram = ram6
+    soc6.core.pc = 0x8000_0000
+    var n = 0
+    while n < 30:
+        soc6 = soc_top_64_tick(soc6)
+        n = n + 1
+    # Host side: 'A' arrives on the UART RX line while the guest spins
+    soc6 = soc64_uart_push_rx(soc6, 65)
+    n = 0
+    while n < 40:
+        soc6 = soc_top_64_tick(soc6)
+        n = n + 1
+    val marker6 = ram64_read(soc6.ram, 0x300, 4)
+    val expected_ext_cause: i64 = (1 << 63) | 11
+    print("case6 pc={soc6.core.pc} marker={marker6} claim1={soc6.core.rf.regs[15]} rbr={soc6.core.rf.regs[17]} claim2={soc6.core.rf.regs[18]} mcause={soc6.core.rf.regs[12]} mepc={soc6.core.csr_m.mepc} mip={soc6.core.csr_m.mip} plic_pend={soc6.plic.pending}")
+    fails = fails + check("case6 mcause == machine external interrupt (bit63|11)", soc6.core.rf.regs[12] == expected_ext_cause)
+    fails = fails + check("case6 first claim returned source 10 (UART)", soc6.core.rf.regs[15] == 10)
+    fails = fails + check("case6 RBR read == 65 ('A')", soc6.core.rf.regs[17] == 65)
+    fails = fails + check("case6 second claim after complete returned 0", soc6.core.rf.regs[18] == 0)
+    fails = fails + check("case6 handler wrote marker 0x321 to RAM", marker6 == 0x321)
+    fails = fails + check("case6 mepc == spin pc 0x80000060", soc6.core.csr_m.mepc == 0x8000_0060)
+    fails = fails + check("case6 pc parks in handler at 0x80000130", soc6.core.pc == 0x8000_0130)
+    fails = fails + check("case6 MEIP deasserted after RX drain (mip bit 11 clear)", (soc6.core.csr_m.mip & 0x800) == 0)
+    fails = fails + check("case6 PLIC pending clear after drain", soc6.plic.pending == 0)
 
     if fails == 0:
         print("SOC64 PROBE: ALL PASS")
