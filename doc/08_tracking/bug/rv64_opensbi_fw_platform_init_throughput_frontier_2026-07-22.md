@@ -186,3 +186,22 @@ checkpoint/resume, not the `lsu64_load` JIT fix, not the watchdog:
 map — promote Case 3's `uart_has_opensbi` scan to a hard assert. Assigned to a
 UART/console bring-up lane. The throughput/CoW work stands; it was necessary
 (the boot now runs unboundedly) but not sufficient.
+
+## Diagnostic follow-up (2026-07-22) — DTB placement ruled OUT; blocker is JIT speed
+
+Instrumented the boot with PC-hit flags for the 8250 console path
+(fdt serial parse / serial_init / uart8250_init / uart8250_putc) and ran two
+DTB placements on the honest 128 MiB map, watchdog defeated, 200k ticks each:
+- A a1=0x80060000 (dtb inside OpenSBI image): uart_len=0, no console func reached.
+- B a1=0x87F00000 (dtb relocated clear of firmware): **identical** — uart_len=0,
+  no console func reached.
+Relocation changes nothing → the DTB-collision hypothesis is NOT the banner
+blocker at this depth. The boot simply has not run far enough (console init is
+past the tick budget reachable in one process at interpreter speed). The single
+blocker is now [[seed_jit_lsu64_load_lowering_forces_interpreter]] — the JIT
+fallback caps the sim at ~600 ticks/s. With JIT restored, one process should
+reach console init; only then is the ns16550a-vs-DTB match worth re-checking.
+
+**Banner chase paused here (reviewer decision):** remaining work is gated on a
+Rust seed-side JIT fix (out of pure-Simple scope, now filed) — not on more
+SoC/UART .spl work, which is correct and complete through fw_platform_init.
