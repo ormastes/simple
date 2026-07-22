@@ -1,0 +1,189 @@
+# AOP hart debug hooks — halt request / halted freeze / single-step / pc trace
+# for the Simple-level RISC-V cores (Phase-3 "AOP hart hooks", see
+# doc/01_research/hardware/riscv/riscv32_riscv64_unification_realrtl_aop_jtag_2026-07-21.md §10).
+#
+# Design:
+#   - `hart64_step_body` / `hart32_step_body` are the named STEP JOIN POINTS:
+#     each executes exactly one architectural step of the rv64 / rv32 core
+#     (core*_combinational + core*_update, same shape as soc_top wiring).
+#   - The step hook `hart_dbg_on_step` is attached to those join points via
+#     the repo's AOP mechanism (`on pc{ execution(...) } use ... before`,
+#     declared below), wired for the full pipeline (driver_pipeline.weave_aop
+#     + mir_aop_injection with W2-B fail-closed `aop_weave_count` accounting).
+#     KNOWN GAP (see doc/08_tracking/bug/aop_hart_hooks_weaving_gaps_2026-07-22.md):
+#     no in-tree path executes woven advice for functions defined in imported
+#     lib modules today (interpreter weaving is entry-module-only, and the MIR
+#     weave matcher does not match parser-tokenized execution(...) predicates),
+#     so `hart_dbg_step_hook_fires` stays 0 on the run path until that lands.
+#   - Because of that gap the pc TRACE is recorded by the seam itself (not by
+#     the advice), so trace/halt/step behavior is fully executable today.
+#   - Halt-freeze and single-step CANNOT be expressed as before/after advice
+#     anyway (advice cannot suppress execution of the advised body; around
+#     advice must call proceed() exactly once), so they live in the explicit
+#     seam `hart64_debug_step` / `hart32_debug_step`, which samples the debug
+#     state at the step boundary and decides whether the join point runs.
+#
+# Single-hart debug state (one rv64 or rv32 hart per process; matches the
+# single-core soc_top harnesses).
+
+use std.hardware.rv64gc_rtl.core.{CoreState64, core64_combinational, core64_update}
+use std.hardware.rv32i_rtl.core.{CoreState, core_combinational, core_update}
+use std.hardware.rv32i_rtl.regfile.{RegFile, regfile_write}
+
+# ============================================================================
+# Hart debug state
+# ============================================================================
+
+var g_halt_req: bool = false     # external halt request (JTAG DMCONTROL.haltreq analog)
+var g_halted: bool = false       # hart is halted (datapath frozen)
+var g_step_req: bool = false     # execute exactly one instruction while halted
+var g_halt_pc: i64 = -1          # pc at which the hart halted
+var g_cur_pc: i64 = -1           # pc of the step currently executing (read by advice)
+var g_trace_on: bool = false     # pc trace enabled
+var g_trace_cap: i64 = 0         # max trace entries (capped append)
+var g_trace_pc: [i64] = []       # traced pcs, one per executed step
+var g_step_hook_fires: i64 = 0   # times the woven step advice actually fired
+
+pub fn hart_dbg_reset():
+    """Clear all hart debug state (run state, no trace)."""
+    g_halt_req = false
+    g_halted = false
+    g_step_req = false
+    g_halt_pc = -1
+    g_cur_pc = -1
+    g_trace_on = false
+    g_trace_cap = 0
+    g_trace_pc = []
+    g_step_hook_fires = 0
+
+pub fn hart_dbg_halt_req():
+    """Request a halt; sampled at the next step boundary."""
+    g_halt_req = true
+
+pub fn hart_dbg_resume():
+    """Clear halt request and resume free-running execution."""
+    g_halt_req = false
+    g_halted = false
+
+pub fn hart_dbg_step_once():
+    """While halted: execute exactly one instruction, then re-freeze."""
+    g_step_req = true
+
+pub fn hart_dbg_trace_enable(cap: i64):
+    """Enable pc tracing with a bounded capacity (capped append)."""
+    g_trace_on = true
+    g_trace_cap = cap
+    g_trace_pc = []
+
+pub fn hart_dbg_trace_disable():
+    g_trace_on = false
+
+pub fn hart_dbg_halted() -> bool:
+    g_halted
+
+pub fn hart_dbg_halt_pc() -> i64:
+    g_halt_pc
+
+pub fn hart_dbg_trace_len() -> i64:
+    g_trace_pc.len()
+
+pub fn hart_dbg_trace_at(i: i64) -> i64:
+    if i < 0 or i >= g_trace_pc.len():
+        return -1
+    g_trace_pc[i]
+
+pub fn hart_dbg_step_hook_fires() -> i64:
+    """How many times the WOVEN step advice fired (0 => aspect not woven)."""
+    g_step_hook_fires
+
+# ============================================================================
+# Advice — woven at the step join points via AOP (sole writer of the trace)
+# ============================================================================
+
+pub fn hart_dbg_on_step():
+    """Before-advice on hart64_step_body / hart32_step_body execution.
+    The JTAG Debug-Module attach point for per-step instrumentation; the
+    fires counter is the weave-executed witness (0 = aspect not woven)."""
+    g_step_hook_fires = g_step_hook_fires + 1
+
+fn hart_dbg_record_step(pc: i64):
+    """Seam-side step recording: bounded pc trace (executable today; see the
+    weaving gap note in the module header)."""
+    g_cur_pc = pc
+    if g_trace_on and g_trace_pc.len() < g_trace_cap:
+        g_trace_pc.push(pc)
+
+# ============================================================================
+# rv64 step seam + join point
+# ============================================================================
+
+struct Hart64StepResult:
+    state: CoreState64
+    executed: bool
+
+fn hart64_step_body(state: CoreState64, imem_data: u32, dmem_rdata: i64) -> CoreState64:
+    """JOIN POINT: exactly one architectural rv64 step (comb + clocked update).
+    Advised by hart_dbg_on_step via the aspect declaration below."""
+    val comb = core64_combinational(state, imem_data, dmem_rdata, state.rf)
+    core64_update(state, imem_data, comb, comb.a0_val, comb.a1_val)
+
+pub fn hart64_debug_step(state: CoreState64, imem_data: u32, dmem_rdata: i64) -> Hart64StepResult:
+    """Step boundary with hart debug hooks: samples halt_req, freezes the
+    datapath while halted, and honors single-step. Memory transactions
+    (imem fetch / dmem prelim pass) remain the caller's responsibility,
+    same as the core64_combinational + core64_update wiring."""
+    if g_halt_req and not g_halted:
+        g_halted = true
+        g_halt_pc = state.pc
+    if g_halted:
+        if not g_step_req:
+            # Frozen: the join point does not run, state is unchanged.
+            return Hart64StepResult(state: state, executed: false)
+        # Single-step: run exactly one instruction, stay halted.
+        g_step_req = false
+        hart_dbg_record_step(state.pc)
+        val stepped = hart64_step_body(state, imem_data, dmem_rdata)
+        return Hart64StepResult(state: stepped, executed: true)
+    hart_dbg_record_step(state.pc)
+    val next = hart64_step_body(state, imem_data, dmem_rdata)
+    Hart64StepResult(state: next, executed: true)
+
+# ============================================================================
+# rv32 step seam + join point (shared aspect, mirrored seam)
+# ============================================================================
+
+struct Hart32StepResult:
+    state: CoreState
+    rf: RegFile
+    executed: bool
+
+fn hart32_step_body(state: CoreState, rf: RegFile, imem_data: u32, dmem_rdata: u32) -> Hart32StepResult:
+    """JOIN POINT: exactly one architectural rv32 step (comb + rd write-back +
+    clocked update; the rv32 core keeps the regfile outside CoreState).
+    Advised by hart_dbg_on_step via the aspect declaration below."""
+    val comb = core_combinational(state, imem_data, dmem_rdata, rf)
+    val new_rf = regfile_write(rf, comb.dec.rd, comb.rd_data, comb.dec.reg_write)
+    val new_state = core_update(state, imem_data, comb, comb.a0_val, comb.a1_val)
+    Hart32StepResult(state: new_state, rf: new_rf, executed: true)
+
+pub fn hart32_debug_step(state: CoreState, rf: RegFile, imem_data: u32, dmem_rdata: u32) -> Hart32StepResult:
+    """rv32 mirror of hart64_debug_step over the shared debug state."""
+    if g_halt_req and not g_halted:
+        g_halted = true
+        g_halt_pc = state.pc as i64
+    if g_halted:
+        if not g_step_req:
+            return Hart32StepResult(state: state, rf: rf, executed: false)
+        g_step_req = false
+        hart_dbg_record_step(state.pc as i64)
+        return hart32_step_body(state, rf, imem_data, dmem_rdata)
+    hart_dbg_record_step(state.pc as i64)
+    hart32_step_body(state, rf, imem_data, dmem_rdata)
+
+# ============================================================================
+# Aspect declarations — the hart debug trace hook, attached via AOP weaving.
+# Explicit per-core pointcuts (no glob) so the advice can never match itself.
+# ============================================================================
+
+on pc{ execution(* hart64_step_body(..)) } use hart_dbg_on_step before priority 10
+on pc{ execution(* hart32_step_body(..)) } use hart_dbg_on_step before priority 10

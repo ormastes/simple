@@ -1,0 +1,180 @@
+# Standalone probe for the AOP hart debug hooks (Phase-3 "AOP hart hooks").
+# Drives the rv64/rv32 cores through the hart debug step seams and proves:
+#   1. pc TRACE — 3 executed steps => 3 traced pcs (seam-recorded).
+#   2. HALT-FREEZE — halt_req sampled at the step boundary freezes pc/state
+#      for M ticks while halted.
+#   3. SINGLE-STEP — step_once executes exactly one instruction per request,
+#      then re-freezes; resume returns to free-running.
+#   4. rv32 mirror — same debug state over the rv32 core seam.
+#   5. WEAVE ACCOUNTING (W2-B) — runs the driver's own weave machinery
+#      (weavingconfig_from_hir_advices -> weave_function ->
+#      aop_weave_accounting_reset/add, exactly the driver_pipeline.weave_aop
+#      sequence) on the hart64_step_body join point and asserts
+#      aop_weave_count() > 0 for the matching rule, AND that the
+#      parser-tokenized `execution(...)` predicate form weaves 0 — the
+#      fail-closed W2-B signal (requested>0, woven=0 => CodegenError in
+#      VHDL generation). See the gap bug doc:
+#      doc/08_tracking/bug/aop_hart_hooks_weaving_gaps_2026-07-22.md
+# NOTE: hart_dbg_step_hook_fires() is EXPECTED to be 0 on this run path —
+# interpreter weaving is entry-module-only and never advises imported lib
+# modules (that is the filed gap, printed loudly below, not hidden).
+# Run: bin/simple run test/01_unit/lib/hardware/debug_hooks/hart_debug_probe.spl
+use std.hardware.rv64gc_rtl.core.{CoreState64, core64_init}
+use std.hardware.rv32i_rtl.core.{CoreState, core_reset}
+use std.hardware.rv32i_rtl.regfile.{RegFile, regfile_create}
+use std.hardware.debug_hooks.hart_debug.{
+    hart_dbg_reset, hart_dbg_halt_req, hart_dbg_resume, hart_dbg_step_once,
+    hart_dbg_trace_enable, hart_dbg_halted, hart_dbg_halt_pc,
+    hart_dbg_trace_len, hart_dbg_trace_at, hart_dbg_step_hook_fires,
+    hart64_debug_step, hart32_debug_step
+}
+use compiler.frontend.core.aop.{weave_function, WeavingConfig, MirBlockInfo, InstructionInfo}
+use compiler.mdsoc.weaving.weaving_config.{weavingconfig_from_hir_advices}
+use compiler.mir.mir_aop_injection.{aop_weave_accounting_reset, aop_weave_accounting_add, aop_weave_count, aop_advices_requested}
+use compiler.hir.hir.{HirAopAdvice}
+use compiler.common.diagnostics.span.{Span}
+
+fn check(name: text, ok: bool) -> i64:
+    if ok:
+        print("PASS {name}")
+        return 0
+    print("FAIL {name}")
+    1
+
+# Program (reset vector 0): pure ALU ops, no memory traffic.
+#   0x00 addi x1, x0, 1
+#   0x04 addi x2, x0, 2
+#   0x08 addi x3, x0, 3
+#   0x0C addi x4, x0, 4
+#   0x10 addi x5, x0, 5
+#   0x14 jal  x0, 0        (park)
+fn fetch(pc: i64) -> u32:
+    val prog = [0x00100093u32, 0x00200113u32, 0x00300193u32,
+                0x00400213u32, 0x00500293u32, 0x0000006Fu32]
+    val idx = pc / 4
+    if idx >= 0 and idx < 6:
+        return prog[idx]
+    0x0000006Fu32
+
+fn weave_hart_advice(pred: text) -> i64:
+    """Run the driver_pipeline.weave_aop sequence for one hart-debug advice
+    rule against the hart64_step_body join point; returns advices inserted."""
+    val adv = HirAopAdvice(predicate_text: pred, advice_function: "hart_dbg_on_step",
+                           form: "before", priority: 10, span: Span.empty())
+    val config = weavingconfig_from_hir_advices([adv])
+    val blocks = [MirBlockInfo(id: 0, instruction_kinds: [InstructionInfo(index: 0, kind_tag: "call")])]
+    val result = weave_function(config, "hart64_step_body", "hardware.debug_hooks.hart_debug", [], [], blocks)
+    if result.advices_inserted > 0:
+        aop_weave_accounting_add(result.advices_inserted)
+    result.advices_inserted
+
+fn main() -> i64:
+    var fails: i64 = 0
+
+    # ------------------------------------------------------------------
+    # Gate 1: trace — 3 executed steps => 3 traced pcs
+    # ------------------------------------------------------------------
+    hart_dbg_reset()
+    hart_dbg_trace_enable(16)
+    var st = core64_init(0)
+    var i = 0
+    while i < 3:
+        val r = hart64_debug_step(st, fetch(st.pc), 0)
+        st = r.state
+        i = i + 1
+    print("rv64 trace_len={hart_dbg_trace_len()} pc={st.pc} x1={st.rf.regs[1]}")
+    fails = fails + check("3 steps executed (pc=0x0C, x1=1)", st.pc == 0x0C and st.rf.regs[1] == 1)
+    fails = fails + check("trace has 3 entries", hart_dbg_trace_len() == 3)
+    fails = fails + check("trace pcs are 0x00,0x04,0x08",
+                          hart_dbg_trace_at(0) == 0x00 and
+                          hart_dbg_trace_at(1) == 0x04 and
+                          hart_dbg_trace_at(2) == 0x08)
+
+    # ------------------------------------------------------------------
+    # Gate 2: halt_req mid-program -> pc frozen for M ticks while halted
+    # ------------------------------------------------------------------
+    hart_dbg_halt_req()
+    val frozen_pc = st.pc
+    var frozen_ok = true
+    var m = 0
+    while m < 5:
+        val r = hart64_debug_step(st, fetch(st.pc), 0)
+        st = r.state
+        if r.executed or st.pc != frozen_pc:
+            frozen_ok = false
+        m = m + 1
+    fails = fails + check("halted latched at step boundary", hart_dbg_halted())
+    fails = fails + check("halt pc recorded (0x0C)", hart_dbg_halt_pc() == 0x0C)
+    fails = fails + check("pc frozen for 5 ticks while halted", frozen_ok and st.pc == 0x0C)
+    fails = fails + check("no trace growth while frozen", hart_dbg_trace_len() == 3)
+
+    # ------------------------------------------------------------------
+    # Gate 3: single-step -> exactly one instruction per step request
+    # ------------------------------------------------------------------
+    hart_dbg_step_once()
+    var r1 = hart64_debug_step(st, fetch(st.pc), 0)
+    st = r1.state
+    val stepped_once = r1.executed and st.pc == 0x10 and hart_dbg_halted()
+    # next tick without a new step request must stay frozen
+    var r2 = hart64_debug_step(st, fetch(st.pc), 0)
+    st = r2.state
+    fails = fails + check("step_once executed exactly one instruction (pc 0x0C->0x10)",
+                          stepped_once)
+    fails = fails + check("re-frozen after single step", (not r2.executed) and st.pc == 0x10)
+    fails = fails + check("single-stepped pc traced", hart_dbg_trace_at(3) == 0x0C and hart_dbg_trace_len() == 4)
+
+    # ------------------------------------------------------------------
+    # Gate 4: resume -> free-running again
+    # ------------------------------------------------------------------
+    hart_dbg_resume()
+    var r3 = hart64_debug_step(st, fetch(st.pc), 0)
+    st = r3.state
+    fails = fails + check("resume unfreezes (executed, pc 0x10->0x14)",
+                          r3.executed and st.pc == 0x14 and not hart_dbg_halted())
+
+    # ------------------------------------------------------------------
+    # Gate 5: rv32 mirror — same debug state over the rv32 core seam
+    # ------------------------------------------------------------------
+    hart_dbg_reset()
+    hart_dbg_trace_enable(8)
+    var st32 = core_reset(0u32)
+    var rf32 = regfile_create()
+    var k = 0
+    while k < 2:
+        val r32 = hart32_debug_step(st32, rf32, fetch(st32.pc as i64), 0u32)
+        st32 = r32.state
+        rf32 = r32.rf
+        k = k + 1
+    print("rv32 pc={st32.pc} x1={rf32.regs[1]} trace_len={hart_dbg_trace_len()}")
+    fails = fails + check("rv32: 2 steps executed and traced (pc=8, x1=1)",
+                          st32.pc == 8u32 and rf32.regs[1] == 1u32 and hart_dbg_trace_len() == 2)
+    hart_dbg_halt_req()
+    val r32f = hart32_debug_step(st32, rf32, fetch(st32.pc as i64), 0u32)
+    fails = fails + check("rv32: halt freezes datapath",
+                          (not r32f.executed) and hart_dbg_halted() and r32f.state.pc == 8u32)
+
+    # ------------------------------------------------------------------
+    # Gate 6: W2-B weave accounting through the driver's weave machinery
+    # ------------------------------------------------------------------
+    # Documented gap, printed loudly (NOT a silent skip): interpreter-path
+    # weaving is entry-module-only, so the module's own `on pc{...}`
+    # declarations cannot fire for lib-module code on this run path.
+    print("INTERP WEAVE GAP: step_hook_fires={hart_dbg_step_hook_fires()} on run path (expected 0; see aop_hart_hooks_weaving_gaps_2026-07-22.md)")
+
+    aop_weave_accounting_reset(1)
+    val woven_bare = weave_hart_advice("hart64_step_body")
+    print("weave[bare fn-name rule]: advices_inserted={woven_bare} aop_weave_count={aop_weave_count()} requested={aop_advices_requested()}")
+    fails = fails + check("WEAVE GATE: hart_dbg_on_step woven at hart64_step_body (count > 0)",
+                          woven_bare > 0 and aop_weave_count() > 0)
+
+    aop_weave_accounting_reset(1)
+    val woven_exec = weave_hart_advice("execution ( * hart64_step_body ( .. ) )")
+    print("weave[tokenized execution(...) rule]: advices_inserted={woven_exec} aop_weave_count={aop_weave_count()}")
+    fails = fails + check("W2-B FAIL-CLOSED SIGNAL: tokenized execution(...) predicate weaves 0 (requested=1, woven=0 => VHDL gen errors, not silent drop)",
+                          woven_exec == 0 and aop_weave_count() == 0 and aop_advices_requested() == 1)
+
+    if fails == 0:
+        print("HART DEBUG HOOKS PROBE: ALL PASS")
+        return 0
+    print("HART DEBUG HOOKS PROBE: {fails} FAILURES")
+    1
