@@ -85,7 +85,14 @@ rv32/rv64 cores is the deferred plan item. To let the riscv-013 driver
 run without a program buffer, `debug_registers.vhd` carries DM-resident
 stub CSRs (documented in its header): misa (RO constant RV64IMA),
 mstatus (RW scratch), tselect/tdata1 (0 triggers). These are replaced by
-the real hart CSR file at hart integration. GDB was not exercised in this
-pass (OpenOCD's gdb server does listen on :3333; `gdb -ex 'target
-extended-remote :3333'` is the follow-up once a real hart is attached —
-against the stub hart a GDB session would only re-prove the same DM paths).
+the real hart CSR file at hart integration.
+
+## GDB session (follow-up pass)
+
+A full GDB end-to-end session over this same stack — attach, GPR
+read/write, SBA memory read/write, pc write, dcsr.step (+4), native
+continue + Ctrl-C halt, clean detach — is scripted in `gdb_e2e.gdb`,
+driven by `run_gdb_e2e.shs`, and documented with the verified transcript
+in `gdb_e2e.md`. Native `stepi`/breakpoints remain blocked on hart
+integration (GDB's riscv stepping plants breakpoints the tb fake hart
+never executes); details in `gdb_e2e.md`.
