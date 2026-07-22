@@ -281,7 +281,18 @@ Current stub interface:
    Known simplifications (documented in-file): update-on-rising-TCK (TDO
    registered on falling edge, pin-visible behavior conforms), all TCK-domain
    (no CDC yet — needed at hart integration).
-3. Wait for BRAM work confirmation before Stage 2
-4. Begin Stage 2 (Debug Module halt/resume) — external-facing interface only,
-   hart hooks stay stubs per plan
-5. Coordinate with opus agent on core integration timing
+3. ✅ **Stage 2 LANDED 2026-07-22** — `riscv_debug_module.vhd` (DM top,
+   resume-handshake FSM, stub hart ports haltreq_o/resumereq_o/ndmreset_o/
+   halted_i/running_i) + `debug_registers.vhd` (DMCONTROL/DMSTATUS/HARTINFO/
+   ABSTRACTCS/COMMAND) + `tb_debug_module.vhd` (6 checks incl. Stage-1
+   regression); `dmi_bus.vhd` routes 0x10–0x1F to DM (scratch 0x00–0x07
+   unchanged, defaulted dm_* ports keep Stage-1 tb source-compatible).
+   GHDL: STAGE2 PASS + STAGE1 PASS, both exit 0, independently re-run by
+   reviewer. v0.13 decisions documented in-file (single hart: hartsel reads
+   0; W-only haltreq/resumereq; activation write doesn't honor same-write
+   fields; cmderr=2 sticky W1C; version=2/authenticated=1 always readable).
+4. Begin Stage 3 (abstract commands): COMMAND access-register + DATA0/1 +
+   ABSTRACTCS.busy/datacount>0/cmderr=1(busy); then hart-side GPR/CSR access
+   port on the rv32 PL core (replaces stubs); wire ndmreset_o into hart reset.
+5. Hart integration still gated on BRAM stability (coordinate before touching
+   rv32_exec_core.vhd / rv64 core)

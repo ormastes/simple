@@ -6,8 +6,12 @@
 -- for one clock with rdata (for reads) and resp (0 = success, 2 = failed).
 --
 -- Stage 1 backing store: 8 x 32-bit registers at addresses 0x00..0x07.
--- Addresses above 0x07 respond `failed` (resp = 2). No Debug Module yet;
--- Stage 2 replaces this with the real DM register map.
+-- Stage 2: addresses 0x10..0x1F are forwarded to the Debug Module over the
+-- dm_* port (same valid/ready protocol). The dm_* inputs have safe defaults
+-- so Stage-1 instantiations (no DM attached) still compile; with no DM
+-- attached an access to 0x10..0x1F never completes (dm_ready defaults '0'),
+-- which the Stage-1 testbench never does. All other addresses outside
+-- 0x00..0x07 and 0x10..0x1F respond `failed` (resp = 2).
 
 library ieee;
 use ieee.std_logic_1164.all;
@@ -25,7 +29,17 @@ entity dmi_bus is
 
     rdata : out std_logic_vector(31 downto 0);
     resp  : out std_logic_vector(1 downto 0);
-    ready : out std_logic
+    ready : out std_logic;
+
+    -- Stage-2 Debug Module forwarding port (DMI addresses 0x10..0x1F).
+    -- Defaults let Stage-1 instantiations leave these unconnected.
+    dm_valid : out std_logic;
+    dm_addr  : out std_logic_vector(6 downto 0);
+    dm_wdata : out std_logic_vector(31 downto 0);
+    dm_op    : out std_logic_vector(1 downto 0);
+    dm_rdata : in  std_logic_vector(31 downto 0) := (others => '0');
+    dm_resp  : in  std_logic_vector(1 downto 0)  := "10";
+    dm_ready : in  std_logic := '0'
   );
 end entity dmi_bus;
 
@@ -38,37 +52,54 @@ architecture rtl of dmi_bus is
   signal resp_r  : std_logic_vector(1 downto 0)  := "00";
   signal ready_r : std_logic := '0';
 
+  signal is_dm    : std_logic;
+  signal sel_dm_r : std_logic := '0';
+
 begin
+
+  -- Address decode: 0x10..0x1F -> Debug Module.
+  is_dm <= '1' when addr(6 downto 4) = "001" else '0';
+
+  dm_valid <= valid and is_dm;
+  dm_addr  <= addr;
+  dm_wdata <= wdata;
+  dm_op    <= op;
 
   process (clk, rst_n)
     variable idx : natural;
   begin
     if rst_n = '0' then
-      regs    <= (others => (others => '0'));
-      rdata_r <= (others => '0');
-      resp_r  <= "00";
-      ready_r <= '0';
+      regs     <= (others => (others => '0'));
+      rdata_r  <= (others => '0');
+      resp_r   <= "00";
+      ready_r  <= '0';
+      sel_dm_r <= '0';
     elsif rising_edge(clk) then
       ready_r <= '0';
       if valid = '1' then
-        if unsigned(addr) <= 7 then
+        if is_dm = '1' then
+          sel_dm_r <= '1';  -- DM supplies rdata/resp/ready for this request
+        elsif unsigned(addr) <= 7 then
+          sel_dm_r <= '0';
           idx := to_integer(unsigned(addr(2 downto 0)));
           if op = "10" then
             regs(idx) <= wdata;
           elsif op = "01" then
             rdata_r <= regs(idx);
           end if;
-          resp_r <= "00";
+          resp_r  <= "00";
+          ready_r <= '1';
         else
-          resp_r <= "10";  -- failed: address out of range
+          sel_dm_r <= '0';
+          resp_r  <= "10";  -- failed: address out of range
+          ready_r <= '1';
         end if;
-        ready_r <= '1';
       end if;
     end if;
   end process;
 
-  rdata <= rdata_r;
-  resp  <= resp_r;
-  ready <= ready_r;
+  rdata <= dm_rdata when sel_dm_r = '1' else rdata_r;
+  resp  <= dm_resp  when sel_dm_r = '1' else resp_r;
+  ready <= dm_ready when sel_dm_r = '1' else ready_r;
 
 end architecture rtl;
