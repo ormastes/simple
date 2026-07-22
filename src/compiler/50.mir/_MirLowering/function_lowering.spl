@@ -506,6 +506,9 @@ impl MirLowering:
                 MirType(kind: MirTypeKind.I64)
 
     me lower_block(block: HirBlock) -> LocalId?:
+        self.lower_block_expected(block, nil)
+
+    me lower_block_expected(block: HirBlock, expected_type: HirType?) -> LocalId?:
         """Lower HIR block to MIR, return result local if any."""
         # Use struct fields directly. A `val` declared without an initializer and
         # then assigned inside a match case is not bound in the outer scope by the
@@ -546,7 +549,20 @@ impl MirLowering:
                 print "[mir-lower] block:value-read"
             if bootstrap_trace:
                 print "[mir-lower] block:value-unwrapped"
-            val local = self.lower_expr(value)
+            var local = LocalId(id: 0)
+            match value.kind:
+                case HirExprKind.If(cond, then_, else_):
+                    local = self.lower_if(cond, then_, else_, expected_type)
+                case HirExprKind.MatchCase(scrutinee, arms):
+                    local = self.lower_match_case(scrutinee, arms, expected_type)
+                case _:
+                    local = self.lower_expr(value)
+            if val found_expected = expected_type:
+                match found_expected.kind:
+                    case HirTypeKind.Optional(_):
+                        local = self.ensure_option_handle(local, found_expected)
+                    case _:
+                        ()
             # Register the HIR type of the block's value expression so that
             # implicit returns (function body without explicit 'return')
             # preserve type information through MIR lowering and inline_call.

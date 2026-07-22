@@ -459,27 +459,19 @@ bin/simple query sem-query 'FIND fn WHERE name starts_with "parse_" AND param_co
   `mcp_wm_text_tools_present=true` for the common WM text tools.
 
 **Stale LSP MCP binary (server behaves old / wrong version):**
-- `.mcp.json` and `config/mcp/install.shs` launch `simple-lsp-mcp` from
-  `bin/release/linux-x86_64/simple_lsp_mcp_server`, but builds deploy to
-  `bin/release/x86_64-unknown-linux-gnu/` and `build/bootstrap/mcp-package/`.
-  The launch path is not refreshed by a rebuild and can go stale.
-- Diagnose: probe `serverInfo.version` and compare with the wrapper:
+- Reinstall the project wrappers and run the native smoke:
   ```bash
-  printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"1"}}}\n' \
-    | bin/release/linux-x86_64/simple_lsp_mcp_server | grep -o '"version":"[0-9.]*"'
-  bin/simple_lsp_mcp_server --version
+  sh config/mcp/install.shs
+  sh scripts/check/check-mcp-native-smoke.shs
   ```
-- Fix: re-copy the fresh build over the launch path. Direct `cp` fails with
-  "Text file busy" while a session is running the server — copy to a temp name
-  and `mv` over it (rename is safe against a running process):
-  ```bash
-  cp bin/release/x86_64-unknown-linux-gnu/simple_lsp_mcp_server bin/release/linux-x86_64/simple_lsp_mcp_server.new
-  mv -f bin/release/linux-x86_64/simple_lsp_mcp_server.new bin/release/linux-x86_64/simple_lsp_mcp_server
-  ```
-- Running sessions keep the old inode; reconnect MCP (or restart the session)
-  to pick up the new binary. Stale-candidate probes also show up as
-  `timeout: the monitored command dumped core` in `.simple/logs/simple_lsp_mcp_stderr.log`
-  and `native_probe_failed` lines in `.simple/logs/simple_lsp_mcp_startup.log`.
+- The wrappers probe canonical release candidates. Inspect
+  `.simple/logs/simple_lsp_mcp_startup.log` and
+  `.simple/logs/simple_lsp_mcp_stderr.log` for `native_probe_failed` (and the
+  corresponding `simple_mcp_*` logs for the MCP server).
+- Unset or correct an explicit `SIMPLE_LSP_MCP_NATIVE` or `SIMPLE_MCP_NATIVE`
+  override, then restart the MCP client after the smoke passes.
+- For deployment-path details, see
+  [MCP/LSP MCP deploy-path fix](lsp_mcp_deploy_path_fix.md).
 
 ---
 
