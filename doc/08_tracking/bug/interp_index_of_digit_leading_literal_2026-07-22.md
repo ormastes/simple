@@ -49,18 +49,40 @@ payloads.
 - 429–1609 sites coalesce via `??` — silently take the nil branch when the true
   answer is 3 (production compiler .spl code incl. linker/backend).
 
-## Fix direction (senior call: architectural, do NOT spot-patch)
-A boundary-boxing patch at index_of call sites was attempted and PROVEN WRONG
-(`??` does not un-shift; would corrupt all 429 sites — dead-end diffs kept in
-session scratchpad for reference). Correct options:
-(a) apply the real `<<3` tagging to the flat `i64?`/`bool?` lane end-to-end
-    (principled; every producer/consumer must be audited), or
-(b) INT64_MIN-style sentinel for the flat lane (smaller change but does NOT fix
-    the tag-misread symptoms for payloads 1/2/4/5 — insufficient alone given
-    the make_opt matrix above).
-Given (b) is demonstrably insufficient, the fix is (a) or removing the flat
-lane. Needs a dedicated seed change with the make_opt(0..12) matrix + index_of
-matrix + `??`/`.?`/print consumers as the regression gate.
+## Representation finding (2026-07-22, MIR-dump-proven)
+`T?` for primitives is NOT a union/enum: it lowers as `HirType::Pointer{inner:T}`
+— a nullable-pointer optimization where the "pointer" IS the raw primitive and
+nil is the fake pointer 3 (`hir/lower/expr/control.rs:554` documents this). The
+lane is internally CONSISTENT raw: arithmetic, `??` (rt_unwrap_or_self
+passthrough), if-val (direct Store copy — a separate HIR pattern path from
+`??`), and function passing all agree on raw. The two defects are:
+1. payload 3 == nil sentinel — UNSOUND BY CONSTRUCTION for full-range i64
+   (no in-band sentinel can be sound; 3 is just badly placed).
+2. generic print consumers assume TAGGED values — raw payloads misread as tag
+   bits (the 1→"nil", 2→"0.0", 11→"true" garbage). Display defect only.
+
+## Resolution (senior decision 2026-07-22)
+- Defect 2 (print): FIX LANDED/IN FLIGHT — print lowering
+  (mir/lower/lowering_expr_builtin.rs print special-case) routes
+  Pointer{inner:primitive} args through nil-aware raw formatters
+  (rt_opt_i64_to_string / rt_opt_bool_to_string), mirroring the existing
+  rt_raw_i64_to_string 61-bit bypass.
+- Defect 1 (payload-3 collision): DOCUMENTED LIMITATION, fix deferred. Full
+  end-to-end tagging was designed and rejected for now: 7 site-groups across
+  6+ files on the hottest lowering paths (Return needs new declared-type
+  context threading; if-val and `??` are two independent paths; call-arg,
+  Let/Assign, struct-field coercion sites all need wiring), it inherits the
+  documented 61-bit BoxInt truncation, and the seed is bootstrap-only by repo
+  policy. An earlier boundary-boxing spot-patch was PROVEN WRONG (`??` does
+  not unshift). If/when fixed properly: retire the flat Pointer representation
+  for primitive optionals in favor of the tagged scheme, using the make_opt
+  matrix + arithmetic-after-unwrap + optional-chain + double-tag probes in the
+  session record as the regression gate.
+- Practical guidance until then: on seed-engine binaries, any `i64?` API can
+  return nil when the true answer is exactly 3 (e.g. index_of match at
+  position 3). Prefer `>= 0` sentinel-style APIs or add +1 offsets in critical
+  paths; the self-hosted engine must be checked for the same representation
+  before the same trust is extended (verification pending).
 
 ## Related prior filings (same family)
 - native_i64opt_some0_collapses_to_nil (the 0-sentinel ancestor)
