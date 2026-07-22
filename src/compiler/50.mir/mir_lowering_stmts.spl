@@ -1546,7 +1546,7 @@ impl MirLowering:
     me lower_for_iterator(var_: SymbolId, iter: HirExpr, body: HirBlock) -> LocalId:
         """Lower `for x in collection` for non-range iterables.
 
-        Runtime arrays lower to a real counted index loop (see
+        Runtime arrays and text lower to a real counted index loop (see
         lower_for_array_indexed). Any other iterable (dicts, custom
         iterators, ...) has no native iterator-protocol lowering yet (#143):
         the old stub emitted iter()/has_next()/next() calls through null
@@ -1598,6 +1598,26 @@ impl MirLowering:
                     element_type = elem_t
                 case _:
                     ()
+
+        # Text iteration reuses the canonical Unicode splitter, then the same
+        # counted array loop used by `text.chars()`. Do not index bytes here:
+        # one loop element is one UTF-8 codepoint-sized text value.
+        if self.local_is_str(collection_local):
+            val tagged_text = self.ensure_tagged_str(collection_local)
+            val chars_func = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_string_chars"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+            ))
+            var b_chars = self.builder
+            val chars_call = b_chars.emit_call(chars_func, [mir_operand_copy(tagged_text)], MirType.i64())
+            self.builder = b_chars
+            if val chars_local = chars_call:
+                return self.lower_for_array_indexed(
+                    var_,
+                    chars_local,
+                    MirType(kind: MirTypeKind.Opaque("str")),
+                    body
+                )
 
         # Runtime-array fast path: lower `for x in arr` to an index-based
         # counted loop over rt_array_len / rt_array_get (mirrors the array

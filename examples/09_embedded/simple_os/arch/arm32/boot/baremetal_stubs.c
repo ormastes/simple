@@ -762,7 +762,7 @@ S1(rt_string_trim) S1(rt_string_trim_start) S1(rt_string_trim_end)
 S1(rt_string_to_upper) S1(rt_string_to_lower)
 S2(rt_string_replace) S3(rt_string_replace_all) S2(rt_string_repeat)
 S2(rt_string_pad_start) S2(rt_string_pad_end)
-S1(rt_string_reverse) S1(rt_string_chars) S1(rt_string_bytes)
+S1(rt_string_reverse) S1(rt_string_bytes)
 S1(rt_string_is_empty) S2(rt_string_compare) S2(rt_string_format)
 
 RuntimeValue rt_array_new(RuntimeValue cap_val)
@@ -834,7 +834,7 @@ RuntimeValue rt_array_get(RuntimeValue arr, RuntimeValue idx)
     if (!IS_HEAP(arr)) return NIL_VALUE;
     RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
     if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
-    int32_t i = DECODE_INT(idx);
+    int32_t i = (int32_t)idx;
     if (i < 0 || (uint32_t)i >= a->len) return NIL_VALUE;
     return a->items[i];
 }
@@ -844,7 +844,7 @@ RuntimeValue rt_array_set(RuntimeValue arr, RuntimeValue idx, RuntimeValue val)
     if (!IS_HEAP(arr)) return NIL_VALUE;
     RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
     if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
-    int32_t i = DECODE_INT(idx);
+    int32_t i = (int32_t)idx;
     if (i < 0 || (uint32_t)i >= a->len) return NIL_VALUE;
     a->items[i] = val;
     return val;
@@ -856,6 +856,23 @@ RuntimeValue rt_array_len(RuntimeValue arr)
     RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
     if (!a || a->hdr.type != HEAP_ARRAY) return 0;
     return (RuntimeValue)a->len;
+}
+
+RuntimeValue rt_string_chars(RuntimeValue str)
+{
+    RuntimeString *s = IS_HEAP(str) ? (RuntimeString *)DECODE_PTR(str) : (RuntimeString *)0;
+    RuntimeValue arr = rt_array_new(ENCODE_INT(s && s->hdr.type == HEAP_STRING ? s->len : 0));
+    if (!s || s->hdr.type != HEAP_STRING) return arr;
+    for (uint32_t i = 0; i < s->len;) {
+        uint8_t lead = (uint8_t)s->data[i];
+        uint32_t width = 1;
+        if (lead >= 0xC2 && lead <= 0xDF && i + 2 <= s->len) width = 2;
+        else if (lead >= 0xE0 && lead <= 0xEF && i + 3 <= s->len) width = 3;
+        else if (lead >= 0xF0 && lead <= 0xF4 && i + 4 <= s->len) width = 4;
+        arr = rt_array_push(arr, rt_string_new((RuntimeValue)(uintptr_t)&s->data[i], (RuntimeValue)width));
+        i += width;
+    }
+    return arr;
 }
 
 S3(rt_array_slice) S2(rt_array_contains) S2(rt_array_index_of)

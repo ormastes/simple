@@ -307,6 +307,24 @@ spl_i64 rt_string_bytes(spl_i64 value) {
     return out;
 }
 
+spl_i64 rt_string_chars(spl_i64 value) {
+    RtString *s = rt_as_string(value);
+    spl_i64 out = rt_array_new(s ? (spl_i64)s->len : 0);
+    if (!s) {
+        return out;
+    }
+    for (spl_u64 i = 0; i < s->len;) {
+        spl_u8 lead = (spl_u8)s->data[i];
+        spl_u64 width = 1;
+        if (lead >= 0xC2 && lead <= 0xDF && i + 2 <= s->len) width = 2;
+        else if (lead >= 0xE0 && lead <= 0xEF && i + 3 <= s->len) width = 3;
+        else if (lead >= 0xF0 && lead <= 0xF4 && i + 4 <= s->len) width = 4;
+        rt_array_push(out, rt_string_new((spl_i64)(spl_u64)(s->data + i), (spl_i64)width));
+        i += width;
+    }
+    return out;
+}
+
 typedef struct RtStringBuilder {
     spl_u64 len;
     spl_u64 capacity;

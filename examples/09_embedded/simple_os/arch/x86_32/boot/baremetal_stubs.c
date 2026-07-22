@@ -842,6 +842,81 @@ RuntimeValue rt_is_some(RuntimeValue value)
     return rt_is_none(value) ? 0 : 1;
 }
 
+RuntimeValue rt_array_new(RuntimeValue cap_val)
+{
+    int32_t cap = (int32_t)cap_val;
+    if (cap <= 0) cap = 64;
+    if (cap < 64) cap = 64;
+    if (cap > 0x100000) cap = 0x100000;
+    size_t alloc_size = sizeof(RuntimeArray) + (size_t)cap * sizeof(RuntimeValue);
+    RuntimeArray *a = (RuntimeArray *)malloc(alloc_size);
+    if (!a) return NIL_VALUE;
+    a->hdr.type = HEAP_ARRAY;
+    a->hdr.size = (uint32_t)alloc_size;
+    a->len = 0;
+    a->cap = (uint32_t)cap;
+    for (int32_t i = 0; i < cap; i++) a->items[i] = NIL_VALUE;
+    return ENCODE_PTR(a);
+}
+
+static RuntimeValue rt_array_push_handle(RuntimeValue arr, RuntimeValue val)
+{
+    if (!IS_HEAP(arr)) return NIL_VALUE;
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
+    if (a->len >= a->cap) {
+        uint32_t old_cap = a->cap;
+        uint32_t new_cap = old_cap ? old_cap * 2 : 64;
+        size_t new_size = sizeof(RuntimeArray) + (size_t)new_cap * sizeof(RuntimeValue);
+        RuntimeArray *grown = (RuntimeArray *)realloc(a, new_size);
+        if (!grown) return ENCODE_PTR(a);
+        grown->hdr.size = (uint32_t)new_size;
+        grown->cap = new_cap;
+        for (uint32_t i = old_cap; i < new_cap; i++) grown->items[i] = NIL_VALUE;
+        a = grown;
+    }
+    a->items[a->len++] = val;
+    return ENCODE_PTR(a);
+}
+
+int8_t rt_array_push(RuntimeValue arr, RuntimeValue val)
+{
+    return rt_array_push_handle(arr, val) != NIL_VALUE;
+}
+
+RuntimeValue rt_array_get(RuntimeValue arr, RuntimeValue idx)
+{
+    if (!IS_HEAP(arr)) return NIL_VALUE;
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    int32_t i = (int32_t)idx;
+    if (!a || a->hdr.type != HEAP_ARRAY || i < 0 || (uint32_t)i >= a->len) return NIL_VALUE;
+    return a->items[i];
+}
+
+RuntimeValue rt_array_len(RuntimeValue arr)
+{
+    if (!IS_HEAP(arr)) return 0;
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    return (!a || a->hdr.type != HEAP_ARRAY) ? 0 : (RuntimeValue)a->len;
+}
+
+RuntimeValue rt_string_chars(RuntimeValue str)
+{
+    RuntimeString *s = IS_HEAP(str) ? (RuntimeString *)DECODE_PTR(str) : (RuntimeString *)0;
+    RuntimeValue arr = rt_array_new((RuntimeValue)(s && s->hdr.type == HEAP_STRING ? s->len : 0));
+    if (!s || s->hdr.type != HEAP_STRING) return arr;
+    for (uint32_t i = 0; i < s->len;) {
+        uint8_t lead = (uint8_t)s->data[i];
+        uint32_t width = 1;
+        if (lead >= 0xC2 && lead <= 0xDF && i + 2 <= s->len) width = 2;
+        else if (lead >= 0xE0 && lead <= 0xEF && i + 3 <= s->len) width = 3;
+        else if (lead >= 0xF0 && lead <= 0xF4 && i + 4 <= s->len) width = 4;
+        arr = rt_array_push_handle(arr, rt_string_new((RuntimeValue)(uintptr_t)&s->data[i], (RuntimeValue)width));
+        i += width;
+    }
+    return arr;
+}
+
 /* ===================================================================
  * 10. No-op stubs — macro-generated runtime function stubs
  * =================================================================== */
@@ -878,12 +953,11 @@ S1(rt_string_trim) S1(rt_string_trim_start) S1(rt_string_trim_end)
 S1(rt_string_to_upper) S1(rt_string_to_lower)
 S2(rt_string_replace) S3(rt_string_replace_all) S2(rt_string_repeat)
 S2(rt_string_pad_start) S2(rt_string_pad_end)
-S1(rt_string_reverse) S1(rt_string_chars) S1(rt_string_bytes)
+S1(rt_string_reverse) S1(rt_string_bytes)
 S1(rt_string_is_empty) S2(rt_string_compare) S2(rt_string_format)
 
 /* --- Array --- */
-S1(rt_array_new) S2(rt_array_push) S1(rt_array_pop)
-S2(rt_array_get) S3(rt_array_set) S1(rt_array_len)
+S1(rt_array_pop) S3(rt_array_set)
 S3(rt_array_slice) S2(rt_array_contains) S2(rt_array_index_of)
 S2(rt_array_last_index_of) S2(rt_array_remove) S3(rt_array_insert)
 S1(rt_array_reverse) S1(rt_array_sort) S2(rt_array_sort_by)

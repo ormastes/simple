@@ -15,9 +15,9 @@ failure is **never** silently converted to a wrong answer.
   case passed, with zero FAIL/XFAIL/XPASS/codegen-fallback results.
 - **Gate 2 — parity:** `scripts/check/check-native-seed-parity.shs` (dual-backend
   regression harness) must report `native_seed_parity=true`. By default it
-  defines **94 logical cases / 131 recorded checks** because strict-dual cases
+  defines **95 logical cases / 133 recorded checks** because strict-dual cases
   record LLVM and Cranelift separately. `NATIVE_OPEN_BUG_REPROS=1` expands this
-  to **95 logical cases / 132 recorded checks**; execution is opt-in because
+  to **96 logical cases / 134 recorded checks**; execution is opt-in because
   the exact brace-literal reproduction remains known-red. Execution of the
   expanded matrix is pending.
   The full unfiltered gate is now scheduled on Linux x86_64 LLVM (STRICT-DUAL
@@ -536,5 +536,13 @@ the shared binary — deploys require explicit user go-ahead).
   text, with generic `rt_index_get` decoding its tagged index before forwarding.
   Typed-parameter literal and dynamic-text oracles run in hosted/FreeBSD parity
   and the shared cross-target fixture; 32-bit lanes remain object-only.
+  Pure MIR `for ch in text` now lowers through Unicode-aware
+  `rt_string_chars` and reuses the existing counted array loop, while dict and
+  custom non-array iterables retain the #143 loud failure. Hosted, pure-core,
+  x86/x86_32, ARM32/AArch64, and both RISC-V64 runtime owners split one text
+  element per UTF-8 codepoint. A dynamic ASCII/BMP/astral strict-dual fixture
+  is selected on hosted and FreeBSD matrices; the shared cross-target fixture
+  inherits the same sum/join oracle for AArch64/RV64 execution and 32-bit
+  object lanes.
   Rebuilt current-source execution remains pending. See
   `native_chr_builtin_no_lowering_2026-07-18.md`.

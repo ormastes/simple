@@ -520,6 +520,23 @@ RuntimeValue rt_string_char_at(RuntimeValue str, RuntimeValue idx)
     return rt_string_new((RuntimeValue)(uintptr_t)(s->data + i), 1);
 }
 
+RuntimeValue rt_string_chars(RuntimeValue str)
+{
+    RuntimeString *s = IS_HEAP(str) ? (RuntimeString *)DECODE_PTR(str) : (RuntimeString *)0;
+    RuntimeValue arr = rt_array_new(ENCODE_INT(s && s->hdr.type == HEAP_STRING ? s->len : 0));
+    if (!s || s->hdr.type != HEAP_STRING) return arr;
+    for (uint32_t i = 0; i < s->len;) {
+        uint8_t lead = (uint8_t)s->data[i];
+        uint32_t width = 1;
+        if (lead >= 0xC2 && lead <= 0xDF && i + 2 <= s->len) width = 2;
+        else if (lead >= 0xE0 && lead <= 0xEF && i + 3 <= s->len) width = 3;
+        else if (lead >= 0xF0 && lead <= 0xF4 && i + 4 <= s->len) width = 4;
+        arr = rt_array_push_handle(arr, rt_string_new((RuntimeValue)(uintptr_t)&s->data[i], (RuntimeValue)width));
+        i += width;
+    }
+    return arr;
+}
+
 RuntimeValue rt_string_eq(RuntimeValue a, RuntimeValue b)
 {
     if (!IS_HEAP(a) || !IS_HEAP(b)) return 0;

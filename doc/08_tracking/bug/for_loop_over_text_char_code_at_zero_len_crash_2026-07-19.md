@@ -1,11 +1,19 @@
 # BUG: `for ch in <text>:` loop-bound element is corrupted — `char_code_at(0)` always 0, `.len()` segfaults the interpreter
 
 ## Status
-WORKAROUND APPLIED (2026-07-19, GLYPH-FIX-8 campaign). The root-cause
-for-loop-over-text codegen/interpreter bug itself is still open (T3-tier,
-not fixed in this session — see "Why not fixed in this session" below,
-unchanged), but the coordinator-approved indexed-loop workaround described
-below IS now applied at all 6 live text-iteration call sites in
+SOURCE FIXED (2026-07-22), rebuilt current-source execution pending. The Rust
+seed's corrupt narrow loop binding was fixed earlier. The self-hosted Pure MIR
+had a separate #143 gap that rejected text as a non-array iterable; it now
+normalizes text, calls the canonical Unicode-aware `rt_string_chars`, and
+reuses the existing counted runtime-array loop with a text element type. Dict
+and custom non-array iterables remain loud failures. Hosted/Pure owners already
+split UTF-8 by codepoint; x86_64, x86_32, ARM32, ARM64, and both RISC-V64
+hardware owners now share that behavior. Strict LLVM/Cranelift parity uses a
+dynamic ASCII/BMP/astral fixture, and the aggregate cross-target fixture carries
+the same oracle to existing AArch64/RISC-V64 execution and 32-bit object gates.
+
+The original coordinator-approved indexed-loop workaround remains applied at
+all 6 live text-iteration call sites in
 `font_renderer.spl` (`_prepare_text_active`, `render_text_payload`,
 `measure_text_width`, `measure_text_advances`, `render_text`, and the
 character-count loop in the resolved-font-metrics path — the last one
@@ -217,7 +225,7 @@ pointers ARE populated through a mechanism other than the always-failing
 the codepoint fed into rasterization is what's corrupted regardless of
 which rasterize backend consumes it.)
 
-## Why not fixed in this session
+## Why not fixed in the original session
 This is a T3-tier defect (shared HIR/interpreter/codegen infrastructure,
 `src/compiler_rust`) affecting a pervasive language idiom. A blind patch
 risks a broad regression across every `for x in text:` call site in the

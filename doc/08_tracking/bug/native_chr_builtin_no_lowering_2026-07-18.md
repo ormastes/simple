@@ -102,7 +102,9 @@ their generic `rt_index_get` paths decode their tagged index before forwarding.
 Hosted LLVM/Cranelift and the shared cross-target fixture now cover literal and
 dynamic text through a typed parameter. ARM32/RV32/Windows ARM64 remain
 object-only checks; rebuilt bare-metal execution is pending. The separate
-`for ch in text` iteration fault remains open.
+`for ch in text` iteration fault is now source-fixed through Unicode-aware
+`rt_string_chars` plus the existing counted array loop; rebuilt execution
+remains pending.
 
 ## Perf gap: pure-Simple glyf rasterization slows 4K WM re-render past 90s
 With real fonts active, the F11-maximize re-render (full-4K window + text via

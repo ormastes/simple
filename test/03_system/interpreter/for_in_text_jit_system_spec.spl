@@ -1,38 +1,13 @@
 # System-level guard for the for-loop-over-text JIT corruption bug
 # (doc/08_tracking/bug/for_loop_over_text_char_code_at_zero_len_crash_2026-07-19.md).
 #
-# `for ch in <text>:` binds `ch` correctly under the tree-walking
-# interpreter, AND under SSpec's `describe`/`it` blocks (which always run
-# their bodies via the interpreter, even inside a `bin/simple run` process).
-# It was corrupted ONLY on the Cranelift-JIT path that plain, non-SSpec
-# `fn main()` programs take by default in the Rust seed. To actually
-# exercise that path from a test, this spec spawns a subprocess running the
-# plain probe script (`for_in_text_jit_probe.spl`) via `run` and asserts on
-# its stdout — the same subprocess pattern used by `lazy_shb_system_spec.spl`.
-#
-# `find_simple_binary()` prefers a freshly built Rust seed
-# (`src/compiler_rust/target/release/simple` / `.../bootstrap/simple`) and
-# falls back to the deployed self-hosted `bin/simple`. The self-hosted
-# compiler (`src/compiler/`) is a SEPARATE reimplementation: its interpreter
-# (`95.interp/mir_interpreter.spl`) runs lowered MIR rather than walking the
-# AST directly, and its MIR lowerer (`50.mir/mir_lowering_stmts.spl`) hard-
-# rejects ANY `for-in` over a non-array iterable — including text — with a
-# compile-time "#143" error, for every execution mode (`run` and
-# `native-build` alike). That is a separate, pre-existing, wider limitation
-# than this bug (this bug was corruption; #143 is a clean, tracked
-# unimplemented-feature gate) and is out of scope for this fix. So: when the
-# resolved binary is the seed, this probe must print "ok"; when it's a
-# self-hosted binary that hasn't implemented #143 yet, the probe fails to
-# compile with the #143 message, which is expected and NOT a regression of
-# this fix — anything else (garbage output, a different error) would be.
+# The subprocess is a plain program, so it exercises the compiler's normal
+# run path rather than only SSpec's interpreted bodies. Both seed and
+# self-hosted compilers must bind one text value per Unicode codepoint.
 extern fn rt_process_run(program: text, args: [text]) -> (text, text, i64)
 extern fn rt_file_exists(path: text) -> bool
 
 fn find_simple_binary() -> text:
-    if rt_file_exists("src/compiler_rust/target/release/simple"):
-        return "src/compiler_rust/target/release/simple"
-    if rt_file_exists("src/compiler_rust/target/bootstrap/simple"):
-        return "src/compiler_rust/target/bootstrap/simple"
     if rt_file_exists("bin/simple"):
         return "bin/simple"
     if rt_file_exists("bin/release/aarch64-apple-darwin-macho/simple"):
@@ -82,12 +57,6 @@ describe "for-loop-over-text JIT regression (subprocess)":
         else:
             val (stdout, stderr, code) = run_probe()
             val out = stdout.trim()
-            if out.contains("#143"):
-                # Resolved to a self-hosted binary that hasn't implemented
-                # for-in-over-non-array yet (separate, pre-existing,
-                # tracked limitation -- see header comment). Not this bug.
-                expect(true).to_equal(true)
-            elif stderr.contains("#143"):
-                expect(true).to_equal(true)
-            else:
-                expect(out).to_equal("ok")
+            expect(code).to_equal(0)
+            expect(stderr.contains("#143")).to_equal(false)
+            expect(out).to_equal("ok")
