@@ -59,6 +59,30 @@ val BOOT_INSN_4: u32 = 0x00028067
 val DTB_BASE: u32 = 0x88000000
 
 # ============================================================================
+# Boot ABI (LOCKED — OpenSBI/Linux RISC-V boot convention)
+# ============================================================================
+#
+# At the jump to the kernel entry point, the bootrom guarantees:
+#
+#   | Register | Value        | Meaning                                   |
+#   |----------|--------------|-------------------------------------------|
+#   | a0 (x10) | 0            | hartid of the booting hart                |
+#   | a1 (x11) | 0x8800_0000  | physical address of the DTB (zero-ext.)   |
+#   | sp (x2)  | 0x8010_0000  | top of RAM stack (zero-extended on RV64)  |
+#   | pc       | 0x8000_0000  | kernel/OpenSBI entry point                |
+#
+# RV64 zero-extension proof (see BOOT64_INSN_* + boot64_probe):
+#   lui a1, 0x88000  -> a1 = 0xFFFFFFFF_88000000 (LUI sign-extends bit 31)
+#   slli a1, a1, 32  -> a1 = 0x88000000_00000000
+#   srli a1, a1, 32  -> a1 = 0x00000000_88000000  (zero-extended, as required)
+# The same slli/srli-by-32 pair zero-extends sp and t0 (jump target).
+#
+# A reader at a1 must find a valid Flattened Device Tree. The bootrom carries
+# an embedded FDT header blob (header-only placeholder) served byte-wise via
+# bootrom_dtb_byte(); the SoC is expected to map it at DTB_BASE (cross-lane:
+# soc_top_64 DTB-region mapping).
+
+# ============================================================================
 # RV64 Boot Sequence
 # ============================================================================
 #
@@ -93,6 +117,63 @@ val BOOT64_INSN_9: u32 = 0x0202D293
 # 0x1028: jalr zero, t0, 0    # Jump to kernel, don't link
 val BOOT64_INSN_10: u32 = 0x00028067
 
+# ============================================================================
+# Embedded DTB blob — FDT header-only placeholder
+# ============================================================================
+#
+# Standard 40-byte FDT header (10 big-endian u32 fields, devicetree spec v0.4):
+#   word 0: magic              0xD00DFEED
+#   word 1: totalsize          40 (header only — placeholder, no struct/strings)
+#   word 2: off_dt_struct      40 (empty struct block starts at end of header)
+#   word 3: off_dt_strings     40 (empty strings block)
+#   word 4: off_mem_rsvmap     40 (empty reservation map)
+#   word 5: version            17
+#   word 6: last_comp_version  16
+#   word 7: boot_cpuid_phys    0  (hart 0 boots)
+#   word 8: size_dt_struct     0
+#   word 9: size_dt_strings    0
+#
+# NOTE: header-only placeholder. It gives a reader at a1 a valid FDT header
+# (correct magic/version/totalsize) but no device nodes yet. Replacing it with
+# a full DTB is a follow-up; the byte-serving interface below stays the same.
+#
+# Combinational lookup, u32 only (VHDL synthesizable subset).
+
+val DTB_MAGIC: u32 = 0xD00DFEED
+val DTB_HEADER_SIZE: u32 = 40
+
+fn bootrom_dtb_word(word_idx: u32) -> u32:
+    """Big-endian FDT header field for word_idx (0..9); 0 outside the header."""
+    if word_idx == 0:
+        return DTB_MAGIC          # magic
+    if word_idx == 1:
+        return DTB_HEADER_SIZE    # totalsize (header-only placeholder)
+    if word_idx == 2:
+        return DTB_HEADER_SIZE    # off_dt_struct
+    if word_idx == 3:
+        return DTB_HEADER_SIZE    # off_dt_strings
+    if word_idx == 4:
+        return DTB_HEADER_SIZE    # off_mem_rsvmap
+    if word_idx == 5:
+        return 17                 # version
+    if word_idx == 6:
+        return 16                 # last_comp_version
+    if word_idx == 7:
+        return 0                  # boot_cpuid_phys (hart 0)
+    0                             # size_dt_struct / size_dt_strings / padding
+
+fn bootrom_dtb_byte(offset: u32) -> u32:
+    """Serve the embedded DTB blob byte-wise (big-endian, as FDT is stored in
+    memory): offset 0 -> 0xD0, 1 -> 0x0D, 2 -> 0xFE, 3 -> 0xED, ...
+    offset is relative to DTB_BASE (0x88000000). Returns 0 past the blob.
+    Returns the byte in the low 8 bits of a u32 (combinational lookup)."""
+    if offset >= DTB_HEADER_SIZE:
+        return 0
+    val w = bootrom_dtb_word(offset >> 2)
+    val lane = offset & 3            # 0 = most-significant byte (big-endian)
+    val shift = (3 - lane) << 3
+    (w >> shift) & 0xFF
+
 export BOOTROM_BASE
 export BOOTROM_SIZE
 export NOP_INSN
@@ -102,6 +183,10 @@ export BOOT_INSN_2
 export BOOT_INSN_3
 export BOOT_INSN_4
 export DTB_BASE
+export DTB_MAGIC
+export DTB_HEADER_SIZE
+export bootrom_dtb_word
+export bootrom_dtb_byte
 export bootrom_read64
 
 # ============================================================================

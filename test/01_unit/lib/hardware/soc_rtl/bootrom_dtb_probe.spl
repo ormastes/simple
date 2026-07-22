@@ -1,0 +1,85 @@
+# Probe: bootrom DTB blob + RV64 boot ABI.
+# 1) bootrom_dtb_byte serves a valid FDT header: magic 0xD00DFEED (big-endian
+#    bytes D0 0D FE ED), totalsize=40, version=17, out-of-range -> 0.
+# 2) Boot ABI encodings served by bootrom_read64 are field-decoded: a0(x10)=hartid
+#    via addi, a1(x11)=0x88000000 via lui 0x88000 + slli/srli 32 (zero-extended,
+#    not sign-extended), jump via jalr x0, t0(x5).
+# 3) The bootrom-SERVED sequence is executed on the real core64 datapath
+#    (fetched from bootrom_read64, placed in RAM) and the final register values
+#    + jump target are asserted.
+use std.hardware.soc_rtl.bootrom.{bootrom_read64, bootrom_dtb_byte, bootrom_dtb_word, DTB_MAGIC, DTB_HEADER_SIZE, DTB_BASE}
+use std.hardware.soc_rtl.soc_top_64.{SocTop64State, soc_top_64_init, soc_top_64_tick}
+use std.hardware.soc_rtl.ram64.{ram64_write}
+
+fn check(name: text, ok: bool) -> i64:
+    if ok:
+        print("PASS {name}")
+        return 0
+    print("FAIL {name}")
+    1
+
+fn main() -> i64:
+    var fails: i64 = 0
+
+    # --- 1) FDT header blob ---
+    val b0 = bootrom_dtb_byte(0)
+    val b1 = bootrom_dtb_byte(1)
+    val b2 = bootrom_dtb_byte(2)
+    val b3 = bootrom_dtb_byte(3)
+    print("dtb magic bytes: {b0} {b1} {b2} {b3}")
+    fails = fails + check("dtb byte 0 == 0xD0", b0 == 0xD0)
+    fails = fails + check("dtb byte 1 == 0x0D", b1 == 0x0D)
+    fails = fails + check("dtb byte 2 == 0xFE", b2 == 0xFE)
+    fails = fails + check("dtb byte 3 == 0xED", b3 == 0xED)
+    fails = fails + check("dtb word 0 == DTB_MAGIC 0xD00DFEED", bootrom_dtb_word(0) == 0xD00DFEED)
+    # totalsize (word 1) big-endian bytes: 00 00 00 28
+    fails = fails + check("dtb totalsize == 40 (header-only)", bootrom_dtb_word(1) == 40)
+    fails = fails + check("dtb totalsize byte 7 == 0x28", bootrom_dtb_byte(7) == 0x28)
+    fails = fails + check("dtb version == 17", bootrom_dtb_word(5) == 17)
+    fails = fails + check("dtb version byte 23 == 0x11", bootrom_dtb_byte(23) == 0x11)
+    fails = fails + check("dtb last_comp_version == 16", bootrom_dtb_word(6) == 16)
+    fails = fails + check("dtb boot_cpuid_phys == 0 (hart 0)", bootrom_dtb_word(7) == 0)
+    fails = fails + check("dtb byte past blob == 0", bootrom_dtb_byte(DTB_HEADER_SIZE) == 0)
+    fails = fails + check("DTB_BASE == 0x88000000", DTB_BASE == 0x88000000)
+
+    # --- 2) ABI field-decode of the bootrom-served RV64 sequence ---
+    val i3 = bootrom_read64(0x100C)   # addi a0, zero, 0
+    val i4 = bootrom_read64(0x1010)   # lui  a1, 0x88000
+    val i5 = bootrom_read64(0x1014)   # slli a1, a1, 32
+    val i6 = bootrom_read64(0x1018)   # srli a1, a1, 32
+    val i10 = bootrom_read64(0x1028)  # jalr zero, t0, 0
+    fails = fails + check("addi: opcode OP-IMM, rd=a0(x10), rs1=x0, imm=0 (hartid)",
+        (i3 & 0x7F) == 0x13 and ((i3 >> 7) & 0x1F) == 10 and ((i3 >> 15) & 0x1F) == 0 and (i3 >> 20) == 0)
+    fails = fails + check("lui: opcode LUI, rd=a1(x11), imm[31:12]=0x88000",
+        (i4 & 0x7F) == 0x37 and ((i4 >> 7) & 0x1F) == 11 and (i4 >> 12) == 0x88000)
+    fails = fails + check("slli a1, a1, 32 (zero-extend step 1)",
+        (i5 & 0x7F) == 0x13 and ((i5 >> 12) & 0x7) == 1 and ((i5 >> 7) & 0x1F) == 11 and ((i5 >> 15) & 0x1F) == 11 and ((i5 >> 20) & 0x3F) == 32)
+    fails = fails + check("srli a1, a1, 32 (zero-extend step 2)",
+        (i6 & 0x7F) == 0x13 and ((i6 >> 12) & 0x7) == 5 and ((i6 >> 7) & 0x1F) == 11 and ((i6 >> 15) & 0x1F) == 11 and ((i6 >> 20) & 0x3F) == 32)
+    fails = fails + check("jalr: opcode JALR, rd=x0 (no link), rs1=t0(x5), imm=0",
+        (i10 & 0x7F) == 0x67 and ((i10 >> 7) & 0x1F) == 0 and ((i10 >> 15) & 0x1F) == 5 and (i10 >> 20) == 0)
+
+    # --- 3) Execute the bootrom-SERVED sequence on the real core64 datapath ---
+    var soc = soc_top_64_init(0x1000)
+    var ram = soc.ram
+    var k: u64 = 0
+    while k < 11:
+        ram = ram64_write(ram, k * 4, 4, bootrom_read64(0x1000 + k * 4))
+        k = k + 1
+    soc.ram = ram
+    soc.core.pc = 0x8000_0000
+    var i = 0
+    while i < 11:
+        soc = soc_top_64_tick(soc)
+        i = i + 1
+    print("bootrom-served boot64: sp={soc.core.rf.regs[2]} a0={soc.core.rf.regs[10]} a1={soc.core.rf.regs[11]} pc={soc.core.pc}")
+    fails = fails + check("a0 == 0 (hartid)", soc.core.rf.regs[10] == 0)
+    fails = fails + check("a1 == 0x88000000 zero-extended (DTB base)", soc.core.rf.regs[11] == 2281701376)
+    fails = fails + check("sp == 0x80100000 zero-extended", soc.core.rf.regs[2] == 2148532224)
+    fails = fails + check("pc landed at 0x80000000 (kernel entry)", soc.core.pc == 2147483648)
+
+    if fails == 0:
+        print("BOOTROM DTB PROBE: ALL PASS")
+        return 0
+    print("BOOTROM DTB PROBE: {fails} FAIL")
+    1
