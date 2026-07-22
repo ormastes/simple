@@ -10,6 +10,7 @@ use std.test_runner.test_runner_files.{strip_ansi, read_file_content}
 use std.io.{file_exists, file_write, file_delete}
 use std.io.{env_get}
 use std.sffi.cli.{cli_get_args}
+use std.string_core.{char_code}
 
 fn _tp_get_temp_dir() -> text:
     val tmpdir = env_get("TMPDIR")
@@ -265,11 +266,13 @@ fn extract_number_after_colon(s: text, prefix: text) -> i64:
     val after = s[idx + prefix.len():].trim()
     if after.len() == 0:
         return -1
-    # Collect digits from start
+    # Collect digits from start. Digit test MUST use char_code + i64 compares:
+    # text `<`/`>` miscompiles to a raw pointer cmp on the native flat-HIR path
+    # (see doc/08_tracking/bug/sspec_test_path_false_green_undercount_2026-07-20.md).
     var end_pos = 0
     while end_pos < after.len():
-        val ch = after[end_pos:end_pos + 1]
-        if ch < "0" or ch > "9":
+        val code: i64 = char_code(after[end_pos:end_pos + 1])
+        if code < 48 or code > 57:
             break
         end_pos = end_pos + 1
     if end_pos == 0:
@@ -291,11 +294,12 @@ fn extract_number_before(s: text, keyword: text) -> i64:
         end = end - 1
     if end < 0:
         return -1
-    # Collect digits backwards
+    # Collect digits backwards. char_code + i64 compares, NOT text `<`/`>` —
+    # same native-path pointer-cmp miscompile as extract_number_after_colon.
     var start = end
     while start >= 0:
-        val ch = s[start:start + 1]
-        if ch < "0" or ch > "9":
+        val code: i64 = char_code(s[start:start + 1])
+        if code < 48 or code > 57:
             break
         start = start - 1
     start = start + 1
