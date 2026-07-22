@@ -1,0 +1,145 @@
+#!/bin/sh
+set -eu
+
+# build_rv64_linux_assets.shs — boot assets for the landed Simple RV64 SoC
+# (src/lib/hardware/soc_rtl/). Produces, into build/os/rv64_soc/:
+#
+#   soc_virt.dtb      device tree blob (from examples/.../riscv64/soc_virt.dts)
+#   initramfs.cpio.gz tiny initramfs with a hand-built static /init that
+#                     prints "SIMPLE-RV64-INIT OK" (marker for boot proof)
+#   fw_jump.bin       OpenSBI fw_jump (pinned v1.4) built for this memory map
+#   Image             Linux kernel (pinned) — ONLY if --kernel and toolchain+net
+#   manifest.txt      load-address manifest (always written, always honest:
+#                     each line says BUILT or MISSING)
+#
+# Load addresses (MUST match soc_rtl/bootrom.spl bootrom_read64):
+#   0x80000000  OpenSBI fw_jump      (bootrom jumps here, t0)
+#   0x80200000  kernel Image         (OpenSBI FW_JUMP_ADDR)
+#   0x88000000  soc_virt.dtb         (bootrom a1; OpenSBI FW_JUMP_FDT_ADDR)
+#
+# Usage:
+#   sh scripts/os/build_rv64_linux_assets.shs            # dtb + initramfs + manifest
+#   sh scripts/os/build_rv64_linux_assets.shs --opensbi  # + build OpenSBI fw_jump
+#   sh scripts/os/build_rv64_linux_assets.shs --kernel   # + fetch/build Linux (slow)
+#   sh scripts/os/build_rv64_linux_assets.shs --all      # everything
+#
+# Pins (override via env):
+#   OPENSBI_TAG   default v1.4
+#   LINUX_TAG     default v6.6  (longterm; rv64 defconfig boots on plic0/clint0)
+#   CROSS         default riscv64-linux-gnu-  (needs gcc for initramfs/opensbi)
+
+REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+OUT="$REPO_ROOT/build/os/rv64_soc"
+DTS="$REPO_ROOT/examples/09_embedded/simple_os/arch/riscv64/soc_virt.dts"
+OPENSBI_TAG="${OPENSBI_TAG:-v1.4}"
+LINUX_TAG="${LINUX_TAG:-v6.6}"
+CROSS="${CROSS:-riscv64-linux-gnu-}"
+
+DO_OPENSBI=0
+DO_KERNEL=0
+for a in "$@"; do
+  case "$a" in
+    --opensbi) DO_OPENSBI=1 ;;
+    --kernel)  DO_KERNEL=1 ;;
+    --all)     DO_OPENSBI=1; DO_KERNEL=1 ;;
+    *) echo "unknown arg: $a" >&2; exit 2 ;;
+  esac
+done
+
+mkdir -p "$OUT"
+note() { echo "[rv64-assets] $*"; }
+
+# --- 1. DTB -----------------------------------------------------------------
+if command -v dtc >/dev/null 2>&1; then
+  dtc -I dts -O dtb -o "$OUT/soc_virt.dtb" "$DTS"
+  note "DTB built: $OUT/soc_virt.dtb"
+else
+  note "SKIP dtb: dtc not installed (apt install device-tree-compiler)"
+fi
+
+# --- 2. initramfs with hand-built marker init -------------------------------
+# Freestanding (no libc, raw syscalls), -march=rv64imac -mabi=lp64: the SoC
+# core has NO F/D extensions, so a default hard-float (lp64d) glibc init
+# would trap on the first FP instruction.
+if command -v "${CROSS}gcc" >/dev/null 2>&1; then
+  W=$(mktemp -d)
+  cat > "$W/init.c" <<'EOF'
+static long sys3(long n, long a, long b, long c) {
+    register long a7 __asm__("a7") = n;
+    register long a0 __asm__("a0") = a;
+    register long a1 __asm__("a1") = b;
+    register long a2 __asm__("a2") = c;
+    __asm__ volatile("ecall" : "+r"(a0) : "r"(a7), "r"(a1), "r"(a2) : "memory");
+    return a0;
+}
+void _start(void) {
+    static const char msg[] = "SIMPLE-RV64-INIT OK\n";
+    static const long ts[2] = {5, 0};   /* struct timespec {5s, 0ns} */
+    for (;;) {
+        sys3(64, 1, (long)msg, sizeof(msg) - 1);  /* write(1, msg, len) */
+        sys3(101, (long)ts, 0, 0);                /* nanosleep(&ts, 0)  */
+    }
+}
+EOF
+  "${CROSS}gcc" -static -nostdlib -ffreestanding -march=rv64imac -mabi=lp64 \
+      -Os -o "$W/init" "$W/init.c"
+  ( cd "$W" && echo init | cpio -o -H newc --owner=0:0 2>/dev/null | gzip -9 ) \
+    > "$OUT/initramfs.cpio.gz"
+  rm -rf "$W"
+  note "initramfs built: $OUT/initramfs.cpio.gz (static rv64 /init marker)"
+else
+  note "SKIP initramfs: ${CROSS}gcc not installed"
+fi
+
+# --- 3. OpenSBI fw_jump (opt-in) --------------------------------------------
+if [ "$DO_OPENSBI" = 1 ]; then
+  if command -v "${CROSS}gcc" >/dev/null 2>&1; then
+    SB="$OUT/opensbi-src"
+    [ -d "$SB/.git" ] || git clone --depth 1 --branch "$OPENSBI_TAG" \
+        https://github.com/riscv-software-src/opensbi.git "$SB"
+    # ISA/ABI pinned to the core: rv64imac, no F/D (add _zicsr_zifencei for
+    # gcc >= 12 where csr/fence.i left the base ISA string).
+    make -C "$SB" CROSS_COMPILE="$CROSS" PLATFORM=generic \
+        PLATFORM_RISCV_ISA=rv64imac_zicsr_zifencei PLATFORM_RISCV_ABI=lp64 \
+        FW_JUMP=y FW_JUMP_ADDR=0x80200000 FW_JUMP_FDT_ADDR=0x88000000 \
+        -j"$(nproc)" >/dev/null
+    cp "$SB/build/platform/generic/firmware/fw_jump.bin" "$OUT/fw_jump.bin"
+    note "OpenSBI fw_jump built: $OUT/fw_jump.bin (jump=0x80200000 fdt=0x88000000)"
+  else
+    note "SKIP opensbi: ${CROSS}gcc not installed"
+  fi
+fi
+
+# --- 4. Linux kernel (opt-in, slow) -----------------------------------------
+if [ "$DO_KERNEL" = 1 ]; then
+  if command -v "${CROSS}gcc" >/dev/null 2>&1; then
+    LS="$OUT/linux-src"
+    [ -d "$LS/.git" ] || git clone --depth 1 --branch "$LINUX_TAG" \
+        https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git "$LS"
+    make -C "$LS" ARCH=riscv CROSS_COMPILE="$CROSS" defconfig >/dev/null
+    make -C "$LS" ARCH=riscv CROSS_COMPILE="$CROSS" -j"$(nproc)" Image
+    cp "$LS/arch/riscv/boot/Image" "$OUT/Image"
+    note "kernel built: $OUT/Image ($LINUX_TAG rv64 defconfig)"
+  else
+    note "SKIP kernel: ${CROSS}gcc not installed"
+  fi
+fi
+
+# --- 5. Manifest (always, honest) -------------------------------------------
+stat_of() { if [ -f "$1" ]; then echo "BUILT ($(wc -c < "$1") bytes)"; else echo "MISSING"; fi; }
+cat > "$OUT/manifest.txt" <<EOF
+# RV64 SoC boot-asset manifest — $(date -u +%Y-%m-%dT%H:%M:%SZ)
+# Load addresses fixed by src/lib/hardware/soc_rtl/bootrom.spl (bootrom_read64):
+#   bootrom jumps to 0x80000000 with a1 = 0x88000000.
+#
+# addr        file                 status
+0x80000000    fw_jump.bin          $(stat_of "$OUT/fw_jump.bin")   # OpenSBI $OPENSBI_TAG, FW_JUMP
+0x80200000    Image                $(stat_of "$OUT/Image")   # Linux $LINUX_TAG rv64 defconfig
+0x88000000    soc_virt.dtb         $(stat_of "$OUT/soc_virt.dtb")   # from soc_virt.dts
+(initrd)      initramfs.cpio.gz    $(stat_of "$OUT/initramfs.cpio.gz")   # load anywhere in RAM above kernel; pass via /chosen linux,initrd-start/end
+#
+# DTB TODO(laneN-clock): clock-frequency/timebase are the 25 MHz candidate;
+# update soc_virt.dts and rebuild when Lane N lands the real PL clock.
+EOF
+note "manifest written: $OUT/manifest.txt"
+cat "$OUT/manifest.txt"
