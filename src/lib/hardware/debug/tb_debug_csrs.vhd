@@ -17,7 +17,7 @@
 --           0x8000_0040 (resume_pc capture); re-halt -> cause=3 again
 --   CHECK4: write dcsr.step=1, resume -> hart runs ONE instruction and
 --           re-halts; allresumeack held; dcsr.cause=4
---   CHECK5: unknown CSR regno 0x300 (mstatus) -> cmderr=2; W1C clears
+--   CHECK5: unknown CSR regno 0x340 (mscratch) -> cmderr=2; W1C clears
 --   CHECK6: all-stage in-bench regressions: Stage-3 GPR abstract write/read
 --           x5 through the bus; Stage-2 ndmreset -> havereset ->
 --           ackhavereset; Stage-1 scratch 0x00/0x03 round-trip.
@@ -433,19 +433,19 @@ begin
            & "allresumeack held" severity note;
 
     ----------------------------------------------------------------------
-    -- CHECK5: unknown CSR regno 0x300 (mstatus) -> cmderr=2; W1C clears.
+    -- CHECK5: unknown CSR regno 0x340 (mscratch; 0x300 mstatus is a Stage-5 DM stub now) -> cmderr=2; W1C clears.
     ----------------------------------------------------------------------
-    dmi_write(A_COMMAND, x"00230300");    -- write mstatus: unsupported
+    dmi_write(A_COMMAND, x"00230340");    -- write mscratch: unsupported
     dmi_read(A_ABSTRACTCS, rd);
     assert rd(10 downto 8) = "010"
-      report "CHECK5 FAIL: cmderr /= 2 for CSR 0x300, ABSTRACTCS=0x"
+      report "CHECK5 FAIL: cmderr /= 2 for CSR 0x340, ABSTRACTCS=0x"
              & to_hstring(rd) severity failure;
     dmi_write(A_ABSTRACTCS, x"00000700"); -- W1C
     dmi_read(A_ABSTRACTCS, rd);
     assert rd(10 downto 8) = "000"
       report "CHECK5 FAIL: cmderr not cleared by W1C, ABSTRACTCS=0x"
              & to_hstring(rd) severity failure;
-    report "CHECK5 PASS: unknown CSR regno 0x300 -> cmderr=2; W1C clears"
+    report "CHECK5 PASS: unknown CSR regno 0x340 -> cmderr=2; W1C clears"
       severity note;
 
     ----------------------------------------------------------------------

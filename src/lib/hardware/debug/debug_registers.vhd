@@ -29,9 +29,23 @@
 --                     Supported regno: 0x1000..0x101F (GPRs x0..x31), and
 --                     (Stage 4) CSR space 0x0000..0x0FFF with exactly two
 --                     debug CSRs implemented INSIDE the DM:
---                       0x7B0 dcsr (aarsize=2 only; aarsize=3 -> cmderr=2)
+--                       0x7B0 dcsr (aarsize=2, or — Stage 5, for the real
+--                                   riscv-013 driver which reads CSRs at
+--                                   XLEN width — aarsize=3: read zero-
+--                                   extends into DATA1, write takes DATA0)
 --                       0x7B1 dpc  (aarsize=2 or 3; aarsize=2 accesses the
 --                                   low 32 bits, write zero-extends)
+--                     (Stage 5) examine/halt-critical stub CSRs so OpenOCD's
+--                       riscv-013 driver works without a program buffer
+--                       (all replaced by real hart CSRs at hart
+--                       integration):
+--                       0x301 misa    RO constant RV64IMA
+--                                     (0x8000000000001101); write -> cmderr=2
+--                       0x300 mstatus RW 64-bit stub register (reset 0)
+--                       0x7A0 tselect WARL stub: writes accepted+ignored,
+--                                     reads 0 (debugger sees 0 triggers)
+--                       0x7A1 tdata1  RO 0 (type=0: no trigger at tselect 0);
+--                                     write -> cmderr=2
 --                     Any other CSR regno -> cmderr=2 (not supported).
 --                     dcsr/dpc accesses complete immediately (no busy
 --                     window — the registers live in the DM itself).
@@ -55,6 +69,42 @@
 --                     scoped to writes in this implementation).
 --   other 0x1x      — read 0 / write ignored, resp = success (harmless
 --                     unimplemented optional registers: haltsum, hawindow...).
+--
+-- Stage-5 System Bus Access (v0.13 §3.10), DMI addresses 0x38..0x3D:
+--   0x38 SBCS        — sbversion(31:29)=1 RO; sbbusyerror(22) R/W1C;
+--                      sbbusy(21) RO; sbreadonaddr(20) RW; sbaccess(19:17)
+--                      RW (only 2=32-bit and 3=64-bit supported, reset 2);
+--                      sbautoincrement(16) RW; sbreadondata(15) RW;
+--                      sberror(14:12) R/W1C; sbasize(11:5)=64 RO;
+--                      sbaccess64(3)=1, sbaccess32(2)=1 RO; 128/16/8 = 0.
+--                      Control fields (20..15) are only updated while
+--                      sbbusy=0 (spec: writing sbcs while sbbusy is
+--                      undefined; this implementation drops the field
+--                      update, W1C bits are always honored).
+--   0x39 SBADDRESS0  — address bits 31:0. Write while sbbusy=1 sets
+--                      sbbusyerror and is dropped. Otherwise the write
+--                      lands, and if sbreadonaddr=1 (and sberror=0 and
+--                      sbbusyerror=0) a bus read is triggered.
+--   0x3A SBADDRESS1  — address bits 63:32 (no trigger).
+--   0x3B             — reserved (sbaddress2): read 0 / write ignored.
+--   0x3C SBDATA0     — data bits 31:0. Read returns sbdata0; if
+--                      sbreadondata=1 (and no error) a new bus read is
+--                      triggered after the value is returned. Write stores
+--                      wdata into sbdata0 and triggers a bus WRITE of
+--                      sbaccess size (64-bit writes use SBDATA1 & SBDATA0).
+--                      Any SBDATA0 access or SBADDRESS write while
+--                      sbbusy=1 sets sbbusyerror and is dropped.
+--   0x3D SBDATA1     — data bits 63:32 (no trigger).
+--   sberror encoding: 2 = bad address (bus target flagged sb_err_i);
+--                     4 = unsupported sbaccess size (not 2/3) at trigger.
+--                     W1C via SBCS(14:12). While sberror/=0 or
+--                     sbbusyerror=1, no new bus accesses start.
+--   sbautoincrement adds (1 << sbaccess) to SBADDRESS after every
+--   SUCCESSFUL bus access (reads and writes; not after sb_err_i).
+--   Bus master port: sb_re_o/sb_we_o held level with sb_addr_o/sb_wdata_o/
+--   sb_size_o stable until the target pulses sb_ack_i for one clock
+--   (sb_err_i sampled with the ack) — same handshake as the GPR port.
+--   sbbusy covers the whole window. dmactive=0 resets all SBA state.
 --
 -- Abstract command execution (GPR port): on an accepted transfer command the
 -- block asserts gpr_re_o or gpr_we_o (level) with gpr_regno_o/gpr_wdata_o
@@ -126,6 +176,18 @@ entity debug_registers is
     dpc_o    : out std_logic_vector(63 downto 0);
     step_o   : out std_logic;
 
+    -- Stage-5 system-bus master port (SBA). re/we held with addr/wdata/size
+    -- until sb_ack_i pulses for one clock; sb_err_i sampled with the ack.
+    -- Defaults let pre-Stage-5 instantiations leave these unconnected.
+    sb_re_o    : out std_logic;
+    sb_we_o    : out std_logic;
+    sb_addr_o  : out std_logic_vector(63 downto 0);
+    sb_wdata_o : out std_logic_vector(63 downto 0);
+    sb_size_o  : out std_logic_vector(1 downto 0);
+    sb_rdata_i : in  std_logic_vector(63 downto 0) := (others => '0');
+    sb_ack_i   : in  std_logic := '0';
+    sb_err_i   : in  std_logic := '0';
+
     -- Status inputs (from DM core / hart)
     halted_i    : in  std_logic;
     running_i   : in  std_logic;
@@ -142,6 +204,18 @@ architecture rtl of debug_registers is
   constant A_HARTINFO   : std_logic_vector(6 downto 0) := "0010010";  -- 0x12
   constant A_ABSTRACTCS : std_logic_vector(6 downto 0) := "0010110";  -- 0x16
   constant A_COMMAND    : std_logic_vector(6 downto 0) := "0010111";  -- 0x17
+  constant A_SBCS       : std_logic_vector(6 downto 0) := "0111000";  -- 0x38
+  constant A_SBADDRESS0 : std_logic_vector(6 downto 0) := "0111001";  -- 0x39
+  constant A_SBADDRESS1 : std_logic_vector(6 downto 0) := "0111010";  -- 0x3A
+  constant A_SBDATA0    : std_logic_vector(6 downto 0) := "0111100";  -- 0x3C
+  constant A_SBDATA1    : std_logic_vector(6 downto 0) := "0111101";  -- 0x3D
+
+  -- Stage-5 examine-critical stub CSR: misa = RV64 (MXL=2) + I + M + A.
+  constant MISA_VALUE : std_logic_vector(63 downto 0) := x"8000000000001101";
+
+  -- Stage-5 stub CSR state (hart integration replaces this with the real
+  -- hart CSR file).
+  signal mstatus_r : std_logic_vector(63 downto 0) := (others => '0');
 
   signal dmactive_r  : std_logic := '0';
   signal ndmreset_r  : std_logic := '0';
@@ -173,6 +247,20 @@ architecture rtl of debug_registers is
   signal step_pending_r : std_logic := '0';
   signal halted_q       : std_logic := '0';
 
+  -- Stage-5 SBA state
+  signal sbaddr_r      : std_logic_vector(63 downto 0) := (others => '0');
+  signal sbdata_r      : std_logic_vector(63 downto 0) := (others => '0');
+  signal sbaccess_r    : std_logic_vector(2 downto 0)  := "010";
+  signal sbreadonaddr_r : std_logic := '0';
+  signal sbreadondata_r : std_logic := '0';
+  signal sbautoincr_r   : std_logic := '0';
+  signal sberror_r      : std_logic_vector(2 downto 0) := "000";
+  signal sbbusyerror_r  : std_logic := '0';
+  signal sbbusy_r       : std_logic := '0';
+  signal sb_re_r        : std_logic := '0';
+  signal sb_we_r        : std_logic := '0';
+  signal sb_wdata_r     : std_logic_vector(63 downto 0) := (others => '0');
+
   signal rdata_r : std_logic_vector(31 downto 0) := (others => '0');
   signal ready_r : std_logic := '0';
 
@@ -181,8 +269,29 @@ begin
   process (clk, rst_n)
     variable dmstatus_v : std_logic_vector(31 downto 0);
     variable cmd_supported_v : boolean;
-    variable is_gpr_v, is_dcsr_v, is_dpc_v : boolean;
+    variable is_gpr_v, is_dcsr_v, is_dpc_v, is_misa_v : boolean;
+    variable is_mstatus_v, is_tselect_v, is_tdata1_v  : boolean;
     variable dcsr_v : std_logic_vector(31 downto 0);
+    variable sbcs_v : std_logic_vector(31 downto 0);
+
+    -- Launch an SBA bus access (read when wr=false, write when wr=true).
+    -- No-op while a previous error is pending; flags sberror=4 on an
+    -- unsupported sbaccess size. Caller must have checked sbbusy already.
+    procedure sb_start(wr : boolean) is
+    begin
+      if sberror_r = "000" and sbbusyerror_r = '0' then
+        if sbaccess_r /= "010" and sbaccess_r /= "011" then
+          sberror_r <= "100";  -- 4 = unsupported size
+        else
+          sbbusy_r <= '1';
+          if wr then
+            sb_we_r <= '1';
+          else
+            sb_re_r <= '1';
+          end if;
+        end if;
+      end if;
+    end procedure sb_start;
   begin
     if rst_n = '0' then
       dmactive_r     <= '0';
@@ -209,6 +318,19 @@ begin
       dcsr_prv_r     <= "11";
       step_pending_r <= '0';
       halted_q       <= '0';
+      sbaddr_r       <= (others => '0');
+      sbdata_r       <= (others => '0');
+      sbaccess_r     <= "010";
+      sbreadonaddr_r <= '0';
+      sbreadondata_r <= '0';
+      sbautoincr_r   <= '0';
+      sberror_r      <= "000";
+      sbbusyerror_r  <= '0';
+      sbbusy_r       <= '0';
+      sb_re_r        <= '0';
+      sb_we_r        <= '0';
+      sb_wdata_r     <= (others => '0');
+      mstatus_r      <= (others => '0');
       rdata_r        <= (others => '0');
       ready_r        <= '0';
     elsif rising_edge(clk) then
@@ -230,6 +352,31 @@ begin
           dcsr_cause_r <= "011";
         end if;
         step_pending_r <= '0';
+      end if;
+
+      -- SBA completion: bus target acknowledged the access.
+      if sbbusy_r = '1' and sb_ack_i = '1' then
+        sb_re_r  <= '0';
+        sb_we_r  <= '0';
+        sbbusy_r <= '0';
+        if sb_err_i = '1' then
+          sberror_r <= "010";  -- 2 = bad address
+        else
+          if sb_re_r = '1' then
+            if sbaccess_r = "011" then
+              sbdata_r <= sb_rdata_i;
+            else
+              sbdata_r(31 downto 0) <= sb_rdata_i(31 downto 0);
+            end if;
+          end if;
+          if sbautoincr_r = '1' then
+            if sbaccess_r = "011" then
+              sbaddr_r <= std_logic_vector(unsigned(sbaddr_r) + 8);
+            else
+              sbaddr_r <= std_logic_vector(unsigned(sbaddr_r) + 4);
+            end if;
+          end if;
+        end if;
       end if;
 
       -- Abstract command completion: hart acknowledged the GPR access.
@@ -270,6 +417,18 @@ begin
               dcsr_cause_r   <= "000";
               dcsr_prv_r     <= "11";
               step_pending_r <= '0';
+              sbaddr_r       <= (others => '0');
+              sbdata_r       <= (others => '0');
+              sbaccess_r     <= "010";
+              sbreadonaddr_r <= '0';
+              sbreadondata_r <= '0';
+              sbautoincr_r   <= '0';
+              sberror_r      <= "000";
+              sbbusyerror_r  <= '0';
+              sbbusy_r       <= '0';
+              sb_re_r        <= '0';
+              sb_we_r        <= '0';
+              mstatus_r      <= (others => '0');
             else
               dmactive_r <= '1';
               if dmactive_r = '1' then
@@ -327,15 +486,22 @@ begin
                 is_gpr_v  := dmi_wdata(15 downto 5) = "00010000000"; -- 0x1000..0x101F
                 is_dcsr_v := dmi_wdata(15 downto 0) = x"07B0";       -- dcsr
                 is_dpc_v  := dmi_wdata(15 downto 0) = x"07B1";       -- dpc
+                is_misa_v := dmi_wdata(15 downto 0) = x"0301";       -- misa
+                is_mstatus_v := dmi_wdata(15 downto 0) = x"0300";    -- mstatus
+                is_tselect_v := dmi_wdata(15 downto 0) = x"07A0";    -- tselect
+                is_tdata1_v  := dmi_wdata(15 downto 0) = x"07A1";    -- tdata1
                 cmd_supported_v :=
                   dmi_wdata(31 downto 24) = x"00"                -- cmdtype 0
                   and (dmi_wdata(22 downto 20) = "010"           -- aarsize 2
                        or dmi_wdata(22 downto 20) = "011")       -- aarsize 3
                   and (dmi_wdata(17) = '0'                       -- no transfer
                        or is_gpr_v
-                       or (is_dcsr_v
-                           and dmi_wdata(22 downto 20) = "010")  -- dcsr 32-bit
-                       or is_dpc_v);
+                       or is_dcsr_v
+                       or is_dpc_v
+                       or is_mstatus_v
+                       or is_tselect_v
+                       or ((is_misa_v or is_tdata1_v)
+                           and dmi_wdata(16) = '0'));            -- RO stubs
                 if not cmd_supported_v then
                   cmderr_r <= "010";  -- 2 = not supported
                 elsif halted_i = '0' then
@@ -378,6 +544,37 @@ begin
                       dcsr_v(2)            := dcsr_step_r;
                       dcsr_v(1 downto 0)   := dcsr_prv_r;
                       data0_r <= dcsr_v;
+                      if dmi_wdata(20) = '1' then
+                        data1_r <= (others => '0');  -- aarsize=3: zero-extend
+                      end if;
+                    end if;
+                  elsif is_misa_v then
+                    -- Read-only stub CSR (writes rejected in the decode).
+                    data0_r <= MISA_VALUE(31 downto 0);
+                    if dmi_wdata(20) = '1' then
+                      data1_r <= MISA_VALUE(63 downto 32);
+                    end if;
+                  elsif is_mstatus_v then
+                    if dmi_wdata(16) = '1' then
+                      if dmi_wdata(20) = '1' then
+                        mstatus_r <= data1_r & data0_r;
+                      else
+                        mstatus_r <= x"00000000" & data0_r;  -- zero-extend
+                      end if;
+                    else
+                      data0_r <= mstatus_r(31 downto 0);
+                      if dmi_wdata(20) = '1' then
+                        data1_r <= mstatus_r(63 downto 32);
+                      end if;
+                    end if;
+                  elsif is_tselect_v or is_tdata1_v then
+                    -- tselect: WARL write accepted + ignored, reads 0.
+                    -- tdata1: reads 0 (type=0 -> no trigger implemented).
+                    if dmi_wdata(16) = '0' then
+                      data0_r <= (others => '0');
+                      if dmi_wdata(20) = '1' then
+                        data1_r <= (others => '0');
+                      end if;
                     end if;
                   else  -- is_dpc_v
                     if dmi_wdata(16) = '1' then
@@ -394,6 +591,58 @@ begin
                     end if;
                   end if;
                 end if;
+              end if;
+            end if;
+          elsif dmi_addr = A_SBCS then
+            if dmactive_r = '1' then
+              sbbusyerror_r <= sbbusyerror_r and not dmi_wdata(22);  -- W1C
+              sberror_r <= sberror_r and not dmi_wdata(14 downto 12);  -- W1C
+              if sbbusy_r = '0' then
+                sbreadonaddr_r <= dmi_wdata(20);
+                sbaccess_r     <= dmi_wdata(19 downto 17);
+                sbautoincr_r   <= dmi_wdata(16);
+                sbreadondata_r <= dmi_wdata(15);
+              end if;
+            end if;
+          elsif dmi_addr = A_SBADDRESS0 then
+            if dmactive_r = '1' then
+              if sbbusy_r = '1' then
+                sbbusyerror_r <= '1';
+              else
+                sbaddr_r(31 downto 0) <= dmi_wdata;
+                if sbreadonaddr_r = '1' then
+                  sb_start(wr => false);
+                end if;
+              end if;
+            end if;
+          elsif dmi_addr = A_SBADDRESS1 then
+            if dmactive_r = '1' then
+              if sbbusy_r = '1' then
+                sbbusyerror_r <= '1';
+              else
+                sbaddr_r(63 downto 32) <= dmi_wdata;
+              end if;
+            end if;
+          elsif dmi_addr = A_SBDATA0 then
+            if dmactive_r = '1' then
+              if sbbusy_r = '1' then
+                sbbusyerror_r <= '1';
+              elsif sberror_r = "000" and sbbusyerror_r = '0' then
+                sbdata_r(31 downto 0) <= dmi_wdata;
+                if sbaccess_r = "011" then
+                  sb_wdata_r <= sbdata_r(63 downto 32) & dmi_wdata;
+                else
+                  sb_wdata_r <= x"00000000" & dmi_wdata;
+                end if;
+                sb_start(wr => true);
+              end if;
+            end if;
+          elsif dmi_addr = A_SBDATA1 then
+            if dmactive_r = '1' then
+              if sbbusy_r = '1' then
+                sbbusyerror_r <= '1';
+              else
+                sbdata_r(63 downto 32) <= dmi_wdata;
               end if;
             end if;
           end if;
@@ -429,6 +678,35 @@ begin
             rdata_r(3 downto 0)   <= "0010";  -- datacount = 2
             rdata_r(12)           <= abusy_r;
             rdata_r(10 downto 8)  <= cmderr_r;
+          elsif dmi_addr = A_SBCS then
+            sbcs_v := (others => '0');
+            sbcs_v(31 downto 29) := "001";           -- sbversion = 1
+            sbcs_v(22)           := sbbusyerror_r;
+            sbcs_v(21)           := sbbusy_r;
+            sbcs_v(20)           := sbreadonaddr_r;
+            sbcs_v(19 downto 17) := sbaccess_r;
+            sbcs_v(16)           := sbautoincr_r;
+            sbcs_v(15)           := sbreadondata_r;
+            sbcs_v(14 downto 12) := sberror_r;
+            sbcs_v(11 downto 5)  := "1000000";       -- sbasize = 64
+            sbcs_v(3)            := '1';             -- sbaccess64
+            sbcs_v(2)            := '1';             -- sbaccess32
+            rdata_r <= sbcs_v;
+          elsif dmi_addr = A_SBADDRESS0 then
+            rdata_r <= sbaddr_r(31 downto 0);
+          elsif dmi_addr = A_SBADDRESS1 then
+            rdata_r <= sbaddr_r(63 downto 32);
+          elsif dmi_addr = A_SBDATA0 then
+            rdata_r <= sbdata_r(31 downto 0);
+            if dmactive_r = '1' then
+              if sbbusy_r = '1' then
+                sbbusyerror_r <= '1';
+              elsif sbreadondata_r = '1' then
+                sb_start(wr => false);
+              end if;
+            end if;
+          elsif dmi_addr = A_SBDATA1 then
+            rdata_r <= sbdata_r(63 downto 32);
           end if;
           -- HARTINFO and all other 0x1x registers read as 0
         end if;
@@ -452,5 +730,11 @@ begin
 
   dpc_o  <= dpc_r;
   step_o <= dcsr_step_r;
+
+  sb_re_o    <= sb_re_r;
+  sb_we_o    <= sb_we_r;
+  sb_addr_o  <= sbaddr_r;
+  sb_wdata_o <= sb_wdata_r;
+  sb_size_o  <= sbaccess_r(1 downto 0);
 
 end architecture rtl;

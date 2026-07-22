@@ -7,6 +7,9 @@
 -- hart; the abstract-command engine itself lives in debug_registers.
 -- Stage 4 adds DM-resident debug CSRs dpc (0x7B1) / dcsr (0x7B0) with
 -- stub-level hart ports (pc_i/prv_i/ebreak_i in, dpc_o/step_o out).
+-- Stage 5 adds System Bus Access (SBCS/SBADDRESS0-1/SBDATA0-1, DMI
+-- 0x38..0x3D) with a system-bus master port (sb_*); the SBA engine lives
+-- in debug_registers, this top just forwards the port.
 --
 -- Hart-side integration is DEFERRED (Stage 2 scope): only stub ports are
 -- exposed — haltreq_o / resumereq_o / ndmreset_o outputs, halted_i /
@@ -70,7 +73,19 @@ entity riscv_debug_module is
     prv_i    : in  std_logic_vector(1 downto 0)  := "11";
     ebreak_i : in  std_logic := '0';
     dpc_o    : out std_logic_vector(63 downto 0);
-    step_o   : out std_logic
+    step_o   : out std_logic;
+
+    -- Stage-5 system-bus master port (SBA, v0.13 §3.10): re/we held with
+    -- addr/wdata/size until sb_ack_i pulses; sb_err_i sampled with the ack.
+    -- Defaults let pre-Stage-5 instantiations leave these unconnected.
+    sb_re_o    : out std_logic;
+    sb_we_o    : out std_logic;
+    sb_addr_o  : out std_logic_vector(63 downto 0);
+    sb_wdata_o : out std_logic_vector(63 downto 0);
+    sb_size_o  : out std_logic_vector(1 downto 0);
+    sb_rdata_i : in  std_logic_vector(63 downto 0) := (others => '0');
+    sb_ack_i   : in  std_logic := '0';
+    sb_err_i   : in  std_logic := '0'
   );
 end entity riscv_debug_module;
 
@@ -116,6 +131,15 @@ begin
       ebreak_i => ebreak_i,
       dpc_o    => dpc_o,
       step_o   => step_o,
+
+      sb_re_o    => sb_re_o,
+      sb_we_o    => sb_we_o,
+      sb_addr_o  => sb_addr_o,
+      sb_wdata_o => sb_wdata_o,
+      sb_size_o  => sb_size_o,
+      sb_rdata_i => sb_rdata_i,
+      sb_ack_i   => sb_ack_i,
+      sb_err_i   => sb_err_i,
 
       halted_i    => halted_i,
       running_i   => running_i,

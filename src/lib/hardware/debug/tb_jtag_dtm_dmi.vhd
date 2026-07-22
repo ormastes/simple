@@ -6,6 +6,10 @@
 --   3. DTMCS scan reports version=1 (bits 3:0) and abits=7 (bits 9:4).
 --   4. DMI write to addr 0x03 then DMI read returns the data, resp=success.
 --   5. BYPASS is 1 bit: pattern shifted through comes back delayed 1 cycle.
+--   6. (Stage 5) DTMCS busy semantics: a stall bridge delays the DMI target
+--      by `stall_cycles`, so a DMI scan while the request is in flight
+--      captures op=3 (busy) and sets sticky dmistat=3; DTMCS.dmireset
+--      clears it and a fresh round-trip succeeds.
 --
 -- Prints "JTAG STAGE1 PASS" only if every assert held.
 --
@@ -43,6 +47,16 @@ architecture sim of tb_jtag_dtm_dmi is
   signal dmi_resp  : std_logic_vector(1 downto 0);
   signal dmi_ready : std_logic;
 
+  -- Stage-5 stall bridge (DTM -> dmi_bus): latches each DMI request and
+  -- forwards it after `stall_cycles` TCK cycles, so the DTM's busy/sticky
+  -- dmistat path gets a real window. stall_cycles=0 adds one fixed cycle
+  -- of latency, which the earlier checks absorb in their idle_cycles.
+  signal b_valid      : std_logic := '0';
+  signal b_addr       : std_logic_vector(6 downto 0) := (others => '0');
+  signal b_wdata      : std_logic_vector(31 downto 0) := (others => '0');
+  signal b_op         : std_logic_vector(1 downto 0) := "00";
+  signal stall_cycles : natural := 0;
+
 begin
 
   u_tap : entity work.jtag_tap
@@ -68,8 +82,36 @@ begin
   u_dmi : entity work.dmi_bus
     port map (
       clk => tck, rst_n => trst_n,
-      valid => dmi_valid, addr => dmi_addr, wdata => dmi_wdata, op => dmi_op,
+      valid => b_valid, addr => b_addr, wdata => b_wdata, op => b_op,
       rdata => dmi_rdata, resp => dmi_resp, ready => dmi_ready);
+
+  -- Stall bridge: request path is delayed, response path is direct.
+  bridge : process (tck, trst_n)
+    variable pend : boolean := false;
+    variable cnt  : natural := 0;
+  begin
+    if trst_n = '0' then
+      b_valid <= '0';
+      pend := false;
+      cnt := 0;
+    elsif rising_edge(tck) then
+      b_valid <= '0';
+      if dmi_valid = '1' then
+        b_addr  <= dmi_addr;
+        b_wdata <= dmi_wdata;
+        b_op    <= dmi_op;
+        pend := true;
+        cnt := stall_cycles;
+      elsif pend then
+        if cnt = 0 then
+          b_valid <= '1';
+          pend := false;
+        else
+          cnt := cnt - 1;
+        end if;
+      end if;
+    end if;
+  end process bridge;
 
   stim : process
 
@@ -227,6 +269,49 @@ begin
       severity failure;
     report "CHECK5 PASS: BYPASS 1-bit passthrough (out=" & to_string(dout4)
       & ")" severity note;
+
+    ---------------------------------------------------------------------
+    -- Check 6 (Stage 5): DTMCS busy semantics — sticky dmistat=3 + dmireset.
+    ---------------------------------------------------------------------
+    scan_ir("10001");         -- DMI
+    stall_cycles <= 100;      -- DM ack delayed: next scan sees busy
+    din41 := "0000010" & x"00000000" & "01";    -- read scratch 0x02
+    scan_dr(din41, dout41);   -- request issued at Update-DR, now in flight
+    din41 := (others => '0');                   -- nop: collect while busy
+    scan_dr(din41, dout41);
+    assert dout41(1 downto 0) = "11"
+      report "CHECK6 FAIL: DMI capture while busy /= op 3, got op="
+        & to_string(dout41(1 downto 0))
+      severity failure;
+    stall_cycles <= 0;
+    idle_cycles(120);         -- let the stalled request complete
+    scan_ir("10000");         -- DTMCS
+    scan_dr(din32, dout32);
+    assert dout32(11 downto 10) = "11"
+      report "CHECK6 FAIL: sticky dmistat /= 3 after busy hit, DTMCS=0x"
+        & to_hstring(dout32)
+      severity failure;
+    din32(16) := '1';         -- dmireset
+    scan_dr(din32, dout32);
+    din32 := (others => '0');
+    scan_dr(din32, dout32);
+    assert dout32(11 downto 10) = "00"
+      report "CHECK6 FAIL: dmistat not cleared by dmireset, DTMCS=0x"
+        & to_hstring(dout32)
+      severity failure;
+    scan_ir("10001");         -- DMI: fresh round-trip must succeed
+    din41 := TEST_ADDR & x"00000000" & "01";
+    scan_dr(din41, dout41);
+    idle_cycles(8);
+    din41 := (others => '0');
+    scan_dr(din41, dout41);
+    assert dout41(1 downto 0) = "00" and dout41(33 downto 2) = TEST_DATA
+      report "CHECK6 FAIL: post-dmireset DMI read broken, op="
+        & to_string(dout41(1 downto 0)) & " data=0x"
+        & to_hstring(dout41(33 downto 2))
+      severity failure;
+    report "CHECK6 PASS: busy capture op=3, sticky dmistat=3, dmireset recovers"
+      severity note;
 
     ---------------------------------------------------------------------
     report "JTAG STAGE1 PASS" severity note;

@@ -312,12 +312,21 @@ Current stub interface:
    dropped — DATA0/1 now proven through the bus); all 4 tbs PASS exit 0,
    reviewer re-ran. tb bring-up finding recorded: poll latched allresumeack
    before allhalted after a step-resume (2-cycle running window race).
-6. Begin Stage 5 (SBA + OpenOCD): (a) SBCS 0x38/SBADDRESS0-1/SBDATA0-1 +
-   dmi_bus forward 0x38–0x3D, (b) DM system-bus master port + stub memory
-   target (sbaccess 2/3, sbreadonaddr/sbreadondata/sbautoincrement,
-   sberror), (c) DTMCS busy/dmistall semantics exercised (currently 1-cycle
-   completion), (d) OpenOCD attach glue: remote-bitbang or JTAG-VPI socket
-   around jtag_tap in GHDL sim; verify hartinfo/haltsum/abstractauto read-0
-   against the riscv-013 driver.
-7. Hart integration still gated on BRAM stability (coordinate before touching
-   rv32_exec_core.vhd / rv64 core)
+6. ✅ **Stage 5 LANDED 2026-07-22 — LIVE OpenOCD ATTACH PASSED.** Full SBA
+   engine (SBCS sbversion=1/sbaccess 2/3/readonaddr/readondata/
+   autoincrement/sberror+sbbusyerror W1C, SBADDRESS0/1, SBDATA0/1, sb_*
+   master port, sba_test_mem target), DTMCS busy/dmireset semantics
+   exercised (STAGE1 tb CHECK6), examine-critical DM stub CSRs (misa RO
+   RV64IMA, mstatus RW, tselect/tdata1=0). `tb_sba` 6/6 → JTAG STAGE5 PASS
+   + all 4 prior stages regression PASS, reviewer re-ran all 5.
+   **Real OpenOCD 0.12.0 attached** to the GHDL-simulated stack via
+   remote_bitbang (VHPIDIRECT TCP glue, `openocd_bitbang_glue.c` +
+   `tb_openocd_bitbang.vhd`): TAP found 0x15350067, hart examined
+   (XLEN=64, misa RV64IMA), SBA memory read (`mdd`) + write round-trip
+   (`mww`/`mdw` 0xfeedc0de), halt/step (+4)/resume/shutdown rc=0 —
+   transcript in `openocd_attach.md`, cfg in `openocd_riscv_sim.cfg`.
+7. **Only remaining plan item: hart integration** (gated on BRAM stability):
+   wire haltreq/resumereq/halted/running + GPR ack port + pc/prv/ebreak/
+   dpc/step into the real rv32/rv64 cores (replace tb fake hart), replace DM
+   stub CSRs with the real hart CSR file, connect sb_* to the real SoC bus
+   (arbitration vs core), then GDB-over-OpenOCD end-to-end on :3333.

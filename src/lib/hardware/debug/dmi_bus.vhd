@@ -16,6 +16,8 @@
 -- still compile; with no DM attached an access to a forwarded address
 -- never completes (dm_ready defaults '0'), which the Stage-1 testbench
 -- never does. All other addresses respond `failed` (resp = 2).
+-- Stage 5: the System Bus Access window 0x38..0x3D (SBCS, SBADDRESS0/1,
+-- 0x3B reserved-read-0, SBDATA0/1) is forwarded to the DM as well.
 
 library ieee;
 use ieee.std_logic_1164.all;
@@ -61,10 +63,11 @@ architecture rtl of dmi_bus is
 
 begin
 
-  -- Address decode: 0x10..0x1F (DM regs) and 0x04..0x0B (abstract data
-  -- window) -> Debug Module.
+  -- Address decode: 0x10..0x1F (DM regs), 0x04..0x0B (abstract data
+  -- window) and 0x38..0x3D (system bus access) -> Debug Module.
   is_dm <= '1' when addr(6 downto 4) = "001"
                  or (unsigned(addr) >= 4 and unsigned(addr) <= 11)
+                 or (unsigned(addr) >= 16#38# and unsigned(addr) <= 16#3D#)
            else '0';
 
   dm_valid <= valid and is_dm;
