@@ -1,0 +1,223 @@
+#!/bin/sh
+# check-riscv-hardware-gates.shs — single entrypoint for the RISC-V hardware gates.
+#
+# Runs, in order, capturing pass/fail per gate:
+#   1. All JTAG debug testbenches (GHDL, VHDL-2008):
+#        tb_jtag_dtm_dmi   -> "JTAG STAGE1 PASS"
+#        tb_debug_module   -> "JTAG STAGE2 PASS"
+#        tb_abstract_cmds  -> "JTAG STAGE3 PASS"
+#        tb_debug_csrs     -> "JTAG STAGE4 PASS"
+#        tb_sba            -> "JTAG STAGE5 PASS"
+#      (tb_openocd_bitbang is skipped with a warning: it needs the VHPIDIRECT
+#       openocd_bitbang_glue.c shared object and a live OpenOCD socket.)
+#   2. The soc/core `bin/simple run` probes (each must print "ALL PASS"):
+#        test/01_unit/lib/hardware/soc_rtl/soc_top_64_probe.spl
+#        test/01_unit/lib/hardware/soc_rtl/boot64_probe.spl
+#        test/01_unit/lib/hardware/rv64gc_rtl/core64_probe.spl
+#        test/01_unit/lib/hardware/debug_hooks/hart_debug_probe.spl (rv32 hart
+#          debug-hook probe; optional-if-missing, asserted when present)
+#   3. scripts/fpga/ghdl_validate_rv32.shs --analyze, only when the generated
+#      VHDL (build/vhdl/rv32/soc_top_rv32_sim.vhd) is present; otherwise a
+#      warning (generation needs an rv32 payload ELF not kept in the tree).
+#
+# Prints a final "RISCV-HW-GATES: <n>/<m> PASS" and exits nonzero on any fail.
+# Missing OPTIONAL inputs warn; missing REQUIRED inputs fail (fail-closed).
+#
+# Env:
+#   SIMPLE_BIN           path to the simple binary (default: auto-discover)
+#   RISCV_GATE_TIMEOUT   per-gate timeout in seconds (default 600)
+
+set -u
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+TIMEOUT_SECS="${RISCV_GATE_TIMEOUT:-600}"
+if command -v timeout >/dev/null 2>&1; then
+    RUN_TIMEOUT="timeout $TIMEOUT_SECS"
+else
+    RUN_TIMEOUT=""
+fi
+
+TOTAL=0
+PASS=0
+FAIL=0
+WARN=0
+
+gate_pass() { TOTAL=$((TOTAL + 1)); PASS=$((PASS + 1)); echo "PASS  $1"; }
+gate_fail() { TOTAL=$((TOTAL + 1)); FAIL=$((FAIL + 1)); echo "FAIL  $1 -- $2"; }
+gate_warn() { WARN=$((WARN + 1)); echo "WARN  $1 -- $2 (skipped, not counted)"; }
+
+LOG_DIR="build/riscv_hw_gates"
+mkdir -p "$LOG_DIR"
+
+echo "=== RISC-V hardware gates ==="
+echo "root: $ROOT_DIR"
+
+# ---------------------------------------------------------------------------
+# 1. JTAG debug testbenches (GHDL)
+# ---------------------------------------------------------------------------
+DEBUG_DIR="src/lib/hardware/debug"
+GHDL_WORK="build/ghdl/jtag_gates"
+mkdir -p "$GHDL_WORK"
+
+# Support units first (analysis order matters), then the testbenches.
+JTAG_UNITS="jtag_tap dmi_bus debug_registers riscv_dtm riscv_debug_module sba_test_mem"
+JTAG_TBS="tb_jtag_dtm_dmi:1 tb_debug_module:2 tb_abstract_cmds:3 tb_debug_csrs:4 tb_sba:5"
+
+if ! command -v ghdl >/dev/null 2>&1; then
+    for spec in $JTAG_TBS; do
+        gate_fail "jtag ${spec%%:*}" "ghdl not found in PATH"
+    done
+else
+    analyze_ok=1
+    for unit in $JTAG_UNITS $(for s in $JTAG_TBS; do echo "${s%%:*}"; done); do
+        src="$DEBUG_DIR/$unit.vhd"
+        if [ ! -f "$src" ]; then
+            echo "ERROR missing required VHDL source: $src"
+            analyze_ok=0
+            continue
+        fi
+        out="$(ghdl -a --std=08 --workdir="$GHDL_WORK" "$src" 2>&1)"
+        rc=$?
+        if [ $rc -ne 0 ] || echo "$out" | grep -q ":error:"; then
+            echo "ERROR analyzing $src:"
+            echo "$out" | tail -20
+            analyze_ok=0
+        fi
+    done
+    # Optional bitbang server tb: only analyzable, needs VHPIDIRECT .so to run.
+    if [ -f "$DEBUG_DIR/tb_openocd_bitbang.vhd" ]; then
+        gate_warn "jtag tb_openocd_bitbang" "needs openocd_bitbang_glue.c VHPIDIRECT .so + live OpenOCD"
+    else
+        gate_warn "jtag tb_openocd_bitbang" "file not present"
+    fi
+
+    for spec in $JTAG_TBS; do
+        tb="${spec%%:*}"
+        stage="${spec##*:}"
+        marker="JTAG STAGE$stage PASS"
+        if [ $analyze_ok -ne 1 ]; then
+            gate_fail "jtag $tb" "VHDL analysis failed (see errors above)"
+            continue
+        fi
+        log="$LOG_DIR/$tb.log"
+        if ! ghdl -e --std=08 --workdir="$GHDL_WORK" "$tb" >"$log" 2>&1; then
+            gate_fail "jtag $tb" "ghdl elaboration failed (see $log)"
+            continue
+        fi
+        $RUN_TIMEOUT ghdl -r --std=08 --workdir="$GHDL_WORK" "$tb" >"$log" 2>&1
+        rc=$?
+        if grep -q "$marker" "$log"; then
+            gate_pass "jtag $tb ($marker)"
+        elif [ $rc -eq 124 ]; then
+            gate_fail "jtag $tb" "timed out after ${TIMEOUT_SECS}s without '$marker'"
+        else
+            gate_fail "jtag $tb" "no '$marker' (rc=$rc, see $log)"
+            tail -10 "$log" | sed 's/^/      /'
+        fi
+    done
+fi
+
+# ---------------------------------------------------------------------------
+# 2. soc/core probes via `simple run`
+# ---------------------------------------------------------------------------
+resolve_simple() {
+    if [ -n "${SIMPLE_BIN:-}" ] && [ -x "${SIMPLE_BIN}" ]; then
+        echo "$SIMPLE_BIN"; return 0
+    fi
+    for cand in \
+        "$ROOT_DIR/bin/simple" \
+        "$ROOT_DIR/src/compiler_rust/target/bootstrap/simple" \
+        "$ROOT_DIR"/bin/release/*/simple; do
+        if [ -x "$cand" ]; then echo "$cand"; return 0; fi
+    done
+    command -v simple 2>/dev/null && return 0
+    return 1
+}
+
+# name|path|required(1/0). hart_debug_probe is the rv32 hart debug-hook probe:
+# asserted when present, warned when absent.
+PROBES="soc_top_64_probe|test/01_unit/lib/hardware/soc_rtl/soc_top_64_probe.spl|1
+boot64_probe|test/01_unit/lib/hardware/soc_rtl/boot64_probe.spl|1
+core64_probe|test/01_unit/lib/hardware/rv64gc_rtl/core64_probe.spl|1
+hart_debug_probe_rv32|test/01_unit/lib/hardware/debug_hooks/hart_debug_probe.spl|0"
+
+SIMPLE="$(resolve_simple)" || SIMPLE=""
+if [ -z "$SIMPLE" ]; then
+    # No simple binary: every required probe is blocked -> fail-closed.
+    OLDIFS=$IFS; IFS='
+'
+    for row in $PROBES; do
+        name="${row%%|*}"; rest="${row#*|}"; req="${rest##*|}"
+        if [ "$req" = "1" ]; then
+            gate_fail "probe $name" "blocked: no simple binary (set SIMPLE_BIN)"
+        else
+            gate_warn "probe $name" "blocked: no simple binary (set SIMPLE_BIN)"
+        fi
+    done
+    IFS=$OLDIFS
+else
+    echo "simple binary: $SIMPLE"
+    OLDIFS=$IFS; IFS='
+'
+    for row in $PROBES; do
+        IFS=$OLDIFS
+        name="${row%%|*}"; rest="${row#*|}"
+        path="${rest%%|*}"; req="${rest##*|}"
+        if [ ! -f "$path" ]; then
+            if [ "$req" = "1" ]; then
+                gate_fail "probe $name" "required file missing: $path"
+            else
+                gate_warn "probe $name" "optional file missing: $path"
+            fi
+            IFS='
+'
+            continue
+        fi
+        log="$LOG_DIR/$name.log"
+        $RUN_TIMEOUT "$SIMPLE" run "$path" >"$log" 2>&1
+        rc=$?
+        if [ $rc -eq 0 ] && grep -q "ALL PASS" "$log"; then
+            gate_pass "probe $name (ALL PASS)"
+        elif [ $rc -eq 124 ]; then
+            gate_fail "probe $name" "timed out after ${TIMEOUT_SECS}s"
+        else
+            gate_fail "probe $name" "rc=$rc or no 'ALL PASS' (see $log)"
+            tail -10 "$log" | sed 's/^/      /'
+        fi
+        IFS='
+'
+    done
+    IFS=$OLDIFS
+fi
+
+# ---------------------------------------------------------------------------
+# 3. Generated-RTL analyze gate (only when generated VHDL is present)
+# ---------------------------------------------------------------------------
+RV32_VALIDATE="scripts/fpga/ghdl_validate_rv32.shs"
+RV32_GEN_MARKER="build/vhdl/rv32/soc_top_rv32_sim.vhd"
+if [ ! -f "$RV32_VALIDATE" ]; then
+    gate_warn "ghdl_validate_rv32 --analyze" "script missing: $RV32_VALIDATE"
+elif [ ! -f "$RV32_GEN_MARKER" ]; then
+    gate_warn "ghdl_validate_rv32 --analyze" "generated VHDL absent ($RV32_GEN_MARKER); run scripts/fpga/generate_rv32_vhdl.shs first"
+else
+    log="$LOG_DIR/ghdl_validate_rv32.log"
+    if $RUN_TIMEOUT sh "$RV32_VALIDATE" --analyze >"$log" 2>&1; then
+        gate_pass "ghdl_validate_rv32 --analyze"
+    else
+        gate_fail "ghdl_validate_rv32 --analyze" "nonzero exit (see $log)"
+        tail -10 "$log" | sed 's/^/      /'
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Summary
+# ---------------------------------------------------------------------------
+echo "---"
+[ $WARN -gt 0 ] && echo "warnings (optional gates skipped): $WARN"
+echo "RISCV-HW-GATES: $PASS/$TOTAL PASS"
+if [ $FAIL -gt 0 ] || [ $TOTAL -eq 0 ] || [ $PASS -ne $TOTAL ]; then
+    exit 1
+fi
+exit 0
