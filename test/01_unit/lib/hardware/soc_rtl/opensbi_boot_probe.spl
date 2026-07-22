@@ -14,17 +14,20 @@
 #   2. Throughput wall removed — bulk 128 MiB alloc + 2 MiB fw_payload load,
 #      with measured before/after numbers.
 #   3. REAL OpenSBI v1.4 fw_payload boot with the boot ABI — runs as far as it
-#      honestly gets.  RV64C is now implemented (Lane PP: decode.spl rvc_expand
-#      + core64 pc+=2), so the old first divergence (c.li @0x80000548 stepping
-#      +4) is FIXED — the core now executes the compressed fw_boot_hart and the
-#      compressed _start relocate loop correctly.  The NEW frontier is a
-#      dword-crossing instruction-fetch bug in ram64_read: a 32-bit insn whose
-#      byte address is ≡6 (mod 8) has its top two bytes zeroed by the width-4
-#      read (no cross-doubleword stitch).  First such insn is `ld t5,16(t0)`
-#      @0x8000008e -> fetched 0xFFFFBF03 instead of 0x0102bf03, decoding as a
-#      bogus load that traps (cause 4).  This lives in soc_rtl/ram64.spl (NOT
-#      rv64gc_rtl) — cross-lane request.  See doc/07_guide/os/opensbi_rv64_soc.md
-#      and doc/08_tracking/bug/rv64_core_no_c_extension_opensbi_stall_2026-07-22.md.
+#      honestly gets.  RV64C (Lane PP) removed the c.li @0x80000548 wall; Lane QQ
+#      then fixed the ram64_read dword-crossing fetch bug (a 32-bit insn whose
+#      byte address is ≡6 (mod 8) had its top two bytes zeroed — `ld t5,16(t0)`
+#      @0x8000008e fetched 0xFFFFBF03 instead of 0x0102bf03 and trapped, cause 4)
+#      and the trap-entry IALIGN=16 mepc/sepc masks (~3 -> ~1).  With both fixes,
+#      real OpenSBI now boots TRAP-FREE (mcause==0) through the ELF relocate loop,
+#      the bss-zero loop, and into fw_platform_init (the FDT platform-init C
+#      code).  The banner is not yet reached: it is ~10^5 instructions further
+#      (fw_platform_init + sbi_init + console init) and the soc_top_64 core runs
+#      interpreted (core64 JIT falls back on `lsu64_load`) at ~600 ticks/s with a
+#      per-tick RAM copy, so the frontier is now sim THROUGHPUT, not a bug in this
+#      lane's files.  Pinned + filed:
+#      doc/08_tracking/bug/rv64_opensbi_fw_platform_init_throughput_frontier_2026-07-22.md.
+#      See also doc/07_guide/os/opensbi_rv64_soc.md.
 use std.hardware.soc_rtl.soc_top_64.{SocTop64State, soc_top_64_init, soc_top_64_tick}
 use std.hardware.soc_rtl.ram64.{ram64_write, ram64_init, ram64_read, ram64_load_bytes}
 use std.hardware.rv64gc_rtl.regfile.{regfile64_write}
@@ -165,111 +168,120 @@ fn run_wall_case() -> i64:
 # ============================================================================
 
 fn run_fw_payload_boot_case() -> i64:
-    """Boot the REAL OpenSBI v1.4 fw_payload on soc_top_64 with the boot ABI
-    (a0=hartid=0, a1=DTB=0x88000000) and record exactly how far it gets.
+    """Boot the REAL OpenSBI v1.4 fw_payload on soc_top_64 and record how far it
+    honestly gets AFTER the ram64 dword-crossing fetch fix (Lane QQ) and the
+    trap-entry IALIGN=16 mepc/sepc mask fix.
 
-    Honest result (Lane PP): RV64C is now implemented, so the OLD divergence is
-    FIXED — the compressed c.li @0x80000548 now steps +2 (-> 0x8000054a) and the
-    core executes the compressed fw_boot_hart (c.li/c.ret) and the compressed
-    _start relocate loop (c.li t3,3 @0x84, ...) correctly.  Boot advances ~39
-    instructions past the old wall into the relocate loop.
+    History: RV64C (Lane PP) removed the old c.li @0x80000548 wall; then the
+    ram64_read dword-crossing bug corrupted the fetch of `ld t5,16(t0)`
+    @0x8000008e (0x0102bf03 -> 0xFFFFBF03) and the boot took a bogus load trap
+    (cause 4) inside the ELF-relocate loop.  Lane QQ fixed ram64_read to stitch
+    across the 8-byte doubleword boundary with logical shifts, so that fetch is
+    now exact and the relocate loop runs to completion.
 
-    The NEW first divergence is a dword-crossing instruction-fetch bug that
-    lives in soc_rtl/ram64.spl (ram64_read), NOT the rv64gc core: a 32-bit insn
-    whose byte address is ≡6 (mod 8) is read with its top two bytes zeroed
-    (width-4 read does not stitch across the 8-byte doubleword boundary).  The
-    first such instruction is `ld t5,16(t0)` @0x8000008e, which fetches as
-    0xFFFFBF03 instead of the true 0x0102bf03 and decodes as a bogus load that
-    traps (cause 4).  This case pins BOTH facts deterministically."""
-    print("=== Case 3: real fw_payload boot (RVC fixed; new fetch frontier) ===")
+    CURRENT FRONTIER (this case pins it deterministically):
+      * The @0x8e fetch is now correct (0x0102bf03) — direct, tick-free proof.
+      * Booting forward, the core executes the compressed _start, the ELF
+        R_RISCV_RELATIVE relocate loop (the ld @0x8e path), _relocate_done,
+        the bss-zero loop, and enters fw_platform_init — the FDT platform-init
+        C code — all with mcause==0 (NO trap).  These four milestones are the
+        HARD-asserted, verified claim below.  No correctness wall remains
+        THROUGH fw_platform_init.
+      * The banner is NOT reached (it lives ~10^5 insns further: sbi_init +
+        console init).  Execution continues trap-free into sbi_init-era code
+        (observed max_pc reaches semihosting_init), but does not reach the banner
+        within a single run.  The LIKELY blocker is sim throughput — the
+        soc_top_64 core runs interpreted (core64 JIT falls back on `lsu64_load`,
+        ~600 ticks/s) with a per-tick RAM copy, and the host kills each run at a
+        ~60 s CPU cap.  NOT yet ruled out: a compacted-map artifact (this harness
+        trims RAM, so reads >=0x70000 return 0) or a loop in other-owned code.
+        Out-of-file-set / cross-lane; filed with the open questions in
+        doc/08_tracking/bug/rv64_opensbi_fw_platform_init_throughput_frontier_2026-07-22.md.
+
+    Sim-speed harness: to make the boot observable we use a COMPACTED memory map
+    (RAM trimmed to firmware+stack+DTB = 0x70000, DTB relocated to 0x80060000
+    via a1).  OpenSBI uses the a1 FDT pointer wherever it points and all of the
+    executed path lives below 0x48000, so the firmware code path is unchanged;
+    only the sim memory footprint (hence per-tick copy cost) shrinks."""
+    print("=== Case 3: real fw_payload boot (ram64 fetch FIXED; frontier = fw_platform_init / throughput) ===")
     val fw = rt_file_read_bytes("build/os/opensbi_rv64_soc/fw_payload.bin") ?? []
     if fw.len() == 0:
         print("fw_payload.bin absent (offline) — SKIP boot attempt (needs cross-gcc build)")
         return 0
 
-    val ram_bytes = 0x8000000 + 0x10000
+    var fails = 0
+
+    # --- Tick-free proof of the ram64 dword-crossing fetch fix ---------------
+    # Load just the fetch window; the compacted map is enough for these reads.
+    val ram_bytes = 0x70000
     var ram = ram64_init(ram_bytes)
     ram = ram64_load_bytes(ram, 0, fw)
-    # Real SoC DTB at a1 (0x88000000): memory@80000000/128MiB, clint@2000000,
-    # uart@10000000, model simple-soc-rv64 — matches this SoC's map exactly.
+    val fetched_8e = ram64_read(ram, 0x8e, 4)   # off&7=6 -> crosses the dword boundary
+    val fetched_8a = ram64_read(ram, 0x8a, 4)   # off&7=2 -> within one dword (control)
+    var true_8e: i64 = 0
+    if fw.len() > 0x91:
+        true_8e = (fw[0x8e] as i64) | ((fw[0x8f] as i64) << 8) |
+                  ((fw[0x90] as i64) << 16) | ((fw[0x91] as i64) << 24)
+    print("FETCH @0x8000008e: soc_fetch={fetched_8e} true={true_8e} (off&7=6, dword-crossing)")
+    print("FETCH @0x8000008a: soc_fetch={fetched_8a} (off&7=2, control)")
+    fails = fails + check("ram64 fix: `ld t5,16(t0)` @0x8e fetches exact 0x0102bf03 (was 0xFFFFBF03)",
+        fetched_8e == 0x0102bf03 and true_8e == 0x0102bf03)
+    fails = fails + check("control: aligned-within-dword fetch @0x8a is exact (0x0002be03)",
+        fetched_8a == 0x0002be03)
+
+    val insn_lo16 = ram64_read(ram, 0x548, 4) & 0xFFFF
+    fails = fails + check("first fw_boot_hart insn is RVC c.li a0,-1 (0x557d={insn_lo16})",
+        insn_lo16 == 0x557d)
+
+    # --- Boot forward on the compacted map; assert trap-free progress --------
     val dtb = rt_file_read_bytes("examples/09_embedded/simple_os/arch/riscv64/soc_virt.dtb") ?? []
     if dtb.len() > 0:
-        ram = ram64_load_bytes(ram, 0x8000000, dtb)
+        ram = ram64_load_bytes(ram, 0x60000, dtb)
 
     var soc = soc_top_64_init(0x1000)
     soc.ram = ram
     var core0 = soc.core
     core0.pc = 0x80000000
     core0.rf = regfile64_write(core0.rf, 10, 0, true)            # a0 = hartid 0
-    core0.rf = regfile64_write(core0.rf, 11, 0x88000000, true)   # a1 = DTB
+    core0.rf = regfile64_write(core0.rf, 11, 0x80060000, true)   # a1 = DTB (relocated low)
     soc.core = core0
 
-    # Tick until the core reaches fw_boot_hart @ 0x80000548 (first RVC insn).
-    var reached = false
+    # Milestones on the real boot path (each requires the ram64 + trap fixes to
+    # have let earlier code run without trapping).
+    var m_reloc_done = false     # 0x800000a4 — ELF relocate loop completed
+    var m_bss = false            # 0x800000cc — bss-zero loop entered
+    var m_fw_plat = false        # 0x800048ba — fw_platform_init (FDT C code) entered
+    var trapped = false
     var t = 0
     val tsr = rt_time_now_micros()
-    while t < 64 and not reached:
+    while t < 9000 and not trapped:
         soc = soc_top_64_tick(soc)
-        if soc.core.pc == 0x80000548:
-            reached = true
-        t = t + 1
-    val insn_lo16 = ram64_read(ram, 0x548, 4) & 0xFFFF   # low 16 bits @ 0x80000548
-    print("reached fw_boot_hart @0x80000548 after {t} ticks: {reached}, insn_lo16={insn_lo16}")
-
-    var fails = 0
-    fails = fails + check("core reaches fw_boot_hart @0x80000548 executing real fw_payload", reached)
-    fails = fails + check("first insn there is RVC c.li a0,-1 (0x557d={insn_lo16})", insn_lo16 == 0x557d)
-
-    # RVC FIXED: stepping the compressed c.li advances pc by 2 (-> 0x8000054a),
-    # NOT 4.  This is the deterministic proof the old no-C wall is gone.
-    val pc_before = soc.core.pc
-    soc = soc_top_64_tick(soc)
-    val pc_after = soc.core.pc
-    val delta = pc_after - pc_before
-    print("RVC STEP: c.li @0x80000548 -> pc {pc_before} => {pc_after} (delta={delta}); spec RVC delta=2")
-    fails = fails + check("RVC fixed: compressed c.li advances +2 not +4 (delta={delta})",
-        delta == 2 and pc_after == 0x8000054a)
-
-    # NEW FRONTIER: the width-4 fetch of a 32-bit insn at an address ≡6 (mod 8)
-    # is corrupted (top 16 bits zeroed) because ram64_read does not stitch
-    # across the 8-byte doubleword boundary.  First such insn: ld t5,16(t0)
-    # @0x8000008e.  Pin it directly against the true fw_payload bytes.
-    val fetched_8e = ram64_read(ram, 0x8e, 4)
-    var true_8e: i64 = 0
-    if fw.len() > 0x91:
-        true_8e = (fw[0x8e] as i64) | ((fw[0x8f] as i64) << 8) |
-                  ((fw[0x90] as i64) << 16) | ((fw[0x91] as i64) << 24)
-    val fetched_8a = ram64_read(ram, 0x8a, 4)   # off&7=2 within a dword: OK
-    print("FETCH @0x8000008e: soc_fetch={fetched_8e} true={true_8e} (off&7=6, dword-crossing)")
-    print("FETCH @0x8000008a: soc_fetch={fetched_8a} (off&7=2, correct)")
-    # Deterministic corrupt value: ram64_read does (raw >> 48) & 0xFFFFFFFF for
-    # a width-4 read at byte_offset 6.  The high bytes (0x90,0x91) are dropped
-    # (no cross-doubleword stitch) AND Simple's `>>` is arithmetic, so byte
-    # 0x8f=0xbf (sign bit set) sign-extends: 0x0102bf03 -> 0xFFFFBF03 (=
-    # 4294950659).  Either defect alone corrupts the fetch — both live in
-    # soc_rtl/ram64.spl, outside this lane's file set.
-    fails = fails + check("new frontier: ram64_read corrupts 32b insn @off 0x8e (0xFFFFBF03 != true)",
-        fetched_8e == 4294950659 and true_8e == 0x0102bf03 and fetched_8e != true_8e)
-    fails = fails + check("control: aligned-within-dword fetch @off 0x8a is exact (0x0002be03)",
-        fetched_8a == 0x0002be03)
-
-    # Characterization: run the real boot forward; the corrupted @0x8e fetch
-    # decodes as a bogus load and the boot takes a load trap (cause 4) with
-    # mtvec still 0 (OpenSBI's handler is installed later).  Deterministic
-    # single-cycle behaviour — reproduces every run.
-    var tt = 0
-    var trapped = false
-    while tt < 80 and not trapped:
-        soc = soc_top_64_tick(soc)
+        val pc = soc.core.pc
+        if pc == 0x800000a4:
+            m_reloc_done = true
+        if pc == 0x800000cc:
+            m_bss = true
+        if pc == 0x800048ba:
+            m_fw_plat = true
         if soc.core.csr_m.mcause != 0:
             trapped = true
-        tt = tt + 1
+        t = t + 1
     val tse = rt_time_now_micros()
-    print("post-RVC boot trap after {tt} more ticks: mcause={soc.core.csr_m.mcause}")
-    print("ticks/sec ~= {((t + tt + 1) * 1000000) / (tse - tsr)}")
-    fails = fails + check("boot progresses into relocate loop then hits fetch-bug load trap (cause 4)",
-        trapped and soc.core.csr_m.mcause == 4)
-    print("finding: RV64C works (old 0x548 wall gone); new wall = ram64_read dword-crossing fetch (soc_rtl, cross-lane)")
+    print("boot: {t} ticks, mcause={soc.core.csr_m.mcause}, pc={soc.core.pc}")
+    print("milestones: reloc_done={m_reloc_done} bss_zero={m_bss} fw_platform_init={m_fw_plat}")
+    if tse > tsr:
+        print("ticks/sec ~= {(t * 1000000) / (tse - tsr)}")
+
+    fails = fails + check("boot runs the ELF relocate loop to completion (reaches _relocate_done @0x800000a4)",
+        m_reloc_done)
+    fails = fails + check("boot enters the bss-zero loop @0x800000cc", m_bss)
+    fails = fails + check("boot enters fw_platform_init FDT C code @0x800048ba", m_fw_plat)
+    fails = fails + check("no trap through fw_platform_init (mcause==0 — ram64+trap fixes hold)",
+        not trapped and soc.core.csr_m.mcause == 0)
+    print("finding: ram64 dword-crossing fetch FIXED + IALIGN trap masks FIXED; real OpenSBI now boots")
+    print("finding: trap-free THROUGH fw_platform_init (verified). Banner not reached; likely blocker =")
+    print("finding: sim throughput (core64 lsu JIT fallback + per-tick RAM copy), NOT yet distinguished")
+    print("finding: from a compacted-map artifact / other-owned loop — out-of-file-set; see bug doc.")
     fails
 
 fn main() -> i64:

@@ -79,39 +79,54 @@ benchmarked at 128 MiB scale. The ~39 s "before" is the byte-mode RMW loader,
 the honest baseline the word-packing fast path replaced.)
 | `soc_top_64_tick` rate | — | **~300 (shallow) / ~675–800 (deep) ticks/s** |
 
-At ~700 ticks/s a UART banner (OpenSBI needs ~10⁵–10⁶ insns for BSS/FDT/console
-init) is minutes-to-hours away — but the boot **diverges long before that**, at
-instruction ~5.
+### Frontier update (2026-07-22, Lane QQ) — boots trap-free into `fw_platform_init`
 
-**First divergence — no RV64C (compressed) support.** The core runs the 32-bit
-`_fw_start` prologue correctly (`add s0,a0` … `jal fw_boot_hart`), then at
-**`pc=0x8000_0548`** meets the first compressed instruction **`0x557d`
-(`c.li a0,-1`)**. `soc_top_64`'s datapath has **no C-extension decode** and only
-a `pc+4` path (`rv64gc_rtl/core.spl` `pc_plus4`; `decode.spl` decodes no
-compressed forms), so it advances `pc` by **4 (→`0x8000_054c`)** instead of
-**2 (→`0x8000_054a`)**, skipping the `c.ret` and desyncing the fetch stream.
-`misa` advertises RV64IMA**C** but no C is implemented. Execution then wanders
-misaligned RVC-dense code until `pc` lands in the trap-handler region
-(`_trap_handler` `0x8000_03f8`) and loops there indefinitely (`mcause` stays 0 —
-it is not a trap, it is a decode/PC-width divergence).
+The two divergences that used to stop the boot are now fixed:
 
-Filed: `doc/08_tracking/bug/rv64_core_no_c_extension_opensbi_stall_2026-07-22.md`.
+- **RV64C** (Lane PP) — the core decodes compressed instructions and steps
+  `pc` by 2 (IALIGN=16). The old `c.li a0,-1` @`0x8000_0548` stall is gone.
+- **ram64_read dword-crossing fetch** (Lane QQ) — a 32-bit access whose byte
+  address is ≡6 (mod 8) used to drop its top two bytes and sign-extend
+  (`ld t5,16(t0)` @`0x8000_008e` fetched `0xFFFF_BF03` instead of `0x0102_bf03`,
+  trapping cause 4 inside the ELF relocate loop). `ram64_read` now stitches
+  across the 8-byte doubleword boundary with **logical** shifts. Fixed value is
+  `0x0102_bf03`, exact.
+- **trap-entry IALIGN masks** (Lane QQ) — `trap64_enter_m_only` (`mepc`) and the
+  S-mode delegation path (`sepc`) masked the saved PC with `~3`; changed to `~1`
+  so a compressed-PC trap return is not misaligned. (`mtvec`/`stvec` keep `~3` —
+  those hold the vector BASE with MODE bits `[1:0]`.)
 
-### Remaining blockers (only reachable AFTER C-extension lands)
+With all three, **real OpenSBI now boots trap-free** (`mcause==0`) through the
+compressed `_start`, the ELF `R_RISCV_RELATIVE` relocate loop
+(`_relocate_done` @`0x8000_00a4`), the bss-zero loop (@`0x8000_00cc`), and into
+**`fw_platform_init`** (FDT platform-init C code, @`0x8000_48ba`) — these four
+are hard-asserted in Case 3. Measured: 18 000 / 28 000 ticks both `mcause==0`,
+no trap; `max_pc` reaches `0x8000_e4d6` (`semihosting_init`, an sbi_init callee),
+so execution continues past `fw_platform_init` into sbi_init-era code.
 
-These were never exercised — execution stalls at insn ~5, before any of them:
+**Current frontier: the banner is not reached within a single run** (it is ~10⁵
+instructions further: `sbi_init` → console init). The **likely** blocker is
+simulation throughput — the `soc_top_64` core runs interpreted (core64 JIT
+falls back: `Unknown variable: lsu64_load`) at ~600 ticks/s with a per-tick RAM
+copy, under the host's ~60 s per-process CPU cap. **Not yet distinguished** from
+a compacted-map artifact (the observability harness trims RAM to 0x70000, so
+firmware reads ≥0x70000 return 0) or a loop in other-owned code — the next owner
+must confirm forward progress on the honest 128 MiB map. Filed:
+`doc/08_tracking/bug/rv64_opensbi_fw_platform_init_throughput_frontier_2026-07-22.md`.
 
-1. **RV64C decode + IALIGN=16 PC stepping** — the actual first blocker above.
-2. **S-mode / `mret` drop** — OpenSBI's purpose; delegation path present
+### Remaining blockers (past the throughput frontier, unexercised)
+
+Not yet reached — execution is throughput-bound inside `fw_platform_init`:
+
+1. **S-mode / `mret` drop** — OpenSBI's purpose; delegation path present
    (`csr64_update_mip_s`, Sv39) but unexercised by a real firmware run.
-3. **PMP** — `sbi_hart_pmp_configure` (`0x9_1be`) writes `pmpcfg0`/`pmpaddr0`
-   (`0x3A0`/`0x3B0`), both **unknown** to `core64_machine_csr_known` → would
-   fail-closed to an illegal-insn trap. **Predicted next divergence** once C
-   lands. `menvcfg` (`0x30A`) and `mcounteren` (`0x306`) are likewise unknown.
-4. **DTB**: now supplied — `examples/09_embedded/simple_os/arch/riscv64/soc_virt.dtb`
+2. **PMP** — `sbi_hart_pmp_configure` writes `pmpcfg0`/`pmpaddr0`
+   (`0x3A0`/`0x3B0`). CsrExt64 now provides storage for `pmp*`/`menvcfg`
+   (`0x30A`)/`mcounteren` (`0x306`) (no enforcement) — predicted to be exercised
+   once throughput allows reaching `sbi_hart_init`.
+3. **DTB**: supplied — `examples/09_embedded/simple_os/arch/riscv64/soc_virt.dtb`
    (1495 B) matches this SoC (memory@80000000/128 MiB, clint@2000000,
-   uart@10000000, model `simple-soc-rv64`). The 40-byte `bootrom_dtb`
-   header-only placeholder is insufficient for `PLATFORM=generic`.
+   uart@10000000, model `simple-soc-rv64`).
 
 Board note (board-runnable rule): sim-RTL bring-up lane; the same
 `fw_payload.bin` is the artifact a physical RV64 board would flash once the core

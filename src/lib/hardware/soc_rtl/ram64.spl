@@ -60,6 +60,14 @@ fn ram64_init(size: i64) -> Ram64State:
 # Read — byte/halfword/word/doubleword
 # ============================================================================
 
+fn ram64_logical_shr(x: i64, s: i64) -> i64:
+    """Logical (unsigned) right shift for i64.  Simple's `>>` is arithmetic and
+    sign-extends when bit 63 is set; that corrupts sub-word reads of data with
+    the high bit set.  Mask the surviving low (64 - s) bits after the shift so
+    the vacated high bits are always zero.  Caller guarantees 0 < s < 64."""
+    val m = (1 << (64 - s)) - 1
+    (x >> s) & m
+
 fn ram64_read(ram: Ram64State, addr: i64, width: i64) -> i64:
     """Read from RAM at the given byte address.
 
@@ -69,32 +77,39 @@ fn ram64_read(ram: Ram64State, addr: i64, width: i64) -> i64:
       4 = word       (32-bit, zero-extended)
       8 = doubleword (64-bit)
 
+    A sub-word (or unaligned doubleword) access whose byte range crosses the
+    8-byte doubleword boundary must stitch bytes from the next doubleword —
+    otherwise the high bytes are dropped.  We assemble a logically-shifted low
+    word ORed with the next word shifted up into the vacated high bits, using
+    LOGICAL shifts throughout so a high-bit-set value is never sign-extended.
+
     Returns 0 for out-of-range addresses."""
     val word_idx = addr >> 3
     val num_words = (ram.size + 7) >> 3
     if word_idx >= num_words:
         return 0
 
-    val raw = ram.data[word_idx]
+    val lo = ram.data[word_idx]
     val byte_offset = addr & 7
+    val shift = byte_offset * 8
+
+    # Assemble the (up to) 64-bit little-endian window starting at byte_offset,
+    # stitching in the next doubleword when the shift vacates high bits.
+    var value = lo
+    if shift > 0:
+        value = ram64_logical_shr(lo, shift)
+        if (word_idx + 1) < num_words:
+            val hi = ram.data[word_idx + 1]
+            value = value | (hi << (64 - shift))
 
     if width == 8:
-        return raw
-
+        return value
     if width == 4:
-        val shift = byte_offset * 8
-        val shifted = raw >> shift
-        return shifted & 0xFFFFFFFF
-
+        return value & 0xFFFFFFFF
     if width == 2:
-        val shift = byte_offset * 8
-        val shifted = raw >> shift
-        return shifted & 0xFFFF
-
+        return value & 0xFFFF
     # width == 1 (byte)
-    val shift = byte_offset * 8
-    val shifted = raw >> shift
-    return shifted & 0xFF
+    return value & 0xFF
 
 # ============================================================================
 # Write — byte/halfword/word/doubleword with read-modify-write
@@ -120,28 +135,34 @@ fn ram64_write(ram: Ram64State, addr: i64, width: i64, val_data: i64) -> Ram64St
     val byte_offset = addr & 7
 
     if width == 8:
+        # Doubleword store.  RV requires natural alignment (byte_offset 0); the
+        # aligned fast path writes the whole word.
         out.data[word_idx] = val_data
-    else if width == 4:
-        val old_word = ram.data[word_idx]
-        val shift = byte_offset * 8
-        val mask = 0xFFFFFFFF << shift
-        val inv_mask = mask ^ -1
-        val new_data = (val_data & 0xFFFFFFFF) << shift
-        out.data[word_idx] = (old_word & inv_mask) | new_data
-    else if width == 2:
-        val old_word = ram.data[word_idx]
-        val shift = byte_offset * 8
-        val mask = 0xFFFF << shift
-        val inv_mask = mask ^ -1
-        val new_data = (val_data & 0xFFFF) << shift
-        out.data[word_idx] = (old_word & inv_mask) | new_data
     else:
-        val old_word = ram.data[word_idx]
-        val shift = byte_offset * 8
-        val mask = 0xFF << shift
-        val inv_mask = mask ^ -1
-        val new_data = (val_data & 0xFF) << shift
-        out.data[word_idx] = (old_word & inv_mask) | new_data
+        # Sub-word store (width 1/2/4).  When byte_offset + width > 8 the field
+        # crosses the 8-byte doubleword boundary, so the high bits must land in
+        # the NEXT doubleword — the old single-word RMW mask silently dropped
+        # them (mirror of the ram64_read dword-crossing bug).  Split the field
+        # across word_idx (low bits) and word_idx+1 (high bits), logical shifts
+        # only so a high-bit-set value is never sign-extended.
+        val nbits = width * 8                 # 8/16/32
+        val shift = byte_offset * 8           # 0..56
+        val v = val_data & ((1 << nbits) - 1) # value masked to its width
+        val low_avail = 64 - shift            # bits available in word_idx above `shift`
+        var low_w = nbits
+        if low_avail < nbits:
+            low_w = low_avail
+        val low_field_mask = ((1 << low_w) - 1) << shift
+        val old_low = ram.data[word_idx]
+        out.data[word_idx] = (old_low & (low_field_mask ^ -1)) | ((v << shift) & low_field_mask)
+        if nbits > low_avail:
+            val high_w = nbits - low_avail
+            val high_field_mask = (1 << high_w) - 1
+            val hi_idx = word_idx + 1
+            if hi_idx < num_words:
+                val old_hi = ram.data[hi_idx]
+                val hi_bits = ram64_logical_shr(v, low_avail) & high_field_mask
+                out.data[hi_idx] = (old_hi & (high_field_mask ^ -1)) | hi_bits
 
     out
 
