@@ -37,7 +37,9 @@ architecture rtl of rv32_exec_core is
   type rom_t is array(0 to ROM_WORDS - 1) of std_logic_vector(31 downto 0);
   type data_rom_t is array(0 to DATA_ROM_WORDS - 1) of std_logic_vector(31 downto 0);
   type scratch_t is array(0 to SCRATCH_WORDS - 1) of std_logic_vector(31 downto 0);
-  type state_t is (S_EXEC, S_UART, S_DIVIDE);
+  type state_t is (S_FETCH, S_EXEC, S_UART, S_DIVIDE, S_LOAD, S_STORE);
+  -- Deferred (synchronous-BRAM) load bookkeeping
+  type ld_kind_t is (LD_WORD, LD_LB, LD_LBU);
 
   impure function init_rom return rom_t is
     file f : text open read_mode is "rv32_payload.mem";
@@ -75,7 +77,14 @@ architecture rtl of rv32_exec_core is
     return mem_v;
   end function;
 
-  signal rom : rom_t := init_rom;
+  -- Replicated code RAM: two identical physical copies, written identically.
+  -- Each copy has exactly ONE synchronous read port (address muxed by FSM
+  -- state) plus the shared write port -> simple-dual-port BRAM inferable.
+  -- rom_a serves fetch word 0 and all data-side reads (loads / sb RMW, which
+  -- happen in states where fetch is idle); rom_b serves fetch word 1
+  -- (pc_idx + 1, needed for misaligned 32-bit instructions).
+  signal rom_a : rom_t := init_rom;
+  signal rom_b : rom_t := init_rom;
   signal data_rom : data_rom_t := init_data_rom;
   signal scratch : scratch_t := (others => (others => '0'));
   signal scratch_bytes : scratch_t := (others => (others => '0'));
@@ -99,11 +108,26 @@ architecture rtl of rv32_exec_core is
   signal div_result_q : unsigned(31 downto 0) := (others => '0');
   attribute rom_style : string;
   attribute ram_style : string;
-  attribute rom_style of rom : signal is "block";
+  attribute ram_style of rom_a : signal is "block";
+  attribute ram_style of rom_b : signal is "block";
+  attribute rom_style of data_rom : signal is "block";
   attribute ram_style of scratch : signal is "distributed";
+  attribute ram_style of scratch_bytes : signal is "distributed";
+  -- Registered BRAM read data (one read port per physical array)
+  signal rom_a_q : std_logic_vector(31 downto 0) := (others => '0');
+  signal rom_b_q : std_logic_vector(31 downto 0) := (others => '0');
+  signal data_rom_q : std_logic_vector(31 downto 0) := (others => '0');
+  -- Deferred load / byte-store state
+  signal ld_rd_q : natural range 0 to 31 := 0;
+  signal ld_kind_q : ld_kind_t := LD_WORD;
+  signal ld_lane_q : natural range 0 to 3 := 0;
+  signal ld_src_data_q : std_logic := '0';
+  signal st_idx_q : natural range 0 to ROM_WORDS - 1 := 0;
+  signal st_lane_q : natural range 0 to 3 := 0;
+  signal st_byte_q : std_logic_vector(7 downto 0) := (others => '0');
   signal regs_q : regs_t := (others => (others => '0'));
   signal pc_q : unsigned(31 downto 0) := BASE_ADDR;
-  signal state_q : state_t := S_EXEC;
+  signal state_q : state_t := S_FETCH;
   signal next_pc_q : unsigned(31 downto 0) := BASE_ADDR;
   signal uart_tx_q : std_logic := '1';
   signal uart_busy_q : std_logic := '0';
@@ -224,61 +248,15 @@ architecture rtl of rv32_exec_core is
     return to_integer(off(15 downto 2));
   end function;
 
-  impure function load_word(addr : unsigned(31 downto 0)) return unsigned is
-    variable idx : natural;
-  begin
-    if addr(31 downto 28) = x"4" then
-      -- DATA ROM at 0x40000000
-      idx := data_rom_index(addr);
-      if idx < DATA_ROM_WORDS then
-        return unsigned(data_rom(idx));
-      else
-        return to_unsigned(0, 32);
-      end if;
-    elsif addr(31 downto 28) = x"8" then
-      -- RAM at 0x80000000
-      idx := word_index(addr);
-      if idx < ROM_WORDS then
-        return unsigned(rom(idx));
-      elsif idx >= SCRATCH_BASE_WORD and idx < SCRATCH_BASE_WORD + SCRATCH_WORDS then
-        return unsigned(scratch(idx - SCRATCH_BASE_WORD));
-      else
-        return to_unsigned(16#13#, 32);
-      end if;
-    else
-      return to_unsigned(0, 32);
-    end if;
-  end function;
-
-  impure function load_byte(addr : unsigned(31 downto 0)) return unsigned is
-    variable w : std_logic_vector(31 downto 0);
-    variable lane : natural range 0 to 3;
-    variable idx : natural;
-  begin
-    if addr(31 downto 28) = x"4" then
-      -- DATA ROM at 0x40000000
-      idx := data_rom_index(addr);
-      if idx < DATA_ROM_WORDS then
-        w := data_rom(idx);
-      else
-        return to_unsigned(0, 32);
-      end if;
-    elsif addr(31 downto 28) = x"8" then
-      -- RAM at 0x80000000
-      idx := word_index(addr);
-      if idx < ROM_WORDS then
-        w := rom(idx);
-      elsif idx >= SCRATCH_BASE_WORD and idx < SCRATCH_BASE_WORD + SCRATCH_WORDS then
-        w := scratch_bytes(idx - SCRATCH_BASE_WORD);
-      else
-        return to_unsigned(0, 32);
-      end if;
-    else
-      return to_unsigned(0, 32);
-    end if;
-    lane := to_integer(addr(1 downto 0));
-    return resize(unsigned(w(lane * 8 + 7 downto lane * 8)), 32);
-  end function;
+  -- NOTE: the former impure load_word/load_byte helpers performed
+  -- asynchronous multi-port reads of rom/data_rom, which forced 16k-deep
+  -- LUTRAM and killed K26 placement. Loads from rom/data_rom are now
+  -- deferred one cycle through the S_LOAD state using the registered
+  -- single-port BRAM reads (rom_a_q / data_rom_q). Word index ranges:
+  -- word_index/data_rom_index return off(15 downto 2), i.e. 0..16383, so
+  -- in-region indexes are always < ROM_WORDS / DATA_ROM_WORDS and loads
+  -- from nibble-4/nibble-8 regions always hit data_rom/rom respectively
+  -- (identical to the old guard outcomes).
 begin
   uart_tx <= uart_tx_q;
   debug_uart_valid <= debug_uart_valid_q;
@@ -315,8 +293,33 @@ begin
     variable rs2_signed : signed(31 downto 0);
     variable dvd : signed(63 downto 0);
     variable res32 : unsigned(31 downto 0);
+    -- Single muxed read address per physical memory + funneled write port
+    variable rom_ra_a : natural range 0 to ROM_WORDS - 1;
+    variable rom_ra_b : natural range 0 to ROM_WORDS - 1;
+    variable dr_ra : natural range 0 to DATA_ROM_WORDS - 1;
+    variable rom_we : boolean;
+    variable rom_wa : natural range 0 to ROM_WORDS - 1;
+    variable rom_wd : std_logic_vector(31 downto 0);
+    variable idxp1 : natural;
+    variable ld_w : std_logic_vector(31 downto 0);
   begin
     if rising_edge(clk) then
+      -- Default memory port addressing: prefetch current pc words. States
+      -- that need a data-side read (S_EXEC issuing a load or sb RMW)
+      -- override rom_ra_a / dr_ra below before the registered reads at the
+      -- bottom of this process.
+      rom_we := false;
+      rom_wa := 0;
+      rom_wd := (others => '0');
+      pc_idx := word_index(pc_q);
+      rom_ra_a := pc_idx;
+      idxp1 := pc_idx + 1;
+      if idxp1 < ROM_WORDS then
+        rom_ra_b := idxp1;
+      else
+        rom_ra_b := ROM_WORDS - 1;
+      end if;
+      dr_ra := 0;
       debug_uart_valid_q <= debug_uart_valid_next_q;
       debug_uart_valid_next_q <= '0';
       if uart_busy_q = '1' then
@@ -340,7 +343,14 @@ begin
         regs_q <= (others => (others => '0'));
         pc_q <= BASE_ADDR;
         next_pc_q <= BASE_ADDR;
-        state_q <= S_EXEC;
+        state_q <= S_FETCH;
+        ld_rd_q <= 0;
+        ld_kind_q <= LD_WORD;
+        ld_lane_q <= 0;
+        ld_src_data_q <= '0';
+        st_idx_q <= 0;
+        st_lane_q <= 0;
+        st_byte_q <= (others => '0');
         uart_tx_q <= '1';
         uart_busy_q <= '0';
         uart_baud_q <= 0;
@@ -378,7 +388,7 @@ begin
       elsif state_q = S_UART then
         if uart_busy_q = '0' then
           pc_q <= next_pc_q;
-          state_q <= S_EXEC;
+          state_q <= S_FETCH;
         end if;
       elsif state_q = S_DIVIDE then
         -- Multi-cycle divider FSM
@@ -397,7 +407,7 @@ begin
           div_dividend_q <= dvd;
         else
           div_running_q <= '0';
-          state_q <= S_EXEC;
+          state_q <= S_FETCH;
           -- Compute the final result into res32, then write it DIRECTLY to the
           -- register file here (signal assignment, effective the cycle S_EXEC
           -- resumes). This makes the result visible to the next instruction via
@@ -423,12 +433,50 @@ begin
           end if;
           div_rd_q <= 0;
         end if;
+      elsif state_q = S_FETCH then
+        -- Fetch cycle: registered BRAM reads at the bottom of this process
+        -- latch rom_a(pc_idx) / rom_b(pc_idx + 1) this edge (default
+        -- addressing above); decode + execute happens next cycle in S_EXEC.
+        state_q <= S_EXEC;
+      elsif state_q = S_LOAD then
+        -- Complete a deferred rom/data_rom load using the data registered on
+        -- the previous edge.
+        if ld_src_data_q = '1' then
+          ld_w := data_rom_q;
+        else
+          ld_w := rom_a_q;
+        end if;
+        if ld_rd_q /= 0 then
+          case ld_kind_q is
+            when LD_WORD =>
+              regs_q(ld_rd_q) <= unsigned(ld_w);
+            when LD_LB =>
+              regs_q(ld_rd_q) <= sext(ld_w(ld_lane_q * 8 + 7 downto ld_lane_q * 8));
+            when LD_LBU =>
+              regs_q(ld_rd_q) <= resize(unsigned(ld_w(ld_lane_q * 8 + 7 downto ld_lane_q * 8)), 32);
+          end case;
+        end if;
+        state_q <= S_FETCH;
+      elsif state_q = S_STORE then
+        -- Complete an sb read-modify-write to the code RAM: rom_a_q holds
+        -- the word registered last edge; merge the byte lane and write both
+        -- physical copies via the funneled write port.
+        data_w := rom_a_q;
+        data_w(st_lane_q * 8 + 7 downto st_lane_q * 8) := st_byte_q;
+        rom_we := true;
+        rom_wa := st_idx_q;
+        rom_wd := data_w;
+        state_q <= S_FETCH;
       else
         r := regs_q;
+        -- Default next state: back to fetch (overridden below by UART /
+        -- DIVIDE / deferred LOAD / deferred STORE transitions).
+        state_q <= S_FETCH;
         pc_next := pc_q + 4;
-        pc_idx := word_index(pc_q);
+        -- pc_idx was set in the per-cycle defaults; instruction words were
+        -- registered from the replicated BRAMs during S_FETCH.
         if pc_idx < ROM_WORDS then
-          w := rom(pc_idx);
+          w := rom_a_q;
         elsif pc_idx >= SCRATCH_BASE_WORD and pc_idx < SCRATCH_BASE_WORD + SCRATCH_WORDS then
           w := scratch(pc_idx - SCRATCH_BASE_WORD);
         else
@@ -440,7 +488,7 @@ begin
         else
           h := w(31 downto 16);
           if pc_idx + 1 < ROM_WORDS then
-            w2 := rom(pc_idx + 1);
+            w2 := rom_b_q;
           elsif pc_idx + 1 >= SCRATCH_BASE_WORD and pc_idx + 1 < SCRATCH_BASE_WORD + SCRATCH_WORDS then
             w2 := scratch(pc_idx + 1 - SCRATCH_BASE_WORD);
           else
@@ -516,7 +564,22 @@ begin
                   r(rd) := unsigned(scratch(mem_idx - SCRATCH_BASE_WORD));
                 end if;
               else
-                r(rd) := load_word(load_addr);
+                -- Deferred sync-BRAM load (was: r(rd) := load_word(load_addr))
+                if load_addr(31 downto 28) = x"4" then
+                  dr_ra := data_rom_index(load_addr);
+                  ld_src_data_q <= '1';
+                  ld_rd_q <= rd;
+                  ld_kind_q <= LD_WORD;
+                  state_q <= S_LOAD;
+                elsif load_addr(31 downto 28) = x"8" then
+                  rom_ra_a := word_index(load_addr);
+                  ld_src_data_q <= '0';
+                  ld_rd_q <= rd;
+                  ld_kind_q <= LD_WORD;
+                  state_q <= S_LOAD;
+                else
+                  r(rd) := (others => '0');
+                end if;
               end if;
             elsif h(15 downto 13) = "110" then
               rs1 := 8 + to_integer(unsigned(h(9 downto 7)));
@@ -524,7 +587,9 @@ begin
               eff := r(rs1) + c_lw_imm(h);
               mem_idx := word_index(eff);
               if mem_idx < ROM_WORDS then
-                rom(mem_idx) <= std_logic_vector(r(rs2));
+                rom_we := true;
+                rom_wa := mem_idx;
+                rom_wd := std_logic_vector(r(rs2));
               elsif mem_idx >= SCRATCH_BASE_WORD and mem_idx < SCRATCH_BASE_WORD + SCRATCH_WORDS then
                 scratch(mem_idx - SCRATCH_BASE_WORD) <= std_logic_vector(r(rs2));
                 scratch_bytes(mem_idx - SCRATCH_BASE_WORD) <= std_logic_vector(r(rs2));
@@ -552,7 +617,22 @@ begin
                     r(rd) := unsigned(scratch(mem_idx - SCRATCH_BASE_WORD));
                   end if;
                 else
-                  r(rd) := load_word(load_addr);
+                  -- Deferred sync-BRAM load (was: r(rd) := load_word(load_addr))
+                  if load_addr(31 downto 28) = x"4" then
+                    dr_ra := data_rom_index(load_addr);
+                    ld_src_data_q <= '1';
+                    ld_rd_q <= rd;
+                    ld_kind_q <= LD_WORD;
+                    state_q <= S_LOAD;
+                  elsif load_addr(31 downto 28) = x"8" then
+                    rom_ra_a := word_index(load_addr);
+                    ld_src_data_q <= '0';
+                    ld_rd_q <= rd;
+                    ld_kind_q <= LD_WORD;
+                    state_q <= S_LOAD;
+                  else
+                    r(rd) := (others => '0');
+                  end if;
                 end if;
               end if;
             elsif h(15 downto 13) = "100" then
@@ -583,7 +663,9 @@ begin
               eff := r(2) + c_swsp_imm(h);
               mem_idx := word_index(eff);
               if mem_idx < ROM_WORDS then
-                rom(mem_idx) <= std_logic_vector(r(rs2));
+                rom_we := true;
+                rom_wa := mem_idx;
+                rom_wd := std_logic_vector(r(rs2));
               elsif mem_idx >= SCRATCH_BASE_WORD and mem_idx < SCRATCH_BASE_WORD + SCRATCH_WORDS then
                 scratch(mem_idx - SCRATCH_BASE_WORD) <= std_logic_vector(r(rs2));
                 scratch_bytes(mem_idx - SCRATCH_BASE_WORD) <= std_logic_vector(r(rs2));
@@ -790,7 +872,24 @@ begin
                       lane := to_integer(eff(1 downto 0));
                       r(rd) := sext(data_w(lane * 8 + 7 downto lane * 8));
                     else
-                      r(rd) := sext(std_logic_vector(load_byte(eff)(7 downto 0)));
+                      -- Deferred sync-BRAM byte load, sign-extended (was lb via load_byte)
+                      if eff(31 downto 28) = x"4" then
+                        dr_ra := data_rom_index(eff);
+                        ld_src_data_q <= '1';
+                        ld_rd_q <= rd;
+                        ld_kind_q <= LD_LB;
+                        ld_lane_q <= to_integer(eff(1 downto 0));
+                        state_q <= S_LOAD;
+                      elsif eff(31 downto 28) = x"8" then
+                        rom_ra_a := word_index(eff);
+                        ld_src_data_q <= '0';
+                        ld_rd_q <= rd;
+                        ld_kind_q <= LD_LB;
+                        ld_lane_q <= to_integer(eff(1 downto 0));
+                        state_q <= S_LOAD;
+                      else
+                        r(rd) := (others => '0');
+                      end if;
                     end if;
                   when "100" =>
                     mem_idx := word_index(eff);
@@ -799,14 +898,46 @@ begin
                       lane := to_integer(eff(1 downto 0));
                       r(rd) := resize(unsigned(data_w(lane * 8 + 7 downto lane * 8)), 32);
                     else
-                      r(rd) := load_byte(eff);
+                      -- Deferred sync-BRAM byte load, zero-extended (was lbu via load_byte)
+                      if eff(31 downto 28) = x"4" then
+                        dr_ra := data_rom_index(eff);
+                        ld_src_data_q <= '1';
+                        ld_rd_q <= rd;
+                        ld_kind_q <= LD_LBU;
+                        ld_lane_q <= to_integer(eff(1 downto 0));
+                        state_q <= S_LOAD;
+                      elsif eff(31 downto 28) = x"8" then
+                        rom_ra_a := word_index(eff);
+                        ld_src_data_q <= '0';
+                        ld_rd_q <= rd;
+                        ld_kind_q <= LD_LBU;
+                        ld_lane_q <= to_integer(eff(1 downto 0));
+                        state_q <= S_LOAD;
+                      else
+                        r(rd) := (others => '0');
+                      end if;
                     end if;
                   when others =>
                     mem_idx := word_index(eff);
                     if mem_idx >= SCRATCH_BASE_WORD and mem_idx < SCRATCH_BASE_WORD + SCRATCH_WORDS then
                       r(rd) := unsigned(scratch(mem_idx - SCRATCH_BASE_WORD));
                     else
-                      r(rd) := load_word(eff);
+                      -- Deferred sync-BRAM word load (was: r(rd) := load_word(eff))
+                      if eff(31 downto 28) = x"4" then
+                        dr_ra := data_rom_index(eff);
+                        ld_src_data_q <= '1';
+                        ld_rd_q <= rd;
+                        ld_kind_q <= LD_WORD;
+                        state_q <= S_LOAD;
+                      elsif eff(31 downto 28) = x"8" then
+                        rom_ra_a := word_index(eff);
+                        ld_src_data_q <= '0';
+                        ld_rd_q <= rd;
+                        ld_kind_q <= LD_WORD;
+                        state_q <= S_LOAD;
+                      else
+                        r(rd) := (others => '0');
+                      end if;
                     end if;
                 end case;
               end if;
@@ -827,14 +958,18 @@ begin
                 if mem_idx < ROM_WORDS then
                   -- Store to code ROM (now writable for stack spills)
                   if ins(14 downto 12) = "000" then
-                    -- sb (byte store) to ROM - read-modify-write
-                    data_w := rom(mem_idx);
-                    lane := to_integer(eff(1 downto 0));
-                    data_w(lane * 8 + 7 downto lane * 8) := std_logic_vector(r(rs2)(7 downto 0));
-                    rom(mem_idx) <= data_w;
+                    -- sb (byte store) to ROM: deferred read-modify-write.
+                    -- Register the word read this edge; merge + write in S_STORE.
+                    rom_ra_a := mem_idx;
+                    st_idx_q <= mem_idx;
+                    st_lane_q <= to_integer(eff(1 downto 0));
+                    st_byte_q <= std_logic_vector(r(rs2)(7 downto 0));
+                    state_q <= S_STORE;
                   else
                     -- sw (word store) to ROM
-                    rom(mem_idx) <= std_logic_vector(r(rs2));
+                    rom_we := true;
+                    rom_wa := mem_idx;
+                    rom_wd := std_logic_vector(r(rs2));
                   end if;
                 elsif mem_idx >= SCRATCH_BASE_WORD and mem_idx < SCRATCH_BASE_WORD + SCRATCH_WORDS then
                   if ins(14 downto 12) = "000" then
@@ -855,12 +990,12 @@ begin
                   -- ecall (funct7=0000000) / ebreak (funct7=0000001)
                   if ins(31 downto 20) = "000000000000" then
                     -- ecall: halt cleanly
-                    state_q <= S_EXEC;
+                    state_q <= S_FETCH;
                     pc_q <= pc_q;
                     null;
                   elsif ins(31 downto 20) = "000000000001" then
                     -- ebreak: halt cleanly
-                    state_q <= S_EXEC;
+                    state_q <= S_FETCH;
                     pc_q <= pc_q;
                     null;
                   end if;
@@ -983,6 +1118,19 @@ begin
           pc_q <= pc_next;
         end if;
       end if;
+
+      -- === Physical memory ports (single read + single write per array) ===
+      -- Funneled write port: both code-RAM copies written identically.
+      if rom_we then
+        rom_a(rom_wa) <= rom_wd;
+        rom_b(rom_wa) <= rom_wd;
+      end if;
+      -- Registered (synchronous) reads: exactly one read port per physical
+      -- array, address muxed by FSM state. Read-first semantics (VHDL signal
+      -- arrays always read pre-edge contents), matching BRAM read-first.
+      rom_a_q <= rom_a(rom_ra_a);
+      rom_b_q <= rom_b(rom_ra_b);
+      data_rom_q <= data_rom(dr_ra);
     end if;
   end process;
 end architecture rtl;
