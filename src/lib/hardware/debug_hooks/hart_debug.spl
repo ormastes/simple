@@ -43,6 +43,10 @@ var g_trace_on: bool = false     # pc trace enabled
 var g_trace_cap: i64 = 0         # max trace entries (capped append)
 var g_trace_pc: [i64] = []       # traced pcs, one per executed step
 var g_step_hook_fires: i64 = 0   # times the woven step advice actually fired
+# --- Sim-level DM event mirror (VHDL hart_core_glue signals) -----------------
+var g_step_pulse: bool = false   # o_step: high for the tick a single-step ran
+var g_ndmreset: bool = false     # ndmreset_s: hart held in DM non-debug reset
+var g_gpr: [i64] = []            # gpr_rdata_s: GPRs captured at last executed step
 
 pub fn hart_dbg_reset():
     """Clear all hart debug state (run state, no trace)."""
@@ -55,6 +59,9 @@ pub fn hart_dbg_reset():
     g_trace_cap = 0
     g_trace_pc = []
     g_step_hook_fires = 0
+    g_step_pulse = false
+    g_ndmreset = false
+    g_gpr = []
 
 pub fn hart_dbg_halt_req():
     """Request a halt; sampled at the next step boundary."""
@@ -96,6 +103,71 @@ pub fn hart_dbg_step_hook_fires() -> i64:
     """How many times the WOVEN step advice fired (0 => aspect not woven)."""
     g_step_hook_fires
 
+# ----------------------------------------------------------------------------
+# Sim-level Debug-Module event mirror. These accessors give the .spl seam the
+# SAME event vocabulary the landed VHDL hart integration exposes
+# (src/lib/hardware/debug/hart_core_glue.vhd), so the interpreter model and the
+# DM/core RTL agree on halt / resume / single-step / running / ndmreset /
+# abstract-command GPR readback / debug-pc.
+# ----------------------------------------------------------------------------
+
+pub fn hart_dbg_running() -> bool:
+    """o_running: hart is free-running (not halted, not held in ndmreset)."""
+    (not g_halted) and (not g_ndmreset)
+
+pub fn hart_dbg_step_signal() -> bool:
+    """o_step: pulses high for the single boundary at which a single-step
+    instruction retired (cleared at the next step boundary)."""
+    g_step_pulse
+
+pub fn hart_dbg_ndmreset():
+    """ndmreset_s asserted: DM drops the hart into non-debug-module reset. The
+    datapath does not advance while held; the hart comes up halted (VHDL
+    halted_r starts '1'), awaiting an explicit resume once reset is cleared."""
+    g_ndmreset = true
+    g_halted = true
+    g_halt_req = false
+    g_step_req = false
+
+pub fn hart_dbg_ndmreset_clear():
+    """Deassert ndmreset; the hart remains halted until hart_dbg_resume()."""
+    g_ndmreset = false
+
+pub fn hart_dbg_in_reset() -> bool:
+    g_ndmreset
+
+pub fn hart_dbg_read_gpr(regno: i64) -> i64:
+    """Abstract-command GPR readback (VHDL gpr_regno_s -> gpr_rdata_s): value of
+    register `regno` as captured at the last executed step; -1 if unavailable."""
+    if regno < 0 or regno >= g_gpr.len():
+        return -1
+    g_gpr[regno]
+
+pub fn hart_dbg_dpc() -> i64:
+    """dpc_o_s: the debug pc (pc at which the hart halted); -1 if never halted."""
+    g_halt_pc
+
+fn hart_dbg_capture_gpr64(regs: [i64]):
+    """Snapshot the rv64 regfile (scalar-by-scalar copy; never alias the source
+    struct — interp struct-local aliasing landmine)."""
+    var snap: [i64] = []
+    var i = 0
+    while i < regs.len():
+        val v = regs[i]
+        snap.push(v)
+        i = i + 1
+    g_gpr = snap
+
+fn hart_dbg_capture_gpr32(regs: [u32]):
+    """Snapshot the rv32 regfile as i64 (scalar-by-scalar copy)."""
+    var snap: [i64] = []
+    var i = 0
+    while i < regs.len():
+        val v = regs[i] as i64
+        snap.push(v)
+        i = i + 1
+    g_gpr = snap
+
 # ============================================================================
 # Advice — woven at the step join points via AOP (sole writer of the trace)
 # ============================================================================
@@ -132,6 +204,10 @@ pub fn hart64_debug_step(state: CoreState64, imem_data: u32, dmem_rdata: i64) ->
     datapath while halted, and honors single-step. Memory transactions
     (imem fetch / dmem prelim pass) remain the caller's responsibility,
     same as the core64_combinational + core64_update wiring."""
+    g_step_pulse = false
+    if g_ndmreset:
+        # Held in ndmreset: the datapath does not advance.
+        return Hart64StepResult(state: state, executed: false)
     if g_halt_req and not g_halted:
         g_halted = true
         g_halt_pc = state.pc
@@ -143,9 +219,12 @@ pub fn hart64_debug_step(state: CoreState64, imem_data: u32, dmem_rdata: i64) ->
         g_step_req = false
         hart_dbg_record_step(state.pc)
         val stepped = hart64_step_body(state, imem_data, dmem_rdata)
+        g_step_pulse = true
+        hart_dbg_capture_gpr64(stepped.rf.regs)
         return Hart64StepResult(state: stepped, executed: true)
     hart_dbg_record_step(state.pc)
     val next = hart64_step_body(state, imem_data, dmem_rdata)
+    hart_dbg_capture_gpr64(next.rf.regs)
     Hart64StepResult(state: next, executed: true)
 
 # ============================================================================
@@ -168,6 +247,9 @@ fn hart32_step_body(state: CoreState, rf: RegFile, imem_data: u32, dmem_rdata: u
 
 pub fn hart32_debug_step(state: CoreState, rf: RegFile, imem_data: u32, dmem_rdata: u32) -> Hart32StepResult:
     """rv32 mirror of hart64_debug_step over the shared debug state."""
+    g_step_pulse = false
+    if g_ndmreset:
+        return Hart32StepResult(state: state, rf: rf, executed: false)
     if g_halt_req and not g_halted:
         g_halted = true
         g_halt_pc = state.pc as i64
@@ -176,9 +258,14 @@ pub fn hart32_debug_step(state: CoreState, rf: RegFile, imem_data: u32, dmem_rda
             return Hart32StepResult(state: state, rf: rf, executed: false)
         g_step_req = false
         hart_dbg_record_step(state.pc as i64)
-        return hart32_step_body(state, rf, imem_data, dmem_rdata)
+        val res = hart32_step_body(state, rf, imem_data, dmem_rdata)
+        g_step_pulse = true
+        hart_dbg_capture_gpr32(res.rf.regs)
+        return res
     hart_dbg_record_step(state.pc as i64)
-    hart32_step_body(state, rf, imem_data, dmem_rdata)
+    val res2 = hart32_step_body(state, rf, imem_data, dmem_rdata)
+    hart_dbg_capture_gpr32(res2.rf.regs)
+    res2
 
 # ============================================================================
 # Aspect declarations — the hart debug trace hook, attached via AOP weaving.

@@ -1,0 +1,78 @@
+# Cross-matcher parity probe for the tokenized AOP pointcut matcher.
+#
+# Guards the fix for Gap 2 of
+# doc/08_tracking/bug/aop_hart_hooks_weaving_gaps_2026-07-22.md: the MIR-weave
+# path (compiler.frontend.core.aop.aop_pointcut_matches, reached from
+# matches_predicate) and the interpreter path
+# (compiler.backend.backend.interpreter_aop_weave.interp_aop_predicate_matches)
+# MUST agree on every parser-tokenized `execution ( * name ( .. ) )` predicate,
+# including the deliberately-limited glob edge cases (middle globs like a*b are
+# NOT supported on either side). If the two ever diverge, this probe fails —
+# the "cannot diverge again" guard the bug doc asks for.
+#
+# Run: bin/simple run test/01_unit/compiler/frontend/core/aop_pointcut_matcher_parity_probe.spl
+use compiler.frontend.core.aop.{aop_pointcut_matches}
+use compiler.backend.backend.interpreter_aop_weave.{interp_aop_predicate_matches}
+
+fn check(name: text, ok: bool) -> i64:
+    if ok:
+        print("PASS {name}")
+        return 0
+    print("FAIL {name}")
+    1
+
+# One parity case: both matchers must agree with each other AND with `expected`.
+fn parity_case(fails: i64, pred: text, fn_name: text, expected: bool) -> i64:
+    val mir = aop_pointcut_matches(pred, fn_name)
+    val interp = interp_aop_predicate_matches(pred, fn_name)
+    val agree = mir == interp
+    val correct = mir == expected
+    if not agree:
+        print("DIVERGENCE pred='{pred}' fn='{fn_name}' mir={mir} interp={interp}")
+    var f = fails
+    f = f + check("agree[{pred} | {fn_name}] mir==interp", agree)
+    f = f + check("value[{pred} | {fn_name}] == {expected}", correct)
+    f
+
+fn main() -> i64:
+    var fails: i64 = 0
+
+    # Exact-name execution selector (the hart hook shape).
+    fails = parity_case(fails, "execution ( * hart64_step_body ( .. ) )", "hart64_step_body", true)
+    fails = parity_case(fails, "execution ( * hart64_step_body ( .. ) )", "hart32_step_body", false)
+    fails = parity_case(fails, "execution ( * hart32_step_body ( .. ) )", "hart32_step_body", true)
+
+    # `call` selector alias.
+    fails = parity_case(fails, "call ( * foo ( .. ) )", "foo", true)
+    fails = parity_case(fails, "call ( * foo ( .. ) )", "bar", false)
+
+    # Prefix / suffix globs (supported on both sides).
+    fails = parity_case(fails, "execution ( * hart* ( .. ) )", "hart64_step_body", true)
+    fails = parity_case(fails, "execution ( * *step_body ( .. ) )", "hart64_step_body", true)
+    fails = parity_case(fails, "execution ( * *step_body ( .. ) )", "hart64_step_zzz", false)
+    fails = parity_case(fails, "execution ( * bare* ( .. ) )", "other_fn", false)
+    fails = parity_case(fails, "execution ( * * ( .. ) )", "anything", true)
+
+    # Middle-glob edge case: NEITHER side supports `a*b` — both must return
+    # false. Pins the shared (intentionally limited) glob semantics so an
+    # "improvement" on one side alone is caught.
+    fails = parity_case(fails, "execution ( * a*b ( .. ) )", "aXXb", false)
+
+    # Combinators: |, &, !, and parenthesized groups.
+    fails = parity_case(fails, "execution ( * a ( .. ) ) | execution ( * b ( .. ) )", "b", true)
+    fails = parity_case(fails, "execution ( * a ( .. ) ) | execution ( * b ( .. ) )", "c", false)
+    fails = parity_case(fails, "execution ( * a ( .. ) ) & execution ( * b ( .. ) )", "a", false)
+    fails = parity_case(fails, "! execution ( * a ( .. ) )", "b", true)
+    fails = parity_case(fails, "! execution ( * a ( .. ) )", "a", false)
+    fails = parity_case(fails, "( execution ( * a ( .. ) ) | execution ( * b ( .. ) ) ) & ! execution ( * a ( .. ) )", "b", true)
+
+    # Non-selector / bare token: the raw tokenized matcher matches nothing
+    # (bare names are handled by matches_predicate's glob fallthrough, not here).
+    fails = parity_case(fails, "hart64_step_body", "hart64_step_body", false)
+    fails = parity_case(fails, "attr ( critical )", "hart64_step_body", false)
+
+    if fails == 0:
+        print("AOP POINTCUT MATCHER PARITY: ALL PASS")
+        return 0
+    print("AOP POINTCUT MATCHER PARITY: {fails} FAILURES")
+    1

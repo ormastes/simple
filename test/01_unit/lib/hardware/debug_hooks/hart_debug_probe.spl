@@ -26,6 +26,8 @@ use std.hardware.debug_hooks.hart_debug.{
     hart_dbg_reset, hart_dbg_halt_req, hart_dbg_resume, hart_dbg_step_once,
     hart_dbg_trace_enable, hart_dbg_halted, hart_dbg_halt_pc,
     hart_dbg_trace_len, hart_dbg_trace_at, hart_dbg_step_hook_fires,
+    hart_dbg_running, hart_dbg_step_signal, hart_dbg_ndmreset,
+    hart_dbg_ndmreset_clear, hart_dbg_in_reset, hart_dbg_read_gpr, hart_dbg_dpc,
     hart64_debug_step, hart32_debug_step
 }
 use compiler.frontend.core.aop.{weave_function, WeavingConfig, MirBlockInfo, InstructionInfo}
@@ -154,6 +156,67 @@ fn main() -> i64:
                           (not r32f.executed) and hart_dbg_halted() and r32f.state.pc == 8u32)
 
     # ------------------------------------------------------------------
+    # Gate 7: rv64 DM event vocabulary — running / o_step pulse / abstract-cmd
+    # GPR readback / dpc — the .spl mirror of hart_core_glue.vhd signals.
+    # ------------------------------------------------------------------
+    hart_dbg_reset()
+    hart_dbg_trace_enable(16)
+    var d = core64_init(0)
+    val d_fr = hart64_debug_step(d, fetch(d.pc), 0)     # addi x1,x0,1 @ pc 0
+    d = d_fr.state
+    fails = fails + check("rv64 running() true while free-running",
+                          hart_dbg_running() and not hart_dbg_halted())
+    fails = fails + check("rv64 o_step pulse low on free-run step", not hart_dbg_step_signal())
+    fails = fails + check("rv64 GPR readback x1==1 after addi x1,x0,1", hart_dbg_read_gpr(1) == 1)
+    hart_dbg_halt_req()
+    val d_hs = hart64_debug_step(d, fetch(d.pc), 0)     # sampled halt -> frozen @ pc 0x04
+    d = d_hs.state
+    fails = fails + check("rv64 not running() while halted", not hart_dbg_running())
+    fails = fails + check("rv64 dpc == halt pc (0x04)", hart_dbg_dpc() == 0x04)
+    hart_dbg_step_once()
+    val d_ss = hart64_debug_step(d, fetch(d.pc), 0)     # addi x2,x0,2 @ pc 0x04
+    d = d_ss.state
+    fails = fails + check("rv64 o_step pulse high on single-step",
+                          hart_dbg_step_signal() and d_ss.executed and d.pc == 0x08)
+    fails = fails + check("rv64 GPR readback x2==2 after single-step", hart_dbg_read_gpr(2) == 2)
+    val d_nf = hart64_debug_step(d, fetch(d.pc), 0)     # no new step req -> frozen
+    fails = fails + check("rv64 o_step pulse clears next boundary",
+                          (not hart_dbg_step_signal()) and (not d_nf.executed))
+
+    # ------------------------------------------------------------------
+    # Gate 8: rv32 mirror of the DM event vocabulary.
+    # ------------------------------------------------------------------
+    hart_dbg_reset()
+    hart_dbg_trace_enable(8)
+    var e = core_reset(0u32)
+    var erf = regfile_create()
+    val e1 = hart32_debug_step(e, erf, fetch(e.pc as i64), 0u32)   # addi x1,x0,1
+    e = e1.state
+    erf = e1.rf
+    fails = fails + check("rv32 running() true while free-running", hart_dbg_running())
+    fails = fails + check("rv32 GPR readback x1==1 after addi x1,x0,1", hart_dbg_read_gpr(1) == 1)
+
+    # ------------------------------------------------------------------
+    # Gate 9: ndmreset — DM holds the hart in non-debug reset (datapath frozen),
+    # comes up halted, resumes only on explicit resume (VHDL ndmreset_s).
+    # ------------------------------------------------------------------
+    hart_dbg_reset()
+    var f = core64_init(0)
+    hart_dbg_ndmreset()
+    fails = fails + check("ndmreset: in_reset() true and not running()",
+                          hart_dbg_in_reset() and not hart_dbg_running())
+    val f_held = hart64_debug_step(f, fetch(f.pc), 0)   # held: no advance
+    fails = fails + check("ndmreset: datapath held (not executed, pc unchanged)",
+                          (not f_held.executed) and f_held.state.pc == 0)
+    hart_dbg_ndmreset_clear()
+    fails = fails + check("ndmreset_clear: reset deasserted, hart still halted",
+                          (not hart_dbg_in_reset()) and hart_dbg_halted())
+    hart_dbg_resume()
+    val f_run = hart64_debug_step(f, fetch(f.pc), 0)     # now free-running
+    fails = fails + check("resume after ndmreset: runs (executed, pc 0->0x04)",
+                          f_run.executed and f_run.state.pc == 0x04 and hart_dbg_running())
+
+    # ------------------------------------------------------------------
     # Gate 6: W2-B weave accounting through the driver's weave machinery
     # ------------------------------------------------------------------
     # Documented gap, printed loudly (NOT a silent skip): interpreter-path
@@ -167,11 +230,26 @@ fn main() -> i64:
     fails = fails + check("WEAVE GATE: hart_dbg_on_step woven at hart64_step_body (count > 0)",
                           woven_bare > 0 and aop_weave_count() > 0)
 
+    # Gap 2 FIXED (matches_predicate now understands the parser-tokenized
+    # execution(...) predicate): the SAME predicate shape the parser emits for
+    # `on pc{ execution(* hart64_step_body(..)) }` now weaves through the MIR
+    # driver machinery. Regression witness for the matcher fix in
+    # src/compiler/10.frontend/core/aop.spl.
     aop_weave_accounting_reset(1)
     val woven_exec = weave_hart_advice("execution ( * hart64_step_body ( .. ) )")
     print("weave[tokenized execution(...) rule]: advices_inserted={woven_exec} aop_weave_count={aop_weave_count()}")
-    fails = fails + check("W2-B FAIL-CLOSED SIGNAL: tokenized execution(...) predicate weaves 0 (requested=1, woven=0 => VHDL gen errors, not silent drop)",
-                          woven_exec == 0 and aop_weave_count() == 0 and aop_advices_requested() == 1)
+    fails = fails + check("GAP-2 FIX: tokenized execution(...) predicate weaves at hart64_step_body (count > 0)",
+                          woven_exec > 0 and aop_weave_count() > 0)
+
+    # Fail-closed still holds (W2-B): a genuinely unmatchable predicate (execution
+    # selector on an absent function) weaves 0 with requested=1 => VHDL generation
+    # errors rather than emitting hollow RTL. The matcher fix widened what MATCHES,
+    # it did NOT weaken the requested>0/woven=0 fail-closed signal.
+    aop_weave_accounting_reset(1)
+    val woven_miss = weave_hart_advice("execution ( * no_such_hart_fn ( .. ) )")
+    print("weave[unmatchable execution(...) rule]: advices_inserted={woven_miss} aop_weave_count={aop_weave_count()} requested={aop_advices_requested()}")
+    fails = fails + check("W2-B FAIL-CLOSED SIGNAL: unmatchable execution(...) predicate weaves 0 (requested=1, woven=0 => VHDL gen errors, not silent drop)",
+                          woven_miss == 0 and aop_weave_count() == 0 and aop_advices_requested() == 1)
 
     if fails == 0:
         print("HART DEBUG HOOKS PROBE: ALL PASS")

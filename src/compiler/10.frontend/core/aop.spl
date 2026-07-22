@@ -329,6 +329,122 @@ fn weavingresult_warnings(result: WeavingResult) -> [WeavingDiagnostic]:
 # Predicate Matching Helpers
 # ============================================================================
 
+# ----------------------------------------------------------------------------
+# Tokenized pointcut matcher — byte-mirror of the interpreter-side matcher in
+# backend/interpreter_aop_weave.spl (interp_aop_*), so the MIR-weave path and
+# the interp path agree on the parser-tokenized `execution ( * name ( .. ) )`
+# predicate_text that parse_pointcut_text emits for `on pc{ execution(...) }`.
+# Semantics (tokenizer + glob edge cases + combinators) are identical to the
+# interp side ON PURPOSE — cross-matcher parity is pinned by
+# test/01_unit/compiler/frontend/core/aop_pointcut_matcher_parity_probe.spl.
+# Do not "improve" one side without updating the other and the parity spec.
+# ----------------------------------------------------------------------------
+
+struct AopPointcutBool:
+    pos: i64
+    matched: bool
+
+fn aop_pointcut_tokenize(text_in: text) -> [text]:
+    var out: [text] = []
+    for tok in text_in.split(" "):
+        if tok.len() > 0:
+            out = out.push(tok)
+    out
+
+fn aop_pointcut_glob(pattern: text, target: text) -> bool:
+    if pattern == "*":
+        return true
+    if pattern == target:
+        return true
+    if pattern.ends_with("*"):
+        # `pattern[:expr]` parses as a symbol literal under the interpreter
+        # (grammar hazard) — use an explicit 0 start index, same as interp side.
+        val prefix_end = pattern.len() - 1
+        return target.starts_with(pattern[0:prefix_end])
+    if pattern.starts_with("*"):
+        return target.ends_with(pattern[1:])
+    false
+
+fn aop_pointcut_skip_balanced(tokens: [text], open_idx: i64) -> i64:
+    """tokens[open_idx] == '(' ; returns the index just past the matching ')'."""
+    var depth = 0
+    var i = open_idx
+    while i < tokens.len():
+        if tokens[i] == "(":
+            depth = depth + 1
+        elif tokens[i] == ")":
+            depth = depth - 1
+            if depth == 0:
+                return i + 1
+        i = i + 1
+    i
+
+fn aop_pointcut_eval_selector(tokens: [text], pos: i64, fn_name: text) -> AopPointcutBool:
+    val name = tokens[pos]
+    val p = pos + 1
+    if p >= tokens.len() or tokens[p] != "(":
+        return AopPointcutBool(pos: p, matched: false)
+    val open_idx = p
+    val close_idx = aop_pointcut_skip_balanced(tokens, open_idx)
+    if name == "execution" or name == "call":
+        # inner tokens: [RET, QNAME, "(", ...args..., ")"] — only QNAME (the
+        # function-name glob) is matched; return type and arg patterns are
+        # accepted but not filtered (core scope).
+        if open_idx + 2 < close_idx:
+            val qname = tokens[open_idx + 2]
+            return AopPointcutBool(pos: close_idx, matched: aop_pointcut_glob(qname, fn_name))
+        return AopPointcutBool(pos: close_idx, matched: false)
+    # attr(...) / within(...) / other selectors: parsed (so combinators still
+    # work) but never match — same as the interp side.
+    AopPointcutBool(pos: close_idx, matched: false)
+
+fn aop_pointcut_eval_or(tokens: [text], pos: i64, fn_name: text) -> AopPointcutBool:
+    var r = aop_pointcut_eval_and(tokens, pos, fn_name)
+    var result = r.matched
+    var p = r.pos
+    while p < tokens.len() and tokens[p] == "|":
+        val r2 = aop_pointcut_eval_and(tokens, p + 1, fn_name)
+        result = result or r2.matched
+        p = r2.pos
+    AopPointcutBool(pos: p, matched: result)
+
+fn aop_pointcut_eval_and(tokens: [text], pos: i64, fn_name: text) -> AopPointcutBool:
+    var r = aop_pointcut_eval_not(tokens, pos, fn_name)
+    var result = r.matched
+    var p = r.pos
+    while p < tokens.len() and tokens[p] == "&":
+        val r2 = aop_pointcut_eval_not(tokens, p + 1, fn_name)
+        result = result and r2.matched
+        p = r2.pos
+    AopPointcutBool(pos: p, matched: result)
+
+fn aop_pointcut_eval_not(tokens: [text], pos: i64, fn_name: text) -> AopPointcutBool:
+    if pos < tokens.len() and tokens[pos] == "!":
+        val r = aop_pointcut_eval_not(tokens, pos + 1, fn_name)
+        return AopPointcutBool(pos: r.pos, matched: not r.matched)
+    aop_pointcut_eval_primary(tokens, pos, fn_name)
+
+fn aop_pointcut_eval_primary(tokens: [text], pos: i64, fn_name: text) -> AopPointcutBool:
+    if pos >= tokens.len():
+        return AopPointcutBool(pos: pos, matched: false)
+    if tokens[pos] == "(":
+        val r = aop_pointcut_eval_or(tokens, pos + 1, fn_name)
+        var p = r.pos
+        if p < tokens.len() and tokens[p] == ")":
+            p = p + 1
+        return AopPointcutBool(pos: p, matched: r.matched)
+    aop_pointcut_eval_selector(tokens, pos, fn_name)
+
+pub fn aop_pointcut_matches(predicate_text: text, fn_name: text) -> bool:
+    """Match a parser-tokenized pointcut predicate (execution/call selectors
+    with &,|,!,() combinators) against a function name. Byte-mirror of
+    interpreter_aop_weave.interp_aop_predicate_matches — see the parity spec."""
+    val tokens = aop_pointcut_tokenize(predicate_text)
+    if tokens.len() == 0:
+        return false
+    val r = aop_pointcut_eval_or(tokens, 0, fn_name)
+    r.matched
+
 fn matches_predicate(predicate_text: text, ctx: JoinPointContext) -> bool:
     val pred = predicate_text.trim()
     if pred == "*":
@@ -339,6 +455,15 @@ fn matches_predicate(predicate_text: text, ctx: JoinPointContext) -> bool:
         return glob_match(pred[7:], ctx.module_path)
     if pred.starts_with("effect:"):
         return ctx.effects.contains(pred[7:])
+    # Parser-tokenized pointcut form — `execution ( * name ( .. ) )`, `call(...)`
+    # and &,|,!,() combinators (the shape parse_pointcut_text emits for standard
+    # `on pc{ execution(...) }` aspects). Previously these fell through to a bare
+    # glob against the whole predicate string and silently matched 0 (Gap 2 in
+    # doc/08_tracking/bug/aop_hart_hooks_weaving_gaps_2026-07-22.md). Route them
+    # to the tokenized matcher so the MIR-weave path matches what the interp path
+    # already matches.
+    if pred.contains("("):
+        return aop_pointcut_matches(pred, ctx.function_name)
     glob_match(pred, ctx.function_name)
 
 fn matches_join_point_predicate(predicate_text: text, join_point: JoinPoint) -> bool:

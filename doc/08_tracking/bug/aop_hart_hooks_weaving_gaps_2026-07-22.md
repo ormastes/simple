@@ -5,6 +5,37 @@
 **Found by:** Lane H (AOP hart debug hooks, `src/lib/hardware/debug_hooks/`)
 **Evidence:** `bin/simple run test/01_unit/lib/hardware/debug_hooks/hart_debug_probe.spl`
 
+## Resolution status (updated 2026-07-22, Lane SS)
+
+- **Gap 2 — FIXED (.spl).** `compiler.frontend.core.aop.matches_predicate` now
+  routes parser-tokenized pointcut predicates (any predicate containing `(`) to
+  a new `aop_pointcut_matches`, a byte-mirror of the interpreter-side
+  `interp_aop_predicate_matches` (execution/call selectors + `& | ! ()`
+  combinators + the same intentionally-limited glob). Regression witnesses:
+  - `hart_debug_probe.spl` Gate 6 now asserts the tokenized
+    `execution ( * hart64_step_body ( .. ) )` predicate weaves >0 (was pinned at
+    0/fail-closed), AND a NEW case pins a genuinely-unmatchable
+    `execution ( * no_such_hart_fn ( .. ) )` predicate at requested=1/woven=0 so
+    the W2-B fail-closed signal stays regression-tested.
+  - NEW `test/01_unit/compiler/frontend/core/aop_pointcut_matcher_parity_probe.spl`
+    asserts the MIR-path and interp-path matchers agree over 20 predicates incl.
+    prefix/suffix/middle-glob edge cases — the "cannot diverge again" guard.
+  Full AOP/weaving spec suite (predicate_parser, weaving_config, ordering,
+  conflict_detect, mir/aop_injection, mdsoc/weaving_support, mdsoc/aop_proceed,
+  interpreter_aop_weave, core/aop_complete) all pass unchanged; matcher change is
+  false→true only for tokenized predicates, so blast radius is bounded.
+
+- **Gap 1 — still OPEN, seed-side (characterized, not fixed).** The run-path
+  weaver is the Rust bootstrap seed's interpreter (`bin/simple` prints the
+  "bootstrap seed only" banner), whose entry-module-only weaving is baked into
+  Rust, not `.spl`. `hart_dbg_step_hook_fires()` therefore remains 0 on
+  `bin/simple run` at this tip (printed loudly, not hidden). No `.spl`-only fix
+  can flip that witness on the deployed binary; it requires the self-hosted
+  compiler deploy (bootstrap blocker tracked in memory/bootstrap docs). Per the
+  no-patch-Rust constraint this gap is left characterized. Bug-doc fix #3 (flip
+  the `step_hook_fires=0` print into a hard assertion) stays deferred until the
+  self-hosted deploy lands.
+
 ## Summary
 
 `src/lib/hardware/debug_hooks/hart_debug.spl` declares the Phase-3 hart debug
