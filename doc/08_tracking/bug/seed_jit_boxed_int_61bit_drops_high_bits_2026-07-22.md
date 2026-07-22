@@ -128,3 +128,53 @@ changes requiring a cargo seed rebuild + T3 bootstrap + full-suite regression to
 land safely — not shippable as a blind autonomous push. Reviewer paused
 implementation here to confirm approach (A vs B) and the bootstrap cycle with
 the requester rather than risk a toolchain-wide-corrupt binary.
+
+## DEFINITIVE DIAGNOSIS (2026-07-22, Option-B implementation attempt)
+Attempted the "narrow" fix (regfile/RAM typed `[u64]` + widen the `[u64]` store
+gate + preserve `U64_PACKED` through `rt_array_copy`/`rt_array_concat`), built the
+seed (cargo, exit 0), and validated. **It did NOT fix the JIT truncation.**
+Empirical findings, all with the freshly-built seed:
+
+- **2×2 (scalar/array × i64/u64):** under JIT ONLY array elements drop bit 63;
+  scalar locals, scalar struct fields, and fn-returns all preserve bit 63.
+  Under interp everything is correct.
+- **Plain `[u64]` ALSO truncates under JIT** — `[u64]` is NOT a "working path".
+  It only packs (`U64_PACKED`) when the literal's elements are statically
+  `TypeId::U64` OR the array-literal `expr_ty` is `[u64]`. For `var a: [u64] =
+  [0,0]` and `var regs: [u64] = []` the annotation does NOT reach
+  `lower_array_expr`'s `outer_ty` (MIR dump shows `BoxInt` per element → generic
+  non-packed array). So the store/read correctly route to
+  `rt_typed_words_u64_set`/`_at`, but on a NON-packed array those re-box via the
+  lossy 61-bit `from_int`/`as_int` (collections.rs:892 / maybe_packed load-store
+  `select(is_packed,...)` picks the tagged arm). Value observed:
+  `0x8010000000000000 → 0x0010000000000000` = one `<<3>>3` round trip.
+- **Interp is immune because its arrays store native i64 losslessly** — packing
+  is a native/JIT-only concept.
+
+**Packing is whack-a-mole.** Making `[u64]`/`[i64]` reliably packed needs, so
+far: (1) store-gate widen [done], (2) `rt_array_copy` packing-preserve [done,
+correct in isolation], (3) `rt_array_concat` packing-preserve [done, correct in
+isolation], (4) creation-site type-propagation so annotated `[u64]`/`[i64]`
+literals+empties actually pack [NOT done] — and still lurking: slices,
+fn-returns-of-arrays, dict values, and every `as_slice()` consumer. Four+ sites
+for one bug ⇒ wrong-shaped approach. If a JIT fix is ever required, **Option A
+(HeapInt, lossless boxing) is the correct single-representation fix**, not
+finishing packing — but it is a full-bootstrap core change with the hot-path
+cost noted above and must go back to the requester with this scope.
+
+## OFF THE CRITICAL PATH (why this is deferred, not shipped)
+`soc_top_64` runs three ways: interp (correct, slow), JIT (fast, THIS bug), and
+VHDL-synth→FPGA (the actual `/goal` board target). The boxed-int representation
+lives ONLY in the Simple runtime; the VHDL backend emits `std_logic_vector`
+hardware and never sees a `RuntimeValue`. So this bug does not affect the FPGA /
+board deliverable, and the RTL model's correctness is already validated by the
+interp test pass. It is a JIT-simulation performance/correctness follow-up, not
+a board blocker. (Also: `build/os/opensbi_rv64_soc/fw_payload.bin` is absent in
+this environment, so the real OpenSBI banner is unreachable here under interp OR
+JIT regardless of this fix.)
+
+Reviewer did NOT land the packing changes — the JIT still truncates, so shipping
+them under a "boxed-int fixed" message would be a false-green. The `copy`/
+`concat` packing-preserve edits are correct in isolation and are preserved in
+worktree `/tmp/wt_heapint` should Option-B-complete or Option-A ever be
+authorized.
