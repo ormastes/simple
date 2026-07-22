@@ -254,6 +254,46 @@ Honest remaining path to the two literal goals:
 2. **JTAG to done**: Stages 1-5 ✅ + GDB e2e (Lane U in flight) → hart-into-core
    integration (BRAM-gated) → board JTAG bring-up.
 
+### Session update 5 (2026-07-22, fifth wave — tiered models: opus/sonnet workers, Fable review)
+
+All six lanes landed, every gate reviewer-reproduced (composition-tested on tip):
+
+- **FF (`12d095dcfc1`, sonnet)**: dangling `core64_step`/`CorePorts64` exports
+  removed; rv64 `rvfi` + ~30 uart16550 publics re-exported; canonical OP_AMO/AMO
+  funct5 in rv32 pkg.spl; package-level import smoke.
+- **II (`d8ba786a823`, sonnet)**: Linux 6.6 Image BUILT (rv64imac lp64
+  soft-float, FPU=n) — **QEMU boots it to `Run /init as init process` with OUR
+  soc_virt.dtb** (Platform simple-soc-rv64, PLIC 2 contexts after stale-dtb
+  rebuild). Open: initramfs `/dev/console` node.
+- **GG (`45428ea79d5`, sonnet)**: rv32 "generator" exposed as hand-authored
+  template + discipline. rv64 VHDL BLOCKED on: phantom `compile_to_vhdl_module`
+  API (segfault 139), zero `@hardware` annotations, `OP_MISC_MEM` unexported.
+  Deterministic PASS/BLOCKED gate landed; hand-authoring `rv64gc_core.vhd`
+  estimated 5-7 wk, gated on the W3 extraction plan.
+- **DD (`5f1275b64f0`, opus)**: rv64 M-extension REAL (was silently ADD) +
+  misaligned load/store faults (cause 4/6); 12 muldiv XFAILs now hard asserts,
+  conformance 0 hard failures.
+- **CC (`4116644f19b`, opus)**: **Sv39 MMU landed** — 3-level walk (4K/2M/1G,
+  perm/SUM checks, software A/D), ifetch/load/store translation in soc_top_64,
+  page faults 12/13/15 with stval via delegation, DTB overlay before-RAM
+  dispatch. Probe: real page tables built in RAM, fault + superpage cases.
+  Known gaps in module header: no TLB/ASID/sfence/canonical-VA/MXR.
+- **EE (`6ac28b352cf`, opus)**: **JTAG hart integration sim-level DONE** — real
+  rv32_exec_core behind the DM, clock-gated halt, real-value GPR readback,
+  single-step. Core-gap bug filed for full-regfile/external-fetch ports.
+
+Reviewer merges of note: CC's `__init__.spl` was hand-merged onto FF's landed
+version (one-word delta) — landing verbatim would have reverted FF. GG's script
+had bash arrays under a `sh`-convention `.shs` — fixed by reviewer before land.
+
+Honest remaining path:
+1. **Linux on FPGA**: sim SoC now has S-mode + Sv39 + M-ext + timer/PLIC; next
+   is SBI/OpenSBI bring-up ON our SoC model (sim throughput is the wall —
+   bulk RAM-load + faster tick or direct kernel-entry shortcut), and the
+   hardware side is gated on the rv64 core RTL (GG's 5-7 wk estimate) — the
+   K26 bitstream today is rv32-only.
+2. **JTAG**: native-stepi infra + 3 core debug ports + board bring-up.
+
 ## Waves 4+ (planned, not scheduled)
 
 Phase 3 JTAG (TAP/DTM/DMI/DM explicit modules + AOP hart hooks), Phase 4

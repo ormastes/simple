@@ -202,7 +202,23 @@ dissolve at hart integration. Files: `src/lib/hardware/debug/gdb_e2e.gdb`,
 
 ---
 
-## Hart Integration (Deferred - Post-BRAM)
+## Hart Integration — SIM-LEVEL DONE `6ac28b352cf` (2026-07-22)
+
+The REAL `rv32_exec_core` now runs behind the Debug Module
+(`src/lib/hardware/debug/hart_core_glue.vhd` + `tb_hart_integration.vhd`,
+harness `run_hart_e2e.shs`): clock-gated halt (falling-edge latched enable, no
+runt pulses — maps to BUFGCE on board), SBA through the glue, abstract-command
+GPR readback of real computed values (x10==42 from the executed program),
+resume/free-run/haltreq, single-step retiring exactly one insn (pc+4).
+Reviewer-reproduced `JTAG HART E2E: ALL PASS` under GHDL. Core untouched.
+
+Remaining (tracked): (a) native GDB `stepi`/breakpoints — needs the VHPIDIRECT
+.so + live OpenOCD infra against this tb (the fake-hart GDB e2e is landed at
+`eb2f1734655`); (b) 3 additive core debug ports for full-regfile access +
+external fetch (bug: `rv32_exec_core_no_external_debug_ports_2026-07-22.md`);
+(c) board JTAG bring-up. Original deferred plan below for reference.
+
+## Hart Integration (original plan, superseded above)
 
 **After BRAM work is confirmed stable**, integrate Debug Module into cores:
 
