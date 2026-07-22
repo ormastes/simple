@@ -1,0 +1,57 @@
+use std.spec.*
+use std.io_runtime.{read_file_text}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_definitions.{HirModule}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.common.config.{Logger}
+
+fn make_logger() -> Logger:
+    Logger(level: 0)
+
+fn lower_value_consumer() -> (HirLowering, HirModule):
+    val log = make_logger()
+    val provider = parse_full_frontend(
+        "pub fn emit(value: text) -> i64:\n    print value\n    0",
+        "provider",
+        "provider",
+        log
+    )
+    val open = "{"
+    val close = "}"
+    val consumer = parse_full_frontend(
+        "use provider." + open + "emit" + close,
+        "consumer",
+        "consumer",
+        log
+    )
+    var modules: Dict<text, any> = {}
+    modules["provider"] = provider
+    var lowering = HirLowering.with_filename("consumer")
+    lowering.modules_by_name = modules
+    val hir = lowering.lower_module(consumer)
+    (lowering, hir)
+
+describe "Stage4 HIR value-name dispatch":
+    it "keeps lowercase value expressions out of type resolution":
+        step("Inspect one lowercase value expression")
+        val (lowering, _) = lower_value_consumer()
+
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "registers the imported callable after parameter rebinding":
+        val (_, hir) = lower_value_consumer()
+
+        val local = hir.symbols.lookup("emit")
+        val qualified = hir.symbols.lookup("provider.emit")
+        val registered = local != nil or qualified != nil
+        expect(registered).to_be(true)
+
+    it "rebinds erased Param elements before reading names or types":
+        val lowering = read_file_text("src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl")
+
+        expect(lowering).to_contain("val receiver_param: Param = raw_params[0]")
+        expect(lowering).to_contain("val raw_param: Param = raw_params[first_raw_param]")
+        expect(lowering).to_contain("self.lower_type(raw_param.type_)")
+        expect(lowering).to_contain("val param: Param = params[i]")
+        expect(lowering.contains("raw_params[first_raw_param].type_")).to_equal(false)
