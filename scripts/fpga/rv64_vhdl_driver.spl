@@ -2,14 +2,21 @@
 #
 # Writes .vhd files to build/vhdl/rv64/:
 #   - soc_top_rv64.vhd       (SoC top-level from generate_soc_top_vhdl_rv64)
-#   - Per-module stubs        (from compile_to_vhdl_module for each RTL module)
+#   - Per-module RTL stubs   (SKIPPED — no .spl-to-VHDL compiler backend exists;
+#                             see honest per-module print below, not a phantom call)
 #   - Peripheral stubs        (clint, plic, uart, ram, bootrom, wb_interconnect)
+#
+# NOTE: this driver previously imported+called `compile_to_vhdl_module` from
+# std.hardware.fpga_linux.riscv_fpga_linux — that function is never defined
+# anywhere in src/ (repo-wide grep confirms zero `fn compile_to_vhdl_module`).
+# The import made the whole driver fail to compile, so nothing after the SoC
+# top-level ever ran. Per-module RTL-to-VHDL compilation is honestly reported
+# as SKIPPED until that backend exists.
 
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_dir_create(path: text) -> bool
 
 use std.hardware.fpga_linux._SocVhdlGen.top_testbench.{generate_soc_top_vhdl_rv64}
-use std.hardware.fpga_linux.riscv_fpga_linux.{compile_to_vhdl_module}
 
 fn vhdl_header() -> text:
     "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\n"
@@ -602,19 +609,17 @@ fn main():
     write_vhd(out_dir, "soc_top_rv64", soc_top)
     write_vhd(out_dir, "soc_top_rv64_k26", gen_k26_top())
 
-    # Generate per-module VHDL stubs for each RTL module
+    # Per-module RTL-to-VHDL compilation: no compiler backend exists yet
+    # (no `compile_to_vhdl_module` anywhere in src/). Report honestly instead
+    # of calling a phantom API.
     print("Generating RTL module stubs...")
     val modules = [
         "pkg", "alu", "regfile", "csr_s", "csr",
         "decode", "lsu", "mmu_sv39", "mul_div", "atomics", "trap"
     ]
 
-    var count = 0
     for mod_name in modules:
-        val src_path = "src/lib/hardware/rv64gc_rtl/{mod_name}.spl"
-        val vhdl = compile_to_vhdl_module(src_path)
-        write_vhd(out_dir, mod_name, vhdl)
-        count = count + 1
+        print("  SKIPPED: {mod_name}.vhd (no .spl-to-VHDL compiler backend)")
 
     # Generate rv64gc_core executor (entity name matches soc_top port map)
     print("Generating rv64gc_core executor...")
@@ -629,5 +634,6 @@ fn main():
     write_vhd(out_dir, "bootrom", gen_bootrom_stub())
     write_vhd(out_dir, "wb_interconnect", gen_wb_interconnect_stub())
 
+    val skipped_count = modules.length()
     print("")
-    print("Generated {count + 9} VHDL files total")
+    print("Generated 9 VHDL files (soc tops + core + peripherals); {skipped_count} RTL module stubs SKIPPED (no compiler backend)")

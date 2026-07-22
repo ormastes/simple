@@ -57,10 +57,23 @@ else
   note "SKIP dtb: dtc not installed (apt install device-tree-compiler)"
 fi
 
-# --- 2. initramfs with hand-built marker init -------------------------------
+# --- 2. initramfs with hand-built marker init + /dev/console device node ----
 # Freestanding (no libc, raw syscalls), -march=rv64imac -mabi=lp64: the SoC
 # core has NO F/D extensions, so a default hard-float (lp64d) glibc init
 # would trap on the first FP instruction.
+#
+# The initramfs also needs a static /dev/console char device (major 5, minor
+# 1) — without it the kernel's early console_on_rootfs() open("/dev/console")
+# fails and prints "Warning: unable to open an initial console." `cpio`/mknod
+# can create device nodes, but doing so needs either root or a cpio built with
+# raw-device support; instead we hand-assemble the newc cpio bytes directly.
+# The newc format is plain ASCII hex: a 6-byte magic "070701" followed by 13
+# 8-hex-digit fields (ino, mode, uid, gid, nlink, mtime, filesize, devmajor,
+# devminor, rdevmajor, rdevminor, namesize, check), then the NUL-terminated
+# name, then the whole header+name padded to a 4-byte boundary (and, for
+# regular files, the data likewise padded to 4 bytes). A char device just
+# needs mode = S_IFCHR (0020000 octal) | permission bits and rdevmajor/minor
+# set — no file data.
 if command -v "${CROSS}gcc" >/dev/null 2>&1; then
   W=$(mktemp -d)
   cat > "$W/init.c" <<'EOF'
@@ -83,10 +96,40 @@ void _start(void) {
 EOF
   "${CROSS}gcc" -static -nostdlib -ffreestanding -march=rv64imac -mabi=lp64 \
       -Os -o "$W/init" "$W/init.c"
-  ( cd "$W" && echo init | cpio -o -H newc --owner=0:0 2>/dev/null | gzip -9 ) \
-    > "$OUT/initramfs.cpio.gz"
+
+  # newc_entry: print one raw newc header+name (+ NUL, + pad to 4 bytes).
+  # Args: ino mode uid gid nlink mtime filesize devmajor devminor rdevmajor
+  #       rdevminor name
+  newc_entry() {
+    ino=$1; mode=$2; uid=$3; gid=$4; nlink=$5; mtime=$6; filesize=$7
+    devmajor=$8; devminor=$9; shift 9; rdevmajor=$1; rdevminor=$2; name=$3
+    namesize=$((${#name} + 1))
+    printf '070701%08x%08x%08x%08x%08x%08x%08x%08x%08x%08x%08x%08x%08x%s\0' \
+      "$ino" "$mode" "$uid" "$gid" "$nlink" "$mtime" "$filesize" \
+      "$devmajor" "$devminor" "$rdevmajor" "$rdevminor" "$namesize" 0 "$name"
+    pad=$(( (4 - ((110 + namesize) % 4)) % 4 ))
+    [ "$pad" -gt 0 ] && head -c "$pad" /dev/zero
+  }
+
+  # Build the init-file entry with plain cpio, then splice in a "dev" dir +
+  # a /dev/console char-device (5,1) entry before a single final TRAILER!!!
+  # (dropping cpio's own trailer, whose newc size is the fixed
+  # 110-byte-header + "TRAILER!!!\0" (11 bytes) padded to 124).
+  ( cd "$W" && echo init | cpio -o -H newc --owner=0:0 2>/dev/null ) > "$W/base.cpio"
+  # cpio pads its whole output to a 512-byte block, so the trailer is NOT
+  # simply "last 124 bytes" — locate the trailer entry's actual header start
+  # (110 bytes before the literal "TRAILER!!!" name) instead of assuming size.
+  trailer_name_off=$(grep -abo 'TRAILER!!!' "$W/base.cpio" | head -1 | cut -d: -f1)
+  head -c "$((trailer_name_off - 110))" "$W/base.cpio" > "$W/spliced.cpio"
+  {
+    cat "$W/spliced.cpio"
+    newc_entry 2 16877 0 0 1 0 0 0 0 0 0 "dev"           # mode 040755 (dir, S_IFDIR)
+    newc_entry 3 8592  0 0 1 0 0 0 0 5 1 "dev/console"   # mode 020620 (S_IFCHR|0620)
+    newc_entry 0 0 0 0 1 0 0 0 0 0 0 "TRAILER!!!"
+  } > "$W/initramfs.cpio"
+  gzip -9 -c "$W/initramfs.cpio" > "$OUT/initramfs.cpio.gz"
   rm -rf "$W"
-  note "initramfs built: $OUT/initramfs.cpio.gz (static rv64 /init marker)"
+  note "initramfs built: $OUT/initramfs.cpio.gz (static rv64 /init marker + /dev/console char 5:1)"
 else
   note "SKIP initramfs: ${CROSS}gcc not installed"
 fi
