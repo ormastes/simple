@@ -149,6 +149,26 @@ Full audit: session scratchpad `riscv_docs/w1c_claim_audit.md`.
   (not fixed): pipeline_fn.spl dead AOP scaffold; HIR-level unknown
   non-AOP attributes outside VHDL lane may still be ignored.
 
+### Session update 2 (2026-07-22, second wave)
+
+- **core64 UNBLOCKED IN-TREE** `b952c456076` — the 3 stacked defects fixed
+  (bug doc → FIXED): `@hardware` decorators removed (matches rv32i pattern),
+  dead clocked `core64_cycle`/PMP path removed pending honest re-land with
+  real `memory_access`/`pmp` modules, `is_csr`/`csr_addr` added to
+  DecodeResult64. In-tree probes: core64 + soc_top_64 ALL PASS, rv32
+  regression clean. Net −178 lines.
+- **soc64 MMIO dispatch LANDED** `a6723de99a5` — CLINT (ld/lw + sd/sw with
+  mtime-mirror resync) + UART16550 TX ('HI\n' via real `sb`, LSR=0x60,
+  monotonic mtime via real `ld`), probe case4 + 3 prior cases PASS. Next
+  Linux-boot gap identified: CLINT mtip/msip → core mip CSR wiring (blocks
+  wfi/timer), UART RX, PLIC data path.
+- **RV64 bootrom FIXED end-to-end** `5ee6cebc41e` + `c95684a1862` —
+  `bootrom_read64` (lui zero-extension via slli/srli-32) + fetch wiring;
+  in-tree probe: reset vector → 11-insn ROM → lands 0x80000000 with
+  sp/a1/t0 zero-extended. Bug doc closed.
+- **JTAG Stage 3 LANDED** `801109c06ba` — abstract commands + GPR access
+  (see JTAG plan doc; Stages 1–3 of 5 now landed).
+
 ## Wave 3 — Phase 2 shared core skeleton (after Wave 2 green)
 
 - `RiscvXlenSpec` + common decode/ALU/regfile extraction per the companion
