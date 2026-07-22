@@ -58,6 +58,41 @@ val BOOT_INSN_4: u32 = 0x00028067
 
 val DTB_BASE: u32 = 0x88000000
 
+# ============================================================================
+# RV64 Boot Sequence
+# ============================================================================
+#
+# On RV64, LUI sign-extends bit 31: `lui t0, 0x80000` yields
+# 0xFFFFFFFF80000000, not 0x80000000, so the RV32 sequence above misjumps
+# (bug: soc64_bootrom_rv32_encoded_sext_misjump_2026-07-22). The RV64
+# sequence zero-extends each LUI result with a slli/srli-by-32 pair.
+#
+# SLLI rd, rs1, 32 (RV64I): 000000 100000 | rs1 | 001 | rd | 0010011
+# SRLI rd, rs1, 32 (RV64I): 000000 100000 | rs1 | 101 | rd | 0010011
+
+# 0x1000: lui  sp, 0x80100
+val BOOT64_INSN_0: u32 = 0x80100137
+# 0x1004: slli sp, sp, 32
+val BOOT64_INSN_1: u32 = 0x02011113
+# 0x1008: srli sp, sp, 32     # sp = 0x0000000080100000
+val BOOT64_INSN_2: u32 = 0x02015113
+# 0x100C: addi a0, zero, 0    # hart_id
+val BOOT64_INSN_3: u32 = 0x00000513
+# 0x1010: lui  a1, 0x88000
+val BOOT64_INSN_4: u32 = 0x880005B7
+# 0x1014: slli a1, a1, 32
+val BOOT64_INSN_5: u32 = 0x02059593
+# 0x1018: srli a1, a1, 32     # a1 = 0x0000000088000000 (DTB base)
+val BOOT64_INSN_6: u32 = 0x0205D593
+# 0x101C: lui  t0, 0x80000
+val BOOT64_INSN_7: u32 = 0x800002B7
+# 0x1020: slli t0, t0, 32
+val BOOT64_INSN_8: u32 = 0x02029293
+# 0x1024: srli t0, t0, 32     # t0 = 0x0000000080000000 (kernel entry)
+val BOOT64_INSN_9: u32 = 0x0202D293
+# 0x1028: jalr zero, t0, 0    # Jump to kernel, don't link
+val BOOT64_INSN_10: u32 = 0x00028067
+
 export BOOTROM_BASE
 export BOOTROM_SIZE
 export NOP_INSN
@@ -67,6 +102,7 @@ export BOOT_INSN_2
 export BOOT_INSN_3
 export BOOT_INSN_4
 export DTB_BASE
+export bootrom_read64
 
 # ============================================================================
 # Boot ROM Read
@@ -102,5 +138,41 @@ fn bootrom_read(addr: u32) -> u32:
         return BOOT_INSN_3
     if word_idx == 4:
         return BOOT_INSN_4
+
+    NOP_INSN
+
+fn bootrom_read64(addr: u64) -> u32:
+    """RV64 boot ROM read — zero-extending boot sequence (see BOOT64_INSN_*).
+    Same 4 KB window at 0x1000; addresses outside return NOP."""
+    if addr < 0x00001000:
+        return NOP_INSN
+    val offset = addr - 0x00001000
+    if offset >= 0x00001000:
+        return NOP_INSN
+
+    val word_idx = offset >> 2
+
+    if word_idx == 0:
+        return BOOT64_INSN_0
+    if word_idx == 1:
+        return BOOT64_INSN_1
+    if word_idx == 2:
+        return BOOT64_INSN_2
+    if word_idx == 3:
+        return BOOT64_INSN_3
+    if word_idx == 4:
+        return BOOT64_INSN_4
+    if word_idx == 5:
+        return BOOT64_INSN_5
+    if word_idx == 6:
+        return BOOT64_INSN_6
+    if word_idx == 7:
+        return BOOT64_INSN_7
+    if word_idx == 8:
+        return BOOT64_INSN_8
+    if word_idx == 9:
+        return BOOT64_INSN_9
+    if word_idx == 10:
+        return BOOT64_INSN_10
 
     NOP_INSN

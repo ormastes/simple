@@ -1,0 +1,47 @@
+# Probe: RV64 zero-extending boot sequence encodings (BOOT64_INSN_*) execute
+# correctly on the real core64 datapath. Places the 11-insn sequence in RAM
+# (position-independent: lui/slli/srli/addi/jalr only) and asserts the
+# zero-extended register results + the final jalr target.
+use std.hardware.soc_rtl.soc_top_64.{SocTop64State, soc_top_64_init, soc_top_64_tick}
+use std.hardware.soc_rtl.ram64.{ram64_write}
+
+fn check(name: text, ok: bool) -> i64:
+    if ok:
+        print("PASS {name}")
+        return 0
+    print("FAIL {name}")
+    1
+
+fn main() -> i64:
+    var fails: i64 = 0
+    var soc = soc_top_64_init(0x1000)
+    var ram = soc.ram
+    ram = ram64_write(ram, 0x00, 4, 0x80100137)   # lui  sp, 0x80100
+    ram = ram64_write(ram, 0x04, 4, 0x02011113)   # slli sp, sp, 32
+    ram = ram64_write(ram, 0x08, 4, 0x02015113)   # srli sp, sp, 32
+    ram = ram64_write(ram, 0x0C, 4, 0x00000513)   # addi a0, zero, 0
+    ram = ram64_write(ram, 0x10, 4, 0x880005B7)   # lui  a1, 0x88000
+    ram = ram64_write(ram, 0x14, 4, 0x02059593)   # slli a1, a1, 32
+    ram = ram64_write(ram, 0x18, 4, 0x0205D593)   # srli a1, a1, 32
+    ram = ram64_write(ram, 0x1C, 4, 0x800002B7)   # lui  t0, 0x80000
+    ram = ram64_write(ram, 0x20, 4, 0x02029293)   # slli t0, t0, 32
+    ram = ram64_write(ram, 0x24, 4, 0x0202D293)   # srli t0, t0, 32
+    ram = ram64_write(ram, 0x28, 4, 0x00028067)   # jalr zero, t0, 0
+    soc.ram = ram
+    soc.core.pc = 0x8000_0000
+    var i = 0
+    while i < 11:
+        soc = soc_top_64_tick(soc)
+        i = i + 1
+    print("boot64 sp={soc.core.rf.regs[2]} a1={soc.core.rf.regs[11]} t0={soc.core.rf.regs[5]} a0={soc.core.rf.regs[10]} pc={soc.core.pc}")
+    # zero-extended targets as positive i64
+    fails = fails + check("sp == 0x80100000 zero-extended", soc.core.rf.regs[2] == 2148532224)
+    fails = fails + check("a1 == 0x88000000 zero-extended", soc.core.rf.regs[11] == 2281701376)
+    fails = fails + check("t0 == 0x80000000 zero-extended", soc.core.rf.regs[5] == 2147483648)
+    fails = fails + check("a0 == 0 (hart id)", soc.core.rf.regs[10] == 0)
+    fails = fails + check("jalr landed at 0x80000000", soc.core.pc == 2147483648)
+    if fails == 0:
+        print("BOOT64 PROBE: ALL PASS")
+        return 0
+    print("BOOT64 PROBE: {fails} FAIL")
+    1
