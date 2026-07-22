@@ -204,6 +204,56 @@ Full audit: session scratchpad `riscv_docs/w1c_claim_audit.md`.
 - `RiscvXlenSpec` + common decode/ALU/regfile extraction per the companion
   module-overlap plan (10 shared modules already identified there).
 
+### Session update 4 (2026-07-22, fourth wave — timing-met board + Linux-path assets)
+
+All lanes reviewer-verified (gates independently re-run) and plumbing-landed:
+
+- **Lane M (S-mode, landed `3b36b68cd11`)**: medeleg/mideleg delegation, S-CSRs,
+  sret, PLIC ctx1→SEIP; 83/0 probe checks. Top Linux blocker cleared.
+- **Lane AA (`75d11d9dbcc`)**: boot ABI locked (a0=hartid, a1=DTB@0x8800_0000
+  zero-ext, sp=0x8010_0000, pc=0x8000_0000) + embedded FDT-header blob
+  (`bootrom_dtb_byte/word`); probe executes bootrom-served insns on real core64.
+  Open cross-lane ask: SoC read path for the DTB region at 0x8800_0000.
+- **Lane T (`96d32db8115`)**: `soc_virt.dts/dtb` matching landed RTL,
+  `build_rv64_linux_assets.shs` (dtb + rv64imac/lp64 soft-float initramfs +
+  pinned OpenSBI v1.4 fw_jump), boot-chain guide. Kernel Image is opt-in
+  `--kernel` (honest manifest). Clock freqs are 25 MHz candidates (now confirmed
+  by Lane N's 25 MHz core domain — DTS freq update pending).
+- **Lane V (`54b841d787e` doc)**: consolidated status audit. Failed claims
+  corrected here: W1-A profile strings superseded (`rv32imc_zicsr`/`rv64imc_zicsr`
+  at tip, not `rv32imac_zicsr_zifencei`); `core64_step` dangling export STILL OPEN;
+  KV260 board evidence was claim-only until this wave; "Lane E/I/L" naming
+  unverifiable in-tree.
+- **Lane BB (`54b841d787e` doc)**: riscv_common extraction plan — three disjoint
+  "common" trees, none consumed by RTL cores; ALU 11 shared/5 split; ordered
+  W3-0..W3-9 lanes.
+- **Lane Z (`fe8e1057ad0`)**: CI — `.github/workflows/riscv-hardware-gates.yml` +
+  `scripts/check/check-riscv-hardware-gates.shs`; reviewer-reproduced
+  `RISCV-HW-GATES: 9/9 PASS` (5 JTAG tbs + 4 probes), fail-closed.
+- **Lane Y (`14e190b1031`)**: full 16550 UART model (23-assert probe). Found +
+  filed interp struct-local aliasing bug
+  (`doc/08_tracking/bug/interp_struct_local_copy_aliasing_2026-07-22.md`).
+- **Lane Q (`54df9459617`)**: pinned OpenSBI v1.4 fw_payload build + M-mode
+  UART/CLINT stub run on real core64 (`OSBI-PAYLOAD-OK`); gap list to full
+  OpenSBI documented.
+- **Lane S (`b08f69a00a4`)**: rv64 RVFI module (NEW) + trace self-checkers +
+  fail-closed `check_retire_chain` theorem; rt_ghdl_* honesty docstrings.
+- **Lane N (`8ef2719412e`)**: K26 TIMING MET — BUFGCE_DIV cfgmclk/2 = 25 MHz core
+  domain, XDC on CFGMCLK pin, fail-closed bit gate. Routed WNS **+16.932 ns**,
+  0/10957 failing endpoints (reviewer-read from the routed report). KV260
+  programmed, **DONE=HIGH**. Remaining board-serial blocker: 3v3 PMOD UART
+  adapter (H12=PL TX, E10) — hardware dependency, tracked in the k26 bug doc.
+
+In flight: Lane K (constrained re-synth, now redundant with N for timing — exec-core
+file only), Lane P (rv32 parity), Lane R (difftest), Lane U (JTAG GDB e2e).
+
+Honest remaining path to the two literal goals:
+1. **Linux on FPGA**: S-mode ✅ → Sv39 MMU + page-fault causes → SBI timer →
+   kernel Image build (`--kernel`) → sim boot → rv64 SoC synth for K26 (only the
+   rv32 SoC has a bitstream today) → PMOD UART adapter for serial proof.
+2. **JTAG to done**: Stages 1-5 ✅ + GDB e2e (Lane U in flight) → hart-into-core
+   integration (BRAM-gated) → board JTAG bring-up.
+
 ## Waves 4+ (planned, not scheduled)
 
 Phase 3 JTAG (TAP/DTM/DMI/DM explicit modules + AOP hart hooks), Phase 4
