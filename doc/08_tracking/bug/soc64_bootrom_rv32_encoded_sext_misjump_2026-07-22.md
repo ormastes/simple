@@ -1,8 +1,10 @@
 # soc_rtl bootrom is RV32-encoded — RV64 boot-to-DRAM handoff misjumps
 
 **Filed:** 2026-07-22 (lane W2-D bonus finding)
-**Status:** OPEN
-**Severity:** medium (RV64 SoC boot path; workaround exists)
+**Status:** FIXED (2026-07-22) — `bootrom_read64` landed and `soc_top_64`
+fetch wired to it (`c95684a1862`); in-tree probe: full reset-vector→DRAM
+handoff, pc lands 0x80000000, sp/a1/t0 zero-extended, specs updated.
+**Severity:** was medium (RV64 SoC boot path)
 
 `src/lib/hardware/soc_rtl/bootrom.spl` encodes the reset-vector trampoline for
 RV32: `lui t0, 0x80000; jalr t0`. On RV64, `lui` sign-extends bit 31, so t0 =

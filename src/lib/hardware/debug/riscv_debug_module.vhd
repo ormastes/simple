@@ -1,7 +1,10 @@
--- riscv_debug_module.vhd — RISC-V Debug Spec v0.13 Debug Module (Stage 2).
+-- riscv_debug_module.vhd — RISC-V Debug Spec v0.13 Debug Module (Stage 3).
 --
 -- Top-level DM: instantiates debug_registers (DMI-visible register block)
 -- and implements the halt/resume handshake state machine toward the hart.
+-- Stage 3 adds abstract register access (DATA0/DATA1, COMMAND access-
+-- register, ABSTRACTCS busy/cmderr) with a stub-level GPR port toward the
+-- hart; the abstract-command engine itself lives in debug_registers.
 --
 -- Hart-side integration is DEFERRED (Stage 2 scope): only stub ports are
 -- exposed — haltreq_o / resumereq_o / ndmreset_o outputs, halted_i /
@@ -44,7 +47,17 @@ entity riscv_debug_module is
     resumereq_o : out std_logic;
     ndmreset_o  : out std_logic;
     halted_i    : in  std_logic;
-    running_i   : in  std_logic
+    running_i   : in  std_logic;
+
+    -- Abstract-command GPR port (Stage 3; stub-level, matches the deferred
+    -- hart integration): re/we held with regno/wdata until ack_i pulses.
+    -- Defaults let pre-Stage-3 instantiations leave these unconnected.
+    gpr_re_o    : out std_logic;
+    gpr_we_o    : out std_logic;
+    gpr_regno_o : out std_logic_vector(4 downto 0);
+    gpr_wdata_o : out std_logic_vector(63 downto 0);
+    gpr_rdata_i : in  std_logic_vector(63 downto 0) := (others => '0');
+    gpr_ack_i   : in  std_logic := '0'
   );
 end entity riscv_debug_module;
 
@@ -77,6 +90,13 @@ begin
       ndmreset_o        => ndmreset_s,
       haltreq_o         => haltreq_lvl_s,
       resumereq_pulse_o => resume_pulse_s,
+
+      gpr_re_o    => gpr_re_o,
+      gpr_we_o    => gpr_we_o,
+      gpr_regno_o => gpr_regno_o,
+      gpr_wdata_o => gpr_wdata_o,
+      gpr_rdata_i => gpr_rdata_i,
+      gpr_ack_i   => gpr_ack_i,
 
       halted_i    => halted_i,
       running_i   => running_i,

@@ -291,8 +291,20 @@ Current stub interface:
    reviewer. v0.13 decisions documented in-file (single hart: hartsel reads
    0; W-only haltreq/resumereq; activation write doesn't honor same-write
    fields; cmderr=2 sticky W1C; version=2/authenticated=1 always readable).
-4. Begin Stage 3 (abstract commands): COMMAND access-register + DATA0/1 +
-   ABSTRACTCS.busy/datacount>0/cmderr=1(busy); then hart-side GPR/CSR access
-   port on the rv32 PL core (replaces stubs); wire ndmreset_o into hart reset.
-5. Hart integration still gated on BRAM stability (coordinate before touching
+4. ✅ **Stage 3 LANDED 2026-07-22** — abstract commands: DATA0/DATA1,
+   COMMAND access-register engine (aarsize 2/3, GPR regno 0x1000–0x101F),
+   ABSTRACTCS datacount=2/busy/cmderr {1=busy-violation, 2=not-supported,
+   4=not-halted; sticky W1C}, level-held GPR port with ack handshake
+   (`tb_abstract_cmds.vhd` 7/7 + Stage-2 + Stage-1 regressions all PASS,
+   reviewer re-ran, exit 0). Deviation recorded: tb_debug_module CHECK5
+   updated (cmderr 2→4) — that command became valid in Stage 3 and the
+   Stage-2 source marked the behavior TBD. Known scoping: dmi_bus forwards
+   only 0x10–0x1F, so the tb drives the DM's DMI port directly; DATA0/1
+   unreachable through dmi_bus until the scratch collision is resolved
+   (Stage-4 prerequisite #1).
+5. Begin Stage 4 (dpc/dcsr): (a) dmi_bus forward 0x04–0x0B to DM (resolve
+   scratch collision), (b) regno 0x0000–0x0FFF CSR decode + hart CSR port
+   (dpc=0x7B1, dcsr=0x7B0), (c) hart halt-cause/prv exposure for dcsr,
+   (d) real hart integration of the GPR port.
+6. Hart integration still gated on BRAM stability (coordinate before touching
    rv32_exec_core.vhd / rv64 core)

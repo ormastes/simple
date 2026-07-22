@@ -10,7 +10,8 @@
 --   CHECK2: dmactive=1, haltreq=1 -> DMSTATUS.allhalted within 100 cycles
 --   CHECK3: resumereq=1 -> allresumeack=1 and allrunning=1
 --   CHECK4: ndmreset pulse -> anyhavereset=1; ackhavereset -> cleared
---   CHECK5: COMMAND write -> ABSTRACTCS.cmderr=2 sticky; W1C clears
+--   CHECK5: COMMAND write while hart running -> ABSTRACTCS.cmderr=4
+--           (haltresume, Stage-3 semantics) sticky; W1C clears
 --   CHECK6: scratch regfile 0x03 round-trip still works (Stage-1 regression
 --           in-bench; full Stage-1 tb run is the external regression gate)
 -- Ends with: report "JTAG STAGE2 PASS"
@@ -244,20 +245,23 @@ begin
       severity note;
 
     ----------------------------------------------------------------------
-    -- CHECK5: COMMAND unsupported -> cmderr=2, sticky, W1C.
+    -- CHECK5: COMMAND while hart running -> cmderr=4 (haltresume),
+    -- sticky, W1C. (Stage 3: the command itself is now a supported
+    -- access-register command; the Stage-2 provisional cmderr=2 was
+    -- explicitly "Stage 3 TBD".)
     ----------------------------------------------------------------------
     dmi_read(A_ABSTRACTCS, rd);
-    assert rd = x"00000000"
-      report "CHECK5 FAIL: ABSTRACTCS /= 0 before COMMAND write"
-      severity failure;
-    dmi_write(A_COMMAND, x"00231000");    -- any access-register command
+    assert rd = x"00000002"               -- datacount=2, busy=0, cmderr=0
+      report "CHECK5 FAIL: ABSTRACTCS /= datacount-only before COMMAND "
+             & "write, got 0x" & to_hstring(rd) severity failure;
+    dmi_write(A_COMMAND, x"00231000");    -- valid access-register command
     dmi_read(A_ABSTRACTCS, rd);
-    assert rd(10 downto 8) = "010"
-      report "CHECK5 FAIL: cmderr /= 2 after COMMAND write, ABSTRACTCS=0x"
-             & to_hstring(rd) severity failure;
-    dmi_write(A_COMMAND, x"00331000");    -- second write: cmderr stays 2
+    assert rd(10 downto 8) = "100"
+      report "CHECK5 FAIL: cmderr /= 4 for COMMAND while running, "
+             & "ABSTRACTCS=0x" & to_hstring(rd) severity failure;
+    dmi_write(A_COMMAND, x"00331000");    -- second write: cmderr stays 4
     dmi_read(A_ABSTRACTCS, rd);
-    assert rd(10 downto 8) = "010"
+    assert rd(10 downto 8) = "100"
       report "CHECK5 FAIL: cmderr not sticky, ABSTRACTCS=0x" & to_hstring(rd)
       severity failure;
     dmi_write(A_ABSTRACTCS, x"00000700"); -- write 1s to cmderr -> clear
@@ -265,7 +269,7 @@ begin
     assert rd(10 downto 8) = "000"
       report "CHECK5 FAIL: cmderr not cleared by W1C, ABSTRACTCS=0x"
              & to_hstring(rd) severity failure;
-    report "CHECK5 PASS: COMMAND -> cmderr=2 sticky, W1C clears"
+    report "CHECK5 PASS: COMMAND while running -> cmderr=4 sticky, W1C clears"
       severity note;
 
     ----------------------------------------------------------------------
