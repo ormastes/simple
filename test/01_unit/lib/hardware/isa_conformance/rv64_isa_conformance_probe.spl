@@ -1,0 +1,531 @@
+# RV64 directed ISA-conformance probe suite (Lane R, 2026-07-22).
+# Drives the landed rv64gc_rtl core model DIRECTLY via
+# core64_init + core64_combinational + core64_update (same wiring as
+# test/01_unit/lib/hardware/rv64gc_rtl/core64_probe.spl) with a small
+# byte-addressed data memory, and asserts architectural results per
+# instruction class: arith_imm, arith_reg, branch_jump, load_store,
+# muldiv (XFAIL), amo, csr, traps_rvc (XFAIL).
+#
+# Output protocol (parsed by scripts/fpga/difftest_isa.shs):
+#   PASS  [class] name    — architectural result matched
+#   FAIL  [class] name    — hard failure (gates red)
+#   XFAIL [class] name    — expected failure, known model gap (documented)
+#   XPASS [class] name    — expected failure that unexpectedly passed
+# Run: bin/simple run test/01_unit/lib/hardware/isa_conformance/rv64_isa_conformance_probe.spl
+use std.hardware.rv64gc_rtl.core.{CoreState64, core64_init, core64_combinational, core64_update}
+
+# ============================================================================
+# Check helpers
+# ============================================================================
+
+fn chk(cls: text, name: text, ok: bool) -> i64:
+    """Hard assertion: returns 1 on failure."""
+    if ok:
+        print("PASS  [{cls}] {name}")
+        return 0
+    print("FAIL  [{cls}] {name}")
+    1
+
+fn chk_x(cls: text, name: text, ok: bool) -> i64:
+    """Expected-failure assertion (known model gap): never gates red."""
+    if ok:
+        print("XPASS [{cls}] {name}")
+        return 0
+    print("XFAIL [{cls}] {name}")
+    0
+
+# ============================================================================
+# RV64 instruction encoders (standard R/I/S/B/U/J formats)
+# ============================================================================
+
+fn enc_r(f7: i64, rs2: i64, rs1: i64, f3: i64, rd: i64, op: i64) -> u32:
+    ((f7 << 25) | (rs2 << 20) | (rs1 << 15) | (f3 << 12) | (rd << 7) | op) as u32
+
+fn enc_i(imm: i64, rs1: i64, f3: i64, rd: i64, op: i64) -> u32:
+    (((imm & 0xFFF) << 20) | (rs1 << 15) | (f3 << 12) | (rd << 7) | op) as u32
+
+fn enc_s(imm: i64, rs2: i64, rs1: i64, f3: i64, op: i64) -> u32:
+    ((((imm >> 5) & 0x7F) << 25) | (rs2 << 20) | (rs1 << 15) | (f3 << 12) |
+     ((imm & 0x1F) << 7) | op) as u32
+
+fn enc_b(imm: i64, rs2: i64, rs1: i64, f3: i64, op: i64) -> u32:
+    ((((imm >> 12) & 0x1) << 31) | (((imm >> 5) & 0x3F) << 25) | (rs2 << 20) |
+     (rs1 << 15) | (f3 << 12) | (((imm >> 1) & 0xF) << 8) |
+     (((imm >> 11) & 0x1) << 7) | op) as u32
+
+fn enc_u(imm20: i64, rd: i64, op: i64) -> u32:
+    (((imm20 & 0xFFFFF) << 12) | (rd << 7) | op) as u32
+
+fn enc_j(imm: i64, rd: i64, op: i64) -> u32:
+    ((((imm >> 20) & 0x1) << 31) | (((imm >> 1) & 0x3FF) << 21) |
+     (((imm >> 11) & 0x1) << 20) | (((imm >> 12) & 0xFF) << 12) |
+     (rd << 7) | op) as u32
+
+fn addi(rd: i64, rs1: i64, imm: i64) -> u32:
+    enc_i(imm, rs1, 0, rd, 0x13)
+
+fn park() -> u32:
+    # jal x0, 0 — self-loop park
+    0x0000006Fu32
+
+# ============================================================================
+# Byte-addressed data memory (256 bytes, little-endian)
+# ============================================================================
+
+fn mem_new() -> [i64]:
+    var m: [i64] = []
+    var i = 0
+    while i < 256:
+        m = m.push(0)
+        i = i + 1
+    m
+
+fn mem_rd64(mem: [i64], addr: i64) -> i64:
+    """Return 8 bytes starting at addr, little-endian, low byte at addr.
+    (lsu64_load extracts/sign-extends from the LOW bits of this value.)"""
+    var v: i64 = 0
+    var j = 0
+    while j < 8:
+        val a = addr + j
+        var b: i64 = 0
+        if a >= 0 and a < 256:
+            b = mem[a]
+        v = v | (b << (8 * j))
+        j = j + 1
+    v
+
+fn mem_wr(mem: [i64], addr: i64, wdata: i64, width: u32) -> [i64]:
+    """Write 1/2/4/8 bytes (dmem_width = funct3&3) from wdata low bytes."""
+    var n: i64 = 1
+    if width == 1:
+        n = 2
+    else if width == 2:
+        n = 4
+    else if width == 3:
+        n = 8
+    var m = mem
+    var j = 0
+    while j < n:
+        val a = addr + j
+        if a >= 0 and a < 256:
+            m[a] = (wdata >> (8 * j)) & 0xFF
+        j = j + 1
+    m
+
+# ============================================================================
+# Run harness: tick the core over a program with the data memory attached
+# ============================================================================
+
+struct IsaRun64:
+    st: CoreState64
+    mem: [i64]
+
+fn run64(prog: [u32], steps: i64) -> IsaRun64:
+    var st = core64_init(0)
+    var mem = mem_new()
+    var i = 0
+    while i < steps and st.halt == false:
+        val idx = st.pc / 4
+        var insn = park()
+        if idx >= 0 and idx < prog.len():
+            insn = prog[idx]
+        var comb = core64_combinational(st, insn, 0, st.rf)
+        if comb.dmem_re:
+            val rdata = mem_rd64(mem, comb.dmem_addr)
+            comb = core64_combinational(st, insn, rdata, st.rf)
+        if comb.dmem_we:
+            mem = mem_wr(mem, comb.dmem_addr, comb.dmem_wdata, comb.dmem_width)
+        st = core64_update(st, insn, comb, comb.a0_val, comb.a1_val)
+        i = i + 1
+    IsaRun64(st: st, mem: mem)
+
+# ============================================================================
+# Class: arith_imm — ADDI/SLTI/SLTIU/XORI/ORI/ANDI/SLLI/SRLI/SRAI/LUI/AUIPC/ADDIW
+# ============================================================================
+
+fn class_arith_imm() -> i64:
+    var p: [u32] = []
+    p = p.push(addi(1, 0, 42))                 #  0: x1 = 42
+    p = p.push(addi(2, 0, -5))                 #  1: x2 = -5
+    p = p.push(enc_i(1, 2, 2, 3, 0x13))        #  2: slti  x3, x2, 1   -> 1
+    p = p.push(enc_i(1, 2, 3, 4, 0x13))        #  3: sltiu x4, x2, 1   -> 0
+    p = p.push(enc_i(255, 1, 4, 5, 0x13))      #  4: xori  x5, x1, 255 -> 213
+    p = p.push(enc_i(128, 1, 6, 6, 0x13))      #  5: ori   x6, x1, 128 -> 170
+    p = p.push(enc_i(15, 1, 7, 7, 0x13))       #  6: andi  x7, x1, 15  -> 10
+    p = p.push(enc_i(4, 1, 1, 8, 0x13))        #  7: slli  x8, x1, 4   -> 672
+    p = p.push(enc_i(60, 2, 5, 9, 0x13))       #  8: srli  x9, x2, 60  -> 15
+    p = p.push(enc_i(0x400 | 2, 2, 5, 10, 0x13)) # 9: srai x10, x2, 2  -> -2
+    p = p.push(enc_u(0x12345, 11, 0x37))       # 10: lui   x11         -> 0x12345000
+    p = p.push(enc_u(1, 12, 0x17))             # 11: auipc x12, 1      -> 0x2C+0x1000
+    p = p.push(enc_u(0x80000, 14, 0x37))       # 12: lui   x14,0x80000 -> sign-ext
+    p = p.push(enc_i(-1, 14, 0, 13, 0x1B))     # 13: addiw x13, x14,-1 -> 0x7FFFFFFF
+    p = p.push(park())                         # 14
+    val r = run64(p, 40)
+    var f: i64 = 0
+    f = f + chk("arith_imm", "addi x1 == 42", r.st.rf.regs[1] == 42)
+    f = f + chk("arith_imm", "addi negative x2 == -5", r.st.rf.regs[2] == -5)
+    f = f + chk("arith_imm", "slti -5 < 1 == 1", r.st.rf.regs[3] == 1)
+    f = f + chk("arith_imm", "sltiu (u)-5 < 1 == 0", r.st.rf.regs[4] == 0)
+    f = f + chk("arith_imm", "xori 42^255 == 213", r.st.rf.regs[5] == 213)
+    f = f + chk("arith_imm", "ori 42|128 == 170", r.st.rf.regs[6] == 170)
+    f = f + chk("arith_imm", "andi 42&15 == 10", r.st.rf.regs[7] == 10)
+    f = f + chk("arith_imm", "slli 42<<4 == 672", r.st.rf.regs[8] == 672)
+    f = f + chk("arith_imm", "srli -5>>l60 == 15", r.st.rf.regs[9] == 15)
+    f = f + chk("arith_imm", "srai -5>>a2 == -2", r.st.rf.regs[10] == -2)
+    f = f + chk("arith_imm", "lui 0x12345000", r.st.rf.regs[11] == 0x12345000)
+    f = f + chk("arith_imm", "auipc pc+0x1000 == 0x102C", r.st.rf.regs[12] == 0x102C)
+    f = f + chk("arith_imm", "lui 0x80000 sign-extends (RV64)",
+        r.st.rf.regs[14] == -2147483648)
+    f = f + chk("arith_imm", "addiw INT32_MIN-1 wraps to 0x7FFFFFFF",
+        r.st.rf.regs[13] == 0x7FFFFFFF)
+    f
+
+# ============================================================================
+# Class: arith_reg — ADD/SUB/SLL/SLT/SLTU/XOR/SRL/SRA/OR/AND + W-forms
+# ============================================================================
+
+fn class_arith_reg() -> i64:
+    var p: [u32] = []
+    p = p.push(addi(1, 0, 7))                    #  0: x1 = 7
+    p = p.push(addi(2, 0, -3))                   #  1: x2 = -3
+    p = p.push(enc_r(0x00, 2, 1, 0, 3, 0x33))    #  2: add  x3  -> 4
+    p = p.push(enc_r(0x20, 2, 1, 0, 4, 0x33))    #  3: sub  x4  -> 10
+    p = p.push(enc_r(0x00, 2, 1, 1, 5, 0x33))    #  4: sll  x5  -> 7<<61
+    p = p.push(enc_r(0x00, 2, 1, 2, 6, 0x33))    #  5: slt  x6  -> 0
+    p = p.push(enc_r(0x00, 2, 1, 3, 7, 0x33))    #  6: sltu x7  -> 1
+    p = p.push(enc_r(0x00, 2, 1, 4, 8, 0x33))    #  7: xor  x8  -> -6
+    p = p.push(enc_r(0x00, 2, 1, 5, 9, 0x33))    #  8: srl  x9  -> 0
+    p = p.push(enc_r(0x20, 1, 2, 5, 10, 0x33))   #  9: sra  x10 -> -1
+    p = p.push(enc_r(0x00, 2, 1, 6, 11, 0x33))   # 10: or   x11 -> -1
+    p = p.push(enc_r(0x00, 2, 1, 7, 12, 0x33))   # 11: and  x12 -> 5
+    p = p.push(enc_r(0x00, 2, 1, 0, 13, 0x3B))   # 12: addw x13 -> 4
+    p = p.push(enc_r(0x20, 2, 1, 0, 14, 0x3B))   # 13: subw x14 -> 10
+    p = p.push(enc_u(0x80000, 15, 0x37))         # 14: lui  x15 -> INT32_MIN
+    p = p.push(enc_i(-1, 15, 0, 16, 0x1B))       # 15: addiw x16 -> 0x7FFFFFFF
+    p = p.push(addi(17, 0, 1))                   # 16: x17 = 1
+    p = p.push(enc_r(0x00, 17, 16, 0, 18, 0x3B)) # 17: addw x18 -> INT32_MIN
+    p = p.push(addi(19, 0, 33))                  # 18: x19 = 33
+    p = p.push(enc_r(0x00, 19, 1, 1, 20, 0x3B))  # 19: sllw x20 -> 14 (shamt 33&31)
+    p = p.push(enc_r(0x20, 17, 15, 5, 21, 0x3B)) # 20: sraw x21 -> 0xC0000000 s-ext
+    p = p.push(park())                           # 21
+    val r = run64(p, 50)
+    var f: i64 = 0
+    f = f + chk("arith_reg", "add 7+-3 == 4", r.st.rf.regs[3] == 4)
+    f = f + chk("arith_reg", "sub 7--3 == 10", r.st.rf.regs[4] == 10)
+    f = f + chk("arith_reg", "sll shamt=rs2&63 (7<<61)",
+        r.st.rf.regs[5] == -2305843009213693952)
+    f = f + chk("arith_reg", "slt 7<-3 == 0", r.st.rf.regs[6] == 0)
+    f = f + chk("arith_reg", "sltu 7<(u)-3 == 1", r.st.rf.regs[7] == 1)
+    f = f + chk("arith_reg", "xor 7^-3 == -6", r.st.rf.regs[8] == -6)
+    f = f + chk("arith_reg", "srl 7>>l61 == 0", r.st.rf.regs[9] == 0)
+    f = f + chk("arith_reg", "sra -3>>a7 == -1", r.st.rf.regs[10] == -1)
+    f = f + chk("arith_reg", "or 7|-3 == -1", r.st.rf.regs[11] == -1)
+    f = f + chk("arith_reg", "and 7&-3 == 5", r.st.rf.regs[12] == 5)
+    f = f + chk("arith_reg", "addw 7+-3 == 4", r.st.rf.regs[13] == 4)
+    f = f + chk("arith_reg", "subw 7--3 == 10", r.st.rf.regs[14] == 10)
+    f = f + chk("arith_reg", "addw INT32_MAX+1 wraps to INT32_MIN",
+        r.st.rf.regs[18] == -2147483648)
+    f = f + chk("arith_reg", "sllw shamt=rs2&31 (7<<1 == 14)", r.st.rf.regs[20] == 14)
+    f = f + chk("arith_reg", "sraw INT32_MIN>>a1 sign-extends",
+        r.st.rf.regs[21] == -1073741824)
+    f
+
+# ============================================================================
+# Class: branch_jump — BEQ/BNE/BLT/BGE/BLTU/BGEU taken + not-taken, JAL/JALR
+# ============================================================================
+
+fn class_branch_jump() -> i64:
+    var p: [u32] = []
+    p = p.push(addi(1, 0, 1))                  #  0: x1 = 1
+    p = p.push(addi(2, 0, -1))                 #  1: x2 = -1
+    p = p.push(enc_b(8, 1, 1, 0, 0x63))        #  2: beq  x1,x1,+8 (taken)
+    p = p.push(addi(22, 0, 111))               #  3: poison x22
+    p = p.push(enc_b(8, 2, 1, 1, 0x63))        #  4: bne  x1,x2,+8 (taken)
+    p = p.push(addi(23, 0, 111))               #  5: poison x23
+    p = p.push(enc_b(8, 1, 2, 4, 0x63))        #  6: blt  x2,x1,+8 (taken, signed)
+    p = p.push(addi(24, 0, 111))               #  7: poison x24
+    p = p.push(enc_b(8, 2, 1, 5, 0x63))        #  8: bge  x1,x2,+8 (taken, signed)
+    p = p.push(addi(25, 0, 111))               #  9: poison x25
+    p = p.push(enc_b(8, 2, 1, 6, 0x63))        # 10: bltu x1,x2,+8 (taken, unsigned)
+    p = p.push(addi(26, 0, 111))               # 11: poison x26
+    p = p.push(enc_b(8, 1, 2, 7, 0x63))        # 12: bgeu x2,x1,+8 (taken, unsigned)
+    p = p.push(addi(27, 0, 111))               # 13: poison x27
+    p = p.push(enc_b(8, 2, 1, 0, 0x63))        # 14: beq  x1,x2,+8 (NOT taken)
+    p = p.push(addi(3, 0, 55))                 # 15: x3 = 55 (must execute)
+    p = p.push(enc_j(8, 4, 0x6F))              # 16: jal  x4,+8 (pc=64, link 68)
+    p = p.push(addi(28, 0, 111))               # 17: poison x28
+    p = p.push(addi(6, 0, 84))                 # 18: x6 = 84 (jalr target)
+    p = p.push(enc_i(0, 6, 0, 5, 0x67))        # 19: jalr x5,0(x6) (pc=76, link 80)
+    p = p.push(addi(29, 0, 111))               # 20: poison x29
+    p = p.push(park())                         # 21: pc = 84 park
+    val r = run64(p, 40)
+    var f: i64 = 0
+    f = f + chk("branch_jump", "beq taken skips poison", r.st.rf.regs[22] == 0)
+    f = f + chk("branch_jump", "bne taken skips poison", r.st.rf.regs[23] == 0)
+    f = f + chk("branch_jump", "blt signed -1<1 taken", r.st.rf.regs[24] == 0)
+    f = f + chk("branch_jump", "bge signed 1>=-1 taken", r.st.rf.regs[25] == 0)
+    f = f + chk("branch_jump", "bltu unsigned 1<(u)-1 taken", r.st.rf.regs[26] == 0)
+    f = f + chk("branch_jump", "bgeu unsigned (u)-1>=1 taken", r.st.rf.regs[27] == 0)
+    f = f + chk("branch_jump", "beq not-taken falls through", r.st.rf.regs[3] == 55)
+    f = f + chk("branch_jump", "jal writes link pc+4 == 68", r.st.rf.regs[4] == 68)
+    f = f + chk("branch_jump", "jal skips poison", r.st.rf.regs[28] == 0)
+    f = f + chk("branch_jump", "jalr writes link pc+4 == 80", r.st.rf.regs[5] == 80)
+    f = f + chk("branch_jump", "jalr reaches target (poison skipped)",
+        r.st.rf.regs[29] == 0)
+    f = f + chk("branch_jump", "final pc parked at 84", r.st.pc == 84)
+    f
+
+# ============================================================================
+# Class: load_store — SD/LD, SW/LW/LWU, SH/LH/LHU, SB/LB/LBU + store-width
+# ============================================================================
+
+fn class_load_store() -> i64:
+    var p: [u32] = []
+    p = p.push(addi(1, 0, 128))                #  0: x1 = 128 (data base)
+    p = p.push(addi(2, 0, -2))                 #  1: x2 = -2
+    p = p.push(enc_s(0, 2, 1, 3, 0x23))        #  2: sd  x2, 0(x1)
+    p = p.push(enc_i(0, 1, 3, 3, 0x03))        #  3: ld  x3, 0(x1)   -> -2
+    p = p.push(enc_s(8, 2, 1, 2, 0x23))        #  4: sw  x2, 8(x1)
+    p = p.push(enc_i(8, 1, 2, 4, 0x03))        #  5: lw  x4, 8(x1)   -> -2 (sign)
+    p = p.push(enc_i(8, 1, 6, 5, 0x03))        #  6: lwu x5, 8(x1)   -> 0xFFFFFFFE
+    p = p.push(enc_s(16, 2, 1, 1, 0x23))       #  7: sh  x2, 16(x1)
+    p = p.push(enc_i(16, 1, 1, 6, 0x03))       #  8: lh  x6, 16(x1)  -> -2 (sign)
+    p = p.push(enc_i(16, 1, 5, 7, 0x03))       #  9: lhu x7, 16(x1)  -> 0xFFFE
+    p = p.push(enc_s(24, 2, 1, 0, 0x23))       # 10: sb  x2, 24(x1)
+    p = p.push(enc_i(24, 1, 0, 8, 0x03))       # 11: lb  x8, 24(x1)  -> -2 (sign)
+    p = p.push(enc_i(24, 1, 4, 9, 0x03))       # 12: lbu x9, 24(x1)  -> 0xFE
+    p = p.push(enc_s(33, 2, 1, 0, 0x23))       # 13: sb  x2, 33(x1)  (odd addr)
+    p = p.push(enc_i(33, 1, 4, 10, 0x03))      # 14: lbu x10, 33(x1) -> 0xFE
+    p = p.push(addi(11, 0, 77))                # 15: x11 = 77
+    p = p.push(enc_s(40, 11, 1, 3, 0x23))      # 16: sd  x11, 40(x1)
+    p = p.push(enc_i(44, 1, 2, 12, 0x03))      # 17: lw  x12, 44(x1) -> 0 (hi word)
+    p = p.push(enc_i(18, 1, 4, 13, 0x03))      # 18: lbu x13, 18(x1) -> 0 (sh 2B only)
+    p = p.push(park())                         # 19
+    val r = run64(p, 40)
+    var f: i64 = 0
+    f = f + chk("load_store", "sd/ld round-trip -2", r.st.rf.regs[3] == -2)
+    f = f + chk("load_store", "sw/lw sign-extends -2", r.st.rf.regs[4] == -2)
+    f = f + chk("load_store", "lwu zero-extends 0xFFFFFFFE",
+        r.st.rf.regs[5] == 0xFFFFFFFE)
+    f = f + chk("load_store", "sh/lh sign-extends -2", r.st.rf.regs[6] == -2)
+    f = f + chk("load_store", "lhu zero-extends 0xFFFE", r.st.rf.regs[7] == 0xFFFE)
+    f = f + chk("load_store", "sb/lb sign-extends -2", r.st.rf.regs[8] == -2)
+    f = f + chk("load_store", "lbu zero-extends 0xFE", r.st.rf.regs[9] == 0xFE)
+    f = f + chk("load_store", "byte store/load at odd address",
+        r.st.rf.regs[10] == 0xFE)
+    f = f + chk("load_store", "ld upper word of small sd is 0",
+        r.st.rf.regs[12] == 0)
+    f = f + chk("load_store", "sh writes exactly 2 bytes", r.st.rf.regs[13] == 0)
+    f
+
+# ============================================================================
+# Class: muldiv — M extension. KNOWN GAP: decode routes funct7==1 to ALU_ADD
+# placeholder ("M extension is handled separately") and mul_div64_step has NO
+# consumer in core64_combinational/core64_update or soc_top_64_tick, so every
+# M-format op computes rs1+rs2. All cases below are XFAIL until the M unit is
+# wired into the core datapath (cross-lane: rv64gc_rtl owner).
+# ============================================================================
+
+fn class_muldiv() -> i64:
+    var p: [u32] = []
+    p = p.push(addi(1, 0, 7))                    #  0: x1 = 7
+    p = p.push(addi(2, 0, -3))                   #  1: x2 = -3
+    p = p.push(enc_r(0x01, 2, 1, 0, 3, 0x33))    #  2: mul   x3  -> -21
+    p = p.push(enc_r(0x01, 2, 1, 1, 4, 0x33))    #  3: mulh  x4  -> -1
+    p = p.push(enc_r(0x01, 2, 1, 4, 5, 0x33))    #  4: div   x5  -> -2 (trunc)
+    p = p.push(enc_r(0x01, 2, 1, 6, 6, 0x33))    #  5: rem   x6  -> 1
+    p = p.push(enc_r(0x01, 2, 1, 5, 7, 0x33))    #  6: divu  x7  -> 0
+    p = p.push(enc_r(0x01, 2, 1, 7, 8, 0x33))    #  7: remu  x8  -> 7
+    p = p.push(addi(9, 0, 0))                    #  8: x9 = 0
+    p = p.push(enc_r(0x01, 9, 1, 4, 10, 0x33))   #  9: div/0 x10 -> -1
+    p = p.push(enc_r(0x01, 9, 1, 6, 11, 0x33))   # 10: rem/0 x11 -> 7
+    p = p.push(addi(12, 0, 1))                   # 11: x12 = 1
+    p = p.push(enc_i(63, 12, 1, 13, 0x13))       # 12: slli x13 = INT64_MIN
+    p = p.push(addi(14, 0, -1))                  # 13: x14 = -1
+    p = p.push(enc_r(0x01, 14, 13, 4, 15, 0x33)) # 14: div ovf x15 -> INT64_MIN
+    p = p.push(enc_r(0x01, 14, 13, 6, 16, 0x33)) # 15: rem ovf x16 -> 0
+    p = p.push(enc_r(0x01, 2, 1, 0, 17, 0x3B))   # 16: mulw  x17 -> -21
+    p = p.push(enc_r(0x01, 2, 1, 4, 18, 0x3B))   # 17: divw  x18 -> -2
+    p = p.push(park())                           # 18
+    val r = run64(p, 40)
+    var f: i64 = 0
+    f = f + chk_x("muldiv", "mul 7*-3 == -21", r.st.rf.regs[3] == -21)
+    f = f + chk_x("muldiv", "mulh high(7*-3) == -1", r.st.rf.regs[4] == -1)
+    f = f + chk_x("muldiv", "div 7/-3 == -2 (trunc)", r.st.rf.regs[5] == -2)
+    f = f + chk_x("muldiv", "rem 7%-3 == 1", r.st.rf.regs[6] == 1)
+    f = f + chk_x("muldiv", "divu 7/(u)-3 == 0", r.st.rf.regs[7] == 0)
+    f = f + chk_x("muldiv", "remu 7%(u)-3 == 7", r.st.rf.regs[8] == 7)
+    f = f + chk_x("muldiv", "div by zero == -1", r.st.rf.regs[10] == -1)
+    f = f + chk_x("muldiv", "rem by zero == dividend", r.st.rf.regs[11] == 7)
+    f = f + chk_x("muldiv", "div overflow INT64_MIN/-1 == INT64_MIN",
+        r.st.rf.regs[15] == r.st.rf.regs[13])
+    f = f + chk_x("muldiv", "rem overflow INT64_MIN%-1 == 0", r.st.rf.regs[16] == 0)
+    f = f + chk_x("muldiv", "mulw 7*-3 == -21", r.st.rf.regs[17] == -21)
+    f = f + chk_x("muldiv", "divw 7/-3 == -2", r.st.rf.regs[18] == -2)
+    f
+
+# ============================================================================
+# Class: amo — LR/SC + AMOADD/SWAP/XOR/OR/AND/MIN/MAXU (.d and .w)
+# ============================================================================
+
+fn class_amo() -> i64:
+    var p: [u32] = []
+    p = p.push(addi(1, 0, 128))                  #  0: x1 = 128
+    p = p.push(addi(2, 0, 5))                    #  1: x2 = 5
+    p = p.push(enc_s(0, 2, 1, 3, 0x23))          #  2: sd x2, 0(x1)     mem=5
+    p = p.push(addi(3, 0, 7))                    #  3: x3 = 7
+    p = p.push(enc_r(0x00, 3, 1, 3, 4, 0x2F))    #  4: amoadd.d  x4  -> 5,  mem=12
+    p = p.push(enc_r(0x04, 2, 1, 3, 5, 0x2F))    #  5: amoswap.d x5  -> 12, mem=5
+    p = p.push(enc_r(0x10, 3, 1, 3, 6, 0x2F))    #  6: amoxor.d  x6  -> 5,  mem=2
+    p = p.push(enc_r(0x20, 3, 1, 3, 7, 0x2F))    #  7: amoor.d   x7  -> 2,  mem=7
+    p = p.push(enc_r(0x30, 3, 1, 3, 8, 0x2F))    #  8: amoand.d  x8  -> 7,  mem=7
+    p = p.push(addi(9, 0, -3))                   #  9: x9 = -3
+    p = p.push(enc_r(0x40, 9, 1, 3, 10, 0x2F))   # 10: amomin.d  x10 -> 7,  mem=-3
+    p = p.push(enc_r(0x70, 3, 1, 3, 11, 0x2F))   # 11: amomaxu.d x11 -> -3, mem=-3
+    p = p.push(enc_r(0x08, 0, 1, 3, 12, 0x2F))   # 12: lr.d      x12 -> -3, resv set
+    p = p.push(enc_r(0x0C, 2, 1, 3, 13, 0x2F))   # 13: sc.d      x13 -> 0,  mem=5
+    p = p.push(enc_r(0x0C, 2, 1, 3, 14, 0x2F))   # 14: sc.d      x14 -> 1 (no resv)
+    p = p.push(enc_r(0x08, 0, 1, 3, 15, 0x2F))   # 15: lr.d      x15 -> 5
+    p = p.push(enc_s(0, 2, 1, 3, 0x23))          # 16: sd x2,0(x1) clears reservation
+    p = p.push(enc_r(0x0C, 3, 1, 3, 16, 0x2F))   # 17: sc.d      x16 -> 1 (invalidated)
+    p = p.push(enc_i(0, 1, 3, 17, 0x03))         # 18: ld x17, 0(x1)  -> 5 (sc failed)
+    p = p.push(addi(18, 0, -1))                  # 19: x18 = -1
+    p = p.push(enc_s(8, 18, 1, 2, 0x23))         # 20: sw x18, 8(x1)  word = -1
+    p = p.push(addi(19, 1, 8))                   # 21: x19 = 136
+    p = p.push(enc_r(0x00, 2, 19, 2, 20, 0x2F))  # 22: amoadd.w x20 -> -1, word=4
+    p = p.push(enc_i(8, 1, 2, 21, 0x03))         # 23: lw x21, 8(x1)  -> 4
+    p = p.push(park())                           # 24
+    val r = run64(p, 50)
+    var f: i64 = 0
+    f = f + chk("amo", "amoadd.d returns old value 5", r.st.rf.regs[4] == 5)
+    f = f + chk("amo", "amoswap.d returns 12, restores 5", r.st.rf.regs[5] == 12)
+    f = f + chk("amo", "amoxor.d old 5, mem 5^7", r.st.rf.regs[6] == 5)
+    f = f + chk("amo", "amoor.d old 2", r.st.rf.regs[7] == 2)
+    f = f + chk("amo", "amoand.d old 7", r.st.rf.regs[8] == 7)
+    f = f + chk("amo", "amomin.d signed old 7 (stores -3)", r.st.rf.regs[10] == 7)
+    f = f + chk("amo", "amomaxu.d unsigned keeps (u)-3", r.st.rf.regs[11] == -3)
+    f = f + chk("amo", "lr.d loads -3", r.st.rf.regs[12] == -3)
+    f = f + chk("amo", "sc.d succeeds after lr.d (rd=0)", r.st.rf.regs[13] == 0)
+    f = f + chk("amo", "second sc.d fails, reservation cleared",
+        r.st.rf.regs[14] == 1)
+    f = f + chk("amo", "sc.d fails after intervening store", r.st.rf.regs[16] == 1)
+    f = f + chk("amo", "failed sc.d does not write memory", r.st.rf.regs[17] == 5)
+    f = f + chk("amo", "amoadd.w sign-extends old word -1", r.st.rf.regs[20] == -1)
+    f = f + chk("amo", "amoadd.w stores 32-bit sum 4", r.st.rf.regs[21] == 4)
+    f
+
+# ============================================================================
+# Class: csr — CSRRW/CSRRS/CSRRC/CSRRWI/CSRRSI on mscratch + mhartid read.
+#
+# csr_trap: ecall trap entry (mtvec redirect + mepc/mcause readback in the
+# handler). Was BLOCKED at lane base ddb8ebc (TrapEnterResult64 lacked csr_s,
+# any taken trap crashed the model); fixed by 3b36b68cd11 — now asserted.
+# ============================================================================
+
+fn class_csr() -> i64:
+    var p: [u32] = []
+    p = p.push(addi(1, 0, 0x77))                 #  0: x1 = 0x77
+    p = p.push(enc_i(0x340, 1, 1, 2, 0x73))      #  1: csrrw  x2, mscratch, x1
+    p = p.push(enc_i(0x340, 0, 2, 3, 0x73))      #  2: csrrs  x3, mscratch, x0 -> 0x77
+    p = p.push(enc_i(0x340, 8, 6, 4, 0x73))      #  3: csrrsi x4, mscratch, 8  -> 0x77
+    p = p.push(enc_i(0x340, 1, 3, 5, 0x73))      #  4: csrrc  x5, mscratch, x1 -> 0x7F
+    p = p.push(enc_i(0x340, 31, 5, 6, 0x73))     #  5: csrrwi x6, mscratch, 31 -> 8
+    p = p.push(enc_i(0xF14, 0, 2, 7, 0x73))      #  6: csrr   x7, mhartid      -> 0
+    p = p.push(enc_i(0x340, 0, 2, 9, 0x73))      #  7: csrr   x9, mscratch     -> 31
+    p = p.push(park())                           #  8: pc = 32
+    val r = run64(p, 30)
+    var f: i64 = 0
+    f = f + chk("csr", "csrrw reads reset mscratch 0", r.st.rf.regs[2] == 0)
+    f = f + chk("csr", "csrrw/csrrs mscratch round-trip 0x77",
+        r.st.rf.regs[3] == 0x77)
+    f = f + chk("csr", "csrrsi returns pre-set value", r.st.rf.regs[4] == 0x77)
+    f = f + chk("csr", "csrrc reads 0x7F, clears bits", r.st.rf.regs[5] == 0x7F)
+    f = f + chk("csr", "csrrwi reads cleared value 8", r.st.rf.regs[6] == 8)
+    f = f + chk("csr", "csrrwi wrote 31 (readback)", r.st.rf.regs[9] == 31)
+    f = f + chk("csr", "mhartid == 0", r.st.rf.regs[7] == 0)
+    f = f + class_csr_trap()
+    f
+
+fn class_csr_trap() -> i64:
+    # ecall from M: mtvec=64 (direct), handler reads mepc/mcause then parks.
+    var p: [u32] = []
+    p = p.push(addi(1, 0, 64))                   #  0: x1 = 64 (handler)
+    p = p.push(enc_i(0x305, 1, 1, 0, 0x73))      #  1: csrrw x0, mtvec, x1
+    p = p.push(enc_i(0x000, 0, 0, 0, 0x73))      #  2: ecall (pc=8)
+    var i: i64 = 3
+    while i < 16:
+        p = p.push(addi(0, 0, 0))                #  3..15: nop pad to byte 64
+        i = i + 1
+    p = p.push(enc_i(0x341, 0, 2, 10, 0x73))     # 16: csrr x10, mepc
+    p = p.push(enc_i(0x342, 0, 2, 11, 0x73))     # 17: csrr x11, mcause
+    p = p.push(park())                           # 18: park
+    val r = run64(p, 40)
+    var f: i64 = 0
+    f = f + chk("csr_trap", "ecall redirected to mtvec handler (mepc/mcause read)",
+        r.st.rf.regs[10] != 0 or r.st.rf.regs[11] != 0)
+    f = f + chk("csr_trap", "mepc == ecall pc (8)", r.st.rf.regs[10] == 8)
+    f = f + chk("csr_trap", "mcause == 11 (ecall from M)", r.st.rf.regs[11] == 11)
+    f
+
+# ============================================================================
+# Class: traps_rvc — KNOWN GAPS, honest XFAIL:
+#  * misaligned load: core64_combinational has no alignment check, so a
+#    misaligned lw returns data instead of raising CAUSE_MISALIGNED_LOAD.
+#  * compressed (RVC): 16-bit parcel reassembly lives in the SoC fetch path
+#    (pipeline_phase/fetch_low), not in the direct core64_combinational
+#    interface; a raw c.addi word decodes as illegal/NOP here. (rv32 PL core
+#    c.add decode bug precedent: commit a9a344e96a3.)
+# ============================================================================
+
+fn class_traps_rvc() -> i64:
+    var f: i64 = 0
+
+    # Misaligned lw should trap to mtvec (handler at 48 sets x3=99).
+    var p: [u32] = []
+    p = p.push(addi(8, 0, 48))                 #  0: x8 = 48
+    p = p.push(enc_i(0x305, 8, 1, 0, 0x73))    #  1: csrrw x0, mtvec, x8
+    p = p.push(addi(1, 0, 129))                #  2: x1 = 129 (misaligned)
+    p = p.push(enc_i(0, 1, 2, 2, 0x03))        #  3: lw x2, 0(x1)
+    p = p.push(park())                         #  4: park if NO trap (pc=16)
+    p = p.push(park())                         #  5
+    p = p.push(park())                         #  6
+    p = p.push(park())                         #  7
+    p = p.push(park())                         #  8
+    p = p.push(park())                         #  9
+    p = p.push(park())                         # 10
+    p = p.push(park())                         # 11
+    p = p.push(addi(3, 0, 99))                 # 12: handler (pc=48): x3 = 99
+    p = p.push(park())                         # 13
+    val r = run64(p, 30)
+    f = f + chk_x("traps_rvc", "misaligned lw raises misaligned-load trap",
+        r.st.rf.regs[3] == 99)
+
+    # Compressed c.addi x10, 1 fed through the direct 32-bit fetch interface.
+    var p2: [u32] = []
+    p2 = p2.push(0x00000505u32)                # 0: c.addi x10, 1 (16-bit parcel)
+    p2 = p2.push(park())                       # 1
+    val r2 = run64(p2, 10)
+    f = f + chk_x("traps_rvc", "compressed c.addi executes at core interface",
+        r2.st.rf.regs[10] == 1)
+    f
+
+# ============================================================================
+# Main
+# ============================================================================
+
+fn main() -> i64:
+    print("=== RV64 ISA conformance probe (core64_combinational/update) ===")
+    var fails: i64 = 0
+    fails = fails + class_arith_imm()
+    fails = fails + class_arith_reg()
+    fails = fails + class_branch_jump()
+    fails = fails + class_load_store()
+    fails = fails + class_muldiv()
+    fails = fails + class_amo()
+    fails = fails + class_csr()
+    fails = fails + class_traps_rvc()
+    if fails == 0:
+        print("RV64 ISA CONFORMANCE: PASS (0 hard failures)")
+        return 0
+    print("RV64 ISA CONFORMANCE: {fails} HARD FAILURES")
+    1

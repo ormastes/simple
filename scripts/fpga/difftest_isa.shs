@@ -1,0 +1,99 @@
+#!/bin/bash
+# ISA-conformance difftest harness (Lane R, 2026-07-22).
+#
+# Stage 1 (directed suite): runs the self-checking directed ISA probes against
+# the landed .spl core models (rv64gc_rtl core64_*, rv32i_rtl core_*) and
+# aggregates per-class PASS/FAIL/XFAIL/XPASS/BLOCKED counts from the probe
+# output protocol.
+#
+# Stage 2 (lockstep cross-check): reuses the scripts/fpga/difftest_lockstep.shs
+# mechanism (dual-QEMU gdb-multiarch per-instruction PC+reg compare) when that
+# script, the QEMU/gdb tools, and a pair of ELFs are available. Fail-closed:
+# when any prerequisite is missing the stage is reported BLOCKED with the
+# exact reason — it is never silently skipped or asserted green.
+#
+# Usage:
+#   sh scripts/fpga/difftest_isa.shs                      # directed suite only
+#   sh scripts/fpga/difftest_isa.shs <elf_a> <elf_b> [rv32|rv64]
+#                                                         # + lockstep stage
+# Env: SIMPLE_BIN — path to the simple binary (default: <repo>/bin/simple)
+set -u
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+SIMPLE_BIN="${SIMPLE_BIN:-$ROOT/bin/simple}"
+PROBE_DIR="$ROOT/test/01_unit/lib/hardware/isa_conformance"
+LOG_DIR="${ISA_LOG_DIR:-$ROOT/build/isa_conformance}"
+mkdir -p "$LOG_DIR"
+
+if [ ! -x "$SIMPLE_BIN" ]; then
+  echo "BLOCKED: simple binary not executable at $SIMPLE_BIN" >&2
+  echo "         (worktrees: set SIMPLE_BIN=/path/to/repo/bin/simple)" >&2
+  exit 2
+fi
+
+CLASSES="arith_imm arith_reg branch_jump load_store muldiv amo csr system traps_rvc"
+overall_rc=0
+
+run_probe() {
+  probe="$1"; tag="$2"
+  log="$LOG_DIR/$tag.log"
+  echo "--- $tag: $probe"
+  ( cd "$ROOT" && timeout 600 "$SIMPLE_BIN" run "$probe" ) >"$log" 2>&1
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "  PROBE RC=$rc — hard failure or crash; tail:"
+    tail -5 "$log" | sed 's/^/    /'
+    overall_rc=1
+  fi
+  pass=$(grep -c '^PASS '  "$log"); fail=$(grep -c '^FAIL '  "$log")
+  xfail=$(grep -c '^XFAIL' "$log"); xpass=$(grep -c '^XPASS' "$log")
+  blocked=$(grep -c '^BLOCKED' "$log")
+  echo "  totals: pass=$pass fail=$fail xfail=$xfail xpass=$xpass blocked=$blocked"
+  echo "  per-class:"
+  for cls in $CLASSES; do
+    cp=$(grep -c "^PASS  \[$cls\]"  "$log"); cf=$(grep -c "^FAIL  \[$cls\]" "$log")
+    cx=$(grep -c "^XFAIL \[$cls\]" "$log"); cxp=$(grep -c "^XPASS \[$cls\]" "$log")
+    tot=$((cp + cf + cx + cxp))
+    [ "$tot" -eq 0 ] && continue
+    echo "    $cls: pass=$cp fail=$cf xfail=$cx xpass=$cxp"
+  done
+  grep '^BLOCKED' "$log" | sed 's/^/  /'
+  [ "$fail" -gt 0 ] && overall_rc=1
+}
+
+echo "=== Stage 1: directed ISA conformance suite ==="
+run_probe "$PROBE_DIR/rv64_isa_conformance_probe.spl" rv64_isa
+run_probe "$PROBE_DIR/rv32_isa_conformance_probe.spl" rv32_isa
+
+echo "=== Stage 2: lockstep cross-check (difftest_lockstep.shs mechanism) ==="
+LOCKSTEP="$ROOT/scripts/fpga/difftest_lockstep.shs"
+if [ "$#" -ge 2 ]; then
+  ELF_A="$1"; ELF_B="$2"; ARCH="${3:-rv64}"
+  blocked_reason=""
+  [ -f "$LOCKSTEP" ] || blocked_reason="$LOCKSTEP not present in tree"
+  command -v "qemu-system-riscv64" >/dev/null 2>&1 || \
+    blocked_reason="${blocked_reason:-qemu-system-riscv64 not installed}"
+  command -v gdb-multiarch >/dev/null 2>&1 || \
+    blocked_reason="${blocked_reason:-gdb-multiarch not installed}"
+  [ -f "$ELF_A" ] || blocked_reason="${blocked_reason:-ELF $ELF_A missing}"
+  [ -f "$ELF_B" ] || blocked_reason="${blocked_reason:-ELF $ELF_B missing}"
+  if [ -n "$blocked_reason" ]; then
+    echo "LOCKSTEP: BLOCKED ($blocked_reason)"
+    overall_rc=1
+  else
+    sh "$LOCKSTEP" "$ELF_A" "$ELF_B" "$ARCH" || overall_rc=1
+  fi
+else
+  echo "LOCKSTEP: not requested (no ELF pair given); directed suite is the"
+  echo "          conformance signal. To cross-check against QEMU:"
+  echo "          sh scripts/fpga/difftest_isa.shs <elf_a> <elf_b> [rv32|rv64]"
+fi
+
+echo "=== RESULT ==="
+if [ "$overall_rc" -eq 0 ]; then
+  echo "ISA CONFORMANCE HARNESS: PASS (0 hard failures; XFAIL/BLOCKED annotated above)"
+else
+  echo "ISA CONFORMANCE HARNESS: FAIL"
+fi
+exit "$overall_rc"

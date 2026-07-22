@@ -1,0 +1,187 @@
+# RV32 directed ISA-conformance probe (Lane R, 2026-07-22).
+# Drives the landed rv32i_rtl core model DIRECTLY via
+# core_reset + core_combinational + core_update with an EXTERNAL register
+# file (the rv32 core keeps rf outside CoreState; write-back mirrors the
+# soc_top.spl step-9 wiring: regfile_write(rf, dec.rd, rd_data, reg_write)).
+# Classes: arith_imm, arith_reg, branch_jump, load_store, system-halt.
+# The rv32i_rtl core is RV32I only at this interface — M/A/CSR classes are
+# N/A here (covered on the rv64 core); see the summary doc.
+#
+# Output protocol: PASS/FAIL/XFAIL/XPASS  [class] name
+# Run: bin/simple run test/01_unit/lib/hardware/isa_conformance/rv32_isa_conformance_probe.spl
+use std.hardware.rv32i_rtl.core.{CoreState, core_reset, core_combinational, core_update}
+use std.hardware.rv32i_rtl.regfile.{RegFile, regfile_create, regfile_write}
+
+fn chk(cls: text, name: text, ok: bool) -> i64:
+    if ok:
+        print("PASS  [{cls}] {name}")
+        return 0
+    print("FAIL  [{cls}] {name}")
+    1
+
+# ============================================================================
+# Encoders (shared formats with the rv64 probe; kept local — probes are
+# standalone `bin/simple run` programs and do not import each other)
+# ============================================================================
+
+fn enc_r(f7: i64, rs2: i64, rs1: i64, f3: i64, rd: i64, op: i64) -> u32:
+    ((f7 << 25) | (rs2 << 20) | (rs1 << 15) | (f3 << 12) | (rd << 7) | op) as u32
+
+fn enc_i(imm: i64, rs1: i64, f3: i64, rd: i64, op: i64) -> u32:
+    (((imm & 0xFFF) << 20) | (rs1 << 15) | (f3 << 12) | (rd << 7) | op) as u32
+
+fn enc_s(imm: i64, rs2: i64, rs1: i64, f3: i64, op: i64) -> u32:
+    ((((imm >> 5) & 0x7F) << 25) | (rs2 << 20) | (rs1 << 15) | (f3 << 12) |
+     ((imm & 0x1F) << 7) | op) as u32
+
+fn enc_b(imm: i64, rs2: i64, rs1: i64, f3: i64, op: i64) -> u32:
+    ((((imm >> 12) & 0x1) << 31) | (((imm >> 5) & 0x3F) << 25) | (rs2 << 20) |
+     (rs1 << 15) | (f3 << 12) | (((imm >> 1) & 0xF) << 8) |
+     (((imm >> 11) & 0x1) << 7) | op) as u32
+
+fn enc_u(imm20: i64, rd: i64, op: i64) -> u32:
+    (((imm20 & 0xFFFFF) << 12) | (rd << 7) | op) as u32
+
+fn enc_j(imm: i64, rd: i64, op: i64) -> u32:
+    ((((imm >> 20) & 0x1) << 31) | (((imm >> 1) & 0x3FF) << 21) |
+     (((imm >> 11) & 0x1) << 20) | (((imm >> 12) & 0xFF) << 12) |
+     (rd << 7) | op) as u32
+
+fn addi(rd: i64, rs1: i64, imm: i64) -> u32:
+    enc_i(imm, rs1, 0, rd, 0x13)
+
+# ============================================================================
+# Byte-addressed data memory (256 bytes, little-endian, 32-bit port)
+# ============================================================================
+
+fn mem_new() -> [i64]:
+    var m: [i64] = []
+    var i = 0
+    while i < 256:
+        m = m.push(0)
+        i = i + 1
+    m
+
+fn mem_rd32(mem: [i64], addr: i64) -> u32:
+    var v: i64 = 0
+    var j = 0
+    while j < 4:
+        val a = addr + j
+        var b: i64 = 0
+        if a >= 0 and a < 256:
+            b = mem[a]
+        v = v | (b << (8 * j))
+        j = j + 1
+    v as u32
+
+fn mem_wr(mem: [i64], addr: i64, wdata: i64, width: u32) -> [i64]:
+    var n: i64 = 1
+    if width == 1:
+        n = 2
+    else if width == 2:
+        n = 4
+    var m = mem
+    var j = 0
+    while j < n:
+        val a = addr + j
+        if a >= 0 and a < 256:
+            m[a] = (wdata >> (8 * j)) & 0xFF
+        j = j + 1
+    m
+
+# ============================================================================
+# Run harness (external regfile, soc_top.spl-style write-back)
+# ============================================================================
+
+struct IsaRun32:
+    st: CoreState
+    rf: RegFile
+    mem: [i64]
+
+fn run32(prog: [u32], steps: i64) -> IsaRun32:
+    var st = core_reset(0)
+    var rf = regfile_create()
+    var mem = mem_new()
+    var i = 0
+    while i < steps and st.halt == false:
+        val idx = (st.pc / 4) as i64
+        var insn: u32 = 0x0000006Fu32
+        if idx >= 0 and idx < prog.len():
+            insn = prog[idx]
+        var comb = core_combinational(st, insn, 0, rf)
+        if comb.dmem_re:
+            val rdata = mem_rd32(mem, comb.dmem_addr as i64)
+            comb = core_combinational(st, insn, rdata, rf)
+        if comb.dmem_we:
+            mem = mem_wr(mem, comb.dmem_addr as i64, comb.dmem_wdata as i64,
+                comb.dmem_width)
+        rf = regfile_write(rf, comb.dec.rd, comb.rd_data,
+            comb.dec.reg_write and (st.semi_suppress == false))
+        st = core_update(st, insn, comb, comb.a0_val, comb.a1_val)
+        i = i + 1
+    IsaRun32(st: st, rf: rf, mem: mem)
+
+# ============================================================================
+# Main — one linear program covering the RV32I classes
+# ============================================================================
+
+fn main() -> i64:
+    print("=== RV32 ISA conformance probe (core_combinational/update) ===")
+    var p: [u32] = []
+    p = p.push(addi(1, 0, 42))                 #  0: x1 = 42
+    p = p.push(addi(2, 0, -5))                 #  1: x2 = 0xFFFFFFFB
+    p = p.push(enc_i(1, 2, 2, 3, 0x13))        #  2: slti  x3, x2, 1 -> 1
+    p = p.push(enc_i(1, 2, 3, 4, 0x13))        #  3: sltiu x4, x2, 1 -> 0
+    p = p.push(enc_i(255, 1, 4, 5, 0x13))      #  4: xori  x5 -> 213
+    p = p.push(enc_i(0x400 | 2, 2, 5, 6, 0x13)) # 5: srai  x6 -> 0xFFFFFFFE
+    p = p.push(enc_u(0x12345, 7, 0x37))        #  6: lui   x7 -> 0x12345000
+    p = p.push(enc_r(0x00, 2, 1, 0, 8, 0x33))  #  7: add   x8 -> 37 (wraps)
+    p = p.push(enc_r(0x20, 2, 1, 0, 9, 0x33))  #  8: sub   x9 -> 47
+    p = p.push(enc_r(0x00, 2, 1, 3, 10, 0x33)) #  9: sltu  x10 -> 1
+    p = p.push(enc_b(8, 1, 1, 0, 0x63))        # 10: beq x1,x1,+8 (taken)
+    p = p.push(addi(22, 0, 111))               # 11: poison x22
+    p = p.push(enc_b(8, 2, 1, 6, 0x63))        # 12: bltu x1,x2,+8 (taken unsigned)
+    p = p.push(addi(23, 0, 111))               # 13: poison x23
+    p = p.push(enc_j(8, 11, 0x6F))             # 14: jal x11,+8 (pc=56, link 60)
+    p = p.push(addi(24, 0, 111))               # 15: poison x24
+    p = p.push(addi(12, 0, 128))               # 16: x12 = 128
+    p = p.push(enc_s(0, 2, 12, 2, 0x23))       # 17: sw x2, 0(x12)
+    p = p.push(enc_i(0, 12, 2, 13, 0x03))      # 18: lw x13 -> 0xFFFFFFFB
+    p = p.push(enc_s(8, 2, 12, 0, 0x23))       # 19: sb x2, 8(x12)
+    p = p.push(enc_i(8, 12, 4, 14, 0x03))      # 20: lbu x14 -> 0xFB
+    p = p.push(enc_s(12, 2, 12, 1, 0x23))      # 21: sh x2, 12(x12)
+    p = p.push(enc_i(12, 12, 5, 15, 0x03))     # 22: lhu x15 -> 0xFFFB
+    p = p.push(enc_i(8, 12, 0, 16, 0x03))      # 23: lb x16 -> 0xFFFFFFFB (sign)
+    p = p.push(0x00000073u32)                  # 24: ecall -> halt (rv32i model)
+    p = p.push(0x0000006Fu32)                  # 25: park
+    val r = run32(p, 60)
+    var f: i64 = 0
+    f = f + chk("arith_imm", "addi x1 == 42", r.rf.regs[1] == 42)
+    f = f + chk("arith_imm", "addi -5 == 0xFFFFFFFB", r.rf.regs[2] == 0xFFFFFFFBu32)
+    f = f + chk("arith_imm", "slti -5 < 1 == 1", r.rf.regs[3] == 1)
+    f = f + chk("arith_imm", "sltiu (u)-5 < 1 == 0", r.rf.regs[4] == 0)
+    f = f + chk("arith_imm", "xori 42^255 == 213", r.rf.regs[5] == 213)
+    f = f + chk("arith_imm", "srai -5>>a2 == -2", r.rf.regs[6] == 0xFFFFFFFEu32)
+    f = f + chk("arith_imm", "lui 0x12345000", r.rf.regs[7] == 0x12345000u32)
+    f = f + chk("arith_reg", "add 42+-5 wraps to 37", r.rf.regs[8] == 37)
+    f = f + chk("arith_reg", "sub 42--5 == 47", r.rf.regs[9] == 47)
+    f = f + chk("arith_reg", "sltu 42<(u)-5 == 1", r.rf.regs[10] == 1)
+    f = f + chk("branch_jump", "beq taken skips poison", r.rf.regs[22] == 0)
+    f = f + chk("branch_jump", "bltu unsigned taken skips poison",
+        r.rf.regs[23] == 0)
+    f = f + chk("branch_jump", "jal link == 60 and skips poison",
+        r.rf.regs[11] == 60 and r.rf.regs[24] == 0)
+    f = f + chk("load_store", "sw/lw round-trip 0xFFFFFFFB",
+        r.rf.regs[13] == 0xFFFFFFFBu32)
+    f = f + chk("load_store", "sb/lbu zero-extends 0xFB", r.rf.regs[14] == 0xFBu32)
+    f = f + chk("load_store", "sh/lhu zero-extends 0xFFFB",
+        r.rf.regs[15] == 0xFFFBu32)
+    f = f + chk("load_store", "lb sign-extends 0xFB -> 0xFFFFFFFB",
+        r.rf.regs[16] == 0xFFFFFFFBu32)
+    f = f + chk("system", "ecall halts the rv32i core (documented model behavior)",
+        r.st.halt)
+    if f == 0:
+        print("RV32 ISA CONFORMANCE: PASS (0 hard failures)")
+        return 0
+    print("RV32 ISA CONFORMANCE: {f} HARD FAILURES")
+    1
