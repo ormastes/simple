@@ -978,6 +978,25 @@ than merely wrong (truncated at a brace, a URL cut at a colon, an empty string
 where text was expected), suspect the literal before the logic — print the
 fixture and compare it to what you wrote.
 
+- **"Passes in `fn main`, fails only under an `it`" usually means
+  JIT-vs-INTERPRETER, not spec-runner semantics.** Plain `bin/simple run`
+  JIT-compiles; spec files fail JIT and fall back to the interpreter, so an
+  interp-only bug *looks* sspec-specific. Before blaming the runner (or
+  restructuring the spec), retest the plain-main repro with
+  `SIMPLE_EXECUTION_MODE=interpreter bin/simple run ...` — if it now fails,
+  the bug is in the interpreter, and the fix belongs there. Two same-day
+  cases (2026-07-21), both misdiagnosed as spec-runner bugs at first:
+  `doc/08_tracking/bug/interp_empty_event_array_result_match_erasure_2026-07-21.md`
+  (extern shim contract drift) and
+  `doc/08_tracking/bug/interp_var_reassign_const_after_me_method_in_spec_2026-07-21.md`
+  (unframed static-method const poisoning; `SIMPLE_CONST_TRACE=<name>` traces it).
+- **Runnable probe mirror for run-path coverage.** `simple test` (SSpec) and
+  `run` use different evaluators, so a green spec does not prove the run/JIT
+  path. For behavior worth gating on both, pair the spec with a runnable
+  `probe_*.spl` beside it that prints per-stage `PASS`/`FAIL` lines and a
+  final verdict line (pattern: `test/.../probe_interaction_core.spl`,
+  `test/02_integration/ui/probe_event_loop_smoke.spl`).
+
 ## Fixtures that lie (mock stdlib on a real-IO path)
 
 `std.nogc_sync_mut.file_system.file_ops` is a **mock**: `file_read_text` returns
