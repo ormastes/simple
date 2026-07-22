@@ -1,0 +1,74 @@
+# Standalone probe for soc_top_64 program execution through the real RV64 core.
+# The SSpec runner daemon hangs on this tree (known deployed-seed bug:
+# doc/08_tracking/bug/deployed_seed_test_runner_init_hang_2026-07-17.md), so
+# this probe mirrors the "SocTop64 Program Execution" spec cases and prints
+# PASS/FAIL. Run: bin/simple run test/01_unit/lib/hardware/soc_rtl/soc_top_64_probe.spl
+use std.hardware.soc_rtl.soc_top_64.{SocTop64State, soc_top_64_init, soc_top_64_tick}
+use std.hardware.soc_rtl.ram64.{ram64_read, ram64_write}
+
+fn check(name: text, ok: bool) -> i64:
+    if ok:
+        print("PASS {name}")
+        return 0
+    print("FAIL {name}")
+    1
+
+fn main() -> i64:
+    var fails: i64 = 0
+
+    # ── Case 1: ALU/branch/jal program (NOP stepper would fail all asserts) ──
+    var soc = soc_top_64_init(0x1000)
+    var ram = soc.ram
+    ram = ram64_write(ram, 0x00, 4, 0x02A00093)   # addi x1, x0, 42
+    ram = ram64_write(ram, 0x04, 4, 0x00108113)   # addi x2, x1, 1   (x2 = 43)
+    ram = ram64_write(ram, 0x08, 4, 0x00209463)   # bne  x1, x2, +8  (taken)
+    ram = ram64_write(ram, 0x0C, 4, 0x00000093)   # addi x1, x0, 0   (poison, skipped)
+    ram = ram64_write(ram, 0x10, 4, 0x00700193)   # addi x3, x0, 7
+    ram = ram64_write(ram, 0x14, 4, 0x0000006F)   # jal  x0, 0       (park)
+    soc.ram = ram
+    soc.core.pc = 0x8000_0000
+    var i = 0
+    while i < 20:
+        soc = soc_top_64_tick(soc)
+        i = i + 1
+    print("case1 pc={soc.core.pc} x1={soc.core.rf.regs[1]} x2={soc.core.rf.regs[2]} x3={soc.core.rf.regs[3]} mtime={soc.clint.mtime}")
+    fails = fails + check("case1 pc parks at jal self-loop 0x80000014", soc.core.pc == 0x8000_0014)
+    fails = fails + check("case1 x1 == 42 (poison skipped by taken bne)", soc.core.rf.regs[1] == 42)
+    fails = fails + check("case1 x2 == 43", soc.core.rf.regs[2] == 43)
+    fails = fails + check("case1 x3 == 7", soc.core.rf.regs[3] == 7)
+    fails = fails + check("case1 clint mtime ticked 20", soc.clint.mtime == 20)
+
+    # ── Case 2: store then load round-trip through RAM via the core ──
+    var soc2 = soc_top_64_init(0x1000)
+    var ram2 = soc2.ram
+    ram2 = ram64_write(ram2, 0x00, 4, 0x03700093)   # addi x1, x0, 55
+    ram2 = ram64_write(ram2, 0x04, 4, 0x00100293)   # addi x5, x0, 1
+    ram2 = ram64_write(ram2, 0x08, 4, 0x01F29293)   # slli x5, x5, 31  (x5 = 0x8000_0000)
+    ram2 = ram64_write(ram2, 0x0C, 4, 0x0412A023)   # sw   x1, 64(x5)
+    ram2 = ram64_write(ram2, 0x10, 4, 0x0402A303)   # lw   x6, 64(x5)
+    ram2 = ram64_write(ram2, 0x14, 4, 0x0000006F)   # jal  x0, 0       (park)
+    soc2.ram = ram2
+    soc2.core.pc = 0x8000_0000
+    var j = 0
+    while j < 12:
+        soc2 = soc_top_64_tick(soc2)
+        j = j + 1
+    val stored = ram64_read(soc2.ram, 0x40, 4)
+    print("case2 pc={soc2.core.pc} x6={soc2.core.rf.regs[6]} mem[0x40]={stored}")
+    fails = fails + check("case2 pc parks at 0x80000014", soc2.core.pc == 0x8000_0014)
+    fails = fails + check("case2 sw wrote 55 to RAM", stored == 55)
+    fails = fails + check("case2 lw read 55 back into x6", soc2.core.rf.regs[6] == 55)
+
+    # ── Case 3: first tick executes the real bootrom lui at reset vector ──
+    var soc3 = soc_top_64_init(0x1000)
+    soc3 = soc_top_64_tick(soc3)
+    val lui_sp_sext = 0x8010_0000 - 0x1_0000_0000
+    print("case3 pc={soc3.core.pc} sp={soc3.core.rf.regs[2]}")
+    fails = fails + check("case3 pc == 0x1004 after bootrom lui", soc3.core.pc == 0x1004)
+    fails = fails + check("case3 sp == sext(0x80100000)", soc3.core.rf.regs[2] == lui_sp_sext)
+
+    if fails == 0:
+        print("SOC64 PROBE: ALL PASS")
+        return 0
+    print("SOC64 PROBE: {fails} FAILURES")
+    1

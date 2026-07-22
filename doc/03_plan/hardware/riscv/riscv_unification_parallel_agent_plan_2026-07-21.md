@@ -100,6 +100,39 @@ Full audit: session scratchpad `riscv_docs/w1c_claim_audit.md`.
   session before starting; blocked on their spec migration for
   `core64_step`.
 
+### Session update (2026-07-22)
+
+- **Trapped riscv chain RECOVERED + PUSHED** `46c54a743d0` — the 13-commit
+  rv32/rv64 session chain (proven rv32 PL core: c.add decode, divider
+  writeback, putint — GHDL boot→login→ls→TEST PASSED; rv64 serial-shell
+  kernel chain + QEMU harness) was stranded locally: every commit conflicted
+  after a rebase and the git materialization trapped all content under
+  `.jjconflict-base-*` trees (real paths absent from the git trees; content
+  recovered via `jj file show`). Landed as one file-level reland on the live
+  origin tip, 18 files, all revert-guarded forward deltas, content-grep
+  verified on the remote tip.
+- **Phase 3 JTAG pulled forward — Stage 1 LANDED** `e0d8fb67e58` —
+  TAP/DTM/DMI foundation, GHDL 5/5 PASS (see
+  `doc/03_plan/hardware/debug/riscv_jtag_debug_plan_2026-07-21.md`).
+- **W2-D LANDED (this session)** — `soc_top_64_tick` wired through the real
+  core via `core64_combinational`+`core64_update` (RV32 soc_tick pattern:
+  CLINT → fetch → comb-prelim → load dispatch → comb-final → store dispatch
+  → update). `core64_cycle` was NOT usable: it calls `memory_access`/`pmp`/
+  `pmp_csr` modules that don't exist in the tree — filed
+  `doc/08_tracking/bug/rv64gc_core_unloadable_at_tip_2026-07-22.md` (also
+  covers the `@hardware` decorator semantic error and the `is_csr` decode
+  mismatch that make core.spl unloadable at tip; shadow-harness reference
+  fix retained in session scratchpad). Gate: SSpec runner still daemon-hung
+  (known deployed-seed bug, identical baseline) — evidence is a standalone
+  probe on a shadow copy with the pre-broken core mechanically unblocked:
+  3 cases, 10/10 PASS (ALU/branch/jal parks PC at self-loop with x1=42
+  poison-skip; sw/lw round-trip through RAM; bootrom first-fetch), NOP
+  stepper provably fails cases 1–2. Bonus: bootrom is RV32-encoded (lui
+  sign-extends on RV64) — filed
+  `doc/08_tracking/bug/soc64_bootrom_rv32_encoded_sext_misjump_2026-07-22.md`.
+- **W2-B + JTAG Stage 2 in flight (this session)** — AOP silent-skip audit
+  lane and Debug Module halt/resume lane running in parallel worktrees.
+
 ## Wave 3 — Phase 2 shared core skeleton (after Wave 2 green)
 
 - `RiscvXlenSpec` + common decode/ALU/regfile extraction per the companion

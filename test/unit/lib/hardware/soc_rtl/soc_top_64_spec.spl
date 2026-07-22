@@ -24,8 +24,9 @@ Covers: AC-3 (SOC top-level integrates core + CLINT + PLIC + UART16550
 ## Compiled-Mode Notes
 
 Memory map constant checks and RAM64 read/write round-trips are
-interpreter-safe. Full SoC tick simulation (core64_step + peripheral
-updates + interrupt routing) requires compiled mode.
+interpreter-safe. Full SoC tick simulation runs the real core via
+core64_combinational + core64_update (core64_cycle's bus-protocol path
+depends on rv64gc_rtl.memory_access/pmp/pmp_csr which are not in tree).
 """
 
 use std.spipe.*
@@ -162,6 +163,63 @@ describe "SocTop64 Tick":
         var soc = soc_top_64_init(SOC64_TEST_DRAM_SIZE)
         soc = soc_top_64_tick(soc)
         expect(soc.clint.mtime).to_equal(1)
+
+
+# ============================================================================
+# AC-3: Program Execution Through the Real RV64 Core
+# ============================================================================
+#
+# A NOP stepper (pc += 4) fails all of these: the taken bne must skip the
+# poison instruction, the jal self-loop must park the PC, and the regfile
+# must hold real ALU results.
+
+describe "SocTop64 Program Execution":
+    it "AC-3: executes an ALU/branch/jal program from RAM through the real core":
+        var soc = soc_top_64_init(SOC64_TEST_DRAM_SIZE)
+        var ram = soc.ram
+        ram = ram64_write(ram, 0x00, 4, 0x02A00093)   # addi x1, x0, 42
+        ram = ram64_write(ram, 0x04, 4, 0x00108113)   # addi x2, x1, 1   (x2 = 43)
+        ram = ram64_write(ram, 0x08, 4, 0x00209463)   # bne  x1, x2, +8  (taken)
+        ram = ram64_write(ram, 0x0C, 4, 0x00000093)   # addi x1, x0, 0   (poison, skipped)
+        ram = ram64_write(ram, 0x10, 4, 0x00700193)   # addi x3, x0, 7
+        ram = ram64_write(ram, 0x14, 4, 0x0000006F)   # jal  x0, 0       (park)
+        soc.ram = ram
+        soc.core.pc = 0x8000_0000
+        var i = 0
+        while i < 20:
+            soc = soc_top_64_tick(soc)
+            i = i + 1
+        expect(soc.core.pc).to_equal(0x8000_0014)
+        expect(soc.core.rf.regs[1]).to_equal(42)
+        expect(soc.core.rf.regs[2]).to_equal(43)
+        expect(soc.core.rf.regs[3]).to_equal(7)
+
+    it "AC-3: store then load round-trips through RAM via the core":
+        var soc = soc_top_64_init(SOC64_TEST_DRAM_SIZE)
+        var ram = soc.ram
+        ram = ram64_write(ram, 0x00, 4, 0x03700093)   # addi x1, x0, 55
+        ram = ram64_write(ram, 0x04, 4, 0x00100293)   # addi x5, x0, 1
+        ram = ram64_write(ram, 0x08, 4, 0x01F29293)   # slli x5, x5, 31  (x5 = 0x8000_0000)
+        ram = ram64_write(ram, 0x0C, 4, 0x0412A023)   # sw   x1, 64(x5)
+        ram = ram64_write(ram, 0x10, 4, 0x0402A303)   # lw   x6, 64(x5)
+        ram = ram64_write(ram, 0x14, 4, 0x0000006F)   # jal  x0, 0       (park)
+        soc.ram = ram
+        soc.core.pc = 0x8000_0000
+        var i = 0
+        while i < 12:
+            soc = soc_top_64_tick(soc)
+            i = i + 1
+        expect(soc.core.pc).to_equal(0x8000_0014)
+        expect(ram64_read(soc.ram, 0x40, 4)).to_equal(55)
+        expect(soc.core.rf.regs[6]).to_equal(55)
+
+    it "AC-3: first tick executes the bootrom instruction at the reset vector":
+        var soc = soc_top_64_init(SOC64_TEST_DRAM_SIZE)
+        soc = soc_top_64_tick(soc)
+        # bootrom 0x1000 = lui sp, 0x80100 -> sign-extended on RV64
+        expect(soc.core.pc).to_equal(0x1004)
+        val lui_sp_sext = 0x8010_0000 - 0x1_0000_0000
+        expect(soc.core.rf.regs[2]).to_equal(lui_sp_sext)
 
 
 # ============================================================================

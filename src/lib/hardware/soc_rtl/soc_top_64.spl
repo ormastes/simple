@@ -2,35 +2,48 @@
 # SoC RTL Top-Level — RV64GC System-on-Chip (64-bit)
 # ============================================================================
 #
-# Wires together the RV64GC core, CLINT, UART16550, and RAM into a complete
+# Wires together the RV64GC core, CLINT, and RAM into a complete
 # single-cycle SoC targeting the QEMU virt memory map.
 #
 # soc_top_64_tick() is the main simulation entry point.  Each call = 1 cycle.
-# Minimal pipeline (interpreter-safe subset):
+# Pipeline per cycle (RV32 soc_tick pattern, see soc_top.spl):
 #   1. Advance CLINT mtime
-#   2. Advance core PC by 4 (NOP step when no instruction memory wired)
+#   2. Fetch instruction by PC (RAM when PC in DRAM range, bootrom otherwise)
+#   3. core64_combinational prelim pass (computes dmem address for loads)
+#   4. Data memory read dispatch (RAM range)
+#   5. core64_combinational final pass with real dmem_rdata
+#   6. Data memory write dispatch (store instructions, RAM range)
+#   7. core64_update — clocked PC / regfile / CSR / trap / semihosting update
 #
-# Full RV64GC pipeline (compiled mode): requires core64_combinational +
-# core64_update + full Wishbone64 dispatch (see soc_top.spl for RV32 pattern).
+# The core entry wired here is core64_combinational + core64_update.
+# core64_cycle (the request_ready/response_valid bus-protocol path) depends on
+# std.hardware.rv64gc_rtl.memory_access / pmp / pmp_csr which do not exist in
+# the tree, so it cannot execute; the comb/update pair is the only runnable
+# real-core path today.
+#
+# MMIO scope: instruction fetch from bootrom/RAM; loads/stores served from RAM
+# only. Loads from unmapped/peripheral space return 0, stores outside RAM are
+# ignored (UART16550/PLIC data-path routing is a follow-up lane).
 #
 # Dependencies:
-#   - std.hardware.rv64gc_rtl.core: CoreState64, core64_init
-#     (priv_mode field and core64_init fn added by rv64gc core parallel agent)
+#   - std.hardware.rv64gc_rtl.core: CoreState64, core64_init,
+#     core64_combinational, core64_update
 #   - std.hardware.soc_rtl.clint: ClintState, clint_create, clint_tick
-#     (mtime i64 field added by clint upgrade parallel agent)
-#   - std.hardware.soc_rtl.ram64: Ram64State, ram64_init
+#   - std.hardware.soc_rtl.ram64: Ram64State, ram64_init, ram64_read, ram64_write
+#   - std.hardware.soc_rtl.bootrom: bootrom_read
 #   - std.hardware.soc_rtl.wb64_interconnect: WbRegion64, Wb64Interconnect,
 #     wb64_qemu_virt_regions, wb64_init, wb64_request
 #
-# VHDL synthesizable subset: i64, bool, [i64], structs only.
+# VHDL synthesizable subset: i64, u32, bool, [i64], structs only.
 # ============================================================================
 
 # -- Core
-use std.hardware.rv64gc_rtl.core.{CoreState64, core64_init}
+use std.hardware.rv64gc_rtl.core.{CoreState64, core64_init, core64_combinational, core64_update}
 
 # -- Peripherals
 use std.hardware.soc_rtl.clint.{ClintState, clint_create, clint_tick}
-use std.hardware.soc_rtl.ram64.{Ram64State, ram64_init}
+use std.hardware.soc_rtl.ram64.{Ram64State, ram64_init, ram64_read, ram64_write}
+use std.hardware.soc_rtl.bootrom.bootrom_read
 
 # -- Wishbone64 interconnect
 use std.hardware.soc_rtl.wb64_interconnect.{WbRegion64, Wb64Interconnect, wb64_qemu_virt_regions, wb64_init}
@@ -38,13 +51,16 @@ use std.hardware.soc_rtl.wb64_interconnect.{WbRegion64, Wb64Interconnect, wb64_q
 # Reset vector matches QEMU virt boot ROM base
 val SOC64_RESET_VECTOR: i64 = 0x1000
 
+# DRAM base matches QEMU virt memory map (wb64_qemu_virt_regions)
+val SOC64_RAM_BASE: i64 = 0x8000_0000
+
 # ============================================================================
 # SoC64 State
 # ============================================================================
 
 struct SocTop64State:
     """Full 64-bit SoC sequential state."""
-    core:  CoreState64     # RV64GC core (pc, priv_mode, halt, ...)
+    core:  CoreState64     # RV64GC core (pc, priv_mode, halt, rf, ...)
     ram:   Ram64State      # DRAM
     clint: ClintState      # CLINT (mtime, mtimecmp, msip)
     ic:    Wb64Interconnect  # Address decode table (read-only after init)
@@ -69,25 +85,79 @@ fn soc_top_64_init(dram_size: i64) -> SocTop64State:
     )
 
 # ============================================================================
+# Memory dispatch helpers
+# ============================================================================
+
+fn soc64_in_ram(soc: SocTop64State, addr: i64) -> bool:
+    """True when the byte address falls inside the DRAM region."""
+    addr >= SOC64_RAM_BASE and addr < SOC64_RAM_BASE + soc.ram.size
+
+fn soc64_width_bytes(width_code: u32) -> i64:
+    """Map funct3 low bits (0=byte 1=half 2=word 3=dword) to byte count."""
+    if width_code == 0:
+        return 1
+    if width_code == 1:
+        return 2
+    if width_code == 2:
+        return 4
+    8
+
+fn soc64_fetch(soc: SocTop64State, pc: i64) -> u32:
+    """Fetch a 32-bit instruction at PC: DRAM when in range, bootrom
+    otherwise (bootrom returns NOP outside its ROM window)."""
+    if soc64_in_ram(soc, pc):
+        val word = ram64_read(soc.ram, pc - SOC64_RAM_BASE, 4)
+        return word as u32
+    bootrom_read(pc as u32)
+
+fn soc64_mem_read(soc: SocTop64State, addr: i64, width_bytes: i64) -> i64:
+    """Data load dispatch: DRAM in range, otherwise 0 (peripheral read
+    routing is not wired yet)."""
+    if soc64_in_ram(soc, addr):
+        return ram64_read(soc.ram, addr - SOC64_RAM_BASE, width_bytes)
+    0
+
+# ============================================================================
 # SoC Tick — one clock cycle
 # ============================================================================
 
 fn soc_top_64_tick(soc: SocTop64State) -> SocTop64State:
-    """Execute one clock cycle of the RV64GC SoC.
+    """Execute one clock cycle of the RV64GC SoC through the real core.
 
-    Minimal interpreter-safe implementation:
-      1. Tick CLINT (increments mtime)
-      2. Advance PC by 4 (NOP instruction step)
-
-    Full pipeline (compiled mode): add core64_combinational + core64_update
-    + Wishbone64 dispatch following the RV32 soc_tick pattern."""
+    Runs the RV32 soc_tick pattern on the RV64 datapath:
+    fetch -> core64_combinational (prelim) -> load dispatch ->
+    core64_combinational (final) -> store dispatch -> core64_update.
+    core64_update owns PC/regfile/CSR/trap/semihosting sequencing."""
     var out = soc
 
     # Step 1: Tick CLINT — increments mtime
     val ct = clint_tick(out.clint)
     out.clint = ct.state
 
-    # Step 2: Advance PC (NOP step — boot ROM returns NOP 0x00000013)
-    out.core.pc = out.core.pc + 4
+    # Halted core: peripherals keep ticking, datapath is frozen
+    if out.core.halt:
+        return out
+
+    # Step 2: Fetch instruction by PC
+    val insn = soc64_fetch(out, out.core.pc)
+
+    # Step 3: Prelim combinational pass — computes dmem address for loads
+    val comb_prelim = core64_combinational(out.core, insn, 0, out.core.rf)
+    val width_bytes = soc64_width_bytes(comb_prelim.dmem_width)
+
+    # Step 4: Data memory read dispatch
+    var dmem_rdata: i64 = 0
+    if comb_prelim.dmem_re:
+        dmem_rdata = soc64_mem_read(out, comb_prelim.dmem_addr, width_bytes)
+
+    # Step 5: Final combinational pass with real load data
+    val comb = core64_combinational(out.core, insn, dmem_rdata, out.core.rf)
+
+    # Step 6: Data memory write dispatch (stores; RAM range only)
+    if comb.dmem_we and soc64_in_ram(out, comb.dmem_addr):
+        out.ram = ram64_write(out.ram, comb.dmem_addr - SOC64_RAM_BASE, width_bytes, comb.dmem_wdata)
+
+    # Step 7: Clocked core update — PC, regfile, CSR, traps, semihosting
+    out.core = core64_update(out.core, insn, comb, comb.a0_val, comb.a1_val)
 
     out

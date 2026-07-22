@@ -272,7 +272,16 @@ Current stub interface:
 ## Next Steps
 
 1. ✅ File this implementation plan
-2. Create stub module interfaces (next step)
+2. ✅ **Stage 1 LANDED 2026-07-22** (`e0d8fb67e58`) — `src/lib/hardware/debug/`
+   `jtag_tap.vhd` (16-state IEEE 1149.1 TAP, 5-bit IR, IDCODE=0x15350067) +
+   `riscv_dtm.vhd` (v0.13 DTMCS version=1 abits=7, sticky dmistat, 41-bit DMI
+   scan) + `dmi_bus.vhd` (sync req/resp, 8×32 regfile) +
+   `tb_jtag_dtm_dmi.vhd`. GHDL 5/5 PASS (TLR-in-5, IDCODE, DTMCS=0x1071, DMI
+   round-trip resp=success, BYPASS), independently re-run by reviewer, exit 0.
+   Known simplifications (documented in-file): update-on-rising-TCK (TDO
+   registered on falling edge, pin-visible behavior conforms), all TCK-domain
+   (no CDC yet — needed at hart integration).
 3. Wait for BRAM work confirmation before Stage 2
-4. Begin Stage 1 (TAP/DTM/DMI) when ready
+4. Begin Stage 2 (Debug Module halt/resume) — external-facing interface only,
+   hart hooks stay stubs per plan
 5. Coordinate with opus agent on core integration timing
