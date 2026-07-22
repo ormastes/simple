@@ -575,7 +575,7 @@ RuntimeValue rt_string_replace_all(RuntimeValue str, RuntimeValue old_val, Runti
     if (o->len == 0 || o->len > s->len) return str;
 
     uint32_t count = 0;
-    for (uint32_t i = 0; i + o->len <= s->len;) {
+    for (uint32_t i = 0; o->len <= s->len - i;) {
         uint32_t j = 0;
         while (j < o->len && s->data[i + j] == o->data[j]) j++;
         if (j == o->len) {
@@ -601,7 +601,7 @@ RuntimeValue rt_string_replace_all(RuntimeValue str, RuntimeValue old_val, Runti
     uint32_t out_i = 0;
     while (in < s->len) {
         uint32_t j = 0;
-        while (in + j < s->len && j < o->len && s->data[in + j] == o->data[j]) j++;
+        while (j < o->len && j < s->len - in && s->data[in + j] == o->data[j]) j++;
         if (j == o->len) {
             for (uint32_t k = 0; k < n->len; k++) out->data[out_i++] = n->data[k];
             in += o->len;

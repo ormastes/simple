@@ -2459,7 +2459,7 @@ int64_t rt_string_replace(int64_t value, int64_t old_value, int64_t new_value) {
     if (old_s->len == 0) return value;
 
     uint64_t count = 0;
-    for (uint64_t i = 0; i + old_s->len <= s->len;) {
+    for (uint64_t i = 0; old_s->len <= s->len - i;) {
         if (memcmp(s->data + i, old_s->data, (size_t)old_s->len) == 0) {
             count++;
             i += old_s->len;
@@ -2482,7 +2482,7 @@ int64_t rt_string_replace(int64_t value, int64_t old_value, int64_t new_value) {
     uint64_t in_i = 0;
     uint64_t out_i = 0;
     while (in_i < s->len) {
-        if (in_i + old_s->len <= s->len && memcmp(s->data + in_i, old_s->data, (size_t)old_s->len) == 0) {
+        if (old_s->len <= s->len - in_i && memcmp(s->data + in_i, old_s->data, (size_t)old_s->len) == 0) {
             if (new_s->len > 0) memcpy(out->data + out_i, new_s->data, (size_t)new_s->len);
             out_i += new_s->len;
             in_i += old_s->len;

@@ -232,8 +232,12 @@ static size_t _heap_off = 0;
 
 void *malloc(size_t sz)
 {
+    if (sz > sizeof(_heap) - 15) {
+        serial_puts("[PANIC] heap exhausted\r\n");
+        for(;;) outb(0xF4, 0);
+    }
     sz = (sz + 15) & ~(size_t)15;
-    if (_heap_off + sz > sizeof(_heap)) {
+    if (_heap_off > sizeof(_heap) - sz) {
         serial_puts("[PANIC] heap exhausted\r\n");
         for(;;) outb(0xF4, 0);
     }
@@ -383,7 +387,7 @@ RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val)
     /* Parameters are raw (untagged) per the Rust runtime ABI.
        len_val is the raw byte count, data is a raw pointer. */
     int32_t len = len_val;
-    if (len <= 0 || len > 0x100000) return NIL_VALUE;
+    if (len < 0 || len > 0x100000) return NIL_VALUE;
     RuntimeString *s = (RuntimeString *)malloc(sizeof(RuntimeString) + (size_t)len + 1);
     if (!s) return NIL_VALUE;
     s->hdr.type = HEAP_STRING;
@@ -951,10 +955,56 @@ S2(rt_string_index_of) S2(rt_string_last_index_of)
 S2(rt_string_substr) S2(rt_string_split)
 S1(rt_string_trim) S1(rt_string_trim_start) S1(rt_string_trim_end)
 S1(rt_string_to_upper) S1(rt_string_to_lower)
-S2(rt_string_replace) S3(rt_string_replace_all) S2(rt_string_repeat)
+S2(rt_string_repeat)
 S2(rt_string_pad_start) S2(rt_string_pad_end)
 S1(rt_string_reverse) S1(rt_string_bytes)
 S1(rt_string_is_empty) S2(rt_string_compare) S2(rt_string_format)
+
+RuntimeValue rt_string_replace_all(RuntimeValue str, RuntimeValue old_val, RuntimeValue new_val)
+{
+    if (!IS_HEAP(str) || !IS_HEAP(old_val) || !IS_HEAP(new_val)) return NIL_VALUE;
+    RuntimeString *s = IS_HEAP(str) ? (RuntimeString *)DECODE_PTR(str) : (RuntimeString *)0;
+    RuntimeString *o = IS_HEAP(old_val) ? (RuntimeString *)DECODE_PTR(old_val) : (RuntimeString *)0;
+    RuntimeString *n = IS_HEAP(new_val) ? (RuntimeString *)DECODE_PTR(new_val) : (RuntimeString *)0;
+    if (!s || !o || !n || s->hdr.type != HEAP_STRING || o->hdr.type != HEAP_STRING || n->hdr.type != HEAP_STRING) return NIL_VALUE;
+    if (o->len == 0 || o->len > s->len) return str;
+    uint32_t nlen = n->len;
+    uint32_t count = 0;
+    for (uint32_t i = 0; o->len <= s->len - i;) {
+        uint32_t j;
+        for (j = 0; j < o->len; j++) if (s->data[i + j] != o->data[j]) break;
+        if (j == o->len) { count++; i += o->len; } else i++;
+    }
+    if (count == 0) return str;
+    uint64_t result_len_wide = (uint64_t)s->len - (uint64_t)count * o->len + (uint64_t)count * nlen;
+    if (result_len_wide > 0x100000U) return str;
+    uint32_t result_len = (uint32_t)result_len_wide;
+    RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + result_len + 1);
+    if (!r) return str;
+    r->hdr.type = HEAP_STRING;
+    r->hdr.size = (uint32_t)(sizeof(RuntimeString) + result_len + 1);
+    r->len = result_len;
+    uint32_t out = 0;
+    for (uint32_t i = 0; i < s->len;) {
+        if (o->len <= s->len - i) {
+            uint32_t j;
+            for (j = 0; j < o->len; j++) if (s->data[i + j] != o->data[j]) break;
+            if (j == o->len) {
+                if (nlen > 0) { __builtin_memcpy(r->data + out, n->data, nlen); out += nlen; }
+                i += o->len;
+                continue;
+            }
+        }
+        r->data[out++] = s->data[i++];
+    }
+    r->data[result_len] = '\0';
+    return ENCODE_PTR(r);
+}
+
+RuntimeValue rt_string_replace(RuntimeValue str, RuntimeValue old_val, RuntimeValue new_val)
+{
+    return rt_string_replace_all(str, old_val, new_val);
+}
 
 /* --- Array --- */
 S1(rt_array_pop) S3(rt_array_set)

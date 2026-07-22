@@ -64,12 +64,18 @@ serial line `font names expected-runtime=|…|NotoSans Mono-Regular|…` vs
 decoded `…|NotoSansMono-Regular|…`. Worked around in font_registry with
 primitive char-extraction stripping.
 
-The x86_64 and ARM64 hardware runtimes now route `rt_string_replace` through
-their existing replace-all owner. Both RISC-V64 runtime copies use the same
-two-pass non-overlapping algorithm and the same wrapper. A host-executable C
-regression covers repeated, expanding, deleting, missing, empty-needle, and
-aliased-replacement cases; an SSpec source contract pins all four owners and
-keeps both RISC-V64 implementations identical. Fresh guest execution remains
+The x86_64, x86_32, ARM32, and ARM64 hardware runtimes now route
+`rt_string_replace` through a real replace-all owner. Both RISC-V64 runtime
+copies use the same two-pass non-overlapping algorithm and wrapper. The two
+32-bit owners also validate all operands as strings, accept empty replacement
+strings, cap results to their existing 1 MiB string limit, and harden bump
+allocation against alignment overflow instead of retaining their zero-return
+macro stubs. Every owner uses subtraction-form match bounds so length addition
+cannot wrap. A host-executable C regression covers repeated,
+expanding, deleting, missing, empty-needle, and aliased-replacement cases; an
+SSpec source contract pins all six owners and keeps both RISC-V64
+implementations identical. ARM32 now compiles the shared cross-target fixture
+through its hard-float object gate. Fresh 32-bit guest execution remains
 pending.
 
 ## Sibling defect (ROOT of the render-fault chain): Option None-discrimination broken on baremetal

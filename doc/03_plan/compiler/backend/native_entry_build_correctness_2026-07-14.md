@@ -534,9 +534,12 @@ the shared binary — deploys require explicit user go-ahead).
   hosted LLVM/Cranelift, FreeBSD LLVM/Cranelift, AArch64/RISC-V64 execution,
   and ARM32/RISC-V32/Windows-ARM64 object gates; the simple-core smoke runs C5
   against the pure runtime. The observed bare-metal text `.replace` sibling now
-  uses replace-all semantics on x86_64, ARM64, and both RISC-V64 runtime owners;
-  focused C behavior and SSpec ownership contracts prevent first-match-only
-  regressions. ARM32, ARM64, and x86_32 text bracket indexing now shares the
+  uses replace-all semantics on x86_64, x86_32, ARM32, ARM64, and both RISC-V64
+  runtime owners; focused C behavior and the six-owner SSpec contract prevent
+  first-match-only, zero-stub, or wrap-prone match bounds. The 32-bit owners
+  accept empty strings and reject allocations beyond their existing 1 MiB
+  string limit; their bump allocators reject alignment overflow. ARM32, ARM64, and x86_32 text
+  bracket indexing now shares the
   hosted/x86_64/RISC-V64 ABI: raw length/index results and tagged one-character
   text, with generic `rt_index_get` decoding its tagged index before forwarding.
   Typed-parameter literal and dynamic-text oracles run in hosted/FreeBSD parity
@@ -548,6 +551,8 @@ the shared binary — deploys require explicit user go-ahead).
   element per UTF-8 codepoint. A dynamic ASCII/BMP/astral strict-dual fixture
   is selected on hosted and FreeBSD matrices; the shared cross-target fixture
   inherits the same sum/join oracle for AArch64/RV64 execution and 32-bit
-  object lanes.
+  object lanes. ARM32 now builds that shared fixture directly and validates a
+  nonempty ELF32 hard-float relocatable object; RV32 remains soft-float
+  object-only.
   Rebuilt current-source execution remains pending. See
   `native_chr_builtin_no_lowering_2026-07-18.md`.

@@ -9793,12 +9793,12 @@ RuntimeValue rt_string_replace_all(RuntimeValue str, RuntimeValue old_val, Runti
     RuntimeString *s = decode_string(str);
     RuntimeString *o = decode_string(old_val);
     RuntimeString *n = decode_string(new_val);
-    if (!s || !o || o->len == 0) return str;
+    if (!s || !o || o->len == 0 || o->len > s->len) return str;
     uint32_t nlen = n ? n->len : 0;
 
     /* First pass: count occurrences to compute result size */
     uint32_t count = 0;
-    for (uint32_t i = 0; i + o->len <= s->len; ) {
+    for (uint32_t i = 0; o->len <= s->len - i; ) {
         uint32_t j;
         for (j = 0; j < o->len; j++) {
             if (s->data[i + j] != o->data[j]) break;
@@ -9822,7 +9822,7 @@ RuntimeValue rt_string_replace_all(RuntimeValue str, RuntimeValue old_val, Runti
     /* Second pass: build result */
     uint32_t out = 0;
     for (uint32_t i = 0; i < s->len; ) {
-        if (i + o->len <= s->len) {
+        if (o->len <= s->len - i) {
             uint32_t j;
             for (j = 0; j < o->len; j++) {
                 if (s->data[i + j] != o->data[j]) break;
