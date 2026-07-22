@@ -955,7 +955,33 @@ impl Lowerer {
             // the enum header) instead of `rt_enum_payload`, producing a corrupt payload
             // pointer that SIGSEGVs on first field access. See
             // doc/08_tracking/bug/stage4_codegen_compact_form_hazards_2026-07-02.md.
-            let class_struct_fields: Option<Vec<(String, TypeId)>> = if enum_name == "_" {
+            // ... and the heuristic must not fire when the pattern is a genuine
+            // ENUM arm whose variant name merely collides with a struct type
+            // elsewhere in the closure (e.g. `struct Enum` in parser_types.spl
+            // vs `case Enum(enum_, variant, payload)` over a `PatternKind`
+            // subject). The .spl self-hosted lowering guards this with
+            // `not enum_variant_names.has(variant)`; mirror that here.
+            // Precedence: a subject KNOWN to be an enum always takes the enum
+            // path; a subject KNOWN to be a struct keeps the positional-struct
+            // path; an unknown/ANY subject falls back to the variant-name test
+            // so closure type degradation cannot re-trigger the miscompile.
+            let subject_is_known_enum =
+                matches!(self.module.types.get(subject_ty), Some(HirType::Enum { .. }));
+            let subject_is_known_struct =
+                matches!(self.module.types.get(subject_ty), Some(HirType::Struct { .. }));
+            let variant_of_some_enum = || {
+                self.global_enum_defs.as_ref().is_some_and(|defs| {
+                    defs.values()
+                        .any(|vs| vs.iter().any(|(v, _)| v == enum_variant.as_str()))
+                }) || self.module.types.iter().any(|(_, ty)| {
+                    matches!(ty, HirType::Enum { variants, .. }
+                        if variants.iter().any(|(v, _)| v == enum_variant.as_str()))
+                })
+            };
+            let struct_reinterpret_ok = enum_name == "_"
+                && !subject_is_known_enum
+                && (subject_is_known_struct || !variant_of_some_enum());
+            let class_struct_fields: Option<Vec<(String, TypeId)>> = if struct_reinterpret_ok {
                 self.module.types.lookup(enum_variant.as_str()).and_then(|tid| {
                     if let Some(HirType::Struct { fields, .. }) = self.module.types.get(tid) {
                         Some(fields.clone())
@@ -1504,12 +1530,32 @@ impl Lowerer {
                 // The type system already guarantees the object is of that class at the
                 // call site, so the condition is always true unless the subject enum
                 // itself owns this variant name.
-                let subject_enum_owns_variant = matches!(
+                // Guard rule (kept in sync with build_pattern_binding_stmts):
+                // a subject KNOWN to be an enum never takes the class path —
+                // even when the local `variants` list is empty (imported
+                // enums), because Bool(true) here silently always-matches the
+                // arm while extraction reads struct field offsets off the enum
+                // header. A subject KNOWN to be a struct keeps the class path.
+                // Unknown/ANY subjects fall back to the variant-name test
+                // (enum wins on collision), mirroring the .spl lowering's
+                // `not enum_variant_names.has(variant)` guard.
+                let subject_is_known_enum = matches!(
                     self.module.types.get(subject_ty),
-                    Some(HirType::Enum { variants, .. })
-                        if variants.iter().any(|(name, _)| name == variant)
+                    Some(HirType::Enum { .. })
                 );
-                let is_class_pattern = !subject_enum_owns_variant
+                let subject_is_known_struct = matches!(
+                    self.module.types.get(subject_ty),
+                    Some(HirType::Struct { .. })
+                );
+                let variant_of_some_enum = self.global_enum_defs.as_ref().is_some_and(|defs| {
+                    defs.values()
+                        .any(|vs| vs.iter().any(|(v, _)| v == variant.as_str()))
+                }) || self.module.types.iter().any(|(_, ty)| {
+                    matches!(ty, HirType::Enum { variants, .. }
+                        if variants.iter().any(|(v, _)| v == variant.as_str()))
+                });
+                let is_class_pattern = !subject_is_known_enum
+                    && (subject_is_known_struct || !variant_of_some_enum)
                     && self.module.types.lookup(variant.as_str()).map_or(false, |tid| {
                         matches!(self.module.types.get(tid), Some(HirType::Struct { .. }))
                     });
