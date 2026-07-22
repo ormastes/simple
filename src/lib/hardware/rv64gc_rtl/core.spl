@@ -21,12 +21,14 @@ use std.hardware.rv64gc_rtl.pkg.{OP_BRANCH, OP_LOAD, OP_STORE, OP_SYSTEM, OP_MIS
 use std.hardware.rv64gc_rtl.pkg.{OP_IMMED, OP_REG, OP_OP_IMM_32, OP_OP_32, OP_AMO}
 use std.hardware.rv64gc_rtl.pkg.{BR_BEQ, BR_BNE, BR_BLT, BR_BGE, BR_BLTU, BR_BGEU}
 use std.hardware.rv64gc_rtl.pkg.{SEMI_ENTRY, SEMI_BREAK, SEMI_EXIT, SYS_EXIT}
-use std.hardware.rv64gc_rtl.decode.{DecodeResult64, decode_instruction_64}
+use std.hardware.rv64gc_rtl.decode.{DecodeResult64, decode_instruction_64, sign_extend_to_64}
 use std.hardware.rv64gc_rtl.alu.{AluResult64, alu64_compute, i64_signed_lt}
 use std.hardware.rv64gc_rtl.regfile.{RegFile64, RegReadResult64, regfile64_create, regfile64_read, regfile64_write}
 use std.hardware.rv64gc_rtl.lsu.lsu64_load
 use std.hardware.rv64gc_rtl.mul_div.{MulDivState, mul_div_ready}
-use std.hardware.rv64gc_rtl.atomics.AtomicsState
+use std.hardware.rv64gc_rtl.atomics.{AtomicsState, atomics_create, atomics_lr, atomics_sc, atomics_invalidate, amo_compute}
+use std.hardware.rv64gc_rtl.pkg.{AMO_LR, AMO_SC, AMO_SWAP, AMO_ADD, AMO_XOR, AMO_AND, AMO_OR}
+use std.hardware.rv64gc_rtl.pkg.{AMO_MIN, AMO_MAX, AMO_MINU, AMO_MAXU}
 use std.hardware.rv64gc_rtl.csr.{CsrFile64, csr64_create, csr64_read, csr64_write}
 use std.hardware.rv64gc_rtl.csr.{MSTATUS_MIE_MASK, MIP_MEIP_MASK, MIP_MSIP_MASK, MIP_MTIP_MASK}
 use std.hardware.rv64gc_rtl.csr_s.{CsrSMode64, csr_s64_create, csr_s64_read, csr_s64_write}
@@ -221,13 +223,24 @@ fn core64_instruction_legal(instruction: u32, dec: DecodeResult64) -> bool:
     if op == OP_SYSTEM:
         if dec.is_sfence_vma:
             return dec.rd == 0
-        if dec.is_csr or dec.is_mret or dec.is_sret:
+        if dec.is_csr or dec.is_mret or dec.is_sret or dec.is_wfi:
             return true
         return instruction == 0x00000073 or instruction == 0x00100073
 
-    # A is recognized so the extension gate below can raise a precise illegal
-    # instruction until its reservation/bus path is connected.
-    op == OP_AMO
+    # A extension: LR/SC + AMO, .W (f3=2) and .D (f3=3) only. LR requires
+    # rs2 == 0. aq/rl bits (funct7[1:0]) are accepted — single-hart, all
+    # accesses already sequentially consistent.
+    if op == OP_AMO:
+        if f3 != 2 and f3 != 3:
+            return false
+        val f5 = f7 >> 2
+        if f5 == AMO_LR:
+            return dec.rs2 == 0
+        return (f5 == AMO_SC or f5 == AMO_SWAP or f5 == AMO_ADD or
+                f5 == AMO_XOR or f5 == AMO_AND or f5 == AMO_OR or
+                f5 == AMO_MIN or f5 == AMO_MAX or f5 == AMO_MINU or
+                f5 == AMO_MAXU)
+    false
 
 fn core64_privileged_instruction_legal(state: CoreState64,
                                        dec: DecodeResult64) -> bool:
@@ -374,10 +387,50 @@ fn core64_combinational(state: CoreState64, imem_data: u32, dmem_rdata: i64, rf:
 
     # Data memory interface
     val dmem_addr = alu_res.result
-    val dmem_wdata = rs2_data
-    val dmem_we = dec.mem_write and (state.semi_suppress == false)
-    val dmem_re = dec.mem_read
+    var dmem_wdata = rs2_data
+    var dmem_we = dec.mem_write and (state.semi_suppress == false)
+    var dmem_re = dec.mem_read
     val dmem_width = dec.funct3 & 0x3
+
+    # ── A extension (OP_AMO): LR / SC / AMO read-modify-write ──
+    # Address = rs1 (decode routes imm=0 through the ALU for OP_AMO, so
+    # dmem_addr already equals rs1). funct3=2 → .W (4 bytes, sign-extended
+    # into rd via lsu64_load), funct3=3 → .D (8 bytes). The SoC tick reads
+    # old memory at step 4 and writes dmem_wdata at step 6 of the SAME
+    # cycle, so an AMO is a true single-cycle atomic RMW.
+    if dec.is_amo:
+        val amo_funct5 = dec.funct7 >> 2
+        if amo_funct5 == AMO_LR:
+            # LR: plain load + reservation set (reservation is sequential
+            # state — core64_update marks it).
+            dmem_re = true
+            rd_data = lsu64_load(dmem_rdata, dec.funct3)
+        else if amo_funct5 == AMO_SC:
+            # SC: store rs2 iff the reservation is valid and matches this
+            # address; rd = 0 on success, 1 on failure.
+            val sc_ok = state.atomics.reservation_valid and
+                        state.atomics.reservation_addr == dmem_addr
+            dmem_we = sc_ok and (state.semi_suppress == false)
+            if sc_ok:
+                rd_data = 0
+            else:
+                rd_data = 1
+        else:
+            # AMOSWAP/ADD/XOR/AND/OR/MIN/MAX/MINU/MAXU: rd gets the
+            # (sign-extended for .W) old value, memory gets the computed
+            # new value. For .W the rs2 operand is sign-extended from its
+            # low 32 bits so signed and unsigned 32-bit min/max order
+            # correctly in the 64-bit comparator; the 4-byte store
+            # truncates the result back to 32 bits.
+            dmem_re = true
+            dmem_we = state.semi_suppress == false
+            val amo_old = lsu64_load(dmem_rdata, dec.funct3)
+            var amo_rs2 = rs2_data
+            if dec.funct3 == 2:
+                amo_rs2 = sign_extend_to_64(rs2_data & 0xFFFF_FFFF, 32)
+            val amo = amo_compute(amo_funct5, amo_old, amo_rs2)
+            dmem_wdata = amo.new_value
+            rd_data = amo_old
 
     CoreCombResult64(
         dec: dec,
@@ -487,6 +540,28 @@ fn core64_update(state: CoreState64, imem_data: u32, comb: CoreCombResult64, a0_
                 new_csr_s = trap.csr_s
                 new_semi_phase = 0
                 new_semi_suppress = false
+                new_atomics = atomics_create()
+
+        else if comb.dec.is_wfi and state.semi_phase == 0:
+            # WFI — wait for interrupt. Chosen semantics (documented):
+            #   * retire as a NOP (pc <- pc+4) when an enabled interrupt is
+            #     already pending (mie & mip != 0) — the SoC's step-8
+            #     interrupt take then fires with mepc = wfi+4, so mret
+            #     resumes AFTER the wfi (RISC-V: mepc = next instruction);
+            #   * retire as a NOP when mstatus.MIE = 0 — the spec allows
+            #     WFI to be a no-op, and this avoids a permanent hang when
+            #     interrupts are globally disabled (OpenSBI relies on this
+            #     in its early idle paths);
+            #   * otherwise hold pc (stall). Peripherals (CLINT/PLIC) keep
+            #     ticking in the SoC loop, so a future mie&mip match wakes
+            #     the core on the cycle it pends.
+            new_semi_phase = 0
+            new_semi_suppress = false
+            val wfi_mie_on = (state.csr_m.mstatus & MSTATUS_MIE_MASK) != 0
+            val wfi_pending = (state.csr_m.mie & state.csr_m.mip) != 0
+            if wfi_pending or wfi_mie_on == false:
+                new_pc = comb.pc_plus4
+            # else: new_pc stays state.pc — architectural stall
 
         else if comb.dec.opcode == OP_SYSTEM and state.semi_phase == 0:
             var cause = CAUSE_ILLEGAL_INSN
@@ -505,11 +580,31 @@ fn core64_update(state: CoreState64, imem_data: u32, comb: CoreCombResult64, a0_
             new_csr_s = trap.csr_s
             new_semi_phase = 0
             new_semi_suppress = false
+            new_atomics = atomics_create()
 
         else:
             new_semi_phase = 0
             new_semi_suppress = false
             new_pc = comb.pc_next
+            # A-extension reservation tracking (single-hart rule,
+            # documented): LR sets the reservation on its address; SC
+            # ALWAYS clears it (success or fail); any other store — plain
+            # SW/SD/... or an AMO — to the reserved address clears it;
+            # synchronous trap entry clears it (branches above). A store
+            # to a DIFFERENT address leaves the reservation intact, which
+            # is architecturally sound on a single hart (the reserved
+            # location cannot have changed).
+            if comb.dec.is_amo:
+                val amo_funct5 = comb.dec.funct7 >> 2
+                if amo_funct5 == AMO_LR:
+                    new_atomics = atomics_lr(state.atomics, comb.dmem_addr)
+                else if amo_funct5 == AMO_SC:
+                    val sc = atomics_sc(state.atomics, comb.dmem_addr)
+                    new_atomics = sc.state
+                else:
+                    new_atomics = atomics_invalidate(state.atomics, comb.dmem_addr)
+            else if comb.dec.mem_write:
+                new_atomics = atomics_invalidate(state.atomics, comb.dmem_addr)
 
         new_rf = regfile64_write(state.rf, comb.dec.rd, comb.rd_data, comb.rd_write)
 

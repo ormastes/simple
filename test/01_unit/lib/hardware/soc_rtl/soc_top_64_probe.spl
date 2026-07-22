@@ -232,6 +232,162 @@ fn main() -> i64:
     fails = fails + check("case6 MEIP deasserted after RX drain (mip bit 11 clear)", (soc6.core.csr_m.mip & 0x800) == 0)
     fails = fails + check("case6 PLIC pending clear after drain", soc6.plic.pending == 0)
 
+    # ── Case a: AMOADD.W — rd gets old value, memory gets old+rs2 ──
+    var soca = soc_top_64_init(0x1000)
+    var rama = soca.ram
+    rama = ram64_write(rama, 0x40, 4, 5)              # mem[0x40] = 5
+    rama = ram64_write(rama, 0x00, 4, 0x800002B7)     # lui  x5, 0x80000
+    rama = ram64_write(rama, 0x04, 4, 0x02029293)     # slli x5, x5, 32
+    rama = ram64_write(rama, 0x08, 4, 0x0202D293)     # srli x5, x5, 32
+    rama = ram64_write(rama, 0x0C, 4, 0x04028293)     # addi x5, x5, 0x40
+    rama = ram64_write(rama, 0x10, 4, 0x00700393)     # addi x7, x0, 7
+    rama = ram64_write(rama, 0x14, 4, 0x0072A32F)     # amoadd.w x6, x7, (x5)
+    rama = ram64_write(rama, 0x18, 4, 0x0000006F)     # jal x0, 0 (park)
+    soca.ram = rama
+    soca.core.pc = 0x8000_0000
+    var pa = 0
+    while pa < 12:
+        soca = soc_top_64_tick(soca)
+        pa = pa + 1
+    val amem = ram64_read(soca.ram, 0x40, 4)
+    print("casea pc={soca.core.pc} x6={soca.core.rf.regs[6]} mem[0x40]={amem}")
+    fails = fails + check("casea amoadd.w rd == old value 5", soca.core.rf.regs[6] == 5)
+    fails = fails + check("casea amoadd.w mem == 5+7 = 12", amem == 12)
+    fails = fails + check("casea pc parks at 0x80000018", soca.core.pc == 0x8000_0018)
+
+    # ── Case b: AMOSWAP.D round-trip + AMOMAXU.W unsigned pick ──
+    var socb = soc_top_64_init(0x1000)
+    var ramb = socb.ram
+    ramb = ram64_write(ramb, 0x48, 8, 100)            # mem64[0x48] = 100
+    ramb = ram64_write(ramb, 0x50, 4, 0x8000_0000)    # mem32[0x50] = 0x80000000
+    val maxu_before = ram64_read(ramb, 0x50, 4)
+    ramb = ram64_write(ramb, 0x00, 4, 0x800002B7)     # lui  x5, 0x80000
+    ramb = ram64_write(ramb, 0x04, 4, 0x02029293)     # slli x5, x5, 32
+    ramb = ram64_write(ramb, 0x08, 4, 0x0202D293)     # srli x5, x5, 32
+    ramb = ram64_write(ramb, 0x0C, 4, 0x04828293)     # addi x5, x5, 0x48
+    ramb = ram64_write(ramb, 0x10, 4, 0x0C800393)     # addi x7, x0, 200
+    ramb = ram64_write(ramb, 0x14, 4, 0x0872B32F)     # amoswap.d x6, x7, (x5)
+    ramb = ram64_write(ramb, 0x18, 4, 0x00828493)     # addi x9, x5, 8  (0x8000_0050)
+    ramb = ram64_write(ramb, 0x1C, 4, 0x00100393)     # addi x7, x0, 1
+    ramb = ram64_write(ramb, 0x20, 4, 0xE074A42F)     # amomaxu.w x8, x7, (x9)
+    ramb = ram64_write(ramb, 0x24, 4, 0x0000006F)     # jal x0, 0 (park)
+    socb.ram = ramb
+    socb.core.pc = 0x8000_0000
+    var pb = 0
+    while pb < 14:
+        socb = soc_top_64_tick(socb)
+        pb = pb + 1
+    val bswap = ram64_read(socb.ram, 0x48, 8)
+    val bmaxu = ram64_read(socb.ram, 0x50, 4)
+    val neg31: i64 = 0 - 0x8000_0000
+    print("caseb x6={socb.core.rf.regs[6]} mem64[0x48]={bswap} x8={socb.core.rf.regs[8]} mem32[0x50]={bmaxu}")
+    fails = fails + check("caseb amoswap.d rd == old value 100", socb.core.rf.regs[6] == 100)
+    fails = fails + check("caseb amoswap.d mem == 200", bswap == 200)
+    fails = fails + check("caseb amomaxu.w rd == sign-extended old 0x80000000", socb.core.rf.regs[8] == neg31)
+    fails = fails + check("caseb amomaxu.w kept 0x80000000 (unsigned max beats 1)", bmaxu == maxu_before)
+
+    # ── Case c: LR/SC success path — sc rd=0, memory updated ──
+    var socc = soc_top_64_init(0x1000)
+    var ramc = socc.ram
+    ramc = ram64_write(ramc, 0x60, 4, 11)             # mem[0x60] = 11
+    ramc = ram64_write(ramc, 0x00, 4, 0x800002B7)     # lui  x5, 0x80000
+    ramc = ram64_write(ramc, 0x04, 4, 0x02029293)     # slli x5, x5, 32
+    ramc = ram64_write(ramc, 0x08, 4, 0x0202D293)     # srli x5, x5, 32
+    ramc = ram64_write(ramc, 0x0C, 4, 0x06028293)     # addi x5, x5, 0x60
+    ramc = ram64_write(ramc, 0x10, 4, 0x1002A32F)     # lr.w x6, (x5)
+    ramc = ram64_write(ramc, 0x14, 4, 0x04D00393)     # addi x7, x0, 77
+    ramc = ram64_write(ramc, 0x18, 4, 0x1872A42F)     # sc.w x8, x7, (x5)
+    ramc = ram64_write(ramc, 0x1C, 4, 0x0000006F)     # jal x0, 0 (park)
+    socc.ram = ramc
+    socc.core.pc = 0x8000_0000
+    var pcc = 0
+    while pcc < 12:
+        socc = soc_top_64_tick(socc)
+        pcc = pcc + 1
+    val cmem = ram64_read(socc.ram, 0x60, 4)
+    print("casec x6={socc.core.rf.regs[6]} x8={socc.core.rf.regs[8]} mem[0x60]={cmem} resv={socc.core.atomics.reservation_valid}")
+    fails = fails + check("casec lr.w loaded 11", socc.core.rf.regs[6] == 11)
+    fails = fails + check("casec sc.w succeeded (rd == 0)", socc.core.rf.regs[8] == 0)
+    fails = fails + check("casec sc.w wrote 77", cmem == 77)
+    fails = fails + check("casec reservation cleared after sc", socc.core.atomics.reservation_valid == false)
+
+    # ── Case d: SC fail path — intervening store clears the reservation ──
+    var socd = soc_top_64_init(0x1000)
+    var ramd = socd.ram
+    ramd = ram64_write(ramd, 0x70, 4, 1)              # mem[0x70] = 1
+    ramd = ram64_write(ramd, 0x00, 4, 0x800002B7)     # lui  x5, 0x80000
+    ramd = ram64_write(ramd, 0x04, 4, 0x02029293)     # slli x5, x5, 32
+    ramd = ram64_write(ramd, 0x08, 4, 0x0202D293)     # srli x5, x5, 32
+    ramd = ram64_write(ramd, 0x0C, 4, 0x07028293)     # addi x5, x5, 0x70
+    ramd = ram64_write(ramd, 0x10, 4, 0x1002A32F)     # lr.w x6, (x5)
+    ramd = ram64_write(ramd, 0x14, 4, 0x06300393)     # addi x7, x0, 99
+    ramd = ram64_write(ramd, 0x18, 4, 0x0072A023)     # sw x7, 0(x5)   (intervening store)
+    ramd = ram64_write(ramd, 0x1C, 4, 0x03700393)     # addi x7, x0, 55
+    ramd = ram64_write(ramd, 0x20, 4, 0x1872A42F)     # sc.w x8, x7, (x5)
+    ramd = ram64_write(ramd, 0x24, 4, 0x0000006F)     # jal x0, 0 (park)
+    socd.ram = ramd
+    socd.core.pc = 0x8000_0000
+    var pd = 0
+    while pd < 14:
+        socd = soc_top_64_tick(socd)
+        pd = pd + 1
+    val dmem = ram64_read(socd.ram, 0x70, 4)
+    print("cased x6={socd.core.rf.regs[6]} x8={socd.core.rf.regs[8]} mem[0x70]={dmem}")
+    fails = fails + check("cased lr.w loaded 1", socd.core.rf.regs[6] == 1)
+    fails = fails + check("cased sc.w failed (rd == 1)", socd.core.rf.regs[8] == 1)
+    fails = fails + check("cased mem kept intervening 99 (sc did NOT write 55)", dmem == 99)
+
+    # ── Case e: WFI + timer wake — pc holds at wfi, then handler with ──
+    # ── mepc == wfi+4 (wfi retires as NOP on wake, take uses next pc) ──
+    var soce = soc_top_64_init(0x1000)
+    var rame = soce.ram
+    rame = ram64_write(rame, 0x000, 4, 0x800002B7)    # lui  x5, 0x80000
+    rame = ram64_write(rame, 0x004, 4, 0x02029293)    # slli x5, x5, 32
+    rame = ram64_write(rame, 0x008, 4, 0x0202D293)    # srli x5, x5, 32
+    rame = ram64_write(rame, 0x00C, 4, 0x10028293)    # addi x5, x5, 0x100 (handler)
+    rame = ram64_write(rame, 0x010, 4, 0x30529073)    # csrrw x0, mtvec, x5
+    rame = ram64_write(rame, 0x014, 4, 0x02004337)    # lui  x6, 0x2004  (mtimecmp)
+    rame = ram64_write(rame, 0x018, 4, 0x03C00393)    # addi x7, x0, 60
+    rame = ram64_write(rame, 0x01C, 4, 0x00733023)    # sd   x7, 0(x6)   mtimecmp=60
+    rame = ram64_write(rame, 0x020, 4, 0x08000393)    # addi x7, x0, 0x80 (MTIE)
+    rame = ram64_write(rame, 0x024, 4, 0x3043A073)    # csrrs x0, mie, x7
+    rame = ram64_write(rame, 0x028, 4, 0x00800393)    # addi x7, x0, 8   (MIE)
+    rame = ram64_write(rame, 0x02C, 4, 0x3003A073)    # csrrs x0, mstatus, x7
+    rame = ram64_write(rame, 0x030, 4, 0x10500073)    # wfi
+    rame = ram64_write(rame, 0x034, 4, 0x07700493)    # addi x9, x0, 0x77 (post-wfi)
+    rame = ram64_write(rame, 0x038, 4, 0x0000006F)    # jal x0, 0
+    # Handler at 0x8000_0100
+    rame = ram64_write(rame, 0x100, 4, 0x32100593)    # addi x11, x0, 0x321
+    rame = ram64_write(rame, 0x104, 4, 0x20B2A023)    # sw x11, 0x200(x5) -> 0x8000_0300
+    rame = ram64_write(rame, 0x108, 4, 0x34202673)    # csrrs x12, mcause, x0
+    rame = ram64_write(rame, 0x10C, 4, 0x341026F3)    # csrrs x13, mepc, x0
+    rame = ram64_write(rame, 0x110, 4, 0x0000006F)    # jal x0, 0 (park)
+    soce.ram = rame
+    soce.core.pc = 0x8000_0000
+    var pe = 0
+    while pe < 30:
+        soce = soc_top_64_tick(soce)
+        pe = pe + 1
+    val held_pc_30 = soce.core.pc
+    val held_x9_30 = soce.core.rf.regs[9]
+    while pe < 50:
+        soce = soc_top_64_tick(soce)
+        pe = pe + 1
+    val held_pc_50 = soce.core.pc
+    while pe < 120:
+        soce = soc_top_64_tick(soce)
+        pe = pe + 1
+    val emarker = ram64_read(soce.ram, 0x300, 4)
+    val e_cause: i64 = (1 << 63) | 7
+    print("casee held30={held_pc_30} held50={held_pc_50} pc={soce.core.pc} mcause(x12)={soce.core.rf.regs[12]} mepc(x13)={soce.core.rf.regs[13]} marker={emarker} x9={soce.core.rf.regs[9]}")
+    fails = fails + check("casee pc held at wfi (0x80000030) at tick 30", held_pc_30 == 0x8000_0030)
+    fails = fails + check("casee pc still held at wfi at tick 50 (pre-timer)", held_pc_50 == 0x8000_0030)
+    fails = fails + check("casee post-wfi insn NOT executed during hold (x9==0)", held_x9_30 == 0)
+    fails = fails + check("casee timer wake entered handler (marker 0x321)", emarker == 0x321)
+    fails = fails + check("casee mcause == machine timer interrupt (bit63|7)", soce.core.rf.regs[12] == e_cause)
+    fails = fails + check("casee mepc == wfi+4 (0x80000034) — resume after wfi", soce.core.rf.regs[13] == 0x8000_0034)
+    fails = fails + check("casee pc parks in handler at 0x80000110", soce.core.pc == 0x8000_0110)
+
     if fails == 0:
         print("SOC64 PROBE: ALL PASS")
         return 0
