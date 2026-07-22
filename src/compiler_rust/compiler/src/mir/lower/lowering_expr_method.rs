@@ -370,15 +370,31 @@ impl<'a> MirLowerer<'a> {
                     | TypeId::U64
                     | TypeId::BOOL
             ) && !receiver_element_is_function;
-            if needs_push_boxing {
+            // F32/F64 push args must go through BoxFloat (lossless rt_value_float
+            // heap box), NOT raw: an untagged double's low mantissa bits read as a
+            // runtime tag, so IndexGet's decode zeroed 3 mantissa bits —
+            // `p.push(0.1); p[0] == 0.1` was false on the JIT path. Same fix the
+            // array-literal lowering already has (lowering_expr_collection.rs).
+            // See doc/08_tracking/bug/seed_f64_array_element_precision_mask_2026-07-19.md.
+            let needs_push_float_boxing = matches!(push_arg_ty, TypeId::F32 | TypeId::F64)
+                && !receiver_element_is_function;
+            if needs_push_boxing || needs_push_float_boxing {
                 let raw_arg = arg_regs[0];
+                let use_float = needs_push_float_boxing;
                 let boxed_arg = self.with_func(|func, current_block| {
                     let boxed = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::BoxInt {
-                        dest: boxed,
-                        value: raw_arg,
-                    });
+                    if use_float {
+                        block.instructions.push(MirInst::BoxFloat {
+                            dest: boxed,
+                            value: raw_arg,
+                        });
+                    } else {
+                        block.instructions.push(MirInst::BoxInt {
+                            dest: boxed,
+                            value: raw_arg,
+                        });
+                    }
                     boxed
                 })?;
                 arg_regs[0] = boxed_arg;

@@ -475,14 +475,29 @@ impl<'a> MirLowerer<'a> {
                                     | TypeId::U64
                                     | TypeId::BOOL
                             );
-                            let push_arg = if needs_box {
+                            // Float payloads need BoxFloat (lossless heap box):
+                            // a raw double stored untagged loses its low 3
+                            // mantissa bits to tag decoding on extraction —
+                            // f64 enum payloads read back 0.09999999999999998.
+                            // Mirrors the arr.push(float) fix in
+                            // lowering_expr_method.rs; see
+                            // doc/08_tracking/bug/seed_f64_array_element_precision_mask_2026-07-19.md.
+                            let needs_float_box = matches!(arg_ty, TypeId::F32 | TypeId::F64);
+                            let push_arg = if needs_box || needs_float_box {
                                 self.with_func(|func, current_block| {
                                     let boxed = func.new_vreg();
                                     let block = func.block_mut(current_block).unwrap();
-                                    block.instructions.push(MirInst::BoxInt {
-                                        dest: boxed,
-                                        value: *arg,
-                                    });
+                                    if needs_float_box {
+                                        block.instructions.push(MirInst::BoxFloat {
+                                            dest: boxed,
+                                            value: *arg,
+                                        });
+                                    } else {
+                                        block.instructions.push(MirInst::BoxInt {
+                                            dest: boxed,
+                                            value: *arg,
+                                        });
+                                    }
                                     boxed
                                 })?
                             } else {

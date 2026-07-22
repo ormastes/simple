@@ -39,12 +39,27 @@
 >   empty-dict path SIGSEGVs — pre-existing at clean origin tip, same fault
 >   site, unrelated to this fix:
 >   [native_empty_dict_text_value_sigsegv_2026-07-20](native_empty_dict_text_value_sigsegv_2026-07-20.md).)
-> - INTERP (`run`/`test`, Rust `simple_runtime` — STILL OPEN, needs seed
->   rebuild/redeploy): `a.push(0.1)` and `a[i] = 0.1` still inline-BoxFloat and
->   mask the low 3 mantissa bits (read back 0.09999999999999998, rc 40); dict
->   literal AND `d[k] = 0.1` store are lossless there. The `aa7ae5506c6`
->   heap-box covered literal construction and reads but not these two array
->   store sites.
+> - INTERP + JIT `run` side: **FIXED + VERIFIED 2026-07-21** (seed rebuilt and
+>   redeployed same day). Re-isolation on the fresh seed showed the two sides
+>   split: the pure INTERPRETER path (`SIMPLE_EXECUTION_MODE=interpreter`) was
+>   already lossless for push/store after the earlier heap-box work + rebuild;
+>   the remaining masker was the seed's **JIT/MIR lowering for `.push`**:
+>   `needs_push_boxing` in `mir/lower/lowering_expr_method.rs` boxed
+>   int/bool push args but had NO F32/F64 arm, so the raw double's bit
+>   pattern hit tag decoding on read (`p.push(0.1); first(p) == 0.1` false,
+>   the doc's rc-40 repro — array literals and `a[i] = 0.1` were already
+>   clean there via BoxFloat → `rt_value_float`). The enum-payload array
+>   builder in `lowering_expr_call.rs` had the identical gap for f64
+>   payloads. Both now emit `MirInst::BoxFloat` for F32/F64.
+>   Verified rc=30 on JIT AND forced-interp for: literal/push/store through a
+>   typed `[f64]` param boundary, plus `Reading.Temp(v: 0.1)` enum payload.
+>   Guard `test/03_system/native/array_f64_element_precision.spl` upgraded
+>   from mask-immune 0.25/0.5 to mask-sensitive 0.1 for push/element-store
+>   and gained a typed-`[f64]`-push case; rc=30 on run+interp. (Native-build
+>   re-verification of the guard was blocked by an unrelated WC-wide
+>   native-build outage — `_driver_module_name_collision not found` even for
+>   hello-world, conflict-storm damage in the pure-Simple driver tree; the
+>   fix does not touch the native lowering path.)
 >
 > The historical root analysis below is retained for reference.
 
