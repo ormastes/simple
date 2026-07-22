@@ -5126,6 +5126,10 @@ int64_t rt_file_atomic_write(int64_t path_value, int64_t content_value) {
 
     char* path = rt_core_string_to_cpath(path_value);
     if (!path) return 0;
+#if !defined(_WIN32)
+    struct stat existing_stat;
+    int preserve_mode = stat(path, &existing_stat) == 0;
+#endif
     char* parent = spl_strdup(path);
     if (!parent) {
         free(path);
@@ -5177,6 +5181,9 @@ int64_t rt_file_atomic_write(int64_t path_value, int64_t content_value) {
     int ok = file != NULL;
     if (ok) ok = fwrite(content_string->data, 1, (size_t)content_string->len, file) == (size_t)content_string->len;
     if (ok) ok = fflush(file) == 0;
+#if !defined(_WIN32)
+    if (ok && preserve_mode) ok = fchmod(fd, existing_stat.st_mode & 07777) == 0;
+#endif
 #if defined(_WIN32)
     if (ok) ok = _commit(fd) == 0;
 #else

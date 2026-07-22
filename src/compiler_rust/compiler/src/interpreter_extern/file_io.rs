@@ -324,10 +324,17 @@ fn atomic_write_file(path: &Path, content: &[u8]) -> bool {
     if fs::create_dir_all(parent).is_err() {
         return false;
     }
+    let permissions = fs::metadata(path).ok().map(|metadata| metadata.permissions());
     let Ok(mut temp) = tempfile::NamedTempFile::new_in(parent) else {
         return false;
     };
-    if temp.write_all(content).is_err() || temp.as_file().sync_all().is_err() {
+    if temp.write_all(content).is_err() {
+        return false;
+    }
+    if permissions.is_some_and(|permissions| temp.as_file().set_permissions(permissions).is_err()) {
+        return false;
+    }
+    if temp.as_file().sync_all().is_err() {
         return false;
     }
     temp.persist(path).is_ok()
@@ -1077,6 +1084,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("state.txt");
         std::fs::write(&target, b"old").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o4740)).unwrap();
+        }
         let result = rt_file_atomic_write(&[
             Value::text(target.to_string_lossy().to_string()),
             Value::text("complete replacement".to_string()),
@@ -1085,6 +1097,11 @@ mod tests {
 
         assert_eq!(result, Value::Bool(true));
         assert_eq!(std::fs::read(&target).unwrap(), b"complete replacement");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&target).unwrap().permissions().mode() & 0o7777, 0o4740);
+        }
 
         let occupied = dir.path().join("occupied");
         std::fs::create_dir(&occupied).unwrap();

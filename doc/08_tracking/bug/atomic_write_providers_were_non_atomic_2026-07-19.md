@@ -17,11 +17,16 @@ native-all, and core-C providers create a unique temporary file in the
 destination directory, write and sync it, then persist it atomically. The
 core-C owner decodes the real tagged-text ABI and preserves embedded NUL bytes.
 Failure leaves the existing destination intact and cleans the temporary file.
+Replacement also copies existing destination permissions to the temporary file
+before the atomic rename, so formatting a source file does not silently chmod it.
 
 ## Evidence
 
 - interpreter replacement, relative-parent, and fail-closed regression: PASS
 - native-all replacement, relative-parent, directory fail-closed, and temp-cleanup regression: PASS
 - expanded core-C stale-temp collision, embedded-NUL, truncation,
-  parent-creation, rename-cleanup, and collision-preservation regression: PASS
+  parent-creation, rename-cleanup, collision-preservation, and mode-preservation
+  regression: PASS
+- formatter `--write` routes through the canonical atomic provider in source:
+  PASS
 - admitted Stage 4 lint/formatter integration: pending

@@ -151,6 +151,7 @@ int main(void) {
     snprintf(atomic_path, sizeof(atomic_path), "%s/value.txt", atomic_root);
     FILE* atomic_file = fopen(atomic_path, "wb");
     assert(atomic_file && fwrite("original-is-longer", 1, 18, atomic_file) == 18 && fclose(atomic_file) == 0);
+    assert(chmod(atomic_path, 04740) == 0);
     snprintf(atomic_temp, sizeof(atomic_temp), "%s.tmp.%ld.0", atomic_path, (long)getpid());
     atomic_file = fopen(atomic_temp, "wb");
     assert(atomic_file && fclose(atomic_file) == 0);
@@ -161,6 +162,8 @@ int main(void) {
     assert(atomic_file && fread(atomic_content, 1, sizeof(replacement_bytes), atomic_file) == sizeof(replacement_bytes));
     assert(fgetc(atomic_file) == EOF && fclose(atomic_file) == 0);
     assert(memcmp(atomic_content, replacement_bytes, sizeof(replacement_bytes)) == 0);
+    struct stat atomic_stat;
+    assert(stat(atomic_path, &atomic_stat) == 0 && (atomic_stat.st_mode & 07777) == 04740);
     assert(access(atomic_temp, F_OK) == 0);
     snprintf(atomic_temp, sizeof(atomic_temp), "%s.tmp.%ld.1", atomic_path, (long)getpid());
     assert(access(atomic_temp, F_OK) != 0);
