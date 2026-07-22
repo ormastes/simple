@@ -67,6 +67,44 @@ fn main() -> i64:
     fails = fails + check("case3 pc == 0x1004 after bootrom lui", soc3.core.pc == 0x1004)
     fails = fails + check("case3 sp == sext(0x80100000)", soc3.core.rf.regs[2] == lui_sp_sext)
 
+    # ── Case 4: MMIO — UART THR/LSR + CLINT mtime via the core ──
+    # Stores 'H','I','\n' to UART THR (0x1000_0000), reads LSR into x28
+    # (expect 0x60 = THRE|TEMT), reads mtime (0x200_BFF8) twice via RV64 ld
+    # into x29/x30 (expect monotonic). NOP-stepper or missing MMIO fails all.
+    var soc4 = soc_top_64_init(0x1000)
+    var ram4 = soc4.ram
+    ram4 = ram64_write(ram4, 0x00, 4, 0x100002B7)   # lui  x5, 0x10000  (x5 = 0x1000_0000 UART)
+    ram4 = ram64_write(ram4, 0x04, 4, 0x04800313)   # addi x6, x0, 72   ('H')
+    ram4 = ram64_write(ram4, 0x08, 4, 0x00628023)   # sb   x6, 0(x5)    THR
+    ram4 = ram64_write(ram4, 0x0C, 4, 0x04900313)   # addi x6, x0, 73   ('I')
+    ram4 = ram64_write(ram4, 0x10, 4, 0x00628023)   # sb   x6, 0(x5)    THR
+    ram4 = ram64_write(ram4, 0x14, 4, 0x00A00313)   # addi x6, x0, 10   ('\n')
+    ram4 = ram64_write(ram4, 0x18, 4, 0x00628023)   # sb   x6, 0(x5)    THR
+    ram4 = ram64_write(ram4, 0x1C, 4, 0x0052CE03)   # lbu  x28, 5(x5)   LSR -> x28
+    ram4 = ram64_write(ram4, 0x20, 4, 0x020003B7)   # lui  x7, 0x2000   (x7 = 0x200_0000 CLINT)
+    ram4 = ram64_write(ram4, 0x24, 4, 0x0000C437)   # lui  x8, 0xC      (x8 = 0xC000)
+    ram4 = ram64_write(ram4, 0x28, 4, 0xFF840413)   # addi x8, x8, -8   (x8 = 0xBFF8)
+    ram4 = ram64_write(ram4, 0x2C, 4, 0x008383B3)   # add  x7, x7, x8   (x7 = 0x200_BFF8 mtime)
+    ram4 = ram64_write(ram4, 0x30, 4, 0x0003BE83)   # ld   x29, 0(x7)   mtime read 1
+    ram4 = ram64_write(ram4, 0x34, 4, 0x0003BF03)   # ld   x30, 0(x7)   mtime read 2
+    ram4 = ram64_write(ram4, 0x38, 4, 0x0000006F)   # jal  x0, 0        (park)
+    soc4.ram = ram4
+    soc4.core.pc = 0x8000_0000
+    var k = 0
+    while k < 24:
+        soc4 = soc_top_64_tick(soc4)
+        k = k + 1
+    print("case4 pc={soc4.core.pc} uart_tx.len={soc4.uart_tx.len()} lsr={soc4.core.rf.regs[28]} mtime1={soc4.core.rf.regs[29]} mtime2={soc4.core.rf.regs[30]}")
+    fails = fails + check("case4 pc parks at 0x80000038", soc4.core.pc == 0x8000_0038)
+    fails = fails + check("case4 uart_tx has 3 bytes", soc4.uart_tx.len() == 3)
+    var tx_ok = false
+    if soc4.uart_tx.len() == 3:
+        tx_ok = soc4.uart_tx[0] == 72 and soc4.uart_tx[1] == 73 and soc4.uart_tx[2] == 10
+    fails = fails + check("case4 uart_tx == [72, 73, 10] ('HI\\n')", tx_ok)
+    fails = fails + check("case4 LSR read == 0x60 (THRE|TEMT)", soc4.core.rf.regs[28] == 0x60)
+    fails = fails + check("case4 mtime read 1 nonzero", soc4.core.rf.regs[29] > 0)
+    fails = fails + check("case4 mtime monotonic (read2 > read1)", soc4.core.rf.regs[30] > soc4.core.rf.regs[29])
+
     if fails == 0:
         print("SOC64 PROBE: ALL PASS")
         return 0

@@ -223,6 +223,52 @@ describe "SocTop64 Program Execution":
 
 
 # ============================================================================
+# AC-3: MMIO Dispatch — CLINT + UART16550 through the Real RV64 Core
+# ============================================================================
+#
+# A NOP stepper or a RAM-only bus fails all of these: the UART TX log must
+# collect the stored bytes, LSR must read 0x60 (THRE|TEMT), and back-to-back
+# mtime loads must observe the free-running CLINT counter advancing.
+
+describe "SocTop64 MMIO":
+    it "AC-3: UART THR stores log bytes, LSR reads 0x60, mtime is monotonic":
+        var soc = soc_top_64_init(SOC64_TEST_DRAM_SIZE)
+        var ram = soc.ram
+        ram = ram64_write(ram, 0x00, 4, 0x100002B7)   # lui  x5, 0x10000  (UART base)
+        ram = ram64_write(ram, 0x04, 4, 0x04800313)   # addi x6, x0, 72   ('H')
+        ram = ram64_write(ram, 0x08, 4, 0x00628023)   # sb   x6, 0(x5)    THR
+        ram = ram64_write(ram, 0x0C, 4, 0x04900313)   # addi x6, x0, 73   ('I')
+        ram = ram64_write(ram, 0x10, 4, 0x00628023)   # sb   x6, 0(x5)    THR
+        ram = ram64_write(ram, 0x14, 4, 0x00A00313)   # addi x6, x0, 10   ('\n')
+        ram = ram64_write(ram, 0x18, 4, 0x00628023)   # sb   x6, 0(x5)    THR
+        ram = ram64_write(ram, 0x1C, 4, 0x0052CE03)   # lbu  x28, 5(x5)   LSR -> x28
+        ram = ram64_write(ram, 0x20, 4, 0x020003B7)   # lui  x7, 0x2000   (CLINT base)
+        ram = ram64_write(ram, 0x24, 4, 0x0000C437)   # lui  x8, 0xC      (0xC000)
+        ram = ram64_write(ram, 0x28, 4, 0xFF840413)   # addi x8, x8, -8   (0xBFF8)
+        ram = ram64_write(ram, 0x2C, 4, 0x008383B3)   # add  x7, x7, x8   (mtime addr)
+        ram = ram64_write(ram, 0x30, 4, 0x0003BE83)   # ld   x29, 0(x7)   mtime read 1
+        ram = ram64_write(ram, 0x34, 4, 0x0003BF03)   # ld   x30, 0(x7)   mtime read 2
+        ram = ram64_write(ram, 0x38, 4, 0x0000006F)   # jal  x0, 0        (park)
+        soc.ram = ram
+        soc.core.pc = 0x8000_0000
+        var i = 0
+        while i < 24:
+            soc = soc_top_64_tick(soc)
+            i = i + 1
+        expect(soc.core.pc).to_equal(0x8000_0038)
+        expect(soc.uart_tx.len()).to_equal(3)
+        expect(soc.uart_tx[0]).to_equal(72)
+        expect(soc.uart_tx[1]).to_equal(73)
+        expect(soc.uart_tx[2]).to_equal(10)
+        expect(soc.core.rf.regs[28]).to_equal(0x60)
+        expect(soc.core.rf.regs[30] > soc.core.rf.regs[29]).to_equal(true)
+
+    it "AC-3: uart_tx log starts empty":
+        val soc = soc_top_64_init(SOC64_TEST_DRAM_SIZE)
+        expect(soc.uart_tx.len()).to_equal(0)
+
+
+# ============================================================================
 # Helper: Build QEMU virt memory map regions
 # ============================================================================
 

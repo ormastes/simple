@@ -21,9 +21,14 @@
 # the tree, so it cannot execute; the comb/update pair is the only runnable
 # real-core path today.
 #
-# MMIO scope: instruction fetch from bootrom/RAM; loads/stores served from RAM
-# only. Loads from unmapped/peripheral space return 0, stores outside RAM are
-# ignored (UART16550/PLIC data-path routing is a follow-up lane).
+# MMIO scope: instruction fetch from bootrom/RAM. Loads/stores dispatch to
+# RAM, CLINT (msip/mtimecmp/mtime @ 0x200_0000) and UART16550 (@ 0x1000_0000).
+# UART model is TX-only: THR writes append the byte to the uart_tx sim log
+# (synthesis maps this to the real UART TX FIFO; sim collects it so specs can
+# assert on printed bytes), LSR reads 0x60 (THRE|TEMT — TX drains instantly),
+# RBR reads 0 (no RX path wired yet). Loads from unmapped space return 0,
+# stores to unmapped space are ignored (PLIC data-path routing is a follow-up
+# lane).
 #
 # Dependencies:
 #   - std.hardware.rv64gc_rtl.core: CoreState64, core64_init,
@@ -41,12 +46,13 @@
 use std.hardware.rv64gc_rtl.core.{CoreState64, core64_init, core64_combinational, core64_update}
 
 # -- Peripherals
-use std.hardware.soc_rtl.clint.{ClintState, clint_create, clint_tick}
+use std.hardware.soc_rtl.clint.{ClintState, clint_create, clint_tick, clint_mmio_read, clint_mmio_write}
 use std.hardware.soc_rtl.ram64.{Ram64State, ram64_init, ram64_read, ram64_write}
 use std.hardware.soc_rtl.bootrom.bootrom_read
 
 # -- Wishbone64 interconnect
 use std.hardware.soc_rtl.wb64_interconnect.{WbRegion64, Wb64Interconnect, wb64_qemu_virt_regions, wb64_init}
+use std.hardware.soc_rtl.wb64_interconnect.{WB64_CLINT_BASE, WB64_CLINT_SIZE, WB64_UART_BASE, WB64_UART_SIZE}
 
 # Reset vector matches QEMU virt boot ROM base
 val SOC64_RESET_VECTOR: i64 = 0x1000
@@ -64,6 +70,8 @@ struct SocTop64State:
     ram:   Ram64State      # DRAM
     clint: ClintState      # CLINT (mtime, mtimecmp, msip)
     ic:    Wb64Interconnect  # Address decode table (read-only after init)
+    uart_tx: [i64]         # UART TX byte log (sim: assertion sink; synthesis:
+                           # maps to the real UART16550 TX FIFO)
 
 # ============================================================================
 # Create / Reset
@@ -77,11 +85,13 @@ fn soc_top_64_init(dram_size: i64) -> SocTop64State:
     - ram.size         = dram_size bytes
     - clint initialized with mtime = 0, mtimecmp = max"""
     val regions = wb64_qemu_virt_regions()
+    val tx_log: [i64] = []
     SocTop64State(
         core:  core64_init(SOC64_RESET_VECTOR),
         ram:   ram64_init(dram_size),
         clint: clint_create(),
-        ic:    wb64_init(regions)
+        ic:    wb64_init(regions),
+        uart_tx: tx_log
     )
 
 # ============================================================================
@@ -110,12 +120,73 @@ fn soc64_fetch(soc: SocTop64State, pc: i64) -> u32:
         return word as u32
     bootrom_read(pc as u32)
 
+fn soc64_in_clint(addr: i64) -> bool:
+    """True when the byte address falls inside the CLINT MMIO region."""
+    addr >= WB64_CLINT_BASE and addr < WB64_CLINT_BASE + WB64_CLINT_SIZE
+
+fn soc64_in_uart(addr: i64) -> bool:
+    """True when the byte address falls inside the UART16550 MMIO region."""
+    addr >= WB64_UART_BASE and addr < WB64_UART_BASE + WB64_UART_SIZE
+
+fn soc64_clint_read(soc: SocTop64State, addr: i64, width_bytes: i64) -> i64:
+    """CLINT load: 8-byte (RV64 ld, the normal kernel access width for
+    mtime/mtimecmp) assembles the {hi,lo} u32 register pair; 4-byte (lw)
+    reads a single 32-bit register via clint_mmio_read."""
+    val off = addr - WB64_CLINT_BASE
+    val lo = (clint_mmio_read(soc.clint, off as u32) as i64) & 0xFFFF_FFFF
+    if width_bytes == 8:
+        val hi = (clint_mmio_read(soc.clint, (off + 4) as u32) as i64) & 0xFFFF_FFFF
+        return (hi << 32) | lo
+    lo
+
+# LSR value: THRE|TEMT — the TX log drains instantly, transmitter always idle
+val SOC64_UART_LSR_IDLE: i64 = 0x60
+
+# UART16550 register offsets served by the SoC64 TX-only model
+val SOC64_UART_OFF_THR: i64 = 0x0   # write: TX holding register
+val SOC64_UART_OFF_LSR: i64 = 0x5   # read: line status
+
+fn soc64_uart_read(addr: i64) -> i64:
+    """UART16550 load (TX-only model): LSR reads 0x60 (THR empty +
+    transmitter empty), RBR reads 0 (no RX path wired yet — documented
+    gap), all other registers read 0."""
+    if addr - WB64_UART_BASE == SOC64_UART_OFF_LSR:
+        return SOC64_UART_LSR_IDLE
+    0
+
 fn soc64_mem_read(soc: SocTop64State, addr: i64, width_bytes: i64) -> i64:
-    """Data load dispatch: DRAM in range, otherwise 0 (peripheral read
-    routing is not wired yet)."""
+    """Data load dispatch: DRAM, CLINT, UART16550; unmapped space reads 0."""
     if soc64_in_ram(soc, addr):
         return ram64_read(soc.ram, addr - SOC64_RAM_BASE, width_bytes)
+    if soc64_in_clint(addr):
+        return soc64_clint_read(soc, addr, width_bytes)
+    if soc64_in_uart(addr):
+        return soc64_uart_read(addr)
     0
+
+fn soc64_mem_write(soc: SocTop64State, addr: i64, width_bytes: i64, wdata: i64) -> SocTop64State:
+    """Data store dispatch: DRAM, CLINT (msip/mtimecmp), UART16550 THR.
+
+    CLINT: an 8-byte store (RV64 sd) splits into the {lo,hi} 32-bit
+    register writes; 4-byte stores hit a single register. The clint.mtime
+    i64 mirror is re-synced from lo/hi after every CLINT write so direct
+    mtime stores cannot desync it.
+    UART: a THR store appends the low byte to the uart_tx sim log
+    (synthesis: real UART TX FIFO); other UART register stores are
+    accepted and dropped. Stores to unmapped space are ignored."""
+    var out = soc
+    if soc64_in_ram(out, addr):
+        out.ram = ram64_write(out.ram, addr - SOC64_RAM_BASE, width_bytes, wdata)
+    else if soc64_in_clint(addr):
+        val off = addr - WB64_CLINT_BASE
+        out.clint = clint_mmio_write(out.clint, off as u32, (wdata & 0xFFFF_FFFF) as u32)
+        if width_bytes == 8:
+            out.clint = clint_mmio_write(out.clint, (off + 4) as u32, ((wdata >> 32) & 0xFFFF_FFFF) as u32)
+        out.clint.mtime = ((out.clint.mtime_hi as i64) << 32) | ((out.clint.mtime_lo as i64) & 0xFFFF_FFFF)
+    else if soc64_in_uart(addr):
+        if addr - WB64_UART_BASE == SOC64_UART_OFF_THR:
+            out.uart_tx = out.uart_tx.push(wdata & 0xFF)
+    out
 
 # ============================================================================
 # SoC Tick — one clock cycle
@@ -153,9 +224,9 @@ fn soc_top_64_tick(soc: SocTop64State) -> SocTop64State:
     # Step 5: Final combinational pass with real load data
     val comb = core64_combinational(out.core, insn, dmem_rdata, out.core.rf)
 
-    # Step 6: Data memory write dispatch (stores; RAM range only)
-    if comb.dmem_we and soc64_in_ram(out, comb.dmem_addr):
-        out.ram = ram64_write(out.ram, comb.dmem_addr - SOC64_RAM_BASE, width_bytes, comb.dmem_wdata)
+    # Step 6: Data memory write dispatch (RAM / CLINT / UART THR)
+    if comb.dmem_we:
+        out = soc64_mem_write(out, comb.dmem_addr, width_bytes, comb.dmem_wdata)
 
     # Step 7: Clocked core update — PC, regfile, CSR, traps, semihosting
     out.core = core64_update(out.core, insn, comb, comb.a0_val, comb.a1_val)
