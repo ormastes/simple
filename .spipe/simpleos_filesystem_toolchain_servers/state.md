@@ -711,3 +711,10 @@ implementation
 - The functional probe was split and reduced to an import-only consumer. It now proves both zero HIR diagnostics and local-or-qualified callable registration; the source contract continues to guard every erased `Param` rebind.
 - The focused spec passes 3/3 once under the bounded Rust bootstrap-repair runner, and its generated manual is current. Independent small-model review plus final higher-model review accept the shared `declared_callable_type` root-cause fix.
 - No Stage2/3, Stage4, full bootstrap, target/image, or QEMU work ran. An unrelated Stage4 build owns another worktree, so the next step is an isolated Cranelift Stage2/3 refresh only after that owner clears, followed by at most one bounded Stage4 admission attempt.
+
+### 2026-07-22 current-evidence and low-resource preflight
+
+- Three small-model audits, checked against the canonical scripts/specs by the final higher-capability reviewer, classify AC-3 as current PASS; AC-7 and AC-10 remain source/documentation-only partials; AC-1, AC-2, AC-4, AC-5, AC-6, AC-8, and AC-9 remain FAIL or current-unproven. Historical HTTP/DB, Clang, and Simple filesystem logs are not current-source evidence.
+- Shell syntax for `make_os_disk.shs`, `build_fsexec_prod_ring3.shs`, `build_clang_disk.shs`, and `simpleos-native-build.shs` passes. `make_os_disk.shs --self-test` and `check-simpleos-x86-kernel-elf.shs --self-test` each pass once on current source.
+- An active 24-GiB Stage4 build belongs to stale July 18 source in `/tmp/simple-memory-sync-resume`; it is isolated and cannot admit this worktree even if it succeeds. No competing compiler, target, image, or QEMU build was started under current memory pressure.
+- Next current-source chain: isolated Cranelift Stage2/3 refresh; at most one bounded Stage4 candidate; current-source validation, canonical redeploy, and `bootstrap_essential_tools_smoke=true`; then one stamped x86 CPL3 `emit-llvm` filesystem profile before LLC, LLD, Clang, Simple filesystem, or RV64 web/DB live gates.
