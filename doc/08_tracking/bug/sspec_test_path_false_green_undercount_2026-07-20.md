@@ -1,8 +1,22 @@
 # Bug: `simple test` false-green undercount (test-path miscompile)
 
-Status: MITIGATED at defect site (char_code fix landed); BACKEND ROOT BUG OPEN
-Observed: 2026-07-20 · Filed: 2026-07-21 · Root cause pinned: 2026-07-22
-Severity: P0 — deploy blocker; invalidates `simple test` verdicts on the self-hosted binary
+Status: **FIXED — VERIFIED 2026-07-22.** Root fix in the Rust seed's cranelift
+codegen (text ordering → rt_text_cmp_any, commit 7fc2f2b0e32; + optional-print
+69aa47afa49 + header repair 0f28c76f9f0) plus defect-site char_code hardening
+(398ba054267). Verification: fresh stage4 full-CLI rebuild driven by the FIXED
+seed (163s, worktree at 0f28c76f9f0) →
+`check-sspec-count-truthful.shs` GREEN clean AND warm:
+arch_check 74/74 (74 passed, 0 failed), bitfield 28/28 (28 passed, 0 failed) —
+versus 18-or-66/74 false-green and 1/28 on the affected binary.
+Deploy notes: (1) the stage4 binary DELEGATES child spec runs to a sibling
+`simple_seed` binary — deploys must ship the sibling next to `simple`, else the
+runner falls back and crashes ("field access on nil receiver" — graceful-fail
+gap, minor, unfiled); (2) the verification build reused the Jul-20
+libsimple_compiler_backfill.a (rt_cranelift_* contract only — irrelevant to the
+test path); a deploy-grade build must regenerate it from the fixed compiler
+archive.
+Observed: 2026-07-20 · Filed: 2026-07-21 · Root cause pinned + fixed: 2026-07-22
+Severity: was P0 — deploy blocker; invalidated `simple test` verdicts
 
 ## Symptom
 Self-hosted native binary only. `simple test <spec>` executes/reports a PREFIX of
