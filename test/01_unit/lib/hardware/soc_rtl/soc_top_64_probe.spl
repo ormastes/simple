@@ -541,25 +541,32 @@ fn main() -> i64:
     fails = fails + check("caseg2 marker written, parks at 0x80000110", g2marker == 0x321 and socg2.core.pc == 0x8000_0110)
 
     # ── Case h: satp store/readback + sret roundtrip from M into S ──
-    # satp is store-only this lane (no MMU activation on fetch/load path):
-    # write Sv39|ppn, read it back. Then sepc + sstatus.SPIE|SPP=S + sret:
-    # pc <- sepc, priv <- SPP (S), SIE <- SPIE, SPP -> U, SPIE -> 1.
-    var soch = soc_top_64_init(0x1000)
+    # Sv39 MMU translation is now LIVE at the SoC layer (Lane CC), so the S-mode
+    # resume target must be backed by a real page table (a bogus satp.ppn would
+    # page-fault the very first S-mode fetch). Root L2 @ PA 0x8010_0000 (ppn
+    # 0x80100) with a single 1 GiB identity megapage at L2[2] maps all of DRAM
+    # VA==PA with V R W X A D, so S-mode executes at 0x8000_0080 through the MMU.
+    # The guest still writes Sv39|ppn to satp and reads it back (x20). Then
+    # sepc + sstatus.SPIE|SPP=S + sret: pc <- sepc, priv <- SPP (S), SIE <- SPIE.
+    var soch = soc_top_64_init(0x40_0000)
     var ramh = soch.ram
+    # Root page table: L2[2] = 1 GiB identity leaf (VA 0x8000_0000 -> PA, VRWXAD)
+    ramh = ram64_write(ramh, 0x10_0010, 8, 0x200000CF)
     ramh = ram64_write(ramh, 0x000, 4, 0x800002B7)   # lui  x5, 0x80000
     ramh = ram64_write(ramh, 0x004, 4, 0x02029293)   # slli x5, x5, 32
-    ramh = ram64_write(ramh, 0x008, 4, 0x0202D293)   # srli x5, x5, 32
+    ramh = ram64_write(ramh, 0x008, 4, 0x0202D293)   # srli x5, x5, 32  (x5 = 0x8000_0000)
     ramh = ram64_write(ramh, 0x00C, 4, 0x00100393)   # addi x7, x0, 1
     ramh = ram64_write(ramh, 0x010, 4, 0x03F39393)   # slli x7, x7, 63  (MODE=8 -> bit 63)
-    ramh = ram64_write(ramh, 0x014, 4, 0x12300413)   # addi x8, x0, 0x123 (ppn)
-    ramh = ram64_write(ramh, 0x018, 4, 0x0083E3B3)   # or   x7, x7, x8
-    ramh = ram64_write(ramh, 0x01C, 4, 0x18039073)   # csrrw x0, satp, x7
-    ramh = ram64_write(ramh, 0x020, 4, 0x18002A73)   # csrrs x20, satp, x0 (readback)
-    ramh = ram64_write(ramh, 0x024, 4, 0x08028313)   # addi x6, x5, 0x80 (resume point)
-    ramh = ram64_write(ramh, 0x028, 4, 0x14131073)   # csrrw x0, sepc, x6
-    ramh = ram64_write(ramh, 0x02C, 4, 0x12000393)   # addi x7, x0, 0x120 (SPIE|SPP)
-    ramh = ram64_write(ramh, 0x030, 4, 0x10039073)   # csrrw x0, sstatus, x7
-    ramh = ram64_write(ramh, 0x034, 4, 0x10200073)   # sret -> S-mode at sepc
+    ramh = ram64_write(ramh, 0x014, 4, 0x00080437)   # lui  x8, 0x80     (x8 = 0x80000)
+    ramh = ram64_write(ramh, 0x018, 4, 0x10040413)   # addi x8, x8, 0x100 (x8 = 0x80100 root ppn)
+    ramh = ram64_write(ramh, 0x01C, 4, 0x0083E3B3)   # or   x7, x7, x8    (x7 = satp)
+    ramh = ram64_write(ramh, 0x020, 4, 0x18039073)   # csrrw x0, satp, x7
+    ramh = ram64_write(ramh, 0x024, 4, 0x18002A73)   # csrrs x20, satp, x0 (readback)
+    ramh = ram64_write(ramh, 0x028, 4, 0x08028313)   # addi x6, x5, 0x80 (resume point)
+    ramh = ram64_write(ramh, 0x02C, 4, 0x14131073)   # csrrw x0, sepc, x6
+    ramh = ram64_write(ramh, 0x030, 4, 0x12000393)   # addi x7, x0, 0x120 (SPIE|SPP)
+    ramh = ram64_write(ramh, 0x034, 4, 0x10039073)   # csrrw x0, sstatus, x7
+    ramh = ram64_write(ramh, 0x038, 4, 0x10200073)   # sret -> S-mode at sepc (through MMU)
     ramh = ram64_write(ramh, 0x080, 4, 0x05500493)   # addi x9, x0, 0x55
     ramh = ram64_write(ramh, 0x084, 4, 0x0000006F)   # jal x0, 0 (park)
     soch.ram = ramh
@@ -568,9 +575,9 @@ fn main() -> i64:
     while ph < 20:
         soch = soc_top_64_tick(soch)
         ph = ph + 1
-    val h_satp: i64 = (1 << 63) | 0x123
+    val h_satp: i64 = (1 << 63) | 0x80100
     print("caseh x20(satp)={soch.core.rf.regs[20]} satp={soch.core.csr_s.satp} pc={soch.core.pc} x9={soch.core.rf.regs[9]} priv={soch.core.priv_mode} sstatus={soch.core.csr_s.sstatus}")
-    fails = fails + check("caseh satp readback == Sv39|0x123", soch.core.rf.regs[20] == h_satp)
+    fails = fails + check("caseh satp readback == Sv39|0x80100", soch.core.rf.regs[20] == h_satp)
     fails = fails + check("caseh satp CSR holds written value", soch.core.csr_s.satp == h_satp)
     fails = fails + check("caseh sret jumped to sepc, executed S code (x9==0x55)", soch.core.rf.regs[9] == 0x55)
     fails = fails + check("caseh parks at 0x80000084", soch.core.pc == 0x8000_0084)

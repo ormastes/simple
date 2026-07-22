@@ -1,0 +1,231 @@
+# Standalone probe for the Sv39 MMU: pure-walk correctness (mmu.spl) + SoC
+# integration (soc_top_64.spl) — translation on ifetch/load/store, page-fault
+# delegation to S, and the DTB region read path. The SSpec runner daemon hangs
+# on this tree (deployed-seed bug), so this probe prints PASS/FAIL directly.
+# Run: bin/simple run test/01_unit/lib/hardware/soc_rtl/sv39_probe.spl
+use std.hardware.rv64gc_rtl.mmu.{sv39_translate, Sv39Result}
+use std.hardware.rv64gc_rtl.mmu.{SV39_ACCESS_FETCH, SV39_ACCESS_LOAD, SV39_ACCESS_STORE}
+use std.hardware.rv64gc_rtl.mmu.{SV39_PRIV_S, SSTATUS_SUM}
+use std.hardware.rv64gc_rtl.csr_s.satp_encode_64
+use std.hardware.soc_rtl.soc_top_64.{SocTop64State, soc_top_64_init, soc_top_64_tick}
+use std.hardware.soc_rtl.ram64.{Ram64State, ram64_init, ram64_read, ram64_write}
+
+fn check(name: text, ok: bool) -> i64:
+    if ok:
+        print("PASS {name}")
+        return 0
+    print("FAIL {name}")
+    1
+
+# ── Build a page table image in a scratch RAM for the pure-walk tests ──
+# ram_base = 0x8000_0000, root at PA 0x8000_0000 (ppn 0x80000):
+#   L2 table @ PA 0x8000_0000 (offset 0x0000)
+#   L1 table @ PA 0x8000_1000 (offset 0x1000, ppn 0x80001)
+#   L0 table @ PA 0x8000_2000 (offset 0x2000, ppn 0x80002)
+fn build_walk_ram() -> Ram64State:
+    var ram = ram64_init(0x3000)
+    # L2[0] -> L1 pointer (ppn 0x80001, V only)
+    ram = ram64_write(ram, 0x0000, 8, 0x20000401)
+    # L2[2] -> 1 GiB leaf identity for VA 0x8000_0000 -> PA 0x8000_0000 (VRWXAD)
+    ram = ram64_write(ram, 0x0010, 8, 0x200000CF)
+    # L1[0] -> L0 pointer (ppn 0x80002, V only)
+    ram = ram64_write(ram, 0x1000, 8, 0x20000801)
+    # L1[2] -> 2 MiB leaf VA 0x40_0000 -> PA 0x8040_0000 (V R A, aligned)
+    ram = ram64_write(ram, 0x1010, 8, 0x20100043)
+    # L1[3] -> 2 MiB leaf MISALIGNED (PPN[0]=1) -> must fault
+    ram = ram64_write(ram, 0x1018, 8, 0x20100443)
+    # L0[1] -> 4 KiB leaf VA 0x1000 -> PA 0x8020_0000 (V R A)
+    ram = ram64_write(ram, 0x2008, 8, 0x20080043)
+    # L0[3] -> 4 KiB leaf, USER + X + A (S-mode fetch of U page must fault)
+    ram = ram64_write(ram, 0x2018, 8, 0x200C0059)
+    # L0[4] -> 4 KiB leaf, USER + R + A -> PA 0x8030_1000 (SUM gate)
+    ram = ram64_write(ram, 0x2020, 8, 0x200C0453)
+    # L0[5] -> 4 KiB leaf, R but A=0 -> must fault (no hardware A/D)
+    ram = ram64_write(ram, 0x2028, 8, 0x200C0803)
+    # L0[6] -> 4 KiB leaf, R W A but D=0 -> load ok, store faults
+    ram = ram64_write(ram, 0x2030, 8, 0x200C0C47)
+    ram
+
+fn main() -> i64:
+    var fails: i64 = 0
+    val BASE: i64 = 0x8000_0000
+    val ROOT: i64 = 0x80000
+
+    # ════════════════════════════════════════════════════════════════════
+    # Part 1 — pure Sv39 walk (mmu.sv39_translate)
+    # ════════════════════════════════════════════════════════════════════
+    val wram = build_walk_ram()
+
+    # 4 KiB mapping VA 0x1000 -> PA 0x8020_0000
+    val r_4k = sv39_translate(ROOT, 0x1000, SV39_ACCESS_LOAD, SV39_PRIV_S, 0, wram, BASE)
+    print("walk 4k pa={r_4k.pa} fault={r_4k.fault}")
+    fails = fails + check("walk 4k: VA 0x1000 -> PA 0x80200000, no fault", r_4k.fault == false and r_4k.pa == 0x8020_0000)
+
+    # Unmapped VA 0x2000 (L0[2] invalid) -> load page fault (13)
+    val r_un = sv39_translate(ROOT, 0x2000, SV39_ACCESS_LOAD, SV39_PRIV_S, 0, wram, BASE)
+    print("walk unmapped fault={r_un.fault} cause={r_un.fault_cause}")
+    fails = fails + check("walk unmapped: fault, cause 13 (load page fault)", r_un.fault and r_un.fault_cause == 13)
+
+    # 2 MiB superpage VA 0x40_0000 -> PA 0x8040_0000
+    val r_2m = sv39_translate(ROOT, 0x40_0000, SV39_ACCESS_LOAD, SV39_PRIV_S, 0, wram, BASE)
+    print("walk 2m pa={r_2m.pa} fault={r_2m.fault}")
+    fails = fails + check("walk 2M superpage: VA 0x400000 -> PA 0x80400000", r_2m.fault == false and r_2m.pa == 0x8040_0000)
+
+    # 1 GiB superpage VA 0x8000_1234 -> PA 0x8000_1234 (identity megapage)
+    val r_1g = sv39_translate(ROOT, 0x8000_1234, SV39_ACCESS_LOAD, SV39_PRIV_S, 0, wram, BASE)
+    print("walk 1g pa={r_1g.pa} fault={r_1g.fault}")
+    fails = fails + check("walk 1G superpage: VA 0x80001234 -> PA 0x80001234", r_1g.fault == false and r_1g.pa == 0x8000_1234)
+
+    # Misaligned 2 MiB superpage (PPN[0]!=0) -> fault
+    val r_mis = sv39_translate(ROOT, 0x60_0000, SV39_ACCESS_LOAD, SV39_PRIV_S, 0, wram, BASE)
+    print("walk misaligned fault={r_mis.fault} cause={r_mis.fault_cause}")
+    fails = fails + check("walk misaligned superpage: fault", r_mis.fault and r_mis.fault_cause == 13)
+
+    # S-mode instruction fetch of a U-page -> fault regardless of SUM
+    val r_su = sv39_translate(ROOT, 0x3000, SV39_ACCESS_FETCH, SV39_PRIV_S, SSTATUS_SUM, wram, BASE)
+    print("walk S-fetch-U fault={r_su.fault} cause={r_su.fault_cause}")
+    fails = fails + check("walk S-mode fetch of U page: fault, cause 12", r_su.fault and r_su.fault_cause == 12)
+
+    # S-mode load of a U-page: faults without SUM, succeeds with SUM
+    val r_nosum = sv39_translate(ROOT, 0x4000, SV39_ACCESS_LOAD, SV39_PRIV_S, 0, wram, BASE)
+    val r_sum = sv39_translate(ROOT, 0x4000, SV39_ACCESS_LOAD, SV39_PRIV_S, SSTATUS_SUM, wram, BASE)
+    print("walk SUM off_fault={r_nosum.fault} on_pa={r_sum.pa} on_fault={r_sum.fault}")
+    fails = fails + check("walk S-load U page, SUM=0: fault", r_nosum.fault and r_nosum.fault_cause == 13)
+    fails = fails + check("walk S-load U page, SUM=1: PA 0x80301000", r_sum.fault == false and r_sum.pa == 0x8030_1000)
+
+    # A=0 leaf -> fault (no hardware A/D)
+    val r_a0 = sv39_translate(ROOT, 0x5000, SV39_ACCESS_LOAD, SV39_PRIV_S, 0, wram, BASE)
+    print("walk A0 fault={r_a0.fault}")
+    fails = fails + check("walk A=0 leaf: load fault", r_a0.fault and r_a0.fault_cause == 13)
+
+    # D=0 leaf -> load ok, store fault
+    val r_d0l = sv39_translate(ROOT, 0x6000, SV39_ACCESS_LOAD, SV39_PRIV_S, 0, wram, BASE)
+    val r_d0s = sv39_translate(ROOT, 0x6000, SV39_ACCESS_STORE, SV39_PRIV_S, 0, wram, BASE)
+    print("walk D0 load_fault={r_d0l.fault} store_fault={r_d0s.fault} cause={r_d0s.fault_cause}")
+    fails = fails + check("walk D=0 leaf: load succeeds", r_d0l.fault == false and r_d0l.pa == 0x8030_3000)
+    fails = fails + check("walk D=0 leaf: store faults, cause 15", r_d0s.fault and r_d0s.fault_cause == 15)
+
+    # ════════════════════════════════════════════════════════════════════
+    # Part 2 — SoC integration (soc_top_64_tick)
+    # ════════════════════════════════════════════════════════════════════
+
+    # ── Case a: identity when satp=0 (Bare) even in S-mode ──
+    # S-mode load from a physical RAM address with satp Bare must be identity.
+    var soca = soc_top_64_init(0x40_0000)
+    var rama = soca.ram
+    rama = ram64_write(rama, 0x40, 4, 0xDEF)          # marker at PA 0x8000_0040
+    rama = ram64_write(rama, 0x00, 4, 0x80000337)     # lui  x6, 0x80000
+    rama = ram64_write(rama, 0x04, 4, 0x02031313)     # slli x6, x6, 32
+    rama = ram64_write(rama, 0x08, 4, 0x02035313)     # srli x6, x6, 32  (x6 = 0x8000_0000)
+    rama = ram64_write(rama, 0x0C, 4, 0x04030313)     # addi x6, x6, 0x40
+    rama = ram64_write(rama, 0x10, 4, 0x00032283)     # lw   x5, 0(x6)   (identity)
+    rama = ram64_write(rama, 0x14, 4, 0x0000006F)     # jal  x0, 0 (park)
+    soca.ram = rama
+    soca.core.pc = 0x8000_0000
+    soca.core.priv_mode = 1                            # S-mode
+    var ia = 0
+    while ia < 12:
+        soca = soc_top_64_tick(soca)
+        ia = ia + 1
+    print("casea x5={soca.core.rf.regs[5]} pc={soca.core.pc} priv={soca.core.priv_mode}")
+    fails = fails + check("casea satp=0 identity: S-mode load read marker 0xDEF", soca.core.rf.regs[5] == 0xDEF)
+    fails = fails + check("casea parks at 0x80000014", soca.core.pc == 0x8000_0014)
+
+    # ── Case b: S-mode load through a real 3-level page table succeeds ──
+    # Root L2 @ PA 0x8010_0000 (ppn 0x80100); L2[2]=1G identity leaf (code),
+    # L2[0]->L1@0x80101, L1[0]->L0@0x80102, L0[1]=4K leaf VA 0x1000 -> PA
+    # 0x8020_0000 where a marker is stored. Code runs identity-mapped in S.
+    var socb = soc_top_64_init(0x40_0000)
+    var ramb = socb.ram
+    ramb = ram64_write(ramb, 0x20_0000, 4, 0xABC)     # marker at PA 0x8020_0000
+    # page table
+    ramb = ram64_write(ramb, 0x10_0000, 8, 0x20040401)  # L2[0] -> L1 (ppn 0x80101)
+    ramb = ram64_write(ramb, 0x10_0010, 8, 0x200000CF)  # L2[2] -> 1G identity (VRWXAD)
+    ramb = ram64_write(ramb, 0x10_1000, 8, 0x20040801)  # L1[0] -> L0 (ppn 0x80102)
+    ramb = ram64_write(ramb, 0x10_2008, 8, 0x20080043)  # L0[1] -> PA 0x8020_0000 (V R A)
+    # code at PA 0x8000_0000 (identity fetch via L2[2])
+    ramb = ram64_write(ramb, 0x00, 4, 0x00001337)     # lui  x6, 0x1   (x6 = 0x1000 VA)
+    ramb = ram64_write(ramb, 0x04, 4, 0x00032283)     # lw   x5, 0(x6) (mapped load)
+    ramb = ram64_write(ramb, 0x08, 4, 0x0000006F)     # jal  x0, 0 (park)
+    socb.ram = ramb
+    var csb = socb.core.csr_s
+    csb.satp = satp_encode_64(8, 0, 0x80100)
+    socb.core.csr_s = csb
+    socb.core.pc = 0x8000_0000
+    socb.core.priv_mode = 1                            # S-mode
+    var ib = 0
+    while ib < 12:
+        socb = soc_top_64_tick(socb)
+        ib = ib + 1
+    print("caseb x5={socb.core.rf.regs[5]} pc={socb.core.pc} satp={socb.core.csr_s.satp}")
+    fails = fails + check("caseb S-mode mapped load VA 0x1000 read marker 0xABC", socb.core.rf.regs[5] == 0xABC)
+    fails = fails + check("caseb parks at 0x80000008", socb.core.pc == 0x8000_0008)
+
+    # ── Case c: unmapped load faults -> cause 13, stval=va, delegated to S ──
+    # Same page table (no L0[2]); medeleg bit 13 set; stvec -> S handler at
+    # 0x8000_0100 (identity via L2[2]). Load VA 0x2000 must page-fault into S.
+    var socc = soc_top_64_init(0x40_0000)
+    var ramc = socc.ram
+    ramc = ram64_write(ramc, 0x10_0000, 8, 0x20040401)  # L2[0] -> L1
+    ramc = ram64_write(ramc, 0x10_0010, 8, 0x200000CF)  # L2[2] -> 1G identity
+    ramc = ram64_write(ramc, 0x10_1000, 8, 0x20040801)  # L1[0] -> L0
+    ramc = ram64_write(ramc, 0x10_2008, 8, 0x20080043)  # L0[1] -> PA 0x8020_0000
+    # (L0[2] deliberately absent -> VA 0x2000 unmapped)
+    ramc = ram64_write(ramc, 0x00, 4, 0x00002337)     # lui  x6, 0x2   (x6 = 0x2000 VA)
+    ramc = ram64_write(ramc, 0x04, 4, 0x00032283)     # lw   x5, 0(x6) (faults)
+    ramc = ram64_write(ramc, 0x08, 4, 0x0000006F)     # jal  x0, 0 (unreached)
+    # S handler at PA 0x8000_0100
+    ramc = ram64_write(ramc, 0x100, 4, 0x14202673)    # csrrs x12, scause, x0
+    ramc = ram64_write(ramc, 0x104, 4, 0x143026F3)    # csrrs x13, stval, x0
+    ramc = ram64_write(ramc, 0x108, 4, 0x0000006F)    # jal x0, 0 (park)
+    socc.ram = ramc
+    var csc = socc.core.csr_s
+    csc.satp = satp_encode_64(8, 0, 0x80100)
+    csc.stvec = 0x8000_0100
+    socc.core.csr_s = csc
+    var cmc = socc.core.csr_m
+    cmc.medeleg = 0xB000                               # bits 12,13,15
+    socc.core.csr_m = cmc
+    socc.core.pc = 0x8000_0000
+    socc.core.priv_mode = 1                            # S-mode
+    var ic = 0
+    while ic < 12:
+        socc = soc_top_64_tick(socc)
+        ic = ic + 1
+    print("casec scause(x12)={socc.core.rf.regs[12]} stval(x13)={socc.core.rf.regs[13]} sepc={socc.core.csr_s.sepc} pc={socc.core.pc} priv={socc.core.priv_mode}")
+    fails = fails + check("casec load page fault scause == 13", socc.core.rf.regs[12] == 13)
+    fails = fails + check("casec stval == faulting VA 0x2000", socc.core.rf.regs[13] == 0x2000)
+    fails = fails + check("casec sepc == faulting insn PC 0x80000004", socc.core.csr_s.sepc == 0x8000_0004)
+    fails = fails + check("casec delegated: handler runs in S-mode (priv==1)", socc.core.priv_mode == 1)
+    fails = fails + check("casec handler parks at 0x80000108", socc.core.pc == 0x8000_0108)
+    fails = fails + check("casec faulting load did NOT commit (x5==0)", socc.core.rf.regs[5] == 0)
+
+    # ── Case e: DTB region read at 0x8800_0000 returns FDT magic bytes ──
+    # M-mode identity; lbu the four magic bytes 0xD0 0x0D 0xFE 0xED.
+    var soce = soc_top_64_init(0x1000)
+    var rame = soce.ram
+    rame = ram64_write(rame, 0x00, 4, 0x88000337)     # lui  x6, 0x88000
+    rame = ram64_write(rame, 0x04, 4, 0x02031313)     # slli x6, x6, 32
+    rame = ram64_write(rame, 0x08, 4, 0x02035313)     # srli x6, x6, 32 (x6 = 0x8800_0000)
+    rame = ram64_write(rame, 0x0C, 4, 0x00034283)     # lbu  x5, 0(x6)
+    rame = ram64_write(rame, 0x10, 4, 0x00134383)     # lbu  x7, 1(x6)
+    rame = ram64_write(rame, 0x14, 4, 0x00234E03)     # lbu  x28, 2(x6)
+    rame = ram64_write(rame, 0x18, 4, 0x00334E83)     # lbu  x29, 3(x6)
+    rame = ram64_write(rame, 0x1C, 4, 0x0000006F)     # jal x0, 0 (park)
+    soce.ram = rame
+    soce.core.pc = 0x8000_0000                         # priv stays M (default)
+    var ie = 0
+    while ie < 12:
+        soce = soc_top_64_tick(soce)
+        ie = ie + 1
+    print("casee b0={soce.core.rf.regs[5]} b1={soce.core.rf.regs[7]} b2={soce.core.rf.regs[28]} b3={soce.core.rf.regs[29]}")
+    fails = fails + check("casee DTB[0] == 0xD0", soce.core.rf.regs[5] == 0xD0)
+    fails = fails + check("casee DTB[1] == 0x0D", soce.core.rf.regs[7] == 0x0D)
+    fails = fails + check("casee DTB[2] == 0xFE", soce.core.rf.regs[28] == 0xFE)
+    fails = fails + check("casee DTB[3] == 0xED", soce.core.rf.regs[29] == 0xED)
+
+    if fails == 0:
+        print("SV39 PROBE: ALL PASS")
+        return 0
+    print("SV39 PROBE: {fails} FAILURES")
+    1

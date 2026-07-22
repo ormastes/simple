@@ -53,13 +53,18 @@
 use std.hardware.rv64gc_rtl.core.{CoreState64, core64_init, core64_combinational, core64_update}
 use std.hardware.rv64gc_rtl.csr.{csr64_update_mip_s}
 use std.hardware.rv64gc_rtl.csr_s.{SIP_SSIP_MASK_64, SIP_STIP_MASK_64, SIP_SEIP_MASK_64}
+use std.hardware.rv64gc_rtl.csr_s.{satp_extract_mode_64, satp_extract_ppn_64}
 use std.hardware.rv64gc_rtl.trap.{trap64_check_interrupt_deleg, trap64_enter, trap64_state_init}
+
+# -- Sv39 MMU (page-table walk at the SoC memory-access layer)
+use std.hardware.rv64gc_rtl.mmu.{sv39_translate, Sv39Result}
+use std.hardware.rv64gc_rtl.mmu.{SV39_SATP_MODE, SV39_ACCESS_FETCH, SV39_ACCESS_LOAD, SV39_ACCESS_STORE}
 
 # -- Peripherals
 use std.hardware.soc_rtl.clint.{ClintState, clint_create, clint_tick, clint_mmio_read, clint_mmio_write}
 use std.hardware.soc_rtl.plic.{PlicState, plic_create, plic_mmio_read, plic_mmio_read_update, plic_mmio_write, plic_set_pending, plic_check_interrupt, plic_check_interrupt_s}
 use std.hardware.soc_rtl.ram64.{Ram64State, ram64_init, ram64_read, ram64_write}
-use std.hardware.soc_rtl.bootrom.bootrom_read64
+use std.hardware.soc_rtl.bootrom.{bootrom_read64, bootrom_dtb_byte, DTB_HEADER_SIZE}
 
 # -- Wishbone64 interconnect
 use std.hardware.soc_rtl.wb64_interconnect.{WbRegion64, Wb64Interconnect, wb64_qemu_virt_regions, wb64_init}
@@ -70,6 +75,12 @@ val SOC64_RESET_VECTOR: i64 = 0x1000
 
 # DRAM base matches QEMU virt memory map (wb64_qemu_virt_regions)
 val SOC64_RAM_BASE: i64 = 0x8000_0000
+
+# DTB region — the boot ROM's `lui a1, 0x88000` hands the kernel a1=0x8800_0000
+# as the FDT pointer. Reads in [DTB_BASE, DTB_BASE + DTB_HEADER_SIZE) are served
+# from bootrom_dtb_byte so a kernel reading [a1] sees the FDT header; writes are
+# ignored. Identity-mapped like RAM (physical dispatch after any translation).
+val SOC64_DTB_BASE: i64 = 0x8800_0000
 
 # ============================================================================
 # SoC64 State
@@ -152,6 +163,25 @@ fn soc64_in_plic(addr: i64) -> bool:
     """True when the byte address falls inside the PLIC MMIO region."""
     addr >= WB64_PLIC_BASE and addr < WB64_PLIC_BASE + WB64_PLIC_SIZE
 
+fn soc64_in_dtb(addr: i64) -> bool:
+    """True when the byte address falls inside the DTB header region."""
+    addr >= SOC64_DTB_BASE and addr < SOC64_DTB_BASE + (DTB_HEADER_SIZE as i64)
+
+fn soc64_dtb_read(addr: i64, width_bytes: i64) -> i64:
+    """DTB load: assemble width_bytes little-endian from bootrom_dtb_byte
+    (the FDT header is stored big-endian byte-wise, so byte address +0 -> 0xD0,
+    +1 -> 0x0D, +2 -> 0xFE, +3 -> 0xED, i.e. the 0xD00DFEED magic). A word/
+    dword read composes those bytes in RISC-V little-endian order; bytes past
+    the header read 0."""
+    val off = addr - SOC64_DTB_BASE
+    var result: i64 = 0
+    var i: i64 = 0
+    while i < width_bytes:
+        val b = bootrom_dtb_byte((off + i) as u32) as i64
+        result = result | (b << (i * 8))
+        i = i + 1
+    result
+
 fn soc64_clint_read(soc: SocTop64State, addr: i64, width_bytes: i64) -> i64:
     """CLINT load: 8-byte (RV64 ld, the normal kernel access width for
     mtime/mtimecmp) assembles the {hi,lo} u32 register pair; 4-byte (lw)
@@ -204,7 +234,15 @@ fn soc64_plic_read(soc: SocTop64State, addr: i64) -> i64:
     (plic_mmio_read(soc.plic, off as u32) as i64) & 0xFFFF_FFFF
 
 fn soc64_mem_read(soc: SocTop64State, addr: i64, width_bytes: i64) -> i64:
-    """Data load dispatch: DRAM, CLINT, PLIC, UART16550; unmapped reads 0."""
+    """Data load dispatch: DTB, DRAM, CLINT, PLIC, UART16550; unmapped reads 0.
+    addr is a PHYSICAL address (any Sv39 translation already applied).
+
+    The DTB header is a READ-ONLY OVERLAY and is checked BEFORE DRAM: the DTB
+    window sits at DRAM_BASE + 128 MiB, so once DRAM is >= 128 MiB (any real
+    kernel) the address is also inside the DRAM range — the overlay must win so
+    a kernel reading [a1] sees the FDT header, not RAM contents."""
+    if soc64_in_dtb(addr):
+        return soc64_dtb_read(addr, width_bytes)
     if soc64_in_ram(soc, addr):
         return ram64_read(soc.ram, addr - SOC64_RAM_BASE, width_bytes)
     if soc64_in_clint(addr):
@@ -252,6 +290,11 @@ fn soc64_mem_write(soc: SocTop64State, addr: i64, width_bytes: i64, wdata: i64) 
     enable register; other UART register stores are accepted and dropped.
     Stores to unmapped space are ignored."""
     var out = soc
+    # DTB header overlay is read-only: writes into its window are ignored, and
+    # this is checked BEFORE DRAM (the window is inside the DRAM range once DRAM
+    # is >= 128 MiB — a store there must not fall through into RAM).
+    if soc64_in_dtb(addr):
+        return out
     if soc64_in_ram(out, addr):
         out.ram = ram64_write(out.ram, addr - SOC64_RAM_BASE, width_bytes, wdata)
     else if soc64_in_clint(addr):
@@ -281,6 +324,45 @@ fn soc64_uart_push_rx(soc: SocTop64State, byte_val: i64) -> SocTop64State:
     and — with IER.ERBFI set — asserts PLIC source 10 on the next tick."""
     var out = soc
     out.uart_rx = out.uart_rx.push(byte_val & 0xFF)
+    out
+
+# ============================================================================
+# Sv39 address translation front-end
+# ============================================================================
+
+struct Soc64Xlate:
+    """Result of translating a virtual access address to physical."""
+    pa: i64            # Physical address (valid when fault==false)
+    fault: bool        # True if a page fault occurred
+    cause: i64         # 12=insn, 13=load, 15=store page fault
+
+fn soc64_translate(soc: SocTop64State, va: i64, access_type: u32) -> Soc64Xlate:
+    """Translate an access address through Sv39 when satp.mode==Sv39 and the
+    core is below M-mode; otherwise identity (M-mode or Bare, and any non-Sv39
+    mode — Sv48 is not implemented here). Page tables and the walk live in
+    mmu.sv39_translate; on fault the cause carries the page-fault scause."""
+    val mode = satp_extract_mode_64(soc.core.csr_s.satp)
+    if soc.core.priv_mode == 3 or mode != SV39_SATP_MODE:
+        return Soc64Xlate(pa: va, fault: false, cause: 0)
+    val root_ppn = satp_extract_ppn_64(soc.core.csr_s.satp)
+    val r = sv39_translate(root_ppn, va, access_type, soc.core.priv_mode as u32,
+        soc.core.csr_s.sstatus, soc.ram, SOC64_RAM_BASE)
+    if r.fault:
+        return Soc64Xlate(pa: 0, fault: true, cause: r.fault_cause)
+    Soc64Xlate(pa: r.pa, fault: false, cause: 0)
+
+fn soc64_raise_trap(soc: SocTop64State, cause: i64, tval: i64, epc: i64) -> SocTop64State:
+    """Take a synchronous exception (page fault) through the delegation-aware
+    trap path: medeleg routes page-fault causes 12/13/15 to S-mode (scause/
+    sepc/stval), otherwise to M-mode. Mirrors the step-8 interrupt take but for
+    an exception at the current instruction (epc = faulting PC, tval = VA)."""
+    var out = soc
+    val ie = trap64_enter(trap64_state_init(), cause, tval, epc,
+        out.core.priv_mode, out.core.csr_m, out.core.csr_s)
+    out.core.csr_m = ie.csr
+    out.core.csr_s = ie.csr_s
+    out.core.pc = ie.trap_pc
+    out.core.priv_mode = ie.target_mode
     out
 
 # ============================================================================
@@ -329,26 +411,42 @@ fn soc_top_64_tick(soc: SocTop64State) -> SocTop64State:
     if out.core.halt:
         return out
 
-    # Step 2: Fetch instruction by PC
-    val insn = soc64_fetch(out, out.core.pc)
+    # Step 2: Fetch instruction by PC — translate through Sv39 first (S/U +
+    # satp.mode==Sv39). A fetch fault aborts the instruction: raise an
+    # instruction page fault (cause 12, stval=PC) via the delegation-aware
+    # trap path and return without running the datapath this cycle.
+    val fx = soc64_translate(out, out.core.pc, SV39_ACCESS_FETCH)
+    if fx.fault:
+        return soc64_raise_trap(out, fx.cause, out.core.pc, out.core.pc)
+    val insn = soc64_fetch(out, fx.pa)
 
     # Step 3: Prelim combinational pass — computes dmem address for loads
     val comb_prelim = core64_combinational(out.core, insn, 0, out.core.rf)
     val width_bytes = soc64_width_bytes(comb_prelim.dmem_width)
 
     # Step 4: Data memory read dispatch (+ read side-effects: PLIC claim
-    # pending-clear, UART RBR queue pop)
+    # pending-clear, UART RBR queue pop). Translate the load VA first; a load
+    # fault (cause 13, stval=VA) aborts the instruction before any read or
+    # read-side-effect is applied.
     var dmem_rdata: i64 = 0
     if comb_prelim.dmem_re:
-        dmem_rdata = soc64_mem_read(out, comb_prelim.dmem_addr, width_bytes)
-        out = soc64_mem_read_update(out, comb_prelim.dmem_addr)
+        val lx = soc64_translate(out, comb_prelim.dmem_addr, SV39_ACCESS_LOAD)
+        if lx.fault:
+            return soc64_raise_trap(out, lx.cause, comb_prelim.dmem_addr, out.core.pc)
+        dmem_rdata = soc64_mem_read(out, lx.pa, width_bytes)
+        out = soc64_mem_read_update(out, lx.pa)
 
     # Step 5: Final combinational pass with real load data
     val comb = core64_combinational(out.core, insn, dmem_rdata, out.core.rf)
 
-    # Step 6: Data memory write dispatch (RAM / CLINT / UART THR)
+    # Step 6: Data memory write dispatch (RAM / CLINT / UART THR). Translate
+    # the store VA first; a store fault (cause 15, stval=VA) aborts the
+    # instruction before the write and before core64_update commits.
     if comb.dmem_we:
-        out = soc64_mem_write(out, comb.dmem_addr, width_bytes, comb.dmem_wdata)
+        val sx = soc64_translate(out, comb.dmem_addr, SV39_ACCESS_STORE)
+        if sx.fault:
+            return soc64_raise_trap(out, sx.cause, comb.dmem_addr, out.core.pc)
+        out = soc64_mem_write(out, sx.pa, width_bytes, comb.dmem_wdata)
 
     # Step 7: Clocked core update — PC, regfile, CSR, traps, semihosting
     out.core = core64_update(out.core, insn, comb, comb.a0_val, comb.a1_val)
