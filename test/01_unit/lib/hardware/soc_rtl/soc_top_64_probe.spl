@@ -112,6 +112,53 @@ fn main() -> i64:
     fails = fails + check("case4 mtime read 1 nonzero", soc4.core.rf.regs[29] > 0)
     fails = fails + check("case4 mtime monotonic (read2 > read1)", soc4.core.rf.regs[30] > soc4.core.rf.regs[29])
 
+    # ── Case 5: CLINT machine timer interrupt — real CSR writes + MMIO arm ──
+    # Guest program: sets mtvec to a handler (0x8000_0100) via csrrw, arms
+    # mtimecmp=64 via a real sd to CLINT MMIO (0x200_4000), enables mie.MTIE
+    # and mstatus.MIE via csrrs, then parks on a spin loop (0x8000_0030).
+    # When mtime reaches 64, mip.MTIP must be delivered from clint_tick and
+    # the core must vector to mtvec. Handler stores marker 0x123 to RAM
+    # 0x200, reads mcause/mepc into x12/x13 via csrrs, and parks.
+    var soc5 = soc_top_64_init(0x1000)
+    var ram5 = soc5.ram
+    ram5 = ram64_write(ram5, 0x000, 4, 0x800002B7)   # lui  x5, 0x80000
+    ram5 = ram64_write(ram5, 0x004, 4, 0x02029293)   # slli x5, x5, 32   (zero-extend)
+    ram5 = ram64_write(ram5, 0x008, 4, 0x0202D293)   # srli x5, x5, 32   (x5 = 0x8000_0000)
+    ram5 = ram64_write(ram5, 0x00C, 4, 0x10028293)   # addi x5, x5, 0x100 (handler)
+    ram5 = ram64_write(ram5, 0x010, 4, 0x30529073)   # csrrw x0, mtvec, x5
+    ram5 = ram64_write(ram5, 0x014, 4, 0x02004337)   # lui  x6, 0x2004   (x6 = 0x200_4000 mtimecmp)
+    ram5 = ram64_write(ram5, 0x018, 4, 0x04000393)   # addi x7, x0, 64
+    ram5 = ram64_write(ram5, 0x01C, 4, 0x00733023)   # sd   x7, 0(x6)    arm mtimecmp = 64
+    ram5 = ram64_write(ram5, 0x020, 4, 0x08000393)   # addi x7, x0, 128
+    ram5 = ram64_write(ram5, 0x024, 4, 0x3043A073)   # csrrs x0, mie, x7  (MTIE)
+    ram5 = ram64_write(ram5, 0x028, 4, 0x00800393)   # addi x7, x0, 8
+    ram5 = ram64_write(ram5, 0x02C, 4, 0x3003A073)   # csrrs x0, mstatus, x7 (MIE)
+    ram5 = ram64_write(ram5, 0x030, 4, 0x0000006F)   # jal  x0, 0        (spin)
+    # Handler at 0x8000_0100
+    ram5 = ram64_write(ram5, 0x100, 4, 0x80000537)   # lui  x10, 0x80000
+    ram5 = ram64_write(ram5, 0x104, 4, 0x02051513)   # slli x10, x10, 32
+    ram5 = ram64_write(ram5, 0x108, 4, 0x02055513)   # srli x10, x10, 32 (x10 = 0x8000_0000)
+    ram5 = ram64_write(ram5, 0x10C, 4, 0x12300593)   # addi x11, x0, 0x123 (marker)
+    ram5 = ram64_write(ram5, 0x110, 4, 0x20B52023)   # sw   x11, 0x200(x10)
+    ram5 = ram64_write(ram5, 0x114, 4, 0x34202673)   # csrrs x12, mcause, x0
+    ram5 = ram64_write(ram5, 0x118, 4, 0x341026F3)   # csrrs x13, mepc, x0
+    ram5 = ram64_write(ram5, 0x11C, 4, 0x0000006F)   # jal  x0, 0        (park)
+    soc5.ram = ram5
+    soc5.core.pc = 0x8000_0000
+    var m = 0
+    while m < 100:
+        soc5 = soc_top_64_tick(soc5)
+        m = m + 1
+    val marker = ram64_read(soc5.ram, 0x200, 4)
+    val expected_cause: i64 = (1 << 63) | 7
+    print("case5 pc={soc5.core.pc} marker={marker} x12(mcause)={soc5.core.rf.regs[12]} x13(mepc)={soc5.core.rf.regs[13]} mip={soc5.core.csr_m.mip} mtvec={soc5.core.csr_m.mtvec}")
+    fails = fails + check("case5 csrrw wrote mtvec (csr write path executed)", soc5.core.csr_m.mtvec == 0x8000_0100)
+    fails = fails + check("case5 handler wrote marker 0x123 to RAM", marker == 0x123)
+    fails = fails + check("case5 mcause == machine timer interrupt (bit63|7)", soc5.core.rf.regs[12] == expected_cause)
+    fails = fails + check("case5 mepc == spin pc 0x80000030", soc5.core.rf.regs[13] == 0x8000_0030)
+    fails = fails + check("case5 mip.MTIP delivered from CLINT (bit 7)", (soc5.core.csr_m.mip & 0x80) != 0)
+    fails = fails + check("case5 pc parks in handler at 0x8000011C", soc5.core.pc == 0x8000_011C)
+
     if fails == 0:
         print("SOC64 PROBE: ALL PASS")
         return 0

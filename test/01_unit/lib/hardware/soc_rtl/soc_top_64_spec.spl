@@ -272,6 +272,46 @@ describe "SocTop64 MMIO":
         val soc = soc_top_64_init(SOC64_TEST_DRAM_SIZE)
         expect(soc.uart_tx.len()).to_equal(0)
 
+    it "AC-4: CLINT machine timer interrupt vectors to mtvec handler":
+        # Guest arms mtimecmp=64 via real CLINT MMIO sd, sets mtvec via
+        # csrrw, enables mie.MTIE + mstatus.MIE via csrrs, spins; handler
+        # stores marker 0x123 to RAM 0x200, reads mcause/mepc via csrrs.
+        var soc = soc_top_64_init(SOC64_TEST_DRAM_SIZE)
+        var ram = soc.ram
+        ram = ram64_write(ram, 0x000, 4, 0x800002B7)   # lui  x5, 0x80000
+        ram = ram64_write(ram, 0x004, 4, 0x02029293)   # slli x5, x5, 32
+        ram = ram64_write(ram, 0x008, 4, 0x0202D293)   # srli x5, x5, 32
+        ram = ram64_write(ram, 0x00C, 4, 0x10028293)   # addi x5, x5, 0x100
+        ram = ram64_write(ram, 0x010, 4, 0x30529073)   # csrrw x0, mtvec, x5
+        ram = ram64_write(ram, 0x014, 4, 0x02004337)   # lui  x6, 0x2004 (mtimecmp)
+        ram = ram64_write(ram, 0x018, 4, 0x04000393)   # addi x7, x0, 64
+        ram = ram64_write(ram, 0x01C, 4, 0x00733023)   # sd   x7, 0(x6)
+        ram = ram64_write(ram, 0x020, 4, 0x08000393)   # addi x7, x0, 128
+        ram = ram64_write(ram, 0x024, 4, 0x3043A073)   # csrrs x0, mie, x7
+        ram = ram64_write(ram, 0x028, 4, 0x00800393)   # addi x7, x0, 8
+        ram = ram64_write(ram, 0x02C, 4, 0x3003A073)   # csrrs x0, mstatus, x7
+        ram = ram64_write(ram, 0x030, 4, 0x0000006F)   # jal x0, 0 (spin)
+        ram = ram64_write(ram, 0x100, 4, 0x80000537)   # lui  x10, 0x80000
+        ram = ram64_write(ram, 0x104, 4, 0x02051513)   # slli x10, x10, 32
+        ram = ram64_write(ram, 0x108, 4, 0x02055513)   # srli x10, x10, 32
+        ram = ram64_write(ram, 0x10C, 4, 0x12300593)   # addi x11, x0, 0x123
+        ram = ram64_write(ram, 0x110, 4, 0x20B52023)   # sw   x11, 0x200(x10)
+        ram = ram64_write(ram, 0x114, 4, 0x34202673)   # csrrs x12, mcause, x0
+        ram = ram64_write(ram, 0x118, 4, 0x341026F3)   # csrrs x13, mepc, x0
+        ram = ram64_write(ram, 0x11C, 4, 0x0000006F)   # jal x0, 0 (park)
+        soc.ram = ram
+        soc.core.pc = 0x8000_0000
+        var i = 0
+        while i < 100:
+            soc = soc_top_64_tick(soc)
+            i = i + 1
+        val expected_cause: i64 = (1 << 63) | 7
+        expect(ram64_read(soc.ram, 0x200, 4)).to_equal(0x123)
+        expect(soc.core.rf.regs[12]).to_equal(expected_cause)
+        expect(soc.core.rf.regs[13]).to_equal(0x8000_0030)
+        expect((soc.core.csr_m.mip & 0x80) != 0).to_equal(true)
+        expect(soc.core.pc).to_equal(0x8000_011C)
+
 
 # ============================================================================
 # Helper: Build QEMU virt memory map regions

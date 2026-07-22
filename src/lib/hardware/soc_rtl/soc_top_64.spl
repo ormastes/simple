@@ -7,13 +7,14 @@
 #
 # soc_top_64_tick() is the main simulation entry point.  Each call = 1 cycle.
 # Pipeline per cycle (RV32 soc_tick pattern, see soc_top.spl):
-#   1. Advance CLINT mtime
+#   1. Advance CLINT mtime; deliver mtip/msip levels into the core mip CSR
 #   2. Fetch instruction by PC (RAM when PC in DRAM range, bootrom otherwise)
 #   3. core64_combinational prelim pass (computes dmem address for loads)
 #   4. Data memory read dispatch (RAM range)
 #   5. core64_combinational final pass with real dmem_rdata
 #   6. Data memory write dispatch (store instructions, RAM range)
 #   7. core64_update — clocked PC / regfile / CSR / trap / semihosting update
+#   8. Machine interrupt take: MIE && (mie & mip) -> mtvec/mcause/mepc
 #
 # The core entry wired here is core64_combinational + core64_update.
 # core64_cycle (the request_ready/response_valid bus-protocol path) depends on
@@ -44,6 +45,8 @@
 
 # -- Core
 use std.hardware.rv64gc_rtl.core.{CoreState64, core64_init, core64_combinational, core64_update}
+use std.hardware.rv64gc_rtl.csr.csr64_update_mip
+use std.hardware.rv64gc_rtl.trap.{trap64_check_interrupt, trap64_enter_m_only}
 
 # -- Peripherals
 use std.hardware.soc_rtl.clint.{ClintState, clint_create, clint_tick, clint_mmio_read, clint_mmio_write}
@@ -205,6 +208,11 @@ fn soc_top_64_tick(soc: SocTop64State) -> SocTop64State:
     val ct = clint_tick(out.clint)
     out.clint = ct.state
 
+    # Step 1b: Deliver CLINT interrupt levels into the core's mip CSR.
+    # Level-sensitive: MTIP tracks mtime >= mtimecmp, MSIP tracks the msip
+    # MMIO register. MEIP stays 0 until the PLIC data path is wired.
+    out.core.csr_m = csr64_update_mip(out.core.csr_m, ct.mtip, ct.msip_out, false)
+
     # Halted core: peripherals keep ticking, datapath is frozen
     if out.core.halt:
         return out
@@ -230,5 +238,19 @@ fn soc_top_64_tick(soc: SocTop64State) -> SocTop64State:
 
     # Step 7: Clocked core update — PC, regfile, CSR, traps, semihosting
     out.core = core64_update(out.core, insn, comb, comb.a0_val, comb.a1_val)
+
+    # Step 8: Interrupt take at the instruction boundary (minimal M-mode).
+    # When mstatus.MIE and (mie & mip) select a pending machine interrupt,
+    # vector to mtvec: mepc <- next PC, mcause <- interrupt cause, MIE
+    # saved to MPIE and cleared (trap64_enter_m_only). No delegation /
+    # S-mode interrupt routing yet. Suppressed mid-semihosting-sequence
+    # and when the core halted this cycle.
+    if out.core.halt == false and out.core.semi_phase == 0:
+        val ic = trap64_check_interrupt(out.core.csr_m)
+        if ic.pending:
+            val ie = trap64_enter_m_only(out.core.csr_m, out.core.pc, ic.cause, 0)
+            out.core.csr_m = ie.csr
+            out.core.pc = ie.trap_pc
+            out.core.priv_mode = ie.target_mode
 
     out
