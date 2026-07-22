@@ -228,3 +228,144 @@ fn mul_div64_step(state: MulDivState, op: i64, rs1: i64, rs2: i64) -> MulDivResu
     while s.busy:
         s = mul_div_tick(s)
     MulDivResult64(rd_val: s.result)
+
+# ============================================================================
+# Single-cycle combinational M-extension result (core64 rd_data path)
+# ============================================================================
+# The synthesizable subset has no i128, so the high-64 products of MULH*
+# are formed from 32-bit unsigned limbs.  These are the pure combinational
+# functions the core datapath consumes for OP_REG/OP_OP_32 funct7==1.
+
+fn muldiv_lshr32(x: i64) -> i64:
+    """Logical shift-right by 32: high 32 bits of x as a non-negative i64."""
+    (x >> 32) & 0xFFFFFFFF
+
+fn muldiv_umulh(a: i64, b: i64) -> i64:
+    """High 64 bits of the UNSIGNED 128-bit product a*b (32-bit limbs)."""
+    val al = a & 0xFFFFFFFF
+    val ah = muldiv_lshr32(a)
+    val bl = b & 0xFFFFFFFF
+    val bh = muldiv_lshr32(b)
+    val ll = al * bl
+    val lh = al * bh
+    val hl = ah * bl
+    val hh = ah * bh
+    val mid = muldiv_lshr32(ll) + (lh & 0xFFFFFFFF) + (hl & 0xFFFFFFFF)
+    hh + muldiv_lshr32(lh) + muldiv_lshr32(hl) + muldiv_lshr32(mid)
+
+fn muldiv_smulh(a: i64, b: i64) -> i64:
+    """High 64 bits of the SIGNED*SIGNED 128-bit product.
+    Correction: signed_high = unsigned_high - (a<0 ? b : 0) - (b<0 ? a : 0)."""
+    var h = muldiv_umulh(a, b)
+    if a < 0:
+        h = h - b
+    if b < 0:
+        h = h - a
+    h
+
+fn muldiv_smulhsu(a: i64, b: i64) -> i64:
+    """High 64 bits of SIGNED a * UNSIGNED b: unsigned_high - (a<0 ? b : 0)."""
+    var h = muldiv_umulh(a, b)
+    if a < 0:
+        h = h - b
+    h
+
+fn muldiv_sdiv(a: i64, b: i64) -> i64:
+    """Signed 64-bit division. /0 -> -1; INT64_MIN/-1 overflow -> INT64_MIN."""
+    val min64: i64 = 1 << 63
+    if b == 0:
+        return -1
+    if a == min64 and b == -1:
+        return min64
+    a / b
+
+fn muldiv_srem(a: i64, b: i64) -> i64:
+    """Signed 64-bit remainder. /0 -> a; INT64_MIN%-1 overflow -> 0."""
+    val min64: i64 = 1 << 63
+    if b == 0:
+        return a
+    if a == min64 and b == -1:
+        return 0
+    a - (a / b) * b
+
+fn muldiv_compute(op: i64, a: i64, b: i64) -> i64:
+    """Combinational rd result for one M-extension op code (MULDIV_*).
+    div-by-zero: quotient all-ones (-1), remainder = dividend.
+    Signed overflow (MIN/-1): quotient MIN, remainder 0.
+    W-variants operate on low 32 bits and sign-extend to 64."""
+    if op == MULDIV_MUL:
+        return a * b
+    if op == MULDIV_MULH:
+        return muldiv_smulh(a, b)
+    if op == MULDIV_MULHSU:
+        return muldiv_smulhsu(a, b)
+    if op == MULDIV_MULHU:
+        return muldiv_umulh(a, b)
+    if op == MULDIV_DIV:
+        return muldiv_sdiv(a, b)
+    if op == MULDIV_DIVU:
+        return unsigned_div64(a, b)
+    if op == MULDIV_REM:
+        return muldiv_srem(a, b)
+    if op == MULDIV_REMU:
+        return unsigned_rem64(a, b)
+
+    # ── W-variants: low 32 bits, sign-extended result. ──
+    if op == MULDIV_MULW:
+        return muldiv_sign_extend_32((a & 0xFFFFFFFF) * (b & 0xFFFFFFFF))
+
+    val a32 = muldiv_sign_extend_32(a)
+    val b32 = muldiv_sign_extend_32(b)
+    if op == MULDIV_DIVW:
+        if b32 == 0:
+            return -1
+        # INT32_MIN/-1 needs no guard: sext32(a32/b32) folds the overflow.
+        return muldiv_sign_extend_32(a32 / b32)
+    if op == MULDIV_REMW:
+        if b32 == 0:
+            return muldiv_sign_extend_32(a32)
+        return muldiv_sign_extend_32(a32 - (a32 / b32) * b32)
+
+    val au = a & 0xFFFFFFFF
+    val bu = b & 0xFFFFFFFF
+    if op == MULDIV_DIVUW:
+        if bu == 0:
+            return -1
+        return muldiv_sign_extend_32(au / bu)
+    if op == MULDIV_REMUW:
+        if bu == 0:
+            return muldiv_sign_extend_32(au)
+        return muldiv_sign_extend_32(au - (au / bu) * bu)
+    0
+
+fn muldiv_select_op(is_word: bool, funct3: u32) -> i64:
+    """Map (OP_OP_32?, funct3) to a MULDIV_* op code (funct7==1 assumed)."""
+    if is_word:
+        if funct3 == 0:
+            return MULDIV_MULW
+        if funct3 == 4:
+            return MULDIV_DIVW
+        if funct3 == 5:
+            return MULDIV_DIVUW
+        if funct3 == 6:
+            return MULDIV_REMW
+        return MULDIV_REMUW
+    if funct3 == 0:
+        return MULDIV_MUL
+    if funct3 == 1:
+        return MULDIV_MULH
+    if funct3 == 2:
+        return MULDIV_MULHSU
+    if funct3 == 3:
+        return MULDIV_MULHU
+    if funct3 == 4:
+        return MULDIV_DIV
+    if funct3 == 5:
+        return MULDIV_DIVU
+    if funct3 == 6:
+        return MULDIV_REM
+    MULDIV_REMU
+
+fn muldiv_execute(is_word: bool, funct3: u32, rs1: i64, rs2: i64) -> i64:
+    """Combinational rd value for one M-extension instruction."""
+    muldiv_compute(muldiv_select_op(is_word, funct3), rs1, rs2)

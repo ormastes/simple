@@ -319,11 +319,12 @@ fn class_load_store() -> i64:
     f
 
 # ============================================================================
-# Class: muldiv — M extension. KNOWN GAP: decode routes funct7==1 to ALU_ADD
-# placeholder ("M extension is handled separately") and mul_div64_step has NO
-# consumer in core64_combinational/core64_update or soc_top_64_tick, so every
-# M-format op computes rs1+rs2. All cases below are XFAIL until the M unit is
-# wired into the core datapath (cross-lane: rv64gc_rtl owner).
+# Class: muldiv — M extension. Wired into the core64 rd_data path (Lane DD):
+# core64_combinational routes OP_REG/OP_OP_32 funct7==1 through
+# muldiv_execute (mul_div.spl), overriding decode's ALU_ADD placeholder.
+# Semantics: div-by-zero -> quotient all-ones (-1), remainder = dividend;
+# signed overflow (INT64_MIN/-1) -> quotient INT64_MIN, remainder 0;
+# W-variants operate on the low 32 bits and sign-extend. Real asserts.
 # ============================================================================
 
 fn class_muldiv() -> i64:
@@ -349,19 +350,19 @@ fn class_muldiv() -> i64:
     p = p.push(park())                           # 18
     val r = run64(p, 40)
     var f: i64 = 0
-    f = f + chk_x("muldiv", "mul 7*-3 == -21", r.st.rf.regs[3] == -21)
-    f = f + chk_x("muldiv", "mulh high(7*-3) == -1", r.st.rf.regs[4] == -1)
-    f = f + chk_x("muldiv", "div 7/-3 == -2 (trunc)", r.st.rf.regs[5] == -2)
-    f = f + chk_x("muldiv", "rem 7%-3 == 1", r.st.rf.regs[6] == 1)
-    f = f + chk_x("muldiv", "divu 7/(u)-3 == 0", r.st.rf.regs[7] == 0)
-    f = f + chk_x("muldiv", "remu 7%(u)-3 == 7", r.st.rf.regs[8] == 7)
-    f = f + chk_x("muldiv", "div by zero == -1", r.st.rf.regs[10] == -1)
-    f = f + chk_x("muldiv", "rem by zero == dividend", r.st.rf.regs[11] == 7)
-    f = f + chk_x("muldiv", "div overflow INT64_MIN/-1 == INT64_MIN",
+    f = f + chk("muldiv", "mul 7*-3 == -21", r.st.rf.regs[3] == -21)
+    f = f + chk("muldiv", "mulh high(7*-3) == -1", r.st.rf.regs[4] == -1)
+    f = f + chk("muldiv", "div 7/-3 == -2 (trunc)", r.st.rf.regs[5] == -2)
+    f = f + chk("muldiv", "rem 7%-3 == 1", r.st.rf.regs[6] == 1)
+    f = f + chk("muldiv", "divu 7/(u)-3 == 0", r.st.rf.regs[7] == 0)
+    f = f + chk("muldiv", "remu 7%(u)-3 == 7", r.st.rf.regs[8] == 7)
+    f = f + chk("muldiv", "div by zero == -1", r.st.rf.regs[10] == -1)
+    f = f + chk("muldiv", "rem by zero == dividend", r.st.rf.regs[11] == 7)
+    f = f + chk("muldiv", "div overflow INT64_MIN/-1 == INT64_MIN",
         r.st.rf.regs[15] == r.st.rf.regs[13])
-    f = f + chk_x("muldiv", "rem overflow INT64_MIN%-1 == 0", r.st.rf.regs[16] == 0)
-    f = f + chk_x("muldiv", "mulw 7*-3 == -21", r.st.rf.regs[17] == -21)
-    f = f + chk_x("muldiv", "divw 7/-3 == -2", r.st.rf.regs[18] == -2)
+    f = f + chk("muldiv", "rem overflow INT64_MIN%-1 == 0", r.st.rf.regs[16] == 0)
+    f = f + chk("muldiv", "mulw 7*-3 == -21", r.st.rf.regs[17] == -21)
+    f = f + chk("muldiv", "divw 7/-3 == -2", r.st.rf.regs[18] == -2)
     f
 
 # ============================================================================
@@ -468,10 +469,12 @@ fn class_csr_trap() -> i64:
     f
 
 # ============================================================================
-# Class: traps_rvc — KNOWN GAPS, honest XFAIL:
-#  * misaligned load: core64_combinational has no alignment check, so a
-#    misaligned lw returns data instead of raising CAUSE_MISALIGNED_LOAD.
-#  * compressed (RVC): 16-bit parcel reassembly lives in the SoC fetch path
+# Class: traps_rvc:
+#  * misaligned load: WIRED (Lane DD) — core64_combinational suppresses the
+#    unaligned access and core64_update raises CAUSE_LOAD_MISALIGNED (4).
+#    Real assert (x3==99 handler reached AND mcause==4).
+#  * compressed (RVC): KNOWN GAP, honest XFAIL —
+#    16-bit parcel reassembly lives in the SoC fetch path
 #    (pipeline_phase/fetch_low), not in the direct core64_combinational
 #    interface; a raw c.addi word decodes as illegal/NOP here. (rv32 PL core
 #    c.add decode bug precedent: commit a9a344e96a3.)
@@ -495,10 +498,13 @@ fn class_traps_rvc() -> i64:
     p = p.push(park())                         # 10
     p = p.push(park())                         # 11
     p = p.push(addi(3, 0, 99))                 # 12: handler (pc=48): x3 = 99
-    p = p.push(park())                         # 13
+    p = p.push(enc_i(0x342, 0, 2, 4, 0x73))    # 13: csrr x4, mcause
+    p = p.push(park())                         # 14
     val r = run64(p, 30)
-    f = f + chk_x("traps_rvc", "misaligned lw raises misaligned-load trap",
+    f = f + chk("traps_rvc", "misaligned lw raises load-misaligned trap (x3=99)",
         r.st.rf.regs[3] == 99)
+    f = f + chk("traps_rvc", "misaligned lw mcause == 4 (load address misaligned)",
+        r.st.rf.regs[4] == 4)
 
     # Compressed c.addi x10, 1 fed through the direct 32-bit fetch interface.
     var p2: [u32] = []

@@ -25,7 +25,7 @@ use std.hardware.rv64gc_rtl.decode.{DecodeResult64, decode_instruction_64, sign_
 use std.hardware.rv64gc_rtl.alu.{AluResult64, alu64_compute, i64_signed_lt}
 use std.hardware.rv64gc_rtl.regfile.{RegFile64, RegReadResult64, regfile64_create, regfile64_read, regfile64_write}
 use std.hardware.rv64gc_rtl.lsu.lsu64_load
-use std.hardware.rv64gc_rtl.mul_div.{MulDivState, mul_div_ready}
+use std.hardware.rv64gc_rtl.mul_div.{MulDivState, mul_div_ready, muldiv_execute}
 use std.hardware.rv64gc_rtl.atomics.{AtomicsState, atomics_create, atomics_lr, atomics_sc, atomics_invalidate, amo_compute}
 use std.hardware.rv64gc_rtl.pkg.{AMO_LR, AMO_SC, AMO_SWAP, AMO_ADD, AMO_XOR, AMO_AND, AMO_OR}
 use std.hardware.rv64gc_rtl.pkg.{AMO_MIN, AMO_MAX, AMO_MINU, AMO_MAXU}
@@ -35,6 +35,7 @@ use std.hardware.rv64gc_rtl.csr_s.{CsrSMode64, csr_s64_create, csr_s64_read, csr
 use std.hardware.rv64gc_rtl.trap.{trap64_mret, trap64_sret, trap64_sret_csr}
 use std.hardware.rv64gc_rtl.trap.{InterruptCheckResult64, trap64_enter, trap64_state_init}
 use std.hardware.rv64gc_rtl.trap.{CAUSE_ILLEGAL_INSN, CAUSE_BREAKPOINT, cause_mei, cause_msi, cause_mti}
+use std.hardware.rv64gc_rtl.trap.{CAUSE_LOAD_MISALIGNED, CAUSE_STORE_MISALIGNED}
 use std.hardware.rv64gc_rtl.mmu_sv39.{MmuState64, mmu64_create, mmu64_flush, mmu64_set_satp}
 use std.hardware.rv64gc_rtl.mmu_sv39.{ACCESS_FETCH_64, ACCESS_LOAD_64, ACCESS_STORE_64}
 use std.hardware.rv64gc_rtl.csr_s.{SSTATUS_SIE_MASK_64, SSTATUS_SUM_MASK_64, SSTATUS_MXR_MASK_64}
@@ -148,6 +149,43 @@ fn i64_unsigned_lt(a: i64, b: i64) -> bool:
 fn i64_unsigned_ge(a: i64, b: i64) -> bool:
     """Unsigned greater-than-or-equal for i64."""
     not i64_unsigned_lt(a, b)
+
+# ============================================================================
+# Misaligned load/store/AMO detection
+# ============================================================================
+# Natural-alignment enforcement: byte accesses never fault; half/word/dword
+# must be 2/4/8-byte aligned. On a misaligned access core64_combinational
+# suppresses the memory access and core64_update raises CAUSE_LOAD_MISALIGNED
+# (4) or CAUSE_STORE_MISALIGNED (6). Both sides use the SAME predicate so the
+# suppressed access and the raised trap stay consistent.
+
+fn core64_access_size(funct3: u32) -> i64:
+    """Natural alignment (bytes) for an access whose width is funct3[1:0]."""
+    val w = funct3 & 0x3
+    if w == 0:
+        return 1
+    if w == 1:
+        return 2
+    if w == 2:
+        return 4
+    8
+
+fn core64_is_mem_op(dec: DecodeResult64) -> bool:
+    """A load, store, or atomic memory operation (the only faulting classes)."""
+    dec.mem_read or dec.mem_write or dec.is_amo
+
+fn core64_mem_misaligned(dec: DecodeResult64, addr: i64) -> bool:
+    """True when this mem op's effective address is not naturally aligned."""
+    if core64_is_mem_op(dec) == false:
+        return false
+    val size = core64_access_size(dec.funct3)
+    (addr & (size - 1)) != 0
+
+fn core64_mem_misalign_cause(dec: DecodeResult64) -> i64:
+    """CAUSE_LOAD_MISALIGNED for loads; CAUSE_STORE_MISALIGNED for stores/AMO."""
+    if dec.mem_read:
+        return CAUSE_LOAD_MISALIGNED
+    CAUSE_STORE_MISALIGNED
 
 # ============================================================================
 # Branch evaluation
@@ -374,6 +412,11 @@ fn core64_combinational(state: CoreState64, imem_data: u32, dmem_rdata: i64, rf:
         rd_data = lsu64_load(dmem_rdata, dec.funct3)
     else if dec.jump:
         rd_data = pc_plus4
+    else if dec.is_muldiv:
+        # M extension: decode routes funct7==1 through the ALU as an ADD
+        # placeholder; override rd here with the real product/quotient/
+        # remainder. is_word selects the .W (32-bit, sign-extended) forms.
+        rd_data = muldiv_execute(dec.opcode == OP_OP_32, dec.funct3, rs1_data, rs2_data)
     else if dec.is_csr:
         val source = core64_csr_source(dec.funct3, dec.rs1, rs1_data)
         val csr_access = core64_csr_access(state, dec.csr_addr, source, dec.funct3)
@@ -431,6 +474,14 @@ fn core64_combinational(state: CoreState64, imem_data: u32, dmem_rdata: i64, rf:
             val amo = amo_compute(amo_funct5, amo_old, amo_rs2)
             dmem_wdata = amo.new_value
             rd_data = amo_old
+
+    # ── Misaligned load/store/AMO: suppress the memory access and the rd
+    #    writeback; core64_update raises CAUSE_LOAD_MISALIGNED (4) /
+    #    CAUSE_STORE_MISALIGNED (6) through the trap path BEFORE any access. ──
+    if core64_mem_misaligned(dec, dmem_addr):
+        dmem_re = false
+        dmem_we = false
+        rd_write = false
 
     CoreCombResult64(
         dec: dec,
@@ -573,6 +624,22 @@ fn core64_update(state: CoreState64, imem_data: u32, comb: CoreCombResult64, a0_
                 cause = CAUSE_BREAKPOINT
                 tval = 0
             val trap = trap64_enter(trap64_state_init(), cause, tval,
+                state.pc, state.priv_mode, state.csr_m, state.csr_s)
+            new_pc = trap.trap_pc
+            new_priv_mode = trap.target_mode
+            new_csr_m = trap.csr
+            new_csr_s = trap.csr_s
+            new_semi_phase = 0
+            new_semi_suppress = false
+            new_atomics = atomics_create()
+
+        else if core64_mem_misaligned(comb.dec, comb.dmem_addr) and state.semi_phase == 0:
+            # Misaligned load/store/AMO: enter a synchronous exception with
+            # cause 4 (load) / 6 (store/AMO) and the faulting address as
+            # tval. The memory access was suppressed in the combinational
+            # path, so no data was read or written. Clear the reservation.
+            val cause = core64_mem_misalign_cause(comb.dec)
+            val trap = trap64_enter(trap64_state_init(), cause, comb.dmem_addr,
                 state.pc, state.priv_mode, state.csr_m, state.csr_s)
             new_pc = trap.trap_pc
             new_priv_mode = trap.target_mode
