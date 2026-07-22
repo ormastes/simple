@@ -1,12 +1,39 @@
 # rv64gc reland removed `core64_step` but left its export and 4 spec call sites dangling
 
 - **Date:** 2026-07-21
-- **Status:** open
+- **Status:** partially fixed (Lane FF, 2026-07-22) — see "Update" below;
+  dangling `__init__.spl` export removed, 2 of 4 spec call sites already
+  self-resolved, 2 remain open.
 - **Severity:** high (rv64gc_rtl package cannot compile once a working test
   runner executes it; currently masked by the stale-seed runner outage)
 - **Area:** `src/lib/hardware/rv64gc_rtl/__init__.spl:48` + 4 spec files
 - **Introduced by:** `81d904de4b5` ("surgical reland of session-unique work
   onto main tip")
+
+## Update (Lane FF, 2026-07-22, verified in worktree at tip `f4a2165f389`)
+
+- `__init__.spl` no longer exports `core64_step` (nor the other dangling
+  `core.spl` symbols confirmed to have zero definitions/consumers tree-wide:
+  `CorePorts64`, `core64_ports`, `Core64StepResult`) — grep for all four across
+  `src/` and `doc/` returns 0 hits outside this doc.
+- Of the 4 call sites originally listed, 2 have already migrated off
+  `core64_step` independently of this lane:
+  - `test/01_unit/lib/hardware/soc_rtl/soc_top_64_spec.spl` — now drives
+    `core64_combinational` + `core64_update` (bus-protocol path), no
+    `core64_step` reference remains.
+  - `test/unit/lib/hardware/soc_rtl/soc_top_64_spec.spl` — same.
+- 2 call sites still reference `core64_step` directly from
+  `std.hardware.rv64gc_rtl.core` (bypassing `__init__.spl`, so this lane's
+  export removal does not touch them) and will fail to resolve once the
+  SSpec runner is unblocked:
+  - `test/01_unit/lib/hardware/rv64gc_rtl/core64_integration_spec.spl:41,319,322,325,329`
+  - `test/unit/lib/hardware/rv64gc_rtl/core64_integration_spec.spl:41,234,237,240,244`
+- These 2 remaining files are out of this lane's file set (test/ specs, not
+  the rtl `__init__.spl`/`pkg.spl`/`soc_rtl` set); fix option 1 (migrate to
+  `core64_cycle`) or option 2 (shim) from below still applies to them.
+- Regression check: `scripts/check/check-riscv-hardware-gates.shs` stays
+  9/9 PASS after the export removal; `core64_probe`/`rvfi64_probe` (both
+  import via `__init__.spl`) ALL PASS.
 
 ## Facts (verified at tip `81d904de4b580aecbc002c218563e1eb29077ea4`)
 
