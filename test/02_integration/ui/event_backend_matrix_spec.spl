@@ -64,15 +64,15 @@ fn _proxy(node_id: i64, left: i32, top: i32, right: i32, bottom: i32, order: i32
     p.tree_order = order
     p
 
-# EventLoop smoke WITHOUT poll: create / backend-match / close.
-# poll() CANNOT be asserted under any sspec `it` in the interpreter — the
-# extern's empty [i64] return degrades to i64 0 inside the spec-runner
-# context (passes from a plain `fn main`), so `raw.len()` inside
-# EventLoop.poll faults. Bug:
-# doc/08_tracking/bug/interp_empty_event_array_result_match_erasure_2026-07-21.md
-# Full smoke INCLUDING poll(0)/poll_one(0) lives in the runnable mirror
-# probe_event_loop_smoke.spl (same directory) per the
-# probe_interaction_core.spl pattern.
+# Full EventLoop smoke incl. poll: stage bitmask — bit0 created, bit1 backend
+# matches PlatformEvent, bit2 poll(0) returns Ok with an EMPTY typed array
+# (len()==0 through the match binding — this line is the regression gate for
+# the rt_event_loop_poll interp shim that used to return Int(count) instead
+# of the [i64] triple array, FIXED same day:
+# doc/08_tracking/bug/interp_empty_event_array_result_match_erasure_2026-07-21.md),
+# bit3 poll_one(0) confirms empty via Ok(nil), bit4 close ok.
+# Runnable mirror probe_event_loop_smoke.spl keeps the run-path covered
+# (test-path and run-path use different evaluators).
 fn _event_loop_smoke_mask() -> i64:
     var mask = 0
     val r = EventLoop.new()
@@ -83,9 +83,23 @@ fn _event_loop_smoke_mask() -> i64:
                 mask = mask + 1
             if lp.platform() == PlatformEvent.new().backend_name():
                 mask = mask + 2
+            val pr = lp.poll(0)
+            match pr:
+                case Ok(events):
+                    if events.len() == 0:
+                        mask = mask + 4
+                case Err(perr):
+                    mask = mask + 0
+            val pr1 = lp.poll_one(0)
+            match pr1:
+                case Ok(ev):
+                    if not ev.?:
+                        mask = mask + 8
+                case Err(perr2):
+                    mask = mask + 0
             val cr = lp.close()
             if cr.is_ok():
-                mask = mask + 4
+                mask = mask + 16
         case Err(e):
             mask = 0
     mask
@@ -121,11 +135,10 @@ describe "host platform event backend detection":
 
 describe "EventLoop smoke on the native backend":
 
-    it "creates on the detected backend and closes cleanly":
-        # bit0 created, bit1 platform matches PlatformEvent, bit2 close ok.
-        # poll coverage is in probe_event_loop_smoke.spl — see the helper's
-        # comment for the interp bug that forces the split.
-        expect(_event_loop_smoke_mask()).to_equal(7)
+    it "creates, polls non-blocking with no fds, and closes cleanly":
+        # All 5 stages — see _event_loop_smoke_mask's comment for the bit map
+        # and the interp-shim regression this gates.
+        expect(_event_loop_smoke_mask()).to_equal(31)
 
 describe "interaction backend composition":
 

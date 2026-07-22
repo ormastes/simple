@@ -1,9 +1,34 @@
 # Interp: empty `[Event]` payload bound via `case Ok(events)` degrades to i64 0
 
 - **Date:** 2026-07-21
-- **Status:** OPEN
-- **Area:** Rust seed interpreter — Result match-arm binding, empty typed arrays
+- **Status:** FIXED + VERIFIED (same day; root cause was NOT type erasure — see below)
+- **Area:** Rust seed interpreter — `rt_event_loop_poll` extern shim contract drift
 - **Severity:** medium (silent type degradation; faults on first method call)
+
+## ROOT CAUSE (supersedes the initial analysis below)
+
+Not a Result/match erasure at all, and not sspec-specific. The interp shim
+`rt_event_loop_poll_interp` (`interpreter_event_loop.rs`) still implemented an
+obsolete protocol: it returned `Value::Int(count)` and stashed fds for a
+separate `rt_event_loop_poll_get_fd` call — while the `.spl` extern contract
+(`platform_event.spl:124`) and the native runtime return a flat `[i64]` of
+(fd, ready, token) triples. The sibling `rt_kqueue_poll`/`rt_iocp_poll` interp
+shims in the SAME file were already migrated to `Value::array(...)`; only the
+epoll one drifted. So `raw` inside `EventLoop.poll` was literally `Int(0)`
+(count of an empty poll), and `raw.len()` faulted with "method `len` not found
+on type `i64` (receiver value: 0)".
+
+The apparent "only under sspec `it`" signature was an artifact: plain
+`fn main` runs took the JIT path (`run_file_jit`), which uses the native
+contract; spec files fail JIT and fall back to the interpreter. Forcing
+`SIMPLE_EXECUTION_MODE=interpreter` reproduced the failure from `fn main` too.
+
+**Fix:** shim now returns `Value::array(platform::poll(...))` (matching
+kqueue/iocp); `LAST_POLL_RESULTS` still populated so any old-protocol
+`poll_get_fd` caller keeps working. Verified: interp-mode probe now returns a
+typed empty array (`events.len() == 0` through the match binding), and the
+restored full EventLoop `it` in
+`test/02_integration/ui/event_backend_matrix_spec.spl` is the regression gate.
 
 ## Symptom
 

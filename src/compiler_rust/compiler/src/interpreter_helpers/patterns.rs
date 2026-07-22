@@ -700,7 +700,7 @@ fn bind_let_pattern_element(pat: &Pattern, val: Value, is_mutable: bool, env: &m
             // Only track names that are not module globals (the collision case is
             // legitimately mutable and enforced by the compiler's semantic phase).
             if !is_mutable && !MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(name)) {
-                CONST_NAMES.with(|cell| cell.borrow_mut().insert(name.clone()));
+                crate::interpreter::const_trace("patterns:val-insert", name); CONST_NAMES.with(|cell| cell.borrow_mut().insert(name.clone()));
             } else if is_mutable {
                 // CONST_NAMES has function lifetime with no block scoping, so a
                 // `val x` executed in one branch would leave `x` const-poisoned
@@ -708,12 +708,12 @@ fn bind_let_pattern_element(pat: &Pattern, val: Value, is_mutable: bool, env: &m
                 // (e.g. layout()'s absolute-child `val child_styles` vs the flex
                 // main loop's `var child_styles`). A mutable re-declaration must
                 // clear the stale entry.
-                CONST_NAMES.with(|cell| cell.borrow_mut().remove(name));
+                crate::interpreter::const_trace("patterns:remove", name); CONST_NAMES.with(|cell| cell.borrow_mut().remove(name));
             }
         }
         Pattern::MutIdentifier(name) => {
             env.insert(name.clone(), val);
-            CONST_NAMES.with(|cell| cell.borrow_mut().remove(name));
+            crate::interpreter::const_trace("patterns:remove", name); CONST_NAMES.with(|cell| cell.borrow_mut().remove(name));
         }
         Pattern::MoveIdentifier(name) => {
             // Move pattern - transfers ownership

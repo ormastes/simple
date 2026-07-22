@@ -230,6 +230,11 @@ fn execute_function_body(
     // Use std::mem::take to swap+clear in one step (avoids clone allocation)
     let saved_const_names = CONST_NAMES.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
     let saved_immutable_vars = IMMUTABLE_VARS.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
+    if let Some(traced) = crate::interpreter::const_trace_target() {
+        if saved_const_names.contains(traced) {
+            eprintln!("[const-trace] fnexec:take fn={} saved-set-contains={}", func.name, traced);
+        }
+    }
 
     // Track which module's function is currently executing (innermost frame),
     // used only to break ties in unqualified same-name/same-arity overload
@@ -276,6 +281,12 @@ fn execute_function_body(
 
     // ALWAYS restore flags before handling the result to avoid flag leaking on error
     IN_IMMUTABLE_FN_METHOD.with(|cell| *cell.borrow_mut() = saved_in_immutable_fn);
+    if let Some(traced) = crate::interpreter::const_trace_target() {
+        let live_has = CONST_NAMES.with(|cell| cell.borrow().contains(traced));
+        if live_has || saved_const_names.contains(traced) {
+            eprintln!("[const-trace] fnexec:restore fn={} live-had={} restoring-to-contains={}", func.name, live_has, saved_const_names.contains(traced));
+        }
+    }
     CONST_NAMES.with(|cell| *cell.borrow_mut() = saved_const_names);
     IMMUTABLE_VARS.with(|cell| *cell.borrow_mut() = saved_immutable_vars);
     CURRENT_EXEC_MODULE.with(|cell| *cell.borrow_mut() = saved_exec_module);

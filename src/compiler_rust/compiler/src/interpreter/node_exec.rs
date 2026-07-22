@@ -237,14 +237,14 @@ pub(crate) fn exec_node(
                     )
                 })?;
             env.insert(const_stmt.name.clone(), value);
-            CONST_NAMES.with(|cell| cell.borrow_mut().insert(const_stmt.name.clone()));
+            crate::interpreter::const_trace("node_exec:const-insert", &const_stmt.name); CONST_NAMES.with(|cell| cell.borrow_mut().insert(const_stmt.name.clone()));
             Ok(Control::Next)
         }
         Node::Static(static_stmt) => {
             let value = evaluate_expr(&static_stmt.value, env, functions, classes, enums, impl_methods)?;
             env.insert(static_stmt.name.clone(), value);
             if !static_stmt.mutability.is_mutable() {
-                CONST_NAMES.with(|cell| cell.borrow_mut().insert(static_stmt.name.clone()));
+                crate::interpreter::const_trace("node_exec:static-insert", &static_stmt.name); CONST_NAMES.with(|cell| cell.borrow_mut().insert(static_stmt.name.clone()));
             }
             Ok(Control::Next)
         }
@@ -552,6 +552,7 @@ pub(crate) fn exec_assignment(
 
         let is_const = CONST_NAMES.with(|cell| cell.borrow().contains(name));
         if is_const {
+            crate::interpreter::const_trace("node_exec:enforce-const-hit", name);
             return Err(crate::error::factory::cannot_assign_to_const(name));
         }
 
@@ -694,7 +695,7 @@ pub(crate) fn exec_assignment(
                     if immutable_by_pattern {
                         if is_all_caps {
                             // ALL_CAPS = constant
-                            CONST_NAMES.with(|cell| cell.borrow_mut().insert(name.clone()));
+                            crate::interpreter::const_trace("node_exec:implicit-caps-insert", name); CONST_NAMES.with(|cell| cell.borrow_mut().insert(name.clone()));
                         } else {
                             // Lowercase = immutable (supports functional updates)
                             IMMUTABLE_VARS.with(|cell| cell.borrow_mut().insert(name.clone()));

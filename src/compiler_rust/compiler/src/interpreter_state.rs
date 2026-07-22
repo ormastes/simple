@@ -124,6 +124,25 @@ pub(crate) use simple_common::fault_detection::MAX_RECURSION_DEPTH;
 pub(crate) use simple_common::fault_detection::STACK_OVERFLOW_DETECTION_ENABLED;
 pub(crate) use simple_common::fault_detection::TIMEOUT_EXCEEDED;
 
+/// Debug aid (env-gated, off by default): trace CONST_NAMES lifecycle for one
+/// name. Enable with SIMPLE_CONST_TRACE=<name> (or "*" for all names); prints
+/// site + name to stderr at every insert/remove/frame-boundary touchpoint.
+/// Used to root-cause the unframed-static-method const-poisoning bug
+/// (doc/08_tracking/bug/interp_var_reassign_const_after_me_method_in_spec_2026-07-21.md);
+/// keep for the next CONST_NAMES scoping regression — this is a recurring class.
+pub(crate) fn const_trace_target() -> Option<&'static str> {
+    static TARGET: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    TARGET.get_or_init(|| std::env::var("SIMPLE_CONST_TRACE").ok()).as_deref()
+}
+
+pub(crate) fn const_trace(site: &str, name: &str) {
+    if let Some(traced) = const_trace_target() {
+        if traced == name || traced == "*" {
+            eprintln!("[const-trace] {} name={}", site, name);
+        }
+    }
+}
+
 thread_local! {
     pub(crate) static ACTOR_SPAWNER: ThreadSpawner = ThreadSpawner::new();
     pub(crate) static ACTOR_INBOX: RefCell<Option<Arc<Mutex<mpsc::Receiver<Message>>>>> = const { RefCell::new(None) };

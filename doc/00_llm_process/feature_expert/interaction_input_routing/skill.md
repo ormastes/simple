@@ -139,12 +139,12 @@ backend-integration angle end to end: host `EventBackend` detection
 (platform_event, exact-per-OS), EventLoop create/close, ONE composed
 hit_stack → dispatch → PointerRouter-capture-redirect scenario (mechanics
 depth stays in `interaction_core_spec.spl` — do not duplicate), winit event
-type-code drift pins, and UISession keypress smoke. Two interp landmines
-force structure choices there:
-- `EventLoop.poll` cannot be asserted under ANY sspec `it` (extern's empty
-  `[i64]` degrades to i64 0 under the spec runner only) — poll coverage lives
-  in the runnable mirror `probe_event_loop_smoke.spl`, following the
-  `probe_interaction_core.spl` pattern. Bug:
+type-code drift pins, and UISession keypress smoke. Notes:
+- The EventLoop `it` asserts the FULL smoke including `poll(0)` returning a
+  typed empty array — it is the regression gate for the (fixed) interp shim
+  that returned `Int(count)` instead of the `[i64]` triple array. The
+  runnable mirror `probe_event_loop_smoke.spl` keeps the run/JIT path covered
+  (test-path and run-path use different evaluators). Bug history:
   `doc/08_tracking/bug/interp_empty_event_array_result_match_erasure_2026-07-21.md`.
 - No headless winit/SDL2 availability probe exists yet; only constant pins
   are asserted (SDL2 exposes no named event-type constants at all — gap noted

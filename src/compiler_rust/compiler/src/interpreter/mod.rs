@@ -26,7 +26,7 @@ pub(crate) use crate::interpreter_unit::*;
 #[path = "../interpreter_state.rs"]
 mod interpreter_state;
 pub(crate) use interpreter_state::{
-    clear_moved_vars, get_aop_config, get_di_config, mark_as_moved, set_aop_config, set_di_config, ExecutionMode,
+    clear_moved_vars, const_trace, const_trace_target, get_aop_config, get_di_config, mark_as_moved, set_aop_config, set_di_config, ExecutionMode,
     debug_call_stack_snapshot, field_access_debug_enabled,
 };
 pub use interpreter_state::{

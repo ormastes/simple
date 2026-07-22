@@ -1,0 +1,39 @@
+# @tag: compiler, interpreter, regression
+# @cover src/compiler_rust/compiler/src/interpreter_method/special/objects.rs 5%
+#
+# Regression gate for the unframed-static-method const-poisoning interp bug:
+# a `val <name>` inside a STATIC method body used to leak into the CALLER's
+# process-global CONST_NAMES set (the static dispatch in
+# handle_constructor_methods ran the body via exec_block_fn without the
+# CONST_NAMES/IMMUTABLE_VARS frame swap execute_function_body performs), so a
+# caller's own `var <name>` reassignment after the call died with
+# "cannot assign to const '<name>'".
+# Bug: doc/08_tracking/bug/interp_var_reassign_const_after_me_method_in_spec_2026-07-21.md
+# Real-world trigger: BackendProbeResult.create's `val ok` vs
+# strict_render_ok's `var ok` in engine2d_backend_matrix_spec.spl.
+
+use std.spec.*
+
+class FrameProbeMaker:
+    v: i64
+
+    static fn make_flagged() -> i64:
+        # The name below MUST match the caller's `var` name — that collision
+        # is the whole regression.
+        val frame_probe_flag = 7
+        frame_probe_flag
+
+describe "interpreter static-method const frame":
+
+    it "static body val does not const-poison the caller's same-named var":
+        var frame_probe_flag = false
+        val got = FrameProbeMaker.make_flagged()
+        frame_probe_flag = got == 7
+        assert_true(frame_probe_flag)
+
+    it "poison-free across two consecutive static calls":
+        var frame_probe_flag = false
+        val a = FrameProbeMaker.make_flagged()
+        val b = FrameProbeMaker.make_flagged()
+        frame_probe_flag = (a + b) == 14
+        assert_true(frame_probe_flag)

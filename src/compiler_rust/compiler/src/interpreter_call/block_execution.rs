@@ -864,7 +864,7 @@ pub(super) fn exec_block_closure_into(
                 // Insert into local environment
                 local_env.insert(const_stmt.name.clone(), value);
                 // Register as const name
-                CONST_NAMES.with(|cell| cell.borrow_mut().insert(const_stmt.name.clone()));
+                crate::interpreter::const_trace("blockexec:const-insert", &const_stmt.name); CONST_NAMES.with(|cell| cell.borrow_mut().insert(const_stmt.name.clone()));
                 last_value = Value::Nil;
             }
             Node::Static(static_stmt) => {
@@ -881,7 +881,7 @@ pub(super) fn exec_block_closure_into(
                 local_env.insert(static_stmt.name.clone(), value);
                 // Register as const if immutable
                 if !static_stmt.mutability.is_mutable() {
-                    CONST_NAMES.with(|cell| cell.borrow_mut().insert(static_stmt.name.clone()));
+                    crate::interpreter::const_trace("blockexec:static-insert", &static_stmt.name); CONST_NAMES.with(|cell| cell.borrow_mut().insert(static_stmt.name.clone()));
                 }
                 last_value = Value::Nil;
             }
@@ -1459,7 +1459,7 @@ fn exec_block_closure_mut(
                 // Insert into environment
                 local_env.insert(const_stmt.name.clone(), value);
                 // Register as const name
-                CONST_NAMES.with(|cell| cell.borrow_mut().insert(const_stmt.name.clone()));
+                crate::interpreter::const_trace("blockexec:const-insert", &const_stmt.name); CONST_NAMES.with(|cell| cell.borrow_mut().insert(const_stmt.name.clone()));
                 last_value = Value::Nil;
             }
             Node::Static(static_stmt) => {
@@ -1469,7 +1469,7 @@ fn exec_block_closure_mut(
                 local_env.insert(static_stmt.name.clone(), value);
                 // Register as const if immutable
                 if !static_stmt.mutability.is_mutable() {
-                    CONST_NAMES.with(|cell| cell.borrow_mut().insert(static_stmt.name.clone()));
+                    crate::interpreter::const_trace("blockexec:static-insert", &static_stmt.name); CONST_NAMES.with(|cell| cell.borrow_mut().insert(static_stmt.name.clone()));
                 }
                 last_value = Value::Nil;
             }

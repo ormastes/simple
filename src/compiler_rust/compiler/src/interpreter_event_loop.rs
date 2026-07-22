@@ -628,9 +628,17 @@ pub fn rt_event_loop_poll_interp(args: &[Value]) -> Result<Value, CompileError> 
     let max_events = args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(64);
     let timeout_ms = args.get(2).and_then(|v| v.as_int().ok()).unwrap_or(-1);
     let fds = platform::poll(loop_fd, max_events, timeout_ms);
-    let count = fds.len() as i64;
-    LAST_POLL_RESULTS.with(|r| *r.borrow_mut() = fds);
-    Ok(Value::Int(count))
+    // Contract: `extern fn rt_event_loop_poll(...) -> [i64]` — a flat
+    // (fd, ready, token) triple array, same as the native runtime and the
+    // rt_kqueue_poll/rt_iocp_poll interp shims below. This shim used to
+    // return Int(count) (an obsolete count+get_fd protocol), which surfaced
+    // in .spl as `raw` being i64 0 so EventLoop.poll's `raw.len()` died with
+    // "method `len` not found on type `i64`" (see
+    // doc/08_tracking/bug/interp_empty_event_array_result_match_erasure_2026-07-21.md).
+    // LAST_POLL_RESULTS is still populated so rt_event_loop_poll_get_fd
+    // keeps working for any remaining old-protocol caller.
+    LAST_POLL_RESULTS.with(|r| *r.borrow_mut() = fds.clone());
+    Ok(Value::array(fds))
 }
 
 pub fn rt_event_loop_poll_get_fd_interp(args: &[Value]) -> Result<Value, CompileError> {
