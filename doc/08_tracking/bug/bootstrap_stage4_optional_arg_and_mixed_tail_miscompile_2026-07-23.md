@@ -67,6 +67,33 @@ conclusion-bearing verification build.
 argument (`borrowset_active_list` / `borrowset_conflicting` in
 `borrow_graph.spl`, used by `nll.spl` check paths).
 
+## Pairing rule (sharpest form of the optional defect)
+
+The defect is a PRODUCER/CONSUMER REPRESENTATION MISMATCH, not "Some is always
+wrong": Some-box producer + `case Some(x)` consumer works (both boxed); flat
+producer (bare-lift) + if-val consumer works; ANY mix breaks (if-val binds a
+box un-unwrapped; `case Some`/`.unwrap()` on a flat value gives garbage or a
+trap). Bare-lift a producer ONLY together with flipping every consumer of that
+payload to if-val (grep for `case Some(`/`.unwrap()` on it first). Hit twice:
+`end_function` (match-Some on freshly flattened `current_function`) and the
+`HirStmtKind.Let` type payload (flat flip broke `mir_lowering_stmts` case-Some
+consumers → universal SIGILL; producer flip reverted instead).
+
+## Fixed alongside (real shared-MIR bugs found while peeling, not lane-specific)
+
+- `lower_enum_match` dropped wildcard positions from the payload-bind list:
+  `A(_,_,v)` bound v to the tuple BOX (bind-count-1 fast path misfire) and
+  `A(_,t,v)` shifted every bind left (bind index used as tuple slot). Fixed
+  with `enum_pat_binding_positions`/`enum_pat_arity` + declared-slot indexing
+  + per-slot text retag via `enum_tuple_text_slots` (construction-site
+  tracking in `box_tuple_payload`). Affected the LLVM lane too.
+- `rt_enum_new` id/disc were emitted as I32 consts against the cranelift
+  lane's uniform-i64 convention — every payload-enum construct failed
+  cranelift verification. Emitted as I64 now (C ABI reads low 32 bits).
+- `compile_module_with_backend` had no return-type annotation — the receiver
+  was void-typed at method resolution and `.is_err()`/`.unwrap_err()`
+  dispatched as `void.*` (masked every real backend error as an empty string).
+
 ## Separate defect (filed, not in this family): `void.unwrap_err`
 
 Compiling an enum/Result probe (`probe_enum3.spl`) through the same stage4

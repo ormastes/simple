@@ -769,13 +769,13 @@ impl CompilerDriver:
             driver_log_trace(log, "compiling module for SMF: {name}")
             val mir_module = ctx.mir_modules[name]
             val compiled = compile_module_with_backend(backend_name, mir_module, is_release, driver_opt_level)
-            if compiled.is_err():
-                val err = compiled.unwrap_err()
-                return CompileResult.CodegenError("AOT compile error in {name}: {err}")
-
             # Flat-safe extraction (same defect as _compile_selected_module:
-            # Result.unwrap returns 0-nil; object_code .unwrap box-assumes).
+            # Result.unwrap returns 0-nil; object_code .unwrap box-assumes;
+            # is_err/unwrap_err dispatched as void.* before the helper's
+            # return type was annotated — match arms are the verified idiom).
             match compiled:
+                case Err(err):
+                    return CompileResult.CodegenError("AOT compile error in {name}: {err}")
                 case Ok(module):
                     if val obj_bytes = module.object_code:
                         all_object_bytes = all_object_bytes.concat(obj_bytes)
@@ -866,9 +866,11 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
 
     val compiled = compile_module_with_backend(backend_name, mir_module, is_release, opt_level)
 
-    if compiled.is_err():
-        val err = compiled.unwrap_err()
-        return Err("AOT compile error in {name}: {err}")
+    match compiled:
+        case Err(err):
+            return Err("AOT compile error in {name}: {err}")
+        case _:
+            ()
 
     # Flat-safe extraction: .unwrap() on this Result returns a 0-nil on the
     # stage4 native lane (the nil-receiver guard catches 0 while `== nil`

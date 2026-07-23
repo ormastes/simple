@@ -2677,6 +2677,17 @@ pub(crate) fn adapt_args_to_signature_with_signedness(
     // Collect expected types before mutating builder
     let expected_types: Vec<_> = sig.params.iter().map(|p| p.value_type).collect();
 
+    // Diagnostic: missing args are about to be padded (once per call, gated on
+    // the same debug env as strict vreg checks). Only the FuncRef/signature is
+    // in scope here, so report counts rather than a callee name.
+    if arg_vals.len() < expected_count && std::env::var("SIMPLE_STRICT_VREG").is_ok() {
+        eprintln!(
+            "[codegen-warn] call arity mismatch: got {} args, callee signature expects {} — padding missing args with tagged nil",
+            arg_vals.len(),
+            expected_count
+        );
+    }
+
     let mut adapted = Vec::with_capacity(expected_count);
     for i in 0..expected_count {
         let expected_ty = expected_types[i];
@@ -2727,15 +2738,23 @@ pub(crate) fn adapt_args_to_signature_with_signedness(
                 adapted.push(val);
             }
         } else {
-            // Padding: create default value for missing argument
-            if expected_ty.is_int() {
+            // Padding: create default value for missing argument.
+            // I64 params are uniform tagged RuntimeValue slots — pad with
+            // tagged nil (TAG_SPECIAL=0b011 | SPECIAL_NIL=0 = 3) so callees
+            // see a valid nil instead of raw 0 (which reads as tagged int 0
+            // and silently produced wrong results / garbage-arg symptoms).
+            // Narrow ints and floats are runtime/SFFI-boundary raw values
+            // where tagged nil is meaningless — keep 0 for those.
+            if expected_ty == types::I64 {
+                adapted.push(builder.ins().iconst(types::I64, 3));
+            } else if expected_ty.is_int() {
                 adapted.push(builder.ins().iconst(expected_ty, 0));
             } else if expected_ty == types::F32 {
                 adapted.push(builder.ins().f32const(0.0));
             } else if expected_ty == types::F64 {
                 adapted.push(builder.ins().f64const(0.0));
             } else {
-                adapted.push(builder.ins().iconst(types::I64, 0));
+                adapted.push(builder.ins().iconst(types::I64, 3));
             }
         }
     }

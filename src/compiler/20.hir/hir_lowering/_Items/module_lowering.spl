@@ -1539,7 +1539,10 @@ impl HirLowering:
         if tag == EXPR_METHOD_CALL:
             return HirExpr(kind: HirExprKind.MethodCall(self.lower_bootstrap_flat_expr(expr_get_left(expr_idx)), expr_get_str(expr_idx), [], MethodResolution.Unresolved), has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
         if tag == EXPR_RETURN:
-            return HirExpr(kind: HirExprKind.Return(Some(self.lower_bootstrap_flat_expr(expr_get_left(expr_idx)))), has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)
+            # Bare-lift — see bug doc 2026-07-23 (Some-box vs flat optional).
+            var flat_ret_val: HirExpr? = nil
+            flat_ret_val = self.lower_bootstrap_flat_expr(expr_get_left(expr_idx))
+            return HirExpr(kind: HirExprKind.Return(flat_ret_val), has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)
         if tag == EXPR_BLOCK:
             return HirExpr(kind: HirExprKind.Block(self.lower_bootstrap_flat_block(expr_get_stmts(expr_idx))), has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
         HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)
@@ -1607,7 +1610,12 @@ impl HirLowering:
             return HirStmt(kind: HirStmtKind.Expr(self.lower_bootstrap_flat_expr(stmt_get_expr(stmt_idx))), span: span)
         if tag == STMT_RETURN:
             val expr_idx = stmt_get_expr(stmt_idx)
-            val value = if expr_idx >= 0: Some(self.lower_bootstrap_flat_expr(expr_idx)) else: nil
+            # Bare-lift: explicit Some(...) builds a heap Option box on the
+            # stage4 native lane; MIR lower_expr then sees the box header
+            # (<value:0x100000004>) — bug doc 2026-07-23.
+            var value: HirExpr? = nil
+            if expr_idx >= 0:
+                value = self.lower_bootstrap_flat_expr(expr_idx)
             return HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.Return(value), has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)), span: span)
         if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL:
             return HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)), span: span)

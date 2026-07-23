@@ -949,6 +949,18 @@ pub fn compile_function_body<M: Module>(
                             let ret_val = if let Some(&rv) = vreg_values.get(v) {
                                 rv
                             } else {
+                                // Missing return vreg indicates a MIR SSA/codegen bug;
+                                // fail fast under SIMPLE_STRICT_VREG (default: legacy 0).
+                                if std::env::var("SIMPLE_STRICT_VREG").is_ok() {
+                                    eprintln!(
+                                        "[strict-vreg] Return: missing value for {:?} in function {}",
+                                        v, func.name
+                                    );
+                                    panic!(
+                                        "codegen: missing VReg value for {:?} in Return of function {}",
+                                        v, func.name
+                                    );
+                                }
                                 builder.ins().iconst(types::I64, 0)
                             };
                             builder.ins().return_(&[ret_val]);
@@ -1012,6 +1024,19 @@ pub fn compile_function_body<M: Module>(
                                 rv
                             }
                         } else {
+                            // Missing return vreg indicates a MIR SSA/codegen bug
+                            // (silent constant-0 returns hid real miscompiles during
+                            // bootstrap); fail fast under SIMPLE_STRICT_VREG.
+                            if std::env::var("SIMPLE_STRICT_VREG").is_ok() {
+                                eprintln!(
+                                    "[strict-vreg] Return: missing value for {:?} in function {}",
+                                    v, func.name
+                                );
+                                panic!(
+                                    "codegen: missing VReg value for {:?} in Return of function {}",
+                                    v, func.name
+                                );
+                            }
                             // Return a default value of the correct type
                             match ret_ty {
                                 types::F32 => builder.ins().f32const(0.0),

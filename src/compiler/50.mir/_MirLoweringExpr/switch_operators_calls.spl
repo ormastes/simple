@@ -109,6 +109,39 @@ fn enum_pat_binding_syms(payload: HirPatternPayload?) -> [SymbolId]:
                 ()
     out
 
+fn enum_pat_binding_positions(payload: HirPatternPayload?) -> [i64]:
+    """Declared-field slot of each symbol enum_pat_binding_syms returns
+    (parallel array): `case A(_, t, v)` -> [1, 2]. Needed because wildcards
+    are skipped from the bind list — indexing rt_tuple_get by bind index
+    shifted every bind left past wildcards (agent_enumslots 2026-07-23)."""
+    var out: [i64] = []
+    if payload.?:
+        match payload.unwrap():
+            case Tuple(patterns):
+                var i = 0
+                while i < patterns.len():
+                    match patterns[i].kind:
+                        case Binding(_, _):
+                            out.push(i)
+                        case _:
+                            ()
+                    i = i + 1
+            case _:
+                ()
+    out
+
+fn enum_pat_arity(payload: HirPatternPayload?) -> i64:
+    """Total declared sub-pattern count incl. wildcards: `A(_,_,v)` -> 3.
+    Gates the raw single-payload fast path (bind-count 1 is NOT arity 1)."""
+    var n = 0
+    if payload.?:
+        match payload.unwrap():
+            case Tuple(patterns):
+                n = patterns.len()
+            case _:
+                ()
+    n
+
 fn struct_construct_spread_base(e: HirExpr) -> HirExpr:
     """Paren-form struct-construct spread (`Ctor(..base, field: x)`) has no
     dedicated spread token in the parser (parser/src/expressions/helpers.rs::
@@ -147,6 +180,12 @@ impl MirLowering:
             case MirTypeKind.F64:
                 var b = self.builder
                 val value = b.emit_bitcast(mir_operand_copy(raw), result_type)
+                self.builder = b
+                value
+            case MirTypeKind.F32:
+                var b = self.builder
+                val wide = b.emit_bitcast(mir_operand_copy(raw), MirType.f64())
+                val value = b.emit_cast(mir_operand_copy(wide), result_type)
                 self.builder = b
                 value
             case _:
@@ -195,7 +234,7 @@ impl MirLowering:
                         ()
         val ctor = MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Str("rt_enum_new"),
-            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType(kind: MirTypeKind.I32), MirType(kind: MirTypeKind.I32), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
         ))
         val result = b.emit_call(ctor, [mir_operand_copy(enum_id_local), mir_operand_copy(disc_local), mir_operand_copy(payload_local)], MirType.i64())
         self.builder = b
@@ -685,7 +724,7 @@ impl MirLowering:
                 return found_sym.name
         self.bootstrap_symbol_name(symbol)
 
-    me bootstrap_resolved_call_return_type(symbol: SymbolId, name: text) -> MirType:
+    me bootstrap_resolved_call_return_type_raw(symbol_raw: i64, name: text) -> MirType:
         if name == "engine2d_simd_fill_row_u32" or name == "engine2d_simd_fill_rows_u32" or name == "engine2d_simd_copy_row_u32" or name == "engine2d_simd_blend_row_u32" or name == "rt_engine2d_simd_fill_row_u32" or name == "rt_engine2d_simd_fill_rows_u32" or name == "rt_engine2d_simd_copy_row_u32" or name == "rt_engine2d_simd_blend_row_u32":
             return MirType(kind: MirTypeKind.Array(MirType(kind: MirTypeKind.U32), 0))
         if name == "rt_array_len" or name == "rt_array_get":
@@ -693,7 +732,7 @@ impl MirLowering:
         if name == "rt_simd_engine2d_neon_hits" or name == "rt_simd_engine2d_neon_reset" or name == "rt_engine2d_simd_row_probe":
             return MirType.i64()
         if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
-            return self.resolved_call_return_type(symbol)
+            return self.resolved_call_return_type_raw(symbol_raw)
         # Preserve declared user-function returns before applying the small
         # bootstrap builtin fallback table. Replacing a declared Array return
         # with i64 made a direct `Box(items: make_items())` aggregate consume
@@ -710,7 +749,7 @@ impl MirLowering:
             call_name = self.bootstrap_resolved_call_name(symbol)
         if call_name != "":
             return self.bootstrap_call_return_type(call_name)
-        self.resolved_call_return_type(symbol)
+        return self.resolved_call_return_type_raw(symbol_raw)
 
     me try_lower_bootstrap_cli_arg_index(base: HirExpr, index_local: LocalId) -> LocalId?:
         if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
@@ -958,7 +997,7 @@ impl MirLowering:
                 # lower the call itself, without depending on the
                 # inference-only `resolution` field.
                 if val method_id = resolution.get_symbol_id():
-                    return self.resolved_call_hir_return_type(method_id)
+                    return self.resolved_call_hir_return_type_raw(method_id.id)
                 val receiver_type = self.receiver_declared_type(receiver)
                 if receiver_type != nil:
                     val found_receiver_type = receiver_type ?? HirType(kind: HirTypeKind.Error, span: expr.span)
@@ -970,7 +1009,7 @@ impl MirLowering:
                     if struct_name != "":
                         val method_key = "{struct_name}::{method}"
                         if self.struct_method_syms != nil and self.struct_method_syms.has(method_key):
-                            return self.resolved_call_hir_return_type(self.struct_method_syms[method_key])
+                            return self.resolved_call_hir_return_type_raw(self.struct_method_syms[method_key].id)
             case _: ()
         nil
 
@@ -1044,6 +1083,8 @@ impl MirLowering:
         # Collect enum arms (disc, payload-binding symbols, body) + one default.
         var enum_discs: [i64] = []
         var enum_binds: [[SymbolId]] = []
+        var enum_bind_pos: [[i64]] = []
+        var enum_arities: [i64] = []
         var enum_bodies: [HirBlock] = []
         # Parallel to enum_discs: the arm's own variant NAME, so the
         # single-payload bind below can look up "{enum_name}::{variant}" in
@@ -1088,6 +1129,8 @@ impl MirLowering:
                             self.error("enum match: unknown variant '{variant}' (no registered enum declares it)", Some(arm.pattern.span))
                     enum_discs = enum_discs.push(d)
                     enum_binds = enum_binds.push(enum_pat_binding_syms(epayload))
+                    enum_bind_pos = enum_bind_pos.push(enum_pat_binding_positions(epayload))
+                    enum_arities = enum_arities.push(enum_pat_arity(epayload))
                     enum_bodies = enum_bodies.push(arm.body)
                     enum_variants = enum_variants.push(variant)
                 case Wildcard:
@@ -1118,7 +1161,10 @@ impl MirLowering:
             b_arm.switch_to_block(arm_block)
             self.builder = b_arm
             val bind_syms = enum_binds[ci]
-            if bind_syms.len() == 1:
+            val bind_pos_row = enum_bind_pos[ci]
+            # Gate on declared ARITY, not bind count: `A(_,_,v)` has 1 bind
+            # but 3 fields — the raw fast path would bind v to the tuple box.
+            if bind_syms.len() == 1 and enum_arities[ci] <= 1:
                 # Single-field payload: byte-stable fast path, unchanged from
                 # before #164 -- the raw i64 payload IS the field value.
                 var bp = self.builder
@@ -1194,7 +1240,7 @@ impl MirLowering:
                             self.local_map[bind_syms[0].id] = text_local
                     elif payload_struct != nil and payload_struct != "":
                         self.struct_value_syms[bound_payload.id] = payload_struct ?? ""
-            elif bind_syms.len() > 1:
+            elif bind_syms.len() >= 1:
                 # #164 multi-field payload: the scalar payload slot holds a
                 # boxed rt_tuple (see box_tuple_payload); unbox each field by
                 # index via rt_tuple_get.
@@ -1211,7 +1257,8 @@ impl MirLowering:
                 var fi = 0
                 while fi < bind_syms.len():
                     var bg = self.builder
-                    val idx_local = bg.emit_const_int(fi)
+                    # Declared slot (skips wildcards), NOT bind index.
+                    val idx_local = bg.emit_const_int(bind_pos_row[fi])
                     self.builder = bg
                     var bget = self.builder
                     val gf = MirOperand(kind: MirOperandKind.Const(
@@ -1221,7 +1268,24 @@ impl MirLowering:
                     val gr = bget.emit_call(gf, [mir_operand_copy(tuple_local), mir_operand_copy(idx_local)], MirType.i64())
                     self.builder = bget
                     if val gl = gr:
-                        self.local_map[bind_syms[fi].id] = gl
+                        # Text retag: mirror the single-field path — if this
+                        # slot was observed TEXT at the construction site,
+                        # rt_interp_cstr(gl) produces a genuinely
+                        # Opaque("str")-typed local (see the long comment in
+                        # the single-field arm for why relabel-in-place fails).
+                        val tuple_text_key = "{enum_name}::{enum_variants[ci]}::{bind_pos_row[fi]}"
+                        if self.enum_tuple_text_slots.has(tuple_text_key):
+                            var bp_ttext = self.builder
+                            val ttext_op = MirOperand(kind: MirOperandKind.Const(
+                                MirConstValue.Str("rt_interp_cstr"),
+                                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
+                            ))
+                            val ttext_res = bp_ttext.emit_call(ttext_op, [mir_operand_copy(gl)], MirType(kind: MirTypeKind.Opaque("str")))
+                            self.builder = bp_ttext
+                            if val ttext_local = ttext_res:
+                                self.local_map[bind_syms[fi].id] = ttext_local
+                        else:
+                            self.local_map[bind_syms[fi].id] = gl
                     fi = fi + 1
             val arm_result = self.lower_block_expected(enum_bodies[ci], expected_type)
             var b_arm2 = self.builder
@@ -1487,7 +1551,7 @@ impl MirLowering:
             return payload_local
         res_local
 
-    me box_tuple_payload(values: [HirExpr]) -> LocalId:
+    me box_tuple_payload(values: [HirExpr], construct_key: text) -> LocalId:
         """#164: box 2+ enum-constructor args into a heap tuple (rt_tuple_new
         + rt_tuple_set per field) so the single scalar payload slot of
         rt_enum_new can still carry them as one i64. The matching unbox
@@ -1517,6 +1581,10 @@ impl MirLowering:
         ))
         var si = 0
         while si < lowered.len():
+            # Record TEXT slots keyed by construct site so lower_enum_match's
+            # multi-field unbox can retag them (defect 2, agent_enumslots).
+            if self.local_is_str(lowered[si]):
+                self.enum_tuple_text_slots["{construct_key}::{si}"] = true
             var bs = self.builder
             val idx_local = bs.emit_const_int(si)
             self.builder = bs
@@ -1545,15 +1613,19 @@ impl MirLowering:
         val variant_names = self.enum_variant_index[enum_name]
         val disc = enum_variant_disc(variant_names, variant)
         var b = self.builder
-        val enum_id_local = b.new_temp(MirType(kind: MirTypeKind.I32))
-        b.emit_const(enum_id_local, MirConstValue.Int(self.enum_runtime_id(enum_name)), MirType(kind: MirTypeKind.I32))
-        val disc_local = b.new_temp(MirType(kind: MirTypeKind.I32))
-        b.emit_const(disc_local, MirConstValue.Int(disc), MirType(kind: MirTypeKind.I32))
+        # I64 (not I32): the cranelift lane is uniformly i64 (see the Bool
+        # note in cranelift_codegen_adapter mir_type_to_cl); I32 consts here
+        # made the rt_enum_new call fail cranelift verification (i32 arg vs
+        # all-i64 import signature) for every payload enum construct.
+        val enum_id_local = b.new_temp(MirType.i64())
+        b.emit_const(enum_id_local, MirConstValue.Int(self.enum_runtime_id(enum_name)), MirType.i64())
+        val disc_local = b.new_temp(MirType.i64())
+        b.emit_const(disc_local, MirConstValue.Int(disc), MirType.i64())
         self.builder = b
         var payload_local = LocalId(id: 0)
         var has_payload = false
-        if payload.?:
-            match payload.unwrap():
+        if val payload_v = payload:
+            match payload_v:
                 case Tuple(values):
                     if values.len() == 1:
                         payload_local = self.lower_expr(values[0])
@@ -1570,7 +1642,7 @@ impl MirLowering:
                             # (wrongly) i64. See enum_text_payload_marker.
                             self.enum_payload_struct_names["{enum_name}::{variant}"] = enum_text_payload_marker()
                     elif values.len() > 1:
-                        payload_local = self.box_tuple_payload(values)
+                        payload_local = self.box_tuple_payload(values, "{enum_name}::{variant}")
                         has_payload = true
                 case _:
                     ()
@@ -1580,7 +1652,7 @@ impl MirLowering:
             self.builder = bz
         val func_operand = MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Str("rt_enum_new"),
-            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType(kind: MirTypeKind.I32), MirType(kind: MirTypeKind.I32), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
         ))
         var b2 = self.builder
         val result = b2.emit_call(func_operand, [mir_operand_copy(enum_id_local), mir_operand_copy(disc_local), mir_operand_copy(payload_local)], MirType.i64())
@@ -1638,10 +1710,14 @@ impl MirLowering:
         val variant_names = self.enum_variant_index[enum_name]
         val disc = enum_variant_disc(variant_names, variant)
         var b = self.builder
-        val enum_id_local = b.new_temp(MirType(kind: MirTypeKind.I32))
-        b.emit_const(enum_id_local, MirConstValue.Int(self.enum_runtime_id(enum_name)), MirType(kind: MirTypeKind.I32))
-        val disc_local = b.new_temp(MirType(kind: MirTypeKind.I32))
-        b.emit_const(disc_local, MirConstValue.Int(disc), MirType(kind: MirTypeKind.I32))
+        # I64 (not I32): the cranelift lane is uniformly i64 (see the Bool
+        # note in cranelift_codegen_adapter mir_type_to_cl); I32 consts here
+        # made the rt_enum_new call fail cranelift verification (i32 arg vs
+        # all-i64 import signature) for every payload enum construct.
+        val enum_id_local = b.new_temp(MirType.i64())
+        b.emit_const(enum_id_local, MirConstValue.Int(self.enum_runtime_id(enum_name)), MirType.i64())
+        val disc_local = b.new_temp(MirType.i64())
+        b.emit_const(disc_local, MirConstValue.Int(disc), MirType.i64())
         self.builder = b
         var payload_local = LocalId(id: 0)
         if args.len() == 1:
@@ -1671,14 +1747,14 @@ impl MirLowering:
             while ai < args.len():
                 values.push(args[ai].value)
                 ai = ai + 1
-            payload_local = self.box_tuple_payload(values)
+            payload_local = self.box_tuple_payload(values, "{enum_name}::{variant}")
         else:
             var bz = self.builder
             payload_local = bz.emit_const_int(0)
             self.builder = bz
         val func_operand = MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Str("rt_enum_new"),
-            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType(kind: MirTypeKind.I32), MirType(kind: MirTypeKind.I32), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
         ))
         var b2 = self.builder
         val result = b2.emit_call(func_operand, [mir_operand_copy(enum_id_local), mir_operand_copy(disc_local), mir_operand_copy(payload_local)], MirType.i64())
@@ -2691,35 +2767,6 @@ impl MirLowering:
             # tagged-or-raw text argument via rt_interp_cstr before parsing,
             # so this is correct whether the argument is a literal (raw) or a
             # runtime-produced string (tagged).
-            # `str(x)` global conversion builtin (same class as `int(x)` just
-            # below): scalars render via coerce_concat_operand's shared
-            # rt_raw_*_to_string dispatch (a TAGGED heap string, exactly what
-            # rt_strcat_tagged concat consumers expect); an already-str local
-            # passes through; any other (any-typed, tagged at runtime) value
-            # routes to rt_value_to_string (tagged in, tagged out).
-            if direct_name == "str" and args.len() == 1:
-                val str_arg_local = self.lower_expr(args[0].value)
-                if self.local_is_str(str_arg_local):
-                    return str_arg_local
-                val str_src = self.coerce_concat_operand(str_arg_local)
-                var str_rendered: LocalId? = nil
-                match str_src.kind:
-                    case MirOperandKind.Copy(str_sl):
-                        if str_sl.id != str_arg_local.id:
-                            str_rendered = Some(str_sl)
-                    case _: ()
-                if val str_done = str_rendered:
-                    return str_done
-                val str_op = MirOperand(kind: MirOperandKind.Const(
-                    MirConstValue.Str("rt_value_to_string"),
-                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: self.bootstrap_text_type(), is_variadic: false)))
-                ))
-                var b_str = self.builder
-                val str_res = b_str.emit_call(str_op, [mir_operand_copy(str_arg_local)], self.bootstrap_text_type())
-                self.builder = b_str
-                if val str_local = str_res:
-                    return str_local
-                return str_arg_local
             if direct_name == "int" and args.len() == 1:
                 val int_arg_local = self.lower_expr(args[0].value)
                 val int_op = MirOperand(kind: MirOperandKind.Const(
@@ -2746,7 +2793,7 @@ impl MirLowering:
         # it. The callee expression type remains a fallback for symbol-less
         # function values.
         if mir_expr_symbol_id_value(direct_symbol) >= 0:
-            call_param_types = self.resolved_call_hir_param_types(direct_symbol)
+            call_param_types = self.resolved_call_hir_param_types_raw(direct_symbol.id)
         if call_param_types.len() == 0 and callee.has_type_:
             match callee.type_.kind:
                 case HirTypeKind.Function(params, _, _):
@@ -2796,7 +2843,7 @@ impl MirLowering:
 
         if is_direct:
             val resolved_name = if direct_name != "": direct_name else: self.bootstrap_resolved_call_name(direct_symbol)
-            val return_type = self.bootstrap_resolved_call_return_type(direct_symbol, resolved_name)
+            val return_type = self.bootstrap_resolved_call_return_type_raw(direct_symbol.id, resolved_name)
             val func_operand = if resolved_name != "":
                 MirOperand(kind: MirOperandKind.Const(
                     MirConstValue.Str(resolved_name),
@@ -2805,7 +2852,7 @@ impl MirLowering:
             else:
                 self.symbol_to_operand(direct_symbol)
             val result = self.emit_resolved_direct_call(func_operand, arg_operands, return_type)
-            self.remember_call_hir_return(result, direct_symbol)
+            self.remember_call_hir_return(result, direct_symbol.id)
             return result
 
         val callee_local = self.lower_expr(callee)

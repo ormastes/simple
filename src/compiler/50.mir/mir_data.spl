@@ -61,7 +61,11 @@ impl MirBuilder:
 
     me begin_function(symbol: SymbolId, name: text, signature: MirSignature, span: Span):
         """Begin building a new function."""
-        self.current_function = Some(MirFunction(
+        # Bare-lift: explicit Some(...) builds a heap Option box on the
+        # stage4 native lane; `if val active_fn = builder.current_function`
+        # then binds the BOX and active_fn.symbol.id derefs garbage
+        # (bug doc 2026-07-23). PAIRED with the if-val reader in end_function.
+        val started_fn = MirFunction(
             symbol: symbol,
             name: name,
             signature: signature,
@@ -87,7 +91,8 @@ impl MirBuilder:
             unroll_factor: 0,
             pipeline_ii: 0,
             memory_banks: 0
-        ))
+        )
+        self.current_function = started_fn
         self.next_local_id = 0
         self.next_block_id = 1
         self.locals = []
@@ -131,11 +136,9 @@ impl MirBuilder:
         # Finalize current block
         self.finalize_block()
 
-        var fn_ = match self.current_function:
-            case Some(active_function):
-                active_function
-            case None:
-                MirFunction(
+        # if-val: current_function is stored FLAT (begin_function bare-lift);
+        # a Some(...) pattern on a flat optional traps on the stage4 lane.
+        var fn_ = MirFunction(
                 symbol: SymbolId.new(-1),
                 name: "<invalid>",
                 signature: MirSignature(params: [], return_type: MirType.unit(), is_variadic: false),
@@ -162,10 +165,12 @@ impl MirBuilder:
                 pipeline_ii: 0,
                 memory_banks: 0
                 )
+        if val active_function = self.current_function:
+            fn_ = active_function
         fn_.locals = self.locals
         fn_.blocks = self.blocks
         self.current_function = nil
-        fn_
+        return fn_
 
     me add_function(fn_: MirFunction):
         """Add a completed function to the module."""

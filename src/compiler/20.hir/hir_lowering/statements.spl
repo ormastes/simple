@@ -406,10 +406,12 @@ impl HirLowering:
                     rvalue
                 case _:
                     nil
-            val rt_hir = if rt_val.?:
-                Some(self.lower_hir_expr(rt_val ?? sk_dummy))
-            else:
-                nil
+            # Bare-lift + if-val: explicit Some(...) here built the heap box
+            # MIR lower_expr saw as <value:0x100000004>. This fast path
+            # SHADOWS the StmtKind.Return arm below (bug doc 2026-07-23).
+            var rt_hir: HirExpr? = nil
+            if val rt_val_e = rt_val:
+                rt_hir = self.lower_hir_expr(rt_val_e)
             return HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.Return(rt_hir), type_: nil, span: s.span)), span: s.span)
         if sk_disc == hir_stmt_kind_disc(StmtKind.Assign(sk_dummy, nil, sk_dummy)):
             val as_target: Expr = match stmt_kind_value:
@@ -566,7 +568,11 @@ impl HirLowering:
                 ))
 
             case StmtKind.Return(value):
-                val return_value = Some(self.lower_hir_expr(value))
+                # Bare-lift: explicit Some(...) builds a heap Option box on the
+                # stage4 native lane; MIR lower_expr then sees the box header
+                # (<value:0x100000004>) instead of the expr (bug doc 2026-07-23).
+                var return_value: HirExpr? = nil
+                return_value = self.lower_hir_expr(value)
                 HirStmtKind.Expr(HirExpr(
                     kind: HirExprKind.Return(return_value),
                     type_: nil,

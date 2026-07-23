@@ -717,12 +717,14 @@ impl MirLowering:
             ))
         self.builder = b
 
-    me resolved_call_hir_return_type(symbol: SymbolId) -> HirType?:
+    me resolved_call_hir_return_type_raw(symbol_raw: i64) -> HirType?:
+        # Raw-i64 params: SymbolId struct/optional arguments are miscompiled
+        # on the stage4 native lane (bug doc 2026-07-23).
         # Bare-lift accumulator + explicit tail: explicit Some(...) on return
         # and mixed return/implicit-tail are both miscompiled on the stage4
         # native lane (bug doc 2026-07-23).
         var ret_out: HirType? = nil
-        val sym = self.symbols.get_symbol_raw(symbol.id)
+        val sym = self.symbols.get_symbol_raw(symbol_raw)
         if val found_sym = sym:
             if val sym_type = found_sym.type_:
                 match sym_type.kind:
@@ -732,8 +734,8 @@ impl MirLowering:
                         ()
         return ret_out
 
-    me resolved_call_hir_param_types(symbol: SymbolId) -> [HirType]:
-        val sym = self.symbols.get_symbol_raw(symbol.id)
+    me resolved_call_hir_param_types_raw(symbol_raw: i64) -> [HirType]:
+        val sym = self.symbols.get_symbol_raw(symbol_raw)
         if val found_sym = sym:
             if val sym_type = found_sym.type_:
                 match sym_type.kind:
@@ -743,8 +745,8 @@ impl MirLowering:
                         ()
         []
 
-    me remember_call_hir_return(local: LocalId, symbol: SymbolId):
-        val return_type = self.resolved_call_hir_return_type(symbol)
+    me remember_call_hir_return(local: LocalId, symbol_raw: i64):
+        val return_type = self.resolved_call_hir_return_type_raw(symbol_raw)
         if val found_type = return_type:
             self.local_hir_types[local.id] = found_type
             match found_type.kind:
@@ -754,8 +756,8 @@ impl MirLowering:
                 case _:
                     ()
 
-    me resolved_call_return_type(symbol: SymbolId) -> MirType:
-        val hir_return_type = self.resolved_call_hir_return_type(symbol)
+    me resolved_call_return_type_raw(symbol_raw: i64) -> MirType:
+        val hir_return_type = self.resolved_call_hir_return_type_raw(symbol_raw)
         if val found_type = hir_return_type:
             return self.lower_type(found_type)
         MirType.i64()
@@ -1367,7 +1369,7 @@ impl MirLowering:
                                 if self.struct_method_syms.has(binop_method_key):
                                     val binop_method_id = self.struct_method_syms[binop_method_key]
                                     val binop_method_operand = self.symbol_to_operand(binop_method_id)
-                                    val binop_return_type = self.resolved_call_return_type(binop_method_id)
+                                    val binop_return_type = self.resolved_call_return_type_raw(binop_method_id.id)
                                     var b_op = self.builder
                                     val binop_call_result = b_op.emit_call(binop_method_operand, [mir_operand_copy(left_local), mir_operand_copy(right_local)], binop_return_type)
                                     self.builder = b_op
@@ -2297,7 +2299,7 @@ impl MirLowering:
                     var br = self.builder
                     var result = self.lower_expr(rv)
                     if val active_fn = self.builder.current_function:
-                        val declared_return = self.resolved_call_hir_return_type(active_fn.symbol)
+                        val declared_return = self.resolved_call_hir_return_type_raw(active_fn.symbol.id)
                         if val found_return = declared_return:
                             match found_return.kind:
                                 case HirTypeKind.Optional(_):

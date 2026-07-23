@@ -163,6 +163,14 @@ fn native_build_mode_from_args(args: [text], i: i64) -> text:
     else:
         native_build_mode_from_args(args, i + 1)
 
+fn native_build_no_borrow_check_from_args(args: [text], i: i64) -> bool:
+    if i >= args.len():
+        false
+    elif args[i] == "--no-borrow-check":
+        true
+    else:
+        native_build_no_borrow_check_from_args(args, i + 1)
+
 # #138/#19: the authorized Stage4 explicit entry and the single-file positional
 # shape (no --source dirs -- i.e. `bm native-build foo.spl -o out`) compile
 # THROUGH THE PURE-SIMPLE IN-PROCESS PIPELINE instead of the Rust
@@ -194,7 +202,8 @@ fn run_native_build_bootstrap(args: [text]) -> i64:
         env_set("SIMPLE_NATIVE_ARENA_DECLS", "1")
         val stage4_result = aot_native_project_with_backend_fixed(
             "", "", "", "", "", 0,
-            explicit_entry, stage4_output, stage4_backend, true, true, 3
+            explicit_entry, stage4_output, stage4_backend, true, true, 3,
+            native_build_no_borrow_check_from_args(args, 0)
         )
         env_set("SIMPLE_NATIVE_ARENA_DECLS", old_native_arena_decls)
         if compile_result_is_success(stage4_result):
@@ -226,6 +235,7 @@ fn run_native_build_bootstrap(args: [text]) -> i64:
     options.backend = backend
     options.release = true
     options.opt_level = 3
+    options.no_borrow_check = native_build_no_borrow_check_from_args(args, 0)
     options = compileoptions_normalize_mir_optimization(options)
     val driver = compiler_driver_create(options)
     val result = compiler_driver_run_compile(driver)
@@ -234,11 +244,11 @@ fn run_native_build_bootstrap(args: [text]) -> i64:
     # lazy-import-returned result never resolve (Task #145 erased-receiver
     # class); plain imported calls resolve by symbol name.
     if compile_result_is_success(result):
-        0
+        return 0
     else:
         for err in compile_result_errors(result):
             print "error: in-process native-build: {err}"
-        1
+        return 1
 
 fn bootstrap_compile_option_takes_value(arg: text) -> bool:
     arg == "-o" or arg == "--output" or arg == "--backend" or arg == "--format" or arg == "--opt-level" or arg == "--target" or arg == "--cpu"
