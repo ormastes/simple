@@ -75,6 +75,28 @@ describe "native build main dispatch contract":
         expect(source).to_contain("env_set(\"SIMPLE_NATIVE_BUILD_ENTRY\", old_native_entry)")
         expect(source).to_contain("env_set(\"SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE\", old_native_entry_closure)")
 
+    it "routes pure native archive output through the portable archiver":
+        val main_source = file_read("src/app/cli/native_build_main.spl")
+        val cli_source = file_read("src/app/io/_CliCompile/compile_targets.spl")
+        val driver_source = file_read("src/compiler/80.driver/driver_aot_output.spl")
+
+        expect(main_source).to_contain("--emit-archive")
+        expect(cli_source).to_contain('elif a == "--emit-archive":')
+        expect(cli_source).to_contain('if emit_archive: "archive"')
+        expect(cli_source).to_contain('env_set("SIMPLE_NATIVE_BUILD_NO_MANGLE", if no_mangle: "1" else: "")')
+        expect(cli_source).to_contain('env_set("SIMPLE_NATIVE_BUILD_NO_MANGLE", old_no_mangle)')
+        expect(driver_source).to_contain("find_archive_portable()")
+        expect(driver_source).to_contain('args = ["/NOLOGO", "/OUT:{output}"]')
+        expect(driver_source).to_contain('else: "rcsD"')
+        expect(driver_source).to_contain("emit-archive failed")
+        val llvm_source = file_read("src/compiler/70.backend/backend/_MirToLlvm/class_def.spl")
+        expect(llvm_source).to_contain("if self.no_mangle:")
+        val cranelift_source = file_read("src/compiler/70.backend/backend/cranelift_codegen_adapter.spl")
+        expect(cranelift_source).to_contain('rt_env_get("SIMPLE_NATIVE_BUILD_NO_MANGLE")')
+        expect(driver_source).to_contain('symbol_mode = if no_mangle_requested: "no-mangle" else: ""')
+        expect(driver_source).to_contain("Cranelift Mach-O archives require llvm-ar")
+        expect(cli_source).to_contain("val non_launchable_output = emit_object or emit_archive")
+
     it "restores SIMPLE_NATIVE_BUILD_TARGET env when set":
         val source = file_read("src/app/io/_CliCompile/compile_targets.spl")
 
@@ -108,7 +130,7 @@ describe "native build main dispatch contract":
     it "names native-build object cache paths by cache scope":
         val source = file_read("src/compiler/80.driver/driver_aot_output.spl")
 
-        expect(source).to_contain("fn driver_native_build_cache_scope(backend: text, cache_dir: text, target_cpu: text, opt_level: i64)")
+        expect(source).to_contain("fn driver_native_build_cache_scope(backend: text, cache_dir: text, target_cpu: text, opt_level: i64, symbol_mode: text)")
         expect(source).to_contain("native_build_cache_scope_key(Some(backend)")
         expect(source).to_contain("val cache_scope_root = rt_path_join(cache_dir, scope)")
         expect(source).to_contain("val object_base = rt_path_join(cache_scope_root, \"object\")")

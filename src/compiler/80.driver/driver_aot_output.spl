@@ -11,6 +11,8 @@
 # Backend helpers for module compilation and backend resolution
 use compiler.backend.backend.backend_helpers.{compile_module_with_backend, get_effective_backend_name}
 use compiler.backend.llvm_backend_tools.{llvm_bootstrap_last_object_path}
+use compiler.backend.backend.llvm_capability.{find_archive_portable}
+use std.platform.{get_host_os}
 use compiler.backend.backend_types.{CompiledModule}
 use compiler.backend.linker.linker_wrapper.{link_to_native, link_to_smf, link_to_self_contained, NativeLinkConfig, SelfContainedConfig, write_elf_bytes_to_file}
 use compiler.backend.backend.llvm_native_link.{link_llvm_native, NativeLinkOptions}
@@ -85,9 +87,10 @@ fn driver_native_build_cache_dir() -> text:
 fn driver_native_build_cache_path(cache_dir: text) -> text:
     rt_path_join(cache_dir, "build_cache.sdn")
 
-fn driver_native_build_cache_scope(backend: text, cache_dir: text, target_cpu: text, opt_level: i64) -> (text, text):
+fn driver_native_build_cache_scope(backend: text, cache_dir: text, target_cpu: text, opt_level: i64, symbol_mode: text) -> (text, text):
     val raw_target = if target_cpu == "": nil else: Some(target_cpu)
-    val scope = native_build_cache_scope_key(Some(backend), raw_target, [], opt_level as i32, native_build_compiler_identity())
+    val compiler_id = native_build_compiler_identity() + if symbol_mode == "": "" else: "-" + symbol_mode
+    val scope = native_build_cache_scope_key(Some(backend), raw_target, [], opt_level as i32, compiler_id)
     val cache_scope_root = rt_path_join(cache_dir, scope)
     (cache_scope_root, scope)
 
@@ -269,9 +272,12 @@ impl CompilerDriver:
         val is_release = ctx.options.release
         val driver_opt_level = driver_effective_native_opt_level(ctx, is_release)
         val stage4_requested = (rt_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") == "1"
-        val emit_object_requested = (rt_env_get("SIMPLE_NATIVE_BUILD_EMIT_OBJECT") ?? "") == "1"
-        if stage4_requested and emit_object_requested:
-            return CompileResult.CodegenError("Stage4 strict profile does not support emit-object output")
+        val native_output_mode = rt_env_get("SIMPLE_NATIVE_BUILD_EMIT_OBJECT") ?? ""
+        val emit_object_requested = native_output_mode == "1"
+        val emit_archive_requested = native_output_mode == "archive"
+        val no_mangle_requested = (rt_env_get("SIMPLE_NATIVE_BUILD_NO_MANGLE") ?? "") == "1"
+        if stage4_requested and (emit_object_requested or emit_archive_requested):
+            return CompileResult.CodegenError("Stage4 strict profile does not support object or archive output")
         val trace = (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
         if trace:
             print "[NATIVE] backend_name={backend_name}, is_release={is_release}"
@@ -283,7 +289,8 @@ impl CompilerDriver:
         val cache_dir = driver_native_build_cache_dir()
         rt_dir_create(cache_dir, true)
         val native_target = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
-        val (base_cache_scope_root, _) = driver_native_build_cache_scope(effective_backend, cache_dir, native_target, driver_opt_level)
+        val symbol_mode = if no_mangle_requested: "no-mangle" else: ""
+        val (base_cache_scope_root, _) = driver_native_build_cache_scope(effective_backend, cache_dir, native_target, driver_opt_level, symbol_mode)
         val cache_scope_root = rt_path_join(base_cache_scope_root, "sources-{driver_native_sources_fingerprint(ctx.sources)}")
         # --clean requested a clean build: drop this entry's cache scope so no
         # previously compiled object in this scope can be reused. Consume the
@@ -450,6 +457,29 @@ impl CompilerDriver:
                 if code != 0:
                     return CompileResult.CodegenError("emit-object relocatable link failed: {stderr}")
             driver_log_info(log, "Native object written to {output}")
+            return driver_native_success_with_launch_metadata(ctx, output)
+
+        if emit_archive_requested:
+            val archiver = find_archive_portable()
+            if archiver == "":
+                return CompileResult.CodegenError("emit-archive requires llvm-ar, ar, or lib.exe")
+            val host_os = get_host_os()
+            val system_ar = archiver == "ar" or archiver.ends_with("/ar")
+            if effective_backend == "cranelift" and host_os == "macos" and system_ar:
+                return CompileResult.CodegenError("Cranelift Mach-O archives require llvm-ar")
+            val msvc_lib = archiver == "lib" or archiver.ends_with("lib.exe")
+            var args: [text] = []
+            if msvc_lib:
+                args = ["/NOLOGO", "/OUT:{output}"]
+            else:
+                val archive_flags = if host_os == "macos" and system_ar: "rcs" else: "rcsD"
+                args = [archive_flags, output]
+            for obj in object_files:
+                args = args.push(obj)
+            val (_stdout, stderr, code) = rt_process_run(archiver, args)
+            if code != 0:
+                return CompileResult.CodegenError("emit-archive failed: {stderr}")
+            driver_log_info(log, "Native archive written to {output}")
             return driver_native_success_with_launch_metadata(ctx, output)
 
         if trace:

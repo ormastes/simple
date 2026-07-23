@@ -1,6 +1,6 @@
 # Simple-Core Pure-Simple Archive Builder Blocker
 
-Status: **Status: RESOLVED** (live-verified 2026-05-29)
+Status: **REOPENED — source fixed, rebuilt self-hosted execution pending** (2026-07-23)
 
 ## Problem Statement
 
@@ -112,3 +112,27 @@ tagged-value, memory, process/time/panic, array, tuple/dict/option helpers,
 terminal/platform shims, string, length, conversion, slice/equality, stdio, and
 print/write symbols needed by the smoke gates without generated unresolved
 stubs in the full TUI app build.
+
+## 2026-07-23 self-hosted regression
+
+The earlier archive implementation and live evidence used the Rust bootstrap
+pipeline. A freshly built pure-Simple Stage4 compiler did not advertise
+`--emit-archive`, so the canonical simple-core smoke could not prove the same
+contract without falling back to the seed.
+
+The pure-Simple source fix now:
+
+- parses and documents `--emit-archive` in both native-build help owners;
+- reuses the existing cached object collection and portable
+  `llvm-ar`/`ar`/`lib.exe` selection to emit a static archive before executable
+  linking;
+- honors `--no-mangle` in the LLVM symbol owner so runtime `rt_*` definitions
+  remain linkable instead of receiving local-collision names; and
+- preserves the preexisting output-mode and no-mangle environment values on
+  every native-build exit.
+
+Rebuilt execution remains required. The currently deployed pure-Simple CLI
+segfaults while checking the changed compiler files, and the concurrently built
+Stage4 artifact is still being replaced by its owner. Do not use the Rust seed
+as acceptance evidence; rerun `check-simple-core-runtime-smoke.shs` with a
+stable rebuilt pure-Simple compiler.

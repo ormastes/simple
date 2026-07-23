@@ -601,6 +601,8 @@ fn cli_native_build(args: [text]) -> i64:
             print "  --list-optimizations Print implemented optimization groups and levels"
             print "  --strip              Strip symbols from output"
             print "  --emit-object        Emit relocatable object output instead of linking executable"
+            print "  --emit-archive       Emit a static archive instead of linking executable"
+            print "  --no-mangle          Preserve declared function symbol names"
             print "  --runtime-bundle <mode> Runtime lane: auto, simple-core, core-c-bootstrap"
             print "  --cpu <policy>       CPU policy: default, native, or x86-64-v1..v4"
             print "  --entry-closure      Compile only modules reachable from --entry"
@@ -683,6 +685,7 @@ fn cli_native_build(args: [text]) -> i64:
         var strip = false
         var emit_smf = false
         var emit_object = false
+        var emit_archive = false
         var source_dirs: [text] = []
         var entry_closure = false
         var release = true
@@ -694,6 +697,7 @@ fn cli_native_build(args: [text]) -> i64:
         var native_threads = 0
         var optimization_requested = false
         var no_borrow_check = false
+        var no_mangle = false
         var j = 0
         # Skip "native-build" command name
         if args.len() > 0 and args[0] == "native-build":
@@ -744,6 +748,8 @@ fn cli_native_build(args: [text]) -> i64:
                 emit_smf = true
             elif a == "--emit-object":
                 emit_object = true
+            elif a == "--emit-archive":
+                emit_archive = true
             elif a == "--threads" or a == "--jobs" or a == "-j":
                 if j + 1 >= args.len():
                     _cli_eprint("Error: {a} requires a positive integer")
@@ -847,7 +853,7 @@ fn cli_native_build(args: [text]) -> i64:
             elif a == "--no-borrow-check":
                 no_borrow_check = true
             elif a == "--no-mangle":
-                pass  # Accepted but not used in llvm-lib path
+                no_mangle = true
             elif a == "--clean":
                 # Ask the driver to wipe this build's cache scope before
                 # compiling. The driver consumes (clears) the flag, so it
@@ -888,6 +894,10 @@ fn cli_native_build(args: [text]) -> i64:
             _cli_eprint("Error: invalid --mode '{build_mode}' (expected dynload or one-binary)")
             return 1
 
+        if emit_object and emit_archive:
+            _cli_eprint("Error: --emit-object and --emit-archive are mutually exclusive")
+            return 1
+
         if entry_point == "":
             _cli_eprint("Error: No entry point specified for native-build backend")
             _cli_eprint("Usage: simple native-build --backend=llvm --entry <file.spl> -o <output> [--source <dir>]...")
@@ -909,6 +919,7 @@ fn cli_native_build(args: [text]) -> i64:
                 _cli_eprint("[native-build] Source dirs: {source_dirs}")
         val old_log_mode = env_get("SIMPLE_OS_LOG_MODE") ?? ""
         val old_emit_object = env_get("SIMPLE_NATIVE_BUILD_EMIT_OBJECT") ?? ""
+        val old_no_mangle = env_get("SIMPLE_NATIVE_BUILD_NO_MANGLE") ?? ""
         val old_native_arena_decls = env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? ""
         val old_native_threads = env_get("SIMPLE_NATIVE_BUILD_THREADS") ?? ""
         val old_native_cache_dir = env_get("SIMPLE_NATIVE_BUILD_CACHE_DIR") ?? ""
@@ -926,10 +937,13 @@ fn cli_native_build(args: [text]) -> i64:
             env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
             _cli_eprint("Error: could not create native-build cache directory {cache_dir}")
             return 1
-        env_set("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", if emit_object: "1" else: "")
+        val native_output_mode = if emit_archive: "archive" elif emit_object: "1" else: ""
+        env_set("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", native_output_mode)
+        env_set("SIMPLE_NATIVE_BUILD_NO_MANGLE", if no_mangle: "1" else: "")
         if not env_set("SIMPLE_NATIVE_BUILD_CACHE_DIR", cache_dir):
             env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
             env_set("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", old_emit_object)
+            env_set("SIMPLE_NATIVE_BUILD_NO_MANGLE", old_no_mangle)
             _cli_eprint("Error: could not export SIMPLE_NATIVE_BUILD_CACHE_DIR={cache_dir}")
             return 1
         if native_threads > 0:
@@ -938,6 +952,7 @@ fn cli_native_build(args: [text]) -> i64:
         if not env_set("SIMPLE_NATIVE_BUILD_ENTRY", entry_point):
             env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
             env_set("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", old_emit_object)
+            env_set("SIMPLE_NATIVE_BUILD_NO_MANGLE", old_no_mangle)
             env_set("SIMPLE_NATIVE_BUILD_CACHE_DIR", old_native_cache_dir)
             env_set("SIMPLE_NATIVE_ARENA_DECLS", old_native_arena_decls)
             env_set("SIMPLE_NATIVE_BUILD_ENTRY", old_native_entry)
@@ -957,7 +972,7 @@ fn cli_native_build(args: [text]) -> i64:
         # --entry-closure: tell the driver to skip its implicit whole-src bulk-load
         # (src/app+lib+compiler+runtime). The explicit --source dirs + entry still
         # load. Gated so the default (bootstrap) path is byte-identical.
-        val effective_entry_closure = entry_closure or emit_object
+        val effective_entry_closure = entry_closure or emit_object or emit_archive
         val nb_closure_env = if effective_entry_closure: "1" else: "0"
         env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", nb_closure_env)
         if runtime_bundle_explicit:
@@ -1021,7 +1036,7 @@ fn cli_native_build(args: [text]) -> i64:
                 _cli_eprint("[native-build] Entry closure files: {native_inputs.len()}")
             options.mode = CompileMode.Aot
             options.output_file = Some(staged_output)
-            if build_mode == "dynload" and not emit_object:
+            if build_mode == "dynload" and not emit_object and not emit_archive:
                 options.output_format = driver_output_format_both()
             else:
                 options.output_format = driver_output_format_native()
@@ -1051,6 +1066,7 @@ fn cli_native_build(args: [text]) -> i64:
                 if not _cli_file_exists_impl(staged_output):
                     env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
                     env_set("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", old_emit_object)
+                    env_set("SIMPLE_NATIVE_BUILD_NO_MANGLE", old_no_mangle)
                     env_set("SIMPLE_NATIVE_BUILD_CACHE_DIR", old_native_cache_dir)
                     env_set("SIMPLE_NATIVE_ARENA_DECLS", old_native_arena_decls)
                     env_set("SIMPLE_NATIVE_BUILD_ENTRY", old_native_entry)
@@ -1071,6 +1087,7 @@ fn cli_native_build(args: [text]) -> i64:
                     _cli_file_remove_impl(staged_output)
                     env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
                     env_set("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", old_emit_object)
+                    env_set("SIMPLE_NATIVE_BUILD_NO_MANGLE", old_no_mangle)
                     env_set("SIMPLE_NATIVE_BUILD_CACHE_DIR", old_native_cache_dir)
                     env_set("SIMPLE_NATIVE_ARENA_DECLS", old_native_arena_decls)
                     env_set("SIMPLE_NATIVE_BUILD_ENTRY", old_native_entry)
@@ -1085,12 +1102,20 @@ fn cli_native_build(args: [text]) -> i64:
                         env_set("SIMPLE_NATIVE_BUILD_THREADS", old_native_threads)
                     _cli_eprint("error: native-build produced staging output but could not publish it: {output}")
                     return 1
-                val metadata = launch_metadata_for_native_build("host", "", "native")
                 val metadata_path = launch_metadata_sidecar_path(output)
-                val metadata_text = render_launch_metadata_sidecar(metadata)
-                if not _cli_file_write_impl(metadata_path, metadata_text):
+                val non_launchable_output = emit_object or emit_archive
+                var metadata_ok = true
+                if non_launchable_output:
+                    if _cli_file_exists_impl(metadata_path):
+                        metadata_ok = _cli_file_remove_impl(metadata_path)
+                else:
+                    val metadata = launch_metadata_for_native_build("host", "", "native")
+                    val metadata_text = render_launch_metadata_sidecar(metadata)
+                    metadata_ok = _cli_file_write_impl(metadata_path, metadata_text)
+                if not metadata_ok:
                     env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
                     env_set("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", old_emit_object)
+                    env_set("SIMPLE_NATIVE_BUILD_NO_MANGLE", old_no_mangle)
                     env_set("SIMPLE_NATIVE_BUILD_CACHE_DIR", old_native_cache_dir)
                     env_set("SIMPLE_NATIVE_ARENA_DECLS", old_native_arena_decls)
                     env_set("SIMPLE_NATIVE_BUILD_ENTRY", old_native_entry)
@@ -1103,10 +1128,11 @@ fn cli_native_build(args: [text]) -> i64:
                         env_set("SIMPLE_NATIVE_CPU", old_native_cpu)
                     if native_threads > 0:
                         env_set("SIMPLE_NATIVE_BUILD_THREADS", old_native_threads)
-                    _cli_eprint("Error: failed to write launch metadata sidecar: {metadata_path}")
+                    _cli_eprint("Error: failed to update launch metadata sidecar: {metadata_path}")
                     return 1
                 env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
                 env_set("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", old_emit_object)
+                env_set("SIMPLE_NATIVE_BUILD_NO_MANGLE", old_no_mangle)
                 env_set("SIMPLE_NATIVE_BUILD_CACHE_DIR", old_native_cache_dir)
                 env_set("SIMPLE_NATIVE_ARENA_DECLS", old_native_arena_decls)
                 env_set("SIMPLE_NATIVE_BUILD_ENTRY", old_native_entry)
@@ -1121,12 +1147,14 @@ fn cli_native_build(args: [text]) -> i64:
                     env_set("SIMPLE_NATIVE_BUILD_THREADS", old_native_threads)
                 if verbose:
                     _cli_eprint("[native-build] Build successful: {output}")
-                    _cli_eprint("[native-build] Launch metadata: {metadata_path}")
+                    if not non_launchable_output:
+                        _cli_eprint("[native-build] Launch metadata: {metadata_path}")
                 return 0
             case _:
                 _cli_file_remove_impl(staged_output)
                 env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
                 env_set("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", old_emit_object)
+                env_set("SIMPLE_NATIVE_BUILD_NO_MANGLE", old_no_mangle)
                 env_set("SIMPLE_NATIVE_BUILD_CACHE_DIR", old_native_cache_dir)
                 env_set("SIMPLE_NATIVE_ARENA_DECLS", old_native_arena_decls)
                 env_set("SIMPLE_NATIVE_BUILD_ENTRY", old_native_entry)
