@@ -732,7 +732,7 @@ begin
                     when "100" => -- div (signed, truncate toward zero)
                       if r(rs2) = 0 then
                         r(rd) := x"FFFFFFFF";
-                      elsif signed(r(rs1)) = -16#80000000# and r(rs2) = x"80000000" then
+                      elsif signed(r(rs1)) = -16#80000000# and r(rs2) = x"FFFFFFFF" then
                         r(rd) := x"80000000";
                       else
                         -- Start multi-cycle division
@@ -786,7 +786,7 @@ begin
                     when "110" => -- rem (signed remainder)
                       if r(rs2) = 0 then
                         r(rd) := r(rs1);
-                      elsif signed(r(rs1)) = -16#80000000# and r(rs2) = x"80000000" then
+                      elsif signed(r(rs1)) = -16#80000000# and r(rs2) = x"FFFFFFFF" then
                         r(rd) := x"00000000";
                       else
                         -- Start multi-cycle signed remainder
