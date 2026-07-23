@@ -187,7 +187,11 @@ impl HirLowering:
             if not self.registering_import_symbols:
                 self.error("untyped function returns a value: function '{fn_decl.name}' returns a value but declares no return type; add '-> T'", fn_decl.span)
             return HirType(kind: HirTypeKind.Unit, span: fn_decl.span)
-        HirType(kind: hir_type_kind_from_simple_name(scan.resolved_name.unwrap()), span: fn_decl.span)
+        # if-val: .unwrap() is box-assuming and breaks flat optionals on the
+        # stage4 native lane (bug doc 2026-07-23).
+        if val rn = scan.resolved_name:
+            return HirType(kind: hir_type_kind_from_simple_name(rn), span: fn_decl.span)
+        return HirType(kind: HirTypeKind.Unit, span: fn_decl.span)
 
     me declared_callable_type(fn_decl: Function, owner_symbol: SymbolId?) -> HirType?:
         # Generic callables keep the existing untyped-symbol behavior until
@@ -249,7 +253,10 @@ impl HirLowering:
                     if param.name == name:
                         found = Some(self.lower_type(param.type_))
                     i = i + 1
-                if found.?: hir_type_simple_name(found.unwrap()) else: nil
+                var found_name: text? = nil
+                if val found_t = found:
+                    found_name = hir_type_simple_name(found_t)
+                found_name
             case ExprKind.Unary(op, operand):
                 match op:
                     case UnaryOp.Not:
@@ -264,10 +271,12 @@ impl HirLowering:
                 elif ast_binop_is_arith(op):
                     val lt = self.infer_simple_type_name_ast(left, params)
                     val rt = self.infer_simple_type_name_ast(right, params)
-                    if lt.? and rt.? and lt.unwrap() == rt.unwrap() and hir_simple_type_name_is_known(lt.unwrap()):
-                        lt
-                    else:
-                        nil
+                    var arith_name: text? = nil
+                    if val lt_v = lt:
+                        if val rt_v = rt:
+                            if lt_v == rt_v and hir_simple_type_name_is_known(lt_v):
+                                arith_name = lt
+                    arith_name
                 else:
                     nil
             case ExprKind.Cast(_, target):
@@ -296,15 +305,17 @@ impl HirLowering:
             case StmtKind.Val(_, _, init):
                 self.scan_ast_expr_for_returns(init, params)
             case StmtKind.Var(_, _, init):
-                if init.?: self.scan_ast_expr_for_returns(init.unwrap(), params) else: return_scan_empty()
+                var var_scan = return_scan_empty()
+                if val init_e = init:
+                    var_scan = self.scan_ast_expr_for_returns(init_e, params)
+                var_scan
             case StmtKind.Assign(target, _, value):
                 merge_return_scan(self.scan_ast_expr_for_returns(target, params), self.scan_ast_expr_for_returns(value, params))
             case StmtKind.Return(value):
-                if value.?:
-                    val v = value.unwrap()
-                    ReturnScan(found_value_return: true, resolved_name: self.infer_simple_type_name_ast(v, params), ambiguous: false)
-                else:
-                    return_scan_empty()
+                var ret_scan = return_scan_empty()
+                if val v = value:
+                    ret_scan = ReturnScan(found_value_return: true, resolved_name: self.infer_simple_type_name_ast(v, params), ambiguous: false)
+                ret_scan
             case StmtKind.For(_, iter, body):
                 merge_return_scan(self.scan_ast_expr_for_returns(iter, params), self.scan_ast_block_for_returns(body, params))
             case StmtKind.While(cond, body):
@@ -312,7 +323,10 @@ impl HirLowering:
             case StmtKind.Loop(body):
                 self.scan_ast_block_for_returns(body, params)
             case StmtKind.Yield(value):
-                if value.?: self.scan_ast_expr_for_returns(value.unwrap(), params) else: return_scan_empty()
+                var yield_scan = return_scan_empty()
+                if val yv = value:
+                    yield_scan = self.scan_ast_expr_for_returns(yv, params)
+                yield_scan
             case StmtKind.Throw(value):
                 self.scan_ast_expr_for_returns(value, params)
             case StmtKind.With(_, body):
@@ -331,15 +345,14 @@ impl HirLowering:
     me scan_ast_expr_for_returns(e: Expr, params: [Param]) -> ReturnScan:
         match e.kind:
             case ExprKind.Return(value):
-                if value.?:
-                    val v = value.unwrap()
-                    ReturnScan(found_value_return: true, resolved_name: self.infer_simple_type_name_ast(v, params), ambiguous: false)
-                else:
-                    return_scan_empty()
+                var ret_scan = return_scan_empty()
+                if val v = value:
+                    ret_scan = ReturnScan(found_value_return: true, resolved_name: self.infer_simple_type_name_ast(v, params), ambiguous: false)
+                ret_scan
             case ExprKind.If(cond, then_, else_):
                 var acc = merge_return_scan(self.scan_ast_expr_for_returns(cond, params), self.scan_ast_block_for_returns(then_, params))
-                if else_.?:
-                    acc = merge_return_scan(acc, self.scan_ast_block_for_returns(else_.unwrap(), params))
+                if val else_b = else_:
+                    acc = merge_return_scan(acc, self.scan_ast_block_for_returns(else_b, params))
                 acc
             case ExprKind.MatchCase(scrutinee, arms):
                 var acc = self.scan_ast_expr_for_returns(scrutinee, params)
@@ -352,8 +365,8 @@ impl HirLowering:
                 var acc = self.scan_ast_block_for_returns(body, params)
                 for clause in clauses:
                     acc = merge_return_scan(acc, self.scan_ast_block_for_returns(clause.body, params))
-                if finally_.?:
-                    acc = merge_return_scan(acc, self.scan_ast_block_for_returns(finally_.unwrap(), params))
+                if val fin_b = finally_:
+                    acc = merge_return_scan(acc, self.scan_ast_block_for_returns(fin_b, params))
                 acc
             case ExprKind.Block(block):
                 self.scan_ast_block_for_returns(block, params)
@@ -395,17 +408,20 @@ impl HirLowering:
                 self.scan_ast_expr_for_returns(base, params)
             case ExprKind.Range(start, end, _, step):
                 var acc = return_scan_empty()
-                if start.?:
-                    acc = merge_return_scan(acc, self.scan_ast_expr_for_returns(start.unwrap(), params))
-                if end.?:
-                    acc = merge_return_scan(acc, self.scan_ast_expr_for_returns(end.unwrap(), params))
-                if step.?:
-                    acc = merge_return_scan(acc, self.scan_ast_expr_for_returns(step.unwrap(), params))
+                if val start_e = start:
+                    acc = merge_return_scan(acc, self.scan_ast_expr_for_returns(start_e, params))
+                if val end_e = end:
+                    acc = merge_return_scan(acc, self.scan_ast_expr_for_returns(end_e, params))
+                if val step_e = step:
+                    acc = merge_return_scan(acc, self.scan_ast_expr_for_returns(step_e, params))
                 acc
             case ExprKind.Await(expr):
                 self.scan_ast_expr_for_returns(expr, params)
             case ExprKind.Yield(value):
-                if value.?: self.scan_ast_expr_for_returns(value.unwrap(), params) else: return_scan_empty()
+                var yield_scan = return_scan_empty()
+                if val yv = value:
+                    yield_scan = self.scan_ast_expr_for_returns(yv, params)
+                yield_scan
             case ExprKind.Throw(value):
                 self.scan_ast_expr_for_returns(value, params)
             case ExprKind.Try(expr):

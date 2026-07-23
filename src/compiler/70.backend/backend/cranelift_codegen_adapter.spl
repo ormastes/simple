@@ -26,16 +26,6 @@ extern fn rt_file_read_bytes(path: text) -> [u8]
 fn cranelift_file_read_bytes(path: text) -> [u8]:
     rt_file_read_bytes(path)
 
-fn cl_local_id_of(opt: LocalId?) -> i64:
-    # Flat-optional-safe id extraction: explicit .unwrap() lowers to the
-    # box-assuming rt_enum_payload on the stage4 native lane and reads a
-    # garbage payload slot off a flat (nullable-pointer) LocalId?, then
-    # traps "field access on nil receiver" at .id. if-val is the
-    # documented flat-safe direct-copy construct.
-    if val l = opt:
-        return l.id
-    -1
-
 # ============================================================================
 # Cranelift Type Constants (must match cranelift_sffi.rs)
 # ============================================================================
@@ -139,7 +129,8 @@ pub fn cranelift_compile_module_direct(options: CompileOptions, module: MirModul
     if object_bytes.len() == 0:
         return Err(compileerror_backend_error(BackendKind.Cranelift,
             "Emitted object file was empty or unreadable: {output_path}"))
-    Ok(CodegenOutput.object(module.name, object_bytes))
+    val cg_out = CodegenOutput.object(module.name, object_bytes)
+    Ok(cg_out)
 
 impl Codegen for CraneliftCodegenAdapter:
     fn backend_kind() -> BackendKind: BackendKind.Cranelift
@@ -619,7 +610,15 @@ fn cl_translate_instruction(
         case Call(dest, func_op, args):
             val result = cl_translate_call(ctx, func_op, args, value_map, slot_map, cl_module, func_handles, func)
             if dest.?:
-                val dest_id = cl_local_id_of(dest)
+                # Inline extraction: calling a helper with a LocalId? ARGUMENT is
+                # miscompiled on the stage4 lane (callee never runs, garbage
+                # return); if-val at the use site extracts correctly.
+                var dest_id = -1
+                if val dest_id_l = dest:
+                    dest_id = dest_id_l.id
+                var inline_id = -1
+                if val dest_l = dest:
+                    inline_id = dest_l.id
                 value_map[dest_id] = result
                 if slot_map.has(dest_id):
                     val addr = cranelift_stack_addr(ctx, slot_map[dest_id], 0)
@@ -633,7 +632,12 @@ fn cl_translate_instruction(
                 arg_vals.push(cl_translate_operand(ctx, cl_module, arg, value_map, slot_map, func))
             val result = cranelift_call_indirect(ctx, cl_sig, addr, arg_vals)
             if dest.?:
-                val dest_id = cl_local_id_of(dest)
+                # Inline extraction: calling a helper with a LocalId? ARGUMENT is
+                # miscompiled on the stage4 lane (callee never runs, garbage
+                # return); if-val at the use site extracts correctly.
+                var dest_id = -1
+                if val dest_id_l = dest:
+                    dest_id = dest_id_l.id
                 value_map[dest_id] = result
                 if slot_map.has(dest_id):
                     val dest_addr = cranelift_stack_addr(ctx, slot_map[dest_id], 0)
@@ -653,10 +657,18 @@ fn cl_translate_instruction(
                 # first pair. No caller currently emits N-ary joins through
                 # this backend, so this is latent; guard it loudly rather
                 # than miscompiling silently if that ever changes.
-                if args.len() > 4 and not slot_map.has(cl_local_id_of(dest)):
+                var phi_guard_id = -1
+                if val phi_guard_l = dest:
+                    phi_guard_id = phi_guard_l.id
+                if args.len() > 4 and not slot_map.has(phi_guard_id):
                     eprint("[cranelift] ERROR: __simple_ssa_phi has {args.len()} args (N-ary join) with no stack slot; this fallback only supports a single then/else pair")
                     return
-                val dest_id = cl_local_id_of(dest)
+                # Inline extraction: calling a helper with a LocalId? ARGUMENT is
+                # miscompiled on the stage4 lane (callee never runs, garbage
+                # return); if-val at the use site extracts correctly.
+                var dest_id = -1
+                if val dest_id_l = dest:
+                    dest_id = dest_id_l.id
                 if slot_map.has(dest_id):
                     val addr = cranelift_stack_addr(ctx, slot_map[dest_id], 0)
                     val ty = mir_type_to_cl(local_type(dest_id, func))
@@ -726,7 +738,12 @@ fn store_phi_incomings_for_edge(
                     case Intrinsic(dest, name, args):
                         if name == "__simple_ssa_phi" and dest.?:
                             val incoming = cranelift_phi_incoming_for_predecessor(pred.id, args)
-                            val phi_dest_id = cl_local_id_of(dest)
+                            # Inline extraction: calling a helper with a LocalId? ARGUMENT is
+                            # miscompiled on the stage4 lane (callee never runs, garbage
+                            # return); if-val at the use site extracts correctly.
+                            var phi_dest_id = -1
+                            if val phi_dest_id_l = dest:
+                                phi_dest_id = phi_dest_id_l.id
                             if val incoming_op = incoming:
                                 if slot_map.has(phi_dest_id):
                                     val val_ = cl_translate_operand(ctx, cl_module, incoming_op, value_map, slot_map, func)
@@ -812,7 +829,12 @@ fn cl_translate_terminator(
         case CallTerminator(dest, func_op, args, normal, unwind):
             val result = cl_translate_call(ctx, func_op, args, value_map, slot_map, 0, {}, func)
             if dest.?:
-                val dest_id = cl_local_id_of(dest)
+                # Inline extraction: calling a helper with a LocalId? ARGUMENT is
+                # miscompiled on the stage4 lane (callee never runs, garbage
+                # return); if-val at the use site extracts correctly.
+                var dest_id = -1
+                if val dest_id_l = dest:
+                    dest_id = dest_id_l.id
                 value_map[dest_id] = result
                 if slot_map.has(dest_id):
                     val addr = cranelift_stack_addr(ctx, slot_map[dest_id], 0)
@@ -833,17 +855,24 @@ fn cl_translate_operand(
     slot_map: Dict<i64, i64>,
     func: MirFunction
 ) -> i64:
+    # EXPLICIT returns throughout: a function that mixes explicit `return`
+    # with implicit match-arm tail values loses the tail value (returns 0)
+    # on the stage4 native lane — rt_print received a NULL handle through
+    # exactly this path.
     match operand.kind:
         case Copy(local):
-            if not local.?:
-                return cranelift_iconst(ctx, CL_TYPE_I64, 0)
-            load_local(ctx, local.id, value_map, slot_map, func)
+            # Inline extraction: `local.id` on a match-arm-bound optional in
+            # argument position is miscompiled on the stage4 lane (callee
+            # never runs); if-val extraction to a plain i64 first.
+            if val l = local:
+                return load_local(ctx, l.id, value_map, slot_map, func)
+            return cranelift_iconst(ctx, CL_TYPE_I64, 0)
         case Move(local):
-            if not local.?:
-                return cranelift_iconst(ctx, CL_TYPE_I64, 0)
-            load_local(ctx, local.id, value_map, slot_map, func)
+            if val l = local:
+                return load_local(ctx, l.id, value_map, slot_map, func)
+            return cranelift_iconst(ctx, CL_TYPE_I64, 0)
         case Const(value, type_):
-            cl_translate_const_value(ctx, cl_module, value, type_)
+            return cl_translate_const_value(ctx, cl_module, value, type_)
 
 fn load_local(
     ctx: i64,
@@ -869,22 +898,23 @@ fn load_local(
             return addr
         val ty = mir_type_to_cl(local_ty)
         return cranelift_load(ctx, ty, addr, 0)
-    # Default: zero
-    cranelift_iconst(ctx, CL_TYPE_I64, 0)
+    # Default: zero (explicit return — mixed-return/tail rule)
+    return cranelift_iconst(ctx, CL_TYPE_I64, 0)
 
 # ============================================================================
 # Constant Translation
 # ============================================================================
 
 fn cl_translate_const_value(ctx: i64, cl_module: i64, value: MirConstValue, type_: MirType) -> i64:
+    # EXPLICIT returns: mixed-return/tail rule (see cl_translate_operand).
     match value:
         case Int(v):
-            cranelift_iconst(ctx, mir_type_to_cl(type_), v)
+            return cranelift_iconst(ctx, mir_type_to_cl(type_), v)
         case Float(v):
-            cranelift_fconst(ctx, mir_type_to_cl(type_), v)
+            return cranelift_fconst(ctx, mir_type_to_cl(type_), v)
         case Bool(v):
             # i64, not i8: Bool is uniformly i64 in this backend (mir_type_to_cl)
-            cranelift_iconst(ctx, CL_TYPE_I64, if v: 1 else: 0)
+            return cranelift_iconst(ctx, CL_TYPE_I64, if v: 1 else: 0)
         case Str(v):
             match type_.kind:
                 case FuncPtr(_):
@@ -903,11 +933,12 @@ fn cl_translate_const_value(ctx: i64, cl_module: i64, value: MirConstValue, type
             val data_id = cranelift_declare_string_data(cl_module, v)
             val ptr_val = cranelift_data_addr_in_func(ctx, data_id)
             val len_val = cranelift_iconst(ctx, CL_TYPE_I64, v.len())
-            translate_runtime_import_call_i64(ctx, cl_module, "rt_string_new", [ptr_val, len_val])
+            val strnew_vreg = translate_runtime_import_call_i64(ctx, cl_module, "rt_string_new", [ptr_val, len_val])
+            return strnew_vreg
         case Zero:
-            cranelift_iconst(ctx, mir_type_to_cl(type_), 0)
+            return cranelift_iconst(ctx, mir_type_to_cl(type_), 0)
         case _:
-            cranelift_iconst(ctx, CL_TYPE_I64, 0)
+            return cranelift_iconst(ctx, CL_TYPE_I64, 0)
 
 # ============================================================================
 # Binary Operation Translation
@@ -1127,13 +1158,16 @@ fn cl_translate_call(
                     # helpers and source calls with the same string operand.
                     # Keep the lowering-owned primitives on the runtime ABI so
                     # a coincidentally named local body cannot capture them.
-                    if cl_is_lowering_owned_runtime(name):
+                    val owned_rt = cl_is_lowering_owned_runtime(name)
+                    if owned_rt:
                         return translate_runtime_import_call_i64(ctx, cl_module, name, arg_vals)
-                    # Named function call
+                    # Named function call. EXPLICIT returns: the implicit
+                    # tail-value through match->if nesting yields 0 on the
+                    # stage4 native lane (rt_print received a NULL handle).
                     if func_handles.has(name):
                         val handle = func_handles[name]
                         val func_ref = cranelift_import_function(ctx, handle)
-                        cranelift_call(ctx, func_ref, arg_vals)
+                        return cranelift_call(ctx, func_ref, arg_vals)
                     else:
                         # External function - declare as import
                         val sig = cranelift_new_signature(CL_CC_PLATFORM)
@@ -1142,22 +1176,28 @@ fn cl_translate_call(
                         cranelift_sig_set_return(sig, CL_TYPE_I64)
                         val handle = cranelift_declare_function(cl_module, name, sig, CL_LINKAGE_IMPORT)
                         val func_ref = cranelift_import_function(ctx, handle)
-                        cranelift_call(ctx, func_ref, arg_vals)
+                        return cranelift_call(ctx, func_ref, arg_vals)
                 case _:
-                    cranelift_iconst(ctx, CL_TYPE_I64, 0)
+                    return cranelift_iconst(ctx, CL_TYPE_I64, 0)
         case Copy(local):
-            if not local.?:
+            var lid = -1
+            if val l = local:
+                lid = l.id
+            if lid < 0:
                 return cranelift_iconst(ctx, CL_TYPE_I64, 0)
-            val addr = load_local(ctx, local.id, value_map, slot_map, func)
+            val addr = load_local(ctx, lid, value_map, slot_map, func)
             val sig = cranelift_new_signature(CL_CC_PLATFORM)
             for arg in args:
                 cranelift_sig_add_param(sig, CL_TYPE_I64)
             cranelift_sig_set_return(sig, CL_TYPE_I64)
-            cranelift_call_indirect(ctx, sig, addr, arg_vals)
+            return cranelift_call_indirect(ctx, sig, addr, arg_vals)
         case Move(local):
-            if not local.?:
+            var mlid = -1
+            if val l = local:
+                mlid = l.id
+            if mlid < 0:
                 return cranelift_iconst(ctx, CL_TYPE_I64, 0)
-            val addr = load_local(ctx, local.id, value_map, slot_map, func)
+            val addr = load_local(ctx, mlid, value_map, slot_map, func)
             val sig = cranelift_new_signature(CL_CC_PLATFORM)
             for arg in args:
                 cranelift_sig_add_param(sig, CL_TYPE_I64)
@@ -1204,19 +1244,22 @@ fn local_type(local_id: i64, func: MirFunction) -> MirType:
             continue
         if local.id.id == local_id:
             return local.type_
-    MirType.i64()
+    return MirType.i64()
 
 fn operand_type(operand: MirOperand, func: MirFunction) -> MirType:
+    # Inline extraction + explicit returns: optional-field-in-arg and
+    # mixed-tail are both miscompiled on the stage4 lane.
     match operand.kind:
         case Copy(local):
-            if not local.?:
-                return MirType.i64()
-            local_type(local.id, func)
+            if val l = local:
+                return local_type(l.id, func)
+            return MirType.i64()
         case Move(local):
-            if not local.?:
-                return MirType.i64()
-            local_type(local.id, func)
-        case Const(value, type_): type_
+            if val l = local:
+                return local_type(l.id, func)
+            return MirType.i64()
+        case Const(value, type_):
+            return type_
 
 fn operand_is_float(operand: MirOperand, func: MirFunction) -> bool:
     type_is_float(operand_type(operand, func))

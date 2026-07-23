@@ -210,7 +210,7 @@ impl MirLowering:
         val hir_type = self.local_hir_types[local.id]
         match hir_type.kind:
             case HirTypeKind.Named(symbol, _):
-                val enum_symbol = self.symbols.get_symbol(symbol)
+                val enum_symbol = self.symbols.get_symbol_raw(symbol.id)
                 if val found_enum_symbol = enum_symbol:
                     if self.enum_variant_index.has(found_enum_symbol.name):
                         return symbol.id
@@ -718,18 +718,22 @@ impl MirLowering:
         self.builder = b
 
     me resolved_call_hir_return_type(symbol: SymbolId) -> HirType?:
-        val sym = self.symbols.get_symbol(symbol)
+        # Bare-lift accumulator + explicit tail: explicit Some(...) on return
+        # and mixed return/implicit-tail are both miscompiled on the stage4
+        # native lane (bug doc 2026-07-23).
+        var ret_out: HirType? = nil
+        val sym = self.symbols.get_symbol_raw(symbol.id)
         if val found_sym = sym:
             if val sym_type = found_sym.type_:
                 match sym_type.kind:
                     case HirTypeKind.Function(_, ret, _):
-                        return Some(ret)
+                        ret_out = ret
                     case _:
                         ()
-        nil
+        return ret_out
 
     me resolved_call_hir_param_types(symbol: SymbolId) -> [HirType]:
-        val sym = self.symbols.get_symbol(symbol)
+        val sym = self.symbols.get_symbol_raw(symbol.id)
         if val found_sym = sym:
             if val sym_type = found_sym.type_:
                 match sym_type.kind:
@@ -801,7 +805,7 @@ impl MirLowering:
                     var enum_name = ""
                     match base.kind:
                         case HirExprKind.Var(field_symbol):
-                            val field_sym = self.symbols.get_symbol(field_symbol)
+                            val field_sym = self.symbols.get_symbol_raw(field_symbol.id)
                             if field_sym.?: enum_name = field_sym.name
                         case HirExprKind.NamedVar(_, field_base_name):
                             enum_name = field_base_name
@@ -1385,13 +1389,13 @@ impl MirLowering:
                                         # overloading), but this new dispatch
                                         # site can register its own result.
                                         var binop_result_struct_name = ""
-                                        if val binop_method_sym = self.symbols.get_symbol(binop_method_id):
+                                        if val binop_method_sym = self.symbols.get_symbol_raw(binop_method_id.id):
                                             if val binop_method_sym_type = binop_method_sym.type_:
                                                 match binop_method_sym_type.kind:
                                                     case HirTypeKind.Function(_, binop_ret_hir_type, _):
                                                         match binop_ret_hir_type.kind:
                                                             case Named(binop_ret_named_sym, _):
-                                                                if val binop_ret_struct_sym = self.symbols.get_symbol(binop_ret_named_sym):
+                                                                if val binop_ret_struct_sym = self.symbols.get_symbol_raw(binop_ret_named_sym.id):
                                                                     binop_result_struct_name = binop_ret_struct_sym.name
                                                             case _: ()
                                                     case _: ()
@@ -1874,7 +1878,7 @@ impl MirLowering:
                         # it the same way the array path does.
                         match dict_result_type.kind:
                             case MirTypeKind.Struct(struct_symbol):
-                                val struct_type_sym = self.symbols.get_symbol(struct_symbol)
+                                val struct_type_sym = self.symbols.get_symbol_raw(struct_symbol.id)
                                 if struct_type_sym != nil and struct_type_sym.name != "":
                                     self.struct_value_syms[decoded.id] = struct_type_sym.name
                             case _: ()
@@ -2048,7 +2052,7 @@ impl MirLowering:
                 if val nc_inner_type = self.option_inner_hir_type_for_local(left, left_local):
                     match nc_inner_type.kind:
                         case HirTypeKind.Named(nc_struct_symbol, _):
-                            val nc_type_symbol = self.symbols.get_symbol(nc_struct_symbol)
+                            val nc_type_symbol = self.symbols.get_symbol_raw(nc_struct_symbol.id)
                             if nc_type_symbol != nil:
                                 match nc_type_symbol.kind:
                                     case Struct:
@@ -2179,7 +2183,7 @@ impl MirLowering:
                 if val exists_inner_type = self.option_inner_hir_type_for_local(base, base_local):
                     match exists_inner_type.kind:
                         case HirTypeKind.Named(exists_struct_symbol, _):
-                            val exists_type_symbol = self.symbols.get_symbol(exists_struct_symbol)
+                            val exists_type_symbol = self.symbols.get_symbol_raw(exists_struct_symbol.id)
                             if exists_type_symbol != nil:
                                 match exists_type_symbol.kind:
                                     case Struct:
@@ -2378,7 +2382,7 @@ impl MirLowering:
                 var fa_enum_name = ""
                 match base.kind:
                     case Var(fa_sym):
-                        val fa_s = self.symbols.get_symbol(fa_sym)
+                        val fa_s = self.symbols.get_symbol_raw(fa_sym.id)
                         if fa_s.?: fa_enum_name = fa_s.name
                     case NamedVar(_, fa_name):
                         fa_enum_name = fa_name
@@ -2544,7 +2548,7 @@ impl MirLowering:
             match arm0.pattern.kind:
                 case Binding(bsym, _):
                     var bname = ""
-                    val bsym_opt = self.symbols.get_symbol(bsym)
+                    val bsym_opt = self.symbols.get_symbol_raw(bsym.id)
                     if val bsym_found = bsym_opt:
                         bname = bsym_found.name
                     var owner = ""

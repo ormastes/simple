@@ -157,6 +157,30 @@ build.
   (the feature that hit it) — file a repro here alongside the other 4 if
   one lands.
 
+## Stage4-lane miscompile family (self-hosted AOT driver)
+
+The seed's `SIMPLE_BOOTSTRAP=1` native lane miscompiles several idioms in
+backend/driver code; the self-hosted `native-build --backend cranelift` path
+was silent-wrong until they were worked around (first correct output
+2026-07-23, `probe_trivJ` prints `x5=42`). Rules for stage4-lane .spl:
+
+- never pass a flat optional (or a field of a match-arm-bound optional) as a
+  function argument — inline the `if val` extraction at the use site;
+- never mix explicit `return` with implicit match-arm tail values — make all
+  value tails explicit `return`;
+- never construct with explicit `Some(...)` where a flat optional is expected —
+  bare-lift (`var d: T? = nil; if cond: d = value`);
+- avoid `.unwrap()` (box-assuming) and the `has()`+re-fetch Dict pair — single
+  `.get` + nil-check, or `has()` for the miss case only;
+- `rm -rf` the native cache before any conclusion-bearing rebuild (stale-object
+  poisoning).
+
+Details:
+[bootstrap_stage4_optional_arg_and_mixed_tail_miscompile_2026-07-23](../../../08_tracking/bug/bootstrap_stage4_optional_arg_and_mixed_tail_miscompile_2026-07-23.md).
+Touched: `cranelift_codegen_adapter.spl`, `cranelift_runtime_imports.spl`,
+`mir_data.spl`, `switch_operators_calls.spl`, `driver_aot_output.spl`,
+`driver_build/incremental.spl`.
+
 ## Update Rule
 
 After backend regressions, FFI fixes, or linker changes, refresh this skill

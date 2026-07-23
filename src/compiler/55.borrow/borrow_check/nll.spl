@@ -96,10 +96,11 @@ class ControlFlowGraph:
                     self.blocks[succ_id] = succ_block
 
     fn get_block(id: i64) -> BasicBlock:
-        """Get a block by ID."""
+        """Get a block by ID. Explicit tail: mixed return/implicit-tail is
+        miscompiled on the stage4 native lane (returns 0)."""
         if self.blocks.has(id):
             return self.blocks[id]
-        BasicBlock.create(id)
+        return BasicBlock.create(id)
 
     fn reverse_postorder() -> [i64]:
         """Get blocks in reverse postorder (for dataflow)."""
@@ -330,7 +331,9 @@ class NLLChecker:
 
         # Step 3: Run lifetime inference
         if not self.lifetime_inference.infer():
-            for err in self.lifetime_inference.get_errors():
+            # Direct field reads: accessor methods trap nil-receiver on the stage4
+            # native lane (bug doc 2026-07-23, defect 3).
+            for err in self.lifetime_inference.errors:
                 self.errors = self.errors.push(NLLError(
                     message: err.message,
                     has_primary_span: true,
@@ -341,7 +344,7 @@ class NLLChecker:
                 ))
 
         # Step 4: Check borrow graph for conflicts
-        for err in self.borrow_graph.get_errors():
+        for err in self.borrow_graph.errors:
             self.errors = self.errors.push(NLLError(
                 message: err.message,
                 has_primary_span: true,
@@ -351,7 +354,7 @@ class NLLChecker:
                 help: ""
             ))
 
-        self.errors.is_empty()
+        return self.errors.is_empty()
 
     me check_block(block_id: i64, liveness: LivenessResult):
         """Check a single basic block."""
@@ -383,12 +386,14 @@ class NLLChecker:
             self.borrow_graph.propagate_borrows(point - 1, point)
 
         # Check for borrow conflicts at this point
+        # Free-function + if-val forms: receiver-transport and box-assuming
+        # .unwrap() are miscompiled on the stage4 native lane (bug doc 2026-07-23).
         val borrow_set = self.borrow_graph.get_or_create_borrows(point)
-        val active = borrow_set.active_borrows()
+        val active = borrowset_active_list(borrow_set.borrows)
         for borrow in active:
-            val conflict = borrow_set.has_conflicting_borrow(borrow.place, borrow.kind)
-            if conflict.?:
-                self.errors = self.errors.push(nllerror_borrow_conflict(borrow, conflict.unwrap()))
+            val conflict = borrowset_conflicting(borrow_set.borrows, borrow.place, borrow.kind)
+            if val conflict_b = conflict:
+                self.errors = self.errors.push(nllerror_borrow_conflict(borrow, conflict_b))
 
     me check_terminator(term: Terminator, point: i64, liveness: LivenessResult):
         """Check terminator for borrow violations."""
@@ -396,7 +401,7 @@ class NLLChecker:
             case Return:
                 # On return, all borrows must have ended
                 val borrow_set = self.borrow_graph.get_or_create_borrows(point)
-                val active = borrow_set.active_borrows()
+                val active = borrowset_active_list(borrow_set.borrows)
                 for borrow in active:
                     self.errors = self.errors.push(NLLError(
                         message: "borrow of `{borrow.place.to_text()}` may still be active at return",
