@@ -48,6 +48,53 @@ candidate_frontend_smoke() (
     [ "$probe_stdout" = 5 ]
 )
 
+candidate_frontend_delegate_fidelity() (
+    candidate=$1
+    timeout_bin=$(candidate_frontend_timeout_bin || true)
+    [ -n "$timeout_bin" ] || exit 1
+    probe_dir=$(mktemp -d "${TMPDIR:-/tmp}/simple-front-delegate.XXXXXX") || exit 1
+    trap 'rm -rf "$probe_dir"' 0
+    trap 'exit 1' HUP INT TERM
+    case "$candidate" in
+        *.exe)
+            delegate=$probe_dir/delegate.cmd
+            cat >"$delegate" <<'EOF'
+@echo stage4-delegate-stdout
+@echo stage4-delegate-stderr 1>&2
+@exit /b 17
+EOF
+            ;;
+        *)
+            delegate=$probe_dir/delegate
+            cat >"$delegate" <<'EOF'
+#!/bin/sh
+printf 'stage4-delegate-stdout\n'
+printf 'stage4-delegate-stderr\n' >&2
+exit 17
+EOF
+            chmod +x "$delegate"
+            ;;
+    esac
+    set +e
+    SIMPLE_BINARY="$candidate" \
+    SIMPLE_BIN="$candidate" \
+    SIMPLE_BOOTSTRAP_DRIVER="$candidate" \
+    SIMPLE_FRONTEND_DELEGATE="$delegate" \
+    SIMPLE_FRONTEND_DELEGATED=0 \
+    SIMPLE_NO_STUB_FALLBACK=1 \
+    SIMPLE_EXECUTION_MODE= \
+    SIMPLE_BOOTSTRAP=0 \
+    SIMPLE_LIB="$CANDIDATE_FRONTEND_ROOT/src" \
+        "$timeout_bin" -k "${COMPILER_CHECK_KILL_GRACE_SECONDS}s" \
+        "${COMPILER_PROBE_TIMEOUT_SECONDS}s" "$candidate" check ignored.spl \
+        >"$probe_dir/stdout" 2>"$probe_dir/stderr"
+    probe_status=$?
+    set -e
+    [ "$probe_status" -eq 17 ] || exit 1
+    grep -Fq 'stage4-delegate-stdout' "$probe_dir/stdout" || exit 1
+    grep -Fq 'stage4-delegate-stderr' "$probe_dir/stderr"
+)
+
 simple_binary_is_valid() (
     candidate=$1
     [ -x "$candidate" ] || return 1
@@ -86,6 +133,7 @@ simple_binary_is_valid() (
         'extern fn rt_env_set(key: text, value: text) -> bool; print(rt_env_set("__SIMPLE_CANDIDATE_ENV_ABI__", "ok"))' \
         2>&1) || return 1
     [ "$env_probe" = true ] || return 1
+    candidate_frontend_delegate_fidelity "$candidate" || return 1
     candidate_frontend_smoke "$candidate" || return 1
     if probe=$(SIMPLE_BINARY="$candidate" \
         SIMPLE_BIN="$candidate" \
