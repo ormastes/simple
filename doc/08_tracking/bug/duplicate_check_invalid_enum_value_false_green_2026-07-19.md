@@ -13,3 +13,10 @@ through to text output.
 The parser validated known option names but not their enum values. Validate
 `--mode` and `--format` before scanning, return usage exit 2, and retain both
 negative probes in the essential-tools smoke.
+
+## Follow-up: same-file semantic false green
+
+Local semantic mode excluded every candidate pair from the same `.spl` file,
+while semantic-LLM mode compared them. The local path now keeps same-file pairs
+and still uses its index-based `seen_pairs` key to emit each pair once. The
+focused regression uses two documented functions in one temporary file.
