@@ -25,3 +25,9 @@ the standard `rt_tuple_new(2)` / `rt_tuple_set` row ABI.
 Retain the existing exact archive probe and require it to pass the exit-91
 assertion before closing this report. This change has not run that Rust/archive
 qualification here.
+
+On 2026-07-23 the exact probe was rerun, but stopped earlier while compiling
+`core_string.spl` because a generated `NotEq` could not resolve the locally
+defined `rt_native_neq`. That separate source fix is tracked in
+[`simple_core_archive_runtime_symbol_resolution_2026-07-23.md`](simple_core_archive_runtime_symbol_resolution_2026-07-23.md);
+the tuple-row assertion remains unqualified until the probe reaches it again.

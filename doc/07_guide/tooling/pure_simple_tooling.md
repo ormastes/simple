@@ -215,9 +215,12 @@ evidence boundary for the important pure-Simple tooling lanes:
 - **simple-core ABI** — **Source status:** tuple row-length repair is pushed.
   **Strongest current evidence:** `2dc4fc5a4f` and
   [the dict-entry archive report](../../08_tracking/bug/simple_core_value_memory_probe_dict_entries_failure_2026-07-19.md).
-  **Remaining bug/gap:** the authoritative archive probe has not rerun past its
-  former exit-91 assertion. **Next solution:** perform that incremental exact
-  archive qualification before claiming runtime success.
+  **Remaining bug/gap:** the authoritative archive probe rerun exposed a local
+  runtime-symbol resolution panic before its former exit-91 assertion; that
+  resolver is source-fixed but its Rust test has not executed because the
+  existing test binary failed to link. **Next solution:** restore the Rust test
+  link, then rerun the exact incremental archive qualification before claiming
+  runtime success.
 
 ### Temporary Rust test-runner recovery
 

@@ -295,20 +295,28 @@ pub(crate) fn adapted_call(
 // C1: call_runtime_N helpers — promoted from methods.rs private helpers to pub
 // ============================================================================
 
+/// Resolve a runtime call to its local body when one is declared, otherwise
+/// use the predeclared runtime import.
+fn resolve_runtime_func<M: Module>(ctx: &InstrContext<'_, M>, func_name: &str) -> cranelift_module::FuncId {
+    ctx.func_ids
+        .get(func_name)
+        .copied()
+        .or_else(|| ctx.runtime_funcs.get(func_name).copied())
+        .unwrap_or_else(|| panic!("missing runtime fn '{}' in {}", func_name, ctx.func.name))
+}
+
 /// Call a runtime function with no arguments (arity-0, void return).
-/// The function must be pre-declared in `ctx.runtime_funcs`.
+/// The function may be a pre-declared runtime import or a local definition.
 #[inline]
 pub fn call_runtime_0<M: Module>(ctx: &mut InstrContext<'_, M>, builder: &mut FunctionBuilder, func_name: &str) {
-    let func_id = ctx
-        .runtime_funcs
-        .get(func_name)
-        .unwrap_or_else(|| panic!("missing runtime fn '{}' in {}", func_name, ctx.func.name));
-    let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
+    let func_ref = ctx
+        .module
+        .declare_func_in_func(resolve_runtime_func(ctx, func_name), builder.func);
     adapted_call(builder, func_ref, &[]);
 }
 
 /// Call a runtime function with one argument and return its result.
-/// The function must be pre-declared in `ctx.runtime_funcs`.
+/// The function may be a pre-declared runtime import or a local definition.
 #[inline]
 pub fn call_runtime_1<M: Module>(
     ctx: &mut InstrContext<'_, M>,
@@ -316,18 +324,16 @@ pub fn call_runtime_1<M: Module>(
     func_name: &str,
     arg: cranelift_codegen::ir::Value,
 ) -> cranelift_codegen::ir::Value {
-    let func_id = ctx
-        .runtime_funcs
-        .get(func_name)
-        .unwrap_or_else(|| panic!("missing runtime fn '{}' in {}", func_name, ctx.func.name));
-    let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
+    let func_ref = ctx
+        .module
+        .declare_func_in_func(resolve_runtime_func(ctx, func_name), builder.func);
     let call = adapted_call(builder, func_ref, &[arg]);
     builder.inst_results(call)[0]
 }
 
 /// Call a runtime function with one argument, discarding the return value.
 /// Use this for void runtime fns like rt_print_value, rt_actor_reply, rt_condition_probe.
-/// The function must be pre-declared in `ctx.runtime_funcs`.
+/// The function may be a pre-declared runtime import or a local definition.
 #[inline]
 pub fn call_runtime_1_void<M: Module>(
     ctx: &mut InstrContext<'_, M>,
@@ -335,16 +341,14 @@ pub fn call_runtime_1_void<M: Module>(
     func_name: &str,
     arg: cranelift_codegen::ir::Value,
 ) {
-    let func_id = ctx
-        .runtime_funcs
-        .get(func_name)
-        .unwrap_or_else(|| panic!("missing runtime fn '{}' in {}", func_name, ctx.func.name));
-    let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
+    let func_ref = ctx
+        .module
+        .declare_func_in_func(resolve_runtime_func(ctx, func_name), builder.func);
     adapted_call(builder, func_ref, &[arg]);
 }
 
 /// Call a runtime function with two arguments and return its result.
-/// The function must be pre-declared in `ctx.runtime_funcs`.
+/// The function may be a pre-declared runtime import or a local definition.
 #[inline]
 pub fn call_runtime_2<M: Module>(
     ctx: &mut InstrContext<'_, M>,
@@ -353,17 +357,15 @@ pub fn call_runtime_2<M: Module>(
     arg1: cranelift_codegen::ir::Value,
     arg2: cranelift_codegen::ir::Value,
 ) -> cranelift_codegen::ir::Value {
-    let func_id = ctx
-        .runtime_funcs
-        .get(func_name)
-        .unwrap_or_else(|| panic!("missing runtime fn '{}' in {}", func_name, ctx.func.name));
-    let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
+    let func_ref = ctx
+        .module
+        .declare_func_in_func(resolve_runtime_func(ctx, func_name), builder.func);
     let call = adapted_call(builder, func_ref, &[arg1, arg2]);
     builder.inst_results(call)[0]
 }
 
 /// Call a runtime function with two arguments, discarding the return value.
-/// The function must be pre-declared in `ctx.runtime_funcs`.
+/// The function may be a pre-declared runtime import or a local definition.
 #[inline]
 pub fn call_runtime_2_void<M: Module>(
     ctx: &mut InstrContext<'_, M>,
@@ -372,16 +374,14 @@ pub fn call_runtime_2_void<M: Module>(
     arg1: cranelift_codegen::ir::Value,
     arg2: cranelift_codegen::ir::Value,
 ) {
-    let func_id = ctx
-        .runtime_funcs
-        .get(func_name)
-        .unwrap_or_else(|| panic!("missing runtime fn '{}' in {}", func_name, ctx.func.name));
-    let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
+    let func_ref = ctx
+        .module
+        .declare_func_in_func(resolve_runtime_func(ctx, func_name), builder.func);
     adapted_call(builder, func_ref, &[arg1, arg2]);
 }
 
 /// Call a runtime function with three arguments and return its result.
-/// The function must be pre-declared in `ctx.runtime_funcs`.
+/// The function may be a pre-declared runtime import or a local definition.
 #[inline]
 pub fn call_runtime_3<M: Module>(
     ctx: &mut InstrContext<'_, M>,
@@ -391,17 +391,15 @@ pub fn call_runtime_3<M: Module>(
     arg2: cranelift_codegen::ir::Value,
     arg3: cranelift_codegen::ir::Value,
 ) -> cranelift_codegen::ir::Value {
-    let func_id = ctx
-        .runtime_funcs
-        .get(func_name)
-        .unwrap_or_else(|| panic!("missing runtime fn '{}' in {}", func_name, ctx.func.name));
-    let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
+    let func_ref = ctx
+        .module
+        .declare_func_in_func(resolve_runtime_func(ctx, func_name), builder.func);
     let call = adapted_call(builder, func_ref, &[arg1, arg2, arg3]);
     builder.inst_results(call)[0]
 }
 
 /// Call a runtime function with four arguments and return its result.
-/// The function must be pre-declared in `ctx.runtime_funcs`.
+/// The function may be a pre-declared runtime import or a local definition.
 #[inline]
 pub fn call_runtime_4<M: Module>(
     ctx: &mut InstrContext<'_, M>,
@@ -412,18 +410,16 @@ pub fn call_runtime_4<M: Module>(
     arg3: cranelift_codegen::ir::Value,
     arg4: cranelift_codegen::ir::Value,
 ) -> cranelift_codegen::ir::Value {
-    let func_id = ctx
-        .runtime_funcs
-        .get(func_name)
-        .unwrap_or_else(|| panic!("missing runtime fn '{}' in {}", func_name, ctx.func.name));
-    let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
+    let func_ref = ctx
+        .module
+        .declare_func_in_func(resolve_runtime_func(ctx, func_name), builder.func);
     let call = adapted_call(builder, func_ref, &[arg1, arg2, arg3, arg4]);
     builder.inst_results(call)[0]
 }
 
 /// Call a runtime function with three arguments, discarding the return value.
 /// Use this for void runtime fns like rt_condition_probe.
-/// The function must be pre-declared in `ctx.runtime_funcs`.
+/// The function may be a pre-declared runtime import or a local definition.
 #[inline]
 pub fn call_runtime_3_void<M: Module>(
     ctx: &mut InstrContext<'_, M>,
@@ -433,11 +429,9 @@ pub fn call_runtime_3_void<M: Module>(
     arg2: cranelift_codegen::ir::Value,
     arg3: cranelift_codegen::ir::Value,
 ) {
-    let func_id = ctx
-        .runtime_funcs
-        .get(func_name)
-        .unwrap_or_else(|| panic!("missing runtime fn '{}' in {}", func_name, ctx.func.name));
-    let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
+    let func_ref = ctx
+        .module
+        .declare_func_in_func(resolve_runtime_func(ctx, func_name), builder.func);
     adapted_call(builder, func_ref, &[arg1, arg2, arg3]);
 }
 

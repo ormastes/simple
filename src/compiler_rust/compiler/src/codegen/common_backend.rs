@@ -2401,7 +2401,7 @@ pub fn enum_runtime_module_name_from_path(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mir::{BlockId, CallTarget, MirModule, Terminator, VReg};
+    use crate::mir::{BlockId, CallTarget, LocalKind, MirLocal, MirModule, Terminator, VReg};
     use cranelift_object::{ObjectBuilder, ObjectModule};
     use simple_parser::ast::Visibility;
 
@@ -2534,6 +2534,66 @@ mod tests {
         assert_ne!(local_decl.linkage, cranelift_module::Linkage::Import);
         assert_eq!(
             backend.module.declarations().get_function_decl(runtime_id).linkage,
+            cranelift_module::Linkage::Import
+        );
+    }
+
+    #[test]
+    fn local_runtime_neq_resolves_generated_noteq_call() {
+        let mut runtime_neq = MirFunction::new("rt_native_neq".to_string(), TypeId::I64, Visibility::Public);
+        for name in ["left", "right"] {
+            runtime_neq.params.push(MirLocal {
+                name: name.to_string(),
+                ty: TypeId::I64,
+                kind: LocalKind::Parameter,
+                is_ghost: false,
+            });
+        }
+        let neq_result = runtime_neq.new_vreg();
+        runtime_neq
+            .block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::ConstInt {
+                dest: neq_result,
+                value: 1,
+            });
+        runtime_neq.block_mut(BlockId(0)).unwrap().terminator = Terminator::Return(Some(neq_result));
+
+        let mut caller = MirFunction::new("generated_noteq".to_string(), TypeId::I64, Visibility::Public);
+        let left = caller.new_vreg();
+        let right = caller.new_vreg();
+        let result = caller.new_vreg();
+        let block = caller.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::GcAlloc {
+            dest: left,
+            ty: TypeId::ANY,
+        });
+        block.instructions.push(MirInst::GcAlloc {
+            dest: right,
+            ty: TypeId::ANY,
+        });
+        block.instructions.push(MirInst::BinOp {
+            dest: result,
+            op: crate::hir::BinOp::NotEq,
+            left,
+            right,
+        });
+        block.terminator = Terminator::Return(Some(result));
+
+        let mut module = MirModule::new();
+        module.functions.push(runtime_neq);
+        module.functions.push(caller);
+
+        let mut backend = test_backend();
+        backend
+            .compile_all_functions(&module)
+            .expect("local rt_native_neq compile");
+
+        assert!(!backend.runtime_funcs.contains_key("rt_native_neq"));
+        let local_id = backend.func_ids["rt_native_neq"];
+        assert_ne!(
+            backend.module.declarations().get_function_decl(local_id).linkage,
             cranelift_module::Linkage::Import
         );
     }
