@@ -59,9 +59,59 @@ fn _is_log_option(arg: text) -> bool:
     arg == "--human" or arg == "--llm" or arg == "--json" or
         arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
         arg == "--verbose" or arg == "--dots" or arg == "--count" or
-        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--no-progress" or arg == "--log-mode" or
         arg == "--progress" or arg.starts_with("--log-mode=") or
         arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn _is_signed_integer(value: text) -> bool:
+    if value.len() == 0:
+        return false
+    var i = 0
+    if value.starts_with("-"):
+        if value.len() == 1:
+            return false
+        i = 1
+    while i < value.len():
+        val ch = value[i:i + 1]
+        if ch < "0" or ch > "9":
+            return false
+        i = i + 1
+    true
+
+pub fn examples_check_option_error(args: [text]) -> text:
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        val numeric_value = arg == "--timeout" or arg == "--limit"
+        val needs_value = numeric_value or arg == "--binary" or arg == "--report"
+        if needs_value:
+            if i + 1 >= args.len() or args[i + 1] == "":
+                return "missing value for {arg}"
+            val value = args[i + 1]
+            if (numeric_value and not _is_signed_integer(value)) or (not numeric_value and value.starts_with("-")):
+                return "invalid value for {arg}"
+            i = i + 2
+            continue
+        val equals_numeric = arg.starts_with("--timeout=") or arg.starts_with("--limit=")
+        val equals_path = arg.starts_with("--binary=") or arg.starts_with("--report=")
+        if equals_numeric or equals_path:
+            val value = arg.slice(arg.index_of("=") + 1, arg.len())
+            if value == "":
+                return "missing value for " + arg.slice(0, arg.index_of("="))
+            if (equals_numeric and not _is_signed_integer(value)) or (equals_path and value.starts_with("-")):
+                return "invalid value for " + arg.slice(0, arg.index_of("="))
+        val known = (
+            arg == "examples-check" or arg == "--run" or arg == "--compile" or arg == "--fail-fast" or arg == "--help" or arg == "-h" or
+            equals_numeric or equals_path or
+            _is_log_option(arg)
+        )
+        if known:
+            i = i + 1
+            continue
+        if arg.starts_with("-"):
+            return "unknown option: {arg}"
+        i = i + 1
+    ""
 
 fn parse_args(args: [text]) -> ExampleCheckConfig:
     var root = "examples"
@@ -230,6 +280,11 @@ fn main() -> i64:
     if has_flag(args, "-h") or has_flag(args, "--help"):
         print_help()
         return 0
+
+    val option_error = examples_check_option_error(args)
+    if option_error != "":
+        error("examples-check", option_error)
+        return 2
 
     val config = parse_args(args)
     val as_json = log_opts.log_mode == "json"
