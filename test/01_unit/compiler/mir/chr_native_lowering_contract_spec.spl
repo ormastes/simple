@@ -4,18 +4,23 @@ describe "native chr lowering":
     it "routes integer chr through the canonical Unicode runtime ABI":
         val lowering = file_read("src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl")
         expect(lowering).to_contain("(method == \"chr\" or method == \"to_char\") and args.len() == 0")
-        expect(lowering).to_contain("MirConstValue.Str(\"text_dot_from_char_code\")")
-        expect(lowering).to_contain("MirTypeKind.I8 | MirTypeKind.U8")
-        expect(lowering).to_contain("MirTypeKind.Opaque(\"str\")")
-        expect(lowering.contains("MirConstValue.Str(\"rt_char_from_code\")")).to_be(false)
+        expect(lowering).to_contain("MirConstValue.Str(\"rt_char_from_code\")")
+        expect(lowering).to_contain("MirTypeKind.I8 | MirTypeKind.I16 | MirTypeKind.I32 | MirTypeKind.I64 | MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32 | MirTypeKind.U64")
+        expect(lowering).to_contain("emit_call(chr_op, [mir_operand_copy(chr_receiver)], MirType.i64())")
+        expect(lowering.contains("MirConstValue.Str(\"text_dot_from_char_code\")")).to_be(false)
 
-    it "keeps both LLVM compilers off the ASCII-only helper":
-        val pure_backend = file_read("src/compiler/70.backend/backend/_MirToLlvm/asm_constraints_helpers.spl")
-        expect(pure_backend).to_contain("declare ptr @text_dot_from_char_code(i64)")
+    it "keeps pure and hosted runtimes on the raw-i64 Unicode ABI":
+        val pure_runtime = file_read("src/runtime/simple_core/core_string.spl")
+        val hosted_runtime = file_read("src/runtime/runtime_native.c")
+        val hosted_header = file_read("src/runtime/runtime.h")
 
-        val rust_emitter = file_read("src/compiler_rust/compiler/src/codegen/llvm/emitter.rs")
-        val rust_functions = file_read("src/compiler_rust/compiler/src/codegen/llvm/functions.rs")
+        expect(pure_runtime).to_contain("pub fn rt_char_from_code(code: i64) -> i64:")
+        expect(pure_runtime).to_contain("code < 0 or code > 1114111 or (code >= 55296 and code <= 57343)")
+        expect(hosted_runtime).to_contain("int64_t rt_char_from_code(int64_t code)")
+        expect(hosted_runtime).to_contain("code < 0 || code > 0x10FFFF || (code >= 0xD800 && code <= 0xDFFF)")
+        expect(hosted_header).to_contain("int64_t  rt_char_from_code(int64_t code);")
+
+    it "keeps the Rust seed on its existing Unicode helper until migration":
         val rust_calls = file_read("src/compiler_rust/compiler/src/codegen/llvm/functions/calls.rs")
-        expect(rust_emitter).to_contain("call_runtime(\"text_dot_from_char_code\"")
-        expect(rust_functions).to_contain("get_function(\"text_dot_from_char_code\")")
+        expect(rust_calls).to_contain("if matches!(method, \"chr\" | \"to_char\") && !args.is_empty()")
         expect(rust_calls).to_contain("get_function(\"text_dot_from_char_code\")")
