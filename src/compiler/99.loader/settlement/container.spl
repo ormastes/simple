@@ -78,6 +78,20 @@ impl ContainerError:
                 "Link failed:\n  {msgs.join("\n  ")}"
             case LoadFailed(id, reason): "Failed to load module {id}: {reason}"
 
+fn _insert_sorted_unique(values: [text], value: text) -> [text]:
+    if values.contains(value):
+        return values
+    var out: [text] = []
+    var inserted = false
+    for existing in values:
+        if not inserted and value < existing:
+            out.push(value)
+            inserted = true
+        out.push(existing)
+    if not inserted:
+        out.push(value)
+    out
+
 # ============================================================================
 # Settlement Container
 # ============================================================================
@@ -104,6 +118,13 @@ impl SettlementContainer:
             is_linked: false
         )
 
+    me _invalidate_load_order():
+        self.load_order = []
+        for module_id in self.modules.keys():
+            var module = self.modules[module_id]
+            module.load_order = -1
+            self.modules[module_id] = module
+
     me add_module(id: text, path: text) -> Result<(), ContainerError>:
         """Register a new module in the container."""
         if self.modules.contains(id):
@@ -111,6 +132,7 @@ impl SettlementContainer:
         val entry = ModuleEntry.create(id, path)
         self.modules[id] = entry
         self.linker.add_module(id)
+        self._invalidate_load_order()
         self.is_linked = false
         debug("settlement", "Added module: {id}")
         Ok(())
@@ -130,6 +152,7 @@ impl SettlementContainer:
         to_mod.dependents.push(from_id)
         self.modules[to_id] = to_mod
 
+        self._invalidate_load_order()
         self.is_linked = false
         Ok(())
 
@@ -281,7 +304,8 @@ impl SettlementContainer:
         Uses Kahn's algorithm for topological sorting.
         Returns error if circular dependency detected.
         """
-        # Build in-degree map
+        # Count each module's unresolved dependencies. A dependency-free module
+        # is ready first; completing it releases its dependents.
         var in_degree: Dict<text, i64> = {}
         for id in self.modules.keys():
             in_degree[id] = 0
@@ -290,13 +314,14 @@ impl SettlementContainer:
             val entry = self.modules[id]
             for dep_id in entry.dependencies:
                 if in_degree.contains(dep_id):
-                    in_degree[dep_id] = in_degree[dep_id] + 1
+                    in_degree[id] = in_degree[id] + 1
 
-        # Find all modules with no incoming edges
+        # Keep every ready set lexical so hash-map iteration cannot change the
+        # serialized settlement order across hosts.
         var queue: [text] = []
         for id in in_degree.keys():
             if in_degree[id] == 0:
-                queue.push(id)
+                queue = _insert_sorted_unique(queue, id)
 
         var sorted: [text] = []
         while queue.len() > 0:
@@ -305,18 +330,18 @@ impl SettlementContainer:
             sorted.push(current)
 
             val entry = self.modules[current]
-            for dep_id in entry.dependencies:
-                if in_degree.contains(dep_id):
-                    in_degree[dep_id] = in_degree[dep_id] - 1
-                    if in_degree[dep_id] == 0:
-                        queue.push(dep_id)
+            for dependent_id in entry.dependents:
+                if in_degree.contains(dependent_id):
+                    in_degree[dependent_id] = in_degree[dependent_id] - 1
+                    if in_degree[dependent_id] == 0:
+                        queue = _insert_sorted_unique(queue, dependent_id)
 
         if sorted.len() != self.modules.len():
             # Circular dependency — find the cycle
             var cycle: [text] = []
             for id in self.modules.keys():
                 if not sorted.contains(id):
-                    cycle.push(id)
+                    cycle = _insert_sorted_unique(cycle, id)
             return Err(ContainerError.CircularDependency(cycle))
 
         # Assign load order

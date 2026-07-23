@@ -1,5 +1,5 @@
 use std.spec.{describe, it, expect}
-use compiler.loader.settlement.container.{SettlementContainer}
+use compiler.loader.settlement.container.{SettlementContainer, ContainerError}
 use compiler.loader.settlement.linker.{SymbolEntry, SymbolVisibility, SymbolBinding, ImportRef, RelocationKind}
 
 fn export_symbol(name: text, address: i64, module_id: text, binding: SymbolBinding) -> SymbolEntry:
@@ -168,3 +168,66 @@ describe "settlement export updates are transactional":
         match container.linker.get_export("service"):
             case Some(symbol): expect(symbol.address).to_equal(20)
             case nil: expect(false).to_equal(true)
+
+    it "orders a dependency chain before its consumers deterministically":
+        val container = SettlementContainer.create()
+        expect(container.add_module("app", "/app.smf").is_ok()).to_equal(true)
+        expect(container.add_module("mid", "/mid.smf").is_ok()).to_equal(true)
+        expect(container.add_module("base", "/base.smf").is_ok()).to_equal(true)
+        expect(container.add_dependency("app", "mid").is_ok()).to_equal(true)
+        expect(container.add_dependency("mid", "base").is_ok()).to_equal(true)
+        match container.topological_sort():
+            case Ok(order):
+                expect(order).to_equal(["base", "mid", "app"])
+                expect(container.get_load_order()).to_equal(order)
+                var i = 0
+                while i < order.len():
+                    expect(container.modules[order[i]].load_order).to_equal(i)
+                    i = i + 1
+            case Err(_):
+                expect(false).to_equal(true)
+        expect(container.add_module("solo", "/solo.smf").is_ok()).to_equal(true)
+        expect(container.get_load_order().len()).to_equal(0)
+        for id in ["app", "mid", "base", "solo"]:
+            expect(container.modules[id].load_order).to_equal(-1)
+        match container.topological_sort():
+            case Ok(order): expect(order).to_equal(["base", "mid", "app", "solo"])
+            case Err(_): expect(false).to_equal(true)
+
+    it "orders a diamond dependency once and keeps repeat sorts stable":
+        val container = SettlementContainer.create()
+        for id in ["right", "app", "base", "left"]:
+            expect(container.add_module(id, "/{id}.smf").is_ok()).to_equal(true)
+        expect(container.add_dependency("app", "right").is_ok()).to_equal(true)
+        expect(container.add_dependency("app", "left").is_ok()).to_equal(true)
+        expect(container.add_dependency("right", "base").is_ok()).to_equal(true)
+        expect(container.add_dependency("left", "base").is_ok()).to_equal(true)
+        val first = container.topological_sort()
+        val second = container.topological_sort()
+        match first:
+            case Ok(order): expect(order).to_equal(["base", "left", "right", "app"])
+            case Err(_): expect(false).to_equal(true)
+        match second:
+            case Ok(order): expect(order).to_equal(["base", "left", "right", "app"])
+            case Err(_): expect(false).to_equal(true)
+
+    it "rejects cycles without publishing a partial load order":
+        val container = SettlementContainer.create()
+        for id in ["A", "B", "C", "D"]:
+            expect(container.add_module(id, "/{id}.smf").is_ok()).to_equal(true)
+        expect(container.add_dependency("A", "B").is_ok()).to_equal(true)
+        expect(container.add_dependency("B", "C").is_ok()).to_equal(true)
+        match container.topological_sort():
+            case Ok(order): expect(order).to_equal(["C", "B", "A", "D"])
+            case Err(_): expect(false).to_equal(true)
+        expect(container.add_dependency("C", "A").is_ok()).to_equal(true)
+        expect(container.get_load_order().len()).to_equal(0)
+        expect(container.modules["A"].load_order).to_equal(-1)
+        match container.topological_sort():
+            case Err(ContainerError.CircularDependency(cycle)):
+                expect(cycle).to_equal(["A", "B", "C"])
+            case _:
+                expect(false).to_equal(true)
+        expect(container.get_load_order().len()).to_equal(0)
+        for id in ["A", "B", "C", "D"]:
+            expect(container.modules[id].load_order).to_equal(-1)
