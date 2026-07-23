@@ -190,9 +190,10 @@ evidence boundary for the important pure-Simple tooling lanes:
   **Next solution:** exercise mutation and write-failure cases through the
   newly deployed pure-Simple CLI.
 - **duplicate-check** — **Source status:** effective `mode`/`format`
-  validation and same-file local semantic matching are fixed. **Strongest
+  validation plus same-file semantic and non-overlapping cosine matching are fixed;
+  overlapping windows cannot collapse into one-occurrence groups. **Strongest
   current evidence:** `f2818a4b63` plus focused invalid-option and same-file
-  semantic contracts; see
+  semantic/cosine contracts and source review; see
   [the tracking report](../../08_tracking/bug/duplicate_check_invalid_enum_value_false_green_2026-07-19.md).
   **Remaining bug/gap:** that is focused evidence only, not an aggregate Stage
   4 pass. **Next solution:** run the clean/exact-clone and invalid-option
