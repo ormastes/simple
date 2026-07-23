@@ -510,6 +510,8 @@ bin/simple lint file.spl --fix-dry-run # Preview safe lint fixes without writing
 repository scripts that do not provide structured output. It may be combined
 with `--fix`, `--fix-all`, or `--fix-dry-run`; fixes use the atomic file owner
 and emit a `lint-fix-summary` JSON line instead of human progress.
+Unknown options and bare or empty `--profile` values are usage errors; they are
+rejected with exit 2 before any file is linted.
 
 ---
 
