@@ -738,3 +738,8 @@ implementation
 - A sync after the first green refresh brought current MIR/seed-HIR fixes through `8d822dbabe`, so the earlier Stage2/3 hashes were immediately classified stale rather than promoted. `simple-native-all` was incrementally refreshed again; the seed executable and seed stamp remained untouched.
 - The third and final Stage2/3 cycle rebuilt from rebased HEAD `5b4b6c7d4c`, passed Stage2 sanity, Stage3 self-host sanity, and Stage2 native-build capability, and explicitly skipped full CLI/Stage4. Current Stage2 SHA-256: `a6cf4c2d64e2dc622b4ecc4b72e465682ac11d87a2fb5a8df6277b98f007a779`; current Stage3 SHA-256: `5043b40b0b2329131a55ed51ca3ff84b26967593ffa2d173a28da0fd50de607d`.
 - The Stage2/3 three-cycle cap is consumed. Do not rebuild or start Stage4 again this session. Next fresh session still begins with the focused ABI command recorded above against this exact Stage3/runtime pair; if it passes and source HEAD remains unchanged, permit at most one bounded Stage4 admission attempt.
+
+### 2026-07-23 post-build sync invalidation
+
+- The mandatory fetch after the final green build advanced `main` through `170de65f2c`, including self-hosted MIR locals resolution and entry-closure sibling-import compiler fixes. The `5b4b6c7d4c` Stage2/3 artifacts are retained evidence but are not current-tip admission artifacts.
+- The three-cycle cap forbids another rebuild in this session. Next fresh session must first refresh Stage2/3 once from current `main`, then run the focused cross-module ABI gate against that exact Stage3/runtime pair, and only then permit one bounded Stage4 attempt if HEAD has not moved again.
