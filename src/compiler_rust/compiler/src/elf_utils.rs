@@ -532,6 +532,7 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_process_run_with_limits" => value::sffi::rt_process_run_with_limits as *const () as usize,
         "rt_process_spawn" => value::rt_process_spawn as *const () as usize,
         "rt_process_spawn_async" => value::rt_process_spawn_async as *const () as usize,
+        "rt_process_spawn_guarded" => value::rt_process_spawn_guarded as *const () as usize,
         "rt_process_execute" => value::rt_process_execute as *const () as usize,
         "rt_exec" => value::rt_exec as *const () as usize,
         "spl_dlopen" => value::spl_dlopen as *const () as usize,

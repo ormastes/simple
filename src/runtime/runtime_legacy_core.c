@@ -22,6 +22,8 @@
 #include <windows.h>
 #else
 #include <dirent.h>
+#include <signal.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #endif
 
@@ -554,5 +556,68 @@ int64_t rt_process_spawn_async(const char* cmd, const char** args, int64_t arg_c
         _exit(127);
     }
     return (int64_t)pid;
+#endif
+}
+
+static void rt_legacy_stop_group(pid_t worker, bool worker_live) {
+#if !defined(_WIN32)
+    if (worker <= 0) return;
+    if (kill(-worker, SIGTERM) != 0 && (!worker_live || kill(worker, SIGTERM) != 0)) return;
+    usleep(100000);
+    (void)kill(-worker, SIGKILL);
+    if (worker_live) (void)kill(worker, SIGKILL);
+#else
+    (void)worker;
+#endif
+}
+
+int64_t rt_process_spawn_guarded(const char* cmd, const char** args, int64_t arg_count) {
+#if defined(_WIN32)
+    return rt_process_spawn_async(cmd, args, arg_count);
+#else
+    if (!cmd || !*cmd) return -1;
+    pid_t expected_parent = getpid();
+    pid_t guardian = fork();
+    if (guardian < 0) return -1;
+    if (guardian != 0) return (int64_t)guardian;
+    if (getppid() != expected_parent) _exit(143);
+
+    pid_t worker = fork();
+    if (worker < 0) _exit(127);
+    if (worker == 0) {
+        (void)setpgid(0, 0);
+        char** argv = (char**)calloc((size_t)arg_count + 2, sizeof(char*));
+        if (!argv) _exit(1);
+        argv[0] = (char*)cmd;
+        for (int64_t i = 0; i < arg_count; i++) argv[i + 1] = (char*)args[i];
+        execvp(cmd, argv);
+        _exit(127);
+    }
+    (void)setpgid(worker, worker);
+
+    for (;;) {
+        int status = 0;
+        pid_t waited = waitpid(worker, &status, WNOHANG);
+        if (waited == worker) {
+            rt_legacy_stop_group(worker, false);
+            if (WIFEXITED(status)) _exit(WEXITSTATUS(status));
+            if (WIFSIGNALED(status)) {
+                int sig = WTERMSIG(status);
+                (void)signal(sig, SIG_DFL);
+                (void)kill(getpid(), sig);
+            }
+            _exit(127);
+        }
+        if (waited < 0 && errno != EINTR) {
+            rt_legacy_stop_group(worker, true);
+            _exit(127);
+        }
+        if (getppid() != expected_parent) {
+            rt_legacy_stop_group(worker, true);
+            while (waitpid(worker, NULL, 0) < 0 && errno == EINTR) {}
+            _exit(143);
+        }
+        usleep(10000);
+    }
 #endif
 }

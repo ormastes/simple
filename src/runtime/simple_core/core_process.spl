@@ -28,7 +28,10 @@ extern fn fork() -> i64
 extern fn execvp(path: i64, argv: i64) -> i64
 extern fn waitpid(pid: i64, status: i64, options: i64) -> i64
 extern fn getpid() -> i64
+extern fn getppid() -> i64
 extern fn kill(pid: i64, signal_num: i64) -> i64
+extern fn signal(signal_num: i64, handler: i64) -> i64
+extern fn setpgid(pid: i64, pgid: i64) -> i64
 extern fn sigpending(set_ptr: i64) -> i64
 extern fn sigismember(set_ptr: i64, signal_num: i64) -> i64
 extern fn sysconf(name: i64) -> i64
@@ -234,7 +237,62 @@ pub fn rt_signal_check(signal_num: i64) -> i64:
 pub fn rt_atexit_check() -> i64:
     if rt_signal_check(2) > 0 or rt_signal_check(15) > 0: 1 else: 0
 
-pub fn rt_process_spawn_async(cmd_ptr: i64, cmd_len: i64, args: i64) -> i64:
+fn _process_stop_group(pid: i64, worker_live: bool):
+    if pid <= 0:
+        return
+    if kill(0 - pid, 15) != 0 and (not worker_live or kill(pid, 15) != 0):
+        return
+    usleep(100000)
+    kill(0 - pid, 9)
+    if worker_live:
+        kill(pid, 9)
+
+fn _process_guard_exec(command: i64, argv: i64, expected_parent: i64):
+    val worker = fork()
+    if worker == 0:
+        setpgid(0, 0)
+        execvp(command, argv)
+        exit(127)
+        return
+    if worker < 0:
+        exit(127)
+        return
+    setpgid(worker, worker)
+    val status = calloc(1, 8)
+    if status < 1:
+        _process_stop_group(worker, true)
+        exit(127)
+        return
+    var wait_errors = 0
+    while true:
+        val waited = waitpid(worker, status, 1)
+        if waited == worker:
+            val raw_status = spl_load_i64(status, 0)
+            _process_stop_group(worker, false)
+            free(status)
+            if (raw_status & 127) != 0:
+                val signal_num = raw_status & 127
+                signal(signal_num, 0)
+                kill(getpid(), signal_num)
+                exit(127)
+            exit((raw_status >> 8) & 255)
+            return
+        if waited < 0:
+            wait_errors = wait_errors + 1
+            if wait_errors <= 3:
+                usleep(10000)
+                continue
+        else:
+            wait_errors = 0
+        if waited < 0 or getppid() != expected_parent:
+            _process_stop_group(worker, true)
+            waitpid(worker, status, 0)
+            free(status)
+            exit(143)
+            return
+        usleep(10000)
+
+fn _process_spawn(cmd_ptr: i64, cmd_len: i64, args: i64, guarded: bool) -> i64:
     if cmd_ptr < 1 or cmd_len < 1:
         return -1
     val command = malloc(cmd_len + 1)
@@ -255,14 +313,26 @@ pub fn rt_process_spawn_async(cmd_ptr: i64, cmd_len: i64, args: i64) -> i64:
     while i < argc:
         spl_store_i64(argv, (i + 1) * 8, rt_string_data(rt_array_get_text(args, i)))
         i = i + 1
+    val expected_parent = getpid()
     val pid = fork()
     if pid == 0:
-        execvp(command, argv)
-        exit(127)
-        return -1
+        if guarded:
+            _process_guard_exec(command, argv, expected_parent)
+        else:
+            execvp(command, argv)
+            exit(127)
+            return -1
     free(argv)
     free(command)
     pid
+
+pub fn rt_process_spawn_async(cmd_ptr: i64, cmd_len: i64, args: i64) -> i64:
+    _process_spawn(cmd_ptr, cmd_len, args, false)
+
+# Spawn a supervised Unix process tree for bounded app workers. Descendants
+# that deliberately create a new session are outside this process-group owner.
+pub fn rt_process_spawn_guarded(cmd_ptr: i64, cmd_len: i64, args: i64) -> i64:
+    _process_spawn(cmd_ptr, cmd_len, args, true)
 
 fn _process_exit_code(status: i64) -> i64:
     if (status & 127) != 0: -1 else: (status >> 8) & 255

@@ -355,7 +355,7 @@ pub use sffi::{
     rt_env_home, rt_env_remove, rt_env_set, rt_env_temp, rt_env_vars, rt_exit, rt_get_env, rt_lexer_source_set,
     rt_lexer_source_slice, rt_path_probe, rt_platform_name, rt_process_execute, rt_process_is_running, rt_process_kill,
     rt_process_run, rt_process_run_bounded, rt_process_run_inherit, rt_process_run_timeout, rt_process_spawn,
-    rt_process_spawn_async, rt_process_spawn_inherit, rt_process_wait, rt_set_env, rt_term_enable_ansi, rt_term_get_size,
+    rt_process_spawn_async, rt_process_spawn_guarded, rt_process_spawn_inherit, rt_process_wait, rt_set_env, rt_term_enable_ansi, rt_term_get_size,
 };
 
 // Re-export runtime configuration SFFI functions

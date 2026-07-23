@@ -1438,6 +1438,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_process_run_inherit", system::rt_process_run_inherit);
     insert_simple!("rt_process_run_timeout", system::rt_process_run_timeout);
     insert_simple!("rt_process_spawn_async", system::rt_process_spawn_async);
+    insert_simple!("rt_process_spawn_guarded", system::rt_process_spawn_guarded);
     insert_simple!("rt_process_wait", system::rt_process_wait);
     insert_simple!("rt_profiler_is_active", time::rt_profiler_is_active_fn);
     insert_simple!("rt_profiler_record_call", time::rt_profiler_record_call_fn);

@@ -173,6 +173,7 @@ const RT_KEEP: &[&str] = &[
     "rt_driver_supports_sendfile",
     "rt_driver_supports_zero_copy",
     "rt_process_spawn_async",
+    "rt_process_spawn_guarded",
     "rt_process_wait",
     "rt_process_is_running",
     "rt_process_kill",

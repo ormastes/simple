@@ -507,6 +507,7 @@ char*    spl_shell_output(const char* cmd);  /* capture stdout */
 SplArray* rt_process_run(const char* cmd, uint64_t cmd_len, SplArray* args);
 int64_t   rt_process_run_inherit(const char* cmd, uint64_t cmd_len, SplArray* args);
 int64_t   rt_process_run_inherit_value(int64_t cmd, SplArray* args);
+int64_t   rt_process_spawn_guarded_value(int64_t cmd, SplArray* args);
 SplArray* rt_process_run_timeout(const char* cmd, uint64_t cmd_len, SplArray* args, int64_t timeout_ms);
 SplArray* rt_process_run_bounded(const char* cmd, uint64_t cmd_len, SplArray* args,
                                  int64_t timeout_ms, int64_t max_output_bytes);
@@ -517,6 +518,7 @@ char* rt_windows_build_command_line(const char* cmd, const char** args, int64_t 
 /* ===== Process Async ===== */
 
 int64_t  rt_process_spawn_async(const char* cmd, const char** args, int64_t arg_count);
+int64_t  rt_process_spawn_guarded(const char* cmd, const char** args, int64_t arg_count);
 int64_t  rt_process_wait(int64_t pid, int64_t timeout_ms);
 bool     rt_process_is_running(int64_t pid);
 bool     rt_process_kill(int64_t pid);

@@ -1851,6 +1851,14 @@ fn raw_ambient_api_patterns() -> &'static [(&'static str, RawAmbientApi)] {
                 replacement: "ProcessSpawner.run",
             },
         ),
+        (
+            "rt_process_spawn_guarded",
+            RawAmbientApi {
+                name: "rt_process_spawn_guarded",
+                required: "ProcessSpawner",
+                replacement: "ProcessSpawner.run",
+            },
+        ),
     ]
 }
 

@@ -5570,6 +5570,21 @@ int64_t rt_process_run_inherit_value(int64_t cmd, SplArray* args) {
     return rt_process_run_inherit(cmd_c ? cmd_c : "", cmd_len, args);
 }
 
+int64_t rt_process_spawn_guarded_value(int64_t cmd, SplArray* args) {
+    const char* command = rt_interp_cstr(cmd);
+    if (!command) return -1;
+    int64_t argc = rt_array_len(args);
+    const char** argv = (const char**)calloc((size_t)argc + 1, sizeof(char*));
+    if (!argv) return -1;
+    for (int64_t i = 0; i < argc; i++) {
+        const char* value = rt_interp_cstr(rt_array_get_text(args, i));
+        argv[i] = value ? value : "";
+    }
+    int64_t pid = rt_process_spawn_guarded(command, argv, argc);
+    free(argv);
+    return pid;
+}
+
 int64_t* rt_process_run_tuple(int64_t cmd, SplArray* args) {
     const char* cmd_c = rt_interp_cstr(cmd);
     uint64_t cmd_len = cmd_c ? (uint64_t)strlen(cmd_c) : 0;

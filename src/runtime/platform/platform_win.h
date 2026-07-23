@@ -673,6 +673,10 @@ int64_t rt_process_spawn_async(const char* cmd, const char** args, int64_t arg_c
     return pid;
 }
 
+int64_t rt_process_spawn_guarded(const char* cmd, const char** args, int64_t arg_count) {
+    return rt_process_spawn_async(cmd, args, arg_count);
+}
+
 int64_t rt_process_wait(int64_t pid, int64_t timeout_ms) {
     if (pid <= 0) return -1;
 

@@ -8,10 +8,39 @@
 # child's own exit.
 
 use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
 use app.io.process_ops.{process_run_timeout}
 use app.io.time_ops.{current_time_ms}
 
 describe "process_run_timeout":
+    it "routes the native-build Unix wrapper through guarded process ownership":
+        val app_owner = file_read("src/app/io/process_ops.spl")
+        val pure_owner = file_read("src/runtime/simple_core/core_process.spl")
+        val c_owner = file_read("src/runtime/platform/unix_common.h")
+        val windows_owner = file_read("src/runtime/platform/platform_win.h")
+        val rust_owner = file_read("src/compiler_rust/runtime/src/value/sffi/env_process.rs")
+        val native_adapter = file_read("src/runtime/runtime_native.c")
+        val llvm_calls = file_read("src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl")
+        val llvm_decls = file_read("src/compiler/70.backend/backend/_MirToLlvm/asm_constraints_helpers.spl")
+        val pure_cranelift = file_read("src/compiler/70.backend/backend/cranelift_codegen_adapter.spl")
+        val rust_cranelift = file_read("src/compiler_rust/compiler/src/codegen/instr/calls.rs")
+        val parent_death_check = file_read("scripts/check/check-process-parent-death.shs")
+        expect(app_owner).to_contain("rt_process_spawn_guarded(\"/bin/sh\"")
+        expect(pure_owner).to_contain("pub fn rt_process_spawn_guarded")
+        expect(pure_owner).to_contain("getppid() != expected_parent")
+        expect(pure_owner).to_contain("signal(signal_num, 0)")
+        expect(c_owner).to_contain("int64_t rt_process_spawn_guarded")
+        expect(c_owner).to_contain("getppid() != expected_parent")
+        expect(windows_owner).to_contain("return rt_process_spawn_async(cmd, args, arg_count);")
+        expect(rust_owner).to_contain("pub unsafe extern \"C\" fn rt_process_spawn_guarded")
+        expect(rust_owner).to_contain("PR_SET_PDEATHSIG")
+        expect(native_adapter).to_contain("rt_process_spawn_guarded_value(int64_t cmd, SplArray* args)")
+        expect(llvm_calls).to_contain("rt_process_spawn_guarded\": \"@rt_process_spawn_guarded_value")
+        expect(llvm_decls).to_contain("declare i64 @rt_process_spawn_guarded_value(i64, ptr)")
+        expect(pure_cranelift).to_contain("translate_runtime_import_call_i64(ctx, cl_module, \"rt_process_spawn_guarded_value\", arg_vals)")
+        expect(rust_cranelift).to_contain("| \"rt_process_spawn_guarded\"")
+        expect(parent_death_check).to_contain("probe exited before parent-death signal")
+
     it "completes fast commands successfully":
         val (stdout, stderr, code) = process_run_timeout("echo", ["hello"], 5000)
         expect(code).to_equal(0)

@@ -1,7 +1,7 @@
 # native-build parent hangs forever when its worker dies early (zombie, empty log)
 
 Date: 2026-07-03
-Status: REOPENED — parent interruption still leaks the nested timeout/worker
+Status: SOURCE IMPLEMENTED — fresh-runtime parent-death execution blocked
 Severity: P1 (blocks bootstrap stage 4 / --deploy on this host; silent 2h timeout burns)
 Found by: fable orchestrator during bootstrap redeploy
 
@@ -108,3 +108,21 @@ descendant, terminate the Simple parent, and assert within a short deadline that
 neither wrapper nor descendant remains. The shared Unix process owner must
 propagate parent death or perform equivalent process-group cleanup; extending
 timeouts is not a fix.
+
+## Parent-death ownership fix (2026-07-23)
+
+The app timeout path now uses `rt_process_spawn_guarded`. The Pure Simple core
+and shared Unix C runtime fork a guardian that retains the original parent PID,
+runs the wrapper in an isolated process group, and kills that group when the
+parent disappears. Normal exit preserves the wrapper status and also removes
+ordinary descendants; a child that deliberately creates a new session remains
+outside this narrow process-group contract. Windows retains its existing
+direct-spawn behavior; the bootstrap Rust mirror uses a dedicated process group
+plus Linux parent-death signaling. `scripts/check/check-process-parent-death.shs`
+requires an explicit fresh `SIMPLE_RUNTIME`, kills only its still-live recorded
+probe PID, and verifies both a token-owned wrapper and grandchild stop. Source/C
+checks pass. The 2026-07-23 current-source native probe produced only the
+existing parser/GC diagnostic flood and was interrupted under the bounded-build
+guard; focused checks with `bin/release/simple` then exited 139. Fresh
+self-hosted execution therefore remains blocked, and the known-stale binary is
+not accepted as replacement evidence.

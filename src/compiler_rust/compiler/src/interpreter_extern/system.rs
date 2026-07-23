@@ -874,7 +874,7 @@ pub fn rt_process_run_bounded(args: &[Value]) -> Result<Value, CompileError> {
 ///
 /// # Returns
 /// * Int - process ID (PID), or -1 on failure
-pub fn rt_process_spawn_async(args: &[Value]) -> Result<Value, CompileError> {
+fn process_spawn(args: &[Value], guarded: bool) -> Result<Value, CompileError> {
     if args.len() < 2 {
         return Err(CompileError::runtime(
             "rt_process_spawn_async requires 2 arguments (cmd, args)",
@@ -903,23 +903,70 @@ pub fn rt_process_spawn_async(args: &[Value]) -> Result<Value, CompileError> {
         }
     };
 
+    #[cfg(target_os = "linux")]
+    let mut command = if guarded {
+        let mut shell = std::process::Command::new("/bin/sh");
+        shell
+            .arg("-c")
+            .arg("child=; stop(){ [ -z \"$child\" ] || { kill -TERM -- \"-$child\" 2>/dev/null || true; sleep 0.1; kill -KILL -- \"-$child\" 2>/dev/null || true; }; }; die(){ sig=$1; stop; trap - \"$sig\"; kill \"-$sig\" \"$$\"; exit 143; }; trap 'die 1' HUP; trap 'die 2' INT; trap 'die 15' TERM; setsid \"$@\" & child=$!; wait \"$child\"; code=$?; stop; if [ \"$code\" -gt 128 ]; then sig=$((code-128)); trap - \"$sig\"; kill \"-$sig\" \"$$\"; fi; exit \"$code\"")
+            .arg("simple-guard")
+            .arg(&*cmd);
+        shell
+    } else {
+        std::process::Command::new(&*cmd)
+    };
+    #[cfg(not(target_os = "linux"))]
     let mut command = std::process::Command::new(&*cmd);
     clear_simple_child_stack_env(&mut command);
-    match command
+    command
         .args(&cmd_args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .spawn()
-    {
+        .stderr(std::process::Stdio::inherit());
+    #[cfg(unix)]
+    if guarded {
+        use std::os::unix::process::CommandExt;
+        let expected_parent = unsafe { libc::getpid() };
+        unsafe {
+            command.pre_exec(move || {
+                if libc::setpgid(0, 0) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    if libc::getppid() != expected_parent {
+                        return Err(std::io::Error::from_raw_os_error(libc::ECHILD));
+                    }
+                }
+                Ok(())
+            });
+        }
+    }
+    match command.spawn() {
         Ok(child) => {
             let pid = child.id() as i64;
             // Store the child process for later wait
             SPAWNED_PROCESSES.lock().unwrap().insert(pid, child);
             Ok(Value::Int(pid))
         }
-        Err(_) => Ok(Value::Int(-1)),
+        Err(error) => {
+            if std::env::var_os("SIMPLE_PROCESS_DEBUG").is_some() {
+                eprintln!("rt_process_spawn_guarded: {error}");
+            }
+            Ok(Value::Int(-1))
+        }
     }
+}
+
+pub fn rt_process_spawn_async(args: &[Value]) -> Result<Value, CompileError> {
+    process_spawn(args, false)
+}
+
+pub fn rt_process_spawn_guarded(args: &[Value]) -> Result<Value, CompileError> {
+    process_spawn(args, true)
 }
 
 /// Wait for a spawned process to complete

@@ -2522,6 +2522,7 @@ fn process_c_runtime_arg_indices(func_name: &str) -> Option<(&'static [usize], &
         "rt_process_run"
         | "rt_process_run_inherit"
         | "rt_process_spawn"
+        | "rt_process_spawn_guarded"
         | "rt_process_execute"
         | "rt_process_run_timeout"
         | "rt_process_run_bounded" => Some((&[0], &[1])),

@@ -1309,6 +1309,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_process_kill", &[I64], &[I64]),
     // rt_process_spawn_async(cmd_ptr, cmd_len, args) -> pid (i64)
     RuntimeFuncSpec::new("rt_process_spawn_async", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_spawn_guarded", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_spawn_inherit", &[], &[I64]),
     // rt_process_run_with_limits(cmd_ptr, cmd_len, args, timeout_ms, memory_mb) -> RuntimeValue
     RuntimeFuncSpec::new("rt_process_run_with_limits", &[I64, I64, I64, I64, I64], &[I64]),

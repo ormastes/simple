@@ -740,6 +740,78 @@ pub unsafe extern "C" fn rt_process_spawn_async(cmd_ptr: *const u8, cmd_len: u64
     }
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn rt_process_spawn_guarded(cmd_ptr: *const u8, cmd_len: u64, args: RuntimeValue) -> i64 {
+    use std::process::{Command, Stdio};
+    #[cfg(unix)]
+    use std::os::unix::process::CommandExt;
+
+    if cmd_ptr.is_null() {
+        return -1;
+    }
+    let cmd_bytes = std::slice::from_raw_parts(cmd_ptr, cmd_len as usize);
+    let cmd_str = match std::str::from_utf8(cmd_bytes) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    #[cfg(target_os = "linux")]
+    let mut command = {
+        let mut shell = Command::new("/bin/sh");
+        shell
+            .arg("-c")
+            .arg("child=; stop(){ [ -z \"$child\" ] || { kill -TERM -- \"-$child\" 2>/dev/null || true; sleep 0.1; kill -KILL -- \"-$child\" 2>/dev/null || true; }; }; die(){ sig=$1; stop; trap - \"$sig\"; kill \"-$sig\" \"$$\"; exit 143; }; trap 'die 1' HUP; trap 'die 2' INT; trap 'die 15' TERM; setsid \"$@\" & child=$!; wait \"$child\"; code=$?; stop; if [ \"$code\" -gt 128 ]; then sig=$((code-128)); trap - \"$sig\"; kill \"-$sig\" \"$$\"; fi; exit \"$code\"")
+            .arg("simple-guard")
+            .arg(cmd_str);
+        shell
+    };
+    #[cfg(not(target_os = "linux"))]
+    let mut command = Command::new(cmd_str);
+    clear_simple_child_stack_env(&mut command);
+    let args_len = rt_array_len(args);
+    for i in 0..args_len {
+        if let Some(arg_str) = extract_string(rt_array_get(args, i)) {
+            command.arg(arg_str);
+        }
+    }
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    #[cfg(unix)]
+    let expected_parent = libc::getpid();
+    #[cfg(unix)]
+    command.pre_exec(move || {
+        if libc::setpgid(0, 0) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        #[cfg(target_os = "linux")]
+        {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::getppid() != expected_parent {
+                return Err(std::io::Error::from_raw_os_error(libc::ECHILD));
+            }
+        }
+        Ok(())
+    });
+    match command.spawn() {
+        Ok(child) => {
+            let pid = child.id() as i64;
+            if let Ok(mut map) = SPAWNED_CHILDREN.lock() {
+                map.insert(pid, child);
+            }
+            pid
+        }
+        Err(error) => {
+            if std::env::var_os("SIMPLE_PROCESS_DEBUG").is_some() {
+                eprintln!("rt_process_spawn_guarded: {error}");
+            }
+            -1
+        }
+    }
+}
+
 /// Spawn a child that transparently inherits the current process stdio.
 #[no_mangle]
 pub extern "C" fn rt_process_spawn_inherit() -> i64 {
