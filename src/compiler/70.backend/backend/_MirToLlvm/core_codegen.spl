@@ -172,6 +172,18 @@ impl MirTextCodegen for MirToLlvm:
                 if static_.init.?:
                     val init_const: MirConstant = static_.init.unwrap()
                     g_init = self.translate_const_value(init_const.value)
+                    # A Str initializer renders as a `getelementptr` PTR
+                    # constant expression while the global's storage type is
+                    # the i64 word lane -- llc rejects the mismatch
+                    # ("constant expression type mismatch: got 'ptr' but
+                    # expected 'i64'", W107). Wrap in a constant ptrtoint so
+                    # the raw char* address is stored as the i64 word,
+                    # matching how a raw string literal flows everywhere else.
+                    match init_const.value:
+                        case Str(_):
+                            if g_ty == "i64":
+                                g_init = "ptrtoint (ptr {g_init} to i64)"
+                        case _: ()
                 self.builder.emit("{g_name} = global {g_ty} {g_init}")
 
         if bootstrap_debug:
