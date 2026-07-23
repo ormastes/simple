@@ -183,6 +183,26 @@ handoff lane is more fragile than the two gates above (it re-runs the
 `fpga_linux` bundle generator); prefer the two direct gates as the day-to-day
 sanity anchors.
 
+### Live re-verification (2026-07-23)
+Rebuilt all assets from scratch (`build_rv64_linux_assets.shs --all`: OpenSBI
+v1.4 `fw_jump.bin`, Linux **6.6.0** `Image` 22,026,752 B, `soc_virt.dtb`,
+`initramfs.cpio.gz`) and booted under QEMU 8.2.2:
+
+- **Full boot to userspace (auto-dtb + `rdinit=/init`):** `OpenSBI v1.4` →
+  `Linux version 6.6.0` → `Freeing unused kernel image (initmem) memory` →
+  `Run /init as init process` → **`SIMPLE-RV64-INIT OK`** (our initramfs `/init`
+  marker, printed live — supersedes the "marker never prints" cosmetic gap noted
+  below; `rdinit=/init` reaches it).
+  Transcript: `build/os/rv64_soc/transcripts/qemu_control_live.log`.
+- **Our `soc_virt.dtb` (`-dtb`):** `OpenSBI v1.4` → `Platform Name:
+  simple-soc-rv64` → `Linux version 6.6.0` → `plic: plic@c000000: mapped 31
+  interrupts` → **`Kernel panic … VFS: Unable to mount root fs`**. The panic is
+  expected: a *static* `-dtb` has no `/chosen linux,initrd-start/end`, so QEMU
+  cannot inject the initrd address and the kernel finds no rootfs. It confirms
+  our DTB drives real Linux through PLIC init; wiring the initrd into the static
+  DTB (or booting from a block/virtio root) is the remaining packaging step.
+  Transcript: `build/os/rv64_soc/transcripts/qemu_ourdtb_live.log`.
+
 ### Full Linux boot (heavier, needs a kernel build)
 The real OpenSBI v1.4 → Linux 6.6 → `/init` boot (documented in the QEMU-oracle
 sections above, `Platform Name: simple-soc-rv64`) requires the boot assets, which
