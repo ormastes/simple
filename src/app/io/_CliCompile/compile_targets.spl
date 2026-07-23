@@ -279,6 +279,45 @@ fn compile_vhdl(source_file: text, output_file: text, verbose: bool) -> i64:
 # Native build: compile entire project to native binary
 # Supports --backend=llvm-lib for pure Simple LLVM compilation (Stage 3 bootstrap),
 # otherwise delegates to Rust NativeProjectBuilder SFFI.
+fn _nb_dirname(path: text) -> text:
+    val parts = path.split("/")
+    if parts.len() <= 1:
+        return ""
+    var out = ""
+    var i = 0
+    while i < parts.len() - 1:
+        if i > 0:
+            out = out + "/"
+        out = out + parts[i]
+        i = i + 1
+    out
+
+fn _nb_resolve_relative(mp: text, importer_file: text) -> text:
+    # `.sibling` / `..parent_pkg.mod` resolve against the importing FILE's
+    # directory, mirroring the driver's _driver_resolve_relative_entry_import.
+    # The dotted-segment resolver below cannot express these (leading dots
+    # split to empty segments), which silently dropped sibling modules from
+    # the --entry-closure worker input set ("unresolved name" storms in HIR).
+    var dots = 0
+    while dots < mp.len() and mp.substring(dots, dots + 1) == ".":
+        dots = dots + 1
+    if dots >= mp.len():
+        return ""
+    var base_dir = _nb_dirname(importer_file)
+    var up = 1
+    while up < dots and base_dir != "":
+        base_dir = _nb_dirname(base_dir)
+        up = up + 1
+    val rel = mp.substring(dots).replace(".", "/")
+    val base = if base_dir == "": rel else: "{base_dir}/{rel}"
+    if rt_file_exists("{base}.spl"):
+        return "{base}.spl"
+    if rt_file_exists("{base}/mod.spl"):
+        return "{base}/mod.spl"
+    if rt_file_exists("{base}/__init__.spl"):
+        return "{base}/__init__.spl"
+    ""
+
 fn _nb_basename(path: text) -> text:
     val parts = path.split("/")
     if parts.len() == 0:
@@ -461,6 +500,12 @@ fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
             val import_line = raw.trim()
             val mp = _nb_module_path_from_use(import_line)
             if mp == "":
+                continue
+            if mp.starts_with("."):
+                val rel_rp = _nb_resolve_relative(mp, f)
+                if rel_rp != "" and not _driver_text_bucket_set_has(discovered, rel_rp):
+                    queue = queue.push(rel_rp)
+                    discovered = _driver_text_bucket_set_add(discovered, rel_rp)
                 continue
             val segs = mp.split(".")
             val seg_key = _nb_join_segments(segs)

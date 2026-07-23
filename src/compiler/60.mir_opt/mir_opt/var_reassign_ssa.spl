@@ -8,8 +8,7 @@ use compiler.mir_opt.mir_opt.var_reassign_analysis.{
     local_list_contains,
     local_list_push_unique,
     var_reassign_analysis_hotspot_facts,
-    var_reassign_operand_local,
-    var_reassign_written_local
+    var_reassign_operand_local
 }
 
 extern fn rt_env_get(key: text) -> text
@@ -165,24 +164,30 @@ fn ssa_max_local_from_operand(current: i64, operand: MirOperand) -> i64:
     # `Some(0)` to falsy in the bootstrap seed interpreter, which would
     # silently drop local 0 from the max-local-id scan (see the detailed
     # writeup on `ssa_alloca_apply_def_store` below).
-    match var_reassign_operand_local(operand):
-        case Some(local_id):
-            if local_id > current:
-                local_id
+    # Direct operand.kind match (not the cross-module i64? helper): same
+    # bootstrap-seed Option round-trip hazard as ssa_operand_push_local.
+    match operand.kind:
+        case Copy(local):
+            val max_local_id = var_reassign_local_id_value(local)
+            if max_local_id > current:
+                max_local_id
             else:
                 current
-        case nil:
+        case Move(local):
+            val max_local_id = var_reassign_local_id_value(local)
+            if max_local_id > current:
+                max_local_id
+            else:
+                current
+        case Const(_, _):
             current
 
 fn ssa_max_local_from_inst(current: i64, inst: MirInst) -> i64:
     var max_id = current
     # NOTE: explicit match, not `if written.?:` -- see ssa_max_local_from_operand.
-    match var_reassign_written_local(inst):
-        case Some(written_id):
-            if written_id > max_id:
-                max_id = written_id
-        case nil:
-            pass_do_nothing
+    val max_written_id = _ssa_written_local_id(inst)
+    if max_written_id > max_id:
+        max_id = max_written_id
     match inst.kind:
         case Copy(_, src):
             val src_id = ssa_local_id_value(src)
@@ -554,11 +559,9 @@ fn ssa_block_written_locals(block: MirBlock) -> [i64]:
     for inst in block.instructions:
         # NOTE: explicit match, not `if written.?:` -- local id 0 landmine,
         # see ssa_max_local_from_operand.
-        match var_reassign_written_local(inst):
-            case Some(written_id):
-                locals = local_list_push_unique(locals, written_id)
-            case nil:
-                pass_do_nothing
+        val block_written_id = _ssa_written_local_id(inst)
+        if block_written_id >= 0:
+            locals = local_list_push_unique(locals, block_written_id)
     locals
 
 fn ssa_common_locals(left: [i64], right: [i64]) -> [i64]:
@@ -973,13 +976,11 @@ fn ssa_reassigned_locals_for_blocks(blocks: [MirBlock]) -> [i64]:
             # especially dangerous: it feeds the multi-def/slotting
             # decision, i.e. exactly the class of silent miscompile the
             # landed var_reassign_written_local fix addressed.
-            match var_reassign_written_local(inst):
-                case Some(written_id):
-                    val next_counts = local_count_increment(local_ids, counts, written_id)
-                    local_ids = next_counts[0]
-                    counts = next_counts[1]
-                case nil:
-                    pass_do_nothing
+            val written_id = _ssa_written_local_id(inst)
+            if written_id >= 0:
+                val next_counts = local_count_increment(local_ids, counts, written_id)
+                local_ids = next_counts[0]
+                counts = next_counts[1]
     var reassigned: [i64] = []
     var i = 0
     while i < local_ids.len():
@@ -1007,13 +1008,75 @@ fn ssa_local_type_lookup(mir_locals: [MirLocal], local_id: i64) -> MirType:
 # are live from entry, dominate everything, and have no defining instruction to
 # rename into a store).
 
+# Same-module clone of var_reassign_analysis.var_reassign_written_local: an
+# `i64?` returned across the module boundary stops matching `case Some`/`case
+# nil` under the bootstrap seed on this path (same hazard as
+# ssa_operand_push_local) — the whole match then yields nil and callers'
+# tuple returns nil-poison downstream ("cannot index value of type nil").
+fn _ssa_written_local_id(inst: MirInst) -> i64:
+    match inst.kind:
+        case Const(dest, _, _):
+            var_reassign_local_id_value(dest)
+        case Copy(dest, _):
+            var_reassign_local_id_value(dest)
+        case Move(dest, _):
+            var_reassign_local_id_value(dest)
+        case BinOp(dest, _, _, _):
+            var_reassign_local_id_value(dest)
+        case UnaryOp(dest, _, _):
+            var_reassign_local_id_value(dest)
+        case CheckedBinOp(dest, _, _, _):
+            var_reassign_local_id_value(dest)
+        case Alloc(dest, _):
+            var_reassign_local_id_value(dest)
+        case Load(dest, _):
+            var_reassign_local_id_value(dest)
+        case GetElementPtr(dest, _, _):
+            var_reassign_local_id_value(dest)
+        case Aggregate(dest, _, _):
+            var_reassign_local_id_value(dest)
+        case GetField(dest, _, _):
+            var_reassign_local_id_value(dest)
+        case Cast(dest, _, _):
+            var_reassign_local_id_value(dest)
+        case Bitcast(dest, _, _):
+            var_reassign_local_id_value(dest)
+        case Call(dest, _, _):
+            if dest.?:
+                val call_dest = dest
+                var_reassign_local_id_value(call_dest)
+            else:
+                -1
+        case CallIndirect(dest, _, _, _):
+            if dest.?:
+                val indirect_dest = dest
+                var_reassign_local_id_value(indirect_dest)
+            else:
+                -1
+        case Intrinsic(dest, _, _):
+            if dest.?:
+                val intrinsic_dest = dest
+                var_reassign_local_id_value(intrinsic_dest)
+            else:
+                -1
+        case Ref(dest, _, _):
+            var_reassign_local_id_value(dest)
+        case _:
+            -1
+
+
 fn ssa_operand_push_local(locals: [i64], operand: MirOperand) -> [i64]:
     # NOTE: explicit match, not `if lo.?:` -- local id 0 landmine, see
-    # ssa_max_local_from_operand.
-    match var_reassign_operand_local(operand):
-        case Some(local_id):
-            local_list_push_unique(locals, local_id)
-        case nil:
+    # ssa_max_local_from_operand. Matches operand.kind DIRECTLY (not the
+    # var_reassign_operand_local i64? helper): under the bootstrap seed the
+    # Option round-trip through that cross-module helper made this fn return
+    # nil for Const operands, nil-poisoning the caller's accumulator list.
+    match operand.kind:
+        case Copy(local):
+            local_list_push_unique(locals, var_reassign_local_id_value(local))
+        case Move(local):
+            local_list_push_unique(locals, var_reassign_local_id_value(local))
+        case Const(_, _):
             locals
 
 fn ssa_collect_inst_operand_locals(locals: [i64], inst: MirInst) -> [i64]:
@@ -1090,12 +1153,8 @@ fn ssa_local_defined_in_block(block: MirBlock, local_id: i64) -> bool:
     for inst in block.instructions:
         # NOTE: explicit match, not `if written.?:` -- local id 0 landmine,
         # see ssa_max_local_from_operand.
-        match var_reassign_written_local(inst):
-            case Some(written_id):
-                if written_id == local_id:
-                    return true
-            case nil:
-                pass_do_nothing
+        if _ssa_written_local_id(inst) == local_id:
+            return true
     false
 
 fn ssa_local_is_param(mir_locals: [MirLocal], local_id: i64) -> bool:
@@ -1358,23 +1417,28 @@ fn ssa_alloca_apply_def_store(inst: MirInst, slot_keys: [i64], slot_values: [i64
     read via a Load, but never written -- silently reading uninitialized
     stack memory. An explicit `match` on the Option's variant tag sidesteps
     the payload-truthiness collapse entirely."""
-    val written = var_reassign_written_local(inst)
-    match written:
-        case Some(written_id):
+    val written_sentinel = _ssa_written_local_id(inst)
+    # Statement-form accumulation, single tail tuple: a tuple constructed as a
+    # match-arm TAIL expression came back nil through this fn under the
+    # bootstrap seed (anon-tuple-return landmine), nil-poisoning
+    # ssa_alloca_rewrite_inst's def_step.
+    var out_inst = inst
+    var out_stores: [MirInst] = []
+    var out_next = next_temp
+    if written_sentinel >= 0:
+        val written_id = written_sentinel
+        if true:
             val idx = local_count_index(slot_keys, written_id)
             if idx >= 0:
                 val slot_id = slot_values[idx]
                 val new_dest = next_temp
-                val renamed = ssa_alloca_rename_dest(inst, written_id, new_dest)
-                val store_inst = MirInst(
+                out_inst = ssa_alloca_rename_dest(inst, written_id, new_dest)
+                out_stores = [MirInst(
                     kind: MirInstKind.Store(MirOperand(kind: MirOperandKind.Copy(ssa_local(slot_id))), MirOperand(kind: MirOperandKind.Copy(ssa_local(new_dest)))),
                     span: nil
-                )
-                (renamed, [store_inst], next_temp + 1)
-            else:
-                (inst, [], next_temp)
-        case nil:
-            (inst, [], next_temp)
+                )]
+                out_next = next_temp + 1
+    (out_inst, out_stores, out_next)
 
 fn ssa_alloca_rewrite_inst(inst: MirInst, slot_keys: [i64], slot_values: [i64], next_temp: i64) -> ([MirInst], MirInst, [MirInst], i64):
     """Full per-instruction rewrite: (loads to prepend, core inst, stores to

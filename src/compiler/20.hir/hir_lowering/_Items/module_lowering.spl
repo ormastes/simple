@@ -610,16 +610,53 @@ impl HirLowering:
         var import_idx = 0
         while import_idx < module.imports.len():
             val imp = module.imports[import_idx]
-            val imported_mod: Module? = self.modules_by_name.get(imp.module)
+            var imported_mod: Module? = self.modules_by_name.get(imp.module)
+            # Symbols must register under the DEFINING module's canonical name:
+            # a relative alias like ".helper" would otherwise be baked into the
+            # call symbol (@.helper.helper_val) while the definition object
+            # mangles under the path-derived name -> lld undefined symbol.
+            var resolved_module_name = imp.module
+            if imported_mod == nil and imp.module.starts_with("."):
+                # Relative import (`.sibling` / `..pkg.mod`): the module map is
+                # keyed by path-derived dotted names (app.mcp.main_lazy_json),
+                # so a raw leading-dot key always misses. Normalize against the
+                # importing module's own name. The entry module's name can be a
+                # FILE PATH (src/app/mcp/main.spl) — canonicalize to dotted.
+                var rel_base = module.name
+                if rel_base.ends_with(".spl"):
+                    rel_base = rel_base[0:rel_base.len() - 4]
+                rel_base = rel_base.replace("/", ".")
+                if rel_base.starts_with("src."):
+                    rel_base = rel_base.substring(4)
+                var rel_dots = 0
+                while rel_dots < imp.module.len() and imp.module.substring(rel_dots, rel_dots + 1) == ".":
+                    rel_dots = rel_dots + 1
+                val rel_tail = imp.module.substring(rel_dots)
+                # Drop the module's own last segment, plus one more per extra dot.
+                var rel_segs = rel_base.split(".")
+                var rel_keep = rel_segs.len() - rel_dots
+                if rel_keep < 0:
+                    rel_keep = 0
+                var rel_pkg = ""
+                var rel_si = 0
+                while rel_si < rel_keep:
+                    if rel_si > 0:
+                        rel_pkg = rel_pkg + "."
+                    rel_pkg = rel_pkg + rel_segs[rel_si]
+                    rel_si = rel_si + 1
+                val rel_abs = if rel_pkg == "": rel_tail else: rel_pkg + "." + rel_tail
+                imported_mod = self.modules_by_name.get(rel_abs)
+                if imported_mod != nil:
+                    resolved_module_name = rel_abs
             if imported_mod != nil:
                 if imp.items.len() == 0:
-                    self.register_glob_imported_symbols(imported_mod, imp.module, imp.span)
+                    self.register_glob_imported_symbols(imported_mod, resolved_module_name, imp.span)
                 else:
                     var item_idx = 0
                     while item_idx < imp.items.len():
                         val item = imp.items[item_idx]
                         val local_name = if item.has_alias: item.alias else: item.name
-                        self.register_imported_symbol(imported_mod, imp.module, item.name, local_name, imp.span)
+                        self.register_imported_symbol(imported_mod, resolved_module_name, item.name, local_name, imp.span)
                         item_idx = item_idx + 1
             import_idx = import_idx + 1
 
