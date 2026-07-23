@@ -1,0 +1,152 @@
+# ============================================================================
+# hardware/link_mux/jtag_route.spl — JTAG routing over the shared link
+# ============================================================================
+#
+# Phase-1 JTAG tunnel: the JTAG channel carries the OpenOCD `remote_bitbang`
+# byte protocol (bytes '0'..'7' = {tck,tms,tdi}; 'R' = sample TDO -> reply
+# '0'/'1'). The host frames those bytes onto CH_JTAG of the mux; the FPGA side
+# demuxes CH_JTAG and drives the JTAG TAP, framing the TDO replies back. This is
+# the same protocol tb_openocd_bitbang.vhd already proves against the real DTM —
+# here modelled in .spl so the mux path is testable without the VHDL toolchain.
+#
+# Included: a minimal IEEE-1149.1 TAP FSM + IDCODE DR (0x15350067, the RISC-V
+# DTM idcode from jtag_tap.vhd), enough to prove "read IDCODE over the muxed
+# link". Functional style (seed JIT bug: no `me` self array-of-structs writeback).
+# ============================================================================
+
+# remote_bitbang command bytes
+val RBB_R: i64 = 0x52          # 'R' sample TDO
+val RBB_0: i64 = 0x30          # '0' base for {tck,tms,tdi} = 0..7
+
+# RISC-V DTM IDCODE (jtag_tap.vhd:32)
+val JTAG_IDCODE: i64 = 0x15350067
+
+# ---------------------------------------------------------------------------
+# TAP FSM (16 states). transition[state][tms] -> next state.
+# 0 TLR 1 RTI 2 SELDR 3 CAPDR 4 SHIFTDR 5 EXIT1DR 6 PAUSEDR 7 EXIT2DR 8 UPDDR
+# 9 SELIR 10 CAPIR 11 SHIFTIR 12 EXIT1IR 13 PAUSEIR 14 EXIT2IR 15 UPDIR
+# ---------------------------------------------------------------------------
+val ST_SHIFT_DR: i64 = 4
+val ST_CAPTURE_DR: i64 = 3
+
+fn tap_next(state: i64, tms: i64) -> i64:
+    var t0: [i64] = [1, 1, 3, 4, 4, 6, 6, 4, 1, 10, 11, 11, 13, 13, 11, 1]
+    var t1: [i64] = [0, 2, 9, 5, 5, 8, 7, 8, 2, 0, 12, 12, 15, 14, 15, 2]
+    if tms == 0:
+        return t0[state]
+    t1[state]
+
+struct TapState:
+    fsm: i64
+    dr: i64            # DR shift register (32-bit IDCODE path)
+    prev_tck: i64
+
+fn tap_create() -> TapState:
+    TapState(fsm: 0, dr: 0, prev_tck: 0)
+
+struct TapStep:
+    tap: TapState
+    tdo: i64           # -1 if the byte was not a TDO sample ('R')
+
+# Apply one remote_bitbang byte to the TAP. On a tck rising edge, advance the
+# FSM (and shift the DR in SHIFT_DR); on CAPTURE_DR load IDCODE. 'R' samples the
+# current TDO (the DR LSB while in SHIFT_DR).
+fn tap_apply(tap: TapState, b: i64) -> TapStep:
+    if b == RBB_R:
+        var tdo = 0
+        if tap.fsm == ST_SHIFT_DR:
+            tdo = tap.dr & 1
+        return TapStep(tap: tap, tdo: tdo)
+    if b >= RBB_0 and b <= RBB_0 + 7:
+        val v = b - RBB_0
+        val tck = (v >> 2) & 1
+        val tms = (v >> 1) & 1
+        val tdi = v & 1
+        var fsm = tap.fsm
+        var dr = tap.dr
+        if tck == 1 and tap.prev_tck == 0:
+            # rising edge: shift first (in SHIFT_DR), then advance state
+            if fsm == ST_SHIFT_DR:
+                dr = ((dr >> 1) | (tdi << 31)) & 0xFFFFFFFF
+            fsm = tap_next(fsm, tms)
+            if fsm == ST_CAPTURE_DR:
+                dr = JTAG_IDCODE & 0xFFFFFFFF
+        return TapStep(tap: TapState(fsm: fsm, dr: dr, prev_tck: tck), tdo: 0 - 1)
+    # unknown byte: ignore
+    TapStep(tap: tap, tdo: 0 - 1)
+
+struct JtagProc:
+    tap: TapState
+    replies: [u8]      # '0'/'1' TDO reply bytes, in order
+
+# FPGA side: consume a demuxed CH_JTAG command stream, drive the TAP, and
+# collect the TDO reply bytes to be framed back on CH_JTAG.
+fn jtag_fpga_process(tap: TapState, cmds: [u8]) -> JtagProc:
+    var cur = tap
+    var replies: [u8] = []
+    var i = 0
+    val n = cmds.len()
+    while i < n:
+        val step = tap_apply(cur, cmds[i].to_i64() & 0xFF)
+        cur = step.tap
+        if step.tdo >= 0:
+            if step.tdo == 1:
+                replies.push(0x31.to_u8())     # '1'
+            else:
+                replies.push(0x30.to_u8())     # '0'
+        i = i + 1
+    JtagProc(tap: cur, replies: replies)
+
+# ---------------------------------------------------------------------------
+# Host side: build the "read IDCODE" bitbang command stream, and decode the
+# 32 TDO reply bits (LSB-first) back into the idcode value.
+# ---------------------------------------------------------------------------
+fn cmd_clock(tms: i64, tdi: i64) -> [u8]:
+    # two bytes: tck=0 then tck=1 (rising edge advances the TAP)
+    var out: [u8] = []
+    out.push((RBB_0 + ((tms << 1) | tdi)).to_u8())          # tck=0
+    out.push((RBB_0 + 4 + ((tms << 1) | tdi)).to_u8())      # tck=1
+    out
+
+fn append_bytes(dst: [u8], src: [u8]) -> [u8]:
+    var out = dst
+    var i = 0
+    while i < src.len():
+        out.push(src[i])
+        i = i + 1
+    out
+
+fn jtag_read_idcode_cmds() -> [u8]:
+    """remote_bitbang stream: reset -> navigate to SHIFT_DR -> read 32 TDO bits."""
+    var cmds: [u8] = []
+    # 5x TMS=1 -> TEST_LOGIC_RESET from any state
+    var r = 0
+    while r < 5:
+        cmds = append_bytes(cmds, cmd_clock(1, 0))
+        r = r + 1
+    # TMS=0 -> RUN_TEST_IDLE
+    cmds = append_bytes(cmds, cmd_clock(0, 0))
+    # TMS=1 -> SELECT_DR ; TMS=0 -> CAPTURE_DR (loads IDCODE) ; TMS=0 -> SHIFT_DR
+    cmds = append_bytes(cmds, cmd_clock(1, 0))
+    cmds = append_bytes(cmds, cmd_clock(0, 0))
+    cmds = append_bytes(cmds, cmd_clock(0, 0))
+    # 32 bits: sample TDO ('R') then clock (TMS=0 for first 31, TMS=1 on last)
+    var bit = 0
+    while bit < 32:
+        cmds.push(RBB_R.to_u8())
+        var tms = 0
+        if bit == 31:
+            tms = 1
+        cmds = append_bytes(cmds, cmd_clock(tms, 0))
+        bit = bit + 1
+    cmds
+
+fn jtag_decode_idcode(replies: [u8]) -> i64:
+    """Assemble the first 32 '0'/'1' reply bytes LSB-first into the idcode."""
+    var val_out = 0
+    var i = 0
+    while i < replies.len() and i < 32:
+        if (replies[i].to_i64() & 0xFF) == 0x31:
+            val_out = val_out | (1 << i)
+        i = i + 1
+    val_out & 0xFFFFFFFF
