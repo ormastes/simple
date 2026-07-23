@@ -331,18 +331,14 @@ pub(crate) fn compile_file_to_object(
     // Bootstrap hack: normalize optional types that older lenient type resolver misses
     let is_bootstrap = std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1");
     let target = effective_target();
-    let mut source = if is_bootstrap {
-        apply_bootstrap_rewrite_for_target(
-            source,
-            matches!(
-                target.os,
-                simple_common::target::TargetOS::None | simple_common::target::TargetOS::SimpleOS
-            ),
-        )
-    } else {
-        // Non-bootstrap: just normalize text? -> text for basic compat
-        source.replace("text?", "text")
-    };
+    let mut source = rewrite_source_for_native_parse(
+        source,
+        is_bootstrap,
+        matches!(
+            target.os,
+            simple_common::target::TargetOS::None | simple_common::target::TargetOS::SimpleOS
+        ),
+    );
     source = crate::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(&source, effective_target().arch);
 
     // Parse
@@ -781,6 +777,18 @@ fn apply_bootstrap_rewrite(source: &str) -> String {
     apply_bootstrap_rewrite_for_target(source, false)
 }
 
+fn rewrite_source_for_native_parse(
+    source: &str,
+    is_bootstrap: bool,
+    preserve_module_global_optional_calls: bool,
+) -> String {
+    if is_bootstrap {
+        apply_bootstrap_rewrite_for_target(source, preserve_module_global_optional_calls)
+    } else {
+        source.to_string()
+    }
+}
+
 fn apply_bootstrap_rewrite_for_target(source: &str, preserve_module_global_optional_calls: bool) -> String {
     // Protect `?` inside string literals from being stripped
     let mut s = crate::pipeline::module_loader::protect_question_marks_in_strings(source);
@@ -1118,7 +1126,14 @@ fn apply_bootstrap_rewrite_for_target(source: &str, preserve_module_global_optio
 
 #[cfg(test)]
 mod bootstrap_rewrite_tests {
-    use super::{apply_bootstrap_rewrite, apply_bootstrap_rewrite_for_target};
+    use super::{apply_bootstrap_rewrite, apply_bootstrap_rewrite_for_target, rewrite_source_for_native_parse};
+
+    #[test]
+    fn non_bootstrap_native_parse_preserves_optional_text() {
+        let src = "fn next_text() -> text?:\n    return nil\n";
+        let out = rewrite_source_for_native_parse(src, false, false);
+        assert_eq!(out, src);
+    }
 
     /// Lambda EXPRESSIONS (`fn(...)` followed by `:`) must keep their
     /// parameter list. Regression test for the stage4

@@ -786,3 +786,150 @@ implementation
   Stage2/3 hashes above are therefore retained diagnostic evidence only. The
   cap forbids another rebuild in this session; the next fresh continuation
   must apply the direct-operand key fix on current main before rebuilding.
+
+### 2026-07-23 current-tip unsigned arithmetic retry cap
+
+- The dedicated lane fetched/rebased cleanly to `41131675a8`; tracked-file
+  count remained `105715`. Three one-writer, no-MCP Stage2/3 cycles completed
+  without fallback or full bootstrap.
+- Disassembly of the first refreshed Stage3 proved the direct Copy/Move keys
+  are no longer collapsed: destination `has`/set use `dest`, source `has`/get
+  use `src`. The unchanged dual-backend fixture still exited `5`.
+- A declared-U64 Let-cast experiment produced a byte-identical diagnostic
+  executable and was removed. Independent sidecars then accepted per-operand
+  signed-aware comparison coercion after rejecting a combined-unsigned form
+  that could zero-extend a signed peer.
+- Final Stage2 SHA-256:
+  `db21a54ea3f4957ce0f635b1f90ed46117335c9117ad00b0b8cadced4d354cd1`;
+  Stage3 SHA-256:
+  `4f09caaa7dca8c7a18f818175dfc06b044087665b67cdf977f6fcf825967d64a`.
+  Both passed generic bootstrap sanity, but the third fixture run still exited
+  `5`; no Stage4, target/image, QEMU, filesystem toolchain, web, or DB claim is
+  accepted.
+- The mandatory three-cycle cap is exhausted. Next session must prove whether
+  the failing cast operand crosses `translate_load` before changing it; its
+  unknown-pointer signed default can overwrite a MIR-primed destination, but
+  this remains a hypothesis. Do not rerun Stage2/3 or the fixture unchanged.
+
+### 2026-07-23 post-sync backend-route diagnosis
+
+- Three bounded one-writer Stage2/3 fix/verify cycles at `f2b493ec65` passed
+  generic sanity; no full bootstrap or Stage4 was run. The final fetch/rebase
+  then synced the lane to `2bc8052471`, matching `origin/main`, so those build
+  artifacts are retained diagnostics rather than current-tip admission.
+- Final Stage2 SHA-256 is
+  `549ea9150c2408c5e0a2148f24d36d6b6da236e2cb3f26452beb53d55deee3cb`;
+  final Stage3 SHA-256 is
+  `f606033b493e5c526a8cf70caad7ea0aee310bad24540d86adb43b0ecb932986`.
+  The focused native-build gate still exits `5`.
+- Temporary marker instrumentation proved the exact failed arithmetic row is
+  branch 6: `high > 0.0` / `0.0 < high`. The marker was removed; the fixture
+  remains intact.
+- Backend review corrected the route: Stage3 `native-build` calls Rust
+  `native_all`, whose default is Cranelift when the optional LLVM feature is
+  absent. Pure-Simple textual-LLVM provenance and typed-integer-literal
+  experiments therefore could not affect the executable and were removed. A
+  no-MIR-optimization diagnostic was byte-identical and still exited `5`.
+- The three-cycle cap is exhausted. Do not rebuild or rerun the unchanged gate
+  in this session. Stage4, image/QEMU, filesystem toolchain, web, and DB proof
+  remain gated.
+
+### 2026-07-23 Cranelift arithmetic admission and flat Option handoff
+
+- The independent mixed `u64`/float Cranelift fix was higher-reviewed, rebased
+  onto current `origin/main`, and pushed as `8671270ca4`. One bounded Stage2/3
+  refresh passed generic sanity with Stage2 SHA-256
+  `f56f86e90a68d2e20cab956ecd834e50df0eab18482920f1f13e94497609f1b2`
+  and Stage3 SHA-256
+  `f08774b6ec2a6321c67ed15a62d6bcf277d41f25f994bcc161afa6c727002167`.
+  The focused fixture advanced beyond arithmetic and exposed unresolved flat
+  `Option.map`/`unwrap_or` lowering; no Stage4 was run.
+- `runtime_need`: none. Flat optional mapping is compiler-owned control flow;
+  ordinary native programs must remain linkable against `core-c-bootstrap`.
+- `facade_checked`: existing `rt_is_none`, MIR `IndirectCall`, and the canonical
+  branch plus typed Store/Load merge pattern.
+- `chosen_path`: `fix-codegen-runtime-owner`. Evaluate receiver and argument
+  once, branch on `rt_is_none`, invoke the outlined mapper only on Some through
+  its raw `ANY/ANY` closure ABI, and reinterpret bits through the result-typed
+  merge local.
+- `rejected_shortcuts`: Rust-only `rt_option_*_flat` symbols, removed hosted
+  runtime bundles, duplicate Core-C helpers, untyped lambda parameters, and
+  receiver self-casts. Those paths either fail the admitted runtime lane or
+  break float closure ABI.
+- The focused MIR regression now covers one receiver evaluation, changed
+  `i64? -> text?` result typing, raw closure ABI, F64 contextual lambda typing,
+  typed F64 merge, branch presence, and absence of rejected helper calls; its
+  final bounded cycle passed 1/1. Incremental Stage2/3 and native fixture
+  admission remain pending higher review.
+
+### 2026-07-23 flat Option native admission cap
+
+- Higher review accepted the contextual-lambda and raw closure ABI lowering.
+  The first incremental Stage2/3 cycle accidentally embedded the stale
+  `libsimple_native_all.a`; its native gate still emitted the removed helper
+  symbols. Rebuilding `simple-native-all` fixed the artifact owner rather than
+  changing source semantics.
+- Cycle 2 Stage2 SHA-256:
+  `8f899fa7afed294dc1b8f45285b93d24786d00bd6fe4b6befa0fd87aa45069bb`;
+  Stage3 SHA-256:
+  `e270b7adff3f205ccd1a4e0457a7fbf386a3cf9e5289c712ca9ce42d1f29b9c4`.
+  Both passed bootstrap compiler sanity and Stage2 native-build capability.
+- The refreshed native fixture links without any `rt_option_*_flat` symbol.
+  Its mapped value equals the absolute oracle `"7"`; diagnostic exit `12`
+  isolates the remaining failure to the module-global `receiver_calls`
+  counter, not mapping output. Module-global mutation is a documented unsafe
+  test oracle in this compiler lane.
+- The three-attempt native-gate cap is exhausted. Do not rerun it this turn.
+  Next continuation should replace all three module-global counters with the
+  already-admitted array-held class-field pattern from
+  `test/fixtures/compiler/native_class_array_param_field_mutation.spl`, then
+  rerun the fixture once against the exact Stage3 above. No Stage2/3 rebuild is
+  needed if compiler source and native bundle remain unchanged. Stage4, QEMU,
+  filesystem Clang/Simple, web, and DB evidence remain gated.
+
+### 2026-07-23 flat Option text-return blocker
+
+- Replaced unsafe module-global fixture counters with the admitted array-held
+  `Counter` pattern. Integer and float `Option.map` values, receiver-once,
+  mapper-only-on-Some, and eager-default checks all pass before the text row.
+- Added local and cross-module `text?` Some/None rows. The executable still
+  exits `51` with `Simple runtime error: function not found: str.map`; the
+  compiler is still losing optional provenance before text method dispatch.
+- Rust boundary regression passed 1/1 and higher review passed the typed inline
+  MIR lowering. Two HIR declared-return carrier hypotheses (direct and admitted
+  one-element-array storage) survived Stage2/3 sanity but did not move the
+  native gate, so the ineffective HIR changes were removed and tests retained.
+- Final Stage2 SHA-256:
+  `03e1f32ae3013cdc3dee934a422bf96861f867a20caa276519fdbeea69cdda0c`.
+  Final Stage3 SHA-256:
+  `edb5dd7e9dc4093e3a180826115e7472081bcb10b747b7a44a9098df7b02e176`.
+- The three-cycle cap is exhausted. Do not rerun the unchanged build/gate in
+  this session. Stage4/full bootstrap, QEMU, filesystem toolchains, web, and DB
+  remain gated.
+
+### 2026-07-23 flat Option and integer-global admission
+
+- Small-model flow tracing found the exact `text?` loss: non-bootstrap native
+  source selection replaced `text?` with `text` before parsing. Normal native
+  parsing now preserves source; bootstrap-only compatibility rewriting is
+  unchanged. Focused unit and native flat-Option gates pass, and higher review
+  accepted the root fix.
+- The wider cross-module fixture then exited `6`. Disassembly proved Option
+  mapping and single receiver evaluation were correct; the unannotated integer
+  module counter was declared `Any`, stored raw `1`, and compared with boxed
+  `1`. Bare integer-literal module vars now infer `i64`. Its focused MIR test
+  passed and higher re-review passed.
+- The refreshed incremental build passed Stage2/3 sanity without full bootstrap.
+  Stage2 SHA-256:
+  `42391ee607aa8e243d9222afc1021e1f03f426c5701ea17591d63f4037662f78`;
+  Stage3 SHA-256:
+  `8641e1d637db3c8012a2b1a8b203f67f99ecce45a3c884cb8ed6cd9c1906aae8`.
+- The unchanged cross-module fixture advanced beyond exit `6` and now exits
+  `7` at `cross_target_nested_copy_ok()`. This is an independent value-copy
+  blocker. The three-cycle cap is consumed; do not rebuild or rerun it in this
+  session. Stage4, QEMU, filesystem Clang/Simple, web, and DB remain gated.
+- Required broad checks could not provide evidence: the minimal Stage3 does
+  not expose `check`/`test`, while the canonical `bin/release/simple` CLI
+  segfaulted (exit `139`) on `src/compiler`, `src/lib`, MCP, LSP-MCP, and the
+  MCP stdio integration spec. Direct-env working-tree guard, spec-layout zero,
+  and `git diff --check` passed. This commit is a focused fix, not verify PASS.

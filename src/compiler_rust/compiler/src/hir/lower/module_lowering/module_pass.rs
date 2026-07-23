@@ -644,6 +644,8 @@ impl Lowerer {
                         self.resolve_type(t).unwrap_or(TypeId::ANY)
                     } else if let Some(ref t) = extract_pattern_type(&l.pattern) {
                         self.resolve_type(t).unwrap_or(TypeId::ANY)
+                    } else if matches!(l.value, Some(Expr::Integer(_))) {
+                        TypeId::I64
                     } else {
                         TypeId::ANY
                     };

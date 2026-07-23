@@ -798,7 +798,23 @@ impl Lowerer {
         ctx: &mut FunctionContext,
     ) -> LowerResult<Option<HirExpr>> {
         let mut receiver = receiver.clone();
-        let hir_args = self.lower_call_args(args, ctx)?;
+        let optional_inner = self.module.types.optional_inner(receiver.ty);
+        let hir_args = if method == "map" && args.len() == 1 {
+            match (&args[0].value, optional_inner) {
+                (
+                    Expr::Lambda {
+                        params,
+                        body,
+                        capture_all,
+                        ..
+                    },
+                    Some(inner_ty),
+                ) => vec![self.lower_lambda_with_param_types(params, body, *capture_all, &[inner_ty], ctx)?],
+                _ => self.lower_call_args(args, ctx)?,
+            }
+        } else {
+            self.lower_call_args(args, ctx)?
+        };
 
         if matches!(method, "push" | "append") && hir_args.len() == 1 {
             if let HirExprKind::Local(local_index) = receiver.kind {
@@ -812,6 +828,35 @@ impl Lowerer {
                     }
                     receiver.ty = specialized_array_ty;
                 }
+            }
+        }
+
+        if let Some(optional_inner) = optional_inner {
+            let result_ty = match (method, hir_args.as_slice()) {
+                ("map", [mapper]) => {
+                    let mapped_inner = match &mapper.kind {
+                        HirExprKind::Lambda { body, .. } => body.ty,
+                        _ => match self.module.types.get(mapper.ty) {
+                            Some(HirType::Function { ret, .. }) => *ret,
+                            _ => optional_inner,
+                        },
+                    };
+                    Some(self.module.types.register_optional(mapped_inner))
+                }
+                ("unwrap_or", [_]) => Some(optional_inner),
+                ("is_some" | "is_none", []) => Some(TypeId::BOOL),
+                _ => None,
+            };
+            if let Some(ty) = result_ty {
+                return Ok(Some(HirExpr {
+                    kind: HirExprKind::MethodCall {
+                        receiver: Box::new(receiver.clone()),
+                        method: method.to_string(),
+                        args: hir_args,
+                        dispatch: DispatchMode::Static,
+                    },
+                    ty,
+                }));
             }
         }
 
@@ -945,11 +990,10 @@ impl Lowerer {
                 // results (bug
                 // seed_interp_bytes_u8_relational_boxtag_shift_2026-07-17.md;
                 // marker: seed_bytes_u8_boxtag_2026-07-17).
-                "bytes" => Some(
-                    self.module
-                        .types
-                        .register(HirType::Array { element: TypeId::I64, size: None }),
-                ),
+                "bytes" => Some(self.module.types.register(HirType::Array {
+                    element: TypeId::I64,
+                    size: None,
+                })),
                 _ => None,
             };
 

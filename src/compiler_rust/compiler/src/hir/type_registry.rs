@@ -19,6 +19,24 @@ pub struct TypeIdAllocator {
     next: u32,
 }
 
+#[cfg(test)]
+mod optional_marker_tests {
+    use super::*;
+
+    #[test]
+    fn optional_marker_does_not_match_plain_pointer() {
+        let mut registry = TypeRegistry::new();
+        let optional = registry.register_optional(TypeId::I64);
+        let pointer = registry.register(HirType::Pointer {
+            kind: PointerKind::Shared,
+            capability: simple_parser::ast::ReferenceCapability::Shared,
+            inner: TypeId::I64,
+        });
+        assert_eq!(registry.optional_inner(optional), Some(TypeId::I64));
+        assert_eq!(registry.optional_inner(pointer), None);
+    }
+}
+
 impl TypeIdAllocator {
     /// Create a new allocator starting after built-in types.
     pub fn new() -> Self {
@@ -56,6 +74,7 @@ pub struct TypeRegistry {
     types: std::collections::BTreeMap<TypeId, HirType>,
     allocator: TypeIdAllocator,
     name_to_id: HashMap<String, TypeId>,
+    optional_type_ids: std::collections::HashSet<TypeId>,
 }
 
 impl TypeRegistry {
@@ -64,6 +83,7 @@ impl TypeRegistry {
             types: std::collections::BTreeMap::new(),
             allocator: TypeIdAllocator::new(),
             name_to_id: HashMap::new(),
+            optional_type_ids: std::collections::HashSet::new(),
         };
 
         // Register built-in types
@@ -125,6 +145,26 @@ impl TypeRegistry {
         let id = self.allocator.alloc();
         self.types.insert(id, ty);
         id
+    }
+
+    pub fn register_optional(&mut self, inner: TypeId) -> TypeId {
+        let id = self.register(HirType::Pointer {
+            kind: PointerKind::Shared,
+            capability: simple_parser::ast::ReferenceCapability::Shared,
+            inner,
+        });
+        self.optional_type_ids.insert(id);
+        id
+    }
+
+    pub fn optional_inner(&self, id: TypeId) -> Option<TypeId> {
+        if !self.optional_type_ids.contains(&id) {
+            return None;
+        }
+        match self.get(id) {
+            Some(HirType::Pointer { inner, .. }) => Some(*inner),
+            _ => None,
+        }
     }
 
     /// Get the allocator for inspection (useful for verification).

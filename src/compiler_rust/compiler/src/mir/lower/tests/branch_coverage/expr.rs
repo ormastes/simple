@@ -385,6 +385,21 @@ fn global_variable_load() {
     }
 }
 
+#[test]
+fn unannotated_integer_global_assignment_stays_typed() {
+    let mir = compile_to_mir("var calls = 0\n\nfn bump():\n    calls = calls + 1\n").unwrap();
+    assert!(mir
+        .globals
+        .iter()
+        .any(|(name, ty, mutable)| name == "calls" && *ty == crate::hir::TypeId::I64 && *mutable));
+    assert_eq!(mir.global_init_values.get("calls"), Some(&0));
+    assert!(has_inst(&mir, |inst| matches!(
+        inst,
+        MirInst::GlobalStore { ty: crate::hir::TypeId::I64, .. }
+    )));
+    assert!(!has_inst(&mir, |inst| matches!(inst, MirInst::BoxInt { .. })));
+}
+
 // =============================================================================
 // Dict operations (lowering_expr.rs)
 // =============================================================================

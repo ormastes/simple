@@ -1477,10 +1477,9 @@ fn load_module_with_imports_internal(
         source = source.replace('\r', "");
     }
 
-    // Bootstrap leniency: older sources use optional `text?` types which the
-    // current parser treats as a bare identifier. During early bootstrap we
-    // normalize them to `text` so type checking succeeds. Guarded by env to
-    // avoid affecting normal builds.
+    // Bootstrap leniency: early bootstrap lowering still normalizes optional
+    // `text?` types to `text` for compatibility. Guarded by env so normal
+    // builds retain the language-level optional type.
     if std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1") {
         source = source.replace("text?", "text");
         source = strip_optionals(source);

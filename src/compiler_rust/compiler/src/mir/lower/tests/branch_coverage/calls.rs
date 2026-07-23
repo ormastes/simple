@@ -305,6 +305,62 @@ fn closure_captures() {
     assert!(has_inst(&mir, |i| matches!(i, MirInst::IndirectCall { .. })));
 }
 
+#[test]
+fn flat_option_map_lowers_typed_branch_once() {
+    let mir = compile_to_mir(
+        "fn next_value() -> i64?:\n    return 5\n\nfn next_float() -> f64?:\n    return 1.5\n\nfn next_text() -> text?:\n    return \"hello\"\n\nfn test() -> text:\n    return next_value().map(\\x: x.to_string()).unwrap_or(\"missing\")\n\nfn test_float() -> f64:\n    return next_float().map(\\x: x + 0.5).unwrap_or(9.0)\n\nfn test_text() -> text:\n    return next_text().map(\\x: x + \"!\").unwrap_or(\"missing\")\n",
+    )
+    .unwrap();
+    let next_calls = mir
+        .functions
+        .iter()
+        .flat_map(|function| &function.blocks)
+        .flat_map(|block| &block.instructions)
+        .filter(|instruction| matches!(instruction, MirInst::Call { target, .. } if target.name() == "next_value"))
+        .count();
+    assert_eq!(next_calls, 1);
+    let next_text_calls = mir
+        .functions
+        .iter()
+        .flat_map(|function| &function.blocks)
+        .flat_map(|block| &block.instructions)
+        .filter(|instruction| matches!(instruction, MirInst::Call { target, .. } if target.name() == "next_text"))
+        .count();
+    assert_eq!(next_text_calls, 1);
+    assert!(has_inst(&mir, |instruction| matches!(
+        instruction,
+        MirInst::Call { target, .. } if target.name() == "rt_is_none"
+    )));
+    assert!(has_inst(&mir, |instruction| matches!(
+        instruction,
+        MirInst::IndirectCall { param_types, return_type, .. }
+            if param_types == &vec![hir::TypeId::ANY] && *return_type == hir::TypeId::ANY
+    )));
+    assert!(has_inst(&mir, |instruction| matches!(
+        instruction,
+        MirInst::Store { ty, .. } | MirInst::Load { ty, .. } if *ty == hir::TypeId::F64
+    )));
+    assert!(has_inst(&mir, |instruction| matches!(
+        instruction,
+        MirInst::ClosureCreate { lambda_params, .. }
+            if lambda_params.iter().any(|param| param.name == "x" && param.ty == hir::TypeId::F64)
+    )));
+    assert!(mir
+        .functions
+        .iter()
+        .flat_map(|function| &function.blocks)
+        .any(|block| { matches!(block.terminator, crate::mir::Terminator::Branch { .. }) }));
+    assert!(!has_inst(&mir, |instruction| matches!(
+        instruction,
+        MirInst::Call { target, .. }
+            if target.name() == "rt_option_map_flat" || target.name() == "rt_option_unwrap_or_flat"
+    )));
+    assert!(!has_inst(&mir, |instruction| matches!(
+        instruction,
+        MirInst::MethodCallStatic { func_name, .. } if func_name == "str.map"
+    )));
+}
+
 // =============================================================================
 // Struct with type registry (lowering_expr.rs lines 817-818)
 // =============================================================================

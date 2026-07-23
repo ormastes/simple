@@ -288,11 +288,7 @@ impl Lowerer {
             }
             Type::Optional(inner) => {
                 let inner_id = self.resolve_type(inner)?;
-                Ok(self.module.types.register(HirType::Pointer {
-                    kind: PointerKind::Shared,
-                    capability: ReferenceCapability::Shared, // Default capability
-                    inner: inner_id,
-                }))
+                Ok(self.module.types.register_optional(inner_id))
             }
             Type::SelfType => self.resolve_self_type(),
             Type::Union(types) => {

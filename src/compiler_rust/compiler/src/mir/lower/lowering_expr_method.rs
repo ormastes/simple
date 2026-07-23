@@ -3,9 +3,128 @@
 use super::lowering_core::{MirLowerResult, MirLowerer};
 use super::lowering_di::builtin_type_name;
 use crate::hir::{DispatchMode, HirExpr, HirType, TypeId};
+use crate::mir::effects::LocalKind;
+use crate::mir::function::MirLocal;
 use crate::mir::instructions::{MirInst, VReg};
+use crate::mir::Terminator;
 
 impl<'a> MirLowerer<'a> {
+    fn lower_flat_optional_method(
+        &mut self,
+        receiver: VReg,
+        argument: VReg,
+        method: &str,
+        result_ty: TypeId,
+    ) -> MirLowerResult<VReg> {
+        let result_local = self.with_func(|func, _| {
+            let index = func.params.len() + func.locals.len();
+            func.locals.push(MirLocal {
+                name: format!("$option_merge_{}", index),
+                ty: result_ty,
+                kind: LocalKind::Local,
+                is_ghost: false,
+            });
+            index
+        })?;
+
+        let is_none = self.with_func(|func, current_block| {
+            let dest = func.new_vreg();
+            func.block_mut(current_block).unwrap().instructions.push(MirInst::Call {
+                dest: Some(dest),
+                target: crate::mir::effects::CallTarget::from_name("rt_is_none"),
+                args: vec![receiver],
+            });
+            dest
+        })?;
+        let (none_block, some_block, merge_block) = self.with_func(|func, current_block| {
+            let none_block = func.new_block();
+            let some_block = func.new_block();
+            let merge_block = func.new_block();
+            func.block_mut(current_block).unwrap().terminator = Terminator::Branch {
+                cond: is_none,
+                then_block: none_block,
+                else_block: some_block,
+            };
+            (none_block, some_block, merge_block)
+        })?;
+
+        self.set_current_block(none_block)?;
+        let none_value = if method == "map" {
+            self.lower_nil_expr()?
+        } else {
+            argument
+        };
+        self.with_func(|func, current_block| {
+            let addr = func.new_vreg();
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::LocalAddr {
+                dest: addr,
+                local_index: result_local,
+            });
+            block.instructions.push(MirInst::Store {
+                addr,
+                value: none_value,
+                ty: result_ty,
+            });
+        })?;
+        self.finalize_block_jump(merge_block)?;
+
+        self.set_current_block(some_block)?;
+        let some_value = if method == "map" {
+            let mapped = self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                func.block_mut(current_block)
+                    .unwrap()
+                    .instructions
+                    .push(MirInst::IndirectCall {
+                        dest: Some(dest),
+                        callee: argument,
+                        // Outlined lambdas use the uniform raw closure ABI;
+                        // the typed merge local reinterprets scalar bits.
+                        param_types: vec![TypeId::ANY],
+                        return_type: TypeId::ANY,
+                        args: vec![receiver],
+                        effect: crate::mir::effects::Effect::Io,
+                    });
+                dest
+            })?;
+            mapped
+        } else {
+            receiver
+        };
+        self.with_func(|func, current_block| {
+            let addr = func.new_vreg();
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::LocalAddr {
+                dest: addr,
+                local_index: result_local,
+            });
+            block.instructions.push(MirInst::Store {
+                addr,
+                value: some_value,
+                ty: result_ty,
+            });
+        })?;
+        self.finalize_block_jump(merge_block)?;
+
+        self.set_current_block(merge_block)?;
+        self.with_func(|func, current_block| {
+            let addr = func.new_vreg();
+            let value = func.new_vreg();
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::LocalAddr {
+                dest: addr,
+                local_index: result_local,
+            });
+            block.instructions.push(MirInst::Load {
+                dest: value,
+                addr,
+                ty: result_ty,
+            });
+            value
+        })
+    }
+
     fn box_method_args_for_any_params(
         &mut self,
         func_name: &str,
@@ -193,6 +312,28 @@ impl<'a> MirLowerer<'a> {
             arg_regs.push(self.lower_expr(arg)?);
         }
 
+        if let Some(inner_ty) = self
+            .type_registry
+            .and_then(|registry| registry.optional_inner(receiver.ty))
+        {
+            if method == "map" && arg_regs.len() == 1 {
+                let result_ty = match &args[0].kind {
+                    crate::hir::HirExprKind::Lambda { body, .. } => body.ty,
+                    _ => self
+                        .type_registry
+                        .and_then(|registry| match registry.get(args[0].ty) {
+                            Some(HirType::Function { ret, .. }) => Some(*ret),
+                            _ => None,
+                        })
+                        .unwrap_or(inner_ty),
+                };
+                return self.lower_flat_optional_method(receiver_reg, arg_regs[0], method, result_ty);
+            }
+            if method == "unwrap_or" && arg_regs.len() == 1 {
+                return self.lower_flat_optional_method(receiver_reg, arg_regs[0], method, inner_ty);
+            }
+        }
+
         // Function-valued struct field invoked with method syntax:
         // `port.run_fn(args)` where `struct BackendPort { run_fn: any }` holds a
         // lambda. Name-based method resolution cannot find a function called
@@ -376,8 +517,8 @@ impl<'a> MirLowerer<'a> {
             // `p.push(0.1); p[0] == 0.1` was false on the JIT path. Same fix the
             // array-literal lowering already has (lowering_expr_collection.rs).
             // See doc/08_tracking/bug/seed_f64_array_element_precision_mask_2026-07-19.md.
-            let needs_push_float_boxing = matches!(push_arg_ty, TypeId::F32 | TypeId::F64)
-                && !receiver_element_is_function;
+            let needs_push_float_boxing =
+                matches!(push_arg_ty, TypeId::F32 | TypeId::F64) && !receiver_element_is_function;
             if needs_push_boxing || needs_push_float_boxing {
                 let raw_arg = arg_regs[0];
                 let use_float = needs_push_float_boxing;
