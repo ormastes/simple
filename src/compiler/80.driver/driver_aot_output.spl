@@ -11,8 +11,6 @@
 # Backend helpers for module compilation and backend resolution
 use compiler.backend.backend.backend_helpers.{compile_module_with_backend, get_effective_backend_name}
 use compiler.backend.llvm_backend_tools.{llvm_bootstrap_last_object_path}
-use compiler.backend.backend.llvm_capability.{find_archive_portable}
-use std.platform.{get_host_os}
 use compiler.backend.backend_types.{CompiledModule}
 use compiler.backend.linker.linker_wrapper.{link_to_native, link_to_smf, link_to_self_contained, NativeLinkConfig, SelfContainedConfig, write_elf_bytes_to_file}
 use compiler.backend.backend.llvm_native_link.{link_llvm_native, NativeLinkOptions}
@@ -32,6 +30,9 @@ use compiler.frontend.parser_types.{Module}
 use compiler.driver.driver_build.incremental.{BuildCache, FileFingerprint, native_build_cache_scope_key, native_build_compiler_identity}
 use compiler.driver.driver_build.parallel.{ParallelBuilder, ParallelBuildConfig, BuildResult}
 use compiler.driver.driver_source_loading.{_driver_entry_import_dirname}
+use compiler.backend.backend.vhdl.vhdl_design_catalog.{VhdlDesignCatalog, vhdl_build_design_catalog_with_hir}
+use compiler.driver.driver_vhdl_artifact_build.{vhdl_artifact_input_from_catalog}
+use compiler.driver.driver_vhdl_artifacts.{vhdl_render_production_artifacts, vhdl_remove_production_artifacts, vhdl_write_production_artifacts}
 
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
@@ -68,6 +69,22 @@ fn driver_effective_native_opt_level(ctx: CompileContext, is_release: bool) -> i
 fn driver_effective_mir_opt_level(ctx: CompileContext) -> i64:
     compileoptions_effective_mir_opt_level(ctx.options)
 
+fn driver_vhdl_entry_module(ctx: CompileContext) -> Result<text, text>:
+    # VHDL selection is owned by this compile request. Ambient native-build
+    # environment belongs to a different invocation and must never redirect a
+    # design catalog. Source-directory inputs do not match Source.path; the one
+    # explicit entry file does. Multiple matching files are ambiguous.
+    var candidates: Dict<text, bool> = {}
+    for input_path in ctx.options.input_files:
+        for source in ctx.sources:
+            if source.path == input_path:
+                candidates[source.module_name] = true
+    if candidates.len() == 0:
+        return Err("VHDL compilation requires one explicit entry file in compile options")
+    if candidates.len() > 1:
+        return Err("VHDL compilation entry is ambiguous: multiple explicit input files match loaded modules")
+    Ok(candidates.keys()[0])
+
 fn driver_native_build_threads() -> i64:
     val raw = rt_env_get("SIMPLE_NATIVE_BUILD_THREADS") ?? ""
     if raw == "":
@@ -87,10 +104,9 @@ fn driver_native_build_cache_dir() -> text:
 fn driver_native_build_cache_path(cache_dir: text) -> text:
     rt_path_join(cache_dir, "build_cache.sdn")
 
-fn driver_native_build_cache_scope(backend: text, cache_dir: text, target_cpu: text, opt_level: i64, symbol_mode: text) -> (text, text):
+fn driver_native_build_cache_scope(backend: text, cache_dir: text, target_cpu: text, opt_level: i64) -> (text, text):
     val raw_target = if target_cpu == "": nil else: Some(target_cpu)
-    val compiler_id = native_build_compiler_identity() + if symbol_mode == "": "" else: "-" + symbol_mode
-    val scope = native_build_cache_scope_key(Some(backend), raw_target, [], opt_level as i32, compiler_id)
+    val scope = native_build_cache_scope_key(Some(backend), raw_target, [], opt_level as i32, native_build_compiler_identity())
     val cache_scope_root = rt_path_join(cache_dir, scope)
     (cache_scope_root, scope)
 
@@ -272,12 +288,9 @@ impl CompilerDriver:
         val is_release = ctx.options.release
         val driver_opt_level = driver_effective_native_opt_level(ctx, is_release)
         val stage4_requested = (rt_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") == "1"
-        val native_output_mode = rt_env_get("SIMPLE_NATIVE_BUILD_EMIT_OBJECT") ?? ""
-        val emit_object_requested = native_output_mode == "1"
-        val emit_archive_requested = native_output_mode == "archive"
-        val no_mangle_requested = (rt_env_get("SIMPLE_NATIVE_BUILD_NO_MANGLE") ?? "") == "1"
-        if stage4_requested and (emit_object_requested or emit_archive_requested):
-            return CompileResult.CodegenError("Stage4 strict profile does not support object or archive output")
+        val emit_object_requested = (rt_env_get("SIMPLE_NATIVE_BUILD_EMIT_OBJECT") ?? "") == "1"
+        if stage4_requested and emit_object_requested:
+            return CompileResult.CodegenError("Stage4 strict profile does not support emit-object output")
         val trace = (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
         if trace:
             print "[NATIVE] backend_name={backend_name}, is_release={is_release}"
@@ -289,8 +302,7 @@ impl CompilerDriver:
         val cache_dir = driver_native_build_cache_dir()
         rt_dir_create(cache_dir, true)
         val native_target = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
-        val symbol_mode = if no_mangle_requested: "no-mangle" else: ""
-        val (base_cache_scope_root, _) = driver_native_build_cache_scope(effective_backend, cache_dir, native_target, driver_opt_level, symbol_mode)
+        val (base_cache_scope_root, _) = driver_native_build_cache_scope(effective_backend, cache_dir, native_target, driver_opt_level)
         val cache_scope_root = rt_path_join(base_cache_scope_root, "sources-{driver_native_sources_fingerprint(ctx.sources)}")
         # --clean requested a clean build: drop this entry's cache scope so no
         # previously compiled object in this scope can be reused. Consume the
@@ -459,29 +471,6 @@ impl CompilerDriver:
             driver_log_info(log, "Native object written to {output}")
             return driver_native_success_with_launch_metadata(ctx, output)
 
-        if emit_archive_requested:
-            val archiver = find_archive_portable()
-            if archiver == "":
-                return CompileResult.CodegenError("emit-archive requires llvm-ar, ar, or lib.exe")
-            val host_os = get_host_os()
-            val system_ar = archiver == "ar" or archiver.ends_with("/ar")
-            if effective_backend == "cranelift" and host_os == "macos" and system_ar:
-                return CompileResult.CodegenError("Cranelift Mach-O archives require llvm-ar")
-            val msvc_lib = archiver == "lib" or archiver.ends_with("lib.exe")
-            var args: [text] = []
-            if msvc_lib:
-                args = ["/NOLOGO", "/OUT:{output}"]
-            else:
-                val archive_flags = if host_os == "macos" and system_ar: "rcs" else: "rcsD"
-                args = [archive_flags, output]
-            for obj in object_files:
-                args = args.push(obj)
-            val (_stdout, stderr, code) = rt_process_run(archiver, args)
-            if code != 0:
-                return CompileResult.CodegenError("emit-archive failed: {stderr}")
-            driver_log_info(log, "Native archive written to {output}")
-            return driver_native_success_with_launch_metadata(ctx, output)
-
         if trace:
             print "[NATIVE] linking {object_files.len()} object files..."
         if effective_backend == "llvm" or effective_backend == "llvm-lib":
@@ -544,18 +533,11 @@ impl CompilerDriver:
             driver_log_trace(log, "translating module: {name}")
             val mir_module = ctx.mir_modules[name]
             val compiled = compile_module_with_backend("c", mir_module, is_release, driver_opt_level)
-            # Flat-safe extraction (same defect as _compile_selected_module):
-            # is_err/unwrap_err/unwrap are miscompile-prone on the stage4
-            # native lane — match arms are the verified idiom. Binding the
-            # payload also lets {e.message} render the real diagnostic text;
-            # interpolating the raw CompileError prints <value:0x...>.
-            match compiled:
-                case Err(e):
-                    return CompileResult.CodegenError("C codegen error in {name}: {e.message}")
-                case Ok(module):
-                    all_c_source = all_c_source + module.assembly
-                case _:
-                    return CompileResult.CodegenError("C codegen error in {name}: backend result not Ok")
+            if compiled.is_err():
+                val err = compiled.unwrap_err()
+                return CompileResult.CodegenError("C codegen error in {name}: {err}")
+            val module: CompiledModule = compiled.unwrap()
+            all_c_source = all_c_source + module.assembly
 
         # Write C++ source to output file
         if not rt_file_write_text(output, all_c_source):
@@ -581,14 +563,9 @@ impl CompilerDriver:
             driver_log_trace(log, "translating module: {name}")
             val mir_module = ctx.mir_modules[name]
             val compiled = compile_module_with_backend("c", mir_module, is_release, driver_opt_level)
-            # Flat-safe error check: unwrap_err is miscompile-prone on the
-            # stage4 native lane, and the bound payload renders its real text
-            # via {e.message} (the raw CompileError prints <value:0x...>).
-            match compiled:
-                case Err(e):
-                    return CompileResult.CodegenError("C codegen error in {name}: {e.message}")
-                case _:
-                    ()
+            if compiled.is_err():
+                val err = compiled.unwrap_err()
+                return CompileResult.CodegenError("C codegen error in {name}: {err}")
             val module: CompiledModule = compiled.unwrap()
 
             # Convert module name to relative file path: "compiler.core.parser" -> "compiler/core/parser.cpp"
@@ -637,18 +614,12 @@ impl CompilerDriver:
             driver_log_trace(log, "translating module to PTX: {name}")
             val mir_module = ctx.mir_modules[name]
             val compiled = compile_module_with_backend("cuda", mir_module, is_release, driver_opt_level)
-            # Flat-safe extraction: match arms instead of is_err/unwrap_err/
-            # unwrap (miscompile-prone on the stage4 native lane); {e.message}
-            # renders the real text where the raw CompileError would print
-            # <value:0x...>.
-            match compiled:
-                case Err(e):
-                    return CompileResult.CodegenError("CUDA compile error in {name}: {e.message}")
-                case Ok(module_result):
-                    val ptx_text = module_result.assembly ?? ""
-                    all_ptx = all_ptx + ptx_text
-                case _:
-                    return CompileResult.CodegenError("CUDA compile error in {name}: backend result not Ok")
+            if compiled.is_err():
+                val err = compiled.unwrap_err()
+                return CompileResult.CodegenError("CUDA compile error in {name}: {err}")
+            val module_result: CompiledModule = compiled.unwrap()
+            val ptx_text = module_result.assembly ?? ""
+            all_ptx = all_ptx + ptx_text
 
         if not rt_file_write_text(output, all_ptx):
             return CompileResult.CodegenError("Failed to write PTX to {output}")
@@ -669,18 +640,12 @@ impl CompilerDriver:
             driver_log_trace(log, "translating module to OpenCL C: {name}")
             val mir_module = ctx.mir_modules[name]
             val compiled = compile_module_with_backend("opencl", mir_module, is_release, driver_opt_level)
-            # Flat-safe extraction: match arms instead of is_err/unwrap_err/
-            # unwrap (miscompile-prone on the stage4 native lane); {e.message}
-            # renders the real text where the raw CompileError would print
-            # <value:0x...>.
-            match compiled:
-                case Err(e):
-                    return CompileResult.CodegenError("OpenCL compile error in {name}: {e.message}")
-                case Ok(module_result):
-                    val source = module_result.assembly ?? ""
-                    all_source = all_source + source
-                case _:
-                    return CompileResult.CodegenError("OpenCL compile error in {name}: backend result not Ok")
+            if compiled.is_err():
+                val err = compiled.unwrap_err()
+                return CompileResult.CodegenError("OpenCL compile error in {name}: {err}")
+            val module_result: CompiledModule = compiled.unwrap()
+            val source = module_result.assembly ?? ""
+            all_source = all_source + source
 
         if not rt_file_write_text(output, all_source):
             return CompileResult.CodegenError("Failed to write OpenCL source to {output}")
@@ -694,27 +659,31 @@ impl CompilerDriver:
         val is_release = ctx.options.release
         val driver_opt_level = driver_effective_mir_opt_level(ctx)
         driver_log_debug(log, "AOT VHDL: generating VHDL to {output}")
+        # A failed generation must not leave a previous design looking current.
+        if not vhdl_remove_production_artifacts(output):
+            return CompileResult.CodegenError("Failed to remove stale VHDL artifacts for {output}")
 
+        # VHDL is one design, not a set of independently compiled objects.
+        # Merge the entry closure before backend validation so imported
+        # entities, helpers, records, and enums share one symbol catalog.
+        val entry_module = match driver_vhdl_entry_module(ctx):
+            case Ok(value): value
+            case Err(err): return CompileResult.CodegenError(err)
+        val catalog: VhdlDesignCatalog = match vhdl_build_design_catalog_with_hir(ctx.mir_modules, ctx.hir_modules, [entry_module], "simple_vhdl_design"):
+            case Ok(value): value
+            case Err(err): return CompileResult.CodegenError("VHDL design catalog error: {err}")
+        driver_log_trace(log, "translating {catalog.source_module_count} MIR modules as one VHDL design")
+        val compiled = compile_module_with_backend("vhdl", catalog.design, is_release, driver_opt_level)
         var all_vhdl = ""
-        val keys = ctx.mir_modules.keys()
-        for name in keys:
-            driver_log_trace(log, "translating module to VHDL: {name}")
-            val mir_module = ctx.mir_modules[name]
-            val compiled = compile_module_with_backend("vhdl", mir_module, is_release, driver_opt_level)
-            # Flat-safe extraction: match arms instead of is_err/unwrap_err/
-            # unwrap (miscompile-prone on the stage4 native lane); {e.message}
-            # renders the real text where the raw CompileError would print
-            # <value:0x...>.
-            match compiled:
-                case Err(e):
-                    return CompileResult.CodegenError("VHDL compile error in {name}: {e.message}")
-                case Ok(module_result):
-                    val vhdl = module_result.assembly ?? ""
-                    if all_vhdl != "" and vhdl != "":
-                        all_vhdl = all_vhdl + "\n\n"
-                    all_vhdl = all_vhdl + vhdl
-                case _:
-                    return CompileResult.CodegenError("VHDL compile error in {name}: backend result not Ok")
+        match compiled:
+            case Err(e):
+                return CompileResult.CodegenError("VHDL design compile error: {e.message}")
+            case Ok(module_result):
+                all_vhdl = module_result.assembly ?? ""
+            case _:
+                return CompileResult.CodegenError("VHDL design compile error: backend result not Ok")
+        if all_vhdl == "":
+            return CompileResult.CodegenError("VHDL design compile produced an empty artifact")
 
         # W2-B fail-closed: if aspects/advices were requested but zero weaves
         # were applied before VHDL emission, the woven logic (e.g. JTAG hart
@@ -724,17 +693,15 @@ impl CompilerDriver:
         if vhdl_aop_requested > 0 and vhdl_aop_woven == 0:
             return CompileResult.CodegenError("VHDL generation error: {vhdl_aop_requested} AOP advice declaration(s) were requested but 0 weaves were applied before VHDL emission — refusing to emit RTL with silently dropped aspects")
 
-        if not rt_file_write_text(output, all_vhdl):
-            return CompileResult.CodegenError("Failed to write VHDL to {output}")
-        # W2-B: generation manifest with AOP weave accounting.
-        var vhdl_manifest = "{\n"
-        vhdl_manifest = vhdl_manifest + "  \"version\": 1,\n"
-        vhdl_manifest = vhdl_manifest + "  \"generated\": \"" + output + "\",\n"
-        vhdl_manifest = vhdl_manifest + "  \"backend\": \"vhdl\",\n"
-        vhdl_manifest = vhdl_manifest + "  \"aop_advices_requested\": " + vhdl_aop_requested.to_text() + ",\n"
-        vhdl_manifest = vhdl_manifest + "  \"aop_weave_count\": " + vhdl_aop_woven.to_text() + "\n"
-        vhdl_manifest = vhdl_manifest + "}\n"
-        rt_file_write_text(output + ".gen.json", vhdl_manifest)
+        val artifact_input = match vhdl_artifact_input_from_catalog(catalog,
+            ctx.sources, output, all_vhdl, ctx.options.profile,
+            vhdl_aop_requested, vhdl_aop_woven):
+            case Ok(value): value
+            case Err(err): return CompileResult.CodegenError("VHDL artifact provenance error: {err}")
+        val rendered = vhdl_render_production_artifacts(artifact_input, all_vhdl)
+        match vhdl_write_production_artifacts(output, all_vhdl, rendered):
+            case Ok(_): ()
+            case Err(err): return CompileResult.CodegenError(err)
         driver_log_info(log, "VHDL source written to {output}")
         CompileResult.Success(output)
 
@@ -755,20 +722,14 @@ impl CompilerDriver:
             driver_log_trace(log, "translating module to WAT: {name}")
             val mir_module = ctx.mir_modules[name]
             val compiled = compile_module_with_backend("wasm", mir_module, is_release, driver_opt_level)
-            # Flat-safe extraction: match arms instead of is_err/unwrap_err/
-            # unwrap (miscompile-prone on the stage4 native lane); {e.message}
-            # renders the real text where the raw CompileError would print
-            # <value:0x...>.
-            match compiled:
-                case Err(e):
-                    return CompileResult.CodegenError("WASM compile error in {name}: {e.message}")
-                case Ok(module_result):
-                    val wat = module_result.assembly ?? ""
-                    if all_wat != "" and wat != "":
-                        all_wat = all_wat + "\n\n"
-                    all_wat = all_wat + wat
-                case _:
-                    return CompileResult.CodegenError("WASM compile error in {name}: backend result not Ok")
+            if compiled.is_err():
+                val err = compiled.unwrap_err()
+                return CompileResult.CodegenError("WASM compile error in {name}: {err}")
+            val module_result: CompiledModule = compiled.unwrap()
+            val wat = module_result.assembly ?? ""
+            if all_wat != "" and wat != "":
+                all_wat = all_wat + "\n\n"
+            all_wat = all_wat + wat
 
         if not rt_file_write_text(output, all_wat):
             return CompileResult.CodegenError("Failed to write WAT to {output}")
@@ -841,7 +802,7 @@ impl CompilerDriver:
             # return type was annotated — match arms are the verified idiom).
             match compiled:
                 case Err(err):
-                    return CompileResult.CodegenError("AOT compile error in {name}: {err.message}")
+                    return CompileResult.CodegenError("AOT compile error in {name}: {err}")
                 case Ok(module):
                     if val obj_bytes = module.object_code:
                         all_object_bytes = all_object_bytes.concat(obj_bytes)
@@ -934,7 +895,7 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
 
     match compiled:
         case Err(err):
-            return Err("AOT compile error in {name}: {err.message}")
+            return Err("AOT compile error in {name}: {err}")
         case _:
             ()
 

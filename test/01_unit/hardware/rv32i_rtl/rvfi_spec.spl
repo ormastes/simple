@@ -5,7 +5,7 @@ use std.hardware.rv32i_rtl.rvfi.{
     rvfi_enabled_config, rvfi_disabled_config,
     rvfi_port_manifest, rvfi_mask_for_width, rvfi_vhdl_type,
     rvfi_missing_vhdl_ports, rvfi_formal_readiness, rvfi_render_formal_readiness,
-    rvfi_trace_from_snapshot, rvfi_formal_wrapper_ports,
+    rvfi_trace_from_snapshot, rvfi_check_traces, rvfi_formal_wrapper_ports,
     rvfi_formal_wrapper_vhdl
 }
 use std.hardware.rv32i_rtl.core.{core_reset, core_combinational, core_rvfi_snapshot, core_rvfi_trace}
@@ -38,9 +38,11 @@ fn snapshot_sample() -> RvfiCoreSnapshot:
 describe "RV32I RVFI manifest":
     it "lists standard RVFI output ports":
         val ports = rvfi_port_manifest()
-        expect ports.len() == 17
+        expect ports.len() == 21
         expect ports[0].name == "rvfi_valid"
         expect ports[2].name == "rvfi_insn"
+        expect ports[4].name == "rvfi_halt"
+        expect ports[7].name == "rvfi_ixl"
 
     it "renders formal wrapper port comments":
         val text = rvfi_formal_wrapper_ports("rv32i_core")
@@ -63,11 +65,11 @@ describe "RV32I RVFI manifest":
     it "reports missing RVFI ports before formal flow runs":
         val entity = "entity rv32i_core is port (clk : in std_logic; reset_n : in std_logic); end entity;"
         val missing = rvfi_missing_vhdl_ports(entity)
-        expect missing.len() == 17
+        expect missing.len() == 21
         expect missing[0] == "rvfi_valid"
         val readiness = rvfi_formal_readiness("rv32i_core", entity)
         check(not readiness.ready)
-        check(readiness.message.contains("missing 17 RVFI ports"))
+        check(readiness.message.contains("missing 21 RVFI ports"))
         check(rvfi_render_formal_readiness(readiness).contains("- rvfi_mem_wdata"))
 
     it "accepts a VHDL entity with the full RVFI manifest":
@@ -95,6 +97,15 @@ describe "RV32I RVFI trace":
         expect rvfi_mask_for_width(0) == 0x1
         expect rvfi_mask_for_width(1) == 0x3
         expect rvfi_mask_for_width(2) == 0xF
+
+    it "allows simultaneous read and write masks only for AMO":
+        var amo = rvfi_trace_from_snapshot(rvfi_enabled_config(0), 0, snapshot_sample())
+        amo.rvfi_insn = 0x0020A1AF
+        amo.rvfi_mem_rmask = 0xF
+        amo.rvfi_mem_wmask = 0xF
+        expect rvfi_check_traces([amo]).len() == 0
+        amo.rvfi_insn = 0x00202023
+        expect rvfi_check_traces([amo]).len() == 1
 
     it "extracts RVFI snapshot from the actual core datapath":
         val insn = 0x00108293  # addi x5, x1, 1

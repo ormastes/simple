@@ -1,0 +1,47 @@
+# Compiler-owned clocked boundary for the canonical protected RV64 core.
+# State and bus composition stay typed; no RAM, queue, or emitted RTL source is
+# hidden in this adapter.
+
+use std.hardware.rv64gc_rtl.core_types.CoreState64
+use std.hardware.rv64gc_rtl.protected_core.{Core64CycleResult, core64_cycle}
+use std.hardware.rv64gc_rtl.core.core64_init
+
+# One product hart owns this state; the explicit reset branch initializes the
+# VHDL signal before normal feedback starts.
+# ponytail: one hart; introduce explicit instance state when multi-hart RTL exists.
+var _core64_product_state = core64_init(0)
+
+@hardware
+@clocked(clk, reset_n)
+fn core64_protected_clocked_entry(clk: bool, reset_n: bool,
+                                  state: CoreState64,
+                                  request_ready: bool,
+                                  response_valid: bool,
+                                  response_error: bool,
+                                  response_data: i64) -> Core64CycleResult:
+    core64_cycle(state, request_ready, response_valid, response_error,
+        response_data)
+
+@hardware
+@clocked(clk, none)
+fn core64_protected_product_entry(clk: bool, reset_n: bool, reset_vec: i64,
+                                  request_ready: bool,
+                                  response_valid: bool,
+                                  response_error: bool,
+                                  response_data: i64) -> Core64CycleResult:
+    if not reset_n:
+        val reset_state = core64_init(reset_vec)
+        val reset = core64_cycle(reset_state, false, false, false, 0)
+        _core64_product_state = reset_state
+        return Core64CycleResult(state: reset_state, bus_valid: reset.bus_valid,
+            bus_addr: reset.bus_addr, bus_size: reset.bus_size,
+            bus_write: reset.bus_write, bus_wdata: reset.bus_wdata,
+            bus_is_pte: reset.bus_is_pte, bus_atomic: reset.bus_atomic,
+            rvfi: reset.rvfi)
+    val result = core64_cycle(_core64_product_state, request_ready,
+        response_valid, response_error, response_data)
+    _core64_product_state = result.state
+    result
+
+export core64_protected_clocked_entry
+export core64_protected_product_entry

@@ -97,6 +97,18 @@ fn make_func_operand(name: text) -> MirOperand:
         MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: make_i32(), is_variadic: false)))
     ))
 
+fn make_vhdl_contract_function(symbol: i64, name: text, params: [MirType], return_type: MirType,
+                                locals: [MirLocal], blocks: [MirBlock], hardware: bool) -> MirFunction:
+    MirFunction(
+        symbol: SymbolId(id: symbol), name: name,
+        signature: MirSignature(params: params, return_type: return_type, is_variadic: false),
+        locals: locals, blocks: blocks, entry_block: BlockId.entry(), span: empty_span(),
+        generic_params: [], is_generic_template: false, specialization_of: nil,
+        type_bindings: {}, layout_phase: nil, is_kernel: false, is_export_c: false,
+        export_name: "", driver_manifest_attr: nil,
+        has_vhdl_metadata: hardware, vhdl_metadata: make_hardware_meta()
+    )
+
 fn make_payloadless_enum_type_def(symbol: SymbolId, name: text, variant_names: [text]) -> MirTypeDef:
     var variants: [MirVariantDef] = []
     var idx = 0
@@ -3135,6 +3147,215 @@ fn bitfield_write_enabled_mid(clk: bool, reset_n: bool, control_raw: u8, next_en
         check(compiled.vhdl.contains("entity top_entity is"))
         check(not compiled.vhdl.contains("entity mix-add is"))
         check(compiled.vhdl.contains("call_result <= mix_add(left_in, right_in);"))
+
+    it "lowers RV32/RV64 acyclic helper CFGs with local record mutation and nested calls":
+        val state_symbol = SymbolId(id: 1400)
+        val state_type = MirType(kind: MirTypeKind.Struct(state_symbol))
+        val state_def = MirTypeDef(symbol: state_symbol, name: "core_state_t", kind: MirTypeDefKind.Struct([
+            MirFieldDef(name: "value", type_: make_i32(), offset: 0, has_bits_attr: false, bits_width: 0),
+            MirFieldDef(name: "valid", type_: make_bool(), offset: 4, has_bits_attr: false, bits_width: 0)
+        ]), is_export_c: false, export_name: "")
+
+        val csr64_tick = make_vhdl_contract_function(1401, "csr64_tick", [make_i32()], make_i32(), [
+            make_arg_local(1, 0, "mode", make_i32())
+        ], [
+            MirBlock(id: BlockId(id: 0), label: Some("entry"), instructions: [], terminator: MirTerminator.Switch(
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
+                [SwitchCase(value: 0, target: BlockId(id: 1))], BlockId(id: 2))),
+            MirBlock(id: BlockId(id: 1), label: Some("machine"), instructions: [], terminator: MirTerminator.Ret(Some(
+                MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(32), make_i32()))))),
+            MirBlock(id: BlockId(id: 2), label: Some("supervisor"), instructions: [], terminator: MirTerminator.Ret(Some(
+                MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(64), make_i32())))))
+        ], true)
+
+        val core32 = make_vhdl_contract_function(1402, "core32_begin_instruction",
+            [state_type, make_bool(), make_i32()], state_type, [
+                make_arg_local(10, 0, "state", state_type),
+                make_arg_local(11, 1, "take_branch", make_bool()),
+                make_arg_local(12, 2, "mode", make_i32()),
+                make_temp_local(13, "working", state_type),
+                make_temp_local(14, "tick", make_i32())
+            ], [
+                MirBlock(id: BlockId(id: 0), label: Some("entry"), instructions: [
+                    MirInst(kind: MirInstKind.Copy(LocalId(id: 13), LocalId(id: 10)), span: nil),
+                    MirInst(kind: MirInstKind.Call(Some(LocalId(id: 14)), make_func_operand("csr64_tick"), [
+                        MirOperand(kind: MirOperandKind.Copy(LocalId(id: 12)))
+                    ]), span: nil)
+                ], terminator: MirTerminator.If(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 11))), BlockId(id: 1), BlockId(id: 2))),
+                MirBlock(id: BlockId(id: 1), label: Some("taken"), instructions: [
+                    MirInst(kind: MirInstKind.SetField(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 13))), 0,
+                        MirOperand(kind: MirOperandKind.Copy(LocalId(id: 14)))), span: nil)
+                ], terminator: MirTerminator.Goto(BlockId(id: 3))),
+                MirBlock(id: BlockId(id: 2), label: Some("plain"), instructions: [
+                    MirInst(kind: MirInstKind.SetField(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 13))), 1,
+                        MirOperand(kind: MirOperandKind.Const(MirConstValue.Bool(true), make_bool()))), span: nil)
+                ], terminator: MirTerminator.Goto(BlockId(id: 3))),
+                MirBlock(id: BlockId(id: 3), label: Some("done"), instructions: [], terminator: MirTerminator.Ret(Some(
+                    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 13)))))
+            ], true)
+
+        val finish32 = make_vhdl_contract_function(1403, "core32_finish_instruction", [make_bool()], make_unit(), [
+            make_arg_local(20, 0, "valid", make_bool())
+        ], [
+            MirBlock(id: BlockId(id: 0), label: Some("entry"), instructions: [], terminator: MirTerminator.If(
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 20))), BlockId(id: 1), BlockId(id: 2))),
+            MirBlock(id: BlockId(id: 1), label: Some("yes"), instructions: [], terminator: MirTerminator.Ret(nil)),
+            MirBlock(id: BlockId(id: 2), label: Some("no"), instructions: [], terminator: MirTerminator.Ret(nil))
+        ], false)
+
+        val top = make_vhdl_contract_function(1404, "protected_top", [state_type, make_bool(), make_i32()], state_type, [
+            make_arg_local(30, 0, "state", state_type), make_arg_local(31, 1, "valid", make_bool()),
+            make_arg_local(32, 2, "mode", make_i32()), make_return_local(33, state_type)
+        ], [MirBlock(id: BlockId(id: 0), label: Some("entry"), instructions: [
+            MirInst(kind: MirInstKind.Call(Some(LocalId(id: 33)), make_func_operand("core32_begin_instruction"), [
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 30))), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 31))),
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 32)))
+            ]), span: nil),
+            MirInst(kind: MirInstKind.Call(nil, make_func_operand("core32_finish_instruction"), [
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 31)))
+            ]), span: nil)
+        ], terminator: MirTerminator.Ret(nil))], true)
+
+        val straight_mutate = make_vhdl_contract_function(1405, "core64_imac_restart_fetch",
+            [state_type], state_type, [
+                make_arg_local(40, 0, "state_in", state_type),
+                make_temp_local(41, "next_state", state_type),
+                make_return_local(42, state_type)
+            ], [MirBlock(id: BlockId(id: 0), label: Some("entry"), instructions: [
+                MirInst(kind: MirInstKind.Copy(LocalId(id: 41), LocalId(id: 40)), span: nil),
+                MirInst(kind: MirInstKind.SetField(
+                    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 41))), 1,
+                    MirOperand(kind: MirOperandKind.Const(MirConstValue.Bool(true), make_bool()))), span: nil),
+                MirInst(kind: MirInstKind.Copy(LocalId(id: 42), LocalId(id: 41)), span: nil)
+            ], terminator: MirTerminator.Ret(nil))], true)
+
+        var functions: Dict<SymbolId, MirFunction> = {}
+        functions[csr64_tick.symbol] = csr64_tick
+        functions[core32.symbol] = core32
+        functions[finish32.symbol] = finish32
+        functions[top.symbol] = top
+        functions[straight_mutate.symbol] = straight_mutate
+        var types: Dict<SymbolId, MirTypeDef> = {}
+        types[state_symbol] = state_def
+        val result = make_simple_backend().compile(MirModule(name: "protected_helpers", functions: functions, statics: {}, constants: {}, types: types))
+        check(result.is_ok())
+        val compiled = result.unwrap()
+        val pkg = compiled.package_vhdl.unwrap()
+        check(pkg.contains("function csr64_tick"))
+        check(pkg.contains("function core32_begin_instruction"))
+        check(pkg.contains("working.value := tick;"))
+        check(pkg.contains("working.valid := '1';"))
+        check(pkg.contains("return working;"))
+        check(pkg.contains("procedure core32_finish_instruction"))
+        check(pkg.contains("return;"))
+        check(compiled.vhdl.contains("result_out <= core32_begin_instruction(state, valid, mode);"))
+        check(not compiled.vhdl.contains("simple_hwcall_core32_begin_instruction"))
+        check(compiled.vhdl.contains("comb: process(all)"))
+        check(compiled.vhdl.contains("variable working : core_state_t;"))
+        check(compiled.vhdl.contains("working.value := tick;"))
+        check(compiled.vhdl.contains("entity core64_imac_restart_fetch is"))
+        check(compiled.vhdl.contains("variable next_state : core_state_t;"))
+        check(compiled.vhdl.contains("next_state.valid := '1';"))
+
+    it "rejects cyclic helper control flow":
+        val helper = make_vhdl_contract_function(1410, "core32_restart_fetch", [], make_i32(), [
+            make_return_local(1, make_i32())
+        ], [
+            MirBlock(id: BlockId(id: 0), label: Some("entry"), instructions: [], terminator: MirTerminator.Goto(BlockId(id: 1))),
+            MirBlock(id: BlockId(id: 1), label: Some("loop"), instructions: [], terminator: MirTerminator.Goto(BlockId(id: 0)))
+        ], false)
+        val top = make_vhdl_contract_function(1411, "cycle_top", [], make_i32(), [make_return_local(2, make_i32())], [
+            MirBlock(id: BlockId(id: 0), label: Some("entry"), instructions: [
+                MirInst(kind: MirInstKind.Call(Some(LocalId(id: 2)), make_func_operand("core32_restart_fetch"), []), span: nil)
+            ], terminator: MirTerminator.Ret(nil))
+        ], true)
+        var functions: Dict<SymbolId, MirFunction> = {}
+        functions[helper.symbol] = helper
+        functions[top.symbol] = top
+        val result = make_simple_backend().compile(MirModule(name: "cyclic_helper", functions: functions, statics: {}, constants: {}, types: {}))
+        check(result.is_err())
+        check(result.unwrap_err().message.contains("acyclic combinational helper"))
+
+    it "rejects recursive helper call cycles":
+        val left = make_vhdl_contract_function(1412, "core32_take_trap", [make_i32()], make_i32(), [
+            make_arg_local(1, 0, "value", make_i32()), make_return_local(2, make_i32())
+        ], [MirBlock(id: BlockId(id: 0), label: Some("entry"), instructions: [
+            MirInst(kind: MirInstKind.Call(Some(LocalId(id: 2)), make_func_operand("core64_imac_sync_sstatus"), [
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))
+            ]), span: nil)
+        ], terminator: MirTerminator.Ret(nil))], false)
+        val right = make_vhdl_contract_function(1413, "core64_imac_sync_sstatus", [make_i32()], make_i32(), [
+            make_arg_local(3, 0, "value", make_i32()), make_return_local(4, make_i32())
+        ], [MirBlock(id: BlockId(id: 0), label: Some("entry"), instructions: [
+            MirInst(kind: MirInstKind.Call(Some(LocalId(id: 4)), make_func_operand("core32_take_trap"), [
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3)))
+            ]), span: nil)
+        ], terminator: MirTerminator.Ret(nil))], false)
+        val top = make_vhdl_contract_function(1414, "recursive_top", [make_i32()], make_i32(), [
+            make_arg_local(5, 0, "value", make_i32()), make_return_local(6, make_i32())
+        ], [MirBlock(id: BlockId(id: 0), label: Some("entry"), instructions: [
+            MirInst(kind: MirInstKind.Call(Some(LocalId(id: 6)), make_func_operand("core32_take_trap"), [
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 5)))
+            ]), span: nil)
+        ], terminator: MirTerminator.Ret(nil))], true)
+        var functions: Dict<SymbolId, MirFunction> = {}
+        functions[left.symbol] = left
+        functions[right.symbol] = right
+        functions[top.symbol] = top
+        val result = make_simple_backend().compile(MirModule(name: "recursive_helpers", functions: functions, statics: {}, constants: {}, types: {}))
+        check(result.is_err())
+        check(result.unwrap_err().message.contains("helper call cycle"))
+
+    it "rejects helper SetField mutation of an argument":
+        val state_symbol = SymbolId(id: 1420)
+        val state_type = MirType(kind: MirTypeKind.Struct(state_symbol))
+        val state_def = MirTypeDef(symbol: state_symbol, name: "arg_state_t", kind: MirTypeDefKind.Struct([
+            MirFieldDef(name: "value", type_: make_i32(), offset: 0, has_bits_attr: false, bits_width: 0)
+        ]), is_export_c: false, export_name: "")
+        val helper = make_vhdl_contract_function(1421, "core64_imac_update", [state_type, make_i32()], state_type, [
+            make_arg_local(1, 0, "state", state_type), make_arg_local(2, 1, "value", make_i32())
+        ], [MirBlock(id: BlockId(id: 0), label: Some("entry"), instructions: [
+            MirInst(kind: MirInstKind.SetField(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))), 0,
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))), span: nil)
+        ], terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))))))], false)
+        val top = make_vhdl_contract_function(1422, "arg_mutation_top", [state_type, make_i32()], state_type, [
+            make_arg_local(10, 0, "state", state_type), make_arg_local(11, 1, "value", make_i32()), make_return_local(12, state_type)
+        ], [MirBlock(id: BlockId(id: 0), label: Some("entry"), instructions: [
+            MirInst(kind: MirInstKind.Call(Some(LocalId(id: 12)), make_func_operand("core64_imac_update"), [
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 10))), MirOperand(kind: MirOperandKind.Copy(LocalId(id: 11)))
+            ]), span: nil)
+        ], terminator: MirTerminator.Ret(nil))], true)
+        var functions: Dict<SymbolId, MirFunction> = {}
+        functions[helper.symbol] = helper
+        functions[top.symbol] = top
+        var types: Dict<SymbolId, MirTypeDef> = {}
+        types[state_symbol] = state_def
+        val result = make_simple_backend().compile(MirModule(name: "arg_mutation_helper", functions: functions, statics: {}, constants: {}, types: types))
+        check(result.is_err())
+        check(result.unwrap_err().message.contains("local-only mutation"))
+
+    it "rejects helper global mutation":
+        val global_symbol = SymbolId(id: 1430)
+        val helper = make_vhdl_contract_function(1431, "csr64_write_global", [make_i32()], make_i32(), [
+            make_arg_local(1, 0, "value", make_i32())
+        ], [MirBlock(id: BlockId(id: 0), label: Some("entry"), instructions: [
+            MirInst(kind: MirInstKind.StoreGlobal(global_symbol, MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))), span: nil)
+        ], terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))))))], false)
+        val top = make_vhdl_contract_function(1432, "global_mutation_top", [make_i32()], make_i32(), [
+            make_arg_local(10, 0, "value", make_i32()), make_return_local(11, make_i32())
+        ], [MirBlock(id: BlockId(id: 0), label: Some("entry"), instructions: [
+            MirInst(kind: MirInstKind.Call(Some(LocalId(id: 11)), make_func_operand("csr64_write_global"), [
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 10)))
+            ]), span: nil)
+        ], terminator: MirTerminator.Ret(nil))], true)
+        var functions: Dict<SymbolId, MirFunction> = {}
+        functions[helper.symbol] = helper
+        functions[top.symbol] = top
+        var statics: Dict<SymbolId, MirStatic> = {}
+        statics[global_symbol] = MirStatic(symbol: global_symbol, name: "state", type_: make_i32(), init: nil, is_mutable: true)
+        val result = make_simple_backend().compile(MirModule(name: "global_mutation_helper", functions: functions, statics: statics, constants: {}, types: {}))
+        check(result.is_err())
+        check(result.unwrap_err().message.contains("acyclic combinational helper"))
 
     it "rejects helper name collisions after sanitization":
         val b = make_named_adder_function(SymbolId(id: 111), "dup-helper")

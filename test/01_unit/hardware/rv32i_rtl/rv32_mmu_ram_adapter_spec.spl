@@ -1,0 +1,27 @@
+use std.spec.*
+use std.hardware.rv32i_rtl.{mmu_create, mmu_set_satp, mmu_translate}
+use std.hardware.rv32i_rtl.{ACCESS_LOAD, PRIV_S}
+use std.hardware.soc_rtl.ram.{ram_create, ram_write}
+
+describe "RV32 legacy RamState MMU adapter":
+    it "preserves bare identity translation through the public facade":
+        val result = mmu_translate(mmu_create(), 0x12345678,
+            ACCESS_LOAD, PRIV_S, ram_create(0))
+        expect(result.fault).to_be(false)
+        expect(result.paddr).to_equal(0x12345678)
+
+    it "preserves the former two-level in-memory Sv32 walk":
+        var ram = ram_create(4096)
+        ram = ram_write(ram, 0x1004, 0x00000801, 2)
+        ram = ram_write(ram, 0x2004, 0x00000C43, 2)
+        val mmu = mmu_set_satp(mmu_create(), 0x80000001)
+        val result = mmu_translate(mmu, 0x00401020, ACCESS_LOAD, PRIV_S, ram)
+        expect(result.fault).to_be(false)
+        expect(result.paddr).to_equal(0x00003020)
+
+    it "preserves the former load page-fault cause":
+        val mmu = mmu_set_satp(mmu_create(), 0x80000001)
+        val result = mmu_translate(mmu, 0x00401020,
+            ACCESS_LOAD, PRIV_S, ram_create(4096))
+        expect(result.fault).to_be(true)
+        expect(result.fault_cause).to_equal(13)

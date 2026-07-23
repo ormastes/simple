@@ -1,0 +1,854 @@
+# Design-wide VHDL MIR catalog.
+
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.{MirModule, MirFunction}
+use compiler.hir.hir_types.{HirModule, SymbolKind}
+use .vhdl_helpers.{vhdl_sanitize_identifier, vhdl_function_is_hardware_entity}
+
+struct VhdlCatalogFunctionSource:
+    symbol: i64
+    name: text
+    source_module: text
+    is_hardware_entity: bool
+
+struct VhdlCatalogSourceRow:
+    module_name: text
+    is_root: bool
+    function_count: i64
+    hardware_entity_count: i64
+    helper_function_count: i64
+    type_count: i64
+    static_count: i64
+    constant_count: i64
+
+struct VhdlDesignCatalog:
+    design: MirModule
+    type_order: [SymbolId]
+    root_modules: [text]
+    reachable_source_modules: [text]
+    function_sources: [VhdlCatalogFunctionSource]
+    source_rows: [VhdlCatalogSourceRow]
+    source_module_count: i64
+    reachable_source_module_count: i64
+    hardware_entity_count: i64
+    helper_function_count: i64
+    type_count: i64
+
+fn vhdl_catalog_sorted_text(values: [text]) -> [text]:
+    var result = values
+    var i = 0
+    while i < result.len():
+        var j = i + 1
+        while j < result.len():
+            if result[j] < result[i]:
+                val tmp = result[i]
+                result[i] = result[j]
+                result[j] = tmp
+            j = j + 1
+        i = i + 1
+    result
+
+fn vhdl_catalog_sorted_symbols(values: [SymbolId]) -> [SymbolId]:
+    var result = values
+    var i = 0
+    while i < result.len():
+        var j = i + 1
+        while j < result.len():
+            if result[j].id < result[i].id:
+                val tmp = result[i]
+                result[i] = result[j]
+                result[j] = tmp
+            j = j + 1
+        i = i + 1
+    result
+
+fn vhdl_catalog_symbol(symbol: SymbolId, rebase: Dict<i64, i64>) -> SymbolId:
+    SymbolId(id: rebase.get(symbol.id) ?? -1)
+
+fn vhdl_catalog_type(ty: MirType, rebase: Dict<i64, i64>) -> MirType:
+    var kind = ty.kind
+    match ty.kind:
+        case Array(element, size): kind = MirTypeKind.Array(vhdl_catalog_type(element, rebase), size)
+        case Dict(key, value): kind = MirTypeKind.Dict(vhdl_catalog_type(key, rebase), vhdl_catalog_type(value, rebase))
+        case Slice(element): kind = MirTypeKind.Slice(vhdl_catalog_type(element, rebase))
+        case Tuple(elements):
+            var mapped: [MirType] = []
+            for element in elements:
+                mapped = mapped.push(vhdl_catalog_type(element, rebase))
+            kind = MirTypeKind.Tuple(mapped)
+        case Struct(symbol): kind = MirTypeKind.Struct(vhdl_catalog_symbol(symbol, rebase))
+        case Enum(symbol): kind = MirTypeKind.Enum(vhdl_catalog_symbol(symbol, rebase))
+        case Ptr(element, mutable): kind = MirTypeKind.Ptr(vhdl_catalog_type(element, rebase), mutable)
+        case Ref(element, mutable): kind = MirTypeKind.Ref(vhdl_catalog_type(element, rebase), mutable)
+        case Promise(element): kind = MirTypeKind.Promise(vhdl_catalog_type(element, rebase))
+        case ScalableVec(element, lanes): kind = MirTypeKind.ScalableVec(vhdl_catalog_type(element, rebase), lanes)
+        case Union(elements):
+            var mapped: [MirType] = []
+            for element in elements:
+                mapped = mapped.push(vhdl_catalog_type(element, rebase))
+            kind = MirTypeKind.Union(mapped)
+        case FuncPtr(signature): kind = MirTypeKind.FuncPtr(vhdl_catalog_signature(signature, rebase))
+        case _: ()
+    MirType(kind: kind)
+
+fn vhdl_catalog_signature(signature: MirSignature, rebase: Dict<i64, i64>) -> MirSignature:
+    var params: [MirType] = []
+    for param in signature.params:
+        params = params.push(vhdl_catalog_type(param, rebase))
+    MirSignature(params: params,
+        return_type: vhdl_catalog_type(signature.return_type, rebase),
+        is_variadic: signature.is_variadic)
+
+fn vhdl_catalog_operand(operand: MirOperand, rebase: Dict<i64, i64>) -> MirOperand:
+    match operand.kind:
+        case Const(value, type_):
+            MirOperand(kind: MirOperandKind.Const(value, vhdl_catalog_type(type_, rebase)))
+        case _: operand
+
+fn vhdl_catalog_operands(operands: [MirOperand], rebase: Dict<i64, i64>) -> [MirOperand]:
+    var mapped: [MirOperand] = []
+    for operand in operands:
+        mapped = mapped.push(vhdl_catalog_operand(operand, rebase))
+    mapped
+
+fn vhdl_catalog_inst(inst: MirInst, rebase: Dict<i64, i64>) -> MirInst:
+    var kind = inst.kind
+    match inst.kind:
+        case Const(dest, value, type_): kind = MirInstKind.Const(dest, value, vhdl_catalog_type(type_, rebase))
+        case BinOp(dest, op, left, right): kind = MirInstKind.BinOp(dest, op, vhdl_catalog_operand(left, rebase), vhdl_catalog_operand(right, rebase))
+        case CheckedBinOp(dest, op, left, right): kind = MirInstKind.CheckedBinOp(dest, op, vhdl_catalog_operand(left, rebase), vhdl_catalog_operand(right, rebase))
+        case UnaryOp(dest, op, operand): kind = MirInstKind.UnaryOp(dest, op, vhdl_catalog_operand(operand, rebase))
+        case Alloc(dest, type_): kind = MirInstKind.Alloc(dest, vhdl_catalog_type(type_, rebase))
+        case Load(dest, ptr): kind = MirInstKind.Load(dest, vhdl_catalog_operand(ptr, rebase))
+        case Store(ptr, value): kind = MirInstKind.Store(vhdl_catalog_operand(ptr, rebase), vhdl_catalog_operand(value, rebase))
+        case GetElementPtr(dest, base, indices): kind = MirInstKind.GetElementPtr(dest, vhdl_catalog_operand(base, rebase), vhdl_catalog_operands(indices, rebase))
+        case LoadGlobal(dest, symbol): kind = MirInstKind.LoadGlobal(dest, vhdl_catalog_symbol(symbol, rebase))
+        case StoreGlobal(symbol, value): kind = MirInstKind.StoreGlobal(vhdl_catalog_symbol(symbol, rebase), vhdl_catalog_operand(value, rebase))
+        case Aggregate(dest, aggregate, operands):
+            val mapped_aggregate = match aggregate:
+                case Array(type_): AggregateKind.Array(vhdl_catalog_type(type_, rebase))
+                case Tuple: AggregateKind.Tuple
+                case Struct(symbol): AggregateKind.Struct(vhdl_catalog_symbol(symbol, rebase))
+                case Enum(symbol, variant): AggregateKind.Enum(vhdl_catalog_symbol(symbol, rebase), variant)
+            kind = MirInstKind.Aggregate(dest, mapped_aggregate, vhdl_catalog_operands(operands, rebase))
+        case GetField(dest, base, field): kind = MirInstKind.GetField(dest, vhdl_catalog_operand(base, rebase), field)
+        case SetField(base, field, value): kind = MirInstKind.SetField(vhdl_catalog_operand(base, rebase), field, vhdl_catalog_operand(value, rebase))
+        case Cast(dest, operand, target): kind = MirInstKind.Cast(dest, vhdl_catalog_operand(operand, rebase), vhdl_catalog_type(target, rebase))
+        case Bitcast(dest, operand, target): kind = MirInstKind.Bitcast(dest, vhdl_catalog_operand(operand, rebase), vhdl_catalog_type(target, rebase))
+        case Call(dest, func, args): kind = MirInstKind.Call(dest, vhdl_catalog_operand(func, rebase), vhdl_catalog_operands(args, rebase))
+        case CallIndirect(dest, ptr, args, signature): kind = MirInstKind.CallIndirect(dest, vhdl_catalog_operand(ptr, rebase), vhdl_catalog_operands(args, rebase), vhdl_catalog_signature(signature, rebase))
+        case Intrinsic(dest, name, args): kind = MirInstKind.Intrinsic(dest, name, vhdl_catalog_operands(args, rebase))
+        case VhdlSignalAssign(target, value, delay): kind = MirInstKind.VhdlSignalAssign(vhdl_catalog_operand(target, rebase), vhdl_catalog_operand(value, rebase), delay)
+        case VhdlVarAssign(target, value): kind = MirInstKind.VhdlVarAssign(vhdl_catalog_operand(target, rebase), vhdl_catalog_operand(value, rebase))
+        case VhdlPortMap(entity, instance, connections):
+            var mapped: [(text, MirOperand)] = []
+            for connection in connections:
+                mapped = mapped.push((connection.0, vhdl_catalog_operand(connection.1, rebase)))
+            kind = MirInstKind.VhdlPortMap(entity, instance, mapped)
+        case VhdlResize(dest, operand, width, signed): kind = MirInstKind.VhdlResize(dest, vhdl_catalog_operand(operand, rebase), width, signed)
+        case VhdlSlice(dest, operand, hi, lo): kind = MirInstKind.VhdlSlice(dest, vhdl_catalog_operand(operand, rebase), hi, lo)
+        case VhdlConcat(dest, parts): kind = MirInstKind.VhdlConcat(dest, vhdl_catalog_operands(parts, rebase))
+        case _: ()
+    MirInst(kind: kind, span: inst.span)
+
+fn vhdl_catalog_terminator(terminator: MirTerminator, rebase: Dict<i64, i64>) -> MirTerminator:
+    var mapped = terminator
+    match terminator:
+        case Ret(value):
+            match value:
+                case Some(operand): mapped = MirTerminator.Ret(Some(vhdl_catalog_operand(operand, rebase)))
+                case None: mapped = MirTerminator.Ret(nil)
+        case If(cond, then_, else_): mapped = MirTerminator.If(vhdl_catalog_operand(cond, rebase), then_, else_)
+        case Switch(value, targets, default): mapped = MirTerminator.Switch(vhdl_catalog_operand(value, rebase), targets, default)
+        case CallTerminator(dest, func, args, normal, unwind):
+            mapped = MirTerminator.CallTerminator(dest, vhdl_catalog_operand(func, rebase), vhdl_catalog_operands(args, rebase), normal, unwind)
+        case _: ()
+    mapped
+
+fn vhdl_catalog_function(func: MirFunction, rebase: Dict<i64, i64>) -> MirFunction:
+    var locals: [MirLocal] = []
+    for local in func.locals:
+        locals = locals.push(MirLocal(id: local.id, name: local.name,
+            type_: vhdl_catalog_type(local.type_, rebase), kind: local.kind,
+            is_ghost: local.is_ghost))
+    var blocks: [MirBlock] = []
+    for block in func.blocks:
+        var instructions: [MirInst] = []
+        for inst in block.instructions:
+            instructions = instructions.push(vhdl_catalog_inst(inst, rebase))
+        blocks = blocks.push(MirBlock(id: block.id, label: block.label,
+            instructions: instructions,
+            terminator: vhdl_catalog_terminator(block.terminator, rebase)))
+    MirFunction(
+        symbol: vhdl_catalog_symbol(func.symbol, rebase), name: func.name,
+        signature: vhdl_catalog_signature(func.signature, rebase), locals: locals,
+        blocks: blocks, entry_block: func.entry_block, span: func.span,
+        generic_params: func.generic_params, is_generic_template: func.is_generic_template,
+        specialization_of: func.specialization_of, type_bindings: func.type_bindings,
+        layout_phase: func.layout_phase, is_kernel: func.is_kernel,
+        gpu_target: func.gpu_target, gpu_backend_order: func.gpu_backend_order,
+        is_export_c: func.is_export_c, export_name: func.export_name,
+        has_driver_manifest_attr: func.has_driver_manifest_attr,
+        driver_manifest_attr: func.driver_manifest_attr,
+        has_vhdl_metadata: func.has_vhdl_metadata, vhdl_metadata: func.vhdl_metadata,
+        has_fast_math: func.has_fast_math, unroll_factor: func.unroll_factor,
+        pipeline_ii: func.pipeline_ii, memory_banks: func.memory_banks)
+
+fn vhdl_catalog_type_def(type_def: MirTypeDef, rebase: Dict<i64, i64>) -> MirTypeDef:
+    val kind = match type_def.kind:
+        case Struct(fields):
+            var mapped: [MirFieldDef] = []
+            for field in fields:
+                mapped = mapped.push(MirFieldDef(name: field.name,
+                    type_: vhdl_catalog_type(field.type_, rebase), offset: field.offset,
+                    has_bits_attr: field.has_bits_attr, bits_width: field.bits_width))
+            MirTypeDefKind.Struct(mapped)
+        case Enum(variants):
+            var mapped: [MirVariantDef] = []
+            for variant in variants:
+                val payload = match variant.payload:
+                    case Some(value): Some(vhdl_catalog_type(value, rebase))
+                    case None: nil
+                mapped = mapped.push(MirVariantDef(name: variant.name,
+                    discriminant: variant.discriminant, payload: payload))
+            MirTypeDefKind.Enum(mapped)
+        case Union(members):
+            var mapped: [MirType] = []
+            for member in members:
+                mapped = mapped.push(vhdl_catalog_type(member, rebase))
+            MirTypeDefKind.Union(mapped)
+    MirTypeDef(symbol: vhdl_catalog_symbol(type_def.symbol, rebase),
+        name: type_def.name, kind: kind, is_export_c: type_def.is_export_c,
+        export_name: type_def.export_name)
+
+fn vhdl_catalog_constant(constant: MirConstant, rebase: Dict<i64, i64>) -> MirConstant:
+    MirConstant(symbol: vhdl_catalog_symbol(constant.symbol, rebase),
+        name: constant.name, type_: vhdl_catalog_type(constant.type_, rebase),
+        value: constant.value)
+
+fn vhdl_catalog_static(static_: MirStatic, rebase: Dict<i64, i64>) -> MirStatic:
+    val init = match static_.init:
+        case Some(value): Some(vhdl_catalog_constant(value, rebase))
+        case None: nil
+    MirStatic(symbol: vhdl_catalog_symbol(static_.symbol, rebase),
+        name: static_.name, type_: vhdl_catalog_type(static_.type_, rebase),
+        init: init, is_mutable: static_.is_mutable)
+
+fn vhdl_catalog_validate_type_ref(ty: MirType, types: Dict<SymbolId, MirTypeDef>) -> Result<(), text>:
+    match ty.kind:
+        case Struct(symbol) | Enum(symbol):
+            if not types.has(symbol):
+                return Err("VHDL design catalog references missing type symbol {symbol.id}")
+        case Array(element, _) | Slice(element):
+            return vhdl_catalog_validate_type_ref(element, types)
+        case Tuple(elements) | Union(elements):
+            for element in elements:
+                match vhdl_catalog_validate_type_ref(element, types):
+                    case Ok(_): ()
+                    case Err(err): return Err(err)
+        case Ptr(element, _) | Ref(element, _) | Promise(element) | ScalableVec(element, _):
+            return vhdl_catalog_validate_type_ref(element, types)
+        case Dict(key, value):
+            match vhdl_catalog_validate_type_ref(key, types):
+                case Ok(_): ()
+                case Err(err): return Err(err)
+            return vhdl_catalog_validate_type_ref(value, types)
+        case FuncPtr(signature):
+            for param in signature.params:
+                match vhdl_catalog_validate_type_ref(param, types):
+                    case Ok(_): ()
+                    case Err(err): return Err(err)
+            return vhdl_catalog_validate_type_ref(signature.return_type, types)
+        case _: ()
+    Ok(())
+
+fn vhdl_catalog_type_ready(ty: MirType, emitted: Dict<i64, bool>) -> bool:
+    match ty.kind:
+        case Struct(symbol) | Enum(symbol): emitted.has(symbol.id)
+        case Array(element, _) | Slice(element): vhdl_catalog_type_ready(element, emitted)
+        case Tuple(elements) | Union(elements):
+            for element in elements:
+                if not vhdl_catalog_type_ready(element, emitted):
+                    return false
+            true
+        case Ptr(element, _) | Ref(element, _) | Promise(element) | ScalableVec(element, _):
+            vhdl_catalog_type_ready(element, emitted)
+        case Dict(key, value):
+            vhdl_catalog_type_ready(key, emitted) and vhdl_catalog_type_ready(value, emitted)
+        case FuncPtr(signature):
+            for param in signature.params:
+                if not vhdl_catalog_type_ready(param, emitted):
+                    return false
+            vhdl_catalog_type_ready(signature.return_type, emitted)
+        case _: true
+
+fn vhdl_catalog_type_def_ready(type_def: MirTypeDef, emitted: Dict<i64, bool>) -> bool:
+    match type_def.kind:
+        case Struct(fields):
+            for field in fields:
+                if not vhdl_catalog_type_ready(field.type_, emitted):
+                    return false
+            true
+        case Enum(variants):
+            for variant in variants:
+                if val payload = variant.payload:
+                    if not vhdl_catalog_type_ready(payload, emitted):
+                        return false
+            true
+        case Union(members):
+            for member in members:
+                if not vhdl_catalog_type_ready(member, emitted):
+                    return false
+            true
+
+fn vhdl_catalog_type_order(types: Dict<SymbolId, MirTypeDef>) -> Result<[SymbolId], text>:
+    for symbol in vhdl_catalog_sorted_symbols(types.keys()):
+        val type_def = types[symbol]
+        match type_def.kind:
+            case Struct(fields):
+                for field in fields:
+                    match vhdl_catalog_validate_type_ref(field.type_, types):
+                        case Ok(_): ()
+                        case Err(err): return Err(err)
+            case Enum(variants):
+                for variant in variants:
+                    if val payload = variant.payload:
+                        match vhdl_catalog_validate_type_ref(payload, types):
+                            case Ok(_): ()
+                            case Err(err): return Err(err)
+            case Union(members):
+                for member in members:
+                    match vhdl_catalog_validate_type_ref(member, types):
+                        case Ok(_): ()
+                        case Err(err): return Err(err)
+
+    var order: [SymbolId] = []
+    var emitted: Dict<i64, bool> = {}
+    while order.len() < types.len():
+        var progressed = false
+        for symbol in vhdl_catalog_sorted_symbols(types.keys()):
+            if emitted.has(symbol.id):
+                continue
+            if vhdl_catalog_type_def_ready(types[symbol], emitted):
+                order = order.push(symbol)
+                emitted[symbol.id] = true
+                progressed = true
+        if not progressed:
+            return Err("VHDL design catalog contains a cyclic record/enum type dependency")
+    Ok(order)
+
+fn vhdl_catalog_type_identity(module_name: text, raw_symbol: i64,
+                              fallback_name: text,
+                              hir_modules: Dict<text, HirModule>) -> text:
+    if hir_modules.has(module_name):
+        val hir_module = hir_modules[module_name]
+        if val symbol = hir_module.symbols.get_symbol_raw(raw_symbol):
+            match symbol.kind:
+                case Struct | Enum:
+                    val owner = symbol.defining_module ?? module_name
+                    return "{owner}::{symbol.name}"
+                case _: ()
+    "{module_name}::{fallback_name}"
+
+fn vhdl_catalog_static_identity(module_name: text, raw_symbol: i64,
+                                fallback_name: text,
+                                hir_modules: Dict<text, HirModule>) -> text:
+    if hir_modules.has(module_name):
+        val hir_module = hir_modules[module_name]
+        if val symbol = hir_module.symbols.get_symbol_raw(raw_symbol):
+            match symbol.kind:
+                case Variable:
+                    val owner = symbol.defining_module ?? module_name
+                    return "{owner}::{symbol.name}"
+                case _: ()
+    "{module_name}::{fallback_name}"
+
+fn vhdl_catalog_identity_owner(identity: text, fallback: text) -> text:
+    val separator = identity.index_of("::")
+    if separator > 0:
+        return identity.substring(0, separator)
+    fallback
+
+fn vhdl_catalog_call_target(operand: MirOperand) -> text?:
+    match operand.kind:
+        case Const(value, _):
+            match value:
+                case Str(name): Some(name)
+                case _: nil
+        case _: nil
+
+fn vhdl_catalog_operand_with_target(operand: MirOperand, target: text) -> MirOperand:
+    match operand.kind:
+        case Const(Str(_), type_):
+            MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(target), type_))
+        case _: operand
+
+fn vhdl_catalog_resolve_target(target: text,
+                               all_functions: Dict<SymbolId, MirFunction>,
+                               all_function_modules: Dict<i64, text>,
+                               hardware_only: bool,
+                               target_kind: text) -> Result<SymbolId?, text>:
+    val qualified = target.contains("::")
+    var found: SymbolId? = nil
+    var matches = 0
+    for candidate_symbol in vhdl_catalog_sorted_symbols(all_functions.keys()):
+        val candidate = all_functions[candidate_symbol]
+        if hardware_only and not vhdl_function_is_hardware_entity(candidate):
+            continue
+        val identity = "{all_function_modules[candidate_symbol.id]}::{candidate.name}"
+        val matches_target = if qualified:
+            identity == target
+        else:
+            candidate.name == target
+        if matches_target:
+            found = Some(candidate_symbol)
+            matches = matches + 1
+    if matches > 1:
+        return Err("Ambiguous VHDL {target_kind} `{target}`; use a module-qualified identity")
+    if matches == 0:
+        if qualified:
+            return Err("Unresolved VHDL {target_kind} `{target}`")
+        return Ok(nil)
+    Ok(found)
+
+fn vhdl_catalog_mark_type(ty: MirType, needed: Dict<i64, bool>):
+    match ty.kind:
+        case Struct(symbol) | Enum(symbol): needed[symbol.id] = true
+        case Array(element, _) | Slice(element) | Ptr(element, _) | Ref(element, _) | Promise(element) | ScalableVec(element, _):
+            vhdl_catalog_mark_type(element, needed)
+        case Tuple(elements) | Union(elements):
+            for element in elements:
+                vhdl_catalog_mark_type(element, needed)
+        case Dict(key, value):
+            vhdl_catalog_mark_type(key, needed)
+            vhdl_catalog_mark_type(value, needed)
+        case FuncPtr(signature):
+            for param in signature.params:
+                vhdl_catalog_mark_type(param, needed)
+            vhdl_catalog_mark_type(signature.return_type, needed)
+        case _: ()
+
+fn vhdl_catalog_mark_function_types(func: MirFunction, needed: Dict<i64, bool>):
+    for param in func.signature.params:
+        vhdl_catalog_mark_type(param, needed)
+    vhdl_catalog_mark_type(func.signature.return_type, needed)
+    for local in func.locals:
+        vhdl_catalog_mark_type(local.type_, needed)
+
+fn vhdl_catalog_mark_operand_type(operand: MirOperand, needed: Dict<i64, bool>):
+    match operand.kind:
+        case Const(_, type_): vhdl_catalog_mark_type(type_, needed)
+        case _: ()
+
+fn vhdl_catalog_mark_operand_types(operands: [MirOperand], needed: Dict<i64, bool>):
+    for operand in operands:
+        vhdl_catalog_mark_operand_type(operand, needed)
+
+fn vhdl_catalog_mark_inst_types(inst: MirInst, needed: Dict<i64, bool>):
+    match inst.kind:
+        case Const(_, _, type_) | Alloc(_, type_):
+            vhdl_catalog_mark_type(type_, needed)
+        case BinOp(_, _, left, right) | CheckedBinOp(_, _, left, right):
+            vhdl_catalog_mark_operand_type(left, needed)
+            vhdl_catalog_mark_operand_type(right, needed)
+        case UnaryOp(_, _, operand) | Load(_, operand):
+            vhdl_catalog_mark_operand_type(operand, needed)
+        case Store(ptr, value):
+            vhdl_catalog_mark_operand_type(ptr, needed)
+            vhdl_catalog_mark_operand_type(value, needed)
+        case GetElementPtr(_, base, indices):
+            vhdl_catalog_mark_operand_type(base, needed)
+            vhdl_catalog_mark_operand_types(indices, needed)
+        case StoreGlobal(_, value):
+            vhdl_catalog_mark_operand_type(value, needed)
+        case Aggregate(_, aggregate, operands):
+            match aggregate:
+                case Array(type_): vhdl_catalog_mark_type(type_, needed)
+                case Struct(symbol) | Enum(symbol, _): needed[symbol.id] = true
+                case _: ()
+            vhdl_catalog_mark_operand_types(operands, needed)
+        case GetField(_, base, _):
+            vhdl_catalog_mark_operand_type(base, needed)
+        case SetField(base, _, value):
+            vhdl_catalog_mark_operand_type(base, needed)
+            vhdl_catalog_mark_operand_type(value, needed)
+        case Cast(_, operand, target) | Bitcast(_, operand, target):
+            vhdl_catalog_mark_operand_type(operand, needed)
+            vhdl_catalog_mark_type(target, needed)
+        case Call(_, func, args):
+            vhdl_catalog_mark_operand_type(func, needed)
+            vhdl_catalog_mark_operand_types(args, needed)
+        case CallIndirect(_, ptr, args, signature):
+            vhdl_catalog_mark_operand_type(ptr, needed)
+            vhdl_catalog_mark_operand_types(args, needed)
+            for param in signature.params:
+                vhdl_catalog_mark_type(param, needed)
+            vhdl_catalog_mark_type(signature.return_type, needed)
+        case Intrinsic(_, _, args):
+            vhdl_catalog_mark_operand_types(args, needed)
+        case VhdlSignalAssign(target, value, _):
+            vhdl_catalog_mark_operand_type(target, needed)
+            vhdl_catalog_mark_operand_type(value, needed)
+        case VhdlVarAssign(target, value):
+            vhdl_catalog_mark_operand_type(target, needed)
+            vhdl_catalog_mark_operand_type(value, needed)
+        case VhdlPortMap(_, _, connections):
+            for connection in connections:
+                vhdl_catalog_mark_operand_type(connection.1, needed)
+        case VhdlResize(_, operand, _, _) | VhdlSlice(_, operand, _, _):
+            vhdl_catalog_mark_operand_type(operand, needed)
+        case VhdlConcat(_, parts):
+            vhdl_catalog_mark_operand_types(parts, needed)
+        case _: ()
+
+fn vhdl_catalog_mark_terminator_types(terminator: MirTerminator,
+                                      needed: Dict<i64, bool>):
+    match terminator:
+        case Ret(value):
+            if val operand = value:
+                vhdl_catalog_mark_operand_type(operand, needed)
+        case If(cond, _, _): vhdl_catalog_mark_operand_type(cond, needed)
+        case Switch(value, _, _): vhdl_catalog_mark_operand_type(value, needed)
+        case CallTerminator(_, func, args, _, _):
+            vhdl_catalog_mark_operand_type(func, needed)
+            vhdl_catalog_mark_operand_types(args, needed)
+        case _: ()
+
+fn vhdl_catalog_type_def_mark_dependencies(type_def: MirTypeDef, needed: Dict<i64, bool>):
+    match type_def.kind:
+        case Struct(fields):
+            for field in fields:
+                vhdl_catalog_mark_type(field.type_, needed)
+        case Enum(variants):
+            for variant in variants:
+                if val payload = variant.payload:
+                    vhdl_catalog_mark_type(payload, needed)
+        case Union(members):
+            for member in members:
+                vhdl_catalog_mark_type(member, needed)
+
+fn vhdl_build_design_catalog_with_hir(modules: Dict<text, MirModule>,
+                                      hir_modules: Dict<text, HirModule>,
+                                      root_modules: [text],
+                                      design_name: text) -> Result<VhdlDesignCatalog, text>:
+    if modules.len() == 0:
+        return Err("VHDL design catalog requires at least one MIR module")
+
+    var functions: Dict<SymbolId, MirFunction> = {}
+    var all_functions: Dict<SymbolId, MirFunction> = {}
+    var all_function_modules: Dict<i64, text> = {}
+    var statics: Dict<SymbolId, MirStatic> = {}
+    var all_statics: Dict<SymbolId, MirStatic> = {}
+    var all_static_modules: Dict<i64, text> = {}
+    var constants: Dict<SymbolId, MirConstant> = {}
+    var all_constants: Dict<SymbolId, MirConstant> = {}
+    var all_constant_modules: Dict<i64, text> = {}
+    var all_types: Dict<SymbolId, MirTypeDef> = {}
+    var all_type_modules: Dict<i64, text> = {}
+    var types: Dict<SymbolId, MirTypeDef> = {}
+    var function_names: Dict<text, text> = {}
+    var package_names: Dict<text, text> = {}
+    var hardware_entity_count = 0
+    var next_symbol = 1
+    var global_type_symbols: Dict<text, i64> = {}
+    var global_type_source_names: Dict<text, text> = {}
+    var global_type_owner_modules: Dict<text, text> = {}
+    var type_name_counts: Dict<text, i64> = {}
+    var global_type_vhdl_names: Dict<text, text> = {}
+    var global_static_symbols: Dict<text, i64> = {}
+    var root_set: Dict<text, bool> = {}
+
+    for root_module in root_modules:
+        if not modules.has(root_module):
+            return Err("VHDL design catalog selected unknown root module `{root_module}`")
+        root_set[root_module] = true
+    val selected_roots = vhdl_catalog_sorted_text(root_set.keys())
+    if selected_roots.len() == 0:
+        return Err("VHDL design catalog requires one explicit root module")
+
+    # Types need stable design identities because every source module owns a
+    # local SymbolTable. HIR retains the defining-module provenance that MIR's
+    # raw SymbolId intentionally omits.
+    for module_name in vhdl_catalog_sorted_text(modules.keys()):
+        val module = modules[module_name]
+        for symbol in vhdl_catalog_sorted_symbols(module.types.keys()):
+            val type_def = module.types[symbol]
+            val identity = vhdl_catalog_type_identity(module_name, symbol.id,
+                type_def.name, hir_modules)
+            if not global_type_symbols.has(identity):
+                global_type_symbols[identity] = next_symbol
+                next_symbol = next_symbol + 1
+                val folded_name = vhdl_sanitize_identifier(type_def.name).to_lower()
+                global_type_source_names[identity] = type_def.name
+                global_type_owner_modules[identity] = vhdl_catalog_identity_owner(identity, module_name)
+                type_name_counts[folded_name] = (type_name_counts.get(folded_name) ?? 0) + 1
+        for symbol in vhdl_catalog_sorted_symbols(module.statics.keys()):
+            val static_ = module.statics[symbol]
+            val identity = vhdl_catalog_static_identity(module_name, symbol.id,
+                static_.name, hir_modules)
+            if not global_static_symbols.has(identity):
+                global_static_symbols[identity] = next_symbol
+                next_symbol = next_symbol + 1
+
+    for identity in vhdl_catalog_sorted_text(global_type_symbols.keys()):
+        val source_name = global_type_source_names[identity]
+        val folded_name = vhdl_sanitize_identifier(source_name).to_lower()
+        global_type_vhdl_names[identity] = if type_name_counts[folded_name] > 1:
+            vhdl_sanitize_identifier(identity)
+        else:
+            source_name
+
+    for module_name in vhdl_catalog_sorted_text(modules.keys()):
+        val module = modules[module_name]
+        var rebase: Dict<i64, i64> = {}
+        if hir_modules.has(module_name):
+            val hir_module = hir_modules[module_name]
+            for hir_symbol in hir_module.symbols.symbols.values():
+                match hir_symbol.kind:
+                    case Struct | Enum:
+                        val identity = vhdl_catalog_type_identity(module_name,
+                            hir_symbol.id.id, hir_symbol.name, hir_modules)
+                        if global_type_symbols.has(identity):
+                            rebase[hir_symbol.id.id] = global_type_symbols[identity]
+                    case Variable:
+                        val identity = vhdl_catalog_static_identity(module_name,
+                            hir_symbol.id.id, hir_symbol.name, hir_modules)
+                        if global_static_symbols.has(identity):
+                            rebase[hir_symbol.id.id] = global_static_symbols[identity]
+                    case _: ()
+        for symbol in vhdl_catalog_sorted_symbols(module.functions.keys()):
+            if not rebase.has(symbol.id):
+                rebase[symbol.id] = next_symbol
+                next_symbol = next_symbol + 1
+        for symbol in vhdl_catalog_sorted_symbols(module.statics.keys()):
+            val static_ = module.statics[symbol]
+            val identity = vhdl_catalog_static_identity(module_name, symbol.id,
+                static_.name, hir_modules)
+            rebase[symbol.id] = global_static_symbols[identity]
+            if val init = static_.init:
+                if not rebase.has(init.symbol.id):
+                    rebase[init.symbol.id] = next_symbol
+                    next_symbol = next_symbol + 1
+        for symbol in vhdl_catalog_sorted_symbols(module.constants.keys()):
+            if not rebase.has(symbol.id):
+                rebase[symbol.id] = next_symbol
+                next_symbol = next_symbol + 1
+        for symbol in vhdl_catalog_sorted_symbols(module.types.keys()):
+            val type_def = module.types[symbol]
+            val identity = vhdl_catalog_type_identity(module_name, symbol.id,
+                type_def.name, hir_modules)
+            rebase[symbol.id] = global_type_symbols[identity]
+
+        for symbol in vhdl_catalog_sorted_symbols(module.functions.keys()):
+            val func = vhdl_catalog_function(module.functions[symbol], rebase)
+            all_functions[func.symbol] = func
+            all_function_modules[func.symbol.id] = module_name
+
+        for symbol in vhdl_catalog_sorted_symbols(module.statics.keys()):
+            val static_ = vhdl_catalog_static(module.statics[symbol], rebase)
+            all_statics[static_.symbol] = static_
+            all_static_modules[static_.symbol.id] = module_name
+
+        for symbol in vhdl_catalog_sorted_symbols(module.constants.keys()):
+            val constant = vhdl_catalog_constant(module.constants[symbol], rebase)
+            all_constants[constant.symbol] = constant
+            all_constant_modules[constant.symbol.id] = module_name
+
+        for symbol in vhdl_catalog_sorted_symbols(module.types.keys()):
+            val identity = vhdl_catalog_type_identity(module_name, symbol.id,
+                module.types[symbol].name, hir_modules)
+            var type_def = vhdl_catalog_type_def(module.types[symbol], rebase)
+            type_def.name = global_type_vhdl_names[identity]
+            all_types[type_def.symbol] = type_def
+            all_type_modules[type_def.symbol.id] = global_type_owner_modules[identity]
+
+    var reachable: Dict<i64, bool> = {}
+    var queue: [SymbolId] = []
+    for symbol in vhdl_catalog_sorted_symbols(all_functions.keys()):
+        val func = all_functions[symbol]
+        if selected_roots.contains(all_function_modules[symbol.id]) and vhdl_function_is_hardware_entity(func):
+            reachable[symbol.id] = true
+            queue = queue.push(symbol)
+    if queue.len() == 0:
+        return Err("VHDL design catalog found no @hardware entry in selected root module(s)")
+
+    var cursor = 0
+    while cursor < queue.len():
+        val caller_symbol = queue[cursor]
+        var caller = all_functions[caller_symbol]
+        cursor = cursor + 1
+        var block_index = 0
+        while block_index < caller.blocks.len():
+            var block = caller.blocks[block_index]
+            var inst_index = 0
+            while inst_index < block.instructions.len():
+                var inst = block.instructions[inst_index]
+                match inst.kind:
+                    case Call(dest, operand, args):
+                        if val target = vhdl_catalog_call_target(operand):
+                            val resolved = match vhdl_catalog_resolve_target(target,
+                                    all_functions, all_function_modules, false, "design call target"):
+                                case Ok(value): value
+                                case Err(err): return Err(err)
+                            if val callee_symbol = resolved:
+                                val callee_name = all_functions[callee_symbol].name
+                                inst = MirInst(kind: MirInstKind.Call(dest,
+                                    vhdl_catalog_operand_with_target(operand, callee_name),
+                                    args), span: inst.span)
+                                if not reachable.has(callee_symbol.id):
+                                    reachable[callee_symbol.id] = true
+                                    queue = queue.push(callee_symbol)
+                    case VhdlPortMap(entity, instance, connections):
+                        val resolved = match vhdl_catalog_resolve_target(entity,
+                                all_functions, all_function_modules, true, "port-map entity"):
+                            case Ok(value): value
+                            case Err(err): return Err(err)
+                        if not resolved.?:
+                            return Err("Unresolved VHDL port-map entity `{entity}`")
+                        val entity_symbol = resolved.unwrap()
+                        val entity_name = all_functions[entity_symbol].name
+                        inst = MirInst(kind: MirInstKind.VhdlPortMap(entity_name,
+                            instance, connections), span: inst.span)
+                        if not reachable.has(entity_symbol.id):
+                            reachable[entity_symbol.id] = true
+                            queue = queue.push(entity_symbol)
+                    case _: ()
+                block.instructions[inst_index] = inst
+                inst_index = inst_index + 1
+            caller.blocks[block_index] = block
+            block_index = block_index + 1
+        all_functions[caller_symbol] = caller
+
+    for symbol in vhdl_catalog_sorted_symbols(all_functions.keys()):
+        if not reachable.has(symbol.id):
+            continue
+        val func = all_functions[symbol]
+        val emitted_name = vhdl_sanitize_identifier(func.name).to_lower()
+        if function_names.has(emitted_name):
+            return Err("Conflicting VHDL function/entity name `{emitted_name}` from `{function_names[emitted_name]}` and `{all_function_modules[symbol.id]}.{func.name}`")
+        function_names[emitted_name] = "{all_function_modules[symbol.id]}.{func.name}"
+        functions[symbol] = func
+        if vhdl_function_is_hardware_entity(func):
+            hardware_entity_count = hardware_entity_count + 1
+
+    var needed_types: Dict<i64, bool> = {}
+    for symbol in vhdl_catalog_sorted_symbols(functions.keys()):
+        val func = functions[symbol]
+        vhdl_catalog_mark_function_types(func, needed_types)
+        for block in func.blocks:
+            for inst in block.instructions:
+                vhdl_catalog_mark_inst_types(inst, needed_types)
+                match inst.kind:
+                    case LoadGlobal(_, static_symbol) | StoreGlobal(static_symbol, _):
+                        if static_symbol.id < 0 or not all_statics.has(static_symbol):
+                            return Err("VHDL design catalog references unmapped global/static symbol {static_symbol.id} from `{func.name}`")
+                        val static_ = all_statics[static_symbol]
+                        statics[static_symbol] = static_
+                        vhdl_catalog_mark_type(static_.type_, needed_types)
+                        if val init = static_.init:
+                            if init.symbol.id < 0:
+                                return Err("VHDL design catalog retained an unmapped static initializer symbol from `{static_.name}`")
+                            if all_constants.has(init.symbol):
+                                constants[init.symbol] = all_constants[init.symbol]
+                            vhdl_catalog_mark_type(init.type_, needed_types)
+                    case _: ()
+            vhdl_catalog_mark_terminator_types(block.terminator, needed_types)
+
+    var type_progress = true
+    while type_progress:
+        type_progress = false
+        for symbol in vhdl_catalog_sorted_symbols(all_types.keys()):
+            if needed_types.has(symbol.id) and not types.has(symbol):
+                val type_def = all_types[symbol]
+                types[symbol] = type_def
+                vhdl_catalog_type_def_mark_dependencies(type_def, needed_types)
+                type_progress = true
+    for type_id in needed_types.keys():
+        if type_id < 0 or not types.has(SymbolId(id: type_id)):
+            return Err("VHDL design catalog references unmapped type symbol {type_id}")
+
+    package_names = {}
+    for symbol in vhdl_catalog_sorted_symbols(types.keys()):
+        val type_def = types[symbol]
+        val emitted_name = vhdl_sanitize_identifier(type_def.name).to_lower()
+        if package_names.has(emitted_name):
+            return Err("Conflicting reachable VHDL package type `{emitted_name}`")
+        package_names[emitted_name] = type_def.name
+    for symbol in vhdl_catalog_sorted_symbols(constants.keys()):
+        val constant = constants[symbol]
+        val emitted_name = vhdl_sanitize_identifier(constant.name).to_lower()
+        if package_names.has(emitted_name):
+            return Err("Conflicting reachable VHDL package declaration `{emitted_name}`")
+        package_names[emitted_name] = constant.name
+
+    val order = match vhdl_catalog_type_order(types):
+        case Ok(value): value
+        case Err(err): return Err(err)
+
+    var function_sources: [VhdlCatalogFunctionSource] = []
+    var reachable_module_set: Dict<text, bool> = {}
+    var module_function_counts: Dict<text, i64> = {}
+    var module_entity_counts: Dict<text, i64> = {}
+    var module_helper_counts: Dict<text, i64> = {}
+    var module_type_counts: Dict<text, i64> = {}
+    var module_static_counts: Dict<text, i64> = {}
+    var module_constant_counts: Dict<text, i64> = {}
+    for symbol in vhdl_catalog_sorted_symbols(functions.keys()):
+        val func = functions[symbol]
+        val source_module = all_function_modules[symbol.id]
+        val is_entity = vhdl_function_is_hardware_entity(func)
+        function_sources = function_sources.push(VhdlCatalogFunctionSource(
+            symbol: symbol.id, name: func.name, source_module: source_module,
+            is_hardware_entity: is_entity))
+        reachable_module_set[source_module] = true
+        module_function_counts[source_module] = (module_function_counts.get(source_module) ?? 0) + 1
+        if is_entity:
+            module_entity_counts[source_module] = (module_entity_counts.get(source_module) ?? 0) + 1
+        else:
+            module_helper_counts[source_module] = (module_helper_counts.get(source_module) ?? 0) + 1
+    for symbol in vhdl_catalog_sorted_symbols(types.keys()):
+        val source_module = all_type_modules[symbol.id]
+        reachable_module_set[source_module] = true
+        module_type_counts[source_module] = (module_type_counts.get(source_module) ?? 0) + 1
+    for symbol in vhdl_catalog_sorted_symbols(statics.keys()):
+        val source_module = all_static_modules[symbol.id]
+        reachable_module_set[source_module] = true
+        module_static_counts[source_module] = (module_static_counts.get(source_module) ?? 0) + 1
+    for symbol in vhdl_catalog_sorted_symbols(constants.keys()):
+        val source_module = all_constant_modules[symbol.id]
+        reachable_module_set[source_module] = true
+        module_constant_counts[source_module] = (module_constant_counts.get(source_module) ?? 0) + 1
+
+    val reachable_source_modules = vhdl_catalog_sorted_text(reachable_module_set.keys())
+    var source_rows: [VhdlCatalogSourceRow] = []
+    for source_module in reachable_source_modules:
+        source_rows = source_rows.push(VhdlCatalogSourceRow(
+            module_name: source_module, is_root: root_set.has(source_module),
+            function_count: module_function_counts.get(source_module) ?? 0,
+            hardware_entity_count: module_entity_counts.get(source_module) ?? 0,
+            helper_function_count: module_helper_counts.get(source_module) ?? 0,
+            type_count: module_type_counts.get(source_module) ?? 0,
+            static_count: module_static_counts.get(source_module) ?? 0,
+            constant_count: module_constant_counts.get(source_module) ?? 0))
+
+    val safe_name = vhdl_sanitize_identifier(design_name)
+    Ok(VhdlDesignCatalog(
+        design: MirModule(name: safe_name, functions: functions, statics: statics,
+            constants: constants, types: types),
+        type_order: order,
+        root_modules: selected_roots,
+        reachable_source_modules: reachable_source_modules,
+        function_sources: function_sources,
+        source_rows: source_rows,
+        source_module_count: modules.len(),
+        reachable_source_module_count: reachable_source_modules.len(),
+        hardware_entity_count: hardware_entity_count,
+        helper_function_count: functions.len() - hardware_entity_count,
+        type_count: types.len()
+    ))
+
+fn vhdl_build_design_catalog(modules: Dict<text, MirModule>, design_name: text) -> Result<VhdlDesignCatalog, text>:
+    vhdl_build_design_catalog_with_hir(modules, {},
+        vhdl_catalog_sorted_text(modules.keys()), design_name)
+
+export VhdlCatalogFunctionSource, VhdlCatalogSourceRow, VhdlDesignCatalog, vhdl_build_design_catalog, vhdl_build_design_catalog_with_hir, vhdl_catalog_type_order

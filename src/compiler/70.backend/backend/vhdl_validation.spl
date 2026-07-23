@@ -11,7 +11,7 @@ use compiler.backend.codegen_types.{Codegen, CodegenOutput, CodegenOutputKind}
 use compiler.backend.vhdl_type_mapper.VhdlTypeMapper
 use compiler.backend.vhdl.vhdl_builder.{VhdlBuilder}
 use .vhdl.vhdl_builder.{VhdlBuilder}
-use .vhdl.vhdl_helpers.{vhdl_sanitize_identifier, vhdl_function_is_hardware_entity, vhdl_helper_is_procedure, vhdl_helper_collision_message}
+use .vhdl.vhdl_helpers.{vhdl_sanitize_identifier, vhdl_function_is_hardware_entity, vhdl_helper_is_procedure, vhdl_helper_collision_message, vhdl_function_is_runtime_module_initializer}
 use compiler.common.diagnostics.span.{Span}
 use .vhdl_backend.{VhdlBackend, VhdlPortSpec, VhdlReturnField, VhdlReturnAbi}
 
@@ -43,12 +43,152 @@ impl VhdlBackend:
                 return true
         false
 
+    fn direct_vhdl_call_target(operand: MirOperand) -> text?:
+        match operand.kind:
+            case Const(value, _):
+                match value:
+                    case Str(name): Some(name)
+                    case _: nil
+            case _: nil
+
+    fn helper_local_is_mutable(func: MirFunction, id: LocalId) -> bool:
+        for local in func.locals:
+            if local.id.id == id.id:
+                match local.kind:
+                    case Var | Temp | Return: return true
+                    case Arg(_): return false
+        false
+
+    fn helper_block_shape_supported(func: MirFunction, block_id: BlockId, blocks: Dict<i64, MirBlock>, seen: [i64]) -> bool:
+        for prior in seen:
+            if prior == block_id.id:
+                return false
+        if not blocks.has(block_id.id):
+            return false
+        val block = blocks[block_id.id]
+        for inst in block.instructions:
+            match inst.kind:
+                case Const(_, _, _) | Copy(_, _) | Move(_, _) | BinOp(_, _, _, _) | CheckedBinOp(_, _, _, _) | UnaryOp(_, _, _) | Cast(_, _, _) | Bitcast(_, _, _) | Aggregate(_, _, _) | GetField(_, _, _) | VhdlResize(_, _, _, _) | VhdlSlice(_, _, _, _) | VhdlConcat(_, _) | Nop:
+                    ()
+                case SetField(base, _, _):
+                    match base.kind:
+                        case Copy(local) | Move(local):
+                            if not self.helper_local_is_mutable(func, local):
+                                return false
+                        case _: return false
+                case Call(_, operand, _):
+                    val target = self.direct_vhdl_call_target(operand)
+                    if not target.? or not self.active_function_by_name.has(target.unwrap()):
+                        return false
+                    val callee = self.active_function_by_name[target.unwrap()]
+                    if vhdl_function_is_hardware_entity(callee) and callee.vhdl_metadata.has_clocked:
+                        return false
+                case _:
+                    return false
+        var next_seen = seen
+        next_seen = next_seen.push(block_id.id)
+        match block.terminator:
+            case Ret(_): true
+            case Goto(target): self.helper_block_shape_supported(func, target, blocks, next_seen)
+            case If(_, then_, else_):
+                self.helper_block_shape_supported(func, then_, blocks, next_seen) and self.helper_block_shape_supported(func, else_, blocks, next_seen)
+            case Switch(_, targets, default):
+                for target in targets:
+                    if not self.helper_block_shape_supported(func, target.target, blocks, next_seen):
+                        return false
+                self.helper_block_shape_supported(func, default, blocks, next_seen)
+            case _: false
+
+    fn helper_subprogram_shape_supported(func: MirFunction) -> bool:
+        var blocks: Dict<i64, MirBlock> = {}
+        for block in func.blocks:
+            blocks[block.id.id] = block
+        self.helper_block_shape_supported(func, func.entry_block, blocks, [])
+
+    fn helper_call_reaches(from: text, target: text, seen: [text]) -> bool:
+        if from == target:
+            return true
+        for prior in seen:
+            if prior == from:
+                return false
+        val known = self.active_function_by_name.get(from)
+        if not known.? or not self.active_helper_name_by_source.has(from):
+            return false
+        var next_seen = seen
+        next_seen = next_seen.push(from)
+        for block in known.unwrap().blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case Call(_, operand, _):
+                        val callee = self.direct_vhdl_call_target(operand)
+                        if callee.? and self.active_helper_name_by_source.has(callee.unwrap()):
+                            if self.helper_call_reaches(callee.unwrap(), target, next_seen):
+                                return true
+                    case _: ()
+        false
+
+    fn validate_helper_call_cycles() -> Result<(), CompileError>:
+        for caller_name in self.active_helper_name_by_source.keys():
+            val caller = self.active_function_by_name[caller_name]
+            for block in caller.blocks:
+                for inst in block.instructions:
+                    match inst.kind:
+                        case Call(_, operand, _):
+                            val callee = self.direct_vhdl_call_target(operand)
+                            if callee.? and self.active_helper_name_by_source.has(callee.unwrap()):
+                                val callee_name = callee.unwrap()
+                                if self.helper_call_reaches(callee_name, caller_name, [caller_name]):
+                                    return Err(self.backend_error("Recursive VHDL helper call cycle `{caller_name}` -> `{callee_name}` is not synthesizable"))
+                        case _: ()
+        Ok(())
+
     me prepare_helper_subprograms(module: MirModule) -> Result<(), CompileError>:
         var used: Dict<text, text> = {}
+        var helper_reachable: Dict<text, bool> = {}
         self.active_helper_name_by_source = {}
+        # Role rule: a direct @hardware child of a clocked product entry is an
+        # entity/port-map boundary. Every other direct call made by hardware is
+        # an in-process helper candidate, including annotated unclocked leaves.
+        for symbol in module.functions.keys():
+            val caller = module.functions[symbol]
+            if not vhdl_function_is_hardware_entity(caller):
+                continue
+            for block in caller.blocks:
+                for inst in block.instructions:
+                    match inst.kind:
+                        case Call(_, operand, _):
+                            val target = self.direct_vhdl_call_target(operand)
+                            if target.? and self.active_function_by_name.has(target.unwrap()):
+                                val callee = self.active_function_by_name[target.unwrap()]
+                                val entity_boundary = caller.vhdl_metadata.has_clocked and vhdl_function_is_hardware_entity(callee)
+                                if not entity_boundary:
+                                    helper_reachable[target.unwrap()] = true
+                        case _: ()
+        var changed = true
+        while changed:
+            changed = false
+            for symbol in module.functions.keys():
+                val caller = module.functions[symbol]
+                if not helper_reachable.has(caller.name):
+                    continue
+                for block in caller.blocks:
+                    for inst in block.instructions:
+                        match inst.kind:
+                            case Call(_, operand, _):
+                                val target = self.direct_vhdl_call_target(operand)
+                                if target.? and self.active_function_by_name.has(target.unwrap()):
+                                    val callee = self.active_function_by_name[target.unwrap()]
+                                    if vhdl_function_is_hardware_entity(callee) and callee.vhdl_metadata.has_clocked:
+                                        continue
+                                    if not helper_reachable.has(target.unwrap()):
+                                        helper_reachable[target.unwrap()] = true
+                                        changed = true
+                            case _: ()
         for symbol in module.functions.keys():
             val func = module.functions[symbol]
-            if vhdl_function_is_hardware_entity(func):
+            if vhdl_function_is_runtime_module_initializer(func):
+                continue
+            if not helper_reachable.has(func.name) or not self.helper_subprogram_shape_supported(func):
                 continue
             val safe_name = vhdl_sanitize_identifier(func.name)
             val prior = used.get(safe_name)
@@ -59,6 +199,12 @@ impl VhdlBackend:
         Ok(())
 
     fn validate_module_supported_before_emit(module: MirModule, hardware_mode: bool) -> Result<(), CompileError>:
+        match self.validate_hardware_call_cycles(module):
+            case Ok(_): ()
+            case Err(err): return Err(err)
+        match self.validate_helper_call_cycles():
+            case Ok(_): ()
+            case Err(err): return Err(err)
         for symbol in module.types.keys():
             match self.validate_type_def_supported_before_emit(module.types[symbol]):
                 case Ok(_): ()
@@ -170,11 +316,104 @@ impl VhdlBackend:
         var blocks: Dict<i64, MirBlock> = {}
         for block in func.blocks:
             blocks[block.id.id] = block
+        val allow_clocked_state = func.has_vhdl_metadata and func.vhdl_metadata.has_clocked and not func.vhdl_metadata.clocked.has_reset
+        if allow_clocked_state and self.function_static_symbols(func).len() > 0:
+            match self.validate_clocked_state_owner(func, blocks):
+                case Ok(_): pass
+                case Err(err): return Err(err)
         for block in func.blocks:
-            match self.validate_block_supported_before_emit(block, blocks, is_helper):
+            match self.validate_block_supported_before_emit(block, blocks, is_helper, allow_clocked_state):
                 case Ok(_): ()
                 case Err(err): return Err(err)
         Ok(())
+
+    fn validate_clocked_state_owner(func: MirFunction, blocks: Dict<i64, MirBlock>) -> Result<(), CompileError>:
+        if not blocks.has(func.entry_block.id):
+            return Err(self.backend_error("VHDL clocked state owner `{func.name}` has no entry block"))
+        val entry = blocks[func.entry_block.id]
+        match entry.terminator:
+            case If(condition, reset_path, feedback_path):
+                if not self.clocked_entry_condition_is_active_low_reset(func, entry, condition):
+                    return Err(self.backend_error("VHDL clocked global state owner `{func.name}` requires `if not reset_n` as its entry reset guard"))
+                for symbol in self.function_static_symbols(func):
+                    if not self.active_statics.has(symbol.id):
+                        return Err(self.backend_error("VHDL global state references unknown static symbol {symbol.id}"))
+                    val state_name = self.active_statics[symbol.id].name
+                    for inst in entry.instructions:
+                        match inst.kind:
+                            case LoadGlobal(_, accessed) | StoreGlobal(accessed, _):
+                                if accessed.id == symbol.id:
+                                    return Err(self.backend_error("VHDL clocked state `{state_name}` cannot be accessed before the reset/feedback branch"))
+                            case _:
+                                ()
+                    val reset_access = self.block_path_static_access_order(reset_path, symbol, blocks, [], 0)
+                    if reset_access != 2:
+                        return Err(self.backend_error("VHDL clocked state `{state_name}` reset branch must store an initial value without loading prior state"))
+                    val feedback_access = self.block_path_static_access_order(feedback_path, symbol, blocks, [], 0)
+                    if feedback_access != 3:
+                        return Err(self.backend_error("VHDL clocked state `{state_name}` feedback branch must load once before its final store; store-then-load is not supported"))
+                Ok(())
+            case _:
+                Err(self.backend_error("VHDL clocked global state owner `{func.name}` requires an explicit entry reset/feedback branch"))
+
+    fn clocked_entry_condition_is_active_low_reset(func: MirFunction, entry: MirBlock, condition: MirOperand) -> bool:
+        var reset_local = -1
+        for local in func.locals:
+            match local.kind:
+                case Arg(_):
+                    if (local.name ?? "") == "reset_n" and local.type_.kind == MirTypeKind.Bool:
+                        reset_local = local.id.id
+                case _:
+                    ()
+        if reset_local < 0:
+            return false
+        val condition_local = self.mir_operand_use_id(condition)
+        if condition_local < 0:
+            return false
+        for inst in entry.instructions:
+            match inst.kind:
+                case UnaryOp(dest, Not, operand):
+                    if dest.id == condition_local and self.mir_operand_use_id(operand) == reset_local:
+                        return true
+                case _:
+                    ()
+        false
+
+    fn block_path_static_access_order(block_id: BlockId, symbol: SymbolId, blocks: Dict<i64, MirBlock>, seen: [i64], phase: i64) -> i64:
+        for prior in seen:
+            if prior == block_id.id:
+                return -1
+        if not blocks.has(block_id.id):
+            return -1
+        val block = blocks[block_id.id]
+        var next_phase = phase
+        for inst in block.instructions:
+            match inst.kind:
+                case LoadGlobal(_, loaded):
+                    if loaded.id == symbol.id:
+                        if next_phase == 0:
+                            next_phase = 1
+                        elif next_phase >= 2:
+                            return -1
+                case StoreGlobal(stored, _):
+                    if stored.id == symbol.id:
+                        if next_phase == 0:
+                            next_phase = 2
+                        elif next_phase == 1:
+                            next_phase = 3
+                        else:
+                            return -1
+                case _:
+                    ()
+        match block.terminator:
+            case Goto(next):
+                var next_seen = seen
+                next_seen = next_seen.push(block_id.id)
+                self.block_path_static_access_order(next, symbol, blocks, next_seen, next_phase)
+            case Ret(_):
+                next_phase
+            case _:
+                -1
 
     fn validate_hardware_output_abi_supported(func: MirFunction) -> Result<(), CompileError>:
         if not vhdl_function_is_hardware_entity(func):
@@ -195,17 +434,17 @@ impl VhdlBackend:
             case _:
                 Ok(())
 
-    fn validate_block_supported_before_emit(block: MirBlock, blocks: Dict<i64, MirBlock>, is_helper: bool) -> Result<(), CompileError>:
+    fn validate_block_supported_before_emit(block: MirBlock, blocks: Dict<i64, MirBlock>, is_helper: bool, allow_clocked_state: bool) -> Result<(), CompileError>:
         for inst in block.instructions:
-            match self.validate_instruction_supported_before_emit(inst, blocks, is_helper):
+            match self.validate_instruction_supported_before_emit(inst, blocks, is_helper, allow_clocked_state):
                 case Ok(_): ()
                 case Err(err): return Err(err)
         Ok(())
 
-    fn validate_instruction_supported_before_emit(inst: MirInst, blocks: Dict<i64, MirBlock>, is_helper: bool) -> Result<(), CompileError>:
+    fn validate_instruction_supported_before_emit(inst: MirInst, blocks: Dict<i64, MirBlock>, is_helper: bool, allow_clocked_state: bool) -> Result<(), CompileError>:
         if is_helper:
             match inst.kind:
-                case Const(_, _, _) | Copy(_, _) | Move(_, _) | BinOp(_, _, _, _) | CheckedBinOp(_, _, _, _) | UnaryOp(_, _, _) | Cast(_, _, _) | Bitcast(_, _, _) | Aggregate(_, _, _) | GetField(_, _, _) | VhdlResize(_, _, _, _) | VhdlSlice(_, _, _, _) | VhdlConcat(_, _) | Nop:
+                case Const(_, _, _) | Copy(_, _) | Move(_, _) | BinOp(_, _, _, _) | CheckedBinOp(_, _, _, _) | UnaryOp(_, _, _) | Cast(_, _, _) | Bitcast(_, _, _) | Aggregate(_, _, _) | GetField(_, _, _) | SetField(_, _, _) | VhdlResize(_, _, _, _) | VhdlSlice(_, _, _, _) | VhdlConcat(_, _) | Nop:
                     Ok(())
                 case Call(_, func, _):
                     self.validate_call_supported_before_emit(func)
@@ -218,13 +457,60 @@ impl VhdlBackend:
                 case VhdlProcess(_, body_block):
                     val block = blocks.get(body_block.id)
                     if block.?:
-                        self.validate_block_supported_before_emit(block, blocks, false)
+                        self.validate_block_supported_before_emit(block, blocks, false, allow_clocked_state)
                     else:
                         Err(self.backend_error("VHDL process references unknown block BB{body_block.id}"))
                 case Call(_, func, _):
                     self.validate_call_supported_before_emit(func)
+                case LoadGlobal(_, symbol):
+                    self.validate_clocked_static_access(symbol, allow_clocked_state, inst.span)
+                case StoreGlobal(symbol, _):
+                    self.validate_clocked_static_access(symbol, allow_clocked_state, inst.span)
                 case _:
                     Err(self.unsupported_vhdl_instruction_error(inst))
+
+    fn validate_clocked_static_access(symbol: SymbolId, allow_clocked_state: bool, span: Span?) -> Result<(), CompileError>:
+        if not allow_clocked_state:
+            return Err(self.backend_error_at("VHDL global state access requires an @clocked(clk, none) @hardware entity with an explicit source reset branch", span))
+        if not self.active_statics.has(symbol.id):
+            return Err(self.backend_error_at("VHDL global state references unknown static symbol {symbol.id}", span))
+        val static_ = self.active_statics[symbol.id]
+        if not static_.is_mutable:
+            return Err(self.backend_error_at("VHDL global state `{static_.name}` must be a mutable module var", span))
+        match self.validate_clocked_static_type(static_.type_, static_.name, [], span):
+            case Ok(_): pass
+            case Err(err): return Err(err)
+        Ok(())
+
+    fn validate_clocked_static_type(ty: MirType, name: text, seen: [i64], span: Span?) -> Result<(), CompileError>:
+        match ty.kind:
+            case I8 | I16 | I32 | I64 | U8 | U16 | U32 | U64 | Bool:
+                Ok(())
+            case Bits(width, _):
+                if width > 0:
+                    Ok(())
+                else:
+                    Err(self.backend_error_at("VHDL clocked global `{name}` has non-positive bit width {width}", span))
+            case Struct(symbol):
+                for prior in seen:
+                    if prior == symbol.id:
+                        return Err(self.backend_error_at("VHDL clocked global `{name}` has a recursive record type", span))
+                val type_def = match self.type_def_by_symbol(symbol):
+                    case Ok(value): value
+                    case Err(err): return Err(err)
+                match type_def.kind:
+                    case Struct(fields):
+                        var next_seen = seen
+                        next_seen = next_seen.push(symbol.id)
+                        for field in fields:
+                            match self.validate_clocked_static_type(field.type_, "{name}.{field.name}", next_seen, span):
+                                case Ok(_): pass
+                                case Err(err): return Err(err)
+                        Ok(())
+                    case _:
+                        Err(self.backend_error_at("VHDL clocked global `{name}` references non-record type `{type_def.name}`", span))
+            case _:
+                Err(self.backend_error_at("VHDL clocked global `{name}` must be a fixed scalar or transitive record; dynamic/unsupported type `{ty.kind}` is not synthesizable", span))
 
     fn validate_call_supported_before_emit(func: MirOperand) -> Result<(), CompileError>:
         val target = match self.call_target_name(func):
@@ -236,7 +522,9 @@ impl VhdlBackend:
             match known:
                 case Some(func_def):
                     if vhdl_function_is_hardware_entity(func_def):
-                        return Err(self.backend_error("VHDL helper call `{target}` targets a hardware entity; instantiate entities with VhdlPortMap instead of subprogram calls"))
+                        return Ok(())
+                    if not self.helper_subprogram_shape_supported(func_def):
+                        return Err(self.backend_error("VHDL call `{target}` requires an acyclic combinational helper with local-only mutation"))
                 case None:
                     ()
             return Err(self.backend_error("Synthesizable VHDL backend does not support generic Call lowering for `{target}`; only planned pure combinational helpers can be called"))
@@ -310,7 +598,7 @@ impl VhdlBackend:
 
         # Emit type definitions
         # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
-        for symbol in module.types.keys():
+        for symbol in self.active_type_emit_order:
             val type_def = module.types[symbol]
             match type_def.kind:
                 case Struct(fields):
@@ -590,16 +878,73 @@ impl VhdlBackend:
                     fields = fields.push(VhdlReturnField(
                         name: name,
                         type_: elements[idx],
-                        index: idx
+                        index: idx,
+                        selector: "f{idx}"
                     ))
                     idx = idx + 1
                 Ok(VhdlReturnAbi(is_tuple: true, fields: fields))
+            case Struct(symbol):
+                if not func.has_vhdl_metadata or not func.vhdl_metadata.flatten_struct_output:
+                    return Ok(VhdlReturnAbi(is_tuple: false, fields: [
+                        VhdlReturnField(name: "result_out",
+                            type_: func.signature.return_type, index: 0,
+                            selector: "")
+                    ]))
+                if not self.active_type_defs.has(symbol.id):
+                    return Err(self.backend_error("Flattened VHDL struct output type is missing from the active type catalog"))
+                val type_def = self.active_type_defs[symbol.id]
+                match type_def.kind:
+                    case Struct(struct_fields):
+                        var fields: [VhdlReturnField] = []
+                        var used: Dict<text, bool> = {}
+                        var idx = 0
+                        for field in struct_fields:
+                            val name = self.sanitize_vhdl_identifier(field.name)
+                            if used.get(name).?:
+                                return Err(self.backend_error("Duplicate VHDL output port after sanitization: {name}"))
+                            used[name] = true
+                            var port_type = field.type_
+                            var selector = self.sanitize_vhdl_identifier(field.name)
+                            if field.has_bits_attr:
+                                if field.bits_width <= 0:
+                                    return Err(self.backend_error("Flattened VHDL struct output `{field.name}` has invalid @bits width"))
+                                val capacity = match field.type_.kind:
+                                    case I8 | U8: 8
+                                    case I16 | U16: 16
+                                    case I32 | U32: 32
+                                    case I64 | U64: 64
+                                    case Bool: 1
+                                    case _:
+                                        return Err(self.backend_error("Flattened VHDL struct output @bits field `{field.name}` must be integer or bool"))
+                                if field.bits_width > capacity:
+                                    return Err(self.backend_error("Flattened VHDL struct output `{field.name}` @bits width exceeds its field type"))
+                                val signed = match field.type_.kind:
+                                    case I8 | I16 | I32 | I64: true
+                                    case U8 | U16 | U32 | U64 | Bool: false
+                                    case _:
+                                        return Err(self.backend_error("Flattened VHDL struct output @bits field `{field.name}` must be integer or bool"))
+                                match field.type_.kind:
+                                    case Bool:
+                                        port_type = field.type_
+                                    case _:
+                                        port_type = MirType(kind: MirTypeKind.Bits(field.bits_width, signed))
+                                        selector = "{selector}({field.bits_width - 1} downto 0)"
+                            fields = fields.push(VhdlReturnField(name: name,
+                                type_: port_type, index: idx,
+                                selector: selector))
+                            idx = idx + 1
+                        Ok(VhdlReturnAbi(is_tuple: true, fields: fields))
+                    case _:
+                        Err(self.backend_error("@flatten_struct_output requires a struct return type"))
             case _:
+                if func.has_vhdl_metadata and func.vhdl_metadata.flatten_struct_output:
+                    return Err(self.backend_error("@flatten_struct_output requires a struct return type"))
                 Ok(VhdlReturnAbi(is_tuple: false, fields: [
                     VhdlReturnField(
                         name: "result_out",
                         type_: func.signature.return_type,
-                        index: 0
+                        index: 0,
+                        selector: ""
                     )
                 ]))
 

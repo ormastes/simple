@@ -2388,6 +2388,44 @@ impl LlvmBackend {
             raw_arg_vals.push(casted.into_int_value());
         }
 
+        // LLVM represents Simple booleans as tagged RuntimeValues (true = 11,
+        // false = 19), while rt_value_bool accepts an unboxed C boolean. Keep
+        // raw 0/1 inputs intact, but untag values produced by ConstBool before
+        // crossing that SFFI boundary.
+        if sffi_name == "rt_value_bool" {
+            if let Some(value) = raw_arg_vals.first_mut() {
+                let is_tagged_false = builder
+                    .build_int_compare(
+                        IntPredicate::EQ,
+                        *value,
+                        i64_type.const_int(19, false),
+                        "bool_is_false_tag",
+                    )
+                    .map_err(|e| crate::error::factory::llvm_build_failed("compare false bool tag", &e))?;
+                let without_false_tag = builder
+                    .build_select(is_tagged_false, i64_type.const_zero(), *value, "bool_without_false_tag")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("normalize false bool tag", &e))?
+                    .into_int_value();
+                let is_tagged_true = builder
+                    .build_int_compare(
+                        IntPredicate::EQ,
+                        *value,
+                        i64_type.const_int(11, false),
+                        "bool_is_true_tag",
+                    )
+                    .map_err(|e| crate::error::factory::llvm_build_failed("compare true bool tag", &e))?;
+                *value = builder
+                    .build_select(
+                        is_tagged_true,
+                        i64_type.const_int(1, false),
+                        without_false_tag,
+                        "bool_raw",
+                    )
+                    .map_err(|e| crate::error::factory::llvm_build_failed("normalize true bool tag", &e))?
+                    .into_int_value();
+            }
+        }
+
         // Expand text RuntimeValue arguments to (ptr, len) pairs for SFFI calls.
         // This handles the ABI mismatch between Simple (text = RuntimeValue i64)
         // and Rust SFFI (text = *const u8 + u64 len).

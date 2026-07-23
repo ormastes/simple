@@ -1,0 +1,615 @@
+# ============================================================================
+# RV64GC RTL Core — Single-Cycle Datapath (64-bit)
+# ============================================================================
+#
+# Adapts RV32I core pattern for 64-bit RV64GC.  Top-level module that wires
+# the decoder, ALU, register file, LSU, mul/div, and atomics into a
+# single-cycle pipeline.
+#
+# Architecture:
+#   - core64_combinational()  — all combinational datapath logic
+#   - core64_update()         — clocked sequential logic (PC, semihosting, halt)
+#   - core64_reset()          — initial state at reset
+#
+# Semihosting: detects the same 3-instruction magic sequence as RV32
+#   slli zero,zero,0x1f  /  ebreak  /  srai zero,zero,0x7
+# (32-bit instruction encoding is unchanged).
+# ============================================================================
+
+use std.hardware.rv64gc_rtl.pkg.{OP_LUI, OP_AUIPC, OP_JAL, OP_JALR}
+use std.hardware.rv64gc_rtl.pkg.{OP_BRANCH, OP_LOAD, OP_STORE, OP_SYSTEM, OP_MISC_MEM}
+use std.hardware.rv64gc_rtl.pkg.{OP_IMMED, OP_REG, OP_OP_IMM_32, OP_OP_32, OP_AMO}
+use std.hardware.rv64gc_rtl.pkg.{BR_BEQ, BR_BNE, BR_BLT, BR_BGE, BR_BLTU, BR_BGEU}
+use std.hardware.rv64gc_rtl.pkg.{SEMI_ENTRY, SEMI_BREAK, SEMI_EXIT, SYS_EXIT}
+use std.hardware.rv64gc_rtl.decode.{DecodeResult64, decode_instruction_64, sign_extend_to_64}
+use std.hardware.rv64gc_rtl.decode.{RvcExpansion, rvc_expand}
+use std.hardware.rv64gc_rtl.alu.{AluResult64, alu64_compute, i64_signed_lt}
+use std.hardware.rv64gc_rtl.regfile.{RegFile64, RegReadResult64, regfile64_create, regfile64_read, regfile64_write}
+use std.hardware.rv64gc_rtl.lsu.lsu64_load
+use std.hardware.rv64gc_rtl.mul_div.{MulDivState, mul_div_ready, muldiv_execute, mul_div_start, mul_div_tick}
+use std.hardware.rv64gc_rtl.pkg.{MULDIV_MUL, MULDIV_MULH, MULDIV_MULHSU, MULDIV_MULHU}
+use std.hardware.rv64gc_rtl.pkg.{MULDIV_DIV, MULDIV_DIVU, MULDIV_REM, MULDIV_REMU}
+use std.hardware.rv64gc_rtl.pkg.{MULDIV_MULW, MULDIV_DIVW, MULDIV_DIVUW, MULDIV_REMW, MULDIV_REMUW}
+use std.hardware.rv64gc_rtl.atomics.{AtomicsState, atomics_create, atomics_lr, atomics_sc, atomics_invalidate, amo_compute}
+use std.hardware.rv64gc_rtl.pkg.{AMO_LR, AMO_SC, AMO_SWAP, AMO_ADD, AMO_XOR, AMO_AND, AMO_OR}
+use std.hardware.rv64gc_rtl.pkg.{AMO_MIN, AMO_MAX, AMO_MINU, AMO_MAXU}
+use std.hardware.rv64gc_rtl.csr.{CsrFile64, csr64_create, csr64_read, csr64_write, csr64_tick, csr64_retire}
+use std.hardware.rv64gc_rtl.csr.{csr64_fs_state, csr64_set_fs, csr64_mark_fp_dirty, FS_OFF, FS_INITIAL}
+use std.hardware.rv64gc_rtl.csr.{CsrExt64, csr_ext64_create, csr_ext64_read, csr_ext64_write, csr_ext64_known}
+use std.hardware.rv64gc_rtl.csr.{MSTATUS_MIE_MASK, MSTATUS_MPP_MASK, MSTATUS_MPP_LO_BIT, MSTATUS_FS_MASK, MSTATUS_SD_MASK, MIP_MEIP_MASK, MIP_MSIP_MASK, MIP_MTIP_MASK}
+use std.hardware.rv64gc_rtl.csr_s.{CsrSMode64, csr_s64_create, csr_s64_read, csr_s64_write}
+use std.hardware.rv64gc_rtl.trap.{trap64_mret, trap64_sret, trap64_sret_csr}
+use std.hardware.rv64gc_rtl.trap.{InterruptCheckResult64, trap64_check_interrupt_deleg, trap64_enter, trap64_state_init}
+use std.hardware.rv64gc_rtl.trap.{CAUSE_ILLEGAL_INSN, CAUSE_BREAKPOINT, cause_mei, cause_msi, cause_mti}
+use std.hardware.rv64gc_rtl.trap.{CAUSE_LOAD_MISALIGNED, CAUSE_STORE_MISALIGNED}
+use std.hardware.rv64gc_rtl.mmu_sv39.{MmuState64, mmu64_create, mmu64_flush, mmu64_set_satp}
+use std.hardware.rv64gc_rtl.mmu_sv39.{ACCESS_FETCH_64, ACCESS_LOAD_64, ACCESS_STORE_64}
+use std.hardware.rv64gc_rtl.csr_s.{SSTATUS_SIE_MASK_64, SSTATUS_SUM_MASK_64, SSTATUS_MXR_MASK_64}
+use std.hardware.rv64gc_rtl.fpu.{FpuConfig, FpuUnit, Fcsr, FRegFile64, fregfile_create, fcsr_create, fpu_config_enabled, fpu_config_disabled, fpu_execute, fpu_fmv_from_int, fpu_cvt_int_to_float, fpu_load_writeback, fpu_store_data, fcsr_read_csr, fcsr_write_csr, FpuStep, OP_FP, OP_LOAD_FP, OP_STORE_FP, OP_FMADD, OP_FMSUB, OP_FNMSUB, OP_FNMADD}
+use std.hardware.rv64gc_rtl.memory_access.MemoryAccessState64
+use std.hardware.rv64gc_rtl.memory_access.{memory64_start, memory64_start_atomic_read}
+use std.hardware.rv64gc_rtl.memory_access.{memory64_start_lr, memory64_start_atomic_store}
+use std.hardware.rv64gc_rtl.memory_access.{memory64_start_conditional_store, memory64_cycle}
+use std.hardware.rv64gc_rtl.pmp.PmpEntries64
+use std.hardware.rv64gc_rtl.pmp_csr.{pmp64_entries_reset, pmp64_csr_read, pmp64_csr_write}
+use std.hardware.rv64gc_rtl.rvfi_base.{RvfiTrace64, rvfi64_mask_for_width}
+use std.hardware.rv64gc_rtl.core_types.{CoreState64, CoreCombResult64, CORE64_FETCH_LOW, CORE64_FETCH_HIGH}
+use std.hardware.rv64gc_rtl.core_types.{CORE64_DATA_ACCESS, CORE64_MULDIV, CORE64_ATOMIC_LOAD, CORE64_ATOMIC_STORE, CORE64_WFI}
+use std.hardware.rv64gc_rtl.core_types.CORE64_MSTATUS_MPRV_MASK
+use std.hardware.rv64gc_rtl.core_helpers.{core64_csr_access, core64_csr_source, core64_sync_sstatus_fp}
+use std.hardware.rv64gc_rtl.core_helpers.{core64_instruction_legal, core64_privileged_instruction_legal, core64_is_fp}
+use std.hardware.rv64gc_rtl.core.{core64_init, core64_update, core64_combinational_length}
+use std.hardware.rv64gc_rtl.core.{core64_wfi_wakeup_pending, core64_fp_config_allows, core64_is_fcsr_addr}
+
+struct Core64CycleResult:
+    """One clock result and the canonical physical bus request."""
+    state: CoreState64
+    bus_valid: bool
+    bus_addr: i64
+    bus_size: u32
+    bus_write: bool
+    bus_wdata: i64
+    bus_is_pte: bool
+    bus_atomic: bool
+    rvfi: RvfiTrace64
+
+# ============================================================================
+# Clocked protected-memory core path
+# ============================================================================
+
+fn core64_init_single_master(reset_vec: i64) -> CoreState64:
+    """Enable protected A operations only for an exclusive memory master."""
+    var out = core64_init(reset_vec)
+    out.atomic_bus_exclusive = true
+    out.csr_m.misa = out.csr_m.misa | 1
+    out
+
+@hardware
+fn core64_sum_enabled(state: CoreState64) -> bool:
+    (state.csr_m.mstatus & SSTATUS_SUM_MASK_64) != 0
+
+@hardware
+fn core64_mxr_enabled(state: CoreState64) -> bool:
+    (state.csr_m.mstatus & SSTATUS_MXR_MASK_64) != 0
+
+@hardware
+fn core64_data_size(funct3: u32) -> u32:
+    val width = funct3 & 0x3
+    if width == 0: return 1
+    if width == 1: return 2
+    if width == 2: return 4
+    8
+
+@hardware
+fn core64_data_privilege(state: CoreState64) -> u32:
+    """MPRV applies to data/atomic access, never instruction fetch."""
+    if state.priv_mode != 3 or (state.csr_m.mstatus & CORE64_MSTATUS_MPRV_MASK) == 0:
+        return state.priv_mode as u32
+    val mpp = (state.csr_m.mstatus & MSTATUS_MPP_MASK) >> MSTATUS_MPP_LO_BIT
+    if mpp == 0 or mpp == 1 or mpp == 3:
+        return mpp as u32
+    3
+
+@hardware
+fn core64_data_sum_enabled(state: CoreState64) -> bool:
+    core64_data_privilege(state) == 1 and core64_sum_enabled(state)
+
+@hardware
+fn core64_data_mxr_enabled(state: CoreState64) -> bool:
+    core64_data_privilege(state) != 3 and core64_mxr_enabled(state)
+
+@hardware
+fn core64_atomic_size(dec: DecodeResult64) -> u32:
+    if dec.funct3 == 2: return 4
+    # core64_instruction_legal admits only .W/.D AMOs, so atomics never hand
+    # the generic memory frontend a byte or halfword request.
+    8
+
+@hardware
+fn core64_atomic_read_value(dec: DecodeResult64, value: i64) -> i64:
+    if dec.funct3 == 2:
+        return sign_extend_to_64(value & 0xFFFF_FFFF, 32)
+    value
+
+@hardware
+fn core64_atomic_write_value(funct5: u32, dec: DecodeResult64,
+                             old_value: i64, rs2_value: i64) -> i64:
+    if dec.funct3 != 2:
+        return amo_compute(funct5, old_value, rs2_value).new_value
+    val old_word = old_value & 0xFFFF_FFFF
+    val rs2_word = rs2_value & 0xFFFF_FFFF
+    var value = old_word
+    if funct5 == AMO_SWAP: value = rs2_word
+    else if funct5 == AMO_ADD: value = old_word + rs2_word
+    else if funct5 == AMO_XOR: value = old_word ^ rs2_word
+    else if funct5 == AMO_AND: value = old_word & rs2_word
+    else if funct5 == AMO_OR: value = old_word | rs2_word
+    else if funct5 == AMO_MIN:
+        if sign_extend_to_64(rs2_word, 32) < sign_extend_to_64(old_word, 32): value = rs2_word
+    else if funct5 == AMO_MAX:
+        if sign_extend_to_64(rs2_word, 32) > sign_extend_to_64(old_word, 32): value = rs2_word
+    else if funct5 == AMO_MINU:
+        if rs2_word < old_word: value = rs2_word
+    else if funct5 == AMO_MAXU:
+        if rs2_word > old_word: value = rs2_word
+    value & 0xFFFF_FFFF
+
+@hardware
+fn core64_muldiv_op(dec: DecodeResult64) -> i64:
+    if dec.opcode == OP_OP_32:
+        if dec.funct3 == 0: return MULDIV_MULW
+        if dec.funct3 == 4: return MULDIV_DIVW
+        if dec.funct3 == 5: return MULDIV_DIVUW
+        if dec.funct3 == 6: return MULDIV_REMW
+        return MULDIV_REMUW
+    if dec.funct3 == 0: return MULDIV_MUL
+    if dec.funct3 == 1: return MULDIV_MULH
+    if dec.funct3 == 2: return MULDIV_MULHSU
+    if dec.funct3 == 3: return MULDIV_MULHU
+    if dec.funct3 == 4: return MULDIV_DIV
+    if dec.funct3 == 5: return MULDIV_DIVU
+    if dec.funct3 == 6: return MULDIV_REM
+    MULDIV_REMU
+
+@hardware
+fn core64_restart_fetch(state: CoreState64) -> CoreState64:
+    var out = state
+    out.pipeline_phase = CORE64_FETCH_LOW
+    out.fetch_low = 0
+    out.wfi_wait = false
+    out.memory = memory64_start(out.mmu, out.pmp, out.pc, ACCESS_FETCH_64, 2,
+        out.priv_mode as u32, core64_sum_enabled(out), core64_mxr_enabled(out), 0)
+    out
+
+@hardware
+fn core64_raise_exception(state: CoreState64, cause: i64, tval: i64) -> CoreState64:
+    val trap = trap64_enter(trap64_state_init(), cause, tval, state.pc,
+        state.priv_mode, state.csr_m, state.csr_s)
+    var out = state
+    out.pc = trap.trap_pc
+    out.priv_mode = trap.target_mode
+    out.csr_m = trap.csr
+    out.csr_s = core64_sync_sstatus_fp(trap.csr_s, trap.csr)
+    out.atomics = atomics_create()
+    out.atomic_old = 0
+    out.atomic_reservation_size = 0
+    out.semi_phase = 0
+    out.semi_suppress = false
+    out.wfi_wait = false
+    core64_restart_fetch(out)
+
+@hardware
+fn core64_raise_sync_exception(state: CoreState64, cause: i64, tval: i64,
+                               instruction: u32) -> CoreState64:
+    """Take one synchronous exception and expose it as one RVFI event."""
+    var out = core64_raise_exception(state, cause, tval)
+    out.rvfi_valid = true
+    out.rvfi_trap = true
+    out.rvfi_insn = instruction
+    out.rvfi_pc_wdata = out.pc
+    out.rvfi_order = state.rvfi_order + 1
+    out
+
+@hardware
+fn core64_finish_instruction(state: CoreState64) -> CoreState64:
+    var out = state
+    out.csr_m = csr64_retire(out.csr_m)
+    out.wfi_wait = false
+    out.rvfi_valid = true
+    out.rvfi_trap = false
+    out.rvfi_order = state.rvfi_order + 1
+    if out.halt: return out
+    val interrupt = trap64_check_interrupt_deleg(out.priv_mode, out.csr_m, out.csr_s)
+    if interrupt.pending:
+        return core64_raise_exception(out, interrupt.cause, 0)
+    core64_restart_fetch(out)
+
+@hardware
+fn core64_fp_memory_opcode(opcode: i64) -> bool:
+    opcode == OP_LOAD_FP or opcode == OP_STORE_FP
+
+@hardware
+fn core64_fp_compute_legal(state: CoreState64, instruction: u32,
+                            comb: CoreCombResult64) -> bool:
+    val unit = FpuUnit(cfg: state.fpu_cfg, frf: state.frf, fcsr: state.fcsr)
+    val opcode = (instruction as i64) & 0x7F
+    var step = fpu_execute(unit, instruction as i64)
+    val funct5 = ((instruction as i64) >> 27) & 0x1F
+    if opcode == OP_FP and funct5 == 0x1E:
+        step = fpu_fmv_from_int(unit, comb.dec.rd, ((instruction >> 25) & 3) == 1,
+            comb.rs1_data)
+    else if opcode == OP_FP and funct5 == 0x1A:
+        step = fpu_cvt_int_to_float(unit, instruction as i64, comb.rs1_data)
+    not step.illegal
+
+@hardware
+fn core64_invalidate_reservation(state: CoreState64, paddr: i64,
+                                 size_bytes: u32) -> CoreState64:
+    if not state.atomics.reservation_valid:
+        return state
+    val reserved_size = state.atomic_reservation_size as i64
+    val store_size = size_bytes as i64
+    val reserved_end = state.atomics.reservation_addr + reserved_size
+    val store_end = paddr + store_size
+    if reserved_size > 0 and store_size > 0 and paddr < reserved_end and
+        state.atomics.reservation_addr < store_end:
+        var out = state
+        out.atomics = atomics_create()
+        out.atomic_reservation_size = 0
+        return out
+    state
+
+@hardware
+fn core64_begin_instruction(state: CoreState64, instruction: u32,
+                            instruction_bytes: u32, trap_value: i64) -> CoreState64:
+    """Validate and begin one expanded 16/32-bit architectural instruction."""
+    var out = state
+    out.instruction = instruction
+    out.instruction_bytes = instruction_bytes
+    out.rvfi_insn = if instruction_bytes == 2: trap_value as u32 else: instruction
+    val comb = core64_combinational_length(out, instruction, 0, out.rf,
+        instruction_bytes)
+    val opcode = (instruction as i64) & 0x7F
+    val is_fp = core64_is_fp(opcode)
+    val legal = core64_instruction_legal(instruction, comb.dec) and
+        core64_privileged_instruction_legal(out, comb.dec) and
+        (not comb.dec.is_amo or out.atomic_bus_exclusive)
+    if not legal:
+        return core64_raise_sync_exception(out, CAUSE_ILLEGAL_INSN, trap_value,
+            out.rvfi_insn)
+
+    if is_fp:
+        if not core64_fp_config_allows(out.fpu_cfg, instruction, comb.dec) or
+            csr64_fs_state(out.csr_m) == FS_OFF:
+            return core64_raise_sync_exception(out, CAUSE_ILLEGAL_INSN,
+                trap_value, out.rvfi_insn)
+        if core64_fp_memory_opcode(opcode):
+            val access = if opcode == OP_STORE_FP: ACCESS_STORE_64 else: ACCESS_LOAD_64
+            out.pipeline_phase = CORE64_DATA_ACCESS
+            out.memory = memory64_start(out.mmu, out.pmp, comb.dmem_addr, access,
+                core64_data_size(comb.dec.funct3), core64_data_privilege(out),
+                core64_data_sum_enabled(out), core64_data_mxr_enabled(out), comb.dmem_wdata)
+            return out
+        if not core64_fp_compute_legal(out, instruction, comb):
+            return core64_raise_sync_exception(out, CAUSE_ILLEGAL_INSN,
+                trap_value, out.rvfi_insn)
+        out = core64_update(out, instruction, comb, comb.a0_val, comb.a1_val)
+        return core64_finish_instruction(out)
+
+    # core64_update retains legacy direct-step trap handling.  The clocked
+    # path must take these synchronous traps before calling finish_instruction,
+    # otherwise it would retire them and could replace them with an interrupt.
+    if comb.dec.is_csr:
+        if core64_is_fcsr_addr(comb.dec.csr_addr as i64):
+            if not out.fpu_cfg.enabled or csr64_fs_state(out.csr_m) == FS_OFF:
+                return core64_raise_sync_exception(out, CAUSE_ILLEGAL_INSN,
+                    trap_value, out.rvfi_insn)
+        else:
+            val source = core64_csr_source(comb.dec.funct3, comb.dec.rs1,
+                comb.rs1_data)
+            if not core64_csr_access(out, comb.dec.csr_addr, source,
+                comb.dec.funct3).valid:
+                return core64_raise_sync_exception(out, CAUSE_ILLEGAL_INSN,
+                    trap_value, out.rvfi_insn)
+
+    val semihost_break = instruction_bytes == 4 and instruction == SEMI_BREAK and
+        out.semi_phase == 1
+    if comb.dec.opcode == OP_SYSTEM and not comb.dec.is_csr and
+        not comb.dec.is_mret and not comb.dec.is_sret and
+        not comb.dec.is_sfence_vma and not comb.dec.is_wfi and not semihost_break:
+        val cause = if instruction == 0x00000073:
+            if out.priv_mode == 0: 8 else if out.priv_mode == 1: 9 else: 11
+        else: CAUSE_BREAKPOINT
+        return core64_raise_sync_exception(out, cause, 0, out.rvfi_insn)
+
+    if comb.dec.is_wfi:
+        val pending = core64_wfi_wakeup_pending(out)
+        val enabled = (out.csr_m.mstatus & MSTATUS_MIE_MASK) != 0
+        if pending or not enabled:
+            out = core64_update(out, instruction, comb, comb.a0_val, comb.a1_val)
+            return core64_finish_instruction(out)
+        out.pc = comb.pc_plus4
+        out.pipeline_phase = CORE64_WFI
+        out.wfi_wait = true
+        out.csr_m = csr64_retire(out.csr_m)
+        out.rvfi_valid = true
+        out.rvfi_trap = false
+        out.rvfi_insn = if instruction_bytes == 2: trap_value as u32 else: instruction
+        out.rvfi_pc_wdata = out.pc
+        out.rvfi_order = state.rvfi_order + 1
+        return out
+
+    if comb.dec.is_amo:
+        val funct5 = (instruction >> 27) & 0x1F
+        val size = core64_atomic_size(comb.dec)
+        if funct5 == AMO_SC:
+            val reservation = out.atomics
+            val reservation_size = out.atomic_reservation_size
+            out.atomics = atomics_create()
+            out.atomic_reservation_size = 0
+            out.pipeline_phase = CORE64_ATOMIC_STORE
+            out.memory = memory64_start_conditional_store(out.mmu, out.pmp,
+                comb.rs1_data, size, core64_data_privilege(out),
+                core64_data_sum_enabled(out), core64_data_mxr_enabled(out), comb.rs2_data,
+                reservation.reservation_valid, reservation.reservation_addr,
+                reservation_size)
+        else:
+            out.pipeline_phase = CORE64_ATOMIC_LOAD
+            if funct5 == AMO_LR:
+                out.memory = memory64_start_lr(out.mmu, out.pmp, comb.rs1_data,
+                    size, core64_data_privilege(out), core64_data_sum_enabled(out),
+                    core64_data_mxr_enabled(out))
+            else:
+                out.memory = memory64_start_atomic_read(out.mmu, out.pmp,
+                    comb.rs1_data, size, core64_data_privilege(out),
+                    core64_data_sum_enabled(out), core64_data_mxr_enabled(out))
+        return out
+
+    if comb.dec.is_muldiv:
+        out.pipeline_phase = CORE64_MULDIV
+        out.mul_div = mul_div_start(core64_muldiv_op(comb.dec), comb.rs1_data,
+            comb.rs2_data)
+        return out
+
+    if comb.dec.mem_read or comb.dec.mem_write:
+        val access = if comb.dec.mem_write: ACCESS_STORE_64 else: ACCESS_LOAD_64
+        out.pipeline_phase = CORE64_DATA_ACCESS
+        out.memory = memory64_start(out.mmu, out.pmp, comb.dmem_addr, access,
+            core64_data_size(comb.dec.funct3), core64_data_privilege(out),
+            core64_data_sum_enabled(out), core64_data_mxr_enabled(out), comb.dmem_wdata)
+        return out
+
+    out = core64_update(out, instruction, comb, comb.a0_val, comb.a1_val)
+    core64_finish_instruction(out)
+
+@hardware
+fn core64_rvfi_width(size_bytes: u32) -> u32:
+    if size_bytes == 1: return 0
+    if size_bytes == 2: return 1
+    if size_bytes == 4: return 2
+    3
+
+@hardware
+fn core64_rvfi_data_mask(size_bytes: u32) -> i64:
+    if size_bytes == 1: return 0xFF
+    if size_bytes == 2: return 0xFFFF
+    if size_bytes == 4: return 0xFFFF_FFFF
+    -1
+
+@hardware
+fn core64_rvfi_invalid(order: i64) -> RvfiTrace64:
+    RvfiTrace64(rvfi_valid: false, rvfi_order: order, rvfi_insn: 0,
+        rvfi_trap: false, rvfi_intr: false, rvfi_rs1_addr: 0, rvfi_rs2_addr: 0,
+        rvfi_rs1_rdata: 0, rvfi_rs2_rdata: 0, rvfi_rd_addr: 0,
+        rvfi_rd_wdata: 0, rvfi_pc_rdata: 0, rvfi_pc_wdata: 0,
+        rvfi_mem_addr: 0, rvfi_mem_rmask: 0, rvfi_mem_wmask: 0,
+        rvfi_mem_rdata: 0, rvfi_mem_wdata: 0)
+
+@hardware
+fn core64_rvfi_for_cycle(before: CoreState64, after: CoreState64,
+                         mem_paddr: i64, mem_size: u32,
+                         mem_read_data: i64, mem_write_data: i64,
+                         conditional_failed: bool) -> RvfiTrace64:
+    """Build RVFI only from the protected transition that produced the event."""
+    if not after.rvfi_valid:
+        return core64_rvfi_invalid(after.rvfi_order)
+
+    val decode_insn = if after.rvfi_trap: after.rvfi_insn else: after.instruction
+    val dec = decode_instruction_64(decode_insn)
+    val rr = regfile64_read(before.rf, dec.rs1, dec.rs2)
+    val rd_before = regfile64_read(before.rf, dec.rd, 0).rs1_data
+    val rd_after = regfile64_read(after.rf, dec.rd, 0).rs1_data
+    val comb = core64_combinational_length(before, decode_insn,
+        mem_read_data, before.rf, after.instruction_bytes)
+    val writes_rd = not after.rvfi_trap and dec.rd != 0 and
+        (comb.rd_write or dec.is_muldiv or dec.is_amo or rd_before != rd_after)
+    val rd_addr = if writes_rd: dec.rd else: 0
+    val rd_wdata = if writes_rd: rd_after else: 0
+
+    var mem_addr: i64 = 0
+    var mem_rmask: u32 = 0
+    var mem_wmask: u32 = 0
+    var mem_rdata: i64 = 0
+    var mem_wdata: i64 = 0
+    if not after.rvfi_trap:
+        val lane: u32 = (mem_paddr & 7) as u32
+        val lane_bits: i64 = (lane as i64) * 8
+        val mask = rvfi64_mask_for_width(core64_rvfi_width(mem_size)) << lane
+        val data_mask = core64_rvfi_data_mask(mem_size)
+        val shifted_read_data = (mem_read_data & data_mask) << lane_bits
+        val shifted_write_data = (mem_write_data & data_mask) << lane_bits
+        val opcode = (after.instruction as i64) & 0x7F
+        if before.pipeline_phase == CORE64_DATA_ACCESS:
+            mem_addr = mem_paddr
+            if opcode == OP_STORE or opcode == OP_STORE_FP:
+                mem_wmask = mask
+                mem_wdata = shifted_write_data
+            else:
+                mem_rmask = mask
+                mem_rdata = shifted_read_data
+        else if before.pipeline_phase == CORE64_ATOMIC_LOAD:
+            val funct5 = (after.instruction >> 27) & 0x1F
+            if funct5 == AMO_LR:
+                mem_addr = mem_paddr
+                mem_rmask = mask
+                mem_rdata = shifted_read_data
+        else if before.pipeline_phase == CORE64_ATOMIC_STORE:
+            val funct5 = (after.instruction >> 27) & 0x1F
+            mem_addr = mem_paddr
+            if funct5 != AMO_SC:
+                mem_rmask = mask
+                mem_rdata = (before.atomic_old & data_mask) << lane_bits
+            if not conditional_failed:
+                mem_wmask = mask
+                mem_wdata = shifted_write_data
+
+    RvfiTrace64(rvfi_valid: true, rvfi_order: after.rvfi_order - 1,
+        rvfi_insn: after.rvfi_insn, rvfi_trap: after.rvfi_trap,
+        rvfi_intr: false,
+        rvfi_rs1_addr: dec.rs1, rvfi_rs2_addr: dec.rs2,
+        rvfi_rs1_rdata: rr.rs1_data, rvfi_rs2_rdata: rr.rs2_data,
+        rvfi_rd_addr: rd_addr, rvfi_rd_wdata: rd_wdata,
+        rvfi_pc_rdata: before.pc,
+        rvfi_pc_wdata: after.rvfi_pc_wdata,
+        rvfi_mem_addr: mem_addr, rvfi_mem_rmask: mem_rmask,
+        rvfi_mem_wmask: mem_wmask, rvfi_mem_rdata: mem_rdata,
+        rvfi_mem_wdata: mem_wdata)
+
+@hardware
+fn core64_cycle_result(before: CoreState64, after: CoreState64,
+                       bus_valid: bool, bus_addr: i64, bus_size: u32,
+                       bus_write: bool, bus_wdata: i64, bus_is_pte: bool,
+                       bus_atomic: bool, mem_paddr: i64, mem_size: u32,
+                       mem_read_data: i64, mem_write_data: i64,
+                       conditional_failed: bool) -> Core64CycleResult:
+    val trace = core64_rvfi_for_cycle(before, after, mem_paddr, mem_size,
+        mem_read_data, mem_write_data, conditional_failed)
+    Core64CycleResult(state: after, bus_valid: bus_valid, bus_addr: bus_addr,
+        bus_size: bus_size, bus_write: bus_write, bus_wdata: bus_wdata,
+        bus_is_pte: bus_is_pte, bus_atomic: bus_atomic, rvfi: trace)
+
+@hardware
+fn core64_cycle(state: CoreState64, request_ready: bool, response_valid: bool,
+                response_error: bool, response_data: i64) -> Core64CycleResult:
+    """Advance one staged Sv39/PMP protected core clock."""
+    var out = state
+    out.rvfi_valid = false
+    out.rvfi_trap = false
+    if state.halt:
+        return core64_cycle_result(state, out, false, 0, 1, false, 0,
+            false, false, 0, 1, 0, 0, false)
+
+    out.csr_m = csr64_tick(out.csr_m)
+    out.semi_trigger = false
+
+    if state.pipeline_phase == CORE64_WFI:
+        val interrupt = trap64_check_interrupt_deleg(out.priv_mode, out.csr_m,
+            out.csr_s)
+        if interrupt.pending:
+            out.wfi_wait = false
+            out = core64_raise_exception(out, interrupt.cause, 0)
+        else if core64_wfi_wakeup_pending(out):
+            # WFI wakeup observes raw locally enabled pending interrupts even
+            # when privilege/global gating prevents taking the trap now.
+            out = core64_restart_fetch(out)
+        return core64_cycle_result(state, out, false, 0, 1, false, 0,
+            false, false, 0, 1, 0, 0, false)
+
+    if state.pipeline_phase == CORE64_MULDIV:
+        val mul_div = mul_div_tick(state.mul_div)
+        out.mul_div = mul_div
+        if not mul_div.busy:
+            var comb = core64_combinational_length(out, state.instruction, 0,
+                out.rf, state.instruction_bytes)
+            comb.rd_data = mul_div.result
+            comb.rd_write = true
+            out = core64_update(out, state.instruction, comb, comb.a0_val, comb.a1_val)
+            out = core64_finish_instruction(out)
+        return core64_cycle_result(state, out, false, 0, 1, false, 0,
+            false, false, 0, 1, 0, 0, false)
+
+    val mem = memory64_cycle(state.memory, state.mmu, state.pmp, request_ready,
+        response_valid, response_error, response_data)
+    out.memory = mem.state
+    out.mmu = mem.mmu
+    if mem.done:
+        if mem.fault:
+            val fault_insn = if state.pipeline_phase == CORE64_FETCH_HIGH:
+                state.fetch_low else if state.pipeline_phase == CORE64_FETCH_LOW:
+                0 else: state.instruction
+            out = core64_raise_sync_exception(out, mem.fault_cause,
+                mem.fault_tval, fault_insn)
+        else if state.pipeline_phase == CORE64_ATOMIC_LOAD:
+            var comb = core64_combinational_length(out, state.instruction, 0,
+                out.rf, state.instruction_bytes)
+            val funct5 = (state.instruction >> 27) & 0x1F
+            if funct5 == AMO_LR:
+                val reservation_paddr = mem.state.paddr
+                val reservation_size = core64_atomic_size(comb.dec)
+                out.atomics = atomics_lr(out.atomics, reservation_paddr)
+                out.atomic_reservation_size = reservation_size
+                comb.rd_data = core64_atomic_read_value(comb.dec, mem.read_data)
+                comb.rd_write = true
+                out = core64_update(out, state.instruction, comb, comb.a0_val, comb.a1_val)
+                # Legacy update records comb.dmem_addr (the VA).  The protected
+                # LR/SC contract reserves the translated physical granule.
+                out.atomics = atomics_lr(out.atomics, reservation_paddr)
+                out.atomic_reservation_size = reservation_size
+                out = core64_finish_instruction(out)
+            else:
+                out.atomic_old = core64_atomic_read_value(comb.dec, mem.read_data)
+                out.pipeline_phase = CORE64_ATOMIC_STORE
+                out.memory = memory64_start_atomic_store(out.mmu, out.pmp,
+                    state.memory.vaddr, core64_atomic_size(comb.dec),
+                    core64_data_privilege(out), core64_data_sum_enabled(out),
+                    core64_data_mxr_enabled(out), core64_atomic_write_value(funct5,
+                    comb.dec, mem.read_data, comb.rs2_data))
+        else if state.pipeline_phase == CORE64_ATOMIC_STORE:
+            var comb = core64_combinational_length(out, state.instruction, 0,
+                out.rf, state.instruction_bytes)
+            val funct5 = (state.instruction >> 27) & 0x1F
+            if funct5 == AMO_SC:
+                comb.rd_data = if mem.state.conditional_failed: 1 else: 0
+            else:
+                comb.rd_data = state.atomic_old
+                out = core64_invalidate_reservation(out, mem.state.paddr,
+                    core64_atomic_size(comb.dec))
+            comb.rd_write = true
+            out.atomic_old = 0
+            out = core64_update(out, state.instruction, comb, comb.a0_val, comb.a1_val)
+            out = core64_finish_instruction(out)
+        else if state.pipeline_phase == CORE64_FETCH_LOW:
+            val parcel = (mem.read_data & 0xFFFF) as u32
+            if (parcel & 0x3) != 0x3:
+                val expanded = rvc_expand(parcel)
+                if expanded.legal:
+                    out = core64_begin_instruction(out, expanded.insn, 2, parcel as i64)
+                else:
+                    out = core64_raise_sync_exception(out, CAUSE_ILLEGAL_INSN,
+                        parcel as i64, parcel)
+            else if (parcel & 0x1F) == 0x1F:
+                out = core64_raise_sync_exception(out, CAUSE_ILLEGAL_INSN, 0,
+                    parcel)
+            else:
+                out.fetch_low = parcel
+                out.pipeline_phase = CORE64_FETCH_HIGH
+                out.memory = memory64_start(out.mmu, out.pmp, out.pc + 2,
+                    ACCESS_FETCH_64, 2, out.priv_mode as u32,
+                    core64_sum_enabled(out), core64_mxr_enabled(out), 0)
+        else if state.pipeline_phase == CORE64_FETCH_HIGH:
+            val instruction = state.fetch_low | (((mem.read_data & 0xFFFF) as u32) << 16)
+            out = core64_begin_instruction(out, instruction, 4, instruction as i64)
+        else:
+            val comb = core64_combinational_length(out, state.instruction,
+                mem.read_data, out.rf, state.instruction_bytes)
+            val opcode = (state.instruction as i64) & 0x7F
+            if comb.dec.mem_write or opcode == OP_STORE_FP:
+                out = core64_invalidate_reservation(out, mem.state.paddr,
+                    core64_data_size(comb.dec.funct3))
+            out = core64_update(out, state.instruction, comb, comb.a0_val, comb.a1_val)
+            out = core64_finish_instruction(out)
+
+    core64_cycle_result(state, out, mem.bus_valid, mem.bus_addr, mem.bus_size,
+        mem.bus_write, mem.bus_wdata, mem.bus_is_pte, mem.bus_atomic,
+        mem.state.paddr, mem.state.size_bytes, mem.read_data,
+        mem.state.write_data, mem.state.conditional_failed)

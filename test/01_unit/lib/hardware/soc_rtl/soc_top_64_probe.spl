@@ -4,6 +4,7 @@
 # this probe mirrors the "SocTop64 Program Execution" spec cases and prints
 # PASS/FAIL. Run: bin/simple run test/01_unit/lib/hardware/soc_rtl/soc_top_64_probe.spl
 use std.hardware.soc_rtl.soc_top_64.{SocTop64State, soc_top_64_init, soc_top_64_tick, soc64_uart_push_rx}
+use std.hardware.rv64gc_rtl.regfile.regfile64_read_one
 use std.hardware.soc_rtl.ram64.{ram64_read, ram64_write}
 
 fn check(name: text, ok: bool) -> i64:
@@ -31,11 +32,11 @@ fn main() -> i64:
     while i < 20:
         soc = soc_top_64_tick(soc)
         i = i + 1
-    print("case1 pc={soc.core.pc} x1={soc.core.rf.regs[1]} x2={soc.core.rf.regs[2]} x3={soc.core.rf.regs[3]} mtime={soc.clint.mtime}")
+    print("case1 pc={soc.core.pc} x1={regfile64_read_one(soc.core.rf, 1)} x2={regfile64_read_one(soc.core.rf, 2)} x3={regfile64_read_one(soc.core.rf, 3)} mtime={soc.clint.mtime}")
     fails = fails + check("case1 pc parks at jal self-loop 0x80000014", soc.core.pc == 0x8000_0014)
-    fails = fails + check("case1 x1 == 42 (poison skipped by taken bne)", soc.core.rf.regs[1] == 42)
-    fails = fails + check("case1 x2 == 43", soc.core.rf.regs[2] == 43)
-    fails = fails + check("case1 x3 == 7", soc.core.rf.regs[3] == 7)
+    fails = fails + check("case1 x1 == 42 (poison skipped by taken bne)", regfile64_read_one(soc.core.rf, 1) == 42)
+    fails = fails + check("case1 x2 == 43", regfile64_read_one(soc.core.rf, 2) == 43)
+    fails = fails + check("case1 x3 == 7", regfile64_read_one(soc.core.rf, 3) == 7)
     fails = fails + check("case1 clint mtime ticked 20", soc.clint.mtime == 20)
 
     # ── Case 2: store then load round-trip through RAM via the core ──
@@ -54,10 +55,10 @@ fn main() -> i64:
         soc2 = soc_top_64_tick(soc2)
         j = j + 1
     val stored = ram64_read(soc2.ram, 0x40, 4)
-    print("case2 pc={soc2.core.pc} x6={soc2.core.rf.regs[6]} mem[0x40]={stored}")
+    print("case2 pc={soc2.core.pc} x6={regfile64_read_one(soc2.core.rf, 6)} mem[0x40]={stored}")
     fails = fails + check("case2 pc parks at 0x80000014", soc2.core.pc == 0x8000_0014)
     fails = fails + check("case2 sw wrote 55 to RAM", stored == 55)
-    fails = fails + check("case2 lw read 55 back into x6", soc2.core.rf.regs[6] == 55)
+    fails = fails + check("case2 lw read 55 back into x6", regfile64_read_one(soc2.core.rf, 6) == 55)
 
     # ── Case 3: full RV64 bootrom sequence — reset vector to DRAM handoff ──
     # bootrom_read64 zero-extends each lui with slli/srli-32 (fixes the
@@ -68,11 +69,11 @@ fn main() -> i64:
     while k < 11:
         soc3 = soc_top_64_tick(soc3)
         k = k + 1
-    print("case3 pc={soc3.core.pc} sp={soc3.core.rf.regs[2]} a1={soc3.core.rf.regs[11]} t0={soc3.core.rf.regs[5]}")
+    print("case3 pc={soc3.core.pc} sp={regfile64_read_one(soc3.core.rf, 2)} a1={regfile64_read_one(soc3.core.rf, 11)} t0={regfile64_read_one(soc3.core.rf, 5)}")
     fails = fails + check("case3 boot handoff lands at 0x80000000", soc3.core.pc == 0x8000_0000)
-    fails = fails + check("case3 sp == 0x80100000 zero-extended", soc3.core.rf.regs[2] == 0x8010_0000)
-    fails = fails + check("case3 a1 == 0x88000000 zero-extended (DTB)", soc3.core.rf.regs[11] == 0x8800_0000)
-    fails = fails + check("case3 t0 == 0x80000000 zero-extended (entry)", soc3.core.rf.regs[5] == 0x8000_0000)
+    fails = fails + check("case3 sp == 0x80100000 zero-extended", regfile64_read_one(soc3.core.rf, 2) == 0x8010_0000)
+    fails = fails + check("case3 a1 == 0x88000000 zero-extended (DTB)", regfile64_read_one(soc3.core.rf, 11) == 0x8800_0000)
+    fails = fails + check("case3 t0 == 0x80000000 zero-extended (entry)", regfile64_read_one(soc3.core.rf, 5) == 0x8000_0000)
 
     # ── Case 4: MMIO — UART THR/LSR + CLINT mtime via the core ──
     # Stores 'H','I','\n' to UART THR (0x1000_0000), reads LSR into x28
@@ -101,16 +102,16 @@ fn main() -> i64:
     while k < 24:
         soc4 = soc_top_64_tick(soc4)
         k = k + 1
-    print("case4 pc={soc4.core.pc} uart_tx.len={soc4.uart_tx.len()} lsr={soc4.core.rf.regs[28]} mtime1={soc4.core.rf.regs[29]} mtime2={soc4.core.rf.regs[30]}")
+    print("case4 pc={soc4.core.pc} uart_tx.len={soc4.uart_tx.len()} lsr={regfile64_read_one(soc4.core.rf, 28)} mtime1={regfile64_read_one(soc4.core.rf, 29)} mtime2={regfile64_read_one(soc4.core.rf, 30)}")
     fails = fails + check("case4 pc parks at 0x80000038", soc4.core.pc == 0x8000_0038)
     fails = fails + check("case4 uart_tx has 3 bytes", soc4.uart_tx.len() == 3)
     var tx_ok = false
     if soc4.uart_tx.len() == 3:
         tx_ok = soc4.uart_tx[0] == 72 and soc4.uart_tx[1] == 73 and soc4.uart_tx[2] == 10
     fails = fails + check("case4 uart_tx == [72, 73, 10] ('HI\\n')", tx_ok)
-    fails = fails + check("case4 LSR read == 0x60 (THRE|TEMT)", soc4.core.rf.regs[28] == 0x60)
-    fails = fails + check("case4 mtime read 1 nonzero", soc4.core.rf.regs[29] > 0)
-    fails = fails + check("case4 mtime monotonic (read2 > read1)", soc4.core.rf.regs[30] > soc4.core.rf.regs[29])
+    fails = fails + check("case4 LSR read == 0x60 (THRE|TEMT)", regfile64_read_one(soc4.core.rf, 28) == 0x60)
+    fails = fails + check("case4 mtime read 1 nonzero", regfile64_read_one(soc4.core.rf, 29) > 0)
+    fails = fails + check("case4 mtime monotonic (read2 > read1)", regfile64_read_one(soc4.core.rf, 30) > regfile64_read_one(soc4.core.rf, 29))
 
     # ── Case 5: CLINT machine timer interrupt — real CSR writes + MMIO arm ──
     # Guest program: sets mtvec to a handler (0x8000_0100) via csrrw, arms
@@ -151,11 +152,11 @@ fn main() -> i64:
         m = m + 1
     val marker = ram64_read(soc5.ram, 0x200, 4)
     val expected_cause: i64 = (1 << 63) | 7
-    print("case5 pc={soc5.core.pc} marker={marker} x12(mcause)={soc5.core.rf.regs[12]} x13(mepc)={soc5.core.rf.regs[13]} mip={soc5.core.csr_m.mip} mtvec={soc5.core.csr_m.mtvec}")
+    print("case5 pc={soc5.core.pc} marker={marker} x12(mcause)={regfile64_read_one(soc5.core.rf, 12)} x13(mepc)={regfile64_read_one(soc5.core.rf, 13)} mip={soc5.core.csr_m.mip} mtvec={soc5.core.csr_m.mtvec}")
     fails = fails + check("case5 csrrw wrote mtvec (csr write path executed)", soc5.core.csr_m.mtvec == 0x8000_0100)
     fails = fails + check("case5 handler wrote marker 0x123 to RAM", marker == 0x123)
-    fails = fails + check("case5 mcause == machine timer interrupt (bit63|7)", soc5.core.rf.regs[12] == expected_cause)
-    fails = fails + check("case5 mepc == spin pc 0x80000030", soc5.core.rf.regs[13] == 0x8000_0030)
+    fails = fails + check("case5 mcause == machine timer interrupt (bit63|7)", regfile64_read_one(soc5.core.rf, 12) == expected_cause)
+    fails = fails + check("case5 mepc == spin pc 0x80000030", regfile64_read_one(soc5.core.rf, 13) == 0x8000_0030)
     fails = fails + check("case5 mip.MTIP delivered from CLINT (bit 7)", (soc5.core.csr_m.mip & 0x80) != 0)
     fails = fails + check("case5 pc parks in handler at 0x8000011C", soc5.core.pc == 0x8000_011C)
 
@@ -221,11 +222,11 @@ fn main() -> i64:
         n = n + 1
     val marker6 = ram64_read(soc6.ram, 0x300, 4)
     val expected_ext_cause: i64 = (1 << 63) | 11
-    print("case6 pc={soc6.core.pc} marker={marker6} claim1={soc6.core.rf.regs[15]} rbr={soc6.core.rf.regs[17]} claim2={soc6.core.rf.regs[18]} mcause={soc6.core.rf.regs[12]} mepc={soc6.core.csr_m.mepc} mip={soc6.core.csr_m.mip} plic_pend={soc6.plic.pending}")
-    fails = fails + check("case6 mcause == machine external interrupt (bit63|11)", soc6.core.rf.regs[12] == expected_ext_cause)
-    fails = fails + check("case6 first claim returned source 10 (UART)", soc6.core.rf.regs[15] == 10)
-    fails = fails + check("case6 RBR read == 65 ('A')", soc6.core.rf.regs[17] == 65)
-    fails = fails + check("case6 second claim after complete returned 0", soc6.core.rf.regs[18] == 0)
+    print("case6 pc={soc6.core.pc} marker={marker6} claim1={regfile64_read_one(soc6.core.rf, 15)} rbr={regfile64_read_one(soc6.core.rf, 17)} claim2={regfile64_read_one(soc6.core.rf, 18)} mcause={regfile64_read_one(soc6.core.rf, 12)} mepc={soc6.core.csr_m.mepc} mip={soc6.core.csr_m.mip} plic_pend={soc6.plic.pending}")
+    fails = fails + check("case6 mcause == machine external interrupt (bit63|11)", regfile64_read_one(soc6.core.rf, 12) == expected_ext_cause)
+    fails = fails + check("case6 first claim returned source 10 (UART)", regfile64_read_one(soc6.core.rf, 15) == 10)
+    fails = fails + check("case6 RBR read == 65 ('A')", regfile64_read_one(soc6.core.rf, 17) == 65)
+    fails = fails + check("case6 second claim after complete returned 0", regfile64_read_one(soc6.core.rf, 18) == 0)
     fails = fails + check("case6 handler wrote marker 0x321 to RAM", marker6 == 0x321)
     fails = fails + check("case6 mepc == spin pc 0x80000060", soc6.core.csr_m.mepc == 0x8000_0060)
     fails = fails + check("case6 pc parks in handler at 0x80000130", soc6.core.pc == 0x8000_0130)
@@ -250,8 +251,8 @@ fn main() -> i64:
         soca = soc_top_64_tick(soca)
         pa = pa + 1
     val amem = ram64_read(soca.ram, 0x40, 4)
-    print("casea pc={soca.core.pc} x6={soca.core.rf.regs[6]} mem[0x40]={amem}")
-    fails = fails + check("casea amoadd.w rd == old value 5", soca.core.rf.regs[6] == 5)
+    print("casea pc={soca.core.pc} x6={regfile64_read_one(soca.core.rf, 6)} mem[0x40]={amem}")
+    fails = fails + check("casea amoadd.w rd == old value 5", regfile64_read_one(soca.core.rf, 6) == 5)
     fails = fails + check("casea amoadd.w mem == 5+7 = 12", amem == 12)
     fails = fails + check("casea pc parks at 0x80000018", soca.core.pc == 0x8000_0018)
 
@@ -280,10 +281,10 @@ fn main() -> i64:
     val bswap = ram64_read(socb.ram, 0x48, 8)
     val bmaxu = ram64_read(socb.ram, 0x50, 4)
     val neg31: i64 = 0 - 0x8000_0000
-    print("caseb x6={socb.core.rf.regs[6]} mem64[0x48]={bswap} x8={socb.core.rf.regs[8]} mem32[0x50]={bmaxu}")
-    fails = fails + check("caseb amoswap.d rd == old value 100", socb.core.rf.regs[6] == 100)
+    print("caseb x6={regfile64_read_one(socb.core.rf, 6)} mem64[0x48]={bswap} x8={regfile64_read_one(socb.core.rf, 8)} mem32[0x50]={bmaxu}")
+    fails = fails + check("caseb amoswap.d rd == old value 100", regfile64_read_one(socb.core.rf, 6) == 100)
     fails = fails + check("caseb amoswap.d mem == 200", bswap == 200)
-    fails = fails + check("caseb amomaxu.w rd == sign-extended old 0x80000000", socb.core.rf.regs[8] == neg31)
+    fails = fails + check("caseb amomaxu.w rd == sign-extended old 0x80000000", regfile64_read_one(socb.core.rf, 8) == neg31)
     fails = fails + check("caseb amomaxu.w kept 0x80000000 (unsigned max beats 1)", bmaxu == maxu_before)
 
     # ── Case c: LR/SC success path — sc rd=0, memory updated ──
@@ -305,9 +306,9 @@ fn main() -> i64:
         socc = soc_top_64_tick(socc)
         pcc = pcc + 1
     val cmem = ram64_read(socc.ram, 0x60, 4)
-    print("casec x6={socc.core.rf.regs[6]} x8={socc.core.rf.regs[8]} mem[0x60]={cmem} resv={socc.core.atomics.reservation_valid}")
-    fails = fails + check("casec lr.w loaded 11", socc.core.rf.regs[6] == 11)
-    fails = fails + check("casec sc.w succeeded (rd == 0)", socc.core.rf.regs[8] == 0)
+    print("casec x6={regfile64_read_one(socc.core.rf, 6)} x8={regfile64_read_one(socc.core.rf, 8)} mem[0x60]={cmem} resv={socc.core.atomics.reservation_valid}")
+    fails = fails + check("casec lr.w loaded 11", regfile64_read_one(socc.core.rf, 6) == 11)
+    fails = fails + check("casec sc.w succeeded (rd == 0)", regfile64_read_one(socc.core.rf, 8) == 0)
     fails = fails + check("casec sc.w wrote 77", cmem == 77)
     fails = fails + check("casec reservation cleared after sc", socc.core.atomics.reservation_valid == false)
 
@@ -332,9 +333,9 @@ fn main() -> i64:
         socd = soc_top_64_tick(socd)
         pd = pd + 1
     val dmem = ram64_read(socd.ram, 0x70, 4)
-    print("cased x6={socd.core.rf.regs[6]} x8={socd.core.rf.regs[8]} mem[0x70]={dmem}")
-    fails = fails + check("cased lr.w loaded 1", socd.core.rf.regs[6] == 1)
-    fails = fails + check("cased sc.w failed (rd == 1)", socd.core.rf.regs[8] == 1)
+    print("cased x6={regfile64_read_one(socd.core.rf, 6)} x8={regfile64_read_one(socd.core.rf, 8)} mem[0x70]={dmem}")
+    fails = fails + check("cased lr.w loaded 1", regfile64_read_one(socd.core.rf, 6) == 1)
+    fails = fails + check("cased sc.w failed (rd == 1)", regfile64_read_one(socd.core.rf, 8) == 1)
     fails = fails + check("cased mem kept intervening 99 (sc did NOT write 55)", dmem == 99)
 
     # ── Case e: WFI + timer wake — pc holds at wfi, then handler with ──
@@ -369,7 +370,7 @@ fn main() -> i64:
         soce = soc_top_64_tick(soce)
         pe = pe + 1
     val held_pc_30 = soce.core.pc
-    val held_x9_30 = soce.core.rf.regs[9]
+    val held_x9_30 = regfile64_read_one(soce.core.rf, 9)
     while pe < 50:
         soce = soc_top_64_tick(soce)
         pe = pe + 1
@@ -379,13 +380,13 @@ fn main() -> i64:
         pe = pe + 1
     val emarker = ram64_read(soce.ram, 0x300, 4)
     val e_cause: i64 = (1 << 63) | 7
-    print("casee held30={held_pc_30} held50={held_pc_50} pc={soce.core.pc} mcause(x12)={soce.core.rf.regs[12]} mepc(x13)={soce.core.rf.regs[13]} marker={emarker} x9={soce.core.rf.regs[9]}")
+    print("casee held30={held_pc_30} held50={held_pc_50} pc={soce.core.pc} mcause(x12)={regfile64_read_one(soce.core.rf, 12)} mepc(x13)={regfile64_read_one(soce.core.rf, 13)} marker={emarker} x9={regfile64_read_one(soce.core.rf, 9)}")
     fails = fails + check("casee pc held at wfi (0x80000030) at tick 30", held_pc_30 == 0x8000_0030)
     fails = fails + check("casee pc still held at wfi at tick 50 (pre-timer)", held_pc_50 == 0x8000_0030)
     fails = fails + check("casee post-wfi insn NOT executed during hold (x9==0)", held_x9_30 == 0)
     fails = fails + check("casee timer wake entered handler (marker 0x321)", emarker == 0x321)
-    fails = fails + check("casee mcause == machine timer interrupt (bit63|7)", soce.core.rf.regs[12] == e_cause)
-    fails = fails + check("casee mepc == wfi+4 (0x80000034) — resume after wfi", soce.core.rf.regs[13] == 0x8000_0034)
+    fails = fails + check("casee mcause == machine timer interrupt (bit63|7)", regfile64_read_one(soce.core.rf, 12) == e_cause)
+    fails = fails + check("casee mepc == wfi+4 (0x80000034) — resume after wfi", regfile64_read_one(soce.core.rf, 13) == 0x8000_0034)
     fails = fails + check("casee pc parks in handler at 0x80000110", soce.core.pc == 0x8000_0110)
 
     # ── Case f: delegated UART external interrupt lands in S-mode ──
@@ -459,13 +460,13 @@ fn main() -> i64:
         pf = pf + 1
     val fmarker = ram64_read(socf.ram, 0x400, 4)
     val f_cause: i64 = (1 << 63) | 9
-    print("casef priv_pre={priv_before_irq} hpriv={handler_priv} scause(x12)={socf.core.rf.regs[12]} sepc(x13)={socf.core.rf.regs[13]} claim={socf.core.rf.regs[15]} rbr={socf.core.rf.regs[17]} marker={fmarker} pc={socf.core.pc} priv={socf.core.priv_mode} sstatus={socf.core.csr_s.sstatus} mip={socf.core.csr_m.mip}")
+    print("casef priv_pre={priv_before_irq} hpriv={handler_priv} scause(x12)={regfile64_read_one(socf.core.rf, 12)} sepc(x13)={regfile64_read_one(socf.core.rf, 13)} claim={regfile64_read_one(socf.core.rf, 15)} rbr={regfile64_read_one(socf.core.rf, 17)} marker={fmarker} pc={socf.core.pc} priv={socf.core.priv_mode} sstatus={socf.core.csr_s.sstatus} mip={socf.core.csr_m.mip}")
     fails = fails + check("casef mret entered S-mode (priv==1 pre-irq)", priv_before_irq == 1)
     fails = fails + check("casef handler ran in S-mode (priv==1)", handler_priv == 1)
-    fails = fails + check("casef scause == supervisor external interrupt (bit63|9)", socf.core.rf.regs[12] == f_cause)
-    fails = fails + check("casef sepc == S spin pc 0x80000080", socf.core.rf.regs[13] == 0x8000_0080)
-    fails = fails + check("casef ctx1 claim returned source 10 (UART)", socf.core.rf.regs[15] == 10)
-    fails = fails + check("casef RBR read == 65 ('A')", socf.core.rf.regs[17] == 65)
+    fails = fails + check("casef scause == supervisor external interrupt (bit63|9)", regfile64_read_one(socf.core.rf, 12) == f_cause)
+    fails = fails + check("casef sepc == S spin pc 0x80000080", regfile64_read_one(socf.core.rf, 13) == 0x8000_0080)
+    fails = fails + check("casef ctx1 claim returned source 10 (UART)", regfile64_read_one(socf.core.rf, 15) == 10)
+    fails = fails + check("casef RBR read == 65 ('A')", regfile64_read_one(socf.core.rf, 17) == 65)
     fails = fails + check("casef handler wrote marker 0x321", fmarker == 0x321)
     fails = fails + check("casef sret resumed S spin at 0x80000080", socf.core.pc == 0x8000_0080)
     fails = fails + check("casef priv back to S after sret", socf.core.priv_mode == 1)
@@ -500,9 +501,9 @@ fn main() -> i64:
         socg = soc_top_64_tick(socg)
         pg = pg + 1
     val gmarker = ram64_read(socg.ram, 0x400, 4)
-    print("caseg1 scause(x12)={socg.core.rf.regs[12]} sepc(x13)={socg.core.rf.regs[13]} marker={gmarker} pc={socg.core.pc} priv={socg.core.priv_mode} sstatus={socg.core.csr_s.sstatus}")
-    fails = fails + check("caseg1 delegated ecall-from-U: scause == 8", socg.core.rf.regs[12] == 8)
-    fails = fails + check("caseg1 sepc == U ecall pc 0x80000080", socg.core.rf.regs[13] == 0x8000_0080)
+    print("caseg1 scause(x12)={regfile64_read_one(socg.core.rf, 12)} sepc(x13)={regfile64_read_one(socg.core.rf, 13)} marker={gmarker} pc={socg.core.pc} priv={socg.core.priv_mode} sstatus={socg.core.csr_s.sstatus}")
+    fails = fails + check("caseg1 delegated ecall-from-U: scause == 8", regfile64_read_one(socg.core.rf, 12) == 8)
+    fails = fails + check("caseg1 sepc == U ecall pc 0x80000080", regfile64_read_one(socg.core.rf, 13) == 0x8000_0080)
     fails = fails + check("caseg1 handler in S-mode (priv==1)", socg.core.priv_mode == 1)
     fails = fails + check("caseg1 sstatus.SPP == U (bit 8 clear)", (socg.core.csr_s.sstatus & 0x100) == 0)
     fails = fails + check("caseg1 marker written, parks at 0x80000110", gmarker == 0x321 and socg.core.pc == 0x8000_0110)
@@ -533,9 +534,9 @@ fn main() -> i64:
         socg2 = soc_top_64_tick(socg2)
         pg2 = pg2 + 1
     val g2marker = ram64_read(socg2.ram, 0x400, 4)
-    print("caseg2 mcause(x12)={socg2.core.rf.regs[12]} mepc(x13)={socg2.core.rf.regs[13]} marker={g2marker} pc={socg2.core.pc} priv={socg2.core.priv_mode} mstatus={socg2.core.csr_m.mstatus}")
-    fails = fails + check("caseg2 undelegated ecall-from-U: mcause == 8", socg2.core.rf.regs[12] == 8)
-    fails = fails + check("caseg2 mepc == U ecall pc 0x80000080", socg2.core.rf.regs[13] == 0x8000_0080)
+    print("caseg2 mcause(x12)={regfile64_read_one(socg2.core.rf, 12)} mepc(x13)={regfile64_read_one(socg2.core.rf, 13)} marker={g2marker} pc={socg2.core.pc} priv={socg2.core.priv_mode} mstatus={socg2.core.csr_m.mstatus}")
+    fails = fails + check("caseg2 undelegated ecall-from-U: mcause == 8", regfile64_read_one(socg2.core.rf, 12) == 8)
+    fails = fails + check("caseg2 mepc == U ecall pc 0x80000080", regfile64_read_one(socg2.core.rf, 13) == 0x8000_0080)
     fails = fails + check("caseg2 handler in M-mode (priv==3)", socg2.core.priv_mode == 3)
     fails = fails + check("caseg2 mstatus.MPP records U (bits 12:11 == 0)", (socg2.core.csr_m.mstatus & 0x1800) == 0)
     fails = fails + check("caseg2 marker written, parks at 0x80000110", g2marker == 0x321 and socg2.core.pc == 0x8000_0110)
@@ -576,10 +577,10 @@ fn main() -> i64:
         soch = soc_top_64_tick(soch)
         ph = ph + 1
     val h_satp: i64 = (1 << 63) | 0x80100
-    print("caseh x20(satp)={soch.core.rf.regs[20]} satp={soch.core.csr_s.satp} pc={soch.core.pc} x9={soch.core.rf.regs[9]} priv={soch.core.priv_mode} sstatus={soch.core.csr_s.sstatus}")
-    fails = fails + check("caseh satp readback == Sv39|0x80100", soch.core.rf.regs[20] == h_satp)
+    print("caseh x20(satp)={regfile64_read_one(soch.core.rf, 20)} satp={soch.core.csr_s.satp} pc={soch.core.pc} x9={regfile64_read_one(soch.core.rf, 9)} priv={soch.core.priv_mode} sstatus={soch.core.csr_s.sstatus}")
+    fails = fails + check("caseh satp readback == Sv39|0x80100", regfile64_read_one(soch.core.rf, 20) == h_satp)
     fails = fails + check("caseh satp CSR holds written value", soch.core.csr_s.satp == h_satp)
-    fails = fails + check("caseh sret jumped to sepc, executed S code (x9==0x55)", soch.core.rf.regs[9] == 0x55)
+    fails = fails + check("caseh sret jumped to sepc, executed S code (x9==0x55)", regfile64_read_one(soch.core.rf, 9) == 0x55)
     fails = fails + check("caseh parks at 0x80000084", soch.core.pc == 0x8000_0084)
     fails = fails + check("caseh priv == S after sret (SPP was 1)", soch.core.priv_mode == 1)
     fails = fails + check("caseh sret: SIE <- SPIE (bit 1 set)", (soch.core.csr_s.sstatus & 0x2) != 0)

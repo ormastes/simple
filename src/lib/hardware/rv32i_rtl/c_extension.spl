@@ -1,0 +1,243 @@
+# Frozen RV32C integer expansion lane.  This file deliberately does not wire
+# into the RV32 core or change its IALIGN/MISA contract.
+
+struct Rv32CResult:
+    instruction_pc: u32
+    second_half_address: u32
+    instruction: u32
+    length_bytes: u32
+    illegal: bool
+    fetch_fault: bool
+    fault_address: u32
+    fault_status: u32
+
+struct Rv32FetchWindow:
+    instruction_pc: u32
+    second_half_address: u32
+    first_word: u32
+    waiting_for_second_word: bool
+
+@hardware
+fn rv32c_result(instruction: u32, length_bytes: u32, illegal: bool) -> Rv32CResult:
+    Rv32CResult(instruction_pc: 0, second_half_address: 0,
+        instruction: instruction, length_bytes: length_bytes, illegal: illegal,
+        fetch_fault: false, fault_address: 0, fault_status: 0)
+
+@hardware
+fn rv32c_fetch_result(instruction_pc: u32, second_half_address: u32,
+                      instruction: u32, length_bytes: u32, illegal: bool,
+                      fetch_fault: bool, fault_address: u32,
+                      fault_status: u32) -> Rv32CResult:
+    Rv32CResult(instruction_pc: instruction_pc, second_half_address: second_half_address,
+        instruction: instruction, length_bytes: length_bytes, illegal: illegal,
+        fetch_fault: fetch_fault, fault_address: fault_address, fault_status: fault_status)
+
+@hardware
+fn rv32c_is_compressed(parcel: u32) -> bool:
+    (parcel & 3) != 3
+
+@hardware
+fn rv32c_sign_extend(value: u32, width: u32) -> i64:
+    val low = (value & ((1 << width) - 1)) as i64
+    if (low & (1 << (width - 1))) != 0:
+        return low | (-1 << width)
+    low
+
+@hardware
+fn rv32c_prime(value: u32) -> u32:
+    8 + (value & 7)
+
+@hardware
+fn rv32c_i(rd: u32, funct3: u32, rs1: u32, imm: i64) -> u32:
+    (((imm as u32) & 0xFFF) << 20) | (rs1 << 15) | (funct3 << 12) | (rd << 7) | 0x13
+
+@hardware
+fn rv32c_r(rd: u32, funct3: u32, rs1: u32, rs2: u32, funct7: u32) -> u32:
+    (funct7 << 25) | (rs2 << 20) | (rs1 << 15) | (funct3 << 12) | (rd << 7) | 0x33
+
+@hardware
+fn rv32c_s(funct3: u32, rs1: u32, rs2: u32, imm: i64) -> u32:
+    val value = imm as u32
+    (((value >> 5) & 0x7F) << 25) | (rs2 << 20) | (rs1 << 15) |
+        (funct3 << 12) | ((value & 0x1F) << 7) | 0x23
+
+@hardware
+fn rv32c_b(funct3: u32, rs1: u32, imm: i64) -> u32:
+    val value = imm as u32
+    (((value >> 12) & 1) << 31) | (((value >> 5) & 0x3F) << 25) |
+        (rs1 << 15) | (funct3 << 12) | (((value >> 1) & 0xF) << 8) |
+        (((value >> 11) & 1) << 7) | 0x63
+
+@hardware
+fn rv32c_j(rd: u32, imm: i64) -> u32:
+    val value = imm as u32
+    (((value >> 20) & 1) << 31) | (((value >> 1) & 0x3FF) << 21) |
+        (((value >> 11) & 1) << 20) | (((value >> 12) & 0xFF) << 12) |
+        (rd << 7) | 0x6F
+
+@hardware
+fn rv32c_jalr(rd: u32, rs1: u32) -> u32:
+    (rs1 << 15) | (rd << 7) | 0x67
+
+@hardware
+fn rv32c_ci_imm(c: u32) -> i64:
+    rv32c_sign_extend((((c >> 12) & 1) << 5) | ((c >> 2) & 0x1F), 6)
+
+@hardware
+fn rv32c_addi4spn_imm(c: u32) -> i64:
+    ((((c >> 7) & 0xF) << 6) | (((c >> 11) & 3) << 4) |
+        (((c >> 5) & 1) << 3) | (((c >> 6) & 1) << 2)) as i64
+
+@hardware
+fn rv32c_lw_imm(c: u32) -> i64:
+    ((((c >> 5) & 1) << 6) | (((c >> 10) & 7) << 3) | (((c >> 6) & 1) << 2)) as i64
+
+@hardware
+fn rv32c_jump_imm(c: u32) -> i64:
+    rv32c_sign_extend((((c >> 12) & 1) << 11) | (((c >> 11) & 1) << 4) |
+        (((c >> 9) & 3) << 8) | (((c >> 8) & 1) << 10) | (((c >> 7) & 1) << 6) |
+        (((c >> 6) & 1) << 7) | (((c >> 3) & 7) << 1) | (((c >> 2) & 1) << 5), 12)
+
+@hardware
+fn rv32c_branch_imm(c: u32) -> i64:
+    rv32c_sign_extend((((c >> 12) & 1) << 8) | (((c >> 10) & 3) << 3) |
+        (((c >> 5) & 3) << 6) | (((c >> 3) & 3) << 1) | (((c >> 2) & 1) << 5), 9)
+
+@hardware
+fn rv32c_addi16sp_imm(c: u32) -> i64:
+    rv32c_sign_extend((((c >> 12) & 1) << 9) | (((c >> 6) & 1) << 4) |
+        (((c >> 5) & 1) << 6) | (((c >> 3) & 3) << 7) | (((c >> 2) & 1) << 5), 10)
+
+@hardware
+fn rv32c_lwsp_imm(c: u32) -> i64:
+    ((((c >> 2) & 3) << 6) | (((c >> 12) & 1) << 5) | (((c >> 4) & 7) << 2)) as i64
+
+@hardware
+fn rv32c_swsp_imm(c: u32) -> i64:
+    ((((c >> 7) & 3) << 6) | (((c >> 9) & 0xF) << 2)) as i64
+
+@hardware
+fn rv32c_expand(parcel: u32) -> Rv32CResult:
+    """Expand one legal RV32C integer parcel; reserved/FP encodings fail closed."""
+    val c = parcel & 0xFFFF
+    if not rv32c_is_compressed(c):
+        return rv32c_result(0, 0, true)
+    val quadrant = c & 3
+    val funct3 = (c >> 13) & 7
+    val rd = (c >> 7) & 0x1F
+    val rs2 = (c >> 2) & 0x1F
+    val rd_prime = rv32c_prime((c >> 7) & 7)
+    val rs2_prime = rv32c_prime((c >> 2) & 7)
+
+    if quadrant == 0:
+        if funct3 == 0:
+            val imm = rv32c_addi4spn_imm(c)
+            if imm == 0: return rv32c_result(0, 2, true)
+            return rv32c_result(rv32c_i(rs2_prime, 0, 2, imm), 2, false)
+        if funct3 == 2:
+            return rv32c_result(rv32c_i(rs2_prime, 2, rd_prime, rv32c_lw_imm(c)), 2, false)
+        if funct3 == 6:
+            return rv32c_result(rv32c_s(2, rd_prime, rs2_prime, rv32c_lw_imm(c)), 2, false)
+        return rv32c_result(0, 2, true)
+
+    if quadrant == 1:
+        val imm = rv32c_ci_imm(c)
+        if funct3 == 0:
+            return rv32c_result(rv32c_i(rd, 0, rd, imm), 2, false)
+        if funct3 == 1:
+            # C.JAL writes x1; the caller advances the architectural link by length_bytes (2).
+            return rv32c_result(rv32c_j(1, rv32c_jump_imm(c)), 2, false)
+        if funct3 == 2:
+            return rv32c_result(rv32c_i(rd, 0, 0, imm), 2, false)
+        if funct3 == 3:
+            if rd == 2:
+                val sp_imm = rv32c_addi16sp_imm(c)
+                if sp_imm == 0: return rv32c_result(0, 2, true)
+                return rv32c_result(rv32c_i(2, 0, 2, sp_imm), 2, false)
+            # C.LUI x0 is a HINT.  Other zero-immediate C.LUI encodings are reserved.
+            if rd == 0: return rv32c_result(rv32c_i(0, 0, 0, 0), 2, false)
+            if imm == 0: return rv32c_result(0, 2, true)
+            return rv32c_result(((imm as u32) << 12) | (rd << 7) | 0x37, 2, false)
+        if funct3 == 4:
+            val mode = (c >> 10) & 3
+            val shamt = (((c >> 12) & 1) << 5) | ((c >> 2) & 0x1F)
+            if mode == 0:
+                if (c & 0x1000) != 0: return rv32c_result(0, 2, true)
+                return rv32c_result(rv32c_i(rd_prime, 5, rd_prime, shamt as i64), 2, false)
+            if mode == 1:
+                if (c & 0x1000) != 0: return rv32c_result(0, 2, true)
+                return rv32c_result(rv32c_i(rd_prime, 5, rd_prime, (0x400 | shamt) as i64), 2, false)
+            if mode == 2:
+                return rv32c_result(rv32c_i(rd_prime, 7, rd_prime, imm), 2, false)
+            if (c & 0x1000) != 0: return rv32c_result(0, 2, true)
+            val op = (c >> 5) & 3
+            if op == 0: return rv32c_result(rv32c_r(rd_prime, 0, rd_prime, rs2_prime, 0x20), 2, false)
+            if op == 1: return rv32c_result(rv32c_r(rd_prime, 4, rd_prime, rs2_prime, 0), 2, false)
+            if op == 2: return rv32c_result(rv32c_r(rd_prime, 6, rd_prime, rs2_prime, 0), 2, false)
+            return rv32c_result(rv32c_r(rd_prime, 7, rd_prime, rs2_prime, 0), 2, false)
+        if funct3 == 5:
+            return rv32c_result(rv32c_j(0, rv32c_jump_imm(c)), 2, false)
+        if funct3 == 6:
+            return rv32c_result(rv32c_b(0, rd_prime, rv32c_branch_imm(c)), 2, false)
+        return rv32c_result(rv32c_b(1, rd_prime, rv32c_branch_imm(c)), 2, false)
+
+    if quadrant == 2:
+        if funct3 == 0:
+            val shamt = (((c >> 12) & 1) << 5) | ((c >> 2) & 0x1F)
+            if (c & 0x1000) != 0: return rv32c_result(0, 2, true)
+            return rv32c_result(rv32c_i(rd, 1, rd, shamt as i64), 2, false)
+        if funct3 == 2:
+            if rd == 0: return rv32c_result(0, 2, true)
+            return rv32c_result(rv32c_i(rd, 2, 2, rv32c_lwsp_imm(c)), 2, false)
+        if funct3 == 4:
+            val high = (c & 0x1000) != 0
+            if not high:
+                if rs2 == 0:
+                    if rd == 0: return rv32c_result(0, 2, true)
+                    return rv32c_result(rv32c_jalr(0, rd), 2, false)
+                # C.MV x0, rs2 is a HINT.
+                if rd == 0: return rv32c_result(rv32c_i(0, 0, 0, 0), 2, false)
+                return rv32c_result(rv32c_r(rd, 0, 0, rs2, 0), 2, false)
+            if rs2 == 0:
+                if rd == 0: return rv32c_result(0x00100073, 2, false)
+                return rv32c_result(rv32c_jalr(1, rd), 2, false)
+            # C.ADD x0, rs2 is a HINT.
+            if rd == 0: return rv32c_result(rv32c_i(0, 0, 0, 0), 2, false)
+            return rv32c_result(rv32c_r(rd, 0, rd, rs2, 0), 2, false)
+        if funct3 == 6:
+            return rv32c_result(rv32c_s(2, 2, rs2, rv32c_swsp_imm(c)), 2, false)
+        return rv32c_result(0, 2, true)
+
+    rv32c_result(0, 2, true)
+
+@hardware
+fn rv32c_fetch_window(instruction_pc: u32, first_word: u32) -> Rv32FetchWindow:
+    val parcel = if (instruction_pc & 2) == 0: first_word & 0xFFFF else: (first_word >> 16) & 0xFFFF
+    Rv32FetchWindow(instruction_pc: instruction_pc, second_half_address: instruction_pc + 2,
+        first_word: first_word,
+        waiting_for_second_word: (instruction_pc & 1) == 0 and (instruction_pc & 2) != 0 and not rv32c_is_compressed(parcel))
+
+@hardware
+fn rv32c_assemble_fetch(window: Rv32FetchWindow, second_word: u32,
+                         second_fetch_fault: bool) -> Rv32CResult:
+    """Assemble at PC/PC+2. fault_status is zero on success and one for the
+    second-half instruction-access fault; it is distinct from illegal decode."""
+    if (window.instruction_pc & 1) != 0:
+        return rv32c_fetch_result(window.instruction_pc, window.second_half_address,
+            0, 0, true, false, 0, 0)
+    val parcel = if (window.instruction_pc & 2) == 0:
+        window.first_word & 0xFFFF
+    else:
+        (window.first_word >> 16) & 0xFFFF
+    if rv32c_is_compressed(parcel):
+        val result = rv32c_expand(parcel)
+        return rv32c_fetch_result(window.instruction_pc, window.second_half_address,
+            result.instruction, result.length_bytes, result.illegal, false, 0, 0)
+    if not window.waiting_for_second_word:
+        return rv32c_fetch_result(window.instruction_pc, window.second_half_address,
+            window.first_word, 4, false, false, 0, 0)
+    if second_fetch_fault:
+        return rv32c_fetch_result(window.instruction_pc, window.second_half_address,
+            0, 4, false, true, window.second_half_address, 1)
+    rv32c_fetch_result(window.instruction_pc, window.second_half_address,
+        parcel | ((second_word & 0xFFFF) << 16), 4, false, false, 0, 0)

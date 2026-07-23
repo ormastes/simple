@@ -16,11 +16,9 @@
 #   7. core64_update — clocked PC / regfile / CSR / trap / semihosting update
 #   8. Machine interrupt take: MIE && (mie & mip) -> mtvec/mcause/mepc
 #
-# The core entry wired here is core64_combinational + core64_update.
-# core64_cycle (the request_ready/response_valid bus-protocol path) depends on
-# std.hardware.rv64gc_rtl.memory_access / pmp / pmp_csr which do not exist in
-# the tree, so it cannot execute; the comb/update pair is the only runnable
-# real-core path today.
+# soc_top_64_tick keeps the legacy combinational core path. The protected
+# soc_top_64_protected_tick path drives core64_cycle through one registered
+# response slot and the same boot ROM/RAM/MMIO dispatch below.
 #
 # MMIO scope: instruction fetch from bootrom/RAM. Loads/stores dispatch to
 # RAM, CLINT (msip/mtimecmp/mtime @ 0x200_0000), PLIC (@ 0xC00_0000) and
@@ -38,8 +36,8 @@
 # Loads from unmapped space return 0, stores to unmapped space are ignored.
 #
 # Dependencies:
-#   - std.hardware.rv64gc_rtl.core: CoreState64, core64_init,
-#     core64_combinational, core64_update
+#   - std.hardware.rv64gc_rtl.core: core64_combinational, core64_update
+#   - std.hardware.rv64gc_rtl.protected_core: protected state and cycle
 #   - std.hardware.soc_rtl.clint: ClintState, clint_create, clint_tick
 #   - std.hardware.soc_rtl.ram64: Ram64State, ram64_init, ram64_read, ram64_write
 #   - std.hardware.soc_rtl.bootrom: bootrom_read64
@@ -50,7 +48,9 @@
 # ============================================================================
 
 # -- Core
-use std.hardware.rv64gc_rtl.core.{CoreState64, core64_init, core64_combinational, core64_update}
+use std.hardware.rv64gc_rtl.core_types.CoreState64
+use std.hardware.rv64gc_rtl.core.{core64_combinational, core64_update}
+use std.hardware.rv64gc_rtl.protected_core.{Core64CycleResult, core64_init_single_master, core64_cycle}
 use std.hardware.rv64gc_rtl.csr.{csr64_update_mip_s}
 use std.hardware.rv64gc_rtl.csr_s.{SIP_SSIP_MASK_64, SIP_STIP_MASK_64, SIP_SEIP_MASK_64}
 use std.hardware.rv64gc_rtl.csr_s.{satp_extract_mode_64, satp_extract_ppn_64}
@@ -63,8 +63,10 @@ use std.hardware.rv64gc_rtl.mmu.{SV39_SATP_MODE, SV39_ACCESS_FETCH, SV39_ACCESS_
 # -- Peripherals
 use std.hardware.soc_rtl.clint.{ClintState, clint_create, clint_tick, clint_mmio_read, clint_mmio_write}
 use std.hardware.soc_rtl.plic.{PlicState, plic_create, plic_mmio_read, plic_mmio_read_update, plic_mmio_write, plic_set_pending, plic_check_interrupt, plic_check_interrupt_s}
-use std.hardware.soc_rtl.ram64.{Ram64State, ram64_init, ram64_read, ram64_write, ram64_logical_shr}
-use std.hardware.soc_rtl.bootrom.{bootrom_read64, bootrom_dtb_byte, DTB_HEADER_SIZE}
+use std.hardware.soc_rtl.ram64.{Ram64State, ram64_init, ram64_read, ram64_write, ram64_logical_shr, ram64_load_bytes}
+use std.hardware.soc_rtl.bootrom.{bootrom_read64, BOOTROM_BASE, BOOTROM_SIZE}
+use std.hardware.soc_rtl.dtb_asset.{SOC_DTB_RAM_SIZE, SOC_DTB_RESERVED_SIZE}
+use std.hardware.soc_rtl.dtb_asset.soc_rv64_linux_dtb_for_ram_initrd
 
 # -- Wishbone64 interconnect
 use std.hardware.soc_rtl.wb64_interconnect.{WbRegion64, Wb64Interconnect, wb64_qemu_virt_regions, wb64_init}
@@ -77,9 +79,9 @@ val SOC64_RESET_VECTOR: i64 = 0x1000
 val SOC64_RAM_BASE: i64 = 0x8000_0000
 
 # DTB region — the boot ROM's `lui a1, 0x88000` hands the kernel a1=0x8800_0000
-# as the FDT pointer. Reads in [DTB_BASE, DTB_BASE + DTB_HEADER_SIZE) are served
-# from bootrom_dtb_byte so a kernel reading [a1] sees the FDT header; writes are
-# ignored. Identity-mapped like RAM (physical dispatch after any translation).
+# as the FDT pointer. Production images preload the shared DTB bytes into RAM;
+# sequential state carries scalar overlay metadata only. The overlay is
+# read-only and identity-mapped after any translation.
 val SOC64_DTB_BASE: i64 = 0x8800_0000
 
 # ============================================================================
@@ -99,12 +101,23 @@ struct SocTop64State:
                            # soc64_uart_push_rx; synthesis: RX FIFO)
     uart_ier: i64          # UART IER register (bit 0 = ERBFI: RX data
                            # available interrupt enable)
+    protected_response_valid: bool
+    protected_response_error: bool
+    protected_response_data: i64
+    dtb_size: i64
+    dtb_ram_size: i64
+    dtb_initrd_start: i64
+    dtb_initrd_end: i64
 
 # ============================================================================
 # Create / Reset
 # ============================================================================
 
 fn soc_top_64_init(dram_size: i64) -> SocTop64State:
+    soc_top_64_init_with_initrd(dram_size, 0, 0)
+
+fn soc_top_64_init_with_initrd(dram_size: i64, initrd_start: i64,
+                               initrd_end: i64) -> SocTop64State:
     """Create and initialize the full RV64GC SoC.
 
     - core.pc          = 0x1000  (QEMU virt boot ROM reset vector)
@@ -115,15 +128,39 @@ fn soc_top_64_init(dram_size: i64) -> SocTop64State:
     val tx_log: [i64] = []
     val rx_queue: [i64] = []
     SocTop64State(
-        core:  core64_init(SOC64_RESET_VECTOR),
+        core:  core64_init_single_master(SOC64_RESET_VECTOR),
         ram:   ram64_init(dram_size),
         clint: clint_create(),
         plic:  plic_create(),
         ic:    wb64_init(regions),
         uart_tx: tx_log,
         uart_rx: rx_queue,
-        uart_ier: 0
+        uart_ier: 0,
+        protected_response_valid: false,
+        protected_response_error: false,
+        protected_response_data: 0,
+        dtb_size: SOC_DTB_RESERVED_SIZE as i64,
+        dtb_ram_size: dram_size,
+        dtb_initrd_start: initrd_start,
+        dtb_initrd_end: initrd_end
     )
+
+fn soc_top_64_protected_init() -> SocTop64State:
+    """Production protected SoC: 256 MiB RAM with DTB inside that range."""
+    soc_top_64_protected_init_with_initrd(0, 0)
+
+fn soc_top_64_protected_init_with_initrd(initrd_start: i64,
+                                         initrd_end: i64) -> SocTop64State:
+    soc_top_64_init_with_initrd(SOC_DTB_RAM_SIZE as i64,
+        initrd_start, initrd_end)
+
+fn soc_top_64_sim_preload_dtb(soc: SocTop64State) -> SocTop64State:
+    """Simulation-only asset load; production RAM images preload the same blob."""
+    var out = soc
+    val blob = soc_rv64_linux_dtb_for_ram_initrd(soc.dtb_ram_size as u64,
+        soc.dtb_initrd_start as u64, soc.dtb_initrd_end as u64)
+    out.ram = ram64_load_bytes(out.ram, SOC64_DTB_BASE - SOC64_RAM_BASE, blob)
+    out
 
 # ============================================================================
 # Memory dispatch helpers
@@ -151,6 +188,18 @@ fn soc64_fetch(soc: SocTop64State, pc: i64) -> u32:
         return word as u32
     bootrom_read64(pc as u64)
 
+fn soc64_bootrom_read(addr: i64, width_bytes: i64) -> i64:
+    """Read one naturally aligned protected-bus value from the RV64 boot ROM."""
+    var result: i64 = 0
+    var i: i64 = 0
+    while i < width_bytes:
+        val byte_addr = addr + i
+        val word = bootrom_read64((byte_addr & -4) as u64) as i64
+        val byte_value = (word >> ((byte_addr & 3) * 8)) & 0xFF
+        result = result | (byte_value << (i * 8))
+        i = i + 1
+    result
+
 fn soc64_in_clint(addr: i64) -> bool:
     """True when the byte address falls inside the CLINT MMIO region."""
     addr >= WB64_CLINT_BASE and addr < WB64_CLINT_BASE + WB64_CLINT_SIZE
@@ -163,24 +212,17 @@ fn soc64_in_plic(addr: i64) -> bool:
     """True when the byte address falls inside the PLIC MMIO region."""
     addr >= WB64_PLIC_BASE and addr < WB64_PLIC_BASE + WB64_PLIC_SIZE
 
-fn soc64_in_dtb(addr: i64) -> bool:
-    """True when the byte address falls inside the DTB header region."""
-    addr >= SOC64_DTB_BASE and addr < SOC64_DTB_BASE + (DTB_HEADER_SIZE as i64)
+fn soc64_in_dtb(soc: SocTop64State, addr: i64) -> bool:
+    """True when the byte address falls inside the complete DTB asset."""
+    addr >= SOC64_DTB_BASE and addr < SOC64_DTB_BASE + soc.dtb_size
 
-fn soc64_dtb_read(addr: i64, width_bytes: i64) -> i64:
-    """DTB load: assemble width_bytes little-endian from bootrom_dtb_byte
+fn soc64_dtb_read(soc: SocTop64State, addr: i64, width_bytes: i64) -> i64:
+    """DTB load: assemble width_bytes little-endian from the shared asset
     (the FDT header is stored big-endian byte-wise, so byte address +0 -> 0xD0,
     +1 -> 0x0D, +2 -> 0xFE, +3 -> 0xED, i.e. the 0xD00DFEED magic). A word/
-    dword read composes those bytes in RISC-V little-endian order; bytes past
-    the header read 0."""
+    dword read composes those bytes in RISC-V little-endian order."""
     val off = addr - SOC64_DTB_BASE
-    var result: i64 = 0
-    var i: i64 = 0
-    while i < width_bytes:
-        val b = bootrom_dtb_byte((off + i) as u32) as i64
-        result = result | (b << (i * 8))
-        i = i + 1
-    result
+    ram64_read(soc.ram, SOC64_DTB_BASE - SOC64_RAM_BASE + off, width_bytes)
 
 fn soc64_clint_read(soc: SocTop64State, addr: i64, width_bytes: i64) -> i64:
     """CLINT load: 8-byte (RV64 ld, the normal kernel access width for
@@ -237,12 +279,12 @@ fn soc64_mem_read(soc: SocTop64State, addr: i64, width_bytes: i64) -> i64:
     """Data load dispatch: DTB, DRAM, CLINT, PLIC, UART16550; unmapped reads 0.
     addr is a PHYSICAL address (any Sv39 translation already applied).
 
-    The DTB header is a READ-ONLY OVERLAY and is checked BEFORE DRAM: the DTB
+    The DTB is a READ-ONLY OVERLAY and is checked BEFORE DRAM: the DTB
     window sits at DRAM_BASE + 128 MiB, so once DRAM is >= 128 MiB (any real
     kernel) the address is also inside the DRAM range — the overlay must win so
     a kernel reading [a1] sees the FDT header, not RAM contents."""
-    if soc64_in_dtb(addr):
-        return soc64_dtb_read(addr, width_bytes)
+    if soc64_in_dtb(soc, addr):
+        return soc64_dtb_read(soc, addr, width_bytes)
     if soc64_in_ram(soc, addr):
         return ram64_read(soc.ram, addr - SOC64_RAM_BASE, width_bytes)
     if soc64_in_clint(addr):
@@ -290,10 +332,10 @@ fn soc64_mem_write(soc: SocTop64State, addr: i64, width_bytes: i64, wdata: i64) 
     enable register; other UART register stores are accepted and dropped.
     Stores to unmapped space are ignored."""
     var out = soc
-    # DTB header overlay is read-only: writes into its window are ignored, and
+    # DTB overlay is read-only: writes into its window are ignored, and
     # this is checked BEFORE DRAM (the window is inside the DRAM range once DRAM
     # is >= 128 MiB — a store there must not fall through into RAM).
-    if soc64_in_dtb(addr):
+    if soc64_in_dtb(out, addr):
         return out
     if soc64_in_ram(out, addr):
         out.ram = ram64_write(out.ram, addr - SOC64_RAM_BASE, width_bytes, wdata)
@@ -396,7 +438,8 @@ fn soc_top_64_tick(soc: SocTop64State) -> SocTop64State:
     # bitmap against its own enable/threshold registers.
     val pchk = plic_check_interrupt(out.plic)
     val pchk_s = plic_check_interrupt_s(out.plic)
-    out.core.csr_m = csr64_update_mip_s(out.core.csr_m, ct.mtip, ct.msip_out, pchk.meip, pchk_s.meip)
+    out.core.csr_m = csr64_update_mip_s(out.core.csr_m, ct.mtip, ct.msip_out,
+        pchk.meip, false, pchk_s.meip)
 
     # Step 1d: Mirror the S-mode view into sip: SSIP is software-owned
     # (kept from the CSR file), STIP/SEIP mirror the delegated mip levels
@@ -471,6 +514,68 @@ fn soc_top_64_tick(soc: SocTop64State) -> SocTop64State:
 
     out
 
+fn soc_top_64_protected_tick(soc: SocTop64State) -> SocTop64State:
+    """Advance the Sv39/PMP core and its one-request/one-response physical bus."""
+    var out = soc
+
+    val ct = clint_tick(out.clint)
+    out.clint = ct.state
+    val uart_irq = (out.uart_ier & 0x1) != 0 and out.uart_rx.len() > 0
+    out.plic = plic_set_pending(out.plic, SOC64_PLIC_SRC_UART, uart_irq)
+    val pchk = plic_check_interrupt(out.plic)
+    val pchk_s = plic_check_interrupt_s(out.plic)
+    out.core.csr_m = csr64_update_mip_s(out.core.csr_m, ct.mtip, ct.msip_out,
+        pchk.meip, false, pchk_s.meip)
+    val sip_soft = out.core.csr_s.sip & SIP_SSIP_MASK_64
+    val sip_lvl = out.core.csr_m.mip & (SIP_STIP_MASK_64 | SIP_SEIP_MASK_64) & out.core.csr_m.mideleg
+    var csr_s_mir = out.core.csr_s
+    csr_s_mir.sip = sip_soft | sip_lvl
+    out.core.csr_s = csr_s_mir
+
+    val cycle = core64_cycle(out.core, true, out.protected_response_valid,
+        out.protected_response_error, out.protected_response_data)
+    out.core = cycle.state
+    out.protected_response_valid = false
+    out.protected_response_error = false
+    out.protected_response_data = 0
+
+    soc64_accept_core_request(out, cycle)
+
+fn soc64_accept_core_request(soc: SocTop64State,
+                             cycle: Core64CycleResult) -> SocTop64State:
+    """Accept one protected-core request into the registered SoC response."""
+    var out = soc
+
+    if cycle.bus_valid:
+        val bootrom_first = BOOTROM_BASE as i64
+        val bootrom_last = bootrom_first + (BOOTROM_SIZE as i64)
+        val in_bootrom = cycle.bus_addr >= bootrom_first and cycle.bus_addr < bootrom_last
+        val in_dtb = soc64_in_dtb(out, cycle.bus_addr)
+        val mapped = (in_bootrom or in_dtb or
+            soc64_in_ram(out, cycle.bus_addr) or soc64_in_clint(cycle.bus_addr) or
+            soc64_in_plic(cycle.bus_addr) or soc64_in_uart(cycle.bus_addr))
+        val writable = (not in_dtb and (soc64_in_ram(out, cycle.bus_addr) or
+            soc64_in_clint(cycle.bus_addr) or soc64_in_plic(cycle.bus_addr) or
+            soc64_in_uart(cycle.bus_addr)))
+        val atomic_ok = not cycle.bus_atomic or (out.core.atomic_bus_exclusive and
+            soc64_in_ram(out, cycle.bus_addr))
+        val write_ok = not cycle.bus_write or writable
+        out.protected_response_valid = true
+        out.protected_response_error = not mapped or not atomic_ok or not write_ok
+        if mapped and atomic_ok and write_ok and cycle.bus_write:
+            out = soc64_mem_write(out, cycle.bus_addr, cycle.bus_size as i64,
+                cycle.bus_wdata)
+        else if mapped and atomic_ok and write_ok:
+            if in_bootrom:
+                out.protected_response_data = soc64_bootrom_read(cycle.bus_addr,
+                    cycle.bus_size as i64)
+            else:
+                out.protected_response_data = soc64_mem_read(out, cycle.bus_addr,
+                    cycle.bus_size as i64)
+                out = soc64_mem_read_update(out, cycle.bus_addr)
+
+    out
+
 # ============================================================================
 # SoC Run — batched multi-cycle driver (per-tick RAM value-copy eliminated)
 # ============================================================================
@@ -539,7 +644,8 @@ fn soc_top_64_run(soc: SocTop64State, max_ticks: i64) -> SocRunResult:
         # --- Step 1c: interrupt levels into mip ---
         val pchk = plic_check_interrupt(out.plic)
         val pchk_s = plic_check_interrupt_s(out.plic)
-        out.core.csr_m = csr64_update_mip_s(out.core.csr_m, ct.mtip, ct.msip_out, pchk.meip, pchk_s.meip)
+        out.core.csr_m = csr64_update_mip_s(out.core.csr_m, ct.mtip,
+            ct.msip_out, pchk.meip, false, pchk_s.meip)
 
         # --- Step 1d: S-mode sip mirror ---
         val sip_soft = out.core.csr_s.sip & SIP_SSIP_MASK_64
@@ -587,8 +693,8 @@ fn soc_top_64_run(soc: SocTop64State, max_ticks: i64) -> SocRunResult:
                     if sx.fault:
                         out = soc64_raise_trap(out, sx.cause, comb.dmem_addr, out.core.pc)
                         store_faulted = true
-                    else if soc64_in_dtb(sx.pa):
-                        pass    # DTB header overlay is read-only (mirrors soc64_mem_write)
+                    else if soc64_in_dtb(out, sx.pa):
+                        pass    # DTB overlay is read-only (mirrors soc64_mem_write)
                     else if soc64_in_ram(out, sx.pa):
                         # In-place DRAM store: drop-ref so ram.data stays unique
                         # and arr[i]= is O(1) (no per-store 128 MiB copy).  RMW

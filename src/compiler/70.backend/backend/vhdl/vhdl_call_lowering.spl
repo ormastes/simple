@@ -11,6 +11,12 @@
 #   LoweringDiagnostic   — diagnostic from the lowering pass
 
 use compiler.backend.vhdl.vhdl_hardware_metadata.{HardwareAttr, ReturnLabel, HardwareCallInstance, CallLowerResult, PortMapEntry, deterministic_instance_name}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.{MirModule, MirFunction}
+use compiler.backend.backend_api.*
+use compiler.backend.vhdl.vhdl_builder.VhdlBuilder
+use compiler.backend.vhdl.vhdl_helpers.{vhdl_sanitize_identifier, vhdl_function_is_hardware_entity}
+use compiler.backend.backend.vhdl_backend.VhdlBackend
 
 # ============================================================================
 # CallSite — a call site to a @hardware function
@@ -258,6 +264,579 @@ fn allocate_temp_signals(attr: HardwareAttr, inst_name: text) -> [TempSignal]:
     if attr.label_count >= 3:
         temps.push(TempSignal.for_output(inst_name, attr.l2_name, 1))
     return temps
+
+# ============================================================================
+# MIR entity-call lowering
+# ============================================================================
+
+impl VhdlBackend:
+    fn direct_hardware_callee(operand: MirOperand) -> MirFunction?:
+        match operand.kind:
+            case Const(value, _):
+                match value:
+                    case Str(name):
+                        val known = self.active_function_by_name.get(name)
+                        match known:
+                            case Some(func):
+                                if vhdl_function_is_hardware_entity(func): Some(func) else: nil
+                            case None: nil
+                    case _: nil
+            case _: nil
+
+    fn hardware_call_uses_port_map(caller: MirFunction, operand: MirOperand) -> bool:
+        caller.has_vhdl_metadata and caller.vhdl_metadata.has_clocked and self.direct_hardware_callee(operand).?
+
+    fn hardware_call_name_is_reserved(func: MirFunction, name: text) -> Result<bool, CompileError>:
+        val folded = name.to_lower()
+        if folded == "comb" or folded == "p_clk":
+            return Ok(true)
+        for local_name in self.active_local_names.values():
+            if local_name.to_lower() == folded:
+                return Ok(true)
+        val ports = match self.vhdl_ports_for_function(func):
+            case Ok(value): value
+            case Err(err): return Err(err)
+        for port in ports:
+            if port.name.to_lower() == folded:
+                return Ok(true)
+        for symbol in self.function_static_symbols(func):
+            val static_ = match self.clocked_static(symbol):
+                case Ok(value): value
+                case Err(err): return Err(err)
+            if self.clocked_static_name(static_).to_lower() == folded:
+                return Ok(true)
+        for block in func.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case VhdlPortMap(_, instance, _):
+                        if instance.to_lower() == folded:
+                            return Ok(true)
+                    case _: ()
+        for planned in self.active_hardware_call_instance_names.values():
+            val prior = planned.to_lower()
+            if prior == folded or folded.starts_with("{prior}_") or prior.starts_with("{folded}_"):
+                return Ok(true)
+        Ok(false)
+
+    fn plan_hardware_call_instance_name(func: MirFunction, callee: MirFunction, ordinal: i32) -> Result<text, CompileError>:
+        val stem = "simple_hwcall_{vhdl_sanitize_identifier(callee.name)}_{ordinal}"
+        val abi = match self.vhdl_return_abi(callee):
+            case Ok(value): value
+            case Err(err): return Err(err)
+        var suffix: i32 = 0
+        while suffix < 10000:
+            val candidate = if suffix == 0: stem else: "{stem}_{suffix}"
+            val label_reserved = match self.hardware_call_name_is_reserved(func, candidate):
+                case Ok(value): value
+                case Err(err): return Err(err)
+            var reserved = label_reserved
+            if not reserved:
+                for field in abi.fields:
+                    val output_reserved = match self.hardware_call_name_is_reserved(func, "{candidate}_{field.name}"):
+                        case Ok(value): value
+                        case Err(err): return Err(err)
+                    if output_reserved:
+                        reserved = true
+            if not reserved:
+                self.active_hardware_call_instance_names[ordinal as i64] = candidate
+                return Ok(candidate)
+            suffix = suffix + 1
+        Err(self.backend_error("VHDL hardware call `{callee.name}` could not allocate a collision-free instance label"))
+
+    fn hardware_call_instance_name(ordinal: i32) -> Result<text, CompileError>:
+        val planned = self.active_hardware_call_instance_names.get(ordinal as i64)
+        match planned:
+            case Some(name): Ok(name)
+            case None: Err(self.backend_error("VHDL hardware call instance {ordinal} was not planned before emission"))
+
+    fn validate_hardware_call_shape(dest: LocalId?, callee: MirFunction, args: [MirOperand]) -> Result<(), CompileError>:
+        if callee.is_generic_template or callee.generic_params.len() > 0:
+            return Err(self.backend_error("VHDL hardware call `{callee.name}` must be monomorphized before entity lowering"))
+        if callee.vhdl_metadata.generics.len() > 0:
+            return Err(self.backend_error("VHDL hardware call `{callee.name}` has entity generics but no explicit generic map"))
+        if callee.vhdl_metadata.has_clocked:
+            return Err(self.backend_error("VHDL hardware call `{callee.name}` targets a clocked entity; nested clock-domain calls require an explicit top-level port map"))
+        if args.len() != callee.signature.params.len():
+            return Err(self.backend_error("VHDL hardware call `{callee.name}` arity mismatch: expected {callee.signature.params.len()}, got {args.len()}"))
+        var idx = 0
+        while idx < args.len():
+            val actual = match self.operand_type(args[idx]):
+                case Ok(value): value
+                case Err(err): return Err(err)
+            if actual.kind != callee.signature.params[idx].kind:
+                return Err(self.backend_error("VHDL hardware call `{callee.name}` argument {idx} type does not match its input port"))
+            idx = idx + 1
+        val abi = match self.vhdl_return_abi(callee):
+            case Ok(value): value
+            case Err(err): return Err(err)
+        if abi.fields.len() > 1:
+            return Err(self.backend_error("VHDL hardware call `{callee.name}` has multiple output ports; aggregate call-result wiring is not supported at this MIR boundary"))
+        if abi.fields.len() == 0 and dest.?:
+            return Err(self.backend_error("VHDL void hardware call `{callee.name}` cannot assign a result local"))
+        if abi.fields.len() == 1 and not dest.?:
+            return Err(self.backend_error("VHDL hardware call `{callee.name}` requires a result local for output wiring"))
+        match dest:
+            case Some(local):
+                val actual = match self.local_type(local):
+                    case Ok(value): value
+                    case Err(err): return Err(err)
+                if actual.kind != callee.signature.return_type.kind:
+                    return Err(self.backend_error("VHDL hardware call `{callee.name}` result type does not match its output port"))
+            case None: ()
+        Ok(())
+
+    fn hardware_call_reaches(from: text, target: text, seen: [text]) -> bool:
+        if from == target:
+            return true
+        for prior in seen:
+            if prior == from:
+                return false
+        val known = self.active_function_by_name.get(from)
+        if not known.?:
+            return false
+        var next_seen = seen
+        next_seen = next_seen.push(from)
+        for block in known.unwrap().blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case Call(_, operand, _):
+                        val callee = self.direct_hardware_callee(operand)
+                        if callee.? and self.hardware_call_uses_port_map(known.unwrap(), operand):
+                            if self.hardware_call_reaches(callee.unwrap().name, target, next_seen):
+                                return true
+                    case _: ()
+        false
+
+    fn validate_hardware_call_cycles(module: MirModule) -> Result<(), CompileError>:
+        for symbol in module.functions.keys():
+            val caller = module.functions[symbol]
+            if not vhdl_function_is_hardware_entity(caller):
+                continue
+            for block in caller.blocks:
+                for inst in block.instructions:
+                    match inst.kind:
+                        case Call(_, operand, _):
+                            val callee = self.direct_hardware_callee(operand)
+                            if callee.? and self.hardware_call_uses_port_map(caller, operand):
+                                val entity = callee.unwrap()
+                                if self.hardware_call_reaches(entity.name, caller.name, [caller.name]):
+                                    return Err(self.backend_error("Recursive VHDL hardware entity call cycle `{caller.name}` -> `{entity.name}` is not synthesizable"))
+                        case _: ()
+        Ok(())
+
+    fn hardware_dependencies_emitted(func: MirFunction, emitted: Dict<text, bool>) -> bool:
+        for block in func.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case Call(_, operand, _):
+                        val callee = self.direct_hardware_callee(operand)
+                        if callee.? and self.hardware_call_uses_port_map(func, operand):
+                            if not emitted.get(callee.unwrap().name).?:
+                                return false
+                    case _: ()
+        true
+
+    fn hardware_functions_sorted(module: MirModule) -> [MirFunction]:
+        var functions: [MirFunction] = []
+        for symbol in module.functions.keys():
+            val func = module.functions[symbol]
+            if vhdl_function_is_hardware_entity(func):
+                functions = functions.push(func)
+        for i in range(0, functions.len()):
+            for j in range(i + 1, functions.len()):
+                if functions[j].name < functions[i].name:
+                    val tmp = functions[i]
+                    functions[i] = functions[j]
+                    functions[j] = tmp
+        functions
+
+    fn hardware_entity_emit_order(module: MirModule) -> Result<[MirFunction], CompileError>:
+        val functions = self.hardware_functions_sorted(module)
+        val total = functions.len()
+        var emitted: Dict<text, bool> = {}
+        var order: [MirFunction] = []
+        while order.len() < total:
+            var progressed = false
+            for func in functions:
+                if emitted.get(func.name).?:
+                    continue
+                if self.hardware_dependencies_emitted(func, emitted):
+                    order = order.push(func)
+                    emitted[func.name] = true
+                    progressed = true
+            if not progressed:
+                return Err(self.backend_error("Recursive VHDL hardware entity call graph has no callee-first emission order"))
+        Ok(order)
+
+    fn local_definition_count(func: MirFunction, local: LocalId) -> i64:
+        var count = 0
+        for block in func.blocks:
+            for inst in block.instructions:
+                if self.inst_def_id(inst) == local.id:
+                    count = count + 1
+        count
+
+    fn hardware_call_local_is_mutated(func: MirFunction, local: LocalId) -> bool:
+        for block in func.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case SetField(base, _, _):
+                        if self.mir_operand_use_id(base) == local.id:
+                            return true
+                    case _: ()
+        false
+
+    fn hardware_call_operand_definition_is_safe(func: MirFunction, call_block: BlockId, call_index: i64, operand: MirOperand) -> bool:
+        match operand.kind:
+            case Const(_, _): true
+            case Copy(local) | Move(local):
+                self.hardware_call_arg_definition_is_safe(func, call_block, call_index, local)
+
+    fn hardware_call_arg_definition_is_safe(func: MirFunction, call_block: BlockId, call_index: i64, local: LocalId) -> bool:
+        if self.hardware_call_local_is_mutated(func, local):
+            return false
+        val kind = match self.local_kind(local):
+            case Ok(value): value
+            case Err(_): return false
+        match kind:
+            case Arg(_): return true
+            case _: ()
+        if self.local_definition_count(func, local) != 1:
+            return false
+        var definition_block = BlockId(id: -1)
+        var definition_index: i64 = -1
+        var definition: MirInst? = nil
+        for block in func.blocks:
+            var idx: i64 = 0
+            for inst in block.instructions:
+                if self.inst_def_id(inst) == local.id:
+                    definition_block = block.id
+                    definition_index = idx
+                    definition = Some(inst)
+                idx = idx + 1
+        if not definition.?:
+            return false
+        val before_call = definition_block.id == call_block.id and definition_index < call_index
+        val unconditional_entry = definition_block.id == func.entry_block.id and (call_block.id != func.entry_block.id or definition_index < call_index)
+        match definition.unwrap().kind:
+            case LoadGlobal(_, _): before_call or unconditional_entry
+            case Const(_, _, _): unconditional_entry
+            case Copy(_, src) | Move(_, src):
+                before_call and self.hardware_call_arg_definition_is_safe(func, definition_block, definition_index, src)
+            case GetField(_, base, _):
+                before_call and self.hardware_call_operand_definition_is_safe(func, definition_block, definition_index, base)
+            case Cast(_, operand, _) | Bitcast(_, operand, _) | UnaryOp(_, _, operand) | VhdlResize(_, operand, _, _):
+                before_call and self.hardware_call_operand_definition_is_safe(func, definition_block, definition_index, operand)
+            case BinOp(_, _, left, right) | CheckedBinOp(_, _, left, right):
+                before_call and self.hardware_call_operand_definition_is_safe(func, definition_block, definition_index, left) and self.hardware_call_operand_definition_is_safe(func, definition_block, definition_index, right)
+            case VhdlSlice(_, signal, _, _):
+                before_call and self.hardware_call_operand_definition_is_safe(func, definition_block, definition_index, signal)
+            case Call(_, operand, args):
+                if self.direct_hardware_callee(operand).?:
+                    before_call
+                else:
+                    if not before_call:
+                        return false
+                    for arg in args:
+                        if not self.hardware_call_operand_definition_is_safe(func, definition_block, definition_index, arg):
+                            return false
+                    true
+            case _: false
+
+    fn hardware_call_dest_dominates_uses(func: MirFunction, call_block: BlockId, call_index: i64, dest: LocalId) -> bool:
+        if self.local_definition_count(func, dest) != 1:
+            return false
+        for block in func.blocks:
+            var idx: i64 = 0
+            for inst in block.instructions:
+                for used in self.inst_used_ids(inst):
+                    if used == dest.id:
+                        if block.id.id != call_block.id or idx <= call_index:
+                            return false
+                idx = idx + 1
+            for used in self.terminator_used_ids(block.terminator):
+                if used == dest.id and block.id.id != call_block.id:
+                    return false
+        true
+
+    fn validate_hardware_call_placement(func: MirFunction, call_block: BlockId, call_index: i64, dest: LocalId?, args: [MirOperand]) -> Result<(), CompileError>:
+        match dest:
+            case Some(local):
+                if not self.hardware_call_dest_dominates_uses(func, call_block, call_index, local):
+                    return Err(self.backend_error("VHDL hardware call result local {local.id} in `{func.name}` must have one definition and only dominated same-block uses"))
+            case None: ()
+        for arg in args:
+            match arg.kind:
+                case Copy(local) | Move(local):
+                    if not self.hardware_call_arg_definition_is_safe(func, call_block, call_index, local):
+                        return Err(self.backend_error("VHDL hardware call input local {local.id} in `{func.name}` must have one unconditional architecture-visible definition"))
+                case Const(_, _): ()
+        Ok(())
+
+    fn hardware_call_operand_plan_expr(func: MirFunction, call_block: BlockId, call_index: i64, operand: MirOperand) -> Result<text, CompileError>:
+        match operand.kind:
+            case Const(_, _): self.operand_to_vhdl(operand)
+            case Copy(local) | Move(local):
+                if self.hardware_call_local_is_mutated(func, local):
+                    return Err(self.backend_error("VHDL hardware call input local {local.id} in `{func.name}` is mutated by SetField; concurrent entity wiring cannot represent this call-site record snapshot"))
+                val kind = match self.local_kind(local):
+                    case Ok(value): value
+                    case Err(err): return Err(err)
+                match kind:
+                    case Arg(_): return self.local_to_vhdl(local)
+                    case _: ()
+                var definition: MirInst? = nil
+                for block in func.blocks:
+                    for inst in block.instructions:
+                        if self.inst_def_id(inst) == local.id:
+                            definition = Some(inst)
+                if not definition.?:
+                    return Err(self.backend_error("VHDL hardware call input local {local.id} in `{func.name}` has no unique definition"))
+                match definition.unwrap().kind:
+                    case LoadGlobal(_, symbol):
+                        val static_ = match self.clocked_static(symbol):
+                            case Ok(value): value
+                            case Err(err): return Err(err)
+                        Ok(self.clocked_static_name(static_))
+                    case Const(_, value, ty):
+                        self.const_value_to_vhdl_at(value, ty, definition.unwrap().span)
+                    case Copy(_, src) | Move(_, src):
+                        self.hardware_call_operand_plan_expr(func, call_block, call_index, MirOperand(kind: MirOperandKind.Copy(src)))
+                    case GetField(_, base, field):
+                        val base_expr = match self.hardware_call_operand_plan_expr(func, call_block, call_index, base):
+                            case Ok(value): value
+                            case Err(err): return Err(err)
+                        val field_name = match self.field_name_for_operand(base, field):
+                            case Ok(value): value
+                            case Err(err): return Err(err)
+                        Ok("{base_expr}.{field_name}")
+                    case Cast(_, source, target) | Bitcast(_, source, target):
+                        val source_expr = match self.hardware_call_operand_plan_expr(func, call_block, call_index, source):
+                            case Ok(value): value
+                            case Err(err): return Err(err)
+                        val source_type = match self.operand_type(source):
+                            case Ok(value): value
+                            case Err(err): return Err(err)
+                        self.cast_to_vhdl(source_expr, source_type, target)
+                    case UnaryOp(_, op, source):
+                        val source_expr = match self.hardware_call_operand_plan_expr(func, call_block, call_index, source):
+                            case Ok(value): value
+                            case Err(err): return Err(err)
+                        self.unaryop_to_vhdl(op, source_expr)
+                    case BinOp(_, op, left, right) | CheckedBinOp(_, op, left, right):
+                        val left_expr = match self.hardware_call_operand_plan_expr(func, call_block, call_index, left):
+                            case Ok(value): value
+                            case Err(err): return Err(err)
+                        val right_expr = match self.hardware_call_operand_plan_expr(func, call_block, call_index, right):
+                            case Ok(value): value
+                            case Err(err): return Err(err)
+                        val left_type = match self.operand_type(left):
+                            case Ok(value): value
+                            case Err(err): return Err(err)
+                        val right_type = match self.operand_type(right):
+                            case Ok(value): value
+                            case Err(err): return Err(err)
+                        self.binop_to_vhdl(op, left_expr, left_type, right_expr, right_type, right)
+                    case VhdlResize(_, source, width, signed):
+                        val source_expr = match self.hardware_call_operand_plan_expr(func, call_block, call_index, source):
+                            case Ok(value): value
+                            case Err(err): return Err(err)
+                        self.resize_expr_to_vhdl(source_expr, signed, width)
+                    case VhdlSlice(_, source, hi, lo):
+                        val source_expr = match self.hardware_call_operand_plan_expr(func, call_block, call_index, source):
+                            case Ok(value): value
+                            case Err(err): return Err(err)
+                        Ok("{source_expr}({hi} downto {lo})")
+                    case Call(_, callee, args):
+                        if self.direct_hardware_callee(callee).?:
+                            if self.active_inline_exprs.has(local.id):
+                                return Ok(self.active_inline_exprs[local.id])
+                            return Err(self.backend_error("VHDL hardware call result local {local.id} was not planned before use"))
+                        val target = match self.call_target_name(callee):
+                            case Ok(value): value
+                            case Err(err): return Err(err)
+                        val helper = self.active_helper_name_by_source.get(target)
+                        if not helper.?:
+                            return Err(self.backend_error("VHDL hardware call input depends on unplanned helper `{target}`"))
+                        val helper_name = helper.unwrap()
+                        var rendered: [text] = []
+                        for arg in args:
+                            val arg_expr = match self.hardware_call_operand_plan_expr(func, call_block, call_index, arg):
+                                case Ok(value): value
+                                case Err(err): return Err(err)
+                            rendered = rendered.push(arg_expr)
+                        if rendered.len() == 0: Ok(helper_name) else: Ok("{helper_name}({rendered.join(\", \")})")
+                    case _:
+                        Err(self.backend_error("VHDL hardware call input local {local.id} in `{func.name}` is not a recursively pure SSA expression"))
+
+    fn prepare_hardware_call_wiring(func: MirFunction) -> Result<(), CompileError>:
+        var hardware_args: Dict<i64, bool> = {}
+        for block in func.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case Call(_, operand, args):
+                        if self.hardware_call_uses_port_map(func, operand):
+                            for arg in args:
+                                match arg.kind:
+                                    case Copy(local) | Move(local): hardware_args[local.id] = true
+                                    case _: ()
+                    case _: ()
+
+        var ordinal: i32 = 0
+        for block in func.blocks:
+            var inst_index: i64 = 0
+            for inst in block.instructions:
+                match inst.kind:
+                    case LoadGlobal(dest, symbol):
+                        if hardware_args.get(dest.id).?:
+                            val static_ = match self.clocked_static(symbol):
+                                case Ok(value): value
+                                case Err(err): return Err(err)
+                            self.active_inline_exprs[dest.id] = self.clocked_static_name(static_)
+                    case Copy(dest, src) | Move(dest, src):
+                        if hardware_args.get(dest.id).?:
+                            val expr = match self.local_operand_expr(src):
+                                case Ok(value): value
+                                case Err(err): return Err(err)
+                            self.active_inline_exprs[dest.id] = expr
+                    case Const(dest, value, ty):
+                        if hardware_args.get(dest.id).?:
+                            val expr = match self.const_value_to_vhdl_at(value, ty, inst.span):
+                                case Ok(result): result
+                                case Err(err): return Err(err)
+                            self.active_inline_exprs[dest.id] = expr
+                    case Call(dest, operand, args):
+                        val callee = if self.hardware_call_uses_port_map(func, operand): self.direct_hardware_callee(operand) else: nil
+                        match callee:
+                            case Some(entity):
+                                match self.validate_hardware_call_shape(dest, entity, args):
+                                    case Ok(_): ()
+                                    case Err(err): return Err(err)
+                                match self.validate_hardware_call_placement(func, block.id, inst_index, dest, args):
+                                    case Ok(_): ()
+                                    case Err(err): return Err(err)
+                                for arg in args:
+                                    match arg.kind:
+                                        case Copy(local) | Move(local):
+                                            val planned_arg = match self.hardware_call_operand_plan_expr(func, block.id, inst_index, arg):
+                                                case Ok(value): value
+                                                case Err(err): return Err(err)
+                                            self.active_inline_exprs[local.id] = planned_arg
+                                        case Const(_, _): ()
+                                val abi = match self.vhdl_return_abi(entity):
+                                    case Ok(value): value
+                                    case Err(err): return Err(err)
+                                val instance = match self.plan_hardware_call_instance_name(func, entity, ordinal):
+                                    case Ok(value): value
+                                    case Err(err): return Err(err)
+                                if abi.fields.len() == 1:
+                                    val local = dest.unwrap()
+                                    self.active_inline_exprs[local.id] = "{instance}_{abi.fields[0].name}"
+                                ordinal = ordinal + 1
+                            case None:
+                                match dest:
+                                    case Some(local):
+                                        if hardware_args.get(local.id).?:
+                                            val expr = match self.helper_call_expr(operand, args, false):
+                                                case Ok(value): value
+                                                case Err(err): return Err(err)
+                                            self.active_inline_exprs[local.id] = expr
+                                    case None: ()
+                    case _: ()
+                inst_index = inst_index + 1
+        Ok(())
+
+    fn hardware_call_operand_expr(func: MirFunction, operand: MirOperand) -> Result<text, CompileError>:
+        match operand.kind:
+            case Const(_, _): self.operand_to_vhdl(operand)
+            case Copy(local) | Move(local):
+                if self.active_inline_exprs.has(local.id):
+                    return Ok(self.active_inline_exprs[local.id])
+                val kind = match self.local_kind(local):
+                    case Ok(value): value
+                    case Err(err): return Err(err)
+                match kind:
+                    case Arg(_): self.local_to_vhdl(local)
+                    case _:
+                        if func.has_vhdl_metadata and func.vhdl_metadata.has_clocked:
+                            Err(self.backend_error("VHDL hardware call input local {local.id} in clocked `{func.name}` is process-local; expose a fixed combinational wire before entity lowering"))
+                        else:
+                            self.local_to_vhdl(local)
+
+    fn emit_hardware_call_signal_declarations(builder: VhdlBuilder, func: MirFunction) -> Result<(), CompileError>:
+        var ordinal: i32 = 0
+        for block in func.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case Call(dest, operand, args):
+                        val callee = if self.hardware_call_uses_port_map(func, operand): self.direct_hardware_callee(operand) else: nil
+                        if callee.?:
+                            val entity = callee.unwrap()
+                            match self.validate_hardware_call_shape(dest, entity, args):
+                                case Ok(_): ()
+                                case Err(err): return Err(err)
+                            val abi = match self.vhdl_return_abi(entity):
+                                case Ok(value): value
+                                case Err(err): return Err(err)
+                            if abi.fields.len() == 1:
+                                val field = abi.fields[0]
+                                val type_name = match self.mir_type_to_vhdl_at(field.type_, Some(func.span)):
+                                    case Ok(value): value
+                                    case Err(err): return Err(err)
+                                val instance = match self.hardware_call_instance_name(ordinal):
+                                    case Ok(value): value
+                                    case Err(err): return Err(err)
+                                builder.emit_signal_decl("{instance}_{field.name}", type_name, nil)
+                            ordinal = ordinal + 1
+                    case _: ()
+        Ok(())
+
+    fn emit_hardware_call_instances(builder: VhdlBuilder, func: MirFunction) -> Result<(), CompileError>:
+        var ordinal: i32 = 0
+        for block in func.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case Call(dest, operand, args):
+                        val callee = if self.hardware_call_uses_port_map(func, operand): self.direct_hardware_callee(operand) else: nil
+                        if not callee.?:
+                            continue
+                        val entity = callee.unwrap()
+                        match self.validate_hardware_call_shape(dest, entity, args):
+                            case Ok(_): ()
+                            case Err(err): return Err(err)
+                        val ports = match self.vhdl_ports_for_function(entity):
+                            case Ok(value): value
+                            case Err(err): return Err(err)
+                        val abi = match self.vhdl_return_abi(entity):
+                            case Ok(value): value
+                            case Err(err): return Err(err)
+                        val instance = match self.hardware_call_instance_name(ordinal):
+                            case Ok(value): value
+                            case Err(err): return Err(err)
+                        builder.emit_instance_begin(instance, entity.name)
+                        builder.emit_port_map_begin()
+                        var connection_count = args.len() + abi.fields.len()
+                        if connection_count == 0:
+                            return Err(self.backend_error("VHDL hardware call `{entity.name}` has no ports to wire"))
+                        var connection_index = 0
+                        var idx = 0
+                        while idx < args.len():
+                            val actual = match self.hardware_call_operand_expr(func, args[idx]):
+                                case Ok(value): value
+                                case Err(err): return Err(err)
+                            builder.emit_port_map_entry(ports[idx].name, actual, connection_index == connection_count - 1)
+                            connection_index = connection_index + 1
+                            idx = idx + 1
+                        if abi.fields.len() == 1:
+                            val field = abi.fields[0]
+                            builder.emit_port_map_entry(field.name, "{instance}_{field.name}", true)
+                        builder.emit_port_map_end()
+                        ordinal = ordinal + 1
+                    case _: ()
+        Ok(())
+
+    fn call_is_lowered_hardware_entity(operand: MirOperand) -> bool:
+        self.active_hardware_calls_use_port_maps and self.direct_hardware_callee(operand).?
 
 fn main():
     print("vhdl_call_lowering loaded")

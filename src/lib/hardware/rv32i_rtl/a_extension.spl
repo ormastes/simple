@@ -1,0 +1,157 @@
+# RV32A helpers; the protected core owns all atomic bus sequencing.
+
+val RV32A_OPCODE: u32 = 0x2F
+val RV32A_FUNCT3_W: u32 = 2
+
+val RV32A_AMO_ADD: u32 = 0x00
+val RV32A_AMO_SWAP: u32 = 0x01
+val RV32A_AMO_LR: u32 = 0x02
+val RV32A_AMO_SC: u32 = 0x03
+val RV32A_AMO_XOR: u32 = 0x04
+val RV32A_AMO_OR: u32 = 0x08
+val RV32A_AMO_AND: u32 = 0x0C
+val RV32A_AMO_MIN: u32 = 0x10
+val RV32A_AMO_MAX: u32 = 0x14
+val RV32A_AMO_MINU: u32 = 0x18
+val RV32A_AMO_MAXU: u32 = 0x1C
+
+struct Rv32ADecode:
+    matched: bool
+    operation: u32
+    acquire: bool
+    release: bool
+
+struct Rv32Reservation:
+    """A translated physical LR.W word; the core owns all atomic bus sequencing."""
+    valid: bool
+    physical_word_address: i64
+
+struct Rv32AScResult:
+    """Permission to issue SC.W; the core writes rd=0 only after bus acknowledgement."""
+    store_allowed: bool
+    reservation: Rv32Reservation
+
+struct Rv32AExternalWrite:
+    """Acknowledged external physical write used to invalidate a local reservation.
+    Atomic bus ownership remains in the core; this type carries no bus command."""
+    valid: bool
+    physical_address: i64
+    size_bytes: u32
+
+val RV32A_MAX_PADDR: i64 = 0x3FFFFFFFF
+
+@hardware
+fn rv32a_operation_valid(operation: u32) -> bool:
+    operation == RV32A_AMO_LR or operation == RV32A_AMO_SC or
+    operation == RV32A_AMO_SWAP or operation == RV32A_AMO_ADD or
+    operation == RV32A_AMO_XOR or operation == RV32A_AMO_OR or
+    operation == RV32A_AMO_AND or operation == RV32A_AMO_MIN or
+    operation == RV32A_AMO_MAX or operation == RV32A_AMO_MINU or
+    operation == RV32A_AMO_MAXU
+
+@hardware
+fn rv32a_decode(instruction: u32) -> Rv32ADecode:
+    """Decode a legal AMO.W/LR.W/SC.W, accepting all aq/rl combinations."""
+    val operation = (instruction >> 27) & 0x1F
+    val acquire = ((instruction >> 26) & 1) != 0
+    val release = ((instruction >> 25) & 1) != 0
+    val lr_rs2_zero = ((instruction >> 20) & 0x1F) == 0
+    val matched = (instruction & 0x7F) == RV32A_OPCODE and
+        ((instruction >> 12) & 7) == RV32A_FUNCT3_W and
+        rv32a_operation_valid(operation) and
+        (operation != RV32A_AMO_LR or lr_rs2_zero)
+    Rv32ADecode(matched: matched, operation: operation, acquire: acquire,
+        release: release)
+
+@hardware
+fn rv32a_signed_lt(left: u32, right: u32) -> bool:
+    (left ^ 0x80000000) < (right ^ 0x80000000)
+
+@hardware
+fn rv32a_compute(operation: u32, old_value: u32, rs2_value: u32) -> u32:
+    """Return the AMO.W memory result; LR/SC and unknown operations leave it unchanged."""
+    if operation == RV32A_AMO_SWAP:
+        return rs2_value
+    if operation == RV32A_AMO_ADD:
+        return old_value + rs2_value
+    if operation == RV32A_AMO_XOR:
+        return old_value ^ rs2_value
+    if operation == RV32A_AMO_OR:
+        return old_value | rs2_value
+    if operation == RV32A_AMO_AND:
+        return old_value & rs2_value
+    if operation == RV32A_AMO_MIN:
+        return if rv32a_signed_lt(rs2_value, old_value): rs2_value else: old_value
+    if operation == RV32A_AMO_MAX:
+        return if rv32a_signed_lt(old_value, rs2_value): rs2_value else: old_value
+    if operation == RV32A_AMO_MINU:
+        return if rs2_value < old_value: rs2_value else: old_value
+    if operation == RV32A_AMO_MAXU:
+        return if old_value < rs2_value: rs2_value else: old_value
+    old_value
+
+@hardware
+fn rv32a_reservation_empty() -> Rv32Reservation:
+    Rv32Reservation(valid: false, physical_word_address: 0)
+
+@hardware
+fn rv32a_lr_set(physical_address: i64) -> Rv32Reservation:
+    """Record a successful aligned translated physical LR.W word."""
+    if physical_address < 0 or physical_address > RV32A_MAX_PADDR or
+        (physical_address & 3) != 0:
+        return rv32a_reservation_empty()
+    Rv32Reservation(valid: true, physical_word_address: physical_address)
+
+@hardware
+fn rv32a_sc_check_and_clear(reservation: Rv32Reservation,
+                            physical_address: i64) -> Rv32AScResult:
+    """SC.W succeeds only for its aligned reserved physical word and always clears."""
+    val store_allowed = reservation.valid and physical_address >= 0 and
+        physical_address <= RV32A_MAX_PADDR and (physical_address & 3) == 0 and
+        reservation.physical_word_address == physical_address
+    Rv32AScResult(store_allowed: store_allowed, reservation: rv32a_reservation_empty())
+
+@hardware
+fn rv32a_store_conflicts(reservation: Rv32Reservation, physical_address: i64,
+                         size_bytes: u32) -> bool:
+    if not reservation.valid or size_bytes == 0 or physical_address < 0 or
+        physical_address > RV32A_MAX_PADDR:
+        return false
+    val word_first = reservation.physical_word_address
+    val word_last = word_first + 3
+    val store_last = physical_address + (size_bytes as i64) - 1
+    if store_last > RV32A_MAX_PADDR:
+        return false
+    physical_address <= word_last and word_first <= store_last
+
+@hardware
+fn rv32a_invalidate_store(reservation: Rv32Reservation, physical_address: i64,
+                          size_bytes: u32) -> Rv32Reservation:
+    if rv32a_store_conflicts(reservation, physical_address, size_bytes):
+        return rv32a_reservation_empty()
+    reservation
+
+@hardware
+fn rv32a_invalidate_amo(reservation: Rv32Reservation,
+                        physical_address: i64) -> Rv32Reservation:
+    rv32a_invalidate_store(reservation, physical_address, 4)
+
+@hardware
+fn rv32a_invalidate_external(reservation: Rv32Reservation, physical_address: i64,
+                             size_bytes: u32) -> Rv32Reservation:
+    rv32a_invalidate_store(reservation, physical_address, size_bytes)
+
+@hardware
+fn rv32a_invalidate_external_write(reservation: Rv32Reservation,
+                                   write: Rv32AExternalWrite) -> Rv32Reservation:
+    if not write.valid:
+        return reservation
+    rv32a_invalidate_external(reservation, write.physical_address, write.size_bytes)
+
+export Rv32ADecode, Rv32Reservation, Rv32AScResult, Rv32AExternalWrite
+export rv32a_decode, rv32a_compute, rv32a_lr_set, rv32a_sc_check_and_clear
+export rv32a_store_conflicts, rv32a_invalidate_store, rv32a_invalidate_amo
+export rv32a_invalidate_external, rv32a_invalidate_external_write, rv32a_reservation_empty
+export RV32A_AMO_ADD, RV32A_AMO_SWAP, RV32A_AMO_LR, RV32A_AMO_SC
+export RV32A_AMO_XOR, RV32A_AMO_OR, RV32A_AMO_AND, RV32A_AMO_MIN, RV32A_AMO_MAX
+export RV32A_AMO_MINU, RV32A_AMO_MAXU

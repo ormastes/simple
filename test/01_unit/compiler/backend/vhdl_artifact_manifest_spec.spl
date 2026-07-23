@@ -1,0 +1,129 @@
+use std.spec
+use compiler.driver.driver_vhdl_artifacts.{
+    VhdlArtifactSource, VhdlArtifactLocation, VhdlArtifactGeneratedItem,
+    VhdlArtifactPort, VhdlArtifactInput, vhdl_render_production_artifacts,
+    vhdl_write_production_artifacts, vhdl_artifact_target_for_entity,
+    vhdl_validate_production_artifact_input
+}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text?
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+extern fn rt_dir_remove_all(path: text) -> bool
+
+fn artifact_sha() -> text:
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+fn artifact_location() -> VhdlArtifactLocation:
+    VhdlArtifactLocation(available: true, module_name: "hardware.rv32.entry",
+        file: "src/lib/hardware/rv32i_rtl/protected_entry.spl",
+        start: 100, end: 140, line: 8, col: 1)
+
+fn artifact_port_location() -> VhdlArtifactLocation:
+    VhdlArtifactLocation(available: false, module_name: "", file: "",
+        start: 0, end: 0, line: 0, col: 0)
+
+fn artifact_input(sources: [VhdlArtifactSource], ports: [VhdlArtifactPort], output: text) -> VhdlArtifactInput:
+    VhdlArtifactInput(output_path: output,
+        entry_module: "hardware.rv32.entry",
+        entry_entity: "core32_protected_product_entry",
+        root_modules: ["hardware.rv32.entry"], sources: sources,
+        compiler_identity: "compiler-id", compiler_hash: artifact_sha(),
+        target: "riscv32", xlen: 32, profile: "RV32IMAC+Sv32+PMP",
+        catalog_name: "simple_vhdl_design", module_count: 2,
+        entity_count: 1, type_count: 3, helper_count: 4,
+        generated_items: [VhdlArtifactGeneratedItem(kind: "entity",
+            name: "core32_protected_product_entry", location: artifact_location())],
+        ports: ports, aop_advices_requested: 0, aop_weave_count: 0)
+
+describe "VHDL production artifact manifest":
+    it "routes every artifact writer error to CompileResult failure":
+        val source = rt_file_read_text(
+            "src/compiler/80.driver/driver_aot_output.spl") ?? ""
+        expect(source).to_contain("if not vhdl_remove_production_artifacts(output)")
+        expect(source).to_contain("match vhdl_write_production_artifacts(output, all_vhdl, rendered)")
+        expect(source).to_contain("case Err(err): return CompileResult.CodegenError(err)")
+
+    it "pins the production RISC-V target profiles":
+        val rv32 = vhdl_artifact_target_for_entity("core32_protected_product_entry", "dev")
+        val rv64 = vhdl_artifact_target_for_entity("core64_imac_product_entry", "dev")
+        expect(rv32.name).to_equal("riscv32")
+        expect(rv32.xlen).to_equal(32)
+        expect(rv32.profile).to_equal("RV32IMAC+Sv32+PMP")
+        expect(rv64.name).to_equal("riscv64")
+        expect(rv64.xlen).to_equal(64)
+        expect(rv64.profile).to_equal("RV64IMAC+Sv39+PMP")
+
+    it "is deterministic and retains exact source and flat-port provenance":
+        val a = VhdlArtifactSource(module_name: "hardware.rv32.entry",
+            path: "entry.spl", content_hash: artifact_sha())
+        val b = VhdlArtifactSource(module_name: "hardware.rv32.core",
+            path: "core.spl", content_hash: artifact_sha())
+        val p0 = VhdlArtifactPort(entity: "core32_protected_product_entry",
+            name: "clk", direction: "in", type_name: "std_logic", index: 0,
+            location: artifact_port_location())
+        val p1 = VhdlArtifactPort(entity: "core32_protected_product_entry",
+            name: "bus_addr", direction: "out", type_name: "unsigned(33 downto 0)",
+            index: 1, location: artifact_port_location())
+        val first = vhdl_render_production_artifacts(
+            artifact_input([a, b], [p1, p0], "build/core32.vhd"), "entity rtl is\n")
+        val second = vhdl_render_production_artifacts(
+            artifact_input([b, a], [p0, p1], "build/core32.vhd"), "entity rtl is\n")
+        expect(first.manifest).to_equal(second.manifest)
+        expect(first.source_map).to_equal(second.source_map)
+        expect(first.manifest).to_contain("\"qualification\":{\"status\":\"FAIL\"")
+        expect(first.manifest).to_contain("\"source_closure_sha256\"")
+        expect(first.manifest).to_contain("\"name\":\"bus_addr\",\"direction\":\"out\"")
+        expect(first.source_map).to_contain("\"file\":\"src/lib/hardware/rv32i_rtl/protected_entry.spl\"")
+        expect(first.source_map).to_contain("\"line\":8")
+        expect(first.source_map).to_contain("\"name\":\"clk\",\"direction\":\"in\",\"type\":\"std_logic\",\"source\":null")
+        expect(vhdl_validate_production_artifact_input(
+            artifact_input([a, b], [p0, p1], "build/core32.vhd")).is_ok()).to_equal(true)
+
+    it "rejects missing compiler and source hashes":
+        val source = VhdlArtifactSource(module_name: "hardware.rv32.entry",
+            path: "entry.spl", content_hash: "")
+        val input = artifact_input([source], [], "build/core32.vhd")
+        expect(vhdl_validate_production_artifact_input(input).is_err()).to_equal(true)
+
+    it "removes the VHDL when a sidecar write fails":
+        val root = "build/vhdl_artifact_write_failure_contract"
+        rt_dir_remove_all(root)
+        expect(rt_dir_create(root, true)).to_equal(true)
+        val output = root + "/core.vhd"
+        # A directory at the map path deterministically rejects the map write.
+        expect(rt_dir_create(output + ".map.json", true)).to_equal(true)
+        val rendered = vhdl_render_production_artifacts(
+            artifact_input([], [], output), "entity core is\n")
+        val result = vhdl_write_production_artifacts(output, "entity core is\n", rendered)
+        expect(result.is_err()).to_equal(true)
+        expect(rt_file_exists(output)).to_equal(false)
+        expect(rt_file_exists(output + ".gen.json")).to_equal(false)
+        rt_dir_remove_all(root)
+
+    it "returns an error when the VHDL path is not writable":
+        val root = "build/vhdl_artifact_vhdl_write_failure_contract"
+        rt_dir_remove_all(root)
+        expect(rt_dir_create(root, true)).to_equal(true)
+        expect(rt_file_write_text(root + ".map.json", "stale")).to_equal(true)
+        expect(rt_file_write_text(root + ".gen.json", "stale")).to_equal(true)
+        val rendered = vhdl_render_production_artifacts(
+            artifact_input([], [], root), "entity core is\n")
+        expect(vhdl_write_production_artifacts(root, "entity core is\n", rendered).is_err()).to_equal(true)
+        expect(rt_file_exists(root + ".map.json")).to_equal(false)
+        expect(rt_file_exists(root + ".gen.json")).to_equal(false)
+        rt_dir_remove_all(root)
+
+    it "removes VHDL and source map when the manifest write fails":
+        val root = "build/vhdl_artifact_manifest_write_failure_contract"
+        rt_dir_remove_all(root)
+        expect(rt_dir_create(root, true)).to_equal(true)
+        val output = root + "/core.vhd"
+        expect(rt_dir_create(output + ".gen.json", true)).to_equal(true)
+        val rendered = vhdl_render_production_artifacts(
+            artifact_input([], [], output), "entity core is\n")
+        expect(vhdl_write_production_artifacts(output, "entity core is\n", rendered).is_err()).to_equal(true)
+        expect(rt_file_exists(output)).to_equal(false)
+        expect(rt_file_exists(output + ".map.json")).to_equal(false)
+        rt_dir_remove_all(root)

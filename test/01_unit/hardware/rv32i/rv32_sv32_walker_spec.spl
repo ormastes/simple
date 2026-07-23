@@ -1,0 +1,205 @@
+use std.spec.*
+use std.hardware.rv32i_rtl.mmu_sv32.{TlbEntry, mmu_create, mmu_set_satp, mmu_tlb_lookup, mmu_tlb_insert}
+use std.hardware.rv32i_rtl.mmu_sv32.mmu_sfence_vma
+use std.hardware.rv32i_rtl.mmu_sv32.{ACCESS_FETCH, ACCESS_LOAD, ACCESS_STORE, PRIV_S}
+use std.hardware.rv32i_rtl.mmu_sv32.sv32_full_vpn
+use std.hardware.rv32i_rtl.sv32_walker.{sv32_walker32_start, sv32_walker32_cycle}
+use std.hardware.rv32i_rtl.pmp.PmpEntries32
+use std.hardware.rv32i_rtl.pmp_csr.pmp32_entries_reset
+
+val PTE_V: u32 = 1
+val PTE_R: u32 = 2
+val PTE_W: u32 = 4
+val PTE_X: u32 = 8
+val PTE_U: u32 = 16
+val PTE_G: u32 = 32
+val PTE_A: u32 = 64
+val PTE_D: u32 = 128
+
+fn sv32_satp(root_ppn: u32) -> u32:
+    (1 << 31) | root_ppn
+
+fn sv32_satp_asid(root_ppn: u32, asid: u32) -> u32:
+    (1 << 31) | ((asid & 0x1FF) << 22) | root_ppn
+
+fn pointer_pte(ppn: u32) -> u32:
+    (ppn << 10) | PTE_V
+
+fn leaf_pte(ppn: u32, flags: u32) -> u32:
+    (ppn << 10) | PTE_V | flags
+
+fn pmp_allow_all() -> PmpEntries32:
+    var entries = pmp32_entries_reset()
+    entries.cfg_0 = 0x19
+    entries.addr_0 = 0xFFFFFFFF
+    entries
+
+describe "RV32 Sv32 request response walker":
+    it "holds a PTE request, walks two levels, and refills a 4 KiB TLB entry":
+        val vaddr: u32 = 0x00401234
+        val mmu = mmu_set_satp(mmu_create(), sv32_satp(0x100))
+        val pmp = pmp_allow_all()
+        val walker = sv32_walker32_start(mmu, pmp, vaddr, ACCESS_LOAD, PRIV_S, false, false)
+
+        val held = sv32_walker32_cycle(walker, mmu, pmp, false, false, false, 0)
+        expect(held.bus_valid).to_be(true)
+        expect(held.bus_addr).to_equal(0x100004)
+        expect(held.bus_size).to_equal(4)
+        expect(held.bus_write).to_be(false)
+
+        val l1_issue = sv32_walker32_cycle(held.walker, held.mmu, pmp, true, false, false, 0)
+        val l1_response = sv32_walker32_cycle(l1_issue.walker, l1_issue.mmu, pmp,
+            false, true, false, pointer_pte(0x101))
+        val l0_issue = sv32_walker32_cycle(l1_response.walker, l1_response.mmu, pmp,
+            true, false, false, 0)
+        expect(l0_issue.bus_addr).to_equal(0x101004)
+
+        val done = sv32_walker32_cycle(l0_issue.walker, l0_issue.mmu, pmp, false,
+            true, false, leaf_pte(0x80000, PTE_R | PTE_W | PTE_A | PTE_D))
+        expect(done.done).to_be(true)
+        expect(done.fault).to_be(false)
+        expect(done.paddr).to_equal(0x80000234)
+        expect(done.mmu.tlb_count).to_equal(1)
+        expect(mmu_tlb_lookup(done.mmu, sv32_full_vpn(vaddr)).hit).to_be(true)
+
+    it "accepts a zero-latency response and applies SUM plus MXR permissions":
+        val vaddr: u32 = 0x00005000
+        val mmu = mmu_set_satp(mmu_create(), sv32_satp(0x100))
+        val pmp = pmp_allow_all()
+        val walker = sv32_walker32_start(mmu, pmp, vaddr, ACCESS_LOAD, PRIV_S, true, true)
+        val done = sv32_walker32_cycle(walker, mmu, pmp, true, true, false,
+            leaf_pte(0x90000, PTE_X | PTE_U | PTE_A))
+        expect(done.bus_valid).to_be(true)
+        expect(done.done).to_be(true)
+        expect(done.paddr).to_equal(0x90005000)
+
+        val fetch = sv32_walker32_cycle(
+            sv32_walker32_start(done.mmu, pmp, vaddr, ACCESS_FETCH, PRIV_S, true, true),
+            done.mmu, pmp, true, true, false, leaf_pte(0x90000, PTE_X | PTE_U | PTE_A))
+        expect(fetch.fault_cause).to_equal(12)
+
+    it "faults on Svade A/D failures and reports PTE bus errors as access faults":
+        val mmu = mmu_set_satp(mmu_create(), sv32_satp(0x100))
+        val pmp = pmp_allow_all()
+        val no_accessed = sv32_walker32_cycle(
+            sv32_walker32_start(mmu, pmp, 0x2000, ACCESS_LOAD, PRIV_S, false, false),
+            mmu, pmp, true, true, false, leaf_pte(0x40000, PTE_R))
+        expect(no_accessed.fault).to_be(true)
+        expect(no_accessed.fault_cause).to_equal(13)
+
+        val no_dirty = sv32_walker32_cycle(
+            sv32_walker32_start(mmu, pmp, 0x3000, ACCESS_STORE, PRIV_S, false, false),
+            mmu, pmp, true, true, false, leaf_pte(0x40000, PTE_R | PTE_W | PTE_A))
+        expect(no_dirty.fault).to_be(true)
+        expect(no_dirty.fault_cause).to_equal(15)
+
+        val store = sv32_walker32_start(mmu, pmp, 0x3000, ACCESS_STORE, PRIV_S, false, false)
+        val issued = sv32_walker32_cycle(store, mmu, pmp, true, false, false, 0)
+        val bus_error = sv32_walker32_cycle(issued.walker, issued.mmu, pmp, false, true, true, 0)
+        expect(bus_error.fault_cause).to_equal(7)
+
+    it "accepts a 34-bit root PTE address and denies a PTE read through PMP":
+        val wide_root = mmu_set_satp(mmu_create(), sv32_satp(0x3FFFFF))
+        val allow = pmp_allow_all()
+        val wide = sv32_walker32_cycle(
+            sv32_walker32_start(wide_root, allow, 0xFFC00000, ACCESS_LOAD, PRIV_S, false, false),
+            wide_root, allow, false, false, false, 0)
+        expect(wide.bus_valid).to_be(true)
+        expect(wide.bus_addr).to_equal(0x3FFFFFFFC)
+
+        val deny = pmp32_entries_reset()
+        val denied = sv32_walker32_cycle(
+            sv32_walker32_start(mmu_set_satp(mmu_create(), sv32_satp(0x100)), deny,
+                0x4000, ACCESS_LOAD, PRIV_S, false, false),
+            mmu_set_satp(mmu_create(), sv32_satp(0x100)), deny, false, false, false, 0)
+        expect(denied.bus_valid).to_be(false)
+        expect(denied.fault).to_be(true)
+        expect(denied.fault_cause).to_equal(5)
+
+    it "does not cache a megapage in a 4 KiB-only TLB":
+        val mmu = mmu_set_satp(mmu_create(), sv32_satp(0x100))
+        val vaddr: u32 = 0x00401234
+        val pmp = pmp_allow_all()
+        val walker = sv32_walker32_start(mmu, pmp, vaddr, ACCESS_LOAD, PRIV_S, false, false)
+        val done = sv32_walker32_cycle(walker, mmu, pmp, true, true, false,
+            leaf_pte(0x80000, PTE_R | PTE_A))
+        expect(done.done).to_be(true)
+        expect(done.paddr).to_equal(0x80001234)
+        expect(done.mmu.tlb_count).to_equal(0)
+
+    it "matches local entries by SATP ASID and global entries across ASIDs":
+        val vpn: u32 = 0x12345
+        var local = mmu_set_satp(mmu_create(), sv32_satp_asid(0x100, 7))
+        local = mmu_tlb_insert(local, vpn, 0x80000, PTE_V | PTE_R | PTE_A)
+        expect(local.satp_asid).to_equal(7)
+        val other = mmu_set_satp(local, sv32_satp_asid(0x100, 8))
+        expect(mmu_tlb_lookup(other, vpn).hit).to_be(false)
+
+        var global = mmu_set_satp(mmu_create(), sv32_satp_asid(0x100, 7))
+        global = mmu_tlb_insert(global, vpn, 0x80000, PTE_V | PTE_R | PTE_G | PTE_A)
+        global = mmu_set_satp(global, sv32_satp_asid(0x100, 8))
+        expect(mmu_tlb_lookup(global, vpn).hit).to_be(true)
+
+    it "checks first middle and last TLB entries with ASID and global matching":
+        var mmu = mmu_set_satp(mmu_create(), sv32_satp_asid(0x100, 7))
+        mmu.tlb_0 = TlbEntry(vpn: 0x10000, ppn: 0x80000, flags: PTE_V,
+            asid: 7, valid: true)
+        mmu.tlb_8 = TlbEntry(vpn: 0x10008, ppn: 0x80008, flags: PTE_V,
+            asid: 7, valid: true)
+        mmu.tlb_9 = TlbEntry(vpn: 0x10009, ppn: 0x80009, flags: PTE_V,
+            asid: 8, valid: true)
+        mmu.tlb_14 = TlbEntry(vpn: 0x1000E, ppn: 0x8000E,
+            flags: PTE_V | PTE_G, asid: 7, valid: true)
+        mmu.tlb_15 = TlbEntry(vpn: 0x1000F, ppn: 0x8000F, flags: PTE_V,
+            asid: 7, valid: true)
+
+        expect(mmu_tlb_lookup(mmu, 0x10000).ppn).to_equal(0x80000)
+        expect(mmu_tlb_lookup(mmu, 0x10008).ppn).to_equal(0x80008)
+        expect(mmu_tlb_lookup(mmu, 0x1000F).ppn).to_equal(0x8000F)
+        expect(mmu_tlb_lookup(mmu, 0x1FFFF).hit).to_be(false)
+        expect(mmu_tlb_lookup(mmu, 0x10009).hit).to_be(false)
+
+        val asid8 = mmu_set_satp(mmu, sv32_satp_asid(0x100, 8))
+        expect(mmu_tlb_lookup(asid8, 0x10009).ppn).to_equal(0x80009)
+        expect(mmu_tlb_lookup(asid8, 0x1000E).ppn).to_equal(0x8000E)
+        expect(mmu_tlb_lookup(asid8, 0x10000).hit).to_be(false)
+
+        val fenced = mmu_sfence_vma(mmu, 0, 7, false, true)
+        expect(fenced.tlb_0.valid).to_be(false)
+        expect(fenced.tlb_8.valid).to_be(false)
+        expect(fenced.tlb_15.valid).to_be(false)
+        expect(fenced.tlb_9.valid).to_be(true)
+        expect(fenced.tlb_14.valid).to_be(true)
+
+    it "keeps globals on ASID fences and invalidates exact address matches":
+        val local_vaddr: u32 = 0x12345000
+        val other_vaddr: u32 = 0x23456000
+        val global_vaddr: u32 = 0x34567000
+        var mmu = mmu_set_satp(mmu_create(), sv32_satp_asid(0x100, 7))
+        mmu = mmu_tlb_insert(mmu, sv32_full_vpn(local_vaddr), 0x80000, PTE_V | PTE_R)
+        mmu = mmu_tlb_insert(mmu, sv32_full_vpn(global_vaddr), 0x80001, PTE_V | PTE_R | PTE_G)
+        mmu = mmu_set_satp(mmu, sv32_satp_asid(0x100, 8))
+        mmu = mmu_tlb_insert(mmu, sv32_full_vpn(other_vaddr), 0x80002, PTE_V | PTE_R)
+
+        val asid_fenced = mmu_sfence_vma(mmu, 0, 7, false, true)
+        val asid7 = mmu_set_satp(asid_fenced, sv32_satp_asid(0x100, 7))
+        expect(mmu_tlb_lookup(asid7, sv32_full_vpn(local_vaddr)).hit).to_be(false)
+        expect(mmu_tlb_lookup(asid7, sv32_full_vpn(global_vaddr)).hit).to_be(true)
+        val asid8 = mmu_set_satp(asid_fenced, sv32_satp_asid(0x100, 8))
+        expect(mmu_tlb_lookup(asid8, sv32_full_vpn(other_vaddr)).hit).to_be(true)
+
+        val address_fenced = mmu_sfence_vma(asid_fenced, global_vaddr, 0, true, false)
+        expect(mmu_tlb_lookup(address_fenced, sv32_full_vpn(global_vaddr)).hit).to_be(false)
+
+    it "inherits global mapping state from a non-leaf PTE":
+        val vaddr: u32 = 0x00401234
+        var mmu = mmu_set_satp(mmu_create(), sv32_satp_asid(0x100, 7))
+        val pmp = pmp_allow_all()
+        val start = sv32_walker32_start(mmu, pmp, vaddr, ACCESS_LOAD, PRIV_S, false, false)
+        val l1 = sv32_walker32_cycle(start, mmu, pmp, true, true, false,
+            pointer_pte(0x101) | PTE_G)
+        val done = sv32_walker32_cycle(l1.walker, l1.mmu, pmp, true, true, false,
+            leaf_pte(0x80000, PTE_R | PTE_A))
+        mmu = mmu_set_satp(done.mmu, sv32_satp_asid(0x100, 8))
+        val hit = sv32_walker32_start(mmu, pmp, vaddr, ACCESS_LOAD, PRIV_S, false, false)
+        expect(hit.tlb_hit).to_be(true)

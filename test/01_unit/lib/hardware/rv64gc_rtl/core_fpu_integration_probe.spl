@@ -7,9 +7,11 @@
 #  (2) disabled (core64_set_fpu(.., fpu_config_disabled())): the same FP op
 #      raises an illegal-instruction trap (PC -> mtvec=0), NOT pc+4.
 use std.hardware.rv64gc_rtl.core.{
-    CoreState64, core64_init, core64_combinational, core64_update, core64_set_fpu
+    core64_init, core64_combinational, core64_update, core64_set_fpu
 }
+use std.hardware.rv64gc_rtl.core_types.CoreState64
 use std.hardware.rv64gc_rtl.fpu.{fpu_config_disabled}
+use std.hardware.rv64gc_rtl.regfile.regfile64_read_one
 use std.hardware.rv64gc_rtl.csr.{csr64_fs_state}
 
 fn check(name: text, ok: bool) -> i64:
@@ -67,19 +69,19 @@ fn main() -> i64:
     fails = fails + check("FMV.D.X advanced pc (no trap)", st.pc == base + 8)
     st = step(st, enc_opfp(0x1C, 1, 0, 1, 0, 2))         # FMV.X.D x2, f1 ; pc=+4
     fails = fails + check("FMV.X.D advanced pc", st.pc == base + 12)
-    fails = fails + check("int->float->int round-trip x2==0x123", st.rf.regs[2] == 0x123)
+    fails = fails + check("int->float->int round-trip x2==0x123", regfile64_read_one(st.rf, 2) == 0x123)
 
     # ---- 2. FSGNJN.D self: negate sign of f1 -> f3, move back to x4 ----
     # FSGNJN (rm=1) with rs2==rs1 flips the sign bit of f1 (0x123 -> sign set).
     st = step(st, enc_opfp(0x04, 1, 1, 1, 1, 3))         # FSGNJN.D f3, f1, f1
     st = step(st, enc_opfp(0x1C, 1, 0, 3, 0, 4))         # FMV.X.D x4, f3
     val expect_neg = 0x123 | (1 << 63)                    # sign bit set
-    fails = fails + check("FSGNJN.D set sign bit", st.rf.regs[4] == expect_neg)
+    fails = fails + check("FSGNJN.D set sign bit", regfile64_read_one(st.rf, 4) == expect_neg)
 
     # ---- 2b. FCVT round-trip through the core: int 0x123 -> f5 -> int x6 ----
     st = step(st, enc_opfp(0x1A, 1, 0, 1, 0, 5))         # FCVT.D.W f5, x1 (291.0)
     st = step(st, enc_opfp(0x18, 1, 0, 5, 1, 6))         # FCVT.W.D x6, f5 (rtz->291)
-    fails = fails + check("FCVT.D.W/W.D round-trip x6==291", st.rf.regs[6] == 291)
+    fails = fails + check("FCVT.D.W/W.D round-trip x6==291", regfile64_read_one(st.rf, 6) == 291)
 
     # ---- 3. DI toggle OFF: same FP op traps to mtvec(0), not pc+4 ----
     var stoff = core64_set_fpu(core64_init(base), fpu_config_disabled())
@@ -97,16 +99,16 @@ fn main() -> i64:
     fails = fails + check("FSD wrote 42 to memory", so.mem == 42)
     var lo = step_mem(so.state, enc_load_fp(3, 2, 10, 0), so.mem)  # FLD f2, 0(x10)
     var m2 = step(lo.state, enc_opfp(0x1C, 1, 0, 2, 0, 3))         # FMV.X.D x3, f2
-    fails = fails + check("FLD/FSD memory round-trip x3==42", m2.rf.regs[3] == 42)
+    fails = fails + check("FLD/FSD memory round-trip x3==42", regfile64_read_one(m2.rf, 3) == 42)
 
     # ---- 5. fcsr CSR: write fcsr=0x51 (frm=2,fflags=0x11), read it back ----
     var c = core64_init(base)
     c = step(c, enc_addi(5, 0, 0x51))                    # x5 = 0x51
     c = step(c, enc_csr(0x003, 5, 1, 0))                 # csrrw fcsr, x5
     c = step(c, enc_csr(0x003, 0, 2, 6))                 # csrrs x6, fcsr, x0 (read)
-    fails = fails + check("csrr fcsr == 0x51", c.rf.regs[6] == 0x51)
+    fails = fails + check("csrr fcsr == 0x51", regfile64_read_one(c.rf, 6) == 0x51)
     c = step(c, enc_csr(0x001, 0, 2, 7))                 # csrrs x7, fflags, x0
-    fails = fails + check("csrr fflags == 0x11", c.rf.regs[7] == 0x11)
+    fails = fails + check("csrr fflags == 0x11", regfile64_read_one(c.rf, 7) == 0x11)
 
     # ---- 6. mstatus.FS goes Dirty after an FP write ----
     var d = core64_init(base)

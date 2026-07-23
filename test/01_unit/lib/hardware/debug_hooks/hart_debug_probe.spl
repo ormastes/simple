@@ -19,9 +19,11 @@
 # interpreter weaving is entry-module-only and never advises imported lib
 # modules (that is the filed gap, printed loudly below, not hidden).
 # Run: bin/simple run test/01_unit/lib/hardware/debug_hooks/hart_debug_probe.spl
-use std.hardware.rv64gc_rtl.core.{CoreState64, core64_init}
+use std.hardware.rv64gc_rtl.core_types.CoreState64
+use std.hardware.rv64gc_rtl.core.core64_init
+use std.hardware.rv64gc_rtl.regfile.regfile64_read_one
 use std.hardware.rv32i_rtl.core.{CoreState, core_reset}
-use std.hardware.rv32i_rtl.regfile.{RegFile, regfile_create}
+use std.hardware.rv32i_rtl.regfile.{RegFile, regfile_create, regfile_read}
 use std.hardware.debug_hooks.hart_debug.{
     hart_dbg_reset, hart_dbg_halt_req, hart_dbg_resume, hart_dbg_step_once,
     hart_dbg_trace_enable, hart_dbg_halted, hart_dbg_halt_pc,
@@ -42,6 +44,9 @@ fn check(name: text, ok: bool) -> i64:
         return 0
     print("FAIL {name}")
     1
+
+fn rv32_gpr(rf: RegFile, addr: u32) -> u32:
+    regfile_read(rf, addr, 0).rs1_data
 
 # Program (reset vector 0): pure ALU ops, no memory traffic.
 #   0x00 addi x1, x0, 1
@@ -84,8 +89,8 @@ fn main() -> i64:
         val r = hart64_debug_step(st, fetch(st.pc), 0)
         st = r.state
         i = i + 1
-    print("rv64 trace_len={hart_dbg_trace_len()} pc={st.pc} x1={st.rf.regs[1]}")
-    fails = fails + check("3 steps executed (pc=0x0C, x1=1)", st.pc == 0x0C and st.rf.regs[1] == 1)
+    print("rv64 trace_len={hart_dbg_trace_len()} pc={st.pc} x1={regfile64_read_one(st.rf, 1)}")
+    fails = fails + check("3 steps executed (pc=0x0C, x1=1)", st.pc == 0x0C and regfile64_read_one(st.rf, 1) == 1)
     fails = fails + check("trace has 3 entries", hart_dbg_trace_len() == 3)
     fails = fails + check("trace pcs are 0x00,0x04,0x08",
                           hart_dbg_trace_at(0) == 0x00 and
@@ -147,9 +152,9 @@ fn main() -> i64:
         st32 = r32.state
         rf32 = r32.rf
         k = k + 1
-    print("rv32 pc={st32.pc} x1={rf32.regs[1]} trace_len={hart_dbg_trace_len()}")
+    print("rv32 pc={st32.pc} x1={rv32_gpr(rf32, 1)} trace_len={hart_dbg_trace_len()}")
     fails = fails + check("rv32: 2 steps executed and traced (pc=8, x1=1)",
-                          st32.pc == 8u32 and rf32.regs[1] == 1u32 and hart_dbg_trace_len() == 2)
+                          st32.pc == 8u32 and rv32_gpr(rf32, 1) == 1u32 and hart_dbg_trace_len() == 2)
     hart_dbg_halt_req()
     val r32f = hart32_debug_step(st32, rf32, fetch(st32.pc as i64), 0u32)
     fails = fails + check("rv32: halt freezes datapath",

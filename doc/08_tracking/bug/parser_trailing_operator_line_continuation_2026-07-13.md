@@ -57,17 +57,12 @@ function: rt_cli_arg_count` semantic message remains).
 
 ## 2026-07-23 recurrence
 
-Stage 4 fails on an unparenthesized `or` continuation in
-`src/app/devhub/main.spl` even though the Core lexer rule and
-`dedent_continuation_spec.spl` already cover it. Rebuilding Stage 2 and Stage 3
-with kind-only handling for unique `TOK_KW_AND` and `TOK_KW_OR` did not change
-the failure, so token-text comparison is not the cause and that experiment was
-reverted. A focused native probe then showed `core_lexer_next_token` correctly
-emitting `true`, `or`, `false` without layout tokens, while parser-facing
-`lex_next` recorded continuation state after `or` and emitted `NEWLINE`,
-`INDENT` on its next call. Routing through the state-in/state-out helper did not
-change that result. A dedicated Boolean mirror also failed because assignment
-back into the copied `CoreLexer` is itself unreliable in this path; that
-experiment was reverted. The next scoped fix should derive continuation inside
-`core_lexer_next_token` from the surviving previous `cur_kind`/`cur_text`, then
-rerun the native probe before another staged bootstrap.
+The staged `rt_value_bool` SFFI boundary normalization clears the reported
+unparenthesized `or` continuation failure. The remaining Stage 4 failure is a
+separate semantic-resolution bug: `resolve_method -> try_ufcs` selects imported
+`nogc_async_mut.path.join(parts: [text])` for `Array.join("")`. MIR therefore
+emits the free path join, lexer slices become slash-separated text, and keywords
+are parsed as identifiers. A focused semantic regression and the smallest UFCS
+suppression for Array/Slice `join` are staged. A fresh bootstrap was not run
+because the three-cycle cap had already been reached; Stage 4 remains
+unqualified.

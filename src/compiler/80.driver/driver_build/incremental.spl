@@ -42,6 +42,20 @@ fn incremental_hash_text(content: text) -> i64:
 
 var _compiler_src_fingerprint_memo: text = "@@unset@@"
 
+fn incremental_sorted_text(values: [text]) -> [text]:
+    var result = values
+    var i = 0
+    while i < result.len():
+        var j = i + 1
+        while j < result.len():
+            if result[j] < result[i]:
+                val tmp = result[i]
+                result[i] = result[j]
+                result[j] = tmp
+            j = j + 1
+        i = i + 1
+    result
+
 fn native_build_compiler_source_fingerprint() -> text:
     """Fingerprint of the live-interpreted compiler sources (src/compiler/**/*.spl).
 
@@ -51,9 +65,9 @@ fn native_build_compiler_source_fingerprint() -> text:
     stale objects kept getting linked. Fingerprint the compiler tree: per-file
     "path|size|sha256" lines joined into a manifest, hashed via a temp file
     (rt_hash_text and rt_hash_sha256 are unavailable/broken under the seed
-    interpreter). Measured ~90ms for ~2900 files. Traversal order follows
-    rt_dir_list; any order instability only causes a safe cache miss
-    ([text].sort() is a no-op under the seed interpreter). Returns "" when no
+    interpreter). Measured ~90ms for ~2900 files. Directory entries are sorted
+    explicitly because [text].sort() is a no-op under the seed interpreter.
+    Returns "" when no
     src/compiler tree is visible from the build cwd (deployed binary outside
     a repo) — identity is then unchanged.
     """
@@ -69,7 +83,7 @@ fn native_build_compiler_source_fingerprint() -> text:
     while i < dirs.len():
         val dir = dirs[i]
         i = i + 1
-        val entries = rt_dir_list(dir) ?? []
+        val entries = incremental_sorted_text(rt_dir_list(dir) ?? [])
         for entry in entries:
             val full = dir + "/" + entry
             if rt_dir_exists(full):
@@ -87,15 +101,21 @@ fn native_build_compiler_source_fingerprint() -> text:
     _compiler_src_fingerprint_memo = fp
     fp
 
-fn native_build_compiler_identity() -> text:
-    val src_fp = native_build_compiler_source_fingerprint()
+fn native_build_compiler_executable_hash() -> text:
     val args = rt_cli_get_args()
     if args.len() > 0:
         val hash = rt_file_hash_sha256(args[0])
         if hash.len() == 64:
-            if src_fp == "":
-                return hash
-            return "{hash}+src{src_fp}"
+            return hash
+    ""
+
+fn native_build_compiler_identity() -> text:
+    val src_fp = native_build_compiler_source_fingerprint()
+    val hash = native_build_compiler_executable_hash()
+    if hash != "":
+        if src_fp == "":
+            return hash
+        return "{hash}+src{src_fp}"
     # Fail closed: an unknown compiler must not reuse another compiler's cache.
     "uncacheable-{rt_getpid()}-{rt_time_now_unix_micros()}"
 
@@ -678,4 +698,4 @@ fn merge_mir(cached_fns: {text: text}, new_fns: {text: text}) -> {text: text}:
 
 export FileFingerprint, DependencyEntry, ChangeKind, IncrChangeSet
 export BuildCache, IncrementalCompiler
-export merge_mir, native_build_cache_scope_key, native_build_compiler_identity
+export merge_mir, native_build_cache_scope_key, native_build_compiler_identity, native_build_compiler_executable_hash

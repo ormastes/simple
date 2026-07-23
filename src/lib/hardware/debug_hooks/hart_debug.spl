@@ -26,9 +26,11 @@
 # Single-hart debug state (one rv64 or rv32 hart per process; matches the
 # single-core soc_top harnesses).
 
-use std.hardware.rv64gc_rtl.core.{CoreState64, core64_combinational, core64_update}
+use std.hardware.rv64gc_rtl.core_types.CoreState64
+use std.hardware.rv64gc_rtl.core.{core64_combinational, core64_update}
+use std.hardware.rv64gc_rtl.regfile.{RegFile64, regfile64_read_one}
 use std.hardware.rv32i_rtl.core.{CoreState, core_combinational, core_update}
-use std.hardware.rv32i_rtl.regfile.{RegFile, regfile_write}
+use std.hardware.rv32i_rtl.regfile.{RegFile, regfile_read, regfile_write}
 
 # ============================================================================
 # Hart debug state
@@ -147,23 +149,23 @@ pub fn hart_dbg_dpc() -> i64:
     """dpc_o_s: the debug pc (pc at which the hart halted); -1 if never halted."""
     g_halt_pc
 
-fn hart_dbg_capture_gpr64(regs: [i64]):
+fn hart_dbg_capture_gpr64(rf: RegFile64):
     """Snapshot the rv64 regfile (scalar-by-scalar copy; never alias the source
     struct — interp struct-local aliasing landmine)."""
     var snap: [i64] = []
     var i = 0
-    while i < regs.len():
-        val v = regs[i]
+    while i < 32:
+        val v = regfile64_read_one(rf, i as u32)
         snap.push(v)
         i = i + 1
     g_gpr = snap
 
-fn hart_dbg_capture_gpr32(regs: [u32]):
+fn hart_dbg_capture_gpr32(rf: RegFile):
     """Snapshot the rv32 regfile as i64 (scalar-by-scalar copy)."""
     var snap: [i64] = []
     var i = 0
-    while i < regs.len():
-        val v = regs[i] as i64
+    while i < 32:
+        val v = regfile_read(rf, i as u32, 0).rs1_data as i64
         snap.push(v)
         i = i + 1
     g_gpr = snap
@@ -220,11 +222,11 @@ pub fn hart64_debug_step(state: CoreState64, imem_data: u32, dmem_rdata: i64) ->
         hart_dbg_record_step(state.pc)
         val stepped = hart64_step_body(state, imem_data, dmem_rdata)
         g_step_pulse = true
-        hart_dbg_capture_gpr64(stepped.rf.regs)
+        hart_dbg_capture_gpr64(stepped.rf)
         return Hart64StepResult(state: stepped, executed: true)
     hart_dbg_record_step(state.pc)
     val next = hart64_step_body(state, imem_data, dmem_rdata)
-    hart_dbg_capture_gpr64(next.rf.regs)
+    hart_dbg_capture_gpr64(next.rf)
     Hart64StepResult(state: next, executed: true)
 
 # ============================================================================
@@ -260,11 +262,11 @@ pub fn hart32_debug_step(state: CoreState, rf: RegFile, imem_data: u32, dmem_rda
         hart_dbg_record_step(state.pc as i64)
         val res = hart32_step_body(state, rf, imem_data, dmem_rdata)
         g_step_pulse = true
-        hart_dbg_capture_gpr32(res.rf.regs)
+        hart_dbg_capture_gpr32(res.rf)
         return res
     hart_dbg_record_step(state.pc as i64)
     val res2 = hart32_step_body(state, rf, imem_data, dmem_rdata)
-    hart_dbg_capture_gpr32(res2.rf.regs)
+    hart_dbg_capture_gpr32(res2.rf)
     res2
 
 # ============================================================================

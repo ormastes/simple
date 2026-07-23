@@ -27,7 +27,7 @@ impl VhdlBackend:
     me emit_return_expr(builder: VhdlBuilder, value_name: text) -> Result<(), CompileError>:
         if self.active_return_abi.is_tuple:
             for field in self.active_return_abi.fields:
-                builder.emit_signal_assign(field.name, "{value_name}.f{field.index}")
+                builder.emit_signal_assign(field.name, "{value_name}.{field.selector}")
         else:
             builder.emit_signal_assign("result_out", value_name)
         Ok(())
@@ -40,6 +40,9 @@ impl VhdlBackend:
         self.active_local_kinds = {}
         self.active_blocks = {}
         self.active_local_memory_type_names = {}
+        self.active_hardware_call_instance_names = {}
+        self.active_process_locals_are_variables = func.has_vhdl_metadata and func.vhdl_metadata.has_clocked
+        self.active_hardware_calls_use_port_maps = self.active_process_locals_are_variables
         val return_abi_result = self.vhdl_return_abi(func)
         if return_abi_result.is_err():
             return Err(return_abi_result.unwrap_err())
@@ -47,6 +50,9 @@ impl VhdlBackend:
 
         for block in func.blocks:
             self.active_blocks[block.id.id] = block
+
+        if self.needs_control_process(func):
+            self.active_process_locals_are_variables = true
 
         for local in func.locals:
             val resolved_name = self.default_local_name(local)
@@ -57,6 +63,9 @@ impl VhdlBackend:
         # Pick single-use side-effect-free temps to inline into their consumer
         # (must run after names/types are resolved above).
         self.compute_inline_exprs(func)
+        match self.prepare_hardware_call_wiring(func):
+            case Ok(_): ()
+            case Err(err): return Err(err)
 
         val ports_result = self.vhdl_ports_for_function(func)
         if ports_result.is_err():
@@ -76,13 +85,27 @@ impl VhdlBackend:
         # Emit architecture
         builder.emit_architecture_begin(entity_name, "rtl")
 
+        val static_symbols = self.function_static_symbols(func)
+        for symbol in static_symbols:
+            val static_ = match self.clocked_static(symbol):
+                case Ok(value): value
+                case Err(err): return Err(err)
+            val static_type = match self.mir_type_to_vhdl_at(static_.type_, Some(func.span)):
+                case Ok(value): value
+                case Err(err): return Err(err)
+            builder.emit_signal_decl(self.clocked_static_name(static_), static_type, nil)
+
+        match self.emit_hardware_call_signal_declarations(builder, func):
+            case Ok(_): ()
+            case Err(err): return Err(err)
+
         # Declare internal signals for local variables
         for local in func.locals:
             match local.kind:
                 case Var | Temp:
                     # Inlined temps have no intermediate signal; their defining
                     # expression is substituted at each use site.
-                    if not self.active_inline_exprs.has(local.id.id):
+                    if not self.active_process_locals_are_variables and not self.active_inline_exprs.has(local.id.id):
                         val declare_result = self.emit_local_signal_declaration(builder, local, Some(func.span))
                         if declare_result.is_err():
                             return Err(declare_result.unwrap_err())
@@ -92,7 +115,7 @@ impl VhdlBackend:
                     # before splitting it across the per-field output ports
                     # below; that signal needs its own declaration since it
                     # isn't one of the entity's ports.
-                    if self.active_return_abi.is_tuple:
+                    if self.active_return_abi.is_tuple and not self.active_process_locals_are_variables:
                         val declare_result = self.emit_local_signal_declaration(builder, local, Some(func.span))
                         if declare_result.is_err():
                             return Err(declare_result.unwrap_err())
@@ -100,6 +123,17 @@ impl VhdlBackend:
                     ()
 
         builder.emit_architecture_body_begin()
+
+        match self.emit_hardware_call_instances(builder, func):
+            case Ok(_): ()
+            case Err(err): return Err(err)
+
+        if func.has_vhdl_metadata and func.vhdl_metadata.has_clocked:
+            val process_result = self.compile_metadata_clocked_function(builder, func)
+            if process_result.is_err():
+                return Err(process_result.unwrap_err())
+            builder.emit_architecture_end("rtl")
+            return Ok(VhdlEntity(name: entity_name, port_count: ports.len()))
 
         if self.needs_control_process(func):
             val process_result = self.compile_function_control_process(builder, func)
@@ -159,7 +193,7 @@ impl VhdlBackend:
                             case Ok(result): result
                             case Err(err): return Err(err)
                         for field in self.active_return_abi.fields:
-                            builder.emit_signal_assign(field.name, "{return_name}.f{field.index}")
+                            builder.emit_signal_assign(field.name, "{return_name}.{field.selector}")
                     case _:
                         ()
 
@@ -274,6 +308,35 @@ impl VhdlBackend:
             case Move(local): self.local_type(local)
             case Const(_, ty): Ok(ty)
 
+    fn clocked_static(symbol: SymbolId) -> Result<MirStatic, CompileError>:
+        if self.active_statics.has(symbol.id):
+            Ok(self.active_statics[symbol.id])
+        else:
+            Err(self.backend_error("No active VHDL global state for symbol {symbol.id}"))
+
+    fn clocked_static_name(static_: MirStatic) -> text:
+        "global_{vhdl_sanitize_identifier(static_.name)}"
+
+    fn function_static_symbols(func: MirFunction) -> [SymbolId]:
+        var symbols: [SymbolId] = []
+        var seen: Dict<i64, bool> = {}
+        for block in func.blocks:
+            for inst in block.instructions:
+                var symbol: SymbolId? = nil
+                match inst.kind:
+                    case LoadGlobal(_, value) | StoreGlobal(value, _):
+                        symbol = Some(value)
+                    case _:
+                        ()
+                match symbol:
+                    case Some(value):
+                        if not seen.get(value.id).?:
+                            seen[value.id] = true
+                            symbols = symbols.push(value)
+                    case None:
+                        ()
+        symbols
+
     # ========================================================================
     # Single-use temp expression inlining
     #
@@ -303,6 +366,7 @@ impl VhdlBackend:
             case GetField(dest, _, _): dest.id
             case Alloc(dest, _): dest.id
             case Load(dest, _): dest.id
+            case LoadGlobal(dest, _): dest.id
             case GetElementPtr(dest, _, _): dest.id
             case VhdlResize(dest, _, _, _): dest.id
             case VhdlSlice(dest, _, _, _): dest.id
@@ -337,6 +401,8 @@ impl VhdlBackend:
                 ids = ids.push(self.mir_operand_use_id(ptr))
             case Store(ptr, value):
                 ids = ids.push(self.mir_operand_use_id(ptr))
+                ids = ids.push(self.mir_operand_use_id(value))
+            case StoreGlobal(_, value):
                 ids = ids.push(self.mir_operand_use_id(value))
             case GetElementPtr(_, base, indices):
                 ids = ids.push(self.mir_operand_use_id(base))
@@ -492,6 +558,23 @@ impl VhdlBackend:
             Err(self.backend_error("VHDL process references unknown block BB{id.id}"))
 
     fn needs_control_process(func: MirFunction) -> bool:
+        # Straight-line functions that assign process locals or mutate records
+        # still require sequential variable semantics. Concurrent signal
+        # assignments would observe the previous value and can create multiple
+        # drivers even without an If/Switch terminator.
+        for block in func.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case SetField(_, _, _): return true
+                    case _:
+                        val def_id = self.inst_def_id(inst)
+                        if def_id >= 0:
+                            for local in func.locals:
+                                if local.id.id == def_id:
+                                    match local.kind:
+                                        case Var | Temp: return true
+                                        case _: ()
+
         val entry = self.block_by_id(func.entry_block)
         if entry.is_err():
             return false

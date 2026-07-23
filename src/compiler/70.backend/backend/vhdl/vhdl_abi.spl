@@ -91,6 +91,25 @@ fn vhdl_signal_type_for_or_error(ty: MirType, mapper: VhdlTypeMapper, context: t
     else:
         "-- ERROR: unsynthesizable type in {context}"
 
+fn vhdl_signal_type_for_with_types(ty: MirType, mapper: VhdlTypeMapper,
+                                   types: Dict<SymbolId, MirTypeDef>) -> text?:
+    match ty.kind:
+        case Struct(symbol) | Enum(symbol):
+            if types.has(symbol):
+                Some(types[symbol].name)
+            else:
+                nil
+        case _: vhdl_signal_type_for(ty, mapper)
+
+fn vhdl_signal_type_for_or_error_with_types(ty: MirType, mapper: VhdlTypeMapper,
+                                            types: Dict<SymbolId, MirTypeDef>,
+                                            context: text) -> text:
+    val result = vhdl_signal_type_for_with_types(ty, mapper, types)
+    if result.?:
+        result.unwrap()
+    else:
+        "-- ERROR: unsynthesizable type in {context}"
+
 # ============================================================================
 # Port Name Sanitization
 # ============================================================================
@@ -131,12 +150,18 @@ fn vhdl_abi_sanitize_port_name(name: text) -> text:
 # ============================================================================
 
 fn vhdl_resolve_return_abi(func: MirFunction, mapper: VhdlTypeMapper) -> VhdlAbiReturn:
+    vhdl_resolve_return_abi_with_types(func, mapper, {})
+
+fn vhdl_resolve_return_abi_with_types(func: MirFunction, mapper: VhdlTypeMapper,
+                                      types: Dict<SymbolId, MirTypeDef>) -> VhdlAbiReturn:
     """Resolve the return ABI for a hardware function.
 
     - Unit returns produce no output ports (empty fields).
     - Scalar returns produce a single `result_out` port.
     - Labeled tuple returns produce one output port per labeled field
       (labels come from VhdlReturnFieldMetadata on the function).
+    - `@flatten_struct_output` returns produce one port per struct field;
+      `@bits(N)` controls the exact port width.
     - Anonymous tuple returns produce numbered `out_0`, `out_1`, ... ports.
     """
     val ret_ty = func.signature.return_type
@@ -150,7 +175,8 @@ fn vhdl_resolve_return_abi(func: MirFunction, mapper: VhdlTypeMapper) -> VhdlAbi
                 has_labels = func.vhdl_metadata.return_fields.len() == elements.len()
             var idx = 0
             for elem in elements:
-                val type_name = vhdl_signal_type_for_or_error(elem, mapper, "return field")
+                val type_name = vhdl_signal_type_for_or_error_with_types(
+                    elem, mapper, types, "return field")
                 var port_name = "out_{idx}"
                 if has_labels:
                     val label = func.vhdl_metadata.return_fields[idx].label
@@ -162,8 +188,37 @@ fn vhdl_resolve_return_abi(func: MirFunction, mapper: VhdlTypeMapper) -> VhdlAbi
                 ))
                 idx = idx + 1
             return VhdlAbiReturn(is_tuple: true, fields: fields)
+        case Struct(symbol):
+            if func.has_vhdl_metadata and func.vhdl_metadata.flatten_struct_output and types.has(symbol):
+                val type_def = types[symbol]
+                match type_def.kind:
+                    case Struct(struct_fields):
+                        var fields: [VhdlAbiReturnField] = []
+                        var idx = 0
+                        for field in struct_fields:
+                            var type_name = vhdl_signal_type_for_or_error_with_types(
+                                field.type_, mapper, types, "return field")
+                            if field.has_bits_attr:
+                                var signed = false
+                                match field.type_.kind:
+                                    case I8 | I16 | I32 | I64: signed = true
+                                    case _: ()
+                                type_name = match field.type_.kind:
+                                    case Bool: mapper.bit_type()
+                                    case _: mapper.map_fixed_bits(field.bits_width, signed)
+                            fields = fields.push(VhdlAbiReturnField(
+                                name: vhdl_abi_sanitize_port_name(field.name),
+                                type_name: type_name, index: idx))
+                            idx = idx + 1
+                        return VhdlAbiReturn(is_tuple: true, fields: fields)
+                    case _: ()
+            val type_name = vhdl_signal_type_for_or_error_with_types(
+                ret_ty, mapper, types, "return")
+            return VhdlAbiReturn(is_tuple: false, fields: [VhdlAbiReturnField(
+                name: "result_out", type_name: type_name, index: 0)])
         case _:
-            val type_name = vhdl_signal_type_for_or_error(ret_ty, mapper, "return")
+            val type_name = vhdl_signal_type_for_or_error_with_types(
+                ret_ty, mapper, types, "return")
             return VhdlAbiReturn(
                 is_tuple: false,
                 fields: [VhdlAbiReturnField(
@@ -178,6 +233,10 @@ fn vhdl_resolve_return_abi(func: MirFunction, mapper: VhdlTypeMapper) -> VhdlAbi
 # ============================================================================
 
 fn vhdl_resolve_input_ports(func: MirFunction, mapper: VhdlTypeMapper) -> [VhdlAbiPort]:
+    vhdl_resolve_input_ports_with_types(func, mapper, {})
+
+fn vhdl_resolve_input_ports_with_types(func: MirFunction, mapper: VhdlTypeMapper,
+                                       types: Dict<SymbolId, MirTypeDef>) -> [VhdlAbiPort]:
     """Resolve input ports from function parameters.
 
     Each parameter produces one input port named `arg0`, `arg1`, etc.
@@ -187,7 +246,8 @@ fn vhdl_resolve_input_ports(func: MirFunction, mapper: VhdlTypeMapper) -> [VhdlA
     var ports: [VhdlAbiPort] = []
     var idx = 0
     for param_ty in func.signature.params:
-        val type_name = vhdl_signal_type_for_or_error(param_ty, mapper, "input port")
+        val type_name = vhdl_signal_type_for_or_error_with_types(
+            param_ty, mapper, types, "input port")
         # Try to find a named local for this argument
         var port_name = "arg{idx}"
         for local in func.locals:
@@ -210,12 +270,16 @@ fn vhdl_resolve_input_ports(func: MirFunction, mapper: VhdlTypeMapper) -> [VhdlA
 # ============================================================================
 
 fn vhdl_resolve_all_ports(func: MirFunction, mapper: VhdlTypeMapper) -> [VhdlAbiPort]:
+    vhdl_resolve_all_ports_with_types(func, mapper, {})
+
+fn vhdl_resolve_all_ports_with_types(func: MirFunction, mapper: VhdlTypeMapper,
+                                     types: Dict<SymbolId, MirTypeDef>) -> [VhdlAbiPort]:
     """Resolve all ports (inputs + outputs) for a hardware function.
 
     Combines input ports from parameters with output ports from the return ABI.
     """
-    var ports = vhdl_resolve_input_ports(func, mapper)
-    val ret_abi = vhdl_resolve_return_abi(func, mapper)
+    var ports = vhdl_resolve_input_ports_with_types(func, mapper, types)
+    val ret_abi = vhdl_resolve_return_abi_with_types(func, mapper, types)
     for field in ret_abi.fields:
         ports = ports.push(VhdlAbiPort(
             name: field.name,

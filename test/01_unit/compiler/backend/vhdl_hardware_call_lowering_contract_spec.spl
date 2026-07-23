@@ -1,0 +1,276 @@
+use std.spec
+use compiler.backend.backend.vhdl_backend.VhdlBackend
+use compiler.backend.backend.backend_types.{CodegenTarget, compileoptions_default_options}
+use compiler.common.attributes.{VhdlClockedMetadata, VhdlGenericMetadata, VhdlResetPolarity, VhdlResetSynchrony, vhdl_hardware_metadata_default}
+use compiler.common.diagnostics.span.Span
+use compiler.hir.hir_types.SymbolId
+use compiler.mir.mir_data.*
+
+fn span() -> Span:
+    Span(start: 0, end: 0, line: 1, col: 1, file: "", length: 0)
+
+fn i32_type() -> MirType:
+    MirType(kind: MirTypeKind.I32)
+
+fn bool_type() -> MirType:
+    MirType(kind: MirTypeKind.Bool)
+
+fn record_type() -> MirType:
+    MirType(kind: MirTypeKind.Struct(SymbolId(id: 900)))
+
+fn copy(id: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Copy(LocalId(id: id)))
+
+fn direct(name: text) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(name),
+        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [i32_type()],
+            return_type: i32_type(), is_variadic: false)))))
+
+fn direct_record(name: text) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(name),
+        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [i32_type()],
+            return_type: record_type(), is_variadic: false)))))
+
+fn hardware_metadata(clocked: bool):
+    var metadata = vhdl_hardware_metadata_default()
+    metadata.is_hardware = true
+    if clocked:
+        metadata.has_clocked = true
+        metadata.clocked = VhdlClockedMetadata(
+            clock_signal: "clk", reset_signal: "", has_reset: false,
+            reset_polarity: VhdlResetPolarity.ActiveLow,
+            reset_synchrony: VhdlResetSynchrony.None_, domain: "clk",
+            is_valid: true, validation_errors: [])
+    metadata
+
+fn function(symbol: i64, name: text, params: [MirType], locals: [MirLocal],
+            instructions: [MirInst], return_id: i64, clocked: bool) -> MirFunction:
+    MirFunction(
+        symbol: SymbolId(id: symbol), name: name,
+        signature: MirSignature(params: params, return_type: i32_type(), is_variadic: false),
+        locals: locals,
+        blocks: [MirBlock(id: BlockId(id: 0), label: Some("entry"),
+            instructions: instructions, terminator: MirTerminator.Ret(Some(copy(return_id))))],
+        entry_block: BlockId(id: 0), span: span(), generic_params: [],
+        is_generic_template: false, specialization_of: nil, type_bindings: {},
+        layout_phase: nil, is_kernel: false, gpu_target: "", gpu_backend_order: "",
+        is_export_c: false, export_name: "", has_driver_manifest_attr: false,
+        driver_manifest_attr: nil, has_vhdl_metadata: true,
+        vhdl_metadata: hardware_metadata(clocked), has_fast_math: false,
+        unroll_factor: 0, pipeline_ii: 0, memory_banks: 0)
+
+fn multi_block_function(symbol: i64, name: text, params: [MirType], return_type: MirType,
+                        locals: [MirLocal], blocks: [MirBlock], clocked: bool) -> MirFunction:
+    MirFunction(
+        symbol: SymbolId(id: symbol), name: name,
+        signature: MirSignature(params: params, return_type: return_type, is_variadic: false),
+        locals: locals, blocks: blocks, entry_block: BlockId(id: 0), span: span(),
+        generic_params: [], is_generic_template: false, specialization_of: nil,
+        type_bindings: {}, layout_phase: nil, is_kernel: false, gpu_target: "",
+        gpu_backend_order: "", is_export_c: false, export_name: "",
+        has_driver_manifest_attr: false, driver_manifest_attr: nil,
+        has_vhdl_metadata: true, vhdl_metadata: hardware_metadata(clocked),
+        has_fast_math: false, unroll_factor: 0, pipeline_ii: 0, memory_banks: 0)
+
+fn call_module(recursive: bool) -> MirModule:
+    val callee_name = if recursive: "clocked_top" else: "transition"
+    val transition = function(800, "transition", [i32_type()], [
+        MirLocal(id: LocalId(id: 0), name: Some("state"), type_: i32_type(), kind: LocalKind.Arg(0)),
+        MirLocal(id: LocalId(id: 1), name: nil, type_: i32_type(), kind: LocalKind.Return)
+    ], [MirInst(kind: MirInstKind.Copy(LocalId(id: 1), LocalId(id: 0)), span: nil)], 1, false)
+    val top = function(801, "clocked_top", [bool_type(), i32_type()], [
+        MirLocal(id: LocalId(id: 0), name: Some("clk"), type_: bool_type(), kind: LocalKind.Arg(0)),
+        MirLocal(id: LocalId(id: 1), name: Some("state_in"), type_: i32_type(), kind: LocalKind.Arg(1)),
+        MirLocal(id: LocalId(id: 2), name: nil, type_: i32_type(), kind: LocalKind.Return)
+    ], [MirInst(kind: MirInstKind.Call(Some(LocalId(id: 2)), direct(callee_name), [copy(1)]), span: nil)], 2, true)
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[top.symbol] = top
+    functions[transition.symbol] = transition
+    MirModule(name: "hardware_call_contract", functions: functions,
+        statics: {}, constants: {}, types: {})
+
+fn record_transition(symbol: i64, name: text) -> MirFunction:
+    multi_block_function(symbol, name, [i32_type()], record_type(), [
+        MirLocal(id: LocalId(id: 0), name: Some("state"), type_: i32_type(), kind: LocalKind.Arg(0)),
+        MirLocal(id: LocalId(id: 1), name: nil, type_: record_type(), kind: LocalKind.Return),
+        MirLocal(id: LocalId(id: 2), name: Some("valid"), type_: bool_type(), kind: LocalKind.Temp)
+    ], [MirBlock(id: BlockId(id: 0), label: Some("entry"), instructions: [
+        MirInst(kind: MirInstKind.Const(LocalId(id: 2), MirConstValue.Bool(true), bool_type()), span: nil),
+        MirInst(kind: MirInstKind.Aggregate(LocalId(id: 1), AggregateKind.Struct(SymbolId(id: 900)), [copy(0), copy(2)]), span: nil)
+    ], terminator: MirTerminator.Ret(Some(copy(1))))], false)
+
+fn record_clocked_module() -> MirModule:
+    val state_symbol = SymbolId(id: 910)
+    val reset = record_transition(911, "reset_transition")
+    val cycle = record_transition(912, "cycle_transition")
+    val entry = MirBlock(id: BlockId(id: 0), label: Some("entry"), instructions: [
+        MirInst(kind: MirInstKind.UnaryOp(LocalId(id: 4), MirUnaryOp.Not, copy(1)), span: nil)
+    ], terminator: MirTerminator.If(copy(4), BlockId(id: 1), BlockId(id: 2)))
+    val reset_block = MirBlock(id: BlockId(id: 1), label: Some("reset"), instructions: [
+        MirInst(kind: MirInstKind.Call(Some(LocalId(id: 5)), direct_record("reset_transition"), [copy(2)]), span: nil),
+        MirInst(kind: MirInstKind.GetField(LocalId(id: 6), copy(5), 0), span: nil),
+        MirInst(kind: MirInstKind.StoreGlobal(state_symbol, copy(6)), span: nil)
+    ], terminator: MirTerminator.Ret(Some(copy(5))))
+    val feedback_block = MirBlock(id: BlockId(id: 2), label: Some("feedback"), instructions: [
+        MirInst(kind: MirInstKind.LoadGlobal(LocalId(id: 7), state_symbol), span: nil),
+        MirInst(kind: MirInstKind.Call(Some(LocalId(id: 8)), direct_record("cycle_transition"), [copy(7)]), span: nil),
+        MirInst(kind: MirInstKind.GetField(LocalId(id: 9), copy(8), 0), span: nil),
+        MirInst(kind: MirInstKind.StoreGlobal(state_symbol, copy(9)), span: nil)
+    ], terminator: MirTerminator.Ret(Some(copy(8))))
+    val top = multi_block_function(913, "record_clocked_top",
+        [bool_type(), bool_type(), i32_type()], record_type(), [
+            MirLocal(id: LocalId(id: 0), name: Some("clk"), type_: bool_type(), kind: LocalKind.Arg(0)),
+            MirLocal(id: LocalId(id: 1), name: Some("reset_n"), type_: bool_type(), kind: LocalKind.Arg(1)),
+            MirLocal(id: LocalId(id: 2), name: Some("reset_vec"), type_: i32_type(), kind: LocalKind.Arg(2)),
+            MirLocal(id: LocalId(id: 3), name: nil, type_: record_type(), kind: LocalKind.Return),
+            MirLocal(id: LocalId(id: 4), name: Some("reset_active"), type_: bool_type(), kind: LocalKind.Temp),
+            MirLocal(id: LocalId(id: 5), name: Some("reset_result"), type_: record_type(), kind: LocalKind.Temp),
+            MirLocal(id: LocalId(id: 6), name: Some("reset_state"), type_: i32_type(), kind: LocalKind.Temp),
+            MirLocal(id: LocalId(id: 7), name: Some("current_state"), type_: i32_type(), kind: LocalKind.Temp),
+            MirLocal(id: LocalId(id: 8), name: Some("cycle_result"), type_: record_type(), kind: LocalKind.Temp),
+            MirLocal(id: LocalId(id: 9), name: Some("next_state"), type_: i32_type(), kind: LocalKind.Temp)
+        ], [entry, reset_block, feedback_block], true)
+    val result_def = MirTypeDef(symbol: SymbolId(id: 900), name: "cycle_result_t",
+        kind: MirTypeDefKind.Struct([
+            MirFieldDef(name: "state", type_: i32_type(), offset: 0, has_bits_attr: false, bits_width: 0),
+            MirFieldDef(name: "valid", type_: bool_type(), offset: 4, has_bits_attr: false, bits_width: 0)
+        ]), is_export_c: false, export_name: "")
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[top.symbol] = top
+    functions[cycle.symbol] = cycle
+    functions[reset.symbol] = reset
+    var statics: Dict<SymbolId, MirStatic> = {}
+    statics[state_symbol] = MirStatic(symbol: state_symbol, name: "state", type_: i32_type(), init: nil, is_mutable: true)
+    var types: Dict<SymbolId, MirTypeDef> = {}
+    types[result_def.symbol] = result_def
+    MirModule(name: "record_clocked_contract", functions: functions,
+        statics: statics, constants: {}, types: types)
+
+fn duplicate_dest_module(branch_local_arg: bool) -> MirModule:
+    val transition = function(920, "transition", [i32_type()], [
+        MirLocal(id: LocalId(id: 0), name: Some("state"), type_: i32_type(), kind: LocalKind.Arg(0)),
+        MirLocal(id: LocalId(id: 1), name: nil, type_: i32_type(), kind: LocalKind.Return)
+    ], [MirInst(kind: MirInstKind.Copy(LocalId(id: 1), LocalId(id: 0)), span: nil)], 1, false)
+    val entry = MirBlock(id: BlockId(id: 0), label: Some("entry"), instructions: [],
+        terminator: MirTerminator.If(copy(0), BlockId(id: 1), BlockId(id: 2)))
+    var then_instructions: [MirInst] = []
+    if branch_local_arg:
+        then_instructions = then_instructions.push(MirInst(kind: MirInstKind.Const(LocalId(id: 2), MirConstValue.Int(7), i32_type()), span: nil))
+    val then_arg = if branch_local_arg: 2 else: 1
+    then_instructions = then_instructions.push(MirInst(kind: MirInstKind.Call(Some(LocalId(id: 3)), direct("transition"), [copy(then_arg)]), span: nil))
+    val then_block = MirBlock(id: BlockId(id: 1), label: Some("then"), instructions: then_instructions,
+        terminator: MirTerminator.Ret(Some(copy(3))))
+    var else_instructions: [MirInst] = []
+    if not branch_local_arg:
+        else_instructions = else_instructions.push(MirInst(kind: MirInstKind.Call(Some(LocalId(id: 3)), direct("transition"), [copy(1)]), span: nil))
+    val else_result = if branch_local_arg: 1 else: 3
+    val else_block = MirBlock(id: BlockId(id: 2), label: Some("else"), instructions: else_instructions,
+        terminator: MirTerminator.Ret(Some(copy(else_result))))
+    val top = multi_block_function(921, "branch_top", [bool_type(), i32_type()], i32_type(), [
+        MirLocal(id: LocalId(id: 0), name: Some("flag"), type_: bool_type(), kind: LocalKind.Arg(0)),
+        MirLocal(id: LocalId(id: 1), name: Some("state"), type_: i32_type(), kind: LocalKind.Arg(1)),
+        MirLocal(id: LocalId(id: 2), name: Some("branch_value"), type_: i32_type(), kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 3), name: nil, type_: i32_type(), kind: LocalKind.Return)
+    ], [entry, then_block, else_block], false)
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[top.symbol] = top
+    functions[transition.symbol] = transition
+    MirModule(name: "branch_call_contract", functions: functions,
+        statics: {}, constants: {}, types: {})
+
+fn pure_ssa_call_module() -> MirModule:
+    val transition = function(930, "transition", [i32_type()], [
+        MirLocal(id: LocalId(id: 0), name: Some("state"), type_: i32_type(), kind: LocalKind.Arg(0)),
+        MirLocal(id: LocalId(id: 1), name: nil, type_: i32_type(), kind: LocalKind.Return)
+    ], [MirInst(kind: MirInstKind.Copy(LocalId(id: 1), LocalId(id: 0)), span: nil)], 1, false)
+    val top = function(931, "pure_ssa_top", [bool_type(), i32_type(), i32_type()], [
+        MirLocal(id: LocalId(id: 0), name: Some("clk"), type_: bool_type(), kind: LocalKind.Arg(0)),
+        MirLocal(id: LocalId(id: 1), name: Some("left"), type_: i32_type(), kind: LocalKind.Arg(1)),
+        MirLocal(id: LocalId(id: 2), name: Some("right"), type_: i32_type(), kind: LocalKind.Arg(2)),
+        MirLocal(id: LocalId(id: 3), name: Some("sum"), type_: i32_type(), kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 4), name: nil, type_: i32_type(), kind: LocalKind.Return)
+    ], [
+        MirInst(kind: MirInstKind.BinOp(LocalId(id: 3), MirBinOp.Add, copy(1), copy(2)), span: nil),
+        MirInst(kind: MirInstKind.Call(Some(LocalId(id: 4)), direct("transition"), [copy(3)]), span: nil)
+    ], 4, true)
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[top.symbol] = top
+    functions[transition.symbol] = transition
+    MirModule(name: "pure_ssa_call_contract", functions: functions,
+        statics: {}, constants: {}, types: {})
+
+fn instance_collision_module() -> MirModule:
+    var module = call_module(false)
+    val top_symbol = SymbolId(id: 801)
+    var top = module.functions[top_symbol]
+    var state_input = top.locals[1]
+    state_input.name = Some("simple_hwcall_transition_0")
+    top.locals[1] = state_input
+    module.functions[top_symbol] = top
+    module
+
+fn backend() -> VhdlBackend:
+    VhdlBackend.create(CodegenTarget.Riscv32, compileoptions_default_options())
+
+describe "VHDL direct hardware calls":
+    it "instantiates a typed entity outside the clocked process":
+        val result = backend().compile(call_module(false))
+        expect(result.is_ok()).to_equal(true)
+        val vhdl = result.unwrap().vhdl
+        expect(vhdl.contains("signal simple_hwcall_transition_0_result_out : signed(31 downto 0);")).to_equal(true)
+        expect(vhdl.contains("simple_hwcall_transition_0: entity work.transition")).to_equal(true)
+        expect(vhdl.contains("state => state_in")).to_equal(true)
+        expect(vhdl.contains("result_out => simple_hwcall_transition_0_result_out")).to_equal(true)
+        expect(vhdl.contains("result_out <= simple_hwcall_transition_0_result_out;")).to_equal(true)
+        expect(vhdl.index_of("entity transition is")).to_be_less_than(vhdl.index_of("entity clocked_top is"))
+
+    it "orders record callees before a reset-owned clocked state entry":
+        val result = backend().compile(record_clocked_module())
+        expect(result.is_ok()).to_equal(true)
+        val vhdl = result.unwrap().vhdl
+        expect(vhdl.index_of("entity reset_transition is")).to_be_less_than(vhdl.index_of("entity record_clocked_top is"))
+        expect(vhdl.index_of("entity cycle_transition is")).to_be_less_than(vhdl.index_of("entity record_clocked_top is"))
+        expect(vhdl.contains("signal simple_hwcall_reset_transition_0_result_out : cycle_result_t;")).to_equal(true)
+        expect(vhdl.contains("signal simple_hwcall_cycle_transition_1_result_out : cycle_result_t;")).to_equal(true)
+        expect(vhdl.contains("signal global_state : signed(31 downto 0);")).to_equal(true)
+        expect(vhdl.contains("state => global_state")).to_equal(true)
+        expect(vhdl.contains("p_clk: process(clk)")).to_equal(true)
+
+    it "rejects duplicate call-result definitions across branches":
+        val result = backend().compile(duplicate_dest_module(false))
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err().message.contains("one definition")).to_equal(true)
+
+    it "rejects branch-local call input definitions":
+        val result = backend().compile(duplicate_dest_module(true))
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err().message.contains("unconditional architecture-visible definition")).to_equal(true)
+
+    it "rejects entity generics without an explicit generic map":
+        var module = call_module(false)
+        val symbol = SymbolId(id: 800)
+        var transition = module.functions[symbol]
+        var metadata = transition.vhdl_metadata
+        metadata.generics = [VhdlGenericMetadata(name: "WIDTH", type_text: "natural", default_text: "32")]
+        transition.vhdl_metadata = metadata
+        module.functions[symbol] = transition
+        val result = backend().compile(module)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err().message.contains("no explicit generic map")).to_equal(true)
+
+    it "rejects recursive entity call graphs":
+        val result = backend().compile(call_module(true))
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err().message.contains("call cycle")).to_equal(true)
+
+    it "renders an immutable BinOp SSA argument directly into the port map":
+        val result = backend().compile(pure_ssa_call_module())
+        expect(result.is_ok()).to_equal(true)
+        val vhdl = result.unwrap().vhdl
+        expect(vhdl.contains("state => (left + right)")).to_equal(true)
+
+    it "suffixes generated instance labels that collide with a port name":
+        val result = backend().compile(instance_collision_module())
+        expect(result.is_ok()).to_equal(true)
+        val vhdl = result.unwrap().vhdl
+        expect(vhdl.contains("simple_hwcall_transition_0_1: entity work.transition")).to_equal(true)

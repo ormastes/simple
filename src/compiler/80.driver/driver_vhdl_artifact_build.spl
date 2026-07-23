@@ -1,0 +1,161 @@
+# Build production VHDL provenance from the canonical catalog and ABI.
+
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.backend.backend.vhdl.vhdl_design_catalog.{VhdlDesignCatalog}
+use compiler.backend.backend.vhdl.vhdl_helpers.{vhdl_sanitize_identifier}
+use compiler.backend.backend.vhdl.vhdl_abi.{vhdl_resolve_all_ports_with_types}
+use compiler.backend.backend.vhdl_type_mapper.{vhdl_type_mapper_create}
+use compiler.driver.driver_build.incremental.{native_build_compiler_identity, native_build_compiler_executable_hash}
+use compiler.driver.driver_vhdl_artifacts.{
+    VhdlArtifactSource, VhdlArtifactLocation, VhdlArtifactGeneratedItem,
+    VhdlArtifactPort, VhdlArtifactInput, vhdl_artifact_target_for_entity,
+    vhdl_validate_production_artifact_input
+}
+use std.common.crypto.sha256.{sha256_text}
+
+fn vhdl_artifact_stable_source_path(path: text) -> text:
+    val normalized = path.replace("\\", "/")
+    val src_at = normalized.find("/src/") ?? -1
+    if src_at >= 0:
+        return normalized.substring(src_at + 1)
+    val examples_at = normalized.find("/examples/") ?? -1
+    if examples_at >= 0:
+        return normalized.substring(examples_at + 1)
+    if normalized.starts_with("./"):
+        return normalized.substring(2)
+    normalized
+
+fn vhdl_artifact_source_for_module(sources: [SourceFile], module_name: text) -> SourceFile?:
+    var selected: SourceFile? = nil
+    for source in sources:
+        if source.module_name != module_name:
+            continue
+        match selected:
+            case Some(current):
+                if source.path < current.path:
+                    selected = Some(source)
+            case nil:
+                selected = Some(source)
+    selected
+
+fn vhdl_artifact_location(catalog: VhdlDesignCatalog, sources: [SourceFile],
+                          symbol: i64, module_name: text) -> VhdlArtifactLocation:
+    val unavailable = VhdlArtifactLocation(available: false, module_name: "",
+        file: "", start: 0, end: 0, line: 0, col: 0)
+    val source = vhdl_artifact_source_for_module(sources, module_name)
+    if source == nil:
+        return unavailable
+    val key = SymbolId(id: symbol)
+    if not catalog.design.functions.has(key):
+        return unavailable
+    val span = catalog.design.functions[key].span
+    if span.line <= 0 or span.col <= 0:
+        return unavailable
+    val source_file = if span.file != "": span.file else: source.unwrap().path
+    val file = vhdl_artifact_stable_source_path(source_file)
+    if file == "":
+        return unavailable
+    VhdlArtifactLocation(available: true, module_name: module_name, file: file,
+        start: span.start, end: span.end, line: span.line, col: span.col)
+
+fn vhdl_artifact_catalog_sources(catalog: VhdlDesignCatalog,
+                                 sources: [SourceFile]) -> Result<[VhdlArtifactSource], text>:
+    var result: [VhdlArtifactSource] = []
+    for module_name in catalog.reachable_source_modules:
+        val source = vhdl_artifact_source_for_module(sources, module_name)
+        if source == nil:
+            return Err("VHDL artifact provenance cannot find reachable source module `{module_name}`")
+        val value = source.unwrap()
+        val digest = sha256_text(value.content)
+        if digest.len() != 64:
+            return Err("VHDL artifact provenance could not hash `{value.path}`")
+        result = result.push(VhdlArtifactSource(module_name: module_name,
+            path: vhdl_artifact_stable_source_path(value.path),
+            content_hash: digest))
+    Ok(result)
+
+fn vhdl_artifact_input_from_catalog(catalog: VhdlDesignCatalog,
+                                    sources: [SourceFile], output: text, vhdl: text,
+                                    fallback_profile: text,
+                                    aop_advices_requested: i64,
+                                    aop_weave_count: i64) -> Result<VhdlArtifactInput, text>:
+    val artifact_sources = match vhdl_artifact_catalog_sources(catalog, sources):
+        case Ok(value): value
+        case Err(err): return Err(err)
+    var items: [VhdlArtifactGeneratedItem] = []
+    var ports: [VhdlArtifactPort] = []
+    var selected_entity = ""
+    var selected_product_entity = ""
+    var root_entity_count = 0
+    var root_product_entity_count = 0
+    val mapper = vhdl_type_mapper_create()
+    for function_source in catalog.function_sources:
+        val key = SymbolId(id: function_source.symbol)
+        if not catalog.design.functions.has(key):
+            return Err("VHDL artifact provenance cannot find catalog function `{function_source.name}`")
+        val func = catalog.design.functions[key]
+        val location = vhdl_artifact_location(catalog, sources,
+            function_source.symbol, function_source.source_module)
+        val kind = if function_source.is_hardware_entity: "entity" else: "helper"
+        val generated_name = vhdl_sanitize_identifier(function_source.name)
+        val emitted = (function_source.is_hardware_entity or
+            vhdl.contains("function {generated_name}(") or
+            vhdl.contains("function {generated_name} return ") or
+            vhdl.contains("procedure {generated_name}(") or
+            vhdl.contains("procedure {generated_name} is"))
+        if emitted:
+            items = items.push(VhdlArtifactGeneratedItem(kind: kind,
+                name: generated_name, location: location))
+        if function_source.is_hardware_entity:
+            val is_root_entity = catalog.root_modules.contains(
+                function_source.source_module)
+            if is_root_entity:
+                root_entity_count = root_entity_count + 1
+                if selected_entity == "":
+                    selected_entity = generated_name
+            val candidate_target = vhdl_artifact_target_for_entity(generated_name,
+                fallback_profile)
+            if candidate_target.xlen > 0 and is_root_entity:
+                root_product_entity_count = root_product_entity_count + 1
+                selected_product_entity = generated_name
+            val abi_ports = vhdl_resolve_all_ports_with_types(func, mapper,
+                catalog.design.types)
+            var index = 0
+            for port in abi_ports:
+                ports = ports.push(VhdlArtifactPort(entity: generated_name,
+                    name: port.name, direction: port.direction,
+                    type_name: port.type_name, index: index,
+                    # MIR retains the owner function span, not an exact
+                    # parameter/return-field span. Do not invent one.
+                    location: VhdlArtifactLocation(available: false,
+                        module_name: "", file: "", start: 0, end: 0,
+                        line: 0, col: 0)))
+                index = index + 1
+    if root_product_entity_count > 1:
+        return Err("VHDL artifact provenance found multiple product entities in selected root module")
+    if root_product_entity_count == 0 and root_entity_count > 1:
+        return Err("VHDL artifact provenance requires an unambiguous root entity")
+    if selected_entity == "" or root_entity_count == 0:
+        return Err("VHDL artifact provenance found no hardware entity in selected root module")
+    if selected_product_entity != "":
+        selected_entity = selected_product_entity
+    val target = vhdl_artifact_target_for_entity(selected_entity, fallback_profile)
+    val compiler_hash = native_build_compiler_executable_hash()
+    val input = VhdlArtifactInput(output_path: output,
+        entry_module: catalog.root_modules[0], entry_entity: selected_entity,
+        root_modules: catalog.root_modules,
+        sources: artifact_sources,
+        compiler_identity: native_build_compiler_identity(),
+        compiler_hash: compiler_hash, target: target.name, xlen: target.xlen,
+        profile: target.profile, catalog_name: catalog.design.name,
+        module_count: catalog.reachable_source_module_count,
+        entity_count: catalog.hardware_entity_count, type_count: catalog.type_count,
+        helper_count: catalog.helper_function_count, generated_items: items,
+        ports: ports, aop_advices_requested: aop_advices_requested,
+        aop_weave_count: aop_weave_count)
+    match vhdl_validate_production_artifact_input(input):
+        case Ok(_): Ok(input)
+        case Err(err): Err(err)
+
+export vhdl_artifact_input_from_catalog

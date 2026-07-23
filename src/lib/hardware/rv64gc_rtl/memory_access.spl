@@ -1,0 +1,284 @@
+# RV64 architectural memory frontend: Sv39 -> PMP -> physical request.
+#
+# Fetch callers issue 2-byte instruction parcels so C-extension instructions
+# and page boundaries stay precise. Data accesses use natural alignment. One
+# request may be outstanding; DONE/FAULT remain valid until replaced by start.
+
+use std.hardware.rv64gc_rtl.mmu_sv39.MmuState64
+use std.hardware.rv64gc_rtl.mmu_sv39.{ACCESS_FETCH_64, ACCESS_LOAD_64, ACCESS_STORE_64}
+use std.hardware.rv64gc_rtl.sv39_walker.{Sv39Walker64, sv39_walker64_reset}
+use std.hardware.rv64gc_rtl.sv39_walker.{sv39_walker64_start, sv39_walker64_cycle}
+use std.hardware.rv64gc_rtl.sv39_walker.{SV39_WALK_DONE, SV39_WALK_FAULT}
+use std.hardware.rv64gc_rtl.pmp.{PmpEntries64, pmp64_gate_access, PMP64_NO_MATCH}
+use std.hardware.rv64gc_rtl.pmp.{PMP64_CAUSE_INSN_ACCESS_FAULT, PMP64_CAUSE_LOAD_ACCESS_FAULT, PMP64_CAUSE_STORE_ACCESS_FAULT}
+use std.hardware.rv64gc_rtl.trap.{CAUSE_MISALIGNED_FETCH, CAUSE_LOAD_MISALIGNED, CAUSE_STORE_MISALIGNED}
+
+val MEMORY64_IDLE: u32 = 0
+val MEMORY64_WALK: u32 = 1
+val MEMORY64_REQUEST: u32 = 2
+val MEMORY64_WAIT: u32 = 3
+val MEMORY64_DONE: u32 = 4
+val MEMORY64_FAULT: u32 = 5
+
+struct MemoryAccessState64:
+    phase: u32
+    walker: Sv39Walker64
+    vaddr: i64
+    paddr: i64
+    access_type: u32
+    size_bytes: u32
+    privilege: u32
+    sum: bool
+    mxr: bool
+    write_data: i64
+    bus_write: bool
+    atomic: bool
+    read_data: i64
+    fault_cause: i64
+    pmp_index: u32
+    conditional_store: bool
+    reservation_valid: bool
+    reservation_paddr: i64
+    reservation_size: u32
+    conditional_failed: bool
+
+struct MemoryAccessCycle64:
+    state: MemoryAccessState64
+    mmu: MmuState64
+    bus_valid: bool
+    bus_addr: i64
+    bus_size: u32
+    bus_write: bool
+    bus_wdata: i64
+    bus_is_pte: bool
+    bus_atomic: bool
+    done: bool
+    fault: bool
+    read_data: i64
+    fault_cause: i64
+    fault_tval: i64
+    pmp_index: u32
+
+@hardware
+fn memory64_reset() -> MemoryAccessState64:
+    MemoryAccessState64(phase: MEMORY64_IDLE, walker: sv39_walker64_reset(),
+        vaddr: 0, paddr: 0, access_type: ACCESS_LOAD_64, size_bytes: 1,
+        privilege: 3, sum: false, mxr: false, write_data: 0, read_data: 0,
+        bus_write: false, atomic: false, fault_cause: 0,
+        pmp_index: PMP64_NO_MATCH,
+        conditional_store: false,
+        reservation_valid: false, reservation_paddr: 0,
+        reservation_size: 0, conditional_failed: false)
+
+@hardware
+fn memory64_access_fault_cause(access_type: u32) -> i64:
+    if access_type == ACCESS_FETCH_64:
+        return PMP64_CAUSE_INSN_ACCESS_FAULT
+    if access_type == ACCESS_STORE_64:
+        return PMP64_CAUSE_STORE_ACCESS_FAULT
+    PMP64_CAUSE_LOAD_ACCESS_FAULT
+
+@hardware
+fn memory64_misaligned_cause(access_type: u32) -> i64:
+    if access_type == ACCESS_FETCH_64:
+        return CAUSE_MISALIGNED_FETCH
+    if access_type == ACCESS_STORE_64:
+        return CAUSE_STORE_MISALIGNED
+    CAUSE_LOAD_MISALIGNED
+
+@hardware
+fn memory64_fault(state: MemoryAccessState64, cause: i64, pmp_index: u32) -> MemoryAccessState64:
+    var out = state
+    out.phase = MEMORY64_FAULT
+    out.paddr = 0
+    out.fault_cause = cause
+    out.pmp_index = pmp_index
+    out
+
+@hardware
+fn memory64_size_valid(access_type: u32, size_bytes: u32) -> bool:
+    if access_type == ACCESS_FETCH_64:
+        return size_bytes == 2
+    size_bytes == 1 or size_bytes == 2 or size_bytes == 4 or size_bytes == 8
+
+@hardware
+fn memory64_atomic_size_valid(size_bytes: u32) -> bool:
+    size_bytes == 4 or size_bytes == 8
+
+@hardware
+fn memory64_aligned(vaddr: i64, access_type: u32, size_bytes: u32) -> bool:
+    if access_type == ACCESS_FETCH_64:
+        return (vaddr & 1) == 0
+    if size_bytes == 2:
+        return (vaddr & 1) == 0
+    if size_bytes == 4:
+        return (vaddr & 3) == 0
+    if size_bytes == 8:
+        return (vaddr & 7) == 0
+    true
+
+@hardware
+fn memory64_after_translation(state: MemoryAccessState64, pmp: PmpEntries64) -> MemoryAccessState64:
+    val gate = pmp64_gate_access(pmp, state.paddr, state.size_bytes,
+        state.access_type, state.privilege, false, 0)
+    if not gate.bus_valid:
+        return memory64_fault(state, gate.fault_cause, gate.matched_index)
+    var out = state
+    out.paddr = gate.paddr
+    out.pmp_index = gate.matched_index
+    if state.conditional_store and (not state.reservation_valid or
+                                   gate.paddr != state.reservation_paddr or
+                                   state.size_bytes != state.reservation_size):
+        out.phase = MEMORY64_DONE
+        out.conditional_failed = true
+        return out
+    out.phase = MEMORY64_REQUEST
+    out
+
+@hardware
+fn memory64_start_internal(mmu: MmuState64, pmp: PmpEntries64, vaddr: i64,
+                           access_type: u32, size_bytes: u32, privilege: u32,
+                           sum: bool, mxr: bool, write_data: i64,
+                           bus_write: bool, atomic: bool,
+                           conditional_store: bool, reservation_valid: bool,
+                           reservation_paddr: i64,
+                           reservation_size: u32) -> MemoryAccessState64:
+    var out = memory64_reset()
+    out.vaddr = vaddr
+    out.access_type = access_type
+    out.size_bytes = size_bytes
+    out.privilege = privilege
+    out.sum = sum
+    out.mxr = mxr
+    out.write_data = write_data
+    out.bus_write = bus_write
+    out.atomic = atomic
+    out.conditional_store = conditional_store
+    out.reservation_valid = reservation_valid
+    out.reservation_paddr = reservation_paddr
+    out.reservation_size = reservation_size
+
+    if access_type > ACCESS_STORE_64 or not memory64_size_valid(access_type, size_bytes):
+        return memory64_fault(out, memory64_access_fault_cause(access_type), PMP64_NO_MATCH)
+    if atomic and not memory64_atomic_size_valid(size_bytes):
+        return memory64_fault(out, memory64_access_fault_cause(access_type), PMP64_NO_MATCH)
+    if not memory64_aligned(vaddr, access_type, size_bytes):
+        return memory64_fault(out, memory64_misaligned_cause(access_type), PMP64_NO_MATCH)
+
+    out.walker = sv39_walker64_start(mmu, vaddr, access_type, privilege, sum, mxr)
+    if out.walker.phase == SV39_WALK_FAULT:
+        return memory64_fault(out, out.walker.fault_cause, out.walker.pmp_index)
+    if out.walker.phase == SV39_WALK_DONE:
+        out.paddr = out.walker.paddr
+        return memory64_after_translation(out, pmp)
+    out.phase = MEMORY64_WALK
+    out
+
+@hardware
+fn memory64_start(mmu: MmuState64, pmp: PmpEntries64, vaddr: i64,
+                  access_type: u32, size_bytes: u32, privilege: u32, sum: bool,
+                  mxr: bool, write_data: i64) -> MemoryAccessState64:
+    memory64_start_internal(mmu, pmp, vaddr, access_type, size_bytes, privilege,
+        sum, mxr, write_data, access_type == ACCESS_STORE_64, false,
+        false, false, 0, 0)
+
+@hardware
+fn memory64_start_atomic_read(mmu: MmuState64, pmp: PmpEntries64,
+                              vaddr: i64, size_bytes: u32, privilege: u32,
+                              sum: bool, mxr: bool) -> MemoryAccessState64:
+    """Issue an AMO read with store/AMO translation, PMP, and fault semantics."""
+    memory64_start_internal(mmu, pmp, vaddr, ACCESS_STORE_64, size_bytes,
+        privilege, sum, mxr, 0, false, true, false, false, 0, 0)
+
+@hardware
+fn memory64_start_lr(mmu: MmuState64, pmp: PmpEntries64, vaddr: i64,
+                     size_bytes: u32, privilege: u32, sum: bool,
+                     mxr: bool) -> MemoryAccessState64:
+    """Issue an LR with load faults while carrying the atomic PMA qualifier."""
+    memory64_start_internal(mmu, pmp, vaddr, ACCESS_LOAD_64, size_bytes,
+        privilege, sum, mxr, 0, false, true, false, false, 0, 0)
+
+@hardware
+fn memory64_start_atomic_store(mmu: MmuState64, pmp: PmpEntries64,
+                               vaddr: i64, size_bytes: u32, privilege: u32,
+                               sum: bool, mxr: bool,
+                               write_data: i64) -> MemoryAccessState64:
+    memory64_start_internal(mmu, pmp, vaddr, ACCESS_STORE_64, size_bytes,
+        privilege, sum, mxr, write_data, true, true, false, false, 0, 0)
+
+@hardware
+fn memory64_start_conditional_store(mmu: MmuState64, pmp: PmpEntries64,
+                                    vaddr: i64, size_bytes: u32,
+                                    privilege: u32, sum: bool, mxr: bool,
+                                    write_data: i64, reservation_valid: bool,
+                                    reservation_paddr: i64,
+                                    reservation_size: u32) -> MemoryAccessState64:
+    """Translate and PMP-check SC before conditionally suppressing its write."""
+    memory64_start_internal(mmu, pmp, vaddr, ACCESS_STORE_64, size_bytes,
+        privilege, sum, mxr, write_data, true, true, true, reservation_valid,
+        reservation_paddr, reservation_size)
+
+@hardware
+fn memory64_cycle(state: MemoryAccessState64, mmu: MmuState64, pmp: PmpEntries64, request_ready: bool, response_valid: bool, response_error: bool, response_data: i64) -> MemoryAccessCycle64:
+    var next = state
+    var next_mmu = mmu
+    var bus_valid = false
+    var bus_addr: i64 = 0
+    var bus_size: u32 = state.size_bytes
+    var bus_write = false
+    var bus_wdata: i64 = 0
+    var bus_is_pte = false
+    var bus_atomic = false
+
+    if state.phase == MEMORY64_WALK:
+        val walk = sv39_walker64_cycle(state.walker, mmu, pmp,
+            request_ready, response_valid, response_error, response_data)
+        next.walker = walk.walker
+        next_mmu = walk.mmu
+        bus_valid = walk.bus_valid
+        bus_addr = walk.bus_addr
+        bus_size = walk.bus_size
+        bus_is_pte = walk.bus_valid
+        if walk.done:
+            if walk.fault:
+                next = memory64_fault(next, walk.fault_cause, walk.pmp_index)
+            else:
+                next.paddr = walk.paddr
+                next = memory64_after_translation(next, pmp)
+
+    else if state.phase == MEMORY64_REQUEST:
+        bus_valid = true
+        bus_addr = state.paddr
+        bus_write = state.bus_write
+        bus_wdata = state.write_data
+        bus_atomic = state.atomic
+        if request_ready:
+            if response_valid:
+                if response_error:
+                    next = memory64_fault(state, memory64_access_fault_cause(state.access_type), state.pmp_index)
+                else:
+                    next.phase = MEMORY64_DONE
+                    next.read_data = response_data
+            else:
+                next.phase = MEMORY64_WAIT
+
+    else if state.phase == MEMORY64_WAIT and response_valid:
+        if response_error:
+            next = memory64_fault(state, memory64_access_fault_cause(state.access_type), state.pmp_index)
+        else:
+            next.phase = MEMORY64_DONE
+            next.read_data = response_data
+
+    val done = next.phase == MEMORY64_DONE or next.phase == MEMORY64_FAULT
+    MemoryAccessCycle64(state: next, mmu: next_mmu, bus_valid: bus_valid,
+        bus_addr: bus_addr, bus_size: bus_size, bus_write: bus_write,
+        bus_wdata: bus_wdata, bus_is_pte: bus_is_pte,
+        bus_atomic: bus_atomic, done: done,
+        fault: next.phase == MEMORY64_FAULT, read_data: next.read_data,
+        fault_cause: next.fault_cause, fault_tval: next.vaddr,
+        pmp_index: next.pmp_index)
+
+export MemoryAccessState64, MemoryAccessCycle64
+export memory64_reset, memory64_start, memory64_start_atomic_read, memory64_start_lr
+export memory64_start_atomic_store, memory64_start_conditional_store, memory64_cycle
+export MEMORY64_IDLE, MEMORY64_WALK, MEMORY64_REQUEST, MEMORY64_WAIT, MEMORY64_DONE, MEMORY64_FAULT

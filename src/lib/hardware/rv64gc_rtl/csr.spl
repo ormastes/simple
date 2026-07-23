@@ -232,7 +232,11 @@ fn csr64_write(csr: CsrFile64, addr: u32, value: i64) -> CsrFile64:
         out.medeleg = value
     else if addr == CSR_ADDR_MIDELEG:
         out.mideleg = value
-    # misa, mhartid, mcycle, minstret — read-only or counter (updated by tick)
+    else if addr == CSR_ADDR_MCYCLE:
+        out.mcycle = value
+    else if addr == CSR_ADDR_MINSTRET:
+        out.minstret = value
+    # misa and mhartid are read-only.
     out
 
 # ============================================================================
@@ -311,14 +315,18 @@ fn csr64_rw(csr: CsrFile64, addr: u32, rs1_val: i64, funct3: u32) -> CsrRwResult
     CsrRwResult64(csr: new_csr, old_value: old_value)
 
 # ============================================================================
-# CSR Tick — increment cycle and instruction counters
+# CSR counters — cycle and retirement are separate architectural events
 # ============================================================================
 
 fn csr64_tick(csr: CsrFile64) -> CsrFile64:
-    """Increment mcycle and minstret counters (called once per clock cycle).
-    64-bit counters — no overflow split needed."""
+    """Increment mcycle once per clock; fetch/walk/wait do not retire."""
     var out = csr
     out.mcycle = csr.mcycle + 1
+    out
+
+fn csr64_retire(csr: CsrFile64) -> CsrFile64:
+    """Increment minstret exactly once for a committed instruction."""
+    var out = csr
     out.minstret = csr.minstret + 1
     out
 
@@ -339,10 +347,13 @@ fn csr64_update_mip(csr: CsrFile64, mtip: bool, msip: bool, meip: bool) -> CsrFi
     out.mip = new_mip
     out
 
-fn csr64_update_mip_s(csr: CsrFile64, mtip: bool, msip: bool, meip: bool, seip: bool) -> CsrFile64:
+fn csr64_update_mip_s(csr: CsrFile64, mtip: bool, msip: bool, meip: bool,
+                      stip: bool, seip: bool) -> CsrFile64:
     """Update the interrupt-pending register including the S-mode external
     interrupt level (mip.SEIP, bit 9 — driven from PLIC context 1)."""
     var out = csr64_update_mip(csr, mtip, msip, meip)
+    if stip:
+        out.mip = out.mip | 0x00000020
     if seip:
         out.mip = out.mip | MIP_SEIP_MASK
     out
@@ -484,7 +495,7 @@ fn csr64_init() -> CsrFile64:
     csr64_create(0)
 
 export CsrFile64, CsrRwResult64
-export csr64_create, csr64_read, csr64_write, csr64_rw, csr64_tick, csr64_update_mip
+export csr64_create, csr64_read, csr64_write, csr64_rw, csr64_tick, csr64_retire, csr64_update_mip
 export csr64_update_mip_s
 export misa_rv64imac, csr64_init
 export CsrExt64, csr_ext64_create, csr_ext64_read, csr_ext64_write, csr_ext64_known

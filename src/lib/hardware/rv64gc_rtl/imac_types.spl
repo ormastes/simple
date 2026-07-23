@@ -1,0 +1,111 @@
+# Integer-only RV64IMAC state/types for the synthesizable protected root.
+# This module intentionally has no dependency on the behavioral F/D owner.
+
+use std.hardware.rv64gc_rtl.mul_div.MulDivState
+use std.hardware.rv64gc_rtl.atomics.AtomicsState
+use std.hardware.rv64gc_rtl.csr.{CsrFile64, CsrExt64}
+use std.hardware.rv64gc_rtl.csr_s.{CsrSMode64, SSTATUS_SUM_MASK_64, SSTATUS_MXR_MASK_64}
+use std.hardware.rv64gc_rtl.mmu_sv39.MmuState64
+use std.hardware.rv64gc_rtl.pmp.PmpEntries64
+use std.hardware.rv64gc_rtl.regfile.RegFile64
+use std.hardware.rv64gc_rtl.memory_access.MemoryAccessState64
+use std.hardware.rv64gc_rtl.decode.DecodeResult64
+
+val CORE64_FETCH_LOW: u32 = 0
+val CORE64_FETCH_HIGH: u32 = 1
+val CORE64_DATA_ACCESS: u32 = 2
+val CORE64_MULDIV: u32 = 3
+val CORE64_ATOMIC_LOAD: u32 = 4
+val CORE64_ATOMIC_STORE: u32 = 5
+val CORE64_WFI: u32 = 6
+val CORE64_MSTATUS_MPRV_MASK: i64 = 0x0002_0000
+val CORE64_MSTATUS_DATA_MASK: i64 = CORE64_MSTATUS_MPRV_MASK | SSTATUS_SUM_MASK_64 | SSTATUS_MXR_MASK_64
+# ============================================================================
+# Core sequential state (clocked registers)
+# ============================================================================
+
+struct CoreImacState64:
+    """Sequential state updated on each clock edge."""
+    pc: i64             # Program counter (64-bit)
+    halt: bool          # CPU halted
+    semi_phase: u32     # Semihosting sequence detector (0/1/2)
+    semi_op: i64        # Latched semihosting operation (a0)
+    semi_param: i64     # Latched semihosting parameter (a1)
+    semi_suppress: bool # Suppress normal execution during semihost sequence
+    semi_trigger: bool  # One-cycle pulse when semihosting completes
+    wfi_wait: bool      # Retired WFI is parked until an interrupt becomes pending
+    mul_div: MulDivState  # M extension state
+    atomics: AtomicsState # A extension state
+    atomic_old: i64       # AMO read value held through its protected store
+    atomic_reservation_size: u32 # Protected LR/SC reservation granule
+    atomic_bus_exclusive: bool  # Embedding guarantees no competing memory agent
+    priv_mode: i64      # Current privilege mode: M=3, S=1, U=0
+    csr_m: CsrFile64    # M-mode CSR file
+    csr_ext: CsrExt64   # PMP + counter-enable CSR storage (no enforcement)
+    csr_s: CsrSMode64   # S-mode CSR file
+    mmu: MmuState64      # Sv39 MMU state, including TLB
+    pmp: PmpEntries64    # Machine-owned physical memory protection state
+    rf: RegFile64         # Architectural integer register file
+    time_value: i64       # Platform-sampled architectural time CSR value
+    memory: MemoryAccessState64 # One staged Sv39/PMP transaction
+    pipeline_phase: u32   # Fetch low parcel, fetch high parcel, or data
+    fetch_low: u32        # Low 16-bit instruction parcel
+    instruction: u32      # Current 32-bit instruction during data access
+    instruction_bytes: u32 # Architectural instruction length (2 or 4)
+    rvfi_order: i64       # Next protected architectural event order
+    rvfi_valid: bool      # One-cycle protected retire/trap event
+    rvfi_trap: bool       # Current RVFI event is a synchronous exception
+    rvfi_insn: u32        # Instruction attached to the current event
+    rvfi_pc_wdata: i64    # Architectural PC after the current event
+    rvfi_intr_pending: bool # First handler instruction carries rvfi_intr
+
+struct CoreImacCsrAccess64:
+    """One legal CSR read/modify/write result for the clocked core."""
+    valid: bool
+    old_value: i64
+    csr_m: CsrFile64
+    csr_ext: CsrExt64
+    csr_s: CsrSMode64
+    mmu: MmuState64
+    pmp: PmpEntries64
+
+# ============================================================================
+# Combinational result bundle
+# ============================================================================
+
+struct CoreImacCombResult64:
+    """All combinational outputs from one cycle of the datapath."""
+    # Decoder outputs
+    dec: DecodeResult64
+
+    # Register file read results
+    rs1_data: i64
+    rs2_data: i64
+    a0_val: i64
+    a1_val: i64
+
+    # ALU results
+    alu_result: i64
+    alu_zero: bool
+
+    # Branch evaluation
+    branch_taken: bool
+    branch_target: i64
+
+    # Next PC (combinational)
+    pc_next: i64
+    pc_plus4: i64
+
+    # Write-back data for rd
+    rd_data: i64
+    rd_write: bool
+
+    # Data memory interface
+    dmem_addr: i64
+    dmem_wdata: i64
+    dmem_we: bool
+    dmem_re: bool
+    dmem_width: u32
+
+    # Instruction memory address
+    imem_addr: i64

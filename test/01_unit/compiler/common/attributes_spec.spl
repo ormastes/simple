@@ -1,4 +1,4 @@
-use compiler.common.attributes.{FunctionAttr, parse_function_attrs}
+use compiler.common.attributes.{FunctionAttr, VhdlResetSynchrony, parse_function_attrs, _parse_vhdl_clocked_args}
 use compiler.common.diagnostics.span.{Span}
 use compiler.frontend.parser_types.{Attribute, Expr, ExprKind}
 
@@ -60,3 +60,30 @@ describe "FunctionAttr":
             val fa = parse_function_attrs([make_gpu_backends_attr("cuda,opencl")])
             expect(fa.is_gpu_kernel).to_equal(true)
             expect(fa.gpu_backends).to_equal("cuda,opencl")
+
+describe "VHDL clock metadata":
+    it "treats positional none as source-owned reset":
+        val clocked = _parse_vhdl_clocked_args([
+            make_ident_expr("clk"), make_ident_expr("none")
+        ])
+        expect(clocked.is_valid).to_equal(true)
+        expect(clocked.clock_signal).to_equal("clk")
+        expect(clocked.has_reset).to_equal(false)
+        expect(clocked.reset_signal).to_equal("")
+        expect(clocked.reset_synchrony).to_equal(VhdlResetSynchrony.None_)
+
+    it "keeps real positional reset signals backend-managed":
+        val clocked = _parse_vhdl_clocked_args([
+            make_ident_expr("clk"), make_ident_expr("reset_n")
+        ])
+        expect(clocked.is_valid).to_equal(true)
+        expect(clocked.has_reset).to_equal(true)
+        expect(clocked.reset_signal).to_equal("reset_n")
+
+    it "rejects reset synchrony after positional none":
+        val clocked = _parse_vhdl_clocked_args([
+            make_ident_expr("clk"), make_ident_expr("none"),
+            make_ident_expr("async")
+        ])
+        expect(clocked.is_valid).to_equal(false)
+        expect(clocked.has_reset).to_equal(false)

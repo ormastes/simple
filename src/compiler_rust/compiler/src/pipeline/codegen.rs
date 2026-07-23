@@ -3263,6 +3263,41 @@ fn top(a: i32) -> i32:
     }
 
     #[test]
+    fn vhdl_lowers_hardware_call_before_clocked_process() {
+        let source = "\
+@hardware
+fn transition(state: i32) -> i32:
+    return state + 1
+
+@hardware
+@clocked(clk, none)
+fn clocked_top(clk: bool, state: i32) -> i32:
+    return transition(state)
+";
+        let mut parser = Parser::new(source);
+        let ast = parser.parse().expect("parse failed");
+        let metadata = collect_vhdl_source_metadata(&ast);
+        let hir_module = crate::hir::lower(&ast).expect("hir lower failed");
+        let mir_module = crate::mir::lower_to_mir(&hir_module).expect("mir lower failed");
+        let vhdl = generate_vhdl_with_metadata(&mir_module, &metadata).expect("VHDL generation failed");
+
+        let instance = vhdl
+            .find("u_transition_0: entity work.transition")
+            .expect("expected transition entity instance");
+        let process = vhdl.find("p_clk: process(clk)").expect("expected clocked process");
+        assert!(instance < process, "entity instance must be concurrent with the clocked process:\n{vhdl}");
+        assert!(vhdl.contains("state => state"), "expected typed input wiring:\n{vhdl}");
+        assert!(
+            vhdl.contains("result_out => u_transition_0_result_out"),
+            "expected typed output wiring:\n{vhdl}"
+        );
+        assert!(
+            vhdl.contains("result_out <= u_transition_0_result_out;"),
+            "expected clocked result assignment:\n{vhdl}"
+        );
+    }
+
+    #[test]
     fn vhdl_lowers_multi_output_hardware_call_to_named_port_map() {
         let source = "\
 @hardware

@@ -24,6 +24,8 @@ use .vhdl_codegen_helpers.*
 use .vhdl_entity_compile.*
 use .vhdl_process.*
 use .vhdl_expr.*
+use .vhdl.vhdl_call_lowering.*
+use .vhdl.vhdl_design_catalog.{vhdl_catalog_type_order}
 
 # ============================================================================
 # VHDL Return ABI
@@ -38,6 +40,7 @@ struct VhdlReturnField:
     name: text
     type_: MirType
     index: i64
+    selector: text
 
 struct VhdlReturnAbi:
     is_tuple: bool
@@ -75,13 +78,18 @@ class VhdlBackend:
     active_local_kinds: Dict<i64, LocalKind>
     active_blocks: Dict<i64, MirBlock>
     active_type_defs: Dict<i64, MirTypeDef>
+    active_type_emit_order: [SymbolId]
     active_tuple_type_names: Dict<text, text>
     active_tuple_type_shapes: Dict<text, [MirType]>
     active_tuple_type_order: [text]
     active_return_abi: VhdlReturnAbi
     active_function_by_name: Dict<text, MirFunction>
     active_helper_name_by_source: Dict<text, text>
+    active_hardware_call_instance_names: Dict<i64, text>
     active_local_memory_type_names: Dict<i64, text>
+    active_statics: Dict<i64, MirStatic>
+    active_process_locals_are_variables: bool
+    active_hardware_calls_use_port_maps: bool
     # Single-use temp locals whose side-effect-free defining expression
     # (slice/resize/cast/concat) is inlined into its sole consumer instead of
     # being materialised as an intermediate signal. Maps local id -> rendered
@@ -102,13 +110,18 @@ class VhdlBackend:
             active_local_kinds: {},
             active_blocks: {},
             active_type_defs: {},
+            active_type_emit_order: [],
             active_tuple_type_names: {},
             active_tuple_type_shapes: {},
             active_tuple_type_order: [],
             active_return_abi: VhdlReturnAbi(is_tuple: false, fields: []),
             active_function_by_name: {},
             active_helper_name_by_source: {},
+            active_hardware_call_instance_names: {},
             active_local_memory_type_names: {},
+            active_statics: {},
+            active_process_locals_are_variables: false,
+            active_hardware_calls_use_port_maps: false,
             active_inline_exprs: {}
         )
 
@@ -123,13 +136,18 @@ class VhdlBackend:
             active_local_kinds: {},
             active_blocks: {},
             active_type_defs: {},
+            active_type_emit_order: [],
             active_tuple_type_names: {},
             active_tuple_type_shapes: {},
             active_tuple_type_order: [],
             active_return_abi: VhdlReturnAbi(is_tuple: false, fields: []),
             active_function_by_name: {},
             active_helper_name_by_source: {},
+            active_hardware_call_instance_names: {},
             active_local_memory_type_names: {},
+            active_statics: {},
+            active_process_locals_are_variables: false,
+            active_hardware_calls_use_port_maps: false,
             active_inline_exprs: {}
         )
 
@@ -137,14 +155,22 @@ class VhdlBackend:
         """Compile MIR module to VHDL."""
         val builder: VhdlBuilder = VhdlBuilder.create(module.name)
         self.active_type_defs = {}
+        self.active_type_emit_order = []
         self.active_function_by_name = {}
         self.active_helper_name_by_source = {}
+        self.active_statics = {}
         for symbol in module.types.keys():
             val type_def = module.types[symbol]
             self.active_type_defs[type_def.symbol.id] = type_def
+        self.active_type_emit_order = match vhdl_catalog_type_order(module.types):
+            case Ok(value): value
+            case Err(err): return Err(self.backend_error(err))
         for symbol in module.functions.keys():
             val func = module.functions[symbol]
             self.active_function_by_name[func.name] = func
+        for symbol in module.statics.keys():
+            val static_ = module.statics[symbol]
+            self.active_statics[static_.symbol.id] = static_
         self.prepare_tuple_types_for_module(module)
         val hardware_mode = self.module_has_vhdl_hardware(module)
         if hardware_mode:
@@ -173,11 +199,17 @@ class VhdlBackend:
 
         # Compile each function as an entity/architecture
         var entities: [VhdlEntity] = []
-        # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
-        for symbol in module.functions.keys():
-            val func = module.functions[symbol]
-            if hardware_mode and not vhdl_function_is_hardware_entity(func):
-                continue
+        var emit_functions: [MirFunction] = []
+        if hardware_mode:
+            val order = match self.hardware_entity_emit_order(module):
+                case Ok(value): value
+                case Err(err): return Err(err)
+            emit_functions = order
+        else:
+            # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
+            for symbol in module.functions.keys():
+                emit_functions = emit_functions.push(module.functions[symbol])
+        for func in emit_functions:
             val result = self.compile_function(builder, func)
             match result:
                 case Ok(entity):
@@ -286,9 +318,13 @@ impl HardwareCodegen for VhdlBackend:
         val builder: VhdlBuilder = VhdlBuilder.create(module.name)
         builder.emit_library_header()
         self.active_type_defs = {}
+        self.active_type_emit_order = []
         for symbol in module.types.keys():
             val type_def = module.types[symbol]
             self.active_type_defs[type_def.symbol.id] = type_def
+        self.active_type_emit_order = match vhdl_catalog_type_order(module.types):
+            case Ok(value): value
+            case Err(err): return Err(self.backend_error(err))
         self.prepare_tuple_types_for_module(module)
         val result = self.compile_package_into(builder, module)
         if result.is_err():

@@ -67,6 +67,10 @@ fn rvfi_port_manifest() -> [RvfiPort]:
         RvfiPort(name: "rvfi_order", width: 64, direction: "out"),
         RvfiPort(name: "rvfi_insn", width: 32, direction: "out"),
         RvfiPort(name: "rvfi_trap", width: 1, direction: "out"),
+        RvfiPort(name: "rvfi_halt", width: 1, direction: "out"),
+        RvfiPort(name: "rvfi_intr", width: 1, direction: "out"),
+        RvfiPort(name: "rvfi_mode", width: 2, direction: "out"),
+        RvfiPort(name: "rvfi_ixl", width: 2, direction: "out"),
         RvfiPort(name: "rvfi_rs1_addr", width: 5, direction: "out"),
         RvfiPort(name: "rvfi_rs2_addr", width: 5, direction: "out"),
         RvfiPort(name: "rvfi_rs1_rdata", width: 32, direction: "out"),
@@ -128,9 +132,7 @@ fn rvfi_check_traces(traces: [RvfiTrace]) -> [text]:
       2. pc chaining: pc_wdata of retire N == pc_rdata of retire N+1,
          except when retire N trapped.
       3. x0 gating: rd_addr == 0 implies rd_wdata == 0.
-      4. mem masks: rmask/wmask nonzero only with a mem_addr latched
-         is not asserted (address 0 is legal) — but a nonzero wmask and
-         nonzero rmask on the same retire is rejected (single-port core).
+      4. simultaneous rmask/wmask is reserved for one retired AMO.
 
     Returns a list of violation strings; empty list == all invariants hold.
     The caller must additionally reject vacuous runs (fewer than 2 valid
@@ -148,7 +150,8 @@ fn rvfi_check_traces(traces: [RvfiTrace]) -> [text]:
             continue
         if t.rvfi_rd_addr == 0 and t.rvfi_rd_wdata != 0:
             violations = violations.push("retire {idx}: x0 write nonzero rd_wdata")
-        if t.rvfi_mem_rmask != 0 and t.rvfi_mem_wmask != 0:
+        val is_amo = (t.rvfi_insn & 0x7F) == 0x2F
+        if t.rvfi_mem_rmask != 0 and t.rvfi_mem_wmask != 0 and not is_amo:
             violations = violations.push("retire {idx}: simultaneous rmask and wmask")
         if have_prev:
             if t.rvfi_order <= prev_order:

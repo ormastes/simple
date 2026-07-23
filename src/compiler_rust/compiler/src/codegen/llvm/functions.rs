@@ -2986,6 +2986,38 @@ mod tests {
     }
 
     #[test]
+    fn rt_value_bool_calls_receive_raw_boolean_bits() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("rt_value_bool_raw_bits").unwrap();
+
+        let mut func = MirFunction::new(
+            "probe".to_string(),
+            crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        for (bool_reg, call_reg, value) in [(VReg(0), VReg(1), false), (VReg(2), VReg(3), true)] {
+            func.blocks[0]
+                .instructions
+                .push(MirInst::ConstBool { dest: bool_reg, value });
+            func.blocks[0].instructions.push(MirInst::Call {
+                dest: Some(call_reg),
+                target: CallTarget::from_name("rt_value_bool"),
+                args: vec![bool_reg],
+            });
+        }
+        func.blocks[0].terminator = Terminator::Return(Some(VReg(3)));
+
+        backend.compile_function(&func).unwrap();
+        let ir = backend.get_ir().unwrap();
+        assert!(ir.contains("call i64 @rt_value_bool(i64 0)"), "{ir}");
+        assert!(ir.contains("call i64 @rt_value_bool(i64 1)"), "{ir}");
+        assert!(!ir.contains("call i64 @rt_value_bool(i64 19)"), "{ir}");
+        assert!(!ir.contains("call i64 @rt_value_bool(i64 11)"), "{ir}");
+        backend.verify().unwrap();
+    }
+
+    #[test]
     fn static_dict_remove_uses_runtime_symbol() {
         let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
         let backend = LlvmBackend::new(target).unwrap();

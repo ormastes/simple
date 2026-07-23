@@ -1,0 +1,519 @@
+use std.spec.*
+use std.hardware.rv32i_rtl.protected_core.{CoreProtectedState32, CORE32_FETCH, CORE32_EXECUTE, CORE32_DATA_ACCESS, CORE32_WFI, core32_init, core32_cycle}
+use std.hardware.rv32i_rtl.protected_core.{core32_csr_access, core32_data_privilege, core32_check_interrupt, core32_enter_trap}
+use std.hardware.rv32i_rtl.protected_core.{core32_set_pending_interrupts, core32_invalidate_reservation}
+use std.hardware.rv32i_rtl.protected_core.core32_set_supervisor_pending_interrupts
+use std.hardware.rv32i_rtl.protected_core.core32_set_time_value
+use std.hardware.rv32i_rtl.protected_entry.{core32_protected_clocked_entry, core32_protected_product_entry}
+use std.hardware.rv32i_rtl.regfile.{regfile_read, regfile_write}
+use std.hardware.rv32i_rtl.memory_access.memory32_start
+use std.hardware.rv32i_rtl.mmu_sv32.{ACCESS_LOAD, ACCESS_STORE, PRIV_S, PRIV_M, mmu_set_satp, mmu_tlb_insert, mmu_tlb_lookup}
+use std.hardware.rv32i_rtl.a_extension.{rv32a_lr_set, RV32A_AMO_ADD}
+use std.hardware.soc_rtl.soc_top.{soc_protected32_create, soc_protected32_tick}
+use std.hardware.soc_rtl.bootrom.BOOT_INSN_0
+use std.hardware.soc_rtl.ram_sparse.sparse_read
+
+fn deliver_32bit_instruction(requested: CoreProtectedState32,
+                             instruction: u32) -> CoreProtectedState32:
+    val first = core32_cycle(requested, true, true, false, instruction & 0xFFFF)
+    val second_request = core32_cycle(first.state, false, false, false, 0)
+    core32_cycle(second_request.state, true, true, false, instruction >> 16).state
+
+describe "RV32 protected core shell":
+    it "fetches and commits an integer instruction through the only bus":
+        val initial = core32_init(0x1000)
+        val request = core32_cycle(initial, false, false, false, 0)
+        expect(request.bus_valid).to_be(true)
+        expect(request.bus_addr).to_equal(0x1000)
+        expect(request.bus_is_pte).to_be(false)
+        val fetched = deliver_32bit_instruction(request.state, 0x00100093)
+        expect(fetched.pipeline_phase).to_equal(CORE32_EXECUTE)
+        val committed = core32_cycle(fetched, false, false, false, 0)
+        expect(regfile_read(committed.state.rf, 1, 0).rs1_data).to_equal(1)
+        expect(committed.state.core.pc).to_equal(0x1004)
+        expect(committed.rvfi.rvfi_valid).to_be(true)
+        expect(committed.rvfi.rvfi_trap).to_be(false)
+        expect(committed.rvfi.rvfi_order).to_equal(0)
+        expect(committed.rvfi.rvfi_insn).to_equal(0x00100093)
+        expect(committed.rvfi.rvfi_pc_rdata).to_equal(0x1000)
+        expect(committed.rvfi.rvfi_pc_wdata).to_equal(0x1004)
+        expect(committed.rvfi.rvfi_rd_addr).to_equal(1)
+        expect(committed.rvfi.rvfi_rd_wdata).to_equal(1)
+        expect(committed.state.rvfi_order).to_equal(1)
+
+    it "exposes the protected transition through the compiler clocked entry":
+        val initial = core32_init(0x1000)
+        val result = core32_protected_clocked_entry(true, true, initial,
+            false, false, false, 0)
+        expect(result.bus_valid).to_be(true)
+        expect(result.bus_addr).to_equal(0x1000)
+
+    it "owns reset state and feeds the protected result into the next clock":
+        val reset = core32_protected_product_entry(true, false, 0x2000,
+            false, false, false, false, false, 0,
+            false, false, false, 0)
+        expect(reset.bus_valid).to_be(false)
+        expect(reset.rvfi_ixl).to_equal(1)
+        expect(reset.rvfi_mode).to_equal(3)
+        val first = core32_protected_product_entry(true, true, 0x2000,
+            false, false, false, false, false, 0,
+            false, false, false, 0)
+        expect(first.bus_valid).to_be(true)
+        expect(first.bus_addr).to_equal(0x2000)
+        val second = core32_protected_product_entry(true, true, 0x2000,
+            false, false, false, false, false, 0,
+            false, false, false, 0)
+        expect(second.bus_addr).to_equal(0x2000)
+
+    it "emits one ordered trap event for a synchronous illegal instruction":
+        var initial = core32_init(0x1000)
+        initial.pipeline_phase = CORE32_EXECUTE
+        initial.instruction = 0xFFFFFFFF
+        initial.csr_m.mtvec = 0x2000
+        val trapped = core32_cycle(initial, false, false, false, 0)
+        expect(trapped.rvfi.rvfi_valid).to_be(true)
+        expect(trapped.rvfi.rvfi_trap).to_be(true)
+        expect(trapped.rvfi.rvfi_order).to_equal(0)
+        expect(trapped.rvfi.rvfi_insn).to_equal(0xFFFFFFFF)
+        expect(trapped.rvfi.rvfi_pc_rdata).to_equal(0x1000)
+        expect(trapped.rvfi.rvfi_pc_wdata).to_equal(0x2000)
+        expect(trapped.state.rvfi_order).to_equal(1)
+
+    it "preserves the raw illegal compressed parcel in the trap trace":
+        var initial = core32_init(0x1000)
+        initial.csr_m.mtvec = 0x2000
+        val trapped = core32_cycle(initial, true, true, false, 0x1082)
+        expect(trapped.rvfi.rvfi_valid).to_be(true)
+        expect(trapped.rvfi.rvfi_trap).to_be(true)
+        expect(trapped.rvfi.rvfi_insn).to_equal(0x1082)
+        expect(trapped.rvfi.rvfi_pc_rdata).to_equal(0x1000)
+        expect(trapped.rvfi.rvfi_pc_wdata).to_equal(0x2000)
+
+    it "routes SATP CSR writes through S-mode state and flushes the MMU":
+        var initial = core32_init(0x1000)
+        initial.rf = regfile_write(initial.rf, 1, 0x80000100, true)
+        val request = core32_cycle(initial, false, false, false, 0)
+        val fetched = deliver_32bit_instruction(request.state, 0x18009073)
+        val committed = core32_cycle(fetched, false, false, false, 0)
+        expect(committed.state.csr_s.satp).to_equal(0x80000100)
+        expect(committed.state.mmu.satp_mode).to_equal(1)
+        expect(committed.state.mmu.satp_ppn).to_equal(0x100)
+
+    it "takes a data PMP fault without committing the load destination":
+        var initial = core32_init(0x1000)
+        initial.pmp.cfg_0 = 0x88
+        initial.pmp.addr_0 = 0x400
+        initial.csr_m.mtvec = 0x2000
+        val fetch_request = core32_cycle(initial, false, false, false, 0)
+        val fetched = deliver_32bit_instruction(fetch_request.state, 0x00002103)
+        val data_started = core32_cycle(fetched, false, false, false, 0)
+        expect(data_started.state.memory.vaddr).to_equal(0)
+        val fault = core32_cycle(data_started.state, false, false, false, 0)
+        expect(fault.bus_valid).to_be(false)
+        expect(fault.state.csr_m.mcause).to_equal(5)
+        expect(fault.state.csr_m.mtval).to_equal(0)
+        expect(regfile_read(fault.state.rf, 2, 0).rs1_data).to_equal(0x00000FFC)
+        expect(fault.state.core.pc).to_equal(0x2000)
+
+    it "ticks mcycle every active clock and minstret only on retirement":
+        val initial = core32_init(0x1000)
+        val request = core32_cycle(initial, false, false, false, 0)
+        expect(request.state.csr_m.mcycle).to_equal(1)
+        expect(request.state.csr_m.minstret).to_equal(0)
+        val fetched = deliver_32bit_instruction(request.state, 0x00100093)
+        expect(fetched.csr_m.mcycle).to_equal(4)
+        expect(fetched.csr_m.minstret).to_equal(0)
+        val committed = core32_cycle(fetched, false, false, false, 0)
+        expect(committed.state.csr_m.mcycle).to_equal(5)
+        expect(committed.state.csr_m.minstret).to_equal(1)
+
+        val next_request = core32_cycle(committed.state, false, false, false, 0)
+        val invalid_fetched = deliver_32bit_instruction(next_request.state, 0xFFFFFFFF)
+        val trapped = core32_cycle(invalid_fetched, false, false, false, 0)
+        expect(trapped.state.csr_m.mcycle).to_equal(10)
+        expect(trapped.state.csr_m.minstret).to_equal(1)
+
+    it "permits a Zicsr write to mcycle through the protected core":
+        var initial = core32_init(0x1000)
+        initial.rf = regfile_write(initial.rf, 1, 0x12345678, true)
+        val request = core32_cycle(initial, false, false, false, 0)
+        val fetched = deliver_32bit_instruction(request.state, 0xB0009073)
+        val committed = core32_cycle(fetched, false, false, false, 0)
+        expect(committed.state.csr_m.mcycle).to_equal(0x12345678)
+        expect(committed.state.csr_m.minstret).to_equal(1)
+
+    it "issues SC.W to the exact physical address accepted by its probe":
+        var initial = core32_init(0x1000)
+        initial.pipeline_phase = CORE32_EXECUTE
+        initial.instruction = 0x1820A1AF
+        initial.instruction_bytes = 4
+        initial.rf = regfile_write(initial.rf, 1, 0x2000, true)
+        initial.rf = regfile_write(initial.rf, 2, 0xA5A5A5A5, true)
+        initial.reservation = rv32a_lr_set(0x2000)
+        val probing = core32_cycle(initial, false, false, false, 0)
+        val armed = core32_cycle(probing.state, false, false, false, 0)
+        expect(armed.bus_lock).to_be(true)
+        val store = core32_cycle(armed.state, false, false, false, 0)
+        expect(store.bus_valid).to_be(true)
+        expect(store.bus_write).to_be(true)
+        expect(store.bus_addr).to_equal(0x2000)
+        expect(store.bus_lock).to_be(true)
+
+        val invalidated = core32_invalidate_reservation(armed.state, 0x2000, 4)
+        val cancelled = core32_cycle(invalidated, true, false, false, 0)
+        expect(cancelled.bus_valid).to_be(false)
+        expect(regfile_read(cancelled.state.rf, 3, 0).rs1_data).to_equal(1)
+        expect(cancelled.rvfi.rvfi_valid).to_be(true)
+        expect(cancelled.rvfi.rvfi_mem_rmask).to_equal(0)
+        expect(cancelled.rvfi.rvfi_mem_wmask).to_equal(0)
+
+    it "does not alias a 34-bit external write onto a low reservation":
+        var initial = core32_init(0x1000)
+        initial.reservation = rv32a_lr_set(0)
+        val high = core32_invalidate_reservation(initial, 0x100000000, 4)
+        expect(high.reservation.valid).to_be(true)
+        val low = core32_invalidate_reservation(high, 0, 4)
+        expect(low.reservation.valid).to_be(false)
+        initial.reservation = rv32a_lr_set(0x100000000)
+        val exact_high = core32_invalidate_reservation(initial, 0x100000000, 4)
+        expect(exact_high.reservation.valid).to_be(false)
+
+    it "keeps translated LR/SC and AMO physical state above 4 GiB":
+        val virtual_address: u32 = 0x2000
+        val physical_address: i64 = 0x100001000
+        var initial = core32_init(0x1000)
+        initial.privilege = PRIV_S
+        initial.pmp.cfg_0 = 0x1F
+        initial.pmp.addr_0 = 0xFFFFFFFF
+        initial.mmu = mmu_set_satp(initial.mmu, 0x80000100)
+        initial.mmu = mmu_tlb_insert(initial.mmu, virtual_address >> 12,
+            (physical_address >> 12) as u32, 0xC7)
+        initial.rf = regfile_write(initial.rf, 1, virtual_address, true)
+        initial.pipeline_phase = CORE32_EXECUTE
+        initial.instruction = 0x1000A1AF
+        initial.instruction_bytes = 4
+
+        val lr_started = core32_cycle(initial, false, false, false, 0)
+        val lr_request = core32_cycle(lr_started.state, false, false, false, 0)
+        expect(lr_request.bus_addr).to_equal(physical_address)
+        expect(lr_request.bus_lock).to_be(true)
+        val lr_done = core32_cycle(lr_request.state, true, true, false, 0x11223344)
+        expect(lr_done.state.reservation.physical_word_address).to_equal(physical_address)
+        expect(regfile_read(lr_done.state.rf, 3, 0).rs1_data).to_equal(0x11223344)
+
+        var sc_state = lr_done.state
+        sc_state.pipeline_phase = CORE32_EXECUTE
+        sc_state.instruction = 0x1820A1AF
+        sc_state.instruction_bytes = 4
+        sc_state.rf = regfile_write(sc_state.rf, 2, 0xA5A5A5A5, true)
+        val sc_probe = core32_cycle(sc_state, false, false, false, 0)
+        val sc_armed = core32_cycle(sc_probe.state, false, false, false, 0)
+        val sc_store = core32_cycle(sc_armed.state, false, false, false, 0)
+        expect(sc_store.bus_addr).to_equal(physical_address)
+        expect(sc_store.bus_write).to_be(true)
+        expect(sc_store.bus_lock).to_be(true)
+        val sc_done = core32_cycle(sc_store.state, true, true, false, 0)
+        expect(regfile_read(sc_done.state.rf, 3, 0).rs1_data).to_equal(0)
+        expect(sc_done.state.reservation.valid).to_be(false)
+
+        var amo_state = sc_done.state
+        amo_state.pipeline_phase = CORE32_EXECUTE
+        amo_state.instruction = (RV32A_AMO_ADD << 27) | 0x0020A1AF
+        amo_state.instruction_bytes = 4
+        val amo_probe = core32_cycle(amo_state, false, false, false, 0)
+        val amo_read_state = core32_cycle(amo_probe.state, false, false, false, 0)
+        val amo_read = core32_cycle(amo_read_state.state, false, false, false, 0)
+        expect(amo_read.bus_addr).to_equal(physical_address)
+        expect(amo_read.bus_lock).to_be(true)
+        val amo_loaded = core32_cycle(amo_read.state, true, true, false, 7)
+        val amo_store = core32_cycle(amo_loaded.state, false, false, false, 0)
+        expect(amo_store.state.atomic_old).to_equal(7)
+        expect(amo_store.bus_addr).to_equal(physical_address)
+        expect(amo_store.bus_write).to_be(true)
+        expect(amo_store.bus_lock).to_be(true)
+        val amo_done = core32_cycle(amo_store.state, true, true, false, 0)
+        expect(amo_done.rvfi.rvfi_valid).to_be(true)
+        expect(amo_done.rvfi.rvfi_mem_addr).to_equal(virtual_address)
+        expect(amo_done.rvfi.rvfi_mem_rmask).to_equal(0xF)
+        expect(amo_done.rvfi.rvfi_mem_wmask).to_equal(0xF)
+        expect(amo_done.rvfi.rvfi_mem_rdata).to_equal(7)
+        expect(amo_done.rvfi.rvfi_mem_wdata).to_equal(0xA5A5A5AC)
+
+    it "services the protected core fetch through the canonical SoC fabric":
+        val initial = soc_protected32_create(16)
+        val issued = soc_protected32_tick(initial)
+        expect(issued.state.response_valid).to_be(true)
+        expect(issued.state.response_error).to_be(false)
+        expect(issued.state.response_data & 0xFFFF).to_equal(BOOT_INSN_0 & 0xFFFF)
+        val consumed = soc_protected32_tick(issued.state)
+        expect(consumed.state.response_valid).to_be(false)
+        val upper_issued = soc_protected32_tick(consumed.state)
+        expect(upper_issued.state.response_valid).to_be(true)
+        expect(upper_issued.state.response_data & 0xFFFF).to_equal(BOOT_INSN_0 >> 16)
+        val completed = soc_protected32_tick(upper_issued.state)
+        expect(completed.state.core.pipeline_phase).to_equal(CORE32_EXECUTE)
+
+    it "propagates an unmapped protected-bus response as an access fault":
+        var initial = soc_protected32_create(16)
+        initial.core.pipeline_phase = CORE32_DATA_ACCESS
+        initial.core.memory = memory32_start(initial.core.mmu, initial.core.pmp,
+            0x40000000, ACCESS_LOAD, 4, PRIV_M, false, false, 0)
+        val issued = soc_protected32_tick(initial)
+        expect(issued.state.response_valid).to_be(true)
+        expect(issued.state.response_error).to_be(true)
+        val faulted = soc_protected32_tick(issued.state)
+        expect(faulted.state.core.csr_m.mcause).to_equal(5)
+
+    it "rejects protected writes to the read-only DTB overlay":
+        var initial = soc_protected32_create(16)
+        initial.core.pipeline_phase = CORE32_DATA_ACCESS
+        initial.core.memory = memory32_start(initial.core.mmu, initial.core.pmp,
+            0x88000000, ACCESS_STORE, 4, PRIV_M, false, false, 0xDEADBEEF)
+        val issued = soc_protected32_tick(initial)
+        expect(issued.state.response_valid).to_be(true)
+        expect(issued.state.response_error).to_be(true)
+        expect(issued.state.dram_size).to_equal(0x10000000)
+        expect(sparse_read(issued.state.sparse, 0x08000000)).to_equal(
+            sparse_read(initial.sparse, 0x08000000))
+        val consumed = soc_protected32_tick(issued.state)
+        expect(consumed.state.response_valid).to_be(false)
+        expect(consumed.state.core.csr_m.mcause).to_equal(7)
+
+    it "uses MPRV for data and clears it when MRET lowers privilege":
+        var initial = core32_init(0x1000)
+        initial.csr_m.mstatus = 0x00020000 | (1 << 11)
+        expect(core32_data_privilege(initial)).to_equal(1)
+        initial.pipeline_phase = CORE32_EXECUTE
+        initial.instruction = 0x0000A103
+        initial.instruction_bytes = 4
+        initial.rf = regfile_write(initial.rf, 1, 0x2000, true)
+        val load = core32_cycle(initial, false, false, false, 0)
+        expect(load.state.memory.privilege).to_equal(1)
+        initial.pipeline_phase = CORE32_EXECUTE
+        initial.instruction = 0x30200073
+        initial.instruction_bytes = 4
+        initial.csr_m.mepc = 0x3000
+        val returned = core32_cycle(initial, false, false, false, 0)
+        expect(returned.state.privilege).to_equal(1)
+        expect(returned.state.csr_m.mstatus & 0x00020000).to_equal(0)
+
+    it "keeps S status and interrupt CSRs as delegated M aliases":
+        var initial = core32_init(0x1000)
+        val delegated = core32_csr_access(initial, 0x303, 0x222, 1)
+        initial.csr_m = delegated.csr_m
+        initial.csr_s = delegated.csr_s
+        val status = core32_csr_access(initial, 0x100, 0x00040002, 1)
+        initial.csr_m = status.csr_m
+        initial.csr_s = status.csr_s
+        expect(initial.csr_m.mstatus & 0x00040002).to_equal(0x00040002)
+        val enabled = core32_csr_access(initial, 0x104, 0xFFFFFFFF, 1)
+        expect(enabled.csr_m.mie).to_equal(0x222)
+        initial.csr_m = enabled.csr_m
+        initial.csr_s = enabled.csr_s
+        val pending = core32_csr_access(initial, 0x144, 0x2, 1)
+        initial.csr_m = pending.csr_m
+        initial.csr_s = pending.csr_s
+        val refreshed = core32_set_pending_interrupts(initial, false, false, false)
+        expect(refreshed.csr_m.mip & 0x2).to_equal(0x2)
+        expect(refreshed.csr_s.sip).to_equal(0x2)
+
+    it "vectors delegated supervisor and machine interrupts from aligned BASE":
+        var supervisor = core32_init(0x1000)
+        supervisor.privilege = 1
+        supervisor.csr_s.mideleg = 0x2
+        val stvec = core32_csr_access(supervisor, 0x105, 0x2003, 1)
+        supervisor.csr_m = stvec.csr_m
+        supervisor.csr_s = stvec.csr_s
+        supervisor.csr_m.mie = 0x2
+        supervisor.csr_m.mip = 0x2
+        supervisor.csr_m.mstatus = 0x2
+        expect(core32_check_interrupt(supervisor).pending).to_be(true)
+        val strap = core32_enter_trap(supervisor, 0x80000001, 0)
+        expect(strap.privilege).to_equal(1)
+        expect(strap.pc).to_equal(0x2004)
+        var machine = core32_init(0x1000)
+        val mtvec = core32_csr_access(machine, 0x305, 0x3003, 1)
+        machine.csr_m = mtvec.csr_m
+        machine.csr_s = mtvec.csr_s
+        val mtrap = core32_enter_trap(machine, 0x8000000B, 0)
+        expect(mtrap.pc).to_equal(0x302C)
+
+    it "filters interrupt eligibility before selecting priority":
+        var machine = core32_init(0x1000)
+        machine.csr_m.mstatus = 0x8
+        machine.csr_s.mideleg = 0x200
+        machine.csr_m.mie = 0x202
+        machine.csr_m.mip = 0x202
+        val lower = core32_check_interrupt(machine)
+        expect(lower.pending).to_be(true)
+        expect(lower.cause).to_equal(0x80000001)
+        machine.csr_m.mip = 0x200
+        expect(core32_check_interrupt(machine).pending).to_be(false)
+
+        var supervisor = core32_init(0x1000)
+        supervisor.privilege = 1
+        supervisor.csr_s.mideleg = 0x200
+        supervisor.csr_m.mie = 0x202
+        supervisor.csr_m.mip = 0x202
+        supervisor.csr_m.mstatus = 0
+        val higher_target = core32_check_interrupt(supervisor)
+        expect(higher_target.pending).to_be(true)
+        expect(higher_target.cause).to_equal(0x80000001)
+
+    it "routes supervisor pending levels without clobbering machine or SSIP levels":
+        var initial = core32_init(0x1000)
+        initial.csr_m.mip = 0x88A
+        initial.csr_s.mideleg = 0x222
+        val raised = core32_set_supervisor_pending_interrupts(initial, true, true)
+        expect(raised.csr_m.mip).to_equal(0xAAA)
+        expect(raised.csr_s.sip).to_equal(0x222)
+        val lowered = core32_set_supervisor_pending_interrupts(raised, false, false)
+        expect(lowered.csr_m.mip).to_equal(0x88A)
+
+    it "merges firmware and platform STIP while keeping SIP writes SSIP-only":
+        var initial = core32_init(0x1000)
+        initial.csr_s.mideleg = 0x20
+        val firmware_set = core32_csr_access(initial, 0x344, 0x20, 1)
+        expect(firmware_set.valid).to_be(true)
+        expect(firmware_set.firmware_stip).to_be(true)
+        expect(firmware_set.csr_m.mip & 0x20).to_equal(0x20)
+        initial.csr_m = firmware_set.csr_m
+        initial.csr_s = firmware_set.csr_s
+        initial.firmware_stip = firmware_set.firmware_stip
+        initial.privilege = 1
+        val observed = core32_csr_access(initial, 0x144, 0, 2)
+        expect(observed.old_value & 0x20).to_equal(0x20)
+        val s_clear_attempt = core32_csr_access(initial, 0x144, 0, 1)
+        expect(s_clear_attempt.csr_m.mip & 0x20).to_equal(0x20)
+
+        initial.privilege = 3
+        val firmware_clear = core32_csr_access(initial, 0x344, 0, 1)
+        expect(firmware_clear.firmware_stip).to_be(false)
+        expect(firmware_clear.csr_m.mip & 0x20).to_equal(0)
+        val firmware_merged = core32_set_supervisor_pending_interrupts(initial, false, false)
+        expect(firmware_merged.csr_m.mip & 0x20).to_equal(0x20)
+        initial.csr_m = firmware_clear.csr_m
+        initial.csr_s = firmware_clear.csr_s
+        initial.firmware_stip = firmware_clear.firmware_stip
+        val platform_set = core32_set_supervisor_pending_interrupts(initial, true, false)
+        expect(platform_set.csr_m.mip & 0x20).to_equal(0x20)
+        val platform_m_clear = core32_csr_access(platform_set, 0x344, 0, 1)
+        expect(platform_m_clear.firmware_stip).to_be(false)
+        expect(platform_m_clear.csr_m.mip & 0x20).to_equal(0x20)
+        var platform_state = platform_set
+        platform_state.csr_m = platform_m_clear.csr_m
+        platform_state.csr_s = platform_m_clear.csr_s
+        platform_state.firmware_stip = platform_m_clear.firmware_stip
+        platform_state.platform_stip = platform_m_clear.platform_stip
+        val platform_clear = core32_set_supervisor_pending_interrupts(platform_state, false, false)
+        expect(platform_clear.csr_m.mip & 0x20).to_equal(0)
+        var supervisor_clear_observe = platform_clear
+        supervisor_clear_observe.privilege = 1
+        expect(core32_csr_access(supervisor_clear_observe, 0x144, 0, 2).old_value & 0x20).to_equal(0)
+
+    it "gates cycle time and instret aliases with counter-enable CSRs":
+        var initial = core32_init(0x1000)
+        initial.csr_m.mcycle = 0x12345678
+        initial.csr_m.mcycleh = 0x9ABCDEF0
+        initial.csr_m.minstret = 0x55
+        initial.csr_m.minstreth = 0x66
+        initial = core32_set_time_value(initial, 0x1234567889ABCDEF)
+        initial.privilege = 1
+        expect(core32_csr_access(initial, 0xC00, 0, 2).valid).to_be(false)
+
+        initial.privilege = 3
+        val machine_enable = core32_csr_access(initial, 0x306, 7, 1)
+        expect(machine_enable.valid).to_be(true)
+        expect(machine_enable.mcounteren).to_equal(7)
+        initial.mcounteren = machine_enable.mcounteren
+        initial.privilege = 1
+        expect(core32_csr_access(initial, 0xC00, 0, 2).old_value).to_equal(0x12345678)
+        expect(core32_csr_access(initial, 0xC01, 0, 2).old_value).to_equal(0x89ABCDEF)
+        expect(core32_csr_access(initial, 0xC81, 0, 2).old_value).to_equal(0x12345678)
+        expect(core32_csr_access(initial, 0xC02, 0, 2).old_value).to_equal(0x55)
+        expect(core32_csr_access(initial, 0xC82, 0, 2).old_value).to_equal(0x66)
+        expect(core32_csr_access(initial, 0xC00, 1, 1).valid).to_be(false)
+
+        val supervisor_enable = core32_csr_access(initial, 0x106, 7, 1)
+        expect(supervisor_enable.valid).to_be(true)
+        initial.scounteren = supervisor_enable.scounteren
+        initial.privilege = 0
+        expect(core32_csr_access(initial, 0xC01, 0, 2).valid).to_be(true)
+        initial.scounteren = 1
+        expect(core32_csr_access(initial, 0xC01, 0, 2).valid).to_be(false)
+
+    it "returns with SRET only from a legal privilege":
+        var supervisor = core32_init(0x1000)
+        supervisor.privilege = 1
+        supervisor.pipeline_phase = CORE32_EXECUTE
+        supervisor.instruction = 0x10200073
+        supervisor.instruction_bytes = 4
+        supervisor.csr_s.sepc = 0x2345
+        supervisor.csr_m.mstatus = 0x20
+        val returned = core32_cycle(supervisor, false, false, false, 0)
+        expect(returned.state.privilege).to_equal(0)
+        expect(returned.state.core.pc).to_equal(0x2344)
+        expect(returned.state.csr_m.mstatus & 0x22).to_equal(0x22)
+
+        var user = core32_init(0x1000)
+        user.privilege = 0
+        user.pipeline_phase = CORE32_EXECUTE
+        user.instruction = 0x10200073
+        user.instruction_bytes = 4
+        user.csr_m.mtvec = 0x3000
+        val rejected = core32_cycle(user, false, false, false, 0)
+        expect(rejected.state.privilege).to_equal(3)
+        expect(rejected.state.csr_m.mcause).to_equal(2)
+        expect(rejected.state.csr_m.mtval).to_equal(0x10200073)
+        expect(rejected.state.core.pc).to_equal(0x3000)
+
+    it "passes SFENCE.VMA register operands to selective TLB invalidation":
+        var supervisor = core32_init(0x1000)
+        supervisor.privilege = 1
+        supervisor.pipeline_phase = CORE32_EXECUTE
+        supervisor.instruction = 0x12208073
+        supervisor.instruction_bytes = 4
+        supervisor.rf = regfile_write(supervisor.rf, 1, 0x12345000, true)
+        supervisor.rf = regfile_write(supervisor.rf, 2, 7, true)
+        supervisor.mmu = mmu_set_satp(supervisor.mmu, 0x81C00100)
+        supervisor.mmu = mmu_tlb_insert(supervisor.mmu, 0x12345, 0x80000, 0x3)
+        supervisor.mmu = mmu_tlb_insert(supervisor.mmu, 0x23456, 0x80001, 0x3)
+        val fenced = core32_cycle(supervisor, false, false, false, 0)
+        expect(mmu_tlb_lookup(fenced.state.mmu, 0x12345).hit).to_be(false)
+        expect(mmu_tlb_lookup(fenced.state.mmu, 0x23456).hit).to_be(true)
+
+    it "retires WFI once then wakes or traps on a locally enabled interrupt":
+        var initial = core32_init(0x1000)
+        initial.pipeline_phase = CORE32_EXECUTE
+        initial.instruction = 0x10500073
+        initial.instruction_bytes = 4
+        initial.csr_m.mstatus = 0
+        val parked = core32_cycle(initial, false, false, false, 0)
+        expect(parked.state.pipeline_phase).to_equal(CORE32_WFI)
+        expect(parked.state.core.pc).to_equal(0x1004)
+        expect(parked.state.csr_m.minstret).to_equal(1)
+        expect(parked.rvfi.rvfi_valid).to_be(true)
+        expect(parked.rvfi.rvfi_trap).to_be(false)
+        val held = core32_cycle(parked.state, false, false, false, 0)
+        expect(held.state.pipeline_phase).to_equal(CORE32_WFI)
+        expect(held.state.csr_m.minstret).to_equal(1)
+
+        var wake = held.state
+        wake.csr_m.mie = 0x80
+        wake.csr_m.mip = 0x80
+        val woken = core32_cycle(wake, false, false, false, 0)
+        expect(woken.state.pipeline_phase).to_equal(CORE32_FETCH)
+        expect(woken.state.csr_m.mcause).to_equal(0)
+        expect(woken.state.core.pc).to_equal(0x1004)
+
+        var trap = held.state
+        trap.csr_m.mstatus = 0x8
+        trap.csr_m.mie = 0x80
+        trap.csr_m.mip = 0x80
+        trap.csr_m.mtvec = 0x4000
+        val trapped = core32_cycle(trap, false, false, false, 0)
+        expect(trapped.state.privilege).to_equal(3)
+        expect(trapped.state.csr_m.mcause).to_equal(0x80000007)
+        expect(trapped.state.csr_m.mepc).to_equal(0x1004)
+        expect(trapped.state.core.pc).to_equal(0x4000)
+        expect(trapped.rvfi.rvfi_valid).to_be(false)

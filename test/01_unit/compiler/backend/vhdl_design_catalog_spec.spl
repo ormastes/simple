@@ -1,0 +1,382 @@
+use std.spec
+use compiler.backend.backend.vhdl.vhdl_design_catalog.{vhdl_build_design_catalog, vhdl_build_design_catalog_with_hir, vhdl_catalog_type_order}
+use compiler.backend.backend.vhdl_backend.VhdlBackend
+use compiler.backend.backend.backend_types.{CodegenTarget, compileoptions_default_options}
+use compiler.common.attributes.vhdl_hardware_metadata_default
+use compiler.common.dependency.visibility.Visibility
+use compiler.common.diagnostics.span.Span
+use compiler.hir.hir_types.{SymbolId, HirModule, SymbolTable, SymbolKind}
+use compiler.mir.mir_data.*
+
+extern fn rt_file_read_text(path: text) -> text?
+
+fn catalog_span() -> Span:
+    Span(start: 0, end: 0, line: 1, col: 1, file: "", length: 0)
+
+fn catalog_i32() -> MirType:
+    MirType(kind: MirTypeKind.I32)
+
+fn catalog_function(symbol: i64, name: text, hardware: bool) -> MirFunction:
+    var metadata = vhdl_hardware_metadata_default()
+    metadata.is_hardware = hardware
+    MirFunction(symbol: SymbolId(id: symbol), name: name,
+        signature: MirSignature(params: [], return_type: catalog_i32(), is_variadic: false),
+        locals: [MirLocal(id: LocalId(id: 0), name: nil, type_: catalog_i32(),
+            kind: LocalKind.Return, is_ghost: false)],
+        blocks: [MirBlock(id: BlockId(id: 0), label: Some("entry"),
+            instructions: [MirInst(kind: MirInstKind.Const(LocalId(id: 0),
+                MirConstValue.Int(0), catalog_i32()), span: nil)],
+            terminator: MirTerminator.Ret(Some(MirOperand(kind:
+                MirOperandKind.Copy(LocalId(id: 0))))))],
+        entry_block: BlockId(id: 0), span: catalog_span(), generic_params: [],
+        is_generic_template: false, specialization_of: nil, type_bindings: {},
+        layout_phase: nil, is_kernel: false, gpu_target: "", gpu_backend_order: "",
+        is_export_c: false, export_name: "", has_driver_manifest_attr: false,
+        driver_manifest_attr: nil, has_vhdl_metadata: hardware,
+        vhdl_metadata: metadata, has_fast_math: false, unroll_factor: 0,
+        pipeline_ii: 0, memory_banks: 0)
+
+fn catalog_module_a() -> MirModule:
+    val base = MirTypeDef(symbol: SymbolId(id: 1), name: "base_t",
+        kind: MirTypeDefKind.Struct([MirFieldDef(name: "value", type_: catalog_i32(),
+            offset: 0, has_bits_attr: false, bits_width: 0)]),
+        is_export_c: false, export_name: "")
+    val wrapper = MirTypeDef(symbol: SymbolId(id: 2), name: "wrapper_t",
+        kind: MirTypeDefKind.Struct([MirFieldDef(name: "base",
+            type_: MirType(kind: MirTypeKind.Struct(SymbolId(id: 1))),
+            offset: 0, has_bits_attr: false, bits_width: 0)]),
+        is_export_c: false, export_name: "")
+    var types: Dict<SymbolId, MirTypeDef> = {}
+    types[wrapper.symbol] = wrapper
+    types[base.symbol] = base
+    var leaf = catalog_function(3, "catalog_leaf", true)
+    leaf.locals = leaf.locals.push(MirLocal(id: LocalId(id: 1),
+        name: Some("record_state"),
+        type_: MirType(kind: MirTypeKind.Struct(SymbolId(id: 2))),
+        kind: LocalKind.Temp, is_ghost: false))
+    var entry = leaf.blocks[0]
+    entry.instructions = [MirInst(kind: MirInstKind.Call(Some(LocalId(id: 0)),
+        MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("catalog_helper"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [],
+                return_type: catalog_i32(), is_variadic: false))))), []), span: nil)]
+    leaf.blocks[0] = entry
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[leaf.symbol] = leaf
+    MirModule(name: "a", functions: functions, statics: {}, constants: {}, types: types)
+
+fn catalog_module_b(name: text, hardware: bool) -> MirModule:
+    val helper = catalog_function(1, name, hardware)
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[helper.symbol] = helper
+    MirModule(name: "b", functions: functions, statics: {}, constants: {}, types: {})
+
+fn catalog_entry_module() -> MirModule:
+    var top = catalog_function(1, "catalog_top", true)
+    var entry = top.blocks[0]
+    entry.instructions = [MirInst(kind: MirInstKind.Call(Some(LocalId(id: 0)),
+        MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("catalog_leaf"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [],
+                return_type: catalog_i32(), is_variadic: false))))), []), span: nil)]
+    top.blocks[0] = entry
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[top.symbol] = top
+    MirModule(name: "entry", functions: functions, statics: {}, constants: {}, types: {})
+
+fn catalog_call_entry_module(target: text) -> MirModule:
+    var top = catalog_function(1, "catalog_call_top", true)
+    var entry = top.blocks[0]
+    entry.instructions = [MirInst(kind: MirInstKind.Call(Some(LocalId(id: 0)),
+        MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(target),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [],
+                return_type: catalog_i32(), is_variadic: false))))), []), span: nil)]
+    top.blocks[0] = entry
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[top.symbol] = top
+    MirModule(name: "entry", functions: functions, statics: {}, constants: {}, types: {})
+
+fn catalog_hir_module(name: text) -> HirModule:
+    var symbols = SymbolTable.new()
+    symbols.define("shared_state", SymbolKind.Variable, nil, catalog_span(),
+        Visibility.Public, true, Some("owner"))
+    symbols.define("shared_record", SymbolKind.Struct, nil, catalog_span(),
+        Visibility.Public, false, Some("owner"))
+    symbols.define("catalog_import_top", SymbolKind.Function, nil, catalog_span(),
+        Visibility.Public, false, Some(name))
+    HirModule(name: name, path: "{name}.spl", imports: [], exports: [],
+        domain_blocks: [], symbols: symbols, functions: {}, classes: {},
+        structs: {}, enums: {}, bitfields: {}, traits: {}, impls: [], constants: {},
+        static_asserts: [], aop_advices: [], di_bindings: [], arch_rules: [],
+        mock_decls: [], types: [])
+
+fn catalog_owner_module() -> MirModule:
+    val record = MirTypeDef(symbol: SymbolId(id: 1), name: "shared_record",
+        kind: MirTypeDefKind.Struct([MirFieldDef(name: "value", type_: catalog_i32(),
+            offset: 0, has_bits_attr: false, bits_width: 0)]),
+        is_export_c: false, export_name: "")
+    val init = MirConstant(symbol: SymbolId(id: 3), name: "shared_init",
+        type_: catalog_i32(), value: MirConstValue.Int(7))
+    val static_ = MirStatic(symbol: SymbolId(id: 0), name: "shared_state",
+        type_: catalog_i32(), init: Some(init), is_mutable: true)
+    var statics: Dict<SymbolId, MirStatic> = {}
+    statics[static_.symbol] = static_
+    var constants: Dict<SymbolId, MirConstant> = {}
+    constants[init.symbol] = init
+    var types: Dict<SymbolId, MirTypeDef> = {}
+    types[record.symbol] = record
+    MirModule(name: "owner", functions: {}, statics: statics,
+        constants: constants, types: types)
+
+fn catalog_import_entry_module(global_symbol: i64) -> MirModule:
+    var top = catalog_function(2, "catalog_import_top", true)
+    top.locals = top.locals.push(MirLocal(id: LocalId(id: 1),
+        name: Some("imported_record"),
+        type_: MirType(kind: MirTypeKind.Struct(SymbolId(id: 1))),
+        kind: LocalKind.Temp, is_ghost: false))
+    var entry = top.blocks[0]
+    entry.instructions = [MirInst(kind: MirInstKind.LoadGlobal(
+        LocalId(id: 0), SymbolId(id: global_symbol)), span: nil)]
+    top.blocks[0] = entry
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[top.symbol] = top
+    MirModule(name: "entry", functions: functions, statics: {}, constants: {}, types: {})
+
+fn catalog_portmap_entry_module(target: text) -> MirModule:
+    var top = catalog_function(1, "catalog_portmap_top", true)
+    var entry = top.blocks[0]
+    entry.instructions = [MirInst(kind: MirInstKind.VhdlPortMap(
+        target, "u_leaf", []), span: nil),
+        MirInst(kind: MirInstKind.Const(LocalId(id: 0), MirConstValue.Int(0),
+            catalog_i32()), span: nil)]
+    top.blocks[0] = entry
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[top.symbol] = top
+    MirModule(name: "entry", functions: functions, statics: {}, constants: {}, types: {})
+
+fn catalog_unmapped_aggregate_entry_module() -> MirModule:
+    var top = catalog_function(1, "catalog_unmapped_type_top", true)
+    var entry = top.blocks[0]
+    entry.instructions = [MirInst(kind: MirInstKind.Aggregate(LocalId(id: 0),
+        AggregateKind.Struct(SymbolId(id: 99)), []), span: nil)]
+    top.blocks[0] = entry
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[top.symbol] = top
+    MirModule(name: "entry", functions: functions, statics: {}, constants: {}, types: {})
+
+fn catalog_function_symbol(module: MirModule, name: text) -> i64:
+    for symbol in module.functions.keys():
+        if module.functions[symbol].name == name:
+            return symbol.id
+    -1
+
+describe "VHDL design-wide catalog":
+    it "rebases module-local symbols and orders record dependencies":
+        var modules: Dict<text, MirModule> = {}
+        modules["a"] = catalog_module_a()
+        modules["b"] = catalog_module_b("catalog_helper", false)
+        modules["entry"] = catalog_entry_module()
+        val result = vhdl_build_design_catalog(modules, "catalog_contract")
+        expect(result.is_ok()).to_equal(true)
+        val catalog = result.unwrap()
+        expect(catalog.design.functions.len()).to_equal(3)
+        expect(catalog.design.types.len()).to_equal(2)
+        expect(catalog.type_order.len()).to_equal(2)
+        expect(catalog.design.types[catalog.type_order[0]].name).to_equal("base_t")
+        expect(catalog.design.types[catalog.type_order[1]].name).to_equal("wrapper_t")
+        expect(catalog.source_module_count).to_equal(3)
+        expect(catalog.hardware_entity_count).to_equal(2)
+        val compiled = VhdlBackend.create(CodegenTarget.Riscv32,
+            compileoptions_default_options()).compile(catalog.design)
+        expect(compiled.is_ok()).to_equal(true)
+        val output = compiled.unwrap()
+        val package = output.package_vhdl.unwrap()
+        expect(package).to_contain("function catalog_helper")
+        expect(package.index_of("type base_t is")).to_be_less_than(
+            package.index_of("type wrapper_t is"))
+        expect(output.vhdl).to_contain("entity catalog_leaf is")
+        expect(output.vhdl).to_contain("entity catalog_top is")
+        expect(output.vhdl.index_of("entity catalog_leaf is")).to_be_less_than(
+            output.vhdl.index_of("entity catalog_top is"))
+
+    it "uses HIR provenance for imported types and globals and rebases nested static initializers":
+        var modules: Dict<text, MirModule> = {}
+        modules["owner"] = catalog_owner_module()
+        modules["entry"] = catalog_import_entry_module(0)
+        var hir_modules: Dict<text, HirModule> = {}
+        hir_modules["owner"] = catalog_hir_module("owner")
+        hir_modules["entry"] = catalog_hir_module("entry")
+        val result = vhdl_build_design_catalog_with_hir(modules, hir_modules,
+            ["entry"], "catalog_import_contract")
+        expect(result.is_ok()).to_equal(true)
+        val catalog = result.unwrap()
+        expect(catalog.design.functions.len()).to_equal(1)
+        expect(catalog.design.types.len()).to_equal(1)
+        expect(catalog.design.statics.len()).to_equal(1)
+        expect(catalog.design.constants.len()).to_equal(1)
+        expect(catalog.root_modules.len()).to_equal(1)
+        expect(catalog.root_modules[0]).to_equal("entry")
+        expect(catalog.reachable_source_modules.len()).to_equal(2)
+        expect(catalog.reachable_source_modules[0]).to_equal("entry")
+        expect(catalog.reachable_source_modules[1]).to_equal("owner")
+        expect(catalog.source_rows.len()).to_equal(2)
+        expect(catalog.function_sources.len()).to_equal(1)
+        expect(catalog.helper_function_count).to_equal(0)
+        expect(catalog.type_count).to_equal(1)
+        val static_symbol = catalog.design.statics.keys()[0]
+        expect(static_symbol.id).to_be_greater_than(0)
+        val retained = catalog.design.statics[static_symbol]
+        expect(retained.init.unwrap().symbol.id).to_be_greater_than(0)
+        val root_symbol = catalog.design.functions.keys()[0]
+        val root_inst = catalog.design.functions[root_symbol].blocks[0].instructions[0]
+        match root_inst.kind:
+            case LoadGlobal(_, symbol): expect(symbol.id).to_equal(static_symbol.id)
+            case _: expect(false).to_equal(true)
+
+    it "fails at the catalog boundary for an unmapped imported global":
+        var modules: Dict<text, MirModule> = {}
+        modules["owner"] = catalog_owner_module()
+        modules["entry"] = catalog_import_entry_module(99)
+        var hir_modules: Dict<text, HirModule> = {}
+        hir_modules["owner"] = catalog_hir_module("owner")
+        hir_modules["entry"] = catalog_hir_module("entry")
+        val result = vhdl_build_design_catalog_with_hir(modules, hir_modules,
+            ["entry"], "catalog_import_contract")
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("unmapped global/static symbol")
+
+    it "retains hardware entities referenced by explicit port maps":
+        var modules: Dict<text, MirModule> = {}
+        modules["leaf"] = catalog_module_b("catalog_leaf", true)
+        modules["entry"] = catalog_portmap_entry_module("leaf::catalog_leaf")
+        val result = vhdl_build_design_catalog_with_hir(modules, {}, ["entry"],
+            "catalog_portmap_contract")
+        expect(result.is_ok()).to_equal(true)
+        val catalog = result.unwrap()
+        expect(catalog.design.functions.len()).to_equal(2)
+        expect(catalog.hardware_entity_count).to_equal(2)
+        expect(catalog_function_symbol(catalog.design, "catalog_leaf")).to_be_greater_than(0)
+        val top_symbol = SymbolId(id: catalog_function_symbol(catalog.design,
+            "catalog_portmap_top"))
+        match catalog.design.functions[top_symbol].blocks[0].instructions[0].kind:
+            case VhdlPortMap(entity, _, _): expect(entity).to_equal("catalog_leaf")
+            case _: expect(false).to_equal(true)
+
+    it "fails closed when an explicit port-map entity does not resolve":
+        var modules: Dict<text, MirModule> = {}
+        modules["entry"] = catalog_portmap_entry_module("catalog_leaf")
+        val result = vhdl_build_design_catalog_with_hir(modules, {}, ["entry"],
+            "catalog_missing_portmap_contract")
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("Unresolved VHDL port-map entity")
+
+    it "rejects ambiguous bare port-map entity names across modules":
+        var modules: Dict<text, MirModule> = {}
+        modules["a"] = catalog_module_b("shared_entity", true)
+        modules["b"] = catalog_module_b("shared_entity", true)
+        modules["entry"] = catalog_portmap_entry_module("shared_entity")
+        val result = vhdl_build_design_catalog_with_hir(modules, {}, ["entry"],
+            "catalog_ambiguous_portmap_contract")
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("Ambiguous VHDL port-map entity")
+
+    it "rejects ambiguous bare call names across modules":
+        var modules: Dict<text, MirModule> = {}
+        modules["a"] = catalog_module_b("shared_helper", false)
+        modules["b"] = catalog_module_b("shared_helper", false)
+        modules["entry"] = catalog_call_entry_module("shared_helper")
+        val result = vhdl_build_design_catalog_with_hir(modules, {}, ["entry"],
+            "catalog_ambiguous_call_contract")
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("Ambiguous VHDL design call target")
+
+    it "resolves a module-qualified call identity and prunes its bare-name sibling":
+        var modules: Dict<text, MirModule> = {}
+        modules["a"] = catalog_module_b("shared_helper", false)
+        modules["b"] = catalog_module_b("shared_helper", false)
+        modules["entry"] = catalog_call_entry_module("a::shared_helper")
+        val result = vhdl_build_design_catalog_with_hir(modules, {}, ["entry"],
+            "catalog_qualified_call_contract")
+        expect(result.is_ok()).to_equal(true)
+        val catalog = result.unwrap()
+        expect(catalog.design.functions.len()).to_equal(2)
+        expect(catalog_function_symbol(catalog.design, "shared_helper")).to_be_greater_than(0)
+        val top_symbol = SymbolId(id: catalog_function_symbol(catalog.design,
+            "catalog_call_top"))
+        match catalog.design.functions[top_symbol].blocks[0].instructions[0].kind:
+            case Call(_, operand, _):
+                match operand.kind:
+                    case Const(Str(name), _): expect(name).to_equal("shared_helper")
+                    case _: expect(false).to_equal(true)
+            case _: expect(false).to_equal(true)
+
+    it "fails at the catalog boundary for instruction-embedded unmapped types":
+        var modules: Dict<text, MirModule> = {}
+        modules["entry"] = catalog_unmapped_aggregate_entry_module()
+        val result = vhdl_build_design_catalog_with_hir(modules, {}, ["entry"],
+            "catalog_unmapped_type_contract")
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("unmapped type symbol")
+
+    it "is deterministic when source modules are inserted in reverse order":
+        var forward: Dict<text, MirModule> = {}
+        forward["a"] = catalog_module_a()
+        forward["b"] = catalog_module_b("catalog_helper", false)
+        forward["entry"] = catalog_entry_module()
+        var reverse: Dict<text, MirModule> = {}
+        reverse["entry"] = catalog_entry_module()
+        reverse["b"] = catalog_module_b("catalog_helper", false)
+        reverse["a"] = catalog_module_a()
+        val first = vhdl_build_design_catalog(forward, "catalog_contract").unwrap()
+        val second = vhdl_build_design_catalog(reverse, "catalog_contract").unwrap()
+        expect(first.root_modules.len()).to_equal(second.root_modules.len())
+        expect(first.root_modules[0]).to_equal(second.root_modules[0])
+        expect(first.reachable_source_modules.len()).to_equal(
+            second.reachable_source_modules.len())
+        expect(first.reachable_source_modules[0]).to_equal(
+            second.reachable_source_modules[0])
+        expect(first.source_rows[0].module_name).to_equal(
+            second.source_rows[0].module_name)
+        expect(first.source_rows[0].function_count).to_equal(
+            second.source_rows[0].function_count)
+        expect(catalog_function_symbol(first.design, "catalog_top")).to_equal(
+            catalog_function_symbol(second.design, "catalog_top"))
+        expect(catalog_function_symbol(first.design, "catalog_helper")).to_equal(
+            catalog_function_symbol(second.design, "catalog_helper"))
+        val first_vhdl = VhdlBackend.create(CodegenTarget.Riscv32,
+            compileoptions_default_options()).compile(first.design).unwrap()
+        val second_vhdl = VhdlBackend.create(CodegenTarget.Riscv32,
+            compileoptions_default_options()).compile(second.design).unwrap()
+        expect(first_vhdl.package_vhdl.unwrap()).to_equal(second_vhdl.package_vhdl.unwrap())
+        expect(first_vhdl.vhdl).to_equal(second_vhdl.vhdl)
+
+    it "fails closed on design-wide emitted-name conflicts":
+        var modules: Dict<text, MirModule> = {}
+        modules["a"] = catalog_module_b("duplicate_name", true)
+        modules["b"] = catalog_module_b("DUPLICATE_NAME", true)
+        val result = vhdl_build_design_catalog(modules, "catalog_contract")
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("Conflicting VHDL function/entity name")
+
+    it "fails closed on cyclic reachable record dependencies":
+        val left = MirTypeDef(symbol: SymbolId(id: 1), name: "left_t",
+            kind: MirTypeDefKind.Struct([MirFieldDef(name: "right",
+                type_: MirType(kind: MirTypeKind.Struct(SymbolId(id: 2))),
+                offset: 0, has_bits_attr: false, bits_width: 0)]),
+            is_export_c: false, export_name: "")
+        val right = MirTypeDef(symbol: SymbolId(id: 2), name: "right_t",
+            kind: MirTypeDefKind.Struct([MirFieldDef(name: "left",
+                type_: MirType(kind: MirTypeKind.Struct(SymbolId(id: 1))),
+                offset: 0, has_bits_attr: false, bits_width: 0)]),
+            is_export_c: false, export_name: "")
+        var types: Dict<SymbolId, MirTypeDef> = {}
+        types[left.symbol] = left
+        types[right.symbol] = right
+        val result = vhdl_catalog_type_order(types)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("cyclic record/enum type dependency")
+
+    it "selects the VHDL root only from explicit compile inputs, never native-build env":
+        val source = rt_file_read_text(
+            "src/compiler/80.driver/driver_aot_output.spl") ?? ""
+        expect(source.contains("rt_env_get(\"SIMPLE_NATIVE_BUILD_ENTRY\")")).to_equal(false)
+        expect(source).to_contain("VHDL compilation requires one explicit entry file in compile options")
+        expect(source).to_contain("VHDL compilation entry is ambiguous")

@@ -10,6 +10,7 @@ use compiler.hir.hir_types.{SymbolId}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.attributes.{VhdlResetPolarity, VhdlResetSynchrony}
 use compiler.backend.backend.vhdl_backend.{VhdlBackend, VhdlReturnAbi}
+use compiler.backend.vhdl.vhdl_helpers.{vhdl_sanitize_identifier, vhdl_helper_is_procedure}
 
 impl VhdlBackend:
     fn block_chain_has_instructions(id: BlockId, seen: [i64]) -> bool:
@@ -32,12 +33,9 @@ impl VhdlBackend:
                 false
 
     fn process_local_name(local: LocalId) -> Result<text, CompileError>:
-        # Var/Temp locals are already declared as architecture-level signals
-        # by compile_function's "Declare internal signals" pass (see
-        # emit_local_signal_declaration), so process bodies reference them
-        # by their plain signal name via signal assignment (`<=`), not as
-        # separate "v_"-prefixed process variables. See
-        # doc/08_tracking/bug/vhdl_backend_spec_remaining_failures_2026-07-02.md.
+        # Clocked entities declare Var/Temp locals as process variables;
+        # combinational control processes retain architecture-level signals.
+        # Both use the same resolved local name.
         self.local_to_vhdl(local)
 
     fn process_operand_to_vhdl(operand: MirOperand) -> Result<text, CompileError>:
@@ -46,6 +44,11 @@ impl VhdlBackend:
                 self.local_operand_expr(local)
             case Const(value, ty):
                 self.const_value_to_vhdl(value, ty)
+
+    fn control_operand_to_vhdl(operand: MirOperand, helper: MirFunction?) -> Result<text, CompileError>:
+        match helper:
+            case Some(_): self.helper_operand_to_vhdl(operand)
+            case None: self.process_operand_to_vhdl(operand)
 
     fn local_kind(local: LocalId) -> Result<LocalKind, CompileError>:
         if self.active_local_kinds.has(local.id):
@@ -59,26 +62,72 @@ impl VhdlBackend:
             case Err(err): return Err(err)
         match kind:
             case Return:
-                builder.emit_signal_assign("result_out", expr)
+                if self.active_return_abi.is_tuple:
+                    builder.emit_var_assign("return_value", expr)
+                else:
+                    builder.emit_signal_assign("result_out", expr)
             case Var | Temp:
-                # Var/Temp locals are declared as architecture-level signals
-                # (see emit_local_signal_declaration), so assign to them with
-                # `<=`, not as separate process-local `variable`s.
                 val dest_name = match self.process_local_name(dest):
                     case Ok(result): result
                     case Err(err): return Err(err)
-                builder.emit_signal_assign(dest_name, expr)
+                if self.active_process_locals_are_variables:
+                    builder.emit_var_assign(dest_name, expr)
+                else:
+                    builder.emit_signal_assign(dest_name, expr)
             case Arg(_):
                 return Err(self.backend_error("Synthesizable VHDL process cannot assign function argument local {dest.id}"))
         Ok(())
 
+    fn emit_local_record_field_assign(builder: VhdlBuilder, base: MirOperand, field: i64, value: MirOperand, in_helper: bool) -> Result<(), CompileError>:
+        val field_name = match self.field_name_for_operand(base, field):
+            case Ok(result): result
+            case Err(err): return Err(err)
+        val value_name = match if in_helper: self.helper_operand_to_vhdl(value) else: self.process_operand_to_vhdl(value):
+            case Ok(result): result
+            case Err(err): return Err(err)
+        match base.kind:
+            case Copy(local) | Move(local):
+                val kind = match self.local_kind(local):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                val base_name = match if in_helper: self.helper_operand_to_vhdl(base) else: self.process_operand_to_vhdl(base):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                val target = "{base_name}.{field_name}"
+                match kind:
+                    case Var | Temp:
+                        builder.emit_var_assign(target, value_name)
+                    case Return:
+                        if in_helper or self.active_process_locals_are_variables:
+                            builder.emit_var_assign(target, value_name)
+                        else:
+                            builder.emit_signal_assign(target, value_name)
+                    case Arg(_):
+                        return Err(self.backend_error("Synthesizable VHDL helper/process cannot set field on argument local {local.id}"))
+            case _:
+                return Err(self.backend_error("Synthesizable VHDL helper/process field set requires a mutable local base"))
+        Ok(())
+
     fn compile_function_control_process(builder: VhdlBuilder, func: MirFunction) -> Result<(), CompileError>:
-        # Var/Temp locals already got a `signal ... : ...;` declaration in
-        # the architecture's declarative region from compile_function's
-        # "Declare internal signals" pass, so this process body does not
-        # redeclare them as process-local variables (see
-        # process_local_name/emit_process_dest_assign).
         builder.emit_process_begin(Some("comb"), ["all"])
+        for local in func.locals:
+            match local.kind:
+                case Var | Temp:
+                    if self.active_inline_exprs.has(local.id.id):
+                        continue
+                    if self.type_has_general_memory(local.type_):
+                        return Err(self.backend_error("VHDL combinational local `{self.default_local_name(local)}` must be a fixed scalar or record"))
+                    val local_type = match self.mir_type_to_vhdl_at(local.type_, Some(func.span)):
+                        case Ok(value): value
+                        case Err(err): return Err(err)
+                    builder.emit_process_var(self.default_local_name(local), local_type, nil)
+                case Return:
+                    if self.active_return_abi.is_tuple:
+                        val local_type = match self.mir_type_to_vhdl_at(local.type_, Some(func.span)):
+                            case Ok(value): value
+                            case Err(err): return Err(err)
+                        builder.emit_process_var("return_value", local_type, nil)
+                case _: ()
         builder.emit_process_body_begin()
         match self.compile_control_block(builder, func.entry_block, []):
             case Ok(_): pass
@@ -86,50 +135,130 @@ impl VhdlBackend:
         builder.emit_process_end(Some("comb"))
         Ok(())
 
+    fn compile_metadata_clocked_function(builder: VhdlBuilder, func: MirFunction) -> Result<(), CompileError>:
+        val clocked = func.vhdl_metadata.clocked
+        if not clocked.is_valid:
+            return Err(self.backend_error("Invalid @clocked metadata on `{func.name}`"))
+        val domain = vhdl_clock_domain_from_metadata(clocked)
+        val async_reset = if domain.reset_synchrony == VhdlResetSynchrony.Async: domain.reset_signal else: nil
+        val label = "p_{vhdl_sanitize_identifier(domain.name)}"
+        builder.emit_clocked_process_begin(Some(label), domain.clock_signal, async_reset)
+        for local in func.locals:
+            match local.kind:
+                case Var | Temp:
+                    if self.active_inline_exprs.has(local.id.id):
+                        continue
+                    if self.type_has_general_memory(local.type_):
+                        return Err(self.backend_error("VHDL clocked local `{self.default_local_name(local)}` must be a fixed scalar or record"))
+                    val local_type = match self.mir_type_to_vhdl_at(local.type_, Some(func.span)):
+                        case Ok(value): value
+                        case Err(err): return Err(err)
+                    builder.emit_process_var(self.default_local_name(local), local_type, nil)
+                case Return:
+                    if self.active_return_abi.is_tuple:
+                        val local_type = match self.mir_type_to_vhdl_at(local.type_, Some(func.span)):
+                            case Ok(value): value
+                            case Err(err): return Err(err)
+                        builder.emit_process_var("return_value", local_type, nil)
+                case _:
+                    ()
+        builder.emit_process_body_begin()
+        match domain.reset_signal:
+            case Some(reset_signal):
+                if domain.reset_synchrony == VhdlResetSynchrony.Async:
+                    builder.emit_if_begin("{reset_signal} = {self.reset_asserted_literal(domain)}")
+                    builder.emit_line("null;")
+                    builder.emit_else()
+            case None:
+                ()
+        match domain.edge:
+            case Rising: builder.emit_rising_edge_check(domain.clock_signal)
+            case Falling: builder.emit_falling_edge_check(domain.clock_signal)
+        if domain.reset_signal.? and domain.reset_synchrony == VhdlResetSynchrony.Sync:
+            val reset_signal = domain.reset_signal.unwrap()
+            builder.emit_if_begin("{reset_signal} = {self.reset_asserted_literal(domain)}")
+            builder.emit_line("null;")
+            builder.emit_else()
+        match self.compile_control_block(builder, func.entry_block, []):
+            case Ok(_): pass
+            case Err(err): return Err(err)
+        if domain.reset_signal.? and domain.reset_synchrony == VhdlResetSynchrony.Sync:
+            builder.emit_if_end()
+        builder.emit_if_end()
+        if domain.reset_signal.? and domain.reset_synchrony == VhdlResetSynchrony.Async:
+            builder.emit_if_end()
+        builder.emit_process_end(Some(label))
+        Ok(())
+
     fn compile_control_block(builder: VhdlBuilder, block_id: BlockId, seen: [i64]) -> Result<(), CompileError>:
+        self.compile_acyclic_control_block(builder, block_id, seen, nil)
+
+    fn compile_helper_control_block(builder: VhdlBuilder, func: MirFunction, block_id: BlockId, seen: [i64]) -> Result<(), CompileError>:
+        self.compile_acyclic_control_block(builder, block_id, seen, Some(func))
+
+    fn compile_acyclic_control_block(builder: VhdlBuilder, block_id: BlockId, seen: [i64], helper: MirFunction?) -> Result<(), CompileError>:
         for prior in seen:
             if prior == block_id.id:
-                return Err(self.backend_error("Synthesizable VHDL process cannot lower cyclic control flow at BB{block_id.id}"))
+                return Err(self.backend_error("Synthesizable VHDL control flow cannot lower a cycle at BB{block_id.id}"))
         val block = match self.block_by_id(block_id):
             case Ok(result): result
             case Err(err): return Err(err)
         var next_seen = seen
         next_seen = next_seen.push(block_id.id)
         for inst in block.instructions:
-            match self.compile_process_instruction(builder, inst):
+            val result = match helper:
+                case Some(_): self.compile_helper_instruction(builder, inst)
+                case None: self.compile_process_instruction(builder, inst)
+            match result:
                 case Ok(_): pass
                 case Err(err): return Err(err)
         if block.terminator != nil:
             match block.terminator:
                 case Ret(value):
-                    match value:
-                        case Some(operand):
-                            val value_expr = match self.process_operand_to_vhdl(operand):
-                                case Ok(result): result
-                                case Err(err): return Err(err)
-                            match self.emit_return_expr(builder, value_expr):
-                                case Ok(_): pass
-                                case Err(err): return Err(err)
-                        case None: ()
+                    match helper:
+                        case Some(func):
+                            if vhdl_helper_is_procedure(func):
+                                builder.emit_line("return;")
+                            else:
+                                val value_expr = match value:
+                                    case Some(operand):
+                                        match self.helper_operand_to_vhdl(operand):
+                                            case Ok(result): result
+                                            case Err(err): return Err(err)
+                                    case None: "return_value"
+                                builder.emit_line("return {value_expr};")
+                        case None:
+                            match value:
+                                case Some(operand):
+                                    val value_expr = match self.process_operand_to_vhdl(operand):
+                                        case Ok(result): result
+                                        case Err(err): return Err(err)
+                                    match self.emit_return_expr(builder, value_expr):
+                                        case Ok(_): pass
+                                        case Err(err): return Err(err)
+                                case None: ()
                     Ok(())
                 case Goto(target):
-                    self.compile_control_block(builder, target, next_seen)
+                    self.compile_acyclic_control_block(builder, target, next_seen, helper)
                 case If(cond, then_, else_):
-                    val cond_expr = match self.process_operand_to_vhdl(cond):
+                    val cond_expr = match self.control_operand_to_vhdl(cond, helper):
                         case Ok(result): result
                         case Err(err): return Err(err)
                     builder.emit_if_begin("{cond_expr} = '1'")
-                    match self.compile_control_block(builder, then_, next_seen):
+                    match self.compile_acyclic_control_block(builder, then_, next_seen, helper):
                         case Ok(_): pass
                         case Err(err): return Err(err)
                     builder.emit_else()
-                    match self.compile_control_block(builder, else_, next_seen):
+                    match self.compile_acyclic_control_block(builder, else_, next_seen, helper):
                         case Ok(_): pass
                         case Err(err): return Err(err)
                     builder.emit_if_end()
                     Ok(())
                 case Switch(value, targets, default):
-                    val value_expr = match self.switch_value_expr_to_vhdl(value, true):
+                    val in_process = match helper:
+                        case Some(_): false
+                        case None: true
+                    val value_expr = match self.switch_value_expr_to_vhdl(value, in_process):
                         case Ok(result): result
                         case Err(err): return Err(err)
                     val value_type = match self.operand_type(value):
@@ -147,17 +276,17 @@ impl VhdlBackend:
                         else:
                             builder.emit_if_begin(condition)
                             emitted_case = true
-                        match self.compile_control_block(builder, target.target, next_seen):
+                        match self.compile_acyclic_control_block(builder, target.target, next_seen, helper):
                             case Ok(_): pass
                             case Err(err): return Err(err)
                     if emitted_case:
                         builder.emit_else()
-                        match self.compile_control_block(builder, default, next_seen):
+                        match self.compile_acyclic_control_block(builder, default, next_seen, helper):
                             case Ok(_): pass
                             case Err(err): return Err(err)
                         builder.emit_if_end()
                     else:
-                        match self.compile_control_block(builder, default, next_seen):
+                        match self.compile_acyclic_control_block(builder, default, next_seen, helper):
                             case Ok(_): pass
                             case Err(err): return Err(err)
                     Ok(())
@@ -171,12 +300,16 @@ impl VhdlBackend:
     fn compile_process_instruction(builder: VhdlBuilder, inst: MirInst) -> Result<(), CompileError>:
         match inst.kind:
             case Const(dest, value, ty):
+                if self.active_inline_exprs.has(dest.id):
+                    return Ok(())
                 val value_expr = match self.const_value_to_vhdl_at(value, ty, inst.span):
                     case Ok(result): result
                     case Err(err): return Err(err)
                 self.emit_process_dest_assign(builder, dest, value_expr)
 
             case Copy(dest, src) | Move(dest, src):
+                if self.active_inline_exprs.has(dest.id):
+                    return Ok(())
                 val value_expr = match self.process_operand_to_vhdl(MirOperand(kind: MirOperandKind.Copy(src))):
                     case Ok(result): result
                     case Err(err): return Err(err)
@@ -187,6 +320,23 @@ impl VhdlBackend:
 
             case Store(ptr, value):
                 return Err(self.backend_error_at("Synthesizable VHDL backend does not support pointer Store lowering", inst.span))
+
+            case LoadGlobal(dest, symbol):
+                if self.active_inline_exprs.has(dest.id):
+                    return Ok(())
+                val static_ = match self.clocked_static(symbol):
+                    case Ok(value): value
+                    case Err(err): return Err(err)
+                self.emit_process_dest_assign(builder, dest, self.clocked_static_name(static_))
+
+            case StoreGlobal(symbol, value):
+                val static_ = match self.clocked_static(symbol):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                val value_name = match self.process_operand_to_vhdl(value):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                builder.emit_signal_assign(self.clocked_static_name(static_), value_name)
 
             case BinOp(dest, op, left, right) | CheckedBinOp(dest, op, left, right):
                 val left_name = match self.process_operand_to_vhdl(left):
@@ -239,30 +389,7 @@ impl VhdlBackend:
                 self.emit_process_dest_assign(builder, dest, "{base_name}.{field_name}")
 
             case SetField(base, field, value):
-                val field_name = match self.field_name_for_operand(base, field):
-                    case Ok(result): result
-                    case Err(err): return Err(err)
-                val value_name = match self.process_operand_to_vhdl(value):
-                    case Ok(result): result
-                    case Err(err): return Err(err)
-                match base.kind:
-                    case Copy(local) | Move(local):
-                        val kind = match self.local_kind(local):
-                            case Ok(result): result
-                            case Err(err): return Err(err)
-                        val base_name = match self.process_operand_to_vhdl(base):
-                            case Ok(result): result
-                            case Err(err): return Err(err)
-                        val target = "{base_name}.{field_name}"
-                        match kind:
-                            case Var | Temp:
-                                builder.emit_var_assign(target, value_name)
-                            case Return:
-                                builder.emit_signal_assign(target, value_name)
-                            case Arg(_):
-                                return Err(self.backend_error("Synthesizable VHDL process cannot set field on argument local {local.id}"))
-                    case _:
-                        return Err(self.backend_error("Synthesizable VHDL process field set requires local base"))
+                self.emit_local_record_field_assign(builder, base, field, value, false)
 
             case VhdlResize(dest, operand, new_width, signed):
                 if self.active_inline_exprs.has(dest.id):
@@ -328,6 +455,25 @@ impl VhdlBackend:
 
             case Nop:
                 ()
+
+            case Call(dest, func, args):
+                if self.call_is_lowered_hardware_entity(func):
+                    return Ok(())
+                match dest:
+                    case Some(dest_id):
+                        if self.active_inline_exprs.has(dest_id.id):
+                            return Ok(())
+                    case None: ()
+                val expr = match self.helper_call_expr(func, args, true):
+                    case Ok(value): value
+                    case Err(err): return Err(err)
+                match dest:
+                    case Some(dest_id):
+                        match self.emit_process_dest_assign(builder, dest_id, expr):
+                            case Ok(_): pass
+                            case Err(err): return Err(err)
+                    case None:
+                        builder.emit_line("{expr};")
 
             case _:
                 return Err(self.unsupported_vhdl_instruction_error(inst))

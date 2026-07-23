@@ -179,6 +179,7 @@ struct VhdlHardwareMetadata:
     has_clocked: bool
     clocked: VhdlClockedMetadata
     return_fields: [VhdlReturnFieldMetadata]
+    flatten_struct_output: bool
 
 # ============================================================================
 # SIMD/GPU Optimization Requirement Attributes
@@ -439,7 +440,8 @@ fn vhdl_hardware_metadata_default() -> VhdlHardwareMetadata:
         generics: [],
         has_clocked: false,
         clocked: vhdl_clocked_metadata_default(),
-        return_fields: []
+        return_fields: [],
+        flatten_struct_output: false
     )
 
 fn parse_vhdl_hardware_attrs(attrs: [Attribute]) -> VhdlHardwareMetadata:
@@ -458,6 +460,8 @@ fn parse_vhdl_hardware_attrs(attrs: [Attribute]) -> VhdlHardwareMetadata:
         elif attr.name == "clocked":
             meta.has_clocked = true
             meta.clocked = _parse_vhdl_clocked_args(attr.args)
+        elif attr.name == "flatten_struct_output":
+            meta.flatten_struct_output = true
 
     meta
 
@@ -467,7 +471,8 @@ fn vhdl_hardware_metadata_with_return_fields(meta: VhdlHardwareMetadata, fields:
         generics: meta.generics,
         has_clocked: meta.has_clocked,
         clocked: meta.clocked,
-        return_fields: fields
+        return_fields: fields,
+        flatten_struct_output: meta.flatten_struct_output
     )
 
 fn _parse_vhdl_generic_args(args: [Expr]) -> [VhdlGenericMetadata]:
@@ -550,8 +555,12 @@ fn _parse_vhdl_clocked_args(args: [Expr]) -> VhdlClockedMetadata:
                 if positional == 0:
                     clock_signal = token
                 elif positional == 1:
-                    reset_signal = token
-                    has_reset = token != ""
+                    if _vhdl_clocked_value_is_no_reset(lower_token):
+                        reset_signal = ""
+                        has_reset = false
+                    else:
+                        reset_signal = token
+                        has_reset = token != ""
                 else:
                     if lower_token == "active_high" or lower_token == "high" or lower_token == "reset_high":
                         polarity = VhdlResetPolarity.ActiveHigh

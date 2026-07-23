@@ -1,0 +1,339 @@
+# Deterministic VHDL production artifacts.
+
+use std.common.crypto.sha256.{sha256_text}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+
+struct VhdlArtifactSource:
+    module_name: text
+    path: text
+    content_hash: text
+
+struct VhdlArtifactLocation:
+    available: bool
+    module_name: text
+    file: text
+    start: i64
+    end: i64
+    line: i64
+    col: i64
+
+struct VhdlArtifactGeneratedItem:
+    kind: text
+    name: text
+    location: VhdlArtifactLocation
+
+struct VhdlArtifactPort:
+    entity: text
+    name: text
+    direction: text
+    type_name: text
+    index: i64
+    location: VhdlArtifactLocation
+
+struct VhdlArtifactInput:
+    output_path: text
+    entry_module: text
+    entry_entity: text
+    root_modules: [text]
+    sources: [VhdlArtifactSource]
+    compiler_identity: text
+    compiler_hash: text
+    target: text
+    xlen: i64
+    profile: text
+    catalog_name: text
+    module_count: i64
+    entity_count: i64
+    type_count: i64
+    helper_count: i64
+    generated_items: [VhdlArtifactGeneratedItem]
+    ports: [VhdlArtifactPort]
+    aop_advices_requested: i64
+    aop_weave_count: i64
+
+struct VhdlArtifactRendered:
+    manifest: text
+    source_map: text
+    vhdl_hash: text
+    source_map_hash: text
+    source_aggregate_hash: text
+
+struct VhdlArtifactTarget:
+    name: text
+    xlen: i64
+    profile: text
+
+fn vhdl_artifact_target_for_entity(entity: text, fallback_profile: text) -> VhdlArtifactTarget:
+    if entity == "core32_protected_product_entry":
+        return VhdlArtifactTarget(name: "riscv32", xlen: 32,
+            profile: "RV32IMAC+Sv32+PMP")
+    if entity == "core64_imac_product_entry":
+        return VhdlArtifactTarget(name: "riscv64", xlen: 64,
+            profile: "RV64IMAC+Sv39+PMP")
+    VhdlArtifactTarget(name: "generic-vhdl", xlen: 0, profile: fallback_profile)
+
+fn vhdl_validate_production_artifact_input(input: VhdlArtifactInput) -> Result<(), text>:
+    if (input.output_path == "" or input.entry_module == "" or
+        input.entry_entity == "" or input.root_modules.len() == 0):
+        return Err("VHDL artifact provenance requires output, entry entity, and root module")
+    if input.sources.len() == 0:
+        return Err("VHDL artifact provenance requires a non-empty reachable source closure")
+    if input.compiler_identity == "" or input.compiler_hash.len() != 64:
+        return Err("VHDL artifact provenance requires compiler identity and SHA-256")
+    if input.target == "" or input.profile == "" or input.catalog_name == "":
+        return Err("VHDL artifact provenance requires target, profile, and design catalog")
+    for source in input.sources:
+        if source.module_name == "" or source.path == "" or source.content_hash.len() != 64:
+            return Err("VHDL artifact source closure contains incomplete provenance")
+    var entry_port_count = 0
+    for port in input.ports:
+        if (port.entity == "" or port.name == "" or port.direction == "" or
+            port.type_name == "" or port.type_name.contains("-- ERROR:")):
+            return Err("VHDL artifact flat port manifest contains an incomplete port")
+        if port.location.available and (port.location.module_name == "" or
+            port.location.file == "" or port.location.line <= 0 or
+            port.location.col <= 0 or port.location.end < port.location.start):
+            return Err("VHDL artifact port source location is incomplete")
+        if port.entity == input.entry_entity:
+            entry_port_count = entry_port_count + 1
+    if entry_port_count == 0:
+        return Err("VHDL artifact provenance found no flat ports for selected entry entity")
+    var entry_item_count = 0
+    for item in input.generated_items:
+        if item.kind == "" or item.name == "":
+            return Err("VHDL artifact source map contains an unnamed generated item")
+        if item.location.available and (item.location.module_name == "" or
+            item.location.file == "" or item.location.line <= 0 or
+            item.location.col <= 0 or item.location.end < item.location.start):
+            return Err("VHDL artifact generated-item source location is incomplete")
+        if item.name == input.entry_entity:
+            entry_item_count = entry_item_count + 1
+            if not item.location.available:
+                return Err("VHDL artifact selected entry entity has no source span")
+    if entry_item_count != 1:
+        return Err("VHDL artifact provenance requires exactly one selected entry entity")
+    Ok(())
+
+fn vhdl_artifact_json_escape(value: text) -> text:
+    var out = ""
+    var i = 0
+    while i < value.len():
+        val ch = value.substring(i, i + 1)
+        if ch == "\\":
+            out = out + "\\\\"
+        elif ch == "\"":
+            out = out + "\\\""
+        elif ch == "\n":
+            out = out + "\\n"
+        elif ch == "\r":
+            out = out + "\\r"
+        elif ch == "\t":
+            out = out + "\\t"
+        else:
+            out = out + ch
+        i = i + 1
+    out
+
+fn vhdl_artifact_json_text(value: text) -> text:
+    "\"{vhdl_artifact_json_escape(value)}\""
+
+fn vhdl_artifact_location_json(location: VhdlArtifactLocation) -> text:
+    if not location.available:
+        return "null"
+    "{" +
+        "\"module\":" + vhdl_artifact_json_text(location.module_name) + "," +
+        "\"file\":" + vhdl_artifact_json_text(location.file) + "," +
+        "\"start\":" + location.start.to_text() + "," +
+        "\"end\":" + location.end.to_text() + "," +
+        "\"line\":" + location.line.to_text() + "," +
+        "\"column\":" + location.col.to_text() + "}"
+
+fn vhdl_artifact_sorted_sources(values: [VhdlArtifactSource]) -> [VhdlArtifactSource]:
+    var result = values
+    var i = 0
+    while i < result.len():
+        var j = i + 1
+        while j < result.len():
+            val left = "{result[i].module_name}\n{result[i].path}"
+            val right = "{result[j].module_name}\n{result[j].path}"
+            if right < left:
+                val tmp = result[i]
+                result[i] = result[j]
+                result[j] = tmp
+            j = j + 1
+        i = i + 1
+    result
+
+fn vhdl_artifact_sorted_text(values: [text]) -> [text]:
+    var result = values
+    var i = 0
+    while i < result.len():
+        var j = i + 1
+        while j < result.len():
+            if result[j] < result[i]:
+                val tmp = result[i]
+                result[i] = result[j]
+                result[j] = tmp
+            j = j + 1
+        i = i + 1
+    result
+
+fn vhdl_artifact_sorted_items(values: [VhdlArtifactGeneratedItem]) -> [VhdlArtifactGeneratedItem]:
+    var result = values
+    var i = 0
+    while i < result.len():
+        var j = i + 1
+        while j < result.len():
+            val left = "{result[i].kind}\n{result[i].name}"
+            val right = "{result[j].kind}\n{result[j].name}"
+            if right < left:
+                val tmp = result[i]
+                result[i] = result[j]
+                result[j] = tmp
+            j = j + 1
+        i = i + 1
+    result
+
+fn vhdl_artifact_sorted_ports(values: [VhdlArtifactPort]) -> [VhdlArtifactPort]:
+    var result = values
+    var i = 0
+    while i < result.len():
+        var j = i + 1
+        while j < result.len():
+            val entity_before = result[j].entity < result[i].entity
+            val same_entity = result[j].entity == result[i].entity
+            val index_before = result[j].index < result[i].index
+            val same_index = result[j].index == result[i].index
+            if entity_before or (same_entity and (index_before or
+                (same_index and result[j].name < result[i].name))):
+                val tmp = result[i]
+                result[i] = result[j]
+                result[j] = tmp
+            j = j + 1
+        i = i + 1
+    result
+
+fn vhdl_artifact_text_array(values: [text]) -> text:
+    var rows: [text] = []
+    for value in vhdl_artifact_sorted_text(values):
+        rows = rows.push(vhdl_artifact_json_text(value))
+    "[" + rows.join(",") + "]"
+
+fn vhdl_artifact_sources_json(sources: [VhdlArtifactSource]) -> text:
+    var rows: [text] = []
+    for source in vhdl_artifact_sorted_sources(sources):
+        rows = rows.push("{" +
+            "\"module\":" + vhdl_artifact_json_text(source.module_name) + "," +
+            "\"path\":" + vhdl_artifact_json_text(source.path) + "," +
+            "\"sha256\":" + vhdl_artifact_json_text(source.content_hash) + "}")
+    "[" + rows.join(",") + "]"
+
+fn vhdl_artifact_source_aggregate_hash(sources: [VhdlArtifactSource]) -> text:
+    var rows: [text] = []
+    for source in vhdl_artifact_sorted_sources(sources):
+        rows = rows.push("{source.module_name.len()}:{source.module_name}{source.path.len()}:{source.path}{source.content_hash}")
+    sha256_text(rows.join("\n"))
+
+fn vhdl_artifact_generated_json(items: [VhdlArtifactGeneratedItem]) -> text:
+    var rows: [text] = []
+    for item in vhdl_artifact_sorted_items(items):
+        rows = rows.push("{" +
+            "\"kind\":" + vhdl_artifact_json_text(item.kind) + "," +
+            "\"name\":" + vhdl_artifact_json_text(item.name) + "," +
+            "\"source\":" + vhdl_artifact_location_json(item.location) + "}")
+    "[" + rows.join(",") + "]"
+
+fn vhdl_artifact_ports_json(ports: [VhdlArtifactPort]) -> text:
+    var rows: [text] = []
+    for port in vhdl_artifact_sorted_ports(ports):
+        rows = rows.push("{" +
+            "\"entity\":" + vhdl_artifact_json_text(port.entity) + "," +
+            "\"index\":" + port.index.to_text() + "," +
+            "\"name\":" + vhdl_artifact_json_text(port.name) + "," +
+            "\"direction\":" + vhdl_artifact_json_text(port.direction) + "," +
+            "\"type\":" + vhdl_artifact_json_text(port.type_name) + "," +
+            "\"source\":" + vhdl_artifact_location_json(port.location) + "}")
+    "[" + rows.join(",") + "]"
+
+fn vhdl_artifact_entry_ports(ports: [VhdlArtifactPort], entity: text) -> [VhdlArtifactPort]:
+    var result: [VhdlArtifactPort] = []
+    for port in ports:
+        if port.entity == entity:
+            result = result.push(port)
+    result
+
+fn vhdl_render_production_artifacts(input: VhdlArtifactInput, vhdl: text) -> VhdlArtifactRendered:
+    val map_path = input.output_path + ".map.json"
+    val source_hash = vhdl_artifact_source_aggregate_hash(input.sources)
+    val vhdl_hash = sha256_text(vhdl)
+    val source_map = "{\n" +
+        "  \"version\":1,\n" +
+        "  \"generated\":" + vhdl_artifact_json_text(input.output_path) + ",\n" +
+        "  \"entry_module\":" + vhdl_artifact_json_text(input.entry_module) + ",\n" +
+        "  \"entry_entity\":" + vhdl_artifact_json_text(input.entry_entity) + ",\n" +
+        "  \"items\":" + vhdl_artifact_generated_json(input.generated_items) + ",\n" +
+        "  \"ports\":" + vhdl_artifact_ports_json(input.ports) + "\n" +
+        "}\n"
+    val source_map_hash = sha256_text(source_map)
+    val manifest = "{\n" +
+        "  \"version\":2,\n" +
+        "  \"backend\":\"vhdl\",\n" +
+        "  \"generated\":" + vhdl_artifact_json_text(input.output_path) + ",\n" +
+        "  \"entry_module\":" + vhdl_artifact_json_text(input.entry_module) + ",\n" +
+        "  \"entry_entity\":" + vhdl_artifact_json_text(input.entry_entity) + ",\n" +
+        "  \"root_modules\":" + vhdl_artifact_text_array(input.root_modules) + ",\n" +
+        "  \"source_closure\":" + vhdl_artifact_sources_json(input.sources) + ",\n" +
+        "  \"source_closure_sha256\":" + vhdl_artifact_json_text(source_hash) + ",\n" +
+        "  \"compiler\":{\"identity\":" + vhdl_artifact_json_text(input.compiler_identity) + ",\"sha256\":" + vhdl_artifact_json_text(input.compiler_hash) + "},\n" +
+        "  \"vhdl\":{\"path\":" + vhdl_artifact_json_text(input.output_path) + ",\"sha256\":" + vhdl_artifact_json_text(vhdl_hash) + "},\n" +
+        "  \"source_map\":{\"path\":" + vhdl_artifact_json_text(map_path) + ",\"sha256\":" + vhdl_artifact_json_text(source_map_hash) + "},\n" +
+        "  \"design_catalog\":{\"name\":" + vhdl_artifact_json_text(input.catalog_name) + ",\"modules\":" + input.module_count.to_text() + ",\"entities\":" + input.entity_count.to_text() + ",\"types\":" + input.type_count.to_text() + ",\"helpers\":" + input.helper_count.to_text() + "},\n" +
+        "  \"ports\":" + vhdl_artifact_ports_json(
+            vhdl_artifact_entry_ports(input.ports, input.entry_entity)) + ",\n" +
+        "  \"target\":{\"name\":" + vhdl_artifact_json_text(input.target) + ",\"xlen\":" + input.xlen.to_text() + ",\"profile\":" + vhdl_artifact_json_text(input.profile) + "},\n" +
+        "  \"aop\":{\"requested\":" + input.aop_advices_requested.to_text() + ",\"woven\":" + input.aop_weave_count.to_text() + "},\n" +
+        "  \"qualification\":{\"status\":\"FAIL\",\"reason\":\"unqualified_generated_artifact\"}\n" +
+        "}\n"
+    VhdlArtifactRendered(manifest: manifest, source_map: source_map,
+        vhdl_hash: vhdl_hash, source_map_hash: source_map_hash,
+        source_aggregate_hash: source_hash)
+
+fn vhdl_remove_production_artifacts(output: text) -> bool:
+    val paths = [output, output + ".map.json", output + ".gen.json"]
+    for path in paths:
+        if rt_file_exists(path):
+            rt_file_delete(path)
+    for path in paths:
+        if rt_file_exists(path):
+            return false
+    true
+
+fn vhdl_write_production_artifacts(output: text, vhdl: text,
+                                   rendered: VhdlArtifactRendered) -> Result<(), text>:
+    if not vhdl_remove_production_artifacts(output):
+        return Err("Failed to remove stale VHDL artifacts for {output}")
+    if not rt_file_write_text(output, vhdl):
+        if not vhdl_remove_production_artifacts(output):
+            return Err("Failed to write VHDL to {output}; partial artifact cleanup also failed")
+        return Err("Failed to write VHDL to {output}")
+    val map_path = output + ".map.json"
+    if not rt_file_write_text(map_path, rendered.source_map):
+        if not vhdl_remove_production_artifacts(output):
+            return Err("Failed to write VHDL source map to {map_path}; partial artifact cleanup also failed")
+        return Err("Failed to write VHDL source map to {map_path}")
+    val manifest_path = output + ".gen.json"
+    if not rt_file_write_text(manifest_path, rendered.manifest):
+        if not vhdl_remove_production_artifacts(output):
+            return Err("Failed to write VHDL manifest to {manifest_path}; partial artifact cleanup also failed")
+        return Err("Failed to write VHDL manifest to {manifest_path}")
+    Ok(())
+
+export VhdlArtifactSource, VhdlArtifactLocation, VhdlArtifactGeneratedItem
+export VhdlArtifactPort, VhdlArtifactInput, VhdlArtifactRendered
+export VhdlArtifactTarget, vhdl_artifact_target_for_entity
+export vhdl_validate_production_artifact_input
+export vhdl_artifact_source_aggregate_hash, vhdl_render_production_artifacts
+export vhdl_remove_production_artifacts, vhdl_write_production_artifacts

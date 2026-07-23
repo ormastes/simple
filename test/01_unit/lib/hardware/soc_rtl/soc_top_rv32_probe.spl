@@ -7,6 +7,10 @@
 # Run: bin/simple run test/01_unit/lib/hardware/soc_rtl/soc_top_rv32_probe.spl
 use std.hardware.soc_rtl.soc_top.{SocState, soc_create, soc_tick}
 use std.hardware.soc_rtl.ram.{ram_read, ram_write}
+use std.hardware.rv32i_rtl.regfile.regfile_read
+
+fn soc_gpr(soc: SocState, addr: u32) -> u32:
+    regfile_read(soc.regfile, addr, 0).rs1_data
 
 fn check(name: text, ok: bool) -> i64:
     if ok:
@@ -39,11 +43,11 @@ fn main() -> i64:
     soc1.ram = ram1
     soc1.core.pc = 0x8000_0000
     soc1 = run_ticks(soc1, 20)
-    print("case1 pc={soc1.core.pc} x1={soc1.regfile.regs[1]} x2={soc1.regfile.regs[2]} x3={soc1.regfile.regs[3]}")
+    print("case1 pc={soc1.core.pc} x1={soc_gpr(soc1, 1)} x2={soc_gpr(soc1, 2)} x3={soc_gpr(soc1, 3)}")
     fails = fails + check("case1 pc parks at 0x80000014", soc1.core.pc == 0x8000_0014)
-    fails = fails + check("case1 x1 == 42 (poison skipped by taken bne)", soc1.regfile.regs[1] == 42)
-    fails = fails + check("case1 x2 == 43", soc1.regfile.regs[2] == 43)
-    fails = fails + check("case1 x3 == 7", soc1.regfile.regs[3] == 7)
+    fails = fails + check("case1 x1 == 42 (poison skipped by taken bne)", soc_gpr(soc1, 1) == 42)
+    fails = fails + check("case1 x2 == 43", soc_gpr(soc1, 2) == 43)
+    fails = fails + check("case1 x3 == 7", soc_gpr(soc1, 3) == 7)
 
     # ── Case 2: store/load round-trip through RAM via the core ──
     var soc2 = soc_create(4096)
@@ -57,10 +61,10 @@ fn main() -> i64:
     soc2.core.pc = 0x8000_0000
     soc2 = run_ticks(soc2, 12)
     val stored2 = ram_read(soc2.ram, 0x40)
-    print("case2 pc={soc2.core.pc} x6={soc2.regfile.regs[6]} mem[0x40]={stored2}")
+    print("case2 pc={soc2.core.pc} x6={soc_gpr(soc2, 6)} mem[0x40]={stored2}")
     fails = fails + check("case2 pc parks at 0x80000010", soc2.core.pc == 0x8000_0010)
     fails = fails + check("case2 sw wrote 55 to RAM", stored2 == 55)
-    fails = fails + check("case2 lw read 55 back into x6", soc2.regfile.regs[6] == 55)
+    fails = fails + check("case2 lw read 55 back into x6", soc_gpr(soc2, 6) == 55)
 
     # ── Case 3: Zicsr rd-writeback — csrrs must write rd (rv64 latent-bug check) ──
     var soc3 = soc_create(4096)
@@ -72,9 +76,9 @@ fn main() -> i64:
     soc3.ram = ram3
     soc3.core.pc = 0x8000_0000
     soc3 = run_ticks(soc3, 8)
-    print("case3 pc={soc3.core.pc} x6={soc3.regfile.regs[6]} mscratch={soc3.csr.mscratch}")
+    print("case3 pc={soc3.core.pc} x6={soc_gpr(soc3, 6)} mscratch={soc3.csr.mscratch}")
     fails = fails + check("case3 csrrw wrote mscratch = 0x55", soc3.csr.mscratch == 0x55)
-    fails = fails + check("case3 csrrs wrote rd (x6 == 0x55)", soc3.regfile.regs[6] == 0x55)
+    fails = fails + check("case3 csrrs wrote rd (x6 == 0x55)", soc_gpr(soc3, 6) == 0x55)
     fails = fails + check("case3 csrrs with rs1=x0 did not clobber mscratch", soc3.csr.mscratch == 0x55)
 
     # ── Case 4: CLINT machine timer interrupt — real CSR writes + MMIO arm ──
@@ -106,11 +110,11 @@ fn main() -> i64:
     soc4.core.pc = 0x8000_0000
     soc4 = run_ticks(soc4, 150)
     val marker4 = ram_read(soc4.ram, 0x200)
-    print("case4 pc={soc4.core.pc} marker={marker4} x12(mcause)={soc4.regfile.regs[12]} x13(mepc)={soc4.regfile.regs[13]} mip={soc4.csr.mip} mtvec={soc4.csr.mtvec}")
+    print("case4 pc={soc4.core.pc} marker={marker4} x12(mcause)={soc_gpr(soc4, 12)} x13(mepc)={soc_gpr(soc4, 13)} mip={soc4.csr.mip} mtvec={soc4.csr.mtvec}")
     fails = fails + check("case4 csrrw wrote mtvec (csr write path executed)", soc4.csr.mtvec == 0x8000_0100)
     fails = fails + check("case4 handler wrote marker 0x123 to RAM", marker4 == 0x123)
-    fails = fails + check("case4 mcause == machine timer interrupt (0x80000007)", soc4.regfile.regs[12] == 0x8000_0007)
-    fails = fails + check("case4 mepc == spin pc 0x8000002C", soc4.regfile.regs[13] == 0x8000_002C)
+    fails = fails + check("case4 mcause == machine timer interrupt (0x80000007)", soc_gpr(soc4, 12) == 0x8000_0007)
+    fails = fails + check("case4 mepc == spin pc 0x8000002C", soc_gpr(soc4, 13) == 0x8000_002C)
     fails = fails + check("case4 mip.MTIP delivered from CLINT (bit 7)", (soc4.csr.mip & 0x80) != 0)
     fails = fails + check("case4 pc parks in handler at 0x80000114", soc4.core.pc == 0x8000_0114)
 
@@ -127,8 +131,8 @@ fn main() -> i64:
     soc5.core.pc = 0x8000_0000
     soc5 = run_ticks(soc5, 10)
     val amem5 = ram_read(soc5.ram, 0x40)
-    print("case5 pc={soc5.core.pc} x6={soc5.regfile.regs[6]} mem[0x40]={amem5}")
-    fails = fails + check("case5 amoadd.w rd == old value 5", soc5.regfile.regs[6] == 5)
+    print("case5 pc={soc5.core.pc} x6={soc_gpr(soc5, 6)} mem[0x40]={amem5}")
+    fails = fails + check("case5 amoadd.w rd == old value 5", soc_gpr(soc5, 6) == 5)
     fails = fails + check("case5 amoadd.w memory == 12 (5+7)", amem5 == 12)
 
     # ── Case 6: LR.W/SC.W success path — sc rd=0, memory updated ──
@@ -145,9 +149,9 @@ fn main() -> i64:
     soc6.core.pc = 0x8000_0000
     soc6 = run_ticks(soc6, 12)
     val cmem6 = ram_read(soc6.ram, 0x60)
-    print("case6 x6={soc6.regfile.regs[6]} x8={soc6.regfile.regs[8]} mem[0x60]={cmem6} resv={soc6.core.res_valid}")
-    fails = fails + check("case6 lr.w loaded 11", soc6.regfile.regs[6] == 11)
-    fails = fails + check("case6 sc.w succeeded (rd == 0)", soc6.regfile.regs[8] == 0)
+    print("case6 x6={soc_gpr(soc6, 6)} x8={soc_gpr(soc6, 8)} mem[0x60]={cmem6} resv={soc6.core.res_valid}")
+    fails = fails + check("case6 lr.w loaded 11", soc_gpr(soc6, 6) == 11)
+    fails = fails + check("case6 sc.w succeeded (rd == 0)", soc_gpr(soc6, 8) == 0)
     fails = fails + check("case6 sc.w wrote 77", cmem6 == 77)
     fails = fails + check("case6 reservation cleared after sc", soc6.core.res_valid == false)
 
@@ -167,9 +171,9 @@ fn main() -> i64:
     soc7.core.pc = 0x8000_0000
     soc7 = run_ticks(soc7, 14)
     val dmem7 = ram_read(soc7.ram, 0x70)
-    print("case7 x6={soc7.regfile.regs[6]} x8={soc7.regfile.regs[8]} mem[0x70]={dmem7}")
-    fails = fails + check("case7 lr.w loaded 1", soc7.regfile.regs[6] == 1)
-    fails = fails + check("case7 sc.w failed (rd == 1)", soc7.regfile.regs[8] == 1)
+    print("case7 x6={soc_gpr(soc7, 6)} x8={soc_gpr(soc7, 8)} mem[0x70]={dmem7}")
+    fails = fails + check("case7 lr.w loaded 1", soc_gpr(soc7, 6) == 1)
+    fails = fails + check("case7 sc.w failed (rd == 1)", soc_gpr(soc7, 8) == 1)
     fails = fails + check("case7 mem kept intervening 99 (sc did NOT write 55)", dmem7 == 99)
 
     # ── Case 8: WFI + timer wake — pc holds at wfi, then handler with ──
@@ -200,18 +204,18 @@ fn main() -> i64:
     soc8.core.pc = 0x8000_0000
     soc8 = run_ticks(soc8, 30)
     val held_pc_30 = soc8.core.pc
-    val held_x9_30 = soc8.regfile.regs[9]
+    val held_x9_30 = soc_gpr(soc8, 9)
     soc8 = run_ticks(soc8, 20)
     val held_pc_50 = soc8.core.pc
     soc8 = run_ticks(soc8, 70)
     val emarker8 = ram_read(soc8.ram, 0x300)
-    print("case8 held30={held_pc_30} held50={held_pc_50} pc={soc8.core.pc} mcause(x12)={soc8.regfile.regs[12]} mepc(x13)={soc8.regfile.regs[13]} marker={emarker8} x9={soc8.regfile.regs[9]}")
+    print("case8 held30={held_pc_30} held50={held_pc_50} pc={soc8.core.pc} mcause(x12)={soc_gpr(soc8, 12)} mepc(x13)={soc_gpr(soc8, 13)} marker={emarker8} x9={soc_gpr(soc8, 9)}")
     fails = fails + check("case8 pc held at wfi (0x8000002C) at tick 30", held_pc_30 == 0x8000_002C)
     fails = fails + check("case8 pc still held at wfi at tick 50 (pre-timer)", held_pc_50 == 0x8000_002C)
     fails = fails + check("case8 post-wfi insn NOT executed during hold (x9==0)", held_x9_30 == 0)
     fails = fails + check("case8 timer wake entered handler (marker 0x321)", emarker8 == 0x321)
-    fails = fails + check("case8 mcause == machine timer interrupt (0x80000007)", soc8.regfile.regs[12] == 0x8000_0007)
-    fails = fails + check("case8 mepc == wfi+4 (0x80000030) — resume after wfi", soc8.regfile.regs[13] == 0x8000_0030)
+    fails = fails + check("case8 mcause == machine timer interrupt (0x80000007)", soc_gpr(soc8, 12) == 0x8000_0007)
+    fails = fails + check("case8 mepc == wfi+4 (0x80000030) — resume after wfi", soc_gpr(soc8, 13) == 0x8000_0030)
     fails = fails + check("case8 pc parks in handler at 0x80000110", soc8.core.pc == 0x8000_0110)
 
     if fails == 0:

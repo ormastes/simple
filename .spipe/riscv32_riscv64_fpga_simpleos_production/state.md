@@ -216,6 +216,14 @@ implementation-milestone-0-in-progress
   and focused regression are staged, but the three-cycle bootstrap cap was
   reached before a fresh Stage 4 qualification. Details are recorded in
   `doc/08_tracking/bug/parser_trailing_operator_line_continuation_2026-07-13.md`.
+- toolchain recovery 2026-07-23: a cache-preserving, isolated build of only
+  `src/app/cli/bootstrap_main.spl` progressed from discovery to the final link.
+  It exposed and source-fixed a nested-match parser form, a stray `endif`, two
+  stale `symbol` references, and legacy receiver fields missing `self.`. The
+  third capped cycle then failed closed on bootstrap-unresolved enum constructors
+  and `range` calls in the new VHDL catalog/artifact sort paths; their minimal
+  source fixes are staged for the next bounded session. Logs and retained
+  objects are under `build/stage4-ufcs/`. No Stage 4 or RTL evidence is claimed.
 - implementation milestone 2026-07-23: high source/static review accepts the
   protected RV32/RV64IMAC semantics, full shared DTB, exact flat product
   bus/RVFI ports, reset-owned state, fixed register banks, multi-block helper

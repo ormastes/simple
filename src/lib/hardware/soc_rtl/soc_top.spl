@@ -31,6 +31,9 @@ use std.hardware.rv32i_rtl.alu.{alu_compute}
 use std.hardware.rv32i_rtl.regfile.{RegFile, regfile_create, regfile_read, regfile_write}
 use std.hardware.rv32i_rtl.lsu.lsu_load
 use std.hardware.rv32i_rtl.core.{CoreState, core_reset, core_combinational, core_update}
+use std.hardware.rv32i_rtl.protected_core.{CoreProtectedState32, core32_init, core32_cycle}
+use std.hardware.rv32i_rtl.protected_core.{core32_set_pending_interrupts, core32_invalidate_reservation}
+use std.hardware.rv32i_rtl.protected_core.core32_set_supervisor_pending_interrupts
 
 # -- CSR / Trap
 use std.hardware.rv32i_rtl.csr.{CsrFile, CsrRwResult, csr_create, csr_read, csr_rw, csr_tick, csr_update_mip}
@@ -42,8 +45,11 @@ use std.hardware.rv32i_rtl.trap.{CAUSE_ECALL_M, CAUSE_BREAKPOINT}
 
 # -- Peripherals
 use std.hardware.soc_rtl.bootrom.{bootrom_read, BOOTROM_BASE}
-use std.hardware.soc_rtl.uart16550.{Uart16550State, uart_create, uart_mmio_read, uart_mmio_read_update, uart_mmio_write, uart_tick}
+use std.hardware.soc_rtl.dtb_asset.{SOC_DTB_BASE, SOC_DTB_RAM_SIZE, SOC_DTB_RESERVED_SIZE}
+use std.hardware.soc_rtl.dtb_asset.soc_rv32_linux_dtb_for_ram_initrd
+use std.hardware.soc_rtl.uart16550.{Uart16550State, uart_create, uart_mmio_read, uart_mmio_read_update, uart_mmio_write, uart_tick, uart_rx_push}
 use std.hardware.soc_rtl.clint.{ClintState, clint_create, clint_mmio_read, clint_mmio_write, clint_tick}
+use std.hardware.soc_rtl.plic.{PlicState, plic_create, plic_mmio_read, plic_mmio_read_update, plic_mmio_write, plic_set_pending, plic_check_interrupt, plic_check_interrupt_s, PLIC_BASE}
 use std.hardware.soc_rtl.ram.{RamState, ram_create, ram_read, ram_write}
 use std.hardware.soc_rtl.ram_sparse.{SparseRam, sparse_create, sparse_read, sparse_write, sparse_pages_allocated}
 use std.hardware.soc_rtl.mailbox.{MailboxState, mailbox_create, mailbox_mmio_read, mailbox_mmio_write}
@@ -52,6 +58,7 @@ use std.hardware.soc_rtl.mailbox.{MailboxState, mailbox_create, mailbox_mmio_rea
 use std.hardware.soc_rtl.wb_interconnect.{wb_decode_address, wb_route_read, wb_route_write}
 use std.hardware.soc_rtl.wb_interconnect.{WB_SLAVE_ROM, WB_SLAVE_CLINT, WB_SLAVE_UART}
 use std.hardware.soc_rtl.wb_interconnect.{WB_SLAVE_RAM, WB_SLAVE_MAILBOX}
+use std.hardware.soc_rtl.wb_interconnect.WB_SLAVE_UNMAPPED
 use std.hardware.soc_rtl.wb_interconnect.{RAM_BASE, CLINT_BASE, UART_BASE, MB_BASE}
 
 # ============================================================================
@@ -74,10 +81,15 @@ struct SocState:
     regfile: RegFile
     uart: Uart16550State
     clint: ClintState
+    plic: PlicState
     mailbox: MailboxState
     ram: RamState
     sparse: SparseRam
     dram_size: u32
+    dtb_size: u32
+    dtb_ram_size: u32
+    dtb_initrd_start: u32
+    dtb_initrd_end: u32
 
 # ============================================================================
 # SoC External Ports
@@ -105,6 +117,9 @@ struct SocTickResult:
 
 # Legacy DRAM window: 128 MiB, matching the historic RAM_BASE..RAM_END range.
 val RAM_LEGACY_SIZE: u32 = 0x08000000
+val SOC32_SLAVE_PLIC: u32 = 6
+val SOC32_PLIC_END: u32 = 0x0FFFFFFF
+val SOC32_PLIC_SRC_UART: u32 = 10
 
 fn soc_create(ram_size_words: u32) -> SocState:
     """Create and initialize the full SoC.  PC starts at boot ROM (0x1000).
@@ -118,10 +133,15 @@ fn soc_create(ram_size_words: u32) -> SocState:
         regfile: regfile_create(),
         uart: uart_create(),
         clint: clint_create(),
+        plic: plic_create(),
         mailbox: mailbox_create(),
         ram: ram_create(ram_size_words),
         sparse: sparse_create(RAM_LEGACY_SIZE),
-        dram_size: RAM_LEGACY_SIZE
+        dram_size: RAM_LEGACY_SIZE,
+        dtb_size: SOC_DTB_RESERVED_SIZE as u32,
+        dtb_ram_size: RAM_LEGACY_SIZE,
+        dtb_initrd_start: 0,
+        dtb_initrd_end: 0
     )
 
 fn soc_create_bytes(dram_bytes: u32) -> SocState:
@@ -136,10 +156,15 @@ fn soc_create_bytes(dram_bytes: u32) -> SocState:
         regfile: regfile_create(),
         uart: uart_create(),
         clint: clint_create(),
+        plic: plic_create(),
         mailbox: mailbox_create(),
         ram: ram_create(0),
         sparse: sparse_create(dram_bytes),
-        dram_size: dram_bytes
+        dram_size: dram_bytes,
+        dtb_size: SOC_DTB_RESERVED_SIZE as u32,
+        dtb_ram_size: dram_bytes,
+        dtb_initrd_start: 0,
+        dtb_initrd_end: 0
     )
 
 fn soc_reset(ram_size_words: u32) -> SocState:
@@ -170,6 +195,8 @@ fn soc_route(addr: u32, dram_size: u32) -> u32:
     their fixed wb_interconnect ranges — the Mailbox aperture inside RAM is
     honored because wb_decode_address checks it first.  Only the RAM-vs-unmapped
     decision is widened past wb_interconnect's 128 MiB RAM_END."""
+    if addr >= PLIC_BASE and addr <= SOC32_PLIC_END:
+        return SOC32_SLAVE_PLIC
     val idx = wb_decode_address(addr)
     if idx == WB_SLAVE_RAM or idx == WB_SLAVE_UNMAPPED:
         if soc_addr_in_ram(addr, dram_size):
@@ -196,6 +223,15 @@ fn soc_ram_write(state: SocState, offset: u32, wdata: u32, width: u32) -> SocSta
         out.sparse = sparse_write(state.sparse, offset, wdata, width)
     out
 
+fn soc32_in_dtb(state: SocState, addr: u32) -> bool:
+    if (addr as u64) < SOC_DTB_BASE:
+        return false
+    ((addr as u64) - SOC_DTB_BASE) < (state.dtb_size as u64)
+
+fn soc32_dtb_read(state: SocState, addr: u32) -> u32:
+    val off = (((addr as u64) - SOC_DTB_BASE) >> 2) << 2
+    soc_ram_read(state, (SOC_DTB_BASE as u32) - RAM_BASE + (off as u32))
+
 # ============================================================================
 # Instruction Fetch — route through Wishbone address map
 # ============================================================================
@@ -218,7 +254,11 @@ fn soc_fetch_instruction(state: SocState, pc: u32) -> u32:
 
 fn soc_mem_read(state: SocState, addr: u32) -> u32:
     """Read a 32-bit word from the data bus via Wishbone address decode."""
+    if soc32_in_dtb(state, addr):
+        return soc32_dtb_read(state, addr)
     val slave_idx = soc_route(addr, state.dram_size)
+    if slave_idx == SOC32_SLAVE_PLIC:
+        return plic_mmio_read(state.plic, addr - PLIC_BASE)
 
     var rom_data: u32 = 0
     var clint_data: u32 = 0
@@ -246,10 +286,14 @@ fn soc_mem_read(state: SocState, addr: u32) -> u32:
 
 fn soc_mem_read_update(state: SocState, addr: u32) -> SocState:
     """Apply read side-effects (e.g. UART RX FIFO pop)."""
-    val slave_idx = wb_decode_address(addr)
+    val slave_idx = soc_route(addr, state.dram_size)
     if slave_idx == WB_SLAVE_UART:
         var out = state
         out.uart = uart_mmio_read_update(state.uart, addr - UART_BASE)
+        return out
+    if slave_idx == SOC32_SLAVE_PLIC:
+        var out = state
+        out.plic = plic_mmio_read_update(state.plic, addr - PLIC_BASE)
         return out
     state
 
@@ -266,6 +310,9 @@ struct SocWriteResult:
 
 fn soc_mem_write(state: SocState, addr: u32, wdata: u32, width: u32) -> SocWriteResult:
     """Write to data memory via Wishbone address decode."""
+    if soc32_in_dtb(state, addr):
+        return SocWriteResult(state: state, char_out: 0, char_valid: false,
+            halt_request: false)
     val slave_idx = soc_route(addr, state.dram_size)
     val wr = wb_route_write(slave_idx, addr, wdata)
     var out = state
@@ -273,7 +320,10 @@ fn soc_mem_write(state: SocState, addr: u32, wdata: u32, width: u32) -> SocWrite
     var char_valid: bool = false
     var halt_request: bool = false
 
-    if slave_idx == WB_SLAVE_CLINT:
+    if slave_idx == SOC32_SLAVE_PLIC:
+        out.plic = plic_mmio_write(state.plic, addr - PLIC_BASE, wdata)
+
+    else if slave_idx == WB_SLAVE_CLINT:
         out.clint = clint_mmio_write(state.clint, wr.offset, wdata)
 
     else if slave_idx == WB_SLAVE_UART:
@@ -370,6 +420,11 @@ fn soc_tick(state: SocState) -> SocTickResult:
         val ut = uart_tick(cur_state.uart)
         cur_state.uart = ut.state
         uart_tx_bit = ut.tx_out
+        val uart_irq_pending = (ut.irq and
+            cur_state.plic.claim_complete != SOC32_PLIC_SRC_UART and
+            cur_state.plic.claim_complete_s != SOC32_PLIC_SRC_UART)
+        cur_state.plic = plic_set_pending(cur_state.plic,
+            SOC32_PLIC_SRC_UART, uart_irq_pending)
 
         val ports = SocPorts(
             uart_tx: uart_tx_bit != 0,
@@ -535,9 +590,15 @@ fn soc_tick(state: SocState) -> SocTickResult:
     val ut = uart_tick(cur_state.uart)
     cur_state.uart = ut.state
     uart_tx_bit = ut.tx_out
+    val uart_irq_pending = (ut.irq and
+        cur_state.plic.claim_complete != SOC32_PLIC_SRC_UART and
+        cur_state.plic.claim_complete_s != SOC32_PLIC_SRC_UART)
+    cur_state.plic = plic_set_pending(cur_state.plic,
+        SOC32_PLIC_SRC_UART, uart_irq_pending)
+    val plic_irq = plic_check_interrupt(cur_state.plic)
 
     # ── Step 12: Update CSR mip from peripheral interrupts ───────────────
-    cur_state.csr = csr_update_mip(cur_state.csr, ct.mtip, ct.msip_out, false)
+    cur_state.csr = csr_update_mip(cur_state.csr, ct.mtip, ct.msip_out, plic_irq.meip)
 
     # Tick CSR counters (mcycle, minstret)
     cur_state.csr = csr_tick(cur_state.csr)
@@ -551,3 +612,221 @@ fn soc_tick(state: SocState) -> SocTickResult:
     )
 
     SocTickResult(state: cur_state, ports: ports)
+
+# ============================================================================
+# Protected RV32IMAC SoC path — additive; legacy soc_tick remains unchanged
+# ============================================================================
+
+struct SocProtected32State:
+    core: CoreProtectedState32
+    uart: Uart16550State
+    clint: ClintState
+    plic: PlicState
+    mailbox: MailboxState
+    ram: RamState
+    sparse: SparseRam
+    dram_size: u32
+    dtb_size: u32
+    dtb_ram_size: u32
+    dtb_initrd_start: u32
+    dtb_initrd_end: u32
+    response_valid: bool
+    response_error: bool
+    response_data: u32
+    supervisor_timer_pending: bool
+    supervisor_external_pending: bool
+
+struct SocProtected32TickResult:
+    state: SocProtected32State
+    ports: SocPorts
+    bus_lock: bool
+
+fn soc_protected32_from_legacy(fabric: SocState) -> SocProtected32State:
+    SocProtected32State(core: core32_init(BOOTROM_BASE), uart: fabric.uart,
+        clint: fabric.clint, plic: fabric.plic, mailbox: fabric.mailbox, ram: fabric.ram,
+        sparse: fabric.sparse, dram_size: fabric.dram_size,
+        dtb_size: fabric.dtb_size, dtb_ram_size: fabric.dtb_ram_size,
+        dtb_initrd_start: fabric.dtb_initrd_start,
+        dtb_initrd_end: fabric.dtb_initrd_end,
+        response_valid: false, response_error: false, response_data: 0,
+        supervisor_timer_pending: false, supervisor_external_pending: false)
+
+fn soc_protected32_create(ram_size_words: u32) -> SocProtected32State:
+    soc_protected32_create_with_initrd(ram_size_words, 0, 0)
+
+fn soc_protected32_create_with_initrd(ram_size_words: u32,
+                                      initrd_start: u32,
+                                      initrd_end: u32) -> SocProtected32State:
+    var fabric = soc_create(ram_size_words)
+    fabric.sparse = sparse_create(SOC_DTB_RAM_SIZE as u32)
+    fabric.dram_size = SOC_DTB_RAM_SIZE as u32
+    fabric.dtb_ram_size = SOC_DTB_RAM_SIZE as u32
+    fabric.dtb_initrd_start = initrd_start
+    fabric.dtb_initrd_end = initrd_end
+    fabric.dtb_size = SOC_DTB_RESERVED_SIZE as u32
+    soc_protected32_from_legacy(fabric)
+
+fn soc_protected32_create_bytes(dram_bytes: u32) -> SocProtected32State:
+    soc_protected32_create_bytes_with_initrd(dram_bytes, 0, 0)
+
+fn soc_protected32_create_bytes_with_initrd(dram_bytes: u32,
+                                            initrd_start: u32,
+                                            initrd_end: u32) -> SocProtected32State:
+    var effective_size = dram_bytes
+    if effective_size < SOC_DTB_RAM_SIZE as u32:
+        effective_size = SOC_DTB_RAM_SIZE as u32
+    var fabric = soc_create_bytes(effective_size)
+    fabric.dtb_initrd_start = initrd_start
+    fabric.dtb_initrd_end = initrd_end
+    fabric.dtb_size = SOC_DTB_RESERVED_SIZE as u32
+    soc_protected32_from_legacy(fabric)
+
+fn soc_protected32_sim_preload_dtb(state: SocProtected32State) -> SocProtected32State:
+    """Simulation-only asset load; production RAM images preload the same blob."""
+    var out = state
+    val blob = soc_rv32_linux_dtb_for_ram_initrd(state.dtb_ram_size as u64,
+        state.dtb_initrd_start as u64, state.dtb_initrd_end as u64)
+    var i: u32 = 0
+    while i < blob.len() as u32:
+        out.sparse = sparse_write(out.sparse,
+            (SOC_DTB_BASE as u32) - RAM_BASE + i, blob[i] as u32, 0)
+        i = i + 1
+    out
+
+fn soc_protected32_fabric(state: SocProtected32State) -> SocState:
+    """Build a transient legacy-fabric view; protected core state stays authoritative."""
+    SocState(core: state.core.core, csr: state.core.csr_m, regfile: state.core.rf,
+        uart: state.uart, clint: state.clint, plic: state.plic, mailbox: state.mailbox,
+        ram: state.ram, sparse: state.sparse, dram_size: state.dram_size,
+        dtb_size: state.dtb_size, dtb_ram_size: state.dtb_ram_size,
+        dtb_initrd_start: state.dtb_initrd_start,
+        dtb_initrd_end: state.dtb_initrd_end)
+
+fn soc_protected32_copy_fabric(state: SocProtected32State,
+                               fabric: SocState) -> SocProtected32State:
+    var out = state
+    out.uart = fabric.uart
+    out.clint = fabric.clint
+    out.plic = fabric.plic
+    out.mailbox = fabric.mailbox
+    out.ram = fabric.ram
+    out.sparse = fabric.sparse
+    out.dtb_size = fabric.dtb_size
+    out.dtb_ram_size = fabric.dtb_ram_size
+    out.dtb_initrd_start = fabric.dtb_initrd_start
+    out.dtb_initrd_end = fabric.dtb_initrd_end
+    out
+
+fn soc_protected32_bus_width(size_bytes: u32) -> u32:
+    if size_bytes == 4: return 2
+    if size_bytes == 2: return 1
+    0
+
+fn soc_protected32_read(state: SocProtected32State, addr: u32) -> u32:
+    val fabric = soc_protected32_fabric(state)
+    val data = soc_mem_read(fabric, addr)
+    if soc32_in_dtb(fabric, addr):
+        return data >> ((addr & 3) * 8)
+    val slave_idx = soc_route(addr, state.dram_size)
+    if slave_idx == WB_SLAVE_ROM or slave_idx == WB_SLAVE_RAM:
+        return data >> ((addr & 3) * 8)
+    data
+
+fn soc_protected32_read_update(state: SocProtected32State,
+                               addr: u32) -> SocProtected32State:
+    val fabric = soc_mem_read_update(soc_protected32_fabric(state), addr)
+    soc_protected32_copy_fabric(state, fabric)
+
+fn soc_protected32_invalidate_reservation(state: SocProtected32State,
+                                          physical_address: i64,
+                                          size_bytes: u32) -> SocProtected32State:
+    var out = state
+    out.core = core32_invalidate_reservation(state.core, physical_address, size_bytes)
+    out
+
+fn soc_protected32_uart_push_rx(state: SocProtected32State,
+                                byte_val: u32) -> SocProtected32State:
+    """Latch one host/testbench receive event into the canonical UART FIFO."""
+    var out = state
+    out.uart = uart_rx_push(state.uart, byte_val)
+    out
+
+fn soc_protected32_set_supervisor_interrupts(state: SocProtected32State,
+                                             stip: bool,
+                                             seip: bool) -> SocProtected32State:
+    """Latch platform-owned S interrupt levels without exposing CSR internals."""
+    var out = state
+    out.supervisor_timer_pending = stip
+    out.supervisor_external_pending = seip
+    out
+
+fn soc_protected32_tick(state: SocProtected32State) -> SocProtected32TickResult:
+    """Advance the protected core and service one accepted physical request."""
+    var out = state
+    val cycle = core32_cycle(state.core, true, state.response_valid,
+        state.response_error, state.response_data)
+    out.core = cycle.state
+    out.response_valid = false
+    out.response_error = false
+    out.response_data = 0
+    var char_out: u32 = 0
+    var char_valid = false
+
+    if cycle.bus_valid:
+        out.response_valid = true
+        if (cycle.bus_addr < 0 or cycle.bus_addr > 0xFFFFFFFF or
+            (cycle.bus_size != 1 and cycle.bus_size != 2 and cycle.bus_size != 4)):
+            out.response_error = true
+        else:
+            val addr = cycle.bus_addr as u32
+            val slave_idx = soc_route(addr, out.dram_size)
+            val is_dtb = soc32_in_dtb(soc_protected32_fabric(out), addr)
+            if (cycle.bus_is_pte and (cycle.bus_write or cycle.bus_size != 4 or
+                is_dtb or (slave_idx != WB_SLAVE_ROM and slave_idx != WB_SLAVE_RAM))):
+                out.response_error = true
+            else if slave_idx == SOC32_SLAVE_PLIC and cycle.bus_size != 4:
+                out.response_error = true
+            else if cycle.bus_write:
+                if is_dtb:
+                    out.response_error = true
+                else if (slave_idx == WB_SLAVE_CLINT or slave_idx == WB_SLAVE_UART or
+                    slave_idx == SOC32_SLAVE_PLIC or
+                    slave_idx == WB_SLAVE_RAM or slave_idx == WB_SLAVE_MAILBOX):
+                    val written = soc_mem_write(soc_protected32_fabric(out), addr,
+                        cycle.bus_wdata, soc_protected32_bus_width(cycle.bus_size))
+                    out = soc_protected32_copy_fabric(out, written.state)
+                    char_out = written.char_out
+                    char_valid = written.char_valid
+                    if written.halt_request:
+                        out.core.core.halt = true
+                else:
+                    out.response_error = true
+            else:
+                if is_dtb:
+                    out.response_data = soc_protected32_read(out, addr)
+                else if (slave_idx == WB_SLAVE_ROM or slave_idx == WB_SLAVE_CLINT or
+                    slave_idx == SOC32_SLAVE_PLIC or
+                    slave_idx == WB_SLAVE_UART or slave_idx == WB_SLAVE_RAM or
+                    slave_idx == WB_SLAVE_MAILBOX):
+                    out.response_data = soc_protected32_read(out, addr)
+                    if not cycle.bus_is_pte:
+                        out = soc_protected32_read_update(out, addr)
+                else:
+                    out.response_error = true
+
+    val ct = clint_tick(out.clint)
+    out.clint = ct.state
+    val ut = uart_tick(out.uart)
+    out.uart = ut.state
+    val uart_irq_pending = (ut.irq and
+        out.plic.claim_complete != SOC32_PLIC_SRC_UART and
+        out.plic.claim_complete_s != SOC32_PLIC_SRC_UART)
+    out.plic = plic_set_pending(out.plic, SOC32_PLIC_SRC_UART, uart_irq_pending)
+    val plic_irq = plic_check_interrupt(out.plic)
+    val plic_s_irq = plic_check_interrupt_s(out.plic)
+    out.core = core32_set_pending_interrupts(out.core, ct.msip_out, ct.mtip, plic_irq.meip)
+    out.core = core32_set_supervisor_pending_interrupts(out.core,
+        out.supervisor_timer_pending, out.supervisor_external_pending or plic_s_irq.meip)
+    val ports = SocPorts(uart_tx: ut.tx_out != 0, halted: out.core.core.halt,
+        char_out: char_out, char_valid: char_valid)
+    SocProtected32TickResult(state: out, ports: ports, bus_lock: cycle.bus_lock)

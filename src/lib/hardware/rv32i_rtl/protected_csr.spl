@@ -1,0 +1,266 @@
+use std.hardware.rv32i_rtl.csr.{CsrFile, csr_read, csr_write}
+use std.hardware.rv32i_rtl.csr.{CSR_ADDR_MSTATUS, CSR_ADDR_MISA, CSR_ADDR_MIE, CSR_ADDR_MTVEC}
+use std.hardware.rv32i_rtl.csr.{CSR_ADDR_MSCRATCH, CSR_ADDR_MEPC, CSR_ADDR_MCAUSE, CSR_ADDR_MTVAL, CSR_ADDR_MIP}
+use std.hardware.rv32i_rtl.csr.{CSR_ADDR_MCYCLE, CSR_ADDR_MCYCLEH, CSR_ADDR_MINSTRET, CSR_ADDR_MINSTRETH, CSR_ADDR_MHARTID}
+use std.hardware.rv32i_rtl.csr_s.{CsrSMode, csr_s_read, csr_s_write}
+use std.hardware.rv32i_rtl.csr_s.{CSR_ADDR_SSTATUS, CSR_ADDR_SIE, CSR_ADDR_STVEC, CSR_ADDR_SSCRATCH, CSR_ADDR_SEPC, CSR_ADDR_SCAUSE, CSR_ADDR_STVAL, CSR_ADDR_SIP, CSR_ADDR_SATP, CSR_ADDR_MEDELEG, CSR_ADDR_MIDELEG}
+use std.hardware.rv32i_rtl.csr_s.{SSTATUS_WRITABLE, SIP_SSIP_MASK, SIP_STIP_MASK, SIP_SEIP_MASK}
+use std.hardware.rv32i_rtl.mmu_sv32.{MmuState, mmu_set_satp, mmu_flush, PRIV_U, PRIV_M}
+use std.hardware.rv32i_rtl.pmp.PmpEntries32
+use std.hardware.rv32i_rtl.pmp_csr.{pmp32_csr_read, pmp32_csr_write}
+
+val CORE32_S_INTERRUPT_MASK: u32 = SIP_SSIP_MASK | SIP_STIP_MASK | SIP_SEIP_MASK
+val CORE32_MSTATUS_WRITABLE: u32 = 0x000E19AA
+val CORE32_COUNTER_MASK: u32 = 0x00000007
+val CSR_ADDR_MCOUNTEREN: u32 = 0x306
+val CSR_ADDR_SCOUNTEREN: u32 = 0x106
+val CSR_ADDR_CYCLE: u32 = 0xC00
+val CSR_ADDR_TIME: u32 = 0xC01
+val CSR_ADDR_INSTRET: u32 = 0xC02
+val CSR_ADDR_CYCLEH: u32 = 0xC80
+val CSR_ADDR_TIMEH: u32 = 0xC81
+val CSR_ADDR_INSTRETH: u32 = 0xC82
+
+struct ProtectedCsrState32:
+    csr_m: CsrFile
+    csr_s: CsrSMode
+    mmu: MmuState
+    pmp: PmpEntries32
+    privilege: u32
+    mcounteren: u32
+    scounteren: u32
+    firmware_stip: bool
+    platform_stip: bool
+    time_value: i64
+
+struct Core32CsrAccess:
+    valid: bool
+    old_value: u32
+    csr_m: CsrFile
+    csr_s: CsrSMode
+    mmu: MmuState
+    pmp: PmpEntries32
+    mcounteren: u32
+    scounteren: u32
+    firmware_stip: bool
+    platform_stip: bool
+
+@hardware
+fn core32_sync_supervisor_aliases(csr: CsrFile, smode: CsrSMode) -> CsrSMode:
+    var out = smode
+    out.sstatus = csr.mstatus & SSTATUS_WRITABLE
+    val delegated = smode.mideleg & CORE32_S_INTERRUPT_MASK
+    out.sie = csr.mie & delegated
+    out.sip = csr.mip & delegated
+    out
+
+@hardware
+fn protected_csr32_read(csr: CsrFile, addr: u32) -> u32:
+    if addr == CSR_ADDR_MISA:
+        return csr.misa | 0x00001005
+    csr_read(csr, addr)
+
+@hardware
+fn protected_csr32_write(csr: CsrFile, addr: u32, value: u32) -> CsrFile:
+    var out = csr
+    if addr == CSR_ADDR_MCYCLE:
+        out.mcycle = value
+        return out
+    if addr == CSR_ADDR_MCYCLEH:
+        out.mcycleh = value
+        return out
+    if addr == CSR_ADDR_MINSTRET:
+        out.minstret = value
+        return out
+    if addr == CSR_ADDR_MINSTRETH:
+        out.minstreth = value
+        return out
+    if addr == CSR_ADDR_MEPC:
+        out.mepc = value & 0xFFFFFFFE
+        return out
+    if addr == CSR_ADDR_MSTATUS:
+        out.mstatus = value & CORE32_MSTATUS_WRITABLE
+        if ((out.mstatus & 0x00001800) >> 11) == 2:
+            out.mstatus = out.mstatus | 0x00001800
+        return out
+    if addr == CSR_ADDR_MTVEC:
+        out.mtvec = (value & 0xFFFFFFFC) | (value & 1)
+        return out
+    if addr == CSR_ADDR_MIP:
+        val writable = SIP_SSIP_MASK | SIP_STIP_MASK
+        out.mip = (csr.mip & (writable ^ 0xFFFFFFFF)) | (value & writable)
+        return out
+    csr_write(csr, addr, value)
+
+@hardware
+fn protected_csr32_s_write(smode: CsrSMode, addr: u32, value: u32) -> CsrSMode:
+    if addr == CSR_ADDR_SEPC:
+        var out = smode
+        out.sepc = value & 0xFFFFFFFE
+        return out
+    if addr == CSR_ADDR_STVEC:
+        var out = smode
+        out.stvec = (value & 0xFFFFFFFC) | (value & 1)
+        return out
+    csr_s_write(smode, addr, value)
+
+@hardware
+fn protected_csr32_machine_known(addr: u32) -> bool:
+    addr == CSR_ADDR_MSTATUS or addr == CSR_ADDR_MISA or addr == CSR_ADDR_MIE or
+    addr == CSR_ADDR_MTVEC or addr == CSR_ADDR_MSCRATCH or addr == CSR_ADDR_MEPC or
+    addr == CSR_ADDR_MCAUSE or addr == CSR_ADDR_MTVAL or addr == CSR_ADDR_MIP or
+    addr == CSR_ADDR_MCYCLE or addr == CSR_ADDR_MCYCLEH or addr == CSR_ADDR_MINSTRET or
+    addr == CSR_ADDR_MINSTRETH or addr == CSR_ADDR_MHARTID
+
+@hardware
+fn protected_csr32_supervisor_known(addr: u32) -> bool:
+    addr == CSR_ADDR_SSTATUS or addr == CSR_ADDR_SIE or addr == CSR_ADDR_STVEC or
+    addr == CSR_ADDR_SSCRATCH or addr == CSR_ADDR_SEPC or addr == CSR_ADDR_SCAUSE or
+    addr == CSR_ADDR_STVAL or addr == CSR_ADDR_SIP or addr == CSR_ADDR_SATP or
+    addr == CSR_ADDR_MEDELEG or addr == CSR_ADDR_MIDELEG
+
+@hardware
+fn protected_csr32_counter_known(addr: u32) -> bool:
+    addr == CSR_ADDR_CYCLE or addr == CSR_ADDR_TIME or addr == CSR_ADDR_INSTRET or
+    addr == CSR_ADDR_CYCLEH or addr == CSR_ADDR_TIMEH or addr == CSR_ADDR_INSTRETH
+
+@hardware
+fn protected_csr32_counter_bit(addr: u32) -> u32:
+    if addr == CSR_ADDR_CYCLE or addr == CSR_ADDR_CYCLEH: return 1
+    if addr == CSR_ADDR_TIME or addr == CSR_ADDR_TIMEH: return 2
+    4
+
+@hardware
+fn protected_csr32_counter_read(state: ProtectedCsrState32, addr: u32) -> u32:
+    if addr == CSR_ADDR_CYCLE: return state.csr_m.mcycle
+    if addr == CSR_ADDR_TIME: return state.time_value as u32
+    if addr == CSR_ADDR_CYCLEH: return state.csr_m.mcycleh
+    if addr == CSR_ADDR_TIMEH: return (state.time_value >> 32) as u32
+    if addr == CSR_ADDR_INSTRET: return state.csr_m.minstret
+    state.csr_m.minstreth
+
+@hardware
+fn protected_csr32_counter_enabled(state: ProtectedCsrState32, addr: u32) -> bool:
+    if state.privilege == PRIV_M: return true
+    val bit = protected_csr32_counter_bit(addr)
+    if (state.mcounteren & bit) == 0: return false
+    state.privilege != PRIV_U or (state.scounteren & bit) != 0
+
+@hardware
+fn core32_csr_source(funct3: u32, rs1: u32, rs1_data: u32) -> u32:
+    if (funct3 & 4) != 0: return rs1
+    rs1_data
+
+@hardware
+fn protected_csr32_write_requested(funct3: u32, source: u32) -> bool:
+    val op = funct3 & 3
+    op == 1 or ((op == 2 or op == 3) and source != 0)
+
+@hardware
+fn protected_csr32_next_value(old_value: u32, source: u32, funct3: u32) -> u32:
+    val op = funct3 & 3
+    if op == 1: return source
+    if op == 2: return old_value | source
+    if op == 3: return old_value & (source ^ 0xFFFFFFFF)
+    old_value
+
+fn protected_csr32_invalid(state: ProtectedCsrState32) -> Core32CsrAccess:
+    Core32CsrAccess(valid: false, old_value: 0, csr_m: state.csr_m,
+        csr_s: state.csr_s, mmu: state.mmu, pmp: state.pmp,
+        mcounteren: state.mcounteren, scounteren: state.scounteren,
+        firmware_stip: state.firmware_stip, platform_stip: state.platform_stip)
+
+fn protected_csr32_access(state: ProtectedCsrState32, addr: u32, source: u32,
+                          funct3: u32) -> Core32CsrAccess:
+    if (funct3 & 3) == 0:
+        return protected_csr32_invalid(state)
+    val write_requested = protected_csr32_write_requested(funct3, source)
+    val read_only = ((addr >> 10) & 3) == 3 or addr == CSR_ADDR_MISA or addr == CSR_ADDR_MHARTID
+    if state.privilege < ((addr >> 8) & 3) or (write_requested and read_only):
+        return protected_csr32_invalid(state)
+
+    if protected_csr32_counter_known(addr):
+        if not protected_csr32_counter_enabled(state, addr):
+            return protected_csr32_invalid(state)
+        return Core32CsrAccess(valid: true, old_value: protected_csr32_counter_read(state, addr),
+            csr_m: state.csr_m, csr_s: state.csr_s, mmu: state.mmu, pmp: state.pmp,
+            mcounteren: state.mcounteren, scounteren: state.scounteren,
+            firmware_stip: state.firmware_stip, platform_stip: state.platform_stip)
+
+    if addr == CSR_ADDR_MCOUNTEREN or addr == CSR_ADDR_SCOUNTEREN:
+        val old_value = if addr == CSR_ADDR_MCOUNTEREN: state.mcounteren else: state.scounteren
+        var next_value = old_value
+        if write_requested:
+            next_value = protected_csr32_next_value(old_value, source, funct3) & CORE32_COUNTER_MASK
+        return Core32CsrAccess(valid: true, old_value: old_value,
+            csr_m: state.csr_m, csr_s: state.csr_s, mmu: state.mmu, pmp: state.pmp,
+            mcounteren: if addr == CSR_ADDR_MCOUNTEREN: next_value else: state.mcounteren,
+            scounteren: if addr == CSR_ADDR_SCOUNTEREN: next_value else: state.scounteren,
+            firmware_stip: state.firmware_stip, platform_stip: state.platform_stip)
+
+    val pmp_read = pmp32_csr_read(state.pmp, addr)
+    if pmp_read.handled:
+        var new_pmp = state.pmp
+        if write_requested:
+            new_pmp = pmp32_csr_write(state.pmp, addr,
+                protected_csr32_next_value(pmp_read.value, source, funct3)).entries
+        return Core32CsrAccess(valid: true, old_value: pmp_read.value,
+            csr_m: state.csr_m, csr_s: state.csr_s, mmu: state.mmu, pmp: new_pmp,
+            mcounteren: state.mcounteren, scounteren: state.scounteren,
+            firmware_stip: state.firmware_stip, platform_stip: state.platform_stip)
+
+    if protected_csr32_machine_known(addr):
+        val old_value = protected_csr32_read(state.csr_m, addr)
+        var new_csr = state.csr_m
+        var new_firmware_stip = state.firmware_stip
+        if write_requested:
+            val next_value = protected_csr32_next_value(old_value, source, funct3)
+            new_csr = protected_csr32_write(state.csr_m, addr, next_value)
+            if addr == CSR_ADDR_MIP:
+                new_firmware_stip = (next_value & SIP_STIP_MASK) != 0
+                if state.platform_stip or new_firmware_stip:
+                    new_csr.mip = new_csr.mip | SIP_STIP_MASK
+        return Core32CsrAccess(valid: true, old_value: old_value, csr_m: new_csr,
+            csr_s: core32_sync_supervisor_aliases(new_csr, state.csr_s),
+            mmu: state.mmu, pmp: state.pmp,
+            mcounteren: state.mcounteren, scounteren: state.scounteren,
+            firmware_stip: new_firmware_stip, platform_stip: state.platform_stip)
+
+    if protected_csr32_supervisor_known(addr):
+        var old_value = csr_s_read(state.csr_s, addr)
+        if addr == CSR_ADDR_SSTATUS:
+            old_value = state.csr_m.mstatus & SSTATUS_WRITABLE
+        else if addr == CSR_ADDR_SIE:
+            old_value = state.csr_m.mie & state.csr_s.mideleg & CORE32_S_INTERRUPT_MASK
+        else if addr == CSR_ADDR_SIP:
+            old_value = state.csr_m.mip & state.csr_s.mideleg & CORE32_S_INTERRUPT_MASK
+        var new_s = state.csr_s
+        var new_csr = state.csr_m
+        var new_mmu = state.mmu
+        if write_requested:
+            val next_value = protected_csr32_next_value(old_value, source, funct3)
+            if addr == CSR_ADDR_SSTATUS:
+                new_csr.mstatus = (new_csr.mstatus & (SSTATUS_WRITABLE ^ 0xFFFFFFFF)) |
+                    (next_value & SSTATUS_WRITABLE)
+            else if addr == CSR_ADDR_SIE:
+                val mask = state.csr_s.mideleg & CORE32_S_INTERRUPT_MASK
+                new_csr.mie = (new_csr.mie & (mask ^ 0xFFFFFFFF)) | (next_value & mask)
+            else if addr == CSR_ADDR_SIP:
+                val mask = state.csr_s.mideleg & SIP_SSIP_MASK
+                new_csr.mip = (new_csr.mip & (mask ^ 0xFFFFFFFF)) | (next_value & mask)
+            else:
+                new_s = protected_csr32_s_write(state.csr_s, addr, next_value)
+                if addr == CSR_ADDR_MIDELEG:
+                    new_s.mideleg = next_value & CORE32_S_INTERRUPT_MASK
+            if addr == CSR_ADDR_SATP and new_s.satp != state.csr_s.satp:
+                new_mmu = mmu_set_satp(mmu_flush(state.mmu), new_s.satp)
+        new_s = core32_sync_supervisor_aliases(new_csr, new_s)
+        return Core32CsrAccess(valid: true, old_value: old_value, csr_m: new_csr,
+            csr_s: new_s, mmu: new_mmu, pmp: state.pmp,
+            mcounteren: state.mcounteren, scounteren: state.scounteren,
+            firmware_stip: state.firmware_stip, platform_stip: state.platform_stip)
+    protected_csr32_invalid(state)
+
+export ProtectedCsrState32, Core32CsrAccess
+export CORE32_S_INTERRUPT_MASK
+export core32_sync_supervisor_aliases, core32_csr_source, protected_csr32_access

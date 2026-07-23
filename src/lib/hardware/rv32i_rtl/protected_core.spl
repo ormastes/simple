@@ -1,0 +1,753 @@
+use std.hardware.rv32i_rtl.pkg.{OP_LUI, OP_AUIPC, OP_JAL, OP_JALR}
+use std.hardware.rv32i_rtl.pkg.{OP_BRANCH, OP_LOAD, OP_STORE, OP_SYSTEM, OP_IMMED, OP_REG}
+use std.hardware.rv32i_rtl.pkg.{BR_BEQ, BR_BNE, BR_BLT, BR_BGE, BR_BLTU, BR_BGEU}
+use std.hardware.rv32i_rtl.decode.decode_instruction
+use std.hardware.rv32i_rtl.regfile.{RegFile, regfile_create, regfile_read, regfile_write}
+use std.hardware.rv32i_rtl.core.{CoreState, core_reset, core_combinational}
+use std.hardware.rv32i_rtl.csr.{CsrFile, csr_create}
+use std.hardware.rv32i_rtl.csr_s.{CsrSMode, csr_s_create}
+use std.hardware.rv32i_rtl.csr_s.{SSTATUS_SUM_MASK, SSTATUS_MXR_MASK, SSTATUS_SIE_MASK, SSTATUS_SPIE_MASK, SSTATUS_SPP_MASK}
+use std.hardware.rv32i_rtl.csr_s.{SIP_SSIP_MASK, SIP_STIP_MASK, SIP_SEIP_MASK}
+use std.hardware.rv32i_rtl.mmu_sv32.{MmuState, mmu_create, mmu_sfence_vma}
+use std.hardware.rv32i_rtl.mmu_sv32.{ACCESS_FETCH, ACCESS_LOAD, ACCESS_STORE, PRIV_U, PRIV_S, PRIV_M}
+use std.hardware.rv32i_rtl.memory_access.{MemoryAccessState32, memory32_start, memory32_start_probe, memory32_start_physical, memory32_cycle}
+use std.hardware.rv32i_rtl.memory_access.MEMORY32_REQUEST
+use std.hardware.rv32i_rtl.pmp.PmpEntries32
+use std.hardware.rv32i_rtl.pmp_csr.pmp32_entries_reset
+use std.hardware.rv32i_rtl.protected_csr.{ProtectedCsrState32, Core32CsrAccess}
+use std.hardware.rv32i_rtl.protected_csr.{CORE32_S_INTERRUPT_MASK, core32_sync_supervisor_aliases}
+use std.hardware.rv32i_rtl.protected_csr.{core32_csr_source, protected_csr32_access}
+use std.hardware.rv32i_rtl.trap.{CAUSE_ILLEGAL_INSN, CAUSE_BREAKPOINT, CAUSE_ECALL_M}
+use std.hardware.rv32i_rtl.m_extension.{Rv32MState, rv32m_create, rv32m_decode, rv32m_start, rv32m_tick}
+use std.hardware.rv32i_rtl.c_extension.{rv32c_is_compressed, rv32c_expand}
+use std.hardware.rv32i_rtl.a_extension.{Rv32Reservation, rv32a_reservation_empty, rv32a_lr_set}
+use std.hardware.rv32i_rtl.a_extension.{rv32a_decode, rv32a_compute, rv32a_sc_check_and_clear, rv32a_invalidate_external}
+use std.hardware.rv32i_rtl.a_extension.{RV32A_AMO_LR, RV32A_AMO_SC}
+use std.hardware.rv32i_rtl.rvfi.{RvfiTrace, rvfi_mask_for_width}
+
+# ============================================================================
+# Canonical protected RV32 core shell
+# ============================================================================
+
+val CORE32_FETCH: u32 = 0
+val CORE32_EXECUTE: u32 = 1
+val CORE32_DATA_ACCESS: u32 = 2
+val CORE32_FETCH_SECOND: u32 = 3
+val CORE32_MULDIV: u32 = 4
+val CORE32_ATOMIC_READ: u32 = 5
+val CORE32_ATOMIC_WRITE: u32 = 6
+val CORE32_ATOMIC_PROBE: u32 = 7
+val CORE32_ATOMIC_WRITE_PROBE: u32 = 8
+val CORE32_WFI: u32 = 9
+val CORE32_CAUSE_ECALL_U: u32 = 8
+val CORE32_CAUSE_ECALL_S: u32 = 9
+val CORE32_MSTATUS_MIE_MASK: u32 = 0x00000008
+val CORE32_MSTATUS_MPIE_MASK: u32 = 0x00000080
+val CORE32_MSTATUS_MPP_MASK: u32 = 0x00001800
+val CORE32_MSTATUS_MPRV_MASK: u32 = 0x00020000
+val CORE32_M_INTERRUPT_MASK: u32 = 0x00000888
+
+struct CoreProtectedState32:
+    """Architectural RV32 state behind the sole Sv32/PMP bus frontend."""
+    core: CoreState
+    rf: RegFile
+    csr_m: CsrFile
+    csr_s: CsrSMode
+    mmu: MmuState
+    pmp: PmpEntries32
+    privilege: u32
+    mcounteren: u32
+    scounteren: u32
+    firmware_stip: bool
+    platform_stip: bool
+    time_value: i64
+    memory: MemoryAccessState32
+    pipeline_phase: u32
+    instruction: u32
+    instruction_bytes: u32
+    fetch_first: u32
+    muldiv: Rv32MState
+    reservation: Rv32Reservation
+    atomic_old: u32
+    rvfi_order: i64
+    rvfi_valid: bool
+    rvfi_trap: bool
+    rvfi_pc_wdata: u32
+    rvfi_insn: u32
+
+struct Core32CycleResult:
+    state: CoreProtectedState32
+    bus_valid: bool
+    bus_addr: i64
+    bus_size: u32
+    bus_write: bool
+    bus_wdata: u32
+    bus_is_pte: bool
+    bus_lock: bool
+    rvfi: RvfiTrace
+
+struct Core32TrapResult:
+    csr_m: CsrFile
+    csr_s: CsrSMode
+    privilege: u32
+    pc: u32
+
+struct Core32PendingInterrupt:
+    pending: bool
+    cause: u32
+
+@hardware
+fn core32_trap_vector(tvec: u32, cause: u32) -> u32:
+    val base = tvec & 0xFFFFFFFC
+    if (tvec & 3) == 1 and (cause & 0x80000000) != 0:
+        return base + ((cause & 0x7FFFFFFF) << 2)
+    base
+
+@hardware
+fn core32_data_privilege(state: CoreProtectedState32) -> u32:
+    """MPRV changes data/atomic privilege only; fetch always uses current privilege."""
+    if state.privilege != PRIV_M or (state.csr_m.mstatus & CORE32_MSTATUS_MPRV_MASK) == 0:
+        return state.privilege
+    val mpp = (state.csr_m.mstatus & CORE32_MSTATUS_MPP_MASK) >> 11
+    if mpp == PRIV_U or mpp == PRIV_S or mpp == PRIV_M:
+        return mpp
+    PRIV_M
+
+@hardware
+fn core32_data_sum_enabled(state: CoreProtectedState32) -> bool:
+    core32_data_privilege(state) == PRIV_S and (state.csr_m.mstatus & SSTATUS_SUM_MASK) != 0
+
+@hardware
+fn core32_data_mxr_enabled(state: CoreProtectedState32) -> bool:
+    core32_data_privilege(state) != PRIV_M and (state.csr_m.mstatus & SSTATUS_MXR_MASK) != 0
+
+@hardware
+fn core32_tick_cycle(csr: CsrFile) -> CsrFile:
+    """Tick mcycle only; minstret advances exclusively at retirement."""
+    var out = csr
+    out.mcycle = csr.mcycle + 1
+    if out.mcycle == 0:
+        out.mcycleh = csr.mcycleh + 1
+    out
+
+@hardware
+fn core32_retire(csr: CsrFile) -> CsrFile:
+    var out = csr
+    out.minstret = csr.minstret + 1
+    if out.minstret == 0:
+        out.minstreth = csr.minstreth + 1
+    out
+
+@hardware
+fn core32_instruction_legal(instruction: u32) -> bool:
+    """Reject encodings the plain decoder deliberately leaves permissive."""
+    val dec = decode_instruction(instruction)
+    val f3 = dec.funct3
+    val f7 = dec.funct7
+    if dec.opcode == OP_LUI or dec.opcode == OP_AUIPC or dec.opcode == OP_JAL:
+        return true
+    if dec.opcode == OP_JALR:
+        return f3 == 0
+    if dec.opcode == OP_BRANCH:
+        return f3 == BR_BEQ or f3 == BR_BNE or f3 == BR_BLT or f3 == BR_BGE or f3 == BR_BLTU or f3 == BR_BGEU
+    if dec.opcode == OP_LOAD:
+        return f3 == 0 or f3 == 1 or f3 == 2 or f3 == 4 or f3 == 5
+    if dec.opcode == OP_STORE:
+        return f3 == 0 or f3 == 1 or f3 == 2
+    if dec.opcode == OP_IMMED:
+        if f3 == 1: return f7 == 0
+        if f3 == 5: return f7 == 0 or f7 == 0x20
+        return f3 == 0 or f3 == 2 or f3 == 3 or f3 == 4 or f3 == 6 or f3 == 7
+    if dec.opcode == OP_REG:
+        if rv32m_decode(instruction).matched: return true
+        if f3 == 0 or f3 == 5: return f7 == 0 or f7 == 0x20
+        return (f3 == 1 or f3 == 2 or f3 == 3 or f3 == 4 or f3 == 6 or f3 == 7) and f7 == 0
+    if dec.opcode == OP_SYSTEM:
+        if f3 == 1 or f3 == 2 or f3 == 3 or f3 == 5 or f3 == 6 or f3 == 7:
+            return true
+        if instruction == 0x00000073 or instruction == 0x00100073:
+            return true
+        if instruction == 0x30200073 or instruction == 0x10200073 or instruction == 0x10500073:
+            return true
+        return (instruction & 0xFE007FFF) == 0x12000073
+    if dec.opcode == 0x0F:
+        return f3 == 0 or f3 == 1
+    rv32a_decode(instruction).matched
+
+@hardware
+fn core32_trap_delegated(state: CoreProtectedState32, cause: u32) -> bool:
+    if state.privilege == PRIV_M:
+        return false
+    val bit = 1 << (cause & 0x1F)
+    if (cause & 0x80000000) != 0:
+        return (state.csr_s.mideleg & bit) != 0
+    (state.csr_s.medeleg & bit) != 0
+
+fn core32_enter_trap(state: CoreProtectedState32, cause: u32, tval: u32) -> Core32TrapResult:
+    if core32_trap_delegated(state, cause):
+        var csr = state.csr_m
+        var smode = state.csr_s
+        val old_sie = csr.mstatus & SSTATUS_SIE_MASK
+        csr.mstatus = csr.mstatus & ((SSTATUS_SIE_MASK | SSTATUS_SPIE_MASK |
+            SSTATUS_SPP_MASK) ^ 0xFFFFFFFF)
+        csr.mstatus = csr.mstatus | (old_sie << 4)
+        if state.privilege == PRIV_S:
+            csr.mstatus = csr.mstatus | SSTATUS_SPP_MASK
+        smode.sepc = state.core.pc & 0xFFFFFFFE
+        smode.scause = cause
+        smode.stval = tval
+        smode = core32_sync_supervisor_aliases(csr, smode)
+        return Core32TrapResult(csr_m: csr, csr_s: smode, privilege: PRIV_S,
+            pc: core32_trap_vector(smode.stvec, cause))
+
+    var csr = state.csr_m
+    val old_mie = csr.mstatus & CORE32_MSTATUS_MIE_MASK
+    csr.mstatus = csr.mstatus & ((CORE32_MSTATUS_MIE_MASK |
+        CORE32_MSTATUS_MPIE_MASK | CORE32_MSTATUS_MPP_MASK) ^ 0xFFFFFFFF)
+    csr.mstatus = csr.mstatus | (old_mie << 4)
+    csr.mstatus = csr.mstatus | ((state.privilege & 3) << 11)
+    csr.mepc = state.core.pc & 0xFFFFFFFE
+    csr.mcause = cause
+    csr.mtval = tval
+    val smode = core32_sync_supervisor_aliases(csr, state.csr_s)
+    Core32TrapResult(csr_m: csr, csr_s: smode, privilege: PRIV_M,
+        pc: core32_trap_vector(csr.mtvec, cause))
+
+fn core32_exit_mret(state: CoreProtectedState32) -> Core32TrapResult:
+    var csr = state.csr_m
+    val restored_privilege = (csr.mstatus >> 11) & 3
+    val old_mpie = csr.mstatus & CORE32_MSTATUS_MPIE_MASK
+    csr.mstatus = csr.mstatus & ((CORE32_MSTATUS_MIE_MASK |
+        CORE32_MSTATUS_MPIE_MASK | CORE32_MSTATUS_MPP_MASK) ^ 0xFFFFFFFF)
+    csr.mstatus = csr.mstatus | (old_mpie >> 4) | CORE32_MSTATUS_MPIE_MASK
+    if restored_privilege != PRIV_M:
+        csr.mstatus = csr.mstatus & (CORE32_MSTATUS_MPRV_MASK ^ 0xFFFFFFFF)
+    val smode = core32_sync_supervisor_aliases(csr, state.csr_s)
+    Core32TrapResult(csr_m: csr, csr_s: smode, privilege: restored_privilege,
+        pc: csr.mepc & 0xFFFFFFFE)
+
+fn core32_exit_sret(state: CoreProtectedState32) -> Core32TrapResult:
+    var csr = state.csr_m
+    var smode = state.csr_s
+    val restored_privilege = if (csr.mstatus & SSTATUS_SPP_MASK) != 0: PRIV_S else: PRIV_U
+    val old_spie = csr.mstatus & SSTATUS_SPIE_MASK
+    csr.mstatus = csr.mstatus & ((SSTATUS_SIE_MASK | SSTATUS_SPIE_MASK |
+        SSTATUS_SPP_MASK) ^ 0xFFFFFFFF)
+    csr.mstatus = csr.mstatus | (old_spie >> 4) | SSTATUS_SPIE_MASK
+    if state.privilege == PRIV_M and restored_privilege != PRIV_M:
+        csr.mstatus = csr.mstatus & (CORE32_MSTATUS_MPRV_MASK ^ 0xFFFFFFFF)
+    smode = core32_sync_supervisor_aliases(csr, smode)
+    Core32TrapResult(csr_m: csr, csr_s: smode, privilege: restored_privilege,
+        pc: smode.sepc & 0xFFFFFFFE)
+
+@hardware
+fn core32_interrupt_eligible(state: CoreProtectedState32, mask: u32) -> bool:
+    if (state.csr_m.mie & state.csr_m.mip & mask) == 0:
+        return false
+    if (state.csr_s.mideleg & mask) != 0:
+        if state.privilege == PRIV_M: return false
+        if state.privilege == PRIV_S:
+            return (state.csr_m.mstatus & SSTATUS_SIE_MASK) != 0
+        return true
+    if state.privilege == PRIV_M:
+        return (state.csr_m.mstatus & CORE32_MSTATUS_MIE_MASK) != 0
+    true
+
+fn core32_check_interrupt(state: CoreProtectedState32) -> Core32PendingInterrupt:
+    # Apply delegation and global privilege gates before selecting priority.
+    if core32_interrupt_eligible(state, 0x00000800):
+        return Core32PendingInterrupt(pending: true, cause: 0x8000000B)
+    if core32_interrupt_eligible(state, 0x00000008):
+        return Core32PendingInterrupt(pending: true, cause: 0x80000003)
+    if core32_interrupt_eligible(state, 0x00000080):
+        return Core32PendingInterrupt(pending: true, cause: 0x80000007)
+    if core32_interrupt_eligible(state, SIP_SEIP_MASK):
+        return Core32PendingInterrupt(pending: true, cause: 0x80000009)
+    if core32_interrupt_eligible(state, SIP_SSIP_MASK):
+        return Core32PendingInterrupt(pending: true, cause: 0x80000001)
+    if core32_interrupt_eligible(state, SIP_STIP_MASK):
+        return Core32PendingInterrupt(pending: true, cause: 0x80000005)
+    Core32PendingInterrupt(pending: false, cause: 0)
+
+@hardware
+fn core32_sum_enabled(state: CoreProtectedState32) -> bool:
+    (state.csr_m.mstatus & SSTATUS_SUM_MASK) != 0
+
+@hardware
+fn core32_mxr_enabled(state: CoreProtectedState32) -> bool:
+    (state.csr_m.mstatus & SSTATUS_MXR_MASK) != 0
+
+@hardware
+fn core32_data_size(funct3: u32) -> u32:
+    if (funct3 & 3) == 0: return 1
+    if (funct3 & 3) == 1: return 2
+    4
+
+fn core32_empty_rvfi(order: i64) -> RvfiTrace:
+    RvfiTrace(rvfi_valid: false, rvfi_order: order, rvfi_insn: 0,
+        rvfi_trap: false, rvfi_rs1_addr: 0, rvfi_rs2_addr: 0,
+        rvfi_rs1_rdata: 0, rvfi_rs2_rdata: 0, rvfi_rd_addr: 0,
+        rvfi_rd_wdata: 0, rvfi_pc_rdata: 0, rvfi_pc_wdata: 0,
+        rvfi_mem_addr: 0, rvfi_mem_rmask: 0, rvfi_mem_wmask: 0,
+        rvfi_mem_rdata: 0, rvfi_mem_wdata: 0)
+
+fn core32_rvfi_trace(before: CoreProtectedState32, after: CoreProtectedState32,
+                     response_data: u32) -> RvfiTrace:
+    if not after.rvfi_valid:
+        return core32_empty_rvfi(before.rvfi_order)
+    val instruction = if after.rvfi_trap: after.instruction else: before.instruction
+    var trace_insn = if after.rvfi_trap: after.rvfi_insn else: before.rvfi_insn
+    if trace_insn == 0:
+        trace_insn = instruction
+    val dec = decode_instruction(instruction)
+    val read = regfile_read(before.rf, dec.rs1, dec.rs2)
+    val comb = core_combinational(before.core, instruction, response_data, before.rf)
+    val amo = rv32a_decode(instruction)
+    val writes_rd = not after.rvfi_trap and (comb.dec.reg_write or
+        rv32m_decode(instruction).matched or amo.matched or
+        (dec.opcode == OP_SYSTEM and dec.funct3 != 0))
+    val rd_addr = if writes_rd: dec.rd else: 0
+    val rd_data = if rd_addr == 0: 0 else: regfile_read(after.rf, rd_addr, 0).rs1_data
+    var sc_failed = false
+    if amo.matched and amo.operation == RV32A_AMO_SC and
+        before.pipeline_phase == CORE32_ATOMIC_WRITE and before.memory.phase == MEMORY32_REQUEST:
+        sc_failed = not rv32a_sc_check_and_clear(before.reservation,
+            before.memory.paddr).store_allowed
+    val memory_event = not after.rvfi_trap and not sc_failed and (before.pipeline_phase == CORE32_DATA_ACCESS or
+        before.pipeline_phase == CORE32_ATOMIC_READ or
+        before.pipeline_phase == CORE32_ATOMIC_WRITE)
+    val size_code: u32 = if before.memory.size_bytes == 1: 0 else if before.memory.size_bytes == 2: 1 else: 2
+    val lane_shift = (before.memory.vaddr & 3) * 8
+    val mask = if memory_event: rvfi_mask_for_width(size_code) << (before.memory.vaddr & 3) else: 0
+    var memory_read = memory_event and (before.memory.access_type == ACCESS_LOAD)
+    val memory_write = memory_event and (before.memory.access_type == ACCESS_STORE)
+    var memory_read_data = response_data
+    if memory_event and before.pipeline_phase == CORE32_ATOMIC_WRITE and
+        amo.matched and amo.operation != RV32A_AMO_SC:
+        memory_read = true
+        memory_read_data = before.atomic_old
+    RvfiTrace(rvfi_valid: true, rvfi_order: before.rvfi_order,
+        rvfi_insn: trace_insn, rvfi_trap: after.rvfi_trap,
+        rvfi_rs1_addr: dec.rs1, rvfi_rs2_addr: dec.rs2,
+        rvfi_rs1_rdata: read.rs1_data, rvfi_rs2_rdata: read.rs2_data,
+        rvfi_rd_addr: rd_addr, rvfi_rd_wdata: rd_data,
+        rvfi_pc_rdata: before.core.pc, rvfi_pc_wdata: after.rvfi_pc_wdata,
+        rvfi_mem_addr: if memory_event: before.memory.vaddr else: 0,
+        rvfi_mem_rmask: if memory_read: mask else: 0,
+        rvfi_mem_wmask: if memory_write: mask else: 0,
+        rvfi_mem_rdata: if memory_read: memory_read_data << lane_shift else: 0,
+        rvfi_mem_wdata: if memory_write: before.memory.write_data << lane_shift else: 0)
+
+fn core32_cycle_result(before: CoreProtectedState32, after: CoreProtectedState32,
+                       response_data: u32, bus_valid: bool, bus_addr: i64,
+                       bus_size: u32, bus_write: bool, bus_wdata: u32,
+                       bus_is_pte: bool, bus_lock: bool) -> Core32CycleResult:
+    Core32CycleResult(state: after, bus_valid: bus_valid, bus_addr: bus_addr,
+        bus_size: bus_size, bus_write: bus_write, bus_wdata: bus_wdata,
+        bus_is_pte: bus_is_pte, bus_lock: bus_lock,
+        rvfi: core32_rvfi_trace(before, after, response_data))
+
+fn core32_csr_access(state: CoreProtectedState32, addr: u32, source: u32,
+                     funct3: u32) -> Core32CsrAccess:
+    val csr_state = ProtectedCsrState32(csr_m: state.csr_m, csr_s: state.csr_s,
+        mmu: state.mmu, pmp: state.pmp, privilege: state.privilege,
+        mcounteren: state.mcounteren, scounteren: state.scounteren,
+        firmware_stip: state.firmware_stip, platform_stip: state.platform_stip,
+        time_value: state.time_value)
+    protected_csr32_access(csr_state, addr, source, funct3)
+
+fn core32_restart_fetch(state: CoreProtectedState32) -> CoreProtectedState32:
+    var out = state
+    out.pipeline_phase = CORE32_FETCH
+    out.memory = memory32_start(out.mmu, out.pmp, out.core.pc, ACCESS_FETCH, 2,
+        out.privilege, core32_sum_enabled(out), core32_mxr_enabled(out), 0)
+    out
+
+fn core32_take_trap(state: CoreProtectedState32, cause: u32, tval: u32,
+                    synchronous: bool) -> CoreProtectedState32:
+    val trap = core32_enter_trap(state, cause, tval)
+    var out = state
+    out.csr_m = trap.csr_m
+    out.csr_s = trap.csr_s
+    out.privilege = trap.privilege
+    out.core.pc = trap.pc
+    out.core.semi_phase = 0
+    out.core.semi_suppress = false
+    out.reservation = rv32a_reservation_empty()
+    if synchronous:
+        out.rvfi_valid = true
+        out.rvfi_trap = true
+        out.rvfi_order = state.rvfi_order + 1
+        out.rvfi_pc_wdata = trap.pc
+    core32_restart_fetch(out)
+
+fn core32_raise_exception(state: CoreProtectedState32, cause: u32, tval: u32) -> CoreProtectedState32:
+    var out = core32_take_trap(state, cause, tval, true)
+    if state.pipeline_phase == CORE32_FETCH or state.pipeline_phase == CORE32_FETCH_SECOND:
+        out.rvfi_insn = 0
+        out.instruction = 0
+    else if state.rvfi_insn != 0:
+        out.rvfi_insn = state.rvfi_insn
+    else:
+        out.rvfi_insn = state.instruction
+    out
+
+fn core32_finish_instruction(state: CoreProtectedState32) -> CoreProtectedState32:
+    # Retirement precedes interrupt delivery: an interrupt is taken between
+    # instructions, so the just-completed instruction counts in minstret.
+    var out = state
+    out.csr_m = core32_retire(out.csr_m)
+    out.rvfi_valid = true
+    out.rvfi_trap = false
+    out.rvfi_order = state.rvfi_order + 1
+    out.rvfi_pc_wdata = state.core.pc
+    val pending = core32_check_interrupt(out)
+    if pending.pending:
+        return core32_take_trap(out, pending.cause, 0, false)
+    core32_restart_fetch(out)
+
+fn core32_commit_plain(state: CoreProtectedState32, instruction: u32,
+                       dmem_rdata: u32) -> CoreProtectedState32:
+    var comb = core_combinational(state.core, instruction, dmem_rdata, state.rf)
+    val sequential_pc = state.core.pc + state.instruction_bytes
+    comb.pc_plus4 = sequential_pc
+    if comb.dec.jump:
+        comb.rd_data = sequential_pc
+    if comb.dec.opcode == OP_JALR:
+        comb.pc_next = comb.pc_next & 0xFFFFFFFE
+    else if not comb.branch_taken and not comb.dec.jump:
+        comb.pc_next = sequential_pc
+    if (comb.pc_next & 1) != 0:
+        return core32_raise_exception(state, 0, comb.pc_next)
+    var out = state
+    out.rf = regfile_write(out.rf, comb.dec.rd, comb.rd_data, comb.dec.reg_write)
+    if comb.dec.mem_write:
+        # Any local store is an LR/SC ordering point, even when it targets a
+        # different word; only a new LR may establish a reservation.
+        out.reservation = rv32a_reservation_empty()
+    out.core.pc = comb.pc_next
+    core32_finish_instruction(out)
+
+fn core32_begin_instruction(state: CoreProtectedState32, instruction: u32) -> CoreProtectedState32:
+    val dec = decode_instruction(instruction)
+    if not core32_instruction_legal(instruction):
+        return core32_raise_exception(state, CAUSE_ILLEGAL_INSN, instruction)
+    if dec.opcode == OP_SYSTEM:
+        if dec.funct3 == 0:
+            if instruction == 0x00000073:
+                val cause = if state.privilege == PRIV_U: CORE32_CAUSE_ECALL_U else if state.privilege == PRIV_S: CORE32_CAUSE_ECALL_S else: CAUSE_ECALL_M
+                return core32_raise_exception(state, cause, 0)
+            if instruction == 0x00100073:
+                return core32_raise_exception(state, CAUSE_BREAKPOINT, 0)
+            if instruction == 0x30200073 and state.privilege == PRIV_M:
+                val returned = core32_exit_mret(state)
+                var out = state
+                out.csr_m = returned.csr_m
+                out.csr_s = returned.csr_s
+                out.privilege = returned.privilege
+                out.core.pc = returned.pc
+                return core32_finish_instruction(out)
+            if instruction == 0x10200073 and (state.privilege == PRIV_S or state.privilege == PRIV_M):
+                val returned = core32_exit_sret(state)
+                var out = state
+                out.csr_m = returned.csr_m
+                out.csr_s = returned.csr_s
+                out.privilege = returned.privilege
+                out.core.pc = returned.pc
+                return core32_finish_instruction(out)
+            if (instruction & 0xFE007FFF) == 0x12000073 and (state.privilege == PRIV_S or state.privilege == PRIV_M):
+                var out = state
+                val operands = regfile_read(state.rf, dec.rs1, dec.rs2)
+                out.mmu = mmu_sfence_vma(out.mmu, operands.rs1_data, operands.rs2_data,
+                    dec.rs1 != 0, dec.rs2 != 0)
+                out.core.pc = out.core.pc + out.instruction_bytes
+                return core32_finish_instruction(out)
+            if instruction == 0x10500073 and state.privilege != PRIV_U:
+                # Retire once, then wait. A locally enabled pending interrupt
+                # wakes WFI even when the target privilege's global IE is clear.
+                var out = state
+                out.core.pc = out.core.pc + out.instruction_bytes
+                out.csr_m = core32_retire(out.csr_m)
+                out.rvfi_valid = true
+                out.rvfi_trap = false
+                out.rvfi_order = state.rvfi_order + 1
+                out.rvfi_pc_wdata = out.core.pc
+                val pending = core32_check_interrupt(out)
+                if pending.pending:
+                    return core32_take_trap(out, pending.cause, 0, false)
+                if (out.csr_m.mie & out.csr_m.mip) != 0:
+                    return core32_restart_fetch(out)
+                out.pipeline_phase = CORE32_WFI
+                return out
+            return core32_raise_exception(state, CAUSE_ILLEGAL_INSN, instruction)
+
+        val read = regfile_read(state.rf, dec.rs1, dec.rs2)
+        val source = core32_csr_source(dec.funct3, dec.rs1, read.rs1_data)
+        val access = core32_csr_access(state, (instruction >> 20) & 0xFFF, source, dec.funct3)
+        if not access.valid:
+            return core32_raise_exception(state, CAUSE_ILLEGAL_INSN, instruction)
+        var out = state
+        out.csr_m = access.csr_m
+        out.csr_s = access.csr_s
+        out.mmu = access.mmu
+        out.pmp = access.pmp
+        out.mcounteren = access.mcounteren
+        out.scounteren = access.scounteren
+        out.firmware_stip = access.firmware_stip
+        out.platform_stip = access.platform_stip
+        out.rf = regfile_write(out.rf, dec.rd, access.old_value, true)
+        out.core.pc = out.core.pc + out.instruction_bytes
+        return core32_finish_instruction(out)
+
+    if dec.opcode == 0x0F:
+        var out = state
+        out.core.pc = out.core.pc + out.instruction_bytes
+        return core32_finish_instruction(out)
+
+    val m = rv32m_decode(instruction)
+    if m.matched:
+        val read = regfile_read(state.rf, dec.rs1, dec.rs2)
+        var out = state
+        out.pipeline_phase = CORE32_MULDIV
+        out.muldiv = rv32m_start(state.muldiv, m.operation, read.rs1_data as i64,
+            read.rs2_data as i64)
+        return out
+
+    val amo = rv32a_decode(instruction)
+    if amo.matched:
+        val read = regfile_read(state.rf, dec.rs1, dec.rs2)
+        var out = state
+        if amo.operation == RV32A_AMO_SC:
+            out.pipeline_phase = CORE32_ATOMIC_PROBE
+            out.memory = memory32_start_probe(out.mmu, out.pmp, read.rs1_data,
+                ACCESS_STORE, 4, core32_data_privilege(out),
+                core32_data_sum_enabled(out), core32_data_mxr_enabled(out))
+        else if amo.operation == RV32A_AMO_LR:
+            out.pipeline_phase = CORE32_ATOMIC_READ
+            out.memory = memory32_start(out.mmu, out.pmp, read.rs1_data, ACCESS_LOAD, 4,
+                core32_data_privilege(out), core32_data_sum_enabled(out),
+                core32_data_mxr_enabled(out), 0)
+        else:
+            # An AMO requires store permission before it may read the old value.
+            out.pipeline_phase = CORE32_ATOMIC_WRITE_PROBE
+            out.memory = memory32_start_probe(out.mmu, out.pmp, read.rs1_data, ACCESS_STORE, 4,
+                core32_data_privilege(out), core32_data_sum_enabled(out),
+                core32_data_mxr_enabled(out))
+        return out
+
+    val comb = core_combinational(state.core, instruction, 0, state.rf)
+    if dec.mem_read or dec.mem_write:
+        var out = state
+        out.pipeline_phase = CORE32_DATA_ACCESS
+        val access = if dec.mem_write: ACCESS_STORE else: ACCESS_LOAD
+        out.memory = memory32_start(out.mmu, out.pmp, comb.dmem_addr, access,
+            core32_data_size(dec.funct3), core32_data_privilege(out),
+            core32_data_sum_enabled(out), core32_data_mxr_enabled(out), comb.dmem_wdata)
+        return out
+    core32_commit_plain(state, instruction, 0)
+
+@hardware
+fn core32_init(reset_vec: u32) -> CoreProtectedState32:
+    """Start the M-mode protected core with one pending protected fetch."""
+    val mmu = mmu_create()
+    val pmp = pmp32_entries_reset()
+    val core = core_reset(reset_vec)
+    CoreProtectedState32(core: core, rf: regfile_create(), csr_m: csr_create(0),
+        csr_s: csr_s_create(), mmu: mmu, pmp: pmp, privilege: PRIV_M,
+        mcounteren: 0, scounteren: 0, firmware_stip: false, platform_stip: false,
+        time_value: 0,
+        memory: memory32_start(mmu, pmp, reset_vec, ACCESS_FETCH, 2, PRIV_M,
+            false, false, 0), pipeline_phase: CORE32_FETCH, instruction: 0,
+        instruction_bytes: 4, fetch_first: 0, muldiv: rv32m_create(),
+        reservation: rv32a_reservation_empty(), atomic_old: 0,
+        rvfi_order: 0, rvfi_valid: false, rvfi_trap: false,
+        rvfi_pc_wdata: 0, rvfi_insn: 0)
+
+@hardware
+fn core32_reset_result(reset_vec: u32) -> Core32CycleResult:
+    val state = core32_init(reset_vec)
+    core32_cycle_result(state, state, 0, false, 0, 1, false, 0, false, false)
+
+fn core32_set_pending_interrupts(state: CoreProtectedState32, msip: bool,
+                                 mtip: bool, meip: bool) -> CoreProtectedState32:
+    """Update MIP through the CSR owner; SoCs never poke protected state."""
+    var out = state
+    var pending = state.csr_m.mip & CORE32_S_INTERRUPT_MASK
+    if msip: pending = pending | 0x00000008
+    if mtip: pending = pending | 0x00000080
+    if meip: pending = pending | 0x00000800
+    out.csr_m.mip = pending
+    out.csr_s = core32_sync_supervisor_aliases(out.csr_m, out.csr_s)
+    out
+
+fn core32_set_supervisor_pending_interrupts(state: CoreProtectedState32,
+                                            stip: bool, seip: bool) -> CoreProtectedState32:
+    """Update S timer/external levels while preserving M levels and writable SSIP."""
+    var out = state
+    out.platform_stip = stip
+    var pending = state.csr_m.mip & (CORE32_M_INTERRUPT_MASK | SIP_SSIP_MASK)
+    if stip or state.firmware_stip: pending = pending | SIP_STIP_MASK
+    if seip: pending = pending | SIP_SEIP_MASK
+    out.csr_m.mip = pending
+    out.csr_s = core32_sync_supervisor_aliases(out.csr_m, out.csr_s)
+    out
+
+fn core32_set_time_value(state: CoreProtectedState32,
+                         time_value: i64) -> CoreProtectedState32:
+    var out = state
+    out.time_value = time_value
+    out
+
+fn core32_invalidate_reservation(state: CoreProtectedState32, physical_address: i64,
+                                 size_bytes: u32) -> CoreProtectedState32:
+    """Apply an acknowledged external physical write to the local LR reservation."""
+    var out = state
+    out.reservation = rv32a_invalidate_external(state.reservation, physical_address, size_bytes)
+    out
+
+@hardware
+fn core32_cycle(state: CoreProtectedState32, request_ready: bool,
+                response_valid: bool, response_error: bool,
+                response_data: u32) -> Core32CycleResult:
+    """Advance the only RV32IMAC path through protected memory32 requests."""
+    var out = state
+    out.rvfi_valid = false
+    out.rvfi_trap = false
+    out.rvfi_pc_wdata = 0
+    if state.core.halt:
+        return core32_cycle_result(state, out, response_data, false, 0,
+            1, false, 0, false, false)
+    out.csr_m = core32_tick_cycle(out.csr_m)
+    out.core.semi_trigger = false
+    if state.pipeline_phase == CORE32_EXECUTE:
+        out = core32_begin_instruction(out, state.instruction)
+        return core32_cycle_result(state, out, response_data, false, 0,
+            1, false, 0, false, false)
+
+    if state.pipeline_phase == CORE32_MULDIV:
+        val muldiv = rv32m_tick(state.muldiv)
+        out.muldiv = muldiv
+        if muldiv.result_valid:
+            val dec = decode_instruction(state.instruction)
+            out.rf = regfile_write(out.rf, dec.rd, muldiv.result as u32, true)
+            out.core.pc = out.core.pc + out.instruction_bytes
+            out = core32_finish_instruction(out)
+        return core32_cycle_result(state, out, response_data, false, 0,
+            1, false, 0, false, false)
+
+    if state.pipeline_phase == CORE32_WFI:
+        val pending = core32_check_interrupt(out)
+        if pending.pending:
+            out = core32_take_trap(out, pending.cause, 0, false)
+        else if (out.csr_m.mie & out.csr_m.mip) != 0:
+            out = core32_restart_fetch(out)
+        return core32_cycle_result(state, out, response_data, false, 0,
+            1, false, 0, false, false)
+
+    val pending_amo = rv32a_decode(state.instruction)
+    if (state.pipeline_phase == CORE32_ATOMIC_WRITE and
+        state.memory.phase == MEMORY32_REQUEST and pending_amo.matched and
+        pending_amo.operation == RV32A_AMO_SC):
+        val sc = rv32a_sc_check_and_clear(state.reservation, state.memory.paddr)
+        if not sc.store_allowed:
+            out.reservation = sc.reservation
+            val dec = decode_instruction(state.instruction)
+            out.rf = regfile_write(out.rf, dec.rd, 1, true)
+            out.core.pc = out.core.pc + out.instruction_bytes
+            out = core32_finish_instruction(out)
+            return core32_cycle_result(state, out, response_data, false, 0,
+                1, false, 0, false, false)
+
+    val memory = memory32_cycle(state.memory, state.mmu, state.pmp, request_ready,
+        response_valid, response_error, response_data)
+    out.memory = memory.state
+    out.mmu = memory.mmu
+    if (state.pipeline_phase == CORE32_ATOMIC_WRITE and pending_amo.matched and
+        pending_amo.operation == RV32A_AMO_SC and memory.bus_valid and request_ready):
+        out.reservation = rv32a_reservation_empty()
+    if memory.done:
+        if memory.fault:
+            out = core32_raise_exception(out, memory.fault_cause, memory.fault_tval)
+        else if state.pipeline_phase == CORE32_FETCH:
+            val parcel = memory.read_data & 0xFFFF
+            if rv32c_is_compressed(parcel):
+                val expanded = rv32c_expand(parcel)
+                if expanded.illegal:
+                    out = core32_raise_exception(out, CAUSE_ILLEGAL_INSN, parcel)
+                    out.rvfi_insn = parcel
+                    out.instruction = parcel
+                else:
+                    out.instruction = expanded.instruction
+                    out.rvfi_insn = parcel
+                    out.instruction_bytes = 2
+                    out.pipeline_phase = CORE32_EXECUTE
+            else:
+                out.fetch_first = parcel
+                out.pipeline_phase = CORE32_FETCH_SECOND
+                out.memory = memory32_start(out.mmu, out.pmp, out.core.pc + 2,
+                    ACCESS_FETCH, 2, out.privilege, core32_sum_enabled(out),
+                    core32_mxr_enabled(out), 0)
+        else if state.pipeline_phase == CORE32_FETCH_SECOND:
+            out.instruction = state.fetch_first | ((memory.read_data & 0xFFFF) << 16)
+            out.rvfi_insn = out.instruction
+            out.instruction_bytes = 4
+            out.pipeline_phase = CORE32_EXECUTE
+        else if state.pipeline_phase == CORE32_ATOMIC_PROBE:
+            val dec = decode_instruction(state.instruction)
+            val sc = rv32a_sc_check_and_clear(out.reservation, memory.state.paddr)
+            out.reservation = sc.reservation
+            if not sc.store_allowed:
+                out.rf = regfile_write(out.rf, dec.rd, 1, true)
+                out.core.pc = out.core.pc + out.instruction_bytes
+                out = core32_finish_instruction(out)
+            else:
+                # Keep the reservation armed until the exact physical
+                # store is accepted; an external write may invalidate it.
+                out.reservation = state.reservation
+                val read = regfile_read(out.rf, dec.rs1, dec.rs2)
+                out.pipeline_phase = CORE32_ATOMIC_WRITE
+                out.memory = memory32_start_physical(out.pmp, memory.state.vaddr,
+                    memory.state.paddr, ACCESS_STORE, 4,
+                    core32_data_privilege(out), read.rs2_data)
+        else if state.pipeline_phase == CORE32_ATOMIC_WRITE_PROBE:
+            out.pipeline_phase = CORE32_ATOMIC_READ
+            out.memory = memory32_start_physical(out.pmp, memory.state.vaddr,
+                memory.state.paddr, ACCESS_LOAD, 4,
+                core32_data_privilege(out), 0)
+        else if state.pipeline_phase == CORE32_ATOMIC_READ:
+            val dec = decode_instruction(state.instruction)
+            val amo = rv32a_decode(state.instruction)
+            if amo.operation == RV32A_AMO_LR:
+                out.reservation = rv32a_lr_set(memory.state.paddr)
+                out.rf = regfile_write(out.rf, dec.rd, memory.read_data, true)
+                out.core.pc = out.core.pc + out.instruction_bytes
+                out = core32_finish_instruction(out)
+            else:
+                val read = regfile_read(out.rf, dec.rs1, dec.rs2)
+                out.atomic_old = memory.read_data
+                out.pipeline_phase = CORE32_ATOMIC_WRITE
+                out.memory = memory32_start_physical(out.pmp, memory.state.vaddr,
+                    memory.state.paddr, ACCESS_STORE, 4,
+                    core32_data_privilege(out),
+                    rv32a_compute(amo.operation, memory.read_data, read.rs2_data))
+        else if state.pipeline_phase == CORE32_ATOMIC_WRITE:
+            val dec = decode_instruction(state.instruction)
+            val amo = rv32a_decode(state.instruction)
+            out.reservation = rv32a_reservation_empty()
+            val rd_value = if amo.operation == RV32A_AMO_SC: 0 else: state.atomic_old
+            out.rf = regfile_write(out.rf, dec.rd, rd_value, true)
+            out.core.pc = out.core.pc + out.instruction_bytes
+            out = core32_finish_instruction(out)
+        else:
+            out = core32_commit_plain(out, state.instruction, memory.read_data)
+    val amo = rv32a_decode(state.instruction)
+    val bus_lock = (state.pipeline_phase == CORE32_ATOMIC_PROBE or
+        state.pipeline_phase == CORE32_ATOMIC_WRITE_PROBE or
+        state.pipeline_phase == CORE32_ATOMIC_READ or
+        state.pipeline_phase == CORE32_ATOMIC_WRITE) and amo.matched
+    core32_cycle_result(state, out, response_data, memory.bus_valid, memory.bus_addr,
+        memory.bus_size, memory.bus_write, memory.bus_wdata,
+        memory.bus_is_pte, bus_lock)
+
+export core32_set_supervisor_pending_interrupts
+export core32_set_time_value

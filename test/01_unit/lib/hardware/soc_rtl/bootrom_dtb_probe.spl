@@ -1,13 +1,14 @@
 # Probe: bootrom DTB blob + RV64 boot ABI.
-# 1) bootrom_dtb_byte serves a valid FDT header: magic 0xD00DFEED (big-endian
-#    bytes D0 0D FE ED), totalsize=40, version=17, out-of-range -> 0.
+# 1) bootrom_dtb_byte serves the complete FDT: magic 0xD00DFEED (big-endian
+#    bytes D0 0D FE ED), totalsize matches the blob, out-of-range -> 0.
 # 2) Boot ABI encodings served by bootrom_read64 are field-decoded: a0(x10)=hartid
 #    via addi, a1(x11)=0x88000000 via lui 0x88000 + slli/srli 32 (zero-extended,
 #    not sign-extended), jump via jalr x0, t0(x5).
 # 3) The bootrom-SERVED sequence is executed on the real core64 datapath
 #    (fetched from bootrom_read64, placed in RAM) and the final register values
 #    + jump target are asserted.
-use std.hardware.soc_rtl.bootrom.{bootrom_read64, bootrom_dtb_byte, bootrom_dtb_word, DTB_MAGIC, DTB_HEADER_SIZE, DTB_BASE}
+use std.hardware.soc_rtl.bootrom.{bootrom_read64, bootrom_dtb_byte, bootrom_dtb_word, bootrom_dtb_size, DTB_MAGIC, DTB_HEADER_SIZE, DTB_BASE}
+use std.hardware.rv64gc_rtl.regfile.regfile64_read_one
 use std.hardware.soc_rtl.soc_top_64.{SocTop64State, soc_top_64_init, soc_top_64_tick}
 use std.hardware.soc_rtl.ram64.{ram64_write}
 
@@ -32,14 +33,13 @@ fn main() -> i64:
     fails = fails + check("dtb byte 2 == 0xFE", b2 == 0xFE)
     fails = fails + check("dtb byte 3 == 0xED", b3 == 0xED)
     fails = fails + check("dtb word 0 == DTB_MAGIC 0xD00DFEED", bootrom_dtb_word(0) == 0xD00DFEED)
-    # totalsize (word 1) big-endian bytes: 00 00 00 28
-    fails = fails + check("dtb totalsize == 40 (header-only)", bootrom_dtb_word(1) == 40)
-    fails = fails + check("dtb totalsize byte 7 == 0x28", bootrom_dtb_byte(7) == 0x28)
+    fails = fails + check("full dtb totalsize exceeds header", bootrom_dtb_word(1) > DTB_HEADER_SIZE)
+    fails = fails + check("full dtb totalsize matches blob", bootrom_dtb_word(1) == bootrom_dtb_size())
     fails = fails + check("dtb version == 17", bootrom_dtb_word(5) == 17)
     fails = fails + check("dtb version byte 23 == 0x11", bootrom_dtb_byte(23) == 0x11)
     fails = fails + check("dtb last_comp_version == 16", bootrom_dtb_word(6) == 16)
     fails = fails + check("dtb boot_cpuid_phys == 0 (hart 0)", bootrom_dtb_word(7) == 0)
-    fails = fails + check("dtb byte past blob == 0", bootrom_dtb_byte(DTB_HEADER_SIZE) == 0)
+    fails = fails + check("dtb byte past blob == 0", bootrom_dtb_byte(bootrom_dtb_size()) == 0)
     fails = fails + check("DTB_BASE == 0x88000000", DTB_BASE == 0x88000000)
 
     # --- 2) ABI field-decode of the bootrom-served RV64 sequence ---
@@ -72,10 +72,10 @@ fn main() -> i64:
     while i < 11:
         soc = soc_top_64_tick(soc)
         i = i + 1
-    print("bootrom-served boot64: sp={soc.core.rf.regs[2]} a0={soc.core.rf.regs[10]} a1={soc.core.rf.regs[11]} pc={soc.core.pc}")
-    fails = fails + check("a0 == 0 (hartid)", soc.core.rf.regs[10] == 0)
-    fails = fails + check("a1 == 0x88000000 zero-extended (DTB base)", soc.core.rf.regs[11] == 2281701376)
-    fails = fails + check("sp == 0x80100000 zero-extended", soc.core.rf.regs[2] == 2148532224)
+    print("bootrom-served boot64: sp={regfile64_read_one(soc.core.rf, 2)} a0={regfile64_read_one(soc.core.rf, 10)} a1={regfile64_read_one(soc.core.rf, 11)} pc={soc.core.pc}")
+    fails = fails + check("a0 == 0 (hartid)", regfile64_read_one(soc.core.rf, 10) == 0)
+    fails = fails + check("a1 == 0x88000000 zero-extended (DTB base)", regfile64_read_one(soc.core.rf, 11) == 2281701376)
+    fails = fails + check("sp == 0x80100000 zero-extended", regfile64_read_one(soc.core.rf, 2) == 2148532224)
     fails = fails + check("pc landed at 0x80000000 (kernel entry)", soc.core.pc == 2147483648)
 
     if fails == 0:
