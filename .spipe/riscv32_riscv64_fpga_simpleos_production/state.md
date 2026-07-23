@@ -201,3 +201,18 @@ implementation-milestone-0-in-progress
   CPU-bound with no output until a 120-second timeout. The three-cycle cap is
   reached. Recorded the repair and closure criteria in
   `doc/08_tracking/bug/pure_simple_full_cli_process_run_inherit_spipe_docgen_crash_2026-07-18.md`.
+- toolchain recovery 2026-07-23: A compiled pure-Simple MCP server passed the
+  bounded framed initialize/tools-list sanity and is deployed locally. A
+  temporary Stage 2 compiler is also deployed for native builds only; it lacks
+  the Stage 4 `run`, `test`, and SPipe docgen surface and is not release or
+  RV32/RV64 acceptance evidence. Its SHA-256 is
+  `ce2fcaffa36d95c9f69f6ffdce22df5dbe275d884c8acd53834c1d6208da363c`;
+  rollback is `build/native_probe/simple.pre-temporary-stage2-20260723`.
+- toolchain blocker 2026-07-23: Stage 4 still fails on the multiline trailing
+  `or` continuation in `src/app/devhub/main.spl`. A direct lexer probe retains
+  continuation while the parser-facing wrapper emits newline/indent. Three
+  distinct fix/probe cycles were exhausted and reverted; the blocker and next
+  owner-boundary fix are recorded in
+  `doc/08_tracking/bug/parser_trailing_operator_line_continuation_2026-07-13.md`.
+  Phase remains `implementation-milestone-0-in-progress`, and all generated RTL,
+  MMU/PMP, Linux login/`ls`, and physical-board claims remain fail-closed.

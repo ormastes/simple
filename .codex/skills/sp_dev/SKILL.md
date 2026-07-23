@@ -64,6 +64,14 @@ markers. Raw-source execution, a deployed wrapper, Rust seed, stale artifact,
 or disabled stub-fallback guard is not equivalent evidence. Treat this as
 post-bootstrap command sanity; it does not replace release `--whole` tests or
 the applicable full lint and duplication gates.
+
+A temporarily deployed Stage 2 compiler may unblock native artifact builds,
+but it is not Stage 4 evidence and cannot qualify `run`, `test`, SPipe docgen,
+or release. Record its exact path, hash, supported commands, and rollback path.
+If a direct lexer probe and parser-facing token stream disagree, capture both
+streams plus continuation state in one compiled probe. After three distinct
+fix/probe cycles, update the tracked bug and lane state and stop; do not rewrite
+valid source merely to bypass the parser defect.
 Authenticated interpreter `--assert-ran` requires canonical `simple-bdd-v1`
 evidence; stdout summaries or colored pass markers are never execution proof.
 

@@ -880,6 +880,14 @@ duplicate-check outcomes plus the aggregate pass marker. Raw source, a deployed
 wrapper, Rust seed, or stale binary is not evidence. This sanity does not
 replace release `--whole` or repository-wide policy checks, and it must not be
 copied into compiler Stages 2 or 3.
+
+A temporarily deployed Stage 2 compiler may unblock native artifact builds,
+but it is not Stage 4 evidence and cannot qualify `run`, `test`, SPipe docgen,
+or release. Record its exact path, hash, supported commands, and rollback path.
+If a direct lexer probe and parser-facing token stream disagree, capture both
+streams plus continuation state in one compiled probe. After three distinct
+fix/probe cycles, update the tracked bug and lane state and stop; do not rewrite
+valid source merely to bypass the parser defect.
 Authenticated interpreter `--assert-ran` requires canonical `simple-bdd-v1`
 evidence; stdout summaries or colored pass markers are never execution proof.
 During repair of a crashing stale pure-Simple runner, the Rust bootstrap may

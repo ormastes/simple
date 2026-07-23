@@ -238,3 +238,17 @@ without conflating it with the timing gate:
 A validator that assumes the tools/list response is the final frame reports
 `mcp_tools_count=0` against a core-first server even though the output is valid;
 the content-based frame selection above is the robust fix.
+
+## 2026-07-23 — local pure-Simple recovery deployment
+
+The locally deployed
+`bin/release/x86_64-unknown-linux-gnu/simple_mcp_server` passed a bounded framed
+`initialize`/`tools/list` sanity check as a compiled pure-Simple artifact. Its
+SHA-256 is
+`e189b71947d0ceaa29c6a0a2dac65c6e11a75f37403d2fe1ae19577da1a24212`.
+Keep production launch native-first with no silent source or Rust-seed fallback.
+
+The temporarily deployed Stage 2 compiler is recovery-only: it can rebuild
+native artifacts, but it does not provide the Stage 4 `run`, `test`, or SPipe
+docgen surface and is not full-CLI or release evidence. Promotion still requires
+the fresh Stage 4 essential-tools smoke and the bootstrap MCP acceptance gate.
