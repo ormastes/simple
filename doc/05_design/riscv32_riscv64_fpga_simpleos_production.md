@@ -72,6 +72,13 @@ available as a contract bundle but carry status `contract-not-ready` and reason
 `placeholder-core-no-semantic-rvfi`. Diagnostic entities shall terminate with
 `GENERATED_RTL_NOT_IMPLEMENTED lane=<rv32|rv64>` when executed.
 
+Current source/static review accepts protected RV32/RV64IMAC semantics, full
+DTB composition, reset-owned exact flat product bus/RVFI entries, fixed banks,
+multi-block helper lowering, the design catalog, and versioned provenance
+artifacts. RV64 behavioral F/D is preserved but is not VHDL-qualified. The
+contract does not promote until the actual entries compile under qualified
+pure-Simple Stage 4 and pass GHDL/formal, Linux, and board gates.
+
 Generated testbenches shall not emit PASS, Linux, DTB, MMU, login, or completion
 markers. Formal harnesses shall be visibly non-ready and cannot produce proof
 success. Existing future marker names may remain metadata only.
@@ -97,13 +104,17 @@ DUT-origin evidence and the expected lane marker.
 
 Select an existing RV32 decode/ALU path and existing RV64 decode/ALU path that
 compile without inventing a second core. Add the smallest internal hardware
-entry annotations. The stateful entry then owns clock/reset, instruction/data
-bus request/response, and RVFI commit ports and calls the same existing
-combinational/update helpers used by software-model tests.
+entry annotations. The stateful entry owns clock/reset and exact flat
+request/response, interrupt/time, and RVFI ports, and calls the same existing
+combinational/update helpers used by software-model tests. It does not own RAM,
+DTB bytes, address decode, or peripherals; those remain SoC responsibilities.
 
 The bundle generator invokes or consumes the canonical compiler output; it
-never embeds VHDL source text for CPU semantics. Generated artifacts include
-source root, compiler hash/version, source map, VHDL hash, and diagnostics.
+never embeds VHDL source text for CPU semantics. Generated artifacts are a
+fail-clean `.vhd`/`.map.json`/`.gen.json` triplet. The version-2 manifest binds
+compiler identity/hash, reachable source closure, selected entry/entity, exact
+flat ports, target/profile, design-catalog counts, VHDL hash, source-map hash,
+and an explicit unqualified status.
 
 ### Minimal observable program
 

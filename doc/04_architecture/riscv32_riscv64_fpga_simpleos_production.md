@@ -86,9 +86,10 @@ Owners:
 - RV64: `hardware.rv64gc_rtl` and its existing CSR/trap/MMU submodules.
 
 Each capsule owns register file, PC/pipeline state, privilege, CSRs, trap state,
-TLB, page walker, and XLEN-specific PMP state. Only typed ports, RVFI, and
-profile/status values leave the capsule. Internal flat TLB layouts and walker
-states remain tree-private.
+TLB, page walker, and XLEN-specific PMP state. Its product boundary owns reset
+and exposes exact flat CPU request/response, interrupt/time, and RVFI ports.
+Memory arrays, DTB bytes, address decode, and peripheral state stay outside that
+boundary. Internal TLB layouts and walker states remain tree-private.
 
 The two capsules deliberately retain `MmuState`/`mmu_*` and
 `MmuState64`/`mmu64_*`. A shared MMU abstraction is prohibited until two real
@@ -108,15 +109,24 @@ Generated VHDL and source maps are outputs, not hand-edited inputs. The bundle
 orchestrator may package them but may not synthesize CPU semantics with string
 templates.
 
+The backend compiles the reachable design catalog, including multi-block
+helpers, and represents architectural integer and floating-point banks as fixed
+synthesizable fields. A successful production write is one transactional,
+fail-clean triplet:
+VHDL, `.map.json`, and `.gen.json` version 2. The manifest binds the compiler,
+reachable source closure, selected entry/entity, exact flat ports, target/profile,
+design-catalog counts, VHDL hash, and source-map hash; partial output is removed.
+
 ### Layer 4 — Generated SoC composition
 
 Owner: existing `hardware.soc_rtl` and RISC-V FPGA/Linux composition modules.
 
-The SoC composes emitted CPU, boot ROM, external-memory interface, CLINT, PLIC,
-UART, and interconnect. One typed platform description supplies both address
-decode and device-tree values. Focused simulation can use sparse memory; KV260
-uses a PL-master path to Linux-sized PS DDR. BRAM-only memory is diagnostic and
-cannot satisfy Linux or board acceptance.
+The SoC owns CPU-bus completion, address decode, boot ROM, RAM/external-memory
+interface, CLINT, PLIC, UART, and the complete generated DTB asset. One typed
+platform description supplies both address decode and device-tree values; the
+CPU only emits physical requests and consumes responses. Focused simulation can
+use sparse memory; KV260 uses a PL-master path to Linux-sized PS DDR. BRAM-only
+memory is diagnostic and cannot satisfy Linux or board acceptance.
 
 ### Layer 5 — Artifact and evidence orchestration
 
@@ -129,6 +139,13 @@ properties. Its state machine is:
 
 `contract-not-ready -> rtl-generated -> architecture-validated ->
 rtl-linux-validated -> fpga-validated`
+
+Current source/static review accepts protected RV32/RV64IMAC execution,
+reset-owned exact flat bus/RVFI entries, full DTB composition, fixed banks,
+multi-block helpers, and provenance artifacts. RV64 behavioral F/D is preserved
+but is outside the VHDL-qualified product entry. Promotion still requires a
+qualified pure-Simple Stage 4 compile of the actual entries plus generated-RTL,
+formal, Linux, and board execution evidence.
 
 Promotion requires all earlier evidence for the same XLEN and identical
 artifact hashes. `fail` and `blocked` remain first-class results.

@@ -208,11 +208,20 @@ implementation-milestone-0-in-progress
   RV32/RV64 acceptance evidence. Its SHA-256 is
   `ce2fcaffa36d95c9f69f6ffdce22df5dbe275d884c8acd53834c1d6208da363c`;
   rollback is `build/native_probe/simple.pre-temporary-stage2-20260723`.
-- toolchain blocker 2026-07-23: Stage 4 still fails on the multiline trailing
-  `or` continuation in `src/app/devhub/main.spl`. A direct lexer probe retains
-  continuation while the parser-facing wrapper emits newline/indent. Three
-  distinct fix/probe cycles were exhausted and reverted; the blocker and next
-  owner-boundary fix are recorded in
+- toolchain blocker 2026-07-23: the staged `rt_value_bool` SFFI boundary fix
+  clears the earlier multiline trailing-`or` failure. Stage 4 now fails because
+  semantic UFCS resolves `Array.join("")` to the imported free
+  `nogc_async_mut.path.join`, so lexer slices become slash-separated text and
+  keywords are parsed as identifiers. The smallest owner-boundary suppression
+  and focused regression are staged, but the three-cycle bootstrap cap was
+  reached before a fresh Stage 4 qualification. Details are recorded in
   `doc/08_tracking/bug/parser_trailing_operator_line_continuation_2026-07-13.md`.
-  Phase remains `implementation-milestone-0-in-progress`, and all generated RTL,
-  MMU/PMP, Linux login/`ls`, and physical-board claims remain fail-closed.
+- implementation milestone 2026-07-23: high source/static review accepts the
+  protected RV32/RV64IMAC semantics, full shared DTB, exact flat product
+  bus/RVFI ports, reset-owned state, fixed register banks, multi-block helper
+  lowering, design-wide catalog, and fail-clean artifact triplet (`.vhd`,
+  `.map.json`, `.gen.json` v2). RV64 behavioral F/D remains present but is not
+  part of the VHDL-qualified product entry. The pure-Simple Stage 4 compiler,
+  actual entry compilation, GHDL/formal, Linux login/`ls`, and physical FPGA
+  evidence remain unqualified after the bootstrap/runner iteration cap. The
+  bundle therefore remains `contract-not-ready`.
