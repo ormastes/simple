@@ -429,6 +429,25 @@ fn _nb_resolve_segs(segs: [text], source_dirs: [text]) -> text:
         val src_path = _nb_resolve_under_root("src", segs)
         if src_path != "":
             return src_path
+    # Unprefixed tier-qualified paths (`nogc_sync_mut.io_runtime` from the
+    # std.io_runtime shim's `export use`; `common.ui.access_types`) live
+    # under src/lib but carry no std./lib. prefix — no root above matches.
+    val lib_direct = _nb_resolve_under_root("src/lib", segs)
+    if lib_direct != "":
+        return lib_direct
+    # `std.X` flattens the concurrency-tier directories: std.mcp_sdk.server.
+    # method_detect is physically src/lib/<tier>/mcp_sdk/server/method_detect
+    # .spl. Mirror the seed interpreter's family-fallback order.
+    if segs.len() > 1 and segs[0] == "std":
+        var tier_tail: [text] = []
+        var tier_ti = 1
+        while tier_ti < segs.len():
+            tier_tail = tier_tail.push(segs[tier_ti])
+            tier_ti = tier_ti + 1
+        for tier in ["nogc_async_mut", "nogc_sync_mut", "nogc_async_immut", "common", "gc_async_mut", "nogc_async_mut_noalloc"]:
+            val tier_path = _nb_resolve_under_root("src/lib/" + tier, tier_tail)
+            if tier_path != "":
+                return tier_path
     ""
 
 fn _nb_join_segments(segs: [text]) -> text:
@@ -609,7 +628,6 @@ fn cli_native_build(args: [text]) -> i64:
             print "  --threads <n>        Native build workers"
             print "  --jobs <n>, -j <n>   Alias for --threads"
             print "  --log <on|off>       Compile normal SimpleOS logging in or out"
-            print "  --no-borrow-check    Skip the borrow-check pass (diagnostic; default runs it)"
             print "  --verbose, -v        Verbose output"
             return 0
         elif arg == "--list-optimizations":
@@ -850,8 +868,6 @@ fn cli_native_build(args: [text]) -> i64:
                         return 1
                 release = opt_level > 0
                 optimization_requested = true
-            elif a == "--no-borrow-check":
-                no_borrow_check = true
             elif a == "--no-mangle":
                 no_mangle = true
             elif a == "--clean":
@@ -903,6 +919,14 @@ fn cli_native_build(args: [text]) -> i64:
             _cli_eprint("Usage: simple native-build --backend=llvm --entry <file.spl> -o <output> [--source <dir>]...")
             return 1
 
+        # A missing --output parent dir previously made the worker fail with a
+        # silent exit 1 after the full compile (bug: native_build_missing_output_dir_silent_fail_2026-07-23).
+        val out_slash = output.rfind("/") ?? 0
+        if out_slash > 0:
+            val out_parent = output.substring(0, out_slash)
+            if not _cli_dir_create_impl(out_parent, true):
+                _cli_eprint("Error: could not create output directory {out_parent} for --output {output}")
+                return 1
         # Build into a private sibling first. A stale requested output must not
         # satisfy the success check when a driver/linker reports Success without
         # writing its artifact; conversely, a failed build must leave the last
@@ -1008,7 +1032,6 @@ fn cli_native_build(args: [text]) -> i64:
             options.backend = backend
             options.release = release
             options.opt_level = opt_level
-            options.no_borrow_check = no_borrow_check
             options.target_opt_ctx = _nb_target_opt_ctx
             options = compileoptions_normalize_mir_optimization(options)
             val driver = compiler_driver_create(options)
@@ -1043,7 +1066,6 @@ fn cli_native_build(args: [text]) -> i64:
             options.backend = backend
             options.release = release
             options.opt_level = opt_level
-            options.no_borrow_check = no_borrow_check
             options.target_opt_ctx = _nb_target_opt_ctx
             options = compileoptions_normalize_mir_optimization(options)
             val driver = compiler_driver_create(options)

@@ -119,7 +119,6 @@ impl MirLowering:
             struct_method_return_names: {},
             struct_method_return_is_array: {},
             enum_payload_struct_names: {},
-            enum_tuple_text_slots: {},
             runtime_array_locals: {},
             runtime_dict_locals: {},
             runtime_elem_value_type: {},
@@ -542,6 +541,21 @@ impl MirLowering:
         if bootstrap_mode:
             if bootstrap_trace:
                 print "[mir-lower] fn-list:start"
+            # Module-level `val` constants MUST lower BEFORE function bodies:
+            # this branch returns before the non-bootstrap constants loop far
+            # below, so module `val`s were never registered -- an identifier
+            # reference then resolved through local_map/pre-dispatch to a
+            # nonexistent local and the backend emitted an uninitialized
+            # alloca+load (module globals read as stack garbage; LSP server
+            # startup SIGSEGV, native_module_val_globals 2026-07-23).
+            val bs_const_vals = module.constants.values()
+            if bootstrap_trace and bs_const_vals.len() > 0:
+                print "[mir-lower] constants:count {bs_const_vals.len()}"
+            var bs_ci = 0
+            while bs_ci < bs_const_vals.len():
+                self.lower_const(bs_const_vals[bs_ci])
+                self.lower_static(bs_const_vals[bs_ci])
+                bs_ci = bs_ci + 1
             bootstrap_mir_functions_reset()
             val bootstrap_function_keys = module.functions.keys()
             val bootstrap_function_count = bootstrap_function_keys.len()
@@ -1146,9 +1160,9 @@ impl MirLowering:
                 var callee_symbol: SymbolId? = nil
                 match callee.kind:
                     case Var(sym2):
-                        callee_symbol = sym2
+                        callee_symbol = Some(sym2)
                     case NamedVar(sym2, _):
-                        callee_symbol = sym2
+                        callee_symbol = Some(sym2)
                     case _:
                         ()
                 if val cs = callee_symbol:

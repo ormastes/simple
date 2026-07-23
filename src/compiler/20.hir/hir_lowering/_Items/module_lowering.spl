@@ -1183,6 +1183,22 @@ impl HirLowering:
                 for bootstrap_impl_sym in self.lowered_impl_functions.keys():
                     functions[SymbolId(id: bootstrap_impl_fn_key)] = self.lowered_impl_functions[bootstrap_impl_sym]
                     bootstrap_impl_fn_key = bootstrap_impl_fn_key + 1
+            # Module-level `val` constants: this bootstrap early-return used to
+            # hard-code `constants: {}`, so module globals never reached HIR ->
+            # MIR and every reference lowered to an uninitialized alloca (stack
+            # garbage; LSP server startup SIGSEGV,
+            # native_module_val_globals 2026-07-23). Lower them here exactly
+            # like the non-bootstrap path below (line ~1284).
+            var bootstrap_constants: Dict<SymbolId, HirConst> = {}
+            val bootstrap_const_names = module.constants.keys()
+            if bootstrap_diag and bootstrap_const_names.len() > 0:
+                eprint("[hir-lower] bootstrap-constants:count module={module.name} count={bootstrap_const_names.len()}")
+            var bootstrap_const_idx = 0
+            while bootstrap_const_idx < bootstrap_const_names.len():
+                val bootstrap_const_src: Const = module.constants[bootstrap_const_names[bootstrap_const_idx]]
+                val bootstrap_hir_const = self.lower_const(bootstrap_const_src)
+                bootstrap_constants[bootstrap_hir_const.symbol] = bootstrap_hir_const
+                bootstrap_const_idx = bootstrap_const_idx + 1
             if bootstrap_diag:
                 eprint("[hir-lower] bootstrap-functions:count module={module.name} count={_bootstrap_hir_functions.len()}")
             return HirModule(
@@ -1199,7 +1215,7 @@ impl HirLowering:
                 bitfields: bitfields,
                 traits: traits,
                 impls: impls,
-                constants: {},
+                constants: bootstrap_constants,
                 static_asserts: [],
                 aop_advices: [],
                 di_bindings: [],

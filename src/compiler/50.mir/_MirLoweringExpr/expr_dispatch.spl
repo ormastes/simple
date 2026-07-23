@@ -82,7 +82,7 @@ impl MirLowering:
             val dest = b_glob.new_temp(static_.type_)
             b_glob.emit(MirInst(kind: MirInstKind.LoadGlobal(dest, static_.symbol), span: nil))
             self.builder = b_glob
-            return dest
+            return Some(dest)
         # Immutable (`val`) case: no real storage (lower_static gates on
         # is_mutable) -- inline the folded constant value/type instead, the
         # same way the existing OUTPUT_LIMIT/DEFAULT_TIMEOUT_MS hardcoded
@@ -116,11 +116,34 @@ impl MirLowering:
                     case Zero: is_scalar = true
                     case _: is_scalar = false
                 if is_scalar:
+                    # Derive the dest type from the VALUE kind, not
+                    # mir_const.type_: an unannotated module `val NAME = "s"`
+                    # carries Infer->i64 as its lowered type while the backend
+                    # renders the Str value as a ptr GEP -- inlining with the
+                    # i64 type then routes interpolation down the numeric
+                    # renderer and llc rejects `'%lN' defined with type 'ptr'
+                    # but expected 'i64'` (native_module_val_globals
+                    # 2026-07-23). Mirror emit_bootstrap_str_const for Str;
+                    # trust the declared type for the rest.
+                    var const_read_ty = mir_const.type_
+                    match mir_const.value:
+                        case Str(_):
+                            const_read_ty = MirType(kind: MirTypeKind.Opaque("str"))
+                        case Bool(_):
+                            # Raw 0/1 i64 lane: a bool-typed local is branched
+                            # as bare `br i1 %lN` while the backend renders the
+                            # Bool const as i64 arithmetic -- type it i64 so
+                            # branch lowering inserts the icmp-ne widening
+                            # (llc: "'%lN' defined with type 'i64' but
+                            # expected 'i1'").
+                            const_read_ty = MirType.i64()
+                        case _:
+                            pass
                     var b_const_read = self.builder
-                    val const_dest = b_const_read.new_temp(mir_const.type_)
-                    b_const_read.emit_const(const_dest, mir_const.value, mir_const.type_)
+                    val const_dest = b_const_read.new_temp(const_read_ty)
+                    b_const_read.emit_const(const_dest, mir_const.value, const_read_ty)
                     self.builder = b_const_read
-                    return const_dest
+                    return Some(const_dest)
                 return nil
             cvi = cvi + 1
         nil
@@ -717,14 +740,12 @@ impl MirLowering:
             ))
         self.builder = b
 
-    me resolved_call_hir_return_type_raw(symbol_raw: i64) -> HirType?:
-        # Raw-i64 params: SymbolId struct/optional arguments are miscompiled
-        # on the stage4 native lane (bug doc 2026-07-23).
+    me resolved_call_hir_return_type(symbol: SymbolId) -> HirType?:
         # Bare-lift accumulator + explicit tail: explicit Some(...) on return
         # and mixed return/implicit-tail are both miscompiled on the stage4
         # native lane (bug doc 2026-07-23).
         var ret_out: HirType? = nil
-        val sym = self.symbols.get_symbol_raw(symbol_raw)
+        val sym = self.symbols.get_symbol_raw(symbol.id)
         if val found_sym = sym:
             if val sym_type = found_sym.type_:
                 match sym_type.kind:
@@ -734,8 +755,8 @@ impl MirLowering:
                         ()
         return ret_out
 
-    me resolved_call_hir_param_types_raw(symbol_raw: i64) -> [HirType]:
-        val sym = self.symbols.get_symbol_raw(symbol_raw)
+    me resolved_call_hir_param_types(symbol: SymbolId) -> [HirType]:
+        val sym = self.symbols.get_symbol_raw(symbol.id)
         if val found_sym = sym:
             if val sym_type = found_sym.type_:
                 match sym_type.kind:
@@ -745,8 +766,8 @@ impl MirLowering:
                         ()
         []
 
-    me remember_call_hir_return(local: LocalId, symbol_raw: i64):
-        val return_type = self.resolved_call_hir_return_type_raw(symbol_raw)
+    me remember_call_hir_return(local: LocalId, symbol: SymbolId):
+        val return_type = self.resolved_call_hir_return_type(symbol)
         if val found_type = return_type:
             self.local_hir_types[local.id] = found_type
             match found_type.kind:
@@ -756,8 +777,8 @@ impl MirLowering:
                 case _:
                     ()
 
-    me resolved_call_return_type_raw(symbol_raw: i64) -> MirType:
-        val hir_return_type = self.resolved_call_hir_return_type_raw(symbol_raw)
+    me resolved_call_return_type(symbol: SymbolId) -> MirType:
+        val hir_return_type = self.resolved_call_hir_return_type(symbol)
         if val found_type = hir_return_type:
             return self.lower_type(found_type)
         MirType.i64()
@@ -887,7 +908,7 @@ impl MirLowering:
                                 val field_elem_type_pre = field_elem_types_pre[field_idx]
                                 match field_elem_type_pre.kind:
                                     case HirTypeKind.Error: ()
-                                    case _: field_elem_type_override = field_elem_type_pre
+                                    case _: field_elem_type_override = Some(field_elem_type_pre)
                     var field_type = MirType.i64()
                     if val field_elem_type = field_elem_type_override:
                         field_type = MirType(kind: MirTypeKind.Array(self.lower_type(field_elem_type), 0))
@@ -991,6 +1012,14 @@ impl MirLowering:
                     val pre_symbol_id = mir_expr_symbol_id_value(pre_symbol)
                     if pre_symbol_id >= 0 and self.local_map.has(pre_symbol_id):
                         return self.local_map[pre_symbol_id]
+                    # Module-level `val`/`var` read: without this, the fall
+                    # through below mis-dispatches into UnitLit's bare
+                    # new_temp (see comment above) and the reference becomes
+                    # an uninitialized alloca (module globals read as stack
+                    # garbage, native_module_val_globals 2026-07-23).
+                    if pre_symbol_id >= 0:
+                        if val pre_var_glob = self.try_lower_global_read(pre_symbol_id):
+                            return pre_var_glob
                 case _:
                     pass
         val namedvar_pre_disc = rt_enum_discriminant(HirExprKind.NamedVar(SymbolId(id: -1), ""))
@@ -1007,11 +1036,23 @@ impl MirLowering:
                         val pre_sym_id = mir_expr_symbol_id_value(pre_symbol)
                         if pre_sym_id >= 0 and self.local_map.has(pre_sym_id):
                             return self.local_map[pre_sym_id]
+                        # Module-level `val`/`var` read (same rationale as the
+                        # Var pre-dispatch arm above): resolve via the module
+                        # constants/statics registered by lower_module's
+                        # bootstrap branch before falling through to the big
+                        # match, which mis-dispatches NamedVar into UnitLit's
+                        # bare new_temp -> uninitialized alloca garbage
+                        # (native_module_val_globals 2026-07-23).
+                        if pre_sym_id >= 0:
+                            if val pre_nv_glob = self.try_lower_global_read(pre_sym_id):
+                                return pre_nv_glob
                         val pre_resolved = self.symbols.lookup(pre_name)
                         if pre_resolved != nil:
                             val pre_nv_id = pre_resolved.id
                             if pre_nv_id >= 0 and self.local_map.has(pre_nv_id):
                                 return self.local_map[pre_nv_id]
+                            if val pre_nv_glob2 = self.try_lower_global_read(pre_nv_id):
+                                return pre_nv_glob2
                         # Built-in nullary Option `None` used as a value (not a
                         # call): construct Option.None (disc 1) via rt_enum_new.
                         # A local of the same name shadows it (handled above).
@@ -1369,7 +1410,7 @@ impl MirLowering:
                                 if self.struct_method_syms.has(binop_method_key):
                                     val binop_method_id = self.struct_method_syms[binop_method_key]
                                     val binop_method_operand = self.symbol_to_operand(binop_method_id)
-                                    val binop_return_type = self.resolved_call_return_type_raw(binop_method_id.id)
+                                    val binop_return_type = self.resolved_call_return_type(binop_method_id)
                                     var b_op = self.builder
                                     val binop_call_result = b_op.emit_call(binop_method_operand, [mir_operand_copy(left_local), mir_operand_copy(right_local)], binop_return_type)
                                     self.builder = b_op
@@ -2299,7 +2340,7 @@ impl MirLowering:
                     var br = self.builder
                     var result = self.lower_expr(rv)
                     if val active_fn = self.builder.current_function:
-                        val declared_return = self.resolved_call_hir_return_type_raw(active_fn.symbol.id)
+                        val declared_return = self.resolved_call_hir_return_type(active_fn.symbol)
                         if val found_return = declared_return:
                             match found_return.kind:
                                 case HirTypeKind.Optional(_):
@@ -2460,7 +2501,7 @@ impl MirLowering:
                             val field_elem_type_pre2 = field_elem_types_pre2[field_idx]
                             match field_elem_type_pre2.kind:
                                 case HirTypeKind.Error: ()
-                                case _: field_elem_type_override2 = field_elem_type_pre2
+                                case _: field_elem_type_override2 = Some(field_elem_type_pre2)
                 var field_type = MirType.i64()
                 if val field_elem_type3 = field_elem_type_override2:
                     field_type = MirType(kind: MirTypeKind.Array(self.lower_type(field_elem_type3), 0))
