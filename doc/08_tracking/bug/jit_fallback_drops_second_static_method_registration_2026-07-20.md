@@ -1,14 +1,14 @@
 # JIT-compile failure anywhere in the whole-program closure → interpreter fallback loses a struct's 2nd+ static method registration
 
 **Date:** 2026-07-20
-**Scope:** `bin/release/x86_64-unknown-linux-gnu/simple` (self-hosted binary) JIT-to-interpreter fallback path (compiler internals — needs a rebuild to fix, not a `.spl` source edit)
+**Scope:** `bin/release/x86_64-unknown-linux-gnu/simple` (self-hosted binary) JIT-to-interpreter fallback path (compiler internals — needs a rebuild to verify current source, not a `.spl` source edit)
 **Severity:** medium — silently drops real static methods; no compile error, just a runtime "unknown static method" that looks like a source bug
 **Related:** NOT the `gc_sync_mut` shim/tier-collision issue (that hypothesis was tested and disproven for this symptom — see
 `doc/08_tracking/bug/gc_sync_mut_shim_fallback_struct_collision_2026-07-20.md`)
 
 ## Symptom
 
-`test/feature/lib/gc_parity/nogc_sync_mut_contract_spec.spl`, `it "uses
+`test/03_system/feature/lib/gc_parity/nogc_sync_mut_contract_spec.spl`, `it "uses
 nogc_sync_mut for sync GC metadata"` fails:
 
 ```
@@ -82,36 +82,29 @@ RuntimeValue.from_ptr` — same downstream symptom, same missing
   function, to trigger the loss. Not narrowed further than that within this
   triage task's scope.
 
-## Hypothesis (not proven at the Rust/interpreter-internals level)
+## Root-cause audit (2026-07-23)
 
-JIT (native) compilation runs across the whole program; when it hits an
-HIR-lowering error anywhere (here, an unresolved identifier inside some
-*other* class's method), it aborts and falls back to interpreter mode. The
-interpreter-mode registry that the fallback ends up running against is
-missing `GcConfig`'s **second** static method (`with_heap_size`) while
-keeping the first (`default()`) — consistent with a partial/aborted
-registration pass rather than a full, correct re-registration on fallback.
-This is the same general defect *class* as
-`doc/08_tracking/bug/mcp_stdio_smoke_seed_flat_registry_len_i64_2026-07-17.md`
-(registry corruption from JIT/interpreter dual-path inconsistency) and the
-"registration before identifiers resolve, corrupting registry/slot state"
-failure mode audited in
-`doc/08_tracking/bug/duplicate_type_name_collision_audit_2026-07-17.md`,
-but is a **new, distinct instance** — not fixed by either of those docs'
-changes.
+The original partial-registration hypothesis is disproven in current source.
+Both interpreter registration paths iterate every method in an `impl` block:
+`interpreter_eval.rs` for the flattened entry module and
+`interpreter_module/module_evaluator/evaluation_helpers.rs` for imported
+modules. Those loops predate this report (2026-07-04), and the JIT fallback
+reloads and evaluates the module through the former path. The HIR imported-type
+warning that resolves `std` relative to `/tmp` is a separate resolution bug.
+
+`interpreter_constructor_test.rs::impl_registers_every_static_method` now pins
+the precise source invariant with two distinct static methods and calls the
+second. No speculative registry reset was added because the current JIT
+lowering path does not mutate the interpreter registries.
 
 ## Why not fixed here
 
-Root cause lives in the JIT-to-interpreter fallback / whole-program HIR
-lowering path of the compiler (needs `src/compiler/**` or
-`src/compiler_rust/**` investigation and a binary rebuild to verify a fix —
-per this task's constraint, "if a spec needs a compiler/seed rebuild to
-fix, that's a GENUINE-BUG → file it, don't blind-edit src/"). No `.spl`
-test-file or stdlib-source change can work around it: the failure is
-present against the byte-identical, unmodified real source.
+The deployed binary still needs a controlled rebuild before this report can be
+closed. Its failure does not justify a new compiler mutation when the current
+source already contains the required all-method registration behavior.
 
 ## Status
 
-Not fixed. `test/feature/lib/gc_parity/nogc_sync_mut_contract_spec.spl`
-remains red on the deployed binary. Assertion is correct and left
-unmodified per "never weaken/delete the assertion to force green."
+Source invariant pinned; deployed-binary verification pending. The exact
+`test/03_system/feature/lib/gc_parity/nogc_sync_mut_contract_spec.spl`
+assertion remains unchanged and red on the stale deployed binary.
