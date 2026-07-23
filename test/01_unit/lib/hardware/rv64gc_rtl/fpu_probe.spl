@@ -7,7 +7,8 @@
 use std.hardware.rv64gc_rtl.fpu.{
     FpuConfig, fpu_config_enabled, fpu_config_single_only, fpu_config_disabled,
     FpuUnit, fpu_create, FpuStep, fpu_execute, freg_write, freg_read,
-    fpu_load_writeback, f64_bits, f64_of_bits, FFLAG_DZ, OP_FMADD
+    fpu_load_writeback, fpu_cvt_int_to_float, f64_bits, f64_of_bits,
+    FFLAG_DZ, FFLAG_NV, OP_FMADD
 }
 
 fn check(name: text, ok: bool) -> i64:
@@ -97,6 +98,48 @@ fn main() -> i64:
     # ---- 7. divide-by-zero sets DZ fflag ----
     val dz = fpu_execute(u, enc_opfp(0x03, 1, 0, 1, 0, 3))         # f3 = 3 / 0
     fails = fails + check("FDIV.D by zero sets DZ", (dz.un.fcsr.fflags & FFLAG_DZ) != 0)
+
+    # ---- 8. float -> int (FCVT.int.fp, funct5=0x18, rs2 selects W/WU/L/LU) ----
+    var ci = fpu_create(fpu_config_enabled())
+    ci = freg_write(ci, 1, f64_bits(3.75))
+    val c_wd = fpu_execute(ci, enc_opfp(0x18, 1, 0, 1, 1, 5))      # FCVT.W.D(3.75)
+    fails = fails + check("FCVT.W.D(3.75)->3", c_wd.writes_int and c_wd.int_result == 3)
+
+    ci = freg_write(ci, 2, f64_bits(0.0 - 7.9))
+    val c_wd2 = fpu_execute(ci, enc_opfp(0x18, 1, 0, 2, 1, 5))     # FCVT.W.D(-7.9) trunc
+    fails = fails + check("FCVT.W.D(-7.9)->-7", c_wd2.int_result == 0 - 7)
+
+    ci = freg_write(ci, 3, f64_bits(1000000000000.0))             # 1e12
+    val c_ld = fpu_execute(ci, enc_opfp(0x18, 1, 2, 3, 1, 5))      # FCVT.L.D
+    fails = fails + check("FCVT.L.D(1e12)->1000000000000", c_ld.int_result == 1000000000000)
+
+    # FCVT.WU.S(2^31) : single 0x4F000000 = 2147483648.0f ; result sign-extends
+    var cs = fpu_create(fpu_config_enabled())
+    cs = fpu_load_writeback(cs, 4, false, 0x4F000000).un
+    val c_wu = fpu_execute(cs, enc_opfp(0x18, 0, 1, 4, 1, 5))      # FCVT.WU.S
+    fails = fails + check("FCVT.WU.S(2^31) sign-ext", (c_wu.int_result & 0xFFFFFFFF) == 0x80000000)
+
+    # NaN -> saturated max + NV flag
+    ci = freg_write(ci, 6, 0x7FF8000000000000)                   # canonical qNaN.D
+    val c_nan = fpu_execute(ci, enc_opfp(0x18, 1, 0, 6, 1, 5))     # FCVT.W.D(NaN)
+    fails = fails + check("FCVT.W.D(NaN)->INT32_MAX + NV",
+        c_nan.int_result == 0x7FFFFFFF and (c_nan.un.fcsr.fflags & FFLAG_NV) != 0)
+
+    # ---- 9. int -> float (FCVT.fp.int seam, funct5=0x1A) ----
+    val i2f = fpu_cvt_int_to_float(ci, enc_opfp(0x1A, 1, 0, 0, 0, 7), 0 - 7)   # FCVT.D.W(-7)
+    fails = fails + check("FCVT.D.W(-7)->-7.0", not i2f.illegal and rd_d(i2f.un, 7) == 0.0 - 7.0)
+
+    val i2f2 = fpu_cvt_int_to_float(ci, enc_opfp(0x1A, 1, 3, 0, 0, 8), 1000000000000)  # FCVT.D.LU
+    fails = fails + check("FCVT.D.LU(1e12)->1e12", rd_d(i2f2.un, 8) == 1000000000000.0)
+
+    # FCVT.S.W(5) -> single 5.0f (0x40A00000), read back via FMV.X.W
+    val i2fs = fpu_cvt_int_to_float(ci, enc_opfp(0x1A, 0, 0, 0, 0, 9), 5)
+    val mvw2 = fpu_execute(i2fs.un, enc_opfp(0x1C, 0, 0, 9, 0, 10))            # FMV.X.W f9
+    fails = fails + check("FCVT.S.W(5)==5.0f (0x40A00000)", (mvw2.int_result & 0xFFFFFFFF) == 0x40A00000)
+
+    # round-trip: FCVT.W.D(FCVT.D.W(-7)) == -7
+    val rt = fpu_execute(i2f.un, enc_opfp(0x18, 1, 0, 7, 1, 11))
+    fails = fails + check("round-trip FCVT.W.D(FCVT.D.W(-7))==-7", rt.int_result == 0 - 7)
 
     if fails == 0:
         print("FPU PROBE: ALL PASS")

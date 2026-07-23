@@ -1,0 +1,71 @@
+# Integration probe: F/D FPU wired into the rv64 core (core.spl).
+# Run-path probe: `bin/simple run` (interpreter — float extern is JIT-broken in
+# the seed); expects "CORE FPU INTEGRATION: ALL PASS".
+# Proves the CORE routing + the DI toggle (fpu unit-level math is in fpu_probe):
+#  (1) enabled: FMV.D.X (int->float) then FMV.X.D (float->int) round-trips a
+#      value through the float regfile and back to an integer rd, PC advances;
+#  (2) disabled (core64_set_fpu(.., fpu_config_disabled())): the same FP op
+#      raises an illegal-instruction trap (PC -> mtvec=0), NOT pc+4.
+use std.hardware.rv64gc_rtl.core.{
+    CoreState64, core64_init, core64_combinational, core64_update, core64_set_fpu
+}
+use std.hardware.rv64gc_rtl.fpu.{fpu_config_disabled}
+
+fn check(name: text, ok: bool) -> i64:
+    if ok:
+        return 0
+    print("FAIL {name}")
+    1
+
+fn step(st: CoreState64, insn: i64) -> CoreState64:
+    val iw = insn as u32
+    val comb = core64_combinational(st, iw, 0, st.rf)
+    core64_update(st, iw, comb, comb.a0_val, comb.a1_val)
+
+# encoders
+fn enc_addi(rd: i64, rs1: i64, imm: i64) -> i64:
+    ((imm & 0xFFF) << 20) | (rs1 << 15) | (0 << 12) | (rd << 7) | 0x13
+
+# OP-FP: funct7 = (funct5 << 2) | fmt
+fn enc_opfp(f5: i64, fmt: i64, rs2: i64, rs1: i64, rm: i64, rd: i64) -> i64:
+    val funct7 = (f5 << 2) | fmt
+    (funct7 << 25) | (rs2 << 20) | (rs1 << 15) | (rm << 12) | (rd << 7) | 0x53
+
+fn main() -> i64:
+    var fails = 0
+    val base: i64 = 0x100
+
+    # ---- 1. enabled: round-trip 0x123 int -> f1 -> x2 through the core ----
+    var st = core64_init(base)
+    st = step(st, enc_addi(1, 0, 0x123))                 # x1 = 0x123 ; pc=+4
+    fails = fails + check("ADDI advanced pc", st.pc == base + 4)
+    st = step(st, enc_opfp(0x1E, 1, 0, 1, 0, 1))         # FMV.D.X f1, x1 ; pc=+4
+    fails = fails + check("FMV.D.X advanced pc (no trap)", st.pc == base + 8)
+    st = step(st, enc_opfp(0x1C, 1, 0, 1, 0, 2))         # FMV.X.D x2, f1 ; pc=+4
+    fails = fails + check("FMV.X.D advanced pc", st.pc == base + 12)
+    fails = fails + check("int->float->int round-trip x2==0x123", st.rf.regs[2] == 0x123)
+
+    # ---- 2. FSGNJN.D self: negate sign of f1 -> f3, move back to x4 ----
+    # FSGNJN (rm=1) with rs2==rs1 flips the sign bit of f1 (0x123 -> sign set).
+    st = step(st, enc_opfp(0x04, 1, 1, 1, 1, 3))         # FSGNJN.D f3, f1, f1
+    st = step(st, enc_opfp(0x1C, 1, 0, 3, 0, 4))         # FMV.X.D x4, f3
+    val expect_neg = 0x123 | (1 << 63)                    # sign bit set
+    fails = fails + check("FSGNJN.D set sign bit", st.rf.regs[4] == expect_neg)
+
+    # ---- 2b. FCVT round-trip through the core: int 0x123 -> f5 -> int x6 ----
+    st = step(st, enc_opfp(0x1A, 1, 0, 1, 0, 5))         # FCVT.D.W f5, x1 (291.0)
+    st = step(st, enc_opfp(0x18, 1, 0, 5, 1, 6))         # FCVT.W.D x6, f5 (rtz->291)
+    fails = fails + check("FCVT.D.W/W.D round-trip x6==291", st.rf.regs[6] == 291)
+
+    # ---- 3. DI toggle OFF: same FP op traps to mtvec(0), not pc+4 ----
+    var stoff = core64_set_fpu(core64_init(base), fpu_config_disabled())
+    stoff = step(stoff, enc_addi(1, 0, 0x123))           # x1 = 0x123 (integer ok)
+    fails = fails + check("disabled core: ADDI still works", stoff.pc == base + 4)
+    stoff = step(stoff, enc_opfp(0x1E, 1, 0, 1, 0, 1))   # FMV.D.X while FPU off
+    fails = fails + check("disabled FP -> illegal trap (pc=mtvec=0)", stoff.pc == 0)
+
+    if fails == 0:
+        print("CORE FPU INTEGRATION: ALL PASS")
+        return 0
+    print("CORE FPU INTEGRATION: {fails} FAIL")
+    1

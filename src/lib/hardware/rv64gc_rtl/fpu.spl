@@ -352,6 +352,8 @@ fn _exec_op_fp(un: FpuUnit, instr: i64) -> FpuStep:
         return _exec_cmp(un, instr, a, b, a_nan, b_nan)
     if f5 == 0x08:                                    # FCVT.S.D / FCVT.D.S
         return _exec_cvt_fmt(un, instr, rd, rs1)
+    if f5 == 0x18:                                    # FCVT.W/WU/L/LU.S/D (fp -> int)
+        return _exec_cvt_to_int(un, instr, is_d, rs1, rs2)
     if f5 == 0x1C:                                    # FMV.X / FCLASS (fp -> int)
         return _exec_fmv_x_class(un, instr, is_d, a_bits)
     if f5 == 0x1E:                                    # FMV.W.X / FMV.D.X (int -> fp)
@@ -472,6 +474,148 @@ fn _fclass(bits: i64, is_d: bool) -> i64:
     return 1 << 7                      # +inf
 
 # ---------------------------------------------------------------------------
+# Float <-> integer conversions (FCVT.int.fp / FCVT.fp.int)
+# ---------------------------------------------------------------------------
+# Result of a float->integer conversion: the integer value (already
+# sign/zero-extended to 64 bits per spec) plus whether NV must be raised.
+struct _CvtIntOut:
+    value: i64
+    nv: bool
+
+# Widen a single (f32) bit pattern to the equivalent double (f64) bits, exactly
+# (single->double is always lossless). Preserves inf/NaN so out-of-range and
+# NaN saturation work for the .S conversions without touching the host FPU.
+fn _f32bits_to_f64bits(sb: i64) -> i64:
+    val sign = (sb >> 31) & 1
+    val exp = (sb >> 23) & 0xFF
+    val frac = sb & 0x7FFFFF
+    val dsign = sign << 63
+    if exp == 0xFF:
+        if frac == 0:
+            return dsign | (0x7FF << 52)                    # +/- inf
+        return dsign | (0x7FF << 52) | (frac << 29)         # NaN (payload widened)
+    if exp == 0:
+        if frac == 0:
+            return dsign                                    # +/- zero
+        # subnormal single -> normalized double
+        var f = frac
+        var ee = 0 - 126
+        while (f & 0x800000) == 0:
+            f = f << 1
+            ee = ee - 1
+        val dfrac = (f & 0x7FFFFF) << 29
+        val dexp = ee + 1023
+        return dsign | (dexp << 52) | dfrac
+    val dexp2 = exp - 127 + 1023
+    dsign | (dexp2 << 52) | (frac << 29)
+
+# Truncate (round toward zero) a double bit pattern to a target integer type.
+# sel: 0=W(signed32) 1=WU(unsigned32) 2=L(signed64) 3=LU(unsigned64).
+# Word results are sign-extended to 64 bits; out-of-range/NaN saturate + set NV.
+fn _f64bits_to_int(fbits: i64, sel: i64) -> _CvtIntOut:
+    val exp = (fbits >> 52) & 0x7FF
+    val frac = fbits & 0xFFFFFFFFFFFFF
+    val sign = (fbits >> 63) & 1
+    val is_nan = exp == 0x7FF and frac != 0
+    val is_inf = exp == 0x7FF and frac == 0
+    val W_MAX = 0x7FFFFFFF
+    val W_MIN = 0 - 2147483648
+    val WU_MAX = 0 - 1                 # 0xFFFFFFFF sign-extended
+    val L_MAX = 0x7FFFFFFFFFFFFFFF
+    val L_MIN = 1 << 63               # i64 min bit pattern
+    val LU_MAX = 0 - 1                # all ones
+    var sat_hi = 0
+    var sat_lo = 0
+    if sel == 0:
+        sat_hi = W_MAX
+        sat_lo = W_MIN
+    else if sel == 1:
+        sat_hi = WU_MAX
+        sat_lo = 0
+    else if sel == 2:
+        sat_hi = L_MAX
+        sat_lo = L_MIN
+    else:
+        sat_hi = LU_MAX
+        sat_lo = 0
+    if is_nan:
+        if sel == 0:
+            return _CvtIntOut(value: W_MAX, nv: true)
+        if sel == 1:
+            return _CvtIntOut(value: WU_MAX, nv: true)
+        if sel == 2:
+            return _CvtIntOut(value: L_MAX, nv: true)
+        return _CvtIntOut(value: LU_MAX, nv: true)
+    if is_inf:
+        if sign == 1:
+            return _CvtIntOut(value: sat_lo, nv: true)
+        return _CvtIntOut(value: sat_hi, nv: true)
+    if exp == 0:
+        return _CvtIntOut(value: 0, nv: false)      # subnormal/zero -> 0
+    val e = exp - 1023
+    if e < 0:
+        return _CvtIntOut(value: 0, nv: false)      # |x| < 1 -> 0
+    val mant = (1 << 52) | frac                     # 53-bit significand
+    var M = 0
+    if e <= 52:
+        M = mant >> (52 - e)
+    else if e <= 62:
+        M = mant << (e - 52)
+    # e >= 63: magnitude >= 2^63; M left 0 and handled per-type below
+
+    if sel == 1:                                    # WU (unsigned 32)
+        if sign == 1:
+            return _CvtIntOut(value: 0, nv: true)   # negative -> invalid -> 0
+        if e >= 32:
+            return _CvtIntOut(value: sat_hi, nv: true)
+        if (M & 0x80000000) != 0:
+            return _CvtIntOut(value: M | NANBOX_HI, nv: false)
+        return _CvtIntOut(value: M, nv: false)
+    if sel == 3:                                    # LU (unsigned 64)
+        if sign == 1:
+            return _CvtIntOut(value: 0, nv: true)
+        if e >= 64:
+            return _CvtIntOut(value: sat_hi, nv: true)
+        if e == 63:
+            return _CvtIntOut(value: mant << 11, nv: false)
+        return _CvtIntOut(value: M, nv: false)
+    if sel == 0:                                    # W (signed 32)
+        if sign == 0:
+            if e >= 31:
+                return _CvtIntOut(value: sat_hi, nv: true)
+            return _CvtIntOut(value: M, nv: false)
+        if e >= 32:
+            return _CvtIntOut(value: sat_lo, nv: true)
+        if M == 2147483648:
+            return _CvtIntOut(value: W_MIN, nv: false)   # exactly -2^31
+        if M > 2147483648:
+            return _CvtIntOut(value: sat_lo, nv: true)
+        return _CvtIntOut(value: 0 - M, nv: false)
+    # sel == 2 : L (signed 64)
+    if sign == 0:
+        if e >= 63:
+            return _CvtIntOut(value: sat_hi, nv: true)
+        return _CvtIntOut(value: M, nv: false)
+    if e >= 64:
+        return _CvtIntOut(value: sat_lo, nv: true)
+    if e == 63:
+        if frac == 0:
+            return _CvtIntOut(value: L_MIN, nv: false)    # exactly -2^63
+        return _CvtIntOut(value: sat_lo, nv: true)
+    return _CvtIntOut(value: 0 - M, nv: false)
+
+# FCVT.W/WU/L/LU.S/D : truncate freg rs1 to integer rd (funct5 = 0x18).
+# rs2 selects W(0)/WU(1)/L(2)/LU(3); result targets the integer register file.
+fn _exec_cvt_to_int(un: FpuUnit, instr: i64, is_d: bool, rs1: i64, sel: i64) -> FpuStep:
+    if sel < 0 or sel > 3:
+        return _illegal(un)
+    val fbits = if is_d: freg_read(un, rs1) else: _f32bits_to_f64bits(unbox_single(freg_read(un, rs1)))
+    val out = _f64bits_to_int(fbits, sel)
+    if out.nv:
+        return _ok_int(fpu_set_flags(un, FFLAG_NV), out.value)
+    _ok_int(un, out.value)
+
+# ---------------------------------------------------------------------------
 # Fused multiply-add family (FMADD/FMSUB/FNMSUB/FNMADD)
 # ---------------------------------------------------------------------------
 fn _exec_fma(un: FpuUnit, instr: i64, op: i64) -> FpuStep:
@@ -536,10 +680,47 @@ fn fpu_fmv_from_int(un: FpuUnit, rd: i64, is_double: bool, xval: i64) -> FpuStep
     val stored = if is_double: xval else: nanbox_single(xval & 0xFFFFFFFF)
     _ok_float(freg_write(un, rd, stored))
 
+fn fpu_cvt_int_to_float(un: FpuUnit, instr: i64, xval: i64) -> FpuStep:
+    """FCVT.S/D.W/WU/L/LU (funct5 = 0x1A): convert the integer register value
+    `xval` to a float, writing freg rd (NaN-boxed for single). rs2 selects the
+    integer source width/signedness W(0)/WU(1)/L(2)/LU(3); fmt (instr[26:25])
+    selects single/double. Lives at the core seam because it reads the integer
+    register file, which fpu_execute has no access to."""
+    if not un.cfg.enabled:
+        return _illegal(un)
+    val fmt = _fmt(instr)
+    if fmt != FMT_S and fmt != FMT_D:
+        return _illegal(un)
+    val is_d = fmt == FMT_D
+    if is_d and not un.cfg.has_double:
+        return _illegal(un)
+    val sel = _rs2(instr)
+    if sel < 0 or sel > 3:
+        return _illegal(un)
+    val rd = _rd(instr)
+    var value = 0.0
+    if sel == 0:                                    # W: signed 32
+        val lo = xval & 0xFFFFFFFF
+        val sv = if (lo & 0x80000000) != 0: lo | NANBOX_HI else: lo
+        value = sv.to_f64()
+    else if sel == 1:                               # WU: unsigned 32
+        value = (xval & 0xFFFFFFFF).to_f64()
+    else if sel == 2:                               # L: signed 64
+        value = xval.to_f64()
+    else:                                           # LU: unsigned 64
+        if xval < 0:
+            val loh = xval & 0x7FFFFFFFFFFFFFFF
+            value = loh.to_f64() + 9223372036854775808.0
+        else:
+            value = xval.to_f64()
+    val u = if is_d: _wr_d(un, rd, value) else: _wr_s(un, rd, value)
+    _ok_float(u)
+
 export FpuConfig, fpu_config_enabled, fpu_config_single_only, fpu_config_disabled
 export FRegFile64, fregfile_create, Fcsr, fcsr_create, FpuUnit, fpu_create, fpu_present
 export freg_read, freg_write, fpu_set_flags
 export FpuStep, fpu_execute, fpu_load_writeback, fpu_store_data, fpu_fmv_from_int
+export fpu_cvt_int_to_float
 export f64_bits, f64_of_bits, nanbox_single, unbox_single
 export FFLAG_NX, FFLAG_UF, FFLAG_OF, FFLAG_DZ, FFLAG_NV
 export OP_FP, OP_LOAD_FP, OP_STORE_FP, OP_FMADD, OP_FMSUB, OP_FNMSUB, OP_FNMADD

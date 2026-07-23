@@ -41,6 +41,7 @@ use std.hardware.rv64gc_rtl.trap.{CAUSE_LOAD_MISALIGNED, CAUSE_STORE_MISALIGNED}
 use std.hardware.rv64gc_rtl.mmu_sv39.{MmuState64, mmu64_create, mmu64_flush, mmu64_set_satp}
 use std.hardware.rv64gc_rtl.mmu_sv39.{ACCESS_FETCH_64, ACCESS_LOAD_64, ACCESS_STORE_64}
 use std.hardware.rv64gc_rtl.csr_s.{SSTATUS_SIE_MASK_64, SSTATUS_SUM_MASK_64, SSTATUS_MXR_MASK_64}
+use std.hardware.rv64gc_rtl.fpu.{FpuConfig, FpuUnit, Fcsr, FRegFile64, fregfile_create, fcsr_create, fpu_config_enabled, fpu_config_disabled, fpu_execute, fpu_fmv_from_int, fpu_cvt_int_to_float, FpuStep, OP_FP, OP_FMADD, OP_FMSUB, OP_FNMSUB, OP_FNMADD}
 
 val CORE64_FETCH_LOW: u32 = 0
 val CORE64_FETCH_HIGH: u32 = 1
@@ -67,6 +68,9 @@ struct CoreState64:
     csr_s: CsrSMode64   # S-mode CSR file
     mmu: MmuState64      # Sv39 MMU state, including TLB
     rf: RegFile64         # Architectural integer register file
+    frf: FRegFile64       # F/D float register file (f0-f31)
+    fcsr: Fcsr            # Float control/status (frm + fflags)
+    fpu_cfg: FpuConfig    # Injected FPU config; .enabled toggles the F/D unit
     pipeline_phase: u32   # Fetch low parcel, fetch high parcel, or data
     fetch_low: u32        # Low 16-bit instruction parcel
     instruction: u32      # Current 32-bit instruction during data access
@@ -534,6 +538,23 @@ fn core64_combinational(state: CoreState64, imem_data: u32, dmem_rdata: i64, rf:
 # Sequential update (clocked logic)
 # ============================================================================
 
+fn core64_is_fp_compute(opcode: i64) -> bool:
+    """OP-FP and the fused multiply-add family — the F/D compute ops the core
+    routes to the injected FPU. Load/store FP are not yet wired (deferred)."""
+    opcode == OP_FP or opcode == OP_FMADD or opcode == OP_FMSUB or
+        opcode == OP_FNMSUB or opcode == OP_FNMADD
+
+fn core64_set_fpu(state: CoreState64, cfg: FpuConfig) -> CoreState64:
+    """Inject/replace the FPU config (the on/off toggle) on an existing core."""
+    CoreState64(pc: state.pc, halt: state.halt, semi_phase: state.semi_phase,
+        semi_op: state.semi_op, semi_param: state.semi_param,
+        semi_suppress: state.semi_suppress, semi_trigger: state.semi_trigger,
+        mul_div: state.mul_div, atomics: state.atomics, priv_mode: state.priv_mode,
+        csr_m: state.csr_m, csr_ext: state.csr_ext, csr_s: state.csr_s,
+        mmu: state.mmu, rf: state.rf, frf: state.frf, fcsr: state.fcsr,
+        fpu_cfg: cfg, pipeline_phase: state.pipeline_phase,
+        fetch_low: state.fetch_low, instruction: state.instruction)
+
 fn core64_update(state: CoreState64, imem_data: u32, comb: CoreCombResult64, a0_val: i64, a1_val: i64) -> CoreState64:
     """Update sequential state on rising clock edge.
     Handles PC advancement, semihosting detection, and halt."""
@@ -563,6 +584,14 @@ fn core64_update(state: CoreState64, imem_data: u32, comb: CoreCombResult64, a0_
     var new_csr_s = state.csr_s
     var new_mmu = state.mmu
     var new_rf = state.rf
+    var new_frf = state.frf
+    var new_fcsr = state.fcsr
+    # FP compute retiring to an integer rd (FMV.X/FCLASS/FEQ/FLT/FLE) overrides
+    # the normal integer writeback below.
+    var fp_int_write = false
+    var fp_int_rd = 0
+    var fp_int_val: i64 = 0
+    val fp_opcode: i64 = (eff_insn as i64) & 0x7F
 
     if state.halt == false:
         if imem_data == SEMI_ENTRY and state.semi_phase == 0:
@@ -703,6 +732,48 @@ fn core64_update(state: CoreState64, imem_data: u32, comb: CoreCombResult64, a0_
             new_semi_suppress = false
             new_atomics = atomics_create()
 
+        else if core64_is_fp_compute(fp_opcode) and state.semi_phase == 0:
+            # ── F/D extension: route OP-FP / FMADD-family to the injected FPU.
+            #    Disabled (mstatus.FS==Off equivalent) -> illegal-instruction. ──
+            new_semi_phase = 0
+            new_semi_suppress = false
+            if state.fpu_cfg.enabled:
+                val fp_instr: i64 = eff_insn as i64
+                val fp_funct5 = (fp_instr >> 27) & 0x1F
+                val fp_unit = FpuUnit(cfg: state.fpu_cfg, frf: state.frf, fcsr: state.fcsr)
+                var fp_step = fpu_execute(fp_unit, fp_instr)
+                if fp_opcode == OP_FP and fp_funct5 == 0x1E:
+                    # FMV.W.X / FMV.D.X: move integer rs1 bits into float rd.
+                    val fp_is_d = ((fp_instr >> 25) & 3) == 1
+                    fp_step = fpu_fmv_from_int(fp_unit, comb.dec.rd, fp_is_d, comb.rs1_data)
+                else if fp_opcode == OP_FP and fp_funct5 == 0x1A:
+                    # FCVT.S/D.W/WU/L/LU: convert integer rs1 to float rd.
+                    fp_step = fpu_cvt_int_to_float(fp_unit, fp_instr, comb.rs1_data)
+                if fp_step.illegal:
+                    val trap = trap64_enter(trap64_state_init(), CAUSE_ILLEGAL_INSN,
+                        ill_tval, state.pc, state.priv_mode, state.csr_m, state.csr_s)
+                    new_pc = trap.trap_pc
+                    new_priv_mode = trap.target_mode
+                    new_csr_m = trap.csr
+                    new_csr_s = trap.csr_s
+                    new_atomics = atomics_create()
+                else:
+                    new_frf = fp_step.un.frf
+                    new_fcsr = fp_step.un.fcsr
+                    new_pc = comb.pc_plus4
+                    if fp_step.writes_int:
+                        fp_int_write = true
+                        fp_int_rd = comb.dec.rd
+                        fp_int_val = fp_step.int_result
+            else:
+                val trap = trap64_enter(trap64_state_init(), CAUSE_ILLEGAL_INSN,
+                    ill_tval, state.pc, state.priv_mode, state.csr_m, state.csr_s)
+                new_pc = trap.trap_pc
+                new_priv_mode = trap.target_mode
+                new_csr_m = trap.csr
+                new_csr_s = trap.csr_s
+                new_atomics = atomics_create()
+
         else:
             new_semi_phase = 0
             new_semi_suppress = false
@@ -727,7 +798,10 @@ fn core64_update(state: CoreState64, imem_data: u32, comb: CoreCombResult64, a0_
             else if comb.dec.mem_write:
                 new_atomics = atomics_invalidate(state.atomics, comb.dmem_addr)
 
-        new_rf = regfile64_write(state.rf, comb.dec.rd, comb.rd_data, comb.rd_write)
+        if fp_int_write:
+            new_rf = regfile64_write(state.rf, fp_int_rd, fp_int_val, true)
+        else:
+            new_rf = regfile64_write(state.rf, comb.dec.rd, comb.rd_data, comb.rd_write)
 
     CoreState64(
         pc: new_pc,
@@ -745,6 +819,9 @@ fn core64_update(state: CoreState64, imem_data: u32, comb: CoreCombResult64, a0_
         csr_s: new_csr_s,
         mmu: new_mmu,
         rf: new_rf,
+        frf: new_frf,
+        fcsr: new_fcsr,
+        fpu_cfg: state.fpu_cfg,
         pipeline_phase: state.pipeline_phase,
         fetch_low: state.fetch_low,
         instruction: state.instruction
@@ -781,6 +858,9 @@ fn core64_reset(reset_addr: i64) -> CoreState64:
         csr_s: csr_s64_create(),
         mmu: mmu,
         rf: regfile64_create(),
+        frf: fregfile_create(),
+        fcsr: fcsr_create(),
+        fpu_cfg: fpu_config_enabled(),
         pipeline_phase: CORE64_FETCH_LOW,
         fetch_low: 0,
         instruction: 0
@@ -810,6 +890,9 @@ fn core64_init(reset_vec: i64) -> CoreState64:
         csr_s: csr_s64_create(),
         mmu: mmu,
         rf: regfile64_create(),
+        frf: fregfile_create(),
+        fcsr: fcsr_create(),
+        fpu_cfg: fpu_config_enabled(),
         pipeline_phase: CORE64_FETCH_LOW,
         fetch_low: 0,
         instruction: 0
