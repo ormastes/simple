@@ -1,0 +1,94 @@
+# Debug probe: the rv32 SoC console path end-to-end over the SHARED MMIO map.
+# A program running on the rv32 core stores bytes to the ns16550a THR at the
+# canonical UART base (0x1000_0000, from riscv_common/mmio_map.spl). We then
+# deserialize the real `uart_tx` serial line (8-N-1, divisor=1 => 1 bit/tick)
+# and reconstruct the transmitted bytes — exactly what an FPGA PMOD UART
+# receiver would capture. Proves core -> Wishbone decode -> UART -> serial out
+# on the shared address, the path we could not observe on the K26 (no 3v3
+# PMOD adapter).
+# Run: bin/simple run test/01_unit/lib/hardware/soc_rtl/rv32_uart_console_probe.spl
+use std.hardware.soc_rtl.soc_top.{SocState, soc_create, soc_tick}
+use std.hardware.soc_rtl.ram.{ram_write}
+use std.hardware.soc_rtl.wb_interconnect.UART_BASE
+
+fn check(name: text, ok: bool) -> i64:
+    if ok:
+        print("PASS {name}")
+        return 0
+    print("FAIL {name}")
+    1
+
+fn main() -> i64:
+    var fails: i64 = 0
+
+    # Shared-map sanity: the rv32 interconnect's UART base is the canonical one.
+    print("UART_BASE={UART_BASE}")
+    fails = fails + check("rv32 UART_BASE == shared 0x10000000", UART_BASE == 0x10000000u32)
+
+    # Program at 0x8000_0000: write 'H','i','\n' to THR (UART offset 0), park.
+    #   lui  x5, 0x10000      x5 = 0x1000_0000 (UART base)
+    #   addi x1, x0, 72       'H'
+    #   sw   x1, 0(x5)
+    #   addi x1, x0, 105      'i'
+    #   sw   x1, 0(x5)
+    #   addi x1, x0, 10       '\n'
+    #   sw   x1, 0(x5)
+    #   jal  x0, 0            park
+    var soc = soc_create(4096)
+    var ram = soc.ram
+    ram = ram_write(ram, 0x00, 0x100002B7, 2)   # lui  x5, 0x10000
+    ram = ram_write(ram, 0x04, 0x04800093, 2)   # addi x1, x0, 72
+    ram = ram_write(ram, 0x08, 0x0012A023, 2)   # sw   x1, 0(x5)
+    ram = ram_write(ram, 0x0C, 0x06900093, 2)   # addi x1, x0, 105
+    ram = ram_write(ram, 0x10, 0x0012A023, 2)   # sw   x1, 0(x5)
+    ram = ram_write(ram, 0x14, 0x00A00093, 2)   # addi x1, x0, 10
+    ram = ram_write(ram, 0x18, 0x0012A023, 2)   # sw   x1, 0(x5)
+    ram = ram_write(ram, 0x1C, 0x0000006F, 2)   # jal  x0, 0 (park)
+    soc.ram = ram
+    soc.core.pc = 0x8000_0000
+
+    # Run, sampling the serial TX line each cycle and deserializing 8-N-1 frames.
+    var got: [i64] = []
+    var frame_active = false
+    var samples = 0
+    var cur = 0
+    var i = 0
+    while i < 200:
+        val t = soc_tick(soc)
+        soc = t.state
+        val line_high = t.ports.uart_tx    # true = mark/idle(1), false = space/start(0)
+        if not frame_active:
+            if not line_high:          # falling edge = start bit
+                frame_active = true
+                samples = 0
+                cur = 0
+        else:
+            samples = samples + 1
+            # tick 1 = start-bit alignment (skip); ticks 2..9 = data bits 0..7
+            # sampled at bit center; tick 10 = stop bit -> byte complete.
+            if samples >= 2 and samples <= 9:
+                if line_high:
+                    cur = cur | (1 << (samples - 2))
+            else if samples >= 10:
+                got.push(cur & 0xFF)
+                frame_active = false
+        i = i + 1
+
+    var dump = ""
+    var k = 0
+    while k < got.len():
+        dump = dump + "{got[k]} "
+        k = k + 1
+    print("deserialized bytes: {dump}(count={got.len()})")
+
+    fails = fails + check("transmitted exactly 3 bytes", got.len() == 3)
+    if got.len() == 3:
+        fails = fails + check("byte 0 == 'H' (72)", got[0] == 72)
+        fails = fails + check("byte 1 == 'i' (105)", got[1] == 105)
+        fails = fails + check("byte 2 == '\\n' (10)", got[2] == 10)
+
+    if fails == 0:
+        print("RV32 UART CONSOLE PROBE: ALL PASS")
+        return 0
+    print("RV32 UART CONSOLE PROBE: {fails} FAILURES")
+    1
