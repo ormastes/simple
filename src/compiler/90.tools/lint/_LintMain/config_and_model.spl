@@ -193,11 +193,12 @@ class LintConfig:
     levels: Dict<String, String>
     # Selected strictness tier; nil = unset (legacy build_default_levels behavior).
     profile: Option<LintProfile>
+    error: String
 
     # Create a default config (all defaults, no overrides).
 impl LintConfig:
     static fn new() -> LintConfig:
-        LintConfig(levels: {}, profile: nil)
+        LintConfig(levels: {}, profile: nil, error: "")
 
     # Load config from an SDN file.  Parses the [lints] section.
     static fn from_sdn_file(path: String) -> LintConfig:
@@ -245,14 +246,25 @@ impl LintConfig:
                     # profile=<tier> selects the strictness tier (not a lint name).
                     # Handle it BEFORE the all_lint_names() gate or it is dropped.
                     if lint_name == "profile":
-                        config.set_profile_from_string(level_str)
+                        if parse_lint_profile(level_str).?:
+                            config.set_profile_from_string(level_str)
+                        else:
+                            config.set_error_once("unknown profile: {level_str}")
                     # Validate the lint name is known
                     elif all_lint_names().contains(lint_name):
-                        config.levels[lint_name] = level_str
+                        if parse_lint_level(level_str).?:
+                            config.levels[lint_name] = level_str
+                        else:
+                            config.set_error_once("invalid level for {lint_name}: {level_str}")
                     elif lint_name == "unknown_annotation":
                         # Meta-lint: sets both unknown_decorator and unknown_attribute
-                        config.levels["unknown_decorator"] = level_str
-                        config.levels["unknown_attribute"] = level_str
+                        if parse_lint_level(level_str).?:
+                            config.levels["unknown_decorator"] = level_str
+                            config.levels["unknown_attribute"] = level_str
+                        else:
+                            config.set_error_once("invalid level for {lint_name}: {level_str}")
+                    else:
+                        config.set_error_once("unknown lint: {lint_name}")
 
         config
 
@@ -286,6 +298,10 @@ impl LintConfig:
     # Select the strictness tier directly.
     me set_profile(profile: LintProfile):
         self.profile = Some(profile)
+
+    me set_error_once(message: String):
+        if self.error == "":
+            self.error = message
 
     # Select the strictness tier from a string; unknown strings are ignored.
     me set_profile_from_string(profile_str: String):
@@ -386,7 +402,7 @@ impl LintConfig:
             if src_keys != nil:
                 for key in src_keys:
                     new_levels[key] = src_levels[key]
-        LintConfig(levels: new_levels, profile: self.profile)
+        LintConfig(levels: new_levels, profile: self.profile, error: self.error)
 
 fn resolve_lint_config(base: LintConfig, path: String, content: String) -> LintConfig:
     var config = base.child()

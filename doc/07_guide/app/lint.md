@@ -2,6 +2,10 @@
 
 The Simple compiler includes a multi-layer lint system for detecting code quality issues, performance anti-patterns, and stub/dummy implementations.
 
+Lint configuration is fail-closed: inside `simple.sdn`'s `[lints]` section,
+unknown profiles or rule names, and levels other than `allow`, `warn`, or
+`deny`, make `simple lint` return usage status 2.
+
 ---
 
 ## Quick Start
