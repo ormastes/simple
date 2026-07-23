@@ -186,7 +186,22 @@ evidence boundary for the important pure-Simple tooling lanes:
   **Remaining bug/gap:** no successor full CLI has qualified both the p2 source
   fix and the bounded-output source fix. **Next solution:** incrementally build
   one fresh Stage 4 candidate, run each focused regression once, then run the
-  aggregate essential-tools gate.
+  aggregate essential-tools gate. The `run` wrapper now consumes shared log
+  options only before the entry file and preserves every post-file program
+  token (including `--`) unchanged; its focused source contract awaits the
+  same fresh Stage 4 candidate.
+- **verify** — **Source status:** the public verification CLI now validates its
+  grammar before worker dispatch. Unknown, bare/empty `--files`, duplicate, and
+  conflicting scope options return exit 2 rather than silently falling back to
+  changed-file or empty PASS scope; status/list/check/regenerate reject tails,
+  and help is valid only by itself. `--all` supplies Git-tracked project files
+  to the tooling gate rather than the current diff, so a clean checkout cannot
+  skip tooling-sensitive paths while claiming full-project scope.
+  **Strongest current evidence:** the focused contracts in
+  `test/01_unit/app/verify_cli_option_validation_contract_check.spl` and
+  `test/01_unit/app/verify_all_scope_contract_check.spl`.
+  **Remaining bug/gap:** fresh Stage 4 runtime qualification is pending; see
+  [the verify option report](../../08_tracking/bug/verify_cli_option_false_green_2026-07-23.md).
 - **lint** — **Source status:** parser-backed ARG001/ARG002, COLL001-COLL008,
   STUB001/STUB002, and module-level W0404 wide-public CLI parity are implemented; W0404 reports at
   line 1, honors `visibility_boundary`, and suppresses `__init__.spl`/`mod.spl` facades.
