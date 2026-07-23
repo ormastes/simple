@@ -660,6 +660,44 @@ impl HirLowering:
                         item_idx = item_idx + 1
             import_idx = import_idx + 1
 
+    me resolve_package_sibling_symbols(module: Module):
+        """Directory-package semantics: files in one source directory share a
+        namespace — e.g. std.common.json.array_ops calls json_array from
+        types.spl with NO import line. The seed's flat global registry gives
+        this for free; the entry-closure HIR path must register each sibling
+        module's public symbols explicitly, or every bare cross-file call in a
+        package dies with "unresolved name" (fatal since HIR lowering errors
+        became build errors)."""
+        var self_name = module.name
+        if self_name.ends_with(".spl"):
+            self_name = self_name[0:self_name.len() - 4]
+            self_name = self_name.replace("/", ".")
+            if self_name.starts_with("src."):
+                self_name = self_name.substring(4)
+        val self_segs = self_name.split(".")
+        if self_segs.len() < 2:
+            return
+        var pkg = ""
+        var pkg_si = 0
+        while pkg_si < self_segs.len() - 1:
+            if pkg_si > 0:
+                pkg = pkg + "."
+            pkg = pkg + self_segs[pkg_si]
+            pkg_si = pkg_si + 1
+        val pkg_prefix = pkg + "."
+        val sibling_span = Span(start: 0, end: 0, line: 0, col: 0, file: "", length: 0)
+        for sibling_name in self.modules_by_name.keys():
+            if sibling_name == self_name or sibling_name == module.name:
+                continue
+            if not sibling_name.starts_with(pkg_prefix):
+                continue
+            # DIRECT siblings only: exactly one segment past the package.
+            if sibling_name.substring(pkg_prefix.len()).contains("."):
+                continue
+            val sibling_mod: Module? = self.modules_by_name.get(sibling_name)
+            if sibling_mod != nil:
+                self.register_glob_imported_symbols(sibling_mod, sibling_name, sibling_span)
+
     # Uniquely-named entry point for the driver's unstub `-c`/`run` path.
     # `lowering.lower_module(...)` from the driver never enters this impl's body
     # on the stage4 binary: `lower_module` is also defined on MirLowering with
@@ -730,6 +768,7 @@ impl HirLowering:
             if bootstrap_diag:
                 eprint("[hir-lower] resolve_import_symbols:start module={module.name}")
             self.resolve_import_symbols(module)
+            self.resolve_package_sibling_symbols(module)
             if bootstrap_diag:
                 eprint("[hir-lower] resolve_import_symbols:done module={module.name}")
             hir_module_phase_probe("phase3:hir:imports:done {module.name}")
