@@ -276,3 +276,17 @@ owner and therefore still fails if its own environment ABI is unusable.
 `check-bootstrap-portability.shs` passes with this corrected scope. The broad
 host-GPU self-test was killed before its aggregate marker and is not claimed as
 evidence.
+
+## 2026-07-23 isolated incremental rebuild blocker
+
+A strict isolated `--pure-simple --full-cli --no-mcp --backend=cranelift`
+attempt stopped before Stage 2 because the available Rust seed/runtime stamp
+does not match current Rust inputs. Full-CLI bootstrap correctly refuses the
+stale compiler-backfill archive; three bounded cycles established missing
+local prerequisites first, then the genuine stamp mismatch. No cache or
+candidate was admitted.
+
+The scoped run explicitly forbids `--full-bootstrap`, so do not bypass or
+rewrite the stamp. A fresh seed/runtime/backfill build outside this pure-Simple
+lane is required before the incremental Stage 2–4 pipeline can produce the
+candidate needed for the existing `rt_env_set` admission probe.
