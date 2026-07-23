@@ -152,8 +152,10 @@ Source-fixed is not Stage 4 qualification. The following is the current
 evidence boundary for the important pure-Simple tooling lanes:
 
 - **test / test-daemon** — **Source status:** canonical direct summaries and
-  responsive daemon routing are pushed. **Strongest current evidence:**
-  `eceddfd31d` and `7a011de61f`, plus the zero-executed regression in
+  responsive daemon routing and fail-closed atomic request publication are
+  pushed. A request write/rename failure cleans artifacts and returns nonzero
+  before polling. **Strongest current evidence:** `eceddfd31d`, `7a011de61f`,
+  and `f5440b77fa`, plus the zero-executed regression in
   [the tracked report](../../08_tracking/bug/test_runner_zero_executed_single_file_greenwash_2026-07-17.md).
   **Remaining bug/gap:** the aggregate Stage 4 essential-tools smoke has not
   passed. **Next solution:** deploy a fresh Stage 4 CLI and run the exact
