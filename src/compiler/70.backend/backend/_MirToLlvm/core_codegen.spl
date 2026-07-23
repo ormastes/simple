@@ -1146,12 +1146,13 @@ impl MirTextCodegen for MirToLlvm:
                 self.emit_unsupported_panic("LLVM backend does not support Transpose lowering")
 
     me translate_call(dest: LocalId?, func: MirOperand, args: [MirOperand]):
-        val dest_id = match dest:
-            case Some(dest_local): self.local_id_value(dest_local)
-            case nil: 0
-        val dest_name: text? = match dest:
-            case Some(_): Some(self.get_local(dest_id))
-            case nil: nil
+        # Decay-safe optional access (NOT `match dest: case Some/nil`): the
+        # seed's cross-module optional payloads can DECAY to the bare object
+        # (LocalId, not Some(LocalId)) — a match then exhausts without
+        # matching any arm ("invalid pattern ... object value LocalId").
+        # `!= nil` and `??` handle both the wrapped and decayed shapes.
+        val dest_id = if dest != nil: self.local_id_value(dest ?? LocalId(id: 0)) else: 0
+        val dest_name: text? = if dest != nil: Some(self.get_local(dest_id)) else: nil
         var func_name = self.translate_operand(func)
         match func.kind:
             case Copy(local) | Move(local):
