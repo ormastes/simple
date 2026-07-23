@@ -203,11 +203,12 @@ bin/simple_mcp_server
 - **MCP Version**: 2025-06-18
 - **Startup**: < 1s (optimized single-process)
 - **Tool count**: determined from the deployed native server's `tools/list`
-- **MCP wrapper behavior**: `simple_mcp_server` launches a cached compiled
-  artifact and fails closed by default. Its explicit
-  `SIMPLE_MCP_ALLOW_SOURCE_FALLBACK=1` mode is debugging-only and supplies no
-  production or bootstrap evidence. LSP wrapper fallback policy is separate;
-  the Stage 5 gate bypasses both wrappers and probes the exact fresh native pair.
+- **MCP wrapper behavior**: the generated POSIX `simple_mcp_server` launches a
+  hash-admitted compiled artifact and has no source fallback. The Windows
+  `.cmd` launcher retains `SIMPLE_MCP_ALLOW_SOURCE_FALLBACK=1` for debugging
+  only; it supplies no production or bootstrap evidence. LSP wrapper policy is
+  separate; the Stage 5 gate bypasses both wrappers and probes the exact fresh
+  native pair.
 
 ---
 

@@ -121,10 +121,10 @@ For staged compiler or MCP changes, the bootstrap wrapper must pass its built-in
 Stage 2 and Stage 3 compiler sanity, then run the matching stage sanity SSpec
 and MCP command-line handshake SSpec. `bin/simple_mcp_server` defaults to the cached
 native server; `SIMPLE_MCP_NATIVE` selects an exact artifact for reproducible
-verification. Raw-source execution is an explicit debug fallback controlled by
-`SIMPLE_MCP_ALLOW_SOURCE_FALLBACK=1` and may use only a deployed pure-Simple
-runtime. A wrapper handshake that silently runs raw source or the Rust seed is
-not production evidence.
+verification. The generated POSIX wrapper has no raw-source fallback. The
+Windows `.cmd` launcher alone retains an explicit debugging fallback controlled
+by `SIMPLE_MCP_ALLOW_SOURCE_FALLBACK=1`, and it may use only a deployed
+pure-Simple runtime. No raw-source or Rust-seed launch is production evidence.
 
 `bin/simple_mcp_server` resolves and enters the canonical repository root
 before probing or launching its admitted native server, so relative workspace
