@@ -26,6 +26,16 @@ extern fn rt_file_read_bytes(path: text) -> [u8]
 fn cranelift_file_read_bytes(path: text) -> [u8]:
     rt_file_read_bytes(path)
 
+fn cl_local_id_of(opt: LocalId?) -> i64:
+    # Flat-optional-safe id extraction: explicit .unwrap() lowers to the
+    # box-assuming rt_enum_payload on the stage4 native lane and reads a
+    # garbage payload slot off a flat (nullable-pointer) LocalId?, then
+    # traps "field access on nil receiver" at .id. if-val is the
+    # documented flat-safe direct-copy construct.
+    if val l = opt:
+        return l.id
+    -1
+
 # ============================================================================
 # Cranelift Type Constants (must match cranelift_sffi.rs)
 # ============================================================================
@@ -609,7 +619,7 @@ fn cl_translate_instruction(
         case Call(dest, func_op, args):
             val result = cl_translate_call(ctx, func_op, args, value_map, slot_map, cl_module, func_handles, func)
             if dest.?:
-                val dest_id = dest.unwrap().id
+                val dest_id = cl_local_id_of(dest)
                 value_map[dest_id] = result
                 if slot_map.has(dest_id):
                     val addr = cranelift_stack_addr(ctx, slot_map[dest_id], 0)
@@ -623,7 +633,7 @@ fn cl_translate_instruction(
                 arg_vals.push(cl_translate_operand(ctx, cl_module, arg, value_map, slot_map, func))
             val result = cranelift_call_indirect(ctx, cl_sig, addr, arg_vals)
             if dest.?:
-                val dest_id = dest.unwrap().id
+                val dest_id = cl_local_id_of(dest)
                 value_map[dest_id] = result
                 if slot_map.has(dest_id):
                     val dest_addr = cranelift_stack_addr(ctx, slot_map[dest_id], 0)
@@ -643,10 +653,10 @@ fn cl_translate_instruction(
                 # first pair. No caller currently emits N-ary joins through
                 # this backend, so this is latent; guard it loudly rather
                 # than miscompiling silently if that ever changes.
-                if args.len() > 4 and not slot_map.has(dest.unwrap().id):
+                if args.len() > 4 and not slot_map.has(cl_local_id_of(dest)):
                     eprint("[cranelift] ERROR: __simple_ssa_phi has {args.len()} args (N-ary join) with no stack slot; this fallback only supports a single then/else pair")
                     return
-                val dest_id = dest.unwrap().id
+                val dest_id = cl_local_id_of(dest)
                 if slot_map.has(dest_id):
                     val addr = cranelift_stack_addr(ctx, slot_map[dest_id], 0)
                     val ty = mir_type_to_cl(local_type(dest_id, func))
@@ -716,10 +726,12 @@ fn store_phi_incomings_for_edge(
                     case Intrinsic(dest, name, args):
                         if name == "__simple_ssa_phi" and dest.?:
                             val incoming = cranelift_phi_incoming_for_predecessor(pred.id, args)
-                            if incoming.? and slot_map.has(dest.unwrap().id):
-                                val val_ = cl_translate_operand(ctx, cl_module, incoming.unwrap(), value_map, slot_map, func)
-                                val addr = cranelift_stack_addr(ctx, slot_map[dest.unwrap().id], 0)
-                                cranelift_store(ctx, val_, addr, 0)
+                            val phi_dest_id = cl_local_id_of(dest)
+                            if val incoming_op = incoming:
+                                if slot_map.has(phi_dest_id):
+                                    val val_ = cl_translate_operand(ctx, cl_module, incoming_op, value_map, slot_map, func)
+                                    val addr = cranelift_stack_addr(ctx, slot_map[phi_dest_id], 0)
+                                    cranelift_store(ctx, val_, addr, 0)
                     case _:
                         ()
 
@@ -740,8 +752,8 @@ fn cl_translate_terminator(
                 cranelift_jump(ctx, block_map[target.id])
 
         case Ret(value):
-            if value.?:
-                val ret_val = cl_translate_operand(ctx, cl_module, value.unwrap(), value_map, slot_map, func)
+            if val ret_operand = value:
+                val ret_val = cl_translate_operand(ctx, cl_module, ret_operand, value_map, slot_map, func)
                 cranelift_return(ctx, ret_val)
             elif func.name == "main":
                 cranelift_return(ctx, cranelift_iconst(ctx, CL_TYPE_I64, 0))
@@ -800,7 +812,7 @@ fn cl_translate_terminator(
         case CallTerminator(dest, func_op, args, normal, unwind):
             val result = cl_translate_call(ctx, func_op, args, value_map, slot_map, 0, {}, func)
             if dest.?:
-                val dest_id = dest.unwrap().id
+                val dest_id = cl_local_id_of(dest)
                 value_map[dest_id] = result
                 if slot_map.has(dest_id):
                     val addr = cranelift_stack_addr(ctx, slot_map[dest_id], 0)
