@@ -1,0 +1,138 @@
+#!/bin/sh
+# debug_rv64_linux_gdb.shs — Debug the Simple RV64 Linux boot with QEMU's
+# gdbstub + gdb-multiarch, and capture an evidence transcript.
+#
+# This is the RV64 debug proxy for the FPGA JTAG path: gdb serves registers,
+# memory, and single-step over a serial/remote link exactly as a JTAG probe
+# would. It boots OpenSBI -> Linux 6.6.0 -> /init under a debugger, halted at
+# reset, breaks at the kernel entry (0x80200000 = FW_JUMP_ADDR), reads regs +
+# memory, single-steps, then resumes to /init.
+#
+# POSIX sh — verified under dash. No bash-isms ([ = ], no [[ ]], no pipefail).
+# Fail-closed: prints PASS only if the breakpoint hit AND boot reached /init.
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+ASSETS="$ROOT/build/os/rv64_soc"
+OUT="$ASSETS/transcripts"
+GDBLOG="$OUT/gdb_debug.log"
+SERLOG="$OUT/qemu_gdb_serial.log"
+GDBCMDS="$OUT/gdb_cmds.txt"
+PORT=1234
+ENTRY=0x80200000
+RESET=0x1000
+
+QEMU=qemu-system-riscv64
+GDB=gdb-multiarch
+
+mkdir -p "$OUT"
+
+# --- Fail-closed asset + tool checks -----------------------------------------
+for f in fw_jump.bin Image initramfs.cpio.gz; do
+    if [ ! -f "$ASSETS/$f" ]; then
+        echo "RV64-LINUX-GDB-DEBUG: FAIL (missing asset $f)"
+        exit 1
+    fi
+done
+for t in "$QEMU" "$GDB"; do
+    if ! command -v "$t" >/dev/null 2>&1; then
+        echo "RV64-LINUX-GDB-DEBUG: FAIL (missing tool $t)"
+        exit 1
+    fi
+done
+
+# --- Cleanup: always kill QEMU ------------------------------------------------
+QEMU_PID=""
+cleanup() {
+    if [ -n "$QEMU_PID" ]; then
+        kill "$QEMU_PID" 2>/dev/null
+        wait "$QEMU_PID" 2>/dev/null
+    fi
+}
+trap cleanup EXIT INT TERM
+
+# --- gdb batch command file ---------------------------------------------------
+# NB: the FINAL resume is `detach` (not `continue`): `/init` never halts, so a
+# trailing `continue` would block batch gdb forever. `detach` resumes the vCPU
+# and disconnects — functionally the "continue" — then QEMU free-runs to /init
+# and the script polls the serial log for the landing string.
+cat > "$GDBCMDS" <<EOF
+set pagination off
+set architecture riscv:rv64
+target remote :$PORT
+printf "RESET_PC=%#lx\n", \$pc
+echo === registers at reset ===\n
+info registers pc
+hbreak *$ENTRY
+continue
+printf "ENTRY_PC=%#lx\n", \$pc
+echo === registers at kernel entry ($ENTRY) ===\n
+info registers
+echo === disassembly at \$pc ===\n
+x/8i \$pc
+stepi
+printf "STEP1_PC=%#lx\n", \$pc
+stepi
+printf "STEP2_PC=%#lx\n", \$pc
+stepi
+printf "STEP3_PC=%#lx\n", \$pc
+echo === resume (detach) — QEMU free-runs to /init ===\n
+detach
+quit
+EOF
+
+# --- Launch QEMU: real-firmware boot + gdbstop halted at reset ----------------
+: > "$SERLOG"
+"$QEMU" -M virt -m 256M -smp 1 -nographic -no-reboot \
+    -bios "$ASSETS/fw_jump.bin" -kernel "$ASSETS/Image" \
+    -initrd "$ASSETS/initramfs.cpio.gz" \
+    -append "console=ttyS0,115200 earlycon=sbi rdinit=/init" \
+    -s -S > "$SERLOG" 2>&1 &
+QEMU_PID=$!
+
+# --- Wait for gdbstub port (bounded) -----------------------------------------
+i=0
+while [ "$i" -lt 50 ]; do
+    if ss -ltn 2>/dev/null | grep -q ":$PORT "; then
+        break
+    fi
+    i=$((i + 1))
+    sleep 0.2
+done
+sleep 1
+
+# --- Drive gdb: connect, break at entry, read regs/mem, step, detach ----------
+"$GDB" -batch -x "$GDBCMDS" "$ASSETS/Image" > "$GDBLOG" 2>&1
+
+# --- After detach, QEMU free-runs; poll serial for the /init landing ----------
+init_ok=0
+i=0
+while [ "$i" -lt 90 ]; do
+    if grep -q "Run /init as init process" "$SERLOG"; then
+        init_ok=1
+        break
+    fi
+    i=$((i + 1))
+    sleep 1
+done
+
+# --- Evaluate evidence (fail-closed) -----------------------------------------
+reset_ok=0
+bp_hit=0
+grep -q "RESET_PC=$RESET" "$GDBLOG" && reset_ok=1
+grep -q "ENTRY_PC=$ENTRY" "$GDBLOG" && bp_hit=1
+
+echo ""
+echo "--- evidence summary ---"
+echo "reset_pc_ok (halted at $RESET) : $reset_ok"
+echo "breakpoint_hit ($ENTRY)        : $bp_hit"
+echo "boot_reached_init              : $init_ok"
+echo "gdb transcript                 : $GDBLOG"
+echo "qemu serial log                : $SERLOG"
+echo ""
+
+if [ "$bp_hit" = 1 ] && [ "$init_ok" = 1 ]; then
+    echo "RV64-LINUX-GDB-DEBUG: PASS"
+    exit 0
+fi
+echo "RV64-LINUX-GDB-DEBUG: FAIL (reset_ok=$reset_ok bp_hit=$bp_hit init_ok=$init_ok)"
+exit 1
