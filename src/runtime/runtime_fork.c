@@ -363,7 +363,10 @@ int64_t rt_fork_parent_wait_bounded(int64_t child_pid, int64_t timeout_ms,
             break;
         }
         if (ret == 0) {
-            if (child_exited) {
+            /* A delegated child may compute silently before writing its final
+             * summary. Positive-timeout callers already have deadline_ms, so
+             * only unbounded waits need the short inherited-fd grace cap. */
+            if (child_exited && timeout_ms <= 0) {
                 exited_grace_polls++;
                 if (exited_grace_polls >= FORK_EXIT_GRACE_POLLS) {
                     cleanup_descendants = stdout_open || stderr_open;

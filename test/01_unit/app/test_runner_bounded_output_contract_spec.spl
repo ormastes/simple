@@ -1,6 +1,7 @@
 use std.spec
 use std.io_runtime.{file_read}
 use app.io.process_ops.{process_run_bounded}
+use std.io.{process_run_with_limits_bounded}
 use app.io.env_ops.{host_os}
 
 fn run_bounded_process_case() -> (text, text, i64):
@@ -13,6 +14,31 @@ fn run_bounded_process_case_with_script(posix_script: text, windows_script: text
         process_run_bounded("/bin/sh", ["-c", posix_script], timeout_ms, cap)
 
 describe "test runner bounded output contract":
+    it "preserves both streams and nonzero status through the limited result wrapper":
+        val posix_script = "printf CHILD_OUT; printf CHILD_ERR >&2; exit 17"
+        val windows_script = "<nul set /p \"=CHILD_OUT\" & <nul set /p \"=CHILD_ERR\" 1>&2 & exit /b 17"
+        val (stdout, stderr, code) = run_bounded_process_case_with_script(
+            posix_script, windows_script, 5000, 1024)
+        val limited = if host_os() == "windows":
+            process_run_with_limits_bounded("cmd.exe", ["/D", "/C", windows_script], 5000, 0, 0, 0, 64, 1024)
+        else:
+            process_run_with_limits_bounded("/bin/sh", ["-c", posix_script], 5000, 0, 0, 0, 64, 1024)
+
+        expect(stdout).to_equal("CHILD_OUT")
+        expect(stderr).to_equal("CHILD_ERR")
+        expect(code).to_equal(17)
+        expect(limited.stdout).to_equal("CHILD_OUT")
+        expect(limited.stderr).to_equal("CHILD_ERR")
+        expect(limited.exit_code).to_equal(17)
+
+        if host_os() != "windows":
+            val late = process_run_with_limits_bounded(
+                "/bin/sh", ["-c", "(sleep 3; printf LATE_OUT; printf LATE_ERR >&2) & exit 0"],
+                6000, 0, 0, 0, 64, 1024)
+            expect(late.stdout).to_equal("LATE_OUT")
+            expect(late.stderr).to_equal("LATE_ERR")
+            expect(late.exit_code).to_equal(0)
+
     it "executes the hosted bounded-process ABI instead of a stale missing extern":
         val (stdout, stderr, code) = run_bounded_process_case()
 
@@ -106,6 +132,7 @@ describe "test runner bounded output contract":
         expect(async_source.contains("file_read(run.stderr_file)")).to_equal(false)
         expect(fork_source).to_contain("same 4 MiB-per-stream")
         expect(fork_runtime).to_contain("#define FORK_CAPTURE_LIMIT (4U * 1024U * 1024U)")
+        expect(fork_runtime).to_contain("if (child_exited && timeout_ms <= 0)")
         expect(fork_runtime.contains("SPL_REALLOC")).to_equal(false)
 
     it "keeps the legacy APIs while exposing bounded variants":
