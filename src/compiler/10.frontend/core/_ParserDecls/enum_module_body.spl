@@ -383,6 +383,29 @@ fn parse_module_body():
             # import X.{Y, Z} -- treat like use
             val d = parse_use_decl()
             module_add_decl(d)
+        elif par_kind_get() == 6 and par_text_get() == "mod":
+            # `mod pkg.member` package-member declaration (260+ uses across
+            # src/lib, e.g. std.common.json's `mod json.types`). Not a lexer
+            # keyword here, so it used to fall through to the expression-
+            # statement path and die as "unresolved name: mod". Lower it as a
+            # SIBLING import (`.member`) — the path after `mod` is rooted at
+            # the declaring file's own package, so the last segment names the
+            # sibling file; the relative-import machinery resolves the rest.
+            parser_advance()
+            var mod_last_seg = ""
+            if par_kind_get() == 6:
+                mod_last_seg = par_text_get()
+                parser_advance()
+                while par_kind_get() == 164:
+                    parser_advance()
+                    if par_kind_get() == 6:
+                        mod_last_seg = par_text_get()
+                        parser_advance()
+                    else:
+                        break
+            if mod_last_seg != "":
+                val mod_d = decl_use_import("." + mod_last_seg, [], 0)
+                module_add_decl(mod_d)
         elif par_kind_get() == 6 and is_domain_block_kind(par_text_get()) and current_ident_followed_by_lbrace():
             val block_kind = par_text_get()
             val d = parse_module_domain_block_decl(i, block_kind)
