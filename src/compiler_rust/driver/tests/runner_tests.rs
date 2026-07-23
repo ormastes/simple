@@ -281,6 +281,7 @@ fn target_smf_rejects_required_interpreter_fallback_before_codegen() {
         "x86_64-freebsd",
         "arm-linux",
         "aarch64-linux",
+        "aarch64-pc-windows-msvc",
         "riscv64-linux",
     ];
 
