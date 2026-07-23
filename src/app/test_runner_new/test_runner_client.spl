@@ -27,11 +27,13 @@ extern fn rt_time_now_unix_micros() -> i64
 # consuming and discarding the real request (#98).
 fn atomic_write_text(path: text, content: text) -> bool:
     val tmp_path = "{path}.tmp"
-    if rt_file_write_text(tmp_path, content):
-        if rt_file_rename(tmp_path, path):
-            return true
+    if not rt_file_write_text(tmp_path, content):
         rt_file_delete(tmp_path)
-    rt_file_write_text(path, content)
+        return false
+    if rt_file_rename(tmp_path, path):
+        return true
+    rt_file_delete(tmp_path)
+    false
 
 val LIGHT_DAEMON_DIR: text = ".build/test_daemon_light"
 val LIGHT_REQ_DIR: text = ".build/test_daemon_light/requests"
@@ -209,7 +211,11 @@ fn main() -> i64:
     val resp_path = "{LIGHT_RESP_DIR}/{id}.resp"
     val expiry_micros = light_request_expiry_micros(rt_time_now_unix_micros(), timeout_ms)
     rt_file_delete(resp_path)
-    atomic_write_text(req_path, light_request_encode(run.path, expiry_micros))
+    if not atomic_write_text(req_path, light_request_encode(run.path, expiry_micros)):
+        rt_file_delete(req_path)
+        rt_file_delete(resp_path)
+        print "ERROR: test daemon request write failed: {req_path}"
+        return 1
     val deadline = expiry_micros + (LIGHT_REQUEST_RESPONSE_GRACE_MS * 1000)
     while rt_time_now_unix_micros() < deadline:
         if rt_file_exists(resp_path):
