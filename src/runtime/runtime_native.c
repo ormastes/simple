@@ -2421,6 +2421,46 @@ int64_t rt_string_join(int64_t array_value, int64_t separator) {
     return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
 }
 
+/* Join for entry-closure natives (native `[text].join(sep)` lowering):
+ * elements pushed at runtime are RAW i64 words — a string literal element is
+ * a raw char* GEP, a concat result is a TAGGED handle — so rt_string_join's
+ * rt_core_as_string-per-element silently skips raw words (join returned ""
+ * and rendered as 0; W100 / "tools":[0]). Normalize each element AND the
+ * separator via rt_interp_cstr's tagged-or-raw autodetection instead. */
+int64_t rt_array_join_any(int64_t array_value, int64_t separator) {
+    RtCoreArray* array = rt_core_as_array(array_value);
+    const char* sep = rt_interp_cstr(separator);
+    if (!sep) sep = "";
+    if (!array) return rt_string_new(NULL, 0);
+    size_t sep_len = strlen(sep);
+    size_t total = 0;
+    for (int64_t i = 0; i < array->len; i++) {
+        const char* item = rt_interp_cstr(((int64_t*)array->data)[i]);
+        if (item) total += strlen(item);
+        if (i + 1 < array->len) total += sep_len;
+    }
+    RtCoreString* out = (RtCoreString*)malloc(sizeof(RtCoreString) + total + 1);
+    if (!out) return rt_string_new(NULL, 0);
+    out->kind = RT_VALUE_HEAP_STRING;
+    out->reserved = 0;
+    out->len = (uint64_t)total;
+    size_t pos = 0;
+    for (int64_t i = 0; i < array->len; i++) {
+        const char* item = rt_interp_cstr(((int64_t*)array->data)[i]);
+        if (item) {
+            size_t il = strlen(item);
+            if (il > 0) { memcpy(out->data + pos, item, il); pos += il; }
+        }
+        if (i + 1 < array->len && sep_len > 0) {
+            memcpy(out->data + pos, sep, sep_len);
+            pos += sep_len;
+        }
+    }
+    out->data[total] = '\0';
+    rt_core_register_string(out);
+    return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
+}
+
 int8_t rt_contains(int64_t collection, int64_t value) {
     RtCoreArray* array = rt_core_as_array(collection);
     if (array) {

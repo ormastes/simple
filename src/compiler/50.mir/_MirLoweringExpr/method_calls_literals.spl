@@ -1486,7 +1486,30 @@ impl MirLowering:
                         jn_result = self.emit_raw_strcat(jn_result, jn_elem_local)
                         jn_i = jn_i + 1
                     return jn_result
-                case _: ()
+                case _:
+                    # Runtime-array receiver (`xs.join(sep)` where xs was
+                    # built via push): elements are raw-or-tagged i64 words;
+                    # rt_array_join_any normalizes each via rt_interp_cstr's
+                    # autodetection (the reason the old rt_string_join route
+                    # was skipped no longer applies). Previously this fell to
+                    # `case Unresolved:` -> const-0 -> join rendered as `0`
+                    # (W100; "tools":[0] in MCP servers,
+                    # native_call_return_type_loss family).
+                    val jna_recv = self.lower_expr(receiver)
+                    val jna_sep_arg = args[0]
+                    val jna_sep_expr = jna_sep_arg.value
+                    val jna_sep_raw = self.lower_expr(jna_sep_expr)
+                    val jna_sep_local = self.bootstrap_coerce_to_raw_str(jna_sep_raw)
+                    val jna_op = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("rt_array_join_any"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
+                    ))
+                    var jna_b = self.builder
+                    val jna_res = jna_b.emit_call(jna_op, [mir_operand_copy(jna_recv), mir_operand_copy(jna_sep_local)], MirType(kind: MirTypeKind.Opaque("str")))
+                    self.builder = jna_b
+                    if val jna_local = jna_res:
+                        return jna_local
+                    return self.emit_bootstrap_str_const("")
 
         # Bug #137 (follow-up): `x.starts_with(literal)` on the bootstrap
         # argv-element path resolves to MethodResolution.Unresolved (the flat
