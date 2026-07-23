@@ -259,13 +259,37 @@ impl MirLowering:
         val span = hi - lo
         span >= 0 and span <= 1024
 
+    me match_result_mir_type(expected: HirType?) -> MirType:
+        """MIR type for a value-position match's result temp. The i64
+        default made print's numeric-coercion check treat a text match
+        result as an int and render the handle as a decimal (value-position
+        match printed garbage numbers). `.?` + `??` extraction — if-val on
+        this lane's optionals is the pairing miscompile class."""
+        # if-val extraction here, NOT `.?`+`??`: this HirType? pairs with
+        # if-val (the merge-block `if val found_expected = expected_type:`
+        # site consumes it that way and works); `??` on it returned nil and
+        # `.kind` SIGILL'd. Optional pairing is per-producer, not universal.
+        if val expected_found = expected:
+            match expected_found.kind:
+                case HirTypeKind.Error:
+                    return MirType.i64()
+                case _:
+                    return self.lower_type(expected_found)
+        return MirType.i64()
+
     me emit_switch_dispatch(scrut_local: LocalId, int_cases: [(i64, HirBlock)], default_body: HirBlock, default_binding: SymbolId?, expected_type: HirType?) -> LocalId:
         """Emit a MirTerminator.Switch for a dense int match. Each arm
         lowers into its own block, stores its result into a shared temp,
         and jumps to a merge block. Mirrors lower_if's
         temp-then-merge pattern."""
         var b = self.builder
-        val result = b.new_temp(MirType.i64())
+        val result = b.new_temp(self.match_result_mir_type(expected_type))
+        # Arm-type inference fallback: HIR match exprs usually carry NO type_
+        # (expected_type nil), leaving the temp i64 — print then decimal-
+        # renders text results. Capture the first arm result's MIR type and
+        # retype the temp at the merge.
+        var inferred_known = false
+        var inferred_ty = MirType.i64()
         val merge_block = b.new_block(Some("match_merge"))
         val default_block = b.new_block(Some("match_default"))
 
@@ -305,9 +329,18 @@ impl MirLowering:
             # vanished this way, leaving a Goto to merge that read an
             # undefined `result` local). Mirrors lower_enum_match's guard.
             if not b_arm2.current_block_has_explicit_terminator():
-                if val arm_result_local = arm_result:
+                # `.?` + `??` extraction: if-val on this optional evaluates
+                # FALSE on the stage4 lane (pairing class), silently skipping
+                # the arm-result copy — every value-position match printed 0.
+                if arm_result.?:
+                    val arm_result_fb = LocalId(id: 0)
+                    val arm_result_local = arm_result ?? arm_result_fb
                     b_arm2.emit_copy(result, arm_result_local)
                     result_defined = true
+                    if not inferred_known:
+                        if val arm_ty_found = self.local_mir_type_of(arm_result_local):
+                            inferred_known = true
+                            inferred_ty = arm_ty_found
                 b_arm2.terminate_goto(merge_block)
             self.builder = b_arm2
             ci = ci + 1
@@ -327,9 +360,15 @@ impl MirLowering:
         var b_d2 = self.builder
         # Same post-terminator guard as the arm loop above.
         if not b_d2.current_block_has_explicit_terminator():
-            if val def_result_local = def_result:
+            if def_result.?:
+                val def_result_fb = LocalId(id: 0)
+                val def_result_local = def_result ?? def_result_fb
                 b_d2.emit_copy(result, def_result_local)
                 result_defined = true
+                if not inferred_known:
+                    if val def_ty_found = self.local_mir_type_of(def_result_local):
+                        inferred_known = true
+                        inferred_ty = def_ty_found
             b_d2.terminate_goto(merge_block)
         self.builder = b_d2
 
@@ -343,6 +382,8 @@ impl MirLowering:
         # SIGSEGV in llvm-lib). Define it here if no arm ever did.
         if not result_defined:
             b_m.emit_const(result, MirConstValue.Int(0), MirType.i64())
+        if inferred_known:
+            b_m.set_local_type(result, inferred_ty)
         self.builder = b_m
 
         if val found_expected = expected_type:
@@ -360,7 +401,13 @@ impl MirLowering:
         """Emit a nested If chain for sparse / small int matches.
         Cheaper than a jump table when arms < 4 or key span > 1024."""
         var b = self.builder
-        val result = b.new_temp(MirType.i64())
+        val result = b.new_temp(self.match_result_mir_type(expected_type))
+        # Arm-type inference fallback: HIR match exprs usually carry NO type_
+        # (expected_type nil), leaving the temp i64 — print then decimal-
+        # renders text results. Capture the first arm result's MIR type and
+        # retype the temp at the merge.
+        var inferred_known = false
+        var inferred_ty = MirType.i64()
         val merge_block = b.new_block(Some("match_merge"))
         self.builder = b
 
@@ -399,9 +446,18 @@ impl MirLowering:
             # vanished this way, leaving a Goto to merge that read an
             # undefined `result` local). Mirrors lower_enum_match's guard.
             if not b_arm2.current_block_has_explicit_terminator():
-                if val arm_result_local = arm_result:
+                # `.?` + `??` extraction: if-val on this optional evaluates
+                # FALSE on the stage4 lane (pairing class), silently skipping
+                # the arm-result copy — every value-position match printed 0.
+                if arm_result.?:
+                    val arm_result_fb = LocalId(id: 0)
+                    val arm_result_local = arm_result ?? arm_result_fb
                     b_arm2.emit_copy(result, arm_result_local)
                     result_defined = true
+                    if not inferred_known:
+                        if val arm_ty_found = self.local_mir_type_of(arm_result_local):
+                            inferred_known = true
+                            inferred_ty = arm_ty_found
                 b_arm2.terminate_goto(merge_block)
             self.builder = b_arm2
 
@@ -424,9 +480,15 @@ impl MirLowering:
         var b_def = self.builder
         # Same post-terminator guard as the arm loop above.
         if not b_def.current_block_has_explicit_terminator():
-            if val def_result_local = def_result:
+            if def_result.?:
+                val def_result_fb2 = LocalId(id: 0)
+                val def_result_local = def_result ?? def_result_fb2
                 b_def.emit_copy(result, def_result_local)
                 result_defined = true
+                if not inferred_known:
+                    if val def_ty_found2 = self.local_mir_type_of(def_result_local):
+                        inferred_known = true
+                        inferred_ty = def_ty_found2
             b_def.terminate_goto(merge_block)
         self.builder = b_def
 
@@ -439,6 +501,8 @@ impl MirLowering:
         # (ICmp/binop SIGSEGV in llvm-lib). Define it here if no arm ever did.
         if not result_defined:
             b_m.emit_const(result, MirConstValue.Int(0), MirType.i64())
+        if inferred_known:
+            b_m.set_local_type(result, inferred_ty)
         self.builder = b_m
 
         if val found_expected = expected_type:
@@ -1110,7 +1174,13 @@ impl MirLowering:
             ai = ai + 1
 
         var b = self.builder
-        val result = b.new_temp(MirType.i64())
+        val result = b.new_temp(self.match_result_mir_type(expected_type))
+        # Arm-type inference fallback: HIR match exprs usually carry NO type_
+        # (expected_type nil), leaving the temp i64 — print then decimal-
+        # renders text results. Capture the first arm result's MIR type and
+        # retype the temp at the merge.
+        var inferred_known = false
+        var inferred_ty = MirType.i64()
         val merge_block = b.new_block(Some("ematch_merge"))
         self.builder = b
         var result_defined = false
@@ -1242,9 +1312,18 @@ impl MirLowering:
             # instruction the arm body emitted (the `return 17` const vanished
             # this way, leaving rets of undefined locals).
             if not b_arm2.current_block_has_explicit_terminator():
-                if val arm_result_local = arm_result:
+                # `.?` + `??` extraction: if-val on this optional evaluates
+                # FALSE on the stage4 lane (pairing class), silently skipping
+                # the arm-result copy — every value-position match printed 0.
+                if arm_result.?:
+                    val arm_result_fb = LocalId(id: 0)
+                    val arm_result_local = arm_result ?? arm_result_fb
                     b_arm2.emit_copy(result, arm_result_local)
                     result_defined = true
+                    if not inferred_known:
+                        if val arm_ty_found = self.local_mir_type_of(arm_result_local):
+                            inferred_known = true
+                            inferred_ty = arm_ty_found
                 b_arm2.terminate_goto(merge_block)
             self.builder = b_arm2
             var b_n = self.builder
@@ -1257,9 +1336,15 @@ impl MirLowering:
             var b_d2 = self.builder
             # Same post-terminator guard as the arm loop above.
             if not b_d2.current_block_has_explicit_terminator():
-                if val drl = dres:
+                if dres.?:
+                    val drl_fb = LocalId(id: 0)
+                    val drl = dres ?? drl_fb
                     b_d2.emit_copy(result, drl)
                     result_defined = true
+                    if not inferred_known:
+                        if val drl_ty_found = self.local_mir_type_of(drl):
+                            inferred_known = true
+                            inferred_ty = drl_ty_found
             self.builder = b_d2
         var b_end = self.builder
         if not b_end.current_block_has_explicit_terminator():
@@ -1270,6 +1355,8 @@ impl MirLowering:
         b_m.switch_to_block(merge_block)
         if not result_defined:
             b_m.emit_const(result, MirConstValue.Int(0), MirType.i64())
+        if inferred_known:
+            b_m.set_local_type(result, inferred_ty)
         self.builder = b_m
         if val found_expected = expected_type:
             self.local_hir_types[result.id] = found_expected

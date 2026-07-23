@@ -745,6 +745,13 @@ impl MirLowering:
         # and mixed return/implicit-tail are both miscompiled on the stage4
         # native lane (bug doc 2026-07-23).
         var ret_out: HirType? = nil
+        # Primary source: declared return types recorded in the lower_module
+        # pre-pass (fn_return_types, mir_lowering_types.spl) — the symbol
+        # table's fn type_ is NOT reliably Function(...)-kind on this lane
+        # (unresolved infer var observed). Bare-lift assign, no Some().
+        if self.fn_return_types.has(symbol.id):
+            ret_out = self.fn_return_types[symbol.id]
+            return ret_out
         val sym = self.symbols.get_symbol_raw(symbol.id)
         if val found_sym = sym:
             if val sym_type = found_sym.type_:
@@ -780,7 +787,16 @@ impl MirLowering:
     me resolved_call_return_type(symbol: SymbolId) -> MirType:
         val hir_return_type = self.resolved_call_hir_return_type(symbol)
         if val found_type = hir_return_type:
-            return self.lower_type(found_type)
+            match found_type.kind:
+                case HirTypeKind.Str:
+                    # Call results carry runtime text HANDLES — same repr as
+                    # literals (Opaque("str"), see bootstrap_text_type), NOT
+                    # lower_type(Str)'s (ptr,len) fat-pointer Tuple. The Tuple
+                    # typing sent user-fn text returns down the aggregate
+                    # path and print rendered them as decimals.
+                    return self.bootstrap_text_type()
+                case _:
+                    return self.lower_type(found_type)
         MirType.i64()
 
     me bitfield_field_mask(bit_width: i64) -> i64:

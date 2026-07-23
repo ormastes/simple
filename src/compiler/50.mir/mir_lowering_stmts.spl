@@ -1247,7 +1247,13 @@ impl MirLowering:
         val then_block = b.new_block(Some("then"))
         val else_block = b.new_block(Some("else"))
         val merge_block = b.new_block(Some("merge"))
-        val result = b.new_temp(MirType.i64())
+        # Typed from expected when known; else arm-type inference below
+        # retypes at the merge (same fix as the match dispatches: an i64
+        # default made print decimal-render text results of value-position
+        # ifs).
+        val result = b.new_temp(self.match_result_mir_type(expected_type))
+        var inferred_known = false
+        var inferred_ty = MirType.i64()
         b.terminate_if(mir_operand_copy(cond_local), then_block, else_block)
         self.builder = b
 
@@ -1264,7 +1270,13 @@ impl MirLowering:
         var b3 = self.builder
         var result_defined = false
         if not b3.current_block_has_explicit_terminator():
-            if val then_local = then_result:
+            # `.?` + `??` extraction: if-val on lower_block_expected's
+            # LocalId? evaluates FALSE on the stage4 lane (pairing class),
+            # silently skipping the arm-result copy (value-position if
+            # printed 0).
+            if then_result.?:
+                val then_local_fb = LocalId(id: 0)
+                val then_local = then_result ?? then_local_fb
                 # A Unit-typed arm result (statement-form print, etc.) has no
                 # real value to merge -- copying it into the i64 result slot
                 # would force an `alloca void` in the backend. Leave
@@ -1273,6 +1285,10 @@ impl MirLowering:
                 if not self.local_is_unit(then_local):
                     b3.emit_copy(result, then_local)
                     result_defined = true
+                    if not inferred_known:
+                        if val then_ty_found = self.local_mir_type_of(then_local):
+                            inferred_known = true
+                            inferred_ty = then_ty_found
             b3.terminate_goto(merge_block)
         self.builder = b3
 
@@ -1284,10 +1300,16 @@ impl MirLowering:
             val else_result = self.lower_block_expected(else_block_value, expected_type)
             var b5 = self.builder
             if not b5.current_block_has_explicit_terminator():
-                if val else_local = else_result:
+                if else_result.?:
+                    val else_local_fb = LocalId(id: 0)
+                    val else_local = else_result ?? else_local_fb
                     if not self.local_is_unit(else_local):
                         b5.emit_copy(result, else_local)
                         result_defined = true
+                        if not inferred_known:
+                            if val else_ty_found = self.local_mir_type_of(else_local):
+                                inferred_known = true
+                                inferred_ty = else_ty_found
                 b5.terminate_goto(merge_block)
             self.builder = b5
         else:
@@ -1304,6 +1326,8 @@ impl MirLowering:
         # Define it in the merge block so every returned id has a def.
         if not result_defined:
             b6.emit_const(result, MirConstValue.Int(0), MirType.i64())
+        if inferred_known:
+            b6.set_local_type(result, inferred_ty)
         self.builder = b6
 
         if val found_expected = expected_type:

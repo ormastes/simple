@@ -97,6 +97,7 @@ impl MirLowering:
             symbols: symbols,
             local_map: {},
             local_hir_types: {},
+            fn_return_types: {},
             current_function_symbols: [],
             current_function_names: [],
             loop_stack: empty_loop_stack,
@@ -470,6 +471,20 @@ impl MirLowering:
         for func in module.functions.values():
             function_names.push(func.name)
         self.current_function_names = function_names
+        # Pre-pass: record declared fn return types by symbol id BEFORE any
+        # body lowering (forward calls resolve against this map, not the
+        # symbol table's unreliable fn type_ — see fn_return_types field
+        # note in mir_lowering_types.spl).
+        val prepass_fns = module.functions.values()
+        var prepass_i = 0
+        while prepass_i < prepass_fns.len():
+            # Typed rebind: loop/indexed elements decode as ANY and field
+            # reads mis-decode without it (see expressions.spl MatchCase
+            # arm rebind note).
+            val func_rt: HirFunction = prepass_fns[prepass_i]
+            if func_rt.return_type.?:
+                self.fn_return_types[func_rt.symbol.id] = func_rt.return_type
+            prepass_i = prepass_i + 1
         # Cross-module prescans keep the first definition. The module being
         # lowered is authoritative for its own same-name struct/class.
         val local_struct_values = module.structs.values()
