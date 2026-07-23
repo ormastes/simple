@@ -168,22 +168,24 @@ evidence boundary for the important pure-Simple tooling lanes:
   **Remaining bug/gap:** capability-owned provider composition still blocks the
   full CLI. **Next solution:** complete the canonical provider profile, then
   build and qualify the fresh Stage 4 CLI.
-- **lint** — **Source status:** parser-backed ARG001/ARG002, STUB001/STUB002, and
-  module-level W0404 wide-public CLI parity are implemented; W0404 reports at
+- **lint** — **Source status:** parser-backed ARG001/ARG002, COLL001-COLL008,
+  STUB001/STUB002, and module-level W0404 wide-public CLI parity are implemented; W0404 reports at
   line 1, honors `visibility_boundary`, and suppresses `__init__.spl`/`mod.spl` facades.
   Query/LSP STUB001/STUB002 collection now reports the checker's declaration
   span instead of a same-name comment/string text match.
-  The generic `pass_todo` check remains the STUB003
-  owner so that placeholder is not duplicated, and the other AST leaves remain open. **Strongest current evidence:**
+  The generic EasyFix rule remains the sole public duplicate-typed argument
+  owner; the DTYP query/LSP leaf now ignores named calls. The generic
+  `pass_todo` check remains the STUB003 owner so findings are not duplicated,
+  and wildcard-import/export parity remains open. **Strongest current evidence:**
   the focused warn/deny/allow, decoy-line, extern-span, compatibility, and
   STUB and W0404 line/config/facade contract checks are bounded bootstrap repair evidence; the
   query STUB decoy-line contract passes on the Rust seed, while the deployed
   pure-Simple wrapper still segfaults before that contract executes; see
   [the AST dispatch report](../../08_tracking/bug/simple_lint_ast_rules_unwired_2026-07-19.md).
-  **Remaining bug/gap:** this is not fresh Stage 4 evidence, and COLL, DTYP,
-  wildcard-import parity is incomplete. **Next
-  solution:** qualify ARG/STUB/W0404 through the exact fresh CLI, then extend the same
-  CLI-owned parsed adapter one semantic leaf at a time.
+  **Remaining bug/gap:** this is not fresh Stage 4 evidence, and wildcard-import
+  parity is incomplete. **Next solution:** qualify ARG/COLL/STUB/W0404 through
+  the exact fresh CLI, then extend the same CLI-owned parsed adapter one
+  semantic leaf at a time.
 - **fmt / fix** — **Source status:** atomic writes and fail-closed source
   rewrites are pushed. **Strongest current evidence:** `5b13444c83` and
   `0a7b45ea7b`. **Remaining bug/gap:** no fresh Stage 4 behavior proof.

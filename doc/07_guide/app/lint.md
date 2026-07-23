@@ -47,10 +47,11 @@ The lint system operates at three layers:
 Deep analysis using the arena-based AST. Query/LSP diagnostics dispatch the ARG,
 COLL, DTYP, STUB, wildcard-import/export, and wide-public leaves through
 `src/app/cli/query_lint.spl`. Production `simple lint` now runs parser-backed
-ARG001/ARG002, STUB001/STUB002, and module-level W0404 in its CLI-owned path;
-the generic `pass_todo` source lint remains the STUB003 owner so that
-placeholder is emitted once. Parity for the remaining AST leaves is still
-tracked as open work.
+ARG001/ARG002, COLL001-COLL008, STUB001/STUB002, and module-level W0404 in its
+CLI-owned path. The generic EasyFix rule remains the public duplicate-typed
+argument owner, while the DTYP query/LSP leaf ignores already-named calls. The
+generic `pass_todo` source lint remains the STUB003 owner so each finding is
+emitted once. Wildcard-import/export parity remains open work.
 
 | Code | Category | Severity | Description |
 |------|----------|----------|-------------|

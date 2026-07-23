@@ -20,6 +20,7 @@ use compiler.semantics.lint.riscv_rtl_debuggability_lint.{lint_riscv_rtl_debugga
 use compiler.core.ast.{module_get_decls}
 use compiler.core.parser.{parse_module_silent, parser_has_errors, parser_set_had_error}
 use compiler.semantics.lint.argument_count.{check_argument_count}
+use compiler.semantics.lint.collection_patterns.{check_collection_patterns}
 use compiler.semantics.lint.stub_impl.{check_stub_impl}
 use compiler.semantics.lint.wide_public.{check_wide_public_file}
 
@@ -39,6 +40,7 @@ fn lint_cli_source(linter: Linter, path: String, content: String) -> [LintResult
 
     val config = resolve_lint_config(linter.config, path, content)
     val decls = module_get_decls()
+    val lines = content.split("\n")
     for warning in check_argument_count(decls):
         if not should_keep_lint_result(config, warning.code):
             continue
@@ -47,6 +49,14 @@ fn lint_cli_source(linter: Linter, path: String, content: String) -> [LintResult
         val lint = Lint.new(warning.code, level, LintCategory.Style, warning.message)
             .with_fix(warning.hint)
         results.push(LintResult.new(path, warning.line, 0, lint))
+    for warning in check_collection_patterns(decls):
+        if not should_keep_lint_result(config, warning.code):
+            continue
+        val base_level = if warning.code == "COLL001" or warning.code == "COLL006": LintLevel.Deny else: LintLevel.Warn
+        val level = apply_config_level(config, warning.code, base_level)
+        val lint = Lint.new(warning.code, level, LintCategory.Warning, warning.message)
+            .with_fix(warning.hint)
+        results.push(LintResult.new(path, lint_cli_find_fn_line(lines, warning.item_name), 0, lint))
     for warning in check_stub_impl(decls):
         # STUB003 remains the generic source lint so one placeholder emits once.
         if warning.code != "STUB001" and warning.code != "STUB002":
@@ -66,6 +76,18 @@ fn lint_cli_source(linter: Linter, path: String, content: String) -> [LintResult
         val lint = Lint.new(warning.code, level, LintCategory.Warning, message)
         results.push(LintResult.new(path, warning.line, 0, lint))
     results
+
+# Locate a declaration line without mistaking comment or string decoys for a function.
+fn lint_cli_find_fn_line(lines: [text], fn_name: text) -> i64:
+    var i = 0
+    while i < lines.len():
+        val trimmed = lines[i].trim()
+        val is_fn_decl = trimmed.starts_with("fn ") or trimmed.starts_with("pub fn ") or trimmed.starts_with("static fn ") or trimmed.starts_with("pub static fn ") or trimmed.starts_with("async fn ") or trimmed.starts_with("pub async fn ")
+        if is_fn_decl:
+            if trimmed.contains("fn {fn_name}(") or trimmed.contains("fn {fn_name}<"):
+                return i + 1
+        i = i + 1
+    0
 
 fn main() -> Int:
     val args = get_args()
