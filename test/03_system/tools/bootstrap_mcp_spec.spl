@@ -136,6 +136,22 @@ describe "Bootstrap MCP — deployed launchers":
         expect(rc).to_equal(0)
         expect(out + err).to_contain("probe ok")
 
+    it "deployed MCP launcher anchors real codebase requests at the repository":
+        val wrapper = file_read("bin/simple_mcp_server")
+        expect(wrapper.contains("script_dir=\"$(CDPATH= cd \"$\{script_dir}\" && pwd)\"")).to_equal(true)
+        expect(wrapper.contains("repo_root=\"$(CDPATH= cd \"$\{script_dir}/..\" && pwd)\"")).to_equal(true)
+        expect(wrapper.contains("cd \"$\{repo_root}\"")).to_equal(true)
+        val initialize = "{\"jsonrpc\":\"2.0\",\"id\":\"bootstrap-mcp-initialize\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"bootstrap\",\"version\":\"1\"}}}"
+        val search = "{\"jsonrpc\":\"2.0\",\"id\":\"bootstrap-mcp-search\",\"method\":\"tools/call\",\"params\":{\"name\":\"simple_search\",\"arguments\":{\"query\":\"handle_simple_api\",\"kind\":\"fn\",\"scope\":\"app\"}}}"
+        val command = "runner=; if command -v timeout >/dev/null 2>&1; then runner='timeout 10'; elif command -v gtimeout >/dev/null 2>&1; then runner='gtimeout 10'; elif command -v perl >/dev/null 2>&1; then runner=\"perl -e 'alarm shift; exec @ARGV' 10\"; else exit 127; fi; repo_root=\"$(pwd)\"; workdir=\"$(mktemp -d)\"; trap 'rm -rf \"$workdir\"' EXIT; (cd \"$workdir\" && printf '%s\\n%s\\n' '" + initialize + "' '" + search + "' | $runner \"$repo_root/bin/simple_mcp_server\")"
+        val (out, err, rc) = process_run("sh", ["-c", command])
+        expect(rc).to_equal(0)
+        val response = out + err
+        expect(response.contains("\"id\":\"bootstrap-mcp-initialize\",\"result\"")).to_equal(true)
+        expect(response.contains("\"id\":\"bootstrap-mcp-search\",\"result\"")).to_equal(true)
+        expect(response.contains("handle_simple_api")).to_equal(true)
+        expect(response.contains("\"error\"")).to_equal(false)
+
     it "deployed LSP MCP launcher passes correlated symbols admission":
         val wrapper = file_read("bin/simple_lsp_mcp_server")
         expect(wrapper.contains("native_hash_is_valid")).to_equal(true)
