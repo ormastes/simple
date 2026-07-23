@@ -567,6 +567,10 @@ lint-wrapper segfault tracked in repo bug docs.
 - Simple strict workflow exists and uses `--deny-all`
 - Primitive-sort runtime defines NEON threshold constants
 
+A Stage 4 full-CLI candidate is not qualified by lint alone. Bootstrap must run
+the shared [Stage 4 essential-tools gate](../tooling/pure_simple_tooling.md#stage-4-essential-tools-gate)
+once against the exact fresh binary; it covers test, lint, and duplicate-check.
+
 ### Suppressing Warnings
 
 File-level `#![allow(rule_name)]` is the override mechanism. When removing a

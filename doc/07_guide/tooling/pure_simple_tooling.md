@@ -137,6 +137,8 @@ candidate only after correlated `initialize`, `tools/list` (advertising
 Any JSON-RPC `error`, MCP `isError`, child-command failure text, timeout, or
 nonzero child exit fails closed.
 
+## Stage 4 essential-tools gate
+
 Every bootstrap route that produces a Stage 4 full CLI runs
 `scripts/check/check-bootstrap-essential-tools-smoke.shs` with the exact fresh
 binary. From a temporary non-repository working directory it checks real

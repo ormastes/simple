@@ -101,6 +101,8 @@ binary from a temporary non-repository directory. It requires clean token JSON
 to exit 0 with zero groups and an exact clone pair to exit 1 with one group,
 two occurrences, and ten duplicated lines. This proves dispatch and a minimal
 detector path; it does not replace semantic/cosine or repository-scale checks.
+The shared [Stage 4 essential-tools gate](../tooling/pure_simple_tooling.md#stage-4-essential-tools-gate)
+also requires the test-runner and lint markers from that same fresh binary.
 
 ---
 

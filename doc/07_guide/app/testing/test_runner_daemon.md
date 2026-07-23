@@ -52,6 +52,10 @@ commands detect it and bypass the same serial daemon.
 The daemon launches only the current production `simple` runtime. It does not
 fall back to `src/compiler_rust/target/{bootstrap,debug}`.
 
+A Stage 4 full-CLI candidate is not qualified by the runner alone. Bootstrap
+must run the shared [Stage 4 essential-tools gate](../../tooling/pure_simple_tooling.md#stage-4-essential-tools-gate)
+once against the exact fresh binary; it covers test, lint, and duplicate-check.
+
 ## Resource Safety
 
 The daemon checks current host CPU and memory before starting work. Requests are
