@@ -146,8 +146,10 @@ test-runner pass/fail/zero/forged outcomes, focused lint pass/deny and strict
 JSON-Lines outcomes, and duplicate-check clean/exact-clone JSON outcomes. The aggregate is bounded,
 sets `SIMPLE_NO_STUB_FALLBACK=1`, and fails closed; a deployed wrapper, raw
 source worker, Rust seed, stale binary, or help-only response cannot satisfy it.
-The gate establishes command dispatch and minimal behavior only. Release still
-requires the full test, lint, and duplication evidence for its scope.
+The gate establishes command dispatch and minimal behavior only for `test`,
+`lint`, and `duplicate-check`; release still requires the full evidence for its
+scope. Strict JSON parsing and focused malformed-line coverage are source-fixed;
+the fresh Stage 4 aggregate remains pending.
 
 ## Current qualification snapshot (2026-07-23)
 
@@ -165,9 +167,12 @@ evidence boundary for the important pure-Simple tooling lanes:
   The bounded-capture root fix and evidence are recorded in
   [the delayed-output report](../../08_tracking/bug/stage4_test_runner_bounded_capture_empty_2026-07-23.md).
   **Remaining bug/gap:** neither that fix nor the aggregate essential-tools
-  smoke has fresh Stage 4 evidence. **Next solution:** deploy a fresh Stage 4
-  CLI, run the focused bounded-output contract once, then run the exact
-  essential-tools smoke from its temporary external working directory.
+  smoke has fresh Stage 4 evidence. Unknown options and options missing their
+  value also fall back to the full suite. **Next solution:** validate every
+  test CLI argument in shared `parse_test_args` and return exit 2 before any
+  default test-root selection; then deploy a fresh Stage 4 CLI, run the focused
+  bounded-output and CLI contracts once, then run the exact essential-tools
+  smoke from its temporary external working directory.
 - **check / build / run** — **Source status:** the full pure-Simple CLI links,
   preserves delegated streams/status, and its isolated official source-check
   passes when `SIMPLE_BINARY` names the candidate. The paired-value lowering
@@ -194,9 +199,13 @@ evidence boundary for the important pure-Simple tooling lanes:
   query STUB decoy-line contract passes on the Rust seed, while the deployed
   pure-Simple wrapper still segfaults before that contract executes; see
   [the AST dispatch report](../../08_tracking/bug/simple_lint_ast_rules_unwired_2026-07-19.md).
-  **Remaining bug/gap:** `982ce3fa445` and the focused wildcard contract are not
-  fresh Stage 4 evidence. **Next solution:** qualify ARG/COLL/STUB/W0404/W0406/W0407
-  through the exact fresh CLI, then extend the same CLI-owned parsed adapter one
+  Parse failure now denies with PARSE001 (`57a4761a38d`), invalid or missing
+  CLI options return exit 2 (`6dd99e39653`), and invalid project lint config is
+  rejected (`ef2ef732608`); each has focused contract evidence. **Remaining
+  bug/gap:** these fixes, `982ce3fa445`, and the focused wildcard contract are
+  not fresh Stage 4 evidence. **Next solution:** qualify
+  ARG/COLL/STUB/W0404/W0406/W0407 and the parse/CLI/config contracts through
+  the exact fresh CLI, then extend the same CLI-owned parsed adapter one
   semantic leaf at a time.
 - **fmt / fix** — **Source status:** atomic writes and fail-closed source
   rewrites are pushed. **Strongest current evidence:** `5b13444c83` and
@@ -208,11 +217,15 @@ evidence boundary for the important pure-Simple tooling lanes:
   matching, and cosine fragment grouping are fixed. Overlapping cosine
   candidates are threshold-scored before physical occurrences collapse, and
   the legacy 320-block sampler no longer drops late candidates. The top-five
-  signature index and 400-block bucket cap still bound comparisons. **Strongest
-  current evidence:** `f2818a4b63`, `6a9af6f6635`, and `74594ec99ff`; the focused
-  detector spec passed 12 examples through the temporary bootstrap interpreter.
+  signature index and 400-block bucket cap still bound comparisons. Similarity,
+  semantic, and semantic-drift thresholds now reject non-finite and
+  out-of-range values (`60f23743d1d`). **Strongest current evidence:**
+  `f2818a4b63`, `6a9af6f6635`, `74594ec99ff`, and `60f23743d1d`; the focused
+  detector and threshold contracts passed through the temporary bootstrap
+  interpreter.
   See the [token threshold report](../../08_tracking/bug/duplicate_check_token_mode_min_tokens_ignored_2026-07-23.md)
-  and [cosine fragment report](../../08_tracking/bug/duplicate_check_cosine_fragmented_occurrence_groups_2026-07-23.md).
+  [cosine fragment report](../../08_tracking/bug/duplicate_check_cosine_fragmented_occurrence_groups_2026-07-23.md),
+  and [similarity threshold report](../../08_tracking/bug/duplicate_check_similarity_threshold_false_clean_2026-07-23.md).
   **Remaining bug/gap:** fresh Stage 4 evidence is missing, and incremental-cache
   flags remain deliberately rejected because their detector/cache path is
   disconnected; see [the cache report](../../08_tracking/bug/duplicate_check_incremental_cache_disconnected_2026-07-23.md).
@@ -234,8 +247,23 @@ evidence boundary for the important pure-Simple tooling lanes:
   fail-closed fixture contract are present. **Strongest current evidence:**
   `scripts/check/check-bootstrap-essential-tools-smoke.shs` is required by this
   guide and the bootstrap build guide. **Remaining bug/gap:** the aggregate
-  Stage 4 smoke still has not passed. **Next solution:** run that one bounded
-  gate once after a fresh Stage 4 CLI is admitted.
+  Stage 4 smoke still has not passed; strict JSON parsing and focused
+  malformed-line coverage are source-fixed only; see the
+  [lint JSON report](../../08_tracking/bug/bootstrap_lint_json_validation_false_green_2026-07-23.md).
+  **Next solution:** deploy a fresh Stage 4 CLI, then run the one bounded gate
+  once.
+- **examples-check** — **Source status:** pure-Simple command routing is
+  implemented. **Remaining bug/gap:** no fresh qualification evidence.
+  **Next solution:** run one focused passing example and one failing example
+  through the exact fresh CLI, preserving their exit statuses.
+- **spipe-docgen** — **Source status:** pure-Simple `simple-core` or
+  `core-c-bootstrap` routing is implemented. **Remaining bug/gap:** no fresh
+  qualification evidence. **Next solution:** generate one fixture document
+  with the exact runtime and assert the expected output exists and is nonempty.
+- **native-build** — **Source status:** pure-Simple command routing and cached
+  artifact path are implemented. **Remaining bug/gap:** no fresh qualification
+  evidence. **Next solution:** incrementally build one small entry closure with
+  the exact fresh CLI, then run its artifact once.
 - **latest full Stage 4 candidate (2026-07-23)** — candidate SHA
   `00431ce52f940722f52746a802011f7d33f35d4931738facee26c5c7b7917b31`
   passes delegated stream/status fidelity and the isolated official

@@ -10,6 +10,7 @@ use lib.json.serializer.{json_minify, json_beautify}
 use lib.json.builder.{JsonBuilder}
 use lib.json.utilities.{json_diff, json_patch, json_unflatten_object}
 use lib.json.validation.{json_deep_equals}
+use lib.json.jsonl.{jsonl_is_valid, jsonl_content_is_valid}
 
 describe "JSON Library Logic":
     describe "parser strictness":
@@ -51,6 +52,63 @@ describe "JSON Library Logic":
         it "decodes escaped slash and control escapes in strings":
             val parsed = json_parse("{\"path\":\"https:\\/\\/example.com\\b\\f\"}")
             expect(json_to_string(json_path_get(parsed, "path"))).to_equal("https://example.com\b\f")
+
+        it "rejects unknown string escapes":
+            val result = json_parse_with_error("{\"path\":\"\\q\"}")
+            expect(result.0).to_be_nil()
+            expect(result.1).to_contain("Invalid string escape")
+
+        it "rejects raw control characters in strings":
+            val input = "{" + "\"path\":\"ok" + text.from_char_code(1) + "\"" + "}"
+            val result = json_parse_with_error(input)
+            expect(result.0).to_be_nil()
+            expect(result.1).to_contain("Invalid string escape")
+
+        it "rejects truncated and malformed unicode escapes":
+            val truncated = json_parse_with_error("{\"path\":\"\\u12\"}")
+            val bad_hex = json_parse_with_error("{\"path\":\"\\u12xz\"}")
+            expect(truncated.0).to_be_nil()
+            expect(bad_hex.0).to_be_nil()
+
+        it "accepts complete unicode escapes":
+            val result = json_parse_with_error("{\"path\":\"\\u12AF\"}")
+            expect(result.1).to_equal("")
+
+        it "rejects malformed number token mixes":
+            val result = json_parse_with_error("{\"value\":1e+}")
+            expect(result.0).to_be_nil()
+            expect(result.1).to_contain("Invalid number")
+
+        it "rejects incomplete and non-canonical numbers":
+            val bare_minus = json_parse_with_error("-")
+            val leading_zero = json_parse_with_error("01")
+            val incomplete_fraction = json_parse_with_error("1.")
+            val incomplete_exponent = json_parse_with_error("1e")
+            expect(bare_minus.0).to_be_nil()
+            expect(leading_zero.0).to_be_nil()
+            expect(incomplete_fraction.0).to_be_nil()
+            expect(incomplete_exponent.0).to_be_nil()
+
+        it "accepts valid negative decimal and exponent numbers":
+            expect(json_parse_with_error("-0").1).to_equal("")
+            expect(json_parse_with_error("-0.25").1).to_equal("")
+            expect(json_parse_with_error("1.25e-2").1).to_equal("")
+
+        it "rejects trailing characters after a number":
+            val result = json_parse_with_error("1x")
+            expect(result.0).to_be_nil()
+            expect(result.1).to_contain("trailing")
+
+        it "validates every nonempty JSONL record":
+            expect(jsonl_is_valid("{\"ok\":true}\n[1,2]\n")).to_equal(true)
+            expect(jsonl_is_valid("{\"ok\":true}\n{\"truncated\":")).to_equal(false)
+            expect(jsonl_is_valid("{\"ok\":true}\n\n[1,2]")).to_equal(false)
+            expect(jsonl_is_valid("")).to_equal(false)
+
+        it "rejects JSONL control-only records and unreadable content":
+            expect(jsonl_is_valid(text.from_char_code(11))).to_equal(false)
+            expect(jsonl_is_valid(text.from_char_code(12))).to_equal(false)
+            expect(jsonl_content_is_valid(nil)).to_equal(false)
 
         it "keeps invalid trailing input unchanged during minify and beautify":
             val input = "{\"ok\":true} garbage"
