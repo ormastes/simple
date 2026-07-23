@@ -1,11 +1,11 @@
-# Bug: backend_optimization_*_for_budget_with_facts does not gate on required optimizer facts (8 failures)
+# Bug: backend optimization skip reasons retain optional fact wrappers (8 failures)
 
-- **Status:** open
+- **Status:** SOURCE-FIXED — focused self-hosted rerun pending
 - **Filed:** 2026-07-20
-- **Affected spec:** `test/unit/compiler/mir_opt/general_patterns_backend_recommendation_spec.spl`
+- **Affected specs:** `test/{01_unit,unit}/compiler/mir_opt/general_patterns_backend_recommendation_spec.spl`
 - **Command:**
   `SIMPLE_RUST_SEED_WARNING=0 timeout 90 bin/release/x86_64-unknown-linux-gnu/simple test test/unit/compiler/mir_opt/general_patterns_backend_recommendation_spec.spl --no-session-daemon`
-- **Result:** `22 examples, 8 failures` (after fixing an unrelated `.?` truthiness bug in the
+- **Historical result:** `22 examples, 8 failures` (after fixing an unrelated `.?` truthiness bug in the
   same file at line 34 — see commit note below; 14 pass, 8 remain genuinely broken)
 
 ## Symptom (representative failures)
@@ -29,7 +29,7 @@
     expected call result to be truthy, got false
 ```
 
-## Root cause (hypothesis, not confirmed — no src edit attempted)
+## Root cause
 
 Each failing `it` block calls
 `backend_optimization_plan_for_budget_with_facts(backend, budget, facts_list)`
@@ -53,17 +53,12 @@ for-loop/closure-mutation bug (a known landmine class) as the cause, since the
 identical loop-and-flag idiom works fine elsewhere in the same file — the
 divergence is isolated to the `_with_facts` variant of the API.
 
-This strongly suggests `backend_optimization_plan_for_budget_with_facts` /
-`backend_optimization_decisions_for_budget_with_facts` in
-`src/compiler/60.mir_opt/general_patterns.spl` either does not implement
-fact-gating for these specific optimizer rules (ssa-var-canon,
-simple-loop-unroll, simple-predicate-promote, simple-strength-reduce,
-simple-scalar-cleanup, simple-auto-vectorize, simple-hot-call-inline,
-llvm-entry-alloca-shaping), or implements it but does not emit a
-`skipped_decisions` entry with the expected `reason` string when a required
-fact is absent — a genuine gap between the REQ-OPJH-022/025/026 spec's stated
-contract and the current implementation. Not root-caused further (out of
-scope for this triage pass; no src/** edit attempted).
+Fact discovery and gating were correct: the recommendation is excluded and a
+skipped decision is emitted. The decision owner then concatenated the returned
+`text?` directly into the reason, so the diagnostic did not equal the required
+`"missing <fact>"` contract. It now checks presence explicitly and unwraps the
+fact only at that formatting boundary. Existing tests cover all eight missing
+fact reasons without weakening their assertions.
 
 ## Repro (trimmed)
 
@@ -78,8 +73,7 @@ for decision in missing.skipped_decisions:
 print(found)   # false, expected true — no skipped_decisions entry carries this reason
 ```
 
-Not touched further: `test/unit/compiler/mir_opt/general_patterns_backend_recommendation_spec.spl`
-had one unrelated `.?` truthiness fix applied (line 34: `reason.?` → `reason != nil`,
-matching the documented `.?`-on-a-value landmine and confirmed by re-run: failures
-dropped from 9 to 8). The remaining 8 failures are genuine and were left untouched —
-weakening these assertions would violate the no-weakening rule.
+The mirrored recommendation specs also use explicit `reason != nil` for their
+presence assertion. A focused rerun with a usable self-hosted test runner is
+still required; the currently deployed bootstrap-only binary cannot execute
+the test command.
