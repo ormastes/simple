@@ -208,13 +208,16 @@ evidence boundary for the important pure-Simple tooling lanes:
   the exact fresh CLI, then extend the same CLI-owned parsed adapter one
   semantic leaf at a time.
 - **fmt / fix** — **Source status:** atomic writes, fail-closed source
-  rewrites, and closed `fix` option parsing are pushed. Invalid or empty fix
-  options now exit 2 before a file read/write; exact `--dry-run` remains
+  rewrites, and closed `fmt`/`fix` option parsing are source-fixed. Invalid or
+  malformed fmt options return exit 2 before a file read/write/output; help
+  returns 0 without file work; invalid or empty fix options return exit 2 before
+  a file read/write; exact `--dry-run` remains
   non-mutating. **Strongest current evidence:** `5b13444c83`, `0a7b45ea7b`,
   and `3bd9be7c52c`.
   Both fix-option owner contracts pass through the temporary bootstrap
-  interpreter after routing writes through the module-level facade.
-  **Remaining bug/gap:** the retained pure-Simple binary crashes with the
+  interpreter after routing writes through the module-level facade. **Remaining
+  bug/gap:** the fmt validator and both isolated owner contracts also pass
+  through that temporary interpreter; the retained pure-Simple binary crashes with the
   separately tracked stale `rt_env_set` ABI before either contract executes,
   so there is no fresh Stage 4 behavior proof. **Next solution:** deploy a
   candidate that passes frontend admission, then exercise option, mutation,
@@ -264,9 +267,10 @@ evidence boundary for the important pure-Simple tooling lanes:
   **Next solution:** run one focused passing example and one failing example
   through the exact fresh CLI, preserving their exit statuses.
 - **spipe-docgen** — **Source status:** pure-Simple `simple-core` or
-  `core-c-bootstrap` routing is implemented. **Remaining bug/gap:** no fresh
-  qualification evidence. **Next solution:** generate one fixture document
-  with the exact runtime and assert the expected output exists and is nonempty.
+  `core-c-bootstrap` routing is implemented and unknown options fail closed
+  before generation. **Remaining bug/gap:** no fresh qualification evidence.
+  **Next solution:** generate one fixture document with the exact runtime and
+  assert the expected output exists and is nonempty.
 - **native-build** — **Source status:** pure-Simple command routing and cached
   artifact path are implemented. **Remaining bug/gap:** no fresh qualification
   evidence. **Next solution:** incrementally build one small entry closure with
