@@ -134,6 +134,46 @@ describe "entry-closure physical source deduplication":
         expect(driver).to_contain("if has_project_source and self.ctx.options.mode != CompileMode.Check and not nb_entry_closure:")
         expect(driver).to_not_contain("closure_added")
 
+    it "fails required closure load parse and HIR errors before later phases":
+        val driver = rt_file_read_text("src/compiler/80.driver/driver.spl") ?? ""
+        val compile_start = driver.find("    me compile() -> CompileResult:") ?? -1
+        val load_start = driver.find("    me load_sources_impl() -> bool:") ?? -1
+        val parse_start = driver.find("    me parse_all_impl() -> bool:") ?? -1
+        val hir_start = driver.find("    me lower_and_check_impl() -> bool:") ?? -1
+        val hir_end = driver.find("    fn lower_to_hir_impl() -> (CompileContext, bool):") ?? -1
+        expect(compile_start).to_be_greater_than(-1)
+        expect(load_start).to_be_greater_than(compile_start)
+        expect(parse_start).to_be_greater_than(load_start)
+        expect(hir_start).to_be_greater_than(parse_start)
+        expect(hir_end).to_be_greater_than(hir_start)
+
+        val compile_body = driver.substring(compile_start, load_start)
+        val load_body = driver.substring(load_start, parse_start)
+        val parse_body = driver.substring(parse_start, hir_start)
+        val hir_body = driver.substring(hir_start, hir_end)
+        expect(compile_body).to_contain("if not self.load_sources_impl():\n            log_error(\"phase 1 FAILED\")\n            return CompileResult.ParseError(self.ctx.errors)")
+        expect(compile_body).to_contain("if not self.parse_all_impl():\n            log_error(\"phase 2 FAILED\")\n            return CompileResult.ParseError(self.ctx.errors)")
+        expect(compile_body).to_contain("if not analyze_ok:\n            log_error(\"phase 3 FAILED\")")
+        val type_error_return = compile_body.index_of("return CompileResult.TypeError(self.ctx.errors)") ?? -1
+        val phase4_start = compile_body.index_of("phase4:monomorphize:start") ?? -1
+        expect(type_error_return).to_be_greater_than(-1)
+        expect(phase4_start).to_be_greater_than(type_error_return)
+        val unresolved_error = load_body.index_of("self.ctx.add_error(\"unresolved import '") ?? -1
+        val empty_import_error = load_body.index_of("self.ctx.add_error(\"import '") ?? -1
+        val sources_commit = load_body.index_of("self.ctx.sources = all_sources") ?? -1
+        expect(unresolved_error).to_be_greater_than(-1)
+        expect(empty_import_error).to_be_greater_than(unresolved_error)
+        expect(sources_commit).to_be_greater_than(empty_import_error)
+        expect(load_body.substring(sources_commit)).to_contain("self.ctx.errors.len() == 0")
+        expect(parse_body).to_contain("if par_had_error_get():\n                    self.ctx.errors.push(\"parse error in {source.path} (see [parser_error] output above)\")\n                    return false")
+        val hir_loop_start = hir_body.index_of("var source_idx = 0") ?? -1
+        expect(hir_loop_start).to_be_greater_than(-1)
+        val hir_loop = hir_body.substring(hir_loop_start)
+        val hir_error_collect = hir_loop.index_of("_driver_collect_hir_errors(self.ctx, name, lowering.errors)") ?? -1
+        val hir_final_status = hir_loop.index_of("\n        self.ctx.errors.len() == 0") ?? -1
+        expect(hir_error_collect).to_be_greater_than(-1)
+        expect(hir_final_status).to_be_greater_than(hir_error_collect)
+
     it "collects only the source roots supplied by its caller":
         val loading = rt_file_read_text("src/compiler/80.driver/driver_source_loading.spl") ?? ""
         val helpers = rt_file_read_text("src/compiler/80.driver/driver_helpers.spl") ?? ""

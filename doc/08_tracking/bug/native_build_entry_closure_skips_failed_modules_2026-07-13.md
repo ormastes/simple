@@ -1,5 +1,13 @@
 # Bug: native-build entry closure skips failed semantic dependencies
 
+## Status
+
+Reported dotted-import resolution, parse, and HIR-skip path source-fixed; fresh
+self-hosted execution pending. Unresolved single-segment imports remain open:
+the closure walker still skips them as possible prose/pseudo-imports. The
+optional whole-program type-check pass also remains warn-only under
+`SIMPLE_TYPECHECK_WARN=1` and belongs to the separate type-check burndown.
+
 ## Symptom
 
 `native-build --entry-closure` reports imported modules as `FAILED FILES`, labels
@@ -36,10 +44,21 @@ Continuing can produce unresolved stubs, misleading runtime/link failures, or a
 binary missing behavior that the entry imports. `SIMPLE_NO_STUB_FALLBACK=1` did
 not turn these skipped dependency failures into an immediate hard error.
 
-## Owner and fix direction
+## Current owner and resolution
 
-Owner: native-build entry-closure dependency accounting and failure aggregation.
-Propagate requiredness from the entry graph to every compilation unit and reject
-the build when any required unit fails. Add one regression with a required
-module containing a deterministic HIR error; assert no linker invocation and no
-output binary.
+Owner: the pure-Simple driver phase gates in `src/compiler/80.driver/driver.spl`.
+Closure resolution adds unresolved dotted or empty-import errors to
+`ctx.errors`, and phase 1 returns `ParseError` before parsing. Entry-closure
+parsing returns false on parser diagnostics, and phase 2 returns `ParseError`.
+HIR lowering collects every non-recovered `LoweringError` into `ctx.errors`;
+phase 3 returns `TypeError` before monomorphization and link.
+
+`entry_closure_physical_source_dedup_spec.spl` scopes its regression assertions
+to the four owning function bodies and pins each fail-fast edge plus the phase-3
+return before phase 4. The deployed self-hosted runner still has the separately
+tracked stale `rt_env_set` crash, so fresh executable evidence remains pending;
+no Rust-seed result is substituted.
+
+The next source fix must distinguish valid single-segment module imports from
+scanner false positives and fail unresolved required modules closed. Do not
+remove the skip while another agent owns the active driver/bootstrap rebuild.
