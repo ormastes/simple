@@ -464,11 +464,12 @@ the shared binary — deploys require explicit user go-ahead).
   The later cross-module arithmetic exit-5 evidence is now isolated to
   `u64(0x8000000000000000) > 0.0`: generated code encodes the cast as signed
   f64 `0xc3e0000000000000`. A current-source Stage2/3 rebuild reproduced it.
-  The remaining root is earlier unsigned-provenance copy propagation, not
-  LLVM/Cranelift comparison dispatch; the attempted destination-or-source rule
-  was rejected because it can contaminate an authoritative signed destination.
-  The three-cycle cap is exhausted, with the narrow destination-unregistered
-  rule and unchanged cross-module fixture recorded for the next session.
+  The remaining root was earlier unsigned-provenance copy propagation, not
+  LLVM/Cranelift comparison dispatch. Copy propagation now preserves an
+  authoritative registered destination and inherits a source flag only for an
+  unregistered destination, using direct operand-to-ID calls so bootstrap
+  cannot collapse the keys. The rejected destination-or-source rule remains
+  absent. The unchanged cross-module fixture still needs rebuilt execution.
   Pure-Simple text `.char_code_at(index)` now lowers after custom-owner
   dispatch through a reserved alias to the exact raw-i64 runtime ABI instead
   of boxing/decoding the codepoint or capturing a same-named source function.

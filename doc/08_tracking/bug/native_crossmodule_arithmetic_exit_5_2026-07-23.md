@@ -2,7 +2,8 @@
 
 ## Status
 
-Open. Stage2/3 rebuilt successfully from pre-fetch HEAD `74269ec415`, but the
+Source-fixed; rebuilt execution pending. Stage2/3 rebuilt successfully from
+pre-fetch HEAD `74269ec415`, but the
 focused dual-backend gate still stopped before printing
 `native-crossmodule-result-u8: pass`. A later mandatory fetch advanced current
 source to `448317ea5d`, so those binaries are retained diagnostic evidence, not
@@ -52,13 +53,12 @@ as `src_id`. The resulting binaries retained the old source-first overwrite.
 The cast path itself correctly calls `get_operand_unsigned` and
 `value_as_type_signed`; it is not the remaining owner.
 
-## Next step
+## Source fix (2026-07-23)
 
-The three-cycle verification cap is exhausted for this session. In a fresh
-session, change only copy propagation using direct operand-to-ID calls so the
-bootstrap seed cannot collapse the two local aliases. An already-primed
-destination keeps its authoritative MIR signedness; only an unregistered
-destination inherits a known source flag:
+Copy propagation now uses direct operand-to-ID calls so the bootstrap seed
+cannot collapse the two local aliases. An already-primed destination keeps its
+authoritative MIR signedness; only an unregistered destination inherits a known
+source flag:
 
 ```spl
 if not self.unsigned_locals.has(self.local_id_value(dest)):
@@ -66,7 +66,8 @@ if not self.unsigned_locals.has(self.local_id_value(dest)):
         self.unsigned_locals[self.local_id_value(dest)] = self.unsigned_locals[self.local_id_value(src)]
 ```
 
-Then rebuild Stage2/3 incrementally and run the unchanged cross-module fixture
-once. If it still fails, disassemble the keys before considering the separate
+The focused source regression rejects the former source-first overwrite. Next,
+rebuild Stage2/3 incrementally and run the unchanged cross-module fixture once.
+If it still fails, disassemble the keys before considering the separate
 `translate_load` provenance audit. Do not weaken or delete the fixture, and do
 not advance to Stage4/QEMU until it passes.
