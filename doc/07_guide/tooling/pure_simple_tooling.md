@@ -121,6 +121,10 @@ verification. Raw-source execution is an explicit debug fallback controlled by
 runtime. A wrapper handshake that silently runs raw source or the Rust seed is
 not production evidence.
 
+`bin/simple_mcp_server` resolves and enters the canonical repository root
+before probing or launching its admitted native server, so relative workspace
+paths do not depend on the client's launch directory.
+
 `bin/simple_lsp_mcp_server` is a hash-admitted, bounded native launcher. It
 restores the canonical repository-root CWD before execution and admits a
 candidate only after correlated `initialize`, `tools/list` (advertising
@@ -137,6 +141,76 @@ sets `SIMPLE_NO_STUB_FALLBACK=1`, and fails closed; a deployed wrapper, raw
 source worker, Rust seed, stale binary, or help-only response cannot satisfy it.
 The gate establishes command dispatch and minimal behavior only. Release still
 requires the full test, lint, and duplication evidence for its scope.
+
+## Current qualification snapshot (2026-07-23)
+
+Source-fixed is not Stage 4 qualification. The following is the current
+evidence boundary for the important pure-Simple tooling lanes:
+
+- **test / test-daemon** — **Source status:** canonical direct summaries and
+  responsive daemon routing are pushed. **Strongest current evidence:**
+  `eceddfd31d` and `7a011de61f`, plus the zero-executed regression in
+  [the tracked report](../../08_tracking/bug/test_runner_zero_executed_single_file_greenwash_2026-07-17.md).
+  **Remaining bug/gap:** the aggregate Stage 4 essential-tools smoke has not
+  passed. **Next solution:** deploy a fresh Stage 4 CLI and run the exact
+  essential-tools smoke from its temporary external working directory.
+- **check / build / run** — **Source status:** partially fixed; the full
+  pure-Simple CLI is not linked/qualified. **Strongest current evidence:**
+  Stage 2/3 success and the bounded Stage 4 analysis in
+  [the imported-provider report](../../08_tracking/bug/bootstrap_stage4_import_mangling_runtime_gap_2026-07-12.md).
+  **Remaining bug/gap:** capability-owned provider composition still blocks the
+  full CLI. **Next solution:** complete the canonical provider profile, then
+  build and qualify the fresh Stage 4 CLI.
+- **lint** — **Source status:** AST-rule parity remains open; capped WIP is not
+  landed. **Strongest current evidence:**
+  [the AST dispatch audit](../../08_tracking/bug/simple_lint_ast_rules_unwired_2026-07-19.md)
+  shows production CLI lint omits semantic rules. **Remaining bug/gap:** there
+  is no landed CLI/query parity proof. **Next solution:** finish the smallest
+  shared semantic-warning route and its focused parity regression before Stage
+  4 qualification.
+- **fmt / fix** — **Source status:** atomic writes and fail-closed source
+  rewrites are pushed. **Strongest current evidence:** `5b13444c83` and
+  `0a7b45ea7b`. **Remaining bug/gap:** no fresh Stage 4 behavior proof.
+  **Next solution:** exercise mutation and write-failure cases through the
+  newly deployed pure-Simple CLI.
+- **duplicate-check** — **Source status:** effective `mode`/`format`
+  validation is pushed. **Strongest current evidence:** `f2818a4b63` and its
+  focused bad-value/valid-override probes; see
+  [the tracking report](../../08_tracking/bug/duplicate_check_invalid_enum_value_false_green_2026-07-19.md).
+  **Remaining bug/gap:** that is focused evidence only, not an aggregate Stage
+  4 pass. **Next solution:** run the clean/exact-clone and invalid-option
+  essential-tools probes against the exact fresh CLI.
+- **MCP** — **Source status:** the full wrapper's repository-root CWD restore
+  is pushed. **Strongest current evidence:** `1035de83f1` and the wrapper
+  contract above. **Remaining bug/gap:** a fresh Stage 4 native full-MCP
+  handshake has not yet been captured as qualification evidence. **Next
+  solution:** deploy the exact native server and run its command-line handshake
+  from an external CWD.
+- **LSP MCP** — **Source status:** bounded native candidate admission is
+  pushed. **Strongest current evidence:** `8401b5ebfd` requires correlated
+  initialize/list/symbol probes and fails closed. **Remaining bug/gap:** no
+  fresh Stage 4 native artifact has completed that admission. **Next
+  solution:** build the exact artifact and run the bounded wrapper contract.
+- **bootstrap essential gate** — **Source status:** the aggregate gate and its
+  fail-closed fixture contract are present. **Strongest current evidence:**
+  `scripts/check/check-bootstrap-essential-tools-smoke.shs` is required by this
+  guide and the bootstrap build guide. **Remaining bug/gap:** the aggregate
+  Stage 4 smoke still has not passed. **Next solution:** run that one bounded
+  gate once after a fresh Stage 4 CLI is admitted.
+- **Codex session guard** — **Source status:** duplicate-resume locking and
+  documented runaway thresholds are pushed. **Strongest current evidence:**
+  `879a767a73`, `0e5a2198a5`, and
+  [the SQLite/WAL incident report](../../08_tracking/bug/codex_duplicate_resume_sqlite_wal_lock_2026-07-19.md).
+  **Remaining bug/gap:** direct Codex invocations outside `bin/codex` remain
+  intentionally outside the guard. **Next solution:** use the guarded launcher
+  with repo `bin/` first on `PATH`; add broader protection only if direct
+  invocation becomes supported.
+- **simple-core ABI** — **Source status:** tuple row-length repair is pushed.
+  **Strongest current evidence:** `2dc4fc5a4f` and
+  [the dict-entry archive report](../../08_tracking/bug/simple_core_value_memory_probe_dict_entries_failure_2026-07-19.md).
+  **Remaining bug/gap:** the authoritative archive probe has not rerun past its
+  former exit-91 assertion. **Next solution:** perform that incremental exact
+  archive qualification before claiming runtime success.
 
 ### Temporary Rust test-runner recovery
 

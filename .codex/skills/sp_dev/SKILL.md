@@ -52,6 +52,11 @@ complete when workflow/tooling behavior changed and the matching guide, skill,
 agent, command, or generated/manual spec docs are still stale. Update the docs
 first, then run focused verification evidence once.
 
+For every acceptance criterion, record one passing result and do not rerun the
+same unchanged green command. Stop after three verify/fix cycles for one
+feature and report any remaining failure; convergence ends the lane instead of
+starting another confirmation loop.
+
 Bootstrap/tooling lanes that produce a Stage 4 full CLI must retain the bounded
 `scripts/check/check-bootstrap-essential-tools-smoke.shs` gate against the exact
 fresh binary. Require the test-runner, lint, duplicate-check, and aggregate pass
