@@ -182,11 +182,22 @@ fn bootstrap_mir_functions_add(name: text, fn_: MirFunction, module_index: i64):
     val return_type_tag = bootstrap_mir_static_type_tag(fn_.signature.return_type)
     val param_start = _bootstrap_mir_function_param_type_tags.len()
     val param_count = fn_.signature.params.len()
-    for param_type in fn_.signature.params:
-        _bootstrap_mir_function_param_type_tags.push(bootstrap_mir_static_type_tag(param_type))
-    _bootstrap_mir_function_return_type_tags.push(return_type_tag)
-    _bootstrap_mir_function_param_starts.push(param_start)
-    _bootstrap_mir_function_param_counts.push(param_count)
+    # Accumulate param tags in a LOCAL, then reassign the module global ONCE
+    # at straight-line level. The seed rejects `global = global.push(...)`
+    # INSIDE a loop body ("cannot reassign to immutable variable",
+    # rMCP19/20) but accepts it straight-line (see the names/functions
+    # reassigns below, unchanged from the original). Reassign is REQUIRED —
+    # bare `.push()` on a module global silently drops elements (81 of 842),
+    # desyncing the parallel accumulator arrays (rMCP17 OOB 761/761).
+    var jn_param_tags = _bootstrap_mir_function_param_type_tags
+    var jn_param_i = 0
+    while jn_param_i < fn_.signature.params.len():
+        jn_param_tags = jn_param_tags.push(bootstrap_mir_static_type_tag(fn_.signature.params[jn_param_i]))
+        jn_param_i = jn_param_i + 1
+    _bootstrap_mir_function_param_type_tags = jn_param_tags
+    _bootstrap_mir_function_return_type_tags = _bootstrap_mir_function_return_type_tags.push(return_type_tag)
+    _bootstrap_mir_function_param_starts = _bootstrap_mir_function_param_starts.push(param_start)
+    _bootstrap_mir_function_param_counts = _bootstrap_mir_function_param_counts.push(param_count)
     var stored_fn = fn_
     val rewritten = ssa_alloca_transform_blocks(fn_.blocks, fn_.locals, fn_.entry_block)
     if rewritten.applied:
@@ -223,19 +234,38 @@ fn bootstrap_mir_static_init_parts(value: MirConstValue) -> (i64, text):
 
 fn bootstrap_mir_modules_add(module: MirModule):
     val module_index = _bootstrap_mir_module_count_value
-    for static_ in module.statics.values():
+    # Accumulate into LOCALS inside the loop, reassign each module global
+    # ONCE at straight-line level after — same seed reassign-in-loop rule +
+    # bare-push element-drop rationale as bootstrap_mir_functions_add above.
+    var bs_modules = _bootstrap_mir_static_modules
+    var bs_symbol_ids = _bootstrap_mir_static_symbol_ids
+    var bs_names = _bootstrap_mir_static_names
+    var bs_type_tags = _bootstrap_mir_static_type_tags
+    var bs_init_kinds = _bootstrap_mir_static_init_kinds
+    var bs_init_payloads = _bootstrap_mir_static_init_payloads
+    val bs_static_vals = module.statics.values()
+    var bs_si = 0
+    while bs_si < bs_static_vals.len():
+        val static_ = bs_static_vals[bs_si]
         var init_kind = 0
         var init_payload = ""
         if static_.init.?:
             val (captured_init_kind, captured_init_payload) = bootstrap_mir_static_init_parts(static_.init.unwrap().value)
             init_kind = captured_init_kind
             init_payload = captured_init_payload
-        _bootstrap_mir_static_modules.push(module_index)
-        _bootstrap_mir_static_symbol_ids.push(static_.symbol.id)
-        _bootstrap_mir_static_names.push(static_.name)
-        _bootstrap_mir_static_type_tags.push(bootstrap_mir_static_type_tag(static_.type_))
-        _bootstrap_mir_static_init_kinds.push(init_kind)
-        _bootstrap_mir_static_init_payloads.push(init_payload)
+        bs_modules = bs_modules.push(module_index)
+        bs_symbol_ids = bs_symbol_ids.push(static_.symbol.id)
+        bs_names = bs_names.push(static_.name)
+        bs_type_tags = bs_type_tags.push(bootstrap_mir_static_type_tag(static_.type_))
+        bs_init_kinds = bs_init_kinds.push(init_kind)
+        bs_init_payloads = bs_init_payloads.push(init_payload)
+        bs_si = bs_si + 1
+    _bootstrap_mir_static_modules = bs_modules
+    _bootstrap_mir_static_symbol_ids = bs_symbol_ids
+    _bootstrap_mir_static_names = bs_names
+    _bootstrap_mir_static_type_tags = bs_type_tags
+    _bootstrap_mir_static_init_kinds = bs_init_kinds
+    _bootstrap_mir_static_init_payloads = bs_init_payloads
     _bootstrap_mir_module_count_value = module_index + 1
 
 # The real HIR module for the bootstrap entry, set by the driver
@@ -355,6 +385,9 @@ fn bootstrap_mir_function_at(index: i64) -> MirFunction:
 
 fn bootstrap_mir_function_name_at(index: i64) -> text:
     _bootstrap_mir_function_names[index]
+
+fn bootstrap_mir_accumulator_lens_diag():
+    print "[acc-lens] fns={_bootstrap_mir_functions.len()} names={_bootstrap_mir_function_names.len()} modules={_bootstrap_mir_function_modules.len()} ret_tags={_bootstrap_mir_function_return_type_tags.len()} p_starts={_bootstrap_mir_function_param_starts.len()} p_counts={_bootstrap_mir_function_param_counts.len()} p_tags={_bootstrap_mir_function_param_type_tags.len()} statics={_bootstrap_mir_static_names.len()}"
 
 fn bootstrap_mir_function_module_at(index: i64) -> i64:
     _bootstrap_mir_function_modules[index]

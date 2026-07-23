@@ -353,9 +353,14 @@ impl MirToLlvm:
                     panic("compile error: indirect call with unresolved callee — likely an unresolved import or unsupported first-class function value")
             case _:
                 ()
-        val dest_name: text? = match dest:
-            case Some(dest_local): Some(self.get_local(self.local_id_value(dest_local)))
-            case nil: nil
+        # Decay-safe: the seed's `match dest: case Some(x)/case nil` on a
+        # LocalId? exhausts without matching when the option carries a bound
+        # payload (invalid pattern ... object value LocalId, rMCP21) — the
+        # same match-decay landmine fixed in core_codegen.spl's translate_call.
+        # Use an explicit nil check + unwrap instead.
+        var dest_name: text? = nil
+        if dest != nil:
+            dest_name = Some(self.get_local(self.local_id_value(dest ?? LocalId(id: 0))))
         val raw_ptr_val = self.translate_operand(ptr)
         val ptr_val = self.value_as_type(raw_ptr_val, self.get_operand_type(ptr), "ptr")
         var arg_vals: [text] = []
@@ -370,10 +375,10 @@ impl MirToLlvm:
             arg_val = self.value_as_type(arg_val, self.get_operand_type(arg), arg_ty)
             arg_vals = arg_vals.push("{arg_ty} {arg_val}")
             arg_i = arg_i + 1
-        val ret_ty = match dest:
-            case Some(dest_local): self.valid_llvm_type(self.get_local_type(self.local_id_value(dest_local)))
-            case nil:
-                if sig.return_type == nil: "void" else: self.valid_llvm_type(self.llvm_type_text(sig.return_type))
+        # Decay-safe (see dest_name above).
+        var ret_ty: text = if sig.return_type == nil: "void" else: self.valid_llvm_type(self.llvm_type_text(sig.return_type))
+        if dest != nil:
+            ret_ty = self.valid_llvm_type(self.get_local_type(self.local_id_value(dest ?? LocalId(id: 0))))
         self.builder.emit_call_indirect(dest_name, ret_ty, ptr_val, arg_vals)
 
     me phi_block_id_arg(arg: MirOperand) -> i64?:
@@ -445,19 +450,29 @@ impl MirToLlvm:
             case "clmul_hi":
                 self.emit_clmul_intrinsic(dest, args, "17")
             case _:
-                # Generic fallback: forward to runtime stub
+                # Generic fallback: forward to runtime stub. The stub is
+                # declared with i64 params, so COERCE each operand to i64
+                # (sext/zext/trunc) via value_as_type — hardcoding `"i64 " +
+                # value` emitted `i64 %lN` for an i32-typed operand (e.g. an
+                # `i32` loop counter used as a bounds_check index), which llc
+                # rejects ("defined with type 'i32' but expected 'i64'",
+                # native_i32_index_bounds_check 2026-07-23).
                 var arg_vals: [text] = []
                 for arg in args:
-                    arg_vals = arg_vals.push("i64 " + self.translate_operand(arg))
+                    val raw_arg = self.translate_operand(arg)
+                    val arg_ty = self.valid_llvm_type(self.get_operand_type(arg))
+                    val coerced = self.value_as_type(raw_arg, arg_ty, "i64")
+                    arg_vals = arg_vals.push("i64 " + coerced)
                 val args_str = arg_vals.join(", ")
-                match dest:
-                    Some(dest_local):
-                        val dest_id = self.local_id_value(dest_local)
-                        val dest_name = self.get_local(dest_id)
-                        val ret_ty = self.valid_llvm_type(self.get_local_type(dest_id))
-                        self.builder.emit("  {dest_name} = call {ret_ty} @__simple_intrinsic_{name}({args_str})  ; intrinsic: {name}")
-                    nil:
-                        self.builder.emit("  call void @__simple_intrinsic_{name}({args_str})  ; intrinsic: {name}")
+                # Decay-safe dest check (seed match Some/nil on LocalId?
+                # exhausts with a bound payload).
+                if dest != nil:
+                    val dest_id = self.local_id_value(dest ?? LocalId(id: 0))
+                    val dest_name = self.get_local(dest_id)
+                    val ret_ty = self.valid_llvm_type(self.get_local_type(dest_id))
+                    self.builder.emit("  {dest_name} = call {ret_ty} @__simple_intrinsic_{name}({args_str})  ; intrinsic: {name}")
+                else:
+                    self.builder.emit("  call void @__simple_intrinsic_{name}({args_str})  ; intrinsic: {name}")
 
     me translate_inline_asm(asm_template: text, is_volatile: bool, inputs: [MirAsmOperand], outputs: [MirAsmOperand], clobbers: [text]):
         """Translate inline assembly to LLVM inline asm call."""

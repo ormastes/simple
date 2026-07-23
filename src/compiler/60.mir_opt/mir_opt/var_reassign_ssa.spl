@@ -280,6 +280,15 @@ fn ssa_var_transform_inst_supported(inst: MirInst) -> bool:
         case Bitcast(_, _, _): true
         case Call(_, _, _): true
         case Intrinsic(_, _, _): true
+        # Module-global load/store (mutglobal2 lane): LoadGlobal's dest is a
+        # plain def (rename + store-to-slot), StoreGlobal's value is a plain
+        # read (load-from-slot). Rejecting a whole function over these left
+        # every OTHER reassigned local un-slotted -> duplicate `%lN` SSA defs
+        # at llc (native_module_var_alloca_global_insts 2026-07-23: any fn
+        # writing a module `var` — e.g. _mcp_init_tool_set — plus an if/??
+        # expression got the raw invalid SSA).
+        case LoadGlobal(_, _): true
+        case StoreGlobal(_, _): true
         case Nop: true
         case DebugValue(_, _): true
         case _: false
@@ -1061,6 +1070,12 @@ fn _ssa_written_local_id(inst: MirInst) -> i64:
                 -1
         case Ref(dest, _, _):
             var_reassign_local_id_value(dest)
+        # LoadGlobal writes its dest local (module-global read, mutglobal2
+        # lane); without this it counted as no-write and a multi-def/cross-
+        # block LoadGlobal dest was never slotted (native_module_var_alloca_
+        # global_insts 2026-07-23). StoreGlobal writes no local -> catch-all.
+        case LoadGlobal(dest, _):
+            var_reassign_local_id_value(dest)
         case _:
             -1
 
@@ -1308,6 +1323,13 @@ fn ssa_alloca_rewrite_inst_operands(inst: MirInst, slot_keys: [i64], slot_values
             for p in rv[1]:
                 prepend = prepend.push(p)
             (MirInst(kind: MirInstKind.SetField(rb[0], field, rv[0]), span: inst.span), prepend, rv[2])
+        # StoreGlobal's value operand may reference a slotted local -> load it
+        # from the slot first (native_module_var_alloca_global_insts). LoadGlobal
+        # reads only its global symbol (no local operand); its dest is handled
+        # on the def-store side.
+        case StoreGlobal(symbol, value):
+            val rv = ssa_alloca_rewrite_operand(value, slot_keys, slot_values, next_temp)
+            (MirInst(kind: MirInstKind.StoreGlobal(symbol, rv[0]), span: inst.span), rv[1], rv[2])
         case _:
             (inst, [], next_temp)
 
@@ -1393,6 +1415,11 @@ fn ssa_alloca_rename_dest(inst: MirInst, original_id: i64, new_id: i64) -> MirIn
         case Intrinsic(dest, name, args):
             if dest.? and ssa_local_id_value(dest.unwrap()) == original_id:
                 MirInst(kind: MirInstKind.Intrinsic(Some(ssa_local(new_id)), name, args), span: inst.span)
+            else:
+                inst
+        case LoadGlobal(dest, symbol):
+            if ssa_local_id_value(dest) == original_id:
+                MirInst(kind: MirInstKind.LoadGlobal(ssa_local(new_id), symbol), span: inst.span)
             else:
                 inst
         case _:
