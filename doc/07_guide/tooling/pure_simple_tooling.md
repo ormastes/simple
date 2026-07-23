@@ -175,7 +175,11 @@ evidence boundary for the important pure-Simple tooling lanes:
   smoke from its temporary external working directory.
 - **check / build / run** — **Source status:** the full pure-Simple CLI links,
   preserves delegated streams/status, and its isolated official source-check
-  passes when `SIMPLE_BINARY` names the candidate. The paired-value lowering
+  passes when `SIMPLE_BINARY` names the candidate. `check` is source-fixed to
+  reject unknown, missing, and invalid-domain output options before discovery,
+  so a typo cannot silently pass after checking a different scope. Its focused
+  option contract passes through the temporary bootstrap interpreter; fresh
+  Stage 4 runtime qualification remains pending. The paired-value lowering
   fix in `2f6430a87c8` clears the focused p2 enum probe at source. **Strongest
   current evidence:** candidate `00431ce5…`, `2f6430a87c8`, and the bounded repair in
   [the Stage 4 report](../../08_tracking/bug/stage4_full_cli_source_check_blank_exit8_2026-07-23.md).
@@ -232,7 +236,9 @@ evidence boundary for the important pure-Simple tooling lanes:
   out-of-range values (`60f23743d1d`). **Strongest current evidence:**
   `f2818a4b63`, `6a9af6f6635`, `74594ec99ff`, and `60f23743d1d`; the focused
   detector and threshold contracts passed through the temporary bootstrap
-  interpreter.
+  interpreter. The configured lexical SDN report path now writes once,
+  propagates write failure, and has focused temporary-bootstrap evidence; see
+  the [report-path report](../../08_tracking/bug/duplicate_check_report_path_silent_noop_2026-07-23.md).
   See the [token threshold report](../../08_tracking/bug/duplicate_check_token_mode_min_tokens_ignored_2026-07-23.md)
   [cosine fragment report](../../08_tracking/bug/duplicate_check_cosine_fragmented_occurrence_groups_2026-07-23.md),
   and [similarity threshold report](../../08_tracking/bug/duplicate_check_similarity_threshold_false_clean_2026-07-23.md).
@@ -263,7 +269,9 @@ evidence boundary for the important pure-Simple tooling lanes:
   **Next solution:** deploy a fresh Stage 4 CLI, then run the one bounded gate
   once.
 - **examples-check** — **Source status:** pure-Simple command routing is
-  implemented. **Remaining bug/gap:** no fresh qualification evidence.
+  implemented and malformed command options now fail closed before discovery.
+  Its focused option contract passes through the temporary bootstrap
+  interpreter. **Remaining bug/gap:** no fresh pure-Simple qualification evidence.
   **Next solution:** run one focused passing example and one failing example
   through the exact fresh CLI, preserving their exit statuses.
 - **spipe-docgen** — **Source status:** pure-Simple `simple-core` or
