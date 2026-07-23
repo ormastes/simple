@@ -869,10 +869,10 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
 
                     // Search lib subdirectories for the original parts
                     for subdir in &[
-                        "common",
-                        "nogc_sync_mut",
                         "nogc_async_mut",
+                        "nogc_sync_mut",
                         "nogc_async_immut",
+                        "common",
                         "gc_async_mut",
                         "nogc_async_mut_noalloc",
                     ] {

@@ -18,8 +18,13 @@
 
 ## Error handling
 
-Every qualification child call is deadline-bound. Child exit is preserved before parsing
-presentation text. Missing files count as failed lint inputs. Unsupported JSON
+Every qualification child call is deadline-bound. Test-runner child-result
+preservation is currently **OPEN / not release-qualified**: the limited bounded
+path can lose stdout, stderr, and nonzero exit before parsing presentation text
+([tracked bug](../08_tracking/bug/stage4_test_runner_bounded_capture_empty_2026-07-23.md)).
+Admission must separately prove the no-limit tuple path and limited
+`ProcessResult` path, then repair the first divergent boundary; the summary
+parser remains fail-closed. Missing files count as failed lint inputs. Unsupported JSON
 repository modes return usage error; unauthenticated assert-ran modes fail
 closed and cannot qualify a release.
 Incremental object-cache publication accepts a racing destination only when
