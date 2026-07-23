@@ -260,6 +260,50 @@ fn _driver_import_prefix_at(bytes: [u8], start: i64, end_pos: i64, prefix: [u8])
         i = i + 1
     true
 
+fn _driver_entry_import_module_paths_text_fallback(content: text) -> [text]:
+    # Compiled Stage4 can currently lose the byte-scanner result. Keep this
+    # allocation-based compatibility path local to entry-closure discovery.
+    var result: [text] = []
+    var in_doc = false
+    for raw_line in content.split("\n"):
+        var scan_line = raw_line
+        if not in_doc:
+            val comment_at = scan_line.find("#") ?? -1
+            if comment_at >= 0:
+                scan_line = scan_line[0:comment_at]
+        val quote_parts = scan_line.split("\"\"\"")
+        val quote_count = quote_parts.len() - 1
+        val was_in_doc = in_doc
+        if quote_count % 2 == 1:
+            in_doc = not in_doc
+        if was_in_doc or quote_count > 0:
+            continue
+
+        val line = scan_line.trim()
+        var tail = ""
+        if line.starts_with("use lazy "):
+            continue
+        elif line.starts_with("export use "):
+            tail = line.substring(11)
+        elif line.starts_with("use "):
+            tail = line.substring(4)
+        elif line.starts_with("import "):
+            tail = line.substring(7)
+        else:
+            continue
+
+        var cut = tail.len()
+        for delimiter in [" ", "{", "(", "*", "#"]:
+            val delimiter_at = tail.find(delimiter) ?? -1
+            if delimiter_at >= 0 and delimiter_at < cut:
+                cut = delimiter_at
+        var module_path = tail[0:cut]
+        while module_path.ends_with("."):
+            module_path = module_path[0:module_path.len() - 1]
+        if module_path != "":
+            result = result.push(module_path)
+    result
+
 pub fn _driver_entry_import_module_paths(content: text) -> [text]:
     """Dotted module paths of the use/export-use/import declarations in a
     source text. `use lazy` imports are dynamic-by-design and skipped.
@@ -311,6 +355,10 @@ pub fn _driver_entry_import_module_paths(content: text) -> [text]:
                     result = result.push(mp)
         line_start = scan_pos + 1
         scan_pos = scan_pos + 1
+    # ponytail: keep the zero/selective fallback until Stage4's byte-array
+    # result transport is fixed; merge both scans only if partial loss appears.
+    if result.len() == 0 or content.contains(".{"):
+        return _driver_entry_import_module_paths_text_fallback(content)
     result
 
 fn _driver_try_entry_import_rel(rel: text, entry_dir: text) -> text:

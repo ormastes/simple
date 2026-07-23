@@ -1,0 +1,59 @@
+extern fn rt_file_read_text(path: text) -> text
+
+describe "bootstrap flat non-entry module globals":
+    it "recovers the entry HIR and emits every lowered module's globals and initializer":
+        val driver = rt_file_read_text("src/compiler/80.driver/driver_bootstrap.spl") ?? ""
+        val pipeline = rt_file_read_text("src/compiler/80.driver/driver.spl") ?? ""
+        val globals = rt_file_read_text("src/compiler/50.mir/_MirLowering/bootstrap_globals.spl") ?? ""
+        val lowering = rt_file_read_text("src/compiler/50.mir/_MirLowering/module_lowering.spl") ?? ""
+        val hir_modules = rt_file_read_text("src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl") ?? ""
+        val hir_helpers = rt_file_read_text("src/compiler/20.hir/hir_lowering/_Items/lowering_helpers.spl") ?? ""
+        val hir_items = rt_file_read_text("src/compiler/20.hir/hir_lowering/_Items/trait_impl_lowering.spl") ?? ""
+        val llvm = rt_file_read_text("src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl") ?? ""
+        val ssa = rt_file_read_text("src/compiler/60.mir_opt/mir_opt/var_reassign_ssa.spl") ?? ""
+
+        expect(driver).to_contain("val mapped_entry_hir = ctx.hir_modules[entry_module_name]")
+        expect(driver).to_contain("bootstrap_set_entry_hir_module(mapped_entry_hir)")
+        expect(driver).to_contain("bootstrap_lower_flat_hir_modules_to_mir_for_target(entry_module_name, target_context)")
+        expect(driver).to_contain("ctx.options.bootstrap_input_count == 1")
+        expect(driver).to_contain("return ctx.sources[0].module_name")
+        expect(pipeline).to_contain("name == bootstrap_entry_module_name(self.ctx)")
+        expect(pipeline).to_contain("var phase_hir_modules: Dict<text, HirModule> = self.ctx.hir_modules")
+        expect(pipeline).to_contain("phase_hir_modules[name] = hir_module")
+        expect(pipeline).to_contain("phase_ctx.bootstrap_entry_hir = phase_entry_hir")
+        expect(pipeline).to_contain("bootstrap_ctx.hir_modules = updated_hir_boot")
+        expect(pipeline).to_contain("bootstrap_ctx.bootstrap_entry_hir = Some(bootstrap_entry_module)")
+        expect(pipeline).to_contain("val (analyzed_ctx, analyze_ok) = self.lower_and_check_impl()")
+        expect(pipeline).to_contain("self.ctx = analyzed_ctx")
+        expect(pipeline).to_contain("driver_inputs = [native_entry_input]")
+        expect(pipeline).to_contain("if bootstrap_flat_aot:")
+        expect(pipeline).to_contain("aot:flat_mir_passes:skipped")
+        expect(driver).to_contain("val static_count = bootstrap_mir_static_count()")
+        expect(driver).to_contain("val module_idx = bootstrap_mir_static_module_at(static_idx)")
+        expect(driver).to_contain("bootstrap_mir_static_init_payload_at(static_idx)")
+        expect(driver).to_contain("translator.current_bootstrap_module = bootstrap_mir_function_module_at(idx)")
+        expect(driver).to_contain("bootstrap_mir_function_return_type_tag_at(signature_idx)")
+        expect(driver).to_contain("bootstrap_mir_function_param_type_tag_at(signature_idx, signature_param_idx)")
+        expect(driver.contains("val signature_body = MirBody.from_function(signature_fn)")).to_equal(false)
+        expect(globals).to_contain("var _bootstrap_mir_function_return_type_tags: [i64] = []")
+        expect(globals).to_contain("lowering.lower_runtime_module_initializers_named(module_name, constants, mir_module_index)")
+        expect(lowering).to_contain("if bootstrap_module_index >= 0:")
+        expect(driver).to_contain("[driver-mir] bootstrap flat:start")
+        expect(globals).to_contain("var _bootstrap_mir_static_type_tags: [i64] = []")
+        expect(globals).to_contain("fn bootstrap_mir_static_init_parts(value: MirConstValue) -> (i64, text):")
+        expect(globals.contains("var _bootstrap_mir_modules: [MirModule]")).to_equal(false)
+        expect(driver.contains("bootstrap_mir_module_at")).to_equal(false)
+        expect(driver).to_contain("bootstrap_lower_extra_hir_module_to_mir_for_target(extra_hir, target_context)")
+        expect(globals).to_contain("lowering.lower_runtime_module_initializers(hir_module, const_vals)")
+        expect(globals).to_contain("bootstrap_mir_modules_add(lowering.builder.module)")
+        expect(lowering).to_contain("self.global_symbol_ids[sym_id] = true")
+        expect(hir_modules).to_contain("val parser_constants = module.constants.values()")
+        expect(hir_modules).to_contain("self.lower_hir_const_decl(parser_constants[const_idx])")
+        expect(hir_modules).to_contain("bootstrap_hir_modules_add(module.name, self.symbols.symbols.values(), flat_functions, flat_constants)")
+        expect(hir_helpers).to_contain("var _bootstrap_hir_module_functions: [[HirFunction]] = []")
+        expect(hir_helpers).to_contain("fn bootstrap_hir_module_functions_at(index: i64) -> [HirFunction]:")
+        expect(globals).to_contain("fn bootstrap_lower_flat_hir_modules_to_mir_for_target(entry_module_name: text, target_context: MirTargetContext) -> MirModule:")
+        expect(hir_items).to_contain("me lower_hir_const_decl(const_: Const) -> HirConst:")
+        expect(llvm).to_contain("me global_static_key(symbol_id: i64) -> text:")
+        expect(ssa).to_contain("fn ssa_cross_block_live_locals(blocks: [MirBlock], mir_locals: [MirLocal]) -> [i64]:")
+        expect(ssa).to_contain("if blocks.len() < 2:\n        return []")

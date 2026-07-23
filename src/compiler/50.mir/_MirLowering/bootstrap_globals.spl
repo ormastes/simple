@@ -20,6 +20,7 @@ use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, mir_operand_const_int}
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
+use compiler.hir.hir_lowering.items.{bootstrap_hir_module_count, bootstrap_hir_module_name_at, bootstrap_hir_module_symbols_at, bootstrap_hir_module_functions_at, bootstrap_hir_module_constants_at}
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 extern fn rt_exit(code: i64)
@@ -28,6 +29,7 @@ use compiler.blocks.value.BlockValue
 use compiler.types.type_layout.{compute_struct_layout, layoutattr_default_, FieldLayout}
 use compiler.core.types.{TYPE_BOOL, TYPE_I64, TYPE_F64}
 use compiler.mir.synthetic_driver_codegen.{apply_synthetic_driver_codegen}
+use compiler.mir_opt.{ssa_alloca_transform_blocks}
 use compiler.frontend.core.types.{custom_primitive_underlying_type_tag_by_symbol}
 use compiler.common.mir_target_context.{MirTargetContext, mir_target_context_from}
 
@@ -102,6 +104,18 @@ fn bootstrap_hir_accumulator_name(module: HirModule, func: HirFunction) -> text:
 
 var _bootstrap_mir_functions: [MirFunction] = []
 var _bootstrap_mir_function_names: [text] = []
+var _bootstrap_mir_function_modules: [i64] = []
+var _bootstrap_mir_function_return_type_tags: [i64] = []
+var _bootstrap_mir_function_param_starts: [i64] = []
+var _bootstrap_mir_function_param_counts: [i64] = []
+var _bootstrap_mir_function_param_type_tags: [i64] = []
+var _bootstrap_mir_module_count_value: i64 = 0
+var _bootstrap_mir_static_modules: [i64] = []
+var _bootstrap_mir_static_symbol_ids: [i64] = []
+var _bootstrap_mir_static_names: [text] = []
+var _bootstrap_mir_static_type_tags: [i64] = []
+var _bootstrap_mir_static_init_kinds: [i64] = []
+var _bootstrap_mir_static_init_payloads: [text] = []
 var _bootstrap_function_value_names: [text] = []
 var _bootstrap_enum_runtime_id_names: Dict<text, text> = {}
 
@@ -119,10 +133,78 @@ fn bootstrap_register_function_value_module(module: HirModule):
 fn bootstrap_mir_functions_reset():
     _bootstrap_mir_functions = []
     _bootstrap_mir_function_names = []
+    _bootstrap_mir_function_modules = []
+    _bootstrap_mir_function_return_type_tags = []
+    _bootstrap_mir_function_param_starts = []
+    _bootstrap_mir_function_param_counts = []
+    _bootstrap_mir_function_param_type_tags = []
+    _bootstrap_mir_module_count_value = 0
+    _bootstrap_mir_static_modules = []
+    _bootstrap_mir_static_symbol_ids = []
+    _bootstrap_mir_static_names = []
+    _bootstrap_mir_static_type_tags = []
+    _bootstrap_mir_static_init_kinds = []
+    _bootstrap_mir_static_init_payloads = []
 
-fn bootstrap_mir_functions_add(name: text, fn_: MirFunction):
+fn bootstrap_mir_functions_add(name: text, fn_: MirFunction, module_index: i64):
+    val return_type_tag = bootstrap_mir_static_type_tag(fn_.signature.return_type)
+    val param_start = _bootstrap_mir_function_param_type_tags.len()
+    val param_count = fn_.signature.params.len()
+    for param_type in fn_.signature.params:
+        _bootstrap_mir_function_param_type_tags.push(bootstrap_mir_static_type_tag(param_type))
+    _bootstrap_mir_function_return_type_tags.push(return_type_tag)
+    _bootstrap_mir_function_param_starts.push(param_start)
+    _bootstrap_mir_function_param_counts.push(param_count)
+    var stored_fn = fn_
+    val rewritten = ssa_alloca_transform_blocks(fn_.blocks, fn_.locals, fn_.entry_block)
+    if rewritten.applied:
+        stored_fn.blocks = rewritten.blocks
     _bootstrap_mir_function_names = _bootstrap_mir_function_names.push(name)
-    _bootstrap_mir_functions = _bootstrap_mir_functions.push(fn_)
+    _bootstrap_mir_functions = _bootstrap_mir_functions.push(stored_fn)
+    _bootstrap_mir_function_modules = _bootstrap_mir_function_modules.push(module_index)
+
+fn bootstrap_mir_static_type_tag(type_: MirType) -> i64:
+    match type_.kind:
+        case MirTypeKind.I64 | MirTypeKind.U64: 1
+        case MirTypeKind.I32 | MirTypeKind.U32 | MirTypeKind.Char: 2
+        case MirTypeKind.I16 | MirTypeKind.U16: 3
+        case MirTypeKind.I8 | MirTypeKind.U8: 4
+        case MirTypeKind.F64: 5
+        case MirTypeKind.F32: 6
+        case MirTypeKind.Bool: 7
+        case MirTypeKind.Unit | MirTypeKind.Never: 8
+        case MirTypeKind.Ptr(_, _) | MirTypeKind.Ref(_, _) | MirTypeKind.FuncPtr(_) | MirTypeKind.Function(_, _) | MirTypeKind.Opaque(_): 9
+        case MirTypeKind.Struct(_) | MirTypeKind.Enum(_) | MirTypeKind.Tuple(_) | MirTypeKind.Array(_, _) | MirTypeKind.Dict(_, _) | MirTypeKind.Slice(_) | MirTypeKind.Union(_): 9
+        case MirTypeKind.Promise(_) | MirTypeKind.Generator(_, _) | MirTypeKind.ActorType(_): 9
+        case _: 0
+
+fn bootstrap_mir_static_init_parts(value: MirConstValue) -> (i64, text):
+    match value:
+        case Int(v): (1, "{v}")
+        case Float(v): (1, "{v}")
+        case Bool(v): (1, if v: "1" else: "0")
+        case Str(v): (2, v)
+        case Zero: (1, "0")
+        case Array(_): (1, "zeroinitializer")
+        case Tuple(_): (1, "zeroinitializer")
+        case Struct(_): (1, "zeroinitializer")
+
+fn bootstrap_mir_modules_add(module: MirModule):
+    val module_index = _bootstrap_mir_module_count_value
+    for static_ in module.statics.values():
+        var init_kind = 0
+        var init_payload = ""
+        if static_.init.?:
+            val (captured_init_kind, captured_init_payload) = bootstrap_mir_static_init_parts(static_.init.unwrap().value)
+            init_kind = captured_init_kind
+            init_payload = captured_init_payload
+        _bootstrap_mir_static_modules.push(module_index)
+        _bootstrap_mir_static_symbol_ids.push(static_.symbol.id)
+        _bootstrap_mir_static_names.push(static_.name)
+        _bootstrap_mir_static_type_tags.push(bootstrap_mir_static_type_tag(static_.type_))
+        _bootstrap_mir_static_init_kinds.push(init_kind)
+        _bootstrap_mir_static_init_payloads.push(init_payload)
+    _bootstrap_mir_module_count_value = module_index + 1
 
 # The real HIR module for the bootstrap entry, set by the driver
 # (bootstrap_lower_to_mir_context) from ctx.hir_modules before MIR lowering.
@@ -138,6 +220,101 @@ fn bootstrap_set_entry_hir_module(m: HirModule):
 fn bootstrap_clear_entry_hir_module():
     _bootstrap_entry_hir_module = nil
 
+fn bootstrap_flat_symbol_table(module_index: i64) -> SymbolTable:
+    var table = SymbolTable.new()
+    val flat_symbols = bootstrap_hir_module_symbols_at(module_index)
+    for symbol in flat_symbols:
+        table.symbols[symbol.id.id] = symbol
+    table
+
+fn bootstrap_flat_function_symbol_name(symbols: SymbolTable, func: HirFunction) -> text:
+    if func.is_method:
+        return symbols.symbol_display_name(func.symbol, func.name).replace("::", ".")
+    func.name
+
+fn bootstrap_register_flat_function_values():
+    var module_index = 0
+    while module_index < bootstrap_hir_module_count():
+        val module_name = bootstrap_mir_logical_module_name(bootstrap_hir_module_name_at(module_index))
+        val symbols = bootstrap_flat_symbol_table(module_index)
+        val functions = bootstrap_hir_module_functions_at(module_index)
+        for func in functions:
+            val function_name = bootstrap_flat_function_symbol_name(symbols, func)
+            _bootstrap_function_value_names.push(function_name)
+            if not func.is_method:
+                _bootstrap_function_value_names.push("{module_name}.{function_name}")
+        module_index = module_index + 1
+
+fn bootstrap_lower_flat_hir_module_to_mir(module_index: i64, target_context: MirTargetContext, is_entry: bool) -> (MirModule, i64):
+    val module_name = bootstrap_hir_module_name_at(module_index)
+    val logical_module_name = bootstrap_mir_logical_module_name(module_name)
+    val symbols = bootstrap_flat_symbol_table(module_index)
+    val functions = bootstrap_hir_module_functions_at(module_index)
+    val constants = bootstrap_hir_module_constants_at(module_index)
+    var lowering = MirLowering.new_for_target(symbols, target_context)
+    lowering.current_function_names = _bootstrap_function_value_names
+    for const_ in constants:
+        lowering.lower_const(const_)
+        lowering.lower_static(const_)
+    val mir_module_index = _bootstrap_mir_module_count_value
+    lowering.lower_runtime_module_initializers_named(module_name, constants, mir_module_index)
+
+    var lowered_module = lowering.builder.module
+    lowered_module.name = module_name
+
+    var instruction_total = 0
+    for hir_fn in functions:
+        if hir_fn.is_extern:
+            continue
+        val function_name = bootstrap_flat_function_symbol_name(symbols, hir_fn)
+        val emitted_name = if is_entry or hir_fn.is_method:
+            function_name
+        else:
+            "{logical_module_name}.{function_name}"
+        lowering.symbols = symbols
+        val mir_fn = lowering.lower_function(hir_fn)
+        bootstrap_mir_functions_add(emitted_name, mir_fn, mir_module_index)
+        for block in mir_fn.blocks:
+            instruction_total = instruction_total + block.instructions.len()
+        var builder = lowering.builder
+        lowered_module = builder.module
+        lowered_module.name = module_name
+        var lowered_functions = lowered_module.functions
+        lowered_functions[mir_fn.symbol] = mir_fn
+        lowered_module.functions = lowered_functions
+        builder.module = lowered_module
+        lowering.builder = builder
+
+    lowered_module = lowering.builder.module
+    lowered_module.name = module_name
+    bootstrap_mir_modules_add(lowered_module)
+    (lowered_module, instruction_total)
+
+fn bootstrap_lower_flat_hir_modules_to_mir_for_target(entry_module_name: text, target_context: MirTargetContext) -> MirModule:
+    bootstrap_mir_functions_reset()
+    bootstrap_function_value_names_reset()
+    bootstrap_register_flat_function_values()
+    var entry_index = -1
+    var module_index = 0
+    while module_index < bootstrap_hir_module_count():
+        if bootstrap_mir_logical_module_name(bootstrap_hir_module_name_at(module_index)) == entry_module_name:
+            entry_index = module_index
+        module_index = module_index + 1
+    if entry_index < 0:
+        eprint("error: bootstrap flat HIR entry module was not captured: {entry_module_name}\n")
+        rt_exit(1)
+
+    val (entry_module, entry_instruction_total) = bootstrap_lower_flat_hir_module_to_mir(entry_index, target_context, true)
+    if entry_instruction_total == 0:
+        eprint("error: bootstrap entry lowered to 0 MIR instructions (ret-0 stub module)\n")
+        rt_exit(1)
+    module_index = 0
+    while module_index < bootstrap_hir_module_count():
+        if module_index != entry_index:
+            val _extra_result = bootstrap_lower_flat_hir_module_to_mir(module_index, target_context, false)
+        module_index = module_index + 1
+    entry_module
+
 fn bootstrap_mir_function_count() -> i64:
     _bootstrap_mir_functions.len()
 
@@ -146,6 +323,39 @@ fn bootstrap_mir_function_at(index: i64) -> MirFunction:
 
 fn bootstrap_mir_function_name_at(index: i64) -> text:
     _bootstrap_mir_function_names[index]
+
+fn bootstrap_mir_function_module_at(index: i64) -> i64:
+    _bootstrap_mir_function_modules[index]
+
+fn bootstrap_mir_function_return_type_tag_at(index: i64) -> i64:
+    _bootstrap_mir_function_return_type_tags[index]
+
+fn bootstrap_mir_function_param_count_at(index: i64) -> i64:
+    _bootstrap_mir_function_param_counts[index]
+
+fn bootstrap_mir_function_param_type_tag_at(function_index: i64, param_index: i64) -> i64:
+    _bootstrap_mir_function_param_type_tags[_bootstrap_mir_function_param_starts[function_index] + param_index]
+
+fn bootstrap_mir_static_count() -> i64:
+    _bootstrap_mir_static_names.len()
+
+fn bootstrap_mir_static_module_at(index: i64) -> i64:
+    _bootstrap_mir_static_modules[index]
+
+fn bootstrap_mir_static_symbol_id_at(index: i64) -> i64:
+    _bootstrap_mir_static_symbol_ids[index]
+
+fn bootstrap_mir_static_name_at(index: i64) -> text:
+    _bootstrap_mir_static_names[index]
+
+fn bootstrap_mir_static_type_tag_at(index: i64) -> i64:
+    _bootstrap_mir_static_type_tags[index]
+
+fn bootstrap_mir_static_init_kind_at(index: i64) -> i64:
+    _bootstrap_mir_static_init_kinds[index]
+
+fn bootstrap_mir_static_init_payload_at(index: i64) -> text:
+    _bootstrap_mir_static_init_payloads[index]
 
 fn bootstrap_mir_symbol_for_index(index: i64) -> SymbolId:
     if index == 0:
@@ -286,8 +496,6 @@ fn bootstrap_lower_hir_globals_to_mir_module_for_target(target_context: MirTarge
         val hir_module: HirModule = _bootstrap_entry_hir_module.unwrap()
         var lowering = MirLowering.new_for_target(hir_module.symbols, target_context)
         lowering = bootstrap_register_hir_type_defs(lowering, hir_module)
-        var lowered_module = lowering.builder.module
-        lowered_module.name = hir_module.name
         val entry_functions = hir_module.functions
         val fn_keys = entry_functions.keys()
         var function_names: [text] = []
@@ -296,6 +504,17 @@ fn bootstrap_lower_hir_globals_to_mir_module_for_target(target_context: MirTarge
         for function_name in _bootstrap_function_value_names:
             function_names.push(function_name)
         lowering.current_function_names = function_names
+        val const_vals = hir_module.constants.values()
+        for const_ in const_vals:
+            lowering.lower_const(const_)
+            lowering.lower_static(const_)
+        lowering.lower_runtime_module_initializers(hir_module, const_vals)
+        val module_index = _bootstrap_mir_module_count_value
+        var lowered_module = lowering.builder.module
+        lowered_module.name = hir_module.name
+        for init_fn in lowered_module.functions.values():
+            if init_fn.name.starts_with("__module_init"):
+                bootstrap_mir_functions_add(init_fn.name, init_fn, module_index)
         if trace_enabled:
             print "[mir-lower-free] functions:count {fn_keys.len()}"
         var fki = 0
@@ -315,7 +534,7 @@ fn bootstrap_lower_hir_globals_to_mir_module_for_target(target_context: MirTarge
                     print "[mir-lower-free] function:start {bootstrap_name}"
                 lowering.symbols = hir_module.symbols
                 val mir_fn = lowering.lower_function(hir_fn)
-                bootstrap_mir_functions_add(bootstrap_name, mir_fn)
+                bootstrap_mir_functions_add(bootstrap_name, mir_fn, module_index)
                 var blk_i = 0
                 while blk_i < mir_fn.blocks.len():
                     real_instr_total = real_instr_total + mir_fn.blocks[blk_i].instructions.len()
@@ -341,6 +560,7 @@ fn bootstrap_lower_hir_globals_to_mir_module_for_target(target_context: MirTarge
             eprint("error: bootstrap entry lowered to 0 MIR instructions (ret-0 stub module)\n")
             eprint("error: refusing to emit a stub-only bootstrap binary; real Simple lowering produced no bodies\n")
             rt_exit(1)
+        bootstrap_mir_modules_add(lowering.builder.module)
         return lowering.builder.module
     eprint("error: bootstrap entry HIR module was not set before MIR lowering\n")
     eprint("error: refusing to emit a stub-only bootstrap binary\n")
@@ -385,6 +605,17 @@ fn bootstrap_lower_extra_hir_module_to_mir_for_target(hir_module: HirModule, tar
     for function_name in _bootstrap_function_value_names:
         function_names.push(function_name)
     lowering.current_function_names = function_names
+    val const_vals = hir_module.constants.values()
+    for const_ in const_vals:
+        lowering.lower_const(const_)
+        lowering.lower_static(const_)
+    lowering.lower_runtime_module_initializers(hir_module, const_vals)
+    val module_index = _bootstrap_mir_module_count_value
+    var lowered_module = lowering.builder.module
+    lowered_module.name = hir_module.name
+    for init_fn in lowered_module.functions.values():
+        if init_fn.name.starts_with("__module_init"):
+            bootstrap_mir_functions_add(init_fn.name, init_fn, module_index)
     if trace_enabled:
         print "[mir-lower-extra] module={hir_module.name} functions:count {fn_keys.len()}"
     var fki = 0
@@ -416,7 +647,15 @@ fn bootstrap_lower_extra_hir_module_to_mir_for_target(hir_module: HirModule, tar
         if fn_name != "" and not already_added:
             lowering.symbols = hir_module.symbols
             val mir_fn = lowering.lower_function(hir_fn)
-            bootstrap_mir_functions_add(qualified_fn_name, mir_fn)
+            bootstrap_mir_functions_add(qualified_fn_name, mir_fn, module_index)
+            var bldr = lowering.builder
+            lowered_module = bldr.module
+            lowered_module.name = hir_module.name
+            var functions = lowered_module.functions
+            functions[mir_fn.symbol] = mir_fn
+            lowered_module.functions = functions
+            bldr.module = lowered_module
+            lowering.builder = bldr
             var blk_i = 0
             while blk_i < mir_fn.blocks.len():
                 added_instr_total = added_instr_total + mir_fn.blocks[blk_i].instructions.len()
@@ -424,4 +663,5 @@ fn bootstrap_lower_extra_hir_module_to_mir_for_target(hir_module: HirModule, tar
             if trace_enabled:
                 print "[mir-lower-extra] function:added {fn_name}"
         fki = fki + 1
+    bootstrap_mir_modules_add(lowering.builder.module)
     added_instr_total

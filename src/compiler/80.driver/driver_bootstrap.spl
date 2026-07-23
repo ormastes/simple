@@ -14,8 +14,8 @@ use compiler.backend.backend._MirToLlvm.asm_constraints_helpers.{llvm_bootstrap_
 use compiler.backend.backend.llvm_native_link.{link_llvm_native, NativeLinkOptions}
 use compiler.backend.backend.backend_helpers.{compile_bootstrap_module_with_backend}
 use compiler.hir.hir_types.{SymbolTable, SymbolId}
-use compiler.hir.hir_lowering.items.{bootstrap_hir_function_count, bootstrap_hir_function_at}
-use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_function_at, bootstrap_mir_function_name_at, bootstrap_lower_hir_globals_to_mir_module_for_target, bootstrap_set_entry_hir_module, bootstrap_clear_entry_hir_module, bootstrap_lower_extra_hir_module_to_mir_for_target, bootstrap_function_value_names_reset, bootstrap_register_function_value_module}
+use compiler.hir.hir_lowering.items.{bootstrap_hir_function_count, bootstrap_hir_function_at, bootstrap_hir_module_count}
+use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_function_at, bootstrap_mir_function_name_at, bootstrap_mir_function_module_at, bootstrap_mir_function_return_type_tag_at, bootstrap_mir_function_param_count_at, bootstrap_mir_function_param_type_tag_at, bootstrap_mir_static_count, bootstrap_mir_static_module_at, bootstrap_mir_static_symbol_id_at, bootstrap_mir_static_name_at, bootstrap_mir_static_type_tag_at, bootstrap_mir_static_init_kind_at, bootstrap_mir_static_init_payload_at, bootstrap_lower_hir_globals_to_mir_module_for_target, bootstrap_lower_flat_hir_modules_to_mir_for_target, bootstrap_set_entry_hir_module, bootstrap_clear_entry_hir_module, bootstrap_lower_extra_hir_module_to_mir_for_target, bootstrap_function_value_names_reset, bootstrap_register_function_value_module}
 use compiler.mir_opt.{ssa_alloca_transform_blocks}
 use compiler.common.driver_core_types.{CompileResult}
 use driver_types.{CompileContext, CompileOptions}
@@ -106,6 +106,17 @@ pub fn bootstrap_entry_module_name(ctx: CompileContext) -> text:
                 return source.module_name
             i = i + 1
         return _driver_module_name_from_path(native_entry)
+    if ctx.options.bootstrap_input_count == 1 and ctx.options.bootstrap_input_0.ends_with(".spl"):
+        val option_entry = ctx.options.bootstrap_input_0
+        for source in ctx.sources:
+            if source.path == option_entry or source.path.ends_with("/" + option_entry):
+                return source.module_name
+        return _driver_module_name_from_path(option_entry)
+    for source in ctx.sources:
+        if source.path.ends_with("/app/cli/bootstrap_main.spl"):
+            return source.module_name
+    if ctx.sources.len() > 0:
+        return ctx.sources[0].module_name
     "app.cli.bootstrap_main"
 
 pub fn bootstrap_lower_to_mir_context(ctx: CompileContext) -> (CompileContext, bool):
@@ -118,6 +129,14 @@ pub fn bootstrap_lower_to_mir_context(ctx: CompileContext) -> (CompileContext, b
     # from the freshly-parsed Module.functions) to the MIR free path so it lowers
     # real bodies instead of ret-0 stubs.
     val entry_module_name = bootstrap_entry_module_name(ctx)
+    val closure_mode = (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
+    if closure_mode and bootstrap_hir_module_count() > 0:
+        if bootstrap_trace_enabled():
+            print "[driver-mir] bootstrap flat:start entry={entry_module_name} modules={bootstrap_hir_module_count()}"
+        val flat_bootstrap_mir = bootstrap_lower_flat_hir_modules_to_mir_for_target(entry_module_name, target_context)
+        next_ctx.bootstrap_entry_mir = Some(flat_bootstrap_mir)
+        next_ctx.mir_modules[entry_module_name] = flat_bootstrap_mir
+        return (next_ctx, next_ctx.errors.len() == 0)
     bootstrap_clear_entry_hir_module()
     bootstrap_function_value_names_reset()
     for hir_module in ctx.hir_modules.values():
@@ -125,6 +144,10 @@ pub fn bootstrap_lower_to_mir_context(ctx: CompileContext) -> (CompileContext, b
             bootstrap_register_function_value_module(hir_module)
     if ctx.bootstrap_entry_hir.?:
         bootstrap_set_entry_hir_module(ctx.bootstrap_entry_hir.unwrap())
+    else:
+        val mapped_entry_hir = ctx.hir_modules[entry_module_name]
+        if mapped_entry_hir != nil:
+            bootstrap_set_entry_hir_module(mapped_entry_hir)
     var bootstrap_mir = bootstrap_lower_hir_globals_to_mir_module_for_target(target_context)
     # --entry-closure builds parse+HIR-lower EVERY module reachable from the
     # entry (see SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE handling in driver.spl and
@@ -139,7 +162,6 @@ pub fn bootstrap_lower_to_mir_context(ctx: CompileContext) -> (CompileContext, b
     # too, appending to the same accumulator (bug
     # bootstrap_stage2_empty_mir_bodies_2026-07-05, cross-module closure gap,
     # stage 3: object emission).
-    val closure_mode = (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
     if closure_mode:
         for extra_hir in ctx.hir_modules.values():
             if extra_hir != nil:
@@ -287,6 +309,19 @@ fn bootstrap_emit_llvm_trailer(translator: MirToLlvm):
         translator.builder.emit("; String constants")
         translator.builder.emit(string_globals)
 
+fn bootstrap_static_llvm_type_text(type_tag: i64) -> text:
+    match type_tag:
+        case 1: "i64"
+        case 2: "i32"
+        case 3: "i16"
+        case 4: "i8"
+        case 5: "double"
+        case 6: "float"
+        case 7: "i1"
+        case 8: "void"
+        case 9: "ptr"
+        case _: ""
+
 pub fn bootstrap_emit_real_llvm_object(output: text, opt_level_i64: i64) -> CompileResult:
     """Emit LLVM for bootstrap MIR functions from the local driver module instance."""
     log_phase("aot:bootstrap_real_llvm:start")
@@ -299,17 +334,69 @@ pub fn bootstrap_emit_real_llvm_object(output: text, opt_level_i64: i64) -> Comp
     val count = bootstrap_mir_function_count()
     print "[bootstrap-real-llvm] count {count}"
     log_phase("aot:bootstrap_real_llvm:functions")
+    var signature_idx = 0
+    while signature_idx < count:
+        val signature_name = bootstrap_mir_function_name_at(signature_idx)
+        val emitted_signature_name = if signature_name == "main": "__simple_main" else: signature_name
+        val signature_ret = translator.valid_llvm_type(bootstrap_static_llvm_type_text(bootstrap_mir_function_return_type_tag_at(signature_idx)))
+        translator.remember_function_return_type(signature_name, signature_ret)
+        translator.remember_function_return_type(emitted_signature_name, signature_ret)
+        var signature_param_types: [text] = []
+        var signature_param_idx = 0
+        while signature_param_idx < bootstrap_mir_function_param_count_at(signature_idx):
+            val param_tag = bootstrap_mir_function_param_type_tag_at(signature_idx, signature_param_idx)
+            signature_param_types.push(translator.valid_llvm_type(bootstrap_static_llvm_type_text(param_tag)))
+            signature_param_idx = signature_param_idx + 1
+        translator.remember_function_param_types(signature_name, signature_param_types)
+        translator.remember_function_param_types(emitted_signature_name, signature_param_types)
+        signature_idx = signature_idx + 1
+    val static_count = bootstrap_mir_static_count()
+    var static_idx = 0
+    while static_idx < static_count:
+        val module_idx = bootstrap_mir_static_module_at(static_idx)
+        val symbol_id = bootstrap_mir_static_symbol_id_at(static_idx)
+        val static_name = bootstrap_mir_static_name_at(static_idx)
+        translator.current_bootstrap_module = module_idx
+        val g_ty = translator.valid_llvm_type(bootstrap_static_llvm_type_text(bootstrap_mir_static_type_tag_at(static_idx)))
+        val g_name = "@g_{module_idx}_{symbol_id}_{static_name}"
+        val g_key = translator.global_static_key(symbol_id)
+        translator.global_static_names[g_key] = g_name
+        translator.global_static_types[g_key] = g_ty
+        var g_init = "zeroinitializer"
+        val init_kind = bootstrap_mir_static_init_kind_at(static_idx)
+        val init_payload = bootstrap_mir_static_init_payload_at(static_idx)
+        if init_kind == 1:
+            g_init = init_payload
+        elif init_kind == 2:
+            g_init = translator.translate_const_value(MirConstValue.Str(init_payload))
+        translator.builder.emit("{g_name} = global {g_ty} {g_init}")
+        static_idx = static_idx + 1
     var idx = 0
     while idx < count:
         val name = bootstrap_mir_function_name_at(idx)
         print "[bootstrap-real-llvm] function {name}"
         val fn_ = bootstrap_mir_function_at(idx)
-        if bootstrap_trace_enabled():
-            print "[bootstrap-real-llvm] ssa-start {name}"
-        val ssa_fn = bootstrap_ssa_phi_function(fn_)
+        translator.current_bootstrap_module = bootstrap_mir_function_module_at(idx)
         if bootstrap_trace_enabled():
             print "[bootstrap-real-llvm] body-start {name}"
-        val body = MirBody.from_function(ssa_fn)
+        var body_return_ty = MirType.i64()
+        match bootstrap_mir_function_return_type_tag_at(idx):
+            case 2: body_return_ty = MirType(kind: MirTypeKind.I32)
+            case 3: body_return_ty = MirType(kind: MirTypeKind.I16)
+            case 4: body_return_ty = MirType(kind: MirTypeKind.I8)
+            case 5: body_return_ty = MirType(kind: MirTypeKind.F64)
+            case 6: body_return_ty = MirType(kind: MirTypeKind.F32)
+            case 7: body_return_ty = MirType.bool()
+            case 8: body_return_ty = MirType.unit()
+            case 9: body_return_ty = MirType.ptr(MirType.unit(), false)
+            case _: ()
+        val body = MirBody(
+            name: name,
+            blocks: fn_.blocks,
+            locals: fn_.locals,
+            arg_count: bootstrap_mir_function_param_count_at(idx),
+            return_ty: body_return_ty
+        )
         if bootstrap_trace_enabled():
             print "[bootstrap-real-llvm] translate-start {name}"
         translator.translate_function(if name == "main": "__simple_main" else: name, body)

@@ -62,7 +62,7 @@ use compiler.driver.driver_log_helpers.{log_debug, log_trace, log_info, log_warn
 use compiler.driver.driver_bootstrap.{
     bootstrap_native_opt_level, bootstrap_llvm_opt_level,
     bootstrap_compile_to_native_local, bootstrap_compile_context_to_native_local,
-    bootstrap_lower_to_mir_context, bootstrap_empty_hir_module,
+    bootstrap_lower_to_mir_context, bootstrap_entry_module_name, bootstrap_empty_hir_module,
     bootstrap_lower_hir_globals_to_mir_module_driver,
     bootstrap_function_names, bootstrap_symbol_for_name
 }
@@ -269,7 +269,9 @@ pub class CompilerDriver:
         # Phase 1: Load source files
         log_phase("compile:start")
         log_phase("phase1:load_sources:start")
-        if not self.load_sources_impl():
+        val (loaded_ctx, load_ok) = self.load_sources_impl()
+        self.ctx = loaded_ctx
+        if not load_ok:
             log_error("phase 1 FAILED")
             return CompileResult.ParseError(self.ctx.errors)
         if self.ctx.options.mode == CompileMode.Aot:
@@ -286,7 +288,9 @@ pub class CompilerDriver:
         # Phase 2: Parse all sources
         log_phase("phase2:parse:start")
         log_debug("phase 2: parsing...")
-        if not self.parse_all_impl():
+        val (parsed_ctx, parse_ok) = self.parse_all_impl()
+        self.ctx = parsed_ctx
+        if not parse_ok:
             log_error("phase 2 FAILED")
             return CompileResult.ParseError(self.ctx.errors)
         log_debug("phase 2 done")
@@ -300,7 +304,8 @@ pub class CompilerDriver:
         # Phase 3: Lower to HIR, resolve methods, and type check (combined loop)
         log_phase("phase3:hir_typecheck:start")
         log_trace("BEFORE phase 3")
-        val analyze_ok = self.lower_and_check_impl()
+        val (analyzed_ctx, analyze_ok) = self.lower_and_check_impl()
+        self.ctx = analyzed_ctx
         log_trace("AFTER phase 3")
         if not analyze_ok:
             log_error("phase 3 FAILED")
@@ -417,7 +422,7 @@ pub class CompilerDriver:
                     return false
         true
 
-    me load_sources_impl() -> bool:
+    me load_sources_impl() -> (CompileContext, bool):
         # Build sources list locally to avoid chained method call issue
         # (self.ctx.sources.push() doesn't persist — interpreter limitation)
         var all_sources: [SourceFile] = []
@@ -442,6 +447,10 @@ pub class CompilerDriver:
                 driver_inputs = driver_inputs + [self.ctx.options.bootstrap_input_5]
         else:
             driver_inputs = self.ctx.options.input_files
+        if driver_inputs.len() == 0:
+            val native_entry_input = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
+            if native_entry_input != "":
+                driver_inputs = [native_entry_input]
         val input_len = driver_inputs.len()
         val source_trace = (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1" or (rt_env_get("SIMPLE_INTERP_TRACE") ?? "") == "1"
         if source_trace:
@@ -457,7 +466,7 @@ pub class CompilerDriver:
             has_project_source = false
             if source_trace:
                 print "[load_sources] direct modules loaded"
-            return self.ctx.errors.len() == 0
+            return (self.ctx, self.ctx.errors.len() == 0)
         while i < input_len:
             val input_path = driver_inputs[i]
             val loaded = _driver_collect_sources(input_path)
@@ -596,26 +605,28 @@ pub class CompilerDriver:
         val module_collision = _driver_module_name_collision(all_sources)
         if module_collision != "":
             self.ctx.add_error(module_collision)
-            return false
+            return (self.ctx, false)
 
         # Single assignment avoids chained push issue
-        self.ctx.sources = all_sources
+        var loaded_ctx: CompileContext = self.ctx
+        loaded_ctx.sources = all_sources
         if source_trace:
             print "[load_sources] total {all_sources.len()}"
 
-        self.ctx.errors.len() == 0
+        (loaded_ctx, loaded_ctx.errors.len() == 0)
 
     # --------------------------------------------------------------------------
     # Phase 2: Parse
     # --------------------------------------------------------------------------
 
-    me parse_all_impl() -> bool:
+    me parse_all_impl() -> (CompileContext, bool):
         val log = self.ctx.logger
         val sources = self.ctx.sources
         log_debug("parsing sources")
         val native_entry_closure = (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
         val native_entry = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
         if native_entry_closure or native_entry != "":
+            var entry_modules: Dict<text, Module> = self.ctx.modules
             var entry_sources: [SourceFile] = []
             var entry_idx = 0
             while entry_idx < sources.len():
@@ -631,7 +642,7 @@ pub class CompilerDriver:
                     if native_entry != "" and not native_entry_closure:
                         if not requested_entry_match:
                             self.ctx.errors.push("native-build entry mismatch: requested entry '{native_entry}' but resolver also selected '{source.path}' (module {source.module_name}) — refusing silent substitution")
-                            return false
+                            return (self.ctx, false)
                     entry_sources = entry_sources.push(source)
                 entry_idx = entry_idx + 1
             val unique_entry_sources = _driver_unique_physical_sources(entry_sources)
@@ -656,7 +667,7 @@ pub class CompilerDriver:
                 # another module are stale. Fail phase 2 on any parse error.
                 if par_had_error_get():
                     self.ctx.errors.push("parse error in {source.path} (see [parser_error] output above)")
-                    return false
+                    return (self.ctx, false)
                 if (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1" or (rt_env_get("SIMPLE_INTERP_TRACE") ?? "") == "1":
                     dtrace("[BOOTSTRAP-PHASE] phase2:parse:entry:done {source.path}")
                 parsed_entry_paths = parsed_entry_paths.push(physical_key)
@@ -666,25 +677,28 @@ pub class CompilerDriver:
                 val parsed_idx = _driver_text_list_index(parsed_entry_paths, physical_key)
                 if parsed_idx < 0:
                     self.ctx.errors.push("internal entry-closure parse cache miss for {source.path}")
-                    return false
-                self.ctx.modules[source.module_name] = parsed_entry_modules[parsed_idx]
-            self.ctx.sources = entry_sources
+                    return (self.ctx, false)
+                entry_modules[source.module_name] = parsed_entry_modules[parsed_idx]
+            var entry_ctx: CompileContext = self.ctx
+            entry_ctx.modules = entry_modules
+            entry_ctx.sources = entry_sources
             if entry_sources.len() == 0:
-                self.ctx.errors.push("native entry source not found: {native_entry}")
-            return self.ctx.errors.len() == 0
+                entry_ctx.errors.push("native entry source not found: {native_entry}")
+            return (entry_ctx, entry_ctx.errors.len() == 0)
         if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (rt_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1":
+            var bootstrap_modules: Dict<text, Module> = self.ctx.modules
             var boot_idx = 0
             while boot_idx < sources.len():
                 val source = sources[boot_idx]
                 if _driver_is_bootstrap_entry_source(source.path, source.module_name):
                     val entry_module = parse_full_frontend(source.content, source.path, source.module_name, self.ctx.logger)
-                    self.ctx.modules[source.module_name] = entry_module
+                    bootstrap_modules[source.module_name] = entry_module
                 boot_idx = boot_idx + 1
             boot_idx = 0
             while boot_idx < sources.len():
                 val source = sources[boot_idx]
                 if not _driver_is_bootstrap_entry_source(source.path, source.module_name):
-                    self.ctx.modules[source.module_name] = parser_module_new(
+                    bootstrap_modules[source.module_name] = parser_module_new(
                         name: source.module_name,
                         imports: [],
                         exports: [],
@@ -708,17 +722,22 @@ pub class CompilerDriver:
                         mock_decls: []
                     )
                 boot_idx = boot_idx + 1
-            return self.ctx.errors.len() == 0
+            var bootstrap_parse_ctx: CompileContext = self.ctx
+            bootstrap_parse_ctx.modules = bootstrap_modules
+            return (bootstrap_parse_ctx, bootstrap_parse_ctx.errors.len() == 0)
 
+        var parsed_modules: Dict<text, Module> = self.ctx.modules
         var src_idx = 0
         while src_idx < sources.len():
             val source = sources[src_idx]
             val module = parse_full_frontend(source.content, source.path, source.module_name, self.ctx.logger)
-            self.ctx.modules[source.module_name] = module
+            parsed_modules[source.module_name] = module
             src_idx = src_idx + 1
 
         log_debug("parsing done")
-        self.ctx.errors.len() == 0
+        var parsed_all_ctx: CompileContext = self.ctx
+        parsed_all_ctx.modules = parsed_modules
+        (parsed_all_ctx, parsed_all_ctx.errors.len() == 0)
 
     fn parse_source(source: SourceFile) -> Module:
         print "[parse_source] start {source.path} module {source.module_name} len {source.content.len()}"
@@ -734,7 +753,7 @@ pub class CompilerDriver:
     # phases in a single loop, avoiding redundant iterations and improving
     # performance on large codebases.
 
-    me lower_and_check_impl() -> bool:
+    me lower_and_check_impl() -> (CompileContext, bool):
         val log = self.ctx.logger
 
         # Build module_name -> source_path map so each module gets the right
@@ -757,6 +776,8 @@ pub class CompilerDriver:
         var shared_lowered_traits: Dict<text, HirTrait> = {}
         if self.ctx.sources.len() <= 0:
             dtrace("[DRV] lac-branch=modules-loop (sources<=0)")
+            var bootstrap_hir_modules: Dict<text, HirModule> = {}
+            val bootstrap_entry_name = bootstrap_entry_module_name(self.ctx)
             for module in self.ctx.modules:
                 val name = module.name
                 log_trace("processing module")
@@ -775,14 +796,20 @@ pub class CompilerDriver:
                     self.ctx.add_error("Method resolution error in {name}: {err.message}")
                     err_idx = err_idx + 1
                 val folded_module = run_const_fold_pass(resolved_module)
-                self.ctx.hir_modules[name] = folded_module
+                bootstrap_hir_modules[name] = folded_module
             log_debug("running effect inference pass...")
-            val (updated_hir_boot, effect_warnings_boot) = run_effect_pass(self.ctx.hir_modules)
-            self.ctx.hir_modules = updated_hir_boot
+            val (updated_hir_boot, effect_warnings_boot) = run_effect_pass(bootstrap_hir_modules)
+            var bootstrap_ctx: CompileContext = self.ctx
+            bootstrap_ctx.hir_modules = updated_hir_boot
+            val bootstrap_entry_module = updated_hir_boot[bootstrap_entry_name]
+            if bootstrap_entry_module != nil:
+                bootstrap_ctx.bootstrap_entry_hir = Some(bootstrap_entry_module)
             log_debug("effect inference done")
             log_debug("HIR lowering complete")
-            _driver_validate_value_struct_layouts(self.ctx)
-            return self.ctx.errors.len() == 0
+            _driver_validate_value_struct_layouts(bootstrap_ctx)
+            return (bootstrap_ctx, bootstrap_ctx.errors.len() == 0)
+        var phase_hir_modules: Dict<text, HirModule> = self.ctx.hir_modules
+        var phase_entry_hir: HirModule? = self.ctx.bootstrap_entry_hir
         var source_idx = 0
         while source_idx < self.ctx.sources.len():
             val src = self.ctx.sources[source_idx]
@@ -809,7 +836,7 @@ pub class CompilerDriver:
             # stage4 lowering regression ever needs to be bypassed in the field.
             val unstub_hir = (rt_env_get("SIMPLE_STUB_HIR") ?? "") != "1"
             val native_entry_closure_hir = (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
-            val is_requested_bootstrap_entry = _driver_is_bootstrap_entry_source(src.path, name)
+            val is_requested_bootstrap_entry = _driver_is_bootstrap_entry_source(src.path, name) or name == bootstrap_entry_module_name(self.ctx)
             val is_bootstrap_entry = native_entry_closure_hir or is_requested_bootstrap_entry
             dtrace("[DRV] lac-loop name={name} content_len={src.content.len()}")
             val hir_module = if is_bootstrap_entry:
@@ -868,10 +895,9 @@ pub class CompilerDriver:
             # instance) can still resolve cross-module trait default methods.
             shared_lowered_traits = lowering.lowered_traits
 
-            # Store final module directly (avoids copy-modify-reassign bug in compiled mode)
+            phase_hir_modules[name] = hir_module
             if is_requested_bootstrap_entry:
-                self.ctx.bootstrap_entry_hir = Some(hir_module)
-            self.ctx.hir_modules[name] = hir_module
+                phase_entry_hir = Some(hir_module)
             log_phase("phase3:hir:file:done {src.path} module={name} funcs={hir_module.functions.len()}")
             log_trace("stored HIR module")
             source_idx = source_idx + 1
@@ -888,7 +914,10 @@ pub class CompilerDriver:
 
         log_debug("HIR lowering complete")
 
-        _driver_validate_value_struct_layouts(self.ctx)
+        var phase_ctx: CompileContext = self.ctx
+        phase_ctx.hir_modules = phase_hir_modules
+        phase_ctx.bootstrap_entry_hir = phase_entry_hir
+        _driver_validate_value_struct_layouts(phase_ctx)
 
         # Phase 3 (opt-in, warn-only): HM type inference + visibility diagnostics.
         # The 30.types inference engine (HmInferContext.infer_module) and the
@@ -904,14 +933,14 @@ pub class CompilerDriver:
         # once the stage4 wall permits a verified non-crashing build to measure
         # the real blast — see doc/03_plan/compiler/type_system/typecheck_burndown.md
         if (rt_env_get("SIMPLE_TYPECHECK_WARN") ?? "") == "1":
-            val tc_warnings = run_typecheck_warn_pass(self.ctx.hir_modules)
+            val tc_warnings = run_typecheck_warn_pass(phase_hir_modules)
             log_warn("typecheck warn-only pass: {tc_warnings.len()} diagnostic(s)")
             var tcw_idx = 0
             while tcw_idx < tc_warnings.len():
                 log_warn(tc_warnings[tcw_idx])
                 tcw_idx = tcw_idx + 1
 
-        self.ctx.errors.len() == 0
+        (phase_ctx, phase_ctx.errors.len() == 0)
 
     # --------------------------------------------------------------------------
     # Phase 3a: Lower to HIR (standalone, kept for compatibility)
@@ -1086,38 +1115,45 @@ pub class CompilerDriver:
             log_debug("low-memory: evicting HIR modules")
             self.ctx.evict_hir()
 
-        # Borrow checking
-        log_phase("aot:borrow_check:start")
-        if not self.borrow_check():
-            for err in self.ctx.errors:
-                log_error("Borrow error: {err}")
-            return CompileResult.BorrowError(self.ctx.errors)
-        log_phase("aot:borrow_check:done")
-
-        # Process async functions (generate state machines for await/yield)
-        log_phase("aot:process_async:start")
-        val async_state_machines = self.process_async()
-        log_phase("aot:process_async:done")
-
-        # Optimize MIR (use optimization level from options)
-        log_phase("aot:optimize_mir:start")
-        val skip_mir_opt = rt_env_get("SIMPLE_BOOTSTRAP_SKIP_MIR_OPT") ?? ""
-        if skip_mir_opt == "1":
-            log_phase("aot:optimize_mir:skipped")
+        # Bootstrap closure MIR lives in the flat accumulators consumed by the
+        # bootstrap emitter; the wide ctx.mir_modules transport is intentionally
+        # bypassed and cannot feed the ordinary mutation passes below.
+        val bootstrap_flat_aot = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (rt_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1"
+        if bootstrap_flat_aot:
+            log_phase("aot:flat_mir_passes:skipped")
         else:
-            val opt_config = self.get_optimization_config()
-            self.optimize_mir(opt_config)
-        log_phase("aot:optimize_mir:done")
+            # Borrow checking
+            log_phase("aot:borrow_check:start")
+            if not self.borrow_check():
+                for err in self.ctx.errors:
+                    log_error("Borrow error: {err}")
+                return CompileResult.BorrowError(self.ctx.errors)
+            log_phase("aot:borrow_check:done")
 
-        # AOP weaving (after optimization, before codegen)
-        log_phase("aot:weave_aop:start")
-        self.weave_aop()
-        log_phase("aot:weave_aop:done")
+            # Process async functions (generate state machines for await/yield)
+            log_phase("aot:process_async:start")
+            val async_state_machines = self.process_async()
+            log_phase("aot:process_async:done")
 
-        # Debug trace injection (after AOP, before codegen)
-        log_phase("aot:debug_trace:start")
-        self.apply_debug_trace()
-        log_phase("aot:debug_trace:done")
+            # Optimize MIR (use optimization level from options)
+            log_phase("aot:optimize_mir:start")
+            val skip_mir_opt = rt_env_get("SIMPLE_BOOTSTRAP_SKIP_MIR_OPT") ?? ""
+            if skip_mir_opt == "1":
+                log_phase("aot:optimize_mir:skipped")
+            else:
+                val opt_config = self.get_optimization_config()
+                self.optimize_mir(opt_config)
+            log_phase("aot:optimize_mir:done")
+
+            # AOP weaving (after optimization, before codegen)
+            log_phase("aot:weave_aop:start")
+            self.weave_aop()
+            log_phase("aot:weave_aop:done")
+
+            # Debug trace injection (after AOP, before codegen)
+            log_phase("aot:debug_trace:start")
+            self.apply_debug_trace()
+            log_phase("aot:debug_trace:done")
 
         # Determine output file
         log_phase("aot:output:start")

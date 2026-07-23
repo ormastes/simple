@@ -1,0 +1,33 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SIMPLE_BINARY="${SIMPLE_BINARY:-bin/simple}"
+WORK_DIR="${WORK_DIR:-build/native_probe/bootstrap_nonentry_module_global_check}"
+BINARY="$WORK_DIR/probe"
+LOG="$WORK_DIR/native-build.log"
+
+test -x "$SIMPLE_BINARY"
+mkdir -p "$WORK_DIR"
+rm -f "$BINARY"
+
+env SIMPLE_BOOTSTRAP=1 SIMPLE_BOOTSTRAP_REAL_LLVM=1 SIMPLE_BOOTSTRAP_DEBUG=1 \
+    SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB=src \
+    "$SIMPLE_BINARY" native-build \
+    test/fixtures/bootstrap_nonentry_module_global/main.spl \
+    --backend llvm --output "$BINARY" >"$LOG" 2>&1
+
+grep -F "[driver-mir] bootstrap flat:start" "$LOG" >/dev/null
+grep -F "[bootstrap-real-llvm] function __module_init_" "$LOG" \
+    | grep -F "bootstrap_nonentry_module_global_provider" >/dev/null
+test -x "$BINARY"
+
+set +e
+"$BINARY" >>"$LOG" 2>&1
+actual="$?"
+set -e
+test "$actual" -eq 42
+
+echo "bootstrap-nonentry-module-global: pass"

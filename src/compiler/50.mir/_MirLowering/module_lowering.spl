@@ -557,7 +557,7 @@ impl MirLowering:
                     if bootstrap_trace:
                         print "[mir-lower] function:start {fn_.name}"
                     val mir_fn = self.lower_function(fn_)
-                    bootstrap_mir_functions_add(fn_.name, mir_fn)
+                    bootstrap_mir_functions_add(fn_.name, mir_fn, 0)
                     var bldr = self.builder
                     var bldr_module = bldr.module
                     var functions = bldr_module.functions
@@ -873,6 +873,9 @@ impl MirLowering:
                 type_: static_type,
                 value: const_value
             ))
+        val sym_id = const_.symbol.id
+        if sym_id >= 0:
+            self.global_symbol_ids[sym_id] = true
         var bldr = self.builder
         var module_ = bldr.module
         var statics = module_.statics
@@ -888,11 +891,14 @@ impl MirLowering:
         self.builder = bldr
 
     me lower_runtime_module_initializers(module: HirModule, consts: [HirConst]):
+        self.lower_runtime_module_initializers_named(module.name, consts)
+
+    me lower_runtime_module_initializers_named(module_name_raw: text, consts: [HirConst], bootstrap_module_index: i64 = -1):
         val dynamic = runtime_module_initializers_in_declaration_order(consts)
         if dynamic.len() == 0:
             return
 
-        val module_name = module.name.replace(".", "_").replace("/", "_").replace("-", "_")
+        val module_name = module_name_raw.replace(".", "_").replace("/", "_").replace("-", "_")
         val init_name = "__module_init_{module_name}_dynamic"
         var symbols = self.symbols
         val init_symbol = symbols.define(init_name, SymbolKind.Function, nil, Span.empty(), Visibility.Private, false, nil)
@@ -939,6 +945,8 @@ impl MirLowering:
         result_module.functions = functions
         finish.module = result_module
         self.builder = finish
+        if bootstrap_module_index >= 0:
+            bootstrap_mir_functions_add(init_function.name, init_function, bootstrap_module_index)
 
     me lower_struct_type(struct_def: HirStruct):
         """Lower a HIR struct definition into MIR type metadata."""

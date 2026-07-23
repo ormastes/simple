@@ -1028,6 +1028,17 @@ pub unsafe extern "C" fn rt_cranelift_icmp(ctx: i64, cond: i64, a: i64, b: i64) 
 
     let cc = int_cc_from_code(cond);
     let result = builder.ins().icmp(cc, a_val, b_val);
+    // Widen to i64: the pure-Simple direct-cranelift adapter treats Bool as
+    // uniformly i64 (8-byte slots, i64 slot loads). Cranelift's icmp/fcmp
+    // yields a raw i8; storing that to a local's slot emits a 1-byte store,
+    // and the i64 reload then reads 7 bytes of stack garbage - a loop
+    // condition that never turns false (AOT while-loop runtime hang).
+    let result = if builder.func.dfg.value_type(result) != types::I64 {
+        builder.ins().uextend(types::I64, result)
+    } else {
+        result
+    };
+
     let id = ab.next_value_id;
     ab.next_value_id += 1;
     ab.values.insert(id, result);
@@ -1045,6 +1056,17 @@ pub unsafe extern "C" fn rt_cranelift_fcmp(ctx: i64, cond: i64, a: i64, b: i64) 
 
     let cc = float_cc_from_code(cond);
     let result = builder.ins().fcmp(cc, a_val, b_val);
+    // Widen to i64: the pure-Simple direct-cranelift adapter treats Bool as
+    // uniformly i64 (8-byte slots, i64 slot loads). Cranelift's icmp/fcmp
+    // yields a raw i8; storing that to a local's slot emits a 1-byte store,
+    // and the i64 reload then reads 7 bytes of stack garbage - a loop
+    // condition that never turns false (AOT while-loop runtime hang).
+    let result = if builder.func.dfg.value_type(result) != types::I64 {
+        builder.ins().uextend(types::I64, result)
+    } else {
+        result
+    };
+
     let id = ab.next_value_id;
     ab.next_value_id += 1;
     ab.values.insert(id, result);

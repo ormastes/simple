@@ -117,6 +117,11 @@ fn llvm_module_is_native_entry(module_name: text) -> bool:
 
 impl MirTextCodegen for MirToLlvm:
 
+    me global_static_key(symbol_id: i64) -> text:
+        if self.current_bootstrap_module >= 0:
+            return "{self.current_bootstrap_module}:{symbol_id}"
+        "{symbol_id}"
+
     # === Required: top-level translation ===
 
     me translate_module(module: MirModule) -> text:
@@ -160,8 +165,9 @@ impl MirTextCodegen for MirToLlvm:
             for static_ in module.statics.values():
                 val g_ty = self.valid_llvm_type(self.llvm_type_text(static_.type_))
                 val g_name = "@g_{static_.name}"
-                self.global_static_names[static_.symbol.id] = g_name
-                self.global_static_types[static_.symbol.id] = g_ty
+                val g_key = self.global_static_key(static_.symbol.id)
+                self.global_static_names[g_key] = g_name
+                self.global_static_types[g_key] = g_ty
                 var g_init = "zeroinitializer"
                 if static_.init.?:
                     val init_const: MirConstant = static_.init.unwrap()
@@ -1550,8 +1556,9 @@ impl MirTextCodegen for MirToLlvm:
     me translate_load_global(dest: LocalId, symbol: SymbolId):
         val dest_id = self.local_id_value(dest)
         val dest_name = self.get_local(dest_id)
-        val g_name = self.global_static_names.get(symbol.id) ?? "@g_undeclared_{symbol.id}"
-        val g_ty = self.global_static_types.get(symbol.id) ?? self.native_int_type
+        val g_key = self.global_static_key(symbol.id)
+        val g_name = self.global_static_names.get(g_key) ?? "@g_undeclared_{symbol.id}"
+        val g_ty = self.global_static_types.get(g_key) ?? self.native_int_type
         self.local_types[dest_id] = g_ty
         self.value_types[dest_name] = g_ty
         if g_ty == "ptr":
@@ -1559,8 +1566,9 @@ impl MirTextCodegen for MirToLlvm:
         self.builder.emit_load(dest_name, g_ty, g_name)
 
     me translate_store_global(symbol: SymbolId, value: MirOperand):
-        val g_name = self.global_static_names.get(symbol.id) ?? "@g_undeclared_{symbol.id}"
-        val g_ty = self.global_static_types.get(symbol.id) ?? self.native_int_type
+        val g_key = self.global_static_key(symbol.id)
+        val g_name = self.global_static_names.get(g_key) ?? "@g_undeclared_{symbol.id}"
+        val g_ty = self.global_static_types.get(g_key) ?? self.native_int_type
         val raw_value_val = self.translate_operand(value)
         val value_val = self.value_as_type(raw_value_val, self.get_operand_type(value), g_ty)
         self.builder.emit_store(g_ty, value_val, g_name)

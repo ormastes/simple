@@ -840,7 +840,38 @@ impl HirLowering:
         # hir_lowering modules — `(hir_*_env_get("X") ?? "") == "1"` evaluates
         # false on stage4 even when X=1 — while UNGATED eprint works fine.
         # Probe builds must use ungated eprint here.
-        self.lower_module(module)
+        val bootstrap_mode = (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+        val bootstrap_closure = bootstrap_mode and (hir_module_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
+        if bootstrap_mode and (not bootstrap_closure or hir_module_is_bootstrap_entry(module.name)):
+            bootstrap_hir_modules_reset()
+        val parser_constants = module.constants.values()
+        var lowered_module = self.lower_module(module)
+        var flat_constants: [HirConst] = []
+        if bootstrap_mode and parser_constants.len() > 0:
+            var recovered_constants: Dict<SymbolId, HirConst> = {}
+            var const_idx = 0
+            while const_idx < parser_constants.len():
+                val hir_const = self.lower_hir_const_decl(parser_constants[const_idx])
+                recovered_constants[SymbolId(id: const_idx)] = hir_const
+                flat_constants = flat_constants.push(hir_const)
+                const_idx = const_idx + 1
+            lowered_module.constants = recovered_constants
+        elif lowered_module.constants.len() == 0 and parser_constants.len() > 0:
+            var recovered_constants: Dict<SymbolId, HirConst> = {}
+            var const_idx = 0
+            while const_idx < parser_constants.len():
+                val hir_const = self.lower_hir_const_decl(parser_constants[const_idx])
+                recovered_constants[SymbolId(id: const_idx)] = hir_const
+                const_idx = const_idx + 1
+            lowered_module.constants = recovered_constants
+        if bootstrap_mode:
+            var flat_functions: [HirFunction] = []
+            var flat_fn_idx = 0
+            while flat_fn_idx < bootstrap_hir_function_count():
+                flat_functions = flat_functions.push(bootstrap_hir_function_at(flat_fn_idx))
+                flat_fn_idx = flat_fn_idx + 1
+            bootstrap_hir_modules_add(module.name, self.symbols.symbols.values(), flat_functions, flat_constants)
+        lowered_module
 
     me lower_module(module: Module) -> HirModule:
         # Probe MUST be eprint AND ungated (Traps A/C/D, bug doc iters 13-17).
@@ -1281,14 +1312,12 @@ impl HirLowering:
             functions[sym] = self.lowered_impl_functions[sym]
             lower_idx = lower_idx + 1
 
-        val lower_module_constants = module.constants
-        val lower_const_keys = lower_module_constants.keys()
+        val lower_const_values = module.constants.values()
         lower_idx = 0
-        while lower_idx < lower_const_keys.len():
-            val name = lower_const_keys[lower_idx]
-            val const_: Const = lower_module_constants[name]
-            val hir_const = self.lower_const(const_)
-            constants[hir_const.symbol] = hir_const
+        while lower_idx < lower_const_values.len():
+            val const_: Const = lower_const_values[lower_idx]
+            val hir_const = self.lower_hir_const_decl(const_)
+            constants[SymbolId(id: lower_idx)] = hir_const
             lower_idx = lower_idx + 1
 
         # Lower static assertions
