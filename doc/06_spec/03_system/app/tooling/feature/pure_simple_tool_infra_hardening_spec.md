@@ -105,7 +105,9 @@ zero-executed, and stdout-forged suites. “Run the fresh lint sanity” checks
 one clean file and one `STUB003` denial. “Run the fresh duplicate checker
 sanity” uses an above-threshold clean fixture and requires clean JSON plus the
 deterministic one-group/two-occurrence/
-ten-line clone result. Only all three markers plus the aggregate marker pass;
+ten-line clone result. It also rejects invalid config-file `mode` and
+`output-format` values, while proving explicit valid CLI mode/JSON overrides
+take precedence through their output. Only all three markers plus the aggregate marker pass;
 raw-source, seed, wrapper, stale-binary, and fallback paths are rejected.
 
 ## Measure warm tooling budgets

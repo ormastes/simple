@@ -40,6 +40,7 @@ Modes:
 
 `simple duplicate-check` supports:
 - `--mode semantic`
+- `--mode semantic-llm`
 - `--mode token`
 - `--mode cosine`
 
@@ -129,6 +130,12 @@ duplicate-check:
   min-tokens: 30
   similarity-threshold: 0.85
 ```
+
+`mode` accepts `semantic`, `semantic-llm`, `token`, or `cosine`;
+`output-format` accepts `text` or `json`. The CLI applies explicit flags after
+loading this file, then validates the effective values. An invalid value that
+is not replaced by a valid CLI override is a configuration error and exits `2`
+instead of silently selecting a different analysis or output mode.
 
 ---
 
