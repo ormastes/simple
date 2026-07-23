@@ -1931,18 +1931,21 @@ impl<'a> MirLowerer<'a> {
             });
         })?;
 
-        // Create blocks
-        let (header_id, body_id, exit_id) = self.with_func(|func, current_block| {
+        // Create blocks (separate increment block for correct continue behavior)
+        let (header_id, body_id, increment_id, exit_id) = self.with_func(|func, current_block| {
             let header_id = func.new_block();
             let body_id = func.new_block();
+            let increment_id = func.new_block();
             let exit_id = func.new_block();
             let block = func.block_mut(current_block).unwrap();
             block.terminator = Terminator::Jump(header_id);
-            (header_id, body_id, exit_id)
+            (header_id, body_id, increment_id, exit_id)
         })?;
 
+        // continue must jump to increment (not header) so the counter advances;
+        // jumping to the header re-tests the SAME counter value = infinite loop.
         self.push_loop(LoopContext {
-            continue_target: header_id,
+            continue_target: increment_id,
             break_target: exit_id,
         })?;
 
@@ -1984,7 +1987,7 @@ impl<'a> MirLowerer<'a> {
             };
         })?;
 
-        // Body: execute body, then increment
+        // Body: execute body, then fall through to the increment block
         self.set_current_block(body_id)?;
 
         // Execute body statements
@@ -1993,7 +1996,11 @@ impl<'a> MirLowerer<'a> {
             self.lower_stmt(stmt, contract)?;
         }
 
-        // Increment loop variable
+        // Body falls through to increment block
+        self.finalize_block_jump(increment_id)?;
+
+        // Increment block: increment loop variable, then jump back to header
+        self.set_current_block(increment_id)?;
         self.with_func(|func, current_block| {
             let addr = func.new_vreg();
             let current_val = func.new_vreg();

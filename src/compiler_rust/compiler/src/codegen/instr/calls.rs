@@ -3357,10 +3357,42 @@ pub fn compile_call<M: Module>(
 
         let arg_vals: Vec<_> = args.iter().map(|a| get_vreg_or_default(ctx, builder, a)).collect();
         let arg_vals = reinterpret_float_bit_args(ctx, builder, args, arg_vals);
+        // Single source of truth for the callee arity: consult fn_arities ONCE,
+        // keyed by the SAME sanitized resolved name used for func_ids lookup /
+        // declare_function below. The receiver-strip decision and the
+        // synthesized import signature must agree on this key; independent
+        // lookups here can drift and silently truncate/pad call arguments.
+        let callee_arity: Option<usize> = ctx.fn_arities.get(resolved_name.as_ref()).copied();
+        if std::env::var("SIMPLE_STRICT_VREG").is_ok() {
+            // Mis-key detector: if the arity registry answers differently under
+            // the pre-resolution (ladder) spelling than under the resolved key,
+            // arities were registered under a different key than the one symbol
+            // resolution produced — the silent truncate/pad bug class.
+            let ladder_key: std::borrow::Cow<'_, str> = if func_name.contains('.') {
+                std::borrow::Cow::Owned(func_name.replace('.', "_dot_"))
+            } else {
+                std::borrow::Cow::Borrowed(func_name)
+            };
+            if ladder_key.as_ref() != resolved_name.as_ref() {
+                if let Some(&ladder_arity) = ctx.fn_arities.get(ladder_key.as_ref()) {
+                    if callee_arity != Some(ladder_arity) {
+                        eprintln!(
+                            "[strict-vreg] fn_arities key drift for call '{}': resolved key '{}' -> {:?}, ladder key '{}' -> {}",
+                            func_name, resolved_name, callee_arity, ladder_key, ladder_arity
+                        );
+                        debug_assert!(
+                            false,
+                            "fn_arities key drift for call '{}' (resolved '{}' vs ladder '{}')",
+                            func_name, resolved_name, ladder_key
+                        );
+                    }
+                }
+            }
+        }
         // Strip spurious nil receiver from module-qualified free function calls.
         // HIR→MIR lowers `mod.func(args)` as [nil_receiver, args...]; when
         // fn_arities proves the callee expects fewer params, drop the leading nil.
-        let arg_vals = if let Some(&arity) = ctx.fn_arities.get(resolved_name.as_ref()) {
+        let arg_vals = if let Some(arity) = callee_arity {
             if arg_vals.len() > arity && arg_vals.len() == arity + 1 {
                 arg_vals[1..].to_vec()
             } else {
@@ -3372,10 +3404,29 @@ pub fn compile_call<M: Module>(
         if !has_resolved_name {
             if let Some((type_name, "new")) = func_name.rsplit_once('.') {
                 if arg_vals.len() == 1 && type_name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
-                    if let Some(d) = dest {
-                        ctx.vreg_values.insert(*d, arg_vals[0]);
+                    // Historically this call was silently ELIDED (dest = arg0), so
+                    // the constructor body never executed — passing a raw scalar
+                    // where the callee expects a struct (the SymbolId segfault
+                    // family). If the callee symbol exists via any legitimate
+                    // path, fall through and emit the real call; otherwise fail
+                    // loudly instead of miscompiling.
+                    let symbol_known = ctx.func_ids.contains_key(resolved_name.as_ref())
+                        || callee_arity.is_some()
+                        || matches!(
+                            ctx.module.get_name(resolved_name.as_ref()),
+                            Some(cranelift_module::FuncOrDataId::Func(_))
+                        );
+                    if !symbol_known {
+                        return Err(format!(
+                            "unresolved constructor call '{}' ({} arg): no function symbol '{}' \
+                             in use/import maps, declared functions, or arity registry; \
+                             refusing to silently elide the call. Constructor calls should \
+                             lower to StructInit before codegen.",
+                            func_name,
+                            arg_vals.len(),
+                            resolved_name
+                        ));
                     }
-                    return Ok(());
                 }
             }
         }
@@ -3393,11 +3444,9 @@ pub fn compile_call<M: Module>(
             }
             let call_conv = crate::codegen::shared::platform_call_conv();
             let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
-            let param_count = ctx
-                .fn_arities
-                .get(resolved_name.as_ref())
-                .copied()
-                .unwrap_or(arg_vals.len());
+            // Same single-source-of-truth arity as the receiver-strip above:
+            // never re-key this lookup independently of `callee_arity`.
+            let param_count = callee_arity.unwrap_or(arg_vals.len());
             for _ in 0..param_count {
                 sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
             }

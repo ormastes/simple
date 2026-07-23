@@ -22,7 +22,6 @@ use compiler.mir.mir_call_ownership.{mir_runtime_owned_call_name}
 use std.sffi.codegen.*
 
 extern fn rt_file_read_bytes(path: text) -> [u8]
-extern fn rt_env_get(key: text) -> text
 
 fn cranelift_file_read_bytes(path: text) -> [u8]:
     rt_file_read_bytes(path)
@@ -233,14 +232,25 @@ fn mir_type_to_cl(ty: MirType) -> i64:
 # Signature Building
 # ============================================================================
 
+# Sub-64 int types widen to I64 in signatures: the lane is uniformly i64
+# (loads, consts, cmp results all produce I64), so a narrow declared
+# param/return width can never be satisfied by a produced value
+# (probe_enum6: `return v21: result 0 has type i64, must match function
+# signature of i16`).
+fn sig_type_to_cl(ty: MirType) -> i64:
+    val cl = mir_type_to_cl(ty)
+    if cl == CL_TYPE_I8 or cl == CL_TYPE_I16 or cl == CL_TYPE_I32:
+        return CL_TYPE_I64
+    return cl
+
 fn build_signature(sig: MirSignature, is_main: bool) -> i64:
     val cl_sig = cranelift_new_signature(CL_CC_PLATFORM)
     for param in sig.params:
-        cranelift_sig_add_param(cl_sig, mir_type_to_cl(param))
+        cranelift_sig_add_param(cl_sig, sig_type_to_cl(param))
     if is_main:
         cranelift_sig_set_return(cl_sig, CL_TYPE_I64)
     elif sig.return_type.kind != MirTypeKind.Unit:
-        cranelift_sig_set_return(cl_sig, mir_type_to_cl(sig.return_type))
+        cranelift_sig_set_return(cl_sig, sig_type_to_cl(sig.return_type))
     cl_sig
 
 # Split supported/value pair instead of one `-> i64?` accessor: Option
@@ -336,19 +346,23 @@ fn compile_function(cl_module: i64, func: MirFunction, func_handles: Dict<text, 
 
     # Allocate stack slots for all locals
     for local in func.locals:
-        if not local.?:
-            continue
+        # (vestigial local.? gate removed: `.?` on a loop-bound plain
+        # struct is FALSE on the stage4 lane and skipped EVERY local.)
         # 8-byte slot floor: Bool lowers to i64 in this backend (see
         # mir_type_to_cl), so a 1-byte Bool slot would be clobber-overflowed
         # by i64 stores. Widening is safe (stack waste only).
-        var size = if type_is_runtime_handle(local.type_): 8 else: local.type_.size_bytes()
-        var align = if type_is_runtime_handle(local.type_): 8 else: local.type_.alignment()
-        if size > 0 and size < 8:
-            size = 8
-        if align > 0 and align < 8:
-            align = 8
+        # Kind-based sizing, no method calls: `local.type_.size_bytes()` (a
+        # method on a loop-bound struct field, inside a value-if) returned 0
+        # on the stage4 lane (receiver-transport + value-if family), so NO
+        # slots were ever allocated and everything ran on value_map alone.
+        var size = 8
+        match local.type_.kind:
+            case Unit:
+                size = 0
+            case _:
+                ()
         if size > 0:
-            val slot = cranelift_stack_slot(ctx, size, align)
+            val slot = cranelift_stack_slot(ctx, size, 8)
             slot_map[local.id.id] = slot
 
     # Switch to entry block and process
@@ -357,8 +371,8 @@ fn compile_function(cl_module: i64, func: MirFunction, func_handles: Dict<text, 
     # Store function params into their stack slots
     var param_idx = 0
     for local in func.locals:
-        if not local.?:
-            continue
+        # (vestigial local.? gate removed: `.?` on a loop-bound plain
+        # struct is FALSE on the stage4 lane and skipped EVERY local.)
         match local.kind:
             case Arg(index):
                 val param_val = cranelift_block_param(ctx, entry_block, index)
@@ -502,8 +516,10 @@ fn cl_translate_instruction(
 
         case Load(dest, ptr):
             val addr = cl_translate_operand(ctx, cl_module, ptr, value_map, slot_map, func)
-            val ty = mir_type_to_cl(local_type(dest.id, func))
-            val result = cranelift_load(ctx, ty, addr, 0)
+            # Ints/bool load as I64: the lane is uniformly i64 (see the Bool
+            # note in mir_type_to_cl) — a typed sub-64 load fed i16 values
+            # into i64-signature calls (probe_enum6 inst91 verifier reject).
+            val result = load_uniform_i64(ctx, dest.id, addr, func)
             value_map[dest.id] = result
             store_local_result(ctx, dest, result, slot_map, func)
 
@@ -518,7 +534,19 @@ fn cl_translate_instruction(
             val addr = cranelift_data_addr_in_func(ctx, global_handles[symbol.id])
             if addr == 0:
                 panic("Cranelift global address unavailable: {symbol.id}")
-            val result = cranelift_load(ctx, mir_type_to_cl(local_type(dest.id, func)), addr, 0)
+            # Globals are declared at their true width (rt_cranelift_declare_
+            # global_data sizes the data object from the type code), so the
+            # load must stay typed — but the uniformly-i64 lane requires
+            # canonical I64 SSA values, so narrow int loads extend back up.
+            val g_ty = local_type(dest.id, func)
+            val g_cl = mir_type_to_cl(g_ty)
+            var result = cranelift_load(ctx, g_cl, addr, 0)
+            if g_cl == CL_TYPE_I8 or g_cl == CL_TYPE_I16 or g_cl == CL_TYPE_I32:
+                match g_ty.kind:
+                    case U8 | U16 | U32 | Char:
+                        result = cranelift_uextend(ctx, CL_TYPE_I64, result)
+                    case _:
+                        result = cranelift_sextend(ctx, CL_TYPE_I64, result)
             value_map[dest.id] = result
             store_local_result(ctx, dest, result, slot_map, func)
 
@@ -547,8 +575,9 @@ fn cl_translate_instruction(
             val addr = cranelift_band(ctx, tagged_addr, cranelift_iconst(ctx, CL_TYPE_I64, -8))
             val offset = field * 8
             val field_addr = cranelift_iadd(ctx, addr, cranelift_iconst(ctx, CL_TYPE_I64, offset))
-            val ty = mir_type_to_cl(local_type(dest.id, func))
-            val result = cranelift_load(ctx, ty, field_addr, 0)
+            # Fields sit at an 8-byte stride (offset above), so an I64 load is
+            # size-safe; ints/bool load as I64 to keep the lane uniformly i64.
+            val result = load_uniform_i64(ctx, dest.id, field_addr, func)
             value_map[dest.id] = result
             store_local_result(ctx, dest, result, slot_map, func)
 
@@ -688,8 +717,9 @@ fn cl_translate_instruction(
                     dest_id = dest_id_l.id
                 if slot_map.has(dest_id):
                     val addr = cranelift_stack_addr(ctx, slot_map[dest_id], 0)
-                    val ty = mir_type_to_cl(local_type(dest_id, func))
-                    value_map[dest_id] = cranelift_load(ctx, ty, addr, 0)
+                    # Slots have an 8-byte floor; ints/bool reload as I64 to
+                    # keep the lane uniformly i64 (see load_local).
+                    value_map[dest_id] = load_uniform_i64(ctx, dest_id, addr, func)
                 elif args.len() >= 4:
                     value_map[dest_id] = cl_translate_operand(ctx, cl_module, args[1], value_map, slot_map, func)
                 elif args.len() > 0:
@@ -794,7 +824,11 @@ fn cl_translate_terminator(
             # do NOT bare-lift the producers — 8+ case-Some/.unwrap consumers
             # depend on the boxed repr.
             if value.?:
-                val ret_operand = value.unwrap()
+                # `.unwrap()` here returned the raw box (match on the payload's
+                # .kind hit a nil receiver); `??` with a hoisted fallback is the
+                # extraction shape verified working on this lane.
+                val ret_fallback = mir_operand_const_int(0)
+                val ret_operand = value ?? ret_fallback
                 val ret_val = cl_translate_operand(ctx, cl_module, ret_operand, value_map, slot_map, func)
                 cranelift_return(ctx, ret_val)
             elif func.name == "main":
@@ -827,6 +861,9 @@ fn cl_translate_terminator(
                 for i in 0..targets.len():
                     val case_ = targets[i]
                     val case_val = cranelift_iconst(ctx, CL_TYPE_I64, case_.value)
+                    # rt_cranelift_icmp widens its result to I64 in the linked
+                    # runtime (cranelift_sffi.rs); a second uextend here would be
+                    # an invalid same-width widen (verifier reject).
                     val cmp = cranelift_icmp(ctx, CL_CMP_EQ, switch_val, case_val)
                     val target_edge = cranelift_create_block(ctx)
                     if i == targets.len() - 1:
@@ -899,6 +936,17 @@ fn cl_translate_operand(
         case Const(value, type_):
             return cl_translate_const_value(ctx, cl_module, value, type_)
 
+# Uniform-i64 memory load for a local's value: floats keep their typed
+# load, everything else loads as I64 (the lane is uniformly i64 — see the
+# Bool note in mir_type_to_cl and the slot-scalar note in load_local).
+fn load_uniform_i64(ctx: i64, local_id: i64, addr: i64, func: MirFunction) -> i64:
+    val local_ty = local_type(local_id, func)
+    match local_ty.kind:
+        case F32 | F64:
+            return cranelift_load(ctx, mir_type_to_cl(local_ty), addr, 0)
+        case _:
+            return cranelift_load(ctx, CL_TYPE_I64, addr, 0)
+
 fn load_local(
     ctx: i64,
     local_id: i64,
@@ -913,6 +961,26 @@ fn load_local(
     if type_is_runtime_handle(local_ty) and slot_map.has(local_id):
         val handle_addr = cranelift_stack_addr(ctx, slot_map[local_id], 0)
         return cranelift_load(ctx, CL_TYPE_PTR, handle_addr, 0)
+    # Scalar slot preference: cross-block value_map reuse violates SSA
+    # dominance; slot loads are memory ops and dominance-free. Ints/bool
+    # load as I64 (uniform-i64 lane; typed sub-64 loads leaked i16 args).
+    if type_is_slot_scalar(local_ty) and slot_map.has(local_id):
+        val scalar_addr = cranelift_stack_addr(ctx, slot_map[local_id], 0)
+        match local_ty.kind:
+            case F32 | F64:
+                return cranelift_load(ctx, mir_type_to_cl(local_ty), scalar_addr, 0)
+            case _:
+                return cranelift_load(ctx, CL_TYPE_I64, scalar_addr, 0)
+    if slot_map.has(local_id):
+        var is_opaque = false
+        match local_ty.kind:
+            case Opaque(_):
+                is_opaque = true
+            case _:
+                ()
+        if is_opaque:
+            val opq_addr = cranelift_stack_addr(ctx, slot_map[local_id], 0)
+            return cranelift_load(ctx, CL_TYPE_PTR, opq_addr, 0)
     # Prefer SSA value if available
     if value_map.has(local_id):
         return value_map[local_id]
@@ -934,7 +1002,7 @@ fn cl_translate_const_value(ctx: i64, cl_module: i64, value: MirConstValue, type
     # EXPLICIT returns: mixed-return/tail rule (see cl_translate_operand).
     match value:
         case Int(v):
-            return cranelift_iconst(ctx, mir_type_to_cl(type_), v)
+            return cranelift_iconst(ctx, const_int_cl_type(type_), v)
         case Float(v):
             return cranelift_fconst(ctx, mir_type_to_cl(type_), v)
         case Bool(v):
@@ -1103,7 +1171,17 @@ fn cl_translate_cast(ctx: i64, cl_module: i64, src_val: i64, operand: MirOperand
         val dst_size = match target.kind:
             case Bool: 8
             case _: target.size_bytes()
-        return if dst_size < 8: cranelift_ireduce(ctx, to_cl, parsed) else: parsed
+        if dst_size < 8:
+            # Narrow for wrap semantics, then extend straight back to I64:
+            # no sub-64 SSA value may escape on this uniformly-i64 lane.
+            val narrowed = cranelift_ireduce(ctx, to_cl, parsed)
+            val zero_extend_back = match target.kind:
+                case U8 | U16 | U32 | Bool | Char: true
+                case _: false
+            if zero_extend_back:
+                return cranelift_uextend(ctx, CL_TYPE_I64, narrowed)
+            return cranelift_sextend(ctx, CL_TYPE_I64, narrowed)
+        return parsed
 
     if is_src_float and not is_dst_float:
         # Float to int
@@ -1134,12 +1212,20 @@ fn cl_translate_cast(ctx: i64, cl_module: i64, src_val: i64, operand: MirOperand
             case Bool: 8
             case _: target.size_bytes()
         if dst_size > src_size:
-            val zero_extend = match src_type.kind:
-                case U8 | U16 | U32 | U64 | Bool | Char: true
-                case _: false
-            if zero_extend: cranelift_uextend(ctx, to_cl, src_val) else: cranelift_sextend(ctx, to_cl, src_val)
+            # Widening is a no-op on this uniformly-i64 lane: every int SSA
+            # value is already a canonically-extended I64 (I64-uniform loads,
+            # I64 consts, runtime-widened cmp results), so uextend/sextend
+            # here would be an invalid same-width widen (verifier reject).
+            src_val
         elif dst_size < src_size:
-            cranelift_ireduce(ctx, to_cl, src_val)
+            # Narrow for wrap semantics, then extend straight back to I64:
+            # no sub-64 SSA value may escape on this uniformly-i64 lane
+            # (probe_enum6: a typed narrow fed i16 into an i64-signature call).
+            val reduced = cranelift_ireduce(ctx, to_cl, src_val)
+            val zero_extend_back = match target.kind:
+                case U8 | U16 | U32 | Bool | Char: true
+                case _: false
+            if zero_extend_back: cranelift_uextend(ctx, CL_TYPE_I64, reduced) else: cranelift_sextend(ctx, CL_TYPE_I64, reduced)
         else:
             src_val
 
@@ -1235,8 +1321,6 @@ fn cl_is_lowering_owned_runtime(name: text) -> bool:
 fn cl_function_emit_name(name: text) -> text:
     if name == "main":
         return "__simple_main"
-    if (rt_env_get("SIMPLE_NATIVE_BUILD_NO_MANGLE") ?? "") == "1":
-        return name
     # cl_is_lowering_owned_runtime names are unconditionally runtime-routed
     # in cl_translate_call above -- a same-named local body is unreachable
     # by any ordinary call, so it only needs a private symbol to avoid a
@@ -1267,8 +1351,8 @@ fn method_leaf_name(name: text) -> text:
 
 fn local_type(local_id: i64, func: MirFunction) -> MirType:
     for local in func.locals:
-        if not local.?:
-            continue
+        # (vestigial local.? gate removed: `.?` on a loop-bound plain
+        # struct is FALSE on the stage4 lane and skipped EVERY local.)
         if local.id.id == local_id:
             return local.type_
     return MirType.i64()
@@ -1303,6 +1387,24 @@ fn type_is_unsigned(ty: MirType) -> bool:
     match ty.kind:
         case U8 | U16 | U32 | U64: true
         case _: false
+
+fn type_is_slot_scalar(ty: MirType) -> bool:
+    """True for plain machine scalars whose def sites always store to their
+    stack slot (see load_local slot preference)."""
+    match ty.kind:
+        case I8 | I16 | I32 | I64 | U8 | U16 | U32 | U64 | F32 | F64 | Bool:
+            return true
+        case _:
+            return false
+
+fn const_int_cl_type(ty: MirType) -> i64:
+    """Int consts emit as I64 regardless of declared width: the lane is
+    uniformly i64 and sub-64 iconst types leaked i16 args into i64-signature
+    calls (probe_enum6 verifier reject)."""
+    match ty.kind:
+        case F32: return CL_TYPE_F32
+        case F64: return CL_TYPE_F64
+        case _: return CL_TYPE_I64
 
 fn type_is_aggregate(ty: MirType) -> bool:
     match ty.kind:

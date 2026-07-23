@@ -1372,7 +1372,30 @@ macro_rules! impl_conv {
 }
 
 impl_conv!(rt_cranelift_sextend, sextend);
-impl_conv!(rt_cranelift_uextend, uextend);
+// Hand-written (not impl_conv!): idempotent on already-target-width values.
+// The pure-Simple adapter widens cmp results with an unconditional uextend,
+// and rt_cranelift_icmp/fcmp also widen internally — without this guard the
+// second widen hits the verifier's same-width uextend rejection.
+#[no_mangle]
+pub unsafe extern "C" fn rt_cranelift_uextend(ctx: i64, to_type: i64, value: i64) -> i64 {
+    let mut active = ACTIVE_BUILDERS.lock().unwrap();
+    let Some(ab) = active.get_mut(&ctx) else { return 0 };
+    let Some(builder) = ab.builder.as_mut() else {
+        return 0;
+    };
+    let Some(&val) = ab.values.get(&value) else {
+        return 0;
+    };
+    let ty = type_from_code(to_type);
+    if builder.func.dfg.value_type(val) == ty {
+        return value;
+    }
+    let result = builder.ins().uextend(ty, val);
+    let id = ab.next_value_id;
+    ab.next_value_id += 1;
+    ab.values.insert(id, result);
+    id
+}
 impl_conv!(rt_cranelift_ireduce, ireduce);
 impl_conv!(rt_cranelift_fcvt_to_sint, fcvt_to_sint);
 impl_conv!(rt_cranelift_fcvt_to_uint, fcvt_to_uint);
