@@ -21,6 +21,7 @@ use compiler.core.ast.{module_get_decls}
 use compiler.core.parser.{parse_module_silent, parser_has_errors, parser_set_had_error}
 use compiler.semantics.lint.argument_count.{check_argument_count}
 use compiler.semantics.lint.collection_patterns.{check_collection_patterns}
+use compiler.semantics.lint.star_import.{check_star_export_file}
 use compiler.semantics.lint.stub_impl.{check_stub_impl}
 use compiler.semantics.lint.wide_public.{check_wide_public_file}
 
@@ -68,6 +69,14 @@ fn lint_cli_source(linter: Linter, path: String, content: String) -> [LintResult
         val lint = Lint.new(warning.code, level, LintCategory.Warning, warning.message)
             .with_fix(warning.hint)
         results.push(LintResult.new(path, warning.line, 0, lint))
+    # W0406 already comes from the text EasyFix owner. Add only the parsed
+    # export sibling here so wildcard imports are not reported twice.
+    for warning in check_star_export_file(decls, path):
+        if not should_keep_lint_result(config, warning.code):
+            continue
+        val level = apply_config_level(config, warning.code, LintLevel.Warn)
+        val lint = Lint.new(warning.code, level, LintCategory.Warning, warning.message)
+        results.push(LintResult.new(path, lint_cli_find_decl_line(lines, "export ", warning.module_path), 0, lint))
     for warning in check_wide_public_file(decls, path):
         if not should_keep_lint_result(config, warning.code):
             continue
@@ -76,6 +85,15 @@ fn lint_cli_source(linter: Linter, path: String, content: String) -> [LintResult
         val lint = Lint.new(warning.code, level, LintCategory.Warning, message)
         results.push(LintResult.new(path, warning.line, 0, lint))
     results
+
+fn lint_cli_find_decl_line(lines: [text], prefix: text, module_path: text) -> i64:
+    var i = 0
+    while i < lines.len():
+        val trimmed = lines[i].trim()
+        if trimmed.starts_with(prefix) and trimmed.contains(module_path):
+            return i + 1
+        i = i + 1
+    1
 
 # Locate a declaration line without mistaking comment or string decoys for a function.
 fn lint_cli_find_fn_line(lines: [text], fn_name: text) -> i64:

@@ -30,6 +30,8 @@ export MyClass, my_function, CONSTANT
 ### Architecture
 - `StarWildcardWarning` — single struct for both W0406 and W0407
 - `_is_facade_file(path)` — shared helper (deduplicates __init__/mod check)
+- Production lint keeps W0406 in its text/EasyFix owner and adds W0407 through
+  the parsed AST adapter, preventing duplicate wildcard-import diagnostics.
 - `_emit_wildcard_warnings(warnings, lines, file, format, keyword)` — shared emit in query_lint
 - `_find_decl_line_in_source(lines, keyword, path)` — generic line finder
 - Backwards-compatible aliases: `StarImportWarning = StarWildcardWarning`, `StarExportWarning = StarWildcardWarning`
