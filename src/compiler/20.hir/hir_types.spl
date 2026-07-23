@@ -233,8 +233,9 @@ impl SymbolTable:
             val scope = self.scopes[self.current_scope.id]
             val existing = scope.symbols.get(name)
             if existing != nil:
-                # Already registered — return the existing id (first-write-wins)
-                return SymbolId(id: existing)
+                # Already registered — return the existing id (first-write-wins).
+                # Bracket-index read: same stage4 lane hardening as `lookup`.
+                return SymbolId(id: scope.symbols[name])
 
         val raw_id = self.next_symbol_id
         val id = SymbolId(id: raw_id)
@@ -278,7 +279,16 @@ impl SymbolTable:
             # plain nil-check idiom on a single `.get()` call instead.
             val found = scope.symbols.get(name)
             if found != nil:
-                return Some(SymbolId(id: found))
+                # Seed stage4 lane hardening: Dict<text,i64>.get returns the
+                # TAGGED stored value on the seed-compiled native path
+                # (raw<<3) while bracket-index takes the type-directed untag
+                # path; and an explicit Some(...) wrap materializes a heap
+                # Option box that `if val` binds un-unwrapped (field reads
+                # then hit the box header, id = 0x100000004). Read the value
+                # via bracket-index and return the bare struct (implicit
+                # lift) so every engine sees a flat SymbolId.
+                val direct: i64 = scope.symbols[name]
+                return SymbolId(id: direct)
 
             match scope.parent:
                 case Some(parent):
@@ -296,7 +306,9 @@ impl SymbolTable:
             val scope = self.scopes[scope_id.id]
             val found = scope.symbols.get(name)
             if found != nil:
-                return SymbolId(id: found)
+                # Same stage4 lane hardening as `lookup` above: bracket-index
+                # read dodges the tagged Dict.get value.
+                return SymbolId(id: scope.symbols[name])
 
             match scope.parent:
                 case Some(parent):
