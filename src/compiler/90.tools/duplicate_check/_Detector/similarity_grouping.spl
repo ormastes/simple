@@ -10,47 +10,6 @@ use std.nogc_sync_mut.io.time_ops.{current_time_ms}
 fn collect_files(path: text, config: DuplicationConfig) -> [text]:
     collect_detector_files(path, config)
 
-fn sample_blocks_for_similarity(all_blocks: [DuplicateBlock], config: DuplicationConfig) -> [DuplicateBlock]:
-    # Outer safety net only — the real pruning now happens via the shared
-    # signature-token inverted index in build_similarity_adjacency (bucket by
-    # shared vocabulary, only cosine-score within-bucket pairs), not by
-    # capping the candidate pool to an arbitrary small N.
-    val max_blocks_to_analyze = 320
-    var blocks_to_analyze = all_blocks
-    if all_blocks.len() > max_blocks_to_analyze:
-        log_progress(config, "WARNING: Too many blocks ({all_blocks.len()}), sampling {max_blocks_to_analyze} across files")
-        # Sample blocks distributed across files instead of taking first N
-        # Group blocks by file, then round-robin pick from each file
-        var file_blocks = {}
-        for block in all_blocks:
-            if file_blocks.has(block.file):
-                var grouped = file_blocks[block.file]
-                grouped.push(block)
-                file_blocks[block.file] = grouped
-            else:
-                file_blocks[block.file] = [block]
-
-        val file_keys = file_blocks.keys()
-        var limited = []
-        var round = 0
-        var done = false
-        while not done:
-            var added_any = false
-            for fk in file_keys:
-                val fblocks = file_blocks[fk]
-                if round < fblocks.len():
-                    limited.push(fblocks[round])
-                    added_any = true
-                    if limited.len() >= max_blocks_to_analyze:
-                        done = true
-                        break
-            if not added_any:
-                done = true
-            round = round + 1
-        blocks_to_analyze = limited
-        log_verbose(config, "  Sampled from {file_keys.len()} files")
-    blocks_to_analyze
-
 fn load_tokens_with_line_indexes(blocks_to_analyze: [DuplicateBlock], config: DuplicationConfig, cache_manager: TokenCacheManager) -> SimilarityPrep:
     log_progress(config, "Pre-computing features for {blocks_to_analyze.len()} blocks...")
     var file_token_cache = {}
@@ -146,16 +105,18 @@ fn build_similarity_adjacency(prep: SimilarityPrep, config: DuplicationConfig) -
         sigs.push(feature_signature(prep.features[si], 5))
         si = si + 1
 
-    var token_to_indices: {text: text} = {}
+    var token_to_indices: {text: [i64]} = {}
     var gi = 0
     while gi < prep.blocks.len():
         if prep.features[gi].magnitude != 0.0 and not prep.low_signal_flags[gi]:
             for tok in sigs[gi].split(","):
                 if tok.len() > 0:
                     if token_to_indices.has(tok):
-                        token_to_indices[tok] = token_to_indices[tok] + "," + "{gi}"
+                        var indices = token_to_indices[tok]
+                        indices.push(gi)
+                        token_to_indices[tok] = indices
                     else:
-                        token_to_indices[tok] = "{gi}"
+                        token_to_indices[tok] = [gi]
         gi = gi + 1
 
     var adjacency = {}
@@ -163,24 +124,19 @@ fn build_similarity_adjacency(prep: SimilarityPrep, config: DuplicationConfig) -
     var match_count = 0
     var dropped_bucket_blocks = 0
     # Cap giant buckets (a token so common it isn't discriminative, e.g. "value").
-    # A genuine clone pair shares several signature tokens, so it also lands in
-    # smaller, non-capped buckets — this only drops the low-value comparisons
-    # that a common single token would otherwise force.
+    # This is an intentional recall ceiling: pairs whose every shared signature
+    # token is oversized are skipped and reported rather than making work unbounded.
     val max_bucket_size = 400
     var seen_pairs: {text: bool} = {}
     val start_ms = current_time_ms()
     var last_ms = start_ms
 
     for tok in token_to_indices.keys():
-        val idx_strs = token_to_indices[tok].split(",")
-        if idx_strs.len() > max_bucket_size:
-            log_progress(config, "  Skipping oversized bucket '{tok}' ({idx_strs.len()} blocks, cap {max_bucket_size}) to bound work")
-            dropped_bucket_blocks = dropped_bucket_blocks + idx_strs.len()
+        val indices = token_to_indices[tok]
+        if indices.len() > max_bucket_size:
+            log_progress(config, "  Skipping oversized bucket '{tok}' ({indices.len()} blocks, cap {max_bucket_size}) to bound work")
+            dropped_bucket_blocks = dropped_bucket_blocks + indices.len()
             continue
-
-        var indices: [i64] = []
-        for s in idx_strs:
-            indices.push(int(s))
 
         var pi = 0
         while pi < indices.len():
@@ -282,10 +238,9 @@ fn group_occurrence_key(group: DuplicateGroup) -> text:
 
 fn refine_groups_with_similarity(exact_groups: [DuplicateGroup], all_blocks: [DuplicateBlock], config: DuplicationConfig, cache_manager: TokenCacheManager) -> [DuplicateGroup]:
     """Refine hash-based groups using cosine similarity to catch fuzzy duplicates."""
-    val blocks_to_analyze = sample_blocks_for_similarity(all_blocks, config)
-    val prep = load_tokens_with_line_indexes(blocks_to_analyze, config, cache_manager)
+    val prep = load_tokens_with_line_indexes(all_blocks, config, cache_manager)
     val adjacency = build_similarity_adjacency(prep, config)
-    val similarity_groups = build_similarity_groups(adjacency, blocks_to_analyze, config)
+    val similarity_groups = build_similarity_groups(adjacency, all_blocks, config)
 
     var refined_groups = []
     var seen_occurrences: {text: bool} = {}

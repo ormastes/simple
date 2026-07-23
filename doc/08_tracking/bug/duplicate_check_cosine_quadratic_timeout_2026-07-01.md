@@ -5,6 +5,15 @@
 - **Severity:** medium (mode is usable only on small scopes)
 - **Status:** fixed (2026-07-04, task #89); re-verified 2026-07-17 (worker_O_dup_sanity), still fixed and now much faster.
 
+## 2026-07-23 bounded-index update
+
+The later 320-block sampler was removed because it caused source-order false
+negatives. This does not restore the old all-pairs loop: Pass 0 still prunes
+files, each block enters at most five signature buckets, buckets larger than
+400 are explicitly skipped, and candidate indices are stored in arrays rather
+than quadratic text concatenations. Fresh Stage 4 latency/RSS qualification is
+pending alongside the late-tail correctness regression.
+
 ## Re-verification (2026-07-17)
 
 Re-ran the exact bug-report repro (renamed binary copy, to dodge an unrelated

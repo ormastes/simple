@@ -193,12 +193,14 @@ evidence boundary for the important pure-Simple tooling lanes:
   newly deployed pure-Simple CLI.
 - **duplicate-check** — **Source status:** effective `mode`/`format`
   validation plus same-file semantic and non-overlapping cosine matching are fixed;
-  overlapping windows cannot collapse into one-occurrence groups. **Strongest
+  overlapping windows cannot collapse into one-occurrence groups, and the
+  legacy 320-block sampler no longer drops late candidates. The existing
+  top-five signature index and 400-block bucket cap bound comparisons. **Strongest
   current evidence:** `f2818a4b63` plus focused invalid-option and same-file
   semantic/cosine contracts and source review; see
   [the tracking report](../../08_tracking/bug/duplicate_check_invalid_enum_value_false_green_2026-07-19.md).
   **Remaining bug/gap:** that is focused evidence only, not an aggregate Stage
-  4 pass. **Next solution:** run the clean/exact-clone and invalid-option
+  4 pass. **Next solution:** run the clean/exact-clone/late-tail and invalid-option
   essential-tools probes against the exact fresh CLI.
 - **MCP** — **Source status:** the full wrapper's repository-root CWD restore
   is pushed. **Strongest current evidence:** `1035de83f1` and the wrapper
