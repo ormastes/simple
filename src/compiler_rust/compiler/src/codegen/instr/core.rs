@@ -24,9 +24,8 @@ use super::{InstrContext, InstrResult};
 /// - `None` if the VReg has no entry in `vreg_types` (unknown), or the
 ///   stored type is not an integer (bool, floats, structs, strings, etc.).
 ///
-/// Part of FR-DRIVER-0002a infrastructure. Consumers (FR-DRIVER-0002b) will
-/// dispatch on this to pick `sshr`/`ushr` and `sextend`/`uextend`. In this
-/// track the helper exists but is intentionally not wired into any call site.
+/// Used by integer widening, shifts, division, comparisons, and mixed
+/// integer/float coercion to preserve source signedness.
 pub fn vreg_is_signed<M: Module>(ctx: &InstrContext<'_, M>, v: VReg) -> Option<bool> {
     let ty = ctx.vreg_types.get(&v).copied()?;
     match ty {
@@ -153,9 +152,12 @@ fn ensure_i64_vreg<M: Module>(
 /// If either is float, convert the other to float too.
 /// If both are int, ensure both are i64.
 fn coerce_binop_operands(
+    ctx: &InstrContext<'_, impl Module>,
     builder: &mut FunctionBuilder,
     lhs: cranelift_codegen::ir::Value,
     rhs: cranelift_codegen::ir::Value,
+    left_vreg: VReg,
+    right_vreg: VReg,
 ) -> (cranelift_codegen::ir::Value, cranelift_codegen::ir::Value, bool) {
     let lhs_type = builder.func.dfg.value_type(lhs);
     let rhs_type = builder.func.dfg.value_type(rhs);
@@ -175,14 +177,24 @@ fn coerce_binop_operands(
     } else if lhs_is_float && !rhs_is_float {
         // lhs float, rhs int - convert rhs to float
         let target_float = if lhs_type == types::F32 { types::F32 } else { types::F64 };
-        let rhs_i64 = ensure_i64(builder, rhs);
-        let rhs_f = builder.ins().fcvt_from_sint(target_float, rhs_i64);
+        let signed = vreg_is_signed(ctx, right_vreg);
+        let rhs_i64 = ensure_i64_typed(builder, rhs, signed);
+        let rhs_f = if signed == Some(false) {
+            builder.ins().fcvt_from_uint(target_float, rhs_i64)
+        } else {
+            builder.ins().fcvt_from_sint(target_float, rhs_i64)
+        };
         (lhs, rhs_f, true)
     } else if !lhs_is_float && rhs_is_float {
         // lhs int, rhs float - convert lhs to float
         let target_float = if rhs_type == types::F32 { types::F32 } else { types::F64 };
-        let lhs_i64 = ensure_i64(builder, lhs);
-        let lhs_f = builder.ins().fcvt_from_sint(target_float, lhs_i64);
+        let signed = vreg_is_signed(ctx, left_vreg);
+        let lhs_i64 = ensure_i64_typed(builder, lhs, signed);
+        let lhs_f = if signed == Some(false) {
+            builder.ins().fcvt_from_uint(target_float, lhs_i64)
+        } else {
+            builder.ins().fcvt_from_sint(target_float, lhs_i64)
+        };
         (lhs_f, rhs, true)
     } else {
         // Both int - ensure both are i64
@@ -244,7 +256,7 @@ pub(crate) fn compile_binop<M: Module>(
     let pre_rhs_is_int = !matches!(builder.func.dfg.value_type(pre_rhs), types::F32 | types::F64);
 
     // Coerce operands to matching types (handles mixed int/float)
-    let (lhs, rhs, is_float) = coerce_binop_operands(builder, lhs, rhs);
+    let (lhs, rhs, is_float) = coerce_binop_operands(ctx, builder, lhs, rhs, left_vreg, right_vreg);
     let lhs_type = builder.func.dfg.value_type(lhs);
 
     let val = match op {
