@@ -149,12 +149,6 @@ impl MirLowering:
                 val value = b.emit_bitcast(mir_operand_copy(raw), result_type)
                 self.builder = b
                 value
-            case MirTypeKind.F32:
-                var b = self.builder
-                val wide = b.emit_bitcast(mir_operand_copy(raw), MirType.f64())
-                val value = b.emit_cast(mir_operand_copy(wide), result_type)
-                self.builder = b
-                value
             case _:
                 raw
 
@@ -2697,6 +2691,35 @@ impl MirLowering:
             # tagged-or-raw text argument via rt_interp_cstr before parsing,
             # so this is correct whether the argument is a literal (raw) or a
             # runtime-produced string (tagged).
+            # `str(x)` global conversion builtin (same class as `int(x)` just
+            # below): scalars render via coerce_concat_operand's shared
+            # rt_raw_*_to_string dispatch (a TAGGED heap string, exactly what
+            # rt_strcat_tagged concat consumers expect); an already-str local
+            # passes through; any other (any-typed, tagged at runtime) value
+            # routes to rt_value_to_string (tagged in, tagged out).
+            if direct_name == "str" and args.len() == 1:
+                val str_arg_local = self.lower_expr(args[0].value)
+                if self.local_is_str(str_arg_local):
+                    return str_arg_local
+                val str_src = self.coerce_concat_operand(str_arg_local)
+                var str_rendered: LocalId? = nil
+                match str_src.kind:
+                    case MirOperandKind.Copy(str_sl):
+                        if str_sl.id != str_arg_local.id:
+                            str_rendered = Some(str_sl)
+                    case _: ()
+                if val str_done = str_rendered:
+                    return str_done
+                val str_op = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_value_to_string"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: self.bootstrap_text_type(), is_variadic: false)))
+                ))
+                var b_str = self.builder
+                val str_res = b_str.emit_call(str_op, [mir_operand_copy(str_arg_local)], self.bootstrap_text_type())
+                self.builder = b_str
+                if val str_local = str_res:
+                    return str_local
+                return str_arg_local
             if direct_name == "int" and args.len() == 1:
                 val int_arg_local = self.lower_expr(args[0].value)
                 val int_op = MirOperand(kind: MirOperandKind.Const(

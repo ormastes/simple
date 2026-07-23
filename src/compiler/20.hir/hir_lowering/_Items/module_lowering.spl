@@ -516,6 +516,39 @@ impl HirLowering:
                 if src_mod != nil:
                     self.register_imported_symbol(src_mod, hop.module_name, hop.item_name, local_name, import_span)
 
+    me resolve_module_key(name: text) -> text:
+        """Canonical modules_by_name key for an import path, or "".
+        Closure files register ONLY under path-derived names
+        (src/lib/nogc_sync_mut/io_runtime.spl -> lib.nogc_sync_mut.io_runtime;
+        a package __init__.spl carries a .__init__ suffix), while import lines
+        say std.io_runtime / nogc_sync_mut.io_runtime / std.common.json.
+        Try the literal key, then the package facade, the lib.-prefix mirror,
+        and the std.->lib. swap (each with .__init__)."""
+        if self.modules_by_name.contains_key(name):
+            return name
+        var cands: [text] = []
+        cands = cands.push(name + ".__init__")
+        cands = cands.push("lib." + name)
+        cands = cands.push("lib." + name + ".__init__")
+        if name.starts_with("std."):
+            val std_tail = name.substring(4)
+            val lib_tail = "lib." + std_tail
+            cands = cands.push(lib_tail)
+            cands = cands.push(lib_tail + ".__init__")
+            # std.X also flattens the concurrency-tier dirs (seed
+            # stdlib_root_candidates order): std.mcp_sdk.server.method_detect
+            # registers as lib.nogc_sync_mut.mcp_sdk.server.method_detect.
+            for tier in ["nogc_sync_mut", "nogc_async_mut", "nogc_async_immut", "gc_async_mut", "nogc_async_mut_noalloc", "common"]:
+                val tier_key = "lib." + tier + "." + std_tail
+                cands = cands.push(tier_key)
+                cands = cands.push(tier_key + ".__init__")
+        var ci = 0
+        while ci < cands.len():
+            if self.modules_by_name.contains_key(cands[ci]):
+                return cands[ci]
+            ci = ci + 1
+        ""
+
     me find_reexport_source(facade_mod: Module, facade_name: text, wanted: text, depth: i64) -> HirReexportSource:
         """Resolve which transitive module actually DECLARES `wanted` when
         `facade_mod` only re-exports it. Follows the facade's own imports
@@ -539,11 +572,15 @@ impl HirLowering:
                     source_item = item.name
                 item_idx = item_idx + 1
             if matches:
-                val next_mod: Module? = self.modules_by_name.get(imp.module)
+                # Canonical-key fallback: `export use nogc_sync_mut.io_runtime`
+                # inside src/lib/io_runtime.spl names a module registered as
+                # lib.nogc_sync_mut.io_runtime — the literal key always misses.
+                val next_key = self.resolve_module_key(imp.module)
+                val next_mod: Module? = if next_key != "": self.modules_by_name.get(next_key) else: nil
                 if next_mod != nil:
                     if hir_module_declares_item(next_mod, source_item):
-                        return HirReexportSource(found: true, module_name: imp.module, item_name: source_item)
-                    val deeper = self.find_reexport_source(next_mod, imp.module, source_item, depth + 1)
+                        return HirReexportSource(found: true, module_name: next_key, item_name: source_item)
+                    val deeper = self.find_reexport_source(next_mod, next_key, source_item, depth + 1)
                     if deeper.found:
                         return deeper
             import_idx = import_idx + 1
@@ -566,16 +603,8 @@ impl HirLowering:
                         var facade_pkg = facade_name
                         if facade_pkg.ends_with(".__init__"):
                             facade_pkg = facade_pkg[0:facade_pkg.len() - 9]
-                        var exp_sib_name = facade_pkg + "." + exp_base
-                        var exp_sib: Module? = self.modules_by_name.get(exp_sib_name)
-                        if exp_sib == nil and facade_pkg.starts_with("std."):
-                            # Facade was aliased under the requested std.-path,
-                            # but sibling files register only under their
-                            # path-derived lib.-name.
-                            val exp_lib_name = "lib." + facade_pkg.substring(4) + "." + exp_base
-                            exp_sib = self.modules_by_name.get(exp_lib_name)
-                            if exp_sib != nil:
-                                exp_sib_name = exp_lib_name
+                        var exp_sib_name = self.resolve_module_key(facade_pkg + "." + exp_base)
+                        val exp_sib: Module? = if exp_sib_name != "": self.modules_by_name.get(exp_sib_name) else: nil
                         if exp_sib != nil:
                             if hir_module_declares_item(exp_sib, wanted):
                                 return HirReexportSource(found: true, module_name: exp_sib_name, item_name: wanted)
@@ -711,26 +740,15 @@ impl HirLowering:
                 if imported_mod != nil:
                     resolved_module_name = rel_abs
             if imported_mod == nil:
-                # Package/alias fallbacks: closure files register ONLY under
-                # path-derived names (src/lib/common/json/__init__.spl ->
-                # lib.common.json.__init__), while imports say std.common.json.
-                # Try the lib.-mirror of a std.-path, and the package
-                # __init__ facade for a directory import, keeping
+                # Canonical-key fallbacks (see resolve_module_key): closure
+                # files register ONLY under path-derived names, keeping
                 # resolved_module_name canonical so call symbols match the
                 # definition's mangled name.
-                var fb_keys: [text] = []
-                if imp.module.starts_with("std."):
-                    val fb_lib = "lib." + imp.module.substring(4)
-                    fb_keys = fb_keys.push(fb_lib)
-                    fb_keys = fb_keys.push(fb_lib + ".__init__")
-                fb_keys = fb_keys.push(imp.module + ".__init__")
-                var fb_idx = 0
-                while fb_idx < fb_keys.len() and imported_mod == nil:
-                    val fb_key = fb_keys[fb_idx]
+                val fb_key = self.resolve_module_key(imp.module)
+                if fb_key != "":
                     imported_mod = self.modules_by_name.get(fb_key)
                     if imported_mod != nil:
                         resolved_module_name = fb_key
-                    fb_idx = fb_idx + 1
             if imported_mod == nil and (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
                 eprint("[import-miss] importer={module.name} module={imp.module}")
             if imported_mod != nil:
