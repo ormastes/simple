@@ -2668,6 +2668,14 @@ SplArray* rt_get_args(void) {
     return rt_cli_get_args();
 }
 
+/* sys_get_args: the extern name std.io_runtime declares for argv (the seed
+ * interpreter registers it on every lane). No native C definition existed, so
+ * entry-closure binaries linked it as a silent 0-returning stub and
+ * get_args() saw an empty array (native_sys_get_args_missing 2026-07-23). */
+SplArray* sys_get_args(void) {
+    return rt_cli_get_args();
+}
+
 SplArray* rt_cli_get_args(void) {
     int64_t argc = spl_arg_count();
     SplArray* args = rt_array_new(argc);

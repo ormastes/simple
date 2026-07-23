@@ -18,7 +18,10 @@ use std.io_runtime.{get_args, exit}
 val SERVER_NAME = "simple-lsp-mcp"
 val SERVER_VERSION = "0.9.8"
 
-class SimpleLogOptions:
+# struct + free-fn constructor, NOT a class with `static fn defaults()`:
+# class static calls silently lower to nil in entry-closure natives
+# (doc/08_tracking/bug/native_class_static_ctor_missing_2026-07-23.md).
+struct SimpleLogOptions:
     log_mode: text
     surface: text
     progress: text
@@ -27,8 +30,8 @@ class SimpleLogOptions:
     valid: bool
     error: text
 
-    static fn defaults() -> SimpleLogOptions:
-        SimpleLogOptions(log_mode: "human", surface: "stdout", progress: "summary", quiet: false, verbose: false, valid: true, error: "")
+fn simple_log_options_defaults() -> SimpleLogOptions:
+    SimpleLogOptions(log_mode: "human", surface: "stdout", progress: "summary", quiet: false, verbose: false, valid: true, error: "")
 
 fn log_options_help() -> [text]:
     ["--log-mode <human|llm|json>  Select log rendering mode", "--human | --llm | --json     Shorthand log modes", "--stdout | --tui             Select output surface", "--progress <summary|count|dot|none>", "--dots | --count | --no-progress", "--quiet | --verbose"]
@@ -46,7 +49,7 @@ fn render_progress(mode: text, done: i64, total: i64, label: text) -> text:
     label + ": " + str(done) + "/" + str(safe_total)
 
 fn parse_log_options(args: [text]) -> SimpleLogOptions:
-    var opts = SimpleLogOptions.defaults()
+    var opts = simple_log_options_defaults()
     var i = 0
     while i < args.len():
         val arg = args[i]
@@ -215,21 +218,24 @@ fn lsp_tool_json(name: text, description: text, schema: text) -> text:
     r
 
 fn lsp_tools_list_result(id: text) -> text:
-    var tools: [text] = []
+    # Straight concatenation, NOT `[text]` push + join: text-array push/join
+    # degrades in entry-closure natives (rendered `"tools":[0]`; same family
+    # as the [u8] indexing degradation) — string concat is verified solid
+    # (W95/W99).
     val pos_schema = make_position_schema()
     val file_schema = make_file_schema()
-    tools.push(lsp_tool_json("lsp_definition", "Find where a symbol is defined in a Simple source file.", pos_schema))
-    tools.push(lsp_tool_json("lsp_references", "Find symbol references in Simple source.", pos_schema))
-    tools.push(lsp_tool_json("lsp_hover", "Get hover information for a symbol in Simple source.", pos_schema))
-    tools.push(lsp_tool_json("lsp_symbols", "List symbols in a Simple source file.", file_schema))
-    tools.push(lsp_tool_json("lsp_diagnostics", "Run lightweight diagnostics via simple check.", file_schema))
-    tools.push(lsp_tool_json("lsp_completion", "Get code completions at a position in a Simple source file.", pos_schema))
-    tools.push(lsp_tool_json("lsp_type_at", "Get the inferred type of a symbol at a position.", pos_schema))
-    tools.push(lsp_tool_json("lsp_signature_help", "Get function signature information at a call site.", pos_schema))
-    tools.push(lsp_tool_json("lsp_implementation", "Go to implementation of a trait or interface.", pos_schema))
-    tools.push(lsp_tool_json("lsp_document_highlight", "Highlight all occurrences of a symbol in the same file.", pos_schema))
-    tools.push(lsp_tool_json("lsp_type_definition", "Navigate to the type definition of a symbol.", pos_schema))
-    jsonrpc_result(id, jo1(jp("tools", SB_L() + tools.join(",") + SB_R())))
+    var tools_json = lsp_tool_json("lsp_definition", "Find where a symbol is defined in a Simple source file.", pos_schema)
+    tools_json = tools_json + "," + lsp_tool_json("lsp_references", "Find symbol references in Simple source.", pos_schema)
+    tools_json = tools_json + "," + lsp_tool_json("lsp_hover", "Get hover information for a symbol in Simple source.", pos_schema)
+    tools_json = tools_json + "," + lsp_tool_json("lsp_symbols", "List symbols in a Simple source file.", file_schema)
+    tools_json = tools_json + "," + lsp_tool_json("lsp_diagnostics", "Run lightweight diagnostics via simple check.", file_schema)
+    tools_json = tools_json + "," + lsp_tool_json("lsp_completion", "Get code completions at a position in a Simple source file.", pos_schema)
+    tools_json = tools_json + "," + lsp_tool_json("lsp_type_at", "Get the inferred type of a symbol at a position.", pos_schema)
+    tools_json = tools_json + "," + lsp_tool_json("lsp_signature_help", "Get function signature information at a call site.", pos_schema)
+    tools_json = tools_json + "," + lsp_tool_json("lsp_implementation", "Go to implementation of a trait or interface.", pos_schema)
+    tools_json = tools_json + "," + lsp_tool_json("lsp_document_highlight", "Highlight all occurrences of a symbol in the same file.", pos_schema)
+    tools_json = tools_json + "," + lsp_tool_json("lsp_type_definition", "Navigate to the type definition of a symbol.", pos_schema)
+    jsonrpc_result(id, jo1(jp("tools", SB_L() + tools_json + SB_R())))
 
 fn lsp_initialize_result(id: text) -> text:
     var caps = LB()

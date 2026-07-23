@@ -15,7 +15,7 @@ use compiler.backend.backend.llvm_native_link.{link_llvm_native, NativeLinkOptio
 use compiler.backend.backend.backend_helpers.{compile_bootstrap_module_with_backend}
 use compiler.hir.hir_types.{SymbolTable, SymbolId}
 use compiler.hir.hir_lowering.items.{bootstrap_hir_function_count, bootstrap_hir_function_at, bootstrap_hir_module_count}
-use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_function_at, bootstrap_mir_function_name_at, bootstrap_mir_function_module_at, bootstrap_mir_function_return_type_tag_at, bootstrap_mir_function_param_count_at, bootstrap_mir_function_param_type_tag_at, bootstrap_mir_static_count, bootstrap_mir_static_module_at, bootstrap_mir_static_symbol_id_at, bootstrap_mir_static_name_at, bootstrap_mir_static_type_tag_at, bootstrap_mir_static_init_kind_at, bootstrap_mir_static_init_payload_at, bootstrap_lower_hir_globals_to_mir_module_for_target, bootstrap_lower_flat_hir_modules_to_mir_for_target, bootstrap_set_entry_hir_module, bootstrap_clear_entry_hir_module, bootstrap_lower_extra_hir_module_to_mir_for_target, bootstrap_function_value_names_reset, bootstrap_register_function_value_module}
+use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_function_at, bootstrap_mir_function_name_at, bootstrap_mir_function_module_at, bootstrap_mir_function_return_type_tag_at, bootstrap_mir_function_param_count_at, bootstrap_mir_function_param_type_tag_at, bootstrap_mir_static_count, bootstrap_mir_static_module_at, bootstrap_mir_static_symbol_id_at, bootstrap_mir_static_name_at, bootstrap_mir_static_type_tag_at, bootstrap_mir_static_init_kind_at, bootstrap_mir_static_init_payload_at, bootstrap_lower_hir_globals_to_mir_module_for_target, bootstrap_lower_flat_hir_modules_to_mir_for_target, bootstrap_set_entry_hir_module, bootstrap_clear_entry_hir_module, bootstrap_lower_extra_hir_module_to_mir_for_target, bootstrap_function_value_names_reset, bootstrap_register_function_value_module, bootstrap_register_fn_ret_types_module}
 use compiler.mir_opt.{ssa_alloca_transform_blocks}
 use compiler.common.driver_core_types.{CompileResult}
 use driver_types.{CompileContext, CompileOptions}
@@ -142,12 +142,18 @@ pub fn bootstrap_lower_to_mir_context(ctx: CompileContext) -> (CompileContext, b
     for hir_module in ctx.hir_modules.values():
         if hir_module != nil:
             bootstrap_register_function_value_module(hir_module)
+            # Pre-register Str return types for EVERY closure module before
+            # the entry lowers — see bootstrap_register_fn_ret_types_module
+            # (native_call_return_type_loss 2026-07-23, cross-module ordering).
+            bootstrap_register_fn_ret_types_module(hir_module)
     if ctx.bootstrap_entry_hir.?:
         bootstrap_set_entry_hir_module(ctx.bootstrap_entry_hir.unwrap())
+        bootstrap_register_fn_ret_types_module(ctx.bootstrap_entry_hir.unwrap())
     else:
         val mapped_entry_hir = ctx.hir_modules[entry_module_name]
         if mapped_entry_hir != nil:
             bootstrap_set_entry_hir_module(mapped_entry_hir)
+            bootstrap_register_fn_ret_types_module(mapped_entry_hir)
     var bootstrap_mir = bootstrap_lower_hir_globals_to_mir_module_for_target(target_context)
     # --entry-closure builds parse+HIR-lower EVERY module reachable from the
     # entry (see SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE handling in driver.spl and

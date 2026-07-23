@@ -130,6 +130,38 @@ fn bootstrap_register_function_value_module(module: HirModule):
         if not func.is_method:
             _bootstrap_function_value_names.push("{module_name}.{function_name}")
 
+fn bootstrap_register_fn_ret_types_module(module: HirModule):
+    """Pre-register Str-returning functions' return types under every call-site
+    spelling (bare, symbol, module-qualified) BEFORE any module lowers.
+
+    The per-module registration inside the lowering loops fires too late for
+    the entry module's cross-module calls: the entry lowers FIRST
+    (driver_bootstrap line ~128) while helper modules register during the
+    extras loop afterwards — so `LB() + RB()` in an entry fn saw i64-typed
+    dests and lowered to INTEGER ADDITION of two char* pointers (SIGSEGV in
+    strlen; W96/W97, native_call_return_type_loss 2026-07-23). Str-only, same
+    rationale as the in-loop registration."""
+    val module_name = bootstrap_mir_logical_module_name(module.name)
+    for func in module.functions.values():
+        match func.return_type.kind:
+            case HirTypeKind.Str:
+                val str_ty = MirType(kind: MirTypeKind.Tuple([
+                    MirType(kind: MirTypeKind.Ptr(MirType(kind: MirTypeKind.U8), false)),
+                    MirType(kind: MirTypeKind.U64)
+                ]))
+                val function_name = bootstrap_hir_function_symbol_name(module, func)
+                bootstrap_fn_ret_type_register(func.name, str_ty)
+                bootstrap_fn_ret_type_register(function_name, str_ty)
+                if not func.is_method:
+                    bootstrap_fn_ret_type_register("{module_name}.{function_name}", str_ty)
+                    bootstrap_fn_ret_type_register(bootstrap_hir_accumulator_name(module, func), str_ty)
+            case _: ()
+
+# NOTE: bootstrap_fn_ret_type_* registry is deliberately NOT reset here —
+# lower_module's bootstrap branch resets the function accumulator per module,
+# but the return-type registry must accumulate across ALL closure modules
+# (cross-module call sites need the callee module's declared types). The
+# native-build worker is one process per build, so no reset is needed at all.
 fn bootstrap_mir_functions_reset():
     _bootstrap_mir_functions = []
     _bootstrap_mir_function_names = []
@@ -501,6 +533,18 @@ fn bootstrap_lower_hir_globals_to_mir_module_for_target(target_context: MirTarge
         var function_names: [text] = []
         for func in entry_functions.values():
             function_names.push(bootstrap_hir_function_symbol_name(hir_module, func))
+            # Declared-return-type registry (native_call_return_type_loss
+            # 2026-07-23): bare + qualified spellings, cross-module global.
+            # Register ONLY Str returns — for other kinds the HIR-side
+            # builtin-table fallback yields a degraded Int type that would
+            # SHADOW the more accurate MIR-side bootstrap_call_return_type
+            # table (e.g. get_args -> ptr(Array(str)); W93 regression).
+            match func.return_type.kind:
+                case HirTypeKind.Str:
+                    val bg_ret_ty = lowering.lower_type(func.return_type)
+                    bootstrap_fn_ret_type_register(func.name, bg_ret_ty)
+                    bootstrap_fn_ret_type_register(bootstrap_hir_function_symbol_name(hir_module, func), bg_ret_ty)
+                case _: ()
         for function_name in _bootstrap_function_value_names:
             function_names.push(function_name)
         lowering.current_function_names = function_names
@@ -595,6 +639,15 @@ fn bootstrap_lower_extra_hir_module_to_mir_for_target(hir_module: HirModule, tar
     var added_instr_total = 0
     var lowering = MirLowering.new_for_target(hir_module.symbols, target_context)
     lowering = bootstrap_register_hir_type_defs(lowering, hir_module)
+    # Same module-constant registration as the entry path above: non-entry
+    # closure modules (std.log etc.) also reference their own module `val`s.
+    val bx_const_vals = hir_module.constants.values()
+    if trace_enabled and bx_const_vals.len() > 0:
+        print "[mir-lower-extra] constants:count {bx_const_vals.len()}"
+    var bx_ci = 0
+    while bx_ci < bx_const_vals.len():
+        lowering.lower_const(bx_const_vals[bx_ci])
+        bx_ci = bx_ci + 1
     val entry_functions = hir_module.functions
     val fn_keys = entry_functions.keys()
     var function_names: [text] = []
@@ -602,6 +655,17 @@ fn bootstrap_lower_extra_hir_module_to_mir_for_target(hir_module: HirModule, tar
         function_names.push(bootstrap_hir_function_symbol_name(hir_module, func))
         if not func.is_method:
             function_names.push(bootstrap_hir_accumulator_name(hir_module, func))
+        # Declared-return-type registry (native_call_return_type_loss
+        # 2026-07-23): bare + qualified spellings, cross-module global.
+        # Str-only — see the entry-path comment above (W93 regression).
+        match func.return_type.kind:
+            case HirTypeKind.Str:
+                val bx_ret_ty = lowering.lower_type(func.return_type)
+                bootstrap_fn_ret_type_register(func.name, bx_ret_ty)
+                bootstrap_fn_ret_type_register(bootstrap_hir_function_symbol_name(hir_module, func), bx_ret_ty)
+                if not func.is_method:
+                    bootstrap_fn_ret_type_register(bootstrap_hir_accumulator_name(hir_module, func), bx_ret_ty)
+            case _: ()
     for function_name in _bootstrap_function_value_names:
         function_names.push(function_name)
     lowering.current_function_names = function_names

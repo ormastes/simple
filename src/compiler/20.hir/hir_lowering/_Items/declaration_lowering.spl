@@ -264,16 +264,40 @@ impl HirLowering:
         # Lower return type — use explicit check instead of .map() ?? default
         # to avoid crash with null coalescing on Option.map result
         var return_type = HirType(kind: HirTypeKind.Unit, span: fn_.span)
-        if (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        # Gate on has_return_type, not `return_type.?`: return_type is a
+        # non-optional Type whose placeholder for an omitted annotation is a
+        # bare `Infer` node, so `.?` is always true and we would lower that
+        # Infer placeholder — which segfaults in lower_type_list. A function
+        # without an explicit return type keeps the default Unit result.
+        #
+        # DECLARED type takes priority in BOTH modes. The bootstrap arm used
+        # to unconditionally consult bootstrap_builtin_return_type(name) —
+        # a workaround from when the flat bridge discarded declared returns
+        # (see convert_nodes.spl `inferred_ret`). After the bridge fix that
+        # inversion silently retyped EVERY declared `-> text` (etc.) to the
+        # table's i64 default, so call results lost their static type and
+        # interpolation/concat rendered text handles as raw integers
+        # (native_call_return_type_loss 2026-07-23). The table remains the
+        # fallback for bootstrap functions with no declaration.
+        if fn_.has_return_type:
+            val declared_ret = self.lower_type(fn_.return_type)
+            if (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                # NARROW (deliberate): in bootstrap mode only Str declared
+                # returns take priority for now. Widening every declared type
+                # (arrays/structs/dicts) immediately broke consumers tuned to
+                # the uniform-i64 convention (`get_args()` -> Array-typed local
+                # made `a.len()` lower to the raw receiver -> strlen SIGSEGV,
+                # W92). Widen type-by-type with repro coverage; ceiling noted
+                # in native_call_return_type_loss 2026-07-23.
+                match declared_ret.kind:
+                    case HirTypeKind.Str:
+                        return_type = declared_ret
+                    case _:
+                        return_type = bootstrap_builtin_return_type(fn_.name, fn_.span)
+            else:
+                return_type = declared_ret
+        elif (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
             return_type = bootstrap_builtin_return_type(fn_.name, fn_.span)
-        else:
-            # Gate on has_return_type, not `return_type.?`: return_type is a
-            # non-optional Type whose placeholder for an omitted annotation is a
-            # bare `Infer` node, so `.?` is always true and we would lower that
-            # Infer placeholder — which segfaults in lower_type_list. A function
-            # without an explicit return type keeps the default Unit result.
-            if fn_.has_return_type:
-                return_type = self.lower_type(fn_.return_type)
         if bootstrap_diag:
             eprint("[hir-lower] lower_function:return_type {fn_.name}")
 
@@ -318,12 +342,9 @@ impl HirLowering:
         # interpreter's main. main's untyped body returns Unit (defaulted above),
         # so it needs none of this user-function return inference.
         if (not fn_.has_return_type) and (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1" and fn_.name != "main":
-            # if-val: .unwrap() is box-assuming and returns 0 off a flat
-            # HirType? here — .kind then nil-receiver-trapped (SIGILL) for
-            # every void user function (bug doc 2026-07-23).
             val fn_sym_type = self.symbols.get_symbol_type(fn_symbol_id)
-            if val fn_sym_type_v = fn_sym_type:
-                match fn_sym_type_v.kind:
+            if fn_sym_type.?:
+                match fn_sym_type.unwrap().kind:
                     case HirTypeKind.Function(_, ret, _):
                         return_type = ret
                     case _:
