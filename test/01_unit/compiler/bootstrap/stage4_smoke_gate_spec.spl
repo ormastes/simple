@@ -56,6 +56,7 @@ describe "bootstrap stage4 smoke gate":
     it "rejects seed fallback and gates the full candidate before deployment":
         val script = rt_file_read_text("scripts/bootstrap/bootstrap-from-scratch.sh") ?? ""
         val admission = rt_file_read_text("scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs") ?? ""
+        val check_entry = rt_file_read_text("src/app/cli/check_entry.spl") ?? ""
 
         expect(script).to_contain("refusing seed fallback")
         expect(script).to_contain("CANDIDATE_FRONTEND_ROOT=${{repo_root}}")
@@ -76,15 +77,25 @@ describe "bootstrap stage4 smoke gate":
         expect(admission).to_contain("grep -Fq 'stage4-delegate-stderr'")
         expect(admission).to_contain("env_probe=$(SIMPLE_BINARY=\"$candidate\"")
         expect(admission).to_contain("SIMPLE_FRONTEND_DELEGATE=\"$candidate\"")
-        expect(admission).to_contain("[ \"$env_probe\" = true ] || exit 1")
+        expect(admission).to_contain("[ \"$env_probe\" = true ] || return 1")
         expect(admission).to_contain("fixtures/p2_add.spl")
         expect(admission).to_contain("--runtime-bundle core-c-bootstrap")
         expect(admission).to_contain("--mode one-binary")
+        expect(admission).to_contain("cat \"$probe_dir/build.log\" >&2")
         expect(admission).to_contain("--mode definitely-invalid-mode")
         expect(admission).to_contain("trap 'rm -rf \"$probe_dir\"' 0")
         expect(admission).to_contain("simple_binary_is_valid() (")
         expect(admission).to_contain("version=$(SIMPLE_BINARY=\"$candidate\"")
         expect(admission).to_contain("__SIMPLE_CANDIDATE_ENV_ABI__")
+        val configured_pos: i64 = check_entry.find("val configured = env_get(\"SIMPLE_BINARY\")") ?? -1
+        val configured_bin_pos: i64 = check_entry.find("val configured_bin = env_get(\"SIMPLE_BIN\")") ?? -1
+        val uname_pos: i64 = check_entry.find("process_run_timeout(\"uname\"") ?? -1
+        expect(check_entry).to_contain("use app.io.env_ops.{{env_get}}")
+        expect(check_entry).to_contain("configured != nil and configured != \"\" and file_exists(configured)")
+        expect(check_entry).to_contain("configured_bin != nil and configured_bin != \"\" and file_exists(configured_bin)")
+        expect(configured_pos).to_be_greater_than(-1)
+        expect(configured_bin_pos).to_be_greater_than(configured_pos)
+        expect(uname_pos).to_be_greater_than(configured_bin_pos)
         expect(script).to_contain("stage4-redeploy-gate")
         expect(script).to_contain("redeploy_gate/redeploy_gate.shs")
 

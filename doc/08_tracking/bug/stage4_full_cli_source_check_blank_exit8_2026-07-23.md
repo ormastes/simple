@@ -58,9 +58,15 @@ a distinct isolated-layout bug and exits 127:
 timeout: failed to run command 'bin/simple': No such file or directory
 ```
 
-`src/app/cli/check_entry.spl::resolve_worker_binary` ignores the supplied
-`SIMPLE_BINARY` before falling back to `bin/simple`. Fix that owner and add an
-isolated-layout regression before running the official source-check again.
+`src/app/cli/check_entry.spl::resolve_worker_binary` ignored the supplied
+`SIMPLE_BINARY` before falling back to `bin/simple`. The source now prefers an
+existing explicit `SIMPLE_BINARY`, then `SIMPLE_BIN`, before host-derived
+fallbacks. The exact source-check then passes on the corrected candidate:
+
+```text
+exit=0
+All checks passed (1 file(s))
+```
 
 The remaining candidate frontend smoke also rejects this candidate with
 SIGILL while native-building the tiny `p2_add.spl` fixture. The attempted
@@ -68,6 +74,15 @@ pure-Simple incremental relink was terminated after sustained single-core work
 with no phase output; the final temporary-seed relink reused the cache correctly
 (`5 compiled, 1372 cached, 0 failed`, 174.5 seconds). Diagnose the SIGILL and
 the pure relink cache/parallelism regression as separate bounded lanes.
+
+A direct run of the focused Stage4 contract emitted a real BDD footer
+(`16 examples, 2 failures`), while `simple test` captured an empty child result
+and reported `no parseable pass/fail summary`. The parser already recognizes
+that footer; the Stage4 bounded child-result path loses the evidence before
+parsing. The exact failing boundary (`process_run_with_limits_bounded`,
+`rt_process_run_bounded`, or their result conversion) is not isolated yet. It
+must retain stdout, stderr, and nonzero status before the focused runner can
+qualify this candidate. Do not synthesize a pass from missing output.
 
 Do not deploy this candidate until those blockers pass. Do not remap exits,
 fall back to the Rust seed for normal tooling, or rerun already-green delegation
