@@ -57,6 +57,8 @@ argument owner, while the DTYP query/LSP leaf ignores already-named calls. The
 generic `pass_todo` source lint remains the STUB003 owner so each finding is
 emitted once. The CLI-owned parsed adapter also reports wildcard import/export
 and fails closed with PARSE001 when source cannot be parsed.
+Query/LSP applies `visibility_boundary` to W0404 too: `@allow` suppresses the
+module diagnostic and `@deny` promotes it to an error.
 
 | Code | Category | Severity | Description |
 |------|----------|----------|-------------|
