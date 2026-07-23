@@ -47,8 +47,9 @@ The lint system operates at three layers:
 Deep analysis using the arena-based AST. Query/LSP diagnostics dispatch the ARG,
 COLL, DTYP, STUB, wildcard-import/export, and wide-public leaves through
 `src/app/cli/query_lint.spl`. Production `simple lint` now runs parser-backed
-ARG001/ARG002 in its CLI-owned path; parity for the remaining AST leaves is
-still tracked as open work.
+ARG001/ARG002 and STUB001/STUB002 in its CLI-owned path; the generic `pass_todo`
+source lint remains the STUB003 owner so that placeholder is emitted once. Parity for the
+remaining AST leaves is still tracked as open work.
 
 | Code | Category | Severity | Description |
 |------|----------|----------|-------------|
@@ -61,8 +62,8 @@ still tracked as open work.
 | COLL007 | Collection | HIGH | Array rebuild to pop last — use `.pop()` |
 | COLL008 | Collection | MEDIUM | Unbounded global `.push()` with no reset |
 | DTYP001 | Type Safety | WARNING | Positional args sharing type — use named args |
-| STUB001 | Stub Impl | ERROR | Function with params returns trivial value, params unused |
-| STUB002 | Stub Impl | INFO | Zero-param function returns default value (possible stub) |
+| STUB001 | Stub Impl | WARN → ERROR by default config | Function with params returns trivial value, params unused |
+| STUB002 | Stub Impl | ALLOW → ERROR by default config | Zero-param function returns default value (possible stub) |
 | STUB003 | Stub Impl | ERROR | Whole-function explicit placeholder body (`pass_todo`, `pass_do_nothing`, `pass_dn`) in production code |
 | ACC001 | Accessor Quality | ERROR | Getter/setter pair is a dummy field wrapper with no real contract or behavior |
 | NAME001 | Naming Correctness | ERROR | Child method name is suspiciously similar to inherited parent API; use `@name_checked` for intentional shims |
@@ -207,8 +208,12 @@ fn create_user(info: UserInfo, manager: text, office: text):
 ## Stub Implementation Lint (STUB001-STUB003)
 
 Detects functions with trivial/dummy implementations that may be unintentional stubs.
+The public CLI parses once and adds STUB001/STUB002 with declaration spans;
+their base levels are Warn/Allow, and the default `stub_impl = deny` setting
+promotes both to errors. `@warn(stub_impl)` downgrades them and
+`@allow(stub_impl)` suppresses them.
 
-### STUB001: Trivial Return with Unused Parameters (ERROR)
+### STUB001: Trivial Return with Unused Parameters (default ERROR)
 
 Fires when a function has parameters but its body is a single trivial expression that doesn't reference any of them.
 
@@ -227,7 +232,7 @@ fn run_backend(module: text) -> Result:
     Ok(nil)
 ```
 
-### STUB002: Zero-Param Default Return (INFO)
+### STUB002: Zero-Param Default Return (default ERROR)
 
 Fires when a zero-parameter function returns a type-default value. Lower confidence since it could be a legitimate constant.
 

@@ -4,10 +4,12 @@
 - **Observed:** the CLI `Linter` registers ARG/STUB codes but its `lint_source` path only executes line/source and EasyFix checks. A zero-parameter default-return function can exit clean without STUB002.
 - **Cause:** production lint and query diagnostics use different adapters over the shared `compiler.semantics.lint.*` leaves; neither adapter was a whole shared owner.
 - **Implemented slice:** the CLI-owned lint path parses once and translates
-  ARG001/ARG002 into configured `LintResult` values with parser-backed source
-  lines. Generic in-process `Linter.lint_source` remains parser-free because
-  parsing resets shared compiler AST state. The unified CLI fallback now uses
-  that same canonical lint-command owner.
-- **Remaining fix:** route the remaining STUB, COLL, DTYP, wildcard-import, and
-  wide-public semantic leaves through the CLI-owned parsed adapter, then prove
-  CLI/query code parity and qualify the exact fresh Stage 4 binary.
+  ARG001/ARG002 and STUB001/STUB002 into configured `LintResult` values with
+  parser-backed source lines. The generic `pass_todo` check stays the STUB003
+  owner so that placeholder is emitted once. Generic in-process
+  `Linter.lint_source` remains parser-free because parsing resets shared
+  compiler AST state. The unified CLI fallback uses that same canonical
+  lint-command owner.
+- **Remaining fix:** route COLL, DTYP, wildcard-import, and wide-public semantic
+  leaves through the CLI-owned parsed adapter, then prove CLI/query code parity
+  and qualify the exact fresh Stage 4 binary.

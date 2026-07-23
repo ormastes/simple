@@ -20,6 +20,7 @@ use compiler.semantics.lint.riscv_rtl_debuggability_lint.{lint_riscv_rtl_debugga
 use compiler.core.ast.{module_get_decls}
 use compiler.core.parser.{parse_module_silent, parser_has_errors, parser_set_had_error}
 use compiler.semantics.lint.argument_count.{check_argument_count}
+use compiler.semantics.lint.stub_impl.{check_stub_impl}
 
 # File I/O wrapper
 
@@ -36,12 +37,24 @@ fn lint_cli_source(linter: Linter, path: String, content: String) -> [LintResult
         return results
 
     val config = resolve_lint_config(linter.config, path, content)
-    for warning in check_argument_count(module_get_decls()):
+    val decls = module_get_decls()
+    for warning in check_argument_count(decls):
         if not should_keep_lint_result(config, warning.code):
             continue
         val base_level = if warning.code == "ARG002": LintLevel.Deny else: LintLevel.Warn
         val level = apply_config_level(config, warning.code, base_level)
         val lint = Lint.new(warning.code, level, LintCategory.Style, warning.message)
+            .with_fix(warning.hint)
+        results.push(LintResult.new(path, warning.line, 0, lint))
+    for warning in check_stub_impl(decls):
+        # STUB003 remains the generic source lint so one placeholder emits once.
+        if warning.code != "STUB001" and warning.code != "STUB002":
+            continue
+        if not should_keep_lint_result(config, warning.code):
+            continue
+        val base_level = if warning.code == "STUB001": LintLevel.Warn else: LintLevel.Allow
+        val level = apply_config_level(config, warning.code, base_level)
+        val lint = Lint.new(warning.code, level, LintCategory.Warning, warning.message)
             .with_fix(warning.hint)
         results.push(LintResult.new(path, warning.line, 0, lint))
     results

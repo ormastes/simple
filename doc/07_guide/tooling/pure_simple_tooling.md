@@ -161,13 +161,14 @@ evidence boundary for the important pure-Simple tooling lanes:
   **Remaining bug/gap:** capability-owned provider composition still blocks the
   full CLI. **Next solution:** complete the canonical provider profile, then
   build and qualify the fresh Stage 4 CLI.
-- **lint** — **Source status:** parser-backed ARG001/ARG002 CLI parity is
-  implemented; the other AST leaves remain open. **Strongest current evidence:**
-  the focused warn/deny/allow, decoy-line, extern-span, and compatibility
-  contract passes as bounded bootstrap repair evidence; see
+- **lint** — **Source status:** parser-backed ARG001/ARG002 and STUB001/STUB002
+  CLI parity is implemented; the generic `pass_todo` check remains the STUB003
+  owner so that placeholder is not duplicated, and the other AST leaves remain open. **Strongest current evidence:**
+  the focused warn/deny/allow, decoy-line, extern-span, compatibility, and
+  STUB line/config contract checks are bounded bootstrap repair evidence; see
   [the AST dispatch report](../../08_tracking/bug/simple_lint_ast_rules_unwired_2026-07-19.md).
-  **Remaining bug/gap:** this is not fresh Stage 4 evidence, and STUB, COLL,
-  DTYP, wildcard-import, and wide-public parity is incomplete. **Next
+  **Remaining bug/gap:** this is not fresh Stage 4 evidence, and COLL, DTYP,
+  wildcard-import, and wide-public parity is incomplete. **Next
   solution:** qualify ARG through the exact fresh CLI, then extend the same
   CLI-owned parsed adapter one semantic leaf at a time.
 - **fmt / fix** — **Source status:** atomic writes and fail-closed source
