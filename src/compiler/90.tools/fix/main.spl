@@ -94,23 +94,7 @@ class FixApplicator:
         Ok(results)
 
     static fn apply_to_disk(fixes: [EasyFix], sources: Dict<String, String>, dry_run: Bool) -> Result<FixReport, String>:
-        val result = FixApplicator.apply(fixes, sources)
-        match result:
-            case Err(e):
-                return Err(e)
-            case Ok(new_contents):
-                var report = FixReport(applied: 0, skipped: 0, modified_files: [], details: [])
-                report.applied = fixes.len()
-
-                for file in new_contents.keys():
-                    if not dry_run and not file_atomic_write(file, new_contents[file]):
-                        return Err("Atomic fix write failed: {file}")
-                    report.modified_files.push(file)
-
-                for fix in fixes:
-                    report.details.push("[{easyfix_id(fix)}] {easyfix_description(fix)}")
-
-                Ok(report)
+        apply_fixes_to_disk(fixes, sources, dry_run)
 
     static fn filter_by_confidence(fixes: [EasyFix], min_confidence: FixConfidence) -> [EasyFix]:
         match min_confidence:
@@ -135,6 +119,25 @@ class FixApplicator:
             if easyfix_id(f).starts_with(id_prefix):
                 out = out.push(f)
         out
+
+pub fn apply_fixes_to_disk(fixes: [EasyFix], sources: Dict<String, String>, dry_run: Bool) -> Result<FixReport, String>:
+    val result = FixApplicator.apply(fixes, sources)
+    match result:
+        case Err(e):
+            return Err(e)
+        case Ok(new_contents):
+            var report = FixReport(applied: 0, skipped: 0, modified_files: [], details: [])
+            report.applied = fixes.len()
+
+            for file in new_contents.keys():
+                if not dry_run and not file_atomic_write(file, new_contents[file]):
+                    return Err("Atomic fix write failed: {file}")
+                report.modified_files.push(file)
+
+            for fix in fixes:
+                report.details.push("[{easyfix_id(fix)}] {easyfix_description(fix)}")
+
+            Ok(report)
 
 # ============================================================================
 # InteractiveFix: prompts user for each fix
@@ -257,7 +260,7 @@ async fn main() -> Int:
                     return 0
 
             # Apply fixes
-            val apply_result = FixApplicator.apply_to_disk(filtered, sources, dry_run)
+            val apply_result = apply_fixes_to_disk(filtered, sources, dry_run)
             match apply_result:
                 case Ok(report):
                     print(report.format(dry_run))

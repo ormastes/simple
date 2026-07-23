@@ -487,10 +487,10 @@ bin/simple fix file.spl --dry-run
 bin/simple fix file.spl
 
 # Apply all fixes (including uncertain)
-bin/simple fix file.spl --all
+bin/simple fix file.spl --fix-all
 
-# Interactive mode
-bin/simple fix file.spl --interactive
+# Apply only an ID-prefix-selected fix
+bin/simple fix file.spl --fix-id=L:deprecated_if_let
 ```
 
 ---
@@ -518,6 +518,10 @@ with `--fix`, `--fix-all`, or `--fix-dry-run`; fixes use the atomic file owner
 and emit a `lint-fix-summary` JSON line instead of human progress.
 Unknown options and bare or empty `--profile` values are usage errors; they are
 rejected with exit 2 before any file is linted.
+
+For `simple fix`, only `--dry-run`, `--fix-all`, and a nonempty `--fix-id=ID`
+are accepted. Unknown or malformed options exit 2 before source files are read
+or written.
 
 ---
 
