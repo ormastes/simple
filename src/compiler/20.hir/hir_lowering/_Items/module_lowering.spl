@@ -542,6 +542,12 @@ impl HirLowering:
                 val tier_key = "lib." + tier + "." + std_tail
                 cands = cands.push(tier_key)
                 cands = cands.push(tier_key + ".__init__")
+                # Files reached via the src/std -> lib symlink derive their
+                # module name with the std. prefix (src/std/nogc_sync_mut/
+                # simd.spl -> std.nogc_sync_mut.simd) — try that spelling too.
+                val tier_std_key = "std." + tier + "." + std_tail
+                cands = cands.push(tier_std_key)
+                cands = cands.push(tier_std_key + ".__init__")
         var ci = 0
         while ci < cands.len():
             if self.modules_by_name.contains_key(cands[ci]):
@@ -697,11 +703,32 @@ impl HirLowering:
             self.register_imported_symbol(imported_mod, imported_mod_name, keys[idx], keys[idx], import_span)
             idx = idx + 1
 
+        # Facade globs: `use std.simd.*` can resolve to a tier FACADE (e.g.
+        # lib/nogc_async_mut/simd.spl) whose own decl dicts are empty — it
+        # only `export use`-re-exports items from the owning tier module.
+        # Register each of the facade's import items too; the ones the facade
+        # doesn't declare route through find_reexport_source inside
+        # register_imported_symbol and land on the defining module's
+        # canonical name.
+        var glob_imp_idx = 0
+        while glob_imp_idx < imported_mod.imports.len():
+            val glob_imp = imported_mod.imports[glob_imp_idx]
+            var glob_it = 0
+            while glob_it < glob_imp.items.len():
+                val glob_item = glob_imp.items[glob_it]
+                val glob_local = if glob_item.has_alias: glob_item.alias else: glob_item.name
+                self.register_imported_symbol(imported_mod, imported_mod_name, glob_local, glob_local, import_span)
+                glob_it = glob_it + 1
+            glob_imp_idx = glob_imp_idx + 1
+
     me resolve_import_symbols(module: Module):
         var import_idx = 0
         while import_idx < module.imports.len():
             val imp = module.imports[import_idx]
             var imported_mod: Module? = self.modules_by_name.get(imp.module)
+            if (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
+                val dbg_fns = if imported_mod != nil: (imported_mod ?? module).functions.len() else: -1
+                eprint("[imp] importer={module.name} module={imp.module} items={imp.items.len()} fns={dbg_fns}")
             # Symbols must register under the DEFINING module's canonical name:
             # a relative alias like ".helper" would otherwise be baked into the
             # call symbol (@.helper.helper_val) while the definition object
@@ -1005,7 +1032,13 @@ impl HirLowering:
             while bootstrap_decl_idx < bootstrap_function_keys.len():
                 val bootstrap_decl_fn: Function = bootstrap_module_functions[bootstrap_function_keys[bootstrap_decl_idx]]
                 val bootstrap_decl_sym = self.symbols.define(bootstrap_decl_fn.name, SymbolKind.Function, nil, Span.empty(), false, false, nil)
-                if bootstrap_decl_qualify:
+                # Extern fns must keep their BARE runtime symbol: qualifying
+                # them ("std.nogc_sync_mut.simd.rt_simd_has_avx2") makes every
+                # same-module call emit an undefined module-prefixed symbol at
+                # link time — the definition side (bootstrap_globals.spl)
+                # already skips externs, so nothing ever defines the qualified
+                # spelling.
+                if bootstrap_decl_qualify and not bootstrap_decl_fn.is_extern:
                     self.symbols.rename_symbol(bootstrap_decl_sym, "{bootstrap_decl_module_name}.{bootstrap_decl_fn.name}")
                 bootstrap_decl_idx = bootstrap_decl_idx + 1
             while lower_idx < bootstrap_function_keys.len():
