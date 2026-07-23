@@ -368,53 +368,15 @@ fn _driver_resolve_relative_entry_import(module_path: text, entry_dir: text) -> 
     val rel = module_path.substring(dots).replace(".", "/")
     _driver_try_entry_import_rel(rel, base_dir)
 
-fn _driver_resolve_entry_import_exact(module_path: text, entry_dir: text) -> text:
-    val relative = _driver_resolve_relative_entry_import(module_path, entry_dir)
-    if relative != "":
-        return relative
-
-    val rel = module_path.replace(".", "/")
-    val direct = _driver_try_entry_import_rel(rel, entry_dir)
-    if direct != "":
-        return direct
-
-    if not module_path.starts_with("std."):
-        val lib_base = "src/lib/" + rel
-        if rt_file_exists(lib_base + ".spl"):
-            return lib_base + ".spl"
-        if rt_file_exists(lib_base + "/mod.spl"):
-            return lib_base + "/mod.spl"
-        if rt_file_exists(lib_base + "/__init__.spl"):
-            return lib_base + "/__init__.spl"
-        for family in ["nogc_async_mut", "nogc_async_immut", "nogc_sync_immut", "nogc_sync_mut", "common", "gc_async_mut", "gc_async_immut", "gc_sync_mut", "gc_sync_immut", "nogc_async_mut_noalloc"]:
-            val family_base = "src/lib/" + family + "/" + rel
-            if rt_file_exists(family_base + ".spl"):
-                return family_base + ".spl"
-            if rt_file_exists(family_base + "/mod.spl"):
-                return family_base + "/mod.spl"
-            if rt_file_exists(family_base + "/__init__.spl"):
-                return family_base + "/__init__.spl"
-    if module_path.starts_with("std."):
-        val lib_base = "src/lib/" + rel.substring(4)
-        if rt_file_exists(lib_base + ".spl"):
-            return lib_base + ".spl"
-        if rt_file_exists(lib_base + "/mod.spl"):
-            return lib_base + "/mod.spl"
-        if rt_file_exists(lib_base + "/__init__.spl"):
-            return lib_base + "/__init__.spl"
-        val lib_subpath = rel.substring(4)
-        for family in ["nogc_async_mut", "nogc_async_immut", "nogc_sync_immut", "nogc_sync_mut", "common", "gc_async_mut", "gc_async_immut", "gc_sync_mut", "gc_sync_immut", "nogc_async_mut_noalloc"]:
-            val family_base = "src/lib/" + family + "/" + lib_subpath
-            if rt_file_exists(family_base + ".spl"):
-                return family_base + ".spl"
-            if rt_file_exists(family_base + "/mod.spl"):
-                return family_base + "/mod.spl"
-            if rt_file_exists(family_base + "/__init__.spl"):
-                return family_base + "/__init__.spl"
-
-    # Match the canonical numbered compiler layout used by the interpreter's
-    # module resolver. Some layers also retain a same-named wrapper directory;
-    # try both forms without scanning the full source tree.
+fn _driver_resolve_numbered_compiler_import(module_path: text, entry_dir: text) -> text:
+    # Compiler imports dominate Stage4's entry closure. Resolve their canonical
+    # numbered layout before probing every generic stdlib family.
+    # The exact compatibility facade is intentionally owned by src/lib.
+    if module_path == "compiler.mir_opt":
+        return ""
+    val is_numbered = module_path.starts_with("compiler.") or module_path == "monomorphize" or module_path.starts_with("monomorphize.") or module_path == "linker" or module_path.starts_with("linker.")
+    if not is_numbered:
+        return ""
     var mapped = _driver_resolve_rewritten_import(module_path, "compiler.common", "compiler/00.common", entry_dir)
     if mapped != "":
         return mapped
@@ -469,7 +431,58 @@ fn _driver_resolve_entry_import_exact(module_path: text, entry_dir: text) -> tex
     mapped = _driver_resolve_rewritten_import(module_path, "linker", "compiler/70.backend/linker", entry_dir)
     if mapped != "":
         return mapped
-    mapped = _driver_resolve_rewritten_import(module_path, "app.ui.browser", "app/ui.browser", entry_dir)
+    _driver_resolve_rewritten_import(module_path, "compiler.backend", "compiler/70.backend/backend", entry_dir)
+
+fn _driver_resolve_entry_import_exact(module_path: text, entry_dir: text) -> text:
+    val relative = _driver_resolve_relative_entry_import(module_path, entry_dir)
+    if relative != "":
+        return relative
+
+    val rel = module_path.replace(".", "/")
+    val direct = _driver_try_entry_import_rel(rel, entry_dir)
+    if direct != "":
+        return direct
+
+    val numbered_compiler = _driver_resolve_numbered_compiler_import(module_path, entry_dir)
+    if numbered_compiler != "":
+        return numbered_compiler
+
+    if not module_path.starts_with("std."):
+        val lib_base = "src/lib/" + rel
+        if rt_file_exists(lib_base + ".spl"):
+            return lib_base + ".spl"
+        if rt_file_exists(lib_base + "/mod.spl"):
+            return lib_base + "/mod.spl"
+        if rt_file_exists(lib_base + "/__init__.spl"):
+            return lib_base + "/__init__.spl"
+        for family in ["nogc_async_mut", "nogc_async_immut", "nogc_sync_immut", "nogc_sync_mut", "common", "gc_async_mut", "gc_async_immut", "gc_sync_mut", "gc_sync_immut", "nogc_async_mut_noalloc"]:
+            val family_base = "src/lib/" + family + "/" + rel
+            if rt_file_exists(family_base + ".spl"):
+                return family_base + ".spl"
+            if rt_file_exists(family_base + "/mod.spl"):
+                return family_base + "/mod.spl"
+            if rt_file_exists(family_base + "/__init__.spl"):
+                return family_base + "/__init__.spl"
+    if module_path.starts_with("std."):
+        val lib_base = "src/lib/" + rel.substring(4)
+        if rt_file_exists(lib_base + ".spl"):
+            return lib_base + ".spl"
+        if rt_file_exists(lib_base + "/mod.spl"):
+            return lib_base + "/mod.spl"
+        if rt_file_exists(lib_base + "/__init__.spl"):
+            return lib_base + "/__init__.spl"
+        val lib_subpath = rel.substring(4)
+        for family in ["nogc_async_mut", "nogc_async_immut", "nogc_sync_immut", "nogc_sync_mut", "common", "gc_async_mut", "gc_async_immut", "gc_sync_mut", "gc_sync_immut", "nogc_async_mut_noalloc"]:
+            val family_base = "src/lib/" + family + "/" + lib_subpath
+            if rt_file_exists(family_base + ".spl"):
+                return family_base + ".spl"
+            if rt_file_exists(family_base + "/mod.spl"):
+                return family_base + "/mod.spl"
+            if rt_file_exists(family_base + "/__init__.spl"):
+                return family_base + "/__init__.spl"
+
+    # Non-compiler application/tool rewrites retain generic library precedence.
+    var mapped = _driver_resolve_rewritten_import(module_path, "app.ui.browser", "app/ui.browser", entry_dir)
     if mapped != "":
         return mapped
     mapped = _driver_resolve_rewritten_import(module_path, "app.ui.render", "app/ui.render", entry_dir)
@@ -478,9 +491,6 @@ fn _driver_resolve_entry_import_exact(module_path: text, entry_dir: text) -> tex
     mapped = _driver_resolve_rewritten_import(module_path, "cmm_lsp", "examples/10_tooling/trace32_tools/cmm_lsp", entry_dir)
     if mapped != "":
         return mapped
-    val backend_wrapped = _driver_resolve_rewritten_import(module_path, "compiler.backend", "compiler/70.backend/backend", entry_dir)
-    if backend_wrapped != "":
-        return backend_wrapped
     ""
 
 pub fn _driver_resolve_entry_import(module_path: text, entry_dir: text) -> text:

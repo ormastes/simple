@@ -378,7 +378,14 @@ the shared binary — deploys require explicit user go-ahead).
   after `#` inside an active docstring still closes it. The focused regression
   covers both comment states, all declaration forms, long ordinary source,
   indentation, and Unicode before an import; fresh Stage4 execution evidence
-  remains pending. The canonical fixed-arity Stage4 API now also enables the
+  remains pending. A follow-up phase-one audit found that every `compiler.*`
+  closure import still exhausted the generic `src/lib` plus ten-family search
+  before trying its deterministic numbered compiler path, causing up to 33
+  doomed filesystem probes per exact import (and again for terminal-symbol
+  parents). Direct and relative candidates retain precedence, but numbered
+  compiler mappings now run before generic library-family probing; focused
+  resolver coverage pins both the paths and this ordering. Fresh bounded
+  Stage4 timing remains pending. The canonical fixed-arity Stage4 API now also enables the
   low-memory mode its wrapper already requested; previously it reconstructed
   default `CompileOptions` and silently disabled every existing eviction point.
   Per-file AST resets now retain and clear declaration/expression/statement
