@@ -1,0 +1,232 @@
+# ============================================================================
+# hardware/link_mux/mux.spl — the multi-channel mux/demux core
+# ============================================================================
+#
+# "Share one IO channel with many IO": LinkMux fans N logical byte streams
+# (log/term/jtag/ctrl) into ONE framed byte stream with FAIR round-robin
+# arbitration (a bulk log burst never starves a JTAG reply); LinkDemux does the
+# reverse on the far end. Both use the frame.spl codec, so the FPGA side and the
+# host side interoperate byte-for-byte.
+#
+# Configurability is the TransportProfile (real HW vs QEMU vs another FPGA pick a
+# different profile) — NOT a different frame format.
+#
+# STYLE: functional free functions that take state and return new state (the
+# soc_rtl `uart_mmio_write(u,…) -> u` idiom), NOT `me` self-mutation. A `me`
+# method that writes back into a `self` array-of-structs field across multiple
+# indices trips a seed JIT crash (doc/08_tracking/bug/
+# seed_jit_me_method_array_of_struct_writeback_nil_receiver_2026-07-23.md);
+# mutating a LOCAL array and returning a fresh struct is correct under JIT.
+# Simple arrays are value types, so read-modify-write-back is explicit.
+# ============================================================================
+
+use std.hardware.link_mux.frame.{DecodedFrame, frame_encode, frame_decode_body}
+
+# JTAG tunnel mode
+val JTAG_BITBANG: i64 = 0     # Phase 1: tunnel raw remote_bitbang bytes
+val JTAG_DMI_TUNNEL: i64 = 1  # Phase 2: tunnel DMI transactions (measured opt-in)
+
+# Conventional channel ids
+val CH_LOG: i64 = 0
+val CH_TERM: i64 = 1
+val CH_JTAG: i64 = 2
+val CH_CTRL: i64 = 3
+
+struct TransportProfile:
+    """Configurable link profile. Real HW / QEMU / another FPGA select a profile;
+    the frame format is fixed, only these knobs vary."""
+    name: text
+    jtag_mode: i64
+    baud: i64
+    max_frame: i64        # max payload bytes carried per frame (fairness quantum)
+    num_channels: i64
+    crc: bool
+
+fn transport_sim_loopback() -> TransportProfile:
+    TransportProfile(name: "sim-loopback", jtag_mode: JTAG_BITBANG, baud: 115200,
+        max_frame: 64, num_channels: 4, crc: true)
+
+fn transport_k26_pmod() -> TransportProfile:
+    """K26/KV260 PL PMOD-J2 UART (H12/E10). Needs the 3v3 PMOD adapter on real HW;
+    the mux does not remove that gap."""
+    TransportProfile(name: "k26-pmod-uart", jtag_mode: JTAG_BITBANG, baud: 115200,
+        max_frame: 64, num_channels: 4, crc: true)
+
+fn transport_arty() -> TransportProfile:
+    TransportProfile(name: "arty-uart", jtag_mode: JTAG_BITBANG, baud: 115200,
+        max_frame: 64, num_channels: 4, crc: true)
+
+fn imin(a: i64, b: i64) -> i64:
+    if a < b:
+        return a
+    b
+
+# ----------------------------------------------------------------------------
+# Per-channel byte buffer with a read cursor (`head`): bytes [0, head) are
+# consumed; compact (reset) only when fully drained, so the mux never rebuilds
+# the pending tail on every pump (that O(N^2) churn also trips a seed GC crash).
+# ----------------------------------------------------------------------------
+struct ChanBuf:
+    id: i64
+    data: [u8]
+    head: i64
+
+fn make_bufs(n: i64) -> [ChanBuf]:
+    var bufs: [ChanBuf] = []
+    var i = 0
+    while i < n:
+        var empty: [u8] = []
+        bufs.push(ChanBuf(id: i, data: empty, head: 0))
+        i = i + 1
+    bufs
+
+# ----------------------------------------------------------------------------
+# LinkMux — N streams -> one framed stream (fair round-robin)
+# ----------------------------------------------------------------------------
+struct LinkMux:
+    max_frame: i64
+    num_channels: i64
+    bufs: [ChanBuf]
+    rr: i64
+
+struct MuxPumpResult:
+    """New mux state + the framed bytes produced (empty frame = nothing pending)."""
+    mux: LinkMux
+    frame: [u8]
+
+fn mux_create(profile: TransportProfile) -> LinkMux:
+    LinkMux(max_frame: profile.max_frame, num_channels: profile.num_channels,
+        bufs: make_bufs(profile.num_channels), rr: 0)
+
+fn mux_push(mux: LinkMux, chan: i64, data: [u8]) -> LinkMux:
+    """Enqueue payload bytes for `chan` (appended in order)."""
+    var bufs = mux.bufs
+    var cb = bufs[chan]
+    # compact a fully-drained buffer before appending so it can't grow unbounded
+    if cb.head >= cb.data.len() and cb.head > 0:
+        var fresh: [u8] = []
+        cb.data = fresh
+        cb.head = 0
+    var i = 0
+    val n = data.len()
+    while i < n:
+        cb.data.push(data[i])
+        i = i + 1
+    bufs[chan] = cb
+    LinkMux(max_frame: mux.max_frame, num_channels: mux.num_channels, bufs: bufs, rr: mux.rr)
+
+fn mux_pending(mux: LinkMux) -> bool:
+    var i = 0
+    while i < mux.num_channels:
+        if mux.bufs[i].data.len() > mux.bufs[i].head:
+            return true
+        i = i + 1
+    false
+
+fn mux_pump_frame(mux: LinkMux) -> MuxPumpResult:
+    """Emit the next framed chunk from the round-robin-next non-empty channel
+    (<= max_frame payload bytes). Empty frame = nothing pending. Advancing rr past
+    the served channel guarantees fairness: no channel starves."""
+    var bufs = mux.bufs
+    var rr = mux.rr
+    var ch = rr
+    var tries = 0
+    while tries < mux.num_channels:
+        var cb = bufs[ch]
+        val have = cb.data.len() - cb.head
+        if have > 0:
+            val take_n = imin(have, mux.max_frame)
+            var payload: [u8] = []
+            var i = 0
+            while i < take_n:
+                payload.push(cb.data[cb.head + i])
+                i = i + 1
+            cb.head = cb.head + take_n
+            if cb.head >= cb.data.len():
+                var fresh: [u8] = []
+                cb.data = fresh
+                cb.head = 0
+            bufs[ch] = cb
+            val nmux = LinkMux(max_frame: mux.max_frame, num_channels: mux.num_channels,
+                bufs: bufs, rr: (ch + 1) % mux.num_channels)
+            return MuxPumpResult(mux: nmux, frame: frame_encode(ch, payload))
+        ch = (ch + 1) % mux.num_channels
+        tries = tries + 1
+    var none: [u8] = []
+    MuxPumpResult(mux: mux, frame: none)
+
+fn mux_pump_all(mux: LinkMux) -> MuxPumpResult:
+    """Drain every pending channel into one concatenated, fairly-interleaved
+    framed byte stream. Returns the drained mux + all bytes."""
+    var cur = mux
+    var out: [u8] = []
+    while mux_pending(cur):
+        val r = mux_pump_frame(cur)
+        cur = r.mux
+        var i = 0
+        while i < r.frame.len():
+            out.push(r.frame[i])
+            i = i + 1
+    MuxPumpResult(mux: cur, frame: out)
+
+# ----------------------------------------------------------------------------
+# LinkDemux — framed stream -> N per-channel output buffers
+# ----------------------------------------------------------------------------
+struct LinkDemux:
+    acc: [u8]             # bytes since the last 0x00 delimiter
+    outs: [ChanBuf]
+    num_channels: i64
+    bad_frames: i64       # rejected (malformed/CRC) frame count
+
+struct DemuxDrainResult:
+    demux: LinkDemux
+    bytes: [u8]
+
+fn demux_create(profile: TransportProfile) -> LinkDemux:
+    var empty: [u8] = []
+    LinkDemux(acc: empty, outs: make_bufs(profile.num_channels),
+        num_channels: profile.num_channels, bad_frames: 0)
+
+fn demux_feed(demux: LinkDemux, data: [u8]) -> LinkDemux:
+    """Consume incoming link bytes; on each 0x00 delimiter decode the frame and
+    route its payload to the destination channel (or count it bad)."""
+    var acc = demux.acc
+    var outs = demux.outs
+    var bad = demux.bad_frames
+    var i = 0
+    val n = data.len()
+    while i < n:
+        val b = data[i].to_i64() & 0xFF
+        if b == 0:
+            if acc.len() > 0:
+                val df = frame_decode_body(acc)
+                if df.ok and df.chan >= 0 and df.chan < demux.num_channels:
+                    var cb = outs[df.chan]
+                    var k = 0
+                    while k < df.payload.len():
+                        cb.data.push(df.payload[k])
+                        k = k + 1
+                    outs[df.chan] = cb
+                else:
+                    bad = bad + 1
+                var fresh: [u8] = []
+                acc = fresh
+        else:
+            acc.push(data[i])
+        i = i + 1
+    LinkDemux(acc: acc, outs: outs, num_channels: demux.num_channels, bad_frames: bad)
+
+fn demux_peek(demux: LinkDemux, chan: i64) -> [u8]:
+    demux.outs[chan].data
+
+fn demux_drain(demux: LinkDemux, chan: i64) -> DemuxDrainResult:
+    """Return the channel's accumulated output and a demux with it cleared."""
+    var outs = demux.outs
+    var cb = outs[chan]
+    val out = cb.data
+    var fresh: [u8] = []
+    cb.data = fresh
+    outs[chan] = cb
+    val nd = LinkDemux(acc: demux.acc, outs: outs, num_channels: demux.num_channels,
+        bad_frames: demux.bad_frames)
+    DemuxDrainResult(demux: nd, bytes: out)
