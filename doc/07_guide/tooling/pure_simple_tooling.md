@@ -161,13 +161,16 @@ evidence boundary for the important pure-Simple tooling lanes:
   **Remaining bug/gap:** the aggregate Stage 4 essential-tools smoke has not
   passed. **Next solution:** deploy a fresh Stage 4 CLI and run the exact
   essential-tools smoke from its temporary external working directory.
-- **check / build / run** — **Source status:** partially fixed; the full
-  pure-Simple CLI is not linked/qualified. **Strongest current evidence:**
-  Stage 2/3 success and the bounded Stage 4 analysis in
-  [the imported-provider report](../../08_tracking/bug/bootstrap_stage4_import_mangling_runtime_gap_2026-07-12.md).
-  **Remaining bug/gap:** capability-owned provider composition still blocks the
-  full CLI. **Next solution:** complete the canonical provider profile, then
-  build and qualify the fresh Stage 4 CLI.
+- **check / build / run** — **Source status:** the full pure-Simple CLI links,
+  preserves delegated streams/status, and its isolated official source-check
+  passes when `SIMPLE_BINARY` names the candidate. **Strongest current
+  evidence:** candidate `00431ce5…` and the bounded repair in
+  [the Stage 4 report](../../08_tracking/bug/stage4_full_cli_source_check_blank_exit8_2026-07-23.md).
+  **Remaining bug/gap:** Stage 4 is still rejected: the tiny p2 native-build
+  smoke SIGILLs, and the test runner loses bounded child output/status before
+  summary parsing. **Next solution:** isolate the p2 backend crash and the first
+  divergent bounded-result boundary independently; do not revisit the already
+  fixed provider/link and source-check lanes.
 - **lint** — **Source status:** parser-backed ARG001/ARG002, COLL001-COLL008,
   STUB001/STUB002, and module-level W0404 wide-public CLI parity are implemented; W0404 reports at
   line 1, honors `visibility_boundary`, and suppresses `__init__.spl`/`mod.spl` facades.
@@ -219,10 +222,11 @@ evidence boundary for the important pure-Simple tooling lanes:
   guide and the bootstrap build guide. **Remaining bug/gap:** the aggregate
   Stage 4 smoke still has not passed. **Next solution:** run that one bounded
   gate once after a fresh Stage 4 CLI is admitted.
-- **latest Stage 4 candidate (2026-07-23)** — revision `f2b493ec656` linked in
-  190.2s (4 compiled, 1,373 cached), but admission rejected it: with the
-  required seed sibling, `-c` prints `2` and the next official source-check
-  exits 8 with no output. Frontend, redeploy, and essential-tools gates were
+- **latest full Stage 4 candidate (2026-07-23)** — candidate SHA
+  `00431ce52f940722f52746a802011f7d33f35d4931738facee26c5c7b7917b31`
+  passes delegated stream/status fidelity and the isolated official
+  source-check. Admission still rejects it on the p2 native-build SIGILL and
+  bounded test-child result loss; frontend/redeploy/essential-tools gates are
   not credited. See the [candidate failure report](../../08_tracking/bug/stage4_full_cli_source_check_blank_exit8_2026-07-23.md).
 - **Codex session guard** — **Source status:** duplicate-resume locking and
   documented runaway thresholds are pushed. **Strongest current evidence:**
