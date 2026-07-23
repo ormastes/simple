@@ -591,7 +591,14 @@ impl MirLowering:
             slot_count = segments.len() - 1
 
         # result starts as the first literal segment (raw char*).
-        var result_local = self.bootstrap_coerce_to_raw_str(self.emit_bootstrap_str_const(segments[0]))
+        # Two statements, NOT nested `self.a(self.b(...))`: a nested me-call in
+        # argument position snapshots the receiver BEFORE the argument call's
+        # builder mutations, so the outer method's write-back clobbers the
+        # str-const emission and rewinds next_local_id -> the coerce call's
+        # fresh dest collides with its own operand (`%lN = rt_interp_cstr(%lN)`,
+        # llc "Only PHI nodes may reference their own value").
+        val seg0_local = self.emit_bootstrap_str_const(segments[0])
+        var result_local = self.bootstrap_coerce_to_raw_str(seg0_local)
 
         var k = 0
         while k < slot_count:
@@ -627,8 +634,10 @@ impl MirLowering:
             # expects downstream.
             val cstr_local = self.bootstrap_coerce_to_raw_str(interp_local)
             result_local = self.emit_raw_strcat(result_local, cstr_local)
-            # Append the following literal segment.
-            val next_seg = self.bootstrap_coerce_to_raw_str(self.emit_bootstrap_str_const(segments[k + 1]))
+            # Append the following literal segment (split statements — see the
+            # nested-me-call receiver-snapshot note on seg0 above).
+            val next_seg_const = self.emit_bootstrap_str_const(segments[k + 1])
+            val next_seg = self.bootstrap_coerce_to_raw_str(next_seg_const)
             result_local = self.emit_raw_strcat(result_local, next_seg)
             k = k + 1
 
@@ -1164,19 +1173,10 @@ impl MirLowering:
                     self.builder = b_timeout
                     timeout_tmp
                 else:
-                    # Primary: the symbol payload HirLowering already resolved
-                    # (same as the Var(symbol) arm above). The by-name
-                    # symbols.lookup is scope-sensitive and the HIR body scopes
-                    # are popped by MIR time, so it returns nil for every
-                    # function-local — keep it only as a fallback for the
-                    # nil-symbol seed quirk documented above.
                     var symbol_id = -1
-                    if symbol != nil:
-                        symbol_id = mir_expr_symbol_id_value(symbol)
-                    if symbol_id < 0:
-                        val resolved_symbol = self.symbols.lookup(name)
-                        if resolved_symbol != nil:
-                            symbol_id = resolved_symbol.id
+                    val resolved_symbol = self.symbols.lookup(name)
+                    if resolved_symbol != nil:
+                        symbol_id = resolved_symbol.id
                     if symbol_id < 0:
                         self.error("undefined variable: {name}", Some(expr_value.span))
                         var b_err3 = self.builder
@@ -2158,10 +2158,9 @@ impl MirLowering:
                 # `lower_if` (mir_lowering_stmts.spl) sidesteps it exactly
                 # this way, so mirror that proven pattern.
                 val base_local = self.lower_expr(base)
-                # This slot is the raw payload-or-nil sentinel regardless of
-                # the HIR annotation. The generated outer `v != nil` must test
-                # it before lower_if materializes a typed present-branch value.
-                val result_type = MirType.i64()
+                var result_type = MirType.i64()
+                if val expr_type = expr_value.type_:
+                    result_type = self.lower_type(expr_type)
                 # Struct-typed payload: `enum_payload_value`'s default arm
                 # (just below) hands back the raw ptrtoint'd handle
                 # untouched -- correct bits, but with no struct-name
@@ -2176,10 +2175,9 @@ impl MirLowering:
                 # can be attached to result_local once, mirroring how
                 # lower_result_unwrap/emit_resolved_direct_call register
                 # struct_value_syms for their own freshly-produced locals.
-                val exists_inner_type = self.option_inner_hir_type_for_local(base, base_local)
                 var result_struct_name = ""
-                if val found_exists_inner_type = exists_inner_type:
-                    match found_exists_inner_type.kind:
+                if val exists_inner_type = self.option_inner_hir_type_for_local(base, base_local):
+                    match exists_inner_type.kind:
                         case HirTypeKind.Named(exists_struct_symbol, _):
                             val exists_type_symbol = self.symbols.get_symbol(exists_struct_symbol)
                             if exists_type_symbol != nil:
@@ -2264,12 +2262,6 @@ impl MirLowering:
                     self.runtime_dict_locals[result_local.id] = true
                 if result_struct_name != "":
                     self.struct_value_syms[result_local.id] = result_struct_name
-                if val found_exists_inner_type = exists_inner_type:
-                    # Keep the merge slot raw-i64 so the generated `v != nil`
-                    # test can compare the nil sentinel. lower_if uses this
-                    # semantic type only after that test, while lowering the
-                    # present branch's bound value.
-                    self.local_hir_types[result_local.id] = found_exists_inner_type
 
                 var b_merge = self.builder
                 b_merge.switch_to_block(merge_block)
