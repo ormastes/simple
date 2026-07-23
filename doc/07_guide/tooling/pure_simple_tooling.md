@@ -157,22 +157,27 @@ evidence boundary for the important pure-Simple tooling lanes:
 - **test / test-daemon** — **Source status:** canonical direct summaries and
   responsive daemon routing and fail-closed atomic request publication are
   pushed. A request write/rename failure cleans artifacts and returns nonzero
-  before polling. **Strongest current evidence:** `eceddfd31d`, `7a011de61f`,
-  and `f5440b77fa`, plus the zero-executed regression in
+  before polling. Positive-timeout hosted capture now waits for pipe EOF or the
+  caller deadline instead of truncating delayed descendant output after two
+  seconds. **Strongest current evidence:** `eceddfd31d`, `7a011de61f`,
+  `f5440b77fa`, and `bd9de761c11`, plus the zero-executed regression in
   [the tracked report](../../08_tracking/bug/test_runner_zero_executed_single_file_greenwash_2026-07-17.md).
-  **Remaining bug/gap:** the aggregate Stage 4 essential-tools smoke has not
-  passed. **Next solution:** deploy a fresh Stage 4 CLI and run the exact
+  The bounded-capture root fix and evidence are recorded in
+  [the delayed-output report](../../08_tracking/bug/stage4_test_runner_bounded_capture_empty_2026-07-23.md).
+  **Remaining bug/gap:** neither that fix nor the aggregate essential-tools
+  smoke has fresh Stage 4 evidence. **Next solution:** deploy a fresh Stage 4
+  CLI, run the focused bounded-output contract once, then run the exact
   essential-tools smoke from its temporary external working directory.
 - **check / build / run** — **Source status:** the full pure-Simple CLI links,
   preserves delegated streams/status, and its isolated official source-check
-  passes when `SIMPLE_BINARY` names the candidate. **Strongest current
-  evidence:** candidate `00431ce5…` and the bounded repair in
+  passes when `SIMPLE_BINARY` names the candidate. The paired-value lowering
+  fix in `2f6430a87c8` clears the focused p2 enum probe at source. **Strongest
+  current evidence:** candidate `00431ce5…`, `2f6430a87c8`, and the bounded repair in
   [the Stage 4 report](../../08_tracking/bug/stage4_full_cli_source_check_blank_exit8_2026-07-23.md).
-  **Remaining bug/gap:** Stage 4 is still rejected: the tiny p2 native-build
-  smoke SIGILLs, and the test runner loses bounded child output/status before
-  summary parsing. **Next solution:** isolate the p2 backend crash and the first
-  divergent bounded-result boundary independently; do not revisit the already
-  fixed provider/link and source-check lanes.
+  **Remaining bug/gap:** no successor full CLI has qualified both the p2 source
+  fix and the bounded-output source fix. **Next solution:** incrementally build
+  one fresh Stage 4 candidate, run each focused regression once, then run the
+  aggregate essential-tools gate.
 - **lint** — **Source status:** parser-backed ARG001/ARG002, COLL001-COLL008,
   STUB001/STUB002, and module-level W0404 wide-public CLI parity are implemented; W0404 reports at
   line 1, honors `visibility_boundary`, and suppresses `__init__.spl`/`mod.spl` facades.
@@ -180,16 +185,18 @@ evidence boundary for the important pure-Simple tooling lanes:
   span instead of a same-name comment/string text match.
   The generic EasyFix rule remains the sole public duplicate-typed argument
   owner; the DTYP query/LSP leaf now ignores named calls. The generic
-  `pass_todo` check remains the STUB003 owner so findings are not duplicated,
-  and wildcard-import/export parity remains open. **Strongest current evidence:**
+  `pass_todo` check remains the STUB003 owner so findings are not duplicated.
+  Wildcard import/export parity is wired through W0406/W0407 with facade
+  suppression. **Strongest current evidence:**
   the focused warn/deny/allow, decoy-line, extern-span, compatibility, and
-  STUB and W0404 line/config/facade contract checks are bounded bootstrap repair evidence; the
+  STUB, W0404, and wildcard line/config/facade contracts are bounded bootstrap
+  repair evidence; the
   query STUB decoy-line contract passes on the Rust seed, while the deployed
   pure-Simple wrapper still segfaults before that contract executes; see
   [the AST dispatch report](../../08_tracking/bug/simple_lint_ast_rules_unwired_2026-07-19.md).
-  **Remaining bug/gap:** this is not fresh Stage 4 evidence, and wildcard-import
-  parity is incomplete. **Next solution:** qualify ARG/COLL/STUB/W0404 through
-  the exact fresh CLI, then extend the same CLI-owned parsed adapter one
+  **Remaining bug/gap:** `982ce3fa445` and the focused wildcard contract are not
+  fresh Stage 4 evidence. **Next solution:** qualify ARG/COLL/STUB/W0404/W0406/W0407
+  through the exact fresh CLI, then extend the same CLI-owned parsed adapter one
   semantic leaf at a time.
 - **fmt / fix** — **Source status:** atomic writes and fail-closed source
   rewrites are pushed. **Strongest current evidence:** `5b13444c83` and
@@ -197,16 +204,21 @@ evidence boundary for the important pure-Simple tooling lanes:
   **Next solution:** exercise mutation and write-failure cases through the
   newly deployed pure-Simple CLI.
 - **duplicate-check** — **Source status:** effective `mode`/`format`
-  validation plus same-file semantic and non-overlapping cosine matching are fixed;
-  overlapping windows cannot collapse into one-occurrence groups, and the
-  legacy 320-block sampler no longer drops late candidates. The existing
-  top-five signature index and 400-block bucket cap bound comparisons. **Strongest
-  current evidence:** `f2818a4b63` plus focused invalid-option and same-file
-  semantic/cosine contracts and source review; see
-  [the tracking report](../../08_tracking/bug/duplicate_check_invalid_enum_value_false_green_2026-07-19.md).
-  **Remaining bug/gap:** that is focused evidence only, not an aggregate Stage
-  4 pass. **Next solution:** run the clean/exact-clone/late-tail and invalid-option
-  essential-tools probes against the exact fresh CLI.
+  validation, actual token-mode `min_tokens` enforcement, same-file semantic
+  matching, and cosine fragment grouping are fixed. Overlapping cosine
+  candidates are threshold-scored before physical occurrences collapse, and
+  the legacy 320-block sampler no longer drops late candidates. The top-five
+  signature index and 400-block bucket cap still bound comparisons. **Strongest
+  current evidence:** `f2818a4b63`, `6a9af6f6635`, and `74594ec99ff`; the focused
+  detector spec passed 12 examples through the temporary bootstrap interpreter.
+  See the [token threshold report](../../08_tracking/bug/duplicate_check_token_mode_min_tokens_ignored_2026-07-23.md)
+  and [cosine fragment report](../../08_tracking/bug/duplicate_check_cosine_fragmented_occurrence_groups_2026-07-23.md).
+  **Remaining bug/gap:** fresh Stage 4 evidence is missing, and incremental-cache
+  flags remain deliberately rejected because their detector/cache path is
+  disconnected; see [the cache report](../../08_tracking/bug/duplicate_check_incremental_cache_disconnected_2026-07-23.md).
+  **Next solution:** run the focused and essential-tools probes against the
+  exact fresh CLI. Enable caching only after a non-cyclic grouping path and a
+  two-run cache/invalidation smoke pass.
 - **MCP** — **Source status:** the full wrapper's repository-root CWD restore
   is pushed. **Strongest current evidence:** `1035de83f1` and the wrapper
   contract above. **Remaining bug/gap:** a fresh Stage 4 native full-MCP
@@ -229,7 +241,9 @@ evidence boundary for the important pure-Simple tooling lanes:
   passes delegated stream/status fidelity and the isolated official
   source-check. Admission still rejects it on the p2 native-build SIGILL and
   bounded test-child result loss; frontend/redeploy/essential-tools gates are
-  not credited. See the [candidate failure report](../../08_tracking/bug/stage4_full_cli_source_check_blank_exit8_2026-07-23.md).
+  not credited. Both roots now have source fixes (`2f6430a87c8` and
+  `bd9de761c11`), but no successor full candidate is qualified. See the
+  [candidate failure report](../../08_tracking/bug/stage4_full_cli_source_check_blank_exit8_2026-07-23.md).
 - **Codex session guard** — **Source status:** duplicate-resume locking and
   documented runaway thresholds are pushed. **Strongest current evidence:**
   `879a767a73`, `0e5a2198a5`, and
