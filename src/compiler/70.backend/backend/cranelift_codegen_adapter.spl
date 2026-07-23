@@ -769,7 +769,15 @@ fn cl_translate_terminator(
                 cranelift_jump(ctx, block_map[target.id])
 
         case Ret(value):
-            if val ret_operand = value:
+            # Boxed-pairing consumer: ALL live Ret(MirOperand?) producers are
+            # Some-boxed (terminate_return(Some(...)) sites) — if-val here
+            # bound the BOX un-unwrapped and cl_translate_operand ud2'd on the
+            # box header (0x100000004). `.?` + `.unwrap()` is the correct
+            # idiom for a boxed payload (pairing rule, bug doc 2026-07-23);
+            # do NOT bare-lift the producers — 8+ case-Some/.unwrap consumers
+            # depend on the boxed repr.
+            if value.?:
+                val ret_operand = value.unwrap()
                 val ret_val = cl_translate_operand(ctx, cl_module, ret_operand, value_map, slot_map, func)
                 cranelift_return(ctx, ret_val)
             elif func.name == "main":
