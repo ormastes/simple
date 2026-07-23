@@ -219,6 +219,11 @@ evidence boundary for the important pure-Simple tooling lanes:
   guide and the bootstrap build guide. **Remaining bug/gap:** the aggregate
   Stage 4 smoke still has not passed. **Next solution:** run that one bounded
   gate once after a fresh Stage 4 CLI is admitted.
+- **latest Stage 4 candidate (2026-07-23)** — revision `f2b493ec656` linked in
+  190.2s (4 compiled, 1,373 cached), but admission rejected it: with the
+  required seed sibling, `-c` prints `2` and the next official source-check
+  exits 8 with no output. Frontend, redeploy, and essential-tools gates were
+  not credited. See the [candidate failure report](../../08_tracking/bug/stage4_full_cli_source_check_blank_exit8_2026-07-23.md).
 - **Codex session guard** — **Source status:** duplicate-resume locking and
   documented runaway thresholds are pushed. **Strongest current evidence:**
   `879a767a73`, `0e5a2198a5`, and
