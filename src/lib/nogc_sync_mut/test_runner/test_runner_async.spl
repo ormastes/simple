@@ -169,7 +169,7 @@ fn spawn_async_test(file_path: text, options: TestOptions) -> AsyncTestRun:
 # Result Collection
 # ============================================================================
 
-fn collect_async_result(run: AsyncTestRun, observed_exit_code: i64) -> TestFileResult:
+fn collect_async_result(run: AsyncTestRun, observed_exit_code: i64, deadline_expired: bool = false) -> TestFileResult:
     """
     Wait for async test to complete and collect results.
 
@@ -201,7 +201,23 @@ fn collect_async_result(run: AsyncTestRun, observed_exit_code: i64) -> TestFileR
     # Cleanup temp files
     cleanup_temp_files(stdout_file: run.stdout_file, stderr_file: run.stderr_file)
 
-    # Build result using same logic as sync execution
+    # A monitor-enforced deadline is authoritative.  Handle captures first
+    # without trusting -1, which also represents a child crash/start failure.
+    if deadline_expired:
+        return TestFileResult(
+            path: run.file_path,
+            passed: 0,
+            failed: 1,
+            skipped: 0,
+            pending: 0,
+            duration_ms: duration_ms,
+            setup_ms: 0,
+            error: "TIMEOUT after {run.timeout_ms / 1000}s",
+            timed_out: true,
+            cached: false
+        )
+
+    # Build normal completions using the same logic as sync execution.
     make_result_from_output(
         run.file_path,
         stdout,
@@ -276,20 +292,22 @@ fn run_tests_parallel_with_monitoring(
         var had_completion = false
 
         for run in active_runs:
-            val elapsed_ms = (current_time - run.start_time) / 1000
-
-            if elapsed_ms > run.timeout_ms:
-                val result = collect_async_result(run, -2)
-                results.push(result)
-                had_completion = true
-            else:
-                val exit_code = poll_tracked_process(run.pid)
-                if exit_code == -2:
-                    new_runs.push(run)
-                    continue
+            # Poll first: a child that completed at the deadline is complete,
+            # not a timeout.  Only still-pending work can expire.
+            val exit_code = poll_tracked_process(run.pid)
+            if exit_code != -2:
                 val result = collect_async_result(run, exit_code)
                 results.push(result)
                 had_completion = true
+                continue
+
+            val elapsed_ms = (current_time - run.start_time) / 1000
+            if elapsed_ms > run.timeout_ms:
+                val result = collect_async_result(run, -2, true)
+                results.push(result)
+                had_completion = true
+            else:
+                new_runs.push(run)
 
         active_runs = new_runs
 

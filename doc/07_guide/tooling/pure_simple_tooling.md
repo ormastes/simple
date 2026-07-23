@@ -112,7 +112,8 @@ diagnostics and final SPipe summaries remain available. Parallel temp-file and
 fork capture apply the same bound. Timeout handling must kill the process group
 where supported and must never block indefinitely waiting for a descendant that
 kept a pipe open. A plain `-1` exit is not sufficient timeout evidence; require
-the timeout marker so spawn/internal failures remain ordinary failures.
+either the process API timeout marker or the parallel monitor's explicit
+deadline state so spawn/internal failures remain ordinary failures.
 Pure-Simple callers use the `std.io` facade; hosted C owns the OS capture and
 cleanup boundary, and native LLVM calls cross the dedicated tuple ABI facade.
 
