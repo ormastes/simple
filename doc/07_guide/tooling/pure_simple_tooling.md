@@ -139,8 +139,8 @@ nonzero child exit fails closed.
 Every bootstrap route that produces a Stage 4 full CLI runs
 `scripts/check/check-bootstrap-essential-tools-smoke.shs` with the exact fresh
 binary. From a temporary non-repository working directory it checks real
-test-runner pass/fail/zero/forged outcomes, focused lint pass/deny outcomes, and
-duplicate-check clean/exact-clone JSON outcomes. The aggregate is bounded,
+test-runner pass/fail/zero/forged outcomes, focused lint pass/deny and strict
+JSON-Lines outcomes, and duplicate-check clean/exact-clone JSON outcomes. The aggregate is bounded,
 sets `SIMPLE_NO_STUB_FALLBACK=1`, and fails closed; a deployed wrapper, raw
 source worker, Rust seed, stale binary, or help-only response cannot satisfy it.
 The gate establishes command dispatch and minimal behavior only. Release still
