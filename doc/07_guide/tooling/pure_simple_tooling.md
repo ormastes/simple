@@ -272,9 +272,13 @@ evidence boundary for the important pure-Simple tooling lanes:
   **Next solution:** generate one fixture document with the exact runtime and
   assert the expected output exists and is nonempty.
 - **native-build** — **Source status:** pure-Simple command routing and cached
-  artifact path are implemented. **Remaining bug/gap:** no fresh qualification
-  evidence. **Next solution:** incrementally build one small entry closure with
-  the exact fresh CLI, then run its artifact once.
+  artifact path are implemented. Final artifacts now build in a process-unique
+  sibling and publish by direct rename, so stale requested outputs cannot
+  satisfy a driver `Success` without a fresh artifact. Compile/link failures
+  preserve the prior requested output. **Remaining bug/gap:** the focused
+  staging source-contract scenario passes, but no fresh behavioral build is
+  qualified. **Next solution:** incrementally build one small entry closure
+  with the exact fresh CLI, then run its artifact once.
 - **latest full Stage 4 candidate (2026-07-23)** — candidate SHA
   `00431ce52f940722f52746a802011f7d33f35d4931738facee26c5c7b7917b31`
   passes delegated stream/status fidelity and the isolated official

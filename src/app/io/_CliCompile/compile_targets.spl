@@ -7,8 +7,11 @@ use app.io._CliCompile.compile_options.{cli_native_default_opt_level, cli_parse_
 # Helpers from cli_ops.spl
 use app.io.env_ops (env_set)
 use app.io.process_ops (process_run)
-use app.io.file_ops (file_exists, file_write, file_copy)
+use app.io.file_ops (file_exists, file_write, file_copy, file_remove)
 use app.io.dir_ops (dir_create)
+use app.io.sysinfo_ops (getpid)
+use app.io.time_ops (time_now_unix_micros)
+use std.nogc_sync_mut.shell.file (rename)
 
 # Pure Simple compiler driver (use desugared static methods for interpreter compatibility)
 use compiler.driver.driver (compiler_driver_create, compiler_driver_run_compile, aot_file, aot_c_file, aot_cuda_file, aot_opencl_file, aot_vhdl_file, compile_to_smf)
@@ -44,6 +47,12 @@ fn _cli_process_run(command: text, args: [text]) -> (text, text, i64):
 
 fn _cli_file_exists_impl(path: text) -> bool:
     file_exists(path)
+
+fn _cli_file_remove_impl(path: text) -> bool:
+    file_remove(path)
+
+fn _cli_file_rename_impl(source: text, destination: text) -> bool:
+    rename(source, destination)
 
 fn cli_native_build_is_entry_arg(arg: text) -> bool:
     arg == "--entry" or arg.starts_with("--entry=")
@@ -884,6 +893,15 @@ fn cli_native_build(args: [text]) -> i64:
             _cli_eprint("Usage: simple native-build --backend=llvm --entry <file.spl> -o <output> [--source <dir>]...")
             return 1
 
+        # Build into a private sibling first. A stale requested output must not
+        # satisfy the success check when a driver/linker reports Success without
+        # writing its artifact; conversely, a failed build must leave the last
+        # known-good requested output untouched.
+        val staged_output = "{output}.simple-native-build-{getpid()}-{time_now_unix_micros()}.tmp"
+        if _cli_file_exists_impl(staged_output) and not _cli_file_remove_impl(staged_output):
+            _cli_eprint("Error: could not clear stale native-build staging output {staged_output}")
+            return 1
+
         if verbose:
             _cli_eprint("[native-build] Using pure Simple native backend {backend}")
             _cli_eprint("[native-build] Entry: {entry_point}, Output: {output}")
@@ -970,7 +988,7 @@ fn cli_native_build(args: [text]) -> i64:
             if verbose and effective_entry_closure:
                 _cli_eprint("[native-build] Entry closure files: {native_inputs.len()}")
             options.mode = CompileMode.Aot
-            options.output_file = Some(output)
+            options.output_file = Some(staged_output)
             options.output_format = driver_output_format_both()
             options.backend = backend
             options.release = release
@@ -1002,7 +1020,7 @@ fn cli_native_build(args: [text]) -> i64:
             if verbose and effective_entry_closure:
                 _cli_eprint("[native-build] Entry closure files: {native_inputs.len()}")
             options.mode = CompileMode.Aot
-            options.output_file = Some(output)
+            options.output_file = Some(staged_output)
             if build_mode == "dynload" and not emit_object:
                 options.output_format = driver_output_format_both()
             else:
@@ -1030,7 +1048,7 @@ fn cli_native_build(args: [text]) -> i64:
                 # fail loudly here, at the single funnel all native-build exits
                 # pass through, instead of leaving callers to discover a missing
                 # binary after trusting exit code 0.
-                if not _cli_file_exists_impl(output):
+                if not _cli_file_exists_impl(staged_output):
                     env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
                     env_set("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", old_emit_object)
                     env_set("SIMPLE_NATIVE_BUILD_CACHE_DIR", old_native_cache_dir)
@@ -1045,8 +1063,27 @@ fn cli_native_build(args: [text]) -> i64:
                         env_set("SIMPLE_NATIVE_CPU", old_native_cpu)
                     if native_threads > 0:
                         env_set("SIMPLE_NATIVE_BUILD_THREADS", old_native_threads)
-                    _cli_eprint("error: native-build reported success but produced no output binary: {output}")
+                    _cli_file_remove_impl(staged_output)
+                    _cli_eprint("error: native-build reported success but produced no fresh output binary: {staged_output}")
                     _cli_eprint("  (compiler driver returned Success without writing the expected file -- treating as a hard failure, not a silent success)")
+                    return 1
+                if not _cli_file_rename_impl(staged_output, output):
+                    _cli_file_remove_impl(staged_output)
+                    env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
+                    env_set("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", old_emit_object)
+                    env_set("SIMPLE_NATIVE_BUILD_CACHE_DIR", old_native_cache_dir)
+                    env_set("SIMPLE_NATIVE_ARENA_DECLS", old_native_arena_decls)
+                    env_set("SIMPLE_NATIVE_BUILD_ENTRY", old_native_entry)
+                    env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", old_native_entry_closure)
+                    if runtime_bundle_explicit:
+                        env_set("SIMPLE_NATIVE_RUNTIME_BUNDLE", old_native_runtime_bundle)
+                    if set_native_target:
+                        env_set("SIMPLE_NATIVE_BUILD_TARGET", old_native_target)
+                    if set_native_cpu:
+                        env_set("SIMPLE_NATIVE_CPU", old_native_cpu)
+                    if native_threads > 0:
+                        env_set("SIMPLE_NATIVE_BUILD_THREADS", old_native_threads)
+                    _cli_eprint("error: native-build produced staging output but could not publish it: {output}")
                     return 1
                 val metadata = launch_metadata_for_native_build("host", "", "native")
                 val metadata_path = launch_metadata_sidecar_path(output)
@@ -1087,6 +1124,7 @@ fn cli_native_build(args: [text]) -> i64:
                     _cli_eprint("[native-build] Launch metadata: {metadata_path}")
                 return 0
             case _:
+                _cli_file_remove_impl(staged_output)
                 env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
                 env_set("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", old_emit_object)
                 env_set("SIMPLE_NATIVE_BUILD_CACHE_DIR", old_native_cache_dir)
