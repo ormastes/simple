@@ -1,7 +1,7 @@
 # native: rt_text_eq_any derefs untagged small-int as char* (SIGSEGV)
 
 **Found:** 2026-07-23, MCP entry-closure rebuild campaign (repro W42).
-**Status:** OPEN — not an MCP blocker (API-misuse input), but a robustness gap.
+**Status:** SOURCE-FIXED — focused hosted-runtime check added; bootstrap replay pending.
 
 ## Symptom
 Native binary SIGSEGVs at fault address exactly `value << 3` when a text
@@ -32,3 +32,11 @@ for `any`-typed library code (std.common.json takes `any` everywhere).
   indistinguishable from an aligned low heap pointer.
 - Fix direction: `rt_interp_cstr`/`rt_text_eq_any` reject candidates below the
   minimum mmap address (e.g. `< 0x10000`) as non-pointers.
+
+## Fix
+
+`rt_interp_cstr` now rejects signed values below `0x10000`, covering both
+positive and negative boxed small integers before any C-string dereference.
+`rt_text_eq_any` validates both normalized operands before pointer equality.
+The focused native-runtime test checks the original `41 << 3` case in both
+operand orders.

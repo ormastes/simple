@@ -81,6 +81,9 @@ int main(void) {
     assert(empty_a == empty_b);
     assert(one_a == one_a_repeat);
     assert(one_a != one_b);
+    assert(rt_interp_cstr(rt_value_int(41)) == NULL);
+    assert(rt_text_eq_any(rt_value_int(41), one_a) == 0);
+    assert(rt_text_eq_any(one_a, rt_value_int(41)) == 0);
     assert(rt_string_char_at(short_source, 1) == one_a);
     assert(rt_slice(short_source, 1, 2, 1) == one_a);
     const uint8_t unicode_text[] = {'A', 0xe2, 0x80, 0x94, 'B', 0};

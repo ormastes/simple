@@ -1596,12 +1596,14 @@ void rt_string_builder_free(int64_t handle) {
  * a tagged heap string (e.g. an argv element built via rt_string_new) vs a
  * raw char* (e.g. a bootstrap string literal returned from a function). This
  * inspects the tag at runtime: a valid tagged string yields its null-
- * terminated buffer; anything else is assumed to already be a raw char* and
- * is passed through. Used by MIR StringLit interpolation lowering, which then
+ * terminated buffer; anything else above the hosted low-address guard is
+ * assumed to already be a raw char* and passed through. Used by MIR StringLit
+ * interpolation lowering, which then
  * concatenates the raw segments with rt_strcat. Uses the same rt_core_as_string
  * accessor + s->data buffer as rt_string_data above. */
 const char* rt_interp_cstr(int64_t v) {
     RtCoreString* s = rt_core_as_string(v);
+    if (!s && v < 0x10000) return NULL;
     return s ? (const char*)s->data : (const char*)(uintptr_t)v;
 }
 
@@ -2070,11 +2072,10 @@ int64_t rt_text_eq_fast(int64_t left, int64_t right) {
  * unlike rt_string_eq/rt_native_eq above, which require BOTH sides already
  * tagged and so silently return 0 (never equal) for a raw literal operand. */
 int64_t rt_text_eq_any(int64_t left, int64_t right) {
-    if (left == right) return 1;
     const char* a = rt_interp_cstr(left);
     const char* b = rt_interp_cstr(right);
-    if (a == b) return 1;
     if (!a || !b) return 0;
+    if (a == b) return 1;
     return strcmp(a, b) == 0 ? 1 : 0;
 }
 
