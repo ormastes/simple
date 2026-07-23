@@ -47,9 +47,10 @@ The lint system operates at three layers:
 Deep analysis using the arena-based AST. Query/LSP diagnostics dispatch the ARG,
 COLL, DTYP, STUB, wildcard-import/export, and wide-public leaves through
 `src/app/cli/query_lint.spl`. Production `simple lint` now runs parser-backed
-ARG001/ARG002 and STUB001/STUB002 in its CLI-owned path; the generic `pass_todo`
-source lint remains the STUB003 owner so that placeholder is emitted once. Parity for the
-remaining AST leaves is still tracked as open work.
+ARG001/ARG002, STUB001/STUB002, and module-level W0404 in its CLI-owned path;
+the generic `pass_todo` source lint remains the STUB003 owner so that
+placeholder is emitted once. Parity for the remaining AST leaves is still
+tracked as open work.
 
 | Code | Category | Severity | Description |
 |------|----------|----------|-------------|
@@ -65,6 +66,7 @@ remaining AST leaves is still tracked as open work.
 | STUB001 | Stub Impl | WARN → ERROR by default config | Function with params returns trivial value, params unused |
 | STUB002 | Stub Impl | ALLOW → ERROR by default config | Zero-param function returns default value (possible stub) |
 | STUB003 | Stub Impl | ERROR | Whole-function explicit placeholder body (`pass_todo`, `pass_do_nothing`, `pass_dn`) in production code |
+| W0404 | Warning | WARN | Module exports more than 30 distinct public names |
 | ACC001 | Accessor Quality | ERROR | Getter/setter pair is a dummy field wrapper with no real contract or behavior |
 | NAME001 | Naming Correctness | ERROR | Child method name is suspiciously similar to inherited parent API; use `@name_checked` for intentional shims |
 | SPIPE001 | Test Quality | ERROR | Tautological literal assertion in spec/example |
@@ -264,6 +266,13 @@ fn not_done(port: i64) -> i64:
 fn noop_handler(event: text):
     pass_do_nothing("event is intentionally ignored by this sink")
 ```
+
+## Wide Public Lint (W0404)
+
+The public CLI runs W0404 after its single parse. It counts distinct exported
+names and reports one module-level diagnostic at line 1 when more than 30 are
+exported. Facade files named `__init__.spl` or `mod.spl` are intentionally
+suppressed. Configure it with `visibility_boundary = "allow" | "warn" | "deny"`.
 
 ### Required Comment Lints (REQC001-REQC004)
 
