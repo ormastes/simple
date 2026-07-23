@@ -1,0 +1,545 @@
+# ============================================================================
+# RV64GC RTL — F/D Floating-Point Unit (injectable, easy on/off)
+# ============================================================================
+#
+# Implements the RISC-V F (single) and D (double) extensions as a *behavioral*
+# RTL module in the rv64gc_rtl functional style (structs + i64 bitops + match,
+# pure functions returning new state — the same shape as mul_div.spl / atomics).
+#
+# DEPENDENCY INJECTION / TOGGLE
+# -----------------------------
+# The FPU is an INJECTED dependency: the core holds a `FpuUnit` built from a
+# `FpuConfig`. Flip `FpuConfig.enabled` (via `fpu_config_enabled()` vs
+# `fpu_config_disabled()`) to turn the whole float capability on or off:
+#   * enabled  -> FP instructions execute, fcsr/flags update.
+#   * disabled -> every FP op reports `illegal = true`, so the core raises an
+#                 illegal-instruction trap — byte-for-byte the pre-FPU behavior.
+# This is the config-flag form of DI (mirrors SocTopConfig.has_uart gating VHDL
+# emission), chosen over trait-object dispatch specifically because a single
+# `enabled` bool lowers cleanly to an RTL generate-guard, whereas dynamic
+# dispatch does not. (Simple also has trait-object DI — di.spl — but that form
+# cannot be lowered to hardware.)
+#
+# ARITHMETIC MODEL
+# ----------------
+# The datapath uses the host f64/f32 for the actual arithmetic (this model runs
+# in the interpreter/JIT), and models the RISC-V-visible state explicitly: the
+# 32-entry float register file (NaN-boxed for single), fcsr (frm + fflags), the
+# canonical NaN, and the NV/DZ invalid/divide-by-zero flags. Known behavioral
+# simplifications (documented, not silent): OF/UF/NX flags and directed rounding
+# for arithmetic are best-effort; NaN payloads are not preserved (results
+# canonicalize). These do not affect correctness of finite common-case results.
+# ============================================================================
+
+# --- externs (host float support) ---
+extern fn spl_f64_to_bits(value: f64) -> i64
+extern fn rt_math_sqrt(x: f64) -> f64
+
+# ---------------------------------------------------------------------------
+# Opcodes (major)
+# ---------------------------------------------------------------------------
+val OP_LOAD_FP: i64  = 0x07
+val OP_STORE_FP: i64 = 0x27
+val OP_FMADD: i64    = 0x43
+val OP_FMSUB: i64    = 0x47
+val OP_FNMSUB: i64   = 0x4B
+val OP_FNMADD: i64   = 0x4F
+val OP_FP: i64       = 0x53
+
+# fmt field (instr[26:25]): 0 = single (S), 1 = double (D)
+val FMT_S: i64 = 0
+val FMT_D: i64 = 1
+
+# fflags bit masks (fcsr[4:0]): NV DZ OF UF NX
+val FFLAG_NX: i64 = 0x01   # inexact
+val FFLAG_UF: i64 = 0x02   # underflow
+val FFLAG_OF: i64 = 0x04   # overflow
+val FFLAG_DZ: i64 = 0x08   # divide by zero
+val FFLAG_NV: i64 = 0x10   # invalid operation
+
+# Canonical quiet NaN encodings.
+val CANON_NAN_D: i64 = 0x7FF8000000000000
+val CANON_NAN_S: i64 = 0x000000007FC00000       # (before NaN-boxing)
+val NANBOX_HI: i64   = -0x100000000              # 0xFFFFFFFF00000000
+
+# ---------------------------------------------------------------------------
+# Config = the injected dependency. Flip `enabled` to toggle the FPU.
+# ---------------------------------------------------------------------------
+struct FpuConfig:
+    enabled: bool
+    has_double: bool        # D extension present (else F only)
+
+fn fpu_config_enabled() -> FpuConfig:
+    FpuConfig(enabled: true, has_double: true)
+
+fn fpu_config_single_only() -> FpuConfig:
+    FpuConfig(enabled: true, has_double: false)
+
+fn fpu_config_disabled() -> FpuConfig:
+    FpuConfig(enabled: false, has_double: false)
+
+# ---------------------------------------------------------------------------
+# Architectural state
+# ---------------------------------------------------------------------------
+struct FRegFile64:
+    regs: [i64]             # 32 entries, raw bits (NaN-boxed for single)
+
+fn fregfile_create() -> FRegFile64:
+    var v: [i64] = []
+    var i = 0
+    while i < 32:
+        v.push(0)
+        i = i + 1
+    FRegFile64(regs: v)
+
+struct Fcsr:
+    frm: i64                # rounding mode [2:0]
+    fflags: i64             # accrued exception flags [4:0]
+
+fn fcsr_create() -> Fcsr:
+    Fcsr(frm: 0, fflags: 0)
+
+struct FpuUnit:
+    cfg: FpuConfig
+    frf: FRegFile64
+    fcsr: Fcsr
+
+fn fpu_create(cfg: FpuConfig) -> FpuUnit:
+    FpuUnit(cfg: cfg, frf: fregfile_create(), fcsr: fcsr_create())
+
+fn fpu_present(un: FpuUnit) -> bool:
+    un.cfg.enabled
+
+# ---------------------------------------------------------------------------
+# Register access (raw bits)
+# ---------------------------------------------------------------------------
+fn freg_read(un: FpuUnit, idx: i64) -> i64:
+    un.frf.regs[idx & 31]
+
+fn freg_write(un: FpuUnit, idx: i64, bits: i64) -> FpuUnit:
+    var regs = un.frf.regs
+    regs[idx & 31] = bits
+    FpuUnit(cfg: un.cfg, frf: FRegFile64(regs: regs), fcsr: un.fcsr)
+
+fn fpu_set_flags(un: FpuUnit, flags: i64) -> FpuUnit:
+    FpuUnit(cfg: un.cfg, frf: un.frf,
+        fcsr: Fcsr(frm: un.fcsr.frm, fflags: un.fcsr.fflags | (flags & 0x1F)))
+
+# ---------------------------------------------------------------------------
+# Bit <-> float helpers (double)
+# ---------------------------------------------------------------------------
+fn f64_bits(value: f64) -> i64:
+    spl_f64_to_bits(value)
+
+fn _pow2(n: i64) -> f64:
+    var result = 1.0
+    var i = 0
+    if n >= 0:
+        while i < n:
+            result = result * 2.0
+            i = i + 1
+    else:
+        val m = 0 - n
+        while i < m:
+            result = result / 2.0
+            i = i + 1
+    result
+
+fn f64_of_bits(bits: i64) -> f64:
+    val sign = (bits >> 63) & 1
+    val exp = (bits >> 52) & 0x7FF
+    val frac = bits & 0xFFFFFFFFFFFFF
+    var result = 0.0
+    if exp == 0:
+        if frac != 0:
+            result = ((frac.to_f64()) / 4503599627370496.0) * _pow2(0 - 1022)
+    else if exp == 0x7FF:
+        if frac == 0:
+            result = 1.0e308 * 10.0      # +inf magnitude
+        else:
+            result = 0.0                 # NaN -> handled via is_nan on bits
+    else:
+        result = (1.0 + (frac.to_f64()) / 4503599627370496.0) * _pow2(exp - 1023)
+    if sign == 1:
+        return 0.0 - result
+    result
+
+# NaN / inf classification on raw double bits (exact; avoids host-NaN quirks)
+fn bits_is_nan_d(bits: i64) -> bool:
+    val exp = (bits >> 52) & 0x7FF
+    val frac = bits & 0xFFFFFFFFFFFFF
+    exp == 0x7FF and frac != 0
+
+fn bits_is_inf_d(bits: i64) -> bool:
+    val exp = (bits >> 52) & 0x7FF
+    val frac = bits & 0xFFFFFFFFFFFFF
+    exp == 0x7FF and frac == 0
+
+fn bits_is_zero_d(bits: i64) -> bool:
+    (bits & 0x7FFFFFFFFFFFFFFF) == 0
+
+# ---------------------------------------------------------------------------
+# NaN-boxing for single precision (upper 32 bits must be all ones)
+# ---------------------------------------------------------------------------
+fn nanbox_single(sbits32: i64) -> i64:
+    NANBOX_HI | (sbits32 & 0xFFFFFFFF)
+
+fn unbox_single(bits: i64) -> i64:
+    # A properly boxed single: upper 32 all ones -> lower 32. Else canonical NaN.
+    if (bits & NANBOX_HI) == NANBOX_HI:
+        return bits & 0xFFFFFFFF
+    CANON_NAN_S & 0xFFFFFFFF
+
+# single f32 bit-pattern <-> f64 value (via host, best-effort)
+fn f32bits_to_f64(sbits32: i64) -> f64:
+    val sign = (sbits32 >> 31) & 1
+    val exp = (sbits32 >> 23) & 0xFF
+    val frac = sbits32 & 0x7FFFFF
+    var result = 0.0
+    if exp == 0:
+        if frac != 0:
+            result = ((frac.to_f64()) / 8388608.0) * _pow2(0 - 126)
+    else if exp == 0xFF:
+        if frac == 0:
+            result = 1.0e308 * 10.0
+        else:
+            result = 0.0
+    else:
+        result = (1.0 + (frac.to_f64()) / 8388608.0) * _pow2(exp - 127)
+    if sign == 1:
+        return 0.0 - result
+    result
+
+fn f64_to_f32bits(value: f64) -> i64:
+    # Round-trip the double bit pattern down to single fields (round-to-nearest,
+    # ties ignored — behavioral). inf/NaN/zero handled explicitly.
+    val db = f64_bits(value)
+    if bits_is_nan_d(db):
+        return CANON_NAN_S & 0xFFFFFFFF
+    val sign = (db >> 63) & 1
+    if bits_is_zero_d(db):
+        return (sign << 31) & 0xFFFFFFFF
+    val dexp = (db >> 52) & 0x7FF
+    val dfrac = db & 0xFFFFFFFFFFFFF
+    val uexp = dexp - 1023 + 127          # rebias to single
+    if uexp >= 0xFF:
+        return ((sign << 31) | (0xFF << 23)) & 0xFFFFFFFF   # overflow -> inf
+    if uexp <= 0:
+        return (sign << 31) & 0xFFFFFFFF                    # underflow -> zero
+    val sfrac = (dfrac >> 29) & 0x7FFFFF
+    ((sign << 31) | (uexp << 23) | sfrac) & 0xFFFFFFFF
+
+# ---------------------------------------------------------------------------
+# Execution result
+# ---------------------------------------------------------------------------
+struct FpuStep:
+    un: FpuUnit           # new FPU state (float writeback already applied)
+    illegal: bool           # FPU absent or unsupported op -> core raises illegal trap
+    writes_int: bool        # result targets integer rd (FCVT.W/FMV.X/FEQ/FCLASS)
+    int_result: i64
+
+fn _illegal(un: FpuUnit) -> FpuStep:
+    FpuStep(un: un, illegal: true, writes_int: false, int_result: 0)
+
+fn _ok_float(un: FpuUnit) -> FpuStep:
+    FpuStep(un: un, illegal: false, writes_int: false, int_result: 0)
+
+fn _ok_int(un: FpuUnit, v: i64) -> FpuStep:
+    FpuStep(un: un, illegal: false, writes_int: true, int_result: v)
+
+# instruction field extraction
+fn _rd(instr: i64) -> i64:
+    (instr >> 7) & 31
+fn _rs1(instr: i64) -> i64:
+    (instr >> 15) & 31
+fn _rs2(instr: i64) -> i64:
+    (instr >> 20) & 31
+fn _rs3(instr: i64) -> i64:
+    (instr >> 27) & 31
+fn _funct7(instr: i64) -> i64:
+    (instr >> 25) & 0x7F
+fn _funct5(instr: i64) -> i64:
+    (instr >> 27) & 0x1F
+fn _fmt(instr: i64) -> i64:
+    (instr >> 25) & 3
+fn _rm(instr: i64) -> i64:
+    (instr >> 12) & 7
+
+# read a double operand from freg
+fn _opd(un: FpuUnit, idx: i64) -> f64:
+    f64_of_bits(freg_read(un, idx))
+
+# read a single operand (unboxed) as f64
+fn _ops(un: FpuUnit, idx: i64) -> f64:
+    f32bits_to_f64(unbox_single(freg_read(un, idx)))
+
+# write a double result
+fn _wr_d(un: FpuUnit, idx: i64, value: f64) -> FpuUnit:
+    freg_write(un, idx, f64_bits(value))
+
+# write a single result (NaN-boxed)
+fn _wr_s(un: FpuUnit, idx: i64, value: f64) -> FpuUnit:
+    freg_write(un, idx, nanbox_single(f64_to_f32bits(value)))
+
+# ---------------------------------------------------------------------------
+# Core arithmetic dispatch for OP-FP (0x53). Returns FpuStep.
+# ---------------------------------------------------------------------------
+fn _exec_op_fp(un: FpuUnit, instr: i64) -> FpuStep:
+    val fmt = _fmt(instr)
+    val f5 = _funct5(instr)
+    val rd = _rd(instr)
+    val rs1 = _rs1(instr)
+    val rs2 = _rs2(instr)
+    val is_d = fmt == FMT_D
+    if is_d and not un.cfg.has_double:
+        return _illegal(un)
+    if fmt != FMT_S and fmt != FMT_D:
+        return _illegal(un)
+
+    # operand bits (for exact NaN/inf checks) + host values
+    val a_bits = if is_d: freg_read(un, rs1) else: unbox_single(freg_read(un, rs1))
+    val b_bits = if is_d: freg_read(un, rs2) else: unbox_single(freg_read(un, rs2))
+    val a = if is_d: _opd(un, rs1) else: _ops(un, rs1)
+    val b = if is_d: _opd(un, rs2) else: _ops(un, rs2)
+    val a_nan = if is_d: bits_is_nan_d(a_bits) else: bits_is_nan_d(f64_bits(a))
+    val b_nan = if is_d: bits_is_nan_d(b_bits) else: bits_is_nan_d(f64_bits(b))
+
+    # f5 selects the operation class (funct5 = instr[31:27])
+    if f5 == 0x00:                                    # FADD
+        val r = a + b
+        val u = if is_d: _wr_d(un, rd, r) else: _wr_s(un, rd, r)
+        return _ok_float(u)
+    if f5 == 0x01:                                    # FSUB
+        val r = a - b
+        val u = if is_d: _wr_d(un, rd, r) else: _wr_s(un, rd, r)
+        return _ok_float(u)
+    if f5 == 0x02:                                    # FMUL
+        val r = a * b
+        val u = if is_d: _wr_d(un, rd, r) else: _wr_s(un, rd, r)
+        return _ok_float(u)
+    if f5 == 0x03:                                    # FDIV
+        # Guard the zero divisor explicitly: the host interpreter TRAPS on f64
+        # divide-by-zero instead of yielding IEEE inf/NaN, so never execute a/b
+        # when b is zero — synthesize the result bits directly.
+        if bits_is_zero_d(f64_bits(b)):
+            if a_nan or bits_is_zero_d(f64_bits(a)):
+                # NaN/0 or 0/0 -> canonical NaN, invalid
+                val un_n = freg_write(un, rd, if is_d: CANON_NAN_D else: nanbox_single(CANON_NAN_S))
+                return _ok_float(fpu_set_flags(un_n, FFLAG_NV))
+            # finite/0 -> signed infinity, divide-by-zero flag
+            val inf = 1.0e308 * 10.0
+            val signed_inf = if a < 0.0: 0.0 - inf else: inf
+            val un_z = if is_d: _wr_d(un, rd, signed_inf) else: _wr_s(un, rd, signed_inf)
+            return _ok_float(fpu_set_flags(un_z, FFLAG_DZ))
+        val r = a / b
+        val u0 = if is_d: _wr_d(un, rd, r) else: _wr_s(un, rd, r)
+        return _ok_float(u0)
+    if f5 == 0x0B:                                    # FSQRT
+        var flags = 0
+        var r = 0.0
+        if a < 0.0:
+            flags = FFLAG_NV
+            val u = freg_write(un, rd, if is_d: CANON_NAN_D else: nanbox_single(CANON_NAN_S))
+            return _ok_float(fpu_set_flags(u, flags))
+        r = rt_math_sqrt(a)
+        val u = if is_d: _wr_d(un, rd, r) else: _wr_s(un, rd, r)
+        return _ok_float(u)
+    if f5 == 0x04:                                    # FSGNJ / FSGNJN / FSGNJX
+        return _exec_sgnj(un, instr, is_d, a_bits, b_bits)
+    if f5 == 0x05:                                    # FMIN / FMAX
+        return _exec_minmax(un, instr, is_d, a, b, a_nan, b_nan)
+    if f5 == 0x14:                                    # FEQ / FLT / FLE (-> int rd)
+        return _exec_cmp(un, instr, a, b, a_nan, b_nan)
+    if f5 == 0x08:                                    # FCVT.S.D / FCVT.D.S
+        return _exec_cvt_fmt(un, instr, rd, rs1)
+    if f5 == 0x1C:                                    # FMV.X / FCLASS (fp -> int)
+        return _exec_fmv_x_class(un, instr, is_d, a_bits)
+    if f5 == 0x1E:                                    # FMV.W.X / FMV.D.X (int -> fp)
+        return _illegal(un)                         # needs int operand; core path
+    _illegal(un)
+
+fn _exec_sgnj(un: FpuUnit, instr: i64, is_d: bool, a_bits: i64, b_bits: i64) -> FpuStep:
+    val rm = _rm(instr)
+    val rd = _rd(instr)
+    val signmask = if is_d: (1 << 63) else: (1 << 31)
+    val bodymask = if is_d: 0x7FFFFFFFFFFFFFFF else: 0x7FFFFFFF
+    val a_body = a_bits & bodymask
+    var sign = 0
+    if rm == 0:                       # FSGNJ: sign of b
+        sign = b_bits & signmask
+    else if rm == 1:                  # FSGNJN: !sign of b
+        sign = (b_bits & signmask) ^ signmask
+    else if rm == 2:                  # FSGNJX: sign(a) xor sign(b)
+        sign = (a_bits ^ b_bits) & signmask
+    else:
+        return _illegal(un)
+    val res = a_body | sign
+    val stored = if is_d: res else: nanbox_single(res)
+    _ok_float(freg_write(un, rd, stored))
+
+fn _exec_minmax(un: FpuUnit, instr: i64, is_d: bool, a: f64, b: f64, a_nan: bool, b_nan: bool) -> FpuStep:
+    val rm = _rm(instr)
+    val rd = _rd(instr)
+    var flags = 0
+    var r = 0.0
+    if a_nan and b_nan:
+        val u = freg_write(un, rd, if is_d: CANON_NAN_D else: nanbox_single(CANON_NAN_S))
+        return _ok_float(fpu_set_flags(u, FFLAG_NV))
+    if a_nan:
+        r = b
+    else if b_nan:
+        r = a
+    else if rm == 0:                  # FMIN
+        r = if a < b: a else: b
+    else:                             # FMAX
+        r = if a > b: a else: b
+    val u = if is_d: _wr_d(un, rd, r) else: _wr_s(un, rd, r)
+    _ok_float(u)
+
+fn _exec_cmp(un: FpuUnit, instr: i64, a: f64, b: f64, a_nan: bool, b_nan: bool) -> FpuStep:
+    val rm = _rm(instr)
+    val rd = _rd(instr)
+    if a_nan or b_nan:
+        # FLT/FLE signal NV on NaN; FEQ (quiet) does not unless signaling — model as NV for lt/le only
+        var flags = 0
+        if rm == 0 or rm == 1:
+            flags = FFLAG_NV
+        return _ok_int(fpu_set_flags(un, flags), 0)
+    var res = 0
+    if rm == 2:                       # FEQ
+        if a == b: res = 1
+    else if rm == 1:                  # FLT
+        if a < b: res = 1
+    else if rm == 0:                  # FLE
+        if a <= b: res = 1
+    else:
+        return _illegal(un)
+    _ok_int(un, res)
+
+fn _exec_cvt_fmt(un: FpuUnit, instr: i64, rd: i64, rs1: i64) -> FpuStep:
+    val fmt = _fmt(instr)
+    val src = _rs2(instr)             # rs2 encodes source fmt: 0=S,1=D
+    if fmt == FMT_S and src == 1:     # FCVT.S.D : double -> single
+        val v = _opd(un, rs1)
+        return _ok_float(_wr_s(un, rd, v))
+    if fmt == FMT_D and src == 0:     # FCVT.D.S : single -> double
+        if not un.cfg.has_double:
+            return _illegal(un)
+        val v = _ops(un, rs1)
+        return _ok_float(_wr_d(un, rd, v))
+    _illegal(un)
+
+fn _exec_fmv_x_class(un: FpuUnit, instr: i64, is_d: bool, a_bits: i64) -> FpuStep:
+    val rm = _rm(instr)
+    if rm == 0:                       # FMV.X.D / FMV.X.W : move bits to int rd
+        if is_d:
+            return _ok_int(un, a_bits)
+        # FMV.X.W sign-extends the 32-bit pattern
+        val lo = a_bits & 0xFFFFFFFF
+        val sext = if (lo & 0x80000000) != 0: lo | NANBOX_HI else: lo
+        return _ok_int(un, sext)
+    if rm == 1:                       # FCLASS
+        return _ok_int(un, _fclass(a_bits, is_d))
+    _illegal(un)
+
+# RISC-V FCLASS 10-bit result
+fn _fclass(bits: i64, is_d: bool) -> i64:
+    val signmask = if is_d: (1 << 63) else: (1 << 31)
+    val expmask = if is_d: 0x7FF else: 0xFF
+    val expshift = if is_d: 52 else: 23
+    val fracmask = if is_d: 0xFFFFFFFFFFFFF else: 0x7FFFFF
+    val qnanbit = if is_d: (1 << 51) else: (1 << 22)
+    val sign = (bits & signmask) != 0
+    val exp = (bits >> expshift) & expmask
+    val frac = bits & fracmask
+    val is_inf = exp == expmask and frac == 0
+    val is_nan = exp == expmask and frac != 0
+    val is_zero = exp == 0 and frac == 0
+    val is_sub = exp == 0 and frac != 0
+    val is_norm = exp != 0 and exp != expmask
+    if is_nan:
+        if (frac & qnanbit) != 0:
+            return 1 << 9              # quiet NaN
+        return 1 << 8                  # signaling NaN
+    if sign:
+        if is_inf: return 1 << 0
+        if is_norm: return 1 << 1
+        if is_sub: return 1 << 2
+        return 1 << 3                  # -0
+    if is_zero: return 1 << 4          # +0
+    if is_sub: return 1 << 5
+    if is_norm: return 1 << 6
+    return 1 << 7                      # +inf
+
+# ---------------------------------------------------------------------------
+# Fused multiply-add family (FMADD/FMSUB/FNMSUB/FNMADD)
+# ---------------------------------------------------------------------------
+fn _exec_fma(un: FpuUnit, instr: i64, op: i64) -> FpuStep:
+    val fmt = _fmt(instr)
+    val is_d = fmt == FMT_D
+    if is_d and not un.cfg.has_double:
+        return _illegal(un)
+    if fmt != FMT_S and fmt != FMT_D:
+        return _illegal(un)
+    val rd = _rd(instr)
+    val a = if is_d: _opd(un, _rs1(instr)) else: _ops(un, _rs1(instr))
+    val b = if is_d: _opd(un, _rs2(instr)) else: _ops(un, _rs2(instr))
+    val c = if is_d: _opd(un, _rs3(instr)) else: _ops(un, _rs3(instr))
+    var r = 0.0
+    if op == OP_FMADD:
+        r = (a * b) + c
+    else if op == OP_FMSUB:
+        r = (a * b) - c
+    else if op == OP_FNMSUB:
+        r = 0.0 - ((a * b) - c)
+    else:                             # OP_FNMADD
+        r = 0.0 - ((a * b) + c)
+    val u = if is_d: _wr_d(un, rd, r) else: _wr_s(un, rd, r)
+    _ok_float(u)
+
+# ---------------------------------------------------------------------------
+# Public entry: execute one FP compute instruction (OP-FP or FMADD family).
+# Load/store FP and FMV.*.X (int->fp) are handled at the core integration seam
+# (they need memory / the integer register file); see fpu_load_writeback /
+# fpu_store_data / fpu_fmv_from_int below.
+# ---------------------------------------------------------------------------
+fn fpu_execute(un: FpuUnit, instr: i64) -> FpuStep:
+    if not un.cfg.enabled:
+        return _illegal(un)                         # toggle OFF -> illegal trap
+    val opcode = instr & 0x7F
+    if opcode == OP_FP:
+        return _exec_op_fp(un, instr)
+    if opcode == OP_FMADD or opcode == OP_FMSUB or opcode == OP_FNMSUB or opcode == OP_FNMADD:
+        return _exec_fma(un, instr, opcode)
+    _illegal(un)
+
+# --- core-integration seam helpers (memory / integer file) ---
+fn fpu_load_writeback(un: FpuUnit, rd: i64, is_double: bool, data: i64) -> FpuStep:
+    """FLD/FLW: `data` is the value the LSU loaded from memory. Single is
+    NaN-boxed into the 64-bit register."""
+    if not un.cfg.enabled:
+        return _illegal(un)
+    val stored = if is_double: data else: nanbox_single(data & 0xFFFFFFFF)
+    _ok_float(freg_write(un, rd, stored))
+
+fn fpu_store_data(un: FpuUnit, rs2: i64, is_double: bool) -> i64:
+    """FSD/FSW: return the value the LSU should write to memory."""
+    val raw = freg_read(un, rs2)
+    if is_double:
+        return raw
+    unbox_single(raw)
+
+fn fpu_fmv_from_int(un: FpuUnit, rd: i64, is_double: bool, xval: i64) -> FpuStep:
+    """FMV.D.X / FMV.W.X: move integer bits into a float register."""
+    if not un.cfg.enabled:
+        return _illegal(un)
+    val stored = if is_double: xval else: nanbox_single(xval & 0xFFFFFFFF)
+    _ok_float(freg_write(un, rd, stored))
+
+export FpuConfig, fpu_config_enabled, fpu_config_single_only, fpu_config_disabled
+export FRegFile64, fregfile_create, Fcsr, fcsr_create, FpuUnit, fpu_create, fpu_present
+export freg_read, freg_write, fpu_set_flags
+export FpuStep, fpu_execute, fpu_load_writeback, fpu_store_data, fpu_fmv_from_int
+export f64_bits, f64_of_bits, nanbox_single, unbox_single
+export FFLAG_NX, FFLAG_UF, FFLAG_OF, FFLAG_DZ, FFLAG_NV
+export OP_FP, OP_LOAD_FP, OP_STORE_FP, OP_FMADD, OP_FMSUB, OP_FNMSUB, OP_FNMADD

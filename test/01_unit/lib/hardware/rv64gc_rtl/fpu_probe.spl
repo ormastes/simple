@@ -1,0 +1,105 @@
+# Intensive probe for the injectable RV64 F/D FPU (rv64gc_rtl/fpu.spl).
+# Run-path probe: `bin/simple run`; expects "FPU PROBE: ALL PASS".
+# Proves: (1) DI toggle — disabled un reports illegal on every FP op (== pre-FPU
+# behavior); (2) D arithmetic add/sub/mul/div/sqrt/min/max; (3) compares + FCLASS
+# + FMV.X.D to integer rd; (4) FSGNJ; (5) FMADD fused; (6) single-precision path
+# with NaN-boxing via FMV.X.W; (7) divide-by-zero sets the DZ fflag.
+use std.hardware.rv64gc_rtl.fpu.{
+    FpuConfig, fpu_config_enabled, fpu_config_single_only, fpu_config_disabled,
+    FpuUnit, fpu_create, FpuStep, fpu_execute, freg_write, freg_read,
+    fpu_load_writeback, f64_bits, f64_of_bits, FFLAG_DZ, OP_FMADD
+}
+
+fn check(name: text, ok: bool) -> i64:
+    if ok:
+        return 0
+    print("FAIL {name}")
+    1
+
+# OP-FP encoder: funct7 = (funct5 << 2) | fmt
+fn enc_opfp(f5: i64, fmt: i64, rs2: i64, rs1: i64, rm: i64, rd: i64) -> i64:
+    val funct7 = (f5 << 2) | fmt
+    (funct7 << 25) | (rs2 << 20) | (rs1 << 15) | (rm << 12) | (rd << 7) | 0x53
+
+fn enc_fma(op: i64, rs3: i64, fmt: i64, rs2: i64, rs1: i64, rm: i64, rd: i64) -> i64:
+    (rs3 << 27) | (fmt << 25) | (rs2 << 20) | (rs1 << 15) | (rm << 12) | (rd << 7) | op
+
+fn rd_d(u: FpuUnit, idx: i64) -> f64:
+    f64_of_bits(freg_read(u, idx))
+
+fn main() -> i64:
+    var fails = 0
+
+    # ---- 1. DI toggle OFF: every FP op is illegal (pre-FPU behavior) ----
+    var off = fpu_create(fpu_config_disabled())
+    off = freg_write(off, 1, f64_bits(3.0))
+    val s_off = fpu_execute(off, enc_opfp(0x00, 1, 1, 1, 0, 3))   # FADD.D
+    fails = fails + check("disabled FPU -> illegal", s_off.illegal)
+
+    # single-only config rejects double ops
+    var so = fpu_create(fpu_config_single_only())
+    val s_so = fpu_execute(so, enc_opfp(0x00, 1, 1, 1, 0, 3))     # FADD.D
+    fails = fails + check("single-only rejects FADD.D", s_so.illegal)
+
+    # ---- 2. enabled D arithmetic ----
+    var u = fpu_create(fpu_config_enabled())
+    u = freg_write(u, 1, f64_bits(3.0))
+    u = freg_write(u, 2, f64_bits(4.0))
+    u = freg_write(u, 0, f64_bits(0.0))
+
+    val add = fpu_execute(u, enc_opfp(0x00, 1, 2, 1, 0, 3))       # f3 = 3+4
+    fails = fails + check("FADD.D 3+4==7", not add.illegal and rd_d(add.un, 3) == 7.0)
+    val sub = fpu_execute(u, enc_opfp(0x01, 1, 2, 1, 0, 3))       # f3 = 3-4
+    fails = fails + check("FSUB.D 3-4==-1", rd_d(sub.un, 3) == 0.0 - 1.0)
+    val mul = fpu_execute(u, enc_opfp(0x02, 1, 2, 1, 0, 3))       # f3 = 3*4
+    fails = fails + check("FMUL.D 3*4==12", rd_d(mul.un, 3) == 12.0)
+    val dv = fpu_execute(u, enc_opfp(0x03, 1, 2, 1, 0, 3))        # f3 = 3/4
+    fails = fails + check("FDIV.D 3/4==0.75", rd_d(dv.un, 3) == 0.75)
+    val sq = fpu_execute(u, enc_opfp(0x0B, 1, 0, 2, 0, 3))        # f3 = sqrt(4)
+    fails = fails + check("FSQRT.D sqrt(4)==2", rd_d(sq.un, 3) == 2.0)
+    val mn = fpu_execute(u, enc_opfp(0x05, 1, 2, 1, 0, 3))        # FMIN.D(3,4)
+    fails = fails + check("FMIN.D==3", rd_d(mn.un, 3) == 3.0)
+    val mx = fpu_execute(u, enc_opfp(0x05, 1, 2, 1, 1, 3))        # FMAX.D(3,4)
+    fails = fails + check("FMAX.D==4", rd_d(mx.un, 3) == 4.0)
+
+    # ---- 3. compares + FCLASS + FMV.X.D (integer rd) ----
+    val feq = fpu_execute(u, enc_opfp(0x14, 1, 1, 1, 2, 5))       # FEQ.D f1,f1
+    fails = fails + check("FEQ.D 3==3 ->1", feq.writes_int and feq.int_result == 1)
+    val flt = fpu_execute(u, enc_opfp(0x14, 1, 2, 1, 1, 5))       # FLT.D 3<4
+    fails = fails + check("FLT.D 3<4 ->1", flt.int_result == 1)
+    val fle = fpu_execute(u, enc_opfp(0x14, 1, 1, 2, 0, 5))       # FLE.D 4<=3
+    fails = fails + check("FLE.D 4<=3 ->0", fle.int_result == 0)
+    val fcl = fpu_execute(u, enc_opfp(0x1C, 1, 0, 1, 1, 5))       # FCLASS.D(3.0)
+    fails = fails + check("FCLASS.D(+normal)==bit6", fcl.int_result == (1 << 6))
+    val fmvx = fpu_execute(u, enc_opfp(0x1C, 1, 0, 1, 0, 5))      # FMV.X.D f1
+    fails = fails + check("FMV.X.D bits(3.0)", fmvx.int_result == f64_bits(3.0))
+
+    # ---- 4. FSGNJ.D: inject sign of b(-5) into a(3) -> -3 ----
+    var us = freg_write(u, 4, f64_bits(0.0 - 5.0))
+    val sgnj = fpu_execute(us, enc_opfp(0x04, 1, 4, 1, 0, 6))     # FSGNJ.D f6=f1,f4
+    fails = fails + check("FSGNJ.D sign(-5) onto 3 == -3", rd_d(sgnj.un, 6) == 0.0 - 3.0)
+
+    # ---- 5. FMADD.D: (2*3)+4 == 10 ----
+    var uf = freg_write(u, 1, f64_bits(2.0))
+    uf = freg_write(uf, 2, f64_bits(3.0))
+    uf = freg_write(uf, 3, f64_bits(4.0))
+    val fma = fpu_execute(uf, enc_fma(OP_FMADD, 3, 1, 2, 1, 0, 5))
+    fails = fails + check("FMADD.D 2*3+4==10", rd_d(fma.un, 5) == 10.0)
+
+    # ---- 6. single precision: FADD.S with NaN-boxing, read via FMV.X.W ----
+    var sp = fpu_create(fpu_config_enabled())
+    sp = fpu_load_writeback(sp, 1, false, 0x40400000).un         # 3.0f
+    sp = fpu_load_writeback(sp, 2, false, 0x40800000).un         # 4.0f
+    val adds = fpu_execute(sp, enc_opfp(0x00, 0, 2, 1, 0, 3))      # FADD.S -> 7.0f
+    val mvw = fpu_execute(adds.un, enc_opfp(0x1C, 0, 0, 3, 0, 5))# FMV.X.W f3
+    fails = fails + check("FADD.S 3+4==7.0f (0x40E00000)", (mvw.int_result & 0xFFFFFFFF) == 0x40E00000)
+
+    # ---- 7. divide-by-zero sets DZ fflag ----
+    val dz = fpu_execute(u, enc_opfp(0x03, 1, 0, 1, 0, 3))         # f3 = 3 / 0
+    fails = fails + check("FDIV.D by zero sets DZ", (dz.un.fcsr.fflags & FFLAG_DZ) != 0)
+
+    if fails == 0:
+        print("FPU PROBE: ALL PASS")
+        return 0
+    print("FPU PROBE: {fails} FAIL")
+    1
