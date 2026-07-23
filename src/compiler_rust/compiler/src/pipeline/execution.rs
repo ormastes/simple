@@ -106,7 +106,7 @@ fn find_project_root_hint(path: &Path) -> Option<PathBuf> {
     }
 }
 
-pub(super) fn native_single_file_project_hint(source_path: &Path) -> Option<PathBuf> {
+pub fn native_single_file_project_hint(source_path: &Path) -> Option<PathBuf> {
     let normalized = if source_path.is_absolute() {
         source_path.to_path_buf()
     } else {

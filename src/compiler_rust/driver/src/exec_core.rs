@@ -700,7 +700,9 @@ impl ExecCore {
         simple_compiler::pipeline::cfg_strip::strip_inactive_cfg_arch_fns_for_host(&mut ast);
 
         // Lower to HIR with context so imported types (enums, classes) are resolved
-        let hir_module = hir::lower_with_context(&ast, path).map_err(|e| format!("HIR lowering error: {}", e))?;
+        let project_hint = simple_compiler::pipeline::native_single_file_project_hint(path);
+        let hir_module = hir::lower_with_context_and_project_hint(&ast, path, project_hint.as_deref())
+            .map_err(|e| format!("HIR lowering error: {}", e))?;
 
         // Lower to MIR
         let mut mir_module = lower_to_mir(&hir_module).map_err(|e| format!("MIR lowering error: {}", e))?;

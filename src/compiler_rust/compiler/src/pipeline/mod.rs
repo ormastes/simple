@@ -30,6 +30,7 @@ mod parsing;
 pub use core::{CompilerPipeline, SimdMode};
 pub use execution::{
     generate_smf_bytes, generate_smf_bytes_for_target, generate_smf_from_object, generate_smf_from_object_for_target,
+    native_single_file_project_hint,
 };
 
 // Re-export startup configuration types (#1979, #1986)

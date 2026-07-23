@@ -90,7 +90,9 @@ Both interpreter registration paths iterate every method in an `impl` block:
 `interpreter_module/module_evaluator/evaluation_helpers.rs` for imported
 modules. Those loops predate this report (2026-07-04), and the JIT fallback
 reloads and evaluates the module through the former path. The HIR imported-type
-warning that resolves `std` relative to `/tmp` is a separate resolution bug.
+warning that resolved `std` relative to `/tmp` was a separate wiring bug:
+`run_file_jit` omitted the existing bounded temporary-source project hint. It
+now passes that hint to `lower_with_context_and_project_hint`.
 
 `interpreter_constructor_test.rs::impl_registers_every_static_method` now pins
 the precise source invariant with two distinct static methods and calls the
