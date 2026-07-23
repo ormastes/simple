@@ -194,14 +194,23 @@ v1.4 `fw_jump.bin`, Linux **6.6.0** `Image` 22,026,752 B, `soc_virt.dtb`,
   marker, printed live — supersedes the "marker never prints" cosmetic gap noted
   below; `rdinit=/init` reaches it).
   Transcript: `build/os/rv64_soc/transcripts/qemu_control_live.log`.
-- **Our `soc_virt.dtb` (`-dtb`):** `OpenSBI v1.4` → `Platform Name:
-  simple-soc-rv64` → `Linux version 6.6.0` → `plic: plic@c000000: mapped 31
-  interrupts` → **`Kernel panic … VFS: Unable to mount root fs`**. The panic is
-  expected: a *static* `-dtb` has no `/chosen linux,initrd-start/end`, so QEMU
-  cannot inject the initrd address and the kernel finds no rootfs. It confirms
-  our DTB drives real Linux through PLIC init; wiring the initrd into the static
-  DTB (or booting from a block/virtio root) is the remaining packaging step.
-  Transcript: `build/os/rv64_soc/transcripts/qemu_ourdtb_live.log`.
+- **Our `soc_virt.dtb` (`-dtb`) — now reaches userspace (initrd wiring fixed
+  2026-07-23):** `OpenSBI v1.4` → `Platform Name: simple-soc-rv64` → `Linux
+  version 6.6.0` → `Unpacking initramfs...` → **`Run /init as init process`**,
+  **no VFS panic**. Fixed by adding `/chosen linux,initrd-start=0x88200000` /
+  `linux,initrd-end=0x8820033d` (the address QEMU computes for the pinned
+  initramfs — read it with `qemu-system-riscv64 -M virt,dumpdtb=…`) and raising
+  the `memory@80000000` node to **256 MiB** in `soc_virt.dts`. A static `-dtb`
+  cannot be auto-patched by QEMU, so the initrd address must live in the DTB; and
+  the FDT at `0x88000000` (bootrom-fixed) plus the initrd above it need RAM past
+  the 128 MiB edge. Boot command: the QEMU-oracle line above **plus** `-dtb
+  build/os/rv64_soc/soc_virt.dtb` and `-m 256M`.
+  Transcript: `build/os/rv64_soc/transcripts/qemu_ourdtb_wired.log`.
+  Remaining cosmetic gap: our `/init`'s `SIMPLE-RV64-INIT OK` marker does not
+  print under `-dtb` (it does under QEMU's auto-dtb) — kernel printk uses the SBI
+  earlycon, but our `uart@10000000` node isn't bound as the `ttyS0` that init's
+  fd1/`/dev/console` opens. A console-node/driver-binding detail, not the initrd
+  wiring (the initramfs is unpacked and `/init` runs).
 
 ### Full Linux boot (heavier, needs a kernel build)
 The real OpenSBI v1.4 → Linux 6.6 → `/init` boot (documented in the QEMU-oracle
