@@ -25,6 +25,9 @@ simple duplicate-check src/ --semantic-threshold 0.92
 
 # Force JSON output
 simple duplicate-check src/ --format json
+
+# Persist a lexical duplicate database
+simple duplicate-check src/ --mode token --format sdn
 ```
 
 Modes:
@@ -117,6 +120,7 @@ Create `simple.duplicate-check.sdn` in the project root:
 ```sdn
 duplicate-check:
   output-format: text
+  report-path: doc/01_research/analysis/duplicate_db.sdn
   max-allowed: 0
   mode: semantic
 
@@ -138,7 +142,9 @@ duplicate-check:
 ```
 
 `mode` accepts `semantic`, `semantic-llm`, `token`, or `cosine`;
-`output-format` accepts `text` or `json`. The CLI applies explicit flags after
+`output-format` accepts `text`, `json`, or `sdn`. `sdn` requires `token` or
+`cosine` mode, writes the lexical duplicate database to `report-path`, and
+fails nonzero if that write fails. The CLI applies explicit flags after
 loading this file, then validates the effective values. An invalid value that
 is not replaced by a valid CLI override is a configuration error and exits `2`
 instead of silently selecting a different analysis or output mode.
@@ -154,6 +160,7 @@ simple duplicate-check src/ --max-allowed 5
 
 - `text` prints a mode-specific report.
 - `json` emits a stable top-level `mode` field plus mode-specific result arrays.
+- `sdn` writes the lexical duplicate database configured by `report-path`.
 
 ---
 
