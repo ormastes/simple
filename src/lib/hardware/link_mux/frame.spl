@@ -1,0 +1,167 @@
+# ============================================================================
+# hardware/link_mux/frame.spl — channel framing for the shared debug link
+# ============================================================================
+#
+# ONE committed frame format (see doc/03_plan/hardware/debug/
+# shared_link_channel_mux_plan_2026-07-23.md). Configurability lives in the
+# TransportProfile, NOT in swapping this format.
+#
+#   on-wire frame = COBS( chan_byte ++ payload ++ crc16_hi ++ crc16_lo ) ++ 0x00
+#
+# - chan_byte : logical channel (0=LOG 1=TERM 2=JTAG 3=CTRL by convention).
+# - crc16     : CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF, no reflect/xorout)
+#               over (chan_byte ++ payload).
+# - COBS      : Consistent Overhead Byte Stuffing removes every 0x00 from the
+#               body so a single 0x00 is an unambiguous frame delimiter. Bounded
+#               overhead (<=1 byte / 254). Clean resync: after any garbage the
+#               next 0x00 starts a fresh frame.
+#
+# Pure, allocation-only, no I/O — safe on any tier. The FPGA demux and the host
+# bridge both use exactly this codec so a frame that encodes here decodes there.
+# ============================================================================
+
+struct DecodedFrame:
+    """Result of decoding one delimited frame body.
+    ok=false means malformed COBS, too-short, or CRC mismatch (drop it)."""
+    ok: bool
+    chan: i64
+    payload: [u8]
+
+# ----------------------------------------------------------------------------
+# CRC-16/CCITT-FALSE
+# ----------------------------------------------------------------------------
+fn crc16_ccitt(data: [u8]) -> i64:
+    """CRC-16/CCITT-FALSE. crc16_ccitt("123456789") == 0x29B1."""
+    var crc = 0xFFFF
+    var i = 0
+    val n = data.len()
+    while i < n:
+        crc = crc ^ ((data[i].to_i64() & 0xFF) << 8)
+        var k = 0
+        while k < 8:
+            if (crc & 0x8000) != 0:
+                crc = ((crc << 1) ^ 0x1021) & 0xFFFF
+            else:
+                crc = (crc << 1) & 0xFFFF
+            k = k + 1
+        i = i + 1
+    crc & 0xFFFF
+
+# ----------------------------------------------------------------------------
+# COBS encode / decode (canonical placeholder-code algorithm)
+# ----------------------------------------------------------------------------
+fn cobs_encode(data: [u8]) -> [u8]:
+    """Encode `data` with COBS. Result contains no 0x00 byte; caller appends the
+    0x00 delimiter. Empty input encodes to [0x01]."""
+    var out: [u8] = []
+    out.push(0.to_u8())        # placeholder for the first code byte
+    var code_ptr = 0
+    var code = 1
+    var i = 0
+    val n = data.len()
+    while i < n:
+        val b = data[i].to_i64() & 0xFF
+        if b != 0:
+            out.push(b.to_u8())
+            code = code + 1
+            if code == 0xFF:
+                out[code_ptr] = 0xFF.to_u8()
+                code_ptr = out.len()
+                out.push(0.to_u8())
+                code = 1
+        else:
+            out[code_ptr] = code.to_u8()
+            code_ptr = out.len()
+            out.push(0.to_u8())
+            code = 1
+        i = i + 1
+    out[code_ptr] = code.to_u8()
+    out
+
+fn cobs_decode(enc: [u8]) -> [u8]:
+    """Decode one COBS block sequence (the bytes between 0x00 delimiters, with no
+    trailing 0x00). A malformed stream yields best-effort output; callers verify
+    the CRC to reject corruption."""
+    var out: [u8] = []
+    var i = 0
+    val n = enc.len()
+    while i < n:
+        val code = enc[i].to_i64() & 0xFF
+        i = i + 1
+        if code == 0:
+            # unexpected embedded zero — bail (malformed)
+            return out
+        var k = 1
+        while k < code:
+            if i >= n:
+                return out
+            out.push(enc[i])
+            i = i + 1
+            k = k + 1
+        if code < 0xFF and i < n:
+            out.push(0.to_u8())
+    out
+
+# ----------------------------------------------------------------------------
+# Frame encode / decode
+# ----------------------------------------------------------------------------
+fn frame_encode(chan: i64, payload: [u8]) -> [u8]:
+    """Encode a full on-wire frame including the trailing 0x00 delimiter."""
+    var body: [u8] = []
+    body.push((chan & 0xFF).to_u8())
+    var i = 0
+    val n = payload.len()
+    while i < n:
+        body.push(payload[i])
+        i = i + 1
+    val crc = crc16_ccitt(body)
+    body.push(((crc >> 8) & 0xFF).to_u8())
+    body.push((crc & 0xFF).to_u8())
+    var enc = cobs_encode(body)
+    enc.push(0.to_u8())        # frame delimiter
+    enc
+
+fn frame_decode_body(cobs_body: [u8]) -> DecodedFrame:
+    """Decode one delimited frame body (COBS bytes, no trailing 0x00)."""
+    val dec = cobs_decode(cobs_body)
+    val n = dec.len()
+    if n < 3:
+        # need at least chan + 2 CRC bytes
+        return DecodedFrame(ok: false, chan: -1, payload: [])
+    # split CRC (last 2 bytes) from the inner (chan ++ payload)
+    var inner: [u8] = []
+    var i = 0
+    while i < n - 2:
+        inner.push(dec[i])
+        i = i + 1
+    val got = ((dec[n - 2].to_i64() & 0xFF) << 8) | (dec[n - 1].to_i64() & 0xFF)
+    val calc = crc16_ccitt(inner)
+    if calc != got:
+        return DecodedFrame(ok: false, chan: -1, payload: [])
+    var payload: [u8] = []
+    var j = 1
+    while j < inner.len():
+        payload.push(inner[j])
+        j = j + 1
+    DecodedFrame(ok: true, chan: inner[0].to_i64() & 0xFF, payload: payload)
+
+fn frame_decode_stream(stream: [u8]) -> [DecodedFrame]:
+    """Split a raw byte stream on 0x00 delimiters and decode each non-empty body.
+    Garbage between delimiters yields an ok=false frame (resync), so the caller
+    sees exactly the well-formed frames by filtering ok. Models the streaming
+    demux without any I/O."""
+    var frames: [DecodedFrame] = []
+    var cur: [u8] = []
+    var i = 0
+    val n = stream.len()
+    while i < n:
+        val b = stream[i].to_i64() & 0xFF
+        if b == 0:
+            if cur.len() > 0:
+                frames.push(frame_decode_body(cur))
+                cur = []
+            # empty run between delimiters is just idle — skip
+        else:
+            cur.push(stream[i])
+        i = i + 1
+    frames
