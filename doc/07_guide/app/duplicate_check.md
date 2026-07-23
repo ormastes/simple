@@ -50,6 +50,10 @@ The compatibility aliases `--semantic` and `--cosine` are still accepted. Lexica
 - `--min-impact`
 - `--similarity-threshold`
 
+Similarity, semantic, and semantic-drift thresholds are probabilities and must
+remain between `0` and `1`, inclusive. Invalid CLI or configuration values are
+usage errors rather than empty-match success.
+
 Use `--no-default-excludes` when the requested scan root is itself under a
 normally excluded directory such as `test/`. Normal newline-terminated source
 is counted by logical lines; the terminal split artifact is not a candidate
