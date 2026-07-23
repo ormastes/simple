@@ -55,6 +55,7 @@ impl ParsedObject {
     pub fn parse(data: &[u8]) -> ParseResult<Self> {
         let obj_file = object::File::parse(data)?;
         let mut parsed = Self::new();
+        let mut object_section_to_parsed = HashMap::new();
 
         // Phase 1: Parse sections
         for section in obj_file.sections() {
@@ -97,10 +98,37 @@ impl ParsedObject {
             let index = parsed.sections.len();
             parsed.section_name_to_index.insert(name, index);
             parsed.sections.push(smf_section);
+            object_section_to_parsed.insert(section.index(), index);
+        }
+
+        // SMF loads all code sections into one contiguous code buffer. Object
+        // symbols and relocation offsets are section-relative, so normalize
+        // them to that flattened layout before serializing the SMF.
+        let first_code_section = parsed
+            .sections
+            .iter()
+            .position(|section| section.section_type == SectionType::Code)
+            .map(|index| (index as u16) + 1);
+        let mut code_offset = 0u64;
+        let mut code_layout = HashMap::new();
+        for (index, section) in parsed.sections.iter().enumerate() {
+            if section.section_type == SectionType::Code {
+                code_layout.insert(index, code_offset);
+                code_offset += section.data.len() as u64;
+            }
         }
 
         // Phase 2: Parse symbols
-        for (sym_idx, symbol) in obj_file.symbols().enumerate() {
+        let mut object_symbol_indices = HashMap::new();
+        let mut object_section_symbols = Vec::new();
+        for symbol in obj_file.symbols() {
+            let object_symbol_index = symbol.index();
+            if symbol.kind() == SymbolKind::Section {
+                if let Some(section_index) = symbol.section_index() {
+                    object_section_symbols.push((object_symbol_index, section_index));
+                }
+                continue;
+            }
             let name = symbol.name().unwrap_or("<unnamed>").to_string();
 
             // Skip unnamed or invalid symbols
@@ -125,15 +153,20 @@ impl ParsedObject {
             };
 
             // Get section index
+            let mut value = symbol.address();
             let section_index = if let Some(section_idx) = symbol.section_index() {
                 // Find SMF section index from object section index
-                let obj_section = obj_file.section_by_index(section_idx)?;
-                let section_name = obj_section.name().unwrap_or("");
-                parsed
-                    .section_name_to_index
-                    .get(section_name)
-                    .map(|idx| (*idx as u16) + 1)
-                    .unwrap_or(0)
+                let object_section = obj_file.section_by_index(section_idx)?;
+                value = value.checked_sub(object_section.address()).ok_or_else(|| {
+                    ObjectParseError::InvalidSection(format!("symbol {} address precedes its section base", name))
+                })?;
+                let parsed_section_index = object_section_to_parsed.get(&section_idx).copied();
+                if let Some(offset) = parsed_section_index.and_then(|index| code_layout.get(&index)) {
+                    value += offset;
+                    first_code_section.unwrap_or(0)
+                } else {
+                    parsed_section_index.map(|index| (index as u16) + 1).unwrap_or(0)
+                }
             } else {
                 0 // Undefined symbol
             };
@@ -143,7 +176,7 @@ impl ParsedObject {
                 binding,
                 sym_type,
                 section_index,
-                value: symbol.address(),
+                value,
                 size: symbol.size(),
                 layout_phase: 2, // Default to steady phase
                 is_event_loop_anchor: false,
@@ -153,33 +186,76 @@ impl ParsedObject {
             let index = parsed.symbols.len();
             parsed.symbol_name_to_index.insert(name, index);
             parsed.symbols.push(smf_symbol);
+            object_symbol_indices.insert(object_symbol_index, index as u32);
+        }
+
+        // Some relocatable formats target a section plus an addend instead of
+        // a named symbol. Preserve those targets as synthetic local symbols;
+        // dropping them leaves Cranelift's placeholder call displacement in
+        // place (typically a recursive call to the next instruction).
+        let mut section_symbol_indices = HashMap::new();
+        for section in obj_file.sections() {
+            let Some(&parsed_index) = object_section_to_parsed.get(&section.index()) else {
+                continue;
+            };
+            let (section_index, value) = if let Some(offset) = code_layout.get(&parsed_index) {
+                (first_code_section.unwrap_or(0), *offset)
+            } else {
+                ((parsed_index as u16) + 1, 0)
+            };
+            let symbol_index = parsed.symbols.len() as u32;
+            parsed.symbols.push(SmfSymbol {
+                name: format!("__smf_section_{}", section.index().0),
+                binding: SymbolBinding::Local,
+                sym_type: SymbolType::None,
+                section_index,
+                value,
+                size: section.size(),
+                layout_phase: 2,
+                is_event_loop_anchor: false,
+                layout_pinned: false,
+            });
+            section_symbol_indices.insert(section.index(), symbol_index);
+        }
+        for (symbol_index, section_index) in object_section_symbols {
+            if let Some(&synthetic_index) = section_symbol_indices.get(&section_index) {
+                object_symbol_indices.insert(symbol_index, synthetic_index);
+            }
         }
 
         // Phase 3: Parse relocations
         for section in obj_file.sections() {
-            let section_name = section.name().unwrap_or("");
-            let section_idx = parsed.section_name_to_index.get(section_name).copied();
+            let section_idx = object_section_to_parsed.get(&section.index()).copied();
 
             if section_idx.is_none() {
                 continue; // Skip sections we didn't parse
             }
 
             for (offset, reloc) in section.relocations() {
+                if parsed.sections[section_idx.unwrap()].section_type != SectionType::Code {
+                    return Err(ObjectParseError::InvalidSection(format!(
+                        "relocation source section {} is not executable code",
+                        section.name().unwrap_or("<unnamed>")
+                    )));
+                }
                 let symbol_index = match reloc.target() {
-                    RelocationTarget::Symbol(sym_idx) => {
-                        // Find symbol in our parsed symbols
-                        let obj_symbol = obj_file.symbol_by_index(sym_idx)?;
-                        let sym_name = obj_symbol.name().unwrap_or("");
-                        parsed.symbol_name_to_index.get(sym_name).copied().unwrap_or(0) as u32
-                    }
-                    _ => continue, // Skip non-symbol relocations
+                    RelocationTarget::Symbol(sym_idx) => *object_symbol_indices
+                        .get(&sym_idx)
+                        .ok_or_else(|| ObjectParseError::SymbolNotFound(format!("object symbol {}", sym_idx.0)))?,
+                    RelocationTarget::Section(section_idx) => *section_symbol_indices
+                        .get(&section_idx)
+                        .ok_or_else(|| ObjectParseError::SymbolNotFound(format!("section {}", section_idx.0)))?,
+                    _ => continue,
                 };
 
                 // Map object relocation to SMF relocation type
                 let reloc_type = map_relocation_type(reloc.kind(), reloc.encoding(), reloc.flags())?;
 
                 let smf_reloc = SmfRelocation {
-                    offset,
+                    offset: section_idx
+                        .and_then(|index| code_layout.get(&index).copied())
+                        .unwrap_or(0)
+                        + offset,
                     symbol_index,
                     reloc_type,
                     addend: reloc.addend(),
@@ -303,6 +379,80 @@ mod tests {
             )
             .unwrap(),
             RelocationType::Arm64Branch26
+        );
+    }
+
+    #[test]
+    fn flattens_duplicate_code_sections_and_preserves_section_relocation_identity() {
+        use object::write::{Object as WriteObject, Relocation};
+        use object::{Architecture, BinaryFormat, Endianness, RelocationEncoding, RelocationFlags, RelocationKind};
+
+        let mut object = WriteObject::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
+        let helper = object.add_section(Vec::new(), b".text".to_vec(), SectionKind::Text);
+        object.append_section_data(helper, &[0xc3], 1);
+        let main = object.add_section(Vec::new(), b".text".to_vec(), SectionKind::Text);
+        object.append_section_data(main, &[0xe8, 0, 0, 0, 0, 0xc3], 1);
+        let helper_section_symbol = object.section_symbol(helper);
+        object
+            .add_relocation(
+                main,
+                Relocation {
+                    offset: 1,
+                    symbol: helper_section_symbol,
+                    addend: -4,
+                    flags: RelocationFlags::Generic {
+                        kind: RelocationKind::Relative,
+                        encoding: RelocationEncoding::Generic,
+                        size: 32,
+                    },
+                },
+            )
+            .unwrap();
+
+        let parsed = ParsedObject::parse(&object.write().unwrap()).unwrap();
+        let relocation = parsed.relocations.first().expect("relocation must survive parsing");
+        let target = &parsed.symbols[relocation.symbol_index as usize];
+
+        assert_eq!(
+            relocation.offset, 2,
+            "second section relocation must be flattened after the first byte"
+        );
+        assert_eq!(
+            target.value, 0,
+            "section relocation must still target the first code section"
+        );
+        assert!(target.name.starts_with("__smf_section_"));
+    }
+
+    #[test]
+    fn normalizes_macho_symbol_address_before_flattening_code_sections() {
+        use object::write::{Object as WriteObject, Symbol, SymbolSection};
+        use object::{Architecture, BinaryFormat, Endianness, SymbolFlags, SymbolScope};
+
+        let mut object = WriteObject::new(BinaryFormat::MachO, Architecture::Aarch64, Endianness::Little);
+        let first = object.add_section(b"__TEXT".to_vec(), b"__text".to_vec(), SectionKind::Text);
+        object.append_section_data(first, &[0xc0, 0x03, 0x5f, 0xd6], 4);
+        let second = object.add_section(b"__TEXT".to_vec(), b"__text".to_vec(), SectionKind::Text);
+        object.append_section_data(second, &[0xc0, 0x03, 0x5f, 0xd6], 16);
+        object.add_symbol(Symbol {
+            name: b"later".to_vec(),
+            value: 0,
+            size: 4,
+            kind: SymbolKind::Text,
+            scope: SymbolScope::Linkage,
+            weak: false,
+            section: SymbolSection::Section(second),
+            flags: SymbolFlags::None,
+        });
+
+        let parsed = ParsedObject::parse(&object.write().unwrap()).unwrap();
+        let later = parsed
+            .get_symbol("_later")
+            .expect("named Mach-O symbol must survive parsing");
+
+        assert_eq!(
+            later.value, 4,
+            "later section symbol must use flattened code offset exactly once"
         );
     }
 }

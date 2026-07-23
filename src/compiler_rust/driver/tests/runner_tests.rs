@@ -226,6 +226,88 @@ fn compile_file_then_run_smf_bare_script_print_executes_for_real() {
 }
 
 #[test]
+fn standalone_smf_cli_executes_interpolated_helper_in_fresh_process() {
+    let dir = tempfile::tempdir().unwrap();
+    let src_path = dir.path().join("interpolation.spl");
+    let smf_path = dir.path().join("interpolation.smf");
+    std::fs::write(
+        &src_path,
+        "fn render(value: i64) -> text:\n    return \"v={value}\"\n\nfn main():\n    print render(7)\n",
+    )
+    .unwrap();
+
+    let mut compile = assert_cmd::cargo::cargo_bin_cmd!("simple");
+    compile.arg("compile").arg(&src_path).arg("-o").arg(&smf_path);
+    compile.assert().success();
+
+    let mut run = assert_cmd::cargo::cargo_bin_cmd!("simple");
+    run.arg("run").arg(&smf_path);
+    run.assert().success().stdout(contains("v=7"));
+}
+
+#[test]
+fn standalone_smf_rejects_required_interpreter_fallback() {
+    let dir = tempfile::tempdir().unwrap();
+    let src_path = dir.path().join("fallback.spl");
+    let smf_path = dir.path().join("fallback.smf");
+    std::fs::write(
+        &src_path,
+        "fn check(opt: i64?) -> i64:\n    if opt.?:\n        return 1\n    return 0\n\nfn main():\n    print check(Some(7))\n",
+    )
+    .unwrap();
+
+    let error = Runner::new()
+        .compile_file(&src_path, &smf_path)
+        .expect_err("standalone SMF must not serialize interpreter calls");
+
+    assert!(
+        error.contains("cannot compile to standalone SMF"),
+        "unexpected error: {error}"
+    );
+    assert!(
+        error.contains("check") && error.contains("TryOperator"),
+        "unexpected error: {error}"
+    );
+    assert!(!smf_path.exists(), "rejected compilation must not leave an artifact");
+}
+
+#[test]
+fn target_smf_rejects_required_interpreter_fallback_before_codegen() {
+    let source = "fn rejected(opt: i64?) -> i64:\n    if opt.?:\n        return 1\n    return 0\n\nfn main() -> i64:\n    return 0\n";
+    let targets = [
+        "x86_64-linux",
+        "x86_64-macos",
+        "x86_64-windows",
+        "x86_64-freebsd",
+        "arm-linux",
+        "aarch64-linux",
+        "riscv64-linux",
+    ];
+
+    for descriptor in targets {
+        let dir = tempfile::tempdir().unwrap();
+        let smf_path = dir.path().join("fallback.smf");
+        let target = simple_common::target::Target::parse(descriptor).expect("valid target descriptor");
+        let error = Runner::new()
+            .compile_to_smf_for_target(source, &smf_path, target)
+            .expect_err("target SMF must reject interpreter fallback before codegen");
+
+        assert!(
+            error.contains("cannot compile to standalone SMF"),
+            "{descriptor}: {error}"
+        );
+        assert!(
+            error.contains("rejected") && error.contains("TryOperator"),
+            "{descriptor}: {error}"
+        );
+        assert!(
+            !smf_path.exists(),
+            "{descriptor}: rejected compilation left an artifact"
+        );
+    }
+}
+
+#[test]
 fn dependency_analysis_finds_imports_and_macros() {
     let source = r#"
         import foo/bar

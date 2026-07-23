@@ -1,6 +1,6 @@
 //! Interpreter fallback, runtime setup, and execution management.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -12,7 +12,7 @@ use simple_type::check as type_check;
 use tracing::instrument;
 
 use super::core::CompilerPipeline;
-use crate::compilability::{analyze_module, boxed_return_functions, CompilabilityMode};
+use crate::compilability::{analyze_module, boxed_return_functions, CompilabilityMode, CompilabilityStatus};
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::import_loader::{has_script_statements, load_module_with_imports, load_module_with_imports_for_target};
 use crate::interpreter::evaluate_module_with_di_and_aop;
@@ -261,6 +261,34 @@ fn wasm_target_fallback_error(reason: &str) -> CompileError {
 Make the entrypoint native-compilable for wasm, or remove imported module-scope script state such as top-level `var`/`let`/`const` declarations.",
         reason
     ))
+}
+
+fn standalone_smf_fallback_error(
+    compilability: &HashMap<String, CompilabilityStatus>,
+    non_compilable: &HashSet<String>,
+) -> CompileError {
+    let mut flagged: Vec<String> = non_compilable
+        .iter()
+        .map(|name| {
+            let reasons = compilability
+                .get(name)
+                .map(|status| format!("{:?}", status.reasons()))
+                .unwrap_or_else(|| "[unknown]".to_string());
+            format!("  - {name}: {reasons}")
+        })
+        .collect();
+    flagged.sort();
+    let ctx = ErrorContext::new()
+        .with_code(codes::UNSUPPORTED_FEATURE)
+        .with_help("Rewrite the flagged constructs; standalone SMF artifacts cannot call an embedded interpreter.");
+    CompileError::semantic_with_context(
+        format!(
+            "cannot compile to standalone SMF: {} function(s) contain constructs that require the interpreter:\n{}",
+            non_compilable.len(),
+            flagged.join("\n")
+        ),
+        ctx,
+    )
 }
 
 impl CompilerPipeline {
@@ -538,12 +566,8 @@ impl CompilerPipeline {
             ast_module
         };
 
-        // 4. Compilability analysis for hybrid execution. This SMF is loaded
-        // and run through the in-process/hybrid-JIT lane (embedded
-        // interpreter bridge), so keep the conservative HybridJit
-        // classification — see `CompilabilityMode`.
-        let compilability = analyze_module(&ast_module.items, CompilabilityMode::HybridJit);
-        let boxed_returns = boxed_return_functions(&ast_module.items);
+        // Standalone SMF artifacts have no embedded interpreter bridge.
+        let compilability = analyze_module(&ast_module.items, CompilabilityMode::AotNative);
         let non_compilable: HashSet<String> = compilability
             .iter()
             .filter(|(_, status)| !status.is_compilable())
@@ -585,13 +609,8 @@ impl CompilerPipeline {
             return Ok(generate_smf_bytes(main_value, self.gc.as_ref()));
         }
 
-        // 8. Apply hybrid transformation if needed
         if !non_compilable.is_empty() {
-            mir::apply_hybrid_transform(&mut mir_module, &non_compilable, &boxed_returns);
-            tracing::debug!(
-                "Hybrid execution: {} functions require interpreter fallback",
-                non_compilable.len()
-            );
+            return Err(standalone_smf_fallback_error(&compilability, &non_compilable));
         }
 
         // 9. Generate machine code via selected backend
@@ -701,12 +720,8 @@ impl CompilerPipeline {
             ast_module
         };
 
-        // 4. Compilability analysis for hybrid execution. Target-specific SMF
-        // output is loaded and run through the in-process/hybrid-JIT lane
-        // (embedded interpreter bridge), so keep the conservative HybridJit
-        // classification — see `CompilabilityMode`.
-        let compilability = analyze_module(&ast_module.items, CompilabilityMode::HybridJit);
-        let boxed_returns = boxed_return_functions(&ast_module.items);
+        // Standalone target SMF artifacts have no embedded interpreter bridge.
+        let compilability = analyze_module(&ast_module.items, CompilabilityMode::AotNative);
         let non_compilable: HashSet<String> = compilability
             .iter()
             .filter(|(_, status)| !status.is_compilable())
@@ -735,14 +750,8 @@ impl CompilerPipeline {
             return Ok(generate_smf_bytes_for_target(main_value, self.gc.as_ref(), target));
         }
 
-        // 8. Apply hybrid transformation if needed
         if !non_compilable.is_empty() {
-            mir::apply_hybrid_transform(&mut mir_module, &non_compilable, &boxed_returns);
-            tracing::debug!(
-                "Hybrid execution (target {:?}): {} functions require interpreter fallback",
-                target,
-                non_compilable.len()
-            );
+            return Err(standalone_smf_fallback_error(&compilability, &non_compilable));
         }
 
         // 9. Generate machine code via selected backend for the target architecture
