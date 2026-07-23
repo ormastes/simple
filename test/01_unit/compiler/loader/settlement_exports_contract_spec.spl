@@ -16,6 +16,14 @@ fn export_symbol(name: text, address: i64, module_id: text, binding: SymbolBindi
 fn fallback_symbol(name: text) -> SymbolEntry?:
     Some(export_symbol(name, 99, "__jit__", SymbolBinding.Strong))
 
+fn import_symbol(name: text, module_id: text) -> ImportRef:
+    ImportRef(
+        symbol_name: name,
+        from_module: module_id,
+        relocation_offset: 0,
+        relocation_kind: RelocationKind.Abs64
+    )
+
 describe "settlement export updates are transactional":
     it "rejects duplicate strong exports without partial mutation":
         val container = SettlementContainer.create()
@@ -102,3 +110,61 @@ describe "settlement export updates are transactional":
                 expect(symbol.address).to_equal(99)
             case nil:
                 expect(false).to_equal(true)
+
+    it "restores a fallback export after a same-name provider is removed":
+        val container = SettlementContainer.create()
+        expect(container.add_module("consumer", "/consumer.smf").is_ok()).to_equal(true)
+        expect(container.add_module("provider", "/provider.smf").is_ok()).to_equal(true)
+        container.linker.add_import(import_symbol("service", "consumer"))
+        expect(container.linker.resolve_with_fallback(fallback_symbol).is_ok()).to_equal(true)
+        expect(container.set_exports("provider", [export_symbol("service", 20, "provider", SymbolBinding.Strong)]).is_ok()).to_equal(true)
+        match container.linker.get_export("service"):
+            case Some(symbol): expect(symbol.module_id).to_equal("provider")
+            case nil: expect(false).to_equal(true)
+        expect(container.remove_module("provider").is_ok()).to_equal(true)
+        match container.linker.get_export("service"):
+            case Some(symbol):
+                expect(symbol.module_id).to_equal("__jit__")
+                expect(symbol.address).to_equal(99)
+            case nil:
+                expect(false).to_equal(true)
+
+    it "replaces imports instead of accumulating stale or duplicate refs":
+        val container = SettlementContainer.create()
+        expect(container.add_module("A", "/a.smf").is_ok()).to_equal(true)
+        expect(container.set_imports("A", [import_symbol("old_missing", "A")]).is_ok()).to_equal(true)
+        expect(container.set_imports("A", [import_symbol("new_missing", "A")]).is_ok()).to_equal(true)
+        expect(container.set_imports("A", [import_symbol("new_missing", "A")]).is_ok()).to_equal(true)
+        expect(container.linker.imports.contains("old_missing")).to_equal(false)
+        expect(container.linker.imports["new_missing"].len()).to_equal(1)
+        expect(container.linker.resolve().is_err()).to_equal(true)
+        expect(container.linker.stats().unresolved).to_equal(1)
+        expect(container.linker.get_unresolved_imports().contains("old_missing")).to_equal(false)
+        expect(container.linker.get_unresolved_imports().contains("new_missing")).to_equal(true)
+
+    it "removes graph and linker state before a clean module re-add":
+        val container = SettlementContainer.create()
+        expect(container.add_module("consumer", "/consumer.smf").is_ok()).to_equal(true)
+        expect(container.add_module("provider", "/provider-old.smf").is_ok()).to_equal(true)
+        expect(container.add_dependency("consumer", "provider").is_ok()).to_equal(true)
+        expect(container.set_imports("consumer", [import_symbol("service", "consumer")]).is_ok()).to_equal(true)
+        expect(container.set_exports("provider", [export_symbol("service", 10, "provider", SymbolBinding.Strong)]).is_ok()).to_equal(true)
+        expect(container.link().is_ok()).to_equal(true)
+
+        expect(container.remove_module("provider").is_ok()).to_equal(true)
+        expect(container.modules.contains("provider")).to_equal(false)
+        expect(container.linker.modules.contains("provider")).to_equal(false)
+        expect(container.linker.get_export("service") == nil).to_equal(true)
+        expect(container.modules["consumer"].dependencies.contains("provider")).to_equal(false)
+        expect(container.load_order.len()).to_equal(0)
+        expect(container.link().is_err()).to_equal(true)
+        expect(container.linker.stats().unresolved).to_equal(1)
+
+        expect(container.add_module("provider", "/provider-new.smf").is_ok()).to_equal(true)
+        expect(container.add_dependency("consumer", "provider").is_ok()).to_equal(true)
+        expect(container.set_exports("provider", [export_symbol("service", 20, "provider", SymbolBinding.Strong)]).is_ok()).to_equal(true)
+        expect(container.link().is_ok()).to_equal(true)
+        expect(container.linker.modules.filter(\id: id == "provider").len()).to_equal(1)
+        match container.linker.get_export("service"):
+            case Some(symbol): expect(symbol.address).to_equal(20)
+            case nil: expect(false).to_equal(true)

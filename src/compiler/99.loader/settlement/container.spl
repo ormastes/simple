@@ -160,8 +160,12 @@ impl SettlementContainer:
                     case Err(error):
                         return Err(ContainerError.LinkFailed([error]))
 
-        # Fallback/JIT exports are not owned by a registered settlement module.
-        # Preserve them when their name is not replaced by an authoritative export.
+        # Fallback/JIT exports need durable ownership so a temporarily shadowing
+        # module export can reveal them again after replacement or removal.
+        for name in self.linker.fallback_exports.keys():
+            if not staged.exports.contains(name):
+                staged.exports[name] = self.linker.fallback_exports[name]
+        # Preserve other directly registered non-module exports as well.
         for name in self.linker.exports.keys():
             val existing = self.linker.exports[name]
             if not self.linker.modules.contains(existing.module_id) and not staged.exports.contains(name):
@@ -171,6 +175,8 @@ impl SettlementContainer:
         entry.exports = exports
         self.modules[module_id] = entry
         self.linker.exports = staged.exports
+        self.linker.resolved_count = 0
+        self.linker.unresolved_count = 0
 
         self.is_linked = false
         Ok(())
@@ -180,13 +186,29 @@ impl SettlementContainer:
         if not self.modules.contains(module_id):
             return Err(ContainerError.ModuleNotFound(module_id))
 
+        var staged_imports: Dict<text, [ImportRef]> = {}
+        for name in self.linker.imports.keys():
+            for ref in self.linker.imports[name]:
+                if ref.from_module == module_id:
+                    continue
+                var bucket: [ImportRef] = []
+                if staged_imports.contains(name):
+                    bucket = staged_imports[name]
+                bucket.push(ref)
+                staged_imports[name] = bucket
+        for ref in imports:
+            var bucket: [ImportRef] = []
+            if staged_imports.contains(ref.symbol_name):
+                bucket = staged_imports[ref.symbol_name]
+            bucket.push(ref)
+            staged_imports[ref.symbol_name] = bucket
+
         var entry = self.modules[module_id]
         entry.imports = imports
         self.modules[module_id] = entry
-
-        # Register imports with the linker
-        for ref in imports:
-            self.linker.add_import(ref)
+        self.linker.imports = staged_imports
+        self.linker.resolved_count = 0
+        self.linker.unresolved_count = 0
 
         self.is_linked = false
         Ok(())
@@ -212,6 +234,19 @@ impl SettlementContainer:
         if not self.modules.contains(module_id):
             return Err(ContainerError.ModuleNotFound(module_id))
 
+        # Clear module-owned linker indexes while the authoritative entry still
+        # exists, so export shadowing and import ownership rebuild correctly.
+        match self.set_exports(module_id, []):
+            case Err(error):
+                return Err(error)
+            case Ok(_):
+                pass
+        match self.set_imports(module_id, []):
+            case Err(error):
+                return Err(error)
+            case Ok(_):
+                pass
+
         # Remove from dependents of other modules
         val entry = self.modules[module_id]
         for dep_id in entry.dependencies:
@@ -219,8 +254,24 @@ impl SettlementContainer:
                 var dep = self.modules[dep_id]
                 dep.dependents = dep.dependents.filter(\d: d != module_id)
                 self.modules[dep_id] = dep
+        for dependent_id in entry.dependents:
+            if self.modules.contains(dependent_id):
+                var dependent = self.modules[dependent_id]
+                dependent.dependencies = dependent.dependencies.filter(\d: d != module_id)
+                self.modules[dependent_id] = dependent
 
         self.modules = self.modules.remove(module_id)
+        self.linker.modules = self.linker.modules.filter(\id: id != module_id)
+        self.load_order = []
+        for remaining_id in self.modules.keys():
+            var remaining = self.modules[remaining_id]
+            remaining.load_order = -1
+            match remaining.state:
+                case Linked:
+                    remaining.state = ModuleState.Loaded
+                case _:
+                    pass
+            self.modules[remaining_id] = remaining
         self.is_linked = false
         Ok(())
 
