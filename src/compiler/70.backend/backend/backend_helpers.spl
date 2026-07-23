@@ -17,6 +17,7 @@ use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget, BuildMod
     compileerror_backend_error}
 use compiler.mir_opt.mir_opt.mod.{target_opt_context_default, optimize_module_for_backend, OptLevel}
 use compiler.backend.backend.llvm_codegen_adapter.{llvm_compile_module_direct, llvm_compile_module_direct_compiled}
+use compiler.backend.codegen_types.{CodegenOutput}
 use compiler.backend.codegen_factory.{CodegenFactory}
 use compiler.backend.backend.llvm_lib_backend.{llvm_lib_compile_module_direct}
 use compiler.backend.backend.cranelift_codegen_adapter.{CraneliftCodegenAdapter, cranelift_compile_module_direct}
@@ -241,6 +242,30 @@ fn backend_for_name(name: text) -> has_BackendKind:
 # Convenience Functions for Driver Integration
 # ============================================================================
 
+
+fn codegen_output_to_compiled_module(output: CodegenOutput) -> CompiledModule:
+    # Free-function conversion: calling codegen_output_to_compiled_module(output) on a
+    # match-arm-bound receiver reads self fields as false/0 on the stage4
+    # native lane (caller-side field reads of the same value are correct —
+    # receiver transport defect); plain-argument passing is reliable. Also
+    # uses bare conditional assignment (flat implicit lift) instead of an
+    # explicit Some(...) box for the optional fields.
+    var oc: [u8]? = nil
+    if output.has_object_code:
+        oc = output.object_code
+    var asm_opt: text? = nil
+    if output.has_text_output:
+        asm_opt = output.text_output
+    CompiledModule(
+        name: output.name,
+        object_code: oc,
+        assembly: asm_opt,
+        has_llvm_ir: output.has_header_output,
+        llvm_ir: if output.has_header_output: output.header_output else: "",
+        symbols: output.symbols,
+        compile_time_ms: output.compile_time_ms
+    )
+
 fn compile_module_with_backend(
     backend_name: text,
     module: MirModule,
@@ -355,7 +380,7 @@ fn compile_module_with_backend(
         val result = llvm_compile_module_direct(options, optimized_module)
         match result:
             case Ok(output):
-                return Ok(output.to_compiled_module())
+                return Ok(codegen_output_to_compiled_module(output))
             case Err(err):
                 return Err(err)
 
@@ -365,7 +390,7 @@ fn compile_module_with_backend(
         val result = llvm_lib_compile_module_direct(options, optimized_module)
         match result:
             case Ok(output):
-                return Ok(output.to_compiled_module())
+                return Ok(codegen_output_to_compiled_module(output))
             case Err(err):
                 return Err(err)
 
@@ -373,7 +398,7 @@ fn compile_module_with_backend(
         val result = cranelift_compile_module_direct(options, optimized_module)
         match result:
             case Ok(output):
-                return Ok(output.to_compiled_module())
+                return Ok(codegen_output_to_compiled_module(output))
             case Err(err):
                 return Err(err)
 
@@ -381,7 +406,7 @@ fn compile_module_with_backend(
     val result = codegen.compile_module(optimized_module)
     match result:
         case Ok(output):
-            Ok(output.to_compiled_module())
+            Ok(codegen_output_to_compiled_module(output))
         case Err(err):
             Err(err)
 

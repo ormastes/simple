@@ -407,8 +407,12 @@ impl CompilerDriver:
                     val cache_source = driver_native_module_cache_source(ctx, mod_name)
                     if cache_source != "":
                         val source_fp = FileFingerprint.from_file(cache_source)
-                        if source_fp.?:
-                            build_cache.update_entry(cache_source, source_fp.unwrap(), [], [obj_path])
+                        # Flat-safe: .unwrap() on a flat optional lowers to the
+                        # box-assuming rt_enum_payload on the stage4 lane and
+                        # stores a garbage fingerprint (BuildCache.save then
+                        # traps on fp.content_hash); if-val is the safe form.
+                        if val source_fp_val = source_fp:
+                            build_cache.update_entry(cache_source, source_fp_val, [], [obj_path])
 
             # Evict MIR for compiled modules in low-memory mode
             if low_memory:
@@ -861,20 +865,27 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
         val err = compiled.unwrap_err()
         return Err("AOT compile error in {name}: {err}")
 
-    val module: CompiledModule = compiled.unwrap()
-    if module.object_code.?:
-        val obj_path = "{output_base}.{name}.o"
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
-            val bootstrap_obj = llvm_bootstrap_last_object_path()
-            if bootstrap_obj != "" and rt_file_copy(bootstrap_obj, obj_path):
-                return Ok(obj_path)
-        match write_elf_bytes_to_file(obj_path, module.object_code.unwrap()):
-            case Ok(_):
-                Ok(obj_path)
-            case Err(e):
-                Err("Failed to write object file {obj_path}: {e}")
-    else:
-        Err("Backend produced no object code for {name}")
+    # Flat-safe extraction: .unwrap() on this Result returns a 0-nil on the
+    # stage4 native lane (the nil-receiver guard catches 0 while `== nil`
+    # only sees sentinel 3); match-arm payload extraction is the verified
+    # path. Same for the flat [u8]? object_code — if-val, not .unwrap().
+    match compiled:
+        case Ok(module):
+            if val obj_bytes = module.object_code:
+                val obj_path = "{output_base}.{name}.o"
+                if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                    val bootstrap_obj = llvm_bootstrap_last_object_path()
+                    if bootstrap_obj != "" and rt_file_copy(bootstrap_obj, obj_path):
+                        return Ok(obj_path)
+                match write_elf_bytes_to_file(obj_path, obj_bytes):
+                    case Ok(_):
+                        Ok(obj_path)
+                    case Err(e):
+                        Err("Failed to write object file {obj_path}: {e}")
+            else:
+                Err("Backend produced no object code for {name}")
+        case _:
+            Err("AOT compile error in {name}: backend result not Ok")
 
 # ============================================================================
 # Dependency Collection for SMF Staleness Tracking
