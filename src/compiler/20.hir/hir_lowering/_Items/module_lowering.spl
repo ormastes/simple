@@ -184,7 +184,8 @@ impl HirLowering:
         if not scan.found_value_return:
             return HirType(kind: HirTypeKind.Unit, span: fn_decl.span)
         if scan.ambiguous or not scan.resolved_name.?:
-            self.error("untyped function returns a value: function '{fn_decl.name}' returns a value but declares no return type; add '-> T'", fn_decl.span)
+            if not self.registering_import_symbols:
+                self.error("untyped function returns a value: function '{fn_decl.name}' returns a value but declares no return type; add '-> T'", fn_decl.span)
             return HirType(kind: HirTypeKind.Unit, span: fn_decl.span)
         HirType(kind: hir_type_kind_from_simple_name(scan.resolved_name.unwrap()), span: fn_decl.span)
 
@@ -192,6 +193,12 @@ impl HirLowering:
         # Generic callables keep the existing untyped-symbol behavior until
         # monomorphization supplies a concrete signature.
         if fn_decl.type_params.len() > 0:
+            return nil
+        # Import/sibling registration is fail-soft: signature diagnostics
+        # (untyped returns, param types unlowerable in the importer's
+        # context) belong to the defining module's own pass. Register the
+        # symbol untyped instead of erroring the importing module.
+        if self.registering_import_symbols:
             return nil
 
         var param_types: [HirType] = []
@@ -767,8 +774,10 @@ impl HirLowering:
             hir_module_phase_probe("phase3:hir:imports:start {module.name}")
             if bootstrap_diag:
                 eprint("[hir-lower] resolve_import_symbols:start module={module.name}")
+            self.registering_import_symbols = true
             self.resolve_import_symbols(module)
             self.resolve_package_sibling_symbols(module)
+            self.registering_import_symbols = false
             if bootstrap_diag:
                 eprint("[hir-lower] resolve_import_symbols:done module={module.name}")
             hir_module_phase_probe("phase3:hir:imports:done {module.name}")
