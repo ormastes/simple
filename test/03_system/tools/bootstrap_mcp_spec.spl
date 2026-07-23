@@ -136,9 +136,26 @@ describe "Bootstrap MCP — deployed launchers":
         expect(rc).to_equal(0)
         expect(out + err).to_contain("probe ok")
 
-    it "deployed LSP MCP launcher completes initialize":
-        val request = "{\"jsonrpc\":\"2.0\",\"id\":\"bootstrap-lsp-probe\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"bootstrap\",\"version\":\"1\"}}}"
-        val command = "runner=; if command -v timeout >/dev/null 2>&1; then runner='timeout 10'; elif command -v gtimeout >/dev/null 2>&1; then runner='gtimeout 10'; elif command -v perl >/dev/null 2>&1; then runner=\"perl -e 'alarm shift; exec @ARGV' 10\"; else exit 127; fi; printf '%s\\n' '" + request + "' | $runner bin/simple_lsp_mcp_server"
+    it "deployed LSP MCP launcher passes correlated symbols admission":
+        val wrapper = file_read("bin/simple_lsp_mcp_server")
+        expect(wrapper.contains("native_hash_is_valid")).to_equal(true)
+        expect(wrapper.contains("cd \"$\{repo_root}\"")).to_equal(true)
+        expect(wrapper.contains("probe_timeout \"$\{SIMPLE_LSP_MCP_NATIVE_PROBE_TIMEOUT:-3}\"")).to_equal(true)
+        expect(wrapper.contains("&& ! grep -q '\"id\":\"3\".*\"error\"'")).to_equal(true)
+        expect(wrapper.contains("&& ! grep -q '\"id\":\"3\".*\"isError\"'")).to_equal(true)
+        expect(wrapper.contains("command failed with exit code")).to_equal(true)
+        val initialize = "{\"jsonrpc\":\"2.0\",\"id\":\"bootstrap-lsp-initialize\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"bootstrap\",\"version\":\"1\"}}}"
+        val tools_list = "{\"jsonrpc\":\"2.0\",\"id\":\"bootstrap-lsp-tools\",\"method\":\"tools/list\",\"params\":{}}"
+        val symbols = "{\"jsonrpc\":\"2.0\",\"id\":\"bootstrap-lsp-symbols\",\"method\":\"tools/call\",\"params\":{\"name\":\"lsp_symbols\",\"arguments\":{\"file\":\"src/app/simple_lsp_mcp/main.spl\"}}}"
+        val command = "runner=; if command -v timeout >/dev/null 2>&1; then runner='timeout 10'; elif command -v gtimeout >/dev/null 2>&1; then runner='gtimeout 10'; elif command -v perl >/dev/null 2>&1; then runner=\"perl -e 'alarm shift; exec @ARGV' 10\"; else exit 127; fi; repo_root=\"$(pwd)\"; workdir=\"$(mktemp -d)\"; trap 'rm -rf \"$workdir\"' EXIT; (cd \"$workdir\" && printf '%s\\n%s\\n%s\\n' '" + initialize + "' '" + tools_list + "' '" + symbols + "' | $runner \"$repo_root/bin/simple_lsp_mcp_server\")"
         val (out, err, rc) = process_run("sh", ["-c", command])
         expect(rc).to_equal(0)
-        expect(out + err).to_contain("\"id\":\"bootstrap-lsp-probe\",\"result\":")
+        val response = out + err
+        expect(response.contains("\"id\":\"bootstrap-lsp-initialize\",\"result\"")).to_equal(true)
+        expect(response.contains("\"id\":\"bootstrap-lsp-tools\",\"result\"")).to_equal(true)
+        expect(response.contains("lsp_symbols")).to_equal(true)
+        expect(response.contains("\"id\":\"bootstrap-lsp-symbols\",\"result\"")).to_equal(true)
+        expect(response.contains("\\\"name\\\":\\\"log_options_help\\\"")).to_equal(true)
+        expect(response.contains("\"error\"")).to_equal(false)
+        expect(response.contains("\"isError\":true")).to_equal(false)
+        expect(response.contains("command failed with exit code")).to_equal(false)

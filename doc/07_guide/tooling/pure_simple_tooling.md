@@ -121,6 +121,13 @@ verification. Raw-source execution is an explicit debug fallback controlled by
 runtime. A wrapper handshake that silently runs raw source or the Rust seed is
 not production evidence.
 
+`bin/simple_lsp_mcp_server` is a hash-admitted, bounded native launcher. It
+restores the canonical repository-root CWD before execution and admits a
+candidate only after correlated `initialize`, `tools/list` (advertising
+`lsp_symbols`), and `tools/call(lsp_symbols)` (`log_options_help`) results.
+Any JSON-RPC `error`, MCP `isError`, child-command failure text, timeout, or
+nonzero child exit fails closed.
+
 Every bootstrap route that produces a Stage 4 full CLI runs
 `scripts/check/check-bootstrap-essential-tools-smoke.shs` with the exact fresh
 binary. From a temporary non-repository working directory it checks real

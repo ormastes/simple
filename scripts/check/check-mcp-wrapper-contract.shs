@@ -44,6 +44,12 @@ grep -q 'mkdir -p "${log_dir}"' "$BIN/simple_mcp_server"
 grep -q 'mkdir -p "${log_dir}"' "$BIN/simple_lsp_mcp_server"
 grep -q 'SIMPLE_LSP_MCP_NATIVE' "$BIN/simple_lsp_mcp_server"
 grep -q '"id":"3".*"result"' "$BIN/simple_mcp_server"
+grep -q 'probe_status=0' "$BIN/simple_lsp_mcp_server"
+grep -q '"${probe_status}" -eq 0' "$BIN/simple_lsp_mcp_server"
+grep -q '"file":"src/app/simple_lsp_mcp/main.spl"' "$BIN/simple_lsp_mcp_server"
+grep -q '"id":"2".*"result".*"lsp_symbols"' "$BIN/simple_lsp_mcp_server"
+grep -Fq '\"name\":\"log_options_help\"' "$BIN/simple_lsp_mcp_server"
+grep -q '"id":"3".*"command failed with exit code"' "$BIN/simple_lsp_mcp_server"
 grep -q '>"${_stamp}.$$" && mv' "$BIN/simple_mcp_server"
 grep -q '>"${_stamp}.$$" && mv' "$BIN/simple_lsp_mcp_server"
 
@@ -60,13 +66,25 @@ cat > "$TMPDIR/native" <<'EOF'
 #!/bin/sh
 if [ "$#" -eq 0 ]; then
   case "$0" in
-    *lsp*) printf '%s\n' '{"jsonrpc":"2.0","id":"1","result":{"protocolVersion":"2025-06-18"}}' '{"jsonrpc":"2.0","id":"2","result":{"tools":[{"name":"lsp_definition"}]}}' ;;
+    *lsp*)
+      input="$(cat)"
+      printf '%s\n' '{"jsonrpc":"2.0","id":"1","result":{"protocolVersion":"2025-06-18"}}' '{"jsonrpc":"2.0","id":"2","result":{"tools":[{"name":"lsp_definition"},{"name":"lsp_symbols"}]}}'
+      case "$input" in
+        *'"id":"3","method":"tools/call","params":{"name":"lsp_symbols","arguments":{"file":"src/app/simple_lsp_mcp/main.spl"}}}'*)
+          printf '%s\n' '{"jsonrpc":"2.0","id":"3","result":{"content":[{"type":"text","text":"[{\"name\":\"log_options_help\",\"kind\":\"function\"}]"}]}}'
+          ;;
+        *)
+          printf '%s\n' '{"jsonrpc":"2.0","id":"3","error":{"message":"lsp_symbols call missing"}}'
+          ;;
+      esac
+      ;;
     *) printf '%s\n' '{"jsonrpc":"2.0","id":"2","result":{"tools":[{"name":"simple_pipe"}]}}' '{"jsonrpc":"2.0","id":"3","result":{"content":"spipe: linked"}}' ;;
   esac
   exit 0
 fi
 printf 'native=%s\n' "$0"
 printf 'args=%s\n' "$*"
+printf 'cwd=%s\n' "$(pwd)"
 EOF
 chmod +x "$TMPDIR/native"
 cp "$TMPDIR/native" "$BIN/release/x86_64-unknown-linux-gnu/simple_mcp_server"
@@ -80,11 +98,13 @@ printf '%s\n' "$native_hash" > "$BIN/release/x86_64-unknown-linux-gnu/simple_mcp
 printf '%s\n' "$native_hash" > "$BIN/release/x86_64-unknown-linux-gnu/simple_lsp_mcp_server.sha256"
 
 "$BIN/simple_mcp_server" alpha beta > "$TMPDIR/mcp.out"
-"$BIN/simple_lsp_mcp_server" gamma > "$TMPDIR/lsp.out"
+mkdir -p "$TMPDIR/outside"
+(cd "$TMPDIR/outside" && "$BIN/simple_lsp_mcp_server" gamma > "$TMPDIR/lsp.out")
 grep -q 'release/x86_64-unknown-linux-gnu/simple_mcp_server' "$TMPDIR/mcp.out"
 grep -q 'args=alpha beta' "$TMPDIR/mcp.out"
 grep -q 'release/x86_64-unknown-linux-gnu/simple_lsp_mcp_server' "$TMPDIR/lsp.out"
 grep -q 'args=gamma' "$TMPDIR/lsp.out"
+grep -q "cwd=$ROOT" "$TMPDIR/lsp.out"
 [ -d "$ROOT/.simple/logs" ]
 "$BIN/simple_mcp_server" cache-hit >/dev/null
 "$BIN/simple_lsp_mcp_server" cache-hit >/dev/null
@@ -113,6 +133,67 @@ else
 fi
 printf '%s\n' "$bad_hash" > "$BIN/release/x86_64-unknown-linux-gnu/simple_mcp_server.sha256"
 if "$BIN/simple_mcp_server" >/dev/null 2>&1; then
+  exit 1
+fi
+
+cat > "$BIN/release/x86_64-unknown-linux-gnu/simple_lsp_mcp_server" <<'EOF'
+#!/bin/sh
+printf '%s\n' '{"jsonrpc":"2.0","id":"1","result":{"protocolVersion":"2025-06-18"}}' '{"jsonrpc":"2.0","id":"2","result":{"tools":[{"name":"lsp_symbols"}]}}' '{"jsonrpc":"2.0","id":"3","result":{"content":[{"type":"text","text":"log_options_help"}]}}'
+exit 1
+EOF
+chmod +x "$BIN/release/x86_64-unknown-linux-gnu/simple_lsp_mcp_server"
+if command -v sha256sum >/dev/null 2>&1; then
+  bad_hash="$(sha256sum "$BIN/release/x86_64-unknown-linux-gnu/simple_lsp_mcp_server" | awk '{print $1}')"
+else
+  bad_hash="$(shasum -a 256 "$BIN/release/x86_64-unknown-linux-gnu/simple_lsp_mcp_server" | awk '{print $1}')"
+fi
+printf '%s\n' "$bad_hash" > "$BIN/release/x86_64-unknown-linux-gnu/simple_lsp_mcp_server.sha256"
+if "$BIN/simple_lsp_mcp_server" >/dev/null 2>&1; then
+  exit 1
+fi
+
+cat > "$BIN/release/x86_64-unknown-linux-gnu/simple_lsp_mcp_server" <<'EOF'
+#!/bin/sh
+printf '%s\n' '{"jsonrpc":"2.0","id":"1","result":{"protocolVersion":"2025-06-18"}}' '{"jsonrpc":"2.0","id":"2","result":{"tools":[{"name":"lsp_definition"},{"name":"lsp_symbols"}]}}' '{"jsonrpc":"2.0","id":"3","result":{"isError":true}}'
+EOF
+chmod +x "$BIN/release/x86_64-unknown-linux-gnu/simple_lsp_mcp_server"
+if command -v sha256sum >/dev/null 2>&1; then
+  bad_hash="$(sha256sum "$BIN/release/x86_64-unknown-linux-gnu/simple_lsp_mcp_server" | awk '{print $1}')"
+else
+  bad_hash="$(shasum -a 256 "$BIN/release/x86_64-unknown-linux-gnu/simple_lsp_mcp_server" | awk '{print $1}')"
+fi
+printf '%s\n' "$bad_hash" > "$BIN/release/x86_64-unknown-linux-gnu/simple_lsp_mcp_server.sha256"
+if "$BIN/simple_lsp_mcp_server" >/dev/null 2>&1; then
+  exit 1
+fi
+
+cat > "$BIN/release/x86_64-unknown-linux-gnu/simple_lsp_mcp_server" <<'EOF'
+#!/bin/sh
+printf '%s\n' '{"jsonrpc":"2.0","id":"1","result":{"protocolVersion":"2025-06-18"}}' '{"jsonrpc":"2.0","id":"2","result":{"tools":[{"name":"lsp_symbols"}]}}' '{"jsonrpc":"2.0","id":"3","result":{"content":[{"type":"text","text":"command failed with exit code 1"}]}}'
+EOF
+chmod +x "$BIN/release/x86_64-unknown-linux-gnu/simple_lsp_mcp_server"
+if command -v sha256sum >/dev/null 2>&1; then
+  bad_hash="$(sha256sum "$BIN/release/x86_64-unknown-linux-gnu/simple_lsp_mcp_server" | awk '{print $1}')"
+else
+  bad_hash="$(shasum -a 256 "$BIN/release/x86_64-unknown-linux-gnu/simple_lsp_mcp_server" | awk '{print $1}')"
+fi
+printf '%s\n' "$bad_hash" > "$BIN/release/x86_64-unknown-linux-gnu/simple_lsp_mcp_server.sha256"
+if "$BIN/simple_lsp_mcp_server" >/dev/null 2>&1; then
+  exit 1
+fi
+
+cat > "$BIN/release/x86_64-unknown-linux-gnu/simple_lsp_mcp_server" <<'EOF'
+#!/bin/sh
+printf '%s\n' '{"jsonrpc":"2.0","id":"1","result":{"protocolVersion":"2025-06-18"}}' '{"jsonrpc":"2.0","id":"2","result":{"tools":[{"name":"lsp_symbols"}]}}' '{"jsonrpc":"2.0","id":"3","result":{"content":[{"type":"text","text":"documentation mentions log_options_help"}]}}'
+EOF
+chmod +x "$BIN/release/x86_64-unknown-linux-gnu/simple_lsp_mcp_server"
+if command -v sha256sum >/dev/null 2>&1; then
+  bad_hash="$(sha256sum "$BIN/release/x86_64-unknown-linux-gnu/simple_lsp_mcp_server" | awk '{print $1}')"
+else
+  bad_hash="$(shasum -a 256 "$BIN/release/x86_64-unknown-linux-gnu/simple_lsp_mcp_server" | awk '{print $1}')"
+fi
+printf '%s\n' "$bad_hash" > "$BIN/release/x86_64-unknown-linux-gnu/simple_lsp_mcp_server.sha256"
+if "$BIN/simple_lsp_mcp_server" >/dev/null 2>&1; then
   exit 1
 fi
 

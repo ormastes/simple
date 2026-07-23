@@ -11,8 +11,8 @@
 
 This manual mirrors
 `test/03_system/tools/bootstrap_mcp_spec.spl`. It covers deployed layout,
-artifact integrity, the MCP native probe, and one bounded LSP initialize.
-It does not duplicate full feature-call behavior.
+artifact integrity, the MCP native probe, and a bounded LSP symbols admission
+through the launcher. It does not duplicate the broader LSP feature suite.
 
 The executable protocol owners are:
 
@@ -31,7 +31,7 @@ The executable protocol owners are:
 | MCP launcher | `bin/simple_mcp_server` exists and is executable |
 | LSP launcher | `bin/simple_lsp_mcp_server` exists and is executable |
 | MCP startup | `bin/simple_mcp_server --probe` reports `probe ok` |
-| LSP startup | A bounded `initialize` returns a correlated result |
+| LSP wrapper admission | From a non-repository CWD, hash-admitted launcher restores the canonical repository root and returns correlated `initialize`, `tools/list`, and `lsp_symbols` results |
 
 Missing artifacts fail the scenarios. There are no environment skips,
 placeholder passes, source fallbacks, or masked process failures.
@@ -78,11 +78,16 @@ Require `test -x bin/simple_lsp_mcp_server` to return exit code `0`.
 Run the deployed MCP wrapper with `--probe`, require exit code `0`, and require
 the native server's `probe ok` marker.
 
-#### deployed LSP MCP launcher completes initialize
+#### deployed LSP MCP launcher passes correlated symbols admission
 
-Send one JSON-RPC `initialize` request through the deployed LSP wrapper with a
-10-second `timeout`, `gtimeout`, or Perl alarm bound. Fail when no bound is
-available. Require exit code `0` and a correlated `bootstrap-lsp-probe` result.
+Read the deployed wrapper contract to require `native_hash_is_valid`, its
+canonical `cd "${repo_root}"`, and the bounded native probe. Then invoke the
+launcher from a temporary non-repository CWD with a 10-second `timeout`,
+`gtimeout`, or Perl alarm bound. Send correlated `initialize`, `tools/list`,
+and `tools/call(lsp_symbols)` requests. Require exit code `0`, each matching
+result ID, `lsp_symbols` advertised by the list, and a usable symbol object whose
+escaped `name` field is exactly `log_options_help`. Reject JSON-RPC `error`, MCP
+`isError`, text-only mentions, and child-command-failure output.
 
 ## Protocol Evidence
 
@@ -99,5 +104,5 @@ malformed frames, JSON-RPC errors, and MCP `isError` results fail closed.
 - Requirement: `doc/02_requirements/app/build/bootstrap.md`
 - Handshake guide: `doc/07_guide/tooling/mcp_handshake_regression.md`
 
-Manual synchronized on 2026-07-18. Regenerate with the pure-Simple SPipe
+Manual synchronized on 2026-07-23. Regenerate with the pure-Simple SPipe
 docgen after the fresh self-hosted MCP artifacts are deployed.

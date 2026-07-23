@@ -64,6 +64,13 @@ Each native server has an adjacent `.sha256` sidecar emitted by bootstrap and
 deployed with it. The wrapper verifies that hash before its protocol probe or
 `exec`; a missing or mismatched sidecar is a provenance failure.
 
+The LSP wrapper always changes to the canonical repository root before probing
+or executing its admitted native server. Admission is bounded and correlated:
+it requires successful `initialize`, a `tools/list` result advertising
+`lsp_symbols`, then a `tools/call(lsp_symbols)` result containing the usable
+`log_options_help` symbol. JSON-RPC `error`, MCP `isError`, child-command
+failure text, timeout, or nonzero child exit rejects the candidate.
+
 Before installation, `scripts/setup/setup.shs` admits the deployed
 `bin/release/<triple>/simple` with the shared frontend/provenance gate. A
 version string identifying a bootstrap seed, Rust build, or debug build is a
