@@ -1,7 +1,7 @@
 # Freestanding native: outer-scope scalar `val`s read back corrupted inside a `while` loop with intervening calls
 
 - **ID:** native_scalar_spill_clobber_loop_intervening_calls_2026-07-20
-- **Status:** OPEN
+- **Status:** SOURCE FIXED; fresh staged execution pending
 - **Severity:** high (blocks the DrawIR titlebar gradient; general hazard for any loop consuming pre-computed scalars on the freestanding lane)
 - **Found by:** GRADIENT-DRAWIR lane, 2026-07-20, real OVMF boot evidence
 - **Family:** same mechanical shape as
@@ -53,3 +53,20 @@ no-regression, Boot A verified: 1 distinct titlebar color, 0 exceptions) with
 an in-code comment recording this investigation. Fix the seed's spill-slot
 handling with a minimal repro (scalar hoisted over a call-bearing loop) as
 the regression test, then sweep the workaround back out.
+
+## 2026-07-23 pure-Simple root fix
+
+The active freestanding path is the pure-Simple Cranelift adapter, not the
+hand-written native register allocator. Its `value_map` was retained while
+blocks were compiled sequentially, so a use in a loop body could bind to the
+value produced while compiling an earlier block instead of loading the local's
+runtime stack slot. Block entry now retains only `Alloc` addresses (whose slot
+is the allocation itself) and reloads all ordinary cross-block values from
+their persistent slots.
+
+One focused aggressive-Cranelift smoke case pins a pre-loop `u32` across a
+call-bearing `while`. Hosted Linux/macOS/Windows inherit the shared matrix,
+FreeBSD selects the same case in its scoped Cranelift pass, and the existing
+cross-module fixture carries the oracle through AArch64/RV64 execution plus
+ARM32/RV32/Windows-ARM64 object gates. No target-specific implementation was
+added. Fresh staged execution remains pending.

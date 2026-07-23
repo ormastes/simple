@@ -331,6 +331,7 @@ fn compile_function(cl_module: i64, func: MirFunction, func_handles: Dict<text, 
     # or as SSA values for temps
     var value_map: Dict<i64, i64> = {}
     var slot_map: Dict<i64, i64> = {}
+    var alloc_addresses: Dict<i64, i64> = {}
 
     # Allocate stack slots for all locals
     for local in func.locals:
@@ -374,6 +375,13 @@ fn compile_function(cl_module: i64, func: MirFunction, func_handles: Dict<text, 
         val cl_block = block_map[block.id.id]
 
         if i > 0:
+            # value_map is compile-order state, not SSA across CFG edges. Keep
+            # only Alloc addresses (their slot is the allocation itself); all
+            # ordinary locals reload the runtime value persisted in slot_map.
+            var block_values: Dict<i64, i64> = {}
+            for alloc_id in alloc_addresses.keys():
+                block_values[alloc_id] = alloc_addresses[alloc_id]
+            value_map = block_values
             cranelift_switch_to_block(ctx, cl_block)
 
         # Compile instructions. Keep a small adjacent-pattern window so
@@ -398,6 +406,14 @@ fn compile_function(cl_module: i64, func: MirFunction, func_handles: Dict<text, 
                     continue
             cl_translate_instruction(ctx, inst, value_map, slot_map, block_map, cl_module, func_handles, global_handles, func)
             inst_index = inst_index + 1
+
+        for inst in block.instructions:
+            match inst.kind:
+                case Alloc(dest, _):
+                    if value_map.has(dest.id):
+                        alloc_addresses[dest.id] = value_map[dest.id]
+                case _:
+                    pass
 
         # Compile terminator
         cl_translate_terminator(ctx, cl_module, block.id, block.terminator, value_map, slot_map, block_map, func)
