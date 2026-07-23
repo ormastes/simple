@@ -8,7 +8,8 @@ use std.hardware.rv64gc_rtl.fpu.{
     FpuConfig, fpu_config_enabled, fpu_config_single_only, fpu_config_disabled,
     FpuUnit, fpu_create, FpuStep, fpu_execute, freg_write, freg_read,
     fpu_load_writeback, fpu_cvt_int_to_float, f64_bits, f64_of_bits,
-    FFLAG_DZ, FFLAG_NV, OP_FMADD
+    FFLAG_DZ, FFLAG_NV, OP_FMADD,
+    Fcsr, fcsr_create, fcsr_read_csr, fcsr_write_csr
 }
 
 fn check(name: text, ok: bool) -> i64:
@@ -140,6 +141,18 @@ fn main() -> i64:
     # round-trip: FCVT.W.D(FCVT.D.W(-7)) == -7
     val rt = fpu_execute(i2f.un, enc_opfp(0x18, 1, 0, 7, 1, 11))
     fails = fails + check("round-trip FCVT.W.D(FCVT.D.W(-7))==-7", rt.int_result == 0 - 7)
+
+    # ---- 10. fcsr CSR pack/unpack (fflags 0x001, frm 0x002, fcsr 0x003) ----
+    var fc0 = fcsr_create()
+    val fc1 = fcsr_write_csr(fc0, 3, (2 << 5) | 0x11)             # frm=2, fflags=0x11
+    fails = fails + check("fcsr read 0x003 == 0x51", fcsr_read_csr(fc1, 3) == 0x51)
+    fails = fails + check("fcsr read fflags(0x001) == 0x11", fcsr_read_csr(fc1, 1) == 0x11)
+    fails = fails + check("fcsr read frm(0x002) == 2", fcsr_read_csr(fc1, 2) == 2)
+    val fc2 = fcsr_write_csr(fc1, 1, 0x0A)                        # overwrite fflags only
+    fails = fails + check("fcsr write fflags keeps frm", fcsr_read_csr(fc2, 2) == 2 and fcsr_read_csr(fc2, 1) == 0x0A)
+    val fc3 = fcsr_write_csr(fc2, 2, 5)                           # overwrite frm only
+    fails = fails + check("fcsr write frm keeps fflags", fcsr_read_csr(fc3, 2) == 5 and fcsr_read_csr(fc3, 1) == 0x0A)
+    fails = fails + check("fcsr read unknown addr == 0", fcsr_read_csr(fc3, 9) == 0)
 
     if fails == 0:
         print("FPU PROBE: ALL PASS")

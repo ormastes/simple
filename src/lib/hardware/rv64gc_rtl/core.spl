@@ -31,6 +31,7 @@ use std.hardware.rv64gc_rtl.atomics.{AtomicsState, atomics_create, atomics_lr, a
 use std.hardware.rv64gc_rtl.pkg.{AMO_LR, AMO_SC, AMO_SWAP, AMO_ADD, AMO_XOR, AMO_AND, AMO_OR}
 use std.hardware.rv64gc_rtl.pkg.{AMO_MIN, AMO_MAX, AMO_MINU, AMO_MAXU}
 use std.hardware.rv64gc_rtl.csr.{CsrFile64, csr64_create, csr64_read, csr64_write}
+use std.hardware.rv64gc_rtl.csr.{csr64_fs_state, csr64_set_fs, csr64_mark_fp_dirty, FS_OFF, FS_INITIAL}
 use std.hardware.rv64gc_rtl.csr.{CsrExt64, csr_ext64_create, csr_ext64_read, csr_ext64_write, csr_ext64_known}
 use std.hardware.rv64gc_rtl.csr.{MSTATUS_MIE_MASK, MIP_MEIP_MASK, MIP_MSIP_MASK, MIP_MTIP_MASK}
 use std.hardware.rv64gc_rtl.csr_s.{CsrSMode64, csr_s64_create, csr_s64_read, csr_s64_write}
@@ -41,7 +42,7 @@ use std.hardware.rv64gc_rtl.trap.{CAUSE_LOAD_MISALIGNED, CAUSE_STORE_MISALIGNED}
 use std.hardware.rv64gc_rtl.mmu_sv39.{MmuState64, mmu64_create, mmu64_flush, mmu64_set_satp}
 use std.hardware.rv64gc_rtl.mmu_sv39.{ACCESS_FETCH_64, ACCESS_LOAD_64, ACCESS_STORE_64}
 use std.hardware.rv64gc_rtl.csr_s.{SSTATUS_SIE_MASK_64, SSTATUS_SUM_MASK_64, SSTATUS_MXR_MASK_64}
-use std.hardware.rv64gc_rtl.fpu.{FpuConfig, FpuUnit, Fcsr, FRegFile64, fregfile_create, fcsr_create, fpu_config_enabled, fpu_config_disabled, fpu_execute, fpu_fmv_from_int, fpu_cvt_int_to_float, FpuStep, OP_FP, OP_FMADD, OP_FMSUB, OP_FNMSUB, OP_FNMADD}
+use std.hardware.rv64gc_rtl.fpu.{FpuConfig, FpuUnit, Fcsr, FRegFile64, fregfile_create, fcsr_create, fpu_config_enabled, fpu_config_disabled, fpu_execute, fpu_fmv_from_int, fpu_cvt_int_to_float, fpu_load_writeback, fpu_store_data, fcsr_read_csr, fcsr_write_csr, FpuStep, OP_FP, OP_LOAD_FP, OP_STORE_FP, OP_FMADD, OP_FMSUB, OP_FNMSUB, OP_FNMADD}
 
 val CORE64_FETCH_LOW: u32 = 0
 val CORE64_FETCH_HIGH: u32 = 1
@@ -131,6 +132,10 @@ struct CoreCombResult64:
     dmem_we: bool
     dmem_re: bool
     dmem_width: u32
+
+    # F/D load carry: raw value read from memory for FLD/FLW (written to frf in
+    # core64_update); 0 for non-FP-load cycles.
+    fp_load_data: i64
 
     # Instruction memory address
     imem_addr: i64
@@ -447,22 +452,32 @@ fn core64_combinational(state: CoreState64, imem_data: u32, dmem_rdata: i64, rf:
         # remainder. is_word selects the .W (32-bit, sign-extended) forms.
         rd_data = muldiv_execute(dec.opcode == OP_OP_32, dec.funct3, rs1_data, rs2_data)
     else if dec.is_csr:
-        val source = core64_csr_source(dec.funct3, dec.rs1, rs1_data)
-        val csr_access = core64_csr_access(state, dec.csr_addr, source, dec.funct3)
-        if csr_access.valid:
-            rd_data = csr_access.old_value
-            # decode's reg_write excludes OP_SYSTEM, so the CSR old-value
-            # writeback must be enabled here (regfile ignores rd=x0).
-            rd_write = true
+        val csr_a = dec.csr_addr as i64
+        if core64_is_fcsr_addr(csr_a):
+            # fflags/frm/fcsr read their old value from the FPU's fcsr state.
+            if state.fpu_cfg.enabled and csr64_fs_state(state.csr_m) != FS_OFF:
+                rd_data = fcsr_read_csr(state.fcsr, csr_a)
+                rd_write = true
+            else:
+                rd_write = false
         else:
-            rd_write = false
+            val source = core64_csr_source(dec.funct3, dec.rs1, rs1_data)
+            val csr_access = core64_csr_access(state, dec.csr_addr, source, dec.funct3)
+            if csr_access.valid:
+                rd_data = csr_access.old_value
+                # decode's reg_write excludes OP_SYSTEM, so the CSR old-value
+                # writeback must be enabled here (regfile ignores rd=x0).
+                rd_write = true
+            else:
+                rd_write = false
 
     # Data memory interface
-    val dmem_addr = alu_res.result
+    var dmem_addr = alu_res.result
     var dmem_wdata = rs2_data
     var dmem_we = dec.mem_write and (state.semi_suppress == false)
     var dmem_re = dec.mem_read
     val dmem_width = dec.funct3 & 0x3
+    var fp_load_data: i64 = 0
 
     # ── A extension (OP_AMO): LR / SC / AMO read-modify-write ──
     # Address = rs1 (decode routes imm=0 through the ALU for OP_AMO, so
@@ -504,6 +519,24 @@ fn core64_combinational(state: CoreState64, imem_data: u32, dmem_rdata: i64, rf:
             dmem_wdata = amo.new_value
             rd_data = amo_old
 
+    # ── F/D load/store (FLD/FLW/FSD/FSW): the integer decoder does not model
+    #    these opcodes, so compute the effective address and drive the data bus
+    #    here. Gated on the injected FPU being enabled (disabled -> no access;
+    #    core64_update raises illegal). Width is funct3 (2=word, 3=double), which
+    #    dmem_width already carries. ──
+    val fp_ls_op = (eff_insn as i64) & 0x7F
+    if state.fpu_cfg.enabled and fp_ls_op == OP_LOAD_FP:
+        val fimm = sign_extend_to_64(((eff_insn as i64) >> 20) & 0xFFF, 12)
+        dmem_addr = rs1_data + fimm
+        dmem_re = true
+        fp_load_data = dmem_rdata
+    else if state.fpu_cfg.enabled and fp_ls_op == OP_STORE_FP:
+        val simm = sign_extend_to_64(((((eff_insn as i64) >> 25) & 0x7F) << 5) | (((eff_insn as i64) >> 7) & 0x1F), 12)
+        dmem_addr = rs1_data + simm
+        dmem_we = state.semi_suppress == false
+        val fp_st_double = (dec.funct3 & 3) == 3
+        dmem_wdata = fpu_store_data(FpuUnit(cfg: state.fpu_cfg, frf: state.frf, fcsr: state.fcsr), dec.rs2, fp_st_double)
+
     # ── Misaligned load/store/AMO: suppress the memory access and the rd
     #    writeback; core64_update raises CAUSE_LOAD_MISALIGNED (4) /
     #    CAUSE_STORE_MISALIGNED (6) through the trap path BEFORE any access. ──
@@ -531,6 +564,7 @@ fn core64_combinational(state: CoreState64, imem_data: u32, dmem_rdata: i64, rf:
         dmem_we: dmem_we,
         dmem_re: dmem_re,
         dmem_width: dmem_width,
+        fp_load_data: fp_load_data,
         imem_addr: imem_addr
     )
 
@@ -543,6 +577,14 @@ fn core64_is_fp_compute(opcode: i64) -> bool:
     routes to the injected FPU. Load/store FP are not yet wired (deferred)."""
     opcode == OP_FP or opcode == OP_FMADD or opcode == OP_FMSUB or
         opcode == OP_FNMSUB or opcode == OP_FNMADD
+
+fn core64_is_fp(opcode: i64) -> bool:
+    """Every F/D opcode the core routes to the FPU: compute + FP load/store."""
+    core64_is_fp_compute(opcode) or opcode == OP_LOAD_FP or opcode == OP_STORE_FP
+
+fn core64_is_fcsr_addr(addr: i64) -> bool:
+    """Unprivileged float CSRs: fflags(0x001), frm(0x002), fcsr(0x003)."""
+    addr == 0x001 or addr == 0x002 or addr == 0x003
 
 fn core64_set_fpu(state: CoreState64, cfg: FpuConfig) -> CoreState64:
     """Inject/replace the FPU config (the on/off toggle) on an existing core."""
@@ -652,6 +694,30 @@ fn core64_update(state: CoreState64, imem_data: u32, comb: CoreCombResult64, a0_
             new_semi_phase = 0
             new_semi_suppress = false
 
+        else if comb.dec.is_csr and core64_is_fcsr_addr(comb.dec.csr_addr as i64) and state.semi_phase == 0:
+            # fflags/frm/fcsr write: update the FPU fcsr state; a write dirties FS.
+            val fcsr_a = comb.dec.csr_addr as i64
+            if state.fpu_cfg.enabled and csr64_fs_state(state.csr_m) != FS_OFF:
+                val fsrc = core64_csr_source(comb.dec.funct3, comb.dec.rs1, comb.rs1_data)
+                val fold = fcsr_read_csr(state.fcsr, fcsr_a)
+                val fnew = core64_csr_next_value(fold, fsrc, comb.dec.funct3)
+                if fnew != fold:
+                    new_fcsr = fcsr_write_csr(state.fcsr, fcsr_a, fnew)
+                    new_csr_m = csr64_mark_fp_dirty(state.csr_m)
+                new_pc = comb.pc_plus4
+                new_semi_phase = 0
+                new_semi_suppress = false
+            else:
+                val trap = trap64_enter(trap64_state_init(), CAUSE_ILLEGAL_INSN,
+                    ill_tval, state.pc, state.priv_mode, state.csr_m, state.csr_s)
+                new_pc = trap.trap_pc
+                new_priv_mode = trap.target_mode
+                new_csr_m = trap.csr
+                new_csr_s = trap.csr_s
+                new_semi_phase = 0
+                new_semi_suppress = false
+                new_atomics = atomics_create()
+
         else if comb.dec.is_csr and state.semi_phase == 0:
             val source = core64_csr_source(comb.dec.funct3, comb.dec.rs1, comb.rs1_data)
             val csr_access = core64_csr_access(state, comb.dec.csr_addr, source, comb.dec.funct3)
@@ -732,39 +798,55 @@ fn core64_update(state: CoreState64, imem_data: u32, comb: CoreCombResult64, a0_
             new_semi_suppress = false
             new_atomics = atomics_create()
 
-        else if core64_is_fp_compute(fp_opcode) and state.semi_phase == 0:
-            # ── F/D extension: route OP-FP / FMADD-family to the injected FPU.
-            #    Disabled (mstatus.FS==Off equivalent) -> illegal-instruction. ──
+        else if core64_is_fp(fp_opcode) and state.semi_phase == 0:
+            # ── F/D extension: OP-FP, the FMADD family, and FLD/FLW/FSD/FSW are
+            #    routed to the injected FPU. Requires the FPU present
+            #    (fpu_cfg.enabled) AND mstatus.FS != Off; else illegal-instruction.
+            #    Any op that writes FP state marks mstatus.FS = Dirty. ──
             new_semi_phase = 0
             new_semi_suppress = false
-            if state.fpu_cfg.enabled:
+            if state.fpu_cfg.enabled and csr64_fs_state(state.csr_m) != FS_OFF:
                 val fp_instr: i64 = eff_insn as i64
-                val fp_funct5 = (fp_instr >> 27) & 0x1F
-                val fp_unit = FpuUnit(cfg: state.fpu_cfg, frf: state.frf, fcsr: state.fcsr)
-                var fp_step = fpu_execute(fp_unit, fp_instr)
-                if fp_opcode == OP_FP and fp_funct5 == 0x1E:
-                    # FMV.W.X / FMV.D.X: move integer rs1 bits into float rd.
-                    val fp_is_d = ((fp_instr >> 25) & 3) == 1
-                    fp_step = fpu_fmv_from_int(fp_unit, comb.dec.rd, fp_is_d, comb.rs1_data)
-                else if fp_opcode == OP_FP and fp_funct5 == 0x1A:
-                    # FCVT.S/D.W/WU/L/LU: convert integer rs1 to float rd.
-                    fp_step = fpu_cvt_int_to_float(fp_unit, fp_instr, comb.rs1_data)
-                if fp_step.illegal:
-                    val trap = trap64_enter(trap64_state_init(), CAUSE_ILLEGAL_INSN,
-                        ill_tval, state.pc, state.priv_mode, state.csr_m, state.csr_s)
-                    new_pc = trap.trap_pc
-                    new_priv_mode = trap.target_mode
-                    new_csr_m = trap.csr
-                    new_csr_s = trap.csr_s
-                    new_atomics = atomics_create()
-                else:
-                    new_frf = fp_step.un.frf
-                    new_fcsr = fp_step.un.fcsr
+                if fp_opcode == OP_LOAD_FP:
+                    # FLD/FLW: the value was read from memory in the combinational
+                    # path (comb.fp_load_data); NaN-box single into the freg.
+                    val ld = fpu_load_writeback(FpuUnit(cfg: state.fpu_cfg, frf: state.frf, fcsr: state.fcsr),
+                        comb.dec.rd, (comb.dec.funct3 & 3) == 3, comb.fp_load_data)
+                    new_frf = ld.un.frf
+                    new_csr_m = csr64_mark_fp_dirty(state.csr_m)
                     new_pc = comb.pc_plus4
-                    if fp_step.writes_int:
-                        fp_int_write = true
-                        fp_int_rd = comb.dec.rd
-                        fp_int_val = fp_step.int_result
+                else if fp_opcode == OP_STORE_FP:
+                    # FSD/FSW: the store was issued in the combinational path;
+                    # a store reads FP state but does not dirty it.
+                    new_pc = comb.pc_plus4
+                else:
+                    val fp_funct5 = (fp_instr >> 27) & 0x1F
+                    val fp_unit = FpuUnit(cfg: state.fpu_cfg, frf: state.frf, fcsr: state.fcsr)
+                    var fp_step = fpu_execute(fp_unit, fp_instr)
+                    if fp_opcode == OP_FP and fp_funct5 == 0x1E:
+                        # FMV.W.X / FMV.D.X: move integer rs1 bits into float rd.
+                        val fp_is_d = ((fp_instr >> 25) & 3) == 1
+                        fp_step = fpu_fmv_from_int(fp_unit, comb.dec.rd, fp_is_d, comb.rs1_data)
+                    else if fp_opcode == OP_FP and fp_funct5 == 0x1A:
+                        # FCVT.S/D.W/WU/L/LU: convert integer rs1 to float rd.
+                        fp_step = fpu_cvt_int_to_float(fp_unit, fp_instr, comb.rs1_data)
+                    if fp_step.illegal:
+                        val trap = trap64_enter(trap64_state_init(), CAUSE_ILLEGAL_INSN,
+                            ill_tval, state.pc, state.priv_mode, state.csr_m, state.csr_s)
+                        new_pc = trap.trap_pc
+                        new_priv_mode = trap.target_mode
+                        new_csr_m = trap.csr
+                        new_csr_s = trap.csr_s
+                        new_atomics = atomics_create()
+                    else:
+                        new_frf = fp_step.un.frf
+                        new_fcsr = fp_step.un.fcsr
+                        new_csr_m = csr64_mark_fp_dirty(state.csr_m)
+                        new_pc = comb.pc_plus4
+                        if fp_step.writes_int:
+                            fp_int_write = true
+                            fp_int_rd = comb.dec.rd
+                            fp_int_val = fp_step.int_result
             else:
                 val trap = trap64_enter(trap64_state_init(), CAUSE_ILLEGAL_INSN,
                     ill_tval, state.pc, state.priv_mode, state.csr_m, state.csr_s)
@@ -853,7 +935,7 @@ fn core64_reset(reset_addr: i64) -> CoreState64:
         mul_div: MulDivState(busy: false, op: 0, a: 0, b: 0, result: 0, cycles_left: 0),
         atomics: AtomicsState(reservation_valid: false, reservation_addr: 0),
         priv_mode: 3,
-        csr_m: csr64_create(0),
+        csr_m: csr64_set_fs(csr64_create(0), FS_INITIAL),
         csr_ext: csr_ext64_create(),
         csr_s: csr_s64_create(),
         mmu: mmu,
@@ -885,7 +967,7 @@ fn core64_init(reset_vec: i64) -> CoreState64:
         mul_div: MulDivState(busy: false, op: 0, a: 0, b: 0, result: 0, cycles_left: 0),
         atomics: AtomicsState(reservation_valid: false, reservation_addr: 0),
         priv_mode: 3,
-        csr_m: csr64_create(0),
+        csr_m: csr64_set_fs(csr64_create(0), FS_INITIAL),
         csr_ext: csr_ext64_create(),
         csr_s: csr_s64_create(),
         mmu: mmu,

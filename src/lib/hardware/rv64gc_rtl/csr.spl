@@ -41,10 +41,23 @@ val CSR_ADDR_MHARTID: u32   = 0xF14
 val MSTATUS_MIE_MASK: i64   = 0x00000008   # bit 3
 val MSTATUS_MPIE_MASK: i64  = 0x00000080   # bit 7
 val MSTATUS_MPP_MASK: i64   = 0x00001800   # bits [12:11]
+val MSTATUS_FS_MASK: i64    = 0x00006000   # bits [14:13] — FP unit status
 
 val MSTATUS_MIE_BIT: i64    = 3
 val MSTATUS_MPIE_BIT: i64   = 7
 val MSTATUS_MPP_LO_BIT: i64 = 11
+val MSTATUS_FS_LO_BIT: i64  = 13           # FS field low bit
+
+# SD (State Dirty summary) — bit 63.  Read-only: reads 1 iff FS==Dirty(3)
+# (or, on a full impl, VS/XS dirty).  Built at runtime to avoid sign-bit
+# literal issues.
+val MSTATUS_SD_MASK: i64    = 1 << 63
+
+# FS state encodings (mstatus.FS, bits [14:13])
+val FS_OFF: i64     = 0
+val FS_INITIAL: i64 = 1
+val FS_CLEAN: i64   = 2
+val FS_DIRTY: i64   = 3
 
 # MPP = M-mode (0b11) — we only support M-mode
 val MPP_M_MODE: i64          = 0x00001800   # 3 << 11
@@ -186,8 +199,16 @@ fn csr64_write(csr: CsrFile64, addr: u32, value: i64) -> CsrFile64:
     and unknown addresses are silently ignored."""
     var out = csr
     if addr == CSR_ADDR_MSTATUS:
-        val writable_mask = MSTATUS_MIE_MASK | MSTATUS_MPIE_MASK | MSTATUS_MPP_MASK
-        out.mstatus = value & writable_mask
+        # FS (bits [14:13]) is software-writable so `csrw mstatus` can set the
+        # FP unit status.  SD (bit 63) is a derived read-only summary; it is
+        # recomputed here from FS so SD==1 iff FS==Dirty(3).
+        val writable_mask = MSTATUS_MIE_MASK | MSTATUS_MPIE_MASK | MSTATUS_MPP_MASK | MSTATUS_FS_MASK
+        val masked = value & writable_mask
+        val fs_field = (masked >> MSTATUS_FS_LO_BIT) & 3
+        if fs_field == 3:
+            out.mstatus = masked | MSTATUS_SD_MASK
+        else:
+            out.mstatus = masked & (MSTATUS_SD_MASK ^ -1)
     else if addr == CSR_ADDR_MIE:
         out.mie = value
     else if addr == CSR_ADDR_MTVEC:
@@ -213,6 +234,55 @@ fn csr64_write(csr: CsrFile64, addr: u32, value: i64) -> CsrFile64:
         out.mideleg = value
     # misa, mhartid, mcycle, minstret — read-only or counter (updated by tick)
     out
+
+# ============================================================================
+# MSTATUS.FS (floating-point unit status) helpers
+# ============================================================================
+#
+# FS is mstatus[14:13], 4 states: 0=Off, 1=Initial, 2=Clean, 3=Dirty.
+# When FS==Dirty the SD summary bit (mstatus[63]) reads 1.  These helpers let
+# the core / FP path query and update FS without open-coding the bit math.
+#
+# NOTE: S-mode sstatus (csr_s.spl) is a restricted VIEW of mstatus and also
+# exposes FS[14:13] + SD.  Mirroring sstatus.FS <-> mstatus.FS can follow in a
+# later lane; this change is scoped to the M-mode CsrFile64 only.
+# ============================================================================
+
+fn csr64_fs_state(csr: CsrFile64) -> i64:
+    """Return the current mstatus.FS field (0=Off,1=Initial,2=Clean,3=Dirty)."""
+    (csr.mstatus >> 13) & 3
+
+fn csr64_set_fs(csr: CsrFile64, fs: i64) -> CsrFile64:
+    """Return a new CsrFile64 with mstatus.FS[14:13] replaced by (fs & 3), and
+    SD (bit 63) set iff the new FS==Dirty(3).  All other fields preserved."""
+    val fs2 = fs & 3
+    val cleared = csr.mstatus & (MSTATUS_FS_MASK ^ -1)
+    val with_fs = cleared | (fs2 << 13)
+    var new_mstatus = with_fs
+    if fs2 == 3:
+        new_mstatus = with_fs | MSTATUS_SD_MASK
+    else:
+        new_mstatus = with_fs & (MSTATUS_SD_MASK ^ -1)
+    CsrFile64(
+        mstatus: new_mstatus,
+        misa: csr.misa,
+        mie: csr.mie,
+        mtvec: csr.mtvec,
+        mscratch: csr.mscratch,
+        mepc: csr.mepc,
+        mcause: csr.mcause,
+        mtval: csr.mtval,
+        mip: csr.mip,
+        medeleg: csr.medeleg,
+        mideleg: csr.mideleg,
+        mcycle: csr.mcycle,
+        minstret: csr.minstret,
+        mhartid: csr.mhartid
+    )
+
+fn csr64_mark_fp_dirty(csr: CsrFile64) -> CsrFile64:
+    """Convenience: set mstatus.FS = Dirty(3) (also raises SD)."""
+    csr64_set_fs(csr, 3)
 
 # ============================================================================
 # CSR Read-Modify-Write — CSRRW, CSRRS, CSRRC
@@ -426,6 +496,9 @@ export CSR_ADDR_MIP, CSR_ADDR_MCYCLE, CSR_ADDR_MINSTRET, CSR_ADDR_MHARTID
 export CSR_ADDR_MEDELEG, CSR_ADDR_MIDELEG
 export MSTATUS_MIE_MASK, MSTATUS_MPIE_MASK, MSTATUS_MPP_MASK
 export MSTATUS_MIE_BIT, MSTATUS_MPIE_BIT, MSTATUS_MPP_LO_BIT, MPP_M_MODE
+export MSTATUS_FS_MASK, MSTATUS_FS_LO_BIT, MSTATUS_SD_MASK
+export FS_OFF, FS_INITIAL, FS_CLEAN, FS_DIRTY
+export csr64_fs_state, csr64_set_fs, csr64_mark_fp_dirty
 export MIP_MSIP_MASK, MIP_MTIP_MASK, MIP_MEIP_MASK, MIP_SEIP_MASK
 export FUNCT3_CSRRW, FUNCT3_CSRRS, FUNCT3_CSRRC
 export FUNCT3_CSRRWI, FUNCT3_CSRRSI, FUNCT3_CSRRCI

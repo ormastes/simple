@@ -10,6 +10,7 @@ use std.hardware.rv64gc_rtl.core.{
     CoreState64, core64_init, core64_combinational, core64_update, core64_set_fpu
 }
 use std.hardware.rv64gc_rtl.fpu.{fpu_config_disabled}
+use std.hardware.rv64gc_rtl.csr.{csr64_fs_state}
 
 fn check(name: text, ok: bool) -> i64:
     if ok:
@@ -22,6 +23,20 @@ fn step(st: CoreState64, insn: i64) -> CoreState64:
     val comb = core64_combinational(st, iw, 0, st.rf)
     core64_update(st, iw, comb, comb.a0_val, comb.a1_val)
 
+struct StepOut:
+    state: CoreState64
+    mem: i64
+
+# step with a single-cell memory (address-agnostic; the test uses one location):
+# a store latches the written value into `mem`, a load feeds `mem` back in.
+fn step_mem(st: CoreState64, insn: i64, mem_in: i64) -> StepOut:
+    val iw = insn as u32
+    val comb = core64_combinational(st, iw, mem_in, st.rf)
+    var mem_out = mem_in
+    if comb.dmem_we:
+        mem_out = comb.dmem_wdata
+    StepOut(state: core64_update(st, iw, comb, comb.a0_val, comb.a1_val), mem: mem_out)
+
 # encoders
 fn enc_addi(rd: i64, rs1: i64, imm: i64) -> i64:
     ((imm & 0xFFF) << 20) | (rs1 << 15) | (0 << 12) | (rd << 7) | 0x13
@@ -30,6 +45,15 @@ fn enc_addi(rd: i64, rs1: i64, imm: i64) -> i64:
 fn enc_opfp(f5: i64, fmt: i64, rs2: i64, rs1: i64, rm: i64, rd: i64) -> i64:
     val funct7 = (f5 << 2) | fmt
     (funct7 << 25) | (rs2 << 20) | (rs1 << 15) | (rm << 12) | (rd << 7) | 0x53
+
+fn enc_load_fp(funct3: i64, rd: i64, rs1: i64, imm: i64) -> i64:
+    ((imm & 0xFFF) << 20) | (rs1 << 15) | (funct3 << 12) | (rd << 7) | 0x07
+
+fn enc_store_fp(funct3: i64, rs2: i64, rs1: i64, imm: i64) -> i64:
+    (((imm >> 5) & 0x7F) << 25) | (rs2 << 20) | (rs1 << 15) | (funct3 << 12) | ((imm & 0x1F) << 7) | 0x27
+
+fn enc_csr(csr: i64, rs1: i64, funct3: i64, rd: i64) -> i64:
+    (csr << 20) | (rs1 << 15) | (funct3 << 12) | (rd << 7) | 0x73
 
 fn main() -> i64:
     var fails = 0
@@ -63,6 +87,38 @@ fn main() -> i64:
     fails = fails + check("disabled core: ADDI still works", stoff.pc == base + 4)
     stoff = step(stoff, enc_opfp(0x1E, 1, 0, 1, 0, 1))   # FMV.D.X while FPU off
     fails = fails + check("disabled FP -> illegal trap (pc=mtvec=0)", stoff.pc == 0)
+
+    # ---- 4. FP store/load round-trip through memory (FSD then FLD) ----
+    var m = core64_init(base)
+    m = step(m, enc_addi(10, 0, 0x40))                   # x10 = 0x40 (aligned addr)
+    m = step(m, enc_addi(1, 0, 0x2A))                    # x1  = 42
+    m = step(m, enc_opfp(0x1E, 1, 0, 1, 0, 1))           # FMV.D.X f1, x1
+    var so = step_mem(m, enc_store_fp(3, 1, 10, 0), 0)   # FSD f1, 0(x10) -> mem
+    fails = fails + check("FSD wrote 42 to memory", so.mem == 42)
+    var lo = step_mem(so.state, enc_load_fp(3, 2, 10, 0), so.mem)  # FLD f2, 0(x10)
+    var m2 = step(lo.state, enc_opfp(0x1C, 1, 0, 2, 0, 3))         # FMV.X.D x3, f2
+    fails = fails + check("FLD/FSD memory round-trip x3==42", m2.rf.regs[3] == 42)
+
+    # ---- 5. fcsr CSR: write fcsr=0x51 (frm=2,fflags=0x11), read it back ----
+    var c = core64_init(base)
+    c = step(c, enc_addi(5, 0, 0x51))                    # x5 = 0x51
+    c = step(c, enc_csr(0x003, 5, 1, 0))                 # csrrw fcsr, x5
+    c = step(c, enc_csr(0x003, 0, 2, 6))                 # csrrs x6, fcsr, x0 (read)
+    fails = fails + check("csrr fcsr == 0x51", c.rf.regs[6] == 0x51)
+    c = step(c, enc_csr(0x001, 0, 2, 7))                 # csrrs x7, fflags, x0
+    fails = fails + check("csrr fflags == 0x11", c.rf.regs[7] == 0x11)
+
+    # ---- 6. mstatus.FS goes Dirty after an FP write ----
+    var d = core64_init(base)
+    d = step(d, enc_addi(1, 0, 0x2A))
+    d = step(d, enc_opfp(0x1E, 1, 0, 1, 0, 1))           # FMV.D.X f1, x1
+    fails = fails + check("FP write sets mstatus.FS=Dirty(3)", csr64_fs_state(d.csr_m) == 3)
+
+    # ---- 7. mstatus.FS=Off gates FP even with the unit enabled ----
+    var g = core64_init(base)
+    g = step(g, enc_csr(0x300, 0, 1, 0))                 # csrrw mstatus, x0 -> FS=Off
+    g = step(g, enc_opfp(0x1E, 1, 0, 1, 0, 1))           # FMV.D.X -> illegal (FS off)
+    fails = fails + check("FS=Off -> FP traps (pc=mtvec=0)", g.pc == 0)
 
     if fails == 0:
         print("CORE FPU INTEGRATION: ALL PASS")
