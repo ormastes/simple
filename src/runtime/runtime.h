@@ -330,6 +330,7 @@ int64_t  rt_array_len(SplArray* array);
 int64_t  rt_array_len_safe(int64_t value);
 int64_t  rt_array_get(SplArray* array, int64_t idx);
 int64_t  rt_array_get_text(SplArray* array, int64_t idx);
+int64_t  rt_array_last(SplArray* array);
 void     rt_array_set(SplArray* array, int64_t idx, int64_t value);
 int8_t   rt_array_set_text(SplArray* array, int64_t idx, int64_t value);
 int8_t   rt_array_push(SplArray* array, int64_t value);

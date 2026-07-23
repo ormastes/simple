@@ -102,6 +102,8 @@ int main(void) {
     assert(rt_array_get(canonical_bytes, 0) == 0);
     assert(rt_array_get(canonical_bytes, 1) == 127);
     assert(rt_array_get(canonical_bytes, 2) == 255);
+    assert(rt_array_last(canonical_bytes) == 255);
+    assert(rt_array_last(rt_array_new(0)) == 3);
     assert(rt_array_len(rt_bytes_from_raw(0, 3)) == 0);
 
     SplArray* split = rt_strsplit("a,,b", ",");
@@ -239,6 +241,7 @@ int main(void) {
     assert(rt_array_len(joined) == 2);
     assert(rt_array_get(joined, 0) == 11);
     assert(rt_array_get(joined, 1) == 22);
+    assert(rt_array_last(joined) == 22);
     SplArray* generic_bytes = rt_array_new(1);
     for (int64_t i = 0; i < 12; i++) {
         assert(rt_typed_bytes_u8_push(generic_bytes, i + 20));

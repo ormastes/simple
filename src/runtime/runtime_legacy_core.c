@@ -25,6 +25,14 @@
 #include <unistd.h>
 #endif
 
+int64_t rt_getpid(void) {
+#if defined(_WIN32)
+    return (int64_t)_getpid();
+#else
+    return (int64_t)getpid();
+#endif
+}
+
 int64_t rt_thread_available_parallelism(void) {
 #if defined(_WIN32)
     SYSTEM_INFO info;

@@ -3167,6 +3167,10 @@ int64_t rt_array_get_text(SplArray* a, int64_t idx) {
     return rt_array_get(a, idx);
 }
 
+int64_t rt_array_last(SplArray* a) {
+    return rt_array_get(a, -1);
+}
+
 void rt_array_set(SplArray* a, int64_t idx, int64_t val) {
     RtCoreArray* array = rt_core_array_ptr(a);
     if (!array) return;

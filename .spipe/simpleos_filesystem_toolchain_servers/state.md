@@ -743,3 +743,11 @@ implementation
 
 - The mandatory fetch after the final green build advanced `main` through `170de65f2c`, including self-hosted MIR locals resolution and entry-closure sibling-import compiler fixes. The `5b4b6c7d4c` Stage2/3 artifacts are retained evidence but are not current-tip admission artifacts.
 - The three-cycle cap forbids another rebuild in this session. Next fresh session must first refresh Stage2/3 once from current `main`, then run the focused cross-module ABI gate against that exact Stage3/runtime pair, and only then permit one bounded Stage4 attempt if HEAD has not moved again.
+
+### 2026-07-23 Core-C ABI completion and arithmetic handoff
+
+- The focused cross-module gate initially failed at link because the default Core-C runtime lacked `rt_array_last`. The canonical owner now delegates to existing negative-index semantics with `rt_array_get(array, -1)`; the public header, core-required symbol manifest, archive inventory, runtime focus checks, and executable ABI probe cover nonempty and empty arrays.
+- The archive inventory exposed a separate historical omission: `rt_getpid` was still declared and required but its Core-C provider had been lost. The prior platform implementation is restored in `runtime_legacy_core.c`. The executable probe's byte-array expectation was also corrected to the established raw-`u8` ABI instead of tagged `rt_value_int`.
+- `simple-native-all` rebuilt incrementally in 3m44s; the Rust seed and full bootstrap were untouched. The final Cargo test cycle was blocked before execution by unrelated Rust test-harness hidden-symbol linker failures. Earlier compiled-harness evidence proved the new symbol was present and both `rt_array_last` checks executed before the stale byte assertion.
+- The refreshed default-LLVM cross-module build now links three modules with zero compile failures, but its executable exits 5 in `cross_target_arithmetic_ok()` before printing `result-u8-ok`. The final diagnostic is retained under `/tmp/check-native-crossmodule-result-u8-final-2850000`; the concrete follow-up is `doc/08_tracking/bug/native_crossmodule_arithmetic_exit_5_2026-07-23.md`.
+- The three-cycle focused cap is consumed. No Stage2/3, Stage4, full bootstrap, target/image, or QEMU run is permitted in this session. AC-1/2/4/5/6/8/9 remain unproven; no live server or filesystem-toolchain claim is made.

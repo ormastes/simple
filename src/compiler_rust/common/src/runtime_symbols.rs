@@ -130,6 +130,7 @@ pub const CORE_REQUIRED_RUNTIME_SYMBOLS: &[&str] = &[
     "rt_byte_array_new_len",
     "rt_array_get",
     "rt_array_get_text",
+    "rt_array_last",
     "rt_array_data_ptr_text",
     "rt_array_data_ptr_u8",
     "rt_array_set",

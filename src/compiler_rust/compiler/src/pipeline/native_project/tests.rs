@@ -1643,6 +1643,7 @@ fn test_core_lane_runtime_archives_expose_required_abi_symbols() {
     }
     for symbol in [
         "rt_array_concat",
+        "rt_array_last",
         "rt_is_none",
         "rt_math_pow",
         "rt_memory_barrier",
@@ -1803,6 +1804,8 @@ int main(void) {
     if (rt_index_get((int64_t)values, rt_value_int(-1)) != rt_value_int(20)) return 14;
     if (!rt_index_set((int64_t)values, rt_value_int(-1), rt_value_int(21))) return 15;
     if (rt_index_get((int64_t)values, rt_value_int(1)) != rt_value_int(21)) return 16;
+    if (rt_array_last(values) != rt_value_int(21)) return 70;
+    if (rt_array_last(rt_array_new(0)) != rt_value_nil()) return 71;
     if (rt_index_get((int64_t)values, rt_value_int(-3)) != rt_value_nil()) return 17;
     if (rt_index_set((int64_t)values, rt_value_int(2), rt_value_int(99))) return 18;
     if (rt_index_get((int64_t)values, rt_value_nil()) != rt_value_nil()) return 19;
@@ -1842,7 +1845,7 @@ int main(void) {
     int64_t abc = rt_string_new((const uint8_t*)"abc", 3);
     SplArray* bytes = (SplArray*)(uintptr_t)rt_string_bytes(abc);
     if (rt_array_len(bytes) != 3) return 43;
-    if (rt_array_get(bytes, 1) != rt_value_int('b')) return 44;
+    if (rt_array_get(bytes, 1) != 'b') return 44;
     int64_t utf8_chars_text = rt_string_new((const uint8_t*)"a\xC3\xA9", 3);
     SplArray* chars = (SplArray*)(uintptr_t)rt_string_chars(utf8_chars_text);
     if (rt_array_len(chars) != 2) return 45;
