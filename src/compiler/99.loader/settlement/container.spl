@@ -138,15 +138,39 @@ impl SettlementContainer:
         if not self.modules.contains(module_id):
             return Err(ContainerError.ModuleNotFound(module_id))
 
+        # Rebuild from authoritative module entries before committing. This
+        # removes replaced names, restores weak symbols that were shadowed by
+        # the old set, and keeps duplicate rejection atomic.
+        val staged = SettlementLinker.create()
+        var replayed: [text] = []
+        for replay_id in self.linker.modules:
+            if replayed.contains(replay_id):
+                continue
+            replayed.push(replay_id)
+            if not self.modules.contains(replay_id):
+                continue
+            val replay_exports = if replay_id == module_id:
+                exports
+            else:
+                self.modules[replay_id].exports
+            for sym in replay_exports:
+                match staged.add_export(sym):
+                    case Ok(_):
+                        pass
+                    case Err(error):
+                        return Err(ContainerError.LinkFailed([error]))
+
+        # Fallback/JIT exports are not owned by a registered settlement module.
+        # Preserve them when their name is not replaced by an authoritative export.
+        for name in self.linker.exports.keys():
+            val existing = self.linker.exports[name]
+            if not self.linker.modules.contains(existing.module_id) and not staged.exports.contains(name):
+                staged.exports[name] = existing
+
         var entry = self.modules[module_id]
         entry.exports = exports
         self.modules[module_id] = entry
-
-        # Register exports with the linker
-        for sym in exports:
-            val result = self.linker.add_export(sym)
-            if result.is_err():
-                debug("settlement", "Warning: duplicate export {sym.name}")
+        self.linker.exports = staged.exports
 
         self.is_linked = false
         Ok(())

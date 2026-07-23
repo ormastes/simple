@@ -1,0 +1,104 @@
+use std.spec.{describe, it, expect}
+use compiler.loader.settlement.container.{SettlementContainer}
+use compiler.loader.settlement.linker.{SymbolEntry, SymbolVisibility, SymbolBinding, ImportRef, RelocationKind}
+
+fn export_symbol(name: text, address: i64, module_id: text, binding: SymbolBinding) -> SymbolEntry:
+    SymbolEntry(
+        name: name,
+        address: address,
+        size: 8,
+        module_id: module_id,
+        visibility: SymbolVisibility.Public,
+        binding: binding,
+        is_resolved: true
+    )
+
+fn fallback_symbol(name: text) -> SymbolEntry?:
+    Some(export_symbol(name, 99, "__jit__", SymbolBinding.Strong))
+
+describe "settlement export updates are transactional":
+    it "rejects duplicate strong exports without partial mutation":
+        val container = SettlementContainer.create()
+        expect(container.add_module("A", "/a.smf").is_ok()).to_equal(true)
+        expect(container.add_module("B", "/b.smf").is_ok()).to_equal(true)
+        expect(container.set_exports("A", [export_symbol("stable", 10, "A", SymbolBinding.Strong)]).is_ok()).to_equal(true)
+
+        val result = container.set_exports("B", [
+            export_symbol("new_b", 20, "B", SymbolBinding.Strong),
+            export_symbol("stable", 30, "B", SymbolBinding.Strong)
+        ])
+        expect(result.is_err()).to_equal(true)
+        expect(container.linker.get_export("new_b") == nil).to_equal(true)
+        expect(container.modules["B"].exports.len()).to_equal(0)
+        match container.linker.get_export("stable"):
+            case Some(symbol):
+                expect(symbol.module_id).to_equal("A")
+                expect(symbol.address).to_equal(10)
+            case nil:
+                expect(false).to_equal(true)
+
+    it "replaces a module export set and removes stale names":
+        val container = SettlementContainer.create()
+        expect(container.add_module("A", "/a.smf").is_ok()).to_equal(true)
+        expect(container.set_exports("A", [
+            export_symbol("old", 10, "A", SymbolBinding.Strong),
+            export_symbol("keep", 20, "A", SymbolBinding.Strong)
+        ]).is_ok()).to_equal(true)
+        expect(container.set_exports("A", [
+            export_symbol("keep", 30, "A", SymbolBinding.Strong),
+            export_symbol("new", 40, "A", SymbolBinding.Strong)
+        ]).is_ok()).to_equal(true)
+
+        expect(container.linker.get_export("old") == nil).to_equal(true)
+        expect(container.linker.get_export("new") != nil).to_equal(true)
+        match container.linker.get_export("keep"):
+            case Some(symbol): expect(symbol.address).to_equal(30)
+            case nil: expect(false).to_equal(true)
+
+    it "restores a weak export after its strong replacement is removed":
+        val container = SettlementContainer.create()
+        expect(container.add_module("A", "/a.smf").is_ok()).to_equal(true)
+        expect(container.add_module("B", "/b.smf").is_ok()).to_equal(true)
+        expect(container.set_exports("A", [export_symbol("shared", 10, "A", SymbolBinding.Weak)]).is_ok()).to_equal(true)
+        expect(container.set_exports("B", [export_symbol("shared", 20, "B", SymbolBinding.Strong)]).is_ok()).to_equal(true)
+        match container.linker.get_export("shared"):
+            case Some(symbol):
+                expect(symbol.module_id).to_equal("B")
+                expect(symbol.address).to_equal(20)
+            case nil:
+                expect(false).to_equal(true)
+        expect(container.set_exports("B", []).is_ok()).to_equal(true)
+        match container.linker.get_export("shared"):
+            case Some(symbol):
+                expect(symbol.module_id).to_equal("A")
+                expect(symbol.address).to_equal(10)
+            case nil:
+                expect(false).to_equal(true)
+
+    it "handles remove and re-add without replaying a module twice":
+        val container = SettlementContainer.create()
+        expect(container.add_module("A", "/old.smf").is_ok()).to_equal(true)
+        expect(container.set_exports("A", [export_symbol("old", 10, "A", SymbolBinding.Strong)]).is_ok()).to_equal(true)
+        expect(container.remove_module("A").is_ok()).to_equal(true)
+        expect(container.add_module("A", "/new.smf").is_ok()).to_equal(true)
+        expect(container.set_exports("A", [export_symbol("fresh", 20, "A", SymbolBinding.Strong)]).is_ok()).to_equal(true)
+        expect(container.linker.get_export("old") == nil).to_equal(true)
+        expect(container.linker.get_export("fresh") != nil).to_equal(true)
+
+    it "preserves fallback exports across an unrelated module update":
+        val container = SettlementContainer.create()
+        expect(container.add_module("A", "/a.smf").is_ok()).to_equal(true)
+        container.linker.add_import(ImportRef(
+            symbol_name: "fallback",
+            from_module: "A",
+            relocation_offset: 0,
+            relocation_kind: RelocationKind.Abs64
+        ))
+        expect(container.linker.resolve_with_fallback(fallback_symbol).is_ok()).to_equal(true)
+        expect(container.set_exports("A", [export_symbol("owned", 10, "A", SymbolBinding.Strong)]).is_ok()).to_equal(true)
+        match container.linker.get_export("fallback"):
+            case Some(symbol):
+                expect(symbol.module_id).to_equal("__jit__")
+                expect(symbol.address).to_equal(99)
+            case nil:
+                expect(false).to_equal(true)

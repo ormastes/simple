@@ -1,6 +1,6 @@
 # Bug: ModuleLoader load/unload bookkeeping diverges from documented behavior (13 failures)
 
-- **Status:** open
+- **Status:** SOURCE-FIXED in the compatibility loader; fresh Stage 4 replay pending
 - **Filed:** 2026-07-20
 - **Affected spec:** `test/unit/compiler/loader/module_loader_spec.spl`
 - **Command:**
@@ -98,3 +98,14 @@ print(loader.stats().module_count)   # prints 0, expected 1
 Not touched: `test/unit/compiler/loader/module_loader_spec.spl` left as-is —
 these are genuine state-tracking mismatches, not renamed/removed API surface;
 weakening the assertions to force green would violate the no-weakening rule.
+
+## Current-source audit (2026-07-23)
+
+The affected spec imports `compiler.loader.module_loader`, not the newer
+`compiler.loader.runtime` surface. Its compatibility owner now keeps load and
+unload mutations directly inside `me` methods, derives statistics from the
+same `modules`/`global_symbols` dictionaries, and documents why delegating
+those mutations through ordinary free functions loses interpreter write-back.
+The original 13-failure receipt therefore describes an older artifact. Keep
+the existing assertions unchanged and replay them once a qualified fresh
+Stage 4 binary is available.
