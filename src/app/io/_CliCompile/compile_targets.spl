@@ -498,6 +498,30 @@ fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
         # (doc/08_tracking/bug/native_build_entry_closure_quadratic_hang_2026-07-12.md).
         for raw in content.split("\n"):
             val import_line = raw.trim()
+            # `mod pkg.member` package-member decls and `export member.*`
+            # package re-exports both name SIBLING files that must join the
+            # closure (the flat parser lowers `mod` as a sibling import; the
+            # HIR sibling-glob pass needs the file present to register it).
+            if import_line.starts_with("mod "):
+                val mod_tail = import_line.substring(4).trim()
+                val mod_segs_bfs = mod_tail.split(".")
+                if mod_segs_bfs.len() > 0:
+                    val mod_last = mod_segs_bfs[mod_segs_bfs.len() - 1]
+                    if mod_last != "":
+                        val mod_rp = _nb_resolve_relative("." + mod_last, f)
+                        if mod_rp != "" and not _driver_text_bucket_set_has(discovered, mod_rp):
+                            queue = queue.push(mod_rp)
+                            discovered = _driver_text_bucket_set_add(discovered, mod_rp)
+                continue
+            if import_line.starts_with("export ") and import_line.ends_with(".*") and not import_line.starts_with("export use "):
+                val exp_tail = import_line.substring(7).trim()
+                val exp_base = exp_tail[0:exp_tail.len() - 2]
+                if not exp_base.contains(" ") and not exp_base.contains(","):
+                    val exp_rp = _nb_resolve_relative("." + exp_base, f)
+                    if exp_rp != "" and not _driver_text_bucket_set_has(discovered, exp_rp):
+                        queue = queue.push(exp_rp)
+                        discovered = _driver_text_bucket_set_add(discovered, exp_rp)
+                continue
             val mp = _nb_module_path_from_use(import_line)
             if mp == "":
                 continue
