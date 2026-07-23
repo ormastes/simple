@@ -26,7 +26,11 @@ fn print_help_with_progress(progress_mode: text):
 
 fn main() -> i64:
     val raw_args = get_cli_args()
-    val log_opts = parse_log_options(raw_args)
+    val option_error = run_wrapper_option_error(raw_args)
+    if option_error != "":
+        error("run", option_error)
+        return 1
+    val log_opts = parse_log_options(run_wrapper_log_args(raw_args))
     if not log_opts.valid:
         error("run", log_opts.error)
         return 1
@@ -37,7 +41,7 @@ fn main() -> i64:
     for arg in all_args:
         args = args.push(arg)
 
-    if args.len() > 0 and (args[0] == "--help" or args[0] == "-h"):
+    if run_requests_help(args):
         print_help_with_progress(log_opts.progress)
         return 0
     if args.len() == 0:
@@ -63,19 +67,108 @@ fn run_is_log_option(arg: text) -> bool:
     arg == "--human" or arg == "--llm" or arg == "--json" or
         arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
         arg == "--verbose" or arg == "--dots" or arg == "--count" or
-        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--no-progress" or arg == "--log-mode" or
         arg == "--progress" or arg.starts_with("--log-mode=") or
         arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn run_is_runtime_option(arg: text) -> bool:
+    arg == "--help" or arg == "-h" or arg == "--gc-log" or arg == "--gc-off" or arg == "--notui" or
+        arg == "--interpret" or arg == "--interpret-optimized" or
+        arg == "--no-jit" or arg == "--fixed-be" or
+        arg == "--stack-overflow-detection" or arg == "--no-stack-overflow-detection" or
+        arg == "--startup-metrics" or arg == "--macro-trace" or arg == "--debug" or
+        arg == "--sandbox" or arg == "--no-network" or arg == "--fix" or
+        arg == "--fix-all" or arg == "--fix-warnings" or arg == "--fix-errors" or
+        arg == "--fix-info" or arg == "--fix-interactive" or arg == "--fix-dry-run" or
+        arg == "--max-recursion-depth" or arg == "--timeout" or
+        arg == "--execution-limit" or arg == "--interpreter-mode" or
+        arg == "--run-config" or arg == "--jit-threshold" or arg == "--backend" or
+        arg == "--time-limit" or arg == "--memory-limit" or arg == "--fd-limit" or
+        arg == "--thread-limit" or arg == "--network-allow" or arg == "--network-block" or
+        arg == "--read-only" or arg == "--read-write" or arg == "--lang" or
+        arg.starts_with("--gc=") or arg.starts_with("--fix-id=") or
+        arg.starts_with("--fix-code=") or arg.starts_with("--fix-nth=") or
+        arg.starts_with("--max-recursion-depth=") or arg.starts_with("--timeout=") or
+        arg.starts_with("--execution-limit=") or arg.starts_with("--interpreter-mode=") or
+        arg.starts_with("--run-config=") or arg.starts_with("--jit-threshold=") or
+        arg.starts_with("--backend=") or arg.starts_with("--fixed-be=") or
+        arg.starts_with("--time-limit=") or arg.starts_with("--memory-limit=") or
+        arg.starts_with("--fd-limit=") or arg.starts_with("--thread-limit=") or
+        arg.starts_with("--network-allow=") or arg.starts_with("--network-block=") or
+        arg.starts_with("--read-only=") or arg.starts_with("--read-write=") or
+        arg.starts_with("--lang=")
+
+fn run_runtime_option_has_value(arg: text) -> bool:
+    arg == "--max-recursion-depth" or arg == "--timeout" or
+        arg == "--execution-limit" or arg == "--interpreter-mode" or
+        arg == "--run-config" or arg == "--jit-threshold" or arg == "--backend" or
+        arg == "--time-limit" or arg == "--memory-limit" or arg == "--fd-limit" or
+        arg == "--thread-limit" or arg == "--network-allow" or arg == "--network-block" or
+        arg == "--read-only" or arg == "--read-write" or arg == "--lang"
+
+fn run_requests_help(args: [text]) -> bool:
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--help" or arg == "-h":
+            return true
+        if arg == "--" or not run_is_runtime_option(arg):
+            return false
+        if run_runtime_option_has_value(arg):
+            i = i + 1
+        i = i + 1
+    false
 
 fn run_clean_log_args(args: [text]) -> [text]:
     var cleaned: [text] = []
     var i = 0
+    var before_file = true
     while i < args.len():
         val arg = args[i]
-        if run_is_log_option(arg):
-            if arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+        if before_file and arg == "--":
+            before_file = false
+            cleaned.push(arg)
+        elif before_file and run_is_log_option(arg):
+            if arg == "--log-mode" or arg == "--progress":
                 i = i + 1
+        elif before_file and run_is_runtime_option(arg):
+            cleaned.push(arg)
+            if run_runtime_option_has_value(arg) and i + 1 < args.len():
+                i = i + 1
+                cleaned.push(args[i])
         else:
+            before_file = false
             cleaned.push(arg)
         i = i + 1
     cleaned
+
+fn run_wrapper_option_error(args: [text]) -> text:
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--surface":
+            return "--surface requires =stdout or =tui"
+        if arg == "--" or not run_is_log_option(arg) and not run_is_runtime_option(arg):
+            return ""
+        if arg == "--log-mode" or arg == "--progress" or run_runtime_option_has_value(arg):
+            i = i + 1
+        i = i + 1
+    ""
+
+fn run_wrapper_log_args(args: [text]) -> [text]:
+    var wrapper_args: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--" or not run_is_log_option(arg) and not run_is_runtime_option(arg):
+            return wrapper_args
+        if run_is_log_option(arg):
+            wrapper_args.push(arg)
+        if arg == "--log-mode" or arg == "--progress":
+            if i + 1 < args.len():
+                wrapper_args.push(args[i + 1])
+                i = i + 1
+        elif run_runtime_option_has_value(arg):
+            i = i + 1
+        i = i + 1
+    wrapper_args
