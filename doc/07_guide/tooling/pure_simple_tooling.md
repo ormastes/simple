@@ -167,10 +167,10 @@ evidence boundary for the important pure-Simple tooling lanes:
   The bounded-capture root fix and evidence are recorded in
   [the delayed-output report](../../08_tracking/bug/stage4_test_runner_bounded_capture_empty_2026-07-23.md).
   **Remaining bug/gap:** neither that fix nor the aggregate essential-tools
-  smoke has fresh Stage 4 evidence. Unknown options and options missing their
-  value also fall back to the full suite. **Next solution:** validate every
-  test CLI argument in shared `parse_test_args` and return exit 2 before any
-  default test-root selection; then deploy a fresh Stage 4 CLI, run the focused
+  smoke has fresh Stage 4 evidence. Invalid and bare-value test options now
+  return exit 2 before configuration or discovery, while signed split values
+  remain valid. **Remaining bug/gap:** this preflight has focused source
+  evidence only. **Next solution:** deploy a fresh Stage 4 CLI, run the focused
   bounded-output and CLI contracts once, then run the exact essential-tools
   smoke from its temporary external working directory.
 - **check / build / run** — **Source status:** the full pure-Simple CLI links,
@@ -207,11 +207,18 @@ evidence boundary for the important pure-Simple tooling lanes:
   ARG/COLL/STUB/W0404/W0406/W0407 and the parse/CLI/config contracts through
   the exact fresh CLI, then extend the same CLI-owned parsed adapter one
   semantic leaf at a time.
-- **fmt / fix** — **Source status:** atomic writes and fail-closed source
-  rewrites are pushed. **Strongest current evidence:** `5b13444c83` and
-  `0a7b45ea7b`. **Remaining bug/gap:** no fresh Stage 4 behavior proof.
-  **Next solution:** exercise mutation and write-failure cases through the
-  newly deployed pure-Simple CLI.
+- **fmt / fix** — **Source status:** atomic writes, fail-closed source
+  rewrites, and closed `fix` option parsing are pushed. Invalid or empty fix
+  options now exit 2 before a file read/write; exact `--dry-run` remains
+  non-mutating. **Strongest current evidence:** `5b13444c83`, `0a7b45ea7b`,
+  and `3bd9be7c52c`.
+  Both fix-option owner contracts pass through the temporary bootstrap
+  interpreter after routing writes through the module-level facade.
+  **Remaining bug/gap:** the retained pure-Simple binary crashes with the
+  separately tracked stale `rt_env_set` ABI before either contract executes,
+  so there is no fresh Stage 4 behavior proof. **Next solution:** deploy a
+  candidate that passes frontend admission, then exercise option, mutation,
+  and write-failure cases once through that exact CLI.
 - **duplicate-check** — **Source status:** effective `mode`/`format`
   validation, actual token-mode `min_tokens` enforcement, same-file semantic
   matching, and cosine fragment grouping are fixed. Overlapping cosine
