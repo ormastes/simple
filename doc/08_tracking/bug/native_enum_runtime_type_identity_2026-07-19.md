@@ -50,7 +50,9 @@ bytecode writers emit format version 2; both duplicated loaders retain version
   exist. Cross-compiled seed binaries remain build-only; no unsupported cross
   runtime is claimed. These are scheduled gates, not local execution evidence.
 - Focused Rust bytecode tests are scheduled in hosted Linux, macOS, and Windows
-  workspace jobs. Canonical FreeBSD bytecode execution remains pending. The
+  workspace jobs. The canonical FreeBSD full-QEMU wrapper now schedules the two
+  typed-enum compiler/VM tests and requires a strict 2/2 summary; live FreeBSD
+  execution evidence remains pending. The
   native ARM32/AArch64/RV32/RV64 gates do not exercise this bytecode lane and
   are not claimed as evidence for it.
 - Explicit pure-simple-core execution and freestanding x86_64 QEMU proof remain

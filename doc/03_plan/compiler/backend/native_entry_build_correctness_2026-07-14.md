@@ -515,7 +515,9 @@ the shared binary — deploys require explicit user go-ahead).
   `ENUM_MATCH_TYPED`. Legacy opcode layouts remain compatible. Duplicated SMF
   writers emit version 2 while loaders accept versions `1..=2`. Focused Linux
   Rust execution passes and hosted Linux/macOS/Windows jobs schedule the same
-  tests. Canonical FreeBSD bytecode execution remains pending; native
+  tests. The canonical FreeBSD full-QEMU wrapper is wired to run the two typed-enum
+  bytecode compiler/VM regressions and requires an exact 2/2 summary; a live
+  FreeBSD execution receipt remains pending. Native
   ARM32/AArch64/RV32/RV64 gates are not bytecode evidence. The original
   x86_64-unknown-none QEMU proof remains open.
 - Module-init symbols now exclude punctuation inherited from absolute or
