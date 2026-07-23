@@ -263,3 +263,16 @@ macOS matrix now installs the helper's `gtimeout` provider, and both admission
 and portability changes trigger the canonical FreeBSD workflow. This is a
 hosted ABI gate; ARM32/RV32/Windows-ARM64 object receipts are not runtime
 environment evidence.
+
+### Bootstrap-candidate scope correction
+
+`bootstrap_main.spl` deliberately has no inline `-c` command. Placing the ABI
+probe in generic `candidate_frontend_smoke` made every valid Stage2/3 sanity
+check fail after its native fixture had already passed. The unchanged `-c`
+probe now runs only in `simple_binary_is_valid`, which admits full CLI
+candidates. Generic Stage2/3 smoke remains version plus the bounded native p2
+build/execute path; that path uses the bootstrap entry-closure environment
+owner and therefore still fails if its own environment ABI is unusable.
+`check-bootstrap-portability.shs` passes with this corrected scope. The broad
+host-GPU self-test was killed before its aggregate marker and is not claimed as
+evidence.

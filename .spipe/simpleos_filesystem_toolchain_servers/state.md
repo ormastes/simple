@@ -751,3 +751,38 @@ implementation
 - `simple-native-all` rebuilt incrementally in 3m44s; the Rust seed and full bootstrap were untouched. The final Cargo test cycle was blocked before execution by unrelated Rust test-harness hidden-symbol linker failures. Earlier compiled-harness evidence proved the new symbol was present and both `rt_array_last` checks executed before the stale byte assertion.
 - The refreshed default-LLVM cross-module build now links three modules with zero compile failures, but its executable exits 5 in `cross_target_arithmetic_ok()` before printing `result-u8-ok`. The final diagnostic is retained under `/tmp/check-native-crossmodule-result-u8-final-2850000`; the concrete follow-up is `doc/08_tracking/bug/native_crossmodule_arithmetic_exit_5_2026-07-23.md`.
 - The three-cycle focused cap is consumed. No Stage2/3, Stage4, full bootstrap, target/image, or QEMU run is permitted in this session. AC-1/2/4/5/6/8/9 remain unproven; no live server or filesystem-toolchain claim is made.
+
+### 2026-07-23 bootstrap admission correction and emitted-key handoff
+
+- Guided small-model history/source/artifact audits and final higher-model
+  review identified an unrelated current-tip admission regression: commit
+  `5b11528575` required the intentionally minimal Stage2/3 `bootstrap_main`
+  binary to support full-CLI `-c`. The unchanged environment-ABI probe now
+  runs only in `simple_binary_is_valid`; generic stage smoke remains version,
+  unsupported-`run`, and native p2 build/execute. The portability contract
+  passes. The broad host-GPU self-test was killed without its aggregate marker
+  and is not evidence.
+- A retained Stage2 diagnostic passed every corrected generic admission row.
+  Direct self-host produced Stage3 SHA-256
+  `d82ad2d3c7a0a2cd781267cca7f6709752367831dd68f9e982834847fffbad49`
+  from Stage2 SHA-256
+  `68520a4fc367af15c5126da3b996141ac176ca42aa188878f1821d94f761b7dc`;
+  Stage3 also passed the four generic rows.
+- The unchanged LLVM+Cranelift cross-module gate still exited `5`. Higher
+  disassembly review proved the destination-preserving unsigned-copy patch was
+  correct in source but the bootstrap seed emitted both dictionary keys as
+  `src_id`, retaining the stale source-first overwrite. The static source test
+  false-greened and was removed with the unaccepted code patch.
+- The next fresh bounded patch must avoid the collapsed aliases by calling
+  `self.local_id_value(dest)` and `self.local_id_value(src)` directly in the
+  destination/source `has` and index operations, then rebuild Stage2/3 once and
+  run the unchanged executable fixture once. Inspect emitted keys before any
+  separate `translate_load` provenance change.
+- The compiler/fix cap is exhausted. Stage4, target/image construction,
+  filesystem Simple/LLVM/Clang execution, and RV64 web/DB QEMU remain blocked;
+  AC-1/2/4/5/6/8/9 remain current-unproven.
+- Mandatory fetch/rebase then advanced `main` from `74269ec415` to
+  `448317ea5d`, including frontend/HIR, AOT-cache, and codegen changes. The
+  Stage2/3 hashes above are therefore retained diagnostic evidence only. The
+  cap forbids another rebuild in this session; the next fresh continuation
+  must apply the direct-operand key fix on current main before rebuilding.
