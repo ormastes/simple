@@ -51,10 +51,12 @@ ARG001/ARG002, COLL001-COLL008, STUB001/STUB002, and module-level W0404 in its
 CLI-owned path. The generic EasyFix rule remains the public duplicate-typed
 argument owner, while the DTYP query/LSP leaf ignores already-named calls. The
 generic `pass_todo` source lint remains the STUB003 owner so each finding is
-emitted once. Wildcard-import/export parity remains open work.
+emitted once. The CLI-owned parsed adapter also reports wildcard import/export
+and fails closed with PARSE001 when source cannot be parsed.
 
 | Code | Category | Severity | Description |
 |------|----------|----------|-------------|
+| PARSE001 | Correctness | ERROR | Source did not parse; parser-backed lint results are unavailable |
 | COLL001 | Collection | CRITICAL | Array concat in loop `arr = arr + [x]` — use `.push()` |
 | COLL002 | Collection | HIGH | `.contains()` on array in loop — use Dict/Set |
 | COLL003 | Collection | HIGH | `.remove(0)` queue drain in loop |
