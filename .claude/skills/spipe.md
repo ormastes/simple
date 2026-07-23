@@ -1459,8 +1459,56 @@ probes. When a spec or task touches RISC-V/SoC hardware, the sanity anchors are
   `doc/08_tracking/bug/seed_jit_boxed_int_61bit_drops_high_bits_2026-07-22.md`).
 - **RV32 FPGA load path** — `sh scripts/fpga/check_linux_loading_rv32.shs` →
   `CHECK_LINUX_LOADING_RV32: PASS` (core-vs-host checksum over a 64 KB payload).
+- **RV32/64 4 GiB address space** — `bin/simple run
+  test/01_unit/lib/hardware/soc_rtl/addr4g_probe.spl` → `ADDR4G_PROBE: ALL PASS`
+  (rv32 sparse page-backed RAM addresses the full 32-bit space — 3 GiB / top-of-4
+  GiB round-trips, no signed-i32 truncation or RAM_END-cap aliasing; rv64 dispatch
+  ≥ 2^31). `src/lib/hardware/soc_rtl/ram_sparse.spl`.
+- **RISC-V HW gate bundle** — `sh scripts/check/check-riscv-hardware-gates.shs`
+  runs the JTAG debug testbenches + soc/core/mux/FPU probes together.
 - Guide + full-Linux-boot reproduction: `doc/07_guide/os/rv64_soc_linux_boot.md`
   § "Sanity tests".
+
+**Architecture map — DO NOT read one legacy `.vhd` and conclude "nothing exists"
+(that mistake was made 2026-07-23).** The real layout:
+- **Shared XLEN-parameterized logic** lives in `src/lib/hardware/riscv_common/`
+  (`xlen.spl` `XlenConfig.rv32()/.rv64()` — mask/sign_bit/bytes_per_reg; plus
+  shared `alu`/`decode`/`csr_defs`/`registers`/`memory`/`rtl_decode`). BOTH cores
+  import it. Full single-core XLEN migration is planned/in-progress (research doc
+  `doc/01_research/hardware/riscv/riscv32_riscv64_unification_realrtl_aop_jtag_2026-07-21.md`)
+  — the generic-monomorphization path is deliberately NOT used yet (fail-closed
+  hardware templates first). Do not build a second common layer.
+- **rv32 core** = `src/lib/hardware/rv32i_rtl/` (**HAS `mmu_sv32.spl` + S-mode
+  `csr_s.spl` + 4 GiB via ram_sparse**). The 64 KB / no-MMU thing is ONLY the
+  legacy hand-written synthesizable `examples/.../rv32_exec_core.vhd` reference
+  core — not the current `.spl` model.
+- **rv64 core** = `src/lib/hardware/rv64gc_rtl/` (Sv39, S-mode, M/A/C + the F/D
+  **FPU landed 2026-07-23** — `fpu.spl`, DI-toggle, wired into `core.spl`; so the
+  old "GC profile is FALSE, no F/D hardware" note is now partially resolved for
+  the model — verify the profile string against actual F/D wiring before claiming
+  `gc`/`d`-ABI).
+- **JTAG** = explicit RTL (`src/lib/hardware/debug/` jtag_tap/riscv_dtm/dmi_bus,
+  Stages 1–3 of 5 landed) + **AOP hart hooks** (`src/lib/hardware/debug_hooks/
+  hart_debug.spl`, the repo `on pc{…} use … before` weave via
+  `driver_pipeline.weave_aop`/`mir_aop_injection`). AOP is ONLY the hart
+  integration hooks; TAP/DTM/DMI/DM stay explicit RTL.
+
+**What's missing to actually BOOT Linux (honest, 2026-07-23):**
+- *rv64 on the `.spl` model:* Linux→/init is proven on QEMU's OWN cpu with
+  Simple's `soc_virt.dtb` (`build/os/rv64_soc/transcripts/qemu_ourdtb_wired.log`).
+  On the **Simple core**, `SOC64 PROBE: ALL PASS` proves the privileged sequence,
+  and real OpenSBI executes reloc→bss→fw_platform_init→C-init but **stalls
+  spinning ~0x800005F4 before the banner** (open: early SBI/timer or console
+  bind). Full boot also needs the **JIT boxed-int defect fixed** (interp ≈540
+  inst/s → billions of insns is infeasible; JIT mis-executes the core today).
+- *rv32 on the `.spl` model:* MMU(Sv32)+S-mode+4 GiB exist, but there is **no
+  bootable rv32 SoC-top** wired for OpenSBI/kernel handoff (only `soc_top_64.spl`
+  boots) and no rv32 Linux kernel build — both are the gap, not the core.
+- *Either on a real FPGA:* **no synthesizable rv64 core** (the `.spl` model is a
+  simulator; the bundle generator emits `GENERATED_RTL_NOT_IMPLEMENTED`; no
+  `.spl`→Verilog backend), and the synthesizable rv32 `.vhd` lacks the MMU/4 GiB.
+  A board IS present (Xilinx ML Carrier Card, JTAG+UART via FT4232H, Vivado
+  2025.2) — the blocker is the missing synthesizable core, not hardware access.
 
 **Working-copy caveat:** these gates compile the hardware sources directly, so
 leaked jj conflict markers / half-finished parallel-session edits fail them at
