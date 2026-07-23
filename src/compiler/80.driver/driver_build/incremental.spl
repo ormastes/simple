@@ -282,18 +282,23 @@ impl BuildCache:
         if not incremental_file_exists(cache_path):
             return BuildCache.empty(cache_path)
 
+        # Construct the returned BuildCache OUTSIDE the match arm: values
+        # born inside a match arm have broken method-receiver transport on
+        # the stage4 native lane (the first self field access traps) — same
+        # defect family as CodegenOutput.to_compiled_module.
+        var version: i64 = 0
+        var entries: {text: DependencyEntry} = {}
+        var fingerprints: {text: FileFingerprint} = {}
+        var parse_ok = false
         match incremental_parse_file(cache_path):
             case Ok(sdn_value):
+                parse_ok = true
                 val ver = sdn_value.get("version")
-                var version: i64 = 0
                 if val ver_value_raw = ver:
                     val ver_value: SdnValue = ver_value_raw
                     val v = ver_value.as_i64()
                     if val parsed_version = v:
                         version = parsed_version
-
-                var entries: {text: DependencyEntry} = {}
-                var fingerprints: {text: FileFingerprint} = {}
 
                 val entries_val = sdn_value.get("entries")
                 if val entries_value_raw = entries_val:
@@ -378,10 +383,13 @@ impl BuildCache:
                             entries[source] = entry
                             fingerprints[source] = fp
 
-                BuildCache(entries: entries, fingerprints: fingerprints,
-                           cache_path: cache_path, version: version)
+                ()
             case Err(error):
-                BuildCache.empty(cache_path)
+                parse_ok = false
+        if not parse_ok:
+            return BuildCache.empty(cache_path)
+        BuildCache(entries: entries, fingerprints: fingerprints,
+                   cache_path: cache_path, version: version)
 
     me save():
         """Persist cache to disk."""
@@ -418,39 +426,48 @@ impl BuildCache:
 
     fn has_cached_object(source: text) -> bool:
         """Check if source has a cached entry with fresh fingerprint and existing outputs."""
+        # Combined stage4-lane idiom: has() answers the MISSING case (a .get
+        # miss returns a 0-nil that if-val wrongly enters — 0 vs sentinel 3),
+        # while .get + if-val delivers the VALUE for present keys (the
+        # has()+bracket re-fetch pair returned nil for present keys). The
+        # staleness check is inlined as a direct field comparison: a method
+        # call on the struct-FIELD receiver (entry.fingerprint.is_stale(..))
+        # hits the stage4 receiver-transport defect.
         if not self.entries.has(source):
             return false
-        val entry: DependencyEntry = self.entries[source]
-        # Check fingerprint is still fresh
-        val fresh = FileFingerprint.from_file(source)
-        var fresh_fingerprint = entry.fingerprint
-        if val fingerprint = fresh:
-            fresh_fingerprint = fingerprint
-        else:
+        if val entry = self.entries.get(source):
+            val fresh = FileFingerprint.from_file(source)
+            if val fingerprint = fresh:
+                if entry.fingerprint.content_hash != fingerprint.content_hash:
+                    return false
+                # Check all output files still exist on disk
+                for out in entry.outputs:
+                    if not incremental_file_exists(out):
+                        return false
+                return true
             return false
-        if entry.fingerprint.is_stale(fresh_fingerprint):
-            return false
-        # Check all output files still exist on disk
-        for out in entry.outputs:
-            if not incremental_file_exists(out):
-                return false
-        true
+        false
 
     fn get_cached_outputs(source: text) -> [text]?:
         """Return cached output paths if entry is fresh, else nil."""
         if not self.has_cached_object(source):
             return nil
-        Some(self.entries[source].outputs)
+        # Bare return (flat implicit lift), .get read — no Some(...) box,
+        # no bracket-after-has re-fetch.
+        if val entry = self.entries.get(source):
+            return entry.outputs
+        nil
 
     me invalidate(source: text):
         """Remove a stale entry."""
         self.remove_entry(source)
 
     fn get_entry(source: text) -> DependencyEntry?:
-        if self.entries.has(source):
-            Some(self.entries[source])
-        else:
-            nil
+        # has() guards the missing case (see has_cached_object), .get
+        # delivers the present value flat-safely — no Some(...) box.
+        if not self.entries.has(source):
+            return nil
+        self.entries.get(source)
 
     fn detect_changes(source_files: [text]) -> IncrChangeSet:
         """Detect changes since last build."""
