@@ -161,13 +161,15 @@ evidence boundary for the important pure-Simple tooling lanes:
   **Remaining bug/gap:** capability-owned provider composition still blocks the
   full CLI. **Next solution:** complete the canonical provider profile, then
   build and qualify the fresh Stage 4 CLI.
-- **lint** — **Source status:** AST-rule parity remains open; capped WIP is not
-  landed. **Strongest current evidence:**
-  [the AST dispatch audit](../../08_tracking/bug/simple_lint_ast_rules_unwired_2026-07-19.md)
-  shows production CLI lint omits semantic rules. **Remaining bug/gap:** there
-  is no landed CLI/query parity proof. **Next solution:** finish the smallest
-  shared semantic-warning route and its focused parity regression before Stage
-  4 qualification.
+- **lint** — **Source status:** parser-backed ARG001/ARG002 CLI parity is
+  implemented; the other AST leaves remain open. **Strongest current evidence:**
+  the focused warn/deny/allow, decoy-line, extern-span, and compatibility
+  contract passes as bounded bootstrap repair evidence; see
+  [the AST dispatch report](../../08_tracking/bug/simple_lint_ast_rules_unwired_2026-07-19.md).
+  **Remaining bug/gap:** this is not fresh Stage 4 evidence, and STUB, COLL,
+  DTYP, wildcard-import, and wide-public parity is incomplete. **Next
+  solution:** qualify ARG through the exact fresh CLI, then extend the same
+  CLI-owned parsed adapter one semantic leaf at a time.
 - **fmt / fix** — **Source status:** atomic writes and fail-closed source
   rewrites are pushed. **Strongest current evidence:** `5b13444c83` and
   `0a7b45ea7b`. **Remaining bug/gap:** no fresh Stage 4 behavior proof.

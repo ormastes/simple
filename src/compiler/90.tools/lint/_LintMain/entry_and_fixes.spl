@@ -17,8 +17,34 @@ use std.tooling.easy_fix.*
 use common.text.{escape_json}
 use nogc_sync_mut.ui.theme_package.{validate_default_theme_package}
 use compiler.semantics.lint.riscv_rtl_debuggability_lint.{lint_riscv_rtl_debuggability}
+use compiler.core.ast.{module_get_decls}
+use compiler.core.parser.{parse_module_silent, parser_has_errors, parser_set_had_error}
+use compiler.semantics.lint.argument_count.{check_argument_count}
 
 # File I/O wrapper
+
+fn lint_cli_source(linter: Linter, path: String, content: String) -> [LintResult]:
+    var results = linter.lint_source(path, content)
+    if not path.ends_with(".spl"):
+        return results
+
+    val previous_parse_error = parser_has_errors()
+    parse_module_silent(content, path)
+    val parse_failed = parser_has_errors()
+    parser_set_had_error(previous_parse_error)
+    if parse_failed:
+        return results
+
+    val config = resolve_lint_config(linter.config, path, content)
+    for warning in check_argument_count(module_get_decls()):
+        if not should_keep_lint_result(config, warning.code):
+            continue
+        val base_level = if warning.code == "ARG002": LintLevel.Deny else: LintLevel.Warn
+        val level = apply_config_level(config, warning.code, base_level)
+        val lint = Lint.new(warning.code, level, LintCategory.Style, warning.message)
+            .with_fix(warning.hint)
+        results.push(LintResult.new(path, warning.line, 0, lint))
+    results
 
 fn main() -> Int:
     val args = get_args()
@@ -105,7 +131,12 @@ fn run_lint_file(file_path: String, args: [text]) -> Int:
                 case _:
                     val _ = 0
 
-    val lint_result = linter.lint_file(file_path)
+    var lint_result = LintFileResult.LintFileErr("Failed to read file: {file_path}")
+    match lint_read_file(file_path):
+        case LintReadFileResult.ReadFileErr(error):
+            lint_result = LintFileResult.LintFileErr(error)
+        case LintReadFileResult.ReadFileOk(content):
+            lint_result = LintFileResult.LintFileOk(lint_cli_source(linter, file_path, content))
     match lint_result:
         case LintFileResult.LintFileOk(results):
             if results.is_empty():

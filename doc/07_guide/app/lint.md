@@ -44,10 +44,11 @@ The lint system operates at three layers:
 
 ### 1. AST-Based Semantic Lints (`src/compiler/35.semantics/lint/`)
 
-Deep analysis using the arena-based AST. Query/LSP diagnostics currently dispatch
-the ARG, COLL, DTYP, STUB, wildcard-import/export, and wide-public leaves through
-`src/app/cli/query_lint.spl`. Production `simple lint` runs a different
-source/EasyFix adapter; semantic-leaf parity is tracked as an open bug.
+Deep analysis using the arena-based AST. Query/LSP diagnostics dispatch the ARG,
+COLL, DTYP, STUB, wildcard-import/export, and wide-public leaves through
+`src/app/cli/query_lint.spl`. Production `simple lint` now runs parser-backed
+ARG001/ARG002 in its CLI-owned path; parity for the remaining AST leaves is
+still tracked as open work.
 
 | Code | Category | Severity | Description |
 |------|----------|----------|-------------|
@@ -141,7 +142,10 @@ compatibility surface.
 
 ## Argument Count Lint (ARG001/ARG002)
 
-Detects functions with too many parameters, which hurts readability and is often a sign the function should be refactored.
+Detects functions with too many parameters, which hurts readability and is often
+a sign the function should be refactored. Counts come from parsed function AST
+declarations, not regex or line scanning. Generic in-process `Linter.lint_source`
+stays parser-free; the public `simple lint` CLI owns this AST pass.
 
 ### ARG001: Too Many Parameters (WARNING)
 

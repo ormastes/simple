@@ -1,6 +1,13 @@
 # Production `simple lint` omits semantic AST rules
 
-- **Status:** OPEN; confirmed while repairing query diagnostics.
+- **Status:** PARTIALLY FIXED / STAGE 4 QUALIFICATION PENDING.
 - **Observed:** the CLI `Linter` registers ARG/STUB codes but its `lint_source` path only executes line/source and EasyFix checks. A zero-parameter default-return function can exit clean without STUB002.
 - **Cause:** production lint and query diagnostics use different adapters over the shared `compiler.semantics.lint.*` leaves; neither adapter was a whole shared owner.
-- **Required fix:** parse once in `Linter.lint_source`, invoke the semantic leaf checks, translate warnings to configured `LintResult` values, and add a narrow CLI/query code-parity regression. Do not import app/query code into the compiler lint layer.
+- **Implemented slice:** the CLI-owned lint path parses once and translates
+  ARG001/ARG002 into configured `LintResult` values with parser-backed source
+  lines. Generic in-process `Linter.lint_source` remains parser-free because
+  parsing resets shared compiler AST state. The unified CLI fallback now uses
+  that same canonical lint-command owner.
+- **Remaining fix:** route the remaining STUB, COLL, DTYP, wildcard-import, and
+  wide-public semantic leaves through the CLI-owned parsed adapter, then prove
+  CLI/query code parity and qualify the exact fresh Stage 4 binary.
