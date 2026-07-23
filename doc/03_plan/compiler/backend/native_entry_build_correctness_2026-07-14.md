@@ -461,6 +461,14 @@ the shared binary — deploys require explicit user go-ahead).
   The portability contract passes; the full host-GPU self-test reached the
   session's three-cycle cap while exposing these validator defects, so a clean
   rerun remains pending.
+  The later cross-module arithmetic exit-5 evidence is now isolated to
+  `u64(0x8000000000000000) > 0.0`: generated code encodes the cast as signed
+  f64 `0xc3e0000000000000`. A current-source Stage2/3 rebuild reproduced it.
+  The remaining root is earlier unsigned-provenance copy propagation, not
+  LLVM/Cranelift comparison dispatch; the attempted destination-or-source rule
+  was rejected because it can contaminate an authoritative signed destination.
+  The three-cycle cap is exhausted, with the narrow destination-unregistered
+  rule and unchanged cross-module fixture recorded for the next session.
   Pure-Simple text `.char_code_at(index)` now lowers after custom-owner
   dispatch through a reserved alias to the exact raw-i64 runtime ABI instead
   of boxing/decoding the codepoint or capturing a same-named source function.

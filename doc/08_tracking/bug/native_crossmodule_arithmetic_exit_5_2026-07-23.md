@@ -27,10 +27,11 @@ returns 5 with empty stdout.
 ## Boundary
 
 Exit 5 maps to `cross_target_arithmetic_ok()` in
-`test/fixtures/native_crossmodule_result_u8/main.spl`. Object inspection
-isolated the bad value to the `high > 0.0` / `0.0 < high` condition: the
-`0x8000000000000000u64` operand was folded as floating-point `-2^63` instead
-of `+2^63`.
+`test/fixtures/native_crossmodule_result_u8/main.spl`. Object inspection and
+GDB isolate the bad value to the `high > 0.0` / `0.0 < high` condition: GDB
+stops at false-return block `0x40b34d`, and the machine code materializes
+`0x8000000000000000u64` as f64 bits `0xc3e0000000000000` (negative 2^63)
+instead of positive 2^63.
 
 The textual LLVM backend primes unsignedness from MIR locals, but
 `translate_copy_move` overwrote the annotated `u64` destination flag with its
