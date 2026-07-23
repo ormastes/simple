@@ -447,6 +447,20 @@ the shared binary — deploys require explicit user go-ahead).
   oracle. The
   available pure-Simple test artifacts either crash before scenario output or
   lack the `test` command, so native execution remains pending.
+  The tracked release crash is the known stale two-argument `rt_env_set`
+  runtime owner, not current caller lowering. Shared Stage4 candidate admission
+  now runs a bounded, self-pinned `-c` environment-write probe before native-build checks,
+  so the stale artifact fails identically on Linux/macOS/Windows/FreeBSD
+  without a platform-specific disassembler; no redeploy is claimed.
+  While exercising that cross-platform admission self-test, the host-GPU
+  validator exposed older evidence bugs: same-ISA TCG was mislabeled native,
+  report validation read QEMU argv before assignment, and `serial_has_pass`
+  ignored its QEMU-argv parameter in favor of an unset global. Live QEMU runs
+  now select `-accel tcg` explicitly, the shared validator requires that evidence,
+  and report validation assigns and passes the encoded argv before consuming it.
+  The portability contract passes; the full host-GPU self-test reached the
+  session's three-cycle cap while exposing these validator defects, so a clean
+  rerun remains pending.
   Pure-Simple text `.char_code_at(index)` now lowers after custom-owner
   dispatch through a reserved alias to the exact raw-i64 runtime ABI instead
   of boxing/decoding the codepoint or capturing a same-named source function.

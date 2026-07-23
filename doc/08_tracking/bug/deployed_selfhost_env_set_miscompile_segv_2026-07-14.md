@@ -247,3 +247,19 @@ already used by compiler dictionaries and added a focused source regression.
 An isolated Stage 2 native build parsed and linked the registry, but this is
 source-only repair evidence: it produced no admitted full CLI, runner
 calibration, or font acceptance PASS.
+
+## 2026-07-23 candidate admission hardening
+
+The retained release artifact still exits 139 on the first `simple test`
+environment write; no redeploy was attempted. Candidate admission now executes
+a bounded, self-pinned `-c` probe that calls `rt_env_set(text, text)` and requires `true`
+before native-build admission. This directly rejects the obsolete two-argument
+runtime owner without depending on test discovery or a platform disassembler.
+The probe runs through the shared Stage4 admission helper on Linux, macOS,
+Windows shell jobs, and FreeBSD. Its shell self-test includes a stale-ABI fake
+that passes `--version` but exits 139 on the environment call. A fresh full CLI
+and the existing redeploy gates are still required before replacement. The
+macOS matrix now installs the helper's `gtimeout` provider, and both admission
+and portability changes trigger the canonical FreeBSD workflow. This is a
+hosted ABI gate; ARM32/RV32/Windows-ARM64 object receipts are not runtime
+environment evidence.
