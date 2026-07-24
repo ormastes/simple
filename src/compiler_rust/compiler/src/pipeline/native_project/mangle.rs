@@ -680,18 +680,20 @@ fn resolve_method_call_static(
         return;
     }
 
-    if let Some(resolved) = resolve_name_variants(lookup_name, use_map, import_map) {
-        *func_name = resolved;
-    } else {
-        let method = lookup_name.rsplit('.').next().unwrap_or(lookup_name);
-        let type_part = lookup_name.split('.').next().unwrap_or("");
-        let has_type_qualifier = lookup_name.contains('.');
-        if !has_type_qualifier
-            && matches!(
-                method,
-                "unwrap" | "unwrap_or" | "unwrap_err" | "is_some" | "is_none" | "is_ok" | "is_err"
-            )
-        {
+    // The three bare-builtin guards below must run BEFORE resolve_name_variants,
+    // not only before the suffix fallback: a project-wide FREE function with a
+    // builtin's name (private `fn char_at(s, i)` in mcp_sdk/core/json.spl) leaks
+    // into the global import map as a bare entry, so resolution SUCCEEDS and
+    // rebinds an erased-receiver `.char_at()` to a module that may not even be
+    // in the entry closure (undefined `..mcp_sdk__core__json__char_at` at the
+    // stage4 final link, 2026-07-25). Builtin lowering must win for bare names
+    // in every case, same rationale as the `join` guard above.
+    let method_early = lookup_name.rsplit('.').next().unwrap_or(lookup_name);
+    if !lookup_name.contains('.') {
+        if matches!(
+            method_early,
+            "unwrap" | "unwrap_or" | "unwrap_err" | "is_some" | "is_none" | "is_ok" | "is_err"
+        ) {
             // Preserve enum helper method names when the receiver type could not be
             // recovered. Rebinding bare `unwrap` by suffix to an imported
             // `FailSafeResult.unwrap` symbol causes option/result-style field access
@@ -700,71 +702,74 @@ fn resolve_method_call_static(
             // payload/discriminant lowering paths.
             return;
         }
-        if !has_type_qualifier
-            && matches!(
-                method,
-                "starts_with"
-                    | "ends_with"
-                    | "trim"
-                    | "trim_start"
-                    | "trim_end"
-                    | "to_upper"
-                    | "upper"
-                    | "to_lower"
-                    | "lower"
-                    | "char_at"
-                    | "char_code_at"
-                    | "replace"
-            )
-        {
+        if matches!(
+            method_early,
+            "starts_with"
+                | "ends_with"
+                | "trim"
+                | "trim_start"
+                | "trim_end"
+                | "to_upper"
+                | "upper"
+                | "to_lower"
+                | "lower"
+                | "char_at"
+                | "char_code_at"
+                | "replace"
+        ) {
             // Preserve bare string-builtin method names when the receiver type
             // could not be recovered (an erased receiver -- e.g. `parts[i]` from
             // `split(...)`, or a `line.trim()` chain -- leaves the MethodCallStatic
-            // func_name bare). The single-candidate suffix fallback below would
-            // rebind bare `starts_with` to the ONLY user method of that name,
-            // struct `Path.starts_with` (fs_driver/types.spl), whose `self.raw`
-            // dereferences the text receiver as a Path struct -> crash inside
-            // decode_string (SimpleOS WM first-frame render fault, 2026-07-13).
-            // Leaving the name bare routes it through codegen's `bare_rt_redirect`
-            // table (functions/calls.rs) -> rt_string_* -- the SAME correct
-            // lowering a statically-typed `text` receiver gets. Every method here
-            // has a bare_rt_redirect entry, so leaving it bare never produces an
-            // unresolved-call error. Scoped to unambiguous string ops (contains/
-            // split/index_of/to_string are intentionally excluded -- either they
-            // collide with generic user methods or lack a bare_rt_redirect entry).
+            // func_name bare). Rebinding bare `starts_with` to the ONLY user method
+            // of that name, struct `Path.starts_with` (fs_driver/types.spl), whose
+            // `self.raw` dereferences the text receiver as a Path struct, crashed
+            // inside decode_string (SimpleOS WM first-frame render fault,
+            // 2026-07-13). Leaving the name bare routes it through codegen's
+            // `bare_rt_redirect` table (functions/calls.rs) -> rt_string_* -- the
+            // SAME correct lowering a statically-typed `text` receiver gets. Every
+            // method here has a bare_rt_redirect entry, so leaving it bare never
+            // produces an unresolved-call error. Scoped to unambiguous string ops
+            // (contains/split/index_of/to_string are intentionally excluded --
+            // either they collide with generic user methods or lack a
+            // bare_rt_redirect entry).
             return;
         }
-        if !has_type_qualifier
-            && matches!(
-                method,
-                "len"
-                    | "to_i8"
-                    | "to_i16"
-                    | "to_i32"
-                    | "to_i64"
-                    | "to_u8"
-                    | "to_u16"
-                    | "to_u32"
-                    | "to_u64"
-                    | "to_f32"
-                    | "to_f64"
-                    | "to_int"
-                    | "to_float"
-            )
-        {
+        if matches!(
+            method_early,
+            "len"
+                | "to_i8"
+                | "to_i16"
+                | "to_i32"
+                | "to_i64"
+                | "to_u8"
+                | "to_u16"
+                | "to_u32"
+                | "to_u64"
+                | "to_f32"
+                | "to_f64"
+                | "to_int"
+                | "to_float"
+        ) {
             // Same defect class as the string-builtin guard above, for NUMERIC
             // builtins: a bare erased-receiver `.to_i32()` (e.g. `value.len()
             // .to_i32()`, `commands.len().to_i32()`) must lower to the builtin
-            // conversion, not rebind through the single-candidate suffix
-            // fallback to the ONLY user method of that name (`Px.to_i32`,
-            // window_protocol/geometry.spl), which would deref the raw integer
-            // as a Px pointer -> null-receiver fault on the SimpleOS WM
-            // first-frame render (cr2=0, 2026-07-17). Leaving the name bare
+            // conversion, not rebind to the ONLY user method of that name
+            // (`Px.to_i32`, window_protocol/geometry.spl), which would deref the
+            // raw integer as a Px pointer -> null-receiver fault on the SimpleOS
+            // WM first-frame render (cr2=0, 2026-07-17). Leaving the name bare
             // routes it through codegen's builtin numeric lowering (a direct
             // truncation/extension), which is the correct semantics for every
             // primitive receiver.
             return;
         }
+    }
+
+    if let Some(resolved) = resolve_name_variants(lookup_name, use_map, import_map) {
+        *func_name = resolved;
+    } else {
+        let method = lookup_name.rsplit('.').next().unwrap_or(lookup_name);
+        let type_part = lookup_name.split('.').next().unwrap_or("");
+        let has_type_qualifier = lookup_name.contains('.');
         let type_part_lower = type_part.to_lowercase();
         let candidates = local_suffix_index.get(method).or_else(|| suffix_index.get(method));
         if let Some(candidates) = candidates {
