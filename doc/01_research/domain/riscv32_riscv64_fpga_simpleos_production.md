@@ -231,3 +231,23 @@ validation, and reconstruction of compiler-owned enums/structs only at the
 consumer. Unknown tags, mismatched parallel arrays, and ambiguous identities
 must fail closed. This is narrower than a general serializer and directly
 addresses the observed self-hosted ABI boundary.
+
+<!-- codex-research 2026-07-24 -->
+## K26 PS-DDR Integration Boundary
+
+AMD defines `S_AXI_HP0_FPD` as a PS slave interface through which a PL AXI
+master reaches PS DDR. A real design must enable that interface, connect the
+PL master through AXI interconnect/SmartConnect as needed, and share or
+explicitly convert the associated AXI clock/reset domain. Exporting scalar AXI
+ports or a bitstream alone does not create the Vivado interface connection.
+Sources: [AMD AXI platform interface setup](https://docs.amd.com/r/en-US/Vitis-Tutorials-Vitis-Platform-Creation/Enable-AXI-Interfaces-for-the-Platform),
+[AMD embedded processor hardware design](https://docs.amd.com/api/khub/documents/ybtfC0B2saJope5p9Bw05A/content).
+
+PS DDR is not initialized by PL configuration or `STARTUPE3`. The PS
+configuration output supplies `psu_init.tcl` for XSDB and `psu_init.c/.h` for
+the FSBL; AMD documents DDR, clock, PLL, MIO, PS-PL isolation, and board
+initialization in that flow. Therefore K26 qualification must retain the
+generated PS initialization artifact and run it (or boot an equivalent FSBL)
+before the Simple CPU accesses DDR.
+Sources: [PG201 output generation](https://docs.amd.com/r/en-US/pg201-zynq-ultrascale-plus-processing-system/Output-Generation),
+[UG1137 initialization](https://docs.amd.com/r/en-US/ug1137-zynq-ultrascale-mpsoc-swdev/Initialization).
