@@ -2,12 +2,12 @@
 # @cover src/compiler/99.loader/module_loader.spl 80%
 extern fn rt_process_run(program: text, args: [text]) -> (text, text, i64)
 extern fn rt_file_exists(path: text) -> bool
+extern fn rt_env_get(name: text) -> text
 
 fn find_simple_binary() -> text:
-    if rt_file_exists("src/compiler_rust/target/release/simple"):
-        return "src/compiler_rust/target/release/simple"
-    if rt_file_exists("src/compiler_rust/target/bootstrap/simple"):
-        return "src/compiler_rust/target/bootstrap/simple"
+    val configured = rt_env_get("SIMPLE_BINARY")
+    if configured != "" and rt_file_exists(configured):
+        return configured
     if rt_file_exists("bin/simple"):
         return "bin/simple"
     if rt_file_exists("bin/release/aarch64-apple-darwin-macho/simple"):
@@ -47,7 +47,7 @@ val _can_run = _check_binary_runnable()
 fn run_probe(command: text) -> (text, text, i64):
     rt_process_run(
         find_simple_binary(),
-        ["run", "test/system/interpreter/lazy_shb_probe.spl", command]
+        ["run", "test/03_system/interpreter/lazy_shb_probe.spl", command]
     )
 
 describe "Interpreter Lazy SHB Wiring":
@@ -57,6 +57,9 @@ describe "Interpreter Lazy SHB Wiring":
     # The probe exercises interpreter internals (eval_init, register_deferred_module,
     # load_module_parse_only, load_module_register_only, load_module, etc.)
     # and prints "ok" on success or a diagnostic string on failure.
+
+    it "requires a runnable pure-Simple binary":
+        expect(_can_run).to_equal(true)
 
     it "parses a module without registering symbols (parse_only)":
         # Verifies load_module_parse_only() can parse a .spl file
@@ -139,6 +142,21 @@ describe "Interpreter Lazy SHB Wiring":
                 print stderr
             expect(code).to_equal(0)
             expect(stdout).to_contain("ok")
+
+    it "does not load an unused broken lazy module":
+        if not _can_run:
+            expect(_can_run).to_equal(false)
+        else:
+            val result = run_probe("unused_broken")
+            val stdout = result[0]
+            val stderr = result[1]
+            val code = result[2]
+            if code != 0:
+                print stdout
+                print stderr
+            expect(code).to_equal(0)
+            expect(stdout).to_contain("ok")
+            expect(stdout.contains("lazy-module-loaded-eagerly")).to_equal(false)
 
     it "circular lazy wildcard imports are a known interpreter limitation":
         # Known limitation: circular lazy wildcard imports (a uses lazy b.*,
