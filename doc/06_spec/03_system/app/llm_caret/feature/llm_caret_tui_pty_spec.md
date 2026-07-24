@@ -1,8 +1,8 @@
 # LLM Caret Live PTY Qualification
 
-> Launches the shipped cached Caret artifact through a real host PTY with the
-> offline dummy provider. Missing prerequisites and incomplete terminal
-> evidence fail closed.
+> Launches the shipped cached Caret artifact through a real host PTY and
+> explicit `--plain` stdin with the offline dummy provider. Missing
+> prerequisites and incomplete routing evidence fail closed.
 
 | Tests | Active | Skipped | Pending |
 |-------|-------:|--------:|--------:|
@@ -51,9 +51,13 @@ retain an explicit `caret_exit=0` child marker; `script -e` is only supplemental
 exit propagation.
 The promptless case is narrower: it proves that the shipped root metadata
 admits `/compact`, `/summarize`, `/init`, and `/bootstrap`, including the two
-canonical/alias pairs. It does not promote the corresponding leaf feature
-gates from parts-bin evidence or claim that their feature implementations are
-shipped.
+canonical/alias pairs. Each command runs once through the real TUI and once
+through explicit `--plain` stdin. Both routes reject `Unknown command:` and
+`Assistant:` semantic output and reject any entries under the isolated
+`HOME/.llm_caret/sessions` directory. Plain cases additionally require zero
+exit, empty stderr, and no ANSI bytes. These checks do not promote the
+corresponding leaf feature gates from parts-bin evidence or claim that their
+feature implementations are shipped.
 Forced TUI on non-TTY stdin must fail before emitting escape bytes with
 `terminal raw mode unavailable`. Each child is guarded by one fixed 20-second
 watchdog; timeout evidence is retained and fails the case without retry.
@@ -210,12 +214,16 @@ expect(result.exit_code).to_equal(0)
 
 ### Supporting evidence: promptless commands reach shipped root metadata
 
-#### should reach compact summarize init and bootstrap aliases through the shipped root
+#### should reach compact summarize init and bootstrap aliases through shipped TUI and plain roots
 
 - Open the caret TUI.
-- Send the four promptless slash commands through the visible input.
+- Send the four promptless slash commands through the visible input and
+  explicit `--plain` stdin.
   - Expected: `/compact`, `/summarize`, `/init`, and `/bootstrap` each reach
-    the shipped root metadata and report a passing checker case.
+    the shipped root metadata through both routes and report eight passing
+    checker cases.
+  - Expected: aliases produce only their canonical result; no route produces
+    unknown-command or assistant output or creates a session artifact.
 - Check transcript and status.
   - Expected: the checker reports complete evidence, zero failed cases, and
     exits zero.
@@ -238,6 +246,18 @@ expect(result.stdout).to_contain(
 )
 expect(result.stdout).to_contain(
     "case=promptless-bootstrap status=PASS"
+)
+expect(result.stdout).to_contain(
+    "case=plain-promptless-compact status=PASS"
+)
+expect(result.stdout).to_contain(
+    "case=plain-promptless-summarize status=PASS"
+)
+expect(result.stdout).to_contain(
+    "case=plain-promptless-init status=PASS"
+)
+expect(result.stdout).to_contain(
+    "case=plain-promptless-bootstrap status=PASS"
 )
 step("Check transcript and status")
 expect(result.stdout).to_contain("evidence_status=PASS")

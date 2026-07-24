@@ -234,10 +234,6 @@ val result = run_agent_loop(p, [new_user_message("go")], _one_tool, 25)
 # calls - this is the exact gap the guide's M2 milestone flagged.
 expect(result.final_transcript.len()).to_equal(3)
 expect(result.final_transcript[1].content).to_contain("tool_result")
-
-# ============================================================================
-# Markdown-lite rendering (M3)
-# ============================================================================
 ```
 
 </details>
@@ -348,10 +344,8 @@ expect(segs[2].content).to_equal(" now")
 ```simple
 val lines = markdown_turn_lines("user", "a\nb")
 expect(lines.len()).to_equal(2)
-
-# ============================================================================
-# Scrollback (M3)
-# ============================================================================
+expect(lines[0].segments[0].content).to_equal("You: a")
+expect(lines[1].segments[0].content).to_equal("b")
 ```
 
 </details>
@@ -515,27 +509,38 @@ for content in ["zero", "one", "two"]:
     render_turn("assistant", content)
 scroll_page_up(tui_transcript_len(), 1)
 expect(_hint_line(ui)).to_equal(ui.hint + " [scrolled - Ctrl-N to follow]")
+```
+
+</details>
+
+<details>
+<summary>Executable helper source</summary>
+
+```simple
 
 # ============================================================================
 # Slash commands (M2)
 # ============================================================================
 
+var SUBMISSION_RESPONDER_CALLS = 0
+var SUBMISSION_PERSIST_CALLS = 0
+
 fn _noop_persist(session_id: text, msgs: [Message]):
-    ()
+    SUBMISSION_PERSIST_CALLS = SUBMISSION_PERSIST_CALLS + 1
 
 fn _hooks_model(name: text) -> text:
     "model set to " + name
 
 fn _hooks_provider(name: text) -> ProviderSwitchResult:
     ProviderSwitchResult(
-accepted: true, message: "provider set to " + name,
-provider: name, model: "gpt-4o"
+        accepted: true, message: "provider set to " + name,
+        provider: name, model: "gpt-4o"
     )
 
 fn _hooks_provider_reject(name: text) -> ProviderSwitchResult:
     ProviderSwitchResult(
-accepted: false, message: "unknown provider: " + name,
-provider: "dummy", model: "dummy-hello"
+        accepted: false, message: "unknown provider: " + name,
+        provider: "dummy", model: "dummy-hello"
     )
 
 fn _hooks_sessions() -> text:
@@ -546,15 +551,15 @@ fn _hooks_new() -> text:
 
 fn _hooks_resume_found(id: text) -> SessionResumeResult:
     SessionResumeResult(
-found: true, message: "resumed " + id,
-messages: [new_user_message("restored")], session_id: id,
-provider: "claude_cli", model: "sonnet"
+        found: true, message: "resumed " + id,
+        messages: [new_user_message("restored")], session_id: id,
+        provider: "claude_cli", model: "sonnet"
     )
 
 fn _hooks_resume_missing(id: text) -> SessionResumeResult:
     SessionResumeResult(
-found: false, message: "no saved session '" + id + "'",
-messages: [], session_id: "", provider: "", model: ""
+        found: false, message: "no saved session '" + id + "'",
+        messages: [], session_id: "", provider: "", model: ""
     )
 
 fn _hooks_hidden(name: text, arg: text) -> text:
@@ -562,43 +567,48 @@ fn _hooks_hidden(name: text, arg: text) -> text:
 
 fn _test_hooks() -> SessionHooks:
     SessionHooks(
-session_id: "s0", hidden_commands_enabled: false,
-on_model: _hooks_model, on_provider: _hooks_provider,
-on_sessions: _hooks_sessions, on_new: _hooks_new,
-on_resume: _hooks_resume_found,
-on_hidden_command: _hooks_hidden, on_persist: _noop_persist
+        session_id: "s0", hidden_commands_enabled: false,
+        on_model: _hooks_model, on_provider: _hooks_provider,
+        on_sessions: _hooks_sessions, on_new: _hooks_new,
+        on_resume: _hooks_resume_found,
+        on_hidden_command: _hooks_hidden, on_persist: _noop_persist
     )
 
 fn _test_hooks_missing() -> SessionHooks:
     SessionHooks(
-session_id: "s0", hidden_commands_enabled: false,
-on_model: _hooks_model, on_provider: _hooks_provider,
-on_sessions: _hooks_sessions, on_new: _hooks_new,
-on_resume: _hooks_resume_missing,
-on_hidden_command: _hooks_hidden, on_persist: _noop_persist
+        session_id: "s0", hidden_commands_enabled: false,
+        on_model: _hooks_model, on_provider: _hooks_provider,
+        on_sessions: _hooks_sessions, on_new: _hooks_new,
+        on_resume: _hooks_resume_missing,
+        on_hidden_command: _hooks_hidden, on_persist: _noop_persist
     )
 
 fn _test_hooks_provider_reject() -> SessionHooks:
     SessionHooks(
-session_id: "s0", hidden_commands_enabled: false,
-on_model: _hooks_model,
-on_provider: _hooks_provider_reject,
-on_sessions: _hooks_sessions, on_new: _hooks_new,
-on_resume: _hooks_resume_found,
-on_hidden_command: _hooks_hidden,
-on_persist: _noop_persist
+        session_id: "s0", hidden_commands_enabled: false,
+        on_model: _hooks_model,
+        on_provider: _hooks_provider_reject,
+        on_sessions: _hooks_sessions, on_new: _hooks_new,
+        on_resume: _hooks_resume_found,
+        on_hidden_command: _hooks_hidden,
+        on_persist: _noop_persist
     )
 
 fn _test_hooks_hidden() -> SessionHooks:
     SessionHooks(
-session_id: "s0", hidden_commands_enabled: true,
-on_model: _hooks_model, on_provider: _hooks_provider,
-on_sessions: _hooks_sessions, on_new: _hooks_new,
-on_resume: _hooks_resume_found,
-on_hidden_command: _hooks_hidden, on_persist: _noop_persist
+        session_id: "s0", hidden_commands_enabled: true,
+        on_model: _hooks_model, on_provider: _hooks_provider,
+        on_sessions: _hooks_sessions, on_new: _hooks_new,
+        on_resume: _hooks_resume_found,
+        on_hidden_command: _hooks_hidden, on_persist: _noop_persist
     )
 
+fn _reset_submission_call_counts():
+    SUBMISSION_RESPONDER_CALLS = 0
+    SUBMISSION_PERSIST_CALLS = 0
+
 fn _submission_response(messages: [Message]) -> ModelResponse:
+    SUBMISSION_RESPONDER_CALLS = SUBMISSION_RESPONDER_CALLS + 1
     new_model_text("submission reply")
 ```
 
@@ -658,6 +668,10 @@ expect(arg).to_equal("")
 ```simple
 val r = dispatch_slash("help", "", _test_hooks())
 expect(r.message).to_contain("/model <name>")
+expect(r.message.contains("/debug-tool-call")).to_be(false)
+expect(r.message.contains("/debug_tool_call")).to_be(false)
+expect(r.message.contains("/remote-setup")).to_be(false)
+expect(r.message.contains("/remote_setup")).to_be(false)
 ```
 
 </details>

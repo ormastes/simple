@@ -24,7 +24,7 @@ used to generate the full-parity matrices.
 | `doc/09_report/llm_caret_claude_cli_traceability.md` | Maps all 25 direct files and 7,278 current LOC | Current static mapping; not executable evidence |
 | `scripts/check/check-llm-caret-claude-cli-trace.shs` | 25/25 files (100%); 7,278/7,278 LOC (100%); 496/496 file-qualified symbols; `STATUS: PASS` | Current computed gate |
 | Full self-hosted CLI bootstrap | Stage 3 built; Stage 4 full-CLI native build was killed by signal 9; no candidate deployed | Current executable-test blocker; do not retry in this session |
-| Cached Caret live-PTY qualification | Checker/spec/manual contain seven fail-closed scenarios, including three hidden-state and four independent promptless canonical/alias real-TUI process cases; `--case prerequisites` requires a matching adjacent provenance manifest and fails closed when the cached artifact is absent | Current executable-test blocker; no live PASS or skipped prerequisite |
+| Cached Caret live-PTY qualification | Checker/spec/manual contain seven fail-closed scenarios, including three hidden-state cases and one promptless scenario requiring four real-TUI plus four explicit-plain canonical/alias process cases; `--case prerequisites` requires a matching adjacent provenance manifest and fails closed when the cached artifact is absent | Current executable-test blocker; no live PASS or skipped prerequisite |
 | `tmp/claude/claude-code-main/src` | Missing | Current-tree evidence |
 | Full-parity feature matrix | 599 rows, 1,902 historical source files, 512,685 historical LOC | Snapshot-derived evidence; cannot be refreshed against upstream now |
 | Full-parity file matrix | 1,902 rows | Snapshot-derived evidence |
@@ -136,7 +136,7 @@ many tests are aggregated, renamed, or not referenced by the historical
 | Hidden MCP `xaa-idp` and ultrareview | independent MCP/review capsules | focused MCP/review specs plus `feature_gate_registry_spec.spl` | Default metadata and enabling probes are aggregated; complete current-upstream discovery and process invocation remain unproved |
 | Agent swarms, team memory, and buddy | independent feature capsules | focused feature specs plus `feature_gate_registry_spec.spl` | Swarms' 3 and team-memory's 7 focused modern scenarios now have mirrored manuals; aggregate probes retain full gate matrices including both killswitch routes, while buddy remains aggregate-only; no shipped root admission claim |
 | Immediate-command experiment and removed worktree gate | independent experiment/command capsules | focused utility specs plus `feature_gate_registry_spec.spl` | Immediacy and unconditional worktree-mode ownership remain distinct from command admission |
-| Skill-discovery rendering and persistent retry | attachment/retry helpers | `feature_gate_registry_spec.spl`, `components/messages/AttachmentMessage_spec.spl`, `services/api/withRetry_spec.spl` | Skill discovery has three direct dispatcher scenarios for exact visible/demo/redacted render metadata. Retry has a deterministic loop/effect seam and 15 modern scenarios for persistent/max-boundary/provider/overflow behavior. Both remain parts-bin-only; retry execution is still blocked |
+| Skill-discovery rendering and persistent retry | attachment/retry helpers | `feature_gate_registry_spec.spl`, `components/messages/AttachmentMessage_spec.spl`, `services/api/withRetry_spec.spl` | Skill discovery has three direct dispatcher scenarios for exact visible/demo/redacted render metadata. Retry has a deterministic loop/effect seam and 18 modern scenarios for persistent/max-boundary/provider/overflow plus direct classifier/header-owner behavior. Both remain parts-bin-only; retry execution is still blocked |
 
 The accepted `claude_full` parts-bin map now spans 33 selected distributed
 gate dimensions. The 599-row historical feature matrix remains scope evidence
@@ -510,10 +510,10 @@ three process-hardening, ten TUI/hidden, five managed-environment, six
 installed-Claude, five root-registry, seven live-PTY, and one
 hidden-stub aggregate plus three feature-gate aggregate examples form the
 407-example base across the listed executable files (the root-registry spec
-contains five scenarios). The 88 focused owner/effect examples now synchronized
+contains five scenarios). The 91 focused owner/effect examples now synchronized
 across Tasks V2, swarms, team memory, insights, review/rewind/sandbox, bridge
 helpers/command, AttachmentMessage, and withRetry raise the scoped modern
-`should` total to 495 examples with canonical matchers. The pre-existing
+`should` total to 498 examples with canonical matchers. The pre-existing
 unit/component/process manuals retain
 their documented body-parity checks. The feature-gate manual statically checks
 exact 33-row contract/state parity and carries complete folded executable

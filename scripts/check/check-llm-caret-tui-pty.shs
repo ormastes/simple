@@ -352,6 +352,105 @@ write_input() {
     esac
 }
 
+promptless_input_command() {
+    input_kind=$1
+    case "${input_kind}" in
+        promptless-compact)
+            printf '%s\n' "/compact"
+            ;;
+        promptless-summarize)
+            printf '%s\n' "/summarize"
+            ;;
+        promptless-init)
+            printf '%s\n' "/init"
+            ;;
+        promptless-bootstrap)
+            printf '%s\n' "/bootstrap"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+promptless_canonical_command() {
+    input_kind=$1
+    case "${input_kind}" in
+        promptless-compact|promptless-summarize)
+            printf '%s\n' "/compact"
+            ;;
+        promptless-init|promptless-bootstrap)
+            printf '%s\n' "/init"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+reset_promptless_home() {
+    home_dir=$1
+    case "${home_dir}" in
+        "${ARTIFACT_ROOT}"/*/home)
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    rm -rf "${home_dir}" || return 1
+    mkdir -p "${home_dir}"
+}
+
+promptless_session_artifacts_exist() {
+    home_dir=$1
+    session_dir="${home_dir}/.llm_caret/sessions"
+    [ -d "${session_dir}" ] || return 1
+    find "${session_dir}" -mindepth 1 -print -quit 2>/dev/null |
+        grep -q .
+}
+
+PROMPTLESS_FAILURE_REASON=""
+
+validate_promptless_output() {
+    input_kind=$1
+    capture=$2
+    semantic_prefix=$3
+    home_dir=$4
+    PROMPTLESS_FAILURE_REASON=""
+    canonical=$(promptless_canonical_command "${input_kind}") || {
+        PROMPTLESS_FAILURE_REASON="unsupported_promptless_input"
+        return 1
+    }
+    expected="${semantic_prefix}Command not implemented in Caret: ${canonical}"
+    submitted=$(promptless_input_command "${input_kind}") || {
+        PROMPTLESS_FAILURE_REASON="unsupported_promptless_input"
+        return 1
+    }
+    if ! grep -a -F "${expected}" "${capture}" >/dev/null 2>&1; then
+        PROMPTLESS_FAILURE_REASON="promptless_canonical_result_missing"
+        return 1
+    fi
+    if grep -a -F "Unknown command:" "${capture}" >/dev/null 2>&1; then
+        PROMPTLESS_FAILURE_REASON="promptless_unknown_command_output"
+        return 1
+    fi
+    if grep -a -F "Assistant:" "${capture}" >/dev/null 2>&1; then
+        PROMPTLESS_FAILURE_REASON="promptless_assistant_output"
+        return 1
+    fi
+    if [ "${submitted}" != "${canonical}" ] &&
+       grep -a -F "${semantic_prefix}Command not implemented in Caret: ${submitted}" \
+           "${capture}" >/dev/null 2>&1; then
+        PROMPTLESS_FAILURE_REASON="promptless_alias_not_canonical"
+        return 1
+    fi
+    if promptless_session_artifacts_exist "${home_dir}"; then
+        PROMPTLESS_FAILURE_REASON="promptless_session_artifact_created"
+        return 1
+    fi
+    return 0
+}
+
 write_pty_runner() {
     runner=$1
     cat >"${runner}" <<'RUNNER'
@@ -502,7 +601,22 @@ run_pty_case() {
     driver_stdout="${case_dir}/script-stdout.txt"
     driver_stderr="${case_dir}/script-stderr.txt"
     timeout_marker="${case_dir}/timeout.txt"
-    mkdir -p "${case_dir}/home" || {
+    home_dir="${case_dir}/home"
+    case "${input_kind}" in
+        promptless-*)
+            reset_promptless_home "${home_dir}" || {
+                record_failure "${label}" "artifact_directory_unavailable" "${case_dir}"
+                return
+            }
+            ;;
+        *)
+            mkdir -p "${home_dir}" || {
+                record_failure "${label}" "artifact_directory_unavailable" "${case_dir}"
+                return
+            }
+            ;;
+    esac
+    mkdir -p "${case_dir}" || {
         record_failure "${label}" "artifact_directory_unavailable" "${case_dir}"
         return
     }
@@ -518,7 +632,7 @@ run_pty_case() {
     CARET_WRAPPER="${CARET_WRAPPER}"
     CARET_UI_MODE="${ui_mode}"
     CARET_GEOMETRY="${geometry}"
-    HOME="${case_dir}/home"
+    HOME="${home_dir}"
     TERM=xterm-256color
     case "${input_kind}" in
         hidden-enabled|hidden-disabled)
@@ -603,24 +717,63 @@ run_pty_case() {
          ! grep -a -F "system: Command disabled: /remote-setup" \
              "${capture}" >/dev/null 2>&1; then
         record_failure "${label}" "hidden_disabled_rejection_missing" "${case_dir}"
-    elif { [ "${input_kind}" = "promptless-compact" ] ||
-           [ "${input_kind}" = "promptless-summarize" ]; } &&
-         ! grep -a -F "system: Command not implemented in Caret: /compact" \
-             "${capture}" >/dev/null 2>&1; then
-        record_failure "${label}" "promptless_compact_result_missing" "${case_dir}"
-    elif [ "${input_kind}" = "promptless-summarize" ] &&
-         grep -a -F "system: Command not implemented in Caret: /summarize" \
-             "${capture}" >/dev/null 2>&1; then
-        record_failure "${label}" "promptless_summarize_not_canonical" "${case_dir}"
-    elif { [ "${input_kind}" = "promptless-init" ] ||
-           [ "${input_kind}" = "promptless-bootstrap" ]; } &&
-         ! grep -a -F "system: Command not implemented in Caret: /init" \
-             "${capture}" >/dev/null 2>&1; then
-        record_failure "${label}" "promptless_init_result_missing" "${case_dir}"
-    elif [ "${input_kind}" = "promptless-bootstrap" ] &&
-         grep -a -F "system: Command not implemented in Caret: /bootstrap" \
-             "${capture}" >/dev/null 2>&1; then
-        record_failure "${label}" "promptless_bootstrap_not_canonical" "${case_dir}"
+    elif case "${input_kind}" in promptless-*) true ;; *) false ;; esac &&
+         ! validate_promptless_output \
+             "${input_kind}" "${capture}" "system: " "${home_dir}"; then
+        record_failure \
+            "${label}" "${PROMPTLESS_FAILURE_REASON}" "${case_dir}"
+    else
+        record_pass "${label}" "${case_dir}"
+    fi
+}
+
+run_plain_promptless_case() {
+    label=$1
+    input_kind=$2
+    case_dir="${ARTIFACT_ROOT}/${label}"
+    home_dir="${case_dir}/home"
+    input="${case_dir}/input.txt"
+    stdout="${case_dir}/stdout.txt"
+    stderr="${case_dir}/stderr.txt"
+    combined="${case_dir}/combined.txt"
+    timeout_marker="${case_dir}/timeout.txt"
+    mkdir -p "${case_dir}" || {
+        record_failure "${label}" "artifact_directory_unavailable" "${case_dir}"
+        return
+    }
+    reset_promptless_home "${home_dir}" || {
+        record_failure "${label}" "artifact_directory_unavailable" "${case_dir}"
+        return
+    }
+    submitted=$(promptless_input_command "${input_kind}") || {
+        record_failure "${label}" "unsupported_input" "${case_dir}"
+        return
+    }
+    printf '%s\n%s\n' "${submitted}" "/exit" >"${input}"
+    : >"${stdout}"
+    : >"${stderr}"
+    HOME="${home_dir}"
+    TERM=dumb
+    export HOME TERM
+    "${CARET_WRAPPER}" --provider dummy --plain \
+        <"${input}" >"${stdout}" 2>"${stderr}" &
+    caret_pid=$!
+    wait_bounded "${caret_pid}" "${timeout_marker}"
+    status=$?
+    cat "${stdout}" "${stderr}" >"${combined}"
+
+    if [ -s "${timeout_marker}" ]; then
+        record_failure "${label}" "wrapper_timeout" "${case_dir}"
+    elif [ "${status}" -ne 0 ]; then
+        record_failure "${label}" "wrapper_exit_${status}" "${case_dir}"
+    elif has_escape "${combined}"; then
+        record_failure "${label}" "plain_output_contains_ansi" "${case_dir}"
+    elif [ -s "${stderr}" ]; then
+        record_failure "${label}" "plain_stderr_not_empty" "${case_dir}"
+    elif ! validate_promptless_output \
+             "${input_kind}" "${stdout}" "" "${home_dir}"; then
+        record_failure \
+            "${label}" "${PROMPTLESS_FAILURE_REASON}" "${case_dir}"
     else
         record_pass "${label}" "${case_dir}"
     fi
@@ -721,6 +874,14 @@ run_promptless() {
     run_pty_case "promptless-summarize" "forced" "promptless-summarize" "12x80"
     run_pty_case "promptless-init" "forced" "promptless-init" "12x80"
     run_pty_case "promptless-bootstrap" "forced" "promptless-bootstrap" "12x80"
+    run_plain_promptless_case \
+        "plain-promptless-compact" "promptless-compact"
+    run_plain_promptless_case \
+        "plain-promptless-summarize" "promptless-summarize"
+    run_plain_promptless_case \
+        "plain-promptless-init" "promptless-init"
+    run_plain_promptless_case \
+        "plain-promptless-bootstrap" "promptless-bootstrap"
 }
 
 while [ "$#" -gt 0 ]; do

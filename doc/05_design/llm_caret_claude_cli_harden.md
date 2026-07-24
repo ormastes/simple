@@ -215,5 +215,8 @@ cached-wrapper cases: `promptless-compact`, `promptless-summarize`,
 `promptless-init`, and `promptless-bootstrap`. Each drives one command plus
 `/exit` through a real PTY and retains the common child-exit, ANSI, cursor,
 alternate-screen, geometry, and `stty` restoration gates before checking the
-canonical System transcript. These cases are designed but not executed while
-the qualified cached Caret artifact is absent.
+canonical System transcript. Four parallel explicit-`--plain` stdin cases
+require zero exit, empty stderr, no ANSI, and the same canonical mapping.
+Both routes fail on unknown/assistant output or any isolated-HOME session file.
+These cases are designed but not executed while the qualified cached Caret
+artifact is absent.

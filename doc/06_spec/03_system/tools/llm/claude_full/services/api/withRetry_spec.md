@@ -6,7 +6,7 @@
 | Field | Value |
 |---|---|
 | Source | `test/03_system/tools/llm/claude_full/services/api/withRetry_spec.spl` |
-| Executable scenarios | 15 |
+| Executable scenarios | 18 |
 | Execution in this tranche | 0 scenarios executed |
 | Result | Not executed; no PASS is claimed |
 | Requirement | N/A; supporting Claude-full parts-bin evidence |
@@ -142,6 +142,84 @@ it "should compute bounded retry delays without overflow":
     expect(getRetryDelay(100, "", 32000, 0)).to_equal(32000)
     expect(getRetryDelay(64, "", 32000, 25)).to_equal(32000)
     expect(getRetryDelay(3, "", 32000, -9223372036854775807)).to_equal(0)
+```
+
+</details>
+
+#### should classify fast-mode-not-enabled status and message boundaries
+
+- Compare the matching status and message with each false boundary
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+it "should classify fast-mode-not-enabled status and message boundaries":
+    step("Compare the matching status and message with each false boundary")
+    val exact = ApiError.new(400, "Fast mode is not enabled for this organization")
+    val contained = ApiError.new(400, "prefix Fast mode is not enabled suffix")
+    val wrongStatus = ApiError.new(401, "Fast mode is not enabled for this organization")
+    val wrongMessage = ApiError.new(400, "Fast mode is enabled")
+    val wrongCase = ApiError.new(400, "fast mode is not enabled")
+    val unrelated = ApiError.new(500, "server")
+    expect([
+        isFastModeNotEnabledError(exact),
+        isFastModeNotEnabledError(contained),
+        isFastModeNotEnabledError(wrongStatus),
+        isFastModeNotEnabledError(wrongMessage),
+        isFastModeNotEnabledError(wrongCase),
+        isFastModeNotEnabledError(unrelated),
+    ]).to_equal([true, true, false, false, false, false])
+```
+
+</details>
+
+#### should apply the complete default retry classifier boundaries
+
+- Compare mock, connection, request, rate-limit, authentication, and server errors
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+it "should apply the complete default retry classifier boundaries":
+    step("Compare mock, connection, request, rate-limit, authentication, and server errors")
+    val mockRateLimit = ApiError.new(429, "mock rate")
+    mockRateLimit.mockRateLimit = true
+    expect([
+        shouldRetry(mockRateLimit),
+        shouldRetry(ApiError.connection("ECONNRESET")),
+        shouldRetry(ApiError.new(408, "request timeout")),
+        shouldRetry(ApiError.new(409, "conflict")),
+        shouldRetry(ApiError.new(429, "rate")),
+        shouldRetry(ApiError.new(401, "expired")),
+        shouldRetry(ApiError.new(499, "client boundary")),
+        shouldRetry(ApiError.new(500, "server boundary")),
+    ]).to_equal([false, true, true, true, true, true, false, true])
+```
+
+</details>
+
+#### should convert missing and numeric retry-after seconds to milliseconds
+
+- Read missing, zero, and positive Retry-After values through the owner
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+it "should convert missing and numeric retry-after seconds to milliseconds":
+    step("Read missing, zero, and positive Retry-After values through the owner")
+    val missing = ApiError.new(429, "missing header")
+    val zero = ApiError.new(429, "zero header")
+    zero.retryAfter = "0"
+    val seven = ApiError.new(429, "numeric header")
+    seven.retryAfter = "7"
+    expect([
+        getRetryAfterMs(missing),
+        getRetryAfterMs(zero),
+        getRetryAfterMs(seven),
+    ]).to_equal([0, 0, 7000])
 ```
 
 </details>

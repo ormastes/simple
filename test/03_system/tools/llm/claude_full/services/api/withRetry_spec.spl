@@ -66,6 +66,51 @@ describe "Claude full withRetry":
             expect(getRetryDelay(64, "", 32000, 25)).to_equal(32000)
             expect(getRetryDelay(3, "", 32000, -9223372036854775807)).to_equal(0)
 
+        it "should classify fast-mode-not-enabled status and message boundaries":
+            step("Compare the matching status and message with each false boundary")
+            val exact = ApiError.new(400, "Fast mode is not enabled for this organization")
+            val contained = ApiError.new(400, "prefix Fast mode is not enabled suffix")
+            val wrongStatus = ApiError.new(401, "Fast mode is not enabled for this organization")
+            val wrongMessage = ApiError.new(400, "Fast mode is enabled")
+            val wrongCase = ApiError.new(400, "fast mode is not enabled")
+            val unrelated = ApiError.new(500, "server")
+            expect([
+                isFastModeNotEnabledError(exact),
+                isFastModeNotEnabledError(contained),
+                isFastModeNotEnabledError(wrongStatus),
+                isFastModeNotEnabledError(wrongMessage),
+                isFastModeNotEnabledError(wrongCase),
+                isFastModeNotEnabledError(unrelated),
+            ]).to_equal([true, true, false, false, false, false])
+
+        it "should apply the complete default retry classifier boundaries":
+            step("Compare mock, connection, request, rate-limit, authentication, and server errors")
+            val mockRateLimit = ApiError.new(429, "mock rate")
+            mockRateLimit.mockRateLimit = true
+            expect([
+                shouldRetry(mockRateLimit),
+                shouldRetry(ApiError.connection("ECONNRESET")),
+                shouldRetry(ApiError.new(408, "request timeout")),
+                shouldRetry(ApiError.new(409, "conflict")),
+                shouldRetry(ApiError.new(429, "rate")),
+                shouldRetry(ApiError.new(401, "expired")),
+                shouldRetry(ApiError.new(499, "client boundary")),
+                shouldRetry(ApiError.new(500, "server boundary")),
+            ]).to_equal([false, true, true, true, true, true, false, true])
+
+        it "should convert missing and numeric retry-after seconds to milliseconds":
+            step("Read missing, zero, and positive Retry-After values through the owner")
+            val missing = ApiError.new(429, "missing header")
+            val zero = ApiError.new(429, "zero header")
+            zero.retryAfter = "0"
+            val seven = ApiError.new(429, "numeric header")
+            seven.retryAfter = "7"
+            expect([
+                getRetryAfterMs(missing),
+                getRetryAfterMs(zero),
+                getRetryAfterMs(seven),
+            ]).to_equal([0, 0, 7000])
+
     describe "supporting persistent and bounded retry sequences":
         it "should keep persistent 429 retries beyond max retries":
             step("Run four persistent rate-limit failures with one configured max retry")
