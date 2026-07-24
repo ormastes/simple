@@ -32,7 +32,7 @@ used to generate the full-parity matrices.
 | Full-parity implementation gate | 745 mapped targets exist; 1,157 missing; 599/1,902 targets reach 80% source LOC | Current target tree checked against stale snapshot rows |
 | Full-parity primary tests | 174/1,902 mapped primary test paths exist | Current test tree checked against stale snapshot rows |
 | Claude-full system specs | 349 executable specs | Current-tree evidence after adding the focused `AttachmentMessage` dispatcher spec |
-| Generated Claude-full manuals | 64 correctly mirrored; 148 specs also/only have stale `doc/06_spec/test/...` manuals; 138 have neither path; 1 has both | Current-tree evidence after removing three conflicting stale mirrors from this focused lane |
+| Generated Claude-full manuals | 65 correctly mirrored; 147 specs also/only have stale `doc/06_spec/test/...` manuals; 138 have neither path; 1 has both | Current-tree evidence after adding the canonical retry manual and removing its obsolete stale mirror |
 
 The missing upstream tree makes claims such as “every current Claude feature”
 or “no new Claude function is missing” assumptions, not evidence. Restore a
@@ -135,7 +135,7 @@ many tests are aggregated, renamed, or not referenced by the historical
 | Hidden MCP `xaa-idp` and ultrareview | independent MCP/review capsules | focused MCP/review specs plus `feature_gate_registry_spec.spl` | Default metadata and enabling probes are aggregated; complete current-upstream discovery and process invocation remain unproved |
 | Agent swarms, team memory, and buddy | independent feature capsules | focused feature specs plus `feature_gate_registry_spec.spl` | Swarms' 3 and team-memory's 7 focused modern scenarios now have mirrored manuals; aggregate probes retain full gate matrices including both killswitch routes, while buddy remains aggregate-only; no shipped root admission claim |
 | Immediate-command experiment and removed worktree gate | independent experiment/command capsules | focused utility specs plus `feature_gate_registry_spec.spl` | Immediacy and unconditional worktree-mode ownership remain distinct from command admission |
-| Skill-discovery rendering and persistent retry | attachment/retry helpers | `feature_gate_registry_spec.spl`, `components/messages/AttachmentMessage_spec.spl` | Skill discovery now has three direct dispatcher scenarios for exact visible/demo/redacted render metadata plus aggregate gate assertions; it remains parts-bin-only. Persistent retry still needs the deterministic retry-loop effect seam and execution evidence |
+| Skill-discovery rendering and persistent retry | attachment/retry helpers | `feature_gate_registry_spec.spl`, `components/messages/AttachmentMessage_spec.spl`, `services/api/withRetry_spec.spl` | Skill discovery has three direct dispatcher scenarios for exact visible/demo/redacted render metadata. Retry has a deterministic loop/effect seam and 15 modern scenarios for persistent/max-boundary/provider/overflow behavior. Both remain parts-bin-only; retry execution is still blocked |
 
 The accepted `claude_full` parts-bin map now spans 33 selected distributed
 gate dimensions. The 599-row historical feature matrix remains scope evidence
@@ -205,7 +205,7 @@ Current focused executable specs:
 | `test/03_system/tools/llm/claude_full/commands/root_commands_registry_spec.spl` | `doc/06_spec/03_system/tools/llm/claude_full/commands/root_commands_registry_spec.md` | Five scenarios, including one registry-derived exhaustive hidden/disabled/admission matrix that cannot silently omit a newly registered root command |
 | `test/03_system/tools/llm/claude_full/commands/hidden_stub_registry_spec.spl` | `doc/06_spec/03_system/tools/llm/claude_full/commands/hidden_stub_registry_spec.md` | One leaf-derived parts-bin hidden-disabled metadata scenario with independent source discovery, unique canonical identities, hyphen/underscore twin normalization, and two-way completeness |
 | `test/03_system/tools/llm/claude_full/feature_gate_registry_spec.spl` | `doc/06_spec/03_system/tools/llm/claude_full/feature_gate_registry_spec.md` | Three parts-bin scenarios: exact 33-record owner/spec/state matrix, generic root reconciliation plus `/compact` drift, and exact malformed-registry rejection |
-| Eight focused gate-owner specs: Tasks V2, swarms, team memory, insights, review/rewind/sandbox, bridge helpers, bridge command, and AttachmentMessage | Same relative paths under `doc/06_spec/03_system/tools/llm/claude_full/` | 73 modern owner scenarios with frozen steps and synchronized manuals; requirements are narrowly scoped to gate/admission behavior, all manuals report zero execution, and none establishes shipped reachability |
+| Nine focused owner/effect specs: Tasks V2, swarms, team memory, insights, review/rewind/sandbox, bridge helpers, bridge command, AttachmentMessage, and withRetry | Same relative paths under `doc/06_spec/03_system/tools/llm/claude_full/` | 88 modern scenarios with frozen steps/helpers and synchronized manuals; requirements are narrowly scoped, all manuals report zero execution, and none establishes shipped reachability |
 
 Every relevant REQ needs at least a happy, edge, and error/rejection scenario.
 The CLI fixture must use stdlib/facade process APIs, never local `rt_*`
@@ -508,10 +508,10 @@ three process-hardening, nine TUI/hidden, five managed-environment, five
 installed-Claude, five root-registry, six live-PTY, and one
 hidden-stub aggregate plus three feature-gate aggregate examples form the
 401-example base across the listed executable files (the root-registry spec
-contains five scenarios). The 73 focused gate-owner examples now synchronized
+contains five scenarios). The 88 focused owner/effect examples now synchronized
 across Tasks V2, swarms, team memory, insights, review/rewind/sandbox, bridge
-helpers/command, and AttachmentMessage raise the scoped modern `should` total
-to 474 examples with canonical matchers. The pre-existing
+helpers/command, AttachmentMessage, and withRetry raise the scoped modern
+`should` total to 489 examples with canonical matchers. The pre-existing
 unit/component/process manuals retain
 their documented body-parity checks. The feature-gate manual statically checks
 exact 33-row contract/state parity and carries complete folded executable

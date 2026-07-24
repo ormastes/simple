@@ -124,7 +124,7 @@ and must not be resolved, reverted, or included by this lane.
 | Root-registry manual parity | PASS: 5/5 scenario bodies match source, including the production-derived exhaustive matrix | Static synchronization; no CLI/TUI invocation claim |
 | Hidden-stub manual parity | PASS: 1/1 scenario body and the complete supporting-helper block match source | Static synchronization; SSpec/docgen not executed on a qualified runtime |
 | Feature-gate manual parity | PASS (static): 33/33 owner rows, 33/33 independently pinned contract rows, 33/33 state rows, and 3/3 complete folded executable scenario bodies | SSpec/docgen cannot execute until a qualified runtime exists |
-| Focused modern SSpec scan | PASS (static): 474 modern `should` examples across the listed files (401 base plus 73 focused gate-owner examples), canonical matchers, and no placeholder pass | Static source/manual scan only; execution is not claimed |
+| Focused modern SSpec scan | PASS (static): 489 modern `should` examples across the listed files (401 base plus 88 focused owner/effect examples), canonical matchers, and no placeholder pass | Static source/manual scan only; execution is not claimed |
 | Direct environment guard | PASS in working and staged modes | Changed Caret paths only |
 | Numbered-artifact guard | WARN in this jj workspace: both modes emit Git-worktree/`--cached` errors but still print `OK` and exit zero | Not authoritative here; no numbered artifacts are added by this tranche |
 | Generated-spec layout | PASS: zero `.spl` specs under `doc/06_spec` | Layout only |
@@ -199,7 +199,7 @@ fixtures. No lane may run a paid provider.
 
 ### Remaining CLI-then-TUI sequence after lane H
 
-1. **Lane I — modernize mapped gate-owner specs.** Eight focused files are
+1. **Lane I — modernize mapped gate-owner specs.** Nine focused files are
    implemented and statically synchronized with frozen `step("...")` names,
    direct owner imports, `REQ-LLM-CARET-HIDDEN-008` traceability, and mirrored
    zero-execution manuals. The aggregate already closes Tasks V2 todo-off/no-team,
@@ -219,7 +219,7 @@ fixtures. No lane may run a paid provider.
    | `bridge/bridge_small_helpers_spec.spl` | Complete statically: 38 modern examples retained; hidden requirement scoped only to bridge availability and the existing manual synchronized |
    | `commands/bridge_command_spec.spl` | Complete statically: four modern examples, 13 preserved steps plus one fail-closed prerequisite step, scoped requirement, callout-state idempotence, and mirrored full-scenario manual |
    | `components/messages/AttachmentMessage_spec.spl` | Complete statically: direct dispatcher evidence for exact fields, ordered plural skills/demo suppression, and fully redacted disabled/empty/wrong-type results; parts-bin only |
-   | `services/api/withRetry_spec.spl` | Add persistent 429/529 retry-loop effects, max-retry boundaries, deterministic cache/cooldown effects, overflow-floor rejection, and thinking-budget override; introduce a deterministic effect seam and remove the obsolete `doc/06_spec/test/...` mis-mirror after canonical regeneration |
+   | `services/api/withRetry_spec.spl` | Complete statically: `RetryEffectTrace` and `RetrySequenceResult` provide deterministic loop/effect seams; 15 modern scenarios cover persistent 429/529 beyond `maxRetries`, exact heartbeat rounding, the nonpersistent `maxRetries + 1` boundary, AWS/GCP cache clearing, stale cooldown, bounded Retry-After/backoff, overflow floor, and thinking-budget rejection. `setup_retry_sequence_fixture`, `run_retry_sequence`, and `check_retry_sequence` are synchronized with the canonical zero-execution manual; the obsolete `doc/06_spec/test/...` mis-mirror and hardcoded 822-line sentinel are removed. |
 
 2. **Lane J — CLI gate admission.** Extend the offline Caret CLI fixture only
    for gates that can reach the shipped CLI facade. Prove visible/hidden,

@@ -139,3 +139,36 @@ The obsolete helper that returned the historical modeled source-line value 240
 was removed. The upstream matrix target remains 250 source lines and stays
 explicitly non-PASS until pinned upstream regeneration can provide executable
 evidence.
+
+## Deterministic retry loop/effect seam (2026-07-24)
+
+`RetryEffectTrace` is the import-safe substitute for sleeps, heartbeat yields,
+credential-cache mutation, and stale-connection cooldowns. It records
+`sleepDelaysMs`, `heartbeatCounts`, `cacheClears`, `cooldownDelaysMs`, and
+`attemptStatuses`; it never sleeps or reads provider state.
+
+`RetrySequenceResult` returns the ordered per-attempt outcomes plus total retry
+sleep delay (excluding separately recorded stale-connection cooldown), total
+heartbeat count, and the terminal status/error. `WithRetryModel` owns one trace
+and exposes the loop through `run_retry_sequence(model, errors)`.
+Persistent 429/529 errors may continue beyond `maxRetries`; nonpersistent
+errors fail exactly at `maxRetries + 1`. Each retry appends one delay and
+heartbeat count, which makes timing and boundary behavior deterministic.
+`WithRetryModel` caches each numeric attempt and its outcome before exposing
+the trace; immediate or nonconsecutive reuse returns that outcome without
+re-running policy, logging, cache clearing, cooldown, sleep, or heartbeat
+effects.
+Retry-After values are capped by the configured maximum as an intentional
+hardening policy; this is not claimed as proven upstream-exact parity while the
+pinned upstream source is unavailable.
+
+Provider recovery is modeled before the generic retry decision. AWS and GCP
+credential failures append their exact cache identity once per attempt;
+`ECONNRESET`/`EPIPE` append the configured stale-connection cooldown. These
+effects make the error retryable but remain parts-bin evidence: no network,
+credential provider, process, clock, or shipped CLI/TUI path is invoked.
+
+The executable SSpec contract uses `setup_retry_sequence_fixture`,
+`run_retry_sequence`, and `check_retry_sequence`. The canonical manual mirrors
+complete scenario bodies and reports zero execution until a qualified
+self-hosted runtime is available.

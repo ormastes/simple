@@ -96,16 +96,16 @@ the bounded offline argument surface it invokes; it does not establish that
 every current Claude function, authenticated request, or interactive session
 still works.
 
-The scoped hardening files now contain 474 modern `should` examples. Their
+The scoped hardening files now contain 489 modern `should` examples. Their
 401-example base comprises 356
 source-synchronized unit examples, eight CLI feature-contract examples, three
 process-hardening examples, nine TUI/hidden component examples, five
 managed-environment examples, five installed-Claude examples, five
 root-registry examples, six live-PTY examples, one hidden-stub aggregate
-example, and three feature-gate aggregate examples. A further 73 focused
-gate-owner examples cover Tasks V2, swarms, team memory, insights,
-review/rewind/sandbox, bridge helpers/command, and AttachmentMessage with
-mirrored modern manuals.
+example, and three feature-gate aggregate examples. A further 88 focused
+owner/effect examples cover Tasks V2, swarms, team memory, insights,
+review/rewind/sandbox, bridge helpers/command, AttachmentMessage, and
+deterministic withRetry behavior with mirrored modern manuals.
 
 The Tasks V2 focused spec no longer accepts its stale modeled-source sentinel:
 the obsolete owner helper returning `240` was removed. The historical file
