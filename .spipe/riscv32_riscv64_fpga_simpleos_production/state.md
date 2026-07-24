@@ -330,3 +330,16 @@ implementation-milestone-0-in-progress
   The bridge is included in the RV64 bundle manifest, but the K26 top still
   lacks the PS block design and does not instantiate the external-DDR SoC;
   behavioral GHDL and board DDR qualification therefore remain open.
+- product-core integration 2026-07-24: the generated RV64 SoC now instantiates
+  the compiler-emitted `core64_imac_product_entry` through one Wishbone adapter,
+  propagates bus errors, and retains atomic intent at the DDR boundary. The
+  legacy handwritten CPU generator and its clean-build validation paths are
+  removed; the generator no longer requires split RTL files that it does not
+  emit. Focused adapter source checks pass, while the selected-top check remains
+  blocked by the deployed Rust bootstrap seed's unsupported `@hardware`.
+- K26 qualification boundary 2026-07-24: the generated PL wrapper connects the
+  external-DDR SoC to the WB64/AXI-HP bridge, but the physical K26 top still
+  selects internal RAM and no ZynqMP PS/SmartConnect block design owns the raw
+  AXI interface. AXI LOCK is not accepted as proof of contended RISC-V atomic
+  correctness. GHDL behavior, Vivado PS-DDR integration, FPGA execution, and
+  Linux terminal `login`/`ls` evidence remain required.
