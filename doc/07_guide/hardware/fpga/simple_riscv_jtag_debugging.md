@@ -101,6 +101,86 @@ true — no new top ports).
    (decoded from the payload ROM; `GOLDEN_EXPECTED=7EB5A8A9` for the staked
    COUNT=260M build) — enforcing ≥600 s wall, timestamped, golden compare.
 
+## PS-clocked designs on KV260 (JTAG-only bring-up) — landmine
+
+**Verdict: do not clock fabric logic from the Zynq UltraScale+ PS
+(`pl_clk0`/`pl_resetn0`) when the bring-up flow is JTAG-only (no PS boot). Use
+free-running `CFGMCLK` instead — the same pattern already proven for rv32.**
+See `doc/08_tracking/bug/kv260_ps_bd_pl_clk0_unreachable_jtag_bringup_2026-07-24.md`
+for full evidence.
+
+Why: on this board, in a JTAG-only bring-up (the PS is never released from
+POR — no U-Boot/PMU firmware boots the A53s), `pl_clk0` is gated OFF and
+`pl_resetn0` sits LOW, because both are produced by the PS clock/reset
+generators which only start once the PS boot ROM has run far enough to
+configure the IOPLL and de-assert the FPD/LPD reset domains. Symptoms and the
+investigation trail:
+
+1. **Fabric silent, no clock activity.** A netlist ILA on the fabric core
+   clock net (`clk_core`) showed it **never toggles** — proven, not
+   inferred (see "Fabric-internal visibility" below).
+2. **xsdb-side pokes did not fix it**, even though each looked plausible in
+   isolation:
+   - `PL0_REF_CTRL = 0x01010A00` — sets the PL0 reference clock to 100 MHz
+     sourced from the IOPLL, but the IOPLL itself is BootROM-locked and
+     never reaches lock in a JTAG-only flow.
+   - Clearing bit 18 of `RST_LPD_IOU2` — un-resets the GPIO block, needed
+     for further pokes, but does not touch the PL clock/reset path.
+   - Setting bit 31 of `DIRM_5`/`OEN_5`/`DATA_5` (`0xFF0A0344`/`48`/`54`) —
+     drives EMIO95 high, a targeted attempt to fake a "PS ready" signal;
+     no effect on `pl_clk0`/`pl_resetn0`.
+   - `psu_post_config` — the standard post-configuration hook; still no
+     `pl_clk0` toggling afterward.
+3. **Full `psu_init` HANGS in `psu_pll_init_data` over JTAG.** This is the
+   normal, complete PS bring-up sequence (as run by FSBL/PMU firmware); it
+   does not complete when driven by hand over the JTAG debugger in this
+   flow, confirming the PS clock generators are not a viable dependency for
+   a JTAG-only harness.
+4. **Conclusion:** PS-BD clocking (`pl_clk0`/`pl_resetn0`) is unusable for
+   JTAG-only bring-up on KV260. The required clocking source is
+   **free-running `CFGMCLK`** — the same pattern the rv32 build already
+   uses (`generate_rv32_vhdl.shs` / `build_k26_rv32.shs`). Any new PS-BD
+   design on this board should default to CFGMCLK from day one rather than
+   rediscovering this via a failed `pl_clk0` bring-up.
+
+### Fabric-internal visibility (netlist ILA insertion)
+
+The project-flow ILA knob in `build_k26_rv64.shs`
+(`ENABLE_UART_ILA`/`ila_*`) was found to be **dead code** — set but never
+consumed, no `create_debug_core` call anywhere — and has been deleted rather
+than wired up. The recipe that actually gave fabric-internal visibility on
+this board works at the **netlist level, post-route**, and is now scripted
+in `scripts/fpga/insert_ila_netlist.tcl`:
+
+1. Open the **`impl_1` ROUTED checkpoint** (`*_routed.dcp`), not the
+   `synth_1` DCP — the synth_1 checkpoint for a design with a Zynq PS
+   out-of-context (OOC) block design **fails DRC rule INBB-3
+   (instantiated black box)** when opened standalone, because the PS BD
+   only resolves after place/route pulls the OOC netlist back in.
+2. `create_debug_core u_ila_0 ila`; set `C_DATA_DEPTH` etc.
+3. `connect_debug_port u_ila_0/clk <clk net>`.
+4. Set probe width and `connect_debug_port u_ila_0/probe0 [get_nets
+   -hierarchical -filter {MARK_DEBUG}]` (or an explicit net list).
+5. `implement_debug_core`; `place_design`; `route_design`;
+   `write_bitstream` + `write_debug_probes`.
+
+Runtime: ~15 minutes on this design. This is how the "clk_core never
+toggles" finding above was proven, and how BRAM ROM contents can be checked
+directly in a checkpoint (loop `get_property INIT_00..INIT_3F` on
+`[get_cells -hierarchical -filter {PRIMITIVE_TYPE =~ BLOCKRAM.BRAM.*}]` and
+count non-zero INIT strings — distinguishes a populated ROM from a failed
+file-based ROM init that left everything zero).
+
+**Read-only-tap limitation:** the `uart_bscan_log` tap is READ-ONLY (TDI is
+ignored). All-zero reads over this tap **cannot distinguish a dead tap from
+a live tap with no data** — clean, stable zeros (vs. floating/toggling FFs)
+are only weak evidence of "alive." This is a diagnosability gap, not
+something to fix mid-flight (a build was in flight when this was found): a
+future revision should add an always-running, clock-domain aliveness
+counter into the capture word so a live tap is unambiguous even with no
+payload data. Filed as an improvement note in the bug doc above, not
+implemented now.
+
 ## Sim gates (run before any board claim)
 
 - `scripts/fpga/ghdl_validate_jtag_debug.shs` → `SOC JTAG DEBUG: ALL PASS`
@@ -123,6 +203,10 @@ true — no new top ports).
 | `hart.soc.core.pc = x` rejected | Interpreter refuses >2-level nested field ASSIGNMENT — level-by-level read-modify-writeback (reads are fine) |
 | Silent serial log | Identify the fabric UART tty first (`probe_kv260_ps_uart_jtag.shs`); PL UART needs the PMOD adapter |
 | Detached waiters never fire | Prefer synchronous `wait_on_run` / in-loop polling over detached notify chains |
+| Fabric silent, `pl_clk0`/`pl_resetn0` design | PS never boots in JTAG-only bring-up → `pl_clk0` gated off, `pl_resetn0` held low; use free-running CFGMCLK instead (see "PS-clocked designs on KV260" above) |
+| `psu_init` hangs over JTAG | Expected — full PS bring-up cannot complete without FSBL/PMU firmware; do not depend on PS clocking for a JTAG-only flow |
+| Need to see fabric-internal signals (no PS, no working UART) | Netlist ILA insertion on the routed checkpoint — `scripts/fpga/insert_ila_netlist.tcl` |
+| `uart_bscan_log` reads all zero | Read-only tap; zero cannot distinguish dead tap from live-but-idle tap — treat as inconclusive, not proof of failure |
 
 ## References
 
