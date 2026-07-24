@@ -56,17 +56,10 @@ done
 mkdir -p "$OUT"
 note() { echo "[rv64-assets] $*"; }
 
-# --- 1. DTB -----------------------------------------------------------------
-if command -v dtc >/dev/null 2>&1; then
-  dtc -I dts -O dtb -o "$OUT/soc_virt.dtb" "$DTS"
-  note "DTB built: $OUT/soc_virt.dtb"
-else
-  note "SKIP dtb: dtc not installed (apt install device-tree-compiler)"
-fi
-
-# --- 2. initramfs ------------------------------------------------------------
+# --- 1. initramfs ------------------------------------------------------------
 # Default: tiny freestanding marker. --terminal: pinned static BusyBox with
 # real init/getty/login/sh/ls and a deterministic root fixture.
+INITRAMFS_BUILT=0
 if command -v "${CROSS}gcc" >/dev/null 2>&1; then
   W=$(mktemp -d)
   ROOT="$W/rootfs"
@@ -118,7 +111,8 @@ EOF
 Simple RISC-V Linux
 EOF
     : > "$ROOT/SIMPLE_RISCV_LINUX_LOGIN_LS_PASS"
-    (cd "$ROOT" && find . -print0 | cpio --null -o -H newc --owner=0:0 2>/dev/null) \
+    find "$ROOT" -exec touch -h -d @0 {} +
+    (cd "$ROOT" && find . -print0 | sort -z | cpio --reproducible --null -o -H newc --owner=0:0 2>/dev/null) \
         > "$W/base.cpio"
   else
     cat > "$W/init.c" <<'EOF'
@@ -141,7 +135,8 @@ void _start(void) {
 EOF
     "${CROSS}gcc" -static -nostdlib -ffreestanding -march=rv64imac -mabi=lp64 \
         -Os -o "$ROOT/init" "$W/init.c"
-    (cd "$ROOT" && echo init | cpio -o -H newc --owner=0:0 2>/dev/null) \
+    touch -d @0 "$ROOT/init"
+    (cd "$ROOT" && echo init | cpio --reproducible -o -H newc --owner=0:0 2>/dev/null) \
         > "$W/base.cpio"
   fi
 
@@ -154,7 +149,9 @@ EOF
       "$ino" "$mode" "$uid" "$gid" "$nlink" "$mtime" "$filesize" \
       "$devmajor" "$devminor" "$rdevmajor" "$rdevminor" "$namesize" 0 "$name"
     pad=$(( (4 - ((110 + namesize) % 4)) % 4 ))
-    [ "$pad" -gt 0 ] && head -c "$pad" /dev/zero
+    if [ "$pad" -gt 0 ]; then
+      head -c "$pad" /dev/zero
+    fi
   }
 
   trailer_name_off=$(grep -abo 'TRAILER!!!' "$W/base.cpio" | tail -1 | cut -d: -f1)
@@ -167,7 +164,8 @@ EOF
     newc_entry 5 8576 0 0 1 0 0 0 0 4 64 "dev/ttyS0"
     newc_entry 0 0 0 0 1 0 0 0 0 0 0 "TRAILER!!!"
   } > "$W/initramfs.cpio"
-  gzip -9 -c "$W/initramfs.cpio" > "$OUT/initramfs.cpio.gz"
+  gzip -9 -n -c "$W/initramfs.cpio" > "$OUT/initramfs.cpio.gz"
+  INITRAMFS_BUILT=1
   rm -rf "$W"
   if [ "$DO_TERMINAL" = 1 ]; then
     note "initramfs built: $OUT/initramfs.cpio.gz (BusyBox $BUSYBOX_TAG serial login + ls fixture)"
@@ -176,6 +174,32 @@ EOF
   fi
 else
   note "SKIP initramfs: ${CROSS}gcc not installed"
+fi
+
+# --- 2. DTB -----------------------------------------------------------------
+# The initrd's exclusive end depends on its compressed size, so render a
+# temporary DTS while keeping the tracked source valid for direct dtc use.
+if command -v dtc >/dev/null 2>&1; then
+  if [ "$INITRAMFS_BUILT" = 1 ] && [ -f "$OUT/initramfs.cpio.gz" ]; then
+    INITRD_END=$(printf '0x%x' "$((0x88200000 + $(wc -c < "$OUT/initramfs.cpio.gz")))")
+    DTS_RENDERED=$(mktemp)
+    sed \
+      -e 's/linux,initrd-start = <[^>]*>;/linux,initrd-start = <0x0 0x88200000>;/' \
+      -e "s/linux,initrd-end   = <[^>]*>;/linux,initrd-end   = <0x0 $INITRD_END>;/" \
+      "$DTS" > "$DTS_RENDERED"
+    if ! dtc -I dts -O dtb -o "$OUT/soc_virt.dtb" "$DTS_RENDERED"; then
+      rm -f "$DTS_RENDERED"
+      exit 1
+    fi
+    rm -f "$DTS_RENDERED"
+    note "DTB built: $OUT/soc_virt.dtb (initrd 0x88200000..$INITRD_END)"
+  else
+    echo "ERROR: fresh initramfs.cpio.gz is required before DTB generation" >&2
+    exit 1
+  fi
+else
+  echo "ERROR: dtc not installed (apt install device-tree-compiler)" >&2
+  exit 1
 fi
 
 # --- 3. OpenSBI fw_jump (opt-in) --------------------------------------------

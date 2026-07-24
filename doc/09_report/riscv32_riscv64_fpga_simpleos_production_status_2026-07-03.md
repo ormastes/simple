@@ -2,12 +2,14 @@
 
 ## Status
 
-STATUS: PRODUCTION READY FOR ILA-VERIFIED KV260 SIMPLEOS BOOT MARKERS.
+STATUS: CONTRACT-NOT-READY — HISTORICAL ILA MARKERS ARE DIAGNOSTIC ONLY.
 
-The repo has RV32/RV64 RTL, SimpleOS QEMU, Kria/K26 FPGA preflight scripts, and
-existing reports. Current local evidence now proves the RV64 SimpleOS marker
-through KV260 Vivado ILA. Current local evidence also proves the RV32
-`FPGA-RV32` marker through KV260 Vivado ILA.
+Correction (2026-07-24): the selected F1/N3 goal requires compiler-emitted
+RV32/RV64 product cores, MMU/PMP execution, bidirectional Linux login/`ls`, and
+independent board transcripts. The ILA and preload evidence below predates that
+contract and cannot satisfy it. Current blockers are: unqualified pure-Simple
+Stage 4 generation, absent generated-DUT MMU/PMP/formal evidence, no RV32/RV64
+RTL login transcript, and no board-origin bidirectional UART login transcript.
 
 ## Fresh Evidence
 
