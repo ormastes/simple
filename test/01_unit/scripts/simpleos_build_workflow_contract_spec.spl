@@ -1,0 +1,73 @@
+extern fn rt_file_read_text(path: text) -> text
+use std.spec.{describe, it, expect}
+
+fn workflow_text() -> text:
+    rt_file_read_text(".github/workflows/simpleos-build.yml") ?? ""
+
+fn smoke_job_block(text: text) -> text:
+    val start = text.index_of("\n  smoke:\n") ?? -1
+    val finish = text.index_of("\n  full:\n") ?? -1
+    if start < 0 or finish <= start:
+        return ""
+    text.slice(start, finish)
+
+describe "SimpleOS build workflow contract":
+    it "deploys a self-hosted pure-Simple CLI in smoke and full jobs":
+        val workflow = workflow_text()
+
+        expect(workflow.index_of("scripts/setup.sh")).to_equal(-1)
+        expect(workflow.index_of("- name: Build Simple bootstrap binary")).to_equal(-1)
+        expect(workflow).to_contain("- name: Build and deploy pure-Simple CLI")
+        expect(workflow).to_contain("scripts/bootstrap/bootstrap-from-scratch.sh")
+        expect(workflow).to_contain("--full-bootstrap --backend=cranelift --jobs=2 --deploy --no-mcp")
+        expect(workflow).to_contain("test -x bin/simple")
+        expect(workflow).to_contain("version=\"$(bin/simple --version 2>&1)\"")
+        expect(workflow).to_contain("*rust*seed*|*bootstrap*seed*|*rust-built*) exit 1")
+
+        val full_start = workflow.index_of("\n  full:\n") ?? -1
+        expect(full_start).to_be_greater_than(-1)
+        val full = workflow.slice(full_start, workflow.len())
+        expect(smoke_job_block(workflow)).to_contain("- name: Build and deploy pure-Simple CLI")
+        expect(full).to_contain("- name: Build and deploy pure-Simple CLI")
+
+    it "installs the complete x86 evidence toolchain":
+        val workflow = workflow_text()
+
+        expect(workflow).to_contain("qemu-system-x86 llvm mtools dosfstools ovmf grub-efi-amd64-bin")
+        expect(workflow).to_contain("scripts/check/check-simpleos-wm-fullscreen-evidence.shs")
+        expect(workflow).to_contain("scripts/os/**")
+        expect(workflow).to_contain("assets/fonts/google-fonts/ofl/notosansmono/**")
+        expect(workflow).to_contain("examples/09_embedded/simple_os/**")
+        expect(workflow.index_of("examples/simple_os/**")).to_equal(-1)
+        expect(workflow).to_contain("src/compiler/**")
+        expect(workflow).to_contain("src/lib/**")
+        expect(workflow).to_contain("src/compiler_rust/**")
+        expect(workflow).to_contain("src/runtime/**")
+        expect(workflow).to_contain("scripts/bootstrap/**")
+
+    it "runs retained font and input evidence after bootstrap smoke":
+        val smoke = smoke_job_block(workflow_text())
+        val bootstrap_at = smoke.index_of("- name: SimpleOS bootstrap smoke (--smoke)") ?? -1
+        val evidence_at = smoke.index_of("- name: SimpleOS WM font/input evidence") ?? -1
+        val upload_at = smoke.index_of("- name: Upload SimpleOS WM font/input evidence") ?? -1
+
+        expect(bootstrap_at).to_be_greater_than(-1)
+        expect(bootstrap_at).to_be_less_than(evidence_at)
+        expect(evidence_at).to_be_less_than(upload_at)
+        expect(smoke).to_contain("SIMPLE_BIN: ${{ github.workspace }}/bin/simple")
+        expect(smoke).to_contain("REPORT_PATH: build/simpleos-wm-fullscreen-evidence/report.md")
+        expect(smoke).to_contain("run: sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs")
+        expect(smoke.slice(upload_at, smoke.len())).to_contain("if: always()")
+        expect(smoke.slice(upload_at, smoke.len())).to_contain("build/simpleos-wm-fullscreen-evidence/*.ppm")
+
+    it "fails smoke closed within achievable timeout budgets":
+        val workflow = workflow_text()
+        val smoke = smoke_job_block(workflow)
+
+        expect(smoke.index_of("continue-on-error")).to_equal(-1)
+        expect(smoke).to_contain("timeout-minutes: 150")
+        expect(smoke).to_contain("timeout-minutes: 60")
+        expect(smoke).to_contain("timeout-minutes: 25")
+        expect(smoke).to_contain("timeout-minutes: 35")
+        expect(workflow).to_contain("timeout-minutes: 150")
+        expect(workflow).to_contain("test \"${{ needs.smoke.result }}\" = \"success\"")
