@@ -41,7 +41,7 @@ remote-control bridge, OAuth, or full agent orchestration.
 | `src/app/llm_caret/main.spl` | 961 | `src/entrypoints/cli.tsx`, `src/QueryEngine.ts`, `src/screens/REPL.tsx` | CLI entrypoint, runtime state, proxy, and typed UI-result routing |
 | `src/app/llm_caret/mod.spl` | 409 | `src/QueryEngine.ts`, `src/bootstrap/state.ts` | public API, state, provider dispatch |
 | `src/app/llm_caret/openai_api.spl` | 260 | `src/entrypoints/sdk/coreSchemas.ts` | OpenAI-compatible provider extension |
-| `src/app/llm_caret/openai_compat.spl` | 203 | `src/entrypoints/sdk/coreSchemas.ts` | local/OpenAI-compatible endpoint provider |
+| `src/app/llm_caret/openai_compat.spl` | 268 | `src/entrypoints/sdk/coreSchemas.ts` | local/OpenAI-compatible endpoint provider with injected request/completion boundary |
 | `src/app/llm_caret/opencode_cli.spl` | 149 | Simple-only Claude-like CLI provider | OpenCode adapter with Claude-like response shape |
 | `src/app/llm_caret/provider.spl` | 440 | `src/Tool.ts`, `src/constants/tools.ts`, `src/entrypoints/sdk/coreSchemas.ts` | provider registry and normalized response |
 | `src/app/llm_caret/redact.spl` | 336 | Security utility; exact provenance unavailable | credential and diagnostic redaction |
@@ -54,9 +54,9 @@ remote-control bridge, OAuth, or full agent orchestration.
 | `src/app/llm_caret/types.spl` | 225 | `src/entrypoints/sdk/coreSchemas.ts`, `src/types/logs.ts` | request/response/event/config records |
 
 Mapped files at this checkpoint: 25/25 = 100%.
-Mapped LOC at this checkpoint: 7278/7278 = 100%.
-Current direct declaration inventory: 496 symbols; the checker must prove
-496/496 after the symbol TSV is regenerated.
+Mapped LOC at this checkpoint: 7343/7343 = 100%.
+Current direct declaration inventory: 502 symbols; the checker must prove
+502/502 after the symbol TSV is regenerated.
 
 These counts include the new `tui_io.spl` row and match the regenerated
 file-qualified inventory. They prove direct-file classification, not executed
@@ -82,13 +82,13 @@ reachable from the shipped Caret facade.
 | Claude-full root hidden/disabled registry admission | `test/03_system/tools/llm/claude_full/commands/root_commands_registry_spec.spl`; the production-derived scenario enumerates every registry record and alias rather than maintaining a second command list, while the PTY hidden case supplies the corresponding real-TUI process contract |
 | Claude-full hidden-disabled stub descriptor completeness (`REQ-LLM-CARET-HIDDEN-008`, supporting metadata) | `test/03_system/tools/llm/claude_full/commands/hidden_stub_registry_spec.spl`; the parts-bin aggregate projects all 14 leaf descriptors while independent source discovery normalizes hyphen/underscore twins and compares membership in both directions; shipped fulfillment remains the root/component/PTY lane, and execution remains blocked |
 | Claude-full distributed feature-gate owner/spec cross-map (`REQ-LLM-CARET-HIDDEN-008`, supporting metadata) | `test/03_system/tools/llm/claude_full/feature_gate_registry_spec.spl`; 33 bounded gate-dimension records derive leaf-owner Boolean/text outcomes, link exact focused or aggregate evidence, generically reconcile named root metadata, preserve `/compact` root-versus-owner drift, and reject malformed maps with one exact diagnostic array; it is not shipped admission or automatic future-gate discovery |
-| Focused unit branches | `test/01_unit/app/llm_caret/claude_cli_spec.spl`, `chat_spec.spl`, `chat_tui_spec.spl`, `chat_tui_input_spec.spl`, `chat_tui_runtime_spec.spl`, `main_spec.spl`, `config_spec.spl`, `tools_spec.spl`, `types_spec.spl`, `provider_spec.spl`, `retry_spec.spl` under `test/01_unit/app/llm_caret/` |
+| Focused unit branches | `test/01_unit/app/llm_caret/claude_cli_spec.spl`, `chat_spec.spl`, `chat_tui_spec.spl`, `chat_tui_input_spec.spl`, `chat_tui_runtime_spec.spl`, `main_spec.spl`, `config_spec.spl`, `tools_spec.spl`, `types_spec.spl`, `provider_spec.spl`, `retry_spec.spl`, and the injected `openai_compat_spec.spl` exchange under `test/01_unit/app/llm_caret/` |
 | Offline native seams | `test/04_smoke/llm_caret_cli_tui_hardening_smoke.spl` |
 
 Both `claude_full/feature_gate_registry.spl` and
 `claude_full/commands/hidden_stub_registry.spl` are supporting parity-island
 metadata. They are outside the 25 direct shipped-path files counted by the
-trace checker and do not change its 25/25, 7,278-LOC, or 496-symbol totals.
+trace checker and do not change its 25/25, 7,343-LOC, or 502-symbol totals.
 
 These specs do not green historical full-parity rows whose implementation
 target is absent. In particular, the installed executable probe proves only
@@ -96,16 +96,14 @@ the bounded offline argument surface it invokes; it does not establish that
 every current Claude function, authenticated request, or interactive session
 still works.
 
-The scoped hardening files now contain 498 modern `should` examples. Their
-407-example base comprises 359
-source-synchronized unit examples, eight CLI feature-contract examples, three
-process-hardening examples, ten TUI/hidden component examples, five
-managed-environment examples, six installed-Claude examples, five
-root-registry examples, seven live-PTY examples, one hidden-stub aggregate
-example, and three feature-gate aggregate examples. A further 91 focused
-owner/effect examples cover Tasks V2, swarms, team memory, insights,
-review/rewind/sandbox, bridge helpers/command, AttachmentMessage, and
-deterministic withRetry behavior with mirrored modern manuals.
+The curated CLI/TUI/owner cohort now contains 554 modern `should` examples:
+463 base scenarios plus 91 focused owner/effect scenarios. The base includes
+the established direct Caret/registry/PTY owners plus the expanded
+`StructuredIO`, MCP OAuth, bridge lifecycle/messaging, MCP client, and injected
+OpenAI-compatible provider scenarios. The separate trace and strict
+full-parity map gates contain eight additional modern scenarios. The broader
+349-spec Claude-full parts bin is not counted as modern merely because a
+lexical `it` block exists.
 
 The installed-Claude checker executed all six offline cases against Claude
 Code `2.1.218` (SHA-256 `71abaff59312c9a9b6a1d818365048b42e4e95cc521a823660eded3e0880d9b7`).
@@ -138,7 +136,7 @@ assertions do not convert that stale count into green parity.
 | `main.spl` | `MainArgs`, `ResumeBackend`, `resolve_resume_backend`, `main_configure`, `main_responder`, proxy guards, slash hooks, `main` |
 | `mod.spl` | `llm_init_defaults`, `llm_init`, `llm_set_api_key`, `llm_set_base_url`, `llm_set_cli_path`, `llm_system`, `llm_clear`, `llm_history_*`, `llm_chat`, `llm_send` |
 | `openai_api.spl` | `OpenAIResponse`, `build_openai_body`, `build_openai_headers`, `build_openai_messages_json`, `parse_openai_response`, `openai_send` |
-| `openai_compat.spl` | `CompatResponse`, `build_compat_body`, `build_compat_headers`, `parse_compat_response`, `compat_send` |
+| `openai_compat.spl` | `CompatRequest`, `CompatResponse`, `build_compat_body`, `build_compat_headers`, `build_compat_request`, `complete_compat_exchange`, `parse_compat_response`, `compat_send` |
 | `opencode_cli.spl` | `OpencodeCliResponse`, `OpencodeProcessResult`, OpenCode argv/parse/process helpers |
 | `provider.spl` | `LLMResponse`, `dispatch_send`, `dispatch_send_advanced`, provider-specific dispatch helpers |
 | `redact.spl` | secret classifiers and text/JSON/URL/header redaction |

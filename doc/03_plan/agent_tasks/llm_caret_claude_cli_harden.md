@@ -122,7 +122,7 @@ and must not be resolved, reverted, or included by this lane.
 
 | Gate | Current result | Authority/limit |
 |---|---|---|
-| Direct Caret trace | PASS: 25/25 files, 7,278/7,278 LOC, 496/496 file-qualified declarations | Static mapping only |
+| Direct Caret trace | PASS: 25/25 files, 7,343/7,343 LOC, 502/502 file-qualified declarations after the OpenAI-compatible request/completion seam | Static mapping only |
 | Unit manual parity | PASS: 62/62 TUI, 22/22 raw-input, 20/20 runtime, 57/57 main, 12/12 config, 37/37 tools, 24/24 chat, and 14/14 types bodies match source | Zero executed scenarios |
 | Component manual parity | PASS: 10/10 TUI/hidden scenario bodies match source, including default-hidden, admitted-hidden, and disabled alias submission with zero responder/persistence | Zero executed scenarios |
 | PTY manual parity | PASS: 7/7 live-terminal scenario bodies match source | Static synchronization; checker/SSpec not executed on a qualified artifact |
@@ -130,7 +130,7 @@ and must not be resolved, reverted, or included by this lane.
 | Root-registry manual parity | PASS: 5/5 scenario bodies match source, including the production-derived exhaustive matrix | Static synchronization; no CLI/TUI invocation claim |
 | Hidden-stub manual parity | PASS: 1/1 scenario body and the complete supporting-helper block match source | Static synchronization; SSpec/docgen not executed on a qualified runtime |
 | Feature-gate manual parity | PASS (static): 33/33 owner rows, 33/33 independently pinned contract rows, 33/33 state rows, and 4/4 complete folded executable scenario bodies; bounded import-frontier discovery resolves 33 unique physical source/owner edges | This catches imported-registry drift only, not arbitrary unimported or upstream-only gates; SSpec/docgen cannot execute until a qualified runtime exists |
-| Focused modern SSpec scan | PASS (static): 521 modern `should` examples across the listed files (430 base plus 91 focused owner/effect examples), canonical matchers, and no placeholder pass | Static source/manual scan only except for the six-case installed-Claude shell checker |
+| Focused modern SSpec scan | PASS (static): 554 modern `should` examples across the curated CLI/TUI/owner cohort (463 base plus 91 focused owner/effect examples), canonical matchers, and no placeholder pass | Static source/manual scan only except for the six-case installed-Claude shell checker; the broader 349-spec parts bin and eight modern map-gate scenarios are reported separately |
 | Direct environment guard | PASS in working and staged modes | Changed Caret paths only |
 | Numbered-artifact guard | WARN in this jj workspace: both modes emit Git-worktree/`--cached` errors but still print `OK` and exit zero | Not authoritative here; no numbered artifacts are added by this tranche |
 | Generated-spec layout | PASS: zero `.spl` specs under `doc/06_spec` | Layout only |
@@ -144,10 +144,13 @@ and must not be resolved, reverted, or included by this lane.
 
 ### Direct-function coverage closure
 
-The settled-tree audit found 22 production declarations without a focused
-behavioral assertion. Parallel lanes closed 16 of those gaps with direct
-production imports and real assertions. Six terminal-loop declarations remain
-uncovered even though every declaration is present in the static inventory.
+The original settled-tree audit found 22 declarations without a focused
+behavioral assertion. Subsequent injected-runtime work closed the old six-item
+TUI row: `caret_chat`, `_inner_height`, `_draw_frame`, `_read_line`,
+`run_chat_tui`, and `run_chat_plain` are now called directly by
+`chat_tui_runtime_spec.spl`. The remaining direct TUI acceptance gap is the real
+`production_caret_io` boundary plus execution of the provenance-checked cached
+wrapper.
 
 | Closed lane | Newly covered declarations | Evidence added |
 |---|---|---|
@@ -160,9 +163,9 @@ The new repeated-suffix assertions exposed and drove a production fix in
 `_glob_match`: the matcher now uses bounded last-star backtracking rather than
 accepting only the first suffix occurrence.
 
-| Remaining lane | Uncovered declarations | Required proof |
+| Remaining lane | Uncovered declaration/boundary | Required proof |
 |---|---|---|
-| TUI live terminal and routing | `caret_chat`, `_inner_height`, `_draw_frame`, `_read_line`, `run_chat_tui`, `run_chat_plain`, plus the new `CaretIo` adapter owner | Component execution through injected I/O plus cached-artifact PTY evidence for renderer selection, raw-mode entry/read/submit/exit/cleanup, frame flush, one-snapshot resize, and plain/TUI routing |
+| TUI live terminal and routing | `production_caret_io` and the cached process boundary | Cached-artifact PTY evidence for renderer selection, raw-mode entry/read/submit/exit/cleanup, frame flush, one-snapshot resize, and plain/TUI routing |
 
 ### False-evidence cleanup
 
@@ -300,8 +303,8 @@ fixtures. No lane may run a paid provider.
 
    Current audit result: the 33 distributed gate dimensions remain
    parts-bin-only; the shipped entry graph reaches only the compact/init root
-   records and their summarize/bootstrap aliases. The scoped suite contains 521
-   modern scenarios (430 base plus 91 focused owner/effect scenarios), and the
+   records and their summarize/bootstrap aliases. The scoped suite contains 554
+   modern scenarios (463 base plus 91 focused owner/effect scenarios), and the
    PTY manual contains seven fail-closed scenarios with zero executed. Simple
    LSP MCP returns the `commands.spl` symbol inventory and resolves the
    `chat_tui.spl` `findRootCommand` call to its production definition. GitHub
@@ -352,7 +355,7 @@ Remaining work is ordered by shipped-path value and prerequisite cost:
 | M — cached plain process | Complete statically: four fail-closed `--plain` stdin cases for `/compact`, `/summarize`, `/init`, and `/bootstrap` | Execute on the qualified cached artifact; exact canonical output, exit zero, no assistant/unknown output, and no session file under isolated HOME |
 | N — PTY negative effects | Complete statically: promptless negative checks plus hidden canonical/alias and false-env cases are represented in the real PTY checker/spec/manual | Execute once on the qualified cached artifact while preserving forbidden-output/session gates and terminal cleanup |
 | O — registry discovery | Complete for the bounded imported registry frontier: 33/33 discovered physical source/owner edges and an exact negative drift fixture | Restore a pinned current-upstream tree before claiming discovery beyond the imported frontier |
-| P — direct owner closure | Retry, MCP client, and all 16 bridge lifecycle owner seams are complete statically; MCP auth and bridge messaging remain next | Direct owner import, effect/state assertions, canonical manual; never add constant-only sentinel tests |
+| P — direct owner closure | Retry, MCP client, all 16 bridge lifecycle owners, six MCP-auth credential mutations, and bridge messaging core policies are complete statically; structured CLI I/O is in progress | Continue the same direct-owner/effect/manual pattern for shipped provider transports and remaining OAuth owners; never add constant-only sentinel tests |
 | Q — current Claude inventory | Restore a provenance-pinned upstream tree and regenerate file/function matrices | Every current upstream target has an explicit implemented/tested, justified parts-bin, or missing status |
 | R — executable Caret | Qualify a current pure-Simple runtime, build cached Caret, and execute focused SSpec/docgen/PTY exactly once | Provenance sidecar, no seed/source fallback, trustworthy example count/exit, retained artifacts |
 
@@ -365,6 +368,63 @@ another build until they finish and at least 5 GiB is free. The sibling
 but lacks fresh source provenance; qualify it against current Caret source
 before use. Reject the sibling 58 MB candidate because it delegates to a
 `simple_seed`, and do not use Stage 3 as a general test/docgen runtime.
+
+### 2026-07-25 mapping refresh
+
+The direct trace checker now passes exactly 25/25 files, 7,343/7,343 LOC,
+and 502/502 declarations after the OpenAI-compatible request/completion seam.
+The broader one-shot lexical audit is triage rather
+than behavior evidence:
+
+- `claude_full`: 848 source files, 349 specs, 7,009 top-level functions;
+  3,007 have no lexical reference and 666 are ledger-named;
+- shipped 25-file roots: 447 top-level functions; 168 have no lexical
+  reference;
+- name collisions, indirect dispatch, ledgers, and constant accessors make
+  these counts unsuitable as completion percentages.
+
+The highest shipped-path gaps are now ordered as follows:
+
+1. `main.spl:main` through injected argv/env/stdin/stdout or the cached process;
+2. OpenAI-compatible body/parser/send behavior;
+3. Claude API and OpenAI API transport/retry behavior;
+4. config file loading, OpenCode send/spawn, and local-torch cleanup;
+5. `tui_io.spl:production_caret_io` through the cached PTY;
+6. bridge headless/entry wiring and transport callbacks;
+7. MCP result mapping and remaining OAuth redaction/error/flow/step-up owners.
+
+The exact public `@anthropic-ai/claude-code@2.1.218` tarball was inspected.
+SHA-256
+`3a434c8bcb493e9ca87315d9aa6064835c5987e8fbc85c181bb76157dd5c45d8`
+contains seven package entries and no source tree. It cannot satisfy lane Q.
+
+Parallel direct-owner closure now includes:
+
+- MCP auth: nine synchronized scenarios cover all six credential mutation
+  owners, server isolation, idempotence, ordered effects, and fail-closed
+  unsupported operations through `McpAuthMutationModel`;
+- bridge messaging: ten synchronized scenarios cover bounded UUID ownership,
+  discriminants, eligibility/title policy, ingress/deduplication, server
+  controls, and stable result construction through real owners plus
+  `BridgeMessagingModel`;
+- both lanes removed their targeted constant/source-line sentinels and retain
+  explicit zero-execution/no-upstream claims.
+- structured CLI I/O now has 16 synchronized scenarios over the real
+  `StructuredIO` owner; all 13 targeted boolean/source-line sentinels are gone,
+  abort and input-close clear all pending state, and ordered input, replay,
+  permission, hook, elicitation, sandbox, and MCP outcomes are asserted.
+- the MCP-auth lane retains its nine mutation scenarios and adds fifteen direct
+  OAuth/redaction/error/provider scenarios; repeated sensitive parameters now
+  redact at exact query boundaries without corrupting `upstate`-like names;
+- the shipped OpenAI-compatible provider has eleven new injected request and
+  completion scenarios, exact URL/header/body/error evidence, malformed content
+  type rejection, and a single live `compat_send` build/HTTP/complete path.
+
+The next CLI-first work is `cli/structuredIO.spl`, followed by the shipped
+provider transport owners above. Remaining auth behavior work is direct
+`redactSensitiveUrlParams`, `normalizeOAuthErrorBody`, `performMCPOAuthFlow`,
+and `wrapFetchWithStepUpDetection` coverage; mutation coverage alone does not
+close those owners.
 
 ### Required execution order after a qualified runtime is deployed
 
@@ -403,8 +463,9 @@ Caret hardening is not complete until:
 
 - every accepted CLI, TUI, and hidden-feature requirement maps to production
   implementation plus an executed modern SSpec assertion;
-- the six remaining live TUI coverage gaps above are closed with PTY evidence
-  or explicitly removed through a reviewed API-ownership decision;
+- the remaining `production_caret_io` and cached-process TUI boundaries are
+  closed with PTY evidence or explicitly removed through a reviewed
+  API-ownership decision;
 - CLI wrapper/process exits and outputs pass on the shipped cached artifact;
 - TUI behavior passes both pure reducer tests and real PTY lifecycle tests;
 - hidden/disabled/default/enabled states are exercised without paid calls;

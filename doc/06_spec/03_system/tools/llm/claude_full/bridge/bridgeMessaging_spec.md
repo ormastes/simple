@@ -1,22 +1,62 @@
-# codex-system-test
-"""
 # Claude Full Bridge Messaging
 
-Checks deterministic supporting parts-bin behavior for bounded UUID state,
-ingress routing and deduplication, server control responses, and result message
-construction.
+> Deterministic supporting parts-bin evidence for bounded bridge message state,
+> routing, controls, and result construction.
 
-Requirements: N/A. These scenarios do not claim shipped CLI/TUI reachability,
-live transport behavior, network activity, or exact parity with an unavailable
-upstream TypeScript tree.
+| Field | Value |
+|---|---|
+| Source | `test/03_system/tools/llm/claude_full/bridge/bridgeMessaging_spec.spl` |
+| Executable scenarios | 10 |
+| Execution in this tranche | 0 scenarios executed |
+| Result | Not executed; no PASS is claimed |
+| Requirement | N/A; supporting Claude-full parts-bin evidence |
 
-BridgeMessagingTrace arrays are modeled state/effect records. They are not
-evidence that a remote bridge transport read or wrote a message.
-"""
+## Scope and Claim Boundary
 
-use std.spec.*
-use app.llm_caret.claude_full.bridge.bridgeMessaging.*
+The scenarios call the real `BoundedUUIDSet`, `handleIngressMessage`,
+`handleServerControlRequest`, and `makeResultMessage` owners through direct
+assertions and the `BridgeMessagingModel` state/effect seam. They also cover
+the seven isolated policies for message, control-response, and control-request
+discrimination; eligibility; title extraction; control-key normalization; and
+deterministic result UUIDs through real owner behavior.
 
+The trace arrays are deterministic modeled effects. They do not prove that a
+live bridge transport read or wrote a message. The upstream TypeScript source is
+absent, so this manual does not claim exact upstream parity or shipped CLI/TUI
+reachability.
+
+## Frozen Flow
+
+1. **Set up bounded bridge messaging state**
+2. **Route inbound and control messages**
+3. **Check deduplication responses and state effects**
+
+The canonical fixture, runner, and checker are
+`setup_bridge_messaging_fixture`, `run_bridge_message_flow`, and
+`check_bridge_message_flow`.
+
+## Scenarios
+
+1. should route deduplicated ingress controls and results through real owners
+2. should retain unique UUIDs and evict the oldest slot
+3. should reject storage at zero capacity and reset on clear
+4. should enforce SDK message and control discriminants
+5. should admit only eligible user assistant and local command messages
+6. should extract titles only from ordinary human user text
+7. should route control malformed user and non-user ingress distinctly
+8. should write exact success responses for mutable controls
+9. should expose no-transport outbound permission and unknown failures
+10. should construct stable success results without sentinel accessors
+
+## Complete Executable SSpec
+
+The folded source is synchronized exactly with the executable helper and
+scenario bodies.
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
 fn setup_bridge_messaging_fixture() -> BridgeMessagingModel:
     BridgeMessagingModel.new(3, "cse-1")
 
@@ -255,3 +295,6 @@ describe "Claude full bridge messaging":
             expect(model.trace.resultUUIDs).to_equal(["uuid-cse-1", "uuid-cse-1", "uuid-cse-2"])
             val snapshot = model.snapshot()
             expect(snapshot.resultCount).to_equal(3)
+```
+
+</details>

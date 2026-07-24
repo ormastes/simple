@@ -19,3 +19,24 @@ Date: 2026-07-05
 Add traceability and a computed mapping gate before attempting broad behavior
 ports. This gives later migration work a concrete source map and keeps this
 lane small.
+
+## 2026-07-25 continuation findings
+
+The original bounded map now covers 25 direct Caret files, 7,343 LOC, and 502
+declarations exactly. That result is still only a map.
+
+The separate Claude-full parts bin contains 848 source files and 349 specs.
+A fresh lexical triage found 7,009 top-level functions, including 3,007 without
+a call-like test/reference occurrence and 666 ledger-named functions. Name
+collisions and indirect dispatch make these triage counts, not behavioral
+coverage percentages.
+
+The old direct-TUI gap list is stale: injected runtime tests now call
+`caret_chat`, `_inner_height`, `_draw_frame`, `_read_line`, `run_chat_tui`, and
+`run_chat_plain`. The remaining live boundary is `production_caret_io` plus a
+provenance-checked cached Caret process.
+
+Highest-value direct gaps are shipped entry/provider transports first
+(`main`, OpenAI-compatible, Claude API, OpenAI API, config, OpenCode, local
+torch), then live TUI, bridge entry/transport callbacks, MCP result mapping,
+and remaining OAuth redaction/error/flow/step-up owners.

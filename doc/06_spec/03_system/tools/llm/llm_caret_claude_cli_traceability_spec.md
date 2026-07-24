@@ -1,181 +1,60 @@
 # LLM Caret Claude CLI Traceability Specification
 
-> This system spec proves the Claude CLI migration trace remains current enough to guide hardening work. The checker computes the current `src/app/llm_caret/*.spl` file and LOC mapping coverage, then confirms every current Simple function, struct, and extern symbol appears in the trace table.
+The direct Caret trace gate derives its file, LOC, and declaration inventory
+from the current `src/app/llm_caret/*.spl` tree. It is a bounded migration map,
+not proof that every function in the separate Claude-full parts bin works.
 
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| Scenarios | Executed | Passed | Failed |
+|---:|---:|---:|---:|
+| 4 | 0 | 0 | 0 |
 
-<details>
-<summary>Full Scenario Manual</summary>
+Runtime execution and docgen remain blocked until a qualified self-hosted
+Simple runtime is deployed. The checker itself passed independently on
+2026-07-25 with 25/25 files, 7,343/7,343 LOC, and 502/502 declarations.
 
-# LLM Caret Claude CLI Traceability Specification
+## Scope and claim boundary
 
-This system spec proves the Claude CLI migration trace remains current enough to guide hardening work. The checker computes the current `src/app/llm_caret/*.spl` file and LOC mapping coverage, then confirms every current Simple function, struct, and extern symbol appears in the trace table.
+- Requirements: `REQ-LLM-CARET-CLAUDE-TRACE-001..005`
+- NFRs: `NFR-LLM-CARET-TRACE-001..004`
+- Executable spec:
+  `test/03_system/tools/llm/llm_caret_claude_cli_traceability_spec.spl`
+- Checker: `scripts/check/check-llm-caret-claude-cli-trace.shs`
+- Report: `doc/09_report/llm_caret_claude_cli_traceability.md`
+- Exact inventory: `doc/09_report/llm_caret_claude_cli_symbols.tsv`
 
-## At a Glance
+This gate proves the direct Caret map stays complete for its current 25-file
+scope. It does not prove the historical 1,902-file Claude-full inventory,
+current upstream parity, live authentication, paid provider calls, or PTY
+behavior.
 
-| Field | Value |
-|-------|-------|
-| Category | Tooling |
-| Status | Implemented |
-| Requirements | doc/02_requirements/feature/llm_caret_claude_cli_harden.md |
-| Plan | doc/03_plan/sys_test/llm_caret_claude_cli_harden.md |
-| Design | doc/05_design/llm_caret_claude_cli_harden.md |
-| Research | doc/01_research/local/llm_caret_claude_cli_harden.md |
-| Source | `test/03_system/tools/llm/llm_caret_claude_cli_traceability_spec.spl` |
-| Updated | 2026-07-24 |
-| Generator | `simple spipe-docgen` (Simple) |
+## Scenario flow
 
-## Overview
+### REQ-LLM-CARET-CLAUDE-TRACE-001..002: mapped artifacts
 
-This system spec proves the Claude CLI migration trace remains current enough
-to guide hardening work. The checker computes the current
-`src/app/llm_caret/*.spl` file and LOC mapping coverage, then confirms every
-current Simple function, struct, and extern symbol appears in the trace table.
+#### should keep the report checker and exact symbol inventory together
 
-## Syntax
-
-```bash
-sh scripts/check/check-llm-caret-claude-cli-trace.shs
-bin/simple test test/03_system/tools/llm/llm_caret_claude_cli_traceability_spec.spl --mode=interpreter
-```
-
-## Examples
-
-A passing checker prints `llm_caret_mapping_percent=100`,
-`llm_caret_loc_mapping_percent=100`,
-`llm_caret_symbol_traced_count=161`, and
-`STATUS: PASS llm-caret-claude-cli-trace` for the current mapped caret.
-
-## Workflow
-
-1. Inspect the Claude source tree under `tmp/claude/claude-code-main/src`.
-2. Extract feature groups, not copied implementation bodies.
-3. Map each Simple source file in `src/app/llm_caret` to a Claude source file
-   or to an explicit Simple-only provider extension.
-4. Record the mapping in
-   `doc/09_report/llm_caret_claude_cli_traceability.md`.
-5. Run the checker.
-6. Run this SSpec.
-7. Regenerate this manual with `bin/simple spipe-docgen`.
-
-## Source Contract
-
-The report must keep these sections:
-
-- `## MDSOC+ Caret Boundary`
-- `## Extracted Claude CLI Features`
-- `## Source File Mapping`
-- `## Function Trace`
-- `## Simple Symbol Trace`
-- `## Claude Source Trace`
-- `## Claude Key Symbol Trace`
-- `## Verification`
-
-The mapping table must include every current `src/app/llm_caret/*.spl` file,
-and the symbol table must include every current function, struct, and extern
-symbol as a backticked `kind:name` token. The checker computes those lists
-from the filesystem, so adding a provider file or symbol without trace rows
-fails the gate.
-
-## Coverage Rule
-
-The required threshold is 80% mapped files and 80% mapped LOC. A Simple-only
-extension still counts when the row says it is Simple-only and names the role.
-This keeps non-Claude providers such as OpenCode, OpenAI-compatible endpoints,
-and local torch visible without pretending they came from Claude Code.
-
-## MDSOC+ Rule
-
-`src/app/llm_caret` remains one app-layer provider caret. The trace report may
-point to runtime or HTTP facades as dependencies, but this lane must not move
-runtime ownership into the app caret. Runtime boundary fixes belong in a
-separate implementation lane.
-
-## Out Of Scope
-
-The gate does not prove live Claude authentication, remote control, OAuth,
-terminal UI parity, or agent orchestration. It proves the migration map and the
-offline traceability contract only.
-
-## Failure Handling
-
-If the checker prints `STATUS: FAIL`, inspect the key before editing code:
-
-- `llm_caret_mapping_percent` below 80 means source files were added without
-  trace rows.
-- `llm_caret_loc_mapping_percent` below 80 means the unmapped files exceed the
-  allowed LOC budget.
-- `missing_symbol_trace` means a function, struct, or extern exists in source
-  without a `kind:name` entry in the Simple Symbol Trace.
-- `missing_marker` means the report lost a required operator section.
-- `llm_caret_trace_report=missing` means the report path changed or was not
-  generated.
-
-Fix the report or checker first, then rerun this SSpec once. Do not bypass the
-gate with placeholder rows; each row must name either a Claude source match or
-an explicit Simple-only role.
-
-## Operator Checklist
-
-- The checker path exists.
-- The report path exists.
-- The report names the `tmp/claude/claude-code-main/src` evidence root.
-- The report maps `src/app/llm_caret/claude_cli.spl`.
-- The report names `src/entrypoints/cli.tsx`.
-- The report names `src/QueryEngine.ts`.
-- The report names key Claude-side symbols such as `class:QueryEngine`.
-- The checker reports source-file count.
-- The checker reports mapped-file count.
-- The checker reports mapping percent.
-- The checker reports source LOC.
-- The checker reports mapped LOC.
-- The checker reports LOC mapping percent.
-- The checker reports symbol count.
-- The checker reports traced symbol count.
-- The checker reports `STATUS: PASS llm-caret-claude-cli-trace`.
-
-## Evidence Produced
-
-The passing SSpec output proves the trace report and checker are present and
-that the checker accepts the current mapping. The checker output records the
-current file count and percentage, which is the release evidence for the 80%
-mapping gate.
-
-## Scenarios
-
-### LLM caret Claude CLI traceability
-
-#### should keep the trace report and checker in the tree
-
-- Confirm the trace report and checker are present
-
+1. Confirm every traceability artifact is present.
+2. Check the report, checker, and exact inventory paths independently.
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-step("Confirm the trace report and checker are present")
-expect(file_exists(TRACE_REPORT)).to_be(true)
-expect(file_exists(TRACE_CHECK)).to_be(true)
+step("Confirm every traceability artifact is present")
+expect(file_exists(TRACE_REPORT)).to_equal(true)
+expect(file_exists(TRACE_CHECK)).to_equal(true)
+expect(file_exists(TRACE_SYMBOLS)).to_equal(true)
 ```
 
 </details>
 
-#### should document MDSOC+ ownership and source mappings
+#### should document MDSOC ownership and both Claude and Simple mappings
 
-- Inspect the Claude-to-Simple trace report
-
+1. Inspect the Claude-to-Simple trace report.
+2. Check architecture markers and both sides of the migration map.
 
 <details>
 <summary>Executable SSpec</summary>
-
-Runnable source: 14 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Inspect the Claude-to-Simple trace report")
@@ -196,51 +75,86 @@ expect(report).to_contain("class:QueryEngine")
 
 </details>
 
-#### should pass the computed 80 percent mapping gate
+### NFR-LLM-CARET-TRACE-001..004: offline deterministic derivation
 
-- Run the computed traceability checker
+#### should derive the inventory offline from files and stable text tools
 
+1. Inspect the trace checker execution boundary.
+2. Reject provider/network commands.
+3. Require deterministic filesystem, sort, and cleanup primitives.
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
+```simple
+step("Inspect the trace checker execution boundary")
+val source = file_read(TRACE_CHECK)
+
+expect(trace_checker_has_forbidden_network_command(source)).to_equal(false)
+expect(source).to_contain("find \"$src_dir\"")
+expect(source).to_contain("sort -u")
+expect(source).to_contain("mktemp")
+expect(source).to_contain("trap")
+```
+
+</details>
+
+### REQ-LLM-CARET-CLAUDE-TRACE-003..005: computed closure
+
+#### should pass exact file LOC and declaration coverage for the current caret
+
+1. Run the computed traceability checker once.
+2. Check exact file, LOC, declaration, exit, and final status evidence.
+
+<details>
+<summary>Executable SSpec</summary>
 
 ```simple
-step("Run the computed traceability checker")
-val output = run_trace_check()
+step("Run the computed traceability checker once")
+val result = run_trace_check()
+val output = result.0
 
-expect(output).to_contain("llm_caret_source_files=")
-expect(output).to_contain("llm_caret_mapped_files=")
-expect(output).to_contain("llm_caret_mapping_percent=")
-expect(output).to_contain("llm_caret_source_loc=")
-expect(output).to_contain("llm_caret_mapped_loc=")
-expect(output).to_contain("llm_caret_loc_mapping_percent=")
-expect(output).to_contain("llm_caret_symbol_count=")
-expect(output).to_contain("llm_caret_symbol_traced_count=")
+expect(result.1).to_equal(0)
+expect(output).to_contain("llm_caret_source_files=25")
+expect(output).to_contain("llm_caret_mapped_files=25")
+expect(output).to_contain("llm_caret_mapping_percent=100")
+expect(output).to_contain("llm_caret_source_loc=7343")
+expect(output).to_contain("llm_caret_mapped_loc=7343")
+expect(output).to_contain("llm_caret_loc_mapping_percent=100")
+expect(output).to_contain("llm_caret_symbol_count=502")
+expect(output).to_contain("llm_caret_symbol_traced_count=502")
 expect(output).to_contain("STATUS: PASS llm-caret-claude-cli-trace")
 ```
 
 </details>
 
-## Scenario Summary
+## Supporting executable helpers
 
-| Metric | Count |
-|--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
-| Slow scenarios | 0 |
-| Skipped scenarios | 0 |
-| Pending scenarios | 0 |
+<details>
+<summary>Setup and checker source</summary>
 
+```simple
+val TRACE_REPORT = "doc/09_report/llm_caret_claude_cli_traceability.md"
+val TRACE_CHECK = "scripts/check/check-llm-caret-claude-cli-trace.shs"
+val TRACE_SYMBOLS = "doc/09_report/llm_caret_claude_cli_symbols.tsv"
 
-## Related Documentation
+fn run_trace_check() -> (text, i64):
+    val (out_text, err_text, exit_code) = process_run("sh", [TRACE_CHECK])
+    (out_text + err_text, exit_code)
 
-- **Requirements:** `doc/02_requirements/feature/llm_caret_claude_cli_harden.md`
-- **Plan:** `doc/03_plan/sys_test/llm_caret_claude_cli_harden.md`
-- **Design:** `doc/05_design/llm_caret_claude_cli_harden.md`
-- **Research:** `doc/01_research/local/llm_caret_claude_cli_harden.md`
-
+fn trace_checker_has_forbidden_network_command(source: text) -> bool:
+    source.contains("curl ") or source.contains("wget ") or source.contains("claude ")
+```
 
 </details>
+
+## Execution
+
+After a qualified self-hosted runtime is available, run exactly once:
+
+```bash
+bin/simple test test/03_system/tools/llm/llm_caret_claude_cli_traceability_spec.spl --mode=interpreter
+bin/simple spipe-docgen test/03_system/tools/llm/llm_caret_claude_cli_traceability_spec.spl --output doc/06_spec --no-index
+```
+
+Do not infer executable PASS from this synchronized zero-execution manual.

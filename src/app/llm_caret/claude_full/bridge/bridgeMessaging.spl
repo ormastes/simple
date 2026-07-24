@@ -313,164 +313,164 @@ fn rejectedOutboundDebugLine(subtype: text, requestId: text) -> text:
 fn sentControlResponseDebugLine(subtype: text, requestId: text, result: text) -> text:
     BRIDGE_REPL_PREFIX + " Sent control_response for " + subtype + " request_id=" + requestId + " result=" + result
 
-fn outboundOnlyError() -> text:
-    OUTBOUND_ONLY_ERROR
+class BridgeMessagingTrace:
+    ingressData: [text]
+    ingressRoutes: [text]
+    ingressLogs: [text]
+    inboundUUIDs: [text]
+    analyticsEvents: [text]
+    controlRequestIds: [text]
+    controlSubtypes: [text]
+    controlActions: [text]
+    controlLogs: [text]
+    controlResponses: [text]
+    controlErrors: [text]
+    resultSessionIds: [text]
+    resultUUIDs: [text]
 
-fn bridgeReplDebugPrefix() -> text:
-    BRIDGE_REPL_PREFIX
+impl BridgeMessagingTrace:
+    static fn new() -> BridgeMessagingTrace:
+        BridgeMessagingTrace(
+            ingressData: [],
+            ingressRoutes: [],
+            ingressLogs: [],
+            inboundUUIDs: [],
+            analyticsEvents: [],
+            controlRequestIds: [],
+            controlSubtypes: [],
+            controlActions: [],
+            controlLogs: [],
+            controlResponses: [],
+            controlErrors: [],
+            resultSessionIds: [],
+            resultUUIDs: []
+        )
 
-fn resultMessageType() -> text:
-    "result"
+class BridgeMessagingSnapshot:
+    ingressCount: i64
+    ignoredCount: i64
+    inboundCount: i64
+    permissionResponseCount: i64
+    controlRequestCount: i64
+    controlWriteCount: i64
+    controlErrorCount: i64
+    resultCount: i64
+    postedUUIDCount: i64
+    inboundUUIDCount: i64
 
-fn resultSuccessSubtype() -> text:
-    "success"
+impl BridgeMessagingSnapshot:
+    static fn new(
+        ingressCount: i64,
+        ignoredCount: i64,
+        inboundCount: i64,
+        permissionResponseCount: i64,
+        controlRequestCount: i64,
+        controlWriteCount: i64,
+        controlErrorCount: i64,
+        resultCount: i64,
+        postedUUIDCount: i64,
+        inboundUUIDCount: i64
+    ) -> BridgeMessagingSnapshot:
+        BridgeMessagingSnapshot(
+            ingressCount: ingressCount,
+            ignoredCount: ignoredCount,
+            inboundCount: inboundCount,
+            permissionResponseCount: permissionResponseCount,
+            controlRequestCount: controlRequestCount,
+            controlWriteCount: controlWriteCount,
+            controlErrorCount: controlErrorCount,
+            resultCount: resultCount,
+            postedUUIDCount: postedUUIDCount,
+            inboundUUIDCount: inboundUUIDCount
+        )
 
-fn controlResponseType() -> text:
-    "control_response"
+class BridgeMessagingModel:
+    recentPostedUUIDs: BoundedUUIDSet
+    recentInboundUUIDs: BoundedUUIDSet
+    handlers: ControlHandlers
+    trace: BridgeMessagingTrace
+    ingressCount: i64
+    ignoredCount: i64
+    inboundCount: i64
+    permissionResponseCount: i64
+    controlRequestCount: i64
+    controlWriteCount: i64
+    controlErrorCount: i64
+    resultCount: i64
 
-fn controlRequestType() -> text:
-    "control_request"
+impl BridgeMessagingModel:
+    static fn new(capacity: i64, sessionId: text) -> BridgeMessagingModel:
+        BridgeMessagingModel(
+            recentPostedUUIDs: BoundedUUIDSet.new(capacity),
+            recentInboundUUIDs: BoundedUUIDSet.new(capacity),
+            handlers: ControlHandlers.new(sessionId),
+            trace: BridgeMessagingTrace.new(),
+            ingressCount: 0,
+            ignoredCount: 0,
+            inboundCount: 0,
+            permissionResponseCount: 0,
+            controlRequestCount: 0,
+            controlWriteCount: 0,
+            controlErrorCount: 0,
+            resultCount: 0
+        )
 
-fn initializeSubtype() -> text:
-    "initialize"
+    me markPosted(uuid: text):
+        me.recentPostedUUIDs.add(uuid)
 
-fn setModelSubtype() -> text:
-    "set_model"
+    me ingress(data: text) -> IngressResult:
+        val result = handleIngressMessage(data, me.recentPostedUUIDs, me.recentInboundUUIDs)
+        me.ingressCount = me.ingressCount + 1
+        me.trace.ingressData.push(data)
+        me.trace.ingressRoutes.push(result.route)
+        if result.log != "":
+            me.trace.ingressLogs.push(result.log)
+        if result.route == "inbound":
+            me.inboundCount = me.inboundCount + 1
+            me.trace.inboundUUIDs.push(result.message.uuid)
+        if result.route == "ignored":
+            me.ignoredCount = me.ignoredCount + 1
+        if result.route == "permission_response":
+            me.permissionResponseCount = me.permissionResponseCount + 1
+        if result.analytics != "":
+            me.trace.analyticsEvents.push(result.analytics)
+        result
 
-fn setMaxThinkingTokensSubtype() -> text:
-    "set_max_thinking_tokens"
+    me control(request: SDKControlRequest) -> ServerControlResult:
+        val result = handleServerControlRequest(request, me.handlers)
+        me.controlRequestCount = me.controlRequestCount + 1
+        me.trace.controlRequestIds.push(request.requestId)
+        me.trace.controlSubtypes.push(request.subtype)
+        if result.action == "":
+            me.trace.controlActions.push("no_transport")
+        else:
+            me.trace.controlActions.push(result.action)
+        me.trace.controlLogs.push(result.log)
+        if result.wrote:
+            me.controlWriteCount = me.controlWriteCount + 1
+            me.trace.controlResponses.push(result.response.encode())
+            if result.response.error != "":
+                me.controlErrorCount = me.controlErrorCount + 1
+                me.trace.controlErrors.push(result.response.error)
+        result
 
-fn setPermissionModeSubtype() -> text:
-    "set_permission_mode"
+    me result(sessionId: text) -> SDKResultSuccess:
+        val result = makeResultMessage(sessionId)
+        me.resultCount = me.resultCount + 1
+        me.trace.resultSessionIds.push(result.sessionId)
+        me.trace.resultUUIDs.push(result.uuid)
+        result
 
-fn interruptSubtype() -> text:
-    "interrupt"
-
-fn localCommandSubtype() -> text:
-    "local_command"
-
-fn userMessageType() -> text:
-    "user"
-
-fn assistantMessageType() -> text:
-    "assistant"
-
-fn systemMessageType() -> text:
-    "system"
-
-fn bridgeMessageReceivedEventName() -> text:
-    "tengu_bridge_message_received"
-
-fn emptyUsagePromptTokens() -> i64:
-    0
-
-fn emptyUsageCompletionTokens() -> i64:
-    0
-
-fn emptyUsageTotalTokens() -> i64:
-    0
-
-fn defaultOutputStyle() -> text:
-    "normal"
-
-fn availableOutputStyles() -> [text]:
-    ["normal"]
-
-fn defaultModels() -> [text]:
-    []
-
-fn defaultCommands() -> [text]:
-    []
-
-fn unsupportedSetPermissionModeError() -> text:
-    "set_permission_mode is not supported in this context (onSetPermissionMode callback not registered)"
-
-fn controlSuccessSubtype() -> text:
-    "success"
-
-fn controlErrorSubtype() -> text:
-    "error"
-
-fn boundedUuidSetDefaultCapacity() -> i64:
-    256
-
-fn boundedUuidSetEchoPurpose() -> text:
-    "echo filtering"
-
-fn boundedUuidSetInboundPurpose() -> text:
-    "inbound replay dedup"
-
-fn outboundOnlyInitializeStillSucceeds() -> bool:
-    true
-
-fn outboundOnlyMutableRequestsError() -> bool:
-    true
-
-fn ingressControlResponseLog() -> text:
-    BRIDGE_REPL_PREFIX + " Ingress message type=control_response"
-
-fn inboundControlRequestLog(subtype: text) -> text:
-    BRIDGE_REPL_PREFIX + " Inbound control_request subtype=" + subtype
-
-fn echoIgnoredLog(kind: text, uuid: text) -> text:
-    BRIDGE_REPL_PREFIX + " Ignoring echo: type=" + kind + " uuid=" + uuid
-
-fn replayIgnoredLog(kind: text, uuid: text) -> text:
-    BRIDGE_REPL_PREFIX + " Ignoring re-delivered inbound: type=" + kind + " uuid=" + uuid
-
-fn nonUserInboundIgnoredLog(kind: text) -> text:
-    BRIDGE_REPL_PREFIX + " Ignoring non-user inbound message: type=" + kind
-
-fn parseFailureLog(message: text) -> text:
-    BRIDGE_REPL_PREFIX + " Failed to parse ingress message: " + message
-
-fn noTransportLog() -> text:
-    BRIDGE_REPL_PREFIX + " Cannot respond to control_request: transport not configured"
-
-fn initializeCapabilitiesCommandsCount() -> i64:
-    0
-
-fn initializeCapabilitiesModelsCount() -> i64:
-    0
-
-fn initializeCapabilitiesAccountIsEmpty() -> bool:
-    true
-
-fn initializeCapabilitiesIncludesPid() -> bool:
-    true
-
-fn setPermissionModeNoCallbackError() -> text:
-    unsupportedSetPermissionModeError()
-
-fn unknownControlSubtypeError(subtype: text) -> text:
-    "REPL bridge does not handle control_request subtype: " + subtype
-
-fn resultDurationMs() -> i64:
-    0
-
-fn resultDurationApiMs() -> i64:
-    0
-
-fn resultNumTurns() -> i64:
-    0
-
-fn resultTotalCostUsd() -> i64:
-    0
-
-fn resultIsError() -> bool:
-    false
-
-fn resultPermissionDenialsCount() -> i64:
-    0
-
-fn resultModelUsageIsEmpty() -> bool:
-    true
-
-fn resultStopReasonIsNullEquivalent() -> bool:
-    true
-
-fn uuidRingEvictionOrder() -> text:
-    "oldest"
-
-fn uuidRingMemoryModel() -> text:
-    "O(capacity)"
+    fn snapshot() -> BridgeMessagingSnapshot:
+        BridgeMessagingSnapshot.new(
+            self.ingressCount,
+            self.ignoredCount,
+            self.inboundCount,
+            self.permissionResponseCount,
+            self.controlRequestCount,
+            self.controlWriteCount,
+            self.controlErrorCount,
+            self.resultCount,
+            self.recentPostedUUIDs.size(),
+            self.recentInboundUUIDs.size()
+        )

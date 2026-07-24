@@ -102,13 +102,19 @@ struct CompatResponse:
     is_error: bool
     raw: text
 
+struct CompatRequest:
+    method: text
+    url: text
+    headers: text
+    body: text
+
 # ============================================================================
 # Request building
 # ============================================================================
 
 fn build_compat_body(model: text, messages_json: text, max_tokens: i64, temperature: f64) -> text:
     var parts: [text] = []
-    parts = parts + [_Q() + "model" + _Q() + ":" + _Q() + model + _Q()]
+    parts = parts + [_Q() + "model" + _Q() + ":" + _Q() + _escape_json(model) + _Q()]
     parts = parts + [_Q() + "messages" + _Q() + ":" + messages_json]
     if max_tokens > 0:
         parts = parts + [_Q() + "max_tokens" + _Q() + ":" + max_tokens.to_text()]
@@ -130,12 +136,27 @@ fn build_compat_headers(api_key: text) -> text:
         h = "Authorization: Bearer " + api_key + "\n" + h
     h
 
+fn compat_endpoint_url(base_url: text) -> text:
+    var base = base_url
+    while base.len() > 0 and base.ends_with("/"):
+        base = base.substring(0, base.len() - 1)
+    base + "/v1/chat/completions"
+
+fn build_compat_request(base_url: text, api_key: text, model: text, messages_json: text, max_tokens: i64, temperature: f64) -> CompatRequest:
+    CompatRequest(
+        method: "POST",
+        url: compat_endpoint_url(base_url),
+        headers: build_compat_headers(api_key),
+        body: build_compat_body(model, messages_json, max_tokens, temperature)
+    )
+
 # ============================================================================
 # Response parsing
 # ============================================================================
 
 fn parse_compat_response(raw: text) -> CompatResponse:
-    if raw.trim() == "":
+    val trimmed_raw = raw.trim()
+    if trimmed_raw == "":
         return CompatResponse(
             content: "",
             model: "",
@@ -145,6 +166,17 @@ fn parse_compat_response(raw: text) -> CompatResponse:
             error: "empty response",
             is_error: true,
             raw: ""
+        )
+    if not trimmed_raw.starts_with(_LB()) or not trimmed_raw.ends_with(_RB()):
+        return CompatResponse(
+            content: "",
+            model: "",
+            finish_reason: "error",
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            error: "malformed response",
+            is_error: true,
+            raw: raw
         )
     val error_msg = _extract_json_string(raw, "message")
     val has_content = _extract_json_string(raw, "content")
@@ -156,6 +188,28 @@ fn parse_compat_response(raw: text) -> CompatResponse:
             prompt_tokens: 0,
             completion_tokens: 0,
             error: error_msg,
+            is_error: true,
+            raw: raw
+        )
+    if not _has_json_key(raw, "content"):
+        return CompatResponse(
+            content: "",
+            model: "",
+            finish_reason: "error",
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            error: "malformed response",
+            is_error: true,
+            raw: raw
+        )
+    if not _has_json_string_value(raw, "content"):
+        return CompatResponse(
+            content: "",
+            model: "",
+            finish_reason: "error",
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            error: "malformed response",
             is_error: true,
             raw: raw
         )
@@ -178,17 +232,17 @@ fn parse_compat_response(raw: text) -> CompatResponse:
         raw: raw
     )
 
-# ============================================================================
-# Send request
-# ============================================================================
+fn _has_json_key(json: text, key: text) -> bool:
+    json_find(json, _Q() + key + _Q() + ":") >= 0
 
-fn compat_send(base_url: text, api_key: text, model: text, messages_json: text, max_tokens: i64, temperature: f64) -> CompatResponse:
-    val url = base_url + "/v1/chat/completions"
-    val headers = build_compat_headers(api_key)
-    val body = build_compat_body(model, messages_json, max_tokens, temperature)
-    val result = http_request_raw("POST", url, headers, body)
-    val resp_body = result.1 ?? ""
-    val http_error = result.2 ?? ""
+fn _has_json_string_value(json: text, key: text) -> bool:
+    val marker = _Q() + key + _Q() + ":"
+    val index = json_find(json, marker)
+    if index < 0:
+        return false
+    json.substring(index + marker.len()).trim().starts_with(_Q())
+
+fn complete_compat_exchange(resp_body: text, http_error: text) -> CompatResponse:
     if http_error != "":
         return CompatResponse(
             content: "",
@@ -201,3 +255,14 @@ fn compat_send(base_url: text, api_key: text, model: text, messages_json: text, 
             raw: resp_body
         )
     parse_compat_response(resp_body)
+
+# ============================================================================
+# Send request
+# ============================================================================
+
+fn compat_send(base_url: text, api_key: text, model: text, messages_json: text, max_tokens: i64, temperature: f64) -> CompatResponse:
+    val request = build_compat_request(base_url, api_key, model, messages_json, max_tokens, temperature)
+    val result = http_request_raw(request.method, request.url, request.headers, request.body)
+    val resp_body = result.1 ?? ""
+    val http_error = result.2 ?? ""
+    complete_compat_exchange(resp_body, http_error)

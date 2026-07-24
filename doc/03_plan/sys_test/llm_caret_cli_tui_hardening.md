@@ -20,9 +20,9 @@ used to generate the full-parity matrices.
 
 | Evidence | Current finding | Authority |
 |---|---|---|
-| `src/app/llm_caret/*.spl` | 25 direct Caret files; 7,278 LOC; 496 declarations | Finalized working-tree inventory; checker rerun still required |
-| `doc/09_report/llm_caret_claude_cli_traceability.md` | Maps all 25 direct files and 7,278 current LOC | Current static mapping; not executable evidence |
-| `scripts/check/check-llm-caret-claude-cli-trace.shs` | 25/25 files (100%); 7,278/7,278 LOC (100%); 496/496 file-qualified symbols; `STATUS: PASS` | Current computed gate |
+| `src/app/llm_caret/*.spl` | 25 direct Caret files; 7,343 LOC; 502 declarations | Finalized working-tree inventory |
+| `doc/09_report/llm_caret_claude_cli_traceability.md` | Maps all 25 direct files and 7,343 current LOC | Current static mapping; not executable evidence |
+| `scripts/check/check-llm-caret-claude-cli-trace.shs` | 25/25 files (100%); 7,343/7,343 LOC (100%); 502/502 file-qualified symbols; `STATUS: PASS` | Current computed gate, rerun after the OpenAI-compatible owner change |
 | Full self-hosted CLI bootstrap | Stage 3 built; Stage 4 full-CLI native build was killed by signal 9; no candidate deployed | Current executable-test blocker; do not retry in this session |
 | Cached Caret live-PTY qualification | Checker/spec/manual contain seven fail-closed scenarios, including three hidden-state cases and one promptless scenario requiring four real-TUI plus four explicit-plain canonical/alias process cases; `--case prerequisites` requires a matching adjacent provenance manifest and fails closed when the cached artifact is absent | Current executable-test blocker; no live PASS or skipped prerequisite |
 | `tmp/claude/claude-code-main/src` | Missing | Current-tree evidence |
@@ -65,10 +65,10 @@ scenario counts as coverage.
 | Requirement | Implementation evidence | Current tests | Surface/status | Required hardening |
 |---|---|---|---|---|
 | REQ-LLM-CARET-CLAUDE-TRACE-001 | Historical Claude source references in `doc/09_report/llm_caret_claude_cli_traceability.md` | `llm_caret_claude_cli_traceability_spec.spl` | CLI / FAIL: upstream tree missing | Restore pinned source and regenerate feature groups |
-| REQ-LLM-CARET-CLAUDE-TRACE-002 | 25 direct files under `src/app/llm_caret` | Checker maps all 25 files and 7,278 LOC | CLI/TUI / PASS | Keep rows synchronized when direct files move or split |
+| REQ-LLM-CARET-CLAUDE-TRACE-002 | 25 direct files under `src/app/llm_caret` | Checker maps all 25 files and 7,343 LOC | CLI/TUI / PASS | Keep rows synchronized when direct files move or split |
 | REQ-LLM-CARET-CLAUDE-TRACE-003 | `check-llm-caret-claude-cli-trace.shs` | Traceability system spec | CLI / PASS: 100% files, 100% LOC, exact file-qualified symbols | Keep the current filesystem inventory synchronized |
 | REQ-LLM-CARET-CLAUDE-TRACE-004 | Checker emits named counters and status | Traceability system spec | CLI / BLOCKED at runner mismatch in parent run | Modernize with frozen steps and assert exit code plus report fields |
-| REQ-LLM-CARET-CLAUDE-TRACE-005 | File-qualified Simple symbol inventory | Checker proves 496/496 current declarations | CLI / PASS | Regenerate symbol rows and require zero missing/stale symbols |
+| REQ-LLM-CARET-CLAUDE-TRACE-005 | File-qualified Simple symbol inventory | Checker proves 502/502 current declarations | CLI / PASS | Regenerate symbol rows and require zero missing/stale symbols |
 | REQ-LLM-CARET-CLI-HARDEN-006 | Production CLI/provider/session/tool declarations plus the installed Claude executable's offline argument surface | Direct production unit specs and CLI process/contract specs; `llm_caret_installed_claude_cli_spec.spl` is supplemental environmental compatibility evidence | CLI / installed checker PASS; Caret execution blocked | Retain the installed probe evidence, then execute Caret on the qualified self-hosted runtime and cached wrapper |
 | REQ-LLM-CARET-TUI-HARDEN-007 | `CaretIo`, `caret_chat`, and TUI/plain loops | Runtime component spec plus `llm_caret_tui_pty_spec.spl` routing/lifecycle/raw-rejection scenarios | TUI / designed fail-closed; live execution blocked | Require PTY PASS and pre/post mode plus cursor/screen restoration artifacts |
 | REQ-LLM-CARET-HIDDEN-008 | Shipped hidden-command admission; supporting `claude_full` parts-bin hidden-disabled, distributed-gate, and focused owner evidence | `llm_caret_tui_hidden_feature_spec.spl`, the shipped root matrix, hidden-stub and feature-gate registries, narrowly scoped focused owner scenarios including bridge availability/admission, and the real-process `hidden` PTY case | Hidden / component, registry, source-completeness, distributed cross-map, focused parts-bin owner, and PTY process coverage designed; execution blocked | Execute the three registry specs and focused owner specs plus default/enabled/disabled PTY cases without credentials; shipped fulfillment remains exclusively the root/component/PTY lane |
@@ -207,7 +207,11 @@ Current focused executable specs:
 | `test/03_system/tools/llm/claude_full/commands/hidden_stub_registry_spec.spl` | `doc/06_spec/03_system/tools/llm/claude_full/commands/hidden_stub_registry_spec.md` | One leaf-derived parts-bin hidden-disabled metadata scenario with independent source discovery, unique canonical identities, hyphen/underscore twin normalization, and two-way completeness |
 | `test/03_system/tools/llm/claude_full/feature_gate_registry_spec.spl` | `doc/06_spec/03_system/tools/llm/claude_full/feature_gate_registry_spec.md` | Four parts-bin scenarios: exact 33-record owner/spec/state matrix, generic root reconciliation plus `/compact` drift, exact malformed-registry rejection, and bounded 33-edge imported-source discovery with a negative drift fixture |
 | `test/03_system/tools/llm/claude_full/bridge/bridgeMain_spec.spl` | `doc/06_spec/03_system/tools/llm/claude_full/bridge/bridgeMain_spec.md` | Twenty-six direct-owner lifecycle scenarios covering all 16 isolated spawn, heartbeat, cleanup, completion, acknowledgement, retry, timeout, status, stdin, and signal owners |
+| `test/03_system/tools/llm/claude_full/bridge/bridgeMessaging_spec.spl` | `doc/06_spec/03_system/tools/llm/claude_full/bridge/bridgeMessaging_spec.md` | Ten direct-owner scenarios for bounded UUID state, discriminants, eligibility/title policy, ingress/deduplication, control responses, and stable result construction |
 | `test/03_system/tools/llm/claude_full/services/mcp/client_spec.spl` | `doc/06_spec/03_system/tools/llm/claude_full/services/mcp/client_spec.md` | Eighteen direct-owner MCP client scenarios for error classification, connection decisions, cache isolation, batching/order/counts, URL elicitation retry, and result policies |
+| `test/03_system/tools/llm/claude_full/services/mcp/auth_spec.spl` | `doc/06_spec/03_system/tools/llm/claude_full/services/mcp/auth_spec.md` | Twenty-four scenarios: nine credential-mutation state/effect cases plus fifteen direct OAuth, redaction, normalization, provider, XAA, secret-input, scope, and step-up owner cases |
+| `test/03_system/tools/llm/claude_full/cli/structuredIO_spec.spl` | `doc/06_spec/03_system/tools/llm/claude_full/cli/structuredIO_spec.md` | Sixteen direct `StructuredIO` scenarios for ordered input, routing, pending cleanup, replay, bridge injection, permission/hook/elicitation/sandbox, and MCP outcomes |
+| `test/01_unit/app/llm_caret/openai_compat_spec.spl` | `doc/06_spec/01_unit/app/llm_caret/openai_compat_spec.md` | Eleven injected request/completion scenarios for the shipped OpenAI-compatible provider, with no live network or provider call |
 | Nine focused owner/effect specs: Tasks V2, swarms, team memory, insights, review/rewind/sandbox, bridge helpers, bridge command, AttachmentMessage, and withRetry | Same relative paths under `doc/06_spec/03_system/tools/llm/claude_full/` | 88 modern scenarios with frozen steps/helpers and synchronized manuals; requirements are narrowly scoped, all manuals report zero execution, and none establishes shipped reachability |
 
 Every relevant REQ needs at least a happy, edge, and error/rejection scenario.
@@ -507,15 +511,15 @@ production-chat, 62 TUI, 22 raw-input, 20 injected-runtime, 57 main-entry, 12
 production-config, 37 production-tools, and 14 production-types scenarios.
 Because docgen cannot execute in the current runtime, all refreshed manuals
 explicitly report zero executed scenarios and do not claim a PASS.
-The 359 source-synchronized unit examples plus eight CLI feature-contract,
-three process-hardening, ten TUI/hidden, five managed-environment, six
-installed-Claude, five root-registry, seven live-PTY, and one
-hidden-stub aggregate plus four feature-gate aggregate examples form the
-430-example base across the listed executable files (the root-registry spec
-contains five scenarios). The 91 focused owner/effect examples now synchronized
+The established 430-example base includes the source-synchronized unit,
+CLI-contract/process, TUI/hidden, managed-environment, installed-Claude,
+root/feature/hidden registry, PTY, bridge-lifecycle, and MCP-client scenarios
+listed above. The seven-scenario net expansion of direct `StructuredIO`
+coverage, fifteen restored/direct MCP OAuth scenarios, and eleven injected
+OpenAI-compatible provider scenarios raise that base to 463. The 91 focused owner/effect examples now synchronized
 across Tasks V2, swarms, team memory, insights, review/rewind/sandbox, bridge
 helpers/command, AttachmentMessage, and withRetry raise the scoped modern
-`should` total to 521 examples with canonical matchers. The pre-existing
+`should` total to 554 examples with canonical matchers. The pre-existing
 unit/component/process manuals retain
 their documented body-parity checks. The feature-gate manual statically checks
 exact 33-row contract/state parity and carries complete folded executable
@@ -559,8 +563,8 @@ remain rejected under every fixture. Retry backoff is capped after jitter and
 the configured retry timeout now prevents an over-budget sleep.
 
 The completion audit is still red. Adding the Simple-only `tui_io.spl`
-capability owner makes the current direct scope 25 files / 7,278 LOC with
-496/496 file-qualified declarations in the regenerated trace inventory.
+capability owner makes the current direct scope 25 files / 7,343 LOC with
+502/502 file-qualified declarations in the regenerated trace inventory.
 The focused checker covers all file-qualified declarations, including the
 ANSI/UTF-8 raw-key decoder, raw-line reducer, and parser validation helpers.
 The historical
