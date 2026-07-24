@@ -104,6 +104,10 @@ source/manual or traceability PASS as executable behavior evidence.
 | `544c57bcc94a` | Pushed to `origin/main` | Real-TUI default/enabled/disabled hidden admission, explicit child-exit evidence, credential isolation, and synchronized plans/manuals |
 | `4556cbbebb6a` | Pushed to `origin/main` | Parts-bin 14-record hidden-stub registry, normalized source-completeness SSpec/manual, architecture/design boundaries, and trace/plan updates |
 | `1c110455fef2` | Pushed to `origin/main` | Parts-bin 33-record owner/spec/state map, applicability shapes and outcome probes, generic root reconciliation, `/compact` drift, exact malformed-map rejection, synchronized manual, and plan/trace updates |
+| `be28b8d9acdf` | Pushed to `origin/main` | Focused Claude gate owners, real Tasks V2 hook/store model, 73 synchronized owner scenarios, and canonical manual cleanup |
+| `a758d7946520` | Pushed to `origin/main` | Deterministic retry loop/effect seam, bounded timing/provider recovery, 15 synchronized retry scenarios, and stale-manual removal |
+| `80131399ae27` | Pushed to `origin/main` | Shipped promptless root/alias dispatch through pure, injected plain, and TUI submission paths with zero model/persistence evidence |
+| `77f0fbd3a3b3` | Pushed to `origin/main` | Four independent fail-closed cached-wrapper PTY cases for compact/summarize/init/bootstrap plus tightened credential scrubbing |
 
 Workspace-relative MCP/LSP symbols and definitions resolve production targets,
 so the navigation health condition is met. Diagnostics
@@ -283,11 +287,26 @@ fixtures. No lane may run a paid provider.
    `Open the caret TUI`, `Send a prompt through the visible input`, and
    `Check transcript and status` steps. Missing cached artifacts remain a hard
    failure; no case may skip or fall back to source execution.
+   The checker/spec/manual portion is complete and statically synchronized at
+   seven PTY scenarios; execution remains blocked on the qualified cached
+   artifact.
 4. **Lane L — completion audit.** Reconcile every accepted record with its
    focused spec, CLI reachability decision (`reachable` or justified parts-bin
    only), TUI reachability decision, manual, and retained execution artifact.
    Restore a pinned upstream snapshot before making exhaustive current-Claude
    claims.
+
+   Current audit result: the 33 distributed gate dimensions remain
+   parts-bin-only; the shipped entry graph reaches only the compact/init root
+   records and their summarize/bootstrap aliases. The scoped suite contains 493
+   modern scenarios (405 base plus 88 focused owner/effect scenarios), and the
+   PTY manual contains seven fail-closed scenarios with zero executed. Simple
+   LSP MCP returns the `commands.spl` symbol inventory and resolves the
+   `chat_tui.spl` `findRootCommand` call to its production definition. GitHub
+   sync is healthy. Execution/release completion is still blocked by the absent
+   self-hosted Simple/Caret artifacts and missing pinned upstream Claude tree;
+   no exhaustive “every Claude function still works” or runtime PASS is
+   claimed.
 
 ### Required execution order after a qualified runtime is deployed
 
