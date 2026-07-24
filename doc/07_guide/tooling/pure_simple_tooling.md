@@ -175,8 +175,9 @@ evidence boundary for the important pure-Simple tooling lanes:
   and no final aggregate JSON object. It must aggregate spec and both doctest
   lanes before emitting one final object. A subprocess-boundary repair
   was preserved but not pushed. High static review accepted the repaired
-  executable/argv and JSON-parser boundaries, but the bounded Rust-seed
-  contract then hit the seed's 800-module import limit before wrapper behavior; see
+  executable/argv and JSON-parser boundaries. The Rust seed now honors its
+  documented module-limit override, but one finite 1,200-module run still
+  exhausted the full CLI closure before wrapper behavior; see
   [the JSON-format report](../../08_tracking/bug/test_runner_json_format_not_machine_readable_2026-07-24.md).
   **Next solution:** build one fresh incremental Stage 4 CLI containing the
   preserved repair, then run the whole-stdout contract once through that exact
