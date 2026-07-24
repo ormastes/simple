@@ -81,6 +81,8 @@ impl MirLowering:
         e.g. `val s = "hello world"; s.starts_with("hello")`, made
         rt_string_starts_with's rt_core_as_string(receiver) check fail and
         silently return false always)."""
+        if self.runtime_value_locals.contains(value_local.id) and self.local_is_str(value_local):
+            return value_local
         val ets_cstr_op = MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Str("rt_interp_cstr"),
             MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
@@ -1368,6 +1370,8 @@ impl MirLowering:
             if len_symbol != "":
                 if not receiver_lowered:
                     receiver_local = self.lower_expr(receiver)
+                if len_symbol == "rt_len" and self.runtime_value_locals.contains(receiver_local.id) and self.local_is_str(receiver_local):
+                    len_symbol = "rt_string_len"
                 # rt_len (unlike rt_dict_len) expects a tagged heap-string
                 # handle for the string case (it probes via
                 # rt_core_as_string, which only recognizes RT_VALUE_TAG_HEAP
@@ -1660,7 +1664,13 @@ impl MirLowering:
             self.builder = b_chr
             if val chr_local = chr_res:
                 val chr_text_type = self.bootstrap_text_type()
-                return self.decode_runtime_value(chr_local, chr_text_type)
+                var b_chr_typed = self.builder
+                val chr_text = b_chr_typed.new_temp(chr_text_type)
+                b_chr_typed.emit_copy(chr_text, chr_local)
+                self.builder = b_chr_typed
+                self.runtime_value_locals[chr_text.id] = true
+                self.local_hir_types[chr_text.id] = HirType(kind: HirTypeKind.Str, span: receiver.span)
+                return chr_text
             return chr_receiver
 
         # for `x.ends_with(suffix)`. Mirrors the starts_with fix exactly:

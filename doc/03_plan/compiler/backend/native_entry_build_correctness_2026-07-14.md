@@ -15,10 +15,12 @@ failure is **never** silently converted to a wrong answer.
   enum-pattern false positive; discriminator-first Dict classification removes
   that failure. Const predispatch now lets Cranelift compile all five C5
   functions and emit the positional executable, which reaches exit `5`
-  (`nul.len() != 1`). Resume at the tagged-text-to-C-string conversion and
-  `.len()` route: preserve the length-one NUL value through
-  `rt_char_from_code`, decode, and text length dispatch. Do not resume Dict
-  provenance or patch the fixture.
+  (`nul.len() != 1`). Current source preserves the tagged `rt_char_from_code`
+  result and routes proven tagged text through `rt_string_len`, but the capped
+  V26-V28 attempt exposed a Cranelift instruction-dispatch crash before a new
+  executable could run. Resume by isolating the `main`-function
+  `BinOp`/`type_is_unsigned` misdispatch, not by changing NUL semantics,
+  revisiting Dict provenance, or patching the fixture.
 - **C9 positional self-host gate:** remains intentionally blocked until C5
   builds without unresolved warnings and its executable exits `42`; then run
   the unchanged `.parse_f64()` fixture once and require exit `42`.
@@ -776,3 +778,32 @@ the shared binary — deploys require explicit user go-ahead).
   `nul` value through `rt_char_from_code`, `decode_runtime_value`, and `.len()`
   lowering. Track the empty-log LLVM and genuine-Dict compiler crashes as
   separate backend residuals. C9 remains gated on positional C5 exit `42`.
+
+  The bounded embedded-NUL attempt then preserved `rt_char_from_code`'s tagged
+  length-bearing result in an `Opaque("str")` local, reused existing
+  `runtime_value_locals` propagation, bypassed C-string re-tagging for proven
+  tagged text, and selected `rt_string_len` in method and bare-field length
+  lowering. V25 rebuilt `4 compiled, 671 cached, 0 failed`; it was superseded
+  before C5 execution when review required the same tagged-length routing for
+  both bare-field lowering arms. V26 rebuilt `4 compiled, 671 cached, 0 failed`
+  and compiled/emitted every C5 function, but a false Cranelift GEMM-add fusion
+  in `main` emitted
+  undefined `__simple_runtime_gemm_add` references, so hosted linking failed.
+  Exact instruction and `MatMul`/`BroadcastAdd` discriminator guards now reject
+  adjacent non-binop instructions.
+
+  V27 rebuilt `4 compiled, 671 cached, 0 failed`; after that fusion guard, C5
+  SIGSEGVed while compiling `main`. Its single GDB receipt places the fault in
+  `type_is_unsigned <- cl_translate_binop <- cl_translate_instruction <-
+  compile_function`, consistent with another raw instruction-pattern
+  collision. V28 rebuilt `5 compiled, 670 cached, 0 failed`; exact Copy
+  predispatch in both active backends still left C5 crashing at `compile main`.
+  The three-cycle cap stopped the attempt there. No new C5 executable assertion,
+  focused source-test result, LLVM receipt, or C9 run is credited. Next isolate
+  the Cranelift `BinOp` discriminator at the `main` instruction boundary; do
+  not add another NUL semantic workaround or runtime-link shim. C5 remains
+  incomplete, and C9 remains gated on a fresh positional C5 exit `42`.
+  Focused interpreter contracts pass for chr provenance (`5/5`) and GEMM
+  fusion rejection (`4/4`). The broader aggregate-runtime ABI contract timed
+  out after 180 seconds before reporting a result and must not be credited or
+  rerun in this session.

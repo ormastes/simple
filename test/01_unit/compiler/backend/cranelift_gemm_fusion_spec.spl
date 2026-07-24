@@ -57,15 +57,20 @@ fn test_func(instructions: [MirInst], term: MirTerminator) -> MirFunction:
     )
 
 describe "Cranelift GEMM-add fusion detection":
+    it "rejects adjacent non-binop instructions before payload matching":
+        val first = MirInst(kind: MirInstKind.Copy(LocalId(id: 3), LocalId(id: 0)), span: nil)
+        val second = MirInst(kind: MirInstKind.Copy(LocalId(id: 4), LocalId(id: 3)), span: nil)
+        val func = test_func([first, second], MirTerminator.Ret(Some(copy_operand(4))))
+
+        expect(detect_gemm_add_pair(func, first, second)).to_be_nil()
+
     it "detects adjacent MatMul consumed once by BroadcastAdd":
         val matmul = binop_inst(3, MirBinOp.MatMul, 0, 1)
         val add = binop_inst(4, MirBinOp.BroadcastAdd, 3, 2)
         val func = test_func([matmul, add], MirTerminator.Ret(Some(copy_operand(4))))
 
         val plan = detect_gemm_add_pair(func, matmul, add)
-        expect(plan.?).to_equal(true)
-        if plan.?:
-            expect(plan.unwrap().dest.id).to_equal(4)
+        expect(plan.unwrap().dest.id).to_equal(4)
 
     it "does not fuse when the MatMul temp has a second use":
         val matmul = binop_inst(3, MirBinOp.MatMul, 0, 1)
@@ -74,7 +79,7 @@ describe "Cranelift GEMM-add fusion detection":
         val func = test_func([matmul, add, extra_use], MirTerminator.Ret(Some(copy_operand(4))))
 
         val plan = detect_gemm_add_pair(func, matmul, add)
-        expect(plan.?).to_equal(false)
+        expect(plan).to_be_nil()
 
     it "does not fuse non-add broadcast operations":
         val matmul = binop_inst(3, MirBinOp.MatMul, 0, 1)
@@ -82,5 +87,4 @@ describe "Cranelift GEMM-add fusion detection":
         val func = test_func([matmul, sub], MirTerminator.Ret(Some(copy_operand(4))))
 
         val plan = detect_gemm_add_pair(func, matmul, sub)
-        expect(plan.?).to_equal(false)
-
+        expect(plan).to_be_nil()
