@@ -3562,20 +3562,39 @@ pub fn rt_vulkan_create_compute_pipeline_fn(args: &[Value]) -> Result<Value, Com
     };
 
     unsafe {
-        // Descriptor set layout: one storage buffer binding
-        let binding = VkDescriptorSetLayoutBinding {
-            binding: 0,
-            descriptor_type: 7, // STORAGE_BUFFER
-            descriptor_count: 1,
-            stage_flags: 0x20, // COMPUTE_BIT
-            p_immutable_samplers: ptr::null(),
-        };
+        // Keep bindings 0..2 available for shared compute pipelines. The
+        // primitive shaders use only binding 0; the vector-font compositor
+        // additionally binds destination and parameter buffers at 1 and 2.
+        // Vulkan permits unused bindings in a compatible pipeline layout.
+        let bindings = [
+            VkDescriptorSetLayoutBinding {
+                binding: 0,
+                descriptor_type: 7, // STORAGE_BUFFER
+                descriptor_count: 1,
+                stage_flags: 0x20, // COMPUTE_BIT
+                p_immutable_samplers: ptr::null(),
+            },
+            VkDescriptorSetLayoutBinding {
+                binding: 1,
+                descriptor_type: 7,
+                descriptor_count: 1,
+                stage_flags: 0x20,
+                p_immutable_samplers: ptr::null(),
+            },
+            VkDescriptorSetLayoutBinding {
+                binding: 2,
+                descriptor_type: 7,
+                descriptor_count: 1,
+                stage_flags: 0x20,
+                p_immutable_samplers: ptr::null(),
+            },
+        ];
         let dsl_ci = VkDescriptorSetLayoutCreateInfo {
             s_type: 32,
             p_next: ptr::null(),
             flags: 0,
-            binding_count: 1,
-            p_bindings: &binding,
+            binding_count: bindings.len() as u32,
+            p_bindings: bindings.as_ptr(),
         };
         let mut dsl: VkDescriptorSetLayout = 0;
         if (s.fns.create_descriptor_set_layout)(s.device, &dsl_ci, ptr::null(), &mut dsl) != VK_SUCCESS {

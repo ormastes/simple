@@ -88,6 +88,14 @@ fn showcase_checksum(pixels: [u32]) -> i64:
         i = i + 1
     checksum
 
+fn web_readback_checksum(pixels: [u32]) -> i64:
+    var checksum: i64 = 0
+    var i = 0
+    while i < pixels.len():
+        checksum = (checksum + pixels[i].to_i64()) % 2147483647
+        i = i + 1
+    checksum
+
 fn configured_web_backend() -> text:
     val configured = (env_get("SIMPLE_GUI_BACKEND") ?? "").trim().lower()
     if configured == "":
@@ -140,6 +148,10 @@ pub fn run_web_standards_showcase(gui: bool, path: text) -> i64:
         print "web_standards_showcase status=fail reason=wrong-pixel-count expected={RW * RH} actual={pixels.len()}"
         return 2
     val checksum = showcase_checksum(pixels)
+    val initial_pixel_readback_checksum = web_readback_checksum(pixels)
+    if initial_readback.checksum != initial_pixel_readback_checksum:
+        print "web_standards_showcase status=fail reason=initial-checksum-mismatch pixels_checksum={initial_pixel_readback_checksum} readback_checksum={initial_readback.checksum}"
+        return 9
     var first = pixels[0]
     var varied = false
     var nonzero = 0
@@ -159,7 +171,7 @@ pub fn run_web_standards_showcase(gui: bool, path: text) -> i64:
              initial_readback.backend_handle <= 0))):
         print "web_standards_showcase status=fail reason=backend-provenance requested={requested} resolved={resolved} source={initial_readback.source} handle={initial_readback.backend_handle}"
         return 6
-    print "web_standards_showcase status=pass path={path} html_bytes={raw_html.len()} width={RW} height={RH} pixels={pixels.len()} nonzero={nonzero} checksum={checksum} requested={requested} resolved={resolved} source={initial_readback.source} backend_handle={initial_readback.backend_handle} dpi={SHOWCASE_DPI_VALUE} dpi_scale_applied=false"
+    print "web_standards_showcase status=pass path={path} html_bytes={raw_html.len()} width={RW} height={RH} pixels={pixels.len()} nonzero={nonzero} checksum={checksum} readback_checksum={initial_readback.checksum} requested={requested} resolved={resolved} source={initial_readback.source} backend_handle={initial_readback.backend_handle} dpi={SHOWCASE_DPI_VALUE} dpi_scale_applied=false"
 
     if not gui:
         return 0
@@ -205,17 +217,27 @@ pub fn run_web_standards_showcase(gui: bool, path: text) -> i64:
         pointer_events = pointer_events + pointer_delta
         click_events = click_events + click_delta
         if keyboard_delta > 0 or pointer_delta > 0 or click_delta > 0:
-            if interaction_revision == 0:
+            # Do not turn an incidental pointer move during window activation
+            # into interaction proof. The visible rerender is evidence only
+            # after this same window has received every required event class.
+            if (interaction_revision == 0 and keyboard_events > 0 and
+                    pointer_events > 0 and click_events > 0):
                 interaction_revision = 1
                 val updated_html = interactive_web_html(raw_html, interaction_revision)
                 val updated_result = simple_web_render_html_to_readback_result_with_engine2d_backend(updated_html, RW, RH, requested)
                 val updated = updated_result.readback
+                if updated.pixels.len() != RW * RH:
+                    winit_window_free(win)
+                    winit_loop_free(lp)
+                    return 8
+                val updated_pixel_checksum = web_readback_checksum(updated.pixels)
                 interaction_checksum = updated.checksum
                 current_source = updated.source
                 current_handle = updated.backend_handle
                 current_packed = pack_pixels(updated.pixels)
                 if ((gpu_requested and
                         (current_source != "device_readback" or current_handle <= 0)) or
+                        interaction_checksum != updated_pixel_checksum or
                         interaction_checksum == initial_readback.checksum):
                     winit_window_free(win)
                     winit_loop_free(lp)

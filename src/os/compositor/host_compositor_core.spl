@@ -254,8 +254,10 @@ fn _host_evidence_json_text(value: text) -> text:
     # Hoisted local is REQUIRED: stage3 native builds emit an interpolation
     # containing escaped string literals as literal source text (see
     # hosted_wm_evidence._json_text for the live-proven failure).
-    val escaped = value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
-    "\"{escaped}\""
+    val escaped_slashes = value.replace("\\", "\\\\")
+    val escaped_quotes = escaped_slashes.replace("\"", "\\\"")
+    val escaped_newlines = escaped_quotes.replace("\n", "\\n")
+    "\"{escaped_newlines}\""
 
 fn host_compositor_taskbar_model(comp: HostCompositor) -> TaskbarModel:
     """Project authoritative host process and window state into shell objects.
@@ -726,7 +728,14 @@ class HostCompositor:
         while i < window_count:
             val win = self.windows[i]
             val scroll = self.scroll_offset_for(win.id) as i32
-            shared_windows.push(host_window_to_shared_mdi_render_window(win, scroll))
+            # Keep HostedWindow field access inside its owning receiver path.
+            # Passing the class by value through a free helper corrupts the
+            # stage3 layout and can surface as a nil receiver.
+            shared_windows.push(shared_mdi_render_window(
+                win.id, win.title, win.app_id, win.content,
+                win.x, win.y, win.w, win.h, win.process_id,
+                win.minimized, win.focused, scroll
+            ))
             i = i + 1
         var scene = shared_mdi_scene_from_render_windows(self.width, self.height, "host-compositor", shared_windows)
         scene.background = if self.background.kind == WM_BACKGROUND_KIND_COLOR: shared_wm_background_color(theme.compositor_bg) else: self.background
@@ -756,10 +765,10 @@ class HostCompositor:
         false
 
     me render_frame_engine2d(executor: Engine2dCompositorBackend) -> bool:
-        # Native MIR carries the module-qualified object-layout owner, so
-        # cross-module fields use the same vtable-header offset as construction.
-        val executor_width = executor.w
-        val executor_height = executor.h
+        # Resolve dimensions through the layout-owning module. Direct
+        # cross-module field reads can shift by the object-header slot.
+        val executor_width = executor.width()
+        val executor_height = executor.height()
         if not self.native_pixel_lane or host_wm_chrome_force_direct() or self.background.kind != WM_BACKGROUND_KIND_COLOR or executor_width != self.width or executor_height != self.height:
             print "[hosted-wm] draw-ir-reject-detail reason=entry-gate native_pixel_lane={self.native_pixel_lane} force_direct={host_wm_chrome_force_direct()} background_kind={self.background.kind} executor={executor_width}x{executor_height} compositor={self.width}x{self.height}"
             return false

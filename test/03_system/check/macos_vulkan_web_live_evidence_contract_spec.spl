@@ -1,0 +1,64 @@
+use std.io.{file_read}
+use std.spec.{describe, it, expect, step}
+
+val WRAPPER = "scripts/check/check-macos-vulkan-web-live-evidence.shs"
+
+describe "macOS Vulkan web live evidence wrapper contract":
+    it "should require Vulkan device readback from both evidence producers":
+        step("Inspect the backend and framebuffer-source admission checks")
+        val source = file_read(WRAPPER)
+        expect(source).to_contain("SIMPLE_GUI_BACKEND=vulkan")
+        expect(source).to_contain("[ \"$event_backend\" = \"vulkan\" ] || fail \"event-backend-not-vulkan\"")
+        expect(source).to_contain("[ \"$source\" = \"device_readback\" ] || fail \"device-readback-missing\"")
+        expect(source).to_contain("[ \"$renderer_source\" = \"device_readback\" ] || fail \"renderer-device-readback-missing\"")
+
+    it "should require positive device handles and cross-check the renderer checksum":
+        step("Inspect the handle and independent checksum correlation checks")
+        val source = file_read(WRAPPER)
+        expect(source).to_contain("[ \"${handle:-0}\" -gt 0 ] || fail \"backend-handle-missing\"")
+        expect(source).to_contain("[ \"${renderer_handle:-0}\" -gt 0 ] || fail \"renderer-handle-missing\"")
+        expect(source).to_contain("[ \"${renderer_checksum:-0}\" -gt 0 ] || fail \"renderer-checksum-missing\"")
+        expect(source).to_contain("[ \"$renderer_checksum\" = \"$initial_checksum\" ]")
+        expect(source).to_contain("fail \"renderer-event-checksum-mismatch\"")
+
+    it "should prove interaction changes both device and visible captures":
+        step("Inspect the before/after readback and screen-capture checks")
+        val source = file_read(WRAPPER)
+        expect(source).to_contain("[ \"${initial_checksum:-0}\" -gt 0 ] || fail \"initial-checksum-missing\"")
+        expect(source).to_contain("[ \"${interaction_checksum:-0}\" -gt 0 ] || fail \"interaction-checksum-missing\"")
+        expect(source).to_contain("[ \"$initial_checksum\" != \"$interaction_checksum\" ] || fail \"interaction-frame-unchanged\"")
+        expect(source).to_contain("[ \"$before_bytes\" -gt 1000 ] || fail \"before-capture-empty\"")
+        expect(source).to_contain("[ \"$after_bytes\" -gt 1000 ] || fail \"after-capture-empty\"")
+        expect(source).to_contain("[ \"$before_cksum\" != \"$after_cksum\" ] || fail \"capture-unchanged\"")
+
+    it "should route focus keyboard pointer and click input through the live window":
+        step("Inspect input injection and application receipt checks")
+        val source = file_read(WRAPPER)
+        expect(source).to_contain("set frontmost to true")
+        expect(source).to_contain("keystroke \"g\"")
+        expect(source).to_contain("cliclick \"m:${click_x},${click_y}\" \"c:.\"")
+        expect(source).to_contain("[ \"${keyboard:-0}\" -gt 0 ] || fail \"keyboard-event-missing\"")
+        expect(source).to_contain("[ \"${pointer:-0}\" -gt 0 ] || fail \"pointer-event-missing\"")
+        expect(source).to_contain("[ \"${clicks:-0}\" -gt 0 ] || fail \"click-event-missing\"")
+        expect(source).to_contain("[ \"${revision:-0}\" -gt 0 ] || fail \"interaction-revision-missing\"")
+
+    it "should bound startup by timeout and resident memory":
+        step("Inspect the live-process timeout and RSS gates")
+        val source = file_read(WRAPPER)
+        expect(source).to_contain("TIMEOUT_SECS=\"${MACOS_VULKAN_WEB_TIMEOUT_SECS:-180}\"")
+        expect(source).to_contain("MAX_RSS_KB=\"${MACOS_VULKAN_WEB_MAX_RSS_KB:-1048576}\"")
+        expect(source).to_contain("deadline=$(($(date +%s) + TIMEOUT_SECS))")
+        expect(source).to_contain("process_rss_kb()")
+        expect(source).to_contain("[ \"$observed_rss_kb\" -gt \"$MAX_RSS_KB\" ]")
+        expect(source).to_contain("fail \"resource-limit-exceeded\"")
+        expect(source).to_contain("fail \"window-not-found\"")
+
+    it "should clean up the exact launched child on every exit path":
+        step("Inspect PID-scoped child ownership and signal cleanup")
+        val source = file_read(WRAPPER)
+        expect(source).to_contain("app_pid=\"\"")
+        expect(source).to_contain("find_launched_pid()")
+        expect(source).to_contain("cleanup()")
+        expect(source).to_contain("trap cleanup EXIT HUP INT TERM")
+        expect(source).to_contain("if kill -0 \"$app_pid\" 2>/dev/null; then")
+        expect(source).to_contain("kill -TERM \"$app_pid\" 2>/dev/null || true")

@@ -1,0 +1,410 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/tmp/macos_vulkan_gui_widget_live_evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/macos_vulkan_gui_widget_live_evidence_$(date -u +%F).md}"
+SAMPLE="${MACOS_VULKAN_GUI_WIDGET_SAMPLE:-examples/06_io/ui/widget_showcase_gui.spl}"
+TIMEOUT_SECS="${MACOS_VULKAN_GUI_WIDGET_TIMEOUT_SECS:-180}"
+MAX_RSS_KB="${MACOS_VULKAN_GUI_WIDGET_MAX_RSS_KB:-1048576}"
+REQUESTED_RESOLUTION="${SHOWCASE_RESOLUTION:-1200x900}"
+REQUESTED_DPI="${SHOWCASE_DPI:-300}"
+ICD_PATH="${VK_ICD_FILENAMES:-/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json}"
+EVENTS="$BUILD_DIR/events.env"
+VALIDATED_EVENTS="$BUILD_DIR/events.validated.env"
+LAUNCHER_LOG="$BUILD_DIR/launcher.log"
+WINDOW_ENV="$BUILD_DIR/window.env"
+BEFORE_PNG="$BUILD_DIR/before.png"
+AFTER_PNG="$BUILD_DIR/after.png"
+EVIDENCE_ENV="$BUILD_DIR/evidence.env"
+launch_stdout=""
+launch_stderr=""
+child_exit_cause=""
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$EVENTS" "$VALIDATED_EVENTS" "$LAUNCHER_LOG" "$WINDOW_ENV" \
+    "$BEFORE_PNG" "$AFTER_PNG" "$EVIDENCE_ENV"
+
+app_pid=""
+observed_rss_kb=0
+cleanup() {
+    [ -n "$app_pid" ] || return 0
+    osascript - "$app_pid" >/dev/null 2>&1 <<'OSA' || true
+on run argv
+  set targetPid to (item 1 of argv) as integer
+  tell application "System Events"
+    repeat with proc in (processes whose unix id is targetPid)
+      tell proc
+        set frontmost to true
+        keystroke "q"
+      end tell
+    end repeat
+  end tell
+end run
+OSA
+    if kill -0 "$app_pid" 2>/dev/null; then
+        kill -TERM "$app_pid" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT HUP INT TERM
+
+absolute_path() {
+    case "$1" in
+        /*) printf '%s\n' "$1" ;;
+        *) printf '%s/%s\n' "$ROOT_DIR" "$1" ;;
+    esac
+}
+
+value_of() {
+    key="$1"
+    file="$2"
+    sed -n "s/^${key}=//p" "$file" | tail -n 1
+}
+
+file_bytes() {
+    if [ -f "$1" ]; then wc -c <"$1" | tr -d ' '; else echo 0; fi
+}
+
+file_cksum() {
+    if [ -f "$1" ]; then cksum "$1" | awk '{print $1}'; else echo 0; fi
+}
+
+capture_child_exit_cause() {
+    child_exit_cause=""
+    for child_log in "$launch_stderr" "$launch_stdout"; do
+        [ -n "$child_log" ] && [ -f "$child_log" ] || continue
+        child_exit_cause="$(
+            grep -E '^(error:|fatal:|panic:)' "$child_log" 2>/dev/null |
+                tail -n 1 || true
+        )"
+        if [ -z "$child_exit_cause" ]; then
+            child_exit_cause="$(awk 'NF { line = $0 } END { print line }' "$child_log")"
+        fi
+        [ -z "$child_exit_cause" ] || break
+    done
+    child_exit_cause="$(
+        printf '%s' "${child_exit_cause:-SimpleGui exited without captured output}" |
+            tr '\r\n' '  ' | cut -c 1-500
+    )"
+}
+
+child_logs_have_terminal_failure() {
+    for child_log in "$launch_stderr" "$launch_stdout"; do
+        [ -n "$child_log" ] && [ -f "$child_log" ] || continue
+        grep -Eq '^(error:|fatal:|panic:)' "$child_log" 2>/dev/null && return 0
+    done
+    return 1
+}
+
+write_report() {
+    {
+        echo "# macOS Vulkan GUI Widget Live Evidence"
+        echo
+        echo '```text'
+        [ ! -f "$EVIDENCE_ENV" ] || cat "$EVIDENCE_ENV"
+        echo '```'
+        echo
+        echo "- Before interaction: \`$BEFORE_PNG\`"
+        echo "- After interaction: \`$AFTER_PNG\`"
+        echo "- Event receipt: \`$VALIDATED_EVENTS\`"
+        echo "- Launcher log: \`$LAUNCHER_LOG\`"
+        if [ -n "$launch_stdout" ] && [ -f "$launch_stdout" ]; then
+            echo
+            echo "## App stdout tail"
+            echo
+            echo '```text'
+            tail -n 40 "$launch_stdout"
+            echo '```'
+        fi
+        if [ -n "$launch_stderr" ] && [ -f "$launch_stderr" ]; then
+            echo
+            echo "## App stderr tail"
+            echo
+            echo '```text'
+            tail -n 40 "$launch_stderr"
+            echo '```'
+        fi
+    } >"$REPORT_PATH"
+}
+
+fail() {
+    reason="$1"
+    {
+        echo "macos_vulkan_gui_widget_live_status=fail"
+        echo "macos_vulkan_gui_widget_live_reason=$reason"
+        echo "macos_vulkan_gui_widget_live_observed_rss_kb=$observed_rss_kb"
+        echo "macos_vulkan_gui_widget_live_max_rss_kb=$MAX_RSS_KB"
+        if [ -n "$child_exit_cause" ]; then
+            echo "macos_vulkan_gui_widget_live_child_exit_cause=$child_exit_cause"
+        fi
+    } >"$EVIDENCE_ENV"
+    write_report
+    echo "macOS Vulkan GUI widget live evidence: FAIL ($reason)" >&2
+    if [ -n "$child_exit_cause" ]; then
+        echo "SimpleGui log cause: $child_exit_cause" >&2
+    fi
+    exit 1
+}
+
+find_launched_pid() {
+    ps -axo pid=,command= | awk -v sample="$SAMPLE" '
+        index($0, "SimpleGui.app/Contents/MacOS/SimpleGui") &&
+        index($0, sample) { pid = $1 }
+        END { if (pid != "") print pid }
+    '
+}
+
+process_rss_kb() {
+    ps -p "$1" -o rss= 2>/dev/null | tr -d ' '
+}
+
+[ "$(uname -s)" = "Darwin" ] || fail "requires-macos"
+[ -f "$SAMPLE" ] || fail "sample-missing"
+[ -f "$ICD_PATH" ] || fail "moltenvk-icd-missing"
+command -v osascript >/dev/null 2>&1 || fail "osascript-missing"
+command -v screencapture >/dev/null 2>&1 || fail "screencapture-missing"
+command -v cliclick >/dev/null 2>&1 || fail "cliclick-missing"
+
+SIMPLE_GUI_RUN_SKIP_NUDGE=1 \
+SIMPLE_GUI_BACKEND=vulkan \
+SIMPLE_GUI_EXIT_AFTER_INTERACTION=0 \
+SIMPLE_GUI_EVENT_EVIDENCE_PATH="$(absolute_path "$EVENTS")" \
+SHOWCASE_RESOLUTION="$REQUESTED_RESOLUTION" \
+SHOWCASE_DPI="$REQUESTED_DPI" \
+VK_ICD_FILENAMES="$ICD_PATH" \
+DYLD_LIBRARY_PATH="${DYLD_LIBRARY_PATH:-/opt/homebrew/lib}" \
+    scripts/gui/macos-gui-run.shs "$SAMPLE" >"$LAUNCHER_LOG" 2>&1 ||
+    fail "launcher-failed"
+
+launch_stdout="$(sed -n 's/^app stdout: \(.*\)  stderr:.*/\1/p' \
+    "$LAUNCHER_LOG" | tail -n 1)"
+launch_stderr="$(sed -n 's/^app stdout: .*  stderr: \(.*\)$/\1/p' \
+    "$LAUNCHER_LOG" | tail -n 1)"
+[ -n "$launch_stdout" ] || fail "launch-stdout-path-missing"
+[ -n "$launch_stderr" ] || fail "launch-stderr-path-missing"
+
+deadline=$(($(date +%s) + TIMEOUT_SECS))
+saw_app_process=0
+while [ "$(date +%s)" -lt "$deadline" ]; do
+    candidate_pid="$(find_launched_pid)"
+    if [ -n "$candidate_pid" ]; then
+        app_pid="$candidate_pid"
+        saw_app_process=1
+        observed_rss_kb="$(process_rss_kb "$app_pid")"
+        observed_rss_kb="${observed_rss_kb:-0}"
+        if [ "$observed_rss_kb" -gt "$MAX_RSS_KB" ]; then
+            fail "resource-limit-exceeded"
+        fi
+    fi
+    if osascript >"$WINDOW_ENV" 2>/dev/null <<'OSA'; then
+tell application "SimpleGui" to activate
+tell application "System Events"
+  set selectedProc to missing value
+  set selectedPid to 0
+  repeat with proc in (processes whose name is "SimpleGui")
+    if (count of windows of proc) > 0 and (unix id of proc) > selectedPid then
+      set selectedProc to proc
+      set selectedPid to unix id of proc
+    end if
+  end repeat
+  if selectedProc is missing value then error "SimpleGui window not ready"
+  tell selectedProc
+    set position of window 1 to {40, 50}
+    set frontmost to true
+    delay 0.3
+    set p to position of window 1
+    set s to size of window 1
+    set AppleScript's text item delimiters to ","
+    return (selectedPid as text) & "," & (item 1 of p as text) & "," & \
+      (item 2 of p as text) & "," & (item 1 of s as text) & "," & \
+      (item 2 of s as text)
+  end tell
+end tell
+OSA
+        break
+    fi
+    if [ "$saw_app_process" -eq 1 ] &&
+        ! kill -0 "$app_pid" 2>/dev/null; then
+        capture_child_exit_cause
+        fail "app-exited-before-window"
+    fi
+    if [ "$saw_app_process" -eq 0 ] &&
+        child_logs_have_terminal_failure; then
+        capture_child_exit_cause
+        fail "app-exited-before-window"
+    fi
+    sleep 0.25
+done
+
+[ -s "$WINDOW_ENV" ] || fail "window-not-found"
+window_record="$(tr -d '\r\n ' <"$WINDOW_ENV")"
+case "$window_record" in *,*,*,*,*) ;; *) fail "invalid-window-rect" ;; esac
+old_ifs=$IFS
+IFS=,
+set -- $window_record
+IFS=$old_ifs
+app_pid="${1:-}"
+window_x="${2:-0}"
+window_y="${3:-0}"
+window_w="${4:-0}"
+window_h="${5:-0}"
+case "$app_pid" in ""|*[!0-9]*) fail "invalid-window-pid" ;; esac
+window_rect="$window_x,$window_y,$window_w,$window_h"
+
+screencapture -x -R"$window_rect" "$BEFORE_PNG" ||
+    fail "before-capture-failed"
+
+click_x=$((window_x + 150))
+click_y=$((window_y + 140))
+cliclick "m:${click_x},${click_y}" "c:."
+osascript - "$app_pid" >/dev/null <<'OSA'
+on run argv
+set targetPid to (item 1 of argv) as integer
+tell application "System Events"
+  repeat with proc in (processes whose unix id is targetPid)
+    tell proc
+      set frontmost to true
+      keystroke "g"
+      return true
+    end tell
+  end repeat
+end tell
+error "SimpleGui input target missing"
+end run
+OSA
+
+event_deadline=$(($(date +%s) + 20))
+while [ "$(date +%s)" -lt "$event_deadline" ]; do
+    keyboard="$(value_of widget_showcase_event_keyboard_events "$EVENTS")"
+    pointer="$(value_of widget_showcase_event_pointer_events "$EVENTS")"
+    clicks="$(value_of widget_showcase_event_click_events "$EVENTS")"
+    revision="$(value_of widget_showcase_event_interaction_revision "$EVENTS")"
+    keyboard="${keyboard:-0}"
+    pointer="${pointer:-0}"
+    clicks="${clicks:-0}"
+    revision="${revision:-0}"
+    if [ "$keyboard" -gt 0 ] && [ "$pointer" -gt 0 ] &&
+            [ "$clicks" -gt 0 ] && [ "$revision" -gt 0 ]; then
+        break
+    fi
+    sleep 1
+done
+
+[ "${keyboard:-0}" -gt 0 ] || fail "keyboard-event-missing"
+[ "${pointer:-0}" -gt 0 ] || fail "pointer-event-missing"
+[ "${clicks:-0}" -gt 0 ] || fail "click-event-missing"
+[ "${revision:-0}" -gt 0 ] || fail "interaction-revision-missing"
+
+event_backend="$(value_of widget_showcase_event_backend "$EVENTS")"
+source="$(value_of widget_showcase_event_source "$EVENTS")"
+handle="$(value_of widget_showcase_event_backend_handle "$EVENTS")"
+initial_checksum="$(value_of widget_showcase_event_initial_checksum "$EVENTS")"
+interaction_checksum="$(value_of widget_showcase_event_interaction_checksum "$EVENTS")"
+[ "$event_backend" = "vulkan" ] || fail "event-backend-mismatch"
+[ "$source" = "device_readback" ] || fail "device-readback-missing"
+[ "${handle:-0}" -gt 0 ] || fail "backend-handle-missing"
+[ "${initial_checksum:-0}" -gt 0 ] || fail "initial-checksum-missing"
+[ "${interaction_checksum:-0}" -gt 0 ] || fail "interaction-checksum-missing"
+[ "$initial_checksum" != "$interaction_checksum" ] ||
+    fail "interaction-frame-unchanged"
+
+osascript - "$app_pid" >/dev/null <<'OSA'
+on run argv
+set targetPid to (item 1 of argv) as integer
+tell application "System Events"
+  repeat with proc in (processes whose unix id is targetPid)
+    tell proc
+      set position of window 1 to {40, 50}
+      set frontmost to true
+      return true
+    end tell
+  end repeat
+end tell
+error "SimpleGui post-input window missing"
+end run
+OSA
+sleep 1
+screencapture -x -R"$window_rect" "$AFTER_PNG" ||
+    fail "after-capture-failed"
+
+before_bytes="$(file_bytes "$BEFORE_PNG")"
+after_bytes="$(file_bytes "$AFTER_PNG")"
+before_cksum="$(file_cksum "$BEFORE_PNG")"
+after_cksum="$(file_cksum "$AFTER_PNG")"
+[ "$before_bytes" -gt 1000 ] || fail "before-capture-empty"
+[ "$after_bytes" -gt 1000 ] || fail "after-capture-empty"
+[ "$before_cksum" != "$after_cksum" ] || fail "capture-unchanged"
+
+renderer_line="$(sed -n 's/^showcase_frame_backend=//p' "$launch_stdout" | tail -n 1)"
+case "$renderer_line" in
+    "vulkan;source=device_readback;checksum="*) ;;
+    *) fail "renderer-provenance-missing" ;;
+esac
+renderer_handle="$(value_of showcase_frame_backend_handle "$launch_stdout")"
+renderer_dimensions="$(value_of showcase_frame_dimensions "$launch_stdout")"
+renderer_dpi="$(value_of showcase_frame_dpi "$launch_stdout")"
+fallback_reason="$(value_of showcase_vulkan_fallback_reason "$launch_stdout")"
+font_loaded="$(value_of showcase_font_loaded "$launch_stdout")"
+font_expected_identity="$(value_of showcase_font_expected_identity "$launch_stdout")"
+font_identity="$(value_of showcase_font_identity "$launch_stdout")"
+font_cold="$(value_of showcase_font_cold_rasterizations "$launch_stdout")"
+font_warm="$(value_of showcase_font_warm_rasterizations "$launch_stdout")"
+font_hits="$(value_of showcase_font_warm_hits "$launch_stdout")"
+font_target="$(value_of showcase_font_execution_target "$launch_stdout")"
+font_attempts="$(value_of showcase_font_execution_attempts "$launch_stdout")"
+font_succeeded="$(value_of showcase_font_backend_attempt_succeeded "$launch_stdout")"
+[ "$renderer_handle" = "$handle" ] || fail "event-handle-receipt-mismatch"
+[ "$renderer_dimensions" = "$REQUESTED_RESOLUTION" ] ||
+    fail "renderer-dimensions-mismatch"
+[ "$renderer_dpi" = "$REQUESTED_DPI" ] || fail "renderer-dpi-mismatch"
+[ -z "$fallback_reason" ] || fail "renderer-cpu-fallback"
+[ "$font_loaded" = "true" ] || fail "vector-font-not-loaded"
+[ -n "$font_expected_identity" ] || fail "vector-font-identity-missing"
+[ "$font_identity" = "$font_expected_identity" ] ||
+    fail "vector-font-identity-mismatch"
+[ "${font_cold:-0}" -gt 0 ] || fail "vector-font-cold-rasterization-missing"
+[ "${font_warm:--1}" -eq 0 ] || fail "vector-font-warm-rerasterized"
+[ "${font_hits:-0}" -gt 0 ] || fail "vector-font-warm-cache-hit-missing"
+[ "$font_target" = "vulkan" ] || fail "vector-font-execution-target-mismatch"
+[ -n "$font_attempts" ] || fail "vector-font-execution-attempts-missing"
+[ "$font_succeeded" = "true" ] || fail "vector-font-backend-attempt-failed"
+
+cp "$EVENTS" "$VALIDATED_EVENTS"
+{
+    echo "macos_vulkan_gui_widget_live_status=pass"
+    echo "macos_vulkan_gui_widget_live_reason=pass"
+    echo "macos_vulkan_gui_widget_live_backend=vulkan"
+    echo "macos_vulkan_gui_widget_live_source=$source"
+    echo "macos_vulkan_gui_widget_live_backend_handle=$handle"
+    echo "macos_vulkan_gui_widget_live_dimensions=$renderer_dimensions"
+    echo "macos_vulkan_gui_widget_live_dpi=$renderer_dpi"
+    echo "macos_vulkan_gui_widget_live_initial_checksum=$initial_checksum"
+    echo "macos_vulkan_gui_widget_live_interaction_checksum=$interaction_checksum"
+    echo "macos_vulkan_gui_widget_live_keyboard_events=$keyboard"
+    echo "macos_vulkan_gui_widget_live_pointer_events=$pointer"
+    echo "macos_vulkan_gui_widget_live_click_events=$clicks"
+    echo "macos_vulkan_gui_widget_live_interaction_revision=$revision"
+    echo "macos_vulkan_gui_widget_live_font_loaded=$font_loaded"
+    echo "macos_vulkan_gui_widget_live_font_identity=$font_identity"
+    echo "macos_vulkan_gui_widget_live_font_cold_rasterizations=$font_cold"
+    echo "macos_vulkan_gui_widget_live_font_warm_rasterizations=$font_warm"
+    echo "macos_vulkan_gui_widget_live_font_warm_hits=$font_hits"
+    echo "macos_vulkan_gui_widget_live_font_execution_target=$font_target"
+    echo "macos_vulkan_gui_widget_live_font_execution_attempts=$font_attempts"
+    echo "macos_vulkan_gui_widget_live_font_backend_attempt_succeeded=$font_succeeded"
+    echo "macos_vulkan_gui_widget_live_window_rect=$window_rect"
+    echo "macos_vulkan_gui_widget_live_before_png=$BEFORE_PNG"
+    echo "macos_vulkan_gui_widget_live_after_png=$AFTER_PNG"
+    echo "macos_vulkan_gui_widget_live_before_bytes=$before_bytes"
+    echo "macos_vulkan_gui_widget_live_after_bytes=$after_bytes"
+    echo "macos_vulkan_gui_widget_live_before_cksum=$before_cksum"
+    echo "macos_vulkan_gui_widget_live_after_cksum=$after_cksum"
+} >"$EVIDENCE_ENV"
+
+cleanup
+app_pid=""
+write_report
+echo "macOS Vulkan GUI widget live evidence: PASS"
+echo "report=$REPORT_PATH"

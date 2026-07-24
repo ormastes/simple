@@ -24,6 +24,7 @@ use std.nogc_sync_mut.io.time_ops.{time_now_micros}
 use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.nogc_sync_mut.concurrent.thread.{thread_sleep}
 use std.common.science_math.perf_sugar.{alloc_i64}
+use std.common.encoding.font_registry.{selected_font_asset_candidates, selected_font_asset_identity}
 use common.ui.widget.{UITree, WidgetNode, WidgetKind}
 use common.ui.wm_app_process_contract.{WM_APP_MODE_ENV, WM_BRIDGE_FILE_ENV, WM_FRAME_FILE_ENV, WM_EVENT_FILE_ENV, WM_FRAME_SEQ_FILE_ENV, WM_CLIENT_HOLD_ENV, WIDGET_SHOWCASE_APP_SOURCE, wm_app_mode_is_client, wm_widget_showcase_bridge_request_sized, wm_fs_bridge_encode, wm_widget_showcase_event_path, wm_widget_showcase_frame_seq_path, wm_fs_app_event_seq_path, wm_fs_app_event_decode}
 
@@ -531,6 +532,12 @@ fn showcase_backend_key() -> text:
         return "software"
     raw
 
+fn showcase_gpu_backend_requested(name: text) -> bool:
+    name == "metal" or name == "vulkan" or name == "cuda" or
+        name == "rocm" or name == "directx" or name == "opencl" or
+        name == "opengl" or name == "webgpu" or name == "intel" or
+        name == "qualcomm" or name == "virtio_gpu"
+
 # Create the showcase render engine. For "metal" this is the persistent
 # GPU-only fast session (1x1 CPU mirror, device framebuffer is the source of
 # truth, single-hop readback); for every other backend
@@ -995,17 +1002,74 @@ fn main() -> i64:
     # per-frame create. For metal this keeps the GPU device/queue/framebuffer
     # alive across frames.
     var engine = showcase_engine_create(fw, fh)
-    val (engine_after_first, pixels) = build_frame_state_into(engine, fw, fh, state)
+    # Draw the full widget gallery once with its compact built-in label path.
+    # Loading a vector face before this draw makes every label size a separate
+    # cold vector workload and obscures backend correctness behind startup
+    # cost. A visible, bounded vector run is overlaid below instead.
+    val (engine_after_first, widget_pixels) = build_frame_state_into(engine, fw, fh, state)
     engine = engine_after_first
-    if pixels.len() < fw * fh:
+    if widget_pixels.len() < fw * fh:
         engine.shutdown()
         return 1
+    # Keep the live GUI gate bounded: the static Bungee face is 118,996 bytes,
+    # while the catalog's first CJK variable face is 17,772,300 bytes. Both use
+    # the same canonical FontRenderer/backend path, but the small pinned face
+    # avoids turning startup validation into a multi-minute allocation spike.
+    val font_candidate = selected_font_asset_candidates()[9]
+    val expected_font_identity = selected_font_asset_identity(font_candidate)
+    val font_loaded = engine.load_font(font_candidate.local_path)
+    val font_stats_before = engine.font_cache_stats()
+    val vector_font_size = sc1(10, showcase_dpi() * 1000 / 96)
+    val vector_font_y = if fh > vector_font_size + 8: fh - vector_font_size - 4 else: 4
+    engine.draw_text(8, vector_font_y, "VECTOR GUI", WHITE, vector_font_size)
+    val font_stats_cold = engine.font_cache_stats()
+    # The second identical draw must reuse glyph material while preserving a
+    # visible vector-font witness in the captured initial frame.
+    engine.draw_text(8, vector_font_y, "VECTOR GUI", WHITE, vector_font_size)
+    val font_stats_warm = engine.font_cache_stats()
+    val loaded_fonts = engine.fonts()
+    val loaded_font_identity = loaded_fonts.current_font_identity()
+    engine.font_renderer = loaded_fonts
+    val font_execution_target = engine.font_execution_target()
+    val font_execution_attempts = engine.font_execution_attempts().join(",")
+    val font_backend_attempt_succeeded = if showcase_gpu_backend_requested(showcase_backend_key()):
+        font_execution_target == showcase_backend_key()
+    else:
+        font_execution_target == "cpu"
+    val font_cold_rasterizations = font_stats_cold.rasterizations - font_stats_before.rasterizations
+    val font_warm_rasterizations = font_stats_warm.rasterizations - font_stats_cold.rasterizations
+    val font_warm_hits = font_stats_warm.hits - font_stats_cold.hits
     # Honest frame provenance (one line, greppable): for metal this must say
     # source=device_readback — a cpu_mirror source means the GPU lane silently
     # fell back and must not be presented as GPU rendering.
     val prov = engine.read_pixels_with_source()
+    val pixels = prov.pixels
+    if pixels.len() < fw * fh:
+        engine.shutdown()
+        return 1
     print "showcase_frame_backend={engine.backend_name()};source={prov.source};checksum={prov.checksum}"
+    print "showcase_frame_backend_handle={prov.backend_handle}"
+    print "showcase_frame_dimensions={fw}x{fh}"
+    print "showcase_frame_dpi={showcase_dpi()}"
+    print "showcase_vulkan_fallback_reason={engine.vulkan_cpu_fallback_reason()}"
+    print "showcase_font_loaded={font_loaded}"
+    print "showcase_font_expected_identity={expected_font_identity}"
+    print "showcase_font_identity={loaded_font_identity}"
+    print "showcase_font_cold_rasterizations={font_cold_rasterizations}"
+    print "showcase_font_warm_rasterizations={font_warm_rasterizations}"
+    print "showcase_font_warm_hits={font_warm_hits}"
+    print "showcase_font_execution_target={font_execution_target}"
+    print "showcase_font_execution_attempts={font_execution_attempts}"
+    print "showcase_font_backend_attempt_succeeded={font_backend_attempt_succeeded}"
     print "rendered {pixels.len()} px (24 widget types)"
+    if (not font_loaded or loaded_font_identity != expected_font_identity or
+            font_cold_rasterizations <= 0 or font_warm_rasterizations != 0 or
+            font_warm_hits <= 0 or not font_backend_attempt_succeeded):
+        engine.shutdown()
+        return 1
+    # Subsequent interactive widget redraws use the compact label path again;
+    # the captured initial frame and evidence above retain the real vector run.
+    engine.unload_font()
 
     # Capture the framebuffer to a P6 PPM (absolute oracle) when SHOWCASE_PPM is set.
     val ppm_path = env_get("SHOWCASE_PPM") ?? ""
@@ -1030,7 +1094,7 @@ fn main() -> i64:
         print "No GUI runtime available."
         engine.shutdown()
         return 1
-    val win = winit_window_new(lp, fw.to_i64(), fh.to_i64(), "Simple Widget Showcase (CPU lane)")
+    val win = winit_window_new(lp, fw.to_i64(), fh.to_i64(), "Simple Widget Showcase")
     if not win.is_valid:
         winit_loop_free(lp)
         engine.shutdown()

@@ -8,6 +8,7 @@ returns before touching SFFI.
 """
 
 use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
 use common.ui.web_render_api.{WEB_RENDER_TARGET_SIMPLE_WEB}
 use common.window_protocol.geometry.{Size}
 use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
@@ -51,6 +52,8 @@ use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW, COMP_DESTROY_WINDOW, COMP_UPDAT
 use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{simple_web_layout_render_html_pixels_engine2d}
 use common.ui.wm_chrome_theme.{wm_chrome_theme}
 use common.color.convert.{int_to_hex}
+
+val HOST_COMPOSITOR_CORE_SRC = "src/os/compositor/host_compositor_core.spl"
 
 var _fake_present_count: i64 = 0
 var _capture_present_count: i64 = 0
@@ -452,6 +455,60 @@ describe "HostWmHandle loop behavior":
         expect(host_wm_content_renderer_name(browser)).to_equal(WEB_RENDER_TARGET_SIMPLE_WEB)
         expect(host_wm_content_renderer_name(electron)).to_equal(WEB_RENDER_TARGET_SIMPLE_WEB)
         expect(host_wm_content_renderer_name(tauri)).to_equal(WEB_RENDER_TARGET_SIMPLE_WEB)
+
+describe "host compositor native-lowering regression contracts":
+
+    it "reads Engine2D dimensions through accessors in the canonical rendering path":
+        val core = file_read(HOST_COMPOSITOR_CORE_SRC)
+        expect(core).to_contain("val executor_width = executor.width()")
+        expect(core).to_contain("val executor_height = executor.height()")
+        expect(core).to_contain("executor_width != self.width or executor_height != self.height")
+        expect(core.contains("executor.w != self.width")).to_be(false)
+        expect(core.contains("executor.h != self.height")).to_be(false)
+
+    it "projects every hosted window inside the compositor receiver before rendering":
+        val core = file_read(HOST_COMPOSITOR_CORE_SRC)
+        expect(core).to_contain("me _taskbar_render_input(theme: WmChromeColors, frame_time: i64)")
+        expect(core).to_contain("val win = self.windows[i]")
+        expect(core).to_contain("shared_windows.push(shared_mdi_render_window(")
+        expect(core.contains("shared_windows.push(host_window_to_shared_mdi_render_window")).to_be(false)
+
+        val backend = FakeCompositorBackend(w: 640, h: 480)
+        val comp = HostCompositor.new(backend, Size.wh(640, 480))
+        comp.apply_bridge_request(1, 11, COMP_CREATE_WINDOW.to_i64(), 0, "First", 20, 60, 200, 140, "first body", 1, "/sys/apps/first")
+        comp.apply_bridge_request(2, 22, COMP_CREATE_WINDOW.to_i64(), 0, "Second", 260, 60, 200, 140, "second body", 2, "/sys/apps/second")
+        val model = host_compositor_taskbar_model(comp)
+        expect(model.running.len()).to_equal(2)
+        expect(model.running[0].title).to_equal("First")
+        expect(model.running[1].title).to_equal("Second")
+
+    it "escapes backslash quote and newline through sequential receiver locals":
+        val core = file_read(HOST_COMPOSITOR_CORE_SRC)
+        expect(core).to_contain("val escaped_slashes = value.replace")
+        expect(core).to_contain("val escaped_quotes = escaped_slashes.replace")
+        expect(core).to_contain("val escaped_newlines = escaped_quotes.replace")
+
+        val backend = FakeCompositorBackend(w: 320, h: 240)
+        val comp = HostCompositor.new(backend, Size.wh(320, 240))
+        comp.apply_bridge_request(
+            1,
+            77,
+            COMP_CREATE_WINDOW.to_i64(),
+            0,
+            "Folder\\Leaf",
+            20,
+            60,
+            200,
+            140,
+            "line one\nline two",
+            1,
+            "quoted\"app"
+        )
+        val json = comp.evidence_compositor_json()
+        expect(json).to_contain("Folder\\\\Leaf")
+        expect(json).to_contain("quoted\\\"app")
+        expect(json).to_contain("line one\\nline two")
+        expect(json.contains("line one\nline two")).to_be(false)
 
 describe "HostCompositor hosted window state":
 
