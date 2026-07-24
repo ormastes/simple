@@ -783,3 +783,40 @@ record every adjacent delta. The current comparable first-10 slope is
 a full-closure safety proof or a general performance promise. Fail on
 early exit, timeout, memory-cap termination, malformed or duplicate
 markers, or parser errors.
+
+### 2026-07-24 design freeze
+
+Highest-capability design review selected an explicit `ModuleSurface` and
+rejected a body-stripped `Module`, which could accidentally enter ordinary
+lowering and silently compile empty bodies.
+
+Frozen interfaces:
+
+- `ModuleSurface`, `ModuleSurfacesByName`
+- `ModuleSurfaceCallable`, `ModuleSurfaceComposite`, `ModuleSurfaceEnum`
+- `ModuleSurfaceTrait`, `ModuleSurfaceImpl`, `ModuleSurfaceConst`
+- `module_surface_from_module`, `hirlowering_for_module`
+- `driver_streaming_surface_enabled`, `module_surface_source_matches`
+- `module_surface_trait_origin_key`
+- `phase2:surface:file:released`
+
+The surface retains only current cross-module resolver inputs. Trait default
+Function bodies and enum struct-field default expressions are the two
+intentional executable-AST exceptions. Imported traits use canonical
+`module_name::trait_name` identity before installing local aliases.
+
+Each surface binds source index, path, module name, content length, and content
+hash. The second parse fails closed on mismatch. Source text remains until
+streaming HIR completes, then the existing source/AST eviction owners clear
+text and surfaces. Non-streaming behavior is unchanged.
+
+Activation is restricted to Stage4 AOT + low-memory + entry closure +
+`SIMPLE_BOOTSTRAP_STAGE4=1`, with VHDL excluded. Extraction, resolver aliasing,
+the native four-file semantics fixture, and the event-driven first-10
+post-release slope gate must pass before any new Stage4 build.
+
+Each unique physical source owns one canonical surface; aliases reference it.
+Composite surfaces retain declaration identity only. Identical canonical trait
+imports are idempotent, while conflicting source or declaration metadata fails
+closed. The slope checker requests termination at marker 10 and treats any
+raced later marker as diagnostic.

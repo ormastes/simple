@@ -995,3 +995,30 @@ Cooperative review for this continuation:
   `step("Compile and execute a filesystem C program with Clang")`, and
   `step("Launch the Simple compiler toolchain from the filesystem")`.
 - Temporary helpers must call `fail(...)`; placeholder passes are forbidden.
+
+### Stage 4 design freeze
+
+Highest-capability review selected an explicit `ModuleSurface` contract and
+rejected a body-stripped `Module`. Frozen helper types are
+`ModuleSurfaceCallable`, `ModuleSurfaceComposite`, `ModuleSurfaceEnum`,
+`ModuleSurfaceTrait`, `ModuleSurfaceImpl`, and `ModuleSurfaceConst`.
+
+Only imported trait default bodies and enum struct-field default expressions
+retain executable AST. Imported traits are canonically keyed by
+`module_name::trait_name`, independent of local aliases; identical imports are
+idempotent and conflicting metadata fails. Each unique physical source owns one
+surface and its aliases reference it. Composite surfaces retain identity only.
+Every surface binds source index/path/module/content length/content hash, and
+the second parse fails closed on mismatch. `ModuleSurfacesByName` is the single
+resolver contract across all HIR paths; non-streaming paths derive it from
+retained rich modules without reparsing.
+
+`driver_streaming_surface_enabled` is true only for Stage4 AOT +
+entry-closure + low-memory + `SIMPLE_BOOTSTRAP_STAGE4=1` and a non-VHDL
+backend. All other execution modes retain current behavior.
+
+The bounded-memory `NFR-001` gate computes from the first 10 unique ordered
+post-release markers, requests process-group termination at marker 10, and
+requires average retained growth at most 25,000 objects/file. A raced later
+marker is diagnostic. This gate is prerequisite to current `REQ-001` through
+`REQ-005` evidence.
