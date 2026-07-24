@@ -10,7 +10,10 @@ render/event command delegates to the canonical fullscreen evidence wrapper;
 it may not build `wm_entry.spl`.
 
 The canonical live wrapper retains QMP `pmemsave` framebuffer provenance and
-`input-send-event` keyboard/pointer correlation. Run only after the host gate:
+`input-send-event` keyboard/pointer correlation. Each F11 injection must
+produce distinct `scancode=87 kind=press` and `scancode=215 kind=release`
+device receipts; only the press is required to mutate WM state and produce a
+frame. Run only after the host gate:
 
 ```sh
 sh scripts/check/check-simpleos-x86-64-wm-qemu-preflight.shs

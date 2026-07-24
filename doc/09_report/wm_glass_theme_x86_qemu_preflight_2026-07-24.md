@@ -12,7 +12,9 @@ input markers could not prove the production SimpleOS glass WM.
 The compatibility command now delegates to
 `check-simpleos-wm-fullscreen-evidence.shs`, whose production target is
 `gui_entry_desktop.spl` and whose retained bundle binds QMP `pmemsave` frames
-to F11 and pointer press/release input sequences.
+to F11 press/release and pointer press/release input sequences. The F11 press
+is the only edge allowed to maximize/restore and generate a correlated frame;
+the break (`0xD7`) is separately retained as a consumed device receipt.
 
 ## Static acceptance route
 
@@ -33,6 +35,9 @@ sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs
 ```
 
 Executed once on 2026-07-24: the generated-theme ordering, canonical QMP route,
-and target-assembly `pshufd`/`movdqu` SSE2 proof all passed. The existing QEMU
-cycle cap and documented freestanding CSS scan fault remain active; this report
-does not claim current-source framebuffer pixels.
+and target-assembly `pshufd`/`movdqu` SSE2 proof all passed. The integration
+artifact spec now consumes only `build/simpleos_wm_fullscreen_evidence/`
+(`evidence.env`, baseline/fullscreen/restored captures, serial log) rather than
+the obsolete `build/os/wm_x86_64_*` receipts. The existing QEMU cycle cap and
+documented freestanding CSS scan fault remain active; this report does not
+claim current-source framebuffer pixels.

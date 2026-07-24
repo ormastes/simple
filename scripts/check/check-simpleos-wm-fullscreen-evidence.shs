@@ -712,9 +712,11 @@ input_submit_marker=""
 input_irq_marker=""
 input_state_marker=""
 input_frame_marker=""
+input_release_irq_marker=""
 restore_irq_marker=""
 restore_state_marker=""
 restore_frame_marker=""
+restore_release_irq_marker=""
 pointer_irq_marker=""
 pointer_state_marker=""
 pointer_frame_marker=""
@@ -723,7 +725,9 @@ pointer_release_state_marker=""
 pointer_release_frame_marker=""
 baseline_seq=0
 maximize_seq=0
+maximize_release_seq=0
 restore_seq=0
+restore_release_seq=0
 pointer_seq=0
 pointer_release_seq=0
 changed_bytes=0
@@ -910,7 +914,7 @@ def max_input_seq():
     values = [int(v) for v in re.findall(r"\[wm-frame\] input_seq=(\d+) generation=\d+", serial_text())]
     return max(values) if values else 0
 
-def wait_correlation(after_seq, action, expected_window=None):
+def wait_press_correlation(after_seq, action, expected_window=None):
     # 300s (was 90s): the maximize re-render now includes pure-Simple sfnt
     # glyf rasterization of the maximized window's text at 4K under TCG
     # x86_64-on-arm64 (fonts were bitmap-fallback when 90s last sufficed;
@@ -921,9 +925,9 @@ def wait_correlation(after_seq, action, expected_window=None):
     deadline = time.monotonic() + 300.0
     while time.monotonic() < deadline:
         text = serial_text()
-        seqs = sorted({int(v) for v in re.findall(r"\[wm-input-irq\] input_seq=(\d+) scancode=87(?:\r?$)", text, re.M) if int(v) > after_seq})
+        seqs = sorted({int(v) for v in re.findall(r"\[wm-input-irq\] input_seq=(\d+) scancode=87 kind=press(?:\r?$)", text, re.M) if int(v) > after_seq})
         for seq in seqs:
-            irq = re.search(r"^\[wm-input-irq\] input_seq=%d scancode=87\r?$" % seq, text, re.M)
+            irq = re.search(r"^\[wm-input-irq\] input_seq=%d scancode=87 kind=press\r?$" % seq, text, re.M)
             state = re.search(r"^\[wm-state\] input_seq=%d action=%s window=(\d+) maximized=(?:true|false) x=(-?\d+) y=(-?\d+) width=(\d+) height=(\d+)\r?$" % (seq, action), text, re.M)
             frame = re.search(r"^\[wm-frame\] input_seq=%d generation=(\d+)\r?$" % seq, text, re.M)
             if irq and state and frame and int(frame.group(1)) > 0:
@@ -935,7 +939,19 @@ def wait_correlation(after_seq, action, expected_window=None):
                     continue
                 return seq, window_id, irq.group(0), state.group(0), frame.group(0), rect
         time.sleep(0.05)
-    raise RuntimeError("guest-input-irq-state-frame-correlation-missing action=" + action)
+    raise RuntimeError("guest-input-press-state-frame-correlation-missing action=" + action)
+
+def wait_release_receipt(after_seq):
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        text = serial_text()
+        seqs = sorted({int(v) for v in re.findall(r"\[wm-input-irq\] input_seq=(\d+) scancode=215 kind=release(?:\r?$)", text, re.M) if int(v) > after_seq})
+        for seq in seqs:
+            irq = re.search(r"^\[wm-input-irq\] input_seq=%d scancode=215 kind=release\r?$" % seq, text, re.M)
+            if irq:
+                return seq, irq.group(0)
+        time.sleep(0.05)
+    raise RuntimeError("guest-input-release-receipt-missing")
 
 def wait_pointer_correlation(after_seq, kind_code, expected_window=""):
     deadline = time.monotonic() + 30.0
@@ -996,10 +1012,12 @@ with open(corrupt_region_path, "wb") as out:
     out.write(corrupt_region)
 font_region_hash = hashlib.sha256(font_region).hexdigest()
 send_f11(f)
-max_seq, target_window, max_irq, max_state, max_frame, _ = wait_correlation(baseline_seq, "maximize")
+max_seq, target_window, max_irq, max_state, max_frame, _ = wait_press_correlation(baseline_seq, "maximize")
+max_release_seq, max_release_irq = wait_release_receipt(max_seq)
 fullscreen = pmem(f, fullscreen_ppm)
 send_f11(f)
-restore_seq, restored_window, restore_irq, restore_state, restore_frame, restored_rect = wait_correlation(max_seq, "restore", target_window)
+restore_seq, restored_window, restore_irq, restore_state, restore_frame, restored_rect = wait_press_correlation(max_release_seq, "restore", target_window)
+restore_release_seq, restore_release_irq = wait_release_receipt(restore_seq)
 restored = pmem(f, restored_ppm)
 
 base_hash = hashlib.sha256(baseline).hexdigest()
@@ -1018,13 +1036,15 @@ write_qmp(f, {"execute":"input-send-event", "arguments":{"events":[
     {"type":"btn","data":{"down":False,"button":"left"}}
 ]}})
 pointer_release_seq, pointer_release_irq, pointer_release_state, pointer_release_frame, _ = wait_pointer_correlation(pointer_seq, 2, pointer_window)
-print("simpleos_wm_input_submitted host_nonce=%s baseline_seq=%d maximize_seq=%d restore_seq=%d qcode=f11" % (nonce, baseline_seq, max_seq, restore_seq))
+print("simpleos_wm_input_submitted host_nonce=%s baseline_seq=%d maximize_seq=%d maximize_release_seq=%d restore_seq=%d restore_release_seq=%d qcode=f11" % (nonce, baseline_seq, max_seq, max_release_seq, restore_seq, restore_release_seq))
 print("simpleos_wm_maximize_irq_marker=" + max_irq)
 print("simpleos_wm_maximize_state_marker=" + max_state)
 print("simpleos_wm_maximize_frame_marker=" + max_frame)
+print("simpleos_wm_maximize_release_irq_marker=" + max_release_irq)
 print("simpleos_wm_restore_irq_marker=" + restore_irq)
 print("simpleos_wm_restore_state_marker=" + restore_state)
 print("simpleos_wm_restore_frame_marker=" + restore_frame)
+print("simpleos_wm_restore_release_irq_marker=" + restore_release_irq)
 print("simpleos_wm_pointer_irq_marker=" + pointer_irq)
 print("simpleos_wm_pointer_state_marker=" + pointer_state)
 print("simpleos_wm_pointer_frame_marker=" + pointer_frame)
@@ -1045,13 +1065,17 @@ PY
             input_submit_marker="$(sed -n '/^simpleos_wm_input_submitted /p' "$CAPTURE_OUT" | tail -n 1)"
             baseline_seq="$(marker_field "$input_submit_marker" baseline_seq)"
             maximize_seq="$(marker_field "$input_submit_marker" maximize_seq)"
+            maximize_release_seq="$(marker_field "$input_submit_marker" maximize_release_seq)"
             restore_seq="$(marker_field "$input_submit_marker" restore_seq)"
+            restore_release_seq="$(marker_field "$input_submit_marker" restore_release_seq)"
             input_irq_marker="$(sed -n 's/^simpleos_wm_maximize_irq_marker=//p' "$CAPTURE_OUT" | tail -n 1)"
             input_state_marker="$(sed -n 's/^simpleos_wm_maximize_state_marker=//p' "$CAPTURE_OUT" | tail -n 1)"
             input_frame_marker="$(sed -n 's/^simpleos_wm_maximize_frame_marker=//p' "$CAPTURE_OUT" | tail -n 1)"
+            input_release_irq_marker="$(sed -n 's/^simpleos_wm_maximize_release_irq_marker=//p' "$CAPTURE_OUT" | tail -n 1)"
             restore_irq_marker="$(sed -n 's/^simpleos_wm_restore_irq_marker=//p' "$CAPTURE_OUT" | tail -n 1)"
             restore_state_marker="$(sed -n 's/^simpleos_wm_restore_state_marker=//p' "$CAPTURE_OUT" | tail -n 1)"
             restore_frame_marker="$(sed -n 's/^simpleos_wm_restore_frame_marker=//p' "$CAPTURE_OUT" | tail -n 1)"
+            restore_release_irq_marker="$(sed -n 's/^simpleos_wm_restore_release_irq_marker=//p' "$CAPTURE_OUT" | tail -n 1)"
             pointer_irq_marker="$(sed -n 's/^simpleos_wm_pointer_irq_marker=//p' "$CAPTURE_OUT" | tail -n 1)"
             pointer_state_marker="$(sed -n 's/^simpleos_wm_pointer_state_marker=//p' "$CAPTURE_OUT" | tail -n 1)"
             pointer_frame_marker="$(sed -n 's/^simpleos_wm_pointer_frame_marker=//p' "$CAPTURE_OUT" | tail -n 1)"
@@ -1172,14 +1196,18 @@ fi
     echo "simpleos_wm_fullscreen_input_nonce=$input_nonce"
     echo "simpleos_wm_fullscreen_baseline_input_seq=$baseline_seq"
     echo "simpleos_wm_fullscreen_maximize_input_seq=$maximize_seq"
+    echo "simpleos_wm_fullscreen_maximize_release_input_seq=$maximize_release_seq"
     echo "simpleos_wm_fullscreen_restore_input_seq=$restore_seq"
+    echo "simpleos_wm_fullscreen_restore_release_input_seq=$restore_release_seq"
     echo "simpleos_wm_fullscreen_input_submit_marker=$input_submit_marker"
     echo "simpleos_wm_fullscreen_input_irq_marker=$input_irq_marker"
     echo "simpleos_wm_fullscreen_input_state_marker=$input_state_marker"
     echo "simpleos_wm_fullscreen_input_frame_marker=$input_frame_marker"
+    echo "simpleos_wm_fullscreen_input_release_irq_marker=$input_release_irq_marker"
     echo "simpleos_wm_fullscreen_restore_irq_marker=$restore_irq_marker"
     echo "simpleos_wm_fullscreen_restore_state_marker=$restore_state_marker"
     echo "simpleos_wm_fullscreen_restore_frame_marker=$restore_frame_marker"
+    echo "simpleos_wm_fullscreen_restore_release_irq_marker=$restore_release_irq_marker"
     echo "simpleos_wm_fullscreen_pointer_input_seq=$pointer_seq"
     echo "simpleos_wm_fullscreen_pointer_irq_marker=$pointer_irq_marker"
     echo "simpleos_wm_fullscreen_pointer_state_marker=$pointer_state_marker"
@@ -1229,9 +1257,11 @@ fi
     echo "- content provenance: ${content_provenance_marker:--}"
     echo "- scanout: address=${scanout_address:--} width=${scanout_width:-0} height=${scanout_height:-0} byte-pitch=${scanout_stride:-0} format=${scanout_pixel_format:--} generation=${scanout_generation:-0}"
     echo "- host nonce: $input_nonce"
-    echo "- input sequences: baseline=$baseline_seq maximize=$maximize_seq restore=$restore_seq"
-    echo "- maximize IRQ/state/frame: ${input_irq_marker:--} | ${input_state_marker:--} | ${input_frame_marker:--}"
-    echo "- restore IRQ/state/frame: ${restore_irq_marker:--} | ${restore_state_marker:--} | ${restore_frame_marker:--}"
+    echo "- input sequences: baseline=$baseline_seq maximize-press=$maximize_seq maximize-release=$maximize_release_seq restore-press=$restore_seq restore-release=$restore_release_seq"
+    echo "- maximize press IRQ/state/frame: ${input_irq_marker:--} | ${input_state_marker:--} | ${input_frame_marker:--}"
+    echo "- maximize release IRQ: ${input_release_irq_marker:--}"
+    echo "- restore press IRQ/state/frame: ${restore_irq_marker:--} | ${restore_state_marker:--} | ${restore_frame_marker:--}"
+    echo "- restore release IRQ: ${restore_release_irq_marker:--}"
     echo "- pointer IRQ/state/frame: ${pointer_irq_marker:--} | ${pointer_state_marker:--} | ${pointer_frame_marker:--}"
     echo "- pointer release IRQ/state/frame: ${pointer_release_irq_marker:--} | ${pointer_release_state_marker:--} | ${pointer_release_frame_marker:--}"
     echo "- changed bytes (baseline vs maximized): ${changed_bytes:-0}"
@@ -1247,9 +1277,9 @@ fi
     echo "(same q35/max/2G/BGA-std flags as os.qemu_runner._wm_simple_web_qmp_capture_target),"
     echo "derives QMP \`pmemsave\` address and size from the guest's validated"
     echo "scanout marker, converts visible pixels using its byte pitch, injects"
-    echo "F11 plus a pointer click through QEMU input, maps each to newly"
-    echo "observed guest input sequences, and requires sequence-correlated IRQ,"
-    echo "WM state, and frame-generation markers. Boot-time choreography is never"
+    echo "F11 press/release plus a pointer click through QEMU input, maps each to newly"
+    echo "observed guest input sequences, requires both device receipts, and requires"
+    echo "sequence-correlated WM state and frame-generation only for key press. Boot-time choreography is never"
     echo "accepted as interaction evidence; missing correlation fails closed."
 } >"$REPORT_PATH"
 
