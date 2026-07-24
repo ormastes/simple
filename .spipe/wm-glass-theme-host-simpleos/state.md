@@ -193,3 +193,14 @@ implementation-blocked-inferred-text-result-provenance
   not product admission. The focused broad window-scene spec timed out at
   120 seconds with no assertion result and is recorded in
   `window_scene_draw_ir_spec_timeout_2026-07-24.md`. No retry was made.
+- continuation-input-and-switching-2026-07-24: Host production evidence now
+  records distinct real winit/FIFO key-down, key-up, pointer-move,
+  pointer-button-down, and pointer-button-up receipts while retaining the
+  canonical compositor calls. Six focused scenarios pass diagnostically; the
+  product entry check is still blocked on `rt_process_spawn_guarded`. No
+  canonical title-command/body-input API exists, so none was fabricated.
+  ARM64 QMP input remains blocked before rendering by missing VirtIO-MMIO
+  device discovery/eventq/backend/device attachment; a two-scenario system
+  contract remains fail-fast. Runtime theme switching remains blocked by a
+  missing notification transport ABI; its contract was placed under system
+  tests, not the unit suite.

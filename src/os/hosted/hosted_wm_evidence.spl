@@ -28,6 +28,65 @@ struct HostWmEvidenceCommand:
     y: i32
     down: bool
 
+struct HostWmInputReceipt:
+    key_down_count: i64
+    key_up_count: i64
+    pointer_move_count: i64
+    pointer_button_down_count: i64
+    pointer_button_up_count: i64
+    last_event_kind: text
+    last_scancode: i64
+    last_keycode: i64
+    last_pointer_x: i32
+    last_pointer_y: i32
+    last_pointer_button: i64
+
+fn host_wm_input_receipt() -> HostWmInputReceipt:
+    HostWmInputReceipt(
+        key_down_count: 0,
+        key_up_count: 0,
+        pointer_move_count: 0,
+        pointer_button_down_count: 0,
+        pointer_button_up_count: 0,
+        last_event_kind: "none",
+        last_scancode: 0,
+        last_keycode: 0,
+        last_pointer_x: 0,
+        last_pointer_y: 0,
+        last_pointer_button: -1
+    )
+
+fn host_wm_input_record_key(receipt: HostWmInputReceipt, scancode: i64, keycode: i64, down: bool) -> HostWmInputReceipt:
+    var out = receipt
+    if down:
+        out.key_down_count = out.key_down_count + 1
+        out.last_event_kind = "key-down"
+    else:
+        out.key_up_count = out.key_up_count + 1
+        out.last_event_kind = "key-up"
+    out.last_scancode = scancode
+    out.last_keycode = keycode
+    out
+
+fn host_wm_input_record_pointer_move(receipt: HostWmInputReceipt, x: i32, y: i32) -> HostWmInputReceipt:
+    var out = receipt
+    out.pointer_move_count = out.pointer_move_count + 1
+    out.last_event_kind = "pointer-move"
+    out.last_pointer_x = x
+    out.last_pointer_y = y
+    out
+
+fn host_wm_input_record_pointer_button(receipt: HostWmInputReceipt, button: i64, down: bool) -> HostWmInputReceipt:
+    var out = receipt
+    if down:
+        out.pointer_button_down_count = out.pointer_button_down_count + 1
+        out.last_event_kind = "pointer-button-down"
+    else:
+        out.pointer_button_up_count = out.pointer_button_up_count + 1
+        out.last_event_kind = "pointer-button-up"
+    out.last_pointer_button = button
+    out
+
 fn host_wm_evidence_config(snapshot_path: text, capture_path: text, input_fifo: text) -> HostWmEvidenceConfig:
     val count = (if snapshot_path != "": 1 else: 0) + (if capture_path != "": 1 else: 0) + (if input_fifo != "": 1 else: 0)
     if count == 0:
@@ -64,13 +123,16 @@ fn _json_text(value: text) -> text:
     val escaped = value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
     "\"{escaped}\""
 
+fn host_wm_input_receipt_json(receipt: HostWmInputReceipt) -> text:
+    "{\"key_down_count\":{receipt.key_down_count},\"key_up_count\":{receipt.key_up_count},\"pointer_move_count\":{receipt.pointer_move_count},\"pointer_button_down_count\":{receipt.pointer_button_down_count},\"pointer_button_up_count\":{receipt.pointer_button_up_count},\"last_event_kind\":{_json_text(receipt.last_event_kind)},\"last_scancode\":{receipt.last_scancode},\"last_keycode\":{receipt.last_keycode},\"last_pointer_x\":{receipt.last_pointer_x},\"last_pointer_y\":{receipt.last_pointer_y},\"last_pointer_button\":{receipt.last_pointer_button}}"
+
 # `compositor_json` is the receiver-built HostCompositor.evidence_compositor_json()
 # fragment. Passing the HostCompositor aggregate by value into this free
 # function corrupts its window elements under stage3 native codegen
 # (LLDB-proven nil receiver in the element loop), so only scalars and the
 # prebuilt text fragment cross this boundary.
-fn host_wm_evidence_snapshot(compositor_json: text, surface: HostSurfaceState, backend: text, fallback_used: bool, readback: text, command_nonce: i64, command_phase: text) -> text:
-    "{\"schema\":\"simple-wm-production-evidence-v1\",\"surface\":{\"mode\":{_json_text("{surface.mode}")},\"phase\":{_json_text("{surface.phase}")},\"requested_mode\":{_json_text("{surface.requested_mode}")},\"geometry\":{\"x\":{surface.geometry.x},\"y\":{surface.geometry.y},\"width\":{surface.geometry.width},\"height\":{surface.geometry.height},\"scale_milli\":{surface.geometry.scale_milli}},\"saved_windowed_geometry\":{\"x\":{surface.saved_windowed_geometry.x},\"y\":{surface.saved_windowed_geometry.y},\"width\":{surface.saved_windowed_geometry.width},\"height\":{surface.saved_windowed_geometry.height},\"scale_milli\":{surface.saved_windowed_geometry.scale_milli}},\"rollback_geometry\":{\"x\":{surface.rollback_geometry.x},\"y\":{surface.rollback_geometry.y},\"width\":{surface.rollback_geometry.width},\"height\":{surface.rollback_geometry.height},\"scale_milli\":{surface.rollback_geometry.scale_milli}},\"request_nonce\":{surface.request_nonce},\"transition_revision\":{surface.transition_revision},\"deadline_micros\":{surface.deadline_micros},\"resize_acknowledged\":{surface.resize_acknowledged},\"scale_acknowledged\":{surface.scale_acknowledged},\"failure_reason\":{_json_text(surface.failure_reason)}},\"compositor\":{compositor_json},\"render\":{\"backend\":{_json_text(backend)},\"fallback_used\":{fallback_used},\"readback\":{_json_text(readback)}},\"input\":{\"nonce\":{command_nonce},\"phase\":{_json_text(command_phase)}}}}\n"
+fn host_wm_evidence_snapshot(compositor_json: text, surface: HostSurfaceState, backend: text, fallback_used: bool, readback: text, command_nonce: i64, command_phase: text, input_receipt_json: text) -> text:
+    "{\"schema\":\"simple-wm-production-evidence-v1\",\"surface\":{\"mode\":{_json_text("{surface.mode}")},\"phase\":{_json_text("{surface.phase}")},\"requested_mode\":{_json_text("{surface.requested_mode}")},\"geometry\":{\"x\":{surface.geometry.x},\"y\":{surface.geometry.y},\"width\":{surface.geometry.width},\"height\":{surface.geometry.height},\"scale_milli\":{surface.geometry.scale_milli}},\"saved_windowed_geometry\":{\"x\":{surface.saved_windowed_geometry.x},\"y\":{surface.saved_windowed_geometry.y},\"width\":{surface.saved_windowed_geometry.width},\"height\":{surface.saved_windowed_geometry.height},\"scale_milli\":{surface.saved_windowed_geometry.scale_milli}},\"rollback_geometry\":{\"x\":{surface.rollback_geometry.x},\"y\":{surface.rollback_geometry.y},\"width\":{surface.rollback_geometry.width},\"height\":{surface.rollback_geometry.height},\"scale_milli\":{surface.rollback_geometry.scale_milli}},\"request_nonce\":{surface.request_nonce},\"transition_revision\":{surface.transition_revision},\"deadline_micros\":{surface.deadline_micros},\"resize_acknowledged\":{surface.resize_acknowledged},\"scale_acknowledged\":{surface.scale_acknowledged},\"failure_reason\":{_json_text(surface.failure_reason)}},\"compositor\":{compositor_json},\"render\":{\"backend\":{_json_text(backend)},\"fallback_used\":{fallback_used},\"readback\":{_json_text(readback)}},\"input\":{\"nonce\":{command_nonce},\"phase\":{_json_text(command_phase)},\"receipt\":{input_receipt_json}}}}\n"
 
 fn host_wm_evidence_write_snapshot(path: text, snapshot: text) -> bool:
     if path == "":

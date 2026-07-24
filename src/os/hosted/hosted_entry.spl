@@ -38,7 +38,12 @@ use os.hosted.hosted_wm_evidence.{
     host_wm_evidence_read_command,
     host_wm_evidence_snapshot,
     host_wm_evidence_write_capture,
-    host_wm_evidence_write_snapshot
+    host_wm_evidence_write_snapshot,
+    host_wm_input_receipt,
+    host_wm_input_receipt_json,
+    host_wm_input_record_key,
+    host_wm_input_record_pointer_button,
+    host_wm_input_record_pointer_move
 }
 
 extern fn rt_winit_event_loop_new() -> i64
@@ -241,11 +246,12 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
 
     var evidence_nonce: i64 = 0
     var evidence_phase = "presented"
+    var input_receipt = host_wm_input_receipt()
     if evidence.enabled:
         val initial_pixels = comp.pure_simple_pixel_buffer()
         val backend_name = HostedWinitBufferBackend.implementation_name()
         val readback = if initial_pixels.len() == comp.width * comp.height: "presented-pixel-buffer" else: "unavailable"
-        val initial_snapshot = host_wm_evidence_snapshot(comp.evidence_compositor_json(), surface, backend_name, false, readback, evidence_nonce, evidence_phase)
+        val initial_snapshot = host_wm_evidence_snapshot(comp.evidence_compositor_json(), surface, backend_name, false, readback, evidence_nonce, evidence_phase, host_wm_input_receipt_json(input_receipt))
         if not host_wm_evidence_write_snapshot(evidence.snapshot_path, initial_snapshot) or not host_wm_evidence_write_capture(evidence.capture_path, comp.width, comp.height, initial_pixels):
             print "ERROR: hosted WM initial evidence write failed"
             raster.shutdown()
@@ -347,6 +353,7 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                 val mx = (rt_winit_event_mouse_x_milli(ev) / 1000).to_i32()
                 val my = (rt_winit_event_mouse_y_milli(ev) / 1000).to_i32()
                 comp.pointer_move(mx, my)
+                input_receipt = host_wm_input_record_pointer_move(input_receipt, mx, my)
                 mouse_move_events = mouse_move_events + 1
                 if mouse_move_events <= 3:
                     print "[hosted-wm] event mouse_move count={mouse_move_events} x={mx} y={my}"
@@ -360,6 +367,7 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                 # the event is observable even though no chrome action consumes
                 # them yet (parity with ui.browser/app.spl's unconditional forward).
                 comp.handle_mouse_button(button, pressed)
+                input_receipt = host_wm_input_record_pointer_button(input_receipt, button, pressed)
                 mouse_button_events = mouse_button_events + 1
                 print "[hosted-wm] event mouse_button count={mouse_button_events} button={button} pressed={pressed}"
                 other_dirty = true
@@ -372,9 +380,11 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                 val scan_code = rt_winit_event_key_scancode(ev)
                 val keycode = rt_winit_event_key_keycode(ev)
                 val pressed_key = rt_winit_event_key_pressed(ev) != 0
+                input_receipt = host_wm_input_record_key(input_receipt, scan_code, keycode, pressed_key)
+                key_events = key_events + 1
+                val key_state = if pressed_key: "down" else: "up"
+                print "[hosted-wm] event key count={key_events} state={key_state} scancode={scan_code} keycode={keycode}"
                 if pressed_key:
-                    key_events = key_events + 1
-                    print "[hosted-wm] event key count={key_events} keycode={keycode}"
                     if keycode == KEY_ESCAPE:
                         running = false
                     elif keycode == KEY_TAB:
@@ -422,9 +432,11 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                     evidence_phase = "applied"
                 elif command.action == "pointer":
                     comp.pointer_move(command.x, command.y)
+                    input_receipt = host_wm_input_record_pointer_move(input_receipt, command.x, command.y)
                     evidence_phase = "applied"
                 elif command.action == "left":
                     comp.handle_mouse_button(0, command.down)
+                    input_receipt = host_wm_input_record_pointer_button(input_receipt, 0, command.down)
                     evidence_phase = "applied"
                 elif command.action == "snapshot":
                     evidence_phase = "snapshot-only"
@@ -459,7 +471,7 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
             val evidence_pixels = comp.pure_simple_pixel_buffer()
             val evidence_backend = HostedWinitBufferBackend.implementation_name()
             val evidence_readback = if evidence_pixels.len() == comp.width * comp.height: "presented-pixel-buffer" else: "unavailable"
-            val snapshot = host_wm_evidence_snapshot(comp.evidence_compositor_json(), surface, evidence_backend, false, evidence_readback, evidence_nonce, evidence_phase)
+            val snapshot = host_wm_evidence_snapshot(comp.evidence_compositor_json(), surface, evidence_backend, false, evidence_readback, evidence_nonce, evidence_phase, host_wm_input_receipt_json(input_receipt))
             if not host_wm_evidence_write_snapshot(evidence.snapshot_path, snapshot) or not host_wm_evidence_write_capture(evidence.capture_path, comp.width, comp.height, evidence_pixels):
                 print "ERROR: hosted WM evidence write failed nonce={evidence_nonce}"
                 running = false

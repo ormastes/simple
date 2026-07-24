@@ -72,7 +72,7 @@ overlapping dirty work and remains read-only for this lane.
 | Lane | Current state | First unresolved boundary |
 |---|---|---|
 | Host production WM | FAIL; all retained July 24 reports lack an admissible capture | `src/os/hosted/hosted_entry.spl` constructs its backend and `HostCompositor.new_headless` without installing `load_default_theme_package().snapshot`; outer chrome remains Aqua while content requests Aetheric |
-| Host events | INCOMPLETE | evidence FIFO lacks key down/up, title-command, and body-text actions; the winit loop reads key-up but discards it |
+| Host events | SOURCE PARTIAL; product proof pending | real key down/up and pointer move/button-edge receipts are retained; title-command/body-input remain unsupported because HostCompositor exposes no canonical API |
 | Simple Web glass | SEMANTICS IMPLEMENTED, LIVE PROOF PENDING | current-source computed-style/Draw-IR/framebuffer proof has not passed; Chromium fixture timing is not Simple Web animation evidence |
 | SimpleOS x86_64 QEMU | SOURCE FIXED, FRESH BOOT PENDING | rebuild exact current compiler, prove inferred-text relocation, then run one fresh canonical OVMF capture |
 | SimpleOS ARM64 QEMU | FAIL; source wiring absent and runtime unproven | `arm64/gui_entry_desktop.spl` never installs the generated Aetheric snapshot, media lacks hosted package files, `ToggleTheme` is `pass`, and PL011 cannot receipt pointer or key down/up |
@@ -80,7 +80,7 @@ overlapping dirty work and remains read-only for this lane.
 | Simple GUI theme handoff | SOURCE FIXED; product proof pending | resolved snapshot now reaches canonical widget Draw IR; 2 bootstrap-driver scenarios pass diagnostically |
 | Simple Web theme authority | SOURCE FIXED; product proof pending | package CSS is now the final authority; 3 bootstrap-driver scenarios pass diagnostically |
 | WM glass material projection | SOURCE FIXED; focused spec timed out | Draw IR retains durable identity/radius/border/shadows/backdrop request and named fallback; broad focused spec timed out at 120 seconds without assertions |
-| Runtime theme switching | UNWIRED; later lane | `theme_service.spl` loads tokens without installing a render snapshot and subscriber notification is `pass_dn` |
+| Runtime theme switching | ABI BLOCKED; fail-fast system contract | numeric subscriber ports have no `IpcOutputPort`/send adapter, message schema, source identity, or delivery-failure policy |
 
 ### Current parallel ownership
 

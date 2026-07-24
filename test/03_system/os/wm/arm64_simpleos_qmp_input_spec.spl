@@ -1,0 +1,46 @@
+# codex-system-test
+# @req REQ-7
+# @evidence-display: links
+"""# ARM64 SimpleOS QMP input
+
+Fails closed until the canonical ARM64 Engine2D desktop owns a real
+VirtIO-MMIO input transport. PL011 character actions are explicitly excluded
+from keyboard press/release and pointer evidence.
+"""
+use std.spec.*
+use app.io.mod.{file_read_text}
+
+fn require_arm64_virtio_input_transport():
+    fail("ARM64 production input requires VirtIO-MMIO device discovery, eventq ownership, shared KeyEvent/MouseEvent translation, and guest device-to-WM-to-frame sequence correlation; PL011 characters are not key-state or pointer proof")
+
+describe "ARM64 SimpleOS QMP input":
+    it "keeps the production contract red until real keyboard and pointer transport is wired":
+        step("Inspect the canonical ARM64 desktop and QEMU target")
+        val entry = file_read_text(
+            "examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl"
+        )
+        val targets = file_read_text("src/os/_QemuRunner/runner_targets.spl")
+        val translation = file_read_text(
+            "src/os/drivers/virtio/virtio_input_ops.spl"
+        )
+
+        expect(entry).to_contain("event_backend=pl011-uart")
+        expect(entry).to_contain(
+            "unsupported=pointer-down,pointer-up,key-down,key-up"
+        )
+        expect(translation).to_contain("fn virtio_input_key_event(")
+        expect(translation).to_contain("class VirtioMouseAccum:")
+        expect(targets).to_contain("fn get_arm64_desktop_engine2d_target()")
+        require_arm64_virtio_input_transport()
+
+    # @capture(protocol)
+    # @capture(gui)
+    # @capture(artifact)
+    it "correlates QMP key edges and pointer events with guest state and frames":
+        step("Boot the canonical ARM64 Engine2D production desktop")
+        step("Inject keyboard down and up through QMP VirtIO input")
+        step("Inject pointer move and button down and up through QMP VirtIO input")
+        step("Observe guest-owned device receipt sequences")
+        step("Correlate handled input with WM state and later framebuffer revisions")
+        step("Capture baseline and post-input RAMFB images")
+        require_arm64_virtio_input_transport()
