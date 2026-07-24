@@ -220,7 +220,7 @@ if [ "${1:-}" = "--self-test" ]; then
 fi
 
 if [ "$#" -lt 2 ]; then
-    echo "usage: make_os_disk.shs SIZE_BITS IMAGE [KERNEL] [PLATFORM]" >&2
+    echo "usage: make_os_disk.shs SIZE_BITS IMAGE [KERNEL] [PLATFORM] [PROFILE]" >&2
     exit 2
 fi
 
@@ -233,41 +233,61 @@ size_bits="$1"
 image_path="$2"
 kernel_path="${3:-}"
 platform="${4:-x86_64}"
+profile="${5:-fs-exec}"
+case "$profile" in
+    fs-exec) ;;
+    desktop-fonts)
+        if [ "$platform" != "arm64" ]; then
+            echo "desktop-fonts profile requires platform arm64" >&2
+            exit 2
+        fi
+        ;;
+    *)
+        echo "unsupported SimpleOS disk profile: $profile" >&2
+        exit 2
+        ;;
+esac
 
 EXPLICIT_SIMPLE_BINARY="${SIMPLEOS_SIMPLE_BINARY:-}"
 SIMPLEOS_SIMPLE_BINARY="$EXPLICIT_SIMPLE_BINARY"
-case "$platform" in
-    x86_64)
+case "$platform:$profile" in
+    arm64:desktop-fonts)
+        SIMPLEOS_SIMPLE_BINARY=""
+        ;;
+    x86_64:fs-exec)
         if [ -n "$EXPLICIT_SIMPLE_BINARY" ]; then
             validate_elf_payload "$SIMPLEOS_SIMPLE_BINARY" 62 Simple
             validate_simple_payload_provenance "$SIMPLEOS_SIMPLE_BINARY"
         fi
         ;;
-    arm64)
+    arm64:fs-exec)
         SIMPLEOS_SIMPLE_BINARY="${SIMPLEOS_SIMPLE_BINARY:-bin/release/aarch64-unknown-simpleos/simple}"
         validate_elf_payload "$SIMPLEOS_SIMPLE_BINARY" 183 Simple
         ;;
-    riscv64)
+    riscv64:fs-exec)
         SIMPLEOS_SIMPLE_BINARY="${SIMPLEOS_SIMPLE_BINARY:-bin/release/riscv64-unknown-simpleos/simple}"
         validate_elf_payload "$SIMPLEOS_SIMPLE_BINARY" 243 Simple
         ;;
 esac
 
 EXPLICIT_CLANG_BINARY="${SIMPLEOS_CLANG_BINARY:-}"
-case "$platform" in
-    x86_64)
+case "$platform:$profile" in
+    arm64:desktop-fonts)
+        SIMPLEOS_CLANG_BINARY=""
+        ;;
+    x86_64:fs-exec)
         SIMPLEOS_CLANG_BINARY="${SIMPLEOS_CLANG_BINARY:-build/os/clang_static/bin/clang_static}"
         if [ -n "$EXPLICIT_CLANG_BINARY" ] || [ -f "$SIMPLEOS_CLANG_BINARY" ]; then
             validate_elf_payload "$SIMPLEOS_CLANG_BINARY" 62 Clang
         fi
         ;;
-    arm64)
+    arm64:fs-exec)
         SIMPLEOS_CLANG_BINARY="$EXPLICIT_CLANG_BINARY"
         if [ -n "$SIMPLEOS_CLANG_BINARY" ]; then
             validate_elf_payload "$SIMPLEOS_CLANG_BINARY" 183 Clang
         fi
         ;;
-    riscv64)
+    riscv64:fs-exec)
         SIMPLEOS_CLANG_BINARY="$EXPLICIT_CLANG_BINARY"
         if [ -n "$SIMPLEOS_CLANG_BINARY" ]; then
             validate_elf_payload "$SIMPLEOS_CLANG_BINARY" 243 Clang
@@ -276,8 +296,12 @@ case "$platform" in
 esac
 EXPLICIT_LLC_BINARY="${SIMPLEOS_LLC_BINARY:-}"
 EXPLICIT_LLD_BINARY="${SIMPLEOS_LLD_BINARY:-}"
-case "$platform" in
-    x86_64)
+case "$platform:$profile" in
+    arm64:desktop-fonts)
+        SIMPLEOS_LLC_BINARY=""
+        SIMPLEOS_LLD_BINARY=""
+        ;;
+    x86_64:fs-exec)
         SIMPLEOS_LLC_BINARY="${SIMPLEOS_LLC_BINARY:-build/os/llc_static/bin/llc_static}"
         SIMPLEOS_LLD_BINARY="${SIMPLEOS_LLD_BINARY:-build/os/lld_static/bin/lld_static}"
         if [ -n "$EXPLICIT_LLC_BINARY" ] || [ -f "$SIMPLEOS_LLC_BINARY" ]; then
@@ -287,7 +311,7 @@ case "$platform" in
             validate_elf_payload "$SIMPLEOS_LLD_BINARY" 62 LLD
         fi
         ;;
-    arm64)
+    arm64:fs-exec)
         SIMPLEOS_LLC_BINARY="$EXPLICIT_LLC_BINARY"
         SIMPLEOS_LLD_BINARY="$EXPLICIT_LLD_BINARY"
         if [ -n "$SIMPLEOS_LLC_BINARY" ]; then
@@ -297,7 +321,7 @@ case "$platform" in
             validate_elf_payload "$SIMPLEOS_LLD_BINARY" 183 LLD
         fi
         ;;
-    riscv64)
+    riscv64:fs-exec)
         SIMPLEOS_LLC_BINARY="$EXPLICIT_LLC_BINARY"
         SIMPLEOS_LLD_BINARY="$EXPLICIT_LLD_BINARY"
         if [ -n "$SIMPLEOS_LLC_BINARY" ]; then
@@ -316,7 +340,7 @@ SIMPLEOS_SIMPLE_ENTRY_OBJECT="${SIMPLEOS_SIMPLE_ENTRY_OBJECT:-build/os/sysroot/l
 SIMPLEOS_HELLO_OBJECT="${SIMPLEOS_HELLO_OBJECT:-}"
 SIMPLEOS_HELLO_IR="${SIMPLEOS_HELLO_IR:-}"
 SIMPLEOS_FSEXEC_BINARY="${SIMPLEOS_FSEXEC_BINARY:-}"
-if [ "$platform" = "arm64" ] && [ -z "$SIMPLEOS_FSEXEC_BINARY" ]; then
+if [ "$platform" = "arm64" ] && [ "$profile" = "fs-exec" ] && [ -z "$SIMPLEOS_FSEXEC_BINARY" ]; then
     sh scripts/os/build_arm64_fsexec_payload.shs
     SIMPLEOS_FSEXEC_BINARY="build/os/arm64_fsexec/mounted_elf.elf"
 fi
@@ -398,4 +422,4 @@ export SIMPLEOS_FONT_ASSET_BUNGEE SIMPLEOS_FONT_ASSET_NUNITO SIMPLEOS_FONT_ASSET
 export SIMPLEOS_FONT_ASSET_ROBOSLAB SIMPLEOS_FONT_ASSET_UNIFRAKT SIMPLEOS_FONT_ASSET_PIXELIFY
 export SIMPLEOS_FONT_ASSET_NOTOEMOJ
 
-exec "$BIN" "$image_path" "$platform" "$size_bits" "$kernel_path"
+exec "$BIN" "$image_path" "$platform" "$size_bits" "$kernel_path" "$profile"

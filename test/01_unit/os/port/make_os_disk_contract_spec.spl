@@ -30,6 +30,29 @@ describe "make_os_disk target payload and FAT contracts":
         expect(script).to_contain("$(( $1 + 256 * $2 ))")
         expect(script).to_contain("export SIMPLEOS_SIMPLE_BINARY")
 
+    it "separates ARM desktop fonts from fail-closed fs-exec payload media":
+        val script = file_read("scripts/os/make_os_disk.shs")
+        val builder = file_read("scripts/os/make_os_disk.c")
+        expect(script).to_contain("profile=\"${5:-fs-exec}\"")
+        expect(script).to_contain("arm64:desktop-fonts)")
+        expect(script).to_contain("SIMPLEOS_SIMPLE_BINARY=\"\"")
+        expect(script).to_contain("arm64:fs-exec)")
+        expect(script).to_contain("bin/release/aarch64-unknown-simpleos/simple")
+        expect(script).to_contain("validate_elf_payload \"$SIMPLEOS_SIMPLE_BINARY\" 183 Simple")
+        expect(builder).to_contain("write_desktop_font_image(")
+        expect(builder).to_contain("put_dir_entry(root, &root_n, \"SYS        \"")
+        expect(builder).to_contain("put_dir_entry(sys, &sys_n, \"FONTS      \"")
+        expect(builder).to_contain("if (desktop_fonts)")
+
+        val (out, err, rc) = rt_process_run_timeout(
+            "/bin/sh",
+            ["-c", "SIMPLEOS_SIMPLE_BINARY=/definitely/missing/simple scripts/os/make_os_disk.shs 128 /tmp/simpleos-fsexec-must-not-exist.img '' arm64 fs-exec"],
+            30000
+        )
+        expect(rc).to_be_greater_than(0)
+        expect(out).to_equal("")
+        expect(err).to_contain("missing SimpleOS Simple payload")
+
     it "runs the disk-free payload and kernel ELF validation matrices":
         val (payload_out, payload_err, payload_rc) = rt_process_run_timeout(
             "/bin/sh", ["scripts/os/make_os_disk.shs", "--self-test"], 30000)

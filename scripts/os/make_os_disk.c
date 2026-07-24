@@ -489,6 +489,95 @@ static void maybe_write_esp(const char *img_path, const struct bytes *bootloader
     write_file_path(path, limine->data, limine->len);
 }
 
+static void finish_fat32_image(const char *img_path)
+{
+    g_image[0] = 0xeb;
+    g_image[1] = 0x58;
+    g_image[2] = 0x90;
+    memcpy(g_image + 3, "SIMPLEOS", 8);
+    le16(11, SECTOR_SIZE);
+    g_image[13] = SECTORS_PER_CLUSTER;
+    le16(14, RESERVED_SECTORS);
+    g_image[16] = FAT_COUNT;
+    g_image[21] = 0xf8;
+    le16(24, 63);
+    le16(26, 255);
+    le32(32, g_total_sectors);
+    le32(36, g_fat_size_sectors);
+    le32(44, ROOT_CLUSTER);
+    le16(48, 1);
+    le16(50, 6);
+    g_image[510] = 0x55;
+    g_image[511] = 0xaa;
+
+    unsigned char *fat_bytes = g_image + ((size_t)RESERVED_SECTORS * SECTOR_SIZE);
+    for (size_t i = 0; i < (size_t)g_fat_size_sectors * SECTOR_SIZE / 4; ++i)
+        write_u32(fat_bytes, i * 4, g_fat[i]);
+    write_file_path(img_path, g_image, g_image_size);
+}
+
+static void write_desktop_font_image(
+    const char *img_path,
+    const char **font_fat_names,
+    const char **font_long_names,
+    struct bytes *font_payloads,
+    struct bytes *font_metadata_payloads,
+    struct bytes *font_license_payloads,
+    struct bytes font_copyright_payload,
+    struct bytes font_corpus_payload,
+    struct bytes cldr_license_payload,
+    struct bytes simple_license_payload,
+    struct bytes third_party_notices_payload)
+{
+    enum { FONT_ASSET_COUNT = 16 };
+    int sys_cluster = alloc_clusters((const unsigned char *)"", 0);
+    int fonts_cluster = alloc_clusters((const unsigned char *)"", 0);
+    int font_clusters[FONT_ASSET_COUNT];
+    int font_metadata_clusters[FONT_ASSET_COUNT];
+    int font_license_clusters[FONT_ASSET_COUNT];
+    for (int i = 0; i < FONT_ASSET_COUNT; ++i) {
+        font_clusters[i] = alloc_clusters(font_payloads[i].data, font_payloads[i].len);
+        font_metadata_clusters[i] = alloc_clusters(font_metadata_payloads[i].data, font_metadata_payloads[i].len);
+        font_license_clusters[i] = alloc_clusters(font_license_payloads[i].data, font_license_payloads[i].len);
+    }
+    int font_copyright_cluster = alloc_clusters(font_copyright_payload.data, font_copyright_payload.len);
+    int font_corpus_cluster = alloc_clusters(font_corpus_payload.data, font_corpus_payload.len);
+    int cldr_license_cluster = alloc_clusters(cldr_license_payload.data, cldr_license_payload.len);
+    int simple_license_cluster = alloc_clusters(simple_license_payload.data, simple_license_payload.len);
+    int notices_cluster = alloc_clusters(third_party_notices_payload.data, third_party_notices_payload.len);
+
+    unsigned char root[4096] = {0}, sys[4096] = {0}, fonts[4096] = {0};
+    int root_n = 0, sys_n = 0, fonts_n = 0;
+    put_dir_entry(root, &root_n, "SYS        ", sys_cluster, 0, 0x10);
+    put_dir_entry(sys, &sys_n, "FONTS      ", fonts_cluster, 0, 0x10);
+    for (int i = 0; i < FONT_ASSET_COUNT; ++i) {
+        put_named_dir_entry(fonts, &fonts_n, font_fat_names[i], font_long_names[i],
+                            font_clusters[i], font_payloads[i].len, 0x20);
+        char metadata_name[12], license_name[12];
+        font_companion_fat_name(metadata_name, font_fat_names[i], "PB");
+        font_companion_fat_name(license_name, font_fat_names[i], i == 12 ? "LIC" : "OFL");
+        put_dir_entry(fonts, &fonts_n, metadata_name,
+                      font_metadata_clusters[i], font_metadata_payloads[i].len, 0x20);
+        put_dir_entry(fonts, &fonts_n, license_name,
+                      font_license_clusters[i], font_license_payloads[i].len, 0x20);
+    }
+    char copyright_name[12];
+    font_companion_fat_name(copyright_name, font_fat_names[12], "CPY");
+    put_dir_entry(fonts, &fonts_n, copyright_name,
+                  font_copyright_cluster, font_copyright_payload.len, 0x20);
+    put_dir_entry(fonts, &fonts_n, "CORPUS  SDN", font_corpus_cluster, font_corpus_payload.len, 0x20);
+    put_dir_entry(fonts, &fonts_n, "CLDR    LIC", cldr_license_cluster, cldr_license_payload.len, 0x20);
+    put_dir_entry(fonts, &fonts_n, "SIMPLE  LIC", simple_license_cluster, simple_license_payload.len, 0x20);
+    put_dir_entry(fonts, &fonts_n, "NOTICES MD ", notices_cluster, third_party_notices_payload.len, 0x20);
+    if (fonts_n != 91)
+        die("SimpleOS desktop font bundle directory manifest mismatch");
+
+    memcpy(g_image + cluster_offset(ROOT_CLUSTER), root, (size_t)root_n * 32);
+    memcpy(g_image + cluster_offset(sys_cluster), sys, (size_t)sys_n * 32);
+    memcpy(g_image + cluster_offset(fonts_cluster), fonts, (size_t)fonts_n * 32);
+    finish_fat32_image(img_path);
+}
+
 int main(int argc, char **argv)
 {
     enum { FONT_ASSET_COUNT = 16 };
@@ -538,11 +627,17 @@ int main(int argc, char **argv)
         "assets/fonts/google-fonts/ofl/pixelifysans/PixelifySans[wght].ttf",
         "assets/fonts/google-fonts/ofl/notoemoji/NotoEmoji[wght].ttf"
     };
-    if (argc != 5)
-        die("usage: make_os_disk IMAGE PLATFORM SIZE_BITS KERNEL");
+    if (argc != 5 && argc != 6)
+        die("usage: make_os_disk IMAGE PLATFORM SIZE_BITS KERNEL [PROFILE]");
     const char *img_path = argv[1];
     const char *platform = argv[2];
     const char *kernel_path = argv[4];
+    const char *profile = argc == 6 ? argv[5] : "fs-exec";
+    bool desktop_fonts = strcmp(profile, "desktop-fonts") == 0;
+    if (!desktop_fonts && strcmp(profile, "fs-exec") != 0)
+        die("unsupported SimpleOS disk profile");
+    if (desktop_fonts && strcmp(platform, "arm64") != 0)
+        die("desktop-fonts profile requires platform arm64");
     const char *lane = lane_for_platform(platform);
 
     init_geometry(argv[3]);
@@ -580,7 +675,7 @@ int main(int argc, char **argv)
 
     struct bytes kernel_file = read_file(kernel_path);
     struct bytes bootloader_file = read_file(getenv("SIMPLEOS_UEFI_BOOTLOADER"));
-    struct bytes simple_payload = read_simpleos_simple_payload();
+    struct bytes simple_payload = desktop_fonts ? (struct bytes){0} : read_simpleos_simple_payload();
     struct bytes clang_payload = read_file(getenv("SIMPLEOS_CLANG_BINARY"));
     struct bytes llc_payload = read_file(getenv("SIMPLEOS_LLC_BINARY"));
     struct bytes lld_payload = read_file(getenv("SIMPLEOS_LLD_BINARY"));
@@ -622,6 +717,14 @@ int main(int argc, char **argv)
     if (!font_copyright_payload.len || !font_corpus_payload.len || !cldr_license_payload.len ||
         !simple_license_payload.len || !third_party_notices_payload.len)
         die("SimpleOS font bundle global notice could not be read");
+    if (desktop_fonts) {
+        write_desktop_font_image(
+            img_path, font_fat_names, font_long_names, font_payloads,
+            font_metadata_payloads, font_license_payloads, font_copyright_payload,
+            font_corpus_payload, cldr_license_payload, simple_license_payload,
+            third_party_notices_payload);
+        return 0;
+    }
     struct bytes cfat4k = read_cfat4k_baseline();
     struct bytes kernel = kernel_file.len ? kernel_file : text_bytes("SIMPLEOS_UEFI_KERNEL_MISSING\n");
     struct bytes bootloader = bootloader_file.len ? bootloader_file : text_bytes("SIMPLEOS_UEFI_BOOTLOADER_MISSING\n");
@@ -888,30 +991,7 @@ int main(int argc, char **argv)
     memcpy(g_image + cluster_offset(bin_cluster), bin, (size_t)bin_n * 32);
     memcpy(g_image + cluster_offset(sysrt_cluster), sysrt, (size_t)sysrt_n * 32);
 
-    g_image[0] = 0xeb;
-    g_image[1] = 0x58;
-    g_image[2] = 0x90;
-    memcpy(g_image + 3, "SIMPLEOS", 8);
-    le16(11, SECTOR_SIZE);
-    g_image[13] = SECTORS_PER_CLUSTER;
-    le16(14, RESERVED_SECTORS);
-    g_image[16] = FAT_COUNT;
-    g_image[21] = 0xf8;
-    le16(24, 63);
-    le16(26, 255);
-    le32(32, g_total_sectors);
-    le32(36, g_fat_size_sectors);
-    le32(44, ROOT_CLUSTER);
-    le16(48, 1);
-    le16(50, 6);
-    g_image[510] = 0x55;
-    g_image[511] = 0xaa;
-
-    unsigned char *fat_bytes = g_image + ((size_t)RESERVED_SECTORS * SECTOR_SIZE);
-    for (size_t i = 0; i < (size_t)g_fat_size_sectors * SECTOR_SIZE / 4; ++i)
-        write_u32(fat_bytes, i * 4, g_fat[i]);
-
-    write_file_path(img_path, g_image, image_size);
+    finish_fat32_image(img_path);
     if (strcmp(platform, "x86_64") == 0 && bootloader_file.len)
         maybe_write_esp(img_path, &bootloader, &kernel, &limine);
     return 0;
