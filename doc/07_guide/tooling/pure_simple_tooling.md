@@ -174,7 +174,8 @@ evidence boundary for the important pure-Simple tooling lanes:
   remain valid. Explicit targets that discover no spec files now fail with
   exit 4; implicit default discovery, `--list`, and `--spl-doctest` retain
   zero-selection success (`330f11622eb`). This is source-fixed only: fresh
-  pure-Simple qualification remains blocked by the eager/module-loading crash;
+  pure-Simple qualification remains blocked by the deployed native
+  `run`/`test` startup-argument crash, not a proven eager-module failure;
   see the [explicit-selection report](../../08_tracking/bug/test_runner_explicit_empty_selection_false_green_2026-07-24.md).
   **Remaining bug/gap:** this preflight has focused source
   evidence only. Public `--format json` is not yet qualified. The pushed

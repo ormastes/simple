@@ -3,7 +3,7 @@
 ## Status
 
 Source fix implemented; fresh pure-Simple qualification is blocked by the
-eager/module-loading crash described below.
+deployed native `run`/`test` startup-argument crash described below.
 
 ## Reproduction
 
@@ -47,13 +47,18 @@ The retained pure-Simple executable:
   while fresh-running the CLI source.
 
 The three-attempt cap was reached, so validation stopped instead of retrying.
-This is consistent with the active eager/module-loading instability: changing a
-widely imported struct can crash a consumer before runner code executes.
-Consequently this patch must not be marked verify-PASS until a fresh
-pure-Simple incremental artifact runs the focused CLI controls above.
+No reproducer or backtrace connects this SIGSEGV to eager module loading. The
+proven over-eager `cli_ops` import closure was already fixed by `4581db7d8fd`;
+the current deployed-binary failure is tracked separately as consistent with
+a null/empty-array length dereference in
+`native_selfhosted_run_segfault_startup_normalize_2026-07-24.md`. Consequently
+this patch must not be marked verify-PASS until a fresh pure-Simple incremental
+artifact runs the focused CLI controls above.
 
 ## Related
 
 - `doc/08_tracking/bug/rust_test_runner_explicit_non_test_false_green_2026-07-17.md`
 - `doc/08_tracking/bug/test_runner_zero_executed_single_file_greenwash_2026-07-17.md`
 - `doc/08_tracking/bug/test_runner_fresh_seed_silent_noop_2026-07-17.md`
+- `doc/08_tracking/bug/native_selfhosted_run_segfault_startup_normalize_2026-07-24.md`
+- `doc/08_tracking/bug/stage4_test_runner_daemon_fallback_relint_nonmemoized_2026-07-20.md`
