@@ -67,9 +67,10 @@ Codex routes SPipe development work through `$sp_dev`:
 **[.codex/skills/sp_dev/SKILL.md](../../.codex/skills/sp_dev/SKILL.md)**
 
 For broad SPipe lanes, split independent checks across lower-model sidecars
-when available (Codex Spark, Claude Haiku, or Claude Sonnet), then require a
-normal/highest-capability review before accepting done marks, broad exclusions,
-or release-blocking verification. The first architecture pass defines shared
+when available (Codex Spark, Claude Haiku, Claude Sonnet, or **GLM** via z.ai —
+setup: [doc/07_guide/infra/model_providers/glm.md](../../doc/07_guide/infra/model_providers/glm.md)),
+then require a normal/highest-capability review before accepting done marks,
+broad exclusions, or release-blocking verification. The first architecture pass defines shared
 interface names, manual `step("...")` flow helper names, and setup/checker
 helper names; placeholder helpers must fail explicitly (`assert(false)` or
 `fail(...)`).
