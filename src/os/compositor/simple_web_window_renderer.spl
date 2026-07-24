@@ -15,7 +15,6 @@ use common.ui.wm_chrome_theme.{
 }
 use os.compositor.web_render_surface.{compositor_render_html_artifact, compositor_render_request_artifact}
 use std.gc_async_mut.ui.web_render_pixel_backend.{WebRenderPixelArtifactCache}
-use std.common.crypto.sha256.{sha256_text}
 
 val HOST_WM_DEFAULT_THEME_ID: text = "aetheric_dark"
 
@@ -39,24 +38,6 @@ fn _theme_text_rgba(theme: text) -> u32:
     if installed != 0u32:
         return installed
     load_theme_package(theme).snapshot.material.text_rgba
-
-fn simple_web_visible_pixels_realize_solid_material(pixels: [u32], width: i32, height: i32, expected: u32) -> bool:
-    val expected_len = width * height
-    if expected_len <= 0 or pixels.len() != expected_len:
-        return false
-    var matching = 0
-    for pixel in pixels:
-        if pixel == expected:
-            matching = matching + 1
-    # The WM wrapper is a viewport-filling surface. Requiring majority
-    # coverage rejects coincidental icon/text pixels and partial/broken
-    # rasters while allowing real child content to paint over part of it.
-    matching * 2 >= expected_len
-
-fn _theme_solid_material_sha256(theme: text) -> text:
-    val bg = _theme_solid_fallback_rgba(theme)
-    val fg = _theme_text_rgba(theme)
-    sha256_text("simple-web-realized-solid-material-v1\n0|kind=solid-material|bg={bg}|fg={fg}|backdrop=none|background-image=none")
 
 fn _simple_web_window_css(theme: text) -> text:
     # Theme aliases, package inheritance, widget CSS, and visual tokens belong
@@ -203,19 +184,6 @@ fn _simple_web_content_frame_cached_impl(cache: WebRenderPixelArtifactCache, win
     val visible = _window_scrolled_pixels(artifact.pixels, width, full_h, height, clamped_scroll)
     val installed_fingerprint = active_theme_source_fingerprint(theme)
     val theme_fingerprint = if installed_fingerprint != "": installed_fingerprint else: load_theme_package(theme).fingerprint
-    var fallback_kind = artifact.material_fallback.kind
-    var fallback_reason = artifact.material_fallback.reason
-    var fallback_sha256 = artifact.material_fallback.material_sha256
-    # Freestanding can preserve primary DrawIR fields/pixels while losing a
-    # nested fallback-provenance class during the layout -> execution -> cache
-    # -> artifact round trip. Recover only from the authoritative visible
-    # pixels: the named package material must actually appear in the frame.
-    # A declaration without matching pixels remains rejected downstream.
-    val injected_contract = req.body_html.contains("data-wm-theme-fallback='solid-material'")
-    if fallback_kind != "solid-material" and injected_contract and simple_web_visible_pixels_realize_solid_material(visible, width, height, _theme_solid_fallback_rgba(theme)):
-        fallback_kind = "solid-material"
-        fallback_reason = "cpu-raster-backdrop-sampling-unavailable"
-        fallback_sha256 = _theme_solid_material_sha256(theme)
     WmContentFrame(
         window_id: window_id,
         scene_revision: scene_revision,
@@ -231,9 +199,9 @@ fn _simple_web_content_frame_cached_impl(cache: WebRenderPixelArtifactCache, win
         engine2d_status: artifact.engine2d_status,
         engine2d_backend: artifact.engine2d_backend,
         engine2d_reason: artifact.engine2d_reason,
-        material_fallback_kind: fallback_kind,
-        material_fallback_reason: fallback_reason,
-        material_fallback_sha256: fallback_sha256,
+        material_fallback_kind: artifact.material_fallback.kind,
+        material_fallback_reason: artifact.material_fallback.reason,
+        material_fallback_sha256: artifact.material_fallback.material_sha256,
         theme_id: theme,
         theme_source_manifest_sha256: theme_fingerprint
     )

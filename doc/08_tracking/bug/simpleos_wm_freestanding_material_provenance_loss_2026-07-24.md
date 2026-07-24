@@ -25,24 +25,30 @@ pinned Noto Sans Mono font before failing closed on provenance.
 
 Commit `e87aa6430e` moved fallback derivation from authoritative parsed
 nodes/computed styles to a second scan over
-`DrawIrCommand.computed_style`. Freestanding preserves the primary DrawIR
-fields and pixels but loses this optional nested metadata through the wide
-struct-in-array round trip, so the rescan returns zero materials.
+`DrawIrCommand.computed_style`, which was replaced with direct computed-style
+derivation.
 
-Restoring pre-lowering derivation alone was insufficient: the resulting nested
-provenance class is still lost later in the
-layout → execution → cache → artifact chain.
+The remaining failure was real CSS state, not lost provenance transport.
+`apply_decls` retained `bg_layers_raw_v` from an earlier multilayer
+`background:` shorthand even when the later WM override specified
+`background-image:none`. Scalar gradients were cleared, but the radial/raw
+layer list survived. The renderer therefore correctly refused to claim that
+the solid material had been realized.
+
+Disassembly of the v3 freestanding ELF confirms that the provenance class is
+preserved at every layout, execution, cache, and artifact boundary; the prior
+nested-class-loss diagnosis was incorrect.
 
 ## Source fix
 
 - Layout/software results derive fallback from authoritative nodes/styles
   before DrawIR lowering.
-- The WM adapter performs a final fail-closed recovery only when its own
-  injected contract is present, the visible pixel count exactly matches the
-  viewport, and the package's declared opaque fallback ARGB covers at least
-  half of that viewport.
-- The recovered SHA-256 covers the exact resolved background/foreground
-  material tuple.
+- `background-image:none` now clears both scalar gradients and retained raw
+  multilayer background state.
+- No adapter-side pixel heuristic manufactures provenance; the computed CSS
+  must prove the opaque named material with no remaining image layers.
+- A focused radial/multilayer cascade regression checks software and Engine2D
+  results plus the material hash.
 - An empty `System Console` regression covers the first-window QEMU shape.
 
 No declaration-only fallback is accepted: if matching realized pixels are
@@ -52,5 +58,5 @@ absent, the downstream provenance gate still rejects the frame.
 
 - Host entry compile: 254 compiled, 0 failed.
 - MCP and LSP native packages: built and returned valid `initialize` replies.
-- QEMU runtime: retry cap reached before the pixel-validated adapter fix could
-  be exercised. A fresh session must run the canonical evidence wrapper once.
+- QEMU runtime: retry cap was reached before the CSS-state fix could be
+  exercised. A fresh session must run the canonical evidence wrapper once.

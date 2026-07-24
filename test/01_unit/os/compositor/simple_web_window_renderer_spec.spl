@@ -1,6 +1,6 @@
 use std.spec.*
 use app.io.mod.{file_read}
-use os.compositor.simple_web_window_renderer.{simple_web_content_frame_cached, simple_web_content_render_request_with_theme, simple_web_content_revision, simple_web_content_revision_with_theme, simple_web_visible_pixels_realize_solid_material}
+use os.compositor.simple_web_window_renderer.{simple_web_content_frame_cached, simple_web_content_render_request_with_theme, simple_web_content_revision, simple_web_content_revision_with_theme}
 use common.ui.window_scene.{WM_CONTENT_ORIGIN_SIMPLE_WEB, wm_content_frame_web_provenance_valid}
 use common.ui.web_render_api.{WEB_RENDER_TARGET_SIMPLE_WEB, WebRenderRequest}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
@@ -82,6 +82,21 @@ describe "Simple Web compositor adapter":
         expect(contains_pixel(pixels, 0xFF123456u32)).to_be(true)
         expect(contains_pixel(pixels, 0xFFFEDCBAu32)).to_be(true)
 
+    it "clears an earlier multilayer background when realizing the WM fallback":
+        val html = "<div data-wm-theme-fallback='solid-material' data-wm-theme-bg='#123456' data-wm-theme-fg='#FEDCBA' style='width:24px;height:16px;background:radial-gradient(circle,#FF0000,#0000FF),rgba(255,0,0,0.2);backdrop-filter:blur(12px)'>fallback</div>"
+        val software = simple_web_layout_render_html_software_result(html, 24, 16)
+        val draw_ir = simple_web_layout_render_html_readback_engine2d_result(html, 24, 16, "software")
+        expect(contains_pixel(software.pixels, 0xFF123456u32)).to_be(true)
+        expect(software.material_fallback.kind).to_equal("solid-material")
+        expect(software.material_fallback.material_sha256.len()).to_equal(64)
+        expect(draw_ir.material_fallback.kind).to_equal("solid-material")
+        expect(draw_ir.material_fallback.material_sha256).to_equal(software.material_fallback.material_sha256)
+
+    it "honors a later background shorthand after background-image none":
+        val later_none = simple_web_layout_render_html_software_pixels("<div style='width:24px;height:16px;background:radial-gradient(circle,#FF0000,#0000FF);background-image:none'>x</div>", 24, 16)
+        val later_gradient = simple_web_layout_render_html_software_pixels("<div style='width:24px;height:16px;background-image:none;background:radial-gradient(circle,#FF0000,#0000FF)'>x</div>", 24, 16)
+        assert_not_equal(later_gradient, later_none)
+
     it "propagates stable realized fallback provenance through cache hits":
         val req = simple_web_content_render_request_with_theme("aetheric_dark", "Theme", "<p>fallback</p>", 80, 40)
         val cache = web_render_pixel_artifact_cache(80, 40, "software")
@@ -101,13 +116,6 @@ describe "Simple Web compositor adapter":
         expect(frame.material_fallback_reason).to_equal("cpu-raster-backdrop-sampling-unavailable")
         expect(frame.material_fallback_sha256.len()).to_equal(64)
         expect(wm_content_frame_web_provenance_valid(frame)).to_be(true)
-
-    it "requires viewport-scale pixel evidence before recovering a solid material":
-        val bg = 0xFF1F1F21u32
-        expect(simple_web_visible_pixels_realize_solid_material([bg; 8], 4, 2, bg)).to_be(true)
-        expect(simple_web_visible_pixels_realize_solid_material([bg, bg, bg, bg, 0u32, 0u32, 0u32, 0u32], 4, 2, bg)).to_be(true)
-        expect(simple_web_visible_pixels_realize_solid_material([bg, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32], 4, 2, bg)).to_be(false)
-        expect(simple_web_visible_pixels_realize_solid_material([bg; 8], 3, 2, bg)).to_be(false)
 
     it "hashes resolved fallback colors rather than CSS spelling":
         val hex_req = WebRenderRequest.html(WEB_RENDER_TARGET_SIMPLE_WEB, "hex", "<div data-wm-theme-fallback='solid-material' data-wm-theme-bg='#123456' data-wm-theme-fg='#FEDCBA'>x</div>", "", "", 24, 16)
