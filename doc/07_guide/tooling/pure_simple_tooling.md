@@ -273,7 +273,9 @@ evidence boundary for the important pure-Simple tooling lanes:
   directory with no `.spl` files fails with a target diagnostic. Canonical
   identities deduplicate `./dir` plus an equivalent `dir/file.spl` without
   changing the first diagnostic spelling. The focused CLI contract and
-  essential-tools gate cover nested dirty input; see the
+  essential-tools gate cover nested dirty input. Ordinary lint startup keeps
+  the theme-package validator lazy; only `config/themes/**` targets load it.
+  See the
   [directory-target report](../../08_tracking/bug/lint_directory_target_opaque_failure_2026-07-24.md).
   **Remaining
   bug/gap:** these fixes, `982ce3fa445`, and the focused wildcard contract are
