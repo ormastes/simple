@@ -273,7 +273,10 @@ evidence boundary for the important pure-Simple tooling lanes:
   the legacy 320-block sampler no longer drops late candidates. The top-five
   signature index and 400-block bucket cap still bound comparisons. Similarity,
   semantic, and semantic-drift thresholds now reject non-finite and
-  out-of-range values (`60f23743d1d`). **Strongest current evidence:**
+  out-of-range values (`60f23743d1d`). Lexical window and result thresholds now
+  reject malformed, zero-invalid, and negative values before scanning; see the
+  [numeric threshold report](../../08_tracking/bug/duplicate_check_invalid_numeric_thresholds_2026-07-24.md).
+  **Strongest current evidence:**
   `f2818a4b63`, `6a9af6f6635`, `74594ec99ff`, and `60f23743d1d`; the focused
   detector and threshold contracts passed through the temporary bootstrap
   interpreter. The configured lexical SDN report path now writes once,
