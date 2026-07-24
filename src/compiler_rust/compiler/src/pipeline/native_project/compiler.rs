@@ -1298,9 +1298,12 @@ fn qualify_native_struct_layouts(
     // include that owner so independently compiled providers cannot collide.
     for (_, owner_name, vtable_symbol, _, export_symbol) in &mut mir.vtable_impls {
         let bare_owner = owner_name.clone();
-        let (owner, _) = resolve_exact_owner(&bare_owner).ok_or_else(|| {
-            format!("native object layout: unresolved local vtable owner `{bare_owner}`")
-        })?;
+        // Primitive/generic impl targets (`impl Hash for text`/`i32`/`[T]`)
+        // resolve to no local struct or import; keep the legacy
+        // `{module_prefix}__{name}` ownership so the key matches the
+        // consumer-side fallback in imports.rs pending_vtable_impls.
+        let (owner, _) = resolve_exact_owner(&bare_owner)
+            .unwrap_or_else(|| (format!("{module_prefix}__{bare_owner}"), true));
         let trait_name = vtable_symbol
             .rsplit_once("__for__")
             .map(|(_, trait_name)| trait_name)
