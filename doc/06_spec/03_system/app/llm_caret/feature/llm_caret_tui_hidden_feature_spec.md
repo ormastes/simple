@@ -1,17 +1,17 @@
 # LLM Caret TUI and Hidden-Feature System Spec
 
-> Exercises the production Caret TUI submission transition without a live terminal or paid provider. The scenarios drive `run_chat_tui_submission`, ANSI navigation decoding, transcript rendering, permissions, persistence, retry decisions, and production hidden-command dispatch. Raw-terminal byte acquisition and frame timing remain a separate evidence boundary.
+> Exercises the production Caret TUI submission transition without a live terminal or paid provider. The scenarios drive `run_chat_tui_submission`, ANSI/UTF-8 input reduction, transcript rendering, permissions, persistence, retry decisions, and production hidden-command dispatch. Raw-terminal byte acquisition and frame timing remain a separate evidence boundary.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # LLM Caret TUI and Hidden-Feature System Spec
 
-Exercises the production Caret TUI submission transition without a live terminal or paid provider. The scenarios drive `run_chat_tui_submission`, ANSI navigation decoding, transcript rendering, permissions, persistence, retry decisions, and production hidden-command dispatch. Raw-terminal byte acquisition and frame timing remain a separate evidence boundary.
+Exercises the production Caret TUI submission transition without a live terminal or paid provider. The scenarios drive `run_chat_tui_submission`, ANSI/UTF-8 input reduction, transcript rendering, permissions, persistence, retry decisions, and production hidden-command dispatch. Raw-terminal byte acquisition and frame timing remain a separate evidence boundary.
 
 ## At a Glance
 
@@ -31,7 +31,7 @@ Exercises the production Caret TUI submission transition without a live terminal
 
 Exercises the production Caret TUI submission state transition without a live
 terminal or paid provider. The scenarios drive `run_chat_tui_submission`,
-ANSI navigation decoding, transcript rendering, permission handling,
+ANSI/UTF-8 input reduction, transcript rendering, permission handling,
 persistence, retry decisions, and production hidden-command dispatch.
 Provider, model, resume, and new-conversation
 commands must refresh visible state; a new conversation must receive a fresh
@@ -159,6 +159,51 @@ step("Check transcript and status")
 expect(decoder_state).to_equal(0)
 expect(input.value).to_equal(">abc!")
 expect(input.value.contains("[")).to_be(false)
+```
+
+</details>
+
+#### should reduce raw editing paging and Enter to one prompt
+
+- Open the caret TUI
+- Edit a Unicode prompt and request both paging directions
+   - Expected: each input byte continues the current line
+   - Expected: Ctrl-P and Ctrl-N emit page-up and page-down actions
+- Submit one prompt without raw-byte leakage
+   - Expected: submitted action is `RAW_LINE_SUBMIT`
+   - Expected: submitted text equals `hi한`
+   - Expected: submitted text contains no `[` escape continuation
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Complete executable scenario source.
+
+```simple
+step("Open the caret TUI")
+var state = make_raw_line_state(
+    make_chat_tui_with_status(
+        "llm_caret - dummy",
+        "provider=dummy model=dummy-hello session=raw-session"
+    ).input
+)
+
+step("Edit a Unicode prompt and request both paging directions")
+for b in [104, 105, 33, 127, 0xED, 0x95, 0x9C]:
+    val edited = step_raw_line_byte(state, b)
+    expect(edited.action).to_equal(RAW_LINE_CONTINUE)
+    state = edited.state
+val older = step_raw_line_byte(state, 16)
+val newer = step_raw_line_byte(state, 14)
+expect(older.action).to_equal(RAW_LINE_PAGE_UP)
+expect(newer.action).to_equal(RAW_LINE_PAGE_DOWN)
+
+step("Submit one prompt without raw-byte leakage")
+val submitted = step_raw_line_byte(state, 13)
+expect(submitted.action).to_equal(RAW_LINE_SUBMIT)
+expect(submitted.submitted).to_equal("hi한")
+expect(submitted.submitted.contains("[")).to_be(false)
 ```
 
 </details>
@@ -437,8 +482,8 @@ expect(_source_excludes_sgtti("src/app/llm_caret/chat_tui.spl")).to_equal("exclu
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

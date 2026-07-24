@@ -6,9 +6,10 @@
 
 use std.tui.widgets.input.{
     InputWidget, input_insert_char, input_move_left, input_move_right,
-    input_move_home, input_move_end
+    input_move_home, input_move_end, input_delete_back
 }
 use app.io.mod.{env_get}
+use std.string_core.{char_from_code}
 
 fn select_renderer_mode(ui_mode: text, is_tty: bool) -> text:
     if ui_mode == "plain":
@@ -32,6 +33,31 @@ struct RawKeyDecodeResult:
     key: text
     printable_byte: i64
 
+struct RawLineState:
+    input: InputWidget
+    decoder_state: i64
+
+struct RawLineStep:
+    state: RawLineState
+    action: i64
+    submitted: text
+
+val RAW_LINE_CONTINUE = 0
+val RAW_LINE_SUBMIT = 1
+val RAW_LINE_EXIT = 2
+val RAW_LINE_PAGE_UP = 3
+val RAW_LINE_PAGE_DOWN = 4
+
+# UTF-8 decoder states use disjoint bands above the ANSI state range. The
+# offset within each band is the partially decoded Unicode code point.
+val UTF8_STATE_2_FINAL = 2000000
+val UTF8_STATE_3_SECOND = 4000000
+val UTF8_STATE_3_FINAL = 6000000
+val UTF8_STATE_4_THIRD = 8000000
+val UTF8_STATE_4_SECOND = 10000000
+val UTF8_STATE_4_FINAL = 12000000
+val UTF8_STATE_STRIDE = 2000000
+
 fn _raw_key_decode(
     state: i64, key: text, printable_byte: i64
 ) -> RawKeyDecodeResult:
@@ -48,16 +74,68 @@ fn _ansi_final_key(b: i64) -> text:
     if b == 72: return "home"
     ""
 
-# Pure byte-at-a-time ANSI decoder. State 0 is ordinary input, 1 is ESC,
-# 2 is CSI, 3/4/5 are numeric CSI home/end/other, and 6 is SS3. A lone ESC
-# never blocks: its next byte either advances a recognized sequence or is
-# swallowed, so sequence continuations cannot leak into the prompt.
+fn _utf8_state(base: i64, codepoint: i64) -> RawKeyDecodeResult:
+    _raw_key_decode(base + codepoint, "", -1)
+
+fn _utf8_partial(state: i64, base: i64) -> i64:
+    state - base
+
+fn _utf8_append(partial: i64, b: i64) -> i64:
+    (partial << 6) | (b & 63)
+
+fn _utf8_emit_or_reject(codepoint: i64, minimum: i64) -> RawKeyDecodeResult:
+    if codepoint < minimum or codepoint > 0x10FFFF:
+        return _raw_key_decode(0, "", -1)
+    if codepoint >= 0xD800 and codepoint <= 0xDFFF:
+        return _raw_key_decode(0, "", -1)
+    _raw_key_decode(0, "text", codepoint)
+
+# Pure byte-at-a-time ANSI and UTF-8 decoder. State 0 is ordinary input, 1 is
+# ESC, 2 is CSI, 3/4/5 are numeric CSI home/end/other, and 6 is SS3. UTF-8
+# states retain only a partial code point until all 2/3/4 bytes validate.
+# `printable_byte` is the completed Unicode code point; its historic field name
+# is retained for caller compatibility. Invalid, overlong, surrogate, and
+# out-of-range sequences reset without emitting any constituent byte.
 fn decode_raw_key_byte(state: i64, b: i64) -> RawKeyDecodeResult:
     if b == 27:
         return _raw_key_decode(1, "", -1)
     if state == 0:
         if b >= 32 and b <= 126:
             return _raw_key_decode(0, "text", b)
+        if b >= 0xC2 and b <= 0xDF:
+            return _utf8_state(UTF8_STATE_2_FINAL, b & 0x1F)
+        if b >= 0xE0 and b <= 0xEF:
+            return _utf8_state(UTF8_STATE_3_SECOND, b & 0x0F)
+        if b >= 0xF0 and b <= 0xF4:
+            return _utf8_state(UTF8_STATE_4_THIRD, b & 0x07)
+        return _raw_key_decode(0, "", -1)
+    if state >= UTF8_STATE_2_FINAL:
+        if b < 0x80 or b > 0xBF:
+            return _raw_key_decode(0, "", -1)
+        if state < UTF8_STATE_3_SECOND:
+            val partial = _utf8_partial(state, UTF8_STATE_2_FINAL)
+            return _utf8_emit_or_reject(_utf8_append(partial, b), 0x80)
+        if state < UTF8_STATE_3_FINAL:
+            val partial = _utf8_partial(state, UTF8_STATE_3_SECOND)
+            return _utf8_state(
+                UTF8_STATE_3_FINAL, _utf8_append(partial, b)
+            )
+        if state < UTF8_STATE_4_THIRD:
+            val partial = _utf8_partial(state, UTF8_STATE_3_FINAL)
+            return _utf8_emit_or_reject(_utf8_append(partial, b), 0x800)
+        if state < UTF8_STATE_4_SECOND:
+            val partial = _utf8_partial(state, UTF8_STATE_4_THIRD)
+            return _utf8_state(
+                UTF8_STATE_4_SECOND, _utf8_append(partial, b)
+            )
+        if state < UTF8_STATE_4_FINAL:
+            val partial = _utf8_partial(state, UTF8_STATE_4_SECOND)
+            return _utf8_state(
+                UTF8_STATE_4_FINAL, _utf8_append(partial, b)
+            )
+        if state < UTF8_STATE_4_FINAL + UTF8_STATE_STRIDE:
+            val partial = _utf8_partial(state, UTF8_STATE_4_FINAL)
+            return _utf8_emit_or_reject(_utf8_append(partial, b), 0x10000)
         return _raw_key_decode(0, "", -1)
     if state == 1:
         if b == 91: return _raw_key_decode(2, "", -1)
@@ -93,6 +171,50 @@ fn apply_raw_key_decode(
     if decoded.key == "end": return input_move_end(input)
     if decoded.printable_byte >= 0:
         return input_insert_char(
-            input, (decoded.printable_byte as char).to_text()
+            input, char_from_code(decoded.printable_byte)
         )
     input
+
+fn make_raw_line_state(input: InputWidget) -> RawLineState:
+    RawLineState(input: input, decoder_state: 0)
+
+fn _raw_line_step(
+    input: InputWidget, decoder_state: i64, action: i64, submitted: text
+) -> RawLineStep:
+    RawLineStep(
+        state: RawLineState(input: input, decoder_state: decoder_state),
+        action: action,
+        submitted: submitted
+    )
+
+# Pure raw-line reducer. Exit bytes preempt every decoder state; line editing,
+# submission, and paging are active only in ordinary state. When an ANSI or
+# UTF-8 sequence is pending, those bytes are passed to the decoder and safely
+# swallowed or used as continuations exactly like any other non-exit byte.
+fn step_raw_line_byte(state: RawLineState, b: i64) -> RawLineStep:
+    if b < 0 or b == 3 or b == 4:
+        return _raw_line_step(
+            state.input, state.decoder_state, RAW_LINE_EXIT, ""
+        )
+    if state.decoder_state == 0:
+        if b == 13 or b == 10:
+            return _raw_line_step(
+                state.input, 0, RAW_LINE_SUBMIT, state.input.value
+            )
+        if b == 127 or b == 8:
+            return _raw_line_step(
+                input_delete_back(state.input), 0, RAW_LINE_CONTINUE, ""
+            )
+        if b == 16:
+            return _raw_line_step(
+                state.input, 0, RAW_LINE_PAGE_UP, ""
+            )
+        if b == 14:
+            return _raw_line_step(
+                state.input, 0, RAW_LINE_PAGE_DOWN, ""
+            )
+    val decoded = decode_raw_key_byte(state.decoder_state, b)
+    _raw_line_step(
+        apply_raw_key_decode(state.input, decoded),
+        decoded.state, RAW_LINE_CONTINUE, ""
+    )

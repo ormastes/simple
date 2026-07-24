@@ -20,9 +20,9 @@ used to generate the full-parity matrices.
 
 | Evidence | Current finding | Authority |
 |---|---|---|
-| `src/app/llm_caret/*.spl` | 24 direct caret files; 7,042 LOC | Current-tree evidence |
+| `src/app/llm_caret/*.spl` | 24 direct caret files; 7,160 LOC | Current-tree evidence |
 | `doc/09_report/llm_caret_claude_cli_traceability.md` | Maps 13 files and 3,292 current LOC | Stale generated/manual mapping |
-| `scripts/check/check-llm-caret-claude-cli-trace.shs` | 24/24 files (100%); 7,042/7,042 LOC (100%); 470/470 file-qualified symbols after unused-helper removal; `STATUS: PASS` | Current computed gate |
+| `scripts/check/check-llm-caret-claude-cli-trace.shs` | Pending refresh after raw-line/UTF-8 input changes; prior gate passed 24/24 files, 7,042/7,042 LOC, and 470/470 symbols | Current computed gate |
 | Full self-hosted CLI bootstrap | Stage 3 built; Stage 4 full-CLI native build was killed by signal 9; no candidate deployed | Current executable-test blocker; do not retry in this session |
 | `tmp/claude/claude-code-main/src` | Missing | Current-tree evidence |
 | Full-parity feature matrix | 599 rows, 1,902 historical source files, 512,685 historical LOC | Snapshot-derived evidence; cannot be refreshed against upstream now |
@@ -85,7 +85,7 @@ scenario counts as coverage.
 | Tool loop and permission policy | `chat.spl`, `tools.spl`, `main.spl` | `tools_spec.spl`, `main_spec.spl` | No CLI fixture proves deny/allow and exit/output contract | CLI / unit-only |
 | Session save/list/resume | `session.spl`, `main.spl`, `chat_tui.spl` | `session_spec.spl`, `chat_tui_spec.spl` | Live resume uses real Claude; no offline process scenario | CLI/TUI / unit plus opt-in live |
 | Server mode and request guards | `server.spl`, `main.spl` | `main_spec.spl`, `server_spec.spl` | None launches `--server` | CLI / unit-only |
-| TUI selection, transcript, markdown, scroll, slash dispatch | `chat_tui.spl`, `tui_input.spl` | `chat_tui_spec.spl` | `llm_caret_tui_hidden_feature_spec.spl` drives decoder/input-widget and submission transitions | TUI / deterministic component evidence; no live PTY capture |
+| TUI selection, transcript, markdown, scroll, slash dispatch | `chat_tui.spl`, `tui_input.spl` | `chat_tui_spec.spl` | `llm_caret_tui_hidden_feature_spec.spl` drives ANSI/UTF-8 decoding, raw-line control reduction, and submission transitions | TUI / deterministic component evidence; no live PTY capture |
 | `/help`, `/exit`, `/new`, `/model`, `/provider`, `/sessions`, `/resume` | `chat_tui.spl` | `chat_tui_spec.spl` | TUI hidden-feature spec drives provider/resume/new through `run_chat_tui_submission` | TUI / component dispatch; no live terminal |
 | CLI/TUI/GUI shared dummy-provider seam | `provider.spl`, `interface_text.spl`, GUI modules | Core unit specs | `llm_caret_interfaces_spec.spl` | All / no modern steps or visible TUI evidence |
 | Live Claude responses, tokens, model, system prompt, resume | `claude_cli.spl` | Parser/argv unit specs | `llm_caret_live_spec.spl`, `llm_caret_live_comprehensive_spec.spl` | CLI / opt-in; comprehensive spec contains three skip helpers |
@@ -140,7 +140,7 @@ Current focused executable specs:
 |---|---|---|
 | `test/03_system/app/llm_caret/feature/llm_caret_cli_hardening_spec.spl` | `doc/06_spec/03_system/app/llm_caret/feature/llm_caret_cli_hardening_spec.md` | Three scenarios: four source-process cases plus cached-wrapper selection and invalid-override rejection; current runner execution remains blocked |
 | `test/03_system/tools/llm/llm_caret_claude_cli_feature_contract_spec.spl` | `doc/06_spec/03_system/tools/llm/llm_caret_claude_cli_feature_contract_spec.md` | Eight deterministic CLI/parser/provider/state scenarios with complete folded source; current runner execution remains blocked |
-| `test/03_system/app/llm_caret/feature/llm_caret_tui_hidden_feature_spec.spl` | `doc/06_spec/03_system/app/llm_caret/feature/llm_caret_tui_hidden_feature_spec.md` | Eight TUI/hidden component scenarios; expected live capture remains unexecuted |
+| `test/03_system/app/llm_caret/feature/llm_caret_tui_hidden_feature_spec.spl` | `doc/06_spec/03_system/app/llm_caret/feature/llm_caret_tui_hidden_feature_spec.md` | Nine TUI/hidden component scenarios, including Unicode raw-line reduction; expected live capture remains unexecuted |
 
 Every relevant REQ needs at least a happy, edge, and error/rejection scenario.
 The CLI fixture must use stdlib/facade process APIs, never local `rt_*`
@@ -233,7 +233,8 @@ The focused hardening lane now includes:
   help, offline success, provider failure, and unknown-option cases, plus
   cached production-wrapper selection and invalid-override rejection;
 - `llm_caret_tui_hidden_feature_spec.spl`, covering visible input/transcript,
-  provider/model/session status, raw-key decoder/input transitions, permission
+  provider/model/session status, ANSI/UTF-8 decoder and raw-line control
+  transitions, permission
   denial, retry limits, hidden commands, and SGTTI exclusion;
 - `managed_env_constants_spec.spl`, covering the experimental-beta disable and
   agent-team hidden environment keys without reading host state;
@@ -254,12 +255,12 @@ refresh visible status; `/new` obtains a fresh session ID instead of reusing
 and overwriting the prior persisted conversation.
 
 Focused system manuals are mirrored under `doc/06_spec/03_system/...`.
-Source-synchronized unit manuals now mirror 80 Claude CLI, 31 provider, 64 TUI,
+Source-synchronized unit manuals now mirror 80 Claude CLI, 31 provider, 79 TUI,
 and 45 main-entry scenarios. Because docgen cannot execute in the current
 runtime, all refreshed manuals explicitly report zero executed scenarios and
 do not claim a PASS.
 Together with the three process-hardening and five managed-environment
-scenarios, this focused tranche contains 228 modern `should` examples with
+scenarios, this focused tranche contains 243 modern `should` examples with
 canonical matchers and zero source/manual body mismatches.
 
 Executable status remains **FAIL / runtime blocked**. The deployed
@@ -298,14 +299,15 @@ rejected by default and admitted only when enabled, while disabled commands
 remain rejected under every fixture. Retry backoff is capped after jitter and
 the configured retry timeout now prevents an over-budget sleep.
 
-The completion audit is still red. Current direct scope is 24 files / 7,042
+The completion audit is still red. Current direct scope is 24 files / 7,160
 LOC and the focused report contains current rows for all 24 files.
 The focused checker covers all file-qualified declarations, including the
-raw-key decoder and parser validation helpers. The historical
+ANSI/UTF-8 raw-key decoder, raw-line reducer, and parser validation helpers.
+The historical
 1,902-row full-parity matrix has 1,157 missing targets and 1,728 missing primary
 specs, and its upstream source tree is absent. The TUI spec covers the pure
-raw-key decoder and input-widget transition, but not a driven live PTY loop;
-no live capture is claimed.
+raw-key decoder, input-widget transition, and control-byte precedence, but not
+a driven live PTY loop; no live capture is claimed.
 Experimental environment gates and several distributed hidden features are not
 yet part of the aggregate hidden map. These gaps prohibit a full Claude parity
 or production-ready PASS claim.

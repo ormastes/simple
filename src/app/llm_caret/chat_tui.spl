@@ -33,7 +33,7 @@ use std.tui.style.*
 use std.tui.widget.{Rect, make_rect, pad_or_truncate}
 use std.tui.widgets.box_widget.{BoxWidget, make_box_widget_with_content, box_render}
 use std.tui.widgets.input.{
-    InputWidget, make_input_widget, input_delete_back, input_clear, input_render
+    InputWidget, make_input_widget, input_clear, input_render
 }
 
 use app.llm_caret.types.{Message, new_user_message}
@@ -43,8 +43,9 @@ use app.llm_caret.chat.{AgentResult, run_agent_loop, run_agent_loop_rendered,
                         tool_call_status, tool_call_summary}
 use app.llm_caret.claude_full.commands.{findRootCommand, admitRootCommand}
 use app.llm_caret.tui_input.{
-    select_renderer_mode, caret_is_tty, decode_raw_key_byte,
-    apply_raw_key_decode
+    select_renderer_mode, caret_is_tty, make_raw_line_state,
+    step_raw_line_byte, RAW_LINE_SUBMIT, RAW_LINE_EXIT,
+    RAW_LINE_PAGE_UP, RAW_LINE_PAGE_DOWN
 }
 
 extern fn rt_stdin_read_line() -> text
@@ -563,29 +564,24 @@ fn _read_line(ui0: ChatTui) -> (ChatTui, text, i64):
     var done = false
     var result_text = ""
     var status = 1
-    var raw_key_state = 0
+    var raw_line = make_raw_line_state(ui.input)
     while not done:
         _draw_frame(ui)
         val b = terminal_read_byte()
-        if b < 0 or b == KEY_CTRL_C or b == KEY_CTRL_D:
+        val next = step_raw_line_byte(raw_line, b)
+        raw_line = next.state
+        ui = _ui_set_input(ui, raw_line.input)
+        if next.action == RAW_LINE_EXIT:
             status = 1
             done = true
-        elif raw_key_state == 0 and (b == KEY_ENTER or b == 10):
-            result_text = ui.input.value
+        elif next.action == RAW_LINE_SUBMIT:
+            result_text = next.submitted
             status = 0
             done = true
-        elif raw_key_state == 0 and (b == KEY_BACKSPACE or b == 8):
-            ui = _ui_set_input(ui, input_delete_back(ui.input))
-        elif raw_key_state == 0 and b == 16:  # Ctrl-P: scroll toward older lines
+        elif next.action == RAW_LINE_PAGE_UP:
             scroll_page_up(tui_transcript_len(), _inner_height())
-        elif raw_key_state == 0 and b == 14:  # Ctrl-N: scroll toward newer lines / resume auto-follow
+        elif next.action == RAW_LINE_PAGE_DOWN:
             scroll_page_down(tui_transcript_len(), _inner_height())
-        else:
-            val decoded = decode_raw_key_byte(raw_key_state, b)
-            raw_key_state = decoded.state
-            ui = _ui_set_input(
-                ui, apply_raw_key_decode(ui.input, decoded)
-            )
     (ui, result_text, status)
 
 # ============================================================================

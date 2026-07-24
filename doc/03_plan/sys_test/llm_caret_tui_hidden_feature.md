@@ -21,8 +21,9 @@ widget model, dummy responder, styled transcript state, slash-provider hook,
 permission-gated tool loop, retry decisions, Claude REPL error route,
 production hidden-command dispatch/admission, and the SGTTI source boundary.
 It drives the pure raw-key decoder into the production input-widget transition,
-but does not drive live PTY byte acquisition, UTF-8 decoding, raw-mode cleanup,
-resize/redraw, or frame timing. The expected compact component snapshot is
+including valid/rejected UTF-8 and the Enter/edit/page/exit control reducer,
+but does not drive live PTY byte acquisition, raw-mode cleanup, resize/redraw,
+or frame timing. The expected compact component snapshot is
 written to
 `build/test-artifacts/03_system/app/llm_caret/feature/llm_caret_tui_hidden_feature/caret_tui.txt`.
 
@@ -37,6 +38,7 @@ to absence from `src/app/llm_caret/main.spl` and `chat_tui.spl`.
 | Visible prompt, dummy reply, provider/model/session status | `test/03_system/app/llm_caret/feature/llm_caret_tui_hidden_feature_spec.spl` | `doc/06_spec/03_system/app/llm_caret/feature/llm_caret_tui_hidden_feature_spec.md` | Designed |
 | Provider switch is visible in transcript and refreshed status | same | same | Implemented; executable run blocked by stale self-hosted runtime |
 | ANSI navigation updates cursor/input state without escape-byte leakage | same | same | Implemented through pure decoder/input seam; live PTY remains unproved |
+| UTF-8 scalars and raw Enter/edit/page/exit precedence reduce without byte leakage | same | same | Implemented through pure decoder/reducer seams; live PTY remains unproved |
 | Permission denial is rendered as tool error | same | same | Designed |
 | Retry admission, cap, Retry-After, visible query error route | same | same | Designed |
 | Hidden command is rejected by default, admitted by fixture, and stays non-visible | same | same | Implemented; executable run blocked by stale self-hosted runtime |
@@ -45,10 +47,10 @@ to absence from `src/app/llm_caret/main.spl` and `chat_tui.spl`.
 
 ## Pass/fail criteria
 
-PASS requires all eight examples to execute with real assertions, the TUI capture
+PASS requires all nine examples to execute with real assertions, the TUI capture
 to round-trip exactly, the hidden command to remain non-visible, and the
 production entrypoint/TUI sources to remain SGTTI-free. Live raw-terminal
-acquisition, cleanup, UTF-8, resize/redraw, and frame evidence remain separate
+acquisition, cleanup, resize/redraw, and frame evidence remain separate
 required gaps before a broad TUI production-readiness claim.
 
 The generated manual must report `0 stubs`, retain the scope limitation above,

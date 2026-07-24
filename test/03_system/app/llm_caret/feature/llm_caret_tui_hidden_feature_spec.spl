@@ -53,7 +53,10 @@ use app.llm_caret.chat_tui.{
     tui_transcript_len, tui_transcript_line_text
 }
 use app.llm_caret.tui_input.{
-    decode_raw_key_byte, apply_raw_key_decode
+    decode_raw_key_byte, apply_raw_key_decode,
+    make_raw_line_state, step_raw_line_byte,
+    RAW_LINE_CONTINUE, RAW_LINE_SUBMIT,
+    RAW_LINE_PAGE_UP, RAW_LINE_PAGE_DOWN
 }
 use app.llm_caret.retry.{RetryPolicy, should_retry, effective_delay_ms}
 use app.llm_caret.main.{_slash_on_hidden_command}
@@ -284,6 +287,31 @@ describe "REQ-LLM-CARET-FULL-003: LLM Caret TUI visible behavior":
         expect(decoder_state).to_equal(0)
         expect(input.value).to_equal(">abc!")
         expect(input.value.contains("[")).to_be(false)
+
+    it "should reduce raw editing paging and Enter to one prompt":
+        step("Open the caret TUI")
+        var state = make_raw_line_state(
+            make_chat_tui_with_status(
+                "llm_caret - dummy",
+                "provider=dummy model=dummy-hello session=raw-session"
+            ).input
+        )
+
+        step("Edit a Unicode prompt and request both paging directions")
+        for b in [104, 105, 33, 127, 0xED, 0x95, 0x9C]:
+            val edited = step_raw_line_byte(state, b)
+            expect(edited.action).to_equal(RAW_LINE_CONTINUE)
+            state = edited.state
+        val older = step_raw_line_byte(state, 16)
+        val newer = step_raw_line_byte(state, 14)
+        expect(older.action).to_equal(RAW_LINE_PAGE_UP)
+        expect(newer.action).to_equal(RAW_LINE_PAGE_DOWN)
+
+        step("Submit one prompt without raw-byte leakage")
+        val submitted = step_raw_line_byte(state, 13)
+        expect(submitted.action).to_equal(RAW_LINE_SUBMIT)
+        expect(submitted.submitted).to_equal("hi한")
+        expect(submitted.submitted.contains("[")).to_be(false)
 
     it "should surface provider switching through the visible transcript":
         step("Open the caret TUI")

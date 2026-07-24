@@ -26,7 +26,7 @@ remote-control bridge, OAuth, or full agent orchestration.
 | Simple source file | LOC | Claude source match | Role |
 |---|---:|---|---|
 | `src/app/llm_caret/chat.spl` | 227 | `src/assistant/sessionHistory.ts`, `src/bootstrap/state.ts` | conversation history and message JSON |
-| `src/app/llm_caret/chat_tui.spl` | 790 | `src/screens/REPL.tsx`, `src/commands/*` | transcript, slash commands, and session transitions |
+| `src/app/llm_caret/chat_tui.spl` | 786 | `src/screens/REPL.tsx`, `src/commands/*` | transcript, slash commands, and session transitions |
 | `src/app/llm_caret/claude_api.spl` | 241 | `src/QueryEngine.ts`, `src/entrypoints/sdk/coreSchemas.ts` | Anthropic Messages request/response |
 | `src/app/llm_caret/claude_cli.spl` | 580 | `src/entrypoints/cli.tsx`, `src/QueryEngine.ts` | non-interactive argv and typed JSON/stream parsing |
 | `src/app/llm_caret/config.spl` | 228 | `src/bootstrap/state.ts`, `src/constants/product.ts` | defaults and provider config |
@@ -47,11 +47,11 @@ remote-control bridge, OAuth, or full agent orchestration.
 | `src/app/llm_caret/server.spl` | 199 | `src/entrypoints/mcp.ts`, `src/entrypoints/sdk/coreSchemas.ts` | compatibility HTTP/MCP-like response surface |
 | `src/app/llm_caret/session.spl` | 245 | `src/assistant/sessionHistory.ts`, `src/bootstrap/state.ts` | persisted app/provider sessions |
 | `src/app/llm_caret/tools.spl` | 507 | `src/Tool.ts`, `src/constants/tools.ts` | permission-gated tools and tool-use parsing |
-| `src/app/llm_caret/tui_input.spl` | 98 | `src/screens/REPL.tsx` | renderer selection and ANSI raw-key decoding |
+| `src/app/llm_caret/tui_input.spl` | 220 | `src/screens/REPL.tsx` | renderer selection, ANSI/UTF-8 decoding, and raw-line control reduction |
 | `src/app/llm_caret/types.spl` | 225 | `src/entrypoints/sdk/coreSchemas.ts`, `src/types/logs.ts` | request/response/event/config records |
 
 Mapped files: 24/24 = 100%.
-Mapped LOC: 6840/6840 = 100%.
+Mapped LOC: 7160/7160 = 100%.
 
 These counts prove current direct-file classification, not full Claude parity.
 Simple-only and conceptual rows are explicit, and upstream freshness remains
@@ -96,7 +96,7 @@ target is absent.
 | `server.spl` | `build_health_response`, `build_models_response`, `build_chat_completion_response`, `build_anthropic_response`, `build_error_response`, `handle_route` |
 | `session.spl` | `Session`, session ID/path/save/load/list helpers |
 | `tools.spl` | permission policy, tool models, path guards, execution, tool-use parsing |
-| `tui_input.spl` | renderer selection, tty heuristic, ANSI raw-key decoding, input transitions |
+| `tui_input.spl` | renderer selection, tty heuristic, ANSI/UTF-8 raw-key decoding, raw-line control reduction, input transitions |
 | `types.spl` | `Message`, `ChatRequest`, `ChatResponse`, `StreamEvent`, `ProviderConfig`, constructors, response predicates |
 
 ## Simple Symbol Trace
