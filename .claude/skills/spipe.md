@@ -1042,6 +1042,18 @@ same false-green rules apply (conditional PASS markers only; final line
   read/write GPRs and dpc, resume — proven by
   `test/01_unit/lib/hardware/link_mux/jtag_debug_probe.spl`. Prefer extending
   that probe over ad-hoc print-debugging of core state.
+- **Docgen authoring gotchas** (2026-07-24, learned writing
+  `jtag_debug_scenario_spec.spl`): the template's bare `@step "text"`
+  annotation is NOT valid outside a comment — use plain `step("...")` calls;
+  docgen auto-narrates any bare non-`val`/non-`expect` statement into a
+  literal bullet, so keep scenarios `val`-chained and name bit-extraction
+  expressions (trailing inline comments corrupt the "Expected:" extraction).
+- **`simple test` undercounts `it` examples** (2026-07-24, bug doc
+  `sspec_test_runner_undercounts_it_blocks_2026-07-24.md`): the test-path
+  evaluator prints fewer "total" than the registered examples (74 → "34
+  total") while `run` counts all. Verdicts are still per-example correct, but
+  never trust the `test` total as coverage evidence — cross-check example
+  counts with `run` when it matters.
 - Feature knowledge lives in
   `doc/00_llm_process/feature_expert/riscv_soc_linux/skill.md` — read it
   before any "does X exist / why does it fail" hardware question.

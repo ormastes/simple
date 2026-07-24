@@ -1,0 +1,648 @@
+# @cover src/lib/hardware/link_mux/jtag_route.spl 0%
+# @cover src/lib/hardware/link_mux/dtm_route.spl 0%
+# @cover src/lib/hardware/link_mux/dm_model.spl 0%
+"""
+# RISC-V JTAG/DTM/DM Building-Block Unit Specification
+
+**Category:** Infrastructure (hardware/link_mux)
+**Status:** Draft
+
+## Overview
+
+Fine-grained unit tests for the pure building blocks behind the shared-link
+JTAG tunnel, exercised directly (no transport, no mux, no hart ticking):
+
+- `jtag_route.spl` — the 16-state IEEE 1149.1 TAP FSM (`tap_next`), the
+  remote_bitbang byte-level state machine (`tap_apply`), the host-side command
+  encoder (`cmd_clock`), and the IDCODE read round trip.
+- `dtm_route.spl` — the RISC-V DTM layered on the same TAP FSM: IR shift/reset/
+  capture, per-instruction DR width, the DTMCS capture word, DMI DR pack/
+  unpack, and DMI event emission (exactly on Update-DR).
+- `dm_model.spl` — the Debug Module register map (DMSTATUS/ABSTRACTCS/
+  DMCONTROL/DATA0/DATA1) and the abstract COMMAND access-register decode
+  (aarsize/transfer/write/regno -> GPR/dpc), tested against the pure
+  register/hart-accessor functions directly.
+- A VHDL mirror cross-check section pins the `.spl` constants to the literals
+  in `jtag_tap.vhd` / `riscv_dtm.vhd` they are documented to mirror.
+"""
+
+use std.spec.*
+
+use std.hardware.link_mux.jtag_route.{
+    RBB_R, RBB_0, JTAG_IDCODE, ST_CAPTURE_DR, ST_SHIFT_DR,
+    TapState, tap_next, tap_apply, tap_create,
+    cmd_clock, jtag_read_idcode_cmds, jtag_decode_idcode, jtag_fpga_process
+}
+use std.hardware.link_mux.dtm_route.{
+    IR_IDCODE, IR_DTMCS, IR_DMI, IR_WIDTH,
+    DTM_IDCODE, DTM_ABITS, DMI_WIDTH,
+    DMI_OP_READ, DMI_OP_WRITE,
+    DMI_EV_NONE, DMI_EV_READ, DMI_EV_WRITE,
+    dtmcs_value, mask_w, dr_width_for, dmi_dr_pack, dmi_extract_data, dmi_extract_op,
+    DebugTap, debug_tap_create, tap_dtm_apply
+}
+use std.hardware.link_mux.dm_model.{
+    DM_DATA0, DM_DATA1, DM_DMCONTROL, DM_DMSTATUS, DM_ABSTRACTCS, DM_COMMAND,
+    REGNO_GPR_BASE, REGNO_DPC, CMDERR_NONE, CMDERR_NOT_SUPPORTED,
+    hart_create, hart_pc, hart_gpr, hart_set_pc, hart_set_gpr,
+    dm_create, dmstatus_word, abstractcs_word, dm_read, dm_write, dm_command
+}
+use std.hardware.soc_rtl.soc_top_64.{soc_top_64_init}
+
+# ============================================================================
+# Named FSM state ids — shared numbering between jtag_route and dtm_route (see
+# jtag_route.spl header: "0 TLR 1 RTI 2 SELDR 3 CAPDR 4 SHIFTDR 5 EXIT1DR
+# 6 PAUSEDR 7 EXIT2DR 8 UPDDR 9 SELIR 10 CAPIR 11 SHIFTIR 12 EXIT1IR 13 PAUSEIR
+# 14 EXIT2IR 15 UPDIR"). ST_CAPTURE_DR (3) and ST_SHIFT_DR (4) are imported
+# from jtag_route itself; the rest are named locally for readability.
+# ============================================================================
+val ST_TLR: i64 = 0
+val ST_RTI: i64 = 1
+val ST_SELECT_DR: i64 = 2
+val ST_EXIT1_DR: i64 = 5
+val ST_PAUSE_DR: i64 = 6
+val ST_EXIT2_DR: i64 = 7
+val ST_UPDATE_DR: i64 = 8
+val ST_SELECT_IR: i64 = 9
+val ST_CAPTURE_IR: i64 = 10
+val ST_SHIFT_IR: i64 = 11
+val ST_EXIT1_IR: i64 = 12
+val ST_PAUSE_IR: i64 = 13
+val ST_EXIT2_IR: i64 = 14
+val ST_UPDATE_IR: i64 = 15
+
+# BYPASS instruction encoding (jtag_tap.vhd:70 INSN_BYPASS = "11111" = 0x1F).
+val IR_BYPASS: i64 = 0x1F
+
+# DMI DR field layout (riscv_dtm.vhd:16): { addr[40:34], data[33:2], op[1:0] }.
+val DMI_ADDR_SHIFT: i64 = 34
+
+# DTMCS field layout (riscv_dtm.vhd:8-11): version[3:0], abits[9:4], idle[14:12].
+val DTMCS_VERSION_MASK: i64 = 0xF
+val DTMCS_ABITS_SHIFT: i64 = 4
+val DTMCS_ABITS_MASK: i64 = 0x3F
+val DTMCS_IDLE_SHIFT: i64 = 12
+val DTMCS_IDLE_MASK: i64 = 0x7
+
+# DMCONTROL bit layout (debug_registers.vhd via dm_model.spl header).
+val DMCONTROL_DMACTIVE_BIT: i64 = 1
+val DMCONTROL_RESUMEREQ_BIT: i64 = 1 << 30
+val DMCONTROL_HALTREQ_BIT: i64 = 1 << 31
+
+# ABSTRACTCS cmderr field (dm_model.spl header): cmderr[10:8].
+val ABSTRACTCS_CMDERR_SHIFT: i64 = 8
+
+# Abstract COMMAND word layout (dm_model.spl header):
+#   cmdtype[31:24]=0 (access-register), aarsize[22:20]=2|3, transfer(17),
+#   write(16), regno[15:0].
+val CMD_CMDTYPE_SHIFT: i64 = 24
+val CMD_AARSIZE_SHIFT: i64 = 20
+val CMD_TRANSFER_BIT: i64 = 17
+val CMD_WRITE_BIT: i64 = 16
+val CMDTYPE_ACCESS_REGISTER: i64 = 0
+val CMDTYPE_BAD: i64 = 1
+val AARSIZE_32: i64 = 2
+val AARSIZE_64: i64 = 3
+val AARSIZE_UNSUPPORTED_16: i64 = 1
+val TRANSFER_ON: i64 = 1
+val TRANSFER_OFF: i64 = 0
+val ACCESS_WRITE: i64 = 1
+val ACCESS_READ: i64 = 0
+
+val DM_TEST_DRAM_SIZE: i64 = 0x1000
+
+# ============================================================================
+# Local test helpers (not exported by the units under test).
+# ============================================================================
+
+# One remote_bitbang byte: RBB_0-based {tck,tms,tdi} triplet.
+fn jtag_byte(tck: i64, tms: i64, tdi: i64) -> i64:
+    RBB_0 + ((tck << 2) | (tms << 1) | tdi)
+
+fn make_command_word(cmdtype: i64, aarsize: i64, transfer: i64, is_write: i64, regno: i64) -> i64:
+    (cmdtype << CMD_CMDTYPE_SHIFT) | (aarsize << CMD_AARSIZE_SHIFT) |
+        (transfer << CMD_TRANSFER_BIT) | (is_write << CMD_WRITE_BIT) | regno
+
+fn access_register_cmd(aarsize: i64, transfer: i64, is_write: i64, regno: i64) -> i64:
+    make_command_word(CMDTYPE_ACCESS_REGISTER, aarsize, transfer, is_write, regno)
+
+
+# ============================================================================
+# jtag_route.spl — TAP FSM transition table
+# ============================================================================
+
+describe "TAP FSM transition table (jtag_route.tap_next) — IEEE 1149.1":
+    it "Test-Logic-Reset: TMS=0 -> Run-Test/Idle, TMS=1 stays in Test-Logic-Reset":
+        expect(tap_next(ST_TLR, 0)).to_equal(ST_RTI)
+        expect(tap_next(ST_TLR, 1)).to_equal(ST_TLR)
+
+    it "Run-Test/Idle: TMS=0 stays, TMS=1 -> Select-DR-Scan":
+        expect(tap_next(ST_RTI, 0)).to_equal(ST_RTI)
+        expect(tap_next(ST_RTI, 1)).to_equal(ST_SELECT_DR)
+
+    it "Select-DR-Scan: TMS=0 -> Capture-DR, TMS=1 -> Select-IR-Scan":
+        expect(tap_next(ST_SELECT_DR, 0)).to_equal(ST_CAPTURE_DR)
+        expect(tap_next(ST_SELECT_DR, 1)).to_equal(ST_SELECT_IR)
+
+    it "Capture-DR: TMS=0 -> Shift-DR, TMS=1 -> Exit1-DR":
+        expect(tap_next(ST_CAPTURE_DR, 0)).to_equal(ST_SHIFT_DR)
+        expect(tap_next(ST_CAPTURE_DR, 1)).to_equal(ST_EXIT1_DR)
+
+    it "Shift-DR: TMS=0 stays, TMS=1 -> Exit1-DR":
+        expect(tap_next(ST_SHIFT_DR, 0)).to_equal(ST_SHIFT_DR)
+        expect(tap_next(ST_SHIFT_DR, 1)).to_equal(ST_EXIT1_DR)
+
+    it "Exit1-DR: TMS=0 -> Pause-DR, TMS=1 -> Update-DR":
+        expect(tap_next(ST_EXIT1_DR, 0)).to_equal(ST_PAUSE_DR)
+        expect(tap_next(ST_EXIT1_DR, 1)).to_equal(ST_UPDATE_DR)
+
+    it "Pause-DR: TMS=0 stays, TMS=1 -> Exit2-DR":
+        expect(tap_next(ST_PAUSE_DR, 0)).to_equal(ST_PAUSE_DR)
+        expect(tap_next(ST_PAUSE_DR, 1)).to_equal(ST_EXIT2_DR)
+
+    it "Exit2-DR: TMS=0 -> Shift-DR, TMS=1 -> Update-DR":
+        expect(tap_next(ST_EXIT2_DR, 0)).to_equal(ST_SHIFT_DR)
+        expect(tap_next(ST_EXIT2_DR, 1)).to_equal(ST_UPDATE_DR)
+
+    it "Update-DR: TMS=0 -> Run-Test/Idle, TMS=1 -> Select-DR-Scan":
+        expect(tap_next(ST_UPDATE_DR, 0)).to_equal(ST_RTI)
+        expect(tap_next(ST_UPDATE_DR, 1)).to_equal(ST_SELECT_DR)
+
+    it "Select-IR-Scan: TMS=0 -> Capture-IR, TMS=1 -> Test-Logic-Reset":
+        expect(tap_next(ST_SELECT_IR, 0)).to_equal(ST_CAPTURE_IR)
+        expect(tap_next(ST_SELECT_IR, 1)).to_equal(ST_TLR)
+
+    it "Capture-IR: TMS=0 -> Shift-IR, TMS=1 -> Exit1-IR":
+        expect(tap_next(ST_CAPTURE_IR, 0)).to_equal(ST_SHIFT_IR)
+        expect(tap_next(ST_CAPTURE_IR, 1)).to_equal(ST_EXIT1_IR)
+
+    it "Shift-IR: TMS=0 stays, TMS=1 -> Exit1-IR":
+        expect(tap_next(ST_SHIFT_IR, 0)).to_equal(ST_SHIFT_IR)
+        expect(tap_next(ST_SHIFT_IR, 1)).to_equal(ST_EXIT1_IR)
+
+    it "Exit1-IR: TMS=0 -> Pause-IR, TMS=1 -> Update-IR":
+        expect(tap_next(ST_EXIT1_IR, 0)).to_equal(ST_PAUSE_IR)
+        expect(tap_next(ST_EXIT1_IR, 1)).to_equal(ST_UPDATE_IR)
+
+    it "Pause-IR: TMS=0 stays, TMS=1 -> Exit2-IR":
+        expect(tap_next(ST_PAUSE_IR, 0)).to_equal(ST_PAUSE_IR)
+        expect(tap_next(ST_PAUSE_IR, 1)).to_equal(ST_EXIT2_IR)
+
+    it "Exit2-IR: TMS=0 -> Shift-IR, TMS=1 -> Update-IR":
+        expect(tap_next(ST_EXIT2_IR, 0)).to_equal(ST_SHIFT_IR)
+        expect(tap_next(ST_EXIT2_IR, 1)).to_equal(ST_UPDATE_IR)
+
+    it "Update-IR: TMS=0 -> Run-Test/Idle, TMS=1 -> Select-DR-Scan":
+        expect(tap_next(ST_UPDATE_IR, 0)).to_equal(ST_RTI)
+        expect(tap_next(ST_UPDATE_IR, 1)).to_equal(ST_SELECT_DR)
+
+
+# ============================================================================
+# jtag_route.spl — bitbang byte application (tap_apply)
+# ============================================================================
+
+describe "TAP bitbang application (jtag_route.tap_apply)":
+    it "a rising edge (tck 0->1) advances the FSM":
+        val tap = TapState(fsm: ST_TLR, dr: 0, prev_tck: 0)
+        val step = tap_apply(tap, jtag_byte(1, 0, 0))
+        expect(step.tap.fsm).to_equal(ST_RTI)
+        expect(step.tap.prev_tck).to_equal(1)
+
+    it "clock held high (tck 1->1, no edge) does not advance the FSM":
+        val tap = TapState(fsm: ST_RTI, dr: 0, prev_tck: 1)
+        val step = tap_apply(tap, jtag_byte(1, 1, 0))
+        expect(step.tap.fsm).to_equal(ST_RTI)
+
+    it "a falling edge (tck 1->0) does not advance the FSM":
+        val tap = TapState(fsm: ST_RTI, dr: 0, prev_tck: 1)
+        val step = tap_apply(tap, jtag_byte(0, 1, 0))
+        expect(step.tap.fsm).to_equal(ST_RTI)
+        expect(step.tap.prev_tck).to_equal(0)
+
+    it "arriving at Capture-DR loads JTAG_IDCODE into the DR":
+        val tap = TapState(fsm: ST_SELECT_DR, dr: 0, prev_tck: 0)
+        val step = tap_apply(tap, jtag_byte(1, 0, 0))
+        expect(step.tap.fsm).to_equal(ST_CAPTURE_DR)
+        expect(step.tap.dr).to_equal(JTAG_IDCODE)
+
+    it "'R' sample returns the DR LSB while in Shift-DR":
+        val tap_odd = TapState(fsm: ST_SHIFT_DR, dr: 0x2223, prev_tck: 0)
+        expect(tap_apply(tap_odd, RBB_R).tdo).to_equal(1)
+        val tap_even = TapState(fsm: ST_SHIFT_DR, dr: 0x2222, prev_tck: 0)
+        expect(tap_apply(tap_even, RBB_R).tdo).to_equal(0)
+
+    it "'R' sample returns 0 outside Shift-DR even with an odd DR value":
+        val tap = TapState(fsm: ST_TLR, dr: 0x2223, prev_tck: 0)
+        expect(tap_apply(tap, RBB_R).tdo).to_equal(0)
+
+    it "an out-of-range byte is ignored and leaves the TAP state unchanged":
+        val before = TapState(fsm: ST_RTI, dr: 0x2222, prev_tck: 1)
+        val step = tap_apply(before, 0xFF)
+        expect(step.tdo).to_equal(0 - 1)
+        expect(step.tap.fsm).to_equal(before.fsm)
+        expect(step.tap.dr).to_equal(before.dr)
+        expect(step.tap.prev_tck).to_equal(before.prev_tck)
+
+
+# ============================================================================
+# jtag_route.spl — host-side command encoding
+# ============================================================================
+
+describe "Host-side command encoding (jtag_route.cmd_clock)":
+    it "encodes tck=0 then tck=1 as RBB_0-based {tck,tms,tdi} bytes":
+        val low_low = cmd_clock(0, 0)
+        expect(low_low.len()).to_equal(2)
+        expect(low_low[0].to_i64()).to_equal(jtag_byte(0, 0, 0))
+        expect(low_low[1].to_i64()).to_equal(jtag_byte(1, 0, 0))
+
+        val high_high = cmd_clock(1, 1)
+        expect(high_high[0].to_i64()).to_equal(jtag_byte(0, 1, 1))
+        expect(high_high[1].to_i64()).to_equal(jtag_byte(1, 1, 1))
+
+        val tms_only = cmd_clock(1, 0)
+        expect(tms_only[0].to_i64()).to_equal(jtag_byte(0, 1, 0))
+        expect(tms_only[1].to_i64()).to_equal(jtag_byte(1, 1, 0))
+
+
+# ============================================================================
+# jtag_route.spl — IDCODE read round trip
+# ============================================================================
+
+describe "IDCODE read round-trip (jtag_route)":
+    it "jtag_read_idcode_cmds -> TAP -> jtag_decode_idcode reconstructs JTAG_IDCODE":
+        val cmds = jtag_read_idcode_cmds()
+        val proc = jtag_fpga_process(tap_create(), cmds)
+        val idcode = jtag_decode_idcode(proc.replies)
+        expect(idcode).to_equal(JTAG_IDCODE)
+
+
+# ============================================================================
+# dtm_route.spl — DebugTap reset defaults
+# ============================================================================
+
+describe "DebugTap reset defaults (dtm_route.debug_tap_create)":
+    it "resets into Test-Logic-Reset with IR = IDCODE":
+        val tap = debug_tap_create()
+        expect(tap.fsm).to_equal(ST_TLR)
+        expect(tap.ir).to_equal(IR_IDCODE)
+
+
+# ============================================================================
+# dtm_route.spl — IR shift / reset / capture lifecycle
+# ============================================================================
+
+describe "DTM instruction register lifecycle (dtm_route.tap_dtm_apply)":
+    it "Update-IR latches the shifted-in instruction (DTMCS)":
+        val tap = DebugTap(fsm: ST_EXIT1_IR, prev_tck: 0, ir: IR_IDCODE, ir_sr: IR_DTMCS,
+            dr: 0, dmi_addr: 0, dmi_data: 0, dmi_stat: 0)
+        val step = tap_dtm_apply(tap, jtag_byte(1, 1, 0))     # EXIT1_IR -> UPDATE_IR
+        expect(step.tap.fsm).to_equal(ST_UPDATE_IR)
+        expect(step.tap.ir).to_equal(IR_DTMCS)
+
+    it "Update-IR latches the shifted-in instruction (DMI)":
+        val tap = DebugTap(fsm: ST_EXIT1_IR, prev_tck: 0, ir: IR_IDCODE, ir_sr: IR_DMI,
+            dr: 0, dmi_addr: 0, dmi_data: 0, dmi_stat: 0)
+        val step = tap_dtm_apply(tap, jtag_byte(1, 1, 0))
+        expect(step.tap.ir).to_equal(IR_DMI)
+
+    it "any transition landing on Test-Logic-Reset resets IR to IDCODE":
+        val tap = DebugTap(fsm: ST_SELECT_IR, prev_tck: 0, ir: IR_DMI, ir_sr: 0,
+            dr: 0, dmi_addr: 0, dmi_data: 0, dmi_stat: 0)
+        val step = tap_dtm_apply(tap, jtag_byte(1, 1, 0))     # SELECT_IR -> TLR
+        expect(step.tap.fsm).to_equal(ST_TLR)
+        expect(step.tap.ir).to_equal(IR_IDCODE)
+
+    it "Capture-IR always loads the mandatory ...01 pattern (== IDCODE)":
+        val tap = DebugTap(fsm: ST_SELECT_IR, prev_tck: 0, ir: IR_DMI, ir_sr: 0,
+            dr: 0, dmi_addr: 0, dmi_data: 0, dmi_stat: 0)
+        val step = tap_dtm_apply(tap, jtag_byte(1, 0, 0))     # SELECT_IR -> CAPTURE_IR
+        expect(step.tap.fsm).to_equal(ST_CAPTURE_IR)
+        expect(step.tap.ir_sr).to_equal(IR_IDCODE)
+
+
+# ============================================================================
+# dtm_route.spl — per-instruction DR width
+# ============================================================================
+
+describe "DTM per-instruction DR width (dtm_route.dr_width_for)":
+    it "IDCODE and DTMCS select a 32-bit DR":
+        expect(dr_width_for(IR_IDCODE)).to_equal(32)
+        expect(dr_width_for(IR_DTMCS)).to_equal(32)
+
+    it "DMI selects the abits+34-bit DR":
+        expect(dr_width_for(IR_DMI)).to_equal(DMI_WIDTH)
+        expect(DMI_WIDTH).to_equal(DTM_ABITS + 34)
+
+    it "an unrecognized instruction (BYPASS) falls back to a 1-bit DR":
+        expect(dr_width_for(IR_BYPASS)).to_equal(1)
+
+
+# ============================================================================
+# dtm_route.spl — DTMCS capture word
+# ============================================================================
+
+describe "DTMCS capture word (dtm_route.dtmcs_value)":
+    it "encodes version=1, abits=7, idle=1 at their spec-defined bit offsets":
+        val dtmcs = dtmcs_value()
+        expect(dtmcs & DTMCS_VERSION_MASK).to_equal(1)
+        expect((dtmcs >> DTMCS_ABITS_SHIFT) & DTMCS_ABITS_MASK).to_equal(DTM_ABITS)
+        expect((dtmcs >> DTMCS_IDLE_SHIFT) & DTMCS_IDLE_MASK).to_equal(1)
+
+
+# ============================================================================
+# dtm_route.spl — DMI DR pack/unpack
+# ============================================================================
+
+describe "DMI DR pack/unpack (dtm_route.dmi_dr_pack / dmi_extract_*)":
+    it "round-trips op/addr/data at the low boundary (addr=0, data=0, op=read)":
+        val packed = dmi_dr_pack(DMI_OP_READ, 0, 0)
+        expect(dmi_extract_op(packed)).to_equal(DMI_OP_READ)
+        expect((packed >> DMI_ADDR_SHIFT) & mask_w(DTM_ABITS)).to_equal(0)
+        expect(dmi_extract_data(packed)).to_equal(0)
+
+    it "round-trips op/addr/data at the high boundary (addr=0x7F, data=0xFFFFFFFF, op=write)":
+        val packed = dmi_dr_pack(DMI_OP_WRITE, 0x7F, 0xFFFFFFFF)
+        expect(dmi_extract_op(packed)).to_equal(DMI_OP_WRITE)
+        expect((packed >> DMI_ADDR_SHIFT) & mask_w(DTM_ABITS)).to_equal(0x7F)
+        expect(dmi_extract_data(packed)).to_equal(0xFFFFFFFF)
+
+    it "a max addr (0x7F) does not bleed into the data or op fields":
+        val packed = dmi_dr_pack(DMI_OP_READ, 0x7F, 0)
+        expect(dmi_extract_data(packed)).to_equal(0)
+        expect(dmi_extract_op(packed)).to_equal(DMI_OP_READ)
+
+    it "max data (0xFFFFFFFF) does not bleed into the addr or op fields":
+        val packed = dmi_dr_pack(DMI_OP_READ, 0, 0xFFFFFFFF)
+        expect((packed >> DMI_ADDR_SHIFT) & mask_w(DTM_ABITS)).to_equal(0)
+        expect(dmi_extract_op(packed)).to_equal(DMI_OP_READ)
+
+
+# ============================================================================
+# dtm_route.spl — DMI event emission on Update-DR only
+# ============================================================================
+
+describe "DMI event emission on Update-DR only (dtm_route.tap_dtm_apply)":
+    it "emits DMI_EV_READ exactly when the FSM lands in Update-DR with op=read":
+        val addr = 0x11
+        val tap = DebugTap(fsm: ST_EXIT1_DR, prev_tck: 0, ir: IR_DMI, ir_sr: 0,
+            dr: dmi_dr_pack(DMI_OP_READ, addr, 0), dmi_addr: 0, dmi_data: 0, dmi_stat: 0)
+        val step = tap_dtm_apply(tap, jtag_byte(1, 1, 0))     # EXIT1_DR -> UPDATE_DR
+        expect(step.tap.fsm).to_equal(ST_UPDATE_DR)
+        expect(step.event).to_equal(DMI_EV_READ)
+        expect(step.ev_addr).to_equal(addr)
+
+    it "emits DMI_EV_WRITE exactly when the FSM lands in Update-DR with op=write":
+        val addr = 0x03
+        val wdata = 0xABCD
+        val tap = DebugTap(fsm: ST_EXIT1_DR, prev_tck: 0, ir: IR_DMI, ir_sr: 0,
+            dr: dmi_dr_pack(DMI_OP_WRITE, addr, wdata), dmi_addr: 0, dmi_data: 0, dmi_stat: 0)
+        val step = tap_dtm_apply(tap, jtag_byte(1, 1, 0))
+        expect(step.event).to_equal(DMI_EV_WRITE)
+        expect(step.ev_addr).to_equal(addr)
+        expect(step.ev_wdata).to_equal(wdata)
+
+    it "emits no DMI event while parked in Pause-DR":
+        val tap = DebugTap(fsm: ST_PAUSE_DR, prev_tck: 0, ir: IR_DMI, ir_sr: 0,
+            dr: dmi_dr_pack(DMI_OP_WRITE, 5, 9), dmi_addr: 0, dmi_data: 0, dmi_stat: 0)
+        val step = tap_dtm_apply(tap, jtag_byte(1, 0, 0))     # Pause-DR stays in Pause-DR
+        expect(step.tap.fsm).to_equal(ST_PAUSE_DR)
+        expect(step.event).to_equal(DMI_EV_NONE)
+
+    it "emits no DMI event on the Exit2-DR -> Shift-DR transition":
+        val tap = DebugTap(fsm: ST_EXIT2_DR, prev_tck: 0, ir: IR_DMI, ir_sr: 0,
+            dr: dmi_dr_pack(DMI_OP_READ, 5, 0), dmi_addr: 0, dmi_data: 0, dmi_stat: 0)
+        val step = tap_dtm_apply(tap, jtag_byte(1, 0, 0))     # EXIT2_DR -> SHIFT_DR
+        expect(step.tap.fsm).to_equal(ST_SHIFT_DR)
+        expect(step.event).to_equal(DMI_EV_NONE)
+
+    it "emits no DMI event on Capture-DR even though the DR is (re)loaded":
+        val tap = DebugTap(fsm: ST_SELECT_DR, prev_tck: 0, ir: IR_DMI, ir_sr: 0,
+            dr: 0, dmi_addr: 0x11, dmi_data: 0x2222, dmi_stat: 0)
+        val step = tap_dtm_apply(tap, jtag_byte(1, 0, 0))     # SELECT_DR -> CAPTURE_DR
+        expect(step.tap.fsm).to_equal(ST_CAPTURE_DR)
+        expect(step.event).to_equal(DMI_EV_NONE)
+        expect(step.tap.dr).to_equal(dmi_dr_pack(0, 0x11, 0x2222))
+
+
+# ============================================================================
+# dm_model.spl — hart accessors
+# ============================================================================
+
+describe "Hart accessors (dm_model.hart_pc / hart_gpr / hart_set_pc / hart_set_gpr)":
+    it "hart_gpr(0) is hardwired to zero regardless of writes":
+        val hart = hart_set_gpr(hart_create(soc_top_64_init(DM_TEST_DRAM_SIZE)), 0, 0xFF)
+        expect(hart_gpr(hart, 0)).to_equal(0)
+
+    it "hart_set_pc/hart_pc round-trip a program counter value":
+        val hart = hart_set_pc(hart_create(soc_top_64_init(DM_TEST_DRAM_SIZE)), 0x8000_0200)
+        expect(hart_pc(hart)).to_equal(0x8000_0200)
+
+    it "hart_set_gpr/hart_gpr round-trip a general register value":
+        val hart = hart_set_gpr(hart_create(soc_top_64_init(DM_TEST_DRAM_SIZE)), 12, 0x1234_5678)
+        expect(hart_gpr(hart, 12)).to_equal(0x1234_5678)
+
+
+# ============================================================================
+# dm_model.spl — DMSTATUS / ABSTRACTCS / DMCONTROL / DATA0 / DATA1
+# ============================================================================
+
+describe "Debug Module register map (dm_model) — DMSTATUS/ABSTRACTCS/DMCONTROL":
+    it "DMSTATUS reports version=2 and authenticated for any hart state":
+        val hart = hart_create(soc_top_64_init(DM_TEST_DRAM_SIZE))
+        val status = dmstatus_word(hart)
+        expect(status & 0xF).to_equal(2)
+        expect((status >> 7) & 1).to_equal(1)
+
+    it "DMSTATUS shows allrunning while the hart is not halted":
+        var hart = hart_create(soc_top_64_init(DM_TEST_DRAM_SIZE))
+        hart.halted = false
+        val status = dmstatus_word(hart)
+        expect((status >> 10) & 1).to_equal(1)        # anyrunning
+        expect((status >> 11) & 1).to_equal(1)        # allrunning
+        expect((status >> 8) & 1).to_equal(0)         # anyhalted
+        expect((status >> 9) & 1).to_equal(0)         # allhalted
+
+    it "DMSTATUS shows allhalted while the hart is halted":
+        var hart = hart_create(soc_top_64_init(DM_TEST_DRAM_SIZE))
+        hart.halted = true
+        val status = dmstatus_word(hart)
+        expect((status >> 8) & 1).to_equal(1)
+        expect((status >> 9) & 1).to_equal(1)
+        expect((status >> 10) & 1).to_equal(0)
+        expect((status >> 11) & 1).to_equal(0)
+
+    it "DMSTATUS shows allresumeack once the hart has resumed":
+        var hart = hart_create(soc_top_64_init(DM_TEST_DRAM_SIZE))
+        hart.resumeack = true
+        val status = dmstatus_word(hart)
+        expect((status >> 16) & 1).to_equal(1)
+        expect((status >> 17) & 1).to_equal(1)
+
+    it "ABSTRACTCS encodes datacount=2 and the current cmderr":
+        var dm = dm_create()
+        dm.cmderr = CMDERR_NOT_SUPPORTED
+        val cs = abstractcs_word(dm)
+        expect(cs & 0xF).to_equal(2)
+        expect((cs >> ABSTRACTCS_CMDERR_SHIFT) & 7).to_equal(CMDERR_NOT_SUPPORTED)
+
+    it "DMCONTROL read always reports haltreq/resumereq as 0":
+        var dm = dm_create()
+        dm.dmactive = 1
+        val hart = hart_create(soc_top_64_init(DM_TEST_DRAM_SIZE))
+        expect(dm_read(dm, hart, DM_DMCONTROL)).to_equal(1)
+
+    it "a haltreq write is ignored while dmactive is 0":
+        val hart = hart_create(soc_top_64_init(DM_TEST_DRAM_SIZE))
+        val result = dm_write(dm_create(), hart, DM_DMCONTROL, DMCONTROL_HALTREQ_BIT)
+        expect(result.hart.halted).to_equal(false)
+
+    it "a haltreq write halts the hart once dmactive is 1":
+        val hart = hart_create(soc_top_64_init(DM_TEST_DRAM_SIZE))
+        val result = dm_write(dm_create(), hart, DM_DMCONTROL,
+            DMCONTROL_DMACTIVE_BIT | DMCONTROL_HALTREQ_BIT)
+        expect(result.hart.halted).to_equal(true)
+
+    it "a resumereq write resumes the hart and latches resumeack":
+        var hart = hart_create(soc_top_64_init(DM_TEST_DRAM_SIZE))
+        hart.halted = true
+        val result = dm_write(dm_create(), hart, DM_DMCONTROL,
+            DMCONTROL_DMACTIVE_BIT | DMCONTROL_RESUMEREQ_BIT)
+        expect(result.hart.halted).to_equal(false)
+        expect(result.hart.resumeack).to_equal(true)
+
+    it "ABSTRACTCS write with any cmderr bit set clears the sticky cmderr (W1C)":
+        var dm = dm_create()
+        dm.cmderr = CMDERR_NOT_SUPPORTED
+        val hart = hart_create(soc_top_64_init(DM_TEST_DRAM_SIZE))
+        val result = dm_write(dm, hart, DM_ABSTRACTCS, 1 << ABSTRACTCS_CMDERR_SHIFT)
+        expect(result.dm.cmderr).to_equal(CMDERR_NONE)
+
+    it "dm_read wires DMSTATUS to dmstatus_word":
+        val hart = hart_create(soc_top_64_init(DM_TEST_DRAM_SIZE))
+        val dm = dm_create()
+        expect(dm_read(dm, hart, DM_DMSTATUS)).to_equal(dmstatus_word(hart) & 0xFFFFFFFF)
+
+    it "dm_read wires ABSTRACTCS to abstractcs_word":
+        val hart = hart_create(soc_top_64_init(DM_TEST_DRAM_SIZE))
+        var dm = dm_create()
+        dm.cmderr = CMDERR_NOT_SUPPORTED
+        expect(dm_read(dm, hart, DM_ABSTRACTCS)).to_equal(abstractcs_word(dm))
+
+    it "DATA0/DATA1 round-trip through dm_write/dm_read masked to 32 bits":
+        val hart = hart_create(soc_top_64_init(DM_TEST_DRAM_SIZE))
+        var dm = dm_create()
+        dm = dm_write(dm, hart, DM_DATA0, (1 << 32) | 0x55).dm    # upper bits truncated on write
+        dm = dm_write(dm, hart, DM_DATA1, 0xAA).dm
+        expect(dm_read(dm, hart, DM_DATA0)).to_equal(0x55)
+        expect(dm_read(dm, hart, DM_DATA1)).to_equal(0xAA)
+
+
+# ============================================================================
+# dm_model.spl — abstract COMMAND access-register decode
+# ============================================================================
+
+describe "Abstract COMMAND decode (dm_model.dm_command) — access-register":
+    it "rejects a non-access-register cmdtype with cmderr=2":
+        val hart = hart_create(soc_top_64_init(DM_TEST_DRAM_SIZE))
+        val cmd = make_command_word(CMDTYPE_BAD, AARSIZE_32, TRANSFER_ON, ACCESS_READ, REGNO_DPC)
+        val result = dm_command(dm_create(), hart, cmd)
+        expect(result.dm.cmderr).to_equal(CMDERR_NOT_SUPPORTED)
+
+    it "rejects an unsupported aarsize (only 32/64-bit access-register supported)":
+        val hart = hart_create(soc_top_64_init(DM_TEST_DRAM_SIZE))
+        val cmd = access_register_cmd(AARSIZE_UNSUPPORTED_16, TRANSFER_ON, ACCESS_READ, REGNO_DPC)
+        val result = dm_command(dm_create(), hart, cmd)
+        expect(result.dm.cmderr).to_equal(CMDERR_NOT_SUPPORTED)
+
+    it "regno 0x1000+n reads GPR xn into DATA0":
+        val hart = hart_set_gpr(hart_create(soc_top_64_init(DM_TEST_DRAM_SIZE)), 5, 0x2A)
+        val cmd = access_register_cmd(AARSIZE_32, TRANSFER_ON, ACCESS_READ, REGNO_GPR_BASE + 5)
+        val result = dm_command(dm_create(), hart, cmd)
+        expect(result.dm.cmderr).to_equal(CMDERR_NONE)
+        expect(result.dm.data0).to_equal(0x2A)
+
+    it "regno 0x101F (x31, the highest GPR) is accepted":
+        val hart = hart_set_gpr(hart_create(soc_top_64_init(DM_TEST_DRAM_SIZE)), 31, 0x99)
+        val cmd = access_register_cmd(AARSIZE_32, TRANSFER_ON, ACCESS_READ, REGNO_GPR_BASE + 31)
+        val result = dm_command(dm_create(), hart, cmd)
+        expect(result.dm.cmderr).to_equal(CMDERR_NONE)
+        expect(result.dm.data0).to_equal(0x99)
+
+    it "regno 0x07B1 accesses dpc":
+        val hart = hart_set_pc(hart_create(soc_top_64_init(DM_TEST_DRAM_SIZE)), 0x8000_0100)
+        val cmd = access_register_cmd(AARSIZE_64, TRANSFER_ON, ACCESS_READ, REGNO_DPC)
+        val result = dm_command(dm_create(), hart, cmd)
+        expect(result.dm.cmderr).to_equal(CMDERR_NONE)
+        val dpc = (result.dm.data0 & 0xFFFFFFFF) | ((result.dm.data1 & 0xFFFFFFFF) << 32)
+        expect(dpc).to_equal(0x8000_0100)
+
+    it "an unsupported regno sets cmderr=2 and leaves the hart unchanged":
+        val hart = hart_set_gpr(hart_create(soc_top_64_init(DM_TEST_DRAM_SIZE)), 5, 0x2A)
+        val bad_regno = REGNO_GPR_BASE + 32           # one past x31 — not a GPR, not dpc
+        val cmd = access_register_cmd(AARSIZE_32, TRANSFER_ON, ACCESS_READ, bad_regno)
+        val result = dm_command(dm_create(), hart, cmd)
+        expect(result.dm.cmderr).to_equal(CMDERR_NOT_SUPPORTED)
+        expect(result.hart.soc.core.pc).to_equal(hart.soc.core.pc)
+        expect(hart_gpr(result.hart, 5)).to_equal(0x2A)
+
+    it "aarsize=3 write combines DATA0/DATA1 into the full 64-bit GPR value":
+        val hart = hart_create(soc_top_64_init(DM_TEST_DRAM_SIZE))
+        var dm = dm_create()
+        dm.data0 = 0x89ABCDEF
+        dm.data1 = 0x01234567
+        val cmd = access_register_cmd(AARSIZE_64, TRANSFER_ON, ACCESS_WRITE, REGNO_GPR_BASE + 7)
+        val result = dm_command(dm, hart, cmd)
+        expect(result.dm.cmderr).to_equal(CMDERR_NONE)
+        expect(hart_gpr(result.hart, 7)).to_equal(0x0123456789ABCDEF)
+
+    it "aarsize=3 read splits the 64-bit GPR value back into DATA0/DATA1":
+        val hart = hart_set_gpr(hart_create(soc_top_64_init(DM_TEST_DRAM_SIZE)), 9, 0x0123456789ABCDEF)
+        val cmd = access_register_cmd(AARSIZE_64, TRANSFER_ON, ACCESS_READ, REGNO_GPR_BASE + 9)
+        val result = dm_command(dm_create(), hart, cmd)
+        expect(result.dm.data0).to_equal(0x89ABCDEF)
+        expect(result.dm.data1).to_equal(0x01234567)
+
+    it "x0 writes are accepted (no cmderr) but silently absorbed (hardwired zero)":
+        val hart = hart_create(soc_top_64_init(DM_TEST_DRAM_SIZE))
+        var dm = dm_create()
+        dm.data0 = 0xDEAD
+        val cmd = access_register_cmd(AARSIZE_32, TRANSFER_ON, ACCESS_WRITE, REGNO_GPR_BASE)
+        val result = dm_command(dm, hart, cmd)
+        expect(result.dm.cmderr).to_equal(CMDERR_NONE)
+        expect(hart_gpr(result.hart, 0)).to_equal(0)
+
+    it "transfer=0 performs no register access":
+        val hart = hart_set_gpr(hart_create(soc_top_64_init(DM_TEST_DRAM_SIZE)), 3, 0x77)
+        var dm = dm_create()
+        dm.data0 = 0x1234
+        val cmd = access_register_cmd(AARSIZE_32, TRANSFER_OFF, ACCESS_READ, REGNO_GPR_BASE + 3)
+        val result = dm_command(dm, hart, cmd)
+        expect(result.dm.cmderr).to_equal(CMDERR_NONE)
+        expect(result.dm.data0).to_equal(0x1234)
+
+    it "dm_write to COMMAND routes through the abstract command engine":
+        val hart = hart_set_gpr(hart_create(soc_top_64_init(DM_TEST_DRAM_SIZE)), 2, 0x55)
+        val cmd = access_register_cmd(AARSIZE_32, TRANSFER_ON, ACCESS_READ, REGNO_GPR_BASE + 2)
+        val result = dm_write(dm_create(), hart, DM_COMMAND, cmd)
+        expect(result.dm.data0).to_equal(0x55)
+
+
+# ============================================================================
+# VHDL mirror cross-checks — constants must match the RTL
+# ============================================================================
+
+describe "VHDL mirror cross-checks — constants must match the RTL":
+    it "JTAG_IDCODE / DTM_IDCODE match jtag_tap.vhd's IDCODE_VALUE generic default":
+        expect(JTAG_IDCODE).to_equal(0x15350067)      # jtag_tap.vhd:32
+        expect(DTM_IDCODE).to_equal(0x15350067)       # jtag_tap.vhd:32 (dtm_route mirror)
+
+    it "IR_WIDTH matches the jtag_tap.vhd 5-bit instruction register":
+        expect(IR_WIDTH).to_equal(5)                  # jtag_tap.vhd:67-70 (5-bit std_logic_vector)
+
+    it "IR_IDCODE/IR_DTMCS/IR_DMI match jtag_tap.vhd's INSN_* encodings":
+        expect(IR_IDCODE).to_equal(0x01)              # jtag_tap.vhd:67 INSN_IDCODE = "00001"
+        expect(IR_DTMCS).to_equal(0x10)               # jtag_tap.vhd:68 INSN_DTMCS  = "10000"
+        expect(IR_DMI).to_equal(0x11)                 # jtag_tap.vhd:69 INSN_DMI    = "10001"
+
+    it "DTM_ABITS matches riscv_dtm.vhd's ABITS constant":
+        expect(DTM_ABITS).to_equal(7)                 # riscv_dtm.vhd:57 constant ABITS : natural := 7
