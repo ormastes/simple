@@ -45,6 +45,75 @@ Native artifact health is part of the contract. If the pure Stage 2 build fails
 or the child process segfaults, the system spec fails; that is a server/package
 bug, not a test-helper pass.
 
+## Current State — 2026-07-24
+
+- `1d5b3d3f6a0d` strengthened native admission and smoke coverage. The wrapper
+  now probes a real `simple_pipe` search, and the paired smoke requires
+  `simple_status` plus `simple_pipe(surface=codebase, query=main, scope=app)`.
+- The installed Linux artifact passes initialize/tools-list and
+  `simple_status`, but the codebase call exits `139`. GDB isolates the fault to
+  `_process_run_inherit -> rt_process_run -> shell_cmd ->
+  _simple_pipe_search_text`; therefore it is stale and must not be admitted.
+- A fresh self-hosted Stage 4 compiler at
+  `/tmp/simple_riscv_prod_main_20260723/build/stage4-ufcs/stage4-clean/simple`
+  (`sha256 ed5bdd70ca3c51f842b92fce3521014a005507e60be8adb8cb16f4d436477680`)
+  reached the MCP link with `SIMPLE_NO_STUB_FALLBACK=1`.
+- Explicit imports removed all five unresolved `_mcp_find_simple_binary`
+  callers. Canonical `Dict<text, any>` annotations preserve JSON object
+  receiver provenance; the focused source regression pins all three
+  `map.has(key)` sites.
+- The pure-Simple runtime archive completed at
+  `/tmp/root-mcp-current-llvm-20260724-1/simple-core/libsimple_runtime.a`.
+  The third bounded MCP build stopped because this Stage 4 CLI did not honor
+  `--runtime-path`; it requires the runtime directory through
+  `SIMPLE_RUNTIME_PATH` and the exact archive through
+  `SIMPLE_CORE_RUNTIME_PATH`. The session retry cap is exhausted. No further
+  native retry is permitted in this session.
+
+## Ordered Remaining Work
+
+1. Commit and sync the reviewed MCP helper-import and typed-JSON receiver fix.
+2. In a fresh session, build and fully smoke the simple-core runtime once per
+   backend into separate directories. Require the archive-symbol gate, hello,
+   C5 exact exit `42`, TUI markers, and closure-clean result.
+3. Build one fresh LLVM MCP artifact with the runtime environment set
+   explicitly:
+
+   ```bash
+   FRESH_SIMPLE=/path/to/current/pure-simple
+   CORE_DIR="$PWD/build/c5-core-archive-llvm"
+   env SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 \
+     SIMPLE_RUNTIME_PATH="$CORE_DIR" \
+     SIMPLE_CORE_RUNTIME_PATH="$CORE_DIR/libsimple_runtime.a" \
+     "$FRESH_SIMPLE" native-build --backend llvm \
+       --runtime-bundle simple-core \
+       --source src/compiler --source src/app --source src/lib \
+       --entry-closure --entry src/app/mcp/main.spl --strip \
+       --cache-dir build/c5-mcp-stage4-llvm-cache \
+       --output build/c5-mcp-stage4-llvm/simple_mcp_server
+   ```
+
+   Pass requires exit `0`, a nonempty executable, no unresolved helper,
+   `Dict.has`, runtime-provider, or stub-fallback symbols, and a link receipt
+   naming the selected simple-core archive.
+4. Drive the new artifact directly through initialize, initialized, tools/list,
+   `simple_status`, and `simple_pipe` codebase query. Require correlated IDs,
+   the `-- simple_pipe codebase query=main --` marker, and no signal/exit `139`.
+5. Build the matching LSP MCP artifact with a separate cache, then run
+   `check-mcp-native-smoke.shs` once with
+   `MCP_NATIVE_BOOTSTRAP_FRESH=1` and the exact fresh pair.
+6. Deploy only checksum-matched Linux artifacts and sidecars. Regenerate the
+   production wrappers, prove the real search probe admits the new hash, and
+   capture startup/request latency and RSS with
+   `check-mcp-lsp-nfr-evidence.shs`.
+7. Stage both npm registry payloads from verified release assets and require
+   `npm pack --dry-run` to list the declared Linux/x64 native executable.
+
+Follow-up platform work: make POSIX wrapper candidate selection host-triple
+aware for macOS, and make Windows MCP/LSP wrappers native-only with SHA and
+real tools/call admission. These do not replace the Linux release blockers
+above.
+
 ## Execution
 
 ```bash
@@ -61,4 +130,4 @@ bin/simple test test/03_system/app/mcp_cmdline/mcp_cmdline_handshake_spec.spl --
 | REQ | Description | Test File | Generated Spec | Coverage |
 |-----|-------------|-----------|----------------|----------|
 | REQ-MCP-CMD-001 | A pure-Stage2-built native Simple MCP answers initialize/tools-list and serves core tool calls within a time limit | `test/03_system/app/mcp_cmdline/mcp_cmdline_handshake_spec.spl` | `doc/06_spec/03_system/app/mcp_cmdline/mcp_cmdline_handshake_spec.md` | Full |
-| REQ-MCP-CMD-002 | Fresh Stage 5 MCP/LSP outputs answer correlated handshakes and successful `simple_status`/`lsp_symbols` calls before deploy | `scripts/check/check-mcp-native-smoke.shs` | `doc/07_guide/tooling/mcp_handshake_regression.md` | Implementation complete; execution evidence pending pure-Simple CLI repair |
+| REQ-MCP-CMD-002 | Fresh Stage 5 MCP/LSP outputs answer correlated handshakes and successful `simple_status`, `simple_pipe` codebase, and `lsp_symbols` calls before deploy | `scripts/check/check-mcp-native-smoke.shs` | `doc/07_guide/tooling/mcp_handshake_regression.md` | Gate complete; fresh current-artifact execution and deploy evidence pending |

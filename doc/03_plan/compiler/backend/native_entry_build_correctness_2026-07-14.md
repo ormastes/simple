@@ -6,6 +6,33 @@ the native backend emits must equal the seed interpreter oracle, **or** be
 correct-by-construction where the oracle is provably broken. A loud build
 failure is **never** silently converted to a wrong answer.
 
+## Current session remaining (2026-07-24)
+
+- **MCP native receipt:** the fresh pure-Simple Stage4 compiler reached link,
+  but its automatic `core-c-bootstrap` lane lacks the simple-core owners MCP
+  needs. A complete simple-core archive was built successfully at
+  `/tmp/root-mcp-current-llvm-20260724-1/simple-core/libsimple_runtime.a`.
+  The pure CLI now captures `--runtime-path` in both spellings and exports
+  `SIMPLE_RUNTIME_PATH` plus `SIMPLE_CORE_RUNTIME_PATH`; rebuild the MCP
+  artifact with that explicit archive path before accepting it.
+- **MCP helper closure:** the shared helper is now public and four explicit imports resolve
+  `_mcp_find_simple_binary` calls from VCS, CLI, DAP, and play handlers. The
+  first retry removed all five undefined helper symbols.
+- **JSON Dict lowering:** `common/json/object_ops.spl` now gives the three
+  `json_to_object` receivers an explicit `Dict<text, any>` type, with a source
+  regression in `dict_typed_method_lowering_source_spec.spl`. A final native
+  link receipt is still pending; do not claim MCP green until `Dict.has` and
+  the simple-core process/string owners link cleanly.
+- **MCP acceptance:** after the artifact links, run the strengthened
+  `scripts/check/check-mcp-native-smoke.shs` once with LLVM and once with
+  Cranelift as applicable. It now requires initialize/tools-list, correlated
+  `simple_status`, and a real `simple_pipe` codebase query. Then retry the live
+  Simple MCP handshake once; the old installed artifact was proven to SIGSEGV
+  in `_process_run_inherit` on that query.
+- **Other campaign receipts:** the exact brace-literal parity repro, staged
+  platform matrix (macOS/Windows/FreeBSD/ARM/RISC-V), and full Stage4 QEMU
+  execution remain pending as already recorded below.
+
 ## Verification contract (unchanged, in force)
 
 - **Oracle:** `env -u SIMPLE_BOOTSTRAP bin/simple run p.spl` (seed interpreter).
@@ -469,7 +496,10 @@ the shared binary — deploys require explicit user go-ahead).
   authoritative registered destination and inherits a source flag only for an
   unregistered destination, using direct operand-to-ID calls so bootstrap
   cannot collapse the keys. The rejected destination-or-source rule remains
-  absent. The unchanged cross-module fixture still needs rebuilt execution.
+  absent. The unchanged cross-module fixture still needs rebuilt execution:
+  current LLVM and Cranelift artifacts must both exit 0 while preserving the
+  signed destination flag and inheriting unsigned provenance only for an
+  unregistered destination.
   Pure-Simple text `.char_code_at(index)` now lowers after custom-owner
   dispatch through a reserved alias to the exact raw-i64 runtime ABI instead
   of boxing/decoding the codepoint or capturing a same-named source function.
@@ -477,9 +507,10 @@ the shared binary — deploys require explicit user go-ahead).
   without allocation and decodes valid UTF-8 consistently; hosted x86_64,
   freestanding x86_64/AArch64/RV64, textual LLVM, LLVM-lib, and Cranelift owners
   are aligned. Existing Linux/macOS/Windows/FreeBSD smoke and AArch64/RV64
-  execution fixtures now pin raw/tagged/Unicode/bounds behavior. Focused C
-  syntax and hosted runtime behavior pass; the original x86_64-unknown-none
-  pure-Simple redeploy/QEMU proof remains pending.
+  execution fixtures are wired to pin raw/tagged/Unicode/bounds behavior.
+  Focused C syntax and hosted runtime checks pass; native entry execution for
+  those four cases under LLVM and Cranelift remains pending, as does the
+  original x86_64-unknown-none pure-Simple redeploy/QEMU proof.
 - Cranelift tuple returns no longer expose dead callee stack slots. Tuple
   aggregates now reuse LLVM's existing `rt_alloc` ownership while preserving
   the raw, untagged tuple pointer ABI. Multi-block native-smoke and cross-target
