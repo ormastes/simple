@@ -31,6 +31,24 @@ Invoke as slash-commands (`/research`, `/design`, …); sources live in `.claude
 - [Unit specs](../../../../test/01_unit/app/devhub/) — 23 spec files; run one at a time
   (`bin/simple test --no-session-daemon <spec>`), verify by `Failed: 0`, never a bare `PASS` line
 
+## Handoff Notes (2026-07-24)
+
+- **Suite re-verified green: 25 spec files, 517 examples, 0 failures** (13 files
+  green under `test`; 12 false-fail there with "no parseable pass/fail summary" —
+  the known seed-JIT 10–99-example landmine — and are ALL green under the
+  authoritative `simple run <spec>`). Verify per-file with `run` when `test`
+  reports a summary-less FAIL.
+- **Tree landmine (cost a full day): stale untracked `*.smf` stubs shadow real
+  modules.** ~9k Feb-dated 179-byte `.smf` stubs under `src/`+`test/` made
+  `std.spec` resolve to an empty stub → every spec failed
+  `unresolved name: describe` on every binary, mimicking a runner/deploy
+  breakage. Fix: quarantine (move out) all untracked `.smf` under `src/` and
+  `test/` — they are build artifacts, never git-tracked. Also confirm a
+  `simple_seed` sibling exists next to the `simple` binary running `test`
+  (frontends delegate SSpec to it; a lone frontend falls back and fails).
+- **`errors.spl` `exit_code()` now uses explicit `self.kind`** (was bare `kind`,
+  which older evaluators can't resolve — file style is explicit `self.` anyway).
+
 ## Handoff Notes (2026-07-20)
 
 - **Five facades shipped, suite green (23/23 files).** Backend selection is always
