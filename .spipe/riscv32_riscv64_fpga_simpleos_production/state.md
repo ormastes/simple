@@ -259,3 +259,30 @@ implementation-milestone-0-in-progress
   attempted behavioral regression. That behavioral addition was removed; no
   deployment or RTL claim is authorized by this evidence. Any remote snapshot
   remains WIP and must not advance `main` before a fresh bounded verification.
+- toolchain recovery 2026-07-24: a fresh pure-Simple compiler-only artifact
+  built 675 files with zero failures at
+  `/tmp/simple-root-go-20260724/build/compiler-only-c5-cce8-current-main/stage4-compiler-only/simple`
+  (SHA-256
+  `be65e69192920ef1e325c8c2ef3aed78b8f0203b8fb37109c66f6daa2ce56c01`).
+  The generic compile-entry closure then produced 678 retained objects but
+  failed its supported `core-c-bootstrap` link on hosted compiler/SFFI
+  dependencies; `rust-hosted` remains removed. Objects and cache are retained
+  under `build/stage4-ufcs/native-objects-00fdBg` and
+  `build/stage4-ufcs/cache-be65-full-cli`. Three bounded build cycles are
+  consumed; no further compiler build is authorized in this session.
+- compiler repair 2026-07-24: high review found and source-fixed three remaining
+  cross-module transport defects: `CompileContext.create` now initializes the
+  flat VHDL metadata rows, recursive struct copies canonicalize nested and
+  aggregate type symbols, and every catalog module receives the design mapping
+  for shared canonical MIR type IDs. The focused catalog fixture now uses a
+  shared canonical owner/importer ID and checks its rebased local type.
+  Verification is staged but not executed because the bounded compiler-build
+  cycle is exhausted.
+- FPGA/Linux audit 2026-07-24: authoritative products remain
+  `rv32i_rtl/protected_entry.spl` (RV32IMAC+Sv32+PMP) and
+  `rv64gc_rtl/imac_entry.spl` (RV64IMAC+Sv39+PMP, interrupts/time/atomics).
+  Active K26 scripts still copy handwritten UART-only cores and do not
+  instantiate the Zynq PS, DDR, or a correct WB-to-AXI HP bridge. Linux QEMU
+  assets are a software oracle only; the FPGA RTL lacks the privileged/MMU,
+  interrupt, DDR, DTB, UART RX, and login-shell path needed for terminal
+  `login`/`ls` evidence.

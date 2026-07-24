@@ -55,3 +55,29 @@ Representative missing groups include process/file/fd operations
 - The focused module-global function-pointer regression executes through the
   runner.
 - The font/SPipe focused suite executes without hosted fallback.
+
+## Compiler-entry recurrence 2026-07-24
+
+A fresh pure-Simple compiler-only build completed with 675 compiled files and
+zero failures:
+
+`/tmp/simple-root-go-20260724/build/compiler-only-c5-cce8-current-main/stage4-compiler-only/simple`
+
+SHA-256:
+`be65e69192920ef1e325c8c2ef3aed78b8f0203b8fb37109c66f6daa2ce56c01`.
+
+Using it with stub fallback disabled, the generic
+`src/app/cli/compile_entry.spl` closure produced 678 retained objects, then
+failed to link against `core-c-bootstrap`. The live closure retains
+Rust-hosted-only `rt_cli_handle_compile` and `rt_compile_to_llvm_ir` paths plus
+hosted Cranelift/SFFI helpers. Retrying with `rust-hosted` is invalid because
+that bundle is intentionally removed. The retained objects and cache are:
+
+- `build/stage4-ufcs/native-objects-00fdBg`
+- `build/stage4-ufcs/cache-be65-full-cli`
+
+Relinking those objects with `libsimple_native_all.a` is diagnostic only and
+must not be accepted as a supported compiler or RTL-generation lane. The next
+bounded fix is a core-safe compile/VHDL entry closure that does not retain the
+hosted compatibility dispatcher, followed by one `core-c-bootstrap` link with
+`SIMPLE_NO_STUB_FALLBACK=1`.
