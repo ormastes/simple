@@ -35,13 +35,25 @@ prove that file caused the segfault.
 - Clearing parser token text after `lex_next()` was rejected as an unproven fix:
   `CoreLexer.next_token()` has already materialized token text by that point.
 
+## Focused isolation result
+
+A temporary, high-reviewed `surface-probe <path>` branch was admitted into a
+pure-Simple bootstrap CLI (674 compiled / 0 failed), used, and then removed.
+Both boundary sources pass independently:
+
+- `io_passes.spl`: status OK, 25 functions, one struct;
+- `dim_constraints_types.spl`: status OK, two structs, three enums, two impls.
+
+The crash is therefore not a file-local parser/cursor failure in sources 401 or
+402. It depends on cumulative process state near 400 surface parses (about
+11.56 million no-GC registry entries at marker 400). Further work must inspect
+registry capacity/growth and cumulative lexer/parser ownership rather than
+patch either boundary source.
+
 ## Acceptance
 
-1. Provide a supported focused parser-probe runtime/entry or an equivalent
-   source-index diagnostic that does not expand the full CLI closure.
-2. Prove surface parsing of `io_passes.spl` and its successor independently,
-   with the following declaration token materialized correctly.
-3. Re-run one full Stage 4 traversal; require all surfaces, Phase-3 lowering,
+1. Add a bounded cumulative-surface probe or repair the registry/lexer
+   ownership failure demonstrated near source 400.
+2. Re-run one full Stage 4 traversal; require all surfaces, Phase-3 lowering,
    link success, and a fresh full CLI artifact.
-4. Only then proceed to current RV64 web/DB and filesystem toolchain QEMU proof.
-
+3. Only then proceed to current RV64 web/DB and filesystem toolchain QEMU proof.
