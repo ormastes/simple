@@ -63,9 +63,9 @@ failure is **never** silently converted to a wrong answer.
   case passed, with zero FAIL/XFAIL/XPASS/codegen-fallback results.
 - **Gate 2 — parity:** `scripts/check/check-native-seed-parity.shs` (dual-backend
   regression harness) must report `native_seed_parity=true`. By default it
-  defines **95 logical cases / 133 recorded checks** because strict-dual cases
+  defines **96 logical cases / 135 recorded checks** because strict-dual cases
   record LLVM and Cranelift separately. `NATIVE_OPEN_BUG_REPROS=1` expands this
-  to **96 logical cases / 134 recorded checks**; execution is opt-in because
+  to **97 logical cases / 136 recorded checks**; execution is opt-in because
   the exact brace-literal reproduction remains known-red. Execution of the
   expanded matrix is pending.
   The full unfiltered gate is now scheduled on Linux x86_64 LLVM (STRICT-DUAL
@@ -615,6 +615,18 @@ the shared binary — deploys require explicit user go-ahead).
   hosted LLVM/Cranelift, FreeBSD LLVM/Cranelift, and Cranelift AArch64/RISC-V64
   QEMU gates. Rebuilt current-source execution remains pending. See
   `native_string_methods_unresolved_in_mir_2026-07-17.md`.
+- FreeBSD's explicit Cranelift smoke subset now schedules the existing
+  `dict_struct_value` fixture (exit `73`), closing its selection gap for
+  struct-valued Dict store/read and text-key iteration. The full captured
+  output must contain the exact Dict PASS row with zero fallback hits; first
+  full FreeBSD execution remains pending. The default LLVM lane continues to
+  run the full matrix; no duplicate fixture or FreeBSD-specific semantics were
+  added. The bounded portability contract
+  progressed past stale Windows-ARM64 object-count and parity-registration
+  assertions after those contracts were aligned with their existing
+  cross-module gates. Its third run stopped at the independent hosted Option
+  parity assertion (`SIMPLE_BINARY="$stage3"` missing), so full portability
+  PASS is not credited and that separate workflow contract remains next.
 - Integer `.chr()`/`.to_char()` now keeps primitive-builtin priority over an
   unrelated same-named UFCS free function while preserving custom struct
   method ownership. The pure-Simple runtime/interpreter and x86/ARM C hardware
