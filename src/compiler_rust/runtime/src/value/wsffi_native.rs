@@ -263,6 +263,36 @@ fn runtime_value_to_f64(value: RuntimeValue) -> f64 {
     0.0
 }
 
+/// spl_str_ptr(s: text) -> i64
+///
+/// Decodes a tagged text RuntimeValue to a NUL-terminated C-string pointer for
+/// Simple code that hands raw pointers to dynamically loaded C functions
+/// (GuiRenderer window titles, TRACE32 ctypes bridge). The pointer aliases a
+/// thread-local buffer valid until the next spl_str_ptr call on the same
+/// thread — callers pass it straight into the C call. Non-text values pass
+/// through unchanged, matching the runtime_native.c provider.
+#[no_mangle]
+pub extern "C" fn spl_str_ptr(value_rv: RuntimeValue) -> i64 {
+    let raw_ptr = rt_string_data(value_rv);
+    if raw_ptr.is_null() {
+        return value_rv.0 as i64;
+    }
+    let len = rt_string_len(value_rv);
+    if len < 0 {
+        return value_rv.0 as i64;
+    }
+    thread_local! {
+        static STR_PTR_BUF: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    STR_PTR_BUF.with(|buf| {
+        let mut buf = buf.borrow_mut();
+        buf.clear();
+        buf.extend_from_slice(unsafe { std::slice::from_raw_parts(raw_ptr, len as usize) });
+        buf.push(0);
+        buf.as_ptr() as i64
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

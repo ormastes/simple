@@ -18,6 +18,8 @@ fn main() {
     println!("cargo:rerun-if-changed=../../runtime/runtime_font.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_value.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_db.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_memtrack.c");
+    println!("cargo:rerun-if-changed=../../runtime/hosted_win32.c");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_DRIVER_HOOKS");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_RUNTIME_SYMBOL_TABLE");
 
@@ -128,6 +130,8 @@ fn compile_c_runtime_sources() {
         "runtime_hosted_signal.c",
         "runtime_hosted_fs.c",
         "runtime_font.c",
+        "runtime_memtrack.c",
+        "hosted_win32.c",
     ];
 
     let mut build = cc::Build::new();
@@ -159,6 +163,10 @@ fn compile_c_runtime_sources() {
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if target_os != "windows" {
         println!("cargo:rustc-link-lib=dylib=m");
+    } else {
+        // hosted_win32.c real mode: CreateWindowExW + CreateDIBSection + BitBlt.
+        println!("cargo:rustc-link-lib=dylib=user32");
+        println!("cargo:rustc-link-lib=dylib=gdi32");
     }
     // openpty / forkpty live in libutil on Linux and most BSDs.
     // On macOS they are part of libc itself; on Windows the functions don't exist.
@@ -210,6 +218,8 @@ fn collect_c_runtime_exports(root: &Path, exported: &mut HashSet<String>) {
         "runtime_hosted_signal.c",
         "runtime_hosted_fs.c",
         "runtime_font.c",
+        "runtime_memtrack.c",
+        "hosted_win32.c",
     ];
     for source in LINKED_C_SOURCES {
         let path = root.join(source);
