@@ -6,6 +6,7 @@ extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
 extern fn rt_env_get(name: text) -> text
+extern fn rt_env_set(name: text, value: text) -> bool
 
 struct SharedParam:
     name: text
@@ -85,6 +86,10 @@ fn _build_wrapped_shared_library(path: text, output: text, parsed: SharedExports
 
 fn _build_native_shared_library(path: text, output: text) -> CompileResult:
     val simple_bin = find_simple_binary()
+    val guard_error = check_compile_delegation_guard("shared library build", simple_bin)
+    if guard_error != "":
+        return CompileResult.RuntimeError(guard_error)
+    mark_compile_delegated()
     val (stdout, stderr, exit_code) = rt_process_run(simple_bin, ["compile", path, "--native", "--shared", "--strip", "-o", output])
     val combined = clean_child_output(stdout, stderr)
     if exit_code == 0 and rt_file_exists(output):
@@ -568,6 +573,63 @@ pub fn find_simple_binary() -> text:
     if rt_file_exists("bin/release/linux-x86_64/simple"):
         return "bin/release/linux-x86_64/simple"
     "bin/simple"
+
+# --- Compile delegation loop guard -----------------------------------------
+#
+# `_run_compile_to_path` / `compile_file` / `compile_to_smf` / `jit_file` /
+# `check_file` / `_build_native_shared_library` all spawn an external `simple`
+# binary resolved by `find_simple_binary()`. When that binary is a wrapper
+# for THIS SAME CLI (the common deployed layout), the child repeats the exact
+# same delegation and forks again, unbounded — observed as a ~35k-process
+# fork bomb. See
+# doc/08_tracking/bug/cli_compile_delegation_fork_bomb_wrapper_2026-07-24.md.
+#
+# Two independent checks, either one refuses the spawn:
+#   1. `SIMPLE_COMPILE_DELEGATED` env marker set by a parent already inside
+#      this delegation chain (set via `mark_compile_delegated()` right before
+#      every legitimate spawn below).
+#   2. The resolved binary path is (textually) the same as this process's own
+#      executable path — a cheap same-path comparison, no canonicalization
+#      round-trip required.
+
+pub fn compile_delegation_guard_message(op_desc: text) -> text:
+    "compile delegation loop detected: external fallback resolves to this same CLI; {op_desc} not supported in-process"
+
+pub fn is_same_binary_path(a: text, b: text) -> bool:
+    if a == "" or b == "":
+        return false
+    if a == b:
+        return true
+    a.ends_with("/" + b) or b.ends_with("/" + a)
+
+# Pure decision core: no I/O, fully unit-testable without spawning processes.
+pub fn compile_delegation_guard_decision(op_desc: text, marker: text, resolved_bin: text, current_exe: text) -> text:
+    if marker == "1":
+        return compile_delegation_guard_message(op_desc)
+    if is_same_binary_path(resolved_bin, current_exe):
+        return compile_delegation_guard_message(op_desc)
+    ""
+
+fn _current_exe_path_for_guard() -> text:
+    val os_env = rt_env_get("OS") ?? ""
+    if os_env.contains("Windows"):
+        return ""
+    val self_exe = rt_process_run("readlink", ["-f", "/proc/self/exe"])
+    if self_exe.2 == 0:
+        return self_exe.0.trim()
+    ""
+
+# Returns "" when the spawn is safe, or an error message when it must be
+# refused. Call before every `rt_process_run(simple_bin, ...)` delegation.
+pub fn check_compile_delegation_guard(op_desc: text, resolved_bin: text) -> text:
+    val marker = rt_env_get("SIMPLE_COMPILE_DELEGATED") ?? ""
+    val current_exe = _current_exe_path_for_guard()
+    compile_delegation_guard_decision(op_desc, marker, resolved_bin, current_exe)
+
+# Call right before every legitimate external-compile spawn so a re-entrant
+# child refuses to delegate again instead of forking without bound.
+pub fn mark_compile_delegated() -> bool:
+    rt_env_set("SIMPLE_COMPILE_DELEGATED", "1")
 
 pub fn clean_child_output(stdout: text, stderr: text) -> text:
     val combined = if stderr.trim() != "":

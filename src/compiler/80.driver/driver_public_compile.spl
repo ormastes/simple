@@ -1,6 +1,6 @@
 use compiler.common.driver_core_types.{CompileMode, CompileResult}
 use compiler.driver.driver_public_api.{interpret_file}
-use compiler.driver.driver_public_shared.{find_simple_binary, clean_child_output}
+use compiler.driver.driver_public_shared.{find_simple_binary, clean_child_output, check_compile_delegation_guard, mark_compile_delegated}
 use compiler.driver.driver_compile_vhdl_source_map.{_compile_simple_vhdl_subset, _write_simple_vhdl_source_map, _file_contains_vhdl_design}
 
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
@@ -20,6 +20,10 @@ struct SimpleVhdlClockConfig:
 
 pub fn compile_file(path: text) -> CompileResult:
     val simple_bin = find_simple_binary()
+    val guard_error = check_compile_delegation_guard("aot compile", simple_bin)
+    if guard_error != "":
+        return CompileResult.RuntimeError(guard_error)
+    mark_compile_delegated()
     val default_output = _default_smf_output(path)
     val (stdout, stderr, exit_code) = rt_process_run(simple_bin, ["compile", path])
     val combined = clean_child_output(stdout, stderr)
@@ -31,6 +35,10 @@ pub fn compile_file(path: text) -> CompileResult:
 
 pub fn compile_to_smf(path: text, output: text) -> Result<text, text>:
     val simple_bin = find_simple_binary()
+    val guard_error = check_compile_delegation_guard("aot compile to smf", simple_bin)
+    if guard_error != "":
+        return Err(guard_error)
+    mark_compile_delegated()
     val (stdout, stderr, exit_code) = rt_process_run(simple_bin, ["compile", path, "-o", output])
     val combined = clean_child_output(stdout, stderr)
     if exit_code == 0 and rt_file_exists(output):
@@ -64,6 +72,10 @@ pub fn compile_files(paths: [text], mode: CompileMode) -> CompileResult:
 
 pub fn jit_file(path: text) -> CompileResult:
     val simple_bin = find_simple_binary()
+    val guard_error = check_compile_delegation_guard("jit execution", simple_bin)
+    if guard_error != "":
+        return CompileResult.RuntimeError(guard_error)
+    mark_compile_delegated()
     val (stdout, stderr, exit_code) = rt_process_run(simple_bin, [path])
     val combined = clean_child_output(stdout, stderr)
     if exit_code == 0:
@@ -114,6 +126,10 @@ pub fn aot_vhdl_file(path: text, output: text) -> CompileResult:
 
 pub fn check_file(path: text) -> CompileResult:
     val simple_bin = find_simple_binary()
+    val guard_error = check_compile_delegation_guard("type check", simple_bin)
+    if guard_error != "":
+        return CompileResult.RuntimeError(guard_error)
+    mark_compile_delegated()
     val (stdout, stderr, exit_code) = rt_process_run(simple_bin, ["check", path])
     val combined = clean_child_output(stdout, stderr)
     if exit_code == 0:
@@ -131,8 +147,23 @@ fn _default_smf_output(path: text) -> text:
         return path.substring(0, path.len() - 4) + ".smf"
     path + ".smf"
 
+fn _describe_extra_args(extra_args: [text]) -> text:
+    if extra_args.len() == 0:
+        return "compile"
+    var parts: [text] = []
+    for extra_arg in extra_args:
+        if extra_arg.starts_with("--"):
+            parts = parts.push(extra_arg.substring(2))
+        else:
+            parts = parts.push(extra_arg)
+    parts.join(" ")
+
 fn _run_compile_to_path(path: text, output: text, extra_args: [text]) -> CompileResult:
     val simple_bin = find_simple_binary()
+    val guard_error = check_compile_delegation_guard(_describe_extra_args(extra_args), simple_bin)
+    if guard_error != "":
+        return CompileResult.RuntimeError(guard_error)
+    mark_compile_delegated()
     var args = ["compile", path]
     var i = 0
     while i < extra_args.len():

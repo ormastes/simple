@@ -4,7 +4,8 @@
 - **Severity:** critical (system-wide resource exhaustion; ~35k leaked
   processes; killed an unrelated Vivado implementation run at checkpoint
   write; also the cause of the earlier "generate-script hang at 0% CPU")
-- **Status:** mitigated at the wrapper; root fix pending in `.spl`
+- **Status:** root fix implemented in `.spl` (requires redeploy to reach
+  `bin/release/*` binaries); wrapper guard retained as defense-in-depth
 
 ## Anatomy
 
@@ -41,12 +42,40 @@ Verified: the VHDL compile now holds a flat 3 processes and terminates
 (rc=1 with the seed's own pre-existing VHDL-backend error — a separate, known
 degradation; both FPGA lanes bypass it).
 
-## Root fix direction (`.spl`, requires redeploy to take effect)
+## Root fix (implemented, `.spl`, requires redeploy to take effect)
 
-- `find_simple_binary()` must never resolve to the current executable or a
-  wrapper for it (compare resolved/inode, honor `SIMPLE_BOOTSTRAP_DRIVER`
-  first, prefer the seed sibling).
-- `_run_compile_to_path` must carry a depth/loop guard (refuse to spawn when
-  an external-compile marker env is already set).
-- Add a regression test: `compile --backend=vhdl` on a file that defeats the
-  subset fallback must terminate with bounded process count.
+`src/compiler/80.driver/driver_public_shared.spl` now has a delegation-loop
+guard consulted by every external-compile spawn in
+`src/compiler/80.driver/driver_public_compile.spl` (`compile_file`,
+`compile_to_smf`, `jit_file`, `check_file`, `_run_compile_to_path` — which
+covers `aot_file`/`aot_c_file`/`aot_llvm_file`/`aot_vhdl_file`/etc.) and in
+`_build_native_shared_library` in the same shared module:
+
+- **Marker guard (the actual root fix for the wrapper-mediated loop):**
+  before spawning, `check_compile_delegation_guard(op_desc, resolved_bin)`
+  reads the `SIMPLE_COMPILE_DELEGATED` env var. If already `"1"` (set by a
+  parent in this same delegation chain via `mark_compile_delegated()` right
+  before its own spawn), the spawn is refused and a
+  `CompileResult.RuntimeError` / `Err(...)` is returned instead:
+  `"compile delegation loop detected: external fallback resolves to this
+  same CLI; {op_desc} not supported in-process"`. Since `rt_process_run`
+  inherits the parent's environment (the runtime never calls
+  `env_clear()`), the marker set via `rt_env_set` on the parent is visible to
+  the wrapper's child and to any grandchild it execs into — this is what
+  bounds the `sh → simple → sh → simple…` chain to one hop.
+- **Trivial self-reference guard:** `is_same_binary_path(resolved_bin,
+  current_exe)` cheaply compares the resolved external binary's path against
+  this process's own executable (`readlink -f /proc/self/exe`, no full
+  canonicalization round-trip) so a `find_simple_binary()` return of the
+  currently-running binary itself (no wrapper hop) is also refused.
+- The decision core (`compile_delegation_guard_decision`,
+  `compile_delegation_guard_message`, `is_same_binary_path`) is a pure,
+  no-I/O function — regression-tested directly without spawning any
+  processes: `test/01_unit/compiler/driver/compile_delegation_guard_spec.spl`
+  (5 examples, all pass under the self-hosted binary).
+
+Redeploy note: this fix lives in the compiler's own `.spl` source, so it only
+takes effect once the self-hosted binary is rebuilt and redeployed to
+`bin/release/<triple>/simple` — until then, the deployed binaries still rely
+solely on the wrapper-level `SIMPLE_WRAPPER_REENTERED` mitigation described
+above.
