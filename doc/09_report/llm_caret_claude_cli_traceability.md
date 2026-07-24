@@ -6,8 +6,10 @@ Date: 2026-07-05
 
 `src/app/llm_caret` is the app-layer LLM provider caret. It owns provider
 selection, CLI/API request construction, response normalization, and lightweight
-server compatibility. Runtime I/O stays behind existing app/runtime facades
-where available. This lane does not migrate Claude's React terminal UI,
+server compatibility. Terminal effects are supplied through the Simple-only
+`CaretIo` capability adapter in `tui_io.spl`; process and environment effects
+remain behind existing app/runtime facades. This lane does not migrate Claude's
+React terminal UI,
 remote-control bridge, OAuth, or full agent orchestration.
 
 ## Extracted Claude CLI Features
@@ -26,7 +28,7 @@ remote-control bridge, OAuth, or full agent orchestration.
 | Simple source file | LOC | Claude source match | Role |
 |---|---:|---|---|
 | `src/app/llm_caret/chat.spl` | 227 | `src/assistant/sessionHistory.ts`, `src/bootstrap/state.ts` | conversation history and message JSON |
-| `src/app/llm_caret/chat_tui.spl` | 786 | `src/screens/REPL.tsx`, `src/commands/*` | transcript, slash commands, and session transitions |
+| `src/app/llm_caret/chat_tui.spl` | 794 | `src/screens/REPL.tsx`, `src/commands/*` | transcript, slash commands, session transitions, and lifecycle-safe injected I/O |
 | `src/app/llm_caret/claude_api.spl` | 241 | `src/QueryEngine.ts`, `src/entrypoints/sdk/coreSchemas.ts` | Anthropic Messages request/response |
 | `src/app/llm_caret/claude_cli.spl` | 580 | `src/entrypoints/cli.tsx`, `src/QueryEngine.ts` | non-interactive argv and typed JSON/stream parsing |
 | `src/app/llm_caret/config.spl` | 228 | `src/bootstrap/state.ts`, `src/constants/product.ts` | defaults and provider config |
@@ -36,7 +38,7 @@ remote-control bridge, OAuth, or full agent orchestration.
 | `src/app/llm_caret/interface_text.spl` | 11 | Simple-only presentation seam | shared role and transcript text |
 | `src/app/llm_caret/json_helpers.spl` | 250 | Simple-only shared helper | local JSON helper caret utility |
 | `src/app/llm_caret/local_torch.spl` | 98 | Simple-only provider extension | local model provider outside Claude parity |
-| `src/app/llm_caret/main.spl` | 956 | `src/entrypoints/cli.tsx`, `src/QueryEngine.ts`, `src/screens/REPL.tsx` | CLI entrypoint, runtime state, proxy, and UI routing |
+| `src/app/llm_caret/main.spl` | 961 | `src/entrypoints/cli.tsx`, `src/QueryEngine.ts`, `src/screens/REPL.tsx` | CLI entrypoint, runtime state, proxy, and typed UI-result routing |
 | `src/app/llm_caret/mod.spl` | 409 | `src/QueryEngine.ts`, `src/bootstrap/state.ts` | public API, state, provider dispatch |
 | `src/app/llm_caret/openai_api.spl` | 260 | `src/entrypoints/sdk/coreSchemas.ts` | OpenAI-compatible provider extension |
 | `src/app/llm_caret/openai_compat.spl` | 203 | `src/entrypoints/sdk/coreSchemas.ts` | local/OpenAI-compatible endpoint provider |
@@ -47,15 +49,20 @@ remote-control bridge, OAuth, or full agent orchestration.
 | `src/app/llm_caret/server.spl` | 199 | `src/entrypoints/mcp.ts`, `src/entrypoints/sdk/coreSchemas.ts` | compatibility HTTP/MCP-like response surface |
 | `src/app/llm_caret/session.spl` | 245 | `src/assistant/sessionHistory.ts`, `src/bootstrap/state.ts` | persisted app/provider sessions |
 | `src/app/llm_caret/tools.spl` | 508 | `src/Tool.ts`, `src/constants/tools.ts` | permission-gated tools and tool-use parsing |
-| `src/app/llm_caret/tui_input.spl` | 220 | `src/screens/REPL.tsx` | renderer selection, ANSI/UTF-8 decoding, and raw-line control reduction |
+| `src/app/llm_caret/tui_input.spl` | 222 | `src/screens/REPL.tsx` | real TTY/TERM renderer selection, ANSI/UTF-8 decoding, and raw-line control reduction |
+| `src/app/llm_caret/tui_io.spl` | 101 | Simple-only terminal capability adapter | injected terminal size/raw/screen/byte/line/output operations with production stdlib wiring |
 | `src/app/llm_caret/types.spl` | 225 | `src/entrypoints/sdk/coreSchemas.ts`, `src/types/logs.ts` | request/response/event/config records |
 
-Mapped files: 24/24 = 100%.
-Mapped LOC: 7161/7161 = 100%.
+Mapped files at this checkpoint: 25/25 = 100%.
+Mapped LOC at this checkpoint: 7278/7278 = 100%.
+Current direct declaration inventory: 496 symbols; the checker must prove
+496/496 after the symbol TSV is regenerated.
 
-These counts prove current direct-file classification, not full Claude parity.
-Simple-only and conceptual rows are explicit, and upstream freshness remains
-unverifiable while the historical Claude source tree is absent.
+These counts include the new `tui_io.spl` row and match the regenerated
+file-qualified inventory. They prove direct-file classification, not executed
+behavior or full Claude parity. Simple-only and conceptual rows are explicit,
+and upstream freshness remains unverifiable while the historical Claude source
+tree is absent.
 
 ## Focused Test Mapping
 
@@ -64,7 +71,8 @@ unverifiable while the historical Claude source tree is absent.
 | CLI argv, typed JSON/NDJSON, subprocess forwarding, redaction, public history | `test/03_system/tools/llm/llm_caret_claude_cli_feature_contract_spec.spl` |
 | Caret process help/success/error/usage exits | `test/03_system/app/llm_caret/feature/llm_caret_cli_hardening_spec.spl` |
 | TUI submission/state/session/permission/retry/hidden admission | `test/03_system/app/llm_caret/feature/llm_caret_tui_hidden_feature_spec.spl` |
-| Focused unit branches | `chat_spec.spl`, `chat_tui_spec.spl`, `chat_tui_input_spec.spl`, `claude_cli_spec.spl`, `config_spec.spl`, `main_spec.spl`, `provider_spec.spl`, `retry_spec.spl`, `tools_spec.spl`, and `types_spec.spl` under `test/01_unit/app/llm_caret/` |
+| Live terminal routing/lifecycle/UTF-8/geometry/raw rejection | `test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl` through `scripts/check/check-llm-caret-tui-pty.shs`; execution requires cached `bin/caret`, `script(1)`, and `stty` |
+| Focused unit branches | `test/01_unit/app/llm_caret/claude_cli_spec.spl`, `chat_spec.spl`, `chat_tui_spec.spl`, `chat_tui_input_spec.spl`, `chat_tui_runtime_spec.spl`, `main_spec.spl`, `config_spec.spl`, `tools_spec.spl`, `types_spec.spl`, `provider_spec.spl`, `retry_spec.spl` under `test/01_unit/app/llm_caret/` |
 | Offline native seams | `test/04_smoke/llm_caret_cli_tui_hardening_smoke.spl` |
 
 These specs do not green historical full-parity rows whose implementation
@@ -96,7 +104,8 @@ target is absent.
 | `server.spl` | `build_health_response`, `build_models_response`, `build_chat_completion_response`, `build_anthropic_response`, `build_error_response`, `handle_route` |
 | `session.spl` | `Session`, session ID/path/save/load/list helpers |
 | `tools.spl` | permission policy, tool models, path guards, execution, tool-use parsing |
-| `tui_input.spl` | renderer selection, tty heuristic, ANSI/UTF-8 raw-key decoding, raw-line control reduction, input transitions |
+| `tui_input.spl` | renderer selection, real stdin TTY plus TERM policy, ANSI/UTF-8 raw-key decoding, raw-line control reduction, input transitions |
+| `tui_io.spl` | `CaretIo`, production terminal capability adapters, terminal size/raw/screen/read/emit functions |
 | `types.spl` | `Message`, `ChatRequest`, `ChatResponse`, `StreamEvent`, `ProviderConfig`, constructors, response predicates |
 
 ## Simple Symbol Trace
@@ -134,5 +143,7 @@ Run:
 
 ```bash
 sh scripts/check/check-llm-caret-claude-cli-trace.shs
+sh scripts/check/check-llm-caret-tui-pty.shs --case all
 bin/simple test test/03_system/tools/llm/llm_caret_claude_cli_traceability_spec.spl --mode=interpreter
+bin/simple test test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl --mode=interpreter
 ```

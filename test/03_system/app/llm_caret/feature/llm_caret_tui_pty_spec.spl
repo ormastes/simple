@@ -1,0 +1,101 @@
+# codex-system-test
+# @evidence-display: embed_tui
+"""
+# LLM Caret Live PTY Qualification
+
+**Requirements:** REQ-LLM-CARET-TUI-HARDEN-007,
+REQ-LLM-CARET-TUI-HARDEN-009, NFR-LLM-CARET-TUI-006
+**Plan:** doc/03_plan/sys_test/llm_caret_cli_tui_hardening.md
+
+## Scope
+
+Launch the shipped cached `bin/caret` wrapper with the offline dummy provider.
+The host `script(1)` utility supplies a real PTY. The checker fails closed when
+the cached artifact, PTY utility, terminal control, output markers, or terminal
+restoration evidence is missing.
+
+**TUI Captures:**
+`build/test-artifacts/03_system/app/llm_caret/feature/llm_caret_tui_pty/`
+"""
+
+use std.spec.{describe, it, expect, step}
+use app.io.mod.{process_run_timeout}
+
+struct CaretPtyEvidence:
+    stdout: text
+    stderr: text
+    exit_code: i32
+
+fn run_caret_pty_case(case_name: text) -> CaretPtyEvidence:
+    val (stdout, stderr, exit_code) = process_run_timeout(
+        "sh",
+        [
+            "scripts/check/check-llm-caret-tui-pty.shs",
+            "--case",
+            case_name
+        ],
+        120000
+    )
+    CaretPtyEvidence(
+        stdout: stdout,
+        stderr: stderr,
+        exit_code: exit_code
+    )
+
+describe "LLM Caret Live PTY Qualification":
+    describe "REQ-LLM-CARET-TUI-HARDEN-007: renderer routing uses real terminal state":
+        it "should route forced and automatic TTY sessions while keeping piped auto output plain":
+            step("Open the caret TUI")
+            val result = run_caret_pty_case("routing")
+            step("Send a prompt through the visible input")
+            expect(result.stdout).to_contain("case=forced-tui-route status=PASS")
+            expect(result.stdout).to_contain("case=auto-tty-route status=PASS")
+            expect(result.stdout).to_contain("case=piped-auto-plain status=PASS")
+            step("Check transcript and status")
+            expect(result.stdout).to_contain("evidence_status=PASS")
+            expect(result.exit_code).to_equal(0)
+
+    describe "REQ-LLM-CARET-TUI-HARDEN-009: terminal lifecycle is restored":
+        it "should restore terminal state after slash exit Ctrl-C Ctrl-D and EOF":
+            step("Open the caret TUI")
+            val result = run_caret_pty_case("lifecycle")
+            step("Send a prompt through the visible input")
+            expect(result.stdout).to_contain("case=restore-after-slash-exit status=PASS")
+            expect(result.stdout).to_contain("case=restore-after-ctrl-c status=PASS")
+            expect(result.stdout).to_contain("case=restore-after-ctrl-d status=PASS")
+            expect(result.stdout).to_contain("case=restore-after-eof status=PASS")
+            step("Check transcript and status")
+            expect(result.stdout).to_contain("failed_cases=0")
+            expect(result.exit_code).to_equal(0)
+
+        it "should preserve UTF-8 editing navigation and bounded terminal geometry":
+            step("Open the caret TUI")
+            val result = run_caret_pty_case("editing")
+            step("Send a prompt through the visible input")
+            expect(result.stdout).to_contain("case=utf8-edit-navigation status=PASS")
+            expect(result.stdout).to_contain("case=small-terminal-geometry status=PASS")
+            step("Check transcript and status")
+            expect(result.stdout).to_contain("evidence_status=PASS")
+            expect(result.exit_code).to_equal(0)
+
+        it "should reject forced TUI before terminal mutation when raw mode is unavailable":
+            step("Open the caret TUI")
+            val result = run_caret_pty_case("raw-failure")
+            step("Send a prompt through the visible input")
+            expect(result.stdout).to_contain("case=forced-tui-without-tty status=PASS")
+            step("Check transcript and status")
+            expect(result.stdout).to_contain("evidence_status=PASS")
+            expect(result.exit_code).to_equal(0)
+
+    describe "NFR-LLM-CARET-TUI-006: qualification is cached offline and fail closed":
+        it "should prove cached offline qualification prerequisites fail closed":
+            step("Open the caret TUI")
+            val result = run_caret_pty_case("prerequisites")
+            step("Send a prompt through the visible input")
+            expect(result.stdout).to_contain("cached_artifact=")
+            expect(result.stdout).to_contain("script_style=")
+            step("Check transcript and status")
+            expect(result.stdout).to_contain(
+                "build/test-artifacts/03_system/app/llm_caret/feature/llm_caret_tui_pty"
+            )
+            expect(result.exit_code).to_equal(0)

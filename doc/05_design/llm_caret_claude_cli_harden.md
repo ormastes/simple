@@ -56,3 +56,31 @@ file-load PASS) asserts the robustness property in the table above against a
 fault it is meant to survive — e.g. a mock 429 for retry, a spawn spy for
 permission deny, a transcript scan for redaction. See the hardening plan for the
 per-task acceptance tests and the interpreter-mode caveat.
+
+## Live TUI I/O and Lifecycle (2026-07-24)
+
+`CaretIo` is an injectable capability record for TTY detection, terminal size,
+raw/alternate-screen lifecycle, cursor state, drawing, byte/line input, and
+text emission. `production_caret_io()` delegates to `std.tui.terminal`,
+`app.llm_caret.tui_input.caret_is_tty`, and the canonical stdin facade.
+
+`CaretLoopResult(mode, ok, exit_reason, error)` makes routing and terminal
+failures observable to `main.spl`. The TUI loop follows:
+
+1. acquire raw mode; fail before screen mutation if unavailable;
+2. enter alternate screen and hide the cursor;
+3. read and reduce input, render, dispatch slash/model transitions;
+4. on `/exit`, Ctrl-C, Ctrl-D, or EOF, show the cursor, leave the alternate
+   screen, then restore raw mode;
+5. report raw restoration failure instead of silently returning success.
+
+The plain loop uses the same capability for line input and output, which makes
+EOF, slash dispatch, persistence, and automatic non-TTY routing deterministic
+in component tests. `_draw_frame` receives the capability and uses exactly one
+size snapshot; `_inner_height(rows)` is pure.
+
+Real PTY evidence is a separate fail-closed system lane. It invokes the cached
+`bin/caret` artifact through a host pseudo-terminal, records artifacts under
+`build/test-artifacts`, and never substitutes source execution or a paid model.
+If the cached artifact, PTY utility, or qualified runtime is absent, the gate
+fails and records the missing prerequisite.

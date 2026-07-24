@@ -111,8 +111,8 @@ pub fn native_term_poll(args: &[Value]) -> Result<Value, CompileError> {
 //
 // src/lib/nogc_sync_mut/tui/terminal.spl (and other low-level TUI code)
 // declares `extern fn rt_stdin_read_byte`, `rt_terminal_enable_raw_mode`,
-// `rt_terminal_disable_raw_mode`, `rt_terminal_get_size` directly — these
-// match the SFFI symbol names in
+// `rt_terminal_disable_raw_mode`, `rt_terminal_is_tty`, and
+// `rt_terminal_get_size` directly — these match the SFFI symbol names in
 // src/compiler_rust/runtime/src/value/sffi/env_process.rs, used when a
 // program JIT/AOT-compiles. When compilation instead falls back to this
 // tree-walking interpreter (e.g. an unrelated HIR lowering failure elsewhere
@@ -149,6 +149,12 @@ pub fn rt_terminal_enable_raw_mode(_args: &[Value]) -> Result<Value, CompileErro
 pub fn rt_terminal_disable_raw_mode(_args: &[Value]) -> Result<Value, CompileError> {
     let result = native_io::native_disable_raw_mode(&[Value::Int(0)])?;
     Ok(Value::Bool(matches!(result, Value::Int(0))))
+}
+
+/// `rt_terminal_is_tty` — query stdin through the interpreter's native
+/// terminal adapter (handle 0).
+pub fn rt_terminal_is_tty(_args: &[Value]) -> Result<Value, CompileError> {
+    native_io::native_is_tty(&[Value::Int(0)])
 }
 
 /// `rt_terminal_get_size` — bridges to `native_get_term_size` on stdout

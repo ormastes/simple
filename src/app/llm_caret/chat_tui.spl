@@ -1,24 +1,6 @@
-# LLM Caret - Interactive Chat TUI
-#
-# An interactive, full-screen chat shell for llm_caret built on the stdlib TUI
-# framework (std.tui). It replaces the headless raw-print experience with a
-# scrollable transcript panel (BoxWidget) + a prompt input line (InputWidget)
-# + a status/hint line.
-#
-# Design:
-#   - Pure formatting helpers (format_turn_line, format_tool_line,
-#     tui_role_style, select_renderer_mode, ...) hold NO terminal state, so they
-#     are unit-testable without a live terminal.
-#   - The mutable transcript lives in module-level state (TUI_TRANSCRIPT), the
-#     same idiom chat.spl uses for history. render_turn / render_tool_call
-#     append styled lines to it.
-#   - tui_tool_renderer is the renderer seam handed to
-#     chat.run_agent_loop_rendered: when a TUI session is active, tool results
-#     are drawn as styled transcript lines instead of raw prints.
-#
-# ponytail: assistant replies render after completion (non-streaming). std.tui
-# has no incremental/streaming re-render primitive; token-by-token streaming is
-# the upgrade path (would need a partial-line redraw during responder()).
+# LLM Caret interactive chat: styled transcript, prompt, status, slash/session
+# hooks, and injected terminal I/O. Assistant replies are currently rendered
+# after completion rather than incrementally streamed.
 #
 # Session hooks + slash commands: run_chat_tui/run_chat_plain accept a
 # SessionHooks bundle so provider/model switching, session listing, and
@@ -28,7 +10,6 @@
 # module). dispatch_slash/parse_slash_command/SlashResult are pure and
 # unit-testable with a fake SessionHooks.
 
-use std.tui.terminal.*
 use std.tui.style.*
 use std.tui.widget.{Rect, make_rect, pad_or_truncate}
 use std.tui.widgets.box_widget.{BoxWidget, make_box_widget_with_content, box_render}
@@ -43,12 +24,11 @@ use app.llm_caret.chat.{AgentResult, run_agent_loop, run_agent_loop_rendered,
                         tool_call_status, tool_call_summary}
 use app.llm_caret.claude_full.commands.{findRootCommand, admitRootCommand}
 use app.llm_caret.tui_input.{
-    select_renderer_mode, caret_is_tty, make_raw_line_state,
+    select_renderer_mode, make_raw_line_state,
     step_raw_line_byte, RAW_LINE_SUBMIT, RAW_LINE_EXIT,
     RAW_LINE_PAGE_UP, RAW_LINE_PAGE_DOWN
 }
-
-extern fn rt_stdin_read_line() -> text
+use app.llm_caret.tui_io.{CaretIo, CaretLoopResult, production_caret_io}
 
 # ============================================================================
 # Module-level session state
@@ -508,8 +488,7 @@ fn _visible_content(inner_h: i64) -> [StyledLine]:
         i = i + 1
     lines
 
-fn _inner_height() -> i64:
-    val rows = terminal_get_size().rows
+fn _inner_height(rows: i64) -> i64:
     var box_h = rows - 3
     if box_h < 3:
         box_h = 3
@@ -529,11 +508,13 @@ fn _hint_line(ui: ChatTui) -> text:
         return ui.hint + " [scrolled - Ctrl-N to follow]"
     ui.hint
 
-fn _draw_frame(ui: ChatTui):
-    terminal_clear_screen()
-    val size = terminal_get_size()
+fn _draw_frame(ui: ChatTui, io: CaretIo):
+    io.clear_screen()
+    # One geometry snapshot owns this entire frame. A resize can affect the
+    # next frame, but cannot mix dimensions within the current render.
+    val size = io.terminal_size()
     val cols = size.cols
-    val inner_h = _inner_height()
+    val inner_h = _inner_height(size.rows)
     val box_h = inner_h + 2
     val content = _visible_content(inner_h)
     val box = make_box_widget_with_content(ui.title, fg_style(COLOR_CYAN), content)
@@ -541,16 +522,16 @@ fn _draw_frame(ui: ChatTui):
     val box_lines = box_render(box, box_area)
     var i = 0
     while i < box_lines.len():
-        terminal_draw_at(i, 0, render_line(box_lines[i]))
+        io.draw_at(i, 0, render_line(box_lines[i]))
         i = i + 1
     val input_area = make_rect(0, box_h, cols, 1)
     val input_lines = input_render(ui.input, input_area)
     if input_lines.len() > 0:
-        terminal_draw_at(box_h, 0, render_line(input_lines[0]))
+        io.draw_at(box_h, 0, render_line(input_lines[0]))
     val hint_style = make_style(COLOR_NONE, COLOR_NONE, false, false, false, true)
-    terminal_draw_at(box_h + 1, 0, styled(pad_or_truncate(_hint_line(ui), cols), hint_style))
-    terminal_draw_at(box_h + 2, 0, styled(pad_or_truncate(_status_line(ui, TURN_COUNT, AWAITING_RESPONSE), cols), hint_style))
-    terminal_flush()
+    io.draw_at(box_h + 1, 0, styled(pad_or_truncate(_hint_line(ui), cols), hint_style))
+    io.draw_at(box_h + 2, 0, styled(pad_or_truncate(_status_line(ui, TURN_COUNT, AWAITING_RESPONSE), cols), hint_style))
+    io.flush()
 
 # ============================================================================
 # Interactive line reader (raw mode, byte-at-a-time)
@@ -559,15 +540,15 @@ fn _draw_frame(ui: ChatTui):
 # Reads one prompt line, redrawing the frame on each keystroke. Returns the
 # (updated ui, submitted text, status) where status: 0 = line submitted,
 # 1 = exit requested (Ctrl-C / Ctrl-D / EOF).
-fn _read_line(ui0: ChatTui) -> (ChatTui, text, i64):
+fn _read_line(ui0: ChatTui, io: CaretIo) -> (ChatTui, text, i64):
     var ui = ui0
     var done = false
     var result_text = ""
     var status = 1
     var raw_line = make_raw_line_state(ui.input)
     while not done:
-        _draw_frame(ui)
-        val b = terminal_read_byte()
+        _draw_frame(ui, io)
+        val b = io.read_byte()
         val next = step_raw_line_byte(raw_line, b)
         raw_line = next.state
         ui = _ui_set_input(ui, raw_line.input)
@@ -579,9 +560,9 @@ fn _read_line(ui0: ChatTui) -> (ChatTui, text, i64):
             status = 0
             done = true
         elif next.action == RAW_LINE_PAGE_UP:
-            scroll_page_up(tui_transcript_len(), _inner_height())
+            scroll_page_up(tui_transcript_len(), _inner_height(io.terminal_size().rows))
         elif next.action == RAW_LINE_PAGE_DOWN:
-            scroll_page_down(tui_transcript_len(), _inner_height())
+            scroll_page_down(tui_transcript_len(), _inner_height(io.terminal_size().rows))
     (ui, result_text, status)
 
 # ============================================================================
@@ -673,39 +654,36 @@ fn run_chat_tui_submission(
         submitted_to_model: submitted_to_model
     )
 
-# The full-screen interactive chat loop. Sets up the alt screen + raw mode per
-# editor/tui_shell.spl, reads a prompt, runs one agent turn (threading the
-# whole conversation - including tool_result turns, via AgentResult's
-# final_transcript - for real multi-turn memory), renders the reply + any
-# tool-call lines, persists the session after every turn, and loops until
-# /exit or Ctrl-C/Ctrl-D. Restores the terminal at the end of the loop.
-#
-# ponytail: no guard restores the terminal on a hard runtime panic mid-loop.
-# Checked for an existing repo idiom first: editor/tui_shell.spl (the pattern
-# this module already mirrors) has the identical gap - enter_raw_mode/
-# enter_alt_screen with teardown only at the function's natural end, no
-# panic guard anywhere. Simple's error model is Result<T,E> + `?` only (no
-# try/catch/throw by design - .claude/rules/language.md), which covers
-# explicit Err returns but not interpreter-level panics (e.g. an out-of-bounds
-# index), so there is no in-language way to intercept those and restore the
-# terminal. A real fix needs either a runtime atexit/signal-handler extern
-# (Rust-seed + bootstrap change) or restructuring every fallible call in this
-# loop through Result/`?` (moot today - none of them return Result). Filing
-# as a bug rather than adding a no-op wrapper that wouldn't actually catch a
-# panic: "chat_tui/editor raw-mode not restored on interpreter panic - needs
-# atexit-style runtime hook, no in-language guard is possible today".
-fn run_chat_tui(ui0: ChatTui, policy: PermissionPolicy, responder: fn([Message]) -> ModelResponse, hooks: SessionHooks, initial_conv: [Message]):
+# Full-screen lifecycle. Raw mode is acquired before any visible mutation and
+# every modeled exit restores cursor, alternate screen, then raw mode. Hard
+# runtime panics still require a future runtime atexit/signal cleanup hook.
+fn run_chat_tui(
+    ui0: ChatTui,
+    policy: PermissionPolicy,
+    responder: fn([Message]) -> ModelResponse,
+    hooks: SessionHooks,
+    initial_conv: [Message],
+    io0: CaretIo? = nil
+) -> CaretLoopResult:
+    val io = io0 ?? production_caret_io()
     tui_transcript_reset()
     var conv = initial_conv
     var session_id = hooks.session_id
     _render_history(conv)
-    terminal_enter_alt_screen()
-    terminal_enter_raw_mode()
-    terminal_hide_cursor()
+    if not io.enter_raw():
+        return CaretLoopResult(
+            mode: "tui",
+            ok: false,
+            exit_reason: "raw-mode-unavailable",
+            error: "terminal raw mode unavailable"
+        )
+    io.enter_alt()
+    io.hide_cursor()
     var ui = ui0
     var running = true
+    var exit_reason = "input_exit"
     while running:
-        val rl = _read_line(ui)
+        val rl = _read_line(ui, io)
         ui = rl.0
         val submitted = rl.1
         val status = rl.2
@@ -718,7 +696,7 @@ fn run_chat_tui(ui0: ChatTui, policy: PermissionPolicy, responder: fn([Message])
                 not is_slash_command(trimmed)
             if model_turn:
                 AWAITING_RESPONSE = true
-                _draw_frame(ui)
+                _draw_frame(ui, io)
             val transition = run_chat_tui_submission(
                 ui, conv, session_id, submitted, policy, responder, hooks
             )
@@ -728,33 +706,54 @@ fn run_chat_tui(ui0: ChatTui, policy: PermissionPolicy, responder: fn([Message])
             conv = transition.conversation
             session_id = transition.session_id
             running = transition.running
-    terminal_show_cursor()
-    terminal_exit_raw_mode()
-    terminal_exit_alt_screen()
-    print "chat session ended"
+            if not running:
+                exit_reason = "command_exit"
+    io.show_cursor()
+    io.exit_alt()
+    val restored = io.exit_raw()
+    if not restored:
+        return CaretLoopResult(
+            mode: "tui",
+            ok: false,
+            exit_reason: exit_reason,
+            error: "failed to restore terminal raw mode"
+        )
+    io.emit("chat session ended\n")
+    CaretLoopResult(mode: "tui", ok: true, exit_reason: exit_reason, error: "")
 
 # ============================================================================
 # Plain fallback loop (non-tty: piped / CI / server)
 # ============================================================================
 
-fn run_chat_plain(policy: PermissionPolicy, responder: fn([Message]) -> ModelResponse, hooks: SessionHooks, initial_conv: [Message]):
+fn run_chat_plain(
+    policy: PermissionPolicy,
+    responder: fn([Message]) -> ModelResponse,
+    hooks: SessionHooks,
+    initial_conv: [Message],
+    io0: CaretIo? = nil
+) -> CaretLoopResult:
+    val io = io0 ?? production_caret_io()
     var conv: [Message] = initial_conv
     var session_id = hooks.session_id
     var running = true
+    var exit_reason = "eof"
     while running:
-        print "> "
-        val line = rt_stdin_read_line() ?? ""
+        io.emit("> ")
+        val line = io.read_line() ?? ""
         val trimmed = line.trim()
         # Empty line == EOF on a drained pipe -> exit. Explicit /exit too.
         if trimmed == "" or trimmed == "/exit" or trimmed == "/quit":
             running = false
+            if trimmed != "":
+                exit_reason = "command_exit"
         elif is_slash_command(trimmed):
             val (cmd, arg) = parse_slash_command(trimmed)
             val result = dispatch_slash(cmd, arg, hooks)
             if result.message != "":
-                print result.message
+                io.emit(result.message + "\n")
             if result.exit:
                 running = false
+                exit_reason = "command_exit"
             elif result.new_conv:
                 conv = []
                 session_id = result.new_session_id
@@ -765,8 +764,9 @@ fn run_chat_plain(policy: PermissionPolicy, responder: fn([Message]) -> ModelRes
             conv = conv + [new_user_message(trimmed)]
             val result = run_agent_loop(policy, conv, responder, 25)
             conv = result.final_transcript
-            print "Assistant: " + result.final_text
+            io.emit("Assistant: " + result.final_text + "\n")
             hooks.on_persist(session_id, conv)
+    CaretLoopResult(mode: "plain", ok: true, exit_reason: exit_reason, error: "")
 
 # ============================================================================
 # Top-level entry: pick TUI vs plain per flag/tty
@@ -778,9 +778,17 @@ fn run_chat_plain(policy: PermissionPolicy, responder: fn([Message]) -> ModelRes
 # wires slash-command effects (model/provider switch, session list/resume,
 # persistence) into main.spl's runtime state; `initial_conv` seeds the
 # transcript (e.g. a --resume'd session's messages, or [] for a fresh chat).
-fn caret_chat(ui: ChatTui, policy: PermissionPolicy, responder: fn([Message]) -> ModelResponse, ui_mode: text, hooks: SessionHooks, initial_conv: [Message]):
-    val mode = select_renderer_mode(ui_mode, caret_is_tty())
+fn caret_chat(
+    ui: ChatTui,
+    policy: PermissionPolicy,
+    responder: fn([Message]) -> ModelResponse,
+    ui_mode: text,
+    hooks: SessionHooks,
+    initial_conv: [Message],
+    io0: CaretIo? = nil
+) -> CaretLoopResult:
+    val io = io0 ?? production_caret_io()
+    val mode = select_renderer_mode(ui_mode, io.is_tty())
     if mode == "tui":
-        run_chat_tui(ui, policy, responder, hooks, initial_conv)
-    else:
-        run_chat_plain(policy, responder, hooks, initial_conv)
+        return run_chat_tui(ui, policy, responder, hooks, initial_conv, io)
+    run_chat_plain(policy, responder, hooks, initial_conv, io)

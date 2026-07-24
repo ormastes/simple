@@ -1444,6 +1444,16 @@ pub extern "C" fn rt_terminal_get_size() -> RuntimeValue {
     rt_term_get_size()
 }
 
+/// Return whether standard input is attached to an interactive terminal.
+///
+/// `IsTerminal` delegates to `isatty` on Unix and `GetConsoleMode` on Windows,
+/// so redirected input is rejected on both platforms.
+#[no_mangle]
+pub extern "C" fn rt_terminal_is_tty() -> RuntimeValue {
+    use std::io::IsTerminal;
+    RuntimeValue::from_bool(std::io::stdin().is_terminal())
+}
+
 // Saved termios state for stdin (fd 0), captured by rt_terminal_enable_raw_mode
 // and restored by rt_terminal_disable_raw_mode. Previously these two externs
 // were no-op stubs that always returned true without touching the terminal at

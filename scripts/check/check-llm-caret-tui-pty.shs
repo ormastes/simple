@@ -1,0 +1,479 @@
+#!/bin/sh
+#
+# Deterministic live-terminal qualification for the shipped LLM Caret wrapper.
+# This checker never compiles source and never contacts a paid provider.
+
+set -u
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO_ROOT=$(CDPATH= cd -- "${SCRIPT_DIR}/../.." && pwd)
+CARET_WRAPPER="${REPO_ROOT}/bin/caret"
+ARTIFACT_ROOT="${REPO_ROOT}/build/test-artifacts/03_system/app/llm_caret/feature/llm_caret_tui_pty"
+CASE_NAME=""
+SCRIPT_STYLE=""
+FAILURES=0
+CASE_TIMEOUT_SECONDS=20
+
+usage() {
+    printf '%s\n' "usage: sh scripts/check/check-llm-caret-tui-pty.shs --case <prerequisites|routing|lifecycle|editing|raw-failure|all>"
+}
+
+fail_prerequisite() {
+    reason=$1
+    printf '%s\n' "evidence_status=FAIL"
+    printf '%s\n' "failure_class=prerequisite"
+    printf '%s\n' "failure_reason=${reason}"
+    printf '%s\n' "artifact_root=${ARTIFACT_ROOT}"
+    exit 1
+}
+
+record_failure() {
+    label=$1
+    reason=$2
+    artifact=$3
+    FAILURES=$((FAILURES + 1))
+    printf '%s\n' "case=${label} status=FAIL reason=${reason} artifact=${artifact}"
+}
+
+record_pass() {
+    label=$1
+    artifact=$2
+    printf '%s\n' "case=${label} status=PASS artifact=${artifact}"
+}
+
+first_cached_artifact() {
+    for candidate in \
+        "${REPO_ROOT}/build/bootstrap/caret-package/caret" \
+        "${REPO_ROOT}/bin/release/aarch64-apple-darwin/caret" \
+        "${REPO_ROOT}/bin/release/aarch64-apple-darwin-macho/caret" \
+        "${REPO_ROOT}/bin/release/x86_64-apple-darwin/caret" \
+        "${REPO_ROOT}/bin/release/x86_64-apple-darwin-macho/caret" \
+        "${REPO_ROOT}/bin/release/x86_64-unknown-linux-gnu/caret" \
+        "${REPO_ROOT}/bin/release/linux-x86_64/caret" \
+        "${REPO_ROOT}/build/bootstrap/full/aarch64-apple-darwin/caret" \
+        "${REPO_ROOT}/build/bootstrap/full/x86_64-apple-darwin/caret" \
+        "${REPO_ROOT}/build/bootstrap/full/x86_64-unknown-linux-gnu/caret"
+    do
+        if [ -x "${candidate}" ]; then
+            printf '%s\n' "${candidate}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+prepare_prerequisites() {
+    mkdir -p "${ARTIFACT_ROOT}" || fail_prerequisite "artifact_directory_unavailable"
+    [ -x "${CARET_WRAPPER}" ] || fail_prerequisite "bin_caret_not_executable"
+    command -v script >/dev/null 2>&1 || fail_prerequisite "script_utility_missing"
+    command -v stty >/dev/null 2>&1 || fail_prerequisite "stty_utility_missing"
+
+    CACHED_ARTIFACT=$(first_cached_artifact) ||
+        fail_prerequisite "cached_caret_artifact_missing"
+    export CACHED_ARTIFACT
+
+    case "$(uname -s 2>/dev/null || printf unknown)" in
+        Darwin|FreeBSD|OpenBSD|NetBSD)
+            SCRIPT_STYLE="bsd"
+            ;;
+        Linux)
+            SCRIPT_STYLE="util-linux"
+            ;;
+        *)
+            fail_prerequisite "unsupported_script_platform"
+            ;;
+    esac
+
+    # The production wrapper must choose a repository cached artifact. An
+    # inherited debug override or source fallback would invalidate evidence.
+    unset SIMPLE_CARET_NATIVE
+    SIMPLE_CARET_ALLOW_SOURCE_FALLBACK=0
+    export SIMPLE_CARET_ALLOW_SOURCE_FALLBACK
+
+    help_dir="${ARTIFACT_ROOT}/prerequisites"
+    mkdir -p "${help_dir}" || fail_prerequisite "prerequisite_artifact_unavailable"
+    HOME="${help_dir}/home"
+    TERM=dumb
+    export HOME TERM
+    mkdir -p "${HOME}"
+    "${CARET_WRAPPER}" --help >"${help_dir}/stdout.txt" 2>"${help_dir}/stderr.txt"
+    help_status=$?
+    if [ "${help_status}" -ne 0 ]; then
+        fail_prerequisite "cached_caret_help_exit_${help_status}"
+    fi
+    if ! grep -F "Interactive LLM chat shell" "${help_dir}/stdout.txt" >/dev/null 2>&1; then
+        fail_prerequisite "cached_caret_help_marker_missing"
+    fi
+    printf '%s\n' "cached_artifact=${CACHED_ARTIFACT}"
+    printf '%s\n' "script_style=${SCRIPT_STYLE}"
+}
+
+write_input() {
+    input_kind=$1
+    input_path=$2
+    case "${input_kind}" in
+        exit)
+            printf '/exit\r' >"${input_path}"
+            ;;
+        ctrl-c)
+            printf '\003' >"${input_path}"
+            ;;
+        ctrl-d)
+            printf '\004' >"${input_path}"
+            ;;
+        eof)
+            : >"${input_path}"
+            ;;
+        utf8-edit)
+            # "ac", left, U+754C, end, "!" => submitted text "a界c!".
+            printf 'ac\033[D界\033[F!\r/exit\r' >"${input_path}"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+write_pty_runner() {
+    runner=$1
+    cat >"${runner}" <<'RUNNER'
+#!/bin/sh
+set -u
+
+if [ "${CARET_GEOMETRY:-}" != "" ]; then
+    rows=${CARET_GEOMETRY%x*}
+    cols=${CARET_GEOMETRY#*x}
+    stty rows "${rows}" cols "${cols}" || exit 92
+fi
+
+baseline=$(stty -g) || exit 93
+geometry_before=$(stty size) || exit 94
+printf '%s\n' "pty_baseline=${baseline}"
+printf '%s\n' "pty_geometry_before=${geometry_before}"
+
+if [ "${CARET_UI_MODE}" = "forced" ]; then
+    "${CARET_WRAPPER}" --provider dummy --tui
+else
+    "${CARET_WRAPPER}" --provider dummy
+fi
+caret_status=$?
+
+after=$(stty -g) || exit 95
+geometry_after=$(stty size) || exit 96
+printf '%s\n' "caret_exit=${caret_status}"
+printf '%s\n' "pty_after=${after}"
+printf '%s\n' "pty_geometry_after=${geometry_after}"
+if [ "${baseline}" != "${after}" ]; then
+    printf '%s\n' "terminal_restored=false"
+    exit 97
+fi
+printf '%s\n' "terminal_restored=true"
+exit "${caret_status}"
+RUNNER
+    chmod +x "${runner}"
+}
+
+shell_quote() {
+    value=$1
+    escaped=$(printf '%s' "${value}" | sed "s/'/'\\\\''/g")
+    printf "'%s'" "${escaped}"
+}
+
+invoke_script() {
+    capture=$1
+    runner=$2
+    input=$3
+    driver_stdout=$4
+    driver_stderr=$5
+    timeout_marker=$6
+    : >"${timeout_marker}"
+    if [ "${SCRIPT_STYLE}" = "bsd" ]; then
+        script -q -e "${capture}" "${runner}" \
+            <"${input}" >"${driver_stdout}" 2>"${driver_stderr}" &
+    else
+        command_text=$(shell_quote "${runner}")
+        script -q -e -c "${command_text}" "${capture}" \
+            <"${input}" >"${driver_stdout}" 2>"${driver_stderr}" &
+    fi
+    driver_pid=$!
+    (
+        sleep "${CASE_TIMEOUT_SECONDS}"
+        printf '%s\n' "timeout" >"${timeout_marker}"
+        kill -TERM "${driver_pid}" 2>/dev/null || :
+        sleep 1
+        kill -KILL "${driver_pid}" 2>/dev/null || :
+    ) &
+    watchdog_pid=$!
+    wait "${driver_pid}"
+    driver_status=$?
+    kill "${watchdog_pid}" 2>/dev/null || :
+    wait "${watchdog_pid}" 2>/dev/null || :
+    return "${driver_status}"
+}
+
+wait_bounded() {
+    child_pid=$1
+    timeout_marker=$2
+    : >"${timeout_marker}"
+    (
+        sleep "${CASE_TIMEOUT_SECONDS}"
+        printf '%s\n' "timeout" >"${timeout_marker}"
+        kill -TERM "${child_pid}" 2>/dev/null || :
+        sleep 1
+        kill -KILL "${child_pid}" 2>/dev/null || :
+    ) &
+    watchdog_pid=$!
+    wait "${child_pid}"
+    child_status=$?
+    kill "${watchdog_pid}" 2>/dev/null || :
+    wait "${watchdog_pid}" 2>/dev/null || :
+    return "${child_status}"
+}
+
+capture_value() {
+    key=$1
+    capture=$2
+    grep -a "^${key}=" "${capture}" 2>/dev/null |
+        tail -1 |
+        sed "s/^${key}=//" |
+        tr -d '\r'
+}
+
+has_escape() {
+    capture=$1
+    escape_byte=$(printf '\033')
+    LC_ALL=C grep -a -F "${escape_byte}" "${capture}" >/dev/null 2>&1
+}
+
+run_pty_case() {
+    label=$1
+    ui_mode=$2
+    input_kind=$3
+    geometry=$4
+    case_dir="${ARTIFACT_ROOT}/${label}"
+    input="${case_dir}/input.bin"
+    capture="${case_dir}/typescript.txt"
+    runner="${case_dir}/pty-runner.sh"
+    driver_stdout="${case_dir}/script-stdout.txt"
+    driver_stderr="${case_dir}/script-stderr.txt"
+    timeout_marker="${case_dir}/timeout.txt"
+    mkdir -p "${case_dir}/home" || {
+        record_failure "${label}" "artifact_directory_unavailable" "${case_dir}"
+        return
+    }
+    write_input "${input_kind}" "${input}" || {
+        record_failure "${label}" "unsupported_input" "${case_dir}"
+        return
+    }
+    write_pty_runner "${runner}"
+    : >"${capture}"
+    : >"${driver_stdout}"
+    : >"${driver_stderr}"
+
+    CARET_WRAPPER="${CARET_WRAPPER}"
+    CARET_UI_MODE="${ui_mode}"
+    CARET_GEOMETRY="${geometry}"
+    HOME="${case_dir}/home"
+    TERM=xterm-256color
+    export CARET_WRAPPER CARET_UI_MODE CARET_GEOMETRY HOME TERM
+    invoke_script "${capture}" "${runner}" "${input}" \
+        "${driver_stdout}" "${driver_stderr}" "${timeout_marker}"
+    status=$?
+
+    baseline=$(capture_value "pty_baseline" "${capture}")
+    after=$(capture_value "pty_after" "${capture}")
+    geometry_before=$(capture_value "pty_geometry_before" "${capture}")
+    geometry_after=$(capture_value "pty_geometry_after" "${capture}")
+    if [ -s "${timeout_marker}" ]; then
+        record_failure "${label}" "script_timeout" "${case_dir}"
+    elif [ "${status}" -ne 0 ]; then
+        record_failure "${label}" "script_exit_${status}" "${case_dir}"
+    elif [ "${baseline}" = "" ] || [ "${after}" = "" ]; then
+        record_failure "${label}" "terminal_mode_markers_missing" "${case_dir}"
+    elif [ "${baseline}" != "${after}" ]; then
+        record_failure "${label}" "terminal_mode_not_restored" "${case_dir}"
+    elif [ "${geometry_before}" != "${geometry_after}" ]; then
+        record_failure "${label}" "terminal_geometry_not_restored" "${case_dir}"
+    elif ! grep -a -F "terminal_restored=true" "${capture}" >/dev/null 2>&1; then
+        record_failure "${label}" "restoration_marker_missing" "${case_dir}"
+    elif ! grep -a -F "chat session ended" "${capture}" >/dev/null 2>&1; then
+        record_failure "${label}" "tui_exit_marker_missing" "${case_dir}"
+    elif ! has_escape "${capture}"; then
+        record_failure "${label}" "tui_ansi_missing" "${case_dir}"
+    elif ! LC_ALL=C grep -a -F "$(printf '\033')[?1049h" \
+        "${capture}" >/dev/null 2>&1; then
+        record_failure "${label}" "alternate_screen_entry_missing" "${case_dir}"
+    elif ! LC_ALL=C grep -a -F "$(printf '\033')[?25l" \
+        "${capture}" >/dev/null 2>&1; then
+        record_failure "${label}" "cursor_hide_missing" "${case_dir}"
+    elif ! LC_ALL=C grep -a -F "$(printf '\033')[?25h" \
+        "${capture}" >/dev/null 2>&1; then
+        record_failure "${label}" "cursor_restore_missing" "${case_dir}"
+    elif ! LC_ALL=C grep -a -F "$(printf '\033')[?1049l" \
+        "${capture}" >/dev/null 2>&1; then
+        record_failure "${label}" "alternate_screen_restore_missing" "${case_dir}"
+    elif [ "${geometry}" != "" ] && [ "${geometry_before}" != "12 50" ]; then
+        record_failure "${label}" "requested_geometry_not_applied" "${case_dir}"
+    elif [ "${geometry}" != "" ] &&
+         ! LC_ALL=C grep -a -F "$(printf '\033')[12;1H" \
+             "${capture}" >/dev/null 2>&1; then
+        record_failure "${label}" "bottom_status_row_missing" "${case_dir}"
+    elif [ "${geometry}" != "" ] &&
+         LC_ALL=C grep -a -F "$(printf '\033')[13;" \
+             "${capture}" >/dev/null 2>&1; then
+        record_failure "${label}" "frame_exceeded_terminal_rows" "${case_dir}"
+    elif [ "${input_kind}" = "utf8-edit" ] &&
+         ! grep -a -F "a界c!" "${capture}" >/dev/null 2>&1; then
+        record_failure "${label}" "utf8_edited_submission_missing" "${case_dir}"
+    else
+        record_pass "${label}" "${case_dir}"
+    fi
+}
+
+run_piped_auto_case() {
+    label="piped-auto-plain"
+    case_dir="${ARTIFACT_ROOT}/${label}"
+    mkdir -p "${case_dir}/home" || {
+        record_failure "${label}" "artifact_directory_unavailable" "${case_dir}"
+        return
+    }
+    printf '/exit\n' >"${case_dir}/input.txt"
+    HOME="${case_dir}/home"
+    TERM=dumb
+    export HOME TERM
+    "${CARET_WRAPPER}" --provider dummy \
+        <"${case_dir}/input.txt" \
+        >"${case_dir}/stdout.txt" \
+        2>"${case_dir}/stderr.txt" &
+    caret_pid=$!
+    wait_bounded "${caret_pid}" "${case_dir}/timeout.txt"
+    status=$?
+    if [ -s "${case_dir}/timeout.txt" ]; then
+        record_failure "${label}" "wrapper_timeout" "${case_dir}"
+    elif [ "${status}" -ne 0 ]; then
+        record_failure "${label}" "wrapper_exit_${status}" "${case_dir}"
+    elif has_escape "${case_dir}/stdout.txt"; then
+        record_failure "${label}" "plain_output_contains_ansi" "${case_dir}"
+    elif ! grep -F "> " "${case_dir}/stdout.txt" >/dev/null 2>&1; then
+        record_failure "${label}" "plain_prompt_missing" "${case_dir}"
+    else
+        record_pass "${label}" "${case_dir}"
+    fi
+}
+
+run_raw_failure_case() {
+    label="forced-tui-without-tty"
+    case_dir="${ARTIFACT_ROOT}/${label}"
+    mkdir -p "${case_dir}/home" || {
+        record_failure "${label}" "artifact_directory_unavailable" "${case_dir}"
+        return
+    }
+    printf '/exit\n' >"${case_dir}/input.txt"
+    HOME="${case_dir}/home"
+    TERM=xterm-256color
+    export HOME TERM
+    "${CARET_WRAPPER}" --provider dummy --tui \
+        <"${case_dir}/input.txt" \
+        >"${case_dir}/stdout.txt" \
+        2>"${case_dir}/stderr.txt" &
+    caret_pid=$!
+    wait_bounded "${caret_pid}" "${case_dir}/timeout.txt"
+    status=$?
+    cat "${case_dir}/stdout.txt" "${case_dir}/stderr.txt" \
+        >"${case_dir}/combined.txt"
+    if [ -s "${case_dir}/timeout.txt" ]; then
+        record_failure "${label}" "wrapper_timeout" "${case_dir}"
+    elif [ "${status}" -eq 0 ]; then
+        record_failure "${label}" "raw_mode_failure_accepted" "${case_dir}"
+    elif has_escape "${case_dir}/combined.txt"; then
+        record_failure "${label}" "terminal_mutated_before_raw_rejection" "${case_dir}"
+    elif ! grep -F "terminal raw mode unavailable" \
+        "${case_dir}/combined.txt" >/dev/null 2>&1; then
+        record_failure "${label}" "raw_mode_error_marker_missing" "${case_dir}"
+    else
+        record_pass "${label}" "${case_dir}"
+    fi
+}
+
+run_routing() {
+    run_piped_auto_case
+    run_pty_case "forced-tui-route" "forced" "exit" ""
+    run_pty_case "auto-tty-route" "auto" "exit" ""
+}
+
+run_lifecycle() {
+    run_pty_case "restore-after-slash-exit" "forced" "exit" ""
+    run_pty_case "restore-after-ctrl-c" "forced" "ctrl-c" ""
+    run_pty_case "restore-after-ctrl-d" "forced" "ctrl-d" ""
+    run_pty_case "restore-after-eof" "forced" "eof" ""
+}
+
+run_editing() {
+    run_pty_case "utf8-edit-navigation" "forced" "utf8-edit" ""
+    run_pty_case "small-terminal-geometry" "forced" "exit" "12x50"
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --case)
+            [ "$#" -ge 2 ] || {
+                usage
+                exit 2
+            }
+            CASE_NAME=$2
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            usage
+            exit 2
+            ;;
+    esac
+done
+
+[ "${CASE_NAME}" != "" ] || {
+    usage
+    exit 2
+}
+
+prepare_prerequisites
+printf '%s\n' "evidence_case=${CASE_NAME}"
+printf '%s\n' "artifact_root=${ARTIFACT_ROOT}"
+
+case "${CASE_NAME}" in
+    prerequisites)
+        ;;
+    routing)
+        run_routing
+        ;;
+    lifecycle)
+        run_lifecycle
+        ;;
+    editing)
+        run_editing
+        ;;
+    raw-failure)
+        run_raw_failure_case
+        ;;
+    all)
+        run_routing
+        run_lifecycle
+        run_editing
+        run_raw_failure_case
+        ;;
+    *)
+        usage
+        exit 2
+        ;;
+esac
+
+if [ "${FAILURES}" -ne 0 ]; then
+    printf '%s\n' "evidence_status=FAIL"
+    printf '%s\n' "failed_cases=${FAILURES}"
+    exit 1
+fi
+printf '%s\n' "evidence_status=PASS"
+printf '%s\n' "failed_cases=0"

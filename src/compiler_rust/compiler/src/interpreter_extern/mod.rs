@@ -310,12 +310,13 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("native_fs_write", filesystem::native_fs_write);
     insert_simple!("native_fs_write_string", filesystem::native_fs_write_string);
     insert_simple!("native_get_term_size", terminal::native_get_term_size);
-    // rt_-prefixed adapters for src/lib/nogc_sync_mut/tui/terminal.spl's raw
-    // extern declarations (were missing from this table entirely — see
+    // rt_-prefixed adapters for src/lib/nogc_sync_mut/tui/terminal.spl's
+    // terminal extern declarations (were missing from this table entirely — see
     // doc/08_tracking/bug/raw_mode_extern_registry_2026-07-03.md).
     insert_simple!("rt_stdin_read_byte", terminal::rt_stdin_read_byte);
     insert_simple!("rt_terminal_enable_raw_mode", terminal::rt_terminal_enable_raw_mode);
     insert_simple!("rt_terminal_disable_raw_mode", terminal::rt_terminal_disable_raw_mode);
+    insert_simple!("rt_terminal_is_tty", terminal::rt_terminal_is_tty);
     insert_simple!("rt_terminal_get_size", terminal::rt_terminal_get_size);
     insert_simple!("native_http_send", network::native_http_send);
     insert_simple!("rt_http_request", network::rt_http_request);

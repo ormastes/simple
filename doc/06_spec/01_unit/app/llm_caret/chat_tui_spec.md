@@ -142,12 +142,10 @@ expect(select_renderer_mode("auto", false)).to_equal("plain")
 <summary>Executable SSpec</summary>
 
 ```simple
-val previous = env_get("TERM")
-expect(env_set("TERM", "dumb")).to_be(true)
-expect(caret_is_tty()).to_be(false)
-expect(env_set("TERM", "xterm-256color")).to_be(true)
-expect(caret_is_tty()).to_be(true)
-_restore_term(previous)
+expect(caret_term_supports_tui(nil)).to_be(false)
+expect(caret_term_supports_tui("")).to_be(false)
+expect(caret_term_supports_tui("dumb")).to_be(false)
+expect(caret_term_supports_tui("xterm-256color")).to_be(true)
 ```
 
 </details>

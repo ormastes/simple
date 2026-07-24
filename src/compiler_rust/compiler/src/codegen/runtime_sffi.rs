@@ -1654,6 +1654,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_terminal_get_size", &[], &[I64]), // () -> RuntimeValue (tuple of i64, i64)
     RuntimeFuncSpec::new("rt_terminal_enable_raw_mode", &[], &[I64]), // () -> RuntimeValue (bool)
     RuntimeFuncSpec::new("rt_terminal_disable_raw_mode", &[], &[I64]), // () -> RuntimeValue (bool)
+    RuntimeFuncSpec::new("rt_terminal_is_tty", &[], &[I64]), // () -> RuntimeValue (bool)
     RuntimeFuncSpec::new("rt_stdin_read_byte", &[], &[I64]), // () -> byte or -1
     RuntimeFuncSpec::new("stdin_read_char", &[], &[I64]), // legacy source-level char read -> RuntimeValue(text)
     RuntimeFuncSpec::new("rt_ssh_userauth_password_only_failure_payload", &[], &[I64]),
