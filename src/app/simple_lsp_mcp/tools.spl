@@ -2,7 +2,7 @@
 #
 # Uses shared mcp_sdk for JSON, shell helpers, and tool result building.
 
-use .json_helpers.{Q, LB, RB, SB_L, SB_R, jp, js, jo1, jo2, extract_field, escape_json, jsonrpc_result, jsonrpc_error, find_simple_binary, clean_command_output, strip_ansi, run_command_text, make_tool_result, make_tool_error, has_method, _char_at, _is_ws, _find_json_value_start}
+use .json_helpers.{Q, LB, RB, SB_L, SB_R, jp, js, jo1, jo2, extract_field, escape_json, jsonrpc_result, jsonrpc_error, find_simple_binary, clean_command_output, strip_ansi, make_tool_result, make_tool_error, has_method, _char_at, _is_ws, _find_json_value_start}
 use std.io_runtime.{process_run}
 # Import process_run_bounded from the light std module, NOT app.io.mod — the
 # latter is a CLI/compiler re-export hub whose graph makes `bin/simple run` skip
@@ -11,12 +11,26 @@ use std.io_runtime.{process_run}
 use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
 
 val LSP_DIAGNOSTICS_OUTPUT_CAPTURE_BYTES: i64 = 1024 * 1024
+val LSP_COMMAND_TIMEOUT_MS: i64 = 10000
+val LSP_COMMAND_OUTPUT_CAPTURE_BYTES: i64 = 1024 * 1024
 
 fn lsp_query_path() -> text:
     "src/lib/nogc_sync_mut/lsp/lsp_query.spl"
 
 fn query_visibility_path() -> text:
     "src/app/cli/query_visibility.spl"
+
+fn run_command_text(binary: text, args: [text]) -> text:
+    val (stdout, stderr, code) = process_run_bounded(
+        binary, args, LSP_COMMAND_TIMEOUT_MS, LSP_COMMAND_OUTPUT_CAPTURE_BYTES)
+    val clean = clean_command_output(stdout)
+    if code == 0:
+        return clean
+    if stderr.trim() != "":
+        return stderr.trim()
+    if clean != "":
+        return clean
+    "command failed with exit code " + str(code)
 
 fn run_lsp_query(subcmd: text, file: text, line0: i64, char0: i64) -> text:
     run_command_text(find_simple_binary(), [lsp_query_path(), subcmd, file, str(line0 + 1), str(char0 + 1)])
@@ -367,6 +381,7 @@ export arg_int_field
 export run_lsp_query
 export run_visibility_query
 export run_visibility_symbols
+export run_command_text
 export run_lsp_diagnostics
 export format_lsp_diagnostics_block
 export handle_tool_call

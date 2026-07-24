@@ -360,7 +360,10 @@ evidence boundary for the important pure-Simple tooling lanes:
 - **LSP MCP** — **Source status:** bounded native candidate admission is
   pushed. Direct entry and generated wrappers now reject/delegate malformed
   tails, validate documented log modes, and reject unsupported split surface
-  before serve (`2d1a6a7afd7`). **Strongest current evidence:**
+  before serve (`2d1a6a7afd7`). All non-diagnostic query children now share a
+  10-second, 1-MiB-per-stream bounded owner; diagnostics retains its separate
+  opt-in bounded path. The owner remains outside shared JSON helpers so Serial
+  MCP does not inherit the process closure. **Strongest current evidence:**
   `2d1a6a7afd7` covers admission/log grammar, while `8401b5ebfd` requires
   correlated initialize/list/symbol probes and fails closed. **Remaining bug/gap:** no
   fresh Stage 4 native artifact has completed that admission. **Next

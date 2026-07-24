@@ -28,8 +28,8 @@ never runs a real `tools/call`).
 Running from source (`bin/simple run src/app/simple_lsp_mcp/main.spl`) fixes
 10/11 tools (symbols, hover, definition, references, completions, type-at,
 signature-help, document-highlight, type-definition, implementation,
-folding-range — all run a plain `simple <script.spl> ...` via `process_run` and
-work). But **`lsp_diagnostics` hangs the whole server**: it shells out to
+folding-range). Those script children now use bounded capture rather than an
+unlimited `process_run`. But **`lsp_diagnostics` hangs the whole server**: it shells out to
 `simple check <file>` (`run_lsp_diagnostics`, tools.spl), and the interpreter's
 `process_run` never completes — the spawned child becomes a **zombie**
 (`[simple-main] <defunct>`) while the parent stays in **`futex_wait`** forever.
@@ -56,12 +56,17 @@ self-exec guard (cf. `stage4-self-exec-fork-bomb`,
 - `run_lsp_diagnostics` is **gated off** unless `SIMPLE_LSP_ENABLE_DIAGNOSTICS=1`: it returns
   a clear "diagnostics unavailable in source mode … run `simple check <file>` directly"
   message instead of spawning `simple check` and hanging the server.
-- 2026-06-22 hardening: the opt-in diagnostics path now uses
-  `process_run_timeout(..., 10000)` instead of the unbounded `process_run`, so
+- 2026-06-22 hardening: the opt-in diagnostics path now uses bounded process
+  capture with a 10-second deadline instead of the unbounded `process_run`, so
   an accidental enable cannot wedge the LSP MCP server indefinitely. Guarded by
   `test/01_unit/app/simple_lsp_mcp/lsp_diagnostics_timeout_spec.spl`.
+- 2026-07-24 hardening: the other ten request handlers share a 10-second,
+  1-MiB-per-stream bounded owner. A slow or flooding query child can no longer
+  wedge or grow the server without bound. The owner stays in `tools.spl` so
+  Serial MCP consumers of `json_helpers.spl` do not inherit its process graph.
 
-So 10/11 LSP tools work today; `lsp_diagnostics` is degraded to a message (no hang).
+So 10/11 LSP tools are source-fixed with bounded children; `lsp_diagnostics`
+is degraded to a message (no hang). Fresh Stage-4 qualification remains pending.
 
 ## Real fixes (pending)
 
