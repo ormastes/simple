@@ -20,7 +20,7 @@ use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, mir_operand_const_int}
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
-use compiler.hir.hir_lowering.items.{bootstrap_hir_module_count, bootstrap_hir_module_name_at, bootstrap_hir_module_symbols_at, bootstrap_hir_module_functions_at, bootstrap_hir_module_constants_at, bootstrap_hir_module_enums_at, bootstrap_hir_module_structs_at}
+use compiler.hir.hir_lowering.items.{bootstrap_hir_module_count, bootstrap_hir_module_name_at, bootstrap_hir_module_symbols_at, bootstrap_hir_module_functions_at, bootstrap_hir_module_constants_at, bootstrap_hir_module_enums_at, bootstrap_hir_module_structs_at, bootstrap_hir_module_classes_at}
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 extern fn rt_exit(code: i64)
@@ -321,6 +321,10 @@ fn bootstrap_lower_flat_hir_module_to_mir(module_index: i64, target_context: Mir
     # `@S` ctor). The reduced flat store now carries these; the globals/extra
     # lowering paths use bootstrap_register_hir_type_defs for the same purpose.
     lowering = bootstrap_register_flat_type_defs(lowering, bootstrap_hir_module_enums_at(module_index), bootstrap_hir_module_structs_at(module_index))
+    # Register class field layout so class construction lowers inline instead of
+    # calling an undefined `@C` ctor. (Class method resolution is a follow-up that
+    # also needs the method bodies lowered into the flat function stream.)
+    lowering = bootstrap_register_flat_class_defs(lowering, bootstrap_hir_module_classes_at(module_index))
     for const_ in constants:
         lowering.lower_const(const_)
         lowering.lower_static(const_)
@@ -512,6 +516,50 @@ fn bootstrap_register_flat_type_defs(lowering: MirLowering, enums: [HirEnum], st
     if not lw.enum_runtime_id_index.has("Option"):
         lw.enum_runtime_id_index["Option"] = 1
     _bootstrap_enum_runtime_id_names = lw.enum_runtime_id_names
+    lw
+
+fn bootstrap_register_flat_class_defs(lowering: MirLowering, classes: [HirClass]) -> MirLowering:
+    """Flat --entry-closure class FIELD registration, mirroring the class block of
+    the normal lower_module (module_lowering.spl ~728-758): register class field
+    layout so `C(..)` reclassifies to an inline aggregate instead of a call to an
+    undefined `@C` ctor. The impl-method / `static::C::m` registry (so class
+    methods resolve) also requires lowering the method BODIES into the flat
+    function stream — a separate follow-up; without emitted bodies, registering
+    the method symbols would only turn a loud const-0 placeholder into an
+    undefined-symbol link error. `lowering` is value-typed here, so every dict
+    write copies back."""
+    var lw = lowering
+
+    # Class field layout: same name-keyed maps as structs, plus class_type_names.
+    var ci = 0
+    while ci < classes.len():
+        val class_def = classes[ci]
+        var field_names: [text] = []
+        var field_has_default: [bool] = []
+        var field_default_expr: [HirExpr] = []
+        var fi = 0
+        while fi < class_def.fields.len():
+            field_names.push(class_def.fields[fi].name)
+            field_has_default.push(class_def.fields[fi].has_default)
+            field_default_expr.push(class_def.fields[fi].default)
+            fi = fi + 1
+        var fm = lw.field_map
+        fm[lw.symbol_id_value(class_def.symbol)] = field_names
+        lw.field_map = fm
+        var shd = lw.struct_field_has_default
+        shd[class_def.name] = field_has_default
+        lw.struct_field_has_default = shd
+        var sde = lw.struct_field_default_expr
+        sde[class_def.name] = field_default_expr
+        lw.struct_field_default_expr = sde
+        var sfo = lw.struct_field_order
+        sfo[class_def.name] = field_names
+        lw.struct_field_order = sfo
+        var ctn = lw.class_type_names
+        ctn[class_def.name] = true
+        lw.class_type_names = ctn
+        ci = ci + 1
+
     lw
 
 fn bootstrap_register_hir_type_defs(lowering: MirLowering, hir_module: HirModule) -> MirLowering:
