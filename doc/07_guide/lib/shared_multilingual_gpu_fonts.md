@@ -731,15 +731,13 @@ and a host-side image hash are not guest rendering evidence.
 The pure-Simple builders own the canonical path. The still-live C image writer
 mirrors the readable names and fixed short aliases for compatibility with its
 existing toolchain/evidence image callers.
-On AArch64 the canonical desktop source route attaches that existing VirtIO-BLK
-FAT32 image, resets stale VFS state, and attempts to mount it and register the
-selected catalog before Engine2D creation. A failed mount or post-mount
-executable probe clears VFS readiness. Host image acceptance requires `mtype` extraction plus
-an exact 1,708,408-byte SHA-256 check; missing tools fail closed. RV64 remains
-on its existing bitmap path because the initializer is ARM-only and the current
-64 KiB runtime heap cannot carry this vector-font bootstrap. Both canonical ARM
-scenario contracts require the exact successful registration marker; bitmap
-fallback cannot satisfy them.
+On AArch64 and RV64 the canonical desktop source routes attach deterministic
+VirtIO-BLK FAT32 media, reset stale VFS state, and mount and register the
+selected catalog before Engine2D creation. A failed mount clears VFS readiness
+and stops RV64 desktop admission. Host image acceptance requires exact `mtools`
+extraction and fails closed when the tools are unavailable. Live RV64
+vector-font pixels remain unproved until the receipt-bound `pmemsave` crop has
+its pinned hash.
 The x86_64 SimpleOS witness is the existing 12 px `taskbar-clock` command in the
 real `SharedWmScene -> DrawIrComposition -> Engine2D` frame; the private
 post-frame `A`/32 px draw was deleted. The fullscreen QEMU wrapper is configured

@@ -1,6 +1,6 @@
 # SimpleOS ARM64/RV64 QMP input transport evidence gap
 
-**Status:** PARTIAL — ARM64 source implemented; ARM64 live proof and RV64 transport remain open
+**Status:** PARTIAL — ARM64/RV64 source implemented; live proof remains open
 **Scope:** `arm64-desktop-engine2d` and `riscv64-display-smoke` on QEMU `virt`
 **Observed:** 2026-07-24
 
@@ -13,10 +13,12 @@ and routes them through the shared evdev translators. This is preflight source,
 not proof that QMP `input-send-event` reaches a current-source guest. PL011
 remains fallback-only and is not keyboard press/release or pointer evidence.
 
-The canonical RV64 desktop has the same boundary: its loop consumes only
-`serial_read_byte()`. The RV64 evidence wrapper currently attaches PCI VirtIO
-keyboard and mouse devices, but no guest owner discovers, negotiates, or drains
-them. Attaching a device is not input evidence.
+The canonical RV64 desktop now uses QEMU's modern-only PCI VirtIO keyboard
+and mouse devices (the device ignores requested legacy enablement and retains
+PCI ID `1af4:1052`). Its freestanding owner discovers both by evdev
+capability, owns eventq 0, acknowledges the PCI ISR, refills every consumed
+descriptor, and injects raw records into the same shared compositor backend as
+ARM64. This remains source evidence until a current RV64 ELF proves delivery.
 
 The ARM entry reports `event_backend=virtio-mmio` ready only when both device
 classes initialize; otherwise it reports a blocker and labels UART as fallback.
@@ -24,8 +26,8 @@ Because the guest polls eventq, evidence uses `[wm-pointer-poll] source=poll`,
 never a false IRQ marker. One pointer `SYN_REPORT` transaction owns one sequence
 across its REL/button records; key press and release each own state/frame
 correlation even when release does not mutate WM state.
-RV64 likewise correctly emits
-`[rv64-input-evidence-unavailable] reason=virtio-input-transport-not-wired`.
+RV64 emits an unavailable marker only when both input device classes do not
+initialize.
 
 ## Historical root cause and current boundary
 
@@ -35,14 +37,15 @@ The repository has only the platform-independent evdev translation owner:
   the existing `KeyEvent` and `MouseEvent` models.
 
 The original production path was missing all hardware-facing ownership.
-ARM64 now closes the source portion through
-`boot/baremetal_stubs.c`, `os.kernel.arch.arm64.virtio_input`, and the canonical
-desktop entry. The following items remain unproved or missing:
+ARM64 now closes its source portion through `boot/baremetal_stubs.c` and
+`os.kernel.arch.arm64.virtio_input`; RV64 closes its separate legacy-PCI
+transport through `riscv64/boot/freestanding_runtime.c` and
+`os.kernel.arch.riscv64.virtio_input`. Both inject the same raw-event poller
+into the existing compositor backend. The following items remain unproved:
 
-- No RV64 driver discovers VirtIO MMIO device ID 18 either; the existing RV64
-  PCI VirtIO-GPU owner does not provide an input queue.
 - ARM64 has no retained live run proving the new queue owner and receipts.
-- RV64 still has neither queue ownership nor an input backend.
+- RV64 has no retained current-ELF run proving PCI queue/ISR/refill and
+  receipt delivery.
 - ARM64 QMP key edges/pointer frames and later RAMFB revisions have not been
   correlated in production evidence.
 
@@ -51,8 +54,8 @@ a probe lane, not a HID event transport.
 
 ## Required canonical implementation status
 
-1. ARM64 source owner: implemented in the architecture freestanding runtime
-   plus thin Simple facade. Generalization to one ARM/RISC-V owner is open.
+1. Both source owners are implemented in their architecture freestanding
+   runtimes plus thin Simple facades; the evdev/backend owner is shared.
 2. ARM64 implemented: discover QEMU `virt` MMIO slots at `0x0a000000`, stride `0x200`, and
    select device ID 18. Identify keyboard and relative-pointer capabilities
    through the VirtIO input configuration space; do not depend on slot order.
@@ -63,15 +66,15 @@ a probe lane, not a HID event transport.
    `{type:u16, code:u16, value:u32}` buffers, and recycle every used buffer.
 4. ARM64 implemented: reuse `virtio_input_key_event` and `VirtioMouseAccum`; do not create new
    key, mouse, or WM action models.
-5. Expose one `InputBackend` implementation returning real `KeyEvent.Press`,
-   `KeyEvent.Release`, and flushed `MouseEvent` values.
-6. ARM64 implemented; RV64 open: attach MMIO `virtio-keyboard-device` and
-   `virtio-mouse-device` to canonical target definitions. Do not attach the
-   current PCI variants to an MMIO-only guest driver.
-7. ARM64 source implemented/live open: route events through existing
+5. Implemented: expose one `InputBackend` implementation returning real
+   `KeyEvent.Press`, `KeyEvent.Release`, and flushed `MouseEvent` values.
+6. Implemented by topology: ARM64 uses MMIO devices; RV64 traverses modern PCI
+   common/notify/ISR/device capabilities for `virtio-keyboard-pci` and
+   `virtio-mouse-pci`.
+7. Source implemented/live open: route events through existing
    compositor/shell input owners. Assign a
    guest monotonic `input_seq` only after a used-ring event is consumed.
-8. ARM64 source implemented/live open: emit distinct device, WM-state, and post-render frame receipts carrying the
+8. Source implemented/live open: emit distinct device, WM-state, and post-render frame receipts carrying the
    same sequence. Never copy a host nonce into guest evidence.
 
 ## Acceptance and capture prerequisites
@@ -80,8 +83,8 @@ a probe lane, not a HID event transport.
   `SIMPLE_BINARY=$PWD/bin/release/aarch64-apple-darwin/simple SIMPLE_LIB=src SIMPLE_OS_BUILD_TIMEOUT_MS=900000 $PWD/bin/release/aarch64-apple-darwin/simple os test --scenario=arm64-desktop-engine2d --log=off`
 - RV64 build:
   `bin/simple os build --scenario=riscv64-display-smoke`
-- QEMU must expose a QMP Unix socket and attach the two VirtIO-MMIO input
-  devices to the production ELF.
+- QEMU must expose a QMP Unix socket and attach the target's two production
+  VirtIO input devices: MMIO for ARM64, modern PCI for RV64.
 - Inject one key down/up pair and a pointer move plus left-button down/up using
   QMP `input-send-event`.
 - Require separate guest device receipts for both key edges and both button
@@ -148,8 +151,8 @@ guest-owned backing bytes directly. The current wrapper instead uses
 5. Call `vfs_boot_init_virtio_fat32()` and
    `simpleos_desktop_register_selected_fonts_from_vfs()` before first
    composition. Reuse Engine2D/Draw IR; add no renderer, atlas, or cache.
-6. Implement the MMIO input owner above, attach MMIO keyboard/pointer devices,
-   and route decoded events through the existing compositor/shell owners.
+6. Build a current ELF and prove the implemented target-specific input owner
+   routes decoded events through the shared compositor/shell owners.
 7. Capture baseline and post-input buffers with `pmemsave`. Admit PASS only
    after guest IRQ, WM-state, later frame generation, and distinct pixels all
    correlate; serial-only or host-nonce-only evidence remains invalid.

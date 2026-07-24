@@ -1,8 +1,8 @@
-# Canonical ARM64 VirtIO-MMIO input adapter for the compositor.
+# Canonical VirtIO input adapter for the compositor.
 #
-# The hardware owner exposes one raw evdev record at a time. This adapter keeps
-# pointer records together until SYN_REPORT, retains keyboard press/release
-# edges, and exposes both through the shared InputBackend trait.
+# ARM64 MMIO and RV64 PCI owners inject the same raw-event poll contract. This
+# adapter keeps pointer records together until SYN_REPORT, retains keyboard
+# press/release edges, and exposes both through the shared InputBackend trait.
 
 use os.compositor.input_backend.{InputBackend}
 use os.drivers.input.ps2_keyboard.{Key, KeyEvent}
@@ -24,16 +24,16 @@ use os.drivers.virtio.virtio_input_ops.{
     REL_X,
     REL_Y,
     SYN_REPORT,
+    VIRTIO_INPUT_DEVICE_KEYBOARD,
+    VIRTIO_INPUT_DEVICE_POINTER,
+    VirtioInputEvent,
     VirtioMouseAccum,
     virtio_input_key_event
 }
-use os.kernel.arch.arm64.virtio_input.{
-    ARM64_VIRTIO_INPUT_DEVICE_KEYBOARD,
-    ARM64_VIRTIO_INPUT_DEVICE_POINTER,
-    arm64_virtio_input_poll
-}
+use os.kernel.arch.arm64.virtio_input.{arm64_virtio_input_poll}
 
 class Arm64VirtioInputBackend:
+    poll_event: fn() -> VirtioInputEvent?
     mouse: VirtioMouseAccum
     pending_key: KeyEvent?
     pending_mouse: MouseEvent?
@@ -41,6 +41,7 @@ class Arm64VirtioInputBackend:
     pending_mouse_sequence: i64
     pending_key_code: u16
     pending_key_value: u32
+    pending_key_irq_status: u32
     pending_pointer_type: u16
     pending_pointer_code: u16
     pending_pointer_value: u32
@@ -54,6 +55,7 @@ class Arm64VirtioInputBackend:
     pending_pointer_right_value: u32
     pending_pointer_middle_edge: bool
     pending_pointer_middle_value: u32
+    pending_pointer_irq_status: u32
     pointer_frame_open: bool
     pointer_frame_sequence: i64
     input_sequence: i64
@@ -61,6 +63,7 @@ class Arm64VirtioInputBackend:
     delivered_key_sequence: i64
     delivered_key_code: u16
     delivered_key_value: u32
+    delivered_key_irq_status: u32
     delivered_mouse_sequence: i64
     delivered_pointer_type: u16
     delivered_pointer_code: u16
@@ -75,6 +78,7 @@ class Arm64VirtioInputBackend:
     delivered_pointer_right_value: u32
     delivered_pointer_middle_edge: bool
     delivered_pointer_middle_value: u32
+    delivered_pointer_irq_status: u32
     left_alt: bool
     right_alt: bool
     left_shift: bool
@@ -84,7 +88,19 @@ class Arm64VirtioInputBackend:
 
 impl Arm64VirtioInputBackend:
     static fn create(screen_width: i64, screen_height: i64) -> Arm64VirtioInputBackend:
+        Arm64VirtioInputBackend.create_with_poller(
+            screen_width,
+            screen_height,
+            arm64_virtio_input_poll
+        )
+
+    static fn create_with_poller(
+        screen_width: i64,
+        screen_height: i64,
+        poll_event: fn() -> VirtioInputEvent?
+    ) -> Arm64VirtioInputBackend:
         Arm64VirtioInputBackend(
+            poll_event: poll_event,
             mouse: VirtioMouseAccum.create(screen_width, screen_height),
             pending_key: nil,
             pending_mouse: nil,
@@ -92,6 +108,7 @@ impl Arm64VirtioInputBackend:
             pending_mouse_sequence: 0,
             pending_key_code: 0u16,
             pending_key_value: 0u32,
+            pending_key_irq_status: 0u32,
             pending_pointer_type: 0u16,
             pending_pointer_code: 0u16,
             pending_pointer_value: 0u32,
@@ -105,6 +122,7 @@ impl Arm64VirtioInputBackend:
             pending_pointer_right_value: 0u32,
             pending_pointer_middle_edge: false,
             pending_pointer_middle_value: 0u32,
+            pending_pointer_irq_status: 0u32,
             pointer_frame_open: false,
             pointer_frame_sequence: 0,
             input_sequence: 0,
@@ -112,6 +130,7 @@ impl Arm64VirtioInputBackend:
             delivered_key_sequence: 0,
             delivered_key_code: 0u16,
             delivered_key_value: 0u32,
+            delivered_key_irq_status: 0u32,
             delivered_mouse_sequence: 0,
             delivered_pointer_type: 0u16,
             delivered_pointer_code: 0u16,
@@ -126,6 +145,7 @@ impl Arm64VirtioInputBackend:
             delivered_pointer_right_value: 0u32,
             delivered_pointer_middle_edge: false,
             delivered_pointer_middle_value: 0u32,
+            delivered_pointer_irq_status: 0u32,
             left_alt: false,
             right_alt: false,
             left_shift: false,
@@ -134,7 +154,13 @@ impl Arm64VirtioInputBackend:
             right_ctrl: false
         )
 
-    me feed_raw_event(device_kind: u32, type_: u16, code: u16, value: u32) -> bool:
+    me feed_raw_event(
+        device_kind: u32,
+        type_: u16,
+        code: u16,
+        value: u32,
+        irq_status: u32 = 0u32
+    ) -> bool:
         """Ingest one already-owned raw record without dropping pending edges.
 
         This method is also the hardware-free test seam. The MMIO poller calls
@@ -143,13 +169,14 @@ impl Arm64VirtioInputBackend:
         if self.pending_key != nil or self.pending_mouse != nil:
             return false
 
-        if device_kind == ARM64_VIRTIO_INPUT_DEVICE_KEYBOARD:
+        if device_kind == VIRTIO_INPUT_DEVICE_KEYBOARD:
             if type_ != EV_KEY:
                 return false
             self.input_sequence = self.input_sequence + 1
             self.pending_key_sequence = self.input_sequence
             self.pending_key_code = code
             self.pending_key_value = value
+            self.pending_key_irq_status = irq_status
             val pressed = value != KEY_VALUE_RELEASE
             if code == KEY_LEFTALT:
                 self.left_alt = pressed
@@ -166,7 +193,7 @@ impl Arm64VirtioInputBackend:
             self.pending_key = virtio_input_key_event(code, value)
             return true
 
-        if device_kind != ARM64_VIRTIO_INPUT_DEVICE_POINTER:
+        if device_kind != VIRTIO_INPUT_DEVICE_POINTER:
             return false
         if not self.pointer_frame_open:
             self.input_sequence = self.input_sequence + 1
@@ -182,10 +209,12 @@ impl Arm64VirtioInputBackend:
             self.pending_pointer_right_value = 0u32
             self.pending_pointer_middle_edge = false
             self.pending_pointer_middle_value = 0u32
+            self.pending_pointer_irq_status = 0u32
 
         self.pending_pointer_type = type_
         self.pending_pointer_code = code
         self.pending_pointer_value = value
+        self.pending_pointer_irq_status = self.pending_pointer_irq_status | irq_status
         if type_ == EV_KEY and code >= BTN_LEFT:
             if code == BTN_LEFT:
                 self.pending_pointer_left_edge = true
@@ -212,13 +241,14 @@ impl Arm64VirtioInputBackend:
         true
 
     me _pump_one() -> bool:
-        val raw_event = arm64_virtio_input_poll()
+        val raw_event = self.poll_event()
         if val event = raw_event:
             return self.feed_raw_event(
                 event.device_kind,
                 event.type_,
                 event.code,
-                event.value
+                event.value,
+                event.irq_status
             )
         false
 
@@ -239,6 +269,7 @@ impl InputBackend for Arm64VirtioInputBackend:
             self.delivered_key_sequence = self.pending_key_sequence
             self.delivered_key_code = self.pending_key_code
             self.delivered_key_value = self.pending_key_value
+            self.delivered_key_irq_status = self.pending_key_irq_status
             return event
         nil
 
@@ -261,6 +292,7 @@ impl InputBackend for Arm64VirtioInputBackend:
             self.delivered_pointer_right_value = self.pending_pointer_right_value
             self.delivered_pointer_middle_edge = self.pending_pointer_middle_edge
             self.delivered_pointer_middle_value = self.pending_pointer_middle_value
+            self.delivered_pointer_irq_status = self.pending_pointer_irq_status
             return event
         nil
 
@@ -291,3 +323,5 @@ impl InputBackend for Arm64VirtioInputBackend:
             Key.R: "r"
             Key.T: "t"
             _: nil
+
+alias VirtioInputBackend = Arm64VirtioInputBackend

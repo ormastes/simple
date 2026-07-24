@@ -56,12 +56,14 @@ shallow-released `retired_core_lexer.source_chars`.
 
 ### 2026-07-24 correction
 
-The unverified eager release was unsafe in the compiled self-host: Stage4
-parsed the first source, then read corrupted tokens from the second source.
-The lexer now keeps the retired array registered until ownership semantics can
-prove a safe release. The existing two-parse frontend regression rejects any
-eager `rt_array_free` in the shared lexer initializer. Full Stage4 artifact and
-RSS acceptance remain open.
+Fresh CI disproved the initial eager-release diagnosis: removing only
+`rt_array_free` left the identical first-file-good/second-file-corrupt failure.
+The next isolated candidate is the preceding optimization that overwrote the
+large `CoreLexer` struct through `current_core_lexer_slot[0]`. The lexer now
+restores pre-optimization whole-owner replacement, and the two-parse regression
+rejects both element overwrite and eager release. This is not promoted as the
+root cause until exact Stage4 CI passes. Full artifact and RSS acceptance
+remain open.
 
 ## Reproduction
 

@@ -1548,6 +1548,8 @@ typedef struct RtPciDevice {
 #define RT_PCI_LEGACY_NET_IO_PORT 0x1000ULL
 #define RT_PCI_LEGACY_GPU_IO_PORT 0x2000ULL
 #define RT_PCI_LEGACY_BLK_IO_PORT 0x3000ULL
+#define RT_PCI_LEGACY_INPUT_IO_PORT 0x4000ULL
+#define RT_PCI_LEGACY_INPUT_IO_STRIDE 0x1000ULL
 #define RT_PCI_CMD_IO 0x1U
 #define RT_PCI_CMD_MEM 0x2U
 #define RT_PCI_CMD_BUS_MASTER 0x4U
@@ -1559,6 +1561,8 @@ typedef struct RtPciDevice {
 #define RT_VIRTIO_BLK_MODERN_DEVICE_ID 0x1042
 #define RT_VIRTIO_GPU_LEGACY_DEVICE_ID 0x1010
 #define RT_VIRTIO_GPU_MODERN_DEVICE_ID 0x1050
+#define RT_VIRTIO_INPUT_LEGACY_DEVICE_ID 0x1012
+#define RT_VIRTIO_INPUT_MODERN_DEVICE_ID 0x1052
 #define RT_VIRTIO_PCI_HOST_FEATURES 0x00ULL
 #define RT_VIRTIO_PCI_GUEST_FEATURES 0x04ULL
 #define RT_VIRTIO_PCI_QUEUE_PFN 0x08ULL
@@ -1566,10 +1570,13 @@ typedef struct RtPciDevice {
 #define RT_VIRTIO_PCI_QUEUE_SEL 0x0eULL
 #define RT_VIRTIO_PCI_QUEUE_NOTIFY 0x10ULL
 #define RT_VIRTIO_PCI_STATUS 0x12ULL
+#define RT_VIRTIO_PCI_ISR_STATUS 0x13ULL
 #define RT_VIRTIO_NET_MAC_OFFSET 0x14ULL
 #define RT_PCI_CAP_ID_VENDOR_SPECIFIC 0x09U
 #define RT_VIRTIO_PCI_CAP_COMMON_CFG 1U
 #define RT_VIRTIO_PCI_CAP_NOTIFY_CFG 2U
+#define RT_VIRTIO_PCI_CAP_ISR_CFG 3U
+#define RT_VIRTIO_PCI_CAP_DEVICE_CFG 4U
 #define RT_VIRTIO_MODERN_DEVICE_FEATURE_SELECT 0x00ULL
 #define RT_VIRTIO_MODERN_DEVICE_FEATURE 0x04ULL
 #define RT_VIRTIO_MODERN_DRIVER_FEATURE_SELECT 0x08ULL
@@ -1605,6 +1612,16 @@ typedef struct RtPciDevice {
 #define VIRTIO_BLK_T_OUT 1U
 #define RT_VIRTIO_BLK_CONFIG_CAPACITY 0x14ULL
 #define RT_VIRTIO_BLK_SECTOR_SIZE 512U
+#define RT_VIRTIO_INPUT_QUEUE 0U
+#define RT_VIRTIO_INPUT_QUEUE_CAP 32U
+#define RT_VIRTIO_INPUT_CONFIG 0x14ULL
+#define RT_VIRTIO_INPUT_CFG_EV_BITS 0x11U
+#define RT_EV_KEY 0x01U
+#define RT_EV_REL 0x02U
+#define RT_REL_X 0x00U
+#define RT_REL_Y 0x01U
+#define RT_KEY_A 30U
+#define RT_BTN_LEFT 0x110U
 #define RT_NVFS_MAGIC 0x4e564653U
 #define RT_NVFS_VERSION 2U
 #define RT_GPU_QUEUE_CAP 64U
@@ -1671,6 +1688,41 @@ static spl_u16 g_rt_gpu_last_used = 0;
 static spl_u64 g_rt_gpu_cmd = 0;
 static spl_u64 g_rt_gpu_resp = 0;
 static spl_u64 g_rt_gpu_fb = 0;
+
+typedef struct RtVirtioInputDevice {
+    spl_u64 bar0;
+    spl_u64 common;
+    spl_u64 notify;
+    spl_u64 isr;
+    spl_u64 device_cfg;
+    spl_u32 notify_multiplier;
+    spl_u16 notify_off;
+    spl_u64 desc;
+    spl_u64 avail;
+    spl_u64 used;
+    spl_u64 events;
+    spl_u16 qsize;
+    spl_u16 last_used;
+    spl_u8 kind;
+    spl_u8 ready;
+    spl_u8 modern;
+} RtVirtioInputDevice;
+
+typedef struct RtVirtioModernCaps {
+    spl_u64 common;
+    spl_u64 notify;
+    spl_u64 isr;
+    spl_u64 device_cfg;
+    spl_u32 notify_multiplier;
+} RtVirtioModernCaps;
+
+static RtVirtioInputDevice g_rt_input_devices[2];
+static spl_u32 g_rt_input_ready_mask = 0;
+static spl_u16 g_rt_input_event_type = 0;
+static spl_u16 g_rt_input_event_code = 0;
+static spl_u32 g_rt_input_event_value = 0;
+static spl_u32 g_rt_input_event_device_kind = 0;
+static spl_u32 g_rt_input_event_irq_status = 0;
 
 static spl_u32 rt_pci_read_config32(spl_u64 bus, spl_u64 dev, spl_u64 func, spl_u64 reg) {
     spl_u64 addr = RT_PCI_ECAM_BASE
@@ -2337,6 +2389,12 @@ static spl_i64 rt_pci_is_virtio_blk(spl_i64 vendor, spl_i64 device_id) {
     return 0;
 }
 
+static spl_i64 rt_pci_is_virtio_input(spl_i64 vendor, spl_i64 device_id) {
+    return vendor == RT_VIRTIO_VENDOR_ID &&
+        (device_id == RT_VIRTIO_INPUT_LEGACY_DEVICE_ID ||
+         device_id == RT_VIRTIO_INPUT_MODERN_DEVICE_ID);
+}
+
 static void rt_put_le32(spl_u8 *p, spl_u32 v);
 static void rt_put_le64(spl_u8 *p, spl_u64 v);
 static spl_u32 rt_get_le32(const spl_u8 *p);
@@ -2367,6 +2425,489 @@ spl_i64 rt_pci_get_field(spl_i64 index, spl_i64 field) {
     if (field == 7) return dev->bar0;
     if (field == 8) return dev->irq;
     return -1;
+}
+
+static spl_i64 rt_virtio_find_modern_caps(
+    RtPciDevice *dev, RtVirtioModernCaps *out
+) {
+    spl_u8 cap = rt_pci_read_config8(
+        (spl_u64)dev->bus, (spl_u64)dev->device,
+        (spl_u64)dev->function, 0x34
+    ) & 0xfcU;
+    spl_u64 bar_base[6];
+    rt_memzero(out, sizeof(*out));
+    for (spl_u64 i = 0; i < 6; i = i + 1) {
+        bar_base[i] = 0;
+    }
+    bar_base[1] = RT_PCI_MMIO_BASE +
+        ((spl_u64)dev->device * 0x100000ULL);
+    bar_base[4] = bar_base[1] + 0x10000ULL;
+    rt_pci_write_config32(
+        (spl_u64)dev->bus, (spl_u64)dev->device,
+        (spl_u64)dev->function, 0x14, (spl_u32)bar_base[1]
+    );
+    rt_pci_write_config32(
+        (spl_u64)dev->bus, (spl_u64)dev->device,
+        (spl_u64)dev->function, 0x20, (spl_u32)bar_base[4]
+    );
+    rt_pci_write_config32(
+        (spl_u64)dev->bus, (spl_u64)dev->device,
+        (spl_u64)dev->function, 0x24, 0
+    );
+    rt_pci_write_config32(
+        (spl_u64)dev->bus, (spl_u64)dev->device,
+        (spl_u64)dev->function, 0x04,
+        RT_PCI_CMD_MEM | RT_PCI_CMD_BUS_MASTER
+    );
+    while (cap >= 0x40U && cap != 0xffU) {
+        spl_u8 cap_id = rt_pci_read_config8(
+            (spl_u64)dev->bus, (spl_u64)dev->device,
+            (spl_u64)dev->function, cap
+        );
+        spl_u8 next = rt_pci_read_config8(
+            (spl_u64)dev->bus, (spl_u64)dev->device,
+            (spl_u64)dev->function, cap + 1U
+        ) & 0xfcU;
+        if (cap_id == RT_PCI_CAP_ID_VENDOR_SPECIFIC) {
+            spl_u8 cfg_type = rt_pci_read_config8(
+                (spl_u64)dev->bus, (spl_u64)dev->device,
+                (spl_u64)dev->function, cap + 3U
+            );
+            spl_u8 bar = rt_pci_read_config8(
+                (spl_u64)dev->bus, (spl_u64)dev->device,
+                (spl_u64)dev->function, cap + 4U
+            );
+            spl_u32 offset = rt_pci_read_config32(
+                (spl_u64)dev->bus, (spl_u64)dev->device,
+                (spl_u64)dev->function, cap + 8U
+            );
+            if (bar < 6U && bar_base[bar] != 0) {
+                spl_u64 address = bar_base[bar] + offset;
+                if (cfg_type == RT_VIRTIO_PCI_CAP_COMMON_CFG) {
+                    out->common = address;
+                } else if (cfg_type == RT_VIRTIO_PCI_CAP_NOTIFY_CFG) {
+                    out->notify = address;
+                    out->notify_multiplier = rt_pci_read_config32(
+                        (spl_u64)dev->bus, (spl_u64)dev->device,
+                        (spl_u64)dev->function, cap + 16U
+                    );
+                } else if (cfg_type == RT_VIRTIO_PCI_CAP_ISR_CFG) {
+                    out->isr = address;
+                } else if (cfg_type == RT_VIRTIO_PCI_CAP_DEVICE_CFG) {
+                    out->device_cfg = address;
+                }
+            }
+        }
+        if (next == 0 || next == cap) {
+            break;
+        }
+        cap = next;
+    }
+    return out->common != 0 && out->notify != 0 &&
+        out->notify_multiplier != 0 ? 0 : -1;
+}
+
+static spl_i64 rt_riscv64_virtio_input_has_bit(
+    spl_u64 bar0, spl_u8 event_type, spl_u16 bit
+) {
+    spl_u32 byte_index = (spl_u32)bit / 8U;
+    rt_io_write8(bar0, RT_VIRTIO_INPUT_CONFIG, RT_VIRTIO_INPUT_CFG_EV_BITS);
+    rt_io_write8(bar0, RT_VIRTIO_INPUT_CONFIG + 1ULL, event_type);
+    __sync_synchronize();
+    spl_u8 bytes = rt_io_read8(bar0, RT_VIRTIO_INPUT_CONFIG + 2ULL);
+    if (bytes == 0U || byte_index >= bytes || byte_index >= 128U) {
+        return 0;
+    }
+    return (rt_io_read8(
+        bar0, RT_VIRTIO_INPUT_CONFIG + 8ULL + byte_index
+    ) & (spl_u8)(1U << ((spl_u32)bit & 7U))) != 0U;
+}
+
+static spl_u8 rt_riscv64_virtio_input_kind(spl_u64 bar0) {
+    if (rt_riscv64_virtio_input_has_bit(bar0, RT_EV_REL, RT_REL_X) &&
+        rt_riscv64_virtio_input_has_bit(bar0, RT_EV_REL, RT_REL_Y) &&
+        rt_riscv64_virtio_input_has_bit(bar0, RT_EV_KEY, RT_BTN_LEFT)) {
+        return 2U;
+    }
+    if (rt_riscv64_virtio_input_has_bit(bar0, RT_EV_KEY, RT_KEY_A)) {
+        return 1U;
+    }
+    return 0U;
+}
+
+static spl_i64 rt_riscv64_virtio_input_has_bit_modern(
+    spl_u64 cfg, spl_u8 event_type, spl_u16 bit
+) {
+    spl_u32 byte_index = (spl_u32)bit / 8U;
+    rt_mmio_write8_raw(cfg, RT_VIRTIO_INPUT_CFG_EV_BITS);
+    rt_mmio_write8_raw(cfg + 1ULL, event_type);
+    __sync_synchronize();
+    spl_u8 bytes = rt_mmio_read8_raw(cfg + 2ULL);
+    if (bytes == 0U || byte_index >= bytes || byte_index >= 128U) {
+        return 0;
+    }
+    return (rt_mmio_read8_raw(cfg + 8ULL + byte_index) &
+        (spl_u8)(1U << ((spl_u32)bit & 7U))) != 0U;
+}
+
+static spl_u8 rt_riscv64_virtio_input_kind_modern(spl_u64 cfg) {
+    if (rt_riscv64_virtio_input_has_bit_modern(cfg, RT_EV_REL, RT_REL_X) &&
+        rt_riscv64_virtio_input_has_bit_modern(cfg, RT_EV_REL, RT_REL_Y) &&
+        rt_riscv64_virtio_input_has_bit_modern(cfg, RT_EV_KEY, RT_BTN_LEFT)) {
+        return 2U;
+    }
+    if (rt_riscv64_virtio_input_has_bit_modern(cfg, RT_EV_KEY, RT_KEY_A)) {
+        return 1U;
+    }
+    return 0U;
+}
+
+static void rt_riscv64_virtio_input_fail(RtVirtioInputDevice *dev) {
+    if (dev->modern && dev->common != 0) {
+        spl_u8 status = rt_mmio_read8_raw(
+            dev->common + RT_VIRTIO_MODERN_DEVICE_STATUS
+        );
+        rt_mmio_write8_raw(
+            dev->common + RT_VIRTIO_MODERN_DEVICE_STATUS,
+            status | RT_VIRTIO_STATUS_FAILED
+        );
+    } else if (dev->bar0 != 0) {
+        spl_u8 status = rt_io_read8(dev->bar0, RT_VIRTIO_PCI_STATUS);
+        rt_io_write8(
+            dev->bar0, RT_VIRTIO_PCI_STATUS,
+            status | RT_VIRTIO_STATUS_FAILED
+        );
+    }
+    dev->ready = 0U;
+}
+
+static spl_i64 rt_riscv64_virtio_input_start_legacy(
+    RtVirtioInputDevice *dev, spl_u64 bar0, spl_u8 kind
+) {
+    dev->bar0 = bar0;
+    rt_io_write8(bar0, RT_VIRTIO_PCI_STATUS, 0U);
+    rt_io_write8(
+        bar0, RT_VIRTIO_PCI_STATUS,
+        RT_VIRTIO_STATUS_ACKNOWLEDGE | RT_VIRTIO_STATUS_DRIVER
+    );
+    rt_io_write32(bar0, RT_VIRTIO_PCI_GUEST_FEATURES, 0U);
+    if (rt_setup_virtqueue(
+            bar0, RT_VIRTIO_INPUT_QUEUE,
+            &dev->desc, &dev->avail, &dev->used, &dev->qsize) < 0) {
+        rt_riscv64_virtio_input_fail(dev);
+        return -1;
+    }
+    dev->events = rt_riscv_noalloc_alloc_page();
+    if (dev->events == 0) {
+        rt_riscv64_virtio_input_fail(dev);
+        return -2;
+    }
+    rt_memzero((void *)dev->events, 4096ULL);
+    for (spl_u16 i = 0; i < dev->qsize; i = i + 1U) {
+        rt_desc_write(
+            dev->desc, i, dev->events + (spl_u64)i * 8ULL, 8U,
+            RT_VIRTQ_DESC_F_WRITE, 0
+        );
+        rt_avail_push(dev->avail, dev->qsize, i);
+    }
+    __sync_synchronize();
+    rt_io_write16(
+        bar0, RT_VIRTIO_PCI_QUEUE_NOTIFY, RT_VIRTIO_INPUT_QUEUE
+    );
+    rt_io_write8(
+        bar0, RT_VIRTIO_PCI_STATUS,
+        RT_VIRTIO_STATUS_ACKNOWLEDGE |
+            RT_VIRTIO_STATUS_DRIVER |
+            RT_VIRTIO_STATUS_DRIVER_OK
+    );
+    dev->kind = kind;
+    dev->ready = 1U;
+    return 0;
+}
+
+static spl_i64 rt_riscv64_virtio_input_start_modern(
+    RtVirtioInputDevice *dev, RtVirtioModernCaps *caps, spl_u8 kind
+) {
+    spl_u16 max_size;
+    spl_u64 total;
+    spl_u64 pages;
+    spl_u64 ring;
+    spl_u64 desc_avail;
+    dev->modern = 1U;
+    dev->common = caps->common;
+    dev->notify = caps->notify;
+    dev->isr = caps->isr;
+    dev->device_cfg = caps->device_cfg;
+    dev->notify_multiplier = caps->notify_multiplier;
+    if (dev->common == 0 || dev->notify == 0 || dev->isr == 0 ||
+        dev->device_cfg == 0 || dev->notify_multiplier == 0) {
+        rt_riscv64_virtio_input_fail(dev);
+        return -1;
+    }
+    rt_mmio_write8_raw(
+        dev->common + RT_VIRTIO_MODERN_DEVICE_STATUS, 0U
+    );
+    rt_mmio_write8_raw(
+        dev->common + RT_VIRTIO_MODERN_DEVICE_STATUS,
+        RT_VIRTIO_STATUS_ACKNOWLEDGE | RT_VIRTIO_STATUS_DRIVER
+    );
+    rt_mmio_write32_raw(
+        dev->common + RT_VIRTIO_MODERN_DEVICE_FEATURE_SELECT, 1U
+    );
+    if ((*(volatile spl_u32 *)(
+            dev->common + RT_VIRTIO_MODERN_DEVICE_FEATURE
+        ) & 1U) == 0) {
+        rt_riscv64_virtio_input_fail(dev);
+        return -2;
+    }
+    rt_mmio_write32_raw(
+        dev->common + RT_VIRTIO_MODERN_DRIVER_FEATURE_SELECT, 0U
+    );
+    rt_mmio_write32_raw(
+        dev->common + RT_VIRTIO_MODERN_DRIVER_FEATURE, 0U
+    );
+    rt_mmio_write32_raw(
+        dev->common + RT_VIRTIO_MODERN_DRIVER_FEATURE_SELECT, 1U
+    );
+    rt_mmio_write32_raw(
+        dev->common + RT_VIRTIO_MODERN_DRIVER_FEATURE, 1U
+    );
+    rt_mmio_write8_raw(
+        dev->common + RT_VIRTIO_MODERN_DEVICE_STATUS,
+        RT_VIRTIO_STATUS_ACKNOWLEDGE |
+            RT_VIRTIO_STATUS_DRIVER |
+            RT_VIRTIO_STATUS_FEATURES_OK
+    );
+    if ((rt_mmio_read8_raw(
+            dev->common + RT_VIRTIO_MODERN_DEVICE_STATUS
+        ) & RT_VIRTIO_STATUS_FEATURES_OK) == 0) {
+        rt_riscv64_virtio_input_fail(dev);
+        return -3;
+    }
+    rt_mmio_write16_raw(
+        dev->common + RT_VIRTIO_MODERN_QUEUE_SELECT,
+        RT_VIRTIO_INPUT_QUEUE
+    );
+    if (rt_mmio_read16_raw(
+            dev->common + RT_VIRTIO_MODERN_NUM_QUEUES
+        ) == 0) {
+        rt_riscv64_virtio_input_fail(dev);
+        return -4;
+    }
+    max_size = rt_mmio_read16_raw(
+        dev->common + RT_VIRTIO_MODERN_QUEUE_SIZE
+    );
+    if (max_size == 0) {
+        rt_riscv64_virtio_input_fail(dev);
+        return -5;
+    }
+    dev->qsize = max_size > RT_VIRTIO_INPUT_QUEUE_CAP ?
+        RT_VIRTIO_INPUT_QUEUE_CAP : max_size;
+    total = rt_virtqueue_total_size(dev->qsize);
+    pages = (total + 4095ULL) / 4096ULL;
+    ring = rt_alloc_contiguous_pages(pages);
+    if (ring == 0) {
+        rt_riscv64_virtio_input_fail(dev);
+        return -6;
+    }
+    rt_memzero((void *)ring, pages * 4096ULL);
+    desc_avail = rt_virtqueue_desc_size(dev->qsize) +
+        rt_virtqueue_avail_size(dev->qsize);
+    dev->desc = ring;
+    dev->avail = ring + rt_virtqueue_desc_size(dev->qsize);
+    dev->used = ring + ((desc_avail + 4095ULL) & ~4095ULL);
+    dev->events = rt_riscv_noalloc_alloc_page();
+    if (dev->events == 0) {
+        rt_riscv64_virtio_input_fail(dev);
+        return -7;
+    }
+    rt_memzero((void *)dev->events, 4096ULL);
+    for (spl_u16 i = 0; i < dev->qsize; i = i + 1U) {
+        rt_desc_write(
+            dev->desc, i, dev->events + (spl_u64)i * 8ULL, 8U,
+            RT_VIRTQ_DESC_F_WRITE, 0
+        );
+        rt_avail_push(dev->avail, dev->qsize, i);
+    }
+    rt_mmio_write16_raw(
+        dev->common + RT_VIRTIO_MODERN_QUEUE_SIZE, dev->qsize
+    );
+    rt_mmio_write32_raw(
+        dev->common + RT_VIRTIO_MODERN_QUEUE_DESC_LO,
+        (spl_u32)(dev->desc & 0xffffffffULL)
+    );
+    rt_mmio_write32_raw(
+        dev->common + RT_VIRTIO_MODERN_QUEUE_DESC_HI,
+        (spl_u32)(dev->desc >> 32)
+    );
+    rt_mmio_write32_raw(
+        dev->common + RT_VIRTIO_MODERN_QUEUE_DRIVER_LO,
+        (spl_u32)(dev->avail & 0xffffffffULL)
+    );
+    rt_mmio_write32_raw(
+        dev->common + RT_VIRTIO_MODERN_QUEUE_DRIVER_HI,
+        (spl_u32)(dev->avail >> 32)
+    );
+    rt_mmio_write32_raw(
+        dev->common + RT_VIRTIO_MODERN_QUEUE_DEVICE_LO,
+        (spl_u32)(dev->used & 0xffffffffULL)
+    );
+    rt_mmio_write32_raw(
+        dev->common + RT_VIRTIO_MODERN_QUEUE_DEVICE_HI,
+        (spl_u32)(dev->used >> 32)
+    );
+    dev->notify_off = rt_mmio_read16_raw(
+        dev->common + RT_VIRTIO_MODERN_QUEUE_NOTIFY_OFF
+    );
+    __sync_synchronize();
+    rt_mmio_write16_raw(
+        dev->common + RT_VIRTIO_MODERN_QUEUE_ENABLE, 1U
+    );
+    rt_mmio_write8_raw(
+        dev->common + RT_VIRTIO_MODERN_DEVICE_STATUS,
+        RT_VIRTIO_STATUS_ACKNOWLEDGE |
+            RT_VIRTIO_STATUS_DRIVER |
+            RT_VIRTIO_STATUS_FEATURES_OK |
+            RT_VIRTIO_STATUS_DRIVER_OK
+    );
+    rt_mmio_write16_raw(
+        dev->notify +
+            (spl_u64)dev->notify_off * dev->notify_multiplier,
+        RT_VIRTIO_INPUT_QUEUE
+    );
+    dev->kind = kind;
+    dev->ready = 1U;
+    return 0;
+}
+
+spl_i64 rt_riscv64_virtio_input_init(void) {
+    spl_i64 count = rt_pci_device_count();
+    spl_u32 input_slot = 0;
+    rt_memzero(g_rt_input_devices, sizeof(g_rt_input_devices));
+    g_rt_input_ready_mask = 0U;
+    for (spl_i64 i = 0; i < count && input_slot < 2U; i = i + 1) {
+        spl_i64 vendor = rt_pci_get_field(i, 5);
+        spl_i64 device_id = rt_pci_get_field(i, 6);
+        if (!rt_pci_is_virtio_input(vendor, device_id)) {
+            continue;
+        }
+        RtPciDevice *pci = &g_rt_pci_devices[i];
+        input_slot = input_slot + 1U;
+        spl_u64 bar0 = 0;
+        spl_u8 kind = 0U;
+        RtVirtioModernCaps caps;
+        rt_memzero(&caps, sizeof(caps));
+        if (device_id == RT_VIRTIO_INPUT_MODERN_DEVICE_ID) {
+            if (rt_virtio_find_modern_caps(pci, &caps) < 0 ||
+                caps.device_cfg == 0 || caps.isr == 0) {
+                continue;
+            }
+            kind = rt_riscv64_virtio_input_kind_modern(caps.device_cfg);
+        } else {
+            spl_u64 io_port = RT_PCI_LEGACY_INPUT_IO_PORT +
+                (spl_u64)(input_slot - 1U) *
+                    RT_PCI_LEGACY_INPUT_IO_STRIDE;
+            bar0 = RT_PCI_IO_BASE + io_port;
+            rt_pci_write_config32(
+                (spl_u64)pci->bus, (spl_u64)pci->device,
+                (spl_u64)pci->function, 0x10,
+                (spl_u32)(io_port | 1ULL)
+            );
+            rt_pci_write_config32(
+                (spl_u64)pci->bus, (spl_u64)pci->device,
+                (spl_u64)pci->function, 0x04,
+                RT_PCI_CMD_IO | RT_PCI_CMD_MEM | RT_PCI_CMD_BUS_MASTER
+            );
+            kind = rt_riscv64_virtio_input_kind(bar0);
+        }
+        spl_u32 mask = kind == 1U ? 1U : (kind == 2U ? 2U : 0U);
+        if (mask == 0U || (g_rt_input_ready_mask & mask) != 0U) {
+            continue;
+        }
+        RtVirtioInputDevice *dev = &g_rt_input_devices[kind - 1U];
+        spl_i64 start_result =
+            device_id == RT_VIRTIO_INPUT_MODERN_DEVICE_ID ?
+                rt_riscv64_virtio_input_start_modern(dev, &caps, kind) :
+                rt_riscv64_virtio_input_start_legacy(dev, bar0, kind);
+        if (start_result == 0) {
+            g_rt_input_ready_mask |= mask;
+        }
+    }
+    return (spl_i64)g_rt_input_ready_mask;
+}
+
+static spl_i64 rt_riscv64_virtio_input_poll_device(
+    RtVirtioInputDevice *dev
+) {
+    if (!dev->ready || dev->qsize == 0) {
+        return 0;
+    }
+    volatile spl_u16 *used_idx = (volatile spl_u16 *)(dev->used + 2ULL);
+    if (*used_idx == dev->last_used) {
+        return 0;
+    }
+    __sync_synchronize();
+    spl_u64 used_entry = dev->used + 4ULL +
+        (spl_u64)(dev->last_used % dev->qsize) * 8ULL;
+    spl_u32 desc_id = *(volatile spl_u32 *)used_entry;
+    spl_u32 used_len = *(volatile spl_u32 *)(used_entry + 4ULL);
+    dev->last_used = dev->last_used + 1U;
+    if (desc_id >= dev->qsize || used_len != 8U) {
+        rt_riscv64_virtio_input_fail(dev);
+        return 0;
+    }
+    spl_u64 event = dev->events + (spl_u64)desc_id * 8ULL;
+    g_rt_input_event_type = *(volatile spl_u16 *)event;
+    g_rt_input_event_code = *(volatile spl_u16 *)(event + 2ULL);
+    g_rt_input_event_value = *(volatile spl_u32 *)(event + 4ULL);
+    g_rt_input_event_device_kind = dev->kind;
+    rt_avail_push(dev->avail, dev->qsize, (spl_u16)desc_id);
+    __sync_synchronize();
+    if (dev->modern) {
+        rt_mmio_write16_raw(
+            dev->notify +
+                (spl_u64)dev->notify_off * dev->notify_multiplier,
+            RT_VIRTIO_INPUT_QUEUE
+        );
+        g_rt_input_event_irq_status = rt_mmio_read8_raw(dev->isr);
+    } else {
+        rt_io_write16(
+            dev->bar0, RT_VIRTIO_PCI_QUEUE_NOTIFY, RT_VIRTIO_INPUT_QUEUE
+        );
+        g_rt_input_event_irq_status =
+            rt_io_read8(dev->bar0, RT_VIRTIO_PCI_ISR_STATUS);
+    }
+    return 1;
+}
+
+spl_i64 rt_riscv64_virtio_input_poll(void) {
+    if (rt_riscv64_virtio_input_poll_device(&g_rt_input_devices[0])) {
+        return 1;
+    }
+    if (rt_riscv64_virtio_input_poll_device(&g_rt_input_devices[1])) {
+        return 1;
+    }
+    return 0;
+}
+
+spl_i64 rt_riscv64_virtio_input_event_type(void) {
+    return (spl_i64)g_rt_input_event_type;
+}
+
+spl_i64 rt_riscv64_virtio_input_event_code(void) {
+    return (spl_i64)g_rt_input_event_code;
+}
+
+spl_i64 rt_riscv64_virtio_input_event_value(void) {
+    return (spl_i64)g_rt_input_event_value;
+}
+
+spl_i64 rt_riscv64_virtio_input_event_device_kind(void) {
+    return (spl_i64)g_rt_input_event_device_kind;
+}
+
+spl_i64 rt_riscv64_virtio_input_event_irq_status(void) {
+    return (spl_i64)g_rt_input_event_irq_status;
 }
 
 spl_i64 rt_net_init(void) {
@@ -2560,7 +3101,10 @@ static spl_i64 rt_storage_probe_nvfs_arena_payload(void) {
     return rt_storage_sector_has_nvfs_arena_payload() ? 0 : -3;
 }
 
-spl_i64 rt_storage_init(void) {
+static spl_i64 rt_storage_init_virtio_blk(spl_i64 require_nvfs) {
+    if (g_rt_storage_ready) {
+        return 0;
+    }
     spl_i64 count = rt_pci_device_count();
     for (spl_i64 i = 0; i < count; i = i + 1) {
         spl_i64 vendor = rt_pci_get_field(i, 5);
@@ -2605,6 +3149,9 @@ spl_i64 rt_storage_init(void) {
                 RT_VIRTIO_STATUS_ACKNOWLEDGE | RT_VIRTIO_STATUS_DRIVER | RT_VIRTIO_STATUS_FEATURES_OK | RT_VIRTIO_STATUS_DRIVER_OK
             );
             g_rt_storage_ready = 1;
+            if (!require_nvfs) {
+                return 0;
+            }
             {
                 spl_i64 read_rc = rt_storage_probe_nvfs_superblock();
                 g_rt_storage_probe_ready = read_rc == 0 ? 1 : 0;
@@ -2621,6 +3168,32 @@ spl_i64 rt_storage_init(void) {
     g_rt_storage_ready = 0;
     g_rt_storage_probe_ready = 0;
     return -1;
+}
+
+spl_i64 rt_storage_init(void) {
+    return rt_storage_init_virtio_blk(1);
+}
+
+/* RV64 desktop FAT32 uses the established legacy PCI VirtIO-BLK queue but
+ * deliberately does not require the unrelated NVFS superblock contract. */
+spl_i64 rt_riscv64_virtio_blk_fat32_init(void) {
+    return rt_storage_init_virtio_blk(0);
+}
+
+spl_i64 rt_riscv64_virtio_blk_fat32_capacity_sectors(void) {
+    return g_rt_storage_ready ? (spl_i64)g_rt_blk_capacity : 0;
+}
+
+spl_i64 rt_riscv64_virtio_blk_fat32_read_sector_bytes(spl_u64 lba) {
+    spl_i64 out;
+    if (rt_riscv64_virtio_blk_fat32_init() < 0 || rt_storage_read_sector(lba) < 0) {
+        return rt_array_new(0);
+    }
+    out = rt_array_new((spl_i64)RT_VIRTIO_BLK_SECTOR_SIZE);
+    for (spl_u64 i = 0; i < RT_VIRTIO_BLK_SECTOR_SIZE; i = i + 1) {
+        rt_array_push(out, rt_int((spl_i64)((spl_u8 *)g_rt_blk_data)[i]));
+    }
+    return out;
 }
 
 spl_i64 rt_storage_read_probe(void) {
@@ -3248,41 +3821,13 @@ static spl_i64 rt_gpu_send_command(spl_u32 cmd, spl_u32 req_len, spl_u32 resp_le
 }
 
 static spl_i64 rt_gpu_find_modern_caps(RtPciDevice *dev) {
-    spl_u8 cap = rt_pci_read_config8((spl_u64)dev->bus, (spl_u64)dev->device, (spl_u64)dev->function, 0x34) & 0xfcU;
-    spl_u64 bar_base[6];
-    for (spl_u64 i = 0; i < 6; i = i + 1) {
-        bar_base[i] = 0;
-    }
-    bar_base[1] = RT_PCI_MMIO_BASE + ((spl_u64)dev->device * 0x100000ULL);
-    bar_base[4] = RT_PCI_MMIO_BASE + ((spl_u64)dev->device * 0x100000ULL) + 0x10000ULL;
-    rt_pci_write_config32((spl_u64)dev->bus, (spl_u64)dev->device, (spl_u64)dev->function, 0x14, (spl_u32)bar_base[1]);
-    rt_pci_write_config32((spl_u64)dev->bus, (spl_u64)dev->device, (spl_u64)dev->function, 0x20, (spl_u32)bar_base[4]);
-    rt_pci_write_config32((spl_u64)dev->bus, (spl_u64)dev->device, (spl_u64)dev->function, 0x24, 0);
-    rt_pci_write_config32((spl_u64)dev->bus, (spl_u64)dev->device, (spl_u64)dev->function, 0x04, RT_PCI_CMD_MEM | RT_PCI_CMD_BUS_MASTER);
-    while (cap >= 0x40U && cap != 0xffU) {
-        spl_u8 cap_id = rt_pci_read_config8((spl_u64)dev->bus, (spl_u64)dev->device, (spl_u64)dev->function, cap);
-        spl_u8 next = rt_pci_read_config8((spl_u64)dev->bus, (spl_u64)dev->device, (spl_u64)dev->function, cap + 1U) & 0xfcU;
-        if (cap_id == RT_PCI_CAP_ID_VENDOR_SPECIFIC) {
-            spl_u8 cfg_type = rt_pci_read_config8((spl_u64)dev->bus, (spl_u64)dev->device, (spl_u64)dev->function, cap + 3U);
-            spl_u8 bar = rt_pci_read_config8((spl_u64)dev->bus, (spl_u64)dev->device, (spl_u64)dev->function, cap + 4U);
-            spl_u32 offset = rt_pci_read_config32((spl_u64)dev->bus, (spl_u64)dev->device, (spl_u64)dev->function, cap + 8U);
-            if (bar < 6U && bar_base[bar] != 0) {
-                if (cfg_type == RT_VIRTIO_PCI_CAP_COMMON_CFG) {
-                    g_rt_gpu_common = bar_base[bar] + offset;
-                } else if (cfg_type == RT_VIRTIO_PCI_CAP_NOTIFY_CFG) {
-                    g_rt_gpu_notify = bar_base[bar] + offset;
-                    g_rt_gpu_notify_multiplier = rt_pci_read_config32((spl_u64)dev->bus, (spl_u64)dev->device, (spl_u64)dev->function, cap + 16U);
-                }
-            }
-        }
-        if (next == 0 || next == cap) {
-            break;
-        }
-        cap = next;
-    }
-    if (g_rt_gpu_common == 0 || g_rt_gpu_notify == 0 || g_rt_gpu_notify_multiplier == 0) {
+    RtVirtioModernCaps caps;
+    if (rt_virtio_find_modern_caps(dev, &caps) < 0) {
         return -1;
     }
+    g_rt_gpu_common = caps.common;
+    g_rt_gpu_notify = caps.notify;
+    g_rt_gpu_notify_multiplier = caps.notify_multiplier;
     return 0;
 }
 

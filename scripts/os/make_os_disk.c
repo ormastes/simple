@@ -636,8 +636,6 @@ int main(int argc, char **argv)
     bool desktop_fonts = strcmp(profile, "desktop-fonts") == 0;
     if (!desktop_fonts && strcmp(profile, "fs-exec") != 0)
         die("unsupported SimpleOS disk profile");
-    if (desktop_fonts && strcmp(platform, "arm64") != 0)
-        die("desktop-fonts profile requires platform arm64");
     const char *lane = lane_for_platform(platform);
 
     init_geometry(argv[3]);

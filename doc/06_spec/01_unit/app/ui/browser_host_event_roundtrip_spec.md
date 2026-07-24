@@ -29,7 +29,11 @@ browser_host_event_roundtrip_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 1 | 1 | 0 | 0 |
+| 3 | 3 | 0 | 0 |
+
+> **Current execution: BLOCKED.** The installed pure-Simple runner accepts the
+> source but fails before any example executes with `runtime error: field
+> access on nil receiver`. No runtime PASS is claimed.
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -39,6 +43,16 @@ browser_host_event_roundtrip_spec -> app
 ## Scenarios
 
 ### BrowserBackend host event roundtrip
+
+#### should preserve one immutable frame identity across an input batch and reject foreign stale or replayed events
+
+- Submit one session-owned Draw IR frame.
+- Stamp move, down, up, and an unconsumed stale event with its session nonce,
+  submission revision, composition, and scene.
+- Accept move/down/up on revision 1, reject the exact repeated down event, and
+  keep the frame valid for the following up event.
+- Reject a foreign-session event and the unconsumed revision-1 event after
+  revision 2 is submitted.
 
 #### correlates a queued input event with a GPU frame dispatch receipt
 
@@ -89,14 +103,37 @@ expect(backend.last_artifact_queue_backend_handle).to_be_greater_than(0)
 
 </details>
 
+#### routes BrowserApp host input through the queued receipt before session dispatch
+
+- Submit one production BrowserApp Draw IR frame.
+- Deliver pointer move, down, and up through `BrowserBackend.push_event` and
+  `poll_events`.
+- Require all three dispatch receipts while the UISession submission revision
+  and composition identity remain unchanged.
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+val submitted = app.session.submit_widget_draw_ir(672, 448, DRAW_IR_BACKEND_GPU)
+app.handle_ui_event(UIEvent.MouseEvent(x: 10.0, y: 20.0, button: "", kind: "move"))
+app.handle_ui_event(UIEvent.MouseEvent(x: 10.0, y: 20.0, button: "left", kind: "down"))
+app.handle_ui_event(UIEvent.MouseEvent(x: 10.0, y: 20.0, button: "left", kind: "up"))
+expect(app.session.draw_ir_submission_revision).to_equal(1)
+expect(app.session.submitted_draw_ir_composition_id).to_equal(submitted.composition_id)
+expect(app.backend.input_event_dispatched_count).to_equal(3)
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
 |-------|-------|
 | Category | Application |
-| Status | Active |
+| Status | BLOCKED — no examples executed |
 | Source | `test/01_unit/app/ui/browser_host_event_roundtrip_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-24 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -108,8 +145,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 1 |
-| Active scenarios | 1 |
+| Total scenarios | 3 |
+| Active scenarios | 3 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

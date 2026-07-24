@@ -122,7 +122,7 @@ SimpleOS QEMU WM paths, including honest SIMD and Vulkan backend evidence.
 | GUI | `WidgetTree -> widget_tree_to_draw_ir -> Engine2D` | session nonce, composition ID, revision, scene key, input key | visible `Ready -> ReadyZ` pixels and queued focus/key/pointer receipts | foreign session, stale revision, and replayed input key reject | production BrowserApp now uses backend queue/receipt; execution BLOCKED |
 | hosted WM | `SharedWmScene -> HostCompositor -> Engine2D` evidence route | command nonce, phase, revision, checksum, input receipt | pinned glyph crop and focus/move/maximize/restore frames; key/pointer receipt matches compositor state | non-increasing nonce is ignored and exact ACK/receipt identity is required | compile/evidence ABI repaired; live calibration/runtime BLOCKED |
 | x86 QEMU | `gui_entry_desktop -> WM -> Engine2D -> QMP` | guest font hash, input sequence, WM/frame generation | independent `pmemsave` glyph crop and correlated events | QMP disconnect, replay, corrupt crop, demo markers reject | contract current; fresh native build exits 139 before QEMU |
-| RV64 QEMU | `riscv64/gui_entry_desktop -> WM -> VirtIO/QMP` target route (font/input currently unwired) | scanout address/geometry/format/generation, scene revision; future font hash and IRQ/input sequence | RV64-only guest-addressed glyph crop and input ordering | zero/stale generation, unavailable markers, corrupt crop, stale/out-of-order input reject | scanout generation receipt source/self-test PASS; font/input/pmemsave BLOCKED |
+| RV64 QEMU | `riscv64/gui_entry_desktop -> WM -> VirtIO/QMP` | scanout address/geometry/format/generation, scene revision, exact font identity, IRQ/input sequence | RV64-only guest-addressed glyph crop and exact Tab/pointer ordering | zero/stale generation, unavailable markers, corrupt crop, unrelated/stale/out-of-order input reject | font VFS, modern VirtIO input, receipt-bound QMP `pmemsave`, and parser self-test PASS; fresh ELF/live crop hash BLOCKED |
 
 ## Phase
 dev-done
@@ -328,7 +328,7 @@ arch-done
 | AC-9 | backend proof | FAIL: no qualifying SIMD/Vulkan execution |
 | AC-10 | release hygiene | FAIL: required manuals/execution incomplete |
 | AC-11 | final review | PASS: highest review completed and withheld overall PASS |
-| AC-12 | RV64 SimpleOS WM | BLOCKED: font asset is not mounted, VirtIO input is not consumed, and no genuine RV64 crop hash is pinned |
+| AC-12 | RV64 SimpleOS WM | BLOCKED: font media/input are wired statically, but no genuine live RV64 crop hash is pinned |
 | AC-13 | module links | static boundary matrix and modern negative cases present; live link coverage remains BLOCKED with the owning runtime rows |
 
 ## Implementation
@@ -393,10 +393,9 @@ arch-done
   `doc/08_tracking/bug/deployed_selfhost_env_set_miscompile_segv_2026-07-14.md`.
   A fresh Stage2–4 self-hosted rebuild is required before focused checks can
   run against current source.
-- RV64 source audit remains blocked below the shared renderer: the display ABI,
-  guest font media, VirtIO input transport, and guest-addressed `pmemsave`
-  metadata are absent. The RV64 manual and tracker retain those gaps without
-  pinning an x86 crop or claiming serial-only evidence.
+- The earlier RV64 source audit identified four gaps below the shared renderer:
+  display ABI, guest font media, VirtIO input, and guest-addressed `pmemsave`.
+  Current source closes all four; live ELF/crop evidence remains unclaimed.
 - BLOCKED: a cache-preserving full-driver bootstrap attempt ran for 600 seconds
   with one CPU-bound worker, produced no output or cache progress, and exited
   124. The observation is appended to
@@ -413,10 +412,11 @@ arch-done
 - Correctly unclaimed: hosted glyph pin, SimpleOS crop/hash, Vulkan
   device-origin readback, executed GUI font pixels, qualifying generated
   manual provenance, full verification, commit, and sync.
-- BLOCKED: the distinct RV64 WM/font/input contract is source-ready in
-  `--wm-font-input` mode, but the canonical entry truthfully reports missing
-  guest font mounting and VirtIO input consumption. No current-source RV64 ELF
-  or RV64-only crop hash was available, so no build or QEMU run was attempted.
+- PASS (source/static): the distinct RV64 WM/font/input contract mounts the
+  deterministic font FAT32 medium, validates selected faces through the shared
+  renderer, consumes modern VirtIO input through the shared backend, and binds
+  QMP `pmemsave` to the exact post-pointer generation. No current-source RV64
+  ELF or RV64-only crop hash is available yet, so no live PASS is claimed.
 - PASS (source/static): the Web event gate now displays the exact production
   WebIR-to-DrawIR ARGB artifact in its Electron WM canvas and the independent
   validator requires byte-for-byte BGRA equality. The modern Web scenario and
@@ -434,11 +434,11 @@ arch-done
   press/release nonce and pointer correlation protocol. One bounded live
   attempt retained `build/test-artifacts/x86-simpleos-font-ac5-current/` and
   failed before QEMU when the stale self-hosted native build exited 139.
-- PASS (source/self-test): RV64 display ownership now advances scanout
+- PASS (source/self-test): RV64 display ownership advances scanout
   generation only after successful flush and publishes address, geometry,
-  BGRA8888 format, generation, and scene revision. Full AC-12 remains blocked
-  on VirtIO-BLK FAT32 font access, VirtIO input, and receipt-bound QMP
-  `pmemsave`; no crop hash is pinned.
+  BGRA8888 format, generation, and scene revision. FAT32 font access, modern
+  VirtIO input, and receipt-bound QMP `pmemsave` are wired. Full AC-12 remains
+  blocked only on a fresh live ELF/crop/hash; no crop hash is pinned.
 
 ## Phase
 implement-active

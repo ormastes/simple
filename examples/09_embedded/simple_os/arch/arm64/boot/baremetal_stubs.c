@@ -2479,6 +2479,7 @@ static uint16_t g_arm64_virtio_input_type = 0;
 static uint16_t g_arm64_virtio_input_code = 0;
 static uint32_t g_arm64_virtio_input_value = 0;
 static uint32_t g_arm64_virtio_input_device_kind = 0;
+static uint32_t g_arm64_virtio_input_irq_status = 0;
 
 static inline volatile uint32_t *arm64_virtio_reg32(uint64_t base, uint32_t off)
 {
@@ -2687,6 +2688,7 @@ static int arm64_virtio_input_poll_device(struct arm64_virtio_input_device *dev)
     g_arm64_virtio_input_code = event_code;
     g_arm64_virtio_input_value = event_value;
     g_arm64_virtio_input_device_kind = dev->kind;
+    g_arm64_virtio_input_irq_status = irq;
     return 1;
 }
 
@@ -2701,6 +2703,7 @@ RuntimeValue rt_arm64_virtio_input_event_type(void) { return (RuntimeValue)g_arm
 RuntimeValue rt_arm64_virtio_input_event_code(void) { return (RuntimeValue)g_arm64_virtio_input_code; }
 RuntimeValue rt_arm64_virtio_input_event_value(void) { return (RuntimeValue)g_arm64_virtio_input_value; }
 RuntimeValue rt_arm64_virtio_input_event_device_kind(void) { return (RuntimeValue)g_arm64_virtio_input_device_kind; }
+RuntimeValue rt_arm64_virtio_input_event_irq_status(void) { return (RuntimeValue)g_arm64_virtio_input_irq_status; }
 
 RuntimeValue rt_memory_barrier(void)
 {

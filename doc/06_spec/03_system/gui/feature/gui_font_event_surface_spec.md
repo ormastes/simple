@@ -36,14 +36,18 @@ widget tree:
    `DrawIrComposition` submitted to Engine2D;
 2. produces a glyph-bearing CPU framebuffer that differs from an otherwise
    identical blank-label framebuffer inside the glyph band;
-3. delivers pointer, focus, and keyboard events to the visible `gui-input`;
+3. delivers one move/down/up pointer batch against one immutable submitted
+   frame, then delivers keyboard input against the next submitted frame;
 4. submits the updated `ReadyZ` composition and retains all three framebuffer
    captures.
 
 In the hosted BrowserApp path, an accepted host event is first enqueued and
-polled by `BrowserBackend`; only then does the exact submitted UISession frame
-accept it and cause the backend dispatch receipt used by the following render.
-Rejected stale/replayed session input does not create a backend dispatch receipt.
+polled by `BrowserBackend`; only then does the exact submitted UISession
+session nonce, submission revision, composition, and scene accept it and cause
+the backend dispatch receipt used by the following render. A frame remains
+valid for a normal event batch; only each accepted input key is consumed.
+Rejected foreign-session, stale-revision, or replayed input does not create a
+backend dispatch receipt.
 
 It uses the canonical `widget_tree_to_draw_ir_cpu`,
 `DrawIrComposition`, Engine2D Draw IR executor, and shared PPM encoder. It does
@@ -96,17 +100,21 @@ Its source wiring and fixture assertions are not live-window evidence.
    - Require each resolved context to retain the submitted composition and scene
      identity.
    - Require `gui_ast` source metadata.
-   - Require the actual fixture input to be visible and focused after the
-     pointer click through `UISession.dispatch_draw_ir_event`.
+   - Stamp move, down, and up as immutable revision-1 events before dispatch.
+   - Require all three events to pass against the same submitted frame and the
+     actual fixture input to be visible and focused after the pointer click
+     through `UISession.dispatch_draw_ir_event`.
+   - Replay the exact down event and require rejection without clearing the
+     frame identity needed by the up event.
    - Submit a fresh focus frame, deliver `Z` through the same production
      session boundary, and require the actual input value to become `ReadyZ`.
 
 9. **Reject disconnected stale or replayed evidence**
    - Resolve the same input against a replayed scene key.
    - Require an unresolved context with `stale_scene_rejected=true`; reject a
-     blank-session frame, a same-scene foreign-session frame, a stale pointer
-     frame, and a duplicate key identity before `process_event`; preserve focus
-     and `ReadyZ`.
+     blank-session event, a same-scene foreign-session event, an unconsumed
+     revision-1 event after revision 2 is submitted, and exact pointer/key
+     event replays before `process_event`; preserve focus and `ReadyZ`.
 
 10. **Capture backend and framebuffer evidence**
    - Convert and submit the updated widget tree.
@@ -126,7 +134,7 @@ All rows are currently **BLOCKED / not produced by a passing execution**.
 | `build/test-artifacts/03_system/gui/feature/gui_font_event_surface/submitted.ppm` | Exact submitted `GUI42` framebuffer; P6 size `192×80×3 + 14` bytes | BLOCKED |
 | `build/test-artifacts/03_system/gui/feature/gui_font_event_surface/blank_oracle.ppm` | Otherwise-identical blank-label framebuffer; same exact P6 size | BLOCKED |
 | `build/test-artifacts/03_system/gui/feature/gui_font_event_surface/updated.ppm` | Exact post-keyboard `ReadyZ` framebuffer; same exact P6 size | BLOCKED |
-| `build/test-artifacts/03_system/gui/feature/gui_font_event_surface/gui_font_event.txt` | `status=pass`, composition/scene frame identity, source/bounds/event targets, replay rejection, and all three paths | BLOCKED |
+| `build/test-artifacts/03_system/gui/feature/gui_font_event_surface/gui_font_event.txt` | `status=pass`, session nonce, revision, composition/scene frame identity, source/bounds/event targets, replay rejection, and all three paths | BLOCKED |
 | `build/test-artifacts/03_system/gui/feature/gui_font_event_surface/verification-blocker.txt` | Exact failed commands, results, and resume command | AVAILABLE blocker evidence only |
 
 The scenario fails closed if any framebuffer has the wrong encoded size, any

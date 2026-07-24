@@ -456,10 +456,12 @@ the shared binary — deploys require explicit user go-ahead).
   of discarding the previous one. Pure runtime `source.chars()` now reuses each
   one-byte character handle within a conversion, retaining at most 256 distinct
   one-byte string objects plus unchanged multibyte objects. The O(N)
-  `source_chars` reference array must remain registered across active lexer
-  replacement: the attempted eager shallow release corrupted the second source
-  in compiled Stage4. Safe reclamation requires ownership evidence before it
-  can return. Stage4 RSS evidence is pending. A
+  The next isolated candidate restores whole-owner `CoreLexer` replacement
+  between sources. Fresh CI proved only that removing the later eager array
+  release was insufficient; exact Stage4 CI must still decide whether the
+  preceding slot-element overwrite caused the corruption. Safe owner reuse
+  requires compiled value-assignment evidence before it can return. Stage4 RSS
+  evidence is pending. A
   bounded current-source refresh reached its 180-second cap without an
   artifact, while an isolated lexer probe compiled from cache but could not
   link through the preserved driver's incomplete pure/core-C runtime bundle
