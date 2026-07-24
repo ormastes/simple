@@ -52,3 +52,14 @@ Two additional infra findings while attempting the all-i64 end-to-end run:
    End-to-end verification on this lane needs a quiescent tree or a pinned
    worktree. The defaulted-field fix's IR-level verification (store 5/true)
    was captured on a coherent tree and stands.
+
+## Focused rerun note (2026-07-24)
+
+The canonical self-hosted Linux runner accepted the one-file regression, then
+produced no further output for more than two minutes. Two same-command
+processes remained CPU-active at 58–76%; both were stopped under the runaway
+cap. The focused regression result is indeterminate, not PASS or FAIL. Re-run:
+
+```bash
+bin/simple test test/01_unit/compiler/backend/llvm_narrow_field_load_spec.spl
+```
