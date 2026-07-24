@@ -201,6 +201,26 @@ impl TypeRegistry {
         self.value_struct_type_ids.contains(&id)
     }
 
+    /// Whether `id` is a value struct whose name identifies one layout.
+    /// Imported modules can retain distinct IDs for identically named types;
+    /// copying at a parameter boundary is only sound when their fields agree.
+    pub fn has_unique_value_struct_layout(&self, id: TypeId) -> bool {
+        if !self.is_value_struct(id) {
+            return false;
+        }
+        let Some(HirType::Struct { name, fields, .. }) = self.get(id) else {
+            return false;
+        };
+        self.types.values().all(|ty| match ty {
+            HirType::Struct {
+                name: other_name,
+                fields: other_fields,
+                ..
+            } if other_name == name => other_fields == fields,
+            _ => true,
+        })
+    }
+
     pub fn set_public_type(&mut self, id: TypeId, is_public: bool) {
         if is_public {
             self.public_type_ids.insert(id);

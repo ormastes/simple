@@ -10,9 +10,10 @@
 //!   keep the old eager (both-operands-always-evaluated) path.
 
 use super::common::*;
-use crate::hir::TypeId;
+use crate::hir::{HirType, TypeId};
 use crate::mir::function::MirFunction;
 use crate::mir::{MirInst, Terminator};
+use simple_parser::Parser;
 
 /// Find the index of the first block containing a direct `Call` whose target
 /// function name matches `name`.
@@ -81,6 +82,24 @@ fn nested_value_struct_bind_and_param_copy_recursively_but_class_fields_do_not()
             .unwrap(),
     );
     assert_eq!(box_names, vec!["Box", "Box"]);
+}
+
+#[test]
+fn ambiguous_value_struct_param_layout_does_not_copy_at_entry() {
+    let mut parser = Parser::new("struct Outer:\n    n: i64\n\nfn take(value: Outer):\n    print(value.n)\n");
+    let ast = parser.parse().unwrap();
+    let mut hir = crate::hir::lower(&ast).unwrap();
+    hir.types.register(HirType::Struct {
+        name: "Outer".to_string(),
+        fields: vec![("other".to_string(), TypeId::I64)],
+        has_snapshot: false,
+        generic_params: vec![],
+        is_generic_template: false,
+        type_bindings: Default::default(),
+    });
+
+    let mir = crate::mir::lower::lower_to_mir(&hir).unwrap();
+    assert!(struct_init_names(mir.functions.iter().find(|func| func.name == "take").unwrap()).is_empty());
 }
 
 // =============================================================================

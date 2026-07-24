@@ -1508,7 +1508,7 @@ impl<'a> MirLowerer<'a> {
                 || param.is_mutable()
                 || !self
                     .type_registry
-                    .is_some_and(|registry| registry.is_value_struct(param.ty))
+                    .is_some_and(|registry| registry.has_unique_value_struct_layout(param.ty))
             {
                 continue;
             }
