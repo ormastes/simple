@@ -72,6 +72,9 @@ exist; no placeholder pass is permitted.
 - Parse a full module after a surface parse to prove no parser mode leaks.
 - Prove a nested skipped method body leaves the following text-bearing
   declaration intact.
+- Cover raw, triple, interpolated, Unicode, comment, `in`/`and`/`or`
+  continuation, and multiple-pending-dedent boundaries through the discard
+  path; preserve unterminated ordinary/raw string behavior.
 - Preserve malformed-declaration failure and the existing alias, enum payload,
   trait-default, fingerprint, and release-order tests.
 - Rebuild one pure-Simple candidate and run the live slope gate once; acceptance

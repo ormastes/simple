@@ -82,6 +82,25 @@ concurrent registry reallocation is therefore not supported as this crash's
 cause. The remaining demonstrated failure is cumulative no-GC allocation and
 host memory pressure during sequential Phase 2.
 
+## Per-call lexical discard follow-up
+
+The body omission path now advances omitted bodies through the existing lexer
+state machine without materializing nonstructural token payloads. It remains
+per-call, restores normal lexing before the declaration after the outer
+DEDENT, and does not affect full parsing or retained trait defaults.
+
+- Higher-capability static review: PASS after correcting `in`/`and`/`or` token
+  kinds and ordinary unterminated-triple parity.
+- Pure-Simple admission: 674 compiled, 0 cached, 0 failed; linked candidate.
+- Canonical frontend smoke: PASS.
+- Live release slope: `average_growth=6543`, threshold `<=25000`, clean
+  `termination=requested seq=10`.
+
+The first live invocation enabled phase profiling, whose adjacent stderr
+records hid marker 1 from the line-oriented checker. The canonical rerun used
+`SIMPLE_COMPILER_PHASE_PROFILE=0` and passed; this is an invocation/log framing
+issue, not a second compiler failure.
+
 ## Acceptance
 
 1. Add a bounded cumulative-surface probe or repair the registry/lexer

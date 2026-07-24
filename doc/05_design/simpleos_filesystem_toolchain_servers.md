@@ -102,6 +102,14 @@ through newline/EOF or one balanced INDENT/DEDENT block, diagnoses a missing
 indent or unterminated block, and leaves the parser after the outer body. No
 process-global mode is used.
 
+Skipped body tokens advance through `CoreLexer.next_token_discard_text` via
+`lex_next_discard_text` and `parser_advance_discard_text`. This is a per-call
+mode: it preserves source position, indentation, pending dedents, delimiters,
+comments, strings, and RHS line continuation while suppressing identifier,
+number, and string payload materialization. The outer DEDENT is followed by a
+normal advance so the next declaration retains its token text. Normal parsing
+and retained trait defaults never use the discard path.
+
 Enum and field defaults, imports/exports, bindings, decorators, source
 preprocessing, parser errors, and full frontend parsing keep their current
 behavior. The release marker remains after surface installation, AST reset, and

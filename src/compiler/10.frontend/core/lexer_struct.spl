@@ -10,7 +10,7 @@
 # Design: All state in CoreLexer struct fields. Methods modify self.
 # Compatible with the minimal bootstrap subset: no generics, no closures, no lambdas.
 
-use compiler.core.tokens.{keyword_lookup, token_requires_rhs}
+use compiler.core.tokens.{keyword_lookup, token_requires_rhs, TOK_KW_IN, TOK_KW_AND, TOK_KW_OR}
 use compiler.core.lexer_chars.{is_digit, is_hex_digit, is_alpha, is_ident_char, is_space}
 use std.string_core.{char_from_code}
 
@@ -122,6 +122,7 @@ struct CoreLexer:
     cur_line: i64
     cur_col: i64
     cur_start: i64
+    discard_token_text: bool
     # Stack of paren_depth values recorded by enable_forced_indentation(): a
     # block-bodied construct (e.g. a `\x:` block lambda) that appears inside a
     # call's parentheses needs real NEWLINE/INDENT/DEDENT tokens for its own
@@ -147,6 +148,7 @@ fn make_core_lexer(source: text) -> CoreLexer:
         cur_line: 0,
         cur_col: 0,
         cur_start: 0,
+        discard_token_text: false,
         force_indent_bracket_depths: []
     )
 
@@ -240,15 +242,16 @@ impl CoreLexer:
 
     me make_token(kind: i64, tok_text: text, start_line: i64, start_col: i64):
         self.cur_kind = kind
-        self.cur_text = tok_text
+        val saved_text: text = if self.discard_token_text then "" else tok_text
+        self.cur_text = saved_text
         self.cur_line = start_line
         self.cur_col = start_col
-        core_token_capture(tok_text, start_line, start_col)
+        core_token_capture(saved_text, start_line, start_col)
         val nul = char_from_code(0)
-        if tok_text.contains(nul):
+        if saved_text.contains(nul):
             core_token_text_save("")
         else:
-            core_token_text_save(tok_text)
+            core_token_text_save(saved_text)
         if core_token_env_save_enabled():
             rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_LINE", "{start_line}")
             rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_COL", "{start_col}")
@@ -303,15 +306,18 @@ impl CoreLexer:
                         pos = pos + 1
                     else:
                         break
-                var num_text: text = self.char_slice(start, pos)
+                var num_text: text = if self.discard_token_text then "" else self.char_slice(start, pos)
                 # Type suffix: 0x10000000u64 / 0x1234_u64 (decimal parity;
                 # the hex-digit loop already stopped at the non-hex alpha).
                 var hex_suffix: text = ""
-                val hxlen: i64 = num_text.len()
+                var has_hex_suffix: bool = false
+                val hxlen: i64 = pos - start
                 val after_hex: text = if pos < src_len then src[pos] else ""
                 if is_alpha(after_hex):
-                    if hxlen > 0 and num_text[hxlen - 1:hxlen] == "_":
-                        num_text = num_text[0:hxlen - 1]
+                    has_hex_suffix = true
+                    if hxlen > 0 and src[pos - 1] == "_":
+                        if not self.discard_token_text:
+                            num_text = num_text[0:num_text.len() - 1]
                     var hsuf_start: i64 = pos
                     for si in 0..1000:
                         if pos >= src_len:
@@ -320,7 +326,8 @@ impl CoreLexer:
                             pos = pos + 1
                         else:
                             break
-                    hex_suffix = self.char_slice(hsuf_start, pos)
+                    if not self.discard_token_text:
+                        hex_suffix = self.char_slice(hsuf_start, pos)
                 # ROOT FIX (bug mixed_unsigned_float_comparison_llvm_2026-07-16):
                 # make_token() -> core_token_capture() unconditionally resets
                 # core_last_token_suffix_slot to "" (see core_token_capture
@@ -331,7 +338,7 @@ impl CoreLexer:
                 # immediately and every hex literal with a unit suffix
                 # (0x8000000000000000u64) lexed as if it had NO suffix at
                 # all, even though `kind` was still correctly 7.
-                if hex_suffix != "":
+                if has_hex_suffix:
                     self.pos = pos
                     self.col = self.col + (pos - start)
                     self.make_token(7, num_text, start_line, start_col)
@@ -359,7 +366,7 @@ impl CoreLexer:
                         pos = pos + 1
                     else:
                         break
-                val num_text: text = self.char_slice(start, pos)
+                val num_text: text = if self.discard_token_text then "" else self.char_slice(start, pos)
                 self.pos = pos
                 self.col = self.col + (pos - start)
                 self.make_token(1, num_text, start_line, start_col)
@@ -380,7 +387,7 @@ impl CoreLexer:
                         pos = pos + 1
                     else:
                         break
-                val num_text: text = self.char_slice(start, pos)
+                val num_text: text = if self.discard_token_text then "" else self.char_slice(start, pos)
                 self.pos = pos
                 self.col = self.col + (pos - start)
                 self.make_token(1, num_text, start_line, start_col)
@@ -445,7 +452,7 @@ impl CoreLexer:
                 else:
                     break
 
-        var num_text: text = self.char_slice(start, pos)
+        var num_text: text = if self.discard_token_text then "" else self.char_slice(start, pos)
 
         # Unit/type suffix: `10_u8` (underscore form) or `10u8`/`5ms` (direct
         # alpha, seed lexer parity — an alpha run glued to a number can only
@@ -453,11 +460,12 @@ impl CoreLexer:
         # forms (`1e5`) were consumed above and never reach here with an
         # alpha follower. Suffix travels via the CORE_TOKEN_SUFFIX env channel.
         var suffix: text = ""
-        val nlen: i64 = num_text.len()
+        val nlen: i64 = pos - start
         val next_ch: text = if pos < src_len then src[pos] else ""
         if is_alpha(next_ch):
-            if nlen > 0 and num_text[nlen - 1:nlen] == "_":
-                num_text = num_text[0:nlen - 1]
+            if nlen > 0 and src[pos - 1] == "_":
+                if not self.discard_token_text:
+                    num_text = num_text[0:num_text.len() - 1]
             var suf_start: i64 = pos
             for i in 0..1000:
                 if pos >= src_len:
@@ -466,10 +474,12 @@ impl CoreLexer:
                     pos = pos + 1
                 else:
                     break
-            suffix = self.char_slice(suf_start, pos)
+            if not self.discard_token_text:
+                suffix = self.char_slice(suf_start, pos)
         self.pos = pos
         self.col = self.col + (pos - start)
-        if suffix != "":
+        val has_suffix: bool = suffix != "" or (self.discard_token_text and is_alpha(next_ch))
+        if has_suffix:
             if is_float:
                 self.make_token(8, num_text, start_line, start_col)
             else:
@@ -484,7 +494,94 @@ impl CoreLexer:
 
     # ----- String Scanning -----
 
+    me scan_string_discard():
+        val start_line: i64 = self.line
+        val start_col: i64 = self.col
+        self.cur_start = self.pos
+        val quote: text = self.advance()
+        val triple: bool = self.peek() == quote and self.peek_next() == quote
+        if triple:
+            self.advance()
+            self.advance()
+        for i in 0..1000000:
+            if self.at_end():
+                if triple:
+                    self.at_line_start = false
+                    self.make_token(3, "", start_line, start_col)
+                else:
+                    self.make_token(191, "", start_line, start_col)
+                return
+            if triple:
+                if self.peek() == quote and self.peek_next() == quote and self.peek_at(2) == quote:
+                    self.advance()
+                    self.advance()
+                    self.advance()
+                    self.at_line_start = false
+                    self.make_token(3, "", start_line, start_col)
+                    return
+            elif self.peek() == "\n":
+                self.make_token(191, "", start_line, start_col)
+                return
+            elif self.peek() == quote:
+                self.advance()
+                self.make_token(3, "", start_line, start_col)
+                return
+            elif self.peek() == "\\":
+                self.advance()
+                if not self.at_end():
+                    self.advance()
+                continue
+            elif self.peek() == "{":
+                # Match ordinary string interpolation lookahead exactly, but
+                # advance the source span instead of materializing its text.
+                val la_next: text = self.peek_next()
+                val la_is_quote: bool = la_next == "\"" or la_next == "'"
+                var la_found: i64 = -1
+                if not la_is_quote:
+                    var la: i64 = self.pos + 1
+                    val src_len: i64 = self.source_chars.len()
+                    var la_depth: i64 = 1
+                    var la_str: text = ""
+                    var la_esc: bool = false
+                    for j in 0..100000:
+                        if la >= src_len:
+                            break
+                        val lc: text = self.source_chars[la]
+                        if lc == "\n":
+                            break
+                        if la_str != "":
+                            if la_esc:
+                                la_esc = false
+                            elif lc == "\\":
+                                la_esc = true
+                            elif lc == la_str:
+                                la_str = ""
+                        else:
+                            if lc == "\"":
+                                la_str = lc
+                            elif lc == "'":
+                                la_str = lc
+                            elif lc == "{":
+                                la_depth = la_depth + 1
+                            elif lc == "}":
+                                la_depth = la_depth - 1
+                                if la_depth == 0:
+                                    la_found = la
+                                    break
+                        la = la + 1
+                if la_found >= 0:
+                    while self.pos <= la_found:
+                        self.advance()
+                else:
+                    self.advance()
+                continue
+            self.advance()
+        self.make_token(191, "", start_line, start_col)
+
     me scan_string():
+        if self.discard_token_text:
+            self.scan_string_discard()
+            return
         val start_line: i64 = self.line
         val start_col: i64 = self.col
         self.cur_start = self.pos
@@ -678,6 +775,33 @@ impl CoreLexer:
     me scan_raw_string(start_line: i64, start_col: i64):
         # Consume the opening double-quote (the `r` was already consumed by scan_ident).
         self.advance()  # consume opening "
+        if self.discard_token_text:
+            val triple: bool = self.peek() == "\"" and self.peek_next() == "\""
+            if triple:
+                self.advance()
+                self.advance()
+            for i in 0..1000000:
+                if self.at_end():
+                    self.make_token(191, "", start_line, start_col)
+                    return
+                if triple:
+                    if self.peek() == "\"" and self.peek_next() == "\"" and self.peek_at(2) == "\"":
+                        self.advance()
+                        self.advance()
+                        self.advance()
+                        self.at_line_start = false
+                        self.make_token(3, "", start_line, start_col)
+                        return
+                elif self.peek() == "\"":
+                    self.advance()
+                    self.make_token(3, "", start_line, start_col)
+                    return
+                elif self.peek() == "\n":
+                    self.make_token(191, "", start_line, start_col)
+                    return
+                self.advance()
+            self.make_token(191, "", start_line, start_col)
+            return
         # Raw triple strings preserve backslashes/interpolation markers and may
         # span lines, matching the Rust seed's r"""...""" grammar.
         if self.peek() == "\"" and self.peek_next() == "\"":
@@ -749,6 +873,24 @@ impl CoreLexer:
         self.col = self.col + (pos - start)
         # `src[start:pos].join("")` returns "" in the SimpleOS guest (native
         # value-type array-slice bug); char_slice builds it via an index loop.
+        if self.discard_token_text:
+            # Surface parsing only needs layout plus RHS-continuation keywords.
+            # Keep raw strings and `in`/`and`/`or` exact without allocating text.
+            val ident_len: i64 = pos - start
+            val is_raw: bool = ident_len == 1 and src[start] == "r"
+            val next_ch: text = if pos < src_len then src[pos] else ""
+            if is_raw and next_ch == "\"":
+                self.scan_raw_string(start_line, start_col)
+                return
+            var kw_kind: i64 = 6
+            if ident_len == 2 and src[start] == "i" and src[start + 1] == "n":
+                kw_kind = TOK_KW_IN
+            elif ident_len == 3 and src[start] == "a" and src[start + 1] == "n" and src[start + 2] == "d":
+                kw_kind = TOK_KW_AND
+            elif ident_len == 2 and src[start] == "o" and src[start + 1] == "r":
+                kw_kind = TOK_KW_OR
+            self.make_token(kw_kind, "", start_line, start_col)
+            return
         val ident_text: text = self.char_slice(start, pos)
 
         # G36: r"..." raw string — backslashes are literal, no escape processing.
@@ -1211,6 +1353,12 @@ impl CoreLexer:
 
         self.scan_token()
         return self.cur_kind
+
+    me next_token_discard_text() -> i64:
+        self.discard_token_text = true
+        val kind = self.next_token()
+        self.discard_token_text = false
+        kind
 
     # Parser-owned generic type closing uses the same `>` token as binary
     # greater-than. Clear the prior token inside the CoreLexer owner so newline
