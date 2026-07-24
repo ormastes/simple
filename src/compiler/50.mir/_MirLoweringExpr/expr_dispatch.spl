@@ -830,6 +830,41 @@ impl MirLowering:
                     total = total + bit_width
         total
 
+    me lower_return_expr(value: HirExpr?) -> LocalId:
+        # Return's payload is HirExpr? (Optional): Some(expr) for
+        # `return expr`, nil for a bare `return`.
+        if val rv = value:
+            var br = self.builder
+            var result = self.lower_expr(rv)
+            # current_function uses a boxed Option on this lane; only the
+            # explicit Some arm unboxes it safely.
+            var cur_builder = self.builder
+            var declared_return: HirType? = nil
+            match cur_builder.current_function:
+                case Some(active_fn):
+                    declared_return = self.resolved_call_hir_return_type(active_fn.symbol)
+                case None:
+                    ()
+            if val found_return = declared_return:
+                match found_return.kind:
+                    case HirTypeKind.Optional(_):
+                        result = self.ensure_option_handle(result, found_return)
+                    case _:
+                        ()
+            br = self.builder
+            val ret_op = mir_operand_copy(result)
+            val ret_box: MirOperand? = Some(ret_op)
+            br.terminate_return(ret_box)
+            self.builder = br
+        else:
+            var br_void = self.builder
+            br_void.terminate_return(nil)
+            self.builder = br_void
+        var br2 = self.builder
+        val ret_temp = br2.new_temp(MirType.unit())
+        self.builder = br2
+        ret_temp
+
     me lower_expr(expr: HirExpr) -> LocalId:
         """Lower HIR expression to MIR, return result local."""
         val nil_span = Span.empty()
@@ -1014,6 +1049,13 @@ impl MirLowering:
                     val block_temp = block_builder.new_temp(MirType.unit())
                     self.builder = block_builder
                     return block_temp
+                case _:
+                    pass
+        val return_disc = rt_enum_discriminant(HirExprKind.Return(nil))
+        if expr_disc == return_disc:
+            match expr_value.kind:
+                case HirExprKind.Return(value):
+                    return self.lower_return_expr(value)
                 case _:
                     pass
         # Var/NamedVar reads need the same disc-guarded pre-dispatch as
@@ -2344,54 +2386,7 @@ impl MirLowering:
                 self.lower_for(var_, iter, body)
 
             case Return(value):
-
-                # Return's payload is HirExpr? (Optional): Some(expr) for
-                # `return expr`, nil for a bare `return`. Bind the present
-                # payload before lowering; a bare return has no operand.
-                if val rv = value:
-                    var br = self.builder
-                    var result = self.lower_expr(rv)
-                    # MirBuilder.current_function is assigned via an EXPLICIT
-                    # `Some(MirFunction(...))` in begin_function, which on this
-                    # lane builds a real 3-word enum box [disc, type_hash,
-                    # payload] -- NOT the nullable-pointer shape most optionals
-                    # use. `if val x = ...` is parser-desugared to a raw bind +
-                    # `x != nil`, so it binds the BOX; reading `.symbol` off it
-                    # then loads the box's discriminant word (0x1_00000004) and
-                    # dereferences it -> SIGSEGV in every function that has an
-                    # explicit `return <expr>`. `match ... case Some(v)` is the
-                    # only shape that unboxes; it is what end_function
-                    # (mir_data.spl) already uses on this same producer.
-                    var cur_builder = self.builder
-                    var declared_return: HirType? = nil
-                    match cur_builder.current_function:
-                        case Some(active_fn):
-                            declared_return = self.resolved_call_hir_return_type(active_fn.symbol)
-                        case None:
-                            ()
-                    if val found_return = declared_return:
-                        match found_return.kind:
-                            case HirTypeKind.Optional(_):
-                                result = self.ensure_option_handle(result, found_return)
-                            case _:
-                                ()
-                    br = self.builder
-                    # Hoisted: `Some(call(...))` inline in argument position is
-                    # the optional-in-argument miscompile class on the stage4
-                    # lane (callee never invoked -> Some(garbage) -> adapter
-                    # reads a nil operand at Ret translate, SIGILL).
-                    val ret_op = mir_operand_copy(result)
-                    val ret_box: MirOperand? = Some(ret_op)
-                    br.terminate_return(ret_box)
-                    self.builder = br
-                else:
-                    var br_void = self.builder
-                    br_void.terminate_return(nil)
-                    self.builder = br_void
-                var br2 = self.builder
-                val ret_temp = br2.new_temp(MirType.unit())
-                self.builder = br2
-                ret_temp
+                self.lower_return_expr(value)
 
             case Break(break_label, break_value):
                 if self.loop_stack.len() > 0:

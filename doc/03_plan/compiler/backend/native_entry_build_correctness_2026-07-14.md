@@ -870,3 +870,24 @@ the shared binary — deploys require explicit user go-ahead).
   `MirLowering.lower_expr` Return dispatch; fix the shared extraction boundary,
   not Cranelift. The three-cycle cap stopped here. LLVM, exit `33`, implicit
   tail, neighbor Dict-struct, and platform promotion remain gated.
+
+  The next fresh-object session separated stale code from the active
+  collision. V35 forced both HIR/MIR statement modules through a cloned cache
+  and traced equal, nonnegative `HirStmtKind.Expr` discriminants; its extracted
+  expression discriminator exactly matched `HirExprKind.Return`. V36 rebuilt
+  those modules without tracing plus exact Return predispatch (`5 compiled,
+  670 cached, 0 failed`) and still stopped on statement 1. V37 replaced the
+  code-layout-sensitive Expr payload match with the runtime payload reader,
+  retained a loud nil guard, and centralized the existing Return lowering
+  behind exact predispatch (`4/671/0`). Its GDB receipt proves that path is
+  active: `lower_stmt -> lower_expr -> lower_return_expr -> lower_expr`.
+
+  The remaining crash is one child deeper. Disassembly maps the recursive call
+  to the active Binary arm lowering its left operand, which is `d["a"]`; the
+  child `HirExprKind.Index` then misroutes in the giant raw expression match.
+  Next extract the existing complete Index arm into one
+  `lower_index_expr(base, index, result_type)` helper and route both exact
+  Index predispatch and the legacy arm through it. Do not duplicate or narrow
+  its Dict/text/array/slice/CLI semantics. Cranelift/LLVM exit `33`, the
+  implicit-tail control, neighbor Dict-struct, and platform promotion remain
+  gated.
