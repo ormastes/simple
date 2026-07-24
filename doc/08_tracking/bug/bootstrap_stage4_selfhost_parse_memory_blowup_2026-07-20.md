@@ -672,3 +672,114 @@ per-file slope — if it regresses, re-run with
 sub-phase and which file(s) moved, rather than guessing from the aggregate
 number alone. Not wired into CI — land + document only, per this session's
 scope.
+
+## 2026-07-24 guarded full-closure result and ownership correction
+
+A fresh compiler-only binary was built with HEAD pinned at
+`dfb889329e41e07048031377720815faa6a8a514` with the Cranelift backend,
+strict stub fallback disabled, and an isolated cache. The build compiled
+673 units with zero failures and zero unresolved symbols. Its SHA-256 was
+`54688881c5c42f25c37ee4d6eee5c56d54cdc07a9bc236f79c9e079275078aad`.
+The build used a detached checkout, excluding the goal worktree's two
+unrelated dirty files.
+The canonical compiler-only identity checks and the Cranelift/core-C
+`candidate_frontend_smoke` passed; both stub dumps were empty.
+
+The synthetic multi-file guard also passed once:
+
+- 40 files x 20 functions
+- peak RSS: 136,196 KiB
+- status: pass
+
+That pass did **not** establish real-corpus safety. One subsequent Stage 4
+full-CLI build was run from the same pinned HEAD with `--low-memory`,
+one worker, a one-hour timeout, and a 16 GiB address-space cap. It stopped
+with exit 139/SIGSEGV at 16,741,880 KiB max RSS after completing only 103
+of 1,314 unique files. Registry growth remained linear:
+
+| completed file | heap registry |
+|---:|---:|
+| closure start | 3,749,442 |
+| 40 | 5,794,044 |
+| 80 | 7,528,611 |
+| 103 | 8,786,865 |
+
+This is about 48.9K additional live registry entries per completed file
+from the closure baseline, with no flattening. The earlier 85-105K/file
+figure counted a different interval; both measurements show the same
+unbounded lifetime shape. Do not raise the memory cap or retry the full
+bootstrap until this ownership defect is fixed.
+
+The final diagnostic at `src/app/devhub/cmd_minio.spl:158` reported
+`expected :, got Ident ''` immediately before the core dump. The clean
+source line is valid `if not ok:` syntax and the identical form occurs
+earlier in the same file. Treat this diagnostic as allocation-failure
+fallout unless it reproduces in an isolated healthy-memory parse.
+
+The guarded run and follow-up ownership trace also correct the earlier
+flat-arena hypothesis in this document:
+
+- `parse_and_build_module` resets the global flat AST pools before every
+  file and eagerly converts the result into a rich `Module`.
+- Stage 4 entry-closure mode retains those rich modules in
+  `CompileContext.modules` through the parse-all phase.
+- HIR import/export/type/constant/impl resolution requires the complete
+  module declaration surface, so a naive parse-one/lower-one change would
+  break forward and sibling resolution.
+- Per-module flat-arena snapshots or another flat-to-tree deep copy would
+  duplicate existing conversion and retain more memory. A post-conversion
+  `ast_reset()` is already effectively performed by the next parse and
+  does not release the retained rich modules.
+
+The next viable design is therefore a declaration/header prepass that
+retains only the cross-module resolution surface, followed by
+parse/lower/discard of full bodies under entry-closure low-memory mode.
+Before another Stage 4 attempt, add a bounded representative real-corpus
+registry-slope gate; the 40-file synthetic peak-RSS guard is too small and
+homogeneous to detect this failure class.
+
+### Selected low-memory ownership boundary
+
+Use one compact HIR-facing `ModuleSurface` index and keep at most one
+ordinary full-body rich Module live, plus compact surfaces and retained
+trait-default subtrees:
+
+- `struct ModuleSurface`
+- `type ModuleSurfacesByName = {text: ModuleSurface}`
+- `fn module_surface_from_module(module: Module) -> ModuleSurface`
+- `fn hirlowering_for_module(filename: text, surfaces:
+  ModuleSurfacesByName) -> HirLowering`
+
+The surface pass reuses the existing parser, extracts imports, exports,
+declaration names/kinds, callable signatures, enum payload/type
+declarations, impl targets/traits/method signatures, constant names, and
+trait declarations. Ordinary function/class/impl bodies are omitted.
+Trait default-method bodies are the only retained executable-body
+exception because imported-symbol registration lowers them on demand.
+`module_surface_from_module` must return independently owned compact data,
+not references that require the transient rich Module to remain live.
+
+After all surfaces exist, the low-memory entry-closure path parses one
+source again, lowers it with the complete surface index, retains the HIR,
+and removes the rich Module from retained compiler state before
+continuing. The post-scope marker must prove whether the allocator actually
+reclaims it. This deliberately accepts a second parse instead of
+introducing a second grammar or depending on source/topological order.
+Non-low-memory mode may keep the existing rich module map during initial
+rollout.
+
+The representative RED-to-GREEN gate must observe a post-release marker,
+not the existing parse-done marker:
+
+`phase2:surface:file:released path=... seq=... heap_registry=...`
+
+Sample the first 10 unique, ordered real-closure paths under a
+pre-calibrated address-space cap that demonstrably reaches marker 10
+(initially 10 GiB on this host) and a 90-second deadline. Stop the compiler
+process group event-driven after the tenth validated marker. Require
+average retained growth `(heap10 - heap1) / 9 <= 25,000` objects/file and
+record every adjacent delta. The current comparable first-10 slope is
+38,770 objects/file, so 25,000 is an early defect-class ratchet rather than
+a full-closure safety proof or a general performance promise. Fail on
+early exit, timeout, memory-cap termination, malformed or duplicate
+markers, or parser errors.
