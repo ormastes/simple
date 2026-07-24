@@ -261,7 +261,9 @@ evidence boundary for the important pure-Simple tooling lanes:
   worker/fallback help handling matches the public lint entry
   (`cc69749ef25`); each has focused contract evidence. Directory targets now
   expand recursively through native-safe shared discovery, while an explicit
-  directory with no `.spl` files fails with a target diagnostic. The focused CLI contract and
+  directory with no `.spl` files fails with a target diagnostic. Canonical
+  identities deduplicate `./dir` plus an equivalent `dir/file.spl` without
+  changing the first diagnostic spelling. The focused CLI contract and
   essential-tools gate cover nested dirty input; see the
   [directory-target report](../../08_tracking/bug/lint_directory_target_opaque_failure_2026-07-24.md).
   **Remaining

@@ -30,8 +30,15 @@ a nested dirty file, plus an empty-source directory in JSON mode. The Stage 4
 essential-tools gate also requires the recursive directory to emit W001, D001,
 and the exact one-file failure summary.
 
+A follow-up audit found that overlap deduplication compared display strings:
+`./dir` plus `dir/file.spl` linted the same physical file twice. Shared source
+discovery now supplies a canonical absolute identity while retaining the first
+caller spelling for diagnostics. Both lint and check use that identity, and the
+focused overlap contract deliberately mixes `./dir` with `dir/file.spl`.
+
 ## Evidence boundary
 
-Source and smoke portability contracts are the current evidence. The retained
-binary predates this fix; a fresh Stage 4 essential-tools run is still required
-for production qualification.
+Source execution through the temporary Rust bootstrap interpreter produced one
+W001 and one failed-file summary for the mixed-spelling overlap. This is not
+production qualification: the retained binary predates the fix, and a fresh
+Stage 4 essential-tools run remains required.
