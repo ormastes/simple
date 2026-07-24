@@ -674,6 +674,12 @@ fn resolve_method_call_static(
         func_name.as_str()
     };
 
+    // Collection `parts.join(sep)` lowers to a bare builtin call. An imported
+    // path helper with the same name must not capture it during suffix binding.
+    if lookup_name == "join" {
+        return;
+    }
+
     if let Some(resolved) = resolve_name_variants(lookup_name, use_map, import_map) {
         *func_name = resolved;
     } else {
@@ -1012,4 +1018,20 @@ fn is_runtime_or_builtin_name(name: &str, extern_fns: &std::collections::HashSet
                 | "matching_sort_by"
                 | "mp_segments"
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_method_call_static;
+    use std::collections::HashMap;
+
+    #[test]
+    fn bare_join_stays_builtin_when_path_join_is_imported() {
+        let mut name = "join".to_string();
+        let use_map = HashMap::from([("join".to_string(), "nogc_async_mut__path__join".to_string())]);
+
+        resolve_method_call_static(&mut name, &use_map, &HashMap::new(), &HashMap::new(), &HashMap::new());
+
+        assert_eq!(name, "join");
+    }
 }
