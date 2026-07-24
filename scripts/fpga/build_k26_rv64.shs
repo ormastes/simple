@@ -32,6 +32,45 @@ fi
 
 mkdir -p "$BUILD_DIR"
 
+# --- Stage the HAND-WRITTEN synthesizable RV64 core (Lane C) ---------------
+# The .spl -> VHDL generator path (generate_rv64_vhdl.shs) is BLOCKED (phantom
+# compile_to_vhdl_module — no backend exists). The REAL synthesizable artifact
+# is the hand-written examples/09_embedded/fpga_riscv/rtl/rv64_exec_core.vhd +
+# soc_top_rv64.vhd (RV64IM + Zicsr subset): GHDL-clean, smoke-tb PASS, and
+# differential-tested against the .spl rv64gc model on the Adler-32 soak mix.
+# Stage a throwaway copy into RTL_DIR so the .mem-path rewrite below never
+# mutates the committed source (mirrors build_k26_rv32.shs's throwaway RTL_DIR).
+SRC_RTL="examples/09_embedded/fpga_riscv/rtl"
+mkdir -p "$RTL_DIR"
+cp "$SRC_RTL/rv64_exec_core.vhd" "$RTL_DIR/rv64_exec_core.vhd"
+cp "$SRC_RTL/soc_top_rv64.vhd"   "$RTL_DIR/soc_top_rv64.vhd"
+
+# Build the Adler-32 soak payload mem (default COUNT; the 10-minute board run
+# sizes COUNT via soak_rv64_hard_job.shs). rv64im, linked at 0x8000_0000.
+RV64_GCC="${RV64_GCC:-riscv64-unknown-elf-gcc}"
+RV64_OBJCOPY="${RV64_OBJCOPY:-riscv64-unknown-elf-objcopy}"
+RV64_BOARD_COUNT="${RV64_BOARD_COUNT:-100000}"
+if command -v "$RV64_GCC" >/dev/null 2>&1 && command -v "$RV64_OBJCOPY" >/dev/null 2>&1; then
+    PAY="examples/09_embedded/fpga_riscv/payload/soak_rv64.s"
+    sed -e "s/@COUNT@/$RV64_BOARD_COUNT/g" -e "s/@INTERVAL@/$((RV64_BOARD_COUNT/20))/g" \
+        "$PAY" > "$RTL_DIR/soak_rv64.s"
+    "$RV64_GCC" -march=rv64im -mabi=lp64 -nostdlib -nostartfiles \
+        -Wl,-Ttext=0x80000000 -o "$RTL_DIR/soak_rv64.elf" "$RTL_DIR/soak_rv64.s"
+    "$RV64_OBJCOPY" -O binary "$RTL_DIR/soak_rv64.elf" "$RTL_DIR/soak_rv64.bin"
+    sz=$(wc -c <"$RTL_DIR/soak_rv64.bin"); pad=$(( (8 - sz % 8) % 8 ))
+    [ "$pad" -gt 0 ] && dd if=/dev/zero bs=1 count="$pad" >>"$RTL_DIR/soak_rv64.bin" 2>/dev/null || true
+    od -An -v -tx8 -w8 "$RTL_DIR/soak_rv64.bin" | tr -d ' ' | awk 'NF{print}' \
+        > "$RTL_DIR/rv64_payload.mem"
+elif [ ! -s "$RTL_DIR/rv64_payload.mem" ]; then
+    echo "ERROR: $RV64_GCC/$RV64_OBJCOPY missing and no prebuilt $RTL_DIR/rv64_payload.mem" >&2
+    exit 2
+fi
+
+# Rewrite the relative "rv64_payload.mem" in the staged core to an absolute path
+# so Vivado resolves it at elaboration regardless of launch dir (mirrors the
+# rv32 rv32_fat32.mem rewrite).
+perl -0pi -e "s#\"(?:[^\"]*/)?rv64_payload\\.mem\"#\"$PWD/$RTL_DIR/rv64_payload.mem\"#g" "$RTL_DIR/rv64_exec_core.vhd"
+
 # Check for required RTL files. The rv64 payload lives at build/vhdl/rv64/
 # and is consumed by rv64_exec_core (instantiated by soc_top_rv64).
 for f in soc_top_rv64.vhd rv64_exec_core.vhd rv64_payload.mem; do
@@ -49,17 +88,8 @@ if ! grep -q 'entity rv64_exec_core is' "$RTL_DIR/rv64_exec_core.vhd"; then
     exit 2
 fi
 
-cat > "$XDC_FILE" <<XDC
-## K26 ML Carrier PMOD J2 serial pins (3.3V LVCMOS33).
-##   pin 1 = TX -> H12   pin 2 = RX <- E10   pin 5 = GND
-## Per doc/07_guide/hardware/fpga/kria_k26_ml_carrier_bringup.md.
-set_property PACKAGE_PIN H12 [get_ports uart_tx]
-set_property IOSTANDARD LVCMOS33 [get_ports uart_tx]
-set_property PACKAGE_PIN E10 [get_ports uart_rx]
-set_property IOSTANDARD LVCMOS33 [get_ports uart_rx]
-## pl_clk0 (100 MHz) is auto-constrained by the zynq_ultra_ps_e IP;
-## no manual create_clock here (the old cfgmclk clock is gone).
-XDC
+# Use the committed board constraints (PMOD J2 UART pins) directly.
+cp scripts/fpga/k26_rv64.xdc "$XDC_FILE"
 
 cat > "$TCL_FILE" <<TCL
 set simple_synth_only $SYNTH_ONLY

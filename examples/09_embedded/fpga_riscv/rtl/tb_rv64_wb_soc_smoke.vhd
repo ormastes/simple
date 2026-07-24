@@ -19,7 +19,10 @@ architecture sim of tb_rv64_wb_soc_smoke is
 begin
   clk <= not clk after 5 ns;
 
-  dut : entity work.soc_top_rv64
+  -- soc_top_rv64_sim is the GHDL-elaboratable wrapper (clk/rst exposed); the
+  -- board top soc_top_rv64.vhd is Zynq-PS-clocked and cannot elaborate under
+  -- raw GHDL. Same board/sim split as tb_rv32_wb_soc_smoke -> soc_top_rv32_sim.
+  dut : entity work.soc_top_rv64_sim
     port map (
       clk => clk,
       rst => rst,
