@@ -48,6 +48,9 @@ fn module_rss_warn_bytes() -> u64 {
     })
 }
 
+/// Default maximum modules that can be loaded.
+const DEFAULT_MODULE_LIMIT: usize = 800;
+
 /// Maximum modules that can be loaded (0 = unlimited).
 /// Read from SIMPLE_MODULE_LIMIT.
 pub fn module_limit() -> usize {
@@ -56,8 +59,13 @@ pub fn module_limit() -> usize {
         std::env::var("SIMPLE_MODULE_LIMIT")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(800) // default from module_cache.rs MAX_TOTAL_MODULES
+            .unwrap_or(DEFAULT_MODULE_LIMIT)
     })
+}
+
+/// Whether a module count exceeds its effective limit (0 = unlimited).
+pub fn module_limit_exceeded(total: usize, limit: usize) -> bool {
+    limit != 0 && total > limit
 }
 
 /// Maximum sibling files to preload per __init__.spl.
@@ -294,7 +302,11 @@ pub fn print_diagnostics() {
 
     GUARD_STATS.with(|stats| {
         let s = stats.borrow();
-        eprintln!("Total modules loaded: {}", s.total_modules);
+        eprintln!(
+            "Total modules loaded: {}  Module limit: {}",
+            s.total_modules,
+            module_limit()
+        );
 
         // Top RSS consumers
         let mut deltas: Vec<_> = s.rss_deltas.iter().collect();
@@ -350,5 +362,17 @@ pub fn assert_module_delta_under_mb(path: &Path, limit_mb: i64) -> Result<i64, S
         ))
     } else {
         Ok(delta_mb)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::module_limit_exceeded;
+
+    #[test]
+    fn module_limit_exceeded_respects_unlimited_zero() {
+        for (total, limit, expected) in [(800, 800, false), (801, 800, true), (usize::MAX, 0, false)] {
+            assert_eq!(module_limit_exceeded(total, limit), expected);
+        }
     }
 }

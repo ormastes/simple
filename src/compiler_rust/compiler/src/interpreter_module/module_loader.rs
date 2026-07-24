@@ -49,7 +49,7 @@ use super::module_cache::{
     cache_module_definitions, cache_module_exports, clear_partial_module_exports, decrement_load_depth,
     get_cached_module_exports, get_partial_module_exports, increment_load_depth, increment_total_modules,
     is_module_loading, mark_module_loading, merge_cached_module_definitions, unmark_module_loading,
-    record_module_visit, record_module_eval_time, record_sibling_preload, MAX_MODULE_DEPTH, MAX_TOTAL_MODULES,
+    record_module_visit, record_module_eval_time, record_sibling_preload, MAX_MODULE_DEPTH,
 };
 use super::module_evaluator::{evaluate_module_exports, evaluate_module_exports_with_preloaded};
 use super::path_resolution::resolve_module_path;
@@ -777,12 +777,13 @@ pub fn load_and_merge_module(
     // Check total module count limit to prevent OOM from loading too many modules
     // Only count unique (non-cached) module loads since cached modules don't add memory
     let total = increment_total_modules();
-    if total > MAX_TOTAL_MODULES {
+    let limit = crate::memory_guard::module_limit();
+    if crate::memory_guard::module_limit_exceeded(total, limit) {
         decrement_load_depth();
-        warn!(total, max = MAX_TOTAL_MODULES, path = ?module_path, "Total module count limit exceeded");
+        warn!(total, max = limit, path = ?module_path, "Total module count limit exceeded");
         return Err(CompileError::Runtime(format!(
             "Module count limit ({}) exceeded loading {:?}. Too many transitive imports.",
-            MAX_TOTAL_MODULES, module_path
+            limit, module_path
         )));
     }
 
