@@ -63,18 +63,33 @@ fn _is_log_option(arg: text) -> bool:
         arg == "--progress" or arg.starts_with("--log-mode=") or
         arg.starts_with("--surface=") or arg.starts_with("--progress=")
 
-fn _is_signed_integer(value: text) -> bool:
+fn _is_bounded_ascii_decimal(value: text, max_value: text, allow_zero: bool) -> bool:
     if value.len() == 0:
         return false
+
     var i = 0
-    if value.starts_with("-"):
-        if value.len() == 1:
-            return false
-        i = 1
+    var first_nonzero = value.len()
     while i < value.len():
         val ch = value[i:i + 1]
         if ch < "0" or ch > "9":
             return false
+        if first_nonzero == value.len() and ch != "0":
+            first_nonzero = i
+        i = i + 1
+
+    if first_nonzero == value.len():
+        return allow_zero
+
+    val digit_count = value.len() - first_nonzero
+    if digit_count != max_value.len():
+        return digit_count < max_value.len()
+
+    i = 0
+    while i < digit_count:
+        val ch = value[first_nonzero + i:first_nonzero + i + 1]
+        val max_ch = max_value[i:i + 1]
+        if ch != max_ch:
+            return ch < max_ch
         i = i + 1
     true
 
@@ -88,7 +103,14 @@ pub fn examples_check_option_error(args: [text]) -> text:
             if i + 1 >= args.len() or args[i + 1] == "":
                 return "missing value for {arg}"
             val value = args[i + 1]
-            if (numeric_value and not _is_signed_integer(value)) or (not numeric_value and value.starts_with("-")):
+            if numeric_value:
+                val valid_numeric = if arg == "--timeout":
+                    _is_bounded_ascii_decimal(value, "9223372036854775", false)
+                else:
+                    _is_bounded_ascii_decimal(value, "9223372036854775807", true)
+                if not valid_numeric:
+                    return "invalid value for {arg}"
+            elif value.starts_with("-"):
                 return "invalid value for {arg}"
             i = i + 2
             continue
@@ -98,7 +120,14 @@ pub fn examples_check_option_error(args: [text]) -> text:
             val value = arg.slice(arg.index_of("=") + 1, arg.len())
             if value == "":
                 return "missing value for " + arg.slice(0, arg.index_of("="))
-            if (equals_numeric and not _is_signed_integer(value)) or (equals_path and value.starts_with("-")):
+            if equals_numeric:
+                val valid_numeric = if arg.starts_with("--timeout="):
+                    _is_bounded_ascii_decimal(value, "9223372036854775", false)
+                else:
+                    _is_bounded_ascii_decimal(value, "9223372036854775807", true)
+                if not valid_numeric:
+                    return "invalid value for " + arg.slice(0, arg.index_of("="))
+            elif equals_path and value.starts_with("-"):
                 return "invalid value for " + arg.slice(0, arg.index_of("="))
         val known = (
             arg == "examples-check" or arg == "--run" or arg == "--compile" or arg == "--fail-fast" or arg == "--help" or arg == "-h" or
