@@ -189,3 +189,21 @@ Stage2/Stage3/Stage4 builds and their caches belong to older snapshots.
 
 Next verification must first build a current-main Stage4 in an isolated,
 cache-preserving lane, then build C5 once and require exit `42`.
+
+### Current-main Stage4 receipt
+
+An isolated cache-preserving compiler-only Stage4 then built from current main:
+675 files compiled, zero failures, candidate SHA-256
+`be65e69192920ef1e325c8c2ef3aed78b8f0203b8fb37109c66f6daa2ce56c01`.
+Its C5 output still returned diagnostic `1` and retained direct calls to the
+colliding free `chr`/`to_char` functions. This proves the remaining dispatch
+bug is before the tagged-result conversion.
+
+The native-entry HIR receiver has no declared type, while method resolution is
+`FreeFunction`; the old primitive guard admitted a MIR-proven integer only
+when resolution was `Unresolved`. Current source now permits primitive
+precedence for `Unresolved` and `FreeFunction` only, excludes custom owners,
+prelowers the receiver once, and reuses that local if a non-integer
+free-function call falls through. Instance, trait, and static resolutions stay
+on their normal dispatch paths. Rebuilt execution of this second source fix is
+pending the next bounded compiler candidate.

@@ -634,5 +634,12 @@ the shared binary — deploys require explicit user go-ahead).
   execution remains pending a current-main Stage4: the available older Stage4
   ignored both live-worker selection knobs and reproduced the same byte-identical
   pre-fix C5 binary in all three bounded attempts. No active compiler build or
-  reusable cache currently represents this source snapshot. See
+  reusable cache represented that source snapshot. A later isolated
+  current-main compiler-only Stage4 built 675 files with zero failures, but
+  its C5 receipt still exited `1` and called the colliding free functions. The
+  remaining gate incorrectly required `Unresolved` resolution even when MIR
+  proved the receiver integer. Current source gives primitive priority over
+  `FreeFunction`/`Unresolved` only, preserves custom instance/trait/static
+  dispatch, and reuses the prelowered receiver on free-function fallthrough.
+  Rebuilt execution of this follow-up remains pending. See
   `native_chr_builtin_no_lowering_2026-07-18.md`.

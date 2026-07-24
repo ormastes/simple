@@ -637,6 +637,9 @@ impl MirLowering:
         # that owner before the primitive fallback below.
         var chr_has_custom_owner = false
         val chr_method_shape = (method == "chr" or method == "to_char") and args.len() == 0
+        val chr_primitive_resolution_allowed = match resolution:
+            case Unresolved | FreeFunction(_): true
+            case _: false
         if resolution_is_unresolved and chr_method_shape:
             val static_chr_key = "static::{static_receiver_name}::{method}"
             if static_receiver_name != "" and self.struct_method_syms.contains(static_chr_key):
@@ -658,6 +661,9 @@ impl MirLowering:
                     val chr_owner = self.struct_value_syms.get(prelowered_method_receiver.id)
                     if chr_owner != nil and chr_owner != "":
                         chr_has_custom_owner = self.struct_method_syms.contains("{chr_owner}::{method}")
+        if chr_method_shape and chr_primitive_resolution_allowed and not chr_has_custom_owner and not has_prelowered_method_receiver:
+            prelowered_method_receiver = self.lower_expr(receiver)
+            has_prelowered_method_receiver = true
 
         if method == "is_some" and args.len() == 0 and option_method_receiver:
             val receiver_local = prelowered_method_receiver
@@ -1611,11 +1617,9 @@ impl MirLowering:
         # interpreter's primitive dispatch. Untyped native-entry HIR keeps the
         # unresolved fallback, after giving a custom struct owner precedence.
         var chr_receiver_is_declared_int = false
-        var chr_receiver_needs_runtime_probe = receiver.type_ == nil
         if val chr_declared_type = receiver.type_:
             match chr_declared_type.kind:
                 case HirTypeKind.Int(_, _): chr_receiver_is_declared_int = true
-                case HirTypeKind.Infer(_, _): chr_receiver_needs_runtime_probe = true
                 case _: ()
         var chr_receiver_is_runtime_int = false
         if has_prelowered_method_receiver:
@@ -1625,8 +1629,8 @@ impl MirLowering:
                         chr_receiver_is_runtime_int = true
                     case _: ()
         val lower_builtin_chr = chr_method_shape and (
-            chr_receiver_is_declared_int or
-            (resolution_is_unresolved and chr_receiver_needs_runtime_probe and not chr_has_custom_owner and chr_receiver_is_runtime_int)
+            chr_primitive_resolution_allowed and not chr_has_custom_owner and
+            (chr_receiver_is_declared_int or chr_receiver_is_runtime_int)
         )
         if lower_builtin_chr:
             val chr_receiver = if has_prelowered_method_receiver:
@@ -2163,6 +2167,8 @@ impl MirLowering:
             case FreeFunction(func_id):
                 val arg_operands = if wb_kind != 0:
                     self.build_args_from_receiver(wb_receiver, args)
+                else if has_prelowered_method_receiver:
+                    self.build_args_from_receiver(prelowered_method_receiver, args)
                 else:
                     self.lower_receiver_and_args(receiver, args)
                 val func_operand = self.symbol_to_operand(func_id)
