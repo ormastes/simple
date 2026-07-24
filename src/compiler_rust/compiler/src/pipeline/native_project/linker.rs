@@ -1123,6 +1123,23 @@ int main(int argc, char** argv) {
                     c_requested.push(dependency);
                 }
             }
+            // The generated main stub declares the runtime-control surface as
+            // WEAK no-op DEFINITIONS (not undefined references), so liveness
+            // never requests these and the capsule localizes them — the weak
+            // no-ops then win the final link: argv is never captured (every
+            // CLI invocation fell through to the empty-args REPL path,
+            // 2026-07-25) and runtime init/shutdown never run. Keep every
+            // stub-contract symbol the core C runtime actually defines global.
+            for contract in [
+                "rt_set_args",
+                "__simple_runtime_init",
+                "__simple_runtime_shutdown",
+                "__simple_call_module_inits",
+            ] {
+                if c_defined.contains(contract) && !c_requested.iter().any(|s| s == contract) {
+                    c_requested.push(contract.to_string());
+                }
+            }
             c_requested.sort();
             let c_capsule = build_stage4_runtime_capsule_archive(
                 core,
