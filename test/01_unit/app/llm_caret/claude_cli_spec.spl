@@ -183,7 +183,7 @@ describe "build_claude_args - verbose":
         expect(args_contain(args, "--verbose")).to_be(false)
 
 describe "build_claude_args - extra args":
-    it "should appends extra args":
+    it "should append extra args":
         val args = build_claude_args("Hi", "", "", "", "", 0, 0, "", [], ["--no-cache"], false)
         expect(args_contain(args, "--no-cache")).to_be(true)
 
@@ -291,6 +291,25 @@ describe "parse_claude_json_response - error":
         expect(resp.is_error).to_be(true)
         expect(resp.error).to_contain("must be numeric")
 
+    it "should reject malformed nested message usage and metadata":
+        val nested_usage = parse_claude_json_response(
+            "{\"result\":\"x\",\"message\":{\"usage\":{\"output_tokens\":\"many\"}}}"
+        )
+        expect(nested_usage.is_error).to_be(true)
+        expect(nested_usage.error).to_contain("must be numeric")
+        val bad_model = parse_claude_json_response(
+            "{\"result\":\"x\",\"model\":42}"
+        )
+        expect(bad_model.is_error).to_be(true)
+        expect(bad_model.error).to_contain("must be strings")
+
+    it "should preserve an explicit zero counter over nested usage":
+        val resp = parse_claude_json_response(
+            "{\"result\":\"x\",\"input_tokens\":0,\"usage\":{\"input_tokens\":9}}"
+        )
+        expect(resp.is_error).to_be(false)
+        expect(resp.input_tokens).to_equal(0)
+
 describe "parse_claude_json_response - edge cases":
     it "should handle missing model field":
         var json = LB()
@@ -315,7 +334,7 @@ describe "parse_claude_json_response - edge cases":
         val resp = parse_claude_json_response(json)
         expect(resp.content).to_equal(expected)
 
-    it "should unescapes quotes and backslashes in result content":
+    it "should unescape quotes and backslashes in result content":
         val expected = "Use \"quoted\" text and C:\\workspace"
         val json = mock_json(expected, "model", "sess")
         val resp = parse_claude_json_response(json)
@@ -355,7 +374,7 @@ describe "parse_claude_stream_line":
         expect(evt.event_type).to_equal("content_block_delta")
         expect(evt.content).to_equal("Hello ")
 
-    it "should unescapes streamed text deltas":
+    it "should unescape streamed text deltas":
         val expected = "first\nsecond"
         val line = mock_stream_line("content_block_delta", expected)
         val evt = parse_claude_stream_line(line)
@@ -448,6 +467,50 @@ describe "parse_claude_stream_line":
         val evt = parse_claude_stream_line(line)
         expect(evt.content.contains("sk-ant-fixture-secret")).to_be(false)
         expect(evt.stop_reason).to_equal("error")
+
+    it "should preserve a nested diagnostic from an error-only result":
+        val line = "{\"type\":\"result\",\"is_error\":true,\"error\":{\"message\":\"provider overloaded\"}}"
+        val evt = parse_claude_stream_line(line)
+        expect(evt.event_type).to_equal("result")
+        expect(evt.content).to_equal("provider overloaded")
+        expect(evt.stop_reason).to_equal("error")
+
+    it "should accept a string protocol error and redact it":
+        val line = "{\"type\":\"error\",\"error\":\"failed sk-ant-fixture-secret\"}"
+        val evt = parse_claude_stream_line(line)
+        expect(evt.event_type).to_equal("error")
+        expect(evt.content).to_contain("[REDACTED:")
+        expect(evt.content.contains("sk-ant-fixture-secret")).to_be(false)
+
+    it "should reject malformed nested stream fields":
+        val nested_usage = parse_claude_stream_line(
+            "{\"type\":\"assistant\",\"message\":{\"usage\":{\"input_tokens\":\"many\"}}}"
+        )
+        expect(nested_usage.stop_reason).to_equal("invalid")
+        expect(nested_usage.content).to_contain("must be numeric")
+        val scalar_delta = parse_claude_stream_line(
+            "{\"type\":\"content_block_delta\",\"delta\":\"text\"}"
+        )
+        expect(scalar_delta.stop_reason).to_equal("invalid")
+        expect(scalar_delta.content).to_contain("must be an object")
+
+    it "should preserve explicit zero stream usage and partial JSON":
+        val started = parse_claude_stream_line(
+            "{\"type\":\"message_start\",\"input_tokens\":0,\"message\":{\"usage\":{\"input_tokens\":9}}}"
+        )
+        expect(started.input_tokens).to_equal(0)
+        val delta = parse_claude_stream_line(
+            "{\"type\":\"content_block_delta\",\"delta\":{\"partial_json\":\"{\\\"x\\\":\"}}"
+        )
+        expect(delta.content).to_equal("{\"x\":")
+
+    it "should accept non-content protocol events without forging terminal state":
+        for event_type in ["content_block_start", "content_block_stop", "ping", "user", "rate_limit_event"]:
+            val evt = parse_claude_stream_line(
+                "{\"type\":\"" + event_type + "\"}"
+            )
+            expect(evt.event_type).to_equal(event_type)
+            expect(evt.stop_reason).to_equal("")
 
     it "should handle empty line":
         val evt = parse_claude_stream_line("")

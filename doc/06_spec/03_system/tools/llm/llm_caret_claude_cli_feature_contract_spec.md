@@ -62,12 +62,14 @@ The specification covers:
 - aggregation of multiple assistant text blocks;
 - JSON-schema `structured_output` result envelopes;
 - rejection of malformed or contract-free JSON responses;
+- direct `claude_cli_send` response-field and failure-path behavior;
 - offline production subprocess dispatch;
 - offline NDJSON stream subprocess dispatch, empty/malformed output rejection,
   and terminal-event enforcement;
 - subprocess-error secret redaction;
 - protocol-level stream error/result secret redaction;
-- public `llm_init`/`llm_chat` history routing;
+- public `llm_init_defaults`/`llm_init`/`llm_send`/`llm_chat` routing;
+- public initialization isolation and failed-session rejection;
 - successful structured responses;
 - usage counters;
 - structured provider errors;
@@ -221,6 +223,43 @@ for case in cases:
 
 </details>
 
+#### should reject malformed and contract-free response envelopes
+
+- Parse malformed, missing-result, wrong-type, unsupported-event, and
+  result-without-content envelopes.
+- Expected: each returns a typed error and cannot become terminal success.
+
+#### should forward schema tools and extras through production dispatch
+
+- Invoke the production Claude dispatcher with a schema, allowed tool, and
+  extra argument.
+- Expected: the fixture returns `advanced-ok`.
+- Expected: another provider rejects the Claude-only arguments.
+
+#### should preserve and redact a provider stream error
+
+- Run the provider-error NDJSON fixture through `claude_cli_stream`.
+- Expected: one terminal diagnostic is preserved while its secret is redacted.
+
+#### should execute the direct Claude sender and fail closed
+
+- Invoke `claude_cli_send` directly and verify content, model, session, stop
+  reason, usage, and raw response fields.
+- Expected: malformed stdout and a missing executable return structured errors.
+
+#### should route the public API history and redact provider failures
+
+- Run successful and failing requests through `llm_init` and `llm_chat`.
+- Expected: successful user/assistant history is retained; a failed assistant
+  turn is not added and provider secrets are redacted.
+
+#### should isolate public initialization and failed provider sessions
+
+- Reinitialize after setting a system prompt.
+- Expected: the new client does not inherit that prompt.
+- Return an error carrying a forged provider session, then send a success.
+- Expected: the failed session is not reused and public defaults can be restored.
+
 ### REQ-LLM-CARET-FULL-006: hidden feature gates
 
 #### should keep gated and permanently hidden commands unavailable
@@ -251,8 +290,8 @@ check_hidden_feature_gate(fixtures)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

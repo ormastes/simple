@@ -110,8 +110,8 @@ expect(tui_transcript_len()).to_equal(2)
 
 step("Check transcript and status")
 expect(check_tui_snapshot(snapshot, case)).to_equal("matched")
-expect(dir_create_all(ARTIFACT_DIR)).to_equal(true)
-expect(file_write(TUI_CAPTURE_PATH, snapshot)).to_equal(true)
+expect(dir_create_all(ARTIFACT_DIR)).to_be(true)
+expect(file_write(TUI_CAPTURE_PATH, snapshot)).to_be(true)
 expect(file_read(TUI_CAPTURE_PATH)).to_equal(snapshot)
 ```
 
@@ -151,7 +151,7 @@ render_turn("system", switched.message)
 step("Check transcript and status")
 expect(refreshed.status).to_contain("provider=openai_compat")
 expect(refreshed.title).to_equal("llm_caret - openai_compat")
-expect(switched.exit).to_equal(false)
+expect(switched.exit).to_be(false)
 expect(tui_transcript_line_text(0)).to_equal("System: provider set to openai_compat")
 ```
 
@@ -231,10 +231,10 @@ step("Open the caret TUI")
 expect(queryEventRoute("error", false, false)).to_equal("show query error")
 
 step("Send a prompt through the visible input")
-expect(should_retry(429, 1, policy)).to_equal(true)
-expect(should_retry(503, 3, policy)).to_equal(true)
-expect(should_retry(503, 4, policy)).to_equal(false)
-expect(should_retry(400, 1, policy)).to_equal(false)
+expect(should_retry(429, 1, policy)).to_be(true)
+expect(should_retry(503, 3, policy)).to_be(true)
+expect(should_retry(503, 4, policy)).to_be(false)
+expect(should_retry(400, 1, policy)).to_be(false)
 
 step("Check transcript and status")
 expect(effective_delay_ms(1, policy, 75)).to_equal(75)
@@ -328,7 +328,7 @@ val case = CaretHiddenFeatureCase(
 
 step("Enable the hidden-feature fixture")
 val lookup = setup_hidden_feature_fixture(case)
-expect(lookup.command.hidden).to_equal(true)
+expect(lookup.command.hidden).to_be(true)
 
 step("Check the hidden-feature gate")
 expect(_source_excludes_sgtti("src/app/llm_caret/main.spl")).to_equal("excluded")

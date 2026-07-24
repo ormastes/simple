@@ -23,6 +23,7 @@ used to generate the full-parity matrices.
 | `src/app/llm_caret/*.spl` | 23 direct caret files; 6,609 LOC | Current-tree evidence |
 | `doc/09_report/llm_caret_claude_cli_traceability.md` | Maps 13 files and 3,292 current LOC | Stale generated/manual mapping |
 | `scripts/check/check-llm-caret-claude-cli-trace.shs` | 23/23 files (100%); 6,840/6,840 LOC (100%); 464/464 file-qualified symbols; `STATUS: PASS` | Current computed gate |
+| Full self-hosted CLI bootstrap | Stage 3 built; Stage 4 full-CLI native build was killed by signal 9; no candidate deployed | Current executable-test blocker; do not retry in this session |
 | `tmp/claude/claude-code-main/src` | Missing | Current-tree evidence |
 | Full-parity feature matrix | 599 rows, 1,902 historical source files, 512,685 historical LOC | Snapshot-derived evidence; cannot be refreshed against upstream now |
 | Full-parity file matrix | 1,902 rows | Snapshot-derived evidence |

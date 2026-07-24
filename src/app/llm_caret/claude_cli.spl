@@ -43,6 +43,21 @@ fn _json_optional_kind(object: any, key: text, expected: text) -> bool:
         return true
     json_get_type(json_object_get(object, key)) == expected
 
+fn _json_text_fields_valid(object: any, keys: [text]) -> bool:
+    for key in keys:
+        if not _json_optional_kind(object, key, "string"):
+            return false
+    true
+
+fn _json_has_usage_key(object: any, key: text) -> bool:
+    if object == nil or json_get_type(object) != "object":
+        return false
+    if json_object_has(object, key):
+        return true
+    val usage = json_object_get(object, "usage")
+    usage != nil and json_get_type(usage) == "object" and
+        json_object_has(usage, key)
+
 fn _json_usage_kinds_valid(object: any) -> bool:
     val usage = json_object_get(object, "usage")
     if usage != nil and json_get_type(usage) != "object":
@@ -55,13 +70,23 @@ fn _json_usage_kinds_valid(object: any) -> bool:
             return false
         if usage != nil and not _json_optional_kind(usage, key, "number"):
             return false
+    val message = json_object_get(object, "message")
+    if message != nil:
+        if json_get_type(message) != "object":
+            return false
+        if not _json_usage_kinds_valid(message):
+            return false
     true
 
 fn _json_usage_i64(object: any, key: text) -> i64:
-    val direct = _json_i64(object, key)
-    if direct != 0:
-        return direct
-    _json_i64(json_object_get(object, "usage"), key)
+    if object == nil or json_get_type(object) != "object":
+        return 0
+    if json_object_has(object, key):
+        return _json_i64(object, key)
+    val usage = json_object_get(object, "usage")
+    if usage != nil and json_object_has(usage, key):
+        return _json_i64(usage, key)
+    0
 
 fn _json_message_field(object: any, key: text) -> text:
     val direct = _json_text(object, key)
@@ -70,10 +95,9 @@ fn _json_message_field(object: any, key: text) -> text:
     _json_text(json_object_get(object, "message"), key)
 
 fn _json_message_usage_i64(object: any, key: text) -> i64:
-    val direct = _json_usage_i64(object, key)
-    if direct != 0:
-        return direct
-    _json_i64(json_object_get(json_object_get(object, "message"), "usage"), key)
+    if _json_has_usage_key(object, key):
+        return _json_usage_i64(object, key)
+    _json_usage_i64(json_object_get(object, "message"), key)
 
 fn _json_message_content(object: any) -> text:
     val message = json_object_get(object, "message")
@@ -236,6 +260,19 @@ pub fn parse_claude_json_response(raw: text) -> CliResponse:
         return _invalid_cli_response(
             raw, "claude CLI usage fields must be numeric"
         )
+    if not _json_text_fields_valid(
+        parsed, ["model", "session_id", "stop_reason"]
+    ):
+        return _invalid_cli_response(
+            raw, "claude CLI model, session, and stop fields must be strings"
+        )
+    val response_message = json_object_get(parsed, "message")
+    if response_message != nil and not _json_text_fields_valid(
+        response_message, ["model"]
+    ):
+        return _invalid_cli_response(
+            raw, "claude CLI message model field must be a string"
+        )
     val is_err = _json_bool(parsed, "is_error")
     if not has_result and not has_structured and not is_err:
         return _invalid_cli_response(raw, "claude CLI response is missing result")
@@ -310,6 +347,24 @@ pub fn parse_claude_stream_line(line: text) -> CliStreamEvent:
         return _invalid_stream_event(
             "claude CLI stream usage fields must be numeric"
         )
+    if not _json_text_fields_valid(
+        parsed, ["session_id", "model", "stop_reason"]
+    ):
+        return _invalid_stream_event(
+            "claude CLI stream metadata fields must be strings"
+        )
+    val stream_message = json_object_get(parsed, "message")
+    if stream_message != nil and not _json_text_fields_valid(
+        stream_message, ["model"]
+    ):
+        return _invalid_stream_event(
+            "claude CLI stream message model field must be a string"
+        )
+    val stream_delta = json_object_get(parsed, "delta")
+    if stream_delta != nil and json_get_type(stream_delta) != "object":
+        return _invalid_stream_event(
+            "claude CLI stream delta field must be an object"
+        )
     var content_val = ""
     var sid = ""
     var mdl = ""
@@ -372,10 +427,23 @@ pub fn parse_claude_stream_line(line: text) -> CliStreamEvent:
         in_tok = _json_usage_i64(parsed, "input_tokens")
         out_tok = _json_usage_i64(parsed, "output_tokens")
         if result_is_error:
+            if content_val == "":
+                content_val = _json_text(parsed, "error")
+            if content_val == "":
+                content_val = _json_text(
+                    json_object_get(parsed, "error"), "message"
+                )
+            if content_val == "":
+                content_val = "claude CLI returned an error"
             content_val = redact(content_val)
             stop_val = "error"
     elif etype == "error":
-        content_val = redact(_json_text(json_object_get(parsed, "error"), "message"))
+        content_val = _json_text(parsed, "error")
+        if content_val == "":
+            content_val = _json_text(
+                json_object_get(parsed, "error"), "message"
+            )
+        content_val = redact(content_val)
         if content_val == "":
             content_val = "claude CLI stream error"
         stop_val = "error"

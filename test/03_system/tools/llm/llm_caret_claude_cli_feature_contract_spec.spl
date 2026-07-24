@@ -45,12 +45,14 @@ The specification covers:
 - aggregation of multiple assistant text blocks;
 - JSON-schema `structured_output` result envelopes;
 - rejection of malformed or contract-free JSON responses;
+- direct `claude_cli_send` response-field and failure-path behavior;
 - offline production subprocess dispatch;
 - offline NDJSON stream subprocess dispatch, empty/malformed output rejection,
   and terminal-event enforcement;
 - subprocess-error secret redaction;
 - protocol-level stream error/result secret redaction;
-- public `llm_init`/`llm_chat` history routing;
+- public `llm_init_defaults`/`llm_init`/`llm_send`/`llm_chat` routing;
+- public initialization isolation and failed-session rejection;
 - successful structured responses;
 - usage counters;
 - structured provider errors;
@@ -169,11 +171,13 @@ use std.spec.*
 use std.io_runtime.{file_exists, file_read}
 use app.llm_caret.claude_cli.{
     CliResponse, build_claude_args, build_claude_stream_args,
-    parse_claude_json_response, parse_claude_stream_line, claude_cli_stream
+    parse_claude_json_response, parse_claude_stream_line,
+    claude_cli_send, claude_cli_stream
 }
 use app.llm_caret.provider.{dispatch_send, dispatch_send_advanced}
 use app.llm_caret.mod.{
-    llm_init, llm_set_cli_path, llm_system, llm_chat, llm_clear,
+    llm_init_defaults, llm_init, llm_set_cli_path, llm_system,
+    llm_send, llm_chat, llm_clear, llm_provider, llm_model,
     llm_history_len, llm_history_role, llm_history_content
 }
 use app.llm_caret.claude_full.commands.fast.index.{FastCommandDescriptor, fastCommand}
@@ -434,9 +438,7 @@ fn check_cli_result(case: CaretCliFeatureCase, response: CliResponse):
         expect(provider_error[0].stop_reason).to_equal("error")
         expect(provider_error[0].content).to_contain("provider overloaded")
         expect(provider_error[0].content).to_contain("[REDACTED:")
-        expect(
-            provider_error[0].content.contains("sk-ant-fixture-secret")
-        ).to_be(false)
+        expect(provider_error[0].content.contains("sk-ant-fixture-secret")).to_be(false)
 
         llm_clear()
         llm_init("claude_cli", "sonnet")
@@ -575,9 +577,39 @@ describe "LLM caret Claude CLI feature contract":
             expect(events[0].stop_reason).to_equal("error")
             expect(events[0].content).to_contain("provider overloaded")
             expect(events[0].content).to_contain("[REDACTED:")
-            expect(
-                events[0].content.contains("sk-ant-fixture-secret")
-            ).to_be(false)
+            expect(events[0].content.contains("sk-ant-fixture-secret")).to_be(false)
+
+        it "should execute the direct Claude sender and fail closed":
+            step("Invoke the direct Claude CLI sender")
+            val response = claude_cli_send(
+                MOCK_CLAUDE, "fixture-success", "sonnet",
+                "Be concise", "", 0, 0, "", [], []
+            )
+
+            step("Check every direct response field")
+            expect(response.is_error).to_be(false)
+            expect(response.content).to_equal("fixture-ok")
+            expect(response.model).to_equal("sonnet")
+            expect(response.session_id).to_equal("resume-1")
+            expect(response.stop_reason).to_equal("end_turn")
+            expect(response.input_tokens).to_equal(11)
+            expect(response.output_tokens).to_equal(3)
+            expect(response.raw).to_contain("fixture-ok")
+
+            step("Reject malformed output and a missing executable")
+            val malformed = claude_cli_send(
+                MOCK_CLAUDE, "fixture-json-malformed", "sonnet",
+                "", "", 0, 0, "", [], []
+            )
+            expect(malformed.is_error).to_be(true)
+            expect(malformed.error).to_contain("invalid JSON")
+            val missing = claude_cli_send(
+                "/definitely/missing/llm-caret-claude", "ignored", "",
+                "", "", 0, 0, "", [], []
+            )
+            expect(missing.is_error).to_be(true)
+            expect(missing.content).to_equal("")
+            expect(missing.stop_reason).to_equal("error")
 
         it "should route the public API history and redact provider failures":
             step("Invoke successful public Claude CLI chat")
@@ -604,6 +636,33 @@ describe "LLM caret Claude CLI feature contract":
             expect(failure).to_contain("[REDACTED:")
             expect(failure.contains("sk-ant-fixture-secret")).to_be(false)
             expect(llm_history_len()).to_equal(1)
+            llm_clear()
+
+        it "should isolate public initialization and failed provider sessions":
+            step("Reset public system prompt state on initialization")
+            llm_init("claude_cli", "sonnet")
+            llm_set_cli_path(MOCK_CLAUDE)
+            llm_system("stale system prompt")
+            llm_init("claude_cli", "sonnet")
+            llm_set_cli_path(MOCK_CLAUDE)
+            expect(llm_send("fixture-no-system")).to_equal("no-system-ok")
+            expect(llm_provider()).to_equal("claude_cli")
+            expect(llm_model()).to_equal("sonnet")
+
+            step("Keep an error response from poisoning the provider session")
+            llm_clear()
+            llm_init("claude_cli", "sonnet")
+            llm_set_cli_path(MOCK_CLAUDE)
+            val failure = llm_send("fixture-error-session")
+            expect(failure).to_start_with("ERROR: ")
+            expect(failure).to_contain("[REDACTED:")
+            llm_system("Be concise")
+            expect(llm_send("fixture-success")).to_equal("fixture-ok")
+
+            step("Restore public defaults")
+            llm_init_defaults()
+            expect(llm_provider()).to_equal("claude_cli")
+            expect(llm_model()).to_equal("")
             llm_clear()
 
     describe "REQ-LLM-CARET-FULL-006: hidden feature gates":
