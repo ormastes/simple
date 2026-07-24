@@ -106,6 +106,15 @@ same failure.
 - Next isolate the exact submitted byte stream at the raw compile boundary and
   validate that captured stream with `spirv-val`/SPIRV-Cross. Do not proceed to
   Vulkan web/GUI/WM or Metal until this first live 2D gate passes.
+- Follow-up capture isolated the failure to the eleventh compile call: the
+  vector-font head/tail append loop corrupted raw iterated bytes at the generic
+  tagged `array.push` boundary. The byte-array concat fix now emits the exact
+  pinned 10,884-byte module and passes `spirv-val`. The next blocker is the
+  freshly built closure: its default link omits explicit provider dependencies,
+  and diagnostic provider injection traps in `VulkanBackend.clear` because the
+  backend receiver is nil. Fix the source-root/module identity or native-link
+  closure so the strict wrapper can launch an explicitly provider-linked
+  binary; then rerun the live gate in a fresh bounded session.
 
 1. In a fresh bounded verification session, run the focused
    `storage_binding_numbers` unit tests and rebuild the Vulkan-enabled runtime
