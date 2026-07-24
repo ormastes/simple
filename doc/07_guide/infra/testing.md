@@ -765,6 +765,14 @@ simple test --refresh-screenshots  # Force recapture
 simple test --screenshot-output doc/06_spec/image/custom
 ```
 
+`--format json` is a machine-output contract: stdout contains one final object
+with `success`, `spec`, `spl_doctest`, and `sdoctest`; disabled lanes are
+`null`. Progress and diagnostics go to stderr. Wrapper failures use the same
+single-object envelope with `success=false`, `worker_exit_code`, and `error`.
+The pure-Simple implementation is source-reviewed but remains unqualified
+until the tracked Stage 4 parser timeout is fixed and the whole-stdout contract
+passes on the fresh candidate.
+
 ### Exit Codes
 
 For child-run wrappers, `simple test` treats the parsed BDD summary line

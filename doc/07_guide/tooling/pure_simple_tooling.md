@@ -170,20 +170,21 @@ evidence boundary for the important pure-Simple tooling lanes:
   smoke has fresh Stage 4 evidence. Invalid and bare-value test options now
   return exit 2 before configuration or discovery, while signed split values
   remain valid. **Remaining bug/gap:** this preflight has focused source
-  evidence only. Public `--format json` is not yet qualified: the current
-  pure runner accepts the value but still emits human per-file/summary output
-  and no final aggregate JSON object. It must aggregate spec and both doctest
-  lanes before emitting one final object. A subprocess-boundary repair
-  was preserved but not pushed. High static review accepted the repaired
-  executable/argv and JSON-parser boundaries. The Rust seed now honors its
-  documented module-limit override, but one finite 1,200-module run still
-  exhausted the full CLI closure before wrapper behavior; see
+  evidence only. Public `--format json` is not yet qualified. A preserved
+  pure-Simple subprocess boundary now captures the worker, routes diagnostics
+  to stderr, and emits one aggregate object covering spec and both doctest
+  lanes; nested JSON tests fail closed with the same JSON envelope. High static
+  review accepted the repaired executable/argv, recursion, and JSON-parser
+  boundaries. Bounded seed diagnostics reached valid worker JSON but cannot
+  qualify production behavior. The required cached Stage 4 link then timed out
+  after 1,800 seconds while parsing
+  `src/app/cli/_CliMain/args_and_os_commands.spl`, producing no candidate; see
   [the JSON-format report](../../08_tracking/bug/test_runner_json_format_not_machine_readable_2026-07-24.md).
-  **Next solution:** build one fresh incremental Stage 4 CLI containing the
-  preserved repair, then run the whole-stdout contract once through that exact
-  binary. Run the remaining focused bounded-output and CLI contracts once,
-  then run the exact essential-tools smoke from its temporary external working
-  directory.
+  **Next solution:** fix the existing global-flags parser/checker timeout,
+  build one fresh incremental Stage 4 CLI containing the preserved repair,
+  then run the whole-stdout contract once through that exact binary. Run the
+  remaining focused bounded-output and CLI contracts once, then run the exact
+  essential-tools smoke from its temporary external working directory.
 - **check / build / run** — **Source status:** the full pure-Simple CLI links,
   preserves delegated streams/status, and its isolated official source-check
   passes when `SIMPLE_BINARY` names the candidate. `check` is source-fixed to
