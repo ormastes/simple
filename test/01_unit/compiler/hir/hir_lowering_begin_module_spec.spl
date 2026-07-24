@@ -1,0 +1,104 @@
+use std.spec.{describe, it, expect}
+use compiler.common.config.{TypeInferenceConfig}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{HirLowering, LoweringError, LoweringErrorKind, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId}
+
+fn lifecycle_fixture() -> text:
+    "struct Carrier:\n" +
+    "    value: i64\n" +
+    "enum Choice:\n" +
+    "    Pick(value: i64)\n" +
+    "trait Shared:\n" +
+    "    fn value(self) -> i64:\n" +
+    "        return 9\n" +
+    "impl Shared for Carrier:\n" +
+    "    fn value(self) -> i64:\n" +
+    "        return self.value\n" +
+    "fn pair() -> (i64, text):\n" +
+    "    return (1, \"one\")\n" +
+    "fn main() -> i64:\n" +
+    "    val carrier = Carrier(value: 3)\n" +
+    "    val tuple_value = (2, \"two\")\n" +
+    "    return carrier.value() + tuple_value.0\n"
+
+fn populated_lowering() -> HirLowering:
+    val content = lifecycle_fixture()
+    val module = parse_and_build_module(content, "begin_module_first.spl")
+    val source = SourceFile(
+        path: "begin_module_first.spl",
+        content: content,
+        module_name: "begin_module.first"
+    )
+    val modules: Dict<text, Module> = {"begin_module.first": module}
+    val surfaces_result = module_surfaces_from_modules(modules, [source])
+    if surfaces_result.is_err():
+        panic(surfaces_result.unwrap_err())
+    var lowering = hirlowering_for_module("begin_module_first.spl", surfaces_result.unwrap())
+    lowering.set_type_inference_config(TypeInferenceConfig.strict())
+    val _ = lowering.lower_module(module)
+
+    lowering.errors.push(LoweringError(
+        message: "prior module diagnostic",
+        span: Span.empty(),
+        kind: LoweringErrorKind.Other
+    ))
+    lowering.current_function = Some(SymbolId.new(77))
+    lowering.loop_depth = 3
+    lowering.loaded_modules.push("begin_module.first")
+    lowering.current_method_self_type = Some(HirType(
+        kind: HirTypeKind.Int(64, true),
+        span: Span.empty()
+    ))
+    lowering.registering_import_symbols = true
+    lowering
+
+describe "HirLowering.begin_module":
+    it "resets module-local lowering state and preserves compilation-wide state":
+        var lowering = populated_lowering()
+
+        expect(lowering.symbols.next_symbol_id).to_be_greater_than(0)
+        expect(lowering.errors.len()).to_be_greater_than(0)
+        expect(lowering.current_function.?).to_equal(true)
+        expect(lowering.loop_depth).to_equal(3)
+        expect(lowering.loaded_modules.len()).to_equal(1)
+        expect(lowering.current_method_self_type.?).to_equal(true)
+        expect(lowering.lowered_impl_functions.len()).to_be_greater_than(0)
+        expect(lowering.struct_field_types_by_name.len()).to_be_greater_than(0)
+        expect(lowering.local_struct_types.len()).to_be_greater_than(0)
+        expect(lowering.struct_field_order_by_name.len()).to_be_greater_than(0)
+        expect(lowering.local_tuple_types.len()).to_be_greater_than(0)
+        expect(lowering.enum_variant_names.len()).to_be_greater_than(0)
+        expect(lowering.registering_import_symbols).to_equal(true)
+        expect(lowering.fn_tuple_returns.len()).to_be_greater_than(0)
+        expect(lowering.lowered_traits.contains_key("Shared")).to_equal(true)
+        expect(lowering.module_surfaces.index_by_name.contains_key("begin_module.first")).to_equal(true)
+        expect(lowering.type_inference_config.unwrap().strict_empty_collections).to_equal(true)
+
+        lowering.begin_module("begin_module_second.spl")
+
+        expect(lowering.module_filename).to_equal("begin_module_second.spl")
+        expect(lowering.symbols.next_symbol_id).to_equal(0)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.current_function).to_be_nil()
+        expect(lowering.loop_depth).to_equal(0)
+        expect(lowering.loaded_modules.len()).to_equal(0)
+        expect(lowering.current_method_self_type).to_be_nil()
+        expect(lowering.lowered_impl_functions.len()).to_equal(0)
+        expect(lowering.struct_field_types_by_name.len()).to_equal(0)
+        expect(lowering.local_struct_types.len()).to_equal(0)
+        expect(lowering.struct_field_order_by_name.len()).to_equal(0)
+        expect(lowering.local_tuple_types.len()).to_equal(0)
+        expect(lowering.enum_variant_names.len()).to_equal(0)
+        expect(lowering.registering_import_symbols).to_equal(false)
+        expect(lowering.fn_tuple_returns.len()).to_equal(0)
+
+        expect(lowering.module_surfaces.surfaces.len()).to_equal(1)
+        expect(lowering.module_surfaces.index_by_name.contains_key("begin_module.first")).to_equal(true)
+        expect(lowering.lowered_traits.contains_key("Shared")).to_equal(true)
+        expect(lowering.type_inference_config.unwrap().strict_empty_collections).to_equal(true)

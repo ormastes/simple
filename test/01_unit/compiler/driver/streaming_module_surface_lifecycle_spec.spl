@@ -1,0 +1,80 @@
+use std.spec.{describe, it, expect}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.driver.driver.{CompilerDriver}
+use compiler.driver.driver_types.{CompileMode, CompileOptions}
+
+fn alpha_source(content: text) -> SourceFile:
+    SourceFile(
+        path: "build/streaming_driver_fixture/alpha.spl",
+        content: content,
+        module_name: "fixture.alpha"
+    )
+
+fn streaming_driver() -> CompilerDriver:
+    var options = CompileOptions.default()
+    options.mode = CompileMode.Aot
+    options.low_memory = true
+    options.backend = "llvm"
+    var driver = CompilerDriver.create(options)
+    val alpha_content = "fn alpha() -> i64:\n    return 1\n"
+    driver.ctx.sources = [
+        alpha_source(alpha_content),
+        SourceFile(
+            path: "build/streaming_driver_fixture/alpha.spl",
+            content: alpha_content,
+            module_name: "fixture.alpha_alias"
+        ),
+        SourceFile(
+            path: "build/streaming_driver_fixture/beta.spl",
+            content: "fn beta() -> i64:\n    return 2\n",
+            module_name: "fixture.beta"
+        )
+    ]
+    driver
+
+describe "streaming module-surface driver lifecycle":
+    it "carries ordered physical surfaces and aliases from phase 2 through phase 3":
+        var driver = streaming_driver()
+
+        val (phase2_ctx, phase2_ok) = driver.parse_all_streaming_surfaces_impl()
+        driver.ctx = phase2_ctx
+        expect(phase2_ok).to_equal(true)
+        expect(driver.ctx.modules.len()).to_equal(0)
+        expect(driver.ctx.module_surfaces.?).to_equal(true)
+        val surfaces = driver.ctx.module_surfaces.unwrap()
+        expect(surfaces.surfaces.len()).to_equal(2)
+        expect(surfaces.surfaces[0].module_name).to_equal("fixture.alpha")
+        expect(surfaces.surfaces[1].module_name).to_equal("fixture.beta")
+        expect(surfaces.index_by_name["fixture.alpha"]).to_equal(0)
+        expect(surfaces.index_by_name["fixture.alpha_alias"]).to_equal(0)
+        expect(surfaces.index_by_name["fixture.beta"]).to_equal(1)
+
+        val (phase3_ctx, phase3_ok) = driver.lower_and_check_streaming_surfaces_impl()
+        driver.ctx = phase3_ctx
+        expect(phase3_ok).to_equal(true)
+        expect(driver.ctx.hir_modules.contains_key("fixture.alpha")).to_equal(true)
+        expect(driver.ctx.hir_modules.contains_key("fixture.alpha_alias")).to_equal(true)
+        expect(driver.ctx.hir_modules.contains_key("fixture.beta")).to_equal(true)
+        expect(driver.ctx.hir_modules["fixture.alpha"].name).to_equal("fixture.alpha")
+        expect(driver.ctx.hir_modules["fixture.alpha_alias"].name).to_equal("fixture.alpha")
+        expect(driver.ctx.hir_modules["fixture.beta"].name).to_equal("fixture.beta")
+        expect(driver.ctx.sources.len()).to_equal(0)
+        expect(driver.ctx.module_surfaces.?).to_equal(false)
+
+    it "retains sources and completed surfaces after a phase-3 fingerprint failure":
+        var driver = streaming_driver()
+        val (phase2_ctx, phase2_ok) = driver.parse_all_streaming_surfaces_impl()
+        driver.ctx = phase2_ctx
+        expect(phase2_ok).to_equal(true)
+
+        var mutated_sources = driver.ctx.sources
+        mutated_sources[0] = alpha_source("fn alpha() -> i64:\n    return 99\n")
+        driver.ctx.sources = mutated_sources
+
+        val (phase3_ctx, phase3_ok) = driver.lower_and_check_streaming_surfaces_impl()
+        driver.ctx = phase3_ctx
+        expect(phase3_ok).to_equal(false)
+        expect(driver.ctx.sources.len()).to_equal(3)
+        expect(driver.ctx.module_surfaces.?).to_equal(true)
+        expect(driver.ctx.module_surfaces.unwrap().surfaces.len()).to_equal(2)
+        expect(driver.ctx.errors[0]).to_contain("fingerprint mismatch")

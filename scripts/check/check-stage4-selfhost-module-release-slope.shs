@@ -1,47 +1,23 @@
 #!/bin/sh
-# Fixture contract for the planned Stage-4 release-stream slope gate.
+# Stage-4 released-module heap-registry slope gate.
 set -eu
+set -f
 
 fail() {
     printf '%s\n' "$*" >&2
     exit 1
 }
 
-self_test=0
-fixture=
-mode=
-low_memory=
-backend=
-while [ "$#" -gt 0 ]; do
-    case "$1" in
-        --self-test) self_test=1; shift ;;
-        --fixture|--mode|--low-memory|--backend)
-            [ "$#" -ge 2 ] || fail "missing value for $1"
-            case "$1" in
-                --fixture) fixture=$2 ;;
-                --mode) mode=$2 ;;
-                --low-memory) low_memory=$2 ;;
-                --backend) backend=$2 ;;
-            esac
-            shift 2
-            ;;
-        *) fail "unknown argument: $1" ;;
-    esac
-done
+activation_enabled() {
+    [ "$mode" = aot ] &&
+        [ "$low_memory" = 1 ] &&
+        [ "${SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE:-}" = 1 ] &&
+        [ "${SIMPLE_BOOTSTRAP_STAGE4:-}" = 1 ] &&
+        [ "$backend" != vhdl ]
+}
 
-[ "$self_test" = 1 ] || fail "live mode not implemented; use --self-test --fixture PATH"
-[ -n "$fixture" ] && [ -f "$fixture" ] || fail "fixture is required"
-[ -n "$mode" ] && [ -n "$low_memory" ] && [ -n "$backend" ] || fail "mode, low-memory, and backend are required"
-
-if [ "$mode" != aot ] || [ "$low_memory" != 1 ] \
-    || [ "${SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE:-}" != 1 ] \
-    || [ "${SIMPLE_BOOTSTRAP_STAGE4:-}" != 1 ] || [ "$backend" = vhdl ]; then
-    printf '%s\n' 'activation=disabled'
-    exit 0
-fi
-
-printf '%s\n' 'activation=enabled'
-awk '
+validate_fixture() {
+    awk '
 function bad(message) { print message > "/dev/stderr"; failed=1; exit 1 }
 $1 == "phase2:surface:file:released" {
     if (count < 10) {
@@ -69,3 +45,211 @@ $1 == "phase2:surface:file:released" {
 }
 END { if (!failed && count < 10) { print "release stream ended before marker 10" > "/dev/stderr"; exit 1 } }
 ' "$fixture"
+}
+
+self_test=0
+live=0
+fixture=
+mode=
+low_memory=
+backend=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --self-test) self_test=1; shift ;;
+        --live) live=1; shift ;;
+        --fixture|--mode|--low-memory|--backend)
+            [ "$#" -ge 2 ] || fail "missing value for $1"
+            case "$1" in
+                --fixture) fixture=$2 ;;
+                --mode) mode=$2 ;;
+                --low-memory) low_memory=$2 ;;
+                --backend) backend=$2 ;;
+            esac
+            shift 2
+            ;;
+        --)
+            shift
+            break
+            ;;
+        *) fail "unknown argument: $1" ;;
+    esac
+done
+
+[ "$self_test" -ne "$live" ] || fail "select exactly one of --self-test or --live"
+[ -n "$mode" ] && [ -n "$low_memory" ] && [ -n "$backend" ] ||
+    fail "mode, low-memory, and backend are required"
+
+if ! activation_enabled; then
+    printf '%s\n' 'activation=disabled'
+    exit 0
+fi
+printf '%s\n' 'activation=enabled'
+
+if [ "$self_test" = 1 ]; then
+    [ -n "$fixture" ] && [ -f "$fixture" ] || fail "fixture is required"
+    validate_fixture
+    exit $?
+fi
+
+[ "$#" -gt 0 ] || fail "--live requires a command after --"
+command -v setsid >/dev/null 2>&1 || fail "util-linux setsid is required"
+setsid --help 2>&1 | grep -q -- '--wait' || fail "util-linux setsid --wait is required"
+
+tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/stage4-release-slope.XXXXXX")
+stream_fifo=$tmp_dir/stream
+group_fifo=$tmp_dir/group
+mkfifo "$stream_fifo"
+mkfifo "$group_fifo"
+launcher_pid=
+group_id=
+stopper_pid=
+child_waited=0
+stop_started=0
+
+group_alive() {
+    [ -n "$group_id" ] && kill -0 "-$group_id" 2>/dev/null
+}
+
+start_bounded_stop() {
+    [ "$stop_started" = 0 ] || return 0
+    stop_started=1
+    kill -TERM "-$group_id" 2>/dev/null || true
+    (
+        attempts=0
+        while [ "$attempts" -lt 20 ]; do
+            if ! kill -0 "-$group_id" 2>/dev/null; then
+                exit 0
+            fi
+            sleep 0.1
+            attempts=$((attempts + 1))
+        done
+        kill -KILL "-$group_id" 2>/dev/null || true
+    ) &
+    stopper_pid=$!
+}
+
+cleanup() {
+    status=$?
+    trap - EXIT HUP INT TERM
+    if [ -n "$launcher_pid" ] && [ "$child_waited" = 0 ]; then
+        if group_alive; then
+            start_bounded_stop
+        fi
+        if [ -n "$stopper_pid" ]; then
+            wait "$stopper_pid" 2>/dev/null || true
+        fi
+        wait "$launcher_pid" 2>/dev/null || true
+        child_waited=1
+    fi
+    rm -rf "$tmp_dir"
+    exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+setsid --wait -- sh -c '
+    group_fifo=$1
+    shift
+    printf "%s\n" "$$" >"$group_fifo"
+    "$@"
+    command_status=$?
+    kill -TERM "-$$" 2>/dev/null || true
+    exit "$command_status"
+' sh "$group_fifo" "$@" >"$stream_fifo" 2>&1 &
+launcher_pid=$!
+# Open the stream reader first: otherwise the child blocks opening the FIFO
+# writer before it can publish the PGID handshake.
+exec 3<"$stream_fifo"
+IFS= read -r group_id <"$group_fifo"
+case "$group_id" in
+    ''|*[!0-9]*) fail "setsid did not report a valid process group" ;;
+esac
+checker_pgid=$(ps -o pgid= -p $$ | tr -d ' ')
+case "$checker_pgid" in
+    ''|*[!0-9]*) fail "could not determine checker process group" ;;
+esac
+[ "$group_id" != "$checker_pgid" ] ||
+    fail "setsid child process group must differ from checker process group"
+
+marker_count=0
+first_heap=0
+seen_paths='|'
+stream_failed=0
+stream_message=
+
+while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+        'phase2:surface:file:released '*)
+            if [ "$marker_count" -ge 10 ]; then
+                set -- $line
+                raced_seq=${3#seq=}
+                raced_path=${2#path=}
+                printf 'raced-marker-after-stop seq=%s path=%s\n' "$raced_seq" "$raced_path"
+                continue
+            fi
+            set -- $line
+            if [ "$#" -ne 4 ] || [ "$1" != "phase2:surface:file:released" ]; then
+                stream_failed=1
+                stream_message="release markers must be ordered"
+                start_bounded_stop
+                break
+            fi
+            case "$2" in path=?*) marker_path=${2#path=} ;; *)
+                stream_failed=1; stream_message="release markers must be ordered"; start_bounded_stop; break ;;
+            esac
+            case "$3" in seq=[0-9]*) marker_seq=${3#seq=} ;; *)
+                stream_failed=1; stream_message="release markers must be ordered"; start_bounded_stop; break ;;
+            esac
+            case "$4" in heap_registry=[0-9]*) marker_heap=${4#heap_registry=} ;; *)
+                stream_failed=1; stream_message="invalid heap registry count"; start_bounded_stop; break ;;
+            esac
+            case "$marker_seq:$marker_heap" in *[!0-9:]*)
+                stream_failed=1; stream_message="invalid heap registry count"; start_bounded_stop; break ;;
+            esac
+            case "$seen_paths" in *"|$marker_path|"*)
+                stream_failed=1; stream_message="release marker path must be unique"; start_bounded_stop; break ;;
+            esac
+            expected_seq=$((marker_count + 1))
+            if [ "$marker_seq" -ne "$expected_seq" ]; then
+                stream_failed=1
+                stream_message="release markers must be ordered"
+                start_bounded_stop
+                break
+            fi
+            seen_paths=$seen_paths$marker_path'|'
+            marker_count=$expected_seq
+            if [ "$marker_count" -eq 1 ]; then
+                first_heap=$marker_heap
+            fi
+            if [ "$marker_count" -eq 10 ]; then
+                growth=$((marker_heap - first_heap))
+                average=$((growth / 9))
+                printf 'average_growth=%s\n' "$average"
+                if [ "$growth" -gt 225000 ]; then
+                    stream_failed=1
+                    stream_message="average heap registry growth exceeds 25000"
+                fi
+                printf '%s\n' 'termination=requested seq=10'
+                start_bounded_stop
+            fi
+            ;;
+        *) printf '%s\n' "$line" ;;
+    esac
+done <&3
+exec 3<&-
+
+if [ -n "$stopper_pid" ]; then
+    wait "$stopper_pid" 2>/dev/null || true
+fi
+wait "$launcher_pid" 2>/dev/null || true
+child_waited=1
+
+if [ "$stream_failed" = 1 ]; then
+    fail "$stream_message"
+fi
+if [ "$marker_count" -lt 10 ]; then
+    fail "release stream ended before marker 10"
+fi
+exit 0

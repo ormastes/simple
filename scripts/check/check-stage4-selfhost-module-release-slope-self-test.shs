@@ -1,0 +1,75 @@
+#!/bin/sh
+set -eu
+
+checker=${CHECKER:-scripts/check/check-stage4-selfhost-module-release-slope.shs}
+
+fail() {
+    printf '%s\n' "$*" >&2
+    exit 1
+}
+
+if [ "${1:-}" = --producer ]; then
+    pid_file=$2
+    mode=$3
+    sleep 300 &
+    grandchild=$!
+    printf '%s %s\n' "$$" "$grandchild" >"$pid_file"
+    limit=10
+    [ "$mode" != early ] || limit=9
+    i=1
+    while [ "$i" -le "$limit" ]; do
+        if [ "$mode" = malformed ] && [ "$i" -eq 2 ]; then
+            printf '%s\n' "phase2:surface:file:released path=module_2.spl seq=2 heap_registry=bad"
+        else
+            heap=$((100000 + (i - 1) * 1000))
+            printf 'phase2:surface:file:released path=module_%s.spl seq=%s heap_registry=%s\n' "$i" "$i" "$heap"
+        fi
+        i=$((i + 1))
+    done
+    [ "$mode" != early ] || exit 0
+    wait "$grandchild"
+    exit 0
+fi
+
+tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/stage4-release-slope-self-test.XXXXXX")
+trap 'rm -rf "$tmp_dir"' EXIT HUP INT TERM
+
+run_live() {
+    mode=$1
+    pid_file=$tmp_dir/$mode.pids
+    timeout -k 2s 15s env SIMPLE_BOOTSTRAP_STAGE4=1 SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1 \
+        sh "$checker" --live --mode aot --low-memory 1 --backend llvm -- \
+        sh "$0" --producer "$pid_file" "$mode"
+}
+
+command -v timeout >/dev/null 2>&1 || fail "timeout is required for checker self-test"
+run_live normal >"$tmp_dir/normal.out" 2>&1 ||
+    fail "normal live producer failed"
+grep -q 'termination=requested seq=10' "$tmp_dir/normal.out" ||
+    fail "normal live producer did not request termination"
+
+set -- $(cat "$tmp_dir/normal.pids")
+producer_pid=$1
+grandchild_pid=$2
+attempt=0
+while [ "$attempt" -lt 20 ] &&
+        { kill -0 "$producer_pid" 2>/dev/null || kill -0 "$grandchild_pid" 2>/dev/null; }; do
+    sleep 0.1
+    attempt=$((attempt + 1))
+done
+kill -0 "$producer_pid" 2>/dev/null && fail "producer survived process-group cleanup"
+kill -0 "$grandchild_pid" 2>/dev/null && fail "grandchild survived process-group cleanup"
+
+if run_live early >"$tmp_dir/early.out" 2>&1; then
+    fail "early producer unexpectedly passed"
+fi
+grep -q 'release stream ended before marker 10' "$tmp_dir/early.out" ||
+    fail "early producer failure was not diagnosed"
+
+if run_live malformed >"$tmp_dir/malformed.out" 2>&1; then
+    fail "malformed producer unexpectedly passed"
+fi
+grep -q 'invalid heap registry count' "$tmp_dir/malformed.out" ||
+    fail "malformed producer failure was not diagnosed"
+
+printf '%s\n' 'stage4 release slope checker self-test: PASS'

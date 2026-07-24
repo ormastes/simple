@@ -23,6 +23,7 @@ use compiler.mir.mir.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock, MirTypeDef, MirBody}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.core.parser.{par_had_error_get}
+use compiler.core.ast.{ast_reset}
 use compiler.frontend.parser_types.*
 use compiler.backend.backend.backend_api.{Backend}
 use compiler.backend.backend.interpreter.{InterpreterBackendImpl}
@@ -41,7 +42,10 @@ use compiler.semantics.visibility_integration.{check_module_visibility}
 use compiler.semantics.value_struct_layout.{validate_value_struct_layouts}
 use driver_types.*
 use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module, LoweringError}
-use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
+use compiler.hir.hir_lowering.module_surface.{
+    ModuleSurface, ModuleSurfaceBuilder, ModuleSurfacesByName,
+    module_surface_source_matches, module_surfaces_from_modules
+}
 use compiler.hir.hir_types.{SymbolTable, SymbolId}
 use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_function_at, bootstrap_mir_function_name_at, bootstrap_lower_hir_globals_to_mir_module}
 use compiler.driver.driver_aot_output.*
@@ -59,7 +63,10 @@ use compiler.driver.driver_pipeline.*
 use compiler.driver.cache.cache_types.{CacheCheckResult, CACHE_FRESH}
 use compiler.common.driver_core_types.{CompileResult, driver_core_compile_options_default, driver_output_format_is_smf, driver_output_format_is_both, driver_output_format_is_self_contained}
 use std.nogc_sync_mut.io.process_ops.{eprint}
-use compiler.driver.driver_log_helpers.{log_debug, log_trace, log_info, log_warn, log_error, log_phase}
+use compiler.driver.driver_log_helpers.{
+    log_debug, log_trace, log_info, log_warn, log_error, log_phase,
+    log_module_surface_released
+}
 use compiler.driver.driver_bootstrap.{
     bootstrap_native_opt_level, bootstrap_llvm_opt_level,
     bootstrap_compile_to_native_local, bootstrap_compile_context_to_native_local,
@@ -174,11 +181,13 @@ fn native_pre_parse_cache_requested() -> bool:
     (rt_env_get("SIMPLE_NATIVE_BUILD_SKIP_PRE_PARSE") ?? "") == "1"
 
 fn driver_streaming_surface_enabled(ctx: CompileContext) -> bool:
-    ctx.options.mode == CompileMode.Aot and
+    (
+        ctx.options.mode == CompileMode.Aot and
         ctx.options.low_memory and
         (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1" and
         (rt_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") == "1" and
         ctx.options.backend != "vhdl"
+    )
 
 fn native_pre_parse_is_dynload_path(ctx: CompileContext) -> bool:
     driver_output_format_is_both(ctx.options.output_format) or (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
@@ -632,7 +641,51 @@ pub class CompilerDriver:
     # Phase 2: Parse
     # --------------------------------------------------------------------------
 
+    me add_streaming_module_surface(
+        builder: ModuleSurfaceBuilder,
+        source: SourceFile,
+        source_index: i64
+    ) -> Result<ModuleSurfaceBuilder, text>:
+        val module = parse_full_frontend(source.content, source.path, source.module_name, self.ctx.logger)
+        if par_had_error_get():
+            return Err("parse error in {source.path} (see [parser_error] output above)")
+        val add_result = builder.add_parsed(module, source, source_index)
+        if add_result.is_err():
+            return Err(add_result.unwrap_err())
+        Ok(builder)
+
+    me parse_all_streaming_surfaces_impl() -> (CompileContext, bool):
+        self.ctx.modules = {}
+        self.ctx.module_surfaces = nil
+        var builder = ModuleSurfaceBuilder.new()
+        var source_index = 0
+        var release_seq: i64 = 0
+        while source_index < self.ctx.sources.len():
+            val source = self.ctx.sources[source_index]
+            if builder.has_path(source.path):
+                val alias_result = builder.add_alias(source)
+                if alias_result.is_err():
+                    self.ctx.add_error("Module surface extraction error: {alias_result.unwrap_err()}")
+                    return (self.ctx, false)
+            else:
+                val parsed_result = self.add_streaming_module_surface(builder, source, source_index)
+                ast_reset()
+                if parsed_result.is_err():
+                    self.ctx.add_error("Module surface extraction error: {parsed_result.unwrap_err()}")
+                    return (self.ctx, false)
+                builder = parsed_result.unwrap()
+                release_seq = release_seq + 1
+                log_module_surface_released(source.path, release_seq)
+            source_index = source_index + 1
+
+        var streaming_ctx = self.ctx
+        streaming_ctx.module_surfaces = Some(builder.finish())
+        streaming_ctx.modules = {}
+        (streaming_ctx, streaming_ctx.errors.len() == 0)
+
     me parse_all_impl() -> (CompileContext, bool):
+        if driver_streaming_surface_enabled(self.ctx):
+            return self.parse_all_streaming_surfaces_impl()
         val log = self.ctx.logger
         val sources = self.ctx.sources
         log_debug("parsing sources")
@@ -768,7 +821,97 @@ pub class CompilerDriver:
     # phases in a single loop, avoiding redundant iterations and improving
     # performance on large codebases.
 
+    me lower_streaming_surface_source(
+        lowering: HirLowering,
+        source: SourceFile
+    ) -> Result<HirModule, text>:
+        val module = parse_full_frontend(source.content, source.path, source.module_name, self.ctx.logger)
+        if par_had_error_get():
+            return Err("parse error in {source.path} (see [parser_error] output above)")
+        Ok(lowering.lower_parser_module_unstub(module))
+
+    me lower_and_check_streaming_surfaces_impl() -> (CompileContext, bool):
+        if not self.ctx.module_surfaces.?:
+            self.ctx.add_error("Streaming module surfaces missing after phase 2")
+            return (self.ctx, false)
+        val surfaces = self.ctx.module_surfaces.unwrap()
+        var lowering: HirLowering = hirlowering_for_module("", surfaces)
+        var lowered_by_surface: Dict<i64, HirModule> = {}
+        var phase_hir_modules: Dict<text, HirModule> = self.ctx.hir_modules
+        var phase_entry_hir: HirModule? = self.ctx.bootstrap_entry_hir
+        var source_index = 0
+
+        while source_index < self.ctx.sources.len():
+            val source = self.ctx.sources[source_index]
+            val surface_index_opt: i64? = surfaces.index_by_name.get(source.module_name)
+            if surface_index_opt == nil:
+                self.ctx.add_error("Missing module surface alias for {source.module_name}")
+                return (self.ctx, false)
+            val surface_index = surface_index_opt ?? -1
+            val is_requested_bootstrap_entry = (
+                _driver_is_bootstrap_entry_source(source.path, source.module_name) or
+                source.module_name == bootstrap_entry_module_name(self.ctx)
+            )
+
+            if lowered_by_surface.contains_key(surface_index):
+                val alias_hir = lowered_by_surface[surface_index]
+                phase_hir_modules[source.module_name] = alias_hir
+                if is_requested_bootstrap_entry:
+                    phase_entry_hir = Some(alias_hir)
+                source_index = source_index + 1
+                continue
+
+            if surface_index < 0 or surface_index >= surfaces.surfaces.len():
+                self.ctx.add_error("Invalid module surface index for {source.module_name}: {surface_index}")
+                return (self.ctx, false)
+            val surface: ModuleSurface = surfaces.surfaces[surface_index]
+            if not module_surface_source_matches(surface, source, source_index):
+                self.ctx.add_error("Module surface/source fingerprint mismatch for {source.path}")
+                return (self.ctx, false)
+
+            lowering.begin_module(source.path)
+            log_phase("phase3:hir:file:start {source.path} module={source.module_name}")
+            val lower_result = self.lower_streaming_surface_source(lowering, source)
+            ast_reset()
+            if lower_result.is_err():
+                self.ctx.add_error("Streaming HIR lowering error: {lower_result.unwrap_err()}")
+                return (self.ctx, false)
+            val hir_module = lower_result.unwrap()
+            _driver_collect_hir_errors(self.ctx, source.module_name, lowering.errors)
+            if self.ctx.errors.len() > 0:
+                return (self.ctx, false)
+
+            lowered_by_surface[surface_index] = hir_module
+            phase_hir_modules[source.module_name] = hir_module
+            if is_requested_bootstrap_entry:
+                phase_entry_hir = Some(hir_module)
+            log_phase("phase3:hir:file:done {source.path} module={source.module_name} funcs={hir_module.functions.len()}")
+            source_index = source_index + 1
+
+        var phase_ctx: CompileContext = self.ctx
+        phase_ctx.hir_modules = phase_hir_modules
+        phase_ctx.bootstrap_entry_hir = phase_entry_hir
+        _driver_validate_value_struct_layouts(phase_ctx)
+        if phase_ctx.errors.len() > 0:
+            return (phase_ctx, false)
+
+        if (rt_env_get("SIMPLE_TYPECHECK_WARN") ?? "") == "1":
+            val tc_warnings = run_typecheck_warn_pass(phase_hir_modules)
+            log_warn("typecheck warn-only pass: {tc_warnings.len()} diagnostic(s)")
+            var warning_index = 0
+            while warning_index < tc_warnings.len():
+                log_warn(tc_warnings[warning_index])
+                warning_index = warning_index + 1
+
+        ast_reset()
+        phase_ctx.modules = {}
+        phase_ctx.evict_sources()
+        phase_ctx.module_surfaces = nil
+        (phase_ctx, true)
+
     me lower_and_check_impl() -> (CompileContext, bool):
+        if driver_streaming_surface_enabled(self.ctx):
+            return self.lower_and_check_streaming_surfaces_impl()
         val log = self.ctx.logger
 
         # Build module_name -> source_path map so each module gets the right

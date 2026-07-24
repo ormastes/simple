@@ -108,6 +108,51 @@ struct ModuleSurfacesByName:
     surfaces: [ModuleSurface]
     index_by_name: Dict<text, i64>
 
+struct ModuleSurfaceBuilder:
+    surfaces: [ModuleSurface]
+    index_by_name: Dict<text, i64>
+    index_by_path: Dict<text, i64>
+
+impl ModuleSurfaceBuilder:
+    static fn new() -> ModuleSurfaceBuilder:
+        ModuleSurfaceBuilder(surfaces: [], index_by_name: {}, index_by_path: {})
+
+    me has_path(path: text) -> bool:
+        self.index_by_path.get(module_surface_canonical_path(path)) != nil
+
+    me add_parsed(module: Module, source: SourceFile, source_index: i64) -> Result<(), text>:
+        val canonical_path = module_surface_canonical_path(source.path)
+        if self.index_by_path.get(canonical_path) != nil:
+            return Err("module surface already exists for physical source: {canonical_path}")
+        val surface_index = self.surfaces.len()
+        val name_result = module_surfaces_add_name(self.index_by_name, source.module_name, surface_index)
+        if name_result.is_err():
+            return Err(name_result.unwrap_err())
+        self.index_by_name = name_result.unwrap()
+        self.surfaces.push(module_surface_from_module(module, source, source_index))
+        self.index_by_path[canonical_path] = surface_index
+        Ok(())
+
+    me add_alias(source: SourceFile) -> Result<(), text>:
+        val canonical_path = module_surface_canonical_path(source.path)
+        val existing: i64? = self.index_by_path.get(canonical_path)
+        if existing == nil:
+            return Err("missing physical module surface for alias: {canonical_path}")
+        val surface_index = existing ?? -1
+        val surface = self.surfaces[surface_index]
+        if (surface.canonical_path != canonical_path or
+            surface.content_length != source.content.len() or
+            surface.content_hash != rt_hash_text(source.content)):
+            return Err("conflicting physical source: {canonical_path}")
+        val name_result = module_surfaces_add_name(self.index_by_name, source.module_name, surface_index)
+        if name_result.is_err():
+            return Err(name_result.unwrap_err())
+        self.index_by_name = name_result.unwrap()
+        Ok(())
+
+    me finish() -> ModuleSurfacesByName:
+        ModuleSurfacesByName(surfaces: self.surfaces, index_by_name: self.index_by_name)
+
 fn module_surface_callable_from_function(function_: Function) -> ModuleSurfaceCallable:
     var params: [ModuleSurfaceParam] = []
     for param in function_.params:
@@ -277,40 +322,42 @@ fn module_surface_declaration_matches(surface: ModuleSurface, module: Module) ->
     if surface.traits.len() != module.traits.len(): return false
     if surface.impls.len() != module.impls.len(): return false
     if surface.constants.len() != module.constants.len(): return false
-    return true
+    for name in module.functions.keys():
+        if surface.callables.get(name) == nil: return false
+    for name in module.classes.keys():
+        if surface.composites.get(name) == nil: return false
+    for name in module.actors.keys():
+        if surface.composites.get(name) == nil: return false
+    for name in module.structs.keys():
+        if surface.composites.get(name) == nil: return false
+    for name in module.enums.keys():
+        if surface.enums.get(name) == nil: return false
+    for name in module.traits.keys():
+        if surface.traits.get(name) == nil: return false
+    for name in module.constants.keys():
+        if surface.constants.get(name) == nil: return false
+    true
 
 fn module_surfaces_from_modules(modules: Dict<text, Module>, sources: [SourceFile]) -> Result<ModuleSurfacesByName, text>:
-    var surfaces: [ModuleSurface] = []
-    var index_by_name: Dict<text, i64> = {}
-    var paths: Dict<text, i64> = {}
+    var builder = ModuleSurfaceBuilder.new()
     var source_index = 0
     while source_index < sources.len():
         val source = sources[source_index]
         val module: Module? = modules.get(source.module_name)
         if module == nil:
             return Err("missing parsed module for source: {source.module_name}")
-        val physical_path = module_surface_canonical_path(source.path)
-        val existing: i64? = paths.get(physical_path)
-        if existing != nil:
-            val existing_index = existing ?? -1
-            val existing_surface = surfaces[existing_index]
-            if (existing_surface.canonical_path != physical_path or
-                existing_surface.content_length != source.content.len() or
-                existing_surface.content_hash != rt_hash_text(source.content) or
-                not module_surface_declaration_matches(existing_surface, module ?? panic("unreachable"))):
-                return Err("conflicting physical source: {physical_path}")
-            val alias_result = module_surfaces_add_name(index_by_name, source.module_name, existing_index)
+        if builder.has_path(source.path):
+            val canonical_path = module_surface_canonical_path(source.path)
+            val surface_index = builder.index_by_path[canonical_path]
+            val surface = builder.surfaces[surface_index]
+            if not module_surface_declaration_matches(surface, module ?? panic("unreachable")):
+                return Err("conflicting declaration metadata for physical source: {canonical_path}")
+            val alias_result = builder.add_alias(source)
             if alias_result.is_err():
                 return Err(alias_result.unwrap_err())
-            index_by_name = alias_result.unwrap()
-        if existing == nil:
-            val surface_index = surfaces.len()
-            val surface = module_surface_from_module(module ?? panic("unreachable"), source, source_index)
-            surfaces.push(surface)
-            paths[physical_path] = surface_index
-            val source_result = module_surfaces_add_name(index_by_name, source.module_name, surface_index)
-            if source_result.is_err():
-                return Err(source_result.unwrap_err())
-            index_by_name = source_result.unwrap()
+        else:
+            val parsed_result = builder.add_parsed(module ?? panic("unreachable"), source, source_index)
+            if parsed_result.is_err():
+                return Err(parsed_result.unwrap_err())
         source_index = source_index + 1
-    return Ok(ModuleSurfacesByName(surfaces: surfaces, index_by_name: index_by_name))
+    Ok(builder.finish())

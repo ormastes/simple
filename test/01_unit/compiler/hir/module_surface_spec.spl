@@ -3,7 +3,7 @@ use compiler.common.driver_core_types.{SourceFile}
 use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
 use compiler.frontend.parser_types.{Module}
 use compiler.core.parser.{parser_has_errors}
-use compiler.hir.hir_lowering.module_surface.{module_surface_from_module, module_surfaces_from_modules, module_surface_source_matches, module_surface_trait_origin_key}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfaceBuilder, module_surface_from_module, module_surfaces_from_modules, module_surface_source_matches, module_surface_trait_origin_key}
 
 fn source_file(path: text, content: text, module_name: text) -> SourceFile:
     SourceFile(path: path, content: content, module_name: module_name)
@@ -104,6 +104,62 @@ describe "ModuleSurface extraction":
         val surfaces = result.unwrap()
         expect(surfaces.surfaces.len()).to_equal(1)
         expect(surfaces.index_by_name["provider.one"]).to_equal(surfaces.index_by_name["provider.two"])
+
+    it "adds physical sources incrementally in insertion order and aliases by path":
+        val first_content = "fn first() -> i64:\n    1\n"
+        val first_module = parse_and_build_module(first_content, "incremental_first.spl")
+        expect(parser_has_errors()).to_equal(false)
+        val second_content = "fn second() -> i64:\n    2\n"
+        val second_module = parse_and_build_module(second_content, "incremental_second.spl")
+        expect(parser_has_errors()).to_equal(false)
+        var builder = ModuleSurfaceBuilder.new()
+        val first_source = source_file("src/incremental/first.spl", first_content, "incremental.first")
+        val second_source = source_file("src/incremental/second.spl", second_content, "incremental.second")
+        expect(builder.add_parsed(first_module, first_source, 7).is_ok()).to_equal(true)
+        expect(builder.add_parsed(second_module, second_source, 9).is_ok()).to_equal(true)
+        val alias = source_file("src/incremental/./first.spl", first_content, "incremental.first_alias")
+        expect(builder.add_alias(alias).is_ok()).to_equal(true)
+        val surfaces = builder.finish()
+        expect(surfaces.surfaces.len()).to_equal(2)
+        expect(surfaces.surfaces[0].module_name).to_equal("incremental.first")
+        expect(surfaces.surfaces[0].source_index).to_equal(7)
+        expect(surfaces.surfaces[1].module_name).to_equal("incremental.second")
+        expect(surfaces.surfaces[1].source_index).to_equal(9)
+        expect(surfaces.index_by_name["incremental.first"]).to_equal(surfaces.index_by_name["incremental.first_alias"])
+
+    it "rejects an incremental alias with conflicting fingerprint metadata":
+        val content = "fn provider() -> i64:\n    1\n"
+        val module = parse_and_build_module(content, "incremental_conflict.spl")
+        expect(parser_has_errors()).to_equal(false)
+        var builder = ModuleSurfaceBuilder.new()
+        val source = source_file("src/incremental/conflict.spl", content, "incremental.conflict")
+        expect(builder.add_parsed(module, source, 0).is_ok()).to_equal(true)
+        val conflict = source_file("src/incremental/./conflict.spl", "fn provider() -> i64:\n    2\n", "incremental.conflict_alias")
+        expect(builder.add_alias(conflict).is_err()).to_equal(true)
+
+    it "rejects a batch alias with structurally different parsed metadata":
+        val content = "fn provider() -> i64:\n    1\n"
+        val first = parse_and_build_module(content, "batch_structure_first.spl")
+        expect(parser_has_errors()).to_equal(false)
+        val different = parse_and_build_module("fn other() -> i64:\n    1\n", "batch_structure_second.spl")
+        expect(parser_has_errors()).to_equal(false)
+        val modules: Dict<text, Module> = {"batch.first": first, "batch.alias": different}
+        val sources = [
+            source_file("src/batch/shape.spl", content, "batch.first"),
+            source_file("src/batch/./shape.spl", content, "batch.alias")
+        ]
+        expect(module_surfaces_from_modules(modules, sources).is_err()).to_equal(true)
+
+    it "rejects a batch alias without its parsed module":
+        val content = "fn provider() -> i64:\n    1\n"
+        val first = parse_and_build_module(content, "batch_missing_first.spl")
+        expect(parser_has_errors()).to_equal(false)
+        val modules: Dict<text, Module> = {"batch.first": first}
+        val sources = [
+            source_file("src/batch/missing.spl", content, "batch.first"),
+            source_file("src/batch/./missing.spl", content, "batch.alias_missing")
+        ]
+        expect(module_surfaces_from_modules(modules, sources).is_err()).to_equal(true)
 
     it "uses a canonical trait origin key idempotently":
         val first = module_surface_trait_origin_key("sample.same", "Same")
