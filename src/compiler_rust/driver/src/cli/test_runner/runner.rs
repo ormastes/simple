@@ -43,9 +43,9 @@ use super::test_db_update::{update_test_database, update_rust_test_database};
 use super::static_registry::StaticTestRegistry;
 use super::rust_tests;
 
-fn generate_spipe_docs_for_results(result: &TestRunResult, quiet: bool) {
-    if !result.success() {
-        return;
+pub fn generate_spipe_docs_for_results(result: &TestRunResult, format: OutputFormat, quiet: bool) -> i32 {
+    if !matches!(format, OutputFormat::Doc) || !result.success() {
+        return 0;
     }
 
     let simple_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("bin/simple"));
@@ -67,7 +67,7 @@ fn generate_spipe_docs_for_results(result: &TestRunResult, quiet: bool) {
     }
 
     if spec_paths.is_empty() {
-        return;
+        return 0;
     }
 
     let mut command = Command::new(&simple_bin);
@@ -87,21 +87,20 @@ fn generate_spipe_docs_for_results(result: &TestRunResult, quiet: bool) {
                     spec_paths.len()
                 );
             }
+            0
         }
         Ok(output) => {
-            if !quiet {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                eprintln!(
-                    "Warning: spipe-docgen failed for {} spec file(s): {}",
-                    spec_paths.len(),
-                    stderr.trim()
-                );
-            }
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            eprintln!(
+                "error: spipe-docgen failed for {} spec file(s): {}",
+                spec_paths.len(),
+                stderr.trim()
+            );
+            3
         }
         Err(e) => {
-            if !quiet {
-                eprintln!("Warning: failed to launch spipe-docgen: {}", e);
-            }
+            eprintln!("error: failed to launch spipe-docgen: {}", e);
+            3
         }
     }
 }
@@ -421,7 +420,6 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
 
     // Post-processing (skip in list mode)
     if !list_mode {
-        generate_spipe_docs_for_results(&result, quiet);
         generate_diagrams_if_enabled(&options, &result, quiet);
         finalize_profiling(&options, quiet);
         save_coverage_data(quiet);

@@ -78,9 +78,9 @@ use app.test_daemon.session_types.{TestSessionMeta, meta_needs_session, meta_to_
 # Runner
 # =========================================================================
 
-fn generate_spipe_docs_for_results(results: [TestFileResult], options: TestOptions):
+pub fn generate_spipe_docs_for_results(results: [TestFileResult], options: TestOptions, binary: text = "bin/simple") -> i64:
     if options.format != "doc" or options.list or options.list_ignored:
-        return
+        return 0
 
     var docgen_args: [text] = ["spipe-docgen"]
     for result in results:
@@ -93,20 +93,22 @@ fn generate_spipe_docs_for_results(results: [TestFileResult], options: TestOptio
         docgen_args.push(result.path)
 
     if docgen_args.len() <= 1:
-        return
+        return 0
 
     docgen_args.push("--output")
     docgen_args.push("doc/06_spec")
     docgen_args.push("--no-index")
-    val (stdout, stderr, code) = process_run_bounded("bin/simple", docgen_args, 600000, TEST_OUTPUT_CAPTURE_BYTES)
+    val (stdout, stderr, code) = process_run_bounded(binary, docgen_args, 600000, TEST_OUTPUT_CAPTURE_BYTES)
     val spec_count = docgen_args.len() - 4
     if code == 0:
         if options.verbose:
             print "Generated SPipe manual docs for {spec_count} spec file(s)"
     else:
-        print "Warning: spipe-docgen failed for {spec_count} spec file(s)"
+        print "ERROR: spipe-docgen failed for {spec_count} spec file(s)"
         if options.verbose:
             print stderr
+        return 3
+    0
 
 fn run_tests(options: TestOptions) -> TestRunResult:
     # CI mode override (config already loaded by main(), use options.ci_mode)
@@ -375,8 +377,6 @@ fn run_tests(options: TestOptions) -> TestRunResult:
     if total_cached > 0:
         print "Skipped {total_cached} unchanged test(s) (cached)"
 
-    generate_spipe_docs_for_results(results, updated_options)
-
     # MEMORY DEBUG: checkpoint cleanup disabled (GROUP 6)
     # if options.resume and checkpoint_exists():
     #     checkpoint_delete()
@@ -577,8 +577,6 @@ fn run_tests_parallel_mode(
 
     if total_cached > 0:
         print "Skipped {total_cached} unchanged test(s) (cached)"
-
-    generate_spipe_docs_for_results(all_results, options)
 
     TestRunResult(
         files: all_results,
@@ -854,6 +852,8 @@ fn run_test_cli() -> i64:
 
         val result_files = spec_result.files
         report_free_mem("AFTER_RUN_{result_files.len()}_files")
+        if generate_spipe_docs_for_results(result_files, options) != 0:
+            return 3
         if not json_worker:
             print_summary(spec_result, options.format)
 

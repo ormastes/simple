@@ -40,7 +40,7 @@ mod result_cache;
 // Re-export public API for backward compatibility
 pub use types::{TestLevel, TestExecutionMode, OutputFormat, TestOptions, TestFileResult, TestRunResult};
 pub use execution::{parse_test_output, run_test_file};
-pub use runner::run_tests;
+pub use runner::{generate_spipe_docs_for_results, run_tests};
 pub use args::parse_test_args;
 pub use watch::watch_tests;
 pub use static_registry::StaticTestRegistry;

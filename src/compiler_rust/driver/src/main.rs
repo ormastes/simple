@@ -1522,6 +1522,9 @@ fn handle_test_rust(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
 
         let format = options.format;
         let result = test_runner::run_tests(options);
+        if test_runner::generate_spipe_docs_for_results(&result, format, false) != 0 {
+            return 3;
+        }
         if !is_run_management {
             test_runner::print_summary(&result, format);
         }
