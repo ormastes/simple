@@ -171,12 +171,23 @@ sh scripts/os/build_rv32_linux_assets.shs --all
 sh scripts/os/build_rv64_linux_assets.shs --all
 ```
 
+Asset compilation defaults to two jobs; set `RISCV_ASSET_JOBS` to another
+positive value when host capacity permits. If Buildroot completed the rootfs
+and toolchain but only manifest finalization failed, recover without rebuilding:
+
+```bash
+sh scripts/os/build_riscv_buildroot.shs rv32 --finalize-only
+sh scripts/os/build_riscv_buildroot.shs rv64 --finalize-only
+```
+
 Buildroot is fixed at commit
 `e4a5ab3b319753f41e2b5cf22e90b6b0304ca225`; OpenSBI v1.4, Linux v6.6,
 and BusyBox 1.36.1 are independently commit/source-hash pinned. The two
 Buildroot outputs reuse one download cache and retain per-architecture
 incremental stamp/output state, while their manifests keep distinct RV32 ILP32
-and RV64 LP64 identities.
+and RV64 LP64 identities. Linux's boot header requires RV32 at
+`0x80400000` (4 MiB RAM offset) and RV64 at `0x80200000` (2 MiB); the K26
+DDR aliases are respectively `0x40400000` and `0x40200000`.
 
 After normal PS firmware initializes and reserves
 `0x40000000..0x4fffffff`, load each image before programming its PL product:

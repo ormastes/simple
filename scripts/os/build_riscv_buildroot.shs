@@ -4,7 +4,12 @@ set -eu
 
 case "${1-}" in
   rv32|rv64) arch="$1" ;;
-  *) echo "usage: $0 rv32|rv64" >&2; exit 2 ;;
+  *) echo "usage: $0 rv32|rv64 [--finalize-only]" >&2; exit 2 ;;
+esac
+case "${2-}" in
+  '') finalize_only=0 ;;
+  --finalize-only) finalize_only=1 ;;
+  *) echo "usage: $0 rv32|rv64 [--finalize-only]" >&2; exit 2 ;;
 esac
 
 pin=e4a5ab3b319753f41e2b5cf22e90b6b0304ca225
@@ -48,24 +53,32 @@ git -C "$source" diff --quiet && git -C "$source" diff --cached --quiet || {
     echo "Buildroot package source overrides are forbidden" >&2
     exit 1
   }
-unset MAKEFLAGS MFLAGS MAKEOVERRIDES LD_LIBRARY_PATH
+unset MAKEFLAGS GNUMAKEFLAGS MFLAGS MAKEOVERRIDES LD_LIBRARY_PATH
 
 export BR2_DL_DIR="$base/dl"
-make -j"$jobs" -C "$source" O="$output" BR2_EXTERNAL="$external" "$defconfig"
-make -j"$jobs" -C "$output" olddefconfig
+if [ "$finalize_only" -eq 0 ]; then
+  make -j"$jobs" -C "$source" O="$output" BR2_EXTERNAL="$external" "$defconfig"
+  make -j"$jobs" -C "$output" olddefconfig
+fi
+[ -s "$output/.config" ] || {
+  echo "missing Buildroot configuration" >&2
+  exit 1
+}
 [ "$(grep '^BR2_PACKAGE_OVERRIDE_FILE=' "$output/.config")" = \
   'BR2_PACKAGE_OVERRIDE_FILE="$(CONFIG_DIR)/local.mk"' ] &&
   [ ! -e "$output/local.mk" ] || {
     echo "Buildroot local/package override file is forbidden" >&2
     exit 1
   }
-make -j"$jobs" -C "$output"
+if [ "$finalize_only" -eq 0 ]; then
+  make -j"$jobs" -C "$output"
+fi
 
 [ -s "$output/images/rootfs.cpio.gz" ] || {
   echo "missing rootfs.cpio.gz" >&2
   exit 1
 }
-cross_gcc=$(find "$output/host/bin" -type f -name "riscv*linux*-gcc" -print -quit)
+cross_gcc=$(find "$output/host/bin" \( -type f -o -type l \) -name "riscv*linux*-gcc" -print -quit)
 [ -n "$cross_gcc" ] || {
   echo "missing Buildroot RISC-V cross compiler" >&2
   exit 1

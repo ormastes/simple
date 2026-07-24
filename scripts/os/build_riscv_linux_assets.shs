@@ -10,16 +10,20 @@ case "$RISCV_ARCH" in
   rv32)
     ARCH_BITS=32; ISA=rv32imac_zicsr_zifencei; ABI=ilp32
     MARKER=SIMPLE-RV32-INIT
+    KERNEL_LOAD_ADDR=0x80400000
+    DTS_ARCH_DIR=riscv32
     SYSTEM_CROSS=riscv32-linux-gnu-; KERNEL_DEFCONFIG_DEFAULT=rv32_defconfig ;;
   rv64)
     ARCH_BITS=64; ISA=rv64imac_zicsr_zifencei; ABI=lp64
     MARKER=SIMPLE-RV64-INIT
+    KERNEL_LOAD_ADDR=0x80200000
+    DTS_ARCH_DIR=riscv64
     SYSTEM_CROSS=riscv64-linux-gnu-; KERNEL_DEFCONFIG_DEFAULT=defconfig ;;
   *) echo "ERROR: RISCV_ARCH must be rv32 or rv64" >&2; exit 2 ;;
 esac
 
 OUT="${OUT:-$REPO_ROOT/build/os/${RISCV_ARCH}_soc}"
-DTS="${DTS:-$REPO_ROOT/examples/09_embedded/simple_os/arch/$RISCV_ARCH/soc_virt.dts}"
+DTS="${DTS:-$REPO_ROOT/examples/09_embedded/simple_os/arch/$DTS_ARCH_DIR/soc_virt.dts}"
 BUILDROOT_OUTPUT="${BUILDROOT_OUTPUT:-$REPO_ROOT/build/os/buildroot/$RISCV_ARCH}"
 BUILDROOT_ROOTFS="${BUILDROOT_ROOTFS:-$BUILDROOT_OUTPUT/images/rootfs.cpio.gz}"
 BUILDROOT_MANIFEST="${BUILDROOT_MANIFEST:-$BUILDROOT_OUTPUT/buildroot-manifest.txt}"
@@ -36,6 +40,10 @@ LINUX_TAG="${LINUX_TAG:-v6.6}"
 LINUX_COMMIT="${LINUX_COMMIT:-ffc253263a1375a65fa6c9f62a893e9767fbebfa}"
 BUSYBOX_VERSION=1.36.1
 BUSYBOX_SHA256=b8cc24c9574d809e7279c3be349795c5d5ceb6fdf19ca709f80cde50e47de314
+jobs="${RISCV_ASSET_JOBS:-2}"
+case "$jobs" in
+  ''|*[!0-9]*|0) echo "ERROR: RISCV_ASSET_JOBS must be a positive integer" >&2; exit 2 ;;
+esac
 
 DO_OPENSBI=0 DO_KERNEL=0 DO_TERMINAL=0
 for a in "$@"; do case "$a" in
@@ -133,7 +141,7 @@ if [ "$DO_OPENSBI" = 1 ]; then
   else
     SB="$OUT/opensbi-src"; [ -d "$SB/.git" ] || git clone --depth 1 --branch "$OPENSBI_TAG" https://github.com/riscv-software-src/opensbi.git "$SB"
     require_source_commit "$SB" "$OPENSBI_COMMIT"
-    make -C "$SB" CROSS_COMPILE="$CROSS" PLATFORM=generic PLATFORM_RISCV_ISA="$ISA" PLATFORM_RISCV_ABI="$ABI" FW_JUMP=y FW_JUMP_ADDR=0x80200000 FW_JUMP_FDT_ADDR=0x88000000 -j"$(nproc)" >/dev/null
+    make -C "$SB" CROSS_COMPILE="$CROSS" PLATFORM=generic PLATFORM_RISCV_ISA="$ISA" PLATFORM_RISCV_ABI="$ABI" FW_JUMP=y FW_JUMP_ADDR="$KERNEL_LOAD_ADDR" FW_JUMP_FDT_ADDR=0x88000000 -j"$jobs" >/dev/null
     cp "$SB/build/platform/generic/firmware/fw_jump.bin" "$OUT/fw_jump.bin"
   fi
 fi
@@ -145,7 +153,7 @@ if [ "$DO_KERNEL" = 1 ]; then
     LS="$OUT/linux-src"; [ -d "$LS/.git" ] || git clone --depth 1 --branch "$LINUX_TAG" https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git "$LS"
     require_source_commit "$LS" "$LINUX_COMMIT"
     make -C "$LS" ARCH=riscv CROSS_COMPILE="$CROSS" "$KERNEL_DEFCONFIG" >/dev/null
-    make -C "$LS" ARCH=riscv CROSS_COMPILE="$CROSS" -j"$(nproc)" Image
+    make -C "$LS" ARCH=riscv CROSS_COMPILE="$CROSS" -j"$jobs" Image
     cp "$LS/arch/riscv/boot/Image" "$OUT/Image"
   fi
 fi
@@ -155,7 +163,7 @@ cat > "$OUT/manifest.txt" <<EOF
 # ISA=$ISA ABI=$ABI kernel_defconfig=$KERNEL_DEFCONFIG
 # Buildroot=$BUILDROOT_COMMIT manifest=$(stat_of "$BUILDROOT_MANIFEST")
 0x80000000    fw_jump.bin          $(stat_of "$OUT/fw_jump.bin")   # OpenSBI $OPENSBI_TAG@$OPENSBI_COMMIT
-0x80200000    Image                $(stat_of "$OUT/Image")   # Linux $LINUX_TAG@$LINUX_COMMIT
+$KERNEL_LOAD_ADDR    Image                $(stat_of "$OUT/Image")   # Linux $LINUX_TAG@$LINUX_COMMIT
 0x88000000    soc_virt.dtb         $(stat_of "$OUT/soc_virt.dtb")   # $RISCV_ARCH DTS
 0x88200000    initramfs.cpio.gz    $(stat_of "$OUT/initramfs.cpio.gz")   # $INITRAMFS_MODE $TERMINAL_MARKER BusyBox $BUSYBOX_VERSION@$BUSYBOX_SHA256
 EOF

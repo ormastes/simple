@@ -431,3 +431,23 @@ implementation-milestone-0-in-progress
   the exact generated core, wrapper, testbench, assembly fixture, and runner.
   The shared self-test rejects a marker-only log and changed dependency content
   even when its timestamp is backdated.
+- RV32 media build 2026-07-24: the third bounded Buildroot run produced a
+  606068-byte terminal rootfs and working RV32 GCC, then its post-build detector
+  rejected the compiler because Buildroot installs it as a symlink. The shared
+  detector now accepts regular executable files or symlinks, and a
+  `--finalize-only` recovery generated and verified the commit/config/external
+  tree/rootfs/compiler manifest without a fourth build cycle.
+- RV32 pinned assets 2026-07-24: the shared builder now maps public `rv32` and
+  `rv64` names to the tracked `riscv32`/`riscv64` DTS directories and caps
+  OpenSBI/Linux builds through validated `RISCV_ASSET_JOBS` (default 2). The
+  RV32 terminal initramfs, DTB, OpenSBI binary, and exact Linux v6.6 Image are
+  built. The first QEMU oracle exposed a shared-address bug: RV32 Linux declares
+  a 4 MiB load offset while RV64 declares 2 MiB. The asset builder and K26
+  loader now use `0x80400000`/`0x40400000` for RV32 and retain
+  `0x80200000`/`0x40200000` for RV64.
+- RV32 QEMU oracle 2026-07-24: after the load-address fix, pinned OpenSBI enters
+  Linux at `0x80400000` and Linux 6.6 reaches its root-mount step. The third
+  bounded attempt then panics because the raw initramfs loader did not add
+  initrd properties to QEMU's generated FDT. Per the three-cycle cap, no fourth
+  attempt was made; the next scoped session must use QEMU's `-initrd` option
+  and still prove interactive `root` plus `ls /`.
