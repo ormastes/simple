@@ -96,10 +96,32 @@ binding). Related: `rv64_fpga_synthesis_plan_2026-07-22.md`,
 - Evidence/report files stay out of git; plan/doc updates and code land on
   `main` via jj (no branches), SSH key `~/.ssh/id_ed25519_this_mac`.
 
+## Status 2026-07-24 (Lane A executed)
+
+- RV32 re-synth **PASS**: DIV-fixed bitstream `rv32_fpga.bit`
+  sha256 `85d08afa8bf9…b9e0a`, timing MET (WNS +16.588 ns). GHDL soak on the
+  fixed core PASS (golden `A77902FA` == host, 7.93 M cycles). Board
+  **programmed clean** (`PROGRAM_HW_DEVICES_DONE`, startup HIGH).
+- 10-min board soak **BLOCKED (missing hardware)**: fabric UART is on PMOD J2
+  (TX=H12, RX=E10) and the KV260 carrier routes NO FT4232H channel to PL pins
+  (Ch.A=JTAG, Ch.B=PS UART1→ttyUSB1, Ch.D=spare→ttyUSB2, Ch.C unrouted);
+  preflight capture on both ttys = 0 bytes while the core ran. Evidence:
+  `build/fpga/evidence/rv32_2026-07-24/` (uncommitted).
+- Unblock paths, in preference order:
+  1. **Wire the 3.3 V USB-UART adapter to PMOD J2**, then
+     `RV32_BOARD_UART_PORTS=/dev/ttyUSB<adapter> sh scripts/fpga/soak_rv32_board.shs run`
+     (bitstream + golden `7EB5A8A9` @ COUNT=260 M already staged).
+  2. **Cable-free via Simple JTAG (Lane B):** poll soak progress/golden through
+     the BSCANE2-tunneled debug module (abstract reads / SBA) for ≥600 s —
+     board-origin evidence with no extra cabling.
+  3. **PS UART1 on EMIO:** re-target the PS block design so PL drives UART1
+     (EMIO) → ttyUSB1; requires PS bring-up, larger change.
+
 ## Exit Criteria
 
 - [ ] RV32: board-origin 10-min soak transcript, golden match, fresh bitstream
-      hash recorded.
+      hash recorded. (2026-07-24: synth+program done; transcript blocked on
+      PMOD J2 adapter — see Status.)
 - [ ] JTAG: board-origin OpenOCD halt/regs/step transcript through the Simple
       TAP/DTM/DM.
 - [ ] RV64: board-origin 10-min soak transcript, golden match — or a precise,
