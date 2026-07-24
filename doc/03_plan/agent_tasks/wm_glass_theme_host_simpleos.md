@@ -293,6 +293,21 @@ is historical.
   aliases/custom primitives, bypassed other top-level lowering paths, and used
   registry-unit simulations instead of real flat MIR/native/reset evidence.
   Cycle 3 is the final compiler implementation cycle for this session.
+- Aggregate cycle 3 (`d59ef76462`) is rejected and not integrated. Direct
+  lowering still re-registered and emitted non-method functions under bare
+  names, static-method identity diverged, alias expansion depended on importer
+  symbols and declaration order, later lowering paths wrote after the claimed
+  single prepass, and skip-MIR could retain stale registry state. Its unit spec
+  still simulated registry state; the full fixture was not invoked by a test
+  or used to compare real flat call/definition ABI signatures.
+- The isolated Cranelift construction itself completed (`3 compiled, 0
+  failed`) before the stop arrived, producing a 29 MB candidate CLI and an
+  unrun fixture in `/tmp/simple-cycle2-owner-cycle2/build/cycle3/`. These
+  artifacts are diagnostic only: architecture review rejected their source,
+  the candidate `test` invocation reported `unknown command 'test'`, and
+  nothing was run, admitted, deployed, or retried. The aggregate compiler
+  implementation-cycle cap is reached; resume only in a fresh scoped session
+  from the cycle-3 review findings.
 - A separate root-worktree full-CLI build is active and is not authoritative
   for this lane because its source state is unrelated and potentially dirty.
   Do not deploy over live MCP. Start the isolated exact-current CLI build only
