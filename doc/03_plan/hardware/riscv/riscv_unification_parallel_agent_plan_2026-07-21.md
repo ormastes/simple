@@ -305,3 +305,64 @@ only), Phase 5 SoC/Linux, Phase 6 FPGA — per research doc §10.
 Diff reviewed by Fable + gate evidence fresh + landed on origin (content-grep
 verified) + pushed. Postponement is not completion; blocked lanes record owner,
 missing prerequisite, exact resume command, and retained artifacts.
+
+## Wave 2 results — 2026-07-24 (3 sonnet lanes, Opus-reviewed, static-evidence)
+
+Context: on resume the rv64gc_rtl tree had been **heavily restructured** by
+parallel sessions (now a full package: pmp/atomics/mmu_sv39/sv39_walker/
+fregfile/core64_combinational/core64_update). The 2026-07-21 "one-seam
+disconnect" audit is STALE. Test runner still unusable for spec gates, so all
+lanes used static/compile/grep evidence only.
+
+- **L1 truth-checker false-positive — LANDED `45166b8e6fb`.** `check-riscv-rtl-truth.shs`
+  rule 4 resolved `entity work.X` only within a lane's own directory, so
+  `soc_top_rv32.vhd` instantiating `work.bscane2_tap_bridge`/`work.jtag_debug_chain`
+  (real entities in `src/lib/hardware/debug/`, landed complete `ea7e12a91ba`
+  behind a `G_DEBUG_JTAG` default-false generate) false-positived as "undefined".
+  Fix: resolve the defined-entity set from the union of lane files +
+  `git ls-files -- '*.vhd'` (flat `work` library). NOT a weakening — added
+  `test/fixtures/riscv_truth/fake_wrapper_dangling_ref.vhd` (genuinely-undefined
+  entity) proving rule 4 still fails closed; both red fixtures still exit 1;
+  full-tree run now 12 lanes, `riscv_rtl_truth_ok=true`. (Landmine noted: the
+  checker self-locates repo root via `$0/../..`, so it MUST be run from its
+  installed path — an out-of-tree scratchpad copy reports "nothing to check".)
+
+- **L3 profile honesty — LANDED `80aa1c87e83`.** `rv64_exec_core.vhd`
+  (created today `c35ef5b7807`) is machine-mode-only and self-declares "no
+  compressed" (PC += 4 always, zero `c_*` decode), so `isa_string()` returning
+  `rv64imc_zicsr` over-claimed C. Corrected to `rv64im_zicsr`; RV32 unchanged
+  (`rv32imc_zicsr` verified honest — 20 compressed-decode hits + PC+2). Lockstep:
+  `riscv_fpga_linux_spec.spl` isa assertions updated from the stale
+  `*imac_zicsr_zifencei` pins to the honest `rv32imc_zicsr`/`rv64im_zicsr`.
+
+- **L2 rv64gc gap re-audit — REFUTES the stale disconnect finding.** At HEAD the
+  `.spl` rv64gc datapath is fully wired: `core64_cycle` (protected_core.spl:492,
+  `@hardware`) drives `core64_combinational`/`core64_update`; PMP/Sv39-walker/
+  atomics/mul-div/csr_s/trap all have production (non-spec) callers; the old
+  `soc_top_64.spl` `pc+=4` bypass is gone. (L2's "dangling `mmu64_translate`
+  export" was a FALSE finding — it is defined at `mmu_sv39.spl` and exported via
+  the `mmu_sv39` submodule; verified repo-wide, not filed.)
+
+### Current real gaps (next-wave input, superseding stale Wave 2/3 items)
+
+1. **P0 — the wired `.spl` datapath never reaches the FPGA bitstream.** The board
+   artifact is the hand-written `examples/09_embedded/fpga_riscv/rtl/rv64_exec_core.vhd`
+   (staged by `scripts/fpga/build_k26_rv64.shs`), which is RV64IM + read-only
+   Zicsr, machine-mode only — no MMU/Sv39, no PMP, no atomics, no F/D, no
+   compressed, no real trap-taking. There is no `.spl`→VHDL backend; the `.spl`
+   model is a differential oracle only. The disconnect moved from *inside* the
+   `.spl` package to *between* the `.spl` package and the board.
+2. **DTB honesty — OPEN QUESTION (not filed as a bug — needs owner judgment).**
+   `src/lib/hardware/soc_rtl/dtb_asset.spl:36,42,52,61` embed
+   `riscv,isa = "rv32imac_zicsr_zifencei"` / `"rv64imac_zicsr_zifencei_svade"`
+   + `riscv,sv32`/`riscv,sv39`. Those claim A, Zifencei, MMU (sv32/sv39), and
+   `svade` — none of which the machine-mode-only exec core implements. Is this a
+   current-board claim (then it over-claims and should be corrected in lockstep
+   with `soc_dtb_asset_spec.spl:169,171`) or an intended Linux target contract
+   (then it needs an explicit readiness/aspirational marker like the guide's
+   `contract-not-ready`)? Resolve before treating the FPGA-Linux DTB as evidence.
+3. **P2 — third placeholder VHDL generator** `riscv_fpga_linux.spl` `generated_core_vhdl()`
+   (`assert false … GENERATED_RTL_NOT_IMPLEMENTED`) adds ambiguity about which
+   generator is authoritative; wire it to the real path or delete it.
+
+Push chain this wave: `45166b8e6fb` (L1) → `80aa1c87e83` (L3) → this doc.
