@@ -2,15 +2,20 @@
 
 ## Current status
 
-- Repository synced to `main` and pushed from local head `main@` = `78f61574`.
-- Theme rendering fix applied in `src/os/compositor/browser_backend.spl` to use package-derived colors via `theme_numeric_colors` instead of hardcoded dark/light constants.
-- Main branch remains clean of this file-level change beyond unrelated working-tree `.cmd` edits and separate agent worktree artifacts.
+- Repository was synced to `main` and the working head is now at `main@` = `d8b158d1` after pushing the latest theme-id propagation fix.
+- Theme rendering fixes now applied in:
+  - `src/os/compositor/host_compositor_core.spl`
+  - `src/os/desktop/shell.spl`
+
+  Both files now derive WM content theme from the active render snapshot (`active_wm_theme_render_snapshot`) with
+  `default_theme_id()` fallback, and pass that theme ID into `simple_web_content_revision_with_theme` / `simple_web_content_frame_cached`.
+- Main worktree still has unrelated pre-existing local `doc/` and `.cmd` edits from sibling agent lanes; those are intentionally kept out of this change.
 
 ## What was run
 
 - `bin/simple check src/os/compositor/browser_backend.spl` (tooling-level check completed; no file-local syntax failure was reported in browser backend output).
 - `jj git fetch`, `jj rebase -d main@origin`, `jj bookmark set main -r @-`, `env -u GITHUB_TOKEN -u GH_TOKEN jj git push --bookmark main`.
-- Host/QEMU evidence runs were executed by side agent:
+- Host/QEMU evidence and renderer checks were executed by side agents:
   - Hosted WM capture evidence script (PASS)
   - ARM64 QEMU readiness checks (PASS)
   - ARM/x86 SIMD checker script (FAIL)
