@@ -254,8 +254,11 @@ describe "TUI frame component state":
 # Slash commands (M2)
 # ============================================================================
 
+var SUBMISSION_RESPONDER_CALLS = 0
+var SUBMISSION_PERSIST_CALLS = 0
+
 fn _noop_persist(session_id: text, msgs: [Message]):
-    ()
+    SUBMISSION_PERSIST_CALLS = SUBMISSION_PERSIST_CALLS + 1
 
 fn _hooks_model(name: text) -> text:
     "model set to " + name
@@ -332,7 +335,58 @@ fn _test_hooks_hidden() -> SessionHooks:
         on_hidden_command: _hooks_hidden, on_persist: _noop_persist
     )
 
+struct CaretPromptlessCommandCase:
+    input: text
+    canonical: text
+    expected_message: text
+
+fn setup_promptless_command_cases() -> [CaretPromptlessCommandCase]:
+    [
+        CaretPromptlessCommandCase(
+            input: "/compact",
+            canonical: "/compact",
+            expected_message: "Command not implemented in Caret: /compact"
+        ),
+        CaretPromptlessCommandCase(
+            input: "/summarize",
+            canonical: "/compact",
+            expected_message: "Command not implemented in Caret: /compact"
+        ),
+        CaretPromptlessCommandCase(
+            input: "/init",
+            canonical: "/init",
+            expected_message: "Command not implemented in Caret: /init"
+        ),
+        CaretPromptlessCommandCase(
+            input: "/bootstrap",
+            canonical: "/init",
+            expected_message: "Command not implemented in Caret: /init"
+        )
+    ]
+
+fn check_promptless_dispatch(case: CaretPromptlessCommandCase):
+    val (cmd, arg) = parse_slash_command(case.input)
+    expect(arg).to_equal("")
+    val result = dispatch_slash(cmd, arg, _test_hooks())
+    expect(result.message).to_equal(case.expected_message)
+    expect(result.message).to_equal(
+        "Command not implemented in Caret: " + case.canonical
+    )
+    expect(result.exit).to_be(false)
+    expect(result.new_conv).to_be(false)
+    expect(result.replace_conv).to_be(false)
+    expect(result.loaded_messages.len()).to_equal(0)
+    expect(result.new_session_id).to_equal("")
+    expect(result.status_provider).to_equal("")
+    expect(result.status_model).to_equal("")
+    expect(result.status_session).to_equal("")
+
+fn _reset_submission_call_counts():
+    SUBMISSION_RESPONDER_CALLS = 0
+    SUBMISSION_PERSIST_CALLS = 0
+
 fn _submission_response(messages: [Message]) -> ModelResponse:
+    SUBMISSION_RESPONDER_CALLS = SUBMISSION_RESPONDER_CALLS + 1
     new_model_text("submission reply")
 
 describe "Slash command parsing":
@@ -524,6 +578,18 @@ describe "Slash command dispatch":
             "remote_setup", "", _test_hooks_hidden()
         ).message).to_contain("Command disabled")
 
+    it "should canonicalize accepted promptless commands without state mutation":
+        step("Load the accepted promptless command aliases")
+        val cases = setup_promptless_command_cases()
+        _reset_submission_call_counts()
+        step("Dispatch the command through the shipped Caret path")
+        for case in cases:
+            check_promptless_dispatch(case)
+        step("Check canonical output and zero model submission")
+        expect(cases.len()).to_equal(4)
+        expect(SUBMISSION_RESPONDER_CALLS).to_equal(0)
+        expect(SUBMISSION_PERSIST_CALLS).to_equal(0)
+
 describe "TUI submission state transition":
     it "should stop on the quit alias without mutating conversation state":
         tui_transcript_reset()
@@ -542,6 +608,7 @@ describe "TUI submission state transition":
 
     it "should run a model turn through the production submission path":
         tui_transcript_reset()
+        _reset_submission_call_counts()
         val ui = make_chat_tui_with_status(
             "llm_caret - dummy",
             "provider=dummy model=dummy-hello session=s0"
@@ -558,6 +625,8 @@ describe "TUI submission state transition":
         expect(tui_transcript_line_text(1)).to_equal(
             "Assistant: submission reply"
         )
+        expect(SUBMISSION_RESPONDER_CALLS).to_equal(1)
+        expect(SUBMISSION_PERSIST_CALLS).to_equal(1)
 
     it "should keep the new-session confirmation after transcript reset":
         tui_transcript_reset()
@@ -634,3 +703,37 @@ describe "TUI submission state transition":
         expect(tui_transcript_line_text(0).contains(
             "secret-argument"
         )).to_be(false)
+
+    it "should render accepted promptless commands without model submission":
+        step("Load the accepted promptless command aliases")
+        val cases = setup_promptless_command_cases()
+        val original = [new_user_message("keep this")]
+        val original_ui = make_chat_tui_with_status(
+            "llm_caret - dummy",
+            "provider=dummy model=dummy-hello session=s0"
+        )
+        step("Dispatch the command through the shipped Caret path")
+        step("Check canonical output and zero model submission")
+        for case in cases:
+            tui_transcript_reset()
+            _reset_submission_call_counts()
+            val result = run_chat_tui_submission(
+                original_ui, original, "s0", case.input,
+                default_policy("build/tmp/caret-tui-unit"),
+                _submission_response, _test_hooks()
+            )
+            expect(result.running).to_be(true)
+            expect(result.submitted_to_model).to_be(false)
+            expect(SUBMISSION_RESPONDER_CALLS).to_equal(0)
+            expect(SUBMISSION_PERSIST_CALLS).to_equal(0)
+            expect(result.session_id).to_equal("s0")
+            expect(result.conversation.len()).to_equal(1)
+            expect(result.conversation[0].role).to_equal("user")
+            expect(result.conversation[0].content).to_equal("keep this")
+            expect(result.ui.title).to_equal(original_ui.title)
+            expect(result.ui.status).to_equal(original_ui.status)
+            expect(result.ui.input.value).to_equal("")
+            expect(tui_transcript_len()).to_equal(1)
+            expect(tui_transcript_line_text(0)).to_equal(
+                "System: " + case.expected_message
+            )

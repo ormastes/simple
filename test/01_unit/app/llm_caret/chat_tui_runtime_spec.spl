@@ -11,7 +11,7 @@ use app.llm_caret.types.{Message}
 use app.llm_caret.tools.{
     ModelResponse, PermissionPolicy, default_policy, new_model_text
 }
-use app.llm_caret.tui_io.{CaretIo}
+use app.llm_caret.tui_io.{CaretIo, CaretLoopResult}
 use app.llm_caret.chat_tui.{
     ChatTui, ProviderSwitchResult, SessionResumeResult, SessionHooks,
     make_chat_tui, tui_transcript_reset, render_turn, is_scrolled,
@@ -40,6 +40,12 @@ var HOOK_MODEL = ""
 var HOOK_PERSIST_COUNT = 0
 var HOOK_PERSIST_SESSION = ""
 var HOOK_PERSIST_MESSAGES = 0
+var RESPONDER_CALLS = 0
+
+struct CaretPromptlessCommandCase:
+    input: text
+    canonical: text
+    expected_message: text
 
 fn _record(event: text):
     IO_EVENTS = IO_EVENTS + event + "|"
@@ -138,6 +144,7 @@ fn _reset_fakes():
     HOOK_PERSIST_COUNT = 0
     HOOK_PERSIST_SESSION = ""
     HOOK_PERSIST_MESSAGES = 0
+    RESPONDER_CALLS = 0
     tui_transcript_reset()
 
 fn _hook_model(name: text) -> text:
@@ -190,6 +197,7 @@ fn _hooks() -> SessionHooks:
     )
 
 fn _responder(messages: [Message]) -> ModelResponse:
+    RESPONDER_CALLS = RESPONDER_CALLS + 1
     new_model_text("fixture reply")
 
 fn _policy() -> PermissionPolicy:
@@ -197,6 +205,79 @@ fn _policy() -> PermissionPolicy:
 
 fn _exit_command_bytes() -> [i64]:
     [47, 101, 120, 105, 116, 13]
+
+fn setup_promptless_command_cases() -> [CaretPromptlessCommandCase]:
+    [
+        CaretPromptlessCommandCase(
+            input: "/compact",
+            canonical: "/compact",
+            expected_message: "Command not implemented in Caret: /compact"
+        ),
+        CaretPromptlessCommandCase(
+            input: "/summarize",
+            canonical: "/compact",
+            expected_message: "Command not implemented in Caret: /compact"
+        ),
+        CaretPromptlessCommandCase(
+            input: "/init",
+            canonical: "/init",
+            expected_message: "Command not implemented in Caret: /init"
+        ),
+        CaretPromptlessCommandCase(
+            input: "/bootstrap",
+            canonical: "/init",
+            expected_message: "Command not implemented in Caret: /init"
+        )
+    ]
+
+fn check_promptless_dispatch(
+    cases: [CaretPromptlessCommandCase],
+    result: CaretLoopResult
+):
+    expect(cases.len()).to_equal(4)
+    expect(cases[0].input).to_equal("/compact")
+    expect(cases[0].canonical).to_equal("/compact")
+    expect(cases[0].expected_message).to_equal(
+        "Command not implemented in Caret: /compact"
+    )
+    expect(cases[1].input).to_equal("/summarize")
+    expect(cases[1].canonical).to_equal("/compact")
+    expect(cases[1].expected_message).to_equal(
+        "Command not implemented in Caret: /compact"
+    )
+    expect(cases[2].input).to_equal("/init")
+    expect(cases[2].canonical).to_equal("/init")
+    expect(cases[2].expected_message).to_equal(
+        "Command not implemented in Caret: /init"
+    )
+    expect(cases[3].input).to_equal("/bootstrap")
+    expect(cases[3].canonical).to_equal("/init")
+    expect(cases[3].expected_message).to_equal(
+        "Command not implemented in Caret: /init"
+    )
+    expect(result.mode).to_equal("plain")
+    expect(result.ok).to_be(true)
+    expect(result.exit_reason).to_equal("command_exit")
+    expect(IO_OUTPUT).to_equal(
+        "> Command not implemented in Caret: /compact\n" +
+        "> Command not implemented in Caret: /compact\n" +
+        "> Command not implemented in Caret: /init\n" +
+        "> Command not implemented in Caret: /init\n" +
+        "> "
+    )
+    expect(RESPONDER_CALLS).to_equal(0)
+    expect(HOOK_PERSIST_COUNT).to_equal(0)
+    expect(HOOK_PERSIST_SESSION).to_equal("")
+    expect(HOOK_PERSIST_MESSAGES).to_equal(0)
+    expect(IO_LINE_INDEX).to_equal(5)
+    expect(IO_LINE_INDEX).to_equal(IO_LINES.len())
+    expect(IO_BYTE_INDEX).to_equal(0)
+    expect(IO_SIZE_CALLS).to_equal(0)
+    expect(IO_DRAW_CALLS).to_equal(0)
+    expect(IO_FLUSH_CALLS).to_equal(0)
+    expect(IO_EVENTS).to_equal(
+        "emit|emit|emit|emit|emit|emit|emit|emit|emit|"
+    )
 
 describe "REQ-LLM-CARET-TUI-HARDEN-009: frame and input behavior":
     it "should clamp inner content height for undersized terminals":
@@ -277,6 +358,27 @@ describe "REQ-LLM-CARET-TUI-HARDEN-009: frame and input behavior":
         expect(HOOK_PERSIST_MESSAGES).to_equal(2)
         expect(IO_OUTPUT).to_contain("model set to sonnet")
         expect(IO_OUTPUT).to_contain("Assistant: fixture reply")
+        expect(RESPONDER_CALLS).to_equal(1)
+
+    it "should dispatch accepted promptless aliases without model submission":
+        step("Load the accepted promptless command aliases")
+        val cases = setup_promptless_command_cases()
+        _reset_fakes()
+        IO_LINES = [
+            cases[0].input,
+            cases[1].input,
+            cases[2].input,
+            cases[3].input,
+            "/exit"
+        ]
+
+        step("Dispatch the command through the shipped Caret path")
+        val result = run_chat_plain(
+            _policy(), _responder, _hooks(), [], _fake_io()
+        )
+
+        step("Check canonical output and zero model submission")
+        check_promptless_dispatch(cases, result)
 
 describe "REQ-LLM-CARET-TUI-HARDEN-007: lifecycle and routing":
     it "should fail raw entry before alternate screen or cursor mutation":

@@ -117,14 +117,14 @@ and must not be resolved, reverted, or included by this lane.
 | Gate | Current result | Authority/limit |
 |---|---|---|
 | Direct Caret trace | PASS: 25/25 files, 7,278/7,278 LOC, 496/496 file-qualified declarations | Static mapping only |
-| Unit manual parity | PASS: 60/60 TUI, 22/22 raw-input, 19/19 runtime, 57/57 main, 12/12 config, 37/37 tools, 24/24 chat, and 14/14 types bodies match source | Zero executed scenarios |
+| Unit manual parity | PASS: 62/62 TUI, 22/22 raw-input, 20/20 runtime, 57/57 main, 12/12 config, 37/37 tools, 24/24 chat, and 14/14 types bodies match source | Zero executed scenarios |
 | Component manual parity | PASS: 9/9 TUI/hidden scenario bodies match source | Zero executed scenarios |
 | PTY manual parity | PASS: 6/6 live-terminal scenario bodies match source | Static synchronization; checker/SSpec not executed on a qualified artifact |
 | Installed-Claude manual parity | PASS: 5/5 offline scenario bodies match source | Static synchronization; checker/SSpec not executed in this tranche |
 | Root-registry manual parity | PASS: 5/5 scenario bodies match source, including the production-derived exhaustive matrix | Static synchronization; no CLI/TUI invocation claim |
 | Hidden-stub manual parity | PASS: 1/1 scenario body and the complete supporting-helper block match source | Static synchronization; SSpec/docgen not executed on a qualified runtime |
 | Feature-gate manual parity | PASS (static): 33/33 owner rows, 33/33 independently pinned contract rows, 33/33 state rows, and 3/3 complete folded executable scenario bodies | SSpec/docgen cannot execute until a qualified runtime exists |
-| Focused modern SSpec scan | PASS (static): 489 modern `should` examples across the listed files (401 base plus 88 focused owner/effect examples), canonical matchers, and no placeholder pass | Static source/manual scan only; execution is not claimed |
+| Focused modern SSpec scan | PASS (static): 492 modern `should` examples across the listed files (404 base plus 88 focused owner/effect examples), canonical matchers, and no placeholder pass | Static source/manual scan only; execution is not claimed |
 | Direct environment guard | PASS in working and staged modes | Changed Caret paths only |
 | Numbered-artifact guard | WARN in this jj workspace: both modes emit Git-worktree/`--cached` errors but still print `OK` and exit zero | Not authoritative here; no numbered artifacts are added by this tranche |
 | Generated-spec layout | PASS: zero `.spl` specs under `doc/06_spec` | Layout only |
@@ -186,7 +186,7 @@ fixtures. No lane may run a paid provider.
 
 | Lane | Owned files | Work | Exit criteria |
 |---|---|---|---|
-| A — TUI component | `test/01_unit/app/llm_caret/chat_tui_spec.spl` | Complete: pure viewport/status/hint behavior | Production imports; no inline copies; 60-body manual synchronized |
+| A — TUI component | `test/01_unit/app/llm_caret/chat_tui_spec.spl` | Complete: pure viewport/status/hint and promptless root-command behavior | Production imports; no inline copies; 62-body manual synchronized |
 | B — main/config | `test/01_unit/app/llm_caret/main_spec.spl`, `config_spec.spl` | Complete: real startup hooks and default branches with isolated env/session fixtures | Host env restored; filesystem confined to `build/tmp`; 57/12-body manuals synchronized |
 | C — tools | `src/app/llm_caret/tools.spl`, `test/01_unit/app/llm_caret/tools_spec.spl` | Complete statically: production glob matcher/executor and list-dir result assertions | Workspace bounded; matcher defect fixed; 37-body manual synchronized |
 | D — live TUI | `scripts/check/check-llm-caret-tui-pty.shs`, focused PTY system spec, manual, plan, and trace rows | Implemented fail-closed: clean-source/runtime-hashed cached `bin/caret` only, dummy provider, forced/auto/piped routing, EOF/Ctrl-C/Ctrl-D, UTF-8/edit/navigation, 12x50 geometry, default/enabled/disabled hidden admission, raw failure before ANSI, and pre/post `stty` evidence | Static/script validation first; six-scenario real PTY PASS on a qualified cached runtime; terminal restored after every modeled outcome |
@@ -222,17 +222,43 @@ fixtures. No lane may run a paid provider.
    | `services/api/withRetry_spec.spl` | Complete statically: `RetryEffectTrace` and `RetrySequenceResult` provide deterministic loop/effect seams; 15 modern scenarios cover persistent 429/529 beyond `maxRetries`, exact heartbeat rounding, the nonpersistent `maxRetries + 1` boundary, AWS/GCP cache clearing, stale cooldown, bounded Retry-After/backoff, overflow floor, and thinking-budget rejection. `setup_retry_sequence_fixture`, `run_retry_sequence`, and `check_retry_sequence` are synchronized with the canonical zero-execution manual; the obsolete `doc/06_spec/test/...` mis-mirror and hardcoded 822-line sentinel are removed. |
 
 2. **Lane J — CLI gate admission.** Extend the offline Caret CLI fixture only
-   for gates that can reach the shipped CLI facade. Prove visible/hidden,
-   accepted/rejected, exit code, stderr/stdout, and no state mutation when a
-   gate rejects. Do not treat a `claude_full` record as shipped reachability.
+   for root registry records that can reach the shipped CLI facade. Prove
+   registered/reachable canonical and alias inputs, exact output, exit
+   behavior, and no state mutation. Do not treat a `claude_full` gate record as
+   shipped reachability or help-menu visibility.
    Current static reachability is deliberately narrow: shipped Caret imports
    only `claude_full.commands`; `/compact`, `/summarize`, `/init`, and
    `/bootstrap` can reach shared promptless plain/TUI slash dispatch and return
-   the exact unimplemented response, but shipped code does not call
-   `compactCommand` or `useNewInitPrompt`. Add unit dispatch assertions first,
-   then cached offline `--plain` stdin cases with exit `0`, exact output, and
-   zero provider invocation. The other 31 registry dimensions remain
-   parts-bin-only until a real production import/call path exists.
+   the exact unimplemented response, but the shipped Caret CLI/TUI entry graph
+   does not call `compactCommand` or `useNewInitPrompt`. Add unit dispatch
+   assertions first, then cached offline `--plain` stdin cases with exit `0`,
+   exact output, and zero provider invocation. All 33 distributed feature-gate
+   dimensions remain parts-bin-only until a real shipped import/call path
+   exists; only the compact/init root metadata and aliases are reachable here.
+   The pure-dispatch, injected plain-loop, and TUI-submission component portion
+   is complete and statically synchronized; cached-wrapper process execution
+   remains blocked.
+
+   The frozen promptless-command test contract is:
+
+   - `CaretPromptlessCommandCase(input, canonical, expected_message)`;
+   - `setup_promptless_command_cases`;
+   - `check_promptless_dispatch`;
+   - `Load the accepted promptless command aliases`;
+   - `Dispatch the command through the shipped Caret path`;
+   - `Check canonical output and zero model submission`.
+
+   The four accepted inputs are `/compact`, `/summarize`, `/init`, and
+   `/bootstrap`; aliases must canonicalize to `/compact` and `/init`
+   respectively. First add exact pure-dispatch and TUI-submission assertions to
+   `chat_tui_spec.spl`, then add an injected-`CaretIo` plain-loop assertion to
+   `chat_tui_runtime_spec.spl`. Pure dispatch and TUI submission must directly
+   preserve conversation/session state; the plain loop must prove preservation
+   through the same non-mutating dispatch flags plus zero responder/persistence
+   calls. Every path produces the exact
+   `Command not implemented in Caret: /<canonical>` text. The cached-wrapper
+   `--plain` stdin process case remains fail-closed pending a qualified Caret
+   artifact; do not convert the injected component result into a process PASS.
 3. **Lane K — TUI visibility and dispatch.** After the CLI contract is stable,
    project the reachable cases through injected `CaretIo`, then the qualified
    cached-wrapper PTY checker. For compact/init, capture only static
@@ -241,7 +267,7 @@ fixtures. No lane may run a paid provider.
    owner gates are not shipped call paths. Default/enabled/disabled state
    testing remains scoped to the separate shipped hidden/disabled root-command
    lane. No source fallback, provider credentials, or paid request.
-   For the four reachable compact/init canonical/alias inputs, assert visible
+   For the four reachable compact/init canonical/alias inputs, assert exact
    system output, unchanged conversation state, and
    `submitted_to_model=false`; extend PTY evidence only after those injected
    component cases are stable.

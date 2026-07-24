@@ -172,3 +172,20 @@ The executable SSpec contract uses `setup_retry_sequence_fixture`,
 `run_retry_sequence`, and `check_retry_sequence`. The canonical manual mirrors
 complete scenario bodies and reports zero execution until a qualified
 self-hosted runtime is available.
+
+## Shipped promptless command reachability (2026-07-24)
+
+The shipped path imports only `claude_full.commands`. `dispatch_slash` resolves
+root aliases through `findRootCommand` and returns one canonical result before
+either the plain or TUI caller can submit input to a model. Therefore
+`/compact` and `/summarize` share the exact message
+`Command not implemented in Caret: /compact`; `/init` and `/bootstrap` share
+`Command not implemented in Caret: /init`.
+
+This is intentionally distinct from the parity-island `compactCommand` and
+`useNewInitPrompt` gates, which the shipped Caret path does not call. Component
+evidence must prove exact canonical output, unchanged conversation/session and
+title/status, one exact System transcript line, cleared input, zero responder
+calls, and zero persistence. The injected `CaretIo` plain-loop case additionally
+proves no raw/alternate-screen/cursor mutation. It remains component evidence,
+not cached-wrapper stdin process evidence.

@@ -96,6 +96,7 @@ scenario counts as coverage.
 | Server mode and request guards | `server.spl`, `main.spl` | `main_spec.spl`, `server_spec.spl` | None launches `--server` | CLI / unit-only |
 | TUI selection, transcript, markdown, scroll, slash dispatch | `chat_tui.spl`, `tui_input.spl`, `tui_io.spl` | `chat_tui_spec.spl`, `chat_tui_input_spec.spl` | Component transitions in `llm_caret_tui_hidden_feature_spec.spl`; real cached-wrapper PTY lifecycle in `llm_caret_tui_pty_spec.spl` through `check-llm-caret-tui-pty.shs` | TUI / component proof present; live checker is fail-closed and still needs execution on a qualified cached artifact |
 | `/help`, `/exit`, `/new`, `/model`, `/provider`, `/sessions`, `/resume` | `chat_tui.spl` | `chat_tui_spec.spl` | TUI hidden-feature spec drives provider/resume/new through `run_chat_tui_submission` | TUI / component dispatch; no live terminal |
+| `/compact`, `/summarize`, `/init`, `/bootstrap` | `claude_full/commands.spl` root metadata/aliases through `chat_tui.spl` generic dispatch | `chat_tui_spec.spl`, `chat_tui_runtime_spec.spl` | Pure dispatch, TUI submission, and injected plain loop prove canonical unimplemented output, unchanged conversation/session/title/status, one exact System transcript line with cleared input, and zero model/persistence; command help does not advertise them and the 33 leaf-gate dimensions remain parts-bin-only | CLI/TUI / component proof; cached-wrapper stdin execution blocked |
 | CLI/TUI/GUI shared dummy-provider seam | `provider.spl`, `interface_text.spl`, GUI modules | Core unit specs | `llm_caret_interfaces_spec.spl` | All / no modern steps or visible TUI evidence |
 | Live Claude responses, tokens, model, system prompt, resume | `claude_cli.spl` | Parser/argv unit specs | `llm_caret_live_spec.spl`, `llm_caret_live_comprehensive_spec.spl` | CLI / opt-in; comprehensive spec contains three skip helpers |
 
@@ -499,19 +500,19 @@ and overwriting the prior persisted conversation.
 
 Focused system manuals are mirrored under `doc/06_spec/03_system/...`.
 Source-synchronized unit manuals now mirror 80 Claude CLI, 31 provider, 24
-production-chat, 60 TUI, 22 raw-input, 19 injected-runtime, 57 main-entry, 12
+production-chat, 62 TUI, 22 raw-input, 20 injected-runtime, 57 main-entry, 12
 production-config, 37 production-tools, and 14 production-types scenarios.
 Because docgen cannot execute in the current runtime, all refreshed manuals
 explicitly report zero executed scenarios and do not claim a PASS.
-The 356 source-synchronized unit examples plus eight CLI feature-contract,
+The 359 source-synchronized unit examples plus eight CLI feature-contract,
 three process-hardening, nine TUI/hidden, five managed-environment, five
 installed-Claude, five root-registry, six live-PTY, and one
 hidden-stub aggregate plus three feature-gate aggregate examples form the
-401-example base across the listed executable files (the root-registry spec
+404-example base across the listed executable files (the root-registry spec
 contains five scenarios). The 88 focused owner/effect examples now synchronized
 across Tasks V2, swarms, team memory, insights, review/rewind/sandbox, bridge
 helpers/command, AttachmentMessage, and withRetry raise the scoped modern
-`should` total to 489 examples with canonical matchers. The pre-existing
+`should` total to 492 examples with canonical matchers. The pre-existing
 unit/component/process manuals retain
 their documented body-parity checks. The feature-gate manual statically checks
 exact 33-row contract/state parity and carries complete folded executable

@@ -2,11 +2,11 @@
 
 > Source-synchronized unit manual. The current self-hosted SSpec runner is
 > blocked before trustworthy scenario execution, so this document records
-> 60 active scenarios and 0 executed scenarios.
+> 62 active scenarios and 0 executed scenarios.
 
 | Tests | Active | Skipped | Pending | Executed |
 |------:|-------:|--------:|--------:|---------:|
-| 60 | 60 | 0 | 0 | 0 |
+| 62 | 62 | 0 | 0 | 0 |
 
 **Executable source:** `test/01_unit/app/llm_caret/chat_tui_spec.spl`
 
@@ -1021,6 +1021,86 @@ expect(dispatch_slash(
 
 </details>
 
+## Promptless command fixture contract
+
+The promptless command scenarios share the exact executable case shape and
+pure-dispatch checker below.
+
+<details>
+<summary>Executable helper source</summary>
+
+```simple
+struct CaretPromptlessCommandCase:
+    input: text
+    canonical: text
+    expected_message: text
+
+fn setup_promptless_command_cases() -> [CaretPromptlessCommandCase]:
+    [
+        CaretPromptlessCommandCase(
+            input: "/compact",
+            canonical: "/compact",
+            expected_message: "Command not implemented in Caret: /compact"
+        ),
+        CaretPromptlessCommandCase(
+            input: "/summarize",
+            canonical: "/compact",
+            expected_message: "Command not implemented in Caret: /compact"
+        ),
+        CaretPromptlessCommandCase(
+            input: "/init",
+            canonical: "/init",
+            expected_message: "Command not implemented in Caret: /init"
+        ),
+        CaretPromptlessCommandCase(
+            input: "/bootstrap",
+            canonical: "/init",
+            expected_message: "Command not implemented in Caret: /init"
+        )
+    ]
+
+fn check_promptless_dispatch(case: CaretPromptlessCommandCase):
+    val (cmd, arg) = parse_slash_command(case.input)
+    expect(arg).to_equal("")
+    val result = dispatch_slash(cmd, arg, _test_hooks())
+    expect(result.message).to_equal(case.expected_message)
+    expect(result.message).to_equal(
+        "Command not implemented in Caret: " + case.canonical
+    )
+    expect(result.exit).to_be(false)
+    expect(result.new_conv).to_be(false)
+    expect(result.replace_conv).to_be(false)
+    expect(result.loaded_messages.len()).to_equal(0)
+    expect(result.new_session_id).to_equal("")
+    expect(result.status_provider).to_equal("")
+    expect(result.status_model).to_equal("")
+    expect(result.status_session).to_equal("")
+```
+
+</details>
+
+## should canonicalize accepted promptless commands without state mutation
+
+**Group:** Slash command dispatch
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+step("Load the accepted promptless command aliases")
+val cases = setup_promptless_command_cases()
+_reset_submission_call_counts()
+step("Dispatch the command through the shipped Caret path")
+for case in cases:
+    check_promptless_dispatch(case)
+step("Check canonical output and zero model submission")
+expect(cases.len()).to_equal(4)
+expect(SUBMISSION_RESPONDER_CALLS).to_equal(0)
+expect(SUBMISSION_PERSIST_CALLS).to_equal(0)
+```
+
+</details>
+
 ## should stop on the quit alias without mutating conversation state
 
 **Group:** TUI submission state transition
@@ -1055,6 +1135,7 @@ expect(tui_transcript_len()).to_equal(0)
 
 ```simple
 tui_transcript_reset()
+_reset_submission_call_counts()
 val ui = make_chat_tui_with_status(
     "llm_caret - dummy",
     "provider=dummy model=dummy-hello session=s0"
@@ -1071,6 +1152,8 @@ expect(tui_transcript_line_text(0)).to_equal("You: hello")
 expect(tui_transcript_line_text(1)).to_equal(
     "Assistant: submission reply"
 )
+expect(SUBMISSION_RESPONDER_CALLS).to_equal(1)
+expect(SUBMISSION_PERSIST_CALLS).to_equal(1)
 ```
 
 </details>
@@ -1191,12 +1274,56 @@ expect(tui_transcript_line_text(0).contains(
 
 </details>
 
+## should render accepted promptless commands without model submission
+
+**Group:** TUI submission state transition
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+step("Load the accepted promptless command aliases")
+val cases = setup_promptless_command_cases()
+val original = [new_user_message("keep this")]
+val original_ui = make_chat_tui_with_status(
+    "llm_caret - dummy",
+    "provider=dummy model=dummy-hello session=s0"
+)
+step("Dispatch the command through the shipped Caret path")
+step("Check canonical output and zero model submission")
+for case in cases:
+    tui_transcript_reset()
+    _reset_submission_call_counts()
+    val result = run_chat_tui_submission(
+        original_ui, original, "s0", case.input,
+        default_policy("build/tmp/caret-tui-unit"),
+        _submission_response, _test_hooks()
+    )
+    expect(result.running).to_be(true)
+    expect(result.submitted_to_model).to_be(false)
+    expect(SUBMISSION_RESPONDER_CALLS).to_equal(0)
+    expect(SUBMISSION_PERSIST_CALLS).to_equal(0)
+    expect(result.session_id).to_equal("s0")
+    expect(result.conversation.len()).to_equal(1)
+    expect(result.conversation[0].role).to_equal("user")
+    expect(result.conversation[0].content).to_equal("keep this")
+    expect(result.ui.title).to_equal(original_ui.title)
+    expect(result.ui.status).to_equal(original_ui.status)
+    expect(result.ui.input.value).to_equal("")
+    expect(tui_transcript_len()).to_equal(1)
+    expect(tui_transcript_line_text(0)).to_equal(
+        "System: " + case.expected_message
+    )
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 60 |
-| Active scenarios | 60 |
+| Total scenarios | 62 |
+| Active scenarios | 62 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 | Executed scenarios | 0 |

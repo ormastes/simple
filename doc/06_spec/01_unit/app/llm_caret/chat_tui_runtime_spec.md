@@ -8,9 +8,16 @@
 
 | Tests | Active | Skipped | Pending | Executed |
 |------:|-------:|--------:|--------:|---------:|
-| 19 | 19 | 0 | 0 | 0 |
+| 20 | 20 | 0 | 0 | 0 |
 
 **Executable source:** `test/01_unit/app/llm_caret/chat_tui_runtime_spec.spl`
+
+The promptless-command fixture uses the frozen
+`CaretPromptlessCommandCase(input, canonical, expected_message)` record.
+`setup_promptless_command_cases` supplies `/compact`, `/summarize`, `/init`,
+and `/bootstrap`; `check_promptless_dispatch` checks their exact canonical
+messages plus the injected plain-loop result, counters, input consumption, and
+I/O event trace.
 
 ## REQ-LLM-CARET-TUI-HARDEN-009: frame and input behavior
 
@@ -66,7 +73,36 @@ to auto-follow.
 
 **Expected:** The model hook observes `sonnet`, one complete conversation is
 persisted to the current session, and the visible model/assistant output is
-emitted.
+emitted. The responder counter is exactly one, providing the positive control
+for the following promptless-command scenario's zero-call assertion.
+
+### should dispatch accepted promptless aliases without model submission
+
+**Step:** Load the accepted promptless command aliases.
+
+**Expected:** The fixture loads `/compact` and `/init` plus the aliases
+`/summarize` → `/compact` and `/bootstrap` → `/init`, with exact canonical
+unimplemented messages.
+
+**Step:** Dispatch the command through the shipped Caret path.
+
+**Expected:** Injected `CaretIo` feeds `/compact`, `/summarize`, `/init`,
+`/bootstrap`, and `/exit` through `run_chat_plain`.
+
+**Step:** Check canonical output and zero model submission.
+
+**Expected:** The result is `mode=plain`, `ok=true`, and
+`exit_reason=command_exit`. The complete output is exactly:
+
+```text
+"> Command not implemented in Caret: /compact\n> Command not implemented in Caret: /compact\n> Command not implemented in Caret: /init\n> Command not implemented in Caret: /init\n> "
+```
+
+All five lines are consumed. The responder and persistence counters stay zero;
+the byte, geometry, draw, and flush counters stay zero; and the I/O trace
+contains only the nine expected emits, proving no raw-mode, alternate-screen,
+or cursor mutation. This is injected component evidence only, not cached
+process or installed-wrapper evidence.
 
 ## REQ-LLM-CARET-TUI-HARDEN-007: lifecycle and routing
 
