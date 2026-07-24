@@ -306,6 +306,26 @@ pub(crate) fn evaluate_call(
             return Ok(result);
         }
 
+        // Lazy imports are intentionally resolved only after names owned by the
+        // runtime and spec DSL have had their normal chance to dispatch.
+        let has_known_callable = env.get(name).is_some_and(|value| {
+            matches!(
+                value,
+                Value::Function { .. }
+                    | Value::Lambda { .. }
+                    | Value::NativeFunction(_)
+                    | Value::Constructor { .. }
+                    | Value::Generator(_)
+                    | Value::Object { .. }
+            )
+        });
+        let has_overload = FUNCTION_OVERLOADS.with(|cell| cell.borrow().contains_key(name));
+        if !has_overload && !functions.contains_key(name) && !has_known_callable && !classes.contains_key(name) {
+            crate::interpreter::interpreter_module::force_deferred_uses_for(
+                name, env, functions, classes,
+            )?;
+        }
+
         // Priority 4: Check overloaded regular functions before the flat map fallback.
         let overloads = FUNCTION_OVERLOADS.with(|cell| cell.borrow().get(name).cloned());
         if let Some(overloads) = overloads {
@@ -666,6 +686,12 @@ pub(crate) fn evaluate_call(
                         payload,
                     });
                 }
+            }
+
+            if crate::interpreter::interpreter_module::force_deferred_uses_for(
+                module_name, env, functions, classes,
+            )? {
+                return evaluate_call(callee, args, env, functions, classes, enums, impl_methods);
             }
 
             // Fall back to global functions if module lookup failed

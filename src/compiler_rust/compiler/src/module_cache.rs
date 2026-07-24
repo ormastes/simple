@@ -12,7 +12,7 @@ use tracing::trace;
 use crate::interpreter::FUNCTION_OVERLOADS;
 
 use crate::value::{Env, Value};
-use simple_parser::ast::{ClassDef, EnumDef, FunctionDef};
+use simple_parser::ast::{ClassDef, EnumDef, FunctionDef, ImportTarget, UseStmt};
 
 /// Check if loader tracing/summary is enabled via SIMPLE_LOADER_TRACE env var.
 fn loader_stats_enabled() -> bool {
@@ -68,6 +68,13 @@ thread_local! {
     pub static PARTIAL_MODULE_EXPORTS_CACHE: RefCell<HashMap<PathBuf, Value>> = RefCell::new(HashMap::new());
     // Total modules loaded counter - reset between test files to prevent OOM
     pub static TOTAL_MODULES_LOADED: RefCell<usize> = const { RefCell::new(0) };
+    pub static DEFERRED_USES: RefCell<Vec<DeferredUse>> = const { RefCell::new(Vec::new()) };
+}
+
+#[derive(Clone)]
+pub struct DeferredUse {
+    pub use_stmt: UseStmt,
+    pub current_file: Option<PathBuf>,
 }
 
 /// Clear the module exports cache (useful between test runs)
@@ -80,6 +87,7 @@ pub fn clear_module_cache() {
     MODULE_LOAD_DEPTH.with(|depth| *depth.borrow_mut() = 0);
     PARTIAL_MODULE_EXPORTS_CACHE.with(|cache| cache.borrow_mut().clear());
     TOTAL_MODULES_LOADED.with(|c| *c.borrow_mut() = 0);
+    DEFERRED_USES.with(|uses| uses.borrow_mut().clear());
     PATH_KEY_CACHE.with(|cache| cache.borrow_mut().clear());
     // Print loader summary before clearing (if SIMPLE_LOADER_TRACE=1)
     print_loader_summary();
@@ -114,9 +122,38 @@ pub fn clear_module_cache_selective() {
     PARTIAL_MODULE_EXPORTS_CACHE.with(|cache| cache.borrow_mut().clear());
     // Reset module counter but don't clear PATH_KEY_CACHE (path normalization is stable)
     TOTAL_MODULES_LOADED.with(|c| *c.borrow_mut() = 0);
+    DEFERRED_USES.with(|uses| uses.borrow_mut().clear());
     // Keep path resolution cache (stable across tests)
     super::interpreter_module::reset_resolve_stats();
     crate::memory_guard::reset_stats();
+}
+
+pub fn defer_use(use_stmt: UseStmt, current_file: Option<&Path>) {
+    DEFERRED_USES.with(|uses| {
+        uses.borrow_mut().push(DeferredUse {
+            use_stmt,
+            current_file: current_file.map(Path::to_path_buf),
+        });
+    });
+}
+
+fn target_binds(target: &ImportTarget, symbol: &str) -> bool {
+    match target {
+        ImportTarget::Single(name) => name == symbol,
+        ImportTarget::Aliased { alias, .. } => alias == symbol,
+        ImportTarget::Group(items) => items.iter().any(|item| target_binds(item, symbol)),
+        ImportTarget::Glob => true,
+    }
+}
+
+pub fn take_deferred_use_for(symbol: &str) -> Option<DeferredUse> {
+    DEFERRED_USES.with(|uses| {
+        let mut uses = uses.borrow_mut();
+        let index = uses
+            .iter()
+            .position(|deferred| target_binds(&deferred.use_stmt.target, symbol))?;
+        Some(uses.remove(index))
+    })
 }
 
 /// Increment total modules loaded counter, return new count

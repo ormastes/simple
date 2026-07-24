@@ -1256,6 +1256,14 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
             }
             // Module system nodes
             Node::UseStmt(use_stmt) => {
+                if use_stmt.is_type_only {
+                    continue;
+                }
+                if use_stmt.is_lazy {
+                    let current_file = super::get_current_file();
+                    crate::interpreter::module_cache::defer_use(use_stmt.clone(), current_file.as_deref());
+                    continue;
+                }
                 // Handle runtime module loading
                 // Determine the binding name (alias or imported item name)
                 let binding_name = match &use_stmt.target {

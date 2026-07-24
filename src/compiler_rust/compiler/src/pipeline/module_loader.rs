@@ -1516,6 +1516,10 @@ fn load_module_with_imports_internal(
     let mut items = Vec::new();
     for item in module.items {
         if let Node::UseStmt(use_stmt) = &item {
+            if use_stmt.is_lazy {
+                items.push(item);
+                continue;
+            }
             if let Some(resolved) = resolve_use_to_path(use_stmt, path.parent().unwrap_or(Path::new("."))) {
                 if flatten_imports {
                     let flatten_this_import = should_flatten_nested_import(use_stmt, &source)
@@ -1983,6 +1987,20 @@ mod tests {
             is_type_only: false,
             is_lazy: false,
         }
+    }
+
+    #[test]
+    fn lazy_import_stays_unflattened_until_runtime_use() {
+        let temp = tempfile::tempdir().unwrap();
+        let entry = temp.path().join("entry.spl");
+        fs::write(&entry, "use lazy .broken.*\nfn main(): 0\n").unwrap();
+        fs::write(temp.path().join("broken.spl"), "const boom = missing\n").unwrap();
+
+        let module = load_module_with_imports(&entry, &mut HashSet::new()).unwrap();
+
+        assert!(module.items.iter().any(|item| {
+            matches!(item, Node::UseStmt(use_stmt) if use_stmt.is_lazy)
+        }));
     }
 
     #[test]

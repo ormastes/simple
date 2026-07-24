@@ -1114,9 +1114,10 @@ mod tests {
         mark_module_loading, prefer_package_init_for_member_import, resolve_member_import_target,
         should_keep_selective_export, unmark_module_loading,
     };
+    use crate::interpreter::{evaluate_expr, ImplMethods};
     use crate::value::Value;
-    use super::super::module_cache::{clear_module_cache, total_modules_loaded};
-    use simple_parser::ast::{ImportTarget, ModulePath, Node, UseStmt};
+    use super::super::module_cache::{clear_module_cache, defer_use, total_modules_loaded};
+    use simple_parser::ast::{Argument, Expr, ImportTarget, ModulePath, Node, UseStmt};
     use simple_parser::token::Span;
     use std::collections::HashMap;
     use std::fs;
@@ -1171,6 +1172,290 @@ mod tests {
         assert_eq!(total_modules_loaded(), 1);
         load_and_merge_module(&use_stmt, Some(&entry), &mut functions, &mut classes, &mut enums).unwrap();
         assert_eq!(total_modules_loaded(), 1);
+        clear_module_cache();
+    }
+
+    #[test]
+    fn lazy_use_defers_until_identifier_or_qualified_access() {
+        clear_module_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let entry = temp.path().join("entry.spl");
+        fs::write(&entry, "").unwrap();
+        fs::write(temp.path().join("provider.spl"), "fn later() -> i64: 42\nexport later\n").unwrap();
+        fs::write(
+            temp.path().join("direct.spl"),
+            "fn direct() -> i64: 7\nfn call_me() -> i64: 7\nexport direct, call_me\n",
+        )
+        .unwrap();
+        fs::write(temp.path().join("qualified.spl"), "fn call_me() -> i64: 9\nexport call_me\n").unwrap();
+        fs::write(temp.path().join("broken.spl"), "const boom = missing\n").unwrap();
+        let mut env = crate::value::Env::new();
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let enums = HashMap::new();
+        let impl_methods: ImplMethods = HashMap::new();
+
+        defer_use(
+            use_stmt_with_path(&["broken"], ImportTarget::Glob),
+            Some(&entry),
+        );
+        assert_eq!(total_modules_loaded(), 0, "unused broken lazy use must not load");
+        assert!(evaluate_expr(
+            &Expr::Identifier("boom".to_string()),
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .is_err());
+        assert_eq!(total_modules_loaded(), 0, "failed force must roll back its load");
+        clear_module_cache();
+
+        defer_use(
+            use_stmt_with_path(
+                &["provider"],
+                ImportTarget::Group(vec![ImportTarget::Single("later".to_string())]),
+            ),
+            Some(&entry),
+        );
+        let value = evaluate_expr(
+            &Expr::Identifier("later".to_string()),
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .unwrap();
+        assert!(matches!(value, Value::Function { .. }));
+        assert_eq!(total_modules_loaded(), 1);
+        let _ = evaluate_expr(
+            &Expr::Identifier("later".to_string()),
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .unwrap();
+        assert_eq!(total_modules_loaded(), 1, "first use must load once");
+
+        defer_use(
+            use_stmt_with_path(
+                &["provider"],
+                ImportTarget::Group(vec![ImportTarget::Aliased {
+                    name: "later".to_string(),
+                    alias: "renamed".to_string(),
+                }]),
+            ),
+            Some(&entry),
+        );
+        let aliased = evaluate_expr(
+            &Expr::Identifier("renamed".to_string()),
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .unwrap();
+        assert!(matches!(aliased, Value::Function { .. }));
+        assert!(functions.contains_key("renamed"));
+        assert_eq!(total_modules_loaded(), 1, "alias should reuse the module cache");
+
+        defer_use(
+            UseStmt {
+                span: Span::new(0, 0, 0, 0),
+                path: ModulePath { segments: vec![] },
+                target: ImportTarget::Single("provider".to_string()),
+                is_type_only: false,
+                is_lazy: true,
+            },
+            Some(&entry),
+        );
+        let qualified = evaluate_expr(
+            &Expr::FieldAccess {
+                receiver: Box::new(Expr::Identifier("provider".to_string())),
+                field: "later".to_string(),
+            },
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .unwrap();
+        assert!(matches!(qualified, Value::Function { .. }));
+        assert_eq!(total_modules_loaded(), 1, "qualified access must use the cache");
+
+        defer_use(
+            use_stmt_with_path(
+                &["direct"],
+                ImportTarget::Group(vec![ImportTarget::Single("direct".to_string())]),
+            ),
+            Some(&entry),
+        );
+        let direct = evaluate_expr(
+            &Expr::Call {
+                callee: Box::new(Expr::Identifier("direct".to_string())),
+                args: Vec::<Argument>::new(),
+            },
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .unwrap();
+        assert!(matches!(direct, Value::Int(7)));
+        assert_eq!(total_modules_loaded(), 2, "direct call must trigger exactly one load");
+        assert!(functions.contains_key("call_me"), "collision fixture must be in global function scope");
+
+        defer_use(
+            UseStmt {
+                span: Span::new(0, 0, 0, 0),
+                path: ModulePath { segments: vec![] },
+                target: ImportTarget::Single("qualified".to_string()),
+                is_type_only: false,
+                is_lazy: true,
+            },
+            Some(&entry),
+        );
+        let qualified_call = evaluate_expr(
+            &Expr::Call {
+                callee: Box::new(Expr::FieldAccess {
+                    receiver: Box::new(Expr::Identifier("qualified".to_string())),
+                    field: "call_me".to_string(),
+                }),
+                args: Vec::new(),
+            },
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .unwrap();
+        assert!(matches!(qualified_call, Value::Int(9)));
+        assert_eq!(total_modules_loaded(), 3, "qualified call must force its module");
+
+        fs::write(
+            temp.path().join("types.spl"),
+            "class LazyClass:\n    value: i64\n\nenum LazyEnum:\n    Ready\n\nexport LazyClass, LazyEnum\n",
+        )
+        .unwrap();
+        defer_use(
+            use_stmt_with_path(
+                &["types"],
+                ImportTarget::Group(vec![ImportTarget::Single("LazyClass".to_string())]),
+            ),
+            Some(&entry),
+        );
+        let lazy_class = evaluate_expr(
+            &Expr::Identifier("LazyClass".to_string()),
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .unwrap();
+        assert!(matches!(lazy_class, Value::Constructor { .. }));
+        assert_eq!(total_modules_loaded(), 4, "class first use must force its module");
+
+        defer_use(
+            use_stmt_with_path(
+                &["types"],
+                ImportTarget::Group(vec![ImportTarget::Single("LazyEnum".to_string())]),
+            ),
+            Some(&entry),
+        );
+        let lazy_enum = evaluate_expr(
+            &Expr::Identifier("LazyEnum".to_string()),
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .unwrap();
+        assert!(matches!(lazy_enum, Value::EnumType { .. }));
+        assert_eq!(total_modules_loaded(), 4, "enum force must reuse the module cache");
+
+        defer_use(
+            use_stmt_with_path(&["broken"], ImportTarget::Glob),
+            Some(&entry),
+        );
+        let direct_again = evaluate_expr(
+            &Expr::Call {
+                callee: Box::new(Expr::Identifier("direct".to_string())),
+                args: Vec::<Argument>::new(),
+            },
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .unwrap();
+        assert!(matches!(direct_again, Value::Int(7)));
+        assert_eq!(total_modules_loaded(), 4, "resolved calls must not force deferred globs");
+        clear_module_cache();
+    }
+
+    #[test]
+    fn lazy_glob_stops_after_the_first_provider_resolves_the_symbol() {
+        clear_module_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let entry = temp.path().join("entry.spl");
+        fs::write(&entry, "").unwrap();
+        fs::write(temp.path().join("first.spl"), "const shared = 1\nexport shared\n").unwrap();
+        fs::write(temp.path().join("second.spl"), "const shared = 2\nexport shared\n").unwrap();
+        let mut env = crate::value::Env::new();
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let enums = HashMap::new();
+        let impl_methods: ImplMethods = HashMap::new();
+
+        defer_use(use_stmt_with_path(&["first"], ImportTarget::Glob), Some(&entry));
+        defer_use(use_stmt_with_path(&["second"], ImportTarget::Glob), Some(&entry));
+        let value = evaluate_expr(
+            &Expr::Identifier("shared".to_string()),
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .unwrap();
+        assert!(matches!(value, Value::Int(1)));
+        assert_eq!(total_modules_loaded(), 1, "later glob providers must remain deferred");
+        clear_module_cache();
+    }
+
+    #[test]
+    fn parsed_nested_lazy_use_registers_without_loading() {
+        clear_module_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let entry = temp.path().join("entry.spl");
+        fs::write(&entry, "").unwrap();
+        fs::write(temp.path().join("provider.spl"), "const unused = 1\nexport unused\n").unwrap();
+        let mut parser = simple_parser::Parser::new("use lazy provider.{unused}\n");
+        let module = parser.parse().unwrap();
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let mut enums = HashMap::new();
+
+        super::super::module_evaluator::evaluate_module_exports(
+            &module.items,
+            Some(&entry),
+            &mut functions,
+            &mut classes,
+            &mut enums,
+        )
+        .unwrap();
+        assert_eq!(total_modules_loaded(), 0);
         clear_module_cache();
     }
 

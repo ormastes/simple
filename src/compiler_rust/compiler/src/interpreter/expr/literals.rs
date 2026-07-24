@@ -325,6 +325,24 @@ pub(super) fn eval_literal_expr(
                 return Ok(Some(Value::Symbol(name.clone())));
             }
 
+            crate::interpreter::interpreter_module::force_deferred_uses_for(name, env, functions, classes)?;
+            if let Some(val) = env.get(name) {
+                return Ok(Some(val.clone()));
+            }
+            if let Some(func) = functions.get(name).cloned() {
+                return Ok(Some(Value::Function {
+                    name: name.clone(),
+                    def: func,
+                    captured_env: Arc::new(Env::new()),
+                }));
+            }
+            if classes.contains_key(name) {
+                return Ok(Some(Value::Constructor { class_name: name.clone() }));
+            }
+            if GLOBAL_ENUMS.with(|cell| cell.borrow().contains_key(name)) {
+                return Ok(Some(Value::EnumType { enum_name: name.clone() }));
+            }
+
             // Collect all known names for typo suggestion
             let known_names: Vec<&str> = env
                 .keys()

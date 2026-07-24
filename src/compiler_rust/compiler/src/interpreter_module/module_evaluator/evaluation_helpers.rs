@@ -13,10 +13,10 @@ use simple_parser::ast::{Attribute, ClassDef, Expr, FunctionDef, ImportTarget, N
 
 use crate::error::CompileError;
 use crate::value::{Env, Value};
-use crate::interpreter::{FUNCTION_OVERLOADS, FUNCTION_MODULE_OWNER};
+use crate::interpreter::{FUNCTION_OVERLOADS, FUNCTION_MODULE_OWNER, GLOBAL_ENUMS};
 
 use crate::interpreter::interpreter_module::export_handler::load_export_source;
-use crate::interpreter::module_cache::filter_functions_from_value;
+use crate::interpreter::module_cache::{defer_use, filter_functions_from_value, take_deferred_use_for};
 
 type Enums = HashMap<String, Arc<simple_parser::ast::EnumDef>>;
 type ImplMethods = HashMap<String, Vec<Arc<simple_parser::ast::FunctionDef>>>;
@@ -494,11 +494,9 @@ fn process_use_stmt(
         return Ok(());
     }
 
-    // Note: `use lazy` is parsed but loaded eagerly in the Rust bootstrap interpreter.
-    // Actual lazy/deferred loading is implemented in the Simple interpreter
-    // (src/compiler/10.frontend/core/interpreter/eval_stmts.spl).
     if use_stmt.is_lazy {
-        trace!("Loading lazy import eagerly (Rust bootstrap): {:?}", use_stmt.path);
+        defer_use(use_stmt.clone(), module_path);
+        return Ok(());
     }
 
     // Recursively load imported modules
@@ -595,6 +593,93 @@ fn process_use_stmt(
         }
     }
     Ok(())
+}
+
+fn import_binding_name(use_stmt: &simple_parser::ast::UseStmt) -> String {
+    match &use_stmt.target {
+        ImportTarget::Single(name) => name.clone(),
+        ImportTarget::Aliased { alias, .. } => alias.clone(),
+        ImportTarget::Glob | ImportTarget::Group(_) => use_stmt
+            .path
+            .segments
+            .last()
+            .cloned()
+            .unwrap_or_else(|| "module".to_string()),
+    }
+}
+
+pub(crate) fn force_deferred_uses_for(
+    symbol: &str,
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+) -> Result<bool, CompileError> {
+    let mut loaded = false;
+    while let Some(deferred_use) = take_deferred_use_for(symbol) {
+        loaded = true;
+        let mut enums = HashMap::new();
+        let value = crate::interpreter::interpreter_module::module_loader::load_and_merge_module(
+            &deferred_use.use_stmt,
+            deferred_use.current_file.as_deref(),
+            functions,
+            classes,
+            &mut enums,
+        )?;
+        GLOBAL_ENUMS.with(|global| {
+            global.borrow_mut().extend(enums);
+        });
+        match &deferred_use.use_stmt.target {
+            ImportTarget::Group(items) => {
+                if let Value::Dict(exports) = &value {
+                    for item in items {
+                        let (source, binding) = match item {
+                            ImportTarget::Single(name) => (name, name),
+                            ImportTarget::Aliased { name, alias } => (name, alias),
+                            _ => continue,
+                        };
+                        if let Some(export) = exports.get(source) {
+                            if let Value::Function { def, .. } = export {
+                                functions.insert(binding.clone(), Arc::clone(def));
+                            }
+                            env.insert(binding.clone(), export.clone());
+                            MODULE_GLOBALS.with(|global| {
+                                global.borrow_mut().insert(binding.clone(), export.clone());
+                            });
+                        }
+                    }
+                }
+            }
+            ImportTarget::Glob => {
+                if let Value::Dict(exports) = &value {
+                    for (name, export) in exports.iter() {
+                        if let Value::Function { def, .. } = export {
+                            if name != "main" {
+                                functions.insert(name.clone(), Arc::clone(def));
+                            }
+                        }
+                        env.insert(name.clone(), export.clone());
+                        MODULE_GLOBALS.with(|global| {
+                            global.borrow_mut().insert(name.clone(), export.clone());
+                        });
+                    }
+                }
+            }
+            ImportTarget::Single(_) | ImportTarget::Aliased { .. } => {}
+        }
+        let binding_name = import_binding_name(&deferred_use.use_stmt);
+        env.insert(binding_name.clone(), value.clone());
+        MODULE_GLOBALS.with(|global| {
+            global.borrow_mut().insert(binding_name, value);
+        });
+        let resolved = env.contains_key(symbol)
+            || functions.contains_key(symbol)
+            || classes.contains_key(symbol)
+            || GLOBAL_ENUMS.with(|global| global.borrow().contains_key(symbol));
+        if resolved {
+            break;
+        }
+    }
+    Ok(loaded)
 }
 
 /// Process an export statement

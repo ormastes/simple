@@ -19,6 +19,7 @@ use evaluation_helpers::{
     add_builtin_types, create_filtered_env, export_functions, process_bare_exports, process_imports_and_assignments,
     register_definitions,
 };
+pub(crate) use evaluation_helpers::force_deferred_uses_for;
 
 type Enums = HashMap<String, Arc<EnumDef>>;
 type ImplMethods = HashMap<String, Vec<Arc<simple_parser::ast::FunctionDef>>>;

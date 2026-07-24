@@ -23,6 +23,7 @@ mod path_resolution;
 
 // Re-export public functions for backward compatibility
 pub use module_evaluator::evaluate_module_exports;
+pub(crate) use module_evaluator::force_deferred_uses_for;
 pub use module_loader::{get_import_alias, load_and_merge_module};
 pub use module_merger::merge_module_definitions;
 pub use path_resolution::{resolve_module_path, clear_path_resolution_cache, print_resolve_stats, reset_resolve_stats};
