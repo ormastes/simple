@@ -30,6 +30,42 @@ describe "SimpleOS build workflow contract":
         expect(smoke_job_block(workflow)).to_contain("- name: Build and deploy pure-Simple CLI")
         expect(full).to_contain("- name: Build and deploy pure-Simple CLI")
 
+    it "retains SHA-bound bootstrap diagnostics only after deployment failure":
+        val workflow = workflow_text()
+        val smoke = smoke_job_block(workflow)
+        val full_start = workflow.index_of("\n  full:\n") ?? -1
+        val full = workflow.slice(full_start, workflow.len())
+        val upload_name = "- name: Upload pure-Simple bootstrap failure logs"
+        val smoke_build_at = smoke.index_of("- name: Build and deploy pure-Simple CLI") ?? -1
+        val smoke_upload_at = smoke.index_of(upload_name) ?? -1
+        val smoke_install_at = smoke.index_of("- name: Install SimpleOS evidence dependencies") ?? -1
+        val full_build_at = full.index_of("- name: Build and deploy pure-Simple CLI") ?? -1
+        val full_upload_at = full.index_of(upload_name) ?? -1
+        val full_install_at = full.index_of("- name: Install SimpleOS evidence dependencies") ?? -1
+
+        expect(smoke_build_at).to_be_less_than(smoke_upload_at)
+        expect(smoke_upload_at).to_be_less_than(smoke_install_at)
+        expect(full_build_at).to_be_less_than(full_upload_at)
+        expect(full_upload_at).to_be_less_than(full_install_at)
+        expect(smoke.slice(smoke_build_at, smoke_upload_at)).to_contain("id: pure_simple_bootstrap")
+        expect(full.slice(full_build_at, full_upload_at)).to_contain("id: pure_simple_bootstrap")
+        val smoke_upload = smoke.slice(smoke_upload_at, smoke_install_at)
+        val full_upload = full.slice(full_upload_at, full_install_at)
+        expect(smoke).to_contain("          esac\n\n      " + upload_name)
+        expect(full).to_contain("          esac\n\n      " + upload_name)
+        expect(smoke_upload).to_contain("if: failure() && steps.pure_simple_bootstrap.outcome == 'failure'")
+        expect(full_upload).to_contain("if: failure() && steps.pure_simple_bootstrap.outcome == 'failure'")
+        expect(smoke_upload).to_contain("uses: actions/upload-artifact@v4")
+        expect(full_upload).to_contain("uses: actions/upload-artifact@v4")
+        expect(smoke_upload).to_contain("name: simpleos-${{ github.job }}-pure-bootstrap-failure-${{ github.sha }}")
+        expect(full_upload).to_contain("name: simpleos-${{ github.job }}-pure-bootstrap-failure-${{ github.sha }}")
+        expect(smoke_upload).to_contain("path: build/bootstrap/logs/**")
+        expect(full_upload).to_contain("path: build/bootstrap/logs/**")
+        expect(smoke_upload).to_contain("if-no-files-found: error")
+        expect(full_upload).to_contain("if-no-files-found: error")
+        expect(smoke_upload).to_contain("retention-days: 7")
+        expect(full_upload).to_contain("retention-days: 7")
+
     it "installs the complete x86 evidence toolchain":
         val workflow = workflow_text()
 

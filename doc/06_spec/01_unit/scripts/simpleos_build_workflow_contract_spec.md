@@ -15,6 +15,15 @@ Cranelift, two workers, and disables MCP. The deployed `bin/simple` must be
 executable, and a version identifying a Rust seed, bootstrap seed, or
 Rust-built binary fails the job.
 
+## Retain bootstrap failures
+
+Immediately after each `pure_simple_bootstrap` deployment step, an artifact
+step retains `build/bootstrap/logs/**` only when that specific step failed. Its
+name includes both the job identity and commit SHA, missing logs are an error,
+and retention is seven days. Earlier unrelated failures cannot trigger this
+upload, and the diagnostic does not make later bootstrap or evidence checks
+optional.
+
 ## Fail-closed smoke evidence
 
 The smoke job has no `continue-on-error`. It installs QEMU, LLVM, FAT tooling,
