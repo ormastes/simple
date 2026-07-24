@@ -1064,6 +1064,11 @@ Almost never a std.spec regression. Check, in order:
    stderr is the tell). Restore the sibling, or copy a known-good
    `{simple, simple_seed}` pair from a clean worktree's
    `build/bootstrap/full/<triple>/` to a scratch dir and run from repo root.
+   **Invoke the real path** (`bin/release/<triple>/simple test ...`), not the
+   `bin/simple` symlink — deployed binaries built before the
+   `/proc/self/exe` fix resolve the exe path from argv[0] and skip
+   delegation with an empty sibling path under the symlink. See
+   `doc/08_tracking/bug/cli_symlink_argv0_seed_sibling_lookup_2026-07-24.md`.
 3. **Spec file outside the repo tree.** Module root is the spec file's
    directory; a spec under `/tmp` fails `module path segment 'std' not
    found`. Keep probes inside the repo (e.g. `build/`).

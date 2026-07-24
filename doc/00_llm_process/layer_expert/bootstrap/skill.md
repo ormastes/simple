@@ -125,7 +125,11 @@ the env var points to the correct seed target.
    (`seed sibling not found, skipping delegation` = it's missing → in-process
    fallback fails `unresolved name: describe`). Every deploy must ship the
    pair. Recovery: copy a known-good `{simple, simple_seed}` pair from a clean
-   worktree's `build/bootstrap/full/<triple>/` to a scratch dir.
+   worktree's `build/bootstrap/full/<triple>/` to a scratch dir. Invoke the
+   REAL binary path, not the `bin/simple` symlink — pre-fix deployed binaries
+   derive exe path from argv[0] and skip delegation under the symlink
+   (`cli_symlink_argv0_seed_sibling_lookup_2026-07-24.md`; source fix =
+   `/proc/self/exe` in `_cli_current_exe_path`, active after next redeploy).
 5. **Stale untracked `.smf` stubs poison module resolution tree-wide** —
    symptom is identical to a deploy clobber (every spec fails
    `unresolved name: describe`). `find src test -name '*.smf'` must be empty;
