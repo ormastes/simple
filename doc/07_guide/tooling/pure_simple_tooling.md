@@ -342,7 +342,10 @@ evidence boundary for the important pure-Simple tooling lanes:
   through the exact fresh CLI, preserving their exit statuses.
 - **spipe-docgen** — **Source status:** pure-Simple `simple-core` or
   `core-c-bootstrap` routing is implemented and unknown options fail closed
-  before generation. **Remaining bug/gap:** no fresh qualification evidence.
+  before generation. Sole help returns 0, while mixed or repeated help returns
+  exit 2 before filesystem mutation; see the
+  [mixed-help report](../../08_tracking/bug/spipe_docgen_mixed_help_false_green_2026-07-24.md).
+  **Remaining bug/gap:** no fresh qualification evidence.
   **Next solution:** generate one fixture document with the exact runtime and
   assert the expected output exists and is nonempty.
 - **native-build** — **Source status:** pure-Simple command routing and cached
