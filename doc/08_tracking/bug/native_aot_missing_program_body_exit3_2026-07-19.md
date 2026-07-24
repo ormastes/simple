@@ -1,6 +1,6 @@
 # `compile --native` binary omits program body — silent exit 3 (NIL sentinel)
 
-**Filed:** 2026-07-19 · **Status:** OPEN · **Area:** native AOT / linker
+**Filed:** 2026-07-19 · **Status:** SOURCE FIXED; native execution pending · **Area:** native AOT / linker
 **Blocks:** running showcases as native binaries (the fast lane that escapes
 the interpreter wall now that the LINK step is fixed).
 
@@ -53,9 +53,13 @@ returns NIL** → silent no-op call, exit 3, body never emitted (hence
 interpreter-required function with its FallbackReasons instead of emitting
 a silently-nil binary. Escape hatches: `SIMPLE_NATIVE_ALLOW_INTERP_CALLS=1`
 or bootstrap mode → loud warning + old behavior. Hybrid `run` lane
-untouched. Takes effect on next seed rebuild. Follow-up (open): narrow the
-FString classifier for the AOT path — native interpolation codegen already
-works, so interpolation should not force interpreter routing.
+untouched. Takes effect on next seed rebuild.
+
+The FString follow-up is also implemented: `CompilabilityMode::AotNative`
+does not classify interpolation as requiring the interpreter, while
+`HybridJit` keeps the fallback. On 2026-07-24,
+`cargo test -p simple-compiler test_fstring_interpolation_flagged_hybrid_not_aot --lib`
+passed. A rebuilt standalone native execution remains the final confirmation.
 
 Side finding: files with no qualifying global-init import fail to link with
 undefined `___module_init` — separate pre-existing defect.
