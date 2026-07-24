@@ -668,17 +668,21 @@ the shared binary — deploys require explicit user go-ahead).
   expression `Block`. The source contract pins all four statement payload
   bindings and the expression block binding.
 
-  A no-stub incremental rebuild after that fix completed with `4 compiled,
-  671 cached, 0 failed`; its positional C5 run no longer crashed in prescan.
-  It reached MIR method lowering and failed loudly on unresolved `chr`,
-  `to_char`, and the downstream `char_code_at` call. Targeted invalidation of
-  the method-lowering object rebuilt and relinked a byte-identical compiler,
-  so another identical C5 run was correctly skipped. The remaining smallest
-  fix is to replace the fragile multi/OR `MethodResolution` classifier with
-  one derived runtime discriminant plus exact `Unresolved` and `FreeFunction`
-  booleans. Keep the existing integer-receiver and custom-owner gates; do not
-  add name-only fallbacks. Then rebuild that one module and require a fresh
-  positional no-stub C5 build (`1 compiled, 0 cached, 0 failed`) whose
-  executable exits `42`. Only after that receipt should the next bottom-up
-  item run: positional C9 `.parse_f64()` must exit `42`. See
+  The classifier source contract was 5/5 before the later test additions.
+  A v9 no-stub incremental rebuild completed with `7 compiled, 668 cached,
+  0 failed`, but all three method diagnostics remained unresolved. Trace then
+  proved primitive calls reach `runtime_int=true` and lower successfully; only
+  `CharOwner` plus `char_code_at` still warned. A v11 no-stub rebuild completed
+  with `5 compiled, 670 cached, 0 failed`; its declared-owner provenance bridge
+  eliminated the `chr`/`to_char` warnings. The final positional C5 receipt now
+  fails only at `char_code_at`. That v11 candidate already contains the
+  discriminator-safe `mir_type_is_str` Opaque/Tuple hardening, so repeating
+  that change is not the next fix.
+
+  This C5 diagnosis has reached its three-cycle cap. The next exact diagnostic
+  is to inspect the produced `chr` result/local MIR type and its `let`
+  propagation into `nul` before adding any fallback. Do not infer a new
+  fallback from the remaining `char_code_at` warning. C9 remains gated: only
+  after a fresh positional C5 executable exits `42` should the next bottom-up
+  item run, positional C9 `.parse_f64()` with exit `42`. See
   `native_chr_builtin_no_lowering_2026-07-18.md`.
