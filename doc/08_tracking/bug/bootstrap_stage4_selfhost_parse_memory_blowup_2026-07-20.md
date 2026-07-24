@@ -879,3 +879,36 @@ core-c-bootstrap, 10k-char source):
 So the remaining ~2.26 objs/char in the multifile gate ≈ per-token slice texts
 + per-node arena inner arrays, i.e. Stage 2/3 of the research plan (span
 tokens / per-file free), not a runtime cache gap.
+
+## 2026-07-24 PM — independent re-validation (scaling harness) + redeploy gap
+
+Triggered by a 4.5h self-host build with monotonic RSS→3.9GB. Built a synthetic
+scaling harness (`/tmp/perfscan/{gen,run}.sh`: one file, G groups × 11 fns) and
+measured native-build (cranelift, one-binary) vs input size:
+
+| compiler binary | 3.2K ch | 12.5K ch | 25K ch | 101K ch | 412K ch |
+|---|---|---|---|---|---|
+| deployed `bin/release/.../simple` (01:22, pre-interning) | 1.9s parse | **22.9s parse → SIGILL @ lower_to_mir** | — | — | — |
+| fresh cranelift bootstrap `stage3` (14:49) | 6.3s | 5.7s | 5.8s | 7.9s | 12.9s |
+
+- Deployed binary: **O(n²)** parse (≈4× time per 2× input), ~18.6 heap objects/char,
+  RSS 29→242MB super-linear, then crashes at MIR — the classic pre-interning wall.
+  This is why the 4.5h build never finished: with 2,600 files it was stuck in
+  **phase2:parse**, RSS climbing as the no-GC registry grew (it never reached codegen).
+- Fresh bootstrap: **linear** — 412K chars in 13s (minus ~5.5s fixed link overhead:
+  101K→412K = chars×4.06, var-time×3.08 ≈ linear, not ×16). Built binaries run
+  correctly (input-dependent rc), not stubs.
+
+**Redeploy gap (the actionable finding):** ALL available self-hosted binaries
+(deployed, wt_fa 12:40, stage3 14:49) grep **0** for `rt_string_new_literal`
+(not stripped — other rt_string_* symbols are visible), so the landed interning fix
+(571bb8) is **not compiled into any binary yet**; stage3's linearity comes from the
+lexer `source_chars` fix (102959c), not interning. The current bootstrap seed
+`src/compiler_rust/target/bootstrap/simple` (17:33) DOES emit interning (grep=4) and
+was verified to propagate it into an output binary (grep=1, runs rc=96).
+
+**Action = redeploy, not new code:** rebuild the production self-hosted binary via
+the interning seed (cranelift; `bin/release` swap intentionally deferred). Do NOT
+native-build the whole compiler with the deployed pre-interning binary — that is the
+O(n²) trap. Harness has no generics/monomorphization; a separate mono-phase O(n²),
+if any, is not covered by this (the observed blowup was parse, which is fixed).
