@@ -47,7 +47,7 @@ use crate::value::{Env, Value};
 
 use super::module_cache::{
     cache_module_definitions, cache_module_exports, clear_partial_module_exports, decrement_load_depth,
-    get_cached_module_exports, get_partial_module_exports, increment_load_depth, increment_total_modules,
+    get_cached_module_exports, get_partial_module_exports, increment_load_depth, reserve_module_load,
     is_module_loading, mark_module_loading, merge_cached_module_definitions, unmark_module_loading,
     record_module_visit, record_module_eval_time, record_sibling_preload, MAX_MODULE_DEPTH,
 };
@@ -776,16 +776,18 @@ pub fn load_and_merge_module(
 
     // Check total module count limit to prevent OOM from loading too many modules
     // Only count unique (non-cached) module loads since cached modules don't add memory
-    let total = increment_total_modules();
     let limit = crate::memory_guard::module_limit();
-    if crate::memory_guard::module_limit_exceeded(total, limit) {
-        decrement_load_depth();
-        warn!(total, max = limit, path = ?module_path, "Total module count limit exceeded");
-        return Err(CompileError::Runtime(format!(
-            "Module count limit ({}) exceeded loading {:?}. Too many transitive imports.",
-            limit, module_path
-        )));
-    }
+    let reservation = match reserve_module_load(limit) {
+        Ok(reservation) => reservation,
+        Err(total) => {
+            decrement_load_depth();
+            warn!(total, max = limit, path = ?module_path, "Total module count limit exceeded");
+            return Err(CompileError::Runtime(format!(
+                "Module count limit ({}) exceeded loading {:?}. Too many transitive imports.",
+                limit, module_path
+            )));
+        }
+    };
 
     // Mark this module as currently loading
     debug!(path = ?module_path, depth, "Loading module");
@@ -1051,6 +1053,7 @@ pub fn load_and_merge_module(
     // Also cache the module definitions (classes, functions, enums) for future imports.
     // module_functions is already HashMap<String, Arc<FunctionDef>> -- cache stores Arc clones (cheap).
     cache_module_definitions(&module_path, &module_classes, &module_functions, &module_enums);
+    reservation.commit();
 
     // Merge freshly loaded definitions into caller's scope (same as cache case above).
     // This ensures static method calls work on imported classes.
@@ -1112,11 +1115,64 @@ mod tests {
         should_keep_selective_export, unmark_module_loading,
     };
     use crate::value::Value;
+    use super::super::module_cache::{clear_module_cache, total_modules_loaded};
     use simple_parser::ast::{ImportTarget, ModulePath, Node, UseStmt};
     use simple_parser::token::Span;
     use std::collections::HashMap;
     use std::fs;
     use std::path::Path;
+
+    fn assert_failed_module_load_restores_count(source: &str) {
+        clear_module_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let entry = temp.path().join("entry.spl");
+        let broken = temp.path().join("broken.spl");
+        fs::write(&entry, "").unwrap();
+        fs::write(&broken, source).unwrap();
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let mut enums = HashMap::new();
+
+        assert!(load_and_merge_module(
+            &use_stmt_with_path(&["broken"], ImportTarget::Glob),
+            Some(&entry),
+            &mut functions,
+            &mut classes,
+            &mut enums,
+        )
+        .is_err());
+        assert_eq!(total_modules_loaded(), 0);
+    }
+
+    #[test]
+    fn parse_failure_restores_module_load_reservation() {
+        assert_failed_module_load_restores_count("fn broken(\n");
+    }
+
+    #[test]
+    fn evaluation_failure_restores_module_load_reservation() {
+        assert_failed_module_load_restores_count("const boom = missing\n");
+    }
+
+    #[test]
+    fn successful_module_load_reservation_commits_once_and_cache_hit_does_not_recount() {
+        clear_module_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let entry = temp.path().join("entry.spl");
+        let good = temp.path().join("good.spl");
+        fs::write(&entry, "").unwrap();
+        fs::write(&good, "fn good(): 1\nexport good\n").unwrap();
+        let use_stmt = use_stmt_with_path(&["good"], ImportTarget::Glob);
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let mut enums = HashMap::new();
+
+        load_and_merge_module(&use_stmt, Some(&entry), &mut functions, &mut classes, &mut enums).unwrap();
+        assert_eq!(total_modules_loaded(), 1);
+        load_and_merge_module(&use_stmt, Some(&entry), &mut functions, &mut classes, &mut enums).unwrap();
+        assert_eq!(total_modules_loaded(), 1);
+        clear_module_cache();
+    }
 
     #[test]
     fn gc_boundary_warning_message_flags_nogc_to_gc_imports() {

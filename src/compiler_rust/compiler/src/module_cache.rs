@@ -128,6 +128,48 @@ pub fn increment_total_modules() -> usize {
     })
 }
 
+/// Undo a failed module-load reservation.
+fn decrement_total_modules() {
+    TOTAL_MODULES_LOADED.with(|c| {
+        let mut v = c.borrow_mut();
+        *v = v.checked_sub(1).expect("module-load reservation underflow");
+    });
+}
+
+/// A module-load budget slot. Dropping an uncommitted reservation rolls it back.
+pub struct ModuleLoadReservation {
+    committed: bool,
+}
+
+impl ModuleLoadReservation {
+    pub fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for ModuleLoadReservation {
+    fn drop(&mut self) {
+        if !self.committed {
+            decrement_total_modules();
+        }
+    }
+}
+
+/// Reserve one module-load budget slot, rejecting without retaining an over-limit attempt.
+pub fn reserve_module_load(limit: usize) -> Result<ModuleLoadReservation, usize> {
+    let total = increment_total_modules();
+    if crate::memory_guard::module_limit_exceeded(total, limit) {
+        decrement_total_modules();
+        return Err(total);
+    }
+    Ok(ModuleLoadReservation { committed: false })
+}
+
+#[cfg(test)]
+pub(crate) fn total_modules_loaded() -> usize {
+    TOTAL_MODULES_LOADED.with(|c| *c.borrow())
+}
+
 /// Reset total modules loaded counter
 pub fn reset_total_modules() {
     TOTAL_MODULES_LOADED.with(|c| *c.borrow_mut() = 0);
@@ -484,5 +526,31 @@ pub fn filter_functions_from_value(value: &Value) -> Value {
         }
         // For all other values, clone them as-is
         other => other.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{reserve_module_load, reset_total_modules, total_modules_loaded};
+
+    #[test]
+    fn module_load_reservation_commits_only_successful_loads() {
+        reset_total_modules();
+        {
+            let _reservation = reserve_module_load(1).unwrap();
+            assert_eq!(total_modules_loaded(), 1);
+        }
+        assert_eq!(total_modules_loaded(), 0);
+
+        reserve_module_load(1).unwrap().commit();
+        assert_eq!(total_modules_loaded(), 1);
+        assert!(matches!(reserve_module_load(1), Err(2)));
+        assert_eq!(total_modules_loaded(), 1);
+        reset_total_modules();
+
+        let unlimited = reserve_module_load(0).unwrap();
+        assert_eq!(total_modules_loaded(), 1);
+        drop(unlimited);
+        assert_eq!(total_modules_loaded(), 0);
     }
 }
