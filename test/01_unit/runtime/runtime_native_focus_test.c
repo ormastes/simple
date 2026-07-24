@@ -16,6 +16,7 @@
 SplArray* rt_bytes_from_raw(int64_t ptr, int64_t len);
 SplArray* rt_strsplit(const char* string, const char* delimiter);
 int64_t spl_wffi_call_i64(int64_t fptr, int64_t args_value, int64_t nargs);
+int64_t rt_mutex_new(int64_t initial);
 
 static int64_t add_i64_args(int64_t left, int64_t right) {
     return left + right;
@@ -71,7 +72,63 @@ static int walk_contains(SplArray* paths, const char* expected) {
     return 0;
 }
 
+static int64_t heap_alloc_total(void) {
+    int64_t total = 0;
+    for (int64_t kind = RT_CORE_HEAP_ALLOC_STRING; kind <= RT_CORE_HEAP_ALLOC_FLOAT; kind++) {
+        total += rt_core_heap_alloc_total_kind(kind);
+    }
+    return total;
+}
+
 int main(void) {
+    assert(rt_core_heap_alloc_total_kind(-1) == 0);
+    assert(rt_core_heap_alloc_total_kind(0) == 0);
+    assert(rt_core_heap_alloc_total_kind(7) == 0);
+
+    int64_t allocs = heap_alloc_total();
+    int64_t string_allocs = rt_core_heap_alloc_total_kind(RT_CORE_HEAP_ALLOC_STRING);
+    int64_t cached_one_byte = rt_string_new((const uint8_t*)"q", 1);
+    assert(cached_one_byte != 0);
+    assert(rt_core_heap_alloc_total_kind(RT_CORE_HEAP_ALLOC_STRING) == string_allocs + 1);
+    assert(heap_alloc_total() == allocs + 1);
+    assert(rt_string_new((const uint8_t*)"q", 1) == cached_one_byte);
+    assert(rt_core_heap_alloc_total_kind(RT_CORE_HEAP_ALLOC_STRING) == string_allocs + 1);
+    assert(heap_alloc_total() == allocs + 1);
+
+    allocs = heap_alloc_total();
+    int64_t array_allocs = rt_core_heap_alloc_total_kind(RT_CORE_HEAP_ALLOC_ARRAY);
+    SplArray* counted_array = rt_array_new(0);
+    assert(counted_array != NULL);
+    assert(rt_core_heap_alloc_total_kind(RT_CORE_HEAP_ALLOC_ARRAY) == array_allocs + 1);
+    assert(heap_alloc_total() == allocs + 1);
+    rt_array_free(counted_array);
+    assert(rt_core_heap_alloc_total_kind(RT_CORE_HEAP_ALLOC_ARRAY) == array_allocs + 1);
+    assert(heap_alloc_total() == allocs + 1);
+
+    allocs = heap_alloc_total();
+    int64_t enum_allocs = rt_core_heap_alloc_total_kind(RT_CORE_HEAP_ALLOC_ENUM);
+    assert(rt_enum_new(123456, 654321, rt_value_nil()) != 0);
+    assert(rt_core_heap_alloc_total_kind(RT_CORE_HEAP_ALLOC_ENUM) == enum_allocs + 1);
+    assert(heap_alloc_total() == allocs + 1);
+
+    allocs = heap_alloc_total();
+    int64_t mutex_allocs = rt_core_heap_alloc_total_kind(RT_CORE_HEAP_ALLOC_MUTEX);
+    assert(rt_mutex_new(0) != 0);
+    assert(rt_core_heap_alloc_total_kind(RT_CORE_HEAP_ALLOC_MUTEX) == mutex_allocs + 1);
+    assert(heap_alloc_total() == allocs + 1);
+
+    allocs = heap_alloc_total();
+    int64_t closure_allocs = rt_core_heap_alloc_total_kind(RT_CORE_HEAP_ALLOC_CLOSURE);
+    assert(rt_closure_new((int64_t)(uintptr_t)add_i64_args, 0) != 0);
+    assert(rt_core_heap_alloc_total_kind(RT_CORE_HEAP_ALLOC_CLOSURE) == closure_allocs + 1);
+    assert(heap_alloc_total() == allocs + 1);
+
+    allocs = heap_alloc_total();
+    int64_t float_allocs = rt_core_heap_alloc_total_kind(RT_CORE_HEAP_ALLOC_FLOAT);
+    for (int64_t i = 0; i < 300; i++) assert(rt_value_float(i) != 0);
+    assert(rt_core_heap_alloc_total_kind(RT_CORE_HEAP_ALLOC_FLOAT) == float_allocs + 300);
+    assert(heap_alloc_total() == allocs + 300);
+
     int64_t empty_a = rt_string_new(NULL, 0);
     int64_t empty_b = rt_string_new((const uint8_t*)"", 0);
     int64_t one_a = rt_string_new((const uint8_t*)"a", 1);

@@ -800,6 +800,7 @@ static int rt_core_dict_del(RtCoreDict* d, int64_t key);
 
 static RtCoreString** rt_core_string_registry = NULL;
 static _Atomic size_t rt_core_heap_registry_count = 0;
+static _Atomic uint64_t rt_core_heap_alloc_total_by_kind[7];
 static size_t rt_core_string_registry_len = 0;
 static size_t rt_core_string_registry_cap = 0;
 static RtCoreString* rt_core_short_string_cache[257] = {0};
@@ -826,6 +827,8 @@ static void rt_core_register_string(RtCoreString* s) {
     }
     rt_core_string_registry[rt_core_string_registry_len++] = s;
     atomic_fetch_add_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(
+        &rt_core_heap_alloc_total_by_kind[RT_CORE_HEAP_ALLOC_STRING], 1, memory_order_relaxed);
 }
 
 static int rt_core_is_registered_string(RtCoreString* s) {
@@ -847,6 +850,8 @@ static void rt_core_register_array(RtCoreArray* array) {
     }
     rt_core_array_registry[rt_core_array_registry_len++] = array;
     atomic_fetch_add_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(
+        &rt_core_heap_alloc_total_by_kind[RT_CORE_HEAP_ALLOC_ARRAY], 1, memory_order_relaxed);
 }
 
 static int rt_core_is_registered_array(RtCoreArray* array) {
@@ -881,6 +886,8 @@ static void rt_core_register_mutex(RtCoreMutex* mutex) {
     }
     rt_core_mutex_registry[rt_core_mutex_registry_len++] = mutex;
     atomic_fetch_add_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(
+        &rt_core_heap_alloc_total_by_kind[RT_CORE_HEAP_ALLOC_MUTEX], 1, memory_order_relaxed);
     atomic_flag_clear_explicit(&rt_core_mutex_registry_lock, memory_order_release);
 }
 
@@ -926,6 +933,8 @@ static void rt_core_register_enum(RtCoreEnum* e) {
     }
     rt_core_enum_registry[rt_core_enum_registry_len++] = e;
     atomic_fetch_add_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(
+        &rt_core_heap_alloc_total_by_kind[RT_CORE_HEAP_ALLOC_ENUM], 1, memory_order_relaxed);
 }
 
 static int rt_core_is_registered_enum(RtCoreEnum* e) {
@@ -942,6 +951,13 @@ static atomic_flag rt_core_closure_registry_lock = ATOMIC_FLAG_INIT;
 
 int64_t rt_heap_registry_count(void) {
     return (int64_t)atomic_load_explicit(&rt_core_heap_registry_count, memory_order_relaxed);
+}
+
+int64_t rt_core_heap_alloc_total_kind(int64_t kind) {
+    if (kind < RT_CORE_HEAP_ALLOC_STRING || kind > RT_CORE_HEAP_ALLOC_FLOAT) return 0;
+    uint64_t total =
+        atomic_load_explicit(&rt_core_heap_alloc_total_by_kind[kind], memory_order_relaxed);
+    return total > (uint64_t)INT64_MAX ? INT64_MAX : (int64_t)total;
 }
 
 static void rt_core_closure_registry_acquire(void) {
@@ -972,6 +988,8 @@ static int rt_core_register_closure(RtCoreClosure* closure) {
     }
     rt_core_closure_registry[rt_core_closure_registry_len++] = closure;
     atomic_fetch_add_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(
+        &rt_core_heap_alloc_total_by_kind[RT_CORE_HEAP_ALLOC_CLOSURE], 1, memory_order_relaxed);
     rt_core_closure_registry_release();
     return 1;
 }
@@ -1074,8 +1092,13 @@ static void rt_core_register_float(RtCoreFloat* f) {
             return;
         }
     }
+    size_t old_len = rt_core_float_registry_len;
     rt_core_float_registry_insert_raw((uintptr_t)f);
-    atomic_fetch_add_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
+    if (rt_core_float_registry_len != old_len) {
+        atomic_fetch_add_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
+        atomic_fetch_add_explicit(
+            &rt_core_heap_alloc_total_by_kind[RT_CORE_HEAP_ALLOC_FLOAT], 1, memory_order_relaxed);
+    }
     rt_core_float_registry_release();
 }
 

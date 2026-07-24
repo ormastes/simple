@@ -284,6 +284,14 @@ void*    rt_memset(void* dst, int8_t val, int64_t n);
 void     rt_exit(int64_t code);
 void     rt_cli_exit(int64_t code);
 int64_t  rt_heap_registry_count(void);
+/* Monotonic successful core-C registry insertions; excludes Dict/raw allocations. */
+#define RT_CORE_HEAP_ALLOC_STRING 1
+#define RT_CORE_HEAP_ALLOC_ARRAY 2
+#define RT_CORE_HEAP_ALLOC_ENUM 3
+#define RT_CORE_HEAP_ALLOC_MUTEX 4
+#define RT_CORE_HEAP_ALLOC_CLOSURE 5
+#define RT_CORE_HEAP_ALLOC_FLOAT 6
+int64_t  rt_core_heap_alloc_total_kind(int64_t kind);
 int64_t  rt_time_now_unix(void);
 int64_t  rt_entropy_hardware_ready(void);
 void     rt_sleep_ms(int64_t ms);
