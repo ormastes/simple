@@ -3578,6 +3578,22 @@ spl_i64 rt_display_height(void) {
     return g_rt_display_ready ? RT_GPU_HEIGHT : 0;
 }
 
+spl_u64 rt_display_framebuffer_address(void) {
+    return g_rt_display_ready ? g_rt_gpu_fb : 0;
+}
+
+spl_i64 rt_display_pitch(void) {
+    return g_rt_display_ready ? (spl_i64)(RT_GPU_WIDTH * sizeof(spl_u32)) : 0;
+}
+
+spl_i64 rt_display_bpp(void) {
+    return g_rt_display_ready ? (spl_i64)(sizeof(spl_u32) * 8U) : 0;
+}
+
+spl_i64 rt_display_present(void) {
+    return rt_gui_flush();
+}
+
 /* ========================================================================
  * Sandbox-boot residual primitives (RV64 freestanding closure).
  *
