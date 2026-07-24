@@ -340,9 +340,15 @@ arch-done
   visible input ID.
 - `src/os/hosted/hosted_entry.spl` fails closed instead of accepting a
   compatibility frame during live evidence.
+- Hosted move events now dirty the compositor so the existing live gate can
+  require a later frame revision instead of waiting on an impossible update.
 - `src/os/compositor/compositor.spl` preserves PS/2 AUX bytes for the pointer
   decoder; `src/os/desktop/shell.spl` emits correlated pointer IRQ/state/frame
   receipts.
+- The SimpleOS workflow preserves one running QEMU admission job across newer
+  pushes; its existing workflow contract locks that policy.
+- Web and GUI focused specs/manuals use the shared exact-composition and
+  correlated-input step names.
 - No new font renderer, atlas, cache, raw runtime alias, or public API was added.
 
 ## Verification Progress
@@ -376,10 +382,13 @@ arch-done
   `doc/08_tracking/bug/bootstrap_stage3_selfhost_seed_wrapper_fallback_2026-06-17.md`;
   no stage-2 self-build was possible.
 - BLOCKED: the hosted native build ran about 10 minutes at 99.6% CPU and
-  approximately 2.9 GiB RSS with zero cache objects and no artifact.
+  approximately 2.9 GiB RSS with zero cache objects and no artifact. The
+  missing post-move dirty transition is fixed, but remains unclaimed until the
+  live gate runs on a qualifying pure-Simple binary.
 - BLOCKED: the SimpleOS native build ran about 13 minutes, exceeded
   `--timeout 300`, retained 1,325 cache files, emitted no refreshed kernel, and
-  never launched QEMU.
+  never launched QEMU. CI cancellation policy is fixed, but no protected run
+  has completed yet.
 - Correctly unclaimed: hosted glyph pin, SimpleOS crop/hash, Vulkan
   device-origin readback, executed GUI font pixels, qualifying generated
   manual provenance, full verification, commit, and sync.

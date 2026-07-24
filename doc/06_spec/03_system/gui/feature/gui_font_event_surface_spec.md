@@ -78,14 +78,14 @@ Its source wiring and fixture assertions are not live-window evidence.
 6. **Build the production surface composition**
    - Create the canonical 192×80 CPU Engine2D surface.
 
-7. **Submit the boundary output to its canonical consumer**
+7. **Submit the exact composition**
    - Submit the same `submitted` value inspected above.
    - Require zero skipped commands.
    - Encode and retain the exact framebuffer as P6 PPM.
    - Render an otherwise-identical blank-label composition.
    - Require more than 20 differing pixels inside the selected glyph band.
 
-7. **Correlate visible pixels and input with one frame identity**
+8. **Deliver correlated focus keyboard and pointer events**
    - Resolve pointer, focus, and key contexts against the submitted scene.
    - Require each resolved context to retain the submitted composition and scene
      identity.
@@ -94,18 +94,18 @@ Its source wiring and fixture assertions are not live-window evidence.
      pointer click.
    - Deliver `Z` and require the actual input value to become `ReadyZ`.
 
-8. **Reject disconnected stale or replayed evidence**
+9. **Reject disconnected stale or replayed evidence**
    - Resolve the same input against a replayed scene key.
    - Require an unresolved context with `stale_scene_rejected=true` and preserve
      `ReadyZ`.
 
-9. **Capture backend and framebuffer evidence**
+10. **Capture backend and framebuffer evidence**
    - Convert and submit the updated widget tree.
    - Require zero skipped commands and visible updated glyph pixels.
    - Write the metadata receipt only with `status=pass` when every required
      PPM write succeeds.
 
-10. **Prove native submission and device readback**
+11. **Prove native submission and device readback**
    - Require exactly `192 × 80` readback pixels.
 
 ## Retained Evidence Contract
@@ -169,8 +169,8 @@ step("Trace the production font and event boundary")
 step("Prepare one shared font batch for 2D and 3D")
 step("Emit the selected font composite program and plan compilation")
 step("Build the production surface composition")
-step("Submit the boundary output to its canonical consumer")
-step("Correlate visible pixels and input with one frame identity")
+step("Submit the exact composition")
+step("Deliver correlated focus keyboard and pointer events")
 step("Reject disconnected stale or replayed evidence")
 step("Capture backend and framebuffer evidence")
 step("Prove native submission and device readback")

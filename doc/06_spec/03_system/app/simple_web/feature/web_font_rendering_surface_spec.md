@@ -35,7 +35,7 @@ Source:
    - Keep font material transient behind the shared Engine2D executor.
 6. **Emit the selected font composite program and plan compilation**
    - Submit the same composition object to the shared pixel facade.
-7. **Submit the boundary output to its canonical consumer**
+7. **Submit the exact composition**
    - Compare each ordered glyph band against the otherwise identical blank
      frame.
 8. **Prove native submission and device readback**
