@@ -642,12 +642,19 @@ pub(crate) fn find_compiler_rt_builtins(triple: &str) -> Option<PathBuf> {
 }
 
 /// Find an objcopy tool that can handle the host object format.
+///
+/// Prefer the NEWEST llvm-objcopy (same rationale as `nm_command`): LLVM 18's
+/// objcopy rejects `--localize-symbols` on Mach-O ("option is not supported
+/// for MachO"), which breaks the Stage4 compiler-backfill localization on
+/// macOS; current LLVM supports it for both ELF and Mach-O.
 pub(crate) fn find_objcopy_tool() -> Option<String> {
     for prefix in &[
-        "/opt/homebrew/opt/llvm@18/bin",
         "/opt/homebrew/opt/llvm/bin",
-        "/usr/local/opt/llvm@18/bin",
+        "/opt/homebrew/opt/llvm@22/bin",
         "/usr/local/opt/llvm/bin",
+        "/usr/local/opt/llvm@22/bin",
+        "/opt/homebrew/opt/llvm@18/bin",
+        "/usr/local/opt/llvm@18/bin",
     ] {
         let path = format!("{prefix}/llvm-objcopy");
         if std::path::Path::new(&path).exists() {
