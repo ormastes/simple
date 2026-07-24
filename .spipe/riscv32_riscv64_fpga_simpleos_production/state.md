@@ -295,3 +295,13 @@ implementation-milestone-0-in-progress
   source is corrected but cannot be rebuilt in this session. Therefore the
   core-C link, generated RV32/RV64 VHDL, GHDL, FPGA, and Linux terminal gates
   remain open.
+- privilege repair 2026-07-24: both protected product cores implemented S/U
+  privilege and Sv32/Sv39 but omitted the S/U bits from `misa`. RV32 now
+  reports `0x40141105`; RV64 adds bits 18 and 20 while retaining F/D clear.
+  Separate focused pure-Simple interpreter specs pass for both architectures.
+- Linux media progress 2026-07-24: a pinned BusyBox terminal-rootfs mode is
+  source-staged with real init/getty/login/sh/ls, serial device nodes, and a
+  deterministic root fixture. The installed `riscv64-linux-gnu-` toolchain
+  emits lp64d BusyBox binaries, incompatible with the RV64IMAC/lp64 product;
+  the builder now fails closed and requires a soft-float `BUSYBOX_CROSS`.
+  No terminal initramfs or boot claim is made.
