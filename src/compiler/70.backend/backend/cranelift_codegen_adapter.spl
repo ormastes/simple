@@ -22,6 +22,9 @@ use compiler.mir.mir_call_ownership.{mir_runtime_owned_call_name}
 use std.sffi.codegen.*
 
 extern fn rt_file_read_bytes(path: text) -> [u8]
+extern fn rt_enum_discriminant(value: Any) -> i64
+extern fn rt_enum_payload(value: Any) -> i64
+extern fn rt_tuple_get(tuple: i64, index: i64) -> i64
 
 fn cranelift_file_read_bytes(path: text) -> [u8]:
     rt_file_read_bytes(path)
@@ -464,14 +467,21 @@ fn cl_translate_instruction(
     global_handles: Dict<i64, i64>,
     func: MirFunction
 ):
-    match inst.kind:
-        case Const(dest, value, type_):
-            val cl_val = cl_translate_const_value(ctx, cl_module, value, type_)
-            value_map[dest.id] = cl_val
-            if slot_map.has(dest.id):
-                val addr = cranelift_stack_addr(ctx, slot_map[dest.id], 0)
-                cranelift_store(ctx, cl_val, addr, 0)
+    val inst_kind = inst.kind
+    val const_disc = rt_enum_discriminant(MirInstKind.Const(LocalId(id: 0), MirConstValue.Zero, MirType.i64()))
+    if rt_enum_discriminant(inst_kind) == const_disc:
+        val payload = rt_enum_payload(inst_kind)
+        val dest: LocalId = rt_tuple_get(payload, 0)
+        val value: MirConstValue = rt_tuple_get(payload, 1)
+        val type_: MirType = rt_tuple_get(payload, 2)
+        val cl_val = cl_translate_const_value(ctx, cl_module, value, type_)
+        value_map[dest.id] = cl_val
+        if slot_map.has(dest.id):
+            val addr = cranelift_stack_addr(ctx, slot_map[dest.id], 0)
+            cranelift_store(ctx, cl_val, addr, 0)
+        return
 
+    match inst_kind:
         case Copy(dest, src):
             val src_val = load_local(ctx, src.id, value_map, slot_map, func)
             value_map[dest.id] = src_val

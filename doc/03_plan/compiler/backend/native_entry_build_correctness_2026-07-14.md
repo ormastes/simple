@@ -11,13 +11,14 @@ failure is **never** silently converted to a wrong answer.
 
 - **C5 positional self-host gate:** the exact `nul` trace now proves
   `0.chr()` is extracted as a MethodCall and lowers to local 1 with the
-  `Opaque("str")` discriminator. Fixed-marker V19–V21 traces prove
-  `local_is_str` and a two-arm conditional both return true, but the
-  effective-type chain selects its earlier Dict arm and produces `I64`;
-  `char_code_at` then rejects the bound receiver. Resume by distinguishing a
-  false `runtime_dict_locals` membership hit from the raw
-  `MirTypeKind.Dict` match inside `local_is_runtime_dict`. Do not reorder the
-  type chain, patch `char_code_at`, or repeat string/conditional probes.
+  `Opaque("str")` discriminator. V22 proved the earlier Dict arm was a raw
+  enum-pattern false positive; discriminator-first Dict classification removes
+  that failure. Const predispatch now lets Cranelift compile all five C5
+  functions and emit the positional executable, which reaches exit `5`
+  (`nul.len() != 1`). Resume at the tagged-text-to-C-string conversion and
+  `.len()` route: preserve the length-one NUL value through
+  `rt_char_from_code`, decode, and text length dispatch. Do not resume Dict
+  provenance or patch the fixture.
 - **C9 positional self-host gate:** remains intentionally blocked until C5
   builds without unresolved warnings and its executable exits `42`; then run
   the unchanged `.parse_f64()` fixture once and require exit `42`.
@@ -746,3 +747,32 @@ the shared binary — deploys require explicit user go-ahead).
   executable exits `42` should the next bottom-up item run, positional C9
   `.parse_f64()` with exit `42`. See
   `native_chr_builtin_no_lowering_2026-07-18.md`.
+
+  V22 then separated the Dict classifier's two true paths:
+  `DICT_MEMBER_FALSE`, a non-Dict runtime discriminator, and
+  `DICT_RAW_MATCH_TRUE`. The raw multi-field enum match was therefore a proven
+  false positive, not stale `runtime_dict_locals` provenance. Current source
+  replaces that match with discriminator equality. The same collision class
+  was present in both active backend Const dispatchers; current source
+  predispatches `MirInstKind.Const`, extracts its tagged tuple payload through
+  `rt_tuple_get`, and bypasses the raw-match path in each hot dispatcher.
+
+  V23 rebuilt `4 compiled, 671 cached, 0 failed`; C5 no longer emitted
+  unresolved `char_code_at`, but the compiler crashed after entering Cranelift
+  compilation of free `to_char`; its first MIR instruction is a string Const.
+  V24 rebuilt `5 compiled, 670 cached, 0 failed`;
+  Cranelift compiled all five functions, emitted the positional artifact, and
+  that executable exited `5`. This is partial progress, not C5 completion:
+  the fixture's NUL-length assertion fails, and the exact runtime/decode/length
+  boundary remains unassigned pending the next correlated trace.
+
+  The V24 LLVM positional C5 build still exits `139` with no phase output, so
+  LLVM Const predispatch is implemented but not execution-proven. The genuine
+  `dict_fn_value.spl` Cranelift control also exits `139` before backend output;
+  an identical fresh-cache V22 A/B run fails at the same boundary, proving
+  this is pre-existing rather than a discriminator-guard regression. The
+  deployed pure-Simple focused source-test runner timed out after 180 seconds
+  without a result and was not rerun. Next diagnose only C5's unique
+  `nul` value through `rt_char_from_code`, `decode_runtime_value`, and `.len()`
+  lowering. Track the empty-log LLVM and genuine-Dict compiler crashes as
+  separate backend residuals. C9 remains gated on positional C5 exit `42`.

@@ -19,6 +19,9 @@ use compiler.backend.common.mir_text_codegen.MirTextCodegen
 use compiler.mir.mir_call_ownership.{mir_runtime_owned_call_name}
 
 extern fn rt_env_get(key: text) -> text
+extern fn rt_enum_discriminant(value: Any) -> i64
+extern fn rt_enum_payload(value: Any) -> i64
+extern fn rt_tuple_get(tuple: i64, index: i64) -> i64
 
 fn llvm_bootstrap_ssa_function(fn_: MirFunction) -> MirFunction:
     # A single-block function is NOT skippable: a straight-line reassignment
@@ -435,8 +438,17 @@ impl MirTextCodegen for MirToLlvm:
         self.translate_terminator(block.terminator)
 
     me translate_instruction(inst: MirInst):
-        match inst.kind:
-            case MirInstKind.Const(dest, value, ty): self.translate_const(dest, value, ty)
+        val inst_kind = inst.kind
+        val const_disc = rt_enum_discriminant(MirInstKind.Const(LocalId(id: 0), MirConstValue.Zero, MirType.i64()))
+        if rt_enum_discriminant(inst_kind) == const_disc:
+            val payload = rt_enum_payload(inst_kind)
+            val dest: LocalId = rt_tuple_get(payload, 0)
+            val value: MirConstValue = rt_tuple_get(payload, 1)
+            val ty: MirType = rt_tuple_get(payload, 2)
+            self.translate_const(dest, value, ty)
+            return
+
+        match inst_kind:
             case Copy(dest, src): self.translate_copy_move(dest, src, false)
             case Move(dest, src): self.translate_copy_move(dest, src, true)
             case BinOp(dest, op, left, right): self.translate_binop(dest, op, left, right)
