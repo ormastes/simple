@@ -1,4 +1,84 @@
-# Stage4 Self-Host Redeploy (#79) — Plan (updated 2026-07-11)
+# Stage4 Self-Host Redeploy (#79) — Plan (updated 2026-07-24)
+
+## STATUS NOW (2026-07-24, fifth wave): pure-Simple stage4 is hard-blocked by
+## CONFIRMED parse retention; seed-FFI rebuild lane IN FLIGHT; not yet deployed
+
+### What is settled (evidence, all pushed at/before `5461a8d7`)
+
+- **The in-process pure-Simple Stage-4 one-binary path cannot fit on this
+  machine class (24GB).** Two instrumented real-corpus runs on 2026-07-24
+  (fresh stage2 built 15:55 with `heap_registry=` in every phase line) were
+  SIGKILLed mid-phase-2 parse. The clean-worktree run
+  (`build/stage4_onebin4_2026-07-24.log` + 5s sampler
+  `build/stage4_wt_mem_2026-07-24.log`) shows macOS growing swap 6GB→62GB in
+  10 min until disk headroom ran out: ~80GB dirty footprint, still mid-parse.
+  The `heap_registry` discriminator (the 07-20 bug doc's stated "single most
+  valuable next step") is now answered: live-object count climbs
+  monotonically, ~8 objects per source char, ~1.3KB/object — **genuine
+  cross-file retention**, projected ~90GB for the full ~1777-file closure.
+  Full data: `doc/08_tracking/bug/bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20.md`
+  (2026-07-24 update section).
+- **The >100KB-single-line parser defect is independent and fixed-around**:
+  `src/app/ui.web/html.spl` line 118 (109KB) split into ≤4KB statements
+  (`2b6ca665`, byte-equivalent payload); the next run got past that file.
+  Underlying lexer defect filed:
+  `doc/08_tracking/bug/stage4_parser_100kb_single_line_literal_2026-07-24.md`.
+- **Provenance**: stage4 builds now run from a clean detached worktree
+  (`build/worktrees/stage4-2b6ca665`) so peer WC edits can't taint or mutate
+  sources mid-parse (Codex peer audit finding).
+- **History decoded**: the deployed `bin/release/aarch64-apple-darwin/simple`
+  (Jul 11) was built by the pre-2026-07-16 dispatch that routed Stage-4
+  `--entry` through Rust `rt_native_build`. `3a9d58fce2` (07-16) rerouted
+  stage4 to the in-process pure-Simple driver; that path has NEVER completed
+  a real build (07-20 64GB kill, 07-24 80GB kills).
+
+### In flight right now
+
+- **Seed-FFI stage4 rebuild** (launched 2026-07-24 17:51, pid 70563): same
+  command shape as the canonical `bootstrap_native_build_main` but WITHOUT
+  `SIMPLE_BOOTSTRAP_STAGE4=1`, so `bootstrap_main.spl:187` dispatches to
+  `run_rt_native_build` (Rust pipeline, memory-feasible: 825MB RSS at 2.5min
+  vs 60GB+ on the pure-Simple path at the same point). Log
+  `build/stage4_seedffi_2026-07-24.log`; memlog
+  `build/stage4_seedffi_mem_2026-07-24.log`; output
+  `build/bootstrap/full/aarch64-apple-darwin/simple`. Wakeup ~18:14.
+
+### REMAINING PLAN (in order)
+
+1. **On seed-FFI EXIT=0 → deploy gate** on the output binary:
+   `--version`; `-c 'print(1+1)'` → `2`; m5 repro (k=5 flag=true); byte-span
+   73-class; m_crc 2923585666; bench2d_10 fast; hook probe
+   (`echo '{"hook_event_name":"Stop","session_id":"probe","transcript_path":"/dev/null","cwd":"/Users/ormastes/simple"}' | timeout 60 <bin> spipe-process-harness hook --provider claude`);
+   MCP stdio probes. All green → deploy to
+   `bin/release/aarch64-apple-darwin/simple` with `.bak-2026-07-24` of the old
+   binary (sha 09b1ed45; cp to `.new` + `mv`, never direct cp — Text file
+   busy). Post-deploy re-verify, docs+memory update, path-scoped commit+push.
+2. **On seed-FFI failure**: diagnose error class (this lane last ran Jul 11;
+   Jul-23 stage4-aot fixes may have shifted it), delegate point-fix to a
+   sonnet agent with a guide, relaunch.
+3. **Root-fix lane for the pure-Simple stage4 (next sessions, ordered by
+   value)** — see the bug doc's 07-24 next-steps:
+   a. Find WHAT retains ~8 objects/char (token arrays kept alongside AST?
+      per-lexeme boxed slices? interning gap) — an order-of-magnitude cut is
+      plausible before any allocator work.
+   b. Lexer O(n²) `char_at`/`slice` fix (`lex_source_codes` exists but is
+      unread by `lex_source_char_at`/`lex_source_slice`,
+      `src/compiler/10.frontend/core/lexer.spl:191-207`) — fixes the TIME
+      symptom incl. 60s-timeout giant-literal files. Validate via dynload
+      bootstrap + both `check-stage4-selfhost-parse-memory*.shs` guards.
+   c. Only after (a)+(b): retry pure-Simple one-binary stage4 and, if green,
+      re-route deploy back through it (restoring the 07-16 intent).
+4. **After deploy pass**: WM/showcase lanes (task #16 matrix — web/WM lanes
+   are interpreter-bound waiting on this deploy).
+
+### Filed, not blocking
+
+- ffi_gen.specs `std.string.{NL}` stale imports ×16; llm_caret
+  hyphen-vs-underscore collisions ×91
+  (`doc/08_tracking/bug/stage4_module_collisions_and_stale_imports_2026-07-24.md`).
+- Divergent twin `18abc26` of kzxuowkw left alone (peer's in-flight session).
+- Cleanup after success: remove `build/worktrees/stage4-2b6ca665` and
+  `build/bootstrap/native_cache_wt`.
 
 ## STATUS NOW (2026-07-11, third wave): runtime-path + argv/runtime selection landed locally; stage4 links, smoke still fails in parser path, NOT deployed
 
