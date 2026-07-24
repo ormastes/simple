@@ -395,9 +395,10 @@ evidence boundary for the important pure-Simple tooling lanes:
   removed hosted runtime-bundle aliases before build work; see the
   [runtime-bundle report](../../08_tracking/bug/native_build_removed_runtime_bundle_false_green_2026-07-24.md).
   Compile/link failures preserve the prior requested output. **Remaining bug/gap:** the focused
-  staging source-contract scenario passes, but no fresh behavioral build is
-  qualified. **Next solution:** incrementally build one small entry closure
-  with the exact fresh CLI, then run its artifact once.
+  staging source-contract scenario passes, but the synchronized cached bootstrap
+  closure remained CPU-bound for 900 seconds with no log or artifact and was
+  terminated once. **Next solution:** instrument or bound entry-closure discovery,
+  then resume the preserved cache and run the artifact once.
   A sole `--help`/`-h` succeeds; malformed invocations (including malformed
   `... --help`) fail with exit 2. `--emit-archive` remains active archive mode;
   legacy `--linker-script`, `--runtime-path`, and `--no-incremental` remain

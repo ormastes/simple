@@ -25,4 +25,13 @@ the FFI boundary: `hosted`, `rust-hosted`, `rust_hosted`, `hosted-runtime`,
   split, inline, and repeated forms across all six aliases.
 - `runtime_bundle_policy_spec.spl` proves the Simple/C-only policy surface.
 
-Fresh deployed Stage-2/Stage-4 qualification remains pending.
+## Qualification blocker
+
+The final synchronized incremental bootstrap closure reused the 675-object
+cache and the supported `core-c-bootstrap` lane. It remained CPU-bound for 900
+seconds, emitted no log output, and produced no artifact, so the bounded run was
+terminated once. No retry was started.
+
+Fresh deployed Stage-2/Stage-4 qualification remains pending. Before retrying,
+instrument or bound entry-closure discovery so this silent CPU-bound phase
+identifies its current module.
