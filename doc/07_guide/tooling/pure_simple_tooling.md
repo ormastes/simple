@@ -144,8 +144,10 @@ Every bootstrap route that produces a Stage 4 full CLI runs
 binary. From a temporary non-repository working directory it checks real
 test-runner pass/fail/zero/forged outcomes, focused lint pass/deny and strict
 JSON-Lines outcomes, and duplicate-check clean/exact-clone JSON outcomes. The aggregate is bounded,
-sets `SIMPLE_NO_STUB_FALLBACK=1`, and fails closed; a deployed wrapper, raw
-source worker, Rust seed, stale binary, or help-only response cannot satisfy it.
+sets `SIMPLE_NO_STUB_FALLBACK=1`, and fails closed. Its identity preflight
+rejects Rust seed/debug binaries; bootstrap supplies the exact fresh candidate,
+and the behavioral probes reject help-only or no-op implementations. The
+preflight is not hash provenance for arbitrary wrappers or stale pure binaries.
 The gate establishes command dispatch and minimal behavior only for `test`,
 `lint`, and `duplicate-check`; release still requires the full evidence for its
 scope. Strict JSON parsing and focused malformed-line coverage are source-fixed;
@@ -236,8 +238,13 @@ evidence boundary for the important pure-Simple tooling lanes:
   [the AST dispatch report](../../08_tracking/bug/simple_lint_ast_rules_unwired_2026-07-19.md).
   Parse failure now denies with PARSE001 (`57a4761a38d`), invalid or missing
   CLI options return exit 2 (`6dd99e39653`), and invalid project lint config is
-  rejected (`ef2ef732608`). Shared worker/fallback help handling now matches
-  the public lint entry (`cc69749ef25`); each has focused contract evidence. **Remaining
+  rejected (`ef2ef732608`). The shared lint owner validates mixed help before
+  returning help (`3721a305413`); the public lint/fmt/fix entry now preserves
+  sole help while routing mixed-help forms to closed option validation.
+  The same change set corrected active Codex/Claude/Gemini/SPipe guidance to use direct
+  `bin/simple lint`; `build lint` remains the Rust clippy lane. Shared
+  worker/fallback help handling matches the public lint entry
+  (`cc69749ef25`); each has focused contract evidence. **Remaining
   bug/gap:** these fixes, `982ce3fa445`, and the focused wildcard contract are
   not fresh Stage 4 evidence. **Next solution:** qualify
   ARG/COLL/STUB/W0404/W0406/W0407 and the parse/CLI/config contracts through
@@ -277,6 +284,10 @@ evidence boundary for the important pure-Simple tooling lanes:
   and [similarity threshold report](../../08_tracking/bug/duplicate_check_similarity_threshold_false_clean_2026-07-23.md).
   Sole help remains exit 0, while mixed help and invalid arguments now return
   exit 2 before parser exit (`f2e15a08c4c`).
+  The unreachable `src/app/cli/duplicate_check.spl` parser, which silently
+  ignored unknown flags and diverged from the compiler-owned command, is
+  deleted; the portability contract now prevents that parallel entrypoint from
+  returning (`4094d5a779e`).
   **Remaining bug/gap:** fresh Stage 4 evidence is missing, and incremental-cache
   flags remain deliberately rejected because their detector/cache path is
   disconnected; see [the cache report](../../08_tracking/bug/duplicate_check_incremental_cache_disconnected_2026-07-23.md).
@@ -301,9 +312,13 @@ evidence boundary for the important pure-Simple tooling lanes:
   fresh Stage 4 native artifact has completed that admission. **Next
   solution:** build the exact artifact and run the bounded wrapper contract.
 - **bootstrap essential gate** — **Source status:** the aggregate gate and its
-  fail-closed fixture contract are present. **Strongest current evidence:**
-  `scripts/check/check-bootstrap-essential-tools-smoke.shs` is required by this
-  guide and the bootstrap build guide. **Remaining bug/gap:** the aggregate
+  fail-closed fixture contract are present. It now runs a bounded identity
+  preflight with seed-warning suppression neutralized, rejects Rust seed/debug
+  identities before any test/lint/duplicate probe, and emits an explicit
+  pure-Simple identity marker (`ca7ce8d432b`). **Strongest current evidence:**
+  the portability contract exercises seed-signature rejection before any tool probe;
+  `scripts/check/check-bootstrap-essential-tools-smoke.shs` remains required by
+  this guide and the bootstrap build guide. **Remaining bug/gap:** the aggregate
   Stage 4 smoke still has not passed; strict JSON parsing and focused
   malformed-line coverage are source-fixed only; see the
   [lint JSON report](../../08_tracking/bug/bootstrap_lint_json_validation_false_green_2026-07-23.md).
