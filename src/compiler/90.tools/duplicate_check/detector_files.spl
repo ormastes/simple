@@ -2,6 +2,9 @@
 
 use compiler.tools.duplicate_check.config.{DuplicationConfig}
 use std.nogc_sync_mut.io.dir_ops.{dir_walk_native}
+use std.nogc_sync_mut.io.sffi_common.{is_absolute_path}
+
+extern fn rt_path_absolute(path: text) -> text
 
 fn collect_detector_files(path: text, config: DuplicationConfig) -> [text]:
     if path.ends_with(".spl"):
@@ -9,8 +12,11 @@ fn collect_detector_files(path: text, config: DuplicationConfig) -> [text]:
             return []
         return [path]
 
+    val scan_path = rt_path_absolute(path).replace("\\", "/")
+    val relative_root = detector_relative_root(path)
     var files = []
-    for file_path in dir_walk_native(path):
+    for physical_path in dir_walk_native(scan_path):
+        val file_path = detector_restore_relative_path(physical_path, scan_path, relative_root)
         if not file_path.ends_with(".spl"):
             continue
         if should_exclude_detector_path(file_path, config):
@@ -18,6 +24,24 @@ fn collect_detector_files(path: text, config: DuplicationConfig) -> [text]:
         files.push(file_path)
 
     files
+
+fn detector_relative_root(path: text) -> text:
+    if is_absolute_path(path):
+        return ""
+    var root = path.replace("\\", "/")
+    while root.len() > 1 and root.ends_with("/"):
+        root = root.substring(0, root.len() - 1)
+    root
+
+fn detector_restore_relative_path(physical_path: text, scan_path: text, relative_root: text) -> text:
+    if relative_root == "":
+        return physical_path
+    val normalized = physical_path.replace("\\", "/")
+    val prefix = scan_path + "/"
+    if not normalized.starts_with(prefix):
+        return physical_path
+    val suffix = normalized.substring(prefix.len(), normalized.len())
+    relative_root + "/" + suffix
 
 fn should_exclude_detector_path(path: text, config: DuplicationConfig) -> bool:
     for pattern in config.exclude_patterns:

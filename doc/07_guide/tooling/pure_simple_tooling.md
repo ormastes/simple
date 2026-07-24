@@ -298,6 +298,11 @@ evidence boundary for the important pure-Simple tooling lanes:
   ignored unknown flags and diverged from the compiler-owned command, is
   deleted; the portability contract now prevents that parallel entrypoint from
   returning (`4094d5a779e`).
+  Relative file and directory targets are normalized once in the shared
+  collector before native walking. The essential-tools known-duplicate probe
+  uses a relative directory from its external working directory and requires
+  one real group, so a zero-file scan cannot pass; see the
+  [relative-directory report](../../08_tracking/bug/duplicate_check_relative_directory_false_green_2026-07-24.md).
   **Remaining bug/gap:** fresh Stage 4 evidence is missing, and incremental-cache
   flags remain deliberately rejected because their detector/cache path is
   disconnected; see [the cache report](../../08_tracking/bug/duplicate_check_incremental_cache_disconnected_2026-07-23.md).
