@@ -850,3 +850,32 @@ doc/00_llm_process/layer_expert/backend/skill.md for the codegen rules this
 fix introduces. Status: **partially fixed — dominant mechanism removed,
 5.6x objects/char reduction, per-file time flat; full-corpus stage4 lane
 re-run still pending.**
+
+## UPDATE 2026-07-24 (late): seed-binary clobber regressed the fix; probe attribution corrected
+
+**Regression found + fixed.** `src/compiler_rust/target/bootstrap/simple` was
+rebuilt at 14:38 by a parallel session from pre-fix source: `strings` shows
+ZERO `rt_string_new_literal` references (the 11:44 fixed seed's probe still
+interns: 300k literal evals → 4 objects; a probe built with the 14:38 seed
+leaks 1 object per literal *evaluation* again — `val l = "xy"` = 10,000
+objects / 10,000 iterations). Source in the working copy AND origin/main is
+intact; only the binary was stale. Fixed by rebuilding the seed in place:
+`cargo build --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap
+-p simple-driver && … -p simple-native-all`. **Landmine for all sessions: a
+seed rebuilt from any pre-571bb8f8be35 checkout silently reverts the parse
+memory fix for every stage2 built afterward. Check
+`strings -a target/bootstrap/simple | grep -c rt_string_new_literal` (>0)
+before trusting memory numbers.**
+
+**Residual-leak attribution corrected** (registry-delta probe, fixed seed,
+core-c-bootstrap, 10k-char source):
+- `chars()` on a 10k string: **1** object (the array). Single-byte strings are
+  process-cached (`short_string_cache`), so `source_chars` per-char texts are
+  NOT ~1.0/char as previously guessed — they are ~0.
+- len-1 slices (`s[i:i+1]`): ~0 (cached path in `rt_slice` → `rt_string_new`).
+- multi-char slices: exactly **1/slice** (genuine dynamic string — token texts).
+- text `==` (dyn==dyn): **0** — equality does not allocate.
+- concat: 1/op (genuine).
+So the remaining ~2.26 objs/char in the multifile gate ≈ per-token slice texts
++ per-node arena inner arrays, i.e. Stage 2/3 of the research plan (span
+tokens / per-file free), not a runtime cache gap.
