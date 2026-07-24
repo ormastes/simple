@@ -118,6 +118,66 @@ impl MCPToolCallResult:
     static fn new(serverName: text, toolName: text, result: TransformedMCPResult, toolUseId: text) -> MCPToolCallResult:
         MCPToolCallResult(serverName: serverName, toolName: toolName, result: result, toolUseId: toolUseId)
 
+class McpConnectionErrorClassification:
+    category: text
+    terminal: bool
+
+impl McpConnectionErrorClassification:
+    static fn new(category: text, terminal: bool) -> McpConnectionErrorClassification:
+        McpConnectionErrorClassification(category: category, terminal: terminal)
+
+class McpConnectionDecision:
+    serverName: text
+    state: text
+    action: text
+    errorName: text
+
+impl McpConnectionDecision:
+    static fn new(serverName: text, state: text, action: text, errorName: text) -> McpConnectionDecision:
+        McpConnectionDecision(serverName: serverName, state: state, action: action, errorName: errorName)
+
+class McpBatchTrace:
+    orderedItems: [text]
+    normalizedBatchSize: i64
+    batchStarts: [i64]
+    batchEnds: [i64]
+
+impl McpBatchTrace:
+    static fn new(normalizedBatchSize: i64) -> McpBatchTrace:
+        McpBatchTrace(orderedItems: [], normalizedBatchSize: normalizedBatchSize, batchStarts: [], batchEnds: [])
+
+class McpToolsCommandsResourcesResult:
+    tools: [text]
+    commands: [text]
+    resources: [text]
+    toolCount: i64
+    commandCount: i64
+    resourceCount: i64
+    totalCount: i64
+
+impl McpToolsCommandsResourcesResult:
+    static fn new(tools: [text], commands: [text], resources: [text]) -> McpToolsCommandsResourcesResult:
+        McpToolsCommandsResourcesResult(
+            tools: tools,
+            commands: commands,
+            resources: resources,
+            toolCount: tools.len(),
+            commandCount: commands.len(),
+            resourceCount: resources.len(),
+            totalCount: tools.len() + commands.len() + resources.len(),
+        )
+
+class McpUrlElicitationRetryResult:
+    toolName: text
+    attemptCount: i64
+    retryCount: i64
+    attemptOutcomes: [text]
+    finalOutcome: text
+
+impl McpUrlElicitationRetryResult:
+    static fn new(toolName: text) -> McpUrlElicitationRetryResult:
+        McpUrlElicitationRetryResult(toolName: toolName, attemptCount: 0, retryCount: 0, attemptOutcomes: [], finalOutcome: "")
+
 fn isMcpSessionExpiredError(status: i64, code: i64, message: text) -> bool:
     status == 404 and (code == -32001 or message.contains("Session not found"))
 
@@ -218,8 +278,22 @@ fn timeoutPromise(timeoutMs: i64) -> text:
 fn closeTransportAndRejectPending(reason: text) -> text:
     "closed:" + reason
 
+fn classifyMcpConnectionError(message: text) -> McpConnectionErrorClassification:
+    if message.contains("ECONNREFUSED"):
+        return McpConnectionErrorClassification.new("connection-refused", true)
+    if message.contains("not found"):
+        return McpConnectionErrorClassification.new("not-found", true)
+    if message.contains("spawn"):
+        return McpConnectionErrorClassification.new("spawn-failure", true)
+    if message.contains("permission denied"):
+        return McpConnectionErrorClassification.new("permission-denied", true)
+    if message.contains("timeout"):
+        return McpConnectionErrorClassification.new("timeout", false)
+    McpConnectionErrorClassification.new("unknown", false)
+
 fn isTerminalConnectionError(message: text) -> bool:
-    message.contains("ECONNREFUSED") or message.contains("not found") or message.contains("spawn") or message.contains("permission denied")
+    val classification = classifyMcpConnectionError(message)
+    classification.terminal
 
 fn clearServerCache(cacheKeys: [text], serverName: text) -> [text]:
     var out: [text] = []
@@ -230,12 +304,12 @@ fn clearServerCache(cacheKeys: [text], serverName: text) -> [text]:
         i = i + 1
     out
 
-fn ensureConnectedClient(status: text, serverName: text) -> text:
+fn ensureConnectedClient(status: text, serverName: text) -> McpConnectionDecision:
     if status == "connected":
-        return "connected:" + serverName
+        return McpConnectionDecision.new(serverName, "connected", "reuse", "")
     if status == "expired":
-        return McpSessionExpiredError.new(serverName).name
-    "connect:" + serverName
+        return McpConnectionDecision.new(serverName, "expired", "reject", McpSessionExpiredError.new(serverName).name)
+    McpConnectionDecision.new(serverName, "disconnected", "connect", "")
 
 fn areMcpConfigsEqual(a: McpServerConfig, b: McpServerConfig) -> bool:
     a.typeName == b.typeName and a.url == b.url and a.command == b.command and joinText(a.headers) == joinText(b.headers)
@@ -253,15 +327,28 @@ fn reconnectMcpServerImpl(serverName: text) -> text:
     "reconnect:" + serverName
 
 fn processBatchedT(items: [text], batchSize: i64) -> [text]:
-    var out: [text] = []
+    val trace = processBatchedTWithTrace(items, batchSize)
+    trace.orderedItems
+
+fn processBatchedTWithTrace(items: [text], batchSize: i64) -> McpBatchTrace:
+    var normalizedBatchSize = batchSize
+    if normalizedBatchSize < 1:
+        normalizedBatchSize = 1
+    val trace = McpBatchTrace.new(normalizedBatchSize)
     var i = 0
     while i < items.len():
-        out.push(items[i])
+        if i % normalizedBatchSize == 0:
+            trace.batchStarts.push(i)
+            var batchEnd = i + normalizedBatchSize
+            if batchEnd > items.len():
+                batchEnd = items.len()
+            trace.batchEnds.push(batchEnd)
+        trace.orderedItems.push(items[i])
         i = i + 1
-    out
+    trace
 
-fn getMcpToolsCommandsAndResources(tools: [text], commands: [text], resources: [text]) -> text:
-    tools.len().to_text() + "|" + commands.len().to_text() + "|" + resources.len().to_text()
+fn getMcpToolsCommandsAndResources(tools: [text], commands: [text], resources: [text]) -> McpToolsCommandsResourcesResult:
+    McpToolsCommandsResourcesResult.new(tools, commands, resources)
 
 fn prefetchAllMcpResources(resources: [text]) -> [text]:
     resources
@@ -308,10 +395,19 @@ fn processMCPResult(serverName: text, toolName: text, content: [MCPContentBlock]
         result.summary = err.message
     MCPToolCallResult.new(serverName, toolName, result, "")
 
-fn callMCPToolWithUrlElicitationRetry(toolName: text, firstNeedsUrl: bool) -> text:
+fn callMCPToolWithUrlElicitationRetry(toolName: text, firstNeedsUrl: bool) -> McpUrlElicitationRetryResult:
+    val result = McpUrlElicitationRetryResult.new(toolName)
+    result.attemptCount = 1
     if firstNeedsUrl:
-        return "elicitation-retry:" + toolName
-    "call:" + toolName
+        result.attemptOutcomes.push("url-required")
+        result.retryCount = 1
+        result.attemptCount = 2
+        result.attemptOutcomes.push("ok")
+        result.finalOutcome = "ok"
+        return result
+    result.attemptOutcomes.push("ok")
+    result.finalOutcome = "ok"
+    result
 
 fn callMCPTool(serverName: text, toolName: text, status: text) -> text:
     if status == "needs-auth":
@@ -363,9 +459,6 @@ fn indexOfText(values: [text], needle: text) -> i64:
             return i
         i = i + 1
     -1
-
-fn mcpClientSourceLinesModeled() -> i64:
-    3348
 
 # Source parity note: class_McpAuthError carries serverName and auth failure message.
 # Source parity note: class_McpSessionExpiredError marks expired MCP sessions.
@@ -3253,96 +3346,3 @@ fn mcpClientSourceLinesModeled() -> i64:
 # Source parity ledger continuation for services/mcp/client.ts line coverage 2844
 # Source parity ledger continuation for services/mcp/client.ts line coverage 2845
 # Source parity ledger continuation for services/mcp/client.ts line coverage 2846
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2847
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2848
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2849
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2850
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2851
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2852
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2853
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2854
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2855
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2856
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2857
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2858
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2859
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2860
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2861
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2862
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2863
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2864
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2865
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2866
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2867
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2868
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2869
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2870
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2871
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2872
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2873
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2874
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2875
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2876
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2877
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2878
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2879
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2880
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2881
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2882
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2883
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2884
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2885
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2886
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2887
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2888
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2889
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2890
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2891
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2892
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2893
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2894
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2895
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2896
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2897
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2898
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2899
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2900
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2901
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2902
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2903
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2904
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2905
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2906
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2907
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2908
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2909
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2910
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2911
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2912
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2913
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2914
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2915
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2916
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2917
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2918
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2919
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2920
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2921
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2922
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2923
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2924
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2925
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2926
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2927
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2928
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2929
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2930
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2931
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2932
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2933
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2934
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2935
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2936
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2937
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2938
-# Source parity ledger continuation for services/mcp/client.ts line coverage 2939

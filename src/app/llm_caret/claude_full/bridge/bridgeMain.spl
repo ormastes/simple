@@ -97,10 +97,18 @@ class CleanupTracker:
     sessionId: text
     workId: text
     stopped: bool
+    stopCalls: i64
 
 impl CleanupTracker:
     static fn new(sessionId: text, workId: text) -> CleanupTracker:
-        CleanupTracker(sessionId: sessionId, workId: workId, stopped: false)
+        CleanupTracker(sessionId: sessionId, workId: workId, stopped: false, stopCalls: 0)
+
+    me stop() -> bool:
+        me.stopCalls = me.stopCalls + 1
+        if me.stopped:
+            return false
+        me.stopped = true
+        true
 
 fn trackCleanup(sessionId: text, workId: text) -> CleanupTracker:
     CleanupTracker.new(sessionId, workId)
@@ -181,21 +189,48 @@ class StopWorkRetryResult:
     ok: bool
     fatal: bool
     lastDelayMs: i64
+    delaysMs: [i64]
+    attemptStatuses: [text]
 
 impl StopWorkRetryResult:
-    static fn new(attempts: i64, ok: bool, fatal: bool, lastDelayMs: i64) -> StopWorkRetryResult:
-        StopWorkRetryResult(attempts: attempts, ok: ok, fatal: fatal, lastDelayMs: lastDelayMs)
+    static fn new(attempts: i64, ok: bool, fatal: bool, delaysMs: [i64], attemptStatuses: [text]) -> StopWorkRetryResult:
+        var lastDelayMs = 0
+        if delaysMs.len() > 0:
+            lastDelayMs = delaysMs[delaysMs.len() - 1]
+        StopWorkRetryResult(
+            attempts: attempts,
+            ok: ok,
+            fatal: fatal,
+            lastDelayMs: lastDelayMs,
+            delaysMs: delaysMs,
+            attemptStatuses: attemptStatuses
+        )
 
 fn stopWorkWithRetry(failuresBeforeSuccess: i64, fatal: bool, baseDelayMs: i64) -> StopWorkRetryResult:
     if fatal:
-        return StopWorkRetryResult.new(1, false, true, 0)
+        return StopWorkRetryResult.new(1, false, true, [], ["fatal-error"])
     if failuresBeforeSuccess <= 0:
-        return StopWorkRetryResult.new(1, true, false, 0)
+        return StopWorkRetryResult.new(1, true, false, [], ["success"])
+    var boundedBaseDelayMs = baseDelayMs
+    if boundedBaseDelayMs < 0:
+        boundedBaseDelayMs = 0
     if failuresBeforeSuccess == 1:
-        return StopWorkRetryResult.new(2, true, false, baseDelayMs)
+        return StopWorkRetryResult.new(2, true, false, [boundedBaseDelayMs], ["retryable-error", "success"])
     if failuresBeforeSuccess == 2:
-        return StopWorkRetryResult.new(3, true, false, baseDelayMs * 2)
-    StopWorkRetryResult.new(3, false, false, baseDelayMs * 4)
+        return StopWorkRetryResult.new(
+            3,
+            true,
+            false,
+            [boundedBaseDelayMs, boundedBaseDelayMs * 2],
+            ["retryable-error", "retryable-error", "success"]
+        )
+    StopWorkRetryResult.new(
+        3,
+        false,
+        false,
+        [boundedBaseDelayMs, boundedBaseDelayMs * 2],
+        ["retryable-error", "retryable-error", "retryable-error"]
+    )
 
 class SessionTimeoutResult:
     sessionId: text
@@ -208,6 +243,165 @@ impl SessionTimeoutResult:
 
 fn onSessionTimeout(sessionId: text, timeoutMs: i64) -> SessionTimeoutResult:
     SessionTimeoutResult.new(sessionId, "Session timed out after " + formatDelay(timeoutMs), true)
+
+class BridgeLifecycleTrace:
+    spawnSessionIds: [text]
+    spawnErrors: [text]
+    heartbeatStatuses: [text]
+    cleanedSessionIds: [text]
+    cleanedWorkIds: [text]
+    ackWorkIds: [text]
+    ackErrors: [text]
+    stopWorkIds: [text]
+    stopDelaysMs: [i64]
+    timeoutSessionIds: [text]
+    stdinActions: [text]
+    receivedSignals: [text]
+    statusEvents: [text]
+
+impl BridgeLifecycleTrace:
+    static fn new() -> BridgeLifecycleTrace:
+        BridgeLifecycleTrace(
+            spawnSessionIds: [],
+            spawnErrors: [],
+            heartbeatStatuses: [],
+            cleanedSessionIds: [],
+            cleanedWorkIds: [],
+            ackWorkIds: [],
+            ackErrors: [],
+            stopWorkIds: [],
+            stopDelaysMs: [],
+            timeoutSessionIds: [],
+            stdinActions: [],
+            receivedSignals: [],
+            statusEvents: []
+        )
+
+class BridgeLifecycleModel:
+    activeSessions: i64
+    completedWorkIds: [text]
+    acknowledgedWorkIds: [text]
+    stopped: bool
+    aborted: bool
+    abortSignal: text
+    abortTransitions: i64
+    worktreeMode: bool
+    statusUpdatesActive: bool
+    statusIntervalMs: i64
+    trace: BridgeLifecycleTrace
+
+impl BridgeLifecycleModel:
+    static fn new() -> BridgeLifecycleModel:
+        BridgeLifecycleModel(
+            activeSessions: 0,
+            completedWorkIds: [],
+            acknowledgedWorkIds: [],
+            stopped: false,
+            aborted: false,
+            abortSignal: "",
+            abortTransitions: 0,
+            worktreeMode: false,
+            statusUpdatesActive: false,
+            statusIntervalMs: 0,
+            trace: BridgeLifecycleTrace.new()
+        )
+
+    me spawn(spawnError: text, sessionId: text) -> SafeSpawnResult:
+        val result = safeSpawn(spawnError, sessionId)
+        if result.ok:
+            me.activeSessions = me.activeSessions + 1
+            me.trace.spawnSessionIds.push(result.sessionId)
+        else:
+            me.trace.spawnErrors.push(result.error)
+        result
+
+    me heartbeat(authFailures: i64, fatalFailures: i64) -> text:
+        val status = heartbeatActiveWorkItems(me.activeSessions, authFailures, fatalFailures)
+        me.trace.heartbeatStatuses.push(status)
+        status
+
+    me cleanup(sessionId: text, workId: text) -> bool:
+        if textArrayContains(me.trace.cleanedWorkIds, workId):
+            return false
+        me.trace.cleanedSessionIds.push(sessionId)
+        me.trace.cleanedWorkIds.push(workId)
+        true
+
+    me complete(sessionId: text, workId: text, singleSessionMode: bool, timedOut: bool) -> SessionDoneResult:
+        val result = onSessionDone(workId, singleSessionMode, timedOut)
+        if textArrayContains(me.completedWorkIds, workId):
+            return result
+        me.completedWorkIds.push(workId)
+        if me.activeSessions > 0:
+            me.activeSessions = me.activeSessions - 1
+        me.cleanup(sessionId, workId)
+        if result.shouldStopLoop:
+            me.stopped = true
+        result
+
+    me ack(workId: text, sessionId: text, apiError: text) -> AckWorkResult:
+        val result = ackWork(workId, sessionId, apiError)
+        if result.ok:
+            if not textArrayContains(me.acknowledgedWorkIds, workId):
+                me.acknowledgedWorkIds.push(workId)
+                me.trace.ackWorkIds.push(workId)
+        else:
+            me.trace.ackErrors.push(result.error)
+        result
+
+    me stopWork(workId: text, failuresBeforeSuccess: i64, fatal: bool, baseDelayMs: i64) -> StopWorkRetryResult:
+        val result = stopWorkWithRetry(failuresBeforeSuccess, fatal, baseDelayMs)
+        me.trace.stopWorkIds.push(workId)
+        var i = 0
+        while i < result.delaysMs.len():
+            me.trace.stopDelaysMs.push(result.delaysMs[i])
+            i = i + 1
+        result
+
+    me timeout(sessionId: text, timeoutMs: i64) -> SessionTimeoutResult:
+        val result = onSessionTimeout(sessionId, timeoutMs)
+        if not textArrayContains(me.trace.timeoutSessionIds, sessionId):
+            me.trace.timeoutSessionIds.push(sessionId)
+        result
+
+    me startStatus(intervalMs: i64) -> bool:
+        if not startStatusUpdates(intervalMs):
+            return false
+        if not me.statusUpdatesActive:
+            me.statusUpdatesActive = true
+            me.statusIntervalMs = intervalMs
+            me.trace.statusEvents.push("start")
+        true
+
+    me stopStatus() -> bool:
+        if not me.statusUpdatesActive:
+            return true
+        me.statusUpdatesActive = false
+        me.trace.statusEvents.push("stop")
+        stopStatusUpdates(me.statusUpdatesActive)
+
+    me stdin(data: text) -> text:
+        val action = onStdinData(data)
+        me.trace.stdinActions.push(action)
+        if action == "toggle-worktree":
+            me.worktreeMode = not me.worktreeMode
+        if action == "quit":
+            me.stopped = true
+        action
+
+    me signal(signalName: text) -> text:
+        var action = "ignored"
+        if signalName == "SIGINT":
+            action = onSigint()
+        if signalName == "SIGTERM":
+            action = onSigterm()
+        me.trace.receivedSignals.push(signalName)
+        if action == "abort" and not me.aborted:
+            me.aborted = true
+            me.stopped = true
+            me.abortSignal = signalName
+            me.abortTransitions = me.abortTransitions + 1
+        action
 
 class ParsedArgs:
     verbose: bool
@@ -469,6 +663,14 @@ fn if_missing(raw: text) -> text:
     if raw == "":
         return "<missing>"
     raw
+
+fn textArrayContains(values: [text], target: text) -> bool:
+    var i = 0
+    while i < values.len():
+        if values[i] == target:
+            return true
+        i = i + 1
+    false
 # Source bridgeMain.ts parity ledger 0001: deterministic behavior mirrored above.
 # Source bridgeMain.ts parity ledger 0002: deterministic behavior mirrored above.
 # Source bridgeMain.ts parity ledger 0003: deterministic behavior mirrored above.

@@ -1,23 +1,106 @@
-# codex-system-test
-"""
 # Claude Full Bridge Lifecycle
 
-Checks deterministic supporting parts-bin behavior for Claude remote-control
-bridge gates, spawn accounting, heartbeat precedence, cleanup/completion
-idempotence, acknowledgement and stop retry effects, timeout state, stdin
-commands, and signal transitions.
+> Deterministic supporting parts-bin evidence for the Claude remote-control
+> bridge lifecycle owners.
 
-Requirements: N/A. These scenarios do not claim shipped CLI/TUI reachability,
-live process or network behavior, wall-clock timer behavior, or exact parity
-with an unavailable upstream TypeScript tree.
+| Field | Value |
+|---|---|
+| Source | `test/03_system/tools/llm/claude_full/bridge/bridgeMain_spec.spl` |
+| Executable scenarios | 26 |
+| Execution in this tranche | 0 scenarios executed |
+| Result | Not executed; no PASS is claimed |
+| Requirement | N/A; supporting Claude-full parts-bin evidence |
 
-All arrays are modeled effect records. They prove state-machine decisions only;
-they are not evidence that a process, request, signal handler, or timer ran.
-"""
+## Scope and Claim Boundary
 
-use std.spec.*
-use app.llm_caret.claude_full.bridge.bridgeMain.*
+The 26 scenarios cover the multi-session gate truth table, spawn argument and
+result ownership, heartbeat precedence, status transitions, completion and
+cleanup idempotence, acknowledgement effects, exact stop retry attempts and
+delays, timeout state, stdin actions, and signal transitions.
 
+The trace arrays are deterministic state/effect records. They do not claim that
+a live process, request, heartbeat, timer, stdin reader, or OS signal handler
+ran. The pinned upstream TypeScript source is absent, so this manual does not
+claim exact upstream parity or shipped CLI/TUI reachability.
+
+## Scenario Flow
+
+### Supporting gate and spawn owner behavior
+
+1. **should enable multi-session spawn for either gate** — Evaluate all cached
+   and blocking gate combinations.
+2. **should prepend the script path only for npm mode** — Compare bundled, npm,
+   and missing script launch inputs.
+3. **should return direct safe-spawn success and failure details** — Invoke the
+   spawn owner with a session and an error.
+4. **should mutate lifecycle state only for successful spawns** — Record one
+   successful and one failed spawn.
+
+### Supporting heartbeat and status owner behavior
+
+5. **should prioritize fatal and auth heartbeat outcomes** — Evaluate fatal,
+   auth, active, and empty heartbeat inputs.
+6. **should record each modeled heartbeat result exactly once** — Spawn a
+   session and record active then fatal heartbeats.
+7. **should accept only the canonical status interval** — Invoke the direct
+   snapshot, start, and stop status owners.
+8. **should make status lifecycle transitions idempotent** — Start twice and
+   stop twice.
+
+### Supporting completion and cleanup owner behavior
+
+9. **should stop a cleanup tracker only once** — Invoke the direct cleanup owner
+   twice.
+10. **should expose direct session completion decisions** — Compare
+    multi-session, single-session, and timeout results.
+11. **should complete and clean a work item idempotently** — Complete the same
+    active work item twice.
+12. **should preserve single-session timeout completion state** — Complete a
+    timed-out single session.
+13. **should preserve direct bridge-loop state** — Build active, completed,
+    stopped, and auth-failed loop snapshots.
+
+### Supporting acknowledgement and stop retry owner behavior
+
+14. **should return direct acknowledgement success and failure details** —
+    Acknowledge one work item successfully and one with an API error.
+15. **should commit successful acknowledgement once and retain each error** —
+    Repeat one successful acknowledgement and record two failures.
+16. **should stop immediately on success or a fatal error** — Compare
+    first-attempt success and fatal failure.
+17. **should retry with exact exponential delays before success** — Compare one
+    and two retryable failures.
+18. **should stop after three attempts without a terminal sleep** — Exhaust
+    retryable failures and clamp a negative delay.
+19. **should aggregate modeled stop delays in lifecycle order** — Run successful
+    and exhausted stop operations.
+
+### Supporting timeout stdin and signal owner behavior
+
+20. **should format direct timeout kill decisions** — Invoke millisecond and
+    second timeout owners.
+21. **should record one timeout transition per session** — Timeout the same
+    session twice and a second session once.
+22. **should classify direct stdin commands** — Invoke worktree, quit, and
+    ignored stdin branches.
+23. **should apply stdin toggles and quit to lifecycle state** — Toggle worktree
+    twice, ignore input, then quit.
+24. **should expose direct SIGINT and SIGTERM abort decisions** — Invoke both
+    signal owners.
+25. **should make repeated SIGINT an idempotent abort transition** — Deliver
+    SIGINT twice.
+26. **should preserve the first abort signal and ignore unknown signals** —
+    Deliver SIGTERM, SIGINT, and an unknown signal.
+
+## Complete Executable SSpec
+
+The folded source below is synchronized exactly with every executable scenario
+body in the canonical spec.
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
 describe "Claude full bridge lifecycle":
     describe "supporting gate and spawn owner behavior":
         it "should enable multi-session spawn for either gate":
@@ -280,3 +363,6 @@ describe "Claude full bridge lifecycle":
             expect(model.abortSignal).to_equal("SIGTERM")
             expect(model.abortTransitions).to_equal(1)
             expect(model.trace.receivedSignals).to_equal(["SIGTERM", "SIGINT", "SIGHUP"])
+```
+
+</details>

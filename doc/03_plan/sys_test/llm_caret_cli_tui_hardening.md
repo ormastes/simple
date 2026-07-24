@@ -199,13 +199,15 @@ Current focused executable specs:
 | Executable spec | Generated manual | Required proof |
 |---|---|---|
 | `test/03_system/app/llm_caret/feature/llm_caret_cli_hardening_spec.spl` | `doc/06_spec/03_system/app/llm_caret/feature/llm_caret_cli_hardening_spec.md` | Three scenarios: four source-process cases plus cached-wrapper selection and invalid-override rejection; current runner execution remains blocked |
-| `test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl` | `doc/06_spec/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.md` | Five bounded offline compatibility scenarios record installed path/version/hash and validate help, missing-input rejection, and removed-option rejection with no submitted prompt or inherited provider credentials |
+| `test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl` | `doc/06_spec/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.md` | Six bounded offline compatibility scenarios record installed path/version/hash and validate help, missing-input rejection, help-hidden accepted `--max-turns`, and removed `--max-tokens` rejection with no submitted prompt or inherited provider credentials |
 | `test/03_system/tools/llm/llm_caret_claude_cli_feature_contract_spec.spl` | `doc/06_spec/03_system/tools/llm/llm_caret_claude_cli_feature_contract_spec.md` | Eight deterministic CLI/parser/provider/state scenarios with complete folded source; current runner execution remains blocked |
-| `test/03_system/app/llm_caret/feature/llm_caret_tui_hidden_feature_spec.spl` | `doc/06_spec/03_system/app/llm_caret/feature/llm_caret_tui_hidden_feature_spec.md` | Nine TUI/hidden component scenarios, including Unicode raw-line reduction; expected live capture remains unexecuted |
-| `test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl` | `doc/06_spec/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.md` | Six fail-closed process scenarios: cached/offline prerequisites, forced/auto/piped routing, modeled teardown, UTF-8/edit/geometry, default/enabled/disabled hidden admission, and raw-entry rejection before ANSI mutation |
+| `test/03_system/app/llm_caret/feature/llm_caret_tui_hidden_feature_spec.spl` | `doc/06_spec/03_system/app/llm_caret/feature/llm_caret_tui_hidden_feature_spec.md` | Ten TUI/hidden component scenarios, including Unicode raw-line reduction and hidden/disabled alias submission with zero responder/persistence; expected live capture remains unexecuted |
+| `test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl` | `doc/06_spec/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.md` | Seven fail-closed process scenarios: cached/offline prerequisites, forced/auto/piped routing, modeled teardown, UTF-8/edit/geometry, hidden canonical/alias admission across default/enabled/disabled/false states, promptless TUI/plain command roots, and raw-entry rejection before ANSI mutation |
 | `test/03_system/tools/llm/claude_full/commands/root_commands_registry_spec.spl` | `doc/06_spec/03_system/tools/llm/claude_full/commands/root_commands_registry_spec.md` | Five scenarios, including one registry-derived exhaustive hidden/disabled/admission matrix that cannot silently omit a newly registered root command |
 | `test/03_system/tools/llm/claude_full/commands/hidden_stub_registry_spec.spl` | `doc/06_spec/03_system/tools/llm/claude_full/commands/hidden_stub_registry_spec.md` | One leaf-derived parts-bin hidden-disabled metadata scenario with independent source discovery, unique canonical identities, hyphen/underscore twin normalization, and two-way completeness |
-| `test/03_system/tools/llm/claude_full/feature_gate_registry_spec.spl` | `doc/06_spec/03_system/tools/llm/claude_full/feature_gate_registry_spec.md` | Three parts-bin scenarios: exact 33-record owner/spec/state matrix, generic root reconciliation plus `/compact` drift, and exact malformed-registry rejection |
+| `test/03_system/tools/llm/claude_full/feature_gate_registry_spec.spl` | `doc/06_spec/03_system/tools/llm/claude_full/feature_gate_registry_spec.md` | Four parts-bin scenarios: exact 33-record owner/spec/state matrix, generic root reconciliation plus `/compact` drift, exact malformed-registry rejection, and bounded 33-edge imported-source discovery with a negative drift fixture |
+| `test/03_system/tools/llm/claude_full/bridge/bridgeMain_spec.spl` | `doc/06_spec/03_system/tools/llm/claude_full/bridge/bridgeMain_spec.md` | Twenty-six direct-owner lifecycle scenarios covering all 16 isolated spawn, heartbeat, cleanup, completion, acknowledgement, retry, timeout, status, stdin, and signal owners |
+| `test/03_system/tools/llm/claude_full/services/mcp/client_spec.spl` | `doc/06_spec/03_system/tools/llm/claude_full/services/mcp/client_spec.md` | Eighteen direct-owner MCP client scenarios for error classification, connection decisions, cache isolation, batching/order/counts, URL elicitation retry, and result policies |
 | Nine focused owner/effect specs: Tasks V2, swarms, team memory, insights, review/rewind/sandbox, bridge helpers, bridge command, AttachmentMessage, and withRetry | Same relative paths under `doc/06_spec/03_system/tools/llm/claude_full/` | 88 modern scenarios with frozen steps/helpers and synchronized manuals; requirements are narrowly scoped, all manuals report zero execution, and none establishes shipped reachability |
 
 Every relevant REQ needs at least a happy, edge, and error/rejection scenario.
@@ -508,16 +510,16 @@ explicitly report zero executed scenarios and do not claim a PASS.
 The 359 source-synchronized unit examples plus eight CLI feature-contract,
 three process-hardening, ten TUI/hidden, five managed-environment, six
 installed-Claude, five root-registry, seven live-PTY, and one
-hidden-stub aggregate plus three feature-gate aggregate examples form the
-407-example base across the listed executable files (the root-registry spec
+hidden-stub aggregate plus four feature-gate aggregate examples form the
+430-example base across the listed executable files (the root-registry spec
 contains five scenarios). The 91 focused owner/effect examples now synchronized
 across Tasks V2, swarms, team memory, insights, review/rewind/sandbox, bridge
 helpers/command, AttachmentMessage, and withRetry raise the scoped modern
-`should` total to 498 examples with canonical matchers. The pre-existing
+`should` total to 521 examples with canonical matchers. The pre-existing
 unit/component/process manuals retain
 their documented body-parity checks. The feature-gate manual statically checks
 exact 33-row contract/state parity and carries complete folded executable
-parity for all three scenario bodies; helper contracts are visible while their
+parity for all four scenario bodies; helper contracts are visible while their
 implementations remain authoritative in the executable spec.
 
 Executable status remains **FAIL / runtime blocked**. The deployed

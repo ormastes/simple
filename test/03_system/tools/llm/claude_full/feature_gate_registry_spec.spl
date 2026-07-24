@@ -9,7 +9,7 @@ or aggregate system-test evidence. It preserves the known distinction between
 root command metadata and leaf conditional behavior.
 
 This is parts-bin evidence. It does not prove shipped Caret admission, future
-gate discovery, or complete current-upstream Claude parity.
+unimported gate discovery, or complete current-upstream Claude parity.
 """
 
 use std.spec.*
@@ -19,11 +19,89 @@ use app.llm_caret.claude_full.feature_gate_registry.{ClaudeFeatureGateProbe, Cla
 use app.llm_caret.claude_full.components.messages.AttachmentMessage.{AttachmentModel, AttachmentSkill, attachmentMessageRenderSkillDiscovery}
 use app.llm_caret.claude_full.services.api.withRetry.{isPersistentRetryEnabled}
 
+val FEATURE_GATE_REGISTRY_SOURCE = "src/app/llm_caret/claude_full/feature_gate_registry.spl"
+val FEATURE_GATE_SOURCE_PREFIX = "src/app/llm_caret/claude_full/"
+
+class ClaudeFeatureGateSource:
+    source_file: text
+    gate_owner: text
+
 fn _feature_gate_contains_text(values: [text], wanted: text) -> bool:
     for value in values:
         if value == wanted:
             return true
     false
+
+fn _feature_gate_source_key(source_file: text, gate_owner: text) -> text:
+    source_file + "|" + gate_owner
+
+fn discover_feature_gate_sources() -> [ClaudeFeatureGateSource]:
+    var discovered: [ClaudeFeatureGateSource] = []
+    val registry_source = file_read_text(FEATURE_GATE_REGISTRY_SOURCE)
+
+    for raw_line in registry_source.split("\n"):
+        val line = raw_line.trim()
+        if line.starts_with("use app.llm_caret.claude_full.") and line.contains(".{") and line.ends_with("}"):
+            val import_parts = line.split(".{")
+            if import_parts.len() == 2:
+                val module_import = import_parts[0].substring(4, import_parts[0].len())
+                val source_file = "src/" + module_import.replace(".", "/") + ".spl"
+                val source = file_read_text(source_file)
+                val imported_symbols = import_parts[1].substring(0, import_parts[1].len() - 1)
+                for raw_symbol in imported_symbols.split(","):
+                    val symbol = raw_symbol.trim()
+                    if source.contains("fn " + symbol + "("):
+                        discovered.push(ClaudeFeatureGateSource(
+                            source_file: source_file,
+                            gate_owner: symbol
+                        ))
+    discovered
+
+fn check_feature_gate_source_completeness(
+    records: [ClaudeFeatureGateRecord],
+    discovered: [ClaudeFeatureGateSource]
+) -> [text]:
+    var diagnostics: [text] = []
+    var discovered_keys: [text] = []
+    var registered_keys: [text] = []
+
+    for source in discovered:
+        val key = _feature_gate_source_key(source.source_file, source.gate_owner)
+        if _feature_gate_contains_text(discovered_keys, key):
+            diagnostics.push("duplicate-discovered-source-owner:" + key)
+        else:
+            discovered_keys.push(key)
+
+    for record in records:
+        for owner in record.gate_owner.split("/"):
+            val key = _feature_gate_source_key(record.source_file, owner)
+            if not _feature_gate_contains_text(registered_keys, key):
+                registered_keys.push(key)
+
+    for source_key in discovered_keys:
+        if not _feature_gate_contains_text(registered_keys, source_key):
+            diagnostics.push("unregistered-source-owner:" + source_key)
+
+    for registered_key in registered_keys:
+        if not _feature_gate_contains_text(discovered_keys, registered_key):
+            diagnostics.push("registry-owner-not-discovered:" + registered_key)
+
+    diagnostics
+
+fn _feature_gate_drifted_source_fixture() -> [ClaudeFeatureGateSource]:
+    val discovered = discover_feature_gate_sources()
+    var drifted: [ClaudeFeatureGateSource] = []
+
+    for source in discovered:
+        if source.gate_owner != "isCcrMirrorEnabled":
+            drifted.push(source)
+    drifted.push(ClaudeFeatureGateSource(
+        source_file: FEATURE_GATE_SOURCE_PREFIX + "future/newGate.spl",
+        gate_owner: "newGateEnabled"
+    ))
+    if discovered.len() > 0:
+        drifted.push(discovered[0])
+    drifted
 
 fn _feature_gate_ids(records: [ClaudeFeatureGateRecord]) -> [text]:
     var ids: [text] = []
@@ -527,6 +605,9 @@ describe "Claude full feature-gate registry":
             ])
             expect(check_claude_feature_gate_registry(records)).to_equal([])
             expect(check_claude_feature_gate_state_matrix(records)).to_equal("complete")
+            val discovered_sources = discover_feature_gate_sources()
+            expect(discovered_sources.len()).to_equal(33)
+            expect(check_feature_gate_source_completeness(records, discovered_sources)).to_equal([])
 
             for record in records:
                 val owner_source = file_read_text(record.source_file)
@@ -589,4 +670,18 @@ describe "Claude full feature-gate registry":
                 "invalid-state-shape:invalid",
                 "unknown-default-labeled:invalid",
                 "compact-drift-missing"
+            ])
+
+        it "should reject import-frontier owners without registry coverage in either direction":
+            step("Compare the bounded import frontier with registry owner edges")
+            val records = setup_claude_feature_gate_fixture()
+            val diagnostics = check_feature_gate_source_completeness(
+                records,
+                _feature_gate_drifted_source_fixture()
+            )
+
+            expect(diagnostics).to_equal([
+                "duplicate-discovered-source-owner:src/app/llm_caret/claude_full/commands/compact/index.spl|compactCommand",
+                "unregistered-source-owner:src/app/llm_caret/claude_full/future/newGate.spl|newGateEnabled",
+                "registry-owner-not-discovered:src/app/llm_caret/claude_full/bridge/bridgeEnabled.spl|isCcrMirrorEnabled"
             ])

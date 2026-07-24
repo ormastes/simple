@@ -176,17 +176,18 @@ expect(result.exit_code).to_equal(0)
 
 ### REQ-LLM-CARET-HIDDEN-008: hidden command admission reaches the real TUI
 
-#### should reject hidden commands by default execute them when enabled and always reject disabled commands
+#### should enforce hidden canonical alias and explicit false admission through the real TUI
 
 - Enable the hidden-feature fixture.
-  - Expected: default state renders
+  - Expected: canonical and alias default state renders the matching
+    unknown-command response.
+  - Expected: explicit `false` renders
     `system: Unknown command: /debug-tool-call (try /help)`.
-  - Expected: the enabled fixture renders
+  - Expected: canonical and alias enabled fixtures render
     `system: tool call id=call-1 name=Read input_bytes=27`.
-  - Expected: the enabled fixture still renders
-    `system: Command disabled: /remote-setup`.
+  - Expected: canonical and alias disabled commands remain rejected.
 - Check the hidden-feature gate.
-  - Expected: all three PTY cases pass with zero failures.
+  - Expected: all seven PTY cases pass with zero failures.
 
 <details>
 <summary>Executable SSpec</summary>
@@ -198,10 +199,22 @@ expect(result.stdout).to_contain(
     "case=hidden-default-rejected status=PASS"
 )
 expect(result.stdout).to_contain(
+    "case=hidden-false-rejected status=PASS"
+)
+expect(result.stdout).to_contain(
     "case=hidden-enabled-executed status=PASS"
 )
 expect(result.stdout).to_contain(
     "case=hidden-disabled-rejected status=PASS"
+)
+expect(result.stdout).to_contain(
+    "case=hidden-alias-default-rejected status=PASS"
+)
+expect(result.stdout).to_contain(
+    "case=hidden-alias-enabled-executed status=PASS"
+)
+expect(result.stdout).to_contain(
+    "case=hidden-disabled-alias-rejected status=PASS"
 )
 
 step("Check the hidden-feature gate")

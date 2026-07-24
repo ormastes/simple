@@ -5,7 +5,7 @@
 
 | Tests | Active | Skipped | Pending |
 |---|---:|---:|---:|
-| 3 | 3 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -22,7 +22,7 @@
 | Requirements | `REQ-LLM-CARET-HIDDEN-008` (supporting parts-bin metadata) |
 | Plan | `doc/03_plan/sys_test/llm_caret_cli_tui_hardening.md` |
 | Source | `test/03_system/tools/llm/claude_full/feature_gate_registry_spec.spl` |
-| Updated | 2026-07-24 |
+| Updated | 2026-07-25 |
 | Generator | Manual synchronization; docgen execution remains blocked |
 
 ## Scope and Claim Boundary
@@ -37,18 +37,23 @@ The executable SSpec checks:
 
 - exact ordered identities, source files, owner symbols, and mapped specs;
 - exact state shape, gate kind, default metadata, and every probe outcome;
+- all 33 imported function-owner declarations against registry
+  `source_file|gate_owner` edges in both directions;
 - every nonempty root-command record against the production root registry;
 - `/compact` root enabled/visible metadata against both leaf environment
   states;
 - exact ordered diagnostics from a deliberately malformed registry.
 
-This is an inward-only `claude_full` parts-bin capsule. It does not prove
-shipped Caret admission, CLI/TUI reachability, automatic discovery of future
-gates, or complete current-upstream Claude parity. Root/component/live-PTY
-evidence remains authoritative for shipped hidden-command behavior.
+This is an inward-only `claude_full` parts-bin capsule. Its discovery boundary
+is the function import frontier of `feature_gate_registry.spl`: an imported
+function owner without a registry edge and a registry edge without an imported
+source declaration both fail. It does not scan for arbitrary unimported gates,
+prove shipped Caret admission or CLI/TUI reachability, or establish complete
+current-upstream Claude parity. Root/component/live-PTY evidence remains
+authoritative for shipped hidden-command behavior.
 
 This manual has exact identity/source/spec/state-matrix parity and complete
-folded executable parity for all three scenario bodies. Supporting helper
+folded executable parity for all four scenario bodies. Supporting helper
 implementations remain authoritative in the linked `.spl` file; their complete
 contracts are visible below.
 
@@ -184,6 +189,8 @@ applicable; textual outcomes remain asserted in the executable matrix.
     above match exactly.
   - Expected: the structural checker returns `[]`.
   - Expected: the exact state matrix returns `complete`.
+  - Expected: source discovery resolves 33 imported functions to their real
+    declarations and the bidirectional completeness checker returns `[]`.
   - Expected: every owner function is declared by its mapped source and named
     by its mapped spec.
   - Expected: every nonempty root command, including `/compact` and `/init`,
@@ -271,6 +278,9 @@ it "should validate the bounded accepted Claude feature-gate registry":
     ])
     expect(check_claude_feature_gate_registry(records)).to_equal([])
     expect(check_claude_feature_gate_state_matrix(records)).to_equal("complete")
+    val discovered_sources = discover_feature_gate_sources()
+    expect(discovered_sources.len()).to_equal(33)
+    expect(check_feature_gate_source_completeness(records, discovered_sources)).to_equal([])
 
     for record in records:
         val owner_source = file_read_text(record.source_file)
@@ -368,6 +378,38 @@ it "should reject duplicate ownerless and incomplete gate records":
 
 </details>
 
+#### should reject import-frontier owners without registry coverage in either direction
+
+- Compare the bounded import frontier with registry owner edges.
+  - Expected: a duplicate imported source-owner edge is rejected exactly.
+  - Expected: an imported future owner without a registry row is rejected
+    exactly.
+  - Expected: a registry owner whose import/source declaration disappears is
+    rejected exactly.
+  - Expected: the checker reports the full ordered diagnostic array, so one
+    direction cannot hide drift in the other.
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+it "should reject import-frontier owners without registry coverage in either direction":
+    step("Compare the bounded import frontier with registry owner edges")
+    val records = setup_claude_feature_gate_fixture()
+    val diagnostics = check_feature_gate_source_completeness(
+        records,
+        _feature_gate_drifted_source_fixture()
+    )
+
+    expect(diagnostics).to_equal([
+        "duplicate-discovered-source-owner:src/app/llm_caret/claude_full/commands/compact/index.spl|compactCommand",
+        "unregistered-source-owner:src/app/llm_caret/claude_full/future/newGate.spl|newGateEnabled",
+        "registry-owner-not-discovered:src/app/llm_caret/claude_full/bridge/bridgeEnabled.spl|isCcrMirrorEnabled"
+    ])
+```
+
+</details>
+
 ## Supporting Checker Contract
 
 The executable helper fails lookups explicitly instead of returning element
@@ -388,5 +430,108 @@ zero silently. `check_claude_feature_gate_registry` validates:
 The independent `check_claude_feature_gate_state_matrix` pins every Boolean and
 textual outcome listed in the Exact State Matrix table. Structural
 self-consistency alone cannot green the first scenario.
+
+`discover_feature_gate_sources` reads only the registry module, resolves its
+`app.llm_caret.claude_full.*.{...}` imports to `src/.../*.spl`, and retains
+imports that are real top-level function declarations. It does not walk the
+full tree, execute owners, or run from a production request path.
+
+`check_feature_gate_source_completeness` compares unique
+`source_file|gate_owner` edges in both directions. Repeated registry edges are
+allowed because one owner can project multiple state dimensions; duplicate
+discovery edges, unregistered imported owners, and undiscovered registry
+owners produce exact diagnostics. This is a bounded import-frontier oracle,
+not automatic discovery of arbitrary unimported or upstream-only features.
+
+<details>
+<summary>Bounded source-discovery helper implementation</summary>
+
+```simple
+val FEATURE_GATE_REGISTRY_SOURCE = "src/app/llm_caret/claude_full/feature_gate_registry.spl"
+val FEATURE_GATE_SOURCE_PREFIX = "src/app/llm_caret/claude_full/"
+
+class ClaudeFeatureGateSource:
+    source_file: text
+    gate_owner: text
+
+fn _feature_gate_contains_text(values: [text], wanted: text) -> bool:
+    for value in values:
+        if value == wanted:
+            return true
+    false
+
+fn _feature_gate_source_key(source_file: text, gate_owner: text) -> text:
+    source_file + "|" + gate_owner
+
+fn discover_feature_gate_sources() -> [ClaudeFeatureGateSource]:
+    var discovered: [ClaudeFeatureGateSource] = []
+    val registry_source = file_read_text(FEATURE_GATE_REGISTRY_SOURCE)
+
+    for raw_line in registry_source.split("\n"):
+        val line = raw_line.trim()
+        if line.starts_with("use app.llm_caret.claude_full.") and line.contains(".{") and line.ends_with("}"):
+            val import_parts = line.split(".{")
+            if import_parts.len() == 2:
+                val module_import = import_parts[0].substring(4, import_parts[0].len())
+                val source_file = "src/" + module_import.replace(".", "/") + ".spl"
+                val source = file_read_text(source_file)
+                val imported_symbols = import_parts[1].substring(0, import_parts[1].len() - 1)
+                for raw_symbol in imported_symbols.split(","):
+                    val symbol = raw_symbol.trim()
+                    if source.contains("fn " + symbol + "("):
+                        discovered.push(ClaudeFeatureGateSource(
+                            source_file: source_file,
+                            gate_owner: symbol
+                        ))
+    discovered
+
+fn check_feature_gate_source_completeness(
+    records: [ClaudeFeatureGateRecord],
+    discovered: [ClaudeFeatureGateSource]
+) -> [text]:
+    var diagnostics: [text] = []
+    var discovered_keys: [text] = []
+    var registered_keys: [text] = []
+
+    for source in discovered:
+        val key = _feature_gate_source_key(source.source_file, source.gate_owner)
+        if _feature_gate_contains_text(discovered_keys, key):
+            diagnostics.push("duplicate-discovered-source-owner:" + key)
+        else:
+            discovered_keys.push(key)
+
+    for record in records:
+        for owner in record.gate_owner.split("/"):
+            val key = _feature_gate_source_key(record.source_file, owner)
+            if not _feature_gate_contains_text(registered_keys, key):
+                registered_keys.push(key)
+
+    for source_key in discovered_keys:
+        if not _feature_gate_contains_text(registered_keys, source_key):
+            diagnostics.push("unregistered-source-owner:" + source_key)
+
+    for registered_key in registered_keys:
+        if not _feature_gate_contains_text(discovered_keys, registered_key):
+            diagnostics.push("registry-owner-not-discovered:" + registered_key)
+
+    diagnostics
+
+fn _feature_gate_drifted_source_fixture() -> [ClaudeFeatureGateSource]:
+    val discovered = discover_feature_gate_sources()
+    var drifted: [ClaudeFeatureGateSource] = []
+
+    for source in discovered:
+        if source.gate_owner != "isCcrMirrorEnabled":
+            drifted.push(source)
+    drifted.push(ClaudeFeatureGateSource(
+        source_file: FEATURE_GATE_SOURCE_PREFIX + "future/newGate.spl",
+        gate_owner: "newGateEnabled"
+    ))
+    if discovered.len() > 0:
+        drifted.push(discovered[0])
+    drifted
+```
+
+</details>
 
 </details>

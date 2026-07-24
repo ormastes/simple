@@ -327,12 +327,19 @@ write_input() {
             # "ac", left, U+754C, end, "!" => submitted text "a界c!".
             printf 'ac\033[D界\033[F!\r/exit\r' >"${input_path}"
             ;;
-        hidden-default|hidden-enabled)
+        hidden-default|hidden-enabled|hidden-false)
             printf '/debug-tool-call {"type":"tool_use","id":"call-1","name":"Read","input":{"file_path":"fixture.txt"}}\r/exit\r' \
                 >"${input_path}"
             ;;
         hidden-disabled)
             printf '/remote-setup\r/exit\r' >"${input_path}"
+            ;;
+        hidden-alias-default|hidden-alias-enabled)
+            printf '/debug_tool_call {"type":"tool_use","id":"call-1","name":"Read","input":{"file_path":"fixture.txt"}}\r/exit\r' \
+                >"${input_path}"
+            ;;
+        hidden-disabled-alias)
+            printf '/remote_setup\r/exit\r' >"${input_path}"
             ;;
         promptless-compact)
             printf '/compact\r/exit\r' >"${input_path}"
@@ -635,8 +642,12 @@ run_pty_case() {
     HOME="${home_dir}"
     TERM=xterm-256color
     case "${input_kind}" in
-        hidden-enabled|hidden-disabled)
+        hidden-enabled|hidden-disabled|hidden-alias-enabled|hidden-disabled-alias)
             LLM_CARET_ENABLE_HIDDEN_COMMANDS=1
+            export LLM_CARET_ENABLE_HIDDEN_COMMANDS
+            ;;
+        hidden-false)
+            LLM_CARET_ENABLE_HIDDEN_COMMANDS=false
             export LLM_CARET_ENABLE_HIDDEN_COMMANDS
             ;;
         *)
@@ -705,11 +716,17 @@ run_pty_case() {
     elif [ "${input_kind}" = "utf8-edit" ] &&
          ! grep -a -F "You: a界c!" "${capture}" >/dev/null 2>&1; then
         record_failure "${label}" "utf8_edited_submission_missing" "${case_dir}"
-    elif [ "${input_kind}" = "hidden-default" ] &&
+    elif { [ "${input_kind}" = "hidden-default" ] ||
+           [ "${input_kind}" = "hidden-false" ]; } &&
          ! grep -a -F "system: Unknown command: /debug-tool-call (try /help)" \
              "${capture}" >/dev/null 2>&1; then
         record_failure "${label}" "hidden_default_rejection_missing" "${case_dir}"
-    elif [ "${input_kind}" = "hidden-enabled" ] &&
+    elif [ "${input_kind}" = "hidden-alias-default" ] &&
+         ! grep -a -F "system: Unknown command: /debug_tool_call (try /help)" \
+             "${capture}" >/dev/null 2>&1; then
+        record_failure "${label}" "hidden_alias_default_rejection_missing" "${case_dir}"
+    elif { [ "${input_kind}" = "hidden-enabled" ] ||
+           [ "${input_kind}" = "hidden-alias-enabled" ]; } &&
          ! grep -a -F "system: tool call id=call-1 name=Read input_bytes=27" \
              "${capture}" >/dev/null 2>&1; then
         record_failure "${label}" "hidden_enabled_execution_missing" "${case_dir}"
@@ -717,6 +734,10 @@ run_pty_case() {
          ! grep -a -F "system: Command disabled: /remote-setup" \
              "${capture}" >/dev/null 2>&1; then
         record_failure "${label}" "hidden_disabled_rejection_missing" "${case_dir}"
+    elif [ "${input_kind}" = "hidden-disabled-alias" ] &&
+         ! grep -a -F "system: Command disabled: /remote_setup" \
+             "${capture}" >/dev/null 2>&1; then
+        record_failure "${label}" "hidden_disabled_alias_rejection_missing" "${case_dir}"
     elif case "${input_kind}" in promptless-*) true ;; *) false ;; esac &&
          ! validate_promptless_output \
              "${input_kind}" "${capture}" "system: " "${home_dir}"; then
@@ -864,8 +885,15 @@ run_editing() {
 
 run_hidden() {
     run_pty_case "hidden-default-rejected" "forced" "hidden-default" "12x80"
+    run_pty_case "hidden-false-rejected" "forced" "hidden-false" "12x80"
     run_pty_case "hidden-enabled-executed" "forced" "hidden-enabled" "12x80"
     run_pty_case "hidden-disabled-rejected" "forced" "hidden-disabled" "12x80"
+    run_pty_case \
+        "hidden-alias-default-rejected" "forced" "hidden-alias-default" "12x80"
+    run_pty_case \
+        "hidden-alias-enabled-executed" "forced" "hidden-alias-enabled" "12x80"
+    run_pty_case \
+        "hidden-disabled-alias-rejected" "forced" "hidden-disabled-alias" "12x80"
     unset LLM_CARET_ENABLE_HIDDEN_COMMANDS
 }
 

@@ -109,6 +109,7 @@ source/manual or traceability PASS as executable behavior evidence.
 | `80131399ae27` | Pushed to `origin/main` | Shipped promptless root/alias dispatch through pure, injected plain, and TUI submission paths with zero model/persistence evidence |
 | `77f0fbd3a3b3` | Pushed to `origin/main` | Four independent fail-closed cached-wrapper PTY cases for compact/summarize/init/bootstrap plus tightened credential scrubbing |
 | `7767e3dba6c2` | Pushed to `origin/main` | Installed Claude hidden-argument proof, explicit hidden env matrix, and hidden/disabled alias submission with zero responder/persistence |
+| `39898a30c30a` | Pushed to `origin/main` | Promptless cached-wrapper TUI/plain cases, direct retry-owner coverage, hidden help exclusions, and synchronized plan/manual repair |
 
 Workspace-relative MCP/LSP symbols and definitions resolve production targets,
 so the navigation health condition is met. Diagnostics
@@ -128,8 +129,8 @@ and must not be resolved, reverted, or included by this lane.
 | Installed-Claude offline probe | PASS: 6/6 cases against Claude Code `2.1.218` (`71abaff5…`): provenance, version, help, missing input, help-hidden `--max-turns`, and removed `--max-tokens` | Real installed-binary checker executed with isolated HOME/config, closed stdin, no prompt, and no inherited provider credentials; SSpec/docgen still blocked |
 | Root-registry manual parity | PASS: 5/5 scenario bodies match source, including the production-derived exhaustive matrix | Static synchronization; no CLI/TUI invocation claim |
 | Hidden-stub manual parity | PASS: 1/1 scenario body and the complete supporting-helper block match source | Static synchronization; SSpec/docgen not executed on a qualified runtime |
-| Feature-gate manual parity | PASS (static): 33/33 owner rows, 33/33 independently pinned contract rows, 33/33 state rows, and 3/3 complete folded executable scenario bodies | SSpec/docgen cannot execute until a qualified runtime exists |
-| Focused modern SSpec scan | PASS (static): 498 modern `should` examples across the listed files (407 base plus 91 focused owner/effect examples), canonical matchers, and no placeholder pass | Static source/manual scan only except for the six-case installed-Claude shell checker |
+| Feature-gate manual parity | PASS (static): 33/33 owner rows, 33/33 independently pinned contract rows, 33/33 state rows, and 4/4 complete folded executable scenario bodies; bounded import-frontier discovery resolves 33 unique physical source/owner edges | This catches imported-registry drift only, not arbitrary unimported or upstream-only gates; SSpec/docgen cannot execute until a qualified runtime exists |
+| Focused modern SSpec scan | PASS (static): 521 modern `should` examples across the listed files (430 base plus 91 focused owner/effect examples), canonical matchers, and no placeholder pass | Static source/manual scan only except for the six-case installed-Claude shell checker |
 | Direct environment guard | PASS in working and staged modes | Changed Caret paths only |
 | Numbered-artifact guard | WARN in this jj workspace: both modes emit Git-worktree/`--cached` errors but still print `OK` and exit zero | Not authoritative here; no numbered artifacts are added by this tranche |
 | Generated-spec layout | PASS: zero `.spl` specs under `doc/06_spec` | Layout only |
@@ -138,7 +139,7 @@ and must not be resolved, reverted, or included by this lane.
 | Simple LSP MCP | Workspace-relative symbols returned the complete production root registry and definition resolved exactly to `commands.spl:44` | Navigation health confirmed |
 | Simple MCP codebase query | Hybrid query reached the LSP workspace-symbol path but exceeded the existing 100 MB watchdog and exited 992 | Broader MCP search/diagnostic execution still blocked; not a Caret PASS |
 | Focused SSpec execution | Not executed on a qualified runtime | Required before production PASS |
-| Live PTY TUI evidence | Six-scenario fail-closed checker, modern SSpec, and synchronized manual now exist, including `REQ-LLM-CARET-HIDDEN-008` default/enabled/disabled hidden admission; execution is still missing because no cached Caret artifact is deployed | Required before production PASS; artifacts are reserved under `build/test-artifacts/03_system/app/llm_caret/feature/llm_caret_tui_pty/` |
+| Live PTY TUI evidence | Seven-scenario fail-closed checker, modern SSpec, and synchronized manual now exist, including `REQ-LLM-CARET-HIDDEN-008` canonical/alias admission for default, enabled, disabled, and explicit-false environment states; execution is still missing because no cached Caret artifact is deployed | Required before production PASS; artifacts are reserved under `build/test-artifacts/03_system/app/llm_caret/feature/llm_caret_tui_pty/` |
 | Current Claude parity | Unprovable: pinned upstream source tree is absent | Historical matrices only |
 
 ### Direct-function coverage closure
@@ -299,8 +300,8 @@ fixtures. No lane may run a paid provider.
 
    Current audit result: the 33 distributed gate dimensions remain
    parts-bin-only; the shipped entry graph reaches only the compact/init root
-   records and their summarize/bootstrap aliases. The scoped suite contains 498
-   modern scenarios (407 base plus 91 focused owner/effect scenarios), and the
+   records and their summarize/bootstrap aliases. The scoped suite contains 521
+   modern scenarios (430 base plus 91 focused owner/effect scenarios), and the
    PTY manual contains seven fail-closed scenarios with zero executed. Simple
    LSP MCP returns the `commands.spl` symbol inventory and resolves the
    `chat_tui.spl` `findRootCommand` call to its production definition. GitHub
@@ -330,15 +331,28 @@ boundary above. The current tranche closes two of those findings:
   output and isolated-HOME session files;
 - the three previously unreferenced direct retry owners now have focused
   status/message, default decision, and Retry-After conversion vectors.
+- the real-PTY hidden lane now includes canonical and alias spellings across
+  default, enabled, disabled, and explicit-`false` environment states;
+- the bounded feature-gate discovery oracle resolves all 33 imported owner
+  functions to 33 unique physical source/owner edges and rejects either-side
+  drift without adding filesystem work to shipped paths;
+- the bridge lifecycle model gives all 16 isolated lifecycle owners
+  deterministic spawn, heartbeat, cleanup, completion, acknowledgement, retry,
+  timeout, stdin, status, and signal state/effect evidence in 26 synchronized
+  scenarios;
+- the MCP client now has 18 synchronized direct-owner scenarios for terminal
+  error classification, connection decisions, per-server cache isolation,
+  ordered batch bounds, capability counts, and exactly-one URL elicitation
+  retry.
 
 Remaining work is ordered by shipped-path value and prerequisite cost:
 
 | Lane | Remaining work | Acceptance |
 |---|---|---|
 | M — cached plain process | Complete statically: four fail-closed `--plain` stdin cases for `/compact`, `/summarize`, `/init`, and `/bootstrap` | Execute on the qualified cached artifact; exact canonical output, exit zero, no assistant/unknown output, and no session file under isolated HOME |
-| N — PTY negative effects | Promptless negative checks are complete; add hidden aliases plus false env value to the real PTY lane | Preserve the new forbidden-output/session gates and terminal cleanup for every case |
-| O — registry discovery | Add independent source-to-registry discovery for distributed gates | A newly added source gate without a registry row makes the aggregate fail |
-| P — direct owner closure | Retry owner tables are complete statically; next design deterministic seams for MCP auth/client and bridge lifecycle owners | Direct owner import, effect/state assertions, canonical manual; never add constant-only sentinel tests |
+| N — PTY negative effects | Complete statically: promptless negative checks plus hidden canonical/alias and false-env cases are represented in the real PTY checker/spec/manual | Execute once on the qualified cached artifact while preserving forbidden-output/session gates and terminal cleanup |
+| O — registry discovery | Complete for the bounded imported registry frontier: 33/33 discovered physical source/owner edges and an exact negative drift fixture | Restore a pinned current-upstream tree before claiming discovery beyond the imported frontier |
+| P — direct owner closure | Retry, MCP client, and all 16 bridge lifecycle owner seams are complete statically; MCP auth and bridge messaging remain next | Direct owner import, effect/state assertions, canonical manual; never add constant-only sentinel tests |
 | Q — current Claude inventory | Restore a provenance-pinned upstream tree and regenerate file/function matrices | Every current upstream target has an explicit implemented/tested, justified parts-bin, or missing status |
 | R — executable Caret | Qualify a current pure-Simple runtime, build cached Caret, and execute focused SSpec/docgen/PTY exactly once | Provenance sidecar, no seed/source fallback, trustworthy example count/exit, retained artifacts |
 
