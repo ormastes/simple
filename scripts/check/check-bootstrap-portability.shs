@@ -53,6 +53,29 @@ grep -Fq 'unknown command '\''run'\''' scripts/bootstrap/bootstrap-from-scratch.
 grep -Fq 'stage4-essential-tools-smoke' scripts/bootstrap/bootstrap-from-scratch.sh || fail "Stage 4 essential-tools smoke hook missing"
 grep -Fq 'SIMPLE_BINARY="$(absolute_path "${full_bin}")"' scripts/bootstrap/bootstrap-from-scratch.sh || fail "essential-tools smoke does not receive the fresh Stage 4 binary"
 essential_tools_smoke=scripts/check/check-bootstrap-essential-tools-smoke.shs
+seed_probe_dir=$(mktemp -d)
+trap 'rm -rf "${seed_probe_dir}"' EXIT INT TERM
+fake_seed="${seed_probe_dir}/simple"
+seed_sentinel="${seed_probe_dir}/tool-probe-ran"
+cat >"${fake_seed}" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = "--version" ]; then
+  echo "WARNING: this Rust-built Simple binary is a bootstrap seed only"
+  exit 0
+fi
+: >"${SEED_REJECTION_TOOL_PROBE:?}"
+exit 99
+EOF
+chmod +x "${fake_seed}"
+set +e
+seed_rejection_output=$(SIMPLE_BINARY="${fake_seed}" SEED_REJECTION_TOOL_PROBE="${seed_sentinel}" sh "${essential_tools_smoke}" 2>&1)
+seed_rejection_rc=$?
+set -e
+[ "${seed_rejection_rc}" -ne 0 ] || fail "essential-tools smoke accepted Rust seed identity"
+printf '%s\n' "${seed_rejection_output}" | grep -Fq 'error=rust_seed_binary' || fail "Rust seed rejection marker missing"
+[ ! -e "${seed_sentinel}" ] || fail "essential-tools smoke ran tool probes before rejecting Rust seed"
+rm -rf "${seed_probe_dir}"
+trap - EXIT INT TERM
 grep -Fq 'essential_test_runner_smoke=true' "${essential_tools_smoke}" || fail "test-runner bootstrap smoke missing"
 grep -Fq 'run_probe test_runner_indexed_u8_fail 1' "${essential_tools_smoke}" || fail "indexed u8 failure smoke missing"
 grep -Fq 'error=test_runner_indexed_u8_failure_summary_missing' "${essential_tools_smoke}" || fail "indexed u8 failure summary guard missing"
@@ -68,6 +91,7 @@ grep -Fq 'error=lint_json_non_json_line' "${essential_tools_smoke}" || fail "lin
 grep -Fq 'error=lint_json_human_output' "${essential_tools_smoke}" || fail "lint JSON human-output guard missing"
 grep -Fq 'essential_duplicate_checker_smoke=true' "${essential_tools_smoke}" || fail "duplicate-check bootstrap smoke missing"
 grep -Fq 'bootstrap_essential_tools_smoke=true' "${essential_tools_smoke}" || fail "essential-tools aggregate pass marker missing"
+grep -Fq 'essential_tools_pure_simple_identity=true' "${essential_tools_smoke}" || fail "pure-Simple identity marker missing"
 grep -Fq 'run_duplicate_check(filtered_args)' src/app/cli/_CliMain/main_and_help.spl || fail "duplicate-check is not linked into the full CLI"
 if grep -Fq 'cli_run_file("src/compiler/90.tools/duplicate_check/main.spl"' src/app/cli/_CliMain/main_and_help.spl; then
   fail "duplicate-check still delegates to repository source"
