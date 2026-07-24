@@ -1616,6 +1616,11 @@ fn project_stage4_archive_closure(
         let actual: BTreeMap<String, usize> = localized_defined
             .iter()
             .map(|(symbol, count)| (canonical_archive_symbol(symbol).to_string(), *count))
+            // rust_eh_personality is deliberately kept global (see the localize
+            // filter above): unwind-info personality references stay EXTERNAL
+            // through `ld -r`, so demoting it breaks the final link. It is a
+            // known non-root export, not an interface drift.
+            .filter(|(symbol, _)| symbol != "rust_eh_personality")
             .collect();
         let expected: BTreeMap<String, usize> = requested.iter().map(|symbol| (symbol.clone(), 1)).collect();
         if actual != expected {
