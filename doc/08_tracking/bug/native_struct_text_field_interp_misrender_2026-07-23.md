@@ -1,6 +1,6 @@
 # native (entry-closure): struct text fields misrender in string interpolation
 
-- **Date:** 2026-07-23  **Status:** OPEN (repro W83)
+- **Date:** 2026-07-23  **Status:** SOURCE FIXED; staged execution pending
 - **Severity:** medium — no crash; wrong output when interpolating struct
   text fields. Comparisons/assignments appear functional.
 
@@ -28,3 +28,17 @@ declared field type threaded to the interpolation coercion.
 simple_lsp_mcp uses struct text fields only in compares/assignments on the
 startup path (post class→struct conversion), so the LSP server is expected
 functional; fix before relying on interpolated struct text fields in natives.
+
+## Resolution (2026-07-24)
+
+Current MIR field projection recovers the owning struct's declared field
+representation before `emit_get_field`, emits text fields as `Opaque("str")`,
+and retains the declared HIR type on the projected local. This routes
+interpolation through text conversion instead of rendering the pointer as an
+integer.
+
+The exact W83 before/after assignment oracle now lives in
+`native_crossmodule_result_u8/main.spl`, which feeds hosted LLVM/Cranelift,
+FreeBSD, AArch64/RISC-V64 execution, and ARM32/RV32/Windows-ARM64 object gates.
+A focused source contract pins both type-propagation steps. Rebuilt execution
+remains pending.
