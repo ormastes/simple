@@ -1,0 +1,107 @@
+#!/bin/sh
+# Fail-closed admission for a real Aetheric host Web/GUI evidence bundle.
+#
+# This wrapper does not manufacture a DOM, pixels, or UI-access history. Its
+# input must be emitted by the production HTML/WebIR-to-DrawIR Electron run.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/aetheric-host-web-gui-evidence}"
+REPORT_PATH="${REPORT_PATH:-$BUILD_DIR/report.md}"
+PROOF_PATH="${AETHERIC_HOST_WEB_GUI_PROOF:-$BUILD_DIR/aetheric-host-web-gui.env}"
+SIMPLE_BIN="${SIMPLE_BIN:-}"
+SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+SNAPSHOT="src/lib/common/ui/generated/aetheric_dark_theme_snapshot.spl"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+
+field() { sed -n "s/^$1=//p" "$PROOF_PATH" | tail -n 1; }
+regular_file() { [ -f "$1" ] && [ ! -L "$1" ]; }
+positive() { case "$1" in ''|*[!0-9]*) return 1 ;; *) [ "$1" -gt 0 ] ;; esac; }
+sha256() { [ "${#1}" -eq 64 ] && case "$1" in *[!0-9a-f]*) false ;; *) true ;; esac; }
+contains() { case "$1" in *"$2"*) return 0 ;; *) return 1 ;; esac; }
+
+emit() {
+    status="$1"; reason="$2"
+    {
+        echo "aetheric_host_web_gui_status=$status"
+        echo "aetheric_host_web_gui_reason=$reason"
+        echo "aetheric_host_web_gui_proof=$PROOF_PATH"
+        echo "aetheric_host_web_gui_simple_bin=$SIMPLE_BIN"
+        echo "aetheric_host_web_gui_simple_bin_source=$SIMPLE_BIN_SOURCE"
+        echo "aetheric_host_web_gui_live_qemu=not-applicable"
+        echo "aetheric_host_web_gui_live_execution=$([ "$status" = pass ] && echo pass || echo pending-or-failed)"
+        [ -f "$PROOF_PATH" ] && sed 's/^/aetheric_host_web_gui_proof_/' "$PROOF_PATH"
+    } | tee "$BUILD_DIR/evidence.env"
+    {
+        echo "# Aetheric Host Web/GUI Evidence"
+        echo
+        echo "- status: $status"
+        echo "- reason: $reason"
+        echo "- proof: $PROOF_PATH"
+        echo "- binary: $SIMPLE_BIN ($SIMPLE_BIN_SOURCE)"
+        echo "- contract: production HTML/WebIR-to-DrawIR Electron evidence only; no fixture, compatibility renderer, raw source execution, blur, or tolerance."
+    } > "$REPORT_PATH"
+    [ "$status" = pass ]
+}
+
+if [ -z "$SIMPLE_BIN" ] || [ ! -x "$SIMPLE_BIN" ]; then
+    emit fail missing-simple-bin
+    exit 1
+fi
+case "$SIMPLE_BIN" in *src/compiler_rust/*|src/compiler_rust/*) emit fail rust-seed-forbidden; exit 1 ;; esac
+if ! "$SIMPLE_BIN" --version >/dev/null 2>&1; then
+    emit fail simple-bin-version-failed
+    exit 1
+fi
+if ! regular_file "$PROOF_PATH"; then
+    emit fail missing-production-proof
+    exit 1
+fi
+if ! regular_file "$SNAPSHOT"; then
+    emit fail generated-aetheric-snapshot-missing
+    exit 1
+fi
+
+expected_manifest="$(sed -n 's/.*source_manifest_sha256: "\([0-9a-f]*\)".*/\1/p' "$SNAPSHOT" | head -n 1)"
+expected_material="$(sed -n 's/.*material_sha256: "\([0-9a-f]*\)".*/\1/p' "$SNAPSHOT" | head -n 1)"
+required='schema status producer theme_id theme_source_manifest_sha256 theme_material_sha256 source_revision binary_sha256 backend capture_path pixel_artifact_path pixel_count pixel_checksum screenshot_path screenshot_nonblank_pixels ui_access_snapshot_status ui_access_surface_status ui_access_find_status ui_access_act_focus_status ui_access_act_pointer_down_status ui_access_act_pointer_up_status ui_access_act_keyboard_status ui_access_act_text_status ui_access_history_status post_action_semantic_state computed_window_background computed_window_border_color computed_window_border_radius computed_window_box_shadow computed_titlebar_backdrop_filter computed_titlebar_webkit_backdrop_filter computed_typography_family computed_typography_weight computed_inactive_border computed_active_border computed_active_shadow performance_now_available performance_now_delta_ms animation_frame_available animation_frame_count css_animation_probe blur_or_tolerance_used synthetic_fixture raw_source_execution compatibility_renderer'
+for key in $required; do
+    value="$(field "$key")"
+    [ -n "$value" ] || { emit fail "missing-required-field:$key"; exit 1; }
+done
+
+[ "$(field schema)" = aetheric-host-web-gui-v1 ] || { emit fail invalid-schema; exit 1; }
+[ "$(field status)" = pass ] || { emit fail producer-status-not-pass; exit 1; }
+[ "$(field producer)" = production-html-webir-drawir-electron ] || { emit fail producer-not-canonical; exit 1; }
+[ "$(field theme_id)" = aetheric_dark ] || { emit fail theme-id-mismatch; exit 1; }
+[ "$(field theme_source_manifest_sha256)" = "$expected_manifest" ] || { emit fail theme-manifest-mismatch; exit 1; }
+[ "$(field theme_material_sha256)" = "$expected_material" ] || { emit fail theme-material-mismatch; exit 1; }
+[ "$(field backend)" = engine2d ] || { emit fail backend-not-engine2d; exit 1; }
+sha256 "$(field binary_sha256)" && sha256 "$(field pixel_checksum)" || { emit fail invalid-binary-or-pixel-sha256; exit 1; }
+for path_key in capture_path pixel_artifact_path screenshot_path; do regular_file "$(field "$path_key")" || { emit fail "missing-or-linked-artifact:$path_key"; exit 1; }; done
+positive "$(field pixel_count)" && positive "$(field screenshot_nonblank_pixels)" || { emit fail blank-or-empty-pixels; exit 1; }
+
+[ "$(field computed_window_background)" = 'rgba(31, 31, 33, 0.8)' ] || { emit fail window-background-mismatch; exit 1; }
+[ "$(field computed_window_border_color)" = 'rgba(139, 144, 160, 0.2)' ] || { emit fail window-border-mismatch; exit 1; }
+[ "$(field computed_window_border_radius)" = 18px ] || { emit fail window-radius-mismatch; exit 1; }
+contains "$(field computed_window_box_shadow)" 'rgba(0, 0, 0, 0.34)' || { emit fail layered-shadow-missing; exit 1; }
+contains "$(field computed_window_box_shadow)" 'rgba(255, 255, 255, 0.1)' || { emit fail inset-shadow-missing; exit 1; }
+[ "$(field computed_titlebar_backdrop_filter)" = 'blur(30px) saturate(170%)' ] || { emit fail backdrop-filter-mismatch; exit 1; }
+[ "$(field computed_titlebar_webkit_backdrop_filter)" = 'blur(30px) saturate(170%)' ] || { emit fail webkit-backdrop-filter-mismatch; exit 1; }
+contains "$(field computed_typography_family)" Manrope || { emit fail typography-family-mismatch; exit 1; }
+[ "$(field computed_typography_weight)" = 650 ] || { emit fail typography-weight-mismatch; exit 1; }
+[ "$(field computed_inactive_border)" = 'rgba(139, 144, 160, 0.2)' ] || { emit fail inactive-state-mismatch; exit 1; }
+[ "$(field computed_active_border)" = 'rgba(193, 198, 215, 0.3)' ] || { emit fail active-state-mismatch; exit 1; }
+contains "$(field computed_active_shadow)" 'rgba(173, 198, 255, 0.4)' || { emit fail active-shadow-missing; exit 1; }
+
+for key in ui_access_snapshot_status ui_access_surface_status ui_access_find_status ui_access_act_focus_status ui_access_act_pointer_down_status ui_access_act_pointer_up_status ui_access_act_keyboard_status ui_access_act_text_status ui_access_history_status; do [ "$(field "$key")" = pass ] || { emit fail "ui-access-not-pass:$key"; exit 1; }; done
+[ "$(field post_action_semantic_state)" = text-mutated-and-focused ] || { emit fail post-action-state-missing; exit 1; }
+[ "$(field performance_now_available)" = true ] && positive "$(field performance_now_delta_ms)" || { emit fail performance-now-missing; exit 1; }
+[ "$(field animation_frame_available)" = true ] && [ "$(field animation_frame_count)" -ge 2 ] || { emit fail animation-frame-missing; exit 1; }
+[ "$(field css_animation_probe)" = true ] || { emit fail css-animation-missing; exit 1; }
+[ "$(field blur_or_tolerance_used)" = false ] && [ "$(field synthetic_fixture)" = false ] && [ "$(field raw_source_execution)" = false ] && [ "$(field compatibility_renderer)" = false ] || { emit fail forbidden-evidence-shortcut; exit 1; }
+
+emit pass production-aetheric-web-gui-evidence-verified

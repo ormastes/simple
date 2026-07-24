@@ -1,0 +1,42 @@
+# codex-system-test
+# @req REQ-003 REQ-004 REQ-005 REQ-008
+"""# Aetheric host Web/GUI evidence contract
+
+The wrapper is intentionally fail-closed: a missing exact-current binary or a
+partial/fixture proof cannot become a rendering PASS.
+"""
+use std.io_runtime.{file_read, process_run}
+use std.spec.*
+
+val WRAPPER = "scripts/check/check-aetheric-host-web-gui-evidence.shs"
+
+describe "Aetheric host Web/GUI evidence":
+    it "requires canonical production proof fields and UI access history":
+        step("Inspect the fail-closed Aetheric proof contract")
+        val source = file_read(WRAPPER)
+        expect(source).to_contain("production-html-webir-drawir-electron")
+        expect(source).to_contain("aetheric-host-web-gui-v1")
+        expect(source).to_contain("ui_access_snapshot_status")
+        expect(source).to_contain("ui_access_history_status")
+        expect(source).to_contain("blur_or_tolerance_used")
+        expect(source).to_contain("synthetic_fixture")
+        expect(source).to_contain("missing-production-proof")
+
+        step("Reject a missing binary before any proof can be accepted")
+        val root = "build/test-aetheric-host-web-gui-missing-bin"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && SIMPLE_BIN=" + root + "/missing BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh " + WRAPPER + " > " + root + "/stdout.txt 2>&1 || true"
+        val (_out, _err, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+        val output = file_read(root + "/stdout.txt")
+        expect(output).to_contain("aetheric_host_web_gui_status=fail")
+        expect(output).to_contain("aetheric_host_web_gui_reason=missing-simple-bin")
+
+    it "rejects a producer pass marker without the required live artifacts":
+        step("Reject a partial proof rather than promoting a synthetic PASS")
+        val root = "build/test-aetheric-host-web-gui-partial-proof"
+        val command = "rm -rf " + root + " && mkdir -p " + root + "/fixture && printf '#!/bin/sh\\nexit 0\\n' > " + root + "/fixture/simple && chmod +x " + root + "/fixture/simple && printf 'schema=aetheric-host-web-gui-v1\\nstatus=pass\\nproducer=production-html-webir-drawir-electron\\n' > " + root + "/proof.env && SIMPLE_BIN=$PWD/" + root + "/fixture/simple AETHERIC_HOST_WEB_GUI_PROOF=$PWD/" + root + "/proof.env BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh " + WRAPPER + " > " + root + "/stdout.txt 2>&1 || true"
+        val (_out, _err, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+        val output = file_read(root + "/stdout.txt")
+        expect(output).to_contain("aetheric_host_web_gui_status=fail")
+        expect(output).to_contain("aetheric_host_web_gui_reason=missing-required-field:theme_id")
