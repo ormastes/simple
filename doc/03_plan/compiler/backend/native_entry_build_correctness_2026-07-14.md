@@ -674,15 +674,29 @@ the shared binary — deploys require explicit user go-ahead).
   proved primitive calls reach `runtime_int=true` and lower successfully; only
   `CharOwner` plus `char_code_at` still warned. A v11 no-stub rebuild completed
   with `5 compiled, 670 cached, 0 failed`; its declared-owner provenance bridge
-  eliminated the `chr`/`to_char` warnings. The final positional C5 receipt now
-  fails only at `char_code_at`. That v11 candidate already contains the
-  discriminator-safe `mir_type_is_str` Opaque/Tuple hardening, so repeating
-  that change is not the next fix.
+  eliminated the `chr`/`to_char` warnings.
+
+  Fresh cycle receipts narrow but do not yet source-correlate the remaining
+  transport fault. V12 (`5 compiled, 670 cached, 0 failed`) observed a decoded
+  `chr` result at local 8 with `Opaque` discriminator `2429702914` and
+  `is_str=true`; a nearby `let` for symbol 8 then became non-string and bound
+  local 9 as `I64` discriminator `258540933`, while the downstream
+  `char_code_at` receiver 9 had `is_str=false`. C5 contains several later
+  primitive `chr`/`to_char` calls, so that trace sequence is not proof that
+  local 8 was specifically `val nul = 0.chr()`. Experimental V13 MethodCall
+  predispatch (`4 compiled, 671 cached, 0 failed`) and V14 typed LocalId
+  anchors (`5 compiled, 670 cached, 0 failed`) left the failure unchanged and
+  were reverted rather than freezing disproved hypotheses in shared lowering.
 
   This C5 diagnosis has reached its three-cycle cap. The next exact diagnostic
-  is to inspect the produced `chr` result/local MIR type and its `let`
-  propagation into `nul` before adding any fallback. Do not infer a new
-  fallback from the remaining `char_code_at` warning. C9 remains gated: only
-  after a fresh positional C5 executable exits `42` should the next bottom-up
-  item run, positional C9 `.parse_f64()` with exit `42`. See
+  is to correlate the exact `nul` binding by symbol name/id and source span,
+  then record its extracted initializer kind/discriminator/span and, only when
+  it is the expected MethodCall, that call's method/receiver/args plus the
+  returned local, effective type, final bound local, and `char_code_at`
+  receiver. This decides between `let` payload extraction and later transport
+  without assuming the nearby local IDs belong to `nul`. Do not repeat
+  `mir_type_is_str`, MethodCall-discriminator, or type-anchor probes. C9
+  remains gated: only after a fresh positional C5
+  executable exits `42` should the next bottom-up item run, positional C9
+  `.parse_f64()` with exit `42`. See
   `native_chr_builtin_no_lowering_2026-07-18.md`.
