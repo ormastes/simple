@@ -172,10 +172,20 @@ fn run_linter_candidate_rg(paths: [text]) -> (text, i64):
     val (stdout, _stderr, exit_code) = process_run("rg", args)
     (stdout, exit_code)
 
+fn rg_scan_failed(exit_code: i64) -> bool:
+    exit_code != 0 and exit_code != 1
+
 fn collect_linter_quality_findings(paths: [text]) -> [TestQualityFinding]:
     var findings: [TestQualityFinding] = []
     val (stdout, exit_code) = run_linter_candidate_rg(paths)
-    if exit_code != 0 and stdout.trim() == "":
+    if rg_scan_failed(exit_code):
+        findings.push(make_quality_finding(
+            "FAIL",
+            "quality-candidate-scan",
+            "quality candidate scan failed (rg exit {exit_code})"
+        ))
+        return findings
+    if exit_code == 1:
         return findings
 
     for line in stdout.split("\n"):
@@ -269,7 +279,14 @@ fn build_test_quality_verify_report(scope: text, files: [text], full_scan: bool)
         findings.push(finding)
 
     val (stdout, exit_code) = run_visible_debt_rg(scan_paths)
-    if exit_code != 0 and stdout.trim() == "":
+    if rg_scan_failed(exit_code):
+        findings.push(make_quality_finding(
+            "FAIL",
+            scope,
+            "visible-debt scan failed (rg exit {exit_code})"
+        ))
+        return quality_report_from_findings(scope, scan_paths, findings)
+    if exit_code == 1:
         if findings.len() == 0:
             findings.push(make_quality_finding("PASS", scope, "No visible debt markers found"))
         return quality_report_from_findings(scope, scan_paths, findings)
@@ -331,3 +348,4 @@ fn write_test_quality_verify_report(report: TestQualityVerifyReport, report_dir:
 
 export TestQualityFinding, TestQualityVerifyReport, VisibleDebtRegistryEntry
 export build_test_quality_verify_report, render_test_quality_verify_report, write_test_quality_verify_report
+export rg_scan_failed

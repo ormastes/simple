@@ -214,7 +214,10 @@ evidence boundary for the important pure-Simple tooling lanes:
   changed-file or empty PASS scope; status/list/check/regenerate reject tails,
   and help is valid only by itself. `--all` supplies Git-tracked project files
   to the tooling gate rather than the current diff, so a clean checkout cannot
-  skip tooling-sensitive paths while claiming full-project scope.
+  skip tooling-sensitive paths while claiming full-project scope. Visible-debt
+  and quality-candidate scans now distinguish `rg` exit 1 (no matches) from
+  scanner failures, which produce release-blocking findings; see the
+  [scanner report](../../08_tracking/bug/verify_rg_scanner_failure_false_green_2026-07-24.md).
   **Strongest current evidence:** the focused contracts in
   `test/01_unit/app/verify_cli_option_validation_contract_check.spl` and
   `test/01_unit/app/verify_all_scope_contract_check.spl`.
