@@ -910,3 +910,31 @@ the shared binary — deploys require explicit user go-ahead).
   Cranelift. If it exits `33`, run LLVM, the mixed fixture, and neighbor
   `dict_struct_value` expecting `73`. Do not credit the provisional call
   diagnosis until it is reproduced from the clean diff.
+
+  V41 did not reach Index execution. Reusing the compiler-only cache with the
+  full `src/app/cli/main.spl` entry exposed the newer runtime-lane policy:
+  `simple-core` has no archive in this workspace, and both
+  `core-c-bootstrap` and `auto` compile the closure but fail to link its hosted
+  process/GUI externs. These are rejected as Index evidence. Separately,
+  `bootstrap_main.spl` source policy rejects the removed hosted bundle aliases;
+  that rejection is not a V41 runtime receipt. The three-cycle cap stopped
+  before another build.
+
+  The next clean compiler candidate must use the canonical bootstrap entry,
+  not the hosted full-CLI entry: `SIMPLE_BOOTSTRAP=1`,
+  `--runtime-bundle core-c-bootstrap`, and
+  `--entry src/app/cli/bootstrap_main.spl`, matching
+  `scripts/bootstrap/bootstrap-from-scratch.sh`. That candidate's positional
+  native-build path runs the pure-Simple `CompilerDriver`, so it can prove the
+  corrected Index lowering without importing unrelated hosted modules.
+
+  Review also found that the positional bootstrap path rejects known removed
+  bundle aliases and consumes runtime option values while finding its `.spl`
+  input, but does not forward `--runtime-bundle` or `--runtime-path` into its
+  in-process driver. Keep that as a separate bootstrap/MCP runtime-provider
+  bug: reproduce with an explicit simple-core archive, resolve that archive
+  from the runtime-path directory contract, then save/set/restore
+  `SIMPLE_NATIVE_RUNTIME_BUNDLE`, `SIMPLE_RUNTIME_PATH`, and
+  `SIMPLE_CORE_RUNTIME_PATH` plus `SIMPLE_LINK_OBJECTS` in
+  `bootstrap_main.spl`. Do not solve it by restoring the removed
+  hosted/native-all lane.
