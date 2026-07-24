@@ -1,0 +1,277 @@
+# macOS Metal Engine2D live evidence harness.
+#
+# This is intentionally test-only. It consumes the raw winit event ABI because
+# the public WinitInput convenience snapshot retains key presses but discards
+# key releases; live evidence must prove the ordered down/up delivery instead
+# of inferring it from aggregate counters.
+
+use std.gpu.engine2d.engine.{Engine2D}
+use std.common.encoding.font_registry.{selected_font_asset_candidates, selected_font_asset_identity, selected_font_asset_physical_path}
+use std.common.image.ppm_decode.{encode_ppm_p6}
+use std.io.window_winit.{winit_loop_new, winit_loop_free, winit_window_new, winit_window_free, winit_present_rgba}
+use std.nogc_sync_mut.concurrent.thread.{thread_sleep}
+use std.io_runtime.{env_get, file_write, file_write_bytes}
+
+extern fn rt_winit_event_loop_poll_events(el: i64, max: i64) -> i64
+extern fn rt_winit_event_get_type(ev: i64) -> i64
+extern fn rt_winit_event_keyboard_input(ev: i64) -> (i64, i64, bool)
+extern fn rt_winit_event_mouse_button(ev: i64) -> (i64, bool)
+extern fn rt_winit_event_free(ev: i64)
+
+val LIVE_WIDTH: i32 = 3840
+val LIVE_HEIGHT: i32 = 2160
+val LIVE_DPI: i32 = 300
+val LIVE_BACKGROUND: u32 = 0xFF101522u32
+val PREVIEW_WIDTH: i32 = 960
+val PREVIEW_HEIGHT: i32 = 540
+val EVT_WINDOW_FOCUSED: i64 = 5
+val EVT_KEYBOARD_INPUT: i64 = 10
+val EVT_MOUSE_BUTTON: i64 = 20
+val EVT_MOUSE_MOVED: i64 = 21
+
+fn event_preview() -> [i64]:
+    # The event window is deliberately smaller than the evidence framebuffer.
+    # It exists only to receive ordered native input promptly; the durable
+    # capture and all pixel assertions remain the 3840x2160 Metal readback.
+    var pixels: [i64] = [0x101522i64; PREVIEW_WIDTH * PREVIEW_HEIGHT]
+    var y = 80
+    while y < PREVIEW_HEIGHT - 80:
+        var x = 100
+        while x < PREVIEW_WIDTH - 100:
+            pixels[y * PREVIEW_WIDTH + x] = 0x312E81i64
+            x = x + 1
+        y = y + 1
+    pixels
+
+fn measured_non_background_bounds(pixels: [u32], width: i32, height: i32) -> text:
+    var min_x = width
+    var min_y = height
+    var max_x = -1
+    var max_y = -1
+    var index = 0
+    while index < pixels.len():
+        if pixels[index] != LIVE_BACKGROUND:
+            val x = index % width
+            val y = index / width
+            if x < min_x:
+                min_x = x
+            if y < min_y:
+                min_y = y
+            if x > max_x:
+                max_x = x
+            if y > max_y:
+                max_y = y
+        index = index + 1
+    if max_x < min_x or max_y < min_y:
+        return ""
+    "{min_x},{min_y},{max_x},{max_y}"
+
+fn append_event(sequence: text, name: text) -> text:
+    if sequence == "":
+        return name
+    sequence + "," + name
+
+fn write_runtime_receipt(path: text, capture_path: text, source_revision: text,
+                         backend_handle: i64, bounds: text,
+                         font_loaded: bool, expected_font_identity: text,
+                         font_identity: text, cold_rasterizations: i64,
+                         warm_rasterizations: i64, warm_hits: i64,
+                         font_target: text, font_attempts: text,
+                         event_sequence: text, event_count: i64) -> bool:
+    file_write(path,
+        "metal_live_status=pass\n" +
+        "metal_live_backend=metal\n" +
+        "metal_live_target=macos-host\n" +
+        "metal_live_width={LIVE_WIDTH}\n" +
+        "metal_live_height={LIVE_HEIGHT}\n" +
+        "metal_live_dpi={LIVE_DPI}\n" +
+        "metal_live_capture_path={capture_path}\n" +
+        "metal_live_source_revision={source_revision}\n" +
+        "metal_live_backend_handle={backend_handle}\n" +
+        "metal_live_source=device_readback\n" +
+        "metal_live_non_background_bounds={bounds}\n" +
+        "metal_live_font_loaded={font_loaded}\n" +
+        "metal_live_font_expected_identity={expected_font_identity}\n" +
+        "metal_live_font_identity={font_identity}\n" +
+        "metal_live_font_cold_rasterizations={cold_rasterizations}\n" +
+        "metal_live_font_warm_rasterizations={warm_rasterizations}\n" +
+        "metal_live_font_warm_hits={warm_hits}\n" +
+        "metal_live_font_execution_target={font_target}\n" +
+        "metal_live_font_execution_attempts={font_attempts}\n" +
+        "metal_live_event_sequence={event_sequence}\n" +
+        "metal_live_event_count={event_count}\n" +
+        "metal_live_event_backend=metal\n")
+
+fn main() -> i64:
+    val capture_path = env_get("METAL_LIVE_CAPTURE_PATH") ?? ""
+    val receipt_path = env_get("METAL_LIVE_RECEIPT_PATH") ?? ""
+    val ready_path = env_get("METAL_LIVE_READY_PATH") ?? ""
+    val source_revision = env_get("METAL_LIVE_SOURCE_REVISION") ?? ""
+    if capture_path == "" or receipt_path == "" or ready_path == "" or source_revision == "":
+        return 2
+
+    var engine = Engine2D.create_with_backend_fast(LIVE_WIDTH, LIVE_HEIGHT, "metal")
+    if engine.backend_name() != "metal":
+        engine.shutdown()
+        return 3
+    engine.clear(LIVE_BACKGROUND)
+    engine.draw_gradient_rect(160, 140, 3520, 1880, 0xFF172554u32, 0xFF312E81u32)
+    engine.draw_rect_filled(260, 260, 1120, 520, 0xCC1F2937u32)
+    engine.draw_circle_filled(3100, 620, 330, 0xFF22D3EEu32)
+    engine.draw_triangle_filled(2460, 1560, 3100, 980, 3580, 1740, 0xFFF59E0Bu32)
+
+    # Use the pinned static Bungee face for live evidence. The first catalog
+    # entry is a 17.7 MB CJK variable font whose interpreted parse alone can
+    # consume the bounded GUI launch window; Bungee still exercises the same
+    # canonical FontRenderer -> FontRenderBatch -> Metal atlas compositor path.
+    val font_candidate = selected_font_asset_candidates()[9]
+    val expected_font_identity = selected_font_asset_identity(font_candidate)
+    val physical_font_path = selected_font_asset_physical_path(font_candidate.local_path)
+    val font_loaded = engine.load_font(physical_font_path)
+    val font_before = engine.font_cache_stats()
+    engine.draw_text(360, 370, "Simple Metal Vector 300 DPI", 0xFFF3F6FCu32, 96)
+    val font_cold = engine.font_cache_stats()
+    engine.draw_text(360, 560, "Simple Metal Vector 300 DPI", 0xFFF3F6FCu32, 96)
+    val font_warm = engine.font_cache_stats()
+    val loaded_fonts = engine.fonts()
+    val font_identity = loaded_fonts.current_font_identity()
+    engine.font_renderer = loaded_fonts
+    val font_target = engine.font_execution_target()
+    val font_attempts = engine.font_execution_attempts().join(",")
+    val cold_rasterizations = font_cold.rasterizations - font_before.rasterizations
+    val warm_rasterizations = font_warm.rasterizations - font_cold.rasterizations
+    val warm_hits = font_warm.hits - font_cold.hits
+    if (not font_loaded or font_identity != expected_font_identity or
+        cold_rasterizations <= 0 or warm_rasterizations != 0 or warm_hits <= 0 or
+        font_target != "metal" or not font_attempts.contains("metal")):
+        engine.shutdown()
+        return 4
+
+    val active_metal = engine.metal_backend
+    if active_metal == nil:
+        engine.shutdown()
+        return 5
+    val metal = active_metal
+    val backend_handle = metal.d_framebuffer
+    if backend_handle <= 0 or not metal.gpu_frame_complete:
+        engine.shutdown()
+        return 6
+    engine.metal_backend = metal
+
+    val lp = winit_loop_new()
+    if not lp.is_valid:
+        engine.shutdown()
+        return 7
+    val win = winit_window_new(
+        lp, PREVIEW_WIDTH.to_i64(), PREVIEW_HEIGHT.to_i64(),
+        "Simple Metal 4K/300 DPI Evidence")
+    if not win.is_valid:
+        winit_loop_free(lp)
+        engine.shutdown()
+        return 8
+    if not winit_present_rgba(
+        win, PREVIEW_WIDTH.to_i64(), PREVIEW_HEIGHT.to_i64(), event_preview()):
+        winit_window_free(win)
+        winit_loop_free(lp)
+        engine.shutdown()
+        return 9
+    if not file_write(ready_path, "metal_live_ready=true\n"):
+        winit_window_free(win)
+        winit_loop_free(lp)
+        engine.shutdown()
+        return 10
+
+    var event_stage = 0
+    var event_sequence = ""
+    var event_count: i64 = 0
+    var wait_ticks = 0
+    while event_stage < 6 and wait_ticks < 18000:
+        var event = rt_winit_event_loop_poll_events(lp.handle, 1)
+        while event != 0:
+            val kind = rt_winit_event_get_type(event)
+            if kind == EVT_WINDOW_FOCUSED and event_stage == 0:
+                event_sequence = append_event(event_sequence, "focus")
+                event_stage = 1
+                event_count = event_count + 1
+            elif kind == EVT_MOUSE_MOVED and event_stage == 1:
+                event_sequence = append_event(event_sequence, "pointer_move")
+                event_stage = 2
+                event_count = event_count + 1
+            elif kind == EVT_MOUSE_BUTTON:
+                val (ignored_button, pressed) = rt_winit_event_mouse_button(event)
+                if event_stage == 2 and pressed:
+                    event_sequence = append_event(event_sequence, "pointer_down")
+                    event_stage = 3
+                    event_count = event_count + 1
+                elif event_stage == 3 and not pressed:
+                    event_sequence = append_event(event_sequence, "pointer_up")
+                    event_stage = 4
+                    event_count = event_count + 1
+            elif kind == EVT_KEYBOARD_INPUT:
+                val (ignored_scancode, ignored_keycode, pressed) = rt_winit_event_keyboard_input(event)
+                if event_stage == 4 and pressed:
+                    event_sequence = append_event(event_sequence, "key_down")
+                    event_stage = 5
+                    event_count = event_count + 1
+                elif event_stage == 5 and not pressed:
+                    event_sequence = append_event(event_sequence, "key_up")
+                    event_stage = 6
+                    event_count = event_count + 1
+            rt_winit_event_free(event)
+            event = rt_winit_event_loop_poll_events(lp.handle, 1)
+        wait_ticks = wait_ticks + 1
+        thread_sleep(10)
+
+    if event_sequence != "focus,pointer_move,pointer_down,pointer_up,key_down,key_up" or event_count != 6:
+        winit_window_free(win)
+        winit_loop_free(lp)
+        engine.shutdown()
+        return 11
+
+    engine.draw_rect_filled(3300, 1860, 300, 180, 0xFF22C55Eu32)
+    val after_metal = engine.metal_backend
+    if after_metal == nil:
+        winit_window_free(win)
+        winit_loop_free(lp)
+        engine.shutdown()
+        return 12
+    val receipt_backend = after_metal
+    if (receipt_backend.d_framebuffer != backend_handle or
+        not receipt_backend.gpu_frame_complete):
+        winit_window_free(win)
+        winit_loop_free(lp)
+        engine.shutdown()
+        return 13
+    engine.metal_backend = receipt_backend
+    val captured_pixels = engine.read_pixels()
+    if captured_pixels.len() != LIVE_WIDTH * LIVE_HEIGHT:
+        winit_window_free(win)
+        winit_loop_free(lp)
+        engine.shutdown()
+        return 14
+    val bounds = measured_non_background_bounds(captured_pixels, LIVE_WIDTH, LIVE_HEIGHT)
+    if bounds == "":
+        winit_window_free(win)
+        winit_loop_free(lp)
+        engine.shutdown()
+        return 15
+    val ppm = encode_ppm_p6(LIVE_WIDTH.to_u32(), LIVE_HEIGHT.to_u32(), captured_pixels)
+    if ppm.len() <= LIVE_WIDTH * LIVE_HEIGHT * 3 or not file_write_bytes(capture_path, ppm):
+        winit_window_free(win)
+        winit_loop_free(lp)
+        engine.shutdown()
+        return 16
+    if not write_runtime_receipt(
+        receipt_path, capture_path, source_revision, backend_handle, bounds,
+        font_loaded, expected_font_identity, font_identity, cold_rasterizations,
+        warm_rasterizations, warm_hits, font_target, font_attempts,
+        event_sequence, event_count):
+        winit_window_free(win)
+        winit_loop_free(lp)
+        engine.shutdown()
+        return 17
+
+    winit_window_free(win)
+    winit_loop_free(lp)
+    engine.shutdown()
+    0

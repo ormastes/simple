@@ -1,0 +1,309 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/tmp/macos_metal_2d_live_evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/macos_metal_2d_live_evidence_$(date -u +%F).md}"
+HARNESS="$ROOT_DIR/test/02_integration/rendering/macos_metal_2d_live_harness.spl"
+CAPTURE_PPM="$BUILD_DIR/metal_3840x2160_300dpi.ppm"
+CAPTURE_PNG="$BUILD_DIR/metal_3840x2160_300dpi.png"
+RECEIPT="$BUILD_DIR/runtime_receipt.env"
+READY="$BUILD_DIR/ready.env"
+EVIDENCE="$BUILD_DIR/evidence.env"
+LAUNCH_OUT="$BUILD_DIR/launch.out"
+LAUNCH_ERR="$BUILD_DIR/launch.err"
+WINDOW_RECORD="$BUILD_DIR/window.txt"
+TIMEOUT_SECS="${MACOS_METAL_2D_TIMEOUT_SECS:-420}"
+SELECTED_DRIVER_PATH=""
+SELECTED_DRIVER_KIND=""
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+BUILD_DIR_ABS="$(CDPATH= cd -- "$BUILD_DIR" && pwd)"
+CAPTURE_PPM="$BUILD_DIR_ABS/$(basename -- "$CAPTURE_PPM")"
+CAPTURE_PNG="$BUILD_DIR_ABS/$(basename -- "$CAPTURE_PNG")"
+RECEIPT="$BUILD_DIR_ABS/$(basename -- "$RECEIPT")"
+READY="$BUILD_DIR_ABS/$(basename -- "$READY")"
+EVIDENCE="$BUILD_DIR_ABS/$(basename -- "$EVIDENCE")"
+LAUNCH_OUT="$BUILD_DIR_ABS/$(basename -- "$LAUNCH_OUT")"
+LAUNCH_ERR="$BUILD_DIR_ABS/$(basename -- "$LAUNCH_ERR")"
+WINDOW_RECORD="$BUILD_DIR_ABS/$(basename -- "$WINDOW_RECORD")"
+rm -f "$CAPTURE_PPM" "$CAPTURE_PNG" "$RECEIPT" "$READY" "$EVIDENCE" \
+    "$LAUNCH_OUT" "$LAUNCH_ERR" "$WINDOW_RECORD" "$REPORT_PATH"
+
+app_pid=""
+app_dir=""
+cleanup() {
+    if [ -n "$app_pid" ]; then
+        osascript - "$app_pid" >/dev/null 2>&1 <<'OSA' || true
+on run argv
+  set targetPid to (item 1 of argv) as integer
+  tell application "System Events"
+    repeat with proc in (processes whose unix id is targetPid)
+      tell proc to keystroke "q"
+    end repeat
+  end tell
+end run
+OSA
+    fi
+    if [ -n "$app_dir" ] && [ -d "$app_dir" ]; then
+        rm -rf "$app_dir"
+    fi
+}
+trap cleanup EXIT HUP INT TERM
+
+value_of() {
+    sed -n "s/^${1}=//p" "$2" | tail -n 1
+}
+
+write_report() {
+    status="$1"
+    reason="$2"
+    {
+        echo "# macOS Metal 2D Live Evidence"
+        echo
+        echo "- status: $status"
+        echo "- reason: $reason"
+        echo "- frozen evidence adapter: \`$EVIDENCE\`"
+        echo "- runtime receipt: \`$RECEIPT\`"
+        echo "- 4K/300-DPI PPM: \`$CAPTURE_PPM\`"
+        echo "- durable PNG derivative: \`$CAPTURE_PNG\`"
+        echo "- launcher stdout: \`$LAUNCH_OUT\`"
+        echo "- launcher stderr: \`$LAUNCH_ERR\`"
+        echo "- selected driver: \`$SELECTED_DRIVER_PATH\`"
+        echo "- selected driver kind: $SELECTED_DRIVER_KIND"
+        echo
+        echo "## Manual"
+        echo
+        echo "1. launch backend"
+        echo "2. render deterministic scene"
+        echo "3. deliver input events"
+        echo "4. capture framebuffer"
+        echo "5. compare evidence"
+        if [ -f "$EVIDENCE" ]; then
+            echo
+            echo "## Backend2dCaptureEvidence / Backend2dEventReceipt adapter"
+            echo
+            echo '```text'
+            cat "$EVIDENCE"
+            echo '```'
+        fi
+        if [ -f "$RECEIPT" ]; then
+            echo
+            echo "## Runtime receipt"
+            echo
+            echo '```text'
+            cat "$RECEIPT"
+            echo '```'
+        fi
+    } >"$REPORT_PATH"
+}
+
+fail() {
+    reason="$1"
+    write_report fail "$reason"
+    echo "macOS Metal 2D live evidence: FAIL ($reason)" >&2
+    exit 1
+}
+
+[ "$(uname -s)" = "Darwin" ] || fail "requires-macos"
+[ -f "$HARNESS" ] || fail "harness-missing"
+command -v osascript >/dev/null 2>&1 || fail "osascript-missing"
+command -v cliclick >/dev/null 2>&1 || fail "cliclick-missing"
+command -v sips >/dev/null 2>&1 || fail "sips-missing"
+
+SELECTED_DRIVER_PATH="${METAL_LIVE_NATIVE_BIN:-}"
+SELECTED_DRIVER_KIND="pure-simple-stage2-native-output"
+[ -n "$SELECTED_DRIVER_PATH" ] || fail "admissible-native-driver-required"
+[ -x "$SELECTED_DRIVER_PATH" ] || fail "admissible-native-driver-missing"
+case "$SELECTED_DRIVER_PATH" in
+    "$ROOT_DIR"/build/*) ;;
+    *) fail "native-driver-outside-owned-build-tree" ;;
+esac
+LC_ALL=C grep -aq -e "MTLCreateSystemDefaultDevice" -e "metal_sffimodule.smf" "$SELECTED_DRIVER_PATH" ||
+    fail "native-driver-without-metal"
+
+driver_sha256="$(shasum -a 256 "$SELECTED_DRIVER_PATH" | awk '{print $1}')"
+source_revision="$(git rev-parse HEAD):$(git hash-object "$HARNESS"):$(git hash-object src/lib/gc_async_mut/gpu/engine2d/backend_metal.spl):$driver_sha256"
+app_dir="$(mktemp -d)"
+app="$app_dir/SimpleMetal.app"
+mkdir -p "$app/Contents/MacOS"
+cp "$SELECTED_DRIVER_PATH" "$app/Contents/MacOS/SimpleMetal"
+cat >"$app/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleExecutable</key><string>SimpleMetal</string>
+  <key>CFBundleIdentifier</key><string>com.simple.metal.evidence.$$</string>
+  <key>CFBundleName</key><string>SimpleMetalEvidence</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleVersion</key><string>1</string>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>LSEnvironment</key>
+  <dict>
+    <key>SIMPLE_GUI</key><string>1</string>
+    <key>SIMPLE_EXECUTION_MODE</key><string>interpret</string>
+    <key>SIMPLE_LIB</key><string>$ROOT_DIR/src</string>
+    <key>SIMPLE_ASSET_ROOT</key><string>$ROOT_DIR</string>
+    <key>SIMPLE_TIMEOUT_SECONDS</key><string>0</string>
+    <key>SIMPLE_ONE_CALL_UPLOAD</key><string>1</string>
+    <key>SIMPLE_ONE_CALL_READBACK</key><string>1</string>
+    <key>SIMPLE_NO_DEPRECATED_WARNINGS</key><string>1</string>
+    <key>METAL_LIVE_CAPTURE_PATH</key><string>$CAPTURE_PPM</string>
+    <key>METAL_LIVE_RECEIPT_PATH</key><string>$RECEIPT</string>
+    <key>METAL_LIVE_READY_PATH</key><string>$READY</string>
+    <key>METAL_LIVE_SOURCE_REVISION</key><string>$source_revision</string>
+  </dict>
+</dict>
+</plist>
+PLIST
+
+open -n --stdout "$LAUNCH_OUT" --stderr "$LAUNCH_ERR" "$app" || fail "launch-failed"
+
+deadline=$(($(date +%s) + TIMEOUT_SECS))
+while [ "$(date +%s)" -lt "$deadline" ]; do
+    if [ -s "$READY" ] && osascript >"$WINDOW_RECORD" 2>/dev/null <<'OSA'; then
+tell application "System Events"
+  set selectedProc to missing value
+  set selectedPid to 0
+  repeat with proc in (processes whose name is "SimpleMetal")
+    if (count of windows of proc) > 0 and (unix id of proc) > selectedPid then
+      set selectedProc to proc
+      set selectedPid to unix id of proc
+    end if
+  end repeat
+  if selectedProc is missing value then error "Metal evidence window not ready"
+  tell selectedProc
+    set position of window 1 to {120, 100}
+    set frontmost to true
+    set p to position of window 1
+    set s to size of window 1
+    set AppleScript's text item delimiters to ","
+    return (selectedPid as text) & "," & (item 1 of p as text) & "," &
+      (item 2 of p as text) & "," & (item 1 of s as text) & "," & (item 2 of s as text)
+  end tell
+end tell
+OSA
+        break
+    fi
+    sleep 1
+done
+[ -s "$READY" ] || fail "render-ready-timeout"
+[ -s "$WINDOW_RECORD" ] || fail "window-not-found"
+
+window_record="$(tr -d '\r\n ' <"$WINDOW_RECORD")"
+old_ifs=$IFS
+IFS=,
+set -- $window_record
+IFS=$old_ifs
+app_pid="${1:-}"
+window_x="${2:-0}"
+window_y="${3:-0}"
+window_w="${4:-0}"
+window_h="${5:-0}"
+case "$app_pid" in ""|*[!0-9]*) fail "invalid-window-pid" ;; esac
+
+# Let the focus event reach the app before emitting the pointer/key sequence.
+sleep 1
+pointer_x=$((window_x + (window_w / 2)))
+pointer_y=$((window_y + (window_h / 2)))
+cliclick "m:${pointer_x},${pointer_y}" "dd:." "w:200" "du:." ||
+    fail "pointer-injection-failed"
+osascript - "$app_pid" >/dev/null <<'OSA' || fail "key-injection-failed"
+on run argv
+  set targetPid to (item 1 of argv) as integer
+  tell application "System Events"
+    repeat with proc in (processes whose unix id is targetPid)
+      tell proc
+        set frontmost to true
+        key code 5
+        return true
+      end tell
+    end repeat
+  end tell
+  error "Metal evidence process missing"
+end run
+OSA
+
+receipt_deadline=$(($(date +%s) + 180))
+while [ "$(date +%s)" -lt "$receipt_deadline" ] && [ ! -s "$RECEIPT" ]; do
+    sleep 1
+done
+[ -s "$RECEIPT" ] || fail "runtime-receipt-timeout"
+[ -s "$CAPTURE_PPM" ] || fail "framebuffer-capture-missing"
+
+[ "$(value_of metal_live_status "$RECEIPT")" = "pass" ] || fail "runtime-status-failed"
+[ "$(value_of metal_live_backend "$RECEIPT")" = "metal" ] || fail "backend-mismatch"
+[ "$(value_of metal_live_source "$RECEIPT")" = "device_readback" ] || fail "device-readback-missing"
+[ "$(value_of metal_live_width "$RECEIPT")" = "3840" ] || fail "width-mismatch"
+[ "$(value_of metal_live_height "$RECEIPT")" = "2160" ] || fail "height-mismatch"
+[ "$(value_of metal_live_dpi "$RECEIPT")" = "300" ] || fail "dpi-mismatch"
+[ "$(value_of metal_live_source_revision "$RECEIPT")" = "$source_revision" ] ||
+    fail "source-revision-mismatch"
+[ "$(value_of metal_live_event_sequence "$RECEIPT")" = "focus,pointer_move,pointer_down,pointer_up,key_down,key_up" ] ||
+    fail "event-sequence-mismatch"
+[ "$(value_of metal_live_event_count "$RECEIPT")" = "6" ] || fail "event-count-mismatch"
+[ "$(value_of metal_live_event_backend "$RECEIPT")" = "metal" ] || fail "event-backend-mismatch"
+[ "$(value_of metal_live_font_loaded "$RECEIPT")" = "true" ] || fail "vector-font-not-loaded"
+[ "$(value_of metal_live_font_identity "$RECEIPT")" = "$(value_of metal_live_font_expected_identity "$RECEIPT")" ] ||
+    fail "vector-font-identity-mismatch"
+[ "$(value_of metal_live_font_warm_rasterizations "$RECEIPT")" = "0" ] ||
+    fail "vector-font-warm-rerasterized"
+[ "$(value_of metal_live_font_execution_target "$RECEIPT")" = "metal" ] ||
+    fail "vector-font-not-executed-on-metal"
+case "$(value_of metal_live_font_cold_rasterizations "$RECEIPT")" in
+    ""|0|*[!0-9]*) fail "vector-font-cold-rasterization-missing" ;;
+esac
+case "$(value_of metal_live_font_warm_hits "$RECEIPT")" in
+    ""|0|*[!0-9]*) fail "vector-font-warm-hit-missing" ;;
+esac
+case "$(value_of metal_live_backend_handle "$RECEIPT")" in
+    ""|0|*[!0-9]*) fail "metal-framebuffer-handle-missing" ;;
+esac
+
+ppm_bytes="$(wc -c <"$CAPTURE_PPM" | tr -d ' ')"
+[ "$ppm_bytes" -gt 24883200 ] || fail "capture-truncated"
+ppm_header="$(head -n 3 "$CAPTURE_PPM" | tr '\n' '|')"
+[ "$ppm_header" = "P6|3840 2160|255|" ] || fail "capture-header-mismatch"
+pixel_sha256="$(dd if="$CAPTURE_PPM" bs=1 skip=17 2>/dev/null | shasum -a 256 | awk '{print $1}')"
+case "$pixel_sha256" in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*)
+        [ "${#pixel_sha256}" -eq 64 ] || fail "pixel-sha256-invalid" ;;
+    *) fail "pixel-sha256-invalid" ;;
+esac
+non_background_bounds="$(value_of metal_live_non_background_bounds "$RECEIPT")"
+case "$non_background_bounds" in
+    *,*,*,*) ;;
+    *) fail "non-background-bounds-missing" ;;
+esac
+
+sips -s format png "$CAPTURE_PPM" --out "$CAPTURE_PNG" >/dev/null ||
+    fail "png-conversion-failed"
+[ -s "$CAPTURE_PNG" ] || fail "png-conversion-empty"
+png_width="$(sips -g pixelWidth "$CAPTURE_PNG" | awk '/pixelWidth:/{print $2}')"
+png_height="$(sips -g pixelHeight "$CAPTURE_PNG" | awk '/pixelHeight:/{print $2}')"
+[ "$png_width" = "3840" ] && [ "$png_height" = "2160" ] ||
+    fail "png-dimensions-mismatch"
+
+{
+    echo "backend=metal"
+    echo "target=macos-host"
+    echo "width=3840"
+    echo "height=2160"
+    echo "dpi=300"
+    echo "pixel_sha256=$pixel_sha256"
+    echo "non_background_bounds=$non_background_bounds"
+    echo "event_sequence=focus,pointer_move,pointer_down,pointer_up,key_down,key_up"
+    echo "event_count=6"
+    echo "event_backend=metal"
+    echo "capture_path=$CAPTURE_PNG"
+    echo "source_revision=$source_revision"
+} >"$EVIDENCE"
+
+app_pid=""
+write_report pass "live-metal-device-readback-vector-font-and-ordered-events"
+echo "macOS Metal 2D live evidence: PASS"
+echo "report=$REPORT_PATH"
+echo "capture=$CAPTURE_PNG"
