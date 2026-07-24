@@ -1,0 +1,174 @@
+# codex-system-test
+"""
+# Stage-4 Module Release Slope Contract
+
+Black-box contract for the planned stage-4 release-slope checker.  Parsing and
+activation belong to production `driver_streaming_surface_enabled` and
+`scripts/check/check-stage4-selfhost-module-release-slope.shs`; this spec keeps
+only inputs and expected outcomes.
+"""
+
+use std.spec.{describe, it, expect, step, fail_test}
+use std.io_runtime.{dir_create_all, file_exists, file_write, process_run}
+
+val CHECKER_PATH: text = "scripts/check/check-stage4-selfhost-module-release-slope.shs"
+val FIXTURE_DIR: text = "build/stage4_module_release_slope_contract"
+val FIXTURE_PATH: text = FIXTURE_DIR + "/release-markers.log"
+
+val TEN_AT_BOUNDARY: text = r"""phase2:surface:file:released path=module_1.spl seq=1 heap_registry=100000
+phase2:surface:file:released path=module_2.spl seq=2 heap_registry=125000
+phase2:surface:file:released path=module_3.spl seq=3 heap_registry=150000
+phase2:surface:file:released path=module_4.spl seq=4 heap_registry=175000
+phase2:surface:file:released path=module_5.spl seq=5 heap_registry=200000
+phase2:surface:file:released path=module_6.spl seq=6 heap_registry=225000
+phase2:surface:file:released path=module_7.spl seq=7 heap_registry=250000
+phase2:surface:file:released path=module_8.spl seq=8 heap_registry=275000
+phase2:surface:file:released path=module_9.spl seq=9 heap_registry=300000
+phase2:surface:file:released path=module_10.spl seq=10 heap_registry=325000
+"""
+
+val TEN_TOO_STEEP: text = r"""phase2:surface:file:released path=module_1.spl seq=1 heap_registry=100000
+phase2:surface:file:released path=module_2.spl seq=2 heap_registry=125001
+phase2:surface:file:released path=module_3.spl seq=3 heap_registry=150002
+phase2:surface:file:released path=module_4.spl seq=4 heap_registry=175003
+phase2:surface:file:released path=module_5.spl seq=5 heap_registry=200004
+phase2:surface:file:released path=module_6.spl seq=6 heap_registry=225005
+phase2:surface:file:released path=module_7.spl seq=7 heap_registry=250006
+phase2:surface:file:released path=module_8.spl seq=8 heap_registry=275007
+phase2:surface:file:released path=module_9.spl seq=9 heap_registry=300008
+phase2:surface:file:released path=module_10.spl seq=10 heap_registry=325009
+"""
+
+val RACED_ELEVENTH: text = TEN_AT_BOUNDARY +
+    "phase2:surface:file:released path=module_11.spl seq=11 heap_registry=350000\n"
+
+val EARLY_STREAM: text = r"""phase2:surface:file:released path=module_1.spl seq=1 heap_registry=100000
+phase2:surface:file:released path=module_2.spl seq=2 heap_registry=100001
+phase2:surface:file:released path=module_3.spl seq=3 heap_registry=100002
+phase2:surface:file:released path=module_4.spl seq=4 heap_registry=100003
+phase2:surface:file:released path=module_5.spl seq=5 heap_registry=100004
+phase2:surface:file:released path=module_6.spl seq=6 heap_registry=100005
+phase2:surface:file:released path=module_7.spl seq=7 heap_registry=100006
+phase2:surface:file:released path=module_8.spl seq=8 heap_registry=100007
+phase2:surface:file:released path=module_9.spl seq=9 heap_registry=100008
+"""
+
+val MALFORMED_BEFORE_TEN: text = r"""phase2:surface:file:released path=module_1.spl seq=1 heap_registry=100000
+phase2:surface:file:released path=module_2.spl seq=2 heap_registry=bad
+"""
+
+val DUPLICATE_PATH_BEFORE_TEN: text = r"""phase2:surface:file:released path=same.spl seq=1 heap_registry=100000
+phase2:surface:file:released path=same.spl seq=2 heap_registry=100001
+"""
+
+val DUPLICATE_SEQUENCE_BEFORE_TEN: text = r"""phase2:surface:file:released path=module_1.spl seq=1 heap_registry=100000
+phase2:surface:file:released path=module_2.spl seq=1 heap_registry=100001
+"""
+
+struct CheckerResult:
+    output: text
+    exit_code: i64
+
+fn run_release_slope_self_test(
+    fixture: text,
+    mode: text = "aot",
+    low_memory: text = "1",
+    entry_closure_env: text = "1",
+    stage4: text = "1",
+    backend: text = "llvm"
+) -> CheckerResult:
+    if not file_exists(CHECKER_PATH):
+        fail_test("missing production release-slope checker: " + CHECKER_PATH)
+    dir_create_all(FIXTURE_DIR)
+    file_write(FIXTURE_PATH, fixture)
+    val args = [
+        "-u", "SIMPLE_BOOTSTRAP_STAGE4",
+        "-u", "SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE",
+        "SIMPLE_BOOTSTRAP_STAGE4=" + stage4,
+        "SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=" + entry_closure_env,
+        "sh", CHECKER_PATH,
+        "--self-test",
+        "--fixture", FIXTURE_PATH,
+        "--mode", mode,
+        "--low-memory", low_memory,
+        "--backend", backend
+    ]
+    val (stdout, stderr, exit_code) = process_run("env", args)
+    CheckerResult(output: stdout + stderr, exit_code: exit_code)
+
+fn assert_checker_success(result: CheckerResult) -> CheckerResult:
+    if result.exit_code != 0:
+        fail_test("release-slope checker unexpectedly failed: " + result.output)
+    result
+
+fn assert_checker_failure(result: CheckerResult) -> CheckerResult:
+    if result.exit_code == 0:
+        fail_test("release-slope checker unexpectedly passed: " + result.output)
+    result
+
+describe "Stage-4 release-slope production activation":
+    it "requires AOT, low memory, SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1, SIMPLE_BOOTSTRAP_STAGE4=1, and a non-VHDL backend":
+        step("Invoke the production checker with the exact enabled conjunction")
+        val result = assert_checker_success(run_release_slope_self_test(TEN_AT_BOUNDARY))
+        expect(result.output).to_contain("activation=enabled")
+
+    it "is inactive in check, interpreter, and JIT modes":
+        val check_result = assert_checker_success(run_release_slope_self_test(TEN_AT_BOUNDARY, mode: "check"))
+        val interpreter_result = assert_checker_success(run_release_slope_self_test(TEN_AT_BOUNDARY, mode: "interpreter"))
+        val jit_result = assert_checker_success(run_release_slope_self_test(TEN_AT_BOUNDARY, mode: "jit"))
+        expect(check_result.output).to_contain("activation=disabled")
+        expect(interpreter_result.output).to_contain("activation=disabled")
+        expect(jit_result.output).to_contain("activation=disabled")
+
+    it "is inactive when low_memory is false":
+        val result = assert_checker_success(run_release_slope_self_test(TEN_AT_BOUNDARY, low_memory: "0"))
+        expect(result.output).to_contain("activation=disabled")
+
+    it "is inactive when SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE is false or unset":
+        val false_result = assert_checker_success(run_release_slope_self_test(TEN_AT_BOUNDARY, entry_closure_env: "0"))
+        val unset_result = assert_checker_success(run_release_slope_self_test(TEN_AT_BOUNDARY, entry_closure_env: ""))
+        expect(false_result.output).to_contain("activation=disabled")
+        expect(unset_result.output).to_contain("activation=disabled")
+
+    it "is inactive when SIMPLE_BOOTSTRAP_STAGE4 is false or unset":
+        val false_result = assert_checker_success(run_release_slope_self_test(TEN_AT_BOUNDARY, stage4: "0"))
+        val unset_result = assert_checker_success(run_release_slope_self_test(TEN_AT_BOUNDARY, stage4: ""))
+        expect(false_result.output).to_contain("activation=disabled")
+        expect(unset_result.output).to_contain("activation=disabled")
+
+    it "is inactive for the VHDL backend":
+        val result = assert_checker_success(run_release_slope_self_test(TEN_AT_BOUNDARY, backend: "vhdl"))
+        expect(result.output).to_contain("activation=disabled")
+
+describe "Stage-4 release-slope production validation":
+    it "accepts ten unique ordered markers at average growth 25000":
+        val result = assert_checker_success(run_release_slope_self_test(TEN_AT_BOUNDARY))
+        expect(result.output).to_contain("average_growth=25000")
+
+    it "requests immediate termination at marker 10":
+        val result = assert_checker_success(run_release_slope_self_test(TEN_AT_BOUNDARY))
+        expect(result.output).to_contain("termination=requested seq=10")
+
+    it "reports raced marker 11 diagnostically without failing":
+        val result = assert_checker_success(run_release_slope_self_test(RACED_ELEVENTH))
+        expect(result.output).to_contain("raced-marker-after-stop seq=11 path=module_11.spl")
+
+    it "rejects average growth above 25000":
+        val result = assert_checker_failure(run_release_slope_self_test(TEN_TOO_STEEP))
+        expect(result.output).to_contain("average heap registry growth exceeds 25000")
+
+    it "rejects a stream ending before marker 10":
+        val result = assert_checker_failure(run_release_slope_self_test(EARLY_STREAM))
+        expect(result.output).to_contain("release stream ended before marker 10")
+
+    it "rejects a malformed marker before marker 10":
+        val result = assert_checker_failure(run_release_slope_self_test(MALFORMED_BEFORE_TEN))
+        expect(result.output).to_contain("invalid heap registry count")
+
+    it "rejects a duplicate path before marker 10":
+        val result = assert_checker_failure(run_release_slope_self_test(DUPLICATE_PATH_BEFORE_TEN))
+        expect(result.output).to_contain("release marker path must be unique")
+
+    it "rejects a duplicate sequence before marker 10":
+        val result = assert_checker_failure(run_release_slope_self_test(DUPLICATE_SEQUENCE_BEFORE_TEN))
+        expect(result.output).to_contain("release markers must be ordered")

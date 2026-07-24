@@ -1,0 +1,153 @@
+# codex-system-test
+# @req NFR-001
+"""
+# Low-Memory Native Module-Surface Regression
+
+Exercises the Stage 4 streaming module-surface lane with a four-file native
+entry closure. The fixture is deliberately written entry-first, then resolves
+definitions through a facade re-export. It covers an enum payload default,
+an imported trait default method, a separate provider implementation, two
+same-named traits with distinct canonical module identities, and an identical
+canonical trait imported through two paths.
+"""
+
+use std.spec.{describe, it, expect, step, fail_test}
+use std.io_runtime.{dir_create_all, file_delete, file_exists, file_write, process_run}
+
+val SURFACE_BUILD_DIR: text = "build/module_surface_low_memory_native"
+val SURFACE_ENTRY_PATH: text = SURFACE_BUILD_DIR + "/surface_entry.spl"
+val SURFACE_CONTRACT_PATH: text = SURFACE_BUILD_DIR + "/surface_contract.spl"
+val SURFACE_PROVIDER_PATH: text = SURFACE_BUILD_DIR + "/surface_provider.spl"
+val SURFACE_FACADE_PATH: text = SURFACE_BUILD_DIR + "/surface_facade.spl"
+val SURFACE_NATIVE_PATH: text = SURFACE_BUILD_DIR + "/surface_entry"
+val STRICT_STUB_GUARD: text = "SIMPLE_NO_STUB_FALLBACK=1"
+
+struct SurfaceNativeResult:
+    output: text
+    exit_code: i64
+    binary_exists: bool
+    strict_stub_guard: text
+
+fn module_surface_fixture_source(kind: text) -> text:
+    if kind == "contract":
+        return r"""val SURFACE_OFFSET: i64 = 2
+
+enum SurfacePayload:
+    Amount(value: i64 = 7)
+
+trait SurfaceMetric:
+    fn raw(self) -> i64
+    fn score(self) -> i64:
+        return self.raw() + 10
+"""
+    if kind == "provider":
+        return r"""use .surface_contract.{SurfaceMetric as ContractMetric, SurfacePayload}
+
+trait SurfaceMetric:
+    fn raw(self) -> i64
+    fn score(self) -> i64:
+        return self.raw() + 40
+
+struct SurfaceProvider:
+    value: i64
+
+impl ContractMetric for SurfaceProvider:
+    fn raw(self) -> i64:
+        return self.value
+
+fn payload_score(payload: SurfacePayload) -> i64:
+    match payload:
+        case Amount(value):
+            return value
+"""
+    if kind == "facade":
+        return r"""export use .surface_contract.{SurfaceMetric as ContractMetric, SurfacePayload, SURFACE_OFFSET}
+export use .surface_provider.{SurfaceMetric as ProviderMetric, SurfaceProvider, payload_score}
+"""
+    if kind == "entry":
+        return r"""use .surface_facade.{ContractMetric, ProviderMetric, SurfacePayload, SURFACE_OFFSET, SurfaceProvider, payload_score}
+use .surface_contract.{SurfaceMetric as ContractMetricAgain}
+
+struct EntryMetric:
+    value: i64
+
+impl ProviderMetric for EntryMetric:
+    fn raw(self) -> i64:
+        return self.value
+
+fn main() -> i64:
+    val contract_metric = SurfaceProvider(value: 3)
+    val provider_metric = EntryMetric(value: 5)
+    val payload = SurfacePayload.Amount()
+    return contract_metric.score() + provider_metric.score() + payload_score(payload) + SURFACE_OFFSET
+"""
+    fail_test("unknown module-surface fixture kind: " + kind)
+    ""
+
+fn write_surface_contract_module():
+    file_write(SURFACE_CONTRACT_PATH, module_surface_fixture_source("contract"))
+
+fn write_surface_provider_module():
+    file_write(SURFACE_PROVIDER_PATH, module_surface_fixture_source("provider"))
+
+fn write_surface_facade_module():
+    file_write(SURFACE_FACADE_PATH, module_surface_fixture_source("facade"))
+
+fn write_surface_entry_module():
+    file_write(SURFACE_ENTRY_PATH, module_surface_fixture_source("entry"))
+
+fn compile_surface_native_fixture() -> SurfaceNativeResult:
+    file_delete(SURFACE_NATIVE_PATH)
+    val args = [
+        "-u", "SIMPLE_BOOTSTRAP",
+        "-u", "SIMPLE_RUNTIME_PATH",
+        "SIMPLE_LIB=src",
+        STRICT_STUB_GUARD,
+        "SIMPLE_BOOTSTRAP_STAGE4=1",
+        "bin/simple",
+        "native-build",
+        "--backend", "cranelift",
+        "--low-memory",
+        "--entry-closure",
+        "--entry", SURFACE_ENTRY_PATH,
+        "--source", SURFACE_BUILD_DIR,
+        "--clean",
+        "-o", SURFACE_NATIVE_PATH
+    ]
+    val (stdout, stderr, exit_code) = process_run("env", args)
+    SurfaceNativeResult(
+        output: stdout + stderr,
+        exit_code: exit_code,
+        binary_exists: file_exists(SURFACE_NATIVE_PATH),
+        strict_stub_guard: STRICT_STUB_GUARD
+    )
+
+fn run_surface_native_fixture() -> SurfaceNativeResult:
+    val (stdout, stderr, exit_code) = process_run(SURFACE_NATIVE_PATH, [])
+    SurfaceNativeResult(
+        output: stdout + stderr,
+        exit_code: exit_code,
+        binary_exists: file_exists(SURFACE_NATIVE_PATH),
+        strict_stub_guard: STRICT_STUB_GUARD
+    )
+
+describe "Stage 4 low-memory native module surfaces":
+    it "resolves rich entry-closure surfaces and produces the exact native result":
+        step("Write the entry before its contract, provider, and facade definitions")
+        dir_create_all(SURFACE_BUILD_DIR)
+        write_surface_entry_module()
+        write_surface_contract_module()
+        write_surface_provider_module()
+        write_surface_facade_module()
+
+        step("Compile AOT with entry closure, low-memory Stage 4, and stub fallback disabled")
+        val built = compile_surface_native_fixture()
+        expect(built.strict_stub_guard).to_equal("SIMPLE_NO_STUB_FALLBACK=1")
+        if built.exit_code != 0:
+            fail_test("low-memory native module-surface implementation unavailable: " + built.output)
+        expect(built.binary_exists).to_equal(true)
+
+        step("Run the strict native artifact and require the exact cross-module result")
+        val ran = run_surface_native_fixture()
+        expect(ran.exit_code).to_equal(67)
+        expect(ran.output).to_equal("")

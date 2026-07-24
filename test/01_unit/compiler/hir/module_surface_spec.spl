@@ -1,0 +1,107 @@
+# RED contract for the Stage4 ModuleSurface streaming prerequisite.
+#
+# The production ModuleSurface extractor/resolver does not exist yet.  These
+# cases deliberately fail after proving their parser fixture is well-formed;
+# replacing module_surface_unavailable with real surface assertions is the
+# implementation hand-off, not a permissive placeholder.
+
+use std.spec.{describe, it, expect, fail_test}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.core.parser.{parser_has_errors}
+
+fn module_surface_unavailable(case_name: text):
+    fail_test("ModuleSurface production helper unavailable: " + case_name)
+
+fn category_fixture() -> text:
+    "use compiler.core.tokens.{TOK_IDENT as Alias}\n" +
+    "export api\n" +
+    "struct LocalThing:\n    value: i64\n" +
+    "enum Choice:\n    Pick(value: i64 = 2)\n" +
+    "trait Defaulted:\n    fn value(me) -> i64:\n        7\n" +
+    "impl LocalThing:\n    fn api(me) -> i64:\n        1\n" +
+    "const answer: i64 = 42\n" +
+    "fn api(input: i64 = 3) -> i64:\n    input\n"
+
+fn default_fixture() -> text:
+    "struct LocalThing:\n    value: i64 = 1\n" +
+    "enum Choice:\n    Pick(value: i64 = 2)\n" +
+    "trait Defaulted:\n    fn value(me) -> i64:\n        7\n" +
+    "const answer: i64 = 42\n" +
+    "fn api(input: i64 = 3) -> i64:\n    input\n"
+
+describe "ModuleSurface RED contract":
+    it "keeps every resolver declaration category without ordinary bodies":
+        val module = parse_and_build_module(category_fixture(), "surface_categories.spl")
+        expect(parser_has_errors()).to_equal(false)
+        expect(module.imports.len()).to_equal(1)
+        expect(module.imports[0].module).to_equal("compiler.core.tokens")
+        expect(module.imports[0].items[0].name).to_equal("TOK_IDENT")
+        expect(module.imports[0].items[0].alias).to_equal("Alias")
+        expect(module.exports.len()).to_equal(1)
+        expect(module.exports[0].items[0]).to_equal("api")
+        expect(module.functions.contains("api")).to_equal(true)
+        expect(module.structs.contains("LocalThing")).to_equal(true)
+        expect(module.enums.contains("Choice")).to_equal(true)
+        expect(module.traits.contains("Defaulted")).to_equal(true)
+        expect(module.impls.len()).to_equal(1)
+        expect(module.constants.contains("answer")).to_equal(true)
+        module_surface_unavailable("categories and body exclusion")
+
+    it "keeps identity-only composites without fields layouts or methods":
+        val module = parse_and_build_module("struct Marker:\n    marker: i64\n", "surface_identity_only.spl")
+        expect(parser_has_errors()).to_equal(false)
+        expect(module.structs.contains("Marker")).to_equal(true)
+        module_surface_unavailable("identity-only composite")
+
+    it "drops ordinary function bodies parameter defaults field defaults and const values":
+        val module = parse_and_build_module(default_fixture(), "surface_body_drop.spl")
+        expect(parser_has_errors()).to_equal(false)
+        val api = module.functions["api"] ?? panic("missing api")
+        expect(api.body.stmts.len()).to_be_greater_than(0)
+        expect(api.params[0].has_default).to_equal(true)
+        expect((module.constants["answer"] ?? panic("missing answer")).name).to_equal("answer")
+        module_surface_unavailable("ordinary body/default/value exclusion")
+
+    it "retains a trait default function and enum field-default expression after parser reset":
+        val first = parse_and_build_module(default_fixture(), "surface_retained_defaults.spl")
+        expect(parser_has_errors()).to_equal(false)
+        val trait_ = first.traits["Defaulted"] ?? panic("missing Defaulted")
+        expect(trait_.methods[0].body.stmts.len()).to_be_greater_than(0)
+        expect(first.enums["Choice"].variants.len()).to_equal(1)
+        val second = parse_and_build_module("fn reset_probe() -> i64:\n    0\n", "surface_reset.spl")
+        expect(parser_has_errors()).to_equal(false)
+        expect(second.functions.contains("reset_probe")).to_equal(true)
+        module_surface_unavailable("trait default and enum field default retention")
+
+    it "rejects a source fingerprint or declaration-order mismatch":
+        val first = parse_and_build_module("fn first() -> i64:\n    1\n", "surface_order.spl")
+        expect(parser_has_errors()).to_equal(false)
+        val second = parse_and_build_module("fn second() -> i64:\n    2\n", "surface_order.spl")
+        expect(parser_has_errors()).to_equal(false)
+        expect(first.function_order[0]).to_equal("first")
+        expect(second.function_order[0]).to_equal("second")
+        module_surface_unavailable("fingerprint and order mismatch")
+
+    it "shares one canonical physical-source surface across aliases":
+        val module = parse_and_build_module("fn provider() -> i64:\n    1\n", "src/sample/provider.spl")
+        expect(parser_has_errors()).to_equal(false)
+        expect(module.name).to_equal("src/sample/provider.spl")
+        module_surface_unavailable("canonical physical-source alias sharing")
+
+    it "accepts identical trait metadata from one canonical origin idempotently":
+        val first = parse_and_build_module("trait Same:\n    fn value() -> i64:\n        1\n", "src/sample/same.spl")
+        expect(parser_has_errors()).to_equal(false)
+        val second = parse_and_build_module("trait Same:\n    fn value() -> i64:\n        1\n", "src/sample/same.spl")
+        expect(parser_has_errors()).to_equal(false)
+        expect(first.traits.contains("Same")).to_equal(true)
+        expect(second.traits.contains("Same")).to_equal(true)
+        module_surface_unavailable("identical trait origin idempotence")
+
+    it "fails loudly for conflicting metadata at one canonical trait origin":
+        val first = parse_and_build_module("trait Same:\n    fn value() -> i64:\n        1\n", "src/sample/conflict.spl")
+        expect(parser_has_errors()).to_equal(false)
+        val second = parse_and_build_module("trait Same:\n    fn value() -> text:\n        \"x\"\n", "src/sample/conflict.spl")
+        expect(parser_has_errors()).to_equal(false)
+        expect(first.traits.contains("Same")).to_equal(true)
+        expect(second.traits.contains("Same")).to_equal(true)
+        module_surface_unavailable("conflicting trait metadata")
