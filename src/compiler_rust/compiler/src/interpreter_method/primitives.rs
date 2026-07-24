@@ -212,11 +212,12 @@ pub fn handle_int_methods(
         "chr" => {
             // Convert to Unicode character
             if !(0..=0x10FFFF).contains(&n) {
-                return Err(CompileError::Runtime(format!("chr() argument out of range: {}", n)));
-            }
-            match char::from_u32(n as u32) {
-                Some(c) => Value::text(c.to_string()),
-                None => return Err(CompileError::Runtime(format!("invalid Unicode code point: {}", n))),
+                Value::text(String::new())
+            } else {
+                match char::from_u32(n as u32) {
+                    Some(c) => Value::text(c.to_string()),
+                    None => Value::text(String::new()),
+                }
             }
         }
         "fdiv" => {

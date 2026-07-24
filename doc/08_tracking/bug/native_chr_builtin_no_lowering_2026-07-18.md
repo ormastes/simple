@@ -143,3 +143,14 @@ than decoding MIR integers as tagged values or replacing non-ASCII with `?`.
 Hosted, FreeBSD, AArch64, RISC-V64, ARM32/RISC-V32, and Windows ARM64 gates
 already consume the aggregate fixture; the simple-core smoke additionally
 builds and runs C5 against the pure runtime. Rebuilt execution is pending.
+
+## Invalid-scalar parity correction (2026-07-24)
+
+Canonical Simple and every native owner return empty text for negative,
+surrogate, or above-U+10FFFF inputs, but the Rust bootstrap interpreter still
+raised a runtime error. The seed now follows the established Simple contract.
+C5 adds all three invalid classes for pure simple-core; the shared cross-target
+aggregate adds the same oracle to hosted, FreeBSD, ARM, RISC-V, and
+Windows-ARM64 gates. The focused source contract prevents the seed diagnostics
+or aggregate assertions from returning. Incremental
+`cargo check -p simple-compiler` passes.
