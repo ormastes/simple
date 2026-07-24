@@ -150,6 +150,9 @@ Each harness executes a compiled RISC-V program through the compiler-emitted
 core and WB wrapper, observes the Sv32/Sv39 target page-table walk, and requires
 load-access-fault cause 5 while proving the final PMP-denied physical address
 never reaches Wishbone. Missing generated cores fail; no CPU stub is accepted.
+Each successful log carries a content digest over the core, wrapper, testbench,
+fixture, and runner; the RV32/RV64 preflights recompute that digest and reject
+marker-only, changed-input, or disconnected logs.
 
 The board synthesis entrypoints reuse one PS-DDR block design:
 

@@ -426,3 +426,8 @@ implementation-milestone-0-in-progress
   thin XLEN selector as RV32 into the shared Simple-generated PS-DDR builder.
   The former handwritten RV64 synthesis implementation is no longer reachable
   through the product entrypoint; board execution is still unqualified.
+- protection-proof provenance 2026-07-24: both architecture preflights now
+  require the real-DUT PASS marker plus a runner-emitted content digest over
+  the exact generated core, wrapper, testbench, assembly fixture, and runner.
+  The shared self-test rejects a marker-only log and changed dependency content
+  even when its timestamp is backdated.
