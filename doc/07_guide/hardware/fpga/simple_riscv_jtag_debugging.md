@@ -53,6 +53,29 @@ host debugger ──rbb bytes──► LinkMux ──frames──► serial ─�
   OpenOCD `remote_bitbang` socket, log/term channels stay live on the same
   wire.
 
+## Board-proven attach recipe (2026-07-24, KV260) — READ THIS
+
+The BSCANE2 path below is **board-verified**: a Simple RV32 core ran a 981 s
+soak on a real KV260 whose golden was read out bit-exact (`0x7EB5A8A9`) over
+this JTAG stack, no UART. Two hard-won details:
+
+1. **TCK must be slow.** The `bscane2_tap_bridge` tck→clk CDC is only proven at
+   TCK ≤ core_clk/8 (core ≈ 25 MHz = CFGMCLK/2, so ≈ 3 MHz). Vivado
+   `hw_jtag`'s ~15 MHz default reads **all-zeros**. Set **1 MHz**: open the
+   target in NORMAL mode, `set_property PARAM.FREQUENCY 1000000
+   [current_hw_target]`, close, reopen with `-jtag_mode 1`.
+2. **Use Vivado `hw_jtag` raw mode, not OpenOCD.** OpenOCD's `use_bscan_tunnel`
+   framing (`[ctrl][7-bit width][data][ctrl]`, FPGA generates inner TMS) is
+   **structurally incompatible** with the v1 bridge (raw 2-bit TMS/TDI pairs,
+   host drives every inner-TAP transition). No cfg/tcl fixes it. Enter raw JTAG
+   with `open_hw_target -jtag_mode 1` (NB: `create_hw_jtag` does NOT exist in
+   Vivado 2025.2), then `run_state_hw_jtag` / `scan_ir_hw_jtag` /
+   `scan_dr_hw_jtag`. Chain = xck26 (idx 0, USER4 host) + arm_dap (idx 1,
+   IR len 4, BYPASS → +1 DR bit). Drive the inner TAP through the USER4 DR as
+   2-bit `{tms,tdi}` pairs; sweep the CAPTURE-phase/scan-offset until the inner
+   IDCODE decodes to `0x15350067`, LSB-first. Sample the running soak with
+   halt(DMCONTROL.haltreq→dmstatus allhalted)→abstract-read x18/x8→resume.
+
 ## Path 2 — BSCANE2 tunnel over the programming cable (board-ready)
 
 Zero extra cabling: the debug TAP is reached through the SAME FT4232H used

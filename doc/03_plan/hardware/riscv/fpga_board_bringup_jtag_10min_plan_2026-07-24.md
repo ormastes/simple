@@ -96,32 +96,34 @@ binding). Related: `rv64_fpga_synthesis_plan_2026-07-22.md`,
 - Evidence/report files stay out of git; plan/doc updates and code land on
   `main` via jj (no branches), SSH key `~/.ssh/id_ed25519_this_mac`.
 
-## Status 2026-07-24 (Lane A executed)
+## Status 2026-07-24 (Lanes A + B executed — RV32 board soak PASS)
 
-- RV32 re-synth **PASS**: DIV-fixed bitstream `rv32_fpga.bit`
-  sha256 `85d08afa8bf9…b9e0a`, timing MET (WNS +16.588 ns). GHDL soak on the
-  fixed core PASS (golden `A77902FA` == host, 7.93 M cycles). Board
-  **programmed clean** (`PROGRAM_HW_DEVICES_DONE`, startup HIGH).
-- 10-min board soak **BLOCKED (missing hardware)**: fabric UART is on PMOD J2
-  (TX=H12, RX=E10) and the KV260 carrier routes NO FT4232H channel to PL pins
-  (Ch.A=JTAG, Ch.B=PS UART1→ttyUSB1, Ch.D=spare→ttyUSB2, Ch.C unrouted);
-  preflight capture on both ttys = 0 bytes while the core ran. Evidence:
-  `build/fpga/evidence/rv32_2026-07-24/` (uncommitted).
-- Unblock paths, in preference order:
-  1. **Wire the 3.3 V USB-UART adapter to PMOD J2**, then
-     `RV32_BOARD_UART_PORTS=/dev/ttyUSB<adapter> sh scripts/fpga/soak_rv32_board.shs run`
-     (bitstream + golden `7EB5A8A9` @ COUNT=260 M already staged).
-  2. **Cable-free via Simple JTAG (Lane B):** poll soak progress/golden through
-     the BSCANE2-tunneled debug module (abstract reads / SBA) for ≥600 s —
-     board-origin evidence with no extra cabling.
-  3. **PS UART1 on EMIO:** re-target the PS block design so PL drives UART1
-     (EMIO) → ttyUSB1; requires PS bring-up, larger change.
+- RV32 re-synth **PASS** (Lane A): DIV-fixed core, timing MET, board programmed
+  clean. The UART soak was blocked (KV260 carrier routes NO FT4232H channel to
+  PL pins; fabric UART on PMOD J2 needs a 3.3 V adapter that is absent) — so the
+  soak was taken **cable-free over Simple's own JTAG** instead (Lane B).
+- **10-min board soak PASS via Simple JTAG** (Lane B, 2026-07-24 03:50→04:06):
+  a debug bitstream (`soc_top_rv32` `G_DEBUG_JTAG=true`, BSCANE2 USER4 tunnel →
+  bridge → CDC → Simple TAP/DTM/DMI → DM → rv32 hart; routed timing MET, WNS
+  +15.68 ns; soak payload COUNT=260 M baked into ROM) was programmed, then the
+  running soak was read out over JTAG: 30 samples of halt→read x18(progress)+
+  x8(Adler-32)→resume. **wall = 981 s, x18 strictly monotonic (→0x0F7F4900),
+  final x8 = 0x7EB5A8A9 == host golden.** Inner TAP IDCODE 0x15350067 confirmed
+  through the tunnel. Key calibration: **TCK = 1 MHz** (bridge CDC proven at
+  ≤ core_clk/8 ≈ 3 MHz; the ~15 MHz `hw_jtag` default read all-zeros).
+  Attach = Vivado `hw_jtag` raw mode (OpenOCD's tunnel framing is structurally
+  incompatible with the v1 bridge — see the interop bug doc). Evidence +
+  verdict: `build/fpga/evidence/rv32_2026-07-24/jtag/` (uncommitted).
 
 ## Exit Criteria
 
-- [ ] RV32: board-origin 10-min soak transcript, golden match, fresh bitstream
-      hash recorded. (2026-07-24: synth+program done; transcript blocked on
-      PMOD J2 adapter — see Status.)
+- [x] RV32: board-origin 10-min soak, golden match, fresh bitstream hash
+      recorded — **PASS via Simple JTAG** (981 s, x8 == 0x7EB5A8A9), 2026-07-24.
+- [x] JTAG: board-origin halt/read-regs/resume through the Simple TAP/DTM/DM —
+      **PASS** (BSCANE2 tunnel, IDCODE 0x15350067, DMI + abstract GPR reads on
+      the real hart).
+- [ ] RV64: board-origin 10-min soak — synthesizable core exists + sim gates
+      green (c35ef5b7807); Vivado synth + board run pending.
 - [ ] JTAG: board-origin OpenOCD halt/regs/step transcript through the Simple
       TAP/DTM/DM.
 - [ ] RV64: board-origin 10-min soak transcript, golden match — or a precise,
