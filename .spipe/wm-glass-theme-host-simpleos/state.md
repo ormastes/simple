@@ -58,7 +58,7 @@ No new drawing IR, private widget renderer, font atlas/cache, Engine3D shortcut,
   capability-declared pixel evidence.
 
 ## Phase
-implementation-blocked-host-theme-return-and-native-to-i64-resolution
+implementation-aggregate-return-source-accepted-runtime-proof-pending
 
 ## Log
 - dev: Created state file with 10 acceptance criteria (type: bug); defined bounded cooperative lanes, canonical interface constraints, evidence steps, and fail-fast policy.
@@ -246,3 +246,30 @@ implementation-blocked-host-theme-return-and-native-to-i64-resolution
   recorded in
   `doc/08_tracking/bug/native_primitive_to_i64_ufcs_collision_2026-07-24.md`.
   The final Web producer cycle remains unspent.
+- continuation-2026-07-25-rodata-and-stage4: Commit `2acc9c729c` moved
+  Cranelift string literals into immutable module data. One exact rebuild
+  passed Stage 2/3 sanity and proved the former `log_modes.spl` lexer
+  corruption was downstream literal-address aliasing. Stage 4 then stopped at
+  a real unparenthesized continuation in `compile_targets.spl`; that source
+  shape is fixed, but the full Stage 4 command was not repeated in this
+  session.
+- continuation-2026-07-25-gui-handoff: `UISession.submit_widget_draw_ir`
+  now obtains the installed immutable `ThemeRenderSnapshot` and uses the
+  canonical snapshot-aware widget converter, retaining the exact legacy route
+  when no snapshot exists. High review accepted this wiring and rejected a
+  broader material patch that changed legacy command shape and incorrectly
+  applied window glass semantics to controls; the rejected patch was removed.
+- continuation-2026-07-25-aggregate-return: A direct native diagnostic built
+  with the retained Stage 3 compiler reproduced the host blocker: the returned
+  `ThemeRenderSnapshot` exists but its nested `material` is nil. The accepted
+  source candidate replaces the cross-module bare-name `MirType` registry with
+  a build-scoped reset/freeze catalog of qualified symbol-free declared type
+  descriptors, resolves named results in the caller symbol table, preserves
+  bootstrap builtin ABI precedence, and retains declared `Named` HIR returns.
+  A fresh-cache Cranelift fixture now requires immediate projected fields,
+  method chaining, two aliased same-named factories with distinct aggregates,
+  and a nested snapshot/token-map/widget-CSS package. Three high-capability
+  reviews rejected unsafe revisions before accepting the current source for
+  build integration. Runtime proof remains pending: the capped full Stage 4
+  rebuild was not repeated, and same-process A-to-B reset/skip-MIR evidence is
+  still a release-evidence gap. Host and QEMU gates therefore remain pending.

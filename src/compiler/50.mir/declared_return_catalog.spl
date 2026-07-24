@@ -1,0 +1,418 @@
+# Build-scoped declared callable return catalog.
+#
+# Flat bootstrap HIR assigns SymbolId values independently in every module.
+# Those IDs, and MIR types derived from them, are not valid metadata in a
+# different caller. Store qualified callable identities and symbol-free
+# declared type descriptors, then resolve them in the caller SymbolTable.
+
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.{HirFunction}
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.core.types.{
+    TYPE_BOOL, TYPE_I64, TYPE_F64,
+    custom_primitive_is_name, custom_primitive_underlying_type_tag_by_symbol
+}
+
+val DECLARED_TYPE_INT: i64 = 1
+val DECLARED_TYPE_FLOAT: i64 = 2
+val DECLARED_TYPE_BOOL: i64 = 3
+val DECLARED_TYPE_CHAR: i64 = 4
+val DECLARED_TYPE_STR: i64 = 5
+val DECLARED_TYPE_UNIT: i64 = 6
+val DECLARED_TYPE_TUPLE: i64 = 7
+val DECLARED_TYPE_ARRAY: i64 = 8
+val DECLARED_TYPE_SLICE: i64 = 9
+val DECLARED_TYPE_DICT: i64 = 10
+val DECLARED_TYPE_REF: i64 = 11
+val DECLARED_TYPE_PTR: i64 = 12
+val DECLARED_TYPE_OPTIONAL: i64 = 13
+val DECLARED_TYPE_RESULT: i64 = 14
+val DECLARED_TYPE_NAMED: i64 = 15
+val DECLARED_TYPE_TYPE_PARAM: i64 = 16
+val DECLARED_TYPE_UNION: i64 = 17
+val DECLARED_TYPE_FUNCTION: i64 = 18
+val DECLARED_TYPE_PROJECTION: i64 = 19
+val DECLARED_TYPE_INFER: i64 = 20
+val DECLARED_TYPE_ERROR: i64 = 21
+val DECLARED_TYPE_NEVER: i64 = 22
+val DECLARED_TYPE_ANY: i64 = 23
+val DECLARED_TYPE_TENSOR: i64 = 24
+val DECLARED_TYPE_LAYER: i64 = 25
+val DECLARED_TYPE_DYN_TRAIT: i64 = 26
+
+val DECLARED_NAMED_UNKNOWN: i64 = 0
+val DECLARED_NAMED_CLASS: i64 = 1
+val DECLARED_NAMED_STRUCT: i64 = 2
+val DECLARED_NAMED_ENUM: i64 = 3
+val DECLARED_NAMED_TRAIT: i64 = 4
+val DECLARED_NAMED_ALIAS: i64 = 5
+val DECLARED_NAMED_CUSTOM_BOOL: i64 = 6
+val DECLARED_NAMED_CUSTOM_I64: i64 = 7
+val DECLARED_NAMED_CUSTOM_F64: i64 = 8
+
+struct DeclaredTypeDescriptor:
+    """Stable declared type metadata. Children retain generic arguments and
+    composite members; alias_provenance records declared alias identities."""
+    tag: i64
+    bits: i64
+    signed_or_mutable: bool
+    has_size: bool
+    size: i64
+    name: text
+    named_kind: i64
+    generic_arg_count: i64
+    has_alias_target: bool
+    alias_provenance: [text]
+    annotations: [text]
+    children: [DeclaredTypeDescriptor]
+
+fn declared_type_descriptor_empty(tag: i64) -> DeclaredTypeDescriptor:
+    DeclaredTypeDescriptor(
+        tag: tag,
+        bits: 0,
+        signed_or_mutable: false,
+        has_size: false,
+        size: 0,
+        name: "",
+        named_kind: DECLARED_NAMED_UNKNOWN,
+        generic_arg_count: 0,
+        has_alias_target: false,
+        alias_provenance: [],
+        annotations: [],
+        children: []
+    )
+
+fn declared_return_logical_module_name(path: text) -> text:
+    var mod_path = path.replace("\\", "/")
+    while mod_path.starts_with("../"):
+        mod_path = mod_path.substring(3)
+    if mod_path.starts_with("./"):
+        mod_path = mod_path.substring(2)
+    val absolute_src = mod_path.find("/src/") ?? -1
+    val absolute_compiler_fixture = mod_path.find("/test/fixtures/compiler/") ?? -1
+    val absolute_test = mod_path.find("/test/") ?? -1
+    if absolute_src >= 0:
+        mod_path = mod_path.substring(absolute_src + 5)
+    elif absolute_compiler_fixture >= 0:
+        mod_path = mod_path.substring(absolute_compiler_fixture + 24)
+    elif absolute_test >= 0:
+        mod_path = mod_path.substring(absolute_test + 1)
+    if mod_path.starts_with("src/"):
+        mod_path = mod_path.substring(4)
+    mod_path = mod_path.replace(".spl", "")
+    mod_path = mod_path.replace(".sdn", "")
+    mod_path.replace("/", ".")
+
+fn declared_return_qualified_name(module_name: text, local_name: text) -> text:
+    val logical_module = declared_return_logical_module_name(module_name)
+    val normalized = local_name.replace("::", ".")
+    if logical_module == "":
+        return normalized
+    if normalized == logical_module or normalized.starts_with(logical_module + "."):
+        return normalized
+    "{logical_module}.{normalized}"
+
+fn declared_return_symbol_identity(symbols: SymbolTable, symbol: SymbolId, fallback_module: text, fallback_name: text) -> text:
+    val found = symbols.get_symbol_raw(symbol.id)
+    if val sym = found:
+        val defining_module = sym.defining_module ?? fallback_module
+        return declared_return_qualified_name(defining_module, sym.name)
+    declared_return_qualified_name(fallback_module, fallback_name)
+
+fn declared_return_callable_identity(module_name: text, symbols: SymbolTable, func: HirFunction) -> text:
+    val display_name = symbols.symbol_display_name(func.symbol, func.name)
+    val owner_name = declared_return_symbol_identity(symbols, func.symbol, module_name, display_name)
+    "{owner_name}#arity={func.params.len()}"
+
+fn declared_return_call_identity(symbols: SymbolTable, symbol: SymbolId, arity: i64) -> text:
+    val found = symbols.get_symbol_raw(symbol.id)
+    if val sym = found:
+        val defining_module = sym.defining_module ?? ""
+        if defining_module != "":
+            val owner_name = declared_return_qualified_name(defining_module, sym.name)
+            return "{owner_name}#arity={arity}"
+    ""
+
+fn declared_return_emitted_identity(emitted_name: text, arity: i64) -> text:
+    """Accept an operand identity only when the frozen definition prepass
+    registered that exact qualified spelling and signature."""
+    val normalized = emitted_name.replace("::", ".")
+    if normalized == "" or not normalized.contains("."):
+        return ""
+    val candidate = "{normalized}#arity={arity}"
+    if _declared_return_catalog_frozen and _declared_return_catalog.contains_key(candidate):
+        return candidate
+    ""
+
+fn declared_named_kind(symbols: SymbolTable, symbol: SymbolId) -> i64:
+    val found = symbols.get_symbol_raw(symbol.id)
+    if val sym = found:
+        # SymbolId values are module-local. Gate the custom-primitive registry
+        # lookup by the declared name so an unrelated struct with a colliding
+        # numeric ID can never be reclassified as a primitive.
+        if custom_primitive_is_name(sym.name):
+            val underlying = custom_primitive_underlying_type_tag_by_symbol(symbol.id)
+            if underlying == TYPE_BOOL:
+                return DECLARED_NAMED_CUSTOM_BOOL
+            if underlying == TYPE_I64:
+                return DECLARED_NAMED_CUSTOM_I64
+            if underlying == TYPE_F64:
+                return DECLARED_NAMED_CUSTOM_F64
+        match sym.kind:
+            case SymbolKind.Class: return DECLARED_NAMED_CLASS
+            case SymbolKind.Struct: return DECLARED_NAMED_STRUCT
+            case SymbolKind.Enum: return DECLARED_NAMED_ENUM
+            case SymbolKind.Trait: return DECLARED_NAMED_TRAIT
+            case SymbolKind.TypeAlias: return DECLARED_NAMED_ALIAS
+            case _: ()
+    DECLARED_NAMED_UNKNOWN
+
+fn declared_type_descriptor(type_: HirType, symbols: SymbolTable, module_name: text) -> DeclaredTypeDescriptor:
+    var out = declared_type_descriptor_empty(DECLARED_TYPE_ERROR)
+    match type_.kind:
+        case HirTypeKind.Int(bits, signed):
+            out.tag = DECLARED_TYPE_INT
+            out.bits = bits
+            out.signed_or_mutable = signed
+        case HirTypeKind.Float(bits):
+            out.tag = DECLARED_TYPE_FLOAT
+            out.bits = bits
+        case HirTypeKind.Bool: out.tag = DECLARED_TYPE_BOOL
+        case HirTypeKind.Char: out.tag = DECLARED_TYPE_CHAR
+        case HirTypeKind.Str: out.tag = DECLARED_TYPE_STR
+        case HirTypeKind.Unit: out.tag = DECLARED_TYPE_UNIT
+        case HirTypeKind.Tuple(elements):
+            out.tag = DECLARED_TYPE_TUPLE
+            for element in elements:
+                out.children.push(declared_type_descriptor(element, symbols, module_name))
+        case HirTypeKind.Array(element, size):
+            out.tag = DECLARED_TYPE_ARRAY
+            out.children.push(declared_type_descriptor(element, symbols, module_name))
+            if val declared_size = size:
+                out.has_size = true
+                out.size = declared_size
+        case HirTypeKind.Slice(element):
+            out.tag = DECLARED_TYPE_SLICE
+            out.children.push(declared_type_descriptor(element, symbols, module_name))
+        case HirTypeKind.Dict(key, value):
+            out.tag = DECLARED_TYPE_DICT
+            out.children.push(declared_type_descriptor(key, symbols, module_name))
+            out.children.push(declared_type_descriptor(value, symbols, module_name))
+        case HirTypeKind.Ref(inner, mutable):
+            out.tag = DECLARED_TYPE_REF
+            out.signed_or_mutable = mutable
+            out.children.push(declared_type_descriptor(inner, symbols, module_name))
+        case HirTypeKind.Ptr(inner, mutable):
+            out.tag = DECLARED_TYPE_PTR
+            out.signed_or_mutable = mutable
+            out.children.push(declared_type_descriptor(inner, symbols, module_name))
+        case HirTypeKind.Optional(inner):
+            out.tag = DECLARED_TYPE_OPTIONAL
+            out.children.push(declared_type_descriptor(inner, symbols, module_name))
+        case HirTypeKind.Result(ok, err):
+            out.tag = DECLARED_TYPE_RESULT
+            out.children.push(declared_type_descriptor(ok, symbols, module_name))
+            out.children.push(declared_type_descriptor(err, symbols, module_name))
+        case HirTypeKind.Named(symbol, args):
+            out.tag = DECLARED_TYPE_NAMED
+            out.name = declared_return_symbol_identity(symbols, symbol, module_name, "")
+            out.named_kind = declared_named_kind(symbols, symbol)
+            out.generic_arg_count = args.len()
+            for arg in args:
+                out.children.push(declared_type_descriptor(arg, symbols, module_name))
+            if out.named_kind == DECLARED_NAMED_ALIAS:
+                out.alias_provenance.push(out.name)
+                # Alias expansion is deliberately deferred. HIR aliases may be
+                # recursive or generic, and this catalog has no substitution
+                # environment. Keeping provenance while declining resolution
+                # is safer than shadowing a concrete caller signature.
+                out.has_alias_target = false
+        case HirTypeKind.DynTrait(trait_):
+            out.tag = DECLARED_TYPE_DYN_TRAIT
+            out.name = declared_return_symbol_identity(symbols, trait_, module_name, "")
+            out.named_kind = DECLARED_NAMED_TRAIT
+        case HirTypeKind.TypeParam(name, bounds):
+            out.tag = DECLARED_TYPE_TYPE_PARAM
+            out.name = name
+            for bound in bounds:
+                out.children.push(declared_type_descriptor(bound, symbols, module_name))
+        case HirTypeKind.Union(members):
+            out.tag = DECLARED_TYPE_UNION
+            for member in members:
+                out.children.push(declared_type_descriptor(member, symbols, module_name))
+        case HirTypeKind.Function(params, ret, effects):
+            out.tag = DECLARED_TYPE_FUNCTION
+            out.generic_arg_count = params.len()
+            for param in params:
+                out.children.push(declared_type_descriptor(param, symbols, module_name))
+            out.children.push(declared_type_descriptor(ret, symbols, module_name))
+            for effect in effects:
+                out.annotations.push("{effect.kind}")
+        case HirTypeKind.Projection(base, assoc_name):
+            out.tag = DECLARED_TYPE_PROJECTION
+            out.name = assoc_name
+            out.children.push(declared_type_descriptor(base, symbols, module_name))
+        case HirTypeKind.Infer(id, level):
+            out.tag = DECLARED_TYPE_INFER
+            out.bits = id
+            out.size = level
+        case HirTypeKind.Error: out.tag = DECLARED_TYPE_ERROR
+        case HirTypeKind.Never: out.tag = DECLARED_TYPE_NEVER
+        case HirTypeKind.Any: out.tag = DECLARED_TYPE_ANY
+        case HirTypeKind.Tensor(element, dims, device):
+            out.tag = DECLARED_TYPE_TENSOR
+            out.children.push(declared_type_descriptor(element, symbols, module_name))
+            out.annotations.push("{dims}")
+            out.annotations.push("{device}")
+        case HirTypeKind.Layer(input, output):
+            out.tag = DECLARED_TYPE_LAYER
+            out.annotations.push("{input}")
+            out.annotations.push("{output}")
+    out
+
+fn declared_named_kind_matches(symbols: SymbolTable, symbol: SymbolId, expected: i64) -> bool:
+    declared_named_kind(symbols, symbol) == expected
+
+fn declared_type_symbol_in(symbols: SymbolTable, identity: text, named_kind: i64) -> SymbolId?:
+    for symbol in symbols.symbols.values():
+        val symbol_identity = declared_return_symbol_identity(symbols, symbol.id, "", symbol.name)
+        if symbol_identity == identity and declared_named_kind_matches(symbols, symbol.id, named_kind):
+            return symbol.id
+    nil
+
+fn declared_type_children(descs: [DeclaredTypeDescriptor], symbols: SymbolTable) -> [HirType]:
+    var out: [HirType] = []
+    for desc in descs:
+        if val resolved = declared_type_resolve(desc, symbols):
+            out.push(resolved)
+    out
+
+fn declared_type_has_unresolved_parameter(desc: DeclaredTypeDescriptor) -> bool:
+    if desc.tag == DECLARED_TYPE_TYPE_PARAM:
+        return true
+    if desc.named_kind == DECLARED_NAMED_ALIAS:
+        return true
+    for child in desc.children:
+        if declared_type_has_unresolved_parameter(child):
+            return true
+    false
+
+fn declared_hir_type_is_concrete(type_: HirType, symbols: SymbolTable) -> bool:
+    """Reject caller signatures that still contain generic/inferred material."""
+    val descriptor = declared_type_descriptor(type_, symbols, "")
+    not declared_type_has_unresolved_parameter(descriptor)
+
+fn declared_type_resolve(desc: DeclaredTypeDescriptor, symbols: SymbolTable) -> HirType?:
+    """Resolve metadata into caller-local SymbolIds before normal lower_type."""
+    if declared_type_has_unresolved_parameter(desc):
+        return nil
+    val span = Span.empty()
+    if desc.tag == DECLARED_TYPE_INT:
+        return HirType(kind: HirTypeKind.Int(desc.bits, desc.signed_or_mutable), span: span)
+    if desc.tag == DECLARED_TYPE_FLOAT:
+        return HirType(kind: HirTypeKind.Float(desc.bits), span: span)
+    if desc.tag == DECLARED_TYPE_BOOL:
+        return HirType(kind: HirTypeKind.Bool, span: span)
+    if desc.tag == DECLARED_TYPE_CHAR:
+        return HirType(kind: HirTypeKind.Char, span: span)
+    if desc.tag == DECLARED_TYPE_STR:
+        return HirType(kind: HirTypeKind.Str, span: span)
+    if desc.tag == DECLARED_TYPE_UNIT:
+        return HirType(kind: HirTypeKind.Unit, span: span)
+    if desc.tag == DECLARED_TYPE_TUPLE:
+        val elements = declared_type_children(desc.children, symbols)
+        if elements.len() == desc.children.len():
+            return HirType(kind: HirTypeKind.Tuple(elements), span: span)
+        return nil
+    if desc.tag == DECLARED_TYPE_ARRAY and desc.children.len() == 1:
+        if val element = declared_type_resolve(desc.children[0], symbols):
+            val size: i64? = if desc.has_size: Some(desc.size) else: nil
+            return HirType(kind: HirTypeKind.Array(element, size), span: span)
+    if desc.tag == DECLARED_TYPE_SLICE and desc.children.len() == 1:
+        if val element = declared_type_resolve(desc.children[0], symbols):
+            return HirType(kind: HirTypeKind.Slice(element), span: span)
+    if desc.tag == DECLARED_TYPE_DICT and desc.children.len() == 2:
+        if val key = declared_type_resolve(desc.children[0], symbols):
+            if val value = declared_type_resolve(desc.children[1], symbols):
+                return HirType(kind: HirTypeKind.Dict(key, value), span: span)
+    if desc.tag == DECLARED_TYPE_REF and desc.children.len() == 1:
+        if val inner = declared_type_resolve(desc.children[0], symbols):
+            return HirType(kind: HirTypeKind.Ref(inner, desc.signed_or_mutable), span: span)
+    if desc.tag == DECLARED_TYPE_PTR and desc.children.len() == 1:
+        if val inner = declared_type_resolve(desc.children[0], symbols):
+            return HirType(kind: HirTypeKind.Ptr(inner, desc.signed_or_mutable), span: span)
+    if desc.tag == DECLARED_TYPE_OPTIONAL and desc.children.len() == 1:
+        if val inner = declared_type_resolve(desc.children[0], symbols):
+            return HirType(kind: HirTypeKind.Optional(inner), span: span)
+    if desc.tag == DECLARED_TYPE_RESULT and desc.children.len() == 2:
+        if val ok = declared_type_resolve(desc.children[0], symbols):
+            if val err = declared_type_resolve(desc.children[1], symbols):
+                return HirType(kind: HirTypeKind.Result(ok, err), span: span)
+    if desc.tag == DECLARED_TYPE_NAMED:
+        if val local_symbol = declared_type_symbol_in(symbols, desc.name, desc.named_kind):
+            var args: [HirType] = []
+            var index = 0
+            while index < desc.generic_arg_count and index < desc.children.len():
+                if val arg = declared_type_resolve(desc.children[index], symbols):
+                    args.push(arg)
+                index = index + 1
+            return HirType(kind: HirTypeKind.Named(local_symbol, args), span: span)
+    if desc.tag == DECLARED_TYPE_DYN_TRAIT:
+        if val local_trait = declared_type_symbol_in(symbols, desc.name, DECLARED_NAMED_TRAIT):
+            return HirType(kind: HirTypeKind.DynTrait(local_trait), span: span)
+    if desc.tag == DECLARED_TYPE_UNION:
+        val members = declared_type_children(desc.children, symbols)
+        if members.len() == desc.children.len():
+            return HirType(kind: HirTypeKind.Union(members), span: span)
+        return nil
+    if desc.tag == DECLARED_TYPE_PROJECTION and desc.children.len() == 1:
+        if val base = declared_type_resolve(desc.children[0], symbols):
+            return HirType(kind: HirTypeKind.Projection(base, desc.name), span: span)
+    if desc.tag == DECLARED_TYPE_INFER:
+        return HirType(kind: HirTypeKind.Infer(desc.bits, desc.size), span: span)
+    if desc.tag == DECLARED_TYPE_ERROR:
+        return HirType(kind: HirTypeKind.Error, span: span)
+    if desc.tag == DECLARED_TYPE_NEVER:
+        return HirType(kind: HirTypeKind.Never, span: span)
+    if desc.tag == DECLARED_TYPE_ANY:
+        return HirType(kind: HirTypeKind.Any, span: span)
+    # Unsupported by normal lower_type today; annotations preserve the stable
+    # declaration without inventing a backend representation.
+    nil
+
+var _declared_return_catalog: Dict<text, DeclaredTypeDescriptor> = {}
+var _declared_return_catalog_frozen: bool = false
+
+fn declared_return_catalog_reset():
+    _declared_return_catalog = {}
+    _declared_return_catalog_frozen = false
+
+fn declared_return_catalog_register(identity: text, descriptor: DeclaredTypeDescriptor):
+    if _declared_return_catalog_frozen:
+        return
+    if identity == "" or not identity.contains("."):
+        return
+    _declared_return_catalog[identity] = descriptor
+
+fn declared_return_catalog_register_function(module_name: text, symbols: SymbolTable, func: HirFunction):
+    val identity = declared_return_callable_identity(module_name, symbols, func)
+    declared_return_catalog_register(identity, declared_type_descriptor(func.return_type, symbols, module_name))
+
+fn declared_return_catalog_freeze():
+    _declared_return_catalog_frozen = true
+
+fn declared_return_catalog_lookup(identity: text) -> DeclaredTypeDescriptor?:
+    if identity != "" and _declared_return_catalog.contains_key(identity):
+        return _declared_return_catalog[identity]
+    nil
+
+fn declared_return_catalog_count() -> i64:
+    _declared_return_catalog.len()
+
+export DeclaredTypeDescriptor
+export declared_return_logical_module_name
+export declared_return_callable_identity, declared_return_call_identity, declared_return_emitted_identity
+export declared_type_descriptor, declared_type_resolve
+export declared_hir_type_is_concrete
+export declared_return_catalog_reset, declared_return_catalog_register_function
+export declared_return_catalog_freeze, declared_return_catalog_lookup, declared_return_catalog_count

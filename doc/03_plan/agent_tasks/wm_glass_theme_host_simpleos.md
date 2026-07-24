@@ -320,3 +320,20 @@ is historical.
   build must not be repeated in this session. Continue from
   `doc/08_tracking/bug/stage4_selfhost_log_modes_lexer_state_corruption_2026-07-24.md`;
   the deployed stale runner remains unchanged.
+
+## Continuation order — 2026-07-25
+
+1. Build one fresh exact-current full CLI from the high-reviewed declared
+   return catalog candidate; do not reuse a stale self-hosted binary.
+2. Run `scripts/check/check-cranelift-aot-aggregates.shs` once with that CLI.
+   Require direct nested `ThemePackage` projections and distinct aliased
+   factories to execute with exact output and empty stderr.
+3. Add and execute same-process A-to-B reset plus skip-MIR invalidation
+   evidence before release admission.
+4. Run the canonical host production fullscreen evidence wrapper. Only a
+   passing host semantic/event/pixel report opens the QEMU gates.
+5. Run x86_64 preflight and canonical OVMF framebuffer/event evidence, then
+   ARM64 desktop/RAMFB keyboard-pointer evidence.
+6. Complete window-surface material projection at its WM/Draw-IR owner. Keep
+   legacy widget command shape exact, do not attach window glass effects to
+   buttons, and use only Engine2D-consumed canonical fallback/style keys.

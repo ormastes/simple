@@ -10,13 +10,17 @@ FIXTURE_DIR="test/fixtures/compiler"
 test -x "$SIMPLE_BIN"
 for source in \
     src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl \
+    src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl \
+    src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl \
     src/compiler/20.hir/hir_lowering/expressions.spl \
     src/compiler/50.mir/mir_types.spl \
     src/compiler/50.mir/mir_data.spl \
+    src/compiler/50.mir/declared_return_catalog.spl \
     src/compiler/50.mir/mir_json.spl \
     src/compiler/50.mir/mir_lowering_types.spl \
     src/compiler/50.mir/mir_lowering_stmts.spl \
     src/compiler/50.mir/_MirLowering/module_lowering.spl \
+    src/compiler/50.mir/_MirLowering/bootstrap_globals.spl \
     src/compiler/50.mir/_MirLowering/function_lowering.spl \
     src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl \
     src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl \
@@ -32,6 +36,8 @@ for source in \
     src/lib/nogc_sync_mut/ffi/codegen.spl \
     src/lib/nogc_sync_mut/sffi/codegen.spl \
     src/compiler/70.backend/codegen.spl \
+    src/compiler/80.driver/driver_bootstrap.spl \
+    src/compiler/80.driver/driver_pipeline.spl \
     src/compiler_rust/compiler/src/codegen/common_backend.rs \
     src/compiler_rust/compiler/src/codegen/instr/calls.rs \
     src/compiler_rust/compiler/src/codegen/cranelift_sffi.rs \
@@ -82,5 +88,25 @@ set -e
 test "$oob_rc" -eq 1
 printf 'PANIC: bounds_check intrinsic index=1 len=1\n' >"$BUILD_DIR/oob.expected.stderr"
 cmp "$BUILD_DIR/oob.expected.stderr" "$BUILD_DIR/oob.stderr"
+
+# This is intentionally a fresh cache.  The entry imports two modules with
+# same-named factories returning distinct structs, an explicit alias return,
+# a tail forwarder, and a generic/method return.  It guards the flat
+# entry-closure declared-return catalog rather than only source compilation.
+AGGREGATE_RETURN_BIN="$BUILD_DIR/aggregate-return-native"
+AGGREGATE_RETURN_CACHE="$BUILD_DIR/aggregate-return-native-cache"
+rm -rf "$AGGREGATE_RETURN_CACHE"
+env -u SIMPLE_BOOTSTRAP "$SIMPLE_BIN" native-build \
+    --backend cranelift --source "$FIXTURE_DIR" --entry-closure \
+    --entry "$FIXTURE_DIR/aggregate_return_native/main.spl" \
+    --cache-dir "$AGGREGATE_RETURN_CACHE" -o "$AGGREGATE_RETURN_BIN"
+set +e
+"$AGGREGATE_RETURN_BIN" >"$BUILD_DIR/aggregate-return.actual" 2>"$BUILD_DIR/aggregate-return.stderr"
+aggregate_return_rc=$?
+set -e
+test "$aggregate_return_rc" -eq 0
+printf 'alpha=11\nbeta=29\nalias-tail=11\ndirect-method=17\nbeta-tail=29\ntheme-package=aetheric\n' >"$BUILD_DIR/aggregate-return.expected"
+cmp "$BUILD_DIR/aggregate-return.expected" "$BUILD_DIR/aggregate-return.actual"
+test ! -s "$BUILD_DIR/aggregate-return.stderr"
 
 echo "cranelift-aot-aggregates: pass"

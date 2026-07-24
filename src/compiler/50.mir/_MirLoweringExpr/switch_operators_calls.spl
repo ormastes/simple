@@ -12,6 +12,11 @@ use compiler.mir.mir_lowering_expr.*
 # - Field access
 
 use compiler.mir.mir_data.*
+use compiler.mir.declared_return_catalog.{
+    declared_return_call_identity, declared_return_emitted_identity,
+    declared_return_catalog_lookup,
+    declared_type_resolve, declared_hir_type_is_concrete
+}
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.common.diagnostics.span.{Span}
@@ -790,38 +795,45 @@ impl MirLowering:
                 return found_sym.name
         self.bootstrap_symbol_name(symbol)
 
-    me bootstrap_resolved_call_return_type(symbol: SymbolId, name: text) -> MirType:
+    me bootstrap_resolved_call_return_type(symbol: SymbolId, name: text, arity: i64) -> MirType:
         if name == "engine2d_simd_fill_row_u32" or name == "engine2d_simd_fill_rows_u32" or name == "engine2d_simd_copy_row_u32" or name == "engine2d_simd_blend_row_u32" or name == "rt_engine2d_simd_fill_row_u32" or name == "rt_engine2d_simd_fill_rows_u32" or name == "rt_engine2d_simd_copy_row_u32" or name == "rt_engine2d_simd_blend_row_u32":
             return MirType(kind: MirTypeKind.Array(MirType(kind: MirTypeKind.U32), 0))
         if name == "rt_array_len" or name == "rt_array_get":
             return MirType.i64()
         if name == "rt_simd_engine2d_neon_hits" or name == "rt_simd_engine2d_neon_reset" or name == "rt_engine2d_simd_row_probe":
             return MirType.i64()
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
-            return self.resolved_call_return_type(symbol)
-        # Preserve declared user-function returns before applying the small
-        # bootstrap builtin fallback table. Replacing a declared Array return
-        # with i64 made a direct `Box(items: make_items())` aggregate consume
-        # pointer-typed call bits as an integer; a named local only hid this by
-        # inserting a type-recovering Copy.
+        # These bootstrap ABI owners intentionally differ from normal
+        # lower_type. They must remain authoritative over both caller HIR and
+        # the declared-return catalog.
+        if name == "get_args" or name == "get_cli_args" or name == "bootstrap_version" or name == "bootstrap_output_from_args":
+            return self.bootstrap_call_return_type(name)
+        var call_name = name
+        if call_name == "":
+            call_name = self.bootstrap_resolved_call_name(symbol)
+        # A concrete caller-instantiated Function signature wins. This retains
+        # overload/generic substitution already performed in the caller.
         val resolved_symbol = self.symbols.get_symbol_raw(symbol.id)
         if val found_symbol = resolved_symbol:
             if val found_type = found_symbol.type_:
                 match found_type.kind:
-                    case HirTypeKind.Function(_, ret, _): return self.lower_type(ret)
+                    case HirTypeKind.Function(_, ret, _):
+                        if declared_hir_type_is_concrete(ret, self.symbols):
+                            return self.lower_type(ret)
                     case _: ()
-        var call_name = name
-        if call_name == "":
-            call_name = self.bootstrap_resolved_call_name(symbol)
-        # Declared-return-type registry (native_call_return_type_loss
-        # 2026-07-23): the symbol lookup above frequently fails in the flat
-        # path (HIR symbol mutations don't survive the pass boundary), which
-        # made every call dest i64 and mis-rendered text-returning calls in
-        # interpolation/concat. The bootstrap prep loops registered each
-        # function's declared MIR return type under bare + qualified names.
-        if call_name != "":
-            if val bs_reg_ty = bootstrap_fn_ret_type_lookup(call_name):
-                return bs_reg_ty
+        var catalog_identity = declared_return_call_identity(self.symbols, symbol, arity)
+        if catalog_identity == "":
+            catalog_identity = declared_return_emitted_identity(call_name, arity)
+        if val descriptor = declared_return_catalog_lookup(catalog_identity):
+            if val caller_type = declared_type_resolve(descriptor, self.symbols):
+                # DynTrait is resolved caller-locally by the descriptor layer,
+                # but normal lower_type has no trait-object representation yet.
+                # Decline precedence instead of shadowing a concrete ABI with
+                # its i64 unsupported-type fallback.
+                match caller_type.kind:
+                    case HirTypeKind.DynTrait(_): ()
+                    case _: return self.lower_type(caller_type)
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+            return self.resolved_call_return_type(symbol)
         if call_name != "":
             return self.bootstrap_call_return_type(call_name)
         self.resolved_call_return_type(symbol)
@@ -2988,7 +3000,7 @@ impl MirLowering:
 
         if is_direct:
             val resolved_name = if direct_name != "": direct_name else: self.bootstrap_resolved_call_name(direct_symbol)
-            val return_type = self.bootstrap_resolved_call_return_type(direct_symbol, resolved_name)
+            val return_type = self.bootstrap_resolved_call_return_type(direct_symbol, resolved_name, arg_operands.len())
             val func_operand = if resolved_name != "":
                 MirOperand(kind: MirOperandKind.Const(
                     MirConstValue.Str(resolved_name),
