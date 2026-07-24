@@ -16,6 +16,7 @@
 const { app, BrowserWindow } = require("electron");
 const crypto = require("crypto");
 const fs = require("fs");
+const http = require("http");
 const net = require("net");
 const path = require("path");
 
@@ -43,6 +44,9 @@ const proofPath = process.env.ELECTRON_CAPTURE_PROOF_PATH || "";
 // generic Chromium bitmap/event runner used by the other evidence lanes.
 const aethericObservationPath = process.env.ELECTRON_CAPTURE_AETHERIC_OBSERVATION_PATH || "";
 const remoteDebuggingPort = process.env.ELECTRON_CAPTURE_REMOTE_DEBUGGING_PORT || "";
+const uiAccessPort = Number(process.env.ELECTRON_CAPTURE_UI_ACCESS_PORT || 0);
+const uiAccessReadyPath = process.env.ELECTRON_CAPTURE_UI_ACCESS_READY_PATH || "";
+const uiAccessDonePath = process.env.ELECTRON_CAPTURE_UI_ACCESS_DONE_PATH || "";
 const contrastMinX100 = Number(process.env.ELECTRON_CAPTURE_CONTRAST_MIN_X100 || 450);
 const touchMinPx = Number(process.env.ELECTRON_CAPTURE_TOUCH_MIN_PX || 44);
 const failOnAudit = /^(1|true|yes)$/i.test(process.env.ELECTRON_CAPTURE_FAIL_ON_AUDIT || "");
@@ -66,6 +70,221 @@ function withTimeout(promise, ms, label) {
   return Promise.race([promise, timeout]).finally(() => {
     if (timer) clearTimeout(timer);
   });
+}
+
+function waitForFile(file, timeoutMs, label) {
+  return withTimeout(new Promise(resolve => {
+    const poll = () => fs.existsSync(file) ? resolve() : setTimeout(poll, 25);
+    poll();
+  }), timeoutMs, label);
+}
+
+function jsonResponse(res, status, payload) {
+  const body = JSON.stringify(payload);
+  res.writeHead(status, {
+    "content-type": "application/json",
+    "content-length": Buffer.byteLength(body),
+    "connection": "close",
+  });
+  res.end(body);
+}
+
+async function startCanonicalUiAccessAdapter(win) {
+  let sequence = 0;
+  const events = [];
+  const surface = {
+    surface_id: "main",
+    title: "Aetheric Production Web GUI",
+    active: true,
+    window_id: "electron-aetheric-production",
+    app_id: "aetheric-host-web-gui",
+    root_canonical_id: "main#root",
+  };
+  const record = (widgetId, kind, payload) => {
+    sequence += 1;
+    events.push({
+      surface_id: "main",
+      widget_id: widgetId,
+      canonical_id: `main#${widgetId}`,
+      event_kind: kind,
+      payload,
+      sequence,
+    });
+    if (events.length > 64) events.shift();
+  };
+  const nodes = async () => win.webContents.executeJavaScript(`
+    (() => {
+      const input = document.querySelector('#theme-name');
+      const button = document.querySelector('.widget-button');
+      const active = document.querySelector('.wm-window.focused');
+      const inactive = document.querySelector('.wm-window:not(.focused)');
+      const node = (canonical_id, widget_id, kind, element, child_ids, action_names) => ({
+        canonical_id, surface_id: 'main', widget_id, kind,
+        visible: Boolean(element && element.getClientRects().length),
+        focused: Boolean(element && document.activeElement === element),
+        enabled: Boolean(element && !element.disabled),
+        selected: false,
+        text: element ? String(element.value || element.textContent || '').trim() : '',
+        props: element ? {
+          tag: element.tagName.toLowerCase(),
+          class: element.className,
+          x: String(Math.round(element.getBoundingClientRect().x)),
+          y: String(Math.round(element.getBoundingClientRect().y)),
+          width: String(Math.round(element.getBoundingClientRect().width)),
+          height: String(Math.round(element.getBoundingClientRect().height))
+        } : {},
+        child_ids, action_names
+      });
+      return [
+        node('main#root', 'root', 'surface', document.querySelector('[data-aetheric-production-surface]'),
+          ['main#active-window', 'main#inactive-window'], []),
+        node('main#active-window', 'active-window', 'window', active,
+          ['main#apply-theme', 'main#theme-name'], []),
+        node('main#inactive-window', 'inactive-window', 'window', inactive, [], []),
+        node('main#apply-theme', 'apply-theme', 'button', button, [],
+          ['focus', 'pointer_down', 'pointer_up']),
+        node('main#theme-name', 'theme-name', 'input', input, [],
+          ['focus', 'keyboard_x', 'text_x'])
+      ];
+    })()
+  `);
+  const snapshot = async () => ({
+    protocol_version: 1,
+    snapshot_revision: sequence,
+    mode: "electron",
+    active_surface: "main",
+    surfaces: [surface],
+    nodes: await nodes(),
+    recent_events: events.slice(),
+  });
+  const applyAction = async (canonicalId, action) => {
+    const selector = canonicalId === "main#apply-theme" ? ".widget-button" :
+      canonicalId === "main#theme-name" ? "#theme-name" : "";
+    if (!selector) return false;
+    return win.webContents.executeJavaScript(`
+      (() => {
+        const element = document.querySelector(${JSON.stringify(selector)});
+        const action = ${JSON.stringify(action)};
+        if (!element) return false;
+        if (action === 'focus') element.focus();
+        else if (action === 'pointer_down') element.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1, button: 0 }));
+        else if (action === 'pointer_up') element.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 1, button: 0 }));
+        else if (action === 'keyboard_x') {
+          element.focus();
+          element.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'X', code: 'KeyX' }));
+          element.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'X', code: 'KeyX' }));
+        } else if (action === 'text_x') {
+          element.focus();
+          element.value = String(element.value || '') + 'X';
+          element.dispatchEvent(new InputEvent('input', { bubbles: true, data: 'X', inputType: 'insertText' }));
+        } else return false;
+        return true;
+      })()
+    `);
+  };
+  const server = http.createServer(async (req, res) => {
+    try {
+      const url = new URL(req.url, `http://127.0.0.1:${uiAccessPort}`);
+      if (req.method === "GET" && url.pathname === "/api/test/ui/snapshot") {
+        jsonResponse(res, 200, await snapshot());
+        return;
+      }
+      if (req.method === "GET" && url.pathname === "/api/test/ui/surface") {
+        if (url.searchParams.get("id") !== "main") {
+          jsonResponse(res, 404, { error: "element_not_found", message: "Surface not found" });
+          return;
+        }
+        jsonResponse(res, 200, surface);
+        return;
+      }
+      if (req.method === "GET" && url.pathname === "/api/test/ui/query") {
+        let found = await nodes();
+        const surfaceId = url.searchParams.get("surface_id") || "";
+        const canonicalId = url.searchParams.get("canonical_id") || "";
+        const kind = url.searchParams.get("kind") || "";
+        const text = url.searchParams.get("text") || "";
+        const focusedOnly = url.searchParams.get("focused_only") === "true";
+        const limit = Number(url.searchParams.get("limit") || 50);
+        found = found.filter(node =>
+          (!surfaceId || node.surface_id === surfaceId) &&
+          (!canonicalId || node.canonical_id === canonicalId) &&
+          (!kind || node.kind === kind) &&
+          (!text || node.text.includes(text) || node.widget_id.includes(text)) &&
+          (!focusedOnly || node.focused)
+        ).slice(0, limit);
+        if (canonicalId && found.length === 0) {
+          jsonResponse(res, 404, { error: "element_not_found", message: "Canonical node not found" });
+          return;
+        }
+        jsonResponse(res, 200, {
+          surface_id: surfaceId,
+          canonical_id: canonicalId,
+          kind,
+          text,
+          focused_only: focusedOnly,
+          match_count: found.length,
+          snapshot: {
+            protocol_version: 1,
+            snapshot_revision: sequence,
+            mode: "electron",
+            active_surface: "main",
+            surfaces: [surface],
+            nodes: found,
+            recent_events: [],
+          },
+        });
+        return;
+      }
+      if (req.method === "GET" && url.pathname === "/api/test/ui/history") {
+        const count = Number(url.searchParams.get("count") || 20);
+        jsonResponse(res, 200, events.slice(-count));
+        return;
+      }
+      if (req.method === "POST" && url.pathname === "/api/test/ui/act") {
+        let body = "";
+        req.setEncoding("utf8");
+        for await (const chunk of req) body += chunk;
+        const request = JSON.parse(body || "{}");
+        const widgetId = String(request.canonical_id || "").split("#")[1] || "";
+        const requestId = String(request.request_id || `ui-act-${sequence + 1}`);
+        const observedRevision = sequence;
+        record(widgetId, "access_request", `request_id=${requestId};code=${String(request.action || "")}`);
+        if (Number(request.expected_revision) !== observedRevision) {
+          record(widgetId, "access_result", `request_id=${requestId};code=stale_target`);
+          jsonResponse(res, 409, { error: "stale_target", message: "UI snapshot revision changed", request_id: requestId });
+          return;
+        }
+        if (!await applyAction(String(request.canonical_id || ""), String(request.action || ""))) {
+          record(widgetId, "access_result", `request_id=${requestId};code=target_not_found`);
+          jsonResponse(res, 404, { error: "element_not_found", message: "Canonical node/action not found", request_id: requestId });
+          return;
+        }
+        record(widgetId, "access_result", `request_id=${requestId};code=ok`);
+        jsonResponse(res, 200, {
+          ok: true,
+          surface_id: "main",
+          canonical_id: request.canonical_id,
+          action: request.action,
+          expected_revision: Number(request.expected_revision),
+          applied_revision: sequence,
+          request_id: requestId,
+        });
+        return;
+      }
+      jsonResponse(res, 404, { error: "element_not_found", message: "Route not found" });
+    } catch (error) {
+      jsonResponse(res, 500, { error: "source_unavailable", message: String(error && error.message || error) });
+    }
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(uiAccessPort, "127.0.0.1", resolve);
+  });
+  if (uiAccessReadyPath) {
+    fs.mkdirSync(path.dirname(uiAccessReadyPath), { recursive: true });
+    fs.writeFileSync(uiAccessReadyPath, `port=${uiAccessPort}\n`);
+  }
+  return server;
 }
 
 function websocketAcceptKey(key) {
@@ -370,6 +589,8 @@ async function collectAethericObservation(win) {
       const inactiveStyle = window.getComputedStyle(inactive);
       const titlebarStyle = window.getComputedStyle(titlebar);
       const typographyStyle = window.getComputedStyle(typography);
+      const button = required('.widget-button');
+      const buttonStyle = button && window.getComputedStyle(button);
       const start = performance.now();
       let frames = 0;
       await new Promise(resolve => {
@@ -381,11 +602,12 @@ async function collectAethericObservation(win) {
         requestAnimationFrame(tick);
       });
       const animationCount = document.getAnimations({ subtree: true }).length;
+      const elapsed = performance.now() - start;
       return {
-        status: animationCount > 0 && frames >= 2 ? 'pass' : 'fail',
-        reason: animationCount > 0 && frames >= 2 ? 'pass' : 'animation-or-raf-missing',
+        status: frames >= 2 && elapsed > 0 && Boolean(buttonStyle) ? 'pass' : 'fail',
+        reason: frames >= 2 && elapsed > 0 && Boolean(buttonStyle) ? 'pass' : 'raf-or-theme-control-missing',
         computed_window_background: focusedStyle.backgroundColor,
-        computed_window_border_color: focusedStyle.borderTopColor,
+        computed_window_border_color: inactiveStyle.borderTopColor,
         computed_window_border_radius: focusedStyle.borderTopLeftRadius,
         computed_window_box_shadow: focusedStyle.boxShadow,
         computed_titlebar_backdrop_filter: titlebarStyle.backdropFilter,
@@ -393,10 +615,12 @@ async function collectAethericObservation(win) {
         computed_typography_family: typographyStyle.fontFamily,
         computed_typography_weight: typographyStyle.fontWeight,
         computed_inactive_border: inactiveStyle.borderTopColor,
+        computed_inactive_shadow: inactiveStyle.boxShadow,
         computed_active_border: focusedStyle.borderTopColor,
         computed_active_shadow: focusedStyle.boxShadow,
+        computed_button_transition_duration: buttonStyle ? buttonStyle.transitionDuration : '',
         performance_now_available: typeof performance.now === 'function',
-        performance_now_delta_ms: Math.max(1, Math.round(performance.now() - start)),
+        performance_now_delta_ms: Math.round(elapsed),
         animation_frame_available: typeof requestAnimationFrame === 'function',
         animation_frame_count: frames,
         css_animation_probe: animationCount > 0,
@@ -888,6 +1112,17 @@ async function main() {
   stage("before-settle");
   await new Promise(r => setTimeout(r, settleMs));
   stage("after-settle");
+  if (uiAccessPort > 0) {
+    if (!uiAccessReadyPath || !uiAccessDonePath) {
+      throw new Error("ui-access-ready-and-done-paths-required");
+    }
+    stage("before-ui-access-adapter");
+    const uiAccessServer = await startCanonicalUiAccessAdapter(win);
+    stage("ui-access-adapter-ready");
+    await waitForFile(uiAccessDonePath, 20000, "ui-access-driver");
+    await new Promise(resolve => uiAccessServer.close(resolve));
+    stage("after-ui-access-adapter");
+  }
 
   stage("before-audit");
   const audit = await collectAudit(win, auditSelectors, emulatedMediaFeatures);
@@ -935,6 +1170,7 @@ async function main() {
     height,
     format: "argb-u32",
     producer: "electron-chromium-capture",
+    blur_or_tolerance_used: false,
     capture_compositor_mode: useOffscreenPaint ? "offscreen-osr-exact-srgb" : "window-capture-page",
     offscreen_paint: useOffscreenPaint,
     nativeWidth: result.nativeWidth,

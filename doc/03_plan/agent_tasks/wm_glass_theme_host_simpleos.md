@@ -154,10 +154,12 @@ overlapping dirty work and remains read-only for this lane.
   files plus absence of `/SYS/APPS` and `/SIMPLE.ELF`, then run the focused
   disk/font contract specs.
 - ARM VirtIO transport rejects both `FAILED` and `DEVICE_NEEDS_RESET` status
-  after `FEATURES_OK` and `DRIVER_OK`. The compositor `InputBackend` cannot yet
-  own the device because the freestanding native compiler erases the trait's
-  `MouseEvent?` return to `ANY`; raw polling remains diagnostic-only and the
-  production event-ready marker stays absent until that ABI blocker is fixed.
+  after `FEATURES_OK` and `DRIVER_OK`. The canonical
+  `Arm64VirtioInputBackend` now owns the raw queue, buffers cross-kind events,
+  retains key edges, and assigns one sequence to each pointer `SYN_REPORT`
+  frame. Typed optional-struct trait dispatch is pinned by a two-vtable native
+  fixture (`49 0 73 0`). The live event-ready marker remains fail-closed until
+  QMP/RAMFB evidence passes.
 
    The ARM input owner is source-wired and keeps UART fallback outside
    production evidence. After the host-first gate, require QMP pointer
@@ -177,3 +179,35 @@ overlapping dirty work and remains read-only for this lane.
 - Do not run QEMU before the focused compiler/object preflight is green.
 - Each acceptance criterion is verified once per current source state, with at
   most three fix/verify cycles.
+
+## Integration checkpoint — 2026-07-24 21:15 KST
+
+Authoritative merge worktree is now
+`build/worktrees/wm-integration-current`. The earlier continuation path above
+is historical.
+
+- Host: the fresh full bootstrap proved provider selection and reached process
+  launch. Cycles 2 and 3 then failed before the first readiness receipt with
+  `field access on nil receiver`; the cycle cap is reached and no host
+  pixels/events are admitted in this session.
+- Web/GUI root cause: Aetheric family defaults styled `widget-*` primitives but
+  omitted their production WM aliases. `.wm-window`, `.wm-titlebar`, and
+  `.wm-title` now inherit the package-owned border/radius/blur/font/weight
+  tokens. Git history traces the incomplete defaults to the 2026-07-04 theme
+  import, while later panel CSS added only color/shadow aliases.
+- Web evidence: the static modern-preview fixture is removed from this lane.
+  Production `simple_web_content_render_request_with_theme` now owns document
+  generation; Simple CPU-SIMD and Electron outputs bind HTML, observation,
+  backend/readback, dimensions, pixels, screenshot, binary, and source hashes.
+  A live Electron adapter exposes the exact DOM over the canonical
+  `simple ui snapshot/surface/find/act/history` protocol. Native producer
+  generation passes with the current manifest/material hashes; full admission
+  remains pending because the exact-current Stage 4 CLI build was killed
+  during the 546 KiB Web source parse and no deployed `simple ui` driver was
+  produced.
+- x86_64: canonical F11 press/release and fullscreen delegation remain
+  source-correct. Missing retained artifacts now fail the integration spec
+  instead of passing through absence assertions. Live QEMU remains host-gated.
+- ARM64: deterministic desktop media and failed/reset-needed VirtIO checks are
+  integrated. The typed canonical VirtIO adapter is wired into
+  `Compositor.with_backends`; live QEMU remains host-gated.
