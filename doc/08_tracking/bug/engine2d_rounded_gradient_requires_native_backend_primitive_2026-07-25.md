@@ -1,7 +1,7 @@
 # Engine2D rounded gradients require a native backend primitive
 
-Status: OPEN — rejected fallback removed  
-Date: 2026-07-25  
+Status: OPEN — rejected fallback removed
+Date: 2026-07-25
 Owners: Engine2D backend, Metal session, Vulkan session, CPU SIMD runtime
 
 ## Symptom
