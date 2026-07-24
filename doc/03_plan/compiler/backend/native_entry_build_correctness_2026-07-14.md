@@ -11,12 +11,13 @@ failure is **never** silently converted to a wrong answer.
 
 - **C5 positional self-host gate:** the exact `nul` trace now proves
   `0.chr()` is extracted as a MethodCall and lowers to local 1 with the
-  `Opaque("str")` discriminator, but `local_is_str(local 1)` returns nil.
-  Let therefore selects `I64` as the effective type and binds local 9 as
-  `I64`; `char_code_at` then rejects that receiver. Three bounded shared-helper
-  repairs did not change the positional failure and were reverted. Resume in a
-  fresh session at the `local_is_str` call/return ABI boundary; do not patch
-  `char_code_at` or repeat initializer/dispatch/type-anchor probes.
+  `Opaque("str")` discriminator. Fixed-marker V19–V21 traces prove
+  `local_is_str` and a two-arm conditional both return true, but the
+  effective-type chain selects its earlier Dict arm and produces `I64`;
+  `char_code_at` then rejects the bound receiver. Resume by distinguishing a
+  false `runtime_dict_locals` membership hit from the raw
+  `MirTypeKind.Dict` match inside `local_is_runtime_dict`. Do not reorder the
+  type chain, patch `char_code_at`, or repeat string/conditional probes.
 - **C9 positional self-host gate:** remains intentionally blocked until C5
   builds without unresolved warnings and its executable exits `42`; then run
   the unchanged `.parse_f64()` fixture once and require exit `42`.
@@ -716,12 +717,31 @@ the shared binary — deploys require explicit user go-ahead).
   discriminator-first Opaque classification directly in the accumulator.
   Each rebuilt a valid no-stub compiler (`4 compiled, 671 cached, 0 failed`)
   and each left the same sole `char_code_at` unresolved failure. All three
-  unproven code changes and all diagnostic prints were reverted. The next
-  session must inspect the compiled call/return ABI or dispatch identity for
-  `local_is_str` itself (including whether the caller receives the declared
-  bool), using the exact `nul` gate and a fresh cache. Do not repeat
-  initializer extraction, MethodCall-discriminator, LocalId-anchor, direct
-  `mir_type_is_str`, or these three helper rewrites. C9 remains gated: only
+  unproven code changes and all diagnostic prints were reverted.
+
+  A fresh three-cycle fixed-marker session then disproved the wrapper/boolean
+  ABI hypothesis. V19 rebuilt `6 compiled, 669 cached, 0 failed`; its exact
+  `nul` row showed the string predicate body returning true and the
+  `local_is_str` wrapper returning true, while the effective type was still
+  non-Opaque. V20 rebuilt `5 compiled, 670 cached, 0 failed`; both a
+  statement-form wrapper probe and a two-arm conditional-expression probe
+  returned true, but neither the production STR nor DEFAULT arm executed.
+  V21 rebuilt `4 compiled, 671 cached, 0 failed` and identified the one
+  preempting arm as `LET_BRANCH_DICT`. Each fresh positional C5 cache retained
+  the same sole unresolved `char_code_at` failure.
+
+  `reset_function_local_tracking()` already clears `runtime_dict_locals` at
+  normal, bootstrap-flat, and module-initializer function entry, with existing
+  lifecycle coverage. The next exact diagnostic is therefore inside
+  `local_is_runtime_dict`: for the correlated `nul` local, separately mark the
+  `runtime_dict_locals.contains(local.id)` result and the raw
+  `MirTypeKind.Dict` type-match result. A membership hit requires tracing the
+  same-function tag producer; a membership miss plus Dict match requires the
+  same discriminator-first enum classification already used by
+  `mir_type_is_str`. Do not change reset ownership without evidence, and do
+  not repeat initializer extraction, string helper/ABI, two-arm conditional,
+  MethodCall-discriminator, LocalId-anchor, or type-anchor probes. All
+  V19–V21 diagnostics were removed. C9 remains gated: only
   after a fresh positional C5
   executable exits `42` should the next bottom-up item run, positional C9
   `.parse_f64()` with exit `42`. See
