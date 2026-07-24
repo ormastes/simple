@@ -6,7 +6,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|-------:|--------:|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -19,7 +19,7 @@
 |-------|-------|
 | Category | Application / TUI |
 | Status | Active; execution requires a qualified cached Caret artifact |
-| Requirements | REQ-LLM-CARET-TUI-HARDEN-007, REQ-LLM-CARET-TUI-HARDEN-009, NFR-LLM-CARET-TUI-006 |
+| Requirements | REQ-LLM-CARET-TUI-HARDEN-007, REQ-LLM-CARET-TUI-HARDEN-009, REQ-LLM-CARET-HIDDEN-008, NFR-LLM-CARET-TUI-006 |
 | Plan | `doc/03_plan/sys_test/llm_caret_cli_tui_hardening.md` |
 | Source | `test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl` |
 | Updated | 2026-07-24 |
@@ -30,12 +30,21 @@
 The checker invokes only `bin/caret`, disables its source fallback, and pins
 the wrapper override to the exact repository-cached native artifact whose
 binary, clean committed source, target, and build-runtime hashes were verified.
-All chat work uses `--provider dummy`; no credential or network is needed.
+All chat work uses `--provider dummy`; provider/cloud credentials are removed
+from the child environment, so no credential or network is needed.
 `script(1)` owns the pseudo-terminal and a child wrapper records
 `stty -g` and geometry before and after Caret.
 
 The checker rejects missing cache, `script(1)`, `stty`, markers, ANSI TUI
 rendering, plain-output purity, edited UTF-8 text, geometry, or restoration.
+It also drives the real TUI root-command path with no hidden-feature
+environment, with `LLM_CARET_ENABLE_HIDDEN_COMMANDS=1`, and with a disabled
+registry command. The three retained transcripts must respectively show
+unknown-command rejection, sanitized debug-command execution, and
+disabled-command rejection. Those cases use a fixed 12x80 PTY so inherited
+geometry cannot truncate the exact semantic lines. Every PTY case must also
+retain an explicit `caret_exit=0` child marker; `script -e` is only supplemental
+exit propagation.
 Forced TUI on non-TTY stdin must fail before emitting escape bytes with
 `terminal raw mode unavailable`. Each child is guarded by one fixed 20-second
 watchdog; timeout evidence is retained and fails the case without retry.
@@ -147,6 +156,44 @@ step("Send a prompt through the visible input")
 expect(result.stdout).to_contain("case=forced-tui-without-tty status=PASS")
 step("Check transcript and status")
 expect(result.stdout).to_contain("evidence_status=PASS")
+expect(result.exit_code).to_equal(0)
+```
+
+</details>
+
+### REQ-LLM-CARET-HIDDEN-008: hidden command admission reaches the real TUI
+
+#### should reject hidden commands by default execute them when enabled and always reject disabled commands
+
+- Enable the hidden-feature fixture.
+  - Expected: default state renders
+    `system: Unknown command: /debug-tool-call (try /help)`.
+  - Expected: the enabled fixture renders
+    `system: tool call id=call-1 name=Read input_bytes=27`.
+  - Expected: the enabled fixture still renders
+    `system: Command disabled: /remote-setup`.
+- Check the hidden-feature gate.
+  - Expected: all three PTY cases pass with zero failures.
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+step("Enable the hidden-feature fixture")
+val result = run_caret_pty_case("hidden")
+expect(result.stdout).to_contain(
+    "case=hidden-default-rejected status=PASS"
+)
+expect(result.stdout).to_contain(
+    "case=hidden-enabled-executed status=PASS"
+)
+expect(result.stdout).to_contain(
+    "case=hidden-disabled-rejected status=PASS"
+)
+
+step("Check the hidden-feature gate")
+expect(result.stdout).to_contain("evidence_status=PASS")
+expect(result.stdout).to_contain("failed_cases=0")
 expect(result.exit_code).to_equal(0)
 ```
 

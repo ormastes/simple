@@ -72,8 +72,8 @@ tree is absent.
 | Caret process help/success/error/usage exits | `test/03_system/app/llm_caret/feature/llm_caret_cli_hardening_spec.spl` |
 | Installed Claude executable offline argument compatibility | `test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl` through `scripts/check/check-llm-caret-installed-claude-cli.shs`; five cases isolate HOME/config/cwd, remove provider credentials, and retain raw path/version/hash/stdout/stderr/exit evidence |
 | TUI submission/state/session/permission/retry/hidden admission | `test/03_system/app/llm_caret/feature/llm_caret_tui_hidden_feature_spec.spl` |
-| Live terminal routing/lifecycle/UTF-8/geometry/raw rejection | `test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl` through `scripts/check/check-llm-caret-tui-pty.shs`; execution requires cached `bin/caret`, `script(1)`, and `stty` |
-| Claude-full root hidden/disabled registry admission | `test/03_system/tools/llm/claude_full/commands/root_commands_registry_spec.spl`; the production-derived scenario enumerates every registry record and alias rather than maintaining a second command list |
+| Live terminal routing/lifecycle/UTF-8/geometry/raw rejection and hidden admission (`REQ-LLM-CARET-HIDDEN-008`) | `test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl` through `scripts/check/check-llm-caret-tui-pty.shs`; the added hidden scenario is designed to drive default-hidden rejection, enabled execution, and always-disabled rejection through the real Caret TUI, but has not yet executed; execution requires cached `bin/caret`, `script(1)`, and `stty` |
+| Claude-full root hidden/disabled registry admission | `test/03_system/tools/llm/claude_full/commands/root_commands_registry_spec.spl`; the production-derived scenario enumerates every registry record and alias rather than maintaining a second command list, while the PTY hidden case supplies the corresponding real-TUI process contract |
 | Focused unit branches | `test/01_unit/app/llm_caret/claude_cli_spec.spl`, `chat_spec.spl`, `chat_tui_spec.spl`, `chat_tui_input_spec.spl`, `chat_tui_runtime_spec.spl`, `main_spec.spl`, `config_spec.spl`, `tools_spec.spl`, `types_spec.spl`, `provider_spec.spl`, `retry_spec.spl` under `test/01_unit/app/llm_caret/` |
 | Offline native seams | `test/04_smoke/llm_caret_cli_tui_hardening_smoke.spl` |
 
@@ -83,9 +83,11 @@ the bounded offline argument surface it invokes; it does not establish that
 every current Claude function, authenticated request, or interactive session
 still works.
 
-The scoped hardening tranche contains 392 modern `should` examples: 356
-source-synchronized unit examples, 30 previously mapped system examples, five
-installed-Claude examples, and one newly added exhaustive registry example.
+The scoped hardening tranche contains 393 modern `should` examples: 356
+source-synchronized unit examples, eight CLI feature-contract examples, three
+process-hardening examples, nine TUI/hidden component examples, five
+managed-environment examples, five installed-Claude examples, one exhaustive
+root-registry example, and six live-PTY examples.
 
 ## Function Trace
 

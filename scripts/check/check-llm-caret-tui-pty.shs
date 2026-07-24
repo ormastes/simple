@@ -17,7 +17,7 @@ FAILURES=0
 CASE_TIMEOUT_SECONDS=20
 
 usage() {
-    printf '%s\n' "usage: sh scripts/check/check-llm-caret-tui-pty.shs --case <prerequisites|routing|lifecycle|editing|raw-failure|all>"
+    printf '%s\n' "usage: sh scripts/check/check-llm-caret-tui-pty.shs --case <prerequisites|routing|lifecycle|editing|hidden|raw-failure|all>"
 }
 
 fail_prerequisite() {
@@ -241,8 +241,18 @@ verify_cached_artifact_provenance() {
     printf '%s\n' "verified_target=${target}"
 }
 
+scrub_provider_credentials() {
+    unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_API_KEY
+    unset CLAUDE_CODE_OAUTH_TOKEN OPENAI_API_KEY AZURE_OPENAI_API_KEY
+    unset GOOGLE_API_KEY GEMINI_API_KEY GOOGLE_APPLICATION_CREDENTIALS
+    unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+    unset AWS_PROFILE AWS_DEFAULT_PROFILE ANTHROPIC_VERTEX_PROJECT_ID
+    unset ANTHROPIC_BEDROCK_BASE_URL
+}
+
 prepare_prerequisites() {
     mkdir -p "${ARTIFACT_ROOT}" || fail_prerequisite "artifact_directory_unavailable"
+    scrub_provider_credentials
     [ -x "${CARET_WRAPPER}" ] || fail_prerequisite "bin_caret_not_executable"
     command -v script >/dev/null 2>&1 || fail_prerequisite "script_utility_missing"
     command -v stty >/dev/null 2>&1 || fail_prerequisite "stty_utility_missing"
@@ -314,6 +324,13 @@ write_input() {
         utf8-edit)
             # "ac", left, U+754C, end, "!" => submitted text "a界c!".
             printf 'ac\033[D界\033[F!\r/exit\r' >"${input_path}"
+            ;;
+        hidden-default|hidden-enabled)
+            printf '/debug-tool-call {"type":"tool_use","id":"call-1","name":"Read","input":{"file_path":"fixture.txt"}}\r/exit\r' \
+                >"${input_path}"
+            ;;
+        hidden-disabled)
+            printf '/remote-setup\r/exit\r' >"${input_path}"
             ;;
         *)
             return 1
@@ -489,6 +506,15 @@ run_pty_case() {
     CARET_GEOMETRY="${geometry}"
     HOME="${case_dir}/home"
     TERM=xterm-256color
+    case "${input_kind}" in
+        hidden-enabled|hidden-disabled)
+            LLM_CARET_ENABLE_HIDDEN_COMMANDS=1
+            export LLM_CARET_ENABLE_HIDDEN_COMMANDS
+            ;;
+        *)
+            unset LLM_CARET_ENABLE_HIDDEN_COMMANDS
+            ;;
+    esac
     export CARET_WRAPPER CARET_UI_MODE CARET_GEOMETRY HOME TERM
     invoke_script "${capture}" "${runner}" "${input}" \
         "${driver_stdout}" "${driver_stderr}" "${timeout_marker}"
@@ -496,10 +522,21 @@ run_pty_case() {
 
     baseline=$(capture_value "pty_baseline" "${capture}")
     after=$(capture_value "pty_after" "${capture}")
+    caret_exit=$(capture_value "caret_exit" "${capture}")
     geometry_before=$(capture_value "pty_geometry_before" "${capture}")
     geometry_after=$(capture_value "pty_geometry_after" "${capture}")
+    requested_rows=""
+    requested_cols=""
+    if [ "${geometry}" != "" ]; then
+        requested_rows=${geometry%x*}
+        requested_cols=${geometry#*x}
+    fi
     if [ -s "${timeout_marker}" ]; then
         record_failure "${label}" "script_timeout" "${case_dir}"
+    elif [ "${caret_exit}" = "" ]; then
+        record_failure "${label}" "caret_exit_marker_missing" "${case_dir}"
+    elif [ "${caret_exit}" != "0" ]; then
+        record_failure "${label}" "caret_exit_${caret_exit}" "${case_dir}"
     elif [ "${status}" -ne 0 ]; then
         record_failure "${label}" "script_exit_${status}" "${case_dir}"
     elif [ "${baseline}" = "" ] || [ "${after}" = "" ]; then
@@ -526,19 +563,32 @@ run_pty_case() {
     elif ! LC_ALL=C grep -a -F "$(printf '\033')[?1049l" \
         "${capture}" >/dev/null 2>&1; then
         record_failure "${label}" "alternate_screen_restore_missing" "${case_dir}"
-    elif [ "${geometry}" != "" ] && [ "${geometry_before}" != "12 50" ]; then
+    elif [ "${geometry}" != "" ] &&
+         [ "${geometry_before}" != "${requested_rows} ${requested_cols}" ]; then
         record_failure "${label}" "requested_geometry_not_applied" "${case_dir}"
     elif [ "${geometry}" != "" ] &&
-         ! LC_ALL=C grep -a -F "$(printf '\033')[12;1H" \
+         ! LC_ALL=C grep -a -F "$(printf '\033')[${requested_rows};1H" \
              "${capture}" >/dev/null 2>&1; then
         record_failure "${label}" "bottom_status_row_missing" "${case_dir}"
     elif [ "${geometry}" != "" ] &&
-         LC_ALL=C grep -a -F "$(printf '\033')[13;" \
+         LC_ALL=C grep -a -F "$(printf '\033')[$((requested_rows + 1));" \
              "${capture}" >/dev/null 2>&1; then
         record_failure "${label}" "frame_exceeded_terminal_rows" "${case_dir}"
     elif [ "${input_kind}" = "utf8-edit" ] &&
          ! grep -a -F "You: a界c!" "${capture}" >/dev/null 2>&1; then
         record_failure "${label}" "utf8_edited_submission_missing" "${case_dir}"
+    elif [ "${input_kind}" = "hidden-default" ] &&
+         ! grep -a -F "system: Unknown command: /debug-tool-call (try /help)" \
+             "${capture}" >/dev/null 2>&1; then
+        record_failure "${label}" "hidden_default_rejection_missing" "${case_dir}"
+    elif [ "${input_kind}" = "hidden-enabled" ] &&
+         ! grep -a -F "system: tool call id=call-1 name=Read input_bytes=27" \
+             "${capture}" >/dev/null 2>&1; then
+        record_failure "${label}" "hidden_enabled_execution_missing" "${case_dir}"
+    elif [ "${input_kind}" = "hidden-disabled" ] &&
+         ! grep -a -F "system: Command disabled: /remote-setup" \
+             "${capture}" >/dev/null 2>&1; then
+        record_failure "${label}" "hidden_disabled_rejection_missing" "${case_dir}"
     else
         record_pass "${label}" "${case_dir}"
     fi
@@ -627,6 +677,13 @@ run_editing() {
     run_pty_case "small-terminal-geometry" "forced" "exit" "12x50"
 }
 
+run_hidden() {
+    run_pty_case "hidden-default-rejected" "forced" "hidden-default" "12x80"
+    run_pty_case "hidden-enabled-executed" "forced" "hidden-enabled" "12x80"
+    run_pty_case "hidden-disabled-rejected" "forced" "hidden-disabled" "12x80"
+    unset LLM_CARET_ENABLE_HIDDEN_COMMANDS
+}
+
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --case)
@@ -669,6 +726,9 @@ case "${CASE_NAME}" in
     editing)
         run_editing
         ;;
+    hidden)
+        run_hidden
+        ;;
     raw-failure)
         run_raw_failure_case
         ;;
@@ -676,6 +736,7 @@ case "${CASE_NAME}" in
         run_routing
         run_lifecycle
         run_editing
+        run_hidden
         run_raw_failure_case
         ;;
     *)
