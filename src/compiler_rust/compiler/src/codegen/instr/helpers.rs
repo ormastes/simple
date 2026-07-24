@@ -138,8 +138,15 @@ pub(crate) fn inline_runtime_array_len_value(
 
 /// Helper to create a string constant in module data and return (ptr, len) values.
 /// Uses content-based naming for deterministic output and deduplication.
+///
+/// MUST be module data, never a stack slot: consumers pass the pointer to
+/// `rt_string_new_literal`, whose intern cache is keyed by `(address, len)`
+/// and lives for the process. A stack address is reused by other frames, so
+/// two same-length literals interned that way alias to whichever string hit
+/// the cache first ("simple_seed" came back as "--log-mode=" in the stage4
+/// macOS CLI, corrupting seed-sibling delegation, 2026-07-25).
 pub(crate) fn create_string_constant<M: Module>(
-    _ctx: &mut InstrContext<'_, M>,
+    ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     text: &str,
 ) -> InstrResult<(cranelift_codegen::ir::Value, cranelift_codegen::ir::Value)> {
@@ -150,13 +157,9 @@ pub(crate) fn create_string_constant<M: Module>(
         return Ok((ptr, len));
     }
 
-    let slot = builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, bytes.len() as u32, 0));
-    for (offset, byte) in bytes.iter().enumerate() {
-        let byte_val = builder.ins().iconst(types::I8, i64::from(*byte));
-        builder.ins().stack_store(byte_val, slot, offset as i32);
-    }
-
-    let ptr = builder.ins().stack_addr(types::I64, slot, 0);
+    let data_id = declare_named_bytes(ctx, bytes)?;
+    let gv = ctx.module.declare_data_in_func(data_id, builder.func);
+    let ptr = builder.ins().global_value(types::I64, gv);
     let len = builder.ins().iconst(types::I64, bytes.len() as i64);
 
     Ok((ptr, len))
