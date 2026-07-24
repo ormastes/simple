@@ -110,26 +110,32 @@ RV64 cannot safely call that owner yet:
 - `riscv64-display-smoke` attaches no FAT32 block image.
 - `vfs_boot_init_virtio_fat32()` reaches the ARM-named
   `rt_arm_virtio_blk_set_mmio_base` boundary.
-- No RV64 freestanding definition of that binding exists.
+- The full `rt_arm_virtio_blk_*` runtime family is implemented in the ARM32
+  and ARM64 `boot/baremetal_stubs.c` runtimes, but not RV64.
+- RV64's freestanding runtime owns a separate private PCI VirtIO-BLK probe,
+  but it does not expose the full `VirtioBlkDriver` extern surface: MMIO
+  u32/u64 read and u32 write; MMIO, queue, and DMA bases; queue configure,
+  reset, available push, and used index; prepare-read, completion wait,
+  status, direct sector read, and sector-byte return.
 
 Adding only the VFS imports would therefore trade an honest unavailable marker
 for an unresolved boot closure. The font marker must remain until the existing
 VirtIO-FAT32 and shared font bootstrap owners are reachable on RV64.
 
-The RV64 framebuffer is suitable for stronger independent capture once its
-metadata boundary is completed. `freestanding_runtime.c` allocates
+The RV64 framebuffer ABI now exposes its existing backing address, pitch, bpp,
+and checked present path. It is suitable for stronger independent capture once
+its receipt gains format and generation. `freestanding_runtime.c` allocates
 `g_rt_gpu_fb` as contiguous identity-mapped guest RAM, attaches it to the
 VirtIO-GPU resource as `B8G8R8A8_UNORM`, and presents with
 TRANSFER_TO_HOST_2D plus RESOURCE_FLUSH. QMP `pmemsave` can therefore read the
 guest-owned backing bytes directly. The current wrapper instead uses
-`screendump`, and the Simple facade declares address/pitch/bpp/present calls
-whose RV64 freestanding definitions are absent.
+`screendump`, so its crop remains diagnostic.
 
 ## Bounded implementation sequence
 
-1. Complete the RV64 display runtime facade: return the physical backing
-   address, byte pitch, bpp, exact pixel format, and a scanout generation owned
-   by resource creation/recreation; keep present in the same GPU owner.
+1. Extend the now-connected RV64 display facade with exact pixel format and a
+   scanout generation owned by resource creation/recreation; keep present in
+   the same GPU owner.
 2. After a successful present, emit one guest scanout marker carrying address,
    width, height, stride, format, scanout generation, and frame revision.
 3. Change only the RV64 wrapper to parse and bounds-check that marker, issue

@@ -1,6 +1,6 @@
 # SimpleOS RV64 WM Live Framebuffer Gate Missing
 
-- status: blocked-rv64-display-abi-font-media-input-transport-and-pmemsave
+- status: blocked-rv64-font-block-transport-input-transport-and-pmemsave
 - gate: `scripts/check/check-simpleos-host-configuration-matrix.shs`
 - failing field: `simpleos_host_configuration_qemu_riscv64_wm_live_status=missing`
 - current source: `examples/09_embedded/simple_os/arch/riscv64/gui_entry_desktop.spl`
@@ -12,13 +12,12 @@
 
 The remaining gap is below the shared WM renderer, not another renderer:
 
-- `src/os/kernel/arch/riscv64/display.spl` declares
-  `rt_display_framebuffer_address`, `rt_display_pitch`, `rt_display_bpp`, and
-  `rt_display_present`, but
-  `src/os/kernel/arch/riscv64/boot/freestanding_runtime.c` currently defines
-  only display initialization, the test fill/flush probe, width, and height.
-  A current-source production ELF therefore has no complete display ABI to
-  link against.
+- `src/os/kernel/arch/riscv64/boot/freestanding_runtime.c` now defines the
+  framebuffer-address, pitch, bpp, and present calls declared by
+  `src/os/kernel/arch/riscv64/display.spl`. Address and metadata fail closed
+  until the existing VirtIO-GPU owner is ready, and present reuses its checked
+  transfer/flush path. The focused source contract is
+  `test/01_unit/os/riscv64_display_abi_contract_test.shs`.
 - The entry reports only width, height, and stride. It does not emit the
   physical scanout address, byte format, or scanout generation required to
   bind host capture to the guest-owned backing buffer.
@@ -27,22 +26,36 @@ The remaining gap is below the shared WM renderer, not another renderer:
   address/stride/format/generation, range-check them, and issue QMP
   `pmemsave`. Its current rightmost crop is diagnostic only and cannot be
   pinned.
-- The shared font VFS bootstrap already exists, but the RV64 display entry
-  does not call it and the direct evidence wrapper attaches no FAT32 block
-  device. A successful registry return, not an unconditional serial string,
-  must guard any `[rv64-font-evidence]` receipt.
+- The pinned media builder already stages `/SYS/FONTS/NOTOSANS` with the
+  required 1,708,408-byte/SHA-256 identity in `build/os/fat32-riscv64.img`,
+  but the display scenario does not ensure or attach that image and the direct
+  evidence wrapper attaches no block device. More importantly,
+  `vfs_boot_init_virtio_fat32()` reaches the ARM-only
+  `rt_arm_virtio_blk_*` ABI, whose production definitions live in the ARM32
+  and ARM64 `boot/baremetal_stubs.c` runtimes.
+  RV64 instead has a private PCI block probe in `freestanding_runtime.c` with
+  no architecture-neutral `BlockDevice`/FAT32 sector-byte interface. Merely
+  adding QEMU media or VFS imports would leave an unresolved boot closure.
+  The missing owner is one shared or RV64 adapter implementing the complete
+  `driver_class.spl` extern surface: MMIO u32/u64 reads and u32 writes; MMIO,
+  queue, and DMA bases; queue configuration, reset, available-ring push, and
+  used index; prepare-read, completion wait, status, direct sector read, and
+  sector-byte return. Only then may the entry
+  call the shared VFS/font bootstrap. A successful registry return, not an
+  unconditional serial string, must guard any `[rv64-font-evidence]` receipt.
 - `src/os/drivers/virtio/virtio_input_ops.spl` is a pure evdev decoder with
-  unit coverage and no production caller. There is no RV64 VirtIO input
+  unit coverage and an ARM64 compositor caller, but no RV64 production caller. There is no RV64 VirtIO input
   discovery, event-virtqueue setup/refill, interrupt acknowledgement, or
   compositor input backend. Adding QEMU `virtio-keyboard-pci` and
   `virtio-mouse-pci` devices does not create that guest transport.
 
-The minimum closure order is: complete the architecture-owned display ABI and
-generation counter; provision the existing RV64 FAT32 image and call the
-shared VFS/font bootstrap; add one RV64 VirtIO input transport which feeds the
-existing decoder and compositor; then switch the wrapper to guest-addressed
-`pmemsave` and capture a fresh RV64-only crop. x86_64 addresses, crops, and
-hashes are not admissible substitutes.
+The minimum closure order is: generalize or implement the architecture-owned
+VirtIO-BLK sector-byte adapter; provision the existing RV64 FAT32 image and
+call the shared VFS/font bootstrap; add the display generation/format receipt;
+add one RV64 VirtIO input transport which feeds the existing decoder and
+compositor; then switch the wrapper to guest-addressed `pmemsave` and capture a
+fresh RV64-only crop. x86_64 addresses, crops, and hashes are not admissible
+substitutes.
 
 The smaller `riscv64-display-smoke` scenario now routes the renamed production
 entry through `src/os` and `src/lib`. Its architecture facade discovers the

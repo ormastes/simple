@@ -51,18 +51,27 @@ The same live scenario traces and rejects boundary failures with:
 
 ## Current blockers
 
-- The RV64 display facade declares framebuffer-address, pitch, bpp, and
-  present runtime calls which are not defined by the current freestanding C
-  runtime. A current-source production ELF therefore lacks a complete display
-  ABI before font/input admission begins.
-- The RV64 entry does not mount the pinned font asset. The shared
+- The RV64 framebuffer-address, pitch, bpp, and present ABI is now connected
+  to the existing VirtIO-GPU state. The guest receipt still lacks physical
+  address, byte format, and scanout generation, so it cannot authorize
+  `pmemsave` yet.
+- The pinned media builder already places `/SYS/FONTS/NOTOSANS` in
+  `build/os/fat32-riscv64.img` with the required byte length and SHA-256. The
+  display scenario/wrapper still neither ensures nor attaches that image.
+- Attaching the image alone is insufficient: `vfs_boot_init_virtio_fat32`
+  uses `VirtioBlkDriver`, whose low-level `rt_arm_virtio_blk_*` ABI is
+  implemented by the ARM32/ARM64 boot runtimes but not RV64. The RV64 freestanding runtime
+  has a separate private PCI block probe but exposes no architecture-neutral
+  sector-byte interface to `BlockDevice`/FAT32. A shared or RV64 owner must
+  implement the full extern surface in `driver_class.spl`: MMIO u32/u64
+  reads and u32 writes; MMIO, queue, and DMA bases; queue configuration,
+  reset, available-ring push, and used index; prepare-read, completion wait,
+  status; direct sector read; and sector-byte return. Only then can the entry safely call
   `vfs_boot_init_virtio_fat32` and
-  `simpleos_desktop_register_selected_fonts_from_vfs` path exists, but the
-  display scenario/wrapper does not provision that media and the entry does
-  not call it.
+  `simpleos_desktop_register_selected_fonts_from_vfs`.
 - The RV64 entry consumes UART shortcuts, not VirtIO keyboard/pointer events.
-  `virtio_input_ops.spl` is a translation-only decoder with no production
-  caller; RV64 has no VirtIO input discovery, virtqueue, IRQ/refill, or
+  `virtio_input_ops.spl` is used by the ARM64 compositor backend, but has no
+  RV64 production caller; RV64 has no VirtIO input discovery, virtqueue, IRQ/refill, or
   compositor-backend owner.
 - The current wrapper asks QMP for `screendump` and derives the crop from that
   PPM. Font admission requires a guest marker carrying physical scanout
