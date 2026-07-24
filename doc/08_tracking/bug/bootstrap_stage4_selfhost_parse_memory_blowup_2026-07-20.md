@@ -672,3 +672,67 @@ per-file slope — if it regresses, re-run with
 sub-phase and which file(s) moved, rather than guessing from the aggregate
 number alone. Not wired into CI — land + document only, per this session's
 scope.
+
+## UPDATE 2026-07-24: retention CONFIRMED by the heap_registry discriminator
+## (the "single most valuable next step" above has now been run)
+
+Two real-corpus Stage-4 one-binary runs on macOS aarch64 (24GB RAM), using a
+fresh stage2 built 2026-07-24 (which, unlike the 07-20 binaries, HAS the
+`heap_registry=` field compiled into every `BOOTSTRAP-PHASE` line):
+
+- Run A (dirty root, `build/stage4_onebin3_2026-07-24.log`): SIGKILL at ~12
+  min while parsing `src/compiler/traits/trait_solver.spl`,
+  `heap_registry=64,571,013`.
+- Run B (clean detached worktree at 2b6ca665,
+  `build/stage4_onebin4_2026-07-24.log` + 5s memory sampler
+  `build/stage4_wt_mem_2026-07-24.log`): SIGKILL at 9m51s while parsing
+  `src/app/ui.web/html.spl` (546,841 chars), `heap_registry=44,822,116` at
+  that file's parse start. Sampler shows macOS grew swap 6GB -> 62GB in 10
+  minutes until disk headroom ran out (last sample: swap used 62,267MB of
+  62,464MB, process RSS ~2.2GB with the rest paged out, VSZ 508GB). Total
+  dirty footprint at kill: ~80GB+ (24GB RAM + 62GB swap), still mid-phase2.
+
+**Discriminator verdict: climbing object count = genuine cross-file
+RETENTION, not allocator high-water churn.** The `heap_registry` live-object
+count climbs monotonically file-after-file and never steps down between
+files. Per-file deltas scale with each file's size at ~8 live objects per
+source char, e.g. (all from run B):
+
+| file | chars | heap_registry delta |
+|---|---|---|
+| `src/lib/common/base_encoding/base64.spl` | 8,723 | +71,017 |
+| `src/lib/common/ui/web_render_api.spl` | 59,767 | +470,970 |
+| `src/app/ui.render/html_widgets.spl` | 37,873 | +330,989 |
+
+At ~44.8M live objects the swap-measured footprint was ~60GB, i.e. **~1.3KB
+average per live heap object**. Projecting the full ~1777-file closure gives
+~70M+ objects / ~90GB+ — structurally unable to fit on a 24GB machine
+regardless of what else runs. The 07-20 "two open candidates" section is
+therefore resolved: the O(n^2) lexer cost is real but is the TIME symptom;
+the MEMORY kill is object retention (tokens/AST/interned slices held live at
+~8 objects and ~10KB per 10-char line — grotesquely un-compact even if the
+AST must legitimately survive until codegen).
+
+Also confirmed 2026-07-24: splitting the single 109KB line in
+`src/app/ui.web/html.spl` (commit 2b6ca665, separate parser bug) moved the
+kill point PAST that file in run A — the two defects are independent.
+
+Provenance note for future sessions: the deployed
+`bin/release/aarch64-apple-darwin/simple` (Jul 11) was built by the
+pre-2026-07-16 dispatch, which routed Stage-4 `--entry` through Rust
+`rt_native_build` (`3a9d58fce2` rerouted it to the in-process pure-Simple
+driver; that path has never completed a real Stage-4 build). Until the
+retention defect is fixed, the Rust-FFI route (drop `SIMPLE_BOOTSTRAP_STAGE4=1`
+so `bootstrap_main.spl` dispatches to `run_rt_native_build`) remains the only
+build shape for the full CLI that fits on this class of machine.
+
+Next steps, in value order:
+1. Find WHAT retains: instrument or read `parse_full_frontend` callers —
+   are per-file token arrays retained alongside the AST? Are text slices
+   (token lexemes) each a separate boxed heap object? A token-array drop or
+   lexeme interning could cut the footprint by an order of magnitude.
+2. The lexer `char_at`/`slice` O(n^2) fix (`lex_source_codes` is already
+   built but unused by `lex_source_char_at`/`lex_source_slice`,
+   `src/compiler/10.frontend/core/lexer.spl:191-207`) — fixes the TIME
+   symptom incl. the 60s-timeout giant-literal files; validate via the
+   normal dynload bootstrap + both guard scripts.
