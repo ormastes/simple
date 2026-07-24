@@ -175,3 +175,17 @@ producing a genuine text-typed local without narrowing the 64-bit runtime value
 on ARM32/RV32. The focused contract pins both halves. The bounded diagnosis
 consumed its three cycles, so rebuilt execution of this final source change is
 intentionally deferred to a fresh session.
+
+### Fresh verification attempt
+
+The next session rebuilt C5 three ways with the known self-hosted Stage4:
+normal in-process, `SIMPLE_NATIVE_BUILD_FORCE_WORKER=1`, and
+`SIMPLE_BOOTSTRAP=1`. All completed in under one second, produced the same
+SHA-256, retained the pre-fix direct calls to the colliding source functions,
+and returned diagnostic exit `1`. This Stage4 predates the source fix and
+ignores both worker-selection knobs, so none of those outputs is current-source
+evidence. No current-main pure-Simple compiler candidate exists; active
+Stage2/Stage3/Stage4 builds and their caches belong to older snapshots.
+
+Next verification must first build a current-main Stage4 in an isolated,
+cache-preserving lane, then build C5 once and require exit `42`.

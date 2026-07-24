@@ -631,6 +631,8 @@ the shared binary — deploys require explicit user go-ahead).
   call ABI, then converts the tagged result through the existing
   `decode_runtime_value` text path; this remains width-correct for ARM32/RV32.
   The focused contract pins the raw call and semantic conversion. Rebuilt
-  execution of that final source change is pending a fresh session because the
-  bounded diagnosis reached its three-cycle cap. See
+  execution remains pending a current-main Stage4: the available older Stage4
+  ignored both live-worker selection knobs and reproduced the same byte-identical
+  pre-fix C5 binary in all three bounded attempts. No active compiler build or
+  reusable cache currently represents this source snapshot. See
   `native_chr_builtin_no_lowering_2026-07-18.md`.
