@@ -122,8 +122,9 @@ impl PlatformLinkConfig {
             "Foundation",
             "AppKit",
             // Metal/CoreGraphics are referenced by the graphics runtime baked into
-            // `libsimple_native_all.a` (e.g. `_MTLCreateSystemDefaultDevice`); without
-            // these frameworks those symbols stay unresolved at link time.
+            // the selected Rust runtime archive (including `libsimple_runtime.a`,
+            // e.g. `_MTLCreateSystemDefaultDevice`); without these frameworks those
+            // symbols stay unresolved at final link time.
             "Metal",
             "CoreGraphics",
         ]

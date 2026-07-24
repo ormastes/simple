@@ -20,7 +20,7 @@ fn add_macos_base_link_args(cmd: &mut std::process::Command) {
 }
 
 #[cfg(target_os = "macos")]
-fn add_macos_native_all_host_support(cmd: &mut std::process::Command) {
+fn add_macos_runtime_host_support(cmd: &mut std::process::Command) {
     if let Some(llvm_lib) = simple_common::platform::cc_detect::find_homebrew_llvm_lib() {
         cmd.arg(format!("-L{}", llvm_lib));
         cmd.arg(format!("-Wl,-rpath,{}", llvm_lib));
@@ -29,6 +29,18 @@ fn add_macos_native_all_host_support(cmd: &mut std::process::Command) {
     for framework in simple_common::platform::link_config::PlatformLinkConfig::macos_frameworks() {
         cmd.arg("-framework").arg(framework);
     }
+}
+
+fn macos_runtime_host_support_required(
+    selected_runtime: bool,
+    host_gpu_lane: bool,
+    exact_stage4: bool,
+) -> bool {
+    // `libsimple_runtime.a` contains the macOS Metal runtime even on the
+    // core-c-bootstrap lane. Static archives do not preserve rustc's
+    // framework-link directives for their final consumer, so every selected
+    // Rust runtime archive needs the same host framework admission.
+    selected_runtime || host_gpu_lane || exact_stage4
 }
 
 impl NativeProjectBuilder {
@@ -1370,8 +1382,12 @@ int main(int argc, char** argv) {
             }
         }
         #[cfg(target_os = "macos")]
-        if has_native_all || host_gpu_lane || exact_stage4 {
-            add_macos_native_all_host_support(&mut cmd);
+        if macos_runtime_host_support_required(
+            selected_runtime.is_some(),
+            host_gpu_lane,
+            exact_stage4,
+        ) {
+            add_macos_runtime_host_support(&mut cmd);
         }
 
         #[cfg(not(target_os = "windows"))]
@@ -1472,9 +1488,9 @@ int main(int argc, char** argv) {
             {
                 Err(format!(
                     "link failed: {}\
-\nnote: the selected core lane (`{}`) links `libsimple_runtime.a` only. \
-If this entry depends on hosted-only runtime symbols, rebuild with `--runtime-bundle rust-hosted` \
-(legacy aliases: `--runtime-bundle hosted` or `--runtime-bundle all`).",
+\nnote: the selected core lane (`{}`) is intentionally limited to the Simple/C core ABI. \
+If this entry needs a symbol outside that ABI, add it to simple-core/core-c-bootstrap or \
+select a supported specialized lane; removed rust-hosted/hosted/all bundles are not fallback options.",
                     stderr,
                     self.resolve_runtime_lane().display_name()
                 ))
@@ -2230,7 +2246,7 @@ mod linker_tests {
     fn macos_native_all_link_args_dead_strip_and_retain_metal_support() {
         let mut command = std::process::Command::new("clang++");
         add_macos_base_link_args(&mut command);
-        add_macos_native_all_host_support(&mut command);
+        add_macos_runtime_host_support(&mut command);
         let args = command
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -2239,6 +2255,14 @@ mod linker_tests {
         assert!(args.iter().any(|arg| arg == "-Wl,-dead_strip"));
         assert!(args.iter().any(|arg| arg == "-lc++"));
         assert!(args.windows(2).any(|pair| pair == ["-framework", "Metal"]));
+    }
+
+    #[test]
+    fn macos_core_runtime_archive_requires_host_framework_support() {
+        assert!(macos_runtime_host_support_required(true, false, false));
+        assert!(macos_runtime_host_support_required(false, true, false));
+        assert!(macos_runtime_host_support_required(false, false, true));
+        assert!(!macos_runtime_host_support_required(false, false, false));
     }
 
     #[test]
