@@ -69,7 +69,8 @@ Its source wiring and fixture assertions are not live-window evidence.
    - Bounds: `x=3, y=9, width=35, height=14`
 
 5. **Emit the selected font composite program and plan compilation**
-   - Composition: `widget-composition`
+   - Composition: a stable session nonce plus fresh `widget-submission-1`
+     revision, so another session cannot replay its frame.
    - Scene: `widget:192x80`
    - Source kind: `gui_ast`
    - Source ID: `gui-root`
@@ -91,13 +92,16 @@ Its source wiring and fixture assertions are not live-window evidence.
      identity.
    - Require `gui_ast` source metadata.
    - Require the actual fixture input to be visible and focused after the
-     pointer click.
-   - Deliver `Z` and require the actual input value to become `ReadyZ`.
+     pointer click through `UISession.dispatch_draw_ir_event`.
+   - Submit a fresh focus frame, deliver `Z` through the same production
+     session boundary, and require the actual input value to become `ReadyZ`.
 
 9. **Reject disconnected stale or replayed evidence**
    - Resolve the same input against a replayed scene key.
-   - Require an unresolved context with `stale_scene_rejected=true` and preserve
-     `ReadyZ`.
+   - Require an unresolved context with `stale_scene_rejected=true`; reject a
+     blank-session frame, a same-scene foreign-session frame, a stale pointer
+     frame, and a duplicate key identity before `process_event`; preserve focus
+     and `ReadyZ`.
 
 10. **Capture backend and framebuffer evidence**
    - Convert and submit the updated widget tree.

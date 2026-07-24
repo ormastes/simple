@@ -376,6 +376,18 @@ arch-done
   concrete-backend-to-trait constructor helper; that helper is now removed,
   but no qualifying pure-Simple executable is available and the capped focused
   specifications have not been rerun.
+- BLOCKED: the focused GUI spec now passes the pure-Simple static check, but its
+  first executable `bin/release/simple test` attempt exited 139 before any
+  example or retained capture. The new UISession identity boundary is therefore
+  source-validated only; no GUI pixel or event PASS is claimed.
+- The GUI identity boundary is now wired through BrowserApp/BrowserBackend:
+  the exact stamped composition is rendered and host input is dispatched
+  through the session envelope. Static app checks pass; runtime admission still
+  awaits a non-crashing pure-Simple execution.
+- RV64 source audit remains blocked below the shared renderer: the display ABI,
+  guest font media, VirtIO input transport, and guest-addressed `pmemsave`
+  metadata are absent. The RV64 manual and tracker retain those gaps without
+  pinning an x86 crop or claiming serial-only evidence.
 - BLOCKED: a cache-preserving full-driver bootstrap attempt ran for 600 seconds
   with one CPU-bound worker, produced no output or cache progress, and exited
   124. The observation is appended to

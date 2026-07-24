@@ -6,6 +6,8 @@
 # shared state across CLI, TUI, and GUI backends.
 
 use common.ui.widget.{WidgetNode, UITree, UIState, UIEvent, UIMode}
+use common.ui.draw_ir.{DrawIrComposition}
+use common.ui.widget_draw_ir.{widget_tree_to_draw_ir}
 use common.ui.widget_store.{WidgetStore}
 use common.ui.viewport.{Viewport, default_viewport}
 use common.ui.changelog.{ChangeLog, default_changelog}
@@ -27,6 +29,26 @@ use common.ui.clipboard_service.{ClipboardService, ClipboardEntry}
 # UISession
 # =========================================================================
 
+var _ui_draw_ir_session_nonce_counter: i64 = 0
+
+fn _ui_draw_ir_session_nonce() -> text:
+    _ui_draw_ir_session_nonce_counter = _ui_draw_ir_session_nonce_counter + 1
+    "ui-session-{_ui_draw_ir_session_nonce_counter}"
+
+struct UiDrawIrEvent:
+    composition_id: text
+    scene_key: text
+    input_key: text
+    event: UIEvent
+
+fn ui_draw_ir_event(composition: DrawIrComposition, input_key: text, event: UIEvent) -> UiDrawIrEvent:
+    UiDrawIrEvent(
+        composition_id: composition.composition_id,
+        scene_key: composition.scene_key,
+        input_key: input_key,
+        event: event
+    )
+
 class UISession:
     state: UIState
     store: WidgetStore
@@ -43,6 +65,11 @@ class UISession:
     window_surfaces: UiWindowSurfaceRegistry
     patch_stream: PatchStream
     clipboard: ClipboardService
+    draw_ir_session_nonce: text
+    draw_ir_submission_revision: i64
+    submitted_draw_ir_composition_id: text
+    submitted_draw_ir_scene_key: text
+    submitted_draw_ir_input_keys: [text]
 
     static fn new(tree: UITree) -> UISession:
         """Create a session with a main tree and default settings."""
@@ -64,7 +91,12 @@ class UISession:
             access_store: nil,
             window_surfaces: UiWindowSurfaceRegistry.new(),
             patch_stream: PatchStream.new(),
-            clipboard: ClipboardService.new()
+            clipboard: ClipboardService.new(),
+            draw_ir_session_nonce: _ui_draw_ir_session_nonce(),
+            draw_ir_submission_revision: 0,
+            submitted_draw_ir_composition_id: "",
+            submitted_draw_ir_scene_key: "",
+            submitted_draw_ir_input_keys: []
         )
 
     static fn new_with_store(tree: UITree, store: WidgetStore) -> UISession:
@@ -86,7 +118,12 @@ class UISession:
             access_store: nil,
             window_surfaces: UiWindowSurfaceRegistry.new(),
             patch_stream: PatchStream.new(),
-            clipboard: ClipboardService.new()
+            clipboard: ClipboardService.new(),
+            draw_ir_session_nonce: _ui_draw_ir_session_nonce(),
+            draw_ir_submission_revision: 0,
+            submitted_draw_ir_composition_id: "",
+            submitted_draw_ir_scene_key: "",
+            submitted_draw_ir_input_keys: []
         )
 
     static fn new_with_policy(tree: UITree, policy: CapabilityPolicy) -> UISession:
@@ -109,7 +146,12 @@ class UISession:
             access_store: nil,
             window_surfaces: UiWindowSurfaceRegistry.new(),
             patch_stream: PatchStream.new(),
-            clipboard: ClipboardService.new()
+            clipboard: ClipboardService.new(),
+            draw_ir_session_nonce: _ui_draw_ir_session_nonce(),
+            draw_ir_submission_revision: 0,
+            submitted_draw_ir_composition_id: "",
+            submitted_draw_ir_scene_key: "",
+            submitted_draw_ir_input_keys: []
         )
 
 # =========================================================================
@@ -159,6 +201,45 @@ impl UISession:
     fn active_backend() -> text:
         """Get the name of the active backend."""
         return self.viewport.active_backend
+
+    me submit_draw_ir_composition(composition: DrawIrComposition) -> DrawIrComposition:
+        """Assign this session's next identity to a canonical Draw IR submission."""
+        self.draw_ir_submission_revision = self.draw_ir_submission_revision + 1
+        val submitted = DrawIrComposition(
+            schema: composition.schema,
+            composition_id: "{self.draw_ir_session_nonce}:widget-submission-{self.draw_ir_submission_revision}",
+            scene_key: composition.scene_key,
+            backend_target: composition.backend_target,
+            batches: composition.batches
+        )
+        self.submitted_draw_ir_composition_id = submitted.composition_id
+        self.submitted_draw_ir_scene_key = submitted.scene_key
+        self.submitted_draw_ir_input_keys = []
+        submitted
+
+    me submit_widget_draw_ir(width: i32, height: i32, backend: text) -> DrawIrComposition:
+        """Build the canonical widget frame and assign its submission identity."""
+        val composition = widget_tree_to_draw_ir(self.state.tree.root_node(), width, height, backend)
+        self.submit_draw_ir_composition(composition)
+
+    fn current_draw_ir_event(input_key: text, event: UIEvent) -> UiDrawIrEvent:
+        UiDrawIrEvent(
+            composition_id: self.submitted_draw_ir_composition_id,
+            scene_key: self.submitted_draw_ir_scene_key,
+            input_key: input_key,
+            event: event
+        )
+
+    me dispatch_draw_ir_event(input: UiDrawIrEvent) -> bool:
+        """Dispatch only current, non-replayed input tied to the submitted widget frame."""
+        if self.submitted_draw_ir_composition_id == "" or input.composition_id != self.submitted_draw_ir_composition_id or input.scene_key != self.submitted_draw_ir_scene_key or input.input_key == "":
+            return false
+        for consumed in self.submitted_draw_ir_input_keys:
+            if consumed == input.input_key:
+                return false
+        self.submitted_draw_ir_input_keys.push(input.input_key)
+        self.dispatch(input.event)
+        true
 
     fn access_snapshot() -> UiAccessSnapshot:
         """Build a canonical access snapshot for all open surfaces."""

@@ -237,8 +237,10 @@ architecture-owned RV64 transports. RV64 capture should then move from QEMU
 `screendump` to `pmemsave` of the guest-emitted physical scanout address,
 stride, format, and scanout generation. The host converts the RV64 BGRA backing
 buffer to RGB and pins a fresh RV64-only rightmost 56x48 crop; neither the x86
-address nor its crop/hash is reusable. The exact bounded owner work is tracked
-in
+address nor its crop/hash is reusable. The exact bounded RV64 framebuffer
+gate is tracked in
+`doc/08_tracking/bug/simpleos_rv64_wm_live_framebuffer_gate_2026-06-30.md`;
+the shared ARM64/RV64 input-transport ownership remains in
 `doc/08_tracking/bug/simpleos_arm64_qmp_input_transport_missing_2026-07-24.md`.
 Widget producers read existing `lang`/`font-family` properties, and
 `SharedWmWindow.language` preserves explicit WM language; absent metadata stays

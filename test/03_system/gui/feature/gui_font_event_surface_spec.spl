@@ -28,9 +28,8 @@ use common.ui.draw_ir.{
     draw_ir_event_target_context,
     draw_ir_text
 }
-use common.ui.widget.{WidgetNode}
-use common.ui.widget_draw_ir.{widget_tree_to_draw_ir_cpu}
-use common.ui.widget_hit.{widget_dispatch_click, widget_dispatch_key}
+use common.ui.widget.{UIEvent, WidgetNode, UITree}
+use nogc_sync_mut.ui.session.{UISession, ui_draw_ir_event}
 use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{engine2d_draw_ir_adv_composition}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 
@@ -98,10 +97,13 @@ describe "GUI font and event surface":
         val fixture = gui_fixture("gui", "GUI42")
         val root = fixture.0
         val input = fixture.1
+        var session = UISession.new(UITree.new(root))
+        session.dispatch(UIEvent.Resize(width: WIDTH, height: HEIGHT))
+        session.dispatch(UIEvent.InsertMode)
 
         step("Accept exact-face-bound simple-script shaping")
         step("Trace the production font and event boundary")
-        val submitted = widget_tree_to_draw_ir_cpu(root, WIDTH, HEIGHT)
+        val submitted = session.submit_widget_draw_ir(WIDTH, HEIGHT, DRAW_IR_BACKEND_CPU)
         val title = text_command(submitted, "GUI42")
 
         step("Prepare one shared font batch for 2D and 3D")
@@ -115,7 +117,8 @@ describe "GUI font and event surface":
         expect(title.height).to_equal(14)
 
         step("Emit the selected font composite program and plan compilation")
-        expect(submitted.composition_id).to_equal("widget-composition")
+        expect(submitted.composition_id).to_start_with("ui-session-")
+        expect(submitted.composition_id).to_end_with(":widget-submission-1")
         expect(submitted.scene_key).to_equal("widget:192x80")
         expect(submitted.batches[0].source.source_kind).to_equal(DRAW_IR_SOURCE_GUI_AST)
         expect(submitted.batches[0].source.source_id).to_equal("gui-root")
@@ -137,7 +140,19 @@ describe "GUI font and event surface":
         expect(submitted_frame_written).to_be(true)
 
         val blank_fixture = gui_fixture("blank", "")
-        val blank_submitted = widget_tree_to_draw_ir_cpu(blank_fixture.0, WIDTH, HEIGHT)
+        var blank_session = UISession.new(UITree.new(blank_fixture.0))
+        val blank_submitted = blank_session.submit_widget_draw_ir(WIDTH, HEIGHT, DRAW_IR_BACKEND_CPU)
+        expect(blank_submitted.composition_id != submitted.composition_id).to_be(true)
+        expect(session.dispatch_draw_ir_event(ui_draw_ir_event(
+            blank_submitted, "blank-frame", UIEvent.KeyPress(key: "X")
+        )).to_be(false)
+        var foreign_session = UISession.new(UITree.new(gui_fixture("foreign", "GUI42").0))
+        val foreign_submitted = foreign_session.submit_widget_draw_ir(WIDTH, HEIGHT, DRAW_IR_BACKEND_CPU)
+        expect(foreign_submitted.scene_key).to_equal(submitted.scene_key)
+        expect(foreign_submitted.composition_id != submitted.composition_id).to_be(true)
+        expect(session.dispatch_draw_ir_event(ui_draw_ir_event(
+            foreign_submitted, "cross-session", UIEvent.KeyPress(key: "X")
+        )).to_be(false)
         var blank_engine = Engine2D.create_with_backend(WIDTH, HEIGHT, "cpu")
         blank_engine.clear(0xff000000u32)
         val blank_rendered = engine2d_draw_ir_adv_composition(blank_engine, blank_submitted, false)
@@ -161,8 +176,15 @@ describe "GUI font and event surface":
         expect(pointer_context.source_kind).to_equal(DRAW_IR_SOURCE_GUI_AST)
         expect(pointer_context.component_id).to_equal("gui-root")
         expect(input.is_visible()).to_be(true)
-        expect(widget_dispatch_click(root, WIDTH, HEIGHT, 10, 45)).to_equal("gui-input")
+        expect(session.dispatch_draw_ir_event(ui_draw_ir_event(
+            submitted, "pointer-1", UIEvent.MouseEvent(x: 10.0, y: 45.0, button: "left", kind: "down")
+        )).to_be(true)
+        expect(session.focused_widget()).to_equal("gui-input")
         expect(input.get_prop("ui_focus")).to_equal("true")
+        expect(session.dispatch_draw_ir_event(ui_draw_ir_event(
+            submitted, "pointer-1", UIEvent.MouseEvent(x: 10.0, y: 45.0, button: "left", kind: "down")
+        )).to_be(false)
+        expect(session.focused_widget()).to_equal("gui-input")
 
         val focus_context = draw_ir_event_target_context(
             submitted, submitted.scene_key, "focus-1", "focus",
@@ -170,15 +192,19 @@ describe "GUI font and event surface":
         )
         expect(focus_context.resolved).to_be(true)
         expect(focus_context.composition_id).to_equal(submitted.composition_id)
-        widget_dispatch_key("gui-input", "Z")
+        val focused_submission = session.submit_widget_draw_ir(WIDTH, HEIGHT, DRAW_IR_BACKEND_CPU)
+        expect(focused_submission.composition_id).to_equal(submitted.composition_id.split(":")[0] + ":widget-submission-2")
+        expect(session.dispatch_draw_ir_event(ui_draw_ir_event(
+            focused_submission, "key-1", UIEvent.KeyPress(key: "Z")
+        )).to_be(true)
         expect(input.get_prop("value")).to_equal("ReadyZ")
 
         val key_context = draw_ir_event_target_context(
-            submitted, submitted.scene_key, "key-1", "key_down",
+            focused_submission, focused_submission.scene_key, "key-1", "key_down",
             "gui-input", "input", 10, 45, DRAW_IR_BACKEND_CPU
         )
         expect(key_context.resolved).to_be(true)
-        expect(key_context.scene_key).to_equal(submitted.scene_key)
+        expect(key_context.scene_key).to_equal(focused_submission.scene_key)
         expect(key_context.input_key).to_equal("key-1")
 
         step("Reject disconnected stale or replayed evidence")
@@ -188,11 +214,18 @@ describe "GUI font and event surface":
         )
         expect(replayed_context.resolved).to_be(false)
         expect(replayed_context.stale_scene_rejected).to_be(true)
+        expect(session.dispatch_draw_ir_event(ui_draw_ir_event(
+            submitted, "pointer-replay", UIEvent.MouseEvent(x: 10.0, y: 45.0, button: "left", kind: "down")
+        )).to_be(false)
+        expect(session.dispatch_draw_ir_event(ui_draw_ir_event(
+            focused_submission, "key-1", UIEvent.KeyPress(key: "X")
+        )).to_be(false)
+        expect(session.focused_widget()).to_equal("gui-input")
         expect(input.get_prop("value")).to_equal("ReadyZ")
         val replayed_scene_rejected = if replayed_context.stale_scene_rejected: "true" else: "false"
 
         step("Capture backend and framebuffer evidence")
-        val updated = widget_tree_to_draw_ir_cpu(root, WIDTH, HEIGHT)
+        val updated = session.submit_widget_draw_ir(WIDTH, HEIGHT, DRAW_IR_BACKEND_CPU)
         val updated_text = text_command(updated, "ReadyZ")
         expect(updated_text.text_value).to_equal("ReadyZ")
         expect(updated.batches[0].source.style_revision).to_equal("1")
@@ -220,6 +253,7 @@ describe "GUI font and event surface":
             "pointer_target=" + pointer_context.target_id + "\n" +
             "focus_target=" + focus_context.target_id + "\n" +
             "keyboard_target=" + key_context.target_id + "\n" +
+            "focused_submission=" + focused_submission.composition_id + "\n" +
             "replayed_scene_rejected=" + replayed_scene_rejected + "\n" +
             "submitted_frame=" + SUBMITTED_FRAME_PATH + "\n" +
             "blank_oracle_frame=" + BLANK_FRAME_PATH + "\n" +

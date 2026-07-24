@@ -103,6 +103,7 @@ class BrowserApp:
     last_mouse_y: i32
     file_change_poll_ticks: i32
     file_change_poll_interval_ticks: i32
+    next_draw_ir_input_key: i64
 
     static fn new(file_path: text, port: i32, gpu_backend: text, web_engine: text = "pure_simple") -> Result<BrowserApp, text>:
         return BrowserApp.new_with_access_store_path(file_path, port, gpu_backend, "", web_engine)
@@ -147,7 +148,8 @@ class BrowserApp:
                             last_mouse_x: 0,
                             last_mouse_y: 0,
                             file_change_poll_ticks: 0,
-                            file_change_poll_interval_ticks: FILE_CHANGE_POLL_INTERVAL_TICKS
+                            file_change_poll_interval_ticks: FILE_CHANGE_POLL_INTERVAL_TICKS,
+                            next_draw_ir_input_key: 0
                         ))
 
     me run_once(snapshot_path: text) -> i64:
@@ -155,8 +157,7 @@ class BrowserApp:
 
         Returns 0 on success, 1 on failure.
         """
-        val state = self.session.current_state()
-        self.backend.render_frame(state.tree, state)
+        self.render_session_frame()
         val ok = self.backend.snapshot_ppm(snapshot_path)
         self.backend.shutdown()
         if ok:
@@ -182,9 +183,8 @@ class BrowserApp:
             return false
         dbg_stage("browser", "window_created")
 
-        val initial_state = self.session.current_state()
         dbg_stage("browser", "first_frame_start")
-        self.backend.render_frame(initial_state.tree, initial_state)
+        self.render_session_frame()
         dbg_stage("browser", "first_frame_done")
         if not self.present_host_window(window):
             print "Error: failed to present initial browser frame"
@@ -210,8 +210,7 @@ class BrowserApp:
 
             val now = browser_time_now_unix_micros()
             if had_event or now >= next_present_at:
-                val state = self.session.current_state()
-                self.backend.render_frame(state.tree, state)
+                self.render_session_frame()
                 if not self.present_host_window(window):
                     print "Error: failed to present browser frame"
                     presentation_ok = false
@@ -252,7 +251,16 @@ class BrowserApp:
             UIEvent.Quit:
                 self.running = false
             _:
-                self.session.dispatch(event)
+                self.next_draw_ir_input_key = self.next_draw_ir_input_key + 1
+                self.session.dispatch_draw_ir_event(self.session.current_draw_ir_event(
+                    "browser-input-{self.next_draw_ir_input_key}", event
+                ))
+
+    me render_session_frame():
+        val state = self.session.current_state()
+        val composition = self.backend.widget_draw_ir_composition(state)
+        val submitted = self.session.submit_draw_ir_composition(composition)
+        self.backend.render_frame_with_composition(state.tree, state, submitted)
 
     me handle_host_event(ev: i64):
         val event_type = browser_winit_event_get_type(ev)

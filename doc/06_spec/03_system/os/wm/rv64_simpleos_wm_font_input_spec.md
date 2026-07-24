@@ -51,12 +51,26 @@ The same live scenario traces and rejects boundary failures with:
 
 ## Current blockers
 
-- The RV64 entry does not mount the pinned font asset and emits
-  `rv64-font-evidence-unavailable`.
-- The RV64 entry consumes UART shortcuts, not VirtIO keyboard/pointer events,
-  and emits `rv64-input-evidence-unavailable`.
+- The RV64 display facade declares framebuffer-address, pitch, bpp, and
+  present runtime calls which are not defined by the current freestanding C
+  runtime. A current-source production ELF therefore lacks a complete display
+  ABI before font/input admission begins.
+- The RV64 entry does not mount the pinned font asset. The shared
+  `vfs_boot_init_virtio_fat32` and
+  `simpleos_desktop_register_selected_fonts_from_vfs` path exists, but the
+  display scenario/wrapper does not provision that media and the entry does
+  not call it.
+- The RV64 entry consumes UART shortcuts, not VirtIO keyboard/pointer events.
+  `virtio_input_ops.spl` is a translation-only decoder with no production
+  caller; RV64 has no VirtIO input discovery, virtqueue, IRQ/refill, or
+  compositor-backend owner.
+- The current wrapper asks QMP for `screendump` and derives the crop from that
+  PPM. Font admission requires a guest marker carrying physical scanout
+  address, stride, pixel format, and generation, followed by range-checked QMP
+  `pmemsave` and RV64 BGRA-to-RGB conversion. The current crop is diagnostic
+  and must not be pinned.
 - `RV64_WM_FONT_REGION_EXPECTED_SHA256` is intentionally empty until a genuine
-  RV64 crop is captured.
+  RV64 `pmemsave` crop is captured.
 - No qualifying current-source RV64 ELF exists in the worktree, so QEMU was
   not launched during this static design pass.
 
@@ -77,7 +91,9 @@ RV64_DISPLAY_SMOKE_BUILD=0 \
   scripts/check/check-rv64-display-smoke-qmp-evidence.shs --wm-font-input
 ```
 
-Pin the reported RV64 crop SHA-256, then rerun once with
+Do not pin the current `screendump` crop. After the guest emits complete
+scanout metadata and the wrapper captures that exact backing buffer with
+`pmemsave`, pin the reported RV64 crop SHA-256, then rerun once with
 `RV64_WM_FONT_REGION_EXPECTED_SHA256` set. PASS requires exact font identity,
 the exact guest marker, absence of unavailable markers, the exact crop,
 corrupt-copy rejection, and both keyboard and pointer correlation rows.
