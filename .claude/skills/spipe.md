@@ -1041,7 +1041,9 @@ same false-green rules apply (conditional PASS markers only; final line
   TAP → DTM/DMI → debug module → rv64 hart) is the in-model debugger — halt,
   read/write GPRs and dpc, resume — proven by
   `test/01_unit/lib/hardware/link_mux/jtag_debug_probe.spl`. Prefer extending
-  that probe over ad-hoc print-debugging of core state.
+  that probe over ad-hoc print-debugging of core state. FULL how-to (muxed
+  serial JTAG + BSCANE2 board path, soak-over-JTAG evidence, troubleshooting
+  table): `doc/07_guide/hardware/fpga/simple_riscv_jtag_debugging.md`.
 - **Docgen authoring gotchas** (2026-07-24, learned writing
   `jtag_debug_scenario_spec.spl`): the template's bare `@step "text"`
   annotation is NOT valid outside a comment — use plain `step("...")` calls;

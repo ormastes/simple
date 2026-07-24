@@ -61,7 +61,11 @@ placeholder stub today)**.
   `mux_probe` / `jtag_route_probe` ALL PASS interpreter+jit. The jtag channel
   tunnels OpenOCD `remote_bitbang`; Phase 1 reached IDCODE only — the DMI/DM
   extension (`jtag_debug_probe.spl`: halt / read-write GPR+dpc / resume against
-  the rv64 core model over the muxed link) is the in-model debugger.
+  the rv64 core model over the muxed link) is the in-model debugger. Board
+  path = BSCANE2 USER4 tunnel (`jtag_debug_chain.vhd` + `G_DEBUG_JTAG` guard,
+  `openocd_kv260_bscan.cfg`, `check_kv260_jtag_debug.shs` verify/soak). THE
+  debugging guide (both paths + troubleshooting):
+  `doc/07_guide/hardware/fpga/simple_riscv_jtag_debugging.md`.
 - **Synthesizable RTL** `examples/09_embedded/fpga_riscv/rtl/rv32_exec_core.vhd`
   is the ONLY real synthesizable CPU (rv32, no MMU, reference/oracle). The
   `fpga_linux` bundle generator (`src/lib/hardware/fpga_linux/riscv_fpga_linux.spl`)
