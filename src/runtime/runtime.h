@@ -417,6 +417,7 @@ int8_t   rt_tuple_set(int64_t tuple, int64_t idx, int64_t value);
 int64_t  rt_tuple_get(int64_t tuple, int64_t idx);
 int64_t  rt_tuple_len(int64_t tuple);
 int64_t  rt_path_parent(const uint8_t* path_ptr, int64_t path_len);
+int64_t  rt_path_absolute(const uint8_t* path_ptr, uint64_t path_len);
 int64_t  rt_path_filename(int64_t path_value);
 int64_t  rt_path_extension(int64_t path_value);
 int64_t  rt_http_get(int64_t url);

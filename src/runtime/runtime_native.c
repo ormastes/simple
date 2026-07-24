@@ -4443,6 +4443,57 @@ int64_t rt_path_parent(const uint8_t* path_ptr, int64_t path_len) {
     return rt_string_new(path_ptr, (uint64_t)slash);
 }
 
+int64_t rt_path_absolute(const uint8_t* path_ptr, uint64_t path_len) {
+    if (!path_ptr || path_len > (uint64_t)SIZE_MAX - 1) {
+        return rt_string_new(NULL, 0);
+    }
+    char* path = (char*)malloc((size_t)path_len + 1);
+    if (!path) return rt_string_new(NULL, 0);
+    memcpy(path, path_ptr, (size_t)path_len);
+    path[(size_t)path_len] = '\0';
+
+#if defined(_WIN32)
+    char* absolute = _fullpath(NULL, path, 0);
+#else
+    char* absolute = realpath(path, NULL);
+#endif
+    if (!absolute) {
+        bool already_absolute = path[0] == '/';
+#if defined(_WIN32)
+        already_absolute = already_absolute ||
+            (path_len >= 3 && path[1] == ':' &&
+             (path[2] == '/' || path[2] == '\\'));
+#endif
+        if (already_absolute) {
+            absolute = spl_strdup(path);
+        } else {
+            char* cwd = rt_getcwd();
+            if (cwd) {
+                size_t cwd_len = strlen(cwd);
+                if (cwd_len <= SIZE_MAX - 2 &&
+                        (size_t)path_len <= SIZE_MAX - cwd_len - 2) {
+                    absolute = (char*)malloc(cwd_len + (size_t)path_len + 2);
+                }
+                if (absolute) {
+                    memcpy(absolute, cwd, cwd_len);
+#if defined(_WIN32)
+                    absolute[cwd_len] = '\\';
+#else
+                    absolute[cwd_len] = '/';
+#endif
+                    memcpy(absolute + cwd_len + 1, path, (size_t)path_len + 1);
+                }
+                free(cwd);
+            }
+        }
+    }
+    free(path);
+    if (!absolute) return rt_string_new(path_ptr, path_len);
+    int64_t result = rt_string_new((const uint8_t*)absolute, strlen(absolute));
+    free(absolute);
+    return result;
+}
+
 int64_t rt_path_filename(int64_t path_value) {
     RtCoreString* path = rt_core_as_string(path_value);
     if (!path || path->len == 0) return rt_string_new(NULL, 0);

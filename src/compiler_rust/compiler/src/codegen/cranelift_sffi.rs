@@ -1546,10 +1546,11 @@ pub unsafe extern "C" fn rt_cranelift_new_aot_module_triple(
 }
 
 fn rt_cranelift_new_aot_module_impl(name: String, isa: std::sync::Arc<dyn cranelift_codegen::isa::TargetIsa>) -> i64 {
-    let builder = match ObjectBuilder::new(isa, name, cranelift_module::default_libcall_names()) {
+    let mut builder = match ObjectBuilder::new(isa, name, cranelift_module::default_libcall_names()) {
         Ok(b) => b,
         Err(_) => return 0,
     };
+    builder.per_function_section(true).per_data_object_section(true);
 
     let module = ObjectModule::new(builder);
     let handle = next_handle();
@@ -1902,6 +1903,47 @@ mod tests {
                 path.len() as i64,
             ));
             assert!(!std::fs::read(path.as_ref()).unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn test_aot_sffi_emits_discardable_function_sections() {
+        use object::{Object, ObjectSection};
+
+        unsafe {
+            let module_name = "test_aot_sections";
+            let module =
+                rt_cranelift_new_aot_module(module_name.as_ptr() as i64, module_name.len() as i64, CL_TARGET_X86_64);
+            assert!(module > 0);
+
+            for (name, value) in [("first", 1), ("second", 2)] {
+                let sig = rt_cranelift_new_signature(0);
+                rt_cranelift_sig_set_return(sig, CL_TYPE_I64);
+                let ctx = rt_cranelift_begin_function(module, name.as_ptr() as i64, name.len() as i64, sig);
+                let entry = rt_cranelift_create_block(ctx);
+                rt_cranelift_switch_to_block(ctx, entry);
+                rt_cranelift_seal_block(ctx, entry);
+                let result = rt_cranelift_iconst(ctx, CL_TYPE_I64, value);
+                rt_cranelift_return(ctx, result);
+                assert!(rt_cranelift_end_function(ctx) > 0);
+                assert!(rt_cranelift_aot_define_function(module, name.as_ptr() as i64, name.len() as i64, ctx));
+            }
+
+            let temp_dir = tempfile::tempdir().unwrap();
+            let path = temp_dir.path().join("sections.o");
+            let path = path.to_string_lossy();
+            assert!(rt_cranelift_emit_object_raw(
+                module,
+                path.as_ptr() as i64,
+                path.len() as i64,
+            ));
+            let bytes = std::fs::read(path.as_ref()).unwrap();
+            let file = object::File::parse(bytes.as_slice()).unwrap();
+            let text_sections = file
+                .sections()
+                .filter(|section| section.name().unwrap_or("").starts_with(".text"))
+                .count();
+            assert!(text_sections >= 2, "expected one discardable text section per function");
         }
     }
 
