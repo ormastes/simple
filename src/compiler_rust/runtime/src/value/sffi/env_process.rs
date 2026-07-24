@@ -759,7 +759,7 @@ pub unsafe extern "C" fn rt_process_spawn_guarded(cmd_ptr: *const u8, cmd_len: u
         let mut shell = Command::new("/bin/sh");
         shell
             .arg("-c")
-            .arg("child=; stop(){ [ -z \"$child\" ] || { kill -TERM -- \"-$child\" 2>/dev/null || true; sleep 0.1; kill -KILL -- \"-$child\" 2>/dev/null || true; }; }; die(){ sig=$1; stop; trap - \"$sig\"; kill \"-$sig\" \"$$\"; exit 143; }; trap 'die 1' HUP; trap 'die 2' INT; trap 'die 15' TERM; setsid \"$@\" & child=$!; wait \"$child\"; code=$?; stop; if [ \"$code\" -gt 128 ]; then sig=$((code-128)); trap - \"$sig\"; kill \"-$sig\" \"$$\"; fi; exit \"$code\"")
+            .arg("child=; stop(){ [ -z \"$child\" ] || { kill -TERM -- \"-$child\" 2>/dev/null || true; sleep 0.1; kill -KILL -- \"-$child\" 2>/dev/null || true; }; }; die(){ sig=$1; stop; trap - \"$sig\"; kill \"-$sig\" \"$$\"; exit 143; }; trap 'die 1' HUP; trap 'die 2' INT; trap 'die 15' TERM; setsid /bin/sh -c 'sleep 3600 & exec \"$@\"' simple-guard-grp \"$@\" & child=$!; wait \"$child\"; code=$?; stop; if [ \"$code\" -gt 128 ]; then sig=$((code-128)); trap - \"$sig\"; kill \"-$sig\" \"$$\"; fi; exit \"$code\"")
             .arg("simple-guard")
             .arg(cmd_str);
         shell
@@ -1442,16 +1442,6 @@ pub extern "C" fn rt_term_get_size() -> RuntimeValue {
 #[no_mangle]
 pub extern "C" fn rt_terminal_get_size() -> RuntimeValue {
     rt_term_get_size()
-}
-
-/// Return whether standard input is attached to an interactive terminal.
-///
-/// `IsTerminal` delegates to `isatty` on Unix and `GetConsoleMode` on Windows,
-/// so redirected input is rejected on both platforms.
-#[no_mangle]
-pub extern "C" fn rt_terminal_is_tty() -> RuntimeValue {
-    use std::io::IsTerminal;
-    RuntimeValue::from_bool(std::io::stdin().is_terminal())
 }
 
 // Saved termios state for stdin (fd 0), captured by rt_terminal_enable_raw_mode
