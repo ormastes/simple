@@ -81,8 +81,14 @@ reachable from the shipped Caret facade.
 | Live terminal routing/lifecycle/UTF-8/geometry/raw rejection and hidden admission (`REQ-LLM-CARET-HIDDEN-008`) | `test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl` through `scripts/check/check-llm-caret-tui-pty.shs`; the added hidden scenario is designed to drive default-hidden rejection, enabled execution, and always-disabled rejection through the real Caret TUI, but has not yet executed; execution requires cached `bin/caret`, `script(1)`, and `stty` |
 | Claude-full root hidden/disabled registry admission | `test/03_system/tools/llm/claude_full/commands/root_commands_registry_spec.spl`; the production-derived scenario enumerates every registry record and alias rather than maintaining a second command list, while the PTY hidden case supplies the corresponding real-TUI process contract |
 | Claude-full hidden-disabled stub descriptor completeness (`REQ-LLM-CARET-HIDDEN-008`, supporting metadata) | `test/03_system/tools/llm/claude_full/commands/hidden_stub_registry_spec.spl`; the parts-bin aggregate projects all 14 leaf descriptors while independent source discovery normalizes hyphen/underscore twins and compares membership in both directions; shipped fulfillment remains the root/component/PTY lane, and execution remains blocked |
+| Claude-full distributed feature-gate owner/spec cross-map (`REQ-LLM-CARET-HIDDEN-008`, supporting metadata) | `test/03_system/tools/llm/claude_full/feature_gate_registry_spec.spl`; 33 bounded gate-dimension records derive leaf-owner Boolean/text outcomes, link exact focused or aggregate evidence, generically reconcile named root metadata, preserve `/compact` root-versus-owner drift, and reject malformed maps with one exact diagnostic array; it is not shipped admission or automatic future-gate discovery |
 | Focused unit branches | `test/01_unit/app/llm_caret/claude_cli_spec.spl`, `chat_spec.spl`, `chat_tui_spec.spl`, `chat_tui_input_spec.spl`, `chat_tui_runtime_spec.spl`, `main_spec.spl`, `config_spec.spl`, `tools_spec.spl`, `types_spec.spl`, `provider_spec.spl`, `retry_spec.spl` under `test/01_unit/app/llm_caret/` |
 | Offline native seams | `test/04_smoke/llm_caret_cli_tui_hardening_smoke.spl` |
+
+Both `claude_full/feature_gate_registry.spl` and
+`claude_full/commands/hidden_stub_registry.spl` are supporting parity-island
+metadata. They are outside the 25 direct shipped-path files counted by the
+trace checker and do not change its 25/25, 7,278-LOC, or 496-symbol totals.
 
 These specs do not green historical full-parity rows whose implementation
 target is absent. In particular, the installed executable probe proves only
@@ -90,12 +96,12 @@ the bounded offline argument surface it invokes; it does not establish that
 every current Claude function, authenticated request, or interactive session
 still works.
 
-The scoped hardening tranche contains 394 modern `should` examples: 356
+The scoped hardening tranche contains 397 modern `should` examples: 356
 source-synchronized unit examples, eight CLI feature-contract examples, three
 process-hardening examples, nine TUI/hidden component examples, five
 managed-environment examples, five installed-Claude examples, one exhaustive
-root-registry example, six live-PTY examples, and one hidden-stub aggregate
-example.
+root-registry example, six live-PTY examples, one hidden-stub aggregate
+example, and three feature-gate aggregate examples.
 
 ## Function Trace
 

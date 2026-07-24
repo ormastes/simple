@@ -41,3 +41,27 @@ cannot mix dimensions from two queries.
 Hard panics and asynchronous signals remain below the app-layer capability
 boundary: full restoration for those paths requires a runtime-owned
 atexit/signal guard and must not be claimed from component tests.
+
+## Claude-Full Feature-Gate Evidence Capsule (2026-07-24)
+
+`claude_full/feature_gate_registry.spl` is an inward-only parts-bin capsule.
+It imports pure leaf gate owners and projects their heterogeneous values into
+`ClaudeFeatureGateRecord` plus condition probes. Exact production and focused
+or aggregate system-test paths make feature-to-test ownership reviewable
+without adding a second runtime dispatcher.
+
+Dependency direction is system evidence → inward registry → leaf owner. The
+`owner_spec` value is an inert repo-relative text path; production source does
+not import `test/**`, and leaf owners do not depend back on the registry.
+
+The capsule is intentionally not imported by `src/app/llm_caret/main.spl`,
+the shipped command registry, or TUI dispatch. Root metadata is recorded only
+where it is needed for reconciliation. In particular, `/compact` remains
+enabled and visible in static root metadata while its leaf owner may disable
+the descriptor from an environment-derived Boolean.
+
+This bounded 33-record registry is supporting evidence for
+`REQ-LLM-CARET-HIDDEN-008`. It does not prove shipped command admission,
+current-upstream exhaustiveness, or discovery of future distributed gates.
+Those claims remain owned by root/component/live-PTY evidence and by a restored
+provenance-pinned upstream inventory respectively.

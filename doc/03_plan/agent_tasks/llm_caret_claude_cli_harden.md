@@ -102,7 +102,8 @@ source/manual or traceability PASS as executable behavior evidence.
 | `e0d214b8fb0f` | Pushed to `origin/main` | Injected TUI I/O boundary, lifecycle-safe routing, unit/runtime specs, and fail-closed live-PTY foundation |
 | `0ac4a158e3e3` | Pushed to `origin/main` | Installed-Claude offline compatibility probe, registry-derived hidden/disabled matrix, and PTY artifact provenance/teardown hardening |
 | `544c57bcc94a` | Pushed to `origin/main` | Real-TUI default/enabled/disabled hidden admission, explicit child-exit evidence, credential isolation, and synchronized plans/manuals |
-| Hidden-stub aggregate tranche | This scoped change; final commit/push identity is recorded in the session handoff | Parts-bin 14-record hidden-stub registry, normalized source-completeness SSpec/manual, architecture/design boundaries, and trace/plan updates |
+| `4556cbbebb6a` | Pushed to `origin/main` | Parts-bin 14-record hidden-stub registry, normalized source-completeness SSpec/manual, architecture/design boundaries, and trace/plan updates |
+| Distributed feature-gate cross-map tranche | Current scoped change; final commit/push identity will be recorded after verification | Parts-bin 33-record owner/spec/state map, applicability shapes and outcome probes, generic root reconciliation, `/compact` drift, exact malformed-map rejection, synchronized manual, and plan/trace updates |
 
 Workspace-relative MCP/LSP symbols and definitions resolve production targets,
 so the navigation health condition is met. Diagnostics
@@ -122,9 +123,10 @@ and must not be resolved, reverted, or included by this lane.
 | Installed-Claude manual parity | PASS: 5/5 offline scenario bodies match source | Static synchronization; checker/SSpec not executed in this tranche |
 | Root-registry manual parity | PASS: 5/5 scenario bodies match source, including the production-derived exhaustive matrix | Static synchronization; no CLI/TUI invocation claim |
 | Hidden-stub manual parity | PASS: 1/1 scenario body and the complete supporting-helper block match source | Static synchronization; SSpec/docgen not executed on a qualified runtime |
-| Focused modern SSpec scan | PASS: 394 scoped canonical `should` examples and matchers; no placeholder pass | Static source scan over the documented tranche |
+| Feature-gate manual parity | PASS (static): 33/33 owner rows, 33/33 independently pinned contract rows, 33/33 state rows, and 3/3 complete folded executable scenario bodies | SSpec/docgen cannot execute until a qualified runtime exists |
+| Focused modern SSpec scan | PASS (static): 397 scoped modern `should` examples, canonical matchers, and no placeholder pass | Static source scan only; execution is not claimed |
 | Direct environment guard | PASS in working and staged modes | Changed Caret paths only |
-| Numbered-artifact guard | PASS in working and staged modes | Changed Caret paths only |
+| Numbered-artifact guard | WARN in this jj workspace: both modes emit Git-worktree/`--cached` errors but still print `OK` and exit zero | Not authoritative here; no numbered artifacts are added by this tranche |
 | Generated-spec layout | PASS: zero `.spl` specs under `doc/06_spec` | Layout only |
 | Claude CLI declaration reachability | PASS: no unreferenced declaration in `claude_cli.spl` | Source-level reachability |
 | Direct `simple check` | FAIL before Caret validation: unknown `rt_process_spawn_guarded` extern | Deployed runtime mismatch |
@@ -191,8 +193,62 @@ fixtures. No lane may run a paid provider.
 | E — installed Claude CLI | installed checker, focused system spec/manual, trace rows | Implemented statically: five bounded offline probes record executable provenance and validate the argument surface with no submitted prompt or inherited provider credentials | Execute once on the installed binary; never generalize the result to authenticated/provider/session parity |
 | F — hidden registry matrix | root command registry spec/manual | Implemented statically: derive lookup, alias, admission, visibility, hidden, and disabled coverage from every production registry record | Execute on a qualified runtime; TUI process contract is covered by lane D, while non-TUI CLI invocation remains separate |
 | G — distributed hidden-stub aggregate | `src/app/llm_caret/claude_full/commands/hidden_stub_registry.spl`, mirrored focused SSpec/manual, plan and trace rows | Implemented statically: derive all 14 canonical hidden-disabled stub records from `claude_full` leaf descriptor declarations with `source_id`, `source_file`, `command_name`, `hidden`, and `enabled`; the stale historical feature TSV is not behavioral authority | `ClaudeHiddenStubCommandRecord`, `hiddenDisabledStubCommandRegistry`, `setup_hidden_stub_registry_fixture`, and `check_hidden_stub_registry_contract`; normalized source discovery and two-way registry comparison are present; supporting metadata only with no shipped admission claim; execute SSpec/docgen on a qualified runtime |
+| H — distributed feature-gate cross-map | `src/app/llm_caret/claude_full/feature_gate_registry.spl`, mirrored focused SSpec/manual, plan and trace rows | Implemented and statically synchronized: 33 bounded records, independently pinned contract/state matrices, generic root reconciliation, exact malformed rejection, and synchronized manual; execution/docgen remain blocked | `ClaudeFeatureGateRecord`, `claudeFeatureGateRegistry`, `setup_claude_feature_gate_fixture`, `check_claude_feature_gate_registry`, and the independent exact state matrix; preserve `/compact` drift; reject malformed records exactly; parts-bin claim only; execute SSpec/docgen on a qualified runtime |
 | Merge owner | current primary agent | Reconcile source/manual bodies, trace rows, and shared maps; commit exact Caret paths only | No unrelated shared-worktree paths in commit |
 | Final reviewer | highest-capability fresh review | Requirement-by-requirement completion audit | Every claimed behavior has executed evidence |
+
+### Remaining CLI-then-TUI sequence after lane H
+
+1. **Lane I — modernize mapped gate-owner specs.** Add frozen `step("...")`
+   names and `REQ-LLM-CARET-HIDDEN-008` traceability without replacing direct
+   owner imports. The aggregate already closes Tasks V2 todo-off/no-team,
+   team-memory mixed states, insights disabled metadata, ultrareview's three
+   rejected combinations, skill-discovery demo/empty/wrong-type rendering,
+   persistent-retry false/true admission, and bridge default-false branches.
+   Retain focused-spec modernization plus deeper attachment-UI and retry-loop
+   effect evidence, and keep each focused manual body synchronized.
+
+   | Focused file/lane | Remaining exact work |
+   |---|---|
+   | `hooks/useTasksV2_spec.spl` | Convert five examples to `should`, preserve the five existing step strings, add the hidden-feature requirement, and add the mirrored manual; do not duplicate the aggregate gate matrix |
+   | `utils/agent_swarms_enabled_spec.spl` | Convert three examples to `should`; freeze `Check ant override`, `Check external opt-in`, and `Check killswitch`; add requirement/manual parity |
+   | `memdir/teamMemPaths_spec.spl` | Preserve seven modern examples/steps; add requirement traceability and its missing mirrored manual |
+   | `commands/insights_command_spec.spl` | Modernize into four scenarios with frozen metadata, thirty-day summary, report/browser-fallback, and rejection steps; replace the unsupported hand-written execution claim |
+   | `commands/review_rewind_sandbox_spec.spl` | Add three frozen steps and scope the hidden-feature requirement to review/ultrareview; add the exact `used == limit` false boundary and a mirrored manual |
+   | `bridge/bridge_small_helpers_spec.spl` | Scope the requirement to bridge-gate scenarios and regenerate the existing manual; preserve its 38 modern examples |
+   | `commands/bridge_command_spec.spl` | Convert four examples to `should`, preserve all 13 existing steps, add requirement traceability, and add the mirrored manual |
+   | `components/messages/AttachmentMessage_spec.spl` | Add direct `attachmentMessageRender` dispatch evidence for exact visible fields, ordered plural skills/demo suppression, and fully redacted disabled/empty/wrong-type results; parts-bin only |
+   | `services/api/withRetry_spec.spl` | Add persistent 429/529 retry-loop effects, max-retry boundaries, deterministic cache/cooldown effects, overflow-floor rejection, and thinking-budget override; introduce a deterministic effect seam and remove the obsolete `doc/06_spec/test/...` mis-mirror after canonical regeneration |
+
+2. **Lane J — CLI gate admission.** Extend the offline Caret CLI fixture only
+   for gates that can reach the shipped CLI facade. Prove visible/hidden,
+   accepted/rejected, exit code, stderr/stdout, and no state mutation when a
+   gate rejects. Do not treat a `claude_full` record as shipped reachability.
+   Current static reachability is deliberately narrow: shipped Caret imports
+   only `claude_full.commands`; `/compact`, `/summarize`, `/init`, and
+   `/bootstrap` can reach shared promptless plain/TUI slash dispatch and return
+   the exact unimplemented response, but shipped code does not call
+   `compactCommand` or `useNewInitPrompt`. Add unit dispatch assertions first,
+   then cached offline `--plain` stdin cases with exit `0`, exact output, and
+   zero provider invocation. The other 31 registry dimensions remain
+   parts-bin-only until a real production import/call path exists.
+3. **Lane K — TUI visibility and dispatch.** After the CLI contract is stable,
+   project the reachable cases through injected `CaretIo`, then the qualified
+   cached-wrapper PTY checker. For compact/init, capture only static
+   canonical/alias admission, the exact unimplemented output,
+   transcript/status effects, and terminal restoration; their conditional
+   owner gates are not shipped call paths. Default/enabled/disabled state
+   testing remains scoped to the separate shipped hidden/disabled root-command
+   lane. No source fallback, provider credentials, or paid request.
+   For the four reachable compact/init canonical/alias inputs, assert visible
+   system output, unchanged conversation state, and
+   `submitted_to_model=false`; extend PTY evidence only after those injected
+   component cases are stable.
+4. **Lane L — completion audit.** Reconcile every accepted record with its
+   focused spec, CLI reachability decision (`reachable` or justified parts-bin
+   only), TUI reachability decision, manual, and retained execution artifact.
+   Restore a pinned upstream snapshot before making exhaustive current-Claude
+   claims.
 
 ### Required execution order after a qualified runtime is deployed
 
@@ -208,7 +264,7 @@ runtime/toolchain mismatch and record it; do not repeat a green gate.
 4. Execute the focused unit specs for `claude_cli`, `provider`, `main`,
    `config`, `tools`, and `chat_tui`.
 5. Execute the CLI process, Claude contract, managed-env, root-registry,
-   hidden-stub-registry, and TUI/hidden system
+   hidden-stub-registry, feature-gate-registry, and TUI/hidden system
    specs in interpreter mode.
 6. Execute the native Caret smoke with stub fallback disabled.
 7. Run `sh scripts/check/check-llm-caret-tui-pty.shs --case all`, then execute
@@ -218,7 +274,9 @@ runtime/toolchain mismatch and record it; do not repeat a green gate.
    `script(1)`, `stty`, or a cached artifact is a failure, not a skip.
 8. Regenerate manuals with `spipe-docgen`; require `0 stubs` and exact scenario
    body parity.
-9. Re-run direct-env, numbered-artifact, trace, and `doc/06_spec` layout gates.
+9. Re-run direct-env, trace, and `doc/06_spec` layout gates. Run the
+   numbered-artifact guard from a Git-backed worktree, or first make it
+   jj-aware; its current `OK` after Git errors is not release evidence.
 10. Fetch GitHub, rebase/duplicate the scoped commit onto `main@origin`, inspect
    exact changed paths, then push only if the MCP/LSP health condition is met.
 

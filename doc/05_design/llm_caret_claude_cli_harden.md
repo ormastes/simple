@@ -13,9 +13,12 @@ transient failure, secret leak, or unsafe tool call is handled.
 
 Real hardening applies to the **shipped path** — the ~3,086-LOC root of
 `src/app/llm_caret/` that actually runs (`mod.spl` -> `provider.spl` ->
-`claude_api.spl`/`claude_cli.spl`/`openai_api.spl`/...). It does NOT apply to the
-`claude_full/` island (~720 files/~151K LOC), which is unreferenced by the
-shipped facade and has no `fn main` (see
+`claude_api.spl`/`claude_cli.spl`/`openai_api.spl`/...). It does not turn the
+broad `claude_full/` parity island (~720 files/~151K LOC) into the shipped
+implementation. The shipped TUI deliberately imports the narrow
+`claude_full.commands` root-command metadata capsule, but not the distributed
+feature-gate registry or the rest of the parity island; `claude_full` has no
+`fn main` (see
 `doc/05_design/llm_caret_claude_cli_full_parity.md` current-state section).
 
 The traceability report itself (`doc/09_report/llm_caret_claude_cli_traceability.md`)
@@ -84,3 +87,37 @@ Real PTY evidence is a separate fail-closed system lane. It invokes the cached
 `build/test-artifacts`, and never substitutes source execution or a paid model.
 If the cached artifact, PTY utility, or qualified runtime is absent, the gate
 fails and records the missing prerequisite.
+
+## Distributed Feature-Gate Cross-Map (2026-07-24)
+
+The bounded `claude_full` gate map contains 33 accepted gate dimensions. Each
+`ClaudeFeatureGateRecord` stores stable source identity, exact owner source,
+focused or aggregate system-test evidence, surface, applicability/state shape,
+owner symbol, optional root command metadata, whether the default is
+authoritative, default hidden/enabled state, gate kind, and one or more
+`ClaudeFeatureGateProbe` Boolean/text outcomes.
+
+`claudeFeatureGateRegistry()` derives probe values from import-safe owner
+functions. It performs no environment reads, process launches, network calls,
+or full-tree scans. Conditional, context, and environment records carry at
+least two behaviorally distinct probes. Metadata-only safe-environment records
+state only classification, not runtime enablement.
+
+The focused SSpec uses:
+
+- `setup_claude_feature_gate_fixture`;
+- `check_claude_feature_gate_registry`;
+- `Load the accepted Claude feature-gate registry`;
+- `Reconcile root metadata with owner behavior`;
+- `Check feature-gate completeness and rejection`.
+
+The checker rejects duplicate identities or root commands, root metadata
+without a named command, ownerless or incomplete records, invalid gate
+kinds/state shapes, empty or duplicate probes, false default labels,
+default/probe mismatch, and conditional records without a distinct state.
+Every named root is reconciled against the production root map; a dedicated
+edge scenario separately preserves `/compact` root metadata and the leaf
+disable probe. The malformed fixture compares one exact ordered diagnostic
+array, so unexpected failures cannot hide behind membership assertions. The
+mirrored manual repeats the exact 33 source-to-spec/state rows and the strict
+parts-bin claim limit while explicitly reporting zero executed scenarios.
