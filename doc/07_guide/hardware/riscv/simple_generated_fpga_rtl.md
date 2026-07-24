@@ -207,6 +207,28 @@ shell prompt and deterministic root entries, and preserve byte-direction and
 timestamp evidence. Output-only UART, testbench-origin prompts, reordered
 markers, or an injected completion string fail.
 
+Build the pure-Simple probe once, then reuse that artifact after the serial
+bridge is listening:
+
+```bash
+set -o pipefail
+mkdir -p build/fpga/tools
+bin/simple native-build \
+  --source scripts/fpga --source src/lib --entry-closure \
+  --entry scripts/fpga/riscv_linux_terminal_probe.spl \
+  --cache-dir build/fpga/tools/cache \
+  --output build/fpga/tools/riscv_linux_terminal_probe
+build/fpga/tools/riscv_linux_terminal_probe 127.0.0.1 2326 120000 \
+  | tee build/fpga/k26/rv64_simpleos_run.log
+```
+
+RV32 uses `build/fpga/rv32/rv32_simpleos_run.log` instead. The probe
+prints timestamped received chunks and a distinct probe-status marker only
+after it observes `login:`, sends `root`, observes the shell, sends `ls /`,
+sees the DUT-origin `SIMPLE_RISCV_LINUX_LOGIN_LS_PASS` entry, and observes the
+next shell prompt. The fixture token must come from received bytes; the probe
+never synthesizes it.
+
 ### 5. Program each FPGA image and capture board-origin evidence
 
 Build and program RV32 and RV64 KV260 bitstreams independently. Retain the

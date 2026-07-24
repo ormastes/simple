@@ -368,3 +368,24 @@ implementation-milestone-0-in-progress
   board-origin login/shell/`ls /` transcript containing the deterministic root
   fixture. Legacy preload and ILA marker evidence remains diagnostic and cannot
   pass the physical run row.
+- Stage 4 status 2026-07-24: PID 446844 remains CPU-bound in the full CLI
+  frontend/entry-closure pass. Its empty incremental cache is expected until
+  codegen; current cache scopes fingerprint the whole closure and cannot safely
+  reuse runtime/lib objects across scopes. No parallel or seed build is
+  substituted.
+- emitted protection gap 2026-07-24: both product generators now root the real
+  protected Simple entries, but the existing WB/AXI GHDL test uses a CPU stub.
+  Qualification still needs generated-core RV32/RV64 programs that set
+  SATP/PMP, distinguish page-walk requests, and prove final-PMP denial produces
+  no final bus request.
+- terminal progress 2026-07-24: a pure-Simple bidirectional probe is staged. It
+  observes `login:`, sends `root`, observes the shell, sends `ls /`, requires
+  the exact DUT-origin root fixture and a subsequent prompt, preserves
+  timestamped received chunks, and emits a separate probe status. It is
+  high-model reviewed; a bootstrap-seed self-test parses and passes, but that
+  is syntax diagnostics only and not production evidence. The probe remains
+  unqualified until the fresh Stage 4 runtime runs the same check.
+- physical/media status 2026-07-24: the connected K26, Vivado/XSDB/hw_server,
+  and both UART interfaces are idle and available. RV64 still lacks qualified
+  OpenSBI/Linux and a soft-float BusyBox terminal image; RV32 still lacks a
+  pinned Linux asset pipeline, so neither board boot may be claimed.
