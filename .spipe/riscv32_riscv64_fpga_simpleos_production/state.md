@@ -305,3 +305,15 @@ implementation-milestone-0-in-progress
   emits lp64d BusyBox binaries, incompatible with the RV64IMAC/lp64 product;
   the builder now fails closed and requires a soft-float `BUSYBOX_CROSS`.
   No terminal initramfs or boot claim is made.
+- K26 DDR progress 2026-07-24: the generated RV64 SoC now has a separate
+  external 64-bit Wishbone DDR boundary while its simulation variant retains
+  internal RAM. The shared RV64 interconnect restricts DDR to the canonical
+  `0x80000000..0x87ffffff` window. No AXI/PS-DDR or board claim is made because
+  the repository has no correct reachable Wishbone-to-AXI HP bridge.
+- source repair 2026-07-24: wrapped every unparenthesized multiline `if`
+  condition in the RV32/RV64 protected-core closure, as required by the Simple
+  grammar. An explicit bootstrap-seed diagnostic advanced from the RV32
+  `Dedent` parse failure to the seed's known unsupported `@hardware` semantic
+  error, proving the repaired closure parses. Production verification remains
+  pending a qualified pure-Simple Stage 4 CLI; the deployed release path is
+  currently a stale Rust-seed fallback and was not promoted.
