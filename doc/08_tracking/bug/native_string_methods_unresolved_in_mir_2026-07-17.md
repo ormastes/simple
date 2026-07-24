@@ -113,3 +113,17 @@ The existing C9 system fixture is now part of the strict LLVM/Cranelift hosted
 matrix, the focused FreeBSD Cranelift selection, and AArch64/RISC-V64 Cranelift
 QEMU execution. Source/ABI checks pass review; execution with a rebuilt current
 Pure Stage3 remains pending.
+
+## Nullable ABI correction (2026-07-24)
+
+The raw-f64 shortcut was still semantically wrong: invalid input and valid
+zero both produced `0.0`, and `strtod` accepted trailing junk. MIR now calls
+the existing nullable tagged `rt_string_to_float` owner, records
+`Optional<f64>` metadata, and lets `unwrap`/`unwrap_or` perform the established
+runtime-value decode. Hosted C and pure-Simple runtimes both require complete
+input consumption and return nil on failure; the dedicated raw-f64 runtime and
+Cranelift import ABI were removed.
+
+C9 now checks valid nonzero, valid zero, invalid text, and trailing junk while
+retaining the existing result `42`. Rebuilt LLVM/Cranelift execution remains
+pending.

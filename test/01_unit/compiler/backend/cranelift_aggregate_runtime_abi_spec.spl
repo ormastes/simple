@@ -215,32 +215,26 @@ describe "Cranelift aggregate runtime ABI":
         expect(typed_guard).to_be_greater_than(-1)
         expect(local_lookup).to_be_greater_than(typed_guard)
 
-    it "keeps the f64 text parser on its native runtime ABI":
+    it "keeps parse_f64 on the nullable tagged-value ABI":
+        val lowering = file_read("src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl")
         val imports = file_read("src/compiler/70.backend/backend/cranelift_runtime_imports.spl")
         val adapter = file_read("src/compiler/70.backend/backend/cranelift_codegen_adapter.spl")
+        val llvm = file_read("src/compiler/70.backend/backend/llvm_lib_translate.spl")
         val runtime = file_read("src/runtime/simple_core/core_string.spl")
-        val runtime_start = runtime.index_of("pub fn rt_string_parse_f64(value: i64) -> f64:") ?? -1
-        val runtime_end = runtime.index_of("# -- Lexer source cache") ?? runtime.len()
-        val runtime_body = runtime.substring(runtime_start, runtime_end)
-        val helper_start = imports.index_of("fn translate_runtime_import_call_i64_f64(") ?? -1
-        val helper_body = imports.substring(helper_start, imports.len())
-        val call_start = adapter.index_of("fn cl_translate_call(") ?? -1
-        val call_body = adapter.substring(call_start, adapter.len())
-        val typed_guard = call_body.index_of("if name == \"rt_string_parse_f64\" and arg_vals.len() == 1:") ?? -1
-        val local_lookup = call_body.index_of("if func_handles.has(name)") ?? -1
-        expect(runtime).to_contain("pub fn rt_string_parse_f64(value: i64) -> f64:")
-        expect(runtime_body).to_contain("strtod(data, 0)")
-        expect(runtime_body.contains("rt_value_float")).to_equal(false)
-        expect(helper_start).to_be_greater_than(-1)
-        expect(imports).to_contain("val CL_CC_PLATFORM_FOR_RUNTIME_IMPORT: i64 = -1")
-        expect(helper_body).to_contain("cranelift_new_signature(CL_CC_PLATFORM_FOR_RUNTIME_IMPORT)")
-        expect(adapter).to_contain("val CL_CC_PLATFORM: i64 = -1")
-        expect(adapter).to_contain("val cl_sig = cranelift_new_signature(CL_CC_PLATFORM)")
-        expect(helper_body).to_contain("cranelift_sig_add_param(sig, CL_TYPE_I64_FOR_RUNTIME_IMPORT)")
-        expect(helper_body).to_contain("cranelift_sig_set_return(sig, CL_TYPE_F64_FOR_RUNTIME_IMPORT)")
-        expect(adapter).to_contain("translate_runtime_import_call_i64_f64(ctx, cl_module, name, arg_vals[0])")
-        expect(typed_guard).to_be_greater_than(-1)
-        expect(local_lookup).to_be_greater_than(typed_guard)
+        val hosted = file_read("src/runtime/runtime_native.c")
+        val header = file_read("src/runtime/runtime.h")
+        expect(lowering).to_contain("case \"parse_f64\": \"rt_string_to_float\"")
+        expect(lowering).to_contain("self.runtime_value_locals[ts_local.id] = true")
+        expect(lowering).to_contain("HirTypeKind.Optional(float_type)")
+        expect(llvm).to_contain("\"rt_string_to_float\", llvm_function_type(i64_ty, [i64_ty], false)")
+        expect(runtime).to_contain("pub fn rt_string_to_float(value: i64) -> i64:")
+        expect(hosted).to_contain("int64_t rt_string_to_float(int64_t value)")
+        expect(header).to_contain("int64_t  rt_string_to_float(int64_t value);")
+        expect(imports.contains("translate_runtime_import_call_i64_f64")).to_be(false)
+        expect(adapter.contains("rt_string_parse_f64")).to_be(false)
+        expect(runtime.contains("rt_string_parse_f64")).to_be(false)
+        expect(hosted.contains("rt_string_parse_f64")).to_be(false)
+        expect(header.contains("rt_string_parse_f64")).to_be(false)
 
     it "predispatches colliding MIR Const instructions":
         val adapter = file_read("src/compiler/70.backend/backend/cranelift_codegen_adapter.spl")

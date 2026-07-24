@@ -2335,25 +2335,25 @@ int64_t rt_string_to_upper(int64_t value) {
     return rt_string_ascii_case(value, 0);
 }
 
-/* parse_f64 (native_string_methods_unresolved_in_mir lane, 2026-07-18):
- * `.parse_f64()` had no native runtime counterpart at all -- unlike
- * to_lower/to_upper (which already had this C implementation before this
- * lane; only their MIR dispatch arm was missing), string->f64 parsing was
- * entirely absent from the native runtime. Mirrors the tagged-string-in
- * family: rt_core_as_string unboxes the tagged handle the MIR call site
- * already produces via ensure_tagged_str, and RtCoreString.data is always
- * NUL-terminated (see rt_string_new), so strtod can read it directly.
- * strtod matches the oracle's Rust `str::parse::<f64>()` for well-formed
- * decimal literals (both are correctly-rounded decimal->binary conversions).
- * Returns 0.0 for a nil/unparseable receiver -- the same "bare-payload
- * sentinel" shortcut already used by rfind (-1 for not-found instead of a
- * real Option<i64>), since this lowering mode has no Option<f64> boxing on
- * the native path; revisit if a closure site ever needs to distinguish a
- * genuine 0.0 parse from a parse failure. */
-double rt_string_parse_f64(int64_t value) {
+int64_t rt_string_to_float(int64_t value) {
     RtCoreString* s = rt_core_as_string(value);
-    if (!s) return 0.0;
-    return strtod(s->data, NULL);
+    if (!s || s->len == 0) return rt_core_nil();
+
+    char* end = NULL;
+    double parsed = strtod(s->data, &end);
+    if (end == s->data) return rt_core_nil();
+
+    const char* finish = s->data + s->len;
+    while (end < finish &&
+           (*end == ' ' || *end == '\t' || *end == '\n' ||
+            *end == '\r' || *end == '\f' || *end == '\v')) {
+        end++;
+    }
+    if (end != finish) return rt_core_nil();
+
+    int64_t bits = 0;
+    memcpy(&bits, &parsed, sizeof(bits));
+    return rt_value_float(bits);
 }
 
 int64_t rt_string_split(int64_t value, int64_t delimiter) {
