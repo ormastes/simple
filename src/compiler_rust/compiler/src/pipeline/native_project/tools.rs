@@ -1500,12 +1500,6 @@ fn project_stage4_archive_closure(
             let refs_c = temp_dir.join(format!("{stem}_refs.c"));
             let refs_o = temp_dir.join(format!("{stem}_refs.o"));
             let mut source = String::new();
-            // The projected Rust members carry aarch64-darwin unwind tables whose
-            // eh_frame CIEs reference rust_eh_personality even under panic=abort.
-            // No linked archive provides it, so define a fail-closed stub here;
-            // the localization pass below demotes it with the other non-roots and
-            // the eh_frame relocations bind to it inside the merged object.
-            source.push_str("void rust_eh_personality(void) { __builtin_trap(); }\n");
             for symbol in &requested {
                 source.push_str(&format!("extern void {symbol}(void);\n"));
             }
@@ -1575,6 +1569,10 @@ fn project_stage4_archive_closure(
         let localize_text = closure_defined
             .keys()
             .filter(|raw| !requested.contains(canonical_archive_symbol(raw)))
+            // `ld -r` keeps unwind-info personality references as EXTERNAL
+            // relocations, so localizing the std-provided rust_eh_personality
+            // leaves the final link undefined (observed run 9, 2026-07-24).
+            .filter(|raw| canonical_archive_symbol(raw) != "rust_eh_personality")
             .map(String::as_str)
             .collect::<Vec<_>>()
             .join("\n");
