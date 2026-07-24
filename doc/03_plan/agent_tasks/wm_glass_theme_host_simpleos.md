@@ -250,6 +250,19 @@ is historical.
   hashed adapter-request preimage and name structural capture evidence
   honestly; it must not claim equality with the independent Simple ARGB
   artifact.
+- The final Web correction (`cc95569c4f` plus `79b8969831`) is rejected and
+  not integrated. It fixed the checksum, real-byte tamper test, request
+  preimage, and structural naming, but did not require byte-exact canonical
+  request serialization, omitted part of the adapter serialization contract,
+  left receipt-selected artifacts without regular-file/canonical-directory
+  guards, and interpolated receipt strings into renderer JavaScript without
+  JSON quoting. The implementation-cycle cap is reached.
+- Main therefore rolls back `f43a30fc30`'s rejected pixel-replay equality claim
+  and the later downstream assertions that treated it as accepted evidence.
+  The earlier live DOM font frame, event, timing, animation, receipt, and
+  independent Simple composition checks remain. Portable adapter-frame binding
+  stays fail-closed and must resume in a fresh scoped session from the final
+  review findings rather than from either rejected candidate.
 - Glass acceptance comes from the package-loaded Aetheric producer, not the
   legacy event fixture. Require the inactive `.wm-window` computed surface to
   retain `rgba(31, 31, 33, 0.8)`, a linear gradient,

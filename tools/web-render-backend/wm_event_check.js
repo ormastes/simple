@@ -60,7 +60,7 @@ function loadCompositionReceipt(root) {
       sha256 !== fields.pixel_artifact_sha256) {
     throw new Error('invalid Simple Web font composition artifact');
   }
-  return { ...fields, receipt_path: receiptPath, artifact_path: artifactPath, artifact };
+  return { ...fields, receipt_path: receiptPath, artifact_path: artifactPath };
 }
 
 function makeHtml(root, receipt) {
@@ -165,7 +165,7 @@ async function main() {
       y: 60,
       width: 320,
       height: 220,
-      html: '<canvas id="font-proof" width="${receipt.viewport_width}" height="${receipt.viewport_height}" style="display:block;font-family:SimplePinnedMono,monospace"></canvas><input id="field" data-canonical-id="win1#field" value=""><button id="ok" data-canonical-id="win1#ok">OK</button>'
+      html: '<div id="font-proof" style="display:inline-block;font-family:SimplePinnedMono,monospace;font-size:16px;line-height:20px;color:#111827">${receipt.text}</div><input id="field" data-canonical-id="win1#field" value=""><button id="ok" data-canonical-id="win1#ok">OK</button>'
     });
     await new Promise((resolve, reject) => {
       const startedAt = Date.now();
@@ -307,22 +307,10 @@ async function main() {
     out.expected_move_x = expectedMoveX;
     out.expected_move_y = expectedMoveY;
     const fontProof = eventTarget('#font-proof');
-    const productionPixels = ${JSON.stringify(receipt.artifact.pixels)};
-    const productionFrame = fontProof.getContext('2d').createImageData(
-      Number('${receipt.viewport_width}'), Number('${receipt.viewport_height}')
-    );
-    productionPixels.forEach((pixel, index) => {
-      const argb = Number(pixel) >>> 0;
-      productionFrame.data[index * 4] = (argb >>> 16) & 255;
-      productionFrame.data[index * 4 + 1] = (argb >>> 8) & 255;
-      productionFrame.data[index * 4 + 2] = argb & 255;
-      productionFrame.data[index * 4 + 3] = (argb >>> 24) & 255;
-    });
-    fontProof.getContext('2d').putImageData(productionFrame, 0, 0);
     await document.fonts.load('16px SimplePinnedMono', '${FONT_TEXT}');
     const fontRect = fontProof.getBoundingClientRect();
     const fontStyle = getComputedStyle(fontProof);
-    out.font_text = '${receipt.text}';
+    out.font_text = fontProof.textContent;
     out.simple_composition_run_id = '${receipt.run_id}';
     out.font_composition_id = '${receipt.composition_id}';
     out.font_identity = '${receipt.font_identity}';
@@ -421,22 +409,12 @@ async function main() {
   result.font_frame_byte_count = frameBitmap.length;
   result.font_frame_pixel_checksum = frameChecksum;
   result.font_frame_nonbackground_pixels = frameNonBackgroundPixels;
-  const expectedBitmap = Buffer.alloc(receipt.artifact.pixels.length * 4);
-  receipt.artifact.pixels.forEach((pixel, index) => {
-    const argb = Number(pixel) >>> 0;
-    expectedBitmap[index * 4] = argb & 255;
-    expectedBitmap[index * 4 + 1] = (argb >>> 8) & 255;
-    expectedBitmap[index * 4 + 2] = (argb >>> 16) & 255;
-    expectedBitmap[index * 4 + 3] = (argb >>> 24) & 255;
-  });
-  result.production_web_frame_bound = frameBitmap.equals(expectedBitmap);
   result.pass = result.pass &&
     frameSize.width > 0 &&
     frameSize.height > 0 &&
     frameBitmap.length === frameSize.width * frameSize.height * 4 &&
     frameChecksum > 0 &&
-    frameNonBackgroundPixels > 0 &&
-    result.production_web_frame_bound;
+    frameNonBackgroundPixels > 0;
   result.electron_process_version = process.versions.electron || '';
   result.chrome_process_version = process.versions.chrome || '';
   console.log('WM_EVENT_CHECK ' + JSON.stringify(result));

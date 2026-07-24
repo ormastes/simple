@@ -122,8 +122,7 @@ function proofSourceArtifact() {
     !source.includes("out.input_to_paint_ms = inputToPaintMs") ||
     !source.includes("out.css_animation_probe = animationProbeStyle.animationName === 'simple-wm-proof-pulse'") ||
     !source.includes("result.font_frame_path = framePath") ||
-    !source.includes("result.font_frame_pixel_checksum = frameChecksum") ||
-    !source.includes("result.production_web_frame_bound = frameBitmap.equals(expectedBitmap)")
+    !source.includes("result.font_frame_pixel_checksum = frameChecksum")
   ) {
     return { status: 'marker-missing', size: String(stat.size), actualSize };
   }
@@ -204,26 +203,9 @@ function simpleCompositionArtifact(proof) {
       sameJsonInteger(proof.simple_composition_pixel_checksum, Number(fields.pixel_checksum)) &&
       sameJsonInteger(proof.simple_composition_artifact_size_bytes, artifactBytes.length) &&
       proof.simple_composition_artifact_sha256 === sha256;
-    const expectedFrame = Buffer.alloc(artifact.pixels.length * 4);
-    artifact.pixels.forEach((pixel, index) => {
-      const argb = Number(pixel) >>> 0;
-      expectedFrame[index * 4] = argb & 255;
-      expectedFrame[index * 4 + 1] = (argb >>> 8) & 255;
-      expectedFrame[index * 4 + 2] = (argb >>> 16) & 255;
-      expectedFrame[index * 4 + 3] = (argb >>> 24) & 255;
-    });
-    const frameBound =
-      valid &&
-      Number(proof.font_frame_width) === artifact.width &&
-      Number(proof.font_frame_height) === artifact.height &&
-      fs.readFileSync(proof.font_frame_path).equals(expectedFrame);
-    return {
-      status: valid ? 'pass' : 'mismatch',
-      frameBindingStatus: frameBound ? 'pass' : 'mismatch',
-      fields,
-    };
+    return { status: valid ? 'pass' : 'mismatch', fields };
   } catch (_err) {
-    return { status: 'missing', frameBindingStatus: 'missing', fields: {} };
+    return { status: 'missing', fields: {} };
   }
 }
 
@@ -373,8 +355,6 @@ const rows = {
   font_frame_nonbackground_pixels: jsonIntegerTextOrBlank(proof.font_frame_nonbackground_pixels),
   font_frame_validated_nonbackground_pixels: fontFrame.nonBackground,
   font_frame_artifact_status: fontFrame.status,
-  production_web_frame_bound: jsonBoolTextOrBlank(proof.production_web_frame_bound),
-  production_web_frame_binding_status: simpleComposition.frameBindingStatus,
   simple_composition_receipt_path: proof.simple_composition_receipt_path,
   simple_composition_run_id: proof.simple_composition_run_id,
   simple_composition_artifact_path: proof.simple_composition_artifact_path,
@@ -396,8 +376,6 @@ if (!boolTrue(proof.pass)) {
   reason = `event-routing-proof-source-${proofSource.status}`;
 } else if (simpleComposition.status !== 'pass') {
   reason = 'event-routing-simple-composition-artifact-invalid';
-} else if (!boolTrue(proof.production_web_frame_bound) || simpleComposition.frameBindingStatus !== 'pass') {
-  reason = 'event-routing-production-web-frame-not-bound';
 } else if (
   proof.browser_engine !== 'chromium' ||
   typeof proof.electron_user_agent !== 'string' ||

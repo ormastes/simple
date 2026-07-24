@@ -222,13 +222,15 @@ This keeps a visually correct capture from passing when visible controls no
 longer receive DOM events or the browser timing, input-to-paint, and animation
 loop are not proven.
 
-For the production Web font receipt, the Electron probe renders the receipt's
-authoritative Engine2D ARGB pixels into its proof canvas and captures that
-canvas. A pass requires `wm_browser_event_routing_production_web_frame_bound=true`
-and `wm_browser_event_routing_production_web_frame_binding_status=pass`: the
-captured BGRA bytes must equal the submitted production frame exactly. Matching
-text, font identity, run ID, or a correlation ID without byte equality is a
-fail-closed `event-routing-production-web-frame-not-bound` result.
+For the production Web font receipt, the event probe validates the receipt and
+its Engine2D ARGB artifact, then separately captures the live DOM font node.
+The DOM frame must be nonempty and its dimensions, byte count, checksum, and
+nonbackground-pixel count must validate. These rows prove live font/event
+presentation and receipt correlation; they do not claim that platform-specific
+Electron bitmap bytes equal the independent Simple ARGB artifact. A portable
+production-adapter frame binding remains fail-closed until its request,
+adapter, generated HTML, and canonical RGBA artifacts pass independent
+provenance validation.
 
 The focused Electron MDI wrapper follows the same rule for the live
 Electron/Chromium shell: `electron_mdi_interaction_latency_status=pass` and
