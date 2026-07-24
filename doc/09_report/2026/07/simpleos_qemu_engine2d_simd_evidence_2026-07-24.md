@@ -2,7 +2,10 @@
 
 STATUS: FAIL (runtime evidence blocked)
 
-Source baseline: `576be2a487176a6ee299be78aa057ada087305aa`
+Implementation baseline: `576be2a487176a6ee299be78aa057ada087305aa`
+
+x86_64 integrated source revision:
+`dc890ae58ed4888ceb06fe87f12def320df0b25e`
 
 ## Manual contract
 
@@ -41,7 +44,31 @@ backend, and its Cranelift attempt overflowed the ARM linker RAM region by
 31,707,136 bytes with 504 unexpected unresolved symbols. Three distinct ARM
 build/launch attempts were consumed, so no further retry was made.
 
-The x86_64 guest was not launched after the ARM-first gate failed.
+### x86_64 runtime attempts
+
+The isolated worktree was clean, fetched, and moved to integrated
+`origin/main` revision `dc890ae58ed4888ceb06fe87f12def320df0b25e`
+without replaying the implementation commit. The file-count safety check
+increased from 106,021 to 106,034 tracked files.
+
+Three x86_64 attempts were counted conservatively:
+
+1. `/Users/ormastes/simple/bin/release/aarch64-apple-darwin-macho/simple os run --help`
+   was interpreted by that older CLI as a default x86_64 run. It stopped in
+   the tooling phase with `no runnable pure-Simple compiler`.
+2. `SIMPLE_BINARY=/Users/ormastes/simple/bin/release/aarch64-apple-darwin-macho/simple SIMPLE_LIB=src /Users/ormastes/simple/bin/release/aarch64-apple-darwin-macho/simple os run --scenario=x64-desktop-gui --log=off`
+   selected the canonical scenario but stopped at the same compiler-admission
+   gate.
+3. `SIMPLE_BINARY=/Users/ormastes/simple/bin/release/aarch64-apple-darwin/simple SIMPLE_LIB=src SIMPLE_OS_BUILD_TIMEOUT_MS=900000 /Users/ormastes/simple/bin/release/aarch64-apple-darwin/simple os run --scenario=x64-desktop-gui --log=off`
+   used the newer pure self-hosted compiler, which passed the runner's exact
+   invalid-mode admission probe. The canonical Cranelift native-build exited
+   `-1` after 23,684 ms before producing
+   `build/os/simpleos_desktop_gui_x86_64.elf`.
+
+No attempt reached QEMU. After the final attempt there was no
+`qemu-system-x86_64` process, guest serial log, QMP socket, framebuffer
+capture, guest event receipt, or guest SIMD counter receipt. The x86_64
+runtime cap is exhausted and no retry is permitted in this run.
 
 ## Input blocker
 
@@ -50,6 +77,10 @@ character action, but it cannot distinguish key-down from key-up and has no
 pointer transport. The guest emits an explicit blocker for
 `pointer-down,pointer-up,key-down,key-up`; these events must not be reported as
 delivered. No ordered input contract passed.
+
+The required x86_64 order was
+`focus,pointer_move,pointer_down,pointer_up,key_down,key_up`. Because no guest
+launched, QMP injected none of these and PS/2 delivered/receipted none of them.
 
 ## Frozen capture fields
 
@@ -62,11 +93,11 @@ delivered. No ordered input contract passed.
 | dpi | unavailable | unavailable |
 | pixel_sha256 | unavailable | unavailable |
 | non_background_bounds | unavailable | unavailable |
-| event_sequence | BLOCKED | not run |
+| event_sequence | BLOCKED | BLOCKED (no guest) |
 | event_count | 0 | 0 |
 | event_backend | `pl011-uart` | `ps2` |
 | capture_path | unavailable | unavailable |
-| source_revision | `576be2a487176a6ee299be78aa057ada087305aa` | `576be2a487176a6ee299be78aa057ada087305aa` |
+| source_revision | `576be2a487176a6ee299be78aa057ada087305aa` | `dc890ae58ed4888ceb06fe87f12def320df0b25e` |
 
 No PPM/PNG, framebuffer hash, bounds, cross-architecture pixel comparison, or
 guest SIMD counter receipt exists. Any adapter must reject this run.
