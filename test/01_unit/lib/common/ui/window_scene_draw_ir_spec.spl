@@ -5,14 +5,13 @@ use std.spec
 use common.ui.builder.{column, label, build_tree_with_title}
 use common.ui.draw_ir.{DRAW_IR_BACKEND_GPU, DRAW_IR_COMMAND_RECT, DRAW_IR_COMMAND_TEXT, DRAW_IR_SOURCE_WM_SCENE, DrawIrCommand, draw_ir_event_target_context, draw_ir_text, simple_2d_draw_ir_adv_composition_plan}
 use common.ui.generated.aetheric_dark_theme_snapshot.{aetheric_dark_theme_render_snapshot}
+use common.ui.theme_render_snapshot.{ThemeMaterialSemantics, ThemeRenderSnapshot, ThemeShadowLayer, theme_material_sha256}
 use common.ui.taskbar_model.{AppRef, TaskbarModel, TrayItem, WindowRef}
 use common.ui.window.{WindowManager}
 use common.ui.window_surface_registry.{UiWindowSurfaceRegistry, UI_SURFACE_KIND_SIMPLE_WEB}
 use common.ui.window_scene.{shared_wm_drag_window, shared_wm_scene_from_window_manager, shared_wm_scene_layout_key, shared_wm_translate_pointer_event, shared_wm_translate_pointer_event_cached}
 use common.ui.window_scene_draw_ir.{shared_wm_scene_draw_ir_composition}
-use common.ui.wm_chrome_theme.{apply_theme_render_snapshot_to_wm_chrome, reset_wm_chrome_theme}
-
-extern fn rt_file_read_text(path: text) -> text
+use common.ui.wm_chrome_theme.{apply_theme_render_snapshot_to_wm_chrome, reset_wm_chrome_theme, wm_chrome_theme}
 
 fn _tree(title: text):
     build_tree_with_title(column("{title}_root", [label("{title}_label", title)]), title, "glass_dark")
@@ -46,6 +45,48 @@ fn _style_value(command: DrawIrCommand, key: text) -> text:
         if prop.key == key:
             return prop.value
     ""
+
+fn _mixed_shadow_snapshot() -> ThemeRenderSnapshot:
+    val base = aetheric_dark_theme_render_snapshot()
+    val material = ThemeMaterialSemantics(
+        desktop_fill_rgba: base.material.desktop_fill_rgba,
+        window_fill_rgba: base.material.window_fill_rgba,
+        active_title_fill_rgba: base.material.active_title_fill_rgba,
+        inactive_title_fill_rgba: base.material.inactive_title_fill_rgba,
+        surface_alpha_milli: base.material.surface_alpha_milli,
+        backdrop_blur_px: base.material.backdrop_blur_px,
+        backdrop_saturation_milli: base.material.backdrop_saturation_milli,
+        border_width_px: base.material.border_width_px,
+        border_rgba: base.material.border_rgba,
+        corner_radius_px: base.material.corner_radius_px,
+        active_shadows: [
+            ThemeShadowLayer(offset_x_px: 1, offset_y_px: 2, blur_radius_px: 3, spread_radius_px: 4, rgba: 0x40112233u32, inset: false),
+            ThemeShadowLayer(offset_x_px: -5, offset_y_px: 6, blur_radius_px: 7, spread_radius_px: 8, rgba: 0x8099AABBu32, inset: true)
+        ],
+        inactive_shadows: [
+            ThemeShadowLayer(offset_x_px: 9, offset_y_px: -10, blur_radius_px: 11, spread_radius_px: 12, rgba: 0x20445566u32, inset: true),
+            ThemeShadowLayer(offset_x_px: 13, offset_y_px: 14, blur_radius_px: 15, spread_radius_px: 16, rgba: 0x30778899u32, inset: false)
+        ],
+        font_family: base.material.font_family,
+        font_size_px: base.material.font_size_px,
+        font_weight: base.material.font_weight,
+        text_rgba: base.material.text_rgba,
+        secondary_text_rgba: base.material.secondary_text_rgba,
+        solid_fallback_rgba: base.material.solid_fallback_rgba,
+        fallback_contrast_milli: base.material.fallback_contrast_milli
+    )
+    ThemeRenderSnapshot(
+        id: base.id,
+        family_id: base.family_id,
+        source_reference: base.source_reference,
+        source_manifest_sha256: base.source_manifest_sha256,
+        material_sha256: theme_material_sha256(material),
+        composed_css: base.composed_css,
+        background_rgba: base.background_rgba,
+        foreground_rgba: base.foreground_rgba,
+        accent_rgba: base.accent_rgba,
+        material: material
+    )
 
 describe "window scene Draw IR projection":
 
@@ -117,48 +158,94 @@ describe "window scene Draw IR projection":
         expect(second.batches[2].source.style_revision).to_equal(first.batches[2].source.style_revision)
         expect(second.batches[3].source.style_revision).to_equal(first.batches[3].source.style_revision)
 
-    it "enriches WM window boxes with hit clip and z-index metadata":
+    it "keeps the no-snapshot WM Draw IR stream byte-compatible with legacy rectangles":
         reset_wm_chrome_theme()
         val composition = shared_wm_scene_draw_ir_composition(_scene(), _taskbar(), DRAW_IR_BACKEND_GPU, 1000, "09:41", 2)
-        val window_batch = composition.batches[2]
+        val window_batch = composition.batches[3]
+        val shadow = window_batch.commands[0]
         val body = window_batch.commands[1]
         val titlebar = window_batch.commands[2]
+        val theme = wm_chrome_theme()
 
-        expect(body.hit_rect.present).to_equal(true)
-        expect(body.hit_rect.width).to_equal(300)
+        expect(window_batch.commands.len()).to_equal(9)
+        expect(shadow.component_id).to_equal("win2-shadow")
+        expect(shadow.kind).to_equal(DRAW_IR_COMMAND_RECT)
+        expect(shadow.color).to_equal(theme.window_shadow)
+        expect(shadow.computed_style.len()).to_equal(0)
+        expect(shadow.hit_rect.present).to_equal(false)
+        expect(body.component_id).to_equal("win2-body")
+        expect(body.kind).to_equal(DRAW_IR_COMMAND_RECT)
+        expect(body.color).to_equal(theme.host_window_body)
         expect(body.width).to_equal(300)
         expect(body.height).to_equal(200)
-        expect(body.clip_rect.present).to_equal(true)
-        expect(body.clip_rect.height).to_equal(200)
-        expect(body.computed_style[0].key).to_equal("source")
-        expect(body.computed_style[1].value).to_equal("body")
-        expect(body.computed_style[2].key).to_equal("z-index")
-        expect(titlebar.hit_rect.height).to_equal(28)
-        expect(titlebar.computed_style[1].value).to_equal("titlebar")
-        expect(_style_value(body, "wm-theme-id")).to_equal("wm-chrome-default")
-        expect(_style_value(body, "wm-material-request")).to_equal("solid-only")
-        expect(_style_value(body, "wm-material-fallback")).to_equal("solid-only:no-theme-render-snapshot")
+        expect(body.computed_style.len()).to_equal(0)
+        expect(body.hit_rect.present).to_equal(false)
+        expect(body.clip_rect.present).to_equal(false)
+        expect(titlebar.component_id).to_equal("win2-titlebar")
+        expect(titlebar.kind).to_equal(DRAW_IR_COMMAND_RECT)
+        expect(titlebar.color).to_equal(theme.title_unfocused)
+        expect(titlebar.height).to_equal(28)
+        expect(titlebar.computed_style.len()).to_equal(0)
+        expect(window_batch.commands[3].component_id).to_equal("win2-traffic-red")
+        expect(window_batch.commands[3].color).to_equal(0xFFE74C3Cu32)
+        expect(window_batch.commands[4].component_id).to_equal("win2-traffic-yellow")
+        expect(window_batch.commands[4].color).to_equal(0xFFF1C40Fu32)
+        expect(window_batch.commands[5].component_id).to_equal("win2-traffic-green")
+        expect(window_batch.commands[5].color).to_equal(0xFF27AE60u32)
+        expect(window_batch.commands[6].component_id).to_equal("win2-title")
+        expect(window_batch.commands[6].text_value).to_equal("Window Two")
+        expect(window_batch.commands[6].x).to_equal(66)
+        expect(window_batch.commands[7].component_id).to_equal("win2-close")
+        expect(window_batch.commands[7].color).to_equal(theme.close_button)
+        expect(window_batch.commands[8].component_id).to_equal("win2-close-label")
+        expect(window_batch.commands[8].text_value).to_equal("X")
 
-    it "retains renderer-neutral glass material identity and structured requests":
+    it "projects Aetheric window material through canonical Engine2D-visible DrawIR properties":
         val snapshot = aetheric_dark_theme_render_snapshot()
         apply_theme_render_snapshot_to_wm_chrome(snapshot)
         val composition = shared_wm_scene_draw_ir_composition(_scene(), _taskbar(), DRAW_IR_BACKEND_GPU, 1000, "09:41", 2)
         val focused_body = composition.batches[3].commands[1]
+        val focused_title = composition.batches[3].commands[2]
+        val title_text = composition.batches[3].commands[6]
 
-        expect(_style_value(focused_body, "wm-theme-schema")).to_equal("theme-render-snapshot-v1")
+        expect(focused_body.color).to_equal(snapshot.material.solid_fallback_rgba)
         expect(_style_value(focused_body, "wm-theme-id")).to_equal(snapshot.id)
+        expect(_style_value(focused_body, "wm-theme-family-id")).to_equal(snapshot.family_id)
         expect(_style_value(focused_body, "wm-theme-source-reference")).to_equal(snapshot.source_reference)
         expect(_style_value(focused_body, "wm-theme-source-manifest-sha256")).to_equal(snapshot.source_manifest_sha256)
         expect(_style_value(focused_body, "wm-theme-material-sha256")).to_equal(snapshot.material_sha256)
-        expect(_style_value(focused_body, "wm-material-corner-radius-px")).to_equal("12")
-        expect(_style_value(focused_body, "wm-material-border-width-px")).to_equal("1")
-        expect(_style_value(focused_body, "wm-material-backdrop-blur-px")).to_equal("30")
-        expect(_style_value(focused_body, "wm-material-backdrop-saturation-milli")).to_equal("1700")
-        expect(_style_value(focused_body, "wm-material-shadow-count")).to_equal("1")
-        expect(_style_value(focused_body, "wm-material-shadow-0-offset-y-px")).to_equal("28")
-        expect(_style_value(focused_body, "wm-material-shadow-0-blur-radius-px")).to_equal("76")
-        expect(_style_value(focused_body, "wm-material-fallback")).to_start_with("solid-rgba-if-glass-unsupported:")
+        expect(_style_value(focused_body, "background-image")).to_equal("none")
+        expect(_style_value(focused_body, "background-image-fallback")).to_equal("solid-material")
+        expect(_style_value(focused_body, "background-image-fallback-reason")).to_equal("typed-theme-gradient-unavailable")
+        expect(_style_value(focused_body, "border-radius")).to_equal("18")
+        expect(_style_value(focused_body, "box-shadow-raw")).to_equal("0px 28px 76px 0px 1962934272")
+        expect(_style_value(focused_body, "box-shadow")).to_equal("0px 28px 1962934272")
+        expect(_style_value(focused_body, "backdrop-filter")).to_equal("blur(30px) saturate(170%)")
+        expect(_style_value(focused_body, "backdrop-filter-capability")).to_equal("unavailable")
+        expect(_style_value(focused_body, "backdrop-filter-fallback")).to_equal("solid-material")
+        expect(_style_value(focused_body, "backdrop-filter-fallback-reason")).to_equal("cpu-raster-backdrop-sampling-unavailable")
+        expect(_style_value(focused_title, "background-image")).to_equal("none")
+        expect(_style_value(focused_title, "font-family")).to_equal(snapshot.material.font_family)
+        expect(_style_value(title_text, "font-size")).to_equal("14")
+        expect(_style_value(title_text, "font-family-requested")).to_equal(snapshot.material.font_family)
+        expect(_style_value(title_text, "font-weight")).to_equal("400")
+        expect(_style_value(title_text, "color")).to_equal(snapshot.material.text_rgba.to_string())
         expect(composition.batches[3].source.style_revision).to_contain(snapshot.material_sha256)
+        reset_wm_chrome_theme()
+
+    it "keeps active and inactive ordered mixed shadows in canonical DrawIR CSS":
+        val snapshot = _mixed_shadow_snapshot()
+        apply_theme_render_snapshot_to_wm_chrome(snapshot)
+        val composition = shared_wm_scene_draw_ir_composition(_scene(), _taskbar(), DRAW_IR_BACKEND_GPU, 1000, "09:41", 2)
+        val inactive_body = composition.batches[2].commands[1]
+        val active_body = composition.batches[3].commands[1]
+
+        expect(_style_value(active_body, "box-shadow-raw")).to_equal("1px 2px 3px 4px 1074864691, inset -5px 6px 7px 8px 2157554363")
+        expect(_style_value(active_body, "box-shadow")).to_equal("1px 2px 1074864691")
+        expect(_style_value(active_body, "box-shadow-layer-count")).to_equal("2")
+        expect(_style_value(inactive_body, "box-shadow-raw")).to_equal("inset 9px -10px 11px 12px 541349222, 13px 14px 15px 16px 813140121")
+        expect(_style_value(inactive_body, "box-shadow")).to_equal("13px 14px 813140121")
+        expect(_style_value(inactive_body, "box-shadow-layer-count")).to_equal("2")
         reset_wm_chrome_theme()
 
     it "lets Simple 2D plan a GPU-targeted WM composition with CPU fallback":

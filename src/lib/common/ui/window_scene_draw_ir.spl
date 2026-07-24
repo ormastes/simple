@@ -47,6 +47,7 @@ use common.ui.window_scene.{
     shared_wm_scene_resolve_background
 }
 use common.ui.wm_chrome_theme.{active_wm_theme_render_snapshot, wm_chrome_theme, WmChromeColors}
+use common.ui.theme_render_snapshot.{ThemeRenderSnapshot, ThemeShadowLayer}
 use os.compositor.display_backend_core.{CompositorBackend, CompositorGlassCapable}
 use os.drivers.framebuffer.fb_font.{get_glyph_8x16}
 
@@ -513,63 +514,91 @@ fn _wm_draw_ir_window_opacity(window: SharedWmWindow) -> i32:
         return 1000
     930
 
-fn _wm_draw_ir_window_material_style(window: SharedWmWindow) -> [DrawIrStyleProp]:
-    if val snapshot = active_wm_theme_render_snapshot():
-        val material = snapshot.material
-        val shadows = if window.focused: material.active_shadows else: material.inactive_shadows
-        var style = [
-            draw_ir_style_prop("wm-theme-schema", "theme-render-snapshot-v1"),
-            draw_ir_style_prop("wm-theme-id", snapshot.id),
-            draw_ir_style_prop("wm-theme-family-id", snapshot.family_id),
-            draw_ir_style_prop("wm-theme-source-reference", snapshot.source_reference),
-            draw_ir_style_prop("wm-theme-source-manifest-sha256", snapshot.source_manifest_sha256),
-            draw_ir_style_prop("wm-theme-material-sha256", snapshot.material_sha256),
-            draw_ir_style_prop("wm-material-request", "window-surface-glass"),
-            draw_ir_style_prop("wm-material-surface-alpha-milli", material.surface_alpha_milli.to_string()),
-            draw_ir_style_prop("wm-material-corner-radius-px", material.corner_radius_px.to_string()),
-            draw_ir_style_prop("wm-material-border-width-px", material.border_width_px.to_string()),
-            draw_ir_style_prop("wm-material-border-rgba", material.border_rgba.to_string()),
-            draw_ir_style_prop("wm-material-backdrop-blur-px", material.backdrop_blur_px.to_string()),
-            draw_ir_style_prop("wm-material-backdrop-saturation-milli", material.backdrop_saturation_milli.to_string()),
-            draw_ir_style_prop("wm-material-shadow-count", shadows.len().to_string()),
-            draw_ir_style_prop("wm-material-fallback", "solid-rgba-if-glass-unsupported:{material.solid_fallback_rgba}")
-        ]
-        var index = 0
-        for shadow in shadows:
-            val prefix = "wm-material-shadow-{index}"
-            style.push(draw_ir_style_prop("{prefix}-offset-x-px", shadow.offset_x_px.to_string()))
-            style.push(draw_ir_style_prop("{prefix}-offset-y-px", shadow.offset_y_px.to_string()))
-            style.push(draw_ir_style_prop("{prefix}-blur-radius-px", shadow.blur_radius_px.to_string()))
-            style.push(draw_ir_style_prop("{prefix}-spread-radius-px", shadow.spread_radius_px.to_string()))
-            style.push(draw_ir_style_prop("{prefix}-rgba", shadow.rgba.to_string()))
-            style.push(draw_ir_style_prop("{prefix}-inset", if shadow.inset: "true" else: "false"))
-            index = index + 1
-        return style
-    [
-        draw_ir_style_prop("wm-theme-schema", "wm-chrome-solid-v1"),
-        draw_ir_style_prop("wm-theme-id", "wm-chrome-default"),
-        draw_ir_style_prop("wm-theme-source-reference", "builtin:common.ui.wm_chrome_theme_defaults"),
-        draw_ir_style_prop("wm-material-request", "solid-only"),
-        draw_ir_style_prop("wm-material-fallback", "solid-only:no-theme-render-snapshot")
-    ]
+fn _wm_draw_ir_opaque(color: u32) -> u32:
+    0xFF000000u32 | (color & 0x00FFFFFFu32)
 
-fn _wm_draw_ir_window_style(window: SharedWmWindow, part: text) -> [DrawIrStyleProp]:
+fn _wm_draw_ir_shadow_raw(shadows: [ThemeShadowLayer]) -> text:
+    var out = ""
+    var index = 0
+    for shadow in shadows:
+        if index > 0:
+            out = "{out}, "
+        val inset = if shadow.inset: "inset " else: ""
+        out = "{out}{inset}{shadow.offset_x_px}px {shadow.offset_y_px}px {shadow.blur_radius_px}px {shadow.spread_radius_px}px {shadow.rgba}"
+        index = index + 1
+    if out == "": "none" else: out
+
+fn _wm_draw_ir_engine_shadow(shadows: [ThemeShadowLayer]) -> text:
+    # Engine2D currently lowers one non-inset layer. The complete ordered CSS
+    # list remains in box-shadow-raw for a future material-capable backend.
+    for shadow in shadows:
+        if not shadow.inset:
+            return "{shadow.offset_x_px}px {shadow.offset_y_px}px {shadow.rgba}"
+    "none"
+
+fn _wm_draw_ir_engine_shadow_blur(shadows: [ThemeShadowLayer]) -> i32:
+    for shadow in shadows:
+        if not shadow.inset:
+            return shadow.blur_radius_px
+    0
+
+fn _wm_draw_ir_window_snapshot_style(snapshot: ThemeRenderSnapshot, window: SharedWmWindow, part: text) -> [DrawIrStyleProp]:
+    val material = snapshot.material
+    val shadows = if window.focused: material.active_shadows else: material.inactive_shadows
+    val surface_color = if part == "body": material.solid_fallback_rgba else if window.focused: _wm_draw_ir_opaque(material.active_title_fill_rgba) else: _wm_draw_ir_opaque(material.inactive_title_fill_rgba)
     var style = [
-        draw_ir_style_prop("source", "wm_scene"),
-        draw_ir_style_prop("part", part),
-        draw_ir_style_prop("z-index", "{window.z_index}"),
-        draw_ir_style_prop("focused", if window.focused: "true" else: "false")
+        draw_ir_style_prop("wm-theme-schema", "theme-render-snapshot-v1"),
+        draw_ir_style_prop("wm-theme-id", snapshot.id),
+        draw_ir_style_prop("wm-theme-family-id", snapshot.family_id),
+        draw_ir_style_prop("wm-theme-source-reference", snapshot.source_reference),
+        draw_ir_style_prop("wm-theme-source-manifest-sha256", snapshot.source_manifest_sha256),
+        draw_ir_style_prop("wm-theme-material-sha256", snapshot.material_sha256),
+        draw_ir_style_prop("wm-material-request", "window-surface-glass"),
+        draw_ir_style_prop("wm-material-surface-alpha-milli", material.surface_alpha_milli.to_string()),
+        # These are the same canonical DrawIR/CSS keys emitted by the web
+        # layout producer. Engine2D consumes border radius, border sides, one
+        # compatible shadow, and font size directly.
+        draw_ir_style_prop("background-color", surface_color.to_string()),
+        # ThemeRenderSnapshot does not yet carry typed gradient stops. Do not
+        # invent a backend palette from one package's current CSS.
+        draw_ir_style_prop("background-image", "none"),
+        draw_ir_style_prop("background-image-capability", "unavailable"),
+        draw_ir_style_prop("background-image-fallback", "solid-material"),
+        draw_ir_style_prop("background-image-fallback-reason", "typed-theme-gradient-unavailable"),
+        draw_ir_style_prop("border-radius", material.corner_radius_px.to_string()),
+        draw_ir_style_prop("border-top-width", material.border_width_px.to_string()),
+        draw_ir_style_prop("border-right-width", material.border_width_px.to_string()),
+        draw_ir_style_prop("border-bottom-width", material.border_width_px.to_string()),
+        draw_ir_style_prop("border-left-width", material.border_width_px.to_string()),
+        draw_ir_style_prop("border-top-color", material.border_rgba.to_string()),
+        draw_ir_style_prop("border-right-color", material.border_rgba.to_string()),
+        draw_ir_style_prop("border-bottom-color", material.border_rgba.to_string()),
+        draw_ir_style_prop("border-left-color", material.border_rgba.to_string()),
+        draw_ir_style_prop("backdrop-filter", "blur({material.backdrop_blur_px}px) saturate({material.backdrop_saturation_milli / 10}%)"),
+        # Engine2D has no backdrop sampling pass. Keep the requested material
+        # inspectable and explicitly realize the opaque fallback above.
+        draw_ir_style_prop("backdrop-filter-capability", "unavailable"),
+        draw_ir_style_prop("backdrop-filter-fallback", "solid-material"),
+        draw_ir_style_prop("backdrop-filter-fallback-reason", "cpu-raster-backdrop-sampling-unavailable")
     ]
-    for prop in _wm_draw_ir_window_material_style(window):
-        style.push(prop)
+    if part == "body":
+        style.push(draw_ir_style_prop("box-shadow", _wm_draw_ir_engine_shadow(shadows)))
+        style.push(draw_ir_style_prop("box-shadow-raw", _wm_draw_ir_shadow_raw(shadows)))
+        style.push(draw_ir_style_prop("box-shadow-layer-count", shadows.len().to_string()))
+        style.push(draw_ir_style_prop("box-shadow-blur-radius", _wm_draw_ir_engine_shadow_blur(shadows).to_string()))
+    else:
+        style.push(draw_ir_style_prop("color", material.text_rgba.to_string()))
+        style.push(draw_ir_style_prop("font-family", material.font_family))
+        style.push(draw_ir_style_prop("font-size", material.font_size_px.to_string()))
+        style.push(draw_ir_style_prop("font-weight", material.font_weight.to_string()))
     style
 
-fn _wm_draw_ir_window_box(window: SharedWmWindow, component_id: text, part: text, x: i32, y: i32, width: i32, height: i32, color: u32) -> DrawIrCommand:
+fn _wm_draw_ir_window_box(snapshot: ThemeRenderSnapshot, window: SharedWmWindow, component_id: text, part: text, x: i32, y: i32, width: i32, height: i32, color: u32) -> DrawIrCommand:
     val border_rect = draw_ir_rect_bounds(x, y, width, height)
     val content_rect = draw_ir_rect_bounds(x, y, width, height)
     val hit_rect = draw_ir_rect_bounds(x, y, width, height)
     val clip_rect = draw_ir_rect_bounds(0, 0, window.width, window.height)
-    val computed_style = _wm_draw_ir_window_style(window, part)
+    val computed_style = _wm_draw_ir_window_snapshot_style(snapshot, window, part)
     draw_ir_box_with_style(
         component_id,
         x,
@@ -600,6 +629,36 @@ fn _wm_draw_ir_text(component_id: text, x: i32, legacy_y: i32, box_y: i32, box_h
         draw_ir_text(component_id, x, legacy_y, value, color)
     if command.height > 0:
         command.y = box_y + (box_height - command.height) / 2
+    command
+
+fn _wm_draw_ir_window_title_text(snapshot: ThemeRenderSnapshot, window: SharedWmWindow, color: u32) -> DrawIrCommand:
+    val family = snapshot.material.font_family
+    val size = snapshot.material.font_size_px
+    val metrics = resolve_font_metrics_with_language(family, window.title, size, window.language)
+    var command = if metrics.valid and metrics.shaping_required:
+        draw_ir_text_shaped_font("{window.window_id}-title", 66, 19, window.title, color, metrics.family, metrics.identity, metrics.advances, metrics.width, metrics.line_height, size, metrics.glyph_run)
+    else if metrics.valid:
+        draw_ir_text_resolved_font("{window.window_id}-title", 66, 19, window.title, color, metrics.family, metrics.identity, metrics.advances, metrics.width, metrics.line_height, size)
+    else:
+        draw_ir_text("{window.window_id}-title", 66, 19, window.title, color)
+    if command.height > 0:
+        command.y = (28 - command.height) / 2
+    var style = command.computed_style
+    var has_family = false
+    var has_size = false
+    for prop in style:
+        if prop.key == "font-family":
+            has_family = true
+        if prop.key == "font-size":
+            has_size = true
+    if not has_family:
+        style.push(draw_ir_style_prop("font-family", family))
+    if not has_size:
+        style.push(draw_ir_style_prop("font-size", size.to_string()))
+    style.push(draw_ir_style_prop("font-family-requested", family))
+    style.push(draw_ir_style_prop("font-weight", snapshot.material.font_weight.to_string()))
+    style.push(draw_ir_style_prop("color", snapshot.material.text_rgba.to_string()))
+    command.computed_style = style
     command
 
 fn _wm_draw_ir_min_i32(a: i32, b: i32) -> i32:
@@ -796,21 +855,37 @@ fn _wm_draw_ir_window_batch(scene: SharedWmScene, window: SharedWmWindow, backen
     # rows are actually black and DO render, painting over the safe fallback.
     # Restored to the single flat box below until the underlying compiler bug
     # is fixed; do not re-attempt this pattern without new pixel evidence.
+    var commands: [DrawIrCommand] = [
+        # Shadow/buttons remain legacy primitives. Window material belongs only
+        # to the top-level body and titlebar surfaces, never arbitrary controls.
+        draw_ir_rect("{window.window_id}-shadow", WM_WINDOW_SHADOW_OFFSET_X, WM_WINDOW_SHADOW_OFFSET_Y, window.width, window.height, theme.window_shadow)
+    ]
+    if val snapshot = active_wm_theme_render_snapshot():
+        commands.push(_wm_draw_ir_window_box(snapshot, window, "{window.window_id}-body", "body", 0, 0, window.width, window.height, snapshot.material.solid_fallback_rgba))
+        val title_fallback = if window.focused: _wm_draw_ir_opaque(snapshot.material.active_title_fill_rgba) else: _wm_draw_ir_opaque(snapshot.material.inactive_title_fill_rgba)
+        commands.push(_wm_draw_ir_window_box(snapshot, window, "{window.window_id}-titlebar", "titlebar", 0, 0, window.width, 28, title_fallback))
+        commands.push(draw_ir_rect("{window.window_id}-traffic-red", 12, 9, 10, 10, 0xFFE74C3Cu32))
+        commands.push(draw_ir_rect("{window.window_id}-traffic-yellow", 30, 9, 10, 10, 0xFFF1C40Fu32))
+        commands.push(draw_ir_rect("{window.window_id}-traffic-green", 48, 9, 10, 10, 0xFF27AE60u32))
+        commands.push(_wm_draw_ir_window_title_text(snapshot, window, snapshot.material.text_rgba))
+        commands.push(draw_ir_rect("{window.window_id}-close", window.width - 24, 2, 20, 20, theme.close_button))
+        commands.push(_wm_draw_ir_text("{window.window_id}-close-label", window.width - 18, 17, 2, 20, "X", snapshot.material.text_rgba, "und"))
+    else:
+        # No resolved package means the historic DrawIR stream is retained
+        # exactly: plain RECT commands with no style metadata or geometry box.
+        commands.push(draw_ir_rect("{window.window_id}-body", 0, 0, window.width, window.height, theme.host_window_body))
+        commands.push(draw_ir_rect("{window.window_id}-titlebar", 0, 0, window.width, 28, title_color))
+        commands.push(draw_ir_rect("{window.window_id}-traffic-red", 12, 9, 10, 10, 0xFFE74C3Cu32))
+        commands.push(draw_ir_rect("{window.window_id}-traffic-yellow", 30, 9, 10, 10, 0xFFF1C40Fu32))
+        commands.push(draw_ir_rect("{window.window_id}-traffic-green", 48, 9, 10, 10, 0xFF27AE60u32))
+        commands.push(_wm_draw_ir_text("{window.window_id}-title", 66, 19, 0, 28, window.title, theme.text_primary, window.language))
+        commands.push(draw_ir_rect("{window.window_id}-close", window.width - 24, 2, 20, 20, theme.close_button))
+        commands.push(_wm_draw_ir_text("{window.window_id}-close-label", window.width - 18, 17, 2, 20, "X", theme.text_primary, "und"))
     draw_ir_batch_with_source(
         "window-{window.window_id}",
         backend_target,
         embedding,
-        [
-            _wm_draw_ir_window_box(window, "{window.window_id}-shadow", "shadow", WM_WINDOW_SHADOW_OFFSET_X, WM_WINDOW_SHADOW_OFFSET_Y, window.width, window.height, theme.window_shadow),
-            _wm_draw_ir_window_box(window, "{window.window_id}-body", "body", 0, 0, window.width, window.height, theme.host_window_body),
-            _wm_draw_ir_window_box(window, "{window.window_id}-titlebar", "titlebar", 0, 0, window.width, 28, title_color),
-            draw_ir_rect("{window.window_id}-traffic-red", 12, 9, 10, 10, 0xFFE74C3Cu32),
-            draw_ir_rect("{window.window_id}-traffic-yellow", 30, 9, 10, 10, 0xFFF1C40Fu32),
-            draw_ir_rect("{window.window_id}-traffic-green", 48, 9, 10, 10, 0xFF27AE60u32),
-            _wm_draw_ir_text("{window.window_id}-title", 66, 19, 0, 28, window.title, theme.text_primary, window.language),
-            draw_ir_rect("{window.window_id}-close", window.width - 24, 2, 20, 20, theme.close_button),
-            _wm_draw_ir_text("{window.window_id}-close-label", window.width - 18, 17, 2, 20, "X", theme.text_primary, "und")
-        ],
+        commands,
         _wm_draw_ir_source("wm.window.{window.window_id}", "wm.window", _wm_draw_ir_window_revision(window))
     )
 
