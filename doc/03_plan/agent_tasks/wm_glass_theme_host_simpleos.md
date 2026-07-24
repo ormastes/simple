@@ -358,3 +358,16 @@ is historical.
 10. Implement the missing ARM64 live QMP input/capture report and the admitted
     x86/ARM SIMD capture comparator. Static ISA receipts and a one-frame RAMFB
     screendump remain prerequisites, not completion evidence.
+
+## Current admission boundary — 2026-07-25
+
+- Exact-current Stage 2/3 and the dedicated aggregate-return fixture pass.
+  Stage 4 source loading is repaired but the full CLI is still blocked by the
+  known parse-memory kill; do not run host or QEMU with Stage 3 or a stale CLI.
+- ARM64 now has a reviewed live input/capture wrapper, but its live system
+  scenario remains intentionally red until a host-green wrapper run creates
+  the evidence manifest and captures.
+- Static x86/ARM SIMD kernel and x86 WM ownership preflights pass. They do not
+  substitute for guest execution or cross-ISA capture comparison.
+- Rounded package gradients remain blocked on native backend primitives
+  described in the tracked bug. Do not restore either rejected fallback.

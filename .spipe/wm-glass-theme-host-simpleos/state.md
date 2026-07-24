@@ -341,3 +341,26 @@ implementation-aggregate-return-source-accepted-runtime-proof-pending
   ABI-neutral source/test correction under high-capability review; shadow
   raster semantics, capture correlation, native event ingress, ARM live
   input/capture, and cross-ISA SIMD comparison remain separate required gates.
+- continuation-2026-07-25-post-review-gates: High review accepted the Rust MIR
+  correction that boxes signed `i8` RuntimeValues as integers rather than
+  booleans; production parser-to-HIR-to-MIR tests cover tuple, array, print,
+  interpolation, and indexed-store paths. Runtime aggregate-suite confirmation
+  awaits the next fresh bootstrap because the retained Stage 3 compiler
+  predates this fix. The ARM64 live evidence lane now has a high-reviewed,
+  fail-closed wrapper for canonical current-source build, bounded QEMU launch,
+  exact key and pointer device-to-WM-to-frame causality, native RAMFB
+  screendumps, nonblank/distinct capture checks, and before/after provenance
+  manifests. Its live system scenario deliberately remains red until the
+  wrapper produces host-green evidence. Static x86/ARM SIMD kernel checks and
+  the x86 WM ownership/preflight pass; no QEMU was started because the host
+  full-CLI gate remains closed.
+- continuation-2026-07-25-rounded-gradient-final-cycle: Three reviewed
+  implementation cycles rejected a per-row GPU submission and then a hidden
+  full-frame readback/allocation/upload fallback. All rejected Engine2D source,
+  API, backend, and test changes were removed. The remaining root fix requires
+  canonical-silhouette native Metal/Vulkan kernels, typed Vulkan state
+  reassignment, and genuine x86 SSE2 plus ARM NEON receipts; the precise frozen
+  contract is recorded in
+  `doc/08_tracking/bug/engine2d_rounded_gradient_requires_native_backend_primitive_2026-07-25.md`.
+  The cycle cap is reached, so square-corner gradient realization remains an
+  explicit blocker rather than a falsely admitted approximation.
