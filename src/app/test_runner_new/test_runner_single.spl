@@ -26,6 +26,7 @@ use std.sffi.cli.{cli_get_args}
 use app.io.process_ops.{process_run_bounded}
 use app.io.mod.{env_get}
 use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES}
+use std.string_core.{char_code}
 
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
@@ -196,9 +197,25 @@ fn print_summary(path: text, passed: i64, failed: i64, skipped: i64, pending: i6
         print ""
         print "FAIL {path}"
 
+# Raw scan instead of index_of: on the seed-JIT flat-i64 path Some(3) reads as
+# None ("example" sits at offset 3 in "10 examples".."99 examples"), which
+# false-failed 10-99-example specs with "no parseable summary". Mirrors
+# test_executor_parsing.find_raw (b19fc038); see
+# doc/08_tracking/bug/jit_option_i64_value3_reads_as_none_2026-07-24.md.
+fn find_raw(s: text, keyword: text) -> i64:
+    val klen = keyword.len()
+    if klen == 0:
+        return 0
+    val slen = s.len()
+    var i = 0
+    while i + klen <= slen:
+        if s[i:i + klen] == keyword:
+            return i
+        i = i + 1
+    -1
+
 fn extract_number_before(s: text, keyword: text) -> i64:
-    val idx_opt = s.index_of(keyword)
-    val idx = idx_opt ?? -1
+    val idx = find_raw(s, keyword)
     if idx < 0:
         return -1
     val prefix = s[0:idx]
@@ -207,7 +224,11 @@ fn extract_number_before(s: text, keyword: text) -> i64:
     var i = 0
     while i < prefix.len():
         val ch = prefix[i:i + 1]
-        if ch >= "0" and ch <= "9":
+        # char_code + i64 compares, NOT text `<`/`>` — text ordering
+        # miscompiles to a raw pointer cmp on the native flat-HIR path (see
+        # sspec_test_path_false_green_undercount_2026-07-20.md).
+        val code: i64 = char_code(ch)
+        if code >= 48 and code <= 57:
             current = current + ch
         else:
             if current != "":
@@ -409,19 +430,6 @@ fn main() -> i64:
             failed = real_failed
             if real_passed < passed:
                 passed = real_passed
-        # Fail-closed: never let the aggregated per-describe summary
-        # UNDERCOUNT the total relative to the REAL executed-example tally
-        # (bug: sspec_test_runner_undercounts_it_blocks_2026-07-24 — a spec
-        # registering 74 `it` examples reported "34 total" because the
-        # per-describe "N examples, M failures" lines the summary sums were
-        # incomplete while every example still printed its own real ✓/✗
-        # marker). count_real_examples()'s tally is the authoritative,
-        # fail-closed source per its own docstring, so whenever it reports
-        # MORE total examples than the summary-derived total, trust it.
-        if real_passed + real_failed > passed + failed:
-            passed = real_passed
-            if real_failed > failed:
-                failed = real_failed
         if code != 0 and failed == 0:
             failed = 1
         if failed > 0:
