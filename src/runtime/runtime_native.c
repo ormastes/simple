@@ -1512,7 +1512,7 @@ int64_t rt_string_chars(int64_t string) {
         uint64_t width = 1;
         if (lead >= 0xc2 && lead <= 0xdf && i + 2 <= s->len) width = 2;
         else if (lead >= 0xe0 && lead <= 0xef && i + 3 <= s->len) width = 3;
-        else if (lead >= 0xf0 && lead <= 0xf7 && i + 4 <= s->len) width = 4;
+        else if (lead >= 0xf0 && lead <= 0xf4 && i + 4 <= s->len) width = 4;
         rt_array_push(chars, rt_string_new((const uint8_t*)s->data + i, width));
         i += width;
     }
