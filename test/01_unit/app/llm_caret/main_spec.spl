@@ -9,15 +9,18 @@
 #     dispatch fn
 #   - server hardening: bearer auth, size cap, rate limit (guard_request)
 
+use app.io.mod.{env_get, env_set, dir_remove_all}
 use app.llm_caret.types.{Message, new_user_message}
-use app.llm_caret.session.{Session}
+use app.llm_caret.session.{Session, save_session, load_session}
 use app.llm_caret.provider.{LLMResponse, new_llm_error}
 use app.llm_caret.tools.{ModelResponse, default_policy}
 use app.llm_caret.chat.{run_agent_loop}
 use app.llm_caret.main.{
     MainArgs, parse_main_args, build_model_response,
     main_configure, main_session_id, _slash_on_new, _slash_on_provider,
-    _slash_on_hidden_command,
+    _resolve_workspace, _build_policy, _slash_on_model, _slash_on_sessions,
+    _hidden_commands_enabled, _slash_on_resume, _on_persist,
+    _build_session_hooks, _slash_on_hidden_command,
     resolve_resume_backend, apply_resumed_session,
     proxy_handle, status_for_path,
     guard_request, bearer_ok, rate_limit_check, rate_limit_reset,
@@ -25,6 +28,20 @@ use app.llm_caret.main.{
 }
 
 val WS_ROOT = "build/tmp/llm_caret_main_test"
+val MAIN_SESSION_ROOT = WS_ROOT + "/session-home"
+
+fn _reset_main_state():
+    main_configure("dummy", "dummy-hello", "", "", "", "", "", 0)
+
+fn _isolate_main_home(path: text) -> text:
+    val original = env_get("HOME") ?? ""
+    dir_remove_all(path)
+    env_set("HOME", path)
+    original
+
+fn _restore_main_home(original: text, path: text):
+    env_set("HOME", original)
+    dir_remove_all(path)
 
 fn _llm_ok(content: text, raw: text) -> LLMResponse:
     LLMResponse(
@@ -94,24 +111,96 @@ describe "parse_main_args":
         val a = parse_main_args(["--bogus-flag", "--another"])
         expect(a.unknown).to_equal("--bogus-flag")
 
+describe "workspace and permission policy resolution":
+    it "should prefer the explicit workspace without reading process state":
+        val args = parse_main_args([
+            "--workspace", "build/tmp/llm_caret_main_test/explicit"
+        ])
+        expect(_resolve_workspace(args)).to_equal(
+            "build/tmp/llm_caret_main_test/explicit"
+        )
+
+    it "should resolve the workspace from PWD and restore the environment":
+        val original = env_get("PWD") ?? ""
+        val changed = env_set(
+            "PWD", "build/tmp/llm_caret_main_test/pwd-fixture"
+        )
+        val workspace = _resolve_workspace(parse_main_args([]))
+        val restored = env_set("PWD", original)
+        expect(changed).to_be(true)
+        expect(restored).to_be(true)
+        expect(workspace).to_equal(
+            "build/tmp/llm_caret_main_test/pwd-fixture"
+        )
+
+    it "should use dot when PWD and explicit workspace are empty":
+        val original = env_get("PWD") ?? ""
+        val changed = env_set("PWD", "")
+        val workspace = _resolve_workspace(parse_main_args([]))
+        val restored = env_set("PWD", original)
+        expect(changed).to_be(true)
+        expect(restored).to_be(true)
+        expect(workspace).to_equal(".")
+
+    it "should build the default restricted policy":
+        val policy = _build_policy(
+            parse_main_args([]), "build/tmp/caret-policy/default///"
+        )
+        expect(policy.workspace_root).to_equal(
+            "build/tmp/caret-policy/default"
+        )
+        expect(policy.default_mode).to_equal("ask")
+        expect(policy.allow_all).to_be(false)
+        expect(policy.interactive).to_be(false)
+
+    it "should build the explicit allow-all policy":
+        val policy = _build_policy(
+            parse_main_args(["--dangerously-allow-all"]),
+            "build/tmp/caret-policy/allow-all/"
+        )
+        expect(policy.workspace_root).to_equal(
+            "build/tmp/caret-policy/allow-all"
+        )
+        expect(policy.default_mode).to_equal("allow")
+        expect(policy.allow_all).to_be(true)
+        expect(policy.interactive).to_be(false)
+
 describe "main_configure / main_session_id":
     it "should round-trips the session id set by main_configure":
         main_configure("claude_cli", "m", "", "", "claude", "", "seeded-session", 0)
-        expect(main_session_id()).to_equal("seeded-session")
+        val session_id = main_session_id()
+        _reset_main_state()
+        expect(session_id).to_equal("seeded-session")
 
     it "should clear the provider session for a new conversation":
         main_configure("claude_cli", "sonnet", "", "", "claude", "", "provider-session", 0)
         val new_id = _slash_on_new()
+        val session_id = main_session_id()
+        _reset_main_state()
         expect(new_id.starts_with("sess-")).to_be(true)
-        expect(main_session_id()).to_equal("")
+        expect(session_id).to_equal("")
 
     it "should refresh provider defaults and clear a foreign provider session":
         main_configure("claude_cli", "sonnet", "", "", "claude", "", "provider-session", 0)
         val changed = _slash_on_provider("dummy")
+        val session_id = main_session_id()
+        _reset_main_state()
         expect(changed.accepted).to_be(true)
         expect(changed.provider).to_equal("dummy")
         expect(changed.model).to_equal("dummy-hello")
-        expect(main_session_id()).to_equal("")
+        expect(session_id).to_equal("")
+
+    it "should update the active model through the production model hook":
+        main_configure(
+            "dummy", "before-model", "", "", "", "",
+            "provider-session", 0
+        )
+        val message = _slash_on_model("after-model")
+        val observed = _slash_on_provider("not-a-provider")
+        _reset_main_state()
+        expect(message).to_equal("model set to after-model")
+        expect(observed.accepted).to_be(false)
+        expect(observed.model).to_equal("after-model")
 
 describe "resume backend resolution":
     it "should restore the saved provider model and provider session by default":
@@ -152,12 +241,14 @@ describe "production session restoration":
             messages: [new_user_message("restored")],
             updated_at_ms: 0
         ))
+        val provider_session_id = main_session_id()
+        _reset_main_state()
         expect(resumed.found).to_be(true)
         expect(resumed.provider).to_equal("dummy")
         expect(resumed.model).to_equal("dummy-hello")
         expect(resumed.session_id).to_equal("saved-app-session")
         expect(resumed.messages.len()).to_equal(1)
-        expect(main_session_id()).to_equal("saved-provider-session")
+        expect(provider_session_id).to_equal("saved-provider-session")
 
     it "should reject an invalid saved provider without mutating the session":
         main_configure(
@@ -172,9 +263,176 @@ describe "production session restoration":
             messages: [],
             updated_at_ms: 0
         ))
+        val provider_session_id = main_session_id()
+        _reset_main_state()
         expect(rejected.found).to_be(false)
         expect(rejected.message).to_contain("unknown provider")
-        expect(main_session_id()).to_equal("keep-provider-session")
+        expect(provider_session_id).to_equal("keep-provider-session")
+
+describe "production session hook effects":
+    it "should list no sessions and then the saved session under isolated HOME":
+        val fixture_home = MAIN_SESSION_ROOT + "/list"
+        val original_home = _isolate_main_home(fixture_home)
+        val empty = _slash_on_sessions()
+        val saved = save_session(Session(
+            id: "listed-session", provider: "dummy", model: "dummy-hello",
+            provider_session_id: "", messages: [], updated_at_ms: 1
+        ))
+        val populated = _slash_on_sessions()
+        _restore_main_home(original_home, fixture_home)
+        expect(empty).to_equal("No saved sessions.")
+        expect(saved).to_be(true)
+        expect(populated).to_contain("Sessions:")
+        expect(populated).to_contain("listed-session")
+
+    it "should report a missing session without changing runtime state":
+        val fixture_home = MAIN_SESSION_ROOT + "/resume-missing"
+        val original_home = _isolate_main_home(fixture_home)
+        main_configure(
+            "dummy", "dummy-hello", "", "", "", "",
+            "keep-provider-session", 0
+        )
+        val resumed = _slash_on_resume("missing-session")
+        val provider_session_id = main_session_id()
+        _reset_main_state()
+        _restore_main_home(original_home, fixture_home)
+        expect(resumed.found).to_be(false)
+        expect(resumed.message).to_contain(
+            "no saved session 'missing-session'"
+        )
+        expect(provider_session_id).to_equal("keep-provider-session")
+
+    it "should resume a saved provider model transcript and provider session":
+        val fixture_home = MAIN_SESSION_ROOT + "/resume-found"
+        val original_home = _isolate_main_home(fixture_home)
+        val saved = save_session(Session(
+            id: "resume-session",
+            provider: "claude_cli",
+            model: "claude-model-fixture",
+            provider_session_id: "provider-session-fixture",
+            messages: [new_user_message("restored fixture")],
+            updated_at_ms: 2
+        ))
+        main_configure(
+            "dummy", "dummy-hello", "", "", "", "", "old-session", 0
+        )
+        val resumed = _slash_on_resume("resume-session")
+        val provider_session_id = main_session_id()
+        _reset_main_state()
+        _restore_main_home(original_home, fixture_home)
+        expect(saved).to_be(true)
+        expect(resumed.found).to_be(true)
+        expect(resumed.provider).to_equal("claude_cli")
+        expect(resumed.model).to_equal("claude-model-fixture")
+        expect(resumed.messages.len()).to_equal(1)
+        expect(resumed.messages[0].content).to_equal("restored fixture")
+        expect(provider_session_id).to_equal("provider-session-fixture")
+
+    it "should persist the complete active backend and conversation":
+        val fixture_home = MAIN_SESSION_ROOT + "/persist"
+        val original_home = _isolate_main_home(fixture_home)
+        main_configure(
+            "claude_cli", "claude-model-fixture", "", "", "claude", "",
+            "provider-session-fixture", 0
+        )
+        _on_persist(
+            "persisted-session",
+            [Message(role: "user", content: "persisted fixture")]
+        )
+        val loaded = load_session("persisted-session")
+        var found = false
+        var provider = ""
+        var model = ""
+        var provider_session = ""
+        var content = ""
+        match loaded:
+            Some(sess):
+                found = true
+                provider = sess.provider
+                model = sess.model
+                provider_session = sess.provider_session_id
+                if sess.messages.len() > 0:
+                    content = sess.messages[0].content
+            nil:
+                found = false
+        _reset_main_state()
+        _restore_main_home(original_home, fixture_home)
+        expect(found).to_be(true)
+        expect(provider).to_equal("claude_cli")
+        expect(model).to_equal("claude-model-fixture")
+        expect(provider_session).to_equal("provider-session-fixture")
+        expect(content).to_equal("persisted fixture")
+
+    it "should expose hidden commands only for explicit true values":
+        val original = env_get("LLM_CARET_ENABLE_HIDDEN_COMMANDS") ?? ""
+        val disabled_set = env_set(
+            "LLM_CARET_ENABLE_HIDDEN_COMMANDS", "0"
+        )
+        val disabled = _hidden_commands_enabled()
+        val one_set = env_set("LLM_CARET_ENABLE_HIDDEN_COMMANDS", "1")
+        val numeric_enabled = _hidden_commands_enabled()
+        val true_set = env_set(
+            "LLM_CARET_ENABLE_HIDDEN_COMMANDS", "TRUE"
+        )
+        val word_enabled = _hidden_commands_enabled()
+        val restored = env_set(
+            "LLM_CARET_ENABLE_HIDDEN_COMMANDS", original
+        )
+        expect(disabled_set).to_be(true)
+        expect(one_set).to_be(true)
+        expect(true_set).to_be(true)
+        expect(restored).to_be(true)
+        expect(disabled).to_be(false)
+        expect(numeric_enabled).to_be(true)
+        expect(word_enabled).to_be(true)
+
+    it "should wire every session callback to the production implementation":
+        val fixture_home = MAIN_SESSION_ROOT + "/hooks"
+        val original_home = _isolate_main_home(fixture_home)
+        val original_hidden = env_get("LLM_CARET_ENABLE_HIDDEN_COMMANDS") ?? ""
+        val hidden_set = env_set(
+            "LLM_CARET_ENABLE_HIDDEN_COMMANDS", "true"
+        )
+        main_configure(
+            "dummy", "dummy-hello", "", "", "", "",
+            "hook-provider-session", 0
+        )
+        val hooks = _build_session_hooks("hook-active-session")
+        val model_message = hooks.on_model("hook-model")
+        val provider_result = hooks.on_provider("not-a-provider")
+        val empty_sessions = hooks.on_sessions()
+        val new_id = hooks.on_new()
+        val missing_resume = hooks.on_resume("missing-hook-session")
+        val hidden_message = hooks.on_hidden_command(
+            "debug-tool-call",
+            "{\"type\":\"tool_use\",\"id\":\"hook-call\"," +
+            "\"name\":\"bash\",\"input\":{}}"
+        )
+        hooks.on_persist(
+            "hook-persisted-session",
+            [Message(role: "user", content: "hook fixture")]
+        )
+        val populated_sessions = hooks.on_sessions()
+        val resumed = hooks.on_resume("hook-persisted-session")
+        val hidden_restored = env_set(
+            "LLM_CARET_ENABLE_HIDDEN_COMMANDS", original_hidden
+        )
+        _reset_main_state()
+        _restore_main_home(original_home, fixture_home)
+        expect(hidden_set).to_be(true)
+        expect(hidden_restored).to_be(true)
+        expect(hooks.session_id).to_equal("hook-active-session")
+        expect(hooks.hidden_commands_enabled).to_be(true)
+        expect(model_message).to_equal("model set to hook-model")
+        expect(provider_result.accepted).to_be(false)
+        expect(provider_result.model).to_equal("hook-model")
+        expect(empty_sessions).to_equal("No saved sessions.")
+        expect(new_id).to_start_with("sess-")
+        expect(missing_resume.found).to_be(false)
+        expect(hidden_message).to_contain("id=hook-call")
+        expect(populated_sessions).to_contain("hook-persisted-session")
+        expect(resumed.found).to_be(true)
+        expect(resumed.model).to_equal("hook-model")
 
 describe "build_model_response":
     it "should map a plain-text response with no tool_use blocks":
@@ -216,6 +474,7 @@ describe "scripted plain-mode conversation (end-to-end via chat.run_agent_loop)"
         SCRIPT_TURN = 0
         val p = default_policy(WS_ROOT)
         val result = run_agent_loop(p, [new_user_message("do the thing")], _scripted_responder, 10)
+        SCRIPT_TURN = 0
         expect(result.tool_calls_made).to_equal(1)
         expect(result.final_text).to_equal("final answer")
         expect(result.stopped_reason).to_equal("end_turn")

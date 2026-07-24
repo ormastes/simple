@@ -360,29 +360,30 @@ fn exec_list_dir(policy: PermissionPolicy, input: text) -> ToolResult:
 
 # Minimal `*` glob matcher on a single name.
 fn _glob_match(pattern: text, name: text) -> bool:
-    if _idx(pattern, "*") < 0:
-        return pattern == name
-    val parts = pattern.split("*")
-    var pos = 0
-    var first = true
-    var idx = 0
-    for part in parts:
-        if part == "":
-            first = false
-            idx = idx + 1
-            continue
-        val rel = _idx(name.substring(pos), part)
-        if rel < 0:
+    var pattern_i = 0
+    var name_i = 0
+    var last_star = -1
+    var star_match_i = 0
+    while name_i < name.len():
+        if pattern_i < pattern.len() and pattern[pattern_i] == name[name_i]:
+            pattern_i = pattern_i + 1
+            name_i = name_i + 1
+        elif pattern_i < pattern.len() and pattern[pattern_i] == "*":
+            last_star = pattern_i
+            pattern_i = pattern_i + 1
+            star_match_i = name_i
+        elif last_star >= 0:
+            # Retry the pattern segment after the most recent star one byte
+            # later. This is the bounded backtracking needed for suffixes such
+            # as `*a` vs `aa` and repeated segments such as `a*a` vs `aaa`.
+            pattern_i = last_star + 1
+            star_match_i = star_match_i + 1
+            name_i = star_match_i
+        else:
             return false
-        if first and rel != 0:
-            return false
-        pos = pos + rel + part.len()
-        first = false
-        idx = idx + 1
-    # if pattern does not end with '*', require we consumed to the end
-    if not pattern.ends_with("*"):
-        return pos == name.len()
-    true
+    while pattern_i < pattern.len() and pattern[pattern_i] == "*":
+        pattern_i = pattern_i + 1
+    pattern_i == pattern.len()
 
 fn exec_glob(policy: PermissionPolicy, input: text) -> ToolResult:
     val pattern = _json_get_str(input, "pattern")

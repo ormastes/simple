@@ -1,430 +1,321 @@
-# Config Specification
+# LLM Caret Config Unit Spec
 
-> 1. reset config
+> Source-synchronized unit manual. The current self-hosted SSpec runner is
+> blocked before trustworthy scenario execution, so this document records
+> 12 active scenarios and 0 executed scenarios.
 
-<!-- sdn-diagram:id=config_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
+| Tests | Active | Skipped | Pending | Executed |
+|------:|-------:|--------:|--------:|---------:|
+| 12 | 12 | 0 | 0 | 0 |
 
-```sdn id=config_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
+**Executable source:** `test/01_unit/app/llm_caret/config_spec.spl`
 
-config_spec
-```
+## should report unloaded state until defaults are loaded
 
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=config_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 20 | 20 | 0 | 0 |
-
-<details>
-<summary>Full Scenario Manual</summary>
-
-# Config Specification
-
-## Scenarios
-
-### Config Defaults
-
-#### has default provider
-
-1. reset config
-   - Expected: DEFAULT_PROVIDER equals `claude_cli`
-
+**Group:** production config defaults
 
 <details>
 <summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 reset_config()
-expect(DEFAULT_PROVIDER).to_equal("claude_cli")
+val before = config_loaded()
+load_defaults()
+val after = config_loaded()
+reset_config()
+expect(before).to_be(false)
+expect(after).to_be(true)
 ```
 
 </details>
 
-#### has default history file
+## should expose the default provider and history settings
 
-1. reset config
-   - Expected: DEFAULT_HISTORY_FILE equals `.llm_caret_history.sdn`
-
+**Group:** production config defaults
 
 <details>
 <summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 reset_config()
-expect(DEFAULT_HISTORY_FILE).to_equal(".llm_caret_history.sdn")
+val provider = config_default_provider()
+val history_file = config_history_file()
+val max_history = config_max_history()
+reset_config()
+expect(provider).to_equal("claude_cli")
+expect(history_file).to_equal(".llm_caret_history.sdn")
+expect(max_history).to_equal(100)
 ```
 
 </details>
 
-#### has default max history
+## should expose the default Claude and OpenCode CLI settings
 
-1. reset config
-   - Expected: DEFAULT_MAX_HISTORY equals `100`
-
+**Group:** production config defaults
 
 <details>
 <summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 reset_config()
-expect(DEFAULT_MAX_HISTORY).to_equal(100)
+val claude_path = config_claude_cli_path()
+val claude_model = config_claude_cli_model()
+val opencode_path = config_opencode_cli_path()
+val opencode_model = config_opencode_cli_model()
+reset_config()
+expect(claude_path).to_equal("claude")
+expect(claude_model).to_equal("claude-sonnet-4-20250514")
+expect(opencode_path).to_equal("opencode")
+expect(opencode_model).to_equal("")
 ```
 
 </details>
 
-#### has default claude cli path
+## should expose the default API provider settings
 
-1. reset config
-   - Expected: CLAUDE_CLI_PATH equals `claude`
-
+**Group:** production config defaults
 
 <details>
 <summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 reset_config()
-expect(CLAUDE_CLI_PATH).to_equal("claude")
+val claude_url = config_claude_api_base_url()
+val claude_model = config_claude_api_model()
+val openai_url = config_openai_base_url()
+val openai_model = config_openai_model()
+reset_config()
+expect(claude_url).to_equal("https://api.anthropic.com")
+expect(claude_model).to_equal("claude-sonnet-4-20250514")
+expect(openai_url).to_equal("https://api.openai.com")
+expect(openai_model).to_equal("gpt-4o")
 ```
 
 </details>
 
-#### has default claude cli model
+## should expose the default compatible and local settings
 
-1. reset config
-   - Expected: CLAUDE_CLI_MODEL equals `claude-sonnet-4-20250514`
-
+**Group:** production config defaults
 
 <details>
 <summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 reset_config()
-expect(CLAUDE_CLI_MODEL).to_equal("claude-sonnet-4-20250514")
+val compat_url = config_compat_base_url()
+val compat_model = config_compat_model()
+val local_model = config_local_model_path()
+val python_path = config_local_python_path()
+reset_config()
+expect(compat_url).to_equal("http://localhost:11434")
+expect(compat_model).to_equal("llama3")
+expect(local_model).to_equal("")
+expect(python_path).to_equal("python3")
 ```
 
 </details>
 
-#### has default claude api base url
+## should parse defaults and set the loaded flag
 
-1. reset config
-   - Expected: CLAUDE_API_BASE_URL equals `https://api.anthropic.com`
-
+**Group:** production config parsing
 
 <details>
 <summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 reset_config()
-expect(CLAUDE_API_BASE_URL).to_equal("https://api.anthropic.com")
+val error = parse_config_text(
+    "defaults:\n    provider: openai\n" +
+    "    history_file: build/tmp/caret-history.sdn\n" +
+    "    max_history: 50"
+)
+val loaded = config_loaded()
+val provider = config_default_provider()
+val history_file = config_history_file()
+val max_history = config_max_history()
+reset_config()
+expect(error).to_equal("")
+expect(loaded).to_be(true)
+expect(provider).to_equal("openai")
+expect(history_file).to_equal("build/tmp/caret-history.sdn")
+expect(max_history).to_equal(50)
 ```
 
 </details>
 
-#### has default openai base url
+## should parse Claude and OpenCode CLI sections
 
-1. reset config
-   - Expected: OPENAI_BASE_URL equals `https://api.openai.com`
-
+**Group:** production config parsing
 
 <details>
 <summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 reset_config()
-expect(OPENAI_BASE_URL).to_equal("https://api.openai.com")
+val error = parse_config_text(
+    "claude_cli:\n" +
+    "    cli_path: /opt/caret/claude\n" +
+    "    model: claude-opus-test\n" +
+    "opencode_cli:\n" +
+    "    cli_path: /opt/caret/opencode\n" +
+    "    model: github-copilot/gpt-test"
+)
+val claude_path = config_claude_cli_path()
+val claude_model = config_claude_cli_model()
+val opencode_path = config_opencode_cli_path()
+val opencode_model = config_opencode_cli_model()
+reset_config()
+expect(error).to_equal("")
+expect(claude_path).to_equal("/opt/caret/claude")
+expect(claude_model).to_equal("claude-opus-test")
+expect(opencode_path).to_equal("/opt/caret/opencode")
+expect(opencode_model).to_equal("github-copilot/gpt-test")
 ```
 
 </details>
 
-#### has default openai model
+## should parse Claude API and OpenAI sections
 
-1. reset config
-   - Expected: OPENAI_MODEL equals `gpt-4o`
-
+**Group:** production config parsing
 
 <details>
 <summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 reset_config()
-expect(OPENAI_MODEL).to_equal("gpt-4o")
+val error = parse_config_text(
+    "claude_api:\n" +
+    "    base_url: https://claude.fixture.invalid\n" +
+    "    model: claude-haiku-test\n" +
+    "openai:\n" +
+    "    base_url: https://openai.fixture.invalid\n" +
+    "    model: gpt-test"
+)
+val claude_url = config_claude_api_base_url()
+val claude_model = config_claude_api_model()
+val openai_url = config_openai_base_url()
+val openai_model = config_openai_model()
+reset_config()
+expect(error).to_equal("")
+expect(claude_url).to_equal("https://claude.fixture.invalid")
+expect(claude_model).to_equal("claude-haiku-test")
+expect(openai_url).to_equal("https://openai.fixture.invalid")
+expect(openai_model).to_equal("gpt-test")
 ```
 
 </details>
 
-#### has default compat base url
+## should parse compatible and local provider sections
 
-1. reset config
-   - Expected: COMPAT_BASE_URL equals `http://localhost:11434`
-
+**Group:** production config parsing
 
 <details>
 <summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 reset_config()
-expect(COMPAT_BASE_URL).to_equal("http://localhost:11434")
+val error = parse_config_text(
+    "openai_compat:\n" +
+    "    base_url: http://127.0.0.1:11435\n" +
+    "    model: mistral-test\n" +
+    "local_torch:\n" +
+    "    model_path: build/tmp/models/test-model\n" +
+    "    python_path: python3.13"
+)
+val compat_url = config_compat_base_url()
+val compat_model = config_compat_model()
+val local_model = config_local_model_path()
+val python_path = config_local_python_path()
+reset_config()
+expect(error).to_equal("")
+expect(compat_url).to_equal("http://127.0.0.1:11435")
+expect(compat_model).to_equal("mistral-test")
+expect(local_model).to_equal("build/tmp/models/test-model")
+expect(python_path).to_equal("python3.13")
 ```
 
 </details>
 
-#### has default local python path
+## should skip comments and retain values across multiple sections
 
-1. reset config
-   - Expected: LOCAL_PYTHON_PATH equals `python3`
-
+**Group:** production config parsing
 
 <details>
 <summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 reset_config()
-expect(LOCAL_PYTHON_PATH).to_equal("python3")
+val error = parse_config_text(
+    "# fixture config\n\n" +
+    "defaults:\n" +
+    "    # provider comment\n" +
+    "    provider: claude_api\n" +
+    "openai:\n" +
+    "    model: gpt-4-test"
+)
+val provider = config_default_provider()
+val openai_model = config_openai_model()
+reset_config()
+expect(error).to_equal("")
+expect(provider).to_equal("claude_api")
+expect(openai_model).to_equal("gpt-4-test")
 ```
 
 </details>
 
-### Config Parsing
+## should mark an empty parsed config loaded without changing defaults
 
-#### parses defaults section
-
-1. check
-
+**Group:** production config parsing
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-check(_test_parse_defaults())
+reset_config()
+val error = parse_config_text("")
+val loaded = config_loaded()
+val provider = config_default_provider()
+val claude_model = config_claude_cli_model()
+reset_config()
+expect(error).to_equal("")
+expect(loaded).to_be(true)
+expect(provider).to_equal("claude_cli")
+expect(claude_model).to_equal("claude-sonnet-4-20250514")
 ```
 
 </details>
 
-#### parses claude_cli section
+## should restore production defaults after reset
 
-1. check
-
+**Group:** production config parsing
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-check(_test_parse_claude_cli())
+reset_config()
+parse_config_text(
+    "defaults:\n    provider: openai\n" +
+    "claude_cli:\n    model: changed-model"
+)
+reset_config()
+val loaded = config_loaded()
+val provider = config_default_provider()
+val claude_model = config_claude_cli_model()
+reset_config()
+expect(loaded).to_be(false)
+expect(provider).to_equal("claude_cli")
+expect(claude_model).to_equal("claude-sonnet-4-20250514")
 ```
 
 </details>
-
-#### parses claude_api section
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-check(_test_parse_claude_api())
-```
-
-</details>
-
-#### parses openai section
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-check(_test_parse_openai())
-```
-
-</details>
-
-#### parses openai_compat section
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-check(_test_parse_openai_compat())
-```
-
-</details>
-
-#### parses local_torch section
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-check(_test_parse_local_torch())
-```
-
-</details>
-
-#### skips comments and empty lines
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-check(_test_skips_comments())
-```
-
-</details>
-
-#### parses multiple sections
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-check(_test_parse_multiple_sections())
-```
-
-</details>
-
-#### sets config loaded flag
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-check(_test_config_loaded_flag())
-```
-
-</details>
-
-#### handles empty config
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-check(_test_empty_config())
-```
-
-</details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Application |
-| Status | Active |
-| Source | `test/01_unit/app/llm_caret/config_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- Config Defaults
-- Config Parsing
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 20 |
-| Active scenarios | 20 |
-| Slow scenarios | 0 |
+| Total scenarios | 12 |
+| Active scenarios | 12 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
-
-
-</details>
+| Executed scenarios | 0 |

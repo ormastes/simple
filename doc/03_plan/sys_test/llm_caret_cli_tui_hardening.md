@@ -20,9 +20,9 @@ used to generate the full-parity matrices.
 
 | Evidence | Current finding | Authority |
 |---|---|---|
-| `src/app/llm_caret/*.spl` | 24 direct caret files; 7,160 LOC | Current-tree evidence |
+| `src/app/llm_caret/*.spl` | 24 direct caret files; 7,161 LOC | Current-tree evidence |
 | `doc/09_report/llm_caret_claude_cli_traceability.md` | Maps 13 files and 3,292 current LOC | Stale generated/manual mapping |
-| `scripts/check/check-llm-caret-claude-cli-trace.shs` | Pending refresh after raw-line/UTF-8 input changes; prior gate passed 24/24 files, 7,042/7,042 LOC, and 470/470 symbols | Current computed gate |
+| `scripts/check/check-llm-caret-claude-cli-trace.shs` | 24/24 files (100%); 7,161/7,161 LOC (100%); 479/479 file-qualified symbols; `STATUS: PASS` | Current computed gate |
 | Full self-hosted CLI bootstrap | Stage 3 built; Stage 4 full-CLI native build was killed by signal 9; no candidate deployed | Current executable-test blocker; do not retry in this session |
 | `tmp/claude/claude-code-main/src` | Missing | Current-tree evidence |
 | Full-parity feature matrix | 599 rows, 1,902 historical source files, 512,685 historical LOC | Snapshot-derived evidence; cannot be refreshed against upstream now |
@@ -178,6 +178,9 @@ sh scripts/check/check-llm-caret-full-parity-implementation.shs
 bin/simple test test/01_unit/app/llm_caret/main_spec.spl --mode=interpreter
 bin/simple test test/01_unit/app/llm_caret/claude_cli_spec.spl --mode=interpreter
 bin/simple test test/01_unit/app/llm_caret/chat_tui_spec.spl --mode=interpreter
+bin/simple test test/01_unit/app/llm_caret/chat_tui_input_spec.spl --mode=interpreter
+bin/simple test test/01_unit/app/llm_caret/config_spec.spl --mode=interpreter
+bin/simple test test/01_unit/app/llm_caret/tools_spec.spl --mode=interpreter
 
 bin/simple test test/03_system/app/llm_caret/feature/llm_caret_cli_hardening_spec.spl --mode=interpreter
 bin/simple test test/03_system/tools/llm/llm_caret_claude_cli_feature_contract_spec.spl --mode=interpreter
@@ -255,13 +258,13 @@ refresh visible status; `/new` obtains a fresh session ID instead of reusing
 and overwriting the prior persisted conversation.
 
 Focused system manuals are mirrored under `doc/06_spec/03_system/...`.
-Source-synchronized unit manuals now mirror 80 Claude CLI, 31 provider, 79 TUI,
-and 45 main-entry scenarios. Because docgen cannot execute in the current
-runtime, all refreshed manuals explicitly report zero executed scenarios and
-do not claim a PASS.
+Source-synchronized unit manuals now mirror 80 Claude CLI, 31 provider, 60 TUI,
+22 raw-input, 57 main-entry, 12 production-config, and 37 production-tools
+scenarios. Because docgen cannot execute in the current runtime, all refreshed
+manuals explicitly report zero executed scenarios and do not claim a PASS.
 Together with the three process-hardening and five managed-environment
-scenarios, this focused tranche contains 243 modern `should` examples with
-canonical matchers and zero source/manual body mismatches.
+scenarios, this expanded focused tranche contains 307 modern `should` examples
+with canonical matchers and zero source/manual body mismatches.
 
 Executable status remains **FAIL / runtime blocked**. The deployed
 self-hosted `bin/simple` lacks `rt_process_spawn_guarded`, so the process SSpec
@@ -299,7 +302,7 @@ rejected by default and admitted only when enabled, while disabled commands
 remain rejected under every fixture. Retry backoff is capped after jitter and
 the configured retry timeout now prevents an over-budget sleep.
 
-The completion audit is still red. Current direct scope is 24 files / 7,160
+The completion audit is still red. Current direct scope is 24 files / 7,161
 LOC and the focused report contains current rows for all 24 files.
 The focused checker covers all file-qualified declarations, including the
 ANSI/UTF-8 raw-key decoder, raw-line reducer, and parser validation helpers.

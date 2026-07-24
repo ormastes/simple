@@ -98,20 +98,21 @@ source/manual or traceability PASS as executable behavior evidence.
 | `6dd31ca4ca7b` | Pushed to `origin/main` | Cached production wrapper, complete focused maps, hidden environment-key checks, and synchronized manuals |
 | `89b5e9e403b0` | Local commit; intentionally not pushed | UTF-8 raw-key decoder, pure raw-line control reducer, 15 unit scenarios, one component system scenario, manuals, and trace rows |
 
-The last commit is based on the current `main` parent but remains unbookmarked
-because the requested push condition is not satisfied: the MCP transport
-responds, while Simple LSP navigation returns empty results and diagnostics
-reports the deployed runtime's process-spawn deadlock. Fetch completed with no
-remote changes. Five unrelated GPU/evidence conflicts remain in the shared
-working-copy descendant; they are not part of any Caret commit and must not be
-resolved, reverted, or included by this lane.
+At checkpoint creation, the last commit remained unbookmarked because absolute
+file paths produced empty LSP navigation results. Rechecking with the required
+workspace-relative paths confirms MCP/LSP symbols and definitions resolve
+production targets, so the navigation health condition is met. Diagnostics
+still report the deployed runtime's process-spawn deadlock and remain an
+executable-verification blocker. Five unrelated GPU/evidence conflicts remain
+in the shared working-copy descendant; they are not part of any Caret commit
+and must not be resolved, reverted, or included by this lane.
 
 ### Current verified evidence
 
 | Gate | Current result | Authority/limit |
 |---|---|---|
-| Direct Caret trace | PASS: 24/24 files, 7,160/7,160 LOC, 479/479 declarations | Static mapping only |
-| Unit manual parity | PASS: 79/79 TUI scenario bodies match source | Zero executed scenarios |
+| Direct Caret trace | PASS: 24/24 files, 7,161/7,161 LOC, 479/479 declarations | Static mapping only |
+| Unit manual parity | PASS: 60/60 TUI, 22/22 raw-input, 57/57 main, 12/12 config, and 37/37 tools bodies match source | Zero executed scenarios |
 | Component manual parity | PASS: 9/9 TUI/hidden scenario bodies match source | Zero executed scenarios |
 | Focused modern SSpec scan | PASS: canonical `should` examples and matchers; no placeholder pass | Static source scan |
 | Direct environment guard | PASS in working and staged modes | Changed Caret paths only |
@@ -119,35 +120,40 @@ resolved, reverted, or included by this lane.
 | Generated-spec layout | PASS: zero `.spl` specs under `doc/06_spec` | Layout only |
 | Claude CLI declaration reachability | PASS: no unreferenced declaration in `claude_cli.spl` | Source-level reachability |
 | Direct `simple check` | FAIL before Caret validation: unknown `rt_process_spawn_guarded` extern | Deployed runtime mismatch |
-| Simple LSP MCP | Transport responds; symbols/definition empty; diagnostics unavailable | Not healthy enough for push condition |
+| Simple LSP MCP | Workspace-relative symbols and definitions resolve production targets; diagnostics remain unavailable because source-mode process spawning deadlocks | Navigation health confirmed; diagnostic execution still blocked |
 | Focused SSpec execution | Not executed on a qualified runtime | Required before production PASS |
 | Live PTY TUI evidence | Missing | Required before production PASS |
 | Current Claude parity | Unprovable: pinned upstream source tree is absent | Historical matrices only |
 
-### Remaining direct-function coverage
+### Direct-function coverage closure
 
 The settled-tree audit found 22 production declarations without a focused
-behavioral assertion. These declarations remain uncovered even though every
-declaration is present in the static trace inventory.
+behavioral assertion. Parallel lanes closed 16 of those gaps with direct
+production imports and real assertions. Six terminal-loop declarations remain
+uncovered even though every declaration is present in the static inventory.
 
-| Lane | Uncovered declarations | Required proof |
+| Closed lane | Newly covered declarations | Evidence added |
 |---|---|---|
-| TUI pure/component | `_visible_content`, `_status_line`, `_hint_line`, `caret_chat` | Direct production imports; viewport/status/hint values and renderer-route decisions |
-| TUI live terminal | `_inner_height`, `_draw_frame`, `_read_line`, `run_chat_tui`, `run_chat_plain` | PTY-driven raw-mode entry/read/submit/exit/cleanup, frame flush, resize, and plain/TUI routing |
-| Main startup/hooks | `_resolve_workspace`, `_build_policy`, `_slash_on_model`, `_slash_on_sessions`, `_hidden_commands_enabled`, `_slash_on_resume`, `_on_persist`, `_build_session_hooks` | Production callbacks with isolated env/files/session fixtures; no duplicate fake implementation |
-| Config defaults | `config_loaded`, `config_default_provider`, `config_claude_cli_model` | Import production module and observe unset/set/default paths |
-| Glob tool | `_glob_match`, `exec_glob` | Direct matching edge cases plus bounded workspace fixture and result semantics |
+| TUI pure/component | `_visible_content`, `_status_line`, `_hint_line` | Tail/fixed viewport, waiting/status composition, and follow/scrolled hints |
+| Main startup/hooks | `_resolve_workspace`, `_build_policy`, `_slash_on_model`, `_slash_on_sessions`, `_hidden_commands_enabled`, `_slash_on_resume`, `_on_persist`, `_build_session_hooks` | Isolated PWD/HOME/env/session fixtures and every production `SessionHooks` callback |
+| Config defaults | `config_loaded`, `config_default_provider`, `config_claude_cli_model` | The copied config implementation was removed; 12 scenarios now import the production module |
+| Glob/list tools | `_glob_match`, `exec_glob`, `exec_list_dir` | Bounded workspace results, rejection paths, empty directories, and repeated-suffix matching |
 
-`exec_list_dir` is reached through the agent loop but its result semantics are
-not asserted; add a behavioral assertion while working in the tool lane.
+The new repeated-suffix assertions exposed and drove a production fix in
+`_glob_match`: the matcher now uses bounded last-star backtracking rather than
+accepting only the first suffix occurrence.
+
+| Remaining lane | Uncovered declarations | Required proof |
+|---|---|---|
+| TUI live terminal and routing | `caret_chat`, `_inner_height`, `_draw_frame`, `_read_line`, `run_chat_tui`, `run_chat_plain` | PTY-driven renderer selection, raw-mode entry/read/submit/exit/cleanup, frame flush, resize, and plain/TUI routing |
 
 ### False-evidence cleanup
 
-The following existing specs exercise inline reimplementations rather than the
-production modules and therefore cannot close production coverage:
+The config lane removed its inline parser/state and now imports the production
+module. The following specs still exercise inline reimplementations rather than
+the production modules and therefore cannot close production coverage:
 
 - `test/01_unit/app/llm_caret/chat_spec.spl`
-- `test/01_unit/app/llm_caret/config_spec.spl`
 - `test/01_unit/app/llm_caret/types_spec.spl`
 
 Replace copied helpers with production imports where the API remains required.
@@ -166,9 +172,9 @@ fixtures. No lane may run a paid provider.
 
 | Lane | Owned files | Work | Exit criteria |
 |---|---|---|---|
-| A — TUI component | `test/01_unit/app/llm_caret/chat_tui_spec.spl` | Cover pure viewport/status/hint behavior and renderer routing that does not require a terminal | Production imports; no inline copies; manual synchronized |
-| B — main/config | `test/01_unit/app/llm_caret/main_spec.spl`, `config_spec.spl` | Cover real startup hooks and default branches with isolated env/session fixtures | Host env restored; filesystem confined to `build/tmp`; manuals synchronized |
-| C — tools | `test/01_unit/app/llm_caret/tools_spec.spl` | Cover production glob matcher/executor and strengthen list-dir result assertions | Workspace bounded; no shell wildcard dependence; manual synchronized |
+| A — TUI component | `test/01_unit/app/llm_caret/chat_tui_spec.spl` | Complete: pure viewport/status/hint behavior | Production imports; no inline copies; 60-body manual synchronized |
+| B — main/config | `test/01_unit/app/llm_caret/main_spec.spl`, `config_spec.spl` | Complete: real startup hooks and default branches with isolated env/session fixtures | Host env restored; filesystem confined to `build/tmp`; 57/12-body manuals synchronized |
+| C — tools | `src/app/llm_caret/tools.spl`, `test/01_unit/app/llm_caret/tools_spec.spl` | Complete statically: production glob matcher/executor and list-dir result assertions | Workspace bounded; matcher defect fixed; 37-body manual synchronized |
 | D — live TUI | new focused PTY system spec and plan/manual | Drive `run_chat_tui`, `_read_line`, redraw, resize, EOF/Ctrl-C/Ctrl-D, and cleanup | Real PTY evidence on qualified runtime; terminal restored after every outcome |
 | Merge owner | current primary agent | Reconcile source/manual bodies, trace rows, and shared maps; commit exact Caret paths only | No unrelated shared-worktree paths in commit |
 | Final reviewer | highest-capability fresh review | Requirement-by-requirement completion audit | Every claimed behavior has executed evidence |
@@ -200,8 +206,8 @@ Caret hardening is not complete until:
 
 - every accepted CLI, TUI, and hidden-feature requirement maps to production
   implementation plus an executed modern SSpec assertion;
-- the 22 direct coverage gaps above are closed or explicitly removed through a
-  reviewed API-ownership decision;
+- the six remaining live TUI coverage gaps above are closed with PTY evidence
+  or explicitly removed through a reviewed API-ownership decision;
 - CLI wrapper/process exits and outputs pass on the shipped cached artifact;
 - TUI behavior passes both pure reducer tests and real PTY lifecycle tests;
 - hidden/disabled/default/enabled states are exercised without paid calls;

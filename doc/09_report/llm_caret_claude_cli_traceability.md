@@ -46,12 +46,12 @@ remote-control bridge, OAuth, or full agent orchestration.
 | `src/app/llm_caret/retry.spl` | 188 | Claude API retry/backoff behavior (conceptual) | retry admission, delay, and deadline budget |
 | `src/app/llm_caret/server.spl` | 199 | `src/entrypoints/mcp.ts`, `src/entrypoints/sdk/coreSchemas.ts` | compatibility HTTP/MCP-like response surface |
 | `src/app/llm_caret/session.spl` | 245 | `src/assistant/sessionHistory.ts`, `src/bootstrap/state.ts` | persisted app/provider sessions |
-| `src/app/llm_caret/tools.spl` | 507 | `src/Tool.ts`, `src/constants/tools.ts` | permission-gated tools and tool-use parsing |
+| `src/app/llm_caret/tools.spl` | 508 | `src/Tool.ts`, `src/constants/tools.ts` | permission-gated tools and tool-use parsing |
 | `src/app/llm_caret/tui_input.spl` | 220 | `src/screens/REPL.tsx` | renderer selection, ANSI/UTF-8 decoding, and raw-line control reduction |
 | `src/app/llm_caret/types.spl` | 225 | `src/entrypoints/sdk/coreSchemas.ts`, `src/types/logs.ts` | request/response/event/config records |
 
 Mapped files: 24/24 = 100%.
-Mapped LOC: 7160/7160 = 100%.
+Mapped LOC: 7161/7161 = 100%.
 
 These counts prove current direct-file classification, not full Claude parity.
 Simple-only and conceptual rows are explicit, and upstream freshness remains
@@ -64,7 +64,7 @@ unverifiable while the historical Claude source tree is absent.
 | CLI argv, typed JSON/NDJSON, subprocess forwarding, redaction, public history | `test/03_system/tools/llm/llm_caret_claude_cli_feature_contract_spec.spl` |
 | Caret process help/success/error/usage exits | `test/03_system/app/llm_caret/feature/llm_caret_cli_hardening_spec.spl` |
 | TUI submission/state/session/permission/retry/hidden admission | `test/03_system/app/llm_caret/feature/llm_caret_tui_hidden_feature_spec.spl` |
-| Focused unit branches | `test/01_unit/app/llm_caret/claude_cli_spec.spl`, `test/01_unit/app/llm_caret/chat_tui_spec.spl`, `test/01_unit/app/llm_caret/main_spec.spl`, `test/01_unit/app/llm_caret/retry_spec.spl` |
+| Focused unit branches | `test/01_unit/app/llm_caret/claude_cli_spec.spl`, `chat_tui_spec.spl`, `chat_tui_input_spec.spl`, `main_spec.spl`, `config_spec.spl`, `tools_spec.spl`, `provider_spec.spl`, `retry_spec.spl` under `test/01_unit/app/llm_caret/` |
 | Offline native seams | `test/04_smoke/llm_caret_cli_tui_hardening_smoke.spl` |
 
 These specs do not green historical full-parity rows whose implementation

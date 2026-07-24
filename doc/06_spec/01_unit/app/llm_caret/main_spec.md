@@ -2,11 +2,11 @@
 
 > Source-synchronized unit manual. The current self-hosted SSpec runner is
 > blocked before trustworthy scenario execution, so this document records
-> 45 active scenarios and 0 executed scenarios.
+> 57 active scenarios and 0 executed scenarios.
 
 | Tests | Active | Skipped | Pending | Executed |
 |------:|-------:|--------:|--------:|---------:|
-| 45 | 45 | 0 | 0 | 0 |
+| 57 | 57 | 0 | 0 | 0 |
 
 **Executable source:** `test/01_unit/app/llm_caret/main_spec.spl`
 
@@ -189,6 +189,109 @@ expect(a.unknown).to_equal("--bogus-flag")
 
 </details>
 
+## should prefer the explicit workspace without reading process state
+
+**Group:** workspace and permission policy resolution
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+val args = parse_main_args([
+    "--workspace", "build/tmp/llm_caret_main_test/explicit"
+])
+expect(_resolve_workspace(args)).to_equal(
+    "build/tmp/llm_caret_main_test/explicit"
+)
+```
+
+</details>
+
+## should resolve the workspace from PWD and restore the environment
+
+**Group:** workspace and permission policy resolution
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+val original = env_get("PWD") ?? ""
+val changed = env_set(
+    "PWD", "build/tmp/llm_caret_main_test/pwd-fixture"
+)
+val workspace = _resolve_workspace(parse_main_args([]))
+val restored = env_set("PWD", original)
+expect(changed).to_be(true)
+expect(restored).to_be(true)
+expect(workspace).to_equal(
+    "build/tmp/llm_caret_main_test/pwd-fixture"
+)
+```
+
+</details>
+
+## should use dot when PWD and explicit workspace are empty
+
+**Group:** workspace and permission policy resolution
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+val original = env_get("PWD") ?? ""
+val changed = env_set("PWD", "")
+val workspace = _resolve_workspace(parse_main_args([]))
+val restored = env_set("PWD", original)
+expect(changed).to_be(true)
+expect(restored).to_be(true)
+expect(workspace).to_equal(".")
+```
+
+</details>
+
+## should build the default restricted policy
+
+**Group:** workspace and permission policy resolution
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+val policy = _build_policy(
+    parse_main_args([]), "build/tmp/caret-policy/default///"
+)
+expect(policy.workspace_root).to_equal(
+    "build/tmp/caret-policy/default"
+)
+expect(policy.default_mode).to_equal("ask")
+expect(policy.allow_all).to_be(false)
+expect(policy.interactive).to_be(false)
+```
+
+</details>
+
+## should build the explicit allow-all policy
+
+**Group:** workspace and permission policy resolution
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+val policy = _build_policy(
+    parse_main_args(["--dangerously-allow-all"]),
+    "build/tmp/caret-policy/allow-all/"
+)
+expect(policy.workspace_root).to_equal(
+    "build/tmp/caret-policy/allow-all"
+)
+expect(policy.default_mode).to_equal("allow")
+expect(policy.allow_all).to_be(true)
+expect(policy.interactive).to_be(false)
+```
+
+</details>
+
 ## should round-trips the session id set by main_configure
 
 **Group:** main_configure / main_session_id
@@ -198,7 +301,9 @@ expect(a.unknown).to_equal("--bogus-flag")
 
 ```simple
 main_configure("claude_cli", "m", "", "", "claude", "", "seeded-session", 0)
-expect(main_session_id()).to_equal("seeded-session")
+val session_id = main_session_id()
+_reset_main_state()
+expect(session_id).to_equal("seeded-session")
 ```
 
 </details>
@@ -213,8 +318,10 @@ expect(main_session_id()).to_equal("seeded-session")
 ```simple
 main_configure("claude_cli", "sonnet", "", "", "claude", "", "provider-session", 0)
 val new_id = _slash_on_new()
+val session_id = main_session_id()
+_reset_main_state()
 expect(new_id.starts_with("sess-")).to_be(true)
-expect(main_session_id()).to_equal("")
+expect(session_id).to_equal("")
 ```
 
 </details>
@@ -229,10 +336,34 @@ expect(main_session_id()).to_equal("")
 ```simple
 main_configure("claude_cli", "sonnet", "", "", "claude", "", "provider-session", 0)
 val changed = _slash_on_provider("dummy")
+val session_id = main_session_id()
+_reset_main_state()
 expect(changed.accepted).to_be(true)
 expect(changed.provider).to_equal("dummy")
 expect(changed.model).to_equal("dummy-hello")
-expect(main_session_id()).to_equal("")
+expect(session_id).to_equal("")
+```
+
+</details>
+
+## should update the active model through the production model hook
+
+**Group:** main_configure / main_session_id
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+main_configure(
+    "dummy", "before-model", "", "", "", "",
+    "provider-session", 0
+)
+val message = _slash_on_model("after-model")
+val observed = _slash_on_provider("not-a-provider")
+_reset_main_state()
+expect(message).to_equal("model set to after-model")
+expect(observed.accepted).to_be(false)
+expect(observed.model).to_equal("after-model")
 ```
 
 </details>
@@ -321,12 +452,14 @@ val resumed = apply_resumed_session(Session(
     messages: [new_user_message("restored")],
     updated_at_ms: 0
 ))
+val provider_session_id = main_session_id()
+_reset_main_state()
 expect(resumed.found).to_be(true)
 expect(resumed.provider).to_equal("dummy")
 expect(resumed.model).to_equal("dummy-hello")
 expect(resumed.session_id).to_equal("saved-app-session")
 expect(resumed.messages.len()).to_equal(1)
-expect(main_session_id()).to_equal("saved-provider-session")
+expect(provider_session_id).to_equal("saved-provider-session")
 ```
 
 </details>
@@ -351,9 +484,235 @@ val rejected = apply_resumed_session(Session(
     messages: [],
     updated_at_ms: 0
 ))
+val provider_session_id = main_session_id()
+_reset_main_state()
 expect(rejected.found).to_be(false)
 expect(rejected.message).to_contain("unknown provider")
-expect(main_session_id()).to_equal("keep-provider-session")
+expect(provider_session_id).to_equal("keep-provider-session")
+```
+
+</details>
+
+## should list no sessions and then the saved session under isolated HOME
+
+**Group:** production session hook effects
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+val fixture_home = MAIN_SESSION_ROOT + "/list"
+val original_home = _isolate_main_home(fixture_home)
+val empty = _slash_on_sessions()
+val saved = save_session(Session(
+    id: "listed-session", provider: "dummy", model: "dummy-hello",
+    provider_session_id: "", messages: [], updated_at_ms: 1
+))
+val populated = _slash_on_sessions()
+_restore_main_home(original_home, fixture_home)
+expect(empty).to_equal("No saved sessions.")
+expect(saved).to_be(true)
+expect(populated).to_contain("Sessions:")
+expect(populated).to_contain("listed-session")
+```
+
+</details>
+
+## should report a missing session without changing runtime state
+
+**Group:** production session hook effects
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+val fixture_home = MAIN_SESSION_ROOT + "/resume-missing"
+val original_home = _isolate_main_home(fixture_home)
+main_configure(
+    "dummy", "dummy-hello", "", "", "", "",
+    "keep-provider-session", 0
+)
+val resumed = _slash_on_resume("missing-session")
+val provider_session_id = main_session_id()
+_reset_main_state()
+_restore_main_home(original_home, fixture_home)
+expect(resumed.found).to_be(false)
+expect(resumed.message).to_contain(
+    "no saved session 'missing-session'"
+)
+expect(provider_session_id).to_equal("keep-provider-session")
+```
+
+</details>
+
+## should resume a saved provider model transcript and provider session
+
+**Group:** production session hook effects
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+val fixture_home = MAIN_SESSION_ROOT + "/resume-found"
+val original_home = _isolate_main_home(fixture_home)
+val saved = save_session(Session(
+    id: "resume-session",
+    provider: "claude_cli",
+    model: "claude-model-fixture",
+    provider_session_id: "provider-session-fixture",
+    messages: [new_user_message("restored fixture")],
+    updated_at_ms: 2
+))
+main_configure(
+    "dummy", "dummy-hello", "", "", "", "", "old-session", 0
+)
+val resumed = _slash_on_resume("resume-session")
+val provider_session_id = main_session_id()
+_reset_main_state()
+_restore_main_home(original_home, fixture_home)
+expect(saved).to_be(true)
+expect(resumed.found).to_be(true)
+expect(resumed.provider).to_equal("claude_cli")
+expect(resumed.model).to_equal("claude-model-fixture")
+expect(resumed.messages.len()).to_equal(1)
+expect(resumed.messages[0].content).to_equal("restored fixture")
+expect(provider_session_id).to_equal("provider-session-fixture")
+```
+
+</details>
+
+## should persist the complete active backend and conversation
+
+**Group:** production session hook effects
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+val fixture_home = MAIN_SESSION_ROOT + "/persist"
+val original_home = _isolate_main_home(fixture_home)
+main_configure(
+    "claude_cli", "claude-model-fixture", "", "", "claude", "",
+    "provider-session-fixture", 0
+)
+_on_persist(
+    "persisted-session",
+    [Message(role: "user", content: "persisted fixture")]
+)
+val loaded = load_session("persisted-session")
+var found = false
+var provider = ""
+var model = ""
+var provider_session = ""
+var content = ""
+match loaded:
+    Some(sess):
+        found = true
+        provider = sess.provider
+        model = sess.model
+        provider_session = sess.provider_session_id
+        if sess.messages.len() > 0:
+            content = sess.messages[0].content
+    nil:
+        found = false
+_reset_main_state()
+_restore_main_home(original_home, fixture_home)
+expect(found).to_be(true)
+expect(provider).to_equal("claude_cli")
+expect(model).to_equal("claude-model-fixture")
+expect(provider_session).to_equal("provider-session-fixture")
+expect(content).to_equal("persisted fixture")
+```
+
+</details>
+
+## should expose hidden commands only for explicit true values
+
+**Group:** production session hook effects
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+val original = env_get("LLM_CARET_ENABLE_HIDDEN_COMMANDS") ?? ""
+val disabled_set = env_set(
+    "LLM_CARET_ENABLE_HIDDEN_COMMANDS", "0"
+)
+val disabled = _hidden_commands_enabled()
+val one_set = env_set("LLM_CARET_ENABLE_HIDDEN_COMMANDS", "1")
+val numeric_enabled = _hidden_commands_enabled()
+val true_set = env_set(
+    "LLM_CARET_ENABLE_HIDDEN_COMMANDS", "TRUE"
+)
+val word_enabled = _hidden_commands_enabled()
+val restored = env_set(
+    "LLM_CARET_ENABLE_HIDDEN_COMMANDS", original
+)
+expect(disabled_set).to_be(true)
+expect(one_set).to_be(true)
+expect(true_set).to_be(true)
+expect(restored).to_be(true)
+expect(disabled).to_be(false)
+expect(numeric_enabled).to_be(true)
+expect(word_enabled).to_be(true)
+```
+
+</details>
+
+## should wire every session callback to the production implementation
+
+**Group:** production session hook effects
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+val fixture_home = MAIN_SESSION_ROOT + "/hooks"
+val original_home = _isolate_main_home(fixture_home)
+val original_hidden = env_get("LLM_CARET_ENABLE_HIDDEN_COMMANDS") ?? ""
+val hidden_set = env_set(
+    "LLM_CARET_ENABLE_HIDDEN_COMMANDS", "true"
+)
+main_configure(
+    "dummy", "dummy-hello", "", "", "", "",
+    "hook-provider-session", 0
+)
+val hooks = _build_session_hooks("hook-active-session")
+val model_message = hooks.on_model("hook-model")
+val provider_result = hooks.on_provider("not-a-provider")
+val empty_sessions = hooks.on_sessions()
+val new_id = hooks.on_new()
+val missing_resume = hooks.on_resume("missing-hook-session")
+val hidden_message = hooks.on_hidden_command(
+    "debug-tool-call",
+    "{\"type\":\"tool_use\",\"id\":\"hook-call\"," +
+    "\"name\":\"bash\",\"input\":{}}"
+)
+hooks.on_persist(
+    "hook-persisted-session",
+    [Message(role: "user", content: "hook fixture")]
+)
+val populated_sessions = hooks.on_sessions()
+val resumed = hooks.on_resume("hook-persisted-session")
+val hidden_restored = env_set(
+    "LLM_CARET_ENABLE_HIDDEN_COMMANDS", original_hidden
+)
+_reset_main_state()
+_restore_main_home(original_home, fixture_home)
+expect(hidden_set).to_be(true)
+expect(hidden_restored).to_be(true)
+expect(hooks.session_id).to_equal("hook-active-session")
+expect(hooks.hidden_commands_enabled).to_be(true)
+expect(model_message).to_equal("model set to hook-model")
+expect(provider_result.accepted).to_be(false)
+expect(provider_result.model).to_equal("hook-model")
+expect(empty_sessions).to_equal("No saved sessions.")
+expect(new_id).to_start_with("sess-")
+expect(missing_resume.found).to_be(false)
+expect(hidden_message).to_contain("id=hook-call")
+expect(populated_sessions).to_contain("hook-persisted-session")
+expect(resumed.found).to_be(true)
+expect(resumed.model).to_equal("hook-model")
 ```
 
 </details>
@@ -401,6 +760,23 @@ val mr = build_model_response(_llm_ok("", raw))
 expect(mr.tool_calls.len()).to_equal(1)
 expect(mr.tool_calls[0].name).to_equal("bash")
 expect(mr.tool_calls[0].id).to_equal("t1")
+
+# ============================================================================
+# Scripted plain-mode conversation end-to-end (M1's "runnable entrypoint"
+# requirement): a fake 2-turn "network" builds real LLMResponse values, which
+# build_model_response maps into ModelResponse, which chat.run_agent_loop (the
+# same production agent loop main_responder drives) executes to completion -
+# no live network/CLI, fully deterministic.
+# ============================================================================
+
+var SCRIPT_TURN = 0
+
+fn _scripted_responder(msgs: [Message]) -> ModelResponse:
+    SCRIPT_TURN = SCRIPT_TURN + 1
+    if SCRIPT_TURN == 1:
+val raw = "{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"bash\",\"input\":{\"command\":\"echo hi\"}}"
+return build_model_response(_llm_ok("", raw))
+    build_model_response(_llm_ok("final answer", "{}"))
 ```
 
 </details>
@@ -416,12 +792,21 @@ expect(mr.tool_calls[0].id).to_equal("t1")
 SCRIPT_TURN = 0
 val p = default_policy(WS_ROOT)
 val result = run_agent_loop(p, [new_user_message("do the thing")], _scripted_responder, 10)
+SCRIPT_TURN = 0
 expect(result.tool_calls_made).to_equal(1)
 expect(result.final_text).to_equal("final answer")
 expect(result.stopped_reason).to_equal("end_turn")
 # the tool_result turn must be threaded into final_transcript (the
 # M2 gap this campaign closed) - not just the initial + final text.
 expect(result.final_transcript.len() > 2).to_be(true)
+
+fn _fake_dispatch_ok(content: text, model: text) -> LLMResponse:
+    _llm_ok("echo: " + content, "{}")
+
+fn _fake_dispatch_err(content: text, model: text) -> LLMResponse:
+    new_llm_error("test", "upstream down")
+
+# ============================================================================
 ```
 
 </details>
@@ -508,6 +893,8 @@ expect(result).to_contain("name=bash")
 expect(result.contains("call-2")).to_be(false)
 expect(result.contains("first-fixture-secret")).to_be(false)
 expect(result.contains("second-fixture-secret")).to_be(false)
+
+# ============================================================================
 ```
 
 </details>
@@ -627,6 +1014,8 @@ val body_in = "{\"content\":\"hi\"}"
 val (code, body) = proxy_handle("POST", "/v1/messages", body_in, _fake_dispatch_ok)
 expect(code).to_equal(200)
 expect(body).to_contain("\"message\"")
+
+# ============================================================================
 ```
 
 </details>
@@ -771,8 +1160,8 @@ rate_limit_reset()
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 45 |
-| Active scenarios | 45 |
+| Total scenarios | 57 |
+| Active scenarios | 57 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 | Executed scenarios | 0 |
