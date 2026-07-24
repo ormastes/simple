@@ -317,3 +317,8 @@ implementation-milestone-0-in-progress
   error, proving the repaired closure parses. Production verification remains
   pending a qualified pure-Simple Stage 4 CLI; the deployed release path is
   currently a stale Rust-seed fallback and was not promoted.
+- parser compatibility 2026-07-24: the shared bootstrap/host field parser now
+  consumes the canonical `field: Type @bits(N)` syntax already supported by
+  the pure-Simple core parser. The focused two-field parser regression passes
+  and proves the annotation no longer consumes or reclassifies the next field.
+  No Stage 4 deployment or RTL qualification is claimed.
