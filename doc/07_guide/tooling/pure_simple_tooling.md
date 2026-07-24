@@ -198,7 +198,13 @@ evidence boundary for the important pure-Simple tooling lanes:
   reject unknown, missing, and invalid-domain output options before discovery,
   so a typo cannot silently pass after checking a different scope. Its focused
   option contract passes through the temporary bootstrap interpreter; fresh
-  Stage 4 runtime qualification remains pending. Multi-file check dispatch now
+  Stage 4 runtime qualification remains pending. Directory targets now expand
+  recursively through native-safe shared discovery, overlapping targets are
+  deduplicated, and an explicit directory containing no `.spl` source fails
+  instead of reporting `OK`; see the
+  [directory-target report](../../08_tracking/bug/check_directory_target_false_green_2026-07-24.md).
+  Multi-file check dispatch still
+  isolates each source in its own worker and
   preserves ordered presentation options and last-option-wins JSON selection,
   while unsupported split `--surface VALUE` fails before shared cleaning
   (`0cd092199ad`). This is routing parity only: surface, verbose, and distinct
@@ -253,8 +259,8 @@ evidence boundary for the important pure-Simple tooling lanes:
   `bin/simple lint`; `build lint` remains the Rust clippy lane. Shared
   worker/fallback help handling matches the public lint entry
   (`cc69749ef25`); each has focused contract evidence. Directory targets now
-  expand recursively in the shared CLI owner, while an explicit directory with
-  no `.spl` files fails with a target diagnostic. The focused CLI contract and
+  expand recursively through native-safe shared discovery, while an explicit
+  directory with no `.spl` files fails with a target diagnostic. The focused CLI contract and
   essential-tools gate cover nested dirty input; see the
   [directory-target report](../../08_tracking/bug/lint_directory_target_opaque_failure_2026-07-24.md).
   **Remaining

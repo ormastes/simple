@@ -6,6 +6,7 @@ use app.io.env_ops.{env_get}
 use app.io.process_ops.{process_run_timeout}
 use std.cli.log_modes.{parse_log_options}
 use app.cli.check_options.{check_option_error, check_worker_args}
+use app.check.targets.{expand_check_targets}
 
 val OUTPUT_LIMIT = 12000
 val CHECK_WORKER_TIMEOUT_MS = 300000
@@ -150,13 +151,24 @@ fn main() -> i64:
     val as_json = parse_log_options(args).log_mode == "json"
     val files = check_files_from_args(args)
     val worker_bin = resolve_worker_binary()
-    if files.len() <= 1:
+    if files.len() == 0:
         return run_single_worker(worker_bin, args, as_json)
 
+    val (expanded_files, empty_directories) = expand_check_targets(files)
+    if expanded_files.len() == 1 and empty_directories.len() == 0:
+        return run_single_worker(
+            worker_bin,
+            check_worker_args(args, expanded_files[0]),
+            as_json
+        )
+
     var checked = 0
-    var errors = 0
+    var errors = empty_directories.len()
     var files_with_errors = 0
-    for file in files:
+    if not as_json:
+        for directory in empty_directories:
+            print "ERROR: {directory}: no Simple source files found"
+    for file in expanded_files:
         val single_args = check_worker_args(args, file)
         var worker_args = ["run", "src/app/check/main.spl"]
         for arg in single_args:
@@ -173,7 +185,7 @@ fn main() -> i64:
 
     if as_json:
         val status = if errors == 0: "ok" else: "error"
-        print "{\"command\":\"check\",\"status\":\"{status}\",\"checked\":{checked},\"files\":{files.len()},\"errors\":{errors},\"files_with_errors\":{files_with_errors}}"
+        print "{\"command\":\"check\",\"status\":\"{status}\",\"checked\":{checked},\"files\":{expanded_files.len()},\"errors\":{errors},\"files_with_errors\":{files_with_errors}}"
     if errors == 0:
         return 0
     1

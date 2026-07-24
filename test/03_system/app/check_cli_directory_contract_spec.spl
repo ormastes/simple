@@ -1,0 +1,65 @@
+# Public `simple check` directory-target contract.
+
+use std.spec.*
+use std.sffi.cli.{cli_get_args}
+use std.io_runtime.{env_get}
+use std.nogc_sync_mut.io.file_ops.{file_exists}
+
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+fn simple_binary() -> text:
+    val configured = env_get("SIMPLE_BINARY")
+    if configured != nil and configured != "" and file_exists(configured):
+        return configured
+    if file_exists("/proc/self/exe"):
+        return "/proc/self/exe"
+    val args = cli_get_args()
+    if args.len() > 0 and file_exists(args[0]):
+        return args[0]
+    ""
+
+fn run_check(args: [text]) -> (text, text, i32):
+    var child_args = ["check"]
+    for arg in args:
+        child_args.push(arg)
+    rt_process_run_timeout(simple_binary(), child_args, 30000)
+
+describe "simple check directory targets":
+    it "recursively checks every Simple source in a relative directory":
+        val (stdout, stderr, code) = run_check([
+            "test/fixtures/pure_simple_tooling/lint_directory",
+            "--json"
+        ])
+        expect(code).to_equal(1)
+        expect(stdout).to_contain("\"status\":\"error\"")
+        expect(stdout).to_contain("\"checked\":2")
+        expect(stdout).to_contain("\"files\":2")
+        expect(stdout).to_contain("\"files_with_errors\":1")
+
+    it "deduplicates overlapping directory and file targets":
+        val (stdout, stderr, code) = run_check([
+            "./test/fixtures/pure_simple_tooling/lint_directory",
+            "test/fixtures/pure_simple_tooling/lint_directory/nested/dirty.spl",
+            "--json"
+        ])
+        expect(code).to_equal(1)
+        expect(stdout).to_contain("\"checked\":2")
+        expect(stdout).to_contain("\"files\":2")
+        expect(stdout).to_contain("\"files_with_errors\":1")
+
+    it "fails repeated empty-directory targets once without inventing files":
+        val empty = "test/fixtures/pure_simple_tooling/lint_empty"
+        val (stdout, stderr, code) = run_check([empty, empty, "--json"])
+        expect(code).to_equal(1)
+        expect(stdout).to_contain("\"checked\":0")
+        expect(stdout).to_contain("\"files\":0")
+        expect(stdout).to_contain("\"errors\":1")
+        expect(stdout).to_contain("\"files_with_errors\":0")
+
+    it "rejects a missing target instead of reporting an empty success":
+        val (stdout, stderr, code) = run_check(["--json"])
+        expect(code).to_equal(1)
+        expect(stdout).to_contain("\"status\":\"error\"")
+        expect(stdout).to_contain("\"checked\":0")
+        expect(stdout).to_contain("\"files\":0")
+        expect(stdout).to_contain("\"errors\":1")
