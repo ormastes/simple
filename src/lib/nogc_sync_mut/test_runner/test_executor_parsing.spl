@@ -258,9 +258,30 @@ fn output_has_zero_pass_summary(output: text) -> bool:
             saw_failed_zero = true
     saw_passed_zero and saw_failed_zero
 
+# find_raw: first index of keyword in s, or -1. Returns a RAW i64 (never i64?),
+# so a match at offset 3 is not lost to the seed-JIT flat-optional payload-3 == nil
+# collision. `text.index_of` returns i64?, whose flat seed-JIT representation uses
+# the in-band sentinel 3 for None, so a genuine match at offset 3 read back as nil
+# — e.g. "example" sits at offset 3 in "10 examples".."99 examples", so every spec
+# with 10-99 examples false-failed with "no parseable pass/fail summary". See
+# doc/08_tracking/bug/interp_index_of_digit_leading_literal_2026-07-22.md (the
+# senior guidance there: prefer >=0 sentinel-style APIs in critical paths until
+# the flat-optional representation is retagged) and
+# jit_option_i64_value3_reads_as_none_2026-07-24.md.
+fn find_raw(s: text, keyword: text) -> i64:
+    val klen = keyword.len()
+    if klen == 0:
+        return 0
+    val slen = s.len()
+    var i = 0
+    while i + klen <= slen:
+        if s[i:i + klen] == keyword:
+            return i
+        i = i + 1
+    -1
+
 fn extract_number_after_colon(s: text, prefix: text) -> i64:
-    val idx_opt = s.index_of(prefix)
-    val idx = idx_opt ?? -1
+    val idx = find_raw(s, prefix)
     if idx < 0:
         return -1
     val after = s[idx + prefix.len():].trim()
@@ -281,8 +302,7 @@ fn extract_number_after_colon(s: text, prefix: text) -> i64:
     to_int(num_str)
 
 fn extract_number_before(s: text, keyword: text) -> i64:
-    val idx_opt = s.index_of(keyword)
-    val idx = idx_opt ?? -1
+    val idx = find_raw(s, keyword)
     if idx < 0:
         return -1
     var end = idx - 1
