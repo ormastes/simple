@@ -16,14 +16,19 @@
 # ============================================================================
 extern fn rt_winit_event_loop_new() -> i64
 extern fn rt_winit_window_new(el: i64, w: i64, h: i64, title: text) -> i64
-extern fn rt_winit_window_present_rgba(win: i64, w: i64, h: i64, pixels: [i64]) -> bool
+extern fn rt_winit_window_staging_ptr(win: i64, w: i64, h: i64) -> i64
+extern fn rt_winit_window_present_staged(win: i64, w: i64, h: i64) -> i64
+extern fn rt_write_u32s_to_raw(ptr: i64, pixels: [u32]) -> i64
 extern fn rt_winit_event_loop_poll_events(el: i64, max: i64) -> i64
 extern fn rt_winit_event_loop_wait_events(el: i64, timeout_ms: i64) -> i64
 extern fn rt_winit_event_get_type(ev: i64) -> i64
-extern fn rt_winit_event_keyboard_input(ev: i64) -> (i64, i64, bool)
-extern fn rt_winit_event_mouse_wheel(ev: i64) -> (f64, f64)
-extern fn rt_winit_event_mouse_button(ev: i64) -> (i64, bool)
-extern fn rt_winit_event_mouse_moved(ev: i64) -> (f64, f64)
+extern fn rt_winit_event_key_keycode(ev: i64) -> i64
+extern fn rt_winit_event_key_pressed(ev: i64) -> i64
+extern fn rt_winit_event_mouse_button(ev: i64) -> i64
+extern fn rt_winit_event_mouse_pressed(ev: i64) -> i64
+extern fn rt_winit_event_mouse_x_milli(ev: i64) -> i64
+extern fn rt_winit_event_mouse_y_milli(ev: i64) -> i64
+extern fn rt_winit_event_wheel_y_milli(ev: i64) -> i64
 extern fn rt_winit_event_free(ev: i64)
 extern fn rt_winit_window_free(win: i64)
 extern fn rt_winit_event_loop_free(el: i64)
@@ -87,7 +92,17 @@ fn winit_window_free(win: WinitWindow):
 fn winit_present_rgba(win: WinitWindow, w: i64, h: i64, pixels: [i64]) -> bool:
     if not win.is_valid:
         return false
-    rt_winit_window_present_rgba(win.handle, w, h, pixels)
+    if w <= 0 or h <= 0 or pixels.len().to_i64() != w * h:
+        return false
+    val staging = rt_winit_window_staging_ptr(win.handle, w, h)
+    if staging == 0:
+        return false
+    var native_pixels: [u32] = []
+    for pixel in pixels:
+        native_pixels = native_pixels.push(pixel.to_u32())
+    if rt_write_u32s_to_raw(staging, native_pixels) != pixels.len().to_i64():
+        return false
+    rt_winit_window_present_staged(win.handle, w, h) != 0
 
 # Toggle borderless fullscreen on the native window. The mutation is routed
 # through the event-loop/main thread (required on macOS). Returns true when the
@@ -205,23 +220,22 @@ fn winit_poll_input(lp: WinitLoop) -> WinitInput:
         if kind == EVT_CLOSE:
             close_requested = true
         elif kind == EVT_KEYBOARD:
-            val (ignored_scancode, keycode, pressed) = rt_winit_event_keyboard_input(ev)
-            if pressed:
+            val keycode = rt_winit_event_key_keycode(ev)
+            if rt_winit_event_key_pressed(ev) != 0:
                 keys = keys.push(keycode)
         elif kind == EVT_MOUSE_MOVED:
-            val (mx, my) = rt_winit_event_mouse_moved(ev)
-            mouse_x = mx
-            mouse_y = my
+            mouse_x = rt_winit_event_mouse_x_milli(ev).to_f64() / 1000.0
+            mouse_y = rt_winit_event_mouse_y_milli(ev).to_f64() / 1000.0
             mouse_moves = mouse_moves + 1
         elif kind == EVT_MOUSE_BUTTON:
-            val (button, pressed) = rt_winit_event_mouse_button(ev)
+            val button = rt_winit_event_mouse_button(ev)
+            val pressed = rt_winit_event_mouse_pressed(ev) != 0
             click_buttons = click_buttons.push(button)
             click_pressed = click_pressed.push(pressed)
             click_x = click_x.push(mouse_x)
             click_y = click_y.push(mouse_y)
         elif kind == EVT_MOUSE_WHEEL:
-            val (ignored_wx, wy) = rt_winit_event_mouse_wheel(ev)
-            scroll_y = scroll_y + wy
+            scroll_y = scroll_y + rt_winit_event_wheel_y_milli(ev).to_f64() / 1000.0
         rt_winit_event_free(ev)
         ev = rt_winit_event_loop_poll_events(lp.handle, 1)
     WinitInput(close: close_requested, keys: keys, scroll_y: scroll_y,
@@ -248,23 +262,22 @@ fn winit_wait_input(lp: WinitLoop, timeout_ms: i64) -> WinitInput:
         if kind == EVT_CLOSE:
             close_requested = true
         elif kind == EVT_KEYBOARD:
-            val (ignored_scancode, keycode, pressed) = rt_winit_event_keyboard_input(ev)
-            if pressed:
+            val keycode = rt_winit_event_key_keycode(ev)
+            if rt_winit_event_key_pressed(ev) != 0:
                 keys = keys.push(keycode)
         elif kind == EVT_MOUSE_MOVED:
-            val (mx, my) = rt_winit_event_mouse_moved(ev)
-            mouse_x = mx
-            mouse_y = my
+            mouse_x = rt_winit_event_mouse_x_milli(ev).to_f64() / 1000.0
+            mouse_y = rt_winit_event_mouse_y_milli(ev).to_f64() / 1000.0
             mouse_moves = mouse_moves + 1
         elif kind == EVT_MOUSE_BUTTON:
-            val (button, pressed) = rt_winit_event_mouse_button(ev)
+            val button = rt_winit_event_mouse_button(ev)
+            val pressed = rt_winit_event_mouse_pressed(ev) != 0
             click_buttons = click_buttons.push(button)
             click_pressed = click_pressed.push(pressed)
             click_x = click_x.push(mouse_x)
             click_y = click_y.push(mouse_y)
         elif kind == EVT_MOUSE_WHEEL:
-            val (ignored_wx, wy) = rt_winit_event_mouse_wheel(ev)
-            scroll_y = scroll_y + wy
+            scroll_y = scroll_y + rt_winit_event_wheel_y_milli(ev).to_f64() / 1000.0
         rt_winit_event_free(ev)
         ev = rt_winit_event_loop_poll_events(lp.handle, 1)
     WinitInput(close: close_requested, keys: keys, scroll_y: scroll_y,

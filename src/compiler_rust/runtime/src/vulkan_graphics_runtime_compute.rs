@@ -251,6 +251,11 @@ pub extern "C" fn rt_vulkan_push_constants(cmd: i64, pipeline_handle: i64, data:
     let Some(data) = byte_array_bytes(data) else {
         return 0;
     };
+    push_constants_bytes(cmd, pipeline_handle, &data)
+}
+
+#[cfg(feature = "vulkan")]
+fn push_constants_bytes(cmd: i64, pipeline_handle: i64, data: &[u8]) -> i64 {
     let len = data.len();
     let state = STATE.lock();
     let device = match state.require_device() {
@@ -281,9 +286,26 @@ pub extern "C" fn rt_vulkan_push_constants(cmd: i64, pipeline_handle: i64, data:
     1
 }
 
+/// AOT/raw-array ABI for pure-Simple native executables.
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_push_constants_raw(cmd: i64, pipeline_handle: i64, data_ptr: i64, byte_count: i64) -> i64 {
+    if data_ptr <= 0 || byte_count < 0 || byte_count > 64 * 1024 * 1024 {
+        return 0;
+    }
+    let data = unsafe { std::slice::from_raw_parts(data_ptr as *const u8, byte_count as usize) };
+    push_constants_bytes(cmd, pipeline_handle, data)
+}
+
 #[no_mangle]
 #[cfg(not(feature = "vulkan"))]
 pub extern "C" fn rt_vulkan_push_constants(_cmd: i64, _pipe: i64, _data: i64) -> i64 {
+    0
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_push_constants_raw(_cmd: i64, _pipe: i64, _data_ptr: i64, _byte_count: i64) -> i64 {
     0
 }
 

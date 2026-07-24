@@ -298,6 +298,17 @@ pub extern "C" fn rt_vulkan_is_available() -> i64 {
     0
 }
 
+/// Distinct provider entry used by the core C runtime fallback.
+///
+/// Native executables may contain a compatibility definition of
+/// `rt_vulkan_is_available`; using a separate name avoids Mach-O
+/// two-level-namespace/preemption ambiguity when a Vulkan-enabled runtime
+/// dylib is linked.
+#[no_mangle]
+pub extern "C" fn rt_vulkan_provider_is_available() -> i64 {
+    rt_vulkan_is_available()
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 
 #[no_mangle]

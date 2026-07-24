@@ -4,18 +4,40 @@ use super::buffer::VulkanBuffer;
 use super::device::VulkanDevice;
 use super::error::{VulkanError, VulkanResult};
 use ash::vk;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
-fn ensure_storage_binding(bindings: &mut Vec<vk::DescriptorSetLayoutBinding<'static>>) {
-    if bindings.is_empty() {
-        bindings.push(
-            vk::DescriptorSetLayoutBinding::default()
-                .binding(0)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE),
-        );
+fn storage_binding_numbers(spirv_code: &[u8]) -> VulkanResult<Vec<u32>> {
+    if spirv_code.len() < 20 || spirv_code.len() % 4 != 0 {
+        return Err(VulkanError::SpirvCompilationFailed(
+            "SPIR-V byte length must include a complete header and words".to_string(),
+        ));
     }
+    let words: Vec<u32> = spirv_code
+        .chunks_exact(4)
+        .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect();
+    let mut bindings = BTreeSet::new();
+    let mut word_offset = 5;
+    while word_offset < words.len() {
+        let instruction = words[word_offset];
+        let word_count = (instruction >> 16) as usize;
+        let opcode = instruction & 0xffff;
+        if word_count == 0 || word_offset + word_count > words.len() {
+            return Err(VulkanError::SpirvCompilationFailed(
+                "SPIR-V instruction extends beyond the module".to_string(),
+            ));
+        }
+        // OpDecorate %target Binding <literal>
+        if opcode == 71 && word_count >= 4 && words[word_offset + 2] == 33 {
+            bindings.insert(words[word_offset + 3]);
+        }
+        word_offset += word_count;
+    }
+    if bindings.is_empty() {
+        bindings.insert(0);
+    }
+    Ok(bindings.into_iter().collect())
 }
 
 /// Compute pipeline with shader and layout
@@ -62,33 +84,21 @@ impl ComputePipeline {
                 .map_err(|e| VulkanError::SpirvCompilationFailed(format!("{:?}", e)))?
         };
 
-        // Use spirv_reflect to extract descriptor set layout information
-        let reflection_module = spirv_reflect::ShaderModule::load_u8_data(spirv_code)
-            .map_err(|e| VulkanError::SpirvCompilationFailed(format!("Reflection failed: {:?}", e)))?;
-
-        // Get descriptor bindings
-        let descriptor_sets = reflection_module
-            .enumerate_descriptor_sets(None)
-            .map_err(|e| VulkanError::SpirvCompilationFailed(format!("Enumerate descriptors: {:?}", e)))?;
-
-        // Create descriptor set layout from reflection data
-        let mut bindings = Vec::new();
-
-        if let Some(desc_set) = descriptor_sets.first() {
-            for binding in &desc_set.bindings {
-                let vk_binding = vk::DescriptorSetLayoutBinding::default()
-                    .binding(binding.binding)
-                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER) // Assume storage buffers
-                    .descriptor_count(binding.count)
-                    .stage_flags(vk::ShaderStageFlags::COMPUTE);
-
-                bindings.push(vk_binding);
-            }
-        }
-        // The SFFI compute contract always binds storage buffer 0. Some valid
-        // hand-assembled kernels are not described by spirv-reflect, so keep
-        // the pipeline layout compatible with the descriptor allocator.
-        ensure_storage_binding(&mut bindings);
+        // Engine2D compute kernels use storage buffers in descriptor set 0.
+        // Parse their Binding decorations directly: the C spirv-reflect parser
+        // aborts the entire process on some valid hand-assembled modules instead
+        // of returning a recoverable error.
+        let binding_numbers = storage_binding_numbers(spirv_code)?;
+        let bindings: Vec<_> = binding_numbers
+            .iter()
+            .map(|binding| {
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(*binding)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::COMPUTE)
+            })
+            .collect();
 
         let descriptor_layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
 
@@ -273,18 +283,47 @@ impl ComputePipeline {
 
 #[cfg(test)]
 mod tests {
-    use super::ensure_storage_binding;
-    use ash::vk;
+    use super::storage_binding_numbers;
 
     #[test]
-    fn empty_reflection_keeps_storage_binding_zero() {
-        let mut bindings = Vec::new();
-        ensure_storage_binding(&mut bindings);
-        assert_eq!(bindings.len(), 1);
-        assert_eq!(bindings[0].binding, 0);
-        assert_eq!(bindings[0].descriptor_type, vk::DescriptorType::STORAGE_BUFFER);
-        assert_eq!(bindings[0].descriptor_count, 1);
-        assert_eq!(bindings[0].stage_flags, vk::ShaderStageFlags::COMPUTE);
+    fn storage_binding_parser_defaults_to_binding_zero() {
+        let mut bytes = Vec::new();
+        for word in [0x0723_0203u32, 0x0001_0300, 0, 1, 0] {
+            bytes.extend_from_slice(&word.to_le_bytes());
+        }
+        assert_eq!(storage_binding_numbers(&bytes).unwrap(), vec![0]);
+    }
+
+    #[test]
+    fn storage_binding_parser_collects_sorted_binding_decorations() {
+        let mut bytes = Vec::new();
+        for word in [
+            0x0723_0203u32,
+            0x0001_0300,
+            0,
+            4,
+            0,
+            (4 << 16) | 71,
+            2,
+            33,
+            2,
+            (4 << 16) | 71,
+            1,
+            33,
+            0,
+        ] {
+            bytes.extend_from_slice(&word.to_le_bytes());
+        }
+        assert_eq!(storage_binding_numbers(&bytes).unwrap(), vec![0, 2]);
+    }
+
+    #[test]
+    fn storage_binding_parser_rejects_truncated_instruction() {
+        let mut bytes = Vec::new();
+        for word in [0x0723_0203u32, 0x0001_0300, 0, 1, 0, (4 << 16) | 71, 2] {
+            bytes.extend_from_slice(&word.to_le_bytes());
+        }
+        assert!(storage_binding_numbers(&bytes).is_err());
     }
 }
 

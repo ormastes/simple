@@ -125,6 +125,11 @@ pub extern "C" fn rt_vulkan_copy_to_buffer(handle: i64, data: RuntimeValue, offs
     let Some(data) = byte_array_bytes(data) else {
         return 0;
     };
+    copy_to_buffer_bytes(handle, &data, offset)
+}
+
+#[cfg(feature = "vulkan")]
+fn copy_to_buffer_bytes(handle: i64, data: &[u8], offset: i64) -> i64 {
     let len = data.len();
     if offset != 0 {
         return 0;
@@ -152,9 +157,26 @@ pub extern "C" fn rt_vulkan_copy_to_buffer(handle: i64, data: RuntimeValue, offs
     }
 }
 
+/// AOT/raw-array ABI for pure-Simple native executables.
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_copy_to_buffer_raw(handle: i64, data_ptr: i64, byte_count: i64, offset: i64) -> i64 {
+    if data_ptr <= 0 || byte_count < 0 || byte_count > 1024 * 1024 * 1024 {
+        return 0;
+    }
+    let data = unsafe { std::slice::from_raw_parts(data_ptr as *const u8, byte_count as usize) };
+    copy_to_buffer_bytes(handle, data, offset)
+}
+
 #[no_mangle]
 #[cfg(not(feature = "vulkan"))]
 pub extern "C" fn rt_vulkan_copy_to_buffer(_handle: i64, _data: i64, _offset: i64) -> i64 {
+    0
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_copy_to_buffer_raw(_handle: i64, _data_ptr: i64, _byte_count: i64, _offset: i64) -> i64 {
     0
 }
 
@@ -189,9 +211,43 @@ pub extern "C" fn rt_vulkan_copy_from_buffer(data: RuntimeValue, handle: i64, of
     }
 }
 
+/// AOT/raw-array ABI for downloading into core-C-owned byte storage.
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_copy_from_buffer_raw(data_ptr: i64, byte_count: i64, handle: i64, offset: i64) -> i64 {
+    if data_ptr <= 0 || byte_count < 0 || offset < 0 || byte_count > 1024 * 1024 * 1024 {
+        return 0;
+    }
+    let end = match offset.checked_add(byte_count) {
+        Some(end) => end,
+        None => return 0,
+    };
+    let state = STATE.lock();
+    let Some(buf) = state.buffers.get(&handle) else {
+        return 0;
+    };
+    if end as u64 > buf.size() {
+        return 0;
+    }
+    let Ok(downloaded) = buf.download(end as u64) else {
+        return 0;
+    };
+    let source = &downloaded[offset as usize..end as usize];
+    unsafe {
+        std::ptr::copy_nonoverlapping(source.as_ptr(), data_ptr as *mut u8, source.len());
+    }
+    1
+}
+
 #[no_mangle]
 #[cfg(not(feature = "vulkan"))]
 pub extern "C" fn rt_vulkan_copy_from_buffer(_data: i64, _handle: i64, _offset: i64) -> i64 {
+    0
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_copy_from_buffer_raw(_data_ptr: i64, _byte_count: i64, _handle: i64, _offset: i64) -> i64 {
     0
 }
 

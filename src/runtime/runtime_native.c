@@ -157,19 +157,50 @@ static char rt_host_gpu_queue_in_flight_payload_texts[RT_HOST_GPU_QUEUE_CAPACITY
 
 void rt_host_gpu_queue_reset(void);
 
-int64_t rt_cuda_available(void) { return 0; }
-int64_t rt_cuda_device_count(void) { return 0; }
-int32_t rt_vk_available(void) { return 0; }
-int64_t rt_vulkan_is_available(void) { return 0; }
-int64_t rt_vulkan_device_count(void) { return 0; }
-
-/* Optional hosted backends are unavailable in the core C runtime. */
+/*
+ * Optional hosted GPU probes are fallback definitions only.  Native programs
+ * that link a real backend provider (for example libsimple_runtime_wm.dylib
+ * built with the Vulkan feature) must be allowed to bind to that provider
+ * instead of being pinned to these zero-return core-runtime fallbacks.
+ */
 #if defined(__GNUC__) || defined(__clang__)
 #define SPL_HOSTED_UNAVAILABLE_WEAK __attribute__((weak))
 #else
 #define SPL_HOSTED_UNAVAILABLE_WEAK
 #endif
 
+int64_t rt_cuda_available(void) { return 0; }
+int64_t rt_cuda_device_count(void) { return 0; }
+int32_t rt_vk_available(void) { return 0; }
+
+typedef int64_t (*spl_hosted_i64_probe_fn)(void);
+
+static int64_t spl_hosted_provider_i64_probe(const char* symbol) {
+#if !defined(_WIN32)
+    /*
+     * Use a provider-only symbol name.  Looking up the public compatibility
+     * name can return this executable's own weak definition under Mach-O's
+     * two-level namespace instead of the strong dependent-dylib definition.
+     */
+    void* resolved = dlsym(RTLD_DEFAULT, symbol);
+    if (resolved != NULL) {
+        return ((spl_hosted_i64_probe_fn)resolved)();
+    }
+#else
+    (void)symbol;
+#endif
+    return 0;
+}
+
+SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_is_available(void) {
+    return spl_hosted_provider_i64_probe("rt_vulkan_provider_is_available");
+}
+
+SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_device_count(void) {
+    return spl_hosted_provider_i64_probe("rt_vulkan_provider_device_count");
+}
+
+/* Optional hosted backends are unavailable in the core C runtime. */
 /* oneAPI */
 bool rt_oneapi_init(void) { return false; }
 bool rt_oneapi_is_available(void) { return false; }
@@ -3448,7 +3479,26 @@ int64_t rt_array_data_ptr_text(SplArray* a) {
 }
 
 int64_t rt_array_data_ptr_u8(SplArray* a) {
-    return rt_array_data_ptr(a);
+    static _Thread_local uint8_t* scratch;
+    static _Thread_local size_t scratch_cap;
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (!array || !array->data) return 0;
+    if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
+        return (int64_t)(uintptr_t)array->data;
+    }
+    if (array->len <= 0) return 0;
+    size_t len = (size_t)array->len;
+    if (scratch_cap < len) {
+        uint8_t* grown = (uint8_t*)realloc(scratch, len);
+        if (!grown) return 0;
+        scratch = grown;
+        scratch_cap = len;
+    }
+    int64_t* values = (int64_t*)array->data;
+    for (size_t i = 0; i < len; i++) {
+        scratch[i] = (uint8_t)(rt_core_as_int(values[i]) & 0xff);
+    }
+    return (int64_t)(uintptr_t)scratch;
 }
 
 static char* rt_core_string_to_cstring(int64_t value) {

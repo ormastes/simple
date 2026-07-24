@@ -8,12 +8,8 @@ use crate::value::{byte_array_bytes, RuntimeValue};
 // ============================================================================
 
 /// Create a `ShaderModule` from a native Simple `[u8]` value.
-#[no_mangle]
 #[cfg(feature = "vulkan")]
-pub extern "C" fn rt_vulkan_compile_spirv(spirv: RuntimeValue) -> i64 {
-    let Some(spirv_bytes) = byte_array_bytes(spirv) else {
-        return 0;
-    };
+fn compile_spirv_bytes(spirv_bytes: Vec<u8>) -> i64 {
     let len = spirv_bytes.len();
     let mut state = STATE.lock();
     let device = match state.require_device() {
@@ -51,8 +47,38 @@ pub extern "C" fn rt_vulkan_compile_spirv(spirv: RuntimeValue) -> i64 {
 }
 
 #[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_compile_spirv(spirv: RuntimeValue) -> i64 {
+    let Some(spirv_bytes) = byte_array_bytes(spirv) else {
+        return 0;
+    };
+    compile_spirv_bytes(spirv_bytes)
+}
+
+/// AOT/raw-array ABI for pure-Simple native executables.
+///
+/// The tagged `RuntimeValue` entry remains the interpreter/JIT ABI. Native
+/// Simple `[u8]` values use the core-C array layout, so their data pointer and
+/// byte count must cross the provider boundary explicitly.
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_compile_spirv_raw(data_ptr: i64, byte_count: i64) -> i64 {
+    if data_ptr <= 0 || byte_count < 0 || byte_count > 64 * 1024 * 1024 {
+        return 0;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(data_ptr as *const u8, byte_count as usize).to_vec() };
+    compile_spirv_bytes(bytes)
+}
+
+#[no_mangle]
 #[cfg(not(feature = "vulkan"))]
 pub extern "C" fn rt_vulkan_compile_spirv(_spirv: i64) -> i64 {
+    0
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_compile_spirv_raw(_data_ptr: i64, _byte_count: i64) -> i64 {
     0
 }
 

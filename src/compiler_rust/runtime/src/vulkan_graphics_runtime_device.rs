@@ -26,6 +26,12 @@ pub extern "C" fn rt_vulkan_device_count() -> i64 {
     0
 }
 
+/// Distinct provider entry used by the core C runtime fallback.
+#[no_mangle]
+pub extern "C" fn rt_vulkan_provider_device_count() -> i64 {
+    rt_vulkan_device_count()
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 
 #[no_mangle]

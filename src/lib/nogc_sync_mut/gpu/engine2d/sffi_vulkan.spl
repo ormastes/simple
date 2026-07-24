@@ -33,10 +33,14 @@ extern fn rt_vulkan_selected_device_driver_identity() -> text
 extern fn rt_vulkan_alloc_buffer(size: i64, usage: i64) -> i64
 extern fn rt_vulkan_free_buffer(handle: i64) -> bool
 extern fn rt_vulkan_copy_to_buffer(handle: i64, data: [u8], offset: i64) -> bool
+extern fn rt_vulkan_copy_to_buffer_raw(handle: i64, data_ptr: i64, byte_count: i64, offset: i64) -> bool
 extern fn rt_vulkan_copy_from_buffer(data: [u8], handle: i64, offset: i64) -> bool
+extern fn rt_vulkan_copy_from_buffer_raw(data_ptr: i64, byte_count: i64, handle: i64, offset: i64) -> bool
 extern fn rt_vulkan_read_buffer_bytes(handle: i64, byte_count: i64, offset: i64) -> [u8]
 extern fn rt_byte_array_new_len(len: i64) -> [u8]
 extern fn rt_vulkan_compile_spirv(spirv_bytes: [u8]) -> i64
+extern fn rt_vulkan_compile_spirv_raw(data_ptr: i64, byte_count: i64) -> i64
+extern fn rt_array_data_ptr_u8(bytes: [u8]) -> i64
 extern fn rt_vulkan_compile_glsl(glsl_source: text) -> i64
 extern fn rt_vulkan_destroy_shader(module: i64) -> bool
 extern fn rt_vulkan_create_compute_pipeline(shader_module: i64, entry_point: text, push_constant_size: i64) -> i64
@@ -48,6 +52,7 @@ extern fn rt_vulkan_begin_compute() -> i64
 extern fn rt_vulkan_bind_pipeline(cmd: i64, pipe: i64) -> bool
 extern fn rt_vulkan_bind_descriptors(cmd: i64, descriptor_set: i64) -> bool
 extern fn rt_vulkan_push_constants(cmd: i64, pipe: i64, data: [u8]) -> bool
+extern fn rt_vulkan_push_constants_raw(cmd: i64, pipe: i64, data_ptr: i64, byte_count: i64) -> bool
 extern fn rt_vulkan_dispatch(cmd: i64, x: i64, y: i64, z: i64) -> bool
 extern fn rt_vulkan_end_compute(cmd: i64) -> bool
 extern fn rt_vulkan_discard_command(cmd: i64) -> bool
@@ -171,12 +176,16 @@ impl FfiDispatchBase for VulkanFfi:
 
     fn copy_to_buffer(handle: i64, data: [u8], offset: i64) -> bool:
         match self._mode:
-            case Static: rt_vulkan_copy_to_buffer(handle, data, offset)
+            case Static:
+                rt_vulkan_copy_to_buffer_raw(
+                    handle, rt_array_data_ptr_u8(data), data.len().to_i64(), offset)
             case Dynamic: false
 
     fn copy_from_buffer(data: [u8], handle: i64, offset: i64) -> bool:
         match self._mode:
-            case Static: rt_vulkan_copy_from_buffer(data, handle, offset)
+            case Static:
+                rt_vulkan_copy_from_buffer_raw(
+                    rt_array_data_ptr_u8(data), data.len().to_i64(), handle, offset)
             case Dynamic: false
 
     fn compile_glsl(source: text) -> i64:
@@ -190,7 +199,9 @@ impl FfiDispatchBase for VulkanFfi:
 
     fn compile_spirv(spirv_bytes: [u8]) -> i64:
         match self._mode:
-            case Static: rt_vulkan_compile_spirv(spirv_bytes)
+            case Static:
+                rt_vulkan_compile_spirv_raw(
+                    rt_array_data_ptr_u8(spirv_bytes), spirv_bytes.len().to_i64())
             case Dynamic: 0
 
     fn create_compute_pipeline(shader: i64, entry: text, pc_size: i64) -> i64:
@@ -262,7 +273,9 @@ impl FfiDispatchBase for VulkanFfi:
 
     fn push_constants(cmd: i64, pipe: i64, data: [u8]) -> bool:
         match self._mode:
-            case Static: rt_vulkan_push_constants(cmd, pipe, data)
+            case Static:
+                rt_vulkan_push_constants_raw(
+                    cmd, pipe, rt_array_data_ptr_u8(data), data.len().to_i64())
             case Dynamic: false
 
     fn dispatch(cmd: i64, x: i64, y: i64, z: i64) -> bool:
@@ -350,7 +363,8 @@ fn vulkan_sffi_compile_glsl(glsl_source: text) -> i64:
     rt_vulkan_compile_glsl(glsl_source)
 
 fn vulkan_sffi_compile_spirv(spirv_bytes: [u8]) -> i64:
-    rt_vulkan_compile_spirv(spirv_bytes)
+    rt_vulkan_compile_spirv_raw(
+        rt_array_data_ptr_u8(spirv_bytes), spirv_bytes.len().to_i64())
 
 fn vulkan_sffi_destroy_shader(module: i64) -> bool:
     rt_vulkan_destroy_shader(module)
@@ -380,7 +394,8 @@ fn vulkan_sffi_bind_descriptors(cmd: i64, descriptor_set: i64) -> bool:
     rt_vulkan_bind_descriptors(cmd, descriptor_set)
 
 fn vulkan_sffi_push_constants(cmd: i64, pipe: i64, data: [u8]) -> bool:
-    rt_vulkan_push_constants(cmd, pipe, data)
+    rt_vulkan_push_constants_raw(
+        cmd, pipe, rt_array_data_ptr_u8(data), data.len().to_i64())
 
 fn vulkan_sffi_dispatch(cmd: i64, x: i64, y: i64, z: i64) -> bool:
     rt_vulkan_dispatch(cmd, x, y, z)
@@ -615,15 +630,21 @@ fn vulkan_sffi_selected_device_driver_identity() -> text:
     rt_vulkan_selected_device_driver_identity()
 
 fn vulkan_sffi_copy_from_buffer(data: [u8], handle: i64, offset: i64) -> bool:
-    rt_vulkan_copy_from_buffer(data, handle, offset)
+    rt_vulkan_copy_from_buffer_raw(
+        rt_array_data_ptr_u8(data), data.len().to_i64(), handle, offset)
 
 fn vulkan_sffi_read_buffer_bytes(handle: i64, byte_count: i64, offset: i64) -> [u8]:
     if byte_count <= 0:
         return []
-    rt_vulkan_read_buffer_bytes(handle, byte_count, offset)
+    val bytes = rt_byte_array_new_len(byte_count)
+    if not rt_vulkan_copy_from_buffer_raw(
+        rt_array_data_ptr_u8(bytes), byte_count, handle, offset):
+        return []
+    bytes
 
 fn vulkan_sffi_copy_to_buffer(handle: i64, data: [u8], offset: i64) -> bool:
-    rt_vulkan_copy_to_buffer(handle, data, offset)
+    rt_vulkan_copy_to_buffer_raw(
+        handle, rt_array_data_ptr_u8(data), data.len().to_i64(), offset)
 
 fn vulkan_sffi_wait_idle() -> bool:
     rt_vulkan_wait_idle()

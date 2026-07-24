@@ -216,6 +216,7 @@ pub fn symbol_tier_of(name: &str) -> RuntimeSymbolTier {
         || name.starts_with("rt_host_gpu_")
         || name.starts_with("rt_cuda_")
         || name.starts_with("rt_vk_")
+        || name.starts_with("rt_vulkan_")
         || name.starts_with("rt_metal_")
         || name.starts_with("rt_directx_")
         || name.starts_with("rt_cranelift_")
@@ -1918,9 +1919,12 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_vulkan_bind_vertex_buffer",
     "rt_vulkan_compile_glsl",
     "rt_vulkan_compile_spirv",
+    "rt_vulkan_compile_spirv_raw",
     "rt_vulkan_copy_buffer",
     "rt_vulkan_copy_from_buffer",
+    "rt_vulkan_copy_from_buffer_raw",
     "rt_vulkan_copy_to_buffer",
+    "rt_vulkan_copy_to_buffer_raw",
     "rt_vulkan_create_compute_pipeline",
     "rt_vulkan_create_descriptor_set",
     "rt_vulkan_create_fence",
@@ -1959,6 +1963,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_vulkan_map_memory",
     "rt_vulkan_present",
     "rt_vulkan_push_constants",
+    "rt_vulkan_push_constants_raw",
+    "rt_vulkan_read_buffer_bytes",
     "rt_vulkan_reset_fence",
     "rt_vulkan_selected_device_driver_identity",
     "rt_vulkan_selected_device_type",
@@ -2032,7 +2038,10 @@ mod tests {
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_array_new"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_heap_registry_count"));
         assert_eq!(symbol_tier_of("rt_heap_registry_count"), RuntimeSymbolTier::Sys);
-        assert_eq!(symbol_class_of("rt_heap_registry_count"), RuntimeSymbolClass::HostedOnly);
+        assert_eq!(
+            symbol_class_of("rt_heap_registry_count"),
+            RuntimeSymbolClass::HostedOnly
+        );
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_byte_array_new"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_len"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_string_trim_start"));
@@ -2059,10 +2068,17 @@ mod tests {
         assert_eq!(symbol_class_of("rt_array_free"), RuntimeSymbolClass::CoreRequired);
         assert_eq!(symbol_class_of("rt_byte_array_new"), RuntimeSymbolClass::CoreRequired);
         assert_eq!(symbol_class_of("rt_stdout_flush"), RuntimeSymbolClass::CoreRequired);
-        assert_eq!(symbol_class_of("rt_string_trim_start"), RuntimeSymbolClass::CoreRequired);
+        assert_eq!(
+            symbol_class_of("rt_string_trim_start"),
+            RuntimeSymbolClass::CoreRequired
+        );
         assert_eq!(symbol_class_of("rt_file_read_text"), RuntimeSymbolClass::HostedOnly);
         assert_eq!(
             symbol_class_of("rt_security_enter_gate"),
+            RuntimeSymbolClass::HostedOnly
+        );
+        assert_eq!(
+            symbol_class_of("rt_vulkan_compile_spirv_raw"),
             RuntimeSymbolClass::HostedOnly
         );
         assert_eq!(symbol_class_of("rt_array_clear"), RuntimeSymbolClass::Unported);

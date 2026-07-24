@@ -1,27 +1,21 @@
 # macOS Vulkan 2D Live Evidence
 
-```text
-macos_vulkan_2d_live_status=pass
-macos_vulkan_2d_live_reason=pass
-macos_vulkan_2d_live_backend=vulkan
-macos_vulkan_2d_live_source=device_readback
-macos_vulkan_2d_live_backend_handle=1
-macos_vulkan_2d_live_initial_checksum=1243781032
-macos_vulkan_2d_live_interaction_checksum=1359661257
-macos_vulkan_2d_live_keyboard_events=1
-macos_vulkan_2d_live_pointer_events=4
-macos_vulkan_2d_live_click_events=2
-macos_vulkan_2d_live_interaction_revision=1
-macos_vulkan_2d_live_window_rect=200,120,320,272
-macos_vulkan_2d_live_before_png=build/tmp/macos_vulkan_2d_live_parity/before.png
-macos_vulkan_2d_live_after_png=build/tmp/macos_vulkan_2d_live_parity/after.png
-macos_vulkan_2d_live_before_bytes=55325
-macos_vulkan_2d_live_after_bytes=55538
-macos_vulkan_2d_live_before_cksum=1534396474
-macos_vulkan_2d_live_after_cksum=3221614511
-```
+- status: fail
+- reason: exact-launched-pid-missing
+- selected driver: `/Users/ormastes/simple/build/worktrees/render_lane_origin_main/build/native_probe/macos-vulkan-2d-4k-300/macos_vulkan_2d_live_harness`
+- selected driver kind: pure-simple-native-output
+- runtime receipt: `/Users/ormastes/simple/build/worktrees/render_lane_origin_main/build/native_probe/macos-vulkan-2d-4k-300/live/runtime_receipt.env`
+- 4K/300-DPI framebuffer: `/Users/ormastes/simple/build/worktrees/render_lane_origin_main/build/native_probe/macos-vulkan-2d-4k-300/live/vulkan_3840x2160_300dpi.png`
+- exact window before input: `/Users/ormastes/simple/build/worktrees/render_lane_origin_main/build/native_probe/macos-vulkan-2d-4k-300/live/window_before.png`
+- exact window after input: `/Users/ormastes/simple/build/worktrees/render_lane_origin_main/build/native_probe/macos-vulkan-2d-4k-300/live/window_after.png`
+- launcher stdout: `/Users/ormastes/simple/build/worktrees/render_lane_origin_main/build/native_probe/macos-vulkan-2d-4k-300/live/launch.out`
+- launcher stderr: `/Users/ormastes/simple/build/worktrees/render_lane_origin_main/build/native_probe/macos-vulkan-2d-4k-300/live/launch.err`
 
-- Before interaction: `build/tmp/macos_vulkan_2d_live_parity/before.png`
-- After interaction: `build/tmp/macos_vulkan_2d_live_parity/after.png`
-- Event receipt: `build/tmp/macos_vulkan_2d_live_parity/events.validated.env`
-- Launcher log: `build/tmp/macos_vulkan_2d_live_parity/launcher.log`
+## Validated evidence
+
+```text
+macos_vulkan_2d_live_status=fail
+macos_vulkan_2d_live_reason=exact-launched-pid-missing
+macos_vulkan_2d_live_driver_kind=pure-simple-native-output
+macos_vulkan_2d_live_driver_path=/Users/ormastes/simple/build/worktrees/render_lane_origin_main/build/native_probe/macos-vulkan-2d-4k-300/macos_vulkan_2d_live_harness
+```

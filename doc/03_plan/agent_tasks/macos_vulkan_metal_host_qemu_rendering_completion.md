@@ -32,7 +32,7 @@ canonical `FontRenderer` path and include the requested 300 DPI configuration.
 | macOS Vulkan environment | PASS | MoltenVK initializes on Apple M4 through `/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json`. |
 | Vulkan vector pipeline creation | PASS (focused only) | A minimal provider probe initialized Vulkan and created the precompiled-SPIR-V pipeline on Apple M4. This does not prove live composite/capture/events. |
 | Vulkan vector composite/readback | FIXED, NOT REVERIFIED | Descriptor bindings 0–2 and returned-byte readback are implemented; promoted device execution, fence completion, nonzero exact bytes, and oracle checksum parity still need one fresh proof. |
-| Vulkan 2D render/events | FAIL | A legacy report says PASS, but the strict four-backend aggregate rejects the Rust-seed diagnostic as inadmissible and records no accepted capture or ordered event receipt. |
+| Vulkan 2D render/events | FAIL — SAFE PIPELINE REFLECTION FIX NOT REVERIFIED | The Vulkan-enabled provider now compiles and exports raw pointer/length bridges for SPIR-V, push constants, upload, and download. Core-C now packs widened `[u8]` slots in thread-local storage, and the focused runtime/provider compile gates pass. A retained pure-Simple closure was relinked with Apple `ld_new`, the corrected core-C object, and the raw provider bridges. The strict live run advanced through shader-module creation but aborted inside the C `spirv-reflect` parser before a receipt or window. All eight Engine2D SPIR-V source blobs independently pass `spirv-val`, so `ComputePipeline` now derives set-0 storage bindings with a bounds-checked Rust SPIR-V instruction scan instead of the aborting parser. That final fix is formatted but not rebuilt/live-tested because the three-cycle cap is reached. No capture/events exist. |
 | Vulkan web render/events | FAIL | No accepted live window/capture/event proof. Asset-root, stamped rerender, readback checksum, bounded failure, exact PID/window capture, and input checks are implemented. |
 | Vulkan widget GUI/render/events | FAIL | Earlier 320×240/96 DPI device-frame and font-cache receipts ended before accepted window/event evidence. Exact PID/window capture, Retina backing-scale, checksum, and input fixes are present but unverified. |
 | 300 DPI vector GUI | NOT PROVEN | Earlier 1200×900/300 DPI source interpretation exceeded about 1.5 GiB before window discovery. Provider-first `dlopen` reduced the smaller path's RSS, but no 300 DPI live PASS exists. |
@@ -90,35 +90,42 @@ same failure.
 
 ## Exact Next Steps
 
-1. Finish the linear rebase onto current `origin/main`, preserving only
-   reviewed rendering commits and applying the file-count guard.
-2. Inspect the current strict macOS Vulkan 2D gate and its selected-backend
-   native closure. Use the refreshed Stage 3 compiler for one bounded focused
-   build; do not rerun the exhausted full-CLI dynload probe.
-3. Launch Vulkan 2D first. Require a real MoltenVK device, positive handle,
+1. In a fresh bounded verification session, run the focused
+   `storage_binding_numbers` unit tests and rebuild the Vulkan-enabled runtime
+   provider. Require the four raw Engine2D ABI exports. Build the pure-Simple
+   `macos_vulkan_session_live_probe.spl` and strict harness with a compiler that
+   includes the `nil.id` semantic-build fix; the currently deployed compiler
+   cannot resolve a fresh closure. Require session status 0, nonempty device
+   identity, and no `shader-*`/`pipeline-*` label. If `ld_classic` stalls,
+   relink retained objects with Apple `ld_new` plus the Command Line Tools SDK;
+   do not use dynamic-lookup. Separately replace the unconditional
+   `-ld_classic` compiler policy with a tested current-linker option. Do not
+   rebuild again in the current session: all three targeted cycles have been
+   consumed.
+2. Launch Vulkan 2D first. Require a real MoltenVK device, positive handle,
    same-frame device readback, durable before/after capture, vector-font
    identity at 300 DPI, and ordered focus/pointer/key receipts.
-4. Verify the hardened web, widget-GUI, and WM contract specs once and generate
+3. Verify the hardened web, widget-GUI, and WM contract specs once and generate
    or refresh their mirrored manuals. Require real assertions and zero
    placeholder passes.
-5. Run the focused Vulkan font composite/readback proof once. Require promoted
+4. Run the focused Vulkan font composite/readback proof once. Require promoted
    Vulkan execution, fence completion, positive backend handle, nonzero exact
    readback bytes, and matching device/oracle checksums.
-6. Run Vulkan web and widget-GUI live gates. Require visible capture plus focus,
+5. Run Vulkan web and widget-GUI live gates. Require visible capture plus focus,
    keyboard/text, pointer, and click receipts. Then repeat widget GUI at
    300 DPI with the selected vector-font identity and cold/warm cache receipts.
-7. Run the host-WM production fullscreen gate and require the native artifact,
+6. Run the host-WM production fullscreen gate and require the native artifact,
    semantic capture, taskbar/window evidence, and routed input.
-8. Only after Vulkan passes, run equivalent Metal 2D/web/GUI/WM rendering and
+7. Only after Vulkan passes, run equivalent Metal 2D/web/GUI/WM rendering and
    event gates and review the existing local agent's 2D comparison commit
    without absorbing its uncommitted work.
-9. Run the strict QEMU SimpleOS 2D/SIMD aggregate until it has real guest
+8. Run the strict QEMU SimpleOS 2D/SIMD aggregate until it has real guest
    framebuffer, dimensions/bounds, exact hashes, input delivery, and runtime
    SIMD receipts. Then run QEMU WM after host WM passes.
-10. Run rendering coupling, direct-runtime, numbered-artifact, spec-layout,
+9. Run rendering coupling, direct-runtime, numbered-artifact, spec-layout,
     compiler/core/lib/MCP/LSP, and scoped production verification gates.
     `STATUS: PASS` is required before a completion commit or release.
-11. Commit only the isolated verified lane, fetch/rebase linearly onto
+10. Commit only the isolated verified lane, fetch/rebase linearly onto
     `main@origin`, apply the file-count guard, set `main`, and push.
 
 ## Required Evidence and Documentation
