@@ -637,7 +637,7 @@ elif [ ! -x "${seed_bin}" ] || [ ! -f "${native_all_lib}" ] || [ "${seed_stale}"
   # the stage4 `-r` capsule link cannot LTO-compile — every runtime root then
   # audits as "0 definitions". The last cargo invocation wins the deps/ archive
   # slot, so this must stay after the driver and native-all builds.
-  run_logged rust-runtime-nolto-build env CARGO_PROFILE_BOOTSTRAP_LTO=off cargo build --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-runtime --features runtime-symbol-table ${llvm_features}
+  run_logged rust-runtime-nolto-build env CARGO_PROFILE_BOOTSTRAP_LTO=off cargo build --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-runtime --features runtime-symbol-table
   rust_rebuilt=1
   # Record the fingerprint of the inputs we just built from, so the next run
   # can skip cargo when nothing actually changed (only written after a real
