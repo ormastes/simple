@@ -24,6 +24,14 @@ failure is **never** silently converted to a wrong answer.
 - **C9 positional self-host gate:** remains intentionally blocked until C5
   builds without unresolved warnings and its executable exits `42`; then run
   the unchanged `.parse_f64()` fixture once and require exit `42`.
+- **Function-returned Dict positional gate:** the current pure-Simple compiler
+  still cannot build `dict_fn_value.spl` under Cranelift. V29-V31 prove the
+  crash is before backend entry: the bootstrap flat block path marks a final
+  explicit `return` as a tail value, then stores a nil `HirExpr` payload.
+  Normal HIR tail matching is now discriminator-guarded and mandatory
+  `HirFunction.return_type` is lowered directly, but the exact fixture remains
+  red (`132`, expected executable exit `33`). Next fix the bootstrap-flat block
+  owner without editing the concurrently owned default-workspace file.
 - **MCP native receipt:** the fresh pure-Simple Stage4 compiler reached link,
   but its automatic `core-c-bootstrap` lane lacks the simple-core owners MCP
   needs. A complete simple-core archive was built successfully at
@@ -819,3 +827,22 @@ the shared binary — deploys require explicit user go-ahead).
   fusion rejection (`4/4`). The broader aggregate-runtime ABI contract timed
   out after 180 seconds before reporting a result and must not be credited or
   rerun in this session.
+
+  The independent function-returned Dict control was then rerun with the
+  current compiler and phase tracing. V29 rebuilt `4 compiled, 671 cached, 0
+  failed`; its fresh positional Cranelift run completed HIR, entered MIR
+  lowering for `main`, then reported `block.has=true` for the final explicit
+  `return` and failed reading a nil block value (`132`). Discriminator-first
+  tail-expression classification was added to the normal HIR block owner. V30
+  rebuilt `4/671/0`; function iteration exposed a second stale invariant at
+  `make_scores` return-type lowering: mandatory `HirFunction.return_type` was
+  still tested with optional truthiness. That field is now lowered directly.
+  V31 rebuilt `4/671/0`, but the fresh exact run again reached `main` first and
+  failed on the same false bootstrap-flat tail value (`132`). No backend marker
+  was reached and no executable was emitted, so neither Cranelift nor the
+  expected exit `33` is credited. The three-cycle cap stopped there. The
+  remaining owner is `lower_bootstrap_flat_block` in the concurrently owned
+  flat module-lowering file: it encodes `return` as an expression statement,
+  then raw-matches the final statement as a tail expression and extracts a nil
+  payload. Fix that owner in a non-conflicting lane before promoting the exact
+  fixture to strict dual-backend/platform coverage.

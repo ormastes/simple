@@ -1462,6 +1462,7 @@ impl HirLowering:
         var stmts: [HirStmt] = []
         var block_has_value = false
         var block_value_expr: HirExpr = HirExpr(kind: HirExprKind.NilLit, type_: nil, span: b.span)
+        val expr_stmt_disc = rt_enum_discriminant(HirStmtKind.Expr(block_value_expr))
         val stmt_count = b.stmts.len()
         var stmt_idx = 0
         while stmt_idx < stmt_count:
@@ -1480,17 +1481,19 @@ impl HirLowering:
             while li < lowered_count:
                 val lowered = lowered_list[li]
                 if stmt_idx == stmt_count - 1 and li == lowered_count - 1:
-                    # QUALIFIED pattern required: bare `case Expr(expr)` collides with
-                    # the frontend `struct Expr`, so the seed's unqualified-pattern
-                    # heuristic (stmt_lowering.rs, enum_name == "_") extracted the
-                    # payload as a struct FieldAccess at offset 0 (the enum header) —
-                    # a garbage HirExpr stored as block.value (iterations 10/14/15).
-                    match lowered.kind:
-                        case HirStmtKind.Expr(expr):
-                            block_has_value = true
-                            block_value_expr = expr
-                        case _:
-                            stmts = stmts.push(lowered)
+                    # Guard the exact Expr discriminator before the qualified
+                    # payload match. Bare or unguarded enum matching can accept
+                    # another statement variant and extract its header as a
+                    # garbage HirExpr stored in block.value.
+                    if rt_enum_discriminant(lowered.kind) == expr_stmt_disc:
+                        match lowered.kind:
+                            case HirStmtKind.Expr(expr):
+                                block_has_value = true
+                                block_value_expr = expr
+                            case _:
+                                stmts = stmts.push(lowered)
+                    else:
+                        stmts = stmts.push(lowered)
                 else:
                     stmts = stmts.push(lowered)
                 li = li + 1
