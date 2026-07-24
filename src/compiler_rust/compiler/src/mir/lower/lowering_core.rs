@@ -1456,6 +1456,22 @@ impl<'a> MirLowerer<'a> {
                             method_fns,
                             false,
                         ));
+                    } else {
+                        // The trait has no trait_infos entry (e.g. `impl Backend
+                        // for ...` where no matching `trait Backend` is importable
+                        // from this module). Dispatch can never resolve slots for
+                        // such a trait, but the native-project consumer scan still
+                        // attaches this impl's vtable symbol to StructInit object
+                        // headers — dropping the entry leaves those references
+                        // dangling at link time. Emit an empty-slot vtable so the
+                        // symbol is defined; its contents are unreachable.
+                        module.vtable_impls.push((
+                            hir_impl.type_id,
+                            hir_impl.type_name.clone(),
+                            format!("__vtable__{}__for__{}", hir_impl.type_name, trait_name),
+                            Vec::new(),
+                            false,
+                        ));
                     }
                 }
             }
