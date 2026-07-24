@@ -412,6 +412,49 @@ fn chained_text_replace_rfind_keeps_string_receiver() {
 }
 
 #[test]
+fn inferred_text_predicate_does_not_reuse_unrelated_custom_owner() {
+    let mir = compile_to_mir(
+        r#"struct CustomPrefixOwner:
+    marker: i64
+
+impl CustomPrefixOwner:
+    fn starts_with(prefix: text) -> bool:
+        self.marker == 41 and prefix == "@"
+
+fn exercise_custom_owner() -> bool:
+    val owner = CustomPrefixOwner(marker: 41)
+    owner.starts_with("@")
+
+fn exercise_css_text_owner() -> bool:
+    val css: text = "@media (min-width: 1px) { .panel { color: red; } }"
+    val parts = css.split("{")
+    val opener = parts[0].trim()
+    opener.starts_with("@")
+"#,
+    )
+    .unwrap();
+
+    let calls: Vec<&str> = mir
+        .functions
+        .iter()
+        .flat_map(|f| f.blocks.iter())
+        .flat_map(|b| b.instructions.iter())
+        .filter_map(|inst| match inst {
+            MirInst::MethodCallStatic { func_name, .. } => Some(func_name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        calls.iter().any(|name| *name == "CustomPrefixOwner.starts_with"),
+        "custom predicate receiver lost its owner: {calls:?}"
+    );
+    assert!(
+        calls.iter().any(|name| *name == "str.starts_with"),
+        "inferred split/trim text receiver reused the custom owner: {calls:?}"
+    );
+}
+
+#[test]
 fn direct_call_boxes_integer_args_for_any_params() {
     let mir =
         compile_to_mir("fn add(a: Any, b: Any) -> Any:\n    return a + b\n\nfn test() -> Any:\n    return add(1, 2)\n")

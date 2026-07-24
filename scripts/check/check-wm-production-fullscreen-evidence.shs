@@ -18,6 +18,9 @@ RESTORED_SNAPSHOT="$BUILD_DIR/restored.scene.json"
 COMMAND_PATH="$BUILD_DIR/evidence.commands"
 NATIVE_BIN="${HOSTED_WM_ARTIFACT:-$BUILD_DIR/hosted_entry}"
 BUILD_LOG="$BUILD_DIR/native-build.log"
+THEME_SNAPSHOT_SOURCE="$ROOT_DIR/src/lib/common/ui/generated/aetheric_dark_theme_snapshot.spl"
+EXPECTED_THEME_ID="aetheric_dark"
+EXPECTED_THEME_SOURCE_MANIFEST_SHA256="$(sed -n 's/.*source_manifest_sha256: "\([0-9a-f][0-9a-f]*\)".*/\1/p' "$THEME_SNAPSHOT_SOURCE" | head -n 1)"
 SPL_WINIT_LIB="${SIMPLE_WM_WINIT_LIB:-$ROOT_DIR/build/sffi/libspl_winit.dylib}"
 case "$(uname -s)" in
     Darwin) RUNTIME_DYLIB_EXT=dylib ;;
@@ -356,6 +359,11 @@ fullscreen_hash=$(sha256_file "$FULLSCREEN_CAPTURE")
 restored_hash=$(sha256_file "$RESTORED_CAPTURE")
 [ "$windowed_hash" != "$fullscreen_hash" ] || fail_live fullscreen-capture-not-distinct
 [ "$windowed_hash" = "$restored_hash" ] || fail_live restored-capture-semantic-state-mismatch
+content_provenance_marker="$(grep -E "^\\[hosted-wm\\] content-presented scene_revision=[1-9][0-9]* window_id=.* status=engine2d_rendered backend=[^ ]+ fallback=solid-material material=[0-9a-f]{64} theme=$EXPECTED_THEME_ID source=$EXPECTED_THEME_SOURCE_MANIFEST_SHA256$" "$LAUNCH_LOG" | tail -n 1 || true)"
+[ -n "$content_provenance_marker" ] || fail_live content-provenance-missing
+if grep -Eq '^\[hosted-wm\] content-provenance-rejected|backend=native-safe-fallback|^\[hosted-wm\] draw-ir-rejected retry=compatibility' "$LAUNCH_LOG"; then
+    fail_live content-provenance-rejected
+fi
 
 cleanup
 trap - EXIT INT TERM
@@ -366,6 +374,8 @@ trap - EXIT INT TERM
     echo "wm_production_fullscreen_backend=simple-2d-winit-buffer"
     echo "wm_production_fullscreen_fallback_used=false"
     echo "wm_production_fullscreen_readback=presented-pixel-buffer"
+    echo "wm_production_fullscreen_content_provenance=$content_provenance_marker"
+    echo "wm_production_fullscreen_theme_source_manifest_sha256=$EXPECTED_THEME_SOURCE_MANIFEST_SHA256"
     echo "wm_production_fullscreen_internal_maximize_hook=verified"
     echo "wm_production_fullscreen_fullscreen_transition_ms=$fullscreen_elapsed"
     echo "wm_production_fullscreen_restore_transition_ms=$restored_elapsed"
@@ -379,6 +389,7 @@ trap - EXIT INT TERM
     echo "- status: pass"
     echo "- artifact: $NATIVE_BIN"
     echo "- backend/readback: simple-2d-winit-buffer / presented-pixel-buffer (no fallback)"
+    echo "- content provenance: $content_provenance_marker"
     echo "- fullscreen/restore: ${fullscreen_elapsed}ms / ${restored_elapsed}ms"
     echo "- internal interactions: focus, drag, minimize, taskbar restore"
     echo "- internal maximize/restore: verified exact"

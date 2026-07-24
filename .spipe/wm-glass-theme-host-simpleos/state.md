@@ -58,7 +58,7 @@ No new drawing IR, private widget renderer, font atlas/cache, Engine3D shortcut,
   capability-declared pixel evidence.
 
 ## Phase
-implementation-blocked-freestanding-css-span-lowering
+implementation-blocked-inferred-text-result-provenance
 
 ## Log
 - dev: Created state file with 10 acceptance criteria (type: bug); defined bounded cooperative lanes, canonical interface constraints, evidence steps, and fail-fast policy.
@@ -143,3 +143,17 @@ implementation-blocked-freestanding-css-span-lowering
   WM/theme, unrelated `llm_caret`, shared, and external lanes, while another
   agent owns a live full-bootstrap process; no mixed or unverified working-copy
   commit was pushed.
+- sync-continuation-2026-07-24: Fetched GitHub with the `$sync` workflow;
+  `main@origin` and the working parent match at `52d0c716f0d1`, and the tracked
+  file-count guard remained `105960 -> 105960`. Mixed WM and unrelated
+  concurrent-session changes remain uncommitted and were not pushed.
+- inferred-text-provenance-2026-07-24: Built exact pure-Simple bootstrap
+  compilers from the synchronized tree. QEMU cycle 2 used compiler
+  `bc99e6c6...`, built a 658-file kernel with zero failures, reached the
+  3840x2160 production scanout, then faulted in `ByteSpan.starts_with` from
+  `_css_scan_rules_simple`. Strengthening the fixture from explicit
+  `opener: text` to inferred `opener` reproduced a direct custom-owner
+  relocation. Three compiler/probe iterations did not clear that relocation;
+  the final RED object and exact resume command are recorded in
+  `simpleos_wm_freestanding_bytespan_css_scan_fault_2026-07-24.md`. Per the
+  hard cap, QEMU cycle 3 and the hosted runtime gate were not run.

@@ -925,7 +925,14 @@ impl Lowerer {
                 // jit_string_length_var_control_flow_wrong_value_2026-07-17.md).
                 "len" | "length" => Some(TypeId::I64),
                 "starts_with" | "ends_with" | "contains" => Some(TypeId::BOOL),
-                "concat" | "slice" | "replace" => Some(TypeId::STRING),
+                "concat" | "slice" | "replace" | "trim" | "trim_start" | "trim_end" => {
+                    Some(TypeId::STRING)
+                }
+                "split" => Some(
+                    self.module
+                        .types
+                        .register(HirType::Array { element: TypeId::STRING, size: None }),
+                ),
                 // find/rfind return -1 if not found, position if found (raw i64 from rt_string_find)
                 "find" | "index_of" | "find_str" | "rfind" | "last_index_of" => Some(TypeId::I64),
                 // `.bytes()` returns UTF-8 bytes as an array of ints (see

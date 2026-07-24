@@ -12,7 +12,7 @@ use common.ui.window_scene.{
     shared_wm_scene_register_motion_background_source,
     shared_wm_scene_resolve_background
 }
-use common.ui.window_scene.{WmContentFrame, WmSceneRevision, WmRenderMetrics, SharedWmRenderInput, SharedWmTaskbarRenderInput}
+use common.ui.window_scene.{WmContentFrame, WmSceneRevision, WmRenderMetrics, SharedWmRenderInput, SharedWmTaskbarRenderInput, wm_content_frame_web_provenance_valid}
 use common.ui.draw_ir.{DRAW_IR_BACKEND_AUTO}
 use common.ui.window_scene_draw_ir.{
     SharedWmPixelBufferBackend,
@@ -751,11 +751,13 @@ class HostCompositor:
         SharedWmTaskbarRenderInput(render: render_input, taskbar: self.taskbar_model(), clock_label: host_taskbar_clock_label(frame_time))
 
     me _reject_engine2d_frame() -> bool:
+        print "[hosted-wm] draw-ir-rejected retry=compatibility"
         self.render_revision = self.render_revision - 1
         false
 
     me render_frame_engine2d(executor: Engine2dCompositorBackend) -> bool:
         if not self.native_pixel_lane or host_wm_chrome_force_direct() or self.background.kind != WM_BACKGROUND_KIND_COLOR or executor.w != self.width or executor.h != self.height:
+            print "[hosted-wm] draw-ir-reject-detail reason=entry-gate native_pixel_lane={self.native_pixel_lane} force_direct={host_wm_chrome_force_direct()} background_kind={self.background.kind} executor={executor.w}x{executor.h} compositor={self.width}x{self.height}"
             return false
         self.render_revision = self.render_revision + 1
         val had_damage = not self.dirty.is_empty()
@@ -777,6 +779,9 @@ class HostCompositor:
                 val frame_index = shared_wm_top_content_frame_index(frames, self.render_revision, window.window_id, content.width, content.height)
                 if frame_index >= 0:
                     val frame = frames[frame_index]
+                    if not wm_content_frame_web_provenance_valid(frame):
+                        print "[hosted-wm] content-provenance-rejected window_id={window.window_id} status={frame.engine2d_status} backend={frame.engine2d_backend} fallback={frame.material_fallback_kind} material={frame.material_fallback_sha256} theme={frame.theme_id} source={frame.theme_source_manifest_sha256}"
+                        return self._reject_engine2d_frame()
                     val image_uri = shared_wm_content_frame_image_uri(frame)
                     var duplicate_uri = image_uri == ""
                     var ii = 0
@@ -785,20 +790,26 @@ class HostCompositor:
                             duplicate_uri = true
                         ii = ii + 1
                     if duplicate_uri:
+                        print "[hosted-wm] draw-ir-reject-detail reason=duplicate-or-empty-content-uri window_id={window.window_id} uri={image_uri}"
                         return self._reject_engine2d_frame()
                     images.push(engine2d_resolved_draw_ir_image(image_uri, frame.width, frame.height, frame.pixels))
                 else:
+                    print "[hosted-wm] draw-ir-reject-detail reason=content-frame-missing window_id={window.window_id} scene_revision={self.render_revision}"
                     return self._reject_engine2d_frame()
             wi = wi + 1
         if images.len() != expected_images or frames.len() != expected_images:
+            print "[hosted-wm] draw-ir-reject-detail reason=content-image-count images={images.len()} frames={frames.len()} expected={expected_images}"
             return self._reject_engine2d_frame()
 
         val composition = shared_wm_scene_draw_ir_composition_with_content(scene, taskbar_input.taskbar, frames, DRAW_IR_BACKEND_AUTO, 1000, taskbar_input.clock_label, 0)
         val result = executor.render_draw_ir_composition(composition, images)
         if result.fallback_required or result.skipped_command_count != 0 or result.rendered_command_count <= 0 or result.pixels.len() != self.width * self.height:
+            print "[hosted-wm] draw-ir-reject-detail reason=render-result fallback_required={result.fallback_required} fallback_reason={result.fallback_reason} skipped={result.skipped_command_count} rendered={result.rendered_command_count} pixels={result.pixels.len()} expected_pixels={self.width * self.height}"
             return self._reject_engine2d_frame()
         self.pixel_backend.blit_pixels(0, 0, self.width, self.height, result.pixels)
         self.pixel_backend.present()
+        for frame in frames:
+            print "[hosted-wm] content-presented scene_revision={self.render_revision} window_id={frame.window_id} status={frame.engine2d_status} backend={frame.engine2d_backend} fallback={frame.material_fallback_kind} material={frame.material_fallback_sha256} theme={frame.theme_id} source={frame.theme_source_manifest_sha256}"
         self.dirty.clear()
         true
 

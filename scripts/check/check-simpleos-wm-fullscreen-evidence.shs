@@ -29,6 +29,9 @@ FONT_REGION_RGB="$BUILD_DIR/font-region.rgb"
 FONT_REGION_CORRUPT_COPY="$BUILD_DIR/font-region-corrupt-calibration.rgb"
 FONT_ASSET="${SIMPLEOS_WM_FONT_ASSET:-assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf}"
 FONT_GUEST_PATH=/SYS/FONTS/NOTOSANS
+THEME_SNAPSHOT_SOURCE="$ROOT_DIR/src/lib/common/ui/generated/aetheric_dark_theme_snapshot.spl"
+EXPECTED_THEME_ID="aetheric_dark"
+EXPECTED_THEME_SOURCE_MANIFEST_SHA256="$(sed -n 's/.*source_manifest_sha256: "\([0-9a-f][0-9a-f]*\)".*/\1/p' "$THEME_SNAPSHOT_SOURCE" | head -n 1)"
 FONT_ASSET_EXPECTED_BYTES=1708408
 FONT_ASSET_EXPECTED_SHA256=2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081
 FONT_REGION_EXPECTED_BYTES=8064
@@ -149,7 +152,7 @@ regular_file_status() {
 }
 
 serial_has_production_fault() {
-    grep -Eq '^\[fault\] \*\*\* EXCEPTION FRAME|page[- ]fault|nil receiver|invalid Simple Web frame|\[simple2d-frame-failed\]' "$SERIAL_LOG" 2>/dev/null
+    grep -Eq '^\[fault\] \*\*\* EXCEPTION FRAME|page[- ]fault|nil receiver|invalid Simple Web frame|\[simple2d-frame-failed\]|^\[wm-frame\] (content-provenance-rejected|engine2d-draw-ir-rejected|frame-degraded)' "$SERIAL_LOG" 2>/dev/null
 }
 
 ppm_magic_status() {
@@ -496,6 +499,7 @@ font_region_sha256=""
 font_region_corrupt_copy_bytes=0
 font_region_corrupt_copy_sha256=""
 font_region_corrupt_rejection_status=not-run
+content_provenance_marker=""
 input_nonce="simpleos-wm-$(date +%s)-$$"
 input_submit_marker=""
 input_irq_marker=""
@@ -859,9 +863,13 @@ PY
             font_region_sha256="$(marker_field "$font_region_line" font_region_rgb_sha256)"
             font_region_corrupt_copy_bytes="$(file_byte_count "$FONT_REGION_CORRUPT_COPY")"
             font_region_corrupt_copy_sha256="$(file_sha256 "$FONT_REGION_CORRUPT_COPY")"
+            content_provenance_marker="$(tr -d '\r' <"$SERIAL_LOG" | grep -E "^\\[wm-frame\\] content-presented scene_revision=[1-9][0-9]* path=(host-gpu|software) window_id=.* status=engine2d_rendered backend=[^ ]+ fallback=solid-material material=[0-9a-f]{64} theme=$EXPECTED_THEME_ID source=$EXPECTED_THEME_SOURCE_MANIFEST_SHA256$" | tail -n 1 || true)"
             if serial_has_production_fault; then
                 status=fail
                 reason=guest-render-fault
+            elif [ -z "$content_provenance_marker" ] || grep -Eq '^\[wm-frame\] content-provenance-rejected|backend=native-safe-fallback' "$SERIAL_LOG"; then
+                status=fail
+                reason=guest-content-provenance-invalid
             elif [ -z "$FONT_REGION_EXPECTED_SHA256" ]; then
                 status=fail
                 reason=canonical-taskbar-clock-oracle-pending
@@ -938,6 +946,8 @@ fi
     echo "simpleos_wm_fullscreen_font_region_corrupt_copy_bytes=$font_region_corrupt_copy_bytes"
     echo "simpleos_wm_fullscreen_font_region_corrupt_copy_sha256=$font_region_corrupt_copy_sha256"
     echo "simpleos_wm_fullscreen_font_region_corrupt_rejection_status=$font_region_corrupt_rejection_status"
+    echo "simpleos_wm_fullscreen_content_provenance=$content_provenance_marker"
+    echo "simpleos_wm_fullscreen_theme_source_manifest_sha256=$EXPECTED_THEME_SOURCE_MANIFEST_SHA256"
     echo "simpleos_wm_fullscreen_scanout_marker=$scanout_marker"
     echo "simpleos_wm_fullscreen_scanout_address=$scanout_address"
     echo "simpleos_wm_fullscreen_scanout_width=$scanout_width"
@@ -1002,6 +1012,7 @@ fi
     echo "- guest font marker: ${font_marker:--}"
     echo "- font region: $FONT_REGION_RGB (${font_region_bytes:-0} bytes, sha256=${font_region_sha256:--}, origin=qemu-pmemsave)"
     echo "- corrupt-copy calibration: $FONT_REGION_CORRUPT_COPY (${font_region_corrupt_copy_bytes:-0} bytes, sha256=${font_region_corrupt_copy_sha256:--}, rejection=$font_region_corrupt_rejection_status)"
+    echo "- content provenance: ${content_provenance_marker:--}"
     echo "- scanout: address=${scanout_address:--} width=${scanout_width:-0} height=${scanout_height:-0} byte-pitch=${scanout_stride:-0} format=${scanout_pixel_format:--} generation=${scanout_generation:-0}"
     echo "- host nonce: $input_nonce"
     echo "- input sequences: baseline=$baseline_seq maximize=$maximize_seq restore=$restore_seq"
