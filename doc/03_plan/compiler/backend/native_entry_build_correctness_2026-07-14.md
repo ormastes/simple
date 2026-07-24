@@ -846,3 +846,27 @@ the shared binary — deploys require explicit user go-ahead).
   then raw-matches the final statement as a tail expression and extracts a nil
   payload. Fix that owner in a non-conflicting lane before promoting the exact
   fixture to strict dual-backend/platform coverage.
+
+  A later isolated lane established that the fixture actually uses the normal
+  HIR function/block path; the flat helper is only a sibling prevention fix.
+  V32 rebuilt `9 compiled, 666 cached, 0 failed`, but still stopped at the
+  declared Dict return type. V33 rebuilt `4/671/0`; reconstructing encoded
+  `Dict<K,V>` in the bootstrap-flat helper was correct but did not affect this
+  active path. V34 added exact `HirTypeKind.Dict` MIR predispatch and the
+  missing inner `HirExprKind.Return` guard in normal block lowering, then
+  rebuilt `5/670/0`. Its fresh positional Cranelift receipt proves the normal
+  Return guard took effect: `main` completed its i64 return-type lowering and
+  its explicit return remained executable (`block:start stmts=2 has=false`)
+  instead of becoming a nil tail value. Function iteration did not reach
+  `make_scores`, so the Dict predispatch remains compile/source-contract
+  covered but execution-pending.
+
+  V34 now stops on statement 1 with `field access on nil receiver` (exit 132),
+  before any backend marker or artifact. The next owner is the already
+  documented residual in `src/compiler/50.mir/mir_lowering_stmts.spl`
+  `lower_stmt`: exact outer `HirStmtKind.Expr` dispatch succeeds, but the inner
+  payload extraction can still yield its NilLit fallback under the native
+  worker. Correlate statement 1 through that extraction and
+  `MirLowering.lower_expr` Return dispatch; fix the shared extraction boundary,
+  not Cranelift. The three-cycle cap stopped here. LLVM, exit `33`, implicit
+  tail, neighbor Dict-struct, and platform promotion remain gated.
