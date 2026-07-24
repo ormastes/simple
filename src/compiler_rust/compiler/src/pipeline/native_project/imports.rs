@@ -253,6 +253,7 @@ pub(crate) fn build_import_map(
     let mut vtable_type_owners: HashSet<String> = HashSet::new();
     let mut vtable_symbols: HashMap<String, String> = HashMap::new();
     let mut pending_vtable_impls: Vec<(String, String, String)> = Vec::new();
+    let mut trait_def_names: HashSet<String> = HashSet::new();
     // Bare function name -> declared return type. This includes primitive
     // returns: losing `u64` here turns native comparisons into mixed ANY/scalar
     // operations whose tagged ABI differs from raw machine integers.
@@ -489,6 +490,7 @@ pub(crate) fn build_import_map(
                         }
                     }
                     simple_parser::ast::Node::Trait(t) => {
+                        trait_def_names.insert(t.name.clone());
                         for m in &t.methods {
                             if has_concrete_body(&m.body) {
                                 let raw = format!("{}.{}", t.name, m.name);
@@ -739,6 +741,16 @@ pub(crate) fn build_import_map(
     // has been scanned. Split `impl Trait for Type` files are common, so the
     // impl file's module prefix is not necessarily the concrete type owner.
     for (impl_prefix, type_name, trait_name) in pending_vtable_impls {
+        // MIR lowering only records a vtable_impls entry when the trait has a
+        // trait_infos definition, so an `impl Trait for Type` whose trait is
+        // declared nowhere in the project never EMITS a vtable. Marking the
+        // type vtable-bearing here would emit dangling references at every
+        // StructInit (undefined __vtable__..__for__Backend, 2026-07-24). No
+        // dispatch site can hold slot numbers for an undefined trait, so
+        // skipping is the consistent side.
+        if !trait_def_names.contains(&trait_name) {
+            continue;
+        }
         let suffix = format!("__{type_name}");
         let mut candidates: Vec<String> = raw_to_mangled
             .get(&type_name)
