@@ -1,11 +1,11 @@
-# Deployed native self-hosted `bin/simple` segfaults on every `run`/`test`
+# Deployed native self-hosted `bin/simple` segfaults on `run`/`test`/`native-build`
 
 - **Date:** 2026-07-24
-- **Severity:** high (blocks all `run`/`test` reproduction on the affected
+- **Severity:** high (blocks `run`/`test` and incremental native builds on the affected
   binaries; discovered as a side-effect while investigating
   `sspec_test_runner_undercounts_it_blocks_2026-07-24.md`)
-- **Status:** open (out of scope for the SSpec undercount fix; filed for a
-  separate lane)
+- **Status:** `run`/`test` source-fixed with redeployment pending;
+  `native-build` root unproven
 
 ## Symptom
 
@@ -14,6 +14,19 @@ The deployed native self-hosted binary segfaults on **every** invocation of
 `cli_run_file`), even for a trivial `fn main(): print "hello"` script — no
 compile error, immediate `SIGSEGV`. `--version`, `lint`, `doc-coverage`, etc.
 are unaffected.
+
+The same retained-artifact failure now reproduces before output or cache
+creation on `native-build`:
+
+- the isolated lane's `release/x86_64-unknown-linux-gnu/simple` building
+  `src/app/cli/bootstrap_main.spl`;
+- the main repository's `bin/release/x86_64-unknown-linux-gnu/simple` building
+  `test/04_smoke/windows_native_hello.spl`.
+
+Both used separate caches, `SIMPLE_NO_STUB_FALLBACK=1`, and Cranelift. Both
+exited by SIGSEGV with empty logs and no candidate artifact. These runs
+corroborate the stale lowering symptom but do not independently prove a new
+frame without a backtrace.
 
 Reproduced on two independently-built copies:
 - This worktree's `release/x86_64-unknown-linux-gnu/simple` (built
@@ -64,17 +77,27 @@ self-hosted binary; that investigation worked around it by using the Rust
 bootstrap seed (`bin/release/x86_64-unknown-linux-gnu/simple_seed`, from the
 main repo) as a `bin/simple` stand-in, since the seed interprets the same
 current `.spl` runner sources rather than running pre-compiled native code.
+It also blocks the cache-preserving incremental Stage-4 mini build before the
+first cache object is produced.
 
-## Suggested next steps
+## Source fix and proving gate
 
-- Rebuild `bin/simple` fresh via `bin/simple build bootstrap` in a clean
-  worktree and check whether the crash is a stale-artifact issue (this
-  worktree has substantial unrelated WIP under `src/os/compositor/`,
-  `src/os/hosted/`, `src/os/desktop/shell.spl` per `git status` — plausible
-  the deployed binary was built from a transiently broken WIP tree) or a
-  genuine regression that survives a clean rebuild.
-- If it survives a clean rebuild: bisect the `args`/`[text]` value flowing
-  into `startup_plan_from_metadata` / `startup_normalize_program_args` for a
-  null-vs-empty-array representation bug, likely in `interpret_file` /
-  `compiler_driver_run_compile`'s construction of the interpreted program's
-  `program_args`.
+Current source already fixes the identified `run`/`test` root for both native
+backends:
+
+- LLVM guards tagged/null arrays before the offset-8 length load in
+  `src/compiler_rust/compiler/src/codegen/llvm/functions/calls.rs`;
+- Cranelift applies the same guard in
+  `src/compiler_rust/compiler/src/codegen/instr/helpers.rs`;
+- `native_inline_array_len_handles_tagged_nil` in
+  `src/compiler_rust/compiler/tests/compile_and_run.rs` proves
+  `rt_array_len(3) == 0`.
+
+The shared repair landed in `00bfd7cfb0e9`. Do not add a second guard in
+`startup_normalize_program_args`. The two `native-build` crashes are consistent
+with retained stale artifacts but have no backtrace, so their root remains
+unproven. Produce one fresh guarded pure-Simple compiler, then reuse the
+bootstrap capability probe that builds and runs
+`test/04_smoke/windows_native_hello.spl` with an isolated cache. A pass resolves
+the retained-artifact suspicion; another crash requires its own backtrace.
+Only after that should the full CLI and essential-tools gates run.

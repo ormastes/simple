@@ -174,8 +174,11 @@ evidence boundary for the important pure-Simple tooling lanes:
   remain valid. Explicit targets that discover no spec files now fail with
   exit 4; implicit default discovery, `--list`, and `--spl-doctest` retain
   zero-selection success (`330f11622eb`). This is source-fixed only: fresh
-  pure-Simple qualification remains blocked by the deployed native
-  `run`/`test` startup-argument crash, not a proven eager-module failure;
+  pure-Simple qualification remains blocked by deployed native crashes, not a
+  proven eager-module failure. The `run`/`test` tagged-null root has current
+  LLVM and Cranelift guards; two `native-build` SIGSEGVs on retained artifacts
+  have no backtrace, so their root remains unproven pending a fresh guarded
+  capability build;
   see the [explicit-selection report](../../08_tracking/bug/test_runner_explicit_empty_selection_false_green_2026-07-24.md).
   **Remaining bug/gap:** this preflight has focused source
   evidence only. Public `--format json` is not yet qualified. The pushed
