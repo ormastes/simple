@@ -1,7 +1,8 @@
 # ARM64 SimpleOS QMP input
 
 **Status:** FAIL — source transport and canonical compositor input ownership
-are implemented; live QMP evidence remains blocked.
+are implemented and source-verified; only live QMP-to-WM-to-frame correlation
+and distinct post-input RAMFB capture evidence remain blocked.
 
 The production `arm64-desktop-engine2d` lane must consume QMP keyboard
 press/release and pointer move/button events through real guest hardware.
@@ -21,7 +22,7 @@ groups pointer records through `SYN_REPORT`, and delivers typed
 per-frame `REL_X`/`REL_Y` summaries and `BTN_LEFT`/`BTN_RIGHT`/`BTN_MIDDLE`
 edge receipts. Every record uses the same guest-owned pointer frame sequence,
 so the final typed mouse delivery cannot erase the raw motion/button evidence.
-Source readiness remains fail-closed with
+Production admission remains fail-closed with
 `[backend2d-event-blocker] reason=live-qmp-evidence-pending` until the required
 QEMU capture exists; failed device discovery uses the same blocker family.
 

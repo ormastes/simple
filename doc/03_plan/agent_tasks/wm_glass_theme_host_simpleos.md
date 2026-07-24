@@ -159,7 +159,9 @@ overlapping dirty work and remains read-only for this lane.
   retains key edges, and assigns one sequence to each pointer `SYN_REPORT`
   frame. Typed optional-struct trait dispatch is pinned by a two-vtable native
   fixture (`49 0 73 0`). The live event-ready marker remains fail-closed until
-  QMP/RAMFB evidence passes.
+  QMP/RAMFB evidence passes. The source preflight pins every retained
+  `REL_X`/`REL_Y` summary and `BTN_LEFT`/`BTN_RIGHT`/`BTN_MIDDLE` edge before
+  its `SYN_REPORT` receipt with the same `input_seq` interpolation.
 
    The ARM input owner is source-wired and keeps UART fallback outside
    production evidence. After the host-first gate, require QMP pointer
