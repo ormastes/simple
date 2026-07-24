@@ -10,18 +10,32 @@ use app.verify.test_quality_gate.{
     render_test_quality_verify_report,
     write_test_quality_verify_report
 }
+use app.io.mod.{file_exists}
 use nogc_sync_mut.ui.theme_package.{validate_default_theme_package, render_theme_validation_report}
+
+fn explicit_scope_files(args: [text]) -> [text]:
+    var files: [text] = []
+    for arg in args:
+        if arg.starts_with("--files="):
+            for path in split_csv_files(arg.substring(8)):
+                files.push(path)
+        elif not arg.starts_with("-"):
+            files.push(arg)
+    files
+
+fn missing_explicit_scope_file(args: [text]) -> text:
+    if args.contains("--all"):
+        return ""
+    for path in explicit_scope_files(args):
+        if not file_exists(path):
+            return path
+    ""
+
 pub fn select_scope_files(args: [text], changed_files: [text], tracked_files: [text]) -> [text]:
     if args.contains("--all"):
         return tracked_files
 
-    var explicit_files: [text] = []
-    for arg in args:
-        if arg.starts_with("--files="):
-            for path in split_csv_files(arg.substring(8)):
-                explicit_files.push(path)
-        elif not arg.starts_with("-"):
-            explicit_files.push(arg)
+    val explicit_files = explicit_scope_files(args)
     if explicit_files.len() > 0:
         return explicit_files
     changed_files
@@ -32,6 +46,11 @@ fn collect_scope_files(args: [text]) -> [text]:
     select_scope_files(args, list_changed_files(), [])
 
 fn run_full_verify(args: [text]) -> i64:
+    val missing_file = missing_explicit_scope_file(args)
+    if missing_file != "":
+        eprint "error: file does not exist: {missing_file}"
+        return 2
+
     val files = collect_scope_files(args)
     val scope = if args.contains("--all"):
         "full project"
