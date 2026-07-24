@@ -44,11 +44,20 @@ use super::static_registry::StaticTestRegistry;
 use super::rust_tests;
 
 pub fn generate_spipe_docs_for_results(result: &TestRunResult, format: OutputFormat, quiet: bool) -> i32 {
+    let simple_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("bin/simple"));
+    generate_spipe_docs_for_results_with_binary(result, format, quiet, &simple_bin)
+}
+
+fn generate_spipe_docs_for_results_with_binary(
+    result: &TestRunResult,
+    format: OutputFormat,
+    quiet: bool,
+    simple_bin: &Path,
+) -> i32 {
     if !matches!(format, OutputFormat::Doc) || !result.success() {
         return 0;
     }
 
-    let simple_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("bin/simple"));
     let mut spec_paths = Vec::new();
 
     for file in &result.files {
@@ -70,7 +79,7 @@ pub fn generate_spipe_docs_for_results(result: &TestRunResult, format: OutputFor
         return 0;
     }
 
-    let mut command = Command::new(&simple_bin);
+    let mut command = Command::new(simple_bin);
     command.arg("spipe-docgen");
     for path in &spec_paths {
         command.arg(path);
@@ -1655,11 +1664,17 @@ fn handle_run_management_with_db(options: &TestOptions, db_path: &Path) -> TestR
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::PathBuf;
 
     use tempfile::tempdir;
 
-    use super::{handle_run_management_with_db, platform_tag_matches_mode, targeted_discovery_is_empty};
-    use crate::cli::test_runner::types::{OutputFormat, TestExecutionMode, TestOptions};
+    use super::{
+        generate_spipe_docs_for_results_with_binary, handle_run_management_with_db,
+        platform_tag_matches_mode, targeted_discovery_is_empty,
+    };
+    use crate::cli::test_runner::types::{
+        OutputFormat, TestExecutionMode, TestFileResult, TestOptions, TestRunResult,
+    };
     use crate::test_db::{TestRunRecord, TestRunStatus, list_runs};
     use crate::unified_db::Database;
 
@@ -1711,5 +1726,37 @@ mod tests {
         assert!(!targeted_discovery_is_empty(false, 0, 0));
         assert!(!targeted_discovery_is_empty(true, 1, 0));
         assert!(!targeted_discovery_is_empty(true, 0, 1));
+    }
+
+    #[test]
+    fn spipe_docgen_child_failure_is_internal_error() {
+        let result = TestRunResult {
+            files: vec![TestFileResult {
+                path: PathBuf::from("fixture_spec.spl"),
+                passed: 1,
+                failed: 0,
+                skipped: 0,
+                ignored: 0,
+                duration_ms: 0,
+                error: None,
+                individual_results: vec![],
+            }],
+            total_listed: 1,
+            total_passed: 1,
+            total_failed: 0,
+            total_skipped: 0,
+            total_ignored: 0,
+            total_duration_ms: 0,
+        };
+
+        assert_eq!(
+            generate_spipe_docs_for_results_with_binary(
+                &result,
+                OutputFormat::Doc,
+                true,
+                std::path::Path::new("/bin/false"),
+            ),
+            3
+        );
     }
 }

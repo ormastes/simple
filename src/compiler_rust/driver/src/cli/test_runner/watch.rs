@@ -11,10 +11,10 @@ use std::sync::mpsc::channel;
 use super::test_discovery::is_test_file;
 use super::test_output::print_summary;
 use super::types::{TestOptions, OutputFormat};
-use super::runner::run_tests;
+use super::runner::{generate_spipe_docs_for_results, run_tests};
 
 /// Watch test directories and auto-regenerate documentation on changes
-pub fn watch_tests(options: TestOptions) -> Result<(), String> {
+pub fn watch_tests(options: TestOptions) -> Result<(), i32> {
     let quiet = matches!(options.format, OutputFormat::Json);
     let generate_docs = matches!(options.format, OutputFormat::Doc);
 
@@ -45,16 +45,25 @@ pub fn watch_tests(options: TestOptions) -> Result<(), String> {
         println!("=== Initial Run ===");
     }
     let result = run_tests(options.clone());
+    if generate_spipe_docs_for_results(&result, options.format, quiet) != 0 {
+        return Err(3);
+    }
     print_summary(&result, options.format);
 
     // Set up filesystem watch
     let (tx, rx) = channel();
     let mut watcher: RecommendedWatcher =
-        RecommendedWatcher::new(tx, Config::default()).map_err(|e| format!("Failed to initialize watcher: {}", e))?;
+        RecommendedWatcher::new(tx, Config::default()).map_err(|e| {
+            eprintln!("Failed to initialize watcher: {}", e);
+            1
+        })?;
 
     watcher
         .watch(&test_path, RecursiveMode::Recursive)
-        .map_err(|e| format!("Failed to watch path: {}", e))?;
+        .map_err(|e| {
+            eprintln!("Failed to watch path: {}", e);
+            1
+        })?;
 
     if !quiet {
         println!();
@@ -100,6 +109,9 @@ pub fn watch_tests(options: TestOptions) -> Result<(), String> {
                 let start = Instant::now();
                 let result = run_tests(options.clone());
                 let duration = start.elapsed();
+                if generate_spipe_docs_for_results(&result, options.format, quiet) != 0 {
+                    return Err(3);
+                }
 
                 if !quiet {
                     print_summary(&result, options.format);

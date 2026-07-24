@@ -1507,10 +1507,7 @@ fn handle_test_rust(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
         // Watch mode: continuously monitor and re-run tests
         match test_runner::watch_tests(options) {
             Ok(()) => 0,
-            Err(e) => {
-                eprintln!("error: {}", e);
-                1
-            }
+            Err(code) => code,
         }
     } else {
         // Normal mode: run tests once
