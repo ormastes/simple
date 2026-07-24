@@ -71,6 +71,11 @@ SimpleOS QEMU WM paths, including honest SIMD and Vulkan backend evidence.
   one-byte-corrupted crop, and correlates QMP VirtIO keyboard and pointer
   delivery with guest IRQ, WM state, and later frame generations. x86_64
   evidence cannot satisfy this row.
+- AC-13: Each of the six production routes has a source-to-test boundary row
+  naming its producer, canonical consumer, identity carried across the link,
+  visible outcome, negative disconnection/replay case, and authoritative
+  executable/manual evidence. Source-contract assertions may guard wiring but
+  cannot replace the runtime pixel/event assertions in AC-1..AC-5 and AC-12.
 
 ## Scope Exclusions
 - Engine3D HUD/world text and non-Linux native host backends are out of scope.
@@ -107,6 +112,17 @@ SimpleOS QEMU WM paths, including honest SIMD and Vulkan backend evidence.
 - rejected_shortcuts: raw `rt_*` aliases, fixture-only painters, direct backend
   field access, synthetic handles, CPU mirrors labeled as GPU, private font
   paths, and serial-only QEMU claims.
+
+## Module Boundary Coverage — 2026-07-24
+
+| Route | Producer -> consumer | Carried identity | Positive oracle | Negative oracle | Evidence/status |
+|---|---|---|---|---|---|
+| 2D | `DrawIrText -> Engine2D.draw_text -> FontRenderer -> backend` | face, advances, composition, backend/readback | exact direct/DrawIR CPU parity plus requested SIMD/Vulkan rows | inconsistent advance count/width rejects before rendering | modern SSpec/manual; live run BLOCKED |
+| Web | `HTML -> WebIR -> DrawIrComposition -> Engine2D` | run ID, composition ID, face, pixel-artifact checksum, frame correlation | readable ARGB glyph artifact and focus/key/pointer/timing frame | stale ID rejects before Electron; only one same-ID invocation can claim final PASS | modern SSpec/manual; receipt creation BLOCKED |
+| GUI | `WidgetTree -> widget_tree_to_draw_ir -> Engine2D` | composition ID, scene key, target/source | visible `Ready -> ReadyZ` pixels and correlated input | replayed scene key remains unresolved | modern SSpec/manual; live window BLOCKED |
+| hosted WM | `SharedWmScene -> HostCompositor -> Engine2D` evidence route | command nonce, phase, revision, checksum | pinned glyph crop and focus/move/maximize/restore frames; compatibility fallback cannot qualify | non-increasing nonce is ignored and exact ACK identity is required | modern SSpec/manual; live hash/runtime BLOCKED |
+| x86 QEMU | `gui_entry_desktop -> WM -> Engine2D -> QMP` | guest font hash, input sequence, WM/frame generation | independent `pmemsave` glyph crop and correlated events | QMP disconnect, replay, corrupt crop, demo markers reject | modern SSpec/manual; current image build BLOCKED |
+| RV64 QEMU | `riscv64/gui_entry_desktop -> WM -> VirtIO/QMP` target route (font/input currently unwired) | RV64 font hash, IRQ/input sequence, WM/frame generation | RV64-only bottom-right glyph crop and input ordering | unavailable markers, corrupt crop, stale/out-of-order input reject | modern SSpec/manual; font/input wiring BLOCKED |
 
 ## Phase
 dev-done
@@ -302,7 +318,7 @@ arch-done
 | AC | Lane | Current status |
 |---|---|---|
 | AC-1 | 2D | blocked before examples; no Vulkan readback |
-| AC-2 | Web | BLOCKED/WEAK: authoritative receipt is joined by run ID/checksum, unexecuted and replayable |
+| AC-2 | Web | BLOCKED: authoritative receipt is joined by run ID/checksum and atomically limited to one final PASS; execution remains unavailable |
 | AC-3 | GUI | source/spec/artifact contract present; execution blocked |
 | AC-4 | hosted WM | source/spec/manual present; native artifact/crop blocked |
 | AC-5 | SimpleOS WM | source/spec present; build stopped before QEMU/crop |
@@ -313,6 +329,7 @@ arch-done
 | AC-10 | release hygiene | FAIL: required manuals/execution incomplete |
 | AC-11 | final review | PASS: highest review completed and withheld overall PASS |
 | AC-12 | RV64 SimpleOS WM | BLOCKED: font asset is not mounted, VirtIO input is not consumed, and no genuine RV64 crop hash is pinned |
+| AC-13 | module links | static boundary matrix and modern negative cases present; live link coverage remains BLOCKED with the owning runtime rows |
 
 ## Implementation
 - The attempted `Engine2D._from_backend(RenderBackend, ...)` constructor

@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+| 2 | 0 | 0 | 2 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -18,7 +18,7 @@ This environmental scenario verifies the retained output of the canonical Linux 
 | Field | Value |
 |-------|-------|
 | Category | Other |
-| Status | Active |
+| Status | BLOCKED — qualifying pure-Simple live-window run unavailable |
 | Requirements | doc/02_requirements/feature/shared_multilingual_gpu_fonts.md |
 | Plan | doc/03_plan/sys_test/shared_multilingual_gpu_fonts.md |
 | Design | doc/05_design/shared_multilingual_gpu_fonts.md |
@@ -95,6 +95,9 @@ button input, and keyboard Tab must appear in the winit event log. The
 production evidence command channel then snapshots the resulting compositor
 state. Internal maximize and restore commands must update the focused window,
 restore the exact pre-maximize window array, and advance the render revision.
+The retained env records exact baseline/input/maximize/restore nonces
+`1/2/4/5`, plus each phase's revision and frame checksum; the live gate rejects
+missing values before reporting a pass.
 
 ## Absolute Glyph Oracle
 
@@ -159,15 +162,19 @@ capture helper, and compatibility renderers are not accepted here.
 
 - Load the pinned multilingual font manifest
 - Accept exact-face-bound simple-script shaping
+- Trace the production font and event boundary
 - Prepare one shared font batch for 2D and 3D
 - Emit the selected font composite program and plan compilation
+- Submit the boundary output to its canonical consumer
 - Prove native submission and device readback
+- Correlate visible pixels and input with one frame identity
+- Reject disconnected stale or replayed evidence
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source: 40 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -183,6 +190,7 @@ val scene = file_read("src/lib/common/ui/window_scene_draw_ir.spl")
 expect(scene).to_contain("resolve_font_metrics_with_language")
 expect(scene).to_contain("draw_ir_text_resolved_font")
 
+step("Trace the production font and event boundary")
 step("Prepare one shared font batch for 2D and 3D")
 val draw_ir = file_read("src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl")
 expect(draw_ir).to_contain("eng.select_font_identity(font_identity)")
@@ -193,6 +201,7 @@ val compositor = file_read("src/os/compositor/host_compositor_core.spl")
 expect(compositor).to_contain("shared_wm_scene_draw_ir_composition_with_content")
 expect(compositor).to_contain("executor.render_draw_ir_composition(composition, images)")
 
+step("Submit the boundary output to its canonical consumer")
 step("Prove native submission and device readback")
 val evidence = file_read(EVIDENCE_PATH)
 expect(evidence).to_contain("linux_hosted_wm_live_window_status=pass")
@@ -203,6 +212,26 @@ expect(evidence).to_contain("linux_hosted_wm_live_window_glyph_crop_status=pass"
 expect(evidence).to_contain("linux_hosted_wm_live_window_glyph_crop_live_match=true")
 expect(evidence).to_contain("linux_hosted_wm_live_window_deliberate_red_status=pass")
 expect(evidence).to_contain("linux_hosted_wm_live_window_compatibility_fallback_status=pass")
+expect(evidence).to_contain("linux_hosted_wm_live_window_baseline_nonce=1")
+expect(evidence).to_contain("linux_hosted_wm_live_window_input_nonce=2")
+expect(evidence).to_contain("linux_hosted_wm_live_window_maximize_nonce=4")
+expect(evidence).to_contain("linux_hosted_wm_live_window_restore_nonce=5")
+expect(evidence).to_contain("linux_hosted_wm_live_window_baseline_revision=")
+expect(evidence).to_contain("linux_hosted_wm_live_window_input_revision=")
+expect(evidence).to_contain("linux_hosted_wm_live_window_maximize_revision=")
+expect(evidence).to_contain("linux_hosted_wm_live_window_restore_revision=")
+expect(evidence).to_contain("linux_hosted_wm_live_window_baseline_frame_checksum=")
+expect(evidence).to_contain("linux_hosted_wm_live_window_input_frame_checksum=")
+expect(evidence).to_contain("linux_hosted_wm_live_window_maximize_frame_checksum=")
+expect(evidence).to_contain("linux_hosted_wm_live_window_restore_frame_checksum=")
+
+step("Correlate visible pixels and input with one frame identity")
+step("Reject disconnected stale or replayed evidence")
+val wrapper = file_read("scripts/check/check-linux-hosted-wm-live-window-evidence.shs")
+expect(entry).to_contain("if command.valid and command.nonce > evidence_nonce:")
+expect(entry).to_contain("evidence_nonce = command.nonce")
+expect(wrapper).to_contain(".input.nonce == $issue_nonce")
+expect(wrapper).to_contain("evidence-ack nonce=$issue_nonce phase=$issue_phase")
 ```
 
 </details>
@@ -255,10 +284,10 @@ expect(evidence).to_contain("linux_hosted_wm_live_window_snapshot=present")
 | Metric | Count |
 |--------|------:|
 | Total scenarios | 2 |
-| Active scenarios | 2 |
+| Active scenarios | 0 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
-| Pending scenarios | 0 |
+| Pending scenarios | 2 |
 
 
 ## Related Documentation

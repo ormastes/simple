@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const expectedRunId = process.env.SIMPLE_WEB_FONT_RUN_ID || '';
+const expectedReceiptPath = process.env.SIMPLE_WEB_FONT_COMPOSITION_RECEIPT || '';
 
 function clean(value) {
   if (value === undefined || value === null) return '';
@@ -162,7 +163,10 @@ function fontFrameArtifact(proof) {
 
 function simpleCompositionArtifact(proof) {
   try {
-    const receiptPath = proof.simple_composition_receipt_path;
+    const receiptPath = path.resolve(proof.simple_composition_receipt_path || '');
+    if (expectedReceiptPath && receiptPath !== path.resolve(expectedReceiptPath)) {
+      return { status: 'receipt-path-mismatch', fields: {} };
+    }
     const fields = Object.fromEntries(
       fs.readFileSync(receiptPath, 'utf8').split(/\r?\n/).filter(Boolean).map(line => {
         const split = line.indexOf('=');

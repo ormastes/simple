@@ -105,12 +105,18 @@ describe "SimpleOS WM fullscreen evidence Simple binary contract":
         expect(script).to_contain("\"type\":\"btn\"")
         expect(script).to_contain("ENTRY=\"examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl\"")
         expect(script).to_contain("host_nonce=%s baseline_seq=%d maximize_seq=%d restore_seq=%d")
+        expect(script).to_contain("maximize-semantic-hash-not-distinct")
         expect(script).to_contain("if restored_hash != base_hash")
-        expect(script.contains("[wm-demo] fullscreen-enter")).to_be(false)
-        expect(script.contains("[wm-demo] fullscreen-exit")).to_be(false)
+        expect(script).to_contain("restore-semantic-hash-mismatch")
+        expect(script).to_contain("simpleos_wm_fullscreen_baseline_ppm_magic_status=")
+        expect(script).to_contain("simpleos_wm_fullscreen_maximized_ppm_magic_status=")
+        expect(script).to_contain("simpleos_wm_fullscreen_restored_ppm_magic_status=")
+        expect(script.index_of("[wm-demo] fullscreen-enter")).to_equal(-1)
+        expect(script.index_of("[wm-demo] fullscreen-exit")).to_equal(-1)
 
     it "pins the guest font source and correlates pointer IRQ state and frame markers":
         step("Load the pinned multilingual font manifest")
+        step("Accept exact-face-bound simple-script shaping")
         val script = file_read("scripts/check/check-simpleos-wm-fullscreen-evidence.shs")
         val entry = file_read("examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl")
         val compositor = file_read("src/os/compositor/compositor.spl")
@@ -121,6 +127,17 @@ describe "SimpleOS WM fullscreen evidence Simple binary contract":
         expect(entry).to_contain("val font_guest_path = \"/SYS/FONTS/NOTOSANS\"")
         expect(entry).to_contain("[font-evidence] guest_path={font_guest_path} asset_bytes={font_blob.len()}")
 
+        step("Trace the production font and event boundary")
+        step("Prepare one shared font batch for 2D and 3D")
+        step("Emit the selected font composite program and plan compilation")
+        step("Boot SimpleOS with the pinned font asset")
+        expect(entry).to_contain("route=shared-wm-draw-ir component_id=taskbar-clock")
+        expect(shell).to_contain("Render one authoritative WM snapshot through Draw IR + Engine2D")
+        expect(shell).to_contain("val scene = self.runtime_scene_snapshot()")
+        expect(shell).to_contain("executor.render(scene, taskbar, content_frames")
+        expect(shell).to_contain("fn runtime_scene_snapshot() -> SharedWmScene")
+
+        step("Submit the boundary output to its canonical consumer")
         step("Deliver correlated focus keyboard and pointer events")
         expect(compositor).to_contain("if ((status as i32) & 0x20) != 0:")
         expect(shell).to_contain("[wm-pointer-irq] input_seq=")
@@ -134,11 +151,27 @@ describe "SimpleOS WM fullscreen evidence Simple binary contract":
         expect(script).to_contain("command=ignored target= app= window= handled=false")
         expect(script).to_contain("handled=true")
 
+        step("Correlate visible pixels and input with one frame identity")
+        step("Prove native submission and device readback")
+        step("Reject disconnected stale or replayed evidence")
         step("Reject a bounded corrupt copy through the same font crop oracle")
         expect(script).to_contain("corrupt_region[0] ^= 1")
         expect(script).to_contain("font_region_oracle_status \"$FONT_REGION_CORRUPT_COPY\"")
         expect(script).to_contain("font-region-corrupt-copy-calibration-failed")
         expect(script).to_contain("simpleos_wm_fullscreen_font_region_corrupt_rejection_status=")
+
+    it "fails closed for disconnected QMP, replayed guest input, and corrupt visible evidence":
+        val script = file_read("scripts/check/check-simpleos-wm-fullscreen-evidence.shs")
+        expect(script).to_contain("qmp-connection-closed")
+        expect(script).to_contain("capture-input-or-guest-correlation-failed")
+        expect(script).to_contain("if int(v) > after_seq")
+        expect(script).to_contain("guest-input-irq-state-frame-correlation-missing")
+        expect(script).to_contain("guest-pointer-irq-state-frame-correlation-missing")
+        expect(script).to_contain("font_region_corrupt_copy_bytes")
+        expect(script).to_contain("font_region_corrupt_copy_sha256")
+        expect(script).to_contain("font_region_corrupt_rejection_status=pass")
+        expect(script).to_contain("simpleos_wm_fullscreen_font_region_device_origin=qemu-pmemsave")
+        expect(script).to_contain("simpleos_wm_fullscreen_delta changed_bytes=")
 
     it "implements F11 sequence-correlated maximize and restore in the guest":
         val compositor = file_read("src/os/compositor/compositor.spl")
@@ -163,8 +196,8 @@ describe "SimpleOS WM fullscreen evidence Simple binary contract":
         expect(web).to_contain("simple_web_content_render_request_with_theme(HOST_WM_DEFAULT_THEME_ID, title, body_html, cw, ch)")
         expect(host).to_contain("simple_web_content_frame_cached")
         expect(host).to_contain("shared_wm_scene_render_taskbar_context_to_backend")
-        expect(guest.contains("render_simple_web_app_content(")).to_be(false)
-        expect(guest.contains("self.backend.fill_rect(s.x, s.y, s.width, 24, 0xFF4A90D9)")).to_be(false)
+        expect(guest.index_of("render_simple_web_app_content(")).to_equal(-1)
+        expect(guest.index_of("self.backend.fill_rect(s.x, s.y, s.width, 24, 0xFF4A90D9)")).to_equal(-1)
 
     it "rejects explicit Rust seed before SimpleOS QMP launch":
         val root = "build/test-simpleos-wm-fullscreen-seed-forbidden"
@@ -236,7 +269,7 @@ describe "SimpleOS WM fullscreen evidence Simple binary contract":
         expect(output).to_contain("simpleos_wm_fullscreen_kernel_sha256=19034b8326bddd75c6fd63c489ada9c7f6a8807312e1dd9318bc23c4898ad498")
         expect(output).to_contain("simpleos_wm_fullscreen_disk_image=" + root + "/disk.img")
         expect(output).to_contain("simpleos_wm_fullscreen_disk_image_sha256=9cb90d8552da342ff12e0ef99273d75c95089049824fda79a4dfb18d7cd7d411")
-        expect(output.contains("caller-kernel-digest")).to_be(false)
-        expect(output.contains("caller-disk-digest")).to_be(false)
+        expect(output.index_of("caller-kernel-digest")).to_equal(-1)
+        expect(output.index_of("caller-disk-digest")).to_equal(-1)
         val (_capture_out, _capture_err, capture_code) = process_run("/bin/sh", ["-c", "test ! -f " + root + "/out/capture.out"])
         expect(capture_code).to_equal(0)

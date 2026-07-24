@@ -59,7 +59,7 @@ Visible primary steps:
 
 - `step("Load the pinned multilingual font manifest")`
 - `step("Accept exact-face-bound simple-script shaping")`
-- `step("Prepare one shared font batch for 2D")`
+- `step("Prepare one shared font batch for 2D and 3D")`
 - `step("Emit the selected font composite program and plan compilation")`
 - `step("Prove native submission and device readback")`
 
@@ -112,7 +112,27 @@ Shared helpers are `setup_shared_font_fixture`, `setup_selected_shaping_face`,
 assert their named oracle; any pending helper fails explicitly. New assertions
 use built-in matchers only.
 
-REQ-015 reuses `step("Prepare one shared font batch for 2D")` and
+### Frozen module-boundary vocabulary
+
+Surface-verification agents reuse these exact steps:
+
+- `step("Trace the production font and event boundary")`
+- `step("Submit the boundary output to its canonical consumer")`
+- `step("Correlate visible pixels and input with one frame identity")`
+- `step("Reject disconnected stale or replayed evidence")`
+
+Shared checker names are `expect_production_boundary_identity`,
+`expect_canonical_consumer_submission`, `expect_correlated_frame_evidence`, and
+`expect_disconnected_evidence_rejected`. Existing lane-local helpers may
+implement them; no new shared abstraction is required. A temporary checker
+must call `fail(...)` or `assert(false)` and therefore cannot produce PASS.
+
+Each lane records producer, consumer, carried identity, positive visible/event
+oracle, negative disconnect/replay oracle, executable spec, manual, and runtime
+status. Source wiring checks supplement but never replace current pure-Simple
+execution and independent pixel/event evidence.
+
+REQ-015 reuses `step("Prepare one shared font batch for 2D and 3D")` and
 `expect_shared_font_batch`. The checker exercises
 `prepare_text_configured`, `prepare_text_with_advances_configured`,
 `prepare_glyph_run_configured`, and `prepare_selected_glyph_run_configured`

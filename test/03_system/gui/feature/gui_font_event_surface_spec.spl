@@ -100,6 +100,7 @@ describe "GUI font and event surface":
         val input = fixture.1
 
         step("Accept exact-face-bound simple-script shaping")
+        step("Trace the production font and event boundary")
         val submitted = widget_tree_to_draw_ir_cpu(root, WIDTH, HEIGHT)
         val title = text_command(submitted, "GUI42")
 
@@ -124,7 +125,7 @@ describe "GUI font and event surface":
         var engine = Engine2D.create_with_backend(WIDTH, HEIGHT, "cpu")
         engine.clear(0xff000000u32)
 
-        step("Submit the exact composition")
+        step("Submit the boundary output to its canonical consumer")
         val rendered = engine2d_draw_ir_adv_composition(engine, submitted, false)
         engine.shutdown()
         expect(rendered.selected_backend).to_equal(DRAW_IR_BACKEND_CPU)
@@ -149,12 +150,14 @@ describe "GUI font and event surface":
         print("gui_font_glyph_region_differences={glyph_differences}")
         expect(glyph_differences).to_be_greater_than(20)
 
-        step("Deliver correlated focus keyboard and pointer events")
+        step("Correlate visible pixels and input with one frame identity")
         val pointer_context = draw_ir_event_target_context(
             submitted, submitted.scene_key, "pointer-1", "pointer_down",
             "gui-input", "input", 10, 45, DRAW_IR_BACKEND_CPU
         )
         expect(pointer_context.resolved).to_be(true)
+        expect(pointer_context.composition_id).to_equal(submitted.composition_id)
+        expect(pointer_context.scene_key).to_equal(submitted.scene_key)
         expect(pointer_context.source_kind).to_equal(DRAW_IR_SOURCE_GUI_AST)
         expect(pointer_context.component_id).to_equal("gui-root")
         expect(input.is_visible()).to_be(true)
@@ -166,6 +169,7 @@ describe "GUI font and event surface":
             "gui-input", "input", 10, 45, DRAW_IR_BACKEND_CPU
         )
         expect(focus_context.resolved).to_be(true)
+        expect(focus_context.composition_id).to_equal(submitted.composition_id)
         widget_dispatch_key("gui-input", "Z")
         expect(input.get_prop("value")).to_equal("ReadyZ")
 
@@ -174,7 +178,18 @@ describe "GUI font and event surface":
             "gui-input", "input", 10, 45, DRAW_IR_BACKEND_CPU
         )
         expect(key_context.resolved).to_be(true)
+        expect(key_context.scene_key).to_equal(submitted.scene_key)
         expect(key_context.input_key).to_equal("key-1")
+
+        step("Reject disconnected stale or replayed evidence")
+        val replayed_context = draw_ir_event_target_context(
+            submitted, submitted.scene_key + "-replayed", "replay-1", "key_down",
+            "gui-input", "input", 10, 45, DRAW_IR_BACKEND_CPU
+        )
+        expect(replayed_context.resolved).to_be(false)
+        expect(replayed_context.stale_scene_rejected).to_be(true)
+        expect(input.get_prop("value")).to_equal("ReadyZ")
+        val replayed_scene_rejected = if replayed_context.stale_scene_rejected: "true" else: "false"
 
         step("Capture backend and framebuffer evidence")
         val updated = widget_tree_to_draw_ir_cpu(root, WIDTH, HEIGHT)
@@ -200,10 +215,12 @@ describe "GUI font and event surface":
             "source_id=" + submitted.batches[0].source.source_id + "\n" +
             "text=" + title.text_value + "\n" +
             "bounds=3,9,35,14\n" +
+            "frame_identity=" + submitted.composition_id + ":" + submitted.scene_key + "\n" +
             "glyph_region_differences=" + glyph_differences.to_string() + "\n" +
             "pointer_target=" + pointer_context.target_id + "\n" +
             "focus_target=" + focus_context.target_id + "\n" +
             "keyboard_target=" + key_context.target_id + "\n" +
+            "replayed_scene_rejected=" + replayed_scene_rejected + "\n" +
             "submitted_frame=" + SUBMITTED_FRAME_PATH + "\n" +
             "blank_oracle_frame=" + BLANK_FRAME_PATH + "\n" +
             "updated_frame=" + UPDATED_FRAME_PATH + "\n"

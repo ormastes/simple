@@ -13,6 +13,18 @@ This SSpec checks the fail-closed source and launcher contract around
 assertions are supporting evidence. Only a fresh successful wrapper run can
 prove guest font pixels and correlated QEMU input.
 
+The focused font/input scenario uses the shared steps:
+
+- Load the pinned multilingual font manifest
+- Accept exact-face-bound simple-script shaping
+- Trace the production font and event boundary
+- Prepare one shared font batch for 2D and 3D
+- Emit the selected font composite program and plan compilation
+- Submit the boundary output to its canonical consumer
+- Correlate visible pixels and input with one frame identity
+- Prove native submission and device readback
+- Reject disconnected stale or replayed evidence
+
 ## Primary flow
 
 1. Load the pinned multilingual font manifest.
@@ -20,7 +32,9 @@ prove guest font pixels and correlated QEMU input.
    `1708408`, and SHA-256
    `2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081`.
 3. Boot only the production x86_64 `gui_entry_desktop.spl` with an accepted
-   pure-Simple self-hosted binary.
+   pure-Simple self-hosted binary. Its live `SharedWmScene` snapshot is rendered
+   through Draw IR and the `Engine2dWmFrameExecutor`; the guest emits the pinned
+   taskbar-clock `route=shared-wm-draw-ir` marker rather than a private font path.
 4. Derive framebuffer address, dimensions, pitch, format, and size only from
    the guest `[scanout-evidence]` marker.
 5. Capture baseline, maximized, and restored frames through QMP `pmemsave`;
@@ -36,6 +50,9 @@ prove guest font pixels and correlated QEMU input.
 9. Copy the crop, XOR exactly one byte, preserve its 8,064-byte length, compute
    its SHA-256 with the wrapper’s existing hash helper, and require the shared
    crop oracle to reject it before PASS.
+10. Retain only valid PPM captures: maximize must change more than 4,096 scanout
+    bytes and restore must reproduce the baseline hash. The evidence record names
+    all three PPM magic statuses and the QMP `pmemsave` device origin.
 
 ## Fail-closed rows
 
@@ -44,6 +61,9 @@ prove guest font pixels and correlated QEMU input.
 - Missing or stale kernel/disk artifacts, invalid scanout metadata, QMP errors,
   serial-only markers, missing guest correlations, blank captures, duplicate
   hashes, and crop-oracle mismatches remain failures.
+- A closed QMP connection fails the capture; maximize, restore, press, and
+  release markers must be strictly newer than their preceding guest `input_seq`,
+  so replayed markers cannot satisfy the correlation.
 - The deliberate corrupt crop must exist, retain the expected byte count,
   produce a valid SHA-256 different from the unmodified crop, and be rejected.
   A missing corrupt file cannot count as successful calibration.

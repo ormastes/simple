@@ -7,14 +7,16 @@
 |---|---:|---:|---:|
 | CPU / `cpu_simd` compatibility | 1 | 0 | 1 |
 | Vulkan device readback | 1 | 0 | 1 |
+| DrawIR canonical consumer | 1 | 0 | 1 |
+| Replayed DrawIR identity | 1 | 0 | 1 |
 
 ## Status
 
 **BLOCKED — no current pure-Simple execution receipt or retained framebuffer
 captures exist for this specification.**
 
-The source spec defines the required absolute oracles, but this documentation-
-only update did not run docgen, the test runner, a native build, or a graphics
+The source spec defines the required absolute oracles, but this spec/manual
+update did not run docgen, the test runner, a native build, or a graphics
 device. Nothing in this manual upgrades an unexecuted row to PASS.
 
 ## Purpose
@@ -35,6 +37,7 @@ build/test-artifacts/03_system/app/simple_2d/feature/
 └── engine2d_font_surface_verification/
     ├── cpu.argb
     ├── cpu_simd.argb
+    ├── draw_ir_cpu.argb
     └── vulkan.argb
 ```
 
@@ -155,6 +158,47 @@ Absolute assertions:
 **Current result: BLOCKED.** No current Vulkan device receipt or capture exists.
 Unavailable Vulkan must fail the scenario; it is never converted to PASS.
 
+## Scenario 3: DrawIR Canonical Consumer
+
+**User-visible outcome:** a resolved `DrawIrText` command carries the pinned
+face identity and advances through `Engine2D`'s normal DrawIR executor, then
+produces the exact same 128×72 CPU frame as the direct `draw_text` oracle.
+
+The scenario uses the frozen boundary flow:
+
+1. **Trace the production font and event boundary**
+   - Resolve the pinned face metrics for `Simple 2D`.
+   - Require the resolved Noto Sans Mono identity and one advance per text
+     character.
+
+2. **Submit the boundary output to its canonical consumer**
+   - Build one `DrawIrComposition` containing the opaque background and the
+     resolved text command.
+   - Execute it through `engine2d_draw_ir_adv_composition`, which dispatches
+     resolved text to `Engine2D.draw_text_with_advances` and its transient
+     `FontRenderer` batch path.
+
+3. **Correlate visible pixels and input with one frame identity**
+   - Require two rendered commands, zero skipped commands, CPU-mirror
+     readback, and equality with the direct CPU oracle.
+   - Retain `draw_ir_cpu.argb` only after the full-frame equality assertion.
+
+**Current result: BLOCKED.** This is executable boundary coverage, but no
+current pure-Simple receipt or retained capture exists. Source wiring alone is
+not a pixel claim.
+
+## Scenario 4: Inconsistent DrawIR Advance Rejection
+
+**User-visible outcome:** a resolved text command whose encoded advances no
+longer match its text length and declared width is rejected before rendering.
+
+The fresh-device preflight returns `preflight_rejected`, renders zero commands,
+returns no pixels, and leaves the caller's all-background framebuffer unchanged.
+This is a disconnected-payload oracle, not device-pixel evidence.
+
+**Current result: BLOCKED.** The assertion has not been executed in the
+pure-Simple runner.
+
 ## Operator Command
 
 Run only with the pure-Simple self-hosted binary:
@@ -173,8 +217,9 @@ source, backend handle, and device identity.
 ## Pass and Block Rules
 
 PASS requires both requested rows to satisfy their own assertions in a current
-run. The `cpu_simd` row may pass only as CPU compatibility under its present
-contract; it does not satisfy a claim of real SIMD execution.
+run, plus the DrawIR canonical-consumer and malformed-payload rejection rows. The
+`cpu_simd` row may pass only as CPU compatibility under its present contract;
+it does not satisfy a claim of real SIMD execution.
 
 The feature remains BLOCKED when any of these is true:
 
@@ -187,6 +232,8 @@ The feature remains BLOCKED when any of these is true:
 - either Vulkan handle is zero;
 - any requested framebuffer pixel differs from CPU;
 - a retained capture is missing.
+- a resolved DrawIR command does not reproduce the direct CPU frame;
+- inconsistent DrawIR advances reach rendering or mutate the framebuffer.
 
 ## Traceability
 
@@ -196,4 +243,6 @@ The feature remains BLOCKED when any of these is true:
 - Font implementation owner: `FontRenderer` and transient `FontRenderBatch`
 - Composition owner: `DrawIrComposition`
 - Text execution owner: Engine2D `draw_text`
+- Production boundary: `DrawIrText` -> `Engine2D.draw_text_with_advances` ->
+  `FontRenderer` -> backend submission/readback
 - Current documentation status: manual present, execution BLOCKED

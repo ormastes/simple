@@ -16,6 +16,9 @@ use std.spec.{describe, it, expect, step, fail_test}
 use std.io_runtime.{file_hash_sha256}
 use std.gpu.engine2d.engine.{Engine2D}
 use std.gpu.engine2d.color.{rgb}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{engine2d_draw_ir_adv_composition, engine2d_draw_ir_adv_fresh_device_composition_with_images}
+use std.gc_async_mut.text_layout.font_renderer.{resolve_font_metrics}
+use std.common.ui.draw_ir.{draw_ir_batch, draw_ir_composition, draw_ir_embedding_config, draw_ir_rect, draw_ir_text_resolved_font}
 use std.nogc_sync_mut.sffi.io.{dir_create_all, file_write_bytes}
 
 val WIDTH = 128
@@ -192,3 +195,66 @@ describe "Engine2D pinned-font rendering surfaces":
         expect(vulkan.max_x).to_equal(cpu.max_x)
         expect(vulkan.max_y).to_equal(cpu.max_y)
         retain_capture("vulkan", vulkan.pixels)
+
+    # @manual_section: DrawIR production boundary
+    # @manual: show
+    # @capture(artifact)
+    it "submits resolved DrawIR text through the canonical font consumer":
+        step("Trace the production font and event boundary")
+        val metrics = resolve_font_metrics(FONT_PATH, TEXT, 24)
+        expect(metrics.valid).to_be(true)
+        expect(metrics.identity).to_contain("NotoSansMono")
+        expect(metrics.advances.len()).to_equal(TEXT.len())
+        val command = draw_ir_text_resolved_font("font-surface-text", 8, 8, TEXT, FG,
+            metrics.family, metrics.identity, metrics.advances, metrics.width, metrics.line_height, 24)
+        expect(command.text_value).to_equal(TEXT)
+        expect(command.computed_style.len()).to_equal(5)
+
+        step("Submit the boundary output to its canonical consumer")
+        val embedding = draw_ir_embedding_config("", "font-surface", 0, 0, WIDTH, HEIGHT, 0, 1000, true)
+        val composition = draw_ir_composition("font-surface-frame", "engine2d-font-surface", "cpu", [
+            draw_ir_batch("font-surface-batch", "cpu", embedding, [
+                draw_ir_rect("font-surface-background", 0, 0, WIDTH, HEIGHT, BG), command
+            ])
+        ])
+        var engine = Engine2D.create_with_backend(WIDTH, HEIGHT, "cpu")
+        expect(engine.load_font(FONT_PATH)).to_be(true)
+        val result = engine2d_draw_ir_adv_composition(engine, composition, false)
+        expect(result.rendered_command_count).to_equal(2)
+        expect(result.skipped_command_count).to_equal(0)
+        expect(result.readback_source).to_equal("cpu_mirror")
+
+        step("Correlate visible pixels and input with one frame identity")
+        val direct = require_render("cpu")
+        expect(result.pixels).to_equal(direct.pixels)
+        expect(result.pixels.len()).to_equal(WIDTH * HEIGHT)
+        retain_capture("draw_ir_cpu", result.pixels)
+        engine.shutdown()
+
+    # @manual: fold
+    it "rejects inconsistent DrawIR font advances before rendering":
+        step("Trace the production font and event boundary")
+        val metrics = resolve_font_metrics(FONT_PATH, TEXT, 24)
+        expect(metrics.valid).to_be(true)
+        var replayed = draw_ir_text_resolved_font("font-surface-replay", 8, 8, TEXT, FG,
+            metrics.family, metrics.identity, metrics.advances, metrics.width, metrics.line_height, 24)
+        replayed.computed_style[2].value = "1"
+
+        step("Submit the boundary output to its canonical consumer")
+        val embedding = draw_ir_embedding_config("", "font-surface", 0, 0, WIDTH, HEIGHT, 0, 1000, true)
+        val composition = draw_ir_composition("font-surface-replayed-frame", "engine2d-font-surface", "cpu", [
+            draw_ir_batch("font-surface-replayed-batch", "cpu", embedding, [
+                draw_ir_rect("font-surface-background", 0, 0, WIDTH, HEIGHT, BG), replayed
+            ])
+        ])
+        var engine = Engine2D.create_with_backend(WIDTH, HEIGHT, "cpu")
+        engine.clear(BG)
+
+        step("Reject disconnected stale or replayed evidence")
+        val result = engine2d_draw_ir_adv_fresh_device_composition_with_images(engine, composition, [])
+        expect(result.readback_source).to_equal("preflight_rejected")
+        expect(result.rendered_command_count).to_equal(0)
+        expect(result.skipped_command_count).to_equal(1)
+        expect(result.pixels.len()).to_equal(0)
+        expect(engine.read_pixels()).to_equal([BG; WIDTH * HEIGHT])
+        engine.shutdown()

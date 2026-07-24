@@ -22,10 +22,14 @@ display-smoke gate.
 4. Inject a keyboard event and a pointer press/release through QMP
    `input-send-event` into RV64 VirtIO input devices.
 5. Correlate each new guest input sequence across device IRQ, WM state, and a
-   later framebuffer generation.
+   later framebuffer generation: keyboard sequence is above the pre-injection
+   baseline and its frame generation is above the desktop-present revision;
+   pointer sequence is later than keyboard and its frame generation is later
+   than keyboard's.
 6. Capture the RV64-only `right56,bottom48` RGB crop (8,064 bytes), require its
-   exact pinned SHA-256, flip one byte in a copy, and prove the same oracle
-   rejects the copy.
+   exact pinned SHA-256, flip `crop[0]` in a copy, and prove the same oracle
+   rejects the copy. The crop is exactly the final 48 rows and final 56 pixels
+   per row of the QMP PPM, never a serial-derived or x86_64 crop.
 
 The crop hash must come from a fresh RV64 QMP capture. The x86_64 crop hash is
 not admissible.
@@ -37,6 +41,13 @@ not admissible.
 3. Prepare one shared font batch for 2D and 3D
 4. Emit the selected font composite program and plan compilation
 5. Prove native submission and device readback
+
+The same live scenario traces and rejects boundary failures with:
+
+1. Trace the production font and event boundary
+2. Submit the boundary output to its canonical consumer
+3. Correlate visible pixels and input with one frame identity
+4. Reject disconnected stale or replayed evidence
 
 ## Current blockers
 

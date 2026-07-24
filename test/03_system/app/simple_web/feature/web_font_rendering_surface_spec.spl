@@ -139,6 +139,7 @@ describe "Simple Web production font rendering and events":
     # @capture(html)
     it "should submit selected Web text and ordered advances as readable glyphs":
         step("Load the pinned multilingual font manifest")
+        step("Trace the production font and event boundary")
         val run_id = env_get("SIMPLE_WEB_FONT_RUN_ID") ?? ""
         expect(run_id.len()).to_be_greater_than(0)
         val receipt_path = "build/test-artifacts/simple-web-font-composition/receipt.env"
@@ -171,7 +172,7 @@ describe "Simple Web production font rendering and events":
             "Simple Web font proof", html, "", "", 96, 48
         ).with_pixel_output()
 
-        step("Submit the exact composition")
+        step("Submit the boundary output to its canonical consumer")
         val artifact = web_render_draw_ir_request_to_pixel_artifact(request, composition, "cpu")
         val blank_artifact = web_render_draw_ir_request_to_pixel_artifact(request, blank_composition, "cpu")
 
@@ -213,6 +214,7 @@ describe "Simple Web production font rendering and events":
     # @capture(exec)
     it "should deliver correlated browser focus keyboard pointer timing and animation events":
         step("Deliver correlated focus keyboard and pointer events")
+        step("Correlate visible pixels and input with one frame identity")
         val run_id = env_get("SIMPLE_WEB_FONT_RUN_ID") ?? ""
         expect(run_id.len()).to_be_greater_than(0)
         val root = "build/test-artifacts/simple-web-font-rendering-events"
@@ -253,3 +255,25 @@ describe "Simple Web production font rendering and events":
             "wm-browser-event-routing|" + run_id + "|html-layout|" + _pinned_mono_identity() + "|WEB|" + simple_checksum + "|8"
         )
         expect(_evidence_value(evidence, "wm_browser_event_routing_blur_or_tolerance_used")).to_equal("false")
+
+        step("Reject disconnected stale or replayed evidence")
+        val stale_root = root + "/stale"
+        val stale_command = "mkdir -p " + stale_root +
+            " && BUILD_DIR=" + stale_root +
+            " REPORT_PATH=" + stale_root + "/report.md" +
+            " SIMPLE_WEB_FONT_RUN_ID=stale-" + run_id +
+            " SIMPLE_WEB_FONT_COMPOSITION_RECEIPT=build/test-artifacts/simple-web-font-composition/receipt.env" +
+            " timeout 60 sh scripts/check/check-wm-browser-event-routing-evidence.shs"
+        val (stale_stdout, _stale_stderr, stale_code) = process_run("/bin/sh", ["-c", stale_command])
+        expect(stale_code).to_be_greater_than(0)
+        expect(stale_stdout).to_contain("wm_browser_event_routing_reason=simple-web-font-run-id-mismatch")
+        val replay_root = root + "/replay"
+        val replay_command = "mkdir -p " + replay_root +
+            " && BUILD_DIR=" + replay_root +
+            " REPORT_PATH=" + replay_root + "/report.md" +
+            " SIMPLE_WEB_FONT_RUN_ID=" + run_id +
+            " SIMPLE_WEB_FONT_COMPOSITION_RECEIPT=build/test-artifacts/simple-web-font-composition/receipt.env" +
+            " timeout 60 sh scripts/check/check-wm-browser-event-routing-evidence.shs"
+        val (replay_stdout, _replay_stderr, replay_code) = process_run("/bin/sh", ["-c", replay_command])
+        expect(replay_code).to_be_greater_than(0)
+        expect(replay_stdout).to_contain("wm_browser_event_routing_reason=simple-web-font-run-id-replayed")

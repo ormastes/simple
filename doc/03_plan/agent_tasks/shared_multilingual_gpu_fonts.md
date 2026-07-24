@@ -125,3 +125,29 @@ runtime shortcuts are frozen in the campaign state before parallel work. Each
 focused criterion runs once; a failed criterion gets at most three fix cycles.
 Generated-manual quality and all done marks remain owned by the final
 highest-capability review.
+
+## Modern SSpec boundary campaign — 2026-07-24
+
+Six agents own distinct executable/manual pairs. Each first traces all
+production callers at its boundary, then adds only the smallest missing happy,
+disconnect/replay, and visible-result assertions. Agents may report production
+defects, but must not add a parallel renderer, runner, or test-only success
+path.
+
+| Lane | Production link | Owned executable/manual |
+|---|---|---|
+| 2D | `DrawIrText -> Engine2D.draw_text -> FontRenderer -> backend submission/readback` | `engine2d_font_surface_verification_spec` |
+| Web | `HTML -> WebIR -> DrawIrComposition -> Engine2D` | `web_font_rendering_surface_spec` |
+| GUI | `WidgetTree -> widget_tree_to_draw_ir -> DrawIrComposition -> Engine2D` | `gui_font_event_surface_spec` |
+| hosted WM | `SharedWmScene -> DrawIrComposition -> HostCompositor -> Engine2D` | `linux_hosted_wm_live_window_spec` |
+| x86 QEMU | `gui_entry_desktop -> WM scene -> Engine2D -> guest framebuffer/QMP` | `simpleos_wm_fullscreen_evidence_simple_bin_spec` |
+| RV64 QEMU | `riscv64/gui_entry_desktop -> WM scene -> VirtIO input/framebuffer/QMP` | `rv64_simpleos_wm_font_input_spec` |
+
+Agents work in `/tmp/simple-font-runtime-admission.IeLF9v`, do not commit or
+sync, and do not edit shared plans/state. `/root` is merge owner; the
+highest-capability `font_final_review` agent owns cross-lane done marks.
+
+Each handoff names exact producer/consumer symbols, existing scenarios, the
+smallest uncovered branch, its modern SSpec/manual change (or why none is
+needed), honest runtime status, and any concrete reproduction-backed defect.
+No agent may invent a numeric coverage percentage without tool evidence.

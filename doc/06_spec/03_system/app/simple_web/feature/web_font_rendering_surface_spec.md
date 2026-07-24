@@ -21,36 +21,46 @@ Source:
 
 ## Required flow
 
-1. **Load the pinned multilingual font manifest**
+1. **Trace the production font and event boundary**
+   - Follow HTML through WebIR into the exact `DrawIrComposition`, then the
+     shared Engine2D pixel facade; WebIR is not a second drawing IR.
+2. **Load the pinned multilingual font manifest**
    - Resolve the exact Noto Sans Mono manifest identity:
      `sha256=2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081;axes=wght=400,wdth=100`.
-2. **Accept exact-face-bound simple-script shaping**
+3. **Accept exact-face-bound simple-script shaping**
    - Require one `WEB` text command with three ordered positive advances.
-3. **Build the production surface composition**
+4. **Build the production surface composition**
    - Use the production HTML/WebIR owner; do not synthesize Draw IR.
-4. **Prepare one shared font batch for 2D and 3D**
+5. **Prepare one shared font batch for 2D and 3D**
    - Keep font material transient behind the shared Engine2D executor.
-5. **Emit the selected font composite program and plan compilation**
+6. **Emit the selected font composite program and plan compilation**
    - Submit the same composition object to the shared pixel facade.
-6. **Submit the exact composition**
+7. **Submit the boundary output to its canonical consumer**
    - Compare each ordered glyph band against the otherwise identical blank
      frame.
-7. **Prove native submission and device readback**
+8. **Prove native submission and device readback**
    - Retain the 96×48 ARGB artifact and write its exact pixel count, weighted
      checksum, file size, SHA-256, and caller-supplied run ID into
      `build/test-artifacts/simple-web-font-composition/receipt.env`.
-8. **Deliver correlated focus keyboard and pointer events**
+9. **Deliver correlated focus keyboard and pointer events**
    - The browser wrapper must consume that receipt and artifact before launch.
      It must fail when the run ID is omitted or differs from the receipt, or
      when either artifact is missing, malformed, or mismatched.
-9. **Capture backend and framebuffer evidence**
+10. **Correlate visible pixels and input with one frame identity**
    - Retain a post-interaction `WEB` glyph crop. Its correlation ID includes
      the caller run ID, authoritative Simple composition checksum, and event
      count.
+11. **Reject disconnected stale or replayed evidence**
+    - Re-run the wrapper unchanged with a deliberately stale caller run ID and
+      then with the same run ID and unchanged receipt. Both runs must exit
+      nonzero with, respectively, `simple-web-font-run-id-mismatch`
+      and `simple-web-font-run-id-replayed`. The scenario does not rewrite or
+      self-stamp a receipt to make a replay appear fresh.
 
-Freshness strength is **WEAK**: a newly generated caller run ID rejects an
-artifact from another run, but deliberately reusing the same run ID can replay
-that artifact. The receipt does not currently bind a self-hosted binary hash,
+Freshness is fail-closed only when both stale and same-ID replay probes reject.
+After a PASS, the wrapper atomically creates a receipt-adjacent consumed-run
+guard. Concurrent probes may execute, but only one can claim final PASS for a
+receipt/run ID. The receipt does not currently bind a self-hosted binary hash,
 so this manual does not claim cryptographic source/binary provenance.
 
 ## Current blocker
@@ -69,6 +79,10 @@ must report `missing-simple-web-font-composition-receipt` (and must report
 `missing-simple-web-font-run-id` when invoked without one), and
 `scripts/check/check-production-gui-web-renderer-parity-evidence.shs` must not
 promote Web font/event PASS.
+
+The checker rejects a stale caller run ID and an unchanged same-ID receipt.
+This source change remains runtime-unverified until the pure-Simple runner can
+create the first authoritative receipt.
 
 Earlier browser-only artifacts were moved non-destructively under
 `build/rejected-evidence/`; they are diagnostic evidence only.
