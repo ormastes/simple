@@ -65,3 +65,16 @@ This bounded 33-record registry is supporting evidence for
 current-upstream exhaustiveness, or discovery of future distributed gates.
 Those claims remain owned by root/component/live-PTY evidence and by a restored
 provenance-pinned upstream inventory respectively.
+
+## Installed Claude Argument-Discovery Boundary (2026-07-24)
+
+Caret's production argument builder remains authoritative for invocation.
+The offline installed-CLI checker is a discovery/evidence adapter: it records
+binary provenance, distinguishes advertised flags from accepted help-hidden
+flags, and rejects removed flags without ever submitting a prompt. Claude Code
+`2.1.218` accepts `--max-turns` while omitting it from top-level help, so help
+text alone is not the compatibility contract.
+
+The checker runs with isolated HOME/config and closed stdin. It may prove
+argument parsing and early rejection only; authentication, provider behavior,
+session continuation, and model output remain outside this boundary.

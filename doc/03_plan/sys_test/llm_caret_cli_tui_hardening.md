@@ -69,7 +69,7 @@ scenario counts as coverage.
 | REQ-LLM-CARET-CLAUDE-TRACE-003 | `check-llm-caret-claude-cli-trace.shs` | Traceability system spec | CLI / PASS: 100% files, 100% LOC, exact file-qualified symbols | Keep the current filesystem inventory synchronized |
 | REQ-LLM-CARET-CLAUDE-TRACE-004 | Checker emits named counters and status | Traceability system spec | CLI / BLOCKED at runner mismatch in parent run | Modernize with frozen steps and assert exit code plus report fields |
 | REQ-LLM-CARET-CLAUDE-TRACE-005 | File-qualified Simple symbol inventory | Checker proves 496/496 current declarations | CLI / PASS | Regenerate symbol rows and require zero missing/stale symbols |
-| REQ-LLM-CARET-CLI-HARDEN-006 | Production CLI/provider/session/tool declarations plus the installed Claude executable's offline argument surface | Direct production unit specs and CLI process/contract specs; `llm_caret_installed_claude_cli_spec.spl` is supplemental environmental compatibility evidence | CLI / static-complete, execution blocked | Execute the installed offline probe once, then execute Caret on the qualified self-hosted runtime and cached wrapper |
+| REQ-LLM-CARET-CLI-HARDEN-006 | Production CLI/provider/session/tool declarations plus the installed Claude executable's offline argument surface | Direct production unit specs and CLI process/contract specs; `llm_caret_installed_claude_cli_spec.spl` is supplemental environmental compatibility evidence | CLI / installed checker PASS; Caret execution blocked | Retain the installed probe evidence, then execute Caret on the qualified self-hosted runtime and cached wrapper |
 | REQ-LLM-CARET-TUI-HARDEN-007 | `CaretIo`, `caret_chat`, and TUI/plain loops | Runtime component spec plus `llm_caret_tui_pty_spec.spl` routing/lifecycle/raw-rejection scenarios | TUI / designed fail-closed; live execution blocked | Require PTY PASS and pre/post mode plus cursor/screen restoration artifacts |
 | REQ-LLM-CARET-HIDDEN-008 | Shipped hidden-command admission; supporting `claude_full` parts-bin hidden-disabled, distributed-gate, and focused owner evidence | `llm_caret_tui_hidden_feature_spec.spl`, the shipped root matrix, hidden-stub and feature-gate registries, narrowly scoped focused owner scenarios including bridge availability/admission, and the real-process `hidden` PTY case | Hidden / component, registry, source-completeness, distributed cross-map, focused parts-bin owner, and PTY process coverage designed; execution blocked | Execute the three registry specs and focused owner specs plus default/enabled/disabled PTY cases without credentials; shipped fulfillment remains exclusively the root/component/PTY lane |
 | REQ-LLM-CARET-TUI-HARDEN-009 | Injected `CaretIo` frame/read/loop boundary | Runtime component spec plus PTY UTF-8/edit/navigation/geometry and modeled EOF scenarios | TUI / component designed; live execution blocked | Execute component scenarios and retained live capture on a cached artifact |
@@ -87,7 +87,7 @@ scenario counts as coverage.
 | Feature | Implementation | Unit/integration evidence | System evidence | Surface/status |
 |---|---|---|---|---|
 | CLI argument parsing, help, and production wrapper | `main.spl`, `bin/caret` | `main_spec.spl` | `llm_caret_cli_hardening_spec.spl` has four source-process cases plus cached-wrapper selection/rejection | CLI / designed process evidence; execution blocked |
-| Installed Claude CLI argument compatibility | installed `claude` executable plus `claude_cli.spl` argument builder assumptions | `claude_cli_spec.spl` | `llm_caret_installed_claude_cli_spec.spl` has five bounded, credential-free offline cases for path/hash/version/help/missing-input/removed-option behavior | CLI / static-complete; checker execution pending; does not prove provider or session behavior |
+| Installed Claude CLI argument compatibility | installed `claude` executable plus `claude_cli.spl` argument builder assumptions | `claude_cli_spec.spl` | `llm_caret_installed_claude_cli_spec.spl` has six bounded, credential-free offline cases for path/hash/version/help/missing-input, hidden `--max-turns`, and removed `--max-tokens` behavior | CLI / checker PASS on Claude Code `2.1.218`; does not prove provider or session behavior |
 | One-shot prompt and structured response | `main.spl`, `provider.spl` | `main_spec.spl`, `provider_spec.spl` | `llm_caret_interfaces_spec.spl` calls provider functions only | CLI / no process evidence |
 | Claude argv: model, system, resume, limits, stream, schema, tools, verbose, extras | `claude_cli.spl` | `claude_cli_spec.spl` | Live specs are credentialed and opt-in | CLI / deterministic unit coverage; no wrapper launch |
 | Provider selection and config | `provider.spl`, `config.spl` | `provider_spec.spl`, `config_spec.spl` | None | CLI / unit-only |
@@ -460,7 +460,7 @@ The focused hardening lane now includes:
 - `llm_caret_cli_hardening_spec.spl`, launching the actual Caret entrypoint for
   help, offline success, provider failure, and unknown-option cases, plus
   cached production-wrapper selection and invalid-override rejection;
-- `llm_caret_installed_claude_cli_spec.spl`, covering five bounded offline
+- `llm_caret_installed_claude_cli_spec.spl`, covering six bounded offline
   probes of the currently installed Claude executable with isolated HOME,
   config, working directory, and provider credentials removed;
 - `llm_caret_tui_hidden_feature_spec.spl`, covering visible input/transcript,
@@ -490,6 +490,7 @@ The installed CLI:
 - returned a missing-input failure for a promptless stream-JSON invocation;
   that observation does not independently prove verbose-option validation;
 - rejects `--max-tokens` as an unknown option;
+- accepts `--max-turns` even though top-level help intentionally omits it;
 - exposes `--allowedTools <tools...>` as one variadic option.
 
 Production changes now enforce those contracts. The real provider dispatcher
@@ -505,14 +506,14 @@ production-config, 37 production-tools, and 14 production-types scenarios.
 Because docgen cannot execute in the current runtime, all refreshed manuals
 explicitly report zero executed scenarios and do not claim a PASS.
 The 359 source-synchronized unit examples plus eight CLI feature-contract,
-three process-hardening, nine TUI/hidden, five managed-environment, five
+three process-hardening, ten TUI/hidden, five managed-environment, six
 installed-Claude, five root-registry, seven live-PTY, and one
 hidden-stub aggregate plus three feature-gate aggregate examples form the
-405-example base across the listed executable files (the root-registry spec
+407-example base across the listed executable files (the root-registry spec
 contains five scenarios). The 88 focused owner/effect examples now synchronized
 across Tasks V2, swarms, team memory, insights, review/rewind/sandbox, bridge
 helpers/command, AttachmentMessage, and withRetry raise the scoped modern
-`should` total to 493 examples with canonical matchers. The pre-existing
+`should` total to 495 examples with canonical matchers. The pre-existing
 unit/component/process manuals retain
 their documented body-parity checks. The feature-gate manual statically checks
 exact 33-row contract/state parity and carries complete folded executable

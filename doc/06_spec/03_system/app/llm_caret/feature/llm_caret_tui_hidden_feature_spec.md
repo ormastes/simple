@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 10 | 10 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -440,6 +440,88 @@ val dispatched = dispatch_slash(
     "remote-setup", "", _hooks_hidden("hidden-session")
 )
 expect(dispatched.message).to_contain("Command disabled")
+```
+
+</details>
+
+#### should preserve TUI state and suppress model persistence for hidden aliases
+
+- Enable the hidden-feature fixture.
+- Dispatch the admitted hidden alias through TUI submission.
+- Check disabled alias rejection and zero side effects.
+  - Expected: default-hidden, enabled-hidden, and disabled aliases never reach
+    the responder or persistence hook.
+  - Expected: conversation, session, title, and status remain unchanged.
+  - Expected: each path renders one exact System transcript line.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Complete executable scenario source.
+
+```simple
+val ui = make_chat_tui_with_status(
+    "llm_caret - dummy",
+    "provider=dummy model=dummy-hello session=hidden-session"
+)
+val seeded = [new_user_message("seed")]
+
+step("Enable the hidden-feature fixture")
+tui_transcript_reset()
+MODEL_COUNT = 0
+PERSIST_COUNT = 0
+val rejected = run_chat_tui_submission(
+    ui, seeded, "hidden-session", "/debug_tool_call",
+    default_policy(WORKSPACE_ROOT), _tui_fixture_model,
+    _hooks("hidden-session")
+)
+expect(rejected.submitted_to_model).to_be(false)
+expect(rejected.conversation).to_equal(seeded)
+expect(rejected.session_id).to_equal("hidden-session")
+expect(rejected.ui.title).to_equal(ui.title)
+expect(rejected.ui.status).to_equal(ui.status)
+expect(rejected.ui.input.value).to_equal("")
+expect(tui_transcript_line_text(0)).to_equal(
+    "System: Unknown command: /debug_tool_call (try /help)"
+)
+expect(MODEL_COUNT).to_equal(0)
+expect(PERSIST_COUNT).to_equal(0)
+
+step("Dispatch the admitted hidden alias through TUI submission")
+tui_transcript_reset()
+val admitted = run_chat_tui_submission(
+    ui, seeded, "hidden-session", "/debug_tool_call",
+    default_policy(WORKSPACE_ROOT), _tui_fixture_model,
+    _hooks_hidden("hidden-session")
+)
+expect(admitted.submitted_to_model).to_be(false)
+expect(admitted.conversation).to_equal(seeded)
+expect(admitted.session_id).to_equal("hidden-session")
+expect(admitted.ui.title).to_equal(ui.title)
+expect(admitted.ui.status).to_equal(ui.status)
+expect(tui_transcript_line_text(0)).to_equal(
+    "System: Usage: /debug-tool-call <tool_use_json>"
+)
+expect(MODEL_COUNT).to_equal(0)
+expect(PERSIST_COUNT).to_equal(0)
+
+step("Check disabled alias rejection and zero side effects")
+tui_transcript_reset()
+val disabled = run_chat_tui_submission(
+    ui, seeded, "hidden-session", "/remote_setup",
+    default_policy(WORKSPACE_ROOT), _tui_fixture_model,
+    _hooks_hidden("hidden-session")
+)
+expect(disabled.submitted_to_model).to_be(false)
+expect(disabled.conversation).to_equal(seeded)
+expect(disabled.session_id).to_equal("hidden-session")
+expect(disabled.ui.title).to_equal(ui.title)
+expect(disabled.ui.status).to_equal(ui.status)
+expect(tui_transcript_line_text(0)).to_equal(
+    "System: Command disabled: /remote_setup"
+)
+expect(MODEL_COUNT).to_equal(0)
+expect(PERSIST_COUNT).to_equal(0)
 ```
 
 </details>

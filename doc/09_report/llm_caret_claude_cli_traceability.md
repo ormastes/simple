@@ -96,16 +96,23 @@ the bounded offline argument surface it invokes; it does not establish that
 every current Claude function, authenticated request, or interactive session
 still works.
 
-The scoped hardening files now contain 493 modern `should` examples. Their
-405-example base comprises 359
+The scoped hardening files now contain 495 modern `should` examples. Their
+407-example base comprises 359
 source-synchronized unit examples, eight CLI feature-contract examples, three
-process-hardening examples, nine TUI/hidden component examples, five
-managed-environment examples, five installed-Claude examples, five
+process-hardening examples, ten TUI/hidden component examples, five
+managed-environment examples, six installed-Claude examples, five
 root-registry examples, seven live-PTY examples, one hidden-stub aggregate
 example, and three feature-gate aggregate examples. A further 88 focused
 owner/effect examples cover Tasks V2, swarms, team memory, insights,
 review/rewind/sandbox, bridge helpers/command, AttachmentMessage, and
 deterministic withRetry behavior with mirrored modern manuals.
+
+The installed-Claude checker executed all six offline cases against Claude
+Code `2.1.218` (SHA-256 `71abaff59312c9a9b6a1d818365048b42e4e95cc521a823660eded3e0880d9b7`).
+It proves that `--max-turns` remains accepted while hidden from top-level help,
+that `--allowedTools` is variadic, and that `--max-tokens` is rejected. The
+probe used an isolated HOME/config, closed stdin, no prompt, and no inherited
+provider credentials; it is not authenticated/provider/session parity.
 
 The Tasks V2 focused spec no longer accepts its stale modeled-source sentinel:
 the obsolete owner helper returning `240` was removed. The historical file

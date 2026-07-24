@@ -6,7 +6,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|-------:|--------:|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -33,10 +33,10 @@ The child starts through `env -i` with only HOME/config, a command-search path,
 fixed locale/TERM, and nonessential-traffic disablement, so host provider
 credentials and repository-parent settings are not inherited.
 
-The executable cases use only `--version`, `--help`, missing `-p` input, and
-the removed `--max-tokens` option. There is no successful prompt-bearing case,
-session resume, authentication, inherited provider credential, or accepted
-provider response.
+The executable cases use only `--version`, `--help`, missing `-p` input, the
+help-hidden `--max-turns` option, and the removed `--max-tokens` option. There
+is no successful prompt-bearing case, session resume, authentication,
+inherited provider credential, or accepted provider response.
 This is supplemental environmental compatibility evidence; direct
 production-declaration scenarios remain the authoritative requirement proof.
 
@@ -121,7 +121,8 @@ check_probe_artifacts("version")
 - Invoke the installed Claude CLI with no prompt or provider credentials.
 - Check the structured CLI response.
   - Expected: Caret’s current Claude arguments are advertised.
-  - Expected: `--allowedTools` is variadic and `--max-tokens` is absent.
+  - Expected: `--allowedTools` is variadic, `--max-tokens` is removed, and
+    supported `--max-turns` remains hidden.
 
 <details>
 <summary>Executable SSpec</summary>
@@ -139,6 +140,9 @@ expect(result.stdout).to_contain("required_flags=present")
 expect(result.stdout).to_contain("allowed_tools_variadic=true")
 expect(result.stdout).to_contain(
     "removed_max_tokens_absent=true"
+)
+expect(result.stdout).to_contain(
+    "hidden_max_turns_absent=true"
 )
 expect(result.stdout).to_contain("prompt_submitted=false")
 expect(result.exit_code).to_equal(0)
@@ -207,6 +211,40 @@ expect(result.stdout).to_contain(
 expect(result.stdout).to_contain("prompt_submitted=false")
 expect(result.exit_code).to_equal(0)
 check_probe_artifacts("removed-option")
+```
+
+</details>
+
+#### should accept the hidden maximum-turn option without a prompt
+
+- Load the accepted Claude feature map.
+- Invoke the installed Claude CLI with no prompt or provider credentials.
+- Check the structured CLI response.
+  - Expected: `--max-turns` is parsed rather than rejected as unknown.
+  - Expected: closed stdin still fails for missing input before any provider
+    request.
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+step("Load the accepted Claude feature map")
+check_feature_map()
+
+step("Invoke the installed Claude CLI with no prompt or provider credentials")
+val result = probe_current_claude_cli("hidden-max-turns")
+
+step("Check the structured CLI response")
+expect(result.stdout).to_contain(
+    "case=hidden-max-turns status=PASS"
+)
+expect(result.stdout).to_contain(
+    "hidden_max_turns_accepted=true"
+)
+expect(result.stdout).to_contain("input_rejected=true")
+expect(result.stdout).to_contain("prompt_submitted=false")
+expect(result.exit_code).to_equal(0)
+check_probe_artifacts("hidden-max-turns")
 ```
 
 </details>

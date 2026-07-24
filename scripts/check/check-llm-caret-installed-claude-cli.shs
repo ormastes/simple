@@ -21,7 +21,7 @@ CAPTURE_LIMIT_BYTES=65536
 
 usage() {
     printf '%s\n' \
-        "usage: sh scripts/check/check-llm-caret-installed-claude-cli.shs --case <prerequisites|version|help|missing-input|removed-option|all>"
+        "usage: sh scripts/check/check-llm-caret-installed-claude-cli.shs --case <prerequisites|version|help|missing-input|hidden-max-turns|removed-option|all>"
 }
 
 fail_prerequisite() {
@@ -291,7 +291,6 @@ run_help_case() {
         "--model" \
         "--system-prompt" \
         "--resume" \
-        "--max-turns" \
         "--json-schema" \
         "--allowedTools" \
         "--verbose"
@@ -308,7 +307,7 @@ run_help_case() {
         record_failure "help" "required_flag_missing_-p" "${help_dir}"
         return
     fi
-    if ! grep -E -- '--allowedTools[[:space:]]+<[^>]*\.\.\.>' \
+    if ! grep -E -- '--allowed-tools[[:space:]]+<[^>]*\.\.\.>' \
         "${help_dir}/stdout.txt" >/dev/null 2>&1; then
         record_failure "help" "allowed_tools_not_variadic" "${help_dir}"
         return
@@ -317,10 +316,15 @@ run_help_case() {
         record_failure "help" "removed_max_tokens_advertised" "${help_dir}"
         return
     fi
+    if grep -F -- "--max-turns" "${help_dir}/stdout.txt" >/dev/null 2>&1; then
+        record_failure "help" "hidden_max_turns_advertised" "${help_dir}"
+        return
+    fi
 
     printf '%s\n' "required_flags=present"
     printf '%s\n' "allowed_tools_variadic=true"
     printf '%s\n' "removed_max_tokens_absent=true"
+    printf '%s\n' "hidden_max_turns_absent=true"
     record_pass "help" "${help_dir}"
 }
 
@@ -388,13 +392,57 @@ run_removed_option_case() {
     record_pass "removed-option" "${removed_dir}"
 }
 
+run_hidden_max_turns_case() {
+    hidden_dir="${ARTIFACT_ROOT}/hidden-max-turns"
+    invoke_isolated "${hidden_dir}" --max-turns 1
+    hidden_status=$?
+    write_case_provenance "${hidden_dir}" || {
+        record_failure "hidden-max-turns" "provenance_write_failed" "${hidden_dir}"
+        return
+    }
+    emit_case_summary "hidden-max-turns" "${hidden_dir}"
+    if [ "${hidden_status}" -eq 124 ]; then
+        record_failure "hidden-max-turns" "probe_timeout" "${hidden_dir}"
+        return
+    elif [ "${hidden_status}" -eq 0 ]; then
+        record_failure "hidden-max-turns" "empty_print_input_accepted" "${hidden_dir}"
+        return
+    fi
+    if {
+        grep -E -i -- \
+            "unknown option.*--max-turns|--max-turns.*unknown option" \
+            "${hidden_dir}/stdout.txt" ||
+        grep -E -i -- \
+            "unknown option.*--max-turns|--max-turns.*unknown option" \
+            "${hidden_dir}/stderr.txt"
+    } >/dev/null 2>&1; then
+        record_failure "hidden-max-turns" "hidden_option_rejected" "${hidden_dir}"
+        return
+    fi
+    if ! {
+        grep -E -i -- \
+            'input must be provided.*(stdin|prompt).*--print|--print.*(input|prompt|stdin)' \
+            "${hidden_dir}/stdout.txt" ||
+        grep -E -i -- \
+            'input must be provided.*(stdin|prompt).*--print|--print.*(input|prompt|stdin)' \
+            "${hidden_dir}/stderr.txt"
+    } >/dev/null 2>&1; then
+        record_failure "hidden-max-turns" "input_rejection_marker_missing" "${hidden_dir}"
+        return
+    fi
+
+    printf '%s\n' "hidden_max_turns_accepted=true"
+    printf '%s\n' "input_rejected=true"
+    record_pass "hidden-max-turns" "${hidden_dir}"
+}
+
 if [ "${#}" -ne 2 ] || [ "${1:-}" != "--case" ]; then
     usage >&2
     exit 2
 fi
 CASE_NAME=$2
 case "${CASE_NAME}" in
-    prerequisites|version|help|missing-input|removed-option|all) ;;
+    prerequisites|version|help|missing-input|hidden-max-turns|removed-option|all) ;;
     *)
         usage >&2
         exit 2
@@ -409,11 +457,13 @@ case "${CASE_NAME}" in
     help) run_help_case ;;
     missing-input) run_missing_input_case ;;
     removed-option) run_removed_option_case ;;
+    hidden-max-turns) run_hidden_max_turns_case ;;
     all)
         run_prerequisites_case
         run_version_case
         run_help_case
         run_missing_input_case
+        run_hidden_max_turns_case
         run_removed_option_case
         ;;
 esac

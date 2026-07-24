@@ -122,13 +122,13 @@ and must not be resolved, reverted, or included by this lane.
 |---|---|---|
 | Direct Caret trace | PASS: 25/25 files, 7,278/7,278 LOC, 496/496 file-qualified declarations | Static mapping only |
 | Unit manual parity | PASS: 62/62 TUI, 22/22 raw-input, 20/20 runtime, 57/57 main, 12/12 config, 37/37 tools, 24/24 chat, and 14/14 types bodies match source | Zero executed scenarios |
-| Component manual parity | PASS: 9/9 TUI/hidden scenario bodies match source | Zero executed scenarios |
-| PTY manual parity | PASS: 6/6 live-terminal scenario bodies match source | Static synchronization; checker/SSpec not executed on a qualified artifact |
-| Installed-Claude manual parity | PASS: 5/5 offline scenario bodies match source | Static synchronization; checker/SSpec not executed in this tranche |
+| Component manual parity | PASS: 10/10 TUI/hidden scenario bodies match source, including default-hidden, admitted-hidden, and disabled alias submission with zero responder/persistence | Zero executed scenarios |
+| PTY manual parity | PASS: 7/7 live-terminal scenario bodies match source | Static synchronization; checker/SSpec not executed on a qualified artifact |
+| Installed-Claude offline probe | PASS: 6/6 cases against Claude Code `2.1.218` (`71abaff5…`): provenance, version, help, missing input, help-hidden `--max-turns`, and removed `--max-tokens` | Real installed-binary checker executed with isolated HOME/config, closed stdin, no prompt, and no inherited provider credentials; SSpec/docgen still blocked |
 | Root-registry manual parity | PASS: 5/5 scenario bodies match source, including the production-derived exhaustive matrix | Static synchronization; no CLI/TUI invocation claim |
 | Hidden-stub manual parity | PASS: 1/1 scenario body and the complete supporting-helper block match source | Static synchronization; SSpec/docgen not executed on a qualified runtime |
 | Feature-gate manual parity | PASS (static): 33/33 owner rows, 33/33 independently pinned contract rows, 33/33 state rows, and 3/3 complete folded executable scenario bodies | SSpec/docgen cannot execute until a qualified runtime exists |
-| Focused modern SSpec scan | PASS (static): 493 modern `should` examples across the listed files (405 base plus 88 focused owner/effect examples), canonical matchers, and no placeholder pass | Static source/manual scan only; execution is not claimed |
+| Focused modern SSpec scan | PASS (static): 495 modern `should` examples across the listed files (407 base plus 88 focused owner/effect examples), canonical matchers, and no placeholder pass | Static source/manual scan only except for the six-case installed-Claude shell checker |
 | Direct environment guard | PASS in working and staged modes | Changed Caret paths only |
 | Numbered-artifact guard | WARN in this jj workspace: both modes emit Git-worktree/`--cached` errors but still print `OK` and exit zero | Not authoritative here; no numbered artifacts are added by this tranche |
 | Generated-spec layout | PASS: zero `.spl` specs under `doc/06_spec` | Layout only |
@@ -194,7 +194,7 @@ fixtures. No lane may run a paid provider.
 | B — main/config | `test/01_unit/app/llm_caret/main_spec.spl`, `config_spec.spl` | Complete: real startup hooks and default branches with isolated env/session fixtures | Host env restored; filesystem confined to `build/tmp`; 57/12-body manuals synchronized |
 | C — tools | `src/app/llm_caret/tools.spl`, `test/01_unit/app/llm_caret/tools_spec.spl` | Complete statically: production glob matcher/executor and list-dir result assertions | Workspace bounded; matcher defect fixed; 37-body manual synchronized |
 | D — live TUI | `scripts/check/check-llm-caret-tui-pty.shs`, focused PTY system spec, manual, plan, and trace rows | Implemented fail-closed: clean-source/runtime-hashed cached `bin/caret` only, dummy provider, forced/auto/piped routing, EOF/Ctrl-C/Ctrl-D, UTF-8/edit/navigation, 12x50 geometry, default/enabled/disabled hidden admission, four promptless canonical/alias cases, raw failure before ANSI, and pre/post `stty` evidence | Static/script validation first; seven-scenario real PTY gate on a qualified cached runtime; terminal restored after every modeled outcome |
-| E — installed Claude CLI | installed checker, focused system spec/manual, trace rows | Implemented statically: five bounded offline probes record executable provenance and validate the argument surface with no submitted prompt or inherited provider credentials | Execute once on the installed binary; never generalize the result to authenticated/provider/session parity |
+| E — installed Claude CLI | installed checker, focused system spec/manual, trace rows | Executed PASS: six bounded offline probes record executable provenance and validate advertised flags, variadic allowed tools, hidden-but-accepted `--max-turns`, and removed `--max-tokens`, with no submitted prompt or inherited provider credentials | Retain the recorded version/hash and never generalize the result to authenticated/provider/session parity |
 | F — hidden registry matrix | root command registry spec/manual | Implemented statically: derive lookup, alias, admission, visibility, hidden, and disabled coverage from every production registry record | Execute on a qualified runtime; TUI process contract is covered by lane D, while non-TUI CLI invocation remains separate |
 | G — distributed hidden-stub aggregate | `src/app/llm_caret/claude_full/commands/hidden_stub_registry.spl`, mirrored focused SSpec/manual, plan and trace rows | Implemented statically: derive all 14 canonical hidden-disabled stub records from `claude_full` leaf descriptor declarations with `source_id`, `source_file`, `command_name`, `hidden`, and `enabled`; the stale historical feature TSV is not behavioral authority | `ClaudeHiddenStubCommandRecord`, `hiddenDisabledStubCommandRegistry`, `setup_hidden_stub_registry_fixture`, and `check_hidden_stub_registry_contract`; normalized source discovery and two-way registry comparison are present; supporting metadata only with no shipped admission claim; execute SSpec/docgen on a qualified runtime |
 | H — distributed feature-gate cross-map | `src/app/llm_caret/claude_full/feature_gate_registry.spl`, mirrored focused SSpec/manual, plan and trace rows | Implemented and statically synchronized: 33 bounded records, independently pinned contract/state matrices, generic root reconciliation, exact malformed rejection, and synchronized manual; execution/docgen remain blocked | `ClaudeFeatureGateRecord`, `claudeFeatureGateRegistry`, `setup_claude_feature_gate_fixture`, `check_claude_feature_gate_registry`, and the independent exact state matrix; preserve `/compact` drift; reject malformed records exactly; parts-bin claim only; execute SSpec/docgen on a qualified runtime |
@@ -298,8 +298,8 @@ fixtures. No lane may run a paid provider.
 
    Current audit result: the 33 distributed gate dimensions remain
    parts-bin-only; the shipped entry graph reaches only the compact/init root
-   records and their summarize/bootstrap aliases. The scoped suite contains 493
-   modern scenarios (405 base plus 88 focused owner/effect scenarios), and the
+   records and their summarize/bootstrap aliases. The scoped suite contains 495
+   modern scenarios (407 base plus 88 focused owner/effect scenarios), and the
    PTY manual contains seven fail-closed scenarios with zero executed. Simple
    LSP MCP returns the `commands.spl` symbol inventory and resolves the
    `chat_tui.spl` `findRootCommand` call to its production definition. GitHub
@@ -307,6 +307,42 @@ fixtures. No lane may run a paid provider.
    self-hosted Simple/Caret artifacts and missing pinned upstream Claude tree;
    no exhaustive “every Claude function still works” or runtime PASS is
    claimed.
+
+### 2026-07-24 parallel-audit continuation
+
+The latest sidecar audit found new work rather than changing the evidence
+boundary above. The current tranche closes two of those findings:
+
+- the installed Claude Code `2.1.218` probe now distinguishes advertised,
+  help-hidden-but-accepted, and removed flags; all six offline cases pass;
+- the hidden-command component spec now drives `/debug_tool_call` and
+  `/remote_setup` through `run_chat_tui_submission`, proving exact transcript,
+  unchanged state, and zero responder/persistence in default-hidden,
+  admitted-hidden, and disabled states;
+- `_hidden_commands_enabled` now has direct negative evidence for empty, `0`,
+  `false`, `yes`, and whitespace-wrapped input, while `1` and case-insensitive
+  `true` remain the only admitted values.
+
+Remaining work is ordered by shipped-path value and prerequisite cost:
+
+| Lane | Remaining work | Acceptance |
+|---|---|---|
+| M — cached plain process | Add four fail-closed `--plain` stdin cases for `/compact`, `/summarize`, `/init`, and `/bootstrap` | Exact canonical output, exit zero, no assistant/unknown extra output, and no session file under isolated HOME |
+| N — PTY negative effects | Tighten promptless PTY checks and add hidden aliases plus false env value | Reject extra semantic output, require empty session directory, preserve terminal cleanup for every case |
+| O — registry discovery | Add independent source-to-registry discovery for distributed gates | A newly added source gate without a registry row makes the aggregate fail |
+| P — direct owner closure | First add behavior tables for `withRetry.isFastModeNotEnabledError`, `shouldRetry`, and `getRetryAfterMs`; then design deterministic seams for MCP auth/client and bridge lifecycle owners | Direct owner import, effect/state assertions, canonical manual; never add constant-only sentinel tests |
+| Q — current Claude inventory | Restore a provenance-pinned upstream tree and regenerate file/function matrices | Every current upstream target has an explicit implemented/tested, justified parts-bin, or missing status |
+| R — executable Caret | Qualify a current pure-Simple runtime, build cached Caret, and execute focused SSpec/docgen/PTY exactly once | Provenance sidecar, no seed/source fallback, trustworthy example count/exit, retained artifacts |
+
+Runtime recovery remains resource-gated. The worktree has no qualified
+runtime/Caret artifact, the shared volume had only about 1.6 GiB free during
+the audit, and concurrent bootstrap/native builds were active. Do not start
+another build until they finish and at least 5 GiB is free. The sibling
+19.7 MB pure-Simple candidate has SHA-256
+`09b1ed4583d5b563360af7c4c00b1ef681e09048451279d64ca98c7e4c65549f`
+but lacks fresh source provenance; qualify it against current Caret source
+before use. Reject the sibling 58 MB candidate because it delegates to a
+`simple_seed`, and do not use Stage 3 as a general test/docgen runtime.
 
 ### Required execution order after a qualified runtime is deployed
 
@@ -317,8 +353,9 @@ runtime/toolchain mismatch and record it; do not repeat a green gate.
    semantic validation.
 2. Confirm LSP symbols, definition, references, and diagnostics return
    non-empty/meaningful results for `step_raw_line_byte`.
-3. Run the installed-Claude offline checker/spec once and retain its raw
-   path/version/hash/stdout/stderr/exit artifacts.
+3. The installed-Claude offline checker already passed all six cases against
+   recorded Claude Code `2.1.218`; execute only its SSpec wrapper once after a
+   qualified runtime exists, without repeating the external checker directly.
 4. Execute the focused unit specs for `claude_cli`, `provider`, `main`,
    `config`, `tools`, and `chat_tui`.
 5. Execute the CLI process, Claude contract, managed-env, root-registry,

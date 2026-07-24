@@ -60,6 +60,20 @@ fault it is meant to survive — e.g. a mock 429 for retry, a spawn spy for
 permission deny, a transcript scan for redaction. See the hardening plan for the
 per-task acceptance tests and the interpreter-mode caveat.
 
+## Installed Claude Hidden-Argument Probe (2026-07-24)
+
+The environmental checker has six bounded cases: provenance, version, help,
+missing print input, hidden maximum-turn acceptance, and removed
+maximum-token rejection. The hidden case invokes `--max-turns 1` with closed
+stdin and passes only when Claude parses the option, rejects the absent input,
+and does not report an unknown option. The help case independently requires
+that `--max-turns` remain unadvertised, while `--allowedTools` remains variadic.
+
+This two-oracle design prevents a help-only false negative for supported hidden
+options and a parse-only false positive for removed options. Every child uses
+an isolated HOME/config/work directory, an empty inherited environment, and a
+five-second process-tree watchdog.
+
 ## Live TUI I/O and Lifecycle (2026-07-24)
 
 `CaretIo` is an injectable capability record for TTY detection, terminal size,
@@ -189,6 +203,12 @@ title/status, one exact System transcript line, cleared input, zero responder
 calls, and zero persistence. The injected `CaretIo` plain-loop case additionally
 proves no raw/alternate-screen/cursor mutation. It remains component evidence,
 not cached-wrapper stdin process evidence.
+
+The same submission boundary applies to hidden aliases. With the hidden gate
+off, `/debug_tool_call` must be indistinguishable from an unknown command; with
+the gate on, it canonicalizes to `/debug-tool-call`. `/remote_setup` remains
+disabled even when hidden admission is enabled. All three paths preserve
+conversation/session/title/status and invoke neither responder nor persistence.
 
 The fail-closed PTY checker projects the same mapping into four independent
 cached-wrapper cases: `promptless-compact`, `promptless-summarize`,
