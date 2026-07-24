@@ -4,8 +4,10 @@
 - **Severity:** high (blocks `run`/`test` and incremental native builds on the affected
   binaries; discovered as a side-effect while investigating
   `sspec_test_runner_undercounts_it_blocks_2026-07-24.md`)
-- **Status:** `run`/`test` source-fixed with redeployment pending;
-  `native-build` root unproven
+- **Status:** `run`/`test` source-fixed (00bfd7cfb0e9); redeployment BLOCKED by a
+  stage4 memory balloon (see "Redeployment blocked" below). Current `bin/simple`
+  is the healthy Rust seed — no user-facing segfault at present.
+  `native-build` root unproven.
 
 ## Symptom
 
@@ -101,3 +103,40 @@ bootstrap capability probe that builds and runs
 `test/04_smoke/windows_native_hello.spl` with an isolated cache. A pass resolves
 the retained-artifact suspicion; another crash requires its own backtrace.
 Only after that should the full CLI and essential-tools gates run.
+
+## Redeployment blocked (2026-07-24, investigated)
+
+Producing the "one fresh guarded pure-Simple compiler" the proving gate needs
+is currently blocked. Repeated isolated `bootstrap-from-scratch.sh
+--backend=cranelift --full-bootstrap --deploy` runs die in **stage4-native-build**
+with **rc=143 (SIGTERM)**. Two stacked causes, both external to the guard fix:
+
+1. **Resource-monitor 64 GB generic cap.** `scripts/resource/kill_simple_monitor.shs`
+   kills any non-protected proc over `KILL_ANY_MEM_MB=64000`. The full-CLI stage4
+   (`native-build --entry src/app/cli/main.spl`) is NOT classed as `simple
+   run/test`, so it falls to the generic branch — the `native_build_main.spl`
+   spare lives only inside the run/test branch and never applies. Every session's
+   stage4 dies identically at ~64 GB. Proof: `/tmp/kill_simple_monitor.log`
+   (`generic rss=65285MB>=64000MB: ... native-build ... -o build/bootstrap/full/.../simple`).
+   Worked around by renaming the stage4 scratch binary to carry a lowercase
+   `claude` token (monitor `is_protected` match) — the token MUST be in argv[0],
+   not an env var (env assignments vanish from `/proc/cmdline` after `env`
+   execve's into the compiler).
+
+2. **~101 GB RSS parse balloon → earlyoom OOM.** Once spared from the monitor,
+   stage4 kept growing and reached **VmRSS 101,248 MiB** while still in
+   `phase2:parse` — then earlyoom SIGTERM'd it as the box crossed its 10%-avail
+   floor (`earlyoom[...]: sending SIGTERM to process ... "claude_wjob_s4c":
+   VmRSS 101248 MiB`). This is the known unfreed-string-literal balloon
+   (memory `project_parse_memory_literal_interning_2026-07-24`: codegen boxes
+   every string-literal EVAL, no-GC never frees). At 100 GB+ the full-CLI
+   self-host does not fit reliably on this contended 128 GB host, and the
+   `[stmt_get_tag] OOB` / `[flat-bridge] missing stmt tag` warnings throughout
+   the stage4 log make the *output* binary's health doubtful even if a run
+   completes — i.e. a completed build would likely re-segfault.
+
+**Net:** the `run`/`test` source guard is landed; the redeploy that would let the
+proving gate run is gated on the parse-memory-balloon fix (interning), not on
+anything in this bug. No user-facing regression meanwhile: `bin/simple` is the
+working seed. Guard-storm/PID-recycle and the sentinel PGID-pin (da7a702e199)
+were investigated and ruled out as the stage4 killer.
