@@ -3,7 +3,7 @@
 - **Date:** 2026-07-24
 - **Lane:** self-hosted AOT `native-build` (flat `--entry-closure` path; both default and `--backend cranelift`)
 - **Severity:** P0 for the AOT lane — blocks compiling essentially any real program
-- **Status:** OPEN — characterized, root-cause narrowed to `lower_hir_expr` Field arm
+- **Status:** OPEN — an earlier layout-metadata nil was repaired in source; rebuilt execution and the later Field arm remain pending
 
 ## Repro (5 lines, reproduces on the DEPLOYED `bin/release` binary)
 
@@ -75,3 +75,30 @@ the exact nil-deref, or make the flat `--entry-closure` path populate
 `local_struct_types` / `struct_field_types_by_name` for locally-constructed
 structs so the type-recovery block is not entered at all. One stage4 build
 (~10 min, `--threads 4` under memory contention) per iteration.
+
+## Earlier in-process blocker found (2026-07-24)
+
+The true pure-Simple bootstrap path is the single positional source form:
+`simple native-build file.spl ...`. The earlier `--entry`/`--source` probes
+routed through `rt_native_build` and did not exercise self-hosted lowering.
+With a no-stub 675-file candidate (SHA-256
+`a654b28ca1c9f4917293f124eb75769302ec47dfb268f867105860f3997d6eb7`),
+the positional C5 build fails first with:
+
+```
+runtime error: field access on nil receiver
+SIGILL in TypeLayout.compute_struct_layout
+  <- MirLowering.lower_struct_type
+  <- MirLowering.lower_module
+  <- CompilerDriver.lower_to_mir
+```
+
+An unannotated struct should carry `has_layout_attr=false` plus a valid default
+`LayoutAttr`. HIR lowering instead constructed a `LayoutAttr?` in value
+position and passed it into the desugared `has_layout_attr`/`layout_attr` pair;
+on Stage4 this can produce a true flag with a nil payload. Current source keeps
+the parsed layout value plain, computes the presence bit directly, and supplies
+both desugared fields explicitly for structs and classes. No consumer-side nil
+default was added because that would hide malformed explicit ABI metadata.
+Source contract: 5/5 passing. Rebuilt positional execution is pending the next
+bounded cycle.

@@ -648,5 +648,13 @@ the shared binary — deploys require explicit user go-ahead).
   `local_hir_types` map when the prelowered MIR local has lost its type. The
   focused pure-Simple contract passes 4/4. A later 662-file rebuild contained
   five unresolved stubs and segfaulted on `--version`, so it is rejected rather
-  than credited; a correct 675-file rebuild and C5 exit `42` remain pending. See
+  than credited. A later no-stub 675-file candidate is valid and runnable, but
+  the prior `--entry` C5 commands are now classified as Rust-worker receipts:
+  the pure-Simple bootstrap route requires a positional `.spl` input. That true
+  route reaches MIR and currently stops first on C5's unannotated `CharOwner`,
+  where a malformed desugared layout presence/payload pair traps in
+  `compute_struct_layout`. Current HIR producers populate the pair explicitly,
+  and the chr MIR-type probe uses a Stage4-safe `?? MirType.unit()` fallback.
+  The focused contract passes 5/5; rebuilt positional C5 exit `42` remains
+  pending. See
   `native_chr_builtin_no_lowering_2026-07-18.md`.

@@ -230,3 +230,22 @@ The final bounded rebuild attempt produced only a 662-file closure with five
 unresolved stubs and a candidate that segfaulted on `--version`; it is not a
 valid C5 receipt. Do not credit C5 execution until a correct 675-file candidate
 builds this source and returns `42`.
+
+### Receipt routing correction
+
+The prior C5 commands used `--entry`/`--source`. `bootstrap_main.spl` routes
+that shape to `rt_native_build` unless the special full-CLI Stage4 contract is
+active, so their byte-identical free-function output was Rust-worker evidence,
+not self-hosted MIR evidence. A correct no-stub 675-file candidate now exists
+(SHA-256
+`a654b28ca1c9f4917293f124eb75769302ec47dfb268f867105860f3997d6eb7`);
+its `--version` is `simple-bootstrap 1.0.0-beta`.
+
+The actual pure-Simple positional command reaches MIR lowering but currently
+stops earlier while lowering C5's unannotated `CharOwner`: a nil layout payload
+traps in `TypeLayout.compute_struct_layout`. HIR struct/class producers now
+populate the desugared layout presence bit and payload explicitly. The chr
+runtime-type probe also uses the established Stage4-safe
+`local_mir_type_of(...) ?? MirType.unit()` form instead of optional `if val`.
+The focused source contract passes 5/5. A rebuilt positional C5 exit `42`
+remains the required receipt.
