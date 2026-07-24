@@ -76,9 +76,16 @@ run_json_probe() {
     echo "${label}_rc=$rc"
     [ "$rc" -eq "$expected_rc" ] || { echo "error=${label}_unexpected_exit"; exit 1; }
     [ ! -s "$work_dir/$label.err" ] || { echo "error=${label}_stderr_not_empty"; exit 1; }
-    [ "$(awk 'NF { print substr($0, 1, 1); exit }' "$work_dir/$label.json")" = '{' ] || { echo "error=${label}_not_json"; exit 1; }
+    run_with_timeout env SIMPLE_BOOTSTRAP= SIMPLE_RUNTIME_PATH= SIMPLE_LIB="$repo_root/src" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_FRONTEND_DELEGATED=1 "$SIMPLE_BINARY" run "$repo_root/scripts/check/validate-json.spl" "$work_dir/$label.json" || { echo "error=${label}_not_json"; exit 1; }
     ! grep -Fq 'Found ' "$work_dir/$label.json" || { echo "error=${label}_human_output"; exit 1; }
 }
+
+printf '%s\n' '{"status":"valid"}' >"$work_dir/valid.json"
+printf '%s\n' '{"status":' >"$work_dir/malformed.json"
+printf '%s\n' '{"status":"valid"}' 'trailing human output' >"$work_dir/trailing.json"
+run_probe validate_json_valid 0 "$SIMPLE_BINARY" run "$repo_root/scripts/check/validate-json.spl" "$work_dir/valid.json"
+run_probe validate_json_malformed 1 "$SIMPLE_BINARY" run "$repo_root/scripts/check/validate-json.spl" "$work_dir/malformed.json"
+run_probe validate_json_trailing 1 "$SIMPLE_BINARY" run "$repo_root/scripts/check/validate-json.spl" "$work_dir/trailing.json"
 
 # Test runner: prove a real pass, assertion failure, and zero-example refusal.
 run_probe test_runner_pass 0 "$SIMPLE_BINARY" test "$repo_root/test/fixtures/pure_simple_tooling/sibling_describe_green_fixture.spl" --mode=interpreter --no-session-daemon --sequential --no-db --no-cache --assert-ran --fail-fast
@@ -162,16 +169,35 @@ grep -Fq '"total_groups": 0' "$work_dir/duplicate_clean.json" || { echo 'error=d
 
 set -f
 duplicate_args='duplicates --exclude duplicates/ignored/** --min-lines 5 --min-tokens 8 --format json --max-allowed 0'
+assert_duplicate_found_json() {
+    label=$1
+    expected_mode=$2
+    report="$work_dir/$label.json"
+    grep -Fq "\"mode\": \"$expected_mode\"" "$report" || { echo "error=${label}_mode_wrong"; exit 1; }
+    grep -Fq '"total_groups": 1' "$report" || { echo "error=${label}_group_count_wrong"; exit 1; }
+    grep -Fq '"total_occurrences": 2' "$report" || { echo "error=${label}_total_occurrences_wrong"; exit 1; }
+    grep -Fq '"total_lines": 10' "$report" || { echo "error=${label}_total_lines_wrong"; exit 1; }
+    grep -Fq '"files_affected": 2' "$report" || { echo "error=${label}_files_affected_wrong"; exit 1; }
+    grep -Fq '"occurrences": 2' "$report" || { echo "error=${label}_group_occurrences_wrong"; exit 1; }
+    grep -Fq '"lines_per_block": 5' "$report" || { echo "error=${label}_lines_per_block_wrong"; exit 1; }
+    grep -Fq '"file": "duplicates/a.spl"' "$report" || { echo "error=${label}_path_a_missing"; exit 1; }
+    grep -Fq '"file": "duplicates/b.spl"' "$report" || { echo "error=${label}_path_b_missing"; exit 1; }
+    [ "$(grep -Fc '"line_start": 1' "$report")" -eq 2 ] || { echo "error=${label}_line_start_wrong"; exit 1; }
+    [ "$(grep -Fc '"line_end": 5' "$report")" -eq 2 ] || { echo "error=${label}_line_end_wrong"; exit 1; }
+    ! grep -Fq 'duplicates/ignored/c.spl' "$report" || { echo "error=${label}_ignored_c_included"; exit 1; }
+    ! grep -Fq 'duplicates/ignored/d.spl' "$report" || { echo "error=${label}_ignored_d_included"; exit 1; }
+}
 run_json_probe duplicate_token_uncached 1 "$SIMPLE_BINARY" duplicate-check $duplicate_args --mode token --no-cache
-grep -Fq '"total_groups": 1' "$work_dir/duplicate_token_uncached.json" || { echo 'error=duplicate_token_uncached_group_count_wrong'; exit 1; }
+assert_duplicate_found_json duplicate_token_uncached token
 run_json_probe duplicate_token_create 1 "$SIMPLE_BINARY" duplicate-check $duplicate_args --mode token --cache-path "$work_dir/token-cache.sdn"
 [ -s "$work_dir/token-cache.sdn" ] || { echo 'error=duplicate_token_cache_missing'; exit 1; }
+cmp -s "$work_dir/duplicate_token_uncached.json" "$work_dir/duplicate_token_create.json" || { echo 'error=duplicate_token_cache_create_changed'; exit 1; }
 run_json_probe duplicate_token_reuse 1 "$SIMPLE_BINARY" duplicate-check $duplicate_args --mode token --cache-path "$work_dir/token-cache.sdn"
 cmp -s "$work_dir/duplicate_token_create.json" "$work_dir/duplicate_token_reuse.json" || { echo 'error=duplicate_token_cache_output_changed'; exit 1; }
 
 printf '%s\n' 'fn similar_value(input: i64) -> i64:' '    val delta = input + 10' '    val epsilon = delta * 2' '    val zeta = epsilon - 3' '    zeta + 1' >"$work_dir/duplicates/b.spl"
 run_json_probe duplicate_cosine_uncached 1 "$SIMPLE_BINARY" duplicate-check $duplicate_args --mode cosine --similarity-threshold 0.85 --no-cache
-grep -Fq '"total_groups": 1' "$work_dir/duplicate_cosine_uncached.json" || { echo 'error=duplicate_cosine_uncached_group_count_wrong'; exit 1; }
+assert_duplicate_found_json duplicate_cosine_uncached cosine
 run_json_probe duplicate_cosine_create 1 "$SIMPLE_BINARY" duplicate-check $duplicate_args --mode cosine --similarity-threshold 0.85 --cache-path "$work_dir/cosine-cache.sdn"
 [ -s "$work_dir/cosine-cache.sdn" ] || { echo 'error=duplicate_cosine_cache_missing'; exit 1; }
 cmp -s "$work_dir/duplicate_cosine_uncached.json" "$work_dir/duplicate_cosine_create.json" || { echo 'error=duplicate_cosine_cache_output_changed'; exit 1; }
@@ -200,14 +226,14 @@ grep -Fq 'duplicate-check: --help must be used alone' "$work_dir/duplicate_help_
 printf '%s\n' 'duplicate-check:' '  mode: tokne' >"$work_dir/simple.duplicate-check.sdn"
 run_probe duplicate_config_invalid_mode 2 "$SIMPLE_BINARY" duplicate-check "$work_dir/duplicates"
 grep -Fq 'duplicate-check: invalid simple.duplicate-check.sdn mode: tokne' "$work_dir/duplicate_config_invalid_mode.out" || { echo 'error=duplicate_config_invalid_mode_accepted'; exit 1; }
-run_probe duplicate_config_mode_override 0 "$SIMPLE_BINARY" duplicate-check "$repo_root/test/fixtures/duplication/clean_pair" --no-default-excludes --mode token --min-lines 5 --min-tokens 8 --format json
-grep -Fq '"mode": "token"' "$work_dir/duplicate_config_mode_override.out" || { echo 'error=duplicate_config_mode_override_ignored'; exit 1; }
+run_json_probe duplicate_config_mode_override 0 "$SIMPLE_BINARY" duplicate-check "$repo_root/test/fixtures/duplication/clean_pair" --no-default-excludes --mode token --min-lines 5 --min-tokens 8 --format json
+grep -Fq '"mode": "token"' "$work_dir/duplicate_config_mode_override.json" || { echo 'error=duplicate_config_mode_override_ignored'; exit 1; }
 
 printf '%s\n' 'duplicate-check:' '  output-format: yaml' >"$work_dir/simple.duplicate-check.sdn"
 run_probe duplicate_config_invalid_format 2 "$SIMPLE_BINARY" duplicate-check "$work_dir/duplicates"
 grep -Fq 'duplicate-check: invalid simple.duplicate-check.sdn output-format: yaml' "$work_dir/duplicate_config_invalid_format.out" || { echo 'error=duplicate_config_invalid_format_accepted'; exit 1; }
-run_probe duplicate_config_format_override 0 "$SIMPLE_BINARY" duplicate-check "$repo_root/test/fixtures/duplication/clean_pair" --no-default-excludes --mode token --min-lines 5 --min-tokens 8 --format json
-grep -Fq '"mode": "token"' "$work_dir/duplicate_config_format_override.out" || { echo 'error=duplicate_config_format_override_ignored'; exit 1; }
+run_json_probe duplicate_config_format_override 0 "$SIMPLE_BINARY" duplicate-check "$repo_root/test/fixtures/duplication/clean_pair" --no-default-excludes --mode token --min-lines 5 --min-tokens 8 --format json
+grep -Fq '"mode": "token"' "$work_dir/duplicate_config_format_override.json" || { echo 'error=duplicate_config_format_override_ignored'; exit 1; }
 echo 'essential_duplicate_checker_smoke=true'
 
 echo 'bootstrap_essential_tools_smoke=true'
