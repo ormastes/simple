@@ -6,6 +6,20 @@
 > fresh kernel. The wrapper reported `wm-simple-web-build-failed`; QEMU never
 > launched, the guest emitted no font or input markers, and no `pmemsave` crop
 > exists. Source contracts below are not runtime proof.
+>
+> The x86 admission path now matches the canonical unoptimized WM build profile,
+> adds a 900-second host watchdog, preserves the native cache on timeout, and
+> only promotes a hash-validated candidate ELF with a matching admission
+> sidecar and unchanged source-content revision. A new live run is blocked in
+> this worktree because its only
+> pure-Simple executable, `release/x86_64-unknown-linux-gnu/simple`, exits 139
+> during the focused contract test; no Rust seed or external stale artifact was
+> substituted.
+>
+> External kernels must independently validate as ELF64 little-endian x86_64
+> (`e_machine=62`). External disks must carry the canonical SimpleOS FAT32
+> BPB/header and pass the installed host FAT checker. Default-disk provenance is
+> derived from the admitted kernel status rather than asserted unconditionally.
 
 ## Required live evidence
 

@@ -1,0 +1,62 @@
+# codex-system-test
+
+use std.io_runtime.{file_read}
+use std.spec.*
+
+describe "hosted WM live-proof focus contract":
+
+    it "seeds an unfocused peer before the focused Terminal window":
+        val source = file_read("src/os/hosted/hosted_entry.spl")
+        val lifecycle = file_read("src/os/compositor/wm_action_lifecycle.spl")
+        val seed_start = source.find("fn _seed_live_proof_surface")
+        val seed_end = source.find("fn _physical_surface_geometry")
+        expect(seed_start).to_be_greater_than(-1)
+        expect(seed_end).to_be_greater_than(seed_start)
+        val seed = source.substring(seed_start, seed_end)
+        val files = seed.find("\"Files\"")
+        val terminal = seed.find("\"Terminal\"")
+        expect(files).to_be_greater_than(-1)
+        expect(terminal).to_be_greater_than(files)
+        expect(seed).to_contain("\"files\"")
+        expect(seed).to_contain("\"terminal\"")
+        val create_start = lifecycle.find("if action.kind == \"create_window\" or action.kind == \"create_web_window\":")
+        val create_end = lifecycle.find("if action.kind == \"destroy_window\":")
+        expect(create_start).to_be_greater_than(-1)
+        expect(create_end).to_be_greater_than(create_start)
+        val create = lifecycle.substring(create_start, create_end)
+        expect(create).to_contain("focused: true")
+        expect(create).to_contain("out_windows = wm_lifecycle_focus_window(out_windows, id)")
+
+    it "keeps the normal shared MDI seed outside live-proof mode":
+        val source = file_read("src/os/hosted/hosted_entry.spl")
+        val run_start = source.find("fn _run_hosted_wm")
+        expect(run_start).to_be_greater_than(-1)
+        val run = source.substring(run_start, source.len())
+        val proof_seed = run.find("comp = _seed_live_proof_surface(comp)")
+        val normal_seed = run.find("comp = _seed_host_compositor_shared_mdi(comp)")
+        expect(proof_seed).to_be_greater_than(-1)
+        expect(normal_seed).to_be_greater_than(proof_seed)
+
+    it "routes native Tab through the canonical next-window focus operation":
+        val entry = file_read("src/os/hosted/hosted_entry.spl")
+        val core = file_read("src/os/compositor/host_compositor_core.spl")
+        val cycle_start = core.find("fn host_compositor_cycle_focus")
+        val cycle_end = core.find("fn host_compositor_focused_window_id")
+        expect(entry).to_contain("elif keycode == KEY_TAB:")
+        expect(entry).to_contain("comp = host_compositor_cycle_focus(comp)")
+        expect(cycle_start).to_be_greater_than(-1)
+        expect(cycle_end).to_be_greater_than(cycle_start)
+        val cycle = core.substring(cycle_start, cycle_end)
+        expect(cycle).to_contain("var next_idx = focused_idx + 1")
+        expect(cycle).to_contain("out.focus_window(out.windows[next_idx].id)")
+
+    it "restores only the focused window changed by the evidence maximize command":
+        val source = file_read("src/os/hosted/hosted_entry.spl")
+        val restore_start = source.find("elif command.action == \"restore\":")
+        val restore_end = source.find("elif command.action == \"close\":")
+        expect(restore_start).to_be_greater_than(-1)
+        expect(restore_end).to_be_greater_than(restore_start)
+        val restore = source.substring(restore_start, restore_end)
+        expect(restore).to_contain("val focused = host_compositor_focused_window_id(comp)")
+        expect(restore).to_contain("if focused > 0: comp.restore_window(focused)")
+        expect(restore.find("host_compositor_restore_all")).to_equal(-1)

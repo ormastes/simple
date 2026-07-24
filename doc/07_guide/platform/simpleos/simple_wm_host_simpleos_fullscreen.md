@@ -89,8 +89,20 @@ Its native build remained CPU-bound for about 13 minutes, exceeded the
 requested `--timeout 300`, emitted an empty build log, and was terminated
 without refreshing the kernel. The wrapper therefore reported
 `wm-simple-web-build-failed`; QEMU did not launch and no crop was promoted.
-Resume with the same wrapper after the self-hosted native-build timeout/perf
-fault is fixed. Source contracts are supporting evidence only.
+The wrapper now uses the canonical WM target's unoptimized profile under a
+900-second host watchdog, retains its native cache after timeout, and admits
+only an ELF64 little-endian x86_64/SHA-256-validated candidate with matching
+wrapper, compiler, profile, and source-content provenance. It rechecks the
+source revision before promotion, so concurrent edits fail rather than
+admitting a mixed-source ELF. Explicit kernel overrides must identify
+`e_machine=62`; explicit images must have the canonical SimpleOS FAT32
+BPB/header and pass the installed host FAT checker. Both remain labeled
+external. A generated default disk is labeled `built-from-admitted-kernel`
+only for a current-source build/cache hit, or
+`built-from-external-elf-validated` when built from an explicit validated ELF.
+The next live run remains blocked in the isolated x86 worktree because its only
+pure-Simple executable exits 139; do not substitute a Rust seed or an unrelated
+artifact. Source contracts are supporting evidence only.
 
 Scalar safety includes enum payloads: raw PMM allocation owns the bitmap path
 instead of wrapping `PageFrame?`, and VMM table allocation consumes the raw

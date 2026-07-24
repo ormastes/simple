@@ -7,7 +7,7 @@ cd "$ROOT_DIR"
 BUILD_DIR="${BUILD_DIR:-build/linux-hosted-wm-live-window-evidence}"
 REPORT_PATH="${REPORT_PATH:-$BUILD_DIR/report.md}"
 ENTRY=src/os/hosted/hosted_entry.spl
-SIMPLE_BIN="${SIMPLE_BIN:-bin/release/x86_64-unknown-linux-gnu/simple}"
+SIMPLE_BIN="${SIMPLE_BIN:-}"
 HOSTED_BIN="${HOSTED_WM_ARTIFACT:-$BUILD_DIR/hosted-wm}"
 WINT_LIB="${SIMPLE_WM_WINIT_LIB:-src/runtime/spl_winit/target/release/libspl_winit.so}"
 RUNTIME_LIB="${SIMPLE_WM_RUNTIME_LIB:-src/compiler_rust/target/bootstrap/deps/libsimple_runtime.so}"
@@ -15,8 +15,19 @@ FONT_ASSET='assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].t
 FONT_ASSET_SHA256=2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081
 # Filled from the exact raw RGB crop after the first current-path capture.
 GLYPH_RGB_SHA256=pending
+GLYPH_CALIBRATION="${LINUX_HOSTED_WM_CALIBRATE_GLYPH:-0}"
 TIMEOUT_SECS="${LINUX_HOSTED_WM_LIVE_TIMEOUT_SECS:-60}"
 BUILD_TIMEOUT_SECS="${LINUX_HOSTED_WM_BUILD_TIMEOUT_SECS:-600}"
+SELF_TEST=0
+
+case "${1:-}" in
+    "") ;;
+    --self-test) SELF_TEST=1 ;;
+    *)
+        echo "usage: $0 [--self-test]" >&2
+        exit 2
+        ;;
+esac
 
 LOG_PATH="$BUILD_DIR/stdout.log"
 ERR_PATH="$BUILD_DIR/stderr.log"
@@ -29,6 +40,10 @@ WINDOW_PNG="$BUILD_DIR/window.png"
 GLYPH_RGB="$BUILD_DIR/terminal-title.rgb"
 WINDOW_GLYPH_RGB="$BUILD_DIR/window-terminal-title.rgb"
 EVIDENCE_ENV="$BUILD_DIR/evidence.env"
+SOURCE_DIFF="$BUILD_DIR/source.diff"
+SOURCE_MANIFEST="$BUILD_DIR/native-source-manifest.sha256"
+SOURCE_MANIFEST_AFTER="$BUILD_DIR/native-source-manifest.after.sha256"
+SOURCE_MANIFEST_ID='native-build-entry-closure:src/os/hosted/hosted_entry.spl:src/os+src/lib:all-spl:sha256-v1'
 CALIBRATION_RGB="$BUILD_DIR/terminal-title.deliberate-red.rgb"
 BASELINE_SNAPSHOT="$BUILD_DIR/baseline.snapshot.json"
 BASELINE_CAPTURE="$BUILD_DIR/baseline.framebuffer.ppm"
@@ -44,13 +59,64 @@ RESTORE_CAPTURE="$BUILD_DIR/restore.framebuffer.ppm"
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$LOG_PATH" "$ERR_PATH" "$BUILD_LOG" "$SNAPSHOT_LIVE" "$CAPTURE_LIVE" \
     "$COMMAND_PATH" "$WINDOW_ENV" "$WINDOW_PNG" "$GLYPH_RGB" \
-    "$WINDOW_GLYPH_RGB" "$EVIDENCE_ENV" "$CALIBRATION_RGB" "$REPORT_PATH" \
+    "$WINDOW_GLYPH_RGB" "$EVIDENCE_ENV" "$SOURCE_DIFF" "$SOURCE_MANIFEST" \
+    "$SOURCE_MANIFEST_AFTER" "$CALIBRATION_RGB" "$REPORT_PATH" \
     "$BASELINE_SNAPSHOT" "$BASELINE_CAPTURE" "$INPUT_SNAPSHOT" "$INPUT_CAPTURE" \
     "$MOVE_SNAPSHOT" "$MOVE_CAPTURE" "$MAXIMIZE_SNAPSHOT" "$MAXIMIZE_CAPTURE" \
     "$RESTORE_SNAPSHOT" "$RESTORE_CAPTURE"
 
 sha256_file() {
     sha256sum "$1" | awk '{print $1}'
+}
+
+glyph_oracle_mode() {
+    if [ "$1" != pending ]; then
+        printf pinned
+    elif [ "$2" = 1 ]; then
+        printf calibration-only
+    else
+        printf calibration-required
+    fi
+}
+
+write_native_source_manifest() {
+    output=$1
+    paths="$output.paths"
+    sorted_paths="$output.paths.sorted"
+    find src/os src/lib \( -type f -o -type l \) -name '*.spl' -print0 >"$paths" || return 1
+    [ -s "$paths" ] || return 1
+    LC_ALL=C sort -z "$paths" >"$sorted_paths" || return 1
+    xargs -0 sha256sum <"$sorted_paths" >"$output" || return 1
+    rm -f "$paths" "$sorted_paths"
+    [ -s "$output" ]
+}
+
+git_dependency_tree_clean() {
+    repo=${1:-.}
+    git -C "$repo" diff --quiet HEAD -- src/os src/lib || return 1
+    [ -z "$(git -C "$repo" ls-files --others -- src/os src/lib | sed -n '/\.spl$/p')" ]
+}
+
+resolve_source_provenance() {
+    if command -v jj >/dev/null 2>&1 && jj root >/dev/null 2>&1; then
+        source_vcs=jj
+        source_revision="$(jj log -r @ --no-graph --no-pager -T 'commit_id ++ "\n"' 2>/dev/null | tail -n 1)"
+        jj diff --git -r @ -- src/os src/lib >"$SOURCE_DIFF" 2>/dev/null || return 1
+    elif command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        source_vcs=git
+        source_revision="$(git rev-parse HEAD 2>/dev/null)"
+        git_dependency_tree_clean || return 1
+        git diff --binary HEAD -- src/os src/lib >"$SOURCE_DIFF" 2>/dev/null || return 1
+    else
+        return 1
+    fi
+    case "$source_revision" in
+        ""|*[!0-9a-f]*) return 1 ;;
+    esac
+    revision_length="$(printf %s "$source_revision" | wc -c | tr -d ' ')"
+    [ "$revision_length" -eq 40 ] || [ "$revision_length" -eq 64 ] || return 1
+    source_diff_sha="$(sha256_file "$SOURCE_DIFF")"
+    source_provenance_status=pass
 }
 
 artifact_status() {
@@ -67,6 +133,12 @@ emit() {
         echo "linux_hosted_wm_live_window_native_artifact=$HOSTED_BIN"
         echo "linux_hosted_wm_live_window_source_revision=$source_revision"
         echo "linux_hosted_wm_live_window_source_diff_sha256=$source_diff_sha"
+        echo "linux_hosted_wm_live_window_source_vcs=$source_vcs"
+        echo "linux_hosted_wm_live_window_source_provenance_status=$source_provenance_status"
+        echo "linux_hosted_wm_live_window_native_source_manifest_identity=$SOURCE_MANIFEST_ID"
+        echo "linux_hosted_wm_live_window_native_source_manifest=$SOURCE_MANIFEST"
+        echo "linux_hosted_wm_live_window_native_source_manifest_sha256=$source_manifest_admitted_sha"
+        echo "linux_hosted_wm_live_window_native_source_manifest_status=$source_manifest_status"
         echo "linux_hosted_wm_live_window_entry_sha256=$entry_sha"
         echo "linux_hosted_wm_live_window_engine2d_sha256=$engine_sha"
         echo "linux_hosted_wm_live_window_wrapper_sha256=$wrapper_sha"
@@ -101,6 +173,12 @@ emit() {
         echo "linux_hosted_wm_live_window_input_capture_sha256=$input_capture_sha"
         echo "linux_hosted_wm_live_window_input_snapshot=$INPUT_SNAPSHOT"
         echo "linux_hosted_wm_live_window_input_capture=$INPUT_CAPTURE"
+        echo "linux_hosted_wm_live_window_move_nonce=3"
+        echo "linux_hosted_wm_live_window_move_revision=$move_revision"
+        echo "linux_hosted_wm_live_window_move_frame_checksum=$move_frame_checksum"
+        echo "linux_hosted_wm_live_window_move_capture_sha256=$move_capture_sha"
+        echo "linux_hosted_wm_live_window_move_snapshot=$MOVE_SNAPSHOT"
+        echo "linux_hosted_wm_live_window_move_capture=$MOVE_CAPTURE"
         echo "linux_hosted_wm_live_window_maximize_nonce=4"
         echo "linux_hosted_wm_live_window_maximize_revision=$max_revision"
         echo "linux_hosted_wm_live_window_maximize_frame_checksum=$maximize_frame_checksum"
@@ -125,6 +203,7 @@ emit() {
         echo "- reason: $reason"
         echo "- route: SharedWmScene -> DrawIrComposition -> Engine2D -> winit"
         echo "- source revision/diff: $source_revision / $source_diff_sha"
+        echo "- native source manifest: $SOURCE_MANIFEST_ID (${source_manifest_admitted_sha:--}, status=$source_manifest_status)"
         echo "- pure-Simple compiler SHA-256: ${simple_bin_sha:--}"
         echo "- native artifact SHA-256: ${hosted_bin_sha:--}"
         echo "- wrapper SHA-256: ${wrapper_sha:--}"
@@ -134,7 +213,7 @@ emit() {
         echo "- framebuffer: $CAPTURE_LIVE"
         echo "- events: focus=$focus_status pointer=$pointer_status keyboard=$keyboard_status move=$move_status maximize=$maximize_status restore=$restore_status"
         echo "- frame correlation: $frame_status"
-        echo "- retained nonce/revision/readback: baseline=1/$baseline_revision/$baseline_frame_checksum input=2/$input_revision/$input_frame_checksum maximize=4/$max_revision/$maximize_frame_checksum restore=5/$restore_revision/$restore_frame_checksum"
+        echo "- retained nonce/revision/readback: baseline=1/$baseline_revision/$baseline_frame_checksum input=2/$input_revision/$input_frame_checksum move=3/$move_revision/$move_frame_checksum maximize=4/$max_revision/$maximize_frame_checksum restore=5/$restore_revision/$restore_frame_checksum"
         echo "- compatibility fallback: $fallback_status"
     } >"$REPORT_PATH"
     cat "$EVIDENCE_ENV"
@@ -176,13 +255,66 @@ restore_capture_sha=""
 last_issue_ack=""
 issue_nonce=""
 issue_phase=""
-source_revision="$(git rev-parse HEAD 2>/dev/null || printf unavailable)"
-source_diff_sha="$(git diff --binary -- "$ENTRY" src/os/compositor/compositor_engine2d.spl | sha256sum | awk '{print $1}')"
+source_revision=""
+source_diff_sha=""
+source_vcs=""
+source_provenance_status=fail
+source_manifest_candidate_sha=""
+source_manifest_admitted_sha=""
+source_manifest_status=fail
 entry_sha="$(sha256_file "$ENTRY")"
 engine_sha="$(sha256_file src/os/compositor/compositor_engine2d.spl)"
 simple_bin_sha=""
 wrapper_sha="$(sha256_file "$0")"
 hosted_bin_sha=""
+
+resolve_source_provenance || {
+    emit fail source-provenance-unavailable
+    exit 1
+}
+
+if [ "$SELF_TEST" -eq 1 ]; then
+    [ "$SIMPLE_BIN" = "" ] || {
+        echo "linux_hosted_wm_live_window_self_test_status=fail"
+        exit 1
+    }
+    [ "$(glyph_oracle_mode pending 0)" = calibration-required ]
+    [ "$(glyph_oracle_mode pending 1)" = calibration-only ]
+    [ "$(glyph_oracle_mode pinned 0)" = pinned ]
+    write_native_source_manifest "$SOURCE_MANIFEST"
+    write_native_source_manifest "$SOURCE_MANIFEST_AFTER"
+    [ "$(sha256_file "$SOURCE_MANIFEST")" = "$(sha256_file "$SOURCE_MANIFEST_AFTER")" ]
+    git_fixture="$(mktemp -d)"
+    mkdir -p "$git_fixture/src/os/hosted" "$git_fixture/src/lib/common"
+    printf 'entry\n' >"$git_fixture/src/os/hosted/hosted_entry.spl"
+    printf 'dependency\n' >"$git_fixture/src/lib/common/dependency.spl"
+    git -C "$git_fixture" init -q
+    git -C "$git_fixture" add src/os src/lib
+    git -C "$git_fixture" -c user.name=self-test -c user.email=self-test@example.invalid \
+        -c commit.gpgsign=false commit -qm initial
+    git_dependency_tree_clean "$git_fixture"
+    printf 'dirty dependency\n' >"$git_fixture/src/lib/common/dependency.spl"
+    if git_dependency_tree_clean "$git_fixture"; then
+        rm -rf "$git_fixture"
+        echo "linux_hosted_wm_live_window_self_test_status=fail"
+        exit 1
+    fi
+    rm -rf "$git_fixture"
+    echo "linux_hosted_wm_live_window_self_test_status=pass"
+    echo "linux_hosted_wm_live_window_self_test_source_vcs=$source_vcs"
+    echo "linux_hosted_wm_live_window_self_test_source_provenance_status=$source_provenance_status"
+    echo "linux_hosted_wm_live_window_self_test_simple_bin_default=explicit-required"
+    echo "linux_hosted_wm_live_window_self_test_pending_glyph=calibration-required"
+    echo "linux_hosted_wm_live_window_self_test_calibration_glyph=calibration-only"
+    echo "linux_hosted_wm_live_window_self_test_native_source_manifest=stable"
+    echo "linux_hosted_wm_live_window_self_test_git_dirty_dependency=rejected"
+    exit 0
+fi
+
+if [ "$SIMPLE_BIN" = "" ]; then
+    emit unavailable explicit-simple-bin-required
+    exit 1
+fi
 
 for command in jq xdotool import convert sha256sum cargo Xvfb; do
     command -v "$command" >/dev/null 2>&1 || {
@@ -216,6 +348,12 @@ if [ ! -s "$WINT_LIB" ] || find src/runtime/spl_winit/src -type f -newer "$WINT_
     }
 fi
 
+write_native_source_manifest "$SOURCE_MANIFEST" || {
+    emit fail native-source-manifest-unavailable
+    exit 1
+}
+source_manifest_candidate_sha="$(sha256_file "$SOURCE_MANIFEST")"
+
 SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB=src timeout -k 10 "$BUILD_TIMEOUT_SECS" "$SIMPLE_BIN" native-build \
     --source "$ENTRY" --entry "$ENTRY" --entry-closure --strip \
     --backend cranelift --cache-dir "$BUILD_DIR/native-cache" --mode dynload \
@@ -223,6 +361,24 @@ SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB=src timeout -k 10 "$BUILD_TIMEOUT_SECS" "$S
         emit fail production-native-build-failed
         exit 1
     }
+write_native_source_manifest "$SOURCE_MANIFEST_AFTER" || {
+    rm -f "$HOSTED_BIN"
+    emit fail native-source-manifest-unavailable-after-build
+    exit 1
+}
+source_manifest_after_sha="$(sha256_file "$SOURCE_MANIFEST_AFTER")"
+if [ "$source_manifest_candidate_sha" != "$source_manifest_after_sha" ]; then
+    rm -f "$HOSTED_BIN"
+    emit fail native-source-manifest-changed-during-build
+    exit 1
+fi
+if [ "$(sha256_file "$SIMPLE_BIN")" != "$simple_bin_sha" ]; then
+    rm -f "$HOSTED_BIN"
+    emit fail simple-bin-changed-during-build
+    exit 1
+fi
+source_manifest_admitted_sha=$source_manifest_candidate_sha
+source_manifest_status=pass
 [ -x "$HOSTED_BIN" ] || {
     emit fail production-native-artifact-missing
     exit 1
@@ -412,16 +568,17 @@ convert "$CAPTURE_LIVE" -crop 60x18+122+82 +repage -depth 8 "rgb:$GLYPH_RGB"
 convert "$WINDOW_PNG" -crop 60x18+122+82 +repage -depth 8 "rgb:$WINDOW_GLYPH_RGB"
 glyph_sha="$(sha256_file "$GLYPH_RGB")"
 if cmp -s "$GLYPH_RGB" "$WINDOW_GLYPH_RGB"; then live_glyph_match=true; fi
-if [ "$GLYPH_RGB_SHA256" = pending ]; then
-    emit fail "glyph-oracle-pending-$glyph_sha"
+glyph_mode="$(glyph_oracle_mode "$GLYPH_RGB_SHA256" "$GLYPH_CALIBRATION")"
+if [ "$glyph_mode" = calibration-required ]; then
+    emit fail "glyph-oracle-pending-calibration-required-$glyph_sha"
     exit 1
 fi
-if [ "$glyph_sha" = "$GLYPH_RGB_SHA256" ] && [ "$live_glyph_match" = true ]; then
+if [ "$glyph_mode" = pinned ] && [ "$glyph_sha" = "$GLYPH_RGB_SHA256" ] && [ "$live_glyph_match" = true ]; then
     glyph_status=pass
 fi
 cp "$GLYPH_RGB" "$CALIBRATION_RGB"
 printf '\377' | dd of="$CALIBRATION_RGB" bs=1 seek=0 conv=notrunc 2>/dev/null
-if [ "$(sha256_file "$CALIBRATION_RGB")" != "$GLYPH_RGB_SHA256" ]; then
+if [ "$(sha256_file "$CALIBRATION_RGB")" != "$glyph_sha" ]; then
     calibration_status=pass
 fi
 
@@ -493,7 +650,8 @@ if [ "$(jq -cS '.compositor.windows' "$SNAPSHOT_LIVE")" = "$pre_max" ]; then
     restore_status=pass
 fi
 if [ "$initial_revision" -lt "$input_revision" ] \
-    && [ "$input_revision" -lt "$max_revision" ] \
+    && [ "$input_revision" -lt "$move_revision" ] \
+    && [ "$move_revision" -lt "$max_revision" ] \
     && [ "$max_revision" -lt "$restore_revision" ] \
     && [ "$baseline_frame_checksum" != "" ] \
     && [ "$input_frame_checksum" != "" ] \
@@ -513,13 +671,26 @@ if ! grep -Fq '[hosted-wm] draw-ir-rejected' "$LOG_PATH" && grep -Fq 'fallback=f
     fallback_status=pass
 fi
 
-if [ "$window_marker" = pass ] && [ "$frame_marker" = pass ] \
-    && [ "$framebuffer_status" = pass ] && [ "$window_status" = pass ] \
-    && [ "$glyph_status" = pass ] && [ "$calibration_status" = pass ] \
-    && [ "$focus_status" = pass ] && [ "$pointer_status" = pass ] \
-    && [ "$keyboard_status" = pass ] && [ "$move_status" = pass ] \
-    && [ "$maximize_status" = pass ] && [ "$restore_status" = pass ] \
-    && [ "$frame_status" = pass ] && [ "$fallback_status" = pass ]; then
+evidence_except_glyph_complete() {
+    [ "$window_marker" = pass ] && [ "$frame_marker" = pass ] \
+        && [ "$framebuffer_status" = pass ] && [ "$window_status" = pass ] \
+        && [ "$calibration_status" = pass ] \
+        && [ "$focus_status" = pass ] && [ "$pointer_status" = pass ] \
+        && [ "$keyboard_status" = pass ] && [ "$move_status" = pass ] \
+        && [ "$maximize_status" = pass ] && [ "$restore_status" = pass ] \
+        && [ "$frame_status" = pass ] && [ "$fallback_status" = pass ]
+}
+
+if [ "$glyph_mode" = calibration-only ]; then
+    if evidence_except_glyph_complete && [ "$live_glyph_match" = true ]; then
+        emit fail "glyph-oracle-calibration-only-$glyph_sha"
+    else
+        emit fail live-font-or-event-evidence-incomplete
+    fi
+    exit 1
+fi
+
+if [ "$glyph_status" = pass ] && evidence_except_glyph_complete; then
     emit pass linux-live-engine2d-pinned-font-and-events
     exit 0
 fi

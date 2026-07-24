@@ -61,6 +61,22 @@ The focused font/input scenario uses the shared steps:
 - Missing or stale kernel/disk artifacts, invalid scanout metadata, QMP errors,
   serial-only markers, missing guest correlations, blank captures, duplicate
   hashes, and crop-oracle mismatches remain failures.
+- A current-source kernel build uses the same unoptimized WM target profile as
+  the canonical QEMU runner, runs under a 900-second host watchdog, writes to a
+  candidate ELF, validates ELF64 little-endian identity and x86_64 machine
+  type, and only then atomically admits it. A
+  timeout removes the candidate while retaining `native-cache` for the next
+  bounded attempt. Reuse also requires the admission sidecar to match the
+  wrapper, pure-Simple compiler, build profile, full source-content revision,
+  and recomputed ELF SHA-256. The source revision is checked again before
+  promotion so concurrent edits cannot admit a mixed-source ELF. The default
+  image is then recorded as `built-from-admitted-kernel`. If an externally
+  validated kernel is used to build the default image, it is recorded instead
+  as `built-from-external-elf-validated`. External image overrides must have
+  the canonical SimpleOS FAT32 BPB/header and pass a host FAT checker before
+  being labeled `external-fat32-validated`. External kernel overrides receive
+  only ELF64 little-endian x86_64/hash validation and remain labeled
+  `external-elf-validated`; they are not claimed as current-source builds.
 - A closed QMP connection fails the capture; maximize, restore, press, and
   release markers must be strictly newer than their preceding guest `input_seq`,
   so replayed markers cannot satisfy the correlation.
@@ -88,11 +104,16 @@ Retained artifacts:
 - `build/simpleos_wm_fullscreen_evidence/native-build.out` (0 bytes)
 - `doc/09_report/simpleos_wm_fullscreen_evidence_2026-07-24.md`
 
+The bounded admission repair was not promoted to live QEMU evidence in the
+isolated x86 worktree: its only pure-Simple executable exited 139 before the
+focused contract ran. No Rust seed or external artifact was substituted.
+
 ## Status matrix
 
 | Row | Status | Required evidence |
 |---|---|---|
 | Pure-Simple launcher provenance | Source-covered | Fresh executable hash/version still required in live PASS |
+| ELF/image admission contract | Source-covered | Executable cases added; current pure-Simple test runner exits 139 |
 | Pinned guest font path/length/hash | Source-covered | Guest marker and device crop missing |
 | Dynamic QMP `pmemsave` crop | BLOCKED | QEMU did not launch |
 | F11 IRQ/state/frame correlation | BLOCKED | No guest execution |
@@ -100,7 +121,7 @@ Retained artifacts:
 | Pointer release ignored/same-focus match | BLOCKED | No guest execution |
 | One-byte corrupt-copy rejection | BLOCKED | No real crop to copy |
 
-Resume after the self-hosted native-build timeout/performance fault is fixed:
+Resume after a runnable current pure-Simple compiler is staged:
 
 ```sh
 sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs

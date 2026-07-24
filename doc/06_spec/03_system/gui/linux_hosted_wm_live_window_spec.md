@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 2 | 0 | 0 | 2 |
+| 3 | 0 | 0 | 3 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -42,8 +42,16 @@ Run the live gate first:
 ```bash
 BUILD_DIR=build/linux-hosted-wm-font-event-current \
 REPORT_PATH=build/linux-hosted-wm-font-event-current/report.md \
+SIMPLE_BIN=/path/to/current/pure-simple \
 sh scripts/check/check-linux-hosted-wm-live-window-evidence.shs
 ```
+
+`SIMPLE_BIN` is required explicitly so an unrelated stale `bin/release`
+artifact cannot become evidence. While the glyph oracle is `pending`, a
+reviewer may run once with `LINUX_HOSTED_WM_CALIBRATE_GLYPH=1` to retain the
+live crop and its reported hash. That calibration run always exits nonzero and
+reports `glyph-oracle-calibration-only-*`; only a separately reviewed pinned
+hash can admit a later live run.
 
 Then run this scenario with the pure-Simple self-hosted binary:
 
@@ -70,6 +78,10 @@ build/linux-hosted-wm-font-event-current/
 ├── window.png
 ├── framebuffer.live.ppm
 ├── terminal-title.rgb
+├── terminal-title.deliberate-red.rgb
+├── source.diff
+├── native-source-manifest.sha256
+├── native-source-manifest.after.sha256
 ├── snapshot.live.json
 └── native-build.log
 ```
@@ -79,6 +91,13 @@ offscreen or compatibility-renderer artifact. `framebuffer.live.ppm` is emitted
 from the exact production pixel buffer that is handed to winit. The raw
 `terminal-title.rgb` region must have the pinned checksum and must match the
 same region extracted independently from `window.png`.
+
+The admitted native-source manifest deterministically hashes every `.spl`
+source under `src/os` and `src/lib`, the complete source roots available to
+this entry-closure build. The wrapper captures it immediately before and after
+native-build, rejects any change, and records the admitted manifest identity
+and SHA-256. Git fallback additionally rejects tracked or untracked dirtiness
+anywhere in those dependency roots.
 
 The initial frame log must identify all production boundaries:
 
@@ -95,8 +114,8 @@ button input, and keyboard Tab must appear in the winit event log. The
 production evidence command channel then snapshots the resulting compositor
 state. Internal maximize and restore commands must update the focused window,
 restore the exact pre-maximize window array, and advance the render revision.
-The retained env records exact baseline/input/maximize/restore nonces
-`1/2/4/5`, plus each phase's revision and frame checksum; the live gate rejects
+The retained env records exact baseline/input/move/maximize/restore nonces
+`1/2/3/4/5`, plus each phase's revision and frame checksum; the live gate rejects
 missing values before reporting a pass.
 
 ## Absolute Glyph Oracle
@@ -133,8 +152,18 @@ to the X server from an event actually consumed by the hosted WM.
   evidence snapshot was not observed before the bounded deadline.
 - `selected-font-identity-missing` means the frame used bitmap default text or
   never selected the pinned vector face.
-- `glyph-oracle-pending-*` is the deliberate first-capture state used to pin a
-  reviewed current-path crop. It is never a pass.
+- `glyph-oracle-pending-calibration-required-*` requires the explicit
+  calibration opt-in before collecting a candidate.
+- `glyph-oracle-calibration-only-*` retained a deliberately requested live
+  candidate and completed the remaining checks. It is never a pass.
+- `source-provenance-unavailable` means neither jj nor Git could bind the
+  exact working-copy revision and source diff. It is never treated as clean.
+- `explicit-simple-bin-required` means the caller did not select the current
+  pure-Simple compiler explicitly.
+- `native-source-manifest-changed-during-build` means an entry-closure input
+  changed while native-build was running; the produced artifact is deleted.
+- `simple-bin-changed-during-build` means the selected compiler changed while
+  it was executing; the produced artifact is deleted.
 - `native-input-event-timeout` means X11 accepted the actions but the winit
   event stream did not report every required event.
 - `live-font-or-event-evidence-incomplete` means at least one explicit status
@@ -174,7 +203,7 @@ capture helper, and compatibility renderers are not accepted here.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 40 lines folded for reproduction.
+Runnable source: 73 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -205,6 +234,11 @@ step("Submit the boundary output to its canonical consumer")
 step("Prove native submission and device readback")
 val evidence = file_read(EVIDENCE_PATH)
 expect(evidence).to_contain("linux_hosted_wm_live_window_status=pass")
+expect(evidence).to_contain("linux_hosted_wm_live_window_source_provenance_status=pass")
+expect(evidence).to_contain("linux_hosted_wm_live_window_source_vcs=")
+expect(evidence).to_contain("linux_hosted_wm_live_window_native_source_manifest_status=pass")
+expect(evidence).to_contain("linux_hosted_wm_live_window_native_source_manifest_identity=native-build-entry-closure:")
+expect(evidence).to_contain("linux_hosted_wm_live_window_native_source_manifest_sha256=")
 expect(evidence).to_contain("linux_hosted_wm_live_window_frame_marker=pass")
 expect(evidence).to_contain("linux_hosted_wm_live_window_framebuffer_status=pass")
 expect(evidence).to_contain("linux_hosted_wm_live_window_live_window_status=pass")
@@ -214,14 +248,17 @@ expect(evidence).to_contain("linux_hosted_wm_live_window_deliberate_red_status=p
 expect(evidence).to_contain("linux_hosted_wm_live_window_compatibility_fallback_status=pass")
 expect(evidence).to_contain("linux_hosted_wm_live_window_baseline_nonce=1")
 expect(evidence).to_contain("linux_hosted_wm_live_window_input_nonce=2")
+expect(evidence).to_contain("linux_hosted_wm_live_window_move_nonce=3")
 expect(evidence).to_contain("linux_hosted_wm_live_window_maximize_nonce=4")
 expect(evidence).to_contain("linux_hosted_wm_live_window_restore_nonce=5")
 expect(evidence).to_contain("linux_hosted_wm_live_window_baseline_revision=")
 expect(evidence).to_contain("linux_hosted_wm_live_window_input_revision=")
+expect(evidence).to_contain("linux_hosted_wm_live_window_move_revision=")
 expect(evidence).to_contain("linux_hosted_wm_live_window_maximize_revision=")
 expect(evidence).to_contain("linux_hosted_wm_live_window_restore_revision=")
 expect(evidence).to_contain("linux_hosted_wm_live_window_baseline_frame_checksum=")
 expect(evidence).to_contain("linux_hosted_wm_live_window_input_frame_checksum=")
+expect(evidence).to_contain("linux_hosted_wm_live_window_move_frame_checksum=")
 expect(evidence).to_contain("linux_hosted_wm_live_window_maximize_frame_checksum=")
 expect(evidence).to_contain("linux_hosted_wm_live_window_restore_frame_checksum=")
 
@@ -232,6 +269,17 @@ expect(entry).to_contain("if command.valid and command.nonce > evidence_nonce:")
 expect(entry).to_contain("evidence_nonce = command.nonce")
 expect(wrapper).to_contain(".input.nonce == $issue_nonce")
 expect(wrapper).to_contain("evidence-ack nonce=$issue_nonce phase=$issue_phase")
+expect(wrapper).to_contain(".render.fallback_used == false")
+expect(wrapper).to_contain("grep -Fq '[hosted-wm] draw-ir-rejected'")
+expect(wrapper).to_contain("retain_phase baseline 1 snapshot-only")
+expect(wrapper).to_contain("retain_phase input 2 snapshot-only")
+expect(wrapper).to_contain("retain_phase move 3 snapshot-only")
+expect(wrapper).to_contain("retain_phase maximize 4 applied")
+expect(wrapper).to_contain("retain_phase restore 5 applied")
+expect(wrapper).to_contain("[ \"$initial_revision\" -lt \"$input_revision\" ]")
+expect(wrapper).to_contain("[ \"$input_revision\" -lt \"$move_revision\" ]")
+expect(wrapper).to_contain("[ \"$move_revision\" -lt \"$max_revision\" ]")
+expect(wrapper).to_contain("[ \"$max_revision\" -lt \"$restore_revision\" ]")
 ```
 
 </details>
@@ -279,15 +327,55 @@ expect(evidence).to_contain("linux_hosted_wm_live_window_snapshot=present")
 
 </details>
 
+#### fails closed before live execution when its source contract is not explicit
+
+- Run the wrapper source-contract self-test without a compiler default
+- Reject silent Git-only provenance and stale release defaults
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 23 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Run the wrapper source-contract self-test without a compiler default")
+val command = "env -u SIMPLE_BIN BUILD_DIR=build/linux-hosted-wm-live-window-self-test sh scripts/check/check-linux-hosted-wm-live-window-evidence.shs --self-test"
+val (stdout, stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+expect(stderr).to_equal("")
+expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_status=pass")
+expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_source_provenance_status=pass")
+expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_simple_bin_default=explicit-required")
+expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_pending_glyph=calibration-required")
+expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_calibration_glyph=calibration-only")
+expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_native_source_manifest=stable")
+expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_git_dirty_dependency=rejected")
+
+step("Reject silent Git-only provenance and stale release defaults")
+val wrapper = file_read("scripts/check/check-linux-hosted-wm-live-window-evidence.shs")
+expect(wrapper).to_contain("jj log -r @ --no-graph --no-pager")
+expect(wrapper).to_contain("jj diff --git -r @ -- src/os src/lib")
+expect(wrapper).to_contain("git_dependency_tree_clean || return 1")
+expect(wrapper).to_contain("write_native_source_manifest \"$SOURCE_MANIFEST\"")
+expect(wrapper).to_contain("write_native_source_manifest \"$SOURCE_MANIFEST_AFTER\"")
+expect(wrapper).to_contain("emit fail source-provenance-unavailable")
+expect(wrapper).to_contain("emit unavailable explicit-simple-bin-required")
+expect(wrapper).to_contain("emit fail \"glyph-oracle-calibration-only-$glyph_sha\"")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 2 |
+| Total scenarios | 3 |
 | Active scenarios | 0 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
-| Pending scenarios | 2 |
+| Pending scenarios | 3 |
 
 
 ## Related Documentation

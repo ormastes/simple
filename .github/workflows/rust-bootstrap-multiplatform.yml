@@ -201,25 +201,6 @@ jobs:
             cargo build --profile bootstrap -p simple-native-all --features driver-compat
           fi
 
-      - name: Run Rust-seed custom enum identity parity
-        if: matrix.backend == 'llvm'
-        shell: bash
-        run: |
-          seed="src/compiler_rust/target/bootstrap/simple"
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            seed="${seed}.exe"
-          fi
-          test -x "$seed"
-          SIMPLE_BINARY="$seed" \
-            NATIVE_PARITY_CASES=crossmodule_result_u8 \
-            NATIVE_PARITY_FAIL_ON_XFAIL=1 \
-            PARITY_WORK_DIR="build/check/rust-seed-enum-identity" \
-            sh scripts/check/check-native-seed-parity.shs
-
-      - name: Test
-        working-directory: src/compiler_rust
-        run: cargo test --workspace --lib
-
       - name: Build and sanity-check pure-Simple stages
         shell: bash
         env:
@@ -239,6 +220,53 @@ jobs:
             --mode=dynload \
             "$mcp_flag" \
             --jobs=2
+
+      - name: Stage hosted full-CLI providers
+        if: runner.os == 'Linux' && matrix.backend == 'llvm'
+        shell: bash
+        run: |
+          full_cli="$(find build/bootstrap/full -type f -name simple -print -quit)"
+          test -n "$full_cli"
+          cargo build --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-runtime
+          cargo build --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p spl_fonts
+          cargo build --manifest-path src/runtime/spl_winit/Cargo.toml --release
+          mkdir -p build/bootstrap/lib src/compiler_rust/target/bootstrap/deps
+          install -m755 src/compiler_rust/target/bootstrap/libsimple_runtime.so \
+            src/compiler_rust/target/bootstrap/deps/libsimple_runtime.so
+          install -m755 src/compiler_rust/target/bootstrap/libspl_fonts.so \
+            build/bootstrap/lib/libspl_fonts.so
+
+      - name: Upload hosted full CLI
+        if: runner.os == 'Linux' && matrix.backend == 'llvm'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootstrap-hosted-full-${{ github.sha }}
+          path: |
+            build/bootstrap/full/**/simple
+            build/bootstrap/lib/libspl_fonts.so
+            src/compiler_rust/target/bootstrap/deps/libsimple_runtime.so
+            src/runtime/spl_winit/target/release/libspl_winit.so
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Run Rust-seed custom enum identity parity
+        if: matrix.backend == 'llvm'
+        shell: bash
+        run: |
+          seed="src/compiler_rust/target/bootstrap/simple"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            seed="${seed}.exe"
+          fi
+          test -x "$seed"
+          SIMPLE_BINARY="$seed" \
+            NATIVE_PARITY_CASES=crossmodule_result_u8 \
+            NATIVE_PARITY_FAIL_ON_XFAIL=1 \
+            PARITY_WORK_DIR="build/check/rust-seed-enum-identity" \
+            sh scripts/check/check-native-seed-parity.shs
+
+      - name: Test
+        working-directory: src/compiler_rust
+        run: cargo test --workspace --lib
 
       - name: Validate hosted Stage4 dynload provider archive
         if: (runner.os == 'Linux' || runner.os == 'macOS' || runner.os == 'Windows') && matrix.backend == 'llvm'

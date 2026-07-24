@@ -89,6 +89,43 @@ describe "SimpleOS WM fullscreen evidence Simple binary contract":
         expect(script).to_contain("simpleos_wm_fullscreen_simple_bin_status=")
         expect(script.index_of("build/bootstrap/stage3/*/simple")).to_be_less_than(script.index_of("bin/release/*/simple"))
 
+    it "bounds current-source kernel admission and preserves the native cache":
+        val script = file_read("scripts/check/check-simpleos-wm-fullscreen-evidence.shs")
+        expect(script).to_contain("SIMPLEOS_WM_NATIVE_BUILD_TIMEOUT_SECONDS")
+        expect(script).to_contain("SIMPLEOS_WM_NATIVE_BUILD_WORKER_TIMEOUT_SECONDS")
+        expect(script).to_contain("\"$TIMEOUT_BIN\" --kill-after=10s")
+        expect(script).to_contain("\"$NATIVE_BUILD_WORKER_TIMEOUT_SECONDS\" -ge \"$NATIVE_BUILD_TIMEOUT_SECONDS\"")
+        expect(script).to_contain("--opt-level=none")
+        expect(script).to_contain("--cache-dir \"$BUILD_DIR/native-cache\"")
+        expect(script).to_contain("-o \"$KERNEL_CANDIDATE\"")
+        expect(script).to_contain("mv \"$KERNEL_CANDIDATE\" \"$KERNEL_OUTPUT\"")
+        expect(script).to_contain("schema=simpleos-wm-kernel-admission-v1")
+        expect(script).to_contain("source_revision_sha256=$KERNEL_SOURCE_REVISION")
+        expect(script).to_contain("source_revision_after")
+        expect(script).to_contain("wm-simple-web-build-source-changed")
+        expect(script).to_contain("simpleos_wm_fullscreen_kernel_admission_sha256=")
+        expect(script).to_contain("simpleos_wm_fullscreen_disk_image_provenance=")
+        expect(script).to_contain("disk_image_provenance=built-from-admitted-kernel")
+        expect(script).to_contain("disk_image_provenance=built-from-external-elf-validated")
+        expect(script).to_contain("invalid-elf64-little-endian")
+        expect(script).to_contain("invalid-elf-machine")
+        expect(script).to_contain("fsck.fat -n")
+        expect(script).to_contain("wm-simple-web-build-timeout")
+        expect(script).to_contain("wm-simple-web-build-invalid-elf")
+        expect(script.index_of("--opt-level=aggressive")).to_equal(-1)
+
+        val root = "build/test-simpleos-wm-fullscreen-build-timeout"
+        val command = "rm -rf " + root + " && mkdir -p " + root + "/bin " + root + "/out/native-cache && printf '%s\\n' '#!/bin/sh' 'if [ \"$1\" = \"--version\" ]; then echo \"Simple v1.0.0 pure-Simple\"; exit 0; fi' 'sleep 30' > " + root + "/fake-simple && printf '%s\\n' '#!/bin/sh' 'exit 99' > " + root + "/bin/qemu-system-x86_64 && chmod +x " + root + "/fake-simple " + root + "/bin/qemu-system-x86_64 && printf 'firmware\\n' > " + root + "/OVMF_CODE.fd && printf 'vars\\n' > " + root + "/OVMF_VARS.fd && printf 'keep\\n' > " + root + "/out/native-cache/sentinel && PATH=$PWD/" + root + "/bin:$PATH SIMPLE_BIN=$PWD/" + root + "/fake-simple OVMF_CODE=$PWD/" + root + "/OVMF_CODE.fd OVMF_VARS_SRC=$PWD/" + root + "/OVMF_VARS.fd GRUB_MKSTANDALONE=unused SIMPLEOS_WM_NATIVE_BUILD_TIMEOUT_SECONDS=2 SIMPLEOS_WM_NATIVE_BUILD_WORKER_TIMEOUT_SECONDS=1 BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs > " + root + "/stdout.txt 2> " + root + "/stderr.txt || true"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        val output = file_read(root + "/stdout.txt")
+        expect(output).to_contain("simpleos_wm_fullscreen_reason=wm-simple-web-build-timeout")
+        expect(output).to_contain("simpleos_wm_fullscreen_kernel_build_status=timeout-cache-preserved")
+        expect(output).to_contain("simpleos_wm_fullscreen_native_build_timeout_seconds=2")
+        val (_files_out, _files_err, files_code) = process_run("/bin/sh", ["-c", "test -f " + root + "/out/native-cache/sentinel && test ! -e " + root + "/out/simpleos_wm_production_desktop.elf && test ! -e " + root + "/out/simpleos_wm_production_desktop.elf.candidate && test ! -e " + root + "/out/qemu.out"])
+        expect(files_code).to_equal(0)
+
     it "uses dynamic scanout and three correlated QMP captures":
         val script = file_read("scripts/check/check-simpleos-wm-fullscreen-evidence.shs")
         expect(script).to_contain("[scanout-evidence]")
@@ -255,9 +292,46 @@ describe "SimpleOS WM fullscreen evidence Simple binary contract":
         val (_files_out, _files_err, files_code) = process_run("/bin/sh", ["-c", "test ! -f " + root + "/out/qemu.out && test ! -f " + root + "/out/capture.out"])
         expect(files_code).to_equal(0)
 
+    it "rejects invalid external kernel and disk overrides before QEMU":
+        val root = "build/test-simpleos-wm-fullscreen-invalid-external-artifacts"
+        val command = "rm -rf " + root + " && mkdir -p " + root + "/bin && printf '%s\\n' '#!/bin/sh' 'if [ \"$1\" = \"--version\" ]; then echo \"Simple v1.0.0 pure-Simple\"; exit 0; fi' 'exit 99' > " + root + "/fake-simple && printf '%s\\n' '#!/bin/sh' 'exit 99' > " + root + "/bin/qemu-system-x86_64 && chmod +x " + root + "/fake-simple " + root + "/bin/qemu-system-x86_64 && printf 'firmware\\n' > " + root + "/OVMF_CODE.fd && printf 'vars\\n' > " + root + "/OVMF_VARS.fd && printf '\\177ELF' > " + root + "/kernel.elf && PATH=$PWD/" + root + "/bin:$PATH SIMPLE_BIN=$PWD/" + root + "/fake-simple OVMF_CODE=$PWD/" + root + "/OVMF_CODE.fd OVMF_VARS_SRC=$PWD/" + root + "/OVMF_VARS.fd GRUB_MKSTANDALONE=unused SIMPLEOS_WM_KERNEL_ARTIFACT=" + root + "/kernel.elf SIMPLEOS_WM_DISK_IMAGE=" + root + "/missing.img BUILD_DIR=" + root + "/kernel-out REPORT_PATH=" + root + "/kernel-report.md sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs > " + root + "/kernel-stdout.txt 2> " + root + "/kernel-stderr.txt || true; { printf '\\177ELF\\002\\001'; dd if=/dev/zero bs=12 count=1 2>/dev/null; printf '\\076\\000'; } > " + root + "/kernel.elf; printf 'not-a-disk\\n' > " + root + "/disk.img; PATH=$PWD/" + root + "/bin:$PATH SIMPLE_BIN=$PWD/" + root + "/fake-simple OVMF_CODE=$PWD/" + root + "/OVMF_CODE.fd OVMF_VARS_SRC=$PWD/" + root + "/OVMF_VARS.fd GRUB_MKSTANDALONE=unused SIMPLEOS_WM_KERNEL_ARTIFACT=" + root + "/kernel.elf SIMPLEOS_WM_DISK_IMAGE=" + root + "/disk.img BUILD_DIR=" + root + "/disk-out REPORT_PATH=" + root + "/disk-report.md sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs > " + root + "/disk-stdout.txt 2> " + root + "/disk-stderr.txt || true"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        val kernel_output = file_read(root + "/kernel-stdout.txt")
+        expect(kernel_output).to_contain("simpleos_wm_fullscreen_reason=explicit-wm-kernel-artifact-invalid")
+        expect(kernel_output).to_contain("simpleos_wm_fullscreen_kernel_build_status=external-elf-invalid-elf64-little-endian")
+        val disk_output = file_read(root + "/disk-stdout.txt")
+        expect(disk_output).to_contain("simpleos_wm_fullscreen_reason=production-fat32-disk-invalid")
+        expect(disk_output).to_contain("simpleos_wm_fullscreen_disk_image_status=too-small")
+        expect(disk_output).to_contain("simpleos_wm_fullscreen_disk_image_provenance=external-unvalidated")
+        val (_files_out, _files_err, files_code) = process_run("/bin/sh", ["-c", "test ! -e " + root + "/kernel-out/qemu.out && test ! -e " + root + "/disk-out/qemu.out"])
+        expect(files_code).to_equal(0)
+
+    it "promotes one valid current-source ELF and rebuilds a mismatched admission":
+        val root = "build/test-simpleos-wm-fullscreen-current-source-promotion"
+        val command = "rm -rf " + root + " && mkdir -p " + root + "/bin && printf '%s\\n' '#!/bin/sh' 'if [ \"$1\" = \"--version\" ]; then echo \"Simple v1.0.0 pure-Simple\"; exit 0; fi' 'out=' 'while [ \"$#\" -gt 0 ]; do' 'if [ \"$1\" = \"-o\" ]; then shift; out=$1; fi' 'shift' 'done' 'printf x >> \"$FAKE_BUILD_COUNT\"' '{' 'printf \"\\177ELF\\002\\001\"' 'dd if=/dev/zero bs=12 count=1 2>/dev/null' 'printf \"\\076\\000\"' '} > \"$out\"' > " + root + "/fake-simple && printf '%s\\n' '#!/bin/sh' 'for arg do' 'case \"$arg\" in' '--output=*) output=${arg#--output=};;' 'esac' 'done' 'mkdir -p \"$(dirname \"$output\")\"' 'printf efi > \"$output\"' > " + root + "/bin/grub-mkstandalone && printf '%s\\n' '#!/bin/sh' 'for arg do' 'case \"$arg\" in' 'unix:*,server,nowait) socket=${arg#unix:}; socket=${socket%,server,nowait};;' 'esac' 'done' 'python3 -c \"import socket,sys;s=socket.socket(socket.AF_UNIX);s.bind(sys.argv[1]);s.close()\" \"$socket\"' > " + root + "/bin/qemu-system-x86_64 && chmod +x " + root + "/fake-simple " + root + "/bin/grub-mkstandalone " + root + "/bin/qemu-system-x86_64 && printf 'firmware\\n' > " + root + "/OVMF_CODE.fd && printf 'vars\\n' > " + root + "/OVMF_VARS.fd && PATH=$PWD/" + root + "/bin:$PATH FAKE_BUILD_COUNT=$PWD/" + root + "/build-count SIMPLE_BIN=$PWD/" + root + "/fake-simple OVMF_CODE=$PWD/" + root + "/OVMF_CODE.fd OVMF_VARS_SRC=$PWD/" + root + "/OVMF_VARS.fd GRUB_MKSTANDALONE=$PWD/" + root + "/bin/grub-mkstandalone BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report-1.md sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs > " + root + "/stdout-1.txt 2> " + root + "/stderr-1.txt || true; sed -i 's/profile=.*/profile=stale/' " + root + "/out/simpleos_wm_production_desktop.elf.admission; PATH=$PWD/" + root + "/bin:$PATH FAKE_BUILD_COUNT=$PWD/" + root + "/build-count SIMPLE_BIN=$PWD/" + root + "/fake-simple OVMF_CODE=$PWD/" + root + "/OVMF_CODE.fd OVMF_VARS_SRC=$PWD/" + root + "/OVMF_VARS.fd GRUB_MKSTANDALONE=$PWD/" + root + "/bin/grub-mkstandalone BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report-2.md sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs > " + root + "/stdout-2.txt 2> " + root + "/stderr-2.txt || true"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        val first = file_read(root + "/stdout-1.txt")
+        val second = file_read(root + "/stdout-2.txt")
+        expect(first).to_contain("simpleos_wm_fullscreen_kernel_build_status=current-source-built")
+        expect(first).to_contain("simpleos_wm_fullscreen_disk_image_provenance=built-from-admitted-kernel")
+        expect(second).to_contain("simpleos_wm_fullscreen_kernel_build_status=current-source-built")
+        expect(second).to_contain("simpleos_wm_fullscreen_disk_image_provenance=built-from-admitted-kernel")
+        expect(second).to_contain("simpleos_wm_fullscreen_reason=qemu-exited-early")
+        val admission = file_read(root + "/out/simpleos_wm_production_desktop.elf.admission")
+        expect(admission).to_contain("profile=cranelift|x86-64-v1|none|dynload")
+        expect(admission).to_contain("source_revision_sha256=")
+        val count = file_read(root + "/build-count")
+        expect(count).to_equal("xx")
+        val (_files_out, _files_err, files_code) = process_run("/bin/sh", ["-c", "test -s " + root + "/out/simpleos_wm_production_desktop.elf && test ! -e " + root + "/out/simpleos_wm_production_desktop.elf.candidate"])
+        expect(files_code).to_equal(0)
+
     it "reports actual external kernel and disk hashes without trusting caller digests":
         val root = "build/test-simpleos-wm-fullscreen-artifact-hashes"
-        val command = "rm -rf " + root + " && mkdir -p " + root + "/bin && printf '%s\\n' '#!/bin/sh' 'if [ \"$1\" = \"--version\" ]; then echo \"Simple v1.0.0 pure-Simple\"; exit 0; fi' 'exit 99' > " + root + "/fake-simple && printf '%s\\n' '#!/bin/sh' 'for arg do' 'case \"$arg\" in' 'unix:*,server,nowait) socket=${arg#unix:}; socket=${socket%,server,nowait};;' 'esac' 'done' 'python3 -c \"import socket,sys;s=socket.socket(socket.AF_UNIX);s.bind(sys.argv[1]);s.close()\" \"$socket\"' > " + root + "/bin/qemu-system-x86_64 && chmod +x " + root + "/fake-simple " + root + "/bin/qemu-system-x86_64 && printf 'kernel-fixture\\n' > " + root + "/kernel.elf && printf 'disk-fixture\\n' > " + root + "/disk.img && PATH=$PWD/" + root + "/bin:$PATH SIMPLE_BIN=$PWD/" + root + "/fake-simple SIMPLEOS_WM_KERNEL_ARTIFACT=" + root + "/kernel.elf SIMPLEOS_WM_DISK_IMAGE=" + root + "/disk.img SIMPLEOS_WM_KERNEL_SHA256=caller-kernel-digest SIMPLEOS_WM_DISK_IMAGE_SHA256=caller-disk-digest BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs > " + root + "/stdout.txt 2> " + root + "/stderr.txt || true"
+        val command = "rm -rf " + root + " && mkdir -p " + root + "/bin && printf '%s\\n' '#!/bin/sh' 'if [ \"$1\" = \"--version\" ]; then echo \"Simple v1.0.0 pure-Simple\"; exit 0; fi' 'exit 99' > " + root + "/fake-simple && printf '%s\\n' '#!/bin/sh' 'for arg do' 'case \"$arg\" in' 'unix:*,server,nowait) socket=${arg#unix:}; socket=${socket%,server,nowait};;' 'esac' 'done' 'python3 -c \"import socket,sys;s=socket.socket(socket.AF_UNIX);s.bind(sys.argv[1]);s.close()\" \"$socket\"' > " + root + "/bin/qemu-system-x86_64 && chmod +x " + root + "/fake-simple " + root + "/bin/qemu-system-x86_64 && { printf '\\177ELF\\002\\001'; dd if=/dev/zero bs=12 count=1 2>/dev/null; printf '\\076\\000'; } > " + root + "/kernel.elf && dd if=/dev/zero of=" + root + "/disk.img bs=1M count=64 2>/dev/null && mkfs.fat -F 32 -n SIMPLEOS " + root + "/disk.img >/dev/null 2>&1 && printf 'SIMPLEOS' | dd of=" + root + "/disk.img bs=1 seek=3 conv=notrunc 2>/dev/null && printf 'simpleos_wm_fullscreen_kernel_sha256=%s\\n' \"$(sha256sum " + root + "/kernel.elf | awk '{print $1}')\" > " + root + "/kernel-expected.txt && printf 'simpleos_wm_fullscreen_disk_image_sha256=%s\\n' \"$(sha256sum " + root + "/disk.img | awk '{print $1}')\" > " + root + "/disk-expected.txt && PATH=$PWD/" + root + "/bin:$PATH SIMPLE_BIN=$PWD/" + root + "/fake-simple SIMPLEOS_WM_KERNEL_ARTIFACT=" + root + "/kernel.elf SIMPLEOS_WM_DISK_IMAGE=" + root + "/disk.img SIMPLEOS_WM_KERNEL_SHA256=caller-kernel-digest SIMPLEOS_WM_DISK_IMAGE_SHA256=caller-disk-digest BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs > " + root + "/stdout.txt 2> " + root + "/stderr.txt || true"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
         expect(code).to_equal(0)
 
@@ -266,9 +340,11 @@ describe "SimpleOS WM fullscreen evidence Simple binary contract":
         expect(output).to_contain("simpleos_wm_fullscreen_wrapper=")
         expect(output).to_contain("simpleos_wm_fullscreen_wrapper_sha256=")
         expect(output).to_contain("simpleos_wm_fullscreen_kernel=" + root + "/kernel.elf")
-        expect(output).to_contain("simpleos_wm_fullscreen_kernel_sha256=19034b8326bddd75c6fd63c489ada9c7f6a8807312e1dd9318bc23c4898ad498")
+        expect(output).to_contain(file_read(root + "/kernel-expected.txt"))
+        expect(output).to_contain("simpleos_wm_fullscreen_kernel_build_status=external-elf-validated")
         expect(output).to_contain("simpleos_wm_fullscreen_disk_image=" + root + "/disk.img")
-        expect(output).to_contain("simpleos_wm_fullscreen_disk_image_sha256=9cb90d8552da342ff12e0ef99273d75c95089049824fda79a4dfb18d7cd7d411")
+        expect(output).to_contain("simpleos_wm_fullscreen_disk_image_provenance=external-fat32-validated")
+        expect(output).to_contain(file_read(root + "/disk-expected.txt"))
         expect(output.index_of("caller-kernel-digest")).to_equal(-1)
         expect(output.index_of("caller-disk-digest")).to_equal(-1)
         val (_capture_out, _capture_err, capture_code) = process_run("/bin/sh", ["-c", "test ! -f " + root + "/out/capture.out"])

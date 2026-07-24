@@ -15,6 +15,11 @@ SIMPLE_BIN_VERSION=""
 SIMPLE_BIN_SHA256=""
 KERNEL_OUTPUT=""
 KERNEL_SHA256=""
+KERNEL_ADMISSION=""
+KERNEL_BUILD_STATUS=unchecked
+KERNEL_SOURCE_REVISION=""
+NATIVE_BUILD_TIMEOUT_SECONDS="${SIMPLEOS_WM_NATIVE_BUILD_TIMEOUT_SECONDS:-900}"
+NATIVE_BUILD_WORKER_TIMEOUT_SECONDS="${SIMPLEOS_WM_NATIVE_BUILD_WORKER_TIMEOUT_SECONDS:-870}"
 LAUNCH_OUT="$BUILD_DIR/qemu.out"
 SERIAL_LOG="$BUILD_DIR/serial.log"
 QMP_SOCKET="$BUILD_DIR/qmp.sock"
@@ -45,6 +50,7 @@ FONT_ASSET_SHA256=""
 DISK_IMAGE=""
 DISK_IMAGE_SHA256=""
 disk_image_status=not-staged
+disk_image_provenance=not-staged
 QEMU_PID=""
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
@@ -136,6 +142,36 @@ is_sha256() {
     esac
 }
 
+kernel_source_revision() {
+    for source_root in src/os src/lib build/os/generated examples/09_embedded/simple_os/arch/x86_64; do
+        if [ ! -d "$source_root" ]; then
+            echo ""
+            return
+        fi
+    done
+    manifest="$(mktemp "$BUILD_DIR/kernel-source-manifest.XXXXXX")" || {
+        echo ""
+        return
+    }
+    find src/os src/lib build/os/generated examples/09_embedded/simple_os/arch/x86_64 \
+        -type f \( -name '*.spl' -o -name '*.c' -o -name '*.h' -o -name '*.s' -o -name '*.S' -o -name '*.ld' \) \
+        -print | LC_ALL=C sort | while IFS= read -r source_path; do
+            source_sha256="$(file_sha256 "$source_path")"
+            if is_sha256 "$source_sha256"; then
+                printf '%s  %s\n' "$source_sha256" "$source_path"
+            else
+                printf 'invalid  %s\n' "$source_path"
+            fi
+        done >"$manifest"
+    if grep -q '^invalid  ' "$manifest"; then
+        revision=""
+    else
+        revision="$(file_sha256 "$manifest")"
+    fi
+    rm -f "$manifest"
+    echo "$revision"
+}
+
 regular_file_status() {
     path="$1"
     if [ -z "$path" ]; then
@@ -148,6 +184,66 @@ regular_file_status() {
         echo "empty"
     else
         echo "pass"
+    fi
+}
+
+elf_file_status() {
+    file_status="$(regular_file_status "$1")"
+    if [ "$file_status" != pass ]; then
+        echo "$file_status"
+        return
+    fi
+    if [ "$(od -An -tx1 -N4 "$1" 2>/dev/null | tr -d ' \n')" != "7f454c46" ]; then
+        echo "invalid-elf-magic"
+        return
+    fi
+    set -- $(od -An -tu1 -j4 -N2 "$1" 2>/dev/null)
+    if [ "$#" -ne 2 ] || [ "$1" -ne 2 ] || [ "$2" -ne 1 ]; then
+        echo "invalid-elf64-little-endian"
+        return
+    fi
+    set -- $(od -An -tu1 -j18 -N2 "$1" 2>/dev/null)
+    if [ "$#" -ne 2 ] || [ "$(( $1 + 256 * $2 ))" -ne 62 ]; then
+        echo "invalid-elf-machine"
+        return
+    fi
+    echo pass
+}
+
+fat32_image_status() {
+    file_status="$(regular_file_status "$1")"
+    if [ "$file_status" != pass ]; then
+        echo "$file_status"
+    elif [ "$(file_byte_count "$1")" -lt 1048576 ]; then
+        echo "too-small"
+    elif [ "$(od -An -tx1 -N3 "$1" 2>/dev/null | tr -d ' \n')" != "eb5890" ]; then
+        echo "invalid-fat32-jump"
+    elif [ "$(dd if="$1" bs=1 skip=3 count=8 2>/dev/null)" != "SIMPLEOS" ]; then
+        echo "invalid-simpleos-oem"
+    elif [ "$(od -An -tx1 -j11 -N2 "$1" 2>/dev/null | tr -d ' \n')" != "0002" ]; then
+        echo "invalid-sector-size"
+    elif [ "$(od -An -tx1 -j510 -N2 "$1" 2>/dev/null | tr -d ' \n')" != "55aa" ]; then
+        echo "invalid-boot-signature"
+    elif command -v fsck.fat >/dev/null 2>&1; then
+        if fsck.fat -n "$1" >/dev/null 2>&1; then
+            echo pass
+        else
+            echo "invalid-fat32-structure"
+        fi
+    elif command -v dosfsck >/dev/null 2>&1; then
+        if dosfsck -n "$1" >/dev/null 2>&1; then
+            echo pass
+        else
+            echo "invalid-fat32-structure"
+        fi
+    elif command -v fsck_msdos >/dev/null 2>&1; then
+        if fsck_msdos -n "$1" >/dev/null 2>&1; then
+            echo pass
+        else
+            echo "invalid-fat32-structure"
+        fi
+    else
+        echo "fat32-checker-unavailable"
     fi
 }
 
@@ -196,8 +292,14 @@ emit_failure() {
         echo "simpleos_wm_fullscreen_serial_log_bytes=$(file_byte_count "$SERIAL_LOG")"
         echo "simpleos_wm_fullscreen_kernel=$KERNEL_OUTPUT"
         echo "simpleos_wm_fullscreen_kernel_sha256=$KERNEL_SHA256"
+        echo "simpleos_wm_fullscreen_kernel_admission=$KERNEL_ADMISSION"
+        echo "simpleos_wm_fullscreen_kernel_admission_sha256=$(file_sha256 "$KERNEL_ADMISSION")"
+        echo "simpleos_wm_fullscreen_kernel_source_revision_sha256=$KERNEL_SOURCE_REVISION"
+        echo "simpleos_wm_fullscreen_kernel_build_status=$KERNEL_BUILD_STATUS"
+        echo "simpleos_wm_fullscreen_native_build_timeout_seconds=$NATIVE_BUILD_TIMEOUT_SECONDS"
         echo "simpleos_wm_fullscreen_disk_image=$DISK_IMAGE"
         echo "simpleos_wm_fullscreen_disk_image_status=$disk_image_status"
+        echo "simpleos_wm_fullscreen_disk_image_provenance=$disk_image_provenance"
         echo "simpleos_wm_fullscreen_disk_image_sha256=$DISK_IMAGE_SHA256"
         echo "simpleos_wm_fullscreen_font_asset=$FONT_ASSET"
         echo "simpleos_wm_fullscreen_font_asset_bytes=$FONT_ASSET_BYTES"
@@ -219,7 +321,8 @@ emit_failure() {
         echo "- simple bin version: $SIMPLE_BIN_VERSION"
         echo "- simple bin sha256: $SIMPLE_BIN_SHA256"
         echo "- kernel: $KERNEL_OUTPUT (sha256=$KERNEL_SHA256)"
-        echo "- disk image: $DISK_IMAGE ($disk_image_status, sha256=$DISK_IMAGE_SHA256)"
+        echo "- kernel build: $KERNEL_BUILD_STATUS (wall timeout=${NATIVE_BUILD_TIMEOUT_SECONDS}s)"
+        echo "- disk image: $DISK_IMAGE ($disk_image_status, provenance=$disk_image_provenance, sha256=$DISK_IMAGE_SHA256)"
     } >"$REPORT_PATH"
     cat "$BUILD_DIR/evidence.env"
 }
@@ -312,9 +415,27 @@ if [ ! -f "$OVMF_VARS_SRC" ]; then
     exit 1
 fi
 
+case "$NATIVE_BUILD_TIMEOUT_SECONDS:$NATIVE_BUILD_WORKER_TIMEOUT_SECONDS" in
+    *[!0-9:]*|0:*|*:0)
+        emit_failure "native-build-timeout-invalid"
+        exit 1
+        ;;
+esac
+if [ "${#NATIVE_BUILD_TIMEOUT_SECONDS}" -gt 9 ] || \
+   [ "${#NATIVE_BUILD_WORKER_TIMEOUT_SECONDS}" -gt 9 ] || \
+   [ "$NATIVE_BUILD_WORKER_TIMEOUT_SECONDS" -ge "$NATIVE_BUILD_TIMEOUT_SECONDS" ]; then
+    emit_failure "native-build-timeout-invalid"
+    exit 1
+fi
+
 ENTRY="examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl"
 LINKER_SCRIPT="examples/09_embedded/simple_os/arch/x86_64/linker.ld"
 KERNEL_OUTPUT="${SIMPLEOS_WM_KERNEL_ARTIFACT:-$BUILD_DIR/simpleos_wm_production_desktop.elf}"
+KERNEL_CANDIDATE="$KERNEL_OUTPUT.candidate"
+KERNEL_ADMISSION="$KERNEL_OUTPUT.admission"
+if [ -z "${SIMPLEOS_WM_KERNEL_ARTIFACT:-}" ] && [ -f "$KERNEL_OUTPUT" ]; then
+    KERNEL_SOURCE_REVISION="$(kernel_source_revision)"
+fi
 
 if [ ! -f "$ENTRY" ]; then
     emit_failure "wm-simple-web-source-missing"
@@ -325,18 +446,35 @@ fi
 # wm-simple-web check target) unless a fresh artifact already exists.
 kernel_stale=false
 if [ -n "${SIMPLEOS_WM_KERNEL_ARTIFACT:-}" ]; then
-    if [ ! -f "$KERNEL_OUTPUT" ] || [ ! -s "$KERNEL_OUTPUT" ]; then
-        emit_failure "explicit-wm-kernel-artifact-missing"
+    explicit_kernel_status="$(elf_file_status "$KERNEL_OUTPUT")"
+    if [ "$explicit_kernel_status" != pass ]; then
+        KERNEL_BUILD_STATUS="external-elf-$explicit_kernel_status"
+        emit_failure "explicit-wm-kernel-artifact-invalid"
         exit 1
     fi
+    KERNEL_ADMISSION=""
+    KERNEL_BUILD_STATUS=external-elf-validated
 elif [ ! -f "$KERNEL_OUTPUT" ]; then
     kernel_stale=true
-elif find src/os src/lib build/os/generated examples/09_embedded/simple_os/arch/x86_64 \
-    -type f \( -name '*.spl' -o -name '*.c' -o -name '*.h' -o -name '*.s' -o -name '*.S' -o -name '*.ld' \) \
-    -newer "$KERNEL_OUTPUT" -print -quit | grep -q .; then
+elif ! is_sha256 "$KERNEL_SOURCE_REVISION" || \
+     [ ! -f "$KERNEL_ADMISSION" ] || \
+     ! grep -Fxq "wrapper_sha256=$WRAPPER_SHA256" "$KERNEL_ADMISSION" || \
+     ! grep -Fxq "simple_bin_sha256=$SIMPLE_BIN_SHA256" "$KERNEL_ADMISSION" || \
+     ! grep -Fxq "profile=cranelift|x86-64-v1|none|dynload" "$KERNEL_ADMISSION" || \
+     ! grep -Fxq "source_revision_sha256=$KERNEL_SOURCE_REVISION" "$KERNEL_ADMISSION" || \
+     ! grep -Fxq "kernel_sha256=$(file_sha256 "$KERNEL_OUTPUT")" "$KERNEL_ADMISSION"; then
     kernel_stale=true
 fi
 if [ "$kernel_stale" = true ]; then
+    TIMEOUT_BIN=""
+    if command -v timeout >/dev/null 2>&1; then
+        TIMEOUT_BIN=timeout
+    elif command -v gtimeout >/dev/null 2>&1; then
+        TIMEOUT_BIN=gtimeout
+    else
+        emit_failure "native-build-watchdog-not-found"
+        exit 1
+    fi
     mkdir -p build/os/generated/generated
     cat >build/os/generated/generated/simpleos_log_config.spl <<'SPL'
 val SIMPLEOS_LOG_COMPILED: bool = false
@@ -349,6 +487,12 @@ fn simpleos_log_compile_mode_name() -> text:
         return "on"
     "off"
 SPL
+    KERNEL_SOURCE_REVISION="$(kernel_source_revision)"
+    if ! is_sha256 "$KERNEL_SOURCE_REVISION"; then
+        KERNEL_BUILD_STATUS=source-revision-unavailable
+        emit_failure "wm-simple-web-source-revision-unavailable"
+        exit 1
+    fi
     # gui_entry_desktop.spl is the production baremetal desktop target
     # (os.qemu_runner._needs_freestanding_stub_env /
     # _uses_baremetal_wrapper_profile): it needs freestanding stub linking
@@ -360,25 +504,67 @@ SPL
             break
         fi
     done
+    rm -f "$KERNEL_CANDIDATE"
     set +e
     SIMPLE_BOOTSTRAP=1 SIMPLE_LIB="$ROOT_DIR/src" SIMPLE_OS_LOG_MODE=off \
     SIMPLE_ALLOW_FREESTANDING_STUBS=1 \
     PATH="${OBJCOPY_PREFIX:+$OBJCOPY_PREFIX:}$PATH" \
+        "$TIMEOUT_BIN" --kill-after=10s "${NATIVE_BUILD_TIMEOUT_SECONDS}s" \
         "$SIMPLE_BIN" native-build \
         --source build/os/generated --source "$ENTRY" \
-        --timeout 300 \
-        --backend cranelift --cpu x86-64-v1 --opt-level=aggressive --log off \
+        --timeout "$NATIVE_BUILD_WORKER_TIMEOUT_SECONDS" \
+        --backend cranelift --cpu x86-64-v1 --opt-level=none --log off \
         --cache-dir "$BUILD_DIR/native-cache" --mode dynload \
         --entry-closure --entry "$ENTRY" \
-        --target x86_64-unknown-none -o "$KERNEL_OUTPUT" \
+        --target x86_64-unknown-none -o "$KERNEL_CANDIDATE" \
         --linker-script "$LINKER_SCRIPT" \
         >"$BUILD_DIR/native-build.out" 2>&1
     build_code=$?
     set -e
-    if [ "$build_code" -ne 0 ] || [ ! -f "$KERNEL_OUTPUT" ]; then
+    if [ "$build_code" -eq 124 ] || [ "$build_code" -eq 137 ]; then
+        rm -f "$KERNEL_CANDIDATE"
+        KERNEL_BUILD_STATUS=timeout-cache-preserved
+        emit_failure "wm-simple-web-build-timeout"
+        exit 1
+    elif [ "$build_code" -ne 0 ] || [ ! -s "$KERNEL_CANDIDATE" ]; then
+        rm -f "$KERNEL_CANDIDATE"
+        KERNEL_BUILD_STATUS=failed-cache-preserved
         emit_failure "wm-simple-web-build-failed"
         exit 1
+    elif [ "$(elf_file_status "$KERNEL_CANDIDATE")" != pass ]; then
+        rm -f "$KERNEL_CANDIDATE"
+        KERNEL_BUILD_STATUS=invalid-elf-cache-preserved
+        emit_failure "wm-simple-web-build-invalid-elf"
+        exit 1
     fi
+    candidate_sha256="$(file_sha256 "$KERNEL_CANDIDATE")"
+    if ! is_sha256 "$candidate_sha256"; then
+        rm -f "$KERNEL_CANDIDATE"
+        KERNEL_BUILD_STATUS=invalid-hash-cache-preserved
+        emit_failure "artifact-sha256-invalid"
+        exit 1
+    fi
+    source_revision_after="$(kernel_source_revision)"
+    if [ "$source_revision_after" != "$KERNEL_SOURCE_REVISION" ]; then
+        rm -f "$KERNEL_CANDIDATE"
+        KERNEL_BUILD_STATUS=source-changed-cache-preserved
+        emit_failure "wm-simple-web-build-source-changed"
+        exit 1
+    fi
+    mv "$KERNEL_CANDIDATE" "$KERNEL_OUTPUT"
+    KERNEL_SHA256="$candidate_sha256"
+    {
+        echo "schema=simpleos-wm-kernel-admission-v1"
+        echo "wrapper_sha256=$WRAPPER_SHA256"
+        echo "simple_bin_sha256=$SIMPLE_BIN_SHA256"
+        echo "profile=cranelift|x86-64-v1|none|dynload"
+        echo "source_revision_sha256=$KERNEL_SOURCE_REVISION"
+        echo "kernel_sha256=$KERNEL_SHA256"
+    } >"$KERNEL_ADMISSION.candidate"
+    mv "$KERNEL_ADMISSION.candidate" "$KERNEL_ADMISSION"
+    KERNEL_BUILD_STATUS=current-source-built
+elif [ -z "${SIMPLEOS_WM_KERNEL_ARTIFACT:-}" ]; then
+    KERNEL_BUILD_STATUS=current-source-cache
 fi
 
 KERNEL_SHA256="$(file_sha256 "$KERNEL_OUTPUT")"
@@ -390,6 +576,9 @@ fi
 rm -f "$QMP_SOCKET" "$SERIAL_LOG"
 
 DISK_IMAGE="${SIMPLEOS_WM_DISK_IMAGE:-$BUILD_DIR/fat32-x86_64-font.img}"
+if [ -n "${SIMPLEOS_WM_DISK_IMAGE:-}" ]; then
+    disk_image_provenance=external-unvalidated
+fi
 if [ -z "${SIMPLEOS_WM_DISK_IMAGE:-}" ]; then
     set +e
     SIMPLEOS_FONT_ASSET="$FONT_ASSET" scripts/os/make_os_disk.shs \
@@ -402,11 +591,29 @@ if [ -z "${SIMPLEOS_WM_DISK_IMAGE:-}" ]; then
         emit_failure "pinned-font-disk-staging-failed"
         exit 1
     fi
+    case "$KERNEL_BUILD_STATUS" in
+        current-source-built|current-source-cache)
+            disk_image_provenance=built-from-admitted-kernel
+            ;;
+        external-elf-validated)
+            disk_image_provenance=built-from-external-elf-validated
+            ;;
+        *)
+            disk_image_provenance=kernel-not-admitted
+            emit_failure "default-disk-kernel-not-admitted"
+            exit 1
+            ;;
+    esac
 fi
-disk_image_status="$(regular_file_status "$DISK_IMAGE")"
-if [ "$disk_image_status" != pass ]; then
-    emit_failure "production-fat32-disk-missing"
+disk_file_status="$(fat32_image_status "$DISK_IMAGE")"
+if [ "$disk_file_status" != pass ]; then
+    disk_image_status="$disk_file_status"
+    emit_failure "production-fat32-disk-invalid"
     exit 1
+fi
+disk_image_status=pass
+if [ -n "${SIMPLEOS_WM_DISK_IMAGE:-}" ]; then
+    disk_image_provenance=external-fat32-validated
 fi
 DISK_IMAGE_SHA256="$(file_sha256 "$DISK_IMAGE")"
 if ! is_sha256 "$DISK_IMAGE_SHA256"; then
@@ -929,8 +1136,14 @@ fi
     echo "simpleos_wm_fullscreen_capture_out=$CAPTURE_OUT"
     echo "simpleos_wm_fullscreen_kernel=$KERNEL_OUTPUT"
     echo "simpleos_wm_fullscreen_kernel_sha256=$KERNEL_SHA256"
+    echo "simpleos_wm_fullscreen_kernel_admission=$KERNEL_ADMISSION"
+    echo "simpleos_wm_fullscreen_kernel_admission_sha256=$(file_sha256 "$KERNEL_ADMISSION")"
+    echo "simpleos_wm_fullscreen_kernel_source_revision_sha256=$KERNEL_SOURCE_REVISION"
+    echo "simpleos_wm_fullscreen_kernel_build_status=$KERNEL_BUILD_STATUS"
+    echo "simpleos_wm_fullscreen_native_build_timeout_seconds=$NATIVE_BUILD_TIMEOUT_SECONDS"
     echo "simpleos_wm_fullscreen_disk_image=$DISK_IMAGE"
     echo "simpleos_wm_fullscreen_disk_image_status=$disk_image_status"
+    echo "simpleos_wm_fullscreen_disk_image_provenance=$disk_image_provenance"
     echo "simpleos_wm_fullscreen_disk_image_sha256=$DISK_IMAGE_SHA256"
     echo "simpleos_wm_fullscreen_font_asset=$FONT_ASSET"
     echo "simpleos_wm_fullscreen_font_guest_path=$FONT_GUEST_PATH"
@@ -1007,7 +1220,8 @@ fi
     echo "- simple bin sha256: $SIMPLE_BIN_SHA256"
     echo "- qmp socket: $QMP_SOCKET"
     echo "- kernel: $KERNEL_OUTPUT (sha256=$KERNEL_SHA256)"
-    echo "- disk image: $DISK_IMAGE ($disk_image_status, sha256=$DISK_IMAGE_SHA256)"
+    echo "- kernel build: $KERNEL_BUILD_STATUS (wall timeout=${NATIVE_BUILD_TIMEOUT_SECONDS}s)"
+    echo "- disk image: $DISK_IMAGE ($disk_image_status, provenance=$disk_image_provenance, sha256=$DISK_IMAGE_SHA256)"
     echo "- pinned font asset: host=$FONT_ASSET guest=$FONT_GUEST_PATH ($FONT_ASSET_BYTES bytes, sha256=$FONT_ASSET_SHA256)"
     echo "- guest font marker: ${font_marker:--}"
     echo "- font region: $FONT_REGION_RGB (${font_region_bytes:-0} bytes, sha256=${font_region_sha256:--}, origin=qemu-pmemsave)"
