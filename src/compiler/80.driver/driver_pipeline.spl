@@ -32,6 +32,7 @@ use compiler.driver.driver.{CompilerDriver}
 use compiler.driver.driver_log_helpers.{log_debug, log_warn, log_phase}
 use compiler.driver.driver_source_loading.{_format_nll_error, _driver_is_bootstrap_entry_source}
 use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use std.alloc.sffi.{rt_dict_contains}
 
 extern fn rt_env_get(key: text) -> text
 
@@ -283,6 +284,10 @@ impl CompilerDriver:
         val log = self.ctx.logger
         log_debug("optimizing MIR modules")
         val backend_name = self.ctx.options.backend
+        # ponytail: stage4 whole-MirModule returns erase late MirFunction
+        # metadata; remove this bypass when that ABI copy bug is fixed.
+        if backend_name == "vhdl":
+            return
 
         for name in self.ctx.mir_modules.keys():
             val mir_module = self.ctx.mir_modules[name]
@@ -476,7 +481,7 @@ impl CompilerDriver:
             while direct_idx < self.ctx.sources.len():
                 val src_direct = self.ctx.sources[direct_idx]
                 val name_direct = src_direct.module_name
-                val mir_direct = if native_entry_closure_mir or _driver_is_bootstrap_entry_source(src_direct.path, name_direct) or (rt_env_get("SIMPLE_UNSTUB_HIR") ?? "") == "1":
+                var mir_direct = if native_entry_closure_mir or _driver_is_bootstrap_entry_source(src_direct.path, name_direct) or (rt_env_get("SIMPLE_UNSTUB_HIR") ?? "") == "1":
                     log_phase("aot:lower_to_mir:module:start idx={direct_idx} module={name_direct} path={src_direct.path}")
                     val direct_hir = self.ctx.hir_modules[name_direct]
                     if direct_hir == nil:
@@ -496,6 +501,17 @@ impl CompilerDriver:
                         constants: {},
                         types: {}
                     )
+                if val metadata_hir = self.ctx.hir_modules[name_direct]:
+                    var stored_functions = mir_direct.functions
+                    for stored_symbol in stored_functions.keys():
+                        if rt_dict_contains(metadata_hir.functions, stored_symbol):
+                            val hir_fn = metadata_hir.functions[stored_symbol]
+                            if hir_fn.has_vhdl_metadata:
+                                var stored_fn = stored_functions[stored_symbol]
+                                stored_fn.has_vhdl_metadata = true
+                                stored_fn.vhdl_metadata = hir_fn.vhdl_metadata
+                                stored_functions[stored_symbol] = stored_fn
+                    mir_direct.functions = stored_functions
                 self.ctx.mir_modules[name_direct] = mir_direct
                 if name_direct == "app.cli.bootstrap_main":
                     self.ctx.bootstrap_entry_mir = Some(mir_direct)

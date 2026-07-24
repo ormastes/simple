@@ -494,18 +494,24 @@ impl MirLowering:
         self.struct_method_return_names = {}
         self.struct_method_return_is_array = {}
         val bootstrap_mode = (mir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
-        val bootstrap_trace = bootstrap_mode and mir_lower_trace_enabled()
+        val trace_enabled = mir_lower_trace_enabled()
+        val bootstrap_trace = bootstrap_mode and trace_enabled
         if bootstrap_trace:
             print "[mir-lower] lower_module:start module={module.name} functions={module.functions.len()}"
         # Copy-modify-reassign: nested field mutations don't propagate in interpreter
         var builder = self.builder
         if bootstrap_trace:
             print "[mir-lower] builder"
-        var builder_module = builder.module
+        val output_name = if bootstrap_mode: builder.module.name else: module.name
+        var builder_module = MirModule(
+            name: output_name,
+            functions: {},
+            statics: {},
+            constants: {},
+            types: {}
+        )
         if bootstrap_trace:
             print "[mir-lower] builder-module"
-        if not bootstrap_mode:
-            builder_module.name = module.name
         # Bug (entry-MIR duplication for __init__ re-export shims,
         # native_build_entry_mir_duplication_2026-07-13): callers that lower
         # several HIR modules in a loop on ONE shared MirLowering instance
@@ -525,10 +531,6 @@ impl MirLowering:
         # regardless of what a shared builder carried over from a prior
         # call. Single-shot callers (a fresh MirLowering per call) are
         # unaffected since these dicts already start empty for them.
-        builder_module.functions = {}
-        builder_module.statics = {}
-        builder_module.constants = {}
-        builder_module.types = {}
         if bootstrap_trace:
             print "[mir-lower] builder-name"
         builder.module = builder_module
@@ -584,7 +586,10 @@ impl MirLowering:
                 if not self.hir_function_is_extern(fn_):
                     if bootstrap_trace:
                         print "[mir-lower] function:start {fn_.name}"
-                    val mir_fn = self.lower_function(fn_)
+                    var mir_fn = self.lower_function(fn_)
+                    if fn_.has_vhdl_metadata:
+                        mir_fn.has_vhdl_metadata = true
+                        mir_fn.vhdl_metadata = fn_.vhdl_metadata
                     bootstrap_mir_functions_add(fn_.name, mir_fn, 0)
                     var bldr = self.builder
                     var bldr_module = bldr.module
@@ -830,13 +835,20 @@ impl MirLowering:
             else:
                 if bootstrap_trace:
                     print "[mir-lower] function:start"
-                val mir_fn = self.lower_function(fn_)
+                var mir_fn = self.lower_function(fn_)
+                if fn_.has_vhdl_metadata:
+                    mir_fn.has_vhdl_metadata = true
+                    mir_fn.vhdl_metadata = fn_.vhdl_metadata
+                    if trace_enabled:
+                        print "[mir-vhdl-store] before name={fn_.name} hardware={mir_fn.has_vhdl_metadata}"
                 # Copy-modify-reassign: nested field mutations don't propagate in the
                 # bootstrap interpreter, so update builder.module.functions explicitly.
                 var bldr = self.builder
                 var bldr_module = bldr.module
                 var functions = bldr_module.functions
                 functions[mir_fn.symbol] = mir_fn
+                if fn_.has_vhdl_metadata and trace_enabled:
+                    print "[mir-vhdl-store] after name={fn_.name} hardware={functions[mir_fn.symbol].has_vhdl_metadata}"
                 bldr_module.functions = functions
                 bldr.module = bldr_module
                 self.builder = bldr

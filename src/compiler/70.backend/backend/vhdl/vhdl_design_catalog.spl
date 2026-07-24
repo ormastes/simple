@@ -3,6 +3,7 @@
 use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction}
 use compiler.hir.hir_types.{HirModule, SymbolKind}
+use compiler.common.attributes.{VhdlHardwareMetadata, vhdl_hardware_metadata_default}
 use std.alloc.sffi.{rt_dict_contains}
 use .vhdl_helpers.{vhdl_sanitize_identifier, vhdl_function_is_hardware_entity}
 
@@ -14,6 +15,11 @@ struct VhdlCatalogFunctionSource:
     name: text
     source_module: text
     is_hardware_entity: bool
+
+struct VhdlCatalogHardwareMetadataRow:
+    module_name: text
+    function_name: text
+    metadata: VhdlHardwareMetadata
 
 struct VhdlCatalogSourceRow:
     module_name: text
@@ -194,7 +200,7 @@ fn vhdl_catalog_function(func: MirFunction, rebase: Dict<i64, i64>) -> MirFuncti
         is_export_c: func.is_export_c, export_name: func.export_name,
         has_driver_manifest_attr: func.has_driver_manifest_attr,
         driver_manifest_attr: func.driver_manifest_attr,
-        has_vhdl_metadata: func.has_vhdl_metadata, vhdl_metadata: func.vhdl_metadata,
+        has_vhdl_metadata: false, vhdl_metadata: vhdl_hardware_metadata_default(),
         has_fast_math: func.has_fast_math, unroll_factor: func.unroll_factor,
         pipeline_ii: func.pipeline_ii, memory_banks: func.memory_banks)
 
@@ -562,6 +568,17 @@ fn vhdl_build_design_catalog_with_hir(modules: Dict<text, MirModule>,
     var global_type_vhdl_names: Dict<text, text> = {}
     var global_static_symbols: Dict<text, i64> = {}
     var root_set: Dict<text, bool> = {}
+    var hardware_metadata_rows: [VhdlCatalogHardwareMetadataRow] = []
+    for hir_module in hir_modules.values():
+        for hir_func in hir_module.functions.values():
+            if hir_func.has_vhdl_metadata:
+                hardware_metadata_rows = hardware_metadata_rows.push(
+                    VhdlCatalogHardwareMetadataRow(
+                        module_name: hir_module.name,
+                        function_name: hir_func.name,
+                        metadata: hir_func.vhdl_metadata
+                    )
+                )
 
     for root_module in root_modules:
         if not rt_dict_contains(modules, root_module):
@@ -632,10 +649,6 @@ fn vhdl_build_design_catalog_with_hir(modules: Dict<text, MirModule>,
             val identity = vhdl_catalog_static_identity(module_name, symbol.id,
                 static_.name, hir_modules)
             rebase[symbol.id] = global_static_symbols[identity]
-            if val init = static_.init:
-                if not rt_dict_contains(rebase, init.symbol.id):
-                    rebase[init.symbol.id] = next_symbol
-                    next_symbol = next_symbol + 1
         for symbol in vhdl_catalog_sorted_symbols(module.constants.keys()):
             if not rt_dict_contains(rebase, symbol.id):
                 rebase[symbol.id] = next_symbol
@@ -647,7 +660,24 @@ fn vhdl_build_design_catalog_with_hir(modules: Dict<text, MirModule>,
             rebase[symbol.id] = global_type_symbols[identity]
 
         for symbol in vhdl_catalog_sorted_symbols(module.functions.keys()):
-            val func = vhdl_catalog_function(module.functions[symbol], rebase)
+            var func = vhdl_catalog_function(module.functions[symbol], rebase)
+            var metadata_index = 0
+            var metadata_match = -1
+            var metadata_name_matches = 0
+            while metadata_index < hardware_metadata_rows.len():
+                val metadata_row = hardware_metadata_rows[metadata_index]
+                if metadata_row.function_name == func.name:
+                    metadata_match = metadata_index
+                    metadata_name_matches = metadata_name_matches + 1
+                if metadata_row.module_name == module_name and metadata_row.function_name == func.name:
+                    metadata_match = metadata_index
+                    metadata_name_matches = 1
+                    metadata_index = hardware_metadata_rows.len()
+                else:
+                    metadata_index = metadata_index + 1
+            if metadata_match >= 0 and metadata_name_matches == 1:
+                func.has_vhdl_metadata = true
+                func.vhdl_metadata = hardware_metadata_rows[metadata_match].metadata
             all_functions[func.symbol] = func
             all_function_modules[func.symbol.id] = module_name
 

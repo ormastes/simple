@@ -89,6 +89,14 @@ fn driver_vhdl_entry_module(ctx: CompileContext) -> Result<text, text>:
                 selected = source.module_name
             source_i = source_i + 1
         input_i = input_i + 1
+    if selected == "" and ctx.options.bootstrap_input_count == 1:
+        val input_path = ctx.options.bootstrap_input_0
+        var source_i = 0
+        while source_i < ctx.sources.len():
+            val source = ctx.sources[source_i]
+            if source.path == input_path:
+                selected = source.module_name
+            source_i = source_i + 1
     if selected == "":
         return Err("VHDL compilation requires one explicit entry file in compile options")
     Ok(selected)
@@ -674,7 +682,16 @@ impl CompilerDriver:
         # VHDL is one design, not a set of independently compiled objects.
         # Merge the entry closure before backend validation so imported
         # entities, helpers, records, and enums share one symbol catalog.
-        val entry_module = bootstrap_entry_module_name(ctx)
+        val entry_result = driver_vhdl_entry_module(ctx)
+        if rt_enum_discriminant(entry_result) == rt_enum_discriminant(Err("")):
+            val entry_error: text = rt_enum_payload(entry_result)
+            return CompileResult.CodegenError(entry_error)
+        val entry_module: text = rt_enum_payload(entry_result)
+        if (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1":
+            val root_mir = ctx.mir_modules[entry_module]
+            eprint("[vhdl-driver] root={entry_module} functions={root_mir.functions.len()}")
+            for root_fn in root_mir.functions.values():
+                eprint("[vhdl-driver] root-fn={root_fn.name} hardware={root_fn.has_vhdl_metadata}")
         val catalog_result = vhdl_build_design_catalog_with_hir(
             ctx.mir_modules, ctx.hir_modules, [entry_module], "simple_vhdl_design")
         val catalog_disc = rt_enum_discriminant(catalog_result)
