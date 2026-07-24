@@ -100,7 +100,9 @@ source/manual or traceability PASS as executable behavior evidence.
 | `6413e62312f3` | Pushed to `origin/main` | Direct production hook, config, tool, and TUI component coverage |
 | `dbbb79c430e0` | Pushed to `origin/main` | Copied chat/type specs replaced by direct production imports and synchronized manuals |
 | `e0d214b8fb0f` | Pushed to `origin/main` | Injected TUI I/O boundary, lifecycle-safe routing, unit/runtime specs, and fail-closed live-PTY foundation |
-| Integrated continuation tranche | This scoped change; final commit/push identity is recorded in the session handoff | Installed-Claude offline compatibility probe, registry-derived hidden/disabled matrix, PTY artifact provenance/teardown hardening, real-TUI default/enabled/disabled hidden admission, and synchronized plans/manuals |
+| `0ac4a158e3e3` | Pushed to `origin/main` | Installed-Claude offline compatibility probe, registry-derived hidden/disabled matrix, and PTY artifact provenance/teardown hardening |
+| `544c57bcc94a` | Pushed to `origin/main` | Real-TUI default/enabled/disabled hidden admission, explicit child-exit evidence, credential isolation, and synchronized plans/manuals |
+| Hidden-stub aggregate tranche | This scoped change; final commit/push identity is recorded in the session handoff | Parts-bin 14-record hidden-stub registry, normalized source-completeness SSpec/manual, architecture/design boundaries, and trace/plan updates |
 
 Workspace-relative MCP/LSP symbols and definitions resolve production targets,
 so the navigation health condition is met. Diagnostics
@@ -119,7 +121,8 @@ and must not be resolved, reverted, or included by this lane.
 | PTY manual parity | PASS: 6/6 live-terminal scenario bodies match source | Static synchronization; checker/SSpec not executed on a qualified artifact |
 | Installed-Claude manual parity | PASS: 5/5 offline scenario bodies match source | Static synchronization; checker/SSpec not executed in this tranche |
 | Root-registry manual parity | PASS: 5/5 scenario bodies match source, including the production-derived exhaustive matrix | Static synchronization; no CLI/TUI invocation claim |
-| Focused modern SSpec scan | PASS: 393 scoped canonical `should` examples and matchers; no placeholder pass | Static source scan over the documented tranche |
+| Hidden-stub manual parity | PASS: 1/1 scenario body and the complete supporting-helper block match source | Static synchronization; SSpec/docgen not executed on a qualified runtime |
+| Focused modern SSpec scan | PASS: 394 scoped canonical `should` examples and matchers; no placeholder pass | Static source scan over the documented tranche |
 | Direct environment guard | PASS in working and staged modes | Changed Caret paths only |
 | Numbered-artifact guard | PASS in working and staged modes | Changed Caret paths only |
 | Generated-spec layout | PASS: zero `.spl` specs under `doc/06_spec` | Layout only |
@@ -187,7 +190,7 @@ fixtures. No lane may run a paid provider.
 | D — live TUI | `scripts/check/check-llm-caret-tui-pty.shs`, focused PTY system spec, manual, plan, and trace rows | Implemented fail-closed: clean-source/runtime-hashed cached `bin/caret` only, dummy provider, forced/auto/piped routing, EOF/Ctrl-C/Ctrl-D, UTF-8/edit/navigation, 12x50 geometry, default/enabled/disabled hidden admission, raw failure before ANSI, and pre/post `stty` evidence | Static/script validation first; six-scenario real PTY PASS on a qualified cached runtime; terminal restored after every modeled outcome |
 | E — installed Claude CLI | installed checker, focused system spec/manual, trace rows | Implemented statically: five bounded offline probes record executable provenance and validate the argument surface with no submitted prompt or inherited provider credentials | Execute once on the installed binary; never generalize the result to authenticated/provider/session parity |
 | F — hidden registry matrix | root command registry spec/manual | Implemented statically: derive lookup, alias, admission, visibility, hidden, and disabled coverage from every production registry record | Execute on a qualified runtime; TUI process contract is covered by lane D, while non-TUI CLI invocation remains separate |
-| G — distributed hidden-stub aggregate | `src/app/llm_caret/claude_full/commands/hidden_stub_registry.spl`, mirrored focused SSpec/manual, plan and trace rows | Next tranche: derive all 14 canonical hidden-disabled stub records from production descriptors with `source_id`, `source_file`, `command_name`, `hidden`, and `enabled`; do not reuse the stale historical feature TSV as behavioral authority | `ClaudeHiddenStubCommandRecord`, `hiddenDisabledStubCommandRegistry`, `setup_hidden_stub_registry_fixture`, and `check_hidden_stub_registry_contract`; normalize hyphenated identities against underscore import facades, compare source discovery exactly with registry membership, and assert nonempty unique inventory, hidden=true, enabled=false |
+| G — distributed hidden-stub aggregate | `src/app/llm_caret/claude_full/commands/hidden_stub_registry.spl`, mirrored focused SSpec/manual, plan and trace rows | Implemented statically: derive all 14 canonical hidden-disabled stub records from `claude_full` leaf descriptor declarations with `source_id`, `source_file`, `command_name`, `hidden`, and `enabled`; the stale historical feature TSV is not behavioral authority | `ClaudeHiddenStubCommandRecord`, `hiddenDisabledStubCommandRegistry`, `setup_hidden_stub_registry_fixture`, and `check_hidden_stub_registry_contract`; normalized source discovery and two-way registry comparison are present; supporting metadata only with no shipped admission claim; execute SSpec/docgen on a qualified runtime |
 | Merge owner | current primary agent | Reconcile source/manual bodies, trace rows, and shared maps; commit exact Caret paths only | No unrelated shared-worktree paths in commit |
 | Final reviewer | highest-capability fresh review | Requirement-by-requirement completion audit | Every claimed behavior has executed evidence |
 
@@ -204,8 +207,8 @@ runtime/toolchain mismatch and record it; do not repeat a green gate.
    path/version/hash/stdout/stderr/exit artifacts.
 4. Execute the focused unit specs for `claude_cli`, `provider`, `main`,
    `config`, `tools`, and `chat_tui`.
-5. Execute the CLI process, Claude contract, managed-env, root-registry, and
-   TUI/hidden system
+5. Execute the CLI process, Claude contract, managed-env, root-registry,
+   hidden-stub-registry, and TUI/hidden system
    specs in interpreter mode.
 6. Execute the native Caret smoke with stub fallback disabled.
 7. Run `sh scripts/check/check-llm-caret-tui-pty.shs --case all`, then execute

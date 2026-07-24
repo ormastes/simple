@@ -64,6 +64,12 @@ behavior or full Claude parity. Simple-only and conceptual rows are explicit,
 and upstream freshness remains unverifiable while the historical Claude source
 tree is absent.
 
+The nested
+`src/app/llm_caret/claude_full/commands/hidden_stub_registry.spl` parts-bin
+aggregate is intentionally outside the 25 direct-file count. Its focused
+source-completeness spec is listed below; it does not make `claude_full`
+reachable from the shipped Caret facade.
+
 ## Focused Test Mapping
 
 | Behavior | Primary executable evidence |
@@ -74,6 +80,7 @@ tree is absent.
 | TUI submission/state/session/permission/retry/hidden admission | `test/03_system/app/llm_caret/feature/llm_caret_tui_hidden_feature_spec.spl` |
 | Live terminal routing/lifecycle/UTF-8/geometry/raw rejection and hidden admission (`REQ-LLM-CARET-HIDDEN-008`) | `test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl` through `scripts/check/check-llm-caret-tui-pty.shs`; the added hidden scenario is designed to drive default-hidden rejection, enabled execution, and always-disabled rejection through the real Caret TUI, but has not yet executed; execution requires cached `bin/caret`, `script(1)`, and `stty` |
 | Claude-full root hidden/disabled registry admission | `test/03_system/tools/llm/claude_full/commands/root_commands_registry_spec.spl`; the production-derived scenario enumerates every registry record and alias rather than maintaining a second command list, while the PTY hidden case supplies the corresponding real-TUI process contract |
+| Claude-full hidden-disabled stub descriptor completeness (`REQ-LLM-CARET-HIDDEN-008`, supporting metadata) | `test/03_system/tools/llm/claude_full/commands/hidden_stub_registry_spec.spl`; the parts-bin aggregate projects all 14 leaf descriptors while independent source discovery normalizes hyphen/underscore twins and compares membership in both directions; shipped fulfillment remains the root/component/PTY lane, and execution remains blocked |
 | Focused unit branches | `test/01_unit/app/llm_caret/claude_cli_spec.spl`, `chat_spec.spl`, `chat_tui_spec.spl`, `chat_tui_input_spec.spl`, `chat_tui_runtime_spec.spl`, `main_spec.spl`, `config_spec.spl`, `tools_spec.spl`, `types_spec.spl`, `provider_spec.spl`, `retry_spec.spl` under `test/01_unit/app/llm_caret/` |
 | Offline native seams | `test/04_smoke/llm_caret_cli_tui_hardening_smoke.spl` |
 
@@ -83,11 +90,12 @@ the bounded offline argument surface it invokes; it does not establish that
 every current Claude function, authenticated request, or interactive session
 still works.
 
-The scoped hardening tranche contains 393 modern `should` examples: 356
+The scoped hardening tranche contains 394 modern `should` examples: 356
 source-synchronized unit examples, eight CLI feature-contract examples, three
 process-hardening examples, nine TUI/hidden component examples, five
 managed-environment examples, five installed-Claude examples, one exhaustive
-root-registry example, and six live-PTY examples.
+root-registry example, six live-PTY examples, and one hidden-stub aggregate
+example.
 
 ## Function Trace
 

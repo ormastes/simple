@@ -26,6 +26,21 @@ its row-level gates pass.
 - `llm_caret.claude_full.support`: constants, utils, context, native-ts,
   state helpers, and platform utilities.
 
+### Commands Metadata Aggregate
+
+`llm_caret.claude_full.commands.hidden_stub_registry` is an inward-only
+metadata capsule. It may depend on the 14 hidden-disabled leaf command
+descriptors, using only their import-safe owners and choosing underscore forms
+for hyphenated identities, and immediately projects their heterogeneous values
+into `ClaudeHiddenStubCommandRecord`.
+Leaf descriptors must never import the aggregate, broad root-command modules,
+the Caret TUI, or shipped provider code.
+
+The aggregate is completeness-tested against independent source discovery that
+normalizes hyphen/underscore twins. It is not a public command registry and
+does not flow outward into shipped admission until a separate reviewed adapter
+and executable gate exist.
+
 ## Public Boundary
 
 The existing public entry points stay boring:

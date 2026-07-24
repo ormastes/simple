@@ -45,6 +45,23 @@ never happened. Treat `claude_full/` as a **parts bin**, not a shipping
 subsystem. Every capability below is designed against the **shipped path**; for
 each we state which `claude_full` modules to WIRE IN, REWRITE, or DELETE.
 
+### Hidden stub inventory inside the parts bin
+
+`commands/hidden_stub_registry.spl` is allowed only as a parts-bin audit
+surface. `hiddenDisabledStubCommandRegistry()` imports the 14 import-safe leaf
+descriptor owners, choosing underscore forms for hyphenated identities, and
+projects `source_id`, `source_file`,
+`command_name`, `hidden`, and `enabled` into neutral records. Hyphenated IDs
+remain canonical; `source_file` names the actual import-safe owner.
+
+The mirrored system spec must independently discover every immediate-child
+`commands/**/index.spl` whose descriptor is named `stub`, normalize
+hyphen/underscore twins, and compare source and registry membership in both
+directions. A fixed count of 14 cannot satisfy completeness by itself. This
+inventory does not make the island shipped, does not prove the twin files are
+identical, and does not replace the shipped root registry or Caret TUI
+admission tests.
+
 ---
 
 ## Production-Quality Design vs Claude Code
