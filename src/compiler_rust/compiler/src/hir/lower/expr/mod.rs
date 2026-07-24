@@ -682,6 +682,39 @@ impl Lowerer {
         // Search pre-registered methods for ".method" suffix
         // Sort matches by name length (shortest = most specific) for deterministic resolution
         let suffix = format!(".{}", method);
+        // Trait names intentionally alias to ANY in HIR because calls use a
+        // runtime vtable.  A module that imports only the trait therefore has
+        // no `ConcreteType.method` entry in `method_return_types`; the trait
+        // signature is the only authoritative result type.  Consult it before
+        // the implementation-name fallback whenever all matching trait
+        // signatures agree.  This is especially important for `T?` returns:
+        // losing `MouseEvent?` here makes `if val event = backend.poll_mouse()`
+        // bind `event` as ANY and rejects every subsequent field access.
+        if recv_ty == TypeId::ANY {
+            let mut trait_return: Option<TypeId> = None;
+            let mut traits_disagree = false;
+            for trait_info in self.module.trait_infos.values() {
+                let Some(sig) = trait_info.methods.get(method) else {
+                    continue;
+                };
+                if sig.return_type == TypeId::ANY || sig.return_type == TypeId::VOID {
+                    continue;
+                }
+                match trait_return {
+                    None => trait_return = Some(sig.return_type),
+                    Some(previous) if previous != sig.return_type => {
+                        traits_disagree = true;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            if !traits_disagree {
+                if let Some(return_type) = trait_return {
+                    return return_type;
+                }
+            }
+        }
         // When the impl matches DISAGREE on the return type, the shortest-name
         // tiebreak below is unreliable: e.g. for `core.read_pixels()` on a
         // trait-typed (ANY-aliased) `RenderBackend` receiver, an FFI wrapper's

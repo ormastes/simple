@@ -1146,6 +1146,61 @@ fn build() -> Widget:
     }
 
     #[test]
+    fn imported_trait_optional_struct_return_preserves_field_type() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let input = src.join("input");
+        fs::create_dir_all(&input).unwrap();
+
+        fs::write(
+            input.join("event.spl"),
+            "struct MouseEvent:\n    left_just_pressed: bool\n",
+        )
+        .unwrap();
+        fs::write(
+            input.join("backend.spl"),
+            r#"use input.event.{MouseEvent}
+
+trait InputBackend:
+    me poll_mouse() -> MouseEvent?
+"#,
+        )
+        .unwrap();
+        let main_path = src.join("main.spl");
+        fs::write(
+            &main_path,
+            r#"use input.backend.{InputBackend}
+
+fn pressed(backend: InputBackend) -> bool:
+    if val event = backend.poll_mouse():
+        return event.left_just_pressed
+    false
+"#,
+        )
+        .unwrap();
+
+        let source = fs::read_to_string(&main_path).unwrap();
+        let mut parser = Parser::new(&source);
+        let ast = parser.parse().expect("parse failed");
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+        let mut lowerer = Lowerer::with_module_resolver(resolver, main_path);
+        let lowered = lowerer
+            .lower_module(&ast)
+            .expect("HIR lowering should preserve MouseEvent?");
+        let pressed = lowered
+            .functions
+            .iter()
+            .find(|func| func.name == "pressed")
+            .expect("pressed function");
+        let body = format!("{:?}", pressed.body);
+
+        assert!(
+            body.contains("left_just_pressed"),
+            "optional trait result field must lower as a field access: {body}"
+        );
+    }
+
+    #[test]
     fn import_target_intersection_matches_group_reexports() {
         let requested = ImportTarget::Single("shell".to_string());
         let available = ImportTarget::Group(vec![

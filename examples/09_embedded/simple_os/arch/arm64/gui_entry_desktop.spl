@@ -13,25 +13,13 @@ use os.kernel.arch.arm64.console.{uart_data_ready, uart_init, uart_read_char, ua
 use os.gui.input_event.{WmAction}
 use os.gui.shortcut.{uart_char_to_action}
 use os.kernel.arch.arm64.virtio_input.{
-    ARM64_VIRTIO_INPUT_DEVICE_KEYBOARD,
-    ARM64_VIRTIO_INPUT_DEVICE_POINTER,
     arm64_virtio_input_init,
-    arm64_virtio_input_poll,
     arm64_virtio_input_ready
 }
-use os.drivers.virtio.virtio_input_ops.{
-    BTN_LEFT,
-    EV_KEY,
-    EV_REL,
-    EV_SYN,
-    SYN_REPORT,
-    virtio_input_key_event,
-    VirtioMouseAccum
-}
 use os.drivers.input.ps2_keyboard.{Key, KeyEvent}
-use os.drivers.input.ps2_mouse.{MouseEvent}
 use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
 use os.compositor.compositor.{Compositor}
+use os.compositor.arm64_virtio_input_backend.{Arm64VirtioInputBackend}
 use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
 use os.compositor.engine2d_display.{create_fb_engine_sized}
 use os.compositor.engine2d_baremetal_core.{
@@ -82,22 +70,6 @@ fn arm64_wm_action_from_virtio_key(event: KeyEvent) -> WmAction:
                 Key.T: WmAction.ToggleTheme
                 _: WmAction.None
 
-fn arm64_pointer_button_code(mouse: MouseEvent) -> i32:
-    if mouse.left_just_pressed or mouse.left_just_released:
-        return 1
-    if mouse.right_just_pressed:
-        return 3
-    if mouse.middle_pressed:
-        return 2
-    0
-
-fn arm64_pointer_kind_code(mouse: MouseEvent) -> i32:
-    if mouse.left_just_pressed or mouse.right_just_pressed:
-        return 1
-    if mouse.left_just_released:
-        return 2
-    3
-
 fn spl_start():
     uart_init()
     val screen_width = ARM64_RAMFB_WIDTH.to_i32()
@@ -137,13 +109,13 @@ fn spl_start():
         uart_writeln("[desktop-gui-arm64] font unavailable fallback=bitmap")
     var engine = create_fb_engine_sized(framebuffer, screen_width, screen_height)
     val compositor_backend = Engine2dCompositorBackend.create(engine)
+    var input_backend = Arm64VirtioInputBackend.create(
+        screen_width.to_i64(),
+        screen_height.to_i64()
+    )
     var compositor = Compositor.with_backends(
         compositor_backend,
-        # The native freestanding compiler currently erases InputBackend's
-        # MouseEvent? trait return to ANY, so a concrete VirtIO backend cannot
-        # safely drive canonical compositor input yet. Raw polling below is
-        # diagnostic-only and the production event gate remains fail-closed.
-        nil,
+        input_backend,
         screen_width,
         screen_height
     )
@@ -196,7 +168,7 @@ fn spl_start():
     val virtio_input_mask = arm64_virtio_input_init()
     val virtio_input_enabled = arm64_virtio_input_ready(virtio_input_mask)
     if virtio_input_enabled:
-        uart_writeln("[backend2d-event-blocker] backend=simpleos-qemu-arm64 event_backend=virtio-mmio keyboard=transport-ready pointer=transport-ready reason=input-backend-trait-mouse-return-erased-to-any diagnostic_raw_poll=enabled")
+        uart_writeln("[backend2d-event-blocker] backend=simpleos-qemu-arm64 event_backend=virtio-mmio keyboard=transport-ready pointer=transport-ready owner=InputBackend reason=live-qmp-evidence-pending")
     else:
         uart_writeln("[backend2d-event-blocker] backend=simpleos-qemu-arm64 event_backend=virtio-mmio required=keyboard,pointer ready_mask={virtio_input_mask} uart=fallback-only")
     uart_writeln("[desktop-gui] first-frame-rendered")
@@ -205,10 +177,8 @@ fn spl_start():
 
     var running = true
     var event_count = 0
-    var guest_input_sequence: i64 = 0
-    var pointer_frame_open = false
-    var pointer_frame_sequence: i64 = 0
-    var virtio_mouse = VirtioMouseAccum.create(screen_width.to_i64(), screen_height.to_i64())
+    var observed_key_sequence: i64 = 0
+    var observed_pointer_sequence: i64 = 0
     while running:
         var input_compositor = shell.compositor
         var action = WmAction.None
@@ -225,41 +195,28 @@ fn spl_start():
         var key_value: u32 = 0u32
 
         if virtio_input_enabled:
-            val raw_event = arm64_virtio_input_poll()
-            if raw_event != nil:
-                val event = raw_event!
-                if event.device_kind == ARM64_VIRTIO_INPUT_DEVICE_KEYBOARD:
-                    if event.type_ == EV_KEY:
-                        guest_input_sequence = guest_input_sequence + 1
-                        input_compositor.input_sequence = guest_input_sequence
-                        key_event_pending = true
-                        key_sequence = guest_input_sequence
-                        key_code = event.code
-                        key_value = event.value
-                        uart_writeln("[virtio-input-device] input_seq={key_sequence} device=keyboard type={event.type_} code={event.code} value={event.value}")
-                        action = arm64_wm_action_from_virtio_key(
-                            virtio_input_key_event(event.code, event.value)
-                        )
-                elif event.device_kind == ARM64_VIRTIO_INPUT_DEVICE_POINTER:
-                    if not pointer_frame_open:
-                        guest_input_sequence = guest_input_sequence + 1
-                        pointer_frame_sequence = guest_input_sequence
-                        pointer_frame_open = true
-                    input_compositor.input_sequence = pointer_frame_sequence
-                    uart_writeln("[virtio-input-device] input_seq={pointer_frame_sequence} device=pointer type={event.type_} code={event.code} value={event.value}")
-                    if event.type_ == EV_KEY and event.code >= BTN_LEFT:
-                        virtio_mouse.feed_key(event.code, event.value != 0u32)
-                    elif event.type_ == EV_REL:
-                        virtio_mouse.feed_rel(event.code, event.value.to_i32().to_i64())
-                    elif event.type_ == EV_SYN and event.code == SYN_REPORT:
-                        val mouse = virtio_mouse.feed_syn()
-                        pointer_event_pending = true
-                        pointer_sequence = pointer_frame_sequence
-                        pointer_frame_open = false
-                        pointer_x = mouse.x.to_i32()
-                        pointer_y = mouse.y.to_i32()
-                        pointer_button_code = arm64_pointer_button_code(mouse)
-                        pointer_kind_code = arm64_pointer_kind_code(mouse)
+            input_compositor.handle_input()
+            if input_backend.delivered_key_sequence > observed_key_sequence:
+                observed_key_sequence = input_backend.delivered_key_sequence
+                key_event_pending = true
+                key_sequence = observed_key_sequence
+                key_code = input_backend.delivered_key_code
+                key_value = input_backend.delivered_key_value
+                input_compositor.input_sequence = key_sequence
+                uart_writeln("[virtio-input-device] input_seq={key_sequence} device=keyboard type=1 code={key_code} value={key_value}")
+                if val key_event = input_backend.delivered_key:
+                    action = arm64_wm_action_from_virtio_key(key_event)
+            if input_backend.delivered_mouse_sequence > observed_pointer_sequence:
+                observed_pointer_sequence = input_backend.delivered_mouse_sequence
+                pointer_event_pending = input_compositor.pending_wm_pointer_valid
+                pointer_sequence = observed_pointer_sequence
+                pointer_x = input_compositor.pending_wm_pointer_x
+                pointer_y = input_compositor.pending_wm_pointer_y
+                pointer_button_code = input_compositor.pending_wm_pointer_button_code
+                pointer_kind_code = input_compositor.pending_wm_pointer_kind_code
+                if pointer_sequence > input_compositor.input_sequence:
+                    input_compositor.input_sequence = pointer_sequence
+                uart_writeln("[virtio-input-device] input_seq={pointer_sequence} device=pointer type={input_backend.delivered_pointer_type} code={input_backend.delivered_pointer_code} value={input_backend.delivered_pointer_value}")
         elif uart_data_ready() == 1:
             action = uart_char_to_action(uart_read_char())
 
@@ -295,13 +252,6 @@ fn spl_start():
                 uart_writeln("[theme-switch-blocker] backend=simpleos-qemu-arm64 reason=snapshot-notification-transport-unavailable")
             case WmAction.None:
                 pass
-
-        if pointer_event_pending:
-            input_compositor.pending_wm_pointer_valid = true
-            input_compositor.pending_wm_pointer_x = pointer_x
-            input_compositor.pending_wm_pointer_y = pointer_y
-            input_compositor.pending_wm_pointer_button_code = pointer_button_code
-            input_compositor.pending_wm_pointer_kind_code = pointer_kind_code
 
         if changed or pointer_event_pending or key_event_pending:
             event_count = event_count + 1

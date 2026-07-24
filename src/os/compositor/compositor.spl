@@ -453,19 +453,52 @@ class Compositor:
                 # the bare character, not an Option wrapper.
                 if val Some(shortcut_char) = inp.key_to_char(pressed_key):
                     self.pending_shortcut = shortcut_char
-        # Drain the mouse poll each frame so the backend event queue does not
-        # back up. Cursor-move + click-to-focus are handled via _handle_input_ps2
-        # (the direct 0x60 PS/2 path below), NOT through this trait poll:
-        # inp.poll_mouse() is an InputBackend TRAIT method, and the bootstrap
-        # native-build HIR erases its MouseEvent? return to ANY, then rejects
-        # struct field access on ANY (a cluster of native-build MIR/HIR gaps —
-        # field-result type not propagated, method calls lowered to const-0;
-        # see doc/08_tracking/bug/simpleos_wm_4k_footprint_exceeds_heap_window_2026-07-14.md).
-        # Reading mouse_event.x/y/left through this ANY receiver made the whole
-        # compositor module fail native-build and get skipped/weak-stubbed, which
-        # null-derefed the desktop render. Draining without field access keeps the
-        # module compiling; the concrete PS/2 path keeps cursor/click working.
-        val _drained_mouse = inp.poll_mouse()
+        if val mouse_event = inp.poll_mouse():
+            var new_x = mouse_event.x.to_i32()
+            var new_y = mouse_event.y.to_i32()
+            if new_x < 0:
+                new_x = 0
+            if new_x >= self.screen_width:
+                new_x = self.screen_width - 1
+            if new_y < 0:
+                new_y = 0
+            if new_y >= self.screen_height:
+                new_y = self.screen_height - 1
+            var cursor_ref = self.cursor
+            cursor_ref.x = new_x
+            cursor_ref.y = new_y
+            self.cursor = cursor_ref
+
+            var pointer_button_code: i32 = 0
+            var pointer_kind_code: i32 = 3
+            if mouse_event.left_just_pressed:
+                pointer_button_code = 1
+                pointer_kind_code = 1
+            elif mouse_event.right_just_pressed:
+                pointer_button_code = 3
+                pointer_kind_code = 1
+            elif mouse_event.left_just_released:
+                pointer_button_code = 1
+                pointer_kind_code = 2
+            elif mouse_event.middle_pressed:
+                pointer_button_code = 2
+            self.note_pending_wm_pointer_step(
+                new_x,
+                new_y,
+                pointer_button_code,
+                pointer_kind_code
+            )
+
+            if mouse_event.left_just_pressed:
+                var hit_idx = -1
+                var wi = 0
+                while wi < self.surfaces.len():
+                    val surface = self.surfaces[wi]
+                    if (new_x >= surface.x and new_x < surface.x + surface.width and new_y >= surface.y and new_y < surface.y + surface.height):
+                        hit_idx = wi
+                    wi = wi + 1
+                if hit_idx >= 0:
+                    self.focus_window(self.surfaces[hit_idx].id)
 
     me _handle_input_ps2():
         var alt_held = false
