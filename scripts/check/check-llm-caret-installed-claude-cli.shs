@@ -1,0 +1,427 @@
+#!/bin/sh
+#
+# Offline compatibility probe for the currently installed Claude CLI.
+# No case submits a prompt or accepts a provider response.
+
+set -u
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO_ROOT=$(CDPATH= cd -- "${SCRIPT_DIR}/../.." && pwd -P)
+ARTIFACT_ROOT="${REPO_ROOT}/build/test-artifacts/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli"
+CASE_NAME=""
+CLAUDE_PATH=""
+CLAUDE_TARGET=""
+CLAUDE_VERSION=""
+CLAUDE_SHA256=""
+METADATA_DIR="${ARTIFACT_ROOT}/_metadata"
+FAILURES=0
+CASE_TIMEOUT_SECONDS=5
+CAPTURE_LIMIT_BLOCKS=64
+CAPTURE_LIMIT_BYTES=65536
+
+usage() {
+    printf '%s\n' \
+        "usage: sh scripts/check/check-llm-caret-installed-claude-cli.shs --case <prerequisites|version|help|missing-input|removed-option|all>"
+}
+
+fail_prerequisite() {
+    prerequisite_reason=$1
+    printf '%s\n' "evidence_status=FAIL"
+    printf '%s\n' "failure_class=prerequisite"
+    printf '%s\n' "failure_reason=${prerequisite_reason}"
+    printf '%s\n' "artifact_root=${ARTIFACT_ROOT}"
+    exit 1
+}
+
+record_failure() {
+    failure_case=$1
+    failure_reason=$2
+    failure_dir=$3
+    FAILURES=$((FAILURES + 1))
+    printf '%s\n' \
+        "case=${failure_case} status=FAIL reason=${failure_reason} artifact=${failure_dir}"
+}
+
+record_pass() {
+    passing_case=$1
+    passing_dir=$2
+    printf '%s\n' "case=${passing_case} status=PASS artifact=${passing_dir}"
+}
+
+canonical_file() {
+    canonical_candidate=$1
+    case "${canonical_candidate}" in
+        /*) ;;
+        *) canonical_candidate="$(pwd)/${canonical_candidate}" ;;
+    esac
+
+    canonical_hops=0
+    while [ -L "${canonical_candidate}" ]; do
+        canonical_link=$(readlink "${canonical_candidate}") || return 1
+        case "${canonical_link}" in
+            /*) canonical_candidate="${canonical_link}" ;;
+            *)
+                canonical_candidate="$(dirname "${canonical_candidate}")/${canonical_link}"
+                ;;
+        esac
+        canonical_hops=$((canonical_hops + 1))
+        [ "${canonical_hops}" -le 32 ] || return 1
+    done
+
+    canonical_dir=$(CDPATH= cd -- "$(dirname -- "${canonical_candidate}")" && pwd -P) ||
+        return 1
+    printf '%s/%s\n' "${canonical_dir}" "$(basename -- "${canonical_candidate}")"
+}
+
+sha256_file() {
+    hash_path=$1
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "${hash_path}" | awk '{print $1}'
+        return
+    fi
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "${hash_path}" | awk '{print $1}'
+        return
+    fi
+    return 1
+}
+
+prepare_isolated_dir() {
+    isolated_dir=$1
+    mkdir -p "${isolated_dir}" || return 1
+}
+
+freeze_probe_tree() {
+    root_pid=$1
+    kill -STOP "${root_pid}" 2>/dev/null || return
+    printf '%s\n' "${root_pid}"
+    descendants=$(pgrep -P "${root_pid}" 2>/dev/null || :)
+    for descendant in ${descendants}; do
+        freeze_probe_tree "${descendant}"
+    done
+}
+
+terminate_probe_tree() {
+    root_pid=$1
+    frozen_pids=$(freeze_probe_tree "${root_pid}")
+    [ "${frozen_pids}" != "" ] || return
+    kill -TERM ${frozen_pids} 2>/dev/null || :
+    kill -CONT ${frozen_pids} 2>/dev/null || :
+    sleep 1
+    kill -KILL ${frozen_pids} 2>/dev/null || :
+}
+
+invoke_isolated() {
+    invoke_dir=$1
+    shift
+    prepare_isolated_dir "${invoke_dir}" || return 125
+    timeout_marker="${invoke_dir}/timeout.txt"
+    : >"${timeout_marker}" || return 125
+    : >"${invoke_dir}/stdout.txt" || return 125
+    : >"${invoke_dir}/stderr.txt" || return 125
+    : >"${invoke_dir}/exit.txt" || return 125
+    probe_tmp_base=$(
+        CDPATH= cd -- "${TMPDIR:-/tmp}" 2>/dev/null && pwd -P
+    ) || return 125
+    case "${probe_tmp_base}/" in
+        "${REPO_ROOT}/"*) return 125 ;;
+    esac
+    probe_tmp=$(
+        mktemp -d "${probe_tmp_base}/llm-caret-claude-probe.XXXXXX"
+    ) || return 125
+    (
+        trap 'rm -rf "${probe_tmp}"' 0 1 2 15
+        mkdir -p \
+            "${probe_tmp}/home" \
+            "${probe_tmp}/config" \
+            "${probe_tmp}/work" ||
+            exit 125
+        cd "${probe_tmp}/work" || exit 125
+        ulimit -f "${CAPTURE_LIMIT_BLOCKS}" || exit 125
+        env -i \
+            HOME="${probe_tmp}/home" \
+            CLAUDE_CONFIG_DIR="${probe_tmp}/config" \
+            CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+            PATH="${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
+            LANG=C \
+            LC_ALL=C \
+            TERM=dumb \
+            "${CLAUDE_PATH}" "$@" </dev/null &
+        probe_pid=$!
+        (
+            sleep "${CASE_TIMEOUT_SECONDS}"
+            printf '%s\n' "timeout" >"${timeout_marker}"
+            terminate_probe_tree "${probe_pid}"
+        ) &
+        watchdog_pid=$!
+        wait "${probe_pid}"
+        probe_status=$?
+        if [ -s "${timeout_marker}" ]; then
+            wait "${watchdog_pid}" 2>/dev/null || :
+            exit 124
+        fi
+        kill "${watchdog_pid}" 2>/dev/null || :
+        wait "${watchdog_pid}" 2>/dev/null || :
+        exit "${probe_status}"
+    ) >"${invoke_dir}/stdout.txt" 2>"${invoke_dir}/stderr.txt"
+    invoke_status=$?
+    printf '%s\n' "${invoke_status}" >"${invoke_dir}/exit.txt" || return 125
+    return "${invoke_status}"
+}
+
+discover_claude() {
+    mkdir -p "${ARTIFACT_ROOT}" || fail_prerequisite "artifact_directory_unavailable"
+    command -v pgrep >/dev/null 2>&1 ||
+        fail_prerequisite "pgrep_utility_missing"
+    CLAUDE_PATH=$(command -v claude 2>/dev/null || :)
+    [ "${CLAUDE_PATH}" != "" ] || fail_prerequisite "claude_binary_absent"
+    [ -x "${CLAUDE_PATH}" ] || fail_prerequisite "claude_binary_not_executable"
+
+    CLAUDE_TARGET=$(canonical_file "${CLAUDE_PATH}") ||
+        fail_prerequisite "claude_canonical_target_unresolved"
+    [ -x "${CLAUDE_TARGET}" ] ||
+        fail_prerequisite "claude_canonical_target_not_executable"
+    CLAUDE_SHA256=$(sha256_file "${CLAUDE_TARGET}") ||
+        fail_prerequisite "sha256_utility_missing"
+    case "${CLAUDE_SHA256}" in
+        *[!0-9a-fA-F]*|"")
+            fail_prerequisite "claude_sha256_invalid"
+            ;;
+    esac
+    [ "${#CLAUDE_SHA256}" -eq 64 ] ||
+        fail_prerequisite "claude_sha256_invalid"
+
+    invoke_isolated "${METADATA_DIR}" --version
+    metadata_status=$?
+    [ "${metadata_status}" -eq 0 ] ||
+        fail_prerequisite "claude_version_exit_${metadata_status}"
+    CLAUDE_VERSION=$(
+        sed -n '/[^[:space:]]/{
+            s/^[[:space:]]*//
+            s/[[:space:]]*$//
+            p
+            q
+        }' "${METADATA_DIR}/stdout.txt"
+    )
+    [ "${CLAUDE_VERSION}" != "" ] ||
+        fail_prerequisite "claude_version_empty"
+}
+
+write_case_provenance() {
+    provenance_dir=$1
+    printf '%s\n' "${CLAUDE_PATH}" >"${provenance_dir}/claude-path.txt" &&
+        printf '%s\n' "${CLAUDE_TARGET}" \
+            >"${provenance_dir}/claude-canonical-target.txt" &&
+        printf '%s\n' "${CLAUDE_VERSION}" \
+            >"${provenance_dir}/claude-version.txt" &&
+        printf '%s\n' "${CLAUDE_SHA256}" \
+            >"${provenance_dir}/claude-sha256.txt"
+}
+
+copy_version_capture() {
+    capture_dir=$1
+    prepare_isolated_dir "${capture_dir}" || return 1
+    cp "${METADATA_DIR}/stdout.txt" "${capture_dir}/stdout.txt" || return 1
+    cp "${METADATA_DIR}/stderr.txt" "${capture_dir}/stderr.txt" || return 1
+    cp "${METADATA_DIR}/exit.txt" "${capture_dir}/exit.txt" || return 1
+}
+
+emit_case_summary() {
+    summary_case=$1
+    summary_dir=$2
+    summary_exit=$(sed -n '1p' "${summary_dir}/exit.txt")
+    printf '%s\n' "probe_case=${summary_case}"
+    printf '%s\n' "prompt_submitted=false"
+    printf '%s\n' "provider_credentials_inherited=false"
+    printf '%s\n' "claude_path=${CLAUDE_PATH}"
+    printf '%s\n' "claude_canonical_target=${CLAUDE_TARGET}"
+    printf '%s\n' "claude_version=${CLAUDE_VERSION}"
+    printf '%s\n' "claude_sha256=${CLAUDE_SHA256}"
+    printf '%s\n' "raw_exit=${summary_exit}"
+    printf '%s\n' "raw_stdout=${summary_dir}/stdout.txt"
+    printf '%s\n' "raw_stderr=${summary_dir}/stderr.txt"
+    printf '%s\n' "capture_limit_bytes=${CAPTURE_LIMIT_BYTES}"
+}
+
+run_prerequisites_case() {
+    prerequisite_dir="${ARTIFACT_ROOT}/prerequisites"
+    copy_version_capture "${prerequisite_dir}" || {
+        record_failure "prerequisites" "artifact_write_failed" "${prerequisite_dir}"
+        return
+    }
+    write_case_provenance "${prerequisite_dir}" || {
+        record_failure "prerequisites" "provenance_write_failed" "${prerequisite_dir}"
+        return
+    }
+    emit_case_summary "prerequisites" "${prerequisite_dir}"
+    record_pass "prerequisites" "${prerequisite_dir}"
+}
+
+run_version_case() {
+    version_dir="${ARTIFACT_ROOT}/version"
+    copy_version_capture "${version_dir}" || {
+        record_failure "version" "artifact_write_failed" "${version_dir}"
+        return
+    }
+    write_case_provenance "${version_dir}" || {
+        record_failure "version" "provenance_write_failed" "${version_dir}"
+        return
+    }
+    emit_case_summary "version" "${version_dir}"
+    printf '%s\n' "version_recorded=true"
+    record_pass "version" "${version_dir}"
+}
+
+run_help_case() {
+    help_dir="${ARTIFACT_ROOT}/help"
+    invoke_isolated "${help_dir}" --help
+    help_status=$?
+    write_case_provenance "${help_dir}" || {
+        record_failure "help" "provenance_write_failed" "${help_dir}"
+        return
+    }
+    emit_case_summary "help" "${help_dir}"
+    if [ "${help_status}" -ne 0 ]; then
+        record_failure "help" "nonzero_exit_${help_status}" "${help_dir}"
+        return
+    fi
+
+    for required_flag in \
+        "--output-format" \
+        "--model" \
+        "--system-prompt" \
+        "--resume" \
+        "--max-turns" \
+        "--json-schema" \
+        "--allowedTools" \
+        "--verbose"
+    do
+        if ! grep -E -- \
+            "(^|[[:space:],])${required_flag}([=[:space:],]|$)" \
+            "${help_dir}/stdout.txt" >/dev/null 2>&1; then
+            record_failure "help" "required_flag_missing_${required_flag}" "${help_dir}"
+            return
+        fi
+    done
+    if ! grep -E -- '(^|[[:space:],])-p([[:space:],]|$)' \
+        "${help_dir}/stdout.txt" >/dev/null 2>&1; then
+        record_failure "help" "required_flag_missing_-p" "${help_dir}"
+        return
+    fi
+    if ! grep -E -- '--allowedTools[[:space:]]+<[^>]*\.\.\.>' \
+        "${help_dir}/stdout.txt" >/dev/null 2>&1; then
+        record_failure "help" "allowed_tools_not_variadic" "${help_dir}"
+        return
+    fi
+    if grep -F -- "--max-tokens" "${help_dir}/stdout.txt" >/dev/null 2>&1; then
+        record_failure "help" "removed_max_tokens_advertised" "${help_dir}"
+        return
+    fi
+
+    printf '%s\n' "required_flags=present"
+    printf '%s\n' "allowed_tools_variadic=true"
+    printf '%s\n' "removed_max_tokens_absent=true"
+    record_pass "help" "${help_dir}"
+}
+
+run_missing_input_case() {
+    missing_dir="${ARTIFACT_ROOT}/missing-input"
+    invoke_isolated "${missing_dir}" -p
+    missing_status=$?
+    write_case_provenance "${missing_dir}" || {
+        record_failure "missing-input" "provenance_write_failed" "${missing_dir}"
+        return
+    }
+    emit_case_summary "missing-input" "${missing_dir}"
+    if [ "${missing_status}" -eq 124 ]; then
+        record_failure "missing-input" "probe_timeout" "${missing_dir}"
+        return
+    elif [ "${missing_status}" -eq 0 ]; then
+        record_failure "missing-input" "empty_print_input_accepted" "${missing_dir}"
+        return
+    fi
+    if ! {
+        grep -E -i -- \
+            'input must be provided.*(stdin|prompt).*--print|--print.*(input|prompt|stdin)' \
+            "${missing_dir}/stdout.txt" ||
+        grep -E -i -- \
+            'input must be provided.*(stdin|prompt).*--print|--print.*(input|prompt|stdin)' \
+            "${missing_dir}/stderr.txt"
+    } >/dev/null 2>&1; then
+        record_failure "missing-input" "input_rejection_marker_missing" "${missing_dir}"
+        return
+    fi
+
+    printf '%s\n' "input_rejected=true"
+    record_pass "missing-input" "${missing_dir}"
+}
+
+run_removed_option_case() {
+    removed_dir="${ARTIFACT_ROOT}/removed-option"
+    invoke_isolated "${removed_dir}" --max-tokens 1
+    removed_status=$?
+    write_case_provenance "${removed_dir}" || {
+        record_failure "removed-option" "provenance_write_failed" "${removed_dir}"
+        return
+    }
+    emit_case_summary "removed-option" "${removed_dir}"
+    if [ "${removed_status}" -eq 124 ]; then
+        record_failure "removed-option" "probe_timeout" "${removed_dir}"
+        return
+    elif [ "${removed_status}" -eq 0 ]; then
+        record_failure "removed-option" "removed_option_accepted" "${removed_dir}"
+        return
+    fi
+    if ! {
+        grep -E -i -- \
+            "unknown option.*--max-tokens|--max-tokens.*unknown option" \
+            "${removed_dir}/stdout.txt" ||
+        grep -E -i -- \
+            "unknown option.*--max-tokens|--max-tokens.*unknown option" \
+            "${removed_dir}/stderr.txt"
+    } >/dev/null 2>&1; then
+        record_failure "removed-option" "removed_option_marker_missing" "${removed_dir}"
+        return
+    fi
+
+    printf '%s\n' "removed_option_rejected=true"
+    record_pass "removed-option" "${removed_dir}"
+}
+
+if [ "${#}" -ne 2 ] || [ "${1:-}" != "--case" ]; then
+    usage >&2
+    exit 2
+fi
+CASE_NAME=$2
+case "${CASE_NAME}" in
+    prerequisites|version|help|missing-input|removed-option|all) ;;
+    *)
+        usage >&2
+        exit 2
+        ;;
+esac
+
+discover_claude
+
+case "${CASE_NAME}" in
+    prerequisites) run_prerequisites_case ;;
+    version) run_version_case ;;
+    help) run_help_case ;;
+    missing-input) run_missing_input_case ;;
+    removed-option) run_removed_option_case ;;
+    all)
+        run_prerequisites_case
+        run_version_case
+        run_help_case
+        run_missing_input_case
+        run_removed_option_case
+        ;;
+esac
+
+printf '%s\n' "failed_cases=${FAILURES}"
+printf '%s\n' "artifact_root=${ARTIFACT_ROOT}"
+if [ "${FAILURES}" -ne 0 ]; then
+    printf '%s\n' "evidence_status=FAIL"
+    exit 1
+fi
+printf '%s\n' "evidence_status=PASS"

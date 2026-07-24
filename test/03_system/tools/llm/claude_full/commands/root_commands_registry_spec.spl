@@ -33,6 +33,52 @@ describe "Claude full root commands registry":
         step("Report missing commands explicitly")
         expect(findRootCommand("/missing").found).to_be(false)
 
+    it "should derive lookup admission and visibility for every registry record":
+        step("Derive lookup identities from each registry record")
+        val registry = rootCommandRegistry()
+        val visible = visibleRootCommands()
+        var hiddenCount = 0
+        var disabledCount = 0
+        for command in registry:
+            val canonical = findRootCommand(command.name)
+            expect(canonical.found).to_be(true)
+            expect(canonical.command.name).to_equal(command.name)
+            expect(canonical.command.slashName).to_equal(command.slashName)
+            expect(canonical.matchedAlias).to_equal("")
+
+            val slash = findRootCommand(command.slashName)
+            expect(slash.found).to_be(true)
+            expect(slash.command.name).to_equal(canonical.command.name)
+            expect(slash.command.slashName).to_equal(canonical.command.slashName)
+            expect(slash.matchedAlias).to_equal("")
+
+            step("Resolve every alias to the same canonical record")
+            for alias in command.aliases:
+                val aliasLookup = findRootCommand(alias)
+                expect(aliasLookup.found).to_be(true)
+                expect(aliasLookup.command.name).to_equal(canonical.command.name)
+                expect(aliasLookup.command.slashName).to_equal(canonical.command.slashName)
+                expect(aliasLookup.matchedAlias).to_equal(alias)
+
+            step("Compare admission and visibility with record flags")
+            val expectedDefaultAdmission = command.enabled and not command.hidden
+            expect(admitRootCommand(command.name, false).found).to_equal(expectedDefaultAdmission)
+            expect(admitRootCommand(command.name, true).found).to_equal(command.enabled)
+            var isVisible = false
+            for visibleCommand in visible:
+                if visibleCommand.name == command.name:
+                    isVisible = true
+            expect(isVisible).to_equal(expectedDefaultAdmission)
+
+            if command.hidden:
+                hiddenCount = hiddenCount + 1
+            if not command.enabled:
+                disabledCount = disabledCount + 1
+
+        step("Require hidden and disabled registry coverage")
+        expect(hiddenCount).to_be_greater_than(0)
+        expect(disabledCount).to_be_greater_than(0)
+
     it "should model disabled and hidden command behavior":
         step("Hidden commands resolve but are excluded from visible summaries")
         val debug = findRootCommand("/debug-tool-call")

@@ -70,13 +70,22 @@ tree is absent.
 |---|---|
 | CLI argv, typed JSON/NDJSON, subprocess forwarding, redaction, public history | `test/03_system/tools/llm/llm_caret_claude_cli_feature_contract_spec.spl` |
 | Caret process help/success/error/usage exits | `test/03_system/app/llm_caret/feature/llm_caret_cli_hardening_spec.spl` |
+| Installed Claude executable offline argument compatibility | `test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl` through `scripts/check/check-llm-caret-installed-claude-cli.shs`; five cases isolate HOME/config/cwd, remove provider credentials, and retain raw path/version/hash/stdout/stderr/exit evidence |
 | TUI submission/state/session/permission/retry/hidden admission | `test/03_system/app/llm_caret/feature/llm_caret_tui_hidden_feature_spec.spl` |
 | Live terminal routing/lifecycle/UTF-8/geometry/raw rejection | `test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl` through `scripts/check/check-llm-caret-tui-pty.shs`; execution requires cached `bin/caret`, `script(1)`, and `stty` |
+| Claude-full root hidden/disabled registry admission | `test/03_system/tools/llm/claude_full/commands/root_commands_registry_spec.spl`; the production-derived scenario enumerates every registry record and alias rather than maintaining a second command list |
 | Focused unit branches | `test/01_unit/app/llm_caret/claude_cli_spec.spl`, `chat_spec.spl`, `chat_tui_spec.spl`, `chat_tui_input_spec.spl`, `chat_tui_runtime_spec.spl`, `main_spec.spl`, `config_spec.spl`, `tools_spec.spl`, `types_spec.spl`, `provider_spec.spl`, `retry_spec.spl` under `test/01_unit/app/llm_caret/` |
 | Offline native seams | `test/04_smoke/llm_caret_cli_tui_hardening_smoke.spl` |
 
 These specs do not green historical full-parity rows whose implementation
-target is absent.
+target is absent. In particular, the installed executable probe proves only
+the bounded offline argument surface it invokes; it does not establish that
+every current Claude function, authenticated request, or interactive session
+still works.
+
+The scoped hardening tranche contains 392 modern `should` examples: 356
+source-synchronized unit examples, 30 previously mapped system examples, five
+installed-Claude examples, and one newly added exhaustive registry example.
 
 ## Function Trace
 
@@ -143,7 +152,10 @@ Run:
 
 ```bash
 sh scripts/check/check-llm-caret-claude-cli-trace.shs
+sh scripts/check/check-llm-caret-installed-claude-cli.shs --case all
 sh scripts/check/check-llm-caret-tui-pty.shs --case all
 bin/simple test test/03_system/tools/llm/llm_caret_claude_cli_traceability_spec.spl --mode=interpreter
+bin/simple test test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl --mode=interpreter
+bin/simple test test/03_system/tools/llm/claude_full/commands/root_commands_registry_spec.spl --mode=interpreter
 bin/simple test test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl --mode=interpreter
 ```

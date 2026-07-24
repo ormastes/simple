@@ -27,10 +27,11 @@
 
 ## Scope
 
-The checker invokes only `bin/caret`, disables its source fallback and inherited
-native override, and requires the wrapper to select a repository cached native
-artifact. All chat work uses `--provider dummy`; no credential or network is
-needed. `script(1)` owns the pseudo-terminal and a child wrapper records
+The checker invokes only `bin/caret`, disables its source fallback, and pins
+the wrapper override to the exact repository-cached native artifact whose
+binary, clean committed source, target, and build-runtime hashes were verified.
+All chat work uses `--provider dummy`; no credential or network is needed.
+`script(1)` owns the pseudo-terminal and a child wrapper records
 `stty -g` and geometry before and after Caret.
 
 The checker rejects missing cache, `script(1)`, `stty`, markers, ANSI TUI
@@ -156,9 +157,11 @@ expect(result.exit_code).to_equal(0)
 #### should prove cached offline qualification prerequisites fail closed
 
 - Open the qualification boundary.
-- Resolve the cached artifact and host PTY implementation.
+- Resolve the clean-source artifact, its build runtime, and host PTY
+  implementation.
 - Check transcript and status.
-  - Expected: output names the cache, script style, and artifact root.
+  - Expected: output names the manifest, matched source revision, binary and
+    runtime hashes, target, exact wrapper pin, script style, and artifact root.
   - Expected: any missing prerequisite exits nonzero instead of skipping.
 
 <details>
@@ -169,6 +172,13 @@ step("Open the caret TUI")
 val result = run_caret_pty_case("prerequisites")
 step("Send a prompt through the visible input")
 expect(result.stdout).to_contain("cached_artifact=")
+expect(result.stdout).to_contain("provenance_file=")
+expect(result.stdout).to_contain("source_commit_check=matched")
+expect(result.stdout).to_contain("verified_binary_sha256=")
+expect(result.stdout).to_contain("verified_runtime_path=")
+expect(result.stdout).to_contain("verified_runtime_sha256=")
+expect(result.stdout).to_contain("verified_target=")
+expect(result.stdout).to_contain("wrapper_native_pin=")
 expect(result.stdout).to_contain("script_style=")
 step("Check transcript and status")
 expect(result.stdout).to_contain(

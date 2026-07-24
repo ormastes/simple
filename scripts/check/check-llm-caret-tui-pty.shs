@@ -11,6 +11,8 @@ CARET_WRAPPER="${REPO_ROOT}/bin/caret"
 ARTIFACT_ROOT="${REPO_ROOT}/build/test-artifacts/03_system/app/llm_caret/feature/llm_caret_tui_pty"
 CASE_NAME=""
 SCRIPT_STYLE=""
+SHA256_TOOL=""
+HOST_TARGET=""
 FAILURES=0
 CASE_TIMEOUT_SECONDS=20
 
@@ -41,9 +43,79 @@ record_pass() {
     printf '%s\n' "case=${label} status=PASS artifact=${artifact}"
 }
 
+select_sha256_tool() {
+    if command -v shasum >/dev/null 2>&1; then
+        SHA256_TOOL="shasum"
+    elif command -v sha256sum >/dev/null 2>&1; then
+        SHA256_TOOL="sha256sum"
+    else
+        fail_prerequisite "sha256_utility_missing"
+    fi
+}
+
+sha256_file() {
+    path=$1
+    case "${SHA256_TOOL}" in
+        shasum)
+            shasum -a 256 "${path}" | awk '{print $1}'
+            ;;
+        sha256sum)
+            sha256sum "${path}" | awk '{print $1}'
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+detect_host_target() {
+    system=$(uname -s 2>/dev/null || printf unknown)
+    machine=$(uname -m 2>/dev/null || printf unknown)
+    case "${machine}" in
+        arm64|aarch64)
+            architecture="aarch64"
+            ;;
+        x86_64|amd64)
+            architecture="x86_64"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    case "${system}" in
+        Darwin)
+            printf '%s\n' "${architecture}-apple-darwin"
+            ;;
+        Linux)
+            if command -v getconf >/dev/null 2>&1 &&
+               getconf GNU_LIBC_VERSION >/dev/null 2>&1; then
+                printf '%s\n' "${architecture}-unknown-linux-gnu"
+            elif command -v ldd >/dev/null 2>&1 &&
+                 ldd --version 2>&1 | grep -i -F musl >/dev/null 2>&1; then
+                printf '%s\n' "${architecture}-unknown-linux-musl"
+            else
+                return 1
+            fi
+            ;;
+        FreeBSD)
+            printf '%s\n' "${architecture}-unknown-freebsd"
+            ;;
+        OpenBSD)
+            printf '%s\n' "${architecture}-unknown-openbsd"
+            ;;
+        NetBSD)
+            printf '%s\n' "${architecture}-unknown-netbsd"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 first_cached_artifact() {
     for candidate in \
         "${REPO_ROOT}/build/bootstrap/caret-package/caret" \
+        "${REPO_ROOT}/bin/release/${HOST_TARGET}/caret" \
         "${REPO_ROOT}/bin/release/aarch64-apple-darwin/caret" \
         "${REPO_ROOT}/bin/release/aarch64-apple-darwin-macho/caret" \
         "${REPO_ROOT}/bin/release/x86_64-apple-darwin/caret" \
@@ -62,18 +134,131 @@ first_cached_artifact() {
     return 1
 }
 
+provenance_value() {
+    key=$1
+    provenance=$2
+    awk -F= -v requested="${key}" '
+        $1 == requested {
+            sub(/^[^=]*=/, "")
+            matches += 1
+            value = $0
+        }
+        END {
+            if (matches == 1 && value != "") {
+                print value
+                exit 0
+            }
+            exit 1
+        }
+    ' "${provenance}"
+}
+
+current_source_commit() {
+    if [ -e "${REPO_ROOT}/.jj" ] &&
+       command -v jj >/dev/null 2>&1; then
+        working_copy_empty=$(
+            cd "${REPO_ROOT}" &&
+                jj log -r '@' --no-graph \
+                    -T 'if(empty, "true\n", "false\n")' 2>/dev/null
+        ) || return 1
+        [ "${working_copy_empty}" = "true" ] || return 1
+        if committed=$(
+            cd "${REPO_ROOT}" &&
+                jj log -r '@-' --no-graph -T 'commit_id ++ "\n"' 2>/dev/null
+        ); then
+            printf '%s' "${committed}"
+            return
+        fi
+    fi
+    if command -v git >/dev/null 2>&1 &&
+       git -C "${REPO_ROOT}" rev-parse --verify HEAD >/dev/null 2>&1; then
+        [ "$(git -C "${REPO_ROOT}" status --porcelain)" = "" ] || return 1
+        git -C "${REPO_ROOT}" rev-parse --verify HEAD
+        return
+    fi
+    return 1
+}
+
+require_sha256_value() {
+    field=$1
+    value=$2
+    if ! printf '%s\n' "${value}" |
+         LC_ALL=C grep -E '^[0-9a-f]{64}$' >/dev/null 2>&1; then
+        fail_prerequisite "${field}_invalid"
+    fi
+}
+
+verify_cached_artifact_provenance() {
+    provenance="${CACHED_ARTIFACT}.provenance"
+    [ -f "${provenance}" ] ||
+        fail_prerequisite "cached_caret_provenance_missing"
+
+    source_commit=$(provenance_value "source_commit" "${provenance}") ||
+        fail_prerequisite "provenance_source_commit_missing_or_duplicate"
+    binary_sha256=$(provenance_value "binary_sha256" "${provenance}") ||
+        fail_prerequisite "provenance_binary_sha256_missing_or_duplicate"
+    runtime_sha256=$(provenance_value "runtime_sha256" "${provenance}") ||
+        fail_prerequisite "provenance_runtime_sha256_missing_or_duplicate"
+    runtime_path=$(provenance_value "runtime_path" "${provenance}") ||
+        fail_prerequisite "provenance_runtime_path_missing_or_duplicate"
+    target=$(provenance_value "target" "${provenance}") ||
+        fail_prerequisite "provenance_target_missing_or_duplicate"
+
+    if ! printf '%s\n' "${source_commit}" |
+         LC_ALL=C grep -E '^([0-9a-f]{40}|[0-9a-f]{64})$' >/dev/null 2>&1; then
+        fail_prerequisite "provenance_source_commit_invalid"
+    fi
+    require_sha256_value "provenance_binary_sha256" "${binary_sha256}"
+    require_sha256_value "provenance_runtime_sha256" "${runtime_sha256}"
+    [ "${runtime_path}" = "bin/release/${target}/simple" ] ||
+        fail_prerequisite "provenance_runtime_path_invalid"
+    verified_runtime="${REPO_ROOT}/${runtime_path}"
+    [ -x "${verified_runtime}" ] ||
+        fail_prerequisite "provenance_runtime_missing_or_not_executable"
+
+    actual_binary_sha256=$(sha256_file "${CACHED_ARTIFACT}") ||
+        fail_prerequisite "cached_caret_hash_unavailable"
+    [ "${actual_binary_sha256}" = "${binary_sha256}" ] ||
+        fail_prerequisite "cached_caret_binary_hash_mismatch"
+    [ "${target}" = "${HOST_TARGET}" ] ||
+        fail_prerequisite "cached_caret_target_mismatch"
+    actual_runtime_sha256=$(sha256_file "${verified_runtime}") ||
+        fail_prerequisite "cached_caret_runtime_hash_unavailable"
+    [ "${actual_runtime_sha256}" = "${runtime_sha256}" ] ||
+        fail_prerequisite "cached_caret_runtime_hash_mismatch"
+
+    committed_source=$(current_source_commit) ||
+        fail_prerequisite "current_source_revision_not_clean_or_unavailable"
+    [ "${committed_source}" = "${source_commit}" ] ||
+        fail_prerequisite "cached_caret_source_commit_mismatch"
+
+    printf '%s\n' "provenance_file=${provenance}"
+    printf '%s\n' "verified_source_commit=${source_commit}"
+    printf '%s\n' "source_commit_check=matched"
+    printf '%s\n' "verified_binary_sha256=${binary_sha256}"
+    printf '%s\n' "verified_runtime_path=${runtime_path}"
+    printf '%s\n' "verified_runtime_sha256=${runtime_sha256}"
+    printf '%s\n' "verified_target=${target}"
+}
+
 prepare_prerequisites() {
     mkdir -p "${ARTIFACT_ROOT}" || fail_prerequisite "artifact_directory_unavailable"
     [ -x "${CARET_WRAPPER}" ] || fail_prerequisite "bin_caret_not_executable"
     command -v script >/dev/null 2>&1 || fail_prerequisite "script_utility_missing"
     command -v stty >/dev/null 2>&1 || fail_prerequisite "stty_utility_missing"
+    command -v pgrep >/dev/null 2>&1 || fail_prerequisite "pgrep_utility_missing"
+    select_sha256_tool
+    HOST_TARGET=$(detect_host_target) ||
+        fail_prerequisite "host_target_undetermined"
+    export HOST_TARGET
 
     CACHED_ARTIFACT=$(first_cached_artifact) ||
         fail_prerequisite "cached_caret_artifact_missing"
     export CACHED_ARTIFACT
+    verify_cached_artifact_provenance
 
     case "$(uname -s 2>/dev/null || printf unknown)" in
-        Darwin|FreeBSD|OpenBSD|NetBSD)
+        Darwin)
             SCRIPT_STYLE="bsd"
             ;;
         Linux)
@@ -84,11 +269,11 @@ prepare_prerequisites() {
             ;;
     esac
 
-    # The production wrapper must choose a repository cached artifact. An
-    # inherited debug override or source fallback would invalidate evidence.
-    unset SIMPLE_CARET_NATIVE
+    # Pin the verified repository artifact so the production wrapper cannot
+    # reselect a different cached binary between verification and execution.
+    SIMPLE_CARET_NATIVE="${CACHED_ARTIFACT}"
     SIMPLE_CARET_ALLOW_SOURCE_FALLBACK=0
-    export SIMPLE_CARET_ALLOW_SOURCE_FALLBACK
+    export SIMPLE_CARET_NATIVE SIMPLE_CARET_ALLOW_SOURCE_FALLBACK
 
     help_dir="${ARTIFACT_ROOT}/prerequisites"
     mkdir -p "${help_dir}" || fail_prerequisite "prerequisite_artifact_unavailable"
@@ -105,6 +290,8 @@ prepare_prerequisites() {
         fail_prerequisite "cached_caret_help_marker_missing"
     fi
     printf '%s\n' "cached_artifact=${CACHED_ARTIFACT}"
+    printf '%s\n' "wrapper_native_pin=${SIMPLE_CARET_NATIVE}"
+    printf '%s\n' "sha256_tool=${SHA256_TOOL}"
     printf '%s\n' "script_style=${SCRIPT_STYLE}"
 }
 
@@ -199,16 +386,41 @@ invoke_script() {
     (
         sleep "${CASE_TIMEOUT_SECONDS}"
         printf '%s\n' "timeout" >"${timeout_marker}"
-        kill -TERM "${driver_pid}" 2>/dev/null || :
-        sleep 1
-        kill -KILL "${driver_pid}" 2>/dev/null || :
+        terminate_process_tree "${driver_pid}"
     ) &
     watchdog_pid=$!
     wait "${driver_pid}"
     driver_status=$?
-    kill "${watchdog_pid}" 2>/dev/null || :
-    wait "${watchdog_pid}" 2>/dev/null || :
+    if [ -s "${timeout_marker}" ]; then
+        wait "${watchdog_pid}" 2>/dev/null || :
+    else
+        kill "${watchdog_pid}" 2>/dev/null || :
+        wait "${watchdog_pid}" 2>/dev/null || :
+    fi
     return "${driver_status}"
+}
+
+freeze_process_tree() {
+    root_pid=$1
+    kill -STOP "${root_pid}" 2>/dev/null || return
+    printf '%s\n' "${root_pid}"
+    descendants=$(pgrep -P "${root_pid}" 2>/dev/null || :)
+    for descendant in ${descendants}; do
+        freeze_process_tree "${descendant}"
+    done
+}
+
+terminate_process_tree() {
+    root_pid=$1
+    frozen_pids=$(freeze_process_tree "${root_pid}")
+    [ "${frozen_pids}" != "" ] || return
+    # Word splitting is intentional: every value originates from pgrep or the
+    # numeric PID returned by the shell.
+    kill -TERM ${frozen_pids} 2>/dev/null || :
+    kill -CONT ${frozen_pids} 2>/dev/null || :
+    sleep 1
+    kill -KILL ${frozen_pids} 2>/dev/null || :
+    printf '%s\n' "timeout_teardown=complete"
 }
 
 wait_bounded() {
@@ -218,15 +430,17 @@ wait_bounded() {
     (
         sleep "${CASE_TIMEOUT_SECONDS}"
         printf '%s\n' "timeout" >"${timeout_marker}"
-        kill -TERM "${child_pid}" 2>/dev/null || :
-        sleep 1
-        kill -KILL "${child_pid}" 2>/dev/null || :
+        terminate_process_tree "${child_pid}"
     ) &
     watchdog_pid=$!
     wait "${child_pid}"
     child_status=$?
-    kill "${watchdog_pid}" 2>/dev/null || :
-    wait "${watchdog_pid}" 2>/dev/null || :
+    if [ -s "${timeout_marker}" ]; then
+        wait "${watchdog_pid}" 2>/dev/null || :
+    else
+        kill "${watchdog_pid}" 2>/dev/null || :
+        wait "${watchdog_pid}" 2>/dev/null || :
+    fi
     return "${child_status}"
 }
 
@@ -323,7 +537,7 @@ run_pty_case() {
              "${capture}" >/dev/null 2>&1; then
         record_failure "${label}" "frame_exceeded_terminal_rows" "${case_dir}"
     elif [ "${input_kind}" = "utf8-edit" ] &&
-         ! grep -a -F "a界c!" "${capture}" >/dev/null 2>&1; then
+         ! grep -a -F "You: a界c!" "${capture}" >/dev/null 2>&1; then
         record_failure "${label}" "utf8_edited_submission_missing" "${case_dir}"
     else
         record_pass "${label}" "${case_dir}"

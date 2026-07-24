@@ -28,7 +28,7 @@ root_commands_registry_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -115,6 +115,75 @@ expect(findRootCommand("/missing").found).to_be(false)
 
 </details>
 
+#### should derive lookup admission and visibility for every registry record
+
+- Derive lookup identities from each registry record
+   - Expected: canonical and slash lookup forms identify the same registry record
+- Resolve every alias to the same canonical record
+   - Expected: every alias reports its canonical command and matched alias
+- Compare admission and visibility with record flags
+   - Expected: default admission and visible membership equal `enabled and not hidden`
+   - Expected: hidden-feature admission equals `enabled`
+- Require hidden and disabled registry coverage
+   - Expected: hiddenCount is greater than `0`
+   - Expected: disabledCount is greater than `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 44 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Derive lookup identities from each registry record")
+val registry = rootCommandRegistry()
+val visible = visibleRootCommands()
+var hiddenCount = 0
+var disabledCount = 0
+for command in registry:
+    val canonical = findRootCommand(command.name)
+    expect(canonical.found).to_be(true)
+    expect(canonical.command.name).to_equal(command.name)
+    expect(canonical.command.slashName).to_equal(command.slashName)
+    expect(canonical.matchedAlias).to_equal("")
+
+    val slash = findRootCommand(command.slashName)
+    expect(slash.found).to_be(true)
+    expect(slash.command.name).to_equal(canonical.command.name)
+    expect(slash.command.slashName).to_equal(canonical.command.slashName)
+    expect(slash.matchedAlias).to_equal("")
+
+    step("Resolve every alias to the same canonical record")
+    for alias in command.aliases:
+        val aliasLookup = findRootCommand(alias)
+        expect(aliasLookup.found).to_be(true)
+        expect(aliasLookup.command.name).to_equal(canonical.command.name)
+        expect(aliasLookup.command.slashName).to_equal(canonical.command.slashName)
+        expect(aliasLookup.matchedAlias).to_equal(alias)
+
+    step("Compare admission and visibility with record flags")
+    val expectedDefaultAdmission = command.enabled and not command.hidden
+    expect(admitRootCommand(command.name, false).found).to_equal(expectedDefaultAdmission)
+    expect(admitRootCommand(command.name, true).found).to_equal(command.enabled)
+    var isVisible = false
+    for visibleCommand in visible:
+        if visibleCommand.name == command.name:
+            isVisible = true
+    expect(isVisible).to_equal(expectedDefaultAdmission)
+
+    if command.hidden:
+        hiddenCount = hiddenCount + 1
+    if not command.enabled:
+        disabledCount = disabledCount + 1
+
+step("Require hidden and disabled registry coverage")
+expect(hiddenCount).to_be_greater_than(0)
+expect(disabledCount).to_be_greater_than(0)
+```
+
+</details>
+
 #### should model disabled and hidden command behavior
 
 - Hidden commands resolve but are excluded from visible summaries
@@ -189,8 +258,8 @@ expect(rootCommandsSourceLinesModeled()).to_equal(754)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
