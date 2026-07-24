@@ -273,3 +273,19 @@ implementation-aggregate-return-source-accepted-runtime-proof-pending
   build integration. Runtime proof remains pending: the capped full Stage 4
   rebuild was not repeated, and same-process A-to-B reset/skip-MIR evidence is
   still a release-evidence gap. Host and QEMU gates therefore remain pending.
+- continuation-2026-07-25-wm-material: The canonical
+  `SharedWmScene -> DrawIrComposition` window owner now applies snapshot
+  material only to WM body/titlebar surfaces. With no snapshot it retains the
+  exact nine-command legacy RECT/text stream. With a snapshot it preserves
+  theme/family/source/manifest/material provenance, opaque solid fallback,
+  border/radius, canonical backdrop request and 170% saturation, active versus
+  inactive ordered/inset shadow metadata, the first Engine2D-compatible outer
+  shadow, and title typography measured at the package family/size. Shadow and
+  control primitives remain unstyled. Three bounded high-capability reviews
+  rejected provenance, invented-gradient, legacy-test, and font-style defects
+  before accepting the corrected source. Engine2D still has no backdrop
+  sampling or multi-shadow realization, and `ThemeRenderSnapshot` still lacks
+  typed package gradient stops; the command declares those capabilities
+  unavailable and uses the solid fallback rather than inventing colors.
+  Focused specs are updated but not executed because the available Stage 3
+  bootstrap artifact has no test/check command.

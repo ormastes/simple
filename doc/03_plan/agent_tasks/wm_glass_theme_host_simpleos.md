@@ -337,3 +337,5 @@ is historical.
 6. Complete window-surface material projection at its WM/Draw-IR owner. Keep
    legacy widget command shape exact, do not attach window glass effects to
    buttons, and use only Engine2D-consumed canonical fallback/style keys.
+   Source projection is high-review accepted; add typed package gradient stops
+   to `ThemeRenderSnapshot` before claiming gradient pixel parity.
