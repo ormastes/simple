@@ -80,6 +80,20 @@ run_json_probe() {
     ! grep -Fq 'Found ' "$work_dir/$label.json" || { echo "error=${label}_human_output"; exit 1; }
 }
 
+run_jsonl_probe() {
+    label=$1
+    expected_rc=$2
+    shift 2
+    set +e
+    (cd "$work_dir" && run_with_timeout env SIMPLE_BOOTSTRAP= SIMPLE_RUNTIME_PATH= SIMPLE_LIB="$repo_root/src" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_FRONTEND_DELEGATED=1 "$@") >"$work_dir/$label.jsonl" 2>"$work_dir/$label.err"
+    rc=$?
+    set -e
+    echo "${label}_rc=$rc"
+    [ "$rc" -eq "$expected_rc" ] || { echo "error=${label}_unexpected_exit"; exit 1; }
+    [ ! -s "$work_dir/$label.err" ] || { echo "error=${label}_jsonl_stderr_not_empty"; exit 1; }
+    run_with_timeout env SIMPLE_BOOTSTRAP= SIMPLE_RUNTIME_PATH= SIMPLE_LIB="$repo_root/src" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_FRONTEND_DELEGATED=1 "$SIMPLE_BINARY" run "$repo_root/scripts/check/validate-jsonl.spl" "$work_dir/$label.jsonl" || { echo "error=${label}_invalid_jsonl"; exit 1; }
+}
+
 printf '%s\n' '{"status":"valid"}' >"$work_dir/valid.json"
 printf '%s\n' '{"status":' >"$work_dir/malformed.json"
 printf '%s\n' '{"status":"valid"}' 'trailing human output' >"$work_dir/trailing.json"
@@ -140,19 +154,18 @@ grep -Fq 'W001' "$work_dir/lint_directory.out" || { echo 'error=lint_directory_w
 grep -Fq 'D001' "$work_dir/lint_directory.out" || { echo 'error=lint_directory_direct_write_rule_missing'; exit 1; }
 grep -Fq 'PARSE001' "$work_dir/lint_directory.out" || { echo 'error=lint_directory_parse_rule_missing'; exit 1; }
 grep -Fq 'Lint failed in 1 file(s)' "$work_dir/lint_directory.out" || { echo 'error=lint_directory_summary_missing'; exit 1; }
-run_probe lint_json_deny 1 "$SIMPLE_BINARY" lint "$work_dir/lint_deny.spl" --json
-grep -Fq '"type":"lint-diagnostic"' "$work_dir/lint_json_deny.out" || { echo 'error=lint_json_diagnostic_missing'; exit 1; }
-grep -Fq '"code":"STUB003"' "$work_dir/lint_json_deny.out" || { echo 'error=lint_json_stub_rule_missing'; exit 1; }
-grep -Fq '"code":"COLL001"' "$work_dir/lint_json_deny.out" || { echo 'error=lint_json_collection_rule_missing'; exit 1; }
-grep -Fq '"type":"lint-file-summary"' "$work_dir/lint_json_deny.out" || { echo 'error=lint_json_summary_missing'; exit 1; }
+run_jsonl_probe lint_json_deny 1 "$SIMPLE_BINARY" lint "$work_dir/lint_deny.spl" --json
+grep -Fq '"type":"lint-diagnostic"' "$work_dir/lint_json_deny.jsonl" || { echo 'error=lint_json_diagnostic_missing'; exit 1; }
+grep -Fq '"code":"STUB003"' "$work_dir/lint_json_deny.jsonl" || { echo 'error=lint_json_stub_rule_missing'; exit 1; }
+grep -Fq '"code":"COLL001"' "$work_dir/lint_json_deny.jsonl" || { echo 'error=lint_json_collection_rule_missing'; exit 1; }
+grep -Fq '"type":"lint-file-summary"' "$work_dir/lint_json_deny.jsonl" || { echo 'error=lint_json_summary_missing'; exit 1; }
 aggregate='{"type":"lint-summary","status":"failed","failed_files":1}'
-aggregate_count=$(grep -Fxc "$aggregate" "$work_dir/lint_json_deny.out" || true)
+aggregate_count=$(grep -Fxc "$aggregate" "$work_dir/lint_json_deny.jsonl" || true)
 [ "$aggregate_count" -eq 1 ] || { echo 'error=lint_json_aggregate_summary_wrong'; exit 1; }
-run_with_timeout env SIMPLE_BOOTSTRAP= SIMPLE_RUNTIME_PATH= SIMPLE_LIB="$repo_root/src" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_FRONTEND_DELEGATED=1 "$SIMPLE_BINARY" run "$repo_root/scripts/check/validate-jsonl.spl" "$work_dir/lint_json_deny.out" || { echo 'error=lint_json_invalid_line'; exit 1; }
-awk 'NF && $0 !~ /^\{"type":"lint-(diagnostic|file-summary|summary|error|fix-summary)"/ { exit 1 }' "$work_dir/lint_json_deny.out" || { echo 'error=lint_json_non_json_line'; exit 1; }
-! grep -Fq 'Found ' "$work_dir/lint_json_deny.out" || { echo 'error=lint_json_human_output'; exit 1; }
-run_probe lint_invalid_profile 2 "$SIMPLE_BINARY" lint "$repo_root/test/fixtures/pure_simple_tooling/clean.spl" --profile=relaible --json
-grep -Fq 'unknown profile: relaible' "$work_dir/lint_invalid_profile.out" || { echo 'error=lint_invalid_profile_accepted'; exit 1; }
+awk 'NF && $0 !~ /^\{"type":"lint-(diagnostic|file-summary|summary|error|fix-summary)"/ { exit 1 }' "$work_dir/lint_json_deny.jsonl" || { echo 'error=lint_json_non_json_line'; exit 1; }
+! grep -Fq 'Found ' "$work_dir/lint_json_deny.jsonl" || { echo 'error=lint_json_human_output'; exit 1; }
+run_jsonl_probe lint_invalid_profile 2 "$SIMPLE_BINARY" lint "$repo_root/test/fixtures/pure_simple_tooling/clean.spl" --profile=relaible --json
+grep -Fq 'unknown profile: relaible' "$work_dir/lint_invalid_profile.jsonl" || { echo 'error=lint_invalid_profile_accepted'; exit 1; }
 echo 'essential_lint_smoke=true'
 
 # Duplicate checker: execute from outside the repo so raw-source CLI fallback fails.
