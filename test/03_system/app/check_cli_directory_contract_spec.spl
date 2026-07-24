@@ -3,7 +3,7 @@
 use std.spec.*
 use std.sffi.cli.{cli_get_args}
 use std.io_runtime.{env_get}
-use std.nogc_sync_mut.io.file_ops.{file_exists}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read}
 
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 
@@ -63,3 +63,31 @@ describe "simple check directory targets":
         expect(stdout).to_contain("\"checked\":0")
         expect(stdout).to_contain("\"files\":0")
         expect(stdout).to_contain("\"errors\":1")
+
+    it "rejects mixed help before target discovery":
+        val missing = "test/fixtures/check/definitely_missing_mixed_help.spl"
+        val (stdout, stderr, code) = run_check(["--help", missing])
+        expect(code).to_equal(2)
+        expect(stdout).to_contain("help cannot be combined with files or other options")
+        expect(stdout.contains("file not found")).to_equal(false)
+
+    it "keeps sole help successful without launching a worker":
+        val (stdout, stderr, code) = run_check(["--help"])
+        expect(code).to_equal(0)
+        expect(stdout).to_contain("Usage: simple check")
+
+    it "rejects help followed by a command-like target":
+        val (stdout, stderr, code) = run_check(["--help", "check"])
+        expect(code).to_equal(2)
+        expect(stdout).to_contain("help cannot be combined with files or other options")
+
+    it "keeps zero-argument and direct-worker help semantics aligned":
+        val (stdout, stderr, code) = run_check([])
+        val worker = file_read("src/app/check/main.spl")
+        val validation_pos = worker.find("val option_error = check_option_error(args)") ?? -1
+        val help_pos = worker.find('if args.contains("-h") or args.contains("--help")') ?? -1
+
+        expect(code).to_equal(1)
+        expect(stdout).to_contain("Usage: simple check")
+        expect(validation_pos).to_be_greater_than(-1)
+        expect(help_pos).to_be_greater_than(validation_pos)

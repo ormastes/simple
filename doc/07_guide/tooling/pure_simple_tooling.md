@@ -213,6 +213,10 @@ evidence boundary for the important pure-Simple tooling lanes:
   deduplicated, and an explicit directory containing no `.spl` source fails
   instead of reporting `OK`; see the
   [directory-target report](../../08_tracking/bug/check_directory_target_false_green_2026-07-24.md).
+  After global-option parsing succeeds, help is valid only as the sole semantic
+  argument; mixed, repeated, or file-plus-help forms fail with exit 2 before
+  discovery or worker launch. Malformed global options retain the global
+  parser's exit 1.
   Multi-file check dispatch still
   isolates each source in its own worker and
   preserves ordered presentation options and last-option-wins JSON selection,
