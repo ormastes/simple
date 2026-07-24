@@ -2,8 +2,8 @@
 
 ## Status
 
-Open. Marker framing is fixed, but streaming builder state still loses surfaces
-before an alias is resolved.
+Open. Marker framing and alias indexing are fixed. The live gate reaches marker
+10, but parser allocation churn exceeds the current registry-growth ceiling.
 
 ## Reproduction
 
@@ -30,11 +30,11 @@ Required activation:
   matching.
 - `ModuleSurfaceBuilder` whole-struct return/assignment, assigned array `push`,
   and an alias bounds guard were added.
-- Final diagnostic after those fixes:
-  `invalid physical module surface index for alias:
-  path=src/lib/nogc_async_mut/cli/log_modes.spl index=8 len=2`.
-- The producer emitted nine release records before the alias failure, while the
-  retained surface array contained only two entries.
+- The apparent alias index `8` was the native tagged representation of stored
+  integer `1`. `Dict.get` is now presence-only and typed bracket reads perform
+  the required untag; an index-1 alias regression covers both maps.
+- The live stream now reaches marker 10 and requests termination correctly.
+- Current failure: `average_growth=38913`, above the `25000` ceiling.
 - No Stage-4 binary or bounded-slope PASS was produced.
 
 The checker self-test covers valid termination, early EOF, invalid heap, invalid
@@ -42,9 +42,18 @@ sequence, and out-of-order sequence while proving process-group cleanup.
 
 ## Next step
 
-Add bounded state diagnostics around the unique-source helper input, post-add
-builder, caller match assignment, and post-`ast_reset` builder. Preserve the
-four-field release record. Use that single run to distinguish self-hosted
-`Result<ModuleSurfaceBuilder, text>` transport loss from `ast_reset` invalidating
-the surface array or retained AST-backed values. Do not repeat the current live
-command without that instrumentation.
+A gated total-allocation probe measured each phase before being removed:
+
+- surface extraction: 73–128 registry entries per sampled physical module;
+- reset/release boundary: about 60 entries;
+- `parse_full_frontend`: 490–101361 entries, including 34933 for
+  `log_modes.spl`, 42835 for `args_and_os_commands.spl`, 101361 for
+  `main_and_help.spl`, and 57539 for `cli_helpers.spl`.
+
+`rt_heap_registry_count` is a no-GC diagnostic registry count; rich parser
+temporaries remain registered for process lifetime. The slope therefore
+measures parser allocation churn, not retained ModuleSurface size. Next work
+must profile and reduce repeated rich frontend materialization (starting with
+the high-allocation CLI modules), or replace the gate with an approved live
+retention metric. Do not delete semantic surface fields or raise the threshold:
+the probe shows surface construction is not the dominant cost.
