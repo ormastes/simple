@@ -7,6 +7,7 @@ requested source module even when another loaded module exports the same name.
 
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_definitions.*
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.common.config.{Logger}
 
@@ -136,3 +137,34 @@ describe "resolve_import_symbols 2-pass import resolver":
         if val driver_symbol_id = driver_id:
             if val backend_symbol_id = backend_id:
                 assert_not_equal(driver_symbol_id.id, backend_symbol_id.id)
+
+    it "resolves a module-qualified imported function call":
+        val log = make_logger()
+        val provider = parse_full_frontend("pub fn answer() -> i64:\n    42", "provider", "provider", log)
+        val consumer = parse_full_frontend("import provider\nfn main() -> i64:\n    provider.answer()", "consumer_qualified", "consumer_qualified", log)
+        var modules: Dict<text, any> = {}
+        modules["provider"] = provider
+        var lowering = HirLowering.with_filename("consumer_qualified")
+        lowering.modules_by_name = modules
+        val hir = lowering.lower_module(consumer)
+
+        expect(hir.symbols.lookup("provider").?).to_equal(true)
+        expect(hir.errors.len()).to_equal(0)
+        for fn_ in hir.functions.values():
+            if fn_.name == "main":
+                match fn_.body.stmts[0].kind:
+                    case HirStmtKind.Expr(expr):
+                        match expr.kind:
+                            case HirExprKind.Call(callee, _, _):
+                                match callee.kind:
+                                    case HirExprKind.NamedVar(symbol, _):
+                                        if val callable = hir.symbols.get_symbol(symbol):
+                                            expect(callable.defining_module.unwrap()).to_equal("provider")
+                                        else:
+                                            assert_true(false)
+                                    case _:
+                                        assert_true(false)
+                            case _:
+                                assert_true(false)
+                    case _:
+                        assert_true(false)

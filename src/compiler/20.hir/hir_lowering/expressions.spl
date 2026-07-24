@@ -309,6 +309,35 @@ impl HirLowering:
                     val fld_base_t: Expr = base
                     val fld_name_t: text = field
                     val fld_lowered_base = self.lower_hir_expr(fld_base_t)
+                    # Module imports are namespaces, not runtime values. A
+                    # qualified imported function must lower to its defining
+                    # function symbol before MIR call lowering.
+                    var fld_module_base_sym: SymbolId? = nil
+                    match fld_lowered_base.kind:
+                        case HirExprKind.Var(fld_base_sym):
+                            fld_module_base_sym = fld_base_sym
+                        case HirExprKind.NamedVar(fld_base_sym, _):
+                            fld_module_base_sym = fld_base_sym
+                        case _: ()
+                    if val fld_base_sym = fld_module_base_sym:
+                        val fld_base_symbol = self.symbols.get_symbol_raw(fld_base_sym.id)
+                        if fld_base_symbol != nil:
+                            match fld_base_symbol.kind:
+                                case SymbolKind.Module:
+                                    if val module_name = fld_base_symbol.defining_module:
+                                        var module_callable: SymbolId? = nil
+                                        for candidate in self.symbols.symbols.values():
+                                            if val candidate_module = candidate.defining_module:
+                                                if candidate_module == module_name:
+                                                    match candidate.kind:
+                                                        case SymbolKind.Function:
+                                                            if candidate.name == fld_name_t or candidate.name.ends_with("." + fld_name_t):
+                                                                module_callable = candidate.id
+                                                        case _: ()
+                                        if val resolved_callable = module_callable:
+                                            val callable_name = self.symbols.symbol_display_name(resolved_callable, fld_name_t)
+                                            return HirExpr(kind: HirExprKind.NamedVar(resolved_callable, callable_name), type_: nil, span: e.span)
+                                case _: ()
                     # Numeric tuple positional access (`t.0`, `t.1`, ...):
                     # route through HirExprKind.Index (rt_array_get at
                     # runtime) instead of the generic struct-field path

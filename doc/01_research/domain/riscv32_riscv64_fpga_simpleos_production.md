@@ -212,3 +212,22 @@ targets. They do not support replacing execution with metadata or PASS markers.
 The recommended strategy is compiler-first modular integration of the existing
 Simple models, with QEMU as artifact/platform oracle and VexRiscv as optional
 differential oracle, followed by generated-RTL and physical-board proof.
+
+<!-- codex-research -->
+## Stage-Boundary Metadata ABI
+
+Compiler-internal struct and enum layout is not a stable wire contract. The
+[Rust Reference](https://doc.rust-lang.org/stable/reference/type-layout.html)
+explicitly separates memory layout from function-call ABI and gives the default
+representation only limited guarantees. The
+[WebAssembly Component Model Canonical ABI](https://github.com/WebAssembly/component-model/blob/main/design/mvp/CanonicalABI.md)
+therefore lowers records field-by-field and variants as a checked discriminant
+plus payload lanes rather than transporting a producer's native aggregate
+layout.
+
+The applicable minimum for Simple is a version-local primitive carrier:
+fixed-width integer flags/tags plus owned text arrays, strict bounds/length/tag
+validation, and reconstruction of compiler-owned enums/structs only at the
+consumer. Unknown tags, mismatched parallel arrays, and ambiguous identities
+must fail closed. This is narrower than a general serializer and directly
+addresses the observed self-hosted ABI boundary.

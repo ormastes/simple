@@ -233,3 +233,29 @@ implementation-milestone-0-in-progress
   actual entry compilation, GHDL/formal, Linux login/`ls`, and physical FPGA
   evidence remain unqualified after the bootstrap/runner iteration cap. The
   bundle therefore remains `contract-not-ready`.
+- toolchain recovery 2026-07-24: recovered the retained clean63 compiler
+  object set by adding a bootstrap-only `rt_dict_insert -> rt_dict_set`
+  compatibility object and relinking it against `libsimple_native_all.a`.
+  The resulting pure-Simple bridge is
+  `build/stage4-ufcs/seed-bridge63-relinked/simple`; both runtime symbols are
+  present and `--version` succeeds. A dedicated scalar CLI stub also exposes
+  the already-linked pure-Simple `cli_compile` implementation as
+  `build/stage4-ufcs/seed-bridge63-relinked/vhdl-simple`.
+- toolchain blocker 2026-07-24: the dedicated VHDL compiler reaches
+  `compile_vhdl`, but both the minimal `@hardware` fixture and the tracked
+  RV32 protected entry fail through the existing cross-module
+  `CompileResult` aggregate boundary with an empty error payload. Three RV32
+  attempts were capped; no `.vhd` was produced. Evidence is under
+  `build/rtl-evidence/`. The next compiler lane must qualify the canonical
+  aggregate-type/enum transport fixes before repeating RV32/RV64 generation.
+- compiler repair 2026-07-24: parallel review confirmed that module-local
+  SymbolIds collide for the two unrelated `CompileResult` enums. The isolated
+  lane now canonicalizes named MIR types by defining module, makes
+  `lower_module` adopt each module's SymbolTable, and canonicalizes the nested
+  spread-field path. A focused source regression records every owner path.
+  Verification is not complete: the interpreter test remained CPU-bound for
+  the bounded window, direct check exited 8 without diagnostics, and lint
+  exposed pre-existing collection-policy errors plus a parser failure in the
+  attempted behavioral regression. That behavioral addition was removed; no
+  deployment or RTL claim is authorized by this evidence. Any remote snapshot
+  remains WIP and must not advance `main` before a fresh bounded verification.

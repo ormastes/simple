@@ -1968,7 +1968,8 @@ impl MirLowering:
                         if fi < known_names.len() and known_names[fi] != "" and not self.class_type_names.has(known_names[fi]) and self.struct_field_order.has(known_names[fi]):
                             val nested_symbol = self.symbols.lookup_or_invalid(known_names[fi])
                             if nested_symbol.is_valid():
-                                spread_field_type = MirType(kind: MirTypeKind.Struct(nested_symbol))
+                                spread_field_type = MirType(kind: MirTypeKind.Struct(
+                                    self.canonical_mir_type_symbol(nested_symbol)))
                     var spread_b = self.builder
                     val spread_field_val = spread_b.emit_get_field(mir_operand_copy(spread_local), fi, spread_field_type)
                     self.builder = spread_b
@@ -2085,9 +2086,11 @@ impl MirLowering:
                 merged.push(name_i)
                 mi = mi + 1
             self.struct_field_type_name[struct_name] = merged
-        val struct_ty = MirType(kind: MirTypeKind.Struct(symbol))
+        val canonical_symbol = self.canonical_mir_type_symbol(symbol)
+        val struct_ty = MirType(kind: MirTypeKind.Struct(canonical_symbol))
         var b = self.builder
-        val dest = b.emit_aggregate(AggregateKind.Struct(symbol), ops, struct_ty)
+        val dest = b.emit_aggregate(AggregateKind.Struct(canonical_symbol), ops,
+            struct_ty)
         self.builder = b
         # Track dest local -> struct NAME so a later `p.x` field read can recover
         # the field ordering (the pipeline has no expr type-inference).
@@ -2672,6 +2675,8 @@ impl MirLowering:
                 lw.struct_method_return_is_array = self.struct_method_return_is_array
                 lw.enum_payload_struct_names = self.enum_payload_struct_names
                 lw.enum_variant_index = self.enum_variant_index
+                lw.canonical_type_symbols = self.canonical_type_symbols
+                lw.next_canonical_type_symbol = self.next_canonical_type_symbol
                 lw.global_symbol_ids = self.global_symbol_ids
                 var b = lw.builder
                 b.begin_function(gen_symbol, gen_name, sig, lam.span)
@@ -2709,6 +2714,8 @@ impl MirLowering:
                             lw.struct_value_syms[loaded_local.id] = capture_struct ?? ""
                         cap_i = cap_i + 1
                 val result = lw.lower_expr(body)
+                self.canonical_type_symbols = lw.canonical_type_symbols
+                self.next_canonical_type_symbol = lw.next_canonical_type_symbol
                 var b2 = lw.builder
                 if not b2.current_block_has_explicit_terminator():
                     b2.terminate_return(Some(mir_operand_copy(result)))
