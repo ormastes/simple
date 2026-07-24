@@ -912,3 +912,24 @@ the interning seed (cranelift; `bin/release` swap intentionally deferred). Do NO
 native-build the whole compiler with the deployed pre-interning binary — that is the
 O(n²) trap. Harness has no generics/monomorphization; a separate mono-phase O(n²),
 if any, is not covered by this (the observed blowup was parse, which is fixed).
+
+### Update — fresh interning binary built (315s) + recipe gotchas
+
+Built the first self-hosted binary carrying the interning fix, via the interning
+seed `src/compiler_rust/target/bootstrap/simple` (17:33, grep `rt_string_new_literal`=4),
+cranelift one-binary of compiler+app+lib+10_tooling:
+- Result: `/tmp/perfscan/fullbuild/simple`, grep **rt_string_new_literal=1** (all
+  prior available binaries = 0 — this is the first). Build **315s total** (212s
+  compile + 103s link, 1389 files, rc=0) — the correctly-configured **seed**-driven
+  build; the 4.5h figure was the pre-fix self-hosted binary wrongly used as the
+  compiler (~50× penalty). This alone demonstrates the practical fix: build via the
+  Rust seed, never the deployed pre-interning binary.
+- Recipe gotchas for the redeploy: `SIMPLE_NO_STUB_FALLBACK=1` + `SIMPLE_BOOTSTRAP_STAGE4=1`
+  hard-fail the Stage4 symbol-closure at link on `rt_vulkan_*` (GPU externs the CLI
+  pulls; no archive owner in core-c-bootstrap). Dropping STAGE4 +
+  `SIMPLE_ALLOW_FREESTANDING_STUBS=1` links, but the STAGE4-stripped binary's CLI
+  arg-dispatch is inert (blank `--version`) — the known seed-run arg-alias quirk. So
+  a FUNCTIONAL interning redeploy needs the full bootstrap flow (GPU runtime bundle
+  present so the Stage4 closure passes), not this stripped validation shortcut.
+- Net: interning-active proven (fullbuild grep=1); linear parse proven (stage3 to
+  412K chars); `bin/release` intentionally left untouched.
