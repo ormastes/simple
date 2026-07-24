@@ -514,7 +514,8 @@ impl<'a> MirLowerer<'a> {
                             let boxed_index = {
                                 let needs_int_boxing = matches!(
                                     index.ty,
-                                    TypeId::I16
+                                    TypeId::I8
+                                        | TypeId::I16
                                         | TypeId::I32
                                         | TypeId::I64
                                         | TypeId::U8
@@ -522,7 +523,7 @@ impl<'a> MirLowerer<'a> {
                                         | TypeId::U32
                                         | TypeId::U64
                                 );
-                                let needs_bool_boxing = index.ty == TypeId::BOOL || index.ty == TypeId::I8;
+                                let needs_bool_boxing = index.ty == TypeId::BOOL;
                                 if needs_int_boxing {
                                     self.with_func(|func, current_block| {
                                         let boxed = func.new_vreg();
@@ -590,7 +591,8 @@ impl<'a> MirLowerer<'a> {
                                 let needs_int_boxing = !elem_is_heap
                                     && matches!(
                                         value.ty,
-                                        TypeId::I16
+                                        TypeId::I8
+                                            | TypeId::I16
                                             | TypeId::I32
                                             | TypeId::I64
                                             | TypeId::U8
@@ -599,8 +601,7 @@ impl<'a> MirLowerer<'a> {
                                             | TypeId::U64
                                     );
                                 let needs_float_boxing = !elem_is_heap && matches!(value.ty, TypeId::F32 | TypeId::F64);
-                                let needs_bool_boxing =
-                                    !elem_is_heap && (value.ty == TypeId::BOOL || value.ty == TypeId::I8);
+                                let needs_bool_boxing = !elem_is_heap && value.ty == TypeId::BOOL;
                                 if needs_int_boxing {
                                     self.with_func(|func, current_block| {
                                         let boxed = func.new_vreg();

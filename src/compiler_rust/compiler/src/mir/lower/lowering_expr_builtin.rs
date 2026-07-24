@@ -386,10 +386,12 @@ impl<'a> MirLowerer<'a> {
                 // I64/U64 are handled above via the raw-to-string bypass (both can
                 // exceed the 61-bit boxed-int range); this list only covers widths
                 // that always fit.
-                let needs_int_boxing =
-                    matches!(arg.ty, TypeId::I16 | TypeId::I32 | TypeId::U8 | TypeId::U16 | TypeId::U32);
+                let needs_int_boxing = matches!(
+                    arg.ty,
+                    TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::U8 | TypeId::U16 | TypeId::U32
+                );
                 let needs_float_boxing = matches!(arg.ty, TypeId::F32 | TypeId::F64);
-                let needs_bool_boxing = arg.ty == TypeId::BOOL || arg.ty == TypeId::I8;
+                let needs_bool_boxing = arg.ty == TypeId::BOOL;
                 if needs_int_boxing || needs_float_boxing || needs_bool_boxing {
                     let boxed = if needs_bool_boxing {
                         // Use rt_value_bool for bool → RuntimeValue conversion

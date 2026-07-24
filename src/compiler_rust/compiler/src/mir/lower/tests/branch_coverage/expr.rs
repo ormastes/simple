@@ -137,10 +137,11 @@ fn fstring_multiple_parts() {
 #[test]
 fn tuple_bool_boxing() {
     // Tuple with bool element should call rt_value_bool
-    let mir = compile_to_mir("fn test():\n    val t = (true, 42)\n").unwrap();
+    let mir = compile_to_mir("fn test():\n    val t = (true, false)\n").unwrap();
     assert!(has_inst(&mir, |i| {
         matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_value_bool"))
     }));
+    assert!(!has_inst(&mir, |i| matches!(i, MirInst::BoxInt { .. })));
 }
 
 #[test]
@@ -150,25 +151,78 @@ fn array_bool_boxing() {
     assert!(has_inst(&mir, |i| {
         matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_value_bool"))
     }));
+    assert!(!has_inst(&mir, |i| matches!(i, MirInst::BoxInt { .. })));
+}
+
+#[test]
+fn tuple_i8_uses_integer_boxing() {
+    let mir = compile_to_mir("fn test():\n    val t = (1 as i8, -2 as i8)\n").unwrap();
+    assert!(has_inst(&mir, |i| matches!(i, MirInst::BoxInt { .. })));
+    assert!(!has_inst(&mir, |i| {
+        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_value_bool"))
+    }));
+}
+
+#[test]
+fn array_i8_uses_integer_boxing() {
+    let mir = compile_to_mir("fn test():\n    val a: [i8] = [1 as i8, -2 as i8]\n").unwrap();
+    assert!(has_inst(&mir, |i| matches!(i, MirInst::BoxInt { .. })));
+    assert!(!has_inst(&mir, |i| {
+        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_value_bool"))
+    }));
+}
+
+#[test]
+fn string_value_i8_uses_integer_boxing() {
+    let mir = compile_to_mir("fn test():\n    val x: i8 = -7 as i8\n    val s = \"{x}\"\n").unwrap();
+    assert!(has_inst(&mir, |i| matches!(i, MirInst::BoxInt { .. })));
+    assert!(!has_inst(&mir, |i| {
+        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_value_bool"))
+    }));
+}
+
+#[test]
+fn print_i8_uses_integer_boxing() {
+    let mir = compile_to_mir("fn test():\n    val x: i8 = -7 as i8\n    print x\n").unwrap();
+    assert!(has_inst(&mir, |i| matches!(i, MirInst::BoxInt { .. })));
+    assert!(!has_inst(&mir, |i| {
+        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_value_bool"))
+    }));
 }
 
 #[test]
 fn print_bool_no_extra_boxing() {
-    // print with bool interpolation: bool goes directly to rt_value_to_string without boxing
-    // (BOOL type is not in the int/float boxing lists for rt_value_to_string)
+    // The generic RuntimeValue conversion must use the dedicated BOOL path.
     let mir = compile_to_mir("fn test():\n    val b: bool = true\n    print \"{b}\"\n").unwrap();
     assert!(has_inst(&mir, |i| {
         matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_value_to_string"))
     }));
+    assert!(has_inst(&mir, |i| {
+        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_value_bool"))
+    }));
+    assert!(!has_inst(&mir, |i| matches!(i, MirInst::BoxInt { .. })));
+}
+
+#[test]
+fn print_bool_uses_boolean_boxing() {
+    let mir = compile_to_mir("fn test():\n    val b: bool = true\n    print b\n").unwrap();
+    assert!(has_inst(&mir, |i| {
+        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_value_bool"))
+    }));
+    assert!(!has_inst(&mir, |i| matches!(i, MirInst::BoxInt { .. })));
 }
 
 #[test]
 fn string_interp_bool_no_extra_boxing() {
-    // String interpolation with bool: bool goes directly to rt_value_to_string without boxing
+    // String interpolation preserves BOOL's dedicated RuntimeValue representation.
     let mir = compile_to_mir("fn test():\n    val b: bool = true\n    val s = \"{b}\"\n").unwrap();
     assert!(has_inst(&mir, |i| {
         matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_value_to_string"))
     }));
+    assert!(has_inst(&mir, |i| {
+        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_value_bool"))
+    }));
+    assert!(!has_inst(&mir, |i| matches!(i, MirInst::BoxInt { .. })));
 }
 
 // =============================================================================

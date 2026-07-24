@@ -345,3 +345,16 @@ is historical.
    Source projection and typed package gradient stops are high-review accepted.
    Pixel specs exist; execute them with the next exact-current full CLI before
    claiming gradient parity.
+8. Repair Engine2D glass realization in evidence-sized increments: first make
+   linear gradients honor the canonical rounded silhouette without changing a
+   backend trait; then design a bounded alpha-mask shadow raster that consumes
+   the selected outer layer's spread/blur and expand snapshot-only embedding
+   bounds. Never route Aetheric's 76px blur through the existing quadratic
+   framebuffer blur or approximate inset/additional layers.
+9. Strengthen host evidence with a contentless material fixture whose capture
+   anchors are derived from the generated snapshot and recorded beside the
+   material SHA. Generic color diversity is not glass-theme proof, and FIFO
+   compositor calls are not native winit input-ingress proof.
+10. Implement the missing ARM64 live QMP input/capture report and the admitted
+    x86/ARM SIMD capture comparator. Static ISA receipts and a one-frame RAMFB
+    screendump remain prerequisites, not completion evidence.

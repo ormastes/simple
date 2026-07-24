@@ -316,3 +316,28 @@ implementation-aggregate-return-source-accepted-runtime-proof-pending
   keyboard module, with parity matrices redirected to it. Independent review
   and a later fresh bootstrap cycle remain required; no host or QEMU evidence
   is claimed from this build.
+- continuation-2026-07-25-exact-current-v3: After rebasing onto
+  `origin/main@64c7cfb85d`, one fresh exact-current Cranelift cycle passed
+  Stage 2 (`7a3c74123825ee9289fe5432642e792b20cd4f80a781a79e8a6cef4839a07556`)
+  and Stage 3
+  (`d5274126129975d41ddf4df3af3d292ca103abd435fd2ed52d2eb71a1fcf6bd9`).
+  Stage 4 loaded all 1,554 sources, proving the allocation-facade and keyboard
+  collision repairs, then was killed by signal 9 during the known full-CLI
+  parse-memory balloon. The command will not be repeated in this cycle.
+  The verified Stage 3 compiler built and ran the dedicated aggregate-return
+  fixture with exact expected output for aliased same-name factories, forwarded
+  returns, methods, and nested `ThemePackage`. The broader aggregate script
+  stopped earlier because `stage4_struct_enum_array_probe.spl` returned code 5
+  in its primitive-array checks; that distinct regression is under isolated
+  diagnosis. No exact-current full CLI exists, so host and QEMU admission
+  remain closed.
+- continuation-2026-07-25-glass-runtime-audit: The canonical host wrapper
+  verifies scene transitions and framebuffer provenance but does not correlate
+  package gradient, radius, border, or shadow values to captured pixels.
+  Engine2D currently paints gradient fills without the declared rounded
+  silhouette, lowers only one outer shadow with blur hardcoded to zero, and
+  clips production-size shadow extents in the window embedding. Backdrop blur
+  is explicitly unavailable. The rounded-gradient defect has a focused,
+  ABI-neutral source/test correction under high-capability review; shadow
+  raster semantics, capture correlation, native event ingress, ARM live
+  input/capture, and cross-ISA SIMD comparison remain separate required gates.

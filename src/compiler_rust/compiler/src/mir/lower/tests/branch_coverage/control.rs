@@ -371,6 +371,18 @@ fn index_set_bool_value_boxing() {
 }
 
 #[test]
+fn index_set_i8_value_uses_integer_boxing() {
+    let mir = compile_to_mir("fn test():\n    var arr: [i8] = [1 as i8, 2 as i8]\n    arr[0] = -7 as i8\n").unwrap();
+    assert!(has_inst(&mir, |i| matches!(i, MirInst::BoxInt { .. })));
+    assert!(has_inst(&mir, |i| {
+        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_index_set"))
+    }));
+    assert!(!has_inst(&mir, |i| {
+        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_value_bool"))
+    }));
+}
+
+#[test]
 fn index_set_float_value_boxing() {
     // Setting a float value should box via BoxFloat
     let mir = compile_to_mir("fn test():\n    var arr = [1.0, 2.0]\n    arr[0] = 3.14\n").unwrap();

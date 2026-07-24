@@ -13,10 +13,17 @@ impl<'a> MirLowerer<'a> {
             // Box native-typed elements so they become RuntimeValues for the tuple
             let needs_int_boxing = matches!(
                 elem.ty,
-                TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
+                TypeId::I8
+                    | TypeId::I16
+                    | TypeId::I32
+                    | TypeId::I64
+                    | TypeId::U8
+                    | TypeId::U16
+                    | TypeId::U32
+                    | TypeId::U64
             );
             let needs_float_boxing = matches!(elem.ty, TypeId::F32 | TypeId::F64);
-            let needs_bool_boxing = elem.ty == TypeId::BOOL || elem.ty == TypeId::I8;
+            let needs_bool_boxing = elem.ty == TypeId::BOOL;
             if needs_int_boxing || needs_float_boxing || needs_bool_boxing {
                 let boxed = if needs_bool_boxing {
                     self.with_func(|func, current_block| {
@@ -231,10 +238,17 @@ impl<'a> MirLowerer<'a> {
                         .is_some_and(|ty| matches!(ty, HirType::Function { .. }));
                 let needs_int_boxing = matches!(
                     elem.ty,
-                    TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
+                    TypeId::I8
+                        | TypeId::I16
+                        | TypeId::I32
+                        | TypeId::I64
+                        | TypeId::U8
+                        | TypeId::U16
+                        | TypeId::U32
+                        | TypeId::U64
                 );
                 let needs_float_boxing = matches!(elem.ty, TypeId::F32 | TypeId::F64);
-                let needs_bool_boxing = elem.ty == TypeId::BOOL || elem.ty == TypeId::I8;
+                let needs_bool_boxing = elem.ty == TypeId::BOOL;
                 let pushed = if elem_is_function {
                     reg
                 } else if needs_bool_boxing {
@@ -291,10 +305,17 @@ impl<'a> MirLowerer<'a> {
             // Box native-typed elements so they become RuntimeValues for the array
             let needs_int_boxing = matches!(
                 elem.ty,
-                TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
+                TypeId::I8
+                    | TypeId::I16
+                    | TypeId::I32
+                    | TypeId::I64
+                    | TypeId::U8
+                    | TypeId::U16
+                    | TypeId::U32
+                    | TypeId::U64
             );
             let needs_float_boxing = matches!(elem.ty, TypeId::F32 | TypeId::F64);
-            let needs_bool_boxing = elem.ty == TypeId::BOOL || elem.ty == TypeId::I8;
+            let needs_bool_boxing = elem.ty == TypeId::BOOL;
             if needs_int_boxing || needs_float_boxing || needs_bool_boxing {
                 let boxed = if needs_bool_boxing {
                     self.with_func(|func, current_block| {
