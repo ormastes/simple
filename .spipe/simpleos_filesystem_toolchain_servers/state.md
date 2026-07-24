@@ -1039,3 +1039,15 @@ three bounded attempts found two compact parser-shape defects in
 `module_surface.spl`; the final `else` defect was replaced statically with an
 early-continue path after the attempt cap. No Stage4 streaming, live process
 observer, release marker, NFR-001 PASS, or filesystem/QEMU evidence is claimed.
+
+### 2026-07-24 ModuleSurface compiler admission
+
+Parallel parser-source review localized the moving final-dedent diagnostics to
+two unparenthesized multiline boolean predicates; parenthesizing them let
+discovery and compilation complete. The pure-Simple candidate built current
+`bootstrap_main.spl` with the bootstrap-only hosted runtime: 3 compiled, 671
+cached, 0 failed, output SHA-256
+`c5e67d5043aa416fc00ea64ba23968a6740a04fe7f144f094de8929ea0638f44`.
+`--version` reports `simple-bootstrap 1.0.0-beta`, and the canonical
+`candidate_frontend_smoke` passes. This admits the groundwork for the streaming
+slice; it is not Stage4 memory or SimpleOS/QEMU evidence.

@@ -836,3 +836,14 @@ that was simplified, the third reported an unsupported `else` shape in the
 duplicate-path branch. The branch now uses a reviewed early `continue`, but no
 fourth build was run. Stage4 streaming, release-marker emission, live
 process-group termination, and the bounded-memory gate remain RED.
+
+### 2026-07-24 compiler admission pass
+
+The apparent loop-dedent failures were recovery fallout from unparenthesized
+multiline `and`/`or` predicates in the newly added surface code. Parser-source
+comparison and highest-capability review selected the minimal parenthesized
+forms. A cache-preserving one-writer build then completed with 3 compiled, 671
+cached, and zero failed modules; the admitted compiler SHA-256 is
+`c5e67d5043aa416fc00ea64ba23968a6740a04fe7f144f094de8929ea0638f44`.
+Version and `candidate_frontend_smoke` pass. Stage4 streaming and the live slope
+observer remain the next bounded implementation slice.
