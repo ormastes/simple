@@ -1017,6 +1017,35 @@ filesystem, use `std.io_runtime` (`file_read`, `file_size`, `file_exists`,
 not just "the call returned ok". Grep a spec's imports for `file_ops` before
 trusting it as evidence of real IO.
 
+## Hardware-model probes (riscv / link_mux) — runner + mode rules
+
+Hardware `.spl` probes (`test/01_unit/lib/hardware/**`) are plain `run` probes
+gated by `scripts/check/check-riscv-hardware-gates.shs`, not SSpec — but the
+same false-green rules apply (conditional PASS markers only; final line
+`<NAME> PROBE: ALL PASS`).
+
+- **Execution mode is part of the spec.** The rv64 core/SoC/FPU models are
+  INTERPRETER-only (seed JIT mis-executes them); such probes go in the gate's
+  `INTERP_PROBES` list. Pure codec/mux probes (frame/mux/jtag_route) must pass
+  BOTH interpreter and jit. "Passes in main, fails under it" ⇒ retest with
+  `SIMPLE_EXECUTION_MODE=interpreter` before debugging the model.
+- **Runner landmines** (2026-07-24, see `doc/08_tracking/bug/`
+  `native_cli_run_std_hardware_brace_import_unresolved_2026-07-24.md`): the
+  deployed CLI's in-process `run` fails to resolve `std.hardware.*`
+  brace-imports. Delegate to the seed:
+  `SIMPLE_BOOTSTRAP_DRIVER=$PWD/src/compiler_rust/target/bootstrap/simple
+  bin/simple run <probe>` — or copy the CLI to a scratch name (`wjob`) with a
+  `simple_seed` sibling (also dodges earlyoom, which kills processes named
+  `simple`).
+- **Debug over the shared link:** the link_mux JTAG channel (remote_bitbang →
+  TAP → DTM/DMI → debug module → rv64 hart) is the in-model debugger — halt,
+  read/write GPRs and dpc, resume — proven by
+  `test/01_unit/lib/hardware/link_mux/jtag_debug_probe.spl`. Prefer extending
+  that probe over ad-hoc print-debugging of core state.
+- Feature knowledge lives in
+  `doc/00_llm_process/feature_expert/riscv_soc_linux/skill.md` — read it
+  before any "does X exist / why does it fail" hardware question.
+
 ## Reproduce-first for bug-fix specs
 
 A regression spec that was written *after* the fix is unproven — it may assert

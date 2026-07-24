@@ -56,7 +56,12 @@ placeholder stub today)**.
   GHDL tbs, IDCODE 0x15350067, Stages 1-3/5) + **AOP hart hooks**
   `src/lib/hardware/debug_hooks/hart_debug.spl` (repo `on pc{…} use … before`
   weave; `driver_pipeline.weave_aop` + `mir_aop_injection`). Also
-  `src/lib/hardware/link_mux/` (frame/mux/jtag_route — shared-link channel mux).
+  `src/lib/hardware/link_mux/` (frame/mux/jtag_route — shared-link channel mux;
+  one link carries log+term+jtag). Verified 2026-07-24: `frame_probe` /
+  `mux_probe` / `jtag_route_probe` ALL PASS interpreter+jit. The jtag channel
+  tunnels OpenOCD `remote_bitbang`; Phase 1 reached IDCODE only — the DMI/DM
+  extension (`jtag_debug_probe.spl`: halt / read-write GPR+dpc / resume against
+  the rv64 core model over the muxed link) is the in-model debugger.
 - **Synthesizable RTL** `examples/09_embedded/fpga_riscv/rtl/rv32_exec_core.vhd`
   is the ONLY real synthesizable CPU (rv32, no MMU, reference/oracle). The
   `fpga_linux` bundle generator (`src/lib/hardware/fpga_linux/riscv_fpga_linux.spl`)
@@ -81,10 +86,15 @@ placeholder stub today)**.
   for billions of insns; JIT currently mis-executes the core).
 - **rv32, `.spl` model:** MMU(Sv32)+S-mode+4 GiB exist; missing = a **bootable
   rv32 SoC-top** (only `soc_top_64` boots) + an rv32 Linux kernel build.
-- **Either on FPGA:** no synthesizable rv64 core; synthesizable rv32 `.vhd` lacks
-  MMU/4 GiB; no `.spl`→Verilog backend. Board present (Xilinx ML Carrier Card,
-  FT4232H JTAG+UART, Vivado 2025.2) — the blocker is the missing synthesizable
-  core, not hardware access.
+- **Either on FPGA:** synthesizable rv64 core EXISTS since 2026-07-24 —
+  hand-written `examples/09_embedded/fpga_riscv/rtl/rv64_exec_core.vhd`
+  (RV64IM+minimal Zicsr, M-mode, no MMU/FPU/C; sim gates green: GHDL smoke
+  `RV64_UART_MARKER_SEEN`, Adler-32 soak golden == host == `.spl` model
+  three-way, 20/20 directed DIV/REM/W-op edge cases) — **not yet board-proven**;
+  Vivado synth via `build_k26_rv64.shs` + KV260 10-min soak pending. Linux on
+  FPGA still needs MMU in RTL. Synthesizable rv32 `.vhd` lacks MMU/4 GiB; no
+  `.spl`→Verilog backend (`generate_rv64_vhdl.shs` stays BLOCKED-honest for the
+  generator path). Board present (KV260, FT4232H JTAG+UART, Vivado 2025.2).
 
 ## Landmines
 
@@ -95,3 +105,13 @@ placeholder stub today)**.
   (soc/boot probes FAIL). Fix the JIT codegen first.
 - WC caveat: leaked jj conflict markers fail the gates at parse time; restore with
   `git checkout origin/main -- src/lib/hardware/ examples/09_embedded/fpga_riscv/`.
+- Runner (2026-07-24): the deployed CLI's in-process `run` cannot resolve
+  `std.hardware.*` brace-imports (bug doc
+  `native_cli_run_std_hardware_brace_import_unresolved_2026-07-24.md`). Run
+  hardware probes via seed delegation
+  (`SIMPLE_BOOTSTRAP_DRIVER=$PWD/src/compiler_rust/target/bootstrap/simple`)
+  or a scratch-named CLI copy + `simple_seed` sibling (`wjob` pattern — also
+  dodges earlyoom's kill-by-name on `simple`). A Jul-23 deploy clobbered
+  `bin/release/<triple>/simple` with a compile-only bootstrap binary; if
+  `bin/simple` suddenly has no `run` command, restore the full CLI (backup at
+  `simple.bootstrap-clobber-bak`, known-good at `build/native_probe/simple`).

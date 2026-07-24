@@ -1,0 +1,266 @@
+# ============================================================================
+# hardware/link_mux/dm_model.spl — RISC-V Debug Module bound to the rv64 core
+# ============================================================================
+#
+# Behavioural RISC-V Debug Spec v0.13 Debug Module, driven over DMI by the DTM
+# (dtm_route.spl), acting on a halt/resume harness around the soc_top_64 .spl RTL
+# core (rv64gc_rtl/core.spl CoreState64 + regfile64). This is the piece that lets
+# the shared-link JTAG actually DEBUG the core, not just read IDCODE.
+#
+# Register layout mirrors debug_registers.vhd so the .spl model and the RTL agree:
+#   0x04 DATA0       abstract data low word
+#   0x05 DATA1       abstract data high word
+#   0x10 DMCONTROL   dmactive(0), resumereq(30,W1), haltreq(31,level)
+#   0x11 DMSTATUS    version=2[3:0], authenticated(7),
+#                    anyhalted(8)/allhalted(9), anyrunning(10)/allrunning(11),
+#                    anyresumeack(16)/allresumeack(17)   (debug_registers.vhd:659)
+#   0x16 ABSTRACTCS  datacount=2[3:0], cmderr[10:8], busy(12)=0
+#   0x17 COMMAND     cmdtype[31:24]=0 (access-register), aarsize[22:20]=2|3,
+#                    transfer(17), write(16), regno[15:0]
+#                      regno 0x1000+n = GPR xn ; regno 0x07B1 = dpc
+#   cmderr: 2 = not-supported (bad cmdtype/aarsize/regno)
+#
+# The hart harness halts on a DMCONTROL.haltreq write and freezes (does not step)
+# while halted; dpc reads the frozen pc; GPR/dpc read/write go through the regfile
+# accessors and core.pc; resume clears halted and latches resumeack.
+#
+# STYLE: functional free functions; no `me` self array-of-struct writeback.
+# ============================================================================
+
+use std.hardware.soc_rtl.soc_top_64.{SocTop64State, soc_top_64_run, SocRunResult}
+use std.hardware.rv64gc_rtl.core.{CoreState64}
+use std.hardware.link_mux.dtm_route.{DebugTap, TapDtmStep, tap_dtm_apply,
+    DMI_EV_NONE, DMI_EV_READ, DMI_EV_WRITE}
+
+# DMI register addresses (7-bit)
+val DM_DATA0: i64 = 0x04
+val DM_DATA1: i64 = 0x05
+val DM_DMCONTROL: i64 = 0x10
+val DM_DMSTATUS: i64 = 0x11
+val DM_ABSTRACTCS: i64 = 0x16
+val DM_COMMAND: i64 = 0x17
+
+# abstract-command regno space
+val REGNO_GPR_BASE: i64 = 0x1000     # 0x1000+n = GPR xn
+val REGNO_DPC: i64 = 0x07B1
+
+# cmderr encodings
+val CMDERR_NONE: i64 = 0
+val CMDERR_NOT_SUPPORTED: i64 = 2
+
+# ---------------------------------------------------------------------------
+# HartHarness — soc_top_64 state + halt/resume bookkeeping.
+# ---------------------------------------------------------------------------
+struct HartHarness:
+    soc: SocTop64State
+    halted: bool
+    resumeack: bool
+
+fn hart_create(soc: SocTop64State) -> HartHarness:
+    HartHarness(soc: soc, halted: false, resumeack: false)
+
+fn hart_run(hart: HartHarness, ticks: i64) -> HartHarness:
+    """Advance the target ticks; a halted hart does not step (debug freeze)."""
+    if hart.halted:
+        return hart
+    var h = hart
+    val r = soc_top_64_run(h.soc, ticks)
+    h.soc = r.soc
+    h
+
+fn hart_pc(hart: HartHarness) -> i64:
+    hart.soc.core.pc
+
+fn hart_gpr(hart: HartHarness, n: i64) -> i64:
+    if n == 0:
+        return 0
+    hart.soc.core.rf.regs[n]
+
+# Deep writes decomposed level-by-level: the interpreter rejects nested field
+# assignment beyond two levels, so read-modify-write-back each value struct.
+fn hart_set_pc(hart: HartHarness, pc: i64) -> HartHarness:
+    var h = hart
+    var soc = h.soc
+    var core = soc.core
+    core.pc = pc
+    soc.core = core
+    h.soc = soc
+    h
+
+fn hart_set_gpr(hart: HartHarness, n: i64, value: i64) -> HartHarness:
+    var h = hart
+    if n == 0:
+        return h
+    var soc = h.soc
+    var core = soc.core
+    var rf = core.rf
+    rf.regs[n] = value
+    core.rf = rf
+    soc.core = core
+    h.soc = soc
+    h
+
+# ---------------------------------------------------------------------------
+# DmRegs — DMI-visible Debug Module registers.
+# ---------------------------------------------------------------------------
+struct DmRegs:
+    dmactive: i64
+    cmderr: i64
+    data0: i64
+    data1: i64
+
+fn dm_create() -> DmRegs:
+    DmRegs(dmactive: 0, cmderr: 0, data0: 0, data1: 0)
+
+fn dmstatus_word(hart: HartHarness) -> i64:
+    var v = 0x2 | (1 << 7)               # version=2, authenticated
+    if hart.halted:
+        v = v | (1 << 8) | (1 << 9)      # anyhalted/allhalted
+    else:
+        v = v | (1 << 10) | (1 << 11)    # anyrunning/allrunning
+    if hart.resumeack:
+        v = v | (1 << 16) | (1 << 17)    # anyresumeack/allresumeack
+    v
+
+fn abstractcs_word(dm: DmRegs) -> i64:
+    2 | ((dm.cmderr & 7) << 8)           # datacount=2, cmderr, busy=0
+
+# ---------------------------------------------------------------------------
+# DM read: a DMI read of `addr`. Returns the 32-bit data (reads never mutate the
+# hart, but the same struct is threaded for uniformity).
+# ---------------------------------------------------------------------------
+fn dm_read(dm: DmRegs, hart: HartHarness, addr: i64) -> i64:
+    if addr == DM_DMSTATUS:
+        return dmstatus_word(hart) & 0xFFFFFFFF
+    if addr == DM_ABSTRACTCS:
+        return abstractcs_word(dm) & 0xFFFFFFFF
+    if addr == DM_DMCONTROL:
+        return dm.dmactive & 1           # haltreq/resumereq read 0
+    if addr == DM_DATA0:
+        return dm.data0 & 0xFFFFFFFF
+    if addr == DM_DATA1:
+        return dm.data1 & 0xFFFFFFFF
+    0
+
+# ---------------------------------------------------------------------------
+# Abstract command engine (COMMAND write): access-register only.
+# ---------------------------------------------------------------------------
+struct DmWriteResult:
+    dm: DmRegs
+    hart: HartHarness
+
+fn dm_command(dm: DmRegs, hart: HartHarness, data: i64) -> DmWriteResult:
+    var d = dm
+    var h = hart
+    if d.cmderr != CMDERR_NONE:
+        return DmWriteResult(dm: d, hart: h)     # sticky: ignore while set
+    val cmdtype = (data >> 24) & 0xFF
+    val aarsize = (data >> 20) & 7
+    val transfer = (data >> 17) & 1
+    val is_write = (data >> 16) & 1
+    val regno = data & 0xFFFF
+    if cmdtype != 0 or (aarsize != 2 and aarsize != 3):
+        d.cmderr = CMDERR_NOT_SUPPORTED
+        return DmWriteResult(dm: d, hart: h)
+    var is_gpr = false
+    var gpr_n = 0
+    var is_dpc = false
+    if regno >= REGNO_GPR_BASE and regno <= REGNO_GPR_BASE + 31:
+        is_gpr = true
+        gpr_n = regno - REGNO_GPR_BASE
+    elif regno == REGNO_DPC:
+        is_dpc = true
+    else:
+        d.cmderr = CMDERR_NOT_SUPPORTED
+        return DmWriteResult(dm: d, hart: h)
+    if transfer == 1:
+        if is_write == 1:
+            var wv = d.data0 & 0xFFFFFFFF
+            if aarsize == 3:
+                wv = wv | ((d.data1 & 0xFFFFFFFF) << 32)
+            if is_gpr:
+                h = hart_set_gpr(h, gpr_n, wv)
+            elif is_dpc:
+                h = hart_set_pc(h, wv)
+        else:
+            var rv = 0
+            if is_gpr:
+                rv = hart_gpr(h, gpr_n)
+            elif is_dpc:
+                rv = hart_pc(h)
+            d.data0 = rv & 0xFFFFFFFF
+            if aarsize == 3:
+                d.data1 = (rv >> 32) & 0xFFFFFFFF
+    DmWriteResult(dm: d, hart: h)
+
+# ---------------------------------------------------------------------------
+# DM write: a DMI write of `data` to `addr`.
+# ---------------------------------------------------------------------------
+fn dm_write(dm: DmRegs, hart: HartHarness, addr: i64, data: i64) -> DmWriteResult:
+    var d = dm
+    var h = hart
+    if addr == DM_DMCONTROL:
+        d.dmactive = data & 1
+        if (d.dmactive & 1) == 1:
+            if ((data >> 31) & 1) == 1:          # haltreq
+                h.halted = true
+            if ((data >> 30) & 1) == 1:          # resumereq (W1 pulse)
+                h.halted = false
+                h.resumeack = true
+        return DmWriteResult(dm: d, hart: h)
+    if addr == DM_DATA0:
+        d.data0 = data & 0xFFFFFFFF
+        return DmWriteResult(dm: d, hart: h)
+    if addr == DM_DATA1:
+        d.data1 = data & 0xFFFFFFFF
+        return DmWriteResult(dm: d, hart: h)
+    if addr == DM_ABSTRACTCS:
+        if ((data >> 8) & 7) != 0:               # W1C cmderr
+            d.cmderr = CMDERR_NONE
+        return DmWriteResult(dm: d, hart: h)
+    if addr == DM_COMMAND:
+        return dm_command(d, h, data)
+    DmWriteResult(dm: d, hart: h)
+
+# ---------------------------------------------------------------------------
+# FpgaDebug — the whole FPGA-side debug stack: TAP+DTM, DM registers, hart.
+# ---------------------------------------------------------------------------
+struct FpgaDebug:
+    tap: DebugTap
+    dm: DmRegs
+    hart: HartHarness
+
+struct FpgaProcResult:
+    fpga: FpgaDebug
+    replies: [u8]      # '0'/'1' TDO reply bytes, in order
+
+# Consume a demuxed CH_JTAG command stream: drive TAP->DTM, service each DMI
+# request against DM->hart, and collect TDO reply bytes to frame back on CH_JTAG.
+fn debug_fpga_process(fpga: FpgaDebug, cmds: [u8]) -> FpgaProcResult:
+    var tap = fpga.tap
+    var dm = fpga.dm
+    var hart = fpga.hart
+    var replies: [u8] = []
+    var i = 0
+    val n = cmds.len()
+    while i < n:
+        val step = tap_dtm_apply(tap, cmds[i].to_i64() & 0xFF)
+        tap = step.tap
+        if step.event == DMI_EV_READ:
+            val rd = dm_read(dm, hart, step.ev_addr)
+            tap.dmi_data = rd
+            tap.dmi_stat = 0
+        elif step.event == DMI_EV_WRITE:
+            val wr = dm_write(dm, hart, step.ev_addr, step.ev_wdata)
+            dm = wr.dm
+            hart = wr.hart
+            tap.dmi_data = step.ev_wdata
+            tap.dmi_stat = 0
+        if step.tdo >= 0:
+            if step.tdo == 1:
+                replies.push(0x31.to_u8())        # '1'
+            else:
+                replies.push(0x30.to_u8())        # '0'
+        i = i + 1
+    val nf = FpgaDebug(tap: tap, dm: dm, hart: hart)
+    FpgaProcResult(fpga: nf, replies: replies)
