@@ -355,6 +355,9 @@ evidence boundary for the important pure-Simple tooling lanes:
   `SIMPLE_RUNTIME_PATH`, preventing bootstrap-only compiler or runtime semantics
   from qualifying as production behavior; see the
   [bootstrap-mode report](../../08_tracking/bug/stage4_essential_tools_inherited_bootstrap_mode_false_green_2026-07-24.md).
+  Bootstrap CI path filters include the shared lint handler and its separate
+  fmt/fix option-parser owners; the Stage 4 static contract prevents either
+  dependency trigger from being dropped silently.
   **Strongest current evidence:**
   the portability contract exercises seed-signature rejection before any tool probe;
   `scripts/check/check-bootstrap-essential-tools-smoke.shs` remains required by
