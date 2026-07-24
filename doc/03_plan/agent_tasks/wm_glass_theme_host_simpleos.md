@@ -74,7 +74,7 @@ overlapping dirty work and remains read-only for this lane.
 | Host production WM | SOURCE FIXED; recapture blocked by cycle cap | exact-current Stage 3 passed; bootstrap/theme/bridge/provider wiring is fixed, but the compiler containing the provider-link fix must be rebuilt before one fresh host capture |
 | Host events | SOURCE PARTIAL; product proof pending | real key down/up and pointer move/button-edge receipts are retained; title-command/body-input remain unsupported because HostCompositor exposes no canonical API |
 | Simple Web glass | SEMANTICS IMPLEMENTED, LIVE PROOF PENDING | current-source computed-style/Draw-IR/framebuffer proof has not passed; Chromium fixture timing is not Simple Web animation evidence |
-| SimpleOS x86_64 QEMU | SOURCE FIXED, FRESH BOOT PENDING | rebuild exact current compiler, prove inferred-text relocation, then run one fresh canonical OVMF capture |
+| SimpleOS x86_64 QEMU | STATIC PREFLIGHT PASS, FRESH BOOT PENDING | legacy render/event command now delegates to canonical `gui_entry_desktop.spl` evidence; host gate, exact-current rebuild, and one OVMF capture remain |
 | SimpleOS ARM64 QEMU | FAIL; source wiring absent and runtime unproven | `arm64/gui_entry_desktop.spl` never installs the generated Aetheric snapshot, media lacks hosted package files, `ToggleTheme` is `pass`, and PL011 cannot receipt pointer or key down/up |
 | Aggregate SSpec | FAIL-FAST BY DESIGN | `require_wm_glass_theme_evidence()` remains a real failure until host and required QEMU rows produce current-source evidence |
 | Simple GUI theme handoff | SOURCE FIXED; product proof pending | resolved snapshot now reaches canonical widget Draw IR; 2 bootstrap-driver scenarios pass diagnostically |
@@ -125,6 +125,12 @@ overlapping dirty work and remains read-only for this lane.
      BUILD_DIR="$PWD/build/wm-glass-theme-qemu-x86-current" \
      REPORT_PATH="$PWD/doc/09_report/wm_glass_theme_qemu_x86_current_2026-07-24.md" \
      sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs
+   ```
+
+   The non-launching x86 ownership/SSE2 preflight must pass first:
+
+   ```sh
+   sh scripts/check/check-simpleos-x86-64-wm-qemu-preflight.shs
    ```
 
 6. Build/run the ARM64 canonical desktop after theme wiring:
