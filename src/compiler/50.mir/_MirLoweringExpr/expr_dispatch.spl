@@ -865,6 +865,222 @@ impl MirLowering:
         self.builder = br2
         ret_temp
 
+    me lower_index_expr(base: HirExpr, index: HirExpr, index_result_hir_type: HirType?) -> LocalId:
+        # Bug (array-slice-index SIGSEGV, CONFLICT-FLAG: expr_dispatch.spl
+        # is fenced, touched here per the fence rule's "CONFLICT-FLAG if
+        # must touch" allowance): `a[1:3]` where `a` is a runtime array
+        # parses as an ordinary Index with `index` being a Range HIR
+        # expr. lower_expr(Range) unconditionally calls lower_range
+        # (function_lowering.spl), which is a KNOWN-incomplete stub --
+        # its emitted call operand is a bare `MirConstValue.Int(0)`
+        # ("function symbol -- will be resolved in codegen") that never
+        # actually resolves to a real rt_range/array-slice runtime
+        # symbol. The backend then has no valid callee and the whole
+        # subtree silently collapses to a placeholder `0`, which this
+        # Index arm then treats as a genuine index/pointer value --
+        # inttoptr'ing and GEP/load'ing off address 0 at runtime
+        # (SIGSEGV), the worst form of "silent wrong -> then crash"
+        # this lane must never ship. Array-slice indexing has no
+        # working native lowering today; fail the BUILD loudly and
+        # cleanly (mirrors the existing unsupported-array-element
+        # convention in lower_array_lit) instead of emitting IR that
+        # crashes at runtime.
+        match index.kind:
+            case Range(_, _, _, _):
+                self.error("unsupported array/string slice index a[start:end] (no native array-slice lowering; cannot safely lower to a value)", nil)
+                return self.builder.emit_const_int(0)
+            case _: ()
+        # Runtime arrays are tagged handles, not raw element pointers.
+        val base_local = self.lower_expr(base)
+        # Dict handles compare keys as tagged heap values, so a `d[k]`
+        # read routes to rt_dict_get with a tagged key -- NOT the raw GEP
+        # array path below (which would treat the string key pointer as
+        # an i64 element offset and emit invalid IR).
+        if self.local_is_runtime_dict(base_local):
+            val dict_key = self.lower_dict_key(index)
+            var dict_result_type = MirType.i64()
+            val dict_mir_type = self.local_mir_type_of(base_local)
+            if dict_mir_type != nil:
+                if rt_enum_discriminant(dict_mir_type.kind) == rt_enum_discriminant(MirTypeKind.Dict(MirType.i64(), MirType.i64())):
+                    match dict_mir_type.kind:
+                        case MirTypeKind.Dict(_, value_type): dict_result_type = value_type
+                        case _: ()
+            val base_type = base.type_
+            if dict_mir_type == nil and base_type != nil:
+                match base_type.kind:
+                    case Dict(_, value_type):
+                        dict_result_type = self.lower_type(value_type)
+                    case _: ()
+            # Store-side refinement: an empty `{}` literal fixes the
+            # declared value type at the i64 default, so an f64 stored
+            # later would decode via the integer `>>3` arm and leak the
+            # heap-box POINTER. Use the store-observed type instead.
+            if rt_enum_discriminant(dict_result_type.kind) == rt_enum_discriminant(MirTypeKind.I64) and self.runtime_elem_value_type.contains(base_local.id):
+                dict_result_type = self.runtime_elem_value_type[base_local.id]
+            val get_op = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_dict_get"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+            ))
+            var b_dget = self.builder
+            val get_res = b_dget.emit_call(get_op, [mir_operand_copy(base_local), mir_operand_copy(dict_key)], MirType.i64())
+            self.builder = b_dget
+            if val get_local = get_res:
+                val decoded = self.decode_runtime_value(get_local, dict_result_type)
+                # Bug #189 (struct-valued Dict field misread, second
+                # symptom found alongside the SIGSEGV): a struct-typed
+                # dict result decodes via decode_runtime_value's
+                # default raw-passthrough arm (no shift, correct
+                # bits), but that arm does not register the VALUE's
+                # struct NAME in struct_value_syms the way
+                # lower_array_lit/the array Index case already do via
+                # array_element_struct_syms. resolve_field_index's
+                # fallback chain (HIR type annotation, then
+                # struct_value_syms keyed by this local) then finds
+                # neither for a freshly-decoded dict-read result and
+                # silently defaults every field access to index 0 --
+                # `m["k1"].y` read `x`'s value instead of `y`'s (only
+                # invisible for single-field structs, where field 0
+                # IS the only field). dict_result_type is already the
+                # correctly-resolved Struct(symbol) here (from either
+                # the annotated Dict<K,V> or the literal's inferred
+                # value type), so just look up its name and propagate
+                # it the same way the array path does.
+                match dict_result_type.kind:
+                    case MirTypeKind.Struct(struct_symbol):
+                        val struct_type_sym = self.symbols.get_symbol_raw(struct_symbol.id)
+                        if struct_type_sym != nil and struct_type_sym.name != "":
+                            self.struct_value_syms[decoded.id] = struct_type_sym.name
+                    case _: ()
+                return decoded
+            return base_local
+        val index_local = self.lower_expr(index)
+        if val cli_arg_local = self.try_lower_bootstrap_cli_arg_index(base, index_local):
+            return cli_arg_local
+        # Text values are tagged runtime handles, not raw element
+        # pointers. Normalize literals and runtime-produced text to
+        # the same representation before bounds checking and lookup.
+        if self.local_is_str(base_local):
+            val tagged_base = self.ensure_tagged_str(base_local)
+            val text_len_op = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_string_len"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+            ))
+            var b_text_len = self.builder
+            val text_len_res = b_text_len.emit_call(text_len_op, [mir_operand_copy(tagged_base)], MirType.i64())
+            if val text_len = text_len_res:
+                b_text_len.emit(MirInst(
+                    kind: MirInstKind.Intrinsic(nil, "bounds_check", [
+                        mir_operand_copy(index_local),
+                        mir_operand_copy(text_len)
+                    ]),
+                    span: nil
+                ))
+            self.builder = b_text_len
+            val char_at_op = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_string_char_at"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+            ))
+            var b_char_at = self.builder
+            val char_at_res = b_char_at.emit_call(char_at_op, [mir_operand_copy(tagged_base), mir_operand_copy(index_local)], MirType.i64())
+            self.builder = b_char_at
+            if val char_at_local = char_at_res:
+                return self.decode_runtime_value(char_at_local, MirType(kind: MirTypeKind.Opaque("str")))
+            return base_local
+        self.emit_bounds_check_for_index(base.type_, base_local, index_local)
+        var result_type = MirType.i64()
+        var result_type_from_base = false
+        val base_mir_type = self.local_mir_type_of(base_local)
+        if base_mir_type != nil:
+            match base_mir_type.kind:
+                case MirTypeKind.Array(element_type, _):
+                    result_type = element_type
+                    result_type_from_base = true
+                case MirTypeKind.Slice(element_type):
+                    result_type = element_type
+                    result_type_from_base = true
+                case MirTypeKind.Dict(_, value_type):
+                    result_type = value_type
+                    result_type_from_base = true
+                case _: ()
+        if not result_type_from_base and self.local_hir_types.contains(base_local.id):
+            val base_hir_type = self.local_hir_types[base_local.id]
+            match base_hir_type.kind:
+                case HirTypeKind.Array(element_type, _) | HirTypeKind.Slice(element_type):
+                    result_type = self.lower_type(element_type)
+                    result_type_from_base = true
+                case _: ()
+        if (mir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and not result_type_from_base:
+            result_type = self.bootstrap_text_type()
+        elif not result_type_from_base:
+            if val expr_type = index_result_hir_type:
+                if expr_type != nil:
+                    result_type = self.lower_type(expr_type)
+        # Store-side refinement (mirror of the dict read above): an
+        # empty `[]` literal fixes the element type at the i64 default;
+        # a later `a.push(0.1)` / `a[i] = 0.1` heap-boxes, so decoding
+        # as i64 would shred the box pointer via `>>3`.
+        if rt_enum_discriminant(result_type.kind) == rt_enum_discriminant(MirTypeKind.I64) and self.runtime_elem_value_type.contains(base_local.id):
+            result_type = self.runtime_elem_value_type[base_local.id]
+        val runtime_array = self.local_is_runtime_array(base_local)
+        if runtime_array or (mir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            val getter = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_array_get"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.ptr(result_type, false), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+            ))
+            var bg = self.builder
+            val getter_result = bg.emit_call(getter, [mir_operand_copy(base_local), mir_operand_copy(index_local)], MirType.i64())
+            self.builder = bg
+            if val getter_local = getter_result:
+                # Bug s54/s54c/s54d: array_element_struct_syms is
+                # registered (lower_array_lit for local literals,
+                # function_lowering.spl's param-array Named-element
+                # case for typed params -- root-fixed in s54d, see
+                # 10.frontend/_FlatAstBridge/convert_nodes.spl's
+                # array-generic-tag decode) with the REAL element
+                # struct name whenever the element is a named
+                # class/struct, and with "" / "__runtime_array__" (or
+                # absent) for plain value-typed arrays (int/text/
+                # bool/etc). Gate the Opaque decode strictly on a
+                # real name so this stays a no-op for int arrays --
+                # an earlier attempt that unconditionally marked
+                # every runtime-array element as runtime_value
+                # (regardless of element kind) corrupted int-array
+                # reads (8x-too-large values from the un-skipped >>3
+                # untag); see the revert commit for the falsified
+                # unconditional version.
+                val elem_struct_name = self.array_element_struct_syms.get(base_local.id)
+                val esn = elem_struct_name ?? ""
+                val has_real_struct_name = esn != "" and esn != "__runtime_array__"
+                val decode_type = if has_real_struct_name:
+                    MirType(kind: MirTypeKind.Opaque(esn))
+                else:
+                    result_type
+                if has_real_struct_name:
+                    self.runtime_value_locals[getter_local.id] = true
+                val decoded_elem = self.decode_runtime_value(getter_local, decode_type)
+                # Bug (array-of-structs field misread): propagate the
+                # array's known element struct name onto THIS decoded
+                # element so a further `.field` access
+                # (resolve_field_index's struct_value_syms fallback)
+                # can find the real field order instead of silently
+                # defaulting to field index 0 for every field name.
+                if has_real_struct_name:
+                    self.struct_value_syms[decoded_elem.id] = esn
+                decoded_elem
+            else:
+                base_local
+        else:
+            var b = self.builder
+            val ptr = b.emit_gep(
+                mir_operand_copy(base_local),
+                [mir_operand_copy(index_local)],
+                MirType.ptr(result_type, false)
+            )
+            val loaded = b.emit_load(mir_operand_copy(ptr), result_type)
+            self.builder = b
+            loaded
+
+
     me lower_expr(expr: HirExpr) -> LocalId:
         """Lower HIR expression to MIR, return result local."""
         val nil_span = Span.empty()
@@ -1056,6 +1272,13 @@ impl MirLowering:
             match expr_value.kind:
                 case HirExprKind.Return(value):
                     return self.lower_return_expr(value)
+                case _:
+                    pass
+        val index_disc = rt_enum_discriminant(HirExprKind.Index(nil_expr, nil_expr))
+        if expr_disc == index_disc:
+            match expr_value.kind:
+                case HirExprKind.Index(index_base, index_value):
+                    return self.lower_index_expr(index_base, index_value, expr_value.type_)
                 case _:
                     pass
         # Var/NamedVar reads need the same disc-guarded pre-dispatch as
@@ -1892,219 +2115,7 @@ impl MirLowering:
                 self.lower_dict_lit(entries)
 
             case Index(base, index):
-                # Bug (array-slice-index SIGSEGV, CONFLICT-FLAG: expr_dispatch.spl
-                # is fenced, touched here per the fence rule's "CONFLICT-FLAG if
-                # must touch" allowance): `a[1:3]` where `a` is a runtime array
-                # parses as an ordinary Index with `index` being a Range HIR
-                # expr. lower_expr(Range) unconditionally calls lower_range
-                # (function_lowering.spl), which is a KNOWN-incomplete stub --
-                # its emitted call operand is a bare `MirConstValue.Int(0)`
-                # ("function symbol -- will be resolved in codegen") that never
-                # actually resolves to a real rt_range/array-slice runtime
-                # symbol. The backend then has no valid callee and the whole
-                # subtree silently collapses to a placeholder `0`, which this
-                # Index arm then treats as a genuine index/pointer value --
-                # inttoptr'ing and GEP/load'ing off address 0 at runtime
-                # (SIGSEGV), the worst form of "silent wrong -> then crash"
-                # this lane must never ship. Array-slice indexing has no
-                # working native lowering today; fail the BUILD loudly and
-                # cleanly (mirrors the existing unsupported-array-element
-                # convention in lower_array_lit) instead of emitting IR that
-                # crashes at runtime.
-                match index.kind:
-                    case Range(_, _, _, _):
-                        self.error("unsupported array/string slice index a[start:end] (no native array-slice lowering; cannot safely lower to a value)", nil)
-                        return self.builder.emit_const_int(0)
-                    case _: ()
-                # Runtime arrays are tagged handles, not raw element pointers.
-                val base_local = self.lower_expr(base)
-                # Dict handles compare keys as tagged heap values, so a `d[k]`
-                # read routes to rt_dict_get with a tagged key -- NOT the raw GEP
-                # array path below (which would treat the string key pointer as
-                # an i64 element offset and emit invalid IR).
-                if self.local_is_runtime_dict(base_local):
-                    val dict_key = self.lower_dict_key(index)
-                    var dict_result_type = MirType.i64()
-                    val dict_mir_type = self.local_mir_type_of(base_local)
-                    if dict_mir_type != nil:
-                        if rt_enum_discriminant(dict_mir_type.kind) == rt_enum_discriminant(MirTypeKind.Dict(MirType.i64(), MirType.i64())):
-                            match dict_mir_type.kind:
-                                case MirTypeKind.Dict(_, value_type): dict_result_type = value_type
-                                case _: ()
-                    val base_type = base.type_
-                    if dict_mir_type == nil and base_type != nil:
-                        match base_type.kind:
-                            case Dict(_, value_type):
-                                dict_result_type = self.lower_type(value_type)
-                            case _: ()
-                    # Store-side refinement: an empty `{}` literal fixes the
-                    # declared value type at the i64 default, so an f64 stored
-                    # later would decode via the integer `>>3` arm and leak the
-                    # heap-box POINTER. Use the store-observed type instead.
-                    if rt_enum_discriminant(dict_result_type.kind) == rt_enum_discriminant(MirTypeKind.I64) and self.runtime_elem_value_type.contains(base_local.id):
-                        dict_result_type = self.runtime_elem_value_type[base_local.id]
-                    val get_op = MirOperand(kind: MirOperandKind.Const(
-                        MirConstValue.Str("rt_dict_get"),
-                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
-                    ))
-                    var b_dget = self.builder
-                    val get_res = b_dget.emit_call(get_op, [mir_operand_copy(base_local), mir_operand_copy(dict_key)], MirType.i64())
-                    self.builder = b_dget
-                    if val get_local = get_res:
-                        val decoded = self.decode_runtime_value(get_local, dict_result_type)
-                        # Bug #189 (struct-valued Dict field misread, second
-                        # symptom found alongside the SIGSEGV): a struct-typed
-                        # dict result decodes via decode_runtime_value's
-                        # default raw-passthrough arm (no shift, correct
-                        # bits), but that arm does not register the VALUE's
-                        # struct NAME in struct_value_syms the way
-                        # lower_array_lit/the array Index case already do via
-                        # array_element_struct_syms. resolve_field_index's
-                        # fallback chain (HIR type annotation, then
-                        # struct_value_syms keyed by this local) then finds
-                        # neither for a freshly-decoded dict-read result and
-                        # silently defaults every field access to index 0 --
-                        # `m["k1"].y` read `x`'s value instead of `y`'s (only
-                        # invisible for single-field structs, where field 0
-                        # IS the only field). dict_result_type is already the
-                        # correctly-resolved Struct(symbol) here (from either
-                        # the annotated Dict<K,V> or the literal's inferred
-                        # value type), so just look up its name and propagate
-                        # it the same way the array path does.
-                        match dict_result_type.kind:
-                            case MirTypeKind.Struct(struct_symbol):
-                                val struct_type_sym = self.symbols.get_symbol_raw(struct_symbol.id)
-                                if struct_type_sym != nil and struct_type_sym.name != "":
-                                    self.struct_value_syms[decoded.id] = struct_type_sym.name
-                            case _: ()
-                        return decoded
-                    return base_local
-                val index_local = self.lower_expr(index)
-                if val cli_arg_local = self.try_lower_bootstrap_cli_arg_index(base, index_local):
-                    return cli_arg_local
-                # Text values are tagged runtime handles, not raw element
-                # pointers. Normalize literals and runtime-produced text to
-                # the same representation before bounds checking and lookup.
-                if self.local_is_str(base_local):
-                    val tagged_base = self.ensure_tagged_str(base_local)
-                    val text_len_op = MirOperand(kind: MirOperandKind.Const(
-                        MirConstValue.Str("rt_string_len"),
-                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
-                    ))
-                    var b_text_len = self.builder
-                    val text_len_res = b_text_len.emit_call(text_len_op, [mir_operand_copy(tagged_base)], MirType.i64())
-                    if val text_len = text_len_res:
-                        b_text_len.emit(MirInst(
-                            kind: MirInstKind.Intrinsic(nil, "bounds_check", [
-                                mir_operand_copy(index_local),
-                                mir_operand_copy(text_len)
-                            ]),
-                            span: nil
-                        ))
-                    self.builder = b_text_len
-                    val char_at_op = MirOperand(kind: MirOperandKind.Const(
-                        MirConstValue.Str("rt_string_char_at"),
-                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
-                    ))
-                    var b_char_at = self.builder
-                    val char_at_res = b_char_at.emit_call(char_at_op, [mir_operand_copy(tagged_base), mir_operand_copy(index_local)], MirType.i64())
-                    self.builder = b_char_at
-                    if val char_at_local = char_at_res:
-                        return self.decode_runtime_value(char_at_local, MirType(kind: MirTypeKind.Opaque("str")))
-                    return base_local
-                self.emit_bounds_check_for_index(base.type_, base_local, index_local)
-                var result_type = MirType.i64()
-                var result_type_from_base = false
-                val base_mir_type = self.local_mir_type_of(base_local)
-                if base_mir_type != nil:
-                    match base_mir_type.kind:
-                        case MirTypeKind.Array(element_type, _):
-                            result_type = element_type
-                            result_type_from_base = true
-                        case MirTypeKind.Slice(element_type):
-                            result_type = element_type
-                            result_type_from_base = true
-                        case MirTypeKind.Dict(_, value_type):
-                            result_type = value_type
-                            result_type_from_base = true
-                        case _: ()
-                if not result_type_from_base and self.local_hir_types.contains(base_local.id):
-                    val base_hir_type = self.local_hir_types[base_local.id]
-                    match base_hir_type.kind:
-                        case HirTypeKind.Array(element_type, _) | HirTypeKind.Slice(element_type):
-                            result_type = self.lower_type(element_type)
-                            result_type_from_base = true
-                        case _: ()
-                if (mir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and not result_type_from_base:
-                    result_type = self.bootstrap_text_type()
-                elif not result_type_from_base:
-                    if val expr_type = expr_value.type_:
-                        if expr_type != nil:
-                            result_type = self.lower_type(expr_type)
-                # Store-side refinement (mirror of the dict read above): an
-                # empty `[]` literal fixes the element type at the i64 default;
-                # a later `a.push(0.1)` / `a[i] = 0.1` heap-boxes, so decoding
-                # as i64 would shred the box pointer via `>>3`.
-                if rt_enum_discriminant(result_type.kind) == rt_enum_discriminant(MirTypeKind.I64) and self.runtime_elem_value_type.contains(base_local.id):
-                    result_type = self.runtime_elem_value_type[base_local.id]
-                val runtime_array = self.local_is_runtime_array(base_local)
-                if runtime_array or (mir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
-                    val getter = MirOperand(kind: MirOperandKind.Const(
-                        MirConstValue.Str("rt_array_get"),
-                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.ptr(result_type, false), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
-                    ))
-                    var bg = self.builder
-                    val getter_result = bg.emit_call(getter, [mir_operand_copy(base_local), mir_operand_copy(index_local)], MirType.i64())
-                    self.builder = bg
-                    if val getter_local = getter_result:
-                        # Bug s54/s54c/s54d: array_element_struct_syms is
-                        # registered (lower_array_lit for local literals,
-                        # function_lowering.spl's param-array Named-element
-                        # case for typed params -- root-fixed in s54d, see
-                        # 10.frontend/_FlatAstBridge/convert_nodes.spl's
-                        # array-generic-tag decode) with the REAL element
-                        # struct name whenever the element is a named
-                        # class/struct, and with "" / "__runtime_array__" (or
-                        # absent) for plain value-typed arrays (int/text/
-                        # bool/etc). Gate the Opaque decode strictly on a
-                        # real name so this stays a no-op for int arrays --
-                        # an earlier attempt that unconditionally marked
-                        # every runtime-array element as runtime_value
-                        # (regardless of element kind) corrupted int-array
-                        # reads (8x-too-large values from the un-skipped >>3
-                        # untag); see the revert commit for the falsified
-                        # unconditional version.
-                        val elem_struct_name = self.array_element_struct_syms.get(base_local.id)
-                        val esn = elem_struct_name ?? ""
-                        val has_real_struct_name = esn != "" and esn != "__runtime_array__"
-                        val decode_type = if has_real_struct_name:
-                            MirType(kind: MirTypeKind.Opaque(esn))
-                        else:
-                            result_type
-                        if has_real_struct_name:
-                            self.runtime_value_locals[getter_local.id] = true
-                        val decoded_elem = self.decode_runtime_value(getter_local, decode_type)
-                        # Bug (array-of-structs field misread): propagate the
-                        # array's known element struct name onto THIS decoded
-                        # element so a further `.field` access
-                        # (resolve_field_index's struct_value_syms fallback)
-                        # can find the real field order instead of silently
-                        # defaulting to field index 0 for every field name.
-                        if has_real_struct_name:
-                            self.struct_value_syms[decoded_elem.id] = esn
-                        decoded_elem
-                    else:
-                        base_local
-                else:
-                    var b = self.builder
-                    val ptr = b.emit_gep(
-                        mir_operand_copy(base_local),
-                        [mir_operand_copy(index_local)],
-                        MirType.ptr(result_type, false)
-                    )
-                    val loaded = b.emit_load(mir_operand_copy(ptr), result_type)
-                    self.builder = b
-                    loaded
+                self.lower_index_expr(base, index, expr_value.type_)
 
             case SetLit(elements, _):
                 self.lower_set_lit(elements)

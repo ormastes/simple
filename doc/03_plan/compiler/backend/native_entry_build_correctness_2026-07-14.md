@@ -891,3 +891,22 @@ the shared binary — deploys require explicit user go-ahead).
   its Dict/text/array/slice/CLI semantics. Cranelift/LLVM exit `33`, the
   implicit-tail control, neighbor Dict-struct, and platform promotion remain
   gated.
+
+  A first V38-V40 attempt compiled and produced useful provisional traces, but
+  final review found that the delegated `expr_dispatch.spl` edit had also
+  imported unrelated default-worktree hunks for Dict classification, string
+  length, NullCoalesce, and runtime propagation. Those candidates are rejected
+  as evidence for the Index fix.
+
+  The file was restored from `@-` and only the three intended Index hunks were
+  reapplied: complete helper extraction, exact discriminator predispatch, and
+  legacy-arm delegation. The corrected diff is source-contract covered but
+  execution-pending because the three-cycle cap was already reached. The mixed
+  Return/tail fixture is
+  `test/03_system/native/hir_stmt_expr_return_tail.spl` and remains known-red
+  and unregistered until a clean candidate exits `33`.
+
+  Next fresh session, build the corrected diff once and run exact Dict under
+  Cranelift. If it exits `33`, run LLVM, the mixed fixture, and neighbor
+  `dict_struct_value` expecting `73`. Do not credit the provisional call
+  diagnosis until it is reproduced from the clean diff.
