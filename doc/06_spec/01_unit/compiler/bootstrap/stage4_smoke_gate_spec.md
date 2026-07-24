@@ -113,10 +113,10 @@ SIMPLE_LIB=src bin/simple test test/01_unit/compiler/bootstrap/stage4_smoke_gate
 The contract is static: it verifies bootstrap source, workflow ordering,
 provider packaging, runtime-bundle selection, and focused frontend regressions.
 It does not claim a successful Stage 2, Stage 3, or Stage 4 native build. For a
-Linux LLVM bootstrap failure, inspect
+Linux bootstrap failure, inspect
 `build/bootstrap/logs/x86_64-unknown-linux-gnu/stage2-native-build.log` and the
-fail-only `bootstrap-failure-logs-<github.sha>` artifact before assigning the
-failure to historical empty MIR.
+fail-only `bootstrap-failure-logs-<backend>-<github.sha>` artifact before
+assigning the failure to historical empty MIR.
 
 ## At a Glance
 
