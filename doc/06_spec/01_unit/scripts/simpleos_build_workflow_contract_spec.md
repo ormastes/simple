@@ -15,6 +15,9 @@ Cranelift, two workers, and disables MCP. The deployed `bin/simple` must be
 executable, and a version identifying a Rust seed, bootstrap seed, or
 Rust-built binary fails the job.
 
+Before either build, the workflow installs `libunwind-dev`, which the native
+Stage 2 link requires on GitHub's Ubuntu runner.
+
 ## Retain bootstrap failures
 
 Immediately after each `pure_simple_bootstrap` deployment step, an artifact

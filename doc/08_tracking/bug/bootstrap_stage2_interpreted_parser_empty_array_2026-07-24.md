@@ -45,3 +45,19 @@ from the earlier runtime-bundle or extern-dispatch failures.
 The same worker must parse `bootstrap_main.spl` and advance beyond phase 2
 without an array-bounds error. Then the normal bootstrap workflow must produce
 the pure-Simple CLI artifact before hosted or SimpleOS/QEMU admission resumes.
+
+## CI differentiation
+
+SimpleOS run `30080758744` on commit `11a84de4150a` retained the new failure
+artifact successfully. Its normal, untraced Stage 2 path advanced through
+codegen and failed at the native link instead:
+
+```text
+/usr/bin/ld: cannot find -lunwind: No such file or directory
+```
+
+Therefore this interpreted-parser failure remains reproducible in the local
+trace diagnostic, but it is not the current GitHub admission blocker. Three
+bounded local fix/probe cycles did not remove it; no speculative arena-owner
+change was retained. The CI blocker is handled separately by installing
+`libunwind-dev` before both pure-Simple workflow builds.
