@@ -1,11 +1,149 @@
 //! Struct/field/index expression lowering: StructInit, FieldAccess, Index.
 
 use super::lowering_core::{MirLowerError, MirLowerResult, MirLowerer};
-use crate::hir::{HirExpr, HirType, TypeId};
-use crate::mir::effects::CallTarget;
+use crate::hir::{BinOp, HirExpr, HirType, TypeId};
+use crate::mir::effects::{CallTarget, LocalKind};
+use crate::mir::function::MirLocal;
 use crate::mir::instructions::{MirInst, UnitOverflowBehavior, VReg};
+use crate::mir::Terminator;
 
 impl<'a> MirLowerer<'a> {
+    fn emit_nullable_value_struct_copy(
+        &mut self,
+        source: VReg,
+        ty: TypeId,
+        chain: &mut Vec<TypeId>,
+    ) -> MirLowerResult<VReg> {
+        let result_local = self.with_func(|func, _| {
+            let index = func.params.len() + func.locals.len();
+            func.locals.push(MirLocal {
+                name: format!("$struct_copy_merge_{index}"),
+                ty,
+                kind: LocalKind::Local,
+                is_ghost: false,
+            });
+            index
+        })?;
+        let (addr, is_nil) = self.with_func(|func, current_block| {
+            let addr = func.new_vreg();
+            let zero = func.new_vreg();
+            let is_nil = func.new_vreg();
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::LocalAddr {
+                dest: addr,
+                local_index: result_local,
+            });
+            block.instructions.push(MirInst::Store {
+                addr,
+                value: source,
+                ty,
+            });
+            block.instructions.push(MirInst::ConstInt { dest: zero, value: 0 });
+            block.instructions.push(MirInst::BinOp {
+                dest: is_nil,
+                op: BinOp::Eq,
+                left: source,
+                right: zero,
+            });
+            (addr, is_nil)
+        })?;
+        let (merge_block, copy_block) = self.with_func(|func, current_block| {
+            let merge_block = func.new_block();
+            let copy_block = func.new_block();
+            func.block_mut(current_block).unwrap().terminator = Terminator::Branch {
+                cond: is_nil,
+                then_block: merge_block,
+                else_block: copy_block,
+            };
+            (merge_block, copy_block)
+        })?;
+
+        self.set_current_block(copy_block)?;
+        let copy = self.emit_value_struct_copy(source, ty, chain)?;
+        self.with_func(|func, current_block| {
+            func.block_mut(current_block)
+                .unwrap()
+                .instructions
+                .push(MirInst::Store { addr, value: copy, ty });
+        })?;
+        self.finalize_block_jump(merge_block)?;
+        self.set_current_block(merge_block)?;
+        self.with_func(|func, current_block| {
+            let dest = func.new_vreg();
+            func.block_mut(current_block)
+                .unwrap()
+                .instructions
+                .push(MirInst::Load { dest, addr, ty });
+            dest
+        })
+    }
+
+    pub(super) fn emit_value_struct_copy(
+        &mut self,
+        source: VReg,
+        ty: TypeId,
+        chain: &mut Vec<TypeId>,
+    ) -> MirLowerResult<VReg> {
+        let Some(HirType::Struct { name, fields, .. }) =
+            self.type_registry.and_then(|registry| registry.get(ty)).cloned()
+        else {
+            return Ok(source);
+        };
+        if !self.type_registry.is_some_and(|registry| registry.is_value_struct(ty)) {
+            return Ok(source);
+        }
+
+        chain.push(ty);
+        let mut field_values = Vec::with_capacity(fields.len());
+        let mut field_types = Vec::with_capacity(fields.len());
+        let mut field_offsets = Vec::with_capacity(fields.len());
+        for (index, (_, field_ty)) in fields.iter().enumerate() {
+            let field = self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                func.block_mut(current_block)
+                    .unwrap()
+                    .instructions
+                    .push(MirInst::FieldGet {
+                        dest,
+                        object: source,
+                        byte_offset: (index * 8) as u32,
+                        field_type: *field_ty,
+                    });
+                dest
+            })?;
+            let copied = if !chain.contains(field_ty)
+                && self
+                    .type_registry
+                    .is_some_and(|registry| registry.is_value_struct(*field_ty))
+            {
+                self.emit_nullable_value_struct_copy(field, *field_ty, chain)?
+            } else {
+                field
+            };
+            field_values.push(copied);
+            field_types.push(*field_ty);
+            field_offsets.push((index * 8) as u32);
+        }
+        chain.pop();
+
+        self.with_func(|func, current_block| {
+            let dest = func.new_vreg();
+            func.block_mut(current_block)
+                .unwrap()
+                .instructions
+                .push(MirInst::StructInit {
+                    dest,
+                    type_id: ty,
+                    struct_name: Some(name),
+                    struct_size: (fields.len() * 8) as u32,
+                    field_offsets,
+                    field_types,
+                    field_values,
+                });
+            dest
+        })
+    }
+
     pub(super) fn lower_struct_init_expr(&mut self, ty: TypeId, fields: &[HirExpr]) -> MirLowerResult<VReg> {
         // Lower field expressions first
         let mut field_regs = Vec::new();

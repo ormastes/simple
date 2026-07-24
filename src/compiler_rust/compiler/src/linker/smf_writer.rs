@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::io::{self, Write};
 use thiserror::Error;
 
+use crate::hir::{HirType, TypeId, TypeRegistry};
 use crate::mir::MirModule;
+use simple_common::smf::{SmfFieldType, SmfNamedType, SmfTypeInfo, SmfTypeKind, SmfTypeRef, SMF_TYPE_INFO_VERSION};
 
 // Re-export SMF types from common (single source of truth)
 pub use simple_common::smf::{
@@ -65,6 +67,175 @@ pub enum SmfWriteError {
 }
 
 pub type SmfWriteResult<T> = Result<T, SmfWriteError>;
+
+/// Converts registry types to the portable, name-based SMF metadata format.
+pub fn smf_type_info_from_registry(registry: &TypeRegistry) -> Result<SmfTypeInfo, String> {
+    let mut types = Vec::new();
+    for (id, ty) in registry.iter() {
+        let (name, kind, fields): (&str, SmfTypeKind, &[(String, TypeId)]) = match ty {
+            HirType::Struct { name, fields, .. } => (
+                name,
+                if registry.is_value_struct(id) {
+                    SmfTypeKind::Struct
+                } else {
+                    SmfTypeKind::Class
+                },
+                fields,
+            ),
+            HirType::Enum { name, .. } => (name, SmfTypeKind::Enum, &[]),
+            HirType::Mixin { name, fields, .. } => (name, SmfTypeKind::Opaque, fields),
+            HirType::Bitfield { name, .. } | HirType::ExternClass { name } => {
+                (name, SmfTypeKind::Opaque, &[])
+            }
+            _ => continue,
+        };
+        if name.is_empty() {
+            return Err("SMF type info cannot encode an unnamed type".to_string());
+        }
+        if registry.lookup(name) != Some(id) {
+            continue;
+        }
+        types.push(SmfNamedType {
+            name: name.to_string(),
+            is_public: registry.is_public_type(id),
+            kind,
+            fields: fields
+                .iter()
+                .map(|(name, ty)| {
+                    Ok(SmfFieldType {
+                        name: name.clone(),
+                        type_ref: smf_type_ref_from_id(registry, *ty)?,
+                    })
+                })
+                .collect::<Result<_, String>>()?,
+        });
+    }
+    types.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(SmfTypeInfo {
+        version: SMF_TYPE_INFO_VERSION,
+        types,
+    })
+}
+
+/// Resolves a HIR type through the registry; SMF never stores compiler-local IDs.
+pub fn smf_type_ref_from_id(registry: &TypeRegistry, id: TypeId) -> Result<SmfTypeRef, String> {
+    let ty = registry
+        .get(id)
+        .ok_or_else(|| format!("SMF type info cannot resolve type id {}", id.0))?;
+    let primitive = |name: &str| Ok(SmfTypeRef::Primitive(name.to_string()));
+    match ty {
+        HirType::Void => primitive("void"),
+        HirType::Bool => primitive("bool"),
+        HirType::Any => primitive("any"),
+        HirType::Char => primitive("char"),
+        HirType::Int { bits, signedness } => {
+            primitive(&format!("{}{}", if signedness.is_signed() { "i" } else { "u" }, bits))
+        }
+        HirType::Float { bits } => primitive(&format!("f{bits}")),
+        HirType::String => primitive("text"),
+        HirType::Nil => primitive("nil"),
+        HirType::Pointer {
+            kind,
+            capability,
+            inner,
+        } => Ok(SmfTypeRef::Pointer {
+            inner: Box::new(smf_type_ref_from_id(registry, *inner)?),
+            kind: match kind {
+                crate::hir::PointerKind::Unique => "Unique",
+                crate::hir::PointerKind::Shared => "Shared",
+                crate::hir::PointerKind::Weak => "Weak",
+                crate::hir::PointerKind::Handle => "Handle",
+                crate::hir::PointerKind::Borrow => "Borrow",
+                crate::hir::PointerKind::BorrowMut => "BorrowMut",
+                crate::hir::PointerKind::RawConst => "RawConst",
+                crate::hir::PointerKind::RawMut => "RawMut",
+            }
+            .to_string(),
+            capability: Some(
+                match capability {
+                    simple_parser::ast::ReferenceCapability::Shared => "Shared",
+                    simple_parser::ast::ReferenceCapability::Exclusive => "Exclusive",
+                    simple_parser::ast::ReferenceCapability::Isolated => "Isolated",
+                }
+                .to_string(),
+            ),
+        }),
+        HirType::Array { element, size } => Ok(SmfTypeRef::Array {
+            element: Box::new(smf_type_ref_from_id(registry, *element)?),
+            size: *size,
+        }),
+        HirType::Simd { lanes, element } => Ok(SmfTypeRef::Simd {
+            lanes: *lanes,
+            element: Box::new(smf_type_ref_from_id(registry, *element)?),
+        }),
+        HirType::Tuple(items) => Ok(SmfTypeRef::Tuple(
+            items
+                .iter()
+                .map(|id| smf_type_ref_from_id(registry, *id))
+                .collect::<Result<_, _>>()?,
+        )),
+        HirType::LabeledTuple(items) => Ok(SmfTypeRef::LabeledTuple(
+            items
+                .iter()
+                .map(|(name, id)| Ok((name.clone(), smf_type_ref_from_id(registry, *id)?)))
+                .collect::<Result<_, String>>()?,
+        )),
+        HirType::Dict { key, value } => Ok(SmfTypeRef::Dict {
+            key: Box::new(smf_type_ref_from_id(registry, *key)?),
+            value: Box::new(smf_type_ref_from_id(registry, *value)?),
+        }),
+        HirType::Function { params, ret } => Ok(SmfTypeRef::Function {
+            params: params
+                .iter()
+                .map(|id| smf_type_ref_from_id(registry, *id))
+                .collect::<Result<_, _>>()?,
+            ret: Box::new(smf_type_ref_from_id(registry, *ret)?),
+        }),
+        HirType::Struct { name, .. }
+        | HirType::Enum { name, .. }
+        | HirType::Mixin { name, .. }
+        | HirType::Bitfield { name, .. }
+        | HirType::ExternClass { name }
+            if !name.is_empty() =>
+        {
+            Ok(SmfTypeRef::Named(name.clone()))
+        }
+        HirType::Union { variants } => Ok(SmfTypeRef::Union(
+            variants
+                .iter()
+                .map(|id| smf_type_ref_from_id(registry, *id))
+                .collect::<Result<_, _>>()?,
+        )),
+        HirType::Promise { inner } => Ok(SmfTypeRef::Promise(Box::new(smf_type_ref_from_id(registry, *inner)?))),
+        HirType::UnitType {
+            name,
+            repr,
+            bits,
+            signedness,
+            is_float,
+            ..
+        } if !name.is_empty() => {
+            let repr = match smf_type_ref_from_id(registry, *repr)? {
+                SmfTypeRef::Primitive(name) | SmfTypeRef::Named(name) => name,
+                _ => return Err(format!("SMF unit {name} has a non-name representation")),
+            };
+            Ok(SmfTypeRef::Unit {
+                name: name.clone(),
+                repr,
+                bits: u16::from(*bits),
+                signed: signedness.is_signed(),
+                is_float: *is_float,
+            })
+        }
+        HirType::Unknown
+        | HirType::Struct { .. }
+        | HirType::Enum { .. }
+        | HirType::Mixin { .. }
+        | HirType::Bitfield { .. }
+        | HirType::ExternClass { .. }
+        | HirType::UnitType { .. } => Err("SMF type info encountered an unresolved or unnamed type".to_string()),
+    }
+}
 
 /// Symbol entry for SMF
 #[derive(Debug, Clone)]
@@ -456,6 +627,17 @@ impl SmfWriter {
             writer.relocations.push(reloc);
         }
 
+        let type_info = smf_type_info_from_registry(&mir.type_registry).map_err(SmfWriteError::InvalidData)?;
+        if !type_info.types.is_empty() {
+            writer.add_custom_section(
+                ".type_info",
+                SectionType::TypeInfo,
+                SECTION_FLAG_READ,
+                type_info.to_bytes().map_err(SmfWriteError::InvalidData)?,
+                8,
+            );
+        }
+
         Ok(writer)
     }
 }
@@ -469,6 +651,57 @@ impl Default for SmfWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn type_info_is_named_sorted_and_uses_registry_semantics() {
+        let mut registry = TypeRegistry::new();
+        let beta = registry.register_named("Beta".to_string(), HirType::Struct {
+            name: "Beta".to_string(),
+            fields: vec![],
+            has_snapshot: false,
+            generic_params: vec![],
+            is_generic_template: false,
+            type_bindings: HashMap::new(),
+        });
+        let alpha = registry.register_named("Alpha".to_string(), HirType::Struct {
+            name: "Alpha".to_string(),
+            fields: vec![("child".to_string(), beta), ("count".to_string(), TypeId::U32)],
+            has_snapshot: false,
+            generic_params: vec![],
+            is_generic_template: false,
+            type_bindings: HashMap::new(),
+        });
+        registry.set_value_struct(alpha, true);
+        registry.set_public_type(alpha, true);
+
+        let info = smf_type_info_from_registry(&registry).unwrap();
+        assert_eq!(
+            info.types.iter().map(|ty| ty.name.as_str()).collect::<Vec<_>>(),
+            ["Alpha", "Beta"]
+        );
+        assert_eq!(info.types[0].kind, SmfTypeKind::Struct);
+        assert!(info.types[0].is_public);
+        assert_eq!(info.types[0].fields[0].type_ref, SmfTypeRef::Named("Beta".to_string()));
+        assert_eq!(
+            info.types[0].fields[1].type_ref,
+            SmfTypeRef::Primitive("u32".to_string())
+        );
+        assert_eq!(info.types[1].kind, SmfTypeKind::Class);
+
+        let pointer = registry.register(HirType::Pointer {
+            kind: crate::hir::PointerKind::BorrowMut,
+            capability: simple_parser::ast::ReferenceCapability::Exclusive,
+            inner: TypeId::U32,
+        });
+        assert_eq!(
+            smf_type_ref_from_id(&registry, pointer).unwrap(),
+            SmfTypeRef::Pointer {
+                inner: Box::new(SmfTypeRef::Primitive("u32".to_string())),
+                kind: "BorrowMut".to_string(),
+                capability: Some("Exclusive".to_string()),
+            }
+        );
+    }
 
     #[test]
     fn test_string_table() {

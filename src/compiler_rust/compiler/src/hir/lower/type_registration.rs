@@ -86,6 +86,8 @@ impl Lowerer {
                 type_bindings: std::collections::HashMap::new(), // Will be filled during specialization
             },
         );
+        self.module.types.set_value_struct(type_id, false);
+        self.module.types.set_public_type(type_id, c.visibility.is_public());
 
         // Build combined invariant: parent invariants + child invariants
         let mut hir_invariant = HirTypeInvariant::default();
@@ -154,6 +156,8 @@ impl Lowerer {
         };
 
         let type_id = self.register_named_struct_preserving_distinct_layout(s.name.clone(), hir_type);
+        self.module.types.set_value_struct(type_id, true);
+        self.module.types.set_public_type(type_id, s.visibility.is_public());
 
         // Register struct invariant if present
         if let Some(ref invariant) = s.invariant {
@@ -252,6 +256,7 @@ impl Lowerer {
         };
 
         let type_id = self.module.types.update_named(s.name.clone(), hir_type);
+        self.module.types.set_public_type(type_id, s.visibility.is_public());
         Ok(type_id)
     }
 
@@ -294,6 +299,7 @@ impl Lowerer {
         };
 
         let type_id = self.module.types.update_named(bf.name.clone(), hir_type);
+        self.module.types.set_public_type(type_id, bf.visibility.is_public());
         Ok(type_id)
     }
 
@@ -379,6 +385,7 @@ impl Lowerer {
         };
 
         let type_id = self.module.types.register_named(m.name.clone(), hir_type);
+        self.module.types.set_public_type(type_id, m.visibility.is_public());
 
         Ok(type_id)
     }

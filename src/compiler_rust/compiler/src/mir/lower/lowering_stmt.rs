@@ -25,7 +25,10 @@ impl<'a> MirLowerer<'a> {
     fn hir_expr_is_place(kind: &HirExprKind) -> bool {
         matches!(
             kind,
-            HirExprKind::Local(_) | HirExprKind::Global(_) | HirExprKind::FieldAccess { .. } | HirExprKind::Index { .. }
+            HirExprKind::Local(_)
+                | HirExprKind::Global(_)
+                | HirExprKind::FieldAccess { .. }
+                | HirExprKind::Index { .. }
         )
     }
 
@@ -175,6 +178,23 @@ impl<'a> MirLowerer<'a> {
                     let vreg = self.lower_expr(val)?;
                     let local_idx = *local_index;
                     let value_ty = val.ty;
+                    let copy_ty = if self
+                        .type_registry
+                        .is_some_and(|registry| registry.is_value_struct(effective_declared_ty))
+                    {
+                        effective_declared_ty
+                    } else {
+                        value_ty
+                    };
+                    let vreg = if Self::hir_expr_is_place(&val.kind)
+                        && self
+                            .type_registry
+                            .is_some_and(|registry| registry.is_value_struct(copy_ty))
+                    {
+                        self.emit_value_struct_copy(vreg, copy_ty, &mut Vec::new())?
+                    } else {
+                        vreg
+                    };
 
                     // Bug (seed_array_local_alias_cow_bypass_2026-07-17): `var c = arr`
                     // for an array-typed `arr` aliased the SAME rt_array heap handle

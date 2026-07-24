@@ -28,6 +28,61 @@ fn has_call(func: &MirFunction, name: &str) -> bool {
     block_index_with_call(func, name).is_some()
 }
 
+fn struct_init_names(func: &MirFunction) -> Vec<&str> {
+    func.blocks
+        .iter()
+        .flat_map(|block| block.instructions.iter())
+        .filter_map(|inst| match inst {
+            MirInst::StructInit {
+                struct_name: Some(name),
+                ..
+            } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn nested_value_struct_bind_and_param_copy_recursively_but_class_fields_do_not() {
+    let mir = compile_to_mir(
+        "struct Inner:\n    n: i64\n\nclass Shared:\n    n: i64\n\nstruct Outer:\n    inner: Inner\n    shared: Shared\n\nfn take(value: Outer):\n    print(value.inner.n)\n\nfn borrow(mut value: Outer):\n    print(value.inner.n)\n\nfn share(value: Shared):\n    print(value.n)\n\nfn main():\n    var original = Outer(inner: Inner(n: 1), shared: Shared(n: 3))\n    var local_copy = original\n    take(original)\n",
+    )
+    .unwrap();
+
+    let main_names = struct_init_names(mir.functions.iter().find(|func| func.name == "main").unwrap());
+    assert_eq!(main_names.iter().filter(|name| **name == "Inner").count(), 2);
+    assert_eq!(main_names.iter().filter(|name| **name == "Outer").count(), 2);
+    assert_eq!(main_names.iter().filter(|name| **name == "Shared").count(), 1);
+
+    let take_names = struct_init_names(mir.functions.iter().find(|func| func.name == "take").unwrap());
+    assert_eq!(take_names.iter().filter(|name| **name == "Inner").count(), 1);
+    assert_eq!(take_names.iter().filter(|name| **name == "Outer").count(), 1);
+    assert!(
+        mir.functions
+            .iter()
+            .find(|func| func.name == "take")
+            .unwrap()
+            .blocks
+            .iter()
+            .any(|block| matches!(block.terminator, Terminator::Branch { .. }))
+    );
+    assert!(struct_init_names(mir.functions.iter().find(|func| func.name == "borrow").unwrap()).is_empty());
+    assert!(struct_init_names(mir.functions.iter().find(|func| func.name == "share").unwrap()).is_empty());
+
+    let generic_mir = compile_to_mir(
+        "struct Box<T>:\n    value: T\n\nfn copy_box(source: Box<i64>):\n    var copy = source\n",
+    )
+    .unwrap();
+    let box_names = struct_init_names(
+        generic_mir
+            .functions
+            .iter()
+            .find(|func| func.name == "copy_box")
+            .unwrap(),
+    );
+    assert_eq!(box_names, vec!["Box", "Box"]);
+}
+
 // =============================================================================
 // #1: Result.Ok end-to-end MIR canonicalization (86e56ca7867)
 // =============================================================================

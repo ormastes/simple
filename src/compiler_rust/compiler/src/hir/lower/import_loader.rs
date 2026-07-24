@@ -6,7 +6,9 @@
 use simple_parser::ast::{Expr, ImportTarget, ModulePath, Node};
 use std::path::{Path, PathBuf};
 
-use super::super::types::{HirType, TypeId};
+use super::super::types::{HirType, PointerKind, Signedness, TypeId};
+use simple_common::smf::{SmfNamedType, SmfTypeInfo, SmfTypeKind, SmfTypeRef};
+use simple_parser::ast::ReferenceCapability;
 use super::error::{LowerError, LowerResult};
 use super::lowerer::Lowerer;
 use crate::CompileError;
@@ -866,64 +868,376 @@ impl Lowerer {
         result
     }
 
+    fn resolve_smf_type_ref(&mut self, type_ref: &SmfTypeRef) -> LowerResult<TypeId> {
+        let unknown = |name: &str, available_types: Vec<String>| LowerError::UnknownType {
+            type_name: name.to_string(),
+            available_types,
+        };
+        match type_ref {
+            SmfTypeRef::Primitive(name) | SmfTypeRef::Named(name) => self
+                .module
+                .types
+                .lookup(name)
+                .ok_or_else(|| unknown(name, self.module.types.all_type_names())),
+            SmfTypeRef::Array { element, size } => {
+                let element = self.resolve_smf_type_ref(element)?;
+                Ok(self.module.types.register(HirType::Array {
+                    element,
+                    size: *size,
+                }))
+            }
+            SmfTypeRef::Tuple(items) => {
+                let items = items
+                    .iter()
+                    .map(|item| self.resolve_smf_type_ref(item))
+                    .collect::<LowerResult<Vec<_>>>()?;
+                Ok(self.module.types.register(HirType::Tuple(items)))
+            }
+            SmfTypeRef::LabeledTuple(items) => {
+                let items = items
+                    .iter()
+                    .map(|(name, item)| Ok((name.clone(), self.resolve_smf_type_ref(item)?)))
+                    .collect::<LowerResult<Vec<_>>>()?;
+                Ok(self.module.types.register(HirType::LabeledTuple(items)))
+            }
+            SmfTypeRef::Dict { key, value } => {
+                let key = self.resolve_smf_type_ref(key)?;
+                let value = self.resolve_smf_type_ref(value)?;
+                Ok(self.module.types.register(HirType::Dict { key, value }))
+            }
+            SmfTypeRef::Pointer {
+                inner,
+                kind,
+                capability,
+            } => {
+                let inner = self.resolve_smf_type_ref(inner)?;
+                let kind = match kind.as_str() {
+                    "Unique" => PointerKind::Unique,
+                    "Shared" => PointerKind::Shared,
+                    "Weak" => PointerKind::Weak,
+                    "Handle" => PointerKind::Handle,
+                    "Borrow" => PointerKind::Borrow,
+                    "BorrowMut" => PointerKind::BorrowMut,
+                    "RawConst" => PointerKind::RawConst,
+                    "RawMut" => PointerKind::RawMut,
+                    _ => {
+                        return Err(LowerError::ModuleResolution(format!(
+                            "unknown SMF pointer kind {kind}"
+                        )))
+                    }
+                };
+                let capability = match capability.as_deref().unwrap_or("Shared") {
+                    "Shared" => ReferenceCapability::Shared,
+                    "Exclusive" => ReferenceCapability::Exclusive,
+                    "Isolated" => ReferenceCapability::Isolated,
+                    value => {
+                        return Err(LowerError::ModuleResolution(format!(
+                            "unknown SMF pointer capability {value}"
+                        )))
+                    }
+                };
+                Ok(self.module.types.register(HirType::Pointer {
+                    kind,
+                    capability,
+                    inner,
+                }))
+            }
+            SmfTypeRef::Simd { lanes, element } => {
+                let element = self.resolve_smf_type_ref(element)?;
+                Ok(self.module.types.register(HirType::Simd {
+                    lanes: *lanes,
+                    element,
+                }))
+            }
+            SmfTypeRef::Function { params, ret } => {
+                let params = params
+                    .iter()
+                    .map(|param| self.resolve_smf_type_ref(param))
+                    .collect::<LowerResult<Vec<_>>>()?;
+                let ret = self.resolve_smf_type_ref(ret)?;
+                Ok(self.module.types.register(HirType::Function { params, ret }))
+            }
+            SmfTypeRef::Union(items) => {
+                let variants = items
+                    .iter()
+                    .map(|item| self.resolve_smf_type_ref(item))
+                    .collect::<LowerResult<Vec<_>>>()?;
+                Ok(self.module.types.register(HirType::Union { variants }))
+            }
+            SmfTypeRef::Promise(inner) => {
+                let inner = self.resolve_smf_type_ref(inner)?;
+                Ok(self.module.types.register(HirType::Promise { inner }))
+            }
+            SmfTypeRef::Unit {
+                name,
+                repr,
+                bits,
+                signed,
+                is_float,
+            } => {
+                let repr = self
+                    .module
+                    .types
+                    .lookup(repr)
+                    .ok_or_else(|| unknown(repr, self.module.types.all_type_names()))?;
+                Ok(self.module.types.register(HirType::UnitType {
+                    name: name.clone(),
+                    repr,
+                    bits: (*bits).try_into().map_err(|_| {
+                        LowerError::ModuleResolution(format!("SMF unit {name} bit width exceeds u8"))
+                    })?,
+                    signedness: if *signed {
+                        Signedness::Signed
+                    } else {
+                        Signedness::Unsigned
+                    },
+                    is_float: *is_float,
+                    constraints: Default::default(),
+                }))
+            }
+            SmfTypeRef::Unknown => Err(LowerError::ModuleResolution(
+                "unresolved type reference in SMF TypeInfo".to_string(),
+            )),
+        }
+    }
+
+    fn register_smf_type_info(&mut self, info: &SmfTypeInfo, target: &ImportTarget) -> LowerResult<()> {
+        let mut registered = std::collections::HashMap::new();
+        for named in &info.types {
+            if self.module.types.lookup(&named.name).is_some() {
+                return Err(LowerError::ModuleResolution(format!(
+                    "SMF TypeInfo name collides with an existing type: {}",
+                    named.name
+                )));
+            }
+            let ty = match named.kind {
+                SmfTypeKind::Struct | SmfTypeKind::Class => HirType::Struct {
+                    name: named.name.clone(),
+                    fields: vec![],
+                    has_snapshot: false,
+                    generic_params: vec![],
+                    is_generic_template: false,
+                    type_bindings: std::collections::HashMap::new(),
+                },
+                SmfTypeKind::Enum => HirType::Enum {
+                    name: named.name.clone(),
+                    variants: vec![],
+                    generic_params: vec![],
+                    is_generic_template: false,
+                    type_bindings: std::collections::HashMap::new(),
+                },
+                SmfTypeKind::Opaque => HirType::ExternClass {
+                    name: named.name.clone(),
+                },
+            };
+            let id = self.module.types.register_named(named.name.clone(), ty);
+            registered.insert(named.name.as_str(), id);
+        }
+
+        for SmfNamedType {
+            name,
+            is_public,
+            kind,
+            fields,
+        } in &info.types
+        {
+            let resolved_fields = fields
+                .iter()
+                .map(|field| Ok((field.name.clone(), self.resolve_smf_type_ref(&field.type_ref)?)))
+                .collect::<LowerResult<Vec<_>>>()?;
+            let ty = match kind {
+                SmfTypeKind::Struct | SmfTypeKind::Class => HirType::Struct {
+                    name: name.clone(),
+                    fields: resolved_fields,
+                    has_snapshot: false,
+                    generic_params: vec![],
+                    is_generic_template: false,
+                    type_bindings: std::collections::HashMap::new(),
+                },
+                SmfTypeKind::Enum => HirType::Enum {
+                    name: name.clone(),
+                    variants: vec![],
+                    generic_params: vec![],
+                    is_generic_template: false,
+                    type_bindings: std::collections::HashMap::new(),
+                },
+                SmfTypeKind::Opaque => HirType::ExternClass { name: name.clone() },
+            };
+            let type_id = *registered.get(name.as_str()).ok_or_else(|| {
+                LowerError::ModuleResolution(format!("SMF TypeInfo lost preregistered type {name}"))
+            })?;
+            self.module.types.update_named(name.clone(), ty);
+            self.module
+                .types
+                .set_value_struct(type_id, matches!(kind, SmfTypeKind::Struct));
+            self.module.types.set_public_type(type_id, *is_public);
+            if *is_public && self.should_import_symbol(name, target) {
+                self.globals.insert(name.clone(), type_id);
+            }
+        }
+        Ok(())
+    }
+
     fn load_types_from_smf(&mut self, smf_path: &Path, target: &ImportTarget) -> LowerResult<()> {
         use simple_common::smf::{SectionType, SmfHeader, SmfSection, SmfSymbol, SymbolType};
         use std::io::{Read, Seek, SeekFrom};
+
+        const MAX_SMF_TABLE_BYTES: usize = 64 * 1024 * 1024;
 
         let mut file = std::fs::File::open(smf_path)
             .map_err(|e| LowerError::ModuleResolution(format!("Failed to open SMF {:?}: {}", smf_path, e)))?;
 
         let header = SmfHeader::read_trailer(&mut file)
             .map_err(|e| LowerError::ModuleResolution(format!("Failed to read SMF header {:?}: {}", smf_path, e)))?;
+        let file_len = file
+            .metadata()
+            .map_err(|error| LowerError::ModuleResolution(format!("Failed to stat SMF {:?}: {error}", smf_path)))?
+            .len();
+        let mut string_table = Vec::new();
+        let mut type_info_bytes = None;
+        if header.section_count > 0 && header.section_table_offset > 0 {
+            if header.section_count > 4096 {
+                return Err(LowerError::ModuleResolution(
+                    "SMF section count exceeds safety limit".to_string(),
+                ));
+            }
+            let sec_size = std::mem::size_of::<SmfSection>();
+            let table_size = sec_size
+                .checked_mul(header.section_count as usize)
+                .ok_or_else(|| LowerError::ModuleResolution("SMF section table size overflow".to_string()))?;
+            let table_end = header
+                .section_table_offset
+                .checked_add(table_size as u64)
+                .ok_or_else(|| LowerError::ModuleResolution("SMF section table offset overflow".to_string()))?;
+            if table_end > file_len {
+                return Err(LowerError::ModuleResolution(
+                    "SMF section table exceeds file size".to_string(),
+                ));
+            }
+            file.seek(SeekFrom::Start(header.section_table_offset))
+                .map_err(|error| LowerError::ModuleResolution(format!("Failed to seek SMF sections: {error}")))?;
+            let mut sec_buf = vec![0u8; table_size];
+            file.read_exact(&mut sec_buf)
+                .map_err(|error| LowerError::ModuleResolution(format!("Failed to read SMF sections: {error}")))?;
+            for raw in sec_buf.chunks_exact(sec_size) {
+                let section_type = raw[0];
+                let offset = u64::from_le_bytes(raw[8..16].try_into().unwrap());
+                let size = u64::from_le_bytes(raw[16..24].try_into().unwrap());
+                let end = offset
+                    .checked_add(size)
+                    .ok_or_else(|| LowerError::ModuleResolution("SMF section offset overflow".to_string()))?;
+                if end > file_len {
+                    return Err(LowerError::ModuleResolution(
+                        "SMF section exceeds file size".to_string(),
+                    ));
+                }
+                if section_type == SectionType::StrTab as u8 && size > 0 {
+                    let size: usize = size.try_into().map_err(|_| {
+                        LowerError::ModuleResolution("SMF string table is too large".to_string())
+                    })?;
+                    if size > MAX_SMF_TABLE_BYTES {
+                        return Err(LowerError::ModuleResolution(
+                            "SMF string table exceeds safety limit".to_string(),
+                        ));
+                    }
+                    file.seek(SeekFrom::Start(offset)).map_err(|error| {
+                        LowerError::ModuleResolution(format!("Failed to seek SMF string table: {error}"))
+                    })?;
+                    string_table.resize(size, 0);
+                    file.read_exact(&mut string_table).map_err(|error| {
+                        LowerError::ModuleResolution(format!("Failed to read SMF string table: {error}"))
+                    })?;
+                } else if section_type == SectionType::TypeInfo as u8 && size > 0 {
+                    let size: usize = size.try_into().map_err(|_| {
+                        LowerError::ModuleResolution("SMF TypeInfo section is too large".to_string())
+                    })?;
+                    if size > simple_common::smf::MAX_TYPE_INFO_PAYLOAD_BYTES {
+                        return Err(LowerError::ModuleResolution(
+                            "SMF TypeInfo section exceeds safety limit".to_string(),
+                        ));
+                    }
+                    let mut bytes = vec![0; size];
+                    file.seek(SeekFrom::Start(offset)).map_err(|error| {
+                        LowerError::ModuleResolution(format!("Failed to seek SMF TypeInfo: {error}"))
+                    })?;
+                    file.read_exact(&mut bytes).map_err(|error| {
+                        LowerError::ModuleResolution(format!("Failed to read SMF TypeInfo: {error}"))
+                    })?;
+                    type_info_bytes = Some(bytes);
+                }
+            }
+        }
+
+        if let Some(bytes) = type_info_bytes {
+            let info = SmfTypeInfo::from_bytes(&bytes).map_err(LowerError::ModuleResolution)?;
+            self.register_smf_type_info(&info, target)?;
+        }
 
         if header.symbol_count == 0 {
             return Ok(());
         }
 
-        let mut string_table = Vec::new();
-        if header.section_count > 0 && header.section_table_offset > 0 {
-            let sec_size = std::mem::size_of::<SmfSection>();
-            if file.seek(SeekFrom::Start(header.section_table_offset)).is_ok() {
-                let mut sec_buf = vec![0u8; sec_size * header.section_count as usize];
-                if file.read_exact(&mut sec_buf).is_ok() {
-                    for i in 0..header.section_count as usize {
-                        let section: SmfSection =
-                            unsafe { std::ptr::read(sec_buf[i * sec_size..].as_ptr() as *const SmfSection) };
-                        if section.section_type == SectionType::StrTab && section.size > 0 {
-                            if file.seek(SeekFrom::Start(section.offset)).is_ok() {
-                                string_table.resize(section.size as usize, 0u8);
-                                let _ = file.read_exact(&mut string_table);
-                            }
-                            break;
-                        }
-                    }
+        let sym_size = std::mem::size_of::<SmfSymbol>();
+        let symbol_bytes = sym_size
+            .checked_mul(header.symbol_count as usize)
+            .ok_or_else(|| LowerError::ModuleResolution("SMF symbol table size overflow".to_string()))?;
+        if symbol_bytes > MAX_SMF_TABLE_BYTES {
+            return Err(LowerError::ModuleResolution(
+                "SMF symbol table exceeds safety limit".to_string(),
+            ));
+        }
+        let symbol_end = header
+            .symbol_table_offset
+            .checked_add(symbol_bytes as u64)
+            .ok_or_else(|| LowerError::ModuleResolution("SMF symbol table offset overflow".to_string()))?;
+        if symbol_end > file_len {
+            return Err(LowerError::ModuleResolution(
+                "SMF symbol table exceeds file size".to_string(),
+            ));
+        }
+        if string_table.is_empty() {
+            let string_offset = symbol_end;
+            if string_offset < file_len {
+                let size: usize = (file_len - string_offset)
+                    .try_into()
+                    .map_err(|_| LowerError::ModuleResolution("SMF string table is too large".to_string()))?;
+                if size > MAX_SMF_TABLE_BYTES {
+                    return Err(LowerError::ModuleResolution(
+                        "SMF string table exceeds safety limit".to_string(),
+                    ));
                 }
+                file.seek(SeekFrom::Start(string_offset)).map_err(|error| {
+                    LowerError::ModuleResolution(format!("Failed to seek trailing SMF string table: {error}"))
+                })?;
+                string_table.resize(size, 0);
+                file.read_exact(&mut string_table).map_err(|error| {
+                    LowerError::ModuleResolution(format!("Failed to read trailing SMF string table: {error}"))
+                })?;
             }
         }
-
         if string_table.is_empty() {
             return Ok(());
         }
 
-        let sym_size = std::mem::size_of::<SmfSymbol>();
         if file.seek(SeekFrom::Start(header.symbol_table_offset)).is_err() {
             return Ok(());
         }
-        let mut sym_buf = vec![0u8; sym_size * header.symbol_count as usize];
+        let mut sym_buf = vec![0u8; symbol_bytes];
         if file.read_exact(&mut sym_buf).is_err() {
             return Ok(());
         }
 
-        for i in 0..header.symbol_count as usize {
-            let sym: SmfSymbol = unsafe { std::ptr::read(sym_buf[i * sym_size..].as_ptr() as *const SmfSymbol) };
-
-            let name = smf_read_string(&string_table, sym.name_offset as usize);
+        for raw in sym_buf.chunks_exact(sym_size) {
+            let name_offset = u32::from_le_bytes(raw[0..4].try_into().unwrap()) as usize;
+            let symbol_type = raw[8];
+            let flags = raw[11];
+            let name = smf_read_string(&string_table, name_offset);
             if name.is_empty() || !self.should_import_symbol(&name, target) {
                 continue;
             }
 
-            match sym.sym_type {
-                SymbolType::Type | SymbolType::Trait => {
+            match symbol_type {
+                value if value == SymbolType::Type as u8 || value == SymbolType::Trait as u8 => {
                     if self.module.types.lookup(&name).is_none() {
                         self.module.types.register_named(
                             name.clone(),
@@ -932,7 +1246,9 @@ impl Lowerer {
                                 fields: vec![],
                                 has_snapshot: false,
                                 generic_params: vec![],
-                                is_generic_template: sym.is_generic_template(),
+                                is_generic_template: flags
+                                    & simple_common::smf::symbol_flags::GENERIC_TEMPLATE
+                                    != 0,
                                 type_bindings: std::collections::HashMap::new(),
                             },
                         );
@@ -940,11 +1256,11 @@ impl Lowerer {
                     let type_id = self.module.types.lookup(&name).unwrap_or(TypeId::ANY);
                     self.globals.insert(name, type_id);
                 }
-                SymbolType::Function => {
+                value if value == SymbolType::Function as u8 => {
                     self.globals.insert(name.clone(), TypeId::ANY);
                     self.imported_function_names.insert(name);
                 }
-                SymbolType::Constant => {
+                value if value == SymbolType::Constant as u8 => {
                     self.globals.insert(name, TypeId::ANY);
                 }
                 _ => {}
@@ -1168,6 +1484,118 @@ fn build() -> Widget:
         assert!(!Lowerer::is_non_addressable_root_import(
             &module_path,
             &ImportTarget::Single("persistent_trie".to_string())
+        ));
+    }
+
+    #[test]
+    fn smf_type_info_two_pass_restores_nested_value_and_class_metadata() {
+        let info = SmfTypeInfo {
+            version: simple_common::smf::SMF_TYPE_INFO_VERSION,
+            types: vec![
+                SmfNamedType {
+                    name: "Outer".to_string(),
+                    is_public: true,
+                    kind: SmfTypeKind::Struct,
+                    fields: vec![
+                        simple_common::smf::SmfFieldType {
+                            name: "inner".to_string(),
+                            type_ref: SmfTypeRef::Named("Inner".to_string()),
+                        },
+                        simple_common::smf::SmfFieldType {
+                            name: "shared".to_string(),
+                            type_ref: SmfTypeRef::Named("Shared".to_string()),
+                        },
+                    ],
+                },
+                SmfNamedType {
+                    name: "Shared".to_string(),
+                    is_public: false,
+                    kind: SmfTypeKind::Class,
+                    fields: vec![simple_common::smf::SmfFieldType {
+                        name: "n".to_string(),
+                        type_ref: SmfTypeRef::Primitive("i64".to_string()),
+                    }],
+                },
+                SmfNamedType {
+                    name: "Inner".to_string(),
+                    is_public: false,
+                    kind: SmfTypeKind::Struct,
+                    fields: vec![simple_common::smf::SmfFieldType {
+                        name: "n".to_string(),
+                        type_ref: SmfTypeRef::Primitive("i64".to_string()),
+                    }],
+                },
+            ],
+        };
+        let mut lowerer = Lowerer::new();
+        lowerer
+            .register_smf_type_info(&info, &ImportTarget::Single("Outer".to_string()))
+            .unwrap();
+
+        let outer = lowerer.module.types.lookup("Outer").unwrap();
+        let inner = lowerer.module.types.lookup("Inner").unwrap();
+        let shared = lowerer.module.types.lookup("Shared").unwrap();
+        assert!(lowerer.module.types.is_value_struct(outer));
+        assert!(lowerer.module.types.is_value_struct(inner));
+        assert!(!lowerer.module.types.is_value_struct(shared));
+        assert!(lowerer.globals.contains_key("Outer"));
+        assert!(!lowerer.globals.contains_key("Inner"));
+        assert!(matches!(
+            lowerer.module.types.get(outer),
+            Some(HirType::Struct { fields, .. })
+                if fields.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>()
+                    == ["inner", "shared"]
+        ));
+
+        let mut writer = crate::linker::SmfWriter::new();
+        writer.add_custom_section(
+            ".type_info",
+            simple_common::smf::SectionType::TypeInfo,
+            simple_common::smf::SECTION_FLAG_READ,
+            info.to_bytes().unwrap(),
+            8,
+        );
+        let mut bytes = Vec::new();
+        writer.write(&mut bytes).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("types-only.smf");
+        std::fs::write(&path, bytes).unwrap();
+
+        let mut from_file = Lowerer::new();
+        from_file
+            .load_types_from_smf(&path, &ImportTarget::Single("Outer".to_string()))
+            .unwrap();
+        let outer = from_file.module.types.lookup("Outer").unwrap();
+        assert!(from_file.module.types.is_value_struct(outer));
+        assert!(from_file.globals.contains_key("Outer"));
+    }
+
+    #[test]
+    fn smf_type_info_rejects_existing_named_type_without_overwrite() {
+        let mut lowerer = Lowerer::new();
+        let existing = lowerer.module.types.register_named(
+            "Collision".to_string(),
+            HirType::ExternClass {
+                name: "Collision".to_string(),
+            },
+        );
+        let info = SmfTypeInfo {
+            version: simple_common::smf::SMF_TYPE_INFO_VERSION,
+            types: vec![SmfNamedType {
+                name: "Collision".to_string(),
+                is_public: true,
+                kind: SmfTypeKind::Struct,
+                fields: vec![],
+            }],
+        };
+
+        assert!(lowerer
+            .register_smf_type_info(&info, &ImportTarget::Single("Collision".to_string()))
+            .is_err());
+        assert_eq!(lowerer.module.types.lookup("Collision"), Some(existing));
+        assert!(matches!(
+            lowerer.module.types.get(existing),
+            Some(HirType::ExternClass { .. })
         ));
     }
 }

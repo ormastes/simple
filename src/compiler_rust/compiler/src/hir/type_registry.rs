@@ -35,6 +35,24 @@ mod optional_marker_tests {
         assert_eq!(registry.optional_inner(optional), Some(TypeId::I64));
         assert_eq!(registry.optional_inner(pointer), None);
     }
+
+    #[test]
+    fn value_struct_marker_is_explicit_and_cloned() {
+        let mut registry = TypeRegistry::new();
+        let ty = registry.register(HirType::Struct {
+            name: "Value".to_string(),
+            fields: vec![],
+            has_snapshot: false,
+            generic_params: vec![],
+            is_generic_template: false,
+            type_bindings: HashMap::new(),
+        });
+        assert!(!registry.is_value_struct(ty));
+        registry.set_value_struct(ty, true);
+        assert!(registry.clone().is_value_struct(ty));
+        registry.set_value_struct(ty, false);
+        assert!(!registry.is_value_struct(ty));
+    }
 }
 
 impl TypeIdAllocator {
@@ -75,6 +93,8 @@ pub struct TypeRegistry {
     allocator: TypeIdAllocator,
     name_to_id: HashMap<String, TypeId>,
     optional_type_ids: std::collections::HashSet<TypeId>,
+    value_struct_type_ids: std::collections::HashSet<TypeId>,
+    public_type_ids: std::collections::HashSet<TypeId>,
 }
 
 impl TypeRegistry {
@@ -84,6 +104,8 @@ impl TypeRegistry {
             allocator: TypeIdAllocator::new(),
             name_to_id: HashMap::new(),
             optional_type_ids: std::collections::HashSet::new(),
+            value_struct_type_ids: std::collections::HashSet::new(),
+            public_type_ids: std::collections::HashSet::new(),
         };
 
         // Register built-in types
@@ -165,6 +187,30 @@ impl TypeRegistry {
             Some(HirType::Pointer { inner, .. }) => Some(*inner),
             _ => None,
         }
+    }
+
+    pub fn set_value_struct(&mut self, id: TypeId, is_value_struct: bool) {
+        if is_value_struct {
+            self.value_struct_type_ids.insert(id);
+        } else {
+            self.value_struct_type_ids.remove(&id);
+        }
+    }
+
+    pub fn is_value_struct(&self, id: TypeId) -> bool {
+        self.value_struct_type_ids.contains(&id)
+    }
+
+    pub fn set_public_type(&mut self, id: TypeId, is_public: bool) {
+        if is_public {
+            self.public_type_ids.insert(id);
+        } else {
+            self.public_type_ids.remove(&id);
+        }
+    }
+
+    pub fn is_public_type(&self, id: TypeId) -> bool {
+        self.public_type_ids.contains(&id)
     }
 
     /// Get the allocator for inspection (useful for verification).

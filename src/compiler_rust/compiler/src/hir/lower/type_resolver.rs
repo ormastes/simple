@@ -409,14 +409,19 @@ impl Lowerer {
                         for (param, arg) in generic_params.iter().zip(args.iter()) {
                             type_bindings.insert(param.clone(), self.resolve_type(arg)?);
                         }
-                        return Ok(self.module.types.register(HirType::Struct {
+                        let is_value_struct = self.module.types.is_value_struct(family_ty);
+                        let is_public = self.module.types.is_public_type(family_ty);
+                        let specialization = self.module.types.register(HirType::Struct {
                             name,
                             fields,
                             has_snapshot,
                             generic_params,
                             is_generic_template: false,
                             type_bindings,
-                        }));
+                        });
+                        self.module.types.set_value_struct(specialization, is_value_struct);
+                        self.module.types.set_public_type(specialization, is_public);
+                        return Ok(specialization);
                     }
                 }
                 // Handle common generic types used in stdlib

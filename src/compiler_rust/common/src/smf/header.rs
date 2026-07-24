@@ -48,7 +48,7 @@ impl SmfHeader {
             ));
         }
 
-        Ok(unsafe { std::ptr::read(buf.as_ptr() as *const SmfHeader) })
+        Ok(unsafe { std::ptr::read_unaligned(buf.as_ptr() as *const SmfHeader) })
     }
 
     pub fn read_trailer<R: Read + Seek>(reader: &mut R) -> std::io::Result<Self> {
@@ -61,7 +61,8 @@ impl SmfHeader {
             reader.read_exact(&mut buf)?;
 
             if &buf[0..4] == SMF_MAGIC {
-                let header: SmfHeader = unsafe { std::ptr::read(buf.as_ptr() as *const SmfHeader) };
+                let header: SmfHeader =
+                    unsafe { std::ptr::read_unaligned(buf.as_ptr() as *const SmfHeader) };
                 return Ok(header);
             }
         }
@@ -77,7 +78,8 @@ impl SmfHeader {
             ));
         }
 
-        let header: SmfHeader = unsafe { std::ptr::read(buf.as_ptr() as *const SmfHeader) };
+        let header: SmfHeader =
+            unsafe { std::ptr::read_unaligned(buf.as_ptr() as *const SmfHeader) };
 
         if current_pos != 0 && current_pos < file_size {
             reader.seek(SeekFrom::Start(Self::SIZE as u64))?;

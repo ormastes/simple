@@ -1503,6 +1503,44 @@ impl<'a> MirLowerer<'a> {
         self.last_expr_value = None;
         self.dead_append_array_locals = Self::dead_append_array_locals_for_body(&func.body);
 
+        for (index, param) in func.params.iter().enumerate() {
+            if param.name == "self"
+                || param.is_mutable()
+                || !self
+                    .type_registry
+                    .is_some_and(|registry| registry.is_value_struct(param.ty))
+            {
+                continue;
+            }
+            let (addr, value) = self.with_func(|mir_func, current_block| {
+                let addr = mir_func.new_vreg();
+                let value = mir_func.new_vreg();
+                let block = mir_func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::LocalAddr {
+                    dest: addr,
+                    local_index: index,
+                });
+                block.instructions.push(MirInst::Load {
+                    dest: value,
+                    addr,
+                    ty: param.ty,
+                });
+                (addr, value)
+            })?;
+            let copy = self.emit_value_struct_copy(value, param.ty, &mut Vec::new())?;
+            self.with_func(|mir_func, current_block| {
+                mir_func
+                    .block_mut(current_block)
+                    .unwrap()
+                    .instructions
+                    .push(MirInst::Store {
+                        addr,
+                        value: copy,
+                        ty: param.ty,
+                    });
+            })?;
+        }
+
         // Emit function entry path probe for coverage (#674)
         self.emit_function_entry_probe()?;
 

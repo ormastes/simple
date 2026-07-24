@@ -362,7 +362,7 @@ impl Lowerer {
                 });
 
                 // Use update_named to update the placeholder created in Pass 0
-                self.module.types.update_named(
+                let enum_type_id = self.module.types.update_named(
                     e.name.clone(),
                     HirType::Enum {
                         name: e.name.clone(),
@@ -372,6 +372,9 @@ impl Lowerer {
                         type_bindings: std::collections::HashMap::new(), // Will be filled during specialization
                     },
                 );
+                self.module
+                    .types
+                    .set_public_type(enum_type_id, e.visibility.is_public());
 
                 // Register enum name in globals so that Backend.Native can be resolved
                 // The enum name acts as a namespace for variant constructors
