@@ -315,7 +315,12 @@ evidence boundary for the important pure-Simple tooling lanes:
   fail-closed fixture contract are present. It now runs a bounded identity
   preflight with seed-warning suppression neutralized, rejects Rust seed/debug
   identities before any test/lint/duplicate probe, and emits an explicit
-  pure-Simple identity marker (`ca7ce8d432b`). **Strongest current evidence:**
+  pure-Simple identity marker (`ca7ce8d432b`). The shared probe boundary and
+  standalone JSON validator now clear inherited `SIMPLE_BOOTSTRAP` and
+  `SIMPLE_RUNTIME_PATH`, preventing bootstrap-only compiler or runtime semantics
+  from qualifying as production behavior; see the
+  [bootstrap-mode report](../../08_tracking/bug/stage4_essential_tools_inherited_bootstrap_mode_false_green_2026-07-24.md).
+  **Strongest current evidence:**
   the portability contract exercises seed-signature rejection before any tool probe;
   `scripts/check/check-bootstrap-essential-tools-smoke.shs` remains required by
   this guide and the bootstrap build guide. **Remaining bug/gap:** the aggregate
