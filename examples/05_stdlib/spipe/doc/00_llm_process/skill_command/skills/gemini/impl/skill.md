@@ -20,7 +20,7 @@ Phases:
 8: Implementation in src/**/<feature>.spl
 9-10: Unit + IT Tests (80%+ coverage) + Doctest
 11-13: Bug Reports + Duplication Check + Refactoring
-14: Full Test Suite (bin/simple test && bin/simple build lint)
+14: Full Test Suite (bin/simple test test --whole --mode=interpreter + bin/simple lint <changed .spl files>)
 15: Run /verify + VCS Sync
 
 All code in .spl — no Python, no Bash.

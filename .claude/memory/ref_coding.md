@@ -42,7 +42,7 @@ print_in_test_spec, unnamed_duplicate_typed_args, resource_leak, spipe_missing_d
 
 ## Commands
 ```bash
-bin/simple build lint           # Check warnings
+bin/simple lint <changed .spl files> # Check Simple source
 bin/simple fix file.spl --dry-run  # Preview fixes
 bin/simple lint file.spl --fix     # Auto-fix
 ```

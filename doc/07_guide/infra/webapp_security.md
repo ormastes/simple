@@ -285,7 +285,7 @@ The `SEC-CMP001` lint rule warns when `==` is used on variables named `password`
 
 ## Compiler Security Lint Rules
 
-Run `bin/simple build lint` to check for security issues:
+Run `bin/simple lint <files>` to check for security issues:
 
 | Code | Level | What It Catches |
 |------|-------|-----------------|

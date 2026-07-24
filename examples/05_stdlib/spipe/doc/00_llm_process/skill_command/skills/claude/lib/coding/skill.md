@@ -7,7 +7,7 @@ Reference: See `ref_coding` memory for syntax rules, type names, lambda shorthan
 ```bash
 bin/simple build                    # Debug build
 bin/simple build --release          # Release build
-bin/simple build lint               # Check warnings — fix all before committing
+bin/simple lint <changed .spl files> # Simple source lint — fix all denies before committing
 bin/simple fix file.spl --dry-run   # Preview auto-fixes
 bin/simple fix file.spl             # Apply fixes
 bin/simple lint file.spl --fix      # Lint with auto-fix

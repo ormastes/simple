@@ -169,7 +169,7 @@ Implement in `src/**/<feature>.spl`:
 1. Follow coding standards (`.spl` files only, generics with `<>`, no inheritance)
 2. Unit + integration tests (80%+ coverage)
 3. Doctest for public fns
-4. Full test suite pass: `bin/simple test && bin/simple build lint`
+4. Full test suite pass: `bin/simple test test --whole --mode=interpreter`, then `bin/simple lint <changed .spl files>`
 
 ---
 

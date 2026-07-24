@@ -12,7 +12,7 @@
 2. Audit/fix: the same script audits paths at all governed depths, skips ignored
    VCS state, and quarantines violations in `build/workspace_quarantine/` when
    `fix` is requested.
-3. Integration gates: `bin/simple build lint` runs staged audit before the
+3. Integration gates: `bin/simple lint --all <files>` runs the root audit before the
    normal runtime lint path. `.git/hooks/pre-commit` runs the staged audit
    (installed via `scripts/setup/install-workspace-guard-hook.shs --apply`).
 4. Permission backend: `lock` and `unlock` currently emit platform-specific

@@ -28,7 +28,7 @@ description: Implement a feature end-to-end. Self-sufficient — if research, re
 8: Implementation in `src/**/<feature>.spl`
 9-10: Unit + IT Tests (80%+ coverage) + Doctest
 11-13: Bug Reports + Duplication Check + Refactoring
-14: Full Test Suite (`bin/simple test && bin/simple build lint`)
+14: Full Test Suite (`bin/simple test test --whole --mode=interpreter` + `bin/simple lint <changed .spl files>`)
 15: Run $verify + final smoke checks + VCS Sync
 
 For compiler backend changes, add focused lint/spec coverage for invalid target

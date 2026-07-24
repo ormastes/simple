@@ -26,7 +26,7 @@ Argument: `$ARGUMENTS`
 ### Step 2 — Identify Issues
 
 1. Run duplication check: `bin/simple duplicate-check` on impl files
-2. Run linter: `bin/simple build lint` on impl files
+2. Run linter: `bin/simple lint <impl .spl files>`
 3. Check file sizes — flag any file exceeding 800 lines
 
 ### Step 3 — Refactor Incrementally
@@ -43,7 +43,7 @@ After EVERY change, run specs to verify no behavior change:
 
 ### Step 4 — Final Verification
 
-1. Run final lint pass: `bin/simple build lint`
+1. Run final lint pass: `bin/simple lint <impl .spl files>`
 2. Verify all specs still pass
 3. Update `.sstack/<feature>/state.md` with refactor status
 
@@ -70,7 +70,7 @@ If a refactoring risks breaking behavior, skip it and note in state file.
 ## Exit Criteria
 
 - [ ] No duplications reported by `bin/simple duplicate-check`
-- [ ] Lint clean: `bin/simple build lint` passes with no warnings
+- [ ] Lint clean: `bin/simple lint <impl .spl files>` passes
 - [ ] No file exceeds 800 lines
 - [ ] All specs still pass: `bin/simple test <spec_file>` green for each
 - [ ] State file updated: `phase: refactor` marked complete

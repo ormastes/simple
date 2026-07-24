@@ -209,7 +209,8 @@ If multiple LLMs participate in research:
 
 **3.11-3.13** Bug Reports + Duplication Check + Refactoring (files >800 lines split).
 
-**3.14** Full Test Suite: `bin/simple test && bin/simple build lint && bin/simple build check`
+**3.14** Full Test Suite: `bin/simple test test --whole --mode=interpreter`, then
+`bin/simple lint <changed .spl files>` and the applicable duplication gate.
 
 **3.15** Run `/verify` + VCS Sync.
 

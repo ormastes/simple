@@ -104,7 +104,7 @@ Do NOT push without explicit user approval.
 ## Pre-Release Checklist
 
 - [ ] `bin/simple test` passing
-- [ ] `bin/simple build lint` clean
+- [ ] `bin/simple lint <changed .spl files>` clean
 - [ ] `bin/simple todo-scan` — no critical TODOs
 - [ ] Local bootstrap build works (3-stage)
 - [ ] No orphan jj commits (`jj log` shows clean history)

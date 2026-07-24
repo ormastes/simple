@@ -72,8 +72,8 @@ bin/simple build --verbose
 
 ```bash
 bin/simple build fmt            # Format all .spl files
-bin/simple build lint           # Run linter
-bin/simple build check          # Format + lint + test
+bin/simple lint <changed .spl files> # Run the pure-Simple source linter
+bin/simple build check          # Rust clippy + rustfmt check + Rust tests
 ```
 
 ---

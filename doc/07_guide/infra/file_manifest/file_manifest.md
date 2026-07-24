@@ -3,8 +3,8 @@
 ## What is FILE.md?
 
 FILE.md files declare which entries (files and directories) are allowed in a
-directory. The workspace root guard enforces these declarations during lint and
-pre-commit checks.
+directory. The workspace root guard enforces these declarations through its
+explicit audit, pre-commit, and SPipe verification paths.
 
 ## Format
 
@@ -79,7 +79,7 @@ and contributors discover which entries are external repositories.
 
 ## Integration Points
 
-- **Lint**: `bin/simple build lint` runs the guard automatically
+- **Manual**: run `sh scripts/check-workspace-root-guard.shs audit`
 - **Pre-commit**: `.git/hooks/pre-commit` blocks commits with violations
   (install via `sh scripts/setup/install-workspace-guard-hook.shs --apply`)
 - **SPipe verify**: Phase 7 runs the guard in strict mode

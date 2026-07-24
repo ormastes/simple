@@ -167,7 +167,7 @@ Reference for all 8 SStack phases. Each phase has: role, focus, entry criteria, 
 4. Verify naming conventions and code style
 5. Remove any dead code, unused imports, or placeholder stubs
 6. Ensure TODOs are either implemented or left as TODO (never converted to NOTE)
-7. Run linter if available: `bin/simple build lint`
+7. Run the Simple linter: `bin/simple lint <changed .spl files>`
 
 **Exit Criteria:**
 - No file exceeds 800 lines

@@ -69,8 +69,8 @@ simple build --release          # Optimized release build
 simple build --target=NAME      # Build specific target
 simple build --clean            # Clean build artifacts
 simple build fmt                # Format code
-simple build lint               # Run linter
-simple build check              # All quality checks
+simple lint <changed .spl files> # Run the pure-Simple source linter
+simple build check              # Rust clippy/rustfmt/test aggregate
 ```
 
 ### `compile`

@@ -10,10 +10,10 @@ bin/simple build                    # Debug build
 bin/simple build --release          # Release build
 bin/simple build --bootstrap        # Bootstrap build (minimal)
 
-bin/simple test                     # Run all tests
-bin/simple build lint               # Run linter
-bin/simple build fmt                # Format code
-bin/simple build check              # All quality checks
+bin/simple test test --whole --mode=interpreter # Run full Simple tests
+bin/simple lint <changed .spl files> # Run pure-Simple source lint
+bin/simple build fmt                # Format Rust code
+bin/simple build check              # Rust workspace checks
 
 bin/simple build clean              # Clean artifacts
 bin/simple build bootstrap          # 3-stage bootstrap pipeline
@@ -50,8 +50,8 @@ bin/simple test --only-slow              # Slow tests only
 
 ## Pre-Release Checklist
 
-- [ ] All tests passing: `bin/simple test`
-- [ ] No lint warnings: `bin/simple build lint`
+- [ ] All tests passing: `bin/simple test test --whole --mode=interpreter`
+- [ ] No Simple lint denies: `bin/simple lint <changed .spl files>`
 - [ ] Version updated in all 3 version sources
 - [ ] `find doc/06_spec -name '*_spec.spl' | wc -l` returns `0`
 - [ ] CHANGELOG.md updated

@@ -1026,16 +1026,18 @@ See [doc/09_report/session/full_test_suite_results_2026-02-14.md](doc/09_report/
 ### Code Quality
 
 ```bash
-# Check before commit (fmt + lint + test)
+# Rust workspace quality aggregate (clippy + rustfmt + Rust tests)
 simple build check
 
-# Full check (includes coverage + duplication)
-simple build check --full
+# Pure-Simple source quality gates
+simple lint <changed .spl files>
+simple duplicate-check <owned-dir> --mode token --min-lines 5
+simple test <scope>
 
-# Format code
+# Format Rust workspace code
 simple build fmt
 
-# Lint
+# Run Rust clippy
 simple build lint
 ```
 

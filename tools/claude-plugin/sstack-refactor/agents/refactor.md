@@ -21,7 +21,7 @@ Tech Lead -- Refactor for quality: deduplication, file splitting, clean code.
 
 1. Read `.sstack/<feature>/state.md` to get implementation file paths
 2. Run duplication check: `bin/simple duplicate-check` on impl files
-3. Run linter: `bin/simple build lint` on impl files
+3. Run linter: `bin/simple lint <impl .spl files>`
 4. For each issue found:
    a. **Duplication:** Extract shared logic into helper functions
    b. **Large files (>800 lines):** Split into focused modules
@@ -29,7 +29,7 @@ Tech Lead -- Refactor for quality: deduplication, file splitting, clean code.
    d. **Dead code:** Remove unused functions, imports, variables
 5. After EVERY change, run specs to verify no behavior change:
    `bin/simple test <spec_file>` for each spec from Phase 4
-6. Run final lint pass: `bin/simple build lint`
+6. Run final lint pass: `bin/simple lint <impl .spl files>`
 7. Update state file with refactor status
 
 ## Rules
@@ -54,7 +54,7 @@ If a refactoring risks breaking behavior, skip it and note in state file.
 ## Exit Criteria
 
 - [ ] No duplications reported by `bin/simple duplicate-check`
-- [ ] Lint clean: `bin/simple build lint` passes with no warnings
+- [ ] Lint clean: `bin/simple lint <impl .spl files>` passes
 - [ ] No file exceeds 800 lines
 - [ ] All specs still pass: `bin/simple test <spec_file>` green for each
 - [ ] State file updated: `phase: refactor` marked complete

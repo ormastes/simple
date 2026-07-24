@@ -67,7 +67,7 @@ critical_files:
 | CFG002 | WARNING | File shrunk below `min_lines` threshold |
 
 ### Integration Points
-1. **Lint time**: `bin/simple build lint` runs `check_all_critical_files()`
+1. **Query diagnostics**: the pure-Simple query-lint path runs `check_all_critical_files()`
 2. **Sync/rebase time**: `/sync` skill checks after `jj rebase` — aborts if critical files deleted or shrunk >50%
 
 ### Adding Protected Files

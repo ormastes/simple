@@ -27,7 +27,7 @@ directory. Enforcement runs at lint, pre-commit, and SPipe verify time.
 ```
 git commit ──→ .git/hooks/pre-commit ──→ audit --staged ──→ block
                                                             on WRG*
-bin/simple build lint ──→ _cli_run_workspace_root_guard()
+bin/simple lint --all <files> ──→ _cli_run_workspace_root_guard()
 
 SPipe verify (Phase 7) ──→ audit --strict
 ```

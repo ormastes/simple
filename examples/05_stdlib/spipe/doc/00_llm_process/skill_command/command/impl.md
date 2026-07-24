@@ -80,7 +80,7 @@ review-team:    explore -> docs          (sequential)
 ### Phase 8: Implementation
 1. Implement in `src/**/<feature>.spl`, follow `/coding` rules
 2. **Stub Prevention Gate** (mandatory):
-   - `bin/simple build lint` on touched files
+   - `bin/simple lint <touched .spl files>`
    - `bin/simple query workspace-symbols --query pass_todo` to find stubs
    - No function ignoring all params (STUB001 = hard fail)
    - Design/spec placeholders must fail explicitly with `assert(false)` or
@@ -99,7 +99,9 @@ review-team:    explore -> docs          (sequential)
 
 ### Phase 14-15: Full Test Suite + VCS Sync
 ```bash
-bin/simple test && bin/simple build lint && bin/simple build check
+bin/simple test test --whole --mode=interpreter
+bin/simple lint <touched .spl files>
+bin/simple duplicate-check <owned-dir> --mode token --min-lines 5
 ```
 Run `/verify` (Claude) for production readiness verification.
 

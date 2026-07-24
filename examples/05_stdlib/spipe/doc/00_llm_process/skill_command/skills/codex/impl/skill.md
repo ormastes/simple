@@ -58,7 +58,9 @@ Skip if exist. See `design` skill for details.
 
 ### Phase 14: Full Test Suite
 ```bash
-bin/simple test && bin/simple build lint
+bin/simple test test --whole --mode=interpreter
+bin/simple lint <changed .spl files>
+bin/simple duplicate-check <owned-dir> --mode token --min-lines 5
 ```
 
 ### Phase 15: Verify + VCS Sync

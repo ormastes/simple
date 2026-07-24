@@ -50,8 +50,9 @@ In a small codebase, you notice when the same function shows up twice. In a *gen
 Simple folds duplication into the quality gate instead of leaving it as a reviewer's side quest:
 
 ```bash
-simple build check          # format + lint + test
-simple build check --full   # adds coverage and duplication detection
+simple lint <changed .spl files>
+simple duplicate-check <owned-dir> --mode token --min-lines 5
+simple test <scope>
 ```
 
 A human reviewer *might* catch a duplicate. A gate catches it every time it runs. This is where Simple stops feeling like "a language" and starts feeling like a fenced construction site for generated code: the model can still propose anything, it just can't keep regrowing the same idea in ten places unnoticed.

@@ -13,7 +13,7 @@ bin/simple build                    # Debug build
 bin/simple build --release          # Release build
 bin/simple test                     # Run all tests
 bin/simple test path/to/spec.spl   # Single test file
-bin/simple build lint               # Linter
+bin/simple lint <changed .spl files> # Simple source linter
 bin/simple build fmt                # Formatter
 bin/simple build check              # All checks
 bin/simple fix file.spl --dry-run   # Preview auto-fixes

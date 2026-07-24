@@ -46,7 +46,7 @@ bin/simple test path/to/spec.spl --compile            # native
 ```bash
 bin/simple build bootstrap          # 3-stage self-compilation (stage1→stage2→stage3 must match)
 bin/simple build check              # lint + fmt --check + full test suite
-bin/simple build lint               # linter for the bootstrap implementation
+bin/simple lint <changed .spl files> # pure-Simple source linter
 bin/simple build fmt --check        # format check
 ```
 
@@ -288,7 +288,7 @@ Interpreter → SMF Loader → Native
 
 ```bash
 # Lint for perf anti-patterns
-bin/simple build lint                            # includes mcp_perf_lint
+bin/simple lint <changed .spl files>             # source lint
 
 # Micro-benchmark with the stdlib
 bin/simple test test/bench/my_bench_spec.spl     # BenchSuite in std.testing.benchmark

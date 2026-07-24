@@ -11,11 +11,11 @@
 ```bash
 bin/simple build                    # Debug build
 bin/simple build --release          # Release build
-bin/simple test                     # Run all tests
+bin/simple test test --whole --mode=interpreter # Run the full Simple test suite
 bin/simple test path/to/spec.spl   # Single test file
-bin/simple build lint               # Linter
-bin/simple build fmt                # Formatter
-bin/simple build check              # All checks
+bin/simple lint <changed .spl files> # Pure-Simple source linter
+bin/simple build fmt                # Rust formatter
+bin/simple build check              # Rust workspace checks
 bin/simple fix file.spl --dry-run   # Preview auto-fixes
 ```
 

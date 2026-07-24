@@ -188,7 +188,7 @@ Reference for all 8 SPipe phases. Each phase has: role, focus, entry criteria, e
 6. Ensure TODOs are either implemented or left as TODO (never converted to NOTE)
 7. Run the SPipe doc/wiki refactor support skill (`.claude/skills/spipe_doc_wiki_refactor.md`) for docs, wiki-style process knowledge, feature/layer expert links, stale command names, and stale file paths affected by the implementation
 8. Run numbered artifact guard: `sh scripts/audit/numbered-artifact-guard.shs --working` and `sh scripts/audit/numbered-artifact-guard.shs --staged`
-9. Run linter if available: `bin/simple build lint`
+9. Run the Simple linter: `bin/simple lint <changed .spl files>`
 
 **Exit Criteria:**
 - No file exceeds 800 lines

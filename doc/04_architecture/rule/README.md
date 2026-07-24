@@ -134,7 +134,7 @@ Every `*_spec.spl` file must have:
 | Mechanism | What it catches |
 |-----------|----------------|
 | CI gates | Build failures, test failures |
-| Linter (`bin/simple build lint`) | Code style violations |
+| Linter (`bin/simple lint <files>`) | Simple code style violations |
 | Code review | Architecture violations |
 | `spipe-docgen` warnings | Missing doc links |
 | `traceability-check` | Missing source/test/doc trace links |

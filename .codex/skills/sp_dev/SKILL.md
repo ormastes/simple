@@ -65,6 +65,11 @@ or disabled stub-fallback guard is not equivalent evidence. Treat this as
 post-bootstrap command sanity; it does not replace release `--whole` tests or
 the applicable full lint and duplication gates.
 
+Use `bin/simple lint <changed .spl files>` and
+`bin/simple duplicate-check <owned-dir> --mode token --min-lines 5` for those
+pure-Simple gates. `bin/simple build lint` and `build check` are Rust workspace
+clippy/rustfmt commands, not substitutes.
+
 A temporarily deployed Stage 2 compiler may unblock native artifact builds,
 but it is not Stage 4 evidence and cannot qualify `run`, `test`, SPipe docgen,
 or release. Record its exact path, hash, supported commands, and rollback path.

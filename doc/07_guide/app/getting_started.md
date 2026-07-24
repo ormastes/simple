@@ -421,8 +421,8 @@ bin/simple build --release          # Optimized build
 bin/simple test                     # Run all tests
 bin/simple test path/to/spec.spl   # Run a specific test
 bin/simple build fmt                # Format code
-bin/simple build lint               # Run linter
-bin/simple build check              # All quality checks (lint + fmt --check + tests)
+bin/simple lint <changed .spl files> # Run the pure-Simple source linter
+bin/simple build check              # Rust clippy + rustfmt check + Rust tests
 ```
 
 ### Bootstrap

@@ -23,7 +23,7 @@ The strongest required edits are precision edits, not a rewrite:
 | 4,067 tests in 17.4s | Supported as dated snapshot | README says this for 2026-02-14; do not present as freshly run. |
 | System-test mock ban | Supported | SPipe mock modes and execution tests exist. |
 | Anti-dummy / anti-stub | Supported | Lint and verify gates exist. |
-| Duplication gate | Mostly supported | Docs and duplicate-check tool/tests exist; exact `build check --full` wiring was not traced in this pass. |
+| Duplication gate | Mostly supported | `simple duplicate-check` is an explicit source gate; fresh Stage 4 and release-scope qualification remain pending. |
 | Primitive public API lint | Supported | Rust and Simple lint code exists. |
 | `unit` / `newunit` | Supported | README/parser evidence exists. |
 | No null | Qualified | Better: no user-level `null`; absence uses `nil`/`Option`. |
@@ -60,6 +60,6 @@ Use four levels of confidence:
 
 - Confirm the final release tag and binary asset names for `1.0.0-beta`.
 - Decide whether README should update stale `v0.6.1` install snippets before the article links to binaries.
-- Trace the exact `simple build check --full` command chain for duplication and coverage.
+- Record fresh duplication and coverage evidence with their explicit commands before release.
 - Confirm whether `--doctest` remains a real alias or only a README compatibility note.
 - Confirm final public wording for handle pointers and target-preset family restriction.

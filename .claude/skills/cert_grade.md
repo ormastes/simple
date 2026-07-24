@@ -63,8 +63,8 @@ The spine of every standard. Each requirement traces **down** to design→code�
 
 ### Phase 2 — Coding Standard & Static Analysis
 
-1. **Coding rules** enforced (Simple's MISRA analog): `bin/simple build lint` clean; no waived rules without a recorded deviation.
-2. **Static analysis** clean at the target grade: run `bin/simple build check` + any `scripts/audit/*` guards (e.g. `direct-env-runtime-guard.shs`, `check-workspace-root-guard.shs`). For the Rust seed / C runtime, MISRA-C / clang-tidy / cppcheck / Frama-C equivalents apply.
+1. **Coding rules** enforced (Simple's MISRA analog): `bin/simple lint <changed .spl files>` clean; no waived rules without a recorded deviation.
+2. **Static analysis** clean at the target grade: run the applicable `bin/simple lint`, `bin/simple duplicate-check`, and `scripts/audit/*` guards (e.g. `direct-env-runtime-guard.shs`, `check-workspace-root-guard.shs`). For the Rust seed / C runtime, `bin/simple build check`, MISRA-C / clang-tidy / cppcheck / Frama-C equivalents apply.
 3. **JPL Power-of-10 analogs** (space grade): bounded loops (no unbounded recursion in the hot compiler path), no dynamic allocation after init in safety-critical modules, assertion density ≥ 2/function on safety paths, check every return value, minimal scope.
 4. **No undefined behavior in generated code** — the codegen must not emit UB (signed overflow, OOB, uninitialized reads). This is a compiler-specific hard requirement.
 
@@ -153,7 +153,7 @@ Nearest achievable now: aero-d / auto-a (statement coverage + robustness).
 ## Applying to the Simple compiler
 
 Run, in order (defer the slow ones per Phase-8 infra):
-1. `bin/simple build check` (lint + fmt + tests) — Phase 2.
+1. Simple lint/duplication/audit gates from Phase 2; use `bin/simple build check` separately for Rust clippy/rustfmt/tests when Rust is in scope.
 2. `scripts/check/check-lean-proofs.shs` — Phase 6.
 3. `scripts/check/check-simpleos-mission-critical-release.shs` — SimpleOS release gate (must report `release_blockers=none`).
 4. Differential optimization-soundness sweep (Phase 4.5) — the redeploy gate (`scratchpad/redeploy_gate.sh`) is a seed of this.

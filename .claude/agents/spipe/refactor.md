@@ -19,7 +19,7 @@
 
 1. Read `.spipe/<feature>/state.md` to get implementation file paths
 2. Run duplication check: `bin/simple duplicate-check <impl-file-or-dir>` for each implementation scope
-3. Run linter: `bin/simple build lint` on impl files
+3. Run linter: `bin/simple lint <impl .spl files>`
 4. For each issue found (max 10 refactor-test cycles total; stop after 10 even if issues remain):
    a. **Duplication:** Extract shared logic into helper functions
    b. **Large files/classes (>800 lines):** Split by methodology — (1) try to
@@ -46,7 +46,7 @@
 8. Run numbered artifact guard:
    `sh scripts/audit/numbered-artifact-guard.shs --working`
    `sh scripts/audit/numbered-artifact-guard.shs --staged`
-9. Run final lint pass: `set -o pipefail; bin/simple build lint 2>&1 | tail -30`
+9. Run final lint pass: `bin/simple lint <impl .spl files>`
 10. Update state file with refactor status and doc/wiki refactor status
 
 ## Rules
@@ -70,7 +70,7 @@ If a refactoring risks breaking behavior, skip it and note in state file.
 ## Exit Criteria
 
 - [ ] No duplications reported by `bin/simple duplicate-check <impl-file-or-dir>`
-- [ ] Lint clean: `bin/simple build lint` passes with no warnings
+- [ ] Lint clean: `bin/simple lint <impl .spl files>` passes
 - [ ] No file exceeds 800 lines
 - [ ] All specs still pass: `bin/simple test <spec_file>` green for each
 - [ ] Doc/wiki refactor pass recorded in state file

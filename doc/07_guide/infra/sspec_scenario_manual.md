@@ -414,7 +414,7 @@ bin/simple md-diagram-update doc/06_spec/
 ```
 
 This renders the ASCII art and fills in the hash. The lint check
-`bin/simple build lint` reports `DIAG001` warnings for stale or placeholder
+`bin/simple lint <scenario files>` reports `DIAG001` warnings for stale or placeholder
 diagrams.
 
 For phase docs (research, architecture, refactor), include at least one SDN

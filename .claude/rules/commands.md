@@ -9,9 +9,9 @@ bin/simple build                    # Debug build (runs bootstrap by default)
 bin/simple build bootstrap          # 3-stage self-compilation verification
 
 # Quality
-bin/simple build lint               # Linter
-bin/simple build fmt                # Formatter
-bin/simple build check              # All checks (lint + fmt --check + tests)
+bin/simple lint <changed .spl files> # Pure-Simple source linter
+bin/simple build fmt                # Rust formatter
+bin/simple build check              # Rust clippy + rustfmt check + Rust tests
 
 # Documentation Coverage
 bin/simple stats                    # Doc coverage in stats

@@ -14,10 +14,12 @@ unknown profiles or rule names, and levels other than `allow`, `warn`, or
 # Run linter on a file
 bin/simple lint file.spl
 
-# Run lint via build system
-bin/simple build lint
+# Run the essential pure-Simple quality gates
+bin/simple test <scope>
+bin/simple lint <changed .spl files>
+bin/simple duplicate-check <owned-dir> --mode token --min-lines 5
 
-# Run all quality checks (includes lint)
+# Check the Rust workspace with clippy/rustfmt/Rust tests
 bin/simple build check
 
 # Guard against new LLM-style numbered duplicate artifacts
@@ -596,7 +598,7 @@ justified until the classifier root cause is fixed.
 
 ## Related Commands
 
-- `simple build check` — All quality checks
+- `simple build check` — Rust workspace clippy/rustfmt/test aggregate
 - `simple build fmt` — Code formatting
 - `simple duplicate-check` — Code duplication detection
 - `simple doc-coverage` — Documentation coverage
