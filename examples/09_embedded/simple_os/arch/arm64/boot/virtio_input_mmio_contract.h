@@ -19,6 +19,13 @@ static inline uint32_t arm64_virtio_status_fail(uint32_t status, uint32_t failed
     return status | failed_bit;
 }
 
+static inline int arm64_virtio_status_rejected(uint32_t status,
+                                               uint32_t failed_bit,
+                                               uint32_t needs_reset_bit)
+{
+    return (status & (failed_bit | needs_reset_bit)) != 0U;
+}
+
 static inline int arm64_virtio_event_length_valid(uint32_t used_len, uint32_t event_size)
 {
     return used_len == event_size;

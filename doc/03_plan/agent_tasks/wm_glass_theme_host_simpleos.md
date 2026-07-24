@@ -142,6 +142,23 @@ overlapping dirty work and remains read-only for this lane.
        --scenario=arm64-desktop-engine2d --log=off
    ```
 
+### ARM64 desktop media ownership (2026-07-24)
+
+- Desktop scenarios own `build/os/fat32-arm64-desktop.img`, produced by the
+  explicit `desktop-fonts` disk profile.
+- The desktop image contains only `/SYS/FONTS`: the 16 pinned production faces
+  and their 37 pinned license/metadata/notices companions.
+- `arm64-virtio-fat32-smf` continues to own `build/os/fat32-arm64.img` and must
+  fail closed when the target ARM64 Simple payload is missing or invalid.
+- Non-QEMU acceptance: build the desktop image once, inspect all 53 font bundle
+  files plus absence of `/SYS/APPS` and `/SIMPLE.ELF`, then run the focused
+  disk/font contract specs.
+- ARM VirtIO transport rejects both `FAILED` and `DEVICE_NEEDS_RESET` status
+  after `FEATURES_OK` and `DRIVER_OK`. The compositor `InputBackend` cannot yet
+  own the device because the freestanding native compiler erases the trait's
+  `MouseEvent?` return to `ANY`; raw polling remains diagnostic-only and the
+  production event-ready marker stays absent until that ABI blocker is fixed.
+
    The ARM input owner is source-wired and keeps UART fallback outside
    production evidence. After the host-first gate, require QMP pointer
    movement/button down/up plus keyboard press/release. Pointer records in one

@@ -10,6 +10,9 @@ int main(void)
     assert(arm64_virtio_status_fail(11U, 128U) == 139U);
     assert(arm64_virtio_status_add(67U, 8U) == 75U);
     assert(arm64_virtio_status_fail(75U, 128U) == 203U);
+    assert(!arm64_virtio_status_rejected(11U, 128U, 64U));
+    assert(arm64_virtio_status_rejected(139U, 128U, 64U));
+    assert(arm64_virtio_status_rejected(75U, 128U, 64U));
     assert(arm64_virtio_event_length_valid(8U, 8U));
     assert(!arm64_virtio_event_length_valid(9U, 8U));
     assert(arm64_virtio_queue_shape_valid(

@@ -2418,6 +2418,7 @@ RuntimeValue rt_gui_render_desktop(RuntimeValue u1, RuntimeValue u2) { (void)u1;
 #define VIRTIO_STATUS_DRIVER         2U
 #define VIRTIO_STATUS_DRIVER_OK      4U
 #define VIRTIO_STATUS_FEATURES_OK    8U
+#define VIRTIO_STATUS_DEVICE_NEEDS_RESET 64U
 #define VIRTIO_STATUS_FAILED         128U
 #define VIRTQ_DESC_F_WRITE           2U
 
@@ -2564,7 +2565,9 @@ static int arm64_virtio_input_start_device(struct arm64_virtio_input_device *dev
     status = arm64_virtio_status_add(mmio[VMMIO_STATUS / 4U], VIRTIO_STATUS_FEATURES_OK);
     mmio[VMMIO_STATUS / 4U] = status;
     status = mmio[VMMIO_STATUS / 4U];
-    if ((status & VIRTIO_STATUS_FEATURES_OK) == 0U) {
+    if ((status & VIRTIO_STATUS_FEATURES_OK) == 0U ||
+        arm64_virtio_status_rejected(
+            status, VIRTIO_STATUS_FAILED, VIRTIO_STATUS_DEVICE_NEEDS_RESET)) {
         arm64_virtio_input_mark_failed(mmio);
         return 0;
     }
@@ -2617,7 +2620,9 @@ static int arm64_virtio_input_start_device(struct arm64_virtio_input_device *dev
     status = arm64_virtio_status_add(mmio[VMMIO_STATUS / 4U], VIRTIO_STATUS_DRIVER_OK);
     mmio[VMMIO_STATUS / 4U] = status;
     status = mmio[VMMIO_STATUS / 4U];
-    if ((status & VIRTIO_STATUS_DRIVER_OK) == 0U) {
+    if ((status & VIRTIO_STATUS_DRIVER_OK) == 0U ||
+        arm64_virtio_status_rejected(
+            status, VIRTIO_STATUS_FAILED, VIRTIO_STATUS_DEVICE_NEEDS_RESET)) {
         arm64_virtio_input_mark_failed(mmio);
         return 0;
     }

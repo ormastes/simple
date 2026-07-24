@@ -139,6 +139,10 @@ fn spl_start():
     val compositor_backend = Engine2dCompositorBackend.create(engine)
     var compositor = Compositor.with_backends(
         compositor_backend,
+        # The native freestanding compiler currently erases InputBackend's
+        # MouseEvent? trait return to ANY, so a concrete VirtIO backend cannot
+        # safely drive canonical compositor input yet. Raw polling below is
+        # diagnostic-only and the production event gate remains fail-closed.
         nil,
         screen_width,
         screen_height
@@ -192,7 +196,7 @@ fn spl_start():
     val virtio_input_mask = arm64_virtio_input_init()
     val virtio_input_enabled = arm64_virtio_input_ready(virtio_input_mask)
     if virtio_input_enabled:
-        uart_writeln("[backend2d-event-ready] backend=simpleos-qemu-arm64 event_backend=virtio-mmio keyboard=ready pointer=ready")
+        uart_writeln("[backend2d-event-blocker] backend=simpleos-qemu-arm64 event_backend=virtio-mmio keyboard=transport-ready pointer=transport-ready reason=input-backend-trait-mouse-return-erased-to-any diagnostic_raw_poll=enabled")
     else:
         uart_writeln("[backend2d-event-blocker] backend=simpleos-qemu-arm64 event_backend=virtio-mmio required=keyboard,pointer ready_mask={virtio_input_mask} uart=fallback-only")
     uart_writeln("[desktop-gui] first-frame-rendered")
@@ -241,7 +245,7 @@ fn spl_start():
                         guest_input_sequence = guest_input_sequence + 1
                         pointer_frame_sequence = guest_input_sequence
                         pointer_frame_open = true
-                    input_compositor.input_sequence = guest_input_sequence
+                    input_compositor.input_sequence = pointer_frame_sequence
                     uart_writeln("[virtio-input-device] input_seq={pointer_frame_sequence} device=pointer type={event.type_} code={event.code} value={event.value}")
                     if event.type_ == EV_KEY and event.code >= BTN_LEFT:
                         virtio_mouse.feed_key(event.code, event.value != 0u32)
