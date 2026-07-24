@@ -1,6 +1,6 @@
 # LLM Caret Claude CLI Traceability
 
-Date: 2026-07-05
+Date: 2026-07-25
 
 ## MDSOC+ Caret Boundary
 
@@ -29,18 +29,18 @@ remote-control bridge, OAuth, or full agent orchestration.
 |---|---:|---|---|
 | `src/app/llm_caret/chat.spl` | 227 | `src/assistant/sessionHistory.ts`, `src/bootstrap/state.ts` | conversation history and message JSON |
 | `src/app/llm_caret/chat_tui.spl` | 794 | `src/screens/REPL.tsx`, `src/commands/*` | transcript, slash commands, session transitions, and lifecycle-safe injected I/O |
-| `src/app/llm_caret/claude_api.spl` | 241 | `src/QueryEngine.ts`, `src/entrypoints/sdk/coreSchemas.ts` | Anthropic Messages request/response |
+| `src/app/llm_caret/claude_api.spl` | 310 | `src/QueryEngine.ts`, `src/entrypoints/sdk/coreSchemas.ts` | Anthropic Messages request/build/retry/completion ownership |
 | `src/app/llm_caret/claude_cli.spl` | 580 | `src/entrypoints/cli.tsx`, `src/QueryEngine.ts` | non-interactive argv and typed JSON/stream parsing |
-| `src/app/llm_caret/config.spl` | 228 | `src/bootstrap/state.ts`, `src/constants/product.ts` | defaults and provider config |
+| `src/app/llm_caret/config.spl` | 231 | `src/bootstrap/state.ts`, `src/constants/product.ts` | defaults, file-load completion, and provider config |
 | `src/app/llm_caret/gui.spl` | 128 | Simple-only provider UI extension | browser GUI outside focused Claude CLI parity |
 | `src/app/llm_caret/gui_metal.spl` | 205 | Simple-only provider UI extension | native Metal GUI outside focused Claude CLI parity |
 | `src/app/llm_caret/gui_native_model.spl` | 69 | Simple-only provider UI extension | native GUI state outside focused Claude CLI parity |
 | `src/app/llm_caret/interface_text.spl` | 11 | Simple-only presentation seam | shared role and transcript text |
 | `src/app/llm_caret/json_helpers.spl` | 250 | Simple-only shared helper | local JSON helper caret utility |
 | `src/app/llm_caret/local_torch.spl` | 98 | Simple-only provider extension | local model provider outside Claude parity |
-| `src/app/llm_caret/main.spl` | 961 | `src/entrypoints/cli.tsx`, `src/QueryEngine.ts`, `src/screens/REPL.tsx` | CLI entrypoint, runtime state, proxy, and typed UI-result routing |
+| `src/app/llm_caret/main.spl` | 963 | `src/entrypoints/cli.tsx`, `src/QueryEngine.ts`, `src/screens/REPL.tsx` | injected CLI entry orchestration, runtime state, proxy, and typed UI-result routing |
 | `src/app/llm_caret/mod.spl` | 409 | `src/QueryEngine.ts`, `src/bootstrap/state.ts` | public API, state, provider dispatch |
-| `src/app/llm_caret/openai_api.spl` | 260 | `src/entrypoints/sdk/coreSchemas.ts` | OpenAI-compatible provider extension |
+| `src/app/llm_caret/openai_api.spl` | 330 | `src/entrypoints/sdk/coreSchemas.ts` | OpenAI request/build/retry/completion provider extension |
 | `src/app/llm_caret/openai_compat.spl` | 268 | `src/entrypoints/sdk/coreSchemas.ts` | local/OpenAI-compatible endpoint provider with injected request/completion boundary |
 | `src/app/llm_caret/opencode_cli.spl` | 149 | Simple-only Claude-like CLI provider | OpenCode adapter with Claude-like response shape |
 | `src/app/llm_caret/provider.spl` | 440 | `src/Tool.ts`, `src/constants/tools.ts`, `src/entrypoints/sdk/coreSchemas.ts` | provider registry and normalized response |
@@ -54,9 +54,9 @@ remote-control bridge, OAuth, or full agent orchestration.
 | `src/app/llm_caret/types.spl` | 225 | `src/entrypoints/sdk/coreSchemas.ts`, `src/types/logs.ts` | request/response/event/config records |
 
 Mapped files at this checkpoint: 25/25 = 100%.
-Mapped LOC at this checkpoint: 7343/7343 = 100%.
-Current direct declaration inventory: 502 symbols; the checker must prove
-502/502 after the symbol TSV is regenerated.
+Mapped LOC at this checkpoint: 7487/7487 = 100%.
+Current direct declaration inventory: 516 symbols; the checker must prove
+516/516 after the symbol TSV is regenerated.
 
 These counts include the new `tui_io.spl` row and match the regenerated
 file-qualified inventory. They prove direct-file classification, not executed
@@ -82,13 +82,13 @@ reachable from the shipped Caret facade.
 | Claude-full root hidden/disabled registry admission | `test/03_system/tools/llm/claude_full/commands/root_commands_registry_spec.spl`; the production-derived scenario enumerates every registry record and alias rather than maintaining a second command list, while the PTY hidden case supplies the corresponding real-TUI process contract |
 | Claude-full hidden-disabled stub descriptor completeness (`REQ-LLM-CARET-HIDDEN-008`, supporting metadata) | `test/03_system/tools/llm/claude_full/commands/hidden_stub_registry_spec.spl`; the parts-bin aggregate projects all 14 leaf descriptors while independent source discovery normalizes hyphen/underscore twins and compares membership in both directions; shipped fulfillment remains the root/component/PTY lane, and execution remains blocked |
 | Claude-full distributed feature-gate owner/spec cross-map (`REQ-LLM-CARET-HIDDEN-008`, supporting metadata) | `test/03_system/tools/llm/claude_full/feature_gate_registry_spec.spl`; 33 bounded gate-dimension records derive leaf-owner Boolean/text outcomes, link exact focused or aggregate evidence, generically reconcile named root metadata, preserve `/compact` root-versus-owner drift, and reject malformed maps with one exact diagnostic array; it is not shipped admission or automatic future-gate discovery |
-| Focused unit branches | `test/01_unit/app/llm_caret/claude_cli_spec.spl`, `chat_spec.spl`, `chat_tui_spec.spl`, `chat_tui_input_spec.spl`, `chat_tui_runtime_spec.spl`, `main_spec.spl`, `config_spec.spl`, `tools_spec.spl`, `types_spec.spl`, `provider_spec.spl`, `retry_spec.spl`, and the injected `openai_compat_spec.spl` exchange under `test/01_unit/app/llm_caret/` |
+| Focused unit branches | `test/01_unit/app/llm_caret/claude_cli_spec.spl`, `claude_api_spec.spl`, `openai_api_spec.spl`, `chat_spec.spl`, `chat_tui_spec.spl`, `chat_tui_input_spec.spl`, `chat_tui_runtime_spec.spl`, `main_spec.spl`, `config_spec.spl`, `tools_spec.spl`, `types_spec.spl`, `provider_spec.spl`, `retry_spec.spl`, and the injected `openai_compat_spec.spl` exchange under `test/01_unit/app/llm_caret/` |
 | Offline native seams | `test/04_smoke/llm_caret_cli_tui_hardening_smoke.spl` |
 
 Both `claude_full/feature_gate_registry.spl` and
 `claude_full/commands/hidden_stub_registry.spl` are supporting parity-island
 metadata. They are outside the 25 direct shipped-path files counted by the
-trace checker and do not change its 25/25, 7,343-LOC, or 502-symbol totals.
+trace checker and do not change its 25/25, 7,487-LOC, or 516-symbol totals.
 
 These specs do not green historical full-parity rows whose implementation
 target is absent. In particular, the installed executable probe proves only
@@ -96,11 +96,13 @@ the bounded offline argument surface it invokes; it does not establish that
 every current Claude function, authenticated request, or interactive session
 still works.
 
-The curated CLI/TUI/owner cohort now contains 554 modern `should` examples:
-463 base scenarios plus 91 focused owner/effect scenarios. The base includes
+The curated CLI/TUI/owner cohort now contains 591 modern `should` examples:
+500 base scenarios plus 91 focused owner/effect scenarios. The base includes
 the established direct Caret/registry/PTY owners plus the expanded
 `StructuredIO`, MCP OAuth, bridge lifecycle/messaging, MCP client, and injected
-OpenAI-compatible provider scenarios. The separate trace and strict
+OpenAI-compatible provider scenarios, six injected main-entry scenarios, four
+config owner scenarios, and 27 Claude/OpenAI API request/completion scenarios.
+The separate trace and strict
 full-parity map gates contain eight additional modern scenarios. The broader
 349-spec Claude-full parts bin is not counted as modern merely because a
 lexical `it` block exists.
@@ -124,18 +126,18 @@ assertions do not convert that stale count into green parity.
 |---|---|
 | `chat.spl` | `chat_clear`, `chat_set_system_prompt`, `chat_add_message`, `chat_truncate`, `chat_build_messages_json`, `chat_last_content`, `chat_last_role` |
 | `chat_tui.spl` | `SessionHooks`, `dispatch_slash`, `run_chat_tui_submission`, `run_chat_tui`, `run_chat_plain`, `caret_chat` |
-| `claude_api.spl` | `ApiResponse`, `build_claude_api_body`, `build_claude_api_headers`, `build_single_message_json`, `parse_claude_api_response`, `claude_api_send` |
+| `claude_api.spl` | `ApiResponse`, `ClaudeApiRequest`, request/body/header builders, `complete_claude_api_exchange`, `parse_claude_api_response`, retry-preserving `claude_api_send` |
 | `claude_cli.spl` | `CliResponse`, `CliStreamEvent`, typed JSON helpers, `build_claude_args`, `build_claude_stream_args`, `parse_claude_json_response`, `parse_claude_stream_line`, `claude_cli_send`, `claude_cli_stream` |
-| `config.spl` | `config_loaded`, `config_default_provider`, provider default getters, config parsing helpers |
+| `config.spl` | `config_loaded`, `config_default_provider`, provider default getters, `complete_config_load`, config parsing helpers |
 | `gui.spl` | `run_gui` and GUI route/process helpers |
 | `gui_metal.spl` | `CaretMetalState`, Metal composition/presentation helpers, `run_caret_metal_gui` |
 | `gui_native_model.spl` | `CaretNativeModelState` and native model updates |
 | `interface_text.spl` | `caret_role_label`, `caret_turn_line` |
 | `json_helpers.spl` | `escape_json_text`, `jo1`-`jo6`, `ja`, `extract_json_string`, `extract_json_value`, `extract_json_int`, `extract_json_bool`, `extract_nested_string`, `build_message_json`, `build_messages_json` |
 | `local_torch.spl` | `LocalResponse`, `build_torch_script`, `local_torch_send` |
-| `main.spl` | `MainArgs`, `ResumeBackend`, `resolve_resume_backend`, `main_configure`, `main_responder`, proxy guards, slash hooks, `main` |
+| `main.spl` | `MainArgs`, `ResumeBackend`, `resolve_resume_backend`, `main_configure`, `main_responder`, proxy guards, slash hooks, injected `run_main_args`, `main` |
 | `mod.spl` | `llm_init_defaults`, `llm_init`, `llm_set_api_key`, `llm_set_base_url`, `llm_set_cli_path`, `llm_system`, `llm_clear`, `llm_history_*`, `llm_chat`, `llm_send` |
-| `openai_api.spl` | `OpenAIResponse`, `build_openai_body`, `build_openai_headers`, `build_openai_messages_json`, `parse_openai_response`, `openai_send` |
+| `openai_api.spl` | `OpenAIResponse`, `OpenAIApiRequest`, request/body/header builders, `complete_openai_exchange`, `parse_openai_response`, retry-preserving `openai_send` |
 | `openai_compat.spl` | `CompatRequest`, `CompatResponse`, `build_compat_body`, `build_compat_headers`, `build_compat_request`, `complete_compat_exchange`, `parse_compat_response`, `compat_send` |
 | `opencode_cli.spl` | `OpencodeCliResponse`, `OpencodeProcessResult`, OpenCode argv/parse/process helpers |
 | `provider.spl` | `LLMResponse`, `dispatch_send`, `dispatch_send_advanced`, provider-specific dispatch helpers |

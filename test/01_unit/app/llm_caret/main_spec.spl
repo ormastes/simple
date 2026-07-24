@@ -1,3 +1,4 @@
+# codex-system-test
 # LLM Caret Main Entry Point Specification
 #
 # Exercises the REAL module (app.llm_caret.main):
@@ -9,6 +10,7 @@
 #     dispatch fn
 #   - server hardening: bearer auth, size cap, rate limit (guard_request)
 
+use std.spec.*
 use app.io.mod.{env_get, env_set, dir_remove_all}
 use app.llm_caret.types.{Message, new_user_message}
 use app.llm_caret.session.{Session, save_session, load_session}
@@ -16,7 +18,7 @@ use app.llm_caret.provider.{LLMResponse, new_llm_error}
 use app.llm_caret.tools.{ModelResponse, default_policy}
 use app.llm_caret.chat.{run_agent_loop}
 use app.llm_caret.main.{
-    MainArgs, parse_main_args, build_model_response,
+    MainArgs, parse_main_args, run_main_args, build_model_response,
     main_configure, main_session_id, _slash_on_new, _slash_on_provider,
     _resolve_workspace, _build_policy, _slash_on_model, _slash_on_sessions,
     _hidden_commands_enabled, _slash_on_resume, _on_persist,
@@ -110,6 +112,136 @@ describe "parse_main_args":
     it "should record the first unrecognized flag":
         val a = parse_main_args(["--bogus-flag", "--another"])
         expect(a.unknown).to_equal("--bogus-flag")
+
+describe "production entry orchestration":
+    it "should return success for help without mutating configured owner state":
+        step("Prepare injected CLI arguments")
+        main_configure(
+            "dummy", "before-model", "", "", "", "",
+            "keep-provider-session", 0
+        )
+        val raw_args = ["--help"]
+
+        step("Run production entry orchestration")
+        val exit_code = run_main_args(raw_args)
+
+        step("Check exact exit and owner effects")
+        val observed = _slash_on_provider("not-a-provider")
+        val provider_session_id = main_session_id()
+        _reset_main_state()
+        expect(exit_code).to_equal(0)
+        expect(observed.provider).to_equal("dummy")
+        expect(observed.model).to_equal("before-model")
+        expect(provider_session_id).to_equal("keep-provider-session")
+
+    it "should reject an unknown option before mutating configured owner state":
+        step("Prepare injected CLI arguments")
+        main_configure(
+            "dummy", "before-model", "", "", "", "",
+            "keep-provider-session", 0
+        )
+        val raw_args = ["--not-a-real-option"]
+
+        step("Run production entry orchestration")
+        val exit_code = run_main_args(raw_args)
+
+        step("Check exact exit and owner effects")
+        val observed = _slash_on_provider("not-a-provider")
+        val provider_session_id = main_session_id()
+        _reset_main_state()
+        expect(exit_code).to_equal(2)
+        expect(observed.provider).to_equal("dummy")
+        expect(observed.model).to_equal("before-model")
+        expect(provider_session_id).to_equal("keep-provider-session")
+
+    it "should reject a missing config before mutating configured owner state":
+        step("Prepare injected CLI arguments")
+        main_configure(
+            "dummy", "before-model", "", "", "", "",
+            "keep-provider-session", 0
+        )
+        val fixture_root = WS_ROOT + "/missing-config-owner"
+        dir_remove_all(fixture_root)
+        val raw_args = ["--config", fixture_root + "/missing.sdn"]
+
+        step("Run production entry orchestration")
+        val exit_code = run_main_args(raw_args)
+
+        step("Check exact exit and owner effects")
+        val observed = _slash_on_provider("not-a-provider")
+        val provider_session_id = main_session_id()
+        _reset_main_state()
+        expect(exit_code).to_equal(2)
+        expect(observed.provider).to_equal("dummy")
+        expect(observed.model).to_equal("before-model")
+        expect(provider_session_id).to_equal("keep-provider-session")
+
+    it "should reject an invalid provider before mutating configured owner state":
+        step("Prepare injected CLI arguments")
+        main_configure(
+            "dummy", "before-model", "", "", "", "",
+            "keep-provider-session", 0
+        )
+        val raw_args = ["--provider", "not-a-provider"]
+
+        step("Run production entry orchestration")
+        val exit_code = run_main_args(raw_args)
+
+        step("Check exact exit and owner effects")
+        val observed = _slash_on_provider("still-not-a-provider")
+        val provider_session_id = main_session_id()
+        _reset_main_state()
+        expect(exit_code).to_equal(2)
+        expect(observed.provider).to_equal("dummy")
+        expect(observed.model).to_equal("before-model")
+        expect(provider_session_id).to_equal("keep-provider-session")
+
+    it "should reject a missing resumed session before mutating configured owner state":
+        step("Prepare injected CLI arguments")
+        main_configure(
+            "dummy", "before-model", "", "", "", "",
+            "keep-provider-session", 0
+        )
+        val fixture_home = MAIN_SESSION_ROOT + "/entry-missing-resume"
+        val original_home = _isolate_main_home(fixture_home)
+        val raw_args = ["--provider", "dummy", "--resume", "missing-session"]
+
+        step("Run production entry orchestration")
+        val exit_code = run_main_args(raw_args)
+
+        step("Check exact exit and owner effects")
+        _restore_main_home(original_home, fixture_home)
+        val observed = _slash_on_provider("not-a-provider")
+        val provider_session_id = main_session_id()
+        _reset_main_state()
+        expect(exit_code).to_equal(2)
+        expect(observed.provider).to_equal("dummy")
+        expect(observed.model).to_equal("before-model")
+        expect(provider_session_id).to_equal("keep-provider-session")
+
+    it "should reject Metal GUI for a non-dummy provider after configuring that owner":
+        step("Prepare injected CLI arguments")
+        main_configure(
+            "dummy", "before-model", "", "", "", "",
+            "keep-provider-session", 0
+        )
+        val raw_args = [
+            "--provider", "claude_cli",
+            "--model", "direct-entry-model",
+            "--metal-gui"
+        ]
+
+        step("Run production entry orchestration")
+        val exit_code = run_main_args(raw_args)
+
+        step("Check exact exit and owner effects")
+        val observed = _slash_on_provider("not-a-provider")
+        val provider_session_id = main_session_id()
+        _reset_main_state()
+        expect(exit_code).to_equal(2)
+        expect(observed.provider).to_equal("claude_cli")
+        expect(observed.model).to_equal("direct-entry-model")
+        expect(provider_session_id).to_equal("")
 
 describe "workspace and permission policy resolution":
     it "should prefer the explicit workspace without reading process state":

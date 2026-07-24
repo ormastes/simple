@@ -26,7 +26,7 @@ must never be reported as every Claude function working.
 | TRACE-001..002 | report/checker/inventory artifacts | All three paths exist |
 | TRACE-001..002, TRACE NFR-003 | MDSOC and Claude/Simple report mapping | Required report sections and key roots/symbols |
 | TRACE NFR-001..004 | offline deterministic derivation | No provider/network command; stable filesystem/sort/temp cleanup |
-| TRACE-003..005 | exact computed closure | Exit zero; 25/25 files, 7,343/7,343 LOC, 502/502 declarations |
+| TRACE-003..005 | exact computed closure | Exit zero; 25/25 files, 7,487/7,487 LOC, 516/516 declarations |
 
 ## Current result and boundary
 
@@ -35,10 +35,10 @@ The standalone checker passed once on 2026-07-25:
 ```text
 llm_caret_source_files=25
 llm_caret_mapped_files=25
-llm_caret_source_loc=7343
-llm_caret_mapped_loc=7343
-llm_caret_symbol_count=502
-llm_caret_symbol_traced_count=502
+llm_caret_source_loc=7487
+llm_caret_mapped_loc=7487
+llm_caret_symbol_count=516
+llm_caret_symbol_traced_count=516
 STATUS: PASS llm-caret-claude-cli-trace
 ```
 

@@ -122,7 +122,7 @@ and must not be resolved, reverted, or included by this lane.
 
 | Gate | Current result | Authority/limit |
 |---|---|---|
-| Direct Caret trace | PASS: 25/25 files, 7,343/7,343 LOC, 502/502 file-qualified declarations after the OpenAI-compatible request/completion seam | Static mapping only |
+| Direct Caret trace | PASS: 25/25 files, 7,487/7,487 LOC, 516/516 file-qualified declarations after the CLI entry/API/config owner seams | Static mapping only |
 | Unit manual parity | PASS: 62/62 TUI, 22/22 raw-input, 20/20 runtime, 57/57 main, 12/12 config, 37/37 tools, 24/24 chat, and 14/14 types bodies match source | Zero executed scenarios |
 | Component manual parity | PASS: 10/10 TUI/hidden scenario bodies match source, including default-hidden, admitted-hidden, and disabled alias submission with zero responder/persistence | Zero executed scenarios |
 | PTY manual parity | PASS: 7/7 live-terminal scenario bodies match source | Static synchronization; checker/SSpec not executed on a qualified artifact |
@@ -130,7 +130,7 @@ and must not be resolved, reverted, or included by this lane.
 | Root-registry manual parity | PASS: 5/5 scenario bodies match source, including the production-derived exhaustive matrix | Static synchronization; no CLI/TUI invocation claim |
 | Hidden-stub manual parity | PASS: 1/1 scenario body and the complete supporting-helper block match source | Static synchronization; SSpec/docgen not executed on a qualified runtime |
 | Feature-gate manual parity | PASS (static): 33/33 owner rows, 33/33 independently pinned contract rows, 33/33 state rows, and 4/4 complete folded executable scenario bodies; bounded import-frontier discovery resolves 33 unique physical source/owner edges | This catches imported-registry drift only, not arbitrary unimported or upstream-only gates; SSpec/docgen cannot execute until a qualified runtime exists |
-| Focused modern SSpec scan | PASS (static): 554 modern `should` examples across the curated CLI/TUI/owner cohort (463 base plus 91 focused owner/effect examples), canonical matchers, and no placeholder pass | Static source/manual scan only except for the six-case installed-Claude shell checker; the broader 349-spec parts bin and eight modern map-gate scenarios are reported separately |
+| Focused modern SSpec scan | PASS (static): 591 modern `should` examples across the curated CLI/TUI/owner cohort (500 base plus 91 focused owner/effect examples), canonical matchers, and no placeholder pass | Static source/manual scan only except for the six-case installed-Claude shell checker; the broader 349-spec parts bin and eight modern map-gate scenarios are reported separately |
 | Direct environment guard | PASS in working and staged modes | Changed Caret paths only |
 | Numbered-artifact guard | WARN in this jj workspace: both modes emit Git-worktree/`--cached` errors but still print `OK` and exit zero | Not authoritative here; no numbered artifacts are added by this tranche |
 | Generated-spec layout | PASS: zero `.spl` specs under `doc/06_spec` | Layout only |
@@ -303,8 +303,8 @@ fixtures. No lane may run a paid provider.
 
    Current audit result: the 33 distributed gate dimensions remain
    parts-bin-only; the shipped entry graph reaches only the compact/init root
-   records and their summarize/bootstrap aliases. The scoped suite contains 554
-   modern scenarios (463 base plus 91 focused owner/effect scenarios), and the
+   records and their summarize/bootstrap aliases. The scoped suite contains 591
+   modern scenarios (500 base plus 91 focused owner/effect scenarios), and the
    PTY manual contains seven fail-closed scenarios with zero executed. Simple
    LSP MCP returns the `commands.spl` symbol inventory and resolves the
    `chat_tui.spl` `findRootCommand` call to its production definition. GitHub
@@ -355,7 +355,7 @@ Remaining work is ordered by shipped-path value and prerequisite cost:
 | M — cached plain process | Complete statically: four fail-closed `--plain` stdin cases for `/compact`, `/summarize`, `/init`, and `/bootstrap` | Execute on the qualified cached artifact; exact canonical output, exit zero, no assistant/unknown output, and no session file under isolated HOME |
 | N — PTY negative effects | Complete statically: promptless negative checks plus hidden canonical/alias and false-env cases are represented in the real PTY checker/spec/manual | Execute once on the qualified cached artifact while preserving forbidden-output/session gates and terminal cleanup |
 | O — registry discovery | Complete for the bounded imported registry frontier: 33/33 discovered physical source/owner edges and an exact negative drift fixture | Restore a pinned current-upstream tree before claiming discovery beyond the imported frontier |
-| P — direct owner closure | Retry, MCP client, all 16 bridge lifecycle owners, six MCP-auth credential mutations, and bridge messaging core policies are complete statically; structured CLI I/O is in progress | Continue the same direct-owner/effect/manual pattern for shipped provider transports and remaining OAuth owners; never add constant-only sentinel tests |
+| P — direct owner closure | Retry, MCP client, all 16 bridge lifecycle owners, MCP auth/OAuth, bridge messaging, structured CLI I/O, and OpenAI-compatible transport are complete statically | Continue the same direct-owner/effect/manual pattern for the entry owner, Claude/OpenAI transports, config loading, OpenCode, and local torch; never add constant-only sentinel tests |
 | Q — current Claude inventory | Restore a provenance-pinned upstream tree and regenerate file/function matrices | Every current upstream target has an explicit implemented/tested, justified parts-bin, or missing status |
 | R — executable Caret | Qualify a current pure-Simple runtime, build cached Caret, and execute focused SSpec/docgen/PTY exactly once | Provenance sidecar, no seed/source fallback, trustworthy example count/exit, retained artifacts |
 
@@ -371,8 +371,8 @@ before use. Reject the sibling 58 MB candidate because it delegates to a
 
 ### 2026-07-25 mapping refresh
 
-The direct trace checker now passes exactly 25/25 files, 7,343/7,343 LOC,
-and 502/502 declarations after the OpenAI-compatible request/completion seam.
+The direct trace checker now passes exactly 25/25 files, 7,487/7,487 LOC,
+and 516/516 declarations after the CLI entry/API/config owner seams.
 The broader one-shot lexical audit is triage rather
 than behavior evidence:
 
@@ -385,13 +385,14 @@ than behavior evidence:
 
 The highest shipped-path gaps are now ordered as follows:
 
-1. `main.spl:main` through injected argv/env/stdin/stdout or the cached process;
-2. OpenAI-compatible body/parser/send behavior;
-3. Claude API and OpenAI API transport/retry behavior;
-4. config file loading, OpenCode send/spawn, and local-torch cleanup;
-5. `tui_io.spl:production_caret_io` through the cached PTY;
-6. bridge headless/entry wiring and transport callbacks;
-7. MCP result mapping and remaining OAuth redaction/error/flow/step-up owners.
+1. `main.spl:main` through injected argv plus the cached process;
+2. Claude API and OpenAI API request/completion/send behavior;
+3. config file loading, API-key environment ownership, OpenCode send/spawn,
+   and local-torch cleanup;
+4. `tui_io.spl:production_caret_io` through the cached PTY;
+5. bridge headless/entry wiring and transport callbacks;
+6. MCP result mapping and any OAuth branches not covered by the current direct
+   redaction/error/flow/step-up scenarios.
 
 The exact public `@anthropic-ai/claude-code@2.1.218` tarball was inspected.
 SHA-256
@@ -420,11 +421,40 @@ Parallel direct-owner closure now includes:
   completion scenarios, exact URL/header/body/error evidence, malformed content
   type rejection, and a single live `compat_send` build/HTTP/complete path.
 
-The next CLI-first work is `cli/structuredIO.spl`, followed by the shipped
-provider transport owners above. Remaining auth behavior work is direct
-`redactSensitiveUrlParams`, `normalizeOAuthErrorBody`, `performMCPOAuthFlow`,
-and `wrapFetchWithStepUpDetection` coverage; mutation coverage alone does not
-close those owners.
+The next CLI-first round is frozen as four non-overlapping owners:
+
+- `main.spl`: `run_main_args(raw_args)` owns injected entry orchestration and
+  `main()` delegates only process argument acquisition;
+- `claude_api.spl`: `ClaudeApiRequest`, `build_claude_api_request`, and
+  `complete_claude_api_exchange` own request/completion seams;
+- `openai_api.spl`: `OpenAIApiRequest`, `build_openai_request`, and
+  `complete_openai_exchange` own request/completion seams;
+- `config.spl`: `complete_config_load` owns the file-read completion boundary,
+  with real fixture, missing-file, and API-key environment-owner scenarios.
+
+This round must retain exact executable/manual scenario parity and must not
+claim a live network, terminal, or provider call.
+
+The round is now integrated statically:
+
+- `main()` delegates once to `run_main_args(get_cli_args())`; six new scenarios
+  cover help, unknown option, missing config, invalid provider, missing resume,
+  and incompatible Metal GUI exits while checking exact runtime-owner state;
+- Claude API has 13 modern scenarios and OpenAI API has 14, each over typed
+  request/build/completion seams, URL/body/header escaping, fail-closed
+  empty/malformed/fieldless/wrong-type/unterminated content, raw error
+  preservation, and retry-preserving send ordering;
+- each production send builds once and retains `with_retry`; its callback owns
+  one `http_request_raw` expression per attempt, so the evidence does not
+  falsely claim one total network attempt;
+- config has 16 synchronized scenarios, including a real repository fixture,
+  a missing-file rejection, injected empty-content completion, and isolated
+  Claude/OpenAI/compatible API-key environment ownership.
+
+The Simple LSP MCP responds, but absolute paths in this goal workspace still
+return an empty symbol list and diagnostics report the documented source-mode
+`process_run` deadlock. No syntax, runtime, docgen, network, or terminal PASS is
+claimed for this round.
 
 ### Required execution order after a qualified runtime is deployed
 
@@ -438,8 +468,8 @@ runtime/toolchain mismatch and record it; do not repeat a green gate.
 3. The installed-Claude offline checker already passed all six cases against
    recorded Claude Code `2.1.218`; execute only its SSpec wrapper once after a
    qualified runtime exists, without repeating the external checker directly.
-4. Execute the focused unit specs for `claude_cli`, `provider`, `main`,
-   `config`, `tools`, and `chat_tui`.
+4. Execute the focused unit specs for `claude_cli`, `claude_api`,
+   `openai_api`, `provider`, `main`, `config`, `tools`, and `chat_tui`.
 5. Execute the CLI process, Claude contract, managed-env, root-registry,
    hidden-stub-registry, feature-gate-registry, and TUI/hidden system
    specs in interpreter mode.

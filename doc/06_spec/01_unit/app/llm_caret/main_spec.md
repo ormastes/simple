@@ -2,11 +2,11 @@
 
 > Source-synchronized unit manual. The current self-hosted SSpec runner is
 > blocked before trustworthy scenario execution, so this document records
-> 57 active scenarios and 0 executed scenarios.
+> 63 active scenarios and 0 executed scenarios.
 
 | Tests | Active | Skipped | Pending | Executed |
 |------:|-------:|--------:|--------:|---------:|
-| 57 | 57 | 0 | 0 | 0 |
+| 63 | 63 | 0 | 0 | 0 |
 
 **Executable source:** `test/01_unit/app/llm_caret/main_spec.spl`
 
@@ -185,6 +185,219 @@ expect(parse_main_args(["--help"]).help).to_be(true)
 ```simple
 val a = parse_main_args(["--bogus-flag", "--another"])
 expect(a.unknown).to_equal("--bogus-flag")
+```
+
+</details>
+
+## should return success for help without mutating configured owner state
+
+**Group:** production entry orchestration
+
+1. Prepare injected CLI arguments
+2. Run production entry orchestration
+3. Check exact exit and owner effects
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+step("Prepare injected CLI arguments")
+main_configure(
+    "dummy", "before-model", "", "", "", "",
+    "keep-provider-session", 0
+)
+val raw_args = ["--help"]
+
+step("Run production entry orchestration")
+val exit_code = run_main_args(raw_args)
+
+step("Check exact exit and owner effects")
+val observed = _slash_on_provider("not-a-provider")
+val provider_session_id = main_session_id()
+_reset_main_state()
+expect(exit_code).to_equal(0)
+expect(observed.provider).to_equal("dummy")
+expect(observed.model).to_equal("before-model")
+expect(provider_session_id).to_equal("keep-provider-session")
+```
+
+</details>
+
+## should reject an unknown option before mutating configured owner state
+
+**Group:** production entry orchestration
+
+1. Prepare injected CLI arguments
+2. Run production entry orchestration
+3. Check exact exit and owner effects
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+step("Prepare injected CLI arguments")
+main_configure(
+    "dummy", "before-model", "", "", "", "",
+    "keep-provider-session", 0
+)
+val raw_args = ["--not-a-real-option"]
+
+step("Run production entry orchestration")
+val exit_code = run_main_args(raw_args)
+
+step("Check exact exit and owner effects")
+val observed = _slash_on_provider("not-a-provider")
+val provider_session_id = main_session_id()
+_reset_main_state()
+expect(exit_code).to_equal(2)
+expect(observed.provider).to_equal("dummy")
+expect(observed.model).to_equal("before-model")
+expect(provider_session_id).to_equal("keep-provider-session")
+```
+
+</details>
+
+## should reject a missing config before mutating configured owner state
+
+**Group:** production entry orchestration
+
+1. Prepare injected CLI arguments
+2. Run production entry orchestration
+3. Check exact exit and owner effects
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+step("Prepare injected CLI arguments")
+main_configure(
+    "dummy", "before-model", "", "", "", "",
+    "keep-provider-session", 0
+)
+val fixture_root = WS_ROOT + "/missing-config-owner"
+dir_remove_all(fixture_root)
+val raw_args = ["--config", fixture_root + "/missing.sdn"]
+
+step("Run production entry orchestration")
+val exit_code = run_main_args(raw_args)
+
+step("Check exact exit and owner effects")
+val observed = _slash_on_provider("not-a-provider")
+val provider_session_id = main_session_id()
+_reset_main_state()
+expect(exit_code).to_equal(2)
+expect(observed.provider).to_equal("dummy")
+expect(observed.model).to_equal("before-model")
+expect(provider_session_id).to_equal("keep-provider-session")
+```
+
+</details>
+
+## should reject an invalid provider before mutating configured owner state
+
+**Group:** production entry orchestration
+
+1. Prepare injected CLI arguments
+2. Run production entry orchestration
+3. Check exact exit and owner effects
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+step("Prepare injected CLI arguments")
+main_configure(
+    "dummy", "before-model", "", "", "", "",
+    "keep-provider-session", 0
+)
+val raw_args = ["--provider", "not-a-provider"]
+
+step("Run production entry orchestration")
+val exit_code = run_main_args(raw_args)
+
+step("Check exact exit and owner effects")
+val observed = _slash_on_provider("still-not-a-provider")
+val provider_session_id = main_session_id()
+_reset_main_state()
+expect(exit_code).to_equal(2)
+expect(observed.provider).to_equal("dummy")
+expect(observed.model).to_equal("before-model")
+expect(provider_session_id).to_equal("keep-provider-session")
+```
+
+</details>
+
+## should reject a missing resumed session before mutating configured owner state
+
+**Group:** production entry orchestration
+
+1. Prepare injected CLI arguments
+2. Run production entry orchestration
+3. Check exact exit and owner effects
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+step("Prepare injected CLI arguments")
+main_configure(
+    "dummy", "before-model", "", "", "", "",
+    "keep-provider-session", 0
+)
+val fixture_home = MAIN_SESSION_ROOT + "/entry-missing-resume"
+val original_home = _isolate_main_home(fixture_home)
+val raw_args = ["--provider", "dummy", "--resume", "missing-session"]
+
+step("Run production entry orchestration")
+val exit_code = run_main_args(raw_args)
+
+step("Check exact exit and owner effects")
+_restore_main_home(original_home, fixture_home)
+val observed = _slash_on_provider("not-a-provider")
+val provider_session_id = main_session_id()
+_reset_main_state()
+expect(exit_code).to_equal(2)
+expect(observed.provider).to_equal("dummy")
+expect(observed.model).to_equal("before-model")
+expect(provider_session_id).to_equal("keep-provider-session")
+```
+
+</details>
+
+## should reject Metal GUI for a non-dummy provider after configuring that owner
+
+**Group:** production entry orchestration
+
+1. Prepare injected CLI arguments
+2. Run production entry orchestration
+3. Check exact exit and owner effects
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+step("Prepare injected CLI arguments")
+main_configure(
+    "dummy", "before-model", "", "", "", "",
+    "keep-provider-session", 0
+)
+val raw_args = [
+    "--provider", "claude_cli",
+    "--model", "direct-entry-model",
+    "--metal-gui"
+]
+
+step("Run production entry orchestration")
+val exit_code = run_main_args(raw_args)
+
+step("Check exact exit and owner effects")
+val observed = _slash_on_provider("not-a-provider")
+val provider_session_id = main_session_id()
+_reset_main_state()
+expect(exit_code).to_equal(2)
+expect(observed.provider).to_equal("claude_cli")
+expect(observed.model).to_equal("direct-entry-model")
+expect(provider_session_id).to_equal("")
 ```
 
 </details>
@@ -778,23 +991,6 @@ val mr = build_model_response(_llm_ok("", raw))
 expect(mr.tool_calls.len()).to_equal(1)
 expect(mr.tool_calls[0].name).to_equal("bash")
 expect(mr.tool_calls[0].id).to_equal("t1")
-
-# ============================================================================
-# Scripted plain-mode conversation end-to-end (M1's "runnable entrypoint"
-# requirement): a fake 2-turn "network" builds real LLMResponse values, which
-# build_model_response maps into ModelResponse, which chat.run_agent_loop (the
-# same production agent loop main_responder drives) executes to completion -
-# no live network/CLI, fully deterministic.
-# ============================================================================
-
-var SCRIPT_TURN = 0
-
-fn _scripted_responder(msgs: [Message]) -> ModelResponse:
-    SCRIPT_TURN = SCRIPT_TURN + 1
-    if SCRIPT_TURN == 1:
-val raw = "{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"bash\",\"input\":{\"command\":\"echo hi\"}}"
-return build_model_response(_llm_ok("", raw))
-    build_model_response(_llm_ok("final answer", "{}"))
 ```
 
 </details>
@@ -817,14 +1013,6 @@ expect(result.stopped_reason).to_equal("end_turn")
 # the tool_result turn must be threaded into final_transcript (the
 # M2 gap this campaign closed) - not just the initial + final text.
 expect(result.final_transcript.len() > 2).to_be(true)
-
-fn _fake_dispatch_ok(content: text, model: text) -> LLMResponse:
-    _llm_ok("echo: " + content, "{}")
-
-fn _fake_dispatch_err(content: text, model: text) -> LLMResponse:
-    new_llm_error("test", "upstream down")
-
-# ============================================================================
 ```
 
 </details>
@@ -911,8 +1099,6 @@ expect(result).to_contain("name=bash")
 expect(result.contains("call-2")).to_be(false)
 expect(result.contains("first-fixture-secret")).to_be(false)
 expect(result.contains("second-fixture-secret")).to_be(false)
-
-# ============================================================================
 ```
 
 </details>
@@ -1032,8 +1218,6 @@ val body_in = "{\"content\":\"hi\"}"
 val (code, body) = proxy_handle("POST", "/v1/messages", body_in, _fake_dispatch_ok)
 expect(code).to_equal(200)
 expect(body).to_contain("\"message\"")
-
-# ============================================================================
 ```
 
 </details>
@@ -1178,8 +1362,8 @@ rate_limit_reset()
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 57 |
-| Active scenarios | 57 |
+| Total scenarios | 63 |
+| Active scenarios | 63 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 | Executed scenarios | 0 |

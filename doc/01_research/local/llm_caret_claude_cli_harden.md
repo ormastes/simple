@@ -22,7 +22,7 @@ lane small.
 
 ## 2026-07-25 continuation findings
 
-The original bounded map now covers 25 direct Caret files, 7,343 LOC, and 502
+The original bounded map now covers 25 direct Caret files, 7,487 LOC, and 516
 declarations exactly. That result is still only a map.
 
 The separate Claude-full parts bin contains 848 source files and 349 specs.
@@ -40,3 +40,10 @@ Highest-value direct gaps are shipped entry/provider transports first
 (`main`, OpenAI-compatible, Claude API, OpenAI API, config, OpenCode, local
 torch), then live TUI, bridge entry/transport callbacks, MCP result mapping,
 and remaining OAuth redaction/error/flow/step-up owners.
+
+The current CLI round closes the static direct-owner gaps for injected
+`main` entry orchestration, OpenAI-compatible, Claude API, OpenAI API, and
+config file/API-key ownership. Both API sends retain retry semantics rather
+than collapsing them to one total network attempt. The next shipped CLI owners
+are OpenCode process/send behavior and local-torch cleanup; live TUI remains
+after those CLI owners.

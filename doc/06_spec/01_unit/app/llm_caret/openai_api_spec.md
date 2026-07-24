@@ -1,360 +1,261 @@
-# Openai Api Specification
+# LLM Caret OpenAI API Exchange
 
-> <details>
+> Deterministic request, completion, and production-delegation evidence for the
+> shipped OpenAI API owner.
 
-<!-- sdn-diagram:id=openai_api_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
+| Field | Value |
+|---|---|
+| Source | `test/01_unit/app/llm_caret/openai_api_spec.spl` |
+| Executable scenarios | 14 |
+| Execution in this tranche | 0 scenarios executed |
+| Result | Not executed; no PASS is claimed |
+| Requirement | N/A; focused shipped-provider unit evidence |
 
-```sdn id=openai_api_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
+## Scope and Claim Boundary
 
-openai_api_spec -> std
-openai_api_spec -> app
-```
+The scenarios call `build_openai_request`, `complete_openai_exchange`, and the
+guarded no-key `openai_send` path directly. They cover exact URL, body,
+headers, defaults, escaping, successful
+completion, API errors, malformed/fieldless/empty/wrong-type responses, and
+transport-error preservation. A source-level scenario also proves that
+`openai_send` keeps the missing-key guard and delegates in build, retry
+transport attempt, complete order. The static check proves one request build
+and one transport-call expression inside the retry callback; it does not claim
+one total network attempt.
 
-</details>
+No scenario makes a network request. This manual does not claim OpenAI
+authentication, availability, latency, retry attempt counts, or remote
+protocol compatibility.
 
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
+## Frozen Flow
 
-```ascii generated-from=openai_api_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 16 | 16 | 0 | 0 |
-
-<details>
-<summary>Full Scenario Manual</summary>
-
-# Openai Api Specification
+1. **Prepare OpenAI API request inputs**
+2. **Build or complete the production exchange**
+3. **Check exact request response and error state**
 
 ## Scenarios
 
-### build_openai_body
+1. should build the exact production request
+2. should apply model and optional-field defaults
+3. should preserve explicit max-token and temperature overrides
+4. should normalize absent single and repeated base URL slashes
+5. should emit the exact authorization and content headers
+6. should escape model role content and control characters
+7. should preserve exact successful response fields
+8. should expose API error messages and preserve their raw body
+9. should reject malformed and fieldless response bodies
+10. should reject an empty response body
+11. should reject a wrong-type content field
+12. should default valid empty content finish reason and token counts
+13. should preserve transport errors and their raw body
+14. should build once then retry transport attempts and complete through the production owner
 
-#### includes model
+## Complete Executable SSpec
 
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val body = build_openai_body("gpt-4-turbo", "[]", 0, -1.0)
-expect(body).to_contain("gpt-4-turbo")
-```
-
-</details>
-
-#### defaults to gpt-4o
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val body = build_openai_body("", "[]", 0, -1.0)
-expect(body).to_contain("gpt-4o")
-```
-
-</details>
-
-#### includes messages
+The folded helper and scenario source is synchronized exactly with the
+executable spec.
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-val msgs = build_openai_messages_json(["user"], ["Hello"])
-val body = build_openai_body("", msgs, 0, -1.0)
-expect(body).to_contain("messages")
-expect(body).to_contain("Hello")
+fn count_openai_source_occurrences(source: text, needle: text) -> i64:
+    var count = 0
+    var position = 0
+    while position + needle.len() <= source.len():
+        if source.substring(position, position + needle.len()) == needle:
+            count = count + 1
+            position = position + needle.len()
+        else:
+            position = position + 1
+    count
+
+describe "LLM Caret OpenAI API exchange":
+    describe "request construction":
+        it "should build the exact production request":
+            step("Prepare OpenAI API request inputs")
+            val messages = "[{\"role\":\"user\",\"content\":\"Hello\"}]"
+            step("Build or complete the production exchange")
+            val request = build_openai_request("sk-live", "https://api.openai.com", "gpt-4.1", messages, 512, 0.25)
+            step("Check exact request response and error state")
+            expect(request.method).to_equal("POST")
+            expect(request.url).to_equal("https://api.openai.com/v1/chat/completions")
+            expect(request.headers).to_equal("Authorization: Bearer sk-live\nContent-Type: application/json")
+            expect(request.body).to_equal("{\"model\":\"gpt-4.1\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello\"}],\"max_tokens\":512,\"temperature\":0.25}")
+
+        it "should apply model and optional-field defaults":
+            step("Prepare OpenAI API request inputs")
+            val messages = "[]"
+            step("Build or complete the production exchange")
+            val request = build_openai_request("sk-default", "https://api.openai.com", "", messages, 0, -1.0)
+            step("Check exact request response and error state")
+            expect(request.body).to_equal("{\"model\":\"gpt-4o\",\"messages\":[]}")
+
+        it "should preserve explicit max-token and temperature overrides":
+            step("Prepare OpenAI API request inputs")
+            val messages = "[]"
+            step("Build or complete the production exchange")
+            val request = build_openai_request("sk-overrides", "https://api.openai.com", "m", messages, 2048, 0.7)
+            step("Check exact request response and error state")
+            expect(request.body).to_equal("{\"model\":\"m\",\"messages\":[],\"max_tokens\":2048,\"temperature\":0.7}")
+
+        it "should normalize absent single and repeated base URL slashes":
+            step("Prepare OpenAI API request inputs")
+            val base = "https://gateway.example"
+            step("Build or complete the production exchange")
+            val absent = build_openai_request("sk-url", base, "m", "[]", 0, -1.0)
+            val single = build_openai_request("sk-url", base + "/", "m", "[]", 0, -1.0)
+            val repeated = build_openai_request("sk-url", base + "///", "m", "[]", 0, -1.0)
+            step("Check exact request response and error state")
+            expect(absent.url).to_equal("https://gateway.example/v1/chat/completions")
+            expect(single.url).to_equal(absent.url)
+            expect(repeated.url).to_equal(absent.url)
+
+        it "should emit the exact authorization and content headers":
+            step("Prepare OpenAI API request inputs")
+            val apiKey = "sk-header"
+            step("Build or complete the production exchange")
+            val request = build_openai_request(apiKey, "https://api.openai.com", "m", "[]", 0, -1.0)
+            step("Check exact request response and error state")
+            expect(request.headers).to_equal("Authorization: Bearer sk-header\nContent-Type: application/json")
+
+        it "should escape model role content and control characters":
+            step("Prepare OpenAI API request inputs")
+            val messages = build_openai_messages_json(["u\"ser"], ["line\nslash\\quote\""])
+            step("Build or complete the production exchange")
+            val request = build_openai_request("sk-escape", "https://api.openai.com", "a\"b\\c\n\r\t", messages, 0, -1.0)
+            step("Check exact request response and error state")
+            expect(messages).to_equal("[{\"role\":\"u\\\"ser\",\"content\":\"line\\nslash\\\\quote\\\"\"}]")
+            expect(request.body).to_equal("{\"model\":\"a\\\"b\\\\c\\n\\r\\t\",\"messages\":[{\"role\":\"u\\\"ser\",\"content\":\"line\\nslash\\\\quote\\\"\"}]}")
+
+    describe "response completion":
+        it "should preserve exact successful response fields":
+            step("Prepare OpenAI API request inputs")
+            val raw = "{\"content\":\"done\",\"model\":\"gpt-4.1\",\"finish_reason\":\"length\",\"prompt_tokens\":11,\"completion_tokens\":7,\"total_tokens\":18}"
+            step("Build or complete the production exchange")
+            val response = complete_openai_exchange(raw, "")
+            step("Check exact request response and error state")
+            expect(response.content).to_equal("done")
+            expect(response.model).to_equal("gpt-4.1")
+            expect(response.finish_reason).to_equal("length")
+            expect(response.prompt_tokens).to_equal(11)
+            expect(response.completion_tokens).to_equal(7)
+            expect(response.total_tokens).to_equal(18)
+            expect(response.error).to_equal("")
+            expect(response.is_error).to_equal(false)
+            expect(response.raw).to_equal(raw)
+
+        it "should expose API error messages and preserve their raw body":
+            step("Prepare OpenAI API request inputs")
+            val raw = "{\"error\":{\"message\":\"quota exceeded\",\"type\":\"insufficient_quota\"}}"
+            step("Build or complete the production exchange")
+            val response = complete_openai_exchange(raw, "")
+            step("Check exact request response and error state")
+            expect(response.content).to_equal("")
+            expect(response.finish_reason).to_equal("error")
+            expect(response.error).to_equal("quota exceeded")
+            expect(response.is_error).to_equal(true)
+            expect(response.raw).to_equal(raw)
+
+        it "should reject malformed and fieldless response bodies":
+            step("Prepare OpenAI API request inputs")
+            val malformedRaw = "not-json"
+            val unterminatedRaw = "{\"content\":\"unterminated}"
+            val fieldlessRaw = "{}"
+            step("Build or complete the production exchange")
+            val malformed = complete_openai_exchange(malformedRaw, "")
+            val unterminated = complete_openai_exchange(unterminatedRaw, "")
+            val fieldless = complete_openai_exchange(fieldlessRaw, "")
+            step("Check exact request response and error state")
+            expect(malformed.error).to_equal("malformed response")
+            expect(malformed.is_error).to_equal(true)
+            expect(malformed.raw).to_equal(malformedRaw)
+            expect(unterminated.error).to_equal("malformed response")
+            expect(unterminated.is_error).to_equal(true)
+            expect(unterminated.raw).to_equal(unterminatedRaw)
+            expect(fieldless.error).to_equal("malformed response")
+            expect(fieldless.is_error).to_equal(true)
+            expect(fieldless.raw).to_equal(fieldlessRaw)
+
+        it "should reject an empty response body":
+            step("Prepare OpenAI API request inputs")
+            val raw = ""
+            step("Build or complete the production exchange")
+            val response = complete_openai_exchange(raw, "")
+            step("Check exact request response and error state")
+            expect(response.error).to_equal("empty response")
+            expect(response.is_error).to_equal(true)
+            expect(response.raw).to_equal(raw)
+
+        it "should reject a wrong-type content field":
+            step("Prepare OpenAI API request inputs")
+            val raw = "{\"content\":123}"
+            step("Build or complete the production exchange")
+            val response = complete_openai_exchange(raw, "")
+            step("Check exact request response and error state")
+            expect(response.content).to_equal("")
+            expect(response.error).to_equal("malformed response")
+            expect(response.is_error).to_equal(true)
+            expect(response.raw).to_equal(raw)
+
+        it "should default valid empty content finish reason and token counts":
+            step("Prepare OpenAI API request inputs")
+            val raw = "{\"content\":\"\"}"
+            step("Build or complete the production exchange")
+            val response = complete_openai_exchange(raw, "")
+            step("Check exact request response and error state")
+            expect(response.content).to_equal("")
+            expect(response.model).to_equal("")
+            expect(response.finish_reason).to_equal("stop")
+            expect(response.prompt_tokens).to_equal(0)
+            expect(response.completion_tokens).to_equal(0)
+            expect(response.total_tokens).to_equal(0)
+            expect(response.error).to_equal("")
+            expect(response.is_error).to_equal(false)
+            expect(response.raw).to_equal(raw)
+
+        it "should preserve transport errors and their raw body":
+            step("Prepare OpenAI API request inputs")
+            val raw = "{\"proxy\":\"offline\"}"
+            step("Build or complete the production exchange")
+            val response = complete_openai_exchange(raw, "connection refused")
+            step("Check exact request response and error state")
+            expect(response.content).to_equal("")
+            expect(response.finish_reason).to_equal("error")
+            expect(response.prompt_tokens).to_equal(0)
+            expect(response.completion_tokens).to_equal(0)
+            expect(response.total_tokens).to_equal(0)
+            expect(response.error).to_equal("HTTP error: connection refused")
+            expect(response.is_error).to_equal(true)
+            expect(response.raw).to_equal(raw)
+
+    describe "production delegation":
+        it "should build once then retry transport attempts and complete through the production owner":
+            step("Prepare OpenAI API request inputs")
+            val path = "src/app/llm_caret/openai_api.spl"
+            step("Build or complete the production exchange")
+            val missingKey = openai_send(
+                "", "https://api.openai.com", "", "[]", 0, -1.0
+            )
+            val source = file_read(path)
+            val buildPosition: i64 = source.find("val request = build_openai_request(") ?? -1
+            val retryPosition: i64 = source.find("val outcome = with_retry(") ?? -1
+            val callPosition: i64 = source.find("val result = http_request_raw(") ?? -1
+            val completePosition: i64 = source.find("    complete_openai_exchange(outcome.body, outcome.error)") ?? -1
+            step("Check exact request response and error state")
+            expect(missingKey.content).to_equal("")
+            expect(missingKey.finish_reason).to_equal("error")
+            expect(missingKey.error).to_equal("OPENAI_API_KEY not set")
+            expect(missingKey.is_error).to_equal(true)
+            expect(missingKey.raw).to_equal("")
+            expect(source).to_contain("if api_key == \"\":")
+            expect(source).to_contain("error: \"OPENAI_API_KEY not set\"")
+            expect(count_openai_source_occurrences(source, "http_request_raw(")).to_equal(1)
+            expect(buildPosition).to_be_greater_than(0)
+            expect(retryPosition).to_be_greater_than(buildPosition)
+            expect(callPosition).to_be_greater_than(buildPosition)
+            expect(callPosition).to_be_greater_than(retryPosition)
+            expect(completePosition).to_be_greater_than(callPosition)
 ```
-
-</details>
-
-#### includes max_tokens when set
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val body = build_openai_body("", "[]", 2048, -1.0)
-expect(body).to_contain("2048")
-```
-
-</details>
-
-#### omits max_tokens when zero
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val body = build_openai_body("", "[]", 0, -1.0)
-expect(body).to_contain("model")
-```
-
-</details>
-
-#### includes temperature when non-negative
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val body = build_openai_body("", "[]", 0, 0.7)
-expect(body).to_contain("temperature")
-```
-
-</details>
-
-#### omits temperature when negative
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val body = build_openai_body("", "[]", 0, -1.0)
-expect(body).to_contain("model")
-```
-
-</details>
-
-### build_openai_headers
-
-#### includes bearer token
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val h = build_openai_headers("sk-test")
-expect(h).to_contain("Authorization: Bearer sk-test")
-```
-
-</details>
-
-#### includes content type
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val h = build_openai_headers("key")
-expect(h).to_contain("Content-Type: application/json")
-```
-
-</details>
-
-### build_openai_messages_json
-
-#### builds single message
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val json = build_openai_messages_json(["user"], ["Hello"])
-expect(json).to_start_with("[")
-expect(json).to_end_with("]")
-expect(json).to_contain("user")
-expect(json).to_contain("Hello")
-```
-
-</details>
-
-#### builds multi-turn conversation
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val json = build_openai_messages_json(["user", "assistant", "user"], ["Hi", "Hello!", "How are you?"])
-expect(json).to_contain("user")
-expect(json).to_contain("assistant")
-expect(json).to_contain("Hi")
-expect(json).to_contain("Hello!")
-expect(json).to_contain("How are you?")
-```
-
-</details>
-
-### parse_openai_response
-
-#### parses success response
-
-- jp
-- jp
-- jp
-- jp
-- jp
-- jp
-   - Expected: resp.content equals `Hi there!`
-   - Expected: resp.model equals `gpt-4o`
-   - Expected: resp.finish_reason equals `stop`
-   - Expected: resp.prompt_tokens equals `50`
-   - Expected: resp.completion_tokens equals `25`
-   - Expected: resp.total_tokens equals `75`
-   - Expected: resp.is_error is false
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 16 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val raw = jo6(
-    jp("content", js("Hi there!")),
-    jp("model", js("gpt-4o")),
-    jp("finish_reason", js("stop")),
-    jp("prompt_tokens", "50"),
-    jp("completion_tokens", "25"),
-    jp("total_tokens", "75")
-)
-val resp = parse_openai_response(raw)
-expect(resp.content).to_equal("Hi there!")
-expect(resp.model).to_equal("gpt-4o")
-expect(resp.finish_reason).to_equal("stop")
-expect(resp.prompt_tokens).to_equal(50)
-expect(resp.completion_tokens).to_equal(25)
-expect(resp.total_tokens).to_equal(75)
-expect(resp.is_error).to_equal(false)
-```
-
-</details>
-
-#### handles empty response
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val resp = parse_openai_response("")
-expect(resp.is_error).to_equal(true)
-expect(resp.error).to_equal("empty response")
-```
-
-</details>
-
-#### defaults finish reason to stop
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val raw = jo1(jp("content", js("Hello")))
-val resp = parse_openai_response(raw)
-expect(resp.finish_reason).to_equal("stop")
-```
-
-</details>
-
-#### preserves raw response
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val raw = jo1(jp("content", js("test")))
-val resp = parse_openai_response(raw)
-expect(resp.raw).to_equal(raw)
-```
-
-</details>
-
-#### handles zero token counts
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val raw = jo1(jp("content", js("Hi")))
-val resp = parse_openai_response(raw)
-expect(resp.prompt_tokens).to_equal(0)
-expect(resp.completion_tokens).to_equal(0)
-```
-
-</details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Application |
-| Status | Active |
-| Source | `test/01_unit/app/llm_caret/openai_api_spec.spl` |
-| Updated | 2026-07-07 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- build_openai_body
-- build_openai_headers
-- build_openai_messages_json
-- parse_openai_response
-
-## Scenario Summary
-
-| Metric | Count |
-|--------|------:|
-| Total scenarios | 16 |
-| Active scenarios | 16 |
-| Slow scenarios | 0 |
-| Skipped scenarios | 0 |
-| Pending scenarios | 0 |
-
 
 </details>

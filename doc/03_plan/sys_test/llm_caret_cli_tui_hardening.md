@@ -20,9 +20,9 @@ used to generate the full-parity matrices.
 
 | Evidence | Current finding | Authority |
 |---|---|---|
-| `src/app/llm_caret/*.spl` | 25 direct Caret files; 7,343 LOC; 502 declarations | Finalized working-tree inventory |
-| `doc/09_report/llm_caret_claude_cli_traceability.md` | Maps all 25 direct files and 7,343 current LOC | Current static mapping; not executable evidence |
-| `scripts/check/check-llm-caret-claude-cli-trace.shs` | 25/25 files (100%); 7,343/7,343 LOC (100%); 502/502 file-qualified symbols; `STATUS: PASS` | Current computed gate, rerun after the OpenAI-compatible owner change |
+| `src/app/llm_caret/*.spl` | 25 direct Caret files; 7,487 LOC; 516 declarations | Finalized working-tree inventory |
+| `doc/09_report/llm_caret_claude_cli_traceability.md` | Maps all 25 direct files and 7,487 current LOC | Current static mapping; not executable evidence |
+| `scripts/check/check-llm-caret-claude-cli-trace.shs` | 25/25 files (100%); 7,487/7,487 LOC (100%); 516/516 file-qualified symbols; `STATUS: PASS` | Current computed gate after the CLI entry/API/config owner changes |
 | Full self-hosted CLI bootstrap | Stage 3 built; Stage 4 full-CLI native build was killed by signal 9; no candidate deployed | Current executable-test blocker; do not retry in this session |
 | Cached Caret live-PTY qualification | Checker/spec/manual contain seven fail-closed scenarios, including three hidden-state cases and one promptless scenario requiring four real-TUI plus four explicit-plain canonical/alias process cases; `--case prerequisites` requires a matching adjacent provenance manifest and fails closed when the cached artifact is absent | Current executable-test blocker; no live PASS or skipped prerequisite |
 | `tmp/claude/claude-code-main/src` | Missing | Current-tree evidence |
@@ -65,10 +65,10 @@ scenario counts as coverage.
 | Requirement | Implementation evidence | Current tests | Surface/status | Required hardening |
 |---|---|---|---|---|
 | REQ-LLM-CARET-CLAUDE-TRACE-001 | Historical Claude source references in `doc/09_report/llm_caret_claude_cli_traceability.md` | `llm_caret_claude_cli_traceability_spec.spl` | CLI / FAIL: upstream tree missing | Restore pinned source and regenerate feature groups |
-| REQ-LLM-CARET-CLAUDE-TRACE-002 | 25 direct files under `src/app/llm_caret` | Checker maps all 25 files and 7,343 LOC | CLI/TUI / PASS | Keep rows synchronized when direct files move or split |
+| REQ-LLM-CARET-CLAUDE-TRACE-002 | 25 direct files under `src/app/llm_caret` | Checker maps all 25 files and 7,487 LOC | CLI/TUI / PASS | Keep rows synchronized when direct files move or split |
 | REQ-LLM-CARET-CLAUDE-TRACE-003 | `check-llm-caret-claude-cli-trace.shs` | Traceability system spec | CLI / PASS: 100% files, 100% LOC, exact file-qualified symbols | Keep the current filesystem inventory synchronized |
 | REQ-LLM-CARET-CLAUDE-TRACE-004 | Checker emits named counters and status | Traceability system spec | CLI / BLOCKED at runner mismatch in parent run | Modernize with frozen steps and assert exit code plus report fields |
-| REQ-LLM-CARET-CLAUDE-TRACE-005 | File-qualified Simple symbol inventory | Checker proves 502/502 current declarations | CLI / PASS | Regenerate symbol rows and require zero missing/stale symbols |
+| REQ-LLM-CARET-CLAUDE-TRACE-005 | File-qualified Simple symbol inventory | Checker proves 516/516 current declarations | CLI / PASS | Regenerate symbol rows and require zero missing/stale symbols |
 | REQ-LLM-CARET-CLI-HARDEN-006 | Production CLI/provider/session/tool declarations plus the installed Claude executable's offline argument surface | Direct production unit specs and CLI process/contract specs; `llm_caret_installed_claude_cli_spec.spl` is supplemental environmental compatibility evidence | CLI / installed checker PASS; Caret execution blocked | Retain the installed probe evidence, then execute Caret on the qualified self-hosted runtime and cached wrapper |
 | REQ-LLM-CARET-TUI-HARDEN-007 | `CaretIo`, `caret_chat`, and TUI/plain loops | Runtime component spec plus `llm_caret_tui_pty_spec.spl` routing/lifecycle/raw-rejection scenarios | TUI / designed fail-closed; live execution blocked | Require PTY PASS and pre/post mode plus cursor/screen restoration artifacts |
 | REQ-LLM-CARET-HIDDEN-008 | Shipped hidden-command admission; supporting `claude_full` parts-bin hidden-disabled, distributed-gate, and focused owner evidence | `llm_caret_tui_hidden_feature_spec.spl`, the shipped root matrix, hidden-stub and feature-gate registries, narrowly scoped focused owner scenarios including bridge availability/admission, and the real-process `hidden` PTY case | Hidden / component, registry, source-completeness, distributed cross-map, focused parts-bin owner, and PTY process coverage designed; execution blocked | Execute the three registry specs and focused owner specs plus default/enabled/disabled PTY cases without credentials; shipped fulfillment remains exclusively the root/component/PTY lane |
@@ -90,7 +90,7 @@ scenario counts as coverage.
 | Installed Claude CLI argument compatibility | installed `claude` executable plus `claude_cli.spl` argument builder assumptions | `claude_cli_spec.spl` | `llm_caret_installed_claude_cli_spec.spl` has six bounded, credential-free offline cases for path/hash/version/help/missing-input, hidden `--max-turns`, and removed `--max-tokens` behavior | CLI / checker PASS on Claude Code `2.1.218`; does not prove provider or session behavior |
 | One-shot prompt and structured response | `main.spl`, `provider.spl` | `main_spec.spl`, `provider_spec.spl` | `llm_caret_interfaces_spec.spl` calls provider functions only | CLI / no process evidence |
 | Claude argv: model, system, resume, limits, stream, schema, tools, verbose, extras | `claude_cli.spl` | `claude_cli_spec.spl` | Live specs are credentialed and opt-in | CLI / deterministic unit coverage; no wrapper launch |
-| Provider selection and config | `provider.spl`, `config.spl` | `provider_spec.spl`, `config_spec.spl` | None | CLI / unit-only |
+| Provider selection and config | `provider.spl`, `config.spl` | `provider_spec.spl`; `config_spec.spl` has real fixture, missing-file, injected-empty, and API-key environment-owner scenarios | None | CLI / static unit evidence; execution blocked |
 | Tool loop and permission policy | `chat.spl`, `tools.spl`, `main.spl` | `tools_spec.spl`, `main_spec.spl` | No CLI fixture proves deny/allow and exit/output contract | CLI / unit-only |
 | Session save/list/resume | `session.spl`, `main.spl`, `chat_tui.spl` | `session_spec.spl`, `chat_tui_spec.spl` | Live resume uses real Claude; no offline process scenario | CLI/TUI / unit plus opt-in live |
 | Server mode and request guards | `server.spl`, `main.spl` | `main_spec.spl`, `server_spec.spl` | None launches `--server` | CLI / unit-only |
@@ -380,6 +380,8 @@ sh scripts/check/check-llm-caret-tui-pty.shs --case all
 
 bin/simple test test/01_unit/app/llm_caret/main_spec.spl --mode=interpreter
 bin/simple test test/01_unit/app/llm_caret/claude_cli_spec.spl --mode=interpreter
+bin/simple test test/01_unit/app/llm_caret/claude_api_spec.spl --mode=interpreter
+bin/simple test test/01_unit/app/llm_caret/openai_api_spec.spl --mode=interpreter
 bin/simple test test/01_unit/app/llm_caret/chat_spec.spl --mode=interpreter
 bin/simple test test/01_unit/app/llm_caret/chat_tui_spec.spl --mode=interpreter
 bin/simple test test/01_unit/app/llm_caret/chat_tui_input_spec.spl --mode=interpreter
@@ -507,19 +509,22 @@ and overwriting the prior persisted conversation.
 
 Focused system manuals are mirrored under `doc/06_spec/03_system/...`.
 Source-synchronized unit manuals now mirror 80 Claude CLI, 31 provider, 24
-production-chat, 62 TUI, 22 raw-input, 20 injected-runtime, 57 main-entry, 12
-production-config, 37 production-tools, and 14 production-types scenarios.
+production-chat, 62 TUI, 22 raw-input, 20 injected-runtime, 63 main-entry, 16
+production-config, 13 Claude API, 14 OpenAI API, 37 production-tools, and 14
+production-types scenarios.
 Because docgen cannot execute in the current runtime, all refreshed manuals
 explicitly report zero executed scenarios and do not claim a PASS.
 The established 430-example base includes the source-synchronized unit,
 CLI-contract/process, TUI/hidden, managed-environment, installed-Claude,
 root/feature/hidden registry, PTY, bridge-lifecycle, and MCP-client scenarios
 listed above. The seven-scenario net expansion of direct `StructuredIO`
-coverage, fifteen restored/direct MCP OAuth scenarios, and eleven injected
-OpenAI-compatible provider scenarios raise that base to 463. The 91 focused owner/effect examples now synchronized
+coverage, fifteen restored/direct MCP OAuth scenarios, eleven injected
+OpenAI-compatible provider scenarios, six injected main-entry scenarios, four
+config owner scenarios, and 27 modern Claude/OpenAI API scenarios raise that
+base to 500. The 91 focused owner/effect examples now synchronized
 across Tasks V2, swarms, team memory, insights, review/rewind/sandbox, bridge
 helpers/command, AttachmentMessage, and withRetry raise the scoped modern
-`should` total to 554 examples with canonical matchers. The pre-existing
+`should` total to 591 examples with canonical matchers. The pre-existing
 unit/component/process manuals retain
 their documented body-parity checks. The feature-gate manual statically checks
 exact 33-row contract/state parity and carries complete folded executable
@@ -563,8 +568,9 @@ remain rejected under every fixture. Retry backoff is capped after jitter and
 the configured retry timeout now prevents an over-budget sleep.
 
 The completion audit is still red. Adding the Simple-only `tui_io.spl`
-capability owner makes the current direct scope 25 files / 7,343 LOC with
-502/502 file-qualified declarations in the regenerated trace inventory.
+capability owner plus the CLI entry/API/config seams makes the current direct
+scope 25 files / 7,487 LOC with 516/516 file-qualified declarations in the
+regenerated trace inventory.
 The focused checker covers all file-qualified declarations, including the
 ANSI/UTF-8 raw-key decoder, raw-line reducer, and parser validation helpers.
 The historical

@@ -2,11 +2,11 @@
 
 > Source-synchronized unit manual. The current self-hosted SSpec runner is
 > blocked before trustworthy scenario execution, so this document records
-> 12 active scenarios and 0 executed scenarios.
+> 16 active scenarios and 0 executed scenarios.
 
 | Tests | Active | Skipped | Pending | Executed |
 |------:|-------:|--------:|--------:|---------:|
-| 12 | 12 | 0 | 0 | 0 |
+| 16 | 16 | 0 | 0 | 0 |
 
 **Executable source:** `test/01_unit/app/llm_caret/config_spec.spl`
 
@@ -111,6 +111,53 @@ expect(compat_url).to_equal("http://localhost:11434")
 expect(compat_model).to_equal("llama3")
 expect(local_model).to_equal("")
 expect(python_path).to_equal("python3")
+```
+
+</details>
+
+## should resolve API keys only from their configured environment owners
+
+**Group:** production config defaults
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+step("Prepare isolated config and environment inputs")
+val old_claude = env_get("ANTHROPIC_API_KEY") ?? ""
+val old_openai = env_get("OPENAI_API_KEY") ?? ""
+val old_compat = env_get("LLM_CARET_COMPAT_TEST_KEY") ?? ""
+reset_config()
+val claude_set = env_set("ANTHROPIC_API_KEY", "claude-test-key")
+val openai_set = env_set("OPENAI_API_KEY", "openai-test-key")
+val compat_set = env_set(
+    "LLM_CARET_COMPAT_TEST_KEY", "compat-test-key"
+)
+val parsed = parse_config_text(
+    "openai_compat:\n" +
+    "    api_key_env: LLM_CARET_COMPAT_TEST_KEY"
+)
+step("Run production config accessors")
+val claude_key = config_claude_api_key()
+val openai_key = config_openai_api_key()
+val compat_key = config_compat_api_key()
+reset_config()
+val claude_restored = env_set("ANTHROPIC_API_KEY", old_claude)
+val openai_restored = env_set("OPENAI_API_KEY", old_openai)
+val compat_restored = env_set(
+    "LLM_CARET_COMPAT_TEST_KEY", old_compat
+)
+step("Check exact config and environment effects")
+expect(claude_set).to_equal(true)
+expect(openai_set).to_equal(true)
+expect(compat_set).to_equal(true)
+expect(parsed).to_equal("")
+expect(claude_key).to_equal("claude-test-key")
+expect(openai_key).to_equal("openai-test-key")
+expect(compat_key).to_equal("compat-test-key")
+expect(claude_restored).to_equal(true)
+expect(openai_restored).to_equal(true)
+expect(compat_restored).to_equal(true)
 ```
 
 </details>
@@ -310,12 +357,96 @@ expect(claude_model).to_equal("claude-sonnet-4-20250514")
 
 </details>
 
+## should load a real repository fixture through the production file owner
+
+**Group:** production config file loading
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+step("Prepare isolated config and file inputs")
+reset_config()
+step("Run production config file loading")
+val error = load_config(
+    "test/fixtures/app/llm_caret/config_valid.sdn"
+)
+val loaded = config_loaded()
+val provider = config_default_provider()
+val history_file = config_history_file()
+val max_history = config_max_history()
+val base_url = config_openai_base_url()
+val model = config_openai_model()
+reset_config()
+step("Check exact config and file effects")
+expect(error).to_equal("")
+expect(loaded).to_equal(true)
+expect(provider).to_equal("openai")
+expect(history_file).to_equal(
+    "build/tmp/caret-config-fixture-history.sdn"
+)
+expect(max_history).to_equal(7)
+expect(base_url).to_equal("https://openai.fixture.invalid")
+expect(model).to_equal("gpt-fixture")
+```
+
+</details>
+
+## should reject a missing file without marking config loaded
+
+**Group:** production config file loading
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+step("Prepare isolated config and file inputs")
+reset_config()
+step("Run production config file loading")
+val error = load_config(
+    "build/tmp/llm-caret-config-does-not-exist.sdn"
+)
+val loaded = config_loaded()
+reset_config()
+step("Check exact config and file effects")
+expect(error).to_equal(
+    "config file not found or empty: " +
+    "build/tmp/llm-caret-config-does-not-exist.sdn"
+)
+expect(loaded).to_equal(false)
+```
+
+</details>
+
+## should reject injected empty content at the load boundary
+
+**Group:** production config file loading
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+step("Prepare injected config content")
+reset_config()
+step("Run production config load completion")
+val error = complete_config_load("empty-fixture.sdn", "")
+val loaded = config_loaded()
+reset_config()
+step("Check exact config load state")
+expect(error).to_equal(
+    "config file not found or empty: empty-fixture.sdn"
+)
+expect(loaded).to_equal(false)
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 16 |
+| Active scenarios | 16 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 | Executed scenarios | 0 |

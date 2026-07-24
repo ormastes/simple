@@ -104,6 +104,12 @@ struct OpenAIResponse:
     is_error: bool
     raw: text
 
+struct OpenAIApiRequest:
+    method: text
+    url: text
+    headers: text
+    body: text
+
 # ============================================================================
 # Pure Function: build request body JSON
 # ============================================================================
@@ -114,7 +120,7 @@ fn build_openai_body(model: text, messages_json: text, max_tokens: i64, temperat
     var model_val = model
     if model_val == "":
         model_val = "gpt-4o"
-    parts = parts + [_Q() + "model" + _Q() + ":" + _Q() + model_val + _Q()]
+    parts = parts + [_Q() + "model" + _Q() + ":" + _Q() + _escape_json(model_val) + _Q()]
     # Messages
     parts = parts + [_Q() + "messages" + _Q() + ":" + messages_json]
     # Max tokens
@@ -140,13 +146,27 @@ fn build_openai_headers(api_key: text) -> text:
     h = h + "Content-Type: application/json"
     h
 
+fn openai_endpoint_url(base_url: text) -> text:
+    var base = base_url
+    while base.len() > 0 and base.ends_with("/"):
+        base = base.substring(0, base.len() - 1)
+    base + "/v1/chat/completions"
+
+fn build_openai_request(api_key: text, base_url: text, model: text, messages_json: text, max_tokens: i64, temperature: f64) -> OpenAIApiRequest:
+    OpenAIApiRequest(
+        method: "POST",
+        url: openai_endpoint_url(base_url),
+        headers: build_openai_headers(api_key),
+        body: build_openai_body(model, messages_json, max_tokens, temperature)
+    )
+
 # Build a messages array for chat completions
 fn build_openai_messages_json(roles: [text], contents: [text]) -> text:
     var items: [text] = []
     var i = 0
     while i < roles.len():
         var msg = _LB()
-        msg = msg + _Q() + "role" + _Q() + ":" + _Q() + roles[i] + _Q() + ","
+        msg = msg + _Q() + "role" + _Q() + ":" + _Q() + _escape_json(roles[i]) + _Q() + ","
         var c = ""
         if i < contents.len():
             c = contents[i]
@@ -169,7 +189,8 @@ fn build_openai_messages_json(roles: [text], contents: [text]) -> text:
 # ============================================================================
 
 fn parse_openai_response(raw: text) -> OpenAIResponse:
-    if raw.trim() == "":
+    val trimmed_raw = raw.trim()
+    if trimmed_raw == "":
         return OpenAIResponse(
             content: "",
             model: "",
@@ -179,11 +200,22 @@ fn parse_openai_response(raw: text) -> OpenAIResponse:
             total_tokens: 0,
             error: "empty response",
             is_error: true,
-            raw: ""
+            raw: raw
+        )
+    if not trimmed_raw.starts_with(_LB()) or not trimmed_raw.ends_with(_RB()):
+        return OpenAIResponse(
+            content: "",
+            model: "",
+            finish_reason: "error",
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            error: "malformed response",
+            is_error: true,
+            raw: raw
         )
     # Check for error
     val error_msg = _extract_json_string(raw, "message")
-    val error_type = _extract_json_string(raw, "type")
     # If there's an error.message and no choices, it's an error
     val has_content = _extract_json_string(raw, "content")
     if error_msg != "" and has_content == "":
@@ -195,6 +227,18 @@ fn parse_openai_response(raw: text) -> OpenAIResponse:
             completion_tokens: 0,
             total_tokens: 0,
             error: error_msg,
+            is_error: true,
+            raw: raw
+        )
+    if not _has_json_key(raw, "content") or not _has_json_string_value(raw, "content"):
+        return OpenAIResponse(
+            content: "",
+            model: "",
+            finish_reason: "error",
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            error: "malformed response",
             is_error: true,
             raw: raw
         )
@@ -220,6 +264,46 @@ fn parse_openai_response(raw: text) -> OpenAIResponse:
         raw: raw
     )
 
+fn _has_json_key(json: text, key: text) -> bool:
+    json_find(json, _Q() + key + _Q() + ":") >= 0
+
+fn _has_json_string_value(json: text, key: text) -> bool:
+    val marker = _Q() + key + _Q() + ":"
+    val index = json_find(json, marker)
+    if index < 0:
+        return false
+    val after = json.substring(index + marker.len()).trim()
+    if not after.starts_with(_Q()):
+        return false
+    val rest = after.substring(1)
+    var end = 0
+    var escaped = false
+    while end < rest.len():
+        val ch = rest[end]
+        if escaped:
+            escaped = false
+        elif ch == "\\":
+            escaped = true
+        elif ch == "\"":
+            return true
+        end = end + 1
+    false
+
+fn complete_openai_exchange(raw: text, transport_error: text) -> OpenAIResponse:
+    if transport_error != "":
+        return OpenAIResponse(
+            content: "",
+            model: "",
+            finish_reason: "error",
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            error: "HTTP error: " + transport_error,
+            is_error: true,
+            raw: raw
+        )
+    parse_openai_response(raw)
+
 # ============================================================================
 # Impure Function: send request
 # ============================================================================
@@ -237,24 +321,10 @@ fn openai_send(api_key: text, base_url: text, model: text, messages_json: text, 
             is_error: true,
             raw: ""
         )
-    val url = base_url + "/v1/chat/completions"
-    val headers = build_openai_headers(api_key)
-    val body = build_openai_body(model, messages_json, max_tokens, temperature)
+    val request = build_openai_request(api_key, base_url, model, messages_json, max_tokens, temperature)
     val policy = retry_policy_from_env()
     val outcome = with_retry(policy, fn(attempt: i64) -> (i64, text, text, i64):
-        val result = http_request_raw("POST", url, headers, body)
+        val result = http_request_raw(request.method, request.url, request.headers, request.body)
         (result.0, result.1 ?? "", result.2 ?? "", 0)
     )
-    if outcome.error != "":
-        return OpenAIResponse(
-            content: "",
-            model: "",
-            finish_reason: "error",
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            total_tokens: 0,
-            error: "HTTP error: " + outcome.error,
-            is_error: true,
-            raw: outcome.body
-        )
-    parse_openai_response(outcome.body)
+    complete_openai_exchange(outcome.body, outcome.error)
