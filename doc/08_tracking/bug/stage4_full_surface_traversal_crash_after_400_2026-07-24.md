@@ -112,6 +112,27 @@ registry slope. Token payload strings were therefore measurable but not the
 dominant RSS owner. Do not repeat the full run until a focused probe identifies
 and reduces the remaining per-token/state-copy or retained-surface allocation.
 
+## First-10 allocation-byte discriminator
+
+A temporary, default-off diagnostic candidate routed only `rt_alloc`/`rt_free`
+through the existing runtime memtracker and recorded registry count, tracked
+live bytes, and max RSS around the surface parse. The probe stopped at release
+marker 10 under a 10 GiB cap. Temporary instrumentation was then removed.
+
+Aggregate deltas across the first ten real closure sources:
+
+| phase | registry | tracked `rt_alloc` bytes | max-RSS KiB |
+|---|---:|---:|---:|
+| parser initialization | 1,191 | 5,304 | 768 |
+| `parse_module_body(true)` | 48,914 | 3,676,080 | 571,936 |
+| `flat_ast_to_module` | 8,229 | 186,408 | 512 |
+| surface extraction + `ast_reset` | 1,715 | 199,848 | 256 |
+
+`parse_module_body(true)` is the demonstrated dominant owner. Direct
+flat-AST-to-surface conversion and per-file `source.chars()` initialization are
+not the next fix from this evidence. No second full run is allowed until a
+focused probe or ownership repair reduces the surface parse-body delta.
+
 ## Acceptance
 
 1. Add a bounded cumulative-surface probe or repair the registry/lexer
