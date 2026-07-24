@@ -12,6 +12,22 @@ use os.kernel.arch.arm64.ramfb.{
 use os.kernel.arch.arm64.console.{uart_data_ready, uart_init, uart_read_char, uart_writeln}
 use os.gui.input_event.{WmAction}
 use os.gui.shortcut.{uart_char_to_action}
+use os.kernel.arch.arm64.virtio_input.{
+    arm64_virtio_input_init,
+    arm64_virtio_input_poll,
+    arm64_virtio_input_ready
+}
+use os.drivers.virtio.virtio_input_ops.{
+    BTN_LEFT,
+    EV_KEY,
+    EV_REL,
+    EV_SYN,
+    SYN_REPORT,
+    virtio_input_key_event,
+    VirtioMouseAccum
+}
+use os.drivers.input.ps2_keyboard.{Key, KeyEvent}
+use os.drivers.input.ps2_mouse.{MouseEvent}
 use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
 use os.compositor.compositor.{Compositor}
 use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
@@ -36,6 +52,49 @@ use common.gpu.simpleos_host_gpu_protocol.{
     SIMPLEOS_HOST_GPU_BACKEND_METAL,
     SIMPLEOS_HOST_GPU_ISA_AARCH64
 }
+
+fn arm64_wm_action_from_virtio_key(event: KeyEvent) -> WmAction:
+    """Map shared evdev-translated key presses onto existing WM actions.
+
+    Releases remain observable device receipts but never mutate WM state.
+    This intentionally shares the existing WmAction model used by UART/PS2.
+    """
+    match event:
+        KeyEvent.Release(_key): WmAction.None
+        KeyEvent.Press(key):
+            match key:
+                Key.Tab: WmAction.CycleFocus
+                Key.Num1: WmAction.FocusWindow(idx: 0u64)
+                Key.Num2: WmAction.FocusWindow(idx: 1u64)
+                Key.Num3: WmAction.FocusWindow(idx: 2u64)
+                Key.Num4: WmAction.FocusWindow(idx: 3u64)
+                Key.Num5: WmAction.FocusWindow(idx: 4u64)
+                Key.Num6: WmAction.FocusWindow(idx: 5u64)
+                Key.Num7: WmAction.FocusWindow(idx: 6u64)
+                Key.Num8: WmAction.FocusWindow(idx: 7u64)
+                Key.Num9: WmAction.FocusWindow(idx: 8u64)
+                Key.Q: WmAction.Quit
+                Key.M: WmAction.Minimize
+                Key.W: WmAction.Close
+                Key.R: WmAction.Restore
+                Key.T: WmAction.ToggleTheme
+                _: WmAction.None
+
+fn arm64_pointer_button_code(mouse: MouseEvent) -> i32:
+    if mouse.left_just_pressed or mouse.left_just_released:
+        return 1
+    if mouse.right_just_pressed:
+        return 3
+    if mouse.middle_pressed:
+        return 2
+    0
+
+fn arm64_pointer_kind_code(mouse: MouseEvent) -> i32:
+    if mouse.left_just_pressed or mouse.right_just_pressed:
+        return 1
+    if mouse.left_just_released:
+        return 2
+    3
 
 fn spl_start():
     uart_init()
@@ -128,59 +187,114 @@ fn spl_start():
         uart_writeln("[engine2d-simd] fatal arch=aarch64 isa=neon reason=zero-runtime-receipt")
         return
     uart_writeln("[engine2d-simd] arch=aarch64 isa=neon enabled=1 fill_hits={simd_hits} fill_chunks={simd_chunks} fill_tail_pixels={simd_tail_pixels}")
-    uart_writeln("[backend2d-event-blocker] backend=simpleos-qemu-arm64 event_backend=pl011-uart unsupported=pointer-down,pointer-up,key-down,key-up")
+    val virtio_input_mask = arm64_virtio_input_init()
+    val virtio_input_enabled = arm64_virtio_input_ready(virtio_input_mask)
+    if virtio_input_enabled:
+        uart_writeln("[backend2d-event-ready] backend=simpleos-qemu-arm64 event_backend=virtio-mmio keyboard=ready pointer=ready")
+    else:
+        uart_writeln("[backend2d-event-blocker] backend=simpleos-qemu-arm64 event_backend=virtio-mmio required=keyboard,pointer ready_mask={virtio_input_mask} uart=fallback-only")
     uart_writeln("[desktop-gui] first-frame-rendered")
     uart_writeln("[desktop-gui-arm64] desktop-ready revision={first_revision}")
     uart_writeln("[desktop-gui-arm64] controls Tab=cycle 1/2/3=focus m=minimize w=close r=restore q=quit")
 
     var running = true
     var event_count = 0
+    var virtio_mouse = VirtioMouseAccum.create(screen_width.to_i64(), screen_height.to_i64())
     while running:
-        if uart_data_ready() == 1:
-            val action = uart_char_to_action(uart_read_char())
-            var input_compositor = shell.compositor
-            var changed = false
+        var input_compositor = shell.compositor
+        var action = WmAction.None
+        var changed = false
+        var pointer_event_pending = false
+        var pointer_sequence: i64 = 0
+        var pointer_x: i32 = 0
+        var pointer_y: i32 = 0
+        var pointer_button_code: i32 = 0
+        var pointer_kind_code: i32 = 0
 
-            match action:
-                case WmAction.CycleFocus:
-                    input_compositor.cycle_focus()
-                    changed = true
-                case WmAction.FocusWindow(idx: surface_index):
-                    if surface_index < input_compositor.surfaces.len().to_u64():
-                        input_compositor.focus_window(
-                            input_compositor.surfaces[surface_index.to_i64()].id.to_i32()
-                        )
-                        changed = true
-                case WmAction.Quit:
-                    running = false
-                case WmAction.Minimize:
-                    val focused = input_compositor.focused_idx
-                    if focused >= 0 and focused < input_compositor.surfaces.len():
-                        input_compositor.minimize_window(input_compositor.surfaces[focused].id.to_u64())
-                        changed = true
-                case WmAction.Close:
-                    val focused = input_compositor.focused_idx
-                    if focused >= 0 and focused < input_compositor.surfaces.len():
-                        input_compositor.destroy_window(input_compositor.surfaces[focused].id)
-                        changed = true
-                case WmAction.Restore:
-                    var surface_index = 0
-                    while surface_index < input_compositor.surfaces.len():
-                        input_compositor.restore_window(input_compositor.surfaces[surface_index].id.to_u64())
-                        surface_index = surface_index + 1
-                    changed = true
-                case WmAction.ToggleTheme:
-                    pass
-                case WmAction.None:
-                    pass
+        if virtio_input_enabled:
+            val raw_event = arm64_virtio_input_poll()
+            if raw_event != nil:
+                val event = raw_event!
+                input_compositor.input_sequence = input_compositor.input_sequence + 1
+                val device_sequence = input_compositor.input_sequence
+                uart_writeln("[virtio-input-device] input_seq={device_sequence} type={event.type_} code={event.code} value={event.value}")
+                if event.type_ == EV_KEY and event.code < BTN_LEFT:
+                    action = arm64_wm_action_from_virtio_key(
+                        virtio_input_key_event(event.code, event.value)
+                    )
+                elif event.type_ == EV_KEY:
+                    virtio_mouse.feed_key(event.code, event.value != 0u32)
+                elif event.type_ == EV_REL:
+                    virtio_mouse.feed_rel(event.code, event.value.to_i32().to_i64())
+                elif event.type_ == EV_SYN and event.code == SYN_REPORT:
+                    val mouse = virtio_mouse.feed_syn()
+                    pointer_event_pending = true
+                    pointer_sequence = device_sequence
+                    pointer_x = mouse.x.to_i32()
+                    pointer_y = mouse.y.to_i32()
+                    pointer_button_code = arm64_pointer_button_code(mouse)
+                    pointer_kind_code = arm64_pointer_kind_code(mouse)
+        elif uart_data_ready() == 1:
+            action = uart_char_to_action(uart_read_char())
 
-            if changed:
-                event_count = event_count + 1
-                uart_writeln("[backend2d-event-receipt] backend=simpleos-qemu-arm64 event_backend=pl011-uart event_sequence=character-action event_count={event_count}")
-                shell.compositor = input_compositor
-                val rendered_revision = shell.render_baremetal_frame(wm_frame_executor)
-                if rendered_revision <= 0:
-                    uart_writeln("[desktop-gui-arm64] fatal reason=changed-frame")
-                    running = false
+        match action:
+            case WmAction.CycleFocus:
+                input_compositor.cycle_focus()
+                changed = true
+            case WmAction.FocusWindow(idx: surface_index):
+                if surface_index < input_compositor.surfaces.len().to_u64():
+                    input_compositor.focus_window(
+                        input_compositor.surfaces[surface_index.to_i64()].id.to_i32()
+                    )
+                    changed = true
+            case WmAction.Quit:
+                running = false
+            case WmAction.Minimize:
+                val focused = input_compositor.focused_idx
+                if focused >= 0 and focused < input_compositor.surfaces.len():
+                    input_compositor.minimize_window(input_compositor.surfaces[focused].id.to_u64())
+                    changed = true
+            case WmAction.Close:
+                val focused = input_compositor.focused_idx
+                if focused >= 0 and focused < input_compositor.surfaces.len():
+                    input_compositor.destroy_window(input_compositor.surfaces[focused].id)
+                    changed = true
+            case WmAction.Restore:
+                var surface_index = 0
+                while surface_index < input_compositor.surfaces.len():
+                    input_compositor.restore_window(input_compositor.surfaces[surface_index].id.to_u64())
+                    surface_index = surface_index + 1
+                changed = true
+            case WmAction.ToggleTheme:
+                # Theme switching remains fail-closed until the snapshot
+                # notification transport owner exists; startup theme is real.
+                pass
+            case WmAction.None:
+                pass
+
+        if pointer_event_pending:
+            input_compositor.pending_wm_pointer_valid = true
+            input_compositor.pending_wm_pointer_x = pointer_x
+            input_compositor.pending_wm_pointer_y = pointer_y
+            input_compositor.pending_wm_pointer_button_code = pointer_button_code
+            input_compositor.pending_wm_pointer_kind_code = pointer_kind_code
+
+        if changed or pointer_event_pending:
+            event_count = event_count + 1
+            shell.compositor = input_compositor
+            if pointer_event_pending:
+                uart_writeln("[wm-pointer-irq] input_seq={pointer_sequence} x={pointer_x} y={pointer_y} button_code={pointer_button_code} kind_code={pointer_kind_code}")
+                shell.handle_pending_wm_pointer_step()
+                uart_writeln("[wm-pointer-state] input_seq={pointer_sequence} focused_idx={shell.compositor.focused_idx}")
+            if virtio_input_enabled:
+                uart_writeln("[backend2d-event-receipt] backend=simpleos-qemu-arm64 event_backend=virtio-mmio event_count={event_count}")
+            else:
+                uart_writeln("[backend2d-event-receipt] backend=simpleos-qemu-arm64 event_backend=pl011-uart event_count={event_count}")
+            val rendered_revision = shell.render_baremetal_frame(wm_frame_executor)
+            if pointer_event_pending:
+                uart_writeln("[wm-pointer-frame] input_seq={pointer_sequence} generation={rendered_revision}")
+            if rendered_revision <= 0:
+                uart_writeln("[desktop-gui-arm64] fatal reason=changed-frame")
+                running = false
 
     uart_writeln("[desktop-gui-arm64] shutdown")

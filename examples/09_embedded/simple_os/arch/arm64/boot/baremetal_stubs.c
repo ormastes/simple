@@ -2373,6 +2373,269 @@ RuntimeValue rt_gui_fill4(RuntimeValue xy, RuntimeValue wh, RuntimeValue color, 
 
 RuntimeValue rt_gui_render_desktop(RuntimeValue u1, RuntimeValue u2) { (void)u1;(void)u2; return 0; }
 
+/*
+ * ARM64 QEMU virt VirtIO-input transport
+ *
+ * The desktop is a flat, identity-mapped freestanding image, so the static
+ * queue and event storage below is valid DMA memory.  Keep this owner here:
+ * it is the only place that knows the ARM virt MMIO topology and it exports
+ * decoded wire records to the Simple architecture facade.  Translation into
+ * the shared KeyEvent/MouseEvent types remains in virtio_input_ops.spl.
+ */
+#define ARM64_VIRTIO_MMIO_BASE       0x0a000000ULL
+#define ARM64_VIRTIO_MMIO_STRIDE     0x200ULL
+#define ARM64_VIRTIO_MMIO_SLOTS      32U
+#define ARM64_VIRTIO_MAGIC           0x74726976U
+#define ARM64_VIRTIO_INPUT_DEVICE_ID 18U
+#define ARM64_VIRTIO_QUEUE_SIZE      32U
+
+#define VMMIO_MAGIC                  0x000U
+#define VMMIO_VERSION                0x004U
+#define VMMIO_DEVICE_ID              0x008U
+#define VMMIO_DEVICE_FEATURES        0x010U
+#define VMMIO_DEVICE_FEATURES_SEL    0x014U
+#define VMMIO_DRIVER_FEATURES        0x020U
+#define VMMIO_DRIVER_FEATURES_SEL    0x024U
+#define VMMIO_QUEUE_SEL              0x030U
+#define VMMIO_QUEUE_NUM_MAX          0x034U
+#define VMMIO_QUEUE_NUM              0x038U
+#define VMMIO_QUEUE_READY            0x044U
+#define VMMIO_QUEUE_NOTIFY           0x050U
+#define VMMIO_INTERRUPT_STATUS       0x060U
+#define VMMIO_INTERRUPT_ACK          0x064U
+#define VMMIO_STATUS                 0x070U
+#define VMMIO_QUEUE_DESC_LOW         0x080U
+#define VMMIO_QUEUE_DESC_HIGH        0x084U
+#define VMMIO_QUEUE_AVAIL_LOW        0x090U
+#define VMMIO_QUEUE_AVAIL_HIGH       0x094U
+#define VMMIO_QUEUE_USED_LOW         0x0a0U
+#define VMMIO_QUEUE_USED_HIGH        0x0a4U
+
+#define VIRTIO_STATUS_ACKNOWLEDGE    1U
+#define VIRTIO_STATUS_DRIVER         2U
+#define VIRTIO_STATUS_DRIVER_OK      4U
+#define VIRTIO_STATUS_FEATURES_OK    8U
+#define VIRTIO_STATUS_FAILED         128U
+#define VIRTQ_DESC_F_WRITE           2U
+
+#define VIRTIO_INPUT_CFG_EV_BITS     0x11U
+#define EV_KEY                       0x01U
+#define EV_REL                       0x02U
+#define REL_X                        0x00U
+#define REL_Y                        0x01U
+#define KEY_A                        30U
+#define BTN_LEFT                     0x110U
+
+struct arm64_virtq_desc {
+    uint64_t addr;
+    uint32_t len;
+    uint16_t flags;
+    uint16_t next;
+};
+
+struct arm64_virtq_avail {
+    uint16_t flags;
+    uint16_t idx;
+    uint16_t ring[ARM64_VIRTIO_QUEUE_SIZE];
+};
+
+struct arm64_virtq_used_elem {
+    uint32_t id;
+    uint32_t len;
+};
+
+struct arm64_virtq_used {
+    uint16_t flags;
+    uint16_t idx;
+    struct arm64_virtq_used_elem ring[ARM64_VIRTIO_QUEUE_SIZE];
+};
+
+struct arm64_virtio_input_event {
+    uint16_t type;
+    uint16_t code;
+    uint32_t value;
+};
+
+struct arm64_virtio_input_device {
+    uint64_t base;
+    uint16_t last_used_idx;
+    uint16_t next_avail_idx;
+    uint8_t kind;
+    uint8_t ready;
+    struct arm64_virtq_desc desc[ARM64_VIRTIO_QUEUE_SIZE];
+    struct arm64_virtq_avail avail;
+    struct arm64_virtq_used used;
+    struct arm64_virtio_input_event events[ARM64_VIRTIO_QUEUE_SIZE];
+} __attribute__((aligned(4096)));
+
+static struct arm64_virtio_input_device g_arm64_virtio_input_devices[2]
+    __attribute__((aligned(4096)));
+static uint32_t g_arm64_virtio_input_ready_mask = 0;
+static uint16_t g_arm64_virtio_input_type = 0;
+static uint16_t g_arm64_virtio_input_code = 0;
+static uint32_t g_arm64_virtio_input_value = 0;
+
+static inline volatile uint32_t *arm64_virtio_reg32(uint64_t base, uint32_t off)
+{
+    return (volatile uint32_t *)(uintptr_t)(base + (uint64_t)off);
+}
+
+static inline void arm64_virtio_fence(void)
+{
+    __asm__ volatile("dmb sy" ::: "memory");
+}
+
+static int arm64_virtio_input_has_bit(uint64_t base, uint8_t event_type, uint16_t bit)
+{
+    volatile uint8_t *cfg = (volatile uint8_t *)(uintptr_t)(base + 0x100ULL);
+    cfg[0] = VIRTIO_INPUT_CFG_EV_BITS;
+    cfg[1] = event_type;
+    arm64_virtio_fence();
+    uint8_t bytes = cfg[2];
+    uint32_t byte_index = (uint32_t)bit / 8U;
+    if (bytes == 0U || byte_index >= bytes || byte_index >= 128U) return 0;
+    return (cfg[8U + byte_index] & (uint8_t)(1U << ((uint32_t)bit & 7U))) != 0U;
+}
+
+static uint8_t arm64_virtio_input_kind(uint64_t base)
+{
+    int has_rel_x = arm64_virtio_input_has_bit(base, EV_REL, REL_X);
+    int has_rel_y = arm64_virtio_input_has_bit(base, EV_REL, REL_Y);
+    int has_left = arm64_virtio_input_has_bit(base, EV_KEY, BTN_LEFT);
+    if (has_rel_x && has_rel_y && has_left) return 2U; /* relative pointer */
+    if (arm64_virtio_input_has_bit(base, EV_KEY, KEY_A)) return 1U; /* keyboard */
+    return 0U;
+}
+
+static int arm64_virtio_input_start_device(struct arm64_virtio_input_device *dev,
+                                           uint64_t base, uint8_t kind)
+{
+    volatile uint32_t *mmio = (volatile uint32_t *)(uintptr_t)base;
+    if (mmio[VMMIO_MAGIC / 4U] != ARM64_VIRTIO_MAGIC ||
+        mmio[VMMIO_VERSION / 4U] != 2U ||
+        mmio[VMMIO_DEVICE_ID / 4U] != ARM64_VIRTIO_INPUT_DEVICE_ID) return 0;
+
+    mmio[VMMIO_STATUS / 4U] = 0U;
+    arm64_virtio_fence();
+    mmio[VMMIO_STATUS / 4U] = VIRTIO_STATUS_ACKNOWLEDGE;
+    mmio[VMMIO_STATUS / 4U] = VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER;
+    mmio[VMMIO_DEVICE_FEATURES_SEL / 4U] = 1U;
+    uint32_t features_hi = mmio[VMMIO_DEVICE_FEATURES / 4U];
+    if ((features_hi & 1U) == 0U) {
+        mmio[VMMIO_STATUS / 4U] = VIRTIO_STATUS_FAILED;
+        return 0;
+    }
+    mmio[VMMIO_DRIVER_FEATURES_SEL / 4U] = 0U;
+    mmio[VMMIO_DRIVER_FEATURES / 4U] = 0U;
+    mmio[VMMIO_DRIVER_FEATURES_SEL / 4U] = 1U;
+    mmio[VMMIO_DRIVER_FEATURES / 4U] = 1U; /* VIRTIO_F_VERSION_1 */
+    mmio[VMMIO_STATUS / 4U] = VIRTIO_STATUS_ACKNOWLEDGE |
+                                 VIRTIO_STATUS_DRIVER |
+                                 VIRTIO_STATUS_FEATURES_OK;
+    if ((mmio[VMMIO_STATUS / 4U] & VIRTIO_STATUS_FEATURES_OK) == 0U) {
+        mmio[VMMIO_STATUS / 4U] = VIRTIO_STATUS_FAILED;
+        return 0;
+    }
+
+    mmio[VMMIO_QUEUE_SEL / 4U] = 0U;
+    uint32_t max_queue = mmio[VMMIO_QUEUE_NUM_MAX / 4U];
+    if (max_queue < ARM64_VIRTIO_QUEUE_SIZE) {
+        mmio[VMMIO_STATUS / 4U] = VIRTIO_STATUS_FAILED;
+        return 0;
+    }
+    __builtin_memset(dev, 0, sizeof(*dev));
+    dev->base = base;
+    dev->kind = kind;
+    for (uint32_t i = 0; i < ARM64_VIRTIO_QUEUE_SIZE; ++i) {
+        dev->desc[i].addr = (uint64_t)(uintptr_t)&dev->events[i];
+        dev->desc[i].len = sizeof(struct arm64_virtio_input_event);
+        dev->desc[i].flags = VIRTQ_DESC_F_WRITE;
+        dev->desc[i].next = 0U;
+        dev->avail.ring[i] = (uint16_t)i;
+    }
+    dev->avail.idx = ARM64_VIRTIO_QUEUE_SIZE;
+    dev->next_avail_idx = ARM64_VIRTIO_QUEUE_SIZE;
+    arm64_virtio_fence();
+    mmio[VMMIO_QUEUE_NUM / 4U] = ARM64_VIRTIO_QUEUE_SIZE;
+    mmio[VMMIO_QUEUE_DESC_LOW / 4U] = (uint32_t)(uintptr_t)&dev->desc[0];
+    mmio[VMMIO_QUEUE_DESC_HIGH / 4U] = (uint32_t)((uint64_t)(uintptr_t)&dev->desc[0] >> 32);
+    mmio[VMMIO_QUEUE_AVAIL_LOW / 4U] = (uint32_t)(uintptr_t)&dev->avail;
+    mmio[VMMIO_QUEUE_AVAIL_HIGH / 4U] = (uint32_t)((uint64_t)(uintptr_t)&dev->avail >> 32);
+    mmio[VMMIO_QUEUE_USED_LOW / 4U] = (uint32_t)(uintptr_t)&dev->used;
+    mmio[VMMIO_QUEUE_USED_HIGH / 4U] = (uint32_t)((uint64_t)(uintptr_t)&dev->used >> 32);
+    mmio[VMMIO_QUEUE_READY / 4U] = 1U;
+    mmio[VMMIO_STATUS / 4U] = VIRTIO_STATUS_ACKNOWLEDGE |
+                                 VIRTIO_STATUS_DRIVER |
+                                 VIRTIO_STATUS_FEATURES_OK |
+                                 VIRTIO_STATUS_DRIVER_OK;
+    arm64_virtio_fence();
+    mmio[VMMIO_QUEUE_NOTIFY / 4U] = 0U;
+    dev->ready = 1U;
+    return 1;
+}
+
+RuntimeValue rt_arm64_virtio_input_init(void)
+{
+    __builtin_memset(g_arm64_virtio_input_devices, 0, sizeof(g_arm64_virtio_input_devices));
+    g_arm64_virtio_input_ready_mask = 0U;
+    for (uint32_t slot = 0; slot < ARM64_VIRTIO_MMIO_SLOTS; ++slot) {
+        uint64_t base = ARM64_VIRTIO_MMIO_BASE + (uint64_t)slot * ARM64_VIRTIO_MMIO_STRIDE;
+        if (*arm64_virtio_reg32(base, VMMIO_MAGIC) != ARM64_VIRTIO_MAGIC ||
+            *arm64_virtio_reg32(base, VMMIO_DEVICE_ID) != ARM64_VIRTIO_INPUT_DEVICE_ID) continue;
+        uint8_t kind = arm64_virtio_input_kind(base);
+        uint32_t mask = kind == 1U ? 1U : (kind == 2U ? 2U : 0U);
+        if (mask == 0U || (g_arm64_virtio_input_ready_mask & mask) != 0U) continue;
+        struct arm64_virtio_input_device *dev = &g_arm64_virtio_input_devices[kind - 1U];
+        if (arm64_virtio_input_start_device(dev, base, kind)) {
+            g_arm64_virtio_input_ready_mask |= mask;
+            serial_puts("[virtio-input] ready kind=");
+            serial_puts(kind == 1U ? "keyboard base=" : "pointer base=");
+            serial_put_hex(base);
+            serial_puts("\r\n");
+        }
+    }
+    return (RuntimeValue)g_arm64_virtio_input_ready_mask;
+}
+
+static int arm64_virtio_input_poll_device(struct arm64_virtio_input_device *dev)
+{
+    if (!dev->ready) return 0;
+    arm64_virtio_fence();
+    uint16_t used_idx = dev->used.idx;
+    if (used_idx == dev->last_used_idx) return 0;
+    struct arm64_virtq_used_elem used = dev->used.ring[dev->last_used_idx % ARM64_VIRTIO_QUEUE_SIZE];
+    dev->last_used_idx++;
+    if (used.id >= ARM64_VIRTIO_QUEUE_SIZE || used.len < sizeof(struct arm64_virtio_input_event)) {
+        *(volatile uint32_t *)(uintptr_t)(dev->base + VMMIO_INTERRUPT_ACK) = 1U;
+        return 0;
+    }
+    struct arm64_virtio_input_event event = dev->events[used.id];
+    uint16_t slot = dev->next_avail_idx % ARM64_VIRTIO_QUEUE_SIZE;
+    dev->avail.ring[slot] = (uint16_t)used.id;
+    arm64_virtio_fence();
+    dev->next_avail_idx++;
+    dev->avail.idx = dev->next_avail_idx;
+    arm64_virtio_fence();
+    *(volatile uint32_t *)(uintptr_t)(dev->base + VMMIO_QUEUE_NOTIFY) = 0U;
+    uint32_t irq = *(volatile uint32_t *)(uintptr_t)(dev->base + VMMIO_INTERRUPT_STATUS);
+    if (irq != 0U) *(volatile uint32_t *)(uintptr_t)(dev->base + VMMIO_INTERRUPT_ACK) = irq;
+    g_arm64_virtio_input_type = event.type;
+    g_arm64_virtio_input_code = event.code;
+    g_arm64_virtio_input_value = event.value;
+    return 1;
+}
+
+RuntimeValue rt_arm64_virtio_input_poll(void)
+{
+    if (arm64_virtio_input_poll_device(&g_arm64_virtio_input_devices[0])) return 1;
+    if (arm64_virtio_input_poll_device(&g_arm64_virtio_input_devices[1])) return 1;
+    return 0;
+}
+
+RuntimeValue rt_arm64_virtio_input_event_type(void) { return (RuntimeValue)g_arm64_virtio_input_type; }
+RuntimeValue rt_arm64_virtio_input_event_code(void) { return (RuntimeValue)g_arm64_virtio_input_code; }
+RuntimeValue rt_arm64_virtio_input_event_value(void) { return (RuntimeValue)g_arm64_virtio_input_value; }
+
 RuntimeValue rt_memory_barrier(void)
 {
     __asm__ volatile("dsb sy" ::: "memory");
