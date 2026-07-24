@@ -476,7 +476,8 @@ IER is zero, so serial input cannot wake a sleeping CPU. The folded manual steps
 are `Handle non-blocking UART window actions` and
 `Present each changed frame through VirtIO-GPU`.
 
-The wrapper now uses evidence contract v2. It requires ordered scanout,
+The wrapper keeps display-smoke evidence contract v2. Its default mode
+requires ordered scanout,
 first-frame, present, and desktop-ready markers with the same positive scene
 revision, validates the dynamic PPM dimensions and stride, and accepts at least
 four canonical desktop palette witnesses. Run its parser without QEMU via
@@ -485,6 +486,31 @@ The historical 2026-07-02 fixed-anchor report remains scanout-only evidence and
 cannot pass contract v2. Until TODO 548 produces and boots a fresh pure-Simple
 ELF, the canonical RV64 desktop is source-ready only; no live QEMU PASS is
 claimed. TODO 565 and TODO 548 remain open for live proof.
+
+The stricter RV64 WM/font/input contract v1 uses the same runner with a
+distinct mode:
+
+```bash
+sh scripts/check/check-rv64-display-smoke-qmp-evidence.shs --self-test-wm-font-input
+RV64_DISPLAY_SMOKE_BUILD=0 \
+  scripts/check/check-rv64-display-smoke-qmp-evidence.shs --wm-font-input
+```
+
+It pins `/SYS/FONTS/NOTOSANS` to 1,708,408 bytes and SHA-256
+`2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081`,
+requires the guest’s exact `rv64-font-evidence` marker for that identity and
+the `shared-wm-draw-ir` route, rejects either font/input unavailable marker,
+injects keyboard and pointer events through QMP VirtIO input, and requires
+guest IRQ-to-WM-to-frame correlation. It captures the RV64-only
+`right56,bottom48` RGB crop, rejects a one-byte-corrupted copy, and refuses PASS
+until `RV64_WM_FONT_REGION_EXPECTED_SHA256` contains the genuine RV64 crop hash.
+The x86_64 crop hash is never reused.
+
+This strict mode is currently **BLOCKED**: the production RV64 entry does not
+mount the selected font and does not consume VirtIO input. Its explicit
+`rv64-font-evidence-unavailable` and `rv64-input-evidence-unavailable` markers
+are blockers, not evidence. See
+`doc/06_spec/03_system/os/wm/rv64_simpleos_wm_font_input_spec.md`.
 
 ## Host-GPU rendering and ProcessingIR
 

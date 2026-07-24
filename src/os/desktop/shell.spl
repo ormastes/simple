@@ -819,6 +819,17 @@ impl DesktopShell:
             var input_compositor = self.compositor
             input_compositor.handle_input_baremetal_ps2()
             val fullscreen_sequence = input_compositor.pending_fullscreen_sequence
+            var pointer_sequence: i64 = 0
+            var pointer_x: i32 = 0
+            var pointer_y: i32 = 0
+            var pointer_button_code: i32 = 0
+            var pointer_kind_code: i32 = 0
+            if input_compositor.pending_wm_pointer_valid:
+                pointer_sequence = input_compositor.input_sequence
+                pointer_x = input_compositor.pending_wm_pointer_x
+                pointer_y = input_compositor.pending_wm_pointer_y
+                pointer_button_code = input_compositor.pending_wm_pointer_button_code
+                pointer_kind_code = input_compositor.pending_wm_pointer_kind_code
             val input_active = (fullscreen_sequence > 0 or input_compositor.pending_meta_key > 0 or input_compositor.pending_shortcut != "" or input_compositor.pending_wm_pointer_valid)
             if not input_active:
                 continue
@@ -856,17 +867,26 @@ impl DesktopShell:
                     else:
                         input_compositor.maximize_window(fullscreen_window_id.to_u64())
                         fullscreen_action = "maximize"
+            if pointer_sequence > 0:
+                serial_println("[wm-pointer-irq] input_seq={pointer_sequence} x={pointer_x} y={pointer_y} button_code={pointer_button_code} kind_code={pointer_kind_code}")
             self.compositor = input_compositor
             self.drain_wm_actions()
             self.handle_pending_wm_pointer_step()
+            if pointer_sequence > 0:
+                var pointer_window_id: i32 = 0
+                if self.compositor.focused_idx >= 0 and self.compositor.focused_idx < self.compositor.surfaces.len():
+                    pointer_window_id = self.compositor.surfaces[self.compositor.focused_idx].id
+                serial_println("[wm-pointer-state] input_seq={pointer_sequence} window={pointer_window_id} marker={self.last_wm_loop_marker}")
             self.handle_pending_shell_input(true)
             self.reconcile_dead_process_windows()
             val scene_revision = self.runtime_scene_revision()
             val taskbar_revision = self.runtime_taskbar_revision()
-            val need_render = (fullscreen_sequence > 0 and fullscreen_action != "") or scene_revision != self.last_rendered_scene_revision or taskbar_revision != self.last_rendered_taskbar_revision
+            val need_render = pointer_sequence > 0 or (fullscreen_sequence > 0 and fullscreen_action != "") or scene_revision != self.last_rendered_scene_revision or taskbar_revision != self.last_rendered_taskbar_revision
             var rendered_revision = scene_revision
             if need_render:
                 rendered_revision = self.render_baremetal_frame(executor)
+            if pointer_sequence > 0:
+                serial_println("[wm-pointer-frame] input_seq={pointer_sequence} generation={rendered_revision}")
             if fullscreen_sequence > 0 and fullscreen_action != "":
                 # Interpolate bool as explicit text: baremetal bool
                 # interpolation prints 1/0, but the evidence wrapper's
@@ -877,7 +897,17 @@ impl DesktopShell:
                 var maximized_text = "false"
                 if fullscreen_action == "maximize":
                     maximized_text = "true"
-                serial_println("[wm-state] input_seq={fullscreen_sequence} action={fullscreen_action} window={fullscreen_window_id} maximized={maximized_text}")
+                var state_x: i32 = 0
+                var state_y: i32 = 0
+                var state_width: i32 = 0
+                var state_height: i32 = 0
+                for state_surface in self.compositor.surfaces:
+                    if state_surface.id == fullscreen_window_id:
+                        state_x = state_surface.x
+                        state_y = state_surface.y
+                        state_width = state_surface.width
+                        state_height = state_surface.height
+                serial_println("[wm-state] input_seq={fullscreen_sequence} action={fullscreen_action} window={fullscreen_window_id} maximized={maximized_text} x={state_x} y={state_y} width={state_width} height={state_height}")
                 serial_println("[wm-frame] input_seq={fullscreen_sequence} generation={rendered_revision}")
 
     fn runtime_scene_revision() -> i64:
@@ -987,7 +1017,10 @@ impl DesktopShell:
         val command = simpleos_wm_pointer_runtime_command(scene, taskbar, x, y, button, kind, 1000, self.clock_text, 2)
         self.wm_runtime_state = simpleos_wm_apply_pointer(self.wm_runtime_state, scene, taskbar, x, y, button, kind, 1000, self.clock_text, 2)
         self.apply_wm_runtime_command_to_live_shell(command)
-        self.last_wm_loop_marker = "[simpleos-wm] loop-step command={command.kind} target={command.target_id} app={command.app_id} window={command.window_id} handled={command.handled}"
+        var handled_text = "false"
+        if command.handled:
+            handled_text = "true"
+        self.last_wm_loop_marker = "[simpleos-wm] loop-step command={command.kind} target={command.target_id} app={command.app_id} window={command.window_id} handled={handled_text}"
         self.last_wm_loop_marker
 
     me ensure_baremetal_system_window():

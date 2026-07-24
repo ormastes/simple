@@ -1,0 +1,103 @@
+# codex-system-test
+# @req REQ-7
+# @evidence-display: links
+"""# RV64 SimpleOS WM font and input evidence
+
+Defines the separate RV64 QEMU dev-board evidence gate. The generic RV64
+display-smoke result is not font or input proof: this lane additionally pins
+the exact guest font identity, crops guest pixels, calibrates rejection with an
+independently corrupted crop, and correlates QMP keyboard and pointer delivery
+with guest IRQ, WM-state, and later frame markers.
+
+The live scenario remains deliberately red until the production RV64 entry
+mounts the pinned font, consumes VirtIO input, and a fresh RV64 crop hash is
+pinned. x86_64 captures and hashes cannot satisfy this lane.
+"""
+use std.spec.*
+use std.io_runtime.{process_run}
+use app.io.mod.{file_read_text}
+
+fn wrapper_source() -> text:
+    file_read_text("scripts/check/check-rv64-display-smoke-qmp-evidence.shs")
+
+fn rv64_entry_source() -> text:
+    file_read_text("examples/09_embedded/simple_os/arch/riscv64/gui_entry_desktop.spl")
+
+fn run_wrapper_contract_self_test() -> text:
+    val (out, err, code) = process_run(
+        "/bin/sh",
+        ["scripts/check/check-rv64-display-smoke-qmp-evidence.shs", "--self-test-wm-font-input"]
+    )
+    expect(code).to_equal(0)
+    out
+
+describe "RV64 SimpleOS WM font and input":
+    it "should keep the RV64 gate separate and fail closed on every required proof":
+        step("Inspect the canonical RV64 QMP evidence contract")
+        val source = wrapper_source()
+        expect(source).to_contain("--wm-font-input")
+        expect(source).to_contain("build/os/simpleos_riscv64_display_smoke.elf")
+        expect(source).to_contain("FONT_GUEST_PATH=/SYS/FONTS/NOTOSANS")
+        expect(source).to_contain("FONT_ASSET_EXPECTED_BYTES=1708408")
+        expect(source).to_contain("2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081")
+        expect(source).to_contain("[rv64-font-evidence] guest_path=$FONT_GUEST_PATH")
+        expect(source).to_contain("grep -Fqx \"$FONT_GUEST_MARKER\"")
+        expect(source).to_contain("unavailable_marker_seen=1")
+        expect(source).to_contain("reason=unavailable-marker-accepted")
+        expect(source).to_contain("FONT_REGION_EXPECTED_BYTES=8064")
+        expect(source).to_contain("RV64_WM_FONT_REGION_EXPECTED_SHA256")
+        expect(source).to_contain("virtio-keyboard-pci")
+        expect(source).to_contain("virtio-mouse-pci")
+        expect(source).to_contain("\"execute\": \"input-send-event\"")
+        expect(source).to_contain("host_nonce=%s")
+        expect(source).to_contain("rv64-qmp-%d")
+        expect(source).to_contain("baseline_input_seq")
+        expect(source).to_contain("[wm-input-irq]")
+        expect(source).to_contain("[wm-pointer-irq]")
+        expect(source).to_contain("font_corrupt_rejected=1")
+        expect(source).to_contain("rv64-font-crop-oracle-unpinned")
+
+    it "should publish the exact current RV64 production blockers":
+        step("Inspect the canonical RV64 production desktop entry")
+        val entry = rv64_entry_source()
+        expect(entry).to_contain("use os.desktop.shell.{DesktopShell}")
+        expect(entry).to_contain("source=shared-wm-draw-ir-engine2d")
+        expect(entry).to_contain("[rv64-font-evidence-unavailable] reason=guest-font-asset-not-mounted")
+        expect(entry).to_contain("required_guest_path=/SYS/FONTS/NOTOSANS")
+        expect(entry).to_contain("[rv64-input-evidence-unavailable] reason=virtio-input-transport-not-wired")
+
+    it "should reject a one-byte-corrupted crop in the parser calibration":
+        step("Run the RV64 font and input evidence parser self-test")
+        expect(run_wrapper_contract_self_test()).to_contain(
+            "rv64_display_smoke_qmp_self_test=pass"
+        )
+
+    # @capture(protocol)
+    # @capture(gui)
+    # @capture(artifact)
+    it "should render the pinned font and correlate QMP input on live RV64":
+        step("Load the pinned multilingual font manifest")
+        step("Accept exact-face-bound simple-script shaping")
+        step("Prepare one shared font batch for 2D and 3D")
+        step("Emit the selected font composite program and plan compilation")
+        step("Prove native submission and device readback")
+        step("Boot the canonical pure-Simple RV64 production desktop in QEMU")
+        step("Inject keyboard and pointer events through QMP VirtIO input")
+        step("Correlate guest IRQ WM state and later frame generations")
+        step("Capture and verify the exact RV64 glyph crop and corrupt-copy rejection")
+        val (out, err, code) = process_run(
+            "/usr/bin/env",
+            [
+                "RV64_DISPLAY_SMOKE_BUILD=0",
+                "/bin/sh",
+                "scripts/check/check-rv64-display-smoke-qmp-evidence.shs",
+                "--wm-font-input"
+            ]
+        )
+        expect(code).to_equal(0)
+        expect(out).to_contain("rv64_display_smoke_qmp_status=pass")
+        expect(out).to_contain("rv64_wm_guest_font_marker=1")
+        expect(out).to_contain("rv64_wm_unavailable_marker_seen=0")
+        expect(out).to_contain("rv64_wm_font_corrupt_crop_rejected=1")
+        expect(out).to_contain("rv64_wm_keyboard_correlated=1")
+        expect(out).to_contain("rv64_wm_pointer_correlated=1")

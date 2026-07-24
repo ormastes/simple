@@ -103,3 +103,25 @@ checking source and executable evidence.
 - Highest-capability review accepted both bounded algorithms but rejected
   registry promotion without executable pure-Simple evidence. Merge ownership
   therefore keeps all three serif cells candidate/unavailable.
+
+## Surface verification campaign — 2026-07-24
+
+This campaign owns only the unresolved REQ-011 production routes and the
+Engine2D SIMD/Vulkan evidence needed by
+`.spipe/font-rendering-surface-verification/state.md`.
+
+| Lane | Agent | Owned result | Final reviewer |
+|---|---|---|---|
+| 1 — 2D | `/root/font_2d` | public Engine2D `cpu_simd` and Vulkan font/readback SSpec | `/root` |
+| 2 — Web | `/root/font_web` | HTML/WebIR-to-exact-DrawIR font and browser-event SSpec | `/root` |
+| 3 — GUI | `/root/font_gui` | `widget_tree_to_draw_ir` font and widget-event SSpec | `/root` |
+| 4 — hosted WM | `/root/font_host_wm` (`gpt-5.6-sol`) | live hosted canonical frame, glyph crop, and correlated WM events | `/root` |
+| 5 — SimpleOS WM | `/root/font_simpleos_wm` (`gpt-5.6-sol`) | canonical desktop QEMU font hash/crop and correlated input evidence | `/root` |
+| 6 — RV64 SimpleOS WM | `/root/font_simpleos_wm` (`gpt-5.6-sol`) | canonical RV64 dev-board QEMU font hash/crop and VirtIO input evidence | `/root` |
+
+The merge owner is `/root`. Agents do not commit or sync. Shared interfaces,
+manual phrases, setup/checker reuse, fail-fast placeholder policy, and rejected
+runtime shortcuts are frozen in the campaign state before parallel work. Each
+focused criterion runs once; a failed criterion gets at most three fix cycles.
+Generated-manual quality and all done marks remain owned by the final
+highest-capability review.

@@ -35,7 +35,7 @@ Host content uses content-only Simple Web requests: the outer WM owns the titleb
 
 The production `DesktopShell.run_baremetal` loop renders `runtime_scene_snapshot()`, `runtime_taskbar_model()`, and validated content-only Simple Web frames through the shared backend. It no longer calls `_draw_baremetal_overlay`, and a failed app launch creates no overlay-only window. Compatibility rendering remains isolated to legacy/demo APIs and is not a production entrypoint or completion evidence.
 
-The production x86_64 entry launches process-owned Browser Demo, Hello World, and Clang surfaces from payloads present in the canonical FAT32 fixture, validates dynamic scanout metadata, and keeps one persistent framebuffer Engine2D. Set-1 F11 input is recorded by `Compositor`, consumed exactly once by `DesktopShell`, and correlated with the resulting maximize/restore state and rendered scene revision.
+The production x86_64 entry launches process-owned Browser Demo, Hello World, and Clang surfaces from payloads present in the canonical FAT32 fixture, validates dynamic scanout metadata, and keeps one persistent framebuffer Engine2D. Set-1 F11 and PS/2 AUX pointer packets share one guest-owned monotonic input sequence. `DesktopShell` correlates each accepted event with its IRQ marker, resulting WM state, and rendered frame marker; QMP submission alone is not evidence.
 
 ### Font path
 
@@ -58,12 +58,15 @@ frame and pixel-oracle gates still fail until that evidence is captured.
 VFAT writing and lookup currently support ASCII long names; nested directories
 chain across clusters, while invalid names and fixed-root overflow fail closed.
 
-Packaging alone is not a font-rendering PASS. The guest paints the fixed `A` at
-32 px and emits its font marker only after hashing live MMIO. The `Capture
-SimpleOS pinned-font pixels` scenario must record the candidate path/hash, WM
-Draw IR identity, guest marker, and independently hashed dynamic-scanout QEMU
-`pmemsave` crop. Host rendering, serial-only markers, or repository file
-presence are blockers, not substitutes.
+Packaging alone is not a font-rendering PASS. The canonical x86_64 desktop
+reads the pinned face from the deterministic guest path
+`/SYS/FONTS/NOTOSANS`, validates exactly 1,708,408 bytes with SHA-256
+`2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081`,
+and emits its font marker only after hashing the live taskbar-clock MMIO crop.
+The `Capture SimpleOS pinned-font pixels` scenario must record that guest
+path/length/hash, WM Draw IR identity, guest marker, and independently hashed
+dynamic-scanout QEMU `pmemsave` crop. Host rendering, serial-only markers,
+repository file presence, and synthetic pixels are blockers, not substitutes.
 
 ## Scenario Manuals
 
@@ -71,11 +74,23 @@ presence are blockers, not substitutes.
 - `doc/06_spec/03_system/os/wm/simpleos_wm_fullscreen_spec.md`
 - `doc/06_spec/03_system/os/wm/simple_wm_performance_spec.md`
 
-Their runtime helpers intentionally fail until production wrappers provide correlated executable, input, authority revision, backend, capture, and performance evidence. Source inspection, demo markers, Rust-seed execution, fixed QEMU metadata, or unverified screenshots cannot satisfy them.
+The production QEMU evidence wrapper is
+`sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs`. It must report
+correlated keyboard and pointer input, authority revision, backend, font crop,
+and framebuffer evidence. Source inspection, demo markers, Rust-seed execution,
+fixed QEMU metadata, or unverified screenshots cannot satisfy the scenarios.
 
 ## Current Verification Limits
 
-Focused source checks pass for the new state and renderer contracts. The local `bin/simple` reports Rust bootstrap-seed provenance and remains ineligible for runtime evidence. The verified stage3 pure-Simple compiler successfully links the production kernel. Stage3 corrupts freestanding aggregate PMM state even when a `PhysMemManager` parameter is unused, so production PMM state and VMM bootstrap now cross module boundaries only as scalars. Live execution confirmed the scalar raw allocator removed the repeated VMM fault storm; the three-cycle cap deferred confirmation of the new direct architecture initializer. Live host captures, a successful dynamic QEMU scanout/input capture, and selected NFR measurements remain required before PASS.
+The 2026-07-24 focused live attempt used
+`bin/release/x86_64-unknown-linux-gnu/simple` (SHA-256
+`a3302eeaabe9e050117a0778806b9fc354409010e293ec3402bd097ee4534fa2`).
+Its native build remained CPU-bound for about 13 minutes, exceeded the
+requested `--timeout 300`, emitted an empty build log, and was terminated
+without refreshing the kernel. The wrapper therefore reported
+`wm-simple-web-build-failed`; QEMU did not launch and no crop was promoted.
+Resume with the same wrapper after the self-hosted native-build timeout/perf
+fault is fixed. Source contracts are supporting evidence only.
 
 Scalar safety includes enum payloads: raw PMM allocation owns the bitmap path
 instead of wrapping `PageFrame?`, and VMM table allocation consumes the raw

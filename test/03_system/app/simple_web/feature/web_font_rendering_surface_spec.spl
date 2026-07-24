@@ -1,0 +1,255 @@
+# codex-system-test
+# @tag: rendering, font, web, draw_ir, engine2d, events
+# @evidence-display: links
+"""# Simple Web Font Rendering Surface
+
+Proves the production HTML/WebIR owner resolves selected text and ordered
+advances into one DrawIrComposition, then submits that exact composition
+through the shared Engine2D pixel facade. The glyph oracle compares each
+ordered glyph band with an otherwise identical blank frame.
+
+The live interaction scenario runs the canonical Electron/Chromium event
+wrapper. It is host evidence: missing Electron, Chromium, or a display host is
+a failure rather than a synthetic pass.
+"""
+
+use std.io_runtime.{
+    env_get,
+    file_hash_sha256,
+    file_read,
+    file_size,
+    file_write,
+    process_run,
+    remove_file_if_exists
+}
+use std.spec.*
+use common.ui.draw_ir.{DRAW_IR_COMMAND_TEXT, DrawIrCommand, DrawIrComposition}
+use common.ui.web_render_api.{
+    WEB_RENDER_ENGINE2D_STATUS_RENDERED,
+    WEB_RENDER_TARGET_PURE_SIMPLE,
+    web_render_adapter_request
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir
+}
+use std.gc_async_mut.ui.web_render_pixel_backend.{
+    web_render_draw_ir_request_to_pixel_artifact
+}
+use std.common.encoding.font_registry.{
+    selected_font_asset_candidates,
+    selected_font_asset_identity
+}
+
+fn _text_commands(composition: DrawIrComposition, value: text) -> [DrawIrCommand]:
+    var matches: [DrawIrCommand] = []
+    for batch in composition.batches:
+        for command in batch.commands:
+            if command.kind == DRAW_IR_COMMAND_TEXT and command.text_value == value:
+                matches.push(command)
+    matches
+
+fn _pinned_mono_identity() -> text:
+    for candidate in selected_font_asset_candidates():
+        if candidate.family == "Noto Sans Mono":
+            expect(candidate.sha256).to_equal("2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081")
+            return selected_font_asset_identity(candidate)
+    fail("pinned Noto Sans Mono manifest entry is missing")
+    return ""
+
+fn _style_value(command: DrawIrCommand, key: text) -> text:
+    for prop in command.computed_style:
+        if prop.key == key:
+            return prop.value
+    ""
+
+fn _pixel_differences(left: [u32], right: [u32]) -> i32:
+    if left.len() != right.len():
+        return -1
+    var differences = 0
+    var i = 0
+    while i < left.len():
+        if left[i] != right[i]:
+            differences = differences + 1
+        i = i + 1
+    differences
+
+fn _pixel_checksum(pixels: [u32]) -> i64:
+    var checksum: i64 = 0
+    var i = 0
+    while i < pixels.len():
+        checksum = (checksum + pixels[i].to_i64() * (i.to_i64() + 1)) % 2147483647
+        i = i + 1
+    checksum
+
+fn _write_argb_artifact(path: text, pixels: [u32], width: i32, height: i32) -> bool:
+    var json = "{\"width\":" + width.to_string() +
+        ",\"height\":" + height.to_string() +
+        ",\"format\":\"argb-u32\",\"producer\":\"pure-simple-html-webir-drawir-engine2d\",\"pixels\":["
+    var i = 0
+    while i < pixels.len():
+        if i > 0:
+            json = json + ","
+        json = json + pixels[i].to_i64().to_string()
+        i = i + 1
+    file_write(path, json + "]}")
+
+fn _glyph_band_differences(left: [u32], right: [u32], viewport_w: i32,
+        viewport_h: i32, x0: i32, x1: i32, y0: i32, y1: i32) -> i32:
+    var differences = 0
+    var y = if y0 < 0: 0 else: y0
+    val end_y = if y1 > viewport_h: viewport_h else: y1
+    val start_x = if x0 < 0: 0 else: x0
+    val end_x = if x1 > viewport_w: viewport_w else: x1
+    while y < end_y:
+        var x = start_x
+        while x < end_x:
+            val index = y * viewport_w + x
+            if left[index] != right[index]:
+                differences = differences + 1
+            x = x + 1
+        y = y + 1
+    differences
+
+fn _expect_each_ordered_glyph_visible(command: DrawIrCommand, pixels: [u32],
+        blank: [u32], viewport_w: i32, viewport_h: i32):
+    val advances = _style_value(command, "font-advance-widths").split(",")
+    expect(advances.len()).to_equal(3)
+    var pen_x = command.x
+    for raw in advances:
+        val advance = raw.to_int() ?? -1
+        expect(advance).to_be_greater_than(0)
+        val ink = _glyph_band_differences(
+            pixels, blank, viewport_w, viewport_h,
+            pen_x, pen_x + advance, command.y, command.y + command.height
+        )
+        expect(ink).to_be_greater_than(0)
+        pen_x = pen_x + advance
+    expect(pen_x).to_equal(command.x + command.width)
+
+fn _evidence_value(evidence: text, key: text) -> text:
+    val prefix = key + "="
+    for line in evidence.split("\n"):
+        if line.starts_with(prefix):
+            return line.substring(prefix.len(), line.len())
+    ""
+
+describe "Simple Web production font rendering and events":
+
+    # @req AC-2 AC-6 AC-7 AC-8 AC-9
+    # @capture(html)
+    it "should submit selected Web text and ordered advances as readable glyphs":
+        step("Load the pinned multilingual font manifest")
+        val run_id = env_get("SIMPLE_WEB_FONT_RUN_ID") ?? ""
+        expect(run_id.len()).to_be_greater_than(0)
+        val receipt_path = "build/test-artifacts/simple-web-font-composition/receipt.env"
+        val artifact_path = "build/test-artifacts/simple-web-font-composition/frame.argb.json"
+        expect(remove_file_if_exists(receipt_path)).to_be(true)
+        expect(remove_file_if_exists(artifact_path)).to_be(true)
+        val text_value = "WEB"
+        val html = "<html><head><style>html,body{margin:0;padding:0;width:96px;height:48px;background:#fff}.font-proof{display:block;color:#111827;font-family:\"Noto Sans Mono\",monospace;font-size:16px;line-height:20px}</style></head><body><span class='font-proof'>" + text_value + "</span></body></html>"
+        val blank_html = "<html><head><style>html,body{margin:0;padding:0;width:96px;height:48px;background:#fff}.font-proof{display:block;color:#111827;font-family:\"Noto Sans Mono\",monospace;font-size:16px;line-height:20px}</style></head><body><span class='font-proof'></span></body></html>"
+
+        step("Accept exact-face-bound simple-script shaping")
+        step("Build the production surface composition")
+        val composition = simple_web_layout_render_html_draw_ir(html, 96, 48)
+        val blank_composition = simple_web_layout_render_html_draw_ir(blank_html, 96, 48)
+        val commands = _text_commands(composition, text_value)
+        expect(commands.len()).to_equal(1)
+        if commands.len() != 1:
+            fail("expected exactly one selected Web text command")
+            return
+        val command = commands[0]
+        expect(command.text_value).to_equal(text_value)
+        expect(_style_value(command, "font-family")).to_equal("\"Noto Sans Mono\",monospace")
+        expect(_style_value(command, "font-identity")).to_equal(_pinned_mono_identity())
+        expect(_style_value(command, "font-advance-widths").len()).to_be_greater_than(0)
+
+        step("Prepare one shared font batch for 2D and 3D")
+        step("Emit the selected font composite program and plan compilation")
+        val request = web_render_adapter_request(
+            WEB_RENDER_TARGET_PURE_SIMPLE, "simple-web-font-proof",
+            "Simple Web font proof", html, "", "", 96, 48
+        ).with_pixel_output()
+
+        step("Submit the exact composition")
+        val artifact = web_render_draw_ir_request_to_pixel_artifact(request, composition, "cpu")
+        val blank_artifact = web_render_draw_ir_request_to_pixel_artifact(request, blank_composition, "cpu")
+
+        step("Prove native submission and device readback")
+        step("Capture backend and framebuffer evidence")
+        expect(artifact.engine2d_status).to_equal(WEB_RENDER_ENGINE2D_STATUS_RENDERED)
+        expect(artifact.engine2d_backend).to_equal("cpu")
+        expect(artifact.pixels.len()).to_equal(96 * 48)
+        expect(blank_artifact.pixels.len()).to_equal(96 * 48)
+        expect(_pixel_differences(artifact.pixels, blank_artifact.pixels)).to_be_greater_than(0)
+        _expect_each_ordered_glyph_visible(
+            command, artifact.pixels, blank_artifact.pixels, 96, 48
+        )
+        val pixel_checksum = _pixel_checksum(artifact.pixels)
+        expect(pixel_checksum).to_be_greater_than(0)
+        expect(_write_argb_artifact(artifact_path, artifact.pixels, 96, 48)).to_be(true)
+        val artifact_size = file_size(artifact_path)
+        val artifact_sha256 = file_hash_sha256(artifact_path)
+        expect(artifact_size).to_be_greater_than(0)
+        expect(artifact_sha256.len()).to_equal(64)
+        val receipt = "schema=simple-web-font-composition-v1\n" +
+            "status=pass\n" +
+            "run_id=" + run_id + "\n" +
+            "producer=pure-simple-html-webir-drawir-engine2d\n" +
+            "surface_id=simple-web-font-proof\n" +
+            "composition_id=" + composition.composition_id + "\n" +
+            "text=" + command.text_value + "\n" +
+            "font_identity=" + _style_value(command, "font-identity") + "\n" +
+            "font_advance_widths=" + _style_value(command, "font-advance-widths") + "\n" +
+            "viewport_width=96\nviewport_height=48\n" +
+            "pixel_count=" + artifact.pixels.len().to_string() + "\n" +
+            "pixel_checksum=" + pixel_checksum.to_string() + "\n" +
+            "pixel_artifact_path=" + artifact_path + "\n" +
+            "pixel_artifact_size_bytes=" + artifact_size.to_string() + "\n" +
+            "pixel_artifact_sha256=" + artifact_sha256 + "\n"
+        expect(file_write(receipt_path, receipt)).to_be(true)
+
+    # @req AC-2 AC-6 AC-7 AC-9
+    # @capture(exec)
+    it "should deliver correlated browser focus keyboard pointer timing and animation events":
+        step("Deliver correlated focus keyboard and pointer events")
+        val run_id = env_get("SIMPLE_WEB_FONT_RUN_ID") ?? ""
+        expect(run_id.len()).to_be_greater_than(0)
+        val root = "build/test-artifacts/simple-web-font-rendering-events"
+        val command = "mkdir -p " + root +
+            " && BUILD_DIR=" + root +
+            " REPORT_PATH=" + root + "/report.md" +
+            " SIMPLE_WEB_FONT_COMPOSITION_RECEIPT=build/test-artifacts/simple-web-font-composition/receipt.env" +
+            " timeout 60 sh scripts/check/check-wm-browser-event-routing-evidence.shs"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        step("Capture backend and framebuffer evidence")
+        val evidence = file_read(root + "/evidence.env")
+        expect(_evidence_value(evidence, "wm_browser_event_routing_status")).to_equal("pass")
+        expect(_evidence_value(evidence, "wm_browser_event_routing_validation_status")).to_equal("pass")
+        expect(_evidence_value(evidence, "wm_browser_event_routing_focus_count")).to_equal("1")
+        expect(_evidence_value(evidence, "wm_browser_event_routing_title_command_count")).to_equal("1")
+        expect(_evidence_value(evidence, "wm_browser_event_routing_text_input_count")).to_equal("1")
+        expect(_evidence_value(evidence, "wm_browser_event_routing_pointer_down_count")).to_equal("1")
+        expect(_evidence_value(evidence, "wm_browser_event_routing_pointer_up_count")).to_equal("1")
+        expect(_evidence_value(evidence, "wm_browser_event_routing_performance_now_available")).to_equal("true")
+        expect((_evidence_value(evidence, "wm_browser_event_routing_performance_now_delta_ms").to_float() ?? 0.0)).to_be_greater_than(0.0)
+        expect((_evidence_value(evidence, "wm_browser_event_routing_input_to_paint_ms").to_float() ?? 0.0)).to_be_greater_than(0.0)
+        expect((_evidence_value(evidence, "wm_browser_event_routing_animation_frame_count").to_int() ?? 0)).to_be_greater_than(1)
+        expect(_evidence_value(evidence, "wm_browser_event_routing_css_animation_probe")).to_equal("true")
+        expect(_evidence_value(evidence, "wm_browser_event_routing_font_text")).to_equal("WEB")
+        expect(_evidence_value(evidence, "wm_browser_event_routing_font_composition_id")).to_equal("html-layout")
+        expect(_evidence_value(evidence, "wm_browser_event_routing_font_identity")).to_equal(_pinned_mono_identity())
+        expect(_evidence_value(evidence, "wm_browser_event_routing_font_loaded")).to_equal("true")
+        expect(_evidence_value(evidence, "wm_browser_event_routing_font_frame_artifact_status")).to_equal("pass")
+        expect((_evidence_value(evidence, "wm_browser_event_routing_font_frame_pixel_checksum").to_int() ?? 0)).to_be_greater_than(0)
+        expect((_evidence_value(evidence, "wm_browser_event_routing_font_frame_nonbackground_pixels").to_int() ?? 0)).to_be_greater_than(0)
+        expect(_evidence_value(evidence, "wm_browser_event_routing_simple_composition_artifact_status")).to_equal("pass")
+        expect(_evidence_value(evidence, "wm_browser_event_routing_simple_composition_run_id")).to_equal(run_id)
+        val simple_checksum = _evidence_value(evidence, "wm_browser_event_routing_simple_composition_pixel_checksum")
+        expect((simple_checksum.to_int() ?? 0)).to_be_greater_than(0)
+        expect(_evidence_value(evidence, "wm_browser_event_routing_font_frame_correlation_id")).to_equal(
+            "wm-browser-event-routing|" + run_id + "|html-layout|" + _pinned_mono_identity() + "|WEB|" + simple_checksum + "|8"
+        )
+        expect(_evidence_value(evidence, "wm_browser_event_routing_blur_or_tolerance_used")).to_equal("false")

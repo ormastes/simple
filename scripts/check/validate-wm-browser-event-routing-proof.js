@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const expectedRunId = process.env.SIMPLE_WEB_FONT_RUN_ID || '';
 
 function clean(value) {
   if (value === undefined || value === null) return '';
@@ -84,6 +87,9 @@ const expectedEventSequence = [
 const expectedProofSource = 'tools/web-render-backend/wm_event_check.js';
 const expectedTarget = 'electron';
 const expectedSurfaceId = 'wm-browser-event-routing';
+const expectedFontText = 'WEB';
+const expectedFontCompositionId = 'html-layout';
+const expectedFontIdentity = 'sha256=2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081;axes=wght=400,wdth=100';
 const maxEventTimingMs = 1000;
 
 function proofSourceArtifact() {
@@ -113,11 +119,90 @@ function proofSourceArtifact() {
     !source.includes("proof_source: 'tools/web-render-backend/wm_event_check.js'") ||
     !source.includes("out.event_sequence = window.__wmFrames.map(frameName)") ||
     !source.includes("out.input_to_paint_ms = inputToPaintMs") ||
-    !source.includes("out.css_animation_probe = animationProbeStyle.animationName === 'simple-wm-proof-pulse'")
+    !source.includes("out.css_animation_probe = animationProbeStyle.animationName === 'simple-wm-proof-pulse'") ||
+    !source.includes("result.font_frame_path = framePath") ||
+    !source.includes("result.font_frame_pixel_checksum = frameChecksum")
   ) {
     return { status: 'marker-missing', size: String(stat.size), actualSize };
   }
   return { status: 'pass', size: String(stat.size), actualSize };
+}
+
+function fontFrameArtifact(proof) {
+  const artifactPath = proof.font_frame_path;
+  if (typeof artifactPath !== 'string' || path.basename(artifactPath) !== 'wm-font-frame.bgra') {
+    return { status: 'path', actualSize: '', checksum: '', nonBackground: '' };
+  }
+  let stat;
+  try {
+    stat = fs.lstatSync(artifactPath);
+  } catch (_err) {
+    return { status: 'missing', actualSize: '', checksum: '', nonBackground: '' };
+  }
+  if (stat.isSymbolicLink()) return { status: 'symlink', actualSize: '', checksum: '', nonBackground: '' };
+  if (!stat.isFile()) return { status: 'not-regular', actualSize: '', checksum: '', nonBackground: '' };
+  if (stat.nlink > 1) return { status: 'hardlink', actualSize: String(stat.size), checksum: '', nonBackground: '' };
+  const bytes = fs.readFileSync(artifactPath);
+  let checksum = 0;
+  let nonBackground = 0;
+  for (let i = 0; i + 3 < bytes.length; i += 4) {
+    const b = bytes[i];
+    const g = bytes[i + 1];
+    const r = bytes[i + 2];
+    const a = bytes[i + 3];
+    checksum = (checksum + (b + 3 * g + 5 * r + 7 * a) * (i / 4 + 1)) % 2147483647;
+    if (a !== 0 && (r !== 255 || g !== 255 || b !== 255)) nonBackground += 1;
+  }
+  const expectedBytes = Number(proof.font_frame_width) * Number(proof.font_frame_height) * 4;
+  if (!Number.isSafeInteger(expectedBytes) || expectedBytes <= 0 || bytes.length !== expectedBytes) {
+    return { status: 'size-mismatch', actualSize: String(bytes.length), checksum: String(checksum), nonBackground: String(nonBackground) };
+  }
+  return { status: 'pass', actualSize: String(bytes.length), checksum: String(checksum), nonBackground: String(nonBackground) };
+}
+
+function simpleCompositionArtifact(proof) {
+  try {
+    const receiptPath = proof.simple_composition_receipt_path;
+    const fields = Object.fromEntries(
+      fs.readFileSync(receiptPath, 'utf8').split(/\r?\n/).filter(Boolean).map(line => {
+        const split = line.indexOf('=');
+        return [line.slice(0, split), line.slice(split + 1)];
+      })
+    );
+    const artifactPath = path.resolve(fields.pixel_artifact_path || '');
+    const artifactBytes = fs.readFileSync(artifactPath);
+    const artifact = JSON.parse(artifactBytes.toString('utf8'));
+    const checksum = artifact.pixels.reduce(
+      (sum, pixel, index) => (sum + Number(pixel) * (index + 1)) % 2147483647, 0
+    );
+    const sha256 = crypto.createHash('sha256').update(artifactBytes).digest('hex');
+    const valid =
+      fields.schema === 'simple-web-font-composition-v1' &&
+      fields.status === 'pass' &&
+      /^[A-Za-z0-9._:-]+$/.test(expectedRunId) &&
+      fields.run_id === expectedRunId &&
+      fields.producer === 'pure-simple-html-webir-drawir-engine2d' &&
+      fields.composition_id === expectedFontCompositionId &&
+      fields.text === expectedFontText &&
+      fields.font_identity === expectedFontIdentity &&
+      artifact.producer === fields.producer &&
+      artifact.format === 'argb-u32' &&
+      artifact.width === Number(fields.viewport_width) &&
+      artifact.height === Number(fields.viewport_height) &&
+      artifact.pixels.length === Number(fields.pixel_count) &&
+      checksum === Number(fields.pixel_checksum) &&
+      artifactBytes.length === Number(fields.pixel_artifact_size_bytes) &&
+      sha256 === fields.pixel_artifact_sha256 &&
+      proof.simple_composition_run_id === expectedRunId &&
+      proof.simple_composition_artifact_path === artifactPath &&
+      sameJsonInteger(proof.simple_composition_pixel_count, Number(fields.pixel_count)) &&
+      sameJsonInteger(proof.simple_composition_pixel_checksum, Number(fields.pixel_checksum)) &&
+      sameJsonInteger(proof.simple_composition_artifact_size_bytes, artifactBytes.length) &&
+      proof.simple_composition_artifact_sha256 === sha256;
+    return { status: valid ? 'pass' : 'mismatch', fields };
+  } catch (_err) {
+    return { status: 'missing', fields: {} };
+  }
 }
 
 function eventSequenceText(value) {
@@ -181,6 +266,8 @@ const move = proof.move_payload || {};
 const title = proof.title_payload || {};
 const text = proof.text_payload || {};
 const proofSource = proofSourceArtifact();
+const fontFrame = fontFrameArtifact(proof);
+const simpleComposition = simpleCompositionArtifact(proof);
 const proofSourceArtifactStatus =
   proofSource.status === 'pass' &&
   proofSource.size !== '' &&
@@ -247,6 +334,31 @@ const rows = {
   move_payload_window_id_hint: move.window_id_hint,
   title_command_text: title.command_text,
   text_input_text: text.event ? text.event.text : undefined,
+  font_text: proof.font_text,
+  font_composition_id: proof.font_composition_id,
+  font_identity: proof.font_identity,
+  font_family: proof.font_family,
+  font_loaded: jsonBoolTextOrBlank(proof.font_loaded),
+  font_frame_event_count: jsonIntegerTextOrBlank(proof.font_frame_event_count),
+  font_frame_correlation_id: proof.font_frame_correlation_id,
+  font_frame_path: proof.font_frame_path,
+  font_frame_width: jsonIntegerTextOrBlank(proof.font_frame_width),
+  font_frame_height: jsonIntegerTextOrBlank(proof.font_frame_height),
+  font_frame_byte_count: jsonIntegerTextOrBlank(proof.font_frame_byte_count),
+  font_frame_actual_size_bytes: fontFrame.actualSize,
+  font_frame_pixel_checksum: jsonIntegerTextOrBlank(proof.font_frame_pixel_checksum),
+  font_frame_validated_checksum: fontFrame.checksum,
+  font_frame_nonbackground_pixels: jsonIntegerTextOrBlank(proof.font_frame_nonbackground_pixels),
+  font_frame_validated_nonbackground_pixels: fontFrame.nonBackground,
+  font_frame_artifact_status: fontFrame.status,
+  simple_composition_receipt_path: proof.simple_composition_receipt_path,
+  simple_composition_run_id: proof.simple_composition_run_id,
+  simple_composition_artifact_path: proof.simple_composition_artifact_path,
+  simple_composition_pixel_count: jsonIntegerTextOrBlank(proof.simple_composition_pixel_count),
+  simple_composition_pixel_checksum: jsonIntegerTextOrBlank(proof.simple_composition_pixel_checksum),
+  simple_composition_artifact_size_bytes: jsonIntegerTextOrBlank(proof.simple_composition_artifact_size_bytes),
+  simple_composition_artifact_sha256: proof.simple_composition_artifact_sha256,
+  simple_composition_artifact_status: simpleComposition.status,
 };
 
 let reason = 'pass';
@@ -258,6 +370,8 @@ if (!boolTrue(proof.pass)) {
   reason = 'event-routing-proof-source-missing';
 } else if (proofSource.status !== 'pass') {
   reason = `event-routing-proof-source-${proofSource.status}`;
+} else if (simpleComposition.status !== 'pass') {
+  reason = 'event-routing-simple-composition-artifact-invalid';
 } else if (
   proof.browser_engine !== 'chromium' ||
   typeof proof.electron_user_agent !== 'string' ||
@@ -309,6 +423,36 @@ if (!boolTrue(proof.pass)) {
   text.event.text !== 'Hello Simple'
 ) {
   reason = 'event-routing-payload-contract-missing';
+} else if (
+  proof.font_text !== expectedFontText ||
+  proof.font_composition_id !== expectedFontCompositionId ||
+  proof.font_identity !== expectedFontIdentity ||
+  typeof proof.font_family !== 'string' ||
+  !proof.font_family.includes('SimplePinnedMono') ||
+  !boolTrue(proof.font_loaded) ||
+  !sameJsonInteger(proof.font_frame_event_count, proof.event_sequence.length) ||
+  proof.font_frame_correlation_id !== [
+    expectedSurfaceId,
+    expectedRunId,
+    expectedFontCompositionId,
+    expectedFontIdentity,
+    expectedFontText,
+    proof.simple_composition_pixel_checksum,
+    proof.event_sequence.length,
+  ].join('|')
+) {
+  reason = 'event-routing-font-frame-correlation-missing';
+} else if (
+  fontFrame.status !== 'pass' ||
+  !jsonIntegerAtLeast(proof.font_frame_width, 1) ||
+  !jsonIntegerAtLeast(proof.font_frame_height, 1) ||
+  jsonIntegerText(proof.font_frame_byte_count) !== fontFrame.actualSize ||
+  jsonIntegerText(proof.font_frame_pixel_checksum) !== fontFrame.checksum ||
+  jsonIntegerText(proof.font_frame_nonbackground_pixels) !== fontFrame.nonBackground ||
+  !jsonIntegerAtLeast(proof.font_frame_pixel_checksum, 1) ||
+  !jsonIntegerAtLeast(proof.font_frame_nonbackground_pixels, 1)
+) {
+  reason = 'event-routing-font-frame-artifact-invalid';
 } else if (
   proof.title_text !== 'Terminal' ||
   proof.title_context_text !== 'terminal' ||

@@ -1,5 +1,46 @@
 # Simpleos Wm Fullscreen Specification
 
+> **Current result: BLOCKED / FAIL (2026-07-24).** The pure-Simple
+> `gui_entry_desktop.spl` native build remained CPU-bound for about 13 minutes,
+> exceeded its requested `--timeout 300`, and was terminated before producing a
+> fresh kernel. The wrapper reported `wm-simple-web-build-failed`; QEMU never
+> launched, the guest emitted no font or input markers, and no `pmemsave` crop
+> exists. Source contracts below are not runtime proof.
+
+## Required live evidence
+
+The canonical command is:
+
+```sh
+sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs
+```
+
+A future PASS must retain all of these from one run:
+
+1. `/SYS/FONTS/NOTOSANS`, exactly 1,708,408 bytes, SHA-256
+   `2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081`.
+2. A guest `[font-evidence]` marker for the production
+   `SharedWmScene -> DrawIrComposition -> Engine2D` taskbar-clock route.
+3. An independent QMP `pmemsave` right-56-by-bottom-48 RGB crop: 8,064 bytes
+   with the pinned crop hash. Serial or source-only pixels cannot substitute.
+4. F11 maximize and restore, each with one newer guest-owned `input_seq`
+   shared by IRQ, WM-state, and frame-generation markers.
+5. A pointer press aimed from the guest-reported restored-window rectangle:
+   the marker must be `window_focus` or `window_drag_begin`, its command window
+   must equal the positive focused window, and its frame generation must be
+   positive.
+6. A newer pointer release preserving that same focused window while the
+   shared dispatch reports `command=ignored` and `handled=false`, followed by
+   a positive frame generation.
+7. A bounded corrupt-copy calibration: copy the 8,064-byte QMP crop, XOR one
+   byte, prove its SHA-256 differs, and require the same crop oracle to reject
+   it before the wrapper may report PASS.
+
+Retained failure artifacts:
+`build/simpleos_wm_fullscreen_evidence/evidence.env`,
+`build/simpleos_wm_fullscreen_evidence/native-build.out` (empty), and
+`doc/09_report/simpleos_wm_fullscreen_evidence_2026-07-24.md`.
+
 > <details>
 
 <!-- sdn-diagram:id=simpleos_wm_fullscreen_spec.arch -->
@@ -27,7 +68,7 @@ simpleos_wm_fullscreen_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 6 | 6 | 0 | 6 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -274,10 +315,10 @@ require_performance_row_provenance()
 | Field | Value |
 |-------|-------|
 | Category | Hardware & OS |
-| Status | Active |
+| Status | BLOCKED — native build failed before QEMU |
 | Source | `test/03_system/os/wm/simpleos_wm_fullscreen_spec.spl` |
-| Updated | 2026-07-11 |
-| Generator | `simple spipe-docgen` (Simple) |
+| Updated | 2026-07-24 |
+| Generator | Manual status synchronization; docgen blocked |
 
 ## Overview
 
@@ -292,7 +333,7 @@ Tests covering:
 | Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
-| Pending scenarios | 0 |
+| Pending scenarios | 6 |
 
 
 </details>

@@ -250,3 +250,28 @@ frame owner must execute the canonical composition, platform backends must only
 present final pixels, and the SimpleOS row must retain the independent QEMU
 framebuffer crop. No private renderer, font loader, atlas, or cache may be added
 to close the evidence gap.
+
+## REQ-011 production-surface verification — 2026-07-24
+
+The focused campaign keeps six independent fail-closed rows:
+
+1. Engine2D `cpu_simd` and Vulkan selected-font draw with absolute glyph pixels,
+   CPU oracle, and exact readback provenance.
+2. HTML/WebIR layout identity and ordered advances in the exact submitted Draw
+   IR frame, correlated with focus, keyboard, pointer, timing, and animation.
+3. GUI widget-tree text/style/bounds in the exact submitted Draw IR frame,
+   correlated with focus, keyboard, and pointer delivery.
+4. Hosted `SharedWmScene -> DrawIrComposition -> Engine2D` live glyph capture,
+   correlated with focus, move/maximize/restore, keyboard, pointer, WM state,
+   and frame generation.
+5. Canonical SimpleOS desktop boot with guest font path/length/hash, guest glyph
+   marker, independent QMP `pmemsave` crop, and injected input correlated with
+   IRQ, WM state, and frame generation.
+6. Canonical RV64 SimpleOS desktop boot with a guest-reported pinned font
+   path/length/hash, an RV64-only QMP crop, and VirtIO keyboard/pointer input
+   correlated with guest WM state and frame generation.
+
+An unavailable Vulkan device or an unbootable QEMU image remains an explicit
+failed/unavailable row. Software fallback, a compatibility renderer, serial
+markers without pixels, or pixels without correlated events cannot satisfy the
+row.

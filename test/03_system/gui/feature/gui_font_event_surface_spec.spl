@@ -1,0 +1,214 @@
+# codex-system-test
+# @tag: gui, font, draw_ir, event, engine2d
+# @cover src/lib/common/ui/widget_draw_ir.spl 80%
+# @cover src/lib/common/ui/widget_hit.spl 70%
+"""# GUI Font and Event Surface
+
+Proves one visible widget tree carries selected text, font identity, geometry,
+and GUI source metadata into the exact `DrawIrComposition` submitted to
+Engine2D. The same visible input then receives correlated pointer, focus, and
+keyboard delivery before the updated tree is submitted again.
+
+The retained capture records the exact submitted, blank-oracle, and
+post-keyboard framebuffers alongside glyph-region and event-target metadata.
+Missing or malformed PPM evidence fails the scenario. This is GUI producer
+evidence; SIMD/Vulkan and live-window evidence belong to their dedicated lanes.
+"""
+
+use std.spec.*
+use std.io_runtime.{dir_create_all, file_write, file_write_bytes}
+use test.helpers.gpu_draw_event_shared.{read_pixels_ppm}
+use common.ui.builder.{column, label, text_input}
+use common.ui.draw_ir.{
+    DRAW_IR_BACKEND_CPU,
+    DRAW_IR_COMMAND_TEXT,
+    DRAW_IR_SOURCE_GUI_AST,
+    DrawIrCommand,
+    DrawIrComposition,
+    draw_ir_event_target_context,
+    draw_ir_text
+}
+use common.ui.widget.{WidgetNode}
+use common.ui.widget_draw_ir.{widget_tree_to_draw_ir_cpu}
+use common.ui.widget_hit.{widget_dispatch_click, widget_dispatch_key}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{engine2d_draw_ir_adv_composition}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+
+val WIDTH: i32 = 192
+val HEIGHT: i32 = 80
+val CAPTURE_PATH = "build/test-artifacts/03_system/gui/feature/gui_font_event_surface/gui_font_event.txt"
+val SUBMITTED_FRAME_PATH = "build/test-artifacts/03_system/gui/feature/gui_font_event_surface/submitted.ppm"
+val BLANK_FRAME_PATH = "build/test-artifacts/03_system/gui/feature/gui_font_event_surface/blank_oracle.ppm"
+val UPDATED_FRAME_PATH = "build/test-artifacts/03_system/gui/feature/gui_font_event_surface/updated.ppm"
+
+fn fixed_height(node: WidgetNode, height: i32) -> WidgetNode:
+    node.set_prop("height", height.to_string())
+    node
+
+fn gui_fixture(prefix: text, title_text: text) -> (WidgetNode, WidgetNode):
+    val title = fixed_height(label("{prefix}-title", title_text), 30)
+    title.set_prop("font-family", "Noto Sans Mono")
+    val input = fixed_height(text_input("{prefix}-input", "Type"), 30)
+    input.set_prop("value", "Ready")
+    input.set_prop("font-family", "Noto Sans Mono")
+    (column("{prefix}-root", [title, input]), input)
+
+fn text_command(composition: DrawIrComposition, value: text) -> DrawIrCommand:
+    for batch in composition.batches:
+        for command in batch.commands:
+            if command.kind == DRAW_IR_COMMAND_TEXT and command.text_value == value:
+                return command
+    fail("missing GUI text command: " + value)
+    draw_ir_text("missing-gui-font-command", 0, 0, "", 0u32)
+
+fn style_value(command: DrawIrCommand, key: text) -> text:
+    for prop in command.computed_style:
+        if prop.key == key:
+            return prop.value
+    ""
+
+fn glyph_region_differences(pixels: [u32], blank_pixels: [u32], command: DrawIrCommand) -> i32:
+    var count = 0
+    var y = command.y
+    while y < command.y + command.height:
+        var x = command.x
+        while x < command.x + command.width:
+            val index = y * WIDTH + x
+            if pixels[index] != blank_pixels[index]:
+                count = count + 1
+            x = x + 1
+        y = y + 1
+    count
+
+fn capture_gui_evidence(body: text) -> bool:
+    dir_create_all("build/test-artifacts/03_system/gui/feature/gui_font_event_surface")
+    file_write(CAPTURE_PATH, body)
+
+describe "GUI font and event surface":
+    """
+    A GUI operator sees selected text rendered through the shared Engine2D
+    route, then focuses the visible input with a pointer and types one key.
+    """
+
+    # @manual_section: Primary GUI font and event flow
+    # @capture(artifact)
+    # @req AC-3 AC-6 AC-7 AC-8 AC-9
+    it "renders selected glyphs and delivers pointer focus and keyboard events to the visible input":
+        step("Load the pinned multilingual font manifest")
+        val fixture = gui_fixture("gui", "GUI42")
+        val root = fixture.0
+        val input = fixture.1
+
+        step("Accept exact-face-bound simple-script shaping")
+        val submitted = widget_tree_to_draw_ir_cpu(root, WIDTH, HEIGHT)
+        val title = text_command(submitted, "GUI42")
+
+        step("Prepare one shared font batch for 2D and 3D")
+        expect(title.text_value).to_equal("GUI42")
+        expect(style_value(title, "font-family")).to_equal("Noto Sans Mono")
+        expect(style_value(title, "font-identity")).to_start_with("sha256=")
+        expect(style_value(title, "font-advance-widths")).to_equal("7,7,7,7,7")
+        expect(title.x).to_equal(3)
+        expect(title.y).to_equal(9)
+        expect(title.width).to_equal(35)
+        expect(title.height).to_equal(14)
+
+        step("Emit the selected font composite program and plan compilation")
+        expect(submitted.composition_id).to_equal("widget-composition")
+        expect(submitted.scene_key).to_equal("widget:192x80")
+        expect(submitted.batches[0].source.source_kind).to_equal(DRAW_IR_SOURCE_GUI_AST)
+        expect(submitted.batches[0].source.source_id).to_equal("gui-root")
+        expect(submitted.batches[0].source.style_key).to_equal("widget-tree")
+
+        step("Build the production surface composition")
+        var engine = Engine2D.create_with_backend(WIDTH, HEIGHT, "cpu")
+        engine.clear(0xff000000u32)
+
+        step("Submit the exact composition")
+        val rendered = engine2d_draw_ir_adv_composition(engine, submitted, false)
+        engine.shutdown()
+        expect(rendered.selected_backend).to_equal(DRAW_IR_BACKEND_CPU)
+        expect(rendered.skipped_command_count).to_equal(0)
+        dir_create_all("build/test-artifacts/03_system/gui/feature/gui_font_event_surface")
+        val submitted_ppm = read_pixels_ppm(WIDTH, HEIGHT, rendered.pixels)
+        expect(submitted_ppm.len()).to_equal(WIDTH * HEIGHT * 3 + 14)
+        val submitted_frame_written = file_write_bytes(SUBMITTED_FRAME_PATH, submitted_ppm)
+        expect(submitted_frame_written).to_be(true)
+
+        val blank_fixture = gui_fixture("blank", "")
+        val blank_submitted = widget_tree_to_draw_ir_cpu(blank_fixture.0, WIDTH, HEIGHT)
+        var blank_engine = Engine2D.create_with_backend(WIDTH, HEIGHT, "cpu")
+        blank_engine.clear(0xff000000u32)
+        val blank_rendered = engine2d_draw_ir_adv_composition(blank_engine, blank_submitted, false)
+        blank_engine.shutdown()
+        val blank_ppm = read_pixels_ppm(WIDTH, HEIGHT, blank_rendered.pixels)
+        expect(blank_ppm.len()).to_equal(WIDTH * HEIGHT * 3 + 14)
+        val blank_frame_written = file_write_bytes(BLANK_FRAME_PATH, blank_ppm)
+        expect(blank_frame_written).to_be(true)
+        val glyph_differences = glyph_region_differences(rendered.pixels, blank_rendered.pixels, title)
+        print("gui_font_glyph_region_differences={glyph_differences}")
+        expect(glyph_differences).to_be_greater_than(20)
+
+        step("Deliver correlated focus keyboard and pointer events")
+        val pointer_context = draw_ir_event_target_context(
+            submitted, submitted.scene_key, "pointer-1", "pointer_down",
+            "gui-input", "input", 10, 45, DRAW_IR_BACKEND_CPU
+        )
+        expect(pointer_context.resolved).to_be(true)
+        expect(pointer_context.source_kind).to_equal(DRAW_IR_SOURCE_GUI_AST)
+        expect(pointer_context.component_id).to_equal("gui-root")
+        expect(input.is_visible()).to_be(true)
+        expect(widget_dispatch_click(root, WIDTH, HEIGHT, 10, 45)).to_equal("gui-input")
+        expect(input.get_prop("ui_focus")).to_equal("true")
+
+        val focus_context = draw_ir_event_target_context(
+            submitted, submitted.scene_key, "focus-1", "focus",
+            "gui-input", "input", 10, 45, DRAW_IR_BACKEND_CPU
+        )
+        expect(focus_context.resolved).to_be(true)
+        widget_dispatch_key("gui-input", "Z")
+        expect(input.get_prop("value")).to_equal("ReadyZ")
+
+        val key_context = draw_ir_event_target_context(
+            submitted, submitted.scene_key, "key-1", "key_down",
+            "gui-input", "input", 10, 45, DRAW_IR_BACKEND_CPU
+        )
+        expect(key_context.resolved).to_be(true)
+        expect(key_context.input_key).to_equal("key-1")
+
+        step("Capture backend and framebuffer evidence")
+        val updated = widget_tree_to_draw_ir_cpu(root, WIDTH, HEIGHT)
+        val updated_text = text_command(updated, "ReadyZ")
+        expect(updated_text.text_value).to_equal("ReadyZ")
+        expect(updated.batches[0].source.style_revision).to_equal("1")
+        var updated_engine = Engine2D.create_with_backend(WIDTH, HEIGHT, "cpu")
+        updated_engine.clear(0xff000000u32)
+        val updated_render = engine2d_draw_ir_adv_composition(updated_engine, updated, false)
+        updated_engine.shutdown()
+        expect(updated_render.skipped_command_count).to_equal(0)
+        expect(glyph_region_differences(updated_render.pixels, blank_rendered.pixels, updated_text)).to_be_greater_than(20)
+        val updated_ppm = read_pixels_ppm(WIDTH, HEIGHT, updated_render.pixels)
+        expect(updated_ppm.len()).to_equal(WIDTH * HEIGHT * 3 + 14)
+        val updated_frame_written = file_write_bytes(UPDATED_FRAME_PATH, updated_ppm)
+        expect(updated_frame_written).to_be(true)
+        val evidence_status = if submitted_frame_written and blank_frame_written and updated_frame_written: "pass" else: "fail"
+        expect(capture_gui_evidence(
+            "status=" + evidence_status + "\n" +
+            "composition=" + submitted.composition_id + "\n" +
+            "scene=" + submitted.scene_key + "\n" +
+            "source_kind=" + submitted.batches[0].source.source_kind + "\n" +
+            "source_id=" + submitted.batches[0].source.source_id + "\n" +
+            "text=" + title.text_value + "\n" +
+            "bounds=3,9,35,14\n" +
+            "glyph_region_differences=" + glyph_differences.to_string() + "\n" +
+            "pointer_target=" + pointer_context.target_id + "\n" +
+            "focus_target=" + focus_context.target_id + "\n" +
+            "keyboard_target=" + key_context.target_id + "\n" +
+            "submitted_frame=" + SUBMITTED_FRAME_PATH + "\n" +
+            "blank_oracle_frame=" + BLANK_FRAME_PATH + "\n" +
+            "updated_frame=" + UPDATED_FRAME_PATH + "\n"
+        )).to_be(true)
+        expect(evidence_status).to_equal("pass")
+
+        step("Prove native submission and device readback")
+        expect(rendered.pixels.len()).to_equal(WIDTH * HEIGHT)

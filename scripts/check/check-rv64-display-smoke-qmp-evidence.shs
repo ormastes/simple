@@ -2,6 +2,18 @@
 set -eu
 
 MODE="${1:-run}"
+WM_FONT_INPUT_MODE=0
+case "$MODE" in
+    run|--self-test)
+        ;;
+    --wm-font-input|--self-test-wm-font-input)
+        WM_FONT_INPUT_MODE=1
+        ;;
+    *)
+        echo "usage: $0 [run|--self-test|--wm-font-input|--self-test-wm-font-input]" >&2
+        exit 2
+        ;;
+esac
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
@@ -12,7 +24,7 @@ ELF="${RV64_DISPLAY_SMOKE_ELF:-build/os/simpleos_riscv64_display_smoke.elf}"
 QEMU_BIN="${QEMU_BIN:-qemu-system-riscv64}"
 DO_BUILD="${RV64_DISPLAY_SMOKE_BUILD:-auto}"
 SELF_TEST_DIR=
-if [ "$MODE" = "--self-test" ]; then
+if [ "$MODE" = "--self-test" ] || [ "$MODE" = "--self-test-wm-font-input" ]; then
     SELF_TEST_DIR="$(mktemp -d)"
     BUILD_DIR="$SELF_TEST_DIR"
     REPORT_PATH="$SELF_TEST_DIR/report.md"
@@ -20,15 +32,28 @@ fi
 SOCK="$BUILD_DIR/qmp.sock"
 SERIAL="$BUILD_DIR/serial.log"
 PPM="$BUILD_DIR/screendump.ppm"
+INPUT_PPM="$BUILD_DIR/input-screendump.ppm"
+FONT_REGION_RGB="$BUILD_DIR/rv64-font-region.rgb"
+FONT_REGION_CORRUPT="$BUILD_DIR/rv64-font-region-corrupt.rgb"
+INPUT_META="$BUILD_DIR/rv64-input-correlation.env"
 ERR="$BUILD_DIR/qemu.stderr.log"
 PIDFILE="$BUILD_DIR/qemu.pid"
+FONT_ASSET="${RV64_WM_FONT_ASSET:-assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf}"
+FONT_GUEST_PATH=/SYS/FONTS/NOTOSANS
+FONT_ASSET_EXPECTED_BYTES=1708408
+FONT_ASSET_EXPECTED_SHA256=2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081
+FONT_GUEST_MARKER="[rv64-font-evidence] guest_path=$FONT_GUEST_PATH asset_bytes=$FONT_ASSET_EXPECTED_BYTES asset_sha256=$FONT_ASSET_EXPECTED_SHA256 route=shared-wm-draw-ir component_id=taskbar-clock"
+FONT_REGION_EXPECTED_BYTES=8064
+FONT_REGION_EXPECTED_SHA256="${RV64_WM_FONT_REGION_EXPECTED_SHA256:-}"
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
-rm -f "$SOCK" "$SERIAL" "$PPM" "$ERR" "$PIDFILE"
+rm -f "$SOCK" "$SERIAL" "$PPM" "$INPUT_PPM" "$FONT_REGION_RGB" \
+    "$FONT_REGION_CORRUPT" "$INPUT_META" "$ERR" "$PIDFILE"
 
 status=fail
 reason=not-run
 contract_version=2
+wm_font_input_contract_version=1
 ready=0
 lifecycle=0
 width=0
@@ -38,6 +63,91 @@ present_revision=0
 nonblack=0
 palette_witnesses=0
 palette_names=
+font_asset_bytes=0
+font_asset_sha256=
+font_region_bytes=0
+font_region_sha256=
+font_corrupt_sha256=
+font_corrupt_rejected=0
+keyboard_correlated=0
+pointer_correlated=0
+input_host_nonce=
+input_baseline_seq=0
+keyboard_seq=0
+pointer_seq=0
+guest_font_marker=0
+unavailable_marker_seen=0
+
+file_byte_count() {
+    wc -c <"$1" 2>/dev/null | tr -d ' ' || printf '0'
+}
+
+file_sha256() {
+    sha256sum "$1" 2>/dev/null | awk '{print $1}' || true
+}
+
+is_sha256() {
+    printf '%s\n' "$1" | grep -Eq '^[0-9a-f]{64}$'
+}
+
+validate_wm_font_input_evidence() {
+    font_asset_bytes="$(file_byte_count "$FONT_ASSET")"
+    font_asset_sha256="$(file_sha256 "$FONT_ASSET")"
+    font_region_bytes="$(file_byte_count "$FONT_REGION_RGB")"
+    font_region_sha256="$(file_sha256 "$FONT_REGION_RGB")"
+    font_corrupt_sha256="$(file_sha256 "$FONT_REGION_CORRUPT")"
+    font_corrupt_rejected=0
+    keyboard_correlated=0
+    pointer_correlated=0
+    guest_font_marker=0
+    unavailable_marker_seen=0
+    input_host_nonce="$(sed -n 's/^host_nonce=//p' "$INPUT_META" 2>/dev/null | tail -n 1)"
+    input_baseline_seq="$(sed -n 's/^baseline_input_seq=//p' "$INPUT_META" 2>/dev/null | tail -n 1)"
+    input_baseline_seq="${input_baseline_seq:-0}"
+
+    if grep -Eq '^\[rv64-(font|input)-evidence-unavailable\]' "$SERIAL" 2>/dev/null; then
+        unavailable_marker_seen=1
+        return 1
+    fi
+    if grep -Fqx "$FONT_GUEST_MARKER" "$SERIAL" 2>/dev/null; then
+        guest_font_marker=1
+    fi
+    [ "$guest_font_marker" = 1 ] || return 1
+
+    [ "$font_asset_bytes" = "$FONT_ASSET_EXPECTED_BYTES" ] || return 1
+    [ "$font_asset_sha256" = "$FONT_ASSET_EXPECTED_SHA256" ] || return 1
+    [ "$font_region_bytes" = "$FONT_REGION_EXPECTED_BYTES" ] || return 1
+    is_sha256 "$FONT_REGION_EXPECTED_SHA256" || return 1
+    [ "$font_region_sha256" = "$FONT_REGION_EXPECTED_SHA256" ] || return 1
+    [ "$font_corrupt_sha256" != "$font_region_sha256" ] || return 1
+    if [ "$(file_byte_count "$FONT_REGION_CORRUPT")" = "$FONT_REGION_EXPECTED_BYTES" ] \
+        && [ "$font_corrupt_sha256" != "$FONT_REGION_EXPECTED_SHA256" ]; then
+        font_corrupt_rejected=1
+    fi
+    [ "$font_corrupt_rejected" = 1 ] || return 1
+
+    keyboard_seq="$(sed -n 's/.*\[wm-input-irq\] input_seq=\([1-9][0-9]*\) .*/\1/p' "$SERIAL" | tail -n 1)"
+    pointer_seq="$(sed -n 's/.*\[wm-pointer-irq\] input_seq=\([1-9][0-9]*\) .*/\1/p' "$SERIAL" | tail -n 1)"
+    keyboard_seq="${keyboard_seq:-0}"
+    pointer_seq="${pointer_seq:-0}"
+    keyboard_generation="$(sed -n "s/^\\[wm-frame\\] input_seq=$keyboard_seq generation=\\([1-9][0-9]*\\).*/\\1/p" "$SERIAL" | tail -n 1)"
+    pointer_generation="$(sed -n "s/^\\[wm-pointer-frame\\] input_seq=$pointer_seq generation=\\([1-9][0-9]*\\).*/\\1/p" "$SERIAL" | tail -n 1)"
+    keyboard_generation="${keyboard_generation:-0}"
+    pointer_generation="${pointer_generation:-0}"
+    if [ -n "$input_host_nonce" ] \
+        && [ "$keyboard_seq" -gt "$input_baseline_seq" ] \
+        && grep -Eq "^\\[wm-state\\] input_seq=$keyboard_seq action=.* window=[1-9][0-9]* .*" "$SERIAL" \
+        && [ "$keyboard_generation" -gt "$present_revision" ]; then
+        keyboard_correlated=1
+    fi
+    if [ -n "$input_host_nonce" ] \
+        && [ "$pointer_seq" -gt "$keyboard_seq" ] \
+        && grep -Eq "^\\[wm-pointer-state\\] input_seq=$pointer_seq window=[1-9][0-9]* .*handled=true" "$SERIAL" \
+        && [ "$pointer_generation" -gt "$keyboard_generation" ]; then
+        pointer_correlated=1
+    fi
+    [ "$keyboard_correlated" = 1 ] && [ "$pointer_correlated" = 1 ]
+}
 
 validate_evidence() {
     ready=0
@@ -158,6 +268,25 @@ finish() {
         echo "- nonblack: $nonblack"
         echo "- canonical_palette_witnesses: $palette_witnesses"
         echo "- canonical_palette_names: $palette_names"
+        echo "- wm_font_input_mode: $WM_FONT_INPUT_MODE"
+        echo "- wm_font_input_contract_version: $wm_font_input_contract_version"
+        echo "- font_guest_path: $FONT_GUEST_PATH"
+        echo "- font_asset: $FONT_ASSET"
+        echo "- font_asset_bytes: $font_asset_bytes"
+        echo "- font_asset_sha256: $font_asset_sha256"
+        echo "- font_region_rgb: $FONT_REGION_RGB"
+        echo "- font_region_rgb_bytes: $font_region_bytes"
+        echo "- font_region_rgb_sha256: $font_region_sha256"
+        echo "- font_region_expected_sha256: $FONT_REGION_EXPECTED_SHA256"
+        echo "- corrupt_crop_rejected: $font_corrupt_rejected"
+        echo "- input_host_nonce: $input_host_nonce"
+        echo "- input_baseline_seq: $input_baseline_seq"
+        echo "- keyboard_input_seq: $keyboard_seq"
+        echo "- pointer_input_seq: $pointer_seq"
+        echo "- guest_font_marker: $guest_font_marker"
+        echo "- unavailable_marker_seen: $unavailable_marker_seen"
+        echo "- keyboard_correlated: $keyboard_correlated"
+        echo "- pointer_correlated: $pointer_correlated"
     } >"$REPORT_PATH"
 
     echo "rv64_display_smoke_qmp_status=$status"
@@ -175,6 +304,25 @@ finish() {
     echo "rv64_display_smoke_qmp_nonblack=$nonblack"
     echo "rv64_display_smoke_qmp_canonical_palette_witnesses=$palette_witnesses"
     echo "rv64_display_smoke_qmp_canonical_palette_names=$palette_names"
+    echo "rv64_wm_font_input_mode=$WM_FONT_INPUT_MODE"
+    echo "rv64_wm_font_input_contract_version=$wm_font_input_contract_version"
+    echo "rv64_wm_font_guest_path=$FONT_GUEST_PATH"
+    echo "rv64_wm_font_asset=$FONT_ASSET"
+    echo "rv64_wm_font_asset_bytes=$font_asset_bytes"
+    echo "rv64_wm_font_asset_sha256=$font_asset_sha256"
+    echo "rv64_wm_font_region_rgb=$FONT_REGION_RGB"
+    echo "rv64_wm_font_region_rgb_bytes=$font_region_bytes"
+    echo "rv64_wm_font_region_rgb_sha256=$font_region_sha256"
+    echo "rv64_wm_font_region_expected_sha256=$FONT_REGION_EXPECTED_SHA256"
+    echo "rv64_wm_font_corrupt_crop_rejected=$font_corrupt_rejected"
+    echo "rv64_wm_input_host_nonce=$input_host_nonce"
+    echo "rv64_wm_input_baseline_seq=$input_baseline_seq"
+    echo "rv64_wm_keyboard_input_seq=$keyboard_seq"
+    echo "rv64_wm_pointer_input_seq=$pointer_seq"
+    echo "rv64_wm_guest_font_marker=$guest_font_marker"
+    echo "rv64_wm_unavailable_marker_seen=$unavailable_marker_seen"
+    echo "rv64_wm_keyboard_correlated=$keyboard_correlated"
+    echo "rv64_wm_pointer_correlated=$pointer_correlated"
     echo "rv64_display_smoke_qmp_report=$REPORT_PATH"
 }
 
@@ -188,13 +336,22 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-if [ "$MODE" = "--self-test" ]; then
+if [ "$MODE" = "--self-test" ] || [ "$MODE" = "--self-test-wm-font-input" ]; then
     {
         echo "[desktop-gui-riscv64] scanout-ready width=8 height=8 stride=32"
         echo "[desktop-gui] first-frame-rendered scene_revision=7"
         echo "[desktop-gui-riscv64] present-ok revision=7"
         echo "[desktop-gui-riscv64] desktop-ready revision=7"
         echo "SIMPLEOS_RISCV_DISPLAY_SMOKE_READY"
+        if [ "$WM_FONT_INPUT_MODE" = 1 ]; then
+            echo "$FONT_GUEST_MARKER"
+            echo "[wm-input-irq] input_seq=8 scancode=15"
+            echo "[wm-state] input_seq=8 action=cycle-focus window=2 maximized=false x=4 y=4 width=4 height=4"
+            echo "[wm-frame] input_seq=8 generation=8"
+            echo "[wm-pointer-irq] input_seq=9 x=3 y=3 button_code=1 kind_code=1"
+            echo "[wm-pointer-state] input_seq=9 window=2 marker=[simpleos-wm] loop-step command=window_focus target= app= window=2 handled=true"
+            echo "[wm-pointer-frame] input_seq=9 generation=9"
+        fi
     } >"$SERIAL"
     python3 - "$PPM" <<'PY'
 import pathlib, sys
@@ -209,6 +366,37 @@ PY
     if ! validate_evidence; then
         echo "rv64_display_smoke_qmp_self_test=fail reason=valid-fixture-rejected"
         exit 1
+    fi
+    if [ "$WM_FONT_INPUT_MODE" = 1 ]; then
+        python3 - "$FONT_REGION_RGB" "$FONT_REGION_CORRUPT" <<'PY'
+import pathlib, sys
+
+crop = bytearray((i * 17 + 11) % 256 for i in range(8064))
+pathlib.Path(sys.argv[1]).write_bytes(crop)
+crop[0] ^= 1
+pathlib.Path(sys.argv[2]).write_bytes(crop)
+PY
+        {
+            echo "host_nonce=rv64-qmp-self-test"
+            echo "baseline_input_seq=7"
+        } >"$INPUT_META"
+        FONT_REGION_EXPECTED_SHA256=1ea380ea2477aaa7b9c5571d4a9c739e084ad29345fa910e72c580efcfbb1795
+        if ! validate_wm_font_input_evidence; then
+            echo "rv64_display_smoke_qmp_self_test=fail reason=valid-wm-font-input-fixture-rejected"
+            exit 1
+        fi
+        echo "[rv64-font-evidence-unavailable] reason=self-test" >>"$SERIAL"
+        if validate_wm_font_input_evidence; then
+            echo "rv64_display_smoke_qmp_self_test=fail reason=unavailable-marker-accepted"
+            exit 1
+        fi
+        sed '/^\[rv64-font-evidence-unavailable\]/d' "$SERIAL" >"$SERIAL.available"
+        mv "$SERIAL.available" "$SERIAL"
+        cp "$FONT_REGION_RGB" "$FONT_REGION_CORRUPT"
+        if validate_wm_font_input_evidence; then
+            echo "rv64_display_smoke_qmp_self_test=fail reason=uncorrupted-calibration-accepted"
+            exit 1
+        fi
     fi
     sed '/present-ok revision=/d' "$SERIAL" >"$SERIAL.bad"
     mv "$SERIAL.bad" "$SERIAL"
@@ -240,13 +428,19 @@ if [ ! -f "$ELF" ]; then
     exit 1
 fi
 
-"$QEMU_BIN" -machine virt -cpu rv64 -m 256M \
+set -- -machine virt -cpu rv64 -m 256M \
     -serial file:"$SERIAL" -display none -no-reboot -bios default \
     -kernel "$ROOT_DIR/$ELF" \
     -global virtio-mmio.force-legacy=false \
-    -device virtio-gpu-pci,disable-modern=on,disable-legacy=off \
-    -qmp unix:"$SOCK",server=on,wait=off \
-    -pidfile "$PIDFILE" -daemonize 2>"$ERR"
+    -device virtio-gpu-pci,disable-modern=on,disable-legacy=off
+if [ "$WM_FONT_INPUT_MODE" = 1 ]; then
+    set -- "$@" \
+        -device virtio-keyboard-pci,disable-modern=on,disable-legacy=off \
+        -device virtio-mouse-pci,disable-modern=on,disable-legacy=off
+fi
+set -- "$@" -qmp unix:"$SOCK",server=on,wait=off \
+    -pidfile "$PIDFILE" -daemonize
+"$QEMU_BIN" "$@" 2>"$ERR"
 
 for _ in $(seq 1 50); do
     if grep -Fq SIMPLEOS_RISCV_DISPLAY_SMOKE_READY "$SERIAL" 2>/dev/null; then
@@ -256,31 +450,114 @@ for _ in $(seq 1 50); do
     sleep 0.2
 done
 
-python3 - "$SOCK" "$PPM" <<'PY'
-import json, os, socket, sys, time
+if ! python3 - "$SOCK" "$PPM" "$INPUT_PPM" "$FONT_REGION_RGB" \
+    "$FONT_REGION_CORRUPT" "$INPUT_META" "$SERIAL" "$WM_FONT_INPUT_MODE" <<'PY'
+import json, os, re, socket, sys, time
 
-sock, out = sys.argv[1], sys.argv[2]
+sock, out, input_out, crop_out, corrupt_out, input_meta, serial, wm_mode = sys.argv[1:]
 s = socket.socket(socket.AF_UNIX)
 s.settimeout(5)
 s.connect(sock)
 f = s.makefile("rwb", buffering=0)
 f.readline()
-for obj in [
-    {"execute": "qmp_capabilities"},
-    {"execute": "human-monitor-command", "arguments": {"command-line": "screendump " + os.path.abspath(out)}},
-]:
+
+def qmp(obj):
     f.write(json.dumps(obj).encode() + b"\n")
     f.flush()
-    f.readline()
-for _ in range(50):
-    if os.path.exists(out) and os.path.getsize(out) > 0:
-        break
-    time.sleep(0.1)
+    response = json.loads(f.readline())
+    if "error" in response:
+        raise RuntimeError(response["error"])
+
+def screendump(path):
+    qmp({"execute": "human-monitor-command", "arguments": {
+        "command-line": "screendump " + os.path.abspath(path)
+    }})
+    for _ in range(50):
+        if os.path.exists(path) and os.path.getsize(path) > 0:
+            return
+        time.sleep(0.1)
+    raise RuntimeError("screendump timeout")
+
+qmp({"execute": "qmp_capabilities"})
+screendump(out)
+
+if wm_mode == "1":
+    serial_before = open(serial, "r", errors="replace").read()
+    baseline_sequences = [
+        int(value) for value in re.findall(r"\[(?:wm-input-irq|wm-pointer-irq)\] input_seq=(\d+)", serial_before)
+    ]
+    baseline_sequence = max(baseline_sequences, default=0)
+    host_nonce = "rv64-qmp-%d" % time.monotonic_ns()
+    open(input_meta, "w").write(
+        "host_nonce=%s\nbaseline_input_seq=%d\n" % (host_nonce, baseline_sequence)
+    )
+    qmp({"execute": "input-send-event", "arguments": {"events": [
+        {"type": "key", "data": {"down": True, "key": {"type": "qcode", "data": "tab"}}},
+        {"type": "key", "data": {"down": False, "key": {"type": "qcode", "data": "tab"}}},
+    ]}})
+    qmp({"execute": "input-send-event", "arguments": {"events": [
+        {"type": "rel", "data": {"axis": "x", "value": 12}},
+        {"type": "rel", "data": {"axis": "y", "value": 8}},
+        {"type": "btn", "data": {"down": True, "button": "left"}},
+        {"type": "btn", "data": {"down": False, "button": "left"}},
+    ]}})
+    for _ in range(50):
+        serial_after = open(serial, "r", errors="replace").read()
+        keyboard = [
+            int(value) for value in re.findall(r"\[wm-input-irq\] input_seq=(\d+)", serial_after)
+            if int(value) > baseline_sequence
+        ]
+        pointer = [
+            int(value) for value in re.findall(r"\[wm-pointer-irq\] input_seq=(\d+)", serial_after)
+            if int(value) > baseline_sequence
+        ]
+        if keyboard and pointer:
+            break
+        time.sleep(0.1)
+    screendump(input_out)
+
+    data = open(out, "rb").read()
+    parts = data.split(None, 4)
+    if len(parts) < 5 or parts[0] != b"P6" or parts[3] != b"255":
+        raise RuntimeError("invalid PPM")
+    width, height, pixels = int(parts[1]), int(parts[2]), parts[4]
+    if width < 56 or height < 48 or len(pixels) != width * height * 3:
+        raise RuntimeError("invalid PPM dimensions")
+    crop = bytearray()
+    for y in range(height - 48, height):
+        start = (y * width + width - 56) * 3
+        crop.extend(pixels[start:start + 56 * 3])
+    open(crop_out, "wb").write(crop)
+    corrupt = bytearray(crop)
+    corrupt[0] ^= 1
+    open(corrupt_out, "wb").write(corrupt)
 PY
+then
+    reason=qmp-capture-or-input-failed
+    finish
+    exit 1
+fi
 
 if validate_evidence; then
-    status=pass
-    reason=rv64-canonical-desktop-qmp-pass
+    if [ "$WM_FONT_INPUT_MODE" = 1 ]; then
+        if validate_wm_font_input_evidence; then
+            status=pass
+            reason=rv64-canonical-wm-font-input-qmp-pass
+        elif grep -Fq '[rv64-font-evidence-unavailable]' "$SERIAL" 2>/dev/null; then
+            reason=rv64-guest-font-route-unavailable
+        elif grep -Fq '[rv64-input-evidence-unavailable]' "$SERIAL" 2>/dev/null; then
+            reason=rv64-virtio-input-route-unavailable
+        elif ! is_sha256 "$FONT_REGION_EXPECTED_SHA256"; then
+            reason=rv64-font-crop-oracle-unpinned
+        elif [ "$guest_font_marker" != 1 ]; then
+            reason=rv64-exact-guest-font-marker-missing
+        else
+            reason=rv64-wm-font-input-correlation-failed
+        fi
+    else
+        status=pass
+        reason=rv64-canonical-desktop-qmp-pass
+    fi
 else
     reason=rv64-canonical-desktop-qmp-failed
 fi

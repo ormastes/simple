@@ -5,180 +5,524 @@ ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 BUILD_DIR="${BUILD_DIR:-build/linux-hosted-wm-live-window-evidence}"
-REPORT_PATH="${REPORT_PATH:-doc/09_report/linux_hosted_wm_live_window_evidence_$(date -u +%F).md}"
+REPORT_PATH="${REPORT_PATH:-$BUILD_DIR/report.md}"
+ENTRY=src/os/hosted/hosted_entry.spl
+SIMPLE_BIN="${SIMPLE_BIN:-bin/release/x86_64-unknown-linux-gnu/simple}"
+HOSTED_BIN="${HOSTED_WM_ARTIFACT:-$BUILD_DIR/hosted-wm}"
+WINT_LIB="${SIMPLE_WM_WINIT_LIB:-src/runtime/spl_winit/target/release/libspl_winit.so}"
+RUNTIME_LIB="${SIMPLE_WM_RUNTIME_LIB:-src/compiler_rust/target/bootstrap/deps/libsimple_runtime.so}"
+FONT_ASSET='assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf'
+FONT_ASSET_SHA256=2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081
+# Filled from the exact raw RGB crop after the first current-path capture.
+GLYPH_RGB_SHA256=pending
+TIMEOUT_SECS="${LINUX_HOSTED_WM_LIVE_TIMEOUT_SECS:-60}"
+BUILD_TIMEOUT_SECS="${LINUX_HOSTED_WM_BUILD_TIMEOUT_SECS:-600}"
+
 LOG_PATH="$BUILD_DIR/stdout.log"
 ERR_PATH="$BUILD_DIR/stderr.log"
-PID_PATH="$BUILD_DIR/pid"
+BUILD_LOG="$BUILD_DIR/native-build.log"
+SNAPSHOT_LIVE="$BUILD_DIR/snapshot.live.json"
+CAPTURE_LIVE="$BUILD_DIR/framebuffer.live.ppm"
+COMMAND_PATH="$BUILD_DIR/evidence.commands"
 WINDOW_ENV="$BUILD_DIR/window.env"
-CAPTURE_PATH="$BUILD_DIR/window.png"
-CAPTURE_METRICS="$BUILD_DIR/capture.metrics"
-TIMEOUT_SECS="${LINUX_HOSTED_WM_LIVE_TIMEOUT_SECS:-25}"
-FORCE_X11="${LINUX_HOSTED_WM_FORCE_X11:-1}"
+WINDOW_PNG="$BUILD_DIR/window.png"
+GLYPH_RGB="$BUILD_DIR/terminal-title.rgb"
+WINDOW_GLYPH_RGB="$BUILD_DIR/window-terminal-title.rgb"
+EVIDENCE_ENV="$BUILD_DIR/evidence.env"
+CALIBRATION_RGB="$BUILD_DIR/terminal-title.deliberate-red.rgb"
+BASELINE_SNAPSHOT="$BUILD_DIR/baseline.snapshot.json"
+BASELINE_CAPTURE="$BUILD_DIR/baseline.framebuffer.ppm"
+INPUT_SNAPSHOT="$BUILD_DIR/input.snapshot.json"
+INPUT_CAPTURE="$BUILD_DIR/input.framebuffer.ppm"
+MOVE_SNAPSHOT="$BUILD_DIR/move.snapshot.json"
+MOVE_CAPTURE="$BUILD_DIR/move.framebuffer.ppm"
+MAXIMIZE_SNAPSHOT="$BUILD_DIR/maximize.snapshot.json"
+MAXIMIZE_CAPTURE="$BUILD_DIR/maximize.framebuffer.ppm"
+RESTORE_SNAPSHOT="$BUILD_DIR/restore.snapshot.json"
+RESTORE_CAPTURE="$BUILD_DIR/restore.framebuffer.ppm"
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
-rm -f "$LOG_PATH" "$ERR_PATH" "$PID_PATH" "$WINDOW_ENV" "$CAPTURE_PATH" "$CAPTURE_METRICS" "$REPORT_PATH"
+rm -f "$LOG_PATH" "$ERR_PATH" "$BUILD_LOG" "$SNAPSHOT_LIVE" "$CAPTURE_LIVE" \
+    "$COMMAND_PATH" "$WINDOW_ENV" "$WINDOW_PNG" "$GLYPH_RGB" \
+    "$WINDOW_GLYPH_RGB" "$EVIDENCE_ENV" "$CALIBRATION_RGB" "$REPORT_PATH" \
+    "$BASELINE_SNAPSHOT" "$BASELINE_CAPTURE" "$INPUT_SNAPSHOT" "$INPUT_CAPTURE" \
+    "$MOVE_SNAPSHOT" "$MOVE_CAPTURE" "$MAXIMIZE_SNAPSHOT" "$MAXIMIZE_CAPTURE" \
+    "$RESTORE_SNAPSHOT" "$RESTORE_CAPTURE"
 
-GUI_BIN="${GUI_BIN:-}"
-GUI_BIN_SOURCE="${GUI_BIN_SOURCE:-explicit-env}"
-if [ "$GUI_BIN" = "" ]; then
-    GUI_BIN_SOURCE="repo-gui-driver-fallback"
-    for candidate in \
-        "src/compiler_rust/target/gui/debug/simple" \
-        "src/compiler_rust/target/gui/release/simple" \
-        "src/compiler_rust/target/debug/simple" \
-        "src/compiler_rust/target/release/simple"
-    do
-        if [ -x "$candidate" ] && LC_ALL=C grep -aq "rt_winit_event_loop_new" "$candidate"; then
-            GUI_BIN="$candidate"
-            break
-        fi
-    done
-fi
+sha256_file() {
+    sha256sum "$1" | awk '{print $1}'
+}
 
-emit_report() {
-    status="$1"
-    reason="$2"
-    window_marker="$3"
-    frame_marker="$4"
-    capture_status="${5:-not-run}"
-    event_status="${6:-not-run}"
+artifact_status() {
+    if [ -s "$1" ]; then printf present; else printf missing; fi
+}
+
+emit() {
+    status=$1 reason=$2
     {
-        echo "# Linux Hosted WM Live Window Evidence"
+        echo "linux_hosted_wm_live_window_status=$status"
+        echo "linux_hosted_wm_live_window_reason=$reason"
+        echo "linux_hosted_wm_live_window_simple_bin=$SIMPLE_BIN"
+        echo "linux_hosted_wm_live_window_simple_bin_sha256=$simple_bin_sha"
+        echo "linux_hosted_wm_live_window_native_artifact=$HOSTED_BIN"
+        echo "linux_hosted_wm_live_window_source_revision=$source_revision"
+        echo "linux_hosted_wm_live_window_source_diff_sha256=$source_diff_sha"
+        echo "linux_hosted_wm_live_window_entry_sha256=$entry_sha"
+        echo "linux_hosted_wm_live_window_engine2d_sha256=$engine_sha"
+        echo "linux_hosted_wm_live_window_wrapper_sha256=$wrapper_sha"
+        echo "linux_hosted_wm_live_window_native_artifact_sha256=$hosted_bin_sha"
+        echo "linux_hosted_wm_live_window_window_marker=$window_marker"
+        echo "linux_hosted_wm_live_window_frame_marker=$frame_marker"
+        echo "linux_hosted_wm_live_window_font_identity=$font_identity"
+        echo "linux_hosted_wm_live_window_font_asset_sha256=$font_sha"
+        echo "linux_hosted_wm_live_window_framebuffer_status=$framebuffer_status"
+        echo "linux_hosted_wm_live_window_live_window_status=$window_status"
+        echo "linux_hosted_wm_live_window_glyph_crop_status=$glyph_status"
+        echo "linux_hosted_wm_live_window_glyph_crop_sha256=$glyph_sha"
+        echo "linux_hosted_wm_live_window_glyph_crop_expected_sha256=$GLYPH_RGB_SHA256"
+        echo "linux_hosted_wm_live_window_glyph_crop_live_match=$live_glyph_match"
+        echo "linux_hosted_wm_live_window_deliberate_red_status=$calibration_status"
+        echo "linux_hosted_wm_live_window_focus_status=$focus_status"
+        echo "linux_hosted_wm_live_window_pointer_status=$pointer_status"
+        echo "linux_hosted_wm_live_window_keyboard_status=$keyboard_status"
+        echo "linux_hosted_wm_live_window_move_status=$move_status"
+        echo "linux_hosted_wm_live_window_maximize_status=$maximize_status"
+        echo "linux_hosted_wm_live_window_restore_status=$restore_status"
+        echo "linux_hosted_wm_live_window_frame_correlation_status=$frame_status"
+        echo "linux_hosted_wm_live_window_baseline_nonce=1"
+        echo "linux_hosted_wm_live_window_baseline_revision=$baseline_revision"
+        echo "linux_hosted_wm_live_window_baseline_frame_checksum=$baseline_frame_checksum"
+        echo "linux_hosted_wm_live_window_baseline_capture_sha256=$baseline_capture_sha"
+        echo "linux_hosted_wm_live_window_baseline_snapshot=$BASELINE_SNAPSHOT"
+        echo "linux_hosted_wm_live_window_baseline_capture=$BASELINE_CAPTURE"
+        echo "linux_hosted_wm_live_window_input_nonce=2"
+        echo "linux_hosted_wm_live_window_input_revision=$input_revision"
+        echo "linux_hosted_wm_live_window_input_frame_checksum=$input_frame_checksum"
+        echo "linux_hosted_wm_live_window_input_capture_sha256=$input_capture_sha"
+        echo "linux_hosted_wm_live_window_input_snapshot=$INPUT_SNAPSHOT"
+        echo "linux_hosted_wm_live_window_input_capture=$INPUT_CAPTURE"
+        echo "linux_hosted_wm_live_window_maximize_nonce=4"
+        echo "linux_hosted_wm_live_window_maximize_revision=$max_revision"
+        echo "linux_hosted_wm_live_window_maximize_frame_checksum=$maximize_frame_checksum"
+        echo "linux_hosted_wm_live_window_maximize_capture_sha256=$maximize_capture_sha"
+        echo "linux_hosted_wm_live_window_maximize_snapshot=$MAXIMIZE_SNAPSHOT"
+        echo "linux_hosted_wm_live_window_maximize_capture=$MAXIMIZE_CAPTURE"
+        echo "linux_hosted_wm_live_window_restore_nonce=5"
+        echo "linux_hosted_wm_live_window_restore_revision=$restore_revision"
+        echo "linux_hosted_wm_live_window_restore_frame_checksum=$restore_frame_checksum"
+        echo "linux_hosted_wm_live_window_restore_capture_sha256=$restore_capture_sha"
+        echo "linux_hosted_wm_live_window_restore_snapshot=$RESTORE_SNAPSHOT"
+        echo "linux_hosted_wm_live_window_restore_capture=$RESTORE_CAPTURE"
+        echo "linux_hosted_wm_live_window_compatibility_fallback_status=$fallback_status"
+        echo "linux_hosted_wm_live_window_window_png=$(artifact_status "$WINDOW_PNG")"
+        echo "linux_hosted_wm_live_window_framebuffer_ppm=$(artifact_status "$CAPTURE_LIVE")"
+        echo "linux_hosted_wm_live_window_snapshot=$(artifact_status "$SNAPSHOT_LIVE")"
+    } >"$EVIDENCE_ENV"
+    {
+        echo "# Linux Hosted WM Live Font and Event Evidence"
         echo
         echo "- status: $status"
         echo "- reason: $reason"
-        echo "- gui_bin: $GUI_BIN"
-        echo "- gui_bin_source: $GUI_BIN_SOURCE"
-        echo "- entry: src/os/hosted/hosted_entry.spl"
-        echo "- window_marker: $window_marker"
-        echo "- frame_marker: $frame_marker"
-        echo "- capture_status: $capture_status"
-        echo "- event_status: $event_status"
-        echo "- force_x11: $FORCE_X11"
-        echo "- capture_png: $CAPTURE_PATH"
-        echo "- capture_metrics: $CAPTURE_METRICS"
-        echo "- stdout: $LOG_PATH"
-        echo "- stderr: $ERR_PATH"
+        echo "- route: SharedWmScene -> DrawIrComposition -> Engine2D -> winit"
+        echo "- source revision/diff: $source_revision / $source_diff_sha"
+        echo "- pure-Simple compiler SHA-256: ${simple_bin_sha:--}"
+        echo "- native artifact SHA-256: ${hosted_bin_sha:--}"
+        echo "- wrapper SHA-256: ${wrapper_sha:--}"
+        echo "- font identity: ${font_identity:--}"
+        echo "- glyph crop: $GLYPH_RGB (${glyph_sha:--})"
+        echo "- live window: $WINDOW_PNG"
+        echo "- framebuffer: $CAPTURE_LIVE"
+        echo "- events: focus=$focus_status pointer=$pointer_status keyboard=$keyboard_status move=$move_status maximize=$maximize_status restore=$restore_status"
+        echo "- frame correlation: $frame_status"
+        echo "- retained nonce/revision/readback: baseline=1/$baseline_revision/$baseline_frame_checksum input=2/$input_revision/$input_frame_checksum maximize=4/$max_revision/$maximize_frame_checksum restore=5/$restore_revision/$restore_frame_checksum"
+        echo "- compatibility fallback: $fallback_status"
     } >"$REPORT_PATH"
-    echo "linux_hosted_wm_live_window_status=$status"
-    echo "linux_hosted_wm_live_window_reason=$reason"
-    echo "linux_hosted_wm_live_window_gui_bin=$GUI_BIN"
-    echo "linux_hosted_wm_live_window_gui_bin_source=$GUI_BIN_SOURCE"
-    echo "linux_hosted_wm_live_window_entry=src/os/hosted/hosted_entry.spl"
-    echo "linux_hosted_wm_live_window_window_marker=$window_marker"
-    echo "linux_hosted_wm_live_window_frame_marker=$frame_marker"
-    echo "linux_hosted_wm_live_window_capture_status=$capture_status"
-    echo "linux_hosted_wm_live_window_event_status=$event_status"
-    echo "linux_hosted_wm_live_window_force_x11=$FORCE_X11"
-    echo "linux_hosted_wm_live_window_capture_png=$CAPTURE_PATH"
-    echo "linux_hosted_wm_live_window_capture_metrics=$CAPTURE_METRICS"
-    echo "linux_hosted_wm_live_window_report_path=$REPORT_PATH"
+    cat "$EVIDENCE_ENV"
 }
-
-if [ "$GUI_BIN" = "" ]; then
-    emit_report "unavailable" "missing-gui-enabled-driver" "fail" "fail" "not-run" "not-run"
-    exit 1
-fi
-
-set +e
-if [ "$FORCE_X11" = "1" ]; then
-    env WAYLAND_DISPLAY= WINIT_UNIX_BACKEND=x11 SIMPLE_HOSTED_WM_LIVE_PROOF=1 SIMPLE_LIB="${SIMPLE_LIB:-src}" "$GUI_BIN" run src/os/hosted/hosted_entry.spl >"$LOG_PATH" 2>"$ERR_PATH" &
-else
-    SIMPLE_HOSTED_WM_LIVE_PROOF=1 SIMPLE_LIB="${SIMPLE_LIB:-src}" "$GUI_BIN" run src/os/hosted/hosted_entry.spl >"$LOG_PATH" 2>"$ERR_PATH" &
-fi
-run_pid=$!
-echo "$run_pid" >"$PID_PATH"
-deadline=$(($(date +%s) + TIMEOUT_SECS))
-while kill -0 "$run_pid" >/dev/null 2>&1 && [ "$(date +%s)" -lt "$deadline" ]; do
-    if grep -Fq "[hosted-wm] warmup-frames-presented count=12" "$LOG_PATH" 2>/dev/null; then
-        break
-    fi
-    sleep 1
-done
-set -e
 
 window_marker=fail
 frame_marker=fail
-if grep -Fq "[hosted-wm] window-created backend=winit mode=windowed fullscreen=false width=1024 height=720 title=SimpleOS Shared Hosted WM" "$LOG_PATH"; then
-    window_marker=pass
+font_identity=""
+font_sha=""
+framebuffer_status=fail
+window_status=fail
+glyph_status=fail
+glyph_sha=""
+live_glyph_match=false
+calibration_status=fail
+focus_status=fail
+pointer_status=fail
+keyboard_status=fail
+move_status=fail
+maximize_status=fail
+restore_status=fail
+frame_status=fail
+fallback_status=fail
+baseline_revision=""
+baseline_frame_checksum=""
+baseline_capture_sha=""
+input_revision=""
+input_frame_checksum=""
+input_capture_sha=""
+move_revision=""
+move_frame_checksum=""
+move_capture_sha=""
+max_revision=""
+maximize_frame_checksum=""
+maximize_capture_sha=""
+restore_revision=""
+restore_frame_checksum=""
+restore_capture_sha=""
+last_issue_ack=""
+issue_nonce=""
+issue_phase=""
+source_revision="$(git rev-parse HEAD 2>/dev/null || printf unavailable)"
+source_diff_sha="$(git diff --binary -- "$ENTRY" src/os/compositor/compositor_engine2d.spl | sha256sum | awk '{print $1}')"
+entry_sha="$(sha256_file "$ENTRY")"
+engine_sha="$(sha256_file src/os/compositor/compositor_engine2d.spl)"
+simple_bin_sha=""
+wrapper_sha="$(sha256_file "$0")"
+hosted_bin_sha=""
+
+for command in jq xdotool import convert sha256sum cargo Xvfb; do
+    command -v "$command" >/dev/null 2>&1 || {
+        emit unavailable "missing-command-$command"
+        exit 1
+    }
+done
+
+if [ ! -x "$SIMPLE_BIN" ] || [ ! -s "$RUNTIME_LIB" ]; then
+    emit unavailable missing-pure-simple-or-runtime
+    exit 1
 fi
-if grep -Fq "[hosted-wm] frame-presented renderer=simple-web host=linux-windowed width=1024 height=720" "$LOG_PATH"; then
-    frame_marker=pass
+simple_bin_sha="$(sha256_file "$SIMPLE_BIN")"
+case "$("$SIMPLE_BIN" --version 2>&1 | tr '[:upper:]' '[:lower:]')" in
+    *rust-built*|*rust*seed*|*bootstrap*seed*)
+        emit fail rust-seed-forbidden
+        exit 1
+        ;;
+esac
+
+font_sha="$(sha256_file "$FONT_ASSET" 2>/dev/null || true)"
+if [ "$font_sha" != "$FONT_ASSET_SHA256" ]; then
+    emit fail pinned-font-asset-invalid
+    exit 1
 fi
 
-capture_status=unavailable
-event_status=fail
-if command -v xdotool >/dev/null 2>&1 && command -v import >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
-    window_id=""
-    for _ in $(seq 1 20); do
-        window_id="$(xdotool search --name 'SimpleOS Shared Hosted WM' 2>/dev/null | tail -n 1 || true)"
-        [ "$window_id" != "" ] && break
-        sleep 1
-    done
-    if [ "$window_id" != "" ]; then
-        xdotool getwindowgeometry --shell "$window_id" >"$WINDOW_ENV" 2>/dev/null || true
-        xdotool windowactivate --sync "$window_id" >/dev/null 2>&1 || true
-        xdotool windowfocus --sync "$window_id" >/dev/null 2>&1 || true
-        abs_x="$(sed -n 's/^X=//p' "$WINDOW_ENV" | tail -n 1)"
-        abs_y="$(sed -n 's/^Y=//p' "$WINDOW_ENV" | tail -n 1)"
-        event_x=$((${abs_x:-0} + 110))
-        event_y=$((${abs_y:-0} + 95))
-        xdotool mousemove "$event_x" "$event_y" >/dev/null 2>&1 || true
-        xdotool click 1 >/dev/null 2>&1 || true
-        xdotool mousedown 1 mouseup 1 >/dev/null 2>&1 || true
-        xdotool key --clearmodifiers a >/dev/null 2>&1 || true
-        xdotool key --clearmodifiers Tab >/dev/null 2>&1 || true
-        for _ in $(seq 1 10); do
-            if grep -Fq "[hosted-wm] event mouse_move" "$LOG_PATH" \
-                && grep -Fq "[hosted-wm] event mouse_button" "$LOG_PATH" \
-                && grep -Fq "[hosted-wm] event key" "$LOG_PATH"; then
-                break
-            fi
-            sleep 0.5
-        done
-        import -window "$window_id" "$CAPTURE_PATH" >/dev/null 2>&1 || true
-        sleep 1
-        if grep -Fq "[hosted-wm] event mouse_move" "$LOG_PATH" \
-            && grep -Fq "[hosted-wm] event focus" "$LOG_PATH"; then
-            event_status=pass
-        fi
-        if [ -s "$CAPTURE_PATH" ]; then
-            colors="$(convert "$CAPTURE_PATH" -format %k info: 2>/dev/null || echo 0)"
-            blue="$(convert "$CAPTURE_PATH" -format '%[pixel:p{70,86}]' info: 2>/dev/null || echo none)"
-            body="$(convert "$CAPTURE_PATH" -format '%[pixel:p{70,112}]' info: 2>/dev/null || echo none)"
-            close="$(convert "$CAPTURE_PATH" -format '%[pixel:p{225,86}]' info: 2>/dev/null || echo none)"
-            {
-                echo "window_id=$window_id"
-                cat "$WINDOW_ENV" 2>/dev/null || true
-                echo "unique_colors=$colors"
-                echo "sample_titlebar=$blue"
-                echo "sample_body=$body"
-                echo "sample_close=$close"
-            } >"$CAPTURE_METRICS"
-            if [ "${colors:-0}" -ge 8 ] \
-                && grep -Fq "WIDTH=1024" "$WINDOW_ENV" \
-                && grep -Fq "HEIGHT=720" "$WINDOW_ENV" \
-                && [ "$blue" != "$body" ] \
-                && [ "$blue" != "srgb(15,23,42)" ]; then
-                capture_status=pass
-            else
-                capture_status=fail
-            fi
-        else
-            capture_status=fail
-        fi
-    else
-        capture_status=unavailable-no-x11-window
+if [ ! -s "$WINT_LIB" ] || find src/runtime/spl_winit/src -type f -newer "$WINT_LIB" -print -quit | grep -q .; then
+    cargo build --manifest-path src/runtime/spl_winit/Cargo.toml --release >"$BUILD_DIR/spl-winit-build.log" 2>&1 || {
+        emit fail spl-winit-build-failed
+        exit 1
+    }
+fi
+
+SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB=src timeout -k 10 "$BUILD_TIMEOUT_SECS" "$SIMPLE_BIN" native-build \
+    --source "$ENTRY" --entry "$ENTRY" --entry-closure --strip \
+    --backend cranelift --cache-dir "$BUILD_DIR/native-cache" --mode dynload \
+    --output "$HOSTED_BIN" >"$BUILD_LOG" 2>&1 || {
+        emit fail production-native-build-failed
+        exit 1
+    }
+[ -x "$HOSTED_BIN" ] || {
+    emit fail production-native-artifact-missing
+    exit 1
+}
+hosted_bin_sha="$(sha256_file "$HOSTED_BIN")"
+
+x_display=""
+for display_number in 91 92 93 94 95 96 97 98 99; do
+    if [ ! -e "/tmp/.X11-unix/X$display_number" ]; then
+        x_display=":$display_number"
+        break
     fi
+done
+[ "$x_display" != "" ] || {
+    emit unavailable no-free-x-display
+    exit 1
+}
+
+Xvfb "$x_display" -screen 0 1280x900x24 -nolisten tcp >"$BUILD_DIR/xvfb.log" 2>&1 &
+xvfb_pid=$!
+wm_pid=""
+cleanup() {
+    if [ "$wm_pid" != "" ]; then
+        kill "$wm_pid" 2>/dev/null || true
+        wait "$wm_pid" 2>/dev/null || true
+    fi
+    kill "$xvfb_pid" 2>/dev/null || true
+    wait "$xvfb_pid" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+sleep 1
+
+printf '0 idle\n' >"$COMMAND_PATH"
+DISPLAY="$x_display" WAYLAND_DISPLAY= WINIT_UNIX_BACKEND=x11 \
+SIMPLE_HOSTED_WM_LIVE_PROOF=1 SIMPLE_WM_EVIDENCE_SNAPSHOT_PATH="$ROOT_DIR/$SNAPSHOT_LIVE" \
+SIMPLE_WM_EVIDENCE_CAPTURE_PATH="$ROOT_DIR/$CAPTURE_LIVE" \
+SIMPLE_WM_EVIDENCE_INPUT_FIFO="$ROOT_DIR/$COMMAND_PATH" \
+LD_PRELOAD="$ROOT_DIR/$WINT_LIB:$ROOT_DIR/$RUNTIME_LIB${LD_PRELOAD:+:$LD_PRELOAD}" \
+    "$HOSTED_BIN" >"$LOG_PATH" 2>"$ERR_PATH" &
+wm_pid=$!
+
+now_ms() {
+    date +%s%3N
+}
+
+wait_until() {
+    predicate=$1
+    started="$(now_ms)"
+    while :; do
+        if eval "$predicate"; then return 0; fi
+        kill -0 "$wm_pid" 2>/dev/null || return 1
+        [ $(( $(now_ms) - started )) -lt $((TIMEOUT_SECS * 1000)) ] || return 1
+        sleep 0.05
+    done
+}
+
+event_count() {
+    sed -n "s/.*\\[hosted-wm\\] event $1 count=\\([0-9][0-9]*\\).*/\\1/p" "$LOG_PATH" | tail -n 1
+}
+
+native_events_advanced() {
+    focus_now="$(event_count focus)"
+    move_now="$(event_count mouse_move)"
+    button_now="$(event_count mouse_button)"
+    key_now="$(event_count key)"
+    [ "${focus_now:-0}" -gt "$focus_before" ] \
+        && [ "${move_now:-0}" -gt "$move_before" ] \
+        && [ "${button_now:-0}" -ge $((button_before + 2)) ] \
+        && [ "${key_now:-0}" -gt "$key_before" ] \
+        && sed -n '/\[hosted-wm\] event mouse_button /p' "$LOG_PATH" | tail -n 2 | grep -Fq 'button=0 pressed=true' \
+        && sed -n '/\[hosted-wm\] event mouse_button /p' "$LOG_PATH" | tail -n 1 | grep -Fq 'button=0 pressed=false'
+}
+
+native_window_move_advanced() {
+    window_move_now="$(event_count window-moved)"
+    [ "${window_move_now:-0}" -gt "$window_move_before" ] \
+        && sed -n '/\[hosted-wm\] event window-moved /p' "$LOG_PATH" | tail -n 1 | grep -Fq 'x=80 y=60 mode=windowed'
+}
+
+evidence_ack_ready() {
+    jq -e ".input.nonce == $issue_nonce and .input.phase == \"$issue_phase\"" "$SNAPSHOT_LIVE" >/dev/null 2>&1 || return 1
+    last_issue_ack="$(sed -n "/^\\[hosted-wm\\] evidence-ack nonce=$issue_nonce phase=$issue_phase /p" "$LOG_PATH" | tail -n 1)"
+    case "$last_issue_ack" in
+        *" revision="*";source="*";checksum="*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+issue() {
+    issue_nonce=$1
+    action=$2
+    if [ "$action" = snapshot ]; then issue_phase=snapshot-only; else issue_phase=applied; fi
+    printf '%s %s\n' "$issue_nonce" "$action" >"$COMMAND_PATH"
+    wait_until evidence_ack_ready
+}
+
+retain_phase() {
+    label=$1
+    nonce=$2
+    phase=$3
+    snapshot_path=$4
+    capture_path=$5
+    revision="$(jq -r '.compositor.render_revision' "$SNAPSHOT_LIVE")"
+    case "$last_issue_ack" in
+        *" revision=$revision "*";checksum="*) ;;
+        *) return 1 ;;
+    esac
+    frame_checksum="$(printf '%s\n' "$last_issue_ack" | sed -n 's/.*;checksum=\([0-9][0-9]*\) identity=.*/\1/p')"
+    [ "$frame_checksum" != "" ] || return 1
+    jq -e --argjson nonce "$nonce" --argjson revision "$revision" \
+        --arg phase "$phase" \
+        '.input.nonce == $nonce and .input.phase == $phase and
+         .compositor.render_revision == $revision and
+         .render.fallback_used == false and
+         .render.readback == "presented-pixel-buffer"' \
+        "$SNAPSHOT_LIVE" >/dev/null || return 1
+    [ -s "$CAPTURE_LIVE" ] || return 1
+    [ "$(convert "$CAPTURE_LIVE" -format '%w %h' info:)" = "1024 720" ] || return 1
+    cp "$SNAPSHOT_LIVE" "$snapshot_path"
+    cp "$CAPTURE_LIVE" "$capture_path"
+    capture_sha="$(sha256_file "$capture_path")"
+    case "$label" in
+        baseline)
+            baseline_revision=$revision
+            baseline_frame_checksum=$frame_checksum
+            baseline_capture_sha=$capture_sha
+            ;;
+        input)
+            input_revision=$revision
+            input_frame_checksum=$frame_checksum
+            input_capture_sha=$capture_sha
+            ;;
+        move)
+            move_revision=$revision
+            move_frame_checksum=$frame_checksum
+            move_capture_sha=$capture_sha
+            ;;
+        maximize)
+            max_revision=$revision
+            maximize_frame_checksum=$frame_checksum
+            maximize_capture_sha=$capture_sha
+            ;;
+        restore)
+            restore_revision=$revision
+            restore_frame_checksum=$frame_checksum
+            restore_capture_sha=$capture_sha
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+wait_until "grep -Fq '[hosted-wm] evidence-ready nonce=0 phase=presented' '$LOG_PATH' && grep -Fq '[hosted-wm] warmup-frames-presented count=12' '$LOG_PATH' && [ -s '$CAPTURE_LIVE' ]" || {
+    emit fail live-window-readiness-timeout
+    exit 1
+}
+
+grep -Fq '[hosted-wm] window-created backend=winit mode=windowed fullscreen=false width=1024 height=720 title=SimpleOS Shared Hosted WM' "$LOG_PATH" && window_marker=pass
+frame_line="$(sed -n '/^\[hosted-wm\] frame-presented renderer=engine2d-draw-ir /p' "$LOG_PATH" | tail -n 1)"
+case "$frame_line" in
+    *"route=shared-wm-scene-draw-ir"*"host=linux-windowed"*"fallback=false"*"identity="*)
+        frame_marker=pass
+        ;;
+esac
+font_identity="$(printf '%s\n' "$frame_line" | sed -n 's/.* identity=\([^ ;]*\).*/\1/p')"
+if [ "$font_identity" = "" ] || [ "$font_identity" = bitmap-default ]; then
+    emit fail selected-font-identity-missing
+    exit 1
 fi
 
-kill "$run_pid" >/dev/null 2>&1 || true
-wait "$run_pid" >/dev/null 2>&1 || true
+window_id="$(DISPLAY="$x_display" xdotool search --sync --name 'SimpleOS Shared Hosted WM' 2>/dev/null | tail -n 1)"
+[ "$window_id" != "" ] || {
+    emit fail live-x11-window-missing
+    exit 1
+}
+DISPLAY="$x_display" xdotool getwindowgeometry --shell "$window_id" >"$WINDOW_ENV"
+DISPLAY="$x_display" import -window "$window_id" "$WINDOW_PNG"
+if [ -s "$WINDOW_PNG" ] && grep -Fq WIDTH=1024 "$WINDOW_ENV" && grep -Fq HEIGHT=720 "$WINDOW_ENV"; then
+    window_status=pass
+fi
+if [ -s "$CAPTURE_LIVE" ] && [ "$(convert "$CAPTURE_LIVE" -format '%w %h' info:)" = "1024 720" ]; then
+    framebuffer_status=pass
+fi
 
-if [ "$window_marker" = pass ] && [ "$frame_marker" = pass ] && [ "$capture_status" = pass ] && [ "$event_status" = pass ]; then
-    emit_report "pass" "linux-windowed-real-capture-and-events" "$window_marker" "$frame_marker" "$capture_status" "$event_status"
+# The live-proof Terminal title is fixed at 58+66, 76+8. Compare the exact
+# production framebuffer crop with the pixels presented by the real X11 window.
+convert "$CAPTURE_LIVE" -crop 60x18+122+82 +repage -depth 8 "rgb:$GLYPH_RGB"
+convert "$WINDOW_PNG" -crop 60x18+122+82 +repage -depth 8 "rgb:$WINDOW_GLYPH_RGB"
+glyph_sha="$(sha256_file "$GLYPH_RGB")"
+if cmp -s "$GLYPH_RGB" "$WINDOW_GLYPH_RGB"; then live_glyph_match=true; fi
+if [ "$GLYPH_RGB_SHA256" = pending ]; then
+    emit fail "glyph-oracle-pending-$glyph_sha"
+    exit 1
+fi
+if [ "$glyph_sha" = "$GLYPH_RGB_SHA256" ] && [ "$live_glyph_match" = true ]; then
+    glyph_status=pass
+fi
+cp "$GLYPH_RGB" "$CALIBRATION_RGB"
+printf '\377' | dd of="$CALIBRATION_RGB" bs=1 seek=0 conv=notrunc 2>/dev/null
+if [ "$(sha256_file "$CALIBRATION_RGB")" != "$GLYPH_RGB_SHA256" ]; then
+    calibration_status=pass
+fi
+
+issue 1 snapshot && retain_phase baseline 1 snapshot-only "$BASELINE_SNAPSHOT" "$BASELINE_CAPTURE" || {
+    emit fail baseline-evidence-ack-or-capture-missing
+    exit 1
+}
+initial_revision="$baseline_revision"
+initial_focus="$(jq -r '.compositor.windows[] | select(.focused == true) | .id' "$SNAPSHOT_LIVE")"
+focus_before="${focus_before:-$(event_count focus)}"
+move_before="${move_before:-$(event_count mouse_move)}"
+button_before="${button_before:-$(event_count mouse_button)}"
+key_before="${key_before:-$(event_count key)}"
+window_move_before="${window_move_before:-$(event_count window-moved)}"
+focus_before="${focus_before:-0}"
+move_before="${move_before:-0}"
+button_before="${button_before:-0}"
+key_before="${key_before:-0}"
+window_move_before="${window_move_before:-0}"
+abs_x="$(sed -n 's/^X=//p' "$WINDOW_ENV")"
+abs_y="$(sed -n 's/^Y=//p' "$WINDOW_ENV")"
+
+DISPLAY="$x_display" xdotool windowfocus --sync "$window_id"
+DISPLAY="$x_display" xdotool mousemove $((abs_x + 150)) $((abs_y + 100))
+DISPLAY="$x_display" xdotool click 1
+DISPLAY="$x_display" xdotool key --clearmodifiers Tab
+wait_until native_events_advanced || {
+    emit fail native-input-event-timeout
+    exit 1
+}
+issue 2 snapshot && retain_phase input 2 snapshot-only "$INPUT_SNAPSHOT" "$INPUT_CAPTURE" || {
+    emit fail input-evidence-ack-or-capture-missing
+    exit 1
+}
+input_focus="$(jq -r '.compositor.windows[] | select(.focused == true) | .id' "$SNAPSHOT_LIVE")"
+pointer_x="$(jq -r '.compositor.pointer_x' "$SNAPSHOT_LIVE")"
+pointer_y="$(jq -r '.compositor.pointer_y' "$SNAPSHOT_LIVE")"
+[ "$input_focus" != "$initial_focus" ] && keyboard_status=pass
+[ "$pointer_x" -gt 0 ] && [ "$pointer_y" -gt 0 ] && pointer_status=pass
+focus_status=pass
+
+DISPLAY="$x_display" xdotool windowmove "$window_id" 80 60
+wait_until native_window_move_advanced || {
+    emit fail native-window-move-timeout
+    exit 1
+}
+issue 3 snapshot && retain_phase move 3 snapshot-only "$MOVE_SNAPSHOT" "$MOVE_CAPTURE" || {
+    emit fail move-evidence-ack-or-capture-missing
+    exit 1
+}
+if [ "$(jq -r '.surface.geometry.x' "$SNAPSHOT_LIVE")" = 80 ] && [ "$(jq -r '.surface.geometry.y' "$SNAPSHOT_LIVE")" = 60 ]; then
+    move_status=pass
+fi
+
+pre_max="$(jq -cS '.compositor.windows' "$SNAPSHOT_LIVE")"
+focused_id="$(jq -r '.compositor.windows[] | select(.focused == true) | .id' "$SNAPSHOT_LIVE")"
+issue 4 maximize && retain_phase maximize 4 applied "$MAXIMIZE_SNAPSHOT" "$MAXIMIZE_CAPTURE" || {
+    emit fail maximize-evidence-ack-or-capture-missing
+    exit 1
+}
+if jq -e --argjson id "$focused_id" '.compositor.windows[] | select(.id == $id) | .maximized == true' "$SNAPSHOT_LIVE" >/dev/null; then
+    maximize_status=pass
+fi
+issue 5 restore && retain_phase restore 5 applied "$RESTORE_SNAPSHOT" "$RESTORE_CAPTURE" || {
+    emit fail restore-evidence-ack-or-capture-missing
+    exit 1
+}
+if [ "$(jq -cS '.compositor.windows' "$SNAPSHOT_LIVE")" = "$pre_max" ]; then
+    restore_status=pass
+fi
+if [ "$initial_revision" -lt "$input_revision" ] \
+    && [ "$input_revision" -lt "$max_revision" ] \
+    && [ "$max_revision" -lt "$restore_revision" ] \
+    && [ "$baseline_frame_checksum" != "" ] \
+    && [ "$input_frame_checksum" != "" ] \
+    && [ "$move_frame_checksum" != "" ] \
+    && [ "$maximize_frame_checksum" != "" ] \
+    && [ "$restore_frame_checksum" != "" ] \
+    && [ "$(sha256_file "$BASELINE_CAPTURE")" = "$baseline_capture_sha" ] \
+    && [ "$(sha256_file "$INPUT_CAPTURE")" = "$input_capture_sha" ] \
+    && [ "$(sha256_file "$MOVE_CAPTURE")" = "$move_capture_sha" ] \
+    && [ "$(sha256_file "$MAXIMIZE_CAPTURE")" = "$maximize_capture_sha" ] \
+    && [ "$(sha256_file "$RESTORE_CAPTURE")" = "$restore_capture_sha" ] \
+    && [ "$maximize_capture_sha" != "$move_capture_sha" ] \
+    && [ "$restore_capture_sha" = "$move_capture_sha" ]; then
+    frame_status=pass
+fi
+if ! grep -Fq '[hosted-wm] draw-ir-rejected' "$LOG_PATH" && grep -Fq 'fallback=false' "$LOG_PATH"; then
+    fallback_status=pass
+fi
+
+if [ "$window_marker" = pass ] && [ "$frame_marker" = pass ] \
+    && [ "$framebuffer_status" = pass ] && [ "$window_status" = pass ] \
+    && [ "$glyph_status" = pass ] && [ "$calibration_status" = pass ] \
+    && [ "$focus_status" = pass ] && [ "$pointer_status" = pass ] \
+    && [ "$keyboard_status" = pass ] && [ "$move_status" = pass ] \
+    && [ "$maximize_status" = pass ] && [ "$restore_status" = pass ] \
+    && [ "$frame_status" = pass ] && [ "$fallback_status" = pass ]; then
+    emit pass linux-live-engine2d-pinned-font-and-events
     exit 0
 fi
 
-emit_report "fail" "missing-real-capture-or-event-evidence" "$window_marker" "$frame_marker" "$capture_status" "$event_status"
+emit fail live-font-or-event-evidence-incomplete
 exit 1

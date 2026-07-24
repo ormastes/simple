@@ -7,6 +7,13 @@ const { app, BrowserWindow } = require('electron');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const crypto = require('crypto');
+const { pathToFileURL } = require('url');
+
+const FONT_TEXT = 'WEB';
+const FONT_COMPOSITION_ID = 'html-layout';
+const FONT_IDENTITY = 'sha256=2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081;axes=wght=400,wdth=100';
+const EXPECTED_RUN_ID = process.env.SIMPLE_WEB_FONT_RUN_ID || '';
 
 app.commandLine.appendSwitch('force-color-profile', 'srgb');
 app.disableHardwareAcceleration();
@@ -15,13 +22,56 @@ function escapeScriptEnd(source) {
   return String(source || '').replace(/<\/script/gi, '<\\/script');
 }
 
-function makeHtml(root) {
+function loadCompositionReceipt(root) {
+  if (!/^[A-Za-z0-9._:-]+$/.test(EXPECTED_RUN_ID)) {
+    throw new Error('missing or invalid SIMPLE_WEB_FONT_RUN_ID');
+  }
+  const receiptPath = process.env.SIMPLE_WEB_FONT_COMPOSITION_RECEIPT ||
+    path.join(root, 'build/test-artifacts/simple-web-font-composition/receipt.env');
+  const fields = Object.fromEntries(
+    fs.readFileSync(receiptPath, 'utf8').split(/\r?\n/).filter(Boolean).map(line => {
+      const split = line.indexOf('=');
+      return [line.slice(0, split), line.slice(split + 1)];
+    })
+  );
+  if (fields.schema !== 'simple-web-font-composition-v1' ||
+      fields.status !== 'pass' ||
+      fields.run_id !== EXPECTED_RUN_ID ||
+      fields.producer !== 'pure-simple-html-webir-drawir-engine2d' ||
+      fields.composition_id !== FONT_COMPOSITION_ID ||
+      fields.text !== FONT_TEXT ||
+      fields.font_identity !== FONT_IDENTITY) {
+    throw new Error('invalid Simple Web font composition receipt');
+  }
+  const artifactPath = path.resolve(root, fields.pixel_artifact_path || '');
+  const artifactBytes = fs.readFileSync(artifactPath);
+  const artifact = JSON.parse(artifactBytes.toString('utf8'));
+  const checksum = artifact.pixels.reduce(
+    (sum, pixel, index) => (sum + Number(pixel) * (index + 1)) % 2147483647, 0
+  );
+  const sha256 = crypto.createHash('sha256').update(artifactBytes).digest('hex');
+  if (artifact.producer !== fields.producer ||
+      artifact.format !== 'argb-u32' ||
+      artifact.width !== Number(fields.viewport_width) ||
+      artifact.height !== Number(fields.viewport_height) ||
+      artifact.pixels.length !== Number(fields.pixel_count) ||
+      checksum !== Number(fields.pixel_checksum) ||
+      artifactBytes.length !== Number(fields.pixel_artifact_size_bytes) ||
+      sha256 !== fields.pixel_artifact_sha256) {
+    throw new Error('invalid Simple Web font composition artifact');
+  }
+  return { ...fields, receipt_path: receiptPath, artifact_path: artifactPath };
+}
+
+function makeHtml(root, receipt) {
   const wmJs = fs.readFileSync(path.join(root, 'src/app/ui.web/wm.js'), 'utf8');
+  const fontUrl = pathToFileURL(path.join(root, 'assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf')).href;
   return `<!doctype html>
 <html>
 <head>
   <meta charset="utf-8">
   <style>
+    @font-face { font-family: SimplePinnedMono; src: url('${fontUrl}') format('truetype'); font-style: normal; font-weight: 400; }
     html, body { margin: 0; width: 800px; height: 600px; background: #f8fafc; }
     #wm-desktop { position: relative; width: 800px; height: 560px; }
     #wm-taskbar { position: absolute; left: 0; top: 560px; width: 800px; height: 40px; }
@@ -63,9 +113,10 @@ function makeHtml(root) {
 
 async function main() {
   const root = process.env.SIMPLE_REPO_ROOT || process.cwd();
+  const receipt = loadCompositionReceipt(root);
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'simple-wm-event-check-'));
   const htmlPath = path.join(tmpDir, 'wm_event_check.html');
-  fs.writeFileSync(htmlPath, makeHtml(root));
+  fs.writeFileSync(htmlPath, makeHtml(root, receipt));
 
   await app.whenReady();
   const win = new BrowserWindow({
@@ -114,7 +165,7 @@ async function main() {
       y: 60,
       width: 320,
       height: 220,
-      html: '<input id="field" data-canonical-id="win1#field" value=""><button id="ok" data-canonical-id="win1#ok">OK</button>'
+      html: '<div id="font-proof" style="display:inline-block;font-family:SimplePinnedMono,monospace;font-size:16px;line-height:20px;color:#111827">${receipt.text}</div><input id="field" data-canonical-id="win1#field" value=""><button id="ok" data-canonical-id="win1#ok">OK</button>'
     });
     await new Promise((resolve, reject) => {
       const startedAt = Date.now();
@@ -255,6 +306,30 @@ async function main() {
     out.text_payload = frames('input_event', 'text_input')[0]?.payload || null;
     out.expected_move_x = expectedMoveX;
     out.expected_move_y = expectedMoveY;
+    const fontProof = eventTarget('#font-proof');
+    await document.fonts.load('16px SimplePinnedMono', '${FONT_TEXT}');
+    const fontRect = fontProof.getBoundingClientRect();
+    const fontStyle = getComputedStyle(fontProof);
+    out.font_text = fontProof.textContent;
+    out.simple_composition_run_id = '${receipt.run_id}';
+    out.font_composition_id = '${receipt.composition_id}';
+    out.font_identity = '${receipt.font_identity}';
+    out.font_family = fontStyle.fontFamily;
+    out.font_loaded = document.fonts.check('16px SimplePinnedMono', '${FONT_TEXT}');
+    out.simple_composition_receipt_path = '${receipt.receipt_path}';
+    out.simple_composition_artifact_path = '${receipt.artifact_path}';
+    out.simple_composition_pixel_count = ${receipt.pixel_count};
+    out.simple_composition_pixel_checksum = ${receipt.pixel_checksum};
+    out.simple_composition_artifact_size_bytes = ${receipt.pixel_artifact_size_bytes};
+    out.simple_composition_artifact_sha256 = '${receipt.pixel_artifact_sha256}';
+    out.font_rect = {
+      x: Math.floor(fontRect.x),
+      y: Math.floor(fontRect.y),
+      width: Math.ceil(fontRect.width),
+      height: Math.ceil(fontRect.height)
+    };
+    out.font_frame_event_count = window.__wmFrames.length;
+    out.font_frame_correlation_id = [out.surface_id, out.simple_composition_run_id, out.font_composition_id, out.font_identity, out.font_text, out.simple_composition_pixel_checksum, out.font_frame_event_count].join('|');
     out.pass = out.ready && out.wm_found &&
       out.focus_count >= 1 &&
       out.move_count >= 1 &&
@@ -294,10 +369,52 @@ async function main() {
       out.minimize_button_background === 'rgb(234, 179, 8)' &&
       out.maximize_button_background === 'rgb(34, 197, 94)' &&
       out.title_payload.command_text === '/tmp/project' &&
-      out.text_payload.event.text === 'Hello Simple';
+      out.text_payload.event.text === 'Hello Simple' &&
+      out.simple_composition_run_id === '${EXPECTED_RUN_ID}' &&
+      out.font_text === '${FONT_TEXT}' &&
+      out.font_composition_id === '${FONT_COMPOSITION_ID}' &&
+      out.font_identity === '${FONT_IDENTITY}' &&
+      out.font_family.includes('SimplePinnedMono') &&
+      out.font_loaded === true &&
+      out.font_frame_event_count === out.event_sequence.length;
     return out;
   })();`);
 
+  const frameDir = process.env.BUILD_DIR || tmpDir;
+  fs.mkdirSync(frameDir, { recursive: true });
+  const framePath = path.join(frameDir, 'wm-font-frame.bgra');
+  const fontRect = result.font_rect || {};
+  const frameImage = await win.webContents.capturePage({
+    x: Number(fontRect.x) || 0,
+    y: Number(fontRect.y) || 0,
+    width: Number(fontRect.width) || 1,
+    height: Number(fontRect.height) || 1,
+  });
+  const frameSize = frameImage.getSize();
+  const frameBitmap = frameImage.toBitmap();
+  fs.writeFileSync(framePath, frameBitmap);
+  let frameChecksum = 0;
+  let frameNonBackgroundPixels = 0;
+  for (let i = 0; i + 3 < frameBitmap.length; i += 4) {
+    const b = frameBitmap[i];
+    const g = frameBitmap[i + 1];
+    const r = frameBitmap[i + 2];
+    const a = frameBitmap[i + 3];
+    frameChecksum = (frameChecksum + (b + 3 * g + 5 * r + 7 * a) * (i / 4 + 1)) % 2147483647;
+    if (a !== 0 && (r !== 255 || g !== 255 || b !== 255)) frameNonBackgroundPixels += 1;
+  }
+  result.font_frame_path = framePath;
+  result.font_frame_width = frameSize.width;
+  result.font_frame_height = frameSize.height;
+  result.font_frame_byte_count = frameBitmap.length;
+  result.font_frame_pixel_checksum = frameChecksum;
+  result.font_frame_nonbackground_pixels = frameNonBackgroundPixels;
+  result.pass = result.pass &&
+    frameSize.width > 0 &&
+    frameSize.height > 0 &&
+    frameBitmap.length === frameSize.width * frameSize.height * 4 &&
+    frameChecksum > 0 &&
+    frameNonBackgroundPixels > 0;
   result.electron_process_version = process.versions.electron || '';
   result.chrome_process_version = process.versions.chrome || '';
   console.log('WM_EVENT_CHECK ' + JSON.stringify(result));

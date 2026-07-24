@@ -207,13 +207,17 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
         comp = _seed_host_compositor_shared_mdi(comp)
     print "[hosted-wm] windows-ready count={comp.windows.len()}"
     if not comp.render_frame_engine2d(raster):
+        if live_proof or evidence.enabled:
+            print "[hosted-wm] draw-ir-rejected evidence=fail-closed"
+            raster.shutdown()
+            return 4
         print "[hosted-wm] draw-ir-rejected retry=compatibility"
         comp.render_frame()
     if not hosted_winit_present_pure_simple_pixels(presenter, comp.pure_simple_pixel_buffer(), comp.width, comp.height):
         print "ERROR: hosted WM initial pure-Simple frame presentation failed"
         raster.shutdown()
         return 3
-    print "[hosted-wm] frame-presented renderer=simple-web host=windowed width={WINDOW_WIDTH} height={WINDOW_HEIGHT} raster=simple-2d-winit-buffer"
+    print "[hosted-wm] frame-presented renderer=engine2d-draw-ir content=simple-web route=shared-wm-scene-draw-ir host=linux-windowed width={WINDOW_WIDTH} height={WINDOW_HEIGHT} raster=simple-2d-winit-buffer fallback=false revision={comp.render_revision} {raster.frame_provenance()} {raster.font_provenance()}"
     print "Frame presented: shared lifecycle windows + Simple Web MDI content"
 
     var evidence_nonce: i64 = 0
@@ -235,6 +239,7 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
     var mouse_button_events: i64 = 0
     var focus_events: i64 = 0
     var key_events: i64 = 0
+    var window_move_events: i64 = 0
     # Motion-background cadence seam (plan item B): the loop stays dirty-gated
     # (GUI-5a) — a due motion frame is just one more dirty *trigger*, evaluated
     # by the pure shared_wm_motion_dirty_due predicate on the loop's existing
@@ -267,6 +272,7 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
     while running and rt_time_now_unix_micros() < end_at:
         var other_dirty = false
         var motion_dirty = false
+        var evidence_capture_requested = false
         val now_micros = rt_time_now_unix_micros()
         if (surface.phase == HostDisplayTransitionPhase.Requested or surface.phase == HostDisplayTransitionPhase.AwaitingResize) and now_micros > surface.deadline_micros:
             val timed_out = fail_or_timeout_display_transition(surface, surface.request_nonce, "", now_micros)
@@ -308,12 +314,13 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
             elif kind == EVT_MOVE:
                 val position_x = rt_winit_event_window_x(ev) as i32
                 val position_y = rt_winit_event_window_y(ev) as i32
+                window_move_events = window_move_events + 1
                 surface.geometry.x = position_x
                 surface.geometry.y = position_y
                 if surface.mode == HostDisplayMode.Windowed and surface.phase != HostDisplayTransitionPhase.Requested and surface.phase != HostDisplayTransitionPhase.AwaitingResize:
                     surface.saved_windowed_geometry.x = position_x
                     surface.saved_windowed_geometry.y = position_y
-                print "[hosted-wm] event window-moved x={position_x} y={position_y} mode={surface.mode}"
+                print "[hosted-wm] event window-moved count={window_move_events} x={position_x} y={position_y} mode={surface.mode}"
             elif kind == EVT_FOCUS or kind == EVT_UNFOCUS:
                 focus_events = focus_events + 1
                 print "[hosted-wm] event focus count={focus_events} focused={kind == EVT_FOCUS}"
@@ -400,10 +407,16 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                     comp.handle_mouse_button(0, command.down)
                     evidence_phase = "applied"
                 elif command.action == "snapshot":
-                    evidence_phase = "applied"
-                other_dirty = true
+                    evidence_phase = "snapshot-only"
+                    evidence_capture_requested = true
+                if command.action != "snapshot":
+                    other_dirty = true
         if other_dirty or warmup_frames < 12:
             if not comp.render_frame_engine2d(raster):
+                if live_proof or evidence.enabled:
+                    print "[hosted-wm] draw-ir-rejected evidence=fail-closed"
+                    running = false
+                    continue
                 print "[hosted-wm] draw-ir-rejected retry=compatibility"
                 comp.render_frame()
             hosted_winit_present_pure_simple_pixels(presenter, comp.pure_simple_pixel_buffer(), comp.width, comp.height)
@@ -414,11 +427,15 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
         elif motion_dirty:
             if not comp.render_background_only(motion_due):
                 if not comp.render_frame_engine2d(raster):
+                    if live_proof or evidence.enabled:
+                        print "[hosted-wm] draw-ir-rejected evidence=fail-closed"
+                        running = false
+                        continue
                     print "[hosted-wm] draw-ir-rejected retry=compatibility"
                     comp.render_frame()
             hosted_winit_present_pure_simple_pixels(presenter, comp.pure_simple_pixel_buffer(), comp.width, comp.height)
 
-        if evidence.enabled and evidence_nonce > 0 and other_dirty:
+        if evidence.enabled and evidence_nonce > 0 and (other_dirty or evidence_capture_requested):
             val evidence_pixels = comp.pure_simple_pixel_buffer()
             val evidence_backend = HostedWinitBufferBackend.implementation_name()
             val evidence_readback = if evidence_pixels.len() == comp.width * comp.height: "presented-pixel-buffer" else: "unavailable"
@@ -427,7 +444,7 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                 print "ERROR: hosted WM evidence write failed nonce={evidence_nonce}"
                 running = false
             else:
-                print "[hosted-wm] evidence-ack nonce={evidence_nonce} phase={evidence_phase} surface_phase={surface.phase}"
+                print "[hosted-wm] evidence-ack nonce={evidence_nonce} phase={evidence_phase} surface_phase={surface.phase} revision={comp.render_revision} {raster.frame_provenance()} {raster.font_provenance()}"
     raster.shutdown()
     rt_winit_window_free(win)
     rt_winit_event_loop_free(el)

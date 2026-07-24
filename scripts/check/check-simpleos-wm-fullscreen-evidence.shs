@@ -26,7 +26,9 @@ RESTORED_RAW="$RESTORED_PPM.raw"
 BASELINE_PPM="$BUILD_DIR/baseline.ppm"
 BASELINE_RAW="$BASELINE_PPM.raw"
 FONT_REGION_RGB="$BUILD_DIR/font-region.rgb"
+FONT_REGION_CORRUPT_COPY="$BUILD_DIR/font-region-corrupt-calibration.rgb"
 FONT_ASSET="${SIMPLEOS_WM_FONT_ASSET:-assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf}"
+FONT_GUEST_PATH=/SYS/FONTS/NOTOSANS
 FONT_ASSET_EXPECTED_BYTES=1708408
 FONT_ASSET_EXPECTED_SHA256=2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081
 FONT_REGION_EXPECTED_BYTES=8064
@@ -46,7 +48,7 @@ mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$LAUNCH_OUT" "$SERIAL_LOG" "$QMP_SOCKET" "$CAPTURE_OUT" \
     "$BASELINE_PPM" "$FULLSCREEN_PPM" "$RESTORED_PPM" \
     "$BASELINE_RAW" "$FULLSCREEN_RAW" "$RESTORED_RAW" \
-    "$FONT_REGION_RGB" "$BUILD_DIR/evidence.env"
+    "$FONT_REGION_RGB" "$FONT_REGION_CORRUPT_COPY" "$BUILD_DIR/evidence.env"
 
 resolve_path() {
     if command -v realpath >/dev/null 2>&1; then
@@ -112,6 +114,15 @@ file_sha256() {
         shasum -a 256 "$1" | awk '{print $1}'
     else
         echo ""
+    fi
+}
+
+font_region_oracle_status() {
+    if [ "$(file_byte_count "$1")" = "$FONT_REGION_EXPECTED_BYTES" ] && \
+       [ "$(file_sha256 "$1")" = "$FONT_REGION_EXPECTED_SHA256" ]; then
+        echo pass
+    else
+        echo fail
     fi
 }
 
@@ -482,6 +493,9 @@ font_oracle_pending=false
 font_region_line=""
 font_region_bytes=0
 font_region_sha256=""
+font_region_corrupt_copy_bytes=0
+font_region_corrupt_copy_sha256=""
+font_region_corrupt_rejection_status=not-run
 input_nonce="simpleos-wm-$(date +%s)-$$"
 input_submit_marker=""
 input_irq_marker=""
@@ -490,9 +504,17 @@ input_frame_marker=""
 restore_irq_marker=""
 restore_state_marker=""
 restore_frame_marker=""
+pointer_irq_marker=""
+pointer_state_marker=""
+pointer_frame_marker=""
+pointer_release_irq_marker=""
+pointer_release_state_marker=""
+pointer_release_frame_marker=""
 baseline_seq=0
 maximize_seq=0
 restore_seq=0
+pointer_seq=0
+pointer_release_seq=0
 changed_bytes=0
 before_sha256=
 after_sha256=
@@ -554,7 +576,7 @@ else
     scanout_pixel_format="$(marker_field "$scanout_marker" pixel_format)"
     scanout_generation="$(marker_field "$scanout_marker" generation)"
     case "$font_marker" in
-        *"[font-evidence] family=Noto Sans Mono asset_sha256=$FONT_ASSET_EXPECTED_SHA256 raster=pure-sfnt-glyf route=shared-wm-draw-ir component_id=taskbar-clock font_size=12 text=00:00 region=right56,bottom48 region_rgb_sha256=$FONT_REGION_EXPECTED_SHA256"*)
+        *"[font-evidence] guest_path=$FONT_GUEST_PATH asset_bytes=$FONT_ASSET_EXPECTED_BYTES family=Noto Sans Mono asset_sha256=$FONT_ASSET_EXPECTED_SHA256 raster=pure-sfnt-glyf route=shared-wm-draw-ir component_id=taskbar-clock font_size=12 text=00:00 region=right56,bottom48 region_rgb_sha256=$FONT_REGION_EXPECTED_SHA256"*)
             font_marker_valid=true
             ;;
     esac
@@ -597,7 +619,7 @@ else
         # Capture baseline, inject two F11 make/break pairs, and map the host
         # nonce to the guest's newly observed monotonic input sequences.
         set +e
-        python3 - "$QMP_SOCKET" "$SERIAL_LOG" "$BASELINE_PPM" "$FULLSCREEN_PPM" "$RESTORED_PPM" "$FONT_REGION_RGB" "$scanout_address" "$scanout_width" "$scanout_height" "$scanout_stride" "$scanout_pixel_format" "$scanout_size" "$input_nonce" >"$CAPTURE_OUT" 2>&1 <<'PY'
+        python3 - "$QMP_SOCKET" "$SERIAL_LOG" "$BASELINE_PPM" "$FULLSCREEN_PPM" "$RESTORED_PPM" "$FONT_REGION_RGB" "$FONT_REGION_CORRUPT_COPY" "$scanout_address" "$scanout_width" "$scanout_height" "$scanout_stride" "$scanout_pixel_format" "$scanout_size" "$input_nonce" >"$CAPTURE_OUT" 2>&1 <<'PY'
 import hashlib
 import json
 import os
@@ -608,9 +630,9 @@ import time
 
 sock_path, serial_path = sys.argv[1], sys.argv[2]
 baseline_ppm, fullscreen_ppm, restored_ppm = sys.argv[3], sys.argv[4], sys.argv[5]
-font_region_path = sys.argv[6]
-address, width, height, pitch = map(int, sys.argv[7:11])
-pixel_format, size, nonce = sys.argv[11], int(sys.argv[12]), sys.argv[13]
+font_region_path, corrupt_region_path = sys.argv[6], sys.argv[7]
+address, width, height, pitch = map(int, sys.argv[8:12])
+pixel_format, size, nonce = sys.argv[12], int(sys.argv[13]), sys.argv[14]
 
 qmp_id = [0]
 
@@ -691,19 +713,54 @@ def wait_correlation(after_seq, action, expected_window=None):
         seqs = sorted({int(v) for v in re.findall(r"\[wm-input-irq\] input_seq=(\d+) scancode=87(?:\r?$)", text, re.M) if int(v) > after_seq})
         for seq in seqs:
             irq = re.search(r"^\[wm-input-irq\] input_seq=%d scancode=87\r?$" % seq, text, re.M)
-            state = re.search(r"^\[wm-state\] input_seq=%d action=%s window=(\d+) maximized=(?:true|false)\r?$" % (seq, action), text, re.M)
+            state = re.search(r"^\[wm-state\] input_seq=%d action=%s window=(\d+) maximized=(?:true|false) x=(-?\d+) y=(-?\d+) width=(\d+) height=(\d+)\r?$" % (seq, action), text, re.M)
             frame = re.search(r"^\[wm-frame\] input_seq=%d generation=(\d+)\r?$" % seq, text, re.M)
             if irq and state and frame and int(frame.group(1)) > 0:
                 window_id = int(state.group(1))
                 if window_id <= 0 or (expected_window is not None and window_id != expected_window):
                     continue
-                return seq, window_id, irq.group(0), state.group(0), frame.group(0)
+                rect = tuple(int(state.group(i)) for i in range(2, 6))
+                if rect[2] <= 0 or rect[3] <= 0:
+                    continue
+                return seq, window_id, irq.group(0), state.group(0), frame.group(0), rect
         time.sleep(0.05)
     raise RuntimeError("guest-input-irq-state-frame-correlation-missing action=" + action)
+
+def wait_pointer_correlation(after_seq, kind_code, expected_window=""):
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        text = serial_text()
+        seqs = sorted({int(v) for v in re.findall(r"^\[wm-pointer-irq\] input_seq=(\d+) x=\d+ y=\d+ button_code=1 kind_code=%d\r?$" % kind_code, text, re.M) if int(v) > after_seq})
+        for seq in seqs:
+            irq = re.search(r"^\[wm-pointer-irq\] input_seq=%d x=\d+ y=\d+ button_code=1 kind_code=%d\r?$" % (seq, kind_code), text, re.M)
+            if kind_code == 1:
+                state = re.search(r"^\[wm-pointer-state\] input_seq=%d window=([1-9]\d*) marker=\[simpleos-wm\] loop-step command=(?:window_focus|window_drag_begin).* window=\1 handled=true\r?$" % seq, text, re.M)
+            else:
+                state = re.search(r"^\[wm-pointer-state\] input_seq=%d window=%s marker=\[simpleos-wm\] loop-step command=ignored target= app= window= handled=false\r?$" % (seq, re.escape(expected_window)), text, re.M)
+            frame = re.search(r"^\[wm-pointer-frame\] input_seq=%d generation=(\d+)\r?$" % seq, text, re.M)
+            if irq and state and frame and int(frame.group(1)) > 0:
+                window = state.group(1) if kind_code == 1 else expected_window
+                return seq, irq.group(0), state.group(0), frame.group(0), window
+        time.sleep(0.05)
+    raise RuntimeError("guest-pointer-irq-state-frame-correlation-missing kind_code=%d" % kind_code)
 
 def send_f11(f):
     events = [{"type":"key","data":{"down":down,"key":{"type":"qcode","data":"f11"}}} for down in (True, False)]
     write_qmp(f, {"execute":"input-send-event", "arguments":{"events":events}})
+
+def send_pointer_click(f, window_rect):
+    window_x, window_y, window_width, _ = window_rect
+    target_x = window_x + window_width // 2
+    target_y = window_y + 14
+    delta_x = target_x - width // 2
+    delta_y = target_y - height // 2
+    write_qmp(f, {"execute":"input-send-event", "arguments":{"events":[
+        {"type":"rel","data":{"axis":"x","value":delta_x}},
+        {"type":"rel","data":{"axis":"y","value":delta_y}}
+    ]}})
+    write_qmp(f, {"execute":"input-send-event", "arguments":{"events":[
+        {"type":"btn","data":{"down":True,"button":"left"}}
+    ]}})
 
 s = socket.socket(socket.AF_UNIX)
 s.settimeout(5)
@@ -722,12 +779,16 @@ for y in range(height - 48, height):
         font_region.extend([baseline[i + 2], baseline[i + 1], baseline[i]])
 with open(font_region_path, "wb") as out:
     out.write(font_region)
+corrupt_region = bytearray(font_region)
+corrupt_region[0] ^= 1
+with open(corrupt_region_path, "wb") as out:
+    out.write(corrupt_region)
 font_region_hash = hashlib.sha256(font_region).hexdigest()
 send_f11(f)
-max_seq, target_window, max_irq, max_state, max_frame = wait_correlation(baseline_seq, "maximize")
+max_seq, target_window, max_irq, max_state, max_frame, _ = wait_correlation(baseline_seq, "maximize")
 fullscreen = pmem(f, fullscreen_ppm)
 send_f11(f)
-restore_seq, restored_window, restore_irq, restore_state, restore_frame = wait_correlation(max_seq, "restore", target_window)
+restore_seq, restored_window, restore_irq, restore_state, restore_frame, restored_rect = wait_correlation(max_seq, "restore", target_window)
 restored = pmem(f, restored_ppm)
 
 base_hash = hashlib.sha256(baseline).hexdigest()
@@ -740,6 +801,12 @@ if full_hash == base_hash or changed <= 4096:
     raise RuntimeError("maximize-semantic-hash-not-distinct")
 if restored_hash != base_hash:
     raise RuntimeError("restore-semantic-hash-mismatch")
+send_pointer_click(f, restored_rect)
+pointer_seq, pointer_irq, pointer_state, pointer_frame, pointer_window = wait_pointer_correlation(restore_seq, 1)
+write_qmp(f, {"execute":"input-send-event", "arguments":{"events":[
+    {"type":"btn","data":{"down":False,"button":"left"}}
+]}})
+pointer_release_seq, pointer_release_irq, pointer_release_state, pointer_release_frame, _ = wait_pointer_correlation(pointer_seq, 2, pointer_window)
 print("simpleos_wm_input_submitted host_nonce=%s baseline_seq=%d maximize_seq=%d restore_seq=%d qcode=f11" % (nonce, baseline_seq, max_seq, restore_seq))
 print("simpleos_wm_maximize_irq_marker=" + max_irq)
 print("simpleos_wm_maximize_state_marker=" + max_state)
@@ -747,6 +814,14 @@ print("simpleos_wm_maximize_frame_marker=" + max_frame)
 print("simpleos_wm_restore_irq_marker=" + restore_irq)
 print("simpleos_wm_restore_state_marker=" + restore_state)
 print("simpleos_wm_restore_frame_marker=" + restore_frame)
+print("simpleos_wm_pointer_irq_marker=" + pointer_irq)
+print("simpleos_wm_pointer_state_marker=" + pointer_state)
+print("simpleos_wm_pointer_frame_marker=" + pointer_frame)
+print("simpleos_wm_pointer_input_seq=%d" % pointer_seq)
+print("simpleos_wm_pointer_release_irq_marker=" + pointer_release_irq)
+print("simpleos_wm_pointer_release_state_marker=" + pointer_release_state)
+print("simpleos_wm_pointer_release_frame_marker=" + pointer_release_frame)
+print("simpleos_wm_pointer_release_input_seq=%d" % pointer_release_seq)
 print("font_region=right56,bottom48 font_region_rgb_bytes=%d font_region_rgb_sha256=%s" % (len(font_region), font_region_hash))
 print("simpleos_wm_fullscreen_delta changed_bytes=%d before_sha256=%s after_sha256=%s restored_sha256=%s" % (changed, base_hash, full_hash, restored_hash))
 PY
@@ -766,6 +841,14 @@ PY
             restore_irq_marker="$(sed -n 's/^simpleos_wm_restore_irq_marker=//p' "$CAPTURE_OUT" | tail -n 1)"
             restore_state_marker="$(sed -n 's/^simpleos_wm_restore_state_marker=//p' "$CAPTURE_OUT" | tail -n 1)"
             restore_frame_marker="$(sed -n 's/^simpleos_wm_restore_frame_marker=//p' "$CAPTURE_OUT" | tail -n 1)"
+            pointer_irq_marker="$(sed -n 's/^simpleos_wm_pointer_irq_marker=//p' "$CAPTURE_OUT" | tail -n 1)"
+            pointer_state_marker="$(sed -n 's/^simpleos_wm_pointer_state_marker=//p' "$CAPTURE_OUT" | tail -n 1)"
+            pointer_frame_marker="$(sed -n 's/^simpleos_wm_pointer_frame_marker=//p' "$CAPTURE_OUT" | tail -n 1)"
+            pointer_seq="$(sed -n 's/^simpleos_wm_pointer_input_seq=//p' "$CAPTURE_OUT" | tail -n 1)"
+            pointer_release_irq_marker="$(sed -n 's/^simpleos_wm_pointer_release_irq_marker=//p' "$CAPTURE_OUT" | tail -n 1)"
+            pointer_release_state_marker="$(sed -n 's/^simpleos_wm_pointer_release_state_marker=//p' "$CAPTURE_OUT" | tail -n 1)"
+            pointer_release_frame_marker="$(sed -n 's/^simpleos_wm_pointer_release_frame_marker=//p' "$CAPTURE_OUT" | tail -n 1)"
+            pointer_release_seq="$(sed -n 's/^simpleos_wm_pointer_release_input_seq=//p' "$CAPTURE_OUT" | tail -n 1)"
             delta_line="$(sed -n '/^simpleos_wm_fullscreen_delta /p' "$CAPTURE_OUT" | tail -n 1)"
             changed_bytes="$(marker_field "$delta_line" changed_bytes)"
             before_sha256="$(marker_field "$delta_line" before_sha256)"
@@ -774,6 +857,8 @@ PY
             font_region_line="$(sed -n '/^font_region=right56,bottom48 /p' "$CAPTURE_OUT" | tail -n 1)"
             font_region_bytes="$(marker_field "$font_region_line" font_region_rgb_bytes)"
             font_region_sha256="$(marker_field "$font_region_line" font_region_rgb_sha256)"
+            font_region_corrupt_copy_bytes="$(file_byte_count "$FONT_REGION_CORRUPT_COPY")"
+            font_region_corrupt_copy_sha256="$(file_sha256 "$FONT_REGION_CORRUPT_COPY")"
             if serial_has_production_fault; then
                 status=fail
                 reason=guest-render-fault
@@ -782,11 +867,17 @@ PY
                 reason=canonical-taskbar-clock-oracle-pending
             elif [ "$font_region_bytes" != "$FONT_REGION_EXPECTED_BYTES" ] || \
                  [ "$font_region_sha256" != "$FONT_REGION_EXPECTED_SHA256" ] || \
-                 [ "$(file_byte_count "$FONT_REGION_RGB")" != "$FONT_REGION_EXPECTED_BYTES" ] || \
-                 [ "$(file_sha256 "$FONT_REGION_RGB")" != "$FONT_REGION_EXPECTED_SHA256" ]; then
+                 [ "$(font_region_oracle_status "$FONT_REGION_RGB")" != pass ]; then
                 status=fail
                 reason=pinned-font-region-oracle-mismatch
+            elif [ "$font_region_corrupt_copy_bytes" != "$FONT_REGION_EXPECTED_BYTES" ] || \
+                 ! is_sha256 "$font_region_corrupt_copy_sha256" || \
+                 [ "$font_region_corrupt_copy_sha256" = "$font_region_sha256" ] || \
+                 [ "$(font_region_oracle_status "$FONT_REGION_CORRUPT_COPY")" != fail ]; then
+                status=fail
+                reason=font-region-corrupt-copy-calibration-failed
             else
+                font_region_corrupt_rejection_status=pass
                 status=pass
                 reason=pass
             fi
@@ -834,6 +925,7 @@ fi
     echo "simpleos_wm_fullscreen_disk_image_status=$disk_image_status"
     echo "simpleos_wm_fullscreen_disk_image_sha256=$DISK_IMAGE_SHA256"
     echo "simpleos_wm_fullscreen_font_asset=$FONT_ASSET"
+    echo "simpleos_wm_fullscreen_font_guest_path=$FONT_GUEST_PATH"
     echo "simpleos_wm_fullscreen_font_asset_bytes=$FONT_ASSET_BYTES"
     echo "simpleos_wm_fullscreen_font_asset_sha256=$FONT_ASSET_SHA256"
     echo "simpleos_wm_fullscreen_font_marker=$font_marker"
@@ -842,6 +934,10 @@ fi
     echo "simpleos_wm_fullscreen_font_region_rgb_bytes=$font_region_bytes"
     echo "simpleos_wm_fullscreen_font_region_rgb_sha256=$font_region_sha256"
     echo "simpleos_wm_fullscreen_font_region_device_origin=qemu-pmemsave"
+    echo "simpleos_wm_fullscreen_font_region_corrupt_copy=$FONT_REGION_CORRUPT_COPY"
+    echo "simpleos_wm_fullscreen_font_region_corrupt_copy_bytes=$font_region_corrupt_copy_bytes"
+    echo "simpleos_wm_fullscreen_font_region_corrupt_copy_sha256=$font_region_corrupt_copy_sha256"
+    echo "simpleos_wm_fullscreen_font_region_corrupt_rejection_status=$font_region_corrupt_rejection_status"
     echo "simpleos_wm_fullscreen_scanout_marker=$scanout_marker"
     echo "simpleos_wm_fullscreen_scanout_address=$scanout_address"
     echo "simpleos_wm_fullscreen_scanout_width=$scanout_width"
@@ -861,6 +957,14 @@ fi
     echo "simpleos_wm_fullscreen_restore_irq_marker=$restore_irq_marker"
     echo "simpleos_wm_fullscreen_restore_state_marker=$restore_state_marker"
     echo "simpleos_wm_fullscreen_restore_frame_marker=$restore_frame_marker"
+    echo "simpleos_wm_fullscreen_pointer_input_seq=$pointer_seq"
+    echo "simpleos_wm_fullscreen_pointer_irq_marker=$pointer_irq_marker"
+    echo "simpleos_wm_fullscreen_pointer_state_marker=$pointer_state_marker"
+    echo "simpleos_wm_fullscreen_pointer_frame_marker=$pointer_frame_marker"
+    echo "simpleos_wm_fullscreen_pointer_release_input_seq=$pointer_release_seq"
+    echo "simpleos_wm_fullscreen_pointer_release_irq_marker=$pointer_release_irq_marker"
+    echo "simpleos_wm_fullscreen_pointer_release_state_marker=$pointer_release_state_marker"
+    echo "simpleos_wm_fullscreen_pointer_release_frame_marker=$pointer_release_frame_marker"
     echo "simpleos_wm_fullscreen_baseline_ppm=$BASELINE_PPM"
     echo "simpleos_wm_fullscreen_baseline_ppm_file_status=$(regular_file_status "$BASELINE_PPM")"
     echo "simpleos_wm_fullscreen_baseline_ppm_magic_status=$(ppm_magic_status "$BASELINE_PPM")"
@@ -894,14 +998,17 @@ fi
     echo "- qmp socket: $QMP_SOCKET"
     echo "- kernel: $KERNEL_OUTPUT (sha256=$KERNEL_SHA256)"
     echo "- disk image: $DISK_IMAGE ($disk_image_status, sha256=$DISK_IMAGE_SHA256)"
-    echo "- pinned font asset: $FONT_ASSET ($FONT_ASSET_BYTES bytes, sha256=$FONT_ASSET_SHA256)"
+    echo "- pinned font asset: host=$FONT_ASSET guest=$FONT_GUEST_PATH ($FONT_ASSET_BYTES bytes, sha256=$FONT_ASSET_SHA256)"
     echo "- guest font marker: ${font_marker:--}"
     echo "- font region: $FONT_REGION_RGB (${font_region_bytes:-0} bytes, sha256=${font_region_sha256:--}, origin=qemu-pmemsave)"
+    echo "- corrupt-copy calibration: $FONT_REGION_CORRUPT_COPY (${font_region_corrupt_copy_bytes:-0} bytes, sha256=${font_region_corrupt_copy_sha256:--}, rejection=$font_region_corrupt_rejection_status)"
     echo "- scanout: address=${scanout_address:--} width=${scanout_width:-0} height=${scanout_height:-0} byte-pitch=${scanout_stride:-0} format=${scanout_pixel_format:--} generation=${scanout_generation:-0}"
     echo "- host nonce: $input_nonce"
     echo "- input sequences: baseline=$baseline_seq maximize=$maximize_seq restore=$restore_seq"
     echo "- maximize IRQ/state/frame: ${input_irq_marker:--} | ${input_state_marker:--} | ${input_frame_marker:--}"
     echo "- restore IRQ/state/frame: ${restore_irq_marker:--} | ${restore_state_marker:--} | ${restore_frame_marker:--}"
+    echo "- pointer IRQ/state/frame: ${pointer_irq_marker:--} | ${pointer_state_marker:--} | ${pointer_frame_marker:--}"
+    echo "- pointer release IRQ/state/frame: ${pointer_release_irq_marker:--} | ${pointer_release_state_marker:--} | ${pointer_release_frame_marker:--}"
     echo "- changed bytes (baseline vs maximized): ${changed_bytes:-0}"
     echo "- baseline sha256: ${before_sha256:--}"
     echo "- maximized sha256: ${after_sha256:--}"
@@ -915,9 +1022,9 @@ fi
     echo "(same q35/max/2G/BGA-std flags as os.qemu_runner._wm_simple_web_qmp_capture_target),"
     echo "derives QMP \`pmemsave\` address and size from the guest's validated"
     echo "scanout marker, converts visible pixels using its byte pitch, injects"
-    echo "F11 through QEMU input, maps its host nonce to newly observed guest"
-    echo "input sequences, and requires sequence-correlated IRQ, WM state, and"
-    echo "frame-generation markers. Boot-time choreography is never"
+    echo "F11 plus a pointer click through QEMU input, maps each to newly"
+    echo "observed guest input sequences, and requires sequence-correlated IRQ,"
+    echo "WM state, and frame-generation markers. Boot-time choreography is never"
     echo "accepted as interaction evidence; missing correlation fails closed."
 } >"$REPORT_PATH"
 

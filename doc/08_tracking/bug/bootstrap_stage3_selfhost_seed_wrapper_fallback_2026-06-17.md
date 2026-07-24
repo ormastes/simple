@@ -167,3 +167,25 @@ confirming the failure is independent of any Rust-seed source change.
 - `doc/09_report/bootstrap_crash_report_2026_04_01.md` (LIM-010 + Stage 3 history)
 - `doc/06_spec/test/03_system/compiler/stage3_segfault_fix_spec.md`
 - `doc/08_tracking/bug/selfhosted_mcp_binary_segfault_2026-06-02.md`
+
+## 2026-07-24 FONT-VERIFICATION OBSERVATION
+
+A cache-preserving full-driver attempt using the installed `bin/release`
+candidate did not converge:
+
+- command entry: `src/app/cli/_CliMain/main_and_help.spl`
+- backend/mode: Cranelift, dynload, entry closure, eight requested threads
+- cache: `build/bootstrap/native_cache_flat_globals_fixedseed`
+  (1,395 objects, 127 MB before and after)
+- bound: 600 seconds
+- result: exit 124, zero build output, no new cache mtimes, no candidate
+- observed worker: one CPU-bound process at about 100% CPU and 73 MB RSS
+- retained log:
+  `build/native_probe/simple-font-rebuild-20260724.log`
+
+The installed producer identifies itself as Rust-built bootstrap material, so
+even a successful first artifact would require a separate-cache stage-2
+self-build before it could qualify as pure-Simple evidence. This observation
+does not validate the proposed fixes above; it records the current silent,
+non-progressing failure mode and prevents font verification from treating the
+installed release image as a self-hosted compiler.

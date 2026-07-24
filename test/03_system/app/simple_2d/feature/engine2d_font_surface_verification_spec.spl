@@ -1,0 +1,194 @@
+# codex-system-test
+# @tag: rendering, font, engine2d, cpu-simd, vulkan
+# @req AC-1 AC-6 AC-7 AC-8 AC-9
+# @evidence-display: links
+
+"""# Engine2D Font Surface Verification
+
+Drives the public Engine2D requested-backend facade with the pinned Noto Sans
+Mono asset. The CPU lane is the exact packed-ARGB oracle. The current
+`cpu_simd` compatibility request must preserve every absolute framebuffer pixel
+while honestly disclosing CPU execution; Vulkan must disclose real device
+submission and readback or fail as unavailable.
+"""
+
+use std.spec.{describe, it, expect, step, fail_test}
+use std.io_runtime.{file_hash_sha256}
+use std.gpu.engine2d.engine.{Engine2D}
+use std.gpu.engine2d.color.{rgb}
+use std.nogc_sync_mut.sffi.io.{dir_create_all, file_write_bytes}
+
+val WIDTH = 128
+val HEIGHT = 72
+val FONT_PATH = "assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf"
+val FONT_SHA256 = "2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081"
+val TEXT = "Simple 2D"
+val BG = 0xff03070bu32
+val FG = 0xfff0dcb4u32
+val ARTIFACT_DIR = "build/test-artifacts/03_system/app/simple_2d/feature/engine2d_font_surface_verification"
+
+class FontSurfaceEvidence:
+    backend: text
+    source: text
+    execution_target: text
+    attempts: text
+    pixels: [u32]
+    painted: i64
+    partial: i64
+    min_x: i32
+    min_y: i32
+    max_x: i32
+    max_y: i32
+    backend_handle: i64
+    device_identity: i64
+
+fn write_argb(path: text, pixels: [u32]) -> bool:
+    var bytes: [u8] = []
+    for pixel in pixels:
+        bytes.push(((pixel >> 24) & 0xffu32).to_u8())
+        bytes.push(((pixel >> 16) & 0xffu32).to_u8())
+        bytes.push(((pixel >> 8) & 0xffu32).to_u8())
+        bytes.push((pixel & 0xffu32).to_u8())
+    file_write_bytes(path, bytes)
+
+fn render_requested_font(backend_name: text) -> Result<FontSurfaceEvidence, text>:
+    val requested = Engine2D.create_requested_backend(WIDTH, HEIGHT, backend_name)
+    if requested.is_err():
+        return Err(requested.unwrap_err())
+    var engine = requested.unwrap()
+    if engine.backend_name() != backend_name:
+        val selected = engine.backend_name()
+        engine.shutdown()
+        return Err("requested=" + backend_name + ",selected=" + selected)
+    if not engine.load_font(FONT_PATH):
+        engine.shutdown()
+        return Err("pinned-font-load-failed")
+
+    engine.clear(BG)
+    engine.draw_text(8, 8, TEXT, FG, 24)
+    val readback = engine.read_pixels_with_source()
+    var painted: i64 = 0
+    var partial: i64 = 0
+    var min_x = WIDTH
+    var min_y = HEIGHT
+    var max_x = -1
+    var max_y = -1
+    var index = 0
+    while index < readback.pixels.len():
+        val pixel = readback.pixels[index]
+        if pixel != BG:
+            val x = index % WIDTH
+            val y = index / WIDTH
+            painted = painted + 1
+            if pixel != FG: partial = partial + 1
+            if x < min_x: min_x = x
+            if y < min_y: min_y = y
+            if x > max_x: max_x = x
+            if y > max_y: max_y = y
+        index = index + 1
+    val evidence = FontSurfaceEvidence(
+        backend: engine.backend_name(), source: readback.source,
+        execution_target: engine.font_execution_target(),
+        attempts: engine.font_execution_attempts().join(","),
+        pixels: readback.pixels, painted: painted, partial: partial,
+        min_x: min_x, min_y: min_y, max_x: max_x, max_y: max_y,
+        backend_handle: readback.backend_handle,
+        device_identity: readback.device_identity)
+    engine.shutdown()
+    Ok(evidence)
+
+fn require_render(backend_name: text) -> FontSurfaceEvidence:
+    val result = render_requested_font(backend_name)
+    if result.is_err():
+        fail_test(backend_name + " font lane unavailable: " + result.unwrap_err())
+    result.unwrap()
+
+fn retain_capture(name: text, pixels: [u32]):
+    dir_create_all(ARTIFACT_DIR)
+    if not write_argb(ARTIFACT_DIR + "/" + name + ".argb", pixels):
+        fail_test("font framebuffer capture failed: " + name)
+
+describe "Engine2D pinned-font rendering surfaces":
+    # @manual_section: Primary flow
+    # @manual: show
+    # @capture(artifact)
+    it "keeps the cpu_simd request pixel-exact while disclosing CPU execution":
+        """The canonical CPU engine and cpu_simd compatibility request consume one semantic string and one selected face.
+
+        The comparison is exact over all 9,216 absolute packed-ARGB pixels; a
+        checksum, tolerance, or separately painted SIMD fixture is insufficient.
+        """
+        step("Load the pinned multilingual font manifest")
+        expect(file_hash_sha256(FONT_PATH)).to_equal(FONT_SHA256)
+        expect(TEXT).to_equal("Simple 2D")
+
+        step("Accept exact-face-bound simple-script shaping")
+        val cpu = require_render("cpu")
+        expect(cpu.backend).to_equal("cpu")
+        expect(cpu.source).to_equal("cpu_mirror")
+        expect(cpu.execution_target).to_equal("cpu")
+        expect(cpu.attempts).to_contain("cpu:success")
+
+        step("Prepare one shared font batch for 2D and 3D")
+        val simd = require_render("cpu_simd")
+        expect(simd.backend).to_equal("cpu_simd")
+        expect(simd.source).to_equal("cpu_mirror")
+        expect(simd.execution_target).to_equal("cpu")
+        expect(simd.attempts).to_contain("cpu:success")
+
+        step("Emit the selected font composite program and plan compilation")
+        expect(simd.pixels).to_equal(cpu.pixels)
+
+        step("Prove native submission and device readback")
+        expect(cpu.pixels.len()).to_equal(WIDTH * HEIGHT)
+        expect(cpu.painted).to_be_greater_than(0)
+        expect(cpu.partial).to_be_greater_than(0)
+        expect(simd.painted).to_equal(cpu.painted)
+        expect(simd.partial).to_equal(cpu.partial)
+        expect(simd.min_x).to_equal(cpu.min_x)
+        expect(simd.min_y).to_equal(cpu.min_y)
+        expect(simd.max_x).to_equal(cpu.max_x)
+        expect(simd.max_y).to_equal(cpu.max_y)
+        expect(cpu.min_x).to_be_greater_than(7)
+        expect(cpu.min_y).to_be_greater_than(7)
+        expect(cpu.max_x).to_be_less_than(WIDTH)
+        expect(cpu.max_y).to_be_less_than(HEIGHT)
+        retain_capture("cpu", cpu.pixels)
+        retain_capture("cpu_simd", simd.pixels)
+
+    # @manual_section: Vulkan device row
+    # @manual: show
+    # @capture(artifact)
+    it "renders the same absolute pixels only after Vulkan device readback":
+        """Vulkan cannot pass through software fallback, a CPU mirror, or backend-name relabeling.
+
+        A host without an accelerated, fenced Vulkan font compositor reports a
+        failing unavailable row so the capability remains visible.
+        """
+        step("Load the pinned multilingual font manifest")
+        expect(file_hash_sha256(FONT_PATH)).to_equal(FONT_SHA256)
+        expect(TEXT).to_equal("Simple 2D")
+
+        step("Accept exact-face-bound simple-script shaping")
+        val cpu = require_render("cpu")
+
+        step("Prepare one shared font batch for 2D and 3D")
+        val vulkan = require_render("vulkan")
+        expect(vulkan.backend).to_equal("vulkan")
+        expect(vulkan.execution_target).to_equal("vulkan")
+        expect(vulkan.attempts).to_contain("vulkan:")
+
+        step("Emit the selected font composite program and plan compilation")
+        expect(vulkan.pixels).to_equal(cpu.pixels)
+
+        step("Prove native submission and device readback")
+        expect(vulkan.source).to_equal("device_readback")
+        expect(vulkan.backend_handle).to_be_greater_than(0)
+        expect(vulkan.device_identity).to_be_greater_than(0)
+        expect(vulkan.painted).to_equal(cpu.painted)
+        expect(vulkan.partial).to_equal(cpu.partial)
+        expect(vulkan.min_x).to_equal(cpu.min_x)
+        expect(vulkan.min_y).to_equal(cpu.min_y)
+        expect(vulkan.max_x).to_equal(cpu.max_x)
+        expect(vulkan.max_y).to_equal(cpu.max_y)
+        retain_capture("vulkan", vulkan.pixels)
