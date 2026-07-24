@@ -16,6 +16,7 @@ use std.test_runner.test_runner_types.{TestFileResult, TestOptions, TEST_OUTPUT_
 use std.test_runner.test_runner_files.{strip_ansi, read_file_content}
 use std.test_runner.test_runner_fork.{run_test_file_fork}
 use std.io.{file_exists, file_write, file_delete}
+use std.nogc_sync_mut.io_runtime.{file_size}
 use std.io.{time_now_unix_micros}
 use std.io.{process_run_bounded, process_run_with_limits_bounded, ProcessResult}
 use std.env.platform.{get_temp_dir}
@@ -175,8 +176,13 @@ fn run_test_file_smf(file_path: text, options: TestOptions) -> TestFileResult:
     val start = time_now_unix_micros()
     val timeout_ms = options.timeout * 1000
 
-    # Check if pre-compiled .smf bytecode exists
-    if file_exists(smf_path):
+    # Check if pre-compiled .smf bytecode exists. Guard against orphaned
+    # header-only stubs (~179 bytes): one stale stub beside the source
+    # silently hijacks every future run of that file. See
+    # doc/08_tracking/bug/smf_stub_shadowing_unresolved_describe_2026-07-24.md.
+    # ponytail: size gate mirrors bootstrap_main's >300-byte stub check;
+    # upgrade to an mtime-vs-source comparison if real .smf can shrink.
+    if file_exists(smf_path) and file_size(smf_path) > 300:
         # Run pre-compiled SMF bytecode directly (no "test" command to avoid recursion)
         var run_args: [text] = [smf_path]
         if options.gc_log:
@@ -603,8 +609,12 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
     val (wrapped_path, cleanup_path) = build_coverage_wrapper(file_path, options)
     val source_path = preprocess_spipe_file(wrapped_path)
 
-    # Step 2: Compile to .smf via 'simple compile'
-    val smf_path = file_path.replace(".spl", ".smf")
+    # Step 2: Compile to .smf via 'simple compile'. Artifact goes under the
+    # temp dir, NOT beside the source: any interrupt between compile and the
+    # cleanup below used to orphan a stub .smf next to the .spl, which then
+    # shadowed the module and poisoned the smf cache (bug doc
+    # smf_stub_shadowing_unresolved_describe_2026-07-24.md).
+    val smf_path = get_temp_dir() + "/" + file_path.replace("/", "_").replace("\\", "_").replace(":", "_").replace(".spl", ".smf")
     var compile_args: [text] = ["compile", source_path, "-o", smf_path]
     if options.verbose:
         compile_args.push("--verbose")
