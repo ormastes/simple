@@ -151,7 +151,7 @@ The gate establishes command dispatch and minimal behavior only for `test`,
 scope. Strict JSON parsing and focused malformed-line coverage are source-fixed;
 the fresh Stage 4 aggregate remains pending.
 
-## Current qualification snapshot (2026-07-23)
+## Current qualification snapshot (2026-07-24)
 
 Source-fixed is not Stage 4 qualification. The following is the current
 evidence boundary for the important pure-Simple tooling lanes:
@@ -170,7 +170,16 @@ evidence boundary for the important pure-Simple tooling lanes:
   smoke has fresh Stage 4 evidence. Invalid and bare-value test options now
   return exit 2 before configuration or discovery, while signed split values
   remain valid. **Remaining bug/gap:** this preflight has focused source
-  evidence only. **Next solution:** deploy a fresh Stage 4 CLI, run the focused
+  evidence only. Public `--format json` is not yet qualified: the current
+  pure runner accepts the value but still emits human per-file/summary output
+  and no final aggregate JSON object. It must aggregate spec and both doctest
+  lanes before emitting one final object. A subprocess-boundary repair
+  was preserved but not pushed after focused verification exposed unstable
+  executable/argv handling and then the wrong JSON parser module; see
+  [the JSON-format report](../../08_tracking/bug/test_runner_json_format_not_machine_readable_2026-07-24.md).
+  **Next solution:** use `cli_current_exe_path`,
+  canonical CLI dispatch, marker-relative worker args, and real aggregate
+  success in one fresh bounded cycle; then deploy a fresh Stage 4 CLI and run the focused
   bounded-output and CLI contracts once, then run the exact essential-tools
   smoke from its temporary external working directory.
 - **check / build / run** — **Source status:** the full pure-Simple CLI links,
@@ -179,7 +188,11 @@ evidence boundary for the important pure-Simple tooling lanes:
   reject unknown, missing, and invalid-domain output options before discovery,
   so a typo cannot silently pass after checking a different scope. Its focused
   option contract passes through the temporary bootstrap interpreter; fresh
-  Stage 4 runtime qualification remains pending. The paired-value lowering
+  Stage 4 runtime qualification remains pending. Multi-file check dispatch now
+  preserves ordered presentation options and last-option-wins JSON selection,
+  while unsupported split `--surface VALUE` fails before shared cleaning
+  (`0cd092199ad`). This is routing parity only: surface, verbose, and distinct
+  LLM rendering remain separate semantic gaps. The paired-value lowering
   fix in `2f6430a87c8` clears the focused p2 enum probe at source. **Strongest
   current evidence:** candidate `00431ce5…`, `2f6430a87c8`, and the bounded repair in
   [the Stage 4 report](../../08_tracking/bug/stage4_full_cli_source_check_blank_exit8_2026-07-23.md).
@@ -220,7 +233,8 @@ evidence boundary for the important pure-Simple tooling lanes:
   [the AST dispatch report](../../08_tracking/bug/simple_lint_ast_rules_unwired_2026-07-19.md).
   Parse failure now denies with PARSE001 (`57a4761a38d`), invalid or missing
   CLI options return exit 2 (`6dd99e39653`), and invalid project lint config is
-  rejected (`ef2ef732608`); each has focused contract evidence. **Remaining
+  rejected (`ef2ef732608`). Shared worker/fallback help handling now matches
+  the public lint entry (`cc69749ef25`); each has focused contract evidence. **Remaining
   bug/gap:** these fixes, `982ce3fa445`, and the focused wildcard contract are
   not fresh Stage 4 evidence. **Next solution:** qualify
   ARG/COLL/STUB/W0404/W0406/W0407 and the parse/CLI/config contracts through
@@ -229,7 +243,8 @@ evidence boundary for the important pure-Simple tooling lanes:
 - **fmt / fix** — **Source status:** atomic writes, fail-closed source
   rewrites, and closed `fmt`/`fix` option parsing are source-fixed. Invalid or
   malformed fmt options return exit 2 before a file read/write/output; help
-  returns 0 without file work; invalid or empty fix options return exit 2 before
+  returns 0 only when used alone, while mixed help fails closed
+  (`a974dddfec6`); invalid or empty fix options return exit 2 before
   a file read/write; exact `--dry-run` remains
   non-mutating. **Strongest current evidence:** `5b13444c83`, `0a7b45ea7b`,
   and `3bd9be7c52c`.
@@ -257,6 +272,8 @@ evidence boundary for the important pure-Simple tooling lanes:
   See the [token threshold report](../../08_tracking/bug/duplicate_check_token_mode_min_tokens_ignored_2026-07-23.md)
   [cosine fragment report](../../08_tracking/bug/duplicate_check_cosine_fragmented_occurrence_groups_2026-07-23.md),
   and [similarity threshold report](../../08_tracking/bug/duplicate_check_similarity_threshold_false_clean_2026-07-23.md).
+  Sole help remains exit 0, while mixed help and invalid arguments now return
+  exit 2 before parser exit (`f2e15a08c4c`).
   **Remaining bug/gap:** fresh Stage 4 evidence is missing, and incremental-cache
   flags remain deliberately rejected because their detector/cache path is
   disconnected; see [the cache report](../../08_tracking/bug/duplicate_check_incremental_cache_disconnected_2026-07-23.md).
@@ -264,14 +281,20 @@ evidence boundary for the important pure-Simple tooling lanes:
   exact fresh CLI. Enable caching only after a non-cyclic grouping path and a
   two-run cache/invalidation smoke pass.
 - **MCP** — **Source status:** the full wrapper's repository-root CWD restore
-  is pushed. **Strongest current evidence:** `1035de83f1` and the wrapper
+  is pushed. Direct server admission now rejects residual/tail arguments before
+  entering stdio; help/version/probe are accepted only when shared-log cleaning
+  leaves them as the sole server argument (`2d1a6a7afd7`).
+  **Strongest current evidence:** `1035de83f1`, `2d1a6a7afd7`, and the wrapper
   contract above. **Remaining bug/gap:** a fresh Stage 4 native full-MCP
   handshake has not yet been captured as qualification evidence. **Next
   solution:** deploy the exact native server and run its command-line handshake
   from an external CWD.
 - **LSP MCP** — **Source status:** bounded native candidate admission is
-  pushed. **Strongest current evidence:** `8401b5ebfd` requires correlated
-  initialize/list/symbol probes and fails closed. **Remaining bug/gap:** no
+  pushed. Direct entry and generated wrappers now reject/delegate malformed
+  tails, validate documented log modes, and reject unsupported split surface
+  before serve (`2d1a6a7afd7`). **Strongest current evidence:**
+  `2d1a6a7afd7` covers admission/log grammar, while `8401b5ebfd` requires
+  correlated initialize/list/symbol probes and fails closed. **Remaining bug/gap:** no
   fresh Stage 4 native artifact has completed that admission. **Next
   solution:** build the exact artifact and run the bounded wrapper contract.
 - **bootstrap essential gate** — **Source status:** the aggregate gate and its
@@ -285,6 +308,8 @@ evidence boundary for the important pure-Simple tooling lanes:
   once.
 - **examples-check** — **Source status:** pure-Simple command routing is
   implemented and malformed command options now fail closed before discovery.
+  Timeout is bounded to positive milliseconds-safe seconds; limit is bounded
+  nonnegative with only zero meaning unlimited (`b06cce875ca`).
   Its focused option contract passes through the temporary bootstrap
   interpreter. **Remaining bug/gap:** no fresh pure-Simple qualification evidence.
   **Next solution:** run one focused passing example and one failing example
@@ -316,8 +341,10 @@ evidence boundary for the important pure-Simple tooling lanes:
   `bd9de761c11`), but no successor full candidate is qualified. See the
   [candidate failure report](../../08_tracking/bug/stage4_full_cli_source_check_blank_exit8_2026-07-23.md).
 - **Codex session guard** — **Source status:** duplicate-resume locking and
-  documented runaway thresholds are pushed. **Strongest current evidence:**
-  `879a767a73`, `0e5a2198a5`, and
+  documented runaway thresholds are pushed. The watchdog now closes its
+  inherited lock descriptor, so an exited session cannot leave a sleeping
+  child holding the resume lock (`0f473de24c7`). **Strongest current evidence:**
+  `879a767a73`, `0e5a2198a5`, `0f473de24c7`, and
   [the SQLite/WAL incident report](../../08_tracking/bug/codex_duplicate_resume_sqlite_wal_lock_2026-07-19.md).
   **Remaining bug/gap:** direct Codex invocations outside `bin/codex` remain
   intentionally outside the guard. **Next solution:** use the guarded launcher
