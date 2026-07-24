@@ -5,6 +5,10 @@ All notable changes to Simple Language will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **LLM Caret Electron and native Metal GUIs** — launch the semantic browser
+  chat in the canonical Electron shell or lower pure-Simple HTML/layout through
+  Draw IR to Engine2D Metal with keyboard, click, and fail-closed device-readback
+  provenance.
 - **Pinned multilingual font catalog** — bundle 16 unchanged Google Fonts
   binaries plus notices for the CLDR 48.2 top-ten language scripts and ten
   honest sparse categories, with immutable hashes and license/RFN metadata.
@@ -31,6 +35,9 @@ All notable changes to Simple Language will be documented in this file.
   existing rendered-payload routes.
 
 ### Fixed
+- **SPipe docgen nested string dispatch** — normalize paths and imports through
+  typed intermediate values so the self-hosted generator no longer fails on
+  chained `replace(...).split(...)` calls.
 - **Font/docgen bootstrap hardening** — filter the SPipe docgen entrypoint from
   spec inputs and register interpreter byte-array pointers for runtime font
   loading; a full self-hosted rebuild remains unverified.

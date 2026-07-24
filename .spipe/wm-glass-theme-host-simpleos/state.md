@@ -40,8 +40,106 @@ No new drawing IR, private widget renderer, font atlas/cache, Engine3D shortcut,
 - chosen_path: `reuse-facade`.
 - rejected_shortcuts: raw `rt_*` aliases, fixture-only theme branches, backend field pokes, compatibility WM renderers claimed as canonical, synthetic GPU/readback evidence, and hard-coded browser pixels.
 
+## Research Summary
+
+- Current theme authority: `config/themes/theme.sdn` selects `aetheric_dark`.
+- Conflicting history: commit `2248995c72` introduced hard-coded light Aqua WM
+  defaults without promoting them to the package registry.
+- Hosted root causes: the production theme-to-WM adapter is unwired; Simple Web
+  emits hard-coded CSS; RGBA, shadow, gradient, and backdrop-blur semantics are
+  lost or incomplete before Draw IR.
+- SimpleOS authority: canonical evidence must use x86_64
+  `gui_entry_desktop.spl` and `engine2d_wm_frame_executor.spl`, not legacy
+  `wm_entry.spl`.
+- Existing QEMU framebuffer evidence is nonblank and interactive but lacks a
+  resolved theme fingerprint and structured glass witnesses.
+- User selected Feature A and NFR A: registered `aetheric_dark` is the single
+  authority; host/SimpleOS require exact semantic parity with
+  capability-declared pixel evidence.
+
 ## Phase
-dev-done
+implementation-blocked-freestanding-css-span-lowering
 
 ## Log
 - dev: Created state file with 10 acceptance criteria (type: bug); defined bounded cooperative lanes, canonical interface constraints, evidence steps, and fail-fast policy.
+- research: Consolidated three parallel read-only audits; wrote local/domain
+  research and selectable feature/NFR options. No implementation choice was
+  inferred because repository policy requires user selection.
+- requirements: User selected Feature A + NFR A. Promoted the selections to
+  final requirement documents and deleted all option artifacts.
+- design: Three bounded read-only reviews converged on explicit package-to-
+  snapshot bootstrap projection, existing canonical render owners, and
+  capability-declared semantic/pixel evidence. Added architecture, GUI/TUI,
+  detail design, system-test plan, agent tasks, and fail-fast executable spec.
+- implementation: Added a content-addressed renderer-neutral theme snapshot,
+  exact generated bare-metal snapshot, host and SimpleOS first-frame WM
+  installation, package-owned Simple Web CSS/cache identity, RGBA parsing,
+  multi-shadow/backdrop semantic preservation, and named solid-material raster
+  fallback. Focused source checks and generator execution passed.
+- verification: Canonical hosted capture stopped before rendering on the
+  existing self-hosted `HostedCaptureFramebuffer.put_pixel` lowering defect;
+  recorded `hosted_wm_capture_put_pixel_lowering_2026-07-19.md`. Canonical QEMU
+  verification was not started because another repository lane owns a live
+  QEMU process. Fail-fast system evidence remains intentionally unresolved.
+- qemu-actual: Launched the canonical x86_64 `gui_entry_desktop.spl` wrapper
+  in isolated `build/wm_glass_theme_qemu_actual`. Cycle 1 exposed hosted
+  `theme_package` execution in bare metal and faulted before the first frame.
+  Fixed the boundary by embedding composed CSS in the generated snapshot and
+  using the installed snapshot before any hosted package fallback. Cycle 2
+  reached production readiness and identified the expected Aetheric taskbar
+  clock-oracle change. Cycle 3 PASS retained independent QMP pmemsave pixels,
+  matching guest/host font-region SHA-256, nonblank 4K frames, correlated F11
+  maximize/restore, 20,043,014 changed bytes, and exact restored checksum.
+- visual-review: Inspection of retained PASS images found the Simple Web
+  Engine2D heuristic still matched WM class names inside CSS and overpainted
+  content with legacy `#2050A0/#182230`. Removed that heuristic for WM content,
+  routed it through real selector/layout rendering, and mapped content fill and
+  text to package variables. Source checks pass. Per the mandatory three-cycle
+  cap, this post-review pixel correction must be re-captured in a fresh session;
+  the retained PASS report predates only this final content-color correction.
+- continuation-2026-07-24: A fresh cache proved the July 20 striped framebuffer
+  predates the current renderer source. Directly routing the full Aetheric CSS
+  into the bare-metal selector/layout path remains unsafe. Added explicit
+  `solid-material` background/foreground metadata from the installed
+  `ThemeRenderSnapshot`; Simple Engine2D now strips package selector CSS only
+  for that declared fallback and renders the original body through the real
+  layout/text painter. Browser engines still consume the full Stitch CSS.
+- continuation-2026-07-24-tooling: Resolved concurrent rebase markers in the
+  canonical wrapper and `gui_entry_desktop.spl` to the retained Aetheric
+  taskbar hash `addf76...`. The deployed CLI is stale on
+  `rt_process_spawn_guarded`; today's pure-Simple Stage-3 compiler
+  (`6175ea...`) successfully built the patched kernel.
+- continuation-2026-07-24-qemu: The old Stage-3 compiler entered SimpleOS but
+  faulted in `sfnt.find_table` before a frame. Two launches of the fresh
+  Stage-3 kernel then failed identically in OVMF/GRUB with #GP
+  `RIP=FFF1000000000000` before `[BOOT32]`. Recorded
+  `simpleos_wm_uefi_pre_kernel_gp_fresh_stage3_2026-07-24.md`; no current-source
+  framebuffer exists. Stopped at the mandatory third cycle.
+- continuation-2026-07-24-host: The patched x86_64 entry closure compiled
+  `658` files with `0` failures using pure-Simple Stage 3. The focused hosted
+  spec reached the test daemon but timed out after its one permitted run.
+  Working and staged direct-env/runtime guards pass, `git diff --check` passes,
+  no conflict markers remain, and `doc/06_spec` contains zero executable
+  `*_spec.spl` files. Runtime host assertions and current-source QEMU pixels
+  remain unproven.
+- continuation-2026-07-24-review: Highest-capability review rejected the
+  selector-free fallback document because it discarded canonical package CSS
+  and affected hosted Engine2D. Removed that rewrite. Renderer-neutral
+  fallback metadata remains on the WM root while the original full document
+  flows through the canonical CSS/layout owner.
+- continuation-2026-07-24-ovmf: Added the EFI GOP/video modules and text
+  payload already proven by the canonical readiness wrapper. Three fresh
+  launches now reach font registration, shell/app startup, compositor
+  software fallback, FAT32, and a 3840x2160 ARGB scanout; the former
+  pre-kernel GP is resolved.
+- continuation-2026-07-24-span-blocker: All three launches stop on the first
+  CSS scan. RIP is in `ByteSpan.starts_with` (previously `equals`) with return
+  address in `_css_scan_rules_simple`. A direct comparison experiment moved
+  but did not fix the fault and was reverted. Recorded
+  `simpleos_wm_freestanding_bytespan_css_scan_fault_2026-07-24.md`; the QEMU
+  cycle cap is exhausted and pixel evidence remains blocked.
+- sync-2026-07-24: Fetched GitHub and confirmed `main@origin` matches local
+  `main` at `058f1338` (parser parity fix). The 85-file dirty tree contains
+  WM/theme, unrelated `llm_caret`, shared, and external lanes, while another
+  agent owns a live full-bootstrap process; no mixed or unverified working-copy
+  commit was pushed.

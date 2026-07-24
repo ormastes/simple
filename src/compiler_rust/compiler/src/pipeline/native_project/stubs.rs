@@ -10,6 +10,10 @@ use super::tools::{
     target_c_compiler,
 };
 
+pub(crate) fn is_inline_asm_symbol(symbol: &str) -> bool {
+    symbol.trim_start_matches('_').starts_with("simple_asm_")
+}
+
 fn is_linker_provided_symbol(sym: &str, defined: &std::collections::HashSet<String>) -> bool {
     matches!(
         sym,
@@ -634,6 +638,12 @@ pub(crate) fn generate_stub_object(
         })
         .filter(|s| !is_optional_weak_hook_symbol(s))
         .filter(|s| !is_compiler_provided_runtime_symbol(s))
+        // Inline-asm blocks are concrete compiler output, never optional
+        // application functions. Weak-stubbing a block after target-specific
+        // asm compilation failed turns a missing instruction path into a
+        // false-success binary. Leave the reference for dead stripping or the
+        // final linker to diagnose.
+        .filter(|s| !is_inline_asm_symbol(s))
         .filter(|s| stub_missing_runtime || !is_runtime_owned_symbol(s))
         .filter(|s| !is_system_symbol(s))
         .filter(|s| !s.starts_with('?') && !s.starts_with("__imp_"))

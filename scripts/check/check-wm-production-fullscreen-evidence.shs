@@ -19,7 +19,13 @@ COMMAND_PATH="$BUILD_DIR/evidence.commands"
 NATIVE_BIN="${HOSTED_WM_ARTIFACT:-$BUILD_DIR/hosted_entry}"
 BUILD_LOG="$BUILD_DIR/native-build.log"
 SPL_WINIT_LIB="${SIMPLE_WM_WINIT_LIB:-$ROOT_DIR/build/sffi/libspl_winit.dylib}"
-SIMPLE_RUNTIME_DYLIB="${SIMPLE_WM_RUNTIME_DYLIB:-$ROOT_DIR/src/compiler_rust/target/bootstrap/deps/libsimple_runtime.dylib}"
+case "$(uname -s)" in
+    Darwin) RUNTIME_DYLIB_EXT=dylib ;;
+    Linux|FreeBSD) RUNTIME_DYLIB_EXT=so ;;
+    *) RUNTIME_DYLIB_EXT=dll ;;
+esac
+SIMPLE_RUNTIME_DYLIB="${SIMPLE_WM_RUNTIME_DYLIB:-$ROOT_DIR/build/sffi/libsimple_runtime_wm.$RUNTIME_DYLIB_EXT}"
+SIMPLE_RUNTIME_C_DYLIB="${SIMPLE_WM_RUNTIME_C_DYLIB:-$ROOT_DIR/build/sffi/libsimple_runtime_c_wm.$RUNTIME_DYLIB_EXT}"
 DRIVER_TIMEOUT_SECS="${WM_EVIDENCE_TIMEOUT_SECS:-20}"
 SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
 SIMPLE_BIN_STATUS=unchecked
@@ -184,8 +190,20 @@ if [ ! -s "$SPL_WINIT_LIB" ] || [ "$ROOT_DIR/src/runtime/spl_winit/src/lib.rs" -
         exit 1
     fi
 fi
-if [ ! -s "$SPL_WINIT_LIB" ] || [ ! -s "$SIMPLE_RUNTIME_DYLIB" ]; then
+if [ ! -s "$SIMPLE_RUNTIME_DYLIB" ] || [ ! -s "$SIMPLE_RUNTIME_C_DYLIB" ] || \
+    find src/runtime src/compiler_rust/runtime src/compiler_rust/common/src/runtime_symbols.rs \
+        -type f -newer "$SIMPLE_RUNTIME_DYLIB" -print -quit | grep -q .; then
+    if ! sh scripts/build/build_simple_runtime_sffi.shs >"$BUILD_DIR/build-simple-runtime-sffi.log" 2>&1; then
+        emit_failure host-runtime-provider-build-failed "$snapshot_hook" "$capture_hook" "$input_hook"
+        exit 1
+    fi
+fi
+if [ ! -s "$SPL_WINIT_LIB" ] || [ ! -s "$SIMPLE_RUNTIME_DYLIB" ] || [ ! -s "$SIMPLE_RUNTIME_C_DYLIB" ]; then
     emit_failure host-runtime-bridge-missing "$snapshot_hook" "$capture_hook" "$input_hook"
+    exit 1
+fi
+if ! nm -g "$SIMPLE_RUNTIME_C_DYLIB" 2>/dev/null | grep -Eq '(_| )rt_engine2d_rocm_download_pixels$'; then
+    emit_failure host-runtime-provider-incomplete "$snapshot_hook" "$capture_hook" "$input_hook"
     exit 1
 fi
 
@@ -234,7 +252,7 @@ SIMPLE_WM_EVIDENCE_SNAPSHOT_PATH="$ROOT_DIR/$FULLSCREEN_SNAPSHOT.live" \
 SIMPLE_WM_EVIDENCE_CAPTURE_PATH="$ROOT_DIR/$FULLSCREEN_CAPTURE.live" \
 SIMPLE_WM_EVIDENCE_INPUT_FIFO="$ROOT_DIR/$COMMAND_PATH" \
 SIMPLE_WM_RASTER="${SIMPLE_WM_RASTER:-simple-2d-winit-buffer}" \
-DYLD_INSERT_LIBRARIES="$SPL_WINIT_LIB:$SIMPLE_RUNTIME_DYLIB${DYLD_INSERT_LIBRARIES:+:$DYLD_INSERT_LIBRARIES}" \
+DYLD_INSERT_LIBRARIES="$SPL_WINIT_LIB:$SIMPLE_RUNTIME_DYLIB:$SIMPLE_RUNTIME_C_DYLIB${DYLD_INSERT_LIBRARIES:+:$DYLD_INSERT_LIBRARIES}" \
     "$NATIVE_BIN" >"$LAUNCH_LOG" 2>&1 &
 wm_pid=$!
 cleanup() {

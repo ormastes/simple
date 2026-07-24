@@ -18,8 +18,13 @@ use common.ui.web_render_api.{
     WebRenderPatchEnvelope,
     WebRenderSnapshotEnvelope,
     WebRenderBinaryArtifactMetadata,
+    WebRenderMaterialFallbackProvenance,
     WebRenderWasmArtifactMetadata,
+    web_render_artifact_with_backend_readback_source,
     web_render_artifact_with_binary_metadata,
+    web_render_artifact_with_material_fallback,
+    web_render_artifact_with_runtime_dispatch_payload,
+    web_render_artifact_with_runtime_queue_handle,
     web_render_capabilities_for_target,
     web_render_body_html,
     web_render_engine2d_rendered_artifact,
@@ -99,6 +104,34 @@ describe "shared web render API":
         expect(with_binary.binary_bytes).to_equal(128)
         expect(with_binary.binary_layout_bytes).to_equal(64)
         expect(with_binary.binary_command_count).to_equal(3)
+
+    it "defaults and preserves material fallback provenance through artifact rebuilds":
+        val req = WebRenderRequest.html(WEB_RENDER_TARGET_PURE_SIMPLE, "", "<main>fallback</main>", "", "", 32, 16)
+        val base = web_render_to_artifact(req)
+        expect(base.material_fallback.kind).to_equal("none")
+        expect(base.material_fallback.reason).to_equal("not_requested")
+        expect(base.material_fallback.material_sha256).to_equal("")
+
+        val material_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        val realized = WebRenderMaterialFallbackProvenance.solid("cpu-raster-backdrop-sampling-unavailable", material_sha256)
+        val with_material = web_render_artifact_with_material_fallback(base, realized)
+        val with_binary = web_render_artifact_with_binary_metadata(with_material, WebRenderBinaryArtifactMetadata(
+            schema: "test-schema",
+            cache_key: "test-cache-key",
+            cache_path: "test-cache-path",
+            encoded_bytes: 10,
+            layout_bytes: 8,
+            command_count: 2
+        ))
+        val rendered = web_render_engine2d_rendered_artifact(with_binary, "software")
+        val queued = web_render_artifact_with_runtime_queue_handle(rendered, "submitted", "drained", 7, 1, 9, "queue drained")
+        val dispatched = web_render_artifact_with_runtime_dispatch_payload(queued, "dispatched", "payload accepted", 12, 34, "payload")
+        val readback = web_render_artifact_with_backend_readback_source(dispatched, "readback", "software", 512, 99, "same-frame readback", "device_readback")
+
+        expect(readback.material_fallback.kind).to_equal("solid-material")
+        expect(readback.material_fallback.reason).to_equal("cpu-raster-backdrop-sampling-unavailable")
+        expect(readback.material_fallback.material_sha256).to_equal(material_sha256)
+        expect(readback.material_fallback.material_sha256.len()).to_equal(64)
 
     it "reports native host capabilities through the common API":
         val caps = web_render_capabilities_for_target(WEB_RENDER_TARGET_ELECTRON)

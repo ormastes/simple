@@ -1,8 +1,15 @@
 use std.spec.*
 use app.io.mod.{file_read}
-use os.compositor.simple_web_window_renderer.{simple_web_content_frame_cached, simple_web_content_render_request_with_theme, simple_web_content_revision}
+use os.compositor.simple_web_window_renderer.{simple_web_content_frame_cached, simple_web_content_render_request_with_theme, simple_web_content_revision, simple_web_content_revision_with_theme}
 use common.ui.window_scene.{WM_CONTENT_ORIGIN_SIMPLE_WEB}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_render_html_software_pixels}
 use std.gc_async_mut.ui.web_render_pixel_backend.{web_render_pixel_artifact_cache}
+
+fn contains_pixel(pixels: [u32], value: u32) -> bool:
+    for pixel in pixels:
+        if pixel == value:
+            return true
+    false
 
 describe "Simple Web compositor adapter":
 
@@ -35,6 +42,39 @@ describe "Simple Web compositor adapter":
         val req = simple_web_content_render_request_with_theme("glass_dark", "Runtime title", "<p>body</p>", 80, 40)
         expect(req.body_html.contains("wm-app-titlebar")).to_be(false)
         expect(req.body_html.contains("wm-app-content")).to_be(true)
+
+    it "composes Aetheric package CSS instead of a renderer-owned palette":
+        val req = simple_web_content_render_request_with_theme("aetheric_dark", "Runtime title", "<p>body</p>", 80, 40)
+        expect(req.css).to_contain("--ui-accent: #adc6ff")
+        expect(req.css).to_contain(".widget-panel")
+        expect(req.css).to_contain("--theme-icon-terminal")
+        expect(req.css).to_contain("backdrop-filter")
+        expect(req.body_html).to_contain("data-wm-theme-fallback='solid-material'")
+        expect(req.body_html).to_contain("data-wm-theme-bg='#1F1F21'")
+        expect(req.body_html).to_contain("data-wm-theme-fg='#E4E2E4'")
+        expect(req.css.contains("#dbeafe")).to_be(false)
+        expect(req.css.contains("#f8fafc")).to_be(false)
+
+    it "does not overlay the legacy blue slate WM heuristic on themed content":
+        val cache = web_render_pixel_artifact_cache(80, 40, "software")
+        val revision = simple_web_content_revision_with_theme("aetheric_dark", "Theme", "<div>content</div>", 80, 40, 0)
+        val frame = simple_web_content_frame_cached(cache, "theme-window", 1, revision, "aetheric_dark", "Theme", "<div>content</div>", 80, 40, 0)
+        expect(contains_pixel(frame.pixels, 0xFF1F1F21u32)).to_be(true)
+        expect(contains_pixel(frame.pixels, 0xFF2050A0u32)).to_be(false)
+        expect(contains_pixel(frame.pixels, 0xFF182230u32)).to_be(false)
+
+    it "realizes the declared solid fallback instead of the translucent surface RGB":
+        val html = "<div data-wm-theme-fallback='solid-material' data-wm-theme-bg='#123456' data-wm-theme-fg='#FEDCBA' style='width:24px;height:16px;background:rgba(255,0,0,0.2);color:#FFFFFF;backdrop-filter:blur(12px)'>fallback</div>"
+        val pixels = simple_web_layout_render_html_software_pixels(html, 24, 16)
+        expect(contains_pixel(pixels, 0xFF123456u32)).to_be(true)
+        expect(contains_pixel(pixels, 0xFFFEDCBAu32)).to_be(true)
+
+    it "keeps compatibility aliases package-owned and themes cache revisions":
+        val canonical = simple_web_content_revision_with_theme("aetheric_dark", "title", "<p>body</p>", 80, 40, 0)
+        val alias = simple_web_content_revision_with_theme("glass_light", "title", "<p>body</p>", 80, 40, 0)
+        val missing = simple_web_content_revision_with_theme("missing_theme_for_revision_test", "title", "<p>body</p>", 80, 40, 0)
+        expect(alias).to_equal(canonical)
+        assert_not_equal(missing, canonical)
 
     it "keeps unchanged content identity stable and changes it on mutation":
         val first_cache = web_render_pixel_artifact_cache(96, 48, "software")

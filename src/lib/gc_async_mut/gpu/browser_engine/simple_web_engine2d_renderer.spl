@@ -1,9 +1,13 @@
 #![allow(large_file)]  # Intentional: legacy heuristic parser is retained only for pixel compatibility.
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter.{simple_web_layout_render_html_pixels, simple_web_layout_render_html_readback, present_layout_pixels_with_engine2d_readback}
-use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{simple_web_layout_render_html_pixels_engine2d}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    SimpleWebLayoutEngine2DReadbackResult,
+    simple_web_layout_render_html_pixels_engine2d,
+    simple_web_layout_render_html_readback_engine2d_result
+}
 use std.gc_async_mut.gpu.engine2d.backend.{Engine2DReadback, engine2d_readback}
 use std.gc_async_mut.gpu.engine2d.helpers_availability.{backend_canonical_name}
-use common.ui.wm_chrome_theme.{wm_chrome_theme}
+use common.ui.web_render_api.{WebRenderMaterialFallbackProvenance}
 
 class SimpleWebHeuristicSurface:
     width: i32
@@ -51,6 +55,7 @@ class SimpleWebEngine2DStaticPixelCache:
     backend_name: text
     last_html: text
     last_pixels: [u32]
+    last_material_fallback: WebRenderMaterialFallbackProvenance
     hits: i32
     stores: i32
 
@@ -62,19 +67,27 @@ impl SimpleWebEngine2DStaticPixelCache:
             backend_name: backend_name,
             last_html: "",
             last_pixels: [],
+            last_material_fallback: WebRenderMaterialFallbackProvenance.none(),
             hits: 0,
             stores: 0
         )
 
     me pixels_for_html(html: text) -> [u32]:
+        self.result_for_html(html).readback.pixels
+
+    me result_for_html(html: text) -> SimpleWebLayoutEngine2DReadbackResult:
         if html == self.last_html and self.last_pixels.len() == self.width * self.height:
             self.hits = self.hits + 1
-            return self.last_pixels
-        val pixels = simple_web_engine2d_render_html_pixels(html, self.width, self.height, self.backend_name)
+            return SimpleWebLayoutEngine2DReadbackResult(
+                readback: engine2d_readback(self.last_pixels, "cache"),
+                material_fallback: self.last_material_fallback
+            )
+        val result = simple_web_layout_render_html_readback_engine2d_result(html, self.width, self.height, self.backend_name)
         self.last_html = html
-        self.last_pixels = pixels
+        self.last_pixels = result.readback.pixels
+        self.last_material_fallback = result.material_fallback
         self.stores = self.stores + 1
-        pixels
+        result
 
 fn _hex_digit_value(c: text) -> u32:
     if c == "0": return 0u32
@@ -401,10 +414,9 @@ fn _html_accent_color(html: text) -> u32:
         return 0xFF22C55Eu32
     if html.contains("simple-web-warning"):
         return 0xFFF59E0Bu32
-    # Aqua accent (see common.ui.wm_chrome_theme.wm_chrome_theme_defaults) —
-    # feeds the WM demo accent stripes drawn below alongside the
-    # already-threaded title_focused titlebar.
-    wm_chrome_theme().accent
+    if html.contains("simple-web-accent"):
+        return 0xFF2563EBu32
+    0xFF2563EBu32
 
 fn _html_background_color(html: text) -> u32:
     val body_start = html.index_of("<body")
@@ -827,6 +839,12 @@ pub fn simple_web_engine2d_render_html_pixels(html: text, width: i32, height: i3
     val has_wm_titlebar = html.contains("wm-app-titlebar")
     val has_wm_content = html.contains("wm-app-content")
     val has_simple_web_mark = html.contains("Simple Web") or html.contains("about:network")
+    # WM class names can appear in package/adapter CSS even when no matching
+    # titlebar element exists. The former substring heuristic painted a fixed
+    # blue/slate demo palette over the fully resolved Aetheric document. WM
+    # content always needs real selector matching and CSS layout.
+    if has_wm_titlebar or has_wm_content:
+        return simple_web_layout_render_html_pixels(html, width, height, backend_name)
     val needs_selector_layout = _style_block_has_class_or_id_selector(html)
     # Result-based discriminator: route to the heuristic only when it
     # recognizes structure it can faithfully reproduce (a resolved background
@@ -885,11 +903,6 @@ pub fn simple_web_engine2d_render_html_pixels(html: text, width: i32, height: i3
             stripe_x = stripe_x + 17
 
     val header_h = if height < 24: height else: 24
-    if has_wm_titlebar and header_h > 0:
-        # Aqua title_focused (see common.ui.wm_chrome_theme.wm_chrome_theme_defaults)
-        engine.draw_rect_filled(0, 0, width, header_h, wm_chrome_theme().title_focused)
-    if has_wm_content and height > header_h:
-        engine.draw_rect_filled(0, header_h, width, height - header_h, 0xFF182230u32)
     if has_simple_web_mark:
         engine.draw_rect_filled(6, 6, 24, 3, 0xFFFFFFFFu32)
 

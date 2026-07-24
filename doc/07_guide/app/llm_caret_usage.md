@@ -5,6 +5,26 @@ Date: 2026-07-07
 Production-quality features of the shipped `src/app/llm_caret` path. Pure-Simple;
 UI on the Simple TUI stdlib (`std.tui`).
 
+## GUI backends
+
+LLM Caret keeps the same provider and `/api/chat` contract across its GUI
+surfaces:
+
+- `--gui` serves the browser GUI and opens the system browser.
+- `--electron` serves that GUI and opens it in the canonical repository
+  Electron shell. For local automation only, set
+  `LLM_CARET_ELECTRON_DEBUG_PORT` to expose Electron's debugging endpoint.
+- `--metal-gui` runs the pure-Simple native GUI. Semantic HTML is parsed and
+  laid out by Simple Web into `DrawIrComposition`; Engine2D then owns Metal
+  lowering and presentation. The path fails closed unless readback reports
+  `device_readback`, a positive backend handle/device identity, the expected
+  pixel count, and a nonzero checksum.
+
+The native composer accepts keyboard input, Enter submission, and Send-button
+clicks. With the deterministic test provider, submitting `test` displays
+`hello`. Use `--provider dummy` for that smoke test; the Metal GUI intentionally
+rejects other providers until an asynchronous provider bridge is designed.
+
 ## Interactive chat UI (Simple TUI)
 
 The chat runs on Simple's own `std.tui` framework (ANSI, no ncurses/FFI):
@@ -68,6 +88,9 @@ and cross-module `char.to_i64()`. See
 
 ## Related
 
+- Architecture: `doc/04_architecture/llm_caret_gui_backends.md`
+- GUI design: `doc/05_design/llm_caret_gui_backends_gui.md`
+- System manual: `doc/06_spec/03_system/app/llm_caret/feature/llm_caret_gui_backends_spec.md`
 - Design: `doc/05_design/llm_caret_claude_cli_full_parity.md`
 - Plan: `doc/03_plan/agent_tasks/llm_caret_claude_cli_full_parity_impl_plan.md`
 - Trace gate (docs-coverage only): `llm_caret_claude_cli_harden.md`

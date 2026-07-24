@@ -120,7 +120,11 @@ mod tests {
     #[test]
     fn test_instance_creation() {
         let instance = VulkanInstance::get_or_init();
-        assert!(instance.is_ok(), "Failed to create Vulkan instance");
+        assert!(
+            instance.is_ok(),
+            "Failed to create Vulkan instance: {:?}",
+            instance.err()
+        );
     }
 
     #[test]

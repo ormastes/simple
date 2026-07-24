@@ -92,6 +92,55 @@ pub extern "C" fn rt_engine2d_simd_copy_row_u32(src: RuntimeValue) -> RuntimeVal
     pixel_array(&copy_row_u32(&pixel_vec(src)))
 }
 
+/// Rust-hosted ABI for an in-place-style `[u32]` span fill.
+///
+/// Runtime arrays are persistent values in the hosted ABI, so this returns a
+/// fresh array containing the updated destination, matching the Simple
+/// function's `dst = rt_engine2d_simd_fill_span_u32(dst, ...)` contract.
+#[no_mangle]
+pub extern "C" fn rt_engine2d_simd_fill_span_u32(
+    dst: RuntimeValue,
+    offset: i64,
+    count: i64,
+    color: i64,
+) -> RuntimeValue {
+    let mut values = pixel_vec(dst);
+    let start = offset.max(0) as usize;
+    if start >= values.len() || count <= 0 {
+        return pixel_array(&values);
+    }
+    let end = start.saturating_add(count as usize).min(values.len());
+    fill_row_into(&mut values[start..end], color as u32);
+    pixel_array(&values)
+}
+
+/// Rust-hosted ABI for an in-place-style `[u32]` span copy.
+#[no_mangle]
+pub extern "C" fn rt_engine2d_simd_copy_span_u32(
+    dst: RuntimeValue,
+    dst_offset: i64,
+    src: RuntimeValue,
+    src_offset: i64,
+    count: i64,
+) -> RuntimeValue {
+    let mut dst_values = pixel_vec(dst);
+    let src_values = pixel_vec(src);
+    let dst_start = dst_offset.max(0) as usize;
+    let src_start = src_offset.max(0) as usize;
+    if dst_start >= dst_values.len() || src_start >= src_values.len() || count <= 0 {
+        return pixel_array(&dst_values);
+    }
+    let available = count as usize;
+    let copied = available
+        .min(dst_values.len() - dst_start)
+        .min(src_values.len() - src_start);
+    copy_row_into(
+        &src_values[src_start..src_start + copied],
+        &mut dst_values[dst_start..dst_start + copied],
+    );
+    pixel_array(&dst_values)
+}
+
 #[inline]
 fn blend_pixel(src: u32, dst: u32) -> u32 {
     let sa = src >> 24;
@@ -295,6 +344,17 @@ mod tests {
         let src = pixel_array(&[0x0000_0000, 0xffff_0000]);
         let blended = rt_engine2d_simd_blend_row_u32(dst, src);
         assert_eq!(pixel_vec(blended), vec![0xff10_2030, 0xffff_0000]);
+    }
+
+    #[test]
+    fn hosted_span_abis_clamp_and_preserve_untouched_pixels() {
+        let dst = pixel_array(&[1, 2, 3, 4, 5]);
+        let filled = rt_engine2d_simd_fill_span_u32(dst, 1, 2, 9);
+        assert_eq!(pixel_vec(filled), vec![1, 9, 9, 4, 5]);
+
+        let src = pixel_array(&[7, 8, 6]);
+        let copied = rt_engine2d_simd_copy_span_u32(filled, 3, src, 1, 9);
+        assert_eq!(pixel_vec(copied), vec![1, 9, 9, 8, 6]);
     }
 
     #[test]

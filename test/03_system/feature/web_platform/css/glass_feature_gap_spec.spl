@@ -1,6 +1,8 @@
 use std.spec.*
 
 use std.gc_async_mut.gpu.browser_engine.glass_comparison_runner.{identify_missing_features}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_render_html_draw_ir}
+use common.ui.draw_ir.{DrawIrCommand}
 
 fn _contains(items: [text], needle: text) -> bool:
     var i = 0
@@ -9,6 +11,22 @@ fn _contains(items: [text], needle: text) -> bool:
             return true
         i = i + 1
     false
+
+fn _draw_ir_command_by_id(commands: [DrawIrCommand], component_id: text) -> DrawIrCommand:
+    var i = 0
+    while i < commands.len():
+        if commands[i].component_id == component_id:
+            return commands[i]
+        i = i + 1
+    commands[0]
+
+fn _draw_ir_style_value(command: DrawIrCommand, key: text) -> text:
+    var i = 0
+    while i < command.computed_style.len():
+        if command.computed_style[i].key == key:
+            return command.computed_style[i].value
+        i = i + 1
+    ""
 
 describe "Glass comparison feature gap detection":
 
@@ -27,6 +45,22 @@ describe "Glass comparison feature gap detection":
         val html = "<style>.panel { box-shadow: 0 8px 24px #000, 0 2px 6px #333; }</style><div class='panel'></div>"
         val missing = identify_missing_features(html)
         expect(_contains(missing, "box-shadow (multi-layer)")).to_equal(false)
+
+    it "preserves resolved glass effects and declares the backdrop raster fallback":
+        val html = "<style>:root { --glass-blur: 12px; --glass-saturation: 145%; } #panel { background: rgba(31,31,33,0.80); backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturation)); box-shadow: 0 8px 24px #000, 0 2px 6px #333; }</style><div id='panel'></div>"
+        val composition = simple_web_layout_render_html_draw_ir(html, 80, 48)
+        val panel = _draw_ir_command_by_id(composition.batches[0].commands, "panel")
+
+        expect(_draw_ir_style_value(panel, "backdrop-filter")).to_equal("blur(12px) saturate(145%)")
+        expect(_draw_ir_style_value(panel, "backdrop-filter-capability")).to_equal("unavailable")
+        expect(_draw_ir_style_value(panel, "backdrop-filter-fallback")).to_equal("solid-material")
+        expect(_draw_ir_style_value(panel, "backdrop-filter-fallback-reason")).to_equal("cpu-raster-backdrop-sampling-unavailable")
+        expect(_draw_ir_style_value(panel, "background-color")).to_equal("4280229665")
+        expect(_draw_ir_style_value(panel, "box-shadow")).to_equal("0 8px 24px #000, 0 2px 6px #333")
+        expect(_draw_ir_style_value(panel, "box-shadow-raw")).to_equal("0 8px 24px #000, 0 2px 6px #333")
+        expect(_draw_ir_style_value(panel, "box-shadow-layer-count")).to_equal("2")
+        expect(_draw_ir_style_value(panel, "box-shadow-blur-radius")).to_equal("15")
+        expect(_contains(identify_missing_features(html), "backdrop-filter: blur()")).to_equal(true)
 
     it "does not report linear gradients as unsupported":
         val html = "<style>.panel { background: linear-gradient(180deg, #fff, #000); }</style><div class='panel'></div>"

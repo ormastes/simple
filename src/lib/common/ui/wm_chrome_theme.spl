@@ -8,13 +8,11 @@
 #
 # The defaults below are the classic Mac OS X "Aqua" glass look (light
 # pinstripe window bodies, glossy Aqua-blue accent/focused-titlebar, light
-# brushed-metal chrome) — derived from the AQUA_LIGHT_* tokens in
-# src/lib/common/ui/glass/numeric_tokens.spl via _wm_argb() below (single
-# source of truth; command_lane is the one field with no AQUA_LIGHT_*
-# counterpart and stays a literal — see comment at its call site). Previously
-# this function reproduced a dark-slate palette byte-for-byte; that pin moved
-# intentionally with this Aqua theme change, so any WM bitmap-evidence gate
-# asserting the old dark literals needs its baseline refreshed (see
+# brushed-metal chrome) — see src/lib/common/ui/glass/numeric_tokens.spl
+# AQUA_LIGHT_* for the named palette this mirrors. Previously this function
+# reproduced a dark-slate palette byte-for-byte; that pin moved intentionally
+# with this Aqua theme change, so any WM bitmap-evidence gate asserting the
+# old dark literals needs its baseline refreshed (see
 # test/03_system/gui/wm_compare/wm_chrome_theme_spec.spl for the in-repo
 # pin, updated alongside this change). A theme can be installed at runtime
 # via register_wm_chrome_theme(); wm_chrome_theme() then returns the
@@ -23,12 +21,7 @@
 # Design: composition + a module-level override var (same idiom as
 # widget_store_ops.spl). No inheritance.
 
-use common.ui.glass.numeric_tokens.{
-    AQUA_LIGHT_DESKTOP_BG, AQUA_LIGHT_TASKBAR, AQUA_LIGHT_TEXT,
-    AQUA_LIGHT_TITLEBAR_FOCUSED, AQUA_LIGHT_TITLEBAR_UNFOCUSED,
-    AQUA_LIGHT_SHADOW_A, AQUA_LIGHT_SURFACE, AQUA_LIGHT_ELEVATED,
-    AQUA_LIGHT_ACCENT, GLASS_BTN_CLOSE
-}
+use common.ui.theme_render_snapshot.{ThemeRenderSnapshot}
 
 struct WmChromeColors:
     desktop_bg: u32          # desktop backdrop (Aqua light default: 0xff5a7fb5)
@@ -45,36 +38,25 @@ struct WmChromeColors:
     close_button: u32        # window close control
     background_hex: text     # chrome background as css hex ("#5A7FB5")
 
-fn _wm_argb(rgb: u64, alpha: u64) -> u32:
-    """Combine a glass numeric token (u64, 0x00RRGGBB convention) with an
-    8-bit alpha into a packed WM ARGB u32 — the single conversion point so
-    wm_chrome_theme_defaults() derives its palette from the AQUA_LIGHT_*
-    tokens instead of hand-copying literals."""
-    (alpha.to_u32() << 24) | (rgb.to_u32() & 0x00FFFFFFu32)
-
 fn wm_chrome_theme_defaults() -> WmChromeColors:
-    # Classic Aqua light glass palette, derived from AQUA_LIGHT_* (and the
-    # theme-independent GLASS_BTN_CLOSE) in glass/numeric_tokens.spl via
-    # _wm_argb() above — no hand-copied literals. title_focused is the pale
-    # aqua-blue brushed-metal titlebar fill (NOT the saturated accent) so
+    # Classic Aqua light glass palette (mirrors AQUA_LIGHT_* in
+    # glass/numeric_tokens.spl). title_focused is the pale aqua-blue
+    # brushed-metal titlebar fill (NOT the saturated accent) so
     # text_primary's dark glyphs stay readable on it — accent is reserved
     # for thin 2px stripes/underlines that never carry text directly.
     WmChromeColors(
-        desktop_bg: _wm_argb(AQUA_LIGHT_DESKTOP_BG, 255u64),
-        compositor_bg: _wm_argb(AQUA_LIGHT_DESKTOP_BG, 255u64),
-        # command_lane has no AQUA_LIGHT_* counterpart (no token in
-        # glass/numeric_tokens.spl carries this RGB) — left as the original
-        # literal to preserve byte-identical output; not folded.
+        desktop_bg: 0xff5a7fb5u32,
+        compositor_bg: 0xff5a7fb5u32,
         command_lane: 0xfff5f5f7u32,
-        taskbar: _wm_argb(AQUA_LIGHT_TASKBAR, 255u64),
-        text_primary: _wm_argb(AQUA_LIGHT_TEXT, 255u64),
-        title_focused: _wm_argb(AQUA_LIGHT_TITLEBAR_FOCUSED, 255u64),
-        title_unfocused: _wm_argb(AQUA_LIGHT_TITLEBAR_UNFOCUSED, 255u64),
-        window_shadow: _wm_argb(0u64, AQUA_LIGHT_SHADOW_A),
-        window_body: _wm_argb(AQUA_LIGHT_SURFACE, 255u64),
-        host_window_body: _wm_argb(AQUA_LIGHT_ELEVATED, 255u64),
-        accent: _wm_argb(AQUA_LIGHT_ACCENT, 255u64),
-        close_button: _wm_argb(GLASS_BTN_CLOSE, 255u64),
+        taskbar: 0xffe8e8ecu32,
+        text_primary: 0xff1d1d1fu32,
+        title_focused: 0xffdceafbu32,
+        title_unfocused: 0xffe2e2e6u32,
+        window_shadow: 0x28000000u32,
+        window_body: 0xfff2f2f2u32,
+        host_window_body: 0xffe8e8e8u32,
+        accent: 0xff2c6fefu32,
+        close_button: 0xffff5f57u32,
         background_hex: "#5A7FB5"
     )
 
@@ -83,6 +65,7 @@ fn wm_chrome_theme_defaults() -> WmChromeColors:
 # only module-global shape that round-trips a struct value correctly under the
 # compiled/test interpreter. Reads happen once per scene projection.
 var _wm_chrome_override: [WmChromeColors] = []
+var _active_theme_render_snapshot: [ThemeRenderSnapshot] = []
 
 fn wm_chrome_theme() -> WmChromeColors:
     """Return the active WM chrome colors — the installed theme if one is
@@ -99,6 +82,72 @@ fn register_wm_chrome_theme(colors: WmChromeColors):
 fn reset_wm_chrome_theme():
     """Restore the byte-identical default palette."""
     _wm_chrome_override = []
+    _active_theme_render_snapshot = []
+
+fn active_theme_composed_css(theme_id: text) -> text:
+    if _active_theme_render_snapshot.len() == 0:
+        return ""
+    val snapshot = _active_theme_render_snapshot[0]
+    if theme_id == "" or theme_id == snapshot.id:
+        return snapshot.composed_css
+    ""
+
+fn active_theme_source_fingerprint(theme_id: text) -> text:
+    if _active_theme_render_snapshot.len() == 0:
+        return ""
+    val snapshot = _active_theme_render_snapshot[0]
+    if theme_id == "" or theme_id == snapshot.id:
+        return snapshot.source_manifest_sha256
+    ""
+
+fn active_theme_solid_fallback_rgba(theme_id: text) -> u32:
+    if _active_theme_render_snapshot.len() == 0:
+        return 0u32
+    val snapshot = _active_theme_render_snapshot[0]
+    if theme_id == "" or theme_id == snapshot.id:
+        return snapshot.material.solid_fallback_rgba
+    0u32
+
+fn active_theme_text_rgba(theme_id: text) -> u32:
+    if _active_theme_render_snapshot.len() == 0:
+        return 0u32
+    val snapshot = _active_theme_render_snapshot[0]
+    if theme_id == "" or theme_id == snapshot.id:
+        return snapshot.material.text_rgba
+    0u32
+
+fn _wm_hex_digit_upper(value: u32) -> text:
+    val digits = "0123456789ABCDEF"
+    digits.char_at(value.to_i64())
+
+fn _wm_argb_to_rgb_hex(value: u32) -> text:
+    val r = (value >> 16) & 0xFF
+    val g = (value >> 8) & 0xFF
+    val b = value & 0xFF
+    "#{_wm_hex_digit_upper(r >> 4)}{_wm_hex_digit_upper(r & 0xF)}{_wm_hex_digit_upper(g >> 4)}{_wm_hex_digit_upper(g & 0xF)}{_wm_hex_digit_upper(b >> 4)}{_wm_hex_digit_upper(b & 0xF)}"
+
+fn wm_chrome_colors_from_render_snapshot(snapshot: ThemeRenderSnapshot) -> WmChromeColors:
+    val material = snapshot.material
+    val active_shadow = if material.active_shadows.len() > 0: material.active_shadows[0].rgba else: 0x28000000u32
+    WmChromeColors(
+        desktop_bg: material.desktop_fill_rgba,
+        compositor_bg: material.desktop_fill_rgba,
+        command_lane: material.window_fill_rgba,
+        taskbar: material.window_fill_rgba,
+        text_primary: material.text_rgba,
+        title_focused: material.active_title_fill_rgba,
+        title_unfocused: material.inactive_title_fill_rgba,
+        window_shadow: active_shadow,
+        window_body: material.window_fill_rgba,
+        host_window_body: material.window_fill_rgba,
+        accent: snapshot.accent_rgba,
+        close_button: snapshot.accent_rgba,
+        background_hex: _wm_argb_to_rgb_hex(material.desktop_fill_rgba)
+    )
+
+fn apply_theme_render_snapshot_to_wm_chrome(snapshot: ThemeRenderSnapshot):
+    _active_theme_render_snapshot = [snapshot]
+    register_wm_chrome_theme(wm_chrome_colors_from_render_snapshot(snapshot))
 
 # =========================================================================
 # GUI (CSS) theme bridge — the WM chrome shares the GUI theme's tokens.
@@ -153,13 +202,99 @@ fn _wm_hex_val(c: text) -> i32:
         return 15
     -1
 
+fn _wm_clamp_byte(value: i64) -> i64:
+    if value < 0:
+        return 0
+    if value > 255:
+        return 255
+    value
+
+fn _wm_decimal_alpha_byte(value: text) -> i64:
+    """Convert CSS alpha text to a byte without floating-point parsing.
+
+    Accepts the common 0..1 decimal form and integer 0..255 form. Extra
+    decimal digits are retained as a rational numerator/denominator so
+    `0.75` deterministically becomes 191 (nearest byte)."""
+    val trimmed = value.trim()
+    if trimmed == "":
+        return -1
+    if not trimmed.contains("."):
+        val integer = trimmed.parse_i64() ?? -1
+        if integer == 0 or integer == 1:
+            return integer * 255
+        if integer >= 0 and integer <= 255:
+            return integer
+        return -1
+    val parts = trimmed.split(".")
+    if parts.len() != 2:
+        return -1
+    val whole = parts[0].trim().parse_i64() ?? -1
+    val digits = parts[1].trim()
+    if whole < 0 or whole > 1 or digits.len() == 0:
+        return -1
+    var numerator: i64 = 0
+    var denominator: i64 = 1
+    var i = 0
+    while i < digits.len():
+        val digit = _wm_hex_val(digits.char_at(i))
+        if digit < 0 or digit > 9:
+            return -1
+        numerator = numerator * 10 + digit.to_i64()
+        denominator = denominator * 10
+        i = i + 1
+    if whole == 1:
+        if numerator != 0:
+            return -1
+        return 255
+    (numerator * 255 + denominator / 2) / denominator
+
+fn _wm_css_function_to_argb(css: text, with_alpha: bool) -> u32:
+    val open_len = if with_alpha: 5 else: 4
+    if css.len() <= open_len or not css.ends_with(")"):
+        return 0
+    val inner = css.substring(open_len, css.len() - 1)
+    val parts = inner.split(",")
+    val expected = if with_alpha: 4 else: 3
+    if parts.len() != expected:
+        return 0
+    val r = parts[0].trim().parse_i64() ?? -1
+    val g = parts[1].trim().parse_i64() ?? -1
+    val b = parts[2].trim().parse_i64() ?? -1
+    if r < 0 or r > 255 or g < 0 or g > 255 or b < 0 or b > 255:
+        return 0
+    val a = if with_alpha: _wm_decimal_alpha_byte(parts[3]) else: 255
+    if a < 0:
+        return 0
+    (_wm_clamp_byte(a).to_u32() << 24) | (r.to_u32() << 16) | (g.to_u32() << 8) | b.to_u32()
+
 fn wm_css_color_to_argb(css: text) -> u32:
-    """Parse a #rgb / #rrggbb CSS hex color into opaque ARGB. Returns 0 for
-    anything else (0 = "no color" sentinel throughout the chrome pipelines,
-    and callers fall back to the default palette)."""
-    val s = css.trim()
+    """Parse CSS hex/rgb/rgba colors into ARGB. Returns 0 for invalid input.
+
+    Alpha-bearing forms are required by the Aetheric package; rejecting them
+    made every translucent WM surface silently fall back to Aqua defaults."""
+    val s = css.trim().lower()
+    if s.starts_with("rgba("):
+        return _wm_css_function_to_argb(s, true)
+    if s.starts_with("rgb("):
+        return _wm_css_function_to_argb(s, false)
     if s.len() == 0 or not s.starts_with("#"):
         return 0
+    if s.len() == 9:
+        val r = _wm_hex_val(s.char_at(1)) * 16 + _wm_hex_val(s.char_at(2))
+        val g = _wm_hex_val(s.char_at(3)) * 16 + _wm_hex_val(s.char_at(4))
+        val b = _wm_hex_val(s.char_at(5)) * 16 + _wm_hex_val(s.char_at(6))
+        val a = _wm_hex_val(s.char_at(7)) * 16 + _wm_hex_val(s.char_at(8))
+        if r < 0 or g < 0 or b < 0 or a < 0:
+            return 0
+        return (a.to_u32() << 24) | (r.to_u32() << 16) | (g.to_u32() << 8) | b.to_u32()
+    if s.len() == 5:
+        val r = _wm_hex_val(s.char_at(1))
+        val g = _wm_hex_val(s.char_at(2))
+        val b = _wm_hex_val(s.char_at(3))
+        val a = _wm_hex_val(s.char_at(4))
+        if r < 0 or g < 0 or b < 0 or a < 0:
+            return 0
+        return ((a * 17).to_u32() << 24) | ((r * 17).to_u32() << 16) | ((g * 17).to_u32() << 8) | (b * 17).to_u32()
     if s.len() == 7:
         val r = _wm_hex_val(s.char_at(1)) * 16 + _wm_hex_val(s.char_at(2))
         val g = _wm_hex_val(s.char_at(3)) * 16 + _wm_hex_val(s.char_at(4))
@@ -180,7 +315,7 @@ fn _wm_pick(candidate: u32, fallback: u32) -> u32:
     if candidate != 0: candidate else: fallback
 
 fn wm_chrome_colors_from_gui_tokens(bg_hex: text, fg_hex: text, accent_hex: text, surface_hex: text, surface_hover_hex: text, error_hex: text) -> WmChromeColors:
-    """Map resolved GUI theme token values (CSS hex strings) onto the WM
+    """Map resolved GUI theme token values (CSS colors) onto the WM
     chrome palette. Unparseable/empty tokens keep the default color for
     that slot."""
     val d = wm_chrome_theme_defaults()

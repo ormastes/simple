@@ -3,6 +3,8 @@ use nogc_sync_mut.ui.theme_package.{
     default_theme_id,
     resolve_theme_alias,
     load_theme_package,
+    invalidate_theme_package_cache,
+    invalidate_all_theme_package_cache,
     resolved_theme_css,
     theme_glass_config,
     theme_icon_defaults,
@@ -12,6 +14,7 @@ use nogc_sync_mut.ui.theme_package.{
 }
 use app.ui.web.html.{generate_css}
 use os.compositor.browser_backend.{theme_bg, theme_accent}
+use app.io.mod.{file_read}
 
 describe "Folder theme packages":
 
@@ -28,6 +31,53 @@ describe "Folder theme packages":
         expect(pkg.source_reference).to_end_with("config/themes/raw/simple_os_dark_refined_alignment/code.html")
         expect(pkg.theme_path).to_equal("config/themes/aetheric_dark/theme.sdn")
         expect(pkg.family_path).to_equal("config/themes/families/aetheric/theme.sdn")
+
+    it "builds a stable content-addressed render snapshot":
+        invalidate_all_theme_package_cache()
+        val direct = load_theme_package("aetheric_dark")
+        val aliased = load_theme_package("glass_obsidian_dark")
+        expect(direct.fingerprint.len()).to_equal(64)
+        expect(direct.snapshot.source_manifest_sha256.len()).to_equal(64)
+        expect(direct.snapshot.material_sha256.len()).to_equal(64)
+        expect(direct.fingerprint).to_equal(direct.snapshot.source_manifest_sha256)
+        expect(aliased.fingerprint).to_equal(direct.fingerprint)
+        expect(aliased.snapshot.material_sha256).to_equal(direct.snapshot.material_sha256)
+        invalidate_theme_package_cache("glass_obsidian_dark")
+        val reloaded = load_theme_package("aetheric_dark")
+        expect(reloaded.fingerprint).to_equal(direct.fingerprint)
+        expect(reloaded.snapshot.material_sha256).to_equal(direct.snapshot.material_sha256)
+
+    it "preserves exact Aetheric RGBA and material semantics":
+        val snapshot = load_theme_package("aetheric_dark").snapshot
+        val material = snapshot.material
+        expect(snapshot.background_rgba).to_equal(0xFF0E0E10)
+        expect(material.desktop_fill_rgba).to_equal(0xFF131315)
+        expect(material.window_fill_rgba).to_equal(0xCC1F1F21)
+        expect(material.active_title_fill_rgba).to_equal(0xE02A2A2C)
+        expect(material.border_rgba).to_equal(0x338B90A0)
+        expect(material.surface_alpha_milli).to_equal(800)
+        expect(material.backdrop_blur_px).to_equal(30)
+        expect(material.backdrop_saturation_milli).to_equal(1700)
+        expect(material.corner_radius_px).to_equal(12)
+        expect(material.font_size_px).to_equal(14)
+        expect(material.font_weight).to_equal(400)
+        expect(material.secondary_text_rgba).to_equal(0xADC1C6D7)
+        expect(material.solid_fallback_rgba).to_equal(0xFF1F1F21)
+        expect(material.fallback_contrast_milli).to_be_greater_than(4500)
+        expect(material.active_shadows.len()).to_equal(1)
+        expect(material.active_shadows[0].offset_y_px).to_equal(28)
+        expect(material.active_shadows[0].blur_radius_px).to_equal(76)
+        expect(material.active_shadows[0].rgba).to_equal(0x75000000)
+        expect(material.inactive_shadows.len()).to_equal(1)
+        expect(material.inactive_shadows[0].rgba).to_equal(0x57000000)
+
+    it "keeps the tracked bare-metal snapshot in exact package parity":
+        val snapshot = load_theme_package("aetheric_dark").snapshot
+        val generated = file_read("src/lib/common/ui/generated/aetheric_dark_theme_snapshot.spl")
+        expect(generated).to_contain(snapshot.source_manifest_sha256)
+        expect(generated).to_contain(snapshot.material_sha256)
+        expect(generated).to_contain("desktop_fill_rgba: {snapshot.material.desktop_fill_rgba}u32")
+        expect(generated).to_contain("backdrop_saturation_milli: {snapshot.material.backdrop_saturation_milli}")
 
     it "assembles family shape CSS, base CSS, widgets, and icon defaults":
         val css = resolved_theme_css("aetheric_dark")

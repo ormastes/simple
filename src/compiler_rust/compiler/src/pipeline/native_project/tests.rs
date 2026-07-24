@@ -4498,6 +4498,10 @@ fn test_cxx_abi_symbols_are_not_stub_candidates() {
     assert!(super::tools::is_system_symbol("pthread_atfork"));
     assert!(super::tools::is_system_symbol("rewind"));
     assert!(super::tools::is_system_symbol("_rewind"));
+    assert!(super::tools::is_system_symbol("perror"));
+    assert!(super::tools::is_system_symbol("_perror"));
+    assert!(super::tools::is_system_symbol("strcasestr"));
+    assert!(super::tools::is_system_symbol("_strcasestr"));
     for symbol in [
         "_cfgetispeed",
         "_class_addMethod",
@@ -4516,6 +4520,13 @@ fn test_cxx_abi_symbols_are_not_stub_candidates() {
         assert!(super::tools::is_system_symbol(symbol), "{symbol}");
     }
     assert!(!super::tools::is_system_symbol("app__mcp__main"));
+}
+
+#[test]
+fn test_inline_asm_symbols_are_never_weak_stub_candidates() {
+    assert!(super::stubs::is_inline_asm_symbol("__simple_asm_Hf5014a9fdb029e11"));
+    assert!(super::stubs::is_inline_asm_symbol("___simple_asm_Hf5014a9fdb029e11"));
+    assert!(!super::stubs::is_inline_asm_symbol("_app__main"));
 }
 
 #[test]

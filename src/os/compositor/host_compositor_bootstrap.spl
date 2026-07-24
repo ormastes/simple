@@ -7,9 +7,8 @@ use os.compositor.hosted_backend_cocoa.{HostedCocoaBackend}
 use os.compositor.hosted_backend_win32.{HostedWin32Backend}
 use common.ui.window_scene.{shared_wm_scene_register_background_image_provider, shared_wm_scene_register_motion_background_source, BackgroundSpec, WM_BACKGROUND_KIND_MOTION}
 use app.play.wm_daemon_ensure.{wm_daemon_autoconnect}
-use std.io.{file_read_text}
-use common.ui.wm_chrome_theme.{register_wm_chrome_theme}
-use common.ui.wm_theme_css.{wm_chrome_colors_from_css_text}
+use nogc_sync_mut.ui.theme_package.{load_default_theme_package}
+use common.ui.wm_chrome_theme.{apply_theme_render_snapshot_to_wm_chrome}
 extern fn rt_env_get(key: text) -> text?
 extern fn rt_time_now_unix_micros() -> i64
 
@@ -20,13 +19,12 @@ fn _create_backend_for_kind(kind: HostBackendKind, w: i32, h: i32, title: text) 
             return sdl
         return nil
     if kind == HostBackendKind.Cocoa:
-        # Aqua desktop_bg (see common.ui.wm_chrome_theme.wm_chrome_theme_defaults)
-        val cocoa = HostedCocoaBackend.try_create(0, w, h, 0xff5a7fb5u32)
+        val cocoa = HostedCocoaBackend.try_create(0, w, h, 0xFF0F172Au32)
         if cocoa != nil:
             return cocoa
         return nil
     if kind == HostBackendKind.Win32:
-        val win32 = HostedWin32Backend.try_create(0, w, h, 0xff5a7fb5u32)
+        val win32 = HostedWin32Backend.try_create(0, w, h, 0xFF0F172Au32)
         if win32 != nil:
             return win32
         return nil
@@ -109,29 +107,10 @@ fn host_motion_background_registered_spec() -> BackgroundSpec?:
         return nil
     BackgroundSpec(kind: WM_BACKGROUND_KIND_MOTION, color: 0xFF000000u32, source: _host_motion_background_manifest_ok, fit: _host_motion_background_fit_ok)
 
-# Installs a user theme file once per process when SIMPLE_WM_THEME_FILE is
-# set (see common.ui.wm_theme_css for the .css/.html token contract). Unset
-# or unreadable/unparseable keeps the byte-identical default chrome palette
-# — wm_chrome_colors_from_css_text always per-slot-defaults, so a bad file
-# degrades gracefully instead of half-applying.
-var _host_wm_theme_file_attempted: bool = false
-
-fn ensure_host_wm_theme_file_applied():
-    if _host_wm_theme_file_attempted:
-        return
-    _host_wm_theme_file_attempted = true
-    val theme_file = rt_env_get("SIMPLE_WM_THEME_FILE") ?? ""
-    if theme_file == "":
-        return
-    val content = file_read_text(theme_file)
-    if content == "":
-        print "[host-wm] theme file unreadable, using defaults: {theme_file}"
-        return
-    register_wm_chrome_theme(wm_chrome_colors_from_css_text(content))
-    print "[host-wm] theme installed from {theme_file}"
-
 fn init_host_wm(cfg: HostWmConfig) -> HostWmHandle?:
-    ensure_host_wm_theme_file_applied()
+    # Resolve and install the registered package before any backend or scene is
+    # created, so the first visible host frame cannot observe Aqua defaults.
+    apply_theme_render_snapshot_to_wm_chrome(load_default_theme_package().snapshot)
     ensure_host_background_image_provider_registered()
     ensure_host_motion_background_source_registered(cfg.initial_size.width.to_i32(), cfg.initial_size.height.to_i32())
     # Auto-ensure the tiny background WM daemon for every REAL hosted GUI
@@ -170,4 +149,3 @@ fn init_host_wm(cfg: HostWmConfig) -> HostWmHandle?:
         window_id: window_id,
         backend: cfg.backend
     )
-

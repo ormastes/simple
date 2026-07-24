@@ -58,7 +58,22 @@ impl VulkanInstance {
 
         #[cfg(debug_assertions)]
         {
-            layer_names_raw = vec![CString::new("VK_LAYER_KHRONOS_validation").unwrap()];
+            let validation_layer = CString::new("VK_LAYER_KHRONOS_validation").unwrap();
+            let validation_available = unsafe {
+                entry
+                    .enumerate_instance_layer_properties()
+                    .map(|layers| {
+                        layers.iter().any(|layer| {
+                            CStr::from_ptr(layer.layer_name.as_ptr()) == validation_layer.as_c_str()
+                        })
+                    })
+                    .unwrap_or(false)
+            };
+            layer_names_raw = if validation_available {
+                vec![validation_layer]
+            } else {
+                vec![]
+            };
             layer_names = layer_names_raw.iter().map(|name| name.as_ptr()).collect();
         }
 
@@ -98,17 +113,27 @@ impl VulkanInstance {
             }
 
             #[cfg(target_os = "macos")]
-            extension_names_raw.push(ash::ext::metal_surface::NAME.to_owned());
+            {
+                extension_names_raw.push(ash::ext::metal_surface::NAME.to_owned());
+                extension_names_raw.push(ash::khr::portability_enumeration::NAME.to_owned());
+            }
         }
 
         for ext in &extension_names_raw {
             extension_names.push(ext.as_ptr());
         }
 
+        let mut create_flags = vk::InstanceCreateFlags::empty();
+        #[cfg(target_os = "macos")]
+        {
+            create_flags |= vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR;
+        }
+
         let create_info = vk::InstanceCreateInfo::default()
             .application_info(&app_info)
             .enabled_layer_names(&layer_names)
-            .enabled_extension_names(&extension_names);
+            .enabled_extension_names(&extension_names)
+            .flags(create_flags);
 
         let instance = unsafe {
             entry

@@ -131,7 +131,7 @@ fn compile_c_runtime_sources() {
     ];
 
     let mut build = cc::Build::new();
-    build.opt_level(2).warnings(false);
+    build.opt_level(2).warnings(false).cargo_metadata(false);
     if env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default() != "msvc" {
         build.flag_if_supported("-std=gnu11");
     }
@@ -142,6 +142,19 @@ fn compile_c_runtime_sources() {
         }
     }
     build.compile("runtime_sffi_c");
+    let out_dir = env::var("OUT_DIR").expect("OUT_DIR");
+    println!("cargo:rustc-link-search=native={out_dir}");
+    if env::var_os("CARGO_FEATURE_RUNTIME_SYMBOL_TABLE").is_some() {
+        // A runtime-symbol-table cdylib promises that every registered C
+        // provider is dynamically available. Normal selective archive
+        // extraction drops providers that are referenced only through the
+        // generated table, leaving hosted executables to abort in dyld before
+        // backend selection. Whole-archive is intentionally limited to this
+        // complete-provider feature; minimal runtime builds stay unchanged.
+        println!("cargo:rustc-link-lib=static:+whole-archive=runtime_sffi_c");
+    } else {
+        println!("cargo:rustc-link-lib=static=runtime_sffi_c");
+    }
 
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if target_os != "windows" {

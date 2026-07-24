@@ -7,6 +7,8 @@ use common.ui.simple_theme.{SimpleTheme}
 use common.ui.glass.tokens.{GlassDesignTokens}
 use common.ui.style.{UITheme, UIThemeColors, Spacing, BorderStyle, FontStyle}
 use common.ui.color.{UIColor}
+use common.ui.theme_render_snapshot.{ThemeShadowLayer, ThemeMaterialSemantics, ThemeRenderSnapshot, theme_material_sha256}
+use std.common.crypto.sha256.{sha256_text}
 use std.io_runtime.{file_exists, read_file}
 
 val THEME_REGISTRY_PATH = "config/themes/theme.sdn"
@@ -66,6 +68,7 @@ class ResolvedThemePackage:
     colors: ResolvedThemeColors
     ui_theme: UITheme
     glass_config: ResolvedThemeGlassConfig
+    snapshot: ThemeRenderSnapshot
 
 class ThemeValidationIssue:
     path: text
@@ -96,9 +99,7 @@ fn load_theme_package(theme_id: text) -> ResolvedThemePackage:
     val resolved_id = resolve_theme_alias(theme_id)
     match _theme_package_cache.get(resolved_id):
         case Some(cached):
-            val fresh_key = _mtime_key(cached.source_paths)
-            if fresh_key == cached.mtime_key:
-                return cached
+            return cached
         case _: pass_dn
 
     val registry = _read_if_exists(THEME_REGISTRY_PATH)
@@ -133,17 +134,36 @@ fn load_theme_package(theme_id: text) -> ResolvedThemePackage:
     val token_map = _token_map_from_css("{shape_css}\n{base_css}")
     val widget_map = _load_widget_css_map(required_widgets, local_widget_dir, family_widget_dir)
 
-    var paths = [THEME_REGISTRY_PATH, final_theme_path, final_family_path, base_path, shape_path, icons_path]
+    val source_reference = _root_value(theme_sdn, "source_raw_reference")
+    var paths = [THEME_REGISTRY_PATH, final_theme_path, final_family_path, base_path, shape_path, icons_path, source_reference]
     for widget in required_widgets:
         val local_path = "{local_widget_dir}/{widget}.css"
         val family_path_for_widget = "{family_widget_dir}/{widget}.css"
         val family_default = "{family_widget_dir}/defaults.css"
         if file_exists(local_path):
             paths = paths.push(local_path)
-        elif file_exists(family_path_for_widget):
+        if file_exists(family_path_for_widget):
             paths = paths.push(family_path_for_widget)
-        elif file_exists(family_default):
+        if file_exists(family_default):
             paths = paths.push(family_default)
+    paths = _sorted_unique_paths(paths)
+
+    val source_manifest_sha256 = _source_manifest_sha256(paths)
+    val material = _material_from_css(base_css, shape_css)
+    val material_sha256 = theme_material_sha256(material)
+    val composed_css = "{shape_css}\n{family_widget_css}\n{base_css}\n{theme_widget_css}\n{icon_css}\n"
+    val snapshot = ThemeRenderSnapshot(
+        id: resolved_id,
+        family_id: family_id,
+        source_reference: source_reference,
+        source_manifest_sha256: source_manifest_sha256,
+        material_sha256: material_sha256,
+        composed_css: composed_css,
+        background_rgba: colors.bg,
+        foreground_rgba: colors.fg,
+        accent_rgba: colors.accent,
+        material: material
+    )
 
     val pkg = ResolvedThemePackage(
         id: resolved_id,
@@ -158,24 +178,31 @@ fn load_theme_package(theme_id: text) -> ResolvedThemePackage:
         theme_widget_css: theme_widget_css,
         widget_css: widget_css,
         icon_css: icon_css,
-        source_reference: _root_value(theme_sdn, "source_raw_reference"),
+        source_reference: source_reference,
         source_paths: paths,
-        fingerprint: _mtime_key(paths),
-        mtime_key: _mtime_key(paths),
+        fingerprint: source_manifest_sha256,
+        mtime_key: source_manifest_sha256,
         tokens: parsed.tokens,
         token_map: token_map,
         widget_css_by_name: widget_map,
         icons: icons,
         colors: colors,
         ui_theme: ui_theme,
-        glass_config: glass_cfg
+        glass_config: glass_cfg,
+        snapshot: snapshot
     )
     _theme_package_cache[resolved_id] = pkg
     pkg
 
 fn resolved_theme_css(theme_id: text) -> text:
-    val pkg = load_theme_package(theme_id)
-    "{pkg.shape_css}\n{pkg.family_widget_css}\n{pkg.base_css}\n{pkg.theme_widget_css}\n{pkg.icon_css}\n"
+    load_theme_package(theme_id).snapshot.composed_css
+
+fn invalidate_theme_package_cache(theme_id: text):
+    val resolved_id = resolve_theme_alias(theme_id)
+    _theme_package_cache.remove(resolved_id)
+
+fn invalidate_all_theme_package_cache():
+    _theme_package_cache = {}
 
 fn theme_ui_theme(theme_id: text) -> UITheme:
     load_theme_package(theme_id).ui_theme
@@ -285,15 +312,40 @@ fn _require_file(issues: [ThemeValidationIssue], owner: text, key: text, path: t
         return _push_issue(issues, path, key, "referenced file is missing")
     issues
 
-fn _mtime_key(paths: [text]) -> text:
-    var out = ""
+fn _sorted_unique_paths(paths: [text]) -> [text]:
+    var out: [text] = []
     for path in paths:
-        if path != "" and file_exists(path):
-            val content = _read_if_exists(path)
-            out = "{out}{path}:{content.len()};"
-        else:
-            out = "{out}{path}:missing;"
+        if path == "":
+            continue
+        var seen = false
+        for existing in out:
+            if existing == path:
+                seen = true
+                break
+        if not seen:
+            out.push(path)
+    var i = 0
+    while i < out.len():
+        var j = i + 1
+        while j < out.len():
+            if out[j] < out[i]:
+                val tmp = out[i]
+                out[i] = out[j]
+                out[j] = tmp
+            j = j + 1
+        i = i + 1
     out
+
+fn _source_manifest_sha256(paths: [text]) -> text:
+    var manifest = "theme-source-manifest-v1\n"
+    for path in paths:
+        val content = _read_if_exists(path)
+        # Hash each source independently, then hash the sorted path/hash
+        # manifest. This keeps the identity content-addressed without copying
+        # whole CSS payloads into the manifest string.
+        val content_sha256 = sha256_text(content)
+        manifest = "{manifest}{path.len()}:{path}\n{content_sha256}\n"
+    sha256_text(manifest)
 
 fn _strip_value(value: text) -> text:
     var v: text = "{value.trim()}"
@@ -479,10 +531,10 @@ fn _ui_theme_from_css(name: text, base_css: text, colors: ResolvedThemeColors) -
 fn _glass_config_from_colors(colors: ResolvedThemeColors, shape_css: text) -> ResolvedThemeGlassConfig:
     ResolvedThemeGlassConfig(
         surface_color: colors.panel & 0x00FFFFFF,
-        surface_alpha: 190,
+        surface_alpha: ((colors.panel >> 24) & 0xFF).to_u8(),
         blur_radius: _px_int(_css_var(shape_css, "--blur-surface", "30px"), 30).to_u32(),
         border_color: colors.border & 0x00FFFFFF,
-        border_alpha: 48,
+        border_alpha: ((colors.border >> 24) & 0xFF).to_u8(),
         shadow_offset: 4,
         shadow_blur: 14,
         shadow_alpha: 44,
@@ -492,6 +544,153 @@ fn _glass_config_from_colors(colors: ResolvedThemeColors, shape_css: text) -> Re
         bg_bottom: colors.panel & 0x00FFFFFF
     )
 
+fn _material_from_css(base_css: text, shape_css: text) -> ThemeMaterialSemantics:
+    val desktop = _argb_from_css(_css_var(base_css, "--app-bg", "#131315"), 0xFF131315)
+    val window = _argb_from_css(_css_var(base_css, "--app-surface", "rgba(31,31,33,0.80)"), 0xCC1F1F21)
+    val active_title = _argb_from_css(_css_var(base_css, "--app-surface-elevated", "rgba(42,42,44,0.88)"), 0xE02A2A2C)
+    val inactive_title = window
+    val border = _argb_from_css(_css_var(base_css, "--app-border", "rgba(139,144,160,0.20)"), 0x338B90A0)
+    val text_color = _argb_from_css(_css_var(base_css, "--ui-fg", "#e4e2e4"), 0xFFE4E2E4)
+    val secondary_text = _argb_from_css(_css_var(base_css, "--ui-dim", "rgba(193,198,215,0.68)"), 0xADC1C6D7)
+    val active_shadows = _shadow_layers(_css_var(shape_css, "--elevation-high", "0 28px 76px rgba(0,0,0,0.46)"))
+    val inactive_shadows = _shadow_layers(_css_var(shape_css, "--elevation-mid", "0 18px 46px rgba(0,0,0,0.34)"))
+    val surface_alpha = (((window >> 24) & 0xFF).to_i64() * 1000 + 127) / 255
+    val solid_fallback = 0xFF000000 | (window & 0x00FFFFFF)
+    ThemeMaterialSemantics(
+        desktop_fill_rgba: desktop,
+        window_fill_rgba: window,
+        active_title_fill_rgba: active_title,
+        inactive_title_fill_rgba: inactive_title,
+        surface_alpha_milli: surface_alpha.to_i32(),
+        backdrop_blur_px: _px_int(_css_var(shape_css, "--blur-surface", "30px"), 30),
+        # Aetheric's canonical widget material declares saturate(170%). Keep
+        # this renderer-neutral value aligned even when no optional numeric
+        # override token is present in base.css.
+        backdrop_saturation_milli: _decimal_milli(_css_var(base_css, "--glass-backdrop-saturation", "1.7"), 1700),
+        border_width_px: _px_int(_css_var(shape_css, "--border-width-hairline", "1px"), 1),
+        border_rgba: border,
+        corner_radius_px: _px_int(_css_var(shape_css, "--radius-md", "12px"), 12),
+        active_shadows: active_shadows,
+        inactive_shadows: inactive_shadows,
+        font_family: _css_var(base_css, "--font-main", "system-ui, sans-serif"),
+        font_size_px: _px_int(_css_var(base_css, "--font-size-base", "14px"), 14),
+        font_weight: (_css_var(base_css, "--font-weight-normal", "400").to_i64() ?? 400).to_i32(),
+        text_rgba: text_color,
+        secondary_text_rgba: secondary_text,
+        solid_fallback_rgba: solid_fallback,
+        fallback_contrast_milli: _argb_contrast_milli(text_color, solid_fallback)
+    )
+
+fn _argb_luminance(color: u32) -> i64:
+    val r = ((color >> 16) & 0xFF).to_i64()
+    val g = ((color >> 8) & 0xFF).to_i64()
+    val b = (color & 0xFF).to_i64()
+    (r * 299 + g * 587 + b * 114) / 1000
+
+fn _argb_contrast_milli(fg: u32, bg: u32) -> i32:
+    val fg_l = _argb_luminance(fg)
+    val bg_l = _argb_luminance(bg)
+    val lighter = if fg_l > bg_l: fg_l else: bg_l
+    val darker = if fg_l > bg_l: bg_l else: fg_l
+    (((lighter + 5) * 1000) / (darker + 5)).to_i32()
+
+fn _clamp_css_channel(value: i64) -> u32:
+    if value < 0:
+        return 0
+    if value > 255:
+        return 255
+    value.to_u32()
+
+fn _clamp_css_alpha(value: f64) -> u32:
+    if value <= 0.0:
+        return 0
+    if value >= 1.0:
+        return 255
+    ((value * 255.0) + 0.5).to_i64().to_u32()
+
+fn _decimal_milli(value: text, fallback: i32) -> i32:
+    val trimmed = value.trim()
+    if trimmed == "":
+        return fallback
+    ((trimmed.to_f64() * 1000.0) + 0.5).to_i32()
+
+fn _split_top_level_commas(value: text) -> [text]:
+    var out: [text] = []
+    var current = ""
+    var depth = 0
+    var i = 0
+    while i < value.len():
+        val ch = value.char_at(i)
+        if ch == "(":
+            depth = depth + 1
+            current = "{current}{ch}"
+        elif ch == ")":
+            if depth > 0:
+                depth = depth - 1
+            current = "{current}{ch}"
+        elif ch == "," and depth == 0:
+            if current.trim() != "":
+                out.push(current.trim())
+            current = ""
+        else:
+            current = "{current}{ch}"
+        i = i + 1
+    if current.trim() != "":
+        out.push(current.trim())
+    out
+
+fn _split_shadow_tokens(value: text) -> [text]:
+    var out: [text] = []
+    var current = ""
+    var depth = 0
+    var i = 0
+    while i < value.len():
+        val ch = value.char_at(i)
+        if ch == "(":
+            depth = depth + 1
+            current = "{current}{ch}"
+        elif ch == ")":
+            if depth > 0:
+                depth = depth - 1
+            current = "{current}{ch}"
+        elif (ch == " " or ch == "\t") and depth == 0:
+            if current.trim() != "":
+                out.push(current.trim())
+                current = ""
+        else:
+            current = "{current}{ch}"
+        i = i + 1
+    if current.trim() != "":
+        out.push(current.trim())
+    out
+
+fn _shadow_layers(value: text) -> [ThemeShadowLayer]:
+    var out: [ThemeShadowLayer] = []
+    for raw_layer in _split_top_level_commas(value):
+        val tokens = _split_shadow_tokens(raw_layer)
+        var lengths: [i32] = []
+        var color = 0x00000000u32
+        var inset = false
+        for token in tokens:
+            if token == "inset":
+                inset = true
+            elif token.starts_with("#") or token.starts_with("rgb"):
+                color = _argb_from_css(token, 0x00000000)
+            elif lengths.len() < 4:
+                lengths.push(_px_int(token, 0))
+        if lengths.len() >= 2:
+            val blur = if lengths.len() >= 3: lengths[2] else: 0
+            val spread = if lengths.len() >= 4: lengths[3] else: 0
+            out.push(ThemeShadowLayer(
+                offset_x_px: lengths[0],
+                offset_y_px: lengths[1],
+                blur_radius_px: blur,
+                spread_radius_px: spread,
+                rgba: color,
+                inset: inset
+            ))
+    out
+
 fn _px_int(value: text, fallback: i32) -> i32:
     val trimmed = value.trim()
     val v = trimmed.replace("px", "")
@@ -500,12 +699,39 @@ fn _px_int(value: text, fallback: i32) -> i32:
 
 fn _argb_from_css(value: text, fallback: u32) -> u32:
     val v: text = "{value.trim()}"
-    if not v.starts_with("#") or v.len() < 7:
+    if v.starts_with("rgba(") and v.ends_with(")"):
+        val parts = v[5:v.len() - 1].split(",")
+        if parts.len() == 4:
+            val r = _clamp_css_channel(parts[0].trim().to_i64() ?? 0)
+            val g = _clamp_css_channel(parts[1].trim().to_i64() ?? 0)
+            val b = _clamp_css_channel(parts[2].trim().to_i64() ?? 0)
+            val alpha_text = parts[3].trim()
+            if alpha_text == "":
+                return fallback
+            val alpha = _clamp_css_alpha(alpha_text.to_f64())
+            return (alpha << 24) | (r << 16) | (g << 8) | b
+        return fallback
+    if v.starts_with("rgb(") and v.ends_with(")"):
+        val parts = v[4:v.len() - 1].split(",")
+        if parts.len() == 3:
+            val r = _clamp_css_channel(parts[0].trim().to_i64() ?? 0)
+            val g = _clamp_css_channel(parts[1].trim().to_i64() ?? 0)
+            val b = _clamp_css_channel(parts[2].trim().to_i64() ?? 0)
+            return 0xFF000000 | (r << 16) | (g << 8) | b
+        return fallback
+    if not v.starts_with("#"):
+        return fallback
+    if v.len() == 4:
+        val r = _theme_package_hex_digit(v.char_code_at(1) as i64)
+        val g = _theme_package_hex_digit(v.char_code_at(2) as i64)
+        val b = _theme_package_hex_digit(v.char_code_at(3) as i64)
+        return 0xFF000000 | ((r * 17).to_u32() << 16) | ((g * 17).to_u32() << 8) | (b * 17).to_u32()
+    if v.len() < 7:
         return fallback
     val hex = v[1:7]
-    val r = _theme_package_hex_digit(hex[0].to_i64()) * 16 + _theme_package_hex_digit(hex[1].to_i64())
-    val g = _theme_package_hex_digit(hex[2].to_i64()) * 16 + _theme_package_hex_digit(hex[3].to_i64())
-    val b = _theme_package_hex_digit(hex[4].to_i64()) * 16 + _theme_package_hex_digit(hex[5].to_i64())
+    val r = _theme_package_hex_digit(hex.char_code_at(0) as i64) * 16 + _theme_package_hex_digit(hex.char_code_at(1) as i64)
+    val g = _theme_package_hex_digit(hex.char_code_at(2) as i64) * 16 + _theme_package_hex_digit(hex.char_code_at(3) as i64)
+    val b = _theme_package_hex_digit(hex.char_code_at(4) as i64) * 16 + _theme_package_hex_digit(hex.char_code_at(5) as i64)
     0xFF000000 | (r.to_u32() << 16) | (g.to_u32() << 8) | b.to_u32()
 
 fn _theme_package_hex_digit(ch: i64) -> i64:
@@ -604,5 +830,6 @@ fn render_theme_validation_report(issues: [ThemeValidationIssue]) -> text:
 
 export ResolvedThemePackage, ResolvedThemeColors, ResolvedThemeGlassConfig, ResolvedThemeIcon, ThemeValidationIssue
 export default_theme_id, resolve_theme_alias, load_default_theme_package, load_theme_package
+export invalidate_theme_package_cache, invalidate_all_theme_package_cache
 export resolved_theme_css, theme_ui_theme, theme_design_tokens, theme_numeric_colors, theme_glass_config, theme_icon_defaults
 export validate_default_theme_package, validate_theme_package, render_theme_validation_report

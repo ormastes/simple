@@ -571,6 +571,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_ptr_to_value",
     "rt_value_to_ptr",
     // Raw pointer operations
+    "rt_ptr_read_i32",
     "rt_ptr_read_i64",
     "rt_ptr_write_u8",
     "rt_ptr_write_i32",
@@ -1160,6 +1161,28 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_cuda_module_unload",
     "rt_cuda_launch_kernel",
     "rt_cuda_sync",
+    // ROCm runtime. These names include canonical unsupported-host
+    // implementations from runtime_rocm.c, so hosted dynamic artifacts must
+    // retain them even on non-ROCm systems; otherwise dyld/ld.so aborts before
+    // the selected Metal/CPU backend can run.
+    "rt_rocm_init",
+    "rt_rocm_is_available",
+    "rt_rocm_device_count",
+    "rt_rocm_device_name",
+    "rt_rocm_device_memory",
+    "rt_rocm_device_identity",
+    "rt_rocm_get_device",
+    "rt_rocm_malloc",
+    "rt_rocm_free",
+    "rt_rocm_memset",
+    "rt_rocm_compile_hsaco",
+    "rt_rocm_get_function",
+    "rt_rocm_launch_kernel",
+    "rt_rocm_unload_module",
+    "rt_rocm_synchronize",
+    "rt_engine2d_rocm_upload_pixels",
+    "rt_engine2d_rocm_upload_host_buf",
+    "rt_engine2d_rocm_download_pixels",
     "rt_webgpu_is_available",
     "rt_webgpu_init",
     "rt_webgpu_shutdown",
@@ -2016,6 +2039,9 @@ mod tests {
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_println_value"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_volatile_read_u64"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_volatile_write_u64"));
+        assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_ptr_read_i32"));
+        assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_rocm_init"));
+        assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_engine2d_rocm_download_pixels"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_memory_barrier"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_load_barrier"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_store_barrier"));

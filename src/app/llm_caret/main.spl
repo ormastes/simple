@@ -6,7 +6,7 @@
 #   bin/simple run src/app/llm_caret/main.spl [options]
 #
 # Options:
-#   --provider <name>        claude_cli | opencode_cli | claude_api | openai |
+#   --provider <name>        dummy | claude_cli | opencode_cli | claude_api | openai |
 #                             openai_compat | local_torch (default: config file's
 #                             defaults.provider, else claude_cli)
 #   --model <name>           model id (default: provider's configured model)
@@ -18,6 +18,10 @@
 #   --dangerously-allow-all  auto-approve mutating tools (bash/write_file)
 #   --plain                  force the plain (non-TUI) renderer
 #   --tui                    force the full-screen TUI renderer
+#   --gui                    launch the browser GUI renderer
+#   --electron               launch the GUI in the canonical Electron shell
+#   --metal-gui              launch pure Simple Web/Draw IR/Engine2D Metal GUI
+#   --prompt <text>          send one prompt, print the response, and exit
 #   --server                 run the HTTP proxy (server.spl) instead of chat
 #   --port <n>                proxy port (default 8317, or $LLM_CARET_PORT)
 #   -h / --help              show this help
@@ -25,11 +29,15 @@
 # Sessions persist to ~/.llm_caret/sessions/<id>.json (session.spl) so
 # --resume restores a prior transcript + provider session id across runs.
 
-use app.io.mod.{env_get, file_exists, current_time_ms}
+use app.io.mod.{env_get, file_exists, current_time_ms, process_spawn_async,
+    process_spawn_async_env}
 use std.nogc_sync_mut.cli.cli_util.{get_cli_args}
-use std.nogc_sync_mut.http_server.{SimpleHttpServer, Router, HttpRequest, HttpResponse}
-use std.nogc_sync_mut.http_server.types.{HttpStatus, http_method_to_text}
+use std.nogc_sync_mut.http_server.{SimpleHttpServer, Router, HttpRequest, HttpResponse,
+    HttpStatus, http_method_to_text}
+use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
 use std.log.{info as log_info}
+
+extern fn rt_bytes_to_text(data: [u8]) -> text
 
 use app.llm_caret.config.{load_config, config_loaded,
     config_default_provider, config_claude_cli_path, config_claude_cli_model,
@@ -47,6 +55,9 @@ use app.llm_caret.server.{handle_route, build_error_response,
     build_chat_completion_response, build_anthropic_response,
     parse_chat_request_content, parse_chat_request_model}
 use app.llm_caret.session.{Session, save_session, load_session, list_session_ids, gen_session_id}
+use app.llm_caret.gui.{caret_gui_html, caret_gui_prompt,
+    caret_gui_json_content, caret_gui_json_error}
+use app.llm_caret.gui_metal.{run_caret_metal_gui}
 
 # ============================================================================
 # Argument parsing (pure - unit-testable without a live process)
@@ -59,6 +70,7 @@ struct MainArgs:
     system_prompt: text
     resume_id: text
     workspace_root: text
+    prompt: text
     allow_all: bool
     ui_mode: text        # "auto" | "tui" | "plain"
     server_mode: bool
@@ -73,6 +85,7 @@ fn parse_main_args(args: [text]) -> MainArgs:
     var system_prompt = ""
     var resume_id = ""
     var workspace_root = ""
+    var prompt = ""
     var allow_all = false
     var ui_mode = "auto"
     var server_mode = false
@@ -114,12 +127,23 @@ fn parse_main_args(args: [text]) -> MainArgs:
             i = i + 1
         elif arg.starts_with("--workspace="):
             workspace_root = arg.substring(12)
+        elif arg == "--prompt" and i + 1 < args.len():
+            prompt = args[i + 1]
+            i = i + 1
+        elif arg.starts_with("--prompt="):
+            prompt = arg.substring(9)
         elif arg == "--dangerously-allow-all":
             allow_all = true
         elif arg == "--plain":
             ui_mode = "plain"
         elif arg == "--tui":
             ui_mode = "tui"
+        elif arg == "--gui":
+            ui_mode = "gui"
+        elif arg == "--electron":
+            ui_mode = "electron"
+        elif arg == "--metal-gui":
+            ui_mode = "metal_gui"
         elif arg == "--server":
             server_mode = true
         elif arg == "--port" and i + 1 < args.len():
@@ -133,7 +157,7 @@ fn parse_main_args(args: [text]) -> MainArgs:
     MainArgs(
         provider: provider, model: model, config_path: config_path,
         system_prompt: system_prompt, resume_id: resume_id,
-        workspace_root: workspace_root, allow_all: allow_all,
+        workspace_root: workspace_root, prompt: prompt, allow_all: allow_all,
         ui_mode: ui_mode, server_mode: server_mode, port: port,
         help: help, unknown: unknown
     )
@@ -151,7 +175,7 @@ fn print_help():
     print "HTTP proxy."
     print ""
     print "Options:"
-    print "  --provider <name>        claude_cli | opencode_cli | claude_api |"
+    print "  --provider <name>        dummy | claude_cli | opencode_cli | claude_api |"
     print "                           openai | openai_compat | local_torch"
     print "  --model <name>           model id (default: provider's configured model)"
     print "  --config <path>          load an llm_caret.sdn config file"
@@ -161,6 +185,10 @@ fn print_help():
     print "  --dangerously-allow-all  auto-approve mutating tools (bash/write_file)"
     print "  --plain                  force the plain (non-TUI) renderer"
     print "  --tui                    force the full-screen TUI renderer"
+    print "  --gui                    launch the browser GUI renderer"
+    print "  --electron               launch the GUI in Electron"
+    print "  --metal-gui              launch pure Simple Web/Draw IR/Metal GUI"
+    print "  --prompt <text>          send one prompt, print the response, and exit"
     print "  --server                 run the HTTP proxy instead of interactive chat"
     print "  --port <n>               proxy port (default 8317, or $LLM_CARET_PORT)"
     print "  -h, --help               show this help"
@@ -170,6 +198,10 @@ fn print_help():
     print ""
     print "Examples:"
     print "  simple run src/app/llm_caret/main.spl --plain"
+    print "  simple run src/app/llm_caret/main.spl --provider dummy --prompt hi"
+    print "  simple run src/app/llm_caret/main.spl --provider dummy --gui"
+    print "  simple run src/app/llm_caret/main.spl --provider dummy --electron"
+    print "  simple run src/app/llm_caret/main.spl --provider dummy --metal-gui --prompt test"
     print "  simple run src/app/llm_caret/main.spl --provider claude_api --model claude-opus-4-20250514"
     print "  simple run src/app/llm_caret/main.spl --resume 2026-07-19-abc123"
     print "  simple run src/app/llm_caret/main.spl --server --port 8317"
@@ -188,6 +220,8 @@ fn _effective_provider(args: MainArgs) -> text:
 fn _effective_model(provider: text, args: MainArgs) -> text:
     if args.model != "":
         return args.model
+    if provider == "dummy":
+        return "dummy-hello"
     if provider == "claude_cli":
         return config_claude_cli_model()
     if provider == "opencode_cli":
@@ -345,7 +379,7 @@ fn _proxy_dispatch(content: text, model: text) -> LLMResponse:
                    RT_CLI_PATH, RT_SYSTEM_PROMPT, "", 0, RT_MAX_TOKENS, messages_json)
 
 fn _to_http_status(code: i64) -> HttpStatus:
-    if code == 200: return HttpStatus.Ok
+    if code == 200: return HttpStatus.OK
     if code == 400: return HttpStatus.BadRequest
     if code == 401: return HttpStatus.Unauthorized
     if code == 404: return HttpStatus.NotFound
@@ -464,6 +498,186 @@ fn run_server(port: i64):
         print "  auth: bearer token required (LLM_CARET_TOKEN set)"
     var server = SimpleHttpServer.new("127.0.0.1", port.to_i32(), router)
     server.start()
+
+# ============================================================================
+# Browser GUI (--gui)
+# ============================================================================
+
+fn _gui_dispatch(prompt: text) -> LLMResponse:
+    val messages_json = ja([build_message_json("user", prompt)])
+    dispatch_send(RT_PROVIDER, prompt, RT_MODEL, RT_API_KEY, RT_BASE_URL,
+                  RT_CLI_PATH, RT_SYSTEM_PROMPT, "", 0, RT_MAX_TOKENS,
+                  messages_json)
+
+fn _gui_http_handle(method: text, path: text, request_body: text) -> (i64, text, text):
+    print "llm_caret GUI request {method} {path}"
+    var status = 404
+    var content_type = "application/json; charset=utf-8"
+    var body = caret_gui_json_error("not found")
+    if method == "GET" and path == "/":
+        status = 200
+        content_type = "text/html; charset=utf-8"
+        body = caret_gui_html()
+    elif method == "POST" and path == "/api/chat":
+        val prompt = caret_gui_prompt(request_body)
+        if prompt == "":
+            status = 400
+            body = caret_gui_json_error("message required")
+        else:
+            val response = _gui_dispatch(prompt)
+            if response.is_error:
+                status = 502
+                body = caret_gui_json_error(response.error)
+            else:
+                status = 200
+                body = caret_gui_json_content(response.content)
+    (status, content_type, body)
+
+fn _gui_read_request(stream: TcpStream) -> Result<(text, text, text), text>:
+    val request_line = match stream.read_line():
+        Err(e): return Err("Failed to read request line: {e}")
+        Ok(line): line.trim()
+    val parts = request_line.split(" ")
+    if parts.len() < 2:
+        return Err("Malformed request line")
+    val method = parts[0]
+    val path = parts[1]
+    if method != "GET" and method != "POST":
+        return Err("Unsupported request method")
+
+    var content_length: i64 = 0
+    var header_count = 0
+    loop:
+        val header = match stream.read_line():
+            Err(e): return Err("Failed to read request header: {e}")
+            Ok(line): line.trim()
+        if header == "":
+            break
+        header_count = header_count + 1
+        if header_count > 64 or header.len() > 8192:
+            return Err("Request headers too large")
+        val colon = header.index_of(":")
+        if colon > 0 and header.slice(0, colon).trim().to_lower() == "content-length":
+            content_length = header.slice(colon + 1, header.len()).trim().to_i64() ?? -1
+            if content_length < 0 or content_length > 1048576:
+                return Err("Invalid Content-Length")
+
+    var body = ""
+    if content_length > 0:
+        match stream.read_exact(content_length):
+            Err(e): return Err("Failed to read request body: {e}")
+            Ok(bytes): body = rt_bytes_to_text(bytes)
+    Ok((method, path, body))
+
+fn _gui_status_text(status: i64) -> text:
+    if status == 200: return "OK"
+    if status == 400: return "Bad Request"
+    if status == 404: return "Not Found"
+    if status == 502: return "Bad Gateway"
+    "Internal Server Error"
+
+fn _gui_write_response(stream: TcpStream, status: i64, content_type: text, body: text) -> bool:
+    var response = "HTTP/1.1 {status} {_gui_status_text(status)}\r\n"
+    response = response + "Content-Type: {content_type}\r\n"
+    response = response + "Content-Length: {body.len()}\r\n"
+    response = response + "Connection: close\r\n\r\n"
+    response = response + body
+    match stream.write_text(response):
+        Ok(_):
+            match stream.flush():
+                Ok(_):
+                    print "llm_caret GUI response {status} bytes={body.len()}"
+                    true
+                Err(e):
+                    print "llm_caret GUI flush error: {e}"
+                    false
+        Err(e):
+            print "llm_caret GUI write error: {e}"
+            false
+
+fn _gui_handle_connection(stream: TcpStream):
+    match _gui_read_request(stream):
+        Err(e):
+            val error_body = caret_gui_json_error(e)
+            val _error_written = _gui_write_response(stream, 400, "application/json; charset=utf-8", error_body)
+        Ok(req):
+            val response = _gui_http_handle(req.0, req.1, req.2)
+            val _written = _gui_write_response(stream, response.0, response.1, response.2)
+    val _closed = stream.close()
+
+fn _caret_electron_binary() -> text:
+    val app_binary = "tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
+    if file_exists(app_binary):
+        return app_binary
+    val shim = "tools/electron-shell/node_modules/.bin/electron"
+    if file_exists(shim):
+        return shim
+    ""
+
+fn _gui_ready(host: text, port: i32, shell: text) -> bool:
+    val url = "http://{host}:{port}/"
+    print "llm_caret GUI ready at {url} shell={shell}"
+    if shell == "electron":
+        val electron = _caret_electron_binary()
+        if electron == "":
+            print "Error: Electron is not installed under tools/electron-shell/node_modules"
+            return false
+        var electron_env: {text: text} = {}
+        electron_env["SIMPLE_ELECTRON_TITLE"] = "LLM Caret — Electron"
+        electron_env["SIMPLE_ELECTRON_WIDTH"] = "900"
+        electron_env["SIMPLE_ELECTRON_HEIGHT"] = "680"
+        var electron_args = ["--no-sandbox"]
+        val debug_port = env_get("LLM_CARET_ELECTRON_DEBUG_PORT") ?? ""
+        if debug_port != "":
+            electron_args.push("--remote-debugging-port=" + debug_port)
+        electron_args.push("tools/electron-shell")
+        electron_args.push("--url")
+        electron_args.push(url)
+        val pid = process_spawn_async_env(
+            electron,
+            electron_args,
+            electron_env)
+        if pid <= 0:
+            print "Error: failed to launch Electron"
+            return false
+        print "llm_caret Electron launched pid={pid} url={url}"
+        return true
+    var opener = ""
+    if file_exists("/usr/bin/open"):
+        opener = "/usr/bin/open"
+    elif file_exists("/usr/bin/xdg-open"):
+        opener = "/usr/bin/xdg-open"
+    if opener != "":
+        val pid = process_spawn_async(opener, [url])
+        if pid < 0:
+            print "Open {url} in a browser."
+    else:
+        print "Open {url} in a browser."
+    true
+
+fn run_gui(port: i64, shell: text) -> i64:
+    val host = "127.0.0.1"
+    val addr = "{host}:{port}"
+    match TcpListener.bind(addr):
+        Err(e):
+            print "Error: Failed to bind to {addr}: {e}"
+            return 1
+        Ok(listener):
+            if not _gui_ready(host, port.to_i32(), shell):
+                val _closed = listener.close()
+                return 1
+            var running = true
+            while running:
+                match listener.accept():
+                    Err(e):
+                        print "Accept error: {e}"
+                        running = false
+                    Ok(stream):
+                        # Browsers may open speculative idle sockets. Bound request
+                        # reads so one such socket cannot stall the GUI accept loop.
+                        stream.set_read_timeout(1000)
+                        _gui_handle_connection(stream)
+    0
 
 # ============================================================================
 # Session integration
@@ -589,6 +803,25 @@ fn main() -> i64:
                 return 2
 
     main_configure(provider, model, api_key, base_url, cli_path, args.system_prompt, provider_session_id, 0)
+
+    if args.ui_mode == "metal_gui":
+        if provider != "dummy":
+            print "Error: --metal-gui currently requires --provider dummy"
+            return 2
+        return run_caret_metal_gui(args.prompt)
+
+    if args.prompt != "":
+        val response = main_responder([Message(role: "user", content: args.prompt)])
+        print response.text
+        if response.text.starts_with("ERROR: "):
+            return 1
+        return 0
+
+    if args.ui_mode == "gui":
+        return run_gui(_effective_port(args), "browser")
+
+    if args.ui_mode == "electron":
+        return run_gui(_effective_port(args), "electron")
 
     val status_text = "provider=" + provider + " model=" + model + " session=" + active_session_id
     val ui = make_chat_tui_with_status("llm_caret - {provider}", status_text)

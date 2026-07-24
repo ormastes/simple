@@ -68,3 +68,25 @@ SIMPLE_EXECUTION_MODE=interpret-optimized bin/simple run /tmp/vk_probe.spl  # ->
 
 ## Related
 - `web_render_gpu_backend_provenance_fabricated_2026-06-17.md`
+
+## macOS / MoltenVK update — 2026-07-24
+
+The same execution-mode split is reproduced on Apple M4 with Homebrew
+`vulkan-loader 1.4.350.1` and `molten-vk 1.4.1`. `vulkaninfo --summary`
+successfully enumerates `Apple M4`, driver `MoltenVK`, but the pure-Simple
+interpreter reports:
+
+```
+requested=vulkan;selected=vulkan;status=Unavailable;reason=Vulkan shared session initialization failed: 1
+```
+
+The direct cause remains the native core stub:
+`src/runtime/runtime_native.c` returns `0` from
+`rt_vulkan_is_available()`. The focused evidence is under
+`build/vulkan-readback-pure-simple-macos/`.
+
+The classic Rust interpreter is not a macOS workaround in the current tree:
+its loader probes only `libvulkan.so.1` and `libvulkan.so` under `cfg(unix)`,
+so Darwin never tries `libvulkan.1.dylib` or `libvulkan.dylib`. That source
+file was already dirty in another active compiler lane and was not modified
+by this investigation.

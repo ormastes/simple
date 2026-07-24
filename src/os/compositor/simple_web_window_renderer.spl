@@ -6,46 +6,77 @@
 use os.compositor.display_backend_core.{CompositorBackend}
 use common.ui.web_render_api.{WEB_RENDER_TARGET_SIMPLE_WEB, WebRenderArtifact, WebRenderRequest}
 use common.ui.window_scene.{WM_CONTENT_ORIGIN_SIMPLE_WEB, WmContentFrame, wm_content_frame_checksum}
+use nogc_sync_mut.ui.theme_package.{load_theme_package, resolved_theme_css}
+use common.ui.wm_chrome_theme.{
+    active_theme_composed_css,
+    active_theme_solid_fallback_rgba,
+    active_theme_source_fingerprint,
+    active_theme_text_rgba
+}
 use os.compositor.web_render_surface.{compositor_render_html_artifact, compositor_render_request_artifact}
 use std.gc_async_mut.ui.web_render_pixel_backend.{WebRenderPixelArtifactCache}
 
 val HOST_WM_DEFAULT_THEME_ID: text = "aetheric_dark"
 
+fn _theme_hex_digit(value: u32) -> text:
+    "0123456789ABCDEF".char_at(value.to_i64())
+
+fn _theme_rgb_css(value: u32) -> text:
+    val r = (value >> 16) & 0xFF
+    val g = (value >> 8) & 0xFF
+    val b = value & 0xFF
+    "#{_theme_hex_digit(r >> 4)}{_theme_hex_digit(r & 0xF)}{_theme_hex_digit(g >> 4)}{_theme_hex_digit(g & 0xF)}{_theme_hex_digit(b >> 4)}{_theme_hex_digit(b & 0xF)}"
+
+fn _theme_solid_fallback_rgba(theme: text) -> u32:
+    val installed = active_theme_solid_fallback_rgba(theme)
+    if installed != 0u32:
+        return installed
+    load_theme_package(theme).snapshot.material.solid_fallback_rgba
+
+fn _theme_text_rgba(theme: text) -> u32:
+    val installed = active_theme_text_rgba(theme)
+    if installed != 0u32:
+        return installed
+    load_theme_package(theme).snapshot.material.text_rgba
+
 fn _simple_web_window_css(theme: text) -> text:
-    var accent = "#2563eb"
-    var success = "#22c55e"
-    var warning = "#f59e0b"
-    var muted = "#94a3b8"
-    var title_bg = "#2050a0"
-    var content_bg = "#182230"
-    if theme == "glass_light" or theme == "ios_light":
-        accent = "#0066cc"
-        success = "#16803c"
-        warning = "#a05a00"
-        muted = "#64748b"
-        title_bg = "#dbeafe"
-        content_bg = "#f8fafc"
-    # Built with interpolation + escaped literal braces. Mixing an unescaped
-    # `{` with `+ var +` concatenation makes the interpolation scanner swallow
-    # the closing quote and the concat operators, emitting them verbatim and
-    # producing invalid CSS (blank render). See bug bug_css_concat_brace_interp.
-    ":root \{ --glass-accent: {accent}; --glass-success: {success}; --glass-warning: {warning}; --glass-text-secondary: {muted}; \} .wm-app-container \{ min-height: 100vh; background: {content_bg}; \} .wm-app-titlebar \{ height: 24px; background: {title_bg}; color: #fff; \} .wm-app-content \{ min-height: calc(100vh - 24px); background: {content_bg}; color: #e5e7eb; \} "
+    # Theme aliases, package inheritance, widget CSS, and visual tokens belong
+    # to theme_package. This adapter contributes layout only; keeping colors,
+    # shadows, and glass effects here created a second, divergent theme owner.
+    val installed_css = active_theme_composed_css(theme)
+    val package_css = if installed_css != "": installed_css else: resolved_theme_css(theme)
+    package_css + "\n.wm-app-container { min-height: 100vh; } .wm-app-titlebar { height: 24px; } .wm-app-content { min-height: calc(100vh - 24px); }"
 
 # Content-only request for WM-owned windows. The shared WM executor owns the
 # outer titlebar and frame, so this request deliberately emits no nested
 # `.wm-app-titlebar` element.
 fn simple_web_content_render_request_with_theme(theme: text, title: text, body_html: text, viewport_w: i32, viewport_h: i32) -> WebRenderRequest:
     val css = _simple_web_window_css(theme)
-    val app_css = css + "body { margin: 0; overflow: hidden; } #app { min-height: 100vh; padding: 0; } .wm-app-content { min-height: 100vh; }"
-    val app_body = "<div class='wm-app-content'>" + body_html + "</div>"
+    val app_css = css + "body { margin: 0; overflow: hidden; background: var(--app-surface); color: var(--ui-fg); } #app { min-height: 100vh; padding: 0; } .wm-app-content { min-height: 100vh; background: var(--app-surface); color: var(--ui-fg); }"
+    # Keep the canonical package CSS intact through parse/layout. The layout
+    # engine owns capability-aware realization: when backdrop sampling is not
+    # available it preserves the resolved surface as an opaque solid material
+    # without discarding selector layout, typography, or content state.
+    val solid_css = _theme_rgb_css(_theme_solid_fallback_rgba(theme))
+    val text_css = _theme_rgb_css(_theme_text_rgba(theme))
+    val app_body = "<div class='wm-app-content' data-wm-theme-fallback='solid-material' data-wm-theme-bg='{solid_css}' data-wm-theme-fg='{text_css}'>" + body_html + "</div>"
     WebRenderRequest.html(WEB_RENDER_TARGET_SIMPLE_WEB, title, app_body, app_css, "", viewport_w, viewport_h)
 
 fn _simple_web_revision_mix(hash: i64, value: i64) -> i64:
     ((hash * 131 + value) % 2147483647) + 1
 
-fn simple_web_content_revision(title: text, body_html: text, width: i32, height: i32, scroll_y: i32) -> i64:
+fn simple_web_content_revision_with_theme(theme: text, title: text, body_html: text, width: i32, height: i32, scroll_y: i32) -> i64:
     var hash: i64 = 17
+    # The content-addressed package fingerprint covers every package-owned
+    # source without rescanning the much larger composed CSS on each request.
+    val installed_fingerprint = active_theme_source_fingerprint(theme)
+    val theme_fingerprint = if installed_fingerprint != "": installed_fingerprint else: load_theme_package(theme).fingerprint
     var i = 0
+    while i < theme_fingerprint.len():
+        hash = _simple_web_revision_mix(hash, theme_fingerprint.char_code_at(i) as i64)
+        i = i + 1
+    hash = _simple_web_revision_mix(hash, 509)
+    i = 0
     while i < title.len():
         hash = _simple_web_revision_mix(hash, title.char_code_at(i) as i64)
         i = i + 1
@@ -57,6 +88,11 @@ fn simple_web_content_revision(title: text, body_html: text, width: i32, height:
     hash = _simple_web_revision_mix(hash, width.to_i64())
     hash = _simple_web_revision_mix(hash, height.to_i64())
     _simple_web_revision_mix(hash, _clamp_scroll_px(scroll_y).to_i64())
+
+# Source-compatible default-theme entrypoint used by existing compositor
+# callers. Theme-aware callers can select the explicit variant above.
+fn simple_web_content_revision(title: text, body_html: text, width: i32, height: i32, scroll_y: i32) -> i64:
+    simple_web_content_revision_with_theme(HOST_WM_DEFAULT_THEME_ID, title, body_html, width, height, scroll_y)
 
 fn simple_web_html_pixel_artifact(html: text, cw: i32, ch: i32) -> WebRenderArtifact:
     val req = WebRenderRequest.html(WEB_RENDER_TARGET_SIMPLE_WEB, "", html, "", "", cw, ch).with_pixel_output()
