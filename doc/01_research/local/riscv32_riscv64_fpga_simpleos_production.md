@@ -264,3 +264,20 @@ Selected implementation contract:
 - nested compiler metadata is reconstructed only inside the catalog;
 - trace mode records the primitive row flags, match result, root membership,
   and recovered hardware classification.
+
+<!-- codex-research 2026-07-24 -->
+## Current K26 DDR Reachability
+
+`generate_soc_top_vhdl_rv64_external_ddr()` exposes the canonical
+`0x80000000..0x87ffffff` window as a 64-bit Wishbone master, but the K26
+generator still instantiates the internal-RAM `soc_top_rv64`. The Vivado build
+has no Zynq PS block design, so no generated DDR signal reaches
+`S_AXI_HP0_FPD`.
+
+The prior `generate_axi_hp_bridge_sv()` is an unused VexRiscv AXI width adapter,
+not a Wishbone bridge; its Tcl names an `M_AXI` interface that the scalar RTL
+ports do not define. A new Simple-emitted one-outstanding WB64-to-AXI-HP bridge
+now supplies aligned single beats, independent AW/W backpressure, both
+128-bit lanes, error propagation, and release-before-reaccept behavior. It
+remains unqualified and disconnected until the generated external-DDR top is
+instantiated inside a PS/SmartConnect block design with initialized DDR.
