@@ -110,14 +110,16 @@ identity=<selected pinned face>
 ```
 
 The event phase drives the real window with `xdotool`. Focus, pointer motion,
-button input, and keyboard Tab must appear in the winit event log and in the
-production snapshot's key-down/up and pointer-move/down/up receipt. The last
-pointer receipt must equal the compositor coordinates. Internal maximize and
-restore commands must update the focused window,
+button input, committed UTF-8 text, and keyboard Tab must appear in the winit
+event log and production receipt. The text commit changes the focused window
+title through the existing compositor lifecycle action, so the snapshot proves
+both receipt and state mutation. The last pointer receipt must equal the
+compositor coordinates. Internal maximize and restore commands must update the focused window,
 restore the exact pre-maximize window array, and advance the render revision.
 The retained env records exact baseline/input/move/maximize/restore nonces
-`1/2/3/4/5`, plus each phase's revision and frame checksum; the live gate rejects
-missing values before reporting a pass.
+`1/2/3/4/5`, plus each phase's revision, Engine2D backend, readback source,
+backend handle, and checksum; the live gate rejects missing or log/snapshot
+mismatched values before reporting a pass.
 
 ## Absolute Glyph Oracle
 
@@ -136,7 +138,7 @@ Simple Web body pixels.
 The gate records strictly increasing revisions across:
 
 1. the initial production frame;
-2. native focus, pointer, button, and keyboard delivery;
+2. native focus, pointer, button, keyboard, and committed-text delivery;
 3. internal maximize;
 4. exact restore.
 
@@ -258,10 +260,25 @@ expect(evidence).to_contain("linux_hosted_wm_live_window_move_revision=")
 expect(evidence).to_contain("linux_hosted_wm_live_window_maximize_revision=")
 expect(evidence).to_contain("linux_hosted_wm_live_window_restore_revision=")
 expect(evidence).to_contain("linux_hosted_wm_live_window_baseline_frame_checksum=")
+expect(evidence).to_contain("linux_hosted_wm_live_window_baseline_backend=")
+expect(evidence).to_contain("linux_hosted_wm_live_window_baseline_readback_source=")
+expect(evidence).to_contain("linux_hosted_wm_live_window_baseline_backend_handle=")
 expect(evidence).to_contain("linux_hosted_wm_live_window_input_frame_checksum=")
+expect(evidence).to_contain("linux_hosted_wm_live_window_input_backend=")
+expect(evidence).to_contain("linux_hosted_wm_live_window_input_readback_source=")
+expect(evidence).to_contain("linux_hosted_wm_live_window_input_backend_handle=")
 expect(evidence).to_contain("linux_hosted_wm_live_window_move_frame_checksum=")
+expect(evidence).to_contain("linux_hosted_wm_live_window_move_backend=")
+expect(evidence).to_contain("linux_hosted_wm_live_window_move_readback_source=")
+expect(evidence).to_contain("linux_hosted_wm_live_window_move_backend_handle=")
 expect(evidence).to_contain("linux_hosted_wm_live_window_maximize_frame_checksum=")
+expect(evidence).to_contain("linux_hosted_wm_live_window_maximize_backend=")
+expect(evidence).to_contain("linux_hosted_wm_live_window_maximize_readback_source=")
+expect(evidence).to_contain("linux_hosted_wm_live_window_maximize_backend_handle=")
 expect(evidence).to_contain("linux_hosted_wm_live_window_restore_frame_checksum=")
+expect(evidence).to_contain("linux_hosted_wm_live_window_restore_backend=")
+expect(evidence).to_contain("linux_hosted_wm_live_window_restore_readback_source=")
+expect(evidence).to_contain("linux_hosted_wm_live_window_restore_backend_handle=")
 
 step("Correlate visible pixels and input with one frame identity")
 step("Reject disconnected stale or replayed evidence")
@@ -270,7 +287,15 @@ expect(entry).to_contain("if command.valid and command.nonce > evidence_nonce:")
 expect(entry).to_contain("evidence_nonce = command.nonce")
 expect(wrapper).to_contain(".input.nonce == $issue_nonce")
 expect(wrapper).to_contain("evidence-ack nonce=$issue_nonce phase=$issue_phase")
+expect(wrapper).to_contain("printf '1 maximize\\n' >\"$COMMAND_PATH\"")
+expect(wrapper).to_contain("replay_status=pass")
 expect(wrapper).to_contain(".render.fallback_used == false")
+expect(wrapper).to_contain(".render.engine2d_backend == $backend")
+expect(wrapper).to_contain(".render.readback_source == $source")
+expect(wrapper).to_contain(".render.backend_handle == $handle")
+expect(wrapper).to_contain(".render.checksum == $checksum")
+expect(wrapper).to_contain("capture_argb_checksum")
+expect(wrapper).to_contain("[ \"$(capture_argb_checksum \"$CAPTURE_LIVE\")\" = \"$frame_checksum\" ]")
 expect(wrapper).to_contain("grep -Fq '[hosted-wm] draw-ir-rejected'")
 expect(wrapper).to_contain("retain_phase baseline 1 snapshot-only")
 expect(wrapper).to_contain("retain_phase input 2 snapshot-only")
@@ -289,7 +314,7 @@ expect(wrapper).to_contain("[ \"$max_revision\" -lt \"$restore_revision\" ]")
 
 - Build the production surface composition
 - Submit the exact composition
-- Deliver correlated focus keyboard and pointer events
+- Deliver correlated focus keyboard text and pointer events
 - Capture backend and framebuffer evidence
 
 
@@ -310,12 +335,23 @@ expect(entry).to_contain("route=shared-wm-scene-draw-ir")
 expect(entry).to_contain("fallback=false revision={comp.render_revision}")
 expect(entry).to_contain("draw-ir-rejected evidence=fail-closed")
 
-step("Deliver correlated focus keyboard and pointer events")
+step("Deliver correlated focus keyboard text and pointer events")
+val winit_runtime = file_read("src/runtime/spl_winit/src/lib.rs")
+val winit_owner = file_read("src/lib/nogc_sync_mut/io/window_winit.spl")
+expect(winit_runtime).to_contain("WindowEvent::Ime(Ime::Commit(text))")
+expect(winit_runtime).to_contain("event.text")
+expect(winit_runtime).to_contain("window.set_ime_allowed(true)")
+expect(winit_owner).to_contain("fn winit_event_text(event: i64) -> text:")
+expect(entry).to_contain("elif kind == EVT_TEXT:")
+expect(entry).to_contain("host_wm_input_record_text(input_receipt, committed_text)")
+expect(entry).to_contain("COMP_SET_TITLE.to_i64()")
 val evidence = file_read(EVIDENCE_PATH)
 expect(evidence).to_contain("linux_hosted_wm_live_window_focus_status=pass")
 expect(evidence).to_contain("linux_hosted_wm_live_window_pointer_status=pass")
 expect(evidence).to_contain("linux_hosted_wm_live_window_keyboard_status=pass")
+expect(evidence).to_contain("linux_hosted_wm_live_window_text_status=pass")
 expect(evidence).to_contain("linux_hosted_wm_live_window_input_receipt_status=pass")
+expect(evidence).to_contain("linux_hosted_wm_live_window_replay_rejection_status=pass")
 expect(evidence).to_contain("linux_hosted_wm_live_window_move_status=pass")
 expect(evidence).to_contain("linux_hosted_wm_live_window_maximize_status=pass")
 expect(evidence).to_contain("linux_hosted_wm_live_window_restore_status=pass")
@@ -354,6 +390,9 @@ expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_pending_glyph=c
 expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_calibration_glyph=calibration-only")
 expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_native_source_manifest=stable")
 expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_git_dirty_dependency=rejected")
+expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_text_receipt=required")
+expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_exact_readback_fields=required")
+expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_capture_checksum=pass")
 
 step("Reject silent Git-only provenance and stale release defaults")
 val wrapper = file_read("scripts/check/check-linux-hosted-wm-live-window-evidence.shs")

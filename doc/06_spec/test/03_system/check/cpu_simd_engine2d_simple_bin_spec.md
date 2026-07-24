@@ -76,6 +76,8 @@ the wrapper skips instead of falling back to `src/compiler_rust/**`.
   x86_64, aarch64, and riscv64 native-build outputs independently.
 - REQ-CPU-SIMD-ENGINE2D-BIN-007: Exact bitmap quality evidence covers alpha
   blend edge cases for transparent, opaque, low-alpha, and high-alpha pixels.
+- REQ-CPU-SIMD-ENGINE2D-BIN-008: An explicitly pinned binary must pass the
+  runnable SIMD smoke before the full evidence program starts.
 
 ## Plan
 
@@ -92,7 +94,9 @@ the wrapper skips instead of falling back to `src/compiler_rust/**`.
 **Design:** doc/04_architecture/compiler/graphics/accelerated_shared_ui_backend_architecture.md
 
 The wrapper validates `SIMPLE_BIN` before generating the evidence `.spl`, so
-forbidden seed rejection is cheap and deterministic.
+forbidden seed rejection is cheap and deterministic. Explicit self-host paths
+must also execute the three-row SIMD smoke; a stale binary records
+`simple-bin-simd-smoke-failed` instead of reaching a segfaulting full run.
 
 ## Research
 
@@ -113,7 +117,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/cpu_simd_engine2d_simple_bin
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -125,6 +129,8 @@ expect(script).to_contain("\"bin/release\"/*/simple")
 expect(script).to_contain("\"build/bootstrap/stage3/simple\"")
 expect(script).to_contain("repo-self-hosted-engine2d-simd")
 expect(script).to_contain("is_rust_seed_simple")
+expect(script).to_contain("if [ \"$SIMPLE_BIN_PINNED\" = \"0\" ]; then")
+expect(script.contains("|| [ \"$SIMPLE_BIN\" = \"bin/simple\" ]")).to_equal(false)
 expect(script).to_contain("SIMPLE_BIN_STATUS=forbidden")
 expect(script).to_contain("export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS")
 expect(script).to_contain("cpu_simd_evidence_simple_bin=$SIMPLE_BIN")

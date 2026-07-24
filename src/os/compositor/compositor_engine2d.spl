@@ -31,11 +31,24 @@ class Engine2dCompositorBackend:
     engine: Engine2D
     w: i32
     h: i32
+    last_backend: text
+    last_readback_source: text
+    last_backend_handle: i64
+    last_readback_checksum: i64
 
     static fn create(engine: Engine2D) -> Engine2dCompositorBackend:
         val id = _engine2d_compositor_next_id
         _engine2d_compositor_next_id = _engine2d_compositor_next_id + 1
-        Engine2dCompositorBackend(id: id, engine: engine, w: engine.width(), h: engine.height())
+        Engine2dCompositorBackend(
+            id: id,
+            engine: engine,
+            w: engine.width(),
+            h: engine.height(),
+            last_backend: engine.backend_name(),
+            last_readback_source: "unavailable",
+            last_backend_handle: 0,
+            last_readback_checksum: 0
+        )
 
     # Backend-by-name factory — the WM "gpu process" fix: ONE persistent
     # Engine2D session (device/queue/framebuffer created once, reused across
@@ -69,14 +82,18 @@ class Engine2dCompositorBackend:
         _engine2d_compositor_override_enabled = false
         val selected = self.engine.backend_name()
         val gpu_available = selected != "software" and selected != "cpu" and selected != "cpu_simd"
-        engine2d_draw_ir_adv_composition_with_images(self.engine, composition, gpu_available, images)
+        val result = engine2d_draw_ir_adv_composition_with_images(self.engine, composition, gpu_available, images)
+        self.last_backend = result.selected_backend
+        self.last_readback_source = result.readback_source
+        self.last_backend_handle = result.backend_handle
+        self.last_readback_checksum = result.readback_checksum
+        result
 
     # Honest frame provenance (greppable): for the metal lane this must say
     # source=device_readback — a cpu_mirror source means the GPU lane silently
     # fell back and must never be presented as GPU rendering.
     fn frame_provenance() -> text:
-        val rb = self.engine.read_pixels_with_source()
-        "backend={self.engine.backend_name()};source={rb.source};handle={rb.backend_handle};checksum={rb.checksum}"
+        "backend={self.last_backend};source={self.last_readback_source};handle={self.last_backend_handle};checksum={self.last_readback_checksum}"
 
     fn font_provenance() -> text:
         val selected = self.engine.font_renderer

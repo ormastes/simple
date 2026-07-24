@@ -117,18 +117,27 @@ SimpleOS QEMU WM paths, including honest SIMD and Vulkan backend evidence.
 
 | Route | Producer -> consumer | Carried identity | Positive oracle | Negative oracle | Evidence/status |
 |---|---|---|---|---|---|
-| 2D | `DrawIrText -> Engine2D.draw_text -> FontRenderer -> backend` | face, advances, composition, backend/readback | exact direct/DrawIR CPU parity plus requested SIMD/Vulkan rows | inconsistent advance count/width rejects before rendering | exact Vulkan fence/device/readback promotion required; stale runner exits 139 |
+| 2D | `DrawIrText -> Engine2D.draw_text -> FontRenderer -> backend` | face, advances, composition, backend/readback | exact direct/DrawIR CPU parity plus requested SIMD/Vulkan rows | inconsistent advance count/width rejects before rendering | exact Vulkan fence/device/readback promotion required; the pinned stale runner is now rejected cleanly as `simple-bin-simd-smoke-failed` before evidence execution |
 | Web | `HTML -> WebIR -> DrawIrComposition -> Engine2D -> Electron canvas` | run ID, composition ID, face, production pixel-artifact checksum, frame correlation | Electron BGRA crop byte-matches the authoritative 96x48 production artifact | stale/replayed ID or any byte/dimension mismatch rejects | source/validator/manual PASS; live receipt creation BLOCKED |
-| GUI | `WidgetTree -> widget_tree_to_draw_ir -> Engine2D` | session nonce, composition ID, revision, scene key, input key | visible `Ready -> ReadyZ` pixels and queued focus/key/pointer receipts | foreign session, stale revision, and replayed input key reject | production BrowserApp now uses backend queue/receipt; execution BLOCKED |
-| hosted WM | `SharedWmScene -> HostCompositor -> Engine2D` evidence route | command nonce, phase, revision, checksum, input receipt | pinned glyph crop and focus/move/maximize/restore frames; key/pointer receipt matches compositor state | non-increasing nonce is ignored and exact ACK/receipt identity is required | compile/evidence ABI repaired; live calibration/runtime BLOCKED |
+| GUI | `WidgetTree -> widget_tree_to_draw_ir -> Engine2D` | session nonce, composition ID, revision, scene key, input key | visible `Ready -> ReadyZ` pixels and queued focus/key/pointer receipts | foreign session, stale revision, and replayed input key reject | CPU mirror evidence now carries and independently recomputes its checksum without claiming device readback; execution BLOCKED |
+| hosted WM | `SharedWmScene -> HostCompositor -> Engine2D` evidence route | command nonce, phase, revision, backend/source/handle/checksum, input receipt | pinned glyph crop and focus/move/maximize/restore frames; key/pointer/text receipt matches compositor state | non-increasing nonce is ignored and exact ACK/receipt identity is required | committed text/IME and per-phase exact readback provenance are wired; live calibration/runtime BLOCKED |
 | x86 QEMU | `gui_entry_desktop -> WM -> Engine2D -> QMP` | guest font hash, input sequence, WM/frame generation | independent `pmemsave` glyph crop and correlated events | QMP disconnect, replay, corrupt crop, demo markers reject | contract current; fresh native build exits 139 before QEMU |
 | RV64 QEMU | `riscv64/gui_entry_desktop -> WM -> VirtIO/QMP` | scanout address/geometry/format/generation, scene revision, exact font identity, IRQ/input sequence | RV64-only guest-addressed glyph crop and exact Tab/pointer ordering | zero/stale generation, unavailable markers, corrupt crop, unrelated/stale/out-of-order input reject | font VFS, modern VirtIO input, receipt-bound QMP `pmemsave`, and parser self-test PASS; fresh ELF/live crop hash BLOCKED |
 
 ## Phase
-dev-done
+dev-runtime-evidence-pending
 
 ## Log
 - dev: Created state file with 11 acceptance criteria (type: feature).
+- dev: A pinned but incompatible self-hosted binary now fails the CPU/SIMD
+  wrapper admission as `simple-bin-simd-smoke-failed`, rather than crashing
+  after admission. GUI CPU evidence records `cpu_mirror` plus an independently
+  recomputed consistency checksum. Hosted-WM evidence now reconstructs the
+  retained PPM as ARGB and compares its checksum with the render receipt, and
+  a replayed nonce must leave both snapshot and ACK count unchanged. Live
+  2D/Web/GUI/hosted-WM/x86-QEMU/RV64-QEMU proof still waits for a source-matched
+  self-hosted CLI; the newest matching Stage4 CI run was active at audit time,
+  so no seed binary was substituted.
 
 ## Research Summary
 

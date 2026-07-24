@@ -69,6 +69,28 @@ sha256_file() {
     sha256sum "$1" | awk '{print $1}'
 }
 
+capture_argb_checksum() {
+    convert "$1" -depth 8 rgba:- 2>/dev/null \
+        | od -An -v -tu1 \
+        | awk '{
+            for (i = 1; i <= NF; i++) {
+                channel = count % 4
+                if (channel == 0) red = $i
+                else if (channel == 1) green = $i
+                else if (channel == 2) blue = $i
+                else {
+                    pixel = $i * 16777216 + red * 65536 + green * 256 + blue
+                    checksum = (checksum + pixel) % 2147483647
+                }
+                count++
+            }
+        }
+        END {
+            if (count == 0 || count % 4 != 0) exit 1
+            printf "%.0f\n", checksum
+        }'
+}
+
 glyph_oracle_mode() {
     if [ "$1" != pending ]; then
         printf pinned
@@ -157,7 +179,9 @@ emit() {
         echo "linux_hosted_wm_live_window_focus_status=$focus_status"
         echo "linux_hosted_wm_live_window_pointer_status=$pointer_status"
         echo "linux_hosted_wm_live_window_keyboard_status=$keyboard_status"
+        echo "linux_hosted_wm_live_window_text_status=$text_status"
         echo "linux_hosted_wm_live_window_input_receipt_status=$input_receipt_status"
+        echo "linux_hosted_wm_live_window_replay_rejection_status=$replay_status"
         echo "linux_hosted_wm_live_window_move_status=$move_status"
         echo "linux_hosted_wm_live_window_maximize_status=$maximize_status"
         echo "linux_hosted_wm_live_window_restore_status=$restore_status"
@@ -165,30 +189,45 @@ emit() {
         echo "linux_hosted_wm_live_window_baseline_nonce=1"
         echo "linux_hosted_wm_live_window_baseline_revision=$baseline_revision"
         echo "linux_hosted_wm_live_window_baseline_frame_checksum=$baseline_frame_checksum"
+        echo "linux_hosted_wm_live_window_baseline_backend=$baseline_backend"
+        echo "linux_hosted_wm_live_window_baseline_readback_source=$baseline_readback_source"
+        echo "linux_hosted_wm_live_window_baseline_backend_handle=$baseline_backend_handle"
         echo "linux_hosted_wm_live_window_baseline_capture_sha256=$baseline_capture_sha"
         echo "linux_hosted_wm_live_window_baseline_snapshot=$BASELINE_SNAPSHOT"
         echo "linux_hosted_wm_live_window_baseline_capture=$BASELINE_CAPTURE"
         echo "linux_hosted_wm_live_window_input_nonce=2"
         echo "linux_hosted_wm_live_window_input_revision=$input_revision"
         echo "linux_hosted_wm_live_window_input_frame_checksum=$input_frame_checksum"
+        echo "linux_hosted_wm_live_window_input_backend=$input_backend"
+        echo "linux_hosted_wm_live_window_input_readback_source=$input_readback_source"
+        echo "linux_hosted_wm_live_window_input_backend_handle=$input_backend_handle"
         echo "linux_hosted_wm_live_window_input_capture_sha256=$input_capture_sha"
         echo "linux_hosted_wm_live_window_input_snapshot=$INPUT_SNAPSHOT"
         echo "linux_hosted_wm_live_window_input_capture=$INPUT_CAPTURE"
         echo "linux_hosted_wm_live_window_move_nonce=3"
         echo "linux_hosted_wm_live_window_move_revision=$move_revision"
         echo "linux_hosted_wm_live_window_move_frame_checksum=$move_frame_checksum"
+        echo "linux_hosted_wm_live_window_move_backend=$move_backend"
+        echo "linux_hosted_wm_live_window_move_readback_source=$move_readback_source"
+        echo "linux_hosted_wm_live_window_move_backend_handle=$move_backend_handle"
         echo "linux_hosted_wm_live_window_move_capture_sha256=$move_capture_sha"
         echo "linux_hosted_wm_live_window_move_snapshot=$MOVE_SNAPSHOT"
         echo "linux_hosted_wm_live_window_move_capture=$MOVE_CAPTURE"
         echo "linux_hosted_wm_live_window_maximize_nonce=4"
         echo "linux_hosted_wm_live_window_maximize_revision=$max_revision"
         echo "linux_hosted_wm_live_window_maximize_frame_checksum=$maximize_frame_checksum"
+        echo "linux_hosted_wm_live_window_maximize_backend=$maximize_backend"
+        echo "linux_hosted_wm_live_window_maximize_readback_source=$maximize_readback_source"
+        echo "linux_hosted_wm_live_window_maximize_backend_handle=$maximize_backend_handle"
         echo "linux_hosted_wm_live_window_maximize_capture_sha256=$maximize_capture_sha"
         echo "linux_hosted_wm_live_window_maximize_snapshot=$MAXIMIZE_SNAPSHOT"
         echo "linux_hosted_wm_live_window_maximize_capture=$MAXIMIZE_CAPTURE"
         echo "linux_hosted_wm_live_window_restore_nonce=5"
         echo "linux_hosted_wm_live_window_restore_revision=$restore_revision"
         echo "linux_hosted_wm_live_window_restore_frame_checksum=$restore_frame_checksum"
+        echo "linux_hosted_wm_live_window_restore_backend=$restore_backend"
+        echo "linux_hosted_wm_live_window_restore_readback_source=$restore_readback_source"
+        echo "linux_hosted_wm_live_window_restore_backend_handle=$restore_backend_handle"
         echo "linux_hosted_wm_live_window_restore_capture_sha256=$restore_capture_sha"
         echo "linux_hosted_wm_live_window_restore_snapshot=$RESTORE_SNAPSHOT"
         echo "linux_hosted_wm_live_window_restore_capture=$RESTORE_CAPTURE"
@@ -212,7 +251,7 @@ emit() {
         echo "- glyph crop: $GLYPH_RGB (${glyph_sha:--})"
         echo "- live window: $WINDOW_PNG"
         echo "- framebuffer: $CAPTURE_LIVE"
-        echo "- events: focus=$focus_status pointer=$pointer_status keyboard=$keyboard_status receipt=$input_receipt_status move=$move_status maximize=$maximize_status restore=$restore_status"
+        echo "- events: focus=$focus_status pointer=$pointer_status keyboard=$keyboard_status text=$text_status receipt=$input_receipt_status replay=$replay_status move=$move_status maximize=$maximize_status restore=$restore_status"
         echo "- frame correlation: $frame_status"
         echo "- retained nonce/revision/readback: baseline=1/$baseline_revision/$baseline_frame_checksum input=2/$input_revision/$input_frame_checksum move=3/$move_revision/$move_frame_checksum maximize=4/$max_revision/$maximize_frame_checksum restore=5/$restore_revision/$restore_frame_checksum"
         echo "- compatibility fallback: $fallback_status"
@@ -233,7 +272,9 @@ calibration_status=fail
 focus_status=fail
 pointer_status=fail
 keyboard_status=fail
+text_status=fail
 input_receipt_status=fail
+replay_status=fail
 move_status=fail
 maximize_status=fail
 restore_status=fail
@@ -241,18 +282,33 @@ frame_status=fail
 fallback_status=fail
 baseline_revision=""
 baseline_frame_checksum=""
+baseline_backend=""
+baseline_readback_source=""
+baseline_backend_handle=""
 baseline_capture_sha=""
 input_revision=""
 input_frame_checksum=""
+input_backend=""
+input_readback_source=""
+input_backend_handle=""
 input_capture_sha=""
 move_revision=""
 move_frame_checksum=""
+move_backend=""
+move_readback_source=""
+move_backend_handle=""
 move_capture_sha=""
 max_revision=""
 maximize_frame_checksum=""
+maximize_backend=""
+maximize_readback_source=""
+maximize_backend_handle=""
 maximize_capture_sha=""
 restore_revision=""
 restore_frame_checksum=""
+restore_backend=""
+restore_readback_source=""
+restore_backend_handle=""
 restore_capture_sha=""
 last_issue_ack=""
 issue_nonce=""
@@ -283,6 +339,10 @@ if [ "$SELF_TEST" -eq 1 ]; then
     [ "$(glyph_oracle_mode pending 0)" = calibration-required ]
     [ "$(glyph_oracle_mode pending 1)" = calibration-only ]
     [ "$(glyph_oracle_mode pinned 0)" = pinned ]
+    checksum_fixture="$BUILD_DIR/checksum-fixture.ppm"
+    printf 'P6\n1 1\n255\n\001\002\003' >"$checksum_fixture"
+    [ "$(capture_argb_checksum "$checksum_fixture")" = 2130772484 ]
+    rm -f "$checksum_fixture"
     write_native_source_manifest "$SOURCE_MANIFEST"
     write_native_source_manifest "$SOURCE_MANIFEST_AFTER"
     [ "$(sha256_file "$SOURCE_MANIFEST")" = "$(sha256_file "$SOURCE_MANIFEST_AFTER")" ]
@@ -310,6 +370,9 @@ if [ "$SELF_TEST" -eq 1 ]; then
     echo "linux_hosted_wm_live_window_self_test_calibration_glyph=calibration-only"
     echo "linux_hosted_wm_live_window_self_test_native_source_manifest=stable"
     echo "linux_hosted_wm_live_window_self_test_git_dirty_dependency=rejected"
+    echo "linux_hosted_wm_live_window_self_test_text_receipt=required"
+    echo "linux_hosted_wm_live_window_self_test_exact_readback_fields=required"
+    echo "linux_hosted_wm_live_window_self_test_capture_checksum=pass"
     exit 0
 fi
 
@@ -446,10 +509,12 @@ native_events_advanced() {
     move_now="$(event_count mouse_move)"
     button_now="$(event_count mouse_button)"
     key_now="$(event_count key)"
+    text_now="$(event_count text)"
     [ "${focus_now:-0}" -gt "$focus_before" ] \
         && [ "${move_now:-0}" -gt "$move_before" ] \
         && [ "${button_now:-0}" -ge $((button_before + 2)) ] \
         && [ "${key_now:-0}" -gt "$key_before" ] \
+        && [ "${text_now:-0}" -gt "$text_before" ] \
         && sed -n '/\[hosted-wm\] event mouse_button /p' "$LOG_PATH" | tail -n 2 | grep -Fq 'button=0 pressed=true' \
         && sed -n '/\[hosted-wm\] event mouse_button /p' "$LOG_PATH" | tail -n 1 | grep -Fq 'button=0 pressed=false'
 }
@@ -464,7 +529,7 @@ evidence_ack_ready() {
     jq -e ".input.nonce == $issue_nonce and .input.phase == \"$issue_phase\"" "$SNAPSHOT_LIVE" >/dev/null 2>&1 || return 1
     last_issue_ack="$(sed -n "/^\\[hosted-wm\\] evidence-ack nonce=$issue_nonce phase=$issue_phase /p" "$LOG_PATH" | tail -n 1)"
     case "$last_issue_ack" in
-        *" revision="*";source="*";checksum="*) return 0 ;;
+        *" revision="*" backend="*";source="*";handle="*";checksum="*) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -484,21 +549,35 @@ retain_phase() {
     snapshot_path=$4
     capture_path=$5
     revision="$(jq -r '.compositor.render_revision' "$SNAPSHOT_LIVE")"
+    frame_backend="$(jq -r '.render.engine2d_backend' "$SNAPSHOT_LIVE")"
+    readback_source="$(jq -r '.render.readback_source' "$SNAPSHOT_LIVE")"
+    backend_handle="$(jq -r '.render.backend_handle' "$SNAPSHOT_LIVE")"
+    frame_checksum="$(jq -r '.render.checksum' "$SNAPSHOT_LIVE")"
+    [ "$frame_backend" != "" ] && [ "$frame_backend" != null ] || return 1
+    [ "$readback_source" != "" ] && [ "$readback_source" != unavailable ] && [ "$readback_source" != null ] || return 1
+    case "$backend_handle:$frame_checksum" in
+        *[!0-9:]*|:|*:) return 1 ;;
+    esac
     case "$last_issue_ack" in
-        *" revision=$revision "*";checksum="*) ;;
+        *" revision=$revision "*"backend=$frame_backend;source=$readback_source;handle=$backend_handle;checksum=$frame_checksum identity="*) ;;
         *) return 1 ;;
     esac
-    frame_checksum="$(printf '%s\n' "$last_issue_ack" | sed -n 's/.*;checksum=\([0-9][0-9]*\) identity=.*/\1/p')"
-    [ "$frame_checksum" != "" ] || return 1
     jq -e --argjson nonce "$nonce" --argjson revision "$revision" \
-        --arg phase "$phase" \
+        --arg phase "$phase" --arg backend "$frame_backend" \
+        --arg source "$readback_source" --argjson handle "$backend_handle" \
+        --argjson checksum "$frame_checksum" \
         '.input.nonce == $nonce and .input.phase == $phase and
          .compositor.render_revision == $revision and
          .render.fallback_used == false and
-         .render.readback == "presented-pixel-buffer"' \
+         .render.readback == "presented-pixel-buffer" and
+         .render.engine2d_backend == $backend and
+         .render.readback_source == $source and
+         .render.backend_handle == $handle and
+         .render.checksum == $checksum' \
         "$SNAPSHOT_LIVE" >/dev/null || return 1
     [ -s "$CAPTURE_LIVE" ] || return 1
     [ "$(convert "$CAPTURE_LIVE" -format '%w %h' info:)" = "1024 720" ] || return 1
+    [ "$(capture_argb_checksum "$CAPTURE_LIVE")" = "$frame_checksum" ] || return 1
     cp "$SNAPSHOT_LIVE" "$snapshot_path"
     cp "$CAPTURE_LIVE" "$capture_path"
     capture_sha="$(sha256_file "$capture_path")"
@@ -506,26 +585,41 @@ retain_phase() {
         baseline)
             baseline_revision=$revision
             baseline_frame_checksum=$frame_checksum
+            baseline_backend=$frame_backend
+            baseline_readback_source=$readback_source
+            baseline_backend_handle=$backend_handle
             baseline_capture_sha=$capture_sha
             ;;
         input)
             input_revision=$revision
             input_frame_checksum=$frame_checksum
+            input_backend=$frame_backend
+            input_readback_source=$readback_source
+            input_backend_handle=$backend_handle
             input_capture_sha=$capture_sha
             ;;
         move)
             move_revision=$revision
             move_frame_checksum=$frame_checksum
+            move_backend=$frame_backend
+            move_readback_source=$readback_source
+            move_backend_handle=$backend_handle
             move_capture_sha=$capture_sha
             ;;
         maximize)
             max_revision=$revision
             maximize_frame_checksum=$frame_checksum
+            maximize_backend=$frame_backend
+            maximize_readback_source=$readback_source
+            maximize_backend_handle=$backend_handle
             maximize_capture_sha=$capture_sha
             ;;
         restore)
             restore_revision=$revision
             restore_frame_checksum=$frame_checksum
+            restore_backend=$frame_backend
+            restore_readback_source=$readback_source
+            restore_backend_handle=$backend_handle
             restore_capture_sha=$capture_sha
             ;;
         *) return 1 ;;
@@ -588,17 +682,27 @@ issue 1 snapshot && retain_phase baseline 1 snapshot-only "$BASELINE_SNAPSHOT" "
     emit fail baseline-evidence-ack-or-capture-missing
     exit 1
 }
+baseline_snapshot_sha="$(sha256_file "$SNAPSHOT_LIVE")"
+baseline_ack_count="$(grep -c '^\[hosted-wm\] evidence-ack nonce=1 ' "$LOG_PATH" || true)"
+printf '1 maximize\n' >"$COMMAND_PATH"
+sleep 1
+if [ "$(sha256_file "$SNAPSHOT_LIVE")" = "$baseline_snapshot_sha" ] \
+    && [ "$(grep -c '^\[hosted-wm\] evidence-ack nonce=1 ' "$LOG_PATH" || true)" = "$baseline_ack_count" ]; then
+    replay_status=pass
+fi
 initial_revision="$baseline_revision"
 initial_focus="$(jq -r '.compositor.windows[] | select(.focused == true) | .id' "$SNAPSHOT_LIVE")"
 focus_before="${focus_before:-$(event_count focus)}"
 move_before="${move_before:-$(event_count mouse_move)}"
 button_before="${button_before:-$(event_count mouse_button)}"
 key_before="${key_before:-$(event_count key)}"
+text_before="${text_before:-$(event_count text)}"
 window_move_before="${window_move_before:-$(event_count window-moved)}"
 focus_before="${focus_before:-0}"
 move_before="${move_before:-0}"
 button_before="${button_before:-0}"
 key_before="${key_before:-0}"
+text_before="${text_before:-0}"
 window_move_before="${window_move_before:-0}"
 abs_x="$(sed -n 's/^X=//p' "$WINDOW_ENV")"
 abs_y="$(sed -n 's/^Y=//p' "$WINDOW_ENV")"
@@ -606,6 +710,7 @@ abs_y="$(sed -n 's/^Y=//p' "$WINDOW_ENV")"
 DISPLAY="$x_display" xdotool windowfocus --sync "$window_id"
 DISPLAY="$x_display" xdotool mousemove $((abs_x + 150)) $((abs_y + 100))
 DISPLAY="$x_display" xdotool click 1
+DISPLAY="$x_display" xdotool type --delay 0 z
 DISPLAY="$x_display" xdotool key --clearmodifiers Tab
 wait_until native_events_advanced || {
     emit fail native-input-event-timeout
@@ -623,11 +728,14 @@ if jq -e '.input.receipt.key_down_count > 0 and
           .input.receipt.pointer_move_count > 0 and
           .input.receipt.pointer_button_down_count > 0 and
           .input.receipt.pointer_button_up_count > 0 and
+          .input.receipt.text_commit_count > 0 and
+          .input.receipt.last_text == "z" and
           .input.receipt.last_pointer_x == .compositor.pointer_x and
           .input.receipt.last_pointer_y == .compositor.pointer_y and
           .input.receipt.last_pointer_button == 0' "$SNAPSHOT_LIVE" >/dev/null; then
     input_receipt_status=pass
 fi
+[ "$(jq -r '[.compositor.windows[].title == "Typed: z"] | any' "$SNAPSHOT_LIVE")" = true ] && text_status=pass
 [ "$input_focus" != "$initial_focus" ] && [ "$input_receipt_status" = pass ] && keyboard_status=pass
 [ "$pointer_x" -gt 0 ] && [ "$pointer_y" -gt 0 ] && [ "$input_receipt_status" = pass ] && pointer_status=pass
 focus_status=pass
@@ -688,7 +796,8 @@ evidence_except_glyph_complete() {
         && [ "$framebuffer_status" = pass ] && [ "$window_status" = pass ] \
         && [ "$calibration_status" = pass ] \
         && [ "$focus_status" = pass ] && [ "$pointer_status" = pass ] \
-        && [ "$keyboard_status" = pass ] && [ "$input_receipt_status" = pass ] \
+        && [ "$keyboard_status" = pass ] && [ "$text_status" = pass ] \
+        && [ "$input_receipt_status" = pass ] && [ "$replay_status" = pass ] \
         && [ "$move_status" = pass ] \
         && [ "$maximize_status" = pass ] && [ "$restore_status" = pass ] \
         && [ "$frame_status" = pass ] && [ "$fallback_status" = pass ]

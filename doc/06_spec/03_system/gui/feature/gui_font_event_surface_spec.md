@@ -124,6 +124,11 @@ Its source wiring and fixture assertions are not live-window evidence.
 
 11. **Prove native submission and device readback**
    - Require exactly `192 × 80` readback pixels.
+   - Require the CPU fixture to report `cpu_mirror`, never
+     `device_readback`.
+   - Require a positive Engine2D checksum equal to an independently recomputed
+     checksum over the retained pixels. Vulkan device readback remains the
+     dedicated 2D backend lane.
 
 ## Retained Evidence Contract
 
@@ -134,7 +139,7 @@ All rows are currently **BLOCKED / not produced by a passing execution**.
 | `build/test-artifacts/03_system/gui/feature/gui_font_event_surface/submitted.ppm` | Exact submitted `GUI42` framebuffer; P6 size `192×80×3 + 14` bytes | BLOCKED |
 | `build/test-artifacts/03_system/gui/feature/gui_font_event_surface/blank_oracle.ppm` | Otherwise-identical blank-label framebuffer; same exact P6 size | BLOCKED |
 | `build/test-artifacts/03_system/gui/feature/gui_font_event_surface/updated.ppm` | Exact post-keyboard `ReadyZ` framebuffer; same exact P6 size | BLOCKED |
-| `build/test-artifacts/03_system/gui/feature/gui_font_event_surface/gui_font_event.txt` | `status=pass`, session nonce, revision, composition/scene frame identity, source/bounds/event targets, replay rejection, and all three paths | BLOCKED |
+| `build/test-artifacts/03_system/gui/feature/gui_font_event_surface/gui_font_event.txt` | `status=pass`, session nonce, revision, composition/scene frame identity, source/bounds/event targets, replay rejection, CPU-mirror provenance/checksum, and all three paths | BLOCKED |
 | `build/test-artifacts/03_system/gui/feature/gui_font_event_surface/verification-blocker.txt` | Exact failed commands, results, and resume command | AVAILABLE blocker evidence only |
 
 The scenario fails closed if any framebuffer has the wrong encoded size, any

@@ -33,7 +33,7 @@ use std::time::Duration;
 use softbuffer::{Context, Surface};
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
-use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::platform::pump_events::EventLoopExtPumpEvents;
@@ -47,6 +47,7 @@ const EVENT_WINDOW_FOCUSED: i64 = 5;
 const EVENT_WINDOW_UNFOCUSED: i64 = 6;
 const EVENT_WINDOW_SCALE_FACTOR_CHANGED: i64 = 7;
 const EVENT_KEYBOARD_INPUT: i64 = 10;
+const EVENT_TEXT_INPUT: i64 = 11;
 const EVENT_MOUSE_BUTTON: i64 = 20;
 const EVENT_MOUSE_MOVED: i64 = 21;
 const EVENT_MOUSE_WHEEL: i64 = 22;
@@ -59,6 +60,7 @@ enum StoredEvent {
     Focused { window_id: i64, focused: bool },
     ScaleFactor { window_id: i64, scale_factor: f64 },
     Keyboard { window_id: i64, scancode: i64, keycode: i64, pressed: bool },
+    Text { window_id: i64, text: String },
     MouseButton { window_id: i64, button: i64, pressed: bool },
     MouseMoved { window_id: i64, x: f64, y: f64 },
     MouseWheel { window_id: i64, x: f64, y: f64 },
@@ -74,6 +76,7 @@ impl StoredEvent {
             StoredEvent::Focused { focused: false, .. } => EVENT_WINDOW_UNFOCUSED,
             StoredEvent::ScaleFactor { .. } => EVENT_WINDOW_SCALE_FACTOR_CHANGED,
             StoredEvent::Keyboard { .. } => EVENT_KEYBOARD_INPUT,
+            StoredEvent::Text { .. } => EVENT_TEXT_INPUT,
             StoredEvent::MouseButton { .. } => EVENT_MOUSE_BUTTON,
             StoredEvent::MouseMoved { .. } => EVENT_MOUSE_MOVED,
             StoredEvent::MouseWheel { .. } => EVENT_MOUSE_WHEEL,
@@ -87,6 +90,7 @@ impl StoredEvent {
             | StoredEvent::Focused { window_id, .. }
             | StoredEvent::ScaleFactor { window_id, .. }
             | StoredEvent::Keyboard { window_id, .. }
+            | StoredEvent::Text { window_id, .. }
             | StoredEvent::MouseButton { window_id, .. }
             | StoredEvent::MouseMoved { window_id, .. }
             | StoredEvent::MouseWheel { window_id, .. } => *window_id,
@@ -163,6 +167,7 @@ impl Inner {
                 }
             };
             window.set_visible(true);
+            window.set_ime_allowed(true);
             window.focus_window();
 
             let context = match Context::new(window.clone()) {
@@ -229,15 +234,32 @@ impl Inner {
                 window_id: wid,
                 scale_factor,
             }),
-            WindowEvent::KeyboardInput { event, .. } => match event.physical_key {
-                PhysicalKey::Code(code) => keycode_to_simple(code).map(|kc| StoredEvent::Keyboard {
-                    window_id: wid,
-                    scancode: kc,
-                    keycode: kc,
-                    pressed: event.state == ElementState::Pressed,
-                }),
-                PhysicalKey::Unidentified(_) => None,
-            },
+            WindowEvent::KeyboardInput { event, .. } => {
+                if let PhysicalKey::Code(code) = event.physical_key {
+                    if let Some(kc) = keycode_to_simple(code) {
+                        self.store_event(StoredEvent::Keyboard {
+                            window_id: wid,
+                            scancode: kc,
+                            keycode: kc,
+                            pressed: event.state == ElementState::Pressed,
+                        });
+                    }
+                }
+                if event.state == ElementState::Pressed {
+                    if let Some(text) = event.text {
+                        if !text.is_empty() {
+                            self.store_event(StoredEvent::Text {
+                                window_id: wid,
+                                text: text.to_string(),
+                            });
+                        }
+                    }
+                }
+                None
+            }
+            WindowEvent::Ime(Ime::Commit(text)) if !text.is_empty() => {
+                Some(StoredEvent::Text { window_id: wid, text })
+            }
             WindowEvent::CursorMoved { position, .. } => Some(StoredEvent::MouseMoved {
                 window_id: wid,
                 x: position.x,
@@ -773,6 +795,26 @@ pub extern "C" fn rt_winit_event_key_keycode(ev: i64) -> i64 {
 pub extern "C" fn rt_winit_event_key_pressed(ev: i64) -> i64 {
     with_event(ev, |e| match e {
         StoredEvent::Keyboard { pressed, .. } => *pressed as i64,
+        _ => 0,
+    })
+    .unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_winit_event_text_len(ev: i64) -> i64 {
+    with_event(ev, |e| match e {
+        StoredEvent::Text { text, .. } => text.len() as i64,
+        _ => 0,
+    })
+    .unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_winit_event_text_byte(ev: i64, index: i64) -> i64 {
+    with_event(ev, |e| match e {
+        StoredEvent::Text { text, .. } if index >= 0 => {
+            text.as_bytes().get(index as usize).copied().unwrap_or(0) as i64
+        }
         _ => 0,
     })
     .unwrap_or(0)
