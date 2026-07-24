@@ -1,8 +1,12 @@
 use std.spec
-use compiler.backend.backend.vhdl.vhdl_design_catalog.{vhdl_build_design_catalog, vhdl_build_design_catalog_with_hir, vhdl_catalog_type_order}
+use compiler.backend.backend.vhdl.vhdl_design_catalog.{
+    vhdl_build_design_catalog,
+    vhdl_build_design_catalog_with_hir, vhdl_build_design_catalog_with_metadata,
+    vhdl_catalog_type_order}
 use compiler.backend.backend.vhdl_backend.VhdlBackend
 use compiler.backend.backend.backend_types.{CodegenTarget, compileoptions_default_options}
-use compiler.common.attributes.vhdl_hardware_metadata_default
+use compiler.common.attributes.{VhdlHardwareMetadataFlatRow, VhdlResetPolarity,
+    VhdlResetSynchrony, vhdl_hardware_metadata_default}
 use compiler.common.dependency.visibility.Visibility
 use compiler.common.diagnostics.span.Span
 use compiler.hir.hir_types.{SymbolId, HirModule, SymbolTable, SymbolKind}
@@ -12,6 +16,27 @@ extern fn rt_file_read_text(path: text) -> text?
 
 fn catalog_span() -> Span:
     Span(start: 0, end: 0, line: 1, col: 1, file: "", length: 0)
+
+fn catalog_flat_row(module_name: text, function_name: text) -> VhdlHardwareMetadataFlatRow:
+    VhdlHardwareMetadataFlatRow(
+        module_name: module_name,
+        function_name: function_name,
+        generic_names: [],
+        generic_type_texts: [],
+        generic_default_texts: [],
+        has_clocked: 0,
+        clock_signal: "",
+        reset_signal: "",
+        has_reset: 0,
+        reset_polarity: 0,
+        reset_synchrony: 2,
+        domain: "",
+        clocked_is_valid: 1,
+        clocked_validation_errors: [],
+        return_field_labels: [],
+        return_field_type_texts: [],
+        flatten_struct_output: 0
+    )
 
 fn catalog_i32() -> MirType:
     MirType(kind: MirTypeKind.I32)
@@ -169,6 +194,138 @@ fn catalog_function_symbol(module: MirModule, name: text) -> i64:
     -1
 
 describe "VHDL design-wide catalog":
+    it "recovers hardware metadata from the driver source sidecar":
+        var mir = catalog_module_b("stage4_metadata_entry", false)
+        mir.name = "lib.stage4_metadata"
+        var modules: Dict<text, MirModule> = {}
+        modules[mir.name] = mir
+        val rows = [VhdlHardwareMetadataFlatRow(
+            module_name: "std.stage4_metadata",
+            function_name: "stage4_metadata_entry",
+            generic_names: ["WIDTH"],
+            generic_type_texts: ["natural"],
+            generic_default_texts: ["32"],
+            has_clocked: 1,
+            clock_signal: "core_clk",
+            reset_signal: "core_reset_n",
+            has_reset: 1,
+            reset_polarity: 0,
+            reset_synchrony: 0,
+            domain: "core",
+            clocked_is_valid: 1,
+            clocked_validation_errors: [],
+            return_field_labels: ["ready", "result"],
+            return_field_type_texts: ["bool", "i32"],
+            flatten_struct_output: 1
+        )]
+        val result = vhdl_build_design_catalog_with_metadata(modules, {}, rows,
+            [mir.name], "stage4_metadata_contract")
+        expect(result.is_ok()).to_equal(true)
+        val catalog = result.unwrap()
+        val symbol = SymbolId(id: catalog_function_symbol(catalog.design,
+            "stage4_metadata_entry"))
+        expect(catalog.design.functions[symbol].has_vhdl_metadata).to_equal(true)
+        val recovered = catalog.design.functions[symbol].vhdl_metadata
+        expect(recovered.is_hardware).to_equal(true)
+        expect(recovered.generics.len()).to_equal(1)
+        expect(recovered.generics[0].name).to_equal("WIDTH")
+        expect(recovered.generics[0].type_text).to_equal("natural")
+        expect(recovered.generics[0].default_text).to_equal("32")
+        expect(recovered.has_clocked).to_equal(true)
+        expect(recovered.clocked.clock_signal).to_equal("core_clk")
+        expect(recovered.clocked.reset_signal).to_equal("core_reset_n")
+        expect(recovered.clocked.has_reset).to_equal(true)
+        expect(recovered.clocked.reset_polarity).to_equal(VhdlResetPolarity.ActiveLow)
+        expect(recovered.clocked.reset_synchrony).to_equal(VhdlResetSynchrony.Async)
+        expect(recovered.clocked.domain).to_equal("core")
+        expect(recovered.return_fields.len()).to_equal(2)
+        expect(recovered.return_fields[0].label).to_equal("ready")
+        expect(recovered.return_fields[1].type_text).to_equal("i32")
+        expect(recovered.flatten_struct_output).to_equal(true)
+        expect(catalog.hardware_entity_count).to_equal(1)
+
+    it "fails closed when no sidecar function name matches":
+        val mir = catalog_module_b("stage4_metadata_entry", false)
+        var modules: Dict<text, MirModule> = {}
+        modules[mir.name] = mir
+        val rows = [catalog_flat_row("other.module", "other_entry")]
+        val result = vhdl_build_design_catalog_with_metadata(modules, {}, rows,
+            [mir.name], "stage4_metadata_mismatch_contract")
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("found no @hardware entry")
+
+    it "does not classify an unrelated same-named sidecar function":
+        val mir = catalog_module_b("stage4_metadata_entry", false)
+        var modules: Dict<text, MirModule> = {}
+        modules[mir.name] = mir
+        val rows = [catalog_flat_row("std.unrelated", "stage4_metadata_entry")]
+        val result = vhdl_build_design_catalog_with_metadata(modules, {}, rows,
+            [mir.name], "stage4_metadata_unrelated_contract")
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("found no @hardware entry")
+
+    it "rejects ambiguous normalized metadata aliases":
+        var mir = catalog_module_b("stage4_metadata_entry", false)
+        mir.name = "stage4_metadata"
+        var modules: Dict<text, MirModule> = {}
+        modules[mir.name] = mir
+        val rows = [
+            catalog_flat_row("std.stage4_metadata", "stage4_metadata_entry"),
+            catalog_flat_row("lib.stage4_metadata", "stage4_metadata_entry")
+        ]
+        val result = vhdl_build_design_catalog_with_metadata(modules, {}, rows,
+            [mir.name], "stage4_metadata_ambiguous_contract")
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("is ambiguous")
+
+    it "rejects an exact metadata row plus its normalized alias":
+        var mir = catalog_module_b("stage4_metadata_entry", false)
+        mir.name = "lib.stage4_metadata"
+        var modules: Dict<text, MirModule> = {}
+        modules[mir.name] = mir
+        val rows = [
+            catalog_flat_row("lib.stage4_metadata", "stage4_metadata_entry"),
+            catalog_flat_row("std.stage4_metadata", "stage4_metadata_entry")
+        ]
+        val result = vhdl_build_design_catalog_with_metadata(modules, {}, rows,
+            [mir.name], "stage4_metadata_exact_alias_contract")
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("is ambiguous")
+
+    it "rejects a generic hardware entry before VHDL emission":
+        var mir = catalog_module_b("generic_entry", false)
+        val symbol = SymbolId(id: catalog_function_symbol(mir, "generic_entry"))
+        var func = mir.functions[symbol]
+        func.generic_params = ["T"]
+        func.is_generic_template = true
+        mir.functions[symbol] = func
+        var modules: Dict<text, MirModule> = {}
+        modules[mir.name] = mir
+        val rows = [catalog_flat_row(mir.name, "generic_entry")]
+        val result = vhdl_build_design_catalog_with_metadata(modules, {}, rows,
+            [mir.name], "generic_hardware_contract")
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("is generic")
+
+    it "rejects flat metadata with mismatched parallel arrays":
+        val mir = catalog_module_b("invalid_metadata_entry", false)
+        var modules: Dict<text, MirModule> = {}
+        modules[mir.name] = mir
+        var row = catalog_flat_row(mir.name, "invalid_metadata_entry")
+        row.generic_names = ["WIDTH"]
+        row.generic_default_texts = ["32"]
+        row.generic_type_texts = []
+        val result = vhdl_build_design_catalog_with_metadata(modules, {}, [row],
+            [mir.name], "invalid_flat_metadata_contract")
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("invalid flat fields")
+        var invalid_tag = catalog_flat_row(mir.name, "invalid_metadata_entry")
+        invalid_tag.reset_synchrony = 3
+        val tag_result = vhdl_build_design_catalog_with_metadata(modules, {},
+            [invalid_tag], [mir.name], "invalid_flat_tag_contract")
+        expect(tag_result.is_err()).to_equal(true)
+        expect(tag_result.unwrap_err()).to_contain("invalid flat fields")
+
     it "rebases module-local symbols and orders record dependencies":
         var modules: Dict<text, MirModule> = {}
         modules["a"] = catalog_module_a()
@@ -184,6 +341,19 @@ describe "VHDL design-wide catalog":
         expect(catalog.design.types[catalog.type_order[1]].name).to_equal("wrapper_t")
         expect(catalog.source_module_count).to_equal(3)
         expect(catalog.hardware_entity_count).to_equal(2)
+        var top_source = ""
+        var leaf_source = ""
+        var helper_source = ""
+        for source in catalog.function_sources:
+            if source.name == "catalog_top":
+                top_source = source.source_module
+            elif source.name == "catalog_leaf":
+                leaf_source = source.source_module
+            elif source.name == "catalog_helper":
+                helper_source = source.source_module
+        expect(top_source).to_equal("entry")
+        expect(leaf_source).to_equal("a")
+        expect(helper_source).to_equal("b")
         val compiled = VhdlBackend.create(CodegenTarget.Riscv32,
             compileoptions_default_options()).compile(catalog.design)
         expect(compiled.is_ok()).to_equal(true)
@@ -196,6 +366,44 @@ describe "VHDL design-wide catalog":
         expect(output.vhdl).to_contain("entity catalog_top is")
         expect(output.vhdl.index_of("entity catalog_leaf is")).to_be_less_than(
             output.vhdl.index_of("entity catalog_top is"))
+
+    it "rebases colliding module-local functions with flat metadata and source ownership":
+        val helper = catalog_module_b("catalog_rebase_helper", false)
+        var entry = catalog_call_entry_module("helper::catalog_rebase_helper")
+        val entry_symbol = SymbolId(id: catalog_function_symbol(entry, "catalog_call_top"))
+        var entry_function = entry.functions[entry_symbol]
+        entry_function.has_vhdl_metadata = false
+        entry_function.vhdl_metadata = vhdl_hardware_metadata_default()
+        entry.functions[entry_symbol] = entry_function
+        expect(catalog_function_symbol(helper, "catalog_rebase_helper")).to_equal(
+            catalog_function_symbol(entry, "catalog_call_top"))
+        var modules: Dict<text, MirModule> = {}
+        modules["helper"] = helper
+        modules["entry"] = entry
+        val result = vhdl_build_design_catalog_with_metadata(modules, {},
+            [catalog_flat_row("entry", "catalog_call_top")], ["entry"],
+            "catalog_rebase_ownership_contract")
+        expect(result.is_ok()).to_equal(true)
+        val catalog = result.unwrap()
+        val helper_symbol = catalog_function_symbol(catalog.design,
+            "catalog_rebase_helper")
+        val top_symbol = catalog_function_symbol(catalog.design, "catalog_call_top")
+        expect(helper_symbol).to_be_greater_than(0)
+        expect(top_symbol).to_be_greater_than(0)
+        expect(helper_symbol == top_symbol).to_equal(false)
+        expect(catalog.hardware_entity_count).to_equal(1)
+        val rebased_top = catalog.design.functions[SymbolId(id: top_symbol)]
+        expect(rebased_top.has_vhdl_metadata).to_equal(true)
+        expect(rebased_top.vhdl_metadata.is_hardware).to_equal(true)
+        var helper_source = ""
+        var top_source = ""
+        for source in catalog.function_sources:
+            if source.name == "catalog_rebase_helper":
+                helper_source = source.source_module
+            elif source.name == "catalog_call_top":
+                top_source = source.source_module
+        expect(helper_source).to_equal("helper")
+        expect(top_source).to_equal("entry")
 
     it "uses HIR provenance for imported types and globals and rebases nested static initializers":
         var modules: Dict<text, MirModule> = {}

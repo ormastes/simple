@@ -6,6 +6,7 @@
 
 use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
 use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.attributes.{parse_vhdl_hardware_attrs, VhdlResetSynchrony}
 use compiler.frontend.parser_types_expr.{ExprKind}
 
 describe "Flat AST bridge public declaration parsing", tag: ["only-compiled"]:
@@ -58,6 +59,23 @@ describe "Flat AST bridge public declaration parsing", tag: ["only-compiled"]:
                         fail("named GPU decorator right side was not a string literal")
             case _:
                 fail("GPU decorator argument was not parsed as an assignment")
+
+    it "preserves VHDL decorators without leaking pending clocked metadata":
+        val src = "@clocked(stale_clk, none, sync)\nval separator: i64 = 0\n\n@hardware\n@flatten_struct_output\n@generic(WIDTH = 8)\n@clocked(clk, none)\npub fn rtl_entry() -> i64:\n    0\n"
+        val module = parse_and_build_module(src, "test_vhdl_decorators.spl")
+
+        val entry = module.functions["rtl_entry"] ?? panic("missing rtl entry")
+        val metadata = parse_vhdl_hardware_attrs(entry.attributes)
+        expect(metadata.is_hardware).to_equal(true)
+        expect(metadata.flatten_struct_output).to_equal(true)
+        expect(metadata.generics.len()).to_equal(1)
+        expect(metadata.generics[0].name).to_equal("WIDTH")
+        expect(metadata.generics[0].default_text).to_equal("8")
+        expect(metadata.has_clocked).to_equal(true)
+        expect(metadata.clocked.clock_signal).to_equal("clk")
+        expect(metadata.clocked.has_reset).to_equal(false)
+        expect(metadata.clocked.reset_synchrony).to_equal(VhdlResetSynchrony.None_)
+        expect(metadata.clocked.is_valid).to_equal(true)
 
     it "accepts top-level pub const-style binding on the active frontend path":
         val src = "pub val answer: i64 = 42\n"
