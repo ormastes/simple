@@ -1,5 +1,8 @@
 use app.io.cli_lint_commands.{run_fix_command}
+use compiler.tools.fix.main.{fix_read_source}
 use std.io.{file_write, file_read, file_delete}
+use app.io.mod.{dir_create, dir_remove_all}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 
 extern fn rt_exit(code: i32)
 
@@ -20,7 +23,42 @@ val dry_run_exit = run_fix_command(["fix", path, "--dry-run", "--fix-all", "--fi
 val after_dry_run = file_read(path)
 val _ = file_delete(path)
 
-if malformed_exit != 2 or unknown_exit != 2 or empty_id_exit != 2 or help_exit != 0 or help_bogus_exit != 2 or help_file_exit != 2 or dry_run_exit != 0 or after_invalid != original or after_dry_run != original:
+val nonce = time_now_unix_micros().to_string()
+val directory = "/tmp/simple_fix_cli_directory_target_" + nonce
+val _directory_cleanup_before = dir_remove_all(directory)
+val _directory_created = dir_create(directory, true)
+val sentinel = directory + "/sentinel.txt"
+val _sentinel_written = file_write(sentinel, "keep")
+val directory_exit = run_fix_command(["fix", directory, "--fix-all"])
+val sentinel_after = file_read(sentinel)
+
+val empty_path = "/tmp/simple_fix_cli_empty_" + nonce + ".spl"
+val _empty_written = file_write(empty_path, "")
+val empty_exit = run_fix_command(["fix", empty_path, "--fix-all"])
+val empty_after = file_read(empty_path)
+
+var directory_read_failed = false
+match fix_read_source(directory):
+    case Err(_): directory_read_failed = true
+    case Ok(_): directory_read_failed = false
+var empty_read_ok = false
+match fix_read_source(empty_path):
+    case Err(_): empty_read_ok = false
+    case Ok(content): empty_read_ok = content == ""
+val missing_path = "/tmp/simple_fix_cli_missing_" + nonce + ".spl"
+var missing_read_failed = false
+match fix_read_source(missing_path):
+    case Err(_): missing_read_failed = true
+    case Ok(_): missing_read_failed = false
+val _directory_cleanup_after = dir_remove_all(directory)
+val _empty_deleted = file_delete(empty_path)
+
+if (malformed_exit != 2 or unknown_exit != 2 or empty_id_exit != 2 or
+    help_exit != 0 or help_bogus_exit != 2 or help_file_exit != 2 or
+    dry_run_exit != 0 or after_invalid != original or after_dry_run != original or
+    directory_exit != 1 or sentinel_after != "keep" or empty_exit != 0 or
+    empty_after != "" or not directory_read_failed or not empty_read_ok or
+    not missing_read_failed):
     print "FAIL: fix accepted an invalid option or mutated a dry-run fixture"
     rt_exit(1)
 

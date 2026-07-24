@@ -259,7 +259,11 @@ evidence boundary for the important pure-Simple tooling lanes:
   returns 0 only when used alone, while mixed help fails closed
   (`a974dddfec6`); invalid or empty fix options return exit 2 before
   a file read/write; exact `--dry-run` remains
-  non-mutating. **Strongest current evidence:** `5b13444c83`, `0a7b45ea7b`,
+  non-mutating. All fix owners now share source admission: directories,
+  missing paths, and detectable read failures return exit 1 before rule
+  evaluation or writes, while valid empty files remain clean no-ops; see the
+  [fix source-admission report](../../08_tracking/bug/fix_directory_target_false_green_2026-07-24.md).
+  **Strongest current evidence:** `5b13444c83`, `0a7b45ea7b`,
   and `3bd9be7c52c`.
   Both fix-option owner contracts pass through the temporary bootstrap
   interpreter after routing writes through the module-level facade. **Remaining
