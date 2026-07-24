@@ -308,7 +308,7 @@ runtime-native capsule from silently reopening it.
 | # | Bug | Note |
 |---|-----|------|
 | 20 | `native_engine2d_runtime_queue_symbols` | Runtime SFFI now registers `rt_host_gpu_queue_emit_payload_text` with a focused ABI regression; end-to-end native Engine2D queue execution remains pending. |
-| 21 | `native_renderdoc_inspector_else_parse` | `Else` parse failure in the RenderDoc inspector source — parser edge case. |
+| 21 | `native_renderdoc_inspector_else_parse` | **Resolved and focused-parser verified:** inline/block/repeated `else if` chains and the real RenderDoc inspector source parse. App bootstrap execution remains a separate receipt. |
 
 ---
 
@@ -333,7 +333,7 @@ The original wave tables above preserve root-cause history; this list supersedes
 their implementation order.
 
 1. Run each row's recorded focused/native/parity gate for execution-proof-only
-   rows #2–#7, #9–#10, #12–#18, and #20–#21. Native/parity gates wait for a
+   rows #2–#7, #9–#10, #12–#18, and #20. Native/parity gates wait for a
    valid pure-Simple executable; do not reimplement landed source fixes.
 2. Implement #8 as one atomic uniform tagged Option ABI change, including every
    producer/consumer boundary and the full Result-preservation matrix. Do not

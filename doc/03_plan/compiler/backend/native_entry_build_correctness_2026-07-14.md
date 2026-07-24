@@ -119,7 +119,8 @@ Landed results from the sweep:
   below; the static constructor crash is resolved by the 2026-07-15 bottom-up
   fix and its parity cases.
 
-**HARD RULE for every lane:** never run `bootstrap-from-scratch.sh`, `cargo`,
+**HARD RULE for every lane:** never run
+`scripts/bootstrap/bootstrap-from-scratch.sh`, `cargo`,
 `bin/simple build bootstrap`, `--deploy`, or anything that writes `bin/release`
 (a rogue redeploy was caught mid-run this session and killed before it clobbered
 the shared binary — deploys require explicit user go-ahead).
@@ -166,11 +167,12 @@ the shared binary — deploys require explicit user go-ahead).
     risking a runaway or crash.
   - The cross-module `Result<[u8], E>` control now routes both its Ok and Err
     paths through `?`. Flagless default-LLVM and explicit-Cranelift gates
-    schedule it on FreeBSD x86_64 and AArch64/RISC-V QEMU. ARM32 default LLVM
-    and RV32 bare-metal LLVM plus Windows ARM64 LLVM/Cranelift require nonempty
-    target-correct relocatable objects from the same fixture. The ARM32 object
-    check requires the target's hard-float ABI and rejects soft-float output;
-    execution remains pending.
+    schedule it on hosted Linux/macOS/Windows, FreeBSD x86_64, and
+    AArch64/RISC-V QEMU. ARM32 default LLVM and RV32 bare-metal LLVM plus
+    Windows ARM64 LLVM/Cranelift require nonempty target-correct relocatable
+    objects from the same fixture. The ARM32 object check requires the target's
+    hard-float ABI and rejects soft-float output; first execution of the added
+    hosted Cranelift gate remains pending.
   - `native_text_option_unwrap_pointer_value_2026-07-15.md` is resolved at
     origin tip 8932fcb3a148: its exact flat-nullable text repro builds and
     prints `opt`. A dedicated strict-dual case schedules that exact repro on
