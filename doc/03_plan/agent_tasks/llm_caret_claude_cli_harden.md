@@ -124,7 +124,7 @@ and must not be resolved, reverted, or included by this lane.
 | Root-registry manual parity | PASS: 5/5 scenario bodies match source, including the production-derived exhaustive matrix | Static synchronization; no CLI/TUI invocation claim |
 | Hidden-stub manual parity | PASS: 1/1 scenario body and the complete supporting-helper block match source | Static synchronization; SSpec/docgen not executed on a qualified runtime |
 | Feature-gate manual parity | PASS (static): 33/33 owner rows, 33/33 independently pinned contract rows, 33/33 state rows, and 3/3 complete folded executable scenario bodies | SSpec/docgen cannot execute until a qualified runtime exists |
-| Focused modern SSpec scan | PASS (static): 492 modern `should` examples across the listed files (404 base plus 88 focused owner/effect examples), canonical matchers, and no placeholder pass | Static source/manual scan only; execution is not claimed |
+| Focused modern SSpec scan | PASS (static): 493 modern `should` examples across the listed files (405 base plus 88 focused owner/effect examples), canonical matchers, and no placeholder pass | Static source/manual scan only; execution is not claimed |
 | Direct environment guard | PASS in working and staged modes | Changed Caret paths only |
 | Numbered-artifact guard | WARN in this jj workspace: both modes emit Git-worktree/`--cached` errors but still print `OK` and exit zero | Not authoritative here; no numbered artifacts are added by this tranche |
 | Generated-spec layout | PASS: zero `.spl` specs under `doc/06_spec` | Layout only |
@@ -189,7 +189,7 @@ fixtures. No lane may run a paid provider.
 | A — TUI component | `test/01_unit/app/llm_caret/chat_tui_spec.spl` | Complete: pure viewport/status/hint and promptless root-command behavior | Production imports; no inline copies; 62-body manual synchronized |
 | B — main/config | `test/01_unit/app/llm_caret/main_spec.spl`, `config_spec.spl` | Complete: real startup hooks and default branches with isolated env/session fixtures | Host env restored; filesystem confined to `build/tmp`; 57/12-body manuals synchronized |
 | C — tools | `src/app/llm_caret/tools.spl`, `test/01_unit/app/llm_caret/tools_spec.spl` | Complete statically: production glob matcher/executor and list-dir result assertions | Workspace bounded; matcher defect fixed; 37-body manual synchronized |
-| D — live TUI | `scripts/check/check-llm-caret-tui-pty.shs`, focused PTY system spec, manual, plan, and trace rows | Implemented fail-closed: clean-source/runtime-hashed cached `bin/caret` only, dummy provider, forced/auto/piped routing, EOF/Ctrl-C/Ctrl-D, UTF-8/edit/navigation, 12x50 geometry, default/enabled/disabled hidden admission, raw failure before ANSI, and pre/post `stty` evidence | Static/script validation first; six-scenario real PTY PASS on a qualified cached runtime; terminal restored after every modeled outcome |
+| D — live TUI | `scripts/check/check-llm-caret-tui-pty.shs`, focused PTY system spec, manual, plan, and trace rows | Implemented fail-closed: clean-source/runtime-hashed cached `bin/caret` only, dummy provider, forced/auto/piped routing, EOF/Ctrl-C/Ctrl-D, UTF-8/edit/navigation, 12x50 geometry, default/enabled/disabled hidden admission, four promptless canonical/alias cases, raw failure before ANSI, and pre/post `stty` evidence | Static/script validation first; seven-scenario real PTY gate on a qualified cached runtime; terminal restored after every modeled outcome |
 | E — installed Claude CLI | installed checker, focused system spec/manual, trace rows | Implemented statically: five bounded offline probes record executable provenance and validate the argument surface with no submitted prompt or inherited provider credentials | Execute once on the installed binary; never generalize the result to authenticated/provider/session parity |
 | F — hidden registry matrix | root command registry spec/manual | Implemented statically: derive lookup, alias, admission, visibility, hidden, and disabled coverage from every production registry record | Execute on a qualified runtime; TUI process contract is covered by lane D, while non-TUI CLI invocation remains separate |
 | G — distributed hidden-stub aggregate | `src/app/llm_caret/claude_full/commands/hidden_stub_registry.spl`, mirrored focused SSpec/manual, plan and trace rows | Implemented statically: derive all 14 canonical hidden-disabled stub records from `claude_full` leaf descriptor declarations with `source_id`, `source_file`, `command_name`, `hidden`, and `enabled`; the stale historical feature TSV is not behavioral authority | `ClaudeHiddenStubCommandRecord`, `hiddenDisabledStubCommandRegistry`, `setup_hidden_stub_registry_fixture`, and `check_hidden_stub_registry_contract`; normalized source discovery and two-way registry comparison are present; supporting metadata only with no shipped admission claim; execute SSpec/docgen on a qualified runtime |
@@ -271,6 +271,18 @@ fixtures. No lane may run a paid provider.
    system output, unchanged conversation state, and
    `submitted_to_model=false`; extend PTY evidence only after those injected
    component cases are stable.
+
+   The cached-wrapper checker extension uses `--case promptless` and four
+   independent fail-closed PTY labels:
+   `promptless-compact`, `promptless-summarize`, `promptless-init`, and
+   `promptless-bootstrap`. Each case sends exactly one slash input followed by
+   `/exit`, asserts the canonical System transcript (`/compact` for the first
+   two, `/init` for the latter two), and must independently preserve the
+   existing exit-zero, ANSI, cursor, alternate-screen, geometry, and terminal
+   restoration gates. The system SSpec adds one scenario using the existing
+   `Open the caret TUI`, `Send a prompt through the visible input`, and
+   `Check transcript and status` steps. Missing cached artifacts remain a hard
+   failure; no case may skip or fall back to source execution.
 4. **Lane L — completion audit.** Reconcile every accepted record with its
    focused spec, CLI reachability decision (`reachable` or justified parts-bin
    only), TUI reachability decision, manual, and retained execution artifact.

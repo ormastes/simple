@@ -17,7 +17,7 @@ FAILURES=0
 CASE_TIMEOUT_SECONDS=20
 
 usage() {
-    printf '%s\n' "usage: sh scripts/check/check-llm-caret-tui-pty.shs --case <prerequisites|routing|lifecycle|editing|hidden|raw-failure|all>"
+    printf '%s\n' "usage: sh scripts/check/check-llm-caret-tui-pty.shs --case <prerequisites|routing|lifecycle|editing|hidden|promptless|raw-failure|all>"
 }
 
 fail_prerequisite() {
@@ -243,11 +243,13 @@ verify_cached_artifact_provenance() {
 
 scrub_provider_credentials() {
     unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_API_KEY
-    unset CLAUDE_CODE_OAUTH_TOKEN OPENAI_API_KEY AZURE_OPENAI_API_KEY
+    unset CLAUDE_CODE_OAUTH_TOKEN CLAUDE_AI_OAUTH_ACCESS_TOKEN
+    unset CLAUDE_BRIDGE_OAUTH_TOKEN OPENAI_API_KEY AZURE_OPENAI_API_KEY
     unset GOOGLE_API_KEY GEMINI_API_KEY GOOGLE_APPLICATION_CREDENTIALS
     unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
-    unset AWS_PROFILE AWS_DEFAULT_PROFILE ANTHROPIC_VERTEX_PROJECT_ID
-    unset ANTHROPIC_BEDROCK_BASE_URL
+    unset AWS_PROFILE AWS_DEFAULT_PROFILE AWS_BEARER_TOKEN_BEDROCK
+    unset ANTHROPIC_VERTEX_PROJECT_ID ANTHROPIC_BEDROCK_BASE_URL
+    unset ANTHROPIC_FOUNDRY_API_KEY
 }
 
 prepare_prerequisites() {
@@ -331,6 +333,18 @@ write_input() {
             ;;
         hidden-disabled)
             printf '/remote-setup\r/exit\r' >"${input_path}"
+            ;;
+        promptless-compact)
+            printf '/compact\r/exit\r' >"${input_path}"
+            ;;
+        promptless-summarize)
+            printf '/summarize\r/exit\r' >"${input_path}"
+            ;;
+        promptless-init)
+            printf '/init\r/exit\r' >"${input_path}"
+            ;;
+        promptless-bootstrap)
+            printf '/bootstrap\r/exit\r' >"${input_path}"
             ;;
         *)
             return 1
@@ -589,6 +603,24 @@ run_pty_case() {
          ! grep -a -F "system: Command disabled: /remote-setup" \
              "${capture}" >/dev/null 2>&1; then
         record_failure "${label}" "hidden_disabled_rejection_missing" "${case_dir}"
+    elif { [ "${input_kind}" = "promptless-compact" ] ||
+           [ "${input_kind}" = "promptless-summarize" ]; } &&
+         ! grep -a -F "system: Command not implemented in Caret: /compact" \
+             "${capture}" >/dev/null 2>&1; then
+        record_failure "${label}" "promptless_compact_result_missing" "${case_dir}"
+    elif [ "${input_kind}" = "promptless-summarize" ] &&
+         grep -a -F "system: Command not implemented in Caret: /summarize" \
+             "${capture}" >/dev/null 2>&1; then
+        record_failure "${label}" "promptless_summarize_not_canonical" "${case_dir}"
+    elif { [ "${input_kind}" = "promptless-init" ] ||
+           [ "${input_kind}" = "promptless-bootstrap" ]; } &&
+         ! grep -a -F "system: Command not implemented in Caret: /init" \
+             "${capture}" >/dev/null 2>&1; then
+        record_failure "${label}" "promptless_init_result_missing" "${case_dir}"
+    elif [ "${input_kind}" = "promptless-bootstrap" ] &&
+         grep -a -F "system: Command not implemented in Caret: /bootstrap" \
+             "${capture}" >/dev/null 2>&1; then
+        record_failure "${label}" "promptless_bootstrap_not_canonical" "${case_dir}"
     else
         record_pass "${label}" "${case_dir}"
     fi
@@ -684,6 +716,13 @@ run_hidden() {
     unset LLM_CARET_ENABLE_HIDDEN_COMMANDS
 }
 
+run_promptless() {
+    run_pty_case "promptless-compact" "forced" "promptless-compact" "12x80"
+    run_pty_case "promptless-summarize" "forced" "promptless-summarize" "12x80"
+    run_pty_case "promptless-init" "forced" "promptless-init" "12x80"
+    run_pty_case "promptless-bootstrap" "forced" "promptless-bootstrap" "12x80"
+}
+
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --case)
@@ -729,6 +768,9 @@ case "${CASE_NAME}" in
     hidden)
         run_hidden
         ;;
+    promptless)
+        run_promptless
+        ;;
     raw-failure)
         run_raw_failure_case
         ;;
@@ -737,6 +779,7 @@ case "${CASE_NAME}" in
         run_lifecycle
         run_editing
         run_hidden
+        run_promptless
         run_raw_failure_case
         ;;
     *)

@@ -24,7 +24,7 @@ used to generate the full-parity matrices.
 | `doc/09_report/llm_caret_claude_cli_traceability.md` | Maps all 25 direct files and 7,278 current LOC | Current static mapping; not executable evidence |
 | `scripts/check/check-llm-caret-claude-cli-trace.shs` | 25/25 files (100%); 7,278/7,278 LOC (100%); 496/496 file-qualified symbols; `STATUS: PASS` | Current computed gate |
 | Full self-hosted CLI bootstrap | Stage 3 built; Stage 4 full-CLI native build was killed by signal 9; no candidate deployed | Current executable-test blocker; do not retry in this session |
-| Cached Caret live-PTY qualification | Checker/spec/manual contain six fail-closed scenarios, including three real-TUI hidden-state process cases; `--case prerequisites` requires a matching adjacent provenance manifest and fails closed when the cached artifact is absent | Current executable-test blocker; no live PASS or skipped prerequisite |
+| Cached Caret live-PTY qualification | Checker/spec/manual contain seven fail-closed scenarios, including three hidden-state and four independent promptless canonical/alias real-TUI process cases; `--case prerequisites` requires a matching adjacent provenance manifest and fails closed when the cached artifact is absent | Current executable-test blocker; no live PASS or skipped prerequisite |
 | `tmp/claude/claude-code-main/src` | Missing | Current-tree evidence |
 | Full-parity feature matrix | 599 rows, 1,902 historical source files, 512,685 historical LOC | Snapshot-derived evidence; cannot be refreshed against upstream now |
 | Full-parity file matrix | 1,902 rows | Snapshot-derived evidence |
@@ -506,13 +506,13 @@ Because docgen cannot execute in the current runtime, all refreshed manuals
 explicitly report zero executed scenarios and do not claim a PASS.
 The 359 source-synchronized unit examples plus eight CLI feature-contract,
 three process-hardening, nine TUI/hidden, five managed-environment, five
-installed-Claude, five root-registry, six live-PTY, and one
+installed-Claude, five root-registry, seven live-PTY, and one
 hidden-stub aggregate plus three feature-gate aggregate examples form the
-404-example base across the listed executable files (the root-registry spec
+405-example base across the listed executable files (the root-registry spec
 contains five scenarios). The 88 focused owner/effect examples now synchronized
 across Tasks V2, swarms, team memory, insights, review/rewind/sandbox, bridge
 helpers/command, AttachmentMessage, and withRetry raise the scoped modern
-`should` total to 492 examples with canonical matchers. The pre-existing
+`should` total to 493 examples with canonical matchers. The pre-existing
 unit/component/process manuals retain
 their documented body-parity checks. The feature-gate manual statically checks
 exact 33-row contract/state parity and carries complete folded executable

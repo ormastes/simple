@@ -6,7 +6,10 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|-------:|--------:|--------:|
-| 6 | 6 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
+
+This manual records zero executed scenarios and does not claim PASS because
+cached process execution is blocked until a qualified Caret artifact exists.
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -30,8 +33,9 @@
 The checker invokes only `bin/caret`, disables its source fallback, and pins
 the wrapper override to the exact repository-cached native artifact whose
 binary, clean committed source, target, and build-runtime hashes were verified.
-All chat work uses `--provider dummy`; provider/cloud credentials are removed
-from the child environment, so no credential or network is needed.
+All chat work uses `--provider dummy`; the checker removes its enumerated known
+provider/cloud credential variables from the child environment. The dummy
+provider requires no provider credential or network.
 `script(1)` owns the pseudo-terminal and a child wrapper records
 `stty -g` and geometry before and after Caret.
 
@@ -45,6 +49,11 @@ disabled-command rejection. Those cases use a fixed 12x80 PTY so inherited
 geometry cannot truncate the exact semantic lines. Every PTY case must also
 retain an explicit `caret_exit=0` child marker; `script -e` is only supplemental
 exit propagation.
+The promptless case is narrower: it proves that the shipped root metadata
+admits `/compact`, `/summarize`, `/init`, and `/bootstrap`, including the two
+canonical/alias pairs. It does not promote the corresponding leaf feature
+gates from parts-bin evidence or claim that their feature implementations are
+shipped.
 Forced TUI on non-TTY stdin must fail before emitting escape bytes with
 `terminal raw mode unavailable`. Each child is guarded by one fixed 20-second
 watchdog; timeout evidence is retained and fails the case without retry.
@@ -192,6 +201,45 @@ expect(result.stdout).to_contain(
 )
 
 step("Check the hidden-feature gate")
+expect(result.stdout).to_contain("evidence_status=PASS")
+expect(result.stdout).to_contain("failed_cases=0")
+expect(result.exit_code).to_equal(0)
+```
+
+</details>
+
+### Supporting evidence: promptless commands reach shipped root metadata
+
+#### should reach compact summarize init and bootstrap aliases through the shipped root
+
+- Open the caret TUI.
+- Send the four promptless slash commands through the visible input.
+  - Expected: `/compact`, `/summarize`, `/init`, and `/bootstrap` each reach
+    the shipped root metadata and report a passing checker case.
+- Check transcript and status.
+  - Expected: the checker reports complete evidence, zero failed cases, and
+    exits zero.
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+step("Open the caret TUI")
+val result = run_caret_pty_case("promptless")
+step("Send a prompt through the visible input")
+expect(result.stdout).to_contain(
+    "case=promptless-compact status=PASS"
+)
+expect(result.stdout).to_contain(
+    "case=promptless-summarize status=PASS"
+)
+expect(result.stdout).to_contain(
+    "case=promptless-init status=PASS"
+)
+expect(result.stdout).to_contain(
+    "case=promptless-bootstrap status=PASS"
+)
+step("Check transcript and status")
 expect(result.stdout).to_contain("evidence_status=PASS")
 expect(result.stdout).to_contain("failed_cases=0")
 expect(result.exit_code).to_equal(0)

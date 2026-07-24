@@ -189,3 +189,11 @@ title/status, one exact System transcript line, cleared input, zero responder
 calls, and zero persistence. The injected `CaretIo` plain-loop case additionally
 proves no raw/alternate-screen/cursor mutation. It remains component evidence,
 not cached-wrapper stdin process evidence.
+
+The fail-closed PTY checker projects the same mapping into four independent
+cached-wrapper cases: `promptless-compact`, `promptless-summarize`,
+`promptless-init`, and `promptless-bootstrap`. Each drives one command plus
+`/exit` through a real PTY and retains the common child-exit, ANSI, cursor,
+alternate-screen, geometry, and `stty` restoration gates before checking the
+canonical System transcript. These cases are designed but not executed while
+the qualified cached Caret artifact is absent.
