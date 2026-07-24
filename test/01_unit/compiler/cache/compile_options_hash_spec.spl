@@ -6,6 +6,9 @@
 # **Feature IDs:** #CACHE-011 to #CACHE-020
 # **Category:** Infrastructure
 
+use compiler.driver.cache.compile_options_hash.{compile_options_hash_compute, compile_options_hash_validate, compile_options_hash_zero, compile_options_hash_from_bytes}
+use compiler.driver.cache.cache_types.{CACHE_FRESH, CACHE_STALE}
+
 # ============================================================================
 # Mock CompileOptionsHash (self-contained for interpreter mode)
 # ============================================================================
@@ -162,3 +165,71 @@ describe "CompileOptionsHash":
             val current = options_hash_compute("cranelift", 2, true, true, false)
             expect(stored.hash != current.hash).to_equal(true)
             expect(stored.backend_kind != current.backend_kind).to_equal(true)
+
+# ============================================================================
+# Real module — sha256 canonical combined hash (audit P1 regression)
+# ============================================================================
+
+describe "compile_options_hash sha256 canonical encoding":
+    it "same options produce the same hash":
+        val h1 = compile_options_hash_compute("llvm", 2, true, false, false, "default", ["a", "b"])
+        val h2 = compile_options_hash_compute("llvm", 2, true, false, false, "default", ["a", "b"])
+        expect(h1.hash).to_equal(h2.hash)
+        assert_true(h1.hash != 0)
+
+    it "each option field change produces a different hash":
+        val base = compile_options_hash_compute("llvm", 2, true, false, false, "default", ["a"])
+        val diff_backend = compile_options_hash_compute("cranelift", 2, true, false, false, "default", ["a"])
+        val diff_opt = compile_options_hash_compute("llvm", 3, true, false, false, "default", ["a"])
+        val diff_release = compile_options_hash_compute("llvm", 2, false, false, false, "default", ["a"])
+        val diff_debug = compile_options_hash_compute("llvm", 2, true, true, false, "default", ["a"])
+        val diff_gc = compile_options_hash_compute("llvm", 2, true, false, true, "default", ["a"])
+        val diff_profile = compile_options_hash_compute("llvm", 2, true, false, false, "fast", ["a"])
+        val diff_families = compile_options_hash_compute("llvm", 2, true, false, false, "default", ["a", "b"])
+        assert_true(base.hash != diff_backend.hash)
+        assert_true(base.hash != diff_opt.hash)
+        assert_true(base.hash != diff_release.hash)
+        assert_true(base.hash != diff_debug.hash)
+        assert_true(base.hash != diff_gc.hash)
+        assert_true(base.hash != diff_profile.hash)
+        assert_true(base.hash != diff_families.hash)
+
+    it "family order does not change the hash (sorted canonical input)":
+        val h1 = compile_options_hash_compute("llvm", 2, true, false, false, "default", ["b", "a", "c"])
+        val h2 = compile_options_hash_compute("llvm", 2, true, false, false, "default", ["a", "c", "b"])
+        expect(h1.hash).to_equal(h2.hash)
+
+    it "delimiter content cannot alias adjacent components":
+        val h1 = compile_options_hash_compute("llvm", 2, true, false, false, "a", ["b:c"])
+        val h2 = compile_options_hash_compute("llvm", 2, true, false, false, "a:b", ["c"])
+        assert_true(h1.hash != h2.hash)
+
+    it "family element containing the old join separator does not alias a split list":
+        val h1 = compile_options_hash_compute("llvm", 2, true, false, false, "default", ["a,b"])
+        val h2 = compile_options_hash_compute("llvm", 2, true, false, false, "default", ["a", "b"])
+        assert_true(h1.hash != h2.hash)
+
+describe "compile_options_hash validation as cache miss":
+    it "matching options validate as fresh":
+        val stored = compile_options_hash_compute("llvm", 2, true, false, false, "default", ["a"])
+        val current = compile_options_hash_compute("llvm", 2, true, false, false, "default", ["a"])
+        val r = compile_options_hash_validate(stored, current)
+        expect(r.status).to_equal(CACHE_FRESH)
+
+    it "legacy zero stored hash validates as a plain miss, never acceptance":
+        val current = compile_options_hash_compute("llvm", 2, true, false, false, "default", ["a"])
+        val r = compile_options_hash_validate(compile_options_hash_zero(), current)
+        expect(r.status).to_equal(CACHE_STALE)
+
+    it "old-format garbage stored hash validates as a plain miss without crashing":
+        val garbage: [u8] = [222, 173, 190, 239, 1, 2, 3, 4, 1, 2, 0, 5, 0, 0, 0, 0]
+        val stored = compile_options_hash_from_bytes(garbage)
+        val current = compile_options_hash_compute("llvm", 2, true, false, false, "default", ["a"])
+        val r = compile_options_hash_validate(stored, current)
+        expect(r.status).to_equal(CACHE_STALE)
+
+    it "changed options validate as stale":
+        val stored = compile_options_hash_compute("llvm", 2, true, false, false, "default", ["a"])
+        val current = compile_options_hash_compute("cranelift", 0, false, true, true, "fast", ["b"])
+        val r = compile_options_hash_validate(stored, current)
+        expect(r.status).to_equal(CACHE_STALE)

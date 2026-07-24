@@ -1,0 +1,221 @@
+# ActionKey — canonical encoder for the global cache identity layer (Option C).
+#
+# Phase 1: compute-and-log only. NOT wired into any load path.
+#
+# Source of truth (this file mirrors the formally verified Lean model):
+#   src/verification/cache_identity/src/CacheIdentity/Model.lean
+#   doc/03_plan/compiler/cache/global_cas_interpreter_cache_option_c_plan_2026-07-24.md (§1.1)
+#
+# Encoding is domain-separated and length-prefixed (mirrors the Lean `Canon`
+# tree, serialised):
+#   field(tag, v) -> "F" + len(tag) + ":" + tag + enc(v)
+#   str(s)        -> "S" + len(s) + ":" + s
+#   nat(n)        -> "N" + decimal(n) + ";"
+#   seq(items)    -> "Q" + count + ":" + concat(enc(item)...)
+# Length prefixes make delimiter injection impossible: a value containing
+# "|" or ":" cannot forge another key.
+#
+# Set-typed fields are sorted before encoding (mirrors Lean canonKey):
+#   deps by (module_id, iface_digest) lexicographic; cfg_features and
+#   ct_env_inputs lexicographic. Resolution-witness candidate probes stay
+#   ORDERED — probe order is semantic there (mirrors plan §1.1).
+
+use std.common.crypto.sha256.{sha256_text}
+use std.common.crypto.types.{text_to_bytes}
+
+# ============================================================================
+# Structs (mirror Model.lean: Dep, ActionKey)
+# ============================================================================
+
+# One dependency: depended module's stable id + its *interface* digest.
+struct ActionDep:
+    module_id: text
+    iface_digest: text
+
+# Every input that can affect the produced interpreter-module artifact.
+# EXACTLY the 15 fields of Model.lean's ActionKey, in the same order.
+struct ActionKey:
+    domain: text                # domain separation, e.g. "simple/interpreter-module/v1"
+    compiler_exe: text          # sha of the compiler executable
+    live_compiler_src: text     # sha of live interpreted compiler source
+    schema_version: i64
+    target_triple: text
+    host_arch: text
+    cfg_features: [text]        # set; canonicalised by sort
+    stdlib_variant: text
+    runtime_family: text
+    source_content: text        # sha of module source bytes
+    resolution_witness: text    # sha from resolution_witness_digest
+    deps: [ActionDep]           # set; canonicalised by sort
+    macro_root: text
+    aop_selection: text
+    ct_env_inputs: [text]       # set; canonicalised by sort
+
+# One ordered candidate probe of the resolver (order is semantic).
+# Named `found` because `exists` is a reserved keyword.
+struct ResolutionProbe:
+    path: text
+    found: bool
+
+# ============================================================================
+# Canonical text ordering (byte-wise lexicographic, mirrors Lean String `<`)
+# ============================================================================
+
+fn action_key_text_lt(a: text, b: text) -> bool:
+    val ab = text_to_bytes(a)
+    val bb = text_to_bytes(b)
+    val an = ab.len()
+    val bn = bb.len()
+    var i = 0
+    while i < an and i < bn:
+        val ca = ab[i] as i64
+        val cb = bb[i] as i64
+        if ca < cb:
+            return true
+        if ca > cb:
+            return false
+        i = i + 1
+    an < bn
+
+# Mirrors Lean strLe: a < b || a == b
+fn action_key_text_le(a: text, b: text) -> bool:
+    if action_key_text_lt(a, b):
+        return true
+    a == b
+
+# Mirrors Lean depLe: lexicographic on (module_id, iface_digest).
+fn action_dep_le(a: ActionDep, b: ActionDep) -> bool:
+    if action_key_text_lt(a.module_id, b.module_id):
+        return true
+    if a.module_id == b.module_id:
+        return action_key_text_le(a.iface_digest, b.iface_digest)
+    false
+
+# Insertion sort (mirrors Lean insStr/sortStrs).
+fn action_key_sort_texts(items: [text]) -> [text]:
+    var out: [text] = []
+    for item in items:
+        var placed = false
+        var next: [text] = []
+        for s in out:
+            if not placed and action_key_text_le(item, s):
+                next.push(item)
+                placed = true
+            next.push(s)
+        if not placed:
+            next.push(item)
+        out = next
+    out
+
+# Insertion sort (mirrors Lean insDep/sortDeps).
+fn action_key_sort_deps(items: [ActionDep]) -> [ActionDep]:
+    var out: [ActionDep] = []
+    for item in items:
+        var placed = false
+        var next: [ActionDep] = []
+        for d in out:
+            if not placed and action_dep_le(item, d):
+                next.push(item)
+                placed = true
+            next.push(d)
+        if not placed:
+            next.push(item)
+        out = next
+    out
+
+# ============================================================================
+# Canonical encoding primitives (serialised Lean `Canon` constructors)
+# ============================================================================
+
+fn canon_str(s: text) -> text:
+    "S" + "{s.len()}" + ":" + s
+
+fn canon_nat(n: i64) -> text:
+    "N" + "{n}" + ";"
+
+fn canon_field(tag: text, encoded_value: text) -> text:
+    "F" + "{tag.len()}" + ":" + tag + encoded_value
+
+fn canon_seq(encoded_items: [text]) -> text:
+    var body = ""
+    for item in encoded_items:
+        body = body + item
+    "Q" + "{encoded_items.len()}" + ":" + body
+
+# Mirrors Lean encodeDep.
+fn canon_dep(d: ActionDep) -> text:
+    var items: [text] = []
+    items.push(canon_field("moduleId", canon_str(d.module_id)))
+    items.push(canon_field("ifaceDigest", canon_str(d.iface_digest)))
+    canon_seq(items)
+
+# ============================================================================
+# Encoder + digest (mirror Lean encode; field order is FIXED)
+# ============================================================================
+
+fn action_key_encode(key: ActionKey) -> text:
+    val cfg_sorted = action_key_sort_texts(key.cfg_features)
+    val env_sorted = action_key_sort_texts(key.ct_env_inputs)
+    val deps_sorted = action_key_sort_deps(key.deps)
+
+    var cfg_items: [text] = []
+    for c in cfg_sorted:
+        cfg_items.push(canon_str(c))
+    var env_items: [text] = []
+    for e in env_sorted:
+        env_items.push(canon_str(e))
+    var dep_items: [text] = []
+    for d in deps_sorted:
+        dep_items.push(canon_dep(d))
+
+    var inner: [text] = []
+    inner.push(canon_field("compilerExe", canon_str(key.compiler_exe)))
+    inner.push(canon_field("liveCompilerSrc", canon_str(key.live_compiler_src)))
+    inner.push(canon_field("schemaVersion", canon_nat(key.schema_version)))
+    inner.push(canon_field("targetTriple", canon_str(key.target_triple)))
+    inner.push(canon_field("hostArch", canon_str(key.host_arch)))
+    inner.push(canon_field("cfgFeatures", canon_seq(cfg_items)))
+    inner.push(canon_field("stdlibVariant", canon_str(key.stdlib_variant)))
+    inner.push(canon_field("runtimeFamily", canon_str(key.runtime_family)))
+    inner.push(canon_field("sourceContent", canon_str(key.source_content)))
+    inner.push(canon_field("resolutionWitness", canon_str(key.resolution_witness)))
+    inner.push(canon_field("deps", canon_seq(dep_items)))
+    inner.push(canon_field("macroRoot", canon_str(key.macro_root)))
+    inner.push(canon_field("aopSelection", canon_str(key.aop_selection)))
+    inner.push(canon_field("ctEnvInputs", canon_seq(env_items)))
+
+    # Mirrors Lean: Canon.field k.domain (Canon.seq [...])
+    canon_field(key.domain, canon_seq(inner))
+
+fn action_key_digest(key: ActionKey) -> text:
+    sha256_text(action_key_encode(key))
+
+# ============================================================================
+# Sub-digest helpers (plan §1.1)
+# ============================================================================
+
+# InterfaceDigest — downstream-visible semantics only. Parts are a SET of
+# canonical interface-item texts; sorted here so callers need not pre-sort.
+fn interface_digest_of(parts: [text]) -> text:
+    val sorted = action_key_sort_texts(parts)
+    var items: [text] = []
+    for p in sorted:
+        items.push(canon_str(p))
+    sha256_text(canon_field("simple/interface/v1", canon_seq(items)))
+
+# ResolutionWitness — records how the resolver arrived at its choice.
+# Candidate probes stay ORDERED (probe order is semantic; NOT sorted).
+fn resolution_witness_digest(probes: [ResolutionProbe], selected: text, dir_generation: text, resolver_version: text) -> text:
+    var probe_items: [text] = []
+    for p in probes:
+        val found_nat = if p.found: 1 else: 0
+        var fields: [text] = []
+        fields.push(canon_field("path", canon_str(p.path)))
+        fields.push(canon_field("found", canon_nat(found_nat)))
+        probe_items.push(canon_seq(fields))
+    var inner: [text] = []
+    inner.push(canon_field("probes", canon_seq(probe_items)))
+    inner.push(canon_field("selected", canon_str(selected)))
+    inner.push(canon_field("dirGeneration", canon_str(dir_generation)))
+    inner.push(canon_field("resolverVersion", canon_str(resolver_version)))
+    sha256_text(canon_field("simple/resolution-witness/v1", canon_seq(inner)))

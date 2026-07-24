@@ -1,0 +1,148 @@
+# CAS Store Specification — cross-process disk content-addressed store
+#
+# Tests the Option-C cache phase-1 disk CAS primitives: digest-addressed
+# blobs, verified reads, action manifests, and schema versioning.
+# Plan: doc/03_plan/compiler/cache/global_cas_interpreter_cache_option_c_plan_2026-07-24.md §2.4
+#
+# **Category:** Infrastructure
+
+use std.spec.*
+use compiler.driver.cache.cas_store.{ActionManifest, cas_root, cas_open, cas_put, cas_get, cas_has, cas_blob_path, cas_action_path, cas_version_text, action_put, action_get, action_manifest_serialize}
+use std.crypto.sha256.{sha256_text}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value_str: text) -> bool
+extern fn rt_getpid() -> i64
+extern fn rt_time_now_unix_micros() -> i64
+
+# Fresh, unique store root per example — never a shared warm store.
+fn fresh_root() -> text:
+    val root = "build/tmp/cas_store_spec/{rt_getpid()}-{rt_time_now_unix_micros()}"
+    cas_open(root)
+    root
+
+# Helpers to observe Option<ActionManifest> results (keep `match` out of
+# it-block bodies — trailing match blocks break dedent parsing there).
+fn action_digest_of(m: ActionManifest?) -> text:
+    match m:
+        case Some(v): v.action_digest
+        case nil: "<absent>"
+
+fn artifact_count_of(m: ActionManifest?) -> i64:
+    match m:
+        case Some(v): v.artifact_digests.len()
+        case nil: -1
+
+fn artifact_at(m: ActionManifest?, i: i64) -> text:
+    match m:
+        case Some(v): v.artifact_digests[i]
+        case nil: "<absent>"
+
+describe "CAS blob store":
+    it "round-trips content and digest matches sha256 of content":
+        val root = fresh_root()
+        val content = "hello cas blob"
+        val digest = cas_put(root, content)
+        expect(digest).to_equal(sha256_text(content))
+        expect(cas_get(root, digest) ?? "<absent>").to_equal(content)
+
+    it "dedups identical content on repeated put":
+        val root = fresh_root()
+        val d1 = cas_put(root, "same bytes twice")
+        val d2 = cas_put(root, "same bytes twice")
+        expect(d1).to_equal(d2)
+        assert_true(d1 != "")
+        assert_true(cas_has(root, d1))
+
+    it "returns none for an absent digest":
+        val root = fresh_root()
+        val absent = sha256_text("content that was never stored")
+        assert_false(cas_has(root, absent))
+        expect(cas_get(root, absent) ?? "<absent>").to_equal("<absent>")
+
+    it "detects corruption and never serves unverified bytes":
+        val root = fresh_root()
+        val digest = cas_put(root, "pristine payload")
+        # Corrupt the blob on disk behind the store's back.
+        assert_true(rt_file_write_text(cas_blob_path(root, digest), "corrupt payload"))
+        expect(cas_get(root, digest) ?? "<absent>").to_equal("<absent>")
+        # Corrupt entry was quarantined, not left in place.
+        assert_false(cas_has(root, digest))
+
+    it "gives distinct digests to distinct contents, both retrievable":
+        val root = fresh_root()
+        val da = cas_put(root, "content alpha")
+        val db = cas_put(root, "content beta")
+        assert_true(da != db)
+        expect(cas_get(root, da) ?? "<absent>").to_equal("content alpha")
+        expect(cas_get(root, db) ?? "<absent>").to_equal("content beta")
+
+    it "keeps slash/underscore collision pairs distinct (P1 flattening hole)":
+        # Under the legacy `/`->`_` path flattening, "a/b_c" and "a_b/c"
+        # collapse to the same cache path. Digest addressing must not.
+        val root = fresh_root()
+        val d1 = cas_put(root, "a/b_c")
+        val d2 = cas_put(root, "a_b/c")
+        assert_true(d1 != d2)
+        expect(cas_get(root, d1) ?? "<absent>").to_equal("a/b_c")
+        expect(cas_get(root, d2) ?? "<absent>").to_equal("a_b/c")
+
+describe "CAS action manifests":
+    it "round-trips an action manifest":
+        val root = fresh_root()
+        val key = sha256_text("action-key-1")
+        val a1 = sha256_text("artifact-one")
+        val a2 = sha256_text("artifact-two")
+        val manifest = ActionManifest(action_digest: key, artifact_digests: [a1, a2], schema_version: 1)
+        assert_true(action_put(root, key, manifest))
+        val got = action_get(root, key)
+        expect(action_digest_of(got)).to_equal(key)
+        expect(artifact_count_of(got)).to_equal(2)
+        expect(artifact_at(got, 0)).to_equal(a1)
+        expect(artifact_at(got, 1)).to_equal(a2)
+
+    it "rejects a mislabeled manifest at put time":
+        val root = fresh_root()
+        val key = sha256_text("action-key-2")
+        val wrong = ActionManifest(action_digest: sha256_text("other-key"), artifact_digests: [], schema_version: 1)
+        assert_false(action_put(root, key, wrong))
+
+    it "returns none for a tampered stored manifest":
+        val root = fresh_root()
+        val key = sha256_text("action-key-3")
+        val manifest = ActionManifest(action_digest: key, artifact_digests: [sha256_text("artifact")], schema_version: 1)
+        assert_true(action_put(root, key, manifest))
+        # Tamper: rewrite the stored manifest so it claims a different action key.
+        val forged = ActionManifest(action_digest: sha256_text("forged-key"), artifact_digests: [sha256_text("artifact")], schema_version: 1)
+        assert_true(rt_file_write_text(cas_action_path(root, key), action_manifest_serialize(forged)))
+        expect(action_digest_of(action_get(root, key))).to_equal("<absent>")
+
+    it "returns none for an absent action digest":
+        val root = fresh_root()
+        val got = action_get(root, sha256_text("never stored action"))
+        expect(action_digest_of(got)).to_equal("<absent>")
+
+describe "CAS schema versioning":
+    it "treats a wrong-version store as empty and rewrites VERSION":
+        val root = fresh_root()
+        val digest = cas_put(root, "old schema payload")
+        assert_true(cas_has(root, digest))
+        # Simulate a schema bump: stamp a foreign version, reopen.
+        assert_true(rt_file_write_text("{root}/VERSION", "999"))
+        assert_true(cas_open(root))
+        # Old entries are never trusted after a schema mismatch.
+        assert_false(cas_has(root, digest))
+        expect(cas_get(root, digest) ?? "<absent>").to_equal("<absent>")
+        # VERSION was rewritten to the current schema.
+        expect(rt_file_read_text("{root}/VERSION").trim()).to_equal(cas_version_text())
+
+    it "resolves root from SIMPLE_CACHE with build/cache_cas default":
+        val saved = rt_env_get("SIMPLE_CACHE") ?? ""
+        rt_env_set("SIMPLE_CACHE", "build/tmp/cas_store_spec/env-root")
+        expect(cas_root()).to_equal("build/tmp/cas_store_spec/env-root")
+        rt_env_set("SIMPLE_CACHE", "")
+        expect(cas_root()).to_equal("build/cache_cas")
+        rt_env_set("SIMPLE_CACHE", saved)

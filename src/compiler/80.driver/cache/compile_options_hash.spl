@@ -4,10 +4,14 @@
 # Old readers ignore reserved bytes; new readers validate backend match.
 #
 # Hash includes: backend, opt_level, target_arch, debug_info, gc_off, release, profile, allowed_families
+# Combined hash = first 8 bytes of sha256 over a canonical, sorted,
+# length-prefixed encoding (see _coh_component). Old-format hashes
+# (rt_hash_text era) and the legacy all-zero hash simply mismatch and
+# validate as a plain cache miss → rebuild, never an error.
 # Quick hash compare (O(1)) → if match, cross-check fields for collision detection.
 
-
-extern fn rt_hash_text(s: text) -> i64
+use std.common.crypto.sha256.{sha256_bytes}
+use std.common.crypto.types.{text_to_bytes}
 
 # ============================================================================
 # Backend Kind Constants
@@ -51,17 +55,72 @@ fn compile_options_hash_is_zero(h: CompileOptionsHash) -> bool:
 # Compute from CompileOptions fields
 # ============================================================================
 
+fn _coh_component(name: text, value: text) -> text:
+    # Length-prefixed name/value pair — delimiter content in a value cannot
+    # alias an adjacent component boundary.
+    "{name.len()}:{name}{value.len()}:{value}"
+
+fn _coh_text_lt(a: text, b: text) -> bool:
+    # Byte-lexicographic compare. Deliberately avoids text `<` (native backend
+    # historically lowered it as raw pointer compare — non-canonical order).
+    val ab = text_to_bytes(a)
+    val bb = text_to_bytes(b)
+    var i = 0
+    while i < ab.len() and i < bb.len():
+        if ab[i] != bb[i]:
+            return ab[i] < bb[i]
+        i = i + 1
+    ab.len() < bb.len()
+
+fn _coh_sorted_text(values: [text]) -> [text]:
+    # Explicit selection sort — [text].sort() is a no-op under the seed interpreter
+    var result = values
+    var i = 0
+    while i < result.len():
+        var j = i + 1
+        while j < result.len():
+            if _coh_text_lt(result[j], result[i]):
+                val tmp = result[i]
+                result[i] = result[j]
+                result[j] = tmp
+            j = j + 1
+        i = i + 1
+    result
+
+fn _coh_sha256_prefix_i64(canonical: text) -> i64:
+    # First 8 digest bytes as little-endian i64 (matches to_bytes/from_bytes layout)
+    val digest = sha256_bytes(text_to_bytes(canonical))
+    var hash: i64 = 0
+    var i = 0
+    while i < 8:
+        hash = hash | (digest[i] << (8 * i))
+        i = i + 1
+    # Never collide with the legacy "missing options" all-zero hash
+    if hash == 0:
+        hash = 1
+    hash
+
 fn compile_options_hash_compute(backend: text, opt_level: i64, release: bool, debug_info: bool, gc_off: bool, profile: text, allowed_families: [text]) -> CompileOptionsHash:
-    # Build canonical string for hashing
+    # Build canonical string for hashing: fixed component order, each component
+    # length-prefixed, set-valued inputs sorted lexicographically first.
     val bk = backend_text_to_kind(backend)
     val opt = if opt_level < 0: 0 else: if opt_level > 3: 3 else: opt_level
     val rel_str = if release: "1" else: "0"
     val dbg_str = if debug_info: "1" else: "0"
     val gc_str = if gc_off: "1" else: "0"
-    val families_str = allowed_families.join(",")
+    val sorted_families = _coh_sorted_text(allowed_families)
+    var families_str = ""
+    for family in sorted_families:
+        families_str = families_str + "{family.len()}:{family}"
 
-    val canonical = "backend={backend};opt={opt};release={rel_str};debug={dbg_str};gc={gc_str};profile={profile};families={families_str}"
-    val hash = rt_hash_text(canonical)
+    var canonical = _coh_component("backend", backend)
+    canonical = canonical + _coh_component("opt", "{opt}")
+    canonical = canonical + _coh_component("release", rel_str)
+    canonical = canonical + _coh_component("debug", dbg_str)
+    canonical = canonical + _coh_component("gc", gc_str)
+    canonical = canonical + _coh_component("profile", profile)
+    canonical = canonical + _coh_component("families", families_str)
+    val hash = _coh_sha256_prefix_i64(canonical)
 
     # Build flags bitfield
     var flags: u8 = 0
