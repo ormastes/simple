@@ -29,6 +29,58 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(SIMPLE_CORE_C_STANDALONE)
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <errno.h>
+#include <signal.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
+
+/*
+ * The standalone core-C archive does not compile platform/platform.h, whose
+ * normal hosted owner provides these two lifecycle helpers. MCP and LSP keep
+ * process sessions in their reachable entry closure even when startup only
+ * performs initialize/tools-list, so leaving the symbols absent makes a fresh
+ * native server abort in dyld before main.
+ */
+bool rt_process_is_running(int64_t pid) {
+    if (pid <= 0) return false;
+#ifdef _WIN32
+    HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, (DWORD)pid);
+    if (!process) return false;
+    DWORD status = WaitForSingleObject(process, 0);
+    CloseHandle(process);
+    return status == WAIT_TIMEOUT;
+#else
+    int status = 0;
+    pid_t waited = waitpid((pid_t)pid, &status, WNOHANG);
+    if (waited == 0) return true;
+    if (waited == (pid_t)pid) return false;
+    if (errno == ECHILD) return kill((pid_t)pid, 0) == 0 || errno == EPERM;
+    return false;
+#endif
+}
+
+bool rt_process_kill(int64_t pid) {
+    if (pid <= 0) return false;
+#ifdef _WIN32
+    HANDLE process = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, (DWORD)pid);
+    if (!process) return false;
+    BOOL terminated = TerminateProcess(process, 1);
+    if (terminated) WaitForSingleObject(process, 1000);
+    CloseHandle(process);
+    return terminated != 0;
+#else
+    if (kill((pid_t)pid, SIGTERM) != 0 && errno != ESRCH) return false;
+    return true;
+#endif
+}
+#endif
+
 static SplArray* process_timeout_result(const char* stdout_text, const char* stderr_text, int64_t code, int timed_out, int64_t timeout_ms) {
     const char* out = stdout_text ? stdout_text : "";
     const char* err = stderr_text ? stderr_text : "";

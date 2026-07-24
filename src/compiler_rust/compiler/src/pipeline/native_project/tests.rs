@@ -1615,6 +1615,8 @@ fn test_core_lane_runtime_archives_expose_required_abi_symbols() {
     assert!(core_c_symbols.contains("rt_bytes_alloc"));
     for symbol in [
         "rt_getpid",
+        "rt_process_is_running",
+        "rt_process_kill",
         "rt_process_wait",
         "rt_process_run_timeout",
         "rt_string_rfind",

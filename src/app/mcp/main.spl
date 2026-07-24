@@ -22,13 +22,6 @@ use .mcp_log_options
 
 extern fn stdin_read_char() -> text
 
-# Default JSONL, not "framed": MCP stdio transport is newline-delimited JSON,
-# and mutable module-`var` writes are invisible in entry-closure natives
-# (native_module_val_globals ceiling) — with a "framed" default the runtime
-# `= "jsonl"` switch never sticks and the server answers JSONL clients with
-# Content-Length headers (same defect fixed in simple_lsp_mcp json_helpers).
-var _MCP_TRANSPORT_MODE = "jsonl"
-
 fn _mcp_error(scope: text, msg: text):
     stderr_write("[error] " + scope + ": " + msg + "\n")
     stderr_flush()
@@ -356,29 +349,28 @@ fn _mcp_parse_decimal_raw(s: text) -> i64:
         i = i + 1
     result
 
-fn _mcp_read_message() -> text:
+fn _mcp_read_message() -> (text, bool):
     var content_length = 0
     while true:
         var line = _mcp_read_line()
         if line == "":
             if content_length > 0:
                 break
-            return ""
+            return ("", true)
         if line == "\r\n" or line == "\r" or line == "\n":
             if content_length > 0:
                 break
             continue
         line = _mcp_strip_line_end(line)
         if line.starts_with(LB()):
-            _MCP_TRANSPORT_MODE = "jsonl"
-            return line
+            return (line, true)
         if line.starts_with("Content-Length:"):
             var len_str = line.replace("Content-Length:", "")
             len_str = len_str.trim()
             content_length = _mcp_parse_decimal_raw(len_str)
     if content_length <= 0:
-        return ""
-    _mcp_read_chars(content_length)
+        return ("", false)
+    (_mcp_read_chars(content_length), false)
 
 fn main() -> i64:
     val raw_args = mcp_get_cli_args()
@@ -443,7 +435,7 @@ fn main() -> i64:
     # Serve loop — uses direct stdio framing to avoid native Optional transport
     # issues that can stop after the first framed request.
     while true:
-        val msg = _mcp_read_message()
+        val (msg, jsonl) = _mcp_read_message()
         if msg == "":
             exit(0)
             return 0
@@ -519,7 +511,6 @@ fn main() -> i64:
             if id != "" and id != "null":
                 response = make_error(id, -32601, "Method not found")
         if response != "":
-            val jsonl = _MCP_TRANSPORT_MODE == "jsonl"
             mcp_write_message(response, jsonl)
             if _mcp_take_emit_list_changed():
                 val notif = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\"}"
