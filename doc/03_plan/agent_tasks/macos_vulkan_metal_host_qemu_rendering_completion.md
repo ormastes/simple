@@ -23,35 +23,9 @@ the canonical `FontRenderer` path and the requested 300 DPI configuration.
 | 300 DPI vector GUI | NOT PROVEN | The 1200×900/300 DPI attempt exceeded about 1.5 GiB before a window appeared. Font probing was subsequently changed to `dlopen` before reading the font, reducing the 96 DPI path to about 332 MiB. |
 | Metal 2D | OTHER-AGENT LANE | Preserve the local Engine2D comparison worktree. The recovered `index 63375` failure belongs to Metal 2D GPU-only CPU composition with an empty software mirror, not the Vulkan GUI lane. |
 | Host WM | FAIL | The live gate exhausted three attempts at native build. Chained/temporary string calls in the self-hosted native-build closure are now hoisted, but focused native build next exposed stale deployed-runtime support for `rt_array_free`. |
-| Isolated full bootstrap | CYCLE 1 FAIL | The default LLVM Stage 2 rejected 40 files because qualified vtable object layout is not implemented. Cycle 2 uses the repository's documented Cranelift Stage 2/3 path with the completed Rust build cache. |
 | QEMU SimpleOS SIMD/2D | FAIL / UPSTREAM CODE PRESENT | Local commit `7f7adc806a` must not be cherry-picked: its seven code/script blobs already landed upstream as `dc890ae58e`; its report is stale. Existing evidence is static prerequisite evidence only and lacks guest framebuffer, hashes, bounds, events, and runtime SIMD receipts. |
 | QEMU WM | NOT STARTED | Must follow a host-WM PASS. |
 | Git sync | FETCHED, NOT PUSHABLE | The shared root mixes rendering work with unrelated LLM-caret and local-agent 2D changes. Current work is being transferred to an isolated worktree rooted at `origin/main`. |
-
-## Verification Blockers Discovered During the Checkpoint
-
-- The shared-root jj workspace has unresolved rendering conflicts, including
-  literal conflict markers in the Vulkan-font unit spec. All integration and
-  verification must use the clean isolated rendering worktree; do not resolve
-  or absorb the other agent's conflicted files from the shared root.
-- Do not accept the local `backend_vulkan.spl` hunk that reports
-  `host_cache_after_device_present` with backend handle `0`. Vulkan completion
-  requires same-frame `device_readback` and a positive Vulkan identity.
-- The shared multilingual GPU-font architecture, design, system-test plan,
-  guide, and generated Vulkan-font manuals still describe older rejected
-  SPIR-V semantics/hash/size evidence. They must be refreshed only after the
-  current pipeline and composite results pass.
-- `vulkan_sffi_read_buffer_bytes` lacks a direct positive provider test.
-  Coverage must prove upload/readback with exact bytes, nonzero offset, and
-  out-of-bounds rejection.
-- The Rust provider's descriptor bindings 0, 1, and 2 need a focused source or
-  provider assertion in addition to the live composite gate.
-- The font FFI unit test currently expects font-file loading before `dlopen`;
-  update it to require provider-first probing and close-on-validation-failure.
-- The macOS Vulkan web and widget GUI evidence wrappers lack executable
-  fail-closed contract specs and mirrored manuals.
-- Host compositor unit coverage must pin accessor-based dimensions,
-  receiver-local multiwindow projection, and JSON escaping.
 
 ## Fixes Present in the Shared Working Copy
 
@@ -80,8 +54,7 @@ the canonical `FontRenderer` path and the requested 300 DPI configuration.
    pure-Simple compiler sources changed:
 
    ```sh
-   scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy \
-     --backend=cranelift --mode=dynload
+   scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy
    ```
 
 3. With the newly deployed pure-Simple binary, run each focused native fixture
@@ -104,43 +77,21 @@ the canonical `FontRenderer` path and the requested 300 DPI configuration.
 4. In a fresh verification session, run the focused Vulkan font composite spec
    once and require promoted device execution, fence completion, nonzero
    readback bytes, and matching device/oracle checksums.
-5. Add focused provider/readback, font-provider ordering, macOS wrapper
-   contract, and host-compositor regression specs. Generate their mirrored
-   manuals with zero stubs.
-6. Refresh the existing shared multilingual GPU-font architecture, design,
-   system-test plan, guide, and generated manuals to match only the evidence
-   proven by the current provider.
-7. Rerun Vulkan web and widget GUI live gates in a fresh session. Require
+5. Rerun Vulkan web and widget GUI live gates in a fresh session. Require
    window capture plus focus, keyboard/input, pointer, and click receipts.
-8. Repeat the widget GUI at 300 DPI after the bounded 96 DPI path passes.
-9. Run the host WM production fullscreen gate and require native artifact,
+6. Repeat the widget GUI at 300 DPI after the bounded 96 DPI path passes.
+7. Run the host WM production fullscreen gate and require native artifact,
    semantic capture, taskbar/window evidence, and routed input.
-10. Only after Vulkan lanes pass, execute equivalent Metal web/GUI/WM checks and
+8. Only after Vulkan lanes pass, execute equivalent Metal web/GUI/WM checks and
    integrate the other agent’s Metal/2D result without absorbing its dirty
    worktree.
-11. Run the QEMU SimpleOS 2D/SIMD evidence gate with real guest framebuffer and
+9. Run the QEMU SimpleOS 2D/SIMD evidence gate with real guest framebuffer and
    runtime receipts, then the QEMU WM gate after host WM passes.
-12. Run rendering source-coupling, direct-runtime, numbered-artifact,
+10. Run rendering source-coupling, direct-runtime, numbered-artifact,
     spec-layout, compiler/core/lib/MCP/LSP, and scoped production verification
     gates. `STATUS: PASS` is required before commit or push.
-13. Commit only the isolated verified lane, fetch/rebase linearly onto
+11. Commit only the isolated verified lane, fetch/rebase linearly onto
     `main@origin`, apply the file-count guard, set `main`, and push.
-
-## Required Existing Documentation and Specs
-
-- `doc/04_architecture/shared_multilingual_gpu_fonts.md`
-- `doc/05_design/shared_multilingual_gpu_fonts.md`
-- `doc/03_plan/sys_test/shared_multilingual_gpu_fonts.md`
-- `doc/07_guide/lib/shared_multilingual_gpu_fonts.md`
-- `doc/06_spec/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font_spec.md`
-- `doc/06_spec/02_integration/rendering/vulkan_font_composite_classification_spec.md`
-- `test/01_unit/lib/engine/font_ffi_spec.spl`
-- `test/01_unit/compiler/bootstrap/stage4_smoke_gate_spec.spl`
-- `test/01_unit/os/compositor/host_compositor_entry_spec.spl`
-- `doc/06_spec/01_unit/os/compositor/host_compositor_entry_spec.md`
-- New macOS Vulkan web and widget GUI wrapper contract specs under
-  `test/03_system/check/`, with mirrored manuals under
-  `doc/06_spec/03_system/check/`
 
 ## Parallel Ownership
 

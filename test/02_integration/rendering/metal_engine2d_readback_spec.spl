@@ -101,15 +101,66 @@ describe "Metal Engine2D framebuffer readback":
             else:
                 expect(is_macos()).to_equal(false)
 
-        it "fails closed for emulated image blending in GPU-only mode":
+        it "round-trips a GPU-only masked draw back to device readback":
+            if is_macos():
+                var b = MetalBackend.create()
+                expect(b.init(4, 4)).to_equal(true)
+                b.use_gpu_only()
+                b.clear(0xff000000u32)
+                val mask = [
+                    0u8, 0u8, 255u8, 255u8,
+                    0u8, 0u8, 255u8, 255u8,
+                    0u8, 0u8, 255u8, 255u8,
+                    0u8, 0u8, 255u8, 255u8
+                ]
+                b.set_mask(mask, 4, 4)
+                # draw_rect_blend is a CPU-composited operation in GPU-only
+                # mode. It must retain the general mask rather than trying to
+                # re-snapshot the deliberately incomplete device frame.
+                b.draw_rect_blend(0, 0, 4, 4, 0xffff0000u32)
+                b.clear_mask()
+                expect(b.gpu_frame_complete).to_equal(true)
+                val receipt = b.read_pixels_with_source()
+                expect(receipt.source).to_equal("device_readback")
+                expect(receipt.backend_handle).to_be_greater_than(0)
+                expect(receipt.pixels[0]).to_equal(0xff000000u32)
+                expect(receipt.pixels[3]).to_equal(0xffff0000u32)
+                b.shutdown()
+            else:
+                expect(is_macos()).to_equal(false)
+
+        it "applies the active clip to a GPU-only CPU-composited operation":
+            if is_macos():
+                var b = MetalBackend.create()
+                expect(b.init(8, 8)).to_equal(true)
+                b.use_gpu_only()
+                b.clear(0xff000000u32)
+                b.set_clip(2, 2, 3, 2)
+                b.draw_rect_blend(0, 0, 8, 8, 0xffff0000u32)
+                expect(b.gpu_frame_complete).to_equal(true)
+                val receipt = b.read_pixels_with_source()
+                expect(receipt.source).to_equal("device_readback")
+                expect(receipt.pixels[0]).to_equal(0xff000000u32)
+                expect(receipt.pixels[2 + (2 * 8)]).to_equal(0xffff0000u32)
+                expect(receipt.pixels[4 + (3 * 8)]).to_equal(0xffff0000u32)
+                expect(receipt.pixels[5 + (3 * 8)]).to_equal(0xff000000u32)
+                b.shutdown()
+            else:
+                expect(is_macos()).to_equal(false)
+
+        it "round-trips emulated image blending in GPU-only mode":
             if is_macos():
                 var b = MetalBackend.create()
                 expect(b.init(4, 4)).to_equal(true)
                 b.use_gpu_only()
                 b.clear(0xff000000u32)
                 b.draw_image_blend(0, 0, 1, 1, [0x80ffffffu32])
-                expect(b.gpu_frame_complete).to_equal(false)
-                expect(b.read_pixels().len()).to_equal(0)
+                expect(b.gpu_frame_complete).to_equal(true)
+                val receipt = b.read_pixels_with_source()
+                expect(receipt.source).to_equal("device_readback")
+                expect(receipt.backend_handle).to_be_greater_than(0)
+                expect(receipt.pixels.len()).to_equal(16)
+                expect(receipt.pixels[0]).to_equal(0xff808080u32)
                 b.shutdown()
             else:
                 expect(is_macos()).to_equal(false)

@@ -7,6 +7,7 @@ use std.gpu.engine2d.engine.{Engine2D}
 use std.io.window_winit.{WinitInput, winit_loop_new, winit_loop_free, winit_window_new, winit_window_free, winit_present_rgba, winit_poll_input}
 use std.nogc_sync_mut.concurrent.thread.{thread_sleep}
 use std.io_runtime.{env_get, file_write}
+use std.common.encoding.font_registry.{selected_font_asset_candidates, selected_font_asset_identity}
 
 # Design-space reference dimensions (scaling denominators). The gallery is
 # authored at 800x600 and scaled up to the resolved render resolution.
@@ -25,7 +26,9 @@ val PURPLE: u32 = 0xFFA855F7u32
 # Shared showcase render-defaults convention:
 #   SHOWCASE_RESOLUTION: unset/"4k" => 3840x2160 (DEFAULT); "8k" => 7680x4320;
 #                        "WxH" (e.g. "1920x1080") => that exact size.
-#   SHOWCASE_DPI:        default 300; scales stroke/detail/text vs a 96 baseline.
+#   SHOWCASE_DPI:        default 300; output-density metadata/evidence. The
+#                        resolution already names backing pixels, so DPI must
+#                        not scale geometry a second time.
 # Full 4K/8K rendering is compiled-lane-gated — the interpreter lane is far too
 # slow for millions of software-rasterized pixels. Verify parameterization at a
 # small rung (e.g. SHOWCASE_RESOLUTION=320x240).
@@ -84,9 +87,10 @@ fn sx(v: i32, rw: i32) -> i32:
     v * rw / W
 fn sy(v: i32, rh: i32) -> i32:
     v * rh / H
-# Stroke / text / detail scale: resolution factor modulated by DPI (96 base).
+# Stroke / text / detail scale follows backing-pixel resolution only.
+# `SHOWCASE_DPI` is output-density metadata, not another geometry multiplier.
 fn sd(v: i32, rw: i32, dpi: i32) -> i32:
-    val r = v * rw / W * dpi / 96
+    val r = v * rw / W
     if r < 1:
         return 1
     r
@@ -269,7 +273,37 @@ fn run_graphics_2d_showcase(gui: bool, backend: text) -> i64:
     val dpi = resolve_showcase_dpi()
     var engine = if backend == "software": Engine2D.create_offscreen(render_w, render_h) else: Engine2D.create_with_backend_fast(render_w, render_h, backend)
     val actual = engine.backend_name()
+    # Use the first pinned, checksum-identified selected face. This is the
+    # canonical trusted sans default and gives the live showcase actual vector
+    # glyph rasterization plus transient backend atlas-composite evidence.
+    val font_candidate = selected_font_asset_candidates()[0]
+    val expected_font_identity = selected_font_asset_identity(font_candidate)
+    val font_loaded = engine.load_font(font_candidate.local_path)
     engine = draw_showcase(engine, render_w, render_h, dpi)
+    # A deliberately new glyph set gives one cold rasterization followed by
+    # one warm cache hit. Drawing at the same coordinates keeps the visual
+    # result stable while proving that the second pass reused glyph material.
+    val font_stats_before = engine.font_cache_stats()
+    engine.draw_text(
+        sx(250, render_w), sy(535, render_h),
+        "QZJ~ VECTOR", WHITE, sd(14, render_w, dpi))
+    val font_stats_cold = engine.font_cache_stats()
+    engine.draw_text(
+        sx(250, render_w), sy(535, render_h),
+        "QZJ~ VECTOR", WHITE, sd(14, render_w, dpi))
+    val font_stats_warm = engine.font_cache_stats()
+    val loaded_fonts = engine.fonts()
+    val loaded_font_identity = loaded_fonts.current_font_identity()
+    engine.font_renderer = loaded_fonts
+    val font_execution_target = engine.font_execution_target()
+    val font_execution_attempts = engine.font_execution_attempts().join(",")
+    val font_backend_attempt_succeeded = if gpu_backend_requested(backend):
+        font_execution_target == backend
+    else:
+        font_execution_target == "cpu"
+    val font_cold_rasterizations = font_stats_cold.rasterizations - font_stats_before.rasterizations
+    val font_warm_rasterizations = font_stats_warm.rasterizations - font_stats_cold.rasterizations
+    val font_warm_hits = font_stats_warm.hits - font_stats_cold.hits
     # Read the exact dirty device frame before present refreshes the backend's
     # host cache. The following present still exercises the production path,
     # while this receipt retains the originating Vulkan/Metal handle.
@@ -292,8 +326,22 @@ fn run_graphics_2d_showcase(gui: bool, backend: text) -> i64:
     print "graphics_2d_dimensions={render_w}x{render_h}"
     print "graphics_2d_dpi={dpi}"
     print "graphics_2d_pixels={readback.pixel_count}"
+    print "graphics_2d_font_loaded={font_loaded}"
+    print "graphics_2d_font_expected_identity={expected_font_identity}"
+    print "graphics_2d_font_identity={loaded_font_identity}"
+    print "graphics_2d_font_cold_rasterizations={font_cold_rasterizations}"
+    print "graphics_2d_font_warm_rasterizations={font_warm_rasterizations}"
+    print "graphics_2d_font_warm_hits={font_warm_hits}"
+    print "graphics_2d_font_execution_target={font_execution_target}"
+    print "graphics_2d_font_execution_attempts={font_execution_attempts}"
+    print "graphics_2d_font_backend_attempt_succeeded={font_backend_attempt_succeeded}"
     if (actual != backend or readback.pixel_count != (render_w * render_h).to_i64() or
             readback.checksum == 0 or nonzero == 0 or semantic_differences < 4):
+        engine.shutdown()
+        return 1
+    if (not font_loaded or loaded_font_identity != expected_font_identity or
+            font_cold_rasterizations <= 0 or font_warm_rasterizations != 0 or
+            font_warm_hits <= 0 or not font_backend_attempt_succeeded):
         engine.shutdown()
         return 1
     if gpu_requested and (readback.source != "device_readback" or readback.backend_handle <= 0):
@@ -322,6 +370,7 @@ fn run_graphics_2d_showcase(gui: bool, backend: text) -> i64:
     var click_events: i64 = 0
     var interaction_revision: i64 = 0
     var interaction_checksum = readback.checksum
+    var interaction_complete = false
     if not write_gui_event_evidence(
             event_evidence_path, actual, readback.source, readback.backend_handle,
             readback.checksum, interaction_checksum, keyboard_events,
@@ -340,15 +389,18 @@ fn run_graphics_2d_showcase(gui: bool, backend: text) -> i64:
         keyboard_events = keyboard_events + keyboard_delta
         pointer_events = pointer_events + pointer_delta
         click_events = click_events + click_delta
-        if keyboard_delta > 0 or pointer_delta > 0 or click_delta > 0:
-            interaction_revision = interaction_revision + 1
-            val marker_color = if interaction_revision % 2 == 0: GREEN else: RED
+        # Host delivery may split the same input into different poll batches.
+        # Render one fixed completion state after all categories arrive so
+        # Vulkan and Metal produce identical interaction pixels.
+        if (not interaction_complete and keyboard_events > 0 and
+                pointer_events > 0 and click_events > 0):
+            interaction_revision = 1
             engine.draw_rect_filled(
                 sx(610, render_w), sy(495, render_h),
-                sx(165, render_w), sy(70, render_h), marker_color)
+                sx(165, render_w), sy(70, render_h), GREEN)
             engine.draw_text(
                 sx(625, render_w), sy(515, render_h),
-                "INPUT {interaction_revision}", WHITE, sd(14, render_w, dpi))
+                "INPUT OK", WHITE, sd(14, render_w, dpi))
             val interaction_readback = engine.read_pixels_with_source()
             engine.present()
             interaction_checksum = interaction_readback.checksum
@@ -370,8 +422,8 @@ fn run_graphics_2d_showcase(gui: bool, backend: text) -> i64:
                 return 1
             print "graphics_2d_event_revision={interaction_revision}"
             print "graphics_2d_event_checksum={interaction_checksum}"
-            if (exit_after_interaction and keyboard_events > 0 and
-                    pointer_events > 0 and click_events > 0):
+            interaction_complete = true
+            if exit_after_interaction:
                 running = false
         thread_sleep(16)
     winit_window_free(win)
