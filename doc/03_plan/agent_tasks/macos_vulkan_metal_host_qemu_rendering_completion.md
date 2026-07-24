@@ -90,6 +90,23 @@ same failure.
 
 ## Exact Next Steps
 
+### 2026-07-24 Safe-Reflection Checkpoint
+
+- Replaced the aborting SPIR-V reflection path with bounded direct parsing and
+  added set-zero, contiguous-binding, malformed-module, and raw-pointer guard
+  coverage. Focused Rust results: 7 parser tests and 3 raw-ABI guard tests
+  passed.
+- Rebuilt and staged the Vulkan runtime provider; its build now fails closed
+  unless all four raw Engine2D ABI symbols are exported.
+- The strict pure-Simple 4K/300-DPI Vulkan launch advanced past the former
+  `spirv-reflect` abort, but MoltenVK rejected the submitted shader with
+  `SPIR-V to MSL conversion error: Currently no block to insert opcode.` The
+  gate therefore remains FAIL (`launched-process-missing`); see
+  `doc/09_report/macos_vulkan_2d_live_evidence_safe_reflect_2026-07-24.md`.
+- Next isolate the exact submitted byte stream at the raw compile boundary and
+  validate that captured stream with `spirv-val`/SPIRV-Cross. Do not proceed to
+  Vulkan web/GUI/WM or Metal until this first live 2D gate passes.
+
 1. In a fresh bounded verification session, run the focused
    `storage_binding_numbers` unit tests and rebuild the Vulkan-enabled runtime
    provider. Require the four raw Engine2D ABI exports. Build the pure-Simple

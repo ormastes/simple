@@ -293,7 +293,20 @@ pub extern "C" fn rt_vulkan_push_constants_raw(cmd: i64, pipeline_handle: i64, d
     if data_ptr <= 0 || byte_count < 0 || byte_count > 64 * 1024 * 1024 {
         return 0;
     }
-    let data = unsafe { std::slice::from_raw_parts(data_ptr as *const u8, byte_count as usize) };
+    let required_size = {
+        let state = STATE.lock();
+        let Some(pipeline) = state.compute_pipelines.get(&pipeline_handle) else {
+            return 0;
+        };
+        pipeline.push_constant_size() as usize
+    };
+    if required_size == 0 {
+        return 1;
+    }
+    if (byte_count as usize) < required_size {
+        return 0;
+    }
+    let data = unsafe { std::slice::from_raw_parts(data_ptr as *const u8, required_size) };
     push_constants_bytes(cmd, pipeline_handle, data)
 }
 
@@ -307,6 +320,16 @@ pub extern "C" fn rt_vulkan_push_constants(_cmd: i64, _pipe: i64, _data: i64) ->
 #[cfg(not(feature = "vulkan"))]
 pub extern "C" fn rt_vulkan_push_constants_raw(_cmd: i64, _pipe: i64, _data_ptr: i64, _byte_count: i64) -> i64 {
     0
+}
+
+#[cfg(all(test, feature = "vulkan"))]
+mod raw_guard_tests {
+    use super::rt_vulkan_push_constants_raw;
+
+    #[test]
+    fn vulkan_raw_guard_rejects_unknown_pipeline_before_pointer_access() {
+        assert_eq!(rt_vulkan_push_constants_raw(0, 0, 1, 4), 0);
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

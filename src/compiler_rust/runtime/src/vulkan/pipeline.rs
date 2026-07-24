@@ -4,7 +4,7 @@ use super::buffer::VulkanBuffer;
 use super::device::VulkanDevice;
 use super::error::{VulkanError, VulkanResult};
 use ash::vk;
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 fn storage_binding_numbers(spirv_code: &[u8]) -> VulkanResult<Vec<u32>> {
@@ -17,7 +17,13 @@ fn storage_binding_numbers(spirv_code: &[u8]) -> VulkanResult<Vec<u32>> {
         .chunks_exact(4)
         .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
         .collect();
-    let mut bindings = BTreeSet::new();
+    if words[0] != 0x0723_0203 {
+        return Err(VulkanError::SpirvCompilationFailed(
+            "Invalid SPIR-V magic number".to_string(),
+        ));
+    }
+    let mut binding_by_target = BTreeMap::new();
+    let mut set_by_target = BTreeMap::new();
     let mut word_offset = 5;
     while word_offset < words.len() {
         let instruction = words[word_offset];
@@ -28,16 +34,52 @@ fn storage_binding_numbers(spirv_code: &[u8]) -> VulkanResult<Vec<u32>> {
                 "SPIR-V instruction extends beyond the module".to_string(),
             ));
         }
-        // OpDecorate %target Binding <literal>
-        if opcode == 71 && word_count >= 4 && words[word_offset + 2] == 33 {
-            bindings.insert(words[word_offset + 3]);
+        // OpDecorate %target (Binding|DescriptorSet) <literal>
+        if opcode == 71 && word_count >= 3 {
+            let decoration = words[word_offset + 2];
+            if decoration == 33 || decoration == 34 {
+                if word_count != 4 {
+                    return Err(VulkanError::SpirvCompilationFailed(
+                        "Binding and DescriptorSet decorations require one literal".to_string(),
+                    ));
+                }
+                let target = words[word_offset + 1];
+                let literal = words[word_offset + 3];
+                if decoration == 33 {
+                    binding_by_target.insert(target, literal);
+                } else {
+                    set_by_target.insert(target, literal);
+                }
+            }
         }
         word_offset += word_count;
     }
-    if bindings.is_empty() {
-        bindings.insert(0);
+    if binding_by_target.is_empty() {
+        return Ok(vec![0]);
     }
-    Ok(bindings.into_iter().collect())
+    let mut target_by_binding = BTreeMap::new();
+    for (target, binding) in binding_by_target {
+        let descriptor_set = set_by_target.get(&target).copied().unwrap_or(0);
+        if descriptor_set != 0 {
+            return Err(VulkanError::SpirvCompilationFailed(
+                "Engine2D compute pipelines support descriptor set 0 only".to_string(),
+            ));
+        }
+        if target_by_binding.insert(binding, target).is_some() {
+            return Err(VulkanError::SpirvCompilationFailed(
+                "Duplicate descriptor binding in Engine2D compute pipeline".to_string(),
+            ));
+        }
+    }
+    let bindings: Vec<u32> = target_by_binding.into_keys().collect();
+    for (expected, binding) in bindings.iter().enumerate() {
+        if *binding != expected as u32 {
+            return Err(VulkanError::SpirvCompilationFailed(
+                "Engine2D descriptor bindings must be contiguous from zero".to_string(),
+            ));
+        }
+    }
+    Ok(bindings)
 }
 
 /// Compute pipeline with shader and layout
@@ -295,7 +337,7 @@ mod tests {
     }
 
     #[test]
-    fn storage_binding_parser_collects_sorted_binding_decorations() {
+    fn storage_binding_parser_collects_contiguous_set_zero_bindings() {
         let mut bytes = Vec::new();
         for word in [
             0x0723_0203u32,
@@ -305,8 +347,16 @@ mod tests {
             0,
             (4 << 16) | 71,
             2,
-            33,
+            34,
+            0,
+            (4 << 16) | 71,
             2,
+            33,
+            1,
+            (4 << 16) | 71,
+            1,
+            34,
+            0,
             (4 << 16) | 71,
             1,
             33,
@@ -314,13 +364,77 @@ mod tests {
         ] {
             bytes.extend_from_slice(&word.to_le_bytes());
         }
-        assert_eq!(storage_binding_numbers(&bytes).unwrap(), vec![0, 2]);
+        assert_eq!(storage_binding_numbers(&bytes).unwrap(), vec![0, 1]);
     }
 
     #[test]
     fn storage_binding_parser_rejects_truncated_instruction() {
         let mut bytes = Vec::new();
         for word in [0x0723_0203u32, 0x0001_0300, 0, 1, 0, (4 << 16) | 71, 2] {
+            bytes.extend_from_slice(&word.to_le_bytes());
+        }
+        assert!(storage_binding_numbers(&bytes).is_err());
+    }
+
+    #[test]
+    fn storage_binding_parser_rejects_zero_word_count() {
+        let mut bytes = Vec::new();
+        for word in [0x0723_0203u32, 0x0001_0300, 0, 1, 0, 71] {
+            bytes.extend_from_slice(&word.to_le_bytes());
+        }
+        assert!(storage_binding_numbers(&bytes).is_err());
+    }
+
+    #[test]
+    fn storage_binding_parser_rejects_nonzero_descriptor_set() {
+        let mut bytes = Vec::new();
+        for word in [
+            0x0723_0203u32,
+            0x0001_0300,
+            0,
+            2,
+            0,
+            (4 << 16) | 71,
+            1,
+            34,
+            1,
+            (4 << 16) | 71,
+            1,
+            33,
+            0,
+        ] {
+            bytes.extend_from_slice(&word.to_le_bytes());
+        }
+        assert!(storage_binding_numbers(&bytes).is_err());
+    }
+
+    #[test]
+    fn storage_binding_parser_rejects_sparse_bindings() {
+        let mut bytes = Vec::new();
+        for word in [
+            0x0723_0203u32,
+            0x0001_0300,
+            0,
+            3,
+            0,
+            (4 << 16) | 71,
+            1,
+            33,
+            0,
+            (4 << 16) | 71,
+            2,
+            33,
+            2,
+        ] {
+            bytes.extend_from_slice(&word.to_le_bytes());
+        }
+        assert!(storage_binding_numbers(&bytes).is_err());
+    }
+
+    #[test]
+    fn storage_binding_parser_rejects_bad_magic() {
+        let mut bytes = Vec::new();
+        for word in [0u32, 0x0001_0300, 0, 1, 0] {
             bytes.extend_from_slice(&word.to_le_bytes());
         }
         assert!(storage_binding_numbers(&bytes).is_err());

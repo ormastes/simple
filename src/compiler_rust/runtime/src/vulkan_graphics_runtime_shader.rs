@@ -63,7 +63,7 @@ pub extern "C" fn rt_vulkan_compile_spirv(spirv: RuntimeValue) -> i64 {
 #[no_mangle]
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_compile_spirv_raw(data_ptr: i64, byte_count: i64) -> i64 {
-    if data_ptr <= 0 || byte_count < 0 || byte_count > 64 * 1024 * 1024 {
+    if data_ptr <= 0 || byte_count < 20 || byte_count > 64 * 1024 * 1024 || byte_count % 4 != 0 {
         return 0;
     }
     let bytes = unsafe { std::slice::from_raw_parts(data_ptr as *const u8, byte_count as usize).to_vec() };
@@ -80,6 +80,17 @@ pub extern "C" fn rt_vulkan_compile_spirv(_spirv: i64) -> i64 {
 #[cfg(not(feature = "vulkan"))]
 pub extern "C" fn rt_vulkan_compile_spirv_raw(_data_ptr: i64, _byte_count: i64) -> i64 {
     0
+}
+
+#[cfg(all(test, feature = "vulkan"))]
+mod raw_guard_tests {
+    use super::rt_vulkan_compile_spirv_raw;
+
+    #[test]
+    fn vulkan_raw_guard_rejects_invalid_spirv_length_before_pointer_access() {
+        assert_eq!(rt_vulkan_compile_spirv_raw(1, 3), 0);
+        assert_eq!(rt_vulkan_compile_spirv_raw(1, 22), 0);
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

@@ -161,8 +161,17 @@ fn copy_to_buffer_bytes(handle: i64, data: &[u8], offset: i64) -> i64 {
 #[no_mangle]
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_copy_to_buffer_raw(handle: i64, data_ptr: i64, byte_count: i64, offset: i64) -> i64 {
-    if data_ptr <= 0 || byte_count < 0 || byte_count > 1024 * 1024 * 1024 {
+    if data_ptr <= 0 || byte_count < 0 || byte_count > 64 * 1024 * 1024 || offset != 0 {
         return 0;
+    }
+    {
+        let state = STATE.lock();
+        let Some(buf) = state.buffers.get(&handle) else {
+            return 0;
+        };
+        if byte_count as u64 > buf.size() {
+            return 0;
+        }
     }
     let data = unsafe { std::slice::from_raw_parts(data_ptr as *const u8, byte_count as usize) };
     copy_to_buffer_bytes(handle, data, offset)
@@ -215,7 +224,7 @@ pub extern "C" fn rt_vulkan_copy_from_buffer(data: RuntimeValue, handle: i64, of
 #[no_mangle]
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_copy_from_buffer_raw(data_ptr: i64, byte_count: i64, handle: i64, offset: i64) -> i64 {
-    if data_ptr <= 0 || byte_count < 0 || offset < 0 || byte_count > 1024 * 1024 * 1024 {
+    if data_ptr <= 0 || byte_count < 0 || offset < 0 || byte_count > 64 * 1024 * 1024 {
         return 0;
     }
     let end = match offset.checked_add(byte_count) {
@@ -249,6 +258,16 @@ pub extern "C" fn rt_vulkan_copy_from_buffer(_data: i64, _handle: i64, _offset: 
 #[cfg(not(feature = "vulkan"))]
 pub extern "C" fn rt_vulkan_copy_from_buffer_raw(_data_ptr: i64, _byte_count: i64, _handle: i64, _offset: i64) -> i64 {
     0
+}
+
+#[cfg(all(test, feature = "vulkan"))]
+mod raw_guard_tests {
+    use super::rt_vulkan_copy_to_buffer_raw;
+
+    #[test]
+    fn vulkan_raw_guard_rejects_unknown_upload_handle_before_pointer_access() {
+        assert_eq!(rt_vulkan_copy_to_buffer_raw(0, 1, 4, 0), 0);
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
