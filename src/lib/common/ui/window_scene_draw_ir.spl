@@ -46,7 +46,7 @@ use common.ui.window_scene.{
     shared_wm_scene_layout_key,
     shared_wm_scene_resolve_background
 }
-use common.ui.wm_chrome_theme.{wm_chrome_theme, WmChromeColors}
+use common.ui.wm_chrome_theme.{active_wm_theme_render_snapshot, wm_chrome_theme, WmChromeColors}
 use os.compositor.display_backend_core.{CompositorBackend, CompositorGlassCapable}
 use os.drivers.framebuffer.fb_font.{get_glyph_8x16}
 
@@ -505,20 +505,64 @@ fn _wm_draw_ir_chrome_revision(scene: SharedWmScene, taskbar: TaskbarModel, dpi_
 fn _wm_draw_ir_window_revision(window: SharedWmWindow) -> text:
     val focused = if window.focused: "1" else: "0"
     val minimized = if window.minimized: "1" else: "0"
-    "wm.window:{window.window_id}:surface={window.surface_id}:xy={window.x},{window.y}:size={window.width}x{window.height}:z={window.z_index}:focused={focused}:minimized={minimized}:title={window.title}:lang={window.language}"
+    val material_revision = if val snapshot = active_wm_theme_render_snapshot(): snapshot.material_sha256 else: "wm-chrome-default-solid"
+    "wm.window:{window.window_id}:surface={window.surface_id}:xy={window.x},{window.y}:size={window.width}x{window.height}:z={window.z_index}:focused={focused}:minimized={minimized}:title={window.title}:lang={window.language}:material={material_revision}"
 
 fn _wm_draw_ir_window_opacity(window: SharedWmWindow) -> i32:
     if window.focused:
         return 1000
     930
 
-fn _wm_draw_ir_window_style(window: SharedWmWindow, part: text) -> [DrawIrStyleProp]:
+fn _wm_draw_ir_window_material_style(window: SharedWmWindow) -> [DrawIrStyleProp]:
+    if val snapshot = active_wm_theme_render_snapshot():
+        val material = snapshot.material
+        val shadows = if window.focused: material.active_shadows else: material.inactive_shadows
+        var style = [
+            draw_ir_style_prop("wm-theme-schema", "theme-render-snapshot-v1"),
+            draw_ir_style_prop("wm-theme-id", snapshot.id),
+            draw_ir_style_prop("wm-theme-family-id", snapshot.family_id),
+            draw_ir_style_prop("wm-theme-source-reference", snapshot.source_reference),
+            draw_ir_style_prop("wm-theme-source-manifest-sha256", snapshot.source_manifest_sha256),
+            draw_ir_style_prop("wm-theme-material-sha256", snapshot.material_sha256),
+            draw_ir_style_prop("wm-material-request", "window-surface-glass"),
+            draw_ir_style_prop("wm-material-surface-alpha-milli", material.surface_alpha_milli.to_string()),
+            draw_ir_style_prop("wm-material-corner-radius-px", material.corner_radius_px.to_string()),
+            draw_ir_style_prop("wm-material-border-width-px", material.border_width_px.to_string()),
+            draw_ir_style_prop("wm-material-border-rgba", material.border_rgba.to_string()),
+            draw_ir_style_prop("wm-material-backdrop-blur-px", material.backdrop_blur_px.to_string()),
+            draw_ir_style_prop("wm-material-backdrop-saturation-milli", material.backdrop_saturation_milli.to_string()),
+            draw_ir_style_prop("wm-material-shadow-count", shadows.len().to_string()),
+            draw_ir_style_prop("wm-material-fallback", "solid-rgba-if-glass-unsupported:{material.solid_fallback_rgba}")
+        ]
+        var index = 0
+        for shadow in shadows:
+            val prefix = "wm-material-shadow-{index}"
+            style.push(draw_ir_style_prop("{prefix}-offset-x-px", shadow.offset_x_px.to_string()))
+            style.push(draw_ir_style_prop("{prefix}-offset-y-px", shadow.offset_y_px.to_string()))
+            style.push(draw_ir_style_prop("{prefix}-blur-radius-px", shadow.blur_radius_px.to_string()))
+            style.push(draw_ir_style_prop("{prefix}-spread-radius-px", shadow.spread_radius_px.to_string()))
+            style.push(draw_ir_style_prop("{prefix}-rgba", shadow.rgba.to_string()))
+            style.push(draw_ir_style_prop("{prefix}-inset", if shadow.inset: "true" else: "false"))
+            index = index + 1
+        return style
     [
+        draw_ir_style_prop("wm-theme-schema", "wm-chrome-solid-v1"),
+        draw_ir_style_prop("wm-theme-id", "wm-chrome-default"),
+        draw_ir_style_prop("wm-theme-source-reference", "builtin:common.ui.wm_chrome_theme_defaults"),
+        draw_ir_style_prop("wm-material-request", "solid-only"),
+        draw_ir_style_prop("wm-material-fallback", "solid-only:no-theme-render-snapshot")
+    ]
+
+fn _wm_draw_ir_window_style(window: SharedWmWindow, part: text) -> [DrawIrStyleProp]:
+    var style = [
         draw_ir_style_prop("source", "wm_scene"),
         draw_ir_style_prop("part", part),
         draw_ir_style_prop("z-index", "{window.z_index}"),
         draw_ir_style_prop("focused", if window.focused: "true" else: "false")
     ]
+    for prop in _wm_draw_ir_window_material_style(window):
+        style.push(prop)
+    style
 
 fn _wm_draw_ir_window_box(window: SharedWmWindow, component_id: text, part: text, x: i32, y: i32, width: i32, height: i32, color: u32) -> DrawIrCommand:
     val border_rect = draw_ir_rect_bounds(x, y, width, height)

@@ -3,12 +3,14 @@
 
 use std.spec
 use common.ui.builder.{column, label, build_tree_with_title}
-use common.ui.draw_ir.{DRAW_IR_BACKEND_GPU, DRAW_IR_COMMAND_RECT, DRAW_IR_COMMAND_TEXT, DRAW_IR_SOURCE_WM_SCENE, draw_ir_event_target_context, draw_ir_text, simple_2d_draw_ir_adv_composition_plan}
+use common.ui.draw_ir.{DRAW_IR_BACKEND_GPU, DRAW_IR_COMMAND_RECT, DRAW_IR_COMMAND_TEXT, DRAW_IR_SOURCE_WM_SCENE, DrawIrCommand, draw_ir_event_target_context, draw_ir_text, simple_2d_draw_ir_adv_composition_plan}
+use common.ui.generated.aetheric_dark_theme_snapshot.{aetheric_dark_theme_render_snapshot}
 use common.ui.taskbar_model.{AppRef, TaskbarModel, TrayItem, WindowRef}
 use common.ui.window.{WindowManager}
 use common.ui.window_surface_registry.{UiWindowSurfaceRegistry, UI_SURFACE_KIND_SIMPLE_WEB}
 use common.ui.window_scene.{shared_wm_drag_window, shared_wm_scene_from_window_manager, shared_wm_scene_layout_key, shared_wm_translate_pointer_event, shared_wm_translate_pointer_event_cached}
 use common.ui.window_scene_draw_ir.{shared_wm_scene_draw_ir_composition}
+use common.ui.wm_chrome_theme.{apply_theme_render_snapshot_to_wm_chrome, reset_wm_chrome_theme}
 
 extern fn rt_file_read_text(path: text) -> text
 
@@ -38,6 +40,12 @@ fn _scene():
     registry.bind_with_kind("win1", "surf1", 42u64, "demo.app", "Window One", UI_SURFACE_KIND_SIMPLE_WEB)
     registry.bind_with_kind("win2", "surf2", 43u64, "demo.two", "Window Two", UI_SURFACE_KIND_SIMPLE_WEB)
     shared_wm_scene_from_window_manager(manager, registry, 800, 600)
+
+fn _style_value(command: DrawIrCommand, key: text) -> text:
+    for prop in command.computed_style:
+        if prop.key == key:
+            return prop.value
+    ""
 
 describe "window scene Draw IR projection":
 
@@ -110,6 +118,7 @@ describe "window scene Draw IR projection":
         expect(second.batches[3].source.style_revision).to_equal(first.batches[3].source.style_revision)
 
     it "enriches WM window boxes with hit clip and z-index metadata":
+        reset_wm_chrome_theme()
         val composition = shared_wm_scene_draw_ir_composition(_scene(), _taskbar(), DRAW_IR_BACKEND_GPU, 1000, "09:41", 2)
         val window_batch = composition.batches[2]
         val body = window_batch.commands[1]
@@ -126,6 +135,31 @@ describe "window scene Draw IR projection":
         expect(body.computed_style[2].key).to_equal("z-index")
         expect(titlebar.hit_rect.height).to_equal(28)
         expect(titlebar.computed_style[1].value).to_equal("titlebar")
+        expect(_style_value(body, "wm-theme-id")).to_equal("wm-chrome-default")
+        expect(_style_value(body, "wm-material-request")).to_equal("solid-only")
+        expect(_style_value(body, "wm-material-fallback")).to_equal("solid-only:no-theme-render-snapshot")
+
+    it "retains renderer-neutral glass material identity and structured requests":
+        val snapshot = aetheric_dark_theme_render_snapshot()
+        apply_theme_render_snapshot_to_wm_chrome(snapshot)
+        val composition = shared_wm_scene_draw_ir_composition(_scene(), _taskbar(), DRAW_IR_BACKEND_GPU, 1000, "09:41", 2)
+        val focused_body = composition.batches[3].commands[1]
+
+        expect(_style_value(focused_body, "wm-theme-schema")).to_equal("theme-render-snapshot-v1")
+        expect(_style_value(focused_body, "wm-theme-id")).to_equal(snapshot.id)
+        expect(_style_value(focused_body, "wm-theme-source-reference")).to_equal(snapshot.source_reference)
+        expect(_style_value(focused_body, "wm-theme-source-manifest-sha256")).to_equal(snapshot.source_manifest_sha256)
+        expect(_style_value(focused_body, "wm-theme-material-sha256")).to_equal(snapshot.material_sha256)
+        expect(_style_value(focused_body, "wm-material-corner-radius-px")).to_equal("12")
+        expect(_style_value(focused_body, "wm-material-border-width-px")).to_equal("1")
+        expect(_style_value(focused_body, "wm-material-backdrop-blur-px")).to_equal("30")
+        expect(_style_value(focused_body, "wm-material-backdrop-saturation-milli")).to_equal("1700")
+        expect(_style_value(focused_body, "wm-material-shadow-count")).to_equal("1")
+        expect(_style_value(focused_body, "wm-material-shadow-0-offset-y-px")).to_equal("28")
+        expect(_style_value(focused_body, "wm-material-shadow-0-blur-radius-px")).to_equal("76")
+        expect(_style_value(focused_body, "wm-material-fallback")).to_start_with("solid-rgba-if-glass-unsupported:")
+        expect(composition.batches[3].source.style_revision).to_contain(snapshot.material_sha256)
+        reset_wm_chrome_theme()
 
     it "lets Simple 2D plan a GPU-targeted WM composition with CPU fallback":
         val composition = shared_wm_scene_draw_ir_composition(_scene(), _taskbar(), DRAW_IR_BACKEND_GPU, 1000, "09:41", 2)

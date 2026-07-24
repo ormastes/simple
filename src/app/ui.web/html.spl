@@ -6,11 +6,11 @@
 use common.ui.widget.{UIState, UITree}
 use app.ui.render.html_widgets.{render_html_tree}
 use common.ui.ios_css.{generate_ios_css}
-use common.ui.glass_css.{generate_glass_css}
-use common.ui.glass.theme.{is_glass_theme, glass_dark, glass_light, glass_obsidian_dark, glass_obsidian_light}
+use common.ui.glass.theme.{is_glass_theme}
 use common.ui.glass.tokens.{GlassColorTokens}
 use common.ui.profile.{Breakpoints, default_breakpoints}
 use common.string_builder.{StringBuilder}
+use nogc_sync_mut.ui.theme_package.{load_theme_package, resolve_theme_alias}
 use std.io_runtime.{read_file, write_file, file_exists}
 
 # =========================================================================
@@ -275,6 +275,8 @@ fn generate_wm_js(ws_port: i32) -> text:
 fn generate_css(theme: text) -> text:
     """Generate comprehensive CSS for all widget types.
     Colors are derived from ThemeColors to stay in sync with TUI ANSI colors."""
+    val canonical_theme = resolve_theme_alias(theme)
+    val uses_package_theme = canonical_theme == "aetheric_dark"
     # Determine if dark variant
     val is_dark = (theme == "dark" or theme == "aetheric_dark" or theme == "glass_dark" or theme == "glass_obsidian_dark" or theme == "ios_dark")
     val is_glass = is_glass_theme(theme)
@@ -2059,18 +2061,6 @@ fn generate_css(theme: text) -> text:
     if ios_css != "":
         result = "{result}{ios_css}"
 
-    # Append Glass overrides when using a glass theme
-    val glass_css = generate_glass_css(theme)
-    if glass_css != "":
-        result = "{result}{glass_css}"
-
-    # Folder-based theme package CSS is temporarily disabled: theme_package.spl
-    # depends on UITheme/UIThemeColors/BorderStyle/FontStyle from common.ui.style,
-    # which the 2cca0bc style.spl rewrite removed (subsystem orphaned). The
-    # generated defaults + glass CSS above already provide full widget styling.
-    # TODO(theme): restore UITheme types in common.ui.style and re-enable
-    # resolved_theme_css(theme) here.
-
     # Apply theme colors — interpolation doesn't work inside .push() calls,
     # so we replace template placeholders with actual color values here.
     val p_bg = "{" + "bg" + "}"
@@ -2112,7 +2102,7 @@ fn generate_css(theme: text) -> text:
     result = result.replace(p_font_body, ui_font_body)
     result = result.replace(p_font_label, ui_font_label)
     result = result.replace(p_wm_window_radius, wm_window_radius)
-    if is_glass:
+    if is_glass and not uses_package_theme:
         result = "{result}\n/* Glass theme touch-up */\n"
         result = "{result}.widget-panel, .widget-menubar, .widget-statusbar, .widget-dialog, .widget-list, .widget-tabs { backdrop-filter: blur(28px) saturate(175%); -webkit-backdrop-filter: blur(28px) saturate(175%); }\n"
         result = "{result}.widget-button { background-image: linear-gradient(180deg, rgba(255,255,255,0.20), rgba(255,255,255,0.08)); }\n"
@@ -2141,6 +2131,15 @@ fn generate_css(theme: text) -> text:
     result = result.replace("{" + "wm_close_hover" + "}", WM_TRAFFIC_CLOSE_HOVER)
     result = result.replace("{" + "wm_min_hover" + "}", WM_TRAFFIC_MIN_HOVER)
     result = result.replace("{" + "wm_max_hover" + "}", WM_TRAFFIC_MAX_HOVER)
+
+    # The resolved folder package is the final visual authority. This adapter's
+    # preceding CSS supplies shared structure and compatibility fallbacks only.
+    # Keep identity beside the CSS so renderer evidence can bind the submitted
+    # stylesheet to the same content-addressed package used by WM chrome.
+    if uses_package_theme:
+        val pkg = load_theme_package(canonical_theme)
+        result = result + "\n/* Folder theme package theme=" + pkg.id + " fingerprint=" + pkg.fingerprint + " */\n"
+        result = result + pkg.snapshot.composed_css
 
     return result
 

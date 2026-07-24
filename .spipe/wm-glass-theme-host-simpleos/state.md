@@ -157,3 +157,39 @@ implementation-blocked-inferred-text-result-provenance
   the final RED object and exact resume command are recorded in
   `simpleos_wm_freestanding_bytespan_css_scan_fault_2026-07-24.md`. Per the
   hard cap, QEMU cycle 3 and the hosted runtime gate were not run.
+- continuation-bootstrap-wiring-2026-07-24: Resumed in the isolated
+  `build/worktrees/wm-glass-theme` worktree from `origin/main` at
+  `3721a30541`. Read-only sidecars confirmed the host production entry bypassed
+  the package snapshot installer and ARM64 never installed the generated
+  Aetheric snapshot. Added one hosted owner helper and one freestanding-safe
+  SimpleOS owner helper; the host now installs the resolved snapshot before
+  backend/compositor construction and uses its desktop fill, while x86_64 and
+  ARM64 install the same generated snapshot before compositor construction.
+  A focused three-scenario source contract passes diagnostically, but the
+  deployed CLI delegates to the Rust seed and is not admissible production
+  evidence. Host event receipts, current-source host pixels, x86_64 QEMU
+  pixels, and ARM64 framebuffer/input evidence remain active gaps.
+- continuation-compiler-check-2026-07-24: The first current-source Cargo
+  command used `--exact` and filtered out the intended inferred-text
+  regression, so it was rejected as evidence. The corrected name-filtered run
+  passed the intended test exactly once: `1 passed; 3346 filtered out`.
+- continuation-history-audit-2026-07-24: Read-only history/source review found
+  three first-loss owners beyond bootstrap: Simple GUI discards `app.theme`
+  before fixed-palette widget Draw IR; Simple Web selects legacy generated
+  glass CSS instead of package-resolved CSS; and WM chrome flattens the render
+  snapshot to colors before fixed-geometry Draw IR. Runtime theme switching
+  also loads tokens without installing/notifying a snapshot. Separate
+  non-overlapping implementation sidecars now own the first three boundaries.
+- continuation-static-gates-2026-07-24: Working/staged direct-env/runtime
+  guards, `git diff --check`, and the `doc/06_spec` executable-layout guard
+  pass. The available Stage-3 artifact identifies as a pure-Simple bootstrap
+  compiler but has no `check` command; no product runtime claim is admitted
+  from it.
+- continuation-parallel-fixes-2026-07-24: Three non-overlapping sidecars
+  removed the legacy Web CSS authority, passed resolved theme snapshots into
+  canonical widget Draw IR, and retained renderer-neutral WM glass identity
+  and effect requests in WM Draw IR. Web passed 3 scenarios and widget Draw IR
+  passed 2 scenarios using the Rust bootstrap driver; both are diagnostic,
+  not product admission. The focused broad window-scene spec timed out at
+  120 seconds with no assertion result and is recorded in
+  `window_scene_draw_ir_spec_timeout_2026-07-24.md`. No retry was made.

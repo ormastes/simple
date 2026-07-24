@@ -14,11 +14,10 @@
 # and applies clipping per-batch (batch.embedding.clip). Scroll areas therefore
 # become their own clipped batch with content offset by the scroll amount.
 #
-# ponytail: compact local palette instead of pulling the full glass token
-# machinery — swap constants for glass tokens if theme parity is required.
-
 use common.ui.layout.{compute_layout, find_rect}
 use common.ui.widget.{WidgetNode, WidgetRect}
+use common.ui.theme_render_snapshot.{ThemeRenderSnapshot}
+use common.ui.wm_chrome_theme.{WmChromeColors, wm_chrome_theme}
 use common.ui.draw_ir.{
     DRAW_IR_BACKEND_CPU,
     DrawIrBatch,
@@ -38,26 +37,55 @@ use std.common.encoding.font_registry.{simpleos_default_font_asset_candidate}
 use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_language}
 
 # =========================================================================
-# Palette (ARGB u32, 0xff = opaque)
+# Semantic widget roles
 # =========================================================================
 
-val PANEL_BG: u32 = 0xff222834u32
-val LABEL_FG: u32 = 0xffe6e6eeu32
-val BTN_NORMAL: u32 = 0xff3b6ea5u32
-val BTN_HOVER: u32 = 0xff4f86c6u32
-val BTN_PRESSED: u32 = 0xff274b73u32
-val BTN_LABEL: u32 = 0xffffffffu32
-val CHECK_BORDER: u32 = 0xff8894a8u32
-val CHECK_BG: u32 = 0xff2a2f3au32
-val CHECK_MARK: u32 = 0xff4f86c6u32
-val INPUT_BG: u32 = 0xff11151cu32
-val INPUT_BORDER: u32 = 0xff3a4150u32
-val INPUT_TEXT: u32 = 0xffd8dde6u32
-val CARET_COLOR: u32 = 0xffffffffu32
-val SCROLL_TRACK: u32 = 0xff161a21u32
-val PROGRESS_TRACK: u32 = 0xff21262fu32
-val PROGRESS_FILL: u32 = 0xff4f86c6u32
-val IMAGE_PLACEHOLDER: u32 = 0xff33405au32
+struct WidgetDrawIrTheme:
+    surface: u32
+    text_primary: u32
+    text_secondary: u32
+    accent: u32
+    border: u32
+    control_normal: u32
+    control_hover: u32
+    control_pressed: u32
+    field: u32
+    track: u32
+    placeholder: u32
+
+fn widget_draw_ir_theme_from_snapshot(snapshot: ThemeRenderSnapshot) -> WidgetDrawIrTheme:
+    """Resolve renderer-neutral material values into widget semantic roles."""
+    val material = snapshot.material
+    WidgetDrawIrTheme(
+        surface: material.window_fill_rgba,
+        text_primary: material.text_rgba,
+        text_secondary: material.secondary_text_rgba,
+        accent: snapshot.accent_rgba,
+        border: material.border_rgba,
+        control_normal: snapshot.accent_rgba,
+        control_hover: material.active_title_fill_rgba,
+        control_pressed: material.inactive_title_fill_rgba,
+        field: material.solid_fallback_rgba,
+        track: material.inactive_title_fill_rgba,
+        placeholder: snapshot.background_rgba
+    )
+
+fn _widget_draw_ir_theme_from_wm_chrome(chrome: WmChromeColors) -> WidgetDrawIrTheme:
+    # Compatibility callers still consume the central installed theme rather
+    # than owning a second fixed palette.
+    WidgetDrawIrTheme(
+        surface: chrome.window_body,
+        text_primary: chrome.text_primary,
+        text_secondary: chrome.text_primary,
+        accent: chrome.accent,
+        border: chrome.title_unfocused,
+        control_normal: chrome.accent,
+        control_hover: chrome.title_focused,
+        control_pressed: chrome.title_unfocused,
+        field: chrome.host_window_body,
+        track: chrome.title_unfocused,
+        placeholder: chrome.compositor_bg
+    )
 
 val GLYPH_ADVANCE: i32 = 7
 
@@ -77,12 +105,12 @@ fn _label_text(node: WidgetNode) -> text:
         return lbl
     node.get_prop("content")
 
-fn _button_color(node: WidgetNode) -> u32:
+fn _button_color(node: WidgetNode, theme: WidgetDrawIrTheme) -> u32:
     if node.get_prop("ui_pressed") == "true":
-        return BTN_PRESSED
+        return theme.control_pressed
     if node.get_prop("ui_hover") == "true":
-        return BTN_HOVER
-    BTN_NORMAL
+        return theme.control_hover
+    theme.control_normal
 
 fn _default_text(node: WidgetNode, component_id: text, x: i32, y: i32, value: text, color: u32) -> DrawIrCommand:
     val candidate = simpleos_default_font_asset_candidate()
@@ -109,7 +137,7 @@ fn _default_text_centered(node: WidgetNode, component_id: text, x: i32, legacy_y
 # (ox=scroll.x, oy=scroll.y+offset) whose embedding re-adds the origin.
 # =========================================================================
 
-fn _emit_widget(node: WidgetNode, rect: WidgetRect, ox: i32, oy: i32, cmds: [DrawIrCommand]) -> [DrawIrCommand]:
+fn _emit_widget(node: WidgetNode, rect: WidgetRect, ox: i32, oy: i32, cmds: [DrawIrCommand], theme: WidgetDrawIrTheme) -> [DrawIrCommand]:
     var result = cmds
     if rect.w <= 0 or rect.h <= 0:
         return result
@@ -119,33 +147,33 @@ fn _emit_widget(node: WidgetNode, rect: WidgetRect, ox: i32, oy: i32, cmds: [Dra
     val mid_y = y + rect.h / 2
 
     if kind == "button":
-        result.push(draw_ir_rect(rect.id, x, y, rect.w, rect.h, _button_color(node)))
+        result.push(draw_ir_rect(rect.id, x, y, rect.w, rect.h, _button_color(node, theme)))
         val lbl = _label_text(node)
         if lbl != "":
-            result.push(_default_text_centered(node, "{rect.id}-label", x + 6, mid_y, y, rect.h, lbl, BTN_LABEL))
+            result.push(_default_text_centered(node, "{rect.id}-label", x + 6, mid_y, y, rect.h, lbl, theme.text_primary))
     elif kind == "checkbox":
         val box = 18
         val box_y = y + (rect.h - box) / 2
-        result.push(draw_ir_rect("{rect.id}-box", x, box_y, box, box, CHECK_BORDER))
-        val inner_color = if node.get_prop("checked") == "true": CHECK_MARK else: CHECK_BG
+        result.push(draw_ir_rect("{rect.id}-box", x, box_y, box, box, theme.border))
+        val inner_color = if node.get_prop("checked") == "true": theme.accent else: theme.field
         result.push(draw_ir_rect("{rect.id}-mark", x + 2, box_y + 2, box - 4, box - 4, inner_color))
         val lbl = _label_text(node)
         if lbl != "":
-            result.push(_default_text_centered(node, "{rect.id}-label", x + box + 6, mid_y, y, rect.h, lbl, LABEL_FG))
+            result.push(_default_text_centered(node, "{rect.id}-label", x + box + 6, mid_y, y, rect.h, lbl, theme.text_primary))
     elif kind == "input" or kind == "textfield":
-        result.push(draw_ir_rect(rect.id, x, y, rect.w, rect.h, INPUT_BORDER))
-        result.push(draw_ir_rect("{rect.id}-field", x + 2, y + 2, rect.w - 4, rect.h - 4, INPUT_BG))
+        result.push(draw_ir_rect(rect.id, x, y, rect.w, rect.h, theme.border))
+        result.push(draw_ir_rect("{rect.id}-field", x + 2, y + 2, rect.w - 4, rect.h - 4, theme.field))
         val value = node.get_prop("value")
         if value != "":
-            result.push(_default_text_centered(node, "{rect.id}-value", x + 5, mid_y, y, rect.h, value, INPUT_TEXT))
+            result.push(_default_text_centered(node, "{rect.id}-value", x + 5, mid_y, y, rect.h, value, theme.text_primary))
         if node.get_prop("ui_focus") == "true":
             val caret = _prop_int(node, "caret")
             val prefix = if caret > 0 and caret < value.len(): value.slice(0, caret) elif caret >= value.len(): value else: ""
-            val prefix_command = _default_text(node, "{rect.id}-caret-metrics", 0, 0, prefix, INPUT_TEXT)
+            val prefix_command = _default_text(node, "{rect.id}-caret-metrics", 0, 0, prefix, theme.text_primary)
             val caret_x = x + 5 + (if prefix_command.computed_style.len() > 0: prefix_command.width else: caret * GLYPH_ADVANCE)
-            result.push(draw_ir_rect("{rect.id}-caret", caret_x, y + 3, 2, rect.h - 6, CARET_COLOR))
+            result.push(draw_ir_rect("{rect.id}-caret", caret_x, y + 3, 2, rect.h - 6, theme.accent))
     elif kind == "progress":
-        result.push(draw_ir_rect("{rect.id}-track", x, y, rect.w, rect.h, PROGRESS_TRACK))
+        result.push(draw_ir_rect("{rect.id}-track", x, y, rect.w, rect.h, theme.track))
         var value = _prop_int(node, "value")
         if value < 0:
             value = 0
@@ -153,21 +181,21 @@ fn _emit_widget(node: WidgetNode, rect: WidgetRect, ox: i32, oy: i32, cmds: [Dra
             value = 100
         val fill_w = rect.w * value / 100
         if fill_w > 0:
-            result.push(draw_ir_rect("{rect.id}-fill", x, y, fill_w, rect.h, PROGRESS_FILL))
+            result.push(draw_ir_rect("{rect.id}-fill", x, y, fill_w, rect.h, theme.accent))
     elif kind == "image":
-        result.push(draw_ir_rect("{rect.id}-bg", x, y, rect.w, rect.h, IMAGE_PLACEHOLDER))
+        result.push(draw_ir_rect("{rect.id}-bg", x, y, rect.w, rect.h, theme.placeholder))
         val src = node.get_prop("src")
         if src != "":
             result.push(draw_ir_image_command(rect.id, x, y, rect.w, rect.h, src, []))
     elif kind == "text" or kind == "label" or kind == "heading":
         val lbl = _label_text(node)
         if lbl != "":
-            result.push(_default_text_centered(node, rect.id, x + 2, mid_y, y, rect.h, lbl, LABEL_FG))
+            result.push(_default_text_centered(node, rect.id, x + 2, mid_y, y, rect.h, lbl, theme.text_primary))
     elif kind == "scroll":
-        result.push(draw_ir_rect("{rect.id}-track", x, y, rect.w, rect.h, SCROLL_TRACK))
+        result.push(draw_ir_rect("{rect.id}-track", x, y, rect.w, rect.h, theme.track))
     else:
         # container / panel / unknown -> background surface
-        result.push(draw_ir_rect(rect.id, x, y, rect.w, rect.h, PANEL_BG))
+        result.push(draw_ir_rect(rect.id, x, y, rect.w, rect.h, theme.surface))
     return result
 
 # =========================================================================
@@ -175,19 +203,19 @@ fn _emit_widget(node: WidgetNode, rect: WidgetRect, ox: i32, oy: i32, cmds: [Dra
 # so the walk draws the scroll frame but does not recurse into it.
 # =========================================================================
 
-fn _walk_main(node: WidgetNode, rects: [WidgetRect], cmds: [DrawIrCommand]) -> [DrawIrCommand]:
+fn _walk_main(node: WidgetNode, rects: [WidgetRect], cmds: [DrawIrCommand], theme: WidgetDrawIrTheme) -> [DrawIrCommand]:
     var result = cmds
     if not node.is_visible():
         return result
     match find_rect(rects, node.id):
         case Some(rect):
-            result = _emit_widget(node, rect, 0, 0, result)
+            result = _emit_widget(node, rect, 0, 0, result, theme)
         case _:
             return result
     if node.kind_name() == "scroll":
         return result
     for child in node.children():
-        result = _walk_main(child, rects, result)
+        result = _walk_main(child, rects, result, theme)
     return result
 
 # =========================================================================
@@ -197,51 +225,51 @@ fn _walk_main(node: WidgetNode, rects: [WidgetRect], cmds: [DrawIrCommand]) -> [
 # depth-aware split if a real app needs it.
 # =========================================================================
 
-fn _walk_scroll_children(node: WidgetNode, rects: [WidgetRect], ox: i32, oy: i32, cmds: [DrawIrCommand]) -> [DrawIrCommand]:
+fn _walk_scroll_children(node: WidgetNode, rects: [WidgetRect], ox: i32, oy: i32, cmds: [DrawIrCommand], theme: WidgetDrawIrTheme) -> [DrawIrCommand]:
     var result = cmds
     if not node.is_visible():
         return result
     match find_rect(rects, node.id):
         case Some(rect):
-            result = _emit_widget(node, rect, ox, oy, result)
+            result = _emit_widget(node, rect, ox, oy, result, theme)
         case _:
             pass
     for child in node.children():
-        result = _walk_scroll_children(child, rects, ox, oy, result)
+        result = _walk_scroll_children(child, rects, ox, oy, result, theme)
     return result
 
-fn _build_scroll_batch(scroll_node: WidgetNode, rects: [WidgetRect], backend: text) -> DrawIrBatch?:
+fn _build_scroll_batch(scroll_node: WidgetNode, rects: [WidgetRect], backend: text, theme: WidgetDrawIrTheme) -> DrawIrBatch?:
     match find_rect(rects, scroll_node.id):
         case Some(srect):
             val offset = _prop_int(scroll_node, "scroll_offset")
             var cmds: [DrawIrCommand] = []
             for child in scroll_node.children():
-                cmds = _walk_scroll_children(child, rects, srect.x, srect.y + offset, cmds)
+                cmds = _walk_scroll_children(child, rects, srect.x, srect.y + offset, cmds, theme)
             val embedding = draw_ir_embedding_config("scroll-{scroll_node.id}", scroll_node.id, srect.x, srect.y, srect.w, srect.h, 5, 1000, true)
             val source = draw_ir_source_gui_ast(scroll_node.id, "widget-scroll", "1")
             return draw_ir_batch_with_source("scroll-{scroll_node.id}", backend, embedding, cmds, source)
         case _:
             return nil
 
-fn _collect_scroll_batches(node: WidgetNode, rects: [WidgetRect], backend: text, batches: [DrawIrBatch]) -> [DrawIrBatch]:
+fn _collect_scroll_batches(node: WidgetNode, rects: [WidgetRect], backend: text, batches: [DrawIrBatch], theme: WidgetDrawIrTheme) -> [DrawIrBatch]:
     var result = batches
     if not node.is_visible():
         return result
     if node.kind_name() == "scroll":
-        match _build_scroll_batch(node, rects, backend):
+        match _build_scroll_batch(node, rects, backend, theme):
             case Some(batch):
                 result.push(batch)
             case _:
                 pass
     for child in node.children():
-        result = _collect_scroll_batches(child, rects, backend, result)
+        result = _collect_scroll_batches(child, rects, backend, result, theme)
     return result
 
 # =========================================================================
 # Public API
 # =========================================================================
 
-fn widget_tree_to_draw_ir(root: WidgetNode, w: i32, h: i32, backend: text) -> DrawIrComposition:
+fn widget_tree_to_draw_ir_with_theme(root: WidgetNode, w: i32, h: i32, backend: text, snapshot: ThemeRenderSnapshot) -> DrawIrComposition:
     """Lay out `root` at (w, h) and project it to a Draw-IR composition.
 
     Batch 0 is the whole tree in absolute coordinates (unclipped). Each scroll
@@ -249,17 +277,31 @@ fn widget_tree_to_draw_ir(root: WidgetNode, w: i32, h: i32, backend: text) -> Dr
     its `scroll_offset`. The result renders through
     `engine2d_draw_ir_adv_composition[_with_images]`.
     """
+    val theme = widget_draw_ir_theme_from_snapshot(snapshot)
     val rects = compute_layout(root, 0, 0, w, h)
     var main_cmds: [DrawIrCommand] = []
-    main_cmds = _walk_main(root, rects, main_cmds)
+    main_cmds = _walk_main(root, rects, main_cmds, theme)
     val embedding = draw_ir_embedding_config("widget-root", root.id, 0, 0, w, h, 0, 1000, false)
     val source = draw_ir_source_gui_ast(root.id, "widget-tree", "1")
     val main_batch = draw_ir_batch_with_source("widget-main", backend, embedding, main_cmds, source)
     var batches: [DrawIrBatch] = [main_batch]
-    batches = _collect_scroll_batches(root, rects, backend, batches)
+    batches = _collect_scroll_batches(root, rects, backend, batches, theme)
+    draw_ir_composition("widget-composition", "widget:{w}x{h}", backend, batches)
+
+fn widget_tree_to_draw_ir(root: WidgetNode, w: i32, h: i32, backend: text) -> DrawIrComposition:
+    val theme = _widget_draw_ir_theme_from_wm_chrome(wm_chrome_theme())
+    val rects = compute_layout(root, 0, 0, w, h)
+    var main_cmds: [DrawIrCommand] = []
+    main_cmds = _walk_main(root, rects, main_cmds, theme)
+    val embedding = draw_ir_embedding_config("widget-root", root.id, 0, 0, w, h, 0, 1000, false)
+    val source = draw_ir_source_gui_ast(root.id, "widget-tree", "1")
+    val main_batch = draw_ir_batch_with_source("widget-main", backend, embedding, main_cmds, source)
+    var batches: [DrawIrBatch] = [main_batch]
+    batches = _collect_scroll_batches(root, rects, backend, batches, theme)
     draw_ir_composition("widget-composition", "widget:{w}x{h}", backend, batches)
 
 fn widget_tree_to_draw_ir_cpu(root: WidgetNode, w: i32, h: i32) -> DrawIrComposition:
     widget_tree_to_draw_ir(root, w, h, DRAW_IR_BACKEND_CPU)
 
-export widget_tree_to_draw_ir, widget_tree_to_draw_ir_cpu
+export WidgetDrawIrTheme, widget_draw_ir_theme_from_snapshot
+export widget_tree_to_draw_ir, widget_tree_to_draw_ir_with_theme, widget_tree_to_draw_ir_cpu
