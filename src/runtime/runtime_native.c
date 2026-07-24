@@ -5063,13 +5063,22 @@ int64_t rt_path_join(
     return result;
 }
 
-int64_t rt_env_get(const uint8_t* key_ptr, uint64_t key_len) {
-    char* key = rt_core_text_arg_to_cstr(key_ptr, key_len);
+static int64_t rt_env_get_cstr(const char* key) {
     if (!key) return rt_core_nil();
     const char* value = getenv(key);
-    free(key);
     if (!value) return rt_core_nil();
     return rt_string_new((const uint8_t*)value, (uint64_t)strlen(value));
+}
+
+int64_t rt_env_get(const uint8_t* key_ptr, uint64_t key_len) {
+    char* key = rt_core_text_arg_to_cstr(key_ptr, key_len);
+    int64_t result = rt_env_get_cstr(key);
+    free(key);
+    return result;
+}
+
+int64_t rt_env_get_value(int64_t key) {
+    return rt_env_get_cstr(rt_interp_cstr(key));
 }
 
 static atomic_flag rt_lexer_source_lock = ATOMIC_FLAG_INIT;

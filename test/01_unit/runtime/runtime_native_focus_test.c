@@ -72,6 +72,19 @@ static int walk_contains(SplArray* paths, const char* expected) {
 }
 
 int main(void) {
+    const uint8_t bounded_env_key[] = {
+        'S', 'I', 'M', 'P', 'L', 'E', '_', 'E', 'N', 'V', '_', 'A', 'B', 'I'
+    };
+    assert(setenv("SIMPLE_ENV_ABI", "bounded", 1) == 0);
+    int64_t bounded_env = rt_env_get(bounded_env_key, sizeof(bounded_env_key));
+    int64_t raw_env = rt_env_get_value((int64_t)(uintptr_t)"SIMPLE_ENV_ABI");
+    int64_t tagged_env_key = rt_string_new(bounded_env_key, sizeof(bounded_env_key));
+    int64_t tagged_env = rt_env_get_value(tagged_env_key);
+    assert(strcmp((const char*)rt_string_data(bounded_env), "bounded") == 0);
+    assert(strcmp((const char*)rt_string_data(raw_env), "bounded") == 0);
+    assert(strcmp((const char*)rt_string_data(tagged_env), "bounded") == 0);
+    assert(unsetenv("SIMPLE_ENV_ABI") == 0);
+
     int64_t empty_a = rt_string_new(NULL, 0);
     int64_t empty_b = rt_string_new((const uint8_t*)"", 0);
     int64_t one_a = rt_string_new((const uint8_t*)"a", 1);

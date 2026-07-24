@@ -538,6 +538,7 @@ bool        rt_editor_wait_simple_dap_stopped(int64_t pid);
 
 const char* spl_env_get(const char* key);
 int64_t     rt_env_get(const uint8_t* key, uint64_t key_len);
+int64_t     rt_env_get_value(int64_t key);
 int64_t     rt_env_get_i64(const uint8_t* key, uint64_t key_len, int64_t default_value);
 void        spl_env_set(const char* key, const char* value);
 bool        rt_env_set(const uint8_t* key, uint64_t key_len, const uint8_t* value, uint64_t value_len);
