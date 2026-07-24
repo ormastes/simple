@@ -940,3 +940,24 @@ the shared binary — deploys require explicit user go-ahead).
   `SIMPLE_CORE_RUNTIME_PATH` plus `SIMPLE_LINK_OBJECTS` in
   `bootstrap_main.spl`. Do not solve it by restoring the removed
   hosted/native-all lane.
+
+  V42 used the canonical bootstrap entry and built cleanly (`3 compiled, 673
+  cached, 0 failed`), proving the full-CLI runtime-lane blocker was avoided.
+  Exact Cranelift `dict_fn_value` then entered the pure-Simple driver and
+  trapped in `lower_index_expr` with `field access on nil receiver` (exit
+  `132`), so Index execution remains red.
+
+  V43 replaced the two-field Index pattern binding with the representation
+  pattern already used by the LLVM/Cranelift adapters:
+  `rt_enum_payload` plus tuple slots 0 and 1. It rebuilt `4/672/0`; GDB proved
+  `lower_index_expr_from_hir -> lower_index_expr`, but the same nil-field trap
+  remained inside the complete helper. V44 replaced the helper's unsafe
+  `MirType? != nil` dereferences with explicit `if val` unwrapping for both
+  Dict and array/slice paths and rebuilt `4/672/0`; exact Cranelift still
+  exited `132` before producing an executable. No `33` receipt exists.
+
+  The three-cycle cap stopped here. Next fresh session, localize the remaining
+  field access inside `lower_index_expr` with one gated stage trace or a
+  line-mapped debug candidate, then fix that single owner. Do not add a
+  Cranelift special case, promote the fixture, or run LLVM/platform matrices
+  until exact Cranelift builds and exits `33`.

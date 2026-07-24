@@ -21,6 +21,8 @@ use compiler.backend.gpu_intrinsics.{is_gpu_intrinsic}
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_enum_discriminant(value: Any) -> i64
+extern fn rt_enum_payload(value: Any) -> i64
+extern fn rt_tuple_get(tuple: i64, index: i64) -> i64
 
 fn mir_expr_env_get(key: text) -> text:
     rt_env_get(key)
@@ -865,6 +867,15 @@ impl MirLowering:
         self.builder = br2
         ret_temp
 
+    me lower_index_expr_from_hir(expr_value: HirExpr) -> LocalId:
+        val payload = rt_enum_payload(expr_value.kind)
+        val base: HirExpr = rt_tuple_get(payload, 0)
+        val index: HirExpr = rt_tuple_get(payload, 1)
+        if base == nil or index == nil:
+            self.error("empty HIR Index payload", Some(expr_value.span))
+            return self.builder.emit_const_int(0)
+        self.lower_index_expr(base, index, expr_value.type_)
+
     me lower_index_expr(base: HirExpr, index: HirExpr, index_result_hir_type: HirType?) -> LocalId:
         # Bug (array-slice-index SIGSEGV, CONFLICT-FLAG: expr_dispatch.spl
         # is fenced, touched here per the fence rule's "CONFLICT-FLAG if
@@ -899,15 +910,15 @@ impl MirLowering:
         if self.local_is_runtime_dict(base_local):
             val dict_key = self.lower_dict_key(index)
             var dict_result_type = MirType.i64()
-            val dict_mir_type = self.local_mir_type_of(base_local)
-            if dict_mir_type != nil:
-                if rt_enum_discriminant(dict_mir_type.kind) == rt_enum_discriminant(MirTypeKind.Dict(MirType.i64(), MirType.i64())):
-                    match dict_mir_type.kind:
+            var has_dict_mir_type = false
+            if val resolved_dict_mir_type = self.local_mir_type_of(base_local):
+                has_dict_mir_type = true
+                if rt_enum_discriminant(resolved_dict_mir_type.kind) == rt_enum_discriminant(MirTypeKind.Dict(MirType.i64(), MirType.i64())):
+                    match resolved_dict_mir_type.kind:
                         case MirTypeKind.Dict(_, value_type): dict_result_type = value_type
                         case _: ()
-            val base_type = base.type_
-            if dict_mir_type == nil and base_type != nil:
-                match base_type.kind:
+            if not has_dict_mir_type and base.has_type_:
+                match base.type_.kind:
                     case Dict(_, value_type):
                         dict_result_type = self.lower_type(value_type)
                     case _: ()
@@ -947,9 +958,9 @@ impl MirLowering:
                 # it the same way the array path does.
                 match dict_result_type.kind:
                     case MirTypeKind.Struct(struct_symbol):
-                        val struct_type_sym = self.symbols.get_symbol_raw(struct_symbol.id)
-                        if struct_type_sym != nil and struct_type_sym.name != "":
-                            self.struct_value_syms[decoded.id] = struct_type_sym.name
+                        if val struct_type_sym = self.symbols.get_symbol_raw(struct_symbol.id):
+                            if struct_type_sym.name != "":
+                                self.struct_value_syms[decoded.id] = struct_type_sym.name
                     case _: ()
                 return decoded
             return base_local
@@ -989,8 +1000,7 @@ impl MirLowering:
         self.emit_bounds_check_for_index(base.type_, base_local, index_local)
         var result_type = MirType.i64()
         var result_type_from_base = false
-        val base_mir_type = self.local_mir_type_of(base_local)
-        if base_mir_type != nil:
+        if val base_mir_type = self.local_mir_type_of(base_local):
             match base_mir_type.kind:
                 case MirTypeKind.Array(element_type, _):
                     result_type = element_type
@@ -1276,11 +1286,7 @@ impl MirLowering:
                     pass
         val index_disc = rt_enum_discriminant(HirExprKind.Index(nil_expr, nil_expr))
         if expr_disc == index_disc:
-            match expr_value.kind:
-                case HirExprKind.Index(index_base, index_value):
-                    return self.lower_index_expr(index_base, index_value, expr_value.type_)
-                case _:
-                    pass
+            return self.lower_index_expr_from_hir(expr_value)
         # Var/NamedVar reads need the same disc-guarded pre-dispatch as
         # Field/Cast/Call/Block above: the seed's big `match expr_value.kind`
         # mis-dispatches NamedVar into an earlier silent arm (UnitLit's bare
