@@ -30,7 +30,11 @@ Fixed by `bootrom_read64` in `src/lib/hardware/soc_rtl/bootrom.spl`
 - `scripts/os/build_rv64_linux_assets.shs` — builds into `build/os/rv64_soc/`:
   - default: `soc_virt.dtb` (dtc) + `initramfs.cpio.gz` (freestanding static
     `/init`, `-march=rv64imac -mabi=lp64`, prints `SIMPLE-RV64-INIT OK`) +
-    honest `manifest.txt` (each artifact BUILT/MISSING).
+    honest `manifest.txt` (each artifact BUILT/MISSING with SHA-256).
+  - `--terminal`: builds pinned BusyBox 1.36.1 with real
+    `init`/`getty`/`login`/`sh`/`ls`, serial device nodes, and the root fixture
+    `SIMPLE_RISCV_LINUX_LOGIN_LS_PASS`. Set `BUSYBOX_CROSS` to an
+    RV64IMAC/lp64 soft-float toolchain prefix; the builder rejects lp64d.
   - `--opensbi`: clones pinned OpenSBI v1.4, builds `fw_jump.bin` with
     `PLATFORM_RISCV_ISA=rv64imac_zicsr_zifencei PLATFORM_RISCV_ABI=lp64`,
     `FW_JUMP_ADDR=0x80200000`, `FW_JUMP_FDT_ADDR=0x88000000`.
@@ -54,14 +58,16 @@ Everything loaded onto this core must be built soft-float:
   `Image` is used on the RTL core — QEMU rv64gc masks this mistake).
 - Userspace/init: `-march=rv64imac -mabi=lp64` (script does this; a default
   glibc lp64d binary traps on the first FP instruction).
+- The distro `riscv64-linux-gnu-` toolchain installed on many hosts is lp64d
+  only. Use a Buildroot/musl soft-float toolchain through `BUSYBOX_CROSS`; the
+  terminal-rootfs builder checks the ELF flags before packaging.
 
 ## Gaps to a live Linux boot (fail-closed list)
 
-1. **S-mode in the core** — OpenSBI enters the kernel in S-mode and Linux
-   needs Sv39 paging. Lane M's S-mode work must land first; until then the
-   chain is provable only through OpenSBI banner + `fw_jump` handoff on the
-   RTL/GHDL core. (QEMU's oracle `virt` CPU model has full S-mode/Sv39 and is
-   not gated by this — see Verification snapshot below.)
+1. **Generated S-mode/Sv39 evidence** — the protected product source now owns
+   S/U privilege, Sv39, and advertises both modes in `misa`; a fresh generated
+   RTL boot through OpenSBI into an S-mode payload is still required. QEMU's
+   `virt` CPU remains a software oracle, not that hardware proof.
 2. **PLIC S-mode context — RESOLVED.** `plic.spl` now implements both
    contexts (ctx0 = M-mode/MEIP irq 11, ctx1 = S-mode/SEIP irq 9, landed with
    S-mode delegation 3b36b68cd11) and `soc_virt.dts` carries
