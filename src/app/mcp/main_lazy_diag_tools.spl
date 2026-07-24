@@ -135,7 +135,7 @@ pub fn format_new_diagnostics_block(path: text, check_output: text) -> text:
 
 fn run_structured_diagnostics(path: text) -> (text, i64):
     val _bin = _mcp_find_simple_binary()
-    shell_cmd("timeout 30 " + _bin + " check " + path + " 2>&1")
+    mcp_run_argv(_bin, ["check", path], 30000, 262144)
 
 # ============================================================================
 # simple_read — Read source file with line numbers + diagnostics
@@ -259,7 +259,7 @@ fn handle_simple_symbols(id: text, body: text) -> text:
     if path == "":
         return make_tool_error(id, -32602, "Missing required parameter: path")
     val _bin = _mcp_find_simple_binary()
-    val (out, exit_code) = shell_cmd("timeout 30 " + _bin + " run src/app/cli/query_visibility.spl symbols " + path + " --requester " + path + " 2>&1")
+    val (out, exit_code) = mcp_run_argv(_bin, ["run", "src/app/cli/query_visibility.spl", "symbols", path, "--requester", path], 30000, 262144)
     if exit_code != 0:
         return make_tool_error(id, "Could not list symbols for: " + path)
     make_tool_result(id, out)
@@ -308,6 +308,8 @@ fn handle_simple_status(id: text, body: text) -> text:
         # Get changed files from jj
         var jj_out = ""
         var jj_exit: i64 = 0
+        # Fixed, no-request pipeline: shell_cmd remains only for this jj output
+        # redirection.  Public request fields below use argv.
         (jj_out, jj_exit) = shell_cmd("timeout 10 jj --no-pager --color never diff -r @ --stat 2>/dev/null")
         if jj_exit == 0 and jj_out.trim() != "":
             file_list_str = extract_spl_from_stat(jj_out)
@@ -317,10 +319,20 @@ fn handle_simple_status(id: text, body: text) -> text:
             var scan_dir = "src/"
             if dir != "":
                 scan_dir = dir
+            if scan_dir.starts_with("-") or scan_dir.starts_with("!") or scan_dir.starts_with("("):
+                return make_tool_error(id, -32602, "Invalid directory: option-like paths are not allowed")
             var find_out = ""
             var _unused: i64 = 0
-            (find_out, _unused) = shell_cmd("timeout 10 find " + scan_dir + " -name '*.spl' -type f | sort | head -30")
-            file_list_str = find_out.trim()
+            (find_out, _unused) = mcp_run_argv("find", [scan_dir, "-name", "*.spl", "-type", "f"], 10000, 262144)
+            var found_paths: [text] = []
+            for line in find_out.split(_DIAG_NL):
+                val found_path = line.trim()
+                if found_path != "":
+                    found_paths.push(found_path)
+            found_paths.sort()
+            if found_paths.len() > 30:
+                found_paths = found_paths[:30]
+            file_list_str = found_paths.join(_DIAG_NL)
 
     if file_list_str == "":
         return make_tool_result(id, "-- Project Diagnostics --" + _DIAG_NL + "No .spl files found to check.")
@@ -360,6 +372,18 @@ fn extract_spl_from_stat(stat_output: text) -> text:
                 parts.push(fname)
         elif t.ends_with(".spl"):
             parts.push(t)
+    parts.join(_DIAG_NL)
+
+fn _diag_first_lines(value: text, maximum: i64) -> text:
+    var parts: [text] = []
+    var count: i64 = 0
+    for line in value.split(_DIAG_NL):
+        if count >= maximum:
+            break
+        if line == "":
+            continue
+        parts.push(line)
+        count = count + 1
     parts.join(_DIAG_NL)
 
 # ============================================================================
@@ -538,17 +562,26 @@ fn handle_simple_api(id: text, body: text) -> text:
     if module_name == "" and query == "":
         return make_tool_error(id, -32602, "Provide 'module' or 'query' parameter")
 
-    var search_cmd = ""
-    if module_name != "":
-        # Search for module file and grep for fn/class/struct/export
-        search_cmd = "timeout 15 find src/ -name '*.spl' -path '*" + module_name + "*' | head -5 | xargs timeout 15 grep -n '^fn \\|^class \\|^struct \\|^enum \\|^export ' 2>/dev/null | head -50"
-    else:
-        # Search all files for query
-        search_cmd = "timeout 15 grep -rn '" + query + "' src/ --include='*.spl' 2>/dev/null | head -50"
-
     var api_out = ""
     var _unused: i64 = 0
-    (api_out, _unused) = shell_cmd(search_cmd)
+    if module_name != "":
+        # Find and grep are separate argv calls so module_name is never shell text.
+        var files_out = ""
+        (files_out, _unused) = mcp_run_argv("find", ["src/", "-name", "*.spl", "-path", "*" + module_name + "*", "-type", "f"], 15000, 262144)
+        var grep_args = ["-n", "-E", "--", "^(fn |class |struct |enum |export )"]
+        var files_checked: i64 = 0
+        for line in files_out.split(_DIAG_NL):
+            val path = line.trim()
+            if path == "" or files_checked >= 5:
+                continue
+            grep_args.push(path)
+            files_checked = files_checked + 1
+        if files_checked > 0:
+            (api_out, _unused) = mcp_run_argv("grep", grep_args, 15000, 262144)
+            api_out = _diag_first_lines(api_out, 50)
+    else:
+        (api_out, _unused) = mcp_run_argv("grep", ["-r", "-n", "--include=*.spl", "--", query, "src/"], 15000, 262144)
+        api_out = _diag_first_lines(api_out, 50)
 
     var out_parts: [text] = []
     out_parts.push("-- simple_api")
@@ -567,3 +600,4 @@ export handle_simple_read
 export handle_simple_status
 export handle_simple_edit
 export handle_simple_multi_edit
+export handle_simple_api

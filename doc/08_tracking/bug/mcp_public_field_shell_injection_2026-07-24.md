@@ -1,6 +1,6 @@
 # MCP public-field shell injection
 
-**Status:** PARTIAL / FIX IN PROGRESS  
+**Status:** FIXED IN SOURCE / STAGE 4 QUALIFICATION PENDING
 **Scope:** `src/app/mcp` source-mode server; the issue is independent of the
 currently unavailable qualified native MCP artifact.
 
@@ -15,8 +15,8 @@ metacharacters, command substitutions, and option parsing remain reachable.
 |---|---|---|
 | VCS | None in the active VCS handler | All VCS handlers now pass public fields as literal arguments through `mcp_run_argv`. |
 | Query | None in the active read-only query handler | Public query, file, revision, requester, and derived module values now use bounded argv or in-process scanning. Two project-summary shell pipelines remain, but their commands are constant and contain no request fields. |
-| Diagnostics | `path`, `directory` | `main_lazy_diag_tools.spl`: structured check, symbols, and status fallback `find`. |
-| CLI passthrough | tool-specific fields such as `path`, `filter`, `query`, `files`, `target`, `package`, `pattern` | `cli_passthrough.spl`: `_append_cli_args_for_name` appends public fields, then `handle_cli_passthrough_direct` calls `shell_cmd`. |
+| Diagnostics | None in the active diagnostics handler | Check, symbols, status fallback, and API search use bounded argv. Option-like status directories are rejected before `find`. |
+| CLI passthrough | None | Fixed table commands and public fields use bounded argv. Positional values that could be parsed as child options are rejected; flag values remain literal argv elements. |
 
 `main_dispatch.spl` imports the four scopes above, so they are active. The
 separate legacy/core copy is `main_dispatch_core.spl`: it also concatenates
@@ -34,7 +34,8 @@ current timeout/output caps. Keep the shell only for fixed, no-public-input
 commands; replace the `simple_test` wrapper with an argv/process helper rather
 than quoting more strings.
 
-The accompanying static guard proves the completed VCS/query migration and
-allows only the two constant query-summary pipelines. It does **not** claim
-complete MCP hardening or cover diagnostics, CLI passthrough, indirect aliases,
-or legacy code.
+The focused VCS/query, diagnostics, and CLI-passthrough regressions cover the
+active handlers. Constant, no-public-input shell pipelines remain allowed.
+`main_dispatch_core.spl` is an inactive legacy copy and remains separately
+tracked; a fresh Stage 4 native MCP handshake is still required before runtime
+qualification.
