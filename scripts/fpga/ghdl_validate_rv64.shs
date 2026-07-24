@@ -42,9 +42,11 @@ mkdir -p "$WORK_DIR"
 # Analysis order per D-5:
 # pkg -> leaves (alu, regfile, csr_s, csr) -> composites (decode, lsu, mmu_sv39,
 # mul_div, atomics, trap) -> core -> soc_top_rv64 -> testbench
-# Order: pkg -> RTL leaves -> RTL composites -> core -> peripherals -> soc_top
-ANALYSIS_ORDER="pkg alu regfile csr_s csr decode lsu mmu_sv39 mul_div atomics trap rv64gc_core clint plic uart ram bootrom wb_interconnect soc_top_rv64"
-MODULE_COUNT=19
+# Order: pkg -> RTL leaves -> compiler product -> WB adapter -> peripherals ->
+# selected SoC tops -> external-DDR bridge/top.
+ANALYSIS_ORDER="pkg alu regfile csr_s csr decode lsu mmu_sv39 mul_div atomics trap rv64gc_core_product rv64gc_core_product_wb clint plic uart ram bootrom wb_interconnect soc_top_rv64 soc_top_rv64_external_ddr wb64_axi_hp_bridge soc_top_rv64_k26_pl"
+set -- $ANALYSIS_ORDER
+MODULE_COUNT=$#
 
 # Phase 1: Analyze
 echo "--- Phase: Analyze ---"
@@ -58,14 +60,13 @@ for module in $ANALYSIS_ORDER; do
         continue
     fi
     printf "  Analyzing %s.vhd ... " "$module"
-    GHDL_OUT=$(ghdl -a --std=08 --workdir="$WORK_DIR" "$VHD_FILE" 2>&1) || true
-    if echo "$GHDL_OUT" | grep -q ":error:"; then
+    if GHDL_OUT=$(ghdl -a --std=08 --workdir="$WORK_DIR" "$VHD_FILE" 2>&1); then
+        echo "OK"
+        PASS=$((PASS + 1))
+    else
         echo "FAIL"
         echo "$GHDL_OUT" | tail -40
         FAIL=$((FAIL + 1))
-    else
-        echo "OK"
-        PASS=$((PASS + 1))
     fi
 done
 

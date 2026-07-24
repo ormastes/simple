@@ -183,12 +183,14 @@ entity wb64_axi_hp_bridge is
     wb_sel_i       : in  std_logic_vector(7 downto 0);
     wb_stb_i       : in  std_logic;
     wb_cyc_i       : in  std_logic;
+    wb_lock_i      : in  std_logic;
     wb_ack_o       : out std_logic;
     wb_err_o       : out std_logic;
     m_axi_awaddr   : out std_logic_vector(48 downto 0);
     m_axi_awlen    : out std_logic_vector(7 downto 0);
     m_axi_awsize   : out std_logic_vector(2 downto 0);
     m_axi_awburst  : out std_logic_vector(1 downto 0);
+    m_axi_awlock   : out std_logic;
     m_axi_awvalid  : out std_logic;
     m_axi_awready  : in  std_logic;
     m_axi_wdata    : out std_logic_vector(127 downto 0);
@@ -203,6 +205,7 @@ entity wb64_axi_hp_bridge is
     m_axi_arlen    : out std_logic_vector(7 downto 0);
     m_axi_arsize   : out std_logic_vector(2 downto 0);
     m_axi_arburst  : out std_logic_vector(1 downto 0);
+    m_axi_arlock   : out std_logic;
     m_axi_arvalid  : out std_logic;
     m_axi_arready  : in  std_logic;
     m_axi_rdata    : in  std_logic_vector(127 downto 0);
@@ -227,6 +230,9 @@ begin
   m_axi_awlen   <= (others => '0');
   m_axi_awsize  <= "011";
   m_axi_awburst <= "01";
+  -- The product core serializes atomics on its single-master bus. AXI LOCK is
+  -- an exclusive transaction protocol, not a generic Wishbone lock.
+  m_axi_awlock  <= '0';
   m_axi_awvalid <= aw_pending;
   m_axi_wdata   <= data_q & x"0000000000000000" when upper_q = '1'
                    else x"0000000000000000" & data_q;
@@ -239,6 +245,7 @@ begin
   m_axi_arlen   <= (others => '0');
   m_axi_arsize  <= "011";
   m_axi_arburst <= "01";
+  m_axi_arlock  <= '0';
   m_axi_arvalid <= '1' when state = read_issue else '0';
   m_axi_rready  <= '1' when state = read_response else '0';
 
@@ -313,6 +320,132 @@ begin
       end if;
     end if;
   end process;
+end architecture rtl;
+"""
+
+pub fn generate_rv64_k26_ps_pl_top_vhdl() -> text:
+    """Connect the generated external-DDR SoC to the K26 AXI-HP bridge."""
+    return """library ieee;
+use ieee.std_logic_1164.all;
+
+entity soc_top_rv64_k26_pl is
+  port (
+    clk            : in  std_logic;
+    rst_n          : in  std_logic;
+    uart_tx        : out std_logic;
+    uart_rx        : in  std_logic;
+    m_axi_awaddr   : out std_logic_vector(48 downto 0);
+    m_axi_awlen    : out std_logic_vector(7 downto 0);
+    m_axi_awsize   : out std_logic_vector(2 downto 0);
+    m_axi_awburst  : out std_logic_vector(1 downto 0);
+    m_axi_awlock   : out std_logic;
+    m_axi_awvalid  : out std_logic;
+    m_axi_awready  : in  std_logic;
+    m_axi_wdata    : out std_logic_vector(127 downto 0);
+    m_axi_wstrb    : out std_logic_vector(15 downto 0);
+    m_axi_wlast    : out std_logic;
+    m_axi_wvalid   : out std_logic;
+    m_axi_wready   : in  std_logic;
+    m_axi_bresp    : in  std_logic_vector(1 downto 0);
+    m_axi_bvalid   : in  std_logic;
+    m_axi_bready   : out std_logic;
+    m_axi_araddr   : out std_logic_vector(48 downto 0);
+    m_axi_arlen    : out std_logic_vector(7 downto 0);
+    m_axi_arsize   : out std_logic_vector(2 downto 0);
+    m_axi_arburst  : out std_logic_vector(1 downto 0);
+    m_axi_arlock   : out std_logic;
+    m_axi_arvalid  : out std_logic;
+    m_axi_arready  : in  std_logic;
+    m_axi_rdata    : in  std_logic_vector(127 downto 0);
+    m_axi_rresp    : in  std_logic_vector(1 downto 0);
+    m_axi_rlast    : in  std_logic;
+    m_axi_rvalid   : in  std_logic;
+    m_axi_rready   : out std_logic
+  );
+end entity soc_top_rv64_k26_pl;
+
+architecture rtl of soc_top_rv64_k26_pl is
+  signal rst           : std_logic;
+  signal ddr_adr       : std_logic_vector(63 downto 0);
+  signal ddr_dat_o     : std_logic_vector(63 downto 0);
+  signal ddr_dat_i     : std_logic_vector(63 downto 0);
+  signal ddr_we        : std_logic;
+  signal ddr_sel       : std_logic_vector(7 downto 0);
+  signal ddr_stb       : std_logic;
+  signal ddr_cyc       : std_logic;
+  signal ddr_lock      : std_logic;
+  signal ddr_ack       : std_logic;
+  signal ddr_err       : std_logic;
+  signal debug_valid   : std_logic;
+  signal debug_byte    : std_logic_vector(7 downto 0);
+begin
+  rst <= not rst_n;
+
+  u_soc: entity work.soc_top_rv64_external_ddr
+    generic map (
+      RESET_ADDR => x"0000000080000000"
+    )
+    port map (
+      clk => clk,
+      rst => rst,
+      uart_tx => uart_tx,
+      uart_rx => uart_rx,
+      debug_uart_valid => debug_valid,
+      debug_uart_byte => debug_byte,
+      ddr_wb_adr_o => ddr_adr,
+      ddr_wb_dat_o => ddr_dat_o,
+      ddr_wb_dat_i => ddr_dat_i,
+      ddr_wb_we_o => ddr_we,
+      ddr_wb_sel_o => ddr_sel,
+      ddr_wb_stb_o => ddr_stb,
+      ddr_wb_cyc_o => ddr_cyc,
+      ddr_wb_lock_o => ddr_lock,
+      ddr_wb_ack_i => ddr_ack,
+      ddr_wb_err_i => ddr_err
+    );
+
+  u_ddr_bridge: entity work.wb64_axi_hp_bridge
+    port map (
+      clk => clk,
+      rst => rst,
+      wb_adr_i => ddr_adr,
+      wb_dat_i => ddr_dat_o,
+      wb_dat_o => ddr_dat_i,
+      wb_we_i => ddr_we,
+      wb_sel_i => ddr_sel,
+      wb_stb_i => ddr_stb,
+      wb_cyc_i => ddr_cyc,
+      wb_lock_i => ddr_lock,
+      wb_ack_o => ddr_ack,
+      wb_err_o => ddr_err,
+      m_axi_awaddr => m_axi_awaddr,
+      m_axi_awlen => m_axi_awlen,
+      m_axi_awsize => m_axi_awsize,
+      m_axi_awburst => m_axi_awburst,
+      m_axi_awlock => m_axi_awlock,
+      m_axi_awvalid => m_axi_awvalid,
+      m_axi_awready => m_axi_awready,
+      m_axi_wdata => m_axi_wdata,
+      m_axi_wstrb => m_axi_wstrb,
+      m_axi_wlast => m_axi_wlast,
+      m_axi_wvalid => m_axi_wvalid,
+      m_axi_wready => m_axi_wready,
+      m_axi_bresp => m_axi_bresp,
+      m_axi_bvalid => m_axi_bvalid,
+      m_axi_bready => m_axi_bready,
+      m_axi_araddr => m_axi_araddr,
+      m_axi_arlen => m_axi_arlen,
+      m_axi_arsize => m_axi_arsize,
+      m_axi_arburst => m_axi_arburst,
+      m_axi_arlock => m_axi_arlock,
+      m_axi_arvalid => m_axi_arvalid,
+      m_axi_arready => m_axi_arready,
+      m_axi_rdata => m_axi_rdata,
+      m_axi_rresp => m_axi_rresp,
+      m_axi_rlast => m_axi_rlast,
+      m_axi_rvalid => m_axi_rvalid,
+      m_axi_rready => m_axi_rready
+    );
 end architecture rtl;
 """
 
