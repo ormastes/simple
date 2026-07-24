@@ -146,18 +146,35 @@ bash scripts/fpga/build_k26_rv32.shs --synth-only
 bash scripts/fpga/build_k26_vexriscv.shs --synth-only
 ```
 
+Build the pinned soft-float Buildroot toolchain/rootfs first, then the
+architecture-specific OpenSBI, Linux, DTB, and initramfs:
+
+```bash
+sh scripts/os/build_riscv_buildroot.shs rv32
+sh scripts/os/build_riscv_buildroot.shs rv64
+sh scripts/os/build_rv32_linux_assets.shs --all
+sh scripts/os/build_rv64_linux_assets.shs --all
+```
+
+Buildroot is fixed at commit
+`e4a5ab3b319753f41e2b5cf22e90b6b0304ca225`; OpenSBI v1.4, Linux v6.6,
+and BusyBox 1.36.1 are independently commit/source-hash pinned. The two
+Buildroot outputs reuse one download cache and retain per-architecture
+incremental stamp/output state, while their manifests keep distinct RV32 ILP32
+and RV64 LP64 identities.
+
 After normal PS firmware initializes and reserves
 `0x40000000..0x4fffffff`, load each image before programming its PL product:
 
 ```bash
 K26_PS_DDR_RESERVED=1 RISCV_ARCH=rv32 \
   bash scripts/fpga/load_elf_k26.shs \
-  build/build/rv32_fpga/gateware/rv32_fpga.bit \
-  build/os/simpleos_riscv32_fpga.elf
+  build/fpga/k26_rv32/k26_rv32_product.bit \
+  build/os/rv32_soc
 
 K26_PS_DDR_RESERVED=1 RISCV_ARCH=rv64 \
   bash scripts/fpga/load_elf_k26.shs \
-  build/build/xilinx_kv260/gateware/xilinx_kv260.bit \
+  build/fpga/k26/k26_rv64_product.bit \
   build/os/rv64_soc
 ```
 

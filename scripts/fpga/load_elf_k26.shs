@@ -11,10 +11,26 @@
 set -euo pipefail
 
 VIVADO_SETTINGS="${VIVADO_SETTINGS:-$HOME/Xilinx/2025.2/Vivado/settings64.sh}"
-BITSTREAM="${1:-build/fpga/k26/k26_vexriscv.bit}"
-INPUT="${2:-build/os/rv64_soc}"
+RISCV_ARCH="${RISCV_ARCH:-rv64}"
+case "$RISCV_ARCH" in
+  rv32)
+    default_bitstream="build/fpga/k26_rv32/k26_rv32_product.bit"
+    default_input="build/os/rv32_soc"
+    default_load_log="build/fpga/rv32/load_elf_rv32.log"
+    tool_prefix="riscv32"
+    ;;
+  rv64)
+    default_bitstream="build/fpga/k26/k26_rv64_product.bit"
+    default_input="build/os/rv64_soc"
+    default_load_log="build/fpga/k26/load_elf_k26.log"
+    tool_prefix="riscv64"
+    ;;
+  *) echo "ERROR: RISCV_ARCH must be rv32 or rv64" >&2; exit 2 ;;
+esac
+BITSTREAM="${1:-$default_bitstream}"
+INPUT="${2:-$default_input}"
 K26_DDR_LOAD_ADDR="0x40000000"
-UART_DEV="${UART_DEV:-/dev/ttyUSB0}"
+UART_DEV="${UART_DEV:-}"
 UART_BAUD="${UART_BAUD:-115200}"
 
 if [ ! -f "$VIVADO_SETTINGS" ]; then
@@ -30,7 +46,7 @@ fi
 
 if [ ! -e "$INPUT" ]; then
     echo "ERROR: image/assets not found: $INPUT"
-    echo "Build Linux assets: sh scripts/os/build_rv64_linux_assets.shs --all"
+    echo "Build Linux assets: sh scripts/os/build_${RISCV_ARCH}_linux_assets.shs --all"
     exit 1
 fi
 if [ "${K26_PS_DDR_RESERVED:-0}" != "1" ]; then
@@ -45,7 +61,7 @@ fi
 echo "=== K26 SimpleOS FPGA Load ==="
 echo "Bitstream: $BITSTREAM"
 echo "Input:     $INPUT"
-echo "UART:      $UART_DEV @ ${UART_BAUD}"
+echo "UART:      ${UART_DEV:-external PMOD adapter required} @ ${UART_BAUD}"
 echo "PS DDR:    $K26_DDR_LOAD_ADDR"
 
 TEMP_BIN=""
@@ -74,8 +90,8 @@ else
     PAYLOAD_BIN="$INPUT"
     case "$INPUT" in
       *.elf)
-        if command -v riscv64-linux-gnu-readelf >/dev/null 2>&1; then
-            READELF=riscv64-linux-gnu-readelf
+        if command -v "${tool_prefix}-linux-gnu-readelf" >/dev/null 2>&1; then
+            READELF="${tool_prefix}-linux-gnu-readelf"
         elif command -v readelf >/dev/null 2>&1; then
             READELF=readelf
         else
@@ -88,8 +104,8 @@ else
             *) echo "ERROR: ELF lowest LOAD is $LOWEST_LOAD, expected 0x80000000" >&2; exit 1 ;;
         esac
         TEMP_BIN=$(mktemp /tmp/k26_riscv_payload.XXXXXX.bin)
-        if command -v riscv64-linux-gnu-objcopy >/dev/null 2>&1; then
-            riscv64-linux-gnu-objcopy -O binary "$INPUT" "$TEMP_BIN"
+        if command -v "${tool_prefix}-linux-gnu-objcopy" >/dev/null 2>&1; then
+            "${tool_prefix}-linux-gnu-objcopy" -O binary "$INPUT" "$TEMP_BIN"
         elif command -v riscv64-unknown-elf-objcopy >/dev/null 2>&1; then
             riscv64-unknown-elf-objcopy -O binary "$INPUT" "$TEMP_BIN"
         else
@@ -136,11 +152,6 @@ puts "RISC-V core started from translated DDR — check UART console"
 disconnect
 XSDB_EOF
 
-case "${RISCV_ARCH:-rv64}" in
-  rv32) default_load_log="build/fpga/rv32/load_elf_rv32.log" ;;
-  rv64) default_load_log="build/fpga/k26/load_elf_k26.log" ;;
-  *) echo "ERROR: RISCV_ARCH must be rv32 or rv64" >&2; exit 2 ;;
-esac
 LOAD_LOG="${LOAD_LOG:-$default_load_log}"
 mkdir -p "$(dirname "$LOAD_LOG")"
 set +e
@@ -154,5 +165,9 @@ if [ "$xsdb_rc" -ne 0 ]; then
 fi
 
 echo ""
-echo "Monitor UART: screen $UART_DEV $UART_BAUD"
-echo "  or: picocom -b $UART_BAUD $UART_DEV"
+if [ -n "$UART_DEV" ]; then
+    echo "Monitor UART: screen $UART_DEV $UART_BAUD"
+    echo "  or: picocom -b $UART_BAUD $UART_DEV"
+else
+    echo "UART capture remains blocked: attach a 3.3V adapter to PMOD H12/E10 and set UART_DEV."
+fi

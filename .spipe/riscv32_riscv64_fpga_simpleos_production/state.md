@@ -389,3 +389,28 @@ implementation-milestone-0-in-progress
   and both UART interfaces are idle and available. RV64 still lacks qualified
   OpenSBI/Linux and a soft-float BusyBox terminal image; RV32 still lacks a
   pinned Linux asset pipeline, so neither board boot may be claimed.
+- dual Linux-media progress 2026-07-24: RV32 and RV64 now share one
+  architecture-parameterized, fail-closed asset builder with thin compatibility
+  wrappers. Buildroot 2024.05.3 is pinned at
+  `e4a5ab3b319753f41e2b5cf22e90b6b0304ca225`; its exact RV32 ILP32 and RV64
+  LP64 uClibc/static defconfigs were resolved against that source and reuse a
+  common download cache plus per-architecture incremental output. Terminal rootfs use verifies the
+  Buildroot, config, BusyBox fragment, overlay, and rootfs hashes before copy.
+- platform-media progress 2026-07-24: the new RV32 Sv32 DTS and corrected RV64
+  Sv39 DTS match the generated 256 MiB DDR, one-hart, 100 MHz CLINT, UART source
+  10, and two-context PLIC contract. Both DTS sources compile; the shared
+  renderer accepts their spacing and proves one exact dynamic initrd range.
+  The K26 loader now selects product bitstream/media/log paths by XLEN and
+  requested OpenSBI/kernel work fails rather than silently skipping.
+- retained blocker 2026-07-24: the Buildroot configs and builders are staged,
+  but neither rootfs/toolchain has been built while Stage 4 owns the host.
+  Physical interactive evidence still requires a 3.3 V PMOD UART adapter on
+  H12/E10; the onboard Xilinx USB serial channels terminate at PS UARTs and
+  cannot substitute for the PL console.
+- RV32 Buildroot execution 2026-07-24: the first bounded build stopped at
+  inherited `LD_LIBRARY_PATH` contamination; the wrapper now clears it. The
+  second reached optional ccache/hiredis and failed because that old package's
+  CMake metadata is incompatible with host CMake 4; ccache was removed while
+  retaining Buildroot stamp/output incrementality and the shared download
+  cache. The third and final cached build cycle is active with two jobs; do not
+  restart it in this session.
