@@ -241,6 +241,25 @@ is historical.
   pixels through a portable format, bind executed probe and adapter source
   hashes, and reject a same-size pixel mismatch. A highest-capability review
   must accept the correction before the frame-binding row is admitted.
+- The first correction candidate (`dadc731bda`) is also rejected and not
+  integrated. Its producer and validator used different RGBA channel weights,
+  its changed-pixel test changed only checksum metadata, its receipt could pair
+  self-consistent forged HTML with the current adapter hash, and its
+  `production_simple_frame_bound` name overstated a dimensions/nonempty-pixel
+  check. The final correction must deterministically regenerate HTML from a
+  hashed adapter-request preimage and name structural capture evidence
+  honestly; it must not claim equality with the independent Simple ARGB
+  artifact.
+- Glass acceptance comes from the package-loaded Aetheric producer, not the
+  legacy event fixture. Require the inactive `.wm-window` computed surface to
+  retain `rgba(31, 31, 33, 0.8)`, a linear gradient,
+  `blur(30px) saturate(170%)`, the `rgba(139, 144, 160, 0.2)` border, `18px`
+  radius, and the black/translucent-white shadow layers. Focus must change the
+  border to `rgba(193, 198, 215, 0.3)` and retain black/accent shadow layers.
+  The titlebar requires `rgba(14, 14, 16, 0.72)` with the same blur, border,
+  and radius; the title requires `rgb(228, 226, 228)`, Manrope, and weight
+  `650`. Aetheric `.widget-button` uses an accent-backed translucent gradient
+  and `12px` radius; traffic-light RGB literals are not Aetheric evidence.
 - The first aggregate-return registry candidate (`d6f68cb9406b`) is rejected
   and not integrated. Its bare-name/global `MirType` registry missed the actual
   flat entry-closure path, confused `Named` classes with enums, aliases, and
@@ -254,6 +273,13 @@ is historical.
   imports, two same-named factories returning different aggregate types,
   projected fields, a forwarded return, and a method, plus same-process A→B
   reset evidence.
+- Aggregate cycle 2 (`4e0c6123cc`) is rejected and not integrated. Although it
+  fixed the flat preregistration order, top-level reset, and stale callee
+  `SymbolId`, it discarded generic type arguments, left method identities
+  collision-prone, normalized descriptor owners asymmetrically, simulated
+  aliases/custom primitives, bypassed other top-level lowering paths, and used
+  registry-unit simulations instead of real flat MIR/native/reset evidence.
+  Cycle 3 is the final compiler implementation cycle for this session.
 - A separate root-worktree full-CLI build is active and is not authoritative
   for this lane because its source state is unrelated and potentially dirty.
   Do not deploy over live MCP. Start the isolated exact-current CLI build only
