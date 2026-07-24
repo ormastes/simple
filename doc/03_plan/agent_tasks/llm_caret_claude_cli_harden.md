@@ -112,7 +112,7 @@ and must not be resolved, reverted, or included by this lane.
 | Gate | Current result | Authority/limit |
 |---|---|---|
 | Direct Caret trace | PASS: 24/24 files, 7,161/7,161 LOC, 479/479 declarations | Static mapping only |
-| Unit manual parity | PASS: 60/60 TUI, 22/22 raw-input, 57/57 main, 12/12 config, and 37/37 tools bodies match source | Zero executed scenarios |
+| Unit manual parity | PASS: 24/24 chat, 60/60 TUI, 22/22 raw-input, 57/57 main, 12/12 config, 37/37 tools, and 14/14 types bodies match source | Zero executed scenarios |
 | Component manual parity | PASS: 9/9 TUI/hidden scenario bodies match source | Zero executed scenarios |
 | Focused modern SSpec scan | PASS: canonical `should` examples and matchers; no placeholder pass | Static source scan |
 | Direct environment guard | PASS in working and staged modes | Changed Caret paths only |
@@ -149,20 +149,20 @@ accepting only the first suffix occurrence.
 
 ### False-evidence cleanup
 
-The config lane removed its inline parser/state and now imports the production
-module. The following specs still exercise inline reimplementations rather than
-the production modules and therefore cannot close production coverage:
+The config, chat, and types lanes removed their inline parser/state/model
+copies. Their specs now import and exercise the production modules directly,
+with synchronized 12-, 24-, and 14-scenario manuals.
 
-- `test/01_unit/app/llm_caret/chat_spec.spl`
-- `test/01_unit/app/llm_caret/types_spec.spl`
-
-Replace copied helpers with production imports where the API remains required.
-Do not delete public-looking declarations solely because current repository
-references are absent; first classify compatibility/API ownership and record
-the decision. The read-only audit identified 47 deletion candidates across the
-legacy chat-state island, config accessors, `jo4`/`jo5`, and unused type
-constructors, but deletion is a separate reviewed refactor rather than assumed
-hardening work.
+The direct coverage does not settle API ownership. Fourteen history/system/JSON
+state APIs in `chat.spl` remain orphaned from current CLI/TUI production call
+paths, which carry explicit message arrays instead. Do not delete these or
+other public-looking declarations solely because repository references are
+absent; first classify compatibility/API ownership and record the decision.
+The earlier read-only audit identified 47 deletion candidates across the
+legacy chat-state island, config accessors, `jo4`/`jo5`, and type constructors,
+but the config/type candidates now have real production behavior evidence.
+Deletion remains a separate reviewed refactor rather than assumed hardening
+work.
 
 ### Parallel continuation lanes
 

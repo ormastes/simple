@@ -177,10 +177,12 @@ sh scripts/check/check-llm-caret-full-parity-implementation.shs
 
 bin/simple test test/01_unit/app/llm_caret/main_spec.spl --mode=interpreter
 bin/simple test test/01_unit/app/llm_caret/claude_cli_spec.spl --mode=interpreter
+bin/simple test test/01_unit/app/llm_caret/chat_spec.spl --mode=interpreter
 bin/simple test test/01_unit/app/llm_caret/chat_tui_spec.spl --mode=interpreter
 bin/simple test test/01_unit/app/llm_caret/chat_tui_input_spec.spl --mode=interpreter
 bin/simple test test/01_unit/app/llm_caret/config_spec.spl --mode=interpreter
 bin/simple test test/01_unit/app/llm_caret/tools_spec.spl --mode=interpreter
+bin/simple test test/01_unit/app/llm_caret/types_spec.spl --mode=interpreter
 
 bin/simple test test/03_system/app/llm_caret/feature/llm_caret_cli_hardening_spec.spl --mode=interpreter
 bin/simple test test/03_system/tools/llm/llm_caret_claude_cli_feature_contract_spec.spl --mode=interpreter
@@ -258,12 +260,13 @@ refresh visible status; `/new` obtains a fresh session ID instead of reusing
 and overwriting the prior persisted conversation.
 
 Focused system manuals are mirrored under `doc/06_spec/03_system/...`.
-Source-synchronized unit manuals now mirror 80 Claude CLI, 31 provider, 60 TUI,
-22 raw-input, 57 main-entry, 12 production-config, and 37 production-tools
-scenarios. Because docgen cannot execute in the current runtime, all refreshed
-manuals explicitly report zero executed scenarios and do not claim a PASS.
+Source-synchronized unit manuals now mirror 80 Claude CLI, 31 provider, 24
+production-chat, 60 TUI, 22 raw-input, 57 main-entry, 12 production-config, 37
+production-tools, and 14 production-types scenarios. Because docgen cannot
+execute in the current runtime, all refreshed manuals explicitly report zero
+executed scenarios and do not claim a PASS.
 Together with the three process-hardening and five managed-environment
-scenarios, this expanded focused tranche contains 307 modern `should` examples
+scenarios, this expanded focused tranche contains 345 modern `should` examples
 with canonical matchers and zero source/manual body mismatches.
 
 Executable status remains **FAIL / runtime blocked**. The deployed
