@@ -74,9 +74,9 @@ semantic mismatch is `fail`.
 |---|---|---|---|
 | REQ-001 | primary; reject noncanonical RTL; reject incomplete provenance | compiler/VHDL/source-map/hash logs | design catalog and fail-clean `.vhd`/`.map.json`/`.gen.json` v2 source-reviewed; actual Stage 4 artifact run pending |
 | REQ-002 | primary; reject noncanonical RTL; reject bypass/cross-arch; reject vacuous formal | RV32 ACT4/RVFI/GHDL | protected RV32IMAC and exact flat RVFI entry source-reviewed; executable proof pending |
-| REQ-003 | primary; reject bypass/cross-arch; reject vacuous formal | Sv32/PMP unit, integration, formal | Sv32/PMP protected transactions source-reviewed; executable/formal proof pending |
+| REQ-003 | primary; reject bypass/cross-arch; reject vacuous formal | Sv32/PMP unit, generated-product GHDL, formal | real-DUT Sv32 walk/final-PMP/no-WB harness authored and high-reviewed; generated-artifact execution/formal proof pending |
 | REQ-004 | primary; reject noncanonical RTL; reject bypass/cross-arch; reject vacuous formal | RV64 ACT4/RVFI/GHDL | protected RV64IMAC and exact flat RVFI entry source-reviewed; behavioral F/D not VHDL-qualified; executable proof pending |
-| REQ-005 | primary; reject bypass/cross-arch; reject vacuous formal | Sv39/PMP unit, integration, formal | Sv39/PMP protected transactions source-reviewed; executable/formal proof pending |
+| REQ-005 | primary; reject bypass/cross-arch; reject vacuous formal | Sv39/PMP unit, generated-product GHDL, formal | real-DUT Sv39 walk/final-PMP/no-WB harness authored and high-reviewed; generated-artifact execution/formal proof pending |
 | REQ-006 | primary; reject QEMU/output-only; reject stale physical evidence | SoC/DT/UART/DDR logs | CPU-bus/SoC ownership and full shared DTB source-reviewed; system proof pending |
 | REQ-007 | primary; reject QEMU/output-only; reject stale physical evidence; reject provenance | media/QEMU/RTL manifests and transcripts | designed; helper pending |
 | REQ-008 | primary; reject noncanonical RTL; reject vacuous formal; reject provenance | ACT4/RVFI/SBY logs | designed; helper pending |

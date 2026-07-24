@@ -18,9 +18,20 @@ Date: 2026-07-18
 | `rv64_mmu_audit` | SPipe/manual structure | Existing app/hardware feature lane, five-step visible flow, folded negative matrices, typed captures, and explicit failing helpers identified | accepted; helper names and spec path frozen by primary |
 | `linux_fpga_audit` | smallest false-green removal | Keep bundle contract names but make CPU/testbench/formal execution fail with `GENERATED_RTL_NOT_IMPLEMENTED`; mark sidecars non-ready | accepted and implemented in Milestone 0 |
 
-The collaboration runtime did not expose a Spark/lower-model selector. The
-available sidecars were therefore kept read-only and bounded. Their conclusions
-were reviewed against source by the primary normal/highest-capability model.
+### 2026-07-24 continuation
+
+| Lane | Model/scope | Result | Review |
+|---|---|---|---|
+| `rv32_generated_proof_audit` | Terra, read-only product-path audit | found the missing emitted-core Sv32/PMP/WB proof | merged |
+| `rv64_generated_proof_audit` | Terra, read-only product-path audit | found the missing emitted-core Sv39/PMP/WB proof | merged |
+| `rv32_product_pmp_tb_impl` | Terra, focused real-DUT harness | assembly/TB/runner added; static checks pass | Sol PASS after three fixes |
+| `rv64_product_pmp_tb_impl` | Terra, focused real-DUT harness | assembly/TB/runner added; static checks pass | Sol PASS after one fix |
+| `riscv_product_harness_high_review` | Sol, final correctness review | accepted data-lane, walk, trap-cause, provenance, and ownership fixes | PASS |
+
+The implementation runtime exposed Terra as the smaller sidecar and Sol as the
+highest-capability reviewer. Full GHDL acceptance remains pending the fresh
+compiler-emitted product artifacts; static or source-level checks do not
+promote that row.
 
 ## Implementation Lanes After Selection
 

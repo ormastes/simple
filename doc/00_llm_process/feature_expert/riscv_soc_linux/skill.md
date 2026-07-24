@@ -88,17 +88,17 @@ placeholder stub today)**.
   spinning ~0x800005F4 before the banner** (open: SBI/timer or console bind).
   Full boot also needs the **JIT boxed-int fix** (interp ≈540 inst/s is too slow
   for billions of insns; JIT currently mis-executes the core).
-- **rv32, `.spl` model:** MMU(Sv32)+S-mode+4 GiB exist; missing = a **bootable
-  rv32 SoC-top** (only `soc_top_64` boots) + an rv32 Linux kernel build.
-- **Either on FPGA:** synthesizable rv64 core EXISTS since 2026-07-24 —
-  hand-written `examples/09_embedded/fpga_riscv/rtl/rv64_exec_core.vhd`
-  (RV64IM+minimal Zicsr, M-mode, no MMU/FPU/C; sim gates green: GHDL smoke
-  `RV64_UART_MARKER_SEEN`, Adler-32 soak golden == host == `.spl` model
-  three-way, 20/20 directed DIV/REM/W-op edge cases) — **not yet board-proven**;
-  Vivado synth via `build_k26_rv64.shs` + KV260 10-min soak pending. Linux on
-  FPGA still needs MMU in RTL. Synthesizable rv32 `.vhd` lacks MMU/4 GiB; no
-  `.spl`→Verilog backend (`generate_rv64_vhdl.shs` stays BLOCKED-honest for the
-  generator path). Board present (KV260, FT4232H JTAG+UART, Vivado 2025.2).
+- **rv32 product:** `core32_protected_product_entry` owns Sv32/PMP and emits
+  the CPU bus; `_SocVhdlGen` owns its WB, external-DDR SoC, and K26 wrappers.
+  Compiler-emitted VHDL simulation and Linux boot remain pending Stage 4.
+- **rv64 product:** `core64_imac_product_entry` owns Sv39/PMP and emits the CPU
+  bus; `_SocVhdlGen` owns the same PS-DDR board path. The old handwritten RV64
+  synthesis entry is no longer the product path.
+- **Either on FPGA:** `build_k26_rv32.shs` and `build_k26_rv64.shs` are thin
+  XLEN selectors for `build_k26_vexriscv.shs`. Neither architecture is
+  board-qualified until its Simple-emitted core passes GHDL, Vivado, PS-DDR
+  load, and DUT-origin bidirectional login/`ls` capture. The connected KV260
+  still needs an external 3.3 V PMOD UART adapter for the PL console.
 
 ## Landmines
 

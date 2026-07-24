@@ -414,3 +414,15 @@ implementation-milestone-0-in-progress
   retaining Buildroot stamp/output incrementality and the shared download
   cache. The third and final cached build cycle is active with two jobs; do not
   restart it in this session.
+- generated-product protection evidence 2026-07-24: bounded Terra audits
+  confirmed that the Simple RV32 Sv32 and RV64 Sv39 paths already apply final
+  PMP before exporting the product bus, but prior GHDL used a CPU stub. New
+  fail-closed RV32/RV64 harnesses now compile real programs, require the target
+  page-table walks, require load-access-fault `mcause=5`, and assert that the
+  denied physical target never reaches Wishbone. Shell/cross-assembly checks
+  pass and Sol re-review is PASS; full GHDL remains pending Stage 4 emitted
+  cores.
+- K26 product-path correction 2026-07-24: `build_k26_rv64.shs` is now the same
+  thin XLEN selector as RV32 into the shared Simple-generated PS-DDR builder.
+  The former handwritten RV64 synthesis implementation is no longer reachable
+  through the product entrypoint; board execution is still unqualified.

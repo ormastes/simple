@@ -136,16 +136,15 @@ investigation trail:
    does not complete when driven by hand over the JTAG debugger in this
    flow, confirming the PS clock generators are not a viable dependency for
    a JTAG-only harness.
-4. **Conclusion:** PS-BD clocking (`pl_clk0`/`pl_resetn0`) is unusable for
-   JTAG-only bring-up on KV260. The required clocking source is
-   **free-running `CFGMCLK`** — the same pattern the rv32 build already
-   uses (`generate_rv32_vhdl.shs` / `build_k26_rv32.shs`). Any new PS-BD
-   design on this board should default to CFGMCLK from day one rather than
-   rediscovering this via a failed `pl_clk0` bring-up.
+4. **Conclusion:** raw JTAG-only bring-up cannot assume PS-BD
+   `pl_clk0`/`pl_resetn0` is active. `CFGMCLK` remains useful for standalone
+   diagnostic designs. The RV32/RV64 Linux product wrappers instead share the
+   PS-DDR build and must initialize the PS before accepting clock or DDR
+   evidence.
 
 ### Fabric-internal visibility (netlist ILA insertion)
 
-The project-flow ILA knob in `build_k26_rv64.shs`
+The former legacy project-flow ILA knob in `build_k26_rv64.shs`
 (`ENABLE_UART_ILA`/`ila_*`) was found to be **dead code** — set but never
 consumed, no `create_debug_core` call anywhere — and has been deleted rather
 than wired up. The recipe that actually gave fabric-internal visibility on

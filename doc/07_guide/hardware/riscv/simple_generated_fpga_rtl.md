@@ -139,11 +139,23 @@ WB64 adapter, CLINT, PLIC, UART, interconnect, external-DDR SoC, AXI bridge, and
 K26 PL top with GHDL. Missing product artifacts fail the command; there is no
 template fallback.
 
+After generation, run the real product-core protection harnesses:
+
+```bash
+sh scripts/fpga/ghdl_rv32_product_sv32_pmp.shs
+sh scripts/fpga/ghdl_rv64_product_sv39_pmp.shs
+```
+
+Each harness executes a compiled RISC-V program through the compiler-emitted
+core and WB wrapper, observes the Sv32/Sv39 target page-table walk, and requires
+load-access-fault cause 5 while proving the final PMP-denied physical address
+never reaches Wishbone. Missing generated cores fail; no CPU stub is accepted.
+
 The board synthesis entrypoints reuse one PS-DDR block design:
 
 ```bash
 bash scripts/fpga/build_k26_rv32.shs --synth-only
-bash scripts/fpga/build_k26_vexriscv.shs --synth-only
+bash scripts/fpga/build_k26_rv64.shs --synth-only
 ```
 
 Build the pinned soft-float Buildroot toolchain/rootfs first, then the
