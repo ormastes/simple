@@ -103,7 +103,7 @@ source/manual or traceability PASS as executable behavior evidence.
 | `0ac4a158e3e3` | Pushed to `origin/main` | Installed-Claude offline compatibility probe, registry-derived hidden/disabled matrix, and PTY artifact provenance/teardown hardening |
 | `544c57bcc94a` | Pushed to `origin/main` | Real-TUI default/enabled/disabled hidden admission, explicit child-exit evidence, credential isolation, and synchronized plans/manuals |
 | `4556cbbebb6a` | Pushed to `origin/main` | Parts-bin 14-record hidden-stub registry, normalized source-completeness SSpec/manual, architecture/design boundaries, and trace/plan updates |
-| Distributed feature-gate cross-map tranche | Current scoped change; final commit/push identity will be recorded after verification | Parts-bin 33-record owner/spec/state map, applicability shapes and outcome probes, generic root reconciliation, `/compact` drift, exact malformed-map rejection, synchronized manual, and plan/trace updates |
+| `1c110455fef2` | Pushed to `origin/main` | Parts-bin 33-record owner/spec/state map, applicability shapes and outcome probes, generic root reconciliation, `/compact` drift, exact malformed-map rejection, synchronized manual, and plan/trace updates |
 
 Workspace-relative MCP/LSP symbols and definitions resolve production targets,
 so the navigation health condition is met. Diagnostics
@@ -124,7 +124,7 @@ and must not be resolved, reverted, or included by this lane.
 | Root-registry manual parity | PASS: 5/5 scenario bodies match source, including the production-derived exhaustive matrix | Static synchronization; no CLI/TUI invocation claim |
 | Hidden-stub manual parity | PASS: 1/1 scenario body and the complete supporting-helper block match source | Static synchronization; SSpec/docgen not executed on a qualified runtime |
 | Feature-gate manual parity | PASS (static): 33/33 owner rows, 33/33 independently pinned contract rows, 33/33 state rows, and 3/3 complete folded executable scenario bodies | SSpec/docgen cannot execute until a qualified runtime exists |
-| Focused modern SSpec scan | PASS (static): 397 scoped modern `should` examples, canonical matchers, and no placeholder pass | Static source scan only; execution is not claimed |
+| Focused modern SSpec scan | PASS (static): 474 modern `should` examples across the listed files (401 base plus 73 focused gate-owner examples), canonical matchers, and no placeholder pass | Static source/manual scan only; execution is not claimed |
 | Direct environment guard | PASS in working and staged modes | Changed Caret paths only |
 | Numbered-artifact guard | WARN in this jj workspace: both modes emit Git-worktree/`--cached` errors but still print `OK` and exit zero | Not authoritative here; no numbered artifacts are added by this tranche |
 | Generated-spec layout | PASS: zero `.spl` specs under `doc/06_spec` | Layout only |
@@ -199,25 +199,26 @@ fixtures. No lane may run a paid provider.
 
 ### Remaining CLI-then-TUI sequence after lane H
 
-1. **Lane I — modernize mapped gate-owner specs.** Add frozen `step("...")`
-   names and `REQ-LLM-CARET-HIDDEN-008` traceability without replacing direct
-   owner imports. The aggregate already closes Tasks V2 todo-off/no-team,
+1. **Lane I — modernize mapped gate-owner specs.** Eight focused files are
+   implemented and statically synchronized with frozen `step("...")` names,
+   direct owner imports, `REQ-LLM-CARET-HIDDEN-008` traceability, and mirrored
+   zero-execution manuals. The aggregate already closes Tasks V2 todo-off/no-team,
    team-memory mixed states, insights disabled metadata, ultrareview's three
    rejected combinations, skill-discovery demo/empty/wrong-type rendering,
    persistent-retry false/true admission, and bridge default-false branches.
    Retain focused-spec modernization plus deeper attachment-UI and retry-loop
    effect evidence, and keep each focused manual body synchronized.
 
-   | Focused file/lane | Remaining exact work |
+   | Focused file/lane | Current status / remaining exact work |
    |---|---|
-   | `hooks/useTasksV2_spec.spl` | Convert five examples to `should`, preserve the five existing step strings, add the hidden-feature requirement, and add the mirrored manual; do not duplicate the aggregate gate matrix |
-   | `utils/agent_swarms_enabled_spec.spl` | Convert three examples to `should`; freeze `Check ant override`, `Check external opt-in`, and `Check killswitch`; add requirement/manual parity |
-   | `memdir/teamMemPaths_spec.spl` | Preserve seven modern examples/steps; add requirement traceability and its missing mirrored manual |
-   | `commands/insights_command_spec.spl` | Modernize into four scenarios with frozen metadata, thirty-day summary, report/browser-fallback, and rejection steps; replace the unsupported hand-written execution claim |
-   | `commands/review_rewind_sandbox_spec.spl` | Add three frozen steps and scope the hidden-feature requirement to review/ultrareview; add the exact `used == limit` false boundary and a mirrored manual |
-   | `bridge/bridge_small_helpers_spec.spl` | Scope the requirement to bridge-gate scenarios and regenerate the existing manual; preserve its 38 modern examples |
-   | `commands/bridge_command_spec.spl` | Convert four examples to `should`, preserve all 13 existing steps, add requirement traceability, and add the mirrored manual |
-   | `components/messages/AttachmentMessage_spec.spl` | Add direct `attachmentMessageRender` dispatch evidence for exact visible fields, ordered plural skills/demo suppression, and fully redacted disabled/empty/wrong-type results; parts-bin only |
+   | `hooks/useTasksV2_spec.spl` | Complete statically: 11 modern examples cover last-subscriber cleanup, shared singleton observation, stable/updated snapshots, rewatch/debounce, first fetch, disabled no-op, collapse ownership, visibility/timer/filter behavior, and a mirrored full-scenario manual; the stale source-sentinel mismatch remains explicit non-PASS debt |
+   | `utils/agent_swarms_enabled_spec.spl` | Complete statically: three modern examples, frozen ANT/opt-in/killswitch steps, scoped requirement, and mirrored full-scenario manual |
+   | `memdir/teamMemPaths_spec.spl` | Complete statically: seven modern examples/steps, requirement traceability, containment/path behavior, and mirrored full-scenario manual |
+   | `commands/insights_command_spec.spl` | Complete statically: four modern metadata, thirty-day summary, report/browser-fallback, and rejection scenarios; unsupported execution claims removed |
+   | `commands/review_rewind_sandbox_spec.spl` | Complete statically: three frozen-step scenarios, review-only requirement scope, exact `used == limit` false boundary, and mirrored full-scenario manual |
+   | `bridge/bridge_small_helpers_spec.spl` | Complete statically: 38 modern examples retained; hidden requirement scoped only to bridge availability and the existing manual synchronized |
+   | `commands/bridge_command_spec.spl` | Complete statically: four modern examples, 13 preserved steps plus one fail-closed prerequisite step, scoped requirement, callout-state idempotence, and mirrored full-scenario manual |
+   | `components/messages/AttachmentMessage_spec.spl` | Complete statically: direct dispatcher evidence for exact fields, ordered plural skills/demo suppression, and fully redacted disabled/empty/wrong-type results; parts-bin only |
    | `services/api/withRetry_spec.spl` | Add persistent 429/529 retry-loop effects, max-retry boundaries, deterministic cache/cooldown effects, overflow-floor rejection, and thinking-budget override; introduce a deterministic effect seam and remove the obsolete `doc/06_spec/test/...` mis-mirror after canonical regeneration |
 
 2. **Lane J — CLI gate admission.** Extend the offline Caret CLI fixture only

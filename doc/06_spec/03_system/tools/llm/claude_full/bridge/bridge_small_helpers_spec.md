@@ -42,14 +42,14 @@ Checks the small bridge and grouped-message parity helpers added from the Claude
 | Field | Value |
 |-------|-------|
 | Category | Other |
-| Status | Active |
-| Requirements | N/A - strict llm_caret Claude CLI parity lane. |
+| Status | Active source; 0 scenarios executed in this tranche and no PASS claimed |
+| Requirements | `REQ-LLM-CARET-HIDDEN-008`, scoped only to bridge availability; other scenarios remain strict parts-bin parity |
 | Plan | N/A - target selected from strict checker output. |
 | Design | N/A - source mirror for Claude CLI bridge and message helpers. |
 | Research | N/A - upstream TypeScript files are the source reference. |
 | Source | `test/03_system/tools/llm/claude_full/bridge/bridge_small_helpers_spec.spl` |
-| Updated | 2026-07-06 |
-| Generator | `simple spipe-docgen` (Simple) |
+| Updated | 2026-07-24 |
+| Generator | Manual requirement synchronization; docgen execution remains blocked |
 
 ## Overview
 
@@ -71,7 +71,10 @@ normalization, bridge polling defaults, bridge status helpers, code-session
 request/response helpers, null-rendering attachments, grouped tool-use
 rendering state, debug message formatting, and source line parity helpers.
 
-**Requirements:** N/A - strict llm_caret Claude CLI parity lane.
+**Requirements:** REQ-LLM-CARET-HIDDEN-008, scoped only to the bridge
+availability scenario; all other scenarios remain strict parts-bin parity.
+This owner-level evidence does not prove shipped Caret import, dispatch,
+visibility, or admission.
 **Plan:** N/A - target selected from strict checker output.
 **Design:** N/A - source mirror for Claude CLI bridge and message helpers.
 **Research:** N/A - upstream TypeScript files are the source reference.
@@ -79,6 +82,12 @@ rendering state, debug message formatting, and source line parity helpers.
 ## Scenarios
 
 ### Claude full bridge small helpers
+
+| Source describe | Ordered scenarios |
+|---|---|
+| `supporting bridge small-helper capacity-wake parts-bin parity` | Capacity wake lifecycle |
+| `REQ-LLM-CARET-HIDDEN-008: bridge availability` | Bridge availability only |
+| `supporting bridge small-helper parts-bin parity` | Remaining 36 scenarios |
 
 #### should model capacity wake signal lifecycle
 
@@ -1843,7 +1852,7 @@ expect(groupedToolUseContentSourceLinesModeled()).to_equal(57)
 
 ## Related Documentation
 
-- **Requirements:** [N/A - strict llm_caret Claude CLI parity lane.](N/A - strict llm_caret Claude CLI parity lane.)
+- **Requirements:** `REQ-LLM-CARET-HIDDEN-008`, scoped only to bridge availability; all other scenarios remain strict parts-bin parity.
 - **Plan:** [N/A - target selected from strict checker output.](N/A - target selected from strict checker output.)
 - **Design:** [N/A - source mirror for Claude CLI bridge and message helpers.](N/A - source mirror for Claude CLI bridge and message helpers.)
 - **Research:** [N/A - upstream TypeScript files are the source reference.](N/A - upstream TypeScript files are the source reference.)

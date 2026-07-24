@@ -31,8 +31,8 @@ used to generate the full-parity matrices.
 | Full-parity symbol matrix | 14,119 rows | Snapshot-derived evidence |
 | Full-parity implementation gate | 745 mapped targets exist; 1,157 missing; 599/1,902 targets reach 80% source LOC | Current target tree checked against stale snapshot rows |
 | Full-parity primary tests | 174/1,902 mapped primary test paths exist | Current test tree checked against stale snapshot rows |
-| Claude-full system specs | 348 executable specs | Current-tree evidence |
-| Generated Claude-full manuals | 55 correctly mirrored, 150 under stale `doc/06_spec/test/...`, 141 missing | Current-tree evidence |
+| Claude-full system specs | 349 executable specs | Current-tree evidence after adding the focused `AttachmentMessage` dispatcher spec |
+| Generated Claude-full manuals | 64 correctly mirrored; 148 specs also/only have stale `doc/06_spec/test/...` manuals; 138 have neither path; 1 has both | Current-tree evidence after removing three conflicting stale mirrors from this focused lane |
 
 The missing upstream tree makes claims such as “every current Claude feature”
 or “no new Claude function is missing” assumptions, not evidence. Restore a
@@ -71,7 +71,7 @@ scenario counts as coverage.
 | REQ-LLM-CARET-CLAUDE-TRACE-005 | File-qualified Simple symbol inventory | Checker proves 496/496 current declarations | CLI / PASS | Regenerate symbol rows and require zero missing/stale symbols |
 | REQ-LLM-CARET-CLI-HARDEN-006 | Production CLI/provider/session/tool declarations plus the installed Claude executable's offline argument surface | Direct production unit specs and CLI process/contract specs; `llm_caret_installed_claude_cli_spec.spl` is supplemental environmental compatibility evidence | CLI / static-complete, execution blocked | Execute the installed offline probe once, then execute Caret on the qualified self-hosted runtime and cached wrapper |
 | REQ-LLM-CARET-TUI-HARDEN-007 | `CaretIo`, `caret_chat`, and TUI/plain loops | Runtime component spec plus `llm_caret_tui_pty_spec.spl` routing/lifecycle/raw-rejection scenarios | TUI / designed fail-closed; live execution blocked | Require PTY PASS and pre/post mode plus cursor/screen restoration artifacts |
-| REQ-LLM-CARET-HIDDEN-008 | Shipped hidden-command admission; supporting `claude_full` parts-bin hidden-disabled and distributed-gate metadata | `llm_caret_tui_hidden_feature_spec.spl`, the shipped root matrix in `root_commands_registry_spec.spl`, the supporting `hidden_stub_registry_spec.spl` and `feature_gate_registry_spec.spl` maps, and the real-process `hidden` case in `llm_caret_tui_pty_spec.spl` | Hidden / component, registry, source-completeness, distributed cross-map, and PTY process coverage designed; execution blocked | Execute all three registry specs plus default/enabled/disabled PTY cases without credentials and retain their evidence; shipped fulfillment remains the root/component/PTY lane |
+| REQ-LLM-CARET-HIDDEN-008 | Shipped hidden-command admission; supporting `claude_full` parts-bin hidden-disabled, distributed-gate, and focused owner evidence | `llm_caret_tui_hidden_feature_spec.spl`, the shipped root matrix, hidden-stub and feature-gate registries, narrowly scoped focused owner scenarios including bridge availability/admission, and the real-process `hidden` PTY case | Hidden / component, registry, source-completeness, distributed cross-map, focused parts-bin owner, and PTY process coverage designed; execution blocked | Execute the three registry specs and focused owner specs plus default/enabled/disabled PTY cases without credentials; shipped fulfillment remains exclusively the root/component/PTY lane |
 | REQ-LLM-CARET-TUI-HARDEN-009 | Injected `CaretIo` frame/read/loop boundary | Runtime component spec plus PTY UTF-8/edit/navigation/geometry and modeled EOF scenarios | TUI / component designed; live execution blocked | Execute component scenarios and retained live capture on a cached artifact |
 | REQ-LLM-CARET-FULL-001..003 | Feature/file/symbol TSV matrices | Full-parity inventory/plan gate | CLI/TUI / STALE | Re-extract only from restored pinned upstream |
 | REQ-LLM-CARET-FULL-004 | 745/1,902 target files exist | Implementation gate plus row specs | All / FAIL | Zero missing implementation and test rows |
@@ -112,7 +112,7 @@ These counts describe historical matrix rows, not verified current Claude.
 | P5 services and extensibility | 172 | 17 | 17 | CLI/hidden |
 | P6 support utilities and hardening | 620 | 151 | 73 | Shared |
 
-The 346 existing Claude-full system specs exceed the 174 matrix paths because
+The 349 existing Claude-full system specs exceed the 174 matrix paths because
 many tests are aggregated, renamed, or not referenced by the historical
 `primary_tests` cells. Coverage is not inferred from spec count.
 
@@ -123,19 +123,19 @@ many tests are aggregated, renamed, or not referenced by the historical
 | Hidden `/debug-tool-call`; disabled `/remote-setup` | `claude_full/commands.spl` | `root_commands_registry_spec.spl`, `llm_caret_tui_hidden_feature_spec.spl`, `llm_caret_tui_pty_spec.spl` | Registry-derived matrix covers every identity/admission state; component dispatch covers non-disclosure, enabled execution, and disabled rejection; the new PTY case drives all three through the real Caret TUI, with execution still pending |
 | Hidden disabled stub commands: ant-trace, env, bughunter, issue, onboarding, share, summary, teleport, break-cache, ctx-viz, good-claude, mock-limits, oauth-refresh, perf-issue | command index capsules plus `commands/hidden_stub_registry.spl` | `hidden_stub_registry_spec.spl` plus the earlier `ant-trace/index_spec.spl`, `env/index_spec.spl`, `stub_commands_spec.spl`, and `more_stub_commands_spec.spl` | `claude_full` parts-bin aggregate and independent normalized source-completeness comparison implemented; modern manual is synchronized, but executable SSpec/docgen evidence is blocked |
 | Fast mode research preview | `commands/fast/index.spl`, `commands/fast/fast.spl` | `fast_command_spec.spl` | Enable/hidden/toggle covered at function level; no CLI/TUI visibility capture |
-| Remote-control/bridge entitlement, profile, version, env-less and CCR mirror gates | `bridge/bridgeEnabled.spl`, bridge command capsules | `bridge_small_helpers_spec.spl`, `bridge_command_spec.spl` | Rich helper coverage; no offline root CLI/TUI gate scenario |
+| Remote-control/bridge entitlement, profile, version, env-less and CCR mirror gates | `bridge/bridgeEnabled.spl`, bridge command capsules | `bridge_small_helpers_spec.spl`, `bridge_command_spec.spl` plus mirrored manuals | 38 helper and 4 command scenarios are modern and statically synchronized; no offline root CLI/TUI gate scenario and no execution PASS |
 | Extra usage interactive/noninteractive visibility | `commands/extra-usage/index.spl` | `extra_usage_command_spec.spl` | Function coverage; no process-mode selection evidence |
 | Hidden remote review command | `commands/review/reviewRemote.spl` | `test/03_system/tools/llm/claude_full/commands/review_remote_spec.spl`, `feature_gate_registry_spec.spl` | Aggregate metadata plus signed-out/session/PR/diff rejection and diff-only/file-count-only/combined readiness are mapped; process invocation remains missing |
-| Todo/Tasks V2 flag and hidden-empty behavior | `hooks/useTasksV2.spl` | `useTasksV2_spec.spl`, `feature_gate_registry_spec.spl` | Store behavior plus default, solo, member, feature-off team-lead rejection, and feature-on team-lead admission are mapped; visible TUI transition is not covered |
+| Todo/Tasks V2 flag and hidden-empty behavior | `hooks/useTasksV2.spl` | `useTasksV2_spec.spl`, `feature_gate_registry_spec.spl` plus mirrored focused manual | Eleven focused hook/store/helper scenarios and the complete aggregate gate projection are statically synchronized; visible TUI transition and runtime execution are not covered. The obsolete `240` sentinel was removed; the historical matrix target `250` remains non-PASS debt pending pinned-upstream regeneration |
 | New init prompt ANT/env gate | `commands/init.spl` | `init_commands_spec.spl` | Function combinations covered; no command invocation evidence |
 | Experimental beta disable and agent teams environment keys | `utils/managedEnvConstants.spl` | `managed_env_constants_spec.spl` plus mirrored manual | Exact safe-list membership and non-provider-managed classification covered; execution blocked |
 | Hidden model-visible meta messages | `components/messages/nullRenderingAttachments.spl` | `test/03_system/tools/llm/claude_full/bridge/bridge_small_helpers_spec.spl` | Named inventory covered; must remain distinct from user-visible hidden commands |
 | Compact environment disable | root `/compact` metadata plus `compactCommand(disableCompactEnvTruthy)` | `test/03_system/tools/llm/claude_full/commands/compact_command_spec.spl`, `feature_gate_registry_spec.spl` | The bounded cross-map preserves root enabled/visible metadata and independently derives both leaf environment states |
-| Chrome beta/noninteractive and insights enablement | Chrome/insights command capsules | focused command specs plus `feature_gate_registry_spec.spl` | Function-level evidence is linked to an accepted parts-bin map with mode-dependent probes; process admission remains unproved |
+| Chrome beta/noninteractive and insights enablement | Chrome/insights command capsules | focused command specs plus `feature_gate_registry_spec.spl` | Insights has four modern metadata/summary/report/rejection scenarios and a mirrored manual; function-level evidence is linked to the parts-bin map, while process admission remains unproved |
 | Hidden MCP `xaa-idp` and ultrareview | independent MCP/review capsules | focused MCP/review specs plus `feature_gate_registry_spec.spl` | Default metadata and enabling probes are aggregated; complete current-upstream discovery and process invocation remain unproved |
-| Agent swarms, team memory, and buddy | independent feature capsules | focused feature specs plus `feature_gate_registry_spec.spl` | Leaf owners are projected into the bounded map; swarms proves ANT and both opt-in routes plus independent killswitch rejection for env and flag paths, while team memory and buddy retain their full state matrices; no shipped root admission claim |
+| Agent swarms, team memory, and buddy | independent feature capsules | focused feature specs plus `feature_gate_registry_spec.spl` | Swarms' 3 and team-memory's 7 focused modern scenarios now have mirrored manuals; aggregate probes retain full gate matrices including both killswitch routes, while buddy remains aggregate-only; no shipped root admission claim |
 | Immediate-command experiment and removed worktree gate | independent experiment/command capsules | focused utility specs plus `feature_gate_registry_spec.spl` | Immediacy and unconditional worktree-mode ownership remain distinct from command admission |
-| Skill-discovery rendering and persistent retry | attachment/retry helpers | `feature_gate_registry_spec.spl` directly derives disabled/enabled owner states | Both formerly unmapped direct gates now have aggregate behavior assertions; deeper attachment UI and retry-loop execution remain separate |
+| Skill-discovery rendering and persistent retry | attachment/retry helpers | `feature_gate_registry_spec.spl`, `components/messages/AttachmentMessage_spec.spl` | Skill discovery now has three direct dispatcher scenarios for exact visible/demo/redacted render metadata plus aggregate gate assertions; it remains parts-bin-only. Persistent retry still needs the deterministic retry-loop effect seam and execution evidence |
 
 The accepted `claude_full` parts-bin map now spans 33 selected distributed
 gate dimensions. The 599-row historical feature matrix remains scope evidence
@@ -205,6 +205,7 @@ Current focused executable specs:
 | `test/03_system/tools/llm/claude_full/commands/root_commands_registry_spec.spl` | `doc/06_spec/03_system/tools/llm/claude_full/commands/root_commands_registry_spec.md` | Five scenarios, including one registry-derived exhaustive hidden/disabled/admission matrix that cannot silently omit a newly registered root command |
 | `test/03_system/tools/llm/claude_full/commands/hidden_stub_registry_spec.spl` | `doc/06_spec/03_system/tools/llm/claude_full/commands/hidden_stub_registry_spec.md` | One leaf-derived parts-bin hidden-disabled metadata scenario with independent source discovery, unique canonical identities, hyphen/underscore twin normalization, and two-way completeness |
 | `test/03_system/tools/llm/claude_full/feature_gate_registry_spec.spl` | `doc/06_spec/03_system/tools/llm/claude_full/feature_gate_registry_spec.md` | Three parts-bin scenarios: exact 33-record owner/spec/state matrix, generic root reconciliation plus `/compact` drift, and exact malformed-registry rejection |
+| Eight focused gate-owner specs: Tasks V2, swarms, team memory, insights, review/rewind/sandbox, bridge helpers, bridge command, and AttachmentMessage | Same relative paths under `doc/06_spec/03_system/tools/llm/claude_full/` | 73 modern owner scenarios with frozen steps and synchronized manuals; requirements are narrowly scoped to gate/admission behavior, all manuals report zero execution, and none establishes shipped reachability |
 
 Every relevant REQ needs at least a happy, edge, and error/rejection scenario.
 The CLI fixture must use stdlib/facade process APIs, never local `rt_*`
@@ -504,11 +505,14 @@ Because docgen cannot execute in the current runtime, all refreshed manuals
 explicitly report zero executed scenarios and do not claim a PASS.
 The 356 source-synchronized unit examples plus eight CLI feature-contract,
 three process-hardening, nine TUI/hidden, five managed-environment, five
-installed-Claude, one new exhaustive root-registry, six live-PTY, and one
-hidden-stub aggregate plus three feature-gate aggregate examples form a
-397-example tranche of modern `should`
-examples
-with canonical matchers. The pre-existing unit/component/process manuals retain
+installed-Claude, five root-registry, six live-PTY, and one
+hidden-stub aggregate plus three feature-gate aggregate examples form the
+401-example base across the listed executable files (the root-registry spec
+contains five scenarios). The 73 focused gate-owner examples now synchronized
+across Tasks V2, swarms, team memory, insights, review/rewind/sandbox, bridge
+helpers/command, and AttachmentMessage raise the scoped modern `should` total
+to 474 examples with canonical matchers. The pre-existing
+unit/component/process manuals retain
 their documented body-parity checks. The feature-gate manual statically checks
 exact 33-row contract/state parity and carries complete folded executable
 parity for all three scenario bodies; helper contracts are visible while their

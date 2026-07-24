@@ -18,15 +18,19 @@ class TasksV2Store:
     subscriberCount: i64
     started: bool
     notifications: i64
+    revision: i64
 
 impl TasksV2Store:
     static fn new() -> TasksV2Store:
-        TasksV2Store(tasks: [], hidden: false, watcherActive: false, watchedDir: "", hideTimerActive: false, debounceTimerActive: false, pollTimerActive: false, subscriberCount: 0, started: false, notifications: 0)
+        TasksV2Store(tasks: [], hidden: false, watcherActive: false, watchedDir: "", hideTimerActive: false, debounceTimerActive: false, pollTimerActive: false, subscriberCount: 0, started: false, notifications: 0, revision: 0)
 
     me getSnapshot() -> [TaskV2]?:
         if me.hidden:
             return nil
         me.tasks
+
+    me snapshotRevision() -> i64:
+        me.revision
 
     me subscribe() -> nil:
         me.subscriberCount = me.subscriberCount + 1
@@ -54,6 +58,8 @@ impl TasksV2Store:
     me fetch(taskListId: text, dir: text, fetchedTasks: [TaskV2], watchSucceeds: bool) -> nil:
         me.rewatch(dir, watchSucceeds)
         val current = filterVisibleTasks(fetchedTasks)
+        val tasksChanged = not tasksV2TasksEqual(me.tasks, current)
+        val hiddenBefore = me.hidden
         me.tasks = current
         val hasIncomplete = hasIncompleteTasks(current)
         if hasIncomplete or current.len() == 0:
@@ -64,14 +70,19 @@ impl TasksV2Store:
                 me.hideTimerActive = true
         me.notify()
         me.pollTimerActive = hasIncomplete
+        if tasksChanged or hiddenBefore != me.hidden:
+            me.revision = me.revision + 1
 
     me onHideTimerFired(scheduledTaskListId: text, currentTaskListId: text, tasksToCheck: [TaskV2]) -> nil:
         me.hideTimerActive = false
         if currentTaskListId != scheduledTaskListId:
             return
         if allStillCompleted(tasksToCheck):
+            val changed = me.tasks.len() > 0 or not me.hidden
             me.tasks = []
             me.hidden = true
+            if changed:
+                me.revision = me.revision + 1
         me.notify()
 
     me clearHideTimer() -> nil:
@@ -85,6 +96,68 @@ impl TasksV2Store:
         me.pollTimerActive = false
         me.started = false
 
+class TasksV2HookModel:
+    store: TasksV2Store
+    enabled: bool
+    committed: bool
+    subscribed: bool
+    fetchCount: i64
+    fetchesBeforeCommit: i64
+    subscribedBeforeFirstFetch: bool
+
+impl TasksV2HookModel:
+    static fn new(store: TasksV2Store, enabled: bool) -> TasksV2HookModel:
+        TasksV2HookModel(
+            store: store,
+            enabled: enabled,
+            committed: false,
+            subscribed: false,
+            fetchCount: 0,
+            fetchesBeforeCommit: 0,
+            subscribedBeforeFirstFetch: false,
+        )
+
+    me fetchAfterCommit(taskListId: text, dir: text, fetchedTasks: [TaskV2], watchSucceeds: bool) -> nil:
+        if not me.enabled:
+            return
+        if not me.committed:
+            me.fetchesBeforeCommit = me.fetchesBeforeCommit + 1
+            return
+        if me.fetchCount == 0:
+            me.subscribedBeforeFirstFetch = me.subscribed
+        me.store.fetch(taskListId, dir, fetchedTasks, watchSucceeds)
+        me.fetchCount = me.fetchCount + 1
+
+    me commit(taskListId: text, dir: text, fetchedTasks: [TaskV2], watchSucceeds: bool) -> nil:
+        if not me.enabled:
+            return
+        me.committed = true
+        if not me.subscribed:
+            me.store.subscribe()
+            me.subscribed = true
+        me.fetchAfterCommit(taskListId, dir, fetchedTasks, watchSucceeds)
+
+    me unmount() -> nil:
+        if me.subscribed:
+            me.store.unsubscribe()
+            me.subscribed = false
+
+    me getSnapshot() -> [TaskV2]?:
+        me.store.getSnapshot()
+
+    me snapshotRevision() -> i64:
+        me.store.snapshotRevision()
+
+class TasksV2HookEnvironment:
+    store: TasksV2Store
+
+impl TasksV2HookEnvironment:
+    static fn new() -> TasksV2HookEnvironment:
+        TasksV2HookEnvironment(store: TasksV2Store.new())
+
+    me createHook(enabled: bool) -> TasksV2HookModel:
+        TasksV2HookModel.new(me.store, enabled)
+
 fn filterVisibleTasks(tasks: [TaskV2]) -> [TaskV2]:
     var out: [TaskV2] = []
     var i = 0
@@ -93,6 +166,16 @@ fn filterVisibleTasks(tasks: [TaskV2]) -> [TaskV2]:
             out.push(tasks[i])
         i = i + 1
     out
+
+fn tasksV2TasksEqual(left: [TaskV2], right: [TaskV2]) -> bool:
+    if left.len() != right.len():
+        return false
+    var i = 0
+    while i < left.len():
+        if left[i].id != right[i].id or left[i].status != right[i].status or left[i].internal != right[i].internal:
+            return false
+        i = i + 1
+    true
 
 fn hasIncompleteTasks(tasks: [TaskV2]) -> bool:
     var i = 0
@@ -123,39 +206,6 @@ fn debounceMs() -> i64:
 
 fn fallbackPollMs() -> i64:
     5000
-
-fn singletonStoreSharedByHooks() -> bool:
-    true
-
-fn snapshotStableBetweenUpdates() -> bool:
-    true
-
-fn firstFetchRunsPostCommit() -> bool:
-    true
-
-fn fileWatcherRetriesSameDirIfMissing() -> bool:
-    true
-
-fn pollOnlyWhenIncompleteTasksExist() -> bool:
-    true
-
-fn hiddenWhenTaskListEmpty() -> bool:
-    true
-
-fn completedTasksHideAfterDelay() -> bool:
-    true
-
-fn internalTasksFiltered() -> bool:
-    true
-
-fn noopSubscribeStableWhenDisabled() -> bool:
-    true
-
-fn collapseEffectRunsFromOneAlwaysMountedComponent() -> bool:
-    true
-
-fn tasksV2StoreSourceLinesModeled() -> i64:
-    240
 
 # Source parity note: store owns file watcher.
 # Source parity note: store owns hide timer.

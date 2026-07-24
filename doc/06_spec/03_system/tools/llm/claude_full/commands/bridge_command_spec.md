@@ -1,29 +1,52 @@
-"""
 # Claude Full Bridge Command
 
-Checks the Simple model for Claude's `/remote-control` command metadata,
-state transitions, dialog choices, and prerequisite ordering.
+> Parts-bin evidence for `/remote-control` metadata, state transitions, dialog
+> choices, and prerequisite ordering.
 
-REQ-LLM-CARET-HIDDEN-008 applies to the command admission and prerequisite
-scenarios in this parts-bin spec. It does not establish shipped Caret
-CLI/TUI reachability.
-"""
+| Tests | Active | Skipped | Pending |
+|---|---:|---:|---:|
+| 4 | 4 | 0 | 0 |
 
-use std.spec.*
-use app.llm_caret.claude_full.commands.bridge.bridge.*
+## Status and Scope
 
-fn prereqInput() -> BridgePrerequisiteInput:
-    BridgePrerequisiteInput(
-        policyAllowed: true,
-        disabledReason: "",
-        envLessEnabled: true,
-        kairosFeature: false,
-        assistantMode: false,
-        envLessVersionError: "",
-        bridgeMinVersionError: "",
-        accessToken: "token",
-    )
+| Field | Value |
+|---|---|
+| Status | Active executable source; execution requires a qualified self-hosted Simple runtime |
+| Execution in this tranche | 0 scenarios executed; no PASS is claimed |
+| Requirement | `REQ-LLM-CARET-HIDDEN-008`, scoped only to scenarios 1 and 4; scenarios 2 and 3 remain supporting parts-bin parity |
+| Executable | `test/03_system/tools/llm/claude_full/commands/bridge_command_spec.spl` |
+| Updated | 2026-07-24 |
 
+This manual covers a `claude_full` parts-bin command model. It does not prove
+that shipped Caret imports or dispatches the bridge command, and it does not
+make a CLI/TUI reachability claim.
+
+## Helper contract
+
+`prereqInput()` creates the accepted prerequisite baseline: policy allowed,
+empty disabled reason, env-less enabled, KAIROS and assistant modes disabled,
+empty env-less and bridge-min-version errors, and access token `token`.
+Scenarios mutate one precedence input at a time from that baseline.
+
+## Scenarios
+
+1. Expose exact command metadata and independently reject the enablement and
+   visibility gates.
+2. Model idle connection, fail-closed prerequisite rejection, first-run
+   callout state/idempotence, full-control disconnect, and outbound-only
+   upgrade.
+3. Model dialog content, focus/action routing, QR filtering, and cleared
+   disconnect state.
+4. Preserve prerequisite precedence across policy, disabled reason, version
+   selection, assistant fallback, and access token.
+
+Every existing `step("...")` label is frozen. The folded block below mirrors
+all four current executable scenario bodies exactly.
+
+<details>
+<summary>Complete executable scenarios</summary>
+
+```simple
 describe "REQ-LLM-CARET-HIDDEN-008: bridge command admission":
     it "should expose remote-control command metadata and gate hidden state":
         step("Read command metadata")
@@ -174,3 +197,6 @@ describe "REQ-LLM-CARET-HIDDEN-008: bridge command prerequisites":
         login.accessToken = ""
         expect(checkBridgePrerequisitesModel(login)).to_equal("Log in to use Remote Control.")
         expect(checkBridgePrerequisitesModel(prereqInput())).to_equal("")
+```
+
+</details>

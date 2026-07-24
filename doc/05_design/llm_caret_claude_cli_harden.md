@@ -121,3 +121,21 @@ disable probe. The malformed fixture compares one exact ordered diagnostic
 array, so unexpected failures cannot hide behind membership assertions. The
 mirrored manual repeats the exact 33 source-to-spec/state rows and the strict
 parts-bin claim limit while explicitly reporting zero executed scenarios.
+
+## Tasks V2 hook/store hardening (2026-07-24)
+
+`TasksV2HookEnvironment` owns one `TasksV2Store` and creates hook models that
+share that store. `TasksV2HookModel.commit()` subscribes before its first fetch,
+while `fetchAfterCommit()` rejects pre-commit and disabled fetches. `unmount()`
+removes only that hook's subscription, so sibling hooks continue to observe the
+shared snapshot.
+
+`TasksV2Store.revision` is the stable external-store snapshot token. Fetches and
+hide-timer transitions increment it only when the visible task/hidden snapshot
+changes. This makes snapshot stability, commit ordering, disabled-hook behavior,
+and shared-store semantics directly testable without hardcoded parity sentinels.
+
+The obsolete helper that returned the historical modeled source-line value 240
+was removed. The upstream matrix target remains 250 source lines and stays
+explicitly non-PASS until pinned upstream regeneration can provide executable
+evidence.
