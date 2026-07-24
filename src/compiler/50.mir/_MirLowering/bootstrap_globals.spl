@@ -20,7 +20,7 @@ use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, mir_operand_const_int}
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
-use compiler.hir.hir_lowering.items.{bootstrap_hir_module_count, bootstrap_hir_module_name_at, bootstrap_hir_module_symbols_at, bootstrap_hir_module_functions_at, bootstrap_hir_module_constants_at}
+use compiler.hir.hir_lowering.items.{bootstrap_hir_module_count, bootstrap_hir_module_name_at, bootstrap_hir_module_symbols_at, bootstrap_hir_module_functions_at, bootstrap_hir_module_constants_at, bootstrap_hir_module_enums_at, bootstrap_hir_module_structs_at}
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 extern fn rt_exit(code: i64)
@@ -315,6 +315,12 @@ fn bootstrap_lower_flat_hir_module_to_mir(module_index: i64, target_context: Mir
     val constants = bootstrap_hir_module_constants_at(module_index)
     var lowering = MirLowering.new_for_target(symbols, target_context)
     lowering.current_function_names = _bootstrap_function_value_names
+    # Register this module's own enum/struct type defs so `E.V` reclassifies to
+    # an enum-variant const (not a field-load on an undefined base) and `S(..)`
+    # reclassifies to an inline aggregate construct (not a call to an undefined
+    # `@S` ctor). The reduced flat store now carries these; the globals/extra
+    # lowering paths use bootstrap_register_hir_type_defs for the same purpose.
+    lowering = bootstrap_register_flat_type_defs(lowering, bootstrap_hir_module_enums_at(module_index), bootstrap_hir_module_structs_at(module_index))
     for const_ in constants:
         lowering.lower_const(const_)
         lowering.lower_static(const_)
@@ -455,6 +461,58 @@ fn bootstrap_mir_name_for_index(index: i64) -> text:
     if index == 6:
         return "rt_native_build"
     ""
+
+fn bootstrap_register_flat_type_defs(lowering: MirLowering, enums: [HirEnum], structs: [HirStruct]) -> MirLowering:
+    """Flat --entry-closure counterpart of bootstrap_register_hir_type_defs: the
+    flat path lowers from the reduced per-module store and has no HirModule, so
+    the enum/struct defs are passed as lists (captured in bootstrap_hir_modules_add).
+    Same registrations as the struct/enum blocks of that function so `E.V` and
+    `S(..)` reclassify correctly. Classes are still unhandled here (a separate,
+    documented gap — the MCP tree converts class -> struct at the source level)."""
+    var lw = lowering
+    lw.enum_runtime_id_names = _bootstrap_enum_runtime_id_names
+    var si = 0
+    while si < structs.len():
+        val struct_def = structs[si]
+        var field_names: [text] = []
+        var fi = 0
+        while fi < struct_def.fields.len():
+            field_names.push(struct_def.fields[fi].name)
+            fi = fi + 1
+        var fm = lw.field_map
+        fm[lw.symbol_id_value(struct_def.symbol)] = field_names
+        lw.field_map = fm
+        var sfo = lw.struct_field_order
+        sfo[struct_def.name] = field_names
+        lw.struct_field_order = sfo
+        lw.lower_struct_type(struct_def)
+        si = si + 1
+
+    var ei = 0
+    while ei < enums.len():
+        val enum_def = enums[ei]
+        var variant_names: [text] = []
+        var vi = 0
+        while vi < enum_def.variants.len():
+            variant_names.push(enum_def.variants[vi].name)
+            vi = vi + 1
+        var evi = lw.enum_variant_index
+        evi[enum_def.name] = variant_names
+        lw.enum_variant_index = evi
+        lw.register_enum_runtime_id(enum_def)
+        ei = ei + 1
+
+    if lw.errors.len() > 0:
+        val first_error = lw.errors[0]
+        eprint("error: bootstrap flat MIR type registration failed: {first_error.message}\n")
+        rt_exit(1)
+
+    if not lw.enum_runtime_id_index.has("Result"):
+        lw.enum_runtime_id_index["Result"] = 0
+    if not lw.enum_runtime_id_index.has("Option"):
+        lw.enum_runtime_id_index["Option"] = 1
+    _bootstrap_enum_runtime_id_names = lw.enum_runtime_id_names
+    lw
 
 fn bootstrap_register_hir_type_defs(lowering: MirLowering, hir_module: HirModule) -> MirLowering:
     """Populate a fresh MirLowering's struct/enum/class type metadata from one
