@@ -180,6 +180,32 @@ fn bytes_method_infers_i64_array_seed_bytes_u8_boxtag_2026_07_17() {
 }
 
 #[test]
+fn array_join_stays_a_static_string_builtin() {
+    let module =
+        parse_and_lower("fn joined() -> text:\n    val parts = [\"a\", \"b\"]\n    return parts.join(\"\")\n")
+            .unwrap();
+    let returned = module.functions[0]
+        .body
+        .iter()
+        .find_map(|stmt| match stmt {
+            HirStmt::Return(Some(expr)) => Some(expr),
+            _ => None,
+        })
+        .expect("joined return");
+
+    assert_eq!(returned.ty, TypeId::STRING);
+    assert!(matches!(
+        &returned.kind,
+        HirExprKind::MethodCall {
+            method,
+            args,
+            dispatch: DispatchMode::Static,
+            ..
+        } if method == "join" && args.len() == 1
+    ));
+}
+
+#[test]
 fn text_rfind_uses_string_method_lowering() {
     let module = parse_and_lower(
         r#"struct text:

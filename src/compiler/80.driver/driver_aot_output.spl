@@ -40,6 +40,8 @@ extern fn rt_file_copy(src: text, dst: text) -> bool
 extern fn rt_dir_create(path: text, recursive: bool) -> bool
 extern fn rt_dir_remove_all(path: text) -> bool
 extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_enum_discriminant(value: Any) -> i64
+extern fn rt_enum_payload(value: Any) -> i64
 extern fn rt_path_join(a: text, b: text) -> text
 extern fn rt_env_get(key: text) -> text
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
@@ -74,16 +76,22 @@ fn driver_vhdl_entry_module(ctx: CompileContext) -> Result<text, text>:
     # environment belongs to a different invocation and must never redirect a
     # design catalog. Source-directory inputs do not match Source.path; the one
     # explicit entry file does. Multiple matching files are ambiguous.
-    var candidates: Dict<text, bool> = {}
-    for input_path in ctx.options.input_files:
-        for source in ctx.sources:
+    var selected = ""
+    var input_i = 0
+    while input_i < ctx.options.input_files.len():
+        val input_path = ctx.options.input_files[input_i]
+        var source_i = 0
+        while source_i < ctx.sources.len():
+            val source = ctx.sources[source_i]
             if source.path == input_path:
-                candidates[source.module_name] = true
-    if candidates.len() == 0:
+                if selected != "" and selected != source.module_name:
+                    return Err("VHDL compilation entry is ambiguous: multiple explicit input files match loaded modules")
+                selected = source.module_name
+            source_i = source_i + 1
+        input_i = input_i + 1
+    if selected == "":
         return Err("VHDL compilation requires one explicit entry file in compile options")
-    if candidates.len() > 1:
-        return Err("VHDL compilation entry is ambiguous: multiple explicit input files match loaded modules")
-    Ok(candidates.keys()[0])
+    Ok(selected)
 
 fn driver_native_build_threads() -> i64:
     val raw = rt_env_get("SIMPLE_NATIVE_BUILD_THREADS") ?? ""
@@ -666,12 +674,20 @@ impl CompilerDriver:
         # VHDL is one design, not a set of independently compiled objects.
         # Merge the entry closure before backend validation so imported
         # entities, helpers, records, and enums share one symbol catalog.
-        val entry_module = match driver_vhdl_entry_module(ctx):
-            case Ok(value): value
-            case Err(err): return CompileResult.CodegenError(err)
-        val catalog: VhdlDesignCatalog = match vhdl_build_design_catalog_with_hir(ctx.mir_modules, ctx.hir_modules, [entry_module], "simple_vhdl_design"):
-            case Ok(value): value
-            case Err(err): return CompileResult.CodegenError("VHDL design catalog error: {err}")
+        val entry_module = bootstrap_entry_module_name(ctx)
+        val catalog_result = vhdl_build_design_catalog_with_hir(
+            ctx.mir_modules, ctx.hir_modules, [entry_module], "simple_vhdl_design")
+        val catalog_disc = rt_enum_discriminant(catalog_result)
+        val catalog_err_disc = rt_enum_discriminant(Err(""))
+        if (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1":
+            eprint("[vhdl-driver] catalog_disc={catalog_disc} err_disc={catalog_err_disc}")
+        if catalog_disc == catalog_err_disc:
+            val catalog_error: text = rt_enum_payload(catalog_result)
+            return CompileResult.CodegenError(
+                "VHDL design catalog error: {catalog_error}")
+        val catalog: VhdlDesignCatalog = rt_enum_payload(catalog_result)
+        if (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1":
+            eprint("[vhdl-driver] catalog payload extracted")
         driver_log_trace(log, "translating {catalog.source_module_count} MIR modules as one VHDL design")
         val compiled = compile_module_with_backend("vhdl", catalog.design, is_release, driver_opt_level)
         var all_vhdl = ""

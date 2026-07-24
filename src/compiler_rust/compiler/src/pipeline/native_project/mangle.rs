@@ -676,7 +676,7 @@ fn resolve_method_call_static(
 
     // Collection `parts.join(sep)` lowers to a bare builtin call. An imported
     // path helper with the same name must not capture it during suffix binding.
-    if lookup_name == "join" {
+    if matches!(lookup_name, "join" | "Array.join") {
         return;
     }
 
@@ -1026,12 +1026,13 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
-    fn bare_join_stays_builtin_when_path_join_is_imported() {
-        let mut name = "join".to_string();
+    fn array_join_stays_builtin_when_path_join_is_imported() {
         let use_map = HashMap::from([("join".to_string(), "nogc_async_mut__path__join".to_string())]);
 
-        resolve_method_call_static(&mut name, &use_map, &HashMap::new(), &HashMap::new(), &HashMap::new());
-
-        assert_eq!(name, "join");
+        for builtin in ["join", "Array.join"] {
+            let mut name = builtin.to_string();
+            resolve_method_call_static(&mut name, &use_map, &HashMap::new(), &HashMap::new(), &HashMap::new());
+            assert_eq!(name, builtin);
+        }
     }
 }

@@ -16,6 +16,7 @@ use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.blocks.value.BlockValue
+use std.alloc.sffi.{rt_dict_contains}
 use compiler.mir.mir_lowering_types.{MirLowering, MirError}
 use compiler.backend.gpu_intrinsics.{is_gpu_intrinsic}
 
@@ -314,7 +315,7 @@ impl MirLowering:
         val declared = self.option_inner_hir_type(receiver)
         if declared != nil:
             return declared
-        if self.local_hir_types.has(local.id):
+        if rt_dict_contains(self.local_hir_types, local.id):
             val local_type = self.local_hir_types[local.id]
             match local_type.kind:
                 case HirTypeKind.Optional(inner_type): return Some(inner_type)
@@ -326,17 +327,17 @@ impl MirLowering:
             return false
         if self.option_inner_hir_type_for_local(receiver, local) != nil:
             return true
-        self.nil_locals.has(local.id)
+        rt_dict_contains(self.nil_locals, local.id)
 
     me option_map_value_hir_type(local: LocalId, span: Span) -> HirType?:
         """Recover the primitive type needed to decode an Option.map result."""
-        if self.local_hir_types.has(local.id):
+        if rt_dict_contains(self.local_hir_types, local.id):
             val known = self.local_hir_types[local.id]
             match known.kind:
                 case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char | HirTypeKind.Str:
                     return Some(known)
                 case _: ()
-        if self.struct_value_syms.has(local.id) or self.runtime_array_locals.has(local.id) or self.runtime_dict_locals.has(local.id) or self.runtime_value_locals.has(local.id):
+        if rt_dict_contains(self.struct_value_syms, local.id) or rt_dict_contains(self.runtime_array_locals, local.id) or rt_dict_contains(self.runtime_dict_locals, local.id) or rt_dict_contains(self.runtime_value_locals, local.id):
             return nil
         if val type_ = self.local_mir_type_of(local):
             # NOTE: each arm returns directly (rather than yielding a value
@@ -506,7 +507,7 @@ impl MirLowering:
         if default_expr != nil:
             val fallback_expr = default_expr ?? HirExpr(kind: HirExprKind.NilLit, type_: nil, span: receiver.span)
             var fallback = self.lower_expr(fallback_expr)
-            if is_text and self.runtime_value_locals.has(fallback.id):
+            if is_text and rt_dict_contains(self.runtime_value_locals, fallback.id):
                 fallback = self.decode_runtime_value(fallback, result_type)
             b_err = self.builder
             b_err.emit_copy(result_local, fallback)
@@ -610,7 +611,7 @@ impl MirLowering:
             case _: false
         if predicate_method_shape and predicate_owner_recovery_allowed:
             val static_predicate_key = "static::{static_receiver_name}::{method}"
-            if resolution_is_unresolved and static_receiver_name != "" and self.struct_method_syms.has(static_predicate_key):
+            if resolution_is_unresolved and static_receiver_name != "" and rt_dict_contains(self.struct_method_syms, static_predicate_key):
                 predicate_has_custom_owner = true
             else:
                 if not has_prelowered_method_receiver:
@@ -622,7 +623,7 @@ impl MirLowering:
                 # stale ByteSpan (or another same-named custom method) steal
                 # `text.starts_with`/`ends_with`/`contains`.
                 predicate_receiver_is_text = self.local_is_str(prelowered_method_receiver)
-                if not predicate_receiver_is_text and self.local_hir_types.has(prelowered_method_receiver.id):
+                if not predicate_receiver_is_text and rt_dict_contains(self.local_hir_types, prelowered_method_receiver.id):
                     val predicate_hir_type = self.local_hir_types[prelowered_method_receiver.id]
                     match predicate_hir_type.kind:
                         case HirTypeKind.Str: predicate_receiver_is_text = true
@@ -630,7 +631,7 @@ impl MirLowering:
                 if not predicate_receiver_is_text and resolution_is_unresolved:
                     val predicate_owner = self.struct_value_syms.get(prelowered_method_receiver.id)
                     if predicate_owner != nil and predicate_owner != "":
-                        predicate_has_custom_owner = self.struct_method_syms.has("{predicate_owner}::{method}")
+                        predicate_has_custom_owner = rt_dict_contains(self.struct_method_syms, "{predicate_owner}::{method}")
 
         # Integer chr/to_char is a language builtin, but an unresolved custom
         # struct method with the same name still owns its receiver. Resolve
@@ -639,7 +640,7 @@ impl MirLowering:
         val chr_method_shape = (method == "chr" or method == "to_char") and args.len() == 0
         if resolution_is_unresolved and chr_method_shape:
             val static_chr_key = "static::{static_receiver_name}::{method}"
-            if static_receiver_name != "" and self.struct_method_syms.has(static_chr_key):
+            if static_receiver_name != "" and rt_dict_contains(self.struct_method_syms, static_chr_key):
                 chr_has_custom_owner = true
             else:
                 var declared_chr_owner = ""
@@ -649,7 +650,7 @@ impl MirLowering:
                             if val chr_owner_definition = self.symbols.get_symbol_raw(chr_owner_symbol.id):
                                 declared_chr_owner = chr_owner_definition.name
                         case _: ()
-                if declared_chr_owner != "" and self.struct_method_syms.has("{declared_chr_owner}::{method}"):
+                if declared_chr_owner != "" and rt_dict_contains(self.struct_method_syms, "{declared_chr_owner}::{method}"):
                     chr_has_custom_owner = true
                 else:
                     if not has_prelowered_method_receiver:
@@ -657,7 +658,7 @@ impl MirLowering:
                         has_prelowered_method_receiver = true
                     val chr_owner = self.struct_value_syms.get(prelowered_method_receiver.id)
                     if chr_owner != nil and chr_owner != "":
-                        chr_has_custom_owner = self.struct_method_syms.has("{chr_owner}::{method}")
+                        chr_has_custom_owner = rt_dict_contains(self.struct_method_syms, "{chr_owner}::{method}")
 
         if method == "is_some" and args.len() == 0 and option_method_receiver:
             val receiver_local = prelowered_method_receiver
@@ -747,7 +748,7 @@ impl MirLowering:
             var some_val_uw = self.option_payload_or_self(receiver_local)
             if unwrap_is_text:
                 some_val_uw = self.option_text_value(some_val_uw, unwrap_result_type)
-            elif self.runtime_value_locals.has(receiver_local.id) and not self.option_value_locals.has(receiver_local.id):
+            elif rt_dict_contains(self.runtime_value_locals, receiver_local.id) and not rt_dict_contains(self.option_value_locals, receiver_local.id):
                 some_val_uw = self.decode_runtime_value(receiver_local, unwrap_result_type)
             elif unwrap_is_bool:
                 some_val_uw = self.option_bool_value(some_val_uw)
@@ -771,7 +772,7 @@ impl MirLowering:
             b_none_uw.terminate_goto(merge_block_uw)
             self.builder = b_none_uw
 
-            if self.runtime_value_locals.has(some_val_uw.id):
+            if rt_dict_contains(self.runtime_value_locals, some_val_uw.id):
                 self.runtime_value_locals[result_local_uw.id] = true
 
             var b_merge_uw = self.builder
@@ -841,7 +842,7 @@ impl MirLowering:
             var some_val_uo = self.option_payload_or_self(receiver_local)
             if uo_is_text:
                 some_val_uo = self.option_text_value(some_val_uo, uo_result_type)
-            elif self.runtime_value_locals.has(receiver_local.id) and not self.option_value_locals.has(receiver_local.id):
+            elif rt_dict_contains(self.runtime_value_locals, receiver_local.id) and not rt_dict_contains(self.option_value_locals, receiver_local.id):
                 some_val_uo = self.decode_runtime_value(receiver_local, uo_result_type)
             elif uo_is_bool:
                 # Bare `some_bool.unwrap_or(default)` (no `.map()` in
@@ -865,14 +866,14 @@ impl MirLowering:
             var default_val_uo = default_local_uo
             if uo_is_text:
                 default_val_uo = self.option_text_value(default_local_uo, uo_result_type)
-            elif self.runtime_value_locals.has(default_local_uo.id):
+            elif rt_dict_contains(self.runtime_value_locals, default_local_uo.id):
                 default_val_uo = self.decode_runtime_value(default_local_uo, uo_result_type)
             b_none_uo = self.builder
             b_none_uo.emit_copy(result_local_uo, default_val_uo)
             b_none_uo.terminate_goto(merge_block_uo)
             self.builder = b_none_uo
 
-            if self.runtime_value_locals.has(some_val_uo.id) or self.runtime_value_locals.has(default_val_uo.id):
+            if rt_dict_contains(self.runtime_value_locals, some_val_uo.id) or rt_dict_contains(self.runtime_value_locals, default_val_uo.id):
                 self.runtime_value_locals[result_local_uo.id] = true
 
             var b_merge_uo = self.builder
@@ -929,7 +930,7 @@ impl MirLowering:
                         match map_inner_type.kind:
                             case MirTypeKind.Bool: map_inner_is_bool = true
                             case _: ()
-                        if self.runtime_value_locals.has(receiver_local.id) and not self.option_value_locals.has(receiver_local.id):
+                        if rt_dict_contains(self.runtime_value_locals, receiver_local.id) and not rt_dict_contains(self.option_value_locals, receiver_local.id):
                             some_val_map = self.decode_runtime_value(receiver_local, map_inner_type)
                         elif map_inner_is_bool:
                             # `Option<bool>` receiver: see option_bool_value's
@@ -995,7 +996,7 @@ impl MirLowering:
             case NamedVar(_, rname):
                 recv_enum_name = rname
             case _: ()
-        if recv_enum_name != "" and self.enum_variant_index.has(recv_enum_name):
+        if recv_enum_name != "" and rt_dict_contains(self.enum_variant_index, recv_enum_name):
             var is_variant = false
             for vn in self.enum_variant_index[recv_enum_name]:
                 if vn == method:
@@ -1390,7 +1391,7 @@ impl MirLowering:
                 # array local (runtime_array_locals): arrays must keep going
                 # through plain rt_len, since rt_interp_cstr/rt_strlen would
                 # misinterpret raw array memory as a C string.
-                if len_symbol == "rt_len" and not self.runtime_array_locals.has(receiver_local.id):
+                if len_symbol == "rt_len" and not rt_dict_contains(self.runtime_array_locals, receiver_local.id):
                     val lc_cstr_op = MirOperand(kind: MirOperandKind.Const(
                         MirConstValue.Str("rt_interp_cstr"),
                         MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
@@ -2225,7 +2226,7 @@ impl MirLowering:
                 # previously re-lowered it) to avoid double-evaluating a
                 # side-effecting receiver expression.
                 val static_method_key = "static::{static_receiver_name}::{method}"
-                if static_receiver_name != "" and self.struct_method_syms.has(static_method_key):
+                if static_receiver_name != "" and rt_dict_contains(self.struct_method_syms, static_method_key):
                     val static_method_id = self.struct_method_syms[static_method_key]
                     var static_args: [MirOperand] = []
                     for arg in args:
@@ -2255,7 +2256,7 @@ impl MirLowering:
                     val unresolved_method_key = "{unresolved_struct_name}::{method}"
                     # Method symbols are owner-qualified during HIR lowering,
                     # so unrelated types may safely expose the same method name.
-                    if self.struct_method_syms.has(unresolved_method_key):
+                    if rt_dict_contains(self.struct_method_syms, unresolved_method_key):
                         val resolved_method_id = self.struct_method_syms[unresolved_method_key]
                         var im_arg_operands: [MirOperand] = [mir_operand_copy(unresolved_receiver_local)]
                         for arg in args:
@@ -2296,7 +2297,7 @@ impl MirLowering:
                             # (see struct_method_return_is_array doc comment)
                             # instead of silently misreading the raw boxed
                             # handle as an offset.
-                            if self.struct_method_return_is_array.has(unresolved_method_key):
+                            if rt_dict_contains(self.struct_method_return_is_array, unresolved_method_key):
                                 self.runtime_array_locals[im_result_local.id] = true
                             return im_result_local
                         var im_b2 = self.builder

@@ -982,6 +982,7 @@ impl Lowerer {
                     }
                 }
                 "contains" | "is_empty" => Some(TypeId::BOOL),
+                "join" => Some(TypeId::STRING),
                 "slice" | "filter" | "map" => Some(receiver.ty), // Returns same array type
                 "first" | "last" | "get" => {
                     // Returns element type (or Option<element>)

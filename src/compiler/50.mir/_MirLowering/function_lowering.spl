@@ -49,6 +49,8 @@ impl MirLowering:
         CSS `text.starts_with` dispatched to `ByteSpan.starts_with` in
         SimpleOS). Module/type/method metadata is intentionally not cleared."""
         self.local_map = {}
+        self.local_symbol_ids = []
+        self.local_symbol_values = []
         self.local_hir_types = {}
         self.bitfield_value_syms = {}
         self.struct_value_syms = {}
@@ -156,14 +158,8 @@ impl MirLowering:
                 # The seed interpreter can miss the Arg-pattern scan above.
                 # Fall back to the actual builder layout, not a hardcoded +1.
                 LocalId(id: pli + parameter_local_offset)
-            # `if val` can still bind nil in this interpreter; re-check before `.id`.
-            if val found_symbol = param.symbol:
-                if found_symbol == nil:
-                    self.error("function parameter has no resolved symbol", Some(param.span))
-                else:
-                    self.local_map[found_symbol.id] = local
-            else:
-                self.error("function parameter has no resolved symbol", Some(param.span))
+            val param_symbol_id = param.symbol.id
+            self.bind_local(param_symbol_id, local)
             # Thread the real HIR parameter name onto the (nameless) MIR arg
             # local so backends render actual port names, not arg0/arg1/arg2.
             var name_bldr = self.builder
@@ -307,9 +303,7 @@ impl MirLowering:
                         # that is neither a `me` receiver nor `mut`-marked,
                         # which is exactly Bug #167's original, correct scope.
                         val copy_local = self.copy_struct_value_recursive(local, parameter_type.name, type_symbol, [parameter_type.name])
-                        if val copy_symbol = param.symbol:
-                            if copy_symbol != nil:
-                                self.local_map[copy_symbol.id] = copy_local
+                        self.bind_local(param_symbol_id, copy_local)
                 case _:
                     ()
             pli = pli + 1
@@ -382,6 +376,7 @@ impl MirLowering:
             fn_result = apply_synthetic_driver_codegen(fn_, fn_result, self.symbols)
 
         if fn_.has_vhdl_metadata:
+            fn_result.has_vhdl_metadata = true
             fn_result.vhdl_metadata = fn_.vhdl_metadata
 
         fn_result
