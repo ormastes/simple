@@ -117,8 +117,10 @@ deadline state so spawn/internal failures remain ordinary failures.
 Pure-Simple callers use the `std.io` facade; hosted C owns the OS capture and
 cleanup boundary, and native LLVM calls cross the dedicated tuple ABI facade.
 Negative/signal statuses must round-trip through that facade unchanged; a
-tagged/masked value such as `0x1fffffffffffffff` is an ABI failure, not a
-runner status to normalize. See the
+corrupted decoded value such as `0x1fffffffffffffff` is an ABI failure, not a
+runner status to normalize. Current source owns the signed conversion in the
+tuple facade; seeing that value from a deployed binary requires fresh Stage-4
+qualification before another source workaround. See the
 [native signal-status report](../../08_tracking/bug/test_runner_native_signal_exit_status_tag_corruption_2026-07-24.md).
 
 For staged compiler or MCP changes, the bootstrap wrapper must pass its built-in
