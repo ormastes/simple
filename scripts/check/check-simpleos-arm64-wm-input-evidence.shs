@@ -1,0 +1,733 @@
+#!/bin/sh
+set -eu
+
+# Canonical ARM64 live lane only. The production aggregate must run its host
+# WM gate first; this wrapper deliberately does not turn static/source checks
+# into a substitute for the required QEMU input and framebuffer evidence.
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+BUILD_DIR="${BUILD_DIR:-build/simpleos_arm64_wm_input_evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/simpleos_arm64_wm_input_evidence_$(date -u +%F).md}"
+case "$BUILD_DIR" in
+    /*) ;;
+    *) BUILD_DIR="$ROOT_DIR/$BUILD_DIR" ;;
+esac
+case "$REPORT_PATH" in
+    /*) ;;
+    *) REPORT_PATH="$ROOT_DIR/$REPORT_PATH" ;;
+esac
+set +e
+_canonical_paths="$(python3 - "$ROOT_DIR" "$BUILD_DIR" "$REPORT_PATH" <<'PY'
+import os
+import pathlib
+import stat
+import sys
+
+root = pathlib.Path(sys.argv[1]).resolve(strict=True)
+
+def canonical_lane_path(raw, allowed_roots, kind):
+    if "\n" in raw or "\r" in raw:
+        raise RuntimeError(kind + "-path-control-character")
+    candidate = pathlib.Path(os.path.abspath(raw))
+    if candidate == root:
+        raise RuntimeError(kind + "-path-is-repo-root")
+    allowed = [root / item for item in allowed_roots]
+    if not any(
+        os.path.commonpath([str(candidate), str(base)]) == str(base)
+        and candidate != base
+        for base in allowed
+    ):
+        raise RuntimeError(kind + "-path-outside-owned-roots")
+    relative = candidate.relative_to(root)
+    current = root
+    for component in relative.parts:
+        current = current / component
+        if os.path.lexists(current):
+            mode = os.lstat(current).st_mode
+            if stat.S_ISLNK(mode):
+                raise RuntimeError(kind + "-path-symlink-component")
+        else:
+            break
+    existing = candidate
+    while not os.path.lexists(existing):
+        if existing == root:
+            raise RuntimeError(kind + "-existing-parent-missing")
+        existing = existing.parent
+    if pathlib.Path(os.path.realpath(existing)) != existing:
+        raise RuntimeError(kind + "-existing-parent-not-canonical")
+    return str(candidate)
+
+build = canonical_lane_path(sys.argv[2], ("build",), "build")
+report = canonical_lane_path(sys.argv[3], ("build", "doc"), "report")
+print(build)
+print(report)
+PY
+)"
+_canonical_code=$?
+set -e
+if [ "$_canonical_code" -ne 0 ] ||
+   [ "$(printf '%s\n' "$_canonical_paths" | wc -l | tr -d ' ')" -ne 2 ]; then
+    echo "simpleos_arm64_wm_input_status=FAIL"
+    echo "simpleos_arm64_wm_input_reason=unsafe-build-or-report-path-rejected"
+    exit 2
+fi
+BUILD_DIR="$(printf '%s\n' "$_canonical_paths" | sed -n '1p')"
+REPORT_PATH="$(printf '%s\n' "$_canonical_paths" | sed -n '2p')"
+
+QEMU_BIN="${QEMU_SYSTEM_AARCH64:-qemu-system-aarch64}"
+BOOT_TIMEOUT_SECONDS="${SIMPLEOS_ARM64_WM_BOOT_TIMEOUT_SECONDS:-120}"
+BUILD_TIMEOUT_SECONDS="${SIMPLEOS_ARM64_WM_BUILD_TIMEOUT_SECONDS:-1200}"
+DISK_TIMEOUT_SECONDS="${SIMPLEOS_ARM64_WM_DISK_TIMEOUT_SECONDS:-300}"
+PROCESS_TERM_GRACE_SECONDS="${SIMPLEOS_ARM64_WM_TERM_GRACE_SECONDS:-10}"
+ENTRY_REL="examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl"
+LINKER_SCRIPT_REL="examples/09_embedded/simple_os/arch/arm64/linker.ld"
+ENTRY="$ROOT_DIR/$ENTRY_REL"
+LINKER_SCRIPT="$ROOT_DIR/$LINKER_SCRIPT_REL"
+KERNEL="$BUILD_DIR/simpleos_arm64_desktop_engine2d.elf"
+DISK_IMAGE="$BUILD_DIR/fat32-arm64-desktop.img"
+GENERATED_SOURCE_ROOT="$BUILD_DIR/generated-source"
+SERIAL_LOG="$BUILD_DIR/serial.log"
+QEMU_LOG="$BUILD_DIR/qemu.log"
+BUILD_LOG="$BUILD_DIR/native-build.log"
+DISK_LOG="$BUILD_DIR/disk-build.log"
+CAPTURE_LOG="$BUILD_DIR/qmp-input-capture.env"
+CAPTURE_ERROR_LOG="$BUILD_DIR/qmp-input-capture.err"
+BASELINE_PPM="$BUILD_DIR/baseline.ppm"
+POST_INPUT_PPM="$BUILD_DIR/post-input.ppm"
+EVIDENCE_ENV="$BUILD_DIR/evidence.env"
+QMP_HELPER="$ROOT_DIR/scripts/check/simpleos_arm64_wm_qmp_input_capture.py"
+SOURCE_MANIFEST_BEFORE="$BUILD_DIR/source-manifest-before-build.txt"
+SOURCE_MANIFEST_AFTER_BUILD="$BUILD_DIR/source-manifest-after-build.txt"
+SOURCE_MANIFEST_AFTER_CAPTURE="$BUILD_DIR/source-manifest-after-capture.txt"
+RUN_DIR=
+QMP_SOCKET=
+
+RESULT_STATUS=FAIL
+REASON=not-started
+REASON_DETAIL=
+FINALIZED=0
+QEMU_PID=
+QEMU_PATH=
+QEMU_VERSION=
+QEMU_VERSION_SHA256=
+QEMU_BINARY_SHA256=
+SIMPLE_BIN_STATUS=unchecked
+SIMPLE_BIN_SOURCE=explicit-env
+SIMPLE_BIN_RESOLVED=
+SIMPLE_BIN_VERSION=
+SIMPLE_BIN_SHA256=
+KERNEL_SHA256=
+DISK_SHA256=
+BASELINE_SHA256=
+POST_INPUT_SHA256=
+CAPTURE_WIDTH=0
+CAPTURE_HEIGHT=0
+CAPTURES_NONBLANK=false
+CAPTURES_DIFFERENT=false
+KEY_DOWN_INPUT_SEQUENCE=0
+KEY_UP_INPUT_SEQUENCE=0
+POINTER_MOVE_INPUT_SEQUENCE=0
+POINTER_DOWN_INPUT_SEQUENCE=0
+POINTER_UP_INPUT_SEQUENCE=0
+KEY_DOWN_FRAME_SEQUENCE=0
+KEY_UP_FRAME_SEQUENCE=0
+POINTER_MOVE_FRAME_SEQUENCE=0
+POINTER_DOWN_FRAME_SEQUENCE=0
+POINTER_UP_FRAME_SEQUENCE=0
+QMP_COMMAND_COUNT=0
+SOURCE_MANIFEST_BEFORE_SHA256=
+SOURCE_MANIFEST_AFTER_BUILD_SHA256=
+SOURCE_MANIFEST_AFTER_CAPTURE_SHA256=
+OBSERVED_RAMFB=false
+OBSERVED_VIRTIO_KEYBOARD=false
+OBSERVED_VIRTIO_MOUSE=false
+OBSERVED_BOOT=not-launched
+OBSERVED_FIRMWARE=not-guest-reported
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$SERIAL_LOG" "$QEMU_LOG" "$BUILD_LOG" "$DISK_LOG" \
+    "$CAPTURE_LOG" "$CAPTURE_ERROR_LOG" "$BASELINE_PPM" "$POST_INPUT_PPM" \
+    "$EVIDENCE_ENV" "$SOURCE_MANIFEST_BEFORE" "$SOURCE_MANIFEST_AFTER_BUILD" \
+    "$SOURCE_MANIFEST_AFTER_CAPTURE"
+
+file_sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        shasum -a 256 "$1" | awk '{print $1}'
+    fi
+}
+
+text_sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        printf '%s' "$1" | sha256sum | awk '{print $1}'
+    else
+        printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
+    fi
+}
+
+resolve_file() {
+    python3 - "$1" <<'PY'
+import os
+import pathlib
+import sys
+
+path = pathlib.Path(os.path.realpath(sys.argv[1]))
+if not path.is_file():
+    sys.exit(1)
+print(path)
+PY
+}
+
+capture_value() {
+    sed -n "s/^simpleos_arm64_wm_input_$1=//p" "$CAPTURE_LOG" | tail -n 1
+}
+
+bounded_qemu_version() {
+    _version_phase="$1"
+    _version_log="$BUILD_DIR/qemu-version-${_version_phase}.log"
+    if python3 "$QMP_HELPER" --run-bounded \
+        15 "$PROCESS_TERM_GRACE_SECONDS" "$_version_log" -- \
+        "$QEMU_PATH" --version; then
+        sed -n '1p' "$_version_log"
+        return 0
+    fi
+    return 1
+}
+
+cleanup() {
+    if [ -n "$QEMU_PID" ] && kill -0 "$QEMU_PID" >/dev/null 2>&1; then
+        python3 "$QMP_HELPER" --terminate-process-group \
+            "$QEMU_PID" "$PROCESS_TERM_GRACE_SECONDS" \
+            "$QEMU_PATH" "$QMP_SOCKET" >/dev/null 2>&1 || true
+    fi
+    QEMU_PID=
+    if [ -n "$RUN_DIR" ] && [ "$QMP_SOCKET" = "$RUN_DIR/qmp.sock" ] &&
+       [ -d "$RUN_DIR" ]; then
+        if [ -e "$QMP_SOCKET" ] || [ -S "$QMP_SOCKET" ]; then
+            rm -f "$QMP_SOCKET"
+        fi
+        rmdir "$RUN_DIR" >/dev/null 2>&1 || true
+    fi
+    RUN_DIR=
+    QMP_SOCKET=
+}
+
+write_results() {
+    {
+        printf 'simpleos_arm64_wm_input_status=%s\n' "$RESULT_STATUS"
+        printf 'simpleos_arm64_wm_input_reason=%s\n' "$REASON"
+        printf 'simpleos_arm64_wm_input_reason_detail=%s\n' "$REASON_DETAIL"
+        printf 'simpleos_arm64_wm_input_live_qemu=%s\n' "$(if [ "$RESULT_STATUS" = PASS ]; then printf true; else printf false; fi)"
+        printf 'simpleos_arm64_wm_input_simple_bin=%s\n' "${SIMPLE_BIN:-}"
+        printf 'simpleos_arm64_wm_input_simple_binary=%s\n' "${SIMPLE_BINARY:-}"
+        printf 'simpleos_arm64_wm_input_simple_bin_source=%s\n' "$SIMPLE_BIN_SOURCE"
+        printf 'simpleos_arm64_wm_input_simple_bin_status=%s\n' "$SIMPLE_BIN_STATUS"
+        printf 'simpleos_arm64_wm_input_simple_bin_resolved=%s\n' "$SIMPLE_BIN_RESOLVED"
+        printf 'simpleos_arm64_wm_input_simple_bin_version=%s\n' "$SIMPLE_BIN_VERSION"
+        printf 'simpleos_arm64_wm_input_simple_bin_sha256=%s\n' "$SIMPLE_BIN_SHA256"
+        printf 'simpleos_arm64_wm_input_qemu_system=%s\n' "$QEMU_PATH"
+        printf 'simpleos_arm64_wm_input_qemu_version=%s\n' "$QEMU_VERSION"
+        printf 'simpleos_arm64_wm_input_qemu_version_sha256=%s\n' "$QEMU_VERSION_SHA256"
+        printf 'simpleos_arm64_wm_input_qemu_binary_sha256=%s\n' "$QEMU_BINARY_SHA256"
+        printf 'simpleos_arm64_wm_input_configured_machine=virt\n'
+        printf 'simpleos_arm64_wm_input_configured_cpu=cortex-a72\n'
+        printf 'simpleos_arm64_wm_input_configured_accelerator=tcg\n'
+        printf 'simpleos_arm64_wm_input_configured_ramfb=true\n'
+        printf 'simpleos_arm64_wm_input_configured_virtio_keyboard=true\n'
+        printf 'simpleos_arm64_wm_input_configured_virtio_mouse=true\n'
+        printf 'simpleos_arm64_wm_input_configured_boot=direct-kernel\n'
+        printf 'simpleos_arm64_wm_input_configured_firmware=none\n'
+        printf 'simpleos_arm64_wm_input_observed_machine=not-guest-reported\n'
+        printf 'simpleos_arm64_wm_input_observed_cpu=not-guest-reported\n'
+        printf 'simpleos_arm64_wm_input_observed_ramfb=%s\n' "$OBSERVED_RAMFB"
+        printf 'simpleos_arm64_wm_input_observed_virtio_keyboard=%s\n' "$OBSERVED_VIRTIO_KEYBOARD"
+        printf 'simpleos_arm64_wm_input_observed_virtio_mouse=%s\n' "$OBSERVED_VIRTIO_MOUSE"
+        printf 'simpleos_arm64_wm_input_observed_boot=%s\n' "$OBSERVED_BOOT"
+        printf 'simpleos_arm64_wm_input_observed_firmware=%s\n' "$OBSERVED_FIRMWARE"
+        printf 'simpleos_arm64_wm_input_source_manifest_before_build_sha256=%s\n' "$SOURCE_MANIFEST_BEFORE_SHA256"
+        printf 'simpleos_arm64_wm_input_source_manifest_after_build_sha256=%s\n' "$SOURCE_MANIFEST_AFTER_BUILD_SHA256"
+        printf 'simpleos_arm64_wm_input_source_manifest_after_capture_sha256=%s\n' "$SOURCE_MANIFEST_AFTER_CAPTURE_SHA256"
+        printf 'simpleos_arm64_wm_input_kernel=%s\n' "$KERNEL"
+        printf 'simpleos_arm64_wm_input_kernel_sha256=%s\n' "$KERNEL_SHA256"
+        printf 'simpleos_arm64_wm_input_disk_image=%s\n' "$DISK_IMAGE"
+        printf 'simpleos_arm64_wm_input_disk_image_sha256=%s\n' "$DISK_SHA256"
+        printf 'simpleos_arm64_wm_input_serial_log=%s\n' "$SERIAL_LOG"
+        printf 'simpleos_arm64_wm_input_baseline_ppm=%s\n' "$BASELINE_PPM"
+        printf 'simpleos_arm64_wm_input_post_input_ppm=%s\n' "$POST_INPUT_PPM"
+        printf 'simpleos_arm64_wm_input_baseline_ppm_sha256=%s\n' "$BASELINE_SHA256"
+        printf 'simpleos_arm64_wm_input_post_input_ppm_sha256=%s\n' "$POST_INPUT_SHA256"
+        printf 'simpleos_arm64_wm_input_capture_width=%s\n' "$CAPTURE_WIDTH"
+        printf 'simpleos_arm64_wm_input_capture_height=%s\n' "$CAPTURE_HEIGHT"
+        printf 'simpleos_arm64_wm_input_captures_nonblank=%s\n' "$CAPTURES_NONBLANK"
+        printf 'simpleos_arm64_wm_input_captures_different=%s\n' "$CAPTURES_DIFFERENT"
+        printf 'simpleos_arm64_wm_input_key_down_input_sequence=%s\n' "$KEY_DOWN_INPUT_SEQUENCE"
+        printf 'simpleos_arm64_wm_input_key_up_input_sequence=%s\n' "$KEY_UP_INPUT_SEQUENCE"
+        printf 'simpleos_arm64_wm_input_pointer_move_input_sequence=%s\n' "$POINTER_MOVE_INPUT_SEQUENCE"
+        printf 'simpleos_arm64_wm_input_pointer_down_input_sequence=%s\n' "$POINTER_DOWN_INPUT_SEQUENCE"
+        printf 'simpleos_arm64_wm_input_pointer_up_input_sequence=%s\n' "$POINTER_UP_INPUT_SEQUENCE"
+        printf 'simpleos_arm64_wm_input_key_down_frame_sequence=%s\n' "$KEY_DOWN_FRAME_SEQUENCE"
+        printf 'simpleos_arm64_wm_input_key_up_frame_sequence=%s\n' "$KEY_UP_FRAME_SEQUENCE"
+        printf 'simpleos_arm64_wm_input_pointer_move_frame_sequence=%s\n' "$POINTER_MOVE_FRAME_SEQUENCE"
+        printf 'simpleos_arm64_wm_input_pointer_down_frame_sequence=%s\n' "$POINTER_DOWN_FRAME_SEQUENCE"
+        printf 'simpleos_arm64_wm_input_pointer_up_frame_sequence=%s\n' "$POINTER_UP_FRAME_SEQUENCE"
+        printf 'simpleos_arm64_wm_input_qmp_command_count=%s\n' "$QMP_COMMAND_COUNT"
+    } >"$EVIDENCE_ENV"
+
+    {
+        printf '# SimpleOS ARM64 WM live input evidence\n\n'
+        printf -- '- status: **%s**\n' "$RESULT_STATUS"
+        printf -- '- reason: %s\n' "$REASON"
+        printf -- '- detail: %s\n' "${REASON_DETAIL:--}"
+        printf -- '- live QEMU evidence: %s\n' "$(if [ "$RESULT_STATUS" = PASS ]; then printf true; else printf false; fi)"
+        printf -- '- compiler: `%s` (%s, sha256 `%s`)\n' "${SIMPLE_BIN_RESOLVED:-missing}" "$SIMPLE_BIN_STATUS" "${SIMPLE_BIN_SHA256:-missing}"
+        printf -- '- configured guest: `virt` / `cortex-a72` / TCG / RAMFB / VirtIO keyboard / VirtIO mouse\n'
+        printf -- '- configured boot: direct `-kernel`; firmware/UEFI: none\n'
+        printf -- '- live-observed: RAMFB capture `%s`; VirtIO keyboard `%s`; VirtIO mouse `%s`; machine/CPU not guest-reported\n' "$OBSERVED_RAMFB" "$OBSERVED_VIRTIO_KEYBOARD" "$OBSERVED_VIRTIO_MOUSE"
+        printf -- '- live-observed boot: `%s`; firmware: `%s`\n' "$OBSERVED_BOOT" "$OBSERVED_FIRMWARE"
+        printf -- '- QEMU: `%s` (binary sha256 `%s`, version sha256 `%s`)\n' "$QEMU_VERSION" "${QEMU_BINARY_SHA256:-missing}" "${QEMU_VERSION_SHA256:-missing}"
+        printf -- '- source manifests: before-build `%s`; after-build `%s`; after-capture `%s`\n' "${SOURCE_MANIFEST_BEFORE_SHA256:-missing}" "${SOURCE_MANIFEST_AFTER_BUILD_SHA256:-missing}" "${SOURCE_MANIFEST_AFTER_CAPTURE_SHA256:-missing}"
+        printf -- '- kernel: `%s` (sha256 `%s`)\n' "$KERNEL" "${KERNEL_SHA256:-missing}"
+        printf -- '- desktop media: `%s` (sha256 `%s`)\n' "$DISK_IMAGE" "${DISK_SHA256:-missing}"
+        printf -- '- baseline: `%s` (sha256 `%s`)\n' "$BASELINE_PPM" "${BASELINE_SHA256:-missing}"
+        printf -- '- post-input: `%s` (sha256 `%s`)\n' "$POST_INPUT_PPM" "${POST_INPUT_SHA256:-missing}"
+        printf -- '- PPM validation: P6/nonblank `%s`; distinct `%s`; %sx%s\n' "$CAPTURES_NONBLANK" "$CAPTURES_DIFFERENT" "$CAPTURE_WIDTH" "$CAPTURE_HEIGHT"
+        printf -- '- input sequences: key-down `%s`, key-up `%s`, pointer-move `%s`, pointer-down `%s`, pointer-up `%s`\n' "$KEY_DOWN_INPUT_SEQUENCE" "$KEY_UP_INPUT_SEQUENCE" "$POINTER_MOVE_INPUT_SEQUENCE" "$POINTER_DOWN_INPUT_SEQUENCE" "$POINTER_UP_INPUT_SEQUENCE"
+        printf -- '- frame sequences: key-down `%s`, key-up `%s`, pointer-move `%s`, pointer-down `%s`, pointer-up `%s`\n' "$KEY_DOWN_FRAME_SEQUENCE" "$KEY_UP_FRAME_SEQUENCE" "$POINTER_MOVE_FRAME_SEQUENCE" "$POINTER_DOWN_FRAME_SEQUENCE" "$POINTER_UP_FRAME_SEQUENCE"
+        printf -- '- acknowledged QMP commands: `%s`\n' "$QMP_COMMAND_COUNT"
+        printf -- '- serial log: `%s`\n\n' "$SERIAL_LOG"
+        printf 'PASS is emitted only after a current-source canonical ARM64 desktop build, a real QEMU boot, five device-to-WM-to-frame serial correlations, and two validated live RAMFB screendumps. Static/source evidence is never promoted to live evidence.\n'
+    } >"$REPORT_PATH"
+}
+
+fail_lane() {
+    REASON="$1"
+    if [ "$#" -gt 1 ]; then
+        REASON_DETAIL="$2"
+    fi
+    RESULT_STATUS=FAIL
+    write_results
+    cat "$EVIDENCE_ENV"
+    FINALIZED=1
+    exit 1
+}
+
+validate_positive_bounded() {
+    _timeout_name="$1"
+    _timeout_value="$2"
+    _timeout_cap="$3"
+    case "$_timeout_value" in
+        ''|*[!0-9]*) fail_lane "invalid-${_timeout_name}-not-positive-integer" ;;
+    esac
+    if [ "$_timeout_value" -le 0 ] || [ "$_timeout_value" -gt "$_timeout_cap" ]; then
+        fail_lane "invalid-${_timeout_name}-outside-1-${_timeout_cap}"
+    fi
+}
+
+on_exit() {
+    _exit_code=$?
+    trap - EXIT HUP INT TERM
+    cleanup
+    if [ "$FINALIZED" -eq 0 ]; then
+        REASON=unexpected-wrapper-exit
+        REASON_DETAIL="exit-code=$_exit_code"
+        RESULT_STATUS=FAIL
+        write_results
+        cat "$EVIDENCE_ENV"
+    fi
+    exit "$_exit_code"
+}
+
+trap on_exit EXIT
+trap 'exit 130' HUP INT TERM
+
+validate_positive_bounded boot-timeout "$BOOT_TIMEOUT_SECONDS" 600
+validate_positive_bounded build-timeout "$BUILD_TIMEOUT_SECONDS" 3600
+validate_positive_bounded disk-timeout "$DISK_TIMEOUT_SECONDS" 900
+validate_positive_bounded term-grace "$PROCESS_TERM_GRACE_SECONDS" 60
+
+if [ "${SIMPLEOS_ARM64_WM_QMP_SOCKET+x}" = x ]; then
+    fail_lane unsafe-qmp-socket-override-rejected
+fi
+TMP_BASE_RAW="${TMPDIR:-/tmp}"
+case "$TMP_BASE_RAW" in
+    /*) ;;
+    *) fail_lane unsafe-relative-tmpdir-rejected ;;
+esac
+TMP_BASE="$(CDPATH= cd -- "$TMP_BASE_RAW" 2>/dev/null && pwd -P)" ||
+    fail_lane unsafe-tmpdir-unresolvable
+case "$TMP_BASE" in
+    ''|/) fail_lane unsafe-broad-tmpdir-rejected ;;
+esac
+[ -d "$TMP_BASE" ] && [ -w "$TMP_BASE" ] ||
+    fail_lane unsafe-tmpdir-not-writable
+RUN_DIR="$(mktemp -d "$TMP_BASE/simpleos-arm64-wm-input.XXXXXX")" ||
+    fail_lane lane-tempdir-create-failed
+case "$RUN_DIR" in
+    "$TMP_BASE"/simpleos-arm64-wm-input.*) ;;
+    *) fail_lane lane-tempdir-ownership-invalid ;;
+esac
+QMP_SOCKET="$RUN_DIR/qmp.sock"
+
+SIMPLE_BIN_INPUT="${SIMPLE_BIN:-}"
+SIMPLE_BINARY_INPUT="${SIMPLE_BINARY:-}"
+if [ -n "$SIMPLE_BIN_INPUT" ] && [ -n "$SIMPLE_BINARY_INPUT" ] && \
+   [ "$SIMPLE_BIN_INPUT" != "$SIMPLE_BINARY_INPUT" ]; then
+    fail_lane conflicting-simple-bin-overrides
+fi
+if [ -n "$SIMPLE_BIN_INPUT" ]; then
+    SIMPLE_BIN="$SIMPLE_BIN_INPUT"
+    if [ -n "$SIMPLE_BINARY_INPUT" ]; then
+        SIMPLE_BIN_SOURCE=explicit-SIMPLE_BIN-and-SIMPLE_BINARY
+    else
+        SIMPLE_BIN_SOURCE=explicit-SIMPLE_BIN
+    fi
+elif [ -n "$SIMPLE_BINARY_INPUT" ]; then
+    SIMPLE_BIN="$SIMPLE_BINARY_INPUT"
+    SIMPLE_BIN_SOURCE=explicit-SIMPLE_BINARY
+else
+    SIMPLE_BIN=
+    SIMPLE_BINARY=
+    SIMPLE_BIN_STATUS=missing
+    fail_lane simple-bin-missing
+fi
+SIMPLE_BINARY="$SIMPLE_BIN"
+export SIMPLE_BIN SIMPLE_BINARY
+
+if [ ! -x "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN_STATUS=missing
+    fail_lane simple-bin-not-executable
+fi
+SIMPLE_BIN_RESOLVED="$(resolve_file "$SIMPLE_BIN")" || fail_lane simple-bin-unresolvable
+case "$SIMPLE_BIN_RESOLVED" in
+    *"/src/compiler_rust/"*|*"/compiler_rust/target/"*)
+        SIMPLE_BIN_STATUS=forbidden
+        fail_lane simple-bin-rust-seed-forbidden
+        ;;
+esac
+[ -f "$QMP_HELPER" ] || fail_lane qmp-input-capture-helper-missing
+command -v python3 >/dev/null 2>&1 || fail_lane python3-missing
+SIMPLE_VERSION_LOG="$BUILD_DIR/simple-version.log"
+set +e
+python3 "$QMP_HELPER" --run-bounded \
+    15 "$PROCESS_TERM_GRACE_SECONDS" "$SIMPLE_VERSION_LOG" -- \
+    "$SIMPLE_BIN_RESOLVED" --version
+_simple_version_code=$?
+set -e
+if [ "$_simple_version_code" -ne 0 ]; then
+    SIMPLE_BIN_STATUS=unverified
+    fail_lane simple-bin-version-failed
+fi
+SIMPLE_BIN_VERSION="$(sed -n '1,4p' "$SIMPLE_VERSION_LOG")"
+SIMPLE_BIN_VERSION="$(printf '%s' "$SIMPLE_BIN_VERSION" | tr '\n' ' ' | sed 's/[[:space:]][[:space:]]*/ /g; s/ $//')"
+case "$(printf '%s' "$SIMPLE_BIN_VERSION" | tr '[:upper:]' '[:lower:]')" in
+    *"rust-built"*|*"rust seed"*|*"bootstrap seed"*)
+        SIMPLE_BIN_STATUS=forbidden
+        fail_lane simple-bin-seed-provenance-forbidden
+        ;;
+esac
+SIMPLE_BIN_SHA256="$(file_sha256 "$SIMPLE_BIN_RESOLVED")" || fail_lane simple-bin-hash-failed
+SIMPLE_BIN_STATUS=pass
+SIMPLE_BIN="$SIMPLE_BIN_RESOLVED"
+SIMPLE_BINARY="$SIMPLE_BIN_RESOLVED"
+export SIMPLE_BIN SIMPLE_BINARY
+cd "$ROOT_DIR"
+
+[ -f "$ENTRY" ] || fail_lane canonical-arm64-desktop-entry-missing
+[ -f "$LINKER_SCRIPT" ] || fail_lane canonical-arm64-linker-script-missing
+
+QEMU_PATH="$(command -v "$QEMU_BIN" 2>/dev/null)" || fail_lane qemu-system-aarch64-missing
+QEMU_PATH="$(resolve_file "$QEMU_PATH")" || fail_lane qemu-system-aarch64-unresolvable
+QEMU_VERSION_LOG="$BUILD_DIR/qemu-version.log"
+set +e
+python3 "$QMP_HELPER" --run-bounded \
+    15 "$PROCESS_TERM_GRACE_SECONDS" "$QEMU_VERSION_LOG" -- \
+    "$QEMU_PATH" --version
+_qemu_version_code=$?
+set -e
+if [ "$_qemu_version_code" -ne 0 ]; then
+    fail_lane qemu-version-query-failed
+fi
+QEMU_VERSION="$(sed -n '1p' "$QEMU_VERSION_LOG")"
+[ -n "$QEMU_VERSION" ] || fail_lane qemu-version-empty
+QEMU_VERSION_SHA256="$(text_sha256 "$QEMU_VERSION")" ||
+    fail_lane qemu-version-hash-failed
+QEMU_BINARY_SHA256="$(file_sha256 "$QEMU_PATH")" ||
+    fail_lane qemu-binary-hash-failed
+set +e
+python3 "$QMP_HELPER" --run-bounded \
+    15 "$PROCESS_TERM_GRACE_SECONDS" "$BUILD_DIR/qemu-machine-help.log" -- \
+    "$QEMU_PATH" -machine help
+_qemu_machine_code=$?
+set -e
+if [ "$_qemu_machine_code" -ne 0 ] ||
+   ! grep -Eq '(^|[[:space:]])virt([[:space:],]|$)' "$BUILD_DIR/qemu-machine-help.log"; then
+    fail_lane qemu-virt-machine-unavailable
+fi
+set +e
+python3 "$QMP_HELPER" --run-bounded \
+    15 "$PROCESS_TERM_GRACE_SECONDS" "$BUILD_DIR/qemu-cpu-help.log" -- \
+    "$QEMU_PATH" -cpu help
+_qemu_cpu_code=$?
+set -e
+if [ "$_qemu_cpu_code" -ne 0 ] ||
+   ! grep -q 'cortex-a72' "$BUILD_DIR/qemu-cpu-help.log"; then
+    fail_lane qemu-cortex-a72-unavailable
+fi
+set +e
+python3 "$QMP_HELPER" --run-bounded \
+    15 "$PROCESS_TERM_GRACE_SECONDS" "$BUILD_DIR/qemu-device-help.log" -- \
+    "$QEMU_PATH" -device help
+_qemu_device_code=$?
+set -e
+if [ "$_qemu_device_code" -ne 0 ]; then
+    fail_lane qemu-device-catalog-unavailable
+fi
+for _device in ramfb virtio-keyboard-device virtio-mouse-device virtio-blk-device; do
+    if ! grep -q "$_device" "$BUILD_DIR/qemu-device-help.log"; then
+        fail_lane "qemu-device-unavailable-$_device"
+    fi
+done
+
+if ! python3 "$QMP_HELPER" --source-manifest "$ROOT_DIR" \
+    "$SIMPLE_BIN_RESOLVED" "$QEMU_PATH" "$SOURCE_MANIFEST_BEFORE"; then
+    fail_lane source-manifest-before-build-failed
+fi
+SOURCE_MANIFEST_BEFORE_SHA256="$(file_sha256 "$SOURCE_MANIFEST_BEFORE")" ||
+    fail_lane source-manifest-before-build-hash-failed
+
+rm -f "$DISK_IMAGE"
+set +e
+python3 "$QMP_HELPER" --run-bounded \
+    "$DISK_TIMEOUT_SECONDS" "$PROCESS_TERM_GRACE_SECONDS" "$DISK_LOG" -- \
+    sh "$ROOT_DIR/scripts/os/make_os_disk.shs" \
+    128 "$DISK_IMAGE" "" arm64 desktop-fonts
+_disk_build_code=$?
+set -e
+if [ "$_disk_build_code" -eq 124 ]; then
+    fail_lane canonical-arm64-desktop-media-build-timeout
+fi
+if [ "$_disk_build_code" -ne 0 ]; then
+    fail_lane canonical-arm64-desktop-media-build-failed
+fi
+[ -s "$DISK_IMAGE" ] || fail_lane canonical-arm64-desktop-media-missing
+command -v mtype >/dev/null 2>&1 || fail_lane mtools-required-for-desktop-media-admission
+FONT_PROBE="$BUILD_DIR/notosans.font"
+set +e
+python3 "$QMP_HELPER" --run-bounded \
+    30 "$PROCESS_TERM_GRACE_SECONDS" "$FONT_PROBE" -- \
+    mtype -i "$DISK_IMAGE" ::/SYS/FONTS/NOTOSANS
+_font_probe_code=$?
+set -e
+if [ "$_font_probe_code" -ne 0 ]; then
+    fail_lane canonical-arm64-desktop-font-missing
+fi
+if [ "$(wc -c <"$FONT_PROBE" | tr -d ' ')" != 1708408 ] ||
+   [ "$(file_sha256 "$FONT_PROBE")" != 2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081 ]; then
+    fail_lane canonical-arm64-desktop-font-invalid
+fi
+DISK_SHA256="$(file_sha256 "$DISK_IMAGE")" || fail_lane desktop-media-hash-failed
+
+mkdir -p "$GENERATED_SOURCE_ROOT/generated"
+if ! printf '%s\n' \
+    'val SIMPLEOS_LOG_COMPILED: bool = true' \
+    '' \
+    'fn simpleos_log_compile_enabled() -> bool:' \
+    '    SIMPLEOS_LOG_COMPILED' \
+    '' \
+    'fn simpleos_log_compile_mode_name() -> text:' \
+    '    "on"' \
+    >"$GENERATED_SOURCE_ROOT/generated/simpleos_log_config.spl"; then
+    fail_lane simpleos-log-config-generation-failed
+fi
+
+rm -f "$KERNEL"
+set +e
+python3 "$QMP_HELPER" --run-bounded \
+    "$BUILD_TIMEOUT_SECONDS" "$PROCESS_TERM_GRACE_SECONDS" "$BUILD_LOG" -- \
+    env SIMPLE_BOOTSTRAP=1 SIMPLE_LIB="$ROOT_DIR/src" \
+    SIMPLE_ALLOW_FREESTANDING_STUBS=1 SIMPLE_NO_STUB_FALLBACK=1 \
+    SIMPLE_OS_LOG_MODE=on "$SIMPLE_BIN" native-build \
+    --source "$GENERATED_SOURCE_ROOT" \
+    --source src/os \
+    --source src/lib \
+    --source examples/09_embedded/simple_os \
+    --backend cranelift --opt-level=aggressive --log on --timeout 870 \
+    --entry-closure --entry "$ENTRY_REL" --target aarch64-unknown-none \
+    -o "$KERNEL" --linker-script "$LINKER_SCRIPT_REL"
+_build_code=$?
+set -e
+if [ "$_build_code" -eq 124 ]; then
+    fail_lane canonical-arm64-desktop-build-external-timeout
+fi
+if [ "$_build_code" -ne 0 ]; then
+    fail_lane canonical-arm64-desktop-build-failed
+fi
+[ -s "$KERNEL" ] || fail_lane canonical-arm64-desktop-kernel-missing
+if ! python3 - "$KERNEL" <<'PY'
+import pathlib
+import sys
+
+header = pathlib.Path(sys.argv[1]).read_bytes()[:20]
+valid = (
+    len(header) >= 20
+    and header[:4] == b"\x7fELF"
+    and header[4] == 2
+    and header[5] == 1
+    and int.from_bytes(header[18:20], "little") == 183
+)
+sys.exit(0 if valid else 1)
+PY
+then
+    fail_lane canonical-arm64-desktop-kernel-invalid-elf
+fi
+KERNEL_SHA256="$(file_sha256 "$KERNEL")" || fail_lane kernel-hash-failed
+
+if ! python3 "$QMP_HELPER" --source-manifest "$ROOT_DIR" \
+    "$SIMPLE_BIN_RESOLVED" "$QEMU_PATH" "$SOURCE_MANIFEST_AFTER_BUILD"; then
+    fail_lane source-manifest-after-build-failed
+fi
+SOURCE_MANIFEST_AFTER_BUILD_SHA256="$(file_sha256 "$SOURCE_MANIFEST_AFTER_BUILD")" ||
+    fail_lane source-manifest-after-build-hash-failed
+if [ "$SOURCE_MANIFEST_AFTER_BUILD_SHA256" != "$SOURCE_MANIFEST_BEFORE_SHA256" ]; then
+    fail_lane source-changed-during-build
+fi
+_qemu_binary_after_build="$(file_sha256 "$QEMU_PATH")" ||
+    fail_lane qemu-binary-recheck-after-build-failed
+_qemu_version_after_build="$(bounded_qemu_version after-build)" ||
+    fail_lane qemu-version-recheck-after-build-failed
+_qemu_version_hash_after_build="$(text_sha256 "$_qemu_version_after_build")" ||
+    fail_lane qemu-version-rehash-after-build-failed
+if [ "$_qemu_binary_after_build" != "$QEMU_BINARY_SHA256" ] ||
+   [ "$_qemu_version_hash_after_build" != "$QEMU_VERSION_SHA256" ]; then
+    fail_lane qemu-changed-during-build
+fi
+
+QEMU_PID="$(python3 "$QMP_HELPER" --spawn-process "$QEMU_LOG" -- "$QEMU_PATH" \
+    -machine virt -cpu cortex-a72 -accel tcg -m 512M \
+    -display none -serial "file:$SERIAL_LOG" -monitor none \
+    -qmp "unix:$QMP_SOCKET,server=on,wait=off" -no-reboot -snapshot \
+    -kernel "$KERNEL" \
+    -global virtio-mmio.force-legacy=false \
+    -device ramfb \
+    -device virtio-keyboard-device \
+    -device virtio-mouse-device \
+    -drive "file=$DISK_IMAGE,if=none,id=armdesktop,format=raw" \
+    -device virtio-blk-device,drive=armdesktop)" ||
+    fail_lane qemu-spawn-failed
+case "$QEMU_PID" in
+    ''|*[!0-9]*|0) fail_lane qemu-spawn-invalid-pid ;;
+esac
+
+_boot_ticks=$((BOOT_TIMEOUT_SECONDS * 10))
+_boot_tick=0
+while [ "$_boot_tick" -lt "$_boot_ticks" ]; do
+    if ! kill -0 "$QEMU_PID" >/dev/null 2>&1; then
+        fail_lane qemu-exited-before-desktop-ready
+    fi
+    if [ -S "$QMP_SOCKET" ] && [ -f "$SERIAL_LOG" ] &&
+       grep -q '^\[desktop-gui-arm64\] desktop-ready revision=[1-9][0-9]*' "$SERIAL_LOG" &&
+       grep -q '^\[desktop-gui-arm64\] font registered source=virtio-fat32' "$SERIAL_LOG" &&
+       grep -q '^\[theme-evidence\] id=.* material_sha256=[0-9a-f][0-9a-f]* ' "$SERIAL_LOG" &&
+       grep -q '^\[engine2d-simd\] arch=aarch64 isa=neon enabled=1 ' "$SERIAL_LOG" &&
+       grep -q '^\[backend2d-event-blocker\] backend=simpleos-qemu-arm64 event_backend=virtio-mmio keyboard=transport-ready pointer=transport-ready ' "$SERIAL_LOG"; then
+        break
+    fi
+    if grep -Eq '^\[desktop-gui-arm64\] fatal|^\[engine2d-simd\] fatal|\*\*\* EXCEPTION FRAME' "$SERIAL_LOG" 2>/dev/null; then
+        fail_lane guest-fault-before-desktop-ready
+    fi
+    sleep 0.1
+    _boot_tick=$((_boot_tick + 1))
+done
+if [ "$_boot_tick" -ge "$_boot_ticks" ]; then
+    fail_lane canonical-arm64-desktop-ready-timeout
+fi
+OBSERVED_BOOT=guest-desktop-ready-after-direct-kernel-launch
+
+if ! python3 "$QMP_HELPER" "$QMP_SOCKET" "$SERIAL_LOG" \
+    "$BASELINE_PPM" "$POST_INPUT_PPM" >"$CAPTURE_LOG" 2>"$CAPTURE_ERROR_LOG"; then
+    REASON_DETAIL="$(tail -n 5 "$CAPTURE_ERROR_LOG" 2>/dev/null | tr '\n' ';' | sed 's/;$//')"
+    fail_lane qmp-input-capture-or-correlation-failed "$REASON_DETAIL"
+fi
+
+BASELINE_SHA256="$(capture_value baseline_ppm_sha256)"
+POST_INPUT_SHA256="$(capture_value post_input_ppm_sha256)"
+CAPTURE_WIDTH="$(capture_value capture_width)"
+CAPTURE_HEIGHT="$(capture_value capture_height)"
+CAPTURES_NONBLANK="$(capture_value captures_nonblank)"
+CAPTURES_DIFFERENT="$(capture_value captures_different)"
+KEY_DOWN_INPUT_SEQUENCE="$(capture_value key_down_input_sequence)"
+KEY_UP_INPUT_SEQUENCE="$(capture_value key_up_input_sequence)"
+POINTER_MOVE_INPUT_SEQUENCE="$(capture_value pointer_move_input_sequence)"
+POINTER_DOWN_INPUT_SEQUENCE="$(capture_value pointer_down_input_sequence)"
+POINTER_UP_INPUT_SEQUENCE="$(capture_value pointer_up_input_sequence)"
+KEY_DOWN_FRAME_SEQUENCE="$(capture_value key_down_frame_sequence)"
+KEY_UP_FRAME_SEQUENCE="$(capture_value key_up_frame_sequence)"
+POINTER_MOVE_FRAME_SEQUENCE="$(capture_value pointer_move_frame_sequence)"
+POINTER_DOWN_FRAME_SEQUENCE="$(capture_value pointer_down_frame_sequence)"
+POINTER_UP_FRAME_SEQUENCE="$(capture_value pointer_up_frame_sequence)"
+QMP_COMMAND_COUNT="$(capture_value qmp_command_count)"
+
+if [ "$(capture_value status)" != PASS ] ||
+   [ "$CAPTURES_NONBLANK" != true ] ||
+   [ "$CAPTURES_DIFFERENT" != true ] ||
+   [ "$BASELINE_SHA256" = "$POST_INPUT_SHA256" ] ||
+   [ "$QMP_COMMAND_COUNT" -ne 8 ]; then
+    fail_lane qmp-live-evidence-contract-incomplete
+fi
+for _numeric in \
+    "$KEY_DOWN_INPUT_SEQUENCE" "$KEY_UP_INPUT_SEQUENCE" \
+    "$POINTER_MOVE_INPUT_SEQUENCE" "$POINTER_DOWN_INPUT_SEQUENCE" \
+    "$POINTER_UP_INPUT_SEQUENCE"; do
+    case "$_numeric" in
+        ''|*[!0-9]*) fail_lane qmp-live-evidence-nonnumeric ;;
+        0) fail_lane qmp-live-evidence-zero-sequence ;;
+    esac
+done
+if [ "$KEY_DOWN_INPUT_SEQUENCE" != "$KEY_DOWN_FRAME_SEQUENCE" ] ||
+   [ "$KEY_UP_INPUT_SEQUENCE" != "$KEY_UP_FRAME_SEQUENCE" ] ||
+   [ "$POINTER_MOVE_INPUT_SEQUENCE" != "$POINTER_MOVE_FRAME_SEQUENCE" ] ||
+   [ "$POINTER_DOWN_INPUT_SEQUENCE" != "$POINTER_DOWN_FRAME_SEQUENCE" ] ||
+   [ "$POINTER_UP_INPUT_SEQUENCE" != "$POINTER_UP_FRAME_SEQUENCE" ]; then
+    fail_lane qmp-input-frame-sequence-mismatch
+fi
+if grep -Eq '^\[desktop-gui-arm64\] fatal|^\[engine2d-simd\] fatal|\*\*\* EXCEPTION FRAME' "$SERIAL_LOG"; then
+    fail_lane guest-fault-after-input
+fi
+
+OBSERVED_RAMFB=true
+OBSERVED_VIRTIO_KEYBOARD=true
+OBSERVED_VIRTIO_MOUSE=true
+if ! python3 "$QMP_HELPER" --source-manifest "$ROOT_DIR" \
+    "$SIMPLE_BIN_RESOLVED" "$QEMU_PATH" "$SOURCE_MANIFEST_AFTER_CAPTURE"; then
+    fail_lane source-manifest-after-capture-failed
+fi
+SOURCE_MANIFEST_AFTER_CAPTURE_SHA256="$(file_sha256 "$SOURCE_MANIFEST_AFTER_CAPTURE")" ||
+    fail_lane source-manifest-after-capture-hash-failed
+if [ "$SOURCE_MANIFEST_AFTER_CAPTURE_SHA256" != "$SOURCE_MANIFEST_BEFORE_SHA256" ]; then
+    fail_lane source-changed-during-capture
+fi
+_kernel_after_capture="$(file_sha256 "$KERNEL")" ||
+    fail_lane kernel-recheck-after-capture-failed
+_disk_after_capture="$(file_sha256 "$DISK_IMAGE")" ||
+    fail_lane disk-recheck-after-capture-failed
+_qemu_binary_after_capture="$(file_sha256 "$QEMU_PATH")" ||
+    fail_lane qemu-binary-recheck-after-capture-failed
+_qemu_version_after_capture="$(bounded_qemu_version after-capture)" ||
+    fail_lane qemu-version-recheck-after-capture-failed
+_qemu_version_hash_after_capture="$(text_sha256 "$_qemu_version_after_capture")" ||
+    fail_lane qemu-version-rehash-after-capture-failed
+if [ "$_kernel_after_capture" != "$KERNEL_SHA256" ] ||
+   [ "$_disk_after_capture" != "$DISK_SHA256" ] ||
+   [ "$_qemu_binary_after_capture" != "$QEMU_BINARY_SHA256" ] ||
+   [ "$_qemu_version_hash_after_capture" != "$QEMU_VERSION_SHA256" ]; then
+    fail_lane admitted-runtime-artifact-changed-during-capture
+fi
+
+RESULT_STATUS=PASS
+REASON=live-qemu-device-wm-frame-capture-evidence-complete
+REASON_DETAIL=
+write_results
+cat "$EVIDENCE_ENV"
+FINALIZED=1
+exit 0
