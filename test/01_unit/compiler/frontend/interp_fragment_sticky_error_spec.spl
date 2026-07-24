@@ -26,6 +26,17 @@ extern fn rt_env_get(key: text) -> text
 extern fn rt_env_set(key: text, value: text) -> bool
 
 describe "Flat AST bridge interpolation fragment recovery does not stick par_had_error":
+    it "keeps a brace-free string literal unchanged without interpolation work":
+        val module = parse_and_build_module("val plain = \"plain text\"\n", "brace_free_string.spl")
+        val plain = module.constants["plain"] ?? panic("missing plain constant")
+
+        match plain.value.kind:
+            case StringLit(value, interps):
+                expect(value).to_equal("plain text")
+                expect(interps.?).to_equal(false)
+            case _:
+                fail("brace-free value did not remain a plain string literal")
+
     it "keeps an inline conditional as a real Pure Simple interpolation expression":
         val src = "val rendered = \"value={if true: 1 else: 0}\"\n"
         val module = parse_and_build_module(src, "inline_if_interp.spl")
@@ -44,6 +55,17 @@ describe "Flat AST bridge interpolation fragment recovery does not stick par_had
                 expect(is_if).to_equal(true)
             case _:
                 fail("inline conditional interpolation did not remain a string literal")
+
+    it "still decodes doubled brace escapes as a plain string literal":
+        val module = parse_and_build_module("val braces = \"{{literal}}\"\n", "escaped_braces.spl")
+        val braces = module.constants["braces"] ?? panic("missing braces constant")
+
+        match braces.value.kind:
+            case StringLit(value, interps):
+                expect(value).to_equal("{literal}")
+                expect(interps.?).to_equal(false)
+            case _:
+                fail("doubled braces did not remain a decoded plain string literal")
 
     it "recovers from a non-expression brace region in a string literal without leaving par_had_error set":
         # `{,}` is not a clean single expression (a bare comma), so
