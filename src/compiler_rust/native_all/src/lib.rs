@@ -1448,10 +1448,77 @@ pub extern "C" fn to_string(val: i64) -> i64 {
 /// Execute a native binary with arguments and timeout.
 ///
 /// Simple signature: `extern fn rt_execute_native(binary_path: text, args: [text], timeout_ms: i64) -> (text, text, i32)`
-#[no_mangle]
-pub extern "C" fn rt_execute_native(path_rv: RuntimeValue, args_rv: RuntimeValue, timeout_ms: i64) -> i64 {
+fn execute_native_process(
+    binary_path: &str,
+    cmd_args: &[String],
+    timeout: std::time::Duration,
+) -> (String, String, i64) {
+    use std::io::Read;
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
+
+    let mut child = match Command::new(binary_path)
+        .args(cmd_args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => return (String::new(), format!("Execution error: {}", error), -1),
+    };
+
+    // Drain both pipes as soon as the child starts. Waiting for process exit
+    // before reading can deadlock when either OS pipe buffer fills.
+    let stdout_reader = child.stdout.take().map(|mut stdout| {
+        std::thread::spawn(move || {
+            let mut captured = String::new();
+            let _ = stdout.read_to_string(&mut captured);
+            captured
+        })
+    });
+    let stderr_reader = child.stderr.take().map(|mut stderr| {
+        std::thread::spawn(move || {
+            let mut captured = String::new();
+            let _ = stderr.read_to_string(&mut captured);
+            captured
+        })
+    });
+
+    let start = Instant::now();
+    let poll_interval = Duration::from_millis(10);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if start.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            Ok(None) => std::thread::sleep(poll_interval),
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
+    };
+
+    let stdout = stdout_reader
+        .and_then(|reader| reader.join().ok())
+        .unwrap_or_default();
+    let stderr = stderr_reader
+        .and_then(|reader| reader.join().ok())
+        .unwrap_or_default();
+
+    match status {
+        Some(status) => (stdout, stderr, status.code().unwrap_or(-1) as i64),
+        None => (String::new(), "Execution timed out".to_string(), 124),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_execute_native(path_rv: RuntimeValue, args_rv: RuntimeValue, timeout_ms: i64) -> i64 {
+    use std::time::Duration;
 
     // Helper: build a result tuple (stdout, stderr, exit_code)
     fn make_result(stdout: &str, stderr: &str, code: i64) -> i64 {
@@ -1482,56 +1549,8 @@ pub extern "C" fn rt_execute_native(path_rv: RuntimeValue, args_rv: RuntimeValue
         Duration::from_millis(1)
     };
 
-    // Spawn with piped stdout/stderr
-    let mut child = match Command::new(&binary_path)
-        .args(&cmd_args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(e) => return make_result("", &format!("Execution error: {}", e), -1),
-    };
-
-    // Poll with timeout
-    let start = Instant::now();
-    let poll_interval = Duration::from_millis(10);
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
-            Ok(None) => {
-                if start.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    break None;
-                }
-                std::thread::sleep(poll_interval);
-            }
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break None;
-            }
-        }
-    };
-
-    if status.is_none() {
-        return make_result("", "Execution timed out", 124);
-    }
-
-    let mut stdout_str = String::new();
-    let mut stderr_str = String::new();
-    if let Some(mut out) = child.stdout.take() {
-        use std::io::Read;
-        let _ = out.read_to_string(&mut stdout_str);
-    }
-    if let Some(mut err) = child.stderr.take() {
-        use std::io::Read;
-        let _ = err.read_to_string(&mut stderr_str);
-    }
-
-    let exit_code = status.unwrap().code().unwrap_or(-1) as i64;
-    make_result(&stdout_str, &stderr_str, exit_code)
+    let (stdout, stderr, exit_code) = execute_native_process(&binary_path, &cmd_args, timeout);
+    make_result(&stdout, &stderr, exit_code)
 }
 #[no_mangle]
 pub extern "C" fn rt_cargo_fmt() -> i64 {
@@ -2070,6 +2089,34 @@ mod tests {
         assert!(!native_build_bootstrap_mode(false, false));
         assert!(native_build_bootstrap_mode(true, false));
         assert!(native_build_bootstrap_mode(false, true));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execute_native_process_drains_saturated_stdout_and_stderr() {
+        let script =
+            "i=0; while [ \"$i\" -lt 4096 ]; do printf '0123456789abcdef'; printf 'fedcba9876543210' >&2; i=$((i + 1)); done";
+        let args = vec!["-c".to_string(), script.to_string()];
+
+        let (stdout, stderr, exit_code) =
+            execute_native_process("/bin/sh", &args, std::time::Duration::from_secs(5));
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(stdout.len(), 65_536);
+        assert_eq!(stderr.len(), 65_536);
+        assert!(stdout.starts_with("0123456789abcdef"));
+        assert!(stderr.starts_with("fedcba9876543210"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execute_native_process_kills_and_waits_on_timeout() {
+        let args = vec!["-c".to_string(), "sleep 2".to_string()];
+
+        let (stdout, stderr, exit_code) =
+            execute_native_process("/bin/sh", &args, std::time::Duration::from_millis(20));
+
+        assert_eq!((stdout.as_str(), stderr.as_str(), exit_code), ("", "Execution timed out", 124));
     }
 
     #[test]
