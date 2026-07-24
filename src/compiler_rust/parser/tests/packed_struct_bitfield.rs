@@ -58,6 +58,19 @@ fn ordinary_struct_fields_have_no_bit_width() {
 }
 
 #[test]
+fn hardware_bits_annotation_preserves_the_following_field() {
+    let node = parse_first("struct Ports:\n    addr: u64 @bits(34)\n    size: u32\n");
+    match node {
+        Node::Struct(s) => {
+            assert_eq!(s.fields.len(), 2);
+            assert_eq!(s.fields[0].bit_width, Some(34));
+            assert_eq!(s.fields[1].bit_width, None);
+        }
+        other => panic!("expected Node::Struct, got {:?}", other),
+    }
+}
+
+#[test]
 fn reject_post_name_packed_struct_syntax_with_targeted_diagnostic() {
     let mut parser = Parser::new("struct Flags @packed { mode: u16:4 }\n");
     let err = parser.parse().expect_err("post-name @packed syntax should be rejected");

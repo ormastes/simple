@@ -358,9 +358,8 @@ impl<'a> Parser<'a> {
             crate::ast::Type::Simple("any".to_string())
         };
 
-        // Parse optional bit-width annotation: `field: Type:N`
-        // This is only meaningful on `@packed` structs, but we accept it at the
-        // parse level and let HIR lowering emit an error if the struct is not @packed.
+        // Parse optional bit-width annotation: `field: Type:N` or
+        // `field: Type @bits(N)`.
         let bit_width = if self.check(&TokenKind::Colon) {
             self.advance();
             match &self.current.kind {
@@ -377,6 +376,30 @@ impl<'a> Parser<'a> {
                     ));
                 }
             }
+        } else if self.check(&TokenKind::At) {
+            self.advance();
+            let attribute = self.expect_identifier()?;
+            if attribute != "bits" {
+                return Err(ParseError::unexpected_token(
+                    "`bits` after `@`",
+                    attribute,
+                    self.previous.span,
+                ));
+            }
+            self.expect(&TokenKind::LParen)?;
+            let bits = match &self.current.kind {
+                TokenKind::Integer(n) => *n as u8,
+                _ => {
+                    return Err(ParseError::unexpected_token(
+                        "integer bit width in `@bits(N)`",
+                        format!("{:?}", self.current.kind),
+                        self.current.span,
+                    ));
+                }
+            };
+            self.advance();
+            self.expect(&TokenKind::RParen)?;
+            Some(bits)
         } else {
             None
         };
