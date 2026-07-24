@@ -33,6 +33,15 @@ struct SimpleLogOptions:
 fn simple_log_options_defaults() -> SimpleLogOptions:
     SimpleLogOptions(log_mode: "human", surface: "stdout", progress: "summary", quiet: false, verbose: false, valid: true, error: "")
 
+fn simple_lsp_mcp_is_log_mode(value: text) -> bool:
+    value == "human" or value == "llm" or value == "json"
+
+fn simple_lsp_mcp_is_surface(value: text) -> bool:
+    value == "stdout" or value == "tui"
+
+fn simple_lsp_mcp_is_progress(value: text) -> bool:
+    value == "summary" or value == "count" or value == "dot" or value == "none"
+
 fn log_options_help() -> [text]:
     ["--log-mode <human|llm|json>  Select log rendering mode", "--human | --llm | --json     Shorthand log modes", "--stdout | --tui             Select output surface", "--progress <summary|count|dot|none>", "--dots | --count | --no-progress", "--quiet | --verbose"]
 
@@ -71,11 +80,46 @@ fn parse_log_options(args: [text]) -> SimpleLogOptions:
         elif arg == "--no-progress":
             opts.progress = "none"
         elif arg.starts_with("--log-mode="):
-            opts.log_mode = arg.replace("--log-mode=", "")
+            val value = arg.slice(11, arg.len())
+            if simple_lsp_mcp_is_log_mode(value):
+                opts.log_mode = value
+            else:
+                opts.valid = false
+                opts.error = "invalid --log-mode: " + value
+        elif arg == "--log-mode":
+            if i + 1 < args.len() and simple_lsp_mcp_is_log_mode(args[i + 1]):
+                opts.log_mode = args[i + 1]
+                i = i + 1
+            else:
+                opts.valid = false
+                opts.error = "invalid --log-mode"
+        elif arg.starts_with("--surface="):
+            val value = arg.slice(10, arg.len())
+            if simple_lsp_mcp_is_surface(value):
+                opts.surface = value
+            else:
+                opts.valid = false
+                opts.error = "invalid --surface: " + value
         elif arg.starts_with("--progress="):
-            opts.progress = arg.replace("--progress=", "")
+            val value = arg.slice(11, arg.len())
+            if simple_lsp_mcp_is_progress(value):
+                opts.progress = value
+            else:
+                opts.valid = false
+                opts.error = "invalid --progress: " + value
+        elif arg == "--progress":
+            if i + 1 < args.len() and simple_lsp_mcp_is_progress(args[i + 1]):
+                opts.progress = args[i + 1]
+                i = i + 1
+            else:
+                opts.valid = false
+                opts.error = "invalid --progress"
         i = i + 1
     opts
+
+pub fn simple_lsp_mcp_log_option_error(args: [text]) -> text:
+    val opts = parse_log_options(args)
+    opts.error
 
 fn print_usage():
     print "{SERVER_NAME} {SERVER_VERSION}"
@@ -96,22 +140,33 @@ fn simple_lsp_mcp_is_log_option(arg: text) -> bool:
     arg == "--human" or arg == "--llm" or arg == "--json" or
         arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
         arg == "--verbose" or arg == "--dots" or arg == "--count" or
-        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--no-progress" or arg == "--log-mode" or
         arg == "--progress" or arg.starts_with("--log-mode=") or
         arg.starts_with("--surface=") or arg.starts_with("--progress=")
 
-fn simple_lsp_mcp_clean_args(args: [text]) -> [text]:
+pub fn simple_lsp_mcp_clean_args(args: [text]) -> [text]:
     var cleaned: [text] = []
     var i = 0
     while i < args.len():
         val arg = args[i]
         if simple_lsp_mcp_is_log_option(arg):
-            if arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+            if arg == "--log-mode" or arg == "--progress":
                 i = i + 1
         else:
             cleaned.push(arg)
         i = i + 1
     cleaned
+
+pub fn simple_lsp_mcp_cli_option_error(args: [text]) -> text:
+    if args.len() == 0:
+        return ""
+    val arg = args[0]
+    val singleton = arg == "--help" or arg == "-h" or arg == "--version" or arg == "-v"
+    if singleton and args.len() == 1:
+        return ""
+    if singleton:
+        return "{arg} must be used alone"
+    "Unknown option: {arg}"
 
 fn simple_lsp_mcp_get_args() -> [text]:
     val all_args = get_args()
@@ -298,6 +353,14 @@ fn main() -> i64:
         return 1
 
     val args = simple_lsp_mcp_clean_args(raw_args)
+    val option_error = simple_lsp_mcp_cli_option_error(args)
+    if option_error != "":
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"simple-lsp-mcp\",\"status\":\"error\",\"error\":\"unknown option\"}"
+        else:
+            print "Error: {option_error}"
+            print_usage()
+        return 1
     if args.len() == 0:
         if log_opts.log_mode == "json":
             print "{\"command\":\"simple-lsp-mcp\",\"status\":\"ready\"}"
@@ -316,13 +379,5 @@ fn main() -> i64:
                 print progress
             print_usage()
             return 0
-        if arg.starts_with("-"):
-            if log_opts.log_mode == "json":
-                print "{\"command\":\"simple-lsp-mcp\",\"status\":\"error\",\"error\":\"unknown option\"}"
-                return 1
-            print "Error: Unknown option: {arg}"
-            print_usage()
-            return 1
-
     lsp_serve_stdio()
     0
