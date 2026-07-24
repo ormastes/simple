@@ -116,6 +116,10 @@ either the process API timeout marker or the parallel monitor's explicit
 deadline state so spawn/internal failures remain ordinary failures.
 Pure-Simple callers use the `std.io` facade; hosted C owns the OS capture and
 cleanup boundary, and native LLVM calls cross the dedicated tuple ABI facade.
+Negative/signal statuses must round-trip through that facade unchanged; a
+tagged/masked value such as `0x1fffffffffffffff` is an ABI failure, not a
+runner status to normalize. See the
+[native signal-status report](../../08_tracking/bug/test_runner_native_signal_exit_status_tag_corruption_2026-07-24.md).
 
 For staged compiler or MCP changes, the bootstrap wrapper must pass its built-in
 Stage 2 and Stage 3 compiler sanity, then run the matching stage sanity SSpec
