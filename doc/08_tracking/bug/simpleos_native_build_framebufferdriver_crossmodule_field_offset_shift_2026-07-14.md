@@ -443,3 +443,23 @@ Same-day landing of interconnected struct-lowering root causes:
 - `8932fcb3a14`: vtable keyed by struct NAME not per-module TypeId (all 13 RenderBackend vtables now emitted; Symptom B root fix in sibling bug `simpleos_native_build_field_defaults_and_boxed_trait_dispatch_2026-07-16.md`)
 
 **Access.rs field-type pre-scan patch READY but UNCOMMITTED on disk** (at `scratchpad/screendump_handoff/compiler_field_fix.patch`). The patch recovers receiver-struct name from erased ANY to resolve ambiguous field indices correctly; bootstrap-safe (seed rebuild 3m29s, no regression). Awaiting runtime verification of: (1) composition builds fully, (2) Engine2D creation dims read correctly, (3) first-frame-rendered screendump non-black.
+
+## 2026-07-24 — trait-vtable header variant found in hosted WM
+
+The hosted Engine2D lane exposed a distinct cross-module offset variant. The
+constructor for `Engine2dCompositorBackend` writes `vtable@0`, `id@8`,
+`engine@16`, `w@24`, and `h@32`, but direct reads from
+`HostCompositor.render_frame_engine2d` compiled as `w@16` and `h@24`.
+Consequently the entry-gate diagnostic printed the tagged `Engine2D` pointer
+as width and the real width as height.
+
+Defining-module `width()`/`height()` accessors compile with the correct
+`+8` header adjustment. The hosted WM now uses those accessors at the
+cross-module gate; a compile-only hosted build completed 254 files with zero
+failures. Runtime evidence was not rerun because the bounded host retry cap had
+already been reached.
+
+The remaining compiler root is that `StructInit` can key vtable layout by the
+collision-free `struct_name`, while `effective_field_offset()` still relies on
+per-module numeric `TypeId`. A two-module native regression and owner identity
+on `FieldGet`/`FieldSet` remain required before this family is closed.

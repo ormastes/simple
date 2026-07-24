@@ -9629,22 +9629,31 @@ class SimpleWebLayoutDrawIrResult:
     composition: DrawIrComposition
     material_fallback: WebRenderMaterialFallbackProvenance
 
-fn _simple_web_draw_ir_style_value(command: DrawIrCommand, key: text) -> text:
-    var i = 0
-    while i < command.computed_style.len():
-        if command.computed_style[i].key == key:
-            return command.computed_style[i].value
-        i = i + 1
-    ""
-
-fn _simple_web_material_fallback_from_commands(commands: [DrawIrCommand]) -> WebRenderMaterialFallbackProvenance:
+fn _simple_web_realized_material_fallback(nodes: [HNode], styles: [Style]) -> WebRenderMaterialFallbackProvenance:
     var canonical = "simple-web-realized-solid-material-v1"
     var material_count = 0
     var i = 0
-    while i < commands.len():
-        val command = commands[i]
-        if _simple_web_draw_ir_style_value(command, "backdrop-filter-fallback") == "solid-material":
-            canonical = canonical + "\n{material_count}|kind=solid-material|bg=" + _simple_web_draw_ir_style_value(command, "background-color") + "|fg=" + _simple_web_draw_ir_style_value(command, "color") + "|backdrop=none|background-image=" + _simple_web_draw_ir_style_value(command, "background-image")
+    while i < nodes.len() and i < styles.len():
+        # Derive provenance from the authoritative computed style before
+        # lowering. Recovering it from DrawIrCommand.computed_style requires a
+        # wide struct-in-array plus nested-array-field round trip that can lose
+        # optional metadata on freestanding builds even while primary draw
+        # fields and pixels remain correct.
+        val declared = attr_value(nodes[i].attrs_raw, "data-wm-theme-fallback").trim().lower() == "solid-material"
+        val declared_bg = parse_color_alpha(attr_value(nodes[i].attrs_raw, "data-wm-theme-bg").trim())
+        val css_requested = styles[i].backdrop_filter_raw != ""
+        val bg_alpha = (styles[i].bg >> 24) & 255u32
+        # compute_styles realizes the explicit WM contract immediately after
+        # the cascade by clearing backdrop/image layers and applying the named
+        # bg/fg. Provenance still requires those computed values to match.
+        # Unannotated CSS backdrop requests use the same strict post-style
+        # evidence before they may claim a solid fallback.
+        val layers_cleared = styles[i].background_gradient_from == 0u32 and styles[i].background_gradient_to == 0u32 and styles[i].bg_layers_raw == ""
+        val declared_realized = declared and declared_bg != 0u32 and bg_alpha == 255u32 and styles[i].bg == declared_bg and layers_cleared
+        val css_realized = css_requested and bg_alpha == 255u32 and layers_cleared
+        val realized = declared_realized or css_realized
+        if realized:
+            canonical = canonical + "\n{material_count}|kind=solid-material|bg={styles[i].bg}|fg={styles[i].fg}|backdrop=none|background-image=none"
             material_count = material_count + 1
         i = i + 1
     if material_count == 0:
@@ -9698,7 +9707,7 @@ fn _simple_web_layout_render_html_draw_ir_result(html: text, width: i32, height:
     val composition = draw_ir_composition("html-layout", "simple-web-html-layout", DRAW_IR_BACKEND_CPU, batches)
     SimpleWebLayoutDrawIrResult(
         composition: composition,
-        material_fallback: _simple_web_material_fallback_from_commands(commands)
+        material_fallback: _simple_web_realized_material_fallback(nodes, styles)
     )
 
 pub fn simple_web_layout_render_html_draw_ir(html: text, width: i32, height: i32) -> DrawIrComposition:
@@ -9812,9 +9821,7 @@ pub fn simple_web_layout_render_html_software_result(html: text, width: i32, hei
     painted = _web_paint_iframes(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, rules, painted, width, height, 0)
     SimpleWebLayoutPixelResult(
         pixels: painted,
-        material_fallback: _simple_web_material_fallback_from_commands(
-            _html_draw_ir_commands(nodes, styles, boxes, width, height, true)
-        )
+        material_fallback: _simple_web_realized_material_fallback(nodes, styles)
     )
 
 pub fn simple_web_layout_render_html_software_pixels(html: text, width: i32, height: i32, budget_ms: i64 = WEB_RENDER_BUDGET_MS) -> [u32]:
