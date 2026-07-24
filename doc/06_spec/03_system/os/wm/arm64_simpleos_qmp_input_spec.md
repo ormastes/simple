@@ -17,7 +17,11 @@ DMA acquire/release ordering, strict used-length validation, shared
 `Arm64VirtioInputBackend` now owns raw VirtIO polling, retains keyboard edges,
 groups pointer records through `SYN_REPORT`, and delivers typed
 `KeyEvent?`/`MouseEvent?` values through the compositor's canonical
-`InputBackend`. Source readiness remains fail-closed with
+`InputBackend`. Before the frame's `SYN_REPORT` receipt, it emits retained
+per-frame `REL_X`/`REL_Y` summaries and `BTN_LEFT`/`BTN_RIGHT`/`BTN_MIDDLE`
+edge receipts. Every record uses the same guest-owned pointer frame sequence,
+so the final typed mouse delivery cannot erase the raw motion/button evidence.
+Source readiness remains fail-closed with
 `[backend2d-event-blocker] reason=live-qmp-evidence-pending` until the required
 QEMU capture exists; failed device discovery uses the same blocker family.
 

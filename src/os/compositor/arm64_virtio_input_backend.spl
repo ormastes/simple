@@ -9,6 +9,8 @@ use os.drivers.input.ps2_keyboard.{Key, KeyEvent}
 use os.drivers.input.ps2_mouse.{MouseEvent}
 use os.drivers.virtio.virtio_input_ops.{
     BTN_LEFT,
+    BTN_MIDDLE,
+    BTN_RIGHT,
     EV_KEY,
     EV_REL,
     EV_SYN,
@@ -19,6 +21,8 @@ use os.drivers.virtio.virtio_input_ops.{
     KEY_RIGHTCTRL,
     KEY_RIGHTSHIFT,
     KEY_VALUE_RELEASE,
+    REL_X,
+    REL_Y,
     SYN_REPORT,
     VirtioMouseAccum,
     virtio_input_key_event
@@ -40,6 +44,16 @@ class Arm64VirtioInputBackend:
     pending_pointer_type: u16
     pending_pointer_code: u16
     pending_pointer_value: u32
+    pending_pointer_rel_x_seen: bool
+    pending_pointer_rel_x: i64
+    pending_pointer_rel_y_seen: bool
+    pending_pointer_rel_y: i64
+    pending_pointer_left_edge: bool
+    pending_pointer_left_value: u32
+    pending_pointer_right_edge: bool
+    pending_pointer_right_value: u32
+    pending_pointer_middle_edge: bool
+    pending_pointer_middle_value: u32
     pointer_frame_open: bool
     pointer_frame_sequence: i64
     input_sequence: i64
@@ -51,6 +65,16 @@ class Arm64VirtioInputBackend:
     delivered_pointer_type: u16
     delivered_pointer_code: u16
     delivered_pointer_value: u32
+    delivered_pointer_rel_x_seen: bool
+    delivered_pointer_rel_x: i64
+    delivered_pointer_rel_y_seen: bool
+    delivered_pointer_rel_y: i64
+    delivered_pointer_left_edge: bool
+    delivered_pointer_left_value: u32
+    delivered_pointer_right_edge: bool
+    delivered_pointer_right_value: u32
+    delivered_pointer_middle_edge: bool
+    delivered_pointer_middle_value: u32
     left_alt: bool
     right_alt: bool
     left_shift: bool
@@ -71,6 +95,16 @@ impl Arm64VirtioInputBackend:
             pending_pointer_type: 0u16,
             pending_pointer_code: 0u16,
             pending_pointer_value: 0u32,
+            pending_pointer_rel_x_seen: false,
+            pending_pointer_rel_x: 0,
+            pending_pointer_rel_y_seen: false,
+            pending_pointer_rel_y: 0,
+            pending_pointer_left_edge: false,
+            pending_pointer_left_value: 0u32,
+            pending_pointer_right_edge: false,
+            pending_pointer_right_value: 0u32,
+            pending_pointer_middle_edge: false,
+            pending_pointer_middle_value: 0u32,
             pointer_frame_open: false,
             pointer_frame_sequence: 0,
             input_sequence: 0,
@@ -82,6 +116,16 @@ impl Arm64VirtioInputBackend:
             delivered_pointer_type: 0u16,
             delivered_pointer_code: 0u16,
             delivered_pointer_value: 0u32,
+            delivered_pointer_rel_x_seen: false,
+            delivered_pointer_rel_x: 0,
+            delivered_pointer_rel_y_seen: false,
+            delivered_pointer_rel_y: 0,
+            delivered_pointer_left_edge: false,
+            delivered_pointer_left_value: 0u32,
+            delivered_pointer_right_edge: false,
+            delivered_pointer_right_value: 0u32,
+            delivered_pointer_middle_edge: false,
+            delivered_pointer_middle_value: 0u32,
             left_alt: false,
             right_alt: false,
             left_shift: false,
@@ -128,13 +172,38 @@ impl Arm64VirtioInputBackend:
             self.input_sequence = self.input_sequence + 1
             self.pointer_frame_sequence = self.input_sequence
             self.pointer_frame_open = true
+            self.pending_pointer_rel_x_seen = false
+            self.pending_pointer_rel_x = 0
+            self.pending_pointer_rel_y_seen = false
+            self.pending_pointer_rel_y = 0
+            self.pending_pointer_left_edge = false
+            self.pending_pointer_left_value = 0u32
+            self.pending_pointer_right_edge = false
+            self.pending_pointer_right_value = 0u32
+            self.pending_pointer_middle_edge = false
+            self.pending_pointer_middle_value = 0u32
 
         self.pending_pointer_type = type_
         self.pending_pointer_code = code
         self.pending_pointer_value = value
         if type_ == EV_KEY and code >= BTN_LEFT:
+            if code == BTN_LEFT:
+                self.pending_pointer_left_edge = true
+                self.pending_pointer_left_value = value
+            elif code == BTN_RIGHT:
+                self.pending_pointer_right_edge = true
+                self.pending_pointer_right_value = value
+            elif code == BTN_MIDDLE:
+                self.pending_pointer_middle_edge = true
+                self.pending_pointer_middle_value = value
             self.mouse.feed_key(code, value != KEY_VALUE_RELEASE)
         elif type_ == EV_REL:
+            if code == REL_X:
+                self.pending_pointer_rel_x_seen = true
+                self.pending_pointer_rel_x = self.pending_pointer_rel_x + value.to_i32().to_i64()
+            elif code == REL_Y:
+                self.pending_pointer_rel_y_seen = true
+                self.pending_pointer_rel_y = self.pending_pointer_rel_y + value.to_i32().to_i64()
             self.mouse.feed_rel(code, value.to_i32().to_i64())
         elif type_ == EV_SYN and code == SYN_REPORT:
             self.pending_mouse = self.mouse.feed_syn()
@@ -182,6 +251,16 @@ impl InputBackend for Arm64VirtioInputBackend:
             self.delivered_pointer_type = self.pending_pointer_type
             self.delivered_pointer_code = self.pending_pointer_code
             self.delivered_pointer_value = self.pending_pointer_value
+            self.delivered_pointer_rel_x_seen = self.pending_pointer_rel_x_seen
+            self.delivered_pointer_rel_x = self.pending_pointer_rel_x
+            self.delivered_pointer_rel_y_seen = self.pending_pointer_rel_y_seen
+            self.delivered_pointer_rel_y = self.pending_pointer_rel_y
+            self.delivered_pointer_left_edge = self.pending_pointer_left_edge
+            self.delivered_pointer_left_value = self.pending_pointer_left_value
+            self.delivered_pointer_right_edge = self.pending_pointer_right_edge
+            self.delivered_pointer_right_value = self.pending_pointer_right_value
+            self.delivered_pointer_middle_edge = self.pending_pointer_middle_edge
+            self.delivered_pointer_middle_value = self.pending_pointer_middle_value
             return event
         nil
 
