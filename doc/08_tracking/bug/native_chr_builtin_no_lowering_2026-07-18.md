@@ -207,3 +207,26 @@ prelowers the receiver once, and reuses that local if a non-integer
 free-function call falls through. Instance, trait, and static resolutions stay
 on their normal dispatch paths. Rebuilt execution of this second source fix is
 pending the next bounded compiler candidate.
+
+### Local HIR provenance follow-up
+
+A second isolated compiler-only candidate rebuilt after the `FreeFunction`
+gate (675 files, zero failures; SHA-256
+`61864c39380c6005fc6ba1ae677e903456d2cad17afe0fac0e4c670fce023db9`).
+Its C5 binary still exited `1` and called the colliding free function. The
+exact fresh lowering object was
+`cache/objects/6a1f8fdf7334f691.o`; its method symbol size matches the linked
+candidate, ruling out the earlier export-closure, backfill, and stale-cache
+selection theories.
+
+The remaining lost proof is the prelowered binding's MIR type. Let lowering
+already records `val cp: i64` in the function-local `local_hir_types` map, so
+the primitive guard now uses that exact `HirTypeKind.Int` as its final
+provenance source, mirroring the existing text-predicate recovery. Resolution
+and custom-owner gates are unchanged. The focused contract passes 4/4 with the
+direct pure-Simple runtime.
+
+The final bounded rebuild attempt produced only a 662-file closure with five
+unresolved stubs and a candidate that segfaulted on `--version`; it is not a
+valid C5 receipt. Do not credit C5 execution until a correct 675-file candidate
+builds this source and returns `42`.

@@ -641,5 +641,12 @@ the shared binary — deploys require explicit user go-ahead).
   proved the receiver integer. Current source gives primitive priority over
   `FreeFunction`/`Unresolved` only, preserves custom instance/trait/static
   dispatch, and reuses the prelowered receiver on free-function fallthrough.
-  Rebuilt execution of this follow-up remains pending. See
+  A fresh 675-file candidate containing that gate still emitted the colliding
+  free call. Its exact lowering object matched the linked method, ruling out
+  export-closure, backfill, and stale-cache selection. Current source therefore
+  also recovers the explicit integer annotation from the function-local
+  `local_hir_types` map when the prelowered MIR local has lost its type. The
+  focused pure-Simple contract passes 4/4. A later 662-file rebuild contained
+  five unresolved stubs and segfaulted on `--version`, so it is rejected rather
+  than credited; a correct 675-file rebuild and C5 exit `42` remain pending. See
   `native_chr_builtin_no_lowering_2026-07-18.md`.
