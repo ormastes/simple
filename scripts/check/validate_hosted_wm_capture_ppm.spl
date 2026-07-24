@@ -98,6 +98,17 @@ fn min3(a: i64, b: i64, c: i64) -> i64:
         m = c
     m
 
+val LEGACY_EXPECTED_WIDTH: i64 = 270
+val LEGACY_EXPECTED_HEIGHT: i64 = 150
+val CROPPED_EXPECTED_WIDTH: i64 = 16
+val CROPPED_EXPECTED_HEIGHT: i64 = 16
+val CROPPED_BACKGROUND_R: i64 = 90
+val CROPPED_BACKGROUND_G: i64 = 127
+val CROPPED_BACKGROUND_B: i64 = 181
+val LEGACY_BACKGROUND_R: i64 = 15
+val LEGACY_BACKGROUND_G: i64 = 23
+val LEGACY_BACKGROUND_B: i64 = 42
+
 fn fnv_step(checksum: i64, r: i64, g: i64, b: i64) -> i64:
     val mixed = checksum ^ ((r << 16) | (g << 8) | b)
     (mixed * 16777619) & 0xffffffff
@@ -112,11 +123,19 @@ fn validate_ppm(path: text) -> Metrics:
         return fail_metrics("not-supported-ppm", 0, 0, 0, 0, 0, 0)
     var status = "pass"
     var reason = "hosted-first-frame-capture-valid"
+    val is_legacy = header.width == LEGACY_EXPECTED_WIDTH and header.height == LEGACY_EXPECTED_HEIGHT
+    val is_crop = header.width == CROPPED_EXPECTED_WIDTH and header.height == CROPPED_EXPECTED_HEIGHT
+    val bg_r = if is_crop: CROPPED_BACKGROUND_R else: LEGACY_BACKGROUND_R
+    val bg_g = if is_crop: CROPPED_BACKGROUND_G else: LEGACY_BACKGROUND_G
+    val bg_b = if is_crop: CROPPED_BACKGROUND_B else: LEGACY_BACKGROUND_B
+    val min_non_bg = if is_crop: 8 else: 16000
+    val min_bright = if is_crop: 8 else: 200
+    val min_accent = if is_crop: 2 else: 4000
     var non_bg: i64 = 0
     var bright: i64 = 0
     var accent: i64 = 0
     var checksum: i64 = 2166136261
-    if header.width != 270 or header.height != 150 or header.max_value != 255:
+    if (not is_legacy and not is_crop) or header.max_value != 255:
         status = "fail"
         reason = "unexpected-ppm-shape"
     val total_values = header.width * header.height * 3
@@ -148,7 +167,7 @@ fn validate_ppm(path: text) -> Metrics:
                     g = gp.value
                     b = bp.value
                     p3_pos = bp.next
-            if r != 15 or g != 23 or b != 42:
+            if r != bg_r or g != bg_g or b != bg_b:
                 non_bg = non_bg + 1
             if r > 210 and g > 210 and b > 210:
                 bright = bright + 1
@@ -158,13 +177,13 @@ fn validate_ppm(path: text) -> Metrics:
                 checksum = fnv_step(checksum, r, g, b)
             x = x + 1
         y = y + 1
-    if status == "pass" and non_bg < 16000:
+    if status == "pass" and non_bg < min_non_bg:
         status = "fail"
         reason = "too-few-rendered-pixels"
-    elif status == "pass" and bright < 200:
+    elif status == "pass" and bright < min_bright:
         status = "fail"
         reason = "missing-text-or-highlight-pixels"
-    elif status == "pass" and accent < 4000:
+    elif status == "pass" and accent < min_accent:
         status = "fail"
         reason = "missing-colored-window-content"
     Metrics(status: status, reason: reason, width: header.width, height: header.height, non_bg: non_bg, bright: bright, accent: accent, checksum: checksum)

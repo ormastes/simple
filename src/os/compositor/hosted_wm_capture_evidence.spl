@@ -3,7 +3,8 @@
 use os.compositor.backend_evidence.{GuiBackendEvidence, make_gui_backend_evidence}
 use os.compositor.shared_mdi_setup.{shared_mdi_surfaces}
 use os.drivers.framebuffer.fb_font.{get_glyph_8x16}
-use common.ui.wm_chrome_theme.{wm_chrome_theme}
+use common.ui.wm_chrome_theme.{active_wm_theme_render_snapshot, wm_chrome_theme}
+use nogc_sync_mut.ui.theme_package.{default_theme_id}
 
 extern fn rt_file_write_text_at(path: text, offset: i64, data: text) -> i64
 extern fn rt_env_get(key: text) -> text?
@@ -43,16 +44,16 @@ class HostedCaptureFramebuffer:
         HostedCaptureFramebuffer(width: width, height: height, pixels: pixels)
 
     me put_pixel(x: i32, y: i32, color: u32):
-        if x < 0 or y < 0 or x >= width or y >= height:
+        if x < 0 or y < 0 or x >= self.width or y >= self.height:
             return
-        pixels[y * width + x] = color
+        self.pixels[y * self.width + x] = color
 
     me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
         var row: i32 = 0
         while row < h:
             var col: i32 = 0
             while col < w:
-                put_pixel(x + col, y + row, color)
+                self.put_pixel(x + col, y + row, color)
                 col = col + 1
             row = row + 1
 
@@ -65,7 +66,7 @@ class HostedCaptureFramebuffer:
             while col < 8:
                 val mask = (0x80u8 >> col.to_u8())
                 val color = if (bits & mask) != 0u8: fg else: bg
-                put_pixel(x + col, y + row, color)
+                self.put_pixel(x + col, y + row, color)
                 col = col + 1
             row = row + 1
 
@@ -73,7 +74,7 @@ class HostedCaptureFramebuffer:
         var cx = x
         var i = 0
         while i < text_value.len():
-            draw_char_8x16(cx, y, text_value.char_code_at(i).to_u8(), fg, bg)
+            self.draw_char_8x16(cx, y, text_value.char_code_at(i).to_u8(), fg, bg)
             cx = cx + 8
             i = i + 1
 
@@ -84,7 +85,7 @@ class HostedCaptureFramebuffer:
             while col < w:
                 val source_index = row * w + col
                 if source_index >= 0 and source_index < source.len():
-                    put_pixel(x + col, y + row, source[source_index])
+                    self.put_pixel(x + col, y + row, source[source_index])
                 col = col + 1
             row = row + 1
 
@@ -102,6 +103,8 @@ class HostedWmCaptureMetrics:
     accent_pixels: i32
     sample_checksum: u64
     render_us: i64
+    theme_id: text
+    theme_source_manifest_sha256: text
     backend_evidence: GuiBackendEvidence
     write_ok: bool
 
@@ -218,6 +221,9 @@ fn render_qemu_wm_compare_scene(fb: HostedCaptureFramebuffer):
 fn capture_shared_hosted_wm_frame(path: text) -> HostedWmCaptureMetrics:
     val fb = HostedCaptureFramebuffer.with_color(HOSTED_WM_CAPTURE_WIDTH, HOSTED_WM_CAPTURE_HEIGHT, HOSTED_WM_BACKGROUND)
     render_shared_mdi_frame(fb)
+    val active_snapshot = active_wm_theme_render_snapshot()
+    val theme_id = if val snapshot = active_snapshot: snapshot.id else: default_theme_id()
+    val theme_source_manifest_sha256 = if val snapshot = active_snapshot: snapshot.source_manifest_sha256 else: ""
     val elapsed: i64 = 0
     val ok = if path != "": write_argb_crop_ppm_text(path, HOSTED_WM_CAPTURE_WIDTH, HOSTED_WM_CROP_X, HOSTED_WM_CROP_Y, HOSTED_WM_CROP_WIDTH, HOSTED_WM_CROP_HEIGHT, fb.pixels) else: true
     var non_background_pixels: i32 = 0
@@ -259,6 +265,8 @@ fn capture_shared_hosted_wm_frame(path: text) -> HostedWmCaptureMetrics:
         accent_pixels: accent_pixels,
         sample_checksum: sample_checksum,
         render_us: elapsed,
+        theme_id: theme_id,
+        theme_source_manifest_sha256: theme_source_manifest_sha256,
         backend_evidence: evidence,
         write_ok: ok
     )
@@ -304,6 +312,8 @@ fn main() -> i64:
     print "hosted_wm_capture_height=" + metrics.height.to_text()
     print "hosted_wm_capture_pixels=" + metrics.pixels.to_text()
     print "hosted_wm_capture_render_us=" + metrics.render_us.to_text()
+    print "hosted_wm_capture_theme_id=" + metrics.theme_id
+    print "hosted_wm_capture_theme_source_manifest_sha256=" + metrics.theme_source_manifest_sha256
     print "hosted_wm_backend_selected=" + metrics.backend_evidence.selected_backend
     print "hosted_wm_backend_fallback_reason=" + metrics.backend_evidence.fallback_reason
     print "hosted_wm_backend_frame_time_us=" + metrics.backend_evidence.frame_time_us.to_text()
