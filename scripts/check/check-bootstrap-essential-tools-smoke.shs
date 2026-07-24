@@ -65,6 +65,21 @@ run_probe() {
     fi
 }
 
+run_json_probe() {
+    label=$1
+    expected_rc=$2
+    shift 2
+    set +e
+    (cd "$work_dir" && run_with_timeout env SIMPLE_BOOTSTRAP= SIMPLE_RUNTIME_PATH= SIMPLE_LIB="$repo_root/src" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_FRONTEND_DELEGATED=1 "$@") >"$work_dir/$label.json" 2>"$work_dir/$label.err"
+    rc=$?
+    set -e
+    echo "${label}_rc=$rc"
+    [ "$rc" -eq "$expected_rc" ] || { echo "error=${label}_unexpected_exit"; exit 1; }
+    [ ! -s "$work_dir/$label.err" ] || { echo "error=${label}_stderr_not_empty"; exit 1; }
+    [ "$(awk 'NF { print substr($0, 1, 1); exit }' "$work_dir/$label.json")" = '{' ] || { echo "error=${label}_not_json"; exit 1; }
+    ! grep -Fq 'Found ' "$work_dir/$label.json" || { echo "error=${label}_human_output"; exit 1; }
+}
+
 # Test runner: prove a real pass, assertion failure, and zero-example refusal.
 run_probe test_runner_pass 0 "$SIMPLE_BINARY" test "$repo_root/test/fixtures/pure_simple_tooling/sibling_describe_green_fixture.spl" --mode=interpreter --no-session-daemon --sequential --no-db --no-cache --assert-ran --fail-fast
 grep -Fq 'Results: 2 total, 2 passed, 0 failed' "$work_dir/test_runner_pass.out" || { echo 'error=test_runner_pass_summary_missing'; exit 1; }
@@ -141,15 +156,39 @@ mkdir -p "$work_dir/duplicates/ignored"
 cp "$work_dir/duplicates/a.spl" "$work_dir/duplicates/ignored/c.spl"
 cp "$work_dir/duplicates/a.spl" "$work_dir/duplicates/ignored/d.spl"
 
-run_probe duplicate_clean 0 "$SIMPLE_BINARY" duplicate-check "$repo_root/test/fixtures/duplication/clean_pair" --no-default-excludes --mode token --min-lines 5 --min-tokens 8 --format json
-grep -Fq '"mode": "token"' "$work_dir/duplicate_clean.out" || { echo 'error=duplicate_clean_mode_missing'; exit 1; }
-grep -Fq '"total_groups": 0' "$work_dir/duplicate_clean.out" || { echo 'error=duplicate_clean_summary_missing'; exit 1; }
+run_json_probe duplicate_clean 0 "$SIMPLE_BINARY" duplicate-check "$repo_root/test/fixtures/duplication/clean_pair" --no-default-excludes --mode token --min-lines 5 --min-tokens 8 --format json
+grep -Fq '"mode": "token"' "$work_dir/duplicate_clean.json" || { echo 'error=duplicate_clean_mode_missing'; exit 1; }
+grep -Fq '"total_groups": 0' "$work_dir/duplicate_clean.json" || { echo 'error=duplicate_clean_summary_missing'; exit 1; }
 
-run_probe duplicate_found 1 "$SIMPLE_BINARY" duplicate-check duplicates --exclude 'duplicates/ignored/**' --mode token --min-lines 5 --min-tokens 8 --format json
-grep -Fq '"mode": "token"' "$work_dir/duplicate_found.out" || { echo 'error=duplicate_found_mode_missing'; exit 1; }
-grep -Fq '"total_groups": 1' "$work_dir/duplicate_found.out" || { echo 'error=duplicate_found_group_count_wrong'; exit 1; }
-grep -Fq '"total_occurrences": 2' "$work_dir/duplicate_found.out" || { echo 'error=duplicate_found_occurrence_count_wrong'; exit 1; }
-grep -Fq '"total_lines": 10' "$work_dir/duplicate_found.out" || { echo 'error=duplicate_found_line_count_wrong'; exit 1; }
+set -f
+duplicate_args='duplicates --exclude duplicates/ignored/** --min-lines 5 --min-tokens 8 --format json --max-allowed 0'
+run_json_probe duplicate_token_uncached 1 "$SIMPLE_BINARY" duplicate-check $duplicate_args --mode token --no-cache
+grep -Fq '"total_groups": 1' "$work_dir/duplicate_token_uncached.json" || { echo 'error=duplicate_token_uncached_group_count_wrong'; exit 1; }
+run_json_probe duplicate_token_create 1 "$SIMPLE_BINARY" duplicate-check $duplicate_args --mode token --cache-path "$work_dir/token-cache.sdn"
+[ -s "$work_dir/token-cache.sdn" ] || { echo 'error=duplicate_token_cache_missing'; exit 1; }
+run_json_probe duplicate_token_reuse 1 "$SIMPLE_BINARY" duplicate-check $duplicate_args --mode token --cache-path "$work_dir/token-cache.sdn"
+cmp -s "$work_dir/duplicate_token_create.json" "$work_dir/duplicate_token_reuse.json" || { echo 'error=duplicate_token_cache_output_changed'; exit 1; }
+
+printf '%s\n' 'fn similar_value(input: i64) -> i64:' '    val delta = input + 10' '    val epsilon = delta * 2' '    val zeta = epsilon - 3' '    zeta + 1' >"$work_dir/duplicates/b.spl"
+run_json_probe duplicate_cosine_uncached 1 "$SIMPLE_BINARY" duplicate-check $duplicate_args --mode cosine --similarity-threshold 0.85 --no-cache
+grep -Fq '"total_groups": 1' "$work_dir/duplicate_cosine_uncached.json" || { echo 'error=duplicate_cosine_uncached_group_count_wrong'; exit 1; }
+run_json_probe duplicate_cosine_create 1 "$SIMPLE_BINARY" duplicate-check $duplicate_args --mode cosine --similarity-threshold 0.85 --cache-path "$work_dir/cosine-cache.sdn"
+[ -s "$work_dir/cosine-cache.sdn" ] || { echo 'error=duplicate_cosine_cache_missing'; exit 1; }
+cmp -s "$work_dir/duplicate_cosine_uncached.json" "$work_dir/duplicate_cosine_create.json" || { echo 'error=duplicate_cosine_cache_output_changed'; exit 1; }
+run_json_probe duplicate_cosine_reuse 1 "$SIMPLE_BINARY" duplicate-check $duplicate_args --mode cosine --similarity-threshold 0.85 --cache-path "$work_dir/cosine-cache.sdn"
+cmp -s "$work_dir/duplicate_cosine_create.json" "$work_dir/duplicate_cosine_reuse.json" || { echo 'error=duplicate_cosine_cache_reuse_changed'; exit 1; }
+
+printf '%s\n' 'fn unique_value(input: i64) -> i64:' '    input + 1' >"$work_dir/duplicates/b.spl"
+run_json_probe duplicate_token_changed 0 "$SIMPLE_BINARY" duplicate-check $duplicate_args --mode token --cache-path "$work_dir/token-cache.sdn"
+grep -Fq '"total_groups": 0' "$work_dir/duplicate_token_changed.json" || { echo 'error=duplicate_token_change_stale'; exit 1; }
+grep -Fq 'file:6475706c6963617465732f622e73706c|' "$work_dir/token-cache.sdn" || { echo 'error=duplicate_token_change_cache_missing'; exit 1; }
+rm "$work_dir/duplicates/b.spl"
+run_json_probe duplicate_token_deleted 0 "$SIMPLE_BINARY" duplicate-check $duplicate_args --mode token --cache-path "$work_dir/token-cache.sdn"
+! grep -Fq 'file:6475706c6963617465732f622e73706c|' "$work_dir/token-cache.sdn" || { echo 'error=duplicate_token_deleted_cache_retained'; exit 1; }
+cp "$work_dir/duplicates/a.spl" "$work_dir/duplicates/b.spl"
+run_json_probe duplicate_cache_disabled 1 "$SIMPLE_BINARY" duplicate-check $duplicate_args --mode token --cache-path "$work_dir/disabled-cache.sdn" --no-cache
+[ ! -e "$work_dir/disabled-cache.sdn" ] || { echo 'error=duplicate_no_cache_ignored'; exit 1; }
+set +f
 
 run_probe duplicate_invalid_mode 2 "$SIMPLE_BINARY" duplicate-check "$work_dir/duplicates" --mode tokne
 grep -Fq 'Usage: simple duplicate-check' "$work_dir/duplicate_invalid_mode.out" || { echo 'error=duplicate_invalid_mode_accepted'; exit 1; }

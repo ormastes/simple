@@ -63,7 +63,9 @@ fresh binary. Require the test-runner, lint, duplicate-check, and aggregate pass
 markers. Raw-source execution, a deployed wrapper, Rust seed, stale artifact,
 or disabled stub-fallback guard is not equivalent evidence. Treat this as
 post-bootstrap command sanity; it does not replace release `--whole` tests or
-the applicable full lint and duplication gates.
+the applicable full lint and duplication gates. If duplicate caching changed,
+the same gate must prove token/cosine create/reuse parity, changed/deleted-file
+invalidation, `--no-cache`, exit parity, and JSON stdout purity.
 
 Use `bin/simple lint <changed .spl files>` and
 `bin/simple duplicate-check <owned-dir> --mode token --min-lines 5` for those

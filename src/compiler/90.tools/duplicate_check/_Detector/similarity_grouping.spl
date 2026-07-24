@@ -4,11 +4,20 @@ use compiler.tools.duplicate_check.config.{DuplicationConfig}
 use compiler.tools.duplicate_check.features.{FeatureVec, extract_token_frequencies, build_feature_vector, cosine_similarity, feature_signature}
 use compiler.tools.duplicate_check.cache.{TokenCacheManager, get_cached_tokens, set_cached_tokens_with_content}
 use compiler.tools.duplicate_check.detector_files.{collect_detector_files}
+use compiler.tools.duplicate_check.incremental.{load_incremental_cache, process_files_incremental}
 use compiler.tools.duplicate_check._Detector.interner_and_logging.*
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
 
 fn collect_files(path: text, config: DuplicationConfig) -> [text]:
     collect_detector_files(path, config)
+
+fn cosine_scan_files(files: [text], config: DuplicationConfig) -> [text]:
+    val candidates = collect_cheap_line_window_candidates(files, config)
+    var selected: [text] = []
+    for file in files:
+        if candidates.has(file):
+            selected.push(file)
+    selected
 
 fn load_tokens_with_line_indexes(blocks_to_analyze: [DuplicateBlock], config: DuplicationConfig, cache_manager: TokenCacheManager) -> SimilarityPrep:
     log_progress(config, "Pre-computing features for {blocks_to_analyze.len()} blocks...")
@@ -383,11 +392,7 @@ fn scan_duplicate_blocks(files: [text], config: DuplicationConfig, cache_manager
         # volume is bounded by which files can possibly matter, not by an
         # exact-match requirement that would defeat cosine's purpose.
         log_progress(config, "Pass 0: cheap line-window pre-filter across {files.len()} files (skips tokenize() for files with no structurally-repeated line-window)...")
-        val cheap_candidates = collect_cheap_line_window_candidates(files, config)
-        var scan_files: [text] = []
-        for f in files:
-            if cheap_candidates.has(f):
-                scan_files.push(f)
+        val scan_files = cosine_scan_files(files, config)
         if scan_files.len() < files.len():
             val pruned0 = files.len() - scan_files.len()
             log_progress(config, "  Pass 0 pruned {pruned0} file(s) before tokenizing (no structurally-repeated line-window anywhere)")
@@ -434,6 +439,27 @@ fn find_duplicates(files: [text], config: DuplicationConfig, cache_manager: Toke
 
     sorted
 
+fn find_duplicates_incremental(
+    files: [text],
+    config: DuplicationConfig,
+    cache_manager: TokenCacheManager,
+    cache_path: text
+) -> [DuplicateGroup]:
+    val cache = load_incremental_cache(cache_path, config)
+    val scan_files = if config.selected_mode == "cosine":
+        cosine_scan_files(files, config)
+    else:
+        files
+    val (all_blocks, _stats) = process_files_incremental(scan_files, config, cache, cache_manager)
+    if config.selected_mode == "token":
+        return group_fast_line_window_blocks(all_blocks, config)
+    val exact_groups = group_exact_blocks(all_blocks, config, cache_manager)
+    val refined_groups = if config.use_cosine_similarity:
+        refine_groups_with_similarity(exact_groups, all_blocks, config, cache_manager)
+    else:
+        exact_groups
+    sort_by_impact(refined_groups)
+
 fn find_duplicates_with_options(
     files: [text],
     config: DuplicationConfig,
@@ -442,10 +468,8 @@ fn find_duplicates_with_options(
     use_incremental: bool,
     incremental_cache_path: text
 ) -> [DuplicateGroup]:
-    # Parallel and incremental modes require cross-module imports (parallel.spl, incremental.spl).
-    # Falling back to sequential processing until module imports are fully supported.
     if use_parallel:
         eprint("[WARNING] Parallel duplicate detection not available; falling back to sequential processing")
     if use_incremental:
-        eprint("[WARNING] Incremental duplicate detection not available; falling back to full scan")
+        return find_duplicates_incremental(files, config, cache_manager, incremental_cache_path)
     find_duplicates(files, config, cache_manager)

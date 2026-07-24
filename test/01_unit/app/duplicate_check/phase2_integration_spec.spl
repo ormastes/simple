@@ -1,14 +1,15 @@
 # Phase 2 Integration Tests - Parallel processing and incremental analysis
 
-use compiler.tools.duplicate_check.config.{DuplicationConfig, default_config}
+use compiler.tools.duplicate_check.config.{DuplicationConfig, default_config, apply_analysis_mode, compute_config_hash}
 use compiler.tools.duplicate_check.parallel.{ParallelConfig, default_parallel_config, single_threaded_config, detect_cpu_count}
 use compiler.tools.duplicate_check.incremental.{IncrementalCache, load_incremental_cache, save_incremental_cache, needs_reprocessing, get_cached_blocks, update_cache_entry, compute_incremental_stats, format_incremental_stats}
-use compiler.tools.duplicate_check.detector.{DuplicateBlock, find_duplicates}
+use compiler.tools.duplicate_check.detector.{DuplicateBlock, find_duplicates, find_duplicates_with_options}
 use compiler.tools.duplicate_check.cache.{new_token_cache_manager}
-use app.io.mod.{file_write, shell}
+use app.io.mod.{file_read, file_write, shell}
 
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_dir_create(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
 
 fn cleanup_test_dir(path: text):
     shell("rm -rf '{path}'")
@@ -71,6 +72,16 @@ describe "Phase 2: Parallel configuration":
 
         expect(cpu_count).to_be_greater_than(0)
 
+describe "Phase 2: Dependency boundary":
+    it "keeps lexical duplicate-check off the MCP compatibility closure":
+        val cli = file_read("src/compiler/90.tools/duplicate_check/main.spl")
+        val semantic_formatter = file_read("src/compiler/90.tools/duplicate_check/semantic_formatter.spl")
+        val ollama_client = file_read("src/compiler/90.tools/duplicate_check/ollama_client.spl")
+        expect(cli).to_contain("use lazy compiler.tools.duplicate_check.semantic.{")
+        expect(cli).to_contain("use lazy compiler.tools.duplicate_check.semantic_formatter.{")
+        expect(semantic_formatter.contains("mcp.helpers")).to_equal(false)
+        expect(ollama_client.contains("mcp.helpers")).to_equal(false)
+
 describe "Phase 2: Incremental cache loading":
     it "creates empty cache when file missing":
         val cache_path = "/tmp/test_duplicate_phase2/cache_empty.sdn"
@@ -102,8 +113,9 @@ describe "Phase 2: Incremental cache loading":
         var cache = load_incremental_cache(cache_path, config)
 
         # Add a test block
-        val test_file = "/tmp/test_duplicate_phase2/test.spl"
+        val test_file = "/tmp/test_duplicate_phase2/a\\b|雪.spl"
         create_test_file(test_file, "fn test(): 42")
+        val roundtrip_code = "\\n|雪\n\r\t\\p"
 
         val blocks = [DuplicateBlock(
             file: test_file,
@@ -113,7 +125,7 @@ describe "Phase 2: Incremental cache loading":
             hash_value: 12345,
             snippet_start_offset: 0,
             snippet_end_offset: 13,
-            code: "fn test(): 42"
+            code: roundtrip_code
         )]
 
         cache = update_cache_entry(cache, test_file, blocks)
@@ -124,7 +136,28 @@ describe "Phase 2: Incremental cache loading":
 
         expect(reloaded.entries.keys().len()).to_equal(1)
         expect(total_cached_block_count(reloaded)).to_equal(1)
+        expect(reloaded.entries.has(test_file)).to_equal(true)
+        expect(reloaded.entries[test_file].blocks[0].code).to_equal(roundtrip_code)
 
+        cleanup_test_files()
+
+    it "rejects malformed cache records instead of partially loading":
+        val cache_path = "/tmp/test_duplicate_phase2/cache_malformed.sdn"
+        cleanup_test_files()
+        var config = minimal_test_config()
+        config.use_incremental = true
+        config.incremental_cache_path = cache_path
+        val header = "# format: 2\n# config_hash: {compute_config_hash(config)}\n"
+        val malformed_records = [
+            "# config_hash: {compute_config_hash(config)}\n",
+            "{header}file:2f746d702f78|hash|1|1\n  1|2|3|4|5|6|zz\n",
+            "{header}file:2f746d702f78|hash|1|9223372036854775807\n",
+            "{header}file:2f746d702f78|hash|1|1\n  1|2|0|4|5|6|636f6465\n",
+            "{header}file:2f746d702f78|hash|not-an-int|0\n"
+        ]
+        for malformed in malformed_records:
+            create_test_file(cache_path, malformed)
+            expect(load_incremental_cache(cache_path, config).entries.keys().len()).to_equal(0)
         cleanup_test_files()
 
 describe "Phase 2: Incremental cache invalidation":
@@ -188,32 +221,45 @@ describe "Phase 2: Incremental statistics":
         expect(formatted).to_contain("80% hit rate")
 
 describe "Phase 2: End-to-end incremental detection":
-    it "uses cached results for unchanged files":
+    it "reuses unchanged files and invalidates changed and deleted files":
         val cache_path = "/tmp/test_duplicate_phase2/cache_e2e.sdn"
         cleanup_test_files()
 
         val test_file1 = "/tmp/test_duplicate_phase2/e2e_test1.spl"
         val test_file2 = "/tmp/test_duplicate_phase2/e2e_test2.spl"
-        create_test_file(test_file1, duplicate_e2e_body("test1"))
-        create_test_file(test_file2, duplicate_e2e_body("test2"))
+        create_test_file(test_file1, duplicate_e2e_body("shared"))
+        create_test_file(test_file2, duplicate_e2e_body("shared"))
 
-        var config = minimal_test_config()
+        var config = apply_analysis_mode(minimal_test_config(), "token")
         config.use_incremental = true
         config.incremental_cache_path = cache_path
 
-        # First run - build cache
-        var cache = load_incremental_cache(cache_path, config)
         val cache_manager = new_token_cache_manager()
         val files = [test_file1, test_file2]
-        val groups1 = find_duplicates(files, config, cache_manager)
+        val full_groups = find_duplicates(files, config, cache_manager)
+        val groups1 = find_duplicates_with_options(files, config, cache_manager, false, true, cache_path)
 
+        expect(groups1.len()).to_equal(full_groups.len())
         expect(groups1.len()).to_be_greater_than(0)
 
-        # Second run - should use cache
-        cache = load_incremental_cache(cache_path, config)
-        val cached1 = get_cached_blocks(test_file1, cache)
+        var cache = load_incremental_cache(cache_path, config)
+        expect(get_cached_blocks(test_file1, cache).len()).to_be_greater_than(0)
+        expect(get_cached_blocks(test_file2, cache).len()).to_be_greater_than(0)
+        val original_hash = cache.entries[test_file2].source_hash
 
-        # Cache should be empty (we didn't update it manually)
-        expect(cached1.len()).to_equal(0)
+        val groups2 = find_duplicates_with_options(files, config, cache_manager, false, true, cache_path)
+        expect(groups2.len()).to_equal(groups1.len())
+
+        create_test_file(test_file2, "fn unique():\n    7\n")
+        val changed_groups = find_duplicates_with_options(files, config, cache_manager, false, true, cache_path)
+        cache = load_incremental_cache(cache_path, config)
+        expect(cache.entries[test_file2].source_hash == original_hash).to_equal(false)
+        expect(changed_groups.len()).to_equal(0)
+
+        expect(rt_file_delete(test_file2)).to_equal(true)
+        val deleted_groups = find_duplicates_with_options([test_file1], config, cache_manager, false, true, cache_path)
+        cache = load_incremental_cache(cache_path, config)
+        expect(cache.entries.has(test_file2)).to_equal(false)
+        expect(deleted_groups.len()).to_equal(0)
 
         cleanup_test_files()

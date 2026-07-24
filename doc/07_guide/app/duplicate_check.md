@@ -104,10 +104,10 @@ path or raise `--min-lines` / `--min-tokens`.
 The full CLI links the canonical duplicate-check owner in-process; production
 evidence must not execute `main.spl` as a raw source worker. After Stage 4,
 `scripts/check/check-bootstrap-essential-tools-smoke.shs` runs the exact fresh
-binary from a temporary non-repository directory. It requires clean token JSON
-to exit 0 with zero groups and an exact clone pair to exit 1 with one group,
-two occurrences, and ten duplicated lines. This proves dispatch and a minimal
-detector path; it does not replace semantic/cosine or repository-scale checks.
+binary from a temporary non-repository directory. It proves clean and cloned
+token JSON, token/cosine uncached parity, cache creation and reuse, changed and
+deleted-file invalidation, `--no-cache` precedence, exit codes, and clean
+stdout/stderr separation. It does not replace repository-scale checks.
 The shared [Stage 4 essential-tools gate](../tooling/pure_simple_tooling.md#stage-4-essential-tools-gate)
 also requires the test-runner and lint markers from that same fresh binary.
 
@@ -139,6 +139,8 @@ duplicate-check:
   min-lines: 5
   min-tokens: 30
   similarity-threshold: 0.85
+  use-incremental: false
+  incremental-cache-path: .simple-cache/duplicate-check.sdn
 ```
 
 `mode` accepts `semantic`, `semantic-llm`, `token`, or `cosine`;
@@ -148,6 +150,13 @@ fails nonzero if that write fails. The CLI applies explicit flags after
 loading this file, then validates the effective values. An invalid value that
 is not replaced by a valid CLI override is a configuration error and exits `2`
 instead of silently selecting a different analysis or output mode.
+
+For token or cosine mode, `--cache-path PATH` enables the versioned per-file
+cache and `--no-cache` disables it. Semantic modes reject incremental caching.
+Malformed, old-format, changed, or deleted entries fail cold and are rebuilt.
+Semantic imports are lazy on interpreted token/cosine startup and their JSON
+helpers do not import MCP; native one-binary closure remains static and is
+tracked separately until fresh Stage-4 qualification.
 
 ---
 

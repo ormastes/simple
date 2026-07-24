@@ -326,12 +326,15 @@ evidence boundary for the important pure-Simple tooling lanes:
   `duplicates`, excludes `duplicates/ignored/**`, and requires one real group,
   so a zero-file scan cannot pass; see the
   [relative-directory report](../../08_tracking/bug/duplicate_check_relative_directory_false_green_2026-07-24.md).
-  **Remaining bug/gap:** fresh Stage 4 evidence is missing, and incremental-cache
-  flags remain deliberately rejected because their detector/cache path is
-  disconnected; see [the cache report](../../08_tracking/bug/duplicate_check_incremental_cache_disconnected_2026-07-23.md).
-  **Next solution:** run the focused and essential-tools probes against the
-  exact fresh CLI. Enable caching only after a non-cyclic grouping path and a
-  two-run cache/invalidation smoke pass.
+  Incremental token/cosine grouping is now non-cyclic in source. Its versioned,
+  UTF-8-safe cache fails cold on malformed data, validates content hashes, and
+  prunes deleted files; see [the cache report](../../08_tracking/bug/duplicate_check_incremental_cache_disconnected_2026-07-23.md).
+  Interpreted token/cosine startup also keeps semantic/MCP modules lazy, while
+  native one-binary closure remains open in the
+  [eager semantic closure report](../../08_tracking/bug/duplicate_check_eager_semantic_native_closure_2026-07-24.md).
+  **Remaining bug/gap:** fresh Stage 4 evidence is missing.
+  **Next solution:** run the focused phase-2 and expanded essential-tools probes
+  once against the exact fresh CLI.
 - **MCP** — **Source status:** the full wrapper's repository-root CWD restore
   is pushed. Direct server admission now rejects residual/tail arguments before
   entering stdio; help/version/probe are accepted only when shared-log cleaning
