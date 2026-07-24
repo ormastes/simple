@@ -168,6 +168,29 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "${script_dir}/../.." && pwd)
 cd "${repo_root}"
 
+# Concurrency guard: two bootstraps sharing one ${output_dir} interleave logs
+# and race binary writes (observed 2026-07-24: twin stage2 builds truncated
+# each other's linked binary to 0 KB, and target/bootstrap/simple was clobbered
+# to 0 bytes by the same class of race). Directory-based lock, stale-safe.
+bootstrap_lock="${output_dir}.lock"
+mkdir -p "$(dirname -- "${bootstrap_lock}")"
+if ! mkdir "${bootstrap_lock}" 2>/dev/null; then
+  holder_pid=$(cat "${bootstrap_lock}/pid" 2>/dev/null || echo "")
+  if [ -n "${holder_pid}" ] && kill -0 "${holder_pid}" 2>/dev/null; then
+    echo "error: another bootstrap (pid ${holder_pid}) already runs against ${output_dir}." >&2
+    echo "Wait for it to finish, or run with --output=<other-dir> for an isolated build." >&2
+    exit 1
+  fi
+  echo "warning: removing stale bootstrap lock ${bootstrap_lock} (holder gone)" >&2
+  rm -rf "${bootstrap_lock}"
+  if ! mkdir "${bootstrap_lock}" 2>/dev/null; then
+    echo "error: could not acquire bootstrap lock ${bootstrap_lock}" >&2
+    exit 1
+  fi
+fi
+echo "$$" > "${bootstrap_lock}/pid"
+trap 'rm -rf "${bootstrap_lock}"' EXIT INT TERM
+
 normalize_target() {
   case "${1-}" in
     simpleos-x86_64|x86_64-simpleos) echo "simpleos-x86_64" ;;
