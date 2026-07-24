@@ -932,6 +932,17 @@ fn convert_flat_expr(idx: i64) -> Expr:
         val cast_operand = convert_flat_expr(expr_get_left(idx))
         val cast_type = convert_flat_type(expr_get_int(idx))
         return Expr(kind: ExprKind.Cast(cast_operand, cast_type), span: span)
+    elif tag == EXPR_SUFFIXED_LIT:
+        # `5i32` / `2.5f32` -- typed-suffix literal. Without this arm the
+        # node fell through to the final `else` and became NilLit, so EVERY
+        # suffixed literal compiled as the tagged-nil constant 3 (NVMe rv32
+        # fw mask-361 failures, 2026-07-24). Lower exactly like the
+        # equivalent `<lit> as <suffix>` cast, which the pipeline handles.
+        val suf_type = Type(kind: TypeKind.Named(expr_get_str(idx), []), span: span)
+        val suf_float_text = expr_get_float(idx)
+        if suf_float_text != "":
+            return Expr(kind: ExprKind.Cast(Expr(kind: ExprKind.FloatLit(suf_float_text.to_float()), span: span), suf_type), span: span)
+        return Expr(kind: ExprKind.Cast(Expr(kind: ExprKind.IntLit(expr_get_int(idx)), span: span), suf_type), span: span)
     elif tag == EXPR_ASM:
         return Expr(kind: ExprKind.AsmBlock(flat_asm_expr(expr_get_str(idx), span)), span: span)
     elif tag == EXPR_ASM_MATCH:

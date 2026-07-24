@@ -722,7 +722,11 @@ done:
 1:  wfi
     j       1b
 EOF_START
-if ! riscv64-unknown-elf-gcc -march=rv32imafdc -mabi=ilp32d -c "$START_ASM" -o "$START_OBJ" >>"$BUILD_OUT" 2>>"$BUILD_ERR"; then
+# ilp32 (soft-float ABI): must match the object the Simple LLVM backend emits
+# for riscv32-unknown-none (soft-float since the FPU DI-toggle work); ilp32d
+# start.o vs ilp32 fw.o is an ld.lld hard error. Soft-float is also the safe
+# ABI for the integer-only rv32 board core.
+if ! riscv64-unknown-elf-gcc -march=rv32imac -mabi=ilp32 -c "$START_ASM" -o "$START_OBJ" >>"$BUILD_OUT" 2>>"$BUILD_ERR"; then
   echo "STATUS: FAIL nvme-rv32-minimal-live start-stub out=$BUILD_OUT err=$BUILD_ERR"
   tail -n 40 "$BUILD_ERR" || true
   exit 1
@@ -732,7 +736,10 @@ if ! llvm-objcopy --redefine-sym _start=__simple_unused_start "$OBJ" >>"$BUILD_O
   tail -n 40 "$BUILD_ERR" || true
   exit 1
 fi
-if ! ld.lld -m elf32lriscv -T src/os/kernel/arch/riscv32/linker.ld --no-relax --gc-sections -o "$OUT" "$START_OBJ" "$OBJ" >>"$BUILD_OUT" 2>>"$BUILD_ERR"; then
+# libgcc supplies the i64 div/mod builtins (__divdi3/__moddi3) the rv32
+# soft-float objects reference; without it the link fails on any i64 division.
+NVME_RV32_LIBGCC="$(riscv64-unknown-elf-gcc -march=rv32imac -mabi=ilp32 -print-libgcc-file-name)"
+if ! ld.lld -m elf32lriscv -T src/os/kernel/arch/riscv32/linker.ld --no-relax --gc-sections -o "$OUT" "$START_OBJ" "$OBJ" "$NVME_RV32_LIBGCC" >>"$BUILD_OUT" 2>>"$BUILD_ERR"; then
   echo "STATUS: FAIL nvme-rv32-minimal-live link out=$BUILD_OUT err=$BUILD_ERR"
   tail -n 40 "$BUILD_ERR" || true
   exit 1

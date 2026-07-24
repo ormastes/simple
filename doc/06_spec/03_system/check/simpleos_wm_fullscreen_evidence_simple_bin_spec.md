@@ -61,6 +61,8 @@ The focused font/input scenario uses the shared steps:
 - Missing or stale kernel/disk artifacts, invalid scanout metadata, QMP errors,
   serial-only markers, missing guest correlations, blank captures, duplicate
   hashes, and crop-oracle mismatches remain failures.
+<<<<<<< Conflict 1 of 1
++++++++ Contents of side #1
 - A current-source kernel build uses the same unoptimized WM target profile as
   the canonical QEMU runner, runs under a 900-second host watchdog, writes to a
   candidate ELF, validates ELF64 little-endian identity and x86_64 machine
@@ -80,6 +82,11 @@ The focused font/input scenario uses the shared steps:
 - A closed QMP connection fails the capture; maximize, restore, press, and
   release markers must be strictly newer than their preceding guest `input_seq`,
   so replayed markers cannot satisfy the correlation.
+%%%%%%% Changes from base to side #2
++- A closed QMP connection fails the capture; maximize, restore, press, and
++  release markers must be strictly newer than their preceding guest `input_seq`,
++  so replayed markers cannot satisfy the correlation.
+>>>>>>> Conflict 1 of 1 ends
 - The deliberate corrupt crop must exist, retain the expected byte count,
   produce a valid SHA-256 different from the unmodified crop, and be rejected.
   A missing corrupt file cannot count as successful calibration.

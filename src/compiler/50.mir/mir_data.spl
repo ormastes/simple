@@ -13,7 +13,7 @@
 # - mir_instructions.spl: Blocks, instructions, terminators, operands (~460 lines)
 # - mir_data.spl: MirBuilder API + re-exports (this file)
 
-use compiler.hir.hir_types.{SymbolId}
+use compiler.hir.hir_types.{SymbolId, HirType}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.attributes.{vhdl_hardware_metadata_default}
 use compiler.mir.mir_types.*
@@ -647,9 +647,57 @@ fn bootstrap_fn_ret_type_lookup(name: text) -> MirType?:
         return Some(_bootstrap_fn_ret_types[name])
     nil
 
+# HIR-typed declared-return registry, name-keyed, accumulated across ALL
+# closure modules in the flat pre-pass (bootstrap_register_flat_function_values).
+# Symbol IDs are per-module-table, so id-keyed maps can't answer for a callee
+# defined in another module; without this a cross-module call to an `-> i32`
+# fn defaulted to the erased i64 return and 32-bit targets read the a0/a1
+# REGISTER PAIR — garbage a1 OR'd into every i32 result (NVMe rv32 fw
+# mask-361, 2026-07-24). Duplicate free-fn names (e.g. two `main`s) are marked
+# ambiguous and never answered.
+var _bootstrap_fn_ret_hir_types: Dict<text, HirType> = {}
+var _bootstrap_fn_ret_hir_ambig: Dict<text, bool> = {}
+
+fn bootstrap_fn_ret_hir_type_register(name: text, ty: HirType):
+    if _bootstrap_fn_ret_hir_ambig.contains_key(name):
+        return
+    if _bootstrap_fn_ret_hir_types.contains_key(name):
+        _bootstrap_fn_ret_hir_ambig[name] = true
+        _bootstrap_fn_ret_hir_types = _bootstrap_fn_ret_hir_types.remove(name)
+        return
+    _bootstrap_fn_ret_hir_types[name] = ty
+
+fn bootstrap_fn_ret_hir_type_lookup(name: text) -> HirType?:
+    if _bootstrap_fn_ret_hir_types.contains_key(name):
+        return Some(_bootstrap_fn_ret_hir_types[name])
+    nil
+
+# Companion PARAM-type registry (same ambiguity set as returns): without it a
+# cross-module call to `fn f(a: i32, b: i64)` erased both params to i64 — on
+# rv32 ilp32 the caller then marshaled the i64 into the wrong (unaligned)
+# register pair while the callee read the ABI-correct one (band/policy/dram/
+# target section failures, 2026-07-24).
+var _bootstrap_fn_param_hir_types: Dict<text, [HirType]> = {}
+
+fn bootstrap_fn_param_hir_types_register(name: text, tys: [HirType]):
+    if _bootstrap_fn_ret_hir_ambig.contains_key(name):
+        if _bootstrap_fn_param_hir_types.contains_key(name):
+            _bootstrap_fn_param_hir_types = _bootstrap_fn_param_hir_types.remove(name)
+        return
+    _bootstrap_fn_param_hir_types[name] = tys
+
+fn bootstrap_fn_param_hir_types_lookup(name: text) -> [HirType]?:
+    if _bootstrap_fn_ret_hir_ambig.contains_key(name):
+        return nil
+    if _bootstrap_fn_param_hir_types.contains_key(name):
+        return Some(_bootstrap_fn_param_hir_types[name])
+    nil
+
 export BlockId, MirBlock, MirInst, MirInstKind
 export MirFunction, MirModule
 export MirOperand, MirOperandKind, MirTerminator
 export MirBinOp, MirUnaryOp, AggregateKind, GpuAtomicOpKind, MirBorrowKind
 export MirBuilder
 export bootstrap_fn_ret_types_reset, bootstrap_fn_ret_type_register, bootstrap_fn_ret_type_lookup
+export bootstrap_fn_ret_hir_type_register, bootstrap_fn_ret_hir_type_lookup
+export bootstrap_fn_param_hir_types_register, bootstrap_fn_param_hir_types_lookup

@@ -798,6 +798,15 @@ impl MirLowering:
         if name == "rt_simd_engine2d_neon_hits" or name == "rt_simd_engine2d_neon_reset" or name == "rt_engine2d_simd_row_probe":
             return MirType.i64()
         if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+            # Name-keyed prescan registry: covers callees whose symbol id is
+            # invalid at this call site (wildcard imports), where
+            # resolved_call_return_type would default to i64 and rv32 callers
+            # pair-read an i32 return (2026-07-24).
+            if name != "":
+                if val reg_ret_ty = bootstrap_fn_ret_hir_type_lookup(name):
+                    print "[pregret] hit {name}"
+                    return self.lower_type(reg_ret_ty)
+                print "[pregret] miss {name}"
             return self.resolved_call_return_type(symbol)
         # Preserve declared user-function returns before applying the small
         # bootstrap builtin fallback table. Replacing a declared Array return
@@ -2933,6 +2942,20 @@ impl MirLowering:
         # function values.
         if mir_expr_symbol_id_value(direct_symbol) >= 0:
             call_param_types = self.resolved_call_hir_param_types(direct_symbol)
+        # Name-keyed prescan registry fallback: a wildcard-imported callee can
+        # carry an INVALID symbol id here, so the symbol path yields nothing
+        # and every arg erased to i64 — on rv32 the caller then marshaled a
+        # mixed (i32, i64) signature as all-i64 register pairs while the
+        # callee read the declared layout (band/policy/dram/target failures,
+        # 2026-07-24).
+        if call_param_types.len() == 0 and direct_name != "":
+            if val reg_param_tys = bootstrap_fn_param_hir_types_lookup(direct_name):
+                print "[pregparam] hit {direct_name}"
+                call_param_types = reg_param_tys
+            else:
+                print "[pregparam] miss {direct_name}"
+        elif call_param_types.len() == 0:
+            print "[pregparam] noname"
         if call_param_types.len() == 0 and callee.has_type_:
             # Nil-guard (stage4 lane): `has_type_` can be spuriously true
             # while `type_` is nil on this lane -- reading `.kind` off it
@@ -2982,6 +3005,21 @@ impl MirLowering:
                         # Producer-side provenance is the only authority that
                         # can distinguish raw payload 3 from the nil sentinel.
                         arg_local = self.ensure_option_handle(arg_local, declared_param_type)
+                    case HirTypeKind.Int(declared_width, _):
+                        # Narrow to the DECLARED width at the call boundary:
+                        # untyped literal/expr args lower as i64, and on rv32
+                        # ilp32 an i64 operand marshals as a REGISTER PAIR —
+                        # an `fn f(a: i32, b: i64)` callee then read shifted
+                        # registers for every later param (band/policy/dram/
+                        # target NVMe fw failures, 2026-07-24).
+                        if declared_width < 64:
+                            val declared_mir_ty = self.lower_type(declared_param_type)
+                            val arg_op_ty = self.local_mir_type_of(arg_local)
+                            if arg_op_ty != nil:
+                                if arg_op_ty.kind == MirTypeKind.I64 or arg_op_ty.kind == MirTypeKind.U64:
+                                    var b_narrow = self.builder
+                                    arg_local = b_narrow.emit_cast(mir_operand_copy(arg_local), declared_mir_ty)
+                                    self.builder = b_narrow
                     case _:
                         ()
             arg_operands = arg_operands.push(mir_operand_copy(arg_local))

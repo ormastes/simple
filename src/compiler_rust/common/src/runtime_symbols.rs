@@ -317,6 +317,7 @@ pub fn symbol_tier_of(name: &str) -> RuntimeSymbolTier {
         || name.starts_with("rt_string_")
         || name.starts_with("rt_utf8_")
         || name == "rt_text_count_codepoints"
+        || name == "rt_text_cmp_any"
         || name.starts_with("rt_swi_")
         || name.starts_with("rt_rank_")
         || name == "rt_select_query"
@@ -489,6 +490,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_utf8_validate",
     "rt_utf8_find_invalid",
     "rt_text_count_codepoints",
+    "rt_text_cmp_any",
     // Time operations backed by runtime_time.c and runtime_timestamp.c.
     "rt_time_now_nanos",
     "rt_time_now_micros",
@@ -1986,6 +1988,22 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     // The compiler emits these Simple-facing names; the AOT loader rewrites them, but the
     // Cranelift JIT registers symbols by exact name, so each is exported as a real symbol
     // forwarding to its canonical target (see runtime/src/value/sffi/{file_io,io_print}).
+    // Auto-registered: emitted by src/compiler backends, defined in src/runtime (JIT NULL-jump fix 2026-07-24).
+    "rt_dict_contains",
+    "rt_dir_exists",
+    "rt_interp_cstr",
+    "rt_mkdir_p",
+    "rt_path_parent",
+    "rt_string_new_literal",
+    "rt_value_as_float",
+    "rt_value_is_float",
+    // Auto-registered batch 2: lib/app extern fns + dynamic rt_opt_* (JIT NULL-jump fix 2026-07-24).
+    "rt_array_push_i64_raw",
+    "rt_dict_get_i64_raw",
+    "rt_dict_set_i64_raw",
+    "rt_opt_bool_to_string",
+    "rt_opt_f64_to_string",
+    "rt_opt_i64_to_string",
     "rt_file_delete", // -> rt_file_remove
     "rt_print",       // -> rt_print_value
     "rt_println",     // -> rt_println_value

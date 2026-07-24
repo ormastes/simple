@@ -19,6 +19,9 @@ use compiler.blocks.value.BlockValue
 use compiler.mir.mir_lowering_types.{MirLowering, MirError}
 use compiler.backend.gpu_intrinsics.{is_gpu_intrinsic}
 
+# std.alloc.sffi only exists in the seed lib tree; the stage4 strict lane
+# cannot resolve it — declare the runtime extern directly.
+extern fn rt_dict_contains(dict: i64, key: Any) -> bool
 extern fn rt_env_get(key: text) -> text
 extern fn rt_enum_discriminant(value: Any) -> i64
 extern fn rt_enum_payload(value: Any) -> i64
@@ -758,6 +761,13 @@ impl MirLowering:
             return ret_out
         val sym = self.symbols.get_symbol_raw(symbol.id)
         if val found_sym = sym:
+            # Name-keyed cross-module source: symbol IDs are per-module-table,
+            # so a callee defined in another closure module never hits the
+            # id-keyed map. The flat pre-pass registered every free fn's
+            # declared return type globally (ambiguous names never answered).
+            if val reg_ret = bootstrap_fn_ret_hir_type_lookup(found_sym.name):
+                ret_out = reg_ret
+                return ret_out
             if val sym_type = found_sym.type_:
                 match sym_type.kind:
                     case HirTypeKind.Function(_, ret, _):
@@ -769,6 +779,12 @@ impl MirLowering:
     me resolved_call_hir_param_types(symbol: SymbolId) -> [HirType]:
         val sym = self.symbols.get_symbol_raw(symbol.id)
         if val found_sym = sym:
+            # Cross-module declared param types (same prescan registry as
+            # return types): without this a `fn f(a: i32, b: i64)` callee in
+            # another module erased to all-i64 at the call site and rv32
+            # marshaled the i64 into the wrong (unaligned) register pair.
+            if val reg_params = bootstrap_fn_param_hir_types_lookup(found_sym.name):
+                return reg_params
             if val sym_type = found_sym.type_:
                 match sym_type.kind:
                     case HirTypeKind.Function(params, _, _):

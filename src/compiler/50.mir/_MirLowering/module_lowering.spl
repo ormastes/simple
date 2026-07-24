@@ -108,6 +108,7 @@ impl MirLowering:
             local_symbol_ids: [],
             local_symbol_values: [],
             local_hir_types: {},
+            fn_return_types: {},
             current_function_symbols: [],
             current_function_names: [],
             loop_stack: empty_loop_stack,
@@ -487,6 +488,21 @@ impl MirLowering:
             val class_def = prescan_class_values[psi]
             self.register_composite_field_metadata(class_def.name, class_def.fields, module.symbols, false)
             psi = psi + 1
+        # Same ordering gap for CALL RETURN TYPES: the entry module lowers
+        # before its dependency modules, so a cross-module call's declared
+        # return type was unknown and defaulted to the erased i64 — on
+        # 32-bit targets the caller then read the a0/a1 REGISTER PAIR of an
+        # i32-returning callee (garbage high word OR'd into every result;
+        # NVMe rv32 fw mask-361, 2026-07-24). Register every free fn's
+        # declared HIR return type name-keyed (ambiguous duplicates are
+        # never answered — see mir_data.spl).
+        for prescan_fn in module.functions.values():
+            if not prescan_fn.is_method:
+                bootstrap_fn_ret_hir_type_register(prescan_fn.name, prescan_fn.return_type)
+                var prescan_param_tys: [HirType] = []
+                for prescan_param in prescan_fn.params:
+                    prescan_param_tys.push(prescan_param.type_)
+                bootstrap_fn_param_hir_types_register(prescan_fn.name, prescan_param_tys)
 
     me lower_module(module: HirModule) -> MirModule:
         """Lower HIR module to MIR."""

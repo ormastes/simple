@@ -489,6 +489,16 @@ pub(super) fn eval_collection_expr(
                     };
                     arr.get(idx).cloned().ok_or_else(|| {
                         // E3002 - Index Out Of Bounds
+                        if std::env::var("SIMPLE_INTERP_OOB_DEBUG").is_ok() {
+                            let recv_dbg = format!("{:?}", receiver);
+                            let idx_dbg = format!("{:?}", index);
+                            eprintln!(
+                                "[oob-debug] recv={} idx={}\n[oob-debug-bt] {}",
+                                &recv_dbg[..recv_dbg.len().min(400)],
+                                &idx_dbg[..idx_dbg.len().min(400)],
+                                std::backtrace::Backtrace::force_capture()
+                            );
+                        }
                         let ctx = ErrorContext::new()
                             .with_code(codes::INDEX_OUT_OF_BOUNDS)
                             .with_help(format!("array has {} element(s)", len))

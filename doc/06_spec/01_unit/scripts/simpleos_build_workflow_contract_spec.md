@@ -1,3 +1,5 @@
+<<<<<<< Conflict 1 of 1
++++++++ Contents of side #1
 # SimpleOS Build Workflow Contract Specification
 
 > **Manual source contract — pending canonical `spipe-docgen`.** This check is
@@ -43,3 +45,35 @@ the workflow. Each job has 150 minutes; deployment has 60, smoke bootstrap 25,
 full bootstrap 60, and WM evidence 35. The summary gate requires a successful
 smoke job while allowing the conditional full job to remain skipped outside
 its configured events.
+%%%%%%% Changes from base to side #2
++# SimpleOS Build Workflow Contract Specification
++
++> **Manual source contract — pending canonical `spipe-docgen`.** This check is
++> intentionally static: it does not compile Simple or launch QEMU.
++
++Executable source:
++
++- `test/01_unit/scripts/simpleos_build_workflow_contract_spec.spl`
++
++## Self-host before SimpleOS checks
++
++Both x86 jobs build the Rust bootstrap seed, then run the staged pure-Simple
++bootstrap with Cranelift, two workers, deployment, and MCP disabled. The
++deployed `bin/simple` must be executable, and a version identifying a Rust or
++bootstrap seed fails the job.
++
++## Fail-closed smoke evidence
++
++The smoke job has no `continue-on-error`. It installs QEMU, LLVM, FAT tooling,
++OVMF, and GRUB EFI, runs the bootstrap smoke, then invokes the WM font/input
++evidence wrapper with an explicit pure-Simple binary and build-local report.
++The evidence command is fail-closed; its retained report, captures, serial log,
++and QEMU log upload under `always()`.
++
++## Trigger and timeout contract
++
++Changes to the evidence wrapper, SimpleOS disk builders, or pinned font asset
++trigger the workflow. Job budgets exceed their bounded bootstrap, QEMU, and
++evidence steps. The summary gate requires a successful smoke job while allowing
++the conditional full job to remain skipped outside its configured events.
+>>>>>>> Conflict 1 of 1 ends

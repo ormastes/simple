@@ -1425,6 +1425,18 @@ pub(crate) fn evaluate_method_call(
         _ => None,
     };
 
+    // Env-gated deep diagnostics for "method not found" on mis-typed receivers
+    // (e.g. a struct field decoding as raw i64): the Rust backtrace pins the
+    // interp dispatch path when the .spl-level location is unknown.
+    if std::env::var("SIMPLE_INTERP_OOB_DEBUG").is_ok() {
+        eprintln!(
+            "[mnf-debug] method={} recv_type={}\n[mnf-debug-bt] {}",
+            method,
+            recv_val.type_name(),
+            std::backtrace::Backtrace::force_capture()
+        );
+    }
+
     // DEBUG: Add receiver value info directly to error message to help diagnose type issues
     let receiver_debug = format!(
         " (receiver value: {})",
@@ -1649,7 +1661,20 @@ pub(crate) fn evaluate_method_call_with_self_update(
     }
 
     // For non-objects (Array, Dict, String, etc.), check if the method returns a mutated value
-    let result = evaluate_method_call(receiver, method, args, env, functions, classes, enums, impl_methods)?;
+    let result = evaluate_method_call(receiver, method, args, env, functions, classes, enums, impl_methods)
+        .map_err(|e| {
+            // Env-gated: names the receiver EXPRESSION (not just its value) so a
+            // "method not found on i64" can be traced to the .spl source site.
+            if std::env::var("SIMPLE_INTERP_OOB_DEBUG").is_ok() {
+                let recv_dbg = format!("{:?}", receiver);
+                eprintln!(
+                    "[mnf-expr] method={} recv_expr={}",
+                    method,
+                    &recv_dbg[..recv_dbg.len().min(400)]
+                );
+            }
+            e
+        })?;
 
     // Only propagate self-update for an allow-list of known in-place mutating methods.
     // Previously this used a type-discriminant heuristic ("same type in/out = mutating"),
