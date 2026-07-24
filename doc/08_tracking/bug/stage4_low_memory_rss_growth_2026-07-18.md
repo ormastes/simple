@@ -50,18 +50,18 @@ owner projection. No RSS baseline is claimed from these failed link paths.
 
 Source review also rules out freeing `previous.source_chars` before replacing
 the active lexer slot: `CoreLexer` copies array fields shallowly, so that order
-creates a use-after-free window. The implemented lifecycle constructs the fresh
-lexer, captures the whole retired lexer, replaces the slot, and only then
-shallow-releases `retired_core_lexer.source_chars`. Pure `simple-core`, hosted
-C, Rust native, Cranelift/JIT, and the Rust interpreter now share the
-`rt_array_free` ABI; interpreter-managed arrays remain Arc-owned while raw
-native handles use the shallow runtime release. The hosted-C shallow-release probe
-verifies registry decrement, preserved element handles, and idempotent rejection
-of a repeated release. A cached pure-Simple frontend closure compiled 28 modules
-with 19 cache hits and no failures. Full Stage4 RSS/artifact acceptance remains
-open because the preserved executable bundle still cannot link the isolated
-probe; do not substitute a raw `make_core_lexer` probe because it bypasses the
-slot-replacement owner.
+creates a use-after-free window. The attempted lifecycle constructed the fresh
+lexer, captured the whole retired lexer, replaced the slot, and only then
+shallow-released `retired_core_lexer.source_chars`.
+
+### 2026-07-24 correction
+
+The unverified eager release was unsafe in the compiled self-host: Stage4
+parsed the first source, then read corrupted tokens from the second source.
+The lexer now keeps the retired array registered until ownership semantics can
+prove a safe release. The existing two-parse frontend regression rejects any
+eager `rt_array_free` in the shared lexer initializer. Full Stage4 artifact and
+RSS acceptance remain open.
 
 ## Reproduction
 
