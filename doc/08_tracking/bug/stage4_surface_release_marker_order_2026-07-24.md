@@ -70,3 +70,8 @@ live slope gate remains the acceptance evidence.
 The admitted pure-Simple candidate compiled 674 files with zero failures,
 passed the canonical frontend smoke, and passed the live gate with
 `average_growth=10332` and `termination=requested seq=10`.
+
+A subsequent full traversal reached ordered release marker 400 and then the
+pure-Simple process crashed before producing an artifact. See
+`stage4_full_surface_traversal_crash_after_400_2026-07-24.md`; the bounded slope
+issue is fixed, but full Stage 4 admission remains blocked.
