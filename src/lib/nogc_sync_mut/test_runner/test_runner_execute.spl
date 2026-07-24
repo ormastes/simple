@@ -16,7 +16,7 @@ use std.test_runner.test_runner_types.{TestFileResult, TestOptions, TEST_OUTPUT_
 use std.test_runner.test_runner_files.{strip_ansi, read_file_content}
 use std.test_runner.test_runner_fork.{run_test_file_fork}
 use std.io.{file_exists, file_write, file_delete}
-use std.nogc_sync_mut.io_runtime.{file_size}
+use std.io.{file_size_raw, file_modified_time}
 use std.io.{time_now_unix_micros}
 use std.io.{process_run_bounded, process_run_with_limits_bounded, ProcessResult}
 use std.env.platform.{get_temp_dir}
@@ -167,6 +167,23 @@ fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileR
         error: result.error, timed_out: result.timed_out, cached: result.cached
     )
 
+# A completed .smf artifact (SMF header + trailer + at least some code) is
+# always well over this many bytes; a bare/empty stub (the 179-byte stubs from
+# doc/08_tracking/bug/smf_stub_shadowing_unresolved_describe_2026-07-24.md)
+# is not. Cheap sanity floor alongside the mtime freshness check — not a real
+# SMF header parse.
+val _SMF_MIN_VALID_SIZE: i64 = 256
+
+fn _smf_artifact_is_usable(smf_path: text, source_path: text) -> bool:
+    # Guard against a stale or stub .smf silently shadowing the real .spl
+    # source: only trust a precompiled artifact that is both non-trivially
+    # sized and at least as fresh as the source file it was built from.
+    if not file_exists(smf_path):
+        return false
+    if file_size_raw(smf_path) < _SMF_MIN_VALID_SIZE:
+        return false
+    file_modified_time(smf_path) >= file_modified_time(source_path)
+
 fn run_test_file_smf(file_path: text, options: TestOptions) -> TestFileResult:
     if options.coverage:
         return run_test_file_native(file_path, options)
@@ -176,13 +193,9 @@ fn run_test_file_smf(file_path: text, options: TestOptions) -> TestFileResult:
     val start = time_now_unix_micros()
     val timeout_ms = options.timeout * 1000
 
-    # Check if pre-compiled .smf bytecode exists. Guard against orphaned
-    # header-only stubs (~179 bytes): one stale stub beside the source
-    # silently hijacks every future run of that file. See
-    # doc/08_tracking/bug/smf_stub_shadowing_unresolved_describe_2026-07-24.md.
-    # ponytail: size gate mirrors bootstrap_main's >300-byte stub check;
-    # upgrade to an mtime-vs-source comparison if real .smf can shrink.
-    if file_exists(smf_path) and file_size(smf_path) > 300:
+    # Check if pre-compiled .smf bytecode exists AND is actually usable —
+    # never trust a stale or stub artifact over the real source.
+    if _smf_artifact_is_usable(smf_path, file_path):
         # Run pre-compiled SMF bytecode directly (no "test" command to avoid recursion)
         var run_args: [text] = [smf_path]
         if options.gc_log:

@@ -40,10 +40,23 @@ Quarantine all untracked `.smf` under `src/` and `test/` (move out of the
 tree; they are build artifacts). After removal the same binaries run specs
 normally — devhub suite verified 25 files / 517 examples / 0 failures.
 
-## Open root fixes
+## Follow-up findings + fixes landed (same day)
 
-- Resolver should reject/ignore stub `.smf` whose payload is empty or older
-  than the sibling `.spl` (fail-open guard exists for dynSMF; extend to
-  module resolution).
-- Builds should not emit `.smf` into `src/`/`test/`; artifacts belong under
-  `build/` (native_cache). Whatever produced the Feb-25 sweep is unidentified.
+- **Producer identified and fixed** (`d12c7be42b7`): the test runner's
+  native/compile mode wrote its `.smf` compile artifact BESIDE the source
+  (`file_path.replace(".spl",".smf")`) and deleted it only on clean
+  completion — any interrupt (timeout kill, OOM, Ctrl-C) orphaned a stub.
+  Artifact now goes under the temp dir.
+- **Cache trust guarded**: `run_test_file_smf` treated *any* existing `.smf`
+  sibling as precompiled cache and executed it directly. Now gated by
+  `_smf_artifact_is_usable` — rejects missing, stub-sized (<256 bytes), or
+  stale (older than the sibling `.spl`) artifacts.
+- **Resolution-order claim corrected**: a dedicated investigation could NOT
+  reproduce ".smf preferred over .spl" in any current resolver — every .spl
+  resolver ignores `.smf` entirely, and the Rust seed's
+  `module_resolver/resolution.rs` checks `.spl` BEFORE `.smf` in the same
+  directory. A planted stub beside `spec.spl` did not break current binaries.
+  The historical mechanism for the incident-era binaries (Jul-22/Jul-24
+  builds; cf. the Jul-17 "std.spec SMF shadowing = Rust-layer defect" note)
+  remains unpinned — but with the producer dead, the cache gated, and current
+  resolvers proven .spl-first, the class is closed at every reachable layer.
