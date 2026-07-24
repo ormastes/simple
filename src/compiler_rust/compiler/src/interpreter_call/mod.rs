@@ -14,14 +14,16 @@ pub(crate) use bdd::{
     BDD_EXPECT_PROVISIONAL, BDD_FAILURE_MSG, BDD_INDENT, BDD_LAZY_VALUES, BDD_MATCHER_RAN, BDD_SHARED_EXAMPLES,
 };
 pub(crate) use core::{
-    bind_args, bind_args_with_injected, exec_function, exec_function_with_captured_env, exec_function_with_values,
-    exec_function_with_values_and_self, exec_lambda, instantiate_class, ProceedContext, IN_NEW_METHOD,
+    bind_args, bind_args_with_injected, exec_function, exec_function_with_bound_args,
+    exec_function_with_captured_env, exec_function_with_values, exec_function_with_values_and_self, exec_lambda,
+    instantiate_class, ProceedContext, IN_NEW_METHOD,
 };
 pub(crate) use core::bitfield_support::instantiate_bitfield_from_args;
 
 use std::sync::Arc;
 use std::borrow::Borrow;
 use std::io::Write;
+use std::path::Path;
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
     call_extern_function, dispatch_context_method, evaluate_expr, BUILTIN_CHANNEL, CONTEXT_OBJECT, EXTERN_FUNCTIONS,
@@ -137,7 +139,22 @@ fn overload_score(func: &FunctionDef, values: &[Value]) -> Option<usize> {
 /// struct's mangled static-method overload registration doesn't tag one).
 fn function_module_owner(func: &Arc<FunctionDef>) -> Option<Arc<str>> {
     let key = Arc::as_ptr(func) as usize;
-    FUNCTION_MODULE_OWNER.with(|cell| cell.borrow().get(&key).cloned())
+    FUNCTION_MODULE_OWNER
+        .with(|cell| cell.borrow().get(&key).cloned())
+        .or_else(|| {
+            func.attributes.iter().find_map(|attribute| {
+                attribute
+                    .name
+                    .strip_prefix(crate::interpreter::FLATTEN_MODULE_OWNER_ATTR_PREFIX)
+                    .map(|raw| {
+                        Arc::from(
+                            crate::interpreter::normalize_path_key(Path::new(raw))
+                                .to_string_lossy()
+                                .as_ref(),
+                        )
+                    })
+            })
+        })
 }
 
 /// True when `func`'s owning module matches the module of the function whose

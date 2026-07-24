@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 
 use simple_common::actor::{Message, ThreadSpawner};
-use simple_parser::ast::{BitfieldDef, Block, EnumDef, MacroDef, NewtypeDef, Type};
+use simple_parser::ast::{Attribute, BitfieldDef, Block, EnumDef, FunctionDef, MacroDef, NewtypeDef, Type};
 
 use crate::aop_config::AopConfig;
 use crate::concurrent_providers::registry::ConcurrentProviderRegistry;
@@ -62,6 +62,23 @@ pub struct LiteralFunctionInfo {
 /// so the lint "unknown attribute" check never sees it.
 pub(crate) const FLATTEN_MODULE_OWNER_ATTR_PREFIX: &str = "__simple_flatten_module_owner__=";
 pub(crate) const FLATTEN_GLOBAL_OWNER_MARKER_PREFIX: &str = "__simple_flatten_global_owner__=";
+
+pub(crate) fn tag_function_module_owner(function: &mut FunctionDef, owner: &str) {
+    if function
+        .attributes
+        .iter()
+        .any(|attribute| attribute.name.starts_with(FLATTEN_MODULE_OWNER_ATTR_PREFIX))
+    {
+        return;
+    }
+    function.attributes.push(Attribute {
+        span: function.span,
+        name: format!("{FLATTEN_MODULE_OWNER_ATTR_PREFIX}{owner}"),
+        value: None,
+        args: None,
+        named_args: None,
+    });
+}
 
 //==============================================================================
 // Thread-local state declarations

@@ -7,7 +7,7 @@ use crate::error::CompileError;
 use crate::interpreter::{
     exec_block_fn, Control, CONST_NAMES, IMMUTABLE_VARS, IN_IMMUTABLE_FN_METHOD, GENERATOR_YIELDS, CURRENT_EXEC_MODULE,
     FUNCTION_MODULE_OWNER, MODULE_ENV_BY_OWNER, MODULE_GLOBALS, MODULE_GLOBALS_BY_OWNER,
-    MODULE_GLOBALS_INITIAL_BY_OWNER,
+    MODULE_GLOBALS_INITIAL_BY_OWNER, visit_pattern_binding_names,
 };
 use crate::interpreter_unit::{is_unit_type, validate_unit_type};
 use crate::value::*;
@@ -121,30 +121,7 @@ fn sync_owned_captured_globals(func: &FunctionDef, local_env: &Env, outer_env: &
 }
 
 fn mark_pattern_locals(pattern: &Pattern, env: &mut Env) {
-    match pattern {
-        Pattern::Identifier(name) | Pattern::MutIdentifier(name) | Pattern::MoveIdentifier(name) => {
-            env.mark_local(name.clone());
-        }
-        Pattern::Tuple(patterns) | Pattern::Array(patterns) | Pattern::Or(patterns) => {
-            for pattern in patterns {
-                mark_pattern_locals(pattern, env);
-            }
-        }
-        Pattern::Struct { fields, .. } => {
-            for (_, pattern) in fields {
-                mark_pattern_locals(pattern, env);
-            }
-        }
-        Pattern::Enum { payload, .. } => {
-            if let Some(patterns) = payload {
-                for pattern in patterns {
-                    mark_pattern_locals(pattern, env);
-                }
-            }
-        }
-        Pattern::Typed { pattern, .. } => mark_pattern_locals(pattern, env),
-        Pattern::Wildcard | Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Rest => {}
-    }
+    visit_pattern_binding_names(pattern, &mut |name| env.mark_local(name.to_owned()));
 }
 
 fn mark_block_locals(block: &Block, env: &mut Env) {
@@ -543,6 +520,29 @@ pub(crate) fn exec_function_with_values(
 ) -> Result<Value, CompileError> {
     with_effect_check!(func, {
         exec_function_with_values_inner(func, args, outer_env, functions, classes, enums, impl_methods)
+    })
+}
+
+#[allow(clippy::too_many_arguments)] // reason: mirrors the other function execution entrypoints
+pub(crate) fn exec_function_with_bound_args(
+    func: &FunctionDef,
+    bound_args: HashMap<String, Value>,
+    outer_env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Value, CompileError> {
+    with_effect_check!(func, {
+        exec_function_with_bound_args_inner(
+            func,
+            bound_args,
+            outer_env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        )
     })
 }
 
@@ -1063,6 +1063,30 @@ fn exec_function_with_values_inner(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
+    let self_mode = SelfMode::IncludeSelf;
+    let bound = bind_args_with_values(
+        &func.params,
+        args,
+        outer_env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
+        self_mode,
+    )?;
+    exec_function_with_bound_args_inner(func, bound, outer_env, functions, classes, enums, impl_methods)
+}
+
+#[allow(clippy::too_many_arguments)] // reason: shared core for already-bound function execution
+fn exec_function_with_bound_args_inner(
+    func: &FunctionDef,
+    bound_args: HashMap<String, Value>,
+    outer_env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Value, CompileError> {
     let trace_start = trace_interpreter_call_enter(func);
 
     // Layout recording for 4KB page locality optimization
@@ -1084,24 +1108,12 @@ fn exec_function_with_values_inner(
     }
 
     let mut local_env = captured_env_with_live_globals(func, &Env::new());
-    let self_mode = SelfMode::IncludeSelf;
-    let bound = bind_args_with_values(
-        &func.params,
-        args,
-        outer_env,
-        functions,
-        classes,
-        enums,
-        impl_methods,
-        self_mode,
-    )?;
-
     // Record function return for layout call graph tracking
     crate::layout_recorder::record_function_return();
 
     let result = execute_function_body(
         func,
-        bound,
+        bound_args,
         &mut local_env,
         functions,
         classes,

@@ -14,7 +14,7 @@ macro_rules! check_timeout {
         }
     };
 }
-use super::core_types::{Control, Enums, ImplMethods, get_pattern_name};
+use super::core_types::{Control, Enums, ImplMethods, visit_pattern_binding_names};
 use super::node_exec::exec_node;
 use super::expr::evaluate_expr;
 use super::macros::{enter_block_scope, exit_block_scope};
@@ -39,18 +39,34 @@ fn capture_block_scope_shadows(block: &Block, env: &mut Env) -> Vec<(String, Opt
     let mut shadows = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for stmt in &block.statements {
-        let name = match stmt {
-            Node::Let(let_stmt) => get_pattern_name(&let_stmt.pattern),
-            Node::Const(const_stmt) => Some(const_stmt.name.clone()),
-            Node::Static(static_stmt) => Some(static_stmt.name.clone()),
-            _ => None,
-        };
-        if let Some(name) = name {
+        let mut names = Vec::new();
+        match stmt {
+            Node::Let(let_stmt) => {
+                visit_pattern_binding_names(&let_stmt.pattern, &mut |name| names.push(name.to_owned()));
+            }
+            Node::Const(const_stmt) => names.push(const_stmt.name.clone()),
+            Node::Static(static_stmt) => names.push(static_stmt.name.clone()),
+            _ => {}
+        }
+        for name in names {
             // Only the first declaration of a name in this block matters: it
             // reflects the value visible from the enclosing scope before this
             // block started executing.
             if seen.insert(name.clone()) {
-                shadows.push((name.clone(), env.get(&name).cloned()));
+                let prior_value = env.get(&name).cloned();
+                if !env.is_local(&name) {
+                    let owner = crate::interpreter::CURRENT_EXEC_MODULE.with(|cell| cell.borrow().clone());
+                    if let (Some(owner), Some(value)) = (owner, prior_value.as_ref()) {
+                        crate::interpreter::MODULE_GLOBALS_BY_OWNER.with(|cell| {
+                            if let Some(globals) = cell.borrow_mut().get_mut(&owner) {
+                                if globals.contains_key(&name) {
+                                    globals.insert(name.clone(), value.clone());
+                                }
+                            }
+                        });
+                    }
+                }
+                shadows.push((name.clone(), prior_value));
                 env.enter_block_local(name);
             }
         }

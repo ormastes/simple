@@ -64,6 +64,82 @@ fn nested_local_shadow_reveals_latest_owner_global() {
 }
 
 #[test]
+fn nested_shadow_preserves_prior_write_and_same_value_nested_write() {
+    let dir = tempdir().unwrap();
+    let state_path = dir.path().join("state.spl");
+    let main_path = dir.path().join("main.spl");
+    fs::write(
+        state_path,
+        "var value = 0\n\nfn set_value(next: i32):\n    value = next\n\nfn assign_then_shadow() -> i32:\n    value = 7\n    if true:\n        val value = 5\n    return value\n\nfn assign_then_same_value_nested() -> i32:\n    value = 7\n    if true:\n        val value = 5\n        set_value(0)\n    return value\n\nfn read() -> i32:\n    return value\n",
+    )
+    .unwrap();
+    fs::write(
+        &main_path,
+        "import state\n\nfn main() -> i32:\n    val first = state.assign_then_shadow()\n    val second = state.assign_then_same_value_nested()\n    return first * 100 + second * 10 + state.read()\n",
+    )
+    .unwrap();
+
+    assert_eq!(evaluate_unflattened(&main_path), 700);
+}
+
+#[test]
+fn tuple_shadow_reveals_latest_owner_global() {
+    let dir = tempdir().unwrap();
+    let state_path = dir.path().join("state.spl");
+    let main_path = dir.path().join("main.spl");
+    fs::write(
+        state_path,
+        "var value = 0\n\nfn set_value(next: i32):\n    value = next\n\nfn tuple_shadow_then_update() -> i32:\n    if true:\n        val (value, other) = (5, 6)\n        set_value(8)\n    return value\n\nfn read() -> i32:\n    return value\n",
+    )
+    .unwrap();
+    fs::write(
+        &main_path,
+        "import state\n\nfn main() -> i32:\n    return state.tuple_shadow_then_update() * 10 + state.read()\n",
+    )
+    .unwrap();
+
+    assert_eq!(evaluate_unflattened(&main_path), 88);
+}
+
+#[test]
+fn imported_static_method_preserves_module_owner() {
+    let dir = tempdir().unwrap();
+    let state_path = dir.path().join("state.spl");
+    let main_path = dir.path().join("main.spl");
+    fs::write(
+        state_path,
+        "var value = 0\n\nclass Worker:\n    static fn set_value(next: i32) -> i32:\n        value = next\n        return value\n\nfn read() -> i32:\n    return value\n",
+    )
+    .unwrap();
+    fs::write(
+        &main_path,
+        "import state\n\nfn main() -> i32:\n    return state.Worker.set_value(9) * 10 + state.read()\n",
+    )
+    .unwrap();
+
+    assert_eq!(evaluate_unflattened(&main_path), 99);
+}
+
+#[test]
+fn flattened_static_method_preserves_module_owner() {
+    let dir = tempdir().unwrap();
+    let state_path = dir.path().join("state.spl");
+    let main_path = dir.path().join("main.spl");
+    fs::write(
+        state_path,
+        "var value = 0\n\nclass Worker:\n    static fn set_value(next: i32) -> i32:\n        value = next\n        return value\n\nfn read() -> i32:\n    return value\n",
+    )
+    .unwrap();
+    fs::write(
+        &main_path,
+        "use state.{Worker, read}\n\nfn main() -> i32:\n    return Worker.set_value(9) * 10 + read()\n",
+    )
+    .unwrap();
+
+    assert_eq!(evaluate_loaded(&main_path), 99);
+}
+
+#[test]
 fn selective_cache_retains_module_owner_metadata() {
     let dir = tempdir().unwrap();
     let lib_dir = dir.path().join("src/lib");

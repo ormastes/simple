@@ -22,6 +22,36 @@ pub(crate) fn get_pattern_name(pattern: &simple_parser::ast::Pattern) -> Option<
     }
 }
 
+pub(crate) fn visit_pattern_binding_names(
+    pattern: &simple_parser::ast::Pattern,
+    visit: &mut impl FnMut(&str),
+) {
+    use simple_parser::ast::Pattern;
+
+    match pattern {
+        Pattern::Identifier(name) | Pattern::MutIdentifier(name) | Pattern::MoveIdentifier(name) => visit(name),
+        Pattern::Tuple(patterns) | Pattern::Array(patterns) | Pattern::Or(patterns) => {
+            for pattern in patterns {
+                visit_pattern_binding_names(pattern, visit);
+            }
+        }
+        Pattern::Struct { fields, .. } => {
+            for (_, pattern) in fields {
+                visit_pattern_binding_names(pattern, visit);
+            }
+        }
+        Pattern::Enum { payload, .. } => {
+            if let Some(patterns) = payload {
+                for pattern in patterns {
+                    visit_pattern_binding_names(pattern, visit);
+                }
+            }
+        }
+        Pattern::Typed { pattern, .. } => visit_pattern_binding_names(pattern, visit),
+        Pattern::Wildcard | Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Rest => {}
+    }
+}
+
 /// Check if a variable name indicates immutability by naming pattern
 /// Returns true if immutable (lowercase), false if mutable (ends with _)
 pub(crate) fn is_immutable_by_pattern(name: &str) -> bool {

@@ -6,14 +6,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use simple_parser::ast::{
-    Argument, Attribute, Capability, ConstStmt, Effect, Expr, ImportTarget, Module, Node, Type, UseStmt, Visibility,
+    Argument, Capability, ConstStmt, Effect, Expr, ImportTarget, Module, Node, Type, UseStmt, Visibility,
 };
 use simple_parser::error_recovery::{ErrorHint, ErrorHintLevel};
 use simple_parser::Parser;
 
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
-    normalize_path_key, FLATTEN_GLOBAL_OWNER_MARKER_PREFIX, FLATTEN_MODULE_OWNER_ATTR_PREFIX,
+    normalize_path_key, tag_function_module_owner, FLATTEN_GLOBAL_OWNER_MARKER_PREFIX,
 };
 use crate::stdlib_variant::stdlib_root_candidates;
 use crate::CompileError as _;
@@ -503,13 +503,43 @@ fn resolve_from_stdlib_root(root: &Path, parts: &[String], use_stmt: &UseStmt) -
 /// The `already_tagged` guard keeps the *innermost* owner: a function pulled in
 /// through a nested import was already tagged by that deeper flatten pass
 /// (nested loads run before this outer strip), so we must not overwrite it.
+fn tag_node_function_owners(node: &mut Node, owner: &str) {
+    let methods = match node {
+        Node::Function(function) => {
+            tag_function_module_owner(function, owner);
+            return;
+        }
+        Node::Struct(definition) => &mut definition.methods,
+        Node::Class(definition) => &mut definition.methods,
+        Node::Enum(definition) => &mut definition.methods,
+        Node::Trait(definition) => &mut definition.methods,
+        Node::Impl(definition) => &mut definition.methods,
+        Node::Mixin(definition) => &mut definition.methods,
+        Node::Actor(definition) => &mut definition.methods,
+        Node::Extend(definition) => &mut definition.methods,
+        Node::ModDecl(module) => {
+            if let Some(body) = &mut module.body {
+                for item in body {
+                    tag_node_function_owners(item, owner);
+                }
+            }
+            return;
+        }
+        _ => return,
+    };
+    for method in methods {
+        tag_function_module_owner(method, owner);
+    }
+}
+
 fn strip_flattened_import_nodes(module: Module, module_path: &Path) -> Module {
     let owner_path = normalize_path_key(module_path);
-    let owner_attr_name = format!("{FLATTEN_MODULE_OWNER_ATTR_PREFIX}{}", owner_path.to_string_lossy());
+    let owner_name = owner_path.to_string_lossy();
     let owner_marker_name = format!("{FLATTEN_GLOBAL_OWNER_MARKER_PREFIX}{}", owner_path.to_string_lossy());
     let mut items = Vec::new();
     let mut next_global_already_tagged = false;
-    for item in module.items {
+    for mut item in module.items {
+        tag_node_function_owners(&mut item, &owner_name);
         if let Node::Const(marker) = &item {
             if marker.name.starts_with(FLATTEN_GLOBAL_OWNER_MARKER_PREFIX) {
                 next_global_already_tagged = true;
@@ -519,22 +549,9 @@ fn strip_flattened_import_nodes(module: Module, module_path: &Path) -> Module {
         }
 
         match item {
-            Node::Function(mut function) => {
+            Node::Function(function) => {
                 if function.name == "main" {
                     continue;
-                }
-                let already_tagged = function
-                    .attributes
-                    .iter()
-                    .any(|a| a.name.starts_with(FLATTEN_MODULE_OWNER_ATTR_PREFIX));
-                if !already_tagged {
-                    function.attributes.push(Attribute {
-                        span: function.span,
-                        name: owner_attr_name.clone(),
-                        value: None,
-                        args: None,
-                        named_args: None,
-                    });
                 }
                 items.push(Node::Function(function));
                 next_global_already_tagged = false;

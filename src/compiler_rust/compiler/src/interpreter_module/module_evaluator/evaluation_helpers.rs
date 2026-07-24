@@ -14,8 +14,8 @@ use simple_parser::ast::{Attribute, ClassDef, Expr, FunctionDef, ImportTarget, N
 use crate::error::CompileError;
 use crate::value::{Env, Value};
 use crate::interpreter::{
-    normalize_path_key, FUNCTION_MODULE_OWNER, FUNCTION_OVERLOADS, GLOBAL_ENUMS, MODULE_GLOBALS_BY_OWNER,
-    MODULE_GLOBALS_INITIAL_BY_OWNER,
+    normalize_path_key, tag_function_module_owner, FUNCTION_MODULE_OWNER, FUNCTION_OVERLOADS, GLOBAL_ENUMS,
+    MODULE_GLOBALS_BY_OWNER, MODULE_GLOBALS_INITIAL_BY_OWNER,
 };
 
 use crate::interpreter::interpreter_module::export_handler::load_export_source;
@@ -43,6 +43,14 @@ fn method_with_impl_driver_attrs(method: &FunctionDef, impl_attrs: &[Attribute])
 
 fn module_owner(module_path: Option<&Path>) -> Option<Arc<str>> {
     module_path.map(|path| Arc::from(normalize_path_key(path).to_string_lossy().as_ref()))
+}
+
+fn function_with_owner(function: &FunctionDef, owner: Option<&Arc<str>>) -> FunctionDef {
+    let mut function = function.clone();
+    if let Some(owner) = owner {
+        tag_function_module_owner(&mut function, owner);
+    }
+    function
 }
 
 fn publish_module_global(module_path: Option<&Path>, name: String, value: Value) {
@@ -120,7 +128,7 @@ pub(super) fn register_definitions(
     for item in items.iter() {
         match item {
             Node::Function(f) => {
-                let arc_f = Arc::new(f.clone());
+                let arc_f = Arc::new(function_with_owner(f, module_ident.as_ref()));
                 if let Some(ident) = &module_ident {
                     FUNCTION_MODULE_OWNER.with(|cell| {
                         cell.borrow_mut()
@@ -141,9 +149,15 @@ pub(super) fn register_definitions(
                 }
             }
             Node::Class(c) => {
-                let arc_c = Arc::new(c.clone());
+                let mut class = c.clone();
+                class.methods = c
+                    .methods
+                    .iter()
+                    .map(|method| function_with_owner(method, module_ident.as_ref()))
+                    .collect();
+                let arc_c = Arc::new(class);
                 local_classes.insert(c.name.clone(), Arc::clone(&arc_c));
-                global_classes.insert(c.name.clone(), arc_c);
+                global_classes.insert(c.name.clone(), Arc::clone(&arc_c));
                 exports.insert(
                     c.name.clone(),
                     Value::Constructor {
@@ -151,7 +165,7 @@ pub(super) fn register_definitions(
                     },
                 );
                 // Register static methods as mangled free functions (ClassName__method)
-                for method in &c.methods {
+                for method in &arc_c.methods {
                     let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                     if is_static {
                         let mangled = format!("{}__{}", c.name, method.name);
@@ -178,7 +192,11 @@ pub(super) fn register_definitions(
                     generic_params: s.generic_params.clone(),
                     where_clause: s.where_clause.clone(),
                     fields: s.fields.clone(),
-                    methods: s.methods.clone(), // Include struct methods!
+                    methods: s
+                        .methods
+                        .iter()
+                        .map(|method| function_with_owner(method, module_ident.as_ref()))
+                        .collect(),
                     parent: None,
                     visibility: s.visibility,
                     effects: vec![],
@@ -194,7 +212,7 @@ pub(super) fn register_definitions(
                 };
                 let arc_class_def = Arc::new(class_def);
                 local_classes.insert(s.name.clone(), Arc::clone(&arc_class_def));
-                global_classes.insert(s.name.clone(), arc_class_def);
+                global_classes.insert(s.name.clone(), Arc::clone(&arc_class_def));
                 exports.insert(
                     s.name.clone(),
                     Value::Constructor {
@@ -202,7 +220,7 @@ pub(super) fn register_definitions(
                     },
                 );
                 // Register static methods as mangled free functions (StructName__method)
-                for method in &s.methods {
+                for method in &arc_class_def.methods {
                     let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                     if is_static {
                         let mangled = format!("{}__{}", s.name, method.name);
@@ -228,47 +246,34 @@ pub(super) fn register_definitions(
                     _ => None,
                 };
                 if let Some(type_name) = type_name {
+                    let owned_methods = impl_block
+                        .methods
+                        .iter()
+                        .map(|method| {
+                            let method = method_with_impl_driver_attrs(method, &impl_block.attributes);
+                            function_with_owner(&method, module_ident.as_ref())
+                        })
+                        .collect::<Vec<_>>();
                     // Handle classes
                     if let Some(class_def) = local_classes.get_mut(&type_name) {
-                        Arc::make_mut(class_def).methods.extend(
-                            impl_block
-                                .methods
-                                .iter()
-                                .map(|m| method_with_impl_driver_attrs(m, &impl_block.attributes)),
-                        );
+                        Arc::make_mut(class_def).methods.extend(owned_methods.iter().cloned());
                     }
                     if let Some(class_def) = global_classes.get_mut(&type_name) {
-                        Arc::make_mut(class_def).methods.extend(
-                            impl_block
-                                .methods
-                                .iter()
-                                .map(|m| method_with_impl_driver_attrs(m, &impl_block.attributes)),
-                        );
+                        Arc::make_mut(class_def).methods.extend(owned_methods.iter().cloned());
                     }
                     // Handle enums - add impl methods to enum definition
                     if let Some(enum_def) = local_enums.get_mut(&type_name) {
-                        Arc::make_mut(enum_def).methods.extend(
-                            impl_block
-                                .methods
-                                .iter()
-                                .map(|m| method_with_impl_driver_attrs(m, &impl_block.attributes)),
-                        );
+                        Arc::make_mut(enum_def).methods.extend(owned_methods.iter().cloned());
                     }
                     if let Some(enum_def) = global_enums.get_mut(&type_name) {
-                        Arc::make_mut(enum_def).methods.extend(
-                            impl_block
-                                .methods
-                                .iter()
-                                .map(|m| method_with_impl_driver_attrs(m, &impl_block.attributes)),
-                        );
+                        Arc::make_mut(enum_def).methods.extend(owned_methods.iter().cloned());
                     }
                     // Register static methods from impl blocks as mangled free functions
-                    for method in &impl_block.methods {
-                        let method = method_with_impl_driver_attrs(method, &impl_block.attributes);
+                    for method in &owned_methods {
                         let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                         if is_static {
                             let mangled = format!("{}__{}", type_name, method.name);
-                            let arc_method = Arc::new(method);
+                            let arc_method = Arc::new(method.clone());
                             local_functions.insert(mangled.clone(), Arc::clone(&arc_method));
                             global_functions.insert(mangled.clone(), Arc::clone(&arc_method));
                             exports.insert(
@@ -285,13 +290,8 @@ pub(super) fn register_definitions(
                     // (mirrors GLOBAL_ENUMS pattern for enum definitions)
                     GLOBAL_IMPL_METHODS.with(|cell| {
                         let mut global_impls = cell.borrow_mut();
-                        let methods = global_impls.entry(type_name.clone()).or_default();
-                        methods.extend(
-                            impl_block
-                                .methods
-                                .iter()
-                                .map(|m| Arc::new(method_with_impl_driver_attrs(m, &impl_block.attributes))),
-                        );
+                        let registered_methods = global_impls.entry(type_name.clone()).or_default();
+                        registered_methods.extend(owned_methods.iter().cloned().map(Arc::new));
                     });
                     // Update MODULE_CLASSES_CACHE with the enriched class definition
                     // so cross-module fallback lookups find impl-added methods
@@ -309,9 +309,15 @@ pub(super) fn register_definitions(
                 }
             }
             Node::Enum(e) => {
-                let arc_e = Arc::new(e.clone());
+                let mut enum_def = e.clone();
+                enum_def.methods = e
+                    .methods
+                    .iter()
+                    .map(|method| function_with_owner(method, module_ident.as_ref()))
+                    .collect();
+                let arc_e = Arc::new(enum_def);
                 local_enums.insert(e.name.clone(), Arc::clone(&arc_e));
-                global_enums.insert(e.name.clone(), arc_e);
+                global_enums.insert(e.name.clone(), Arc::clone(&arc_e));
                 // Export enum as EnumType so EnumName.VariantName syntax works
                 let enum_type = Value::EnumType {
                     enum_name: e.name.clone(),
@@ -320,7 +326,7 @@ pub(super) fn register_definitions(
                 // CRITICAL FIX: Also add to env so it's available in closures
                 env.insert(e.name.clone(), enum_type);
                 // Register enum static methods as mangled free functions
-                for method in &e.methods {
+                for method in &arc_e.methods {
                     let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                     if is_static {
                         let mangled = format!("{}__{}", e.name, method.name);

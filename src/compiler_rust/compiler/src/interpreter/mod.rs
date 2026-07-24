@@ -67,14 +67,14 @@ pub(crate) use interpreter_state::{
     SI_BASE_UNITS, TIMEOUT_EXCEEDED, TRAIT_IMPLS, TRAITS, MIXINS,
     UNIT_FAMILY_ARITHMETIC, UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY, USER_MACROS, FUNCTION_OVERLOADS,
     CLASS_OVERLOADS, FUNCTION_MODULE_OWNER, CURRENT_EXEC_MODULE, FLATTEN_GLOBAL_OWNER_MARKER_PREFIX,
-    FLATTEN_MODULE_OWNER_ATTR_PREFIX,
+    FLATTEN_MODULE_OWNER_ATTR_PREFIX, tag_function_module_owner,
 };
 
 // Core types and utilities
 mod core_types;
 pub(crate) use core_types::{
-    get_identifier_name, get_pattern_name, is_immutable_by_pattern, Classes, Control, Enums, ExternFunctions,
-    ImplMethods, Macros, Traits, TraitImpls, UnitFamilies, UnitFamilyInfo, Units,
+    get_identifier_name, get_pattern_name, is_immutable_by_pattern, visit_pattern_binding_names, Classes, Control,
+    Enums, ExternFunctions, ImplMethods, Macros, Traits, TraitImpls, UnitFamilies, UnitFamilyInfo, Units,
 };
 
 // Async/await support
@@ -146,9 +146,9 @@ pub(crate) use interpreter_call::IN_NEW_METHOD;
 pub(crate) use interpreter_call::exec_block_value;
 pub use interpreter_call::{clear_bdd_state, clear_class_instantiation_state, get_ignored_tests, get_test_results};
 use interpreter_call::{
-    bind_args, bind_args_with_injected, evaluate_call, exec_function, exec_function_with_captured_env,
-    exec_function_with_values, exec_lambda, instantiate_class, BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS,
-    BDD_COUNTS, BDD_INDENT, BDD_LAZY_VALUES, BDD_SHARED_EXAMPLES,
+    bind_args, bind_args_with_injected, evaluate_call, exec_function, exec_function_with_bound_args,
+    exec_function_with_captured_env, exec_function_with_values, exec_lambda, instantiate_class, BDD_AFTER_EACH,
+    BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_COUNTS, BDD_INDENT, BDD_LAZY_VALUES, BDD_SHARED_EXAMPLES,
 };
 
 // Module caching and loading state

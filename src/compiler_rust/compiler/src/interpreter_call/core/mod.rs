@@ -36,8 +36,8 @@ pub(crate) use arg_binding::{bind_args, bind_args_with_injected};
 pub(crate) use arg_eval::{eval_arg, eval_arg_int};
 pub(crate) use class_instantiation::instantiate_class;
 pub(crate) use function_exec::{
-    exec_function, exec_function_with_captured_env, exec_function_with_values,
-    exec_function_with_values_and_self, exec_function_with_values_and_writeback,
+    exec_function, exec_function_with_bound_args, exec_function_with_captured_env,
+    exec_function_with_values, exec_function_with_values_and_self, exec_function_with_values_and_writeback,
 };
 pub(crate) use lambda::exec_lambda;
 

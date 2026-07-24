@@ -5,8 +5,8 @@
 use std::sync::Arc;
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
-    evaluate_expr, exec_block_fn, find_and_exec_method, Control, Enums, ImplMethods, BLOCK_SCOPED_ENUMS,
-    CONST_NAMES, GLOBAL_ENUMS, IMMUTABLE_VARS, TRAIT_IMPLS,
+    evaluate_expr, exec_function_with_bound_args, find_and_exec_method, Enums, ImplMethods, BLOCK_SCOPED_ENUMS,
+    GLOBAL_ENUMS, TRAIT_IMPLS,
 };
 use crate::value::{Env, OptionVariant, ResultVariant, SpecialEnumType, Value};
 use simple_parser::ast::{Argument, ClassDef, FunctionDef, Type};
@@ -224,35 +224,16 @@ pub fn handle_constructor_methods(
                 IN_NEW_METHOD.with(|set| set.borrow_mut().insert(class_name.to_string()));
             }
 
-            // Static method bodies need the same CONST_NAMES/IMMUTABLE_VARS frame
-            // discipline as execute_function_body: without the take/restore, a
-            // `val x` inside the static body leaks into the CALLER's const set
-            // (process-global, no scoping) and a later `x = ...` on the caller's
-            // own `var x` dies with "cannot assign to const" (see
-            // doc/08_tracking/bug/interp_var_reassign_const_after_me_method_in_spec_2026-07-21.md
-            // — root cause was this unframed static path, e.g.
-            // BackendProbeResult.create's `val ok`).
-            let saved_const_names = CONST_NAMES.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
-            let saved_immutable_vars = IMMUTABLE_VARS.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
-
-            // Use exec_block_fn to properly capture implicit returns
-            let result = match exec_block_fn(
-                &method_def.body,
-                &mut local_env,
+            let result = exec_function_with_bound_args(
+                method_def,
+                local_env.to_map(),
+                env,
                 functions,
                 classes,
                 enums,
                 impl_methods,
-            ) {
-                Ok((Control::Return(v), _)) => Ok(Some(v)),
-                Ok((_, Some(implicit_val))) => Ok(Some(implicit_val)), // Implicit return from last expression
-                Ok((_, None)) => Ok(Some(Value::Nil)),
-                Err(e) => Err(e),
-            };
-
-            // ALWAYS restore (error paths included) so the frame never leaks.
-            CONST_NAMES.with(|cell| *cell.borrow_mut() = saved_const_names);
-            IMMUTABLE_VARS.with(|cell| *cell.borrow_mut() = saved_immutable_vars);
+            )
+            .map(Some);
 
             // Remove from tracking set
             if is_new_method {
