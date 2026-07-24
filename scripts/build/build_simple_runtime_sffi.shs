@@ -1,0 +1,80 @@
+#!/bin/sh
+# Build complete hosted runtime symbol providers for dynload Simple artifacts.
+#
+# The Rust provider owns the generated runtime symbol table. The C provider is
+# staged separately so platform linkers cannot discard C symbols referenced
+# only through dynamic lookup.
+set -eu
+
+REPO_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+RUST_ROOT="$REPO_ROOT/src/compiler_rust"
+C_RUNTIME="$REPO_ROOT/src/runtime"
+OUT_DIR="$REPO_ROOT/build/sffi"
+
+case "$(uname -s)" in
+    Darwin)
+        EXT=dylib
+        SHARED_FLAG=-dynamiclib
+        UNDEFINED_FLAGS="-Wl,-undefined,dynamic_lookup"
+        SONAME_FLAG=""
+        ;;
+    Linux|FreeBSD)
+        EXT=so
+        SHARED_FLAG=-shared
+        UNDEFINED_FLAGS=""
+        SONAME_FLAG="-Wl,-soname,libsimple_runtime_c_wm.so"
+        ;;
+    *)
+        echo "error: unsupported host for runtime SFFI provider: $(uname -s)" >&2
+        exit 1
+        ;;
+esac
+
+echo "[build_simple_runtime_sffi] cargo build simple-runtime"
+if [ "$(uname -s)" = Darwin ]; then
+    cargo build --manifest-path "$RUST_ROOT/Cargo.toml" --release \
+        -p simple-runtime --features runtime-symbol-table
+else
+    RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-Wl,-soname,libsimple_runtime_wm.so" \
+        cargo build --manifest-path "$RUST_ROOT/Cargo.toml" --release \
+            -p simple-runtime --features runtime-symbol-table
+fi
+
+mkdir -p "$OUT_DIR"
+RUST_SRC="$RUST_ROOT/target/release/libsimple_runtime.$EXT"
+RUST_DST="$OUT_DIR/libsimple_runtime_wm.$EXT"
+test -s "$RUST_SRC"
+cp "$RUST_SRC" "$RUST_DST.new"
+if [ "$(uname -s)" = Darwin ]; then
+    install_name_tool -id "@rpath/$(basename "$RUST_DST")" "$RUST_DST.new"
+fi
+mv "$RUST_DST.new" "$RUST_DST"
+
+CC_BIN="${CC:-cc}"
+C_DST="$OUT_DIR/libsimple_runtime_c_wm.$EXT"
+"$CC_BIN" "$SHARED_FLAG" $UNDEFINED_FLAGS -fPIC -O2 -std=gnu11 -I"$C_RUNTIME" \
+    $SONAME_FLAG \
+    "$C_RUNTIME/runtime_memory.c" \
+    "$C_RUNTIME/runtime_time.c" \
+    "$C_RUNTIME/runtime_timestamp.c" \
+    "$C_RUNTIME/runtime_db.c" \
+    "$C_RUNTIME/runtime_pool.c" \
+    "$C_RUNTIME/runtime_framebuffer.c" \
+    "$C_RUNTIME/runtime_directx_core.c" \
+    "$C_RUNTIME/runtime_rocm.c" \
+    "$C_RUNTIME/runtime_hosted_signal.c" \
+    "$C_RUNTIME/runtime_hosted_fs.c" \
+    "$C_RUNTIME/runtime_font.c" \
+    -lm -o "$C_DST.new"
+if [ "$(uname -s)" = Darwin ]; then
+    install_name_tool -id "@rpath/$(basename "$C_DST")" "$C_DST.new"
+fi
+mv "$C_DST.new" "$C_DST"
+
+if [ "$(uname -s)" != Darwin ]; then
+    readelf -d "$RUST_DST" | grep -F "Library soname: [$(basename "$RUST_DST")]" >/dev/null
+    readelf -d "$C_DST" | grep -F "Library soname: [$(basename "$C_DST")]" >/dev/null
+fi
+
+echo "[build_simple_runtime_sffi] staged: $RUST_DST"
+echo "[build_simple_runtime_sffi] staged: $C_DST"

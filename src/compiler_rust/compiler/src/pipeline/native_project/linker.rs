@@ -1,6 +1,7 @@
 //! Linker selection, linking, system symbols, stub generation.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use super::{effective_target, inline_asm_emit, safe_canonicalize, ModuleImports, NativeProjectBuilder};
@@ -41,6 +42,49 @@ fn macos_runtime_host_support_required(
     // framework-link directives for their final consumer, so every selected
     // Rust runtime archive needs the same host framework admission.
     selected_runtime || host_gpu_lane || exact_stage4
+}
+
+pub(super) fn split_extra_link_objects(value: &OsStr) -> Vec<PathBuf> {
+    std::env::split_paths(value)
+        .filter(|path| !path.as_os_str().is_empty())
+        .collect()
+}
+
+pub(super) fn validate_extra_link_objects(paths: Vec<PathBuf>) -> Result<Vec<PathBuf>, String> {
+    for path in &paths {
+        if !path.is_file() {
+            return Err(format!(
+                "SIMPLE_LINK_OBJECTS provider is missing or not a file: {}",
+                path.display()
+            ));
+        }
+    }
+    Ok(paths)
+}
+
+fn configured_extra_link_objects() -> Result<Vec<PathBuf>, String> {
+    let Some(value) = std::env::var_os("SIMPLE_LINK_OBJECTS") else {
+        return Ok(Vec::new());
+    };
+    validate_extra_link_objects(split_extra_link_objects(&value))
+}
+
+pub(super) fn add_extra_link_objects(cmd: &mut std::process::Command, providers: &[PathBuf]) {
+    for provider in providers {
+        cmd.arg(provider);
+    }
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "freebsd"))]
+    {
+        let mut directories = BTreeSet::new();
+        for provider in providers {
+            if let Some(parent) = provider.parent() {
+                directories.insert(parent.to_path_buf());
+            }
+        }
+        for directory in directories {
+            cmd.arg(format!("-Wl,-rpath,{}", directory.display()));
+        }
+    }
 }
 
 impl NativeProjectBuilder {
@@ -925,6 +969,7 @@ int main(int argc, char** argv) {
 
         let main_o = self.compile_main_stub(temp_dir)?;
         let init_o = self.generate_init_caller(temp_dir, object_paths, None)?;
+        let extra_link_objects = configured_extra_link_objects()?;
         let selected_runtime = self.selected_runtime_library(temp_dir)?;
         self.reject_unexpected_native_all(selected_runtime.as_ref())?;
         let host_gpu_lane = self.resolve_runtime_lane() == super::NativeRuntimeLane::HostGpu;
@@ -1202,6 +1247,7 @@ int main(int argc, char** argv) {
                 cmd.arg(obj);
             }
         }
+        add_extra_link_objects(&mut cmd, &extra_link_objects);
 
         #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
         if exact_stage4 {
@@ -1406,6 +1452,7 @@ int main(int argc, char** argv) {
                 if let Some(core_runtime) = host_gpu_core_runtime.as_ref() {
                     provider_paths.push(core_runtime.as_path());
                 }
+                provider_paths.extend(extra_link_objects.iter().map(PathBuf::as_path));
                 let stubs_o = generate_stub_object(temp_dir, object_paths, &main_o, &provider_paths, imports)?;
                 cmd.arg(&stubs_o);
                 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -1424,6 +1471,7 @@ int main(int argc, char** argv) {
             if let Some((runtime, _)) = selected_runtime.as_ref() {
                 provider_paths.push(runtime.as_path());
             }
+            provider_paths.extend(extra_link_objects.iter().map(PathBuf::as_path));
             let stubs_o = generate_stub_object(temp_dir, object_paths, &main_o, &provider_paths, &imports)?;
             cmd.arg(&stubs_o);
         }

@@ -22,12 +22,12 @@ BUILD_LOG="$BUILD_DIR/native-build.log"
 THEME_SNAPSHOT_SOURCE="$ROOT_DIR/src/lib/common/ui/generated/aetheric_dark_theme_snapshot.spl"
 EXPECTED_THEME_ID="aetheric_dark"
 EXPECTED_THEME_SOURCE_MANIFEST_SHA256="$(sed -n 's/.*source_manifest_sha256: "\([0-9a-f][0-9a-f]*\)".*/\1/p' "$THEME_SNAPSHOT_SOURCE" | head -n 1)"
-SPL_WINIT_LIB="${SIMPLE_WM_WINIT_LIB:-$ROOT_DIR/build/sffi/libspl_winit.dylib}"
 case "$(uname -s)" in
     Darwin) RUNTIME_DYLIB_EXT=dylib ;;
     Linux|FreeBSD) RUNTIME_DYLIB_EXT=so ;;
     *) RUNTIME_DYLIB_EXT=dll ;;
 esac
+SPL_WINIT_LIB="${SIMPLE_WM_WINIT_LIB:-$ROOT_DIR/build/sffi/libspl_winit.$RUNTIME_DYLIB_EXT}"
 SIMPLE_RUNTIME_DYLIB="${SIMPLE_WM_RUNTIME_DYLIB:-$ROOT_DIR/build/sffi/libsimple_runtime_wm.$RUNTIME_DYLIB_EXT}"
 SIMPLE_RUNTIME_C_DYLIB="${SIMPLE_WM_RUNTIME_C_DYLIB:-$ROOT_DIR/build/sffi/libsimple_runtime_c_wm.$RUNTIME_DYLIB_EXT}"
 DRIVER_TIMEOUT_SECS="${WM_EVIDENCE_TIMEOUT_SECS:-20}"
@@ -218,7 +218,8 @@ if [ -n "${HOSTED_WM_ARTIFACT:-}" ]; then
     fi
 elif [ ! -x "$NATIVE_BIN" ] || find src/os/hosted src/os/compositor src/lib/common/ui \
     -type f -name '*.spl' -newer "$NATIVE_BIN" -print -quit | grep -q .; then
-    if ! SIMPLE_LIB="$ROOT_DIR/src" "$SIMPLE_BIN" native-build \
+    if ! SIMPLE_LINK_OBJECTS="$SPL_WINIT_LIB:$SIMPLE_RUNTIME_DYLIB:$SIMPLE_RUNTIME_C_DYLIB" \
+        SIMPLE_LIB="$ROOT_DIR/src" "$SIMPLE_BIN" native-build \
         --source "$ENTRY" --entry "$ENTRY" --entry-closure --strip \
         --backend cranelift \
         --cache-dir "$BUILD_DIR/native-cache" --mode dynload --output "$NATIVE_BIN" \
@@ -236,6 +237,23 @@ if [ ! -x "$NATIVE_BIN" ]; then
     emit_failure cached-production-artifact-unavailable "$snapshot_hook" "$capture_hook" "$input_hook"
     exit 1
 fi
+
+provider_linked() {
+    binary="$1"
+    provider="$2"
+    provider_name="$(basename -- "$provider")"
+    case "$(uname -s)" in
+        Darwin) otool -L "$binary" 2>/dev/null | grep -Fq "@rpath/$provider_name" ;;
+        Linux|FreeBSD) readelf -d "$binary" 2>/dev/null | grep -Fq "$provider_name" ;;
+        *) return 1 ;;
+    esac
+}
+for provider in "$SPL_WINIT_LIB" "$SIMPLE_RUNTIME_DYLIB" "$SIMPLE_RUNTIME_C_DYLIB"; do
+    if ! provider_linked "$NATIVE_BIN" "$provider"; then
+        emit_failure host-runtime-provider-not-linked "$snapshot_hook" "$capture_hook" "$input_hook"
+        exit 1
+    fi
+done
 
 case "$(uname -s)" in
     Darwin) [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] || : ;; # winit uses the native session.
@@ -256,7 +274,6 @@ SIMPLE_WM_EVIDENCE_SNAPSHOT_PATH="$ROOT_DIR/$FULLSCREEN_SNAPSHOT.live" \
 SIMPLE_WM_EVIDENCE_CAPTURE_PATH="$ROOT_DIR/$FULLSCREEN_CAPTURE.live" \
 SIMPLE_WM_EVIDENCE_INPUT_FIFO="$ROOT_DIR/$COMMAND_PATH" \
 SIMPLE_WM_RASTER="${SIMPLE_WM_RASTER:-simple-2d-winit-buffer}" \
-DYLD_INSERT_LIBRARIES="$SPL_WINIT_LIB:$SIMPLE_RUNTIME_DYLIB:$SIMPLE_RUNTIME_C_DYLIB${DYLD_INSERT_LIBRARIES:+:$DYLD_INSERT_LIBRARIES}" \
     "$NATIVE_BIN" >"$LAUNCH_LOG" 2>&1 &
 wm_pid=$!
 cleanup() {

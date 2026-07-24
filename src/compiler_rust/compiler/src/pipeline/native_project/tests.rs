@@ -10,6 +10,7 @@ use crate::codegen::common_backend::{
 };
 use crate::incremental::SourceInfo;
 use crate::pipeline::execution::runtime_bundle_env_lock_for_tests as runtime_bundle_env_lock;
+use super::linker::{add_extra_link_objects, split_extra_link_objects, validate_extra_link_objects};
 use simple_simd::{host_cpu_config, reset_host_cpu_config_cache_for_tests, HostCpuConfig, SimdTier};
 use super::*;
 
@@ -165,6 +166,109 @@ fn simd_tier_env_lock() -> &'static Mutex<()> {
 fn process_dir_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
+}
+
+#[test]
+fn native_project_extra_link_objects_use_platform_path_list_semantics() {
+    let joined = std::env::join_paths(["provider-a", "provider-b"]).expect("join provider paths");
+    assert_eq!(
+        split_extra_link_objects(&joined),
+        vec![PathBuf::from("provider-a"), PathBuf::from("provider-b")]
+    );
+}
+
+#[test]
+fn native_project_extra_link_objects_reject_missing_provider() {
+    let missing = PathBuf::from("/definitely/missing/simple-provider");
+    let error = validate_extra_link_objects(vec![missing]).expect_err("missing provider must fail closed");
+    assert!(error.contains("missing or not a file"));
+}
+
+#[cfg(not(target_os = "windows"))]
+#[test]
+fn native_project_extra_provider_resolves_symbol_and_suppresses_stub() {
+    let temp = tempfile::tempdir().unwrap();
+    let provider_c = temp.path().join("provider.c");
+    let provider = temp.path().join(if cfg!(target_os = "macos") {
+        "libprovider.dylib"
+    } else {
+        "libprovider.so"
+    });
+    let consumer_c = temp.path().join("consumer.c");
+    let consumer_o = temp.path().join("consumer.o");
+    let output = temp.path().join("provider-probe");
+    std::fs::write(
+        &provider_c,
+        "long external_provider_value(void) { return 42; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &consumer_c,
+        "extern long external_provider_value(void);\nint main(void) { return external_provider_value() == 42 ? 0 : 1; }\n",
+    )
+    .unwrap();
+    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+    let mut provider_build = std::process::Command::new(&cc);
+    if cfg!(target_os = "macos") {
+        provider_build
+            .arg("-dynamiclib")
+            .arg("-Wl,-install_name,@rpath/libprovider.dylib");
+    } else {
+        provider_build
+            .args(["-shared", "-fPIC"])
+            .arg("-Wl,-soname,libprovider.so");
+    }
+    assert!(provider_build
+        .arg(&provider_c)
+        .arg("-o")
+        .arg(&provider)
+        .status()
+        .unwrap()
+        .success());
+    assert!(std::process::Command::new(&cc)
+        .args(["-c", "-fPIC"])
+        .arg(&consumer_c)
+        .arg("-o")
+        .arg(&consumer_o)
+        .status()
+        .unwrap()
+        .success());
+
+    let mut link = std::process::Command::new(&cc);
+    link.arg(&consumer_o).arg("-o").arg(&output);
+    add_extra_link_objects(&mut link, std::slice::from_ref(&provider));
+    assert!(link.status().unwrap().success());
+    assert!(std::process::Command::new(&output).status().unwrap().success());
+
+    let imports = ModuleImports {
+        import_map: std::sync::Arc::new(std::collections::HashMap::new()),
+        ambiguous_names: std::sync::Arc::new(std::collections::HashSet::new()),
+        all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
+        re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
+        trait_impls: std::sync::Arc::new(std::collections::HashMap::new()),
+        vtable_type_owners: std::sync::Arc::new(std::collections::HashSet::new()),
+        vtable_symbols: std::sync::Arc::new(std::collections::HashMap::new()),
+        struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
+        data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
+        fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
+        fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
+        populate_global_struct_defs: false,
+        populate_global_enum_defs: false,
+    };
+    let stub = super::stubs::generate_stub_object(
+        temp.path(),
+        &[consumer_o],
+        &output,
+        &[provider.as_path()],
+        &imports,
+    )
+    .unwrap();
+    let symbols = std::process::Command::new("nm").arg("-g").arg(stub).output().unwrap();
+    assert!(symbols.status.success());
+    assert!(!String::from_utf8_lossy(&symbols.stdout).contains("external_provider_value"));
 }
 
 fn archive_members(path: &Path) -> Option<Vec<String>> {

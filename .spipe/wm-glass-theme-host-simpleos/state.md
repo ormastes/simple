@@ -204,3 +204,16 @@ implementation-blocked-inferred-text-result-provenance
   contract remains fail-fast. Runtime theme switching remains blocked by a
   missing notification transport ABI; its contract was placed under system
   tests, not the unit suite.
+- continuation-exact-bootstrap-and-host-2026-07-24: Rebased to current
+  `origin/main` and built exact-current pure-Simple Stage 2/3 with cargo
+  disabled and `SIMPLE_NO_STUB_FALLBACK=1`; both sanity gates passed and
+  Stage 3 SHA-256 is `6c64561a...`. The three host cycles all stopped before
+  launch: first on two missing bridge-build scripts, then twice because the
+  native-project linker ignored the wrapper's external runtime providers.
+  Added the missing builders, stable provider install names, wrapper
+  `SIMPLE_LINK_OBJECTS` wiring, and the matching native-project linker
+  implementation. High-capability review rejected the first bridge patch for
+  shipping, portability, install-name, proof, injection, and manual gaps. All
+  six were corrected; focused Rust regressions now pass (`3 passed; 3348
+  filtered`) with a real provider link/run and stub-suppression proof.
+  Host cycle cap is exhausted; current-source pixels/events remain unproven.

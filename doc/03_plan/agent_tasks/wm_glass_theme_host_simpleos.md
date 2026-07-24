@@ -71,7 +71,7 @@ overlapping dirty work and remains read-only for this lane.
 
 | Lane | Current state | First unresolved boundary |
 |---|---|---|
-| Host production WM | FAIL; all retained July 24 reports lack an admissible capture | `src/os/hosted/hosted_entry.spl` constructs its backend and `HostCompositor.new_headless` without installing `load_default_theme_package().snapshot`; outer chrome remains Aqua while content requests Aetheric |
+| Host production WM | SOURCE FIXED; recapture blocked by cycle cap | exact-current Stage 3 passed; bootstrap/theme/bridge/provider wiring is fixed, but the compiler containing the provider-link fix must be rebuilt before one fresh host capture |
 | Host events | SOURCE PARTIAL; product proof pending | real key down/up and pointer move/button-edge receipts are retained; title-command/body-input remain unsupported because HostCompositor exposes no canonical API |
 | Simple Web glass | SEMANTICS IMPLEMENTED, LIVE PROOF PENDING | current-source computed-style/Draw-IR/framebuffer proof has not passed; Chromium fixture timing is not Simple Web animation evidence |
 | SimpleOS x86_64 QEMU | SOURCE FIXED, FRESH BOOT PENDING | rebuild exact current compiler, prove inferred-text relocation, then run one fresh canonical OVMF capture |

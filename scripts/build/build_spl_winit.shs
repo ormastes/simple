@@ -1,0 +1,36 @@
+#!/bin/sh
+# Build the production winit/softbuffer SFFI bridge and stage it at the
+# canonical path consumed by host WM evidence wrappers.
+set -eu
+
+REPO_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+CRATE_DIR="$REPO_ROOT/src/runtime/spl_winit"
+OUT_DIR="$REPO_ROOT/build/sffi"
+
+case "$(uname -s)" in
+    Darwin) EXT=dylib ;;
+    Linux|FreeBSD) EXT=so ;;
+    *) EXT=dll ;;
+esac
+
+echo "[build_spl_winit] cargo build --release ($CRATE_DIR)"
+if [ "$(uname -s)" = Darwin ]; then
+    (CDPATH= cd -- "$CRATE_DIR" && cargo build --release)
+else
+    (CDPATH= cd -- "$CRATE_DIR" && \
+        RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-Wl,-soname,libspl_winit.so" cargo build --release)
+fi
+
+mkdir -p "$OUT_DIR"
+SRC="$CRATE_DIR/target/release/libspl_winit.$EXT"
+DST="$OUT_DIR/libspl_winit.$EXT"
+test -s "$SRC"
+cp "$SRC" "$DST.new"
+if [ "$(uname -s)" = Darwin ]; then
+    install_name_tool -id "@rpath/$(basename "$DST")" "$DST.new"
+fi
+mv "$DST.new" "$DST"
+if [ "$(uname -s)" != Darwin ]; then
+    readelf -d "$DST" | grep -F "Library soname: [$(basename "$DST")]" >/dev/null
+fi
+echo "[build_spl_winit] staged: $DST"
