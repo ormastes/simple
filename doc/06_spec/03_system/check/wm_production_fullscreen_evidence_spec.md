@@ -13,6 +13,13 @@ This manual mirrors
    relocatable macOS install names or ELF SONAMEs matching their staged names.
 4. Link those providers directly into the native artifact with a relocatable
    loader path; do not rely on `DYLD_INSERT_LIBRARIES`.
+   The exact pure-Simple linker validates `SIMPLE_LINK_OBJECTS`, keeps those
+   caller-owned providers out of temporary-runtime cleanup, passes them to the
+   final link, and preserves their parent rpaths through both direct and C
+   fallback linkers. Stub fallback is disabled for the production build.
+   The wrapper also rejects a bootstrap binary whose embedded native-all
+   bridge lacks that provider-link capability, before provider builds or GUI
+   launch can hide the stale-driver defect.
 5. Inspect the artifact load commands/dynamic section and reject a provider
    that is not linked.
 6. Launch the production `src/os/hosted/hosted_entry.spl` artifact.

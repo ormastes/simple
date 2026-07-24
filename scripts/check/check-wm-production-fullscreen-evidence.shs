@@ -169,6 +169,17 @@ if [ -z "$SIMPLE_BIN_VERSION" ] || [ "$SIMPLE_BIN_SHA256" = unavailable ]; then
 fi
 SIMPLE_BIN_STATUS=pass
 
+# `bootstrap_main` delegates native-build to its embedded native-all bridge.
+# A pure-Simple bootstrap binary can otherwise look valid while carrying an
+# older bridge that silently ignores SIMPLE_LINK_OBJECTS, yielding a late
+# unresolved-symbol failure. Require the compiled bridge's current fail-closed
+# provider diagnostic before spending a live-evidence attempt.
+if ! LC_ALL=C grep -aFq 'SIMPLE_LINK_OBJECTS provider is missing or not a file:' "$SIMPLE_BIN"; then
+    SIMPLE_BIN_STATUS=provider-link-support-missing
+    emit_failure simple-bin-external-provider-link-support-missing
+    exit 1
+fi
+
 # Production execution is permitted only after the entry advertises all three
 # machine-readable hooks. These names are protocol contracts, not evidence
 # markers: the live run must still produce and correlate every artifact.
@@ -218,7 +229,8 @@ if [ -n "${HOSTED_WM_ARTIFACT:-}" ]; then
     fi
 elif [ ! -x "$NATIVE_BIN" ] || find src/os/hosted src/os/compositor src/lib/common/ui \
     -type f -name '*.spl' -newer "$NATIVE_BIN" -print -quit | grep -q .; then
-    if ! SIMPLE_LINK_OBJECTS="$SPL_WINIT_LIB:$SIMPLE_RUNTIME_DYLIB:$SIMPLE_RUNTIME_C_DYLIB" \
+    if ! SIMPLE_NO_STUB_FALLBACK=1 \
+        SIMPLE_LINK_OBJECTS="$SPL_WINIT_LIB:$SIMPLE_RUNTIME_DYLIB:$SIMPLE_RUNTIME_C_DYLIB" \
         SIMPLE_LIB="$ROOT_DIR/src" "$SIMPLE_BIN" native-build \
         --source "$ENTRY" --entry "$ENTRY" --entry-closure --strip \
         --backend cranelift \
@@ -296,7 +308,9 @@ wait_for() {
         if [ -s "$FULLSCREEN_SNAPSHOT.live" ] && jq -e "$predicate" "$FULLSCREEN_SNAPSHOT.live" >/dev/null 2>&1; then
             return 0
         fi
-        kill -0 "$wm_pid" 2>/dev/null || return 1
+        # Distinguish an application crash from a slow but still-live window.
+        # This preserves a fail-closed report with an actionable reason.
+        kill -0 "$wm_pid" 2>/dev/null || return 2
         [ $(( $(now_ms) - started )) -lt $((DRIVER_TIMEOUT_SECS * 1000)) ] || return 1
         sleep 0.05
     done
@@ -311,7 +325,15 @@ save_phase() {
     cp "$FULLSCREEN_CAPTURE.live" "$2"
 }
 
-wait_for '.schema == "simple-wm-production-evidence-v1" and .input.nonce == 0 and .input.phase == "presented"' || fail_live evidence-readiness-timeout
+if wait_for '.schema == "simple-wm-production-evidence-v1" and .input.nonce == 0 and .input.phase == "presented"'; then
+    :
+else
+    readiness_status=$?
+    if [ "$readiness_status" -eq 2 ]; then
+        fail_live hosted-process-exited-before-evidence
+    fi
+    fail_live evidence-readiness-timeout
+fi
 
 # Exercise the internal-window hooks before fixing the reference semantic scene.
 # Maximize must affect only the focused internal window and restore its exact

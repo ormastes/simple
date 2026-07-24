@@ -575,6 +575,22 @@ fn cc_fallback_object_args(object_files: [text]) -> [text]:
         args.push(obj)
     args
 
+fn cc_fallback_extra_flags(extra_flags: [text]) -> [text]:
+    # NativeLinkConfig uses direct-linker rpath pairs because the normal Unix
+    # path invokes ld/lld itself. Preserve those rpaths when that path falls
+    # back to cc/clang instead of silently dropping them.
+    var result: [text] = []
+    var index = 0
+    while index < extra_flags.len():
+        val flag = extra_flags[index]
+        if flag == "-rpath" and index + 1 < extra_flags.len():
+            result = result.push("-Wl,-rpath," + extra_flags[index + 1])
+            index = index + 2
+        else:
+            result = result.push(flag)
+            index = index + 1
+    result
+
 fn hosted_cross_cc_required(target: text, os: text, arch: text) -> bool:
     val plan = hosted_c_compiler_plan(target, os, arch)
     plan.requires_cross and plan.supported
@@ -628,6 +644,8 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
             args.push(flag)
         for flag in native_all_gnu_support_args(object_files, os_name, brew_prefix):
             args.push(flag)
+        for flag in cc_fallback_extra_flags(config.extra_flags):
+            args.push(flag)
         for flag in ["-Wl,-dead_strip", "-o", output]:
             args.push(flag)
         val (stdout, stderr, code) = process_run(cc, args)
@@ -648,6 +666,8 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         args.push("-lSDL2")
         args.push("-Wl,--no-as-needed")
         for flag in native_all_gnu_support_args(object_files, os_name, ""):
+            args.push(flag)
+        for flag in cc_fallback_extra_flags(config.extra_flags):
             args.push(flag)
         if config.allow_duplicate_definitions:
             args.push("-Wl,--allow-multiple-definition")
@@ -673,6 +693,8 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         args.push("-lpthread")
         args.push("-ldl")
         for flag in native_all_gnu_support_args(object_files, os_name, ""):
+            args.push(flag)
+        for flag in cc_fallback_extra_flags(config.extra_flags):
             args.push(flag)
         args.push("-Wl,--as-needed")
         args.push("-lm")

@@ -24,10 +24,51 @@ use std.common.crypto.sha256.{sha256_u8_hex}
 # Routed through the canonical std.nogc_sync_mut.io_runtime facade (same
 # facade already used by the sibling llvm_backend_tools.spl for process_run);
 # resolves doc/08_tracking/bug/compiler_native_link_direct_runtime_facade_2026-07-12.md.
-use std.nogc_sync_mut.io_runtime.{env_get, file_copy, file_delete, file_exists, file_read, file_write, file_hash_sha256, remove_file_if_exists, process_run, dir_create_all, dir_exists, dir_remove_all}
+use std.nogc_sync_mut.io_runtime.{env_get, file_copy, file_delete, file_exists, file_read, file_write, file_hash_sha256, file_size_raw, remove_file_if_exists, process_run, dir_create_all, dir_exists, dir_remove_all}
 
 fn llvm_link_trace_enabled() -> bool:
     (env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
+
+# Hosted artifacts occasionally need a narrowly-scoped native provider that
+# does not belong in the compiler's default C runtime (for example the winit
+# bridge used by the production WM). Keep it at the final link boundary: the
+# compiler still owns code generation and unresolved calls remain link errors
+# unless a real, readable provider was explicitly supplied.
+fn llvm_configured_external_link_objects() -> Result<[text], text>:
+    val raw = env_get("SIMPLE_LINK_OBJECTS") ?? ""
+    if raw.trim() == "":
+        return Ok([])
+    val separator = if host_os() == "windows": ";" else: ":"
+    var providers: [text] = []
+    for raw_path in raw.split(separator):
+        val provider = raw_path.trim()
+        if provider == "":
+            continue
+        if not file_exists(provider) or file_size_raw(provider) <= 0:
+            return Err("SIMPLE_LINK_OBJECTS provider is missing or empty: " + provider)
+        if not providers.contains(provider):
+            providers = providers.push(provider)
+    Ok(providers)
+
+fn llvm_external_provider_rpath_flags(providers: [text]) -> [text]:
+    val os = host_os()
+    if os != "linux" and os != "freebsd" and os != "macos" and os != "darwin":
+        return []
+    var flags: [text] = []
+    var directories: [text] = []
+    for provider in providers:
+        val slash = provider.rfind("/") ?? -1
+        if slash <= 0:
+            continue
+        val directory = provider.substring(0, slash)
+        if directory != "" and not directories.contains(directory):
+            directories = directories.push(directory)
+            # `link_native_unix` invokes ld/lld directly, where -rpath and its
+            # value are separate arguments. Its C fallback translates this
+            # pair to the compiler-driver spelling.
+            flags = flags.push("-rpath")
+            flags = flags.push(directory)
+    flags
 
 fn llvm_stage4_final_requested_symbols(objects: [text]) -> Result<[text], text>:
     if objects.len() == 0:
@@ -1422,6 +1463,23 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
         if bootstrap_native_all != "":
             all_objects = all_objects.push(bootstrap_native_all)
         all_objects = all_objects.push(entry_obj_path)
+    # External providers are intentionally not temporary runtime objects: do
+    # not pass them to cleanup_runtime_objects or delete them after linking.
+    # They remain caller-owned and must stay present in the final artifact's
+    # dynamic dependency table.
+    val external_providers = match llvm_configured_external_link_objects():
+        case Ok(paths): paths
+        case Err(err):
+            cleanup_runtime_objects(runtime_objects)
+            if bootstrap_support_obj != "":
+                file_delete(bootstrap_support_obj)
+            if stage4_requested:
+                remove_file_if_exists(entry_obj_path)
+            else:
+                file_delete(entry_obj_path)
+            return Err(err)
+    for provider in external_providers:
+        all_objects = all_objects.push(provider)
     if trace:
         print "[LLVM-LINK] total objects: {all_objects.len()}"
 
@@ -1436,7 +1494,7 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
         verbose: options.verbose,
         allow_duplicate_definitions: not stage4_requested,
         allow_cc_fallback: not stage4_requested,
-        extra_flags: []
+        extra_flags: llvm_external_provider_rpath_flags(external_providers)
     )
     if trace:
         print "[LLVM-LINK] calling link_to_native..."
