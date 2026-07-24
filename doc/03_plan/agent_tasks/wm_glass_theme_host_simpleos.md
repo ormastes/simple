@@ -313,3 +313,10 @@ is historical.
   Do not deploy over live MCP. Start the isolated exact-current CLI build only
   after the accepted compiler candidate is integrated and the unrelated build
   releases the native-build resources.
+- The later exact-current isolated bootstrap at `719f610e3c` built its own
+  Rust seed/runtime and passed Stage 2 and Stage 3 sanity, but Stage 4 corrupted
+  lexer/token state while parsing the ordinary `elif` chain in
+  `src/lib/nogc_async_mut/cli/log_modes.spl`. No full CLI was produced and the
+  build must not be repeated in this session. Continue from
+  `doc/08_tracking/bug/stage4_selfhost_log_modes_lexer_state_corruption_2026-07-24.md`;
+  the deployed stale runner remains unchanged.
