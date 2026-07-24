@@ -13,13 +13,10 @@ use simple_parser::ast::{Attribute, ClassDef, Expr, FunctionDef, ImportTarget, N
 
 use crate::error::CompileError;
 use crate::value::{Env, Value};
-use crate::interpreter::{
-    normalize_path_key, tag_function_module_owner, FUNCTION_MODULE_OWNER, FUNCTION_OVERLOADS, GLOBAL_ENUMS,
-    MODULE_GLOBALS_BY_OWNER, MODULE_GLOBALS_INITIAL_BY_OWNER,
-};
+use crate::interpreter::{FUNCTION_OVERLOADS, FUNCTION_MODULE_OWNER};
 
 use crate::interpreter::interpreter_module::export_handler::load_export_source;
-use crate::interpreter::module_cache::{defer_use, filter_functions_from_value, take_deferred_use_for};
+use crate::interpreter::module_cache::filter_functions_from_value;
 
 type Enums = HashMap<String, Arc<simple_parser::ast::EnumDef>>;
 type ImplMethods = HashMap<String, Vec<Arc<simple_parser::ast::FunctionDef>>>;
@@ -39,36 +36,6 @@ fn method_with_impl_driver_attrs(method: &FunctionDef, impl_attrs: &[Attribute])
     attrs.extend(method.attributes);
     method.attributes = attrs;
     method
-}
-
-fn module_owner(module_path: Option<&Path>) -> Option<Arc<str>> {
-    module_path.map(|path| Arc::from(normalize_path_key(path).to_string_lossy().as_ref()))
-}
-
-fn function_with_owner(function: &FunctionDef, owner: Option<&Arc<str>>) -> FunctionDef {
-    let mut function = function.clone();
-    if let Some(owner) = owner {
-        tag_function_module_owner(&mut function, owner);
-    }
-    function
-}
-
-fn publish_module_global(module_path: Option<&Path>, name: String, value: Value) {
-    MODULE_GLOBALS.with(|cell| {
-        cell.borrow_mut().insert(name.clone(), value.clone());
-    });
-    let Some(owner) = module_owner(module_path) else {
-        return;
-    };
-    MODULE_GLOBALS_BY_OWNER.with(|cell| {
-        cell.borrow_mut()
-            .entry(Arc::clone(&owner))
-            .or_default()
-            .insert(name.clone(), value.clone());
-    });
-    MODULE_GLOBALS_INITIAL_BY_OWNER.with(|cell| {
-        cell.borrow_mut().entry(owner).or_default().insert(name, value);
-    });
 }
 
 use crate::interpreter::evaluate_expr;
@@ -123,12 +90,12 @@ pub(super) fn register_definitions(
     // that belongs to the calling function's own module. `None` when the
     // module path is unavailable — those functions simply get no owner entry
     // and fall back to the pre-existing first-registered tie-break.
-    let module_ident = module_owner(module_path);
+    let module_ident: Option<Arc<str>> = module_path.map(|p| Arc::from(p.to_string_lossy().as_ref()));
 
     for item in items.iter() {
         match item {
             Node::Function(f) => {
-                let arc_f = Arc::new(function_with_owner(f, module_ident.as_ref()));
+                let arc_f = Arc::new(f.clone());
                 if let Some(ident) = &module_ident {
                     FUNCTION_MODULE_OWNER.with(|cell| {
                         cell.borrow_mut()
@@ -149,15 +116,9 @@ pub(super) fn register_definitions(
                 }
             }
             Node::Class(c) => {
-                let mut class = c.clone();
-                class.methods = c
-                    .methods
-                    .iter()
-                    .map(|method| function_with_owner(method, module_ident.as_ref()))
-                    .collect();
-                let arc_c = Arc::new(class);
+                let arc_c = Arc::new(c.clone());
                 local_classes.insert(c.name.clone(), Arc::clone(&arc_c));
-                global_classes.insert(c.name.clone(), Arc::clone(&arc_c));
+                global_classes.insert(c.name.clone(), arc_c);
                 exports.insert(
                     c.name.clone(),
                     Value::Constructor {
@@ -165,7 +126,7 @@ pub(super) fn register_definitions(
                     },
                 );
                 // Register static methods as mangled free functions (ClassName__method)
-                for method in &arc_c.methods {
+                for method in &c.methods {
                     let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                     if is_static {
                         let mangled = format!("{}__{}", c.name, method.name);
@@ -192,11 +153,7 @@ pub(super) fn register_definitions(
                     generic_params: s.generic_params.clone(),
                     where_clause: s.where_clause.clone(),
                     fields: s.fields.clone(),
-                    methods: s
-                        .methods
-                        .iter()
-                        .map(|method| function_with_owner(method, module_ident.as_ref()))
-                        .collect(),
+                    methods: s.methods.clone(), // Include struct methods!
                     parent: None,
                     visibility: s.visibility,
                     effects: vec![],
@@ -212,7 +169,7 @@ pub(super) fn register_definitions(
                 };
                 let arc_class_def = Arc::new(class_def);
                 local_classes.insert(s.name.clone(), Arc::clone(&arc_class_def));
-                global_classes.insert(s.name.clone(), Arc::clone(&arc_class_def));
+                global_classes.insert(s.name.clone(), arc_class_def);
                 exports.insert(
                     s.name.clone(),
                     Value::Constructor {
@@ -220,7 +177,7 @@ pub(super) fn register_definitions(
                     },
                 );
                 // Register static methods as mangled free functions (StructName__method)
-                for method in &arc_class_def.methods {
+                for method in &s.methods {
                     let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                     if is_static {
                         let mangled = format!("{}__{}", s.name, method.name);
@@ -246,34 +203,47 @@ pub(super) fn register_definitions(
                     _ => None,
                 };
                 if let Some(type_name) = type_name {
-                    let owned_methods = impl_block
-                        .methods
-                        .iter()
-                        .map(|method| {
-                            let method = method_with_impl_driver_attrs(method, &impl_block.attributes);
-                            function_with_owner(&method, module_ident.as_ref())
-                        })
-                        .collect::<Vec<_>>();
                     // Handle classes
                     if let Some(class_def) = local_classes.get_mut(&type_name) {
-                        Arc::make_mut(class_def).methods.extend(owned_methods.iter().cloned());
+                        Arc::make_mut(class_def).methods.extend(
+                            impl_block
+                                .methods
+                                .iter()
+                                .map(|m| method_with_impl_driver_attrs(m, &impl_block.attributes)),
+                        );
                     }
                     if let Some(class_def) = global_classes.get_mut(&type_name) {
-                        Arc::make_mut(class_def).methods.extend(owned_methods.iter().cloned());
+                        Arc::make_mut(class_def).methods.extend(
+                            impl_block
+                                .methods
+                                .iter()
+                                .map(|m| method_with_impl_driver_attrs(m, &impl_block.attributes)),
+                        );
                     }
                     // Handle enums - add impl methods to enum definition
                     if let Some(enum_def) = local_enums.get_mut(&type_name) {
-                        Arc::make_mut(enum_def).methods.extend(owned_methods.iter().cloned());
+                        Arc::make_mut(enum_def).methods.extend(
+                            impl_block
+                                .methods
+                                .iter()
+                                .map(|m| method_with_impl_driver_attrs(m, &impl_block.attributes)),
+                        );
                     }
                     if let Some(enum_def) = global_enums.get_mut(&type_name) {
-                        Arc::make_mut(enum_def).methods.extend(owned_methods.iter().cloned());
+                        Arc::make_mut(enum_def).methods.extend(
+                            impl_block
+                                .methods
+                                .iter()
+                                .map(|m| method_with_impl_driver_attrs(m, &impl_block.attributes)),
+                        );
                     }
                     // Register static methods from impl blocks as mangled free functions
-                    for method in &owned_methods {
+                    for method in &impl_block.methods {
+                        let method = method_with_impl_driver_attrs(method, &impl_block.attributes);
                         let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                         if is_static {
                             let mangled = format!("{}__{}", type_name, method.name);
-                            let arc_method = Arc::new(method.clone());
+                            let arc_method = Arc::new(method);
                             local_functions.insert(mangled.clone(), Arc::clone(&arc_method));
                             global_functions.insert(mangled.clone(), Arc::clone(&arc_method));
                             exports.insert(
@@ -290,8 +260,13 @@ pub(super) fn register_definitions(
                     // (mirrors GLOBAL_ENUMS pattern for enum definitions)
                     GLOBAL_IMPL_METHODS.with(|cell| {
                         let mut global_impls = cell.borrow_mut();
-                        let registered_methods = global_impls.entry(type_name.clone()).or_default();
-                        registered_methods.extend(owned_methods.iter().cloned().map(Arc::new));
+                        let methods = global_impls.entry(type_name.clone()).or_default();
+                        methods.extend(
+                            impl_block
+                                .methods
+                                .iter()
+                                .map(|m| Arc::new(method_with_impl_driver_attrs(m, &impl_block.attributes))),
+                        );
                     });
                     // Update MODULE_CLASSES_CACHE with the enriched class definition
                     // so cross-module fallback lookups find impl-added methods
@@ -309,15 +284,9 @@ pub(super) fn register_definitions(
                 }
             }
             Node::Enum(e) => {
-                let mut enum_def = e.clone();
-                enum_def.methods = e
-                    .methods
-                    .iter()
-                    .map(|method| function_with_owner(method, module_ident.as_ref()))
-                    .collect();
-                let arc_e = Arc::new(enum_def);
+                let arc_e = Arc::new(e.clone());
                 local_enums.insert(e.name.clone(), Arc::clone(&arc_e));
-                global_enums.insert(e.name.clone(), Arc::clone(&arc_e));
+                global_enums.insert(e.name.clone(), arc_e);
                 // Export enum as EnumType so EnumName.VariantName syntax works
                 let enum_type = Value::EnumType {
                     enum_name: e.name.clone(),
@@ -326,7 +295,7 @@ pub(super) fn register_definitions(
                 // CRITICAL FIX: Also add to env so it's available in closures
                 env.insert(e.name.clone(), enum_type);
                 // Register enum static methods as mangled free functions
-                for method in &arc_e.methods {
+                for method in &e.methods {
                     let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                     if is_static {
                         let mangled = format!("{}__{}", e.name, method.name);
@@ -448,7 +417,9 @@ pub(super) fn process_imports_and_assignments(
                             // Sync module-level vars to MODULE_GLOBALS so that functions
                             // within this module can read/write them even when called from
                             // other modules (where the function's captured_env may not be used).
-                            publish_module_global(module_path, name, value);
+                            MODULE_GLOBALS.with(|cell| {
+                                cell.borrow_mut().insert(name.clone(), value);
+                            });
                         }
                     }
                 }
@@ -464,20 +435,9 @@ pub(super) fn process_imports_and_assignments(
                 )?;
                 env.insert(stmt.name.clone(), value.clone());
                 exports.insert(stmt.name.clone(), value.clone());
-                publish_module_global(module_path, stmt.name.clone(), value);
-            }
-            Node::Static(stmt) => {
-                let value = evaluate_expr(
-                    &stmt.value,
-                    env,
-                    local_functions,
-                    local_classes,
-                    local_enums,
-                    impl_methods,
-                )?;
-                env.insert(stmt.name.clone(), value.clone());
-                exports.insert(stmt.name.clone(), value.clone());
-                publish_module_global(module_path, stmt.name.clone(), value);
+                MODULE_GLOBALS.with(|cell| {
+                    cell.borrow_mut().insert(stmt.name.clone(), value);
+                });
             }
             Node::Assignment(stmt) => {
                 // Evaluate module-level assignments
@@ -494,7 +454,9 @@ pub(super) fn process_imports_and_assignments(
                         // Export vars so they're visible after import
                         exports.insert(name.clone(), value.clone());
                         // Sync to MODULE_GLOBALS for the same reason as Node::Let above
-                        publish_module_global(module_path, name.clone(), value);
+                        MODULE_GLOBALS.with(|cell| {
+                            cell.borrow_mut().insert(name.clone(), value);
+                        });
                     }
                 }
             }
@@ -532,9 +494,11 @@ fn process_use_stmt(
         return Ok(());
     }
 
+    // Note: `use lazy` is parsed but loaded eagerly in the Rust bootstrap interpreter.
+    // Actual lazy/deferred loading is implemented in the Simple interpreter
+    // (src/compiler/10.frontend/core/interpreter/eval_stmts.spl).
     if use_stmt.is_lazy {
-        defer_use(use_stmt.clone(), module_path);
-        return Ok(());
+        trace!("Loading lazy import eagerly (Rust bootstrap): {:?}", use_stmt.path);
     }
 
     // Recursively load imported modules
@@ -631,93 +595,6 @@ fn process_use_stmt(
         }
     }
     Ok(())
-}
-
-fn import_binding_name(use_stmt: &simple_parser::ast::UseStmt) -> String {
-    match &use_stmt.target {
-        ImportTarget::Single(name) => name.clone(),
-        ImportTarget::Aliased { alias, .. } => alias.clone(),
-        ImportTarget::Glob | ImportTarget::Group(_) => use_stmt
-            .path
-            .segments
-            .last()
-            .cloned()
-            .unwrap_or_else(|| "module".to_string()),
-    }
-}
-
-pub(crate) fn force_deferred_uses_for(
-    symbol: &str,
-    env: &mut Env,
-    functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, Arc<ClassDef>>,
-) -> Result<bool, CompileError> {
-    let mut loaded = false;
-    while let Some(deferred_use) = take_deferred_use_for(symbol) {
-        loaded = true;
-        let mut enums = HashMap::new();
-        let value = crate::interpreter::interpreter_module::module_loader::load_and_merge_module(
-            &deferred_use.use_stmt,
-            deferred_use.current_file.as_deref(),
-            functions,
-            classes,
-            &mut enums,
-        )?;
-        GLOBAL_ENUMS.with(|global| {
-            global.borrow_mut().extend(enums);
-        });
-        match &deferred_use.use_stmt.target {
-            ImportTarget::Group(items) => {
-                if let Value::Dict(exports) = &value {
-                    for item in items {
-                        let (source, binding) = match item {
-                            ImportTarget::Single(name) => (name, name),
-                            ImportTarget::Aliased { name, alias } => (name, alias),
-                            _ => continue,
-                        };
-                        if let Some(export) = exports.get(source) {
-                            if let Value::Function { def, .. } = export {
-                                functions.insert(binding.clone(), Arc::clone(def));
-                            }
-                            env.insert(binding.clone(), export.clone());
-                            MODULE_GLOBALS.with(|global| {
-                                global.borrow_mut().insert(binding.clone(), export.clone());
-                            });
-                        }
-                    }
-                }
-            }
-            ImportTarget::Glob => {
-                if let Value::Dict(exports) = &value {
-                    for (name, export) in exports.iter() {
-                        if let Value::Function { def, .. } = export {
-                            if name != "main" {
-                                functions.insert(name.clone(), Arc::clone(def));
-                            }
-                        }
-                        env.insert(name.clone(), export.clone());
-                        MODULE_GLOBALS.with(|global| {
-                            global.borrow_mut().insert(name.clone(), export.clone());
-                        });
-                    }
-                }
-            }
-            ImportTarget::Single(_) | ImportTarget::Aliased { .. } => {}
-        }
-        let binding_name = import_binding_name(&deferred_use.use_stmt);
-        env.insert(binding_name.clone(), value.clone());
-        MODULE_GLOBALS.with(|global| {
-            global.borrow_mut().insert(binding_name, value);
-        });
-        let resolved = env.contains_key(symbol)
-            || functions.contains_key(symbol)
-            || classes.contains_key(symbol)
-            || GLOBAL_ENUMS.with(|global| global.borrow().contains_key(symbol));
-        if resolved {
-            break;
-        }
-    }
-    Ok(loaded)
 }
 
 /// Process an export statement
