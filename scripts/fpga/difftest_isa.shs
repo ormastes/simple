@@ -59,6 +59,22 @@ run_probe() {
     echo "    $cls: pass=$cp fail=$cf xfail=$cx xpass=$cxp"
   done
   grep '^BLOCKED' "$log" | sed 's/^/  /'
+  # Fail-closed no-op guard: a probe that actually ran must emit at least one
+  # PASS/FAIL/XFAIL/XPASS/BLOCKED result. Zero executed with rc=0 is a FALSE
+  # GREEN — it happens when $SIMPLE_BIN is a broken build that prints
+  # "seed sibling not found, skipping delegation" and exits 0 WITHOUT running
+  # the program (the deployed self-hosted bin/simple currently does exactly
+  # this), or on a parse/compile error, or a hang. Never report PASS for it.
+  executed=$((pass + fail + xfail + xpass + blocked))
+  if [ "$executed" -eq 0 ]; then
+    echo "  NO EXAMPLES EXECUTED — $tag emitted zero results (rc=$rc)."
+    echo "  Treated as HARD FAILURE (false-green guard): the compiler did not run"
+    echo "  the probe. Verify \$SIMPLE_BIN actually executes a hello-world .spl"
+    echo "  (a broken deploy exits 0 without printing); or fix the parse/compile"
+    echo "  error shown below. tail:"
+    tail -5 "$log" | sed 's/^/    /'
+    overall_rc=1
+  fi
   [ "$fail" -gt 0 ] && overall_rc=1
 }
 
