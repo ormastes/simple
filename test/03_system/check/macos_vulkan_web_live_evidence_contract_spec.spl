@@ -1,4 +1,4 @@
-use std.io.{file_read}
+use std.io_runtime.{file_read, process_run}
 use std.spec.{describe, it, expect, step}
 
 val WRAPPER = "scripts/check/check-macos-vulkan-web-live-evidence.shs"
@@ -36,6 +36,7 @@ describe "macOS Vulkan web live evidence wrapper contract":
         val source = file_read(WRAPPER)
         expect(source).to_contain("set frontmost to true")
         expect(source).to_contain("keystroke \"g\"")
+        expect(source).to_contain("error \"SimpleGui web pointer target missing\"")
         expect(source).to_contain("cliclick \"m:${click_x},${click_y}\" \"c:.\"")
         expect(source).to_contain("[ \"${keyboard:-0}\" -gt 0 ] || fail \"keyboard-event-missing\"")
         expect(source).to_contain("[ \"${pointer:-0}\" -gt 0 ] || fail \"pointer-event-missing\"")
@@ -43,22 +44,71 @@ describe "macOS Vulkan web live evidence wrapper contract":
         expect(source).to_contain("[ \"${revision:-0}\" -gt 0 ] || fail \"interaction-revision-missing\"")
 
     it "should bound startup by timeout and resident memory":
-        step("Inspect the live-process timeout and RSS gates")
+        step("Inspect numeric validation and peak RSS gates")
         val source = file_read(WRAPPER)
         expect(source).to_contain("TIMEOUT_SECS=\"${MACOS_VULKAN_WEB_TIMEOUT_SECS:-180}\"")
         expect(source).to_contain("MAX_RSS_KB=\"${MACOS_VULKAN_WEB_MAX_RSS_KB:-1048576}\"")
+        expect(source).to_contain("normalize_positive_integer()")
+        expect(source).to_contain("fail \"invalid-timeout-secs\"")
+        expect(source).to_contain("fail \"invalid-max-rss-kb\"")
         expect(source).to_contain("deadline=$(($(date +%s) + TIMEOUT_SECS))")
         expect(source).to_contain("process_rss_kb()")
-        expect(source).to_contain("[ \"$observed_rss_kb\" -gt \"$MAX_RSS_KB\" ]")
+        expect(source).to_contain("sample_peak_rss()")
+        expect(source).to_contain("[ \"$current_rss_kb\" -gt \"$peak_rss_kb\" ]")
+        expect(source).to_contain("[ \"$peak_rss_kb\" -gt \"$MAX_RSS_KB\" ]")
         expect(source).to_contain("fail \"resource-limit-exceeded\"")
+        expect(source).to_contain("macos_vulkan_web_live_peak_rss_kb=$peak_rss_kb")
+        expect(source).to_contain("macos_vulkan_web_live_max_rss_kb=$MAX_RSS_KB")
         expect(source).to_contain("fail \"window-not-found\"")
 
-    it "should clean up the exact launched child on every exit path":
-        step("Inspect PID-scoped child ownership and signal cleanup")
+    it "should reject malformed timeout and RSS limits before platform launch":
+        step("Run the wrapper with invalid numeric configuration")
+        val root = "build/test-macos-vulkan-web-live-numeric-contract"
+        val timeout_command = "rm -rf " + root + " && mkdir -p " + root +
+            " && BUILD_DIR=" + root + "/timeout REPORT_PATH=" + root +
+            "/timeout.md MACOS_VULKAN_WEB_TIMEOUT_SECS=bad sh " + WRAPPER
+        val (_timeout_stdout, _timeout_stderr, timeout_code) =
+            process_run("/bin/sh", ["-c", timeout_command])
+        expect(timeout_code).to_equal(1)
+        val timeout_evidence = file_read(root + "/timeout/evidence.env")
+        expect(timeout_evidence).to_contain("macos_vulkan_web_live_status=fail")
+        expect(timeout_evidence).to_contain("macos_vulkan_web_live_reason=invalid-timeout-secs")
+
+        val rss_command = "BUILD_DIR=" + root + "/rss REPORT_PATH=" + root +
+            "/rss.md MACOS_VULKAN_WEB_MAX_RSS_KB=0 sh " + WRAPPER
+        val (_rss_stdout, _rss_stderr, rss_code) =
+            process_run("/bin/sh", ["-c", rss_command])
+        expect(rss_code).to_equal(1)
+        val rss_evidence = file_read(root + "/rss/evidence.env")
+        expect(rss_evidence).to_contain("macos_vulkan_web_live_status=fail")
+        expect(rss_evidence).to_contain("macos_vulkan_web_live_reason=invalid-max-rss-kb")
+
+    it "should fail closed when the launched child exits before its window":
+        step("Inspect child discovery, early-exit detection, and bounded diagnostics")
         val source = file_read(WRAPPER)
         expect(source).to_contain("app_pid=\"\"")
         expect(source).to_contain("find_launched_pid()")
+        expect(source).to_contain("capture_child_exit_cause()")
+        expect(source).to_contain("child_logs_have_terminal_failure()")
+        expect(source).to_contain("! kill -0 \"$app_pid\" 2>/dev/null")
+        expect(source).to_contain("fail \"app-exited-before-window\"")
+        expect(source).to_contain("macos_vulkan_web_live_child_exit_cause=$child_exit_cause")
+
+    it "should clean up the exact launched child on every exit path":
+        step("Inspect unique executable discovery and PID-scoped ownership")
+        val source = file_read(WRAPPER)
+        expect(source).to_contain("launch_app_bundle=")
+        expect(source).to_contain("launch_app_executable=")
+        expect(source).to_contain("$2 == executable")
+        expect(source).to_contain("assert_launched_process()")
+        expect(source).to_contain("fail \"launched-pid-executable-mismatch\"")
         expect(source).to_contain("cleanup()")
         expect(source).to_contain("trap cleanup EXIT HUP INT TERM")
+        expect(source).to_contain("set targetPid to (item 1 of argv) as integer")
+        expect(source).to_contain("processes whose unix id is targetPid")
+        expect(source).to_contain("osascript - \"$app_pid\" >/dev/null")
+        expect(source).to_contain("app_pid=\"${1:-}\"")
+        expect(source).to_contain("fail \"invalid-window-pid\"")
         expect(source).to_contain("if kill -0 \"$app_pid\" 2>/dev/null; then")
         expect(source).to_contain("kill -TERM \"$app_pid\" 2>/dev/null || true")
+        expect(source).to_contain("cleanup\napp_pid=\"\"")

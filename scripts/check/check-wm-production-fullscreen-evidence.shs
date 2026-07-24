@@ -31,6 +31,11 @@ SPL_WINIT_LIB="${SIMPLE_WM_WINIT_LIB:-$ROOT_DIR/build/sffi/libspl_winit.$RUNTIME
 SIMPLE_RUNTIME_DYLIB="${SIMPLE_WM_RUNTIME_DYLIB:-$ROOT_DIR/build/sffi/libsimple_runtime_wm.$RUNTIME_DYLIB_EXT}"
 SIMPLE_RUNTIME_C_DYLIB="${SIMPLE_WM_RUNTIME_C_DYLIB:-$ROOT_DIR/build/sffi/libsimple_runtime_c_wm.$RUNTIME_DYLIB_EXT}"
 DRIVER_TIMEOUT_SECS="${WM_EVIDENCE_TIMEOUT_SECS:-20}"
+REQUESTED_GUI_BACKEND="$(printf '%s' "${SIMPLE_GUI_BACKEND:-}" | tr '[:upper:]' '[:lower:]')"
+VULKAN_EVIDENCE_REQUIRED=false
+if [ "$REQUESTED_GUI_BACKEND" = vulkan ]; then
+    VULKAN_EVIDENCE_REQUIRED=true
+fi
 SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
 SIMPLE_BIN_STATUS=unchecked
 SIMPLE_BIN_RESOLVED=""
@@ -100,6 +105,8 @@ emit_failure() {
         echo "wm_production_fullscreen_restored_snapshot=$(artifact_status "$RESTORED_SNAPSHOT")"
         echo "wm_production_fullscreen_launch_log=$(artifact_status "$LAUNCH_LOG")"
         echo "wm_production_fullscreen_native_artifact=$(artifact_status "$NATIVE_BIN")"
+        echo "wm_production_fullscreen_requested_gui_backend=$REQUESTED_GUI_BACKEND"
+        echo "wm_production_fullscreen_vulkan_evidence_required=$VULKAN_EVIDENCE_REQUIRED"
     } >"$EVIDENCE_ENV"
     {
         echo "# Production Host WM Fullscreen Evidence"
@@ -324,6 +331,50 @@ save_phase() {
     cp "$FULLSCREEN_SNAPSHOT.live" "$1"
     cp "$FULLSCREEN_CAPTURE.live" "$2"
 }
+vulkan_frame_marker() {
+    marker_pattern=$1
+    grep -E "$marker_pattern" "$LAUNCH_LOG" |
+        grep -E '(^|[ ;])backend=vulkan([; ]|$)' |
+        grep -E '(^|[ ;])source=device_readback([; ]|$)' |
+        grep -E '(^|[ ;])handle=[1-9][0-9]*([; ]|$)' |
+        grep -E '(^|[ ;])checksum=[1-9][0-9]*([; ]|$)' |
+        tail -n 1 || true
+}
+marker_field() {
+    marker=$1
+    field=$2
+    printf '%s\n' "$marker" | tr ';' ' ' | awk -v key="$field" '
+        {
+            for (i = 1; i <= NF; i++) {
+                split($i, pair, "=")
+                if (pair[1] == key) {
+                    print pair[2]
+                    exit
+                }
+            }
+        }
+    '
+}
+ppm_engine2d_checksum() {
+    perl -e '
+        use strict;
+        my ($path) = @ARGV;
+        open my $file, "<:raw", $path or exit 1;
+        local $/;
+        my $data = <$file>;
+        $data =~ /\AP6\r?\n(\d+) (\d+)\r?\n255\r?\n/s or exit 2;
+        my ($width, $height) = ($1, $2);
+        my $pixels = substr($data, $+[0]);
+        length($pixels) == $width * $height * 3 or exit 3;
+        my $checksum = 0;
+        for (my $offset = 0; $offset < length($pixels); $offset += 3) {
+            my ($red, $green, $blue) = unpack("C3", substr($pixels, $offset, 3));
+            my $argb = 0xFF000000 | ($red << 16) | ($green << 8) | $blue;
+            $checksum = ($checksum + $argb) % 2147483647;
+        }
+        print "$checksum\n";
+    ' "$1"
+}
 
 if wait_for '.schema == "simple-wm-production-evidence-v1" and .input.nonce == 0 and .input.phase == "presented"'; then
     :
@@ -405,15 +456,53 @@ if grep -Eq '^\[hosted-wm\] content-provenance-rejected|backend=native-safe-fall
     fail_live content-provenance-rejected
 fi
 
+verified_backend=simple-2d-winit-buffer
+verified_source=presented-pixel-buffer
+verified_backend_handle=0
+verified_same_frame_readback=false
+verified_readback_checksum=0
+verified_presented_checksum=0
+if [ "$VULKAN_EVIDENCE_REQUIRED" = true ]; then
+    initial_vulkan_marker="$(vulkan_frame_marker '^\[hosted-wm\] frame-presented ')"
+    windowed_vulkan_marker="$(vulkan_frame_marker '^\[hosted-wm\] evidence-ack nonce=10 ')"
+    fullscreen_vulkan_marker="$(vulkan_frame_marker '^\[hosted-wm\] evidence-ack nonce=11 ')"
+    restored_vulkan_marker="$(vulkan_frame_marker '^\[hosted-wm\] evidence-ack nonce=12 ')"
+    [ -n "$initial_vulkan_marker" ] || fail_live vulkan-initial-device-readback-marker-missing
+    [ -n "$windowed_vulkan_marker" ] || fail_live vulkan-windowed-device-readback-marker-missing
+    [ -n "$fullscreen_vulkan_marker" ] || fail_live vulkan-fullscreen-device-readback-marker-missing
+    [ -n "$restored_vulkan_marker" ] || fail_live vulkan-restored-device-readback-marker-missing
+    windowed_readback_checksum="$(marker_field "$windowed_vulkan_marker" checksum)"
+    fullscreen_readback_checksum="$(marker_field "$fullscreen_vulkan_marker" checksum)"
+    restored_readback_checksum="$(marker_field "$restored_vulkan_marker" checksum)"
+    windowed_presented_checksum="$(ppm_engine2d_checksum "$WINDOWED_CAPTURE")" || fail_live vulkan-windowed-presented-checksum-unavailable
+    fullscreen_presented_checksum="$(ppm_engine2d_checksum "$FULLSCREEN_CAPTURE")" || fail_live vulkan-fullscreen-presented-checksum-unavailable
+    restored_presented_checksum="$(ppm_engine2d_checksum "$RESTORED_CAPTURE")" || fail_live vulkan-restored-presented-checksum-unavailable
+    [ "$windowed_readback_checksum" = "$windowed_presented_checksum" ] || fail_live vulkan-windowed-same-frame-checksum-mismatch
+    [ "$fullscreen_readback_checksum" = "$fullscreen_presented_checksum" ] || fail_live vulkan-fullscreen-same-frame-checksum-mismatch
+    [ "$restored_readback_checksum" = "$restored_presented_checksum" ] || fail_live vulkan-restored-same-frame-checksum-mismatch
+    verified_backend=vulkan
+    verified_source=device_readback
+    verified_backend_handle="$(marker_field "$fullscreen_vulkan_marker" handle)"
+    verified_same_frame_readback=true
+    verified_readback_checksum="$fullscreen_readback_checksum"
+    verified_presented_checksum="$fullscreen_presented_checksum"
+fi
+
 cleanup
 trap - EXIT INT TERM
 {
     echo "wm_production_fullscreen_status=pass"
     echo "wm_production_fullscreen_reason=live-production-evidence-verified"
     echo "wm_production_fullscreen_native_artifact=$NATIVE_BIN"
-    echo "wm_production_fullscreen_backend=simple-2d-winit-buffer"
+    echo "wm_production_fullscreen_requested_gui_backend=$REQUESTED_GUI_BACKEND"
+    echo "wm_production_fullscreen_vulkan_evidence_required=$VULKAN_EVIDENCE_REQUIRED"
+    echo "wm_production_fullscreen_backend=$verified_backend"
     echo "wm_production_fullscreen_fallback_used=false"
-    echo "wm_production_fullscreen_readback=presented-pixel-buffer"
+    echo "wm_production_fullscreen_readback=$verified_source"
+    echo "wm_production_fullscreen_backend_handle=$verified_backend_handle"
+    echo "wm_production_fullscreen_same_frame_readback=$verified_same_frame_readback"
+    echo "wm_production_fullscreen_readback_checksum=$verified_readback_checksum"
+    echo "wm_production_fullscreen_presented_checksum=$verified_presented_checksum"
     echo "wm_production_fullscreen_content_provenance=$content_provenance_marker"
     echo "wm_production_fullscreen_theme_source_manifest_sha256=$EXPECTED_THEME_SOURCE_MANIFEST_SHA256"
     echo "wm_production_fullscreen_internal_maximize_hook=verified"
@@ -428,7 +517,9 @@ trap - EXIT INT TERM
     echo
     echo "- status: pass"
     echo "- artifact: $NATIVE_BIN"
-    echo "- backend/readback: simple-2d-winit-buffer / presented-pixel-buffer (no fallback)"
+    echo "- backend/readback: $verified_backend / $verified_source (no fallback)"
+    echo "- backend handle: $verified_backend_handle"
+    echo "- same-frame checksum: $verified_same_frame_readback ($verified_readback_checksum / $verified_presented_checksum)"
     echo "- content provenance: $content_provenance_marker"
     echo "- fullscreen/restore: ${fullscreen_elapsed}ms / ${restored_elapsed}ms"
     echo "- internal interactions: focus, drag, minimize, taskbar restore"

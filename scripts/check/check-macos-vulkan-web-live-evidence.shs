@@ -9,6 +9,7 @@ REPORT_PATH="${REPORT_PATH:-doc/09_report/macos_vulkan_web_live_evidence_$(date 
 SAMPLE="${MACOS_VULKAN_WEB_SAMPLE:-examples/06_io/ui/web_standards_showcase_gui.spl}"
 HTML_SAMPLE="${MACOS_VULKAN_WEB_HTML_SAMPLE:-examples/06_io/ui/browser_common_elements_showcase.html}"
 TIMEOUT_SECS="${MACOS_VULKAN_WEB_TIMEOUT_SECS:-180}"
+MAX_RSS_KB="${MACOS_VULKAN_WEB_MAX_RSS_KB:-1048576}"
 ICD_PATH="${VK_ICD_FILENAMES:-/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json}"
 EVENTS="$BUILD_DIR/events.env"
 LAUNCHER_LOG="$BUILD_DIR/launcher.log"
@@ -16,6 +17,11 @@ WINDOW_ENV="$BUILD_DIR/window.env"
 BEFORE_PNG="$BUILD_DIR/before.png"
 AFTER_PNG="$BUILD_DIR/after.png"
 EVIDENCE_ENV="$BUILD_DIR/evidence.env"
+launch_stdout=""
+launch_stderr=""
+launch_app_bundle=""
+launch_app_executable=""
+child_exit_cause=""
 
 case "$HTML_SAMPLE" in
     /*) HTML_SAMPLE_PATH="$HTML_SAMPLE" ;;
@@ -24,6 +30,29 @@ esac
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$EVENTS" "$LAUNCHER_LOG" "$WINDOW_ENV" "$BEFORE_PNG" "$AFTER_PNG" "$EVIDENCE_ENV"
+
+app_pid=""
+peak_rss_kb=0
+cleanup() {
+    [ -n "$app_pid" ] || return 0
+    osascript - "$app_pid" >/dev/null 2>&1 <<'OSA' || true
+on run argv
+  set targetPid to (item 1 of argv) as integer
+  tell application "System Events"
+    repeat with proc in (processes whose unix id is targetPid)
+      tell proc
+        set frontmost to true
+        keystroke "q"
+      end tell
+    end repeat
+  end tell
+end run
+OSA
+    if kill -0 "$app_pid" 2>/dev/null; then
+        kill -TERM "$app_pid" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT HUP INT TERM
 
 write_report() {
     {
@@ -42,35 +71,22 @@ write_report() {
     } >"$REPORT_PATH"
 }
 
-quit_web_app_event() {
-    osascript >/dev/null 2>&1 <<'OSA' || true
-tell application "System Events"
-  repeat with proc in (processes whose name is "SimpleGui")
-    tell proc
-      repeat with win in windows
-        if (name of win as text) starts with "Pure-Simple web renderer" then
-          set frontmost to true
-          keystroke "q"
-          return true
-        end if
-      end repeat
-    end tell
-  end repeat
-end tell
-OSA
-}
-
 fail() {
     reason="$1"
     {
         echo "macos_vulkan_web_live_status=fail"
         echo "macos_vulkan_web_live_reason=$reason"
+        echo "macos_vulkan_web_live_peak_rss_kb=$peak_rss_kb"
+        echo "macos_vulkan_web_live_max_rss_kb=$MAX_RSS_KB"
+        if [ -n "$child_exit_cause" ]; then
+            echo "macos_vulkan_web_live_child_exit_cause=$child_exit_cause"
+        fi
     } >"$EVIDENCE_ENV"
     write_report
-    if [ "${app_launched:-false}" = "true" ]; then
-        quit_web_app_event
-    fi
     echo "macOS Vulkan web live evidence: FAIL ($reason)" >&2
+    if [ -n "$child_exit_cause" ]; then
+        echo "SimpleGui log cause: $child_exit_cause" >&2
+    fi
     exit 1
 }
 
@@ -104,6 +120,88 @@ file_cksum() {
     fi
 }
 
+capture_child_exit_cause() {
+    child_exit_cause=""
+    for child_log in "$launch_stderr" "$launch_stdout"; do
+        [ -n "$child_log" ] && [ -f "$child_log" ] || continue
+        child_exit_cause="$(
+            grep -E '^(error:|fatal:|panic:)' "$child_log" 2>/dev/null |
+                tail -n 1 || true
+        )"
+        if [ -z "$child_exit_cause" ]; then
+            child_exit_cause="$(awk 'NF { line = $0 } END { print line }' "$child_log")"
+        fi
+        [ -z "$child_exit_cause" ] || break
+    done
+    child_exit_cause="$(
+        printf '%s' "${child_exit_cause:-SimpleGui exited without captured output}" |
+            tr '\r\n' '  ' | cut -c 1-500
+    )"
+}
+
+child_logs_have_terminal_failure() {
+    for child_log in "$launch_stderr" "$launch_stdout"; do
+        [ -n "$child_log" ] && [ -f "$child_log" ] || continue
+        grep -Eq '^(error:|fatal:|panic:)' "$child_log" 2>/dev/null && return 0
+    done
+    return 1
+}
+
+find_launched_pid() {
+    ps -axo pid=,command= | awk -v executable="$launch_app_executable" '
+        $2 == executable {
+            print $1
+            exit
+        }
+    '
+}
+
+process_rss_kb() {
+    ps -p "$1" -o rss= 2>/dev/null | tr -d ' '
+}
+
+normalize_positive_integer() {
+    value="$1"
+    case "$value" in
+        ""|*[!0-9]*) return 1 ;;
+    esac
+    normalized="$(expr "$value" + 0)" || return 1
+    [ "$normalized" -gt 0 ] || return 1
+    printf '%s\n' "$normalized"
+}
+
+sample_peak_rss() {
+    [ -n "$app_pid" ] || return 0
+    current_rss_kb="$(process_rss_kb "$app_pid")"
+    [ -n "$current_rss_kb" ] || return 0
+    case "$current_rss_kb" in
+        *[!0-9]*) fail "invalid-rss-sample" ;;
+    esac
+    if [ "$current_rss_kb" -gt "$peak_rss_kb" ]; then
+        peak_rss_kb="$current_rss_kb"
+    fi
+    if [ "$peak_rss_kb" -gt "$MAX_RSS_KB" ]; then
+        fail "resource-limit-exceeded"
+    fi
+}
+
+assert_launched_process() {
+    [ -n "$app_pid" ] || fail "launched-pid-missing"
+    actual_executable="$(
+        ps -p "$app_pid" -o command= 2>/dev/null |
+            awk 'NR == 1 { print $1 }'
+    )"
+    [ "$actual_executable" = "$launch_app_executable" ] ||
+        fail "launched-pid-executable-mismatch"
+}
+
+if ! TIMEOUT_SECS="$(normalize_positive_integer "$TIMEOUT_SECS")"; then
+    fail "invalid-timeout-secs"
+fi
+if ! MAX_RSS_KB="$(normalize_positive_integer "$MAX_RSS_KB")"; then
+    fail "invalid-max-rss-kb"
+fi
+
 if [ "$(uname -s)" != "Darwin" ]; then
     fail "requires-macos"
 fi
@@ -126,7 +224,6 @@ if ! command -v cliclick >/dev/null 2>&1; then
     fail "cliclick-missing"
 fi
 
-app_launched=false
 SIMPLE_GUI_RUN_SKIP_NUDGE=1 \
 SIMPLE_GUI_BACKEND=vulkan \
 SIMPLE_GUI_EXIT_AFTER_INTERACTION=0 \
@@ -138,13 +235,39 @@ VK_ICD_FILENAMES="$ICD_PATH" \
 DYLD_LIBRARY_PATH="${DYLD_LIBRARY_PATH:-/opt/homebrew/lib}" \
     scripts/gui/macos-gui-run.shs "$SAMPLE" >"$LAUNCHER_LOG" 2>&1 ||
     fail "launcher-failed"
-app_launched=true
+
+launch_stdout="$(sed -n 's/^app stdout: \(.*\)  stderr:.*/\1/p' \
+    "$LAUNCHER_LOG" | tail -n 1)"
+launch_stderr="$(sed -n 's/^app stdout: .*  stderr: \(.*\)$/\1/p' \
+    "$LAUNCHER_LOG" | tail -n 1)"
+launch_app_bundle="$(sed -n 's/^launching .* as \(.*\) \.\.\.$/\1/p' \
+    "$LAUNCHER_LOG" | tail -n 1)"
+[ -n "$launch_stdout" ] || fail "launch-stdout-path-missing"
+[ -n "$launch_stderr" ] || fail "launch-stderr-path-missing"
+[ -n "$launch_app_bundle" ] || fail "launch-app-bundle-path-missing"
+[ -d "$launch_app_bundle/Contents/MacOS" ] ||
+    fail "launch-app-bundle-missing"
+launch_app_executable="$(
+    CDPATH= cd -- "$launch_app_bundle/Contents/MacOS" && pwd -P
+)/SimpleGui"
+[ -x "$launch_app_executable" ] || fail "launch-app-executable-missing"
 
 deadline=$(($(date +%s) + TIMEOUT_SECS))
+saw_app_process=0
 while [ "$(date +%s)" -lt "$deadline" ]; do
-    if osascript >"$WINDOW_ENV" 2>/dev/null <<'OSA'; then
+    candidate_pid="$(find_launched_pid)"
+    if [ -n "$candidate_pid" ]; then
+        app_pid="$candidate_pid"
+        saw_app_process=1
+        assert_launched_process
+        sample_peak_rss
+    fi
+    if [ -n "$app_pid" ] &&
+        osascript - "$app_pid" >"$WINDOW_ENV" 2>/dev/null <<'OSA'
+on run argv
+  set targetPid to (item 1 of argv) as integer
 tell application "System Events"
-  repeat with proc in (processes whose name is "SimpleGui")
+  repeat with proc in (processes whose unix id is targetPid)
     tell proc
       repeat with win in windows
         if (name of win as text) starts with "Pure-Simple web renderer" then
@@ -154,28 +277,55 @@ tell application "System Events"
           set p to position of win
           set s to size of win
           set AppleScript's text item delimiters to ","
-          return (item 1 of p as text) & "," & (item 2 of p as text) & "," & (item 1 of s as text) & "," & (item 2 of s as text)
+          return (targetPid as text) & "," & (item 1 of p as text) & "," & \
+            (item 2 of p as text) & "," & (item 1 of s as text) & "," & \
+            (item 2 of s as text)
         end if
       end repeat
     end tell
   end repeat
 end tell
 error "SimpleGui web window not ready"
+end run
 OSA
+    then
         break
     fi
-    sleep 1
+    if [ "$saw_app_process" -eq 1 ] &&
+        ! kill -0 "$app_pid" 2>/dev/null; then
+        capture_child_exit_cause
+        fail "app-exited-before-window"
+    fi
+    if [ "$saw_app_process" -eq 0 ] &&
+        child_logs_have_terminal_failure; then
+        capture_child_exit_cause
+        fail "app-exited-before-window"
+    fi
+    sleep 0.25
 done
 
 if [ ! -s "$WINDOW_ENV" ]; then
     fail "window-not-found"
 fi
-window_rect="$(tr -d '\r\n ' <"$WINDOW_ENV")"
-case "$window_rect" in
-    *,*,*,*) ;;
+window_record="$(tr -d '\r\n ' <"$WINDOW_ENV")"
+case "$window_record" in
+    *,*,*,*,*) ;;
     *) fail "invalid-window-rect" ;;
 esac
+old_ifs=$IFS
+IFS=,
+set -- $window_record
+IFS=$old_ifs
+app_pid="${1:-}"
+window_x="${2:-0}"
+window_y="${3:-0}"
+window_w="${4:-0}"
+window_h="${5:-0}"
+case "$app_pid" in ""|*[!0-9]*) fail "invalid-window-pid" ;; esac
+assert_launched_process
+window_rect="$window_x,$window_y,$window_w,$window_h"
 
+sample_peak_rss
 if ! screencapture -x -R"$window_rect" "$BEFORE_PNG"; then
     fail "before-capture-failed"
 fi
@@ -184,15 +334,38 @@ old_ifs=$IFS
 IFS=,
 set -- $window_rect
 IFS=$old_ifs
-window_x="${1:-0}"
-window_y="${2:-0}"
 click_x=$((window_x + 150))
 click_y=$((window_y + 140))
 
-cliclick "m:${click_x},${click_y}" "c:."
-osascript >/dev/null <<'OSA'
+# Reassert ownership and focus immediately before coordinate-based pointer
+# injection so a different SimpleGui instance cannot receive the click.
+assert_launched_process
+osascript - "$app_pid" >/dev/null <<'OSA'
+on run argv
+  set targetPid to (item 1 of argv) as integer
 tell application "System Events"
-  repeat with proc in (processes whose name is "SimpleGui")
+  repeat with proc in (processes whose unix id is targetPid)
+    tell proc
+      repeat with win in windows
+        if (name of win as text) starts with "Pure-Simple web renderer" then
+          set position of win to {200, 120}
+          set frontmost to true
+          return true
+        end if
+      end repeat
+    end tell
+  end repeat
+end tell
+error "SimpleGui web pointer target missing"
+end run
+OSA
+cliclick "m:${click_x},${click_y}" "c:."
+assert_launched_process
+osascript - "$app_pid" >/dev/null <<'OSA'
+on run argv
+  set targetPid to (item 1 of argv) as integer
+tell application "System Events"
+  repeat with proc in (processes whose unix id is targetPid)
     tell proc
       repeat with win in windows
         if (name of win as text) starts with "Pure-Simple web renderer" then
@@ -205,10 +378,13 @@ tell application "System Events"
   end repeat
 end tell
 error "SimpleGui web input target missing"
+end run
 OSA
+sample_peak_rss
 
 event_deadline=$(($(date +%s) + 15))
 while [ "$(date +%s)" -lt "$event_deadline" ]; do
+    sample_peak_rss
     keyboard="$(value_of web_standards_event_keyboard_events "$EVENTS")"
     pointer="$(value_of web_standards_event_pointer_events "$EVENTS")"
     clicks="$(value_of web_standards_event_click_events "$EVENTS")"
@@ -243,9 +419,12 @@ interaction_checksum="$(value_of web_standards_event_interaction_checksum "$EVEN
 
 # Pin again immediately before the post-input capture so another activation
 # cannot relocate or cover the evidence window.
-osascript >/dev/null <<'OSA'
+assert_launched_process
+osascript - "$app_pid" >/dev/null <<'OSA'
+on run argv
+  set targetPid to (item 1 of argv) as integer
 tell application "System Events"
-  repeat with proc in (processes whose name is "SimpleGui")
+  repeat with proc in (processes whose unix id is targetPid)
     tell proc
       repeat with win in windows
         if (name of win as text) starts with "Pure-Simple web renderer" then
@@ -258,8 +437,11 @@ tell application "System Events"
   end repeat
 end tell
 error "SimpleGui web post-input window missing"
+end run
 OSA
 sleep 1
+sample_peak_rss
+assert_launched_process
 if ! screencapture -x -R"$window_rect" "$AFTER_PNG"; then
     fail "after-capture-failed"
 fi
@@ -272,8 +454,6 @@ after_cksum="$(file_cksum "$AFTER_PNG")"
 [ "$after_bytes" -gt 1000 ] || fail "after-capture-empty"
 [ "$before_cksum" != "$after_cksum" ] || fail "capture-unchanged"
 
-launch_stdout="$(sed -n 's/^app stdout: \(.*\)  stderr:.*/\1/p' "$LAUNCHER_LOG" | tail -n 1)"
-[ -n "$launch_stdout" ] || fail "launch-stdout-path-missing"
 [ -f "$launch_stdout" ] || fail "launch-stdout-missing"
 renderer_line="$(grep '^web_standards_showcase status=pass ' "$launch_stdout" | tail -n 1 || true)"
 [ -n "$renderer_line" ] || fail "renderer-status-missing"
@@ -305,6 +485,11 @@ renderer_checksum="$(line_field readback_checksum "$renderer_line")"
     echo "macos_vulkan_web_live_pointer_events=$pointer"
     echo "macos_vulkan_web_live_click_events=$clicks"
     echo "macos_vulkan_web_live_interaction_revision=$revision"
+    echo "macos_vulkan_web_live_peak_rss_kb=$peak_rss_kb"
+    echo "macos_vulkan_web_live_max_rss_kb=$MAX_RSS_KB"
+    echo "macos_vulkan_web_live_app_bundle=$launch_app_bundle"
+    echo "macos_vulkan_web_live_app_executable=$launch_app_executable"
+    echo "macos_vulkan_web_live_app_pid=$app_pid"
     echo "macos_vulkan_web_live_window_rect=$window_rect"
     echo "macos_vulkan_web_live_before_png=$BEFORE_PNG"
     echo "macos_vulkan_web_live_after_png=$AFTER_PNG"
@@ -316,8 +501,8 @@ renderer_checksum="$(line_field readback_checksum "$renderer_line")"
 write_report
 
 # Q closes through the application's own event route after evidence is durable.
-quit_web_app_event
-app_launched=false
+cleanup
+app_pid=""
 
 echo "macOS Vulkan web live evidence: PASS"
 echo "report=$REPORT_PATH"

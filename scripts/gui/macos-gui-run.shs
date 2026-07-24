@@ -62,6 +62,7 @@ fi
 app="$(mktemp -d)/SimpleGui.app"
 mkdir -p "$app/Contents/MacOS"
 cp "$gui_bin" "$app/Contents/MacOS/SimpleGui"
+app_executable="$app/Contents/MacOS/SimpleGui"
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -72,7 +73,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>CFBundleName</key><string>SimpleGui</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleVersion</key><string>1</string>
-  <key>NSHighResolutionCapable</key><false/>
+  <key>NSHighResolutionCapable</key><true/>
   <key>LSEnvironment</key>
   <dict>
     <key>SIMPLE_GUI</key><string>1</string>
@@ -108,27 +109,72 @@ else
   open -n --stdout "$app/../launch.out" --stderr "$app/../launch.err" "$app" --args run "$program" --no-daemon
 fi
 
+find_exact_app_pid() {
+  ps -axo pid=,command= | awk -v executable="$app_executable" '
+    {
+      pid = $1
+      $1 = ""
+      sub(/^[[:space:]]+/, "")
+      if ($0 == executable || index($0, executable " ") == 1) {
+        print pid
+        exit
+      }
+    }
+  '
+}
+
+# `open` does not return the launched process id. Resolve it only through this
+# invocation's unique temporary executable path, then publish that immutable
+# identity for evidence wrappers. A bundle-name lookup can select another
+# concurrent SimpleGui instance and invalidate all following input/capture proof.
+launched_pid=""
+for _ in $(seq 1 100); do
+  launched_pid="$(find_exact_app_pid)"
+  if [[ -n "$launched_pid" ]]; then
+    break
+  fi
+  sleep 0.1
+done
+if [[ -z "$launched_pid" ]]; then
+  echo "error: launched SimpleGui process not found for $app_executable" >&2
+  exit 1
+fi
+
+echo "app pid: $launched_pid  executable: $app_executable"
+if [[ -n "${SIMPLE_GUI_LAUNCHED_PID_PATH:-}" ]]; then
+  pid_record_tmp="${SIMPLE_GUI_LAUNCHED_PID_PATH}.tmp.$$"
+  {
+    printf 'launched_pid=%s\n' "$launched_pid"
+    printf 'launched_executable=%s\n' "$app_executable"
+    printf 'launched_bundle=%s\n' "$app"
+    printf 'launched_high_resolution_capable=true\n'
+  } >"$pid_record_tmp"
+  mv "$pid_record_tmp" "$SIMPLE_GUI_LAUNCHED_PID_PATH"
+fi
+
 if [[ "${SIMPLE_GUI_RUN_SKIP_NUDGE:-0}" = "1" ]]; then
   exit 0
 fi
 
 # winit may place small windows off-screen on multi-display macOS setups; nudge
-# the first real app window on-screen once it appears. LaunchServices may show a
-# transient process before the window-owning process, so select by window count.
+# the exact launched process window on-screen once it appears.
 for _ in $(seq 1 60); do
-  if osascript <<'OSA' >/dev/null 2>&1; then
-tell application "SimpleGui" to activate
+  if osascript - "$launched_pid" <<'OSA' >/dev/null 2>&1; then
+on run argv
+set targetPid to (item 1 of argv) as integer
 tell application "System Events"
-  repeat with proc in (processes whose name is "SimpleGui")
+  repeat with proc in (processes whose unix id is targetPid)
     tell proc
       if (count of windows) > 0 then
         set position of window 1 to {200, 120}
+        set frontmost to true
         return true
       end if
     end tell
   end repeat
 end tell
 error "SimpleGui window not ready"
+end run
 OSA
     break
   fi

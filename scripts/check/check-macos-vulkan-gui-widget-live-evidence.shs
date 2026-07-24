@@ -16,6 +16,7 @@ EVENTS="$BUILD_DIR/events.env"
 VALIDATED_EVENTS="$BUILD_DIR/events.validated.env"
 LAUNCHER_LOG="$BUILD_DIR/launcher.log"
 WINDOW_ENV="$BUILD_DIR/window.env"
+LAUNCHED_PID_ENV="$BUILD_DIR/launched-pid.env"
 BEFORE_PNG="$BUILD_DIR/before.png"
 AFTER_PNG="$BUILD_DIR/after.png"
 EVIDENCE_ENV="$BUILD_DIR/evidence.env"
@@ -23,14 +24,19 @@ launch_stdout=""
 launch_stderr=""
 child_exit_cause=""
 
-mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
-rm -f "$EVENTS" "$VALIDATED_EVENTS" "$LAUNCHER_LOG" "$WINDOW_ENV" \
-    "$BEFORE_PNG" "$AFTER_PNG" "$EVIDENCE_ENV"
+if [ -z "${MACOS_VULKAN_GUI_WIDGET_CONTRACT_PROBE:-}" ]; then
+    mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+    rm -f "$EVENTS" "$VALIDATED_EVENTS" "$LAUNCHER_LOG" "$WINDOW_ENV" \
+        "$LAUNCHED_PID_ENV" "$BEFORE_PNG" "$AFTER_PNG" "$EVIDENCE_ENV"
+fi
 
 app_pid=""
+launched_executable=""
 observed_rss_kb=0
 cleanup() {
     [ -n "$app_pid" ] || return 0
+    [ -n "$launched_executable" ] || return 0
+    pid_matches_executable "$app_pid" "$launched_executable" || return 0
     osascript - "$app_pid" >/dev/null 2>&1 <<'OSA' || true
 on run argv
   set targetPid to (item 1 of argv) as integer
@@ -70,6 +76,74 @@ file_bytes() {
 file_cksum() {
     if [ -f "$1" ]; then cksum "$1" | awk '{print $1}'; else echo 0; fi
 }
+
+png_dimension() {
+    dimension="$1"
+    path="$2"
+    sips -g "$dimension" "$path" 2>/dev/null |
+        awk -v key="$dimension:" '$1 == key { print $2 }'
+}
+
+positive_integer() {
+    case "${1:-}" in
+        ""|0|*[!0-9]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+validate_checksum_pair() {
+    positive_integer "${1:-}" || return 1
+    positive_integer "${2:-}" || return 1
+    [ "$1" = "$2" ]
+}
+
+validate_executable_command() {
+    executable="${2:-}"
+    case "$executable" in /*/SimpleGui.app/Contents/MacOS/SimpleGui) ;; *)
+        return 1 ;;
+    esac
+    [ "${1:-}" = "$executable" ] ||
+        [ "${1#"$executable "}" != "$1" ]
+}
+
+validate_hidpi_geometry() {
+    logical_width="${1:-}"
+    logical_height="${2:-}"
+    pixel_width="${3:-}"
+    pixel_height="${4:-}"
+    for dimension in "$logical_width" "$logical_height" "$pixel_width" "$pixel_height"; do
+        positive_integer "$dimension" || return 1
+    done
+    [ $((pixel_width % logical_width)) -eq 0 ] || return 1
+    [ $((pixel_height % logical_height)) -eq 0 ] || return 1
+    scale_x=$((pixel_width / logical_width))
+    scale_y=$((pixel_height / logical_height))
+    [ "$scale_x" -gt 1 ] && [ "$scale_x" -eq "$scale_y" ]
+}
+
+if [ -n "${MACOS_VULKAN_GUI_WIDGET_CONTRACT_PROBE:-}" ]; then
+    case "$MACOS_VULKAN_GUI_WIDGET_CONTRACT_PROBE" in
+        checksum)
+            validate_checksum_pair \
+                "${MACOS_VULKAN_GUI_WIDGET_RENDERER_CHECKSUM:-}" \
+                "${MACOS_VULKAN_GUI_WIDGET_EVENT_INITIAL_CHECKSUM:-}"
+            ;;
+        pid)
+            validate_executable_command \
+                "${MACOS_VULKAN_GUI_WIDGET_PROCESS_COMMAND:-}" \
+                "${MACOS_VULKAN_GUI_WIDGET_LAUNCHED_EXECUTABLE:-}"
+            ;;
+        hidpi)
+            validate_hidpi_geometry \
+                "${MACOS_VULKAN_GUI_WIDGET_LOGICAL_WIDTH:-}" \
+                "${MACOS_VULKAN_GUI_WIDGET_LOGICAL_HEIGHT:-}" \
+                "${MACOS_VULKAN_GUI_WIDGET_PIXEL_WIDTH:-}" \
+                "${MACOS_VULKAN_GUI_WIDGET_PIXEL_HEIGHT:-}"
+            ;;
+        *) exit 2 ;;
+    esac
+    exit $?
+fi
 
 capture_child_exit_cause() {
     child_exit_cause=""
@@ -148,16 +222,21 @@ fail() {
     exit 1
 }
 
-find_launched_pid() {
-    ps -axo pid=,command= | awk -v sample="$SAMPLE" '
-        index($0, "SimpleGui.app/Contents/MacOS/SimpleGui") &&
-        index($0, sample) { pid = $1 }
-        END { if (pid != "") print pid }
-    '
-}
-
 process_rss_kb() {
     ps -p "$1" -o rss= 2>/dev/null | tr -d ' '
+}
+
+pid_matches_executable() {
+    target_pid="$1"
+    target_executable="$2"
+    command_line="$(ps -p "$target_pid" -o command= 2>/dev/null || true)"
+    validate_executable_command "$command_line" "$target_executable"
+}
+
+require_launched_process() {
+    kill -0 "$app_pid" 2>/dev/null || fail "launched-process-missing"
+    pid_matches_executable "$app_pid" "$launched_executable" ||
+        fail "launched-process-identity-mismatch"
 }
 
 [ "$(uname -s)" = "Darwin" ] || fail "requires-macos"
@@ -166,8 +245,10 @@ process_rss_kb() {
 command -v osascript >/dev/null 2>&1 || fail "osascript-missing"
 command -v screencapture >/dev/null 2>&1 || fail "screencapture-missing"
 command -v cliclick >/dev/null 2>&1 || fail "cliclick-missing"
+command -v sips >/dev/null 2>&1 || fail "sips-missing"
 
 SIMPLE_GUI_RUN_SKIP_NUDGE=1 \
+SIMPLE_GUI_LAUNCHED_PID_PATH="$(absolute_path "$LAUNCHED_PID_ENV")" \
 SIMPLE_GUI_BACKEND=vulkan \
 SIMPLE_GUI_EXIT_AFTER_INTERACTION=0 \
 SIMPLE_GUI_EVENT_EVIDENCE_PATH="$(absolute_path "$EVENTS")" \
@@ -184,29 +265,36 @@ launch_stderr="$(sed -n 's/^app stdout: .*  stderr: \(.*\)$/\1/p' \
     "$LAUNCHER_LOG" | tail -n 1)"
 [ -n "$launch_stdout" ] || fail "launch-stdout-path-missing"
 [ -n "$launch_stderr" ] || fail "launch-stderr-path-missing"
+[ -s "$LAUNCHED_PID_ENV" ] || fail "launched-pid-record-missing"
+
+app_pid="$(value_of launched_pid "$LAUNCHED_PID_ENV")"
+launched_executable="$(value_of launched_executable "$LAUNCHED_PID_ENV")"
+launched_bundle="$(value_of launched_bundle "$LAUNCHED_PID_ENV")"
+high_resolution_capable="$(value_of launched_high_resolution_capable "$LAUNCHED_PID_ENV")"
+case "$app_pid" in ""|*[!0-9]*) fail "invalid-launched-pid" ;; esac
+case "$launched_executable" in /*/SimpleGui.app/Contents/MacOS/SimpleGui) ;; *)
+    fail "invalid-launched-executable" ;;
+esac
+case "$launched_bundle" in /*/SimpleGui.app) ;; *) fail "invalid-launched-bundle" ;; esac
+[ "$high_resolution_capable" = "true" ] || fail "high-resolution-bundle-disabled"
+require_launched_process
 
 deadline=$(($(date +%s) + TIMEOUT_SECS))
-saw_app_process=0
 while [ "$(date +%s)" -lt "$deadline" ]; do
-    candidate_pid="$(find_launched_pid)"
-    if [ -n "$candidate_pid" ]; then
-        app_pid="$candidate_pid"
-        saw_app_process=1
-        observed_rss_kb="$(process_rss_kb "$app_pid")"
-        observed_rss_kb="${observed_rss_kb:-0}"
-        if [ "$observed_rss_kb" -gt "$MAX_RSS_KB" ]; then
-            fail "resource-limit-exceeded"
-        fi
+    require_launched_process
+    observed_rss_kb="$(process_rss_kb "$app_pid")"
+    observed_rss_kb="${observed_rss_kb:-0}"
+    if [ "$observed_rss_kb" -gt "$MAX_RSS_KB" ]; then
+        fail "resource-limit-exceeded"
     fi
-    if osascript >"$WINDOW_ENV" 2>/dev/null <<'OSA'; then
-tell application "SimpleGui" to activate
+    if osascript - "$app_pid" >"$WINDOW_ENV" 2>/dev/null <<'OSA'; then
+on run argv
+set targetPid to (item 1 of argv) as integer
 tell application "System Events"
   set selectedProc to missing value
-  set selectedPid to 0
-  repeat with proc in (processes whose name is "SimpleGui")
-    if (count of windows of proc) > 0 and (unix id of proc) > selectedPid then
+  repeat with proc in (processes whose unix id is targetPid)
+    if (count of windows of proc) > 0 then
       set selectedProc to proc
-      set selectedPid to unix id of proc
     end if
   end repeat
   if selectedProc is missing value then error "SimpleGui window not ready"
@@ -216,22 +304,19 @@ tell application "System Events"
     delay 0.3
     set p to position of window 1
     set s to size of window 1
+    set windowNumber to value of attribute "AXWindowNumber" of window 1
+    if windowNumber is missing value then error "SimpleGui window id missing"
     set AppleScript's text item delimiters to ","
-    return (selectedPid as text) & "," & (item 1 of p as text) & "," & \
+    return (targetPid as text) & "," & (item 1 of p as text) & "," & \
       (item 2 of p as text) & "," & (item 1 of s as text) & "," & \
-      (item 2 of s as text)
+      (item 2 of s as text) & "," & (windowNumber as text)
   end tell
 end tell
+end run
 OSA
         break
     fi
-    if [ "$saw_app_process" -eq 1 ] &&
-        ! kill -0 "$app_pid" 2>/dev/null; then
-        capture_child_exit_cause
-        fail "app-exited-before-window"
-    fi
-    if [ "$saw_app_process" -eq 0 ] &&
-        child_logs_have_terminal_failure; then
+    if child_logs_have_terminal_failure; then
         capture_child_exit_cause
         fail "app-exited-before-window"
     fi
@@ -240,24 +325,37 @@ done
 
 [ -s "$WINDOW_ENV" ] || fail "window-not-found"
 window_record="$(tr -d '\r\n ' <"$WINDOW_ENV")"
-case "$window_record" in *,*,*,*,*) ;; *) fail "invalid-window-rect" ;; esac
+case "$window_record" in *,*,*,*,*,*) ;; *) fail "invalid-window-rect" ;; esac
 old_ifs=$IFS
 IFS=,
 set -- $window_record
 IFS=$old_ifs
-app_pid="${1:-}"
+window_pid="${1:-}"
 window_x="${2:-0}"
 window_y="${3:-0}"
 window_w="${4:-0}"
 window_h="${5:-0}"
-case "$app_pid" in ""|*[!0-9]*) fail "invalid-window-pid" ;; esac
+window_id="${6:-}"
+case "$window_pid" in ""|*[!0-9]*) fail "invalid-window-pid" ;; esac
+[ "$window_pid" = "$app_pid" ] || fail "window-pid-mismatch"
+positive_integer "$window_w" || fail "invalid-window-width"
+positive_integer "$window_h" || fail "invalid-window-height"
+positive_integer "$window_id" || fail "invalid-window-id"
 window_rect="$window_x,$window_y,$window_w,$window_h"
 
-screencapture -x -R"$window_rect" "$BEFORE_PNG" ||
+require_launched_process
+screencapture -x -o -l"$window_id" "$BEFORE_PNG" ||
     fail "before-capture-failed"
+before_pixel_width="$(png_dimension pixelWidth "$BEFORE_PNG")"
+before_pixel_height="$(png_dimension pixelHeight "$BEFORE_PNG")"
+validate_hidpi_geometry \
+    "$window_w" "$window_h" "$before_pixel_width" "$before_pixel_height" ||
+    fail "high-dpi-backing-mismatch"
+backing_scale=$((before_pixel_width / window_w))
 
 click_x=$((window_x + 150))
 click_y=$((window_y + 140))
+require_launched_process
 cliclick "m:${click_x},${click_y}" "c:."
 osascript - "$app_pid" >/dev/null <<'OSA'
 on run argv
@@ -304,21 +402,28 @@ initial_checksum="$(value_of widget_showcase_event_initial_checksum "$EVENTS")"
 interaction_checksum="$(value_of widget_showcase_event_interaction_checksum "$EVENTS")"
 [ "$event_backend" = "vulkan" ] || fail "event-backend-mismatch"
 [ "$source" = "device_readback" ] || fail "device-readback-missing"
-[ "${handle:-0}" -gt 0 ] || fail "backend-handle-missing"
-[ "${initial_checksum:-0}" -gt 0 ] || fail "initial-checksum-missing"
-[ "${interaction_checksum:-0}" -gt 0 ] || fail "interaction-checksum-missing"
+positive_integer "$handle" || fail "backend-handle-missing"
+positive_integer "$initial_checksum" || fail "initial-checksum-missing"
+positive_integer "$interaction_checksum" || fail "interaction-checksum-missing"
 [ "$initial_checksum" != "$interaction_checksum" ] ||
     fail "interaction-frame-unchanged"
 
-osascript - "$app_pid" >/dev/null <<'OSA'
+require_launched_process
+osascript - "$app_pid" "$window_id" >/dev/null <<'OSA'
 on run argv
 set targetPid to (item 1 of argv) as integer
+set targetWindowId to (item 2 of argv) as integer
 tell application "System Events"
   repeat with proc in (processes whose unix id is targetPid)
     tell proc
-      set position of window 1 to {40, 50}
-      set frontmost to true
-      return true
+      repeat with targetWindow in windows
+        set candidateWindowId to value of attribute "AXWindowNumber" of targetWindow
+        if candidateWindowId = targetWindowId then
+          set position of targetWindow to {40, 50}
+          set frontmost to true
+          return true
+        end if
+      end repeat
     end tell
   end repeat
 end tell
@@ -326,22 +431,35 @@ error "SimpleGui post-input window missing"
 end run
 OSA
 sleep 1
-screencapture -x -R"$window_rect" "$AFTER_PNG" ||
+require_launched_process
+screencapture -x -o -l"$window_id" "$AFTER_PNG" ||
     fail "after-capture-failed"
 
 before_bytes="$(file_bytes "$BEFORE_PNG")"
 after_bytes="$(file_bytes "$AFTER_PNG")"
 before_cksum="$(file_cksum "$BEFORE_PNG")"
 after_cksum="$(file_cksum "$AFTER_PNG")"
+after_pixel_width="$(png_dimension pixelWidth "$AFTER_PNG")"
+after_pixel_height="$(png_dimension pixelHeight "$AFTER_PNG")"
 [ "$before_bytes" -gt 1000 ] || fail "before-capture-empty"
 [ "$after_bytes" -gt 1000 ] || fail "after-capture-empty"
 [ "$before_cksum" != "$after_cksum" ] || fail "capture-unchanged"
+[ "$after_pixel_width" = "$before_pixel_width" ] &&
+    [ "$after_pixel_height" = "$before_pixel_height" ] ||
+    fail "capture-backing-dimensions-changed"
+validate_hidpi_geometry \
+    "$window_w" "$window_h" "$after_pixel_width" "$after_pixel_height" ||
+    fail "after-high-dpi-backing-mismatch"
 
 renderer_line="$(sed -n 's/^showcase_frame_backend=//p' "$launch_stdout" | tail -n 1)"
 case "$renderer_line" in
     "vulkan;source=device_readback;checksum="*) ;;
     *) fail "renderer-provenance-missing" ;;
 esac
+renderer_checksum="${renderer_line##*;checksum=}"
+positive_integer "$renderer_checksum" || fail "renderer-checksum-invalid"
+validate_checksum_pair "$renderer_checksum" "$initial_checksum" ||
+    fail "renderer-event-initial-checksum-mismatch"
 renderer_handle="$(value_of showcase_frame_backend_handle "$launch_stdout")"
 renderer_dimensions="$(value_of showcase_frame_dimensions "$launch_stdout")"
 renderer_dpi="$(value_of showcase_frame_dpi "$launch_stdout")"
@@ -376,10 +494,15 @@ cp "$EVENTS" "$VALIDATED_EVENTS"
     echo "macos_vulkan_gui_widget_live_status=pass"
     echo "macos_vulkan_gui_widget_live_reason=pass"
     echo "macos_vulkan_gui_widget_live_backend=vulkan"
+    echo "macos_vulkan_gui_widget_live_pid=$app_pid"
+    echo "macos_vulkan_gui_widget_live_executable=$launched_executable"
+    echo "macos_vulkan_gui_widget_live_bundle=$launched_bundle"
+    echo "macos_vulkan_gui_widget_live_high_resolution_capable=$high_resolution_capable"
     echo "macos_vulkan_gui_widget_live_source=$source"
     echo "macos_vulkan_gui_widget_live_backend_handle=$handle"
     echo "macos_vulkan_gui_widget_live_dimensions=$renderer_dimensions"
     echo "macos_vulkan_gui_widget_live_dpi=$renderer_dpi"
+    echo "macos_vulkan_gui_widget_live_renderer_checksum=$renderer_checksum"
     echo "macos_vulkan_gui_widget_live_initial_checksum=$initial_checksum"
     echo "macos_vulkan_gui_widget_live_interaction_checksum=$interaction_checksum"
     echo "macos_vulkan_gui_widget_live_keyboard_events=$keyboard"
@@ -395,6 +518,10 @@ cp "$EVENTS" "$VALIDATED_EVENTS"
     echo "macos_vulkan_gui_widget_live_font_execution_attempts=$font_attempts"
     echo "macos_vulkan_gui_widget_live_font_backend_attempt_succeeded=$font_succeeded"
     echo "macos_vulkan_gui_widget_live_window_rect=$window_rect"
+    echo "macos_vulkan_gui_widget_live_window_id=$window_id"
+    echo "macos_vulkan_gui_widget_live_logical_dimensions=${window_w}x${window_h}"
+    echo "macos_vulkan_gui_widget_live_backing_dimensions=${before_pixel_width}x${before_pixel_height}"
+    echo "macos_vulkan_gui_widget_live_backing_scale=$backing_scale"
     echo "macos_vulkan_gui_widget_live_before_png=$BEFORE_PNG"
     echo "macos_vulkan_gui_widget_live_after_png=$AFTER_PNG"
     echo "macos_vulkan_gui_widget_live_before_bytes=$before_bytes"
