@@ -323,18 +323,23 @@ is historical.
 
 ## Continuation order — 2026-07-25
 
-1. Build one fresh exact-current full CLI from the high-reviewed declared
-   return catalog candidate; do not reuse a stale self-hosted binary.
-2. Run `scripts/check/check-cranelift-aot-aggregates.shs` once with that CLI.
+1. Admit the independently reviewed Stage 4 source-boundary repair: back the
+   canonical VHDL allocation import with a self-hosted SFFI facade and
+   remove the byte-identical normalized llm_caret keyboard module collision.
+2. In the next verification cycle, build one fresh exact-current full CLI from
+   the high-reviewed declared return catalog candidate; do not reuse a stale
+   self-hosted binary. The preceding cycle already proved Stage 2/3 green and
+   must not be repeated in the same cycle.
+3. Run `scripts/check/check-cranelift-aot-aggregates.shs` once with that CLI.
    Require direct nested `ThemePackage` projections and distinct aliased
    factories to execute with exact output and empty stderr.
-3. Add and execute same-process A-to-B reset plus skip-MIR invalidation
+4. Add and execute same-process A-to-B reset plus skip-MIR invalidation
    evidence before release admission.
-4. Run the canonical host production fullscreen evidence wrapper. Only a
+5. Run the canonical host production fullscreen evidence wrapper. Only a
    passing host semantic/event/pixel report opens the QEMU gates.
-5. Run x86_64 preflight and canonical OVMF framebuffer/event evidence, then
+6. Run x86_64 preflight and canonical OVMF framebuffer/event evidence, then
    ARM64 desktop/RAMFB keyboard-pointer evidence.
-6. Complete window-surface material projection at its WM/Draw-IR owner. Keep
+7. Complete window-surface material projection at its WM/Draw-IR owner. Keep
    legacy widget command shape exact, do not attach window glass effects to
    buttons, and use only Engine2D-consumed canonical fallback/style keys.
    Source projection and typed package gradient stops are high-review accepted.

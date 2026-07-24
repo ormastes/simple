@@ -302,3 +302,17 @@ implementation-aggregate-return-source-accepted-runtime-proof-pending
   the gradient `not-requested`. New Engine2D specs assert real gradient,
   border, first-shadow, and rounded solid-fallback pixels. High review accepts
   the source and tests; execution remains pending an exact-current full CLI.
+- continuation-2026-07-25-stage4-source-boundary: One fresh isolated
+  `--full-bootstrap --full-cli --no-mcp` Cranelift build passed Stage 2
+  (`09f0f9b8c8fbb5f99da2d87564b21fe0492edd48e919bb12e5c01e661c672361`)
+  and Stage 3
+  (`f09e91fea113ae1d751213ed718267305cd26cf36f752c392d0e1a9188bcf65b`),
+  each with 677 compiled and zero failed. Stage 4 stopped before compiling the
+  rendering lane because the VHDL catalog imported the Rust-bootstrap-only
+  `std.alloc.sffi` path without a self-hosted owner and two byte-identical
+  llm_caret keyboard-event files
+  normalized to the same module name. The bounded repair adds the self-hosted
+  canonical `std.alloc.sffi` facade and retains only the already-imported underscore
+  keyboard module, with parity matrices redirected to it. Independent review
+  and a later fresh bootstrap cycle remain required; no host or QEMU evidence
+  is claimed from this build.
