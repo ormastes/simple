@@ -61,3 +61,15 @@ Planned executable artifacts:
 
 Generate and review the two mirrored system manuals after the executable specs
 exist; no placeholder pass is permitted.
+
+### 2026-07-24 declaration-parser RED acceptance
+
+- Compare rich and surface parses for identical import/export and declaration
+  header sets on representative high-allocation CLI sources.
+- Prove ordinary top-level bodies are empty in the surface parse while trait
+  default and impl bodies remain present.
+- Parse a full module after a surface parse to prove no parser mode leaks.
+- Preserve malformed-declaration failure and the existing alias, enum payload,
+  trait-default, fingerprint, and release-order tests.
+- Rebuild one pure-Simple candidate and run the live slope gate once; acceptance
+  remains average growth at most 25,000 objects/file.

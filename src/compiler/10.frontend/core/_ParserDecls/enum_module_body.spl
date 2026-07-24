@@ -202,15 +202,15 @@ fn finalize_decl_visibility(decl_id: i64, visibility: text) -> i64:
     decl_set_visibility_text(decl_id, visibility)
     decl_id
 
-fn parse_module_decl_with_visibility(loop_index: i64, visibility: text) -> i64:
+fn parse_module_decl_with_visibility(loop_index: i64, visibility: text, surface_only: bool = false) -> i64:
     if par_kind_get() == 53:
         parser_advance()
         if par_kind_get() == 20:
-            return finalize_decl_visibility(parse_fn_decl(1), visibility)
+            return finalize_decl_visibility(parse_fn_decl(1, surface_only), visibility)
         parser_error("expected 'fn' after 'async'")
         return -1
     if par_kind_get() == 20:
-        return finalize_decl_visibility(parse_fn_decl(0), visibility)
+        return finalize_decl_visibility(parse_fn_decl(0, surface_only), visibility)
     if par_kind_get() == 25:
         parser_advance()
         return finalize_decl_visibility(parse_extern_fn_decl(), visibility)
@@ -235,7 +235,7 @@ fn parse_module_decl_with_visibility(loop_index: i64, visibility: text) -> i64:
         val decl_col = par_col_get()
         parser_advance()
         if par_kind_get() == 20:
-            val cfd = parse_fn_decl(0)
+            val cfd = parse_fn_decl(0, surface_only)
             decl_set_comptime(cfd)
             return finalize_decl_visibility(cfd, visibility)
         val const_name = par_text_get()
@@ -271,7 +271,7 @@ fn parser_decorator_arg_text(raw: text) -> text:
 var PENDING_HARDWARE: i64 = 0
 var PENDING_CLOCKED_ARGS: [text] = []
 
-fn parse_module_body():
+fn parse_module_body(surface_only: bool = false):
     for i in 0..100000:
         parser_skip_newlines_and_semicolons()
         if par_kind_get() == 190:
@@ -281,7 +281,7 @@ fn parse_module_body():
         val parsed_visibility = parse_top_level_visibility()
         if parsed_visibility != "private":
             parser_skip_newlines_and_semicolons()
-            val visible_decl = parse_module_decl_with_visibility(i, parsed_visibility)
+            val visible_decl = parse_module_decl_with_visibility(i, parsed_visibility, surface_only)
             if visible_decl >= 0:
                 module_add_decl(visible_decl)
             continue
@@ -292,12 +292,12 @@ fn parse_module_body():
             # Async function: async fn name()
             parser_advance()
             if par_kind_get() == 20:
-                val d = parse_fn_decl(1)  # 1 = is_async
+                val d = parse_fn_decl(1, surface_only)  # 1 = is_async
                 module_add_decl(d)
             else:
                 parser_error("expected 'fn' after 'async'")
         elif par_kind_get() == 20:
-            val d = parse_fn_decl(0)  # 0 = not async
+            val d = parse_fn_decl(0, surface_only)  # 0 = not async
             if PENDING_HARDWARE == 1:
                 decl_set_hardware(d, 1)
                 decl_set_clocked_args(d, PENDING_CLOCKED_ARGS)
@@ -308,7 +308,7 @@ fn parse_module_body():
             # Module-level `me name(self: T, ...)` — parsed as a plain fn with
             # an explicit self param (parity with the Rust parser, which routes
             # top-level Me to parse_function).
-            val me_d = parse_fn_decl(0)
+            val me_d = parse_fn_decl(0, surface_only)
             module_add_decl(me_d)
         elif par_kind_get() == 25:
             parser_advance()
@@ -352,7 +352,7 @@ fn parse_module_body():
             parser_advance()
             if par_kind_get() == 20:
                 # const fn -- parse as normal function with comptime flag
-                val cfd = parse_fn_decl(0)
+                val cfd = parse_fn_decl(0, surface_only)
                 decl_set_comptime(cfd)
                 module_add_decl(cfd)
             else:
@@ -511,7 +511,7 @@ fn parse_module_body():
                 pass_dn
             elif decorator_name == "gpu_kernel" or decorator_name == "gpu":
                 if par_kind_get() == 20 or par_kind_get() == 34:
-                    val d = parse_fn_decl(0)
+                    val d = parse_fn_decl(0, surface_only)
                     decl_is_gpu_kernel[d] = 1
                     if gpu_target_arg.len() > 0:
                         decl_set_gpu_target_text(d, gpu_target_arg)
@@ -522,7 +522,7 @@ fn parse_module_body():
                     module_add_decl(d)
             elif decorator_name == "simd":
                 if par_kind_get() == 20 or par_kind_get() == 34:
-                    val d = parse_fn_decl(0)
+                    val d = parse_fn_decl(0, surface_only)
                     decl_is_simd[d] = 1
                     module_add_decl(d)
             elif decorator_name == "packed":
@@ -779,7 +779,7 @@ fn parse_module_body():
                         val d = parse_val_decl()
                         module_add_decl(d)
                     elif par_kind_get() == 20:
-                        val ctfd = parse_fn_decl(0)
+                        val ctfd = parse_fn_decl(0, surface_only)
                         decl_set_comptime(ctfd)
                         module_add_decl(ctfd)
                     elif par_kind_get() == 161:

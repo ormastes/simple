@@ -1,7 +1,10 @@
 use std.spec.{describe, it, expect}
 use compiler.common.driver_core_types.{SourceFile}
-use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.common.config.{Logger}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module, parse_and_build_surface_module}
+use compiler.frontend.frontend.{parse_full_frontend, parse_surface_frontend}
 use compiler.frontend.parser_types.{Module}
+use compiler.frontend.parser_types_expr.{parser_type_kind_named_name}
 use compiler.core.parser.{parser_has_errors}
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfaceBuilder, module_surface_from_module, module_surfaces_from_modules, module_surface_source_matches, module_surface_trait_origin_key}
 
@@ -26,6 +29,39 @@ fn default_fixture() -> text:
     "fn api(input: i64 = 3) -> i64:\n    input\n"
 
 describe "ModuleSurface extraction":
+    it "keeps top-level headers while skipping only ordinary function bodies":
+        val content = "fn plain(value: i64) -> i64:\n    value + 1\n" +
+            "trait Kept:\n    fn default_value(me) -> i64:\n        7\n" +
+            "impl Kept:\n    fn implementation(me) -> i64:\n        9\n" +
+            "async fn pending() -> i64:\n    2\n" +
+            "const fn fixed() -> i64:\n    3\n"
+        val rich = parse_full_frontend(content, "surface_header_rich.spl", "surface.header.rich", Logger(level: 0))
+        expect(parser_has_errors()).to_equal(false)
+        val surface = parse_surface_frontend(content, "surface_header_only.spl", "surface.header.only", Logger(level: 0))
+        expect(parser_has_errors()).to_equal(false)
+        expect(surface.functions.contains("plain")).to_equal(rich.functions.contains("plain"))
+        expect(surface.functions.contains("pending")).to_equal(true)
+        expect(surface.functions.contains("fixed")).to_equal(true)
+        expect(surface.functions["plain"].body.stmts.len()).to_equal(0)
+        expect(surface.functions["plain"].params.len()).to_equal(rich.functions["plain"].params.len())
+        expect(surface.functions["plain"].has_return_type).to_equal(rich.functions["plain"].has_return_type)
+        expect(surface.functions["pending"].is_async).to_equal(rich.functions["pending"].is_async)
+        expect(parser_type_kind_named_name(surface.functions["pending"].return_type.kind)).to_equal(
+            parser_type_kind_named_name(rich.functions["pending"].return_type.kind)
+        )
+        expect(parser_type_kind_named_name(surface.functions["pending"].return_type.kind)).to_equal("Future")
+        expect(surface.traits["Kept"].methods[0].body.stmts.len()).to_be_greater_than(0)
+        expect(surface.impls[0].methods["implementation"].body.stmts.len()).to_be_greater_than(0)
+        val after_surface = parse_and_build_module("fn after_surface() -> i64:\n    0\n", "surface_no_leak.spl")
+        expect(parser_has_errors()).to_equal(false)
+        expect(after_surface.functions.contains("after_surface")).to_equal(true)
+        expect(after_surface.functions["after_surface"].body.stmts.len()).to_be_greater_than(0)
+
+    it "rejects a surface function body without indentation":
+        val malformed = parse_and_build_surface_module("fn broken() -> i64:\n0\n", "surface_missing_indent.spl")
+        expect(malformed.functions.contains("broken")).to_equal(true)
+        expect(parser_has_errors()).to_equal(true)
+
     it "keeps every resolver declaration category without ordinary bodies":
         val content = category_fixture()
         val module = parse_and_build_module(content, "surface_categories.spl")

@@ -7,7 +7,7 @@
 # (check/interpret/jit/aot) all consume exactly one parse pipeline.
 
 use compiler.frontend.parser_types.{Module, DomainBlock}
-use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module, parse_and_build_surface_module}
 use compiler.frontend.desugar.desugar_async.{desugar_module}
 use compiler.frontend.desugar.collection_desugar.{desugar_collections}
 use compiler.common.diagnostics.span.{Span}
@@ -96,3 +96,19 @@ fn parse_full_frontend(source: text, file_path: text, module_name: text, log: Lo
 
     # Return the parsed-and-desugared module (declared return type is Module).
     module
+
+fn parse_surface_frontend(source: text, file_path: text, module_name: text, log: Logger) -> Module:
+    val preprocessed = preprocess_conditionals(source)
+    var domain_blocks: [DomainBlock] = []
+    var parse_source = preprocessed
+    if frontend_may_have_domain_block(preprocessed):
+        domain_blocks = frontend_collect_domain_blocks(preprocessed)
+        parse_source = frontend_strip_domain_block_lines(preprocessed)
+    var module = parse_and_build_surface_module(parse_source, file_path)
+    if domain_blocks.len() > 0:
+        module.domain_blocks = domain_blocks
+    # Preserve the effective public headers produced by the full frontend
+    # (notably async fn -> fn returning Future<T>). Bodyless async functions
+    # have no suspension points, so module-private state helpers are deferred
+    # to the Phase-3 full parse.
+    desugar_module(module)

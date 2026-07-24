@@ -87,3 +87,23 @@ bootstrap, non-low-memory, and VHDL behavior remain unchanged.
 glob, sibling, enum, and trait resolution across all HIR paths. Non-streaming
 paths derive it from their retained rich modules without reparsing; only the
 Stage4 gate changes ownership and reparses one module at a time.
+
+### 2026-07-24 declaration-only Phase 2 addendum
+
+Phase 2 uses the core parser's existing declaration path, with ordinary
+top-level function bodies omitted before flat-AST conversion. It retains
+imports/exports, callable signatures, composite identity, enum payloads and
+defaults, traits and default bodies, impl headers and methods, and constant
+declared types. The frontend returns a `Module`; the driver remains the owner
+that converts it to `ModuleSurface`, preserving the frontend-to-HIR layer
+boundary.
+
+The first slice intentionally keeps class, trait, and impl method bodies on the
+existing parser path. Non-Stage4 parsing, source fingerprints, diagnostics,
+aliasing, and Phase 3 full parsing are unchanged. TreeSitter outlines are not a
+substitute because they omit required trait default bodies.
+
+The existing async desugar still runs on the bodyless Phase-2 module so exported
+headers use the same `Future<T>` return and non-async flag as Phase 3.
+Suspension-derived state enums and poll helpers are module-private and are
+generated only by the full Phase-3 parse.

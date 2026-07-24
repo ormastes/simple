@@ -337,7 +337,33 @@ fn has_seen_name(names: [text], target: text) -> bool:
 
 # ===== Function Declarations =====
 
-fn parse_fn_decl(is_async: i64) -> i64:
+fn parser_skip_surface_fn_body() -> [i64]:
+    # The module-surface pass needs signatures, not ordinary top-level bodies.
+    # Keep nested declarations on the normal parser path; this only consumes
+    # the already-delimited body of the current function.
+    if par_kind_get() == 180:
+        parser_skip_newlines()
+        if par_kind_get() != 181:
+            parser_error("expected indentation after function declaration")
+            return []
+        var depth: i64 = 1
+        parser_advance()
+        while depth > 0:
+            val kind = par_kind_get()
+            if kind == 190:
+                parser_error("unterminated indented function body")
+                return []
+            if kind == 181:
+                depth = depth + 1
+            elif kind == 182:
+                depth = depth - 1
+            parser_advance()
+        return []
+    while par_kind_get() != 180 and par_kind_get() != 190:
+        parser_advance()
+    []
+
+fn parse_fn_decl(is_async: i64, omit_body: bool = false) -> i64:
     val decl_start = lex_token_start_get()
     val decl_line = par_line_get()
     val decl_col = par_col_get()
@@ -426,7 +452,7 @@ fn parse_fn_decl(is_async: i64) -> i64:
 
     # Function body
     parser_expect(161)
-    val body = parse_block()
+    val body = if omit_body: parser_skip_surface_fn_body() else: parse_block()
 
     val decl_span = flat_span_new(decl_start, lex_token_start_get(), decl_line, decl_col)
     val fn_decl_idx = decl_fn(fn_name, param_names, param_types, ret_type, body, is_async, type_params, decl_span)

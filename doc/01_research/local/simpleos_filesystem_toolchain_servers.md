@@ -112,3 +112,14 @@ Before another Stage 4 attempt, require:
 After Stage 4 admission, reproduce RV64 web/DB first, filesystem Simple second,
 and filesystem Clang guest link/execute last. This order revives known working
 boundaries before extending the two incomplete toolchain lanes.
+
+#### 2026-07-24 allocation follow-up
+
+The first streaming implementation released each rich `Module`, but the live
+no-GC registry still grew by 38,913 objects/file. A brace-free string fast path
+reduced that to 37,602, still above 25,000. Phase probes attribute nearly all
+growth to ordinary body parsing; surface extraction adds only 73--128 entries.
+The next bounded slice therefore keeps the existing parser and conversions but
+omits only top-level function bodies during Phase 2. Trait, class, and impl
+methods and all non-function declarations remain on the rich parser path.
+The admitted slice passed the live gate at 10,332 objects/file.

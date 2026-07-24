@@ -89,3 +89,22 @@ objects/file. It requests process-group termination immediately on marker 10
 under a pre-calibrated memory cap and 90-second deadline; a raced later marker
 is diagnostic, not failure. Early/malformed/duplicate markers before the first
 ten fail. This is not a full bootstrap.
+
+### 2026-07-24 Phase 2 body omission
+
+`parse_surface_frontend` calls `parse_and_build_surface_module`, which calls
+`parse_module_body(surface_only: true)`. Only the top-level `fn`, `async fn`,
+and `const fn` dispatches pass `omit_body: true` to `parse_fn_decl`. The body
+skipper consumes one inline body through newline/EOF or one balanced
+INDENT/DEDENT block, diagnoses a missing indent or unterminated block, and
+leaves the parser after the outer body. No process-global mode is used.
+
+Trait/class/impl methods, enum and field defaults, imports/exports, bindings,
+decorators, source preprocessing, parser errors, and full frontend parsing keep
+their current behavior. The release marker remains after surface installation,
+AST reset, and helper return.
+
+Run `desugar_module` after bodyless conversion to preserve effective async
+callable headers. Do not synthesize suspension state enums or poll helpers in
+Phase 2; they are private implementation declarations recreated by the full
+Phase-3 module parse.

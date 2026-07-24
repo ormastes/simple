@@ -57,3 +57,16 @@ must profile and reduce repeated rich frontend materialization (starting with
 the high-allocation CLI modules), or replace the gate with an approved live
 retention metric. Do not delete semantic surface fields or raise the threshold:
 the probe shows surface construction is not the dominant cost.
+
+## 2026-07-24 bounded parser decision
+
+An admitted brace-free interpolation fast path reduced live average growth from
+38,913 to 37,602 objects/file, which still fails the unchanged 25,000 ceiling.
+Architecture review accepted a parameter-threaded surface parse that omits only
+ordinary top-level function bodies. It keeps traits, impls, enums, constants,
+imports/exports, parser diagnostics, and full-parse behavior unchanged; the
+live slope gate remains the acceptance evidence.
+
+The admitted pure-Simple candidate compiled 674 files with zero failures,
+passed the canonical frontend smoke, and passed the live gate with
+`average_growth=10332` and `termination=requested seq=10`.
