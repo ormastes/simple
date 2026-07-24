@@ -64,7 +64,10 @@ fn generate_soc_top_vhdl() -> text:
     l = l.push("  signal rom_dbus_dat : std_logic_vector(31 downto 0);")
     l = l.push("  signal rom_stb      : std_logic;")
     l = l.push("  -- CLINT")
-    l = l.push("  signal clint_dat : std_logic_vector(31 downto 0);")
+    l = l.push("  signal clint_dat   : std_logic_vector(31 downto 0);")
+    l = l.push("  signal clint_dat64 : std_logic_vector(63 downto 0);")
+    l = l.push("  signal clint_wdata : std_logic_vector(63 downto 0);")
+    l = l.push("  signal clint_sel   : std_logic_vector(7 downto 0);")
     l = l.push("  signal clint_stb : std_logic;")
     l = l.push("  signal clint_ack : std_logic;")
     l = l.push("  signal msip_irq  : std_logic;")
@@ -74,6 +77,8 @@ fn generate_soc_top_vhdl() -> text:
     l = l.push("  signal uart_stb  : std_logic;")
     l = l.push("  signal uart_ack  : std_logic;")
     l = l.push("  signal uart_irq  : std_logic;")
+    l = l.push("  signal meip_irq  : std_logic;")
+    l = l.push("  signal seip_irq  : std_logic;")
     l = l.push("  signal uart_dat32: std_logic_vector(31 downto 0);")
     l = l.push("  -- RAM")
     l = l.push("  signal ram_dat      : std_logic_vector(31 downto 0);")
@@ -95,6 +100,9 @@ fn generate_soc_top_vhdl() -> text:
     l = l.push("  ram_we    <= bus_we and ram_stb;")
     l = l.push("  ram_ack   <= ram_stb;")
     l = l.push("  clint_ack <= clint_stb;")
+    l = l.push("  clint_wdata <= x\"00000000\" & bus_dat_o when bus_adr(2) = '0' else bus_dat_o & x\"00000000\";")
+    l = l.push("  clint_sel <= \"0000\" & bus_sel when bus_adr(2) = '0' else bus_sel & \"0000\";")
+    l = l.push("  clint_dat <= clint_dat64(31 downto 0) when bus_adr(2) = '0' else clint_dat64(63 downto 32);")
     l = l.push("  mb_ack    <= mb_stb;")
     l = l.push("  -- Outputs")
     l = l.push("  char_out   <= mb_char_out;")
@@ -156,8 +164,9 @@ fn generate_soc_top_vhdl() -> text:
     l = l.push("  u_clint : entity work.clint")
     l = l.push("    port map (")
     l = l.push("      clk => clk, rst_n => rst_n,")
-    l = l.push("      addr => bus_adr(15 downto 0), wdata => bus_dat_o,")
-    l = l.push("      rdata => clint_dat, we => bus_we, re => clint_stb,")
+    l = l.push("      addr => bus_adr(15 downto 0), wdata => clint_wdata,")
+    l = l.push("      rdata => clint_dat64, sel => clint_sel,")
+    l = l.push("      we => clint_stb and bus_we, re => clint_stb and not bus_we,")
     l = l.push("      msip_out => msip_irq, mtip_out => mtip_irq")
     l = l.push("    );")
     l = l.push("  u_uart : entity work.uart16550")
@@ -209,7 +218,8 @@ fn generate_soc_top_vhdl() -> text:
 # RV64GC SoC Top-Level VHDL Generator
 # ============================================================================
 
-fn generate_soc_top_vhdl_rv64_impl(entity_name: text, external_ddr: bool) -> text:
+fn generate_soc_top_vhdl_rv64_impl(entity_name: text, core_entity: text,
+                                    external_ddr: bool) -> text:
     """Generates VHDL-2008 text for the RV64GC SoC top-level entity.
     Includes rv64gc_core, clint, plic, uart, ram, bootrom, and wb interconnect.
     64-bit Wishbone data bus (63 downto 0)."""
@@ -269,6 +279,8 @@ fn generate_soc_top_vhdl_rv64_impl(entity_name: text, external_ddr: bool) -> tex
     l = l.push("  signal plic_stb  : std_logic;")
     l = l.push("  signal plic_ack  : std_logic;")
     l = l.push("  signal uart_dat  : std_logic_vector(63 downto 0);")
+    l = l.push("  signal uart_wdata : std_logic_vector(7 downto 0);")
+    l = l.push("  signal uart_rdata : std_logic_vector(7 downto 0);")
     l = l.push("  signal uart_stb  : std_logic;")
     l = l.push("  signal uart_ack  : std_logic;")
     l = l.push("  signal uart_tx_core : std_logic;")
@@ -291,12 +303,38 @@ fn generate_soc_top_vhdl_rv64_impl(entity_name: text, external_ddr: bool) -> tex
     l = l.push("  signal msip_irq  : std_logic;")
     l = l.push("  signal mtip_irq  : std_logic;")
     l = l.push("  signal uart_irq  : std_logic;")
+    l = l.push("  signal meip_irq  : std_logic;")
+    l = l.push("  signal seip_irq  : std_logic;")
     l = l.push("begin")
     l = l.push("")
     l = l.push("  uart_tx <= uart_tx_core;")
     l = l.push("  debug_uart_valid <= debug_uart_valid_core;")
     l = l.push("  debug_uart_byte <= debug_uart_byte_core;")
     l = l.push("  debug_live <= wb_adr(3) xor wb_dat_i(0) xor wb_ack;")
+    l = l.push("  with wb_adr(2 downto 0) select uart_wdata <=")
+    l = l.push("    wb_dat_o(7 downto 0) when \"000\", wb_dat_o(15 downto 8) when \"001\",")
+    l = l.push("    wb_dat_o(23 downto 16) when \"010\", wb_dat_o(31 downto 24) when \"011\",")
+    l = l.push("    wb_dat_o(39 downto 32) when \"100\", wb_dat_o(47 downto 40) when \"101\",")
+    l = l.push("    wb_dat_o(55 downto 48) when \"110\", wb_dat_o(63 downto 56) when others;")
+    l = l.push("  process(uart_rdata, wb_adr)")
+    l = l.push("    variable lane_data : std_logic_vector(63 downto 0);")
+    l = l.push("  begin")
+    l = l.push("    lane_data := (others => '0');")
+    l = l.push("    case wb_adr(2 downto 0) is")
+    l = l.push("      when \"000\" => lane_data(7 downto 0) := uart_rdata;")
+    l = l.push("      when \"001\" => lane_data(15 downto 8) := uart_rdata;")
+    l = l.push("      when \"010\" => lane_data(23 downto 16) := uart_rdata;")
+    l = l.push("      when \"011\" => lane_data(31 downto 24) := uart_rdata;")
+    l = l.push("      when \"100\" => lane_data(39 downto 32) := uart_rdata;")
+    l = l.push("      when \"101\" => lane_data(47 downto 40) := uart_rdata;")
+    l = l.push("      when \"110\" => lane_data(55 downto 48) := uart_rdata;")
+    l = l.push("      when others => lane_data(63 downto 56) := uart_rdata;")
+    l = l.push("    end case;")
+    l = l.push("    uart_dat <= lane_data;")
+    l = l.push("  end process;")
+    l = l.push("  debug_uart_valid_core <= uart_stb and wb_we and uart_ack;")
+    l = l.push("  debug_uart_byte_core <= uart_wdata;")
+    l = l.push("  clint_ack <= clint_stb;")
     if external_ddr:
         l = l.push("  ddr_wb_adr_o <= wb_adr;")
         l = l.push("  ddr_wb_dat_o <= wb_dat_o;")
@@ -314,11 +352,11 @@ fn generate_soc_top_vhdl_rv64_impl(entity_name: text, external_ddr: bool) -> tex
     l = l.push("    end if;")
     l = l.push("  end process;")
     l = l.push("")
-    l = l.push("  u_rv64gc_core : entity work.rv64gc_core_product_wb")
+    l = l.push("  u_product_core : entity work.{core_entity}")
     l = l.push("    generic map (RESET_ADDR => RESET_ADDR)")
     l = l.push("    port map (")
     l = l.push("      clk => clk, rst => rst, msip_i => msip_irq, mtip_i => mtip_irq,")
-    l = l.push("      meip_i => '0', stip_i => '0', seip_i => '0',")
+    l = l.push("      meip_i => meip_irq, stip_i => '0', seip_i => seip_irq,")
     l = l.push("      time_value_i => std_logic_vector(time_value),")
     l = l.push("      wb_adr_o => wb_adr, wb_dat_o => wb_dat_o, wb_dat_i => wb_dat_i,")
     l = l.push("      wb_we_o => wb_we, wb_sel_o => wb_sel,")
@@ -328,11 +366,11 @@ fn generate_soc_top_vhdl_rv64_impl(entity_name: text, external_ddr: bool) -> tex
     l = l.push("")
     l = l.push("  u_clint : entity work.clint")
     l = l.push("    port map (")
-    l = l.push("      clk => clk, rst => rst,")
-    l = l.push("      wb_adr => wb_adr(15 downto 0), wb_dat_i => wb_dat_o,")
-    l = l.push("      wb_dat_o => clint_dat, wb_we => wb_we, wb_stb => clint_stb,")
-    l = l.push("      wb_ack => clint_ack,")
-    l = l.push("      msip_o => msip_irq, mtip_o => mtip_irq")
+    l = l.push("      clk => clk, rst_n => not rst,")
+    l = l.push("      addr => wb_adr(15 downto 0), wdata => wb_dat_o,")
+    l = l.push("      rdata => clint_dat, sel => wb_sel, we => clint_stb and wb_we,")
+    l = l.push("      re => clint_stb and not wb_we,")
+    l = l.push("      msip_out => msip_irq, mtip_out => mtip_irq")
     l = l.push("    );")
     l = l.push("")
     l = l.push("  u_plic : entity work.plic")
@@ -341,19 +379,18 @@ fn generate_soc_top_vhdl_rv64_impl(entity_name: text, external_ddr: bool) -> tex
     l = l.push("      wb_adr => wb_adr(23 downto 0), wb_dat_i => wb_dat_o,")
     l = l.push("      wb_dat_o => plic_dat, wb_we => wb_we, wb_stb => plic_stb,")
     l = l.push("      wb_ack => plic_ack,")
-    l = l.push("      irq_sources(0) => uart_irq")
+    l = l.push("      irq_sources(0) => uart_irq,")
+    l = l.push("      meip_o => meip_irq, seip_o => seip_irq")
     l = l.push("    );")
     l = l.push("")
-    l = l.push("  u_uart : entity work.uart")
+    l = l.push("  u_uart : entity work.uart16550")
     l = l.push("    generic map (CLK_FREQ => CLK_FREQ, BAUD_RATE => BAUD_RATE)")
     l = l.push("    port map (")
-    l = l.push("      clk => clk, rst => rst,")
-    l = l.push("      wb_adr => wb_adr(4 downto 0), wb_dat_i => wb_dat_o(7 downto 0),")
-    l = l.push("      wb_dat_o => uart_dat(7 downto 0), wb_we => wb_we,")
+    l = l.push("      clk => clk, rst_n => not rst,")
+    l = l.push("      wb_adr => wb_adr(2 downto 0), wb_dat_i => uart_wdata,")
+    l = l.push("      wb_dat_o => uart_rdata, wb_we => wb_we,")
     l = l.push("      wb_stb => uart_stb, wb_ack => uart_ack,")
-    l = l.push("      tx => uart_tx_core, rx => uart_rx, irq => uart_irq,")
-    l = l.push("      debug_uart_valid => debug_uart_valid_core,")
-    l = l.push("      debug_uart_byte => debug_uart_byte_core")
+    l = l.push("      tx => uart_tx_core, rx => uart_rx, irq => uart_irq")
     l = l.push("    );")
     l = l.push("")
     if not external_ddr:
@@ -396,12 +433,19 @@ fn generate_soc_top_vhdl_rv64_impl(entity_name: text, external_ddr: bool) -> tex
     l.join("\n")
 
 pub fn generate_soc_top_vhdl_rv64() -> text:
-    generate_soc_top_vhdl_rv64_impl("soc_top_rv64", false)
+    generate_soc_top_vhdl_rv64_impl(
+        "soc_top_rv64", "rv64gc_core_product_wb", false)
 
 pub fn generate_soc_top_vhdl_rv64_external_ddr() -> text:
-    """Generates the RV64GC SoC with its 0x80000000-0x87ffffff memory slot
+    """Generates the RV64GC SoC with its 0x80000000-0x8fffffff memory slot
     exposed as a 64-bit Wishbone master for a board-specific DDR bridge."""
-    generate_soc_top_vhdl_rv64_impl("soc_top_rv64_external_ddr", true)
+    generate_soc_top_vhdl_rv64_impl(
+        "soc_top_rv64_external_ddr", "rv64gc_core_product_wb", true)
+
+pub fn generate_soc_top_vhdl_rv32_external_ddr() -> text:
+    """Generates the RV32IMAC SoC on the shared WB64 external-DDR fabric."""
+    generate_soc_top_vhdl_rv64_impl(
+        "soc_top_rv32_external_ddr", "rv32imac_core_product_wb", true)
 
 fn generate_testbench_vhdl(prog: [u32]) -> text:
     var l: [text] = []

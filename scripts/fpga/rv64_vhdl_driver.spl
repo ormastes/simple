@@ -10,7 +10,8 @@
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_dir_create(path: text) -> bool
 
-use std.hardware.fpga_linux._SocVhdlGen.peripherals.{generate_wb_interconnect_vhdl_rv64}
+use std.hardware.fpga_linux._SocVhdlGen.peripherals.{generate_clint_vhdl, generate_uart_vhdl, generate_wb_interconnect_vhdl_rv64}
+use std.hardware.fpga_linux._SocVhdlGen.plic.{generate_plic_vhdl_rv64}
 use std.hardware.fpga_linux._SocVhdlGen.product_bus.{generate_rv64_product_wb_wrapper_vhdl}
 use std.hardware.fpga_linux._SocVhdlGen.top_testbench.{generate_soc_top_vhdl_rv64, generate_soc_top_vhdl_rv64_external_ddr}
 use std.hardware.fpga_k26.k26_axi_hp_bridge.{generate_wb64_axi_hp_bridge_vhdl, generate_rv64_k26_ps_pl_top_vhdl}
@@ -20,120 +21,6 @@ fn vhdl_header() -> text:
 
 fn vhdl_textio_header() -> text:
     "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.textio.all;\nuse ieee.std_logic_textio.all;\n"
-
-fn gen_clint_stub() -> text:
-    var l = vhdl_header()
-    l = l + "\nentity clint is\n  port (\n"
-    l = l + "    clk      : in  std_logic;\n"
-    l = l + "    rst      : in  std_logic;\n"
-    l = l + "    wb_adr   : in  std_logic_vector(15 downto 0);\n"
-    l = l + "    wb_dat_i : in  std_logic_vector(63 downto 0);\n"
-    l = l + "    wb_dat_o : out std_logic_vector(63 downto 0);\n"
-    l = l + "    wb_we    : in  std_logic;\n"
-    l = l + "    wb_stb   : in  std_logic;\n"
-    l = l + "    wb_ack   : out std_logic;\n"
-    l = l + "    msip_o   : out std_logic;\n"
-    l = l + "    mtip_o   : out std_logic\n"
-    l = l + "  );\nend entity clint;\n\n"
-    l = l + "architecture rtl of clint is\nbegin\n"
-    l = l + "  wb_dat_o <= (others => '0');\n"
-    l = l + "  wb_ack   <= '0';\n"
-    l = l + "  msip_o   <= '0';\n"
-    l = l + "  mtip_o   <= '0';\n"
-    l = l + "end architecture rtl;\n"
-    l
-
-fn gen_plic_stub() -> text:
-    var l = vhdl_header()
-    l = l + "\nentity plic is\n  port (\n"
-    l = l + "    clk         : in  std_logic;\n"
-    l = l + "    rst         : in  std_logic;\n"
-    l = l + "    wb_adr      : in  std_logic_vector(23 downto 0);\n"
-    l = l + "    wb_dat_i    : in  std_logic_vector(63 downto 0);\n"
-    l = l + "    wb_dat_o    : out std_logic_vector(63 downto 0);\n"
-    l = l + "    wb_we       : in  std_logic;\n"
-    l = l + "    wb_stb      : in  std_logic;\n"
-    l = l + "    wb_ack      : out std_logic;\n"
-    l = l + "    irq_sources : in  std_logic_vector(0 downto 0)\n"
-    l = l + "  );\nend entity plic;\n\n"
-    l = l + "architecture rtl of plic is\nbegin\n"
-    l = l + "  wb_dat_o <= (others => '0');\n"
-    l = l + "  wb_ack   <= '0';\n"
-    l = l + "end architecture rtl;\n"
-    l
-
-fn gen_uart_stub() -> text:
-    var l = vhdl_header()
-    l = l + "\nentity uart is\n"
-    l = l + "  generic (\n"
-    l = l + "    CLK_FREQ  : natural := 100000000;\n"
-    l = l + "    BAUD_RATE : natural := 115200\n"
-    l = l + "  );\n"
-    l = l + "  port (\n"
-    l = l + "    clk      : in  std_logic;\n"
-    l = l + "    rst      : in  std_logic;\n"
-    l = l + "    wb_adr   : in  std_logic_vector(4 downto 0);\n"
-    l = l + "    wb_dat_i : in  std_logic_vector(7 downto 0);\n"
-    l = l + "    wb_dat_o : out std_logic_vector(7 downto 0);\n"
-    l = l + "    wb_we    : in  std_logic;\n"
-    l = l + "    wb_stb   : in  std_logic;\n"
-    l = l + "    wb_ack   : out std_logic;\n"
-    l = l + "    tx       : out std_logic;\n"
-    l = l + "    rx       : in  std_logic;\n"
-    l = l + "    irq      : out std_logic;\n"
-    l = l + "    debug_uart_valid : out std_logic;\n"
-    l = l + "    debug_uart_byte  : out std_logic_vector(7 downto 0)\n"
-    l = l + "  );\nend entity uart;\n\n"
-    l = l + "architecture rtl of uart is\n"
-    l = l + "  constant BAUD_DIV : natural := CLK_FREQ / BAUD_RATE;\n"
-    l = l + "  signal tx_q      : std_logic := '1';\n"
-    l = l + "  signal ack_q     : std_logic := '0';\n"
-    l = l + "  signal busy_q    : std_logic := '0';\n"
-    l = l + "  signal baud_cnt  : natural range 0 to CLK_FREQ := 0;\n"
-    l = l + "  signal bit_count : natural range 0 to 10 := 0;\n"
-    l = l + "  signal shreg     : std_logic_vector(9 downto 0) := (others => '1');\n"
-    l = l + "  signal debug_uart_valid_q : std_logic := '0';\n"
-    l = l + "  signal debug_uart_valid_next_q : std_logic := '0';\n"
-    l = l + "  signal debug_uart_byte_q  : std_logic_vector(7 downto 0) := (others => '0');\n"
-    l = l + "begin\n"
-    l = l + "  wb_dat_o <= \"0000000\" & busy_q;\n"
-    l = l + "  wb_ack   <= ack_q;\n"
-    l = l + "  tx       <= tx_q;\n"
-    l = l + "  irq      <= '0';\n"
-    l = l + "  debug_uart_valid <= debug_uart_valid_q;\n"
-    l = l + "  debug_uart_byte <= debug_uart_byte_q;\n"
-    l = l + "  process(clk)\n"
-    l = l + "  begin\n"
-    l = l + "    if rising_edge(clk) then\n"
-    l = l + "      ack_q <= '0';\n"
-    l = l + "      debug_uart_valid_q <= debug_uart_valid_next_q;\n"
-    l = l + "      debug_uart_valid_next_q <= '0';\n"
-    l = l + "      if rst = '1' then\n"
-    l = l + "        tx_q <= '1'; ack_q <= '0'; busy_q <= '0'; baud_cnt <= 0; bit_count <= 0; shreg <= (others => '1'); debug_uart_valid_q <= '0'; debug_uart_valid_next_q <= '0'; debug_uart_byte_q <= (others => '0');\n"
-    l = l + "      else\n"
-    l = l + "        if busy_q = '1' then\n"
-    l = l + "          if baud_cnt >= BAUD_DIV - 1 then\n"
-    l = l + "            baud_cnt <= 0;\n"
-    l = l + "            if bit_count > 1 then\n"
-    l = l + "              tx_q <= shreg(1); shreg <= '1' & shreg(9 downto 1); bit_count <= bit_count - 1;\n"
-    l = l + "            else\n"
-    l = l + "              tx_q <= '1'; busy_q <= '0'; bit_count <= 0;\n"
-    l = l + "            end if;\n"
-    l = l + "          else\n"
-    l = l + "            baud_cnt <= baud_cnt + 1;\n"
-    l = l + "          end if;\n"
-    l = l + "        end if;\n"
-    l = l + "        if wb_stb = '1' and (wb_we = '0' or busy_q = '0') then\n"
-    l = l + "          ack_q <= '1';\n"
-    l = l + "          if wb_we = '1' then\n"
-    l = l + "            shreg <= '1' & wb_dat_i & '0'; tx_q <= '0'; busy_q <= '1'; bit_count <= 10; baud_cnt <= 0; debug_uart_valid_next_q <= '1'; debug_uart_byte_q <= wb_dat_i;\n"
-    l = l + "          end if;\n"
-    l = l + "        end if;\n"
-    l = l + "      end if;\n"
-    l = l + "    end if;\n"
-    l = l + "  end process;\n"
-    l = l + "end architecture rtl;\n"
-    l
 
 fn gen_ram_stub() -> text:
     var l = vhdl_textio_header()
@@ -315,9 +202,9 @@ fn main():
 
     # Generate peripheral stubs
     print("Generating peripheral stubs...")
-    write_vhd(out_dir, "clint", gen_clint_stub())
-    write_vhd(out_dir, "plic", gen_plic_stub())
-    write_vhd(out_dir, "uart", gen_uart_stub())
+    write_vhd(out_dir, "clint", generate_clint_vhdl())
+    write_vhd(out_dir, "plic", generate_plic_vhdl_rv64())
+    write_vhd(out_dir, "uart16550", generate_uart_vhdl())
     write_vhd(out_dir, "ram", gen_ram_stub())
     write_vhd(out_dir, "bootrom", gen_bootrom_stub())
     write_vhd(out_dir, "wb_interconnect", generate_wb_interconnect_vhdl_rv64())

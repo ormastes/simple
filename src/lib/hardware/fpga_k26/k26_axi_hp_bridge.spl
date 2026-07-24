@@ -217,16 +217,22 @@ entity wb64_axi_hp_bridge is
 end entity wb64_axi_hp_bridge;
 
 architecture rtl of wb64_axi_hp_bridge is
+  constant CORE_DDR_BASE : unsigned(48 downto 0) := shift_left(to_unsigned(1, 49), 31);
+  constant K26_DDR_BASE  : unsigned(48 downto 0) := shift_left(to_unsigned(1, 49), 30);
   type state_t is (idle, write_issue, write_response, read_issue, read_response, wb_release);
   signal state       : state_t := idle;
   signal addr_q      : std_logic_vector(63 downto 0) := (others => '0');
   signal data_q      : std_logic_vector(63 downto 0) := (others => '0');
   signal sel_q       : std_logic_vector(7 downto 0) := (others => '0');
   signal upper_q     : std_logic := '0';
+  signal axi_addr_q  : unsigned(48 downto 0);
   signal aw_pending  : std_logic := '0';
   signal w_pending   : std_logic := '0';
 begin
-  m_axi_awaddr  <= addr_q(48 downto 3) & "000";
+  -- Core 0x80000000..0x8fffffff maps into an isolated PS DDR_LOW window at
+  -- 0x40000000..0x4fffffff, leaving PS firmware/load memory separate.
+  axi_addr_q <= unsigned(addr_q(48 downto 0)) - CORE_DDR_BASE + K26_DDR_BASE;
+  m_axi_awaddr  <= std_logic_vector(axi_addr_q(48 downto 3)) & "000";
   m_axi_awlen   <= (others => '0');
   m_axi_awsize  <= "011";
   m_axi_awburst <= "01";
@@ -241,7 +247,7 @@ begin
   m_axi_wvalid  <= w_pending;
   m_axi_bready  <= '1' when state = write_response else '0';
 
-  m_axi_araddr  <= addr_q(48 downto 3) & "000";
+  m_axi_araddr  <= std_logic_vector(axi_addr_q(48 downto 3)) & "000";
   m_axi_arlen   <= (others => '0');
   m_axi_arsize  <= "011";
   m_axi_arburst <= "01";
@@ -334,11 +340,15 @@ entity soc_top_rv64_k26_pl is
     rst_n          : in  std_logic;
     uart_tx        : out std_logic;
     uart_rx        : in  std_logic;
+    m_axi_awid     : out std_logic_vector(0 downto 0);
     m_axi_awaddr   : out std_logic_vector(48 downto 0);
     m_axi_awlen    : out std_logic_vector(7 downto 0);
     m_axi_awsize   : out std_logic_vector(2 downto 0);
     m_axi_awburst  : out std_logic_vector(1 downto 0);
     m_axi_awlock   : out std_logic;
+    m_axi_awcache  : out std_logic_vector(3 downto 0);
+    m_axi_awprot   : out std_logic_vector(2 downto 0);
+    m_axi_awqos    : out std_logic_vector(3 downto 0);
     m_axi_awvalid  : out std_logic;
     m_axi_awready  : in  std_logic;
     m_axi_wdata    : out std_logic_vector(127 downto 0);
@@ -346,16 +356,22 @@ entity soc_top_rv64_k26_pl is
     m_axi_wlast    : out std_logic;
     m_axi_wvalid   : out std_logic;
     m_axi_wready   : in  std_logic;
+    m_axi_bid      : in  std_logic_vector(0 downto 0);
     m_axi_bresp    : in  std_logic_vector(1 downto 0);
     m_axi_bvalid   : in  std_logic;
     m_axi_bready   : out std_logic;
+    m_axi_arid     : out std_logic_vector(0 downto 0);
     m_axi_araddr   : out std_logic_vector(48 downto 0);
     m_axi_arlen    : out std_logic_vector(7 downto 0);
     m_axi_arsize   : out std_logic_vector(2 downto 0);
     m_axi_arburst  : out std_logic_vector(1 downto 0);
     m_axi_arlock   : out std_logic;
+    m_axi_arcache  : out std_logic_vector(3 downto 0);
+    m_axi_arprot   : out std_logic_vector(2 downto 0);
+    m_axi_arqos    : out std_logic_vector(3 downto 0);
     m_axi_arvalid  : out std_logic;
     m_axi_arready  : in  std_logic;
+    m_axi_rid      : in  std_logic_vector(0 downto 0);
     m_axi_rdata    : in  std_logic_vector(127 downto 0);
     m_axi_rresp    : in  std_logic_vector(1 downto 0);
     m_axi_rlast    : in  std_logic;
@@ -378,8 +394,60 @@ architecture rtl of soc_top_rv64_k26_pl is
   signal ddr_err       : std_logic;
   signal debug_valid   : std_logic;
   signal debug_byte    : std_logic_vector(7 downto 0);
+  attribute X_INTERFACE_INFO : string;
+  attribute X_INTERFACE_PARAMETER : string;
+  attribute X_INTERFACE_INFO of clk : signal is "xilinx.com:signal:clock:1.0 clk CLK";
+  attribute X_INTERFACE_PARAMETER of clk : signal is "XIL_INTERFACENAME clk, ASSOCIATED_BUSIF M_AXI_HP, ASSOCIATED_RESET rst_n, FREQ_HZ 100000000";
+  attribute X_INTERFACE_INFO of rst_n : signal is "xilinx.com:signal:reset:1.0 rst_n RST";
+  attribute X_INTERFACE_PARAMETER of rst_n : signal is "XIL_INTERFACENAME rst_n, POLARITY ACTIVE_LOW";
+  attribute X_INTERFACE_PARAMETER of m_axi_awaddr : signal is "XIL_INTERFACENAME M_AXI_HP, PROTOCOL AXI4, DATA_WIDTH 128, ADDR_WIDTH 49, ID_WIDTH 1, HAS_BURST 1, HAS_LOCK 1, HAS_CACHE 1, HAS_PROT 1, HAS_QOS 1, HAS_REGION 0, SUPPORTS_NARROW_BURST 1, MAX_BURST_LENGTH 256, NUM_READ_OUTSTANDING 1, NUM_WRITE_OUTSTANDING 1";
+  attribute X_INTERFACE_INFO of m_axi_awid : signal is "xilinx.com:interface:aximm:1.0 M_AXI_HP AWID";
+  attribute X_INTERFACE_INFO of m_axi_awaddr : signal is "xilinx.com:interface:aximm:1.0 M_AXI_HP AWADDR";
+  attribute X_INTERFACE_INFO of m_axi_awlen : signal is "xilinx.com:interface:aximm:1.0 M_AXI_HP AWLEN";
+  attribute X_INTERFACE_INFO of m_axi_awsize : signal is "xilinx.com:interface:aximm:1.0 M_AXI_HP AWSIZE";
+  attribute X_INTERFACE_INFO of m_axi_awburst : signal is "xilinx.com:interface:aximm:1.0 M_AXI_HP AWBURST";
+  attribute X_INTERFACE_INFO of m_axi_awlock : signal is "xilinx.com:interface:aximm:1.0 M_AXI_HP AWLOCK";
+  attribute X_INTERFACE_INFO of m_axi_awcache : signal is "xilinx.com:interface:aximm:1.0 M_AXI_HP AWCACHE";
+  attribute X_INTERFACE_INFO of m_axi_awprot : signal is "xilinx.com:interface:aximm:1.0 M_AXI_HP AWPROT";
+  attribute X_INTERFACE_INFO of m_axi_awqos : signal is "xilinx.com:interface:aximm:1.0 M_AXI_HP AWQOS";
+  attribute X_INTERFACE_INFO of m_axi_awvalid : signal is "xilinx.com:interface:aximm:1.0 M_AXI_HP AWVALID";
+  attribute X_INTERFACE_INFO of m_axi_awready : signal is "xilinx.com:interface:aximm:1.0 M_AXI_HP AWREADY";
+  attribute X_INTERFACE_INFO of m_axi_wdata : signal is "xilinx.com:interface:aximm:1.0 M_AXI_HP WDATA";
+  attribute X_INTERFACE_INFO of m_axi_wstrb : signal is "xilinx.com:interface:aximm:1.0 M_AXI_HP WSTRB";
+  attribute X_INTERFACE_INFO of m_axi_wlast : signal is "xilinx.com:interface:aximm:1.0 M_AXI_HP WLAST";
+  attribute X_INTERFACE_INFO of m_axi_wvalid : signal is "xilinx.com:interface:aximm:1.0 M_AXI_HP WVALID";
+  attribute X_INTERFACE_INFO of m_axi_wready : signal is "xilinx.com:interface:aximm:1.0 M_AXI_HP WREADY";
+  attribute X_INTERFACE_INFO of m_axi_bid : signal is "xilinx.com:interface:aximm:1.0 M_AXI_HP BID";
+  attribute X_INTERFACE_INFO of m_axi_bresp : signal is "xilinx.com:interface:aximm:1.0 M_AXI_HP BRESP";
+  attribute X_INTERFACE_INFO of m_axi_bvalid : signal is "xilinx.com:interface:aximm:1.0 M_AXI_HP BVALID";
+  attribute X_INTERFACE_INFO of m_axi_bready : signal is "xilinx.com:interface:aximm:1.0 M_AXI_HP BREADY";
+  attribute X_INTERFACE_INFO of m_axi_arid : signal is "xilinx.com:interface:aximm:1.0 M_AXI_HP ARID";
+  attribute X_INTERFACE_INFO of m_axi_araddr : signal is "xilinx.com:interface:aximm:1.0 M_AXI_HP ARADDR";
+  attribute X_INTERFACE_INFO of m_axi_arlen : signal is "xilinx.com:interface:aximm:1.0 M_AXI_HP ARLEN";
+  attribute X_INTERFACE_INFO of m_axi_arsize : signal is "xilinx.com:interface:aximm:1.0 M_AXI_HP ARSIZE";
+  attribute X_INTERFACE_INFO of m_axi_arburst : signal is "xilinx.com:interface:aximm:1.0 M_AXI_HP ARBURST";
+  attribute X_INTERFACE_INFO of m_axi_arlock : signal is "xilinx.com:interface:aximm:1.0 M_AXI_HP ARLOCK";
+  attribute X_INTERFACE_INFO of m_axi_arcache : signal is "xilinx.com:interface:aximm:1.0 M_AXI_HP ARCACHE";
+  attribute X_INTERFACE_INFO of m_axi_arprot : signal is "xilinx.com:interface:aximm:1.0 M_AXI_HP ARPROT";
+  attribute X_INTERFACE_INFO of m_axi_arqos : signal is "xilinx.com:interface:aximm:1.0 M_AXI_HP ARQOS";
+  attribute X_INTERFACE_INFO of m_axi_arvalid : signal is "xilinx.com:interface:aximm:1.0 M_AXI_HP ARVALID";
+  attribute X_INTERFACE_INFO of m_axi_arready : signal is "xilinx.com:interface:aximm:1.0 M_AXI_HP ARREADY";
+  attribute X_INTERFACE_INFO of m_axi_rid : signal is "xilinx.com:interface:aximm:1.0 M_AXI_HP RID";
+  attribute X_INTERFACE_INFO of m_axi_rdata : signal is "xilinx.com:interface:aximm:1.0 M_AXI_HP RDATA";
+  attribute X_INTERFACE_INFO of m_axi_rresp : signal is "xilinx.com:interface:aximm:1.0 M_AXI_HP RRESP";
+  attribute X_INTERFACE_INFO of m_axi_rlast : signal is "xilinx.com:interface:aximm:1.0 M_AXI_HP RLAST";
+  attribute X_INTERFACE_INFO of m_axi_rvalid : signal is "xilinx.com:interface:aximm:1.0 M_AXI_HP RVALID";
+  attribute X_INTERFACE_INFO of m_axi_rready : signal is "xilinx.com:interface:aximm:1.0 M_AXI_HP RREADY";
 begin
   rst <= not rst_n;
+  m_axi_awid    <= (others => '0');
+  m_axi_awcache <= "0011";
+  m_axi_awprot  <= "000";
+  m_axi_awqos   <= (others => '0');
+  m_axi_arid    <= (others => '0');
+  m_axi_arcache <= "0011";
+  m_axi_arprot  <= "000";
+  m_axi_arqos   <= (others => '0');
 
   u_soc: entity work.soc_top_rv64_external_ddr
     generic map (
