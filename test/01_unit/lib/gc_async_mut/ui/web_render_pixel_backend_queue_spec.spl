@@ -42,7 +42,16 @@ use common.ui.web_render_api.{
     WEB_RENDER_TARGET_PURE_SIMPLE,
     web_render_adapter_request
 }
-use common.ui.draw_ir.{DRAW_IR_BACKEND_CPU, draw_ir_batch, draw_ir_composition, draw_ir_embedding_config, draw_ir_rect}
+use common.ui.draw_ir.{
+    DRAW_IR_BACKEND_CPU,
+    draw_ir_batch,
+    draw_ir_box_with_style,
+    draw_ir_composition,
+    draw_ir_embedding_config,
+    draw_ir_no_rect,
+    draw_ir_rect,
+    draw_ir_style_prop
+}
 use std.gc_async_mut.ui.web_render_pixel_backend.{web_render_draw_ir_request_to_pixel_artifact, web_render_html_request_to_pixel_artifact_with_backend}
 
 extern fn rt_host_gpu_queue_reset()
@@ -69,6 +78,24 @@ describe "web render pixel backend runtime queue provenance":
         expect(artifact.gpu_readback_source).to_equal("cpu_mirror")
         expect(artifact.queue_submit_status).to_equal(WEB_RENDER_QUEUE_STATUS_NOT_REQUESTED)
         expect(artifact.queue_dispatch_status).to_equal(WEB_RENDER_QUEUE_STATUS_NOT_REQUESTED)
+
+    it "preserves realized fallback provenance for direct Draw IR execution":
+        val req = web_render_adapter_request(WEB_RENDER_TARGET_PURE_SIMPLE, "surface", "Draw IR", "", "", "", 8, 8).with_pixel_output()
+        val embedding = draw_ir_embedding_config("surface", "fallback", 0, 0, 8, 8, 0, 1000, false)
+        val no_rect = draw_ir_no_rect()
+        val style = [
+            draw_ir_style_prop("backdrop-filter-fallback", "solid-material"),
+            draw_ir_style_prop("background-color", "18,52,86,255"),
+            draw_ir_style_prop("color", "254,220,186,255"),
+            draw_ir_style_prop("background-image", "none")
+        ]
+        val command = draw_ir_box_with_style("fallback", 0, 0, 8, 8, 0xff123456u32, no_rect, no_rect, no_rect, no_rect, style)
+        val batch = draw_ir_batch("fallback", DRAW_IR_BACKEND_CPU, embedding, [command])
+        val artifact = web_render_draw_ir_request_to_pixel_artifact(req, draw_ir_composition("fallback", "fallback", DRAW_IR_BACKEND_CPU, [batch]), "software")
+
+        expect(artifact.material_fallback.kind).to_equal("solid-material")
+        expect(artifact.material_fallback.reason).to_equal("cpu-raster-backdrop-sampling-unavailable")
+        expect(artifact.material_fallback.material_sha256.len()).to_equal(64)
 
     it "stamps GPU web render artifacts with runtime queue submit and drain evidence":
         rt_host_gpu_queue_reset()

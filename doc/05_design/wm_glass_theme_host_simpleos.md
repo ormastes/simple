@@ -68,6 +68,12 @@ capabilities. Per blur/shadow/gradient/font/GPU/readback capability record:
 requested, `available|unavailable`, proof rung, implementation, fallback used,
 fallback kind/reason and realized hash. `unknown` is invalid.
 
+The realized fallback hash canonicalizes the actual emitted, visible paint
+commands after cascade and fallback selection. Hidden/non-emitted nodes are
+excluded, equivalent CSS color spellings converge on one value, and both the
+software and Draw IR paths use the same ordering and canonical representation.
+The typed evidence travels beside pixels in `WebRenderArtifact`.
+
 GPU proof order is BAR2 mapped, hello acknowledged, backend selected, Draw IR
 submission accepted, device receipt valid, readback presented, independent QMP
 `pmemsave`. Record highest passed and first unavailable.

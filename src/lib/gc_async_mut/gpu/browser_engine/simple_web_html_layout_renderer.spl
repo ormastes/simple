@@ -3905,9 +3905,13 @@ fn apply_decls(st: Style, decls: text, em_base: i32) -> Style:
         backdrop_filter_raw_v = if backdrop_filter_norm == "none": "" else: backdrop_filter_norm
     # The CPU raster lane has no backdrop sampling pass. Realize the declared
     # solid-material fallback by making the already-resolved surface fill
-    # opaque; leaving it translucent would falsely imply a blur behind it.
+    # opaque and removing image/gradient layers; leaving either translucency
+    # or a layered image would no longer be the declared solid material.
     if backdrop_filter_raw_v != "" and bg_v != 0u32:
         bg_v = 0xFF000000u32 | (bg_v & 0x00FFFFFFu32)
+        background_gradient_from_v = 0u32
+        background_gradient_to_v = 0u32
+        bg_layers_raw_v = ""
     val margin = decl_get(decls, "margin")
     if margin.len() > 0:
         # Token-aware shorthand so per-side "auto" (centering) and "%" survive.
@@ -9220,6 +9224,8 @@ fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
     val wm_fallback = attr_value(node.attrs_raw, "data-wm-theme-fallback").trim().lower()
     val wm_solid_fallback = wm_fallback == "solid-material"
     val backdrop_requested = st.backdrop_filter_raw != "" or wm_solid_fallback
+    val bg_alpha = (st.bg >> 24) & 255u32
+    val solid_fallback_realized = backdrop_requested and bg_alpha == 255u32 and st.background_gradient_from == 0u32 and st.background_gradient_to == 0u32 and st.bg_layers_raw == ""
     [
         draw_ir_style_prop("tag", node.tag),
         draw_ir_style_prop("id", node.id_attr),
@@ -9244,8 +9250,8 @@ fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
         # pass. Preserve the effect instead of silently dropping it, and expose
         # the exact capability fallback to downstream renderers and inspectors.
         draw_ir_style_prop("backdrop-filter-capability", if backdrop_requested: "unavailable" else: "not-requested"),
-        draw_ir_style_prop("backdrop-filter-fallback", if wm_solid_fallback or st.backdrop_filter_raw != "": "solid-material" else: "none"),
-        draw_ir_style_prop("backdrop-filter-fallback-reason", if backdrop_requested: "cpu-raster-backdrop-sampling-unavailable" else: "none"),
+        draw_ir_style_prop("backdrop-filter-fallback", if solid_fallback_realized: "solid-material" else: "none"),
+        draw_ir_style_prop("backdrop-filter-fallback-reason", if solid_fallback_realized: "cpu-raster-backdrop-sampling-unavailable" elif backdrop_requested: "solid-material-not-realized" else: "none"),
         draw_ir_style_prop("color", "{st.fg}"),
         draw_ir_style_prop("direction", if st.direction_rtl: "rtl" else: "ltr"),
         draw_ir_style_prop("font-size", "{st.font_size}"),
@@ -9619,7 +9625,36 @@ fn _web_paint_iframes(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw:
         i = i + 1
     out
 
-fn _simple_web_layout_render_html_draw_ir(html: text, width: i32, height: i32, vector_fonts: bool) -> DrawIrComposition:
+class SimpleWebLayoutDrawIrResult:
+    composition: DrawIrComposition
+    material_fallback: WebRenderMaterialFallbackProvenance
+
+fn _simple_web_draw_ir_style_value(command: DrawIrCommand, key: text) -> text:
+    var i = 0
+    while i < command.computed_style.len():
+        if command.computed_style[i].key == key:
+            return command.computed_style[i].value
+        i = i + 1
+    ""
+
+fn _simple_web_material_fallback_from_commands(commands: [DrawIrCommand]) -> WebRenderMaterialFallbackProvenance:
+    var canonical = "simple-web-realized-solid-material-v1"
+    var material_count = 0
+    var i = 0
+    while i < commands.len():
+        val command = commands[i]
+        if _simple_web_draw_ir_style_value(command, "backdrop-filter-fallback") == "solid-material":
+            canonical = canonical + "\n{material_count}|kind=solid-material|bg=" + _simple_web_draw_ir_style_value(command, "background-color") + "|fg=" + _simple_web_draw_ir_style_value(command, "color") + "|backdrop=none|background-image=" + _simple_web_draw_ir_style_value(command, "background-image")
+            material_count = material_count + 1
+        i = i + 1
+    if material_count == 0:
+        return WebRenderMaterialFallbackProvenance.none()
+    WebRenderMaterialFallbackProvenance.solid(
+        "cpu-raster-backdrop-sampling-unavailable",
+        sha256_text(canonical)
+    )
+
+fn _simple_web_layout_render_html_draw_ir_result(html: text, width: i32, height: i32, vector_fonts: bool) -> SimpleWebLayoutDrawIrResult:
     val render_start_us = rt_time_now_unix_micros()
     val env_override = _web_render_budget_ms_env_override()
     val area_floor_ms = (width as i64) * (height as i64) / 16
@@ -9661,13 +9696,19 @@ fn _simple_web_layout_render_html_draw_ir(html: text, width: i32, height: i32, v
     val batch = draw_ir_batch_with_source("html-layout", DRAW_IR_BACKEND_CPU, embedding, commands, source)
     val batches = [batch]
     val composition = draw_ir_composition("html-layout", "simple-web-html-layout", DRAW_IR_BACKEND_CPU, batches)
-    composition
+    SimpleWebLayoutDrawIrResult(
+        composition: composition,
+        material_fallback: _simple_web_material_fallback_from_commands(commands)
+    )
 
 pub fn simple_web_layout_render_html_draw_ir(html: text, width: i32, height: i32) -> DrawIrComposition:
-    _simple_web_layout_render_html_draw_ir(html, width, height, true)
+    _simple_web_layout_render_html_draw_ir_result(html, width, height, true).composition
+
+pub fn simple_web_layout_render_html_draw_ir_result(html: text, width: i32, height: i32) -> SimpleWebLayoutDrawIrResult:
+    _simple_web_layout_render_html_draw_ir_result(html, width, height, true)
 
 pub fn simple_web_layout_render_html_draw_ir_cpu_bitmap(html: text, width: i32, height: i32) -> DrawIrComposition:
-    _simple_web_layout_render_html_draw_ir(html, width, height, false)
+    _simple_web_layout_render_html_draw_ir_result(html, width, height, false).composition
 
 # Stage-timed variant of the software render entry: prints per-stage wall
 # times so render-cost regressions can be localized without a debugger.
@@ -9715,24 +9756,6 @@ pub fn simple_web_layout_render_html_software_pixels_traced(html: text, width: i
 class SimpleWebLayoutPixelResult:
     pixels: [u32]
     material_fallback: WebRenderMaterialFallbackProvenance
-
-fn _simple_web_realized_material_fallback(nodes: [HNode], styles: [Style]) -> WebRenderMaterialFallbackProvenance:
-    var canonical = "simple-web-realized-solid-material-v1"
-    var material_count = 0
-    var i = 0
-    while i < nodes.len() and i < styles.len():
-        val declared = attr_value(nodes[i].attrs_raw, "data-wm-theme-fallback").trim().lower() == "solid-material"
-        val css_fallback = styles[i].backdrop_filter_raw != ""
-        if declared or css_fallback:
-            canonical = canonical + "\n{material_count}|kind=solid-material|bg={styles[i].bg}|fg={styles[i].fg}|backdrop=none|background-image=none"
-            material_count = material_count + 1
-        i = i + 1
-    if material_count == 0:
-        return WebRenderMaterialFallbackProvenance.none()
-    WebRenderMaterialFallbackProvenance.solid(
-        "cpu-raster-backdrop-sampling-unavailable",
-        sha256_text(canonical)
-    )
 
 pub fn simple_web_layout_render_html_software_result(html: text, width: i32, height: i32, budget_ms: i64 = WEB_RENDER_BUDGET_MS) -> SimpleWebLayoutPixelResult:
     # Stage-local budget allocation: a single wall-clock budget is partitioned
@@ -9789,7 +9812,9 @@ pub fn simple_web_layout_render_html_software_result(html: text, width: i32, hei
     painted = _web_paint_iframes(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, rules, painted, width, height, 0)
     SimpleWebLayoutPixelResult(
         pixels: painted,
-        material_fallback: _simple_web_realized_material_fallback(nodes, styles)
+        material_fallback: _simple_web_material_fallback_from_commands(
+            _html_draw_ir_commands(nodes, styles, boxes, width, height, true)
+        )
     )
 
 pub fn simple_web_layout_render_html_software_pixels(html: text, width: i32, height: i32, budget_ms: i64 = WEB_RENDER_BUDGET_MS) -> [u32]:

@@ -11,13 +11,11 @@
 # is collapsed to a 1x1 clip and the framebuffer is read back from the GPU in a
 # single FFI hop.
 
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_render_html_draw_ir}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_render_html_draw_ir_result}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{Engine2dDrawIrAdvResult, engine2d_draw_ir_adv_composition}
 use std.gc_async_mut.gpu.engine2d.backend.{Engine2DReadback, engine2d_readback}
 use std.gc_async_mut.gpu.engine2d.backend_probe.{BackendStatus}
-use std.common.crypto.sha256.{sha256_text}
-use common.ui.draw_ir.{DrawIrComposition, DrawIrCommand}
 use common.ui.web_render_api.{WebRenderMaterialFallbackProvenance}
 
 class SimpleWebLayoutEngine2DExecutionResult:
@@ -28,43 +26,13 @@ class SimpleWebLayoutEngine2DReadbackResult:
     readback: Engine2DReadback
     material_fallback: WebRenderMaterialFallbackProvenance
 
-fn _draw_ir_style_value(command: DrawIrCommand, key: text) -> text:
-    var i = 0
-    while i < command.computed_style.len():
-        if command.computed_style[i].key == key:
-            return command.computed_style[i].value
-        i = i + 1
-    ""
-
-fn _draw_ir_material_fallback(composition: DrawIrComposition) -> WebRenderMaterialFallbackProvenance:
-    var canonical = "simple-web-realized-solid-material-v1"
-    var material_count = 0
-    var bi = 0
-    while bi < composition.batches.len():
-        val batch = composition.batches[bi]
-        var ci = 0
-        while ci < batch.commands.len():
-            val command = batch.commands[ci]
-            if _draw_ir_style_value(command, "backdrop-filter-fallback") == "solid-material":
-                canonical = canonical + "\n{material_count}|kind=solid-material|bg=" + _draw_ir_style_value(command, "background-color") + "|fg=" + _draw_ir_style_value(command, "color") + "|backdrop=none|background-image=none"
-                material_count = material_count + 1
-            ci = ci + 1
-        bi = bi + 1
-    if material_count == 0:
-        return WebRenderMaterialFallbackProvenance.none()
-    WebRenderMaterialFallbackProvenance.solid(
-        "cpu-raster-backdrop-sampling-unavailable",
-        sha256_text(canonical)
-    )
-
 fn _simple_web_layout_render_html_engine2d_execution(html: text, width: i32, height: i32, backend_name: text) -> SimpleWebLayoutEngine2DExecutionResult:
-    val ir = simple_web_layout_render_html_draw_ir(html, width, height)
-    val material_fallback = _draw_ir_material_fallback(ir)
+    val layout_result = simple_web_layout_render_html_draw_ir_result(html, width, height)
     var engine = Engine2D.create_with_backend_fast(width, height, backend_name)
     engine.clear(0u32)
-    val render = engine2d_draw_ir_adv_composition(engine, ir, true)
+    val render = engine2d_draw_ir_adv_composition(engine, layout_result.composition, true)
     engine.shutdown()
-    SimpleWebLayoutEngine2DExecutionResult(render: render, material_fallback: material_fallback)
+    SimpleWebLayoutEngine2DExecutionResult(render: render, material_fallback: layout_result.material_fallback)
 
 # Render `html` to a flat ARGB [u32] framebuffer through the layout Draw IR on an
 # Engine2D in native-only fast mode. On Metal this is GPU-rendered with a

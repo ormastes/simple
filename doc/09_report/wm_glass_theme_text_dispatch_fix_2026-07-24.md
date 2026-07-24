@@ -30,6 +30,15 @@ made resolved instance dispatch reuse its pre-lowered receiver. That
 side-effect/static/trait/UFCS hardening is source-reviewed but is not claimed
 as part of the retained object's evidence.
 
+## Renderer follow-up
+
+The shared-WM theme fallback now resolves after cascade, paints the declared
+opaque background and foreground, clears unrealizable backdrop/gradient/layer
+state, and attaches typed realized-material provenance to the pixel artifact.
+Software, cached, fast Draw IR, and direct Draw IR artifact paths preserve the
+same SHA-256 evidence contract. The hash is derived from emitted paint commands,
+not raw CSS spelling, and is intentionally absent from Draw IR.
+
 ## Remaining limitation
 
 The reduced executable reached object generation but failed during host link:

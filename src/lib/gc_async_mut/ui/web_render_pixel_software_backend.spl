@@ -2,13 +2,19 @@
 use std.common.ui.web_render_api.{
     WEB_RENDER_TARGET_PURE_SIMPLE,
     WebRenderArtifact,
+    WebRenderMaterialFallbackProvenance,
     WebRenderRequest,
+    web_render_artifact_with_material_fallback,
     web_render_engine2d_compatibility_artifact,
     web_render_full_html,
     web_render_pixel_artifact,
     web_render_url_request
 }
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_render_html_software_pixels}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    SimpleWebLayoutPixelResult,
+    simple_web_layout_render_html_software_pixels,
+    simple_web_layout_render_html_software_result
+}
 use std.common.ui.glyph_bitmap_5x7.{glyph_index_for_char_code, glyph_row_bits}
 
 fn _native_safe_wm_pixels(req: WebRenderRequest, full_html: text) -> [u32]:
@@ -84,6 +90,9 @@ fn _native_safe_wm_pixels(req: WebRenderRequest, full_html: text) -> [u32]:
 fn _software_pixels(req: WebRenderRequest, full_html: text) -> [u32]:
     simple_web_layout_render_html_software_pixels(full_html, req.viewport_w, req.viewport_h)
 
+fn _software_result(req: WebRenderRequest, full_html: text) -> SimpleWebLayoutPixelResult:
+    simple_web_layout_render_html_software_result(full_html, req.viewport_w, req.viewport_h)
+
 # _native_safe_wm_pixels is a degraded tag-stripping/bitmap-glyph renderer
 # meant only as an explicit crash-recovery fallback when the full HTML
 # layout engine (_software_pixels) cannot be used. Its artifact is stamped
@@ -100,6 +109,7 @@ class WebRenderPixelArtifactCache:
     backend_name: text
     last_html: text
     cached_pixels: [u32]
+    cached_material_fallback: WebRenderMaterialFallbackProvenance
     hit_count: i32
     store_count: i32
 
@@ -111,6 +121,7 @@ impl WebRenderPixelArtifactCache:
             backend_name: "software",
             last_html: "",
             cached_pixels: [],
+            cached_material_fallback: WebRenderMaterialFallbackProvenance.none(),
             hit_count: 0,
             store_count: 0
         )
@@ -122,9 +133,14 @@ impl WebRenderPixelArtifactCache:
             self.width = req.viewport_w
             self.height = req.viewport_h
             self.last_html = full_html
-            self.cached_pixels = _software_pixels(req, full_html)
+            val result = _software_result(req, full_html)
+            self.cached_pixels = result.pixels
+            self.cached_material_fallback = result.material_fallback
             self.store_count = self.store_count + 1
-        web_render_pixel_artifact(req.with_pixel_output(), self.cached_pixels)
+        web_render_artifact_with_material_fallback(
+            web_render_pixel_artifact(req.with_pixel_output(), self.cached_pixels),
+            self.cached_material_fallback
+        )
 
     me request_to_pixel_artifact(req: WebRenderRequest) -> WebRenderArtifact:
         self.html_request_to_pixel_artifact(req, web_render_full_html(req))
@@ -165,13 +181,21 @@ fn web_render_html_request_to_pixels_with_backend(req: WebRenderRequest, full_ht
     _software_pixels(req, full_html)
 
 fn web_render_request_to_pixel_artifact(req: WebRenderRequest) -> WebRenderArtifact:
-    web_render_pixel_artifact(req.with_pixel_output(), web_render_request_to_pixels(req))
+    val result = _software_result(req, web_render_full_html(req))
+    web_render_artifact_with_material_fallback(
+        web_render_pixel_artifact(req.with_pixel_output(), result.pixels),
+        result.material_fallback
+    )
 
 fn web_render_request_to_native_safe_pixel_artifact(req: WebRenderRequest) -> WebRenderArtifact:
     _native_safe_fallback_provenance(web_render_pixel_artifact(req.with_pixel_output(), _native_safe_wm_pixels(req, web_render_full_html(req))))
 
 fn web_render_html_request_to_pixel_artifact(req: WebRenderRequest, full_html: text) -> WebRenderArtifact:
-    web_render_pixel_artifact(req.with_pixel_output(), _software_pixels(req, full_html))
+    val result = _software_result(req, full_html)
+    web_render_artifact_with_material_fallback(
+        web_render_pixel_artifact(req.with_pixel_output(), result.pixels),
+        result.material_fallback
+    )
 
 fn web_render_html_request_to_pixel_artifact_with_backend(req: WebRenderRequest, full_html: text, backend_name: text) -> WebRenderArtifact:
     web_render_html_request_to_pixel_artifact(req, full_html)

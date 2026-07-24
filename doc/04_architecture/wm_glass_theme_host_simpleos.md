@@ -36,6 +36,9 @@ config/themes/theme.sdn + aetheric package
 - Scene/Draw IR: carries requested semantic style and theme revision only.
 - Engine2D: owns transient blur/cache/backend material and reports realized
   capabilities; such state never enters Draw IR.
+- Pixel artifact boundary: carries typed realized fallback kind, reason, and
+  material SHA-256 as a sidecar derived from the authoritative emitted paint
+  commands. The transient hash is not serialized into Draw IR.
 
 ## Bootstrap and Invalidation
 
