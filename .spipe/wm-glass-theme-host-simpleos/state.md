@@ -217,3 +217,15 @@ implementation-blocked-inferred-text-result-provenance
   six were corrected; focused Rust regressions now pass (`3 passed; 3348
   filtered`) with a real provider link/run and stub-suppression proof.
   Host cycle cap is exhausted; current-source pixels/events remain unproven.
+- continuation-arm64-input-source-preflight-2026-07-24: ARM64 source now
+  attaches capability-discovered VirtIO-MMIO keyboard/pointer devices, owns
+  modern eventq 0 with strict reset/status/QueueReady/DMA-layout validation,
+  observes device-owned used records with acquire ordering, and republishes
+  recycled descriptors with release ordering. The desktop reuses shared evdev
+  translation, assigns one guest sequence per pointer SYN transaction, and
+  emits truthful poll/state/frame markers for pointer frames and both keyboard
+  edges. Silent ToggleTheme handling was replaced by an explicit blocker.
+  The focused C contract and cross-target C syntax preflight pass; no QEMU ran.
+  A full diagnostic build still stops before entry compilation because the
+  self-hosted `aarch64-unknown-simpleos/simple` FAT32 payload is absent, so
+  live input/pixel evidence remains FAIL-FAST rather than inferred from source.

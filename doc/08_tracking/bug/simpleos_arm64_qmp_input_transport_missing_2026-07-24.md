@@ -1,70 +1,77 @@
-# SimpleOS ARM64/RV64 QMP input transport is missing
+# SimpleOS ARM64/RV64 QMP input transport evidence gap
 
-**Status:** OPEN — production blocker
+**Status:** PARTIAL — ARM64 source implemented; ARM64 live proof and RV64 transport remain open
 **Scope:** `arm64-desktop-engine2d` and `riscv64-display-smoke` on QEMU `virt`
 **Observed:** 2026-07-24
 
 ## Symptom
 
-The canonical ARM64 desktop accepts PL011 characters and maps them to a small
-set of window-manager actions. QMP `input-send-event` keyboard and pointer
-events cannot reach the guest. PL011 character receipt is not keyboard
-press/release evidence and cannot provide pointer evidence.
+Historically the canonical ARM64 desktop accepted only PL011 characters. The
+ARM64 source now attaches QEMU MMIO keyboard/pointer devices, discovers device
+ID 18 by capability, owns eventq 0, drains/recycles exact eight-byte records,
+and routes them through the shared evdev translators. This is preflight source,
+not proof that QMP `input-send-event` reaches a current-source guest. PL011
+remains fallback-only and is not keyboard press/release or pointer evidence.
 
 The canonical RV64 desktop has the same boundary: its loop consumes only
 `serial_read_byte()`. The RV64 evidence wrapper currently attaches PCI VirtIO
 keyboard and mouse devices, but no guest owner discovers, negotiates, or drains
 them. Attaching a device is not input evidence.
 
-The entry therefore correctly reports
-`[backend2d-event-blocker] ... event_backend=pl011-uart` and must not emit
-`[wm-input-irq]` or `[wm-pointer-irq]` receipts for UART characters.
+The ARM entry reports `event_backend=virtio-mmio` ready only when both device
+classes initialize; otherwise it reports a blocker and labels UART as fallback.
+Because the guest polls eventq, evidence uses `[wm-pointer-poll] source=poll`,
+never a false IRQ marker. One pointer `SYN_REPORT` transaction owns one sequence
+across its REL/button records; key press and release each own state/frame
+correlation even when release does not mutate WM state.
 RV64 likewise correctly emits
 `[rv64-input-evidence-unavailable] reason=virtio-input-transport-not-wired`.
 
-## Root cause
+## Historical root cause and current boundary
 
 The repository has only the platform-independent evdev translation owner:
 
 - `src/os/drivers/virtio/virtio_input_ops.spl` converts VirtIO input fields to
   the existing `KeyEvent` and `MouseEvent` models.
 
-The production path is missing all hardware-facing ownership:
+The original production path was missing all hardware-facing ownership.
+ARM64 now closes the source portion through
+`boot/baremetal_stubs.c`, `os.kernel.arch.arm64.virtio_input`, and the canonical
+desktop entry. The following items remain unproved or missing:
 
-- `get_arm64_desktop_engine2d_target()` attaches RAMFB and VirtIO block only;
-  it does not attach QEMU VirtIO keyboard or pointer devices.
-- No ARM64 driver discovers VirtIO MMIO device ID 18.
 - No RV64 driver discovers VirtIO MMIO device ID 18 either; the existing RV64
   PCI VirtIO-GPU owner does not provide an input queue.
-- No owner negotiates a VirtIO input device, provisions eventq 0 with writable
-  eight-byte event buffers, drains its used ring, and requeues buffers.
-- Neither entry has an `InputBackend` backed by that transport.
-- No guest-owned monotonic input sequence correlates device receipt, WM state
-  mutation, and the later framebuffer revision.
+- ARM64 has no retained live run proving the new queue owner and receipts.
+- RV64 still has neither queue ownership nor an input backend.
+- ARM64 QMP key edges/pointer frames and later RAMFB revisions have not been
+  correlated in production evidence.
 
 PS/2 is x86 port-I/O and is not an ARM64 solution. The current USB xHCI code is
 a probe lane, not a HID event transport.
 
-## Required canonical implementation
+## Required canonical implementation status
 
-1. Add `src/os/drivers/virtio/virtio_input_mmio.spl` as the sole ARM/RISC-V
-   VirtIO-MMIO input transport owner.
-2. Discover the QEMU `virt` MMIO slots at `0x0a000000`, stride `0x200`, and
+1. ARM64 source owner: implemented in the architecture freestanding runtime
+   plus thin Simple facade. Generalization to one ARM/RISC-V owner is open.
+2. ARM64 implemented: discover QEMU `virt` MMIO slots at `0x0a000000`, stride `0x200`, and
    select device ID 18. Identify keyboard and relative-pointer capabilities
    through the VirtIO input configuration space; do not depend on slot order.
-3. Negotiate modern VirtIO correctly, provision eventq 0 with DMA-safe,
+3. ARM64 implemented/preflight-only: negotiate modern VirtIO, reject stale
+   QueueReady, validate identity-mapped DMA layout, provision eventq 0 with
+   DMA acquire/release ordering and
    non-overlapping storage, pre-post writable eight-byte
    `{type:u16, code:u16, value:u32}` buffers, and recycle every used buffer.
-4. Reuse `virtio_input_key_event` and `VirtioMouseAccum`; do not create new
+4. ARM64 implemented: reuse `virtio_input_key_event` and `VirtioMouseAccum`; do not create new
    key, mouse, or WM action models.
 5. Expose one `InputBackend` implementation returning real `KeyEvent.Press`,
    `KeyEvent.Release`, and flushed `MouseEvent` values.
-6. Attach MMIO `virtio-keyboard-device` and `virtio-mouse-device` to the
-   canonical ARM64 and RV64 WM/desktop target definitions. Do not attach the
+6. ARM64 implemented; RV64 open: attach MMIO `virtio-keyboard-device` and
+   `virtio-mouse-device` to canonical target definitions. Do not attach the
    current PCI variants to an MMIO-only guest driver.
-7. Route events through the existing compositor/shell input owners. Assign a
+7. ARM64 source implemented/live open: route events through existing
+   compositor/shell input owners. Assign a
    guest monotonic `input_seq` only after a used-ring event is consumed.
-8. Emit distinct device, WM-state, and post-render frame receipts carrying the
+8. ARM64 source implemented/live open: emit distinct device, WM-state, and post-render frame receipts carrying the
    same sequence. Never copy a host nonce into guest evidence.
 
 ## Acceptance and capture prerequisites

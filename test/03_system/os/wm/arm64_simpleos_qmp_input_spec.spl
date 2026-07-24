@@ -1,5 +1,5 @@
 # codex-system-test
-# @req REQ-7
+# @req REQ-007
 # @evidence-display: links
 """# ARM64 SimpleOS QMP input
 
@@ -43,10 +43,38 @@ describe "ARM64 SimpleOS QMP input":
         expect(runtime).to_contain("VIRTQ_DESC_F_WRITE")
         expect(runtime).to_contain("dev->avail.idx = ARM64_VIRTIO_QUEUE_SIZE")
         expect(runtime).to_contain("dev->last_used_idx++")
+        expect(runtime).to_contain("ARM64_DMA_READ_ONCE(dev->used.idx)")
+        expect(runtime).to_contain("arm64_virtio_dma_acquire()")
+        expect(runtime).to_contain("arm64_virtio_dma_release()")
+        expect(runtime).to_contain("ARM64_DMA_WRITE_ONCE(dev->avail.idx")
+        expect(runtime).to_contain("arm64_virtio_input_wait_reset")
+        expect(runtime).to_contain("arm64_virtio_input_mark_failed")
+        expect(runtime).to_contain("arm64_virtio_event_length_valid")
+        expect(runtime).to_contain("arm64_virtio_queue_shape_valid")
         expect(runtime).to_contain("VMMIO_QUEUE_NOTIFY")
         expect(targets).to_contain("fn get_arm64_desktop_engine2d_target()")
         expect(targets).to_contain("virtio-keyboard-device")
         expect(targets).to_contain("virtio-mouse-device")
+
+        val used_observe = runtime.index_of("ARM64_DMA_READ_ONCE(dev->used.idx)") ?? -1
+        val used_acquire = runtime.index_of("arm64_virtio_dma_acquire()", used_observe) ?? -1
+        val payload_read = runtime.index_of("ARM64_DMA_READ_ONCE(dev->events[used_id].type)") ?? -1
+        val avail_ring = runtime.index_of("ARM64_DMA_WRITE_ONCE(dev->avail.ring") ?? -1
+        val avail_release = runtime.index_of("arm64_virtio_dma_release()", avail_ring) ?? -1
+        val avail_publish = runtime.index_of("ARM64_DMA_WRITE_ONCE(dev->avail.idx", avail_release) ?? -1
+        expect(used_acquire).to_be_greater_than(used_observe)
+        expect(payload_read).to_be_greater_than(used_acquire)
+        expect(avail_release).to_be_greater_than(avail_ring)
+        expect(avail_publish).to_be_greater_than(avail_release)
+
+        expect(entry).to_contain("pointer_frame_open")
+        expect(entry).to_contain("pointer_frame_sequence")
+        expect(entry).to_contain("[wm-pointer-poll] source=poll input_seq=")
+        expect(entry).to_contain("[wm-key-state] input_seq=")
+        expect(entry).to_contain("[wm-key-frame] input_seq=")
+        expect(entry).to_contain("edge={key_edge}")
+        expect(entry).to_contain("[theme-switch-blocker]")
+        expect(entry.contains("[wm-pointer-irq]")).to_be(false)
 
     # @capture(protocol)
     # @capture(gui)
@@ -56,6 +84,7 @@ describe "ARM64 SimpleOS QMP input":
         step("Inject keyboard down and up through QMP VirtIO input")
         step("Inject pointer move and button down and up through QMP VirtIO input")
         step("Observe guest-owned device receipt sequences")
+        step("Require distinct press and release state/frame correlations")
         step("Correlate handled input with WM state and later framebuffer revisions")
         step("Capture baseline and post-input RAMFB images")
         require_arm64_live_qmp_input_evidence()

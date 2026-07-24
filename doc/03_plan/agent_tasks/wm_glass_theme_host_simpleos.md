@@ -75,7 +75,7 @@ overlapping dirty work and remains read-only for this lane.
 | Host events | SOURCE PARTIAL; product proof pending | real key down/up and pointer move/button-edge receipts are retained; title-command/body-input remain unsupported because HostCompositor exposes no canonical API |
 | Simple Web glass | SEMANTICS IMPLEMENTED, LIVE PROOF PENDING | current-source computed-style/Draw-IR/framebuffer proof has not passed; Chromium fixture timing is not Simple Web animation evidence |
 | SimpleOS x86_64 QEMU | STATIC PREFLIGHT PASS, FRESH BOOT PENDING | legacy render/event command now delegates to canonical `gui_entry_desktop.spl` evidence; host gate, exact-current rebuild, and one OVMF capture remain |
-| SimpleOS ARM64 QEMU | FAIL; source wiring absent and runtime unproven | `arm64/gui_entry_desktop.spl` never installs the generated Aetheric snapshot, media lacks hosted package files, `ToggleTheme` is `pass`, and PL011 cannot receipt pointer or key down/up |
+| SimpleOS ARM64 QEMU | SOURCE INPUT PREFLIGHT IMPLEMENTED; LIVE PROOF PENDING | generated Aetheric startup and capability-discovered VirtIO-MMIO keyboard/pointer eventq wiring are present; DMA ordering/status/shape contracts pass locally, but the self-hosted ARM payload and QMP key/pointer/frame/RAMFB evidence are not yet available |
 | Aggregate SSpec | FAIL-FAST BY DESIGN | `require_wm_glass_theme_evidence()` remains a real failure until host and required QEMU rows produce current-source evidence |
 | Simple GUI theme handoff | SOURCE FIXED; product proof pending | resolved snapshot now reaches canonical widget Draw IR; 2 bootstrap-driver scenarios pass diagnostically |
 | Simple Web theme authority | SOURCE FIXED; product proof pending | package CSS is now the final authority; 3 bootstrap-driver scenarios pass diagnostically |
@@ -142,11 +142,12 @@ overlapping dirty work and remains read-only for this lane.
        --scenario=arm64-desktop-engine2d --log=off
    ```
 
-   Extend the current RAMFB evidence owner to capture the canonical
-   `arm64-desktop-engine2d` scene and explicitly report unsupported event
-   semantics. Completion additionally requires a QMP-routable ARM input owner
-   for pointer movement/button down/up and keyboard down/up; PL011 characters
-   cannot satisfy that contract.
+   The ARM input owner is source-wired and keeps UART fallback outside
+   production evidence. After the host-first gate, require QMP pointer
+   movement/button down/up plus keyboard press/release. Pointer records in one
+   `SYN_REPORT` transaction share one guest sequence; every key edge and
+   pointer frame must correlate device, truthful poll, WM state, later frame,
+   and distinct RAMFB capture evidence.
 7. Replace the aggregate fail-fast helper only when it reads and validates
    production artifacts; then regenerate and review the manual.
 

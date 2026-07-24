@@ -10,6 +10,10 @@
   Host source and provider-link wiring are fixed, but the session's three host
   cycles are exhausted before launch; rebuild the compiler and recapture next
   session. The aggregate SSpec remains fail-fast.
+- ARM64 now has source-preflight VirtIO-MMIO keyboard/pointer queues with
+  DMA-order/status contracts and shared input translation. Live QMP key-edge,
+  pointer-frame, WM-state, framebuffer-revision, and RAMFB captures remain
+  unproven; UART is fallback-only.
 - Read-only sidecars own history/CSS, host diagnosis, and QEMU diagnosis;
   `/root` owns merge, compiler preflight, evidence runs, final review, sync,
   and push.
