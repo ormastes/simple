@@ -122,9 +122,28 @@ binding). Related: `rv64_fpga_synthesis_plan_2026-07-22.md`,
 - [x] JTAG: board-origin halt/read-regs/resume through the Simple TAP/DTM/DM —
       **PASS** (BSCANE2 tunnel, IDCODE 0x15350067, DMI + abstract GPR reads on
       the real hart).
-- [ ] RV64: board-origin 10-min soak — synthesizable core exists + sim gates
-      green (c35ef5b7807); Vivado synth + board run pending.
+- [x] RV64: board-origin 10-min soak, golden match — **PASS 2026-07-24**
+      (wall 616 s, byte_cnt strictly monotonic 4→34 across 35 JTAG samples,
+      `DONE=1110197F~` decoded from the BSCANE2 UART-log tap == host Adler-32
+      golden for COUNT=100M). Evidence:
+      `build/fpga/evidence/rv64_2026-07-24/` (uncommitted).
 - [ ] JTAG: board-origin OpenOCD halt/regs/step transcript through the Simple
-      TAP/DTM/DM.
-- [ ] RV64: board-origin 10-min soak transcript, golden match — or a precise,
-      committed BLOCKED statement of exactly which gate it reached.
+      TAP/DTM/DM (rv32 satisfied this via Vivado hw_jtag raw mode; the
+      OpenOCD-specific path stays blocked on the tunnel-framing interop bug).
+
+## RV64 board result 2026-07-24 (Builds #1–#3)
+
+- Build #1 (PS pl_clk0 @100 MHz): bitgen OK, timing FAILED (WNS −3.758 ns on
+  the 64-bit register-file paths). Fixed forward with BUFGCE_DIV /2.
+- Build #2 (50 MHz): timing MET (WNS +1.420 ns) — but the board sat silent:
+  **KV260 PS never boots in JTAG-only bring-up** (A53s in POR), so pl_clk0 is
+  gated and pl_resetn0 low; xsdb-side clock/reset pokes brought the registers
+  up yet a netlist-inserted ILA proved clk_core still never toggled. Full
+  psu_init hangs in psu_pll_init_data over JTAG. See
+  `doc/08_tracking/bug/kv260_ps_bd_pl_clk0_unreachable_jtag_bringup_2026-07-24.md`.
+- Build #3 (CFGMCLK free-running clocking, PS BD dropped, COUNT=100M):
+  **board soak PASS** — first 'P' markers within seconds of configuration,
+  616 s wall, `DONE=1110197F~` == host golden. Read out entirely over the new
+  always-on BSCANE2 USER4 UART-log tap (`uart_bscan_log.vhd`), zero UART
+  cabling. Lesson recorded in the JTAG debugging guide: PS-clocked designs
+  are unusable for JTAG-only bring-up here — clock from CFGMCLK.

@@ -41,9 +41,13 @@ mkdir -p "$BUILD_DIR"
 # Stage a throwaway copy into RTL_DIR so the .mem-path rewrite below never
 # mutates the committed source (mirrors build_k26_rv32.shs's throwaway RTL_DIR).
 SRC_RTL="examples/09_embedded/fpga_riscv/rtl"
+DEBUG_DIR="src/lib/hardware/debug"
 mkdir -p "$RTL_DIR"
 cp "$SRC_RTL/rv64_exec_core.vhd" "$RTL_DIR/rv64_exec_core.vhd"
 cp "$SRC_RTL/soc_top_rv64.vhd"   "$RTL_DIR/soc_top_rv64.vhd"
+# Always-on BSCANE2 USER4 UART-log tap (no UART adapter / debug module exists
+# on this board bring-up) — see src/lib/hardware/debug/uart_bscan_log.vhd.
+cp "$DEBUG_DIR/uart_bscan_log.vhd" "$RTL_DIR/uart_bscan_log.vhd"
 
 # Build the Adler-32 soak payload mem (default COUNT; the 10-minute board run
 # sizes COUNT via soak_rv64_hard_job.shs). rv64im, linked at 0x8000_0000.
@@ -73,7 +77,7 @@ perl -0pi -e "s#\"(?:[^\"]*/)?rv64_payload\\.mem\"#\"$PWD/$RTL_DIR/rv64_payload.
 
 # Check for required RTL files. The rv64 payload lives at build/vhdl/rv64/
 # and is consumed by rv64_exec_core (instantiated by soc_top_rv64).
-for f in soc_top_rv64.vhd rv64_exec_core.vhd rv64_payload.mem; do
+for f in soc_top_rv64.vhd rv64_exec_core.vhd uart_bscan_log.vhd rv64_payload.mem; do
     if [ ! -s "$RTL_DIR/$f" ]; then
         echo "ERROR: missing $RTL_DIR/$f" >&2
         exit 2
@@ -93,62 +97,21 @@ cp scripts/fpga/k26_rv64.xdc "$XDC_FILE"
 
 cat > "$TCL_FILE" <<TCL
 set simple_synth_only $SYNTH_ONLY
-set enable_uart_ila ${ENABLE_UART_ILA:-0}
-set ila_reset_release_count ${ILA_RESET_RELEASE_COUNT:-500000000}
-set ila_data_depth ${ILA_DATA_DEPTH:-4096}
 
 create_project k26_rv64 $BUILD_DIR/k26_rv64 -part xck26-sfvc784-2lv-c -force
 
 # ---------------------------------------------------------------------------
-# Zynq UltraScale+ PS block design. Only pl_clk0 + pl_resetn0 are made
-# external, so the BD wrapper port set stays small and version-stable.
+# NO PS block design (dropped 2026-07-24): board bring-up found pl_clk0 never
+# toggles under a JTAG-only bitstream download (ILA evidence: HW_ILAS=0), and
+# PS-side register bring-up via xsdb did not unstick it -- pl_clk0 needs a
+# full FSBL boot this flow bypasses. soc_top_rv64 now clocks itself from the
+# free-running STARTUPE3 CFGMCLK (see soc_top_rv64.vhd), exactly
+# soc_top_rv32's own clocking, with zero PS dependency.
 # ---------------------------------------------------------------------------
-create_bd_design k26_ps_bd
-create_bd_cell -type ip -vlnv xilinx.com:ip:zynq_ultra_ps_e:3.5 zynq_ultra_ps_e_0
-# Default IP exposes pl_clk0 @ 100 MHz + pl_resetn0; disable the unused PL
-# clocks/resets to keep the design small.
-set_property -dict [list \\
-  CONFIG.PSU__FPGA_PL1_ENABLE {0} \\
-  CONFIG.PSU__FPGA_PL2_ENABLE {0} \\
-  CONFIG.PSU__FPGA_PL3_ENABLE {0} \\
-] [get_bd_cells zynq_ultra_ps_e_0]
 
-make_bd_pins_external -name pl_clk0    [get_bd_pins zynq_ultra_ps_e_0/pl_clk0]
-make_bd_pins_external -name pl_resetn0 [get_bd_pins zynq_ultra_ps_e_0/pl_resetn0]
-
-# The default IP exposes PS AXI HPM masters whose _aclk pins must be tied to
-# a clock for BD validation. We don't use those masters, so fan out pl_clk0
-# to the known AXI clock pins (catch'd so an absent pin doesn't fail the build).
-foreach clkpin {maxihpm0_fpd_aclk maxihpm0_lpd_aclk maxihpm1_fpd_aclk maxihpm1_lpd_aclk} {
-  catch {connect_bd_net [get_bd_pins zynq_ultra_ps_e_0/pl_clk0] [get_bd_pins zynq_ultra_ps_e_0/\$clkpin]}
-}
-
-validate_bd_design
-save_bd_design
-
-# Generate BD targets and import the auto-generated wrapper (entity
-# k26_ps_bd_wrapper) into the sources fileset. make_wrapper -top generates
-# the wrapper HDL but does NOT auto-add it when the BD is not the design
-# top, so we locate it explicitly and add it as a regular source.
-generate_target all [get_files k26_ps_bd.bd]
-make_wrapper -top [get_files k26_ps_bd.bd]
-add_files -norecurse [get_files k26_ps_bd.bd]
-set proj_dir [get_property DIRECTORY [current_project]]
-set wrapper_files [glob -nocomplain -directory \$proj_dir \\
-  k26_rv64.gen/sources_1/bd/k26_ps_bd/hdl/k26_ps_bd_wrapper.vhd \\
-  k26_rv64.srcs/sources_1/bd/k26_ps_bd/hdl/k26_ps_bd_wrapper.vhd \\
-  k26_rv64.gen/sources_1/bd/k26_ps_bd/hdl/k26_ps_bd_wrapper.v \\
-  k26_rv64.srcs/sources_1/bd/k26_ps_bd/hdl/k26_ps_bd_wrapper.v \\
-  k26_rv64.gen/sources_1/bd/k26_ps_bd/synth/k26_ps_bd_wrapper.vhd]
-if {[llength \$wrapper_files] == 0} {
-  puts "ERROR: k26_ps_bd_wrapper HDL not found under \$proj_dir"
-  exit 5
-}
-add_files -norecurse \$wrapper_files
-puts "BD_WRAPPER=[lindex \$wrapper_files 0]"
-
-# PL RTL: soc_top_rv64 instantiates rv64_exec_core + the PS BD wrapper.
-add_files [list $RTL_DIR/soc_top_rv64.vhd $RTL_DIR/rv64_exec_core.vhd]
+# PL RTL: soc_top_rv64 instantiates rv64_exec_core + the always-on BSCANE2
+# UART-log tap (uart_bscan_log). STARTUPE3/BSCANE2 come from unisim, no BD.
+add_files [list $RTL_DIR/soc_top_rv64.vhd $RTL_DIR/rv64_exec_core.vhd $RTL_DIR/uart_bscan_log.vhd]
 add_files -fileset constrs_1 $XDC_FILE
 
 set_property top soc_top_rv64 [current_fileset]
@@ -181,7 +144,7 @@ if [ "$SYNTH_ONLY" = "1" ]; then
     sh scripts/check/convert-riscv-vivado-reports.shs rv64 \\
         "$BUILD_DIR/k26_rv64/k26_rv64.runs/synth_1/soc_top_rv64_utilization_synth.rpt" \\
         "$BUILD_DIR/k26_rv64/k26_rv64.runs/synth_1/soc_top_rv64_timing_summary_synth.rpt" \\
-        "${RISCV_RV64_MHZ:-50}" \\
+        "${RISCV_RV64_MHZ:-25}" \\
         "${RISCV_SYNTH_REPORT_DIR:-build/riscv_synth_reports}"
     echo "SUCCESS: RV64 synthesis checkpoint at $BUILD_DIR/k26_rv64/k26_rv64.runs/synth_1/soc_top_rv64.dcp"
 else
