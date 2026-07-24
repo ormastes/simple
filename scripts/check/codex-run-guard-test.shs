@@ -5,7 +5,12 @@ set -eu
 DIR=$(dirname "$0")
 GUARD="$DIR/codex-run-guard.shs"
 TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT INT TERM
+SLEEP_SHIM_PID=""
+cleanup() {
+    [ -z "$SLEEP_SHIM_PID" ] || kill "$SLEEP_SHIM_PID" 2>/dev/null || true
+    rm -rf "$TMP"
+}
+trap cleanup EXIT INT TERM
 
 # Keep AGENTS.md's operational runaway limits executable: the test below
 # overrides them to avoid a real Codex launch, but production defaults must not
@@ -22,10 +27,26 @@ grep -Fq 'MAX_SESSION_TOKENS="${CODEX_GUARD_MAX_SESSION_TOKENS:-50000000}"' "$GU
 cat > "$TMP/fake-codex" <<'EOF'
 #!/bin/sh
 [ -z "${CODEX_FAKE_MARKER:-}" ] || printf 'x' >> "$CODEX_FAKE_MARKER"
+if [ -n "${CODEX_FAKE_WAIT_FOR:-}" ]; then
+    i=0
+    while [ ! -s "$CODEX_FAKE_WAIT_FOR" ] && [ "$i" -lt 20 ]; do
+        /bin/sleep 0.1
+        i=$((i + 1))
+    done
+    [ -s "$CODEX_FAKE_WAIT_FOR" ] || exit 1
+    exit 0
+fi
 sleep "${CODEX_FAKE_SLEEP:-0}"
 EOF
 chmod +x "$TMP/fake-codex"
 cp "$TMP/fake-codex" "$TMP/codex"
+mkdir -p "$TMP/test-bin"
+cat > "$TMP/test-bin/sleep" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$$" > "$CODEX_FAKE_SLEEP_PID_FILE"
+exec /bin/sleep 30
+EOF
+chmod +x "$TMP/test-bin/sleep"
 mkdir -p "$TMP/.codex/sessions/2026/07/19"
 : > "$TMP/.codex/sessions/2026/07/19/rollout-test-session-1.jsonl"
 : > "$TMP/.codex/sessions/2026/07/19/rollout-test-session-2.jsonl"
@@ -35,6 +56,22 @@ run_guard() {
         CODEX_GUARD_MAX_RESUME_TOKENS=0 CODEX_GUARD_MAX_SESSION_TOKENS=0 \
         CODEX_GUARD_MAX_SECONDS=0 CODEX_GUARD_MAX_RSS_MB=0 "$GUARD" "$@"
 }
+
+# Exercise the watchdog branch: its long-lived sleep child must not inherit the
+# session lock after the guarded Codex process exits.
+CODEX_FAKE_SLEEP_PID_FILE="$TMP/watchdog-sleep.pid" \
+CODEX_FAKE_WAIT_FOR="$TMP/watchdog-sleep.pid" \
+PATH="$TMP/test-bin:$PATH" \
+HOME="$TMP" CODEX_REAL_BIN="$TMP/fake-codex" \
+CODEX_GUARD_MAX_RESUME_TOKENS=0 CODEX_GUARD_MAX_SESSION_TOKENS=0 \
+CODEX_GUARD_MAX_SECONDS=1 CODEX_GUARD_MAX_RSS_MB=0 \
+CODEX_GUARD_POLL_SECONDS=30 "$GUARD" resume session-1
+SLEEP_SHIM_PID=$(sed -n '1p' "$TMP/watchdog-sleep.pid")
+kill -0 "$SLEEP_SHIM_PID" 2>/dev/null || { echo 'FAIL: watchdog sleep fixture did not remain alive'; exit 1; }
+CODEX_FAKE_MARKER="$TMP/watchdog-reacquired" run_guard resume session-1
+[ "$(wc -c < "$TMP/watchdog-reacquired")" -eq 1 ] || { echo 'FAIL: watchdog child retained session lock'; exit 1; }
+kill "$SLEEP_SHIM_PID" 2>/dev/null || true
+SLEEP_SHIM_PID=""
 
 terminate_tree() {
     for child in $(ps -o pid= --ppid "$1" 2>/dev/null); do
