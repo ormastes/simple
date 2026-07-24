@@ -18,14 +18,14 @@ The remaining gap is below the shared WM renderer, not another renderer:
   until the existing VirtIO-GPU owner is ready, and present reuses its checked
   transfer/flush path. The focused source contract is
   `test/01_unit/os/riscv64_display_abi_contract_test.shs`.
-- The entry reports only width, height, and stride. It does not emit the
-  physical scanout address, byte format, or scanout generation required to
-  bind host capture to the guest-owned backing buffer.
+- The entry now emits physical scanout address, dimensions, stride, bpp,
+  `bgra8888` format, successful-present generation, and scene revision. The
+  focused ABI contract pins the generation increment to a successful
+  transfer/flush.
 - `scripts/check/check-rv64-display-smoke-qmp-evidence.shs` uses QMP
-  `screendump`. The WM/font admission lane must instead parse guest-emitted
-  address/stride/format/generation, range-check them, and issue QMP
-  `pmemsave`. Its current rightmost crop is diagnostic only and cannot be
-  pinned.
+  `screendump`. The WM/font admission lane must parse the new guest receipt,
+  range-check it, and issue QMP `pmemsave`. Its current rightmost crop is
+  diagnostic only and cannot be pinned.
 - The pinned media builder already stages `/SYS/FONTS/NOTOSANS` with the
   required 1,708,408-byte/SHA-256 identity in `build/os/fat32-riscv64.img`,
   but the display scenario does not ensure or attach that image and the direct

@@ -51,10 +51,11 @@ The same live scenario traces and rejects boundary failures with:
 
 ## Current blockers
 
-- The RV64 framebuffer-address, pitch, bpp, and present ABI is now connected
-  to the existing VirtIO-GPU state. The guest receipt still lacks physical
-  address, byte format, and scanout generation, so it cannot authorize
-  `pmemsave` yet.
+- The RV64 framebuffer-address, pitch, bpp, generation, and present ABI is now
+  connected to the existing VirtIO-GPU state. The canonical entry emits the
+  physical address, dimensions, stride, bpp, `bgra8888` format, successful
+  present generation, and scene revision. The wrapper does not yet parse and
+  range-check that receipt or issue `pmemsave`, so admission remains blocked.
 - The pinned media builder already places `/SYS/FONTS/NOTOSANS` in
   `build/os/fat32-riscv64.img` with the required byte length and SHA-256. The
   display scenario/wrapper still neither ensures nor attaches that image.

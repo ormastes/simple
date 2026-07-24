@@ -1656,6 +1656,7 @@ static spl_u64 g_rt_blk_capacity = 0;
 static spl_i64 g_rt_blk_nvfs_ready = 0;
 static spl_i64 g_rt_blk_nvfs_arena_ready = 0;
 static spl_i64 g_rt_display_ready = 0;
+static spl_i64 g_rt_display_generation = 0;
 static spl_i64 g_rt_gpu_modern = 0;
 static spl_u64 g_rt_gpu_bar0 = 0;
 static spl_u64 g_rt_gpu_common = 0;
@@ -3490,6 +3491,7 @@ static void rt_gpu_fill_wm_scene(void) {
 }
 
 spl_i64 rt_display_init(void) {
+    g_rt_display_generation = 0;
     spl_i64 count = rt_pci_device_count();
     for (spl_i64 i = 0; i < count; i = i + 1) {
         spl_i64 cls = rt_pci_get_field(i, 3);
@@ -3590,8 +3592,16 @@ spl_i64 rt_display_bpp(void) {
     return g_rt_display_ready ? (spl_i64)(sizeof(spl_u32) * 8U) : 0;
 }
 
+spl_i64 rt_display_generation(void) {
+    return g_rt_display_ready ? g_rt_display_generation : 0;
+}
+
 spl_i64 rt_display_present(void) {
-    return rt_gui_flush();
+    spl_i64 result = rt_gui_flush();
+    if (result == 0) {
+        g_rt_display_generation = g_rt_display_generation + 1;
+    }
+    return result;
 }
 
 /* ========================================================================
