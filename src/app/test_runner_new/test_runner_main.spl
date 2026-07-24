@@ -22,7 +22,7 @@ use std.test_runner.test_runner_files.{discover_test_files, discover_test_files_
 use std.test_runner.test_manifest.{MANIFEST_PATH, manifest_load, manifest_save, manifest_is_fresh}
 use std.test_runner.test_manifest_scanner.{manifest_full_scan}
 use std.test_runner.test_runner_execute.{run_test_file_interpreter, run_test_file_smf, run_test_file_native, run_test_file_compile, run_test_file_safe_mode, run_test_file_composite}
-use std.test_runner.test_runner_output.{print_result, print_summary}
+use std.test_runner.test_runner_output.{combined_test_run_json, print_result, print_summary}
 use std.test_runner.test_runner_config.{report_free_mem, mode_to_str, propagate_env_vars, get_cli_args, get_flag_value, handle_run_management, has_run_management_flag}
 use app.test_daemon.session_scheduler.{schedule_session_tests, schedule_summary, schedule_flatten, schedule_session_file_paths, schedule_local_file_paths}
 # MEMORY DEBUG: groups 3-9 commented out to isolate memory usage
@@ -41,6 +41,7 @@ use std.io.{file_atomic_write}
 # use rust_test_runner.{run_rust_tests, RustTestResult}
 use std.test_runner.sdoctest.config.load_sdoctest_config
 use std.test_runner.sdoctest.runner.{run_sdoctest_mode, print_sdoctest_summary}
+use std.test_runner.sdoctest.types.{SdoctestRunResult}
 use std.test_runner.test_runner_modes.{run_spl_doctest_mode}
 # use sdoctest.types.{SdoctestRunResult, SdoctestFileResult, BlockStatus}
 # use sdoctest.result_db.write_sdoctest_db
@@ -773,10 +774,22 @@ fn run_test_cli() -> i64:
     ensure_kill_monitor_running()
     val all_args = get_cli_args()
     var args: [text] = []
-    var skip_first = all_args.len() > 0 and all_args[0] == "test"
-    var i = 0
-    if skip_first:
-        i = 1
+    var json_worker = false
+    var i = if all_args.len() > 0 and all_args[0] == "test": 1 else: 0
+    var marker = -1
+    var scan = 0
+    while scan < all_args.len():
+        if all_args[scan] == "--test-json-worker":
+            marker = scan
+            break
+        scan = scan + 1
+    if marker >= 0:
+        if env_get("SIMPLE_TEST_JSON_WORKER_AUTH") != "1":
+            print "ERROR: unauthorized private test JSON worker marker"
+            return 2
+        env_set("SIMPLE_TEST_JSON_WORKER_AUTH", "")
+        json_worker = true
+        i = marker + 1
     while i < all_args.len():
         args.push(all_args[i])
         i = i + 1
@@ -818,11 +831,17 @@ fn run_test_cli() -> i64:
     if options.spl_doctest:
         run_spl_doc = true
 
+    var spec_result = TestRunResult(files: [], total_passed: 0, total_failed: 0, total_skipped: 0, total_pending: 0, total_timed_out: 0, total_duration_ms: 0, total_setup_ms: 0, total_cached: 0)
+    var spl_doctest_result = SdoctestRunResult(files: [], total: 0, passed: 0, failed: 0, skipped: 0, errors: 0, accepted: 0, duration_ms: 0)
+    var sdoctest_result = SdoctestRunResult(files: [], total: 0, passed: 0, failed: 0, skipped: 0, errors: 0, accepted: 0, duration_ms: 0)
+
     if not run_spec and not run_sdoc and not run_spl_doc:
         print "Error: No test types enabled. Check config/simple.test.sdn configuration."
         print "  run_spec_tests: {config.run_spec_tests}"
         print "  run_sdoctests: {config.run_sdoctests}"
         print "  run_spl_doctests: {config.run_spl_doctests}"
+        if json_worker:
+            print combined_test_run_json(false, false, spec_result, false, spl_doctest_result, false, sdoctest_result)
         return 1
 
     propagate_env_vars(options)
@@ -836,18 +855,19 @@ fn run_test_cli() -> i64:
         print ""
 
         val run_start = time_now_unix_micros()
-        val result = run_tests(options)
+        spec_result = run_tests(options)
         val run_end = time_now_unix_micros()
 
-        val result_files = result.files
+        val result_files = spec_result.files
         report_free_mem("AFTER_RUN_{result_files.len()}_files")
-        print_summary(result, options.format)
+        if not json_worker:
+            print_summary(spec_result, options.format)
 
         # Persist test results to database and regenerate reports
         if not options.list and not options.no_db:
-            db = update_test_database(result, run_start, run_end)
+            db = update_test_database(spec_result, run_start, run_end)
 
-        if not result.is_ok():
+        if not spec_result.is_ok():
             exit_code = 1
 
     # spl_doctest execution (complement to sdoctest)
@@ -858,7 +878,7 @@ fn run_test_cli() -> i64:
     if run_spl_doc:
         print "=== Running SPL Doctests ==="
         print ""
-        val spl_doctest_result = run_spl_doctest_mode(options, config)
+        spl_doctest_result = run_spl_doctest_mode(options, config)
         spl_doctest_passed = spl_doctest_result.passed
         spl_doctest_failed = spl_doctest_result.failed
         spl_doctest_skipped = spl_doctest_result.skipped
@@ -871,7 +891,7 @@ fn run_test_cli() -> i64:
 
     if run_sdoc:
         val sdoctest_config = load_sdoctest_config("config/sdoctest.sdn")
-        val sdoctest_result = run_sdoctest_mode(options, sdoctest_config)
+        sdoctest_result = run_sdoctest_mode(options, sdoctest_config)
         print_sdoctest_summary(sdoctest_result)
         if not sdoctest_result.is_ok():
             exit_code = 1
@@ -883,6 +903,17 @@ fn run_test_cli() -> i64:
                 val md_content = generate_test_result_md(database)
                 file_atomic_write("doc/08_tracking/test/test_result.md", md_content)
         Err(_): ()  # Silent failure; database may not have been attempted
+
+    if json_worker:
+        print combined_test_run_json(
+            exit_code == 0,
+            run_spec,
+            spec_result,
+            run_spl_doc,
+            spl_doctest_result,
+            run_sdoc,
+            sdoctest_result
+        )
 
     exit_code
 

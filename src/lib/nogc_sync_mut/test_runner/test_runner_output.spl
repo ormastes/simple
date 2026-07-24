@@ -3,7 +3,9 @@
 # Result printing and summary output functions.
 
 use std.test_runner.test_runner_types.{TestFileResult, TestRunResult}
+use std.test_runner.sdoctest.types.{SdoctestFileResult, SdoctestRunResult}
 use std.io.{path_basename}
+use common.text.{escape_json}
 
 # =========================================================================
 # Result Printing
@@ -53,10 +55,89 @@ fn print_result_doc(result: TestFileResult):
 fn print_result(result: TestFileResult, format: text):
     if format == "doc":
         print_result_doc(result)
+    elif format == "json":
+        return
     else:
         print_result_default(result)
 
+fn test_file_result_json(result: TestFileResult) -> text:
+    val error_json = if result.error == "": "null" else: "\"" + escape_json(result.error) + "\""
+    (
+        "{\"path\":\"" + escape_json(result.path) + "\"," +
+        "\"passed\":" + "{result.passed}," +
+        "\"failed\":" + "{result.failed}," +
+        "\"duration_ms\":" + "{result.duration_ms}," +
+        "\"error\":" + error_json + "}"
+    )
+
+fn test_run_result_json(result: TestRunResult) -> text:
+    var files: [text] = []
+    for file_result in result.files:
+        files.push(test_file_result_json(file_result))
+    val success = if result.is_ok(): "true" else: "false"
+    (
+        "{\"success\":" + success + "," +
+        "\"total_passed\":" + "{result.total_passed}," +
+        "\"total_failed\":" + "{result.total_failed}," +
+        "\"total_duration_ms\":" + "{result.total_duration_ms}," +
+        "\"files\":[" + files.join(",") + "]}"
+    )
+
+fn sdoctest_file_result_json(result: SdoctestFileResult) -> text:
+    (
+        "{\"path\":\"" + escape_json(result.source_file) + "\"," +
+        "\"total\":" + "{result.total}," +
+        "\"passed\":" + "{result.passed}," +
+        "\"failed\":" + "{result.failed}," +
+        "\"skipped\":" + "{result.skipped}," +
+        "\"errors\":" + "{result.errors}," +
+        "\"duration_ms\":" + "{result.duration_ms}" + "}"
+    )
+
+fn sdoctest_run_result_json(result: SdoctestRunResult) -> text:
+    var files: [text] = []
+    for file_result in result.files:
+        files.push(sdoctest_file_result_json(file_result))
+    (
+        "{\"total\":" + "{result.total}," +
+        "\"passed\":" + "{result.passed}," +
+        "\"failed\":" + "{result.failed}," +
+        "\"skipped\":" + "{result.skipped}," +
+        "\"errors\":" + "{result.errors}," +
+        "\"duration_ms\":" + "{result.duration_ms}," +
+        "\"files\":[" + files.join(",") + "]}"
+    )
+
+fn combined_test_run_json(
+    runner_ok: bool,
+    spec_enabled: bool,
+    spec_result: TestRunResult,
+    spl_doctest_enabled: bool,
+    spl_doctest_result: SdoctestRunResult,
+    sdoctest_enabled: bool,
+    sdoctest_result: SdoctestRunResult
+) -> text:
+    val success = (
+        runner_ok and
+        (not spec_enabled or spec_result.is_ok()) and
+        (not spl_doctest_enabled or spl_doctest_result.is_ok()) and
+        (not sdoctest_enabled or sdoctest_result.is_ok())
+    )
+    val success_json = if success: "true" else: "false"
+    val spec_json = if spec_enabled: test_run_result_json(spec_result) else: "null"
+    val spl_json = if spl_doctest_enabled: sdoctest_run_result_json(spl_doctest_result) else: "null"
+    val sdoc_json = if sdoctest_enabled: sdoctest_run_result_json(sdoctest_result) else: "null"
+    (
+        "{\"success\":" + success_json + "," +
+        "\"spec\":" + spec_json + "," +
+        "\"spl_doctest\":" + spl_json + "," +
+        "\"sdoctest\":" + sdoc_json + "}"
+    )
+
 fn print_summary(result: TestRunResult, format: text):
+    if format == "json":
+        print test_run_result_json(result)
+        return
     print ""
     print "========================================="
     val total = result.total_passed + result.total_failed

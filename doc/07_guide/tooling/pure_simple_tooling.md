@@ -172,8 +172,8 @@ evidence boundary for the important pure-Simple tooling lanes:
   smoke has fresh Stage 4 evidence. Invalid and bare-value test options now
   return exit 2 before configuration or discovery, while signed split values
   remain valid. **Remaining bug/gap:** this preflight has focused source
-  evidence only. Public `--format json` is not yet qualified. A preserved
-  pure-Simple subprocess boundary now captures the worker, routes diagnostics
+  evidence only. Public `--format json` is not yet qualified. The pushed
+  pure-Simple subprocess boundary captures the worker, routes diagnostics
   to stderr, and emits one aggregate object covering spec and both doctest
   lanes; nested JSON tests fail closed with the same JSON envelope. High static
   review accepted the repaired executable/argv, recursion, and JSON-parser
@@ -183,7 +183,7 @@ evidence boundary for the important pure-Simple tooling lanes:
   `src/app/cli/_CliMain/args_and_os_commands.spl`, producing no candidate; see
   [the JSON-format report](../../08_tracking/bug/test_runner_json_format_not_machine_readable_2026-07-24.md).
   **Next solution:** fix the existing global-flags parser/checker timeout,
-  build one fresh incremental Stage 4 CLI containing the preserved repair,
+  build one fresh incremental Stage 4 CLI containing this source repair,
   then run the whole-stdout contract once through that exact binary. Run the
   remaining focused bounded-output and CLI contracts once, then run the exact
   essential-tools smoke from its temporary external working directory.

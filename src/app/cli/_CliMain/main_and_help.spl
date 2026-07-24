@@ -34,9 +34,10 @@ use app.stats.dynamic.{run_stats}
 use app.jj.main.{handle_jj}
 use app.devhub.main.{handle_itf}
 use os.cli.{handle_os}
-use compiler.tools.leak_check.main.{run_leak_check}
+use lazy compiler.tools.leak_check.main.{run_leak_check}
 use lazy compiler.tools.duplicate_check.main.{run_duplicate_check}
-use app.test_runner_new.test_runner_main.{run_test_cli}
+use lazy app.test_runner_new.test_runner_main.{run_test_cli}
+use lazy app.test_runner_new.json_wrapper.{run_test_json_wrapper, test_json_requested, test_json_worker_requested}
 # Simple Language - Unified CLI (Written in Simple)
 #
 # This is the main entry point for the Simple CLI, written in Simple itself.
@@ -227,17 +228,22 @@ fn main() -> i64:
         val watch_args = _cli_args_from(filtered_args, 1)
         return cli_run_file("src/app/watch/main.spl", watch_args, flags.gc_log, flags.gc_off)
     elif str_eq(first, "test"):
+        val test_args = _cli_args_from(filtered_args, 1)
+        val json_worker = test_json_worker_requested(test_args)
+        if test_json_requested(test_args) and not json_worker:
+            return run_test_json_wrapper(test_args)
         # Recursion guard: refuse nested `bin/simple test` invocations.
         # test_entry.spl applies the same guard for the lightweight path;
         # this site covers the standard `bin/simple test` dispatch path.
         val _depth_str = env_get("SIMPLE_TEST_DEPTH")
         val _depth = if _depth_str == "" or _depth_str == nil: 0 else: _depth_str.to_int() ?? 0
-        if _depth >= 1:
+        if _depth >= 1 and not json_worker:
             print "ERROR: simple test recursion guard triggered (SIMPLE_TEST_DEPTH={_depth_str})"
             print "  Nested `bin/simple test` invocations are not allowed."
             print "  A spec or script is calling `bin/simple test` from inside a test run."
             return 1
-        env_set("SIMPLE_TEST_DEPTH", (_depth + 1).to_text())
+        if _depth < 1:
+            env_set("SIMPLE_TEST_DEPTH", (_depth + 1).to_text())
         return run_test_cli()
     elif str_eq(first, "test-daemon"):
         return cli_test_daemon(_cli_args_from(filtered_args, 1))

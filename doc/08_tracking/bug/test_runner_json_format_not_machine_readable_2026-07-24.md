@@ -13,7 +13,8 @@ cover every enabled test lane. Progress and diagnostics belong on stderr.
 
 ## Repair status
 
-A pure-Simple subprocess-boundary repair is preserved but not pushed. It avoids
+A pure-Simple subprocess-boundary repair is committed in the repository but
+not yet qualified through a fresh Stage 4 binary. It avoids
 scattered print guards by running a private worker subprocess, capturing its
 output, and publishing only a validated final object. High static review
 accepted its executable ownership, source/compiled argv split, marker-relative

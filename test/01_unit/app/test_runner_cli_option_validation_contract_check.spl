@@ -1,6 +1,18 @@
-use std.test_runner.test_runner_args.{test_args_validation_error}
+use std.test_runner.test_runner_args.{parse_test_args, test_args_validation_error}
+use std.test_runner.test_runner_output.{test_run_result_json}
+use std.test_runner.test_runner_types.{TestFileResult, TestRunResult}
+use std.common.json.parser.{json_parse}
+use std.io.{process_run_bounded}
+use app.io.cli_ops.{_cli_source_entry_executable, cli_current_exe_path}
 
 extern fn rt_exit(code: i32)
+extern fn rt_file_read_text(path: text) -> text
+
+fn json_contract_tail(value: text) -> text:
+    val limit: i64 = 2048
+    if value.len() > limit:
+        return value.substring(value.len() - limit)
+    value
 
 val unknown = test_args_validation_error(["--not-a-test-option"])
 val missing_tag = test_args_validation_error(["--tag"])
@@ -10,12 +22,137 @@ val empty_tag = test_args_validation_error(["--tag", ""])
 val empty_mode = test_args_validation_error(["--mode="])
 val signed_value = test_args_validation_error(["--timeout", "-1"])
 val trailing_equals_value = test_args_validation_error(["--sdoctest-env=KEY="])
+val text_format = test_args_validation_error(["--format", "text"])
+val json_format = test_args_validation_error(["--format", "json"])
+val doc_format = test_args_validation_error(["--format", "doc"])
+val xml_format = test_args_validation_error(["--format", "xml"])
+val parsed_json = parse_test_args(["--format", "json"])
+val result_json = test_run_result_json(TestRunResult(
+    files: [TestFileResult(
+        path: "quote\"spec.spl",
+        passed: 1,
+        failed: 0,
+        skipped: 0,
+        pending: 0,
+        duration_ms: 2,
+        setup_ms: 0,
+        error: "",
+        timed_out: false,
+        cached: false
+    )],
+    total_passed: 1,
+    total_failed: 0,
+    total_skipped: 0,
+    total_pending: 0,
+    total_timed_out: 0,
+    total_duration_ms: 2,
+    total_setup_ms: 0,
+    total_cached: 0
+))
+val configured_source_binary = _cli_source_entry_executable(
+    "/repo/src/app/test_runner_new/main.spl",
+    "/repo/bin/simple",
+    true
+)
+val missing_source_binary = _cli_source_entry_executable(
+    "/repo/src/app/test_runner_new/main.spl",
+    "/repo/bin/simple",
+    false
+)
+val compiled_binary = _cli_source_entry_executable(
+    "/repo/bin/simple",
+    "/repo/bin/simple",
+    true
+)
+val cli_source = rt_file_read_text("src/app/cli/_CliMain/main_and_help.spl")
+val runner_source = rt_file_read_text("src/app/test_runner_new/test_runner_main.spl")
+val wrapper_source = rt_file_read_text("src/app/test_runner_new/json_wrapper.spl")
+val cli_executable = cli_current_exe_path()
+val (cli_stdout, cli_stderr, cli_code) = process_run_bounded(
+    cli_executable,
+    [
+        "run",
+        "src/app/cli/_CliMain/main_and_help.spl",
+        "test",
+        "scripts/check/fixtures/font_evidence_runner_fail_spec.spl",
+        "--format",
+        "json",
+        "--no-db",
+        "--no-self-protect",
+        "--sequential",
+        "--no-session-share",
+        "--no-session-daemon",
+        "--no-cover-check",
+        "--assert-ran"
+    ],
+    240000,
+    4194304
+)
+val trimmed_cli_stdout = cli_stdout.trim()
+val (forged_stdout, forged_stderr, forged_code) = process_run_bounded(
+    cli_executable,
+    [
+        "run",
+        "src/app/cli/_CliMain/main_and_help.spl",
+        "test",
+        "--test-json-worker",
+        "scripts/check/fixtures/font_evidence_runner_fail_spec.spl",
+        "--format",
+        "json"
+    ],
+    30000,
+    4194304
+)
+val (forged_source_stdout, forged_source_stderr, forged_source_code) = process_run_bounded(
+    cli_executable,
+    [
+        "run",
+        "src/app/test_runner_new/main.spl",
+        "--test-json-worker",
+        "scripts/check/fixtures/font_evidence_runner_fail_spec.spl",
+        "--format",
+        "json"
+    ],
+    30000,
+    4194304
+)
 
 if (unknown == "" or missing_tag == "" or tag_swallows_unknown == "" or
     tag_swallows_unit == "" or empty_tag == "" or empty_mode == "" or
-    signed_value != "" or trailing_equals_value != ""):
+    signed_value != "" or trailing_equals_value != "" or text_format != "" or
+    json_format != "" or doc_format != "" or xml_format == "" or
+    parsed_json.format != "json" or json_parse(result_json) == nil or
+    configured_source_binary != "/repo/bin/simple" or
+    missing_source_binary != "/repo/src/app/test_runner_new/main.spl" or
+    compiled_binary != "/repo/bin/simple" or
+    not cli_source.contains("if _depth >= 1 and not json_worker:") or
+    not cli_source.contains("if _depth < 1:\n            env_set(\"SIMPLE_TEST_DEPTH\", (_depth + 1).to_text())") or
+    not runner_source.contains("if env_get(\"SIMPLE_TEST_JSON_WORKER_AUTH\") != \"1\":") or
+    not runner_source.contains("env_set(\"SIMPLE_TEST_JSON_WORKER_AUTH\", \"\")") or
+    not wrapper_source.contains("if depth >= 1:\n        print _test_json_failure(\"test recursion guard triggered\", 1)") or
+    not wrapper_source.contains("env_set(\"SIMPLE_TEST_DEPTH\", \"1\")") or
+    not wrapper_source.contains("val TEST_JSON_OUTPUT_BYTES = 4194304") or
+    not wrapper_source.contains("env_set(\"SIMPLE_TEST_JSON_WORKER_AUTH\", \"1\")") or
+    cli_executable == "" or cli_code == 0 or json_parse(trimmed_cli_stdout) == nil or
+    not trimmed_cli_stdout.starts_with("{") or not trimmed_cli_stdout.ends_with("}") or
+    not trimmed_cli_stdout.starts_with("{\"success\":false,") or
+    not trimmed_cli_stdout.contains("\"spec\":") or
+    not trimmed_cli_stdout.contains("\"spl_doctest\":") or
+    not trimmed_cli_stdout.contains("\"sdoctest\":") or
+    not trimmed_cli_stdout.contains("font_evidence_runner_fail_spec.spl") or
+    not trimmed_cli_stdout.contains("\"total_failed\":1") or
+    trimmed_cli_stdout.contains("\"worker_exit_code\":") or
+    forged_code != 2 or
+    not (forged_stdout + forged_stderr).contains("unauthorized private test JSON worker marker") or
+    forged_source_code != 2 or
+    not (forged_source_stdout + forged_source_stderr).contains("unauthorized private test JSON worker marker")):
     print "FAIL: test runner option preflight did not fail closed"
+    print "child rc: {cli_code}"
+    print "child stdout tail:"
+    print json_contract_tail(cli_stdout)
+    print "child stderr tail:"
+    print json_contract_tail(cli_stderr)
     rt_exit(1)
 
-print "PASS: test runner rejects unknown and bare options before discovery"
+print "PASS: test runner emits one valid aggregate JSON object for all enabled lanes"
 rt_exit(0)
