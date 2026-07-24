@@ -544,11 +544,18 @@ impl CompilerDriver:
             driver_log_trace(log, "translating module: {name}")
             val mir_module = ctx.mir_modules[name]
             val compiled = compile_module_with_backend("c", mir_module, is_release, driver_opt_level)
-            if compiled.is_err():
-                val err = compiled.unwrap_err()
-                return CompileResult.CodegenError("C codegen error in {name}: {err}")
-            val module: CompiledModule = compiled.unwrap()
-            all_c_source = all_c_source + module.assembly
+            # Flat-safe extraction (same defect as _compile_selected_module):
+            # is_err/unwrap_err/unwrap are miscompile-prone on the stage4
+            # native lane — match arms are the verified idiom. Binding the
+            # payload also lets {e.message} render the real diagnostic text;
+            # interpolating the raw CompileError prints <value:0x...>.
+            match compiled:
+                case Err(e):
+                    return CompileResult.CodegenError("C codegen error in {name}: {e.message}")
+                case Ok(module):
+                    all_c_source = all_c_source + module.assembly
+                case _:
+                    return CompileResult.CodegenError("C codegen error in {name}: backend result not Ok")
 
         # Write C++ source to output file
         if not rt_file_write_text(output, all_c_source):
@@ -574,9 +581,14 @@ impl CompilerDriver:
             driver_log_trace(log, "translating module: {name}")
             val mir_module = ctx.mir_modules[name]
             val compiled = compile_module_with_backend("c", mir_module, is_release, driver_opt_level)
-            if compiled.is_err():
-                val err = compiled.unwrap_err()
-                return CompileResult.CodegenError("C codegen error in {name}: {err}")
+            # Flat-safe error check: unwrap_err is miscompile-prone on the
+            # stage4 native lane, and the bound payload renders its real text
+            # via {e.message} (the raw CompileError prints <value:0x...>).
+            match compiled:
+                case Err(e):
+                    return CompileResult.CodegenError("C codegen error in {name}: {e.message}")
+                case _:
+                    ()
             val module: CompiledModule = compiled.unwrap()
 
             # Convert module name to relative file path: "compiler.core.parser" -> "compiler/core/parser.cpp"
@@ -625,12 +637,18 @@ impl CompilerDriver:
             driver_log_trace(log, "translating module to PTX: {name}")
             val mir_module = ctx.mir_modules[name]
             val compiled = compile_module_with_backend("cuda", mir_module, is_release, driver_opt_level)
-            if compiled.is_err():
-                val err = compiled.unwrap_err()
-                return CompileResult.CodegenError("CUDA compile error in {name}: {err}")
-            val module_result: CompiledModule = compiled.unwrap()
-            val ptx_text = module_result.assembly ?? ""
-            all_ptx = all_ptx + ptx_text
+            # Flat-safe extraction: match arms instead of is_err/unwrap_err/
+            # unwrap (miscompile-prone on the stage4 native lane); {e.message}
+            # renders the real text where the raw CompileError would print
+            # <value:0x...>.
+            match compiled:
+                case Err(e):
+                    return CompileResult.CodegenError("CUDA compile error in {name}: {e.message}")
+                case Ok(module_result):
+                    val ptx_text = module_result.assembly ?? ""
+                    all_ptx = all_ptx + ptx_text
+                case _:
+                    return CompileResult.CodegenError("CUDA compile error in {name}: backend result not Ok")
 
         if not rt_file_write_text(output, all_ptx):
             return CompileResult.CodegenError("Failed to write PTX to {output}")
@@ -651,12 +669,18 @@ impl CompilerDriver:
             driver_log_trace(log, "translating module to OpenCL C: {name}")
             val mir_module = ctx.mir_modules[name]
             val compiled = compile_module_with_backend("opencl", mir_module, is_release, driver_opt_level)
-            if compiled.is_err():
-                val err = compiled.unwrap_err()
-                return CompileResult.CodegenError("OpenCL compile error in {name}: {err}")
-            val module_result: CompiledModule = compiled.unwrap()
-            val source = module_result.assembly ?? ""
-            all_source = all_source + source
+            # Flat-safe extraction: match arms instead of is_err/unwrap_err/
+            # unwrap (miscompile-prone on the stage4 native lane); {e.message}
+            # renders the real text where the raw CompileError would print
+            # <value:0x...>.
+            match compiled:
+                case Err(e):
+                    return CompileResult.CodegenError("OpenCL compile error in {name}: {e.message}")
+                case Ok(module_result):
+                    val source = module_result.assembly ?? ""
+                    all_source = all_source + source
+                case _:
+                    return CompileResult.CodegenError("OpenCL compile error in {name}: backend result not Ok")
 
         if not rt_file_write_text(output, all_source):
             return CompileResult.CodegenError("Failed to write OpenCL source to {output}")
@@ -677,14 +701,20 @@ impl CompilerDriver:
             driver_log_trace(log, "translating module to VHDL: {name}")
             val mir_module = ctx.mir_modules[name]
             val compiled = compile_module_with_backend("vhdl", mir_module, is_release, driver_opt_level)
-            if compiled.is_err():
-                val err = compiled.unwrap_err()
-                return CompileResult.CodegenError("VHDL compile error in {name}: {err}")
-            val module_result: CompiledModule = compiled.unwrap()
-            val vhdl = module_result.assembly ?? ""
-            if all_vhdl != "" and vhdl != "":
-                all_vhdl = all_vhdl + "\n\n"
-            all_vhdl = all_vhdl + vhdl
+            # Flat-safe extraction: match arms instead of is_err/unwrap_err/
+            # unwrap (miscompile-prone on the stage4 native lane); {e.message}
+            # renders the real text where the raw CompileError would print
+            # <value:0x...>.
+            match compiled:
+                case Err(e):
+                    return CompileResult.CodegenError("VHDL compile error in {name}: {e.message}")
+                case Ok(module_result):
+                    val vhdl = module_result.assembly ?? ""
+                    if all_vhdl != "" and vhdl != "":
+                        all_vhdl = all_vhdl + "\n\n"
+                    all_vhdl = all_vhdl + vhdl
+                case _:
+                    return CompileResult.CodegenError("VHDL compile error in {name}: backend result not Ok")
 
         # W2-B fail-closed: if aspects/advices were requested but zero weaves
         # were applied before VHDL emission, the woven logic (e.g. JTAG hart
@@ -725,14 +755,20 @@ impl CompilerDriver:
             driver_log_trace(log, "translating module to WAT: {name}")
             val mir_module = ctx.mir_modules[name]
             val compiled = compile_module_with_backend("wasm", mir_module, is_release, driver_opt_level)
-            if compiled.is_err():
-                val err = compiled.unwrap_err()
-                return CompileResult.CodegenError("WASM compile error in {name}: {err}")
-            val module_result: CompiledModule = compiled.unwrap()
-            val wat = module_result.assembly ?? ""
-            if all_wat != "" and wat != "":
-                all_wat = all_wat + "\n\n"
-            all_wat = all_wat + wat
+            # Flat-safe extraction: match arms instead of is_err/unwrap_err/
+            # unwrap (miscompile-prone on the stage4 native lane); {e.message}
+            # renders the real text where the raw CompileError would print
+            # <value:0x...>.
+            match compiled:
+                case Err(e):
+                    return CompileResult.CodegenError("WASM compile error in {name}: {e.message}")
+                case Ok(module_result):
+                    val wat = module_result.assembly ?? ""
+                    if all_wat != "" and wat != "":
+                        all_wat = all_wat + "\n\n"
+                    all_wat = all_wat + wat
+                case _:
+                    return CompileResult.CodegenError("WASM compile error in {name}: backend result not Ok")
 
         if not rt_file_write_text(output, all_wat):
             return CompileResult.CodegenError("Failed to write WAT to {output}")
