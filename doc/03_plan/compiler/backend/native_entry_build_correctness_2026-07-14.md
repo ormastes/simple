@@ -9,6 +9,17 @@ failure is **never** silently converted to a wrong answer.
 
 ## Current session remaining (2026-07-24)
 
+- **C5 positional self-host gate:** the exact `nul` trace now proves
+  `0.chr()` is extracted as a MethodCall and lowers to local 1 with the
+  `Opaque("str")` discriminator, but `local_is_str(local 1)` returns nil.
+  Let therefore selects `I64` as the effective type and binds local 9 as
+  `I64`; `char_code_at` then rejects that receiver. Three bounded shared-helper
+  repairs did not change the positional failure and were reverted. Resume in a
+  fresh session at the `local_is_str` call/return ABI boundary; do not patch
+  `char_code_at` or repeat initializer/dispatch/type-anchor probes.
+- **C9 positional self-host gate:** remains intentionally blocked until C5
+  builds without unresolved warnings and its executable exits `42`; then run
+  the unchanged `.parse_f64()` fixture once and require exit `42`.
 - **MCP native receipt:** the fresh pure-Simple Stage4 compiler reached link,
   but its automatic `core-c-bootstrap` lane lacks the simple-core owners MCP
   needs. A complete simple-core archive was built successfully at
@@ -687,15 +698,31 @@ the shared binary — deploys require explicit user go-ahead).
   anchors (`5 compiled, 670 cached, 0 failed`) left the failure unchanged and
   were reverted rather than freezing disproved hypotheses in shared lowering.
 
-  This C5 diagnosis has reached its three-cycle cap. The next exact diagnostic
-  is to correlate the exact `nul` binding by symbol name/id and source span,
-  then record its extracted initializer kind/discriminator/span and, only when
-  it is the expected MethodCall, that call's method/receiver/args plus the
-  returned local, effective type, final bound local, and `char_code_at`
-  receiver. This decides between `let` payload extraction and later transport
-  without assuming the nearby local IDs belong to `nul`. Do not repeat
-  `mir_type_is_str`, MethodCall-discriminator, or type-anchor probes. C9
-  remains gated: only after a fresh positional C5
+  The next session's source-correlated V15 trace completed with a valid
+  no-stub incremental compiler (`4 compiled, 671 cached, 0 failed`). It
+  identified symbol `8:nul`; both statement and initializer spans are
+  unavailable (`0:0`) on this flat-HIR route, but the exact symbol-name gate
+  makes the row unique. Its initializer discriminator exactly matched
+  `HirExprKind.MethodCall`, the isolated qualified payload was
+  `method=chr,args=0`, and lowering returned local 1 with `Opaque("str")`
+  discriminator `2429702914`. At the first adjacent boundary,
+  `local_is_str(local 1)` returned nil, so Let selected `I64` discriminator
+  `258540933` and bound local 9 as I64. The downstream `char_code_at` failure
+  is therefore a consequence, not the repair site.
+
+  Three bounded repairs at that shared helper boundary were tested with fresh
+  positional C5 caches: delegating through `local_mir_type_of`, replacing the
+  loop's nested return with a boolean accumulator, and performing
+  discriminator-first Opaque classification directly in the accumulator.
+  Each rebuilt a valid no-stub compiler (`4 compiled, 671 cached, 0 failed`)
+  and each left the same sole `char_code_at` unresolved failure. All three
+  unproven code changes and all diagnostic prints were reverted. The next
+  session must inspect the compiled call/return ABI or dispatch identity for
+  `local_is_str` itself (including whether the caller receives the declared
+  bool), using the exact `nul` gate and a fresh cache. Do not repeat
+  initializer extraction, MethodCall-discriminator, LocalId-anchor, direct
+  `mir_type_is_str`, or these three helper rewrites. C9 remains gated: only
+  after a fresh positional C5
   executable exits `42` should the next bottom-up item run, positional C9
   `.parse_f64()` with exit `42`. See
   `native_chr_builtin_no_lowering_2026-07-18.md`.
