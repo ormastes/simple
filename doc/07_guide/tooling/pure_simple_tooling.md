@@ -171,7 +171,12 @@ evidence boundary for the important pure-Simple tooling lanes:
   **Remaining bug/gap:** neither that fix nor the aggregate essential-tools
   smoke has fresh Stage 4 evidence. Invalid and bare-value test options now
   return exit 2 before configuration or discovery, while signed split values
-  remain valid. **Remaining bug/gap:** this preflight has focused source
+  remain valid. Explicit targets that discover no spec files now fail with
+  exit 4; implicit default discovery, `--list`, and `--spl-doctest` retain
+  zero-selection success (`330f11622eb`). This is source-fixed only: fresh
+  pure-Simple qualification remains blocked by the eager/module-loading crash;
+  see the [explicit-selection report](../../08_tracking/bug/test_runner_explicit_empty_selection_false_green_2026-07-24.md).
+  **Remaining bug/gap:** this preflight has focused source
   evidence only. Public `--format json` is not yet qualified. The pushed
   pure-Simple subprocess boundary captures the worker, routes diagnostics
   to stderr, and emits one aggregate object covering spec and both doctest
@@ -247,7 +252,12 @@ evidence boundary for the important pure-Simple tooling lanes:
   The same change set corrected active Codex/Claude/Gemini/SPipe guidance to use direct
   `bin/simple lint`; `build lint` remains the Rust clippy lane. Shared
   worker/fallback help handling matches the public lint entry
-  (`cc69749ef25`); each has focused contract evidence. **Remaining
+  (`cc69749ef25`); each has focused contract evidence. Directory targets now
+  expand recursively in the shared CLI owner, while an explicit directory with
+  no `.spl` files fails with a target diagnostic. The focused CLI contract and
+  essential-tools gate cover nested dirty input; see the
+  [directory-target report](../../08_tracking/bug/lint_directory_target_opaque_failure_2026-07-24.md).
+  **Remaining
   bug/gap:** these fixes, `982ce3fa445`, and the focused wildcard contract are
   not fresh Stage 4 evidence. **Next solution:** qualify
   ARG/COLL/STUB/W0404/W0406/W0407 and the parse/CLI/config contracts through
@@ -298,10 +308,11 @@ evidence boundary for the important pure-Simple tooling lanes:
   ignored unknown flags and diverged from the compiler-owned command, is
   deleted; the portability contract now prevents that parallel entrypoint from
   returning (`4094d5a779e`).
-  Relative file and directory targets are normalized once in the shared
-  collector before native walking. The essential-tools known-duplicate probe
-  uses a relative directory from its external working directory and requires
-  one real group, so a zero-file scan cannot pass; see the
+  Relative directory targets are normalized for native walking, then restored
+  to the caller's spelling before exclusion, reporting, and caching; single
+  files are unchanged. The external-CWD essential probe uses relative
+  `duplicates`, excludes `duplicates/ignored/**`, and requires one real group,
+  so a zero-file scan cannot pass; see the
   [relative-directory report](../../08_tracking/bug/duplicate_check_relative_directory_false_green_2026-07-24.md).
   **Remaining bug/gap:** fresh Stage 4 evidence is missing, and incremental-cache
   flags remain deliberately rejected because their detector/cache path is

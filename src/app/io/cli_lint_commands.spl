@@ -9,6 +9,7 @@ use lazy compiler.tools.fix.rules.{check_simd_opportunities, check_short_grammar
 use std.tooling.easy_fix.{FixConfidence}
 use std.tooling.easy_fix.types.{fixreport_applied, fixreport_details}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_read}
+use std.nogc_sync_mut.io.mod_stub.{is_dir, dir_walk}
 use app.io.cli_ops.{_cli_eprint, _cli_process_run, _cli_run_workspace_root_guard}
 use app.io.cli_fix_options.{fix_option_error}
 use app.io.cli_fmt_options.{fmt_option_error}
@@ -48,7 +49,7 @@ fn run_lint_command(args: [text]) -> i64:
         return 2
 
     if args.contains("--help") or args.contains("-h"):
-        print "Usage: simple lint <file.spl> [file2.spl...] [--deny-all] [--warn-all] [--profile=TIER] [--mcp-perf] [--simd]"
+        print "Usage: simple lint <file-or-directory> [more-targets...] [--deny-all] [--warn-all] [--profile=TIER] [--mcp-perf] [--simd]"
         return 0
 
     var files: [text] = []
@@ -118,7 +119,33 @@ fn run_lint_command(args: [text]) -> i64:
         return 1
 
     var failed_files = 0
-    for file_path in files:
+    var lint_files: [text] = []
+    var seen_targets: [text] = []
+    for target in files:
+        if seen_targets.contains(target):
+            continue
+        seen_targets.push(target)
+        if not is_dir(target):
+            if not lint_files.contains(target):
+                lint_files.push(target)
+            continue
+        var discovered_files: [text] = []
+        for discovered in dir_walk(target):
+            if discovered.ends_with(".spl"):
+                discovered_files.push(discovered)
+        discovered_files.sort()
+        for discovered in discovered_files:
+            if not lint_files.contains(discovered):
+                lint_files.push(discovered)
+        if discovered_files.len() == 0:
+            if json_output:
+                print "{\"type\":\"lint-error\",\"file\":\"{escape_json(target)}\",\"message\":\"no Simple source files found\"}"
+            else:
+                _cli_eprint("Error: No Simple source files found: {target}")
+            exit_code = 1
+            failed_files = failed_files + 1
+
+    for file_path in lint_files:
         if not file_exists(file_path):
             if json_output:
                 print "{\"type\":\"lint-error\",\"file\":\"{escape_json(file_path)}\",\"message\":\"file not found\"}"
