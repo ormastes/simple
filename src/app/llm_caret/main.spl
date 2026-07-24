@@ -780,35 +780,49 @@ fn _slash_on_new() -> text:
     RT_SESSION_ID = ""
     gen_session_id()
 
+fn _hidden_commands_enabled() -> bool:
+    val raw = (env_get("LLM_CARET_ENABLE_HIDDEN_COMMANDS") ?? "").to_lower()
+    raw == "1" or raw == "true"
+
+fn _slash_on_hidden_command(name: text, arg: text) -> text:
+    if name == "debug-tool-call":
+        if arg == "":
+            return "Usage: /debug-tool-call <tool_call_id>"
+        return "debug tool call admitted"
+    "Hidden command not implemented: /" + name
+
+fn apply_resumed_session(sess: Session) -> SessionResumeResult:
+    if not is_valid_provider(sess.provider):
+        return SessionResumeResult(
+            found: false,
+            message: "saved session '" + sess.id +
+                "' has unknown provider '" + sess.provider + "'",
+            messages: [], session_id: "",
+            provider: "", model: ""
+        )
+    RT_PROVIDER = sess.provider
+    RT_MODEL = if sess.model == "":
+        _default_model(sess.provider)
+    else:
+        sess.model
+    RT_API_KEY = _effective_api_key(RT_PROVIDER)
+    RT_BASE_URL = _effective_base_url(RT_PROVIDER)
+    RT_CLI_PATH = _effective_cli_path(RT_PROVIDER)
+    RT_SESSION_ID = sess.provider_session_id
+    SessionResumeResult(
+        found: true,
+        message: "resumed session " + sess.id,
+        messages: sess.messages,
+        session_id: sess.id,
+        provider: RT_PROVIDER,
+        model: RT_MODEL
+    )
+
 fn _slash_on_resume(id: text) -> SessionResumeResult:
     val loaded = load_session(id)
     match loaded:
         Some(sess):
-            if not is_valid_provider(sess.provider):
-                return SessionResumeResult(
-                    found: false,
-                    message: "saved session '" + id +
-                        "' has unknown provider '" + sess.provider + "'",
-                    messages: [], session_id: "",
-                    provider: "", model: ""
-                )
-            RT_PROVIDER = sess.provider
-            RT_MODEL = if sess.model == "":
-                _default_model(sess.provider)
-            else:
-                sess.model
-            RT_API_KEY = _effective_api_key(RT_PROVIDER)
-            RT_BASE_URL = _effective_base_url(RT_PROVIDER)
-            RT_CLI_PATH = _effective_cli_path(RT_PROVIDER)
-            RT_SESSION_ID = sess.provider_session_id
-            return SessionResumeResult(
-                found: true,
-                message: "resumed session " + id,
-                messages: sess.messages,
-                session_id: sess.id,
-                provider: RT_PROVIDER,
-                model: RT_MODEL
-            )
+            return apply_resumed_session(sess)
         nil:
             return SessionResumeResult(
                 found: false,
@@ -827,11 +841,13 @@ fn _on_persist(session_id: text, conv: [Message]):
 fn _build_session_hooks(active_session_id: text) -> SessionHooks:
     SessionHooks(
         session_id: active_session_id,
+        hidden_commands_enabled: _hidden_commands_enabled(),
         on_model: _slash_on_model,
         on_provider: _slash_on_provider,
         on_sessions: _slash_on_sessions,
         on_new: _slash_on_new,
         on_resume: _slash_on_resume,
+        on_hidden_command: _slash_on_hidden_command,
         on_persist: _on_persist
     )
 

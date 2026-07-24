@@ -16,11 +16,12 @@ or another paid API.
 
 ## Scope and evidence
 
-The spec drives the input widget model, dummy-provider dispatch, styled
-transcript state, slash-provider hook, permission-gated tool loop, retry
-decisions, Claude REPL error route, hidden command admission gate, and
-production SGTTI source boundary. It does not drive the raw-terminal loop.
-The compact component snapshot is written to
+The spec drives the production `run_chat_tui_submission` transition, input
+widget model, dummy responder, styled transcript state, slash-provider hook,
+permission-gated tool loop, retry decisions, Claude REPL error route,
+production hidden-command dispatch/admission, and the SGTTI source boundary.
+It does not drive raw-terminal key reading or frame timing. The compact
+component snapshot is written to
 `build/test-artifacts/03_system/app/llm_caret/feature/llm_caret_tui_hidden_feature/caret_tui.txt`.
 
 A live PTY, ANSI/pixel screenshot, paid provider, network retry, and production

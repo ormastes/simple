@@ -1,5 +1,6 @@
 # web_render_file_gui.spl — render an HTML file through the pure-Simple web
-# renderer backed by Engine2D CPU SIMD and present it to a window.
+# renderer backed by a caller-selected Engine2D backend and present it to a
+# window with structured rendering and input evidence.
 #
 # This is intended as a web-renderer sanity view, so prefer sample pages with
 # class/id selectors; those route through the generic layout renderer instead of
@@ -25,12 +26,12 @@
 # doc/08_tracking/bug/web_render_dpi_scaling_unsupported_2026-07-12.md.
 
 use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
-    simple_web_render_html_to_pixels_with_engine2d_backend,
+    simple_web_render_html_to_readback_result_with_engine2d_backend,
     simple_web_resolved_engine2d_backend_name}
-use std.io.window_winit.{WinitLoop, WinitWindow, winit_loop_new, winit_loop_free, winit_window_new, winit_window_free, winit_present_rgba, winit_poll_close_requested}
+use std.io.window_winit.{WinitInput, WinitLoop, WinitWindow, winit_loop_new, winit_loop_free, winit_window_new, winit_window_free, winit_present_rgba, winit_poll_input}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 
-use std.io_runtime.{read_file, file_exists, env_get}
+use std.io_runtime.{read_file, file_exists, env_get, file_write}
 
 class ShowcaseDims:
     w: i32
@@ -87,13 +88,54 @@ fn showcase_checksum(pixels: [u32]) -> i64:
         i = i + 1
     checksum
 
+fn configured_web_backend() -> text:
+    val configured = (env_get("SIMPLE_GUI_BACKEND") ?? "").trim().lower()
+    if configured == "":
+        return "cpu_simd"
+    configured
+
+fn web_should_close(input: WinitInput) -> bool:
+    if input.close:
+        return true
+    for key in input.keys:
+        if key == 27 or key == 81 or key == 113:
+            return true
+    false
+
+fn interactive_web_html(raw_html: text, revision: i64) -> text:
+    val marker = "<div id='simple-web-live-input' style='position:absolute;right:20px;bottom:20px;width:150px;height:54px;background:#22c55e;color:#ffffff;border:4px solid #ffffff;font-size:18px'>INPUT " + revision.to_text() + "</div>"
+    if raw_html.contains("</body>"):
+        return raw_html.replace("</body>", marker + "</body>")
+    raw_html + marker
+
+fn write_web_event_evidence(path: text, backend: text, source: text,
+                            backend_handle: i64, initial_checksum: i64,
+                            interaction_checksum: i64, keyboard_events: i64,
+                            pointer_events: i64, click_events: i64,
+                            interaction_revision: i64) -> bool:
+    if path == "":
+        return true
+    file_write(path,
+        "web_standards_event_backend={backend}\n" +
+        "web_standards_event_source={source}\n" +
+        "web_standards_event_backend_handle={backend_handle}\n" +
+        "web_standards_event_initial_checksum={initial_checksum}\n" +
+        "web_standards_event_interaction_checksum={interaction_checksum}\n" +
+        "web_standards_event_keyboard_events={keyboard_events}\n" +
+        "web_standards_event_pointer_events={pointer_events}\n" +
+        "web_standards_event_click_events={click_events}\n" +
+        "web_standards_event_interaction_revision={interaction_revision}\n")
+
 pub fn run_web_standards_showcase(gui: bool, path: text) -> i64:
     if not file_exists(path):
         print "HTML file not found: {path}"
         return 1
     val raw_html = read_file(path)
-    val resolved = simple_web_resolved_engine2d_backend_name(RW, RH, "cpu_simd")
-    val pixels = simple_web_render_html_to_pixels_with_engine2d_backend(raw_html, RW, RH, "cpu_simd")
+    val requested = configured_web_backend()
+    val resolved = simple_web_resolved_engine2d_backend_name(RW, RH, requested)
+    val initial_result = simple_web_render_html_to_readback_result_with_engine2d_backend(raw_html, RW, RH, requested)
+    val initial_readback = initial_result.readback
+    val pixels = initial_readback.pixels
     if pixels.len() != RW * RH:
         print "web_standards_showcase status=fail reason=wrong-pixel-count expected={RW * RH} actual={pixels.len()}"
         return 2
@@ -111,7 +153,13 @@ pub fn run_web_standards_showcase(gui: bool, path: text) -> i64:
     if not varied or nonzero == 0 or checksum == 0:
         print "web_standards_showcase status=fail reason=blank-or-uniform pixels={pixels.len()} nonzero={nonzero} checksum={checksum}"
         return 3
-    print "web_standards_showcase status=pass path={path} html_bytes={raw_html.len()} width={RW} height={RH} pixels={pixels.len()} nonzero={nonzero} checksum={checksum} requested=cpu_simd resolved={resolved} dpi={SHOWCASE_DPI_VALUE} dpi_scale_applied=false"
+    val gpu_requested = requested == "vulkan" or requested == "metal"
+    if (resolved != requested or (gpu_requested and
+            (initial_readback.source != "device_readback" or
+             initial_readback.backend_handle <= 0))):
+        print "web_standards_showcase status=fail reason=backend-provenance requested={requested} resolved={resolved} source={initial_readback.source} handle={initial_readback.backend_handle}"
+        return 6
+    print "web_standards_showcase status=pass path={path} html_bytes={raw_html.len()} width={RW} height={RH} pixels={pixels.len()} nonzero={nonzero} checksum={checksum} requested={requested} resolved={resolved} source={initial_readback.source} backend_handle={initial_readback.backend_handle} dpi={SHOWCASE_DPI_VALUE} dpi_scale_applied=false"
 
     if not gui:
         return 0
@@ -120,24 +168,75 @@ pub fn run_web_standards_showcase(gui: bool, path: text) -> i64:
     if not lp.is_valid:
         print "No GUI runtime available."
         return 4
-    val win = winit_window_new(lp, W.to_i64(), H.to_i64(), "Pure-Simple web renderer CPU SIMD — {path}")
+    val win = winit_window_new(lp, W.to_i64(), H.to_i64(), "Pure-Simple web renderer {resolved} — {path}")
     if not win.is_valid:
         print "Window creation failed."
         winit_loop_free(lp)
         return 5
-    val packed = pack_pixels(pixels)
-    winit_present_rgba(win, RW.to_i64(), RH.to_i64(), packed)
-    # The rendered buffer is static, so present it once and then idle. Each
-    # Poll continuously so AppKit retains its event handler between frames; the
-    # reusable headless path never enters this loop. Re-present only periodically.
+    var current_packed = pack_pixels(pixels)
+    winit_present_rgba(win, RW.to_i64(), RH.to_i64(), current_packed)
+    val event_path = env_get("SIMPLE_GUI_EVENT_EVIDENCE_PATH") ?? ""
+    val exit_after_interaction = (env_get("SIMPLE_GUI_EXIT_AFTER_INTERACTION") ?? "") == "1"
+    var keyboard_events: i64 = 0
+    var pointer_events: i64 = 0
+    var click_events: i64 = 0
+    var interaction_revision: i64 = 0
+    var interaction_checksum = initial_readback.checksum
+    var current_source = initial_readback.source
+    var current_handle = initial_readback.backend_handle
+    if not write_web_event_evidence(
+            event_path, resolved, initial_readback.source,
+            initial_readback.backend_handle, initial_readback.checksum,
+            interaction_checksum, keyboard_events, pointer_events,
+            click_events, interaction_revision):
+        winit_window_free(win)
+        winit_loop_free(lp)
+        return 7
     var running = true
     var frames = 0
     val end_at = time_now_unix_micros() + 60000000
     while running and time_now_unix_micros() < end_at:
-        if winit_poll_close_requested(lp):
-            running = false
+        val input = winit_poll_input(lp)
+        running = not web_should_close(input)
+        val keyboard_delta = input.keys.len().to_i64()
+        val pointer_delta = input.mouse_moves
+        val click_delta = input.click_buttons.len().to_i64()
+        keyboard_events = keyboard_events + keyboard_delta
+        pointer_events = pointer_events + pointer_delta
+        click_events = click_events + click_delta
+        if keyboard_delta > 0 or pointer_delta > 0 or click_delta > 0:
+            if interaction_revision == 0:
+                interaction_revision = 1
+                val updated_html = interactive_web_html(raw_html, interaction_revision)
+                val updated_result = simple_web_render_html_to_readback_result_with_engine2d_backend(updated_html, RW, RH, requested)
+                val updated = updated_result.readback
+                interaction_checksum = updated.checksum
+                current_source = updated.source
+                current_handle = updated.backend_handle
+                current_packed = pack_pixels(updated.pixels)
+                if ((gpu_requested and
+                        (current_source != "device_readback" or current_handle <= 0)) or
+                        interaction_checksum == initial_readback.checksum):
+                    winit_window_free(win)
+                    winit_loop_free(lp)
+                    return 8
+                winit_present_rgba(
+                    win, RW.to_i64(), RH.to_i64(), current_packed)
+                print "web_standards_event_revision={interaction_revision}"
+                print "web_standards_event_checksum={interaction_checksum}"
+            if not write_web_event_evidence(
+                    event_path, resolved, current_source, current_handle,
+                    initial_readback.checksum, interaction_checksum,
+                    keyboard_events, pointer_events, click_events,
+                    interaction_revision):
+                winit_window_free(win)
+                winit_loop_free(lp)
+                return 8
+            if (exit_after_interaction and keyboard_events > 0 and
+                    pointer_events > 0 and click_events > 0):
+                running = false
         if frames % 15 == 0:
-            winit_present_rgba(win, RW.to_i64(), RH.to_i64(), packed)
+            winit_present_rgba(win, RW.to_i64(), RH.to_i64(), current_packed)
         frames = frames + 1
     winit_window_free(win)
     winit_loop_free(lp)

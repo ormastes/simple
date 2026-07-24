@@ -22,7 +22,7 @@ used to generate the full-parity matrices.
 |---|---|---|
 | `src/app/llm_caret/*.spl` | 23 direct caret files; 6,609 LOC | Current-tree evidence |
 | `doc/09_report/llm_caret_claude_cli_traceability.md` | Maps 13 files and 3,292 current LOC | Stale generated/manual mapping |
-| `scripts/check/check-llm-caret-claude-cli-trace.shs` | 13/23 files (56%); 3,292/6,609 LOC (50%); `STATUS: FAIL` | Current computed gate |
+| `scripts/check/check-llm-caret-claude-cli-trace.shs` | 23/23 files (100%); 6,840/6,840 LOC (100%); 464/464 file-qualified symbols; `STATUS: PASS` | Current computed gate |
 | `tmp/claude/claude-code-main/src` | Missing | Current-tree evidence |
 | Full-parity feature matrix | 599 rows, 1,902 historical source files, 512,685 historical LOC | Snapshot-derived evidence; cannot be refreshed against upstream now |
 | Full-parity file matrix | 1,902 rows | Snapshot-derived evidence |
@@ -62,7 +62,7 @@ scenario counts as coverage.
 |---|---|---|---|---|
 | REQ-LLM-CARET-CLAUDE-TRACE-001 | Historical Claude source references in `doc/09_report/llm_caret_claude_cli_traceability.md` | `llm_caret_claude_cli_traceability_spec.spl` | CLI / FAIL: upstream tree missing | Restore pinned source and regenerate feature groups |
 | REQ-LLM-CARET-CLAUDE-TRACE-002 | 23 direct files under `src/app/llm_caret` | Checker maps 13 | CLI/TUI / FAIL: 10 direct files unmapped | Add current rows, including `main`, `chat_tui`, session, tools, and GUI/interface roles |
-| REQ-LLM-CARET-CLAUDE-TRACE-003 | `check-llm-caret-claude-cli-trace.shs` | Traceability system spec | CLI / FAIL: 56% files, 50% LOC | Reach both 80% gates from current filesystem |
+| REQ-LLM-CARET-CLAUDE-TRACE-003 | `check-llm-caret-claude-cli-trace.shs` | Traceability system spec | CLI / PASS: 100% files, 100% LOC, exact file-qualified symbols | Keep the current filesystem inventory synchronized |
 | REQ-LLM-CARET-CLAUDE-TRACE-004 | Checker emits named counters and status | Traceability system spec | CLI / BLOCKED at runner mismatch in parent run | Modernize with frozen steps and assert exit code plus report fields |
 | REQ-LLM-CARET-CLAUDE-TRACE-005 | Report has a Simple symbol table | Checker extracts direct-file symbols | CLI / not established after new files | Regenerate symbol rows; require zero missing symbols |
 | REQ-LLM-CARET-FULL-001..003 | Feature/file/symbol TSV matrices | Full-parity inventory/plan gate | CLI/TUI / STALE | Re-extract only from restored pinned upstream |

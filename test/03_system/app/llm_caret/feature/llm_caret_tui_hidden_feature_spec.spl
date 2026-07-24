@@ -9,13 +9,13 @@
 
 ## Overview
 
-Exercises deterministic Caret TUI component seams without a live terminal or
-paid provider. The scenarios drive the input widget model, dummy provider,
-transcript renderer, permission gate, retry policy, Claude REPL error route,
-and hidden root-command admission gate. Provider, model, resume, and
-new-conversation commands must refresh visible state; a new conversation must
-receive a fresh session ID. The actual raw-terminal input/draw loop is not
-claimed by this component spec.
+Exercises the production Caret TUI submission state transition without a live
+terminal or paid provider. The scenarios drive the input widget model through
+`run_chat_tui_submission`, dummy responder, transcript renderer, permission
+gate, retry policy, Claude REPL error route, and production hidden-command
+dispatch/admission. Provider, model, resume, and new-conversation commands must
+refresh visible state; a new conversation must receive a fresh session ID. The
+raw-terminal key reader/frame timing is not claimed by this component spec.
 
 **Requirement IDs:** REQ-LLM-CARET-FULL-003, REQ-LLM-CARET-FULL-006
 **Requirements:** doc/02_requirements/feature/llm_caret_claude_cli_full_parity.md
@@ -107,25 +107,45 @@ fn _resume_found(name: text) -> SessionResumeResult:
 fn _persist_none(session_id: text, messages: [Message]):
     ()
 
+fn _hidden_command(name: text, arg: text) -> text:
+    "hidden command executed: " + name + " " + arg
+
 fn _hooks(session_id: text) -> SessionHooks:
     SessionHooks(
         session_id: session_id,
+        hidden_commands_enabled: false,
         on_model: _noop_model,
         on_provider: _provider_status,
         on_sessions: _session_list,
         on_new: _new_session,
         on_resume: _resume_none,
+        on_hidden_command: _hidden_command,
         on_persist: _persist_none
     )
 
 fn _hooks_with_resume(session_id: text) -> SessionHooks:
     SessionHooks(
         session_id: session_id,
+        hidden_commands_enabled: false,
         on_model: _noop_model,
         on_provider: _provider_status,
         on_sessions: _session_list,
         on_new: _new_session,
         on_resume: _resume_found,
+        on_hidden_command: _hidden_command,
+        on_persist: _persist_none
+    )
+
+fn _hooks_hidden(session_id: text) -> SessionHooks:
+    SessionHooks(
+        session_id: session_id,
+        hidden_commands_enabled: true,
+        on_model: _noop_model,
+        on_provider: _provider_status,
+        on_sessions: _session_list,
+        on_new: _new_session,
+        on_resume: _resume_none,
+        on_hidden_command: _hidden_command,
         on_persist: _persist_none
     )
 
@@ -145,6 +165,9 @@ fn setup_tui_fixture(case: CaretTuiFeatureCase) -> ChatTui:
 fn _tui_fixture_model(messages: [Message]) -> ModelResponse:
     new_model_text("fixture-dummy-ok")
 
+fn _bool_text(value: bool) -> text:
+    if value: "true" else: "false"
+
 fn run_tui_action(case: CaretTuiFeatureCase, ui: ChatTui) -> text:
     val transition = run_chat_tui_submission(
         ui, [], case.session_id, ui.input.value,
@@ -153,7 +176,7 @@ fn run_tui_action(case: CaretTuiFeatureCase, ui: ChatTui) -> text:
     )
     transition.ui.title + "\n" + transition.ui.status + "\n" +
         "conversation=" + transition.conversation.len().to_text() + "\n" +
-        "submitted=" + transition.submitted_to_model.to_text() + "\n" +
+        "submitted=" + _bool_text(transition.submitted_to_model) + "\n" +
         "input=" + transition.ui.input.value + "\n" +
         tui_transcript_line_text(0) + "\n" +
         tui_transcript_line_text(1) + "\n"
@@ -315,6 +338,16 @@ describe "REQ-LLM-CARET-FULL-006: LLM Caret hidden-feature gate":
         step("Check the hidden-feature gate")
         expect(check_hidden_feature_gate(case, lookup)).to_equal("hidden")
         expect(admitRootCommand(case.command, false).found).to_be(false)
+        val rejected = dispatch_slash(
+            "debug-tool-call", "call-1", _hooks("hidden-session")
+        )
+        expect(rejected.message).to_contain("Hidden command disabled")
+        val executed = dispatch_slash(
+            "debug-tool-call", "call-1", _hooks_hidden("hidden-session")
+        )
+        expect(executed.message).to_equal(
+            "hidden command executed: debug-tool-call call-1"
+        )
 
     it "should reject disabled commands even when hidden features are enabled":
         step("Enable the hidden-feature fixture")
@@ -325,6 +358,10 @@ describe "REQ-LLM-CARET-FULL-006: LLM Caret hidden-feature gate":
         expect(metadata.found).to_be(true)
         expect(metadata.command.enabled).to_be(false)
         expect(admitted.found).to_be(false)
+        val dispatched = dispatch_slash(
+            "remote-setup", "", _hooks_hidden("hidden-session")
+        )
+        expect(dispatched.message).to_contain("Command disabled")
 
     it "should keep SGTTI out of the normal Caret product and TUI entrypoints":
         val case = CaretHiddenFeatureCase(

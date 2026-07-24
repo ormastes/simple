@@ -1,6 +1,6 @@
 # LLM Caret TUI and Hidden-Feature System Spec
 
-> Exercises deterministic Caret TUI component seams without a live terminal or paid provider. The scenarios drive the input widget model, dummy provider, transcript renderer, permission gate, retry policy, Claude REPL error route, and hidden root-command admission gate. Full terminal-loop evidence is tracked separately.
+> Exercises the production Caret TUI submission transition without a live terminal or paid provider. The scenarios drive `run_chat_tui_submission`, transcript rendering, permissions, retry decisions, and production hidden-command dispatch. Raw-terminal key reading and frame timing remain a separate evidence boundary.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -11,7 +11,7 @@
 
 # LLM Caret TUI and Hidden-Feature System Spec
 
-Exercises deterministic Caret TUI component seams without a live terminal or paid provider. The scenarios drive the input widget model, dummy provider, transcript renderer, permission gate, retry policy, Claude REPL error route, and hidden root-command admission gate. Full terminal-loop evidence is tracked separately.
+Exercises the production Caret TUI submission transition without a live terminal or paid provider. The scenarios drive `run_chat_tui_submission`, transcript rendering, permissions, retry decisions, and production hidden-command dispatch. Raw-terminal key reading and frame timing remain a separate evidence boundary.
 
 ## At a Glance
 
@@ -29,12 +29,12 @@ Exercises deterministic Caret TUI component seams without a live terminal or pai
 
 ## Overview
 
-Exercises deterministic Caret TUI component seams without a live terminal or
-paid provider. The scenarios drive the input widget model, dummy provider,
-transcript renderer, permission gate, retry policy, Claude REPL error route,
-and hidden root-command admission gate. Provider, model, resume, and new-conversation commands
-must refresh visible state; a new conversation must receive a fresh session ID.
-The actual raw-terminal input/draw loop is not claimed by this component spec.
+Exercises the production Caret TUI submission state transition without a live
+terminal or paid provider. The scenarios drive `run_chat_tui_submission`,
+transcript rendering, permission handling, retry decisions, and production
+hidden-command dispatch. Provider, model, resume, and new-conversation
+commands must refresh visible state; a new conversation must receive a fresh
+session ID. Raw-terminal key reading and frame timing remain outside this spec.
 
 **Requirement IDs:** REQ-LLM-CARET-FULL-003, REQ-LLM-CARET-FULL-006
 **Requirements:** doc/02_requirements/feature/llm_caret_claude_cli_full_parity.md

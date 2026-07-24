@@ -1,0 +1,27 @@
+# macOS Vulkan 2D Live Evidence
+
+```text
+macos_vulkan_2d_live_status=pass
+macos_vulkan_2d_live_reason=pass
+macos_vulkan_2d_live_backend=vulkan
+macos_vulkan_2d_live_source=device_readback
+macos_vulkan_2d_live_backend_handle=1
+macos_vulkan_2d_live_initial_checksum=1243781032
+macos_vulkan_2d_live_interaction_checksum=1359661257
+macos_vulkan_2d_live_keyboard_events=5
+macos_vulkan_2d_live_pointer_events=5
+macos_vulkan_2d_live_click_events=2
+macos_vulkan_2d_live_interaction_revision=6
+macos_vulkan_2d_live_window_rect=200,120,320,272
+macos_vulkan_2d_live_before_png=build/tmp/macos_vulkan_2d_live_gate3/before.png
+macos_vulkan_2d_live_after_png=build/tmp/macos_vulkan_2d_live_gate3/after.png
+macos_vulkan_2d_live_before_bytes=59378
+macos_vulkan_2d_live_after_bytes=59375
+macos_vulkan_2d_live_before_cksum=2568834817
+macos_vulkan_2d_live_after_cksum=4006552321
+```
+
+- Before interaction: `build/tmp/macos_vulkan_2d_live_gate3/before.png`
+- After interaction: `build/tmp/macos_vulkan_2d_live_gate3/after.png`
+- Event receipt: `build/tmp/macos_vulkan_2d_live_gate3/events.env`
+- Launcher log: `build/tmp/macos_vulkan_2d_live_gate3/launcher.log`

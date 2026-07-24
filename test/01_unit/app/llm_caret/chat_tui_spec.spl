@@ -127,7 +127,7 @@ describe "Markdown-lite rendering":
         expect(tui_transcript_len()).to_equal(1)
         expect(tui_transcript_line_text(0)).to_equal("Assistant: hi")
 
-    it "should splits multi-line content into one transcript line per source line":
+    it "should split multi-line content into one transcript line per source line":
         tui_transcript_reset()
         render_turn("assistant", "line one\nline two")
         expect(tui_transcript_len()).to_equal(2)
@@ -150,7 +150,7 @@ describe "Markdown-lite rendering":
         expect(tui_transcript_len()).to_equal(3)
         expect(tui_transcript_line_text(1)).to_equal("  indented code")
 
-    it "should splits inline code spans into separate segments":
+    it "should split inline code spans into separate segments":
         val segs = inline_code_segments("run `cmd` now", tui_default_style())
         expect(segs.len()).to_equal(3)
         expect(segs[0].content).to_equal("run ")
@@ -185,7 +185,7 @@ describe "Scrollback window (visible_window)":
         expect(end).to_equal(4)
 
 describe "Scroll paging (Ctrl-P/Ctrl-N)":
-    it "should is not scrolled by default":
+    it "should be not scrolled by default":
         tui_transcript_reset()
         assert_false(is_scrolled())
 
@@ -246,43 +246,61 @@ fn _hooks_resume_missing(id: text) -> SessionResumeResult:
         messages: [], session_id: "", provider: "", model: ""
     )
 
+fn _hooks_hidden(name: text, arg: text) -> text:
+    "hidden command executed: " + name + " " + arg
+
 fn _test_hooks() -> SessionHooks:
     SessionHooks(
-        session_id: "s0", on_model: _hooks_model, on_provider: _hooks_provider,
+        session_id: "s0", hidden_commands_enabled: false,
+        on_model: _hooks_model, on_provider: _hooks_provider,
         on_sessions: _hooks_sessions, on_new: _hooks_new,
-        on_resume: _hooks_resume_found, on_persist: _noop_persist
+        on_resume: _hooks_resume_found,
+        on_hidden_command: _hooks_hidden, on_persist: _noop_persist
     )
 
 fn _test_hooks_missing() -> SessionHooks:
     SessionHooks(
-        session_id: "s0", on_model: _hooks_model, on_provider: _hooks_provider,
+        session_id: "s0", hidden_commands_enabled: false,
+        on_model: _hooks_model, on_provider: _hooks_provider,
         on_sessions: _hooks_sessions, on_new: _hooks_new,
-        on_resume: _hooks_resume_missing, on_persist: _noop_persist
+        on_resume: _hooks_resume_missing,
+        on_hidden_command: _hooks_hidden, on_persist: _noop_persist
     )
 
 fn _test_hooks_provider_reject() -> SessionHooks:
     SessionHooks(
-        session_id: "s0", on_model: _hooks_model,
+        session_id: "s0", hidden_commands_enabled: false,
+        on_model: _hooks_model,
         on_provider: _hooks_provider_reject,
         on_sessions: _hooks_sessions, on_new: _hooks_new,
         on_resume: _hooks_resume_found,
+        on_hidden_command: _hooks_hidden,
         on_persist: _noop_persist
+    )
+
+fn _test_hooks_hidden() -> SessionHooks:
+    SessionHooks(
+        session_id: "s0", hidden_commands_enabled: true,
+        on_model: _hooks_model, on_provider: _hooks_provider,
+        on_sessions: _hooks_sessions, on_new: _hooks_new,
+        on_resume: _hooks_resume_found,
+        on_hidden_command: _hooks_hidden, on_persist: _noop_persist
     )
 
 fn _submission_response(messages: [Message]) -> ModelResponse:
     new_model_text("submission reply")
 
 describe "Slash command parsing":
-    it "should recognizes lines starting with /":
+    it "should recognize lines starting with /":
         assert_true(is_slash_command("/help"))
         assert_false(is_slash_command("hello"))
 
-    it "should splits a command and its argument":
+    it "should split a command and its argument":
         val (cmd, arg) = parse_slash_command("/model gpt-4o")
         expect(cmd).to_equal("model")
         expect(arg).to_equal("gpt-4o")
 
-    it "should splits a command with no argument":
+    it "should split a command with no argument":
         val (cmd, arg) = parse_slash_command("/help")
         expect(cmd).to_equal("help")
         expect(arg).to_equal("")
@@ -306,7 +324,7 @@ describe "Slash command dispatch":
         expect(r.new_session_id).to_equal("s-new")
         expect(r.status_session).to_equal("s-new")
 
-    it "should applies a new conversation session to visible TUI status":
+    it "should apply a new conversation session to visible TUI status":
         val ui = make_chat_tui_with_status(
             "llm_caret - dummy",
             "provider=dummy model=dummy-hello session=s0"
@@ -332,7 +350,7 @@ describe "Slash command dispatch":
         expect(r.status_provider).to_equal("openai")
         expect(r.status_model).to_equal("gpt-4o")
 
-    it "should does not refresh visible status after a rejected provider":
+    it "should not refresh visible status after a rejected provider":
         val ui = make_chat_tui_with_status(
             "llm_caret - dummy",
             "provider=dummy model=dummy-hello session=s0"
@@ -346,7 +364,7 @@ describe "Slash command dispatch":
         expect(unchanged.status).to_equal(ui.status)
         expect(unchanged.title).to_equal(ui.title)
 
-    it "should applies provider and model changes to visible TUI status":
+    it "should apply provider and model changes to visible TUI status":
         val ui = make_chat_tui_with_status(
             "llm_caret - dummy",
             "provider=dummy model=dummy-hello session=s0"
@@ -381,7 +399,7 @@ describe "Slash command dispatch":
         expect(r.status_model).to_equal("sonnet")
         expect(r.loaded_messages.len()).to_equal(1)
 
-    it "should applies a resumed session to visible TUI status":
+    it "should apply a resumed session to visible TUI status":
         val ui = make_chat_tui_with_status(
             "llm_caret - dummy",
             "provider=dummy model=dummy-hello session=s0"
@@ -399,12 +417,30 @@ describe "Slash command dispatch":
         expect(r.message).to_contain("no saved session")
         expect(r.status_session).to_equal("")
 
-    it "should unknown /commands are reported, never silently sent to the model":
+    it "should report unknown /commands are reported, never silently sent to the model":
         val r = dispatch_slash("bogus", "", _test_hooks())
         expect(r.message).to_contain("Unknown command")
         assert_false(r.exit)
         assert_false(r.new_conv)
         assert_false(r.replace_conv)
+
+    it "should reject hidden commands by default and execute an enabled fixture":
+        val rejected = dispatch_slash(
+            "debug-tool-call", "call-1", _test_hooks()
+        )
+        expect(rejected.message).to_contain("Hidden command disabled")
+        val admitted = dispatch_slash(
+            "debug-tool-call", "call-1", _test_hooks_hidden()
+        )
+        expect(admitted.message).to_equal(
+            "hidden command executed: debug-tool-call call-1"
+        )
+
+    it "should reject disabled registry commands under every fixture":
+        val result = dispatch_slash(
+            "remote-setup", "", _test_hooks_hidden()
+        )
+        expect(result.message).to_contain("Command disabled")
 
 describe "TUI submission state transition":
     it "should run a model turn through the production submission path":

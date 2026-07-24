@@ -636,6 +636,24 @@ fn pixel_stats(pixels: [u32]) -> (i64, i64):
         i = i + 1
     (nonzero, checksum)
 
+fn write_widget_event_evidence(path: text, backend: text, source: text,
+                               backend_handle: i64, initial_checksum: i64,
+                               interaction_checksum: i64, keyboard_events: i64,
+                               pointer_events: i64, click_events: i64,
+                               interaction_revision: i64) -> bool:
+    if path == "":
+        return true
+    file_write(path,
+        "widget_showcase_event_backend={backend}\n" +
+        "widget_showcase_event_source={source}\n" +
+        "widget_showcase_event_backend_handle={backend_handle}\n" +
+        "widget_showcase_event_initial_checksum={initial_checksum}\n" +
+        "widget_showcase_event_interaction_checksum={interaction_checksum}\n" +
+        "widget_showcase_event_keyboard_events={keyboard_events}\n" +
+        "widget_showcase_event_pointer_events={pointer_events}\n" +
+        "widget_showcase_event_click_events={click_events}\n" +
+        "widget_showcase_event_interaction_revision={interaction_revision}\n")
+
 fn run_widget_showcase_perf_probe(w: i32, h: i32, frames: i64, prefix: text) -> i64:
     var b = Engine2D.create_with_backend(w, h, showcase_backend_key())
     b = draw_frame(b, w, h, showcase_state_default())
@@ -1024,9 +1042,26 @@ fn main() -> i64:
     var mouse_x = 0
     var mouse_y = 0
     var last_tick = time_now_micros()
+    val event_path = env_get("SIMPLE_GUI_EVENT_EVIDENCE_PATH") ?? ""
+    val exit_after_interaction = (env_get("SIMPLE_GUI_EXIT_AFTER_INTERACTION") ?? "") == "1"
+    var keyboard_events: i64 = 0
+    var pointer_events: i64 = 0
+    var click_events: i64 = 0
+    var interaction_revision: i64 = 0
+    var interaction_checksum = prov.checksum
+    var current_source = prov.source
+    var current_handle = prov.backend_handle
     # GUI-5a: present once up front so the initial frame is shown, then only
     # on dirty — avoids presenting the unchanged frame on every ~30ms tick.
     winit_present_rgba(win, fw.to_i64(), fh.to_i64(), packed)
+    if not write_widget_event_evidence(
+            event_path, engine.backend_name(), current_source, current_handle,
+            prov.checksum, interaction_checksum, keyboard_events,
+            pointer_events, click_events, interaction_revision):
+        winit_window_free(win)
+        winit_loop_free(lp)
+        engine.shutdown()
+        return 1
     while running and iters < 2000000:
         val input = winit_poll_input(lp)
         val (next_state, next_mx, next_my, input_dirty, next_running) = apply_native_input(input, mouse_x, mouse_y, state)
@@ -1035,6 +1070,19 @@ fn main() -> i64:
         mouse_y = next_my
         running = next_running
         var dirty = input_dirty
+        val keyboard_delta = input.keys.len().to_i64()
+        val pointer_delta = input.mouse_moves
+        val click_delta = input.click_buttons.len().to_i64()
+        keyboard_events = keyboard_events + keyboard_delta
+        pointer_events = pointer_events + pointer_delta
+        click_events = click_events + click_delta
+        val real_input = keyboard_delta > 0 or pointer_delta > 0 or click_delta > 0
+        if real_input:
+            interaction_revision = interaction_revision + 1
+            # Every real input batch changes a visible widget, including a
+            # pointer move or click outside a widget's ordinary hit target.
+            state.progress_value = (state.progress_value + 7) % 101
+            dirty = true
         val now = time_now_micros()
         if now - last_tick >= 500000:
             state = showcase_on_tick(state)
@@ -1053,6 +1101,28 @@ fn main() -> i64:
                 return 1
             packed = pack(next_pixels)
             winit_present_rgba(win, fw.to_i64(), fh.to_i64(), packed)
+            if real_input:
+                val interaction_prov = engine.read_pixels_with_source()
+                interaction_checksum = interaction_prov.checksum
+                current_source = interaction_prov.source
+                current_handle = interaction_prov.backend_handle
+                if (current_source != prov.source or
+                        current_handle != prov.backend_handle or
+                        interaction_checksum == prov.checksum or
+                        not write_widget_event_evidence(
+                            event_path, engine.backend_name(), current_source,
+                            current_handle, prov.checksum, interaction_checksum,
+                            keyboard_events, pointer_events, click_events,
+                            interaction_revision)):
+                    winit_window_free(win)
+                    winit_loop_free(lp)
+                    engine.shutdown()
+                    return 1
+                print "widget_showcase_event_revision={interaction_revision}"
+                print "widget_showcase_event_checksum={interaction_checksum}"
+                if (exit_after_interaction and keyboard_events > 0 and
+                        pointer_events > 0 and click_events > 0):
+                    running = false
         thread_sleep(30)
         iters = iters + 1
     winit_window_free(win)

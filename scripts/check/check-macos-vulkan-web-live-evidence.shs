@@ -1,0 +1,308 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/tmp/macos_vulkan_web_live_evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/macos_vulkan_web_live_evidence_$(date -u +%F).md}"
+SAMPLE="${MACOS_VULKAN_WEB_SAMPLE:-examples/06_io/ui/web_standards_showcase_gui.spl}"
+TIMEOUT_SECS="${MACOS_VULKAN_WEB_TIMEOUT_SECS:-180}"
+ICD_PATH="${VK_ICD_FILENAMES:-/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json}"
+EVENTS="$BUILD_DIR/events.env"
+LAUNCHER_LOG="$BUILD_DIR/launcher.log"
+WINDOW_ENV="$BUILD_DIR/window.env"
+BEFORE_PNG="$BUILD_DIR/before.png"
+AFTER_PNG="$BUILD_DIR/after.png"
+EVIDENCE_ENV="$BUILD_DIR/evidence.env"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$EVENTS" "$LAUNCHER_LOG" "$WINDOW_ENV" "$BEFORE_PNG" "$AFTER_PNG" "$EVIDENCE_ENV"
+
+write_report() {
+    {
+        echo "# macOS Vulkan Web Live Evidence"
+        echo
+        echo '```text'
+        if [ -f "$EVIDENCE_ENV" ]; then
+            cat "$EVIDENCE_ENV"
+        fi
+        echo '```'
+        echo
+        echo "- Before interaction: \`$BEFORE_PNG\`"
+        echo "- After interaction: \`$AFTER_PNG\`"
+        echo "- Event receipt: \`$EVENTS\`"
+        echo "- Launcher log: \`$LAUNCHER_LOG\`"
+    } >"$REPORT_PATH"
+}
+
+quit_web_app_event() {
+    osascript >/dev/null 2>&1 <<'OSA' || true
+tell application "System Events"
+  repeat with proc in (processes whose name is "SimpleGui")
+    tell proc
+      repeat with win in windows
+        if (name of win as text) starts with "Pure-Simple web renderer" then
+          set frontmost to true
+          keystroke "q"
+          return true
+        end if
+      end repeat
+    end tell
+  end repeat
+end tell
+OSA
+}
+
+fail() {
+    reason="$1"
+    {
+        echo "macos_vulkan_web_live_status=fail"
+        echo "macos_vulkan_web_live_reason=$reason"
+    } >"$EVIDENCE_ENV"
+    write_report
+    if [ "${app_launched:-false}" = "true" ]; then
+        quit_web_app_event
+    fi
+    echo "macOS Vulkan web live evidence: FAIL ($reason)" >&2
+    exit 1
+}
+
+value_of() {
+    key="$1"
+    file="$2"
+    sed -n "s/^${key}=//p" "$file" | tail -n 1
+}
+
+line_field() {
+    key="$1"
+    line="$2"
+    printf '%s\n' "$line" |
+        sed -n "s/.* ${key}=\\([^ ]*\\).*/\\1/p" |
+        tail -n 1
+}
+
+file_bytes() {
+    if [ -f "$1" ]; then
+        wc -c <"$1" | tr -d ' '
+    else
+        echo 0
+    fi
+}
+
+file_cksum() {
+    if [ -f "$1" ]; then
+        cksum "$1" | awk '{print $1}'
+    else
+        echo 0
+    fi
+}
+
+if [ "$(uname -s)" != "Darwin" ]; then
+    fail "requires-macos"
+fi
+if [ ! -f "$SAMPLE" ]; then
+    fail "sample-missing"
+fi
+if [ ! -f "$ICD_PATH" ]; then
+    fail "moltenvk-icd-missing"
+fi
+if ! command -v osascript >/dev/null 2>&1; then
+    fail "osascript-missing"
+fi
+if ! command -v screencapture >/dev/null 2>&1; then
+    fail "screencapture-missing"
+fi
+if ! command -v cliclick >/dev/null 2>&1; then
+    fail "cliclick-missing"
+fi
+
+app_launched=false
+SIMPLE_GUI_RUN_SKIP_NUDGE=1 \
+SIMPLE_GUI_BACKEND=vulkan \
+SIMPLE_GUI_EXIT_AFTER_INTERACTION=0 \
+SIMPLE_GUI_EVENT_EVIDENCE_PATH="$ROOT_DIR/$EVENTS" \
+SHOWCASE_RESOLUTION="${SHOWCASE_RESOLUTION:-320x240}" \
+SHOWCASE_DPI="${SHOWCASE_DPI:-96}" \
+VK_ICD_FILENAMES="$ICD_PATH" \
+DYLD_LIBRARY_PATH="${DYLD_LIBRARY_PATH:-/opt/homebrew/lib}" \
+    scripts/gui/macos-gui-run.shs "$SAMPLE" >"$LAUNCHER_LOG" 2>&1 ||
+    fail "launcher-failed"
+app_launched=true
+
+deadline=$(($(date +%s) + TIMEOUT_SECS))
+while [ "$(date +%s)" -lt "$deadline" ]; do
+    if osascript >"$WINDOW_ENV" 2>/dev/null <<'OSA'; then
+tell application "System Events"
+  repeat with proc in (processes whose name is "SimpleGui")
+    tell proc
+      repeat with win in windows
+        if (name of win as text) starts with "Pure-Simple web renderer" then
+          set position of win to {200, 120}
+          set frontmost to true
+          delay 0.3
+          set p to position of win
+          set s to size of win
+          set AppleScript's text item delimiters to ","
+          return (item 1 of p as text) & "," & (item 2 of p as text) & "," & (item 1 of s as text) & "," & (item 2 of s as text)
+        end if
+      end repeat
+    end tell
+  end repeat
+end tell
+error "SimpleGui web window not ready"
+OSA
+        break
+    fi
+    sleep 1
+done
+
+if [ ! -s "$WINDOW_ENV" ]; then
+    fail "window-not-found"
+fi
+window_rect="$(tr -d '\r\n ' <"$WINDOW_ENV")"
+case "$window_rect" in
+    *,*,*,*) ;;
+    *) fail "invalid-window-rect" ;;
+esac
+
+if ! screencapture -x -R"$window_rect" "$BEFORE_PNG"; then
+    fail "before-capture-failed"
+fi
+
+old_ifs=$IFS
+IFS=,
+set -- $window_rect
+IFS=$old_ifs
+window_x="${1:-0}"
+window_y="${2:-0}"
+click_x=$((window_x + 150))
+click_y=$((window_y + 140))
+
+cliclick "m:${click_x},${click_y}" "c:."
+osascript >/dev/null <<'OSA'
+tell application "System Events"
+  repeat with proc in (processes whose name is "SimpleGui")
+    tell proc
+      repeat with win in windows
+        if (name of win as text) starts with "Pure-Simple web renderer" then
+          set frontmost to true
+          keystroke "g"
+          return true
+        end if
+      end repeat
+    end tell
+  end repeat
+end tell
+error "SimpleGui web input target missing"
+OSA
+
+event_deadline=$(($(date +%s) + 15))
+while [ "$(date +%s)" -lt "$event_deadline" ]; do
+    keyboard="$(value_of web_standards_event_keyboard_events "$EVENTS")"
+    pointer="$(value_of web_standards_event_pointer_events "$EVENTS")"
+    clicks="$(value_of web_standards_event_click_events "$EVENTS")"
+    revision="$(value_of web_standards_event_interaction_revision "$EVENTS")"
+    keyboard="${keyboard:-0}"
+    pointer="${pointer:-0}"
+    clicks="${clicks:-0}"
+    revision="${revision:-0}"
+    if [ "$keyboard" -gt 0 ] && [ "$pointer" -gt 0 ] &&
+            [ "$clicks" -gt 0 ] && [ "$revision" -gt 0 ]; then
+        break
+    fi
+    sleep 1
+done
+
+[ "${keyboard:-0}" -gt 0 ] || fail "keyboard-event-missing"
+[ "${pointer:-0}" -gt 0 ] || fail "pointer-event-missing"
+[ "${clicks:-0}" -gt 0 ] || fail "click-event-missing"
+[ "${revision:-0}" -gt 0 ] || fail "interaction-revision-missing"
+
+event_backend="$(value_of web_standards_event_backend "$EVENTS")"
+source="$(value_of web_standards_event_source "$EVENTS")"
+handle="$(value_of web_standards_event_backend_handle "$EVENTS")"
+initial_checksum="$(value_of web_standards_event_initial_checksum "$EVENTS")"
+interaction_checksum="$(value_of web_standards_event_interaction_checksum "$EVENTS")"
+[ "$event_backend" = "vulkan" ] || fail "event-backend-not-vulkan"
+[ "$source" = "device_readback" ] || fail "device-readback-missing"
+[ "${handle:-0}" -gt 0 ] || fail "backend-handle-missing"
+[ "${initial_checksum:-0}" -gt 0 ] || fail "initial-checksum-missing"
+[ "${interaction_checksum:-0}" -gt 0 ] || fail "interaction-checksum-missing"
+[ "$initial_checksum" != "$interaction_checksum" ] || fail "interaction-frame-unchanged"
+
+# Pin again immediately before the post-input capture so another activation
+# cannot relocate or cover the evidence window.
+osascript >/dev/null <<'OSA'
+tell application "System Events"
+  repeat with proc in (processes whose name is "SimpleGui")
+    tell proc
+      repeat with win in windows
+        if (name of win as text) starts with "Pure-Simple web renderer" then
+          set position of win to {200, 120}
+          set frontmost to true
+          return true
+        end if
+      end repeat
+    end tell
+  end repeat
+end tell
+error "SimpleGui web post-input window missing"
+OSA
+sleep 1
+if ! screencapture -x -R"$window_rect" "$AFTER_PNG"; then
+    fail "after-capture-failed"
+fi
+
+before_bytes="$(file_bytes "$BEFORE_PNG")"
+after_bytes="$(file_bytes "$AFTER_PNG")"
+before_cksum="$(file_cksum "$BEFORE_PNG")"
+after_cksum="$(file_cksum "$AFTER_PNG")"
+[ "$before_bytes" -gt 1000 ] || fail "before-capture-empty"
+[ "$after_bytes" -gt 1000 ] || fail "after-capture-empty"
+[ "$before_cksum" != "$after_cksum" ] || fail "capture-unchanged"
+
+launch_stdout="$(sed -n 's/^app stdout: \(.*\)  stderr:.*/\1/p' "$LAUNCHER_LOG" | tail -n 1)"
+[ -n "$launch_stdout" ] || fail "launch-stdout-path-missing"
+[ -f "$launch_stdout" ] || fail "launch-stdout-missing"
+renderer_line="$(grep '^web_standards_showcase status=pass ' "$launch_stdout" | tail -n 1 || true)"
+[ -n "$renderer_line" ] || fail "renderer-status-missing"
+renderer_requested="$(line_field requested "$renderer_line")"
+renderer_resolved="$(line_field resolved "$renderer_line")"
+renderer_source="$(line_field source "$renderer_line")"
+renderer_handle="$(line_field backend_handle "$renderer_line")"
+[ "$renderer_requested" = "vulkan" ] || fail "renderer-requested-not-vulkan"
+[ "$renderer_resolved" = "vulkan" ] || fail "renderer-resolved-not-vulkan"
+[ "$renderer_source" = "device_readback" ] || fail "renderer-device-readback-missing"
+[ "${renderer_handle:-0}" -gt 0 ] || fail "renderer-handle-missing"
+
+{
+    echo "macos_vulkan_web_live_status=pass"
+    echo "macos_vulkan_web_live_reason=pass"
+    echo "macos_vulkan_web_live_requested_backend=$renderer_requested"
+    echo "macos_vulkan_web_live_backend=$renderer_resolved"
+    echo "macos_vulkan_web_live_source=$source"
+    echo "macos_vulkan_web_live_backend_handle=$handle"
+    echo "macos_vulkan_web_live_renderer_backend_handle=$renderer_handle"
+    echo "macos_vulkan_web_live_initial_checksum=$initial_checksum"
+    echo "macos_vulkan_web_live_interaction_checksum=$interaction_checksum"
+    echo "macos_vulkan_web_live_keyboard_events=$keyboard"
+    echo "macos_vulkan_web_live_pointer_events=$pointer"
+    echo "macos_vulkan_web_live_click_events=$clicks"
+    echo "macos_vulkan_web_live_interaction_revision=$revision"
+    echo "macos_vulkan_web_live_window_rect=$window_rect"
+    echo "macos_vulkan_web_live_before_png=$BEFORE_PNG"
+    echo "macos_vulkan_web_live_after_png=$AFTER_PNG"
+    echo "macos_vulkan_web_live_before_bytes=$before_bytes"
+    echo "macos_vulkan_web_live_after_bytes=$after_bytes"
+    echo "macos_vulkan_web_live_before_cksum=$before_cksum"
+    echo "macos_vulkan_web_live_after_cksum=$after_cksum"
+} >"$EVIDENCE_ENV"
+write_report
+
+# Q closes through the application's own event route after evidence is durable.
+quit_web_app_event
+app_launched=false
+
+echo "macOS Vulkan web live evidence: PASS"
+echo "report=$REPORT_PATH"

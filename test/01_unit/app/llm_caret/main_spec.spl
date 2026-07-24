@@ -10,13 +10,14 @@
 #   - server hardening: bearer auth, size cap, rate limit (guard_request)
 
 use app.llm_caret.types.{Message, new_user_message}
+use app.llm_caret.session.{Session}
 use app.llm_caret.provider.{LLMResponse, new_llm_error}
 use app.llm_caret.tools.{ModelResponse, default_policy}
 use app.llm_caret.chat.{run_agent_loop}
 use app.llm_caret.main.{
     MainArgs, parse_main_args, build_model_response,
     main_configure, main_session_id, _slash_on_new, _slash_on_provider,
-    resolve_resume_backend,
+    resolve_resume_backend, apply_resumed_session,
     proxy_handle, status_for_path,
     guard_request, bearer_ok, rate_limit_check, rate_limit_reset,
     build_error_response
@@ -33,7 +34,7 @@ fn _llm_ok(content: text, raw: text) -> LLMResponse:
 
 # ============================================================================
 describe "parse_main_args":
-    it "should defaults to auto ui mode, claude_cli-less provider, no server":
+    it "should default to auto ui mode, claude_cli-less provider, no server":
         val a = parse_main_args([])
         expect(a.provider).to_equal("")
         expect(a.ui_mode).to_equal("auto")
@@ -41,50 +42,50 @@ describe "parse_main_args":
         expect(a.help).to_be(false)
         expect(a.unknown).to_equal("")
 
-    it "should parses --provider and --model (space form)":
+    it "should parse --provider and --model (space form)":
         val a = parse_main_args(["--provider", "claude_api", "--model", "claude-opus-4-20250514"])
         expect(a.provider).to_equal("claude_api")
         expect(a.model).to_equal("claude-opus-4-20250514")
 
-    it "should parses --provider= and --model= (equals form)":
+    it "should parse --provider= and --model= (equals form)":
         val a = parse_main_args(["--provider=openai", "--model=gpt-4o"])
         expect(a.provider).to_equal("openai")
         expect(a.model).to_equal("gpt-4o")
 
-    it "should parses --plain and --tui":
+    it "should parse --plain and --tui":
         expect(parse_main_args(["--plain"]).ui_mode).to_equal("plain")
         expect(parse_main_args(["--tui"]).ui_mode).to_equal("tui")
 
-    it "should parses --gui and one-shot --prompt":
+    it "should parse --gui and one-shot --prompt":
         val a = parse_main_args(["--gui", "--prompt", "hi"])
         expect(a.ui_mode).to_equal("gui")
         expect(a.prompt).to_equal("hi")
 
-    it "should parses Electron and pure-Simple Metal GUI modes":
+    it "should parse Electron and pure-Simple Metal GUI modes":
         expect(parse_main_args(["--electron"]).ui_mode).to_equal("electron")
         val metal = parse_main_args(["--metal-gui", "--prompt", "test"])
         expect(metal.ui_mode).to_equal("metal_gui")
         expect(metal.prompt).to_equal("test")
 
-    it "should parses --server and --port":
+    it "should parse --server and --port":
         val a = parse_main_args(["--server", "--port", "9000"])
         expect(a.server_mode).to_be(true)
         expect(a.port).to_equal(9000)
 
-    it "should parses --port= form":
+    it "should parse --port= form":
         expect(parse_main_args(["--port=1234"]).port).to_equal(1234)
 
-    it "should parses --resume, --config, --system, --workspace":
+    it "should parse --resume, --config, --system, --workspace":
         val a = parse_main_args(["--resume", "sess-9", "--config", "cfg.sdn", "--system", "be nice", "--workspace", "/tmp/ws"])
         expect(a.resume_id).to_equal("sess-9")
         expect(a.config_path).to_equal("cfg.sdn")
         expect(a.system_prompt).to_equal("be nice")
         expect(a.workspace_root).to_equal("/tmp/ws")
 
-    it "should parses --dangerously-allow-all":
+    it "should parse --dangerously-allow-all":
         expect(parse_main_args(["--dangerously-allow-all"]).allow_all).to_be(true)
 
-    it "should parses -h/--help":
+    it "should parse -h/--help":
         expect(parse_main_args(["-h"]).help).to_be(true)
         expect(parse_main_args(["--help"]).help).to_be(true)
 
@@ -135,6 +136,44 @@ describe "resume backend resolution":
         )
         expect(backend.model).to_equal("different-model")
         expect(backend.reuse_provider_session).to_be(false)
+
+describe "production session restoration":
+    it "should restore provider model messages and provider session atomically":
+        main_configure(
+            "claude_cli", "sonnet", "", "", "claude", "",
+            "old-provider-session", 0
+        )
+        val resumed = apply_resumed_session(Session(
+            id: "saved-app-session",
+            provider: "dummy",
+            model: "",
+            provider_session_id: "saved-provider-session",
+            messages: [new_user_message("restored")],
+            updated_at_ms: 0
+        ))
+        expect(resumed.found).to_be(true)
+        expect(resumed.provider).to_equal("dummy")
+        expect(resumed.model).to_equal("dummy-hello")
+        expect(resumed.session_id).to_equal("saved-app-session")
+        expect(resumed.messages.len()).to_equal(1)
+        expect(main_session_id()).to_equal("saved-provider-session")
+
+    it "should reject an invalid saved provider without mutating the session":
+        main_configure(
+            "dummy", "dummy-hello", "", "", "", "",
+            "keep-provider-session", 0
+        )
+        val rejected = apply_resumed_session(Session(
+            id: "invalid-app-session",
+            provider: "missing-provider",
+            model: "bad-model",
+            provider_session_id: "foreign-provider-session",
+            messages: [],
+            updated_at_ms: 0
+        ))
+        expect(rejected.found).to_be(false)
+        expect(rejected.message).to_contain("unknown provider")
+        expect(main_session_id()).to_equal("keep-provider-session")
 
 describe "build_model_response":
     it "should maps a plain-text response with no tool_use blocks":
@@ -195,7 +234,7 @@ describe "HTTP proxy pure core (proxy_handle)":
         expect(status_for_path("/v1/health")).to_equal(200)
         expect(status_for_path("/v1/models")).to_equal(200)
 
-    it "should unknown routes return 404":
+    it "should report unknown routes return 404":
         expect(status_for_path("/nope")).to_equal(404)
 
     it "should GET /v1/health is routed through proxy_handle end to end":

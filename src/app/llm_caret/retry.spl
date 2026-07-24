@@ -6,7 +6,7 @@
 #   - Never retries other 4xx responses
 #   - Exponential backoff with deterministic jitter, capped at max_delay_ms
 #   - Honors a caller-supplied Retry-After value (milliseconds) when present
-#   - Per-request timeout and max-attempts are both configurable
+#   - Total retry deadline and max-attempts are both configurable
 #
 # Pure decision functions (should_retry, backoff_delay_ms) are unit-testable
 # without any I/O. `with_retry` is the only impure piece — it sleeps between
@@ -131,15 +131,35 @@ fn effective_delay_ms(attempt: i64, policy: RetryPolicy, retry_after_ms: i64) ->
 # (status_code, body, error, retry_after_ms). `error` non-empty means a
 # connection-level failure (status is meaningless / <= 0 by convention).
 # `retry_after_ms` should be 0 when the caller has no Retry-After hint.
+# The deadline is enforced before/after callbacks and before sleeps. The
+# current synchronous HTTP transport cannot interrupt a callback blocked
+# inside the runtime; callers still need a timeout-capable transport for hard
+# cancellation of a hung attempt.
 fn with_retry(policy: RetryPolicy, call: fn(i64) -> (i64, text, text, i64)) -> RetryOutcome:
     val started_at_ms = current_time_ms()
     var attempt = 1
     while true:
+        if attempt > 1 and policy.timeout_ms > 0 and
+           current_time_ms() - started_at_ms >= policy.timeout_ms:
+            return RetryOutcome(
+                status: 0,
+                body: "",
+                error: "retry timeout exceeded",
+                attempts: attempt - 1
+            )
         val result = call(attempt)
         val status = result.0
         val body = result.1
         val err = result.2
         val retry_after_ms = result.3
+        if policy.timeout_ms > 0 and
+           current_time_ms() - started_at_ms > policy.timeout_ms:
+            return RetryOutcome(
+                status: status,
+                body: body,
+                error: "retry timeout exceeded",
+                attempts: attempt
+            )
         val effective_status = if err != "": -1 else: status
         if not should_retry(effective_status, attempt, policy):
             return RetryOutcome(

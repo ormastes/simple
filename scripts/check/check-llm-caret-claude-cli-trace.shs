@@ -2,6 +2,7 @@
 set -eu
 
 report="doc/09_report/llm_caret_claude_cli_traceability.md"
+symbol_inventory="doc/09_report/llm_caret_claude_cli_symbols.tsv"
 src_dir="src/app/llm_caret"
 symbols_file=$(mktemp)
 trap 'rm -f "$symbols_file"' EXIT
@@ -66,14 +67,24 @@ done | sort -u > "$symbols_file"
 
 symbol_total=$(wc -l < "$symbols_file" | tr -d ' ')
 symbol_traced=0
-while IFS="$(printf '\t')" read -r file symbol; do
-  row=$(grep -F "| \`$file\` |" "$report" | grep -F "\`$symbol\`" || true)
-  if [ -n "$row" ]; then
-    symbol_traced=$((symbol_traced + 1))
-  else
-    echo "missing_symbol_trace=$file:$symbol"
-  fi
-done < "$symbols_file"
+if [ ! -f "$symbol_inventory" ]; then
+  echo "llm_caret_symbol_inventory=missing"
+  failed=1
+else
+  while IFS="$(printf '\t')" read -r file symbol; do
+    if grep -F -x -q "$file	$symbol" "$symbol_inventory"; then
+      symbol_traced=$((symbol_traced + 1))
+    else
+      echo "missing_symbol_trace=$file:$symbol"
+    fi
+  done < "$symbols_file"
+  while IFS="$(printf '\t')" read -r file symbol; do
+    if ! grep -F -x -q "$file	$symbol" "$symbols_file"; then
+      echo "stale_symbol_trace=$file:$symbol"
+      failed=1
+    fi
+  done < "$symbol_inventory"
+fi
 
 echo "llm_caret_symbol_count=$symbol_total"
 echo "llm_caret_symbol_traced_count=$symbol_traced"

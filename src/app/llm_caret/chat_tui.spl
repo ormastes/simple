@@ -40,6 +40,7 @@ use app.llm_caret.interface_text.{caret_role_label, caret_turn_line}
 use app.llm_caret.tools.{ToolCall, ToolResult, ModelResponse, PermissionPolicy}
 use app.llm_caret.chat.{AgentResult, run_agent_loop, run_agent_loop_rendered,
                         tool_call_status, tool_call_summary}
+use app.llm_caret.claude_full.commands.{findRootCommand, admitRootCommand}
 use app.io.mod.{env_get}
 
 extern fn rt_stdin_read_line() -> text
@@ -252,11 +253,13 @@ struct SessionResumeResult:
 
 struct SessionHooks:
     session_id: text
+    hidden_commands_enabled: bool
     on_model: fn(text) -> text
     on_provider: fn(text) -> ProviderSwitchResult
     on_sessions: fn() -> text
     on_new: fn() -> text
     on_resume: fn(text) -> SessionResumeResult
+    on_hidden_command: fn(text, text) -> text
     on_persist: fn(text, [Message])
 
 # ============================================================================
@@ -360,6 +363,16 @@ fn dispatch_slash(cmd: text, arg: text, hooks: SessionHooks) -> SlashResult:
             status_model: if resumed.found: resumed.model else: "",
             status_session: if resumed.found: resumed.session_id else: ""
         )
+    val root = findRootCommand(cmd)
+    if root.found and root.command.hidden:
+        val admitted = admitRootCommand(cmd, hooks.hidden_commands_enabled)
+        if admitted.found:
+            return _slash_msg(
+                hooks.on_hidden_command(admitted.command.name, arg)
+            )
+        return _slash_msg("Hidden command disabled: /" + cmd)
+    if root.found and not root.command.enabled:
+        return _slash_msg("Command disabled: /" + cmd)
     _slash_msg("Unknown command: /" + cmd + " (try /help)")
 
 fn _replace_status_field(status: text, key: text, value: text) -> text:
