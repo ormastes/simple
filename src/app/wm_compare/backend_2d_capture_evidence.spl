@@ -1,0 +1,209 @@
+"""Normalized evidence contract for Engine2D backend captures."""
+
+pub struct Backend2dEventReceipt:
+    sequence: text
+    count: i64
+    backend: text
+    injected: bool
+    delivered: bool
+    ordered: bool
+
+pub struct Backend2dCaptureEvidence:
+    backend: text
+    target: text
+    width: i64
+    height: i64
+    dpi: i64
+    pixel_sha256: text
+    non_background_bounds: text
+    events: Backend2dEventReceipt
+    capture_path: text
+    source_revision: text
+
+pub struct Backend2dCaptureComparison:
+    reference_backend: text
+    candidate_backend: text
+    reference_status: text
+    candidate_status: text
+    dimensions_match: bool
+    events_match: bool
+    revisions_match: bool
+    pixels_exact: bool
+    different_pixels: i64
+    max_channel_diff: i64
+    tolerance_profile: text
+    pixels_within_tolerance: bool
+    accepted: bool
+    reason: text
+
+const BACKEND_2D_EVENT_SEQUENCE = "focus,pointer_move,pointer_down,pointer_up,key_down,key_up"
+
+fn _backend_2d_known(name: text) -> bool:
+    name == "metal" or name == "vulkan" or name == "cpu_simd" or
+        name == "simpleos_x86_64_simd" or name == "simpleos_arm64_simd"
+
+fn _backend_2d_hex_shape_valid(value: text, expected_len: i64) -> bool:
+    if value.len().to_i64() != expected_len:
+        return false
+    var i = 0
+    while i < value.len():
+        val c = value[i]
+        val digit = c >= '0' and c <= '9'
+        val lower_hex = c >= 'a' and c <= 'f'
+        if not digit and not lower_hex:
+            return false
+        i = i + 1
+    true
+
+fn _backend_2d_revision_valid(value: text) -> bool:
+    _backend_2d_hex_shape_valid(value, 10) or
+        _backend_2d_hex_shape_valid(value, 40)
+
+fn _backend_2d_tolerance_profile_valid(value: text) -> bool:
+    value == "strict" or value == "wm_default"
+
+fn _backend_2d_unsigned_decimal(value: text) -> bool:
+    if value == "":
+        return false
+    var i = 0
+    while i < value.len():
+        val c = value[i]
+        if c < '0' or c > '9':
+            return false
+        i = i + 1
+    true
+
+fn _backend_2d_bounds_valid(value: text, width: i64, height: i64) -> bool:
+    val parts = value.split(",")
+    if parts.len() != 4:
+        return false
+    for part in parts:
+        if not _backend_2d_unsigned_decimal(part):
+            return false
+    val x = parts[0].to_i64()
+    val y = parts[1].to_i64()
+    val w = parts[2].to_i64()
+    val h = parts[3].to_i64()
+    x >= 0 and y >= 0 and w > 0 and h > 0 and
+        x + w <= width and y + h <= height
+
+pub fn backend_2d_event_receipt(backend: text, injected: bool,
+                                delivered: bool) -> Backend2dEventReceipt:
+    Backend2dEventReceipt(
+        sequence: BACKEND_2D_EVENT_SEQUENCE,
+        count: 6,
+        backend: backend,
+        injected: injected,
+        delivered: delivered,
+        ordered: injected and delivered
+    )
+
+pub fn backend_2d_capture_evidence(backend: text, target: text,
+                                   width: i64, height: i64, dpi: i64,
+                                   pixel_sha256: text,
+                                   non_background_bounds: text,
+                                   events: Backend2dEventReceipt,
+                                   capture_path: text,
+                                   source_revision: text) -> Backend2dCaptureEvidence:
+    Backend2dCaptureEvidence(
+        backend: backend,
+        target: target,
+        width: width,
+        height: height,
+        dpi: dpi,
+        pixel_sha256: pixel_sha256,
+        non_background_bounds: non_background_bounds,
+        events: events,
+        capture_path: capture_path,
+        source_revision: source_revision
+    )
+
+pub fn backend_2d_validate_capture(evidence: Backend2dCaptureEvidence) -> text:
+    if not _backend_2d_known(evidence.backend):
+        return "unknown_backend"
+    if evidence.target == "":
+        return "missing_target"
+    if evidence.width <= 0 or evidence.height <= 0:
+        return "invalid_dimensions"
+    if evidence.dpi <= 0:
+        return "invalid_dpi"
+    if not _backend_2d_hex_shape_valid(evidence.pixel_sha256, 64):
+        return "invalid_pixel_sha256"
+    if not _backend_2d_bounds_valid(
+        evidence.non_background_bounds, evidence.width, evidence.height
+    ):
+        return "invalid_non_background_bounds"
+    if evidence.events.backend != evidence.backend:
+        return "event_backend_mismatch"
+    if evidence.events.sequence != BACKEND_2D_EVENT_SEQUENCE or
+       evidence.events.count != 6:
+        return "invalid_event_sequence"
+    if not evidence.events.injected:
+        return "events_not_injected"
+    if not evidence.events.delivered:
+        return "events_not_delivered"
+    if not evidence.events.ordered:
+        return "events_not_ordered"
+    if not evidence.capture_path.ends_with(".ppm") and
+       not evidence.capture_path.ends_with(".png"):
+        return "invalid_capture_path"
+    if not _backend_2d_revision_valid(evidence.source_revision):
+        return "invalid_source_revision"
+    "accepted"
+
+pub fn backend_2d_compare_capture(reference: Backend2dCaptureEvidence,
+                                  candidate: Backend2dCaptureEvidence,
+                                  different_pixels: i64,
+                                  max_channel_diff: i64,
+                                  tolerance_profile: text,
+                                  pixels_within_tolerance: bool) -> Backend2dCaptureComparison:
+    val reference_status = backend_2d_validate_capture(reference)
+    val candidate_status = backend_2d_validate_capture(candidate)
+    val dimensions_match = reference.width == candidate.width and
+        reference.height == candidate.height
+    val events_match = reference.events.sequence == candidate.events.sequence and
+        reference.events.count == candidate.events.count
+    val revisions_match = reference.source_revision == candidate.source_revision
+    val pixels_exact = reference.pixel_sha256 == candidate.pixel_sha256
+    var reason = "accepted"
+    if reference_status != "accepted":
+        reason = "reference_" + reference_status
+    elif candidate_status != "accepted":
+        reason = "candidate_" + candidate_status
+    elif not dimensions_match:
+        reason = "dimension_mismatch"
+    elif not events_match:
+        reason = "event_mismatch"
+    elif not revisions_match:
+        reason = "revision_mismatch"
+    elif different_pixels < 0 or max_channel_diff < 0 or
+         max_channel_diff > 255 or
+         not _backend_2d_tolerance_profile_valid(tolerance_profile):
+        reason = "invalid_pixel_comparison"
+    elif pixels_exact and (different_pixels != 0 or max_channel_diff != 0):
+        reason = "inconsistent_exact_pixels"
+    elif not pixels_exact and (different_pixels == 0 or max_channel_diff == 0):
+        reason = "inconsistent_changed_pixels"
+    elif pixels_within_tolerance and tolerance_profile == "strict":
+        reason = "strict_tolerance_forbidden"
+    elif not pixels_exact and not pixels_within_tolerance:
+        reason = "pixel_mismatch"
+    val accepted = reason == "accepted"
+    Backend2dCaptureComparison(
+        reference_backend: reference.backend,
+        candidate_backend: candidate.backend,
+        reference_status: reference_status,
+        candidate_status: candidate_status,
+        dimensions_match: dimensions_match,
+        events_match: events_match,
+        revisions_match: revisions_match,
+        pixels_exact: pixels_exact,
+        different_pixels: different_pixels,
+        max_channel_diff: max_channel_diff,
+        tolerance_profile: tolerance_profile,
+        pixels_within_tolerance: pixels_within_tolerance,
+        accepted: accepted,
+        reason: reason
+    )
+
+export BACKEND_2D_EVENT_SEQUENCE

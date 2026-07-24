@@ -1,0 +1,90 @@
+use std.spec
+use app.wm_compare.backend_2d_capture_evidence.{
+    BACKEND_2D_EVENT_SEQUENCE,
+    backend_2d_event_receipt,
+    backend_2d_capture_evidence,
+    backend_2d_validate_capture,
+    backend_2d_compare_capture
+}
+
+fn hash_a() -> text:
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+fn valid_capture(backend: text):
+    val events = backend_2d_event_receipt(backend, true, true)
+    backend_2d_capture_evidence(
+        backend,
+        "aarch64-apple-darwin",
+        1200,
+        900,
+        300,
+        hash_a(),
+        "12,14,1180,870",
+        events,
+        "build/test-artifacts/engine2d/" + backend + ".ppm",
+        "576be2a487"
+    )
+
+describe "Engine2D four-backend capture contract":
+    it "REQ-E2D4-001/003/004 accepts complete deterministic evidence":
+        val evidence = valid_capture("metal")
+        expect(evidence.events.sequence).to_equal(BACKEND_2D_EVENT_SEQUENCE)
+        expect(backend_2d_validate_capture(evidence)).to_equal("accepted")
+
+    it "REQ-E2D4-003 rejects injection without target delivery":
+        val events = backend_2d_event_receipt("vulkan", true, false)
+        val evidence = backend_2d_capture_evidence(
+            "vulkan", "aarch64-apple-darwin", 1200, 900, 300, hash_a(),
+            "12,14,1180,870", events, "capture.ppm", "576be2a487"
+        )
+        expect(backend_2d_validate_capture(evidence)).to_equal("events_not_delivered")
+
+    it "REQ-E2D4-004 rejects self-reported evidence without a real hash":
+        val events = backend_2d_event_receipt("cpu_simd", true, true)
+        val evidence = backend_2d_capture_evidence(
+            "cpu_simd", "aarch64-apple-darwin", 1200, 900, 300, "pass",
+            "12,14,1180,870", events, "capture.ppm", "576be2a487"
+        )
+        expect(backend_2d_validate_capture(evidence)).to_equal("invalid_pixel_sha256")
+
+    it "REQ-E2D4-005 fails comparison when dimensions differ":
+        val reference = valid_capture("cpu_simd")
+        val events = backend_2d_event_receipt("simpleos_arm64_simd", true, true)
+        val candidate = backend_2d_capture_evidence(
+            "simpleos_arm64_simd", "aarch64-unknown-simpleos", 800, 600, 96,
+            hash_a(), "12,14,780,570", events, "arm.ppm", "576be2a487"
+        )
+        val comparison = backend_2d_compare_capture(
+            reference, candidate, 0, 0, "strict", false
+        )
+        expect(comparison.accepted).to_equal(false)
+        expect(comparison.reason).to_equal("dimension_mismatch")
+
+    it "REQ-E2D4-005 records exact-pixel equality independently of metadata acceptance":
+        val reference = valid_capture("cpu_simd")
+        val candidate = valid_capture("vulkan")
+        val comparison = backend_2d_compare_capture(
+            reference, candidate, 0, 0, "strict", false
+        )
+        expect(comparison.accepted).to_equal(true)
+        expect(comparison.pixels_exact).to_equal(true)
+
+    it "REQ-E2D4-005 requires an explicit pixel tolerance result for unequal hashes":
+        val reference = valid_capture("cpu_simd")
+        val events = backend_2d_event_receipt("metal", true, true)
+        val candidate = backend_2d_capture_evidence(
+            "metal", "aarch64-apple-darwin", 1200, 900, 300,
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "12,14,1180,870", events, "metal.ppm", "576be2a487"
+        )
+        val rejected = backend_2d_compare_capture(
+            reference, candidate, 420, 2, "wm_default", false
+        )
+        val tolerated = backend_2d_compare_capture(
+            reference, candidate, 420, 2, "wm_default", true
+        )
+        expect(rejected.reason).to_equal("pixel_mismatch")
+        expect(tolerated.accepted).to_equal(true)
+        expect(tolerated.different_pixels).to_equal(420)
+        expect(tolerated.max_channel_diff).to_equal(2)
+        expect(tolerated.tolerance_profile).to_equal("wm_default")

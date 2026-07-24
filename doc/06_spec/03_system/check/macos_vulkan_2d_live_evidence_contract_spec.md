@@ -59,7 +59,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val source = file_read(WRAPPER)
-expect(source).to_contain("focus,pointer_down,pointer_up,key_down,key_up")
+expect(source).to_contain("focus,pointer_move,pointer_down,pointer_up,key_down,key_up")
 expect(source).to_contain("event-count-mismatch")
 expect(source).to_contain("event-backend-mismatch")
 ```

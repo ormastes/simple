@@ -32,8 +32,9 @@ non-background bounds, capture path, and source revision.
 ### 5. compare evidence
 
 Validate every record, compare exact dimensions and event order, then report
-exact or tolerated pixel differences. Any absent or invalid backend makes the
-aggregate result fail.
+exact or tolerated pixel differences, including differing-pixel count, maximum
+channel delta, and the named tolerance profile. Any absent or invalid backend
+makes the aggregate result fail.
 
 ## Negative cases
 

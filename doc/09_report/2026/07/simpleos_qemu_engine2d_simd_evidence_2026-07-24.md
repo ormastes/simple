@@ -86,7 +86,7 @@ launched, QMP injected none of these and PS/2 delivered/receipted none of them.
 
 | Field | ARM64 | x86_64 |
 |---|---|---|
-| backend | `simpleos-qemu-arm64` | `simpleos-qemu-x86_64` |
+| backend | `simpleos_arm64_simd` | `simpleos_x86_64_simd` |
 | target | `aarch64-unknown-none` | `x86_64-unknown-none` |
 | width | unavailable | unavailable |
 | height | unavailable | unavailable |
