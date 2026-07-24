@@ -28,7 +28,7 @@ remote-control bridge, OAuth, or full agent orchestration.
 | `src/app/llm_caret/chat.spl` | 227 | `src/assistant/sessionHistory.ts`, `src/bootstrap/state.ts` | conversation history and message JSON |
 | `src/app/llm_caret/chat_tui.spl` | 790 | `src/screens/REPL.tsx`, `src/commands/*` | transcript, slash commands, and session transitions |
 | `src/app/llm_caret/claude_api.spl` | 241 | `src/QueryEngine.ts`, `src/entrypoints/sdk/coreSchemas.ts` | Anthropic Messages request/response |
-| `src/app/llm_caret/claude_cli.spl` | 476 | `src/entrypoints/cli.tsx`, `src/QueryEngine.ts` | non-interactive argv and typed JSON/stream parsing |
+| `src/app/llm_caret/claude_cli.spl` | 580 | `src/entrypoints/cli.tsx`, `src/QueryEngine.ts` | non-interactive argv and typed JSON/stream parsing |
 | `src/app/llm_caret/config.spl` | 228 | `src/bootstrap/state.ts`, `src/constants/product.ts` | defaults and provider config |
 | `src/app/llm_caret/gui.spl` | 128 | Simple-only provider UI extension | browser GUI outside focused Claude CLI parity |
 | `src/app/llm_caret/gui_metal.spl` | 205 | Simple-only provider UI extension | native Metal GUI outside focused Claude CLI parity |
@@ -36,14 +36,14 @@ remote-control bridge, OAuth, or full agent orchestration.
 | `src/app/llm_caret/interface_text.spl` | 11 | Simple-only presentation seam | shared role and transcript text |
 | `src/app/llm_caret/json_helpers.spl` | 250 | Simple-only shared helper | local JSON helper caret utility |
 | `src/app/llm_caret/local_torch.spl` | 98 | Simple-only provider extension | local model provider outside Claude parity |
-| `src/app/llm_caret/main.spl` | 932 | `src/entrypoints/cli.tsx`, `src/QueryEngine.ts`, `src/screens/REPL.tsx` | CLI entrypoint, runtime state, proxy, and UI routing |
-| `src/app/llm_caret/mod.spl` | 400 | `src/QueryEngine.ts`, `src/bootstrap/state.ts` | public API, state, provider dispatch |
+| `src/app/llm_caret/main.spl` | 956 | `src/entrypoints/cli.tsx`, `src/QueryEngine.ts`, `src/screens/REPL.tsx` | CLI entrypoint, runtime state, proxy, and UI routing |
+| `src/app/llm_caret/mod.spl` | 409 | `src/QueryEngine.ts`, `src/bootstrap/state.ts` | public API, state, provider dispatch |
 | `src/app/llm_caret/openai_api.spl` | 260 | `src/entrypoints/sdk/coreSchemas.ts` | OpenAI-compatible provider extension |
 | `src/app/llm_caret/openai_compat.spl` | 203 | `src/entrypoints/sdk/coreSchemas.ts` | local/OpenAI-compatible endpoint provider |
 | `src/app/llm_caret/opencode_cli.spl` | 149 | Simple-only Claude-like CLI provider | OpenCode adapter with Claude-like response shape |
 | `src/app/llm_caret/provider.spl` | 440 | `src/Tool.ts`, `src/constants/tools.ts`, `src/entrypoints/sdk/coreSchemas.ts` | provider registry and normalized response |
 | `src/app/llm_caret/redact.spl` | 336 | Security utility; exact provenance unavailable | credential and diagnostic redaction |
-| `src/app/llm_caret/retry.spl` | 168 | Claude API retry/backoff behavior (conceptual) | retry admission, delay, and deadline budget |
+| `src/app/llm_caret/retry.spl` | 188 | Claude API retry/backoff behavior (conceptual) | retry admission, delay, and deadline budget |
 | `src/app/llm_caret/server.spl` | 199 | `src/entrypoints/mcp.ts`, `src/entrypoints/sdk/coreSchemas.ts` | compatibility HTTP/MCP-like response surface |
 | `src/app/llm_caret/session.spl` | 245 | `src/assistant/sessionHistory.ts`, `src/bootstrap/state.ts` | persisted app/provider sessions |
 | `src/app/llm_caret/tools.spl` | 507 | `src/Tool.ts`, `src/constants/tools.ts` | permission-gated tools and tool-use parsing |

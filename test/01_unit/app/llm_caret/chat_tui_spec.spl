@@ -28,8 +28,10 @@ use app.llm_caret.chat_tui.{
     visible_window, is_scrolled, scroll_page_up, scroll_page_down
 }
 use app.llm_caret.tui_input.{
-    select_renderer_mode, decode_raw_key_byte
+    select_renderer_mode, caret_is_tty, decode_raw_key_byte,
+    apply_raw_key_decode
 }
+use app.io.mod.{env_get, env_set}
 use std.tui.style.{Style, COLOR_CYAN, COLOR_GREEN, COLOR_RED, COLOR_YELLOW, tui_default_style}
 
 val WS_ROOT = "build/tmp/llm_caret_tui_test"
@@ -42,6 +44,12 @@ fn _one_tool(msgs: [Message]) -> ModelResponse:
     if msgs.len() <= 1:
         return new_model_tools("", [new_tool_call("t1", "bash", "{\"command\":\"echo hi\"}")])
     new_model_text("done")
+
+fn _restore_term(previous: text?):
+    if previous == nil:
+        env_set("TERM", "")
+    else:
+        env_set("TERM", previous)
 
 # ============================================================================
 describe "TUI pure formatting":
@@ -58,7 +66,7 @@ describe "TUI pure formatting":
         val asst = tui_role_style("assistant")
         expect(us.fg).to_equal(COLOR_CYAN)
         expect(asst.fg).to_equal(COLOR_GREEN)
-        assert_true(us.fg != asst.fg)
+        expect(us.fg == asst.fg).to_be(false)
 
     it "should format a tool-call line":
         expect(format_tool_line("bash", "ok", "output")).to_equal("  -> tool bash [ok]: output")
@@ -79,6 +87,14 @@ describe "Renderer-seam selection":
 
     it "should auto falls back to plain when not a tty":
         expect(select_renderer_mode("auto", false)).to_equal("plain")
+
+    it "should classify dumb and interactive TERM values":
+        val previous = env_get("TERM")
+        expect(env_set("TERM", "dumb")).to_be(true)
+        expect(caret_is_tty()).to_be(false)
+        expect(env_set("TERM", "xterm-256color")).to_be(true)
+        expect(caret_is_tty()).to_be(true)
+        _restore_term(previous)
 
 describe "Transcript rendering":
     it "should append a styled user turn to the transcript":
@@ -138,9 +154,9 @@ describe "Markdown-lite rendering":
         expect(tui_transcript_line_text(1)).to_equal("line two")
 
     it "should detect fenced code block markers":
-        assert_true(is_fence_line("```"))
-        assert_true(is_fence_line("```python"))
-        assert_false(is_fence_line("plain text"))
+        expect(is_fence_line("```")).to_be(true)
+        expect(is_fence_line("```python")).to_be(true)
+        expect(is_fence_line("plain text")).to_be(false)
 
     it "should indent bullet lines and leave others untouched":
         expect(bullet_indent("- item")).to_equal("  - item")
@@ -190,7 +206,7 @@ describe "Scrollback window (visible_window)":
 describe "Scroll paging (Ctrl-P/Ctrl-N)":
     it "should be not scrolled by default":
         tui_transcript_reset()
-        assert_false(is_scrolled())
+        expect(is_scrolled()).to_be(false)
 
     it "should page up away from auto-follow, and resume after enough pages down":
         tui_transcript_reset()
@@ -202,11 +218,11 @@ describe "Scroll paging (Ctrl-P/Ctrl-N)":
         scroll_page_up(len, 5)
         scroll_page_up(len, 5)
         scroll_page_up(len, 5)
-        assert_true(is_scrolled())
+        expect(is_scrolled()).to_be(true)
         scroll_page_down(len, 5)
         scroll_page_down(len, 5)
         scroll_page_down(len, 5)
-        assert_false(is_scrolled())
+        expect(is_scrolled()).to_be(false)
 
 # ============================================================================
 # Slash commands (M2)
@@ -306,6 +322,15 @@ fn _decode_raw_bytes(bytes: [i64]) -> (text, text):
             printable = printable + (decoded.printable_byte as char).to_text()
     (keys.join(","), printable)
 
+fn _apply_raw_bytes(bytes: [i64]) -> (text, i64):
+    var input = make_chat_tui("decoder fixture").input
+    var state = 0
+    for b in bytes:
+        val decoded = decode_raw_key_byte(state, b)
+        state = decoded.state
+        input = apply_raw_key_decode(input, decoded)
+    (input.value, input.cursor_pos)
+
 describe "ANSI raw-key decoding":
     it "should decode CSI and SS3 arrows without leaking printable bytes":
         expect(_decode_raw_bytes([27, 91, 65])).to_equal(("up", ""))
@@ -322,6 +347,14 @@ describe "ANSI raw-key decoding":
         expect(_decode_raw_bytes([27, 91, 55, 126])).to_equal(("home", ""))
         expect(_decode_raw_bytes([27, 91, 56, 126])).to_equal(("end", ""))
 
+    it "should decode every supported SS3 navigation key":
+        expect(_decode_raw_bytes([27, 79, 65])).to_equal(("up", ""))
+        expect(_decode_raw_bytes([27, 79, 66])).to_equal(("down", ""))
+        expect(_decode_raw_bytes([27, 79, 67])).to_equal(("right", ""))
+        expect(_decode_raw_bytes([27, 79, 68])).to_equal(("left", ""))
+        expect(_decode_raw_bytes([27, 79, 70])).to_equal(("end", ""))
+        expect(_decode_raw_bytes([27, 79, 72])).to_equal(("home", ""))
+
     it "should swallow modified and unknown ANSI sequences":
         expect(_decode_raw_bytes([27, 91, 49, 59, 53, 68])).to_equal(
             ("left", "")
@@ -332,10 +365,27 @@ describe "ANSI raw-key decoding":
     it "should preserve ordinary printable input after a completed sequence":
         expect(_decode_raw_bytes([27, 91, 67, 120])).to_equal(("right", "x"))
 
+    it "should recover after abandoned and unknown escape sequences":
+        expect(_decode_raw_bytes(
+            [27, 91, 27, 91, 68, 120]
+        )).to_equal(("left", "x"))
+        expect(_decode_raw_bytes(
+            [27, 91, 51, 126, 121]
+        )).to_equal(("", "y"))
+
+    it "should apply decoded cursor keys without inserting escape bytes":
+        val edited = _apply_raw_bytes([
+            97, 98, 99,
+            27, 91, 68, 88,
+            27, 91, 72, 62,
+            27, 91, 70, 33
+        ])
+        expect(edited).to_equal((">abXc!", 6))
+
 describe "Slash command parsing":
     it "should recognize lines starting with /":
-        assert_true(is_slash_command("/help"))
-        assert_false(is_slash_command("hello"))
+        expect(is_slash_command("/help")).to_be(true)
+        expect(is_slash_command("hello")).to_be(false)
 
     it "should split a command and its argument":
         val (cmd, arg) = parse_slash_command("/model gpt-4o")
@@ -354,15 +404,15 @@ describe "Slash command dispatch":
 
     it "should /exit sets exit=true":
         val r = dispatch_slash("exit", "", _test_hooks())
-        assert_true(r.exit)
+        expect(r.exit).to_be(true)
 
     it "should /quit is an alias for /exit":
         val r = dispatch_slash("quit", "", _test_hooks())
-        assert_true(r.exit)
+        expect(r.exit).to_be(true)
 
     it "should /new clears the conversation":
         val r = dispatch_slash("new", "", _test_hooks())
-        assert_true(r.new_conv)
+        expect(r.new_conv).to_be(true)
         expect(r.new_session_id).to_equal("s-new")
         expect(r.status_session).to_equal("s-new")
 
@@ -434,7 +484,7 @@ describe "Slash command dispatch":
 
     it "should /resume <id> found: replaces the conversation":
         val r = dispatch_slash("resume", "abc", _test_hooks())
-        assert_true(r.replace_conv)
+        expect(r.replace_conv).to_be(true)
         expect(r.new_session_id).to_equal("abc")
         expect(r.status_session).to_equal("abc")
         expect(r.status_provider).to_equal("claude_cli")
@@ -455,16 +505,16 @@ describe "Slash command dispatch":
 
     it "should /resume <id> not found: reports it, does not replace":
         val r = dispatch_slash("resume", "missing-id", _test_hooks_missing())
-        assert_false(r.replace_conv)
+        expect(r.replace_conv).to_be(false)
         expect(r.message).to_contain("no saved session")
         expect(r.status_session).to_equal("")
 
     it "should report unknown /commands are reported, never silently sent to the model":
         val r = dispatch_slash("bogus", "", _test_hooks())
         expect(r.message).to_contain("Unknown command")
-        assert_false(r.exit)
-        assert_false(r.new_conv)
-        assert_false(r.replace_conv)
+        expect(r.exit).to_be(false)
+        expect(r.new_conv).to_be(false)
+        expect(r.replace_conv).to_be(false)
 
     it "should reject hidden commands by default and execute an enabled fixture":
         val rejected = dispatch_slash(
@@ -499,7 +549,44 @@ describe "Slash command dispatch":
         expect(known.message).to_contain("/config")
         expect(known.message == unknown.message).to_be(false)
 
+    it "should enforce registry gates and canonical handlers through aliases":
+        val hidden = dispatch_slash(
+            "debug_tool_call", "payload", _test_hooks()
+        )
+        val unknown = dispatch_slash(
+            "not-registered", "payload", _test_hooks()
+        )
+        expect(hidden.message).to_equal(unknown.message)
+
+        val admitted = dispatch_slash(
+            "debug_tool_call", "payload", _test_hooks_hidden()
+        )
+        expect(admitted.message).to_equal(
+            "hidden command executed: debug-tool-call payload"
+        )
+        expect(dispatch_slash(
+            "settings", "", _test_hooks()
+        ).message).to_contain("/config")
+        expect(dispatch_slash(
+            "remote_setup", "", _test_hooks_hidden()
+        ).message).to_contain("Command disabled")
+
 describe "TUI submission state transition":
+    it "should stop on the quit alias without mutating conversation state":
+        tui_transcript_reset()
+        val result = run_chat_tui_submission(
+            make_chat_tui("llm_caret"),
+            [new_user_message("keep this")], "s0", "  /quit  ",
+            default_policy("build/tmp/caret-tui-unit"),
+            _submission_response, _test_hooks()
+        )
+        expect(result.running).to_be(false)
+        expect(result.submitted_to_model).to_be(false)
+        expect(result.session_id).to_equal("s0")
+        expect(result.conversation.len()).to_equal(1)
+        expect(result.conversation[0].content).to_equal("keep this")
+        expect(tui_transcript_len()).to_equal(0)
+
     it "should run a model turn through the production submission path":
         tui_transcript_reset()
         val ui = make_chat_tui_with_status(
@@ -556,3 +643,41 @@ describe "TUI submission state transition":
         )
         expect(tui_transcript_line_text(0)).to_equal("You: restored")
         expect(tui_transcript_line_text(1)).to_equal("System: resumed abc")
+
+    it "should preserve conversation and session when resume fails":
+        tui_transcript_reset()
+        val original = [new_user_message("keep this")]
+        val result = run_chat_tui_submission(
+            make_chat_tui("llm_caret"), original, "s0",
+            "/resume missing-id",
+            default_policy("build/tmp/caret-tui-unit"),
+            _submission_response, _test_hooks_missing()
+        )
+        expect(result.running).to_be(true)
+        expect(result.submitted_to_model).to_be(false)
+        expect(result.session_id).to_equal("s0")
+        expect(result.conversation.len()).to_equal(1)
+        expect(result.conversation[0].role).to_equal("user")
+        expect(result.conversation[0].content).to_equal("keep this")
+        expect(tui_transcript_line_text(0)).to_equal(
+            "System: no saved session 'missing-id'"
+        )
+
+    it "should keep unknown slash input out of the model conversation":
+        tui_transcript_reset()
+        val original = [new_user_message("keep this")]
+        val result = run_chat_tui_submission(
+            make_chat_tui("llm_caret"), original, "s0",
+            "/not-registered secret-argument",
+            default_policy("build/tmp/caret-tui-unit"),
+            _submission_response, _test_hooks()
+        )
+        expect(result.submitted_to_model).to_be(false)
+        expect(result.session_id).to_equal("s0")
+        expect(result.conversation.len()).to_equal(1)
+        expect(result.conversation[0].role).to_equal("user")
+        expect(result.conversation[0].content).to_equal("keep this")
+        expect(tui_transcript_line_text(0)).to_contain("Unknown command")
+        expect(tui_transcript_line_text(0).contains(
+            "secret-argument"
+        )).to_be(false)

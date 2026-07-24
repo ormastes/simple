@@ -10,7 +10,7 @@ use app.llm_caret.mod.{
     llm_set_api_key, llm_set_base_url, llm_set_cli_path, llm_system,
     llm_provider, llm_model, llm_clear,
     llm_history_len, llm_history_role, llm_history_content,
-    llm_chat, llm_send
+    llm_chat, llm_send, _build_messages_json
 }
 
 val MOCK_CLAUDE = "test/fixtures/llm_caret/mock_claude_cli.shs"
@@ -125,6 +125,49 @@ describe "Dummy Provider":
         expect(resp.provider).to_equal("dummy")
         expect(resp.error).to_contain("require claude_cli")
 
+describe "Provider Dispatch Failures":
+    it "should reject unknown and recognized but unavailable providers":
+        val unknown = dispatch_send(
+            "unknown", "anything", "", "", "", "", "", "", 0, 0, "[]"
+        )
+        expect(unknown.is_error).to_be(true)
+        expect(unknown.provider).to_equal("unknown")
+        expect(unknown.error).to_equal("unknown provider: unknown")
+
+        val unavailable = dispatch_send(
+            "local_torch", "anything", "", "", "", "", "", "", 0, 0, "[]"
+        )
+        expect(unavailable.is_error).to_be(true)
+        expect(unavailable.provider).to_equal("local_torch")
+        expect(unavailable.error).to_contain("not implemented")
+
+    it "should reject remote providers without credentials before network access":
+        val anthropic = dispatch_send(
+            "claude_api", "", "", "", "", "", "", "", 0, 0, "[]"
+        )
+        expect(anthropic.is_error).to_be(true)
+        expect(anthropic.provider).to_equal("claude_api")
+        expect(anthropic.error).to_equal("ANTHROPIC_API_KEY not set")
+
+        val openai = dispatch_send(
+            "openai", "", "", "", "", "", "", "", 0, 0, "[]"
+        )
+        expect(openai.is_error).to_be(true)
+        expect(openai.provider).to_equal("openai")
+        expect(openai.error).to_equal("OPENAI_API_KEY not set")
+
+    it "should preserve Claude CLI fields through advanced dispatch":
+        val resp = dispatch_send_advanced(
+            "claude_cli", "fixture-advanced", "sonnet", "", "",
+            MOCK_CLAUDE, "", "", 0, 0, "[]",
+            "{\"type\":\"object\"}", ["Read"], ["--fixture-extra"]
+        )
+        expect(resp.is_error).to_be(false)
+        expect(resp.provider).to_equal("claude_cli")
+        expect(resp.content).to_equal("advanced-ok")
+        expect(resp.model).to_equal("sonnet")
+        expect(resp.session_id).to_equal("advanced-session")
+
 describe "Public LLM State":
     it "should reject chat and direct send before initialization":
         expect(llm_history_len()).to_equal(0)
@@ -135,6 +178,15 @@ describe "Public LLM State":
             "call llm_init_defaults() or llm_init() first"
         )
         expect(llm_history_len()).to_equal(0)
+
+    it "should serialize public history with escaped message content":
+        llm_init("dummy", "dummy-hello")
+        expect(llm_chat("say \"hi\"\nnext")).to_equal("hello")
+        expect(_build_messages_json()).to_equal(
+            "[{\"role\":\"user\",\"content\":\"say \\\"hi\\\"\\nnext\"}," +
+            "{\"role\":\"assistant\",\"content\":\"hello\"}]"
+        )
+        llm_clear()
 
     it "should reject unsupported providers through both public send routes":
         llm_init("unsupported", "none")
@@ -188,6 +240,21 @@ describe "Public LLM State":
         llm_system("Be concise")
         expect(llm_send("fixture-success")).to_equal("fixture-ok")
         expect(llm_send("fixture-requires-resume")).to_equal("resumed-ok")
+        llm_clear()
+
+    it "should keep a failed Claude response from poisoning public session state":
+        llm_init("claude_cli", "sonnet")
+        llm_set_cli_path(MOCK_CLAUDE)
+        val failed = llm_chat("fixture-error-session")
+        expect(failed).to_start_with("ERROR: ")
+        expect(failed).to_contain("[REDACTED:")
+        expect(failed.contains("sk-ant-fixture-secret")).to_be(false)
+        expect(llm_history_len()).to_equal(1)
+        expect(llm_history_role(0)).to_equal("user")
+        expect(llm_history_content(0)).to_equal("fixture-error-session")
+
+        llm_system("Be concise")
+        expect(llm_send("fixture-success")).to_equal("fixture-ok")
         llm_clear()
 
     it "should clear history and provider session immediately":

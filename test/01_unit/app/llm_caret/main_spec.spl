@@ -221,7 +221,7 @@ describe "scripted plain-mode conversation (end-to-end via chat.run_agent_loop)"
         expect(result.stopped_reason).to_equal("end_turn")
         # the tool_result turn must be threaded into final_transcript (the
         # M2 gap this campaign closed) - not just the initial + final text.
-        assert_true(result.final_transcript.len() > 2)
+        expect(result.final_transcript.len() > 2).to_be(true)
 
 fn _fake_dispatch_ok(content: text, model: text) -> LLMResponse:
     _llm_ok("echo: " + content, "{}")
@@ -251,6 +251,31 @@ describe "Hidden command inspection":
         expect(_slash_on_hidden_command("other-hidden", "{}")).to_contain(
             "not implemented"
         )
+
+    it "should reject tool envelopes with incomplete public metadata":
+        expect(_slash_on_hidden_command(
+            "debug-tool-call",
+            "{\"type\":\"tool_use\",\"name\":\"bash\",\"input\":{}}"
+        )).to_equal("Invalid tool call envelope.")
+        expect(_slash_on_hidden_command(
+            "debug-tool-call",
+            "{\"type\":\"tool_use\",\"id\":\"call-1\",\"input\":{}}"
+        )).to_equal("Invalid tool call envelope.")
+
+    it "should summarize only the first tool envelope without leaking payloads":
+        val result = _slash_on_hidden_command(
+            "debug-tool-call",
+            "{\"content\":[" +
+            "{\"type\":\"tool_use\",\"id\":\"call-1\",\"name\":\"bash\"," +
+            "\"input\":{\"command\":\"first-fixture-secret\"}}," +
+            "{\"type\":\"tool_use\",\"id\":\"call-2\",\"name\":\"write_file\"," +
+            "\"input\":{\"content\":\"second-fixture-secret\"}}]}"
+        )
+        expect(result).to_contain("id=call-1")
+        expect(result).to_contain("name=bash")
+        expect(result.contains("call-2")).to_be(false)
+        expect(result.contains("first-fixture-secret")).to_be(false)
+        expect(result.contains("second-fixture-secret")).to_be(false)
 
 # ============================================================================
 describe "HTTP proxy pure core (proxy_handle)":
@@ -296,26 +321,26 @@ describe "HTTP proxy pure core (proxy_handle)":
 # ============================================================================
 describe "Server hardening (guard_request)":
     it "should bearer_ok always allows when no token is required":
-        assert_true(bearer_ok("", ""))
-        assert_true(bearer_ok("garbage", ""))
+        expect(bearer_ok("", "")).to_be(true)
+        expect(bearer_ok("garbage", "")).to_be(true)
 
     it "should bearer_ok rejects a missing/garbage header when a token is required":
-        assert_false(bearer_ok("", "secret"))
-        assert_false(bearer_ok("Bearer wrong", "secret"))
+        expect(bearer_ok("", "secret")).to_be(false)
+        expect(bearer_ok("Bearer wrong", "secret")).to_be(false)
 
     it "should bearer_ok accepts the exact configured token":
-        assert_true(bearer_ok("Bearer secret", "secret"))
+        expect(bearer_ok("Bearer secret", "secret")).to_be(true)
 
     it "should guard_request returns 401 without a token when one is required":
         rate_limit_reset()
         val (allowed, code, body) = guard_request("", "{}", "secret", "client-a", 1000)
-        assert_false(allowed)
+        expect(allowed).to_be(false)
         expect(code).to_equal(401)
 
     it "should guard_request allows a matching bearer token":
         rate_limit_reset()
         val (allowed, code, body) = guard_request("Bearer secret", "{}", "secret", "client-b", 1000)
-        assert_true(allowed)
+        expect(allowed).to_be(true)
 
     it "should guard_request rejects an oversized body with 413":
         rate_limit_reset()
@@ -326,7 +351,7 @@ describe "Server hardening (guard_request)":
         while big.len() < 1000001:
             big = big + big
         val (allowed, code, body) = guard_request("", big, "", "client-c", 1000)
-        assert_false(allowed)
+        expect(allowed).to_be(false)
         expect(code).to_equal(413)
 
     it "should rate_limit_check allows the first N requests then rejects the N+1th":
@@ -336,9 +361,9 @@ describe "Server hardening (guard_request)":
         while i < 60:
             last_ok = rate_limit_check("client-rl", 1000)
             i = i + 1
-        assert_true(last_ok)
+        expect(last_ok).to_be(true)
         val over_limit = rate_limit_check("client-rl", 1000)
-        assert_false(over_limit)
+        expect(over_limit).to_be(false)
 
     it "should rate_limit_check resets after the window elapses":
         rate_limit_reset()
@@ -346,7 +371,7 @@ describe "Server hardening (guard_request)":
         while i < 60:
             rate_limit_check("client-window", 1000)
             i = i + 1
-        assert_false(rate_limit_check("client-window", 1000))
+        expect(rate_limit_check("client-window", 1000)).to_be(false)
         # 60s+ later, same client should be allowed again
-        assert_true(rate_limit_check("client-window", 1000 + 60001))
+        expect(rate_limit_check("client-window", 1000 + 60001)).to_be(true)
         rate_limit_reset()

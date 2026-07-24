@@ -2,9 +2,13 @@
 
 > This offline system specification exercises the accepted Claude CLI feature map without network access. The provider cases use the production argument builder, structured-response parser, and dispatch path with a local executable fixture. Hidden command checks use production fast-mode and remote-review command gates.
 
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| Tests | Active | Skipped | Pending | Executed |
+|-------|--------|---------|---------|---------:|
+| 8 | 8 | 0 | 0 | 0 |
+
+> Execution status: designed and manually synchronized. The current
+> self-hosted runner cannot resolve its process-spawn boundary, so this manual
+> does not claim an executable PASS.
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -25,7 +29,7 @@ This offline system specification exercises the accepted Claude CLI feature map 
 | Research | doc/01_research/local/llm_caret_claude_cli_harden.md |
 | Source | `test/03_system/tools/llm/llm_caret_claude_cli_feature_contract_spec.spl` |
 | Updated | 2026-07-24 |
-| Generator | `simple spipe-docgen` (Simple) |
+| Generator | Manual synchronization; executable docgen is runtime-blocked |
 
 ## Overview
 
@@ -700,6 +704,7 @@ check_hidden_feature_gate(fixtures)
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+| Executed scenarios | 0 |
 
 
 ## Related Documentation

@@ -1,11 +1,18 @@
 # LLM Caret Claude CLI Specification (PRIMARY - Intensive Testing)
 #
 # Exercises the SHIPPED module (not inline copies) so this gate proves the
-# real parser is correct: build_claude_args, parse_claude_json_response,
-# parse_claude_stream_line. No subprocess calls in unit tests.
+# real wrapper is correct: argument builders, response parsers, and the two
+# subprocess boundaries. Subprocess scenarios use only the local immutable
+# fixture; they never invoke Claude or access the network.
 
-use app.llm_caret.claude_cli.{build_claude_args, build_claude_stream_args, parse_claude_json_response, parse_claude_stream_line}
+use app.llm_caret.claude_cli.{
+    build_claude_args, build_claude_stream_args,
+    parse_claude_json_response, parse_claude_stream_line,
+    claude_cli_send, claude_cli_stream
+}
 use std.mcp.helpers.{LB, RB, Q, escape_json}
+
+val MOCK_CLAUDE_CLI = "test/fixtures/llm_caret/mock_claude_cli.shs"
 
 # ============================================================================
 # Test-only helpers (not part of the shipped module)
@@ -599,3 +606,87 @@ describe "parse_claude_stream_line":
         expect(evt.event_type).to_equal("error")
         expect(evt.stop_reason).to_equal("invalid")
         expect(evt.content).to_contain("missing result")
+
+describe "claude_cli_send - local fixture":
+    it "should forward advanced arguments and preserve response metadata":
+        val resp = claude_cli_send(
+            MOCK_CLAUDE_CLI, "fixture-advanced", "sonnet", "", "", 0, 0,
+            "{\"type\":\"object\"}", ["Read"], ["--fixture-extra"]
+        )
+        expect(resp.is_error).to_be(false)
+        expect(resp.content).to_equal("advanced-ok")
+        expect(resp.model).to_equal("sonnet")
+        expect(resp.session_id).to_equal("advanced-session")
+
+    it "should fail closed and redact subprocess diagnostics":
+        val malformed = claude_cli_send(
+            MOCK_CLAUDE_CLI, "fixture-json-malformed", "sonnet",
+            "", "", 0, 0, "", [], []
+        )
+        expect(malformed.is_error).to_be(true)
+        expect(malformed.error).to_contain("invalid JSON")
+
+        val failed = claude_cli_send(
+            MOCK_CLAUDE_CLI, "fixture-error", "sonnet",
+            "", "", 0, 0, "", [], []
+        )
+        expect(failed.is_error).to_be(true)
+        expect(failed.stop_reason).to_equal("error")
+        expect(failed.error).to_contain("[REDACTED:")
+        expect(failed.error.contains("sk-ant-fixture-secret")).to_be(false)
+
+describe "claude_cli_stream - local fixture":
+    it "should return a complete ordered stream":
+        val events = claude_cli_stream(
+            MOCK_CLAUDE_CLI, "fixture-stream", "sonnet",
+            "Be concise", "", 1
+        )
+        expect(events.len()).to_equal(3)
+        expect(events[0].event_type).to_equal("system")
+        expect(events[0].session_id).to_equal("stream-session")
+        expect(events[1].event_type).to_equal("assistant")
+        expect(events[1].content).to_equal("streamed fixture")
+        expect(events[2].event_type).to_equal("result")
+        expect(events[2].content).to_equal("stream complete")
+        expect(events[2].output_tokens).to_equal(3)
+
+    it "should reject malformed and duplicate terminal streams":
+        val malformed = claude_cli_stream(
+            MOCK_CLAUDE_CLI, "fixture-stream-malformed-then-result",
+            "sonnet", "", "", 1
+        )
+        expect(malformed.len()).to_equal(1)
+        expect(malformed[0].stop_reason).to_equal("invalid")
+        expect(malformed[0].content).to_contain("invalid JSON")
+
+        val duplicate = claude_cli_stream(
+            MOCK_CLAUDE_CLI, "fixture-stream-duplicate-terminal",
+            "sonnet", "", "", 1
+        )
+        expect(duplicate.len()).to_equal(1)
+        expect(duplicate[0].stop_reason).to_equal("invalid")
+        expect(duplicate[0].content).to_contain("after a terminal")
+
+    it "should distinguish incomplete, empty, and valid stop-result streams":
+        val incomplete = claude_cli_stream(
+            MOCK_CLAUDE_CLI, "fixture-stream-incomplete",
+            "sonnet", "", "", 1
+        )
+        expect(incomplete.len()).to_equal(2)
+        expect(incomplete[1].event_type).to_equal("error")
+        expect(incomplete[1].content).to_contain("before a terminal event")
+
+        val empty = claude_cli_stream(
+            MOCK_CLAUDE_CLI, "fixture-stream-empty", "sonnet", "", "", 1
+        )
+        expect(empty.len()).to_equal(1)
+        expect(empty[0].content).to_contain("no valid stream events")
+
+        val completed = claude_cli_stream(
+            MOCK_CLAUDE_CLI, "fixture-stream-stop-then-result",
+            "sonnet", "", "", 1
+        )
+        expect(completed.len()).to_equal(2)
+        expect(completed[0].event_type).to_equal("message_stop")
+        expect(completed[1].event_type).to_equal("result")
+        expect(completed[1].content).to_equal("complete")

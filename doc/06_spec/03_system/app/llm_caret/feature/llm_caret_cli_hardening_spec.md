@@ -1,17 +1,21 @@
 # LLM Caret CLI Process Hardening
 
-> Runs the actual Caret command entrypoint through the self-hosted `bin/simple` wrapper. A fixture configuration routes the Claude provider to a deterministic local executable, so success, subprocess failure, help, and argument rejection are verified without credentials, network access, or paid calls.
+> Runs the Caret source entrypoint through the self-hosted runtime and separately verifies cached production-wrapper selection, argument forwarding, and fail-closed invalid overrides. Provider behavior remains deterministic and offline.
 
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 1 | 1 | 0 | 0 |
+| Tests | Active | Skipped | Pending | Executed |
+|-------|--------|---------|---------|---------:|
+| 3 | 3 | 0 | 0 | 0 |
+
+> Execution status: designed and manually synchronized. The current
+> self-hosted runner cannot resolve its process-spawn boundary, so this manual
+> does not claim an executable PASS.
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # LLM Caret CLI Process Hardening
 
-Runs the actual Caret command entrypoint through the self-hosted `bin/simple` wrapper. A fixture configuration routes the Claude provider to a deterministic local executable, so success, subprocess failure, help, and argument rejection are verified without credentials, network access, or paid calls.
+Runs the Caret source entrypoint through the self-hosted runtime and separately verifies cached production-wrapper selection, argument forwarding, and fail-closed invalid overrides. Provider behavior remains deterministic and offline.
 
 ## At a Glance
 
@@ -25,21 +29,28 @@ Runs the actual Caret command entrypoint through the self-hosted `bin/simple` wr
 | Research | doc/01_research/local/llm_caret_claude_cli_harden.md |
 | Source | `test/03_system/app/llm_caret/feature/llm_caret_cli_hardening_spec.spl` |
 | Updated | 2026-07-24 |
-| Generator | `simple spipe-docgen` (Simple) |
+| Generator | Manual synchronization; executable docgen is runtime-blocked |
 
 ## Overview
 
 Runs the actual Caret command entrypoint through the self-hosted `bin/simple`
-wrapper. A fixture configuration routes the Claude provider to a deterministic
-local executable, so success, subprocess failure, help, and argument rejection
-are verified without credentials, network access, or paid calls.
+runtime and separately verifies that the production `bin/caret` wrapper selects
+an explicit cached executable, forwards arguments, and fails closed on an
+invalid override. A fixture configuration routes the Claude provider to a
+deterministic local executable, so success, subprocess failure, help, and
+argument rejection are verified without credentials, network access, or paid
+calls.
 
 ## Scope
 
 This specification covers the application process boundary that pure provider
 tests cannot prove:
 
-- the canonical self-hosted wrapper starts the Caret source entrypoint;
+- the self-hosted runtime starts the Caret source entrypoint for component
+  process checks;
+- the production wrapper selects a cached native executable rather than
+  silently running source;
+- an invalid explicit cached-artifact override fails closed;
 - `--help` reaches Caret rather than the compiler help surface;
 - a fixture SDN configuration selects the local Claude executable;
 - explicit provider, model, system prompt, and one-shot prompt options parse;
@@ -81,6 +92,14 @@ expose the original secret. A generic successful response is not accepted.
 The usage case sends an option that Caret does not implement. It must return
 exit two and name the unknown option. This prevents silent argument loss.
 
+### Cached Wrapper Selection
+
+The wrapper case points `SIMPLE_CARET_NATIVE` at a deterministic executable and
+requires the original argument vector to reach it unchanged. A second case
+points the override at a missing executable and requires exit 127 plus a
+specific fail-closed diagnostic. These cases do not claim that a release Caret
+artifact was built in the current runtime-blocked lane.
+
 ## Exit Contract
 
 | Case | Expected exit | Required output |
@@ -89,6 +108,8 @@ exit two and name the unknown option. This prevents silent argument loss.
 | Offline single shot | 0 | `fixture-ok` |
 | Provider error | 1 | `[REDACTED:` |
 | Unknown option | 2 | `unknown option` |
+| Explicit cached executable | 0 | forwarded marker |
+| Invalid cached override | 127 | `not executable` |
 
 ## Frozen Test Interface
 
@@ -164,10 +185,11 @@ remain under its normal build/test evidence directories.
 ## Evidence Boundary
 
 A passing interpreter and native run proves the Caret process boundary, local
-provider dispatch, JSON response path, exit mapping, and redaction behavior for
-the four cases above. It complements the pure CLI feature contract and TUI
-hidden-feature specification. It does not replace the full-parity matrix gates
-or an explicitly authorized live-provider run.
+provider dispatch, JSON response path, exit mapping, redaction behavior for the
+four provider cases, and cached-wrapper selection/rejection. It complements the
+pure CLI feature contract and TUI hidden-feature specification. It does not
+replace the full-parity matrix gates, a real release-artifact build, or an
+explicitly authorized live-provider run.
 
 ## Scenarios
 
@@ -207,15 +229,91 @@ for case in cases:
 
 </details>
 
+#### should execute an explicit cached Caret artifact with unchanged arguments
+
+- Load the accepted Claude feature map
+   - Expected: `bin/caret` exists
+- Invoke the caret CLI provider
+- Check the structured CLI response
+   - Expected: exit equals `0`
+   - Expected: stdout contains `caret-wrapper-marker --plain`
+   - Expected: stderr is empty
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Load the accepted Claude feature map")
+expect(file_exists("bin/caret")).to_be(true)
+val previous = env_get("SIMPLE_CARET_NATIVE")
+expect(env_set("SIMPLE_CARET_NATIVE", "/bin/echo")).to_be(true)
+
+step("Invoke the caret CLI provider")
+val result = process_run(
+    "bin/caret", ["caret-wrapper-marker", "--plain"]
+)
+_restore_wrapper_env("SIMPLE_CARET_NATIVE", previous)
+
+step("Check the structured CLI response")
+expect(result.2).to_equal(0)
+expect(result.0 ?? "").to_contain(
+    "caret-wrapper-marker --plain"
+)
+expect(result.1 ?? "").to_equal("")
+```
+
+</details>
+
+#### should reject a missing explicit cached Caret artifact
+
+- Load the accepted Claude feature map
+- Invoke the caret CLI provider
+- Check the structured CLI response
+   - Expected: exit equals `127`
+   - Expected: stderr contains `SIMPLE_CARET_NATIVE is not executable`
+   - Expected: stdout does not contain Caret usage
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Load the accepted Claude feature map")
+val previous = env_get("SIMPLE_CARET_NATIVE")
+expect(env_set(
+    "SIMPLE_CARET_NATIVE",
+    "build/llm_caret/definitely-missing/caret"
+)).to_be(true)
+
+step("Invoke the caret CLI provider")
+val result = process_run("bin/caret", ["--help"])
+_restore_wrapper_env("SIMPLE_CARET_NATIVE", previous)
+
+step("Check the structured CLI response")
+expect(result.2).to_equal(127)
+expect(result.1 ?? "").to_contain(
+    "SIMPLE_CARET_NATIVE is not executable"
+)
+expect((result.0 ?? "").contains("Usage:")).to_be(false)
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 1 |
-| Active scenarios | 1 |
+| Total scenarios | 3 |
+| Active scenarios | 3 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+| Executed scenarios | 0 |
 
 
 ## Related Documentation
