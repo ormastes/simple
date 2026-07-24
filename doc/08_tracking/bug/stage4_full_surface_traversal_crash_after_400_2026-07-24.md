@@ -101,6 +101,17 @@ records hid marker 1 from the line-oriented checker. The canonical rerun used
 `SIMPLE_COMPILER_PHASE_PROFILE=0` and passed; this is an invocation/log framing
 issue, not a second compiler failure.
 
+One incremental full-CLI run then used the admitted candidate with a 64 GiB
+virtual-memory cap and the host's 64,000 MiB RSS guard. It reached
+`seq=401 path=src/compiler/mir_opt/_OptimizationPasses/io_passes.spl` at
+7,448,044 aggregate registry entries. The guard terminated PID 709133 at
+64,928 MiB RSS; no artifact was produced.
+
+This is effectively the original source-400 memory boundary despite the lower
+registry slope. Token payload strings were therefore measurable but not the
+dominant RSS owner. Do not repeat the full run until a focused probe identifies
+and reduces the remaining per-token/state-copy or retained-surface allocation.
+
 ## Acceptance
 
 1. Add a bounded cumulative-surface probe or repair the registry/lexer
