@@ -66,9 +66,18 @@ fn runtime_module_initializer_supported(const_: HirConst) -> bool:
         # Preserve the pre-existing call path; additionally admit wrapped
         # expressions only when every native backend can declare the scalar.
         case Call(_, _, _): true
+        # Compound module `val` whose initializer is a runtime expression, e.g.
+        # `val X = OTHER + "/sub"` (string concat) or `X.method()`: needs a
+        # runtime-initialized global slot, exactly like a Call init. Without
+        # this the binding got NO static slot, so a reference to it emitted an
+        # undefined local rendered as i64 (native_compound_module_val_runtime_
+        # init 2026-07-23: main_lazy_assistant ASSIST_TIMELINES = ASSIST_ROOT
+        # + "/timelines" -> `rt_raw_i64_to_string(i64 %undef)`).
+        case Binary(_, _, _): true
+        case MethodCall(_, _, _, _): true
         case _:
             match const_.type_.kind:
-                case Int(_, _) | Float(_) | Bool: true
+                case Int(_, _) | Float(_) | Bool | Str: true
                 case _: false
 
 fn runtime_module_initializers_in_declaration_order(consts: [HirConst]) -> [HirConst]:
@@ -97,7 +106,6 @@ impl MirLowering:
             symbols: symbols,
             local_map: {},
             local_hir_types: {},
-            fn_return_types: {},
             current_function_symbols: [],
             current_function_names: [],
             loop_stack: empty_loop_stack,
@@ -471,20 +479,6 @@ impl MirLowering:
         for func in module.functions.values():
             function_names.push(func.name)
         self.current_function_names = function_names
-        # Pre-pass: record declared fn return types by symbol id BEFORE any
-        # body lowering (forward calls resolve against this map, not the
-        # symbol table's unreliable fn type_ — see fn_return_types field
-        # note in mir_lowering_types.spl).
-        val prepass_fns = module.functions.values()
-        var prepass_i = 0
-        while prepass_i < prepass_fns.len():
-            # Typed rebind: loop/indexed elements decode as ANY and field
-            # reads mis-decode without it (see expressions.spl MatchCase
-            # arm rebind note).
-            val func_rt: HirFunction = prepass_fns[prepass_i]
-            if func_rt.return_type.?:
-                self.fn_return_types[func_rt.symbol.id] = func_rt.return_type
-            prepass_i = prepass_i + 1
         # Cross-module prescans keep the first definition. The module being
         # lowered is authoritative for its own same-name struct/class.
         val local_struct_values = module.structs.values()
@@ -902,9 +896,17 @@ impl MirLowering:
                     MirType(kind: MirTypeKind.Opaque("str"))
                 else:
                     self.lower_type(const_.type_)
+            # A non-folded Binary/MethodCall reaching the runtime-init path is a
+            # TEXT expression (integer Binary folds via lower_const_expr, so it
+            # never gets here), so its slot must be str -- not the i64 the weak
+            # flat-path Infer would otherwise pick (native_compound_module_val_
+            # runtime_init 2026-07-23).
+            case Binary(_, _, _): MirType(kind: MirTypeKind.Opaque("str"))
+            case MethodCall(_, _, _, _): MirType(kind: MirTypeKind.Opaque("str"))
             case _:
                 match const_.type_.kind:
                     case Infer(_, _): MirType.i64()
+                    case Str: MirType(kind: MirTypeKind.Opaque("str"))
                     case _: self.lower_type(const_.type_)
         var init_const: MirConstant? = nil
         if val const_value = folded:
