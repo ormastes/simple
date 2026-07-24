@@ -1,94 +1,47 @@
 #!/bin/sh
-# Build complete hosted runtime symbol providers for dynload Simple artifacts.
+# Build the hosted runtime dylib with the complete runtime symbol table.
 #
-# The Rust provider owns the generated runtime symbol table. The C provider is
-# staged separately so platform linkers cannot discard C symbols referenced
-# only through dynamic lookup.
+# Native hosted executables intentionally resolve runtime-owned externs from
+# this dynamic provider. The runtime-symbol-table feature retains canonical C
+# providers that Cargo would otherwise dead-strip from the cdylib.
 set -eu
 
 REPO_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
-RUST_ROOT="$REPO_ROOT/src/compiler_rust"
-C_RUNTIME="$REPO_ROOT/src/runtime"
+CRATE_ROOT="$REPO_ROOT/src/compiler_rust"
 OUT_DIR="$REPO_ROOT/build/sffi"
-RUNTIME_FEATURES="${SIMPLE_RUNTIME_SFFI_FEATURES:-runtime-symbol-table,vulkan}"
 
 case "$(uname -s)" in
-    Darwin)
-        EXT=dylib
-        SHARED_FLAG=-dynamiclib
-        UNDEFINED_FLAGS="-Wl,-undefined,dynamic_lookup"
-        SONAME_FLAG=""
-        ;;
-    Linux|FreeBSD)
-        EXT=so
-        SHARED_FLAG=-shared
-        UNDEFINED_FLAGS=""
-        SONAME_FLAG="-Wl,-soname,libsimple_runtime_c_wm.so"
-        ;;
-    *)
-        echo "error: unsupported host for runtime SFFI provider: $(uname -s)" >&2
-        exit 1
-        ;;
+  Darwin) EXT="dylib" ;;
+  Linux|FreeBSD) EXT="so" ;;
+  *) EXT="dll" ;;
 esac
 
-echo "[build_simple_runtime_sffi] cargo build simple-runtime"
-if [ "$(uname -s)" = Darwin ]; then
-    cargo build --manifest-path "$RUST_ROOT/Cargo.toml" --release \
-        -p simple-runtime --features "$RUNTIME_FEATURES"
-else
-    RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-Wl,-soname,libsimple_runtime_wm.so" \
-        cargo build --manifest-path "$RUST_ROOT/Cargo.toml" --release \
-            -p simple-runtime --features "$RUNTIME_FEATURES"
-fi
+(cd "$CRATE_ROOT" && cargo build -p simple-runtime --release --features runtime-symbol-table)
 
 mkdir -p "$OUT_DIR"
-RUST_SRC="$RUST_ROOT/target/release/libsimple_runtime.$EXT"
-RUST_DST="$OUT_DIR/libsimple_runtime_wm.$EXT"
-test -s "$RUST_SRC"
-cp "$RUST_SRC" "$RUST_DST.new"
-if [ "$(uname -s)" = Darwin ]; then
-    install_name_tool -id "@rpath/$(basename "$RUST_DST")" "$RUST_DST.new"
+SRC="$CRATE_ROOT/target/release/libsimple_runtime.$EXT"
+DST="$OUT_DIR/libsimple_runtime_wm.$EXT"
+cp "$SRC" "$DST.new"
+mv "$DST.new" "$DST"
+echo "[build_simple_runtime_sffi] staged: $DST"
+
+C_ARCHIVE="$(find "$CRATE_ROOT/target/release/build" -path '*/simple-runtime-*/out/libruntime_sffi_c.a' -type f -print0 | xargs -0 ls -t | head -1)"
+if [ ! -s "$C_ARCHIVE" ]; then
+  echo "[build_simple_runtime_sffi] missing Cargo C-runtime archive" >&2
+  exit 1
 fi
-mv "$RUST_DST.new" "$RUST_DST"
-
-for symbol in \
-    rt_vulkan_compile_spirv_raw \
-    rt_vulkan_copy_to_buffer_raw \
-    rt_vulkan_copy_from_buffer_raw \
-    rt_vulkan_push_constants_raw
-do
-    nm -g "$RUST_DST" |
-        grep -Eq "(_|[[:space:]])${symbol}$" || {
-            echo "[build_simple_runtime_sffi] missing required export: $symbol" >&2
-            exit 1
-        }
-done
-
-CC_BIN="${CC:-cc}"
 C_DST="$OUT_DIR/libsimple_runtime_c_wm.$EXT"
-"$CC_BIN" "$SHARED_FLAG" $UNDEFINED_FLAGS -fPIC -O2 -std=gnu11 -I"$C_RUNTIME" \
-    $SONAME_FLAG \
-    "$C_RUNTIME/runtime_memory.c" \
-    "$C_RUNTIME/runtime_time.c" \
-    "$C_RUNTIME/runtime_timestamp.c" \
-    "$C_RUNTIME/runtime_db.c" \
-    "$C_RUNTIME/runtime_pool.c" \
-    "$C_RUNTIME/runtime_framebuffer.c" \
-    "$C_RUNTIME/runtime_directx_core.c" \
-    "$C_RUNTIME/runtime_rocm.c" \
-    "$C_RUNTIME/runtime_hosted_signal.c" \
-    "$C_RUNTIME/runtime_hosted_fs.c" \
-    "$C_RUNTIME/runtime_font.c" \
-    -lm -o "$C_DST.new"
-if [ "$(uname -s)" = Darwin ]; then
-    install_name_tool -id "@rpath/$(basename "$C_DST")" "$C_DST.new"
-fi
+case "$(uname -s)" in
+  Darwin)
+    cc -dynamiclib -Wl,-undefined,dynamic_lookup -Wl,-force_load,"$C_ARCHIVE" -o "$C_DST.new" -lm
+    ;;
+  Linux|FreeBSD)
+    cc -shared -Wl,--whole-archive "$C_ARCHIVE" -Wl,--no-whole-archive -o "$C_DST.new" -lm
+    ;;
+  *)
+    echo "[build_simple_runtime_sffi] unsupported host for C provider" >&2
+    exit 1
+    ;;
+esac
 mv "$C_DST.new" "$C_DST"
-
-if [ "$(uname -s)" != Darwin ]; then
-    readelf -d "$RUST_DST" | grep -F "Library soname: [$(basename "$RUST_DST")]" >/dev/null
-    readelf -d "$C_DST" | grep -F "Library soname: [$(basename "$C_DST")]" >/dev/null
-fi
-
-echo "[build_simple_runtime_sffi] staged: $RUST_DST"
 echo "[build_simple_runtime_sffi] staged: $C_DST"

@@ -4,36 +4,6 @@
 **Severity:** high (blocks single-file spec runs repo-wide on the deployed binary)
 **Status:** OPEN — hypothesis pending fresh-seed confirmation
 
-## 2026-07-24 macOS deployed-runner confirmation
-
-The current macOS `bin/simple` still points at
-`bin/release/aarch64-apple-darwin-macho/simple`. That Mach-O is dated
-2026-07-05 and has SHA-256
-`09b1ed4583d5b563360af7c4c00b1ef681e09048451279d64ca98c7e4c65549f`.
-Its exported symbols include `rt_process_run` and
-`rt_process_run_timeout`, but not `rt_process_run_bounded` or
-`rt_process_run_bounded_tuple`.
-
-The bounded-process facade landed later in `f28f8b747c` (2026-07-17).
-At `653261301c97`, current source contains the canonical Simple facade, Rust
-interpreter registration, C process provider, native tuple provider, and
-pure-Simple codegen mapping. Therefore the ARM/WM focused specs failing before
-load with `unknown extern function: rt_process_run_bounded` confirm deployed
-artifact skew; they do not justify a new extern alias or feature-local wrapper.
-Neither failed spec was rerun.
-
-The repair gate is an isolated clean current-source build. Do not overwrite
-live MCP/tool binaries merely to run one spec:
-
-```sh
-sh scripts/bootstrap/bootstrap-from-scratch.sh --full-cli \
-  --output build/current-full-cli
-```
-
-Run the two focused specs directly with the resulting full CLI. Deploy with
-`--deploy` only after concurrent MCP/tool sessions are clear and the same
-artifact passes the essential-tools smoke.
-
 ## 2026-07-18 native-owner update
 
 The separate self-hosted native gap is now fixed in source: hosted C owns

@@ -9,29 +9,6 @@ failure is **never** silently converted to a wrong answer.
 
 ## Current session remaining (2026-07-24)
 
-- **C5 positional self-host gate:** the exact `nul` trace now proves
-  `0.chr()` is extracted as a MethodCall and lowers to local 1 with the
-  `Opaque("str")` discriminator. V22 proved the earlier Dict arm was a raw
-  enum-pattern false positive; discriminator-first Dict classification removes
-  that failure. Const predispatch now lets Cranelift compile all five C5
-  functions and emit the positional executable, which reaches exit `5`
-  (`nul.len() != 1`). Current source preserves the tagged `rt_char_from_code`
-  result and routes proven tagged text through `rt_string_len`, but the capped
-  V26-V28 attempt exposed a Cranelift instruction-dispatch crash before a new
-  executable could run. Resume by isolating the `main`-function
-  `BinOp`/`type_is_unsigned` misdispatch, not by changing NUL semantics,
-  revisiting Dict provenance, or patching the fixture.
-- **C9 positional self-host gate:** remains intentionally blocked until C5
-  builds without unresolved warnings and its executable exits `42`; then run
-  the unchanged `.parse_f64()` fixture once and require exit `42`.
-- **Function-returned Dict positional gate:** the current pure-Simple compiler
-  still cannot build `dict_fn_value.spl` under Cranelift. V29-V31 prove the
-  crash is before backend entry: the bootstrap flat block path marks a final
-  explicit `return` as a tail value, then stores a nil `HirExpr` payload.
-  Normal HIR tail matching is now discriminator-guarded and mandatory
-  `HirFunction.return_type` is lowered directly, but the exact fixture remains
-  red (`132`, expected executable exit `33`). Next fix the bootstrap-flat block
-  owner without editing the concurrently owned default-workspace file.
 - **MCP native receipt:** the fresh pure-Simple Stage4 compiler reached link,
   but its automatic `core-c-bootstrap` lane lacks the simple-core owners MCP
   needs. A complete simple-core archive was built successfully at
@@ -71,9 +48,9 @@ failure is **never** silently converted to a wrong answer.
   case passed, with zero FAIL/XFAIL/XPASS/codegen-fallback results.
 - **Gate 2 — parity:** `scripts/check/check-native-seed-parity.shs` (dual-backend
   regression harness) must report `native_seed_parity=true`. By default it
-  defines **96 logical cases / 135 recorded checks** because strict-dual cases
+  defines **95 logical cases / 133 recorded checks** because strict-dual cases
   record LLVM and Cranelift separately. `NATIVE_OPEN_BUG_REPROS=1` expands this
-  to **97 logical cases / 136 recorded checks**; execution is opt-in because
+  to **96 logical cases / 134 recorded checks**; execution is opt-in because
   the exact brace-literal reproduction remains known-red. Execution of the
   expanded matrix is pending.
   The full unfiltered gate is now scheduled on Linux x86_64 LLVM (STRICT-DUAL
@@ -456,16 +433,15 @@ the shared binary — deploys require explicit user go-ahead).
   of discarding the previous one. Pure runtime `source.chars()` now reuses each
   one-byte character handle within a conversion, retaining at most 256 distinct
   one-byte string objects plus unchanged multibyte objects. The O(N)
-  The next isolated candidate restores whole-owner `CoreLexer` replacement
-  between sources. Fresh CI proved only that removing the later eager array
-  release was insufficient; exact Stage4 CI must still decide whether the
-  preceding slot-element overwrite caused the corruption. Safe owner reuse
-  requires compiled value-assignment evidence before it can return. Stage4 RSS
-  evidence is pending. A
+  `source_chars` reference array is now shallow-released after each active lexer
+  replacement across pure-Simple, hosted-C, Rust native/JIT, and interpreter
+  ownership models. Stage4 RSS evidence is pending. A
   bounded current-source refresh reached its 180-second cap without an
   artifact, while an isolated lexer probe compiled from cache but could not
   link through the preserved driver's incomplete pure/core-C runtime bundle
-  projection.
+  projection. The aligned shallow-release ABI now enforces active-slot
+  replacement before release; freeing the old array earlier remains an
+  aliasing/UAF bug.
   The isolated rich-module bridge now resets the flat type/span/token/symbol/
   signature/composite pools before each file, while `reset_all_pools` clears
   their outer arrays in place instead of registering replacement arrays. A
@@ -625,18 +601,6 @@ the shared binary — deploys require explicit user go-ahead).
   hosted LLVM/Cranelift, FreeBSD LLVM/Cranelift, and Cranelift AArch64/RISC-V64
   QEMU gates. Rebuilt current-source execution remains pending. See
   `native_string_methods_unresolved_in_mir_2026-07-17.md`.
-- FreeBSD's explicit Cranelift smoke subset now schedules the existing
-  `dict_struct_value` fixture (exit `73`), closing its selection gap for
-  struct-valued Dict store/read and text-key iteration. The full captured
-  output must contain the exact Dict PASS row with zero fallback hits; first
-  full FreeBSD execution remains pending. The default LLVM lane continues to
-  run the full matrix; no duplicate fixture or FreeBSD-specific semantics were
-  added. The bounded portability contract
-  progressed past stale Windows-ARM64 object-count and parity-registration
-  assertions after those contracts were aligned with their existing
-  cross-module gates. Its third run stopped at the independent hosted Option
-  parity assertion (`SIMPLE_BINARY="$stage3"` missing), so full portability
-  PASS is not credited and that separate workflow contract remains next.
 - Integer `.chr()`/`.to_char()` now keeps primitive-builtin priority over an
   unrelated same-named UFCS free function while preserving custom struct
   method ownership. The pure-Simple runtime/interpreter and x86/ARM C hardware
@@ -710,301 +674,15 @@ the shared binary — deploys require explicit user go-ahead).
   proved primitive calls reach `runtime_int=true` and lower successfully; only
   `CharOwner` plus `char_code_at` still warned. A v11 no-stub rebuild completed
   with `5 compiled, 670 cached, 0 failed`; its declared-owner provenance bridge
-  eliminated the `chr`/`to_char` warnings.
+  eliminated the `chr`/`to_char` warnings. The final positional C5 receipt now
+  fails only at `char_code_at`. That v11 candidate already contains the
+  discriminator-safe `mir_type_is_str` Opaque/Tuple hardening, so repeating
+  that change is not the next fix.
 
-  Fresh cycle receipts narrow but do not yet source-correlate the remaining
-  transport fault. V12 (`5 compiled, 670 cached, 0 failed`) observed a decoded
-  `chr` result at local 8 with `Opaque` discriminator `2429702914` and
-  `is_str=true`; a nearby `let` for symbol 8 then became non-string and bound
-  local 9 as `I64` discriminator `258540933`, while the downstream
-  `char_code_at` receiver 9 had `is_str=false`. C5 contains several later
-  primitive `chr`/`to_char` calls, so that trace sequence is not proof that
-  local 8 was specifically `val nul = 0.chr()`. Experimental V13 MethodCall
-  predispatch (`4 compiled, 671 cached, 0 failed`) and V14 typed LocalId
-  anchors (`5 compiled, 670 cached, 0 failed`) left the failure unchanged and
-  were reverted rather than freezing disproved hypotheses in shared lowering.
-
-  The next session's source-correlated V15 trace completed with a valid
-  no-stub incremental compiler (`4 compiled, 671 cached, 0 failed`). It
-  identified symbol `8:nul`; both statement and initializer spans are
-  unavailable (`0:0`) on this flat-HIR route, but the exact symbol-name gate
-  makes the row unique. Its initializer discriminator exactly matched
-  `HirExprKind.MethodCall`, the isolated qualified payload was
-  `method=chr,args=0`, and lowering returned local 1 with `Opaque("str")`
-  discriminator `2429702914`. At the first adjacent boundary,
-  `local_is_str(local 1)` returned nil, so Let selected `I64` discriminator
-  `258540933` and bound local 9 as I64. The downstream `char_code_at` failure
-  is therefore a consequence, not the repair site.
-
-  Three bounded repairs at that shared helper boundary were tested with fresh
-  positional C5 caches: delegating through `local_mir_type_of`, replacing the
-  loop's nested return with a boolean accumulator, and performing
-  discriminator-first Opaque classification directly in the accumulator.
-  Each rebuilt a valid no-stub compiler (`4 compiled, 671 cached, 0 failed`)
-  and each left the same sole `char_code_at` unresolved failure. All three
-  unproven code changes and all diagnostic prints were reverted.
-
-  A fresh three-cycle fixed-marker session then disproved the wrapper/boolean
-  ABI hypothesis. V19 rebuilt `6 compiled, 669 cached, 0 failed`; its exact
-  `nul` row showed the string predicate body returning true and the
-  `local_is_str` wrapper returning true, while the effective type was still
-  non-Opaque. V20 rebuilt `5 compiled, 670 cached, 0 failed`; both a
-  statement-form wrapper probe and a two-arm conditional-expression probe
-  returned true, but neither the production STR nor DEFAULT arm executed.
-  V21 rebuilt `4 compiled, 671 cached, 0 failed` and identified the one
-  preempting arm as `LET_BRANCH_DICT`. Each fresh positional C5 cache retained
-  the same sole unresolved `char_code_at` failure.
-
-  `reset_function_local_tracking()` already clears `runtime_dict_locals` at
-  normal, bootstrap-flat, and module-initializer function entry, with existing
-  lifecycle coverage. The next exact diagnostic is therefore inside
-  `local_is_runtime_dict`: for the correlated `nul` local, separately mark the
-  `runtime_dict_locals.contains(local.id)` result and the raw
-  `MirTypeKind.Dict` type-match result. A membership hit requires tracing the
-  same-function tag producer; a membership miss plus Dict match requires the
-  same discriminator-first enum classification already used by
-  `mir_type_is_str`. Do not change reset ownership without evidence, and do
-  not repeat initializer extraction, string helper/ABI, two-arm conditional,
-  MethodCall-discriminator, LocalId-anchor, or type-anchor probes. All
-  V19–V21 diagnostics were removed. C9 remains gated: only
-  after a fresh positional C5
-  executable exits `42` should the next bottom-up item run, positional C9
-  `.parse_f64()` with exit `42`. See
+  This C5 diagnosis has reached its three-cycle cap. The next exact diagnostic
+  is to inspect the produced `chr` result/local MIR type and its `let`
+  propagation into `nul` before adding any fallback. Do not infer a new
+  fallback from the remaining `char_code_at` warning. C9 remains gated: only
+  after a fresh positional C5 executable exits `42` should the next bottom-up
+  item run, positional C9 `.parse_f64()` with exit `42`. See
   `native_chr_builtin_no_lowering_2026-07-18.md`.
-
-  V22 then separated the Dict classifier's two true paths:
-  `DICT_MEMBER_FALSE`, a non-Dict runtime discriminator, and
-  `DICT_RAW_MATCH_TRUE`. The raw multi-field enum match was therefore a proven
-  false positive, not stale `runtime_dict_locals` provenance. Current source
-  replaces that match with discriminator equality. The same collision class
-  was present in both active backend Const dispatchers; current source
-  predispatches `MirInstKind.Const`, extracts its tagged tuple payload through
-  `rt_tuple_get`, and bypasses the raw-match path in each hot dispatcher.
-
-  V23 rebuilt `4 compiled, 671 cached, 0 failed`; C5 no longer emitted
-  unresolved `char_code_at`, but the compiler crashed after entering Cranelift
-  compilation of free `to_char`; its first MIR instruction is a string Const.
-  V24 rebuilt `5 compiled, 670 cached, 0 failed`;
-  Cranelift compiled all five functions, emitted the positional artifact, and
-  that executable exited `5`. This is partial progress, not C5 completion:
-  the fixture's NUL-length assertion fails, and the exact runtime/decode/length
-  boundary remains unassigned pending the next correlated trace.
-
-  The V24 LLVM positional C5 build still exits `139` with no phase output, so
-  LLVM Const predispatch is implemented but not execution-proven. The genuine
-  `dict_fn_value.spl` Cranelift control also exits `139` before backend output;
-  an identical fresh-cache V22 A/B run fails at the same boundary, proving
-  this is pre-existing rather than a discriminator-guard regression. The
-  deployed pure-Simple focused source-test runner timed out after 180 seconds
-  without a result and was not rerun. Next diagnose only C5's unique
-  `nul` value through `rt_char_from_code`, `decode_runtime_value`, and `.len()`
-  lowering. Track the empty-log LLVM and genuine-Dict compiler crashes as
-  separate backend residuals. C9 remains gated on positional C5 exit `42`.
-
-  The bounded embedded-NUL attempt then preserved `rt_char_from_code`'s tagged
-  length-bearing result in an `Opaque("str")` local, reused existing
-  `runtime_value_locals` propagation, bypassed C-string re-tagging for proven
-  tagged text, and selected `rt_string_len` in method and bare-field length
-  lowering. V25 rebuilt `4 compiled, 671 cached, 0 failed`; it was superseded
-  before C5 execution when review required the same tagged-length routing for
-  both bare-field lowering arms. V26 rebuilt `4 compiled, 671 cached, 0 failed`
-  and compiled/emitted every C5 function, but a false Cranelift GEMM-add fusion
-  in `main` emitted
-  undefined `__simple_runtime_gemm_add` references, so hosted linking failed.
-  Exact instruction and `MatMul`/`BroadcastAdd` discriminator guards now reject
-  adjacent non-binop instructions.
-
-  V27 rebuilt `4 compiled, 671 cached, 0 failed`; after that fusion guard, C5
-  SIGSEGVed while compiling `main`. Its single GDB receipt places the fault in
-  `type_is_unsigned <- cl_translate_binop <- cl_translate_instruction <-
-  compile_function`, consistent with another raw instruction-pattern
-  collision. V28 rebuilt `5 compiled, 670 cached, 0 failed`; exact Copy
-  predispatch in both active backends still left C5 crashing at `compile main`.
-  The three-cycle cap stopped the attempt there. No new C5 executable assertion,
-  focused source-test result, LLVM receipt, or C9 run is credited. Next isolate
-  the Cranelift `BinOp` discriminator at the `main` instruction boundary; do
-  not add another NUL semantic workaround or runtime-link shim. C5 remains
-  incomplete, and C9 remains gated on a fresh positional C5 exit `42`.
-  Focused interpreter contracts pass for chr provenance (`5/5`) and GEMM
-  fusion rejection (`4/4`). The broader aggregate-runtime ABI contract timed
-  out after 180 seconds before reporting a result and must not be credited or
-  rerun in this session.
-
-  The independent function-returned Dict control was then rerun with the
-  current compiler and phase tracing. V29 rebuilt `4 compiled, 671 cached, 0
-  failed`; its fresh positional Cranelift run completed HIR, entered MIR
-  lowering for `main`, then reported `block.has=true` for the final explicit
-  `return` and failed reading a nil block value (`132`). Discriminator-first
-  tail-expression classification was added to the normal HIR block owner. V30
-  rebuilt `4/671/0`; function iteration exposed a second stale invariant at
-  `make_scores` return-type lowering: mandatory `HirFunction.return_type` was
-  still tested with optional truthiness. That field is now lowered directly.
-  V31 rebuilt `4/671/0`, but the fresh exact run again reached `main` first and
-  failed on the same false bootstrap-flat tail value (`132`). No backend marker
-  was reached and no executable was emitted, so neither Cranelift nor the
-  expected exit `33` is credited. The three-cycle cap stopped there. The
-  remaining owner is `lower_bootstrap_flat_block` in the concurrently owned
-  flat module-lowering file: it encodes `return` as an expression statement,
-  then raw-matches the final statement as a tail expression and extracts a nil
-  payload. Fix that owner in a non-conflicting lane before promoting the exact
-  fixture to strict dual-backend/platform coverage.
-
-  A later isolated lane established that the fixture actually uses the normal
-  HIR function/block path; the flat helper is only a sibling prevention fix.
-  V32 rebuilt `9 compiled, 666 cached, 0 failed`, but still stopped at the
-  declared Dict return type. V33 rebuilt `4/671/0`; reconstructing encoded
-  `Dict<K,V>` in the bootstrap-flat helper was correct but did not affect this
-  active path. V34 added exact `HirTypeKind.Dict` MIR predispatch and the
-  missing inner `HirExprKind.Return` guard in normal block lowering, then
-  rebuilt `5/670/0`. Its fresh positional Cranelift receipt proves the normal
-  Return guard took effect: `main` completed its i64 return-type lowering and
-  its explicit return remained executable (`block:start stmts=2 has=false`)
-  instead of becoming a nil tail value. Function iteration did not reach
-  `make_scores`, so the Dict predispatch remains compile/source-contract
-  covered but execution-pending.
-
-  V34 now stops on statement 1 with `field access on nil receiver` (exit 132),
-  before any backend marker or artifact. The next owner is the already
-  documented residual in `src/compiler/50.mir/mir_lowering_stmts.spl`
-  `lower_stmt`: exact outer `HirStmtKind.Expr` dispatch succeeds, but the inner
-  payload extraction can still yield its NilLit fallback under the native
-  worker. Correlate statement 1 through that extraction and
-  `MirLowering.lower_expr` Return dispatch; fix the shared extraction boundary,
-  not Cranelift. The three-cycle cap stopped here. LLVM, exit `33`, implicit
-  tail, neighbor Dict-struct, and platform promotion remain gated.
-
-  The next fresh-object session separated stale code from the active
-  collision. V35 forced both HIR/MIR statement modules through a cloned cache
-  and traced equal, nonnegative `HirStmtKind.Expr` discriminants; its extracted
-  expression discriminator exactly matched `HirExprKind.Return`. V36 rebuilt
-  those modules without tracing plus exact Return predispatch (`5 compiled,
-  670 cached, 0 failed`) and still stopped on statement 1. V37 replaced the
-  code-layout-sensitive Expr payload match with the runtime payload reader,
-  retained a loud nil guard, and centralized the existing Return lowering
-  behind exact predispatch (`4/671/0`). Its GDB receipt proves that path is
-  active: `lower_stmt -> lower_expr -> lower_return_expr -> lower_expr`.
-
-  The remaining crash is one child deeper. Disassembly maps the recursive call
-  to the active Binary arm lowering its left operand, which is `d["a"]`; the
-  child `HirExprKind.Index` then misroutes in the giant raw expression match.
-  Next extract the existing complete Index arm into one
-  `lower_index_expr(base, index, result_type)` helper and route both exact
-  Index predispatch and the legacy arm through it. Do not duplicate or narrow
-  its Dict/text/array/slice/CLI semantics. Cranelift/LLVM exit `33`, the
-  implicit-tail control, neighbor Dict-struct, and platform promotion remain
-  gated.
-
-  A first V38-V40 attempt compiled and produced useful provisional traces, but
-  final review found that the delegated `expr_dispatch.spl` edit had also
-  imported unrelated default-worktree hunks for Dict classification, string
-  length, NullCoalesce, and runtime propagation. Those candidates are rejected
-  as evidence for the Index fix.
-
-  The file was restored from `@-` and only the three intended Index hunks were
-  reapplied: complete helper extraction, exact discriminator predispatch, and
-  legacy-arm delegation. The corrected diff is source-contract covered but
-  execution-pending because the three-cycle cap was already reached. The mixed
-  Return/tail fixture is
-  `test/03_system/native/hir_stmt_expr_return_tail.spl` and remains known-red
-  and unregistered until a clean candidate exits `33`.
-
-  Next fresh session, build the corrected diff once and run exact Dict under
-  Cranelift. If it exits `33`, run LLVM, the mixed fixture, and neighbor
-  `dict_struct_value` expecting `73`. Do not credit the provisional call
-  diagnosis until it is reproduced from the clean diff.
-
-  V41 did not reach Index execution. Reusing the compiler-only cache with the
-  full `src/app/cli/main.spl` entry exposed the newer runtime-lane policy:
-  `simple-core` has no archive in this workspace, and both
-  `core-c-bootstrap` and `auto` compile the closure but fail to link its hosted
-  process/GUI externs. These are rejected as Index evidence. Separately,
-  `bootstrap_main.spl` source policy rejects the removed hosted bundle aliases;
-  that rejection is not a V41 runtime receipt. The three-cycle cap stopped
-  before another build.
-
-  The next clean compiler candidate must use the canonical bootstrap entry,
-  not the hosted full-CLI entry: `SIMPLE_BOOTSTRAP=1`,
-  `--runtime-bundle core-c-bootstrap`, and
-  `--entry src/app/cli/bootstrap_main.spl`, matching
-  `scripts/bootstrap/bootstrap-from-scratch.sh`. That candidate's positional
-  native-build path runs the pure-Simple `CompilerDriver`, so it can prove the
-  corrected Index lowering without importing unrelated hosted modules.
-
-  Review also found that the positional bootstrap path rejects known removed
-  bundle aliases and consumes runtime option values while finding its `.spl`
-  input, but does not forward `--runtime-bundle` or `--runtime-path` into its
-  in-process driver. Keep that as a separate bootstrap/MCP runtime-provider
-  bug: reproduce with an explicit simple-core archive, resolve that archive
-  from the runtime-path directory contract, then save/set/restore
-  `SIMPLE_NATIVE_RUNTIME_BUNDLE`, `SIMPLE_RUNTIME_PATH`, and
-  `SIMPLE_CORE_RUNTIME_PATH` plus `SIMPLE_LINK_OBJECTS` in
-  `bootstrap_main.spl`. Do not solve it by restoring the removed
-  hosted/native-all lane.
-
-  V42 used the canonical bootstrap entry and built cleanly (`3 compiled, 673
-  cached, 0 failed`), proving the full-CLI runtime-lane blocker was avoided.
-  Exact Cranelift `dict_fn_value` then entered the pure-Simple driver and
-  trapped in `lower_index_expr` with `field access on nil receiver` (exit
-  `132`), so Index execution remains red.
-
-  V43 replaced the two-field Index pattern binding with the representation
-  pattern already used by the LLVM/Cranelift adapters:
-  `rt_enum_payload` plus tuple slots 0 and 1. It rebuilt `4/672/0`; GDB proved
-  `lower_index_expr_from_hir -> lower_index_expr`, but the same nil-field trap
-  remained inside the complete helper. V44 replaced the helper's unsafe
-  `MirType? != nil` dereferences with explicit `if val` unwrapping for both
-  Dict and array/slice paths and rebuilt `4/672/0`; exact Cranelift still
-  exited `132` before producing an executable. No `33` receipt exists.
-
-  The three-cycle cap stopped here. Next fresh session, localize the remaining
-  field access inside `lower_index_expr` with one gated stage trace or a
-  line-mapped debug candidate, then fix that single owner. Do not add a
-  Cranelift special case, promote the fixture, or run LLVM/platform matrices
-  until exact Cranelift builds and exits `33`.
-
-  V45 mapped the prior trap to `lower_type(index_result_hir_type)` followed by
-  `result_type.kind`. GDB showed the optional boundary transported a boxed
-  `Some(HirType)` wrapper rather than its payload. V46 replaced that boundary
-  with the HIR-native `has_type` plus raw `type_` pair and rebuilt
-  `4 compiled, 672 cached, 0 failed`, but exact Cranelift still exited `132`.
-  Its entry registers showed both missing metadata fields arriving as tagged
-  nil (`3`); direct truthiness treated that nonzero tag as true.
-
-  V47 normalized both Index call-site flags with `has_type_ == true` and
-  required `type_ != nil` before lowering metadata. It rebuilt `4/672/0`, but
-  exact Cranelift still exited `132` with `field access on nil receiver`.
-  The three-cycle cap stopped before mapping the new trap. These changes harden
-  the shared HIR boundary but do not complete Index.
-
-  Next fresh session, map the V47 trap address before editing. Fix only that
-  newly proven receiver, then rebuild once and require exact Cranelift exit
-  `33`. LLVM, mixed Return/tail, neighbor Dict-struct, and all platform
-  promotion remain gated.
-
-  V48 removed the remaining Optional transport around Index-owned MIR-local
-  type lookups. It rebuilt `6 compiled, 670 cached, 0 failed` and produced the
-  first executable, but that executable segfaulted in a raw Index GEP because
-  the call result had lost its declared Dict provenance.
-
-  Diagnostic V49 taught call-result lowering to consume the existing
-  `fn_return_types` registry and tag Dict/Array/Slice/Optional results. It
-  rebuilt `4/672/0`, but the exact fixture still segfaulted because neither
-  MIR module entry path populated the registry.
-
-  Diagnostic V50 populated that registry and rebuilt `5 compiled, 671 cached,
-  0 failed`. Exact Cranelift `dict_fn_value` then linked and ran instead of
-  crashing, but exited `23` rather than `33`. Assembly showed the Dict storing
-  raw `11` and `22`; readback decoded them as `1` and `22`. The common
-  `box_runtime_value` Optional type lookup had skipped integer tagging.
-
-  V49/V50 return-registry changes are rejected from the retained diff:
-  bootstrap assigns symbol ID `100` to every ordinary function, so an
-  ID-keyed registry silently overwrites unrelated return types. Only the V48
-  direct MIR-local lookup hardening remains.
-
-  The three-cycle cap stops here. Next fresh session, diagnose the wrong Dict
-  provenance by the resolved direct-call name or emitted MIR return type, not
-  the lossy bootstrap symbol ID. Apply the same explicit builder-local
-  type scan to `box_runtime_value`, then require exact Cranelift exit `33`
-  before LLVM, mixed Return/tail, Dict-struct, MCP/bootstrap sanity, or
-  platform promotion.

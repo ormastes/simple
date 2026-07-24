@@ -23,7 +23,6 @@ use compiler.backend.gpu_intrinsics.{is_gpu_intrinsic}
 # cannot resolve it — declare the runtime extern directly.
 extern fn rt_dict_contains(dict: i64, key: Any) -> bool
 extern fn rt_env_get(key: text) -> text
-extern fn rt_enum_discriminant(value: Any) -> i64
 
 # ============================================================================
 # Expression Lowering
@@ -550,10 +549,9 @@ impl MirLowering:
         mutation because the receiver is loaded as a value copy into a
         temporary (pure-Simple equivalent of Rust seed bug #28).
         """
-        val resolution_disc = rt_enum_discriminant(resolution)
-        val resolution_is_unresolved = resolution_disc == rt_enum_discriminant(MethodResolution.Unresolved)
-        val resolution_is_free_function = resolution_disc == rt_enum_discriminant(MethodResolution.FreeFunction(SymbolId(id: -1)))
-        val resolution_is_instance_method = resolution_disc == rt_enum_discriminant(MethodResolution.InstanceMethod(SymbolId(id: -1), SymbolId(id: -1)))
+        val resolution_is_unresolved = match resolution:
+            case Unresolved: true
+            case _: false
         var result_ok_type: HirType? = nil
         var result_err_type: HirType? = nil
         if method == "unwrap" or method == "unwrap_or":
@@ -612,7 +610,9 @@ impl MirLowering:
         # stale aggregate-owner shape seen in the freestanding CSS failure.
         # Trait/UFCS/free-function methods keep their explicit resolution, and
         # static methods have no value receiver to pre-lower.
-        val predicate_owner_recovery_allowed = resolution_is_unresolved or resolution_is_instance_method
+        val predicate_owner_recovery_allowed = match resolution:
+            case Unresolved | InstanceMethod(_, _): true
+            case _: false
         if predicate_method_shape and predicate_owner_recovery_allowed:
             val static_predicate_key = "static::{static_receiver_name}::{method}"
             if resolution_is_unresolved and static_receiver_name != "" and self.struct_method_syms.contains(static_predicate_key):
@@ -642,29 +642,22 @@ impl MirLowering:
         # that owner before the primitive fallback below.
         var chr_has_custom_owner = false
         val chr_method_shape = (method == "chr" or method == "to_char") and args.len() == 0
-        val chr_primitive_resolution_allowed = resolution_is_unresolved or resolution_is_free_function
+        val chr_primitive_resolution_allowed = match resolution:
+            case Unresolved | FreeFunction(_): true
+            case _: false
         if resolution_is_unresolved and chr_method_shape:
             val static_chr_key = "static::{static_receiver_name}::{method}"
             if static_receiver_name != "" and self.struct_method_syms.contains(static_chr_key):
                 chr_has_custom_owner = true
             else:
                 var declared_chr_owner = ""
-                val chr_receiver_type = self.receiver_declared_type(receiver)
-                if chr_receiver_type != nil:
-                    val found_chr_receiver_type = chr_receiver_type ?? HirType(kind: HirTypeKind.Error, span: receiver.span)
-                    val named_disc = rt_enum_discriminant(HirTypeKind.Named(SymbolId(id: -1), []))
-                    if rt_enum_discriminant(found_chr_receiver_type.kind) == named_disc:
-                        match found_chr_receiver_type.kind:
-                            case HirTypeKind.Named(chr_owner_symbol, _):
-                                val chr_owner_definition = self.symbols.get_symbol_raw(chr_owner_symbol.id)
-                                if chr_owner_definition != nil:
-                                    declared_chr_owner = chr_owner_definition.name
-                            case _: ()
+                if val chr_receiver_type = receiver.type_:
+                    match chr_receiver_type.kind:
+                        case HirTypeKind.Named(chr_owner_symbol, _):
+                            if val chr_owner_definition = self.symbols.get_symbol_raw(chr_owner_symbol.id):
+                                declared_chr_owner = chr_owner_definition.name
+                        case _: ()
                 if declared_chr_owner != "" and self.struct_method_syms.contains("{declared_chr_owner}::{method}"):
-                    if not has_prelowered_method_receiver:
-                        prelowered_method_receiver = self.lower_expr(receiver)
-                        has_prelowered_method_receiver = true
-                    self.struct_value_syms[prelowered_method_receiver.id] = declared_chr_owner
                     chr_has_custom_owner = true
                 else:
                     if not has_prelowered_method_receiver:
