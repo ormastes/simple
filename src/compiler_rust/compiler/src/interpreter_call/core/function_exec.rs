@@ -6,7 +6,8 @@ use super::macros::*;
 use crate::error::CompileError;
 use crate::interpreter::{
     exec_block_fn, Control, CONST_NAMES, IMMUTABLE_VARS, IN_IMMUTABLE_FN_METHOD, GENERATOR_YIELDS, CURRENT_EXEC_MODULE,
-    FUNCTION_MODULE_OWNER,
+    FUNCTION_MODULE_OWNER, MODULE_ENV_BY_OWNER, MODULE_GLOBALS, MODULE_GLOBALS_BY_OWNER,
+    MODULE_GLOBALS_INITIAL_BY_OWNER,
 };
 use crate::interpreter_unit::{is_unit_type, validate_unit_type};
 use crate::value::*;
@@ -16,11 +17,151 @@ use simple_parser::ast::{
 };
 use simple_runtime::value::diagram_sffi;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
 type Enums = HashMap<String, Arc<EnumDef>>;
 type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
+
+fn function_module_owner(func: &FunctionDef) -> Option<Arc<str>> {
+    let key = func as *const FunctionDef as usize;
+    FUNCTION_MODULE_OWNER
+        .with(|cell| cell.borrow().get(&key).cloned())
+        .or_else(|| {
+            func.attributes.iter().find_map(|attribute| {
+                attribute
+                    .name
+                    .strip_prefix(crate::interpreter::FLATTEN_MODULE_OWNER_ATTR_PREFIX)
+                    .map(|raw| {
+                        Arc::from(
+                            crate::interpreter::normalize_path_key(Path::new(raw))
+                                .to_string_lossy()
+                                .as_ref(),
+                        )
+                    })
+            })
+        })
+}
+
+fn captured_env_with_live_globals(func: &FunctionDef, captured_env: &Env) -> Env {
+    let Some(owner) = function_module_owner(func) else {
+        let mut initial_env = captured_env.clone();
+        let live_globals = MODULE_GLOBALS.with(|cell| {
+            let globals = cell.borrow();
+            captured_env
+                .keys()
+                .filter_map(|name| {
+                    if captured_env.is_local(name) {
+                        return None;
+                    }
+                    globals.get(name).map(|value| (name.clone(), value.clone()))
+                })
+                .collect::<Vec<_>>()
+        });
+        initial_env.extend(live_globals);
+        return initial_env;
+    };
+
+    let initial_owner_globals =
+        MODULE_GLOBALS_INITIAL_BY_OWNER.with(|cell| cell.borrow().get(&owner).cloned().unwrap_or_default());
+    let owner_globals = MODULE_GLOBALS_BY_OWNER.with(|cell| {
+        cell.borrow_mut()
+            .entry(Arc::clone(&owner))
+            .or_insert(initial_owner_globals)
+            .clone()
+    });
+    let mut base = if captured_env.is_empty() {
+        MODULE_ENV_BY_OWNER
+            .with(|cell| cell.borrow().get(&owner).cloned())
+            .map(|env| (*env).clone())
+            .unwrap_or_default()
+    } else {
+        captured_env.to_map()
+    };
+    base.extend(owner_globals);
+    Env::with_base(Arc::new(base))
+}
+
+fn sync_owned_captured_globals(func: &FunctionDef, local_env: &Env, outer_env: &mut Env) {
+    let Some(owner) = function_module_owner(func) else {
+        return;
+    };
+    let changed = MODULE_GLOBALS_BY_OWNER.with(|cell| {
+        let mut globals_by_owner = cell.borrow_mut();
+        let Some(owner_globals) = globals_by_owner.get_mut(&owner) else {
+            return Vec::new();
+        };
+        let changed = local_env
+            .overlay_entries()
+            .filter_map(|(name, value)| {
+                if !owner_globals.contains_key(name)
+                    || func.params.iter().any(|param| param.name == *name)
+                    || local_env.is_local(name)
+                {
+                    return None;
+                }
+                Some((name.clone(), value.clone()))
+            })
+            .collect::<Vec<_>>();
+        for (name, value) in &changed {
+            owner_globals.insert(name.clone(), value.clone());
+        }
+        changed
+    });
+    let caller_has_same_owner =
+        CURRENT_EXEC_MODULE.with(|cell| cell.borrow().as_ref().is_some_and(|current| current == &owner));
+    if caller_has_same_owner {
+        let refreshed = changed
+            .into_iter()
+            .filter(|(name, _)| !outer_env.is_local(name))
+            .collect::<Vec<_>>();
+        outer_env.extend(refreshed);
+    }
+}
+
+fn mark_pattern_locals(pattern: &Pattern, env: &mut Env) {
+    match pattern {
+        Pattern::Identifier(name) | Pattern::MutIdentifier(name) | Pattern::MoveIdentifier(name) => {
+            env.mark_local(name.clone());
+        }
+        Pattern::Tuple(patterns) | Pattern::Array(patterns) | Pattern::Or(patterns) => {
+            for pattern in patterns {
+                mark_pattern_locals(pattern, env);
+            }
+        }
+        Pattern::Struct { fields, .. } => {
+            for (_, pattern) in fields {
+                mark_pattern_locals(pattern, env);
+            }
+        }
+        Pattern::Enum { payload, .. } => {
+            if let Some(patterns) = payload {
+                for pattern in patterns {
+                    mark_pattern_locals(pattern, env);
+                }
+            }
+        }
+        Pattern::Typed { pattern, .. } => mark_pattern_locals(pattern, env),
+        Pattern::Wildcard | Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Rest => {}
+    }
+}
+
+fn mark_block_locals(block: &Block, env: &mut Env) {
+    for node in &block.statements {
+        match node {
+            Node::Let(stmt) => mark_pattern_locals(&stmt.pattern, env),
+            Node::Const(stmt) => env.mark_local(stmt.name.clone()),
+            Node::Static(stmt) => env.mark_local(stmt.name.clone()),
+            Node::Function(def) => env.mark_local(def.name.clone()),
+            Node::Struct(def) => env.mark_local(def.name.clone()),
+            Node::Class(def) => env.mark_local(def.name.clone()),
+            Node::Enum(def) => env.mark_local(def.name.clone()),
+            Node::Newtype(def) => env.mark_local(def.name.clone()),
+            _ => {}
+        }
+    }
+}
 
 static INTERPRETER_CALL_TRACE: LazyLock<Option<String>> =
     LazyLock::new(|| std::env::var("SIMPLE_INTERPRETER_CALL_TRACE").ok());
@@ -241,8 +382,7 @@ fn execute_function_body(
     // resolution (see `select_overload` in interpreter_call/mod.rs). If this
     // function has no recorded owner (e.g. a lambda), leave the inherited
     // value from the caller's frame untouched rather than clearing it.
-    let func_module_key = func as *const FunctionDef as usize;
-    let func_owner_module = FUNCTION_MODULE_OWNER.with(|cell| cell.borrow().get(&func_module_key).cloned());
+    let func_owner_module = function_module_owner(func);
     let saved_exec_module = CURRENT_EXEC_MODULE.with(|cell| {
         let mut current = cell.borrow_mut();
         let saved = current.clone();
@@ -263,6 +403,10 @@ fn execute_function_body(
         saved
     });
 
+    for param in &func.params {
+        local_env.mark_local(param.name.clone());
+    }
+
     // Insert bound arguments into environment
     for (name, val) in bound_args {
         local_env.insert(name, val);
@@ -275,6 +419,7 @@ fn execute_function_body(
 
     let synthetic_body = effective_function_body(func);
     let body = synthetic_body.as_ref().unwrap_or(&func.body);
+    mark_block_locals(body, local_env);
 
     // Execute function body - handle result manually to ensure flag restoration
     let exec_result = exec_block_fn(body, local_env, functions, classes, enums, impl_methods);
@@ -457,7 +602,7 @@ pub(crate) fn exec_function_with_values_and_self(
     self_ctx: Option<(&str, &Arc<HashMap<String, Value>>)>,
 ) -> Result<Value, CompileError> {
     with_effect_check!(func, {
-        let mut local_env = Env::new();
+        let mut local_env = captured_env_with_live_globals(func, &Env::new());
 
         // Set up self context if provided
         if let Some((class_name, fields)) = self_ctx {
@@ -494,7 +639,7 @@ pub(crate) fn exec_function_with_values_and_self(
             self_mode,
         )?;
 
-        execute_function_body(
+        let result = execute_function_body(
             func,
             bound,
             &mut local_env,
@@ -503,7 +648,9 @@ pub(crate) fn exec_function_with_values_and_self(
             enums,
             impl_methods,
             false,
-        )
+        );
+        sync_owned_captured_globals(func, &local_env, outer_env);
+        result
     })
 }
 
@@ -519,7 +666,7 @@ pub(crate) fn exec_function_with_captured_env(
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
     with_effect_check!(func, {
-        let mut local_env = captured_env.clone();
+        let mut local_env = captured_env_with_live_globals(func, captured_env);
 
         let self_mode = SelfMode::IncludeSelf;
         let bound_args = bind_args(
@@ -543,6 +690,7 @@ pub(crate) fn exec_function_with_captured_env(
             impl_methods,
             false,
         );
+        sync_owned_captured_globals(func, &local_env, outer_env);
         if result.is_ok() {
             write_back_mutable_arguments(func, args, outer_env, &local_env, classes, self_mode);
         }
@@ -775,7 +923,7 @@ fn exec_function_inner(
         cov.lock().unwrap().record_function_call(&func.name);
     }
 
-    let mut local_env = Env::new();
+    let mut local_env = captured_env_with_live_globals(func, &Env::new());
 
     if let Some((class_name, fields)) = self_ctx {
         // Check if this is an enum method (fields contains just "self")
@@ -823,6 +971,7 @@ fn exec_function_inner(
         impl_methods,
         true,
     );
+    sync_owned_captured_globals(func, &local_env, outer_env);
 
     if result.is_ok() {
         write_back_mutable_arguments(func, args, outer_env, &local_env, classes, self_mode);
@@ -865,7 +1014,7 @@ fn exec_function_with_values_and_writeback_inner(
         cov.lock().unwrap().record_function_call(&func.name);
     }
 
-    let mut local_env = Env::new();
+    let mut local_env = captured_env_with_live_globals(func, &Env::new());
     let self_mode = SelfMode::IncludeSelf;
     let bound = bind_args_with_values(
         &func.params,
@@ -890,6 +1039,7 @@ fn exec_function_with_values_and_writeback_inner(
         impl_methods,
         true,
     );
+    sync_owned_captured_globals(func, &local_env, outer_env);
 
     if result.is_ok() {
         write_back_mutable_arguments(func, original_args, outer_env, &local_env, classes, self_mode);
@@ -933,7 +1083,7 @@ fn exec_function_with_values_inner(
         cov.lock().unwrap().record_function_call(&func.name);
     }
 
-    let mut local_env = Env::new();
+    let mut local_env = captured_env_with_live_globals(func, &Env::new());
     let self_mode = SelfMode::IncludeSelf;
     let bound = bind_args_with_values(
         &func.params,
@@ -959,6 +1109,7 @@ fn exec_function_with_values_inner(
         impl_methods,
         true,
     );
+    sync_owned_captured_globals(func, &local_env, outer_env);
 
     // Runtime profiler return hook
     if crate::runtime_profile::is_profiling_active() {

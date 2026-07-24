@@ -12,7 +12,8 @@ use simple_parser::ast::{ClassDef, EnumDef, FunctionDef, Node};
 use crate::error::CompileError;
 use crate::value::{Env, Value};
 
-use super::module_cache::cache_partial_module_exports;
+use super::module_cache::{cache_partial_module_exports, normalize_path_key};
+use crate::interpreter::MODULE_ENV_BY_OWNER;
 
 mod evaluation_helpers;
 use evaluation_helpers::{
@@ -119,6 +120,12 @@ pub fn evaluate_module_exports_with_preloaded(
     // export_functions returns the Arc<FunctionDef> map it builds internally,
     // so the same Arc instances flow into both Value::Function (in exports) and the cache.
     let filtered_env = create_filtered_env(&env);
+    if let Some(path) = module_path {
+        let owner: Arc<str> = Arc::from(normalize_path_key(path).to_string_lossy().as_ref());
+        MODULE_ENV_BY_OWNER.with(|cell| {
+            cell.borrow_mut().insert(owner, filtered_env.freeze());
+        });
+    }
     let local_functions_arc = export_functions(&local_functions, &filtered_env, &mut exports, &mut env);
 
     // Process bare export statements

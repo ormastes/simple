@@ -5,12 +5,16 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use simple_parser::ast::{Argument, Attribute, Capability, Effect, Expr, ImportTarget, Module, Node, Type, UseStmt};
+use simple_parser::ast::{
+    Argument, Attribute, Capability, ConstStmt, Effect, Expr, ImportTarget, Module, Node, Type, UseStmt, Visibility,
+};
 use simple_parser::error_recovery::{ErrorHint, ErrorHintLevel};
 use simple_parser::Parser;
 
 use crate::error::{codes, CompileError, ErrorContext};
-use crate::interpreter::FLATTEN_MODULE_OWNER_ATTR_PREFIX;
+use crate::interpreter::{
+    normalize_path_key, FLATTEN_GLOBAL_OWNER_MARKER_PREFIX, FLATTEN_MODULE_OWNER_ATTR_PREFIX,
+};
 use crate::stdlib_variant::stdlib_root_candidates;
 use crate::CompileError as _;
 
@@ -500,14 +504,24 @@ fn resolve_from_stdlib_root(root: &Path, parts: &[String], use_stmt: &UseStmt) -
 /// through a nested import was already tagged by that deeper flatten pass
 /// (nested loads run before this outer strip), so we must not overwrite it.
 fn strip_flattened_import_nodes(module: Module, module_path: &Path) -> Module {
-    let owner_attr_name = format!("{FLATTEN_MODULE_OWNER_ATTR_PREFIX}{}", module_path.to_string_lossy());
-    let items = module
-        .items
-        .into_iter()
-        .filter_map(|item| match item {
+    let owner_path = normalize_path_key(module_path);
+    let owner_attr_name = format!("{FLATTEN_MODULE_OWNER_ATTR_PREFIX}{}", owner_path.to_string_lossy());
+    let owner_marker_name = format!("{FLATTEN_GLOBAL_OWNER_MARKER_PREFIX}{}", owner_path.to_string_lossy());
+    let mut items = Vec::new();
+    let mut next_global_already_tagged = false;
+    for item in module.items {
+        if let Node::Const(marker) = &item {
+            if marker.name.starts_with(FLATTEN_GLOBAL_OWNER_MARKER_PREFIX) {
+                next_global_already_tagged = true;
+                items.push(item);
+                continue;
+            }
+        }
+
+        match item {
             Node::Function(mut function) => {
                 if function.name == "main" {
-                    return None;
+                    continue;
                 }
                 let already_tagged = function
                     .attributes
@@ -522,7 +536,27 @@ fn strip_flattened_import_nodes(module: Module, module_path: &Path) -> Module {
                         named_args: None,
                     });
                 }
-                Some(Node::Function(function))
+                items.push(Node::Function(function));
+                next_global_already_tagged = false;
+            }
+            declaration @ (Node::Let(_) | Node::Const(_) | Node::Static(_)) => {
+                if !next_global_already_tagged {
+                    let span = match &declaration {
+                        Node::Let(stmt) => stmt.span,
+                        Node::Const(stmt) => stmt.span,
+                        Node::Static(stmt) => stmt.span,
+                        _ => unreachable!(),
+                    };
+                    items.push(Node::Const(ConstStmt {
+                        span,
+                        name: owner_marker_name.clone(),
+                        ty: None,
+                        value: Expr::Nil,
+                        visibility: Visibility::Private,
+                    }));
+                }
+                items.push(declaration);
+                next_global_already_tagged = false;
             }
             other => {
                 if matches!(
@@ -534,13 +568,14 @@ fn strip_flattened_import_nodes(module: Module, module_path: &Path) -> Module {
                         | Node::StructuredExportStmt(_)
                         | Node::AutoImportStmt(_)
                 ) {
-                    None
+                    next_global_already_tagged = false;
                 } else {
-                    Some(other)
+                    items.push(other);
+                    next_global_already_tagged = false;
                 }
             }
-        })
-        .collect();
+        }
+    }
     Module {
         name: module.name,
         items,
@@ -1464,7 +1499,7 @@ fn load_module_with_imports_internal(
     target_arch: simple_common::target::TargetArch,
 ) -> Result<Module, CompileError> {
     let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    if !visited.insert(path.clone()) {
+    if flatten_imports && !visited.insert(path.clone()) {
         return Ok(Module {
             name: None,
             items: Vec::new(),

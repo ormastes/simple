@@ -13,7 +13,10 @@ use simple_parser::ast::{Attribute, ClassDef, Expr, FunctionDef, ImportTarget, N
 
 use crate::error::CompileError;
 use crate::value::{Env, Value};
-use crate::interpreter::{FUNCTION_OVERLOADS, FUNCTION_MODULE_OWNER, GLOBAL_ENUMS};
+use crate::interpreter::{
+    normalize_path_key, FUNCTION_MODULE_OWNER, FUNCTION_OVERLOADS, GLOBAL_ENUMS, MODULE_GLOBALS_BY_OWNER,
+    MODULE_GLOBALS_INITIAL_BY_OWNER,
+};
 
 use crate::interpreter::interpreter_module::export_handler::load_export_source;
 use crate::interpreter::module_cache::{defer_use, filter_functions_from_value, take_deferred_use_for};
@@ -36,6 +39,28 @@ fn method_with_impl_driver_attrs(method: &FunctionDef, impl_attrs: &[Attribute])
     attrs.extend(method.attributes);
     method.attributes = attrs;
     method
+}
+
+fn module_owner(module_path: Option<&Path>) -> Option<Arc<str>> {
+    module_path.map(|path| Arc::from(normalize_path_key(path).to_string_lossy().as_ref()))
+}
+
+fn publish_module_global(module_path: Option<&Path>, name: String, value: Value) {
+    MODULE_GLOBALS.with(|cell| {
+        cell.borrow_mut().insert(name.clone(), value.clone());
+    });
+    let Some(owner) = module_owner(module_path) else {
+        return;
+    };
+    MODULE_GLOBALS_BY_OWNER.with(|cell| {
+        cell.borrow_mut()
+            .entry(Arc::clone(&owner))
+            .or_default()
+            .insert(name.clone(), value.clone());
+    });
+    MODULE_GLOBALS_INITIAL_BY_OWNER.with(|cell| {
+        cell.borrow_mut().entry(owner).or_default().insert(name, value);
+    });
 }
 
 use crate::interpreter::evaluate_expr;
@@ -90,7 +115,7 @@ pub(super) fn register_definitions(
     // that belongs to the calling function's own module. `None` when the
     // module path is unavailable — those functions simply get no owner entry
     // and fall back to the pre-existing first-registered tie-break.
-    let module_ident: Option<Arc<str>> = module_path.map(|p| Arc::from(p.to_string_lossy().as_ref()));
+    let module_ident = module_owner(module_path);
 
     for item in items.iter() {
         match item {
@@ -417,9 +442,7 @@ pub(super) fn process_imports_and_assignments(
                             // Sync module-level vars to MODULE_GLOBALS so that functions
                             // within this module can read/write them even when called from
                             // other modules (where the function's captured_env may not be used).
-                            MODULE_GLOBALS.with(|cell| {
-                                cell.borrow_mut().insert(name.clone(), value);
-                            });
+                            publish_module_global(module_path, name, value);
                         }
                     }
                 }
@@ -435,9 +458,20 @@ pub(super) fn process_imports_and_assignments(
                 )?;
                 env.insert(stmt.name.clone(), value.clone());
                 exports.insert(stmt.name.clone(), value.clone());
-                MODULE_GLOBALS.with(|cell| {
-                    cell.borrow_mut().insert(stmt.name.clone(), value);
-                });
+                publish_module_global(module_path, stmt.name.clone(), value);
+            }
+            Node::Static(stmt) => {
+                let value = evaluate_expr(
+                    &stmt.value,
+                    env,
+                    local_functions,
+                    local_classes,
+                    local_enums,
+                    impl_methods,
+                )?;
+                env.insert(stmt.name.clone(), value.clone());
+                exports.insert(stmt.name.clone(), value.clone());
+                publish_module_global(module_path, stmt.name.clone(), value);
             }
             Node::Assignment(stmt) => {
                 // Evaluate module-level assignments
@@ -454,9 +488,7 @@ pub(super) fn process_imports_and_assignments(
                         // Export vars so they're visible after import
                         exports.insert(name.clone(), value.clone());
                         // Sync to MODULE_GLOBALS for the same reason as Node::Let above
-                        MODULE_GLOBALS.with(|cell| {
-                            cell.borrow_mut().insert(name.clone(), value);
-                        });
+                        publish_module_global(module_path, name.clone(), value);
                     }
                 }
             }

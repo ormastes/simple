@@ -61,6 +61,7 @@ pub struct LiteralFunctionInfo {
 /// ever present in the in-memory flattened AST during a run, never in source,
 /// so the lint "unknown attribute" check never sees it.
 pub(crate) const FLATTEN_MODULE_OWNER_ATTR_PREFIX: &str = "__simple_flatten_module_owner__=";
+pub(crate) const FLATTEN_GLOBAL_OWNER_MARKER_PREFIX: &str = "__simple_flatten_global_owner__=";
 
 //==============================================================================
 // Thread-local state declarations
@@ -190,6 +191,12 @@ thread_local! {
     /// When a module declares `let mut x = ...` at top level, x is added here.
     /// Functions can read and write these variables.
     pub(crate) static MODULE_GLOBALS: RefCell<HashMap<String, Value>> = RefCell::new(HashMap::new());
+    /// Live globals keyed by their defining module.
+    pub(crate) static MODULE_GLOBALS_BY_OWNER: RefCell<HashMap<Arc<str>, HashMap<String, Value>>> = RefCell::new(HashMap::new());
+    /// Initial owner-qualified globals retained with the module cache.
+    pub(crate) static MODULE_GLOBALS_INITIAL_BY_OWNER: RefCell<HashMap<Arc<str>, HashMap<String, Value>>> = RefCell::new(HashMap::new());
+    /// Immutable filtered module environments keyed by owner.
+    pub(crate) static MODULE_ENV_BY_OWNER: RefCell<HashMap<Arc<str>, Arc<HashMap<String, Value>>>> = RefCell::new(HashMap::new());
     /// BDD Test Registry - shared across all modules that import spec.registry
     /// This ensures that describe/context/it blocks register to the same location
     /// regardless of how the registry module is imported.
@@ -657,6 +664,8 @@ pub fn clear_interpreter_state() {
 
     // Clear module globals (mutable module-level variables)
     MODULE_GLOBALS.with(|cell| cell.borrow_mut().clear());
+    MODULE_GLOBALS_BY_OWNER.with(|cell| cell.borrow_mut().clear());
+    CURRENT_EXEC_MODULE.with(|cell| *cell.borrow_mut() = None);
 
     // Clear DI singletons
     DI_SINGLETONS.with(|cell| cell.borrow_mut().clear());

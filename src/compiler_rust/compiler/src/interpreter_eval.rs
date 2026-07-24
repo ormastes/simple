@@ -7,6 +7,7 @@
 //! - Main function discovery and execution
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use simple_native_loader::RUNTIME_SYMBOL_NAMES;
@@ -24,7 +25,8 @@ use super::{
     evaluate_method_call_with_self_update, exec_block, exec_context, exec_for, exec_function, exec_if, exec_loop,
     exec_match, exec_node, exec_while, exec_with, exit_class_scope, find_and_exec_method, get_di_config,
     get_import_alias, get_pattern_name, get_type_name, handle_functional_update, handle_method_call_with_self_update,
-    is_unit_type, iter_to_vec, load_and_merge_module, message_to_value, normalize_index, pattern_matches,
+    is_unit_type, iter_to_vec, load_and_merge_module, message_to_value, normalize_index, normalize_path_key,
+    pattern_matches,
     preprocess_macro_contract_at_definition, register_trait_impl, slice_collection, spawn_actor_with_expr,
     spawn_future_with_callable, spawn_future_with_callable_and_env, spawn_future_with_expr,
     take_macro_introduced_symbols, try_method_missing, type_to_family_name, validate_unit_constraints,
@@ -32,12 +34,33 @@ use super::{
     TraitImpls, Traits, UnitArithmeticRules, UnitFamilies, UnitFamilyInfo, Units, BASE_UNIT_DIMENSIONS, BDD_AFTER_EACH,
     BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_COUNTS, BDD_INDENT, BDD_LAZY_VALUES, BDD_SHARED_EXAMPLES,
     BLANKET_IMPL_METHODS, CLASS_OVERLOADS, COMPOUND_UNIT_DIMENSIONS, CONST_NAMES, EXTERN_FUNCTIONS, FUNCTION_OVERLOADS,
-    FUNCTION_MODULE_OWNER, FLATTEN_MODULE_OWNER_ATTR_PREFIX, GLOBAL_ENUMS, GLOBAL_IMPL_METHODS, MACRO_DEFINITION_ORDER,
-    MIXINS, TRAIT_IMPLS, MODULE_GLOBALS, SI_BASE_UNITS, UNIT_FAMILY_ARITHMETIC, UNIT_FAMILY_CONVERSIONS,
+    FUNCTION_MODULE_OWNER, FLATTEN_GLOBAL_OWNER_MARKER_PREFIX, FLATTEN_MODULE_OWNER_ATTR_PREFIX, GLOBAL_ENUMS,
+    GLOBAL_IMPL_METHODS, MACRO_DEFINITION_ORDER, MIXINS, TRAIT_IMPLS, MODULE_GLOBALS, MODULE_GLOBALS_BY_OWNER,
+    MODULE_GLOBALS_INITIAL_BY_OWNER, SI_BASE_UNITS, UNIT_FAMILY_ARITHMETIC, UNIT_FAMILY_CONVERSIONS,
     UNIT_SUFFIX_TO_FAMILY, USER_MACROS,
 };
 
 type Enums = HashMap<String, Arc<EnumDef>>;
+
+fn record_flattened_global(owner: Option<&Arc<str>>, name: String, value: Value) {
+    MODULE_GLOBALS.with(|cell| {
+        cell.borrow_mut().insert(name.clone(), value.clone());
+    });
+    if let Some(owner) = owner {
+        MODULE_GLOBALS_BY_OWNER.with(|cell| {
+            cell.borrow_mut()
+                .entry(Arc::clone(owner))
+                .or_default()
+                .insert(name.clone(), value.clone());
+        });
+        MODULE_GLOBALS_INITIAL_BY_OWNER.with(|cell| {
+            cell.borrow_mut()
+                .entry(Arc::clone(owner))
+                .or_default()
+                .insert(name, value);
+        });
+    }
+}
 
 fn has_driver_manifest_attr(attrs: &[Attribute]) -> bool {
     attrs
@@ -280,6 +303,8 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
     SI_BASE_UNITS.with(|cell| cell.borrow_mut().clear());
     // Clear module-level globals from previous runs
     MODULE_GLOBALS.with(|cell| cell.borrow_mut().clear());
+    let initial_globals = MODULE_GLOBALS_INITIAL_BY_OWNER.with(|cell| cell.borrow().clone());
+    MODULE_GLOBALS_BY_OWNER.with(|cell| *cell.borrow_mut() = initial_globals);
     // Bitfields are module declarations; clear stale definitions before registration.
     super::BITFIELDS.with(|cell| cell.borrow_mut().clear());
     // Clear the struct/class overload registry from previous runs.
@@ -292,6 +317,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
     let mut impl_methods: ImplMethods = HashMap::new();
     let mut extern_functions: ExternFunctions = HashMap::new();
     let mut macros: Macros = HashMap::new();
+    let mut pending_flattened_global_owner: Option<Arc<str>> = None;
     let mut units: Units = HashMap::new();
     let mut unit_families: UnitFamilies = HashMap::new();
     let mut traits: Traits = HashMap::new();
@@ -349,7 +375,11 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 let owner: Arc<str> = f
                     .attributes
                     .iter()
-                    .find_map(|a| a.name.strip_prefix(FLATTEN_MODULE_OWNER_ATTR_PREFIX).map(Arc::from))
+                    .find_map(|a| {
+                        a.name.strip_prefix(FLATTEN_MODULE_OWNER_ATTR_PREFIX).map(|raw| {
+                            Arc::from(normalize_path_key(Path::new(raw)).to_string_lossy().as_ref())
+                        })
+                    })
                     .unwrap_or_else(|| Arc::from("<entry>"));
                 FUNCTION_MODULE_OWNER.with(|cell| {
                     cell.borrow_mut().insert(Arc::as_ptr(&func) as usize, owner);
@@ -1090,6 +1120,14 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     cell.borrow_mut().insert(cu.name.clone(), dimension);
                 });
             }
+            Node::Const(marker) if marker.name.starts_with(FLATTEN_GLOBAL_OWNER_MARKER_PREFIX) => {
+                let raw_owner = marker
+                    .name
+                    .strip_prefix(FLATTEN_GLOBAL_OWNER_MARKER_PREFIX)
+                    .unwrap_or_default();
+                pending_flattened_global_owner =
+                    Some(Arc::from(normalize_path_key(Path::new(raw_owner)).to_string_lossy().as_ref()));
+            }
             Node::Let(let_stmt) => {
                 use super::Control;
                 if let Control::Return(val) =
@@ -1102,16 +1140,49 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 {
                     if let Some(name) = get_pattern_name(&let_stmt.pattern) {
                         if let Some(value) = env.get(&name) {
-                            MODULE_GLOBALS.with(|cell| {
-                                cell.borrow_mut().insert(name, value.clone());
-                            });
+                            record_flattened_global(
+                                pending_flattened_global_owner.as_ref(),
+                                name,
+                                value.clone(),
+                            );
                         }
                     }
                 }
+                pending_flattened_global_owner = None;
             }
-            Node::Const(_)
-            | Node::Static(_)
-            | Node::Assignment(_)
+            Node::Const(const_stmt) => {
+                use super::Control;
+                if let Control::Return(val) =
+                    exec_node(item, &mut env, &mut functions, &mut classes, &enums, &impl_methods)?
+                {
+                    return val.as_int().map(|v| v as i32);
+                }
+                if let Some(value) = env.get(&const_stmt.name) {
+                    record_flattened_global(
+                        pending_flattened_global_owner.as_ref(),
+                        const_stmt.name.clone(),
+                        value.clone(),
+                    );
+                }
+                pending_flattened_global_owner = None;
+            }
+            Node::Static(static_stmt) => {
+                use super::Control;
+                if let Control::Return(val) =
+                    exec_node(item, &mut env, &mut functions, &mut classes, &enums, &impl_methods)?
+                {
+                    return val.as_int().map(|v| v as i32);
+                }
+                if let Some(value) = env.get(&static_stmt.name) {
+                    record_flattened_global(
+                        pending_flattened_global_owner.as_ref(),
+                        static_stmt.name.clone(),
+                        value.clone(),
+                    );
+                }
+                pending_flattened_global_owner = None;
+            }
+            Node::Assignment(_)
             | Node::If(_)
             | Node::For(_)
             | Node::While(_)

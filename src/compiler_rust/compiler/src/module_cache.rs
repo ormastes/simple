@@ -9,7 +9,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use tracing::trace;
-use crate::interpreter::FUNCTION_OVERLOADS;
+use crate::interpreter::{
+    FUNCTION_MODULE_OWNER, FUNCTION_OVERLOADS, MODULE_ENV_BY_OWNER, MODULE_GLOBALS, MODULE_GLOBALS_BY_OWNER,
+    MODULE_GLOBALS_INITIAL_BY_OWNER,
+};
 
 use crate::value::{Env, Value};
 use simple_parser::ast::{ClassDef, EnumDef, FunctionDef, ImportTarget, UseStmt};
@@ -83,6 +86,12 @@ pub fn clear_module_cache() {
     MODULE_CLASSES_CACHE.with(|cache| cache.borrow_mut().clear());
     MODULE_FUNCTIONS_CACHE.with(|cache| cache.borrow_mut().clear());
     MODULE_ENUMS_CACHE.with(|cache| cache.borrow_mut().clear());
+    MODULE_GLOBALS.with(|cache| cache.borrow_mut().clear());
+    MODULE_GLOBALS_BY_OWNER.with(|cache| cache.borrow_mut().clear());
+    MODULE_GLOBALS_INITIAL_BY_OWNER.with(|cache| cache.borrow_mut().clear());
+    MODULE_ENV_BY_OWNER.with(|cache| cache.borrow_mut().clear());
+    FUNCTION_MODULE_OWNER.with(|cache| cache.borrow_mut().clear());
+    FUNCTION_OVERLOADS.with(|cache| cache.borrow_mut().clear());
     MODULES_LOADING.with(|loading| loading.borrow_mut().clear());
     MODULE_LOAD_DEPTH.with(|depth| *depth.borrow_mut() = 0);
     PARTIAL_MODULE_EXPORTS_CACHE.with(|cache| cache.borrow_mut().clear());
@@ -116,6 +125,19 @@ pub fn clear_module_cache_selective() {
     MODULE_CLASSES_CACHE.with(|cache| cache.borrow_mut().retain(|k, _| is_stdlib(k)));
     MODULE_FUNCTIONS_CACHE.with(|cache| cache.borrow_mut().retain(|k, _| is_stdlib(k)));
     MODULE_ENUMS_CACHE.with(|cache| cache.borrow_mut().retain(|k, _| is_stdlib(k)));
+    MODULE_GLOBALS.with(|cache| cache.borrow_mut().clear());
+    FUNCTION_OVERLOADS.with(|cache| cache.borrow_mut().clear());
+    MODULE_GLOBALS_INITIAL_BY_OWNER.with(|cache| {
+        cache.borrow_mut().retain(|owner, _| is_stdlib(Path::new(owner.as_ref())));
+    });
+    let initial_globals = MODULE_GLOBALS_INITIAL_BY_OWNER.with(|cache| cache.borrow().clone());
+    MODULE_GLOBALS_BY_OWNER.with(|cache| *cache.borrow_mut() = initial_globals);
+    MODULE_ENV_BY_OWNER.with(|cache| {
+        cache.borrow_mut().retain(|owner, _| is_stdlib(Path::new(owner.as_ref())));
+    });
+    FUNCTION_MODULE_OWNER.with(|cache| {
+        cache.borrow_mut().retain(|_, owner| is_stdlib(Path::new(owner.as_ref())));
+    });
     // Always clear loading/depth state (transient per-file)
     MODULES_LOADING.with(|loading| loading.borrow_mut().clear());
     MODULE_LOAD_DEPTH.with(|depth| *depth.borrow_mut() = 0);

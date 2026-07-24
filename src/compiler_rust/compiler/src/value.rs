@@ -281,6 +281,10 @@ pub struct CowEnv {
     overlay: HashMap<String, Value>,
     /// Keys removed from base (tombstones)
     tombstones: HashSet<String>,
+    /// Names declared by the current lexical function frame.
+    local_bindings: HashSet<String>,
+    /// Names shadowed by currently executing nested blocks.
+    block_local_bindings: HashMap<String, usize>,
 }
 
 impl CowEnv {
@@ -290,6 +294,8 @@ impl CowEnv {
             base: None,
             overlay: HashMap::new(),
             tombstones: HashSet::new(),
+            local_bindings: HashSet::new(),
+            block_local_bindings: HashMap::new(),
         }
     }
 
@@ -311,6 +317,28 @@ impl CowEnv {
     pub fn insert(&mut self, key: String, value: Value) -> Option<Value> {
         self.tombstones.remove(&key);
         self.overlay.insert(key, value)
+    }
+
+    pub fn mark_local(&mut self, name: impl Into<String>) {
+        self.local_bindings.insert(name.into());
+    }
+
+    pub fn enter_block_local(&mut self, name: impl Into<String>) {
+        *self.block_local_bindings.entry(name.into()).or_default() += 1;
+    }
+
+    pub fn exit_block_local(&mut self, name: &str) {
+        let Some(depth) = self.block_local_bindings.get_mut(name) else {
+            return;
+        };
+        *depth -= 1;
+        if *depth == 0 {
+            self.block_local_bindings.remove(name);
+        }
+    }
+
+    pub fn is_local(&self, name: &str) -> bool {
+        self.local_bindings.contains(name) || self.block_local_bindings.contains_key(name)
     }
 
     /// Get a mutable reference to a value, promoting it from the shared base
@@ -442,6 +470,11 @@ impl CowEnv {
         }
     }
 
+    /// Iterate over values written in this environment frame.
+    pub fn overlay_entries(&self) -> impl Iterator<Item = (&String, &Value)> {
+        self.overlay.iter()
+    }
+
     /// Extend the overlay with entries from an iterator.
     pub fn extend<I: IntoIterator<Item = (String, Value)>>(&mut self, iter: I) {
         for (k, v) in iter {
@@ -456,6 +489,8 @@ impl CowEnv {
             base: None,
             overlay: map,
             tombstones: HashSet::new(),
+            local_bindings: HashSet::new(),
+            block_local_bindings: HashMap::new(),
         }
     }
 
@@ -465,6 +500,8 @@ impl CowEnv {
             base: Some(base),
             overlay: HashMap::new(),
             tombstones: HashSet::new(),
+            local_bindings: HashSet::new(),
+            block_local_bindings: HashMap::new(),
         }
     }
 
@@ -493,6 +530,8 @@ impl CowEnv {
     /// Clear all entries.
     pub fn clear(&mut self) {
         self.overlay.clear();
+        self.local_bindings.clear();
+        self.block_local_bindings.clear();
         if let Some(ref base) = self.base {
             // Tombstone all base keys
             self.tombstones = base.keys().cloned().collect();
@@ -527,6 +566,8 @@ impl Clone for CowEnv {
             base: self.base.clone(),             // Arc::clone — O(1)
             overlay: self.overlay.clone(),       // small
             tombstones: self.tombstones.clone(), // small
+            local_bindings: self.local_bindings.clone(),
+            block_local_bindings: self.block_local_bindings.clone(),
         }
     }
 }

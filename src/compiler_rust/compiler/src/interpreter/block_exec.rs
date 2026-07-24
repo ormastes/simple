@@ -35,7 +35,7 @@ use super::interpreter_helpers::handle_method_call_with_self_update;
 /// bodies of `if`/`for`/`while`/`match`/... statements within it) manage their
 /// own scope via their own `exec_block`/`exec_block_fn` call, so recursing
 /// into them here would double-handle (and mis-scope) their locals.
-fn capture_block_scope_shadows(block: &Block, env: &Env) -> Vec<(String, Option<Value>)> {
+fn capture_block_scope_shadows(block: &Block, env: &mut Env) -> Vec<(String, Option<Value>)> {
     let mut shadows = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for stmt in &block.statements {
@@ -51,6 +51,7 @@ fn capture_block_scope_shadows(block: &Block, env: &Env) -> Vec<(String, Option<
             // block started executing.
             if seen.insert(name.clone()) {
                 shadows.push((name.clone(), env.get(&name).cloned()));
+                env.enter_block_local(name);
             }
         }
     }
@@ -62,7 +63,17 @@ fn capture_block_scope_shadows(block: &Block, env: &Env) -> Vec<(String, Option<
 /// the block ran (so a block-local `var` never leaks into the caller).
 fn restore_block_scope_shadows(shadows: Vec<(String, Option<Value>)>, env: &mut Env) {
     for (name, prior_value) in shadows {
-        match prior_value {
+        env.exit_block_local(&name);
+        let owner_global = if env.is_local(&name) {
+            None
+        } else {
+            let owner = crate::interpreter::CURRENT_EXEC_MODULE.with(|cell| cell.borrow().clone());
+            owner.and_then(|owner| {
+                crate::interpreter::MODULE_GLOBALS_BY_OWNER
+                    .with(|cell| cell.borrow().get(&owner).and_then(|globals| globals.get(&name).cloned()))
+            })
+        };
+        match owner_global.or(prior_value) {
             Some(value) => {
                 env.insert(name, value);
             }
