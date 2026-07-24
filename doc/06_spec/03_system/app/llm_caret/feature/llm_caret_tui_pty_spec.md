@@ -33,13 +33,16 @@ cached process execution is blocked until a qualified Caret artifact exists.
 The checker invokes only `bin/caret`, disables its source fallback, and pins
 the wrapper override to the exact repository-cached native artifact whose
 binary, clean committed source, target, and build-runtime hashes were verified.
+The provenance must also attest `runtime=pure-simple-self-hosted`,
+`runtime_probe=pass`, and `rust_seed_used=false`; missing or different values
+fail closed.
 All chat work uses `--provider dummy`; the checker removes its enumerated known
 provider/cloud credential variables from the child environment. The dummy
 provider requires no provider credential or network.
 `script(1)` owns the pseudo-terminal and a child wrapper records
 `stty -g` and geometry before and after Caret.
 
-The checker rejects missing cache, `script(1)`, `stty`, markers, ANSI TUI
+The checker rejects missing cache, `script(1)`, `stty`, `cmp`, markers, ANSI TUI
 rendering, plain-output purity, edited UTF-8 text, geometry, or restoration.
 It also drives the real TUI root-command path with no hidden-feature
 environment, with `LLM_CARET_ENABLE_HIDDEN_COMMANDS=1`, and with a disabled
@@ -60,7 +63,9 @@ corresponding leaf feature gates from parts-bin evidence or claim that their
 feature implementations are shipped.
 Forced TUI on non-TTY stdin must fail before emitting escape bytes with
 `terminal raw mode unavailable`. Each child is guarded by one fixed 20-second
-watchdog; timeout evidence is retained and fails the case without retry.
+watchdog; timeout evidence is retained and fails the case without retry. The
+outer SSpec process bound is 240 seconds for the seven-case hidden group and
+eight-case promptless group, and 120 seconds for every other scenario.
 
 **TUI Captures:**
 `build/test-artifacts/03_system/app/llm_caret/feature/llm_caret_tui_pty/`
@@ -78,7 +83,8 @@ stdin closes normally; it is not evidence for an uncatchable runtime abort.
 - Open the caret TUI.
 - Send a prompt through the visible input.
   - Expected: forced and automatic PTY sessions render and exit.
-  - Expected: piped auto mode uses the plain prompt with no ANSI byte.
+  - Expected: piped auto mode completes `/exit` with stdout exactly `> `,
+    empty stderr, and no ANSI byte.
 - Check transcript and status.
   - Expected: the checker reports `evidence_status=PASS` and exits zero.
 
@@ -305,6 +311,9 @@ expect(result.stdout).to_contain("source_commit_check=matched")
 expect(result.stdout).to_contain("verified_binary_sha256=")
 expect(result.stdout).to_contain("verified_runtime_path=")
 expect(result.stdout).to_contain("verified_runtime_sha256=")
+expect(result.stdout).to_contain("runtime=pure-simple-self-hosted")
+expect(result.stdout).to_contain("runtime_probe=pass")
+expect(result.stdout).to_contain("rust_seed_used=false")
 expect(result.stdout).to_contain("verified_target=")
 expect(result.stdout).to_contain("wrapper_native_pin=")
 expect(result.stdout).to_contain("script_style=")
@@ -335,6 +344,11 @@ struct CaretPtyEvidence:
     stderr: text
     exit_code: i32
 
+fn caret_pty_case_timeout_ms(case_name: text) -> i64:
+    if case_name == "hidden" or case_name == "promptless":
+        return 240000
+    120000
+
 fn run_caret_pty_case(case_name: text) -> CaretPtyEvidence:
     val (stdout, stderr, exit_code) = process_run_timeout(
         "sh",
@@ -343,7 +357,7 @@ fn run_caret_pty_case(case_name: text) -> CaretPtyEvidence:
             "--case",
             case_name
         ],
-        120000
+        caret_pty_case_timeout_ms(case_name)
     )
     CaretPtyEvidence(
         stdout: stdout,
@@ -352,7 +366,8 @@ fn run_caret_pty_case(case_name: text) -> CaretPtyEvidence:
     )
 ```
 
-It declares no leaf runtime extern and gives every checker invocation a
-120-second hard bound.
+It declares no leaf runtime extern. Hidden and promptless checker groups have a
+240-second hard bound; every other checker invocation has a 120-second hard
+bound.
 
 </details>

@@ -122,15 +122,15 @@ and must not be resolved, reverted, or included by this lane.
 
 | Gate | Current result | Authority/limit |
 |---|---|---|
-| Direct Caret trace | PASS (independent final reconciliation): 25/25 files, 7,194/7,194 LOC, 505/505 file-qualified declarations after the provider-owner seams | The checker passed before the final security refactor and was not rerun, per the one-green-run session guard |
-| Unit manual parity | PASS: 62/62 TUI, 22/22 raw-input, 20/20 runtime, 63/63 main, 16/16 config, 36/36 provider, 15/15 OpenCode, 9/9 local-Torch, 37/37 tools, 24/24 chat, and 14/14 types bodies match source | Zero executed scenarios |
+| Direct Caret trace | PASS (independent final reconciliation): 25/25 files, 7,198/7,198 LOC, 506/506 file-qualified declarations after the bounded-draw helper landed | The checker passed before the final security refactor and was not rerun, per the one-green-run session guard |
+| Unit manual parity | PASS: 62/62 TUI, 22/22 raw-input, 22/22 runtime, 63/63 main, 16/16 config, 36/36 provider, 15/15 OpenCode, 9/9 local-Torch, 37/37 tools, 24/24 chat, and 14/14 types bodies match source | Zero executed scenarios |
 | Component manual parity | PASS: 10/10 TUI/hidden scenario bodies match source, including default-hidden, admitted-hidden, and disabled alias submission with zero responder/persistence | Zero executed scenarios |
 | PTY manual parity | PASS: 7/7 live-terminal scenario bodies match source | Static synchronization; checker/SSpec not executed on a qualified artifact |
 | Installed-Claude offline probe | PASS: 6/6 cases against Claude Code `2.1.218` (`71abaff5…`): provenance, version, help, missing input, help-hidden `--max-turns`, and removed `--max-tokens` | Real installed-binary checker executed with isolated HOME/config, closed stdin, no prompt, and no inherited provider credentials; SSpec/docgen still blocked |
 | Root-registry manual parity | PASS: 5/5 scenario bodies match source, including the production-derived exhaustive matrix | Static synchronization; no CLI/TUI invocation claim |
 | Hidden-stub manual parity | PASS: 1/1 scenario body and the complete supporting-helper block match source | Static synchronization; SSpec/docgen not executed on a qualified runtime |
 | Feature-gate manual parity | PASS (static): 33/33 owner rows, 33/33 independently pinned contract rows, 33/33 state rows, and 4/4 complete folded executable scenario bodies; bounded import-frontier discovery resolves 33 unique physical source/owner edges | This catches imported-registry drift only, not arbitrary unimported or upstream-only gates; SSpec/docgen cannot execute until a qualified runtime exists |
-| Curated SSpec scan | PASS (static): 620 `should` examples across the CLI/TUI/owner cohort (529 base plus 91 focused owner/effect examples), canonical matchers, and no placeholder pass | This is a scenario count, not a claim that all 620 use frozen `step(...)` flows; static source/manual scan only except for the six-case installed-Claude shell checker |
+| Curated SSpec scan | PASS (static): 622 `should` examples across the CLI/TUI/owner cohort (531 base plus 91 focused owner/effect examples), canonical matchers, and no placeholder pass | This is a scenario count, not a claim that all 622 use frozen `step(...)` flows; static source/manual scan only except for the six-case installed-Claude shell checker |
 | Direct environment guard | PASS in working and staged modes | Changed Caret paths only |
 | Numbered-artifact guard | WARN in this jj workspace: both modes emit Git-worktree/`--cached` errors but still print `OK` and exit zero | Not authoritative here; no numbered artifacts are added by this tranche |
 | Generated-spec layout | PASS: zero `.spl` specs under `doc/06_spec` | Layout only |
@@ -303,8 +303,8 @@ fixtures. No lane may run a paid provider.
 
    Current audit result: the 33 distributed gate dimensions remain
    parts-bin-only; the shipped entry graph reaches only the compact/init root
-   records and their summarize/bootstrap aliases. The scoped suite contains 620
-   curated `should` scenarios (529 base plus 91 focused owner/effect
+   records and their summarize/bootstrap aliases. The scoped suite contains 622
+   curated `should` scenarios (531 base plus 91 focused owner/effect
    scenarios), and the
    PTY manual contains seven fail-closed scenarios with zero executed. Simple
    LSP MCP returns the `commands.spl` symbol inventory and resolves the
@@ -381,7 +381,7 @@ paths. It must not execute Caret tests or docgen.
 ### 2026-07-25 mapping refresh
 
 The final independent trace reconciliation proves exactly 25/25 files,
-7,194/7,194 LOC, and 505/505 declarations after the provider-owner seams. The
+7,198/7,198 LOC, and 506/506 declarations after the bounded-draw helper. The
 checker itself was not rerun after the final security refactor.
 The broader one-shot lexical audit is triage rather
 than behavior evidence:
@@ -507,7 +507,7 @@ That provider round is now integrated statically:
   implementation has no shared `/tmp` path, output-file read, symlink target,
   or cleanup branch.
 
-The static curated cohort is now 620 `should` scenarios: 529 base plus 91
+The static curated cohort is now 622 `should` scenarios: 531 base plus 91
 focused owner/effect scenarios. This count does not claim universal frozen-step
 adoption. Executable verification remains blocked by the absence of a
 provenance-qualified pure-Simple runtime and cached Caret.
@@ -568,3 +568,35 @@ Caret hardening is not complete until:
 
 Until those conditions hold, report the status as **in progress / executable
 verification blocked**, never as full Claude parity or production readiness.
+
+### 2026-07-25 TUI component and PTY hardening checkpoint
+
+Completed statically:
+
+- `run_chat_plain` distinguishes `nil` EOF from an empty line and ignores
+  blank/whitespace input without discarding later commands;
+- `_draw_if_visible` owns row admission for every `_draw_frame` write, with a
+  captured five-row terminal fixture;
+- the runtime spec/manual are synchronized at 22 scenarios with zero executed;
+- the seven PTY scenario labels and frozen steps remain unchanged; the outer
+  timeout is 240 seconds for `hidden`/`promptless` and 120 seconds otherwise;
+- piped automatic `/exit` requires byte-exact `> ` stdout, empty stderr, zero
+  exit, and no ANSI;
+- provenance fails closed unless it records `runtime=pure-simple-self-hosted`,
+  `runtime_probe=pass`, and `rust_seed_used=false`; timeout cleanup uses bounded
+  child rescans.
+
+Remaining, in rank order:
+
+1. Execute `production_caret_io`/`caret_is_tty` and all seven PTY scenarios on
+   a provenance-qualified cached Caret artifact.
+2. Add bounded bind/router/lifecycle behavior evidence for `run_server`.
+3. Add pure injected success-normalization evidence for the
+   Claude/OpenAI/compatible/local provider owners.
+4. Add bind/request/launch/cleanup evidence for `run_gui`.
+5. Exercise the Metal render/submit/present loop on a qualified native host.
+6. Restore a pinned upstream Claude source inventory before an exhaustive
+   current-function parity claim.
+
+No provenance-qualified self-hosted Caret artifact exists, and no real PTY
+scenario has executed; static TUI and checker hardening is not a TUI PASS.

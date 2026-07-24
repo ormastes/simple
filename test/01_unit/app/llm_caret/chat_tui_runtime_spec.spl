@@ -29,6 +29,7 @@ var IO_ROWS = 24
 var IO_SIZE_CALLS = 0
 var IO_FLUSH_CALLS = 0
 var IO_DRAW_CALLS = 0
+var IO_DRAW_ROWS: [i64] = []
 var IO_BYTES: [i64] = []
 var IO_BYTE_INDEX = 0
 var IO_LINES: [text] = []
@@ -84,6 +85,7 @@ fn _fake_clear_screen():
 
 fn _fake_draw_at(row: i64, col: i64, content: text):
     IO_DRAW_CALLS = IO_DRAW_CALLS + 1
+    IO_DRAW_ROWS = IO_DRAW_ROWS + [row]
 
 fn _fake_flush():
     IO_FLUSH_CALLS = IO_FLUSH_CALLS + 1
@@ -134,6 +136,7 @@ fn _reset_fakes():
     IO_SIZE_CALLS = 0
     IO_FLUSH_CALLS = 0
     IO_DRAW_CALLS = 0
+    IO_DRAW_ROWS = []
     IO_BYTES = []
     IO_BYTE_INDEX = 0
     IO_LINES = []
@@ -303,6 +306,23 @@ describe "REQ-LLM-CARET-TUI-HARDEN-009: frame and input behavior":
         expect(IO_EVENTS).to_start_with("clear|size|")
         expect(IO_EVENTS).to_end_with("flush|")
 
+    it "should keep every draw within undersized terminal rows":
+        step("Configure a terminal below the minimum layout height")
+        _reset_fakes()
+        IO_COLS = 40
+        IO_ROWS = 5
+
+        step("Draw one bounded frame through deterministic CaretIo")
+        _draw_frame(make_chat_tui("Caret"), _fake_io())
+
+        step("Check every draw row stays inside the terminal snapshot")
+        expect(IO_SIZE_CALLS).to_equal(1)
+        expect(IO_DRAW_ROWS.len()).to_be_greater_than(0)
+        for row in IO_DRAW_ROWS:
+            expect(row).to_be_greater_than(-1)
+            expect(row).to_be_less_than(IO_ROWS)
+        expect(IO_FLUSH_CALLS).to_equal(1)
+
     it "should edit and submit bytes through the production line reader":
         step("Type ab, move left, insert X, and submit")
         _reset_fakes()
@@ -342,6 +362,29 @@ describe "REQ-LLM-CARET-TUI-HARDEN-009: frame and input behavior":
         expect(result.mode).to_equal("plain")
         expect(result.ok).to_be(true)
         expect(result.exit_reason).to_equal("eof")
+        expect(IO_EVENTS.contains("enter_raw")).to_be(false)
+
+    it "should ignore blank plain input without discarding later commands":
+        step("Queue blank input before a valid plain turn")
+        _reset_fakes()
+        IO_LINES = ["", "   ", "hello", "/exit"]
+
+        step("Run the production plain loop through deterministic CaretIo")
+        val result = run_chat_plain(
+            _policy(), _responder, _hooks(), [], _fake_io()
+        )
+
+        step("Check blank input was ignored and the later turn persisted")
+        expect(result.mode).to_equal("plain")
+        expect(result.ok).to_be(true)
+        expect(result.exit_reason).to_equal("command_exit")
+        expect(IO_LINE_INDEX).to_equal(4)
+        expect(IO_LINE_INDEX).to_equal(IO_LINES.len())
+        expect(RESPONDER_CALLS).to_equal(1)
+        expect(HOOK_PERSIST_COUNT).to_equal(1)
+        expect(HOOK_PERSIST_SESSION).to_equal("fixture-session")
+        expect(HOOK_PERSIST_MESSAGES).to_equal(2)
+        expect(IO_OUTPUT).to_contain("Assistant: fixture reply")
         expect(IO_EVENTS.contains("enter_raw")).to_be(false)
 
     it "should process plain model commands and persist model turns":

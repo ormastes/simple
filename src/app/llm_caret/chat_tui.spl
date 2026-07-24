@@ -508,6 +508,10 @@ fn _hint_line(ui: ChatTui) -> text:
         return ui.hint + " [scrolled - Ctrl-N to follow]"
     ui.hint
 
+fn _draw_if_visible(io: CaretIo, rows: i64, row: i64, col: i64, content: text):
+    if row >= 0 and row < rows:
+        io.draw_at(row, col, content)
+
 fn _draw_frame(ui: ChatTui, io: CaretIo):
     io.clear_screen()
     # One geometry snapshot owns this entire frame. A resize can affect the
@@ -522,15 +526,17 @@ fn _draw_frame(ui: ChatTui, io: CaretIo):
     val box_lines = box_render(box, box_area)
     var i = 0
     while i < box_lines.len():
-        io.draw_at(i, 0, render_line(box_lines[i]))
+        _draw_if_visible(io, size.rows, i, 0, render_line(box_lines[i]))
         i = i + 1
     val input_area = make_rect(0, box_h, cols, 1)
     val input_lines = input_render(ui.input, input_area)
     if input_lines.len() > 0:
-        io.draw_at(box_h, 0, render_line(input_lines[0]))
+        _draw_if_visible(io, size.rows, box_h, 0, render_line(input_lines[0]))
     val hint_style = make_style(COLOR_NONE, COLOR_NONE, false, false, false, true)
-    io.draw_at(box_h + 1, 0, styled(pad_or_truncate(_hint_line(ui), cols), hint_style))
-    io.draw_at(box_h + 2, 0, styled(pad_or_truncate(_status_line(ui, TURN_COUNT, AWAITING_RESPONSE), cols), hint_style))
+    val hint = styled(pad_or_truncate(_hint_line(ui), cols), hint_style)
+    _draw_if_visible(io, size.rows, box_h + 1, 0, hint)
+    val status = styled(pad_or_truncate(_status_line(ui, TURN_COUNT, AWAITING_RESPONSE), cols), hint_style)
+    _draw_if_visible(io, size.rows, box_h + 2, 0, status)
     io.flush()
 
 # ============================================================================
@@ -721,9 +727,7 @@ fn run_chat_tui(
     io.emit("chat session ended\n")
     CaretLoopResult(mode: "tui", ok: true, exit_reason: exit_reason, error: "")
 
-# ============================================================================
 # Plain fallback loop (non-tty: piped / CI / server)
-# ============================================================================
 
 fn run_chat_plain(
     policy: PermissionPolicy,
@@ -739,38 +743,38 @@ fn run_chat_plain(
     var exit_reason = "eof"
     while running:
         io.emit("> ")
-        val line = io.read_line() ?? ""
-        val trimmed = line.trim()
-        # Empty line == EOF on a drained pipe -> exit. Explicit /exit too.
-        if trimmed == "" or trimmed == "/exit" or trimmed == "/quit":
-            running = false
-            if trimmed != "":
-                exit_reason = "command_exit"
-        elif is_slash_command(trimmed):
-            val (cmd, arg) = parse_slash_command(trimmed)
-            val result = dispatch_slash(cmd, arg, hooks)
-            if result.message != "":
-                io.emit(result.message + "\n")
-            if result.exit:
+        if val line = io.read_line():
+            val trimmed = line.trim()
+            if trimmed == "":
+                continue
+            if trimmed == "/exit" or trimmed == "/quit":
                 running = false
                 exit_reason = "command_exit"
-            elif result.new_conv:
-                conv = []
-                session_id = result.new_session_id
-            elif result.replace_conv:
-                conv = result.loaded_messages
-                session_id = result.new_session_id
+            elif is_slash_command(trimmed):
+                val (cmd, arg) = parse_slash_command(trimmed)
+                val result = dispatch_slash(cmd, arg, hooks)
+                if result.message != "":
+                    io.emit(result.message + "\n")
+                if result.exit:
+                    running = false
+                    exit_reason = "command_exit"
+                elif result.new_conv:
+                    conv = []
+                    session_id = result.new_session_id
+                elif result.replace_conv:
+                    conv = result.loaded_messages
+                    session_id = result.new_session_id
+            else:
+                conv = conv + [new_user_message(trimmed)]
+                val result = run_agent_loop(policy, conv, responder, 25)
+                conv = result.final_transcript
+                io.emit("Assistant: " + result.final_text + "\n")
+                hooks.on_persist(session_id, conv)
         else:
-            conv = conv + [new_user_message(trimmed)]
-            val result = run_agent_loop(policy, conv, responder, 25)
-            conv = result.final_transcript
-            io.emit("Assistant: " + result.final_text + "\n")
-            hooks.on_persist(session_id, conv)
+            running = false
     CaretLoopResult(mode: "plain", ok: true, exit_reason: exit_reason, error: "")
 
-# ============================================================================
 # Top-level entry: pick TUI vs plain per flag/tty
-# ============================================================================
 
 # Interactive chat entry point. `ui_mode` is "auto" (default), "tui", or
 # "plain". TUI is the default for interactive TTY use; non-tty falls back to the

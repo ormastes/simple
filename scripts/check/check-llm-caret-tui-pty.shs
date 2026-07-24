@@ -201,6 +201,12 @@ verify_cached_artifact_provenance() {
         fail_prerequisite "provenance_runtime_sha256_missing_or_duplicate"
     runtime_path=$(provenance_value "runtime_path" "${provenance}") ||
         fail_prerequisite "provenance_runtime_path_missing_or_duplicate"
+    runtime_identity=$(provenance_value "runtime" "${provenance}") ||
+        fail_prerequisite "provenance_runtime_missing_or_duplicate"
+    runtime_probe=$(provenance_value "runtime_probe" "${provenance}") ||
+        fail_prerequisite "provenance_runtime_probe_missing_or_duplicate"
+    rust_seed_used=$(provenance_value "rust_seed_used" "${provenance}") ||
+        fail_prerequisite "provenance_rust_seed_used_missing_or_duplicate"
     target=$(provenance_value "target" "${provenance}") ||
         fail_prerequisite "provenance_target_missing_or_duplicate"
 
@@ -210,6 +216,12 @@ verify_cached_artifact_provenance() {
     fi
     require_sha256_value "provenance_binary_sha256" "${binary_sha256}"
     require_sha256_value "provenance_runtime_sha256" "${runtime_sha256}"
+    [ "${runtime_identity}" = "pure-simple-self-hosted" ] ||
+        fail_prerequisite "provenance_runtime_not_pure_simple_self_hosted"
+    [ "${runtime_probe}" = "pass" ] ||
+        fail_prerequisite "provenance_runtime_probe_not_pass"
+    [ "${rust_seed_used}" = "false" ] ||
+        fail_prerequisite "provenance_rust_seed_used_not_false"
     [ "${runtime_path}" = "bin/release/${target}/simple" ] ||
         fail_prerequisite "provenance_runtime_path_invalid"
     verified_runtime="${REPO_ROOT}/${runtime_path}"
@@ -238,6 +250,9 @@ verify_cached_artifact_provenance() {
     printf '%s\n' "verified_binary_sha256=${binary_sha256}"
     printf '%s\n' "verified_runtime_path=${runtime_path}"
     printf '%s\n' "verified_runtime_sha256=${runtime_sha256}"
+    printf '%s\n' "runtime=${runtime_identity}"
+    printf '%s\n' "runtime_probe=${runtime_probe}"
+    printf '%s\n' "rust_seed_used=${rust_seed_used}"
     printf '%s\n' "verified_target=${target}"
 }
 
@@ -259,6 +274,7 @@ prepare_prerequisites() {
     command -v script >/dev/null 2>&1 || fail_prerequisite "script_utility_missing"
     command -v stty >/dev/null 2>&1 || fail_prerequisite "stty_utility_missing"
     command -v pgrep >/dev/null 2>&1 || fail_prerequisite "pgrep_utility_missing"
+    command -v cmp >/dev/null 2>&1 || fail_prerequisite "cmp_utility_missing"
     select_sha256_tool
     HOST_TARGET=$(detect_host_target) ||
         fail_prerequisite "host_target_undetermined"
@@ -541,9 +557,27 @@ freeze_process_tree() {
     root_pid=$1
     kill -STOP "${root_pid}" 2>/dev/null || return
     printf '%s\n' "${root_pid}"
-    descendants=$(pgrep -P "${root_pid}" 2>/dev/null || :)
-    for descendant in ${descendants}; do
-        freeze_process_tree "${descendant}"
+    known_descendants=""
+    freeze_pass=0
+    while [ "${freeze_pass}" -lt 3 ]; do
+        descendants=$(pgrep -P "${root_pid}" 2>/dev/null || :)
+        [ "${descendants}" != "" ] || break
+        # Stop the whole direct-child snapshot before walking deeper. A bounded
+        # rescan catches children forked between pgrep and the STOP delivery.
+        kill -STOP ${descendants} 2>/dev/null || :
+        for descendant in ${descendants}; do
+            case " ${known_descendants} " in
+                *" ${descendant} "*)
+                    ;;
+                *)
+                    known_descendants="${known_descendants} ${descendant}"
+                    freeze_process_tree "${descendant}"
+                    ;;
+            esac
+        done
+        refreshed=$(pgrep -P "${root_pid}" 2>/dev/null || :)
+        [ "${refreshed}" = "${descendants}" ] && break
+        freeze_pass=$((freeze_pass + 1))
     done
 }
 
@@ -808,6 +842,7 @@ run_piped_auto_case() {
         return
     }
     printf '/exit\n' >"${case_dir}/input.txt"
+    printf '> ' >"${case_dir}/expected-stdout.txt"
     HOME="${case_dir}/home"
     TERM=dumb
     export HOME TERM
@@ -824,8 +859,11 @@ run_piped_auto_case() {
         record_failure "${label}" "wrapper_exit_${status}" "${case_dir}"
     elif has_escape "${case_dir}/stdout.txt"; then
         record_failure "${label}" "plain_output_contains_ansi" "${case_dir}"
-    elif ! grep -F "> " "${case_dir}/stdout.txt" >/dev/null 2>&1; then
-        record_failure "${label}" "plain_prompt_missing" "${case_dir}"
+    elif [ -s "${case_dir}/stderr.txt" ]; then
+        record_failure "${label}" "plain_stderr_not_empty" "${case_dir}"
+    elif ! cmp -s \
+             "${case_dir}/stdout.txt" "${case_dir}/expected-stdout.txt"; then
+        record_failure "${label}" "plain_prompt_completion_mismatch" "${case_dir}"
     else
         record_pass "${label}" "${case_dir}"
     fi

@@ -8,7 +8,7 @@
 
 | Tests | Active | Skipped | Pending | Executed |
 |------:|-------:|--------:|--------:|---------:|
-| 20 | 20 | 0 | 0 | 0 |
+| 22 | 22 | 0 | 0 | 0 |
 
 **Executable source:** `test/01_unit/app/llm_caret/chat_tui_runtime_spec.spl`
 
@@ -40,6 +40,17 @@ I/O event trace.
 **Expected:** The frame queries geometry once, draws visible rows, and flushes
 exactly once.
 
+### should keep every draw within undersized terminal rows
+
+**Step:** Configure a terminal below the minimum layout height
+
+**Step:** Draw one bounded frame through deterministic CaretIo
+
+**Step:** Check every draw row stays inside the terminal snapshot
+
+**Expected:** A five-row terminal is queried once, every captured draw row is
+non-negative and less than five, and the bounded frame flushes exactly once.
+
 ### should edit and submit bytes through the production line reader
 
 **Step:** Type `ab`, move left, insert `X`, and submit.
@@ -66,6 +77,19 @@ to auto-follow.
 **Step:** Run the production plain loop with exhausted line input.
 
 **Expected:** The loop reports plain-mode EOF and never enters raw mode.
+
+### should ignore blank plain input without discarding later commands
+
+**Step:** Queue blank input before a valid plain turn
+
+**Step:** Run the production plain loop through deterministic CaretIo
+
+**Step:** Check blank input was ignored and the later turn persisted
+
+**Expected:** Empty and whitespace-only lines do not end the loop or reach the
+model. The later `hello` turn is submitted exactly once, persisted as two
+messages in `fixture-session`, visibly answered, and followed by `/exit` with
+`command_exit`; all four lines are consumed without raw-terminal mutation.
 
 ### should process plain model commands and persist model turns
 

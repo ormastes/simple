@@ -28,7 +28,7 @@ remote-control bridge, OAuth, or full agent orchestration.
 | Simple source file | LOC | Claude source match | Role |
 |---|---:|---|---|
 | `src/app/llm_caret/chat.spl` | 227 | `src/assistant/sessionHistory.ts`, `src/bootstrap/state.ts` | conversation history and message JSON |
-| `src/app/llm_caret/chat_tui.spl` | 794 | `src/screens/REPL.tsx`, `src/commands/*` | transcript, slash commands, session transitions, and lifecycle-safe injected I/O |
+| `src/app/llm_caret/chat_tui.spl` | 798 | `src/screens/REPL.tsx`, `src/commands/*` | transcript, slash commands, session transitions, and lifecycle-safe injected I/O |
 | `src/app/llm_caret/claude_api.spl` | 310 | `src/QueryEngine.ts`, `src/entrypoints/sdk/coreSchemas.ts` | Anthropic Messages request/build/retry/completion ownership |
 | `src/app/llm_caret/claude_cli.spl` | 580 | `src/entrypoints/cli.tsx`, `src/QueryEngine.ts` | non-interactive argv and typed JSON/stream parsing |
 | `src/app/llm_caret/config.spl` | 231 | `src/bootstrap/state.ts`, `src/constants/product.ts` | defaults, file-load completion, and provider config |
@@ -54,9 +54,9 @@ remote-control bridge, OAuth, or full agent orchestration.
 | `src/app/llm_caret/types.spl` | 225 | `src/entrypoints/sdk/coreSchemas.ts`, `src/types/logs.ts` | request/response/event/config records |
 
 Mapped files at this checkpoint: 25/25 = 100%.
-Mapped LOC at this checkpoint: 7194/7194 = 100%.
-Current direct declaration inventory: 505 symbols; the checker must prove
-505/505 after the symbol TSV is regenerated.
+Mapped LOC at this checkpoint: 7198/7198 = 100%.
+Current direct declaration inventory: 506 symbols; the checker must prove
+506/506 after the symbol TSV is regenerated.
 
 These counts include the new `tui_io.spl` row and match the regenerated
 file-qualified inventory. They prove direct-file classification, not executed
@@ -88,7 +88,7 @@ reachable from the shipped Caret facade.
 Both `claude_full/feature_gate_registry.spl` and
 `claude_full/commands/hidden_stub_registry.spl` are supporting parity-island
 metadata. They are outside the 25 direct shipped-path files counted by the
-trace checker and do not change its 25/25, 7,194-LOC, or 505-symbol totals.
+trace checker and do not change its 25/25, 7,198-LOC, or 506-symbol totals.
 
 These specs do not green historical full-parity rows whose implementation
 target is absent. In particular, the installed executable probe proves only
@@ -96,8 +96,8 @@ the bounded offline argument surface it invokes; it does not establish that
 every current Claude function, authenticated request, or interactive session
 still works.
 
-The curated CLI/TUI/owner cohort now contains 620 `should` examples:
-529 base scenarios plus 91 focused owner/effect scenarios. The base includes
+The curated CLI/TUI/owner cohort now contains 622 `should` examples:
+531 base scenarios plus 91 focused owner/effect scenarios. The base includes
 the established direct Caret/registry/PTY owners plus the expanded
 `StructuredIO`, MCP OAuth, bridge lifecycle/messaging, MCP client, and injected
 OpenAI-compatible provider scenarios, six injected main-entry scenarios, four
@@ -127,7 +127,7 @@ assertions do not convert that stale count into green parity.
 | Simple file | Public or key functions/classes |
 |---|---|
 | `chat.spl` | `chat_clear`, `chat_set_system_prompt`, `chat_add_message`, `chat_truncate`, `chat_build_messages_json`, `chat_last_content`, `chat_last_role` |
-| `chat_tui.spl` | `SessionHooks`, `dispatch_slash`, `run_chat_tui_submission`, `run_chat_tui`, `run_chat_plain`, `caret_chat` |
+| `chat_tui.spl` | `SessionHooks`, `_draw_if_visible`, `dispatch_slash`, `run_chat_tui_submission`, `run_chat_tui`, `run_chat_plain`, `caret_chat` |
 | `claude_api.spl` | `ApiResponse`, `ClaudeApiRequest`, request/body/header builders, `complete_claude_api_exchange`, `parse_claude_api_response`, retry-preserving `claude_api_send` |
 | `claude_cli.spl` | `CliResponse`, `CliStreamEvent`, typed JSON helpers, `build_claude_args`, `build_claude_stream_args`, `parse_claude_json_response`, `parse_claude_stream_line`, `claude_cli_send`, `claude_cli_stream` |
 | `config.spl` | `config_loaded`, `config_default_provider`, provider default getters, `complete_config_load`, config parsing helpers |

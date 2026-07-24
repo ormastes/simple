@@ -20,9 +20,9 @@ used to generate the full-parity matrices.
 
 | Evidence | Current finding | Authority |
 |---|---|---|
-| `src/app/llm_caret/*.spl` | 25 direct Caret files; 7,194 LOC; 505 declarations | Finalized working-tree inventory |
-| `doc/09_report/llm_caret_claude_cli_traceability.md` | Maps all 25 direct files and 7,194 current LOC | Current static mapping; not executable evidence |
-| `scripts/check/check-llm-caret-claude-cli-trace.shs` | Final independent reconciliation: 25/25 files (100%); 7,194/7,194 LOC (100%); 505/505 file-qualified symbols | Checker passed before the final security refactor and was not rerun, per the one-green-run session guard |
+| `src/app/llm_caret/*.spl` | 25 direct Caret files; 7,198 LOC; 506 declarations | Finalized working-tree inventory |
+| `doc/09_report/llm_caret_claude_cli_traceability.md` | Maps all 25 direct files and 7,198 current LOC | Current static mapping; not executable evidence |
+| `scripts/check/check-llm-caret-claude-cli-trace.shs` | Final independent reconciliation: 25/25 files (100%); 7,198/7,198 LOC (100%); 506/506 file-qualified symbols | Checker passed before the final security refactor and was not rerun, per the one-green-run session guard |
 | Full self-hosted CLI bootstrap | Stage 3 built; Stage 4 full-CLI native build was killed by signal 9; no candidate deployed | Current executable-test blocker; do not retry in this session |
 | Cached Caret live-PTY qualification | Checker/spec/manual contain seven fail-closed scenarios, including three hidden-state cases and one promptless scenario requiring four real-TUI plus four explicit-plain canonical/alias process cases; `--case prerequisites` requires a matching adjacent provenance manifest and fails closed when the cached artifact is absent | Current executable-test blocker; no live PASS or skipped prerequisite |
 | `tmp/claude/claude-code-main/src` | Missing | Current-tree evidence |
@@ -65,10 +65,10 @@ scenario counts as coverage.
 | Requirement | Implementation evidence | Current tests | Surface/status | Required hardening |
 |---|---|---|---|---|
 | REQ-LLM-CARET-CLAUDE-TRACE-001 | Historical Claude source references in `doc/09_report/llm_caret_claude_cli_traceability.md` | `llm_caret_claude_cli_traceability_spec.spl` | CLI / FAIL: upstream tree missing | Restore pinned source and regenerate feature groups |
-| REQ-LLM-CARET-CLAUDE-TRACE-002 | 25 direct files under `src/app/llm_caret` | Checker maps all 25 files and 7,194 LOC | CLI/TUI / PASS | Keep rows synchronized when direct files move or split |
+| REQ-LLM-CARET-CLAUDE-TRACE-002 | 25 direct files under `src/app/llm_caret` | Checker maps all 25 files and 7,198 LOC | CLI/TUI / PASS | Keep rows synchronized when direct files move or split |
 | REQ-LLM-CARET-CLAUDE-TRACE-003 | `check-llm-caret-claude-cli-trace.shs` | Traceability system spec | CLI / PASS: 100% files, 100% LOC, exact file-qualified symbols | Keep the current filesystem inventory synchronized |
 | REQ-LLM-CARET-CLAUDE-TRACE-004 | Checker emits named counters and status | Traceability system spec | CLI / BLOCKED at runner mismatch in parent run | Modernize with frozen steps and assert exit code plus report fields |
-| REQ-LLM-CARET-CLAUDE-TRACE-005 | File-qualified Simple symbol inventory | Checker proves 505/505 current declarations | CLI / PASS | Regenerate symbol rows and require zero missing/stale symbols |
+| REQ-LLM-CARET-CLAUDE-TRACE-005 | File-qualified Simple symbol inventory | Checker proves 506/506 current declarations | CLI / PASS | Regenerate symbol rows and require zero missing/stale symbols |
 | REQ-LLM-CARET-CLI-HARDEN-006 | Production CLI/provider/session/tool declarations plus the installed Claude executable's offline argument surface | Direct production unit specs and CLI process/contract specs; `llm_caret_installed_claude_cli_spec.spl` is supplemental environmental compatibility evidence | CLI / installed checker PASS; Caret execution blocked | Retain the installed probe evidence, then execute Caret on the qualified self-hosted runtime and cached wrapper |
 | REQ-LLM-CARET-TUI-HARDEN-007 | `CaretIo`, `caret_chat`, and TUI/plain loops | Runtime component spec plus `llm_caret_tui_pty_spec.spl` routing/lifecycle/raw-rejection scenarios | TUI / designed fail-closed; live execution blocked | Require PTY PASS and pre/post mode plus cursor/screen restoration artifacts |
 | REQ-LLM-CARET-HIDDEN-008 | Shipped hidden-command admission; supporting `claude_full` parts-bin hidden-disabled, distributed-gate, and focused owner evidence | `llm_caret_tui_hidden_feature_spec.spl`, the shipped root matrix, hidden-stub and feature-gate registries, narrowly scoped focused owner scenarios including bridge availability/admission, and the real-process `hidden` PTY case | Hidden / component, registry, source-completeness, distributed cross-map, focused parts-bin owner, and PTY process coverage designed; execution blocked | Execute the three registry specs and focused owner specs plus default/enabled/disabled PTY cases without credentials; shipped fulfillment remains exclusively the root/component/PTY lane |
@@ -111,7 +111,7 @@ These counts describe historical matrix rows, not verified current Claude.
 | P3 terminal UI | 615 | 274 | 30 | TUI |
 | P4 remote bridge and server | 40 | 35 | 20 | CLI/hidden/remote |
 | P5 services and extensibility | 172 | 17 | 17 | CLI/hidden |
-| P6 support utilities and hardening | 620 | 151 | 73 | Shared |
+| P6 support utilities and hardening | 622 | 151 | 73 | Shared |
 
 The 349 existing Claude-full system specs exceed the 174 matrix paths because
 many tests are aggregated, renamed, or not referenced by the historical
@@ -233,13 +233,19 @@ surface exposes it; screenshot-only evidence is insufficient.
   input bytes, pre/post `stty` modes, and geometry under
   `build/test-artifacts/03_system/app/llm_caret/feature/llm_caret_tui_pty/`.
   A missing cached artifact, adjacent provenance manifest, `script(1)`,
-  `stty`, `pgrep`, SHA-256 utility, marker, or restoration row is a failure,
-  never a skip. Each child has one fixed 20-second watchdog and no retry or
-  polling loop. On timeout the watchdog freezes and recursively enumerates the
-  `script`/runner/Caret child tree with `pgrep -P`, then terminates every
-  captured PID. If the timeout marker is present, the parent waits for TERM,
-  CONT, delayed KILL, and a teardown-complete marker before returning. This is
-  bounded recursive teardown evidence, not a general process-tree proof.
+  `stty`, `pgrep`, `cmp`, SHA-256 utility, marker, or restoration row is a failure,
+  never a skip. Each child has one fixed 20-second watchdog and no retry. On
+  timeout the watchdog freezes each direct-child snapshot before descending,
+  performs at most three `pgrep -P` rescans to close the fork-before-STOP race,
+  and terminates every captured `script`/runner/Caret PID. If the timeout marker
+  is present, the parent waits for TERM, CONT, delayed KILL, and a
+  teardown-complete marker before returning. This is bounded recursive teardown
+  evidence, not a general process-tree proof. The outer SSpec deadline is
+  240 seconds for `hidden` and `promptless`, whose sequential per-child budgets
+  can exceed 120 seconds, and 120 seconds for all other scenario groups.
+- Piped automatic routing submits `/exit` and accepts only stdout exactly `> `,
+  empty stderr, zero exit, and no ANSI bytes. A prompt substring is not
+  completion evidence.
 - The live hidden scenario retains three typescripts: default hidden rejection
   matching unknown-command behavior, explicitly enabled sanitized execution,
   and disabled-command rejection. Its checker requires the exact `system:`
@@ -272,6 +278,9 @@ source_commit=<40-or-64-lowercase-hex-commit>
 binary_sha256=<64-lowercase-hex>
 runtime_sha256=<64-lowercase-hex>
 runtime_path=bin/release/<target>/simple
+runtime=pure-simple-self-hosted
+runtime_probe=pass
+rust_seed_used=false
 target=<canonical-host-target>
 ```
 
@@ -284,7 +293,9 @@ The checker:
 4. verifies `target` equals the detected host architecture, OS, and Linux ABI;
 5. requires `runtime_path` to name `bin/release/<target>/simple`, rehashes that
    executable, and verifies `runtime_sha256`;
-6. exports `SIMPLE_CARET_NATIVE` as that exact verified artifact before
+6. requires the producer-attested `runtime=pure-simple-self-hosted`,
+   `runtime_probe=pass`, and `rust_seed_used=false` fields;
+7. exports `SIMPLE_CARET_NATIVE` as that exact verified artifact before
    invoking `bin/caret`, with source fallback disabled.
 
 Live PTY driving is currently qualified only for Darwin `script(1)` and
@@ -324,6 +335,19 @@ fi
 runtime="bin/release/${target}/simple"
 artifact="build/bootstrap/caret-package/caret"
 test -x "${runtime}"
+case "${runtime}" in
+  *src/compiler_rust/*) exit 1 ;;
+esac
+seed_delegate="$(dirname "${runtime}")/simple_seed"
+test -x "${seed_delegate}"
+if cmp -s "${runtime}" "${seed_delegate}"; then
+  exit 1
+fi
+runtime_id=$("${runtime}" --version 2>&1) || exit 1
+case "${runtime_id}" in
+  *"Rust-built Simple binary"*|*"bootstrap seed only"*) exit 1 ;;
+esac
+test "$("${runtime}" -c 'print(6 * 7)' 2>/dev/null)" = 42
 if test -e .jj; then
   test "$(jj log -r @ --no-graph -T 'if(empty, "true\n", "false\n")')" = true
   source_commit=$(jj log -r '@-' --no-graph -T 'commit_id ++ "\n"')
@@ -356,6 +380,9 @@ runtime_sha256=$(hash_file "${runtime}") || exit 1
   printf 'binary_sha256=%s\n' "${binary_sha256}"
   printf 'runtime_sha256=%s\n' "${runtime_sha256}"
   printf 'runtime_path=%s\n' "${runtime}"
+  printf 'runtime=pure-simple-self-hosted\n'
+  printf 'runtime_probe=pass\n'
+  printf 'rust_seed_used=false\n'
   printf 'target=%s\n' "${target}"
 } >"${artifact}.provenance"
 ```
@@ -364,7 +391,8 @@ Do not copy a manifest from another artifact, edit a hash to satisfy the
 checker, build from uncommitted source, or retain a sidecar after replacing its
 binary. The subsequent `--case prerequisites` run must print the selected
 artifact, manifest path, matched source check, binary hash, runtime path/hash,
-and target
+pure-Simple runtime identity, passing runtime probe, `rust_seed_used=false`, and
+target
 before any PTY case is accepted.
 
 ## Execution Order and Exact Commands
@@ -429,13 +457,15 @@ PASS requires all of the following:
 - TUI scenarios send input through the visible surface and verify transcript
   plus status with captured evidence;
 - live PTY qualification proves forced/automatic routing, ANSI-free piped
-  fallback, modeled terminal teardown, UTF-8 editing/navigation, one bounded
-  geometry, the semantic transcript text `You: a界c!`, explicit zero Caret
-  child exits, and failure before terminal mutation when raw entry is
-  unavailable;
+  fallback with exact prompt-only `/exit` completion and empty stderr, modeled
+  terminal teardown, UTF-8 editing/navigation, one bounded geometry, the
+  semantic transcript text `You: a界c!`, explicit zero Caret child exits, and
+  failure before terminal mutation when raw entry is unavailable;
 - the selected live artifact has a matching adjacent provenance manifest,
   binary digest, clean committed source revision, host target, and rehashed
-  build runtime, and the wrapper is pinned to that verified artifact;
+  build runtime; the manifest attests a passing pure-Simple self-hosted runtime
+  probe and `rust_seed_used=false`, and the wrapper is pinned to that verified
+  artifact;
 - the installed-Claude probe submits no prompt, inherits no provider
   credentials, retains path/version/hash/raw stdout/stderr/exit artifacts, and
   makes no authenticated/provider/session claim;
@@ -509,7 +539,7 @@ and overwriting the prior persisted conversation.
 
 Focused system manuals are mirrored under `doc/06_spec/03_system/...`.
 Source-synchronized unit manuals now mirror 80 Claude CLI, 36 provider, 15
-OpenCode CLI, nine local-Torch, 24 production-chat, 62 TUI, 22 raw-input, 20
+OpenCode CLI, nine local-Torch, 24 production-chat, 62 TUI, 22 raw-input, 22
 injected-runtime, 63 main-entry, 16 production-config, 13 Claude API, 14 OpenAI
 API, 37 production-tools, and 14 production-types scenarios.
 Because docgen cannot execute in the current runtime, all refreshed manuals
@@ -522,11 +552,12 @@ coverage, fifteen restored/direct MCP OAuth scenarios, eleven injected
 OpenAI-compatible provider scenarios, six injected main-entry scenarios, four
 config owner scenarios, 27 modern Claude/OpenAI API scenarios, 15 OpenCode
 process/parse scenarios, nine shell-free local-Torch scenarios, and five
-additional provider-delegation scenarios raise that base to 529. The 91
+additional provider-delegation scenarios plus the two production-imported
+blank-input and undersized-frame scenarios raise that base to 531. The 91
 focused owner/effect examples now synchronized
 across Tasks V2, swarms, team memory, insights, review/rewind/sandbox, bridge
 helpers/command, AttachmentMessage, and withRetry raise the scoped modern
-curated `should` total to 620 examples with canonical matchers. This total is a
+curated `should` total to 622 examples with canonical matchers. This total is a
 scenario inventory, not a claim that every legacy base scenario already uses
 the frozen `step(...)` form. The pre-existing
 unit/component/process manuals retain
@@ -573,7 +604,7 @@ the configured retry timeout now prevents an over-budget sleep.
 
 The completion audit is still red. Adding the Simple-only `tui_io.spl`
 capability owner plus the CLI entry/API/config seams makes the current direct
-scope 25 files / 7,194 LOC with 505/505 file-qualified declarations in the
+scope 25 files / 7,198 LOC with 506/506 file-qualified declarations in the
 regenerated trace inventory.
 The focused checker covers all file-qualified declarations, including the
 ANSI/UTF-8 raw-key decoder, raw-line reducer, and parser validation helpers.
@@ -592,3 +623,24 @@ a bounded parts-bin aggregate plus an independent source-completeness gate.
 Experimental environment gates and the remaining distributed hidden features
 are still not part of one aggregate production invocation map. These gaps
 prohibit a full Claude parity or production-ready PASS claim.
+
+### 2026-07-25 TUI component and PTY checkpoint
+
+The production-imported runtime spec and manual now contain 22 synchronized
+scenarios with zero executed. Blank or whitespace-only plain input continues
+to the next command, while `nil` remains EOF. `_draw_if_visible` bounds every
+frame write, including a captured five-row terminal fixture.
+
+The PTY checker/spec/manual retain the same seven scenario labels and frozen
+steps. Static hardening adds case-specific outer deadlines, exact piped
+prompt-only completion with empty stderr, bounded descendant rescans, and
+required pure-Simple/passing-probe/no-Rust-seed provenance. Shell syntax and
+static parity were checked; zero real PTY cases executed.
+
+Remaining function evidence is explicit: `production_caret_io`/`caret_is_tty`,
+`run_server` lifecycle, successful provider-response normalization, `run_gui`
+lifecycle, and the Metal render/submit/present loop. The pinned upstream Claude
+source and full parity gaps also remain.
+
+No provenance-qualified self-hosted Caret artifact exists, and no real PTY
+scenario has executed; static TUI and checker hardening is not a TUI PASS.
