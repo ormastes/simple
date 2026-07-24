@@ -58,6 +58,28 @@ impl<'a> MirLowerer<'a> {
         }
     }
 
+    /// True when the receiver's NAMED type is the builtin `Result`/`Option`
+    /// enum, even if the generic instantiation's variants are not materialized
+    /// in the type registry (e.g. `Result<Value, BackendError>` with imported
+    /// payload types). For such receivers the zero-arg enum helpers
+    /// (`unwrap`/`unwrap_err`/`is_ok`/`is_err`/`is_some`/`is_none`) are ALWAYS
+    /// the builtin enum operations; emitting a name-dispatched
+    /// `MethodCallStatic("Result.is_err")` instead lets the codegen name-suffix
+    /// fallback rebind them to unrelated user methods whose type name merely
+    /// contains "Result" as a substring (`FailSafeResult.is_err`) or to a
+    /// last-resort bare import-map entry (`Poll.unwrap`) — the stage4 macOS
+    /// interpreter corruption where every interpreted `Value` became 0 and
+    /// printed `<unknown>` (2026-07-25).
+    fn receiver_is_builtin_result_or_option(&self, ty: TypeId, local_ty: Option<TypeId>) -> bool {
+        let Some(registry) = self.type_registry else {
+            return false;
+        };
+        [Some(ty), local_ty]
+            .into_iter()
+            .flatten()
+            .any(|t| matches!(registry.get_type_name(t), Some("Result" | "Option")))
+    }
+
     fn enum_variant_payload_type_for_method_receiver(&self, ty: TypeId, variant_name: &str) -> Option<TypeId> {
         let registry = self.type_registry?;
         match registry.get(ty) {
@@ -132,6 +154,13 @@ impl<'a> MirLowerer<'a> {
                             payload_ty,
                         );
                     }
+                    if self.receiver_is_builtin_result_or_option(receiver.ty, Some(effective_ty)) {
+                        return self.lower_builtin_call_expr(
+                            "rt_enum_payload",
+                            std::slice::from_ref(receiver),
+                            TypeId::ANY,
+                        );
+                    }
                 }
                 "unwrap_err" => {
                     if let Some(payload_ty) = self
@@ -144,10 +173,18 @@ impl<'a> MirLowerer<'a> {
                             payload_ty,
                         );
                     }
+                    if self.receiver_is_builtin_result_or_option(receiver.ty, Some(effective_ty)) {
+                        return self.lower_builtin_call_expr(
+                            "rt_enum_payload",
+                            std::slice::from_ref(receiver),
+                            TypeId::ANY,
+                        );
+                    }
                 }
                 "is_some" => {
                     if self.enum_has_variant_for_method_receiver(receiver.ty, "Some")
                         || self.enum_has_variant_for_method_receiver(effective_ty, "Some")
+                        || self.receiver_is_builtin_result_or_option(receiver.ty, Some(effective_ty))
                     {
                         return self.lower_builtin_call_expr(
                             "rt_is_some",
@@ -159,6 +196,7 @@ impl<'a> MirLowerer<'a> {
                 "is_none" => {
                     if self.enum_has_variant_for_method_receiver(receiver.ty, "None")
                         || self.enum_has_variant_for_method_receiver(effective_ty, "None")
+                        || self.receiver_is_builtin_result_or_option(receiver.ty, Some(effective_ty))
                     {
                         return self.lower_builtin_call_expr(
                             "rt_is_none",
@@ -171,6 +209,7 @@ impl<'a> MirLowerer<'a> {
                     let variant_name = if method == "is_ok" { "Ok" } else { "Err" };
                     if self.enum_has_variant_for_method_receiver(receiver.ty, variant_name)
                         || self.enum_has_variant_for_method_receiver(effective_ty, variant_name)
+                        || self.receiver_is_builtin_result_or_option(receiver.ty, Some(effective_ty))
                     {
                         let expected = HirExpr {
                             kind: crate::hir::HirExprKind::Integer(Self::enum_variant_discriminant(variant_name)),
