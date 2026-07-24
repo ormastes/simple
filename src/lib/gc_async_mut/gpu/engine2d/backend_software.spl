@@ -19,6 +19,7 @@ use std.gpu.engine2d.helpers_text.{text_metrics, text_aa_blit_buffer}
 use common.ui.glyph_bitmap_5x7.{glyph_index_for_char_code, glyph_row_bits}
 use std.gpu.engine2d.simd_provider.{record_simd_fill_hit, record_simd_copy_hit, record_simd_alpha_hit}
 use std.gpu.engine2d.simd_kernels.{native_pixel_rows_enabled, _scalar_fill_row, rt_engine2d_simd_fill_span_u32, rt_engine2d_simd_copy_span_u32, engine2d_simd_blend_row_u32}
+use std.gpu.engine2d.simd_kernels.{active_arch_text}
 use std.gpu.engine2d.backend_emu.{
     emu_draw_ellipse, emu_draw_ellipse_filled,
     emu_draw_arc, emu_draw_bezier,
@@ -604,11 +605,33 @@ impl RenderBackend for SoftwareBackend:
                     else:
                         val dst_off = py * self.w + start_x
                         val src_off = src_row_base + src_x
-                        while col < count:
-                            val src = pixels[src_off + col]
-                            if color_a(src) > 0:
-                                self.buf[dst_off + col] = blend(src, self.buf[dst_off + col])
-                            col = col + 1
+                        if self.native_simd_spans and native_pixel_rows_enabled() and active_arch_text() == "x86_64":
+                            var dst_row: [u32] = [0u32; count]
+                            var src_row: [u32] = [0u32; count]
+                            while col < count:
+                                dst_row[col] = self.buf[dst_off + col]
+                                src_row[col] = pixels[src_off + col]
+                                col = col + 1
+                            val blended = engine2d_simd_blend_row_u32(dst_row, src_row)
+                            if blended.len() == count:
+                                record_simd_alpha_hit()
+                                col = 0
+                                while col < count:
+                                    self.buf[dst_off + col] = blended[col]
+                                    col = col + 1
+                            else:
+                                col = 0
+                                while col < count:
+                                    val src = pixels[src_off + col]
+                                    if color_a(src) > 0:
+                                        self.buf[dst_off + col] = blend(src, self.buf[dst_off + col])
+                                    col = col + 1
+                        else:
+                            while col < count:
+                                val src = pixels[src_off + col]
+                                if color_a(src) > 0:
+                                    self.buf[dst_off + col] = blend(src, self.buf[dst_off + col])
+                                col = col + 1
                         self.mark_span_dirty(start_x, py, count)
             row = row + 1
 

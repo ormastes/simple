@@ -228,6 +228,18 @@ source-wired. Retained evidence now binds and independently recomputes the
 canonical wrapper, kernel ELF, and FAT32 image hashes. Guest rendering and an
 independent host extraction established the same pinned crop hash; a current
 retained PASS bundle remains pending.
+RV64 remains a separate fail-closed admission row. Its canonical entry already
+uses `SharedWmScene -> DrawIrComposition -> Engine2D`, but its display scenario
+does not attach the font FAT32 image and its serial-only loop does not consume
+VirtIO input. The entry must keep both explicit unavailable markers until the
+existing VirtIO-FAT32/shared font bootstrap and evdev decoder are connected by
+architecture-owned RV64 transports. RV64 capture should then move from QEMU
+`screendump` to `pmemsave` of the guest-emitted physical scanout address,
+stride, format, and scanout generation. The host converts the RV64 BGRA backing
+buffer to RGB and pins a fresh RV64-only rightmost 56x48 crop; neither the x86
+address nor its crop/hash is reusable. The exact bounded owner work is tracked
+in
+`doc/08_tracking/bug/simpleos_arm64_qmp_input_transport_missing_2026-07-24.md`.
 Widget producers read existing `lang`/`font-family` properties, and
 `SharedWmWindow.language` preserves explicit WM language; absent metadata stays
 `und` and retains the previous Noto Sans Mono behavior.

@@ -79,15 +79,15 @@ int main(void) {
                                    (int64_t)((uint64_t)0x80ff0000 << 3), 0};
     TestArray blend_dst = {0, 0, {0}, 3, 3, blend_dst_pixels};
     TestArray blend_src = {0, 0, {0}, 3, 3, blend_src_pixels};
+    rt_simd_engine2d_neon_reset();
     result = rt_engine2d_simd_blend_row_u32((SplArray *)&blend_dst,
                                             (SplArray *)&blend_src);
     if (result != (SplArray *)&output_array) return 8;
     if (output_pixels[0] != (int64_t)((uint64_t)0x80ffffff << 3) ||
         output_pixels[1] != (int64_t)((uint64_t)0xbfaa0054 << 3) ||
         output_pixels[2] != (int64_t)((uint64_t)0x00112233 << 3)) return 9;
-#if defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64) || \
-    (defined(__riscv) && defined(__riscv_vector))
-    if (rt_simd_engine2d_neon_hits() <= 0) return 10;
+#if defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64)
+    if (rt_simd_engine2d_neon_hits() != 1) return 10;
 #else
     if (rt_simd_engine2d_neon_hits() != 0) return 10;
 #endif

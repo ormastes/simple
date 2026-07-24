@@ -46,6 +46,7 @@ use std.gpu.engine2d.backend_opencl.{OpenClBackend}
 use std.gpu.engine2d.backend_opengl.{OpenGLBackend}
 use std.gpu.engine2d.backend_software.{SoftwareBackend}
 use std.gpu.engine2d.simd_kernels.{native_pixel_rows_enabled, active_arch_text, active_feature_text}
+use std.nogc_sync_mut.gpu.engine2d.simd_native_rows.{engine2d_simd_native_hits}
 use std.gpu.engine2d.backend_metal.{MetalBackend}
 use std.gpu.engine2d.backend_rocm.{RocmBackend}
 use std.gpu.engine2d.backend_intel.{IntelBackend}
@@ -1115,9 +1116,16 @@ class Engine2D:
                     attempts.push(if quad_index == batch.quads.len(): "rocm:success" else: "rocm:failed")
                     if quad_index == batch.quads.len(): winner = "rocm"
             elif target == "cpu":
-                attempts.push("cpu:success")
+                val cpu_simd_requested = self.selected_backend_name == "cpu_simd" and active_arch_text() == "x86_64"
+                val native_hits_before = engine2d_simd_native_hits()
                 quad_index = self._draw_font_batch_cpu_suffix(x, y, batch, quad_index)
-                winner = "cpu"
+                val cpu_simd = cpu_simd_requested and engine2d_simd_native_hits() > native_hits_before
+                if cpu_simd:
+                    attempts.push("cpu_simd:success")
+                    winner = "cpu_simd"
+                else:
+                    attempts.push(if cpu_simd_requested: "cpu_simd:no-native-alpha-hit" else: "cpu:success")
+                    winner = "cpu"
             if winner != "":
                 break
         self.last_font_execution_attempts = attempts

@@ -5,7 +5,7 @@
 
 | Scenarios | Active | Passed now | Blocked now |
 |---|---:|---:|---:|
-| CPU / `cpu_simd` compatibility | 1 | 0 | 1 |
+| CPU / `cpu_simd` glyph alpha | 1 | 0 | 1 |
 | Vulkan device readback | 1 | 0 | 1 |
 | DrawIR canonical consumer | 1 | 0 | 1 |
 | Replayed DrawIR identity | 1 | 0 | 1 |
@@ -27,7 +27,7 @@ This scenario drives the public `Engine2D.create_requested_backend` facade with:
 - the semantic text `Simple 2D`;
 - a 128×72 packed-ARGB framebuffer;
 - an exact CPU pixel oracle;
-- a requested `cpu_simd` compatibility lane;
+- a requested `cpu_simd` native glyph-alpha lane;
 - a requested Vulkan device lane.
 
 The captured artifact directory, when a future run succeeds, is:
@@ -51,24 +51,28 @@ positive device handles.
 | Row | Required observation | Current truth |
 |---|---|---|
 | CPU oracle | backend `cpu`, source `cpu_mirror`, execution target `cpu`, exact 9,216 pixels | **BLOCKED: not executed** |
-| `cpu_simd` request | backend label `cpu_simd`, source `cpu_mirror`, execution target `cpu`, exact CPU parity | **BLOCKED: not executed; compatibility contract only** |
-| Real SIMD execution | native SIMD target/provenance and independently attributable SIMD work | **BLOCKED: this spec supplies no such proof** |
+| `cpu_simd` request | native-mode x86_64 backend label `cpu_simd`, source `cpu_mirror`, execution target `cpu_simd`, provider alpha-hit plus C-runtime row-hit, exact CPU parity | **BLOCKED: not executed** |
 | Vulkan | backend and execution target `vulkan`, `device_readback`, positive backend handle and device identity, exact CPU parity | **BLOCKED: no device execution receipt** |
 
-### CPU compatibility is not SIMD proof
+### CPU SIMD glyph-alpha proof
 
 The `cpu_simd` scenario deliberately expects:
 
 ```text
 backend=cpu_simd
 source=cpu_mirror
-execution_target=cpu
-attempts contains cpu:success
+execution_target=cpu_simd
+attempts contains cpu_simd:success
+simd_alpha_hits>0
+simd_native_hits>0
 ```
 
-That row proves only that a `cpu_simd` request preserves CPU-rendered pixels
-while honestly disclosing CPU execution. It must never be reported as native
-SIMD acceleration, SIMD device readback, or SIMD performance evidence.
+That row is required to run in native mode. It proves the selected x86_64
+`cpu_simd` backend used both the provider alpha route and the C-runtime SIMD
+row kernel after the clear counter was reset, while preserving CPU pixels
+exactly. Its readback remains `cpu_mirror`; it is never device-readback or
+Vulkan evidence. RV64 remains CPU until an RVV glyph-alpha implementation
+exists.
 
 ### Vulkan naming is not device proof
 
@@ -105,8 +109,7 @@ The shared font flow uses the repository’s frozen operator vocabulary.
 3. **Prepare one shared font batch for 2D and 3D**
    - Request either `cpu_simd` or `vulkan` through the same Engine2D facade.
    - Do not introduce another renderer, atlas, cache, or private font path.
-   - Treat the `cpu_simd` request as CPU compatibility until native SIMD
-     provenance exists.
+   - Require `cpu_simd:success` and a positive native glyph-alpha hit count.
 
 4. **Emit the selected font composite program and plan compilation**
    - Compare the complete requested framebuffer with the CPU framebuffer.
@@ -118,13 +121,13 @@ The shared font flow uses the repository’s frozen operator vocabulary.
    - Retain the exact ARGB capture.
    - For Vulkan, additionally require device readback and positive native
      handles.
-   - For `cpu_simd`, continue to report CPU compatibility unless real SIMD
-     execution is proved elsewhere.
+   - For `cpu_simd`, require native glyph-alpha provenance while retaining CPU
+     readback provenance.
 
-## Scenario 1: CPU / `cpu_simd` Compatibility
+## Scenario 1: CPU / `cpu_simd` Glyph Alpha
 
 **User-visible outcome:** the `cpu_simd` request produces the exact CPU glyph
-frame while disclosing that font execution remained on CPU.
+frame after native SIMD glyph-alpha blending.
 
 Absolute assertions:
 
@@ -135,6 +138,8 @@ Absolute assertions:
 - minimum and maximum painted bounds equal the CPU oracle;
 - glyph bounds remain inside the framebuffer;
 - all 9,216 pixels equal the CPU oracle;
+- execution target is `cpu_simd`, its attempt is `cpu_simd:success`, and its
+  native alpha-hit count is positive;
 - `cpu.argb` and `cpu_simd.argb` are retained only after those assertions.
 
 **Current result: BLOCKED.** No runner result or capture was produced in this
@@ -217,16 +222,16 @@ source, backend handle, and device identity.
 ## Pass and Block Rules
 
 PASS requires both requested rows to satisfy their own assertions in a current
-run, plus the DrawIR canonical-consumer and malformed-payload rejection rows. The
-`cpu_simd` row may pass only as CPU compatibility under its present contract;
-it does not satisfy a claim of real SIMD execution.
+run, plus the DrawIR canonical-consumer and malformed-payload rejection rows.
+The `cpu_simd` row requires the native glyph-alpha hit assertion; CPU mirror
+readback remains distinct from GPU evidence.
 
 The feature remains BLOCKED when any of these is true:
 
 - the pure-Simple runner was not executed;
 - zero scenarios executed;
 - the font hash differs;
-- `cpu_simd` is described as native SIMD without native provenance;
+- `cpu_simd` does not report a positive glyph-alpha hit count;
 - Vulkan is unavailable;
 - Vulkan uses `cpu_mirror`;
 - either Vulkan handle is zero;

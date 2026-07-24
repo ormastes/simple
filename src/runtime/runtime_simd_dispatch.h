@@ -70,14 +70,21 @@ static inline int simd_detect_avx2(void) {
 #if SIMD_CAN_AVX2
 #  if defined(__GNUC__) || defined(__clang__)
     unsigned int eax, ebx, ecx, edx;
-    /* Check OSXSAVE (cpuid leaf 1, ecx bit 27) */
+    /* AVX2 requires AVX plus OS-managed XMM/YMM state. */
     if (!__get_cpuid(1, &eax, &ebx, &ecx, &edx)) return 0;
-    if (!(ecx & (1U << 27))) return 0; /* OSXSAVE not set */
+    if (!(ecx & (1U << 27)) || !(ecx & (1U << 28))) return 0;
+    unsigned int xcr0_eax, xcr0_edx;
+    __asm__ volatile("xgetbv" : "=a"(xcr0_eax), "=d"(xcr0_edx) : "c"(0));
+    uint64_t xcr0 = ((uint64_t)xcr0_edx << 32) | xcr0_eax;
+    if ((xcr0 & 0x6U) != 0x6U) return 0;
     /* Check AVX2 (cpuid leaf 7, sub-leaf 0, ebx bit 5) */
     if (!__get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx)) return 0;
     return (ebx & (1U << 5)) ? 1 : 0;
 #  elif defined(_MSC_VER)
     int info[4];
+    __cpuid(info, 1);
+    if (!(info[2] & (1 << 27)) || !(info[2] & (1 << 28))) return 0;
+    if ((_xgetbv(0) & 0x6) != 0x6) return 0;
     __cpuidex(info, 7, 0);
     return (info[1] & (1 << 5)) ? 1 : 0;
 #  else

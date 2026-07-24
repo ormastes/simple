@@ -620,6 +620,11 @@ int64_t rt_simd_engine2d_neon_reset(void) {
 static void engine2d_fill_u32_sse2(int64_t* data, int64_t count, int64_t color);
 __attribute__((target("avx2")))
 static void engine2d_fill_u32_avx2(int64_t* data, int64_t count, int64_t color);
+static void engine2d_blend_into_sse2(int64_t* out, const int64_t* dst,
+                                     const int64_t* src, int64_t n);
+__attribute__((target("avx2")))
+static void engine2d_blend_into_avx2(int64_t* out, const int64_t* dst,
+                                     const int64_t* src, int64_t n);
 #endif
 
 #if defined(__riscv) && defined(__riscv_vector)
@@ -700,10 +705,90 @@ static inline int64_t engine2d_blend_pixel(int64_t s, int64_t d) {
     return (int64_t)(uint64_t)out;
 }
 
+#if defined(__x86_64__) || defined(_M_X64)
+static uint32_t engine2d_blend_sse2_pixel(uint32_t s, uint32_t d) {
+    uint32_t sa = (s >> 24) & 0xFFu;
+    uint32_t da = (d >> 24) & 0xFFu;
+    uint32_t dw = (da * (255u - sa)) / 255u;
+    uint32_t oa = sa + dw;
+    uint32_t denom = oa == 0u ? 1u : oa;
+    __m128i channels = _mm_set_epi16(0, 0,
+        (short)(d & 0xFFu), (short)(s & 0xFFu),
+        (short)((d >> 8) & 0xFFu), (short)((s >> 8) & 0xFFu),
+        (short)((d >> 16) & 0xFFu), (short)((s >> 16) & 0xFFu));
+    __m128i weights = _mm_set_epi16(0, 0,
+        (short)dw, (short)sa, (short)dw, (short)sa, (short)dw, (short)sa);
+    uint32_t acc[4];
+    _mm_storeu_si128((__m128i*)(void*)acc, _mm_madd_epi16(channels, weights));
+    uint32_t out = (oa << 24) | ((acc[0] / denom) << 16) |
+        ((acc[1] / denom) << 8) | (acc[2] / denom);
+    if (sa == 255u) return s;
+    if (sa == 0u) return d;
+    return out;
+}
+
+static void engine2d_blend_into_sse2(int64_t* out, const int64_t* dst,
+                                     const int64_t* src, int64_t n) {
+    if (n > 0) engine2d_record_simd_row_hit();
+    for (int64_t i = 0; i < n; i++) {
+        uint32_t s = (uint32_t)(uint64_t)src[i];
+        uint32_t d = (uint32_t)(uint64_t)dst[i];
+        out[i] = (int64_t)(uint64_t)engine2d_blend_sse2_pixel(s, d);
+    }
+}
+
+__attribute__((target("avx2")))
+static void engine2d_blend_into_avx2(int64_t* out, const int64_t* dst,
+                                     const int64_t* src, int64_t n) {
+    int64_t i = 0;
+    if (n > 0) engine2d_record_simd_row_hit();
+    for (; i + 2 <= n; i += 2) {
+        uint32_t s0 = (uint32_t)(uint64_t)src[i];
+        uint32_t d0 = (uint32_t)(uint64_t)dst[i];
+        uint32_t s1 = (uint32_t)(uint64_t)src[i + 1];
+        uint32_t d1 = (uint32_t)(uint64_t)dst[i + 1];
+        uint32_t sa0 = (s0 >> 24) & 0xFFu;
+        uint32_t sa1 = (s1 >> 24) & 0xFFu;
+        uint32_t dw0 = (((d0 >> 24) & 0xFFu) * (255u - sa0)) / 255u;
+        uint32_t dw1 = (((d1 >> 24) & 0xFFu) * (255u - sa1)) / 255u;
+        uint32_t oa0 = sa0 + dw0;
+        uint32_t oa1 = sa1 + dw1;
+        uint32_t denom0 = oa0 == 0u ? 1u : oa0;
+        uint32_t denom1 = oa1 == 0u ? 1u : oa1;
+        __m256i channels = _mm256_set_epi16(0, 0,
+            (short)(d1 & 0xFFu), (short)(s1 & 0xFFu),
+            (short)((d1 >> 8) & 0xFFu), (short)((s1 >> 8) & 0xFFu),
+            (short)((d1 >> 16) & 0xFFu), (short)((s1 >> 16) & 0xFFu),
+            0, 0,
+            (short)(d0 & 0xFFu), (short)(s0 & 0xFFu),
+            (short)((d0 >> 8) & 0xFFu), (short)((s0 >> 8) & 0xFFu),
+            (short)((d0 >> 16) & 0xFFu), (short)((s0 >> 16) & 0xFFu));
+        __m256i weights = _mm256_set_epi16(0, 0,
+            (short)dw1, (short)sa1, (short)dw1, (short)sa1, (short)dw1, (short)sa1,
+            0, 0,
+            (short)dw0, (short)sa0, (short)dw0, (short)sa0, (short)dw0, (short)sa0);
+        uint32_t acc[8];
+        _mm256_storeu_si256((__m256i*)(void*)acc, _mm256_madd_epi16(channels, weights));
+        uint32_t o0 = (oa0 << 24) | ((acc[0] / denom0) << 16) |
+            ((acc[1] / denom0) << 8) | (acc[2] / denom0);
+        uint32_t o1 = (oa1 << 24) | ((acc[4] / denom1) << 16) |
+            ((acc[5] / denom1) << 8) | (acc[6] / denom1);
+        out[i] = (int64_t)(uint64_t)(sa0 == 255u ? s0 : (sa0 == 0u ? d0 : o0));
+        out[i + 1] = (int64_t)(uint64_t)(sa1 == 255u ? s1 : (sa1 == 0u ? d1 : o1));
+    }
+    for (; i < n; i++) {
+        uint32_t s = (uint32_t)(uint64_t)src[i];
+        uint32_t d = (uint32_t)(uint64_t)dst[i];
+        out[i] = (int64_t)(uint64_t)engine2d_blend_sse2_pixel(s, d);
+    }
+}
+#endif
+
 static void engine2d_blend_into(int64_t* out, const int64_t* dst,
                                 const int64_t* src, int64_t n) {
 #if defined(__aarch64__) || defined(_M_ARM64)
     int64_t i = 0;
+    if (n >= 2) engine2d_record_simd_row_hit();
     for (; i + 2 <= n; i += 2) {
         /* Vectorize the per-channel multiply-accumulate for both pixels.
            u32 lanes suffice: max accumulator is 255*255*2 = 130050 < 2^32.
@@ -756,6 +841,13 @@ static void engine2d_blend_into(int64_t* out, const int64_t* dst,
     for (; i < n; i++) {
         out[i] = engine2d_blend_pixel(src[i], dst[i]);
     }
+#elif defined(__x86_64__) || defined(_M_X64)
+    if (simd_detect_avx2()) {
+        engine2d_blend_into_avx2(out, dst, src, n);
+        return;
+    }
+    engine2d_blend_into_sse2(out, dst, src, n);
+    return;
 #else
     for (int64_t i = 0; i < n; i++) {
         out[i] = engine2d_blend_pixel(src[i], dst[i]);

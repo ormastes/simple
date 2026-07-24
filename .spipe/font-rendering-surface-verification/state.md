@@ -414,3 +414,11 @@ implement-active
   and rejects every font/input unavailable marker before crop or input
   acceptance. The live SSpec invokes the real fail-closed wrapper and contains
   no unconditional placeholder failure.
+- review-fix: Replaced the x86 fullscreen spec's unconditional placeholder
+  helpers with one invocation of the existing fail-closed QEMU wrapper. A
+  successful run must validate the retained font/input bundle; an unavailable
+  runtime remains explicit non-PASS. No QEMU run was performed in this repair.
+- review-fix: The x86 live scenario now checks nonzero scanout metadata, exact
+  capture size, retained hashes, and monotonic keyboard/restore/pointer
+  sequences. It no longer claims the separate drag/minimize/taskbar or 30-pair
+  performance requirements, whose focused scenarios remain blocked.

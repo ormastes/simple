@@ -6,13 +6,14 @@
 """# Engine2D Font Surface Verification
 
 Drives the public Engine2D requested-backend facade with the pinned Noto Sans
-Mono asset. The CPU lane is the exact packed-ARGB oracle. The current
-`cpu_simd` compatibility request must preserve every absolute framebuffer pixel
-while honestly disclosing CPU execution; Vulkan must disclose real device
+Mono asset. The CPU lane is the exact packed-ARGB oracle. On x86_64, the
+`cpu_simd` request must preserve every absolute framebuffer
+pixel while proving native glyph-alpha rows; Vulkan must disclose real device
 submission and readback or fail as unavailable.
 """
 
 use std.spec.{describe, it, expect, step, fail_test}
+use std.{_is_interpreter_mode}
 use std.io_runtime.{file_hash_sha256}
 use std.gpu.engine2d.engine.{Engine2D}
 use std.gpu.engine2d.color.{rgb}
@@ -20,6 +21,8 @@ use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{engine2d_draw_ir_adv_composition,
 use std.gc_async_mut.text_layout.font_renderer.{resolve_font_metrics}
 use std.common.ui.draw_ir.{draw_ir_batch, draw_ir_composition, draw_ir_embedding_config, draw_ir_rect, draw_ir_text_resolved_font}
 use std.nogc_sync_mut.sffi.io.{dir_create_all, file_write_bytes}
+use std.nogc_sync_mut.gpu.engine2d.simd_native_rows.{engine2d_simd_native_hits, engine2d_simd_native_reset}
+use std.gpu.engine2d.simd_provider.{reset_simd_hits, simd_hit_counts}
 
 val WIDTH = 128
 val HEIGHT = 72
@@ -44,6 +47,8 @@ class FontSurfaceEvidence:
     max_y: i32
     backend_handle: i64
     device_identity: i64
+    simd_alpha_hits: i64
+    simd_native_hits: i64
 
 fn write_argb(path: text, pixels: [u32]) -> bool:
     var bytes: [u8] = []
@@ -68,6 +73,8 @@ fn render_requested_font(backend_name: text) -> Result<FontSurfaceEvidence, text
         return Err("pinned-font-load-failed")
 
     engine.clear(BG)
+    reset_simd_hits()
+    engine2d_simd_native_reset()
     engine.draw_text(8, 8, TEXT, FG, 24)
     val readback = engine.read_pixels_with_source()
     var painted: i64 = 0
@@ -96,7 +103,9 @@ fn render_requested_font(backend_name: text) -> Result<FontSurfaceEvidence, text
         pixels: readback.pixels, painted: painted, partial: partial,
         min_x: min_x, min_y: min_y, max_x: max_x, max_y: max_y,
         backend_handle: readback.backend_handle,
-        device_identity: readback.device_identity)
+        device_identity: readback.device_identity,
+        simd_alpha_hits: simd_hit_counts().alpha_hits,
+        simd_native_hits: engine2d_simd_native_hits())
     engine.shutdown()
     Ok(evidence)
 
@@ -115,12 +124,13 @@ describe "Engine2D pinned-font rendering surfaces":
     # @manual_section: Primary flow
     # @manual: show
     # @capture(artifact)
-    it "keeps the cpu_simd request pixel-exact while disclosing CPU execution":
-        """The canonical CPU engine and cpu_simd compatibility request consume one semantic string and one selected face.
+    it "keeps the cpu_simd request pixel-exact with native glyph alpha rows":
+        """The canonical CPU engine and cpu_simd request consume one semantic string and one selected face.
 
         The comparison is exact over all 9,216 absolute packed-ARGB pixels; a
         checksum, tolerance, or separately painted SIMD fixture is insufficient.
         """
+        expect(_is_interpreter_mode()).to_be(false)
         step("Load the pinned multilingual font manifest")
         expect(file_hash_sha256(FONT_PATH)).to_equal(FONT_SHA256)
         expect(TEXT).to_equal("Simple 2D")
@@ -136,8 +146,8 @@ describe "Engine2D pinned-font rendering surfaces":
         val simd = require_render("cpu_simd")
         expect(simd.backend).to_equal("cpu_simd")
         expect(simd.source).to_equal("cpu_mirror")
-        expect(simd.execution_target).to_equal("cpu")
-        expect(simd.attempts).to_contain("cpu:success")
+        expect(simd.execution_target).to_equal("cpu_simd")
+        expect(simd.attempts).to_contain("cpu_simd:success")
 
         step("Emit the selected font composite program and plan compilation")
         expect(simd.pixels).to_equal(cpu.pixels)
@@ -152,6 +162,9 @@ describe "Engine2D pinned-font rendering surfaces":
         expect(simd.min_y).to_equal(cpu.min_y)
         expect(simd.max_x).to_equal(cpu.max_x)
         expect(simd.max_y).to_equal(cpu.max_y)
+        expect(simd.simd_alpha_hits).to_be_greater_than(0)
+        expect(simd.simd_native_hits).to_be_greater_than(0)
+        expect(simd.simd_native_hits).to_equal(simd.simd_alpha_hits)
         expect(cpu.min_x).to_be_greater_than(7)
         expect(cpu.min_y).to_be_greater_than(7)
         expect(cpu.max_x).to_be_less_than(WIDTH)

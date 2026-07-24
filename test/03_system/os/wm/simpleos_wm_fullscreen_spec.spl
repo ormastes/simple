@@ -1,139 +1,152 @@
 # codex-system-test
-# @req REQ-2 REQ-3 REQ-4 REQ-5 REQ-6 REQ-7 REQ-8 NFR-4 NFR-6 NFR-7
+# @req REQ-2 REQ-5 REQ-7 REQ-8 NFR-7
 # @evidence-display: links
 """# SimpleOS WM Fullscreen
 
-Boots the production pure-Simple SimpleOS desktop in QEMU at its detected
-scanout size, drives the emulated input device and guest IRQ path, and captures
-the live desktop before maximize, while maximized, and after restore. Evidence
-must correlate input, compositor, render, scanout, and capture generations.
-
-This spec deliberately fails closed until its runtime helpers are backed by
-the production QEMU wrapper. The wrapper must derive QMP capture address and
-size from the guest `[scanout-evidence]` marker, respect its byte pitch, inject
-an action through QEMU hardware input, and map each host action nonce to a new
-guest-owned monotonic `input_seq`. The same sequence must appear in guest IRQ,
-WM-state, and framebuffer-generation acknowledgements. Source
-inspection, automatic boot choreography, demo markers, direct shell actions,
-fixed framebuffer metadata, and fabricated captures cannot pass.
+Runs the existing fail-closed x86_64 QEMU evidence wrapper once. An unavailable
+runtime remains an explicit nonzero, non-PASS result. A successful run must
+retain the production guest font crop, corrupt-copy rejection, three QMP
+captures, and correlated keyboard and pointer evidence in one bundle.
 """
+use std.io_runtime.{file_exists, file_hash_sha256, file_read, file_read_bytes, process_run}
 use std.spec.*
 
-# @inline
-fn boot_production_simpleos_desktop():
-    step("Boot the production pure-Simple SimpleOS image in QEMU")
-    step("Wait for the live desktop at the detected framebuffer scanout")
+val WRAPPER = "scripts/check/check-simpleos-wm-fullscreen-evidence.shs"
+val BUILD_DIR = "build/test-simpleos-wm-fullscreen-live"
+val REPORT_PATH = BUILD_DIR + "/report.md"
+val EVIDENCE_PATH = BUILD_DIR + "/evidence.env"
+val FONT_REGION_SHA256 = "addf76edf6d23ca9bea6d698ca1d30bc4bd8dd684bb50ff3158ef755bd2854fc"
 
-# @inline
-fn drive_internal_window_maximize_restore():
-    step("Submit maximize through the QEMU emulated input device")
-    step("Observe the guest input IRQ driver and WM revision sequence")
-    step("Submit restore through the QEMU emulated input device")
+fn evidence_value(record: text, key: text) -> text:
+    val prefix = key + "="
+    var value = ""
+    var found = false
+    for line in record.split("\n"):
+        if line.starts_with(prefix):
+            if found: return ""
+            found = true
+            value = line.substring(prefix.len(), line.len())
+    value
 
-# @inline
-fn validate_three_correlated_captures():
-    step("Capture the baseline framebuffer through QMP")
-    step("Capture the maximized framebuffer through QMP")
-    step("Capture the restored framebuffer through QMP")
-    step("Validate semantic pixels hashes metadata and backend provenance")
-
-fn require_production_qemu_boot_and_dynamic_scanout():
-    fail("runtime helper must boot the production pure-Simple SimpleOS entrypoint and prove the desktop fills detected nonzero scanout address width height stride pixel format and generation without fixed metadata or demo markers")
-
-fn require_emulated_input_irq_revision_path():
-    fail("runtime helper must inject keyboard or pointer input through QEMU input-send-event or send-key, map each host nonce to a newly observed guest monotonic input_seq above baseline, and require the same sequence in guest device IRQ acknowledgement WM action state revision and later framebuffer generation; automatic boot choreography and direct shell action calls are forbidden")
-
-fn require_live_maximize_restore_state_preservation():
-    fail("runtime helper must maximize and restore one live internal window and prove only its rect maximized flag and expected focus or z revisions change while every non-target window and taskbar field is preserved")
-
-fn require_shared_render_and_content_provenance():
-    fail("runtime helper must prove shared taskbar and top title command lane use SharedWmScene objects and backend-neutral Simple 2D while internal content comes from canonical Simple GUI and Simple Web artifacts with matching scene and content revisions")
-
-fn require_three_verified_framebuffer_captures():
-    fail("runtime helper must produce distinct baseline maximized and restored QMP framebuffer captures with semantic desktop titlebar window and taskbar pixels plus matching producer scanout frame revision timestamp dimensions stride format generation and cryptographic hashes")
-
-fn require_fail_closed_qemu_lifecycle():
-    fail("runtime helper must reject QEMU early exit boot timeout missing readiness input submission failure missing IRQ or driver acknowledgement and framebuffer generation timeout")
-
-fn require_fail_closed_capture_contract():
-    fail("runtime helper must reject missing partial corrupt blank stale duplicate unverified or wrong-process captures and any capture whose hash dimensions stride format generation revision or timestamp mismatches guest metadata")
-
-fn require_fail_closed_scanout_metadata():
-    fail("runtime helper must reject missing zero fixed default stale malformed overflowed or invalid framebuffer address visible dimensions byte stride pixel format generation and any QMP pmemsave address size or conversion mismatch; capture size must equal checked byte_stride times height")
-
-fn require_qemu_input_latency_budget():
-    fail("runtime helper must measure 30 emulated-device input submissions on the documented fixed idle QEMU configuration using a monotonic clock and require nearest-rank p95 submission-to-matching-framebuffer-generation latency at or below 500 ms")
-
-fn require_performance_row_provenance():
-    fail("runtime helper must record QEMU machine CPU RAM idle-load policy renderer backend fallback viewport revision executable hash and version readback checksum sample durations and nearest-rank p95 with no seed provenance or silent fallback")
+fn evidence_i64(record: text, key: text) -> i64:
+    evidence_value(record, key).to_i64() ?? 0
 
 describe "SimpleOS production WM fullscreen":
     # @capture(protocol)
     # @capture(gui)
     # @capture(artifact)
-    it "should boot at detected full scanout and preserve live state across input-driven maximize and restore":
-        step("Boot the production pure-Simple SimpleOS image in QEMU")
-        step("Wait for the live desktop at the detected framebuffer scanout")
-        step("Capture the baseline framebuffer through QMP")
-        step("Submit maximize through the QEMU emulated input device")
-        step("Observe the guest input IRQ driver and WM revision sequence")
-        step("Capture the maximized framebuffer through QMP")
-        step("Submit restore through the QEMU emulated input device")
-        step("Capture the restored framebuffer through QMP")
-        step("Validate semantic pixels hashes metadata and backend provenance")
-        # @step: Verify production boot and dynamic detected scanout metadata
-        require_production_qemu_boot_and_dynamic_scanout()
-        # @step: Verify the emulated input device IRQ and correlated revision path
-        require_emulated_input_irq_revision_path()
-        # @step: Verify maximize and restore preserve every non-target state field
-        require_live_maximize_restore_state_preservation()
-        # @step: Verify shared taskbar top lane Simple GUI Web and 2D provenance
-        require_shared_render_and_content_provenance()
-        # @step: Verify all three framebuffer captures and their correlated hashes
-        require_three_verified_framebuffer_captures()
+    it "should retain one valid QEMU font and input bundle or report runtime unavailability":
+        step("Boot the canonical pure-Simple x86_64 desktop through the production QEMU wrapper")
+        val (out, _err, code) = process_run(
+            "/usr/bin/env",
+            [
+                "BUILD_DIR=" + BUILD_DIR,
+                "REPORT_PATH=" + REPORT_PATH,
+                "/bin/sh",
+                WRAPPER
+            ]
+        )
 
-    # @manual: folded
-    # @capture(protocol)
-    it "should reject early exit timeout or an uncorrelated emulated input path":
-        boot_production_simpleos_desktop()
-        step("Interrupt boot input delivery IRQ acknowledgement or frame production")
-        require_fail_closed_qemu_lifecycle()
-        require_emulated_input_irq_revision_path()
+        if code == 0:
+            step("Load the retained production evidence bundle")
+            val evidence = file_read(EVIDENCE_PATH)
+            val report = file_read(REPORT_PATH)
+            expect(file_exists(BUILD_DIR + "/font-region.rgb")).to_be(true)
+            expect(file_exists(BUILD_DIR + "/font-region-corrupt-calibration.rgb")).to_be(true)
+            expect(file_exists(BUILD_DIR + "/baseline.ppm")).to_be(true)
+            expect(file_exists(BUILD_DIR + "/fullscreen.ppm")).to_be(true)
+            expect(file_exists(BUILD_DIR + "/restored.ppm")).to_be(true)
 
-    # @manual: folded
-    # @capture(protocol)
-    # @capture(artifact)
-    it "should reject invalid fixed stale or mismatched framebuffer metadata":
-        boot_production_simpleos_desktop()
-        step("Replace detected scanout metadata with invalid or mismatched values")
-        step("Validate semantic pixels hashes metadata and backend provenance")
-        require_fail_closed_scanout_metadata()
+            step("Prove the pinned guest font crop and corrupt-copy rejection")
+            expect(out).to_contain("simpleos_wm_fullscreen_status=pass")
+            expect(evidence).to_contain("simpleos_wm_fullscreen_font_guest_path=/SYS/FONTS/NOTOSANS")
+            expect(evidence).to_contain("simpleos_wm_fullscreen_font_asset_bytes=1708408")
+            expect(evidence).to_contain("simpleos_wm_fullscreen_font_asset_sha256=2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081")
+            expect(evidence).to_contain("simpleos_wm_fullscreen_font_region_rgb_bytes=8064")
+            expect(evidence).to_contain("simpleos_wm_fullscreen_font_region_rgb_sha256=" + FONT_REGION_SHA256)
+            expect(evidence).to_contain("simpleos_wm_fullscreen_font_region_device_origin=qemu-pmemsave")
+            expect(evidence).to_contain("simpleos_wm_fullscreen_font_region_corrupt_rejection_status=pass")
+            expect(file_read_bytes(BUILD_DIR + "/font-region.rgb").len()).to_equal(8064)
+            expect(file_hash_sha256(BUILD_DIR + "/font-region.rgb")).to_equal(FONT_REGION_SHA256)
+            expect(file_read_bytes(BUILD_DIR + "/font-region-corrupt-calibration.rgb").len()).to_equal(8064)
+            expect(file_hash_sha256(BUILD_DIR + "/font-region-corrupt-calibration.rgb")).to_equal(
+                evidence_value(evidence, "simpleos_wm_fullscreen_font_region_corrupt_copy_sha256")
+            )
+            expect(file_hash_sha256(BUILD_DIR + "/font-region-corrupt-calibration.rgb").index_of(FONT_REGION_SHA256)).to_equal(-1)
+            expect(evidence_value(evidence, "simpleos_wm_fullscreen_font_marker")).to_contain(
+                "route=shared-wm-draw-ir component_id=taskbar-clock"
+            )
+            expect(evidence_value(evidence, "simpleos_wm_fullscreen_content_provenance")).to_contain(
+                "status=engine2d_rendered"
+            )
 
-    # @manual: folded
-    # @capture(gui)
-    # @capture(artifact)
-    it "should reject missing partial stale blank or unverifiable framebuffer captures":
-        boot_production_simpleos_desktop()
-        validate_three_correlated_captures()
-        step("Remove or corrupt capture identity freshness metadata pixels or hash")
-        require_fail_closed_capture_contract()
+            step("Prove detected scanout and retained QMP frames")
+            val scanout_pitch = evidence_i64(evidence, "simpleos_wm_fullscreen_scanout_byte_pitch")
+            val scanout_height = evidence_i64(evidence, "simpleos_wm_fullscreen_scanout_height")
+            expect(evidence_i64(evidence, "simpleos_wm_fullscreen_scanout_address")).to_be_greater_than(0)
+            expect(evidence_i64(evidence, "simpleos_wm_fullscreen_scanout_width")).to_be_greater_than(0)
+            expect(scanout_height).to_be_greater_than(0)
+            expect(scanout_pitch).to_be_greater_than(0)
+            expect(evidence_i64(evidence, "simpleos_wm_fullscreen_scanout_generation")).to_be_greater_than(0)
+            expect(evidence_i64(evidence, "simpleos_wm_fullscreen_scanout_capture_size")).to_equal(scanout_pitch * scanout_height)
+            expect(evidence).to_contain("simpleos_wm_fullscreen_baseline_ppm_magic_status=pass")
+            expect(evidence).to_contain("simpleos_wm_fullscreen_maximized_ppm_magic_status=pass")
+            expect(evidence).to_contain("simpleos_wm_fullscreen_restored_ppm_magic_status=pass")
+            expect(evidence_i64(evidence, "simpleos_wm_fullscreen_baseline_ppm_bytes")).to_be_greater_than(0)
+            expect(evidence_i64(evidence, "simpleos_wm_fullscreen_maximized_ppm_bytes")).to_be_greater_than(0)
+            expect(evidence_i64(evidence, "simpleos_wm_fullscreen_restored_ppm_bytes")).to_be_greater_than(0)
+            expect(file_read_bytes(BUILD_DIR + "/baseline.ppm").len()).to_equal(
+                evidence_i64(evidence, "simpleos_wm_fullscreen_baseline_ppm_bytes")
+            )
+            expect(file_read_bytes(BUILD_DIR + "/fullscreen.ppm").len()).to_equal(
+                evidence_i64(evidence, "simpleos_wm_fullscreen_maximized_ppm_bytes")
+            )
+            expect(file_read_bytes(BUILD_DIR + "/restored.ppm").len()).to_equal(
+                evidence_i64(evidence, "simpleos_wm_fullscreen_restored_ppm_bytes")
+            )
+            expect(evidence_i64(evidence, "simpleos_wm_fullscreen_changed_bytes")).to_be_greater_than(0)
+            val baseline_sha256 = evidence_value(evidence, "simpleos_wm_fullscreen_baseline_sha256")
+            val maximized_sha256 = evidence_value(evidence, "simpleos_wm_fullscreen_maximized_sha256")
+            val restored_sha256 = evidence_value(evidence, "simpleos_wm_fullscreen_restored_sha256")
+            expect(baseline_sha256.len()).to_equal(64)
+            expect(maximized_sha256.len()).to_equal(64)
+            expect(restored_sha256.len()).to_equal(64)
+            expect(file_hash_sha256(BUILD_DIR + "/baseline.ppm")).to_equal(baseline_sha256)
+            expect(file_hash_sha256(BUILD_DIR + "/fullscreen.ppm")).to_equal(maximized_sha256)
+            expect(file_hash_sha256(BUILD_DIR + "/restored.ppm")).to_equal(restored_sha256)
+            expect(maximized_sha256.index_of(baseline_sha256)).to_equal(-1)
+            expect(restored_sha256).to_equal(baseline_sha256)
 
-    # @manual: folded
-    # @capture(protocol)
-    it "should reject demo source-only seed or fabricated render provenance":
-        boot_production_simpleos_desktop()
-        step("Substitute demo markers fixed scenes source inspection seed execution or silent renderer fallback")
-        step("Validate semantic pixels hashes metadata and backend provenance")
-        require_shared_render_and_content_provenance()
-        require_performance_row_provenance()
-
-    # @manual: folded
-    # @capture(protocol)
-    # @capture(artifact)
-    it "should keep emulated input to matching framebuffer generation at or below 500 milliseconds p95":
-        boot_production_simpleos_desktop()
-        step("Discard setup activity and submit 30 maximize restore input pairs at idle load")
-        step("Correlate every input submission with its matching framebuffer generation")
-        step("Calculate nearest-rank p95 from monotonic-clock durations")
-        require_qemu_input_latency_budget()
-        require_performance_row_provenance()
+            step("Prove monotonic keyboard and pointer correlation")
+            val baseline_seq = evidence_i64(evidence, "simpleos_wm_fullscreen_baseline_input_seq")
+            val maximize_seq = evidence_i64(evidence, "simpleos_wm_fullscreen_maximize_input_seq")
+            val restore_seq = evidence_i64(evidence, "simpleos_wm_fullscreen_restore_input_seq")
+            val pointer_seq = evidence_i64(evidence, "simpleos_wm_fullscreen_pointer_input_seq")
+            val pointer_release_seq = evidence_i64(evidence, "simpleos_wm_fullscreen_pointer_release_input_seq")
+            expect(maximize_seq).to_be_greater_than(baseline_seq)
+            expect(restore_seq).to_be_greater_than(maximize_seq)
+            expect(pointer_seq).to_be_greater_than(restore_seq)
+            expect(pointer_release_seq).to_be_greater_than(pointer_seq)
+            expect(evidence_value(evidence, "simpleos_wm_fullscreen_input_irq_marker")).to_contain("input_seq=" + maximize_seq.to_string() + " ")
+            expect(evidence_value(evidence, "simpleos_wm_fullscreen_input_state_marker")).to_contain("input_seq=" + maximize_seq.to_string() + " ")
+            expect(evidence_value(evidence, "simpleos_wm_fullscreen_input_frame_marker")).to_contain("input_seq=" + maximize_seq.to_string() + " ")
+            expect(evidence_value(evidence, "simpleos_wm_fullscreen_restore_irq_marker")).to_contain("input_seq=" + restore_seq.to_string() + " ")
+            expect(evidence_value(evidence, "simpleos_wm_fullscreen_restore_state_marker")).to_contain("input_seq=" + restore_seq.to_string() + " ")
+            expect(evidence_value(evidence, "simpleos_wm_fullscreen_restore_frame_marker")).to_contain("input_seq=" + restore_seq.to_string() + " ")
+            expect(evidence_value(evidence, "simpleos_wm_fullscreen_pointer_irq_marker")).to_contain("input_seq=" + pointer_seq.to_string() + " ")
+            expect(evidence_value(evidence, "simpleos_wm_fullscreen_pointer_state_marker")).to_contain("input_seq=" + pointer_seq.to_string() + " ")
+            expect(evidence_value(evidence, "simpleos_wm_fullscreen_pointer_frame_marker")).to_contain("input_seq=" + pointer_seq.to_string() + " ")
+            expect(evidence_value(evidence, "simpleos_wm_fullscreen_pointer_release_irq_marker")).to_contain("input_seq=" + pointer_release_seq.to_string() + " ")
+            expect(evidence_value(evidence, "simpleos_wm_fullscreen_pointer_release_state_marker")).to_contain("input_seq=" + pointer_release_seq.to_string() + " ")
+            expect(evidence_value(evidence, "simpleos_wm_fullscreen_pointer_release_frame_marker")).to_contain("input_seq=" + pointer_release_seq.to_string() + " ")
+            expect(evidence).to_contain("simpleos_wm_fullscreen_simple_bin_status=pass")
+            expect(report).to_contain("- status: pass")
+        else:
+            step("Keep an unavailable runtime explicit and reject PASS promotion")
+            expect(code).to_be_greater_than(0)
+            expect(out).to_contain("simpleos_wm_fullscreen_status=fail")
+            expect(out).to_contain("simpleos_wm_fullscreen_reason=")
+            expect(out.index_of("simpleos_wm_fullscreen_status=pass")).to_equal(-1)
+            expect(file_read(EVIDENCE_PATH)).to_contain("simpleos_wm_fullscreen_status=fail")
+            expect(file_read(REPORT_PATH)).to_contain("- status: fail")
+            fail("SimpleOS x86_64 QEMU evidence unavailable")

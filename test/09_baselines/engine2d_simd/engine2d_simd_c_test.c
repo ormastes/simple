@@ -6,10 +6,10 @@
  *     - engine2d_fill_into
  *     - engine2d_copy_into
  *     - engine2d_blend_pixel
- *     - engine2d_blend_into  (the NEON-vectorized path on aarch64)
+ *     - engine2d_blend_into  (the NEON/SSE2/AVX2 vectorized paths)
  *
  * Those four helpers depend on nothing from the full runtime (only
- * int64_t/uint32_t and NEON intrinsics), so the gate runner slices that
+ * int64_t/uint32_t and native SIMD intrinsics), so the gate runner slices that
  * block out of the source verbatim into a generated header and we #include
  * it here. That means there is a SINGLE source of truth and drift is
  * impossible -- if the kernels change, this test recompiles against the new
@@ -26,6 +26,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdatomic.h>
+#include "runtime_simd_dispatch.h"
 
 #if defined(__aarch64__) || defined(_M_ARM64)
 #  include <arm_neon.h>
@@ -35,11 +36,8 @@
 #  include <riscv_vector.h>
 #endif
 
-/* The x86 branch of fill_into/copy_into references simd_detect_avx2(); it is
- * dead on aarch64 but must resolve if this gate is ever compiled on x86. */
 #if defined(__x86_64__) || defined(_M_X64)
 #  include <immintrin.h>
-static int simd_detect_avx2(void) { return 0; }
 #endif
 
 /* Pull in the REAL kernel helpers, sliced verbatim from
@@ -131,10 +129,11 @@ static void test_copy(void) {
     }
 }
 
-/* Drive the vectorized engine2d_blend_into over the size list so both the
- * 2-pixel NEON body and the scalar tail are exercised, comparing each pixel
- * against the independent reference. */
-static void test_blend_into(void) {
+typedef void (*blend_kernel_fn)(int64_t*, const int64_t*, const int64_t*, int64_t);
+
+/* Drive one blend kernel over the size list, comparing every pixel against the
+ * independent reference. */
+static void test_blend_kernel(blend_kernel_fn blend_kernel, const char* label) {
     for (int si = 0; si < kNumSizes; si++) {
         int64_t n = kSizes[si];
         int64_t* dst = (int64_t*)calloc((size_t)(n > 0 ? n : 1), sizeof(int64_t));
@@ -155,16 +154,25 @@ static void test_blend_into(void) {
             dst[i] = (int64_t)(uint64_t)((da << 24) | (dr << 16) | (dg << 8) | db);
             out[i] = 0x3333333333333333LL; /* poison */
         }
-        /* Real kernel: engine2d_blend_into(out, dst, src, n). */
-        engine2d_blend_into(out, dst, src, n);
+        blend_kernel(out, dst, src, n);
         for (int64_t i = 0; i < n; i++) {
             int64_t want = ref_blend_pixel(src[i], dst[i]);
-            if (out[i] != want) { fail("blend_into pixel", (long long)(n * 100 + i)); }
+            if (out[i] != want) { fail(label, (long long)(n * 100 + i)); }
         }
         free(dst);
         free(src);
         free(out);
     }
+}
+
+static void test_blend_into(void) {
+    test_blend_kernel(engine2d_blend_into, "blend_into dispatch pixel");
+#if defined(__x86_64__) || defined(_M_X64)
+    test_blend_kernel(engine2d_blend_into_sse2, "blend_into sse2 pixel");
+    if (simd_detect_avx2()) {
+        test_blend_kernel(engine2d_blend_into_avx2, "blend_into avx2 pixel");
+    }
+#endif
 }
 
 /* Exhaustive scalar math: for every sa in 0..255 and every (s_ch, d_ch) pair
@@ -204,7 +212,8 @@ int main(void) {
 #if defined(__aarch64__) || defined(_M_ARM64)
     fprintf(stderr, "ENGINE2D_SIMD_C_TEST: NEON path active (aarch64)\n");
 #elif defined(__x86_64__) || defined(_M_X64)
-    fprintf(stderr, "ENGINE2D_SIMD_C_TEST: x86_64 path (SSE2 fallback unless AVX2)\n");
+    fprintf(stderr, "ENGINE2D_SIMD_C_TEST: x86_64 %s path active\n",
+            simd_detect_avx2() ? "AVX2" : "SSE2");
 #else
     fprintf(stderr, "ENGINE2D_SIMD_C_TEST: scalar path\n");
 #endif
