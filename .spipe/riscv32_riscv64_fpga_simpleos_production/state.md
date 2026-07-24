@@ -451,3 +451,21 @@ implementation-milestone-0-in-progress
   initrd properties to QEMU's generated FDT. Per the three-cycle cap, no fourth
   attempt was made; the next scoped session must use QEMU's `-initrd` option
   and still prove interactive `root` plus `ls /`.
+- QEMU media runner 2026-07-24: `scripts/os/check_riscv_linux_qemu.shs` now
+  binds firmware/kernel/rootfs/DTB to independent pinned build provenance,
+  passes the exact DTB with QEMU `-initrd`, attaches the probe before UART boot,
+  and reuses the pure-Simple ordered terminal probe for both XLENs. Shell syntax
+  passes; its behavioral self-test remains gated on a qualified pure-Simple
+  runtime. Live RV32 was intentionally not repeated after the cap.
+- Fresh Stage4 qualification 2026-07-24: the fixed Rust bootstrap produced a
+  pure-Simple Cranelift CLI in 305 seconds (1390 compiled, zero failed), and a
+  dynload rebuild reused 1386 objects. Both binaries corrupt valid lexer tokens
+  (`in` becomes `Ident`) and trap on the focused terminal-probe self-test.
+  LLVM cannot build the full closure because 95 modules use unsupported
+  qualified-vtable/global-load layouts. The three-cycle cap is reached; no
+  binary was deployed. The release blocker is recorded in
+  `doc/08_tracking/bug/pure_simple_cranelift_lexer_keyword_corruption_2026-07-24.md`.
+- OpenSBI FDT handoff 2026-07-24: RV32 `fw_jump` now passes the previous boot
+  stage's `a1` through to Linux (`add a0,a1,zero`) instead of hardcoding the
+  FPGA DTB address. The FPGA bootrom still supplies `0x88000000`, while QEMU
+  can supply its top-of-RAM `-dtb` address using the identical firmware bytes.

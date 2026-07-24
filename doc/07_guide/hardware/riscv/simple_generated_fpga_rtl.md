@@ -187,7 +187,9 @@ Buildroot outputs reuse one download cache and retain per-architecture
 incremental stamp/output state, while their manifests keep distinct RV32 ILP32
 and RV64 LP64 identities. Linux's boot header requires RV32 at
 `0x80400000` (4 MiB RAM offset) and RV64 at `0x80200000` (2 MiB); the K26
-DDR aliases are respectively `0x40400000` and `0x40200000`.
+DDR aliases are respectively `0x40400000` and `0x40200000`. OpenSBI passes
+the previous boot stage's DTB pointer through unchanged: the generated FPGA
+boot ROM supplies `a1=0x88000000`, while QEMU supplies its `-dtb` address.
 
 After normal PS firmware initializes and reserves
 `0x40000000..0x4fffffff`, load each image before programming its PL product:
@@ -241,6 +243,15 @@ RV64. QEMU first validates the media/platform contract. A generated-RTL
 simulator must then boot the identical hashes and produce DUT-origin OpenSBI,
 kernel, init, and `login:` bytes.
 
+Run the repeatable media oracle only after the matching assets exist:
+
+```bash
+sh scripts/os/check_riscv_linux_qemu.shs rv32
+sh scripts/os/check_riscv_linux_qemu.shs rv64
+```
+
+The wrapper verifies manifest hashes, exposes QEMU's UART over localhost TCP,
+and reuses the pure-Simple terminal probe to send `root` and `ls /` in order.
 QEMU success is recorded as `qemu-media`; it never satisfies `rtl-sim`.
 
 ### 4. Run terminal login and list guest files
