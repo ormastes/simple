@@ -1038,6 +1038,18 @@ same false-green rules apply (conditional PASS markers only; final line
   bin/simple run <probe>` — or copy the CLI to a scratch name (`wjob`) with a
   `simple_seed` sibling (also dodges earlyoom, which kills processes named
   `simple`).
+- **Tree landmine — stale `.smf` stubs** (2026-07-24, bug doc
+  `smf_stub_shadowing_unresolved_describe_2026-07-24.md`): thousands of
+  untracked 179-byte `*.smf` stubs under `src/`+`test/` shadow the real
+  `.spl` modules — `std.spec` resolves to an empty stub and EVERY spec fails
+  `unresolved name: describe` on every binary, mimicking a deploy clobber.
+  Check `find src test -name '*.smf' | wc -l` FIRST; quarantine any hits
+  (never git-tracked). Also confirm the frontend has its `simple_seed`
+  sibling. Full triage: `doc/07_guide/infra/testing.md` § Troubleshooting.
+- **Summary-less FAIL ⇒ verify via `run`.** `simple test` false-fails 10–99
+  example specs with "no parseable pass/fail summary" (seed-JIT
+  Option<i64>=3 landmine); `simple run <spec>` printing `N examples, 0
+  failures` is the authoritative verdict.
 - **Debug over the shared link:** the link_mux JTAG channel (remote_bitbang →
   TAP → DTM/DMI → debug module → rv64 hart) is the in-model debugger — halt,
   read/write GPRs and dpc, resume — proven by

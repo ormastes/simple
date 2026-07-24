@@ -1046,3 +1046,30 @@ mock.was_called_with(["123", "Alice"])   # Match strings
 1. Increase sample size and warmup iterations
 2. Run on idle machine
 3. Use median instead of mean for skewed distributions
+
+## Troubleshooting: runner-level failures (the specs are fine)
+
+### Every spec fails `unresolved name: describe` / parser error on `describe "...":`
+
+Almost never a std.spec regression. Check, in order:
+
+1. **Stale `.smf` stubs shadowing real modules.** `find src test -name '*.smf' | wc -l`
+   — untracked `.smf` files in the source tree make `std.spec` (and other
+   `std.*`) resolve to empty stubs. Quarantine them (move out); they are
+   build artifacts, never git-tracked. See
+   `doc/08_tracking/bug/smf_stub_shadowing_unresolved_describe_2026-07-24.md`.
+2. **Missing `simple_seed` sibling.** A deployed `simple` binary is a
+   compile-only frontend that delegates SSpec to a `simple_seed` in the same
+   directory (`simple: seed sibling not found, skipping delegation` on
+   stderr is the tell). Restore the sibling, or copy a known-good
+   `{simple, simple_seed}` pair from a clean worktree's
+   `build/bootstrap/full/<triple>/` to a scratch dir and run from repo root.
+3. **Spec file outside the repo tree.** Module root is the spec file's
+   directory; a spec under `/tmp` fails `module path segment 'std' not
+   found`. Keep probes inside the repo (e.g. `build/`).
+
+### `simple test` FAILs a file with "no parseable pass/fail summary" but examples look fine
+
+Known seed-JIT false-fail for specs with 10–99 examples. `simple run
+<spec>` is authoritative — if it prints `N examples, 0 failures`, the spec
+is green. Verify per-file with `run` before debugging the spec.

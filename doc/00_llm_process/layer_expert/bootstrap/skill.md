@@ -120,6 +120,18 @@ the env var points to the correct seed target.
    stage2/stage3 round-trip + test subset). Gate failures are hard stops.
 3. **stage2 binary is ephemeral:** only used during bootstrap. After stage3
    succeeds, discard it — no production reliance on stage2 artifacts.
+4. **Deployed `simple` is a frontend; SSpec needs its `simple_seed` sibling.**
+   The release CLI delegates `test` to a `simple_seed` in the SAME directory
+   (`seed sibling not found, skipping delegation` = it's missing → in-process
+   fallback fails `unresolved name: describe`). Every deploy must ship the
+   pair. Recovery: copy a known-good `{simple, simple_seed}` pair from a clean
+   worktree's `build/bootstrap/full/<triple>/` to a scratch dir.
+5. **Stale untracked `.smf` stubs poison module resolution tree-wide** —
+   symptom is identical to a deploy clobber (every spec fails
+   `unresolved name: describe`). `find src test -name '*.smf'` must be empty;
+   quarantine hits. See
+   `doc/08_tracking/bug/smf_stub_shadowing_unresolved_describe_2026-07-24.md`
+   and `doc/07_guide/infra/testing.md` § Troubleshooting.
 
 ## Session update 2026-07-18
 
