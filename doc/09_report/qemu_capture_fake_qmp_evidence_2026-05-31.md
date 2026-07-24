@@ -2,6 +2,9 @@
 
 - status: pass
 - reason: fake-qmp-screendump-pass
+- simple_bin: /home/ormastes/dev/pub/simple/bin/simple
+- simple_bin_source: explicit-env
+- simple_bin_status: pass
 - simple_exit_code: 0
 - fake_qmp_exit_code: 0
 - backend: qemu_vm
@@ -15,9 +18,9 @@
 - mismatch_count: 0
 - first_mismatch: -1
 - blur_or_tolerance_used: false
-- expected_argb_path: build/qemu_capture_fake_qmp_evidence/expected-argb.json
-- captured_argb_path: build/qemu_capture_fake_qmp_evidence/captured-argb.json
-- capture_us: 250777
+- expected_argb_path: build/tmp_fake_qmp_check/expected-argb.json
+- captured_argb_path: build/tmp_fake_qmp_check/captured-argb.json
+- capture_us: 45455
 - error: 
-- socket_path: build/qemu_capture_fake_qmp_evidence/fake-qmp.sock
-- screendump_path: build/qemu_capture_fake_qmp_evidence/fake-screendump.ppm
+- socket_path: build/tmp_fake_qmp_check/fake-qmp.sock
+- screendump_path: build/tmp_fake_qmp_check/fake-screendump.ppm
