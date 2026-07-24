@@ -41,6 +41,7 @@ use compiler.semantics.visibility_integration.{check_module_visibility}
 use compiler.semantics.value_struct_layout.{validate_value_struct_layouts}
 use driver_types.*
 use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module, LoweringError}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
 use compiler.hir.hir_types.{SymbolTable, SymbolId}
 use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_function_at, bootstrap_mir_function_name_at, bootstrap_lower_hir_globals_to_mir_module}
 use compiler.driver.driver_aot_output.*
@@ -172,6 +173,13 @@ fn native_pre_parse_skip_diagnostic(path: text, reason: text) -> text:
 fn native_pre_parse_cache_requested() -> bool:
     (rt_env_get("SIMPLE_NATIVE_BUILD_SKIP_PRE_PARSE") ?? "") == "1"
 
+fn driver_streaming_surface_enabled(ctx: CompileContext) -> bool:
+    ctx.options.mode == CompileMode.Aot and
+        ctx.options.low_memory and
+        (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1" and
+        (rt_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") == "1" and
+        ctx.options.backend != "vhdl"
+
 fn native_pre_parse_is_dynload_path(ctx: CompileContext) -> bool:
     driver_output_format_is_both(ctx.options.output_format) or (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
 
@@ -296,11 +304,6 @@ pub class CompilerDriver:
         log_debug("phase 2 done")
         log_phase("phase2:parse:done n_modules={self.ctx.modules.len()}")
 
-        # Evict raw source text (no longer needed after parsing)
-        if self.ctx.options.low_memory:
-            log_debug("low-memory: evicting source text")
-            self.ctx.evict_sources()
-
         # Phase 3: Lower to HIR, resolve methods, and type check (combined loop)
         log_phase("phase3:hir_typecheck:start")
         log_trace("BEFORE phase 3")
@@ -315,6 +318,11 @@ pub class CompilerDriver:
                 if first_error.contains("Method resolution"):
                     return CompileResult.ResolveError(self.ctx.errors)
             return CompileResult.TypeError(self.ctx.errors)
+        # Module-surface fingerprints are derived from the retained real source
+        # text during HIR lowering. Evict it only after successful analysis.
+        if self.ctx.options.low_memory:
+            log_debug("low-memory: evicting source text")
+            self.ctx.evict_sources()
         log_debug("phase 3 done")
         log_phase("phase3:hir_typecheck:done")
 
@@ -399,10 +407,14 @@ pub class CompilerDriver:
         val module_name = _driver_module_name_from_path(path)
         print "[bootstrap_parse] {path} as {module_name}"
         self.ctx.modules[module_name] = parse_full_frontend(content, path, module_name, self.ctx.logger)
+        var retained_sources = self.ctx.sources
+        retained_sources = retained_sources.push(SourceFile(path: path, content: content, module_name: module_name))
         if module_name.starts_with("compiler.10.frontend.core."):
             val core_alias = "compiler.core." + module_name.substring("compiler.10.frontend.core.".len())
             print "[bootstrap_parse] alias {core_alias}"
             self.ctx.modules[core_alias] = parse_full_frontend(content, path, core_alias, self.ctx.logger)
+            retained_sources = retained_sources.push(SourceFile(path: path, content: content, module_name: core_alias))
+        self.ctx.sources = retained_sources
         true
 
     me parse_bootstrap_default_root(root: text) -> bool:
@@ -463,6 +475,7 @@ pub class CompilerDriver:
             self.parse_bootstrap_default_root("./src/lib/common")
             self.parse_bootstrap_default_root("./src/app/io")
             self.parse_bootstrap_default_root("./src/app/cli/bootstrap_main.spl")
+            self.ctx.config["driver_retained_modules_loaded"] = "1"
             has_project_source = false
             if source_trace:
                 print "[load_sources] direct modules loaded"
@@ -623,6 +636,8 @@ pub class CompilerDriver:
         val log = self.ctx.logger
         val sources = self.ctx.sources
         log_debug("parsing sources")
+        if self.ctx.config.has("driver_retained_modules_loaded"):
+            return (self.ctx, self.ctx.errors.len() == 0)
         val native_entry_closure = (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
         val native_entry = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
         if native_entry_closure or native_entry != "":
@@ -775,39 +790,13 @@ pub class CompilerDriver:
         # registry and fold its result back in after lowering completes.
         var shared_lowered_traits: Dict<text, HirTrait> = {}
         if self.ctx.sources.len() <= 0:
-            dtrace("[DRV] lac-branch=modules-loop (sources<=0)")
-            var bootstrap_hir_modules: Dict<text, HirModule> = {}
-            val bootstrap_entry_name = bootstrap_entry_module_name(self.ctx)
-            for module in self.ctx.modules:
-                val name = module.name
-                log_trace("processing module")
-                if module == nil:
-                    log_error("module is nil")
-                    continue
-                var lowering: HirLowering = hirlowering_for_module("", self.ctx.modules)
-                lowering.lowered_traits = shared_lowered_traits
-                val hir_module = lowering.lower_module(module)
-                shared_lowered_traits = lowering.lowered_traits
-                _driver_collect_hir_errors(self.ctx, name, lowering.errors)
-                val (resolved_module, resolve_errors) = resolve_methods(hir_module)
-                var err_idx = 0
-                while err_idx < resolve_errors.len():
-                    val err = resolve_errors[err_idx]
-                    self.ctx.add_error("Method resolution error in {name}: {err.message}")
-                    err_idx = err_idx + 1
-                val folded_module = run_const_fold_pass(resolved_module)
-                bootstrap_hir_modules[name] = folded_module
-            log_debug("running effect inference pass...")
-            val (updated_hir_boot, effect_warnings_boot) = run_effect_pass(bootstrap_hir_modules)
-            var bootstrap_ctx: CompileContext = self.ctx
-            bootstrap_ctx.hir_modules = updated_hir_boot
-            val bootstrap_entry_module = updated_hir_boot[bootstrap_entry_name]
-            if bootstrap_entry_module != nil:
-                bootstrap_ctx.bootstrap_entry_hir = Some(bootstrap_entry_module)
-            log_debug("effect inference done")
-            log_debug("HIR lowering complete")
-            _driver_validate_value_struct_layouts(bootstrap_ctx)
-            return (bootstrap_ctx, bootstrap_ctx.errors.len() == 0)
+            self.ctx.add_error("Module surface extraction requires retained SourceFile metadata")
+            return (self.ctx, false)
+        val retained_module_surfaces: ModuleSurfacesByName = match module_surfaces_from_modules(self.ctx.modules, self.ctx.sources):
+            case Ok(value): value
+            case Err(error):
+                self.ctx.add_error("Module surface extraction error: {error}")
+                return (self.ctx, false)
         var phase_hir_modules: Dict<text, HirModule> = self.ctx.hir_modules
         var phase_entry_hir: HirModule? = self.ctx.bootstrap_entry_hir
         var source_idx = 0
@@ -825,7 +814,7 @@ pub class CompilerDriver:
             # lower_parser_module_unstub) mis-dispatch and the HIR lowering body
             # never runs (iteration 17; same family as the iteration 9 Dict-ANY
             # field hazard).
-            var lowering: HirLowering = hirlowering_for_module(src_path ?? "", self.ctx.modules)
+            var lowering: HirLowering = hirlowering_for_module(src_path ?? "", retained_module_surfaces)
             if src_path != nil:
                 lowering.module_filename = src_path
             lowering.lowered_traits = shared_lowered_traits
@@ -845,25 +834,26 @@ pub class CompilerDriver:
                 if entry_module_for_hir != nil:
                     lowering.lower_parser_module_unstub(entry_module_for_hir)
                 else:
-                    val reparsed_entry_module = parse_full_frontend(src.content, src.path, name, self.ctx.logger)
-                    lowering.lower_parser_module_unstub(reparsed_entry_module)
-            elif unstub_hir and (src.content != "") and (not self.ctx.options.low_memory):
-                # Opt-in real lowering via a fresh frontend re-parse (see caveat above).
+                    self.ctx.add_error("Retained parsed module unavailable for {src.path} ({name})")
+                    return (self.ctx, false)
+            elif unstub_hir:
+                # Lower the retained phase-2 module. Re-parsing here would create
+                # a second AST identity that does not match the retained surfaces.
                 # MUST call the uniquely-named lower_parser_module_unstub: a plain
                 # `lowering.lower_module(...)` mis-dispatches on the stage4 binary
                 # (same-name sibling on MirLowering; iteration 17) and the real
                 # HIR lowering body never runs.
-                dtrace("[DRV] branch=unstub_reparse")
-                val entry_module_for_hir = parse_full_frontend(src.content, src.path, name, self.ctx.logger)
-                val lowered_hm = lowering.lower_parser_module_unstub(entry_module_for_hir)
-                dtrace("[DRV] lowered funcs={lowered_hm.functions.len()} name={lowered_hm.name}")
-                lowered_hm
-            elif unstub_hir and (self.ctx.modules[name] != nil):
-                # Opt-in real lowering, low_memory fallback (source evicted).
-                lowering.lower_parser_module_unstub(self.ctx.modules[name])
+                dtrace("[DRV] branch=unstub_retained")
+                val retained_module_for_hir = self.ctx.modules[name]
+                if retained_module_for_hir != nil:
+                    val lowered_hm = lowering.lower_parser_module_unstub(retained_module_for_hir)
+                    dtrace("[DRV] lowered funcs={lowered_hm.functions.len()} name={lowered_hm.name}")
+                    lowered_hm
+                else:
+                    self.ctx.add_error("Retained parsed module unavailable for {src.path} ({name})")
+                    return (self.ctx, false)
             else:
-                # Empty-HIR stub: forced via SIMPLE_STUB_HIR=1, or fallback when the
-                # phase-2 module was evicted/unavailable (re-parse would be unsafe).
+                # Empty-HIR stub is forced only via SIMPLE_STUB_HIR=1.
                 dtrace("[DRV] branch=STUB (empty HIR)")
                 HirModule(
                     name: name,
@@ -948,6 +938,14 @@ pub class CompilerDriver:
 
     fn lower_to_hir_impl() -> (CompileContext, bool):
         var ctx = self.ctx
+        if ctx.sources.len() <= 0:
+            ctx.add_error("Module surface extraction requires retained SourceFile metadata")
+            return (ctx, false)
+        val retained_module_surfaces: ModuleSurfacesByName = match module_surfaces_from_modules(ctx.modules, ctx.sources):
+            case Ok(value): value
+            case Err(error):
+                ctx.add_error("Module surface extraction error: {error}")
+                return (ctx, false)
 
         # Build module_name -> source_path map for per-module filename tracking.
         var source_path_map2: Dict<text, text> = {}
@@ -958,7 +956,7 @@ pub class CompilerDriver:
             val name = src2.module_name
             val module = ctx.modules[name]
             val src_path2 = source_path_map2[name]
-            var lowering = hirlowering_for_module(src_path2 ?? "", ctx.modules)
+            var lowering = hirlowering_for_module(src_path2 ?? "", retained_module_surfaces)
             if src_path2 != nil:
                 lowering.module_filename = src_path2
             val hir_module = lowering.lower_module(module)

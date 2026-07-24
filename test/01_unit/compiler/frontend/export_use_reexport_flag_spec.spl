@@ -1,0 +1,45 @@
+# export use re-export flag parser contract.
+
+use std.spec.{describe, it, expect, fail_test}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.frontend.parser_types.{Import}
+use compiler.core.parser.{parser_has_errors}
+
+fn only_import_or_fail(source: text, path: text) -> Import:
+    val module = parse_and_build_module(source, path)
+    expect(parser_has_errors()).to_equal(false)
+    if module.imports.len() != 1:
+        fail_test("expected exactly one import in {path}")
+    module.imports[0]
+
+describe "export use re-export import flags":
+    it "marks export use item aliases as re-exports":
+        val import_ = only_import_or_fail(
+            "export use compiler.core.tokens.{TOK_IDENT as Alias}\n",
+            "export_use_reexport.spl"
+        )
+        expect(import_.is_reexport).to_equal(true)
+        expect(import_.module).to_equal("compiler.core.tokens")
+        expect(import_.items.len()).to_equal(1)
+        expect(import_.items[0].name).to_equal("TOK_IDENT")
+        expect(import_.items[0].has_alias).to_equal(true)
+        expect(import_.items[0].alias).to_equal("Alias")
+
+    it "keeps a plain use out of the re-export surface":
+        val import_ = only_import_or_fail(
+            "use compiler.core.tokens.{TOK_IDENT as Alias}\n",
+            "plain_use_not_reexport.spl"
+        )
+        expect(import_.is_reexport).to_equal(false)
+
+    it "resets the re-export flag before a subsequent plain use parse":
+        val first = only_import_or_fail(
+            "export use compiler.core.tokens.{TOK_IDENT as Alias}\n",
+            "reexport_before_reset.spl"
+        )
+        expect(first.is_reexport).to_equal(true)
+        val second = only_import_or_fail(
+            "use compiler.core.tokens.{TOK_IDENT as Alias}\n",
+            "plain_use_after_reset.spl"
+        )
+        expect(second.is_reexport).to_equal(false)

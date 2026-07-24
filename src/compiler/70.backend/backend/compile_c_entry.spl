@@ -10,11 +10,13 @@ use c_ir_builder.{CIRBuilder}
 use c_type_mapper.{CTypeMapper}
 use compiler.mir.mir_data.*
 use compiler.hir.hir_lowering.types.{LoweringErrorKind, hirlowering_for_module}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
 use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_lowering.expressions.*
 use compiler.hir.hir_lowering.statements.*
 use compiler.mir.mir_lowering.*
 use compiler.backend.backend.mir_target_context_provider.{backend_mir_target_context}
+use compiler.common.driver_core_types.{SourceFile}
 use compiler.hir.hir_types.{SymbolTable, Scope, ScopeId, ScopeKind}
 use compiler.core.parser.{parse_module, parser_has_errors, parser_get_errors, parser_init, parser_advance}
 use compiler.core.parser_decls.{parse_module_body}
@@ -525,7 +527,8 @@ fn flat_ast_to_module(path: text) -> Module:
                 module: module_path,
                 items: import_items,
                 is_lazy: decl_is_lazy[idx] != 0,
-                span: span
+                span: span,
+                is_reexport: decl_get_is_reexport(idx) != 0
             ))
         elif tag == DECL_EXPORT:
             val export_items = decl_imports[idx]
@@ -660,7 +663,17 @@ fn main() -> i64:
         kind: ScopeKind.Module,
         symbols: {}
     )
-    var hir_low = hirlowering_for_module(source_file, {})
+    var retained_modules: Dict<text, Module> = {}
+    retained_modules[ast_module.name] = ast_module
+    val retained_sources: [SourceFile] = [
+        SourceFile(path: source_file, content: source_text, module_name: ast_module.name)
+    ]
+    val retained_module_surfaces: ModuleSurfacesByName = match module_surfaces_from_modules(retained_modules, retained_sources):
+        case Ok(value): value
+        case Err(error):
+            print "[c-compile] Module surface extraction error: {error}"
+            return 1
+    var hir_low = hirlowering_for_module(source_file, retained_module_surfaces)
     hir_low.symbols = sym_table
     val hir_module = hir_low.lower_module(ast_module)
     var hir_failed = false

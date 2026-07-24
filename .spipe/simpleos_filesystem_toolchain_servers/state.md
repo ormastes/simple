@@ -1022,3 +1022,20 @@ post-release markers, requests process-group termination at marker 10, and
 requires average retained growth at most 25,000 objects/file. A raced later
 marker is diagnostic. This gate is prerequisite to current `REQ-001` through
 `REQ-005` evidence.
+
+### 2026-07-24 ModuleSurface groundwork
+
+Implemented the source-bound `ModuleSurface` model, ordered physical-source
+index and aliases, unified HIR import/re-export/glob/sibling resolution,
+canonical trait origins, retained trait/enum default exceptions, and
+`Import.is_reexport` parser provenance. Normal HIR lowering now derives
+surfaces from retained Modules and real SourceFiles without reparsing; source
+and AST eviction are success-only.
+
+Highest-capability source review is PASS for this incomplete groundwork.
+Checker self-tests pass for activation, the 25,000 boundary, marker-10 stop,
+and a raced marker 11. The self-hosted compiler build gate remains blocked:
+three bounded attempts found two compact parser-shape defects in
+`module_surface.spl`; the final `else` defect was replaced statically with an
+early-continue path after the attempt cap. No Stage4 streaming, live process
+observer, release marker, NFR-001 PASS, or filesystem/QEMU evidence is claimed.

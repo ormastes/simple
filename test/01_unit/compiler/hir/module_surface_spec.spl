@@ -1,16 +1,12 @@
-# RED contract for the Stage4 ModuleSurface streaming prerequisite.
-#
-# The production ModuleSurface extractor/resolver does not exist yet.  These
-# cases deliberately fail after proving their parser fixture is well-formed;
-# replacing module_surface_unavailable with real surface assertions is the
-# implementation hand-off, not a permissive placeholder.
-
-use std.spec.{describe, it, expect, fail_test}
+use std.spec.{describe, it, expect}
+use compiler.common.driver_core_types.{SourceFile}
 use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.frontend.parser_types.{Module}
 use compiler.core.parser.{parser_has_errors}
+use compiler.hir.hir_lowering.module_surface.{module_surface_from_module, module_surfaces_from_modules, module_surface_source_matches, module_surface_trait_origin_key}
 
-fn module_surface_unavailable(case_name: text):
-    fail_test("ModuleSurface production helper unavailable: " + case_name)
+fn source_file(path: text, content: text, module_name: text) -> SourceFile:
+    SourceFile(path: path, content: content, module_name: module_name)
 
 fn category_fixture() -> text:
     "use compiler.core.tokens.{TOK_IDENT as Alias}\n" +
@@ -29,79 +25,102 @@ fn default_fixture() -> text:
     "const answer: i64 = 42\n" +
     "fn api(input: i64 = 3) -> i64:\n    input\n"
 
-describe "ModuleSurface RED contract":
+describe "ModuleSurface extraction":
     it "keeps every resolver declaration category without ordinary bodies":
-        val module = parse_and_build_module(category_fixture(), "surface_categories.spl")
+        val content = category_fixture()
+        val module = parse_and_build_module(content, "surface_categories.spl")
         expect(parser_has_errors()).to_equal(false)
-        expect(module.imports.len()).to_equal(1)
-        expect(module.imports[0].module).to_equal("compiler.core.tokens")
-        expect(module.imports[0].items[0].name).to_equal("TOK_IDENT")
-        expect(module.imports[0].items[0].alias).to_equal("Alias")
-        expect(module.exports.len()).to_equal(1)
-        expect(module.exports[0].items[0]).to_equal("api")
-        expect(module.functions.contains("api")).to_equal(true)
-        expect(module.structs.contains("LocalThing")).to_equal(true)
-        expect(module.enums.contains("Choice")).to_equal(true)
-        expect(module.traits.contains("Defaulted")).to_equal(true)
-        expect(module.impls.len()).to_equal(1)
-        expect(module.constants.contains("answer")).to_equal(true)
-        module_surface_unavailable("categories and body exclusion")
+        val source = source_file("src/surface_categories.spl", content, "surface.categories")
+        val surface = module_surface_from_module(module, source, 3)
+        expect(surface.source_index).to_equal(3)
+        expect(surface.module_name).to_equal("surface.categories")
+        expect(surface.imports.len()).to_equal(1)
+        expect(surface.imports[0].items[0].alias).to_equal("Alias")
+        expect(surface.exports[0].items[0]).to_equal("api")
+        expect(surface.callables.contains("api")).to_equal(true)
+        expect(surface.composites.contains("LocalThing")).to_equal(true)
+        expect(surface.enums.contains("Choice")).to_equal(true)
+        expect(surface.traits.contains("Defaulted")).to_equal(true)
+        expect(surface.impls.len()).to_equal(1)
+        expect(surface.constants.contains("answer")).to_equal(true)
 
-    it "keeps identity-only composites without fields layouts or methods":
-        val module = parse_and_build_module("struct Marker:\n    marker: i64\n", "surface_identity_only.spl")
+    it "keeps composites as identity only":
+        val content = "struct Marker:\n    marker: i64\n"
+        val module = parse_and_build_module(content, "surface_identity_only.spl")
         expect(parser_has_errors()).to_equal(false)
-        expect(module.structs.contains("Marker")).to_equal(true)
-        module_surface_unavailable("identity-only composite")
+        val surface = module_surface_from_module(module, source_file("surface_identity_only.spl", content, "surface.identity"), 0)
+        val composite = surface.composites["Marker"] ?? panic("missing Marker surface")
+        expect(composite.name).to_equal("Marker")
+        expect(composite.kind).to_equal("struct")
 
-    it "drops ordinary function bodies parameter defaults field defaults and const values":
-        val module = parse_and_build_module(default_fixture(), "surface_body_drop.spl")
+    it "drops ordinary callable defaults and constant values":
+        val content = default_fixture()
+        val module = parse_and_build_module(content, "surface_body_drop.spl")
         expect(parser_has_errors()).to_equal(false)
-        val api = module.functions["api"] ?? panic("missing api")
-        expect(api.body.stmts.len()).to_be_greater_than(0)
-        expect(api.params[0].has_default).to_equal(true)
-        expect((module.constants["answer"] ?? panic("missing answer")).name).to_equal("answer")
-        module_surface_unavailable("ordinary body/default/value exclusion")
+        val surface = module_surface_from_module(module, source_file("surface_body_drop.spl", content, "surface.body_drop"), 0)
+        val callable = surface.callables["api"] ?? panic("missing api surface")
+        expect(callable.params[0].has_default).to_equal(false)
+        val constant = surface.constants["answer"] ?? panic("missing answer surface")
+        expect(constant.name).to_equal("answer")
+        expect(constant.has_type_).to_equal(true)
 
-    it "retains a trait default function and enum field-default expression after parser reset":
-        val first = parse_and_build_module(default_fixture(), "surface_retained_defaults.spl")
+    it "retains trait defaults and enum field defaults after parser reset":
+        val content = default_fixture()
+        val first = parse_and_build_module(content, "surface_retained_defaults.spl")
         expect(parser_has_errors()).to_equal(false)
-        val trait_ = first.traits["Defaulted"] ?? panic("missing Defaulted")
-        expect(trait_.methods[0].body.stmts.len()).to_be_greater_than(0)
-        expect(first.enums["Choice"].variants.len()).to_equal(1)
+        val surface = module_surface_from_module(first, source_file("surface_retained_defaults.spl", content, "surface.defaults"), 0)
         val second = parse_and_build_module("fn reset_probe() -> i64:\n    0\n", "surface_reset.spl")
         expect(parser_has_errors()).to_equal(false)
         expect(second.functions.contains("reset_probe")).to_equal(true)
-        module_surface_unavailable("trait default and enum field default retention")
+        val trait_ = surface.traits["Defaulted"] ?? panic("missing Defaulted surface")
+        expect(trait_.default_methods.len()).to_equal(1)
+        expect(trait_.default_methods[0].body.stmts.len()).to_be_greater_than(0)
+        expect(surface.enums["Choice"].variants.len()).to_equal(1)
 
-    it "rejects a source fingerprint or declaration-order mismatch":
-        val first = parse_and_build_module("fn first() -> i64:\n    1\n", "surface_order.spl")
+    it "rejects a fingerprint or source-index mismatch":
+        val content = "fn first() -> i64:\n    1\n"
+        val module = parse_and_build_module(content, "surface_fingerprint.spl")
         expect(parser_has_errors()).to_equal(false)
-        val second = parse_and_build_module("fn second() -> i64:\n    2\n", "surface_order.spl")
-        expect(parser_has_errors()).to_equal(false)
-        expect(first.function_order[0]).to_equal("first")
-        expect(second.function_order[0]).to_equal("second")
-        module_surface_unavailable("fingerprint and order mismatch")
+        val source = source_file("src/surface_fingerprint.spl", content, "surface.fingerprint")
+        val surface = module_surface_from_module(module, source, 4)
+        expect(module_surface_source_matches(surface, source, 4)).to_equal(true)
+        expect(module_surface_source_matches(surface, source, 5)).to_equal(false)
+        val changed = source_file("src/surface_fingerprint.spl", "fn first() -> i64:\n    2\n", "surface.fingerprint")
+        expect(module_surface_source_matches(surface, changed, 4)).to_equal(false)
 
-    it "shares one canonical physical-source surface across aliases":
-        val module = parse_and_build_module("fn provider() -> i64:\n    1\n", "src/sample/provider.spl")
+    it "shares one surface for aliases of the same physical source":
+        val content = "fn provider() -> i64:\n    1\n"
+        val first = parse_and_build_module(content, "provider_first.spl")
         expect(parser_has_errors()).to_equal(false)
-        expect(module.name).to_equal("src/sample/provider.spl")
-        module_surface_unavailable("canonical physical-source alias sharing")
+        val second = parse_and_build_module(content, "provider_second.spl")
+        expect(parser_has_errors()).to_equal(false)
+        val modules: Dict<text, Module> = {"provider.one": first, "provider.two": second}
+        val sources = [
+            source_file("src/sample/provider.spl", content, "provider.one"),
+            source_file("src/sample/./provider.spl", content, "provider.two")
+        ]
+        val result = module_surfaces_from_modules(modules, sources)
+        expect(result.is_ok()).to_equal(true)
+        val surfaces = result.unwrap()
+        expect(surfaces.surfaces.len()).to_equal(1)
+        expect(surfaces.index_by_name["provider.one"]).to_equal(surfaces.index_by_name["provider.two"])
 
-    it "accepts identical trait metadata from one canonical origin idempotently":
-        val first = parse_and_build_module("trait Same:\n    fn value() -> i64:\n        1\n", "src/sample/same.spl")
-        expect(parser_has_errors()).to_equal(false)
-        val second = parse_and_build_module("trait Same:\n    fn value() -> i64:\n        1\n", "src/sample/same.spl")
-        expect(parser_has_errors()).to_equal(false)
-        expect(first.traits.contains("Same")).to_equal(true)
-        expect(second.traits.contains("Same")).to_equal(true)
-        module_surface_unavailable("identical trait origin idempotence")
+    it "uses a canonical trait origin key idempotently":
+        val first = module_surface_trait_origin_key("sample.same", "Same")
+        val second = module_surface_trait_origin_key("sample.same", "Same")
+        expect(first).to_equal(second)
+        expect(first).to_equal("sample.same::Same")
 
-    it "fails loudly for conflicting metadata at one canonical trait origin":
-        val first = parse_and_build_module("trait Same:\n    fn value() -> i64:\n        1\n", "src/sample/conflict.spl")
+    it "returns an error for conflicting metadata at one physical path":
+        val first_content = "trait Same:\n    fn value() -> i64:\n        1\n"
+        val first = parse_and_build_module(first_content, "conflict_first.spl")
         expect(parser_has_errors()).to_equal(false)
-        val second = parse_and_build_module("trait Same:\n    fn value() -> text:\n        \"x\"\n", "src/sample/conflict.spl")
+        val second_content = "trait Same:\n    fn value() -> text:\n        \"x\"\n"
+        val second = parse_and_build_module(second_content, "conflict_second.spl")
         expect(parser_has_errors()).to_equal(false)
-        expect(first.traits.contains("Same")).to_equal(true)
-        expect(second.traits.contains("Same")).to_equal(true)
-        module_surface_unavailable("conflicting trait metadata")
+        val modules: Dict<text, Module> = {"conflict.one": first, "conflict.two": second}
+        val sources = [
+            source_file("src/sample/conflict.spl", first_content, "conflict.one"),
+            source_file("src/sample/./conflict.spl", second_content, "conflict.two")
+        ]
+        expect(module_surfaces_from_modules(modules, sources).is_err()).to_equal(true)

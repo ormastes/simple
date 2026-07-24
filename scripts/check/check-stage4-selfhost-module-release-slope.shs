@@ -1,0 +1,71 @@
+#!/bin/sh
+# Fixture contract for the planned Stage-4 release-stream slope gate.
+set -eu
+
+fail() {
+    printf '%s\n' "$*" >&2
+    exit 1
+}
+
+self_test=0
+fixture=
+mode=
+low_memory=
+backend=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --self-test) self_test=1; shift ;;
+        --fixture|--mode|--low-memory|--backend)
+            [ "$#" -ge 2 ] || fail "missing value for $1"
+            case "$1" in
+                --fixture) fixture=$2 ;;
+                --mode) mode=$2 ;;
+                --low-memory) low_memory=$2 ;;
+                --backend) backend=$2 ;;
+            esac
+            shift 2
+            ;;
+        *) fail "unknown argument: $1" ;;
+    esac
+done
+
+[ "$self_test" = 1 ] || fail "live mode not implemented; use --self-test --fixture PATH"
+[ -n "$fixture" ] && [ -f "$fixture" ] || fail "fixture is required"
+[ -n "$mode" ] && [ -n "$low_memory" ] && [ -n "$backend" ] || fail "mode, low-memory, and backend are required"
+
+if [ "$mode" != aot ] || [ "$low_memory" != 1 ] \
+    || [ "${SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE:-}" != 1 ] \
+    || [ "${SIMPLE_BOOTSTRAP_STAGE4:-}" != 1 ] || [ "$backend" = vhdl ]; then
+    printf '%s\n' 'activation=disabled'
+    exit 0
+fi
+
+printf '%s\n' 'activation=enabled'
+awk '
+function bad(message) { print message > "/dev/stderr"; failed=1; exit 1 }
+$1 == "phase2:surface:file:released" {
+    if (count < 10) {
+        if (NF != 4 || $2 !~ /^path=.+/ || $3 !~ /^seq=[0-9]+$/) bad("release markers must be ordered")
+        if ($4 !~ /^heap_registry=[0-9]+$/) bad("invalid heap registry count")
+        path = substr($2, 6)
+        seq = substr($3, 5) + 0
+        heap = substr($4, 15) + 0
+        if (seen[path]++) bad("release marker path must be unique")
+        if (seq != count + 1) bad("release markers must be ordered")
+        count++
+        if (count == 1) first = heap
+        if (count == 10) {
+            growth = heap - first
+            average = int(growth / 9)
+            printf "average_growth=%d\n", average
+            if (growth > 225000) bad("average heap registry growth exceeds 25000")
+            printf "termination=requested seq=10\n"
+        }
+    } else {
+        path = $2 ~ /^path=/ ? substr($2, 6) : ""
+        seq = $3 ~ /^seq=[0-9]+$/ ? substr($3, 5) : ""
+        printf "raced-marker-after-stop seq=%s path=%s\n", seq, path
+    }
+}
+END { if (!failed && count < 10) { print "release stream ended before marker 10" > "/dev/stderr"; exit 1 } }
+' "$fixture"

@@ -1,0 +1,317 @@
+# Module Surface - compact cross-module declarations for staged HIR lowering.
+#
+# codex-impl: Stage4 module retention is reduced by keeping declaration
+# surfaces.  The surface deliberately omits ordinary executable bodies,
+# parameter default expressions, composite fields, and constant values.
+
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.frontend.parser_types.*
+
+extern fn rt_hash_text(content: text) -> i64
+
+struct ModuleSurfaceParam:
+    name: text
+    has_type_: bool
+    type_: Type
+    has_default: bool
+    is_mutable: bool
+    span: Span
+
+struct ModuleSurfaceCallable:
+    name: text
+    type_params: [TypeParam]
+    params: [ModuleSurfaceParam]
+    has_return_type: bool
+    return_type: Type
+    visibility: Visibility
+    is_async: bool
+    is_static: bool
+    is_public: bool
+    is_method: bool
+    is_mutable: bool
+    is_const: bool
+    is_kernel: bool
+    is_extern: bool
+    span: Span
+
+struct ModuleSurfaceComposite:
+    name: text
+    kind: text
+    visibility: Visibility
+    is_public: bool
+    span: Span
+
+struct ModuleSurfaceEnum:
+    name: text
+    type_params: [TypeParam]
+    # Variant.Struct carries its Fields, including the one permitted retained
+    # expression form: an enum struct-variant field default.
+    variants: [Variant]
+    visibility: Visibility
+    is_public: bool
+    span: Span
+
+struct ModuleSurfaceTrait:
+    name: text
+    type_params: [TypeParam]
+    super_traits: [Type]
+    where_clause: [TraitBound]
+    methods: [ModuleSurfaceCallable]
+    # These original AST nodes are the sole executable-body exception: impl
+    # lowering must inject a trait's unoverridden default methods.
+    default_methods: [Function]
+    assoc_types: [AssocTypeDecl]
+    visibility: Visibility
+    is_public: bool
+    span: Span
+
+struct ModuleSurfaceImpl:
+    type_: Type
+    has_trait_: bool
+    trait_: Type
+    type_params: [TypeParam]
+    where_clause: [TraitBound]
+    methods: Dict<text, ModuleSurfaceCallable>
+    assoc_types: [AssocTypeDecl]
+    span: Span
+
+struct ModuleSurfaceConst:
+    name: text
+    has_type_: bool
+    type_: Type
+    is_mutable: bool
+    visibility: Visibility
+    is_public: bool
+    is_volatile: bool
+    has_fixed_address: bool
+    fixed_address: i64
+    span: Span
+
+struct ModuleSurface:
+    source_index: i64
+    canonical_path: text
+    module_name: text
+    content_length: i64
+    content_hash: i64
+    imports: [Import]
+    exports: [Export]
+    callables: Dict<text, ModuleSurfaceCallable>
+    composites: Dict<text, ModuleSurfaceComposite>
+    enums: Dict<text, ModuleSurfaceEnum>
+    traits: Dict<text, ModuleSurfaceTrait>
+    impls: [ModuleSurfaceImpl]
+    constants: Dict<text, ModuleSurfaceConst>
+
+struct ModuleSurfacesByName:
+    surfaces: [ModuleSurface]
+    index_by_name: Dict<text, i64>
+
+fn module_surface_callable_from_function(function_: Function) -> ModuleSurfaceCallable:
+    var params: [ModuleSurfaceParam] = []
+    for param in function_.params:
+        params.push(ModuleSurfaceParam(
+            name: param.name,
+            has_type_: param.has_type_,
+            type_: param.type_,
+            has_default: false,
+            is_mutable: param.is_mutable,
+            span: param.span
+        ))
+    ModuleSurfaceCallable(
+        name: function_.name,
+        type_params: function_.type_params,
+        params: params,
+        has_return_type: function_.has_return_type,
+        return_type: function_.return_type,
+        visibility: function_.visibility,
+        is_async: function_.is_async,
+        is_static: function_.is_static,
+        is_public: function_.is_public,
+        is_method: function_.is_method,
+        is_mutable: function_.is_mutable,
+        is_const: function_.is_const,
+        is_kernel: function_.is_kernel,
+        is_extern: function_.is_extern,
+        span: function_.span
+    )
+
+fn module_surface_trait_from_trait(trait_: Trait) -> ModuleSurfaceTrait:
+    var methods: [ModuleSurfaceCallable] = []
+    var default_methods: [Function] = []
+    for method in trait_.methods:
+        methods.push(module_surface_callable_from_function(method))
+        if not method.body.stmts.is_empty():
+            default_methods.push(method)
+    ModuleSurfaceTrait(
+        name: trait_.name,
+        type_params: trait_.type_params,
+        super_traits: trait_.super_traits,
+        where_clause: trait_.where_clause,
+        methods: methods,
+        default_methods: default_methods,
+        assoc_types: trait_.assoc_types,
+        visibility: trait_.visibility,
+        is_public: trait_.is_public,
+        span: trait_.span
+    )
+
+fn module_surface_impl_from_impl(impl_: Impl) -> ModuleSurfaceImpl:
+    var methods: Dict<text, ModuleSurfaceCallable> = {}
+    for name in impl_.methods.keys():
+        methods[name] = module_surface_callable_from_function(impl_.methods[name])
+    ModuleSurfaceImpl(
+        type_: impl_.type_,
+        has_trait_: impl_.has_trait_,
+        trait_: impl_.trait_,
+        type_params: impl_.type_params,
+        where_clause: impl_.where_clause,
+        methods: methods,
+        assoc_types: impl_.assoc_types,
+        span: impl_.span
+    )
+
+fn module_surface_from_module(module: Module, source: SourceFile, source_index: i64) -> ModuleSurface:
+    var callables: Dict<text, ModuleSurfaceCallable> = {}
+    for name in module.functions.keys():
+        callables[name] = module_surface_callable_from_function(module.functions[name])
+
+    var composites: Dict<text, ModuleSurfaceComposite> = {}
+    for name in module.classes.keys():
+        val class_ = module.classes[name]
+        composites[name] = ModuleSurfaceComposite(name: class_.name, kind: "class", visibility: class_.visibility, is_public: class_.is_public, span: class_.span)
+    for name in module.actors.keys():
+        val actor = module.actors[name]
+        composites[name] = ModuleSurfaceComposite(name: actor.name, kind: "actor", visibility: actor.visibility, is_public: actor.is_public, span: actor.span)
+    for name in module.structs.keys():
+        val struct_ = module.structs[name]
+        composites[name] = ModuleSurfaceComposite(name: struct_.name, kind: "struct", visibility: struct_.visibility, is_public: struct_.is_public, span: struct_.span)
+
+    var enums: Dict<text, ModuleSurfaceEnum> = {}
+    for name in module.enums.keys():
+        val enum_ = module.enums[name]
+        enums[name] = ModuleSurfaceEnum(name: enum_.name, type_params: enum_.type_params, variants: enum_.variants, visibility: enum_.visibility, is_public: enum_.is_public, span: enum_.span)
+
+    var traits: Dict<text, ModuleSurfaceTrait> = {}
+    for name in module.traits.keys():
+        traits[name] = module_surface_trait_from_trait(module.traits[name])
+
+    var impls: [ModuleSurfaceImpl] = []
+    for impl_ in module.impls:
+        impls.push(module_surface_impl_from_impl(impl_))
+
+    var constants: Dict<text, ModuleSurfaceConst> = {}
+    for name in module.constants.keys():
+        val constant = module.constants[name]
+        constants[name] = ModuleSurfaceConst(
+            name: constant.name,
+            has_type_: constant.has_type_,
+            type_: constant.type_,
+            is_mutable: constant.is_mutable,
+            visibility: constant.visibility,
+            is_public: constant.is_public,
+            is_volatile: constant.is_volatile,
+            has_fixed_address: constant.has_fixed_address,
+            fixed_address: constant.fixed_address,
+            span: constant.span
+        )
+
+    ModuleSurface(
+        source_index: source_index,
+        canonical_path: module_surface_canonical_path(source.path),
+        module_name: source.module_name,
+        content_length: source.content.len(),
+        content_hash: rt_hash_text(source.content),
+        imports: module.imports,
+        exports: module.exports,
+        callables: callables,
+        composites: composites,
+        enums: enums,
+        traits: traits,
+        impls: impls,
+        constants: constants
+    )
+
+fn module_surface_source_matches(surface: ModuleSurface, source: SourceFile, index: i64) -> bool:
+    surface.source_index == index and
+        surface.canonical_path == module_surface_canonical_path(source.path) and
+        surface.module_name == source.module_name and
+        surface.content_length == source.content.len() and
+        surface.content_hash == rt_hash_text(source.content)
+
+fn module_surface_trait_origin_key(module_name: text, trait_name: text) -> text:
+    "{module_name}::{trait_name}"
+
+fn module_surface_canonical_path(path: text) -> text:
+    val normalized = path.replace("\\", "/")
+    val absolute = normalized.starts_with("/")
+    var parts: [text] = []
+    for part in normalized.split("/"):
+        if part == "" or part == ".":
+            continue
+        if part == ".." and parts.len() > 0 and parts[parts.len() - 1] != "..":
+            parts = parts[0:parts.len() - 1]
+        elif part == ".." and not absolute:
+            parts.push(part)
+        elif part != "..":
+            parts.push(part)
+    val joined = parts.join("/")
+    if absolute:
+        return "/" + joined
+    joined
+
+fn module_surfaces_add_name(index_by_name: Dict<text, i64>, name: text, surface_index: i64) -> Result<Dict<text, i64>, text>:
+    val existing: i64? = index_by_name.get(name)
+    if existing != nil and (existing ?? -1) != surface_index:
+        return Err("module surface name conflict: {name}")
+    index_by_name[name] = surface_index
+    Ok(index_by_name)
+
+fn module_surface_declaration_matches(surface: ModuleSurface, module: Module) -> bool:
+    if surface.imports.len() != module.imports.len(): return false
+    if surface.exports.len() != module.exports.len(): return false
+    if surface.callables.len() != module.functions.len(): return false
+    if surface.composites.len() != module.classes.len() + module.actors.len() + module.structs.len(): return false
+    if surface.enums.len() != module.enums.len(): return false
+    if surface.traits.len() != module.traits.len(): return false
+    if surface.impls.len() != module.impls.len(): return false
+    if surface.constants.len() != module.constants.len(): return false
+    return true
+
+fn module_surfaces_from_modules(modules: Dict<text, Module>, sources: [SourceFile]) -> Result<ModuleSurfacesByName, text>:
+    var surfaces: [ModuleSurface] = []
+    var index_by_name: Dict<text, i64> = {}
+    var paths: Dict<text, i64> = {}
+    var source_index = 0
+    while source_index < sources.len():
+        val source = sources[source_index]
+        val module: Module? = modules.get(source.module_name)
+        if module == nil:
+            return Err("missing parsed module for source: {source.module_name}")
+        val physical_path = module_surface_canonical_path(source.path)
+        val existing: i64? = paths.get(physical_path)
+        if existing != nil:
+            val existing_index = existing ?? -1
+            val existing_surface = surfaces[existing_index]
+            if existing_surface.canonical_path != physical_path or
+                existing_surface.content_length != source.content.len() or
+                existing_surface.content_hash != rt_hash_text(source.content) or
+                not module_surface_declaration_matches(existing_surface, module ?? panic("unreachable")):
+                return Err("conflicting physical source: {physical_path}")
+            val alias_result = module_surfaces_add_name(index_by_name, source.module_name, existing_index)
+            if alias_result.is_err():
+                return Err(alias_result.unwrap_err())
+            index_by_name = alias_result.unwrap()
+            source_index = source_index + 1
+            continue
+        val surface_index = surfaces.len()
+        val surface = module_surface_from_module(module ?? panic("unreachable"), source, source_index)
+        surfaces.push(surface)
+        paths[physical_path] = surface_index
+        val source_result = module_surfaces_add_name(index_by_name, source.module_name, surface_index)
+        if source_result.is_err():
+            return Err(source_result.unwrap_err())
+        index_by_name = source_result.unwrap()
+        source_index = source_index + 1
+    Ok(ModuleSurfacesByName(surfaces: surfaces, index_by_name: index_by_name))

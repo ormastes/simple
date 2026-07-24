@@ -6,19 +6,32 @@ fresh HIR lowerer with an isolated symbol table and shared import context.
 """
 
 use compiler.hir.hir_lowering.{hirlowering_for_module}
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.frontend.parser_types.{Module}
 
 describe "compiler module-scoped HIR lowering":
     """Module-local lowerers should share import context without sharing symbol tables."""
     it "creates a fresh symbol table for each module":
-        """A second module lowerer starts with an empty symbol table and the same module map."""
-        var modules: Dict<text, any> = {}
-        modules["a"] = "module-a"
-        modules["b"] = "module-b"
+        """A second module lowerer starts with an empty symbol table and the same surface map."""
+        val a_content = "fn module_a() -> i64:\n    1\n"
+        val b_content = "fn module_b() -> i64:\n    2\n"
+        val sources = [
+            SourceFile(path: "a.spl", content: a_content, module_name: "a"),
+            SourceFile(path: "b.spl", content: b_content, module_name: "b")
+        ]
+        var modules: Dict<text, Module> = {}
+        modules["a"] = parse_and_build_module(a_content, "a.spl")
+        modules["b"] = parse_and_build_module(b_content, "b.spl")
+        val surface_result = module_surfaces_from_modules(modules, sources)
+        expect(surface_result.is_ok()).to_equal(true)
+        val surfaces = surface_result.unwrap()
 
-        var first = hirlowering_for_module("a.spl", modules)
+        var first = hirlowering_for_module("a.spl", surfaces)
         first.symbols.next_symbol_id = 42
 
-        val second = hirlowering_for_module("b.spl", modules)
+        val second = hirlowering_for_module("b.spl", surfaces)
         expect(second.module_filename).to_equal("b.spl")
         expect(second.symbols.next_symbol_id).to_equal(0)
-        expect(second.modules_by_name.keys().len()).to_equal(2)
+        expect(second.module_surfaces.index_by_name.keys().len()).to_equal(2)

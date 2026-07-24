@@ -820,3 +820,19 @@ Composite surfaces retain declaration identity only. Identical canonical trait
 imports are idempotent, while conflicting source or declaration metadata fails
 closed. The slope checker requests termination at marker 10 and treats any
 raced later marker as diagnostic.
+
+### 2026-07-24 ModuleSurface groundwork implementation
+
+The first implementation slice now provides source-bound surfaces and the
+single HIR resolver contract. It also fixes parser provenance for `export use`
+through `Import.is_reexport`, keeps private imports out of facade traversal,
+and derives non-stream surfaces from retained Modules without reparsing.
+Highest-capability source review accepted the slice as incomplete groundwork.
+
+The slope checker remains self-test-only and fails live mode explicitly.
+Three capped compiler-only native-build attempts stopped during discovery:
+the first two reported the same declaration-matcher dedent at line 303; after
+that was simplified, the third reported an unsupported `else` shape in the
+duplicate-path branch. The branch now uses a reviewed early `continue`, but no
+fourth build was run. Stage4 streaming, release-marker emission, live
+process-group termination, and the bounded-memory gate remain RED.

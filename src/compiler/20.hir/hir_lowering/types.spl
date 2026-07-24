@@ -12,6 +12,7 @@ use compiler.common.config.{TypeInferenceConfig, TypeDefault}
 use compiler.common.visibility.{effective_visibility}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.frontend.core.types.{custom_primitive_bind_symbol, custom_primitive_is_name}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
 extern fn rt_env_get(key: text) -> text
@@ -30,7 +31,6 @@ struct ModuleResolverPort:
     name: text
     resolve_fn: any
 
-type HirModulesByName = {text: Module}
 type HirImplFunctions = {SymbolId: HirFunction}
 type HirTraitsByName = {text: HirTrait}
 type HirFieldTypesByName = {text: {text: HirType}}
@@ -50,7 +50,7 @@ class HirLowering:
     module_filename: text          # Filename/path for visibility matching and defining_module population
     module_resolver: ModuleResolverPort?   # Optional resolver for 2-pass import resolution (FR-COMPILER-003)
     loaded_modules: [text]         # Paths of modules already loaded (for cycle detection in A2 resolve pass)
-    modules_by_name: HirModulesByName       # All parsed modules keyed by module name (for resolve_import_symbols)
+    module_surfaces: ModuleSurfacesByName
     current_method_self_type: HirType?
     lowered_impl_functions: HirImplFunctions
     lowered_traits: HirTraitsByName   # Traits lowered in this module (by name), for injecting defaults into impls
@@ -131,7 +131,7 @@ enum LoweringErrorKind:
 fn hirlowering_new() -> HirLowering:
     val empty_errors: [LoweringError] = []
     val empty_loaded_modules: [text] = []
-    val empty_modules_by_name: HirModulesByName = {}
+    val empty_module_surfaces = ModuleSurfacesByName(surfaces: [], index_by_name: {})
     val empty_impl_functions: HirImplFunctions = {}
     val empty_traits: HirTraitsByName = {}
     val empty_struct_field_types: HirFieldTypesByName = {}
@@ -149,7 +149,7 @@ fn hirlowering_new() -> HirLowering:
         module_filename: "",
         module_resolver: nil,
         loaded_modules: empty_loaded_modules,
-        modules_by_name: empty_modules_by_name,
+        module_surfaces: empty_module_surfaces,
         current_method_self_type: nil,
         lowered_impl_functions: empty_impl_functions,
         lowered_traits: empty_traits,
@@ -162,10 +162,10 @@ fn hirlowering_new() -> HirLowering:
         fn_tuple_returns: empty_fn_tuple_returns
     )
 
-fn hirlowering_for_module(filename: text, modules_by_name: HirModulesByName) -> HirLowering:
+fn hirlowering_for_module(filename: text, module_surfaces: ModuleSurfacesByName) -> HirLowering:
     var lowering = hirlowering_new()
     lowering.module_filename = filename
-    lowering.modules_by_name = modules_by_name
+    lowering.module_surfaces = module_surfaces
     lowering
 
 impl HirLowering:
