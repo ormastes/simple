@@ -645,14 +645,13 @@ pub class CompilerDriver:
         builder: ModuleSurfaceBuilder,
         source: SourceFile,
         source_index: i64
-    ) -> Result<ModuleSurfaceBuilder, text>:
+    ) -> Result<(), text>:
         val module = parse_full_frontend(source.content, source.path, source.module_name, self.ctx.logger)
         if par_had_error_get():
             return Err("parse error in {source.path} (see [parser_error] output above)")
-        val add_result = builder.add_parsed(module, source, source_index)
-        if add_result.is_err():
-            return Err(add_result.unwrap_err())
-        Ok(builder)
+        match builder.add_parsed(module, source, source_index):
+            case Ok(_): Ok(())
+            case Err(error): Err(error)
 
     me parse_all_streaming_surfaces_impl() -> (CompileContext, bool):
         self.ctx.modules = {}
@@ -663,17 +662,19 @@ pub class CompilerDriver:
         while source_index < self.ctx.sources.len():
             val source = self.ctx.sources[source_index]
             if builder.has_path(source.path):
-                val alias_result = builder.add_alias(source)
-                if alias_result.is_err():
-                    self.ctx.add_error("Module surface extraction error: {alias_result.unwrap_err()}")
-                    return (self.ctx, false)
+                match builder.add_alias(source):
+                    case Ok(_): ()
+                    case Err(error):
+                        self.ctx.add_error("Module surface extraction error: {error}")
+                        return (self.ctx, false)
             else:
                 val parsed_result = self.add_streaming_module_surface(builder, source, source_index)
                 ast_reset()
-                if parsed_result.is_err():
-                    self.ctx.add_error("Module surface extraction error: {parsed_result.unwrap_err()}")
-                    return (self.ctx, false)
-                builder = parsed_result.unwrap()
+                match parsed_result:
+                    case Ok(_): ()
+                    case Err(error):
+                        self.ctx.add_error("Module surface extraction error: {error}")
+                        return (self.ctx, false)
                 release_seq = release_seq + 1
                 log_module_surface_released(source.path, release_seq)
             source_index = source_index + 1
@@ -873,10 +874,11 @@ pub class CompilerDriver:
             log_phase("phase3:hir:file:start {source.path} module={source.module_name}")
             val lower_result = self.lower_streaming_surface_source(lowering, source)
             ast_reset()
-            if lower_result.is_err():
-                self.ctx.add_error("Streaming HIR lowering error: {lower_result.unwrap_err()}")
-                return (self.ctx, false)
-            val hir_module = lower_result.unwrap()
+            val hir_module = match lower_result:
+                case Ok(value): value
+                case Err(error):
+                    self.ctx.add_error("Streaming HIR lowering error: {error}")
+                    return (self.ctx, false)
             _driver_collect_hir_errors(self.ctx, source.module_name, lowering.errors)
             if self.ctx.errors.len() > 0:
                 return (self.ctx, false)
