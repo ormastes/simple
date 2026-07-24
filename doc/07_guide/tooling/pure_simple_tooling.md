@@ -174,14 +174,15 @@ evidence boundary for the important pure-Simple tooling lanes:
   pure runner accepts the value but still emits human per-file/summary output
   and no final aggregate JSON object. It must aggregate spec and both doctest
   lanes before emitting one final object. A subprocess-boundary repair
-  was preserved but not pushed after focused verification exposed unstable
-  executable/argv handling and then the wrong JSON parser module; see
+  was preserved but not pushed. High static review accepted the repaired
+  executable/argv and JSON-parser boundaries, but the bounded Rust-seed
+  contract then hit the seed's 800-module import limit before wrapper behavior; see
   [the JSON-format report](../../08_tracking/bug/test_runner_json_format_not_machine_readable_2026-07-24.md).
-  **Next solution:** use `cli_current_exe_path`,
-  canonical CLI dispatch, marker-relative worker args, and real aggregate
-  success in one fresh bounded cycle; then deploy a fresh Stage 4 CLI and run the focused
-  bounded-output and CLI contracts once, then run the exact essential-tools
-  smoke from its temporary external working directory.
+  **Next solution:** build one fresh incremental Stage 4 CLI containing the
+  preserved repair, then run the whole-stdout contract once through that exact
+  binary. Run the remaining focused bounded-output and CLI contracts once,
+  then run the exact essential-tools smoke from its temporary external working
+  directory.
 - **check / build / run** — **Source status:** the full pure-Simple CLI links,
   preserves delegated streams/status, and its isolated official source-check
   passes when `SIMPLE_BINARY` names the candidate. `check` is source-fixed to

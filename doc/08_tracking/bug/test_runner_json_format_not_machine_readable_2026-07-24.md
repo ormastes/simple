@@ -13,16 +13,20 @@ cover every enabled test lane. Progress and diagnostics belong on stderr.
 
 ## Repair status
 
-A six-file subprocess-boundary repair is preserved but not pushed. It avoids
+A seven-file subprocess-boundary repair is preserved but not pushed. It avoids
 scattered print guards by running a private worker subprocess, capturing its
-output, and publishing only a validated final object. Its executable/argv
-reconstruction still requires final re-audit, and the authoritative focused
-run failed because the repair imported nonexistent `lib.json.parser`; the
-canonical pure module is `std.common.json.parser`. No behavioral PASS is claimed.
+output, and publishing only a validated final object. High static review
+accepted its executable ownership, source/compiled argv split, marker-relative
+worker args, aggregate success, diagnostic routing, and canonical
+`std.common.json.parser` use.
+
+The final bounded Rust-seed contract reached the internal CLI owner but stopped
+before wrapper behavior: the seed exceeded its 800-module transitive-import
+limit while loading `src/app/cli/theme_sync.spl`. No behavioral PASS is claimed,
+and another seed retry is not useful.
 
 ## Next bounded cycle
 
-Use `cli_current_exe_path`, canonical CLI dispatch, marker-relative worker
-arguments, and `std.common.json.parser`; then rerun the single whole-stdout
-contract once, obtain high static review, and qualify the same code through a
-fresh Stage 4 CLI.
+Build one fresh incremental Stage 4 CLI containing the preserved repair, then
+run the single whole-stdout contract once through that exact binary. Do not
+retry the full CLI through the Rust seed or weaken the aggregate assertions.
