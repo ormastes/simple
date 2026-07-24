@@ -680,28 +680,20 @@ fn resolve_method_call_static(
         return;
     }
 
-    // The three bare-builtin guards below must run BEFORE resolve_name_variants,
+    // The string-builtin guard below must run BEFORE resolve_name_variants,
     // not only before the suffix fallback: a project-wide FREE function with a
     // builtin's name (private `fn char_at(s, i)` in mcp_sdk/core/json.spl) leaks
     // into the global import map as a bare entry, so resolution SUCCEEDS and
     // rebinds an erased-receiver `.char_at()` to a module that may not even be
     // in the entry closure (undefined `..mcp_sdk__core__json__char_at` at the
-    // stage4 final link, 2026-07-25). Builtin lowering must win for bare names
-    // in every case, same rationale as the `join` guard above.
+    // stage4 final link, 2026-07-25). For these names builtin lowering is the
+    // correct semantics for every receiver, so pre-resolution is safe — same
+    // rationale as the `join` guard above. The enum-helper and numeric lists
+    // stay in the post-failure position: hoisting them broke legitimate
+    // resolution-success rebinds (the compiled interpreter's own Option
+    // helpers printed `<unknown>` for every text-option `??`, 2026-07-25).
     let method_early = lookup_name.rsplit('.').next().unwrap_or(lookup_name);
     if !lookup_name.contains('.') {
-        if matches!(
-            method_early,
-            "unwrap" | "unwrap_or" | "unwrap_err" | "is_some" | "is_none" | "is_ok" | "is_err"
-        ) {
-            // Preserve enum helper method names when the receiver type could not be
-            // recovered. Rebinding bare `unwrap` by suffix to an imported
-            // `FailSafeResult.unwrap` symbol causes option/result-style field access
-            // in local code (for example Report.location.unwrap()) to become a fake
-            // cross-module call target instead of flowing through the builtin enum
-            // payload/discriminant lowering paths.
-            return;
-        }
         if matches!(
             method_early,
             "starts_with"
@@ -734,34 +726,6 @@ fn resolve_method_call_static(
             // bare_rt_redirect entry).
             return;
         }
-        if matches!(
-            method_early,
-            "len"
-                | "to_i8"
-                | "to_i16"
-                | "to_i32"
-                | "to_i64"
-                | "to_u8"
-                | "to_u16"
-                | "to_u32"
-                | "to_u64"
-                | "to_f32"
-                | "to_f64"
-                | "to_int"
-                | "to_float"
-        ) {
-            // Same defect class as the string-builtin guard above, for NUMERIC
-            // builtins: a bare erased-receiver `.to_i32()` (e.g. `value.len()
-            // .to_i32()`, `commands.len().to_i32()`) must lower to the builtin
-            // conversion, not rebind to the ONLY user method of that name
-            // (`Px.to_i32`, window_protocol/geometry.spl), which would deref the
-            // raw integer as a Px pointer -> null-receiver fault on the SimpleOS
-            // WM first-frame render (cr2=0, 2026-07-17). Leaving the name bare
-            // routes it through codegen's builtin numeric lowering (a direct
-            // truncation/extension), which is the correct semantics for every
-            // primitive receiver.
-            return;
-        }
     }
 
     if let Some(resolved) = resolve_name_variants(lookup_name, use_map, import_map) {
@@ -770,6 +734,51 @@ fn resolve_method_call_static(
         let method = lookup_name.rsplit('.').next().unwrap_or(lookup_name);
         let type_part = lookup_name.split('.').next().unwrap_or("");
         let has_type_qualifier = lookup_name.contains('.');
+        if !has_type_qualifier
+            && matches!(
+                method,
+                "unwrap" | "unwrap_or" | "unwrap_err" | "is_some" | "is_none" | "is_ok" | "is_err"
+            )
+        {
+            // Preserve enum helper method names when the receiver type could not be
+            // recovered. Rebinding bare `unwrap` by suffix to an imported
+            // `FailSafeResult.unwrap` symbol causes option/result-style field access
+            // in local code (for example Report.location.unwrap()) to become a fake
+            // cross-module call target instead of flowing through the builtin enum
+            // payload/discriminant lowering paths.
+            return;
+        }
+        if !has_type_qualifier
+            && matches!(
+                method,
+                "len"
+                    | "to_i8"
+                    | "to_i16"
+                    | "to_i32"
+                    | "to_i64"
+                    | "to_u8"
+                    | "to_u16"
+                    | "to_u32"
+                    | "to_u64"
+                    | "to_f32"
+                    | "to_f64"
+                    | "to_int"
+                    | "to_float"
+            )
+        {
+            // Same defect class as the string-builtin guard above, for NUMERIC
+            // builtins: a bare erased-receiver `.to_i32()` (e.g. `value.len()
+            // .to_i32()`, `commands.len().to_i32()`) must lower to the builtin
+            // conversion, not rebind through the single-candidate suffix
+            // fallback to the ONLY user method of that name (`Px.to_i32`,
+            // window_protocol/geometry.spl), which would deref the raw integer
+            // as a Px pointer -> null-receiver fault on the SimpleOS WM
+            // first-frame render (cr2=0, 2026-07-17). Leaving the name bare
+            // routes it through codegen's builtin numeric lowering (a direct
+            // truncation/extension), which is the correct semantics for every
+            // primitive receiver.
+            return;
+        }
         let type_part_lower = type_part.to_lowercase();
         let candidates = local_suffix_index.get(method).or_else(|| suffix_index.get(method));
         if let Some(candidates) = candidates {
