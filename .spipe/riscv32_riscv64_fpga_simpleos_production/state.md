@@ -286,3 +286,12 @@ implementation-milestone-0-in-progress
   assets are a software oracle only; the FPGA RTL lacks the privileged/MMU,
   interrupt, DDR, DTB, UART RX, and login-shell path needed for terminal
   `login`/`ls` evidence.
+- compiler repair 2026-07-24: retained objects proved function-section GC was
+  already working; generic driver and generic backend dispatch kept Cranelift
+  live. The isolated lane now has a fixed `compiler_driver_run_vhdl` pipeline,
+  direct `VhdlBackend` invocation, and a core-safe VHDL entry. The focused SFFI
+  function-section Rust test and core-C path probe pass. The third capped
+  native-build found one unsupported multiline conditional during discovery;
+  source is corrected but cannot be rebuilt in this session. Therefore the
+  core-C link, generated RV32/RV64 VHDL, GHDL, FPGA, and Linux terminal gates
+  remain open.

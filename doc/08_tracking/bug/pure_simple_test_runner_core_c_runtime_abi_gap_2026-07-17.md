@@ -81,3 +81,29 @@ must not be accepted as a supported compiler or RTL-generation lane. The next
 bounded fix is a core-safe compile/VHDL entry closure that does not retain the
 hosted compatibility dispatcher, followed by one `core-c-bootstrap` link with
 `SIMPLE_NO_STUB_FALLBACK=1`.
+
+## Fixed VHDL runner progress 2026-07-24
+
+ELF inspection corrected the earlier section-layout hypothesis: retained
+Cranelift objects already contain distinct per-function `.text.subsection`
+sections. The live dependency instead came from two generic runtime branches:
+`CompilerDriver.compile`/`aot_compile` and
+`compile_module_with_backend("vhdl", ...)`.
+
+The isolated VHDL lane now has:
+
+- `compiler_driver_run_vhdl`, a fixed AOT/VHDL frontend-to-MIR runner that
+  bypasses generic mode/output dispatch;
+- `vhdl_compile_module_text`, which invokes `VhdlBackend` directly and bypasses
+  the generic backend selector;
+- a core-safe `vhdl_compile_entry.spl` using that fixed runner;
+- consistent per-function/per-data section configuration for the Cranelift
+  SFFI AOT constructor, covered by a focused Rust test (PASS);
+- a real core-C `rt_path_absolute` provider, covered by the focused runtime C
+  probe (PASS).
+
+The third capped native-build stopped during discovery on a multiline
+conditional in the new runner at `driver.spl:450`; that compact form was
+replaced with the supported single-line condition. The corrected entry has not
+yet been rebuilt, so the `core-c-bootstrap` link and real RV32 VHDL output remain
+open.

@@ -1049,6 +1049,20 @@ fn compile_bootstrap_native_all_support_c(pid: i64, verbose: bool, opt_level: i6
         return Err("Bootstrap native_all support compilation failed: {out}{err}")
     Ok(support_o)
 
+# Narrow core runtime lanes must never acquire the Rust hosted archive merely
+# because SIMPLE_RUNTIME_PATH points at the bootstrap directory.
+fn native_all_allowed_for_runtime_bundle(bundle: text) -> bool:
+    match bundle:
+        case "simple-core": false
+        case "simple_core": false
+        case "core-c-bootstrap": false
+        case "core_c_bootstrap": false
+        case "runtime": false
+        case "core": false
+        case "core-c": false
+        case "core_c": false
+        case _: true
+
 # ============================================================================
 # Main Orchestrator
 # ============================================================================
@@ -1128,11 +1142,13 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
     # the link dies with "undefined symbol: rt_native_build" (#146/#79).
     var bootstrap_native_all = ""
     val runtime_path = env_get("SIMPLE_RUNTIME_PATH") ?? ""
+    val runtime_bundle = env_get("SIMPLE_NATIVE_RUNTIME_BUNDLE") ?? ""
     if not stage4_requested and runtime_path != "" and not hosted_plan.requires_cross:
-        val native_all_name = if hosted_os == "windows": "simple_native_all.lib" else: "libsimple_native_all.a"
-        val native_all = runtime_path + "/" + native_all_name
-        if file_exists(native_all):
-            bootstrap_native_all = native_all
+        if native_all_allowed_for_runtime_bundle(runtime_bundle):
+            val native_all_name = if hosted_os == "windows": "simple_native_all.lib" else: "libsimple_native_all.a"
+            val native_all = runtime_path + "/" + native_all_name
+            if file_exists(native_all):
+                bootstrap_native_all = native_all
 
     # Step 1: Always compile the FRESH C runtime to object files, even when the
     # native_all archive is linked (including under SIMPLE_BOOTSTRAP=1). ld

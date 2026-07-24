@@ -398,6 +398,10 @@ int main(void) {
 
     int64_t parent = rt_path_parent((const uint8_t*)"a/b/file.spl", 10);
     assert(strcmp((const char*)rt_string_data(parent), "a/b") == 0);
+    char cwd[4096];
+    assert(getcwd(cwd, sizeof(cwd)) != NULL);
+    int64_t absolute = rt_path_absolute((const uint8_t*)".", 1);
+    assert(strcmp((const char*)rt_string_data(absolute), cwd) == 0);
     int64_t path = text("a/b/file.spl");
     assert(strcmp((const char*)rt_string_data(rt_path_filename(path)), "file.spl") == 0);
     assert(strcmp((const char*)rt_string_data(rt_path_extension(path)), "spl") == 0);
