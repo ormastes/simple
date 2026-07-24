@@ -30,9 +30,14 @@ current Aetheric document successfully. Two full producer attempts then failed
 identically while linking the native Simple renderer: integer `.to_i64()` calls
 were emitted as references to the unrelated `LogLevel.to_i64` symbol. Adding
 `failsafe/core.spl` as an explicit source did not change the result, so another
-identical run is forbidden. The compiler owner is being diagnosed before the
-final allowed producer cycle; no Electron capture or PASS is admitted from the
-partial artifacts.
+identical run is forbidden. Three bounded compiler fix/review cycles were
+rejected because the candidate could steal resolved enum/trait methods, did
+not restore stale inferred-text parse resolution, and included float casts
+that direct native selectors cannot implement numerically. The rejected
+series is not integrated; the semantic fixture and resume gate are recorded
+in `doc/08_tracking/bug/native_primitive_to_i64_ufcs_collision_2026-07-24.md`.
+The final producer cycle remains unspent, and no Electron capture or PASS is
+admitted from the partial artifacts.
 
 Resume after the exact-current binary and real producer bundle exist:
 

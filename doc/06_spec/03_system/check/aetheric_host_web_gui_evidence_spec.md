@@ -34,5 +34,8 @@ addition to positive `performance.now()` and at least two animation frames.
 Before a proof can pass, the admission wrapper recomputes the current source
 revision, self-hosted binary SHA-256, and all three artifact SHA-256 values;
 all artifacts must be regular files beneath `BUILD_DIR`. The latest live
-producer attempt stops fail-closed while linking the native Simple renderer;
-no Electron capture or PASS is admitted from that partial run.
+producer attempt stops fail-closed while linking the native Simple renderer.
+Three compiler fix/review cycles were rejected on custom-method, inferred-text,
+and cross-backend float semantics; the candidate was not integrated and the
+remaining producer cycle was not spent. No Electron capture or PASS is
+admitted from the partial run.

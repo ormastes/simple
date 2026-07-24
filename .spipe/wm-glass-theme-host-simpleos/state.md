@@ -58,7 +58,7 @@ No new drawing IR, private widget renderer, font atlas/cache, Engine3D shortcut,
   capability-declared pixel evidence.
 
 ## Phase
-implementation-blocked-inferred-text-result-provenance
+implementation-blocked-host-theme-return-and-native-to-i64-resolution
 
 ## Log
 - dev: Created state file with 10 acceptance criteria (type: bug); defined bounded cooperative lanes, canonical interface constraints, evidence steps, and fail-fast policy.
@@ -229,3 +229,20 @@ implementation-blocked-inferred-text-result-provenance
   A full diagnostic build still stops before entry compilation because the
   self-hosted `aarch64-unknown-simpleos/simple` FAT32 payload is absent, so
   live input/pixel evidence remains FAIL-FAST rather than inferred from source.
+- integration-checkpoint-2026-07-24: Pushed reviewed Aetheric CSS/WM aliases,
+  production Web/UI-access evidence plumbing, fail-closed x86 evidence, typed
+  ARM VirtIO input ownership, same-frame pointer receipts, and tightened ARM
+  aggregation/reset/order contracts through `9113a77defbd`. High review
+  accepts the ARM implementation. Focused ARM specs remain pre-execution
+  blocked by the deployed runner's missing `rt_process_run_bounded` extern.
+  No QEMU was launched because the host gate remains failed and its
+  three-cycle cap is exhausted.
+- native-to-i64-review-2026-07-24: The Web renderer link failure is a compiler
+  collision between scalar `.to_i64()` and imported `LogLevel.to_i64`.
+  Three bounded fix/review cycles repaired receiver reuse but failed
+  high-capability review on resolved custom/trait dispatch, inferred-text
+  parse-to-Option resolution, and direct-native float conversion. The rejected
+  series was not integrated; the semantic fixture and exact resume gate are
+  recorded in
+  `doc/08_tracking/bug/native_primitive_to_i64_ufcs_collision_2026-07-24.md`.
+  The final Web producer cycle remains unspent.

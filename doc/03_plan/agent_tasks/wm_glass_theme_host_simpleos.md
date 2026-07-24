@@ -213,3 +213,16 @@ is historical.
 - ARM64: deterministic desktop media and failed/reset-needed VirtIO checks are
   integrated. The typed canonical VirtIO adapter is wired into
   `Compositor.with_backends`; live QEMU remains host-gated.
+- ARM64 review: repeated REL_X/REL_Y aggregation, per-frame reset, all three
+  button edges, shared input sequence, and raw-before-SYN receipt order are
+  pinned. High-capability review accepts the implementation. Focused specs
+  were invoked once but the deployed runner failed before loading them on
+  missing `rt_process_run_bounded`; live QMP/RAMFB evidence remains the
+  production blocker.
+- Web compiler blocker: native scalar `.to_i64()` can bind imported
+  `LogLevel.to_i64`. Three bounded compiler fix/review cycles were rejected on
+  custom/trait dispatch, inferred-text parse semantics, and direct-native
+  float conversion. The candidate series is not integrated. Resume from
+  `doc/08_tracking/bug/native_primitive_to_i64_ufcs_collision_2026-07-24.md`;
+  do not spend the final producer cycle before its native semantic fixture
+  passes.
