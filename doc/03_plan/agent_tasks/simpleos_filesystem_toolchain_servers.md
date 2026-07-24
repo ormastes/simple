@@ -51,12 +51,14 @@ Temporary implementations must call `fail(...)`; no TODO or marker-only pass.
 
 | Lane | Owner | Deliverable |
 |---|---|---|
-| Top-level body omission | lower-model sidecar | Reviewed parameter-threaded parser slice; no global mode |
-| Parity regression | lower-model sidecar | Header parity, retained trait/impl bodies, no-leak full parse |
+| Declaration body omission | lower-model sidecar | Parameter-threaded top-level/class/struct/enum/impl/extend slice; no global mode |
+| Parity regression | lower-model sidecar | Header parity, retained trait defaults, ordinary method omission, no-leak full parse |
 | Merge and live measurement | root Codex | One admitted pure-Simple build and one slope run |
 | Final review | highest-capability Codex | Parser-state, token-boundary, and parity acceptance |
 
 Frozen helper/API names for this slice are `parse_fn_decl(..., omit_body)`,
-`parse_module_body(surface_only)`, `parse_and_build_surface_module`, and
-`parse_surface_frontend`. The existing surface interfaces and release marker
-remain unchanged.
+`parse_class_body_method(..., omit_body)`, `parse_struct_decl(..., surface_only)`,
+`parse_enum_decl(surface_only)`, `parse_impl_decl(surface_only)`,
+`parse_module_body(surface_only)`, `parser_skip_surface_fn_body`,
+`parse_and_build_surface_module`, and `parse_surface_frontend`. The existing
+surface interfaces and release marker remain unchanged.

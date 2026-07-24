@@ -66,9 +66,12 @@ exist; no placeholder pass is permitted.
 
 - Compare rich and surface parses for identical import/export and declaration
   header sets on representative high-allocation CLI sources.
-- Prove ordinary top-level bodies are empty in the surface parse while trait
-  default and impl bodies remain present.
+- Prove top-level and ordinary class/struct/enum/impl/extend method bodies are
+  empty in the surface parse while method headers and trait default bodies
+  remain present.
 - Parse a full module after a surface parse to prove no parser mode leaks.
+- Prove a nested skipped method body leaves the following text-bearing
+  declaration intact.
 - Preserve malformed-declaration failure and the existing alias, enum payload,
   trait-default, fingerprint, and release-order tests.
 - Rebuild one pure-Simple candidate and run the live slope gate once; acceptance

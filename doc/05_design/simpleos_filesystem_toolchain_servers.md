@@ -93,16 +93,19 @@ ten fail. This is not a full bootstrap.
 ### 2026-07-24 Phase 2 body omission
 
 `parse_surface_frontend` calls `parse_and_build_surface_module`, which calls
-`parse_module_body(surface_only: true)`. Only the top-level `fn`, `async fn`,
-and `const fn` dispatches pass `omit_body: true` to `parse_fn_decl`. The body
-skipper consumes one inline body through newline/EOF or one balanced
-INDENT/DEDENT block, diagnoses a missing indent or unterminated block, and
-leaves the parser after the outer body. No process-global mode is used.
+`parse_module_body(surface_only: true)`. Top-level functions and ordinary
+class, struct, enum, impl, and extend methods omit their bodies while retaining
+their existing declaration/signature conversion. Trait methods are the sole
+body exception because imported trait defaults remain executable surface data.
+The shared `parser_stmts.parser_skip_surface_fn_body` consumes one inline body
+through newline/EOF or one balanced INDENT/DEDENT block, diagnoses a missing
+indent or unterminated block, and leaves the parser after the outer body. No
+process-global mode is used.
 
-Trait/class/impl methods, enum and field defaults, imports/exports, bindings,
-decorators, source preprocessing, parser errors, and full frontend parsing keep
-their current behavior. The release marker remains after surface installation,
-AST reset, and helper return.
+Enum and field defaults, imports/exports, bindings, decorators, source
+preprocessing, parser errors, and full frontend parsing keep their current
+behavior. The release marker remains after surface installation, AST reset, and
+helper return.
 
 Run `desugar_module` after bodyless conversion to preserve effective async
 callable headers. Do not synthesize suspension state enums or poll helpers in

@@ -68,7 +68,7 @@ use compiler.core.parser.{parser_parse_type, parser_parse_type_with_union}
 
 # Import from sibling split modules
 use compiler.frontend.core.parser_expr.{parse_expr, parse_int_text}
-use compiler.frontend.core.parser_stmts.{parse_block, parse_if_expr, parse_for_expr, parse_while_expr}
+use compiler.frontend.core.parser_stmts.{parse_block, parse_if_expr, parse_for_expr, parse_while_expr, parser_skip_surface_fn_body}
 
 # Re-export use/export/binding/impl declarations (extracted to parser_decls_use.spl)
 use compiler.frontend.core.parser_decls_use.*
@@ -336,32 +336,6 @@ fn has_seen_name(names: [text], target: text) -> bool:
     false
 
 # ===== Function Declarations =====
-
-fn parser_skip_surface_fn_body() -> [i64]:
-    # The module-surface pass needs signatures, not ordinary top-level bodies.
-    # Keep nested declarations on the normal parser path; this only consumes
-    # the already-delimited body of the current function.
-    if par_kind_get() == 180:
-        parser_skip_newlines()
-        if par_kind_get() != 181:
-            parser_error("expected indentation after function declaration")
-            return []
-        var depth: i64 = 1
-        parser_advance()
-        while depth > 0:
-            val kind = par_kind_get()
-            if kind == 190:
-                parser_error("unterminated indented function body")
-                return []
-            if kind == 181:
-                depth = depth + 1
-            elif kind == 182:
-                depth = depth - 1
-            parser_advance()
-        return []
-    while par_kind_get() != 180 and par_kind_get() != 190:
-        parser_advance()
-    []
 
 fn parse_fn_decl(is_async: i64, omit_body: bool = false) -> i64:
     val decl_start = lex_token_start_get()
@@ -646,10 +620,10 @@ fn generate_derive_impls(struct_idx: i64, traits: [text]):
 
 # ===== Struct/Class Declarations =====
 
-fn parse_struct_decl(is_class: bool) -> i64:
-    parse_struct_or_trait_decl(is_class, false)
+fn parse_struct_decl(is_class: bool, surface_only: bool = false) -> i64:
+    parse_struct_or_trait_decl(is_class, false, surface_only)
 
-fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
+fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool, surface_only: bool = false) -> i64:
     parser_advance()
     val struct_name = par_text_get()
     parser_expect(6)
@@ -686,6 +660,7 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
     var field_defaults: [i64] = []
     var field_bits: [i64] = []
     var class_method_ids: [i64] = []
+    val omit_method_body = surface_only and not is_trait
 
     for i in 0..1000:
         parser_skip_newlines()
@@ -729,17 +704,17 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
 
         # Handle methods in class/struct body
         if par_kind_get() == 30:
-            val sm_id = parse_class_body_method(struct_name, true, false)
+            val sm_id = parse_class_body_method(struct_name, true, false, omit_method_body)
             if sm_id >= 0:
                 class_method_ids.push(sm_id)
             continue
         if par_kind_get() == 20:
-            val fm_id = parse_class_body_method(struct_name, false, false)
+            val fm_id = parse_class_body_method(struct_name, false, false, omit_method_body)
             if fm_id >= 0:
                 class_method_ids.push(fm_id)
             continue
         if par_kind_get() == 34:
-            val mm_id = parse_class_body_method(struct_name, false, true)
+            val mm_id = parse_class_body_method(struct_name, false, true, omit_method_body)
             if mm_id >= 0:
                 class_method_ids.push(mm_id)
             continue

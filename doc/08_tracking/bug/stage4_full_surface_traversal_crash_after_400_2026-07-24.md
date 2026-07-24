@@ -50,6 +50,38 @@ The crash is therefore not a file-local parser/cursor failure in sources 401 or
 registry capacity/growth and cumulative lexer/parser ownership rather than
 patch either boundary source.
 
+## Method-surface reduction follow-up
+
+Surface parsing now also omits ordinary class, struct, enum, impl, and extend
+method bodies while retaining trait default bodies. Focused admission compiled
+7 files with 667 cached and 0 failures; the canonical frontend smoke passed,
+and the live release slope remained bounded at `average_growth=10240`.
+
+A single full traversal with that candidate advanced through
+`seq=275 path=src/os/_QemuRunner/scenario_catalog.spl` at 7,443,718 aggregate
+registry entries, then ended with status 143 and produced no artifact. Source
+discovery reports 1,315 physical sources (1,807 total source records), so this
+marker is still inside Phase 2.
+
+The host journal identifies the termination: at 12:26:19 UTC `earlyoom` sent
+SIGTERM to `simple` PID 398434 at 40,480 MiB RSS because host available memory
+and swap had both fallen below 10 percent. The process exited 6.1 seconds later,
+matching status 143.
+
+A nearby invalid-opcode record was initially suspected, but it belongs to a
+different `simple` PID (435827) 18 seconds earlier. It cannot be attributed to
+this traversal from the retained evidence. Its mapped HIR instruction is also
+Phase-3-only while the terminated build was still in Phase 2. Do not patch the
+mapped HIR/MIR functions from that unrelated correlation.
+
+The registry audit rules out a fixed 11.56-million-entry capacity: individual
+registries grow geometrically. Strings are never unregistered, so cumulative
+growth is real. The registry mutation paths are unsynchronized, but the
+`--threads 1` compiler path is sequential through Phase 2, Phase 3, and AOT;
+concurrent registry reallocation is therefore not supported as this crash's
+cause. The remaining demonstrated failure is cumulative no-GC allocation and
+host memory pressure during sequential Phase 2.
+
 ## Acceptance
 
 1. Add a bounded cumulative-surface probe or repair the registry/lexer
