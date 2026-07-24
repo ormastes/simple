@@ -27,7 +27,7 @@ helpers. It must not declare direct `rt_*` externs and must not require Node.js.
 The scenario executes the exact
 `build/bootstrap/mcp-package/simple_mcp_server` artifact directly. It exercises
 `simple_pipe` readiness and the bounded no-match behavior of `simple_search`;
-a source-mode or Rust bootstrap warning fails the scenario. The wrapper-template
+a `bootstrap-only` or `mode=source` marker fails the scenario. The wrapper-template
 contract separately requires cached-native default execution and explicit-only
 pure-Simple source fallback.
 
@@ -35,9 +35,9 @@ pure-Simple source fallback.
 
 The freshly built exact artifact answers the handshake within the time limit,
 lists tools, and serves both representative feature calls.
-The Stage 5 gate additionally requires successful `simple_status` and
-`lsp_symbols` calls from the exact freshly built pair. `--no-mcp` is an explicit
-skip and supplies no MCP acceptance evidence.
+The Stage 5 gate additionally requires successful `simple_status`,
+`simple_pipe` codebase, and `lsp_symbols` calls from the exact freshly built
+pair. `--no-mcp` is an explicit skip and supplies no MCP acceptance evidence.
 
 ## Current Risk
 
@@ -72,7 +72,9 @@ bug, not a test-helper pass.
 
 ## Ordered Remaining Work
 
-1. Commit and sync the reviewed MCP helper-import and typed-JSON receiver fix.
+1. **Complete:** `ecaefd1be7aa` committed and synced the reviewed MCP
+   helper-import, typed-JSON receiver, runtime-path plumbing, tests, and this
+   plan.
 2. In a fresh session, build and fully smoke the simple-core runtime once per
    backend into separate directories. Require the archive-symbol gate, hello,
    C5 exact exit `42`, TUI markers, and closure-clean result.
@@ -99,15 +101,49 @@ bug, not a test-helper pass.
 4. Drive the new artifact directly through initialize, initialized, tools/list,
    `simple_status`, and `simple_pipe` codebase query. Require correlated IDs,
    the `-- simple_pipe codebase query=main --` marker, and no signal/exit `139`.
-5. Build the matching LSP MCP artifact with a separate cache, then run
-   `check-mcp-native-smoke.shs` once with
-   `MCP_NATIVE_BOOTSTRAP_FRESH=1` and the exact fresh pair.
-6. Deploy only checksum-matched Linux artifacts and sidecars. Regenerate the
-   production wrappers, prove the real search probe admits the new hash, and
-   capture startup/request latency and RSS with
-   `check-mcp-lsp-nfr-evidence.shs`.
+5. Build the matching LSP MCP artifact with a separate cache, then run the
+   exact fresh pair once:
+
+   ```bash
+   env SIMPLE_BINARY="$FRESH_SIMPLE" \
+     MCP_SERVER="$PWD/build/c5-mcp-stage4-llvm/simple_mcp_server" \
+     LSP_MCP_SERVER="$PWD/build/c5-mcp-stage4-llvm/simple_lsp_mcp_server" \
+     MCP_NATIVE_BOOTSTRAP_FRESH=1 \
+     sh scripts/check/check-mcp-native-smoke.shs
+   ```
+
+6. Build the release/package pair on the required core-C bootstrap lane, then
+   deploy only checksum-matched Linux artifacts and sidecars:
+
+   ```bash
+   "$FRESH_SIMPLE" native-build --runtime-bundle core-c-bootstrap \
+     --source src/compiler --source src/app --source src/lib --entry-closure \
+     --entry src/app/mcp/main.spl --strip \
+     --output build/bootstrap/mcp-package/simple_mcp_server
+   "$FRESH_SIMPLE" native-build --runtime-bundle core-c-bootstrap \
+     --source src/compiler --source src/app --source src/lib --entry-closure \
+     --entry src/app/simple_lsp_mcp/main.spl --strip \
+     --output build/bootstrap/mcp-package/simple_lsp_mcp_server
+   ```
+
+   Regenerate the production wrappers, prove the real search probe admits the
+   new hash, and capture startup/request latency and RSS with
+   `check-mcp-lsp-nfr-evidence.shs`. The simple-core build in step 3 is runtime
+   migration evidence; it does not replace these release artifacts.
 7. Stage both npm registry payloads from verified release assets and require
-   `npm pack --dry-run` to list the declared Linux/x64 native executable.
+   both dry runs to list the declared Linux/x64 native executable:
+
+   ```bash
+   sh scripts/check-mcp-release-assets.shs tools/mcp-registry
+   sh scripts/check-mcp-release-assets.shs tools/lsp-mcp-registry
+   (cd tools/mcp-registry && npm pack --dry-run)
+   (cd tools/lsp-mcp-registry && npm pack --dry-run)
+   ```
+
+8. Before deploy, run the current pure runtime checks for `src/compiler`,
+   `src/lib`, `src/app/mcp`, and `src/app/simple_lsp_mcp`; run
+   `test/02_integration/app/mcp_stdio_integration_spec.spl` in interpreter
+   mode, the core runtime smoke, and both working/staged direct-env guards.
 
 Follow-up platform work: make POSIX wrapper candidate selection host-triple
 aware for macOS, and make Windows MCP/LSP wrappers native-only with SHA and
