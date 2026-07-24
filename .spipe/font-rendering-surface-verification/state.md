@@ -384,6 +384,15 @@ arch-done
   the exact stamped composition is rendered and host input is dispatched
   through the session envelope. Static app checks pass; runtime admission still
   awaits a non-crashing pure-Simple execution.
+- The current rebased `bin/release/simple` also exits 139 during the Web focused
+  `check` before loading examples, so Web remains source/contract-only in this
+  lane; no browser pixels or event receipt are promoted.
+- Bounded provenance diagnosis identifies that exit 139 as a stale deployed
+  pure-Simple CLI, not a Web/GUI/font source failure: the binary is the known
+  `rt_env_set` ABI-mismatch artifact from
+  `doc/08_tracking/bug/deployed_selfhost_env_set_miscompile_segv_2026-07-14.md`.
+  A fresh Stage2–4 self-hosted rebuild is required before focused checks can
+  run against current source.
 - RV64 source audit remains blocked below the shared renderer: the display ABI,
   guest font media, VirtIO input transport, and guest-addressed `pmemsave`
   metadata are absent. The RV64 manual and tracker retain those gaps without
