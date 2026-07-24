@@ -623,5 +623,14 @@ the shared binary — deploys require explicit user go-ahead).
   object lanes. ARM32 now builds that shared fixture directly and validates a
   nonempty ELF32 hard-float relocatable object; RV32 remains soft-float
   object-only.
-  Rebuilt current-source execution remains pending. See
+  A rebuilt self-hosted Cranelift C5 receipt now identifies the first failed
+  assertion as `65.chr() != "A"` (diagnostic exit `1`). The runtime returns the
+  correct tagged text handle, but MIR recorded the call result as
+  `MirType.i64()` and returned it without text conversion, so later equality
+  and text methods took integer paths. Current source preserves that 64-bit
+  call ABI, then converts the tagged result through the existing
+  `decode_runtime_value` text path; this remains width-correct for ARM32/RV32.
+  The focused contract pins the raw call and semantic conversion. Rebuilt
+  execution of that final source change is pending a fresh session because the
+  bounded diagnosis reached its three-cycle cap. See
   `native_chr_builtin_no_lowering_2026-07-18.md`.

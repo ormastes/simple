@@ -3,7 +3,7 @@
 - **Date:** 2026-07-18
 - **Area:** compiler / 50.mir method lowering (cranelift native lane)
 - **Severity:** high (silent wrong result, no diagnostic)
-- **Status:** source fixed — rebuilt current-source execution pending
+- **Status:** source fixed — rebuilt Cranelift verification pending after bounded three-cycle diagnosis
 
 ## Symptom
 `val cp: i64 = 65; val s: text = cp.chr()` compiles without error on the
@@ -154,3 +154,24 @@ aggregate adds the same oracle to hosted, FreeBSD, ARM, RISC-V, and
 Windows-ARM64 gates. The focused source contract prevents the seed diagnostics
 or aggregate assertions from returning. Incremental
 `cargo check -p simple-compiler` passes.
+
+## Rebuilt Cranelift receipt (2026-07-24)
+
+A self-hosted Stage4 compiler built C5 with Cranelift and the complete
+simple-core archive, but the executable returned diagnostic exit `1`:
+`65.chr() != "A"`. C5 now assigns a distinct non-success exit to each
+codepoint, invalid-scalar, NUL, and custom-owner assertion while preserving
+success exit `42`.
+
+The runtime ABI is correct: `rt_char_from_code` accepts and returns raw `i64`,
+with the result containing a tagged text handle. The remaining bug was MIR
+provenance in `method_calls_literals.spl`: both the function-pointer signature
+and `emit_call` correctly used the raw `MirType.i64()` ABI, but the tagged
+result then returned without conversion. Later equality and text method
+lowering therefore treated the handle as an integer. Current source keeps that
+raw call boundary and routes the result through the existing
+`decode_runtime_value(..., bootstrap_text_type())`/`rt_interp_cstr` path,
+producing a genuine text-typed local without narrowing the 64-bit runtime value
+on ARM32/RV32. The focused contract pins both halves. The bounded diagnosis
+consumed its three cycles, so rebuilt execution of this final source change is
+intentionally deferred to a fresh session.
