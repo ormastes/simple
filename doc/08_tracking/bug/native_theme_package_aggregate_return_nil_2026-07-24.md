@@ -41,3 +41,32 @@ aggregate across a module boundary and reads `snapshot`, `token_map`, and
 native return ABI until all fields remain non-nil. Remove the generated
 snapshot startup bypass only after that regression and the host launch both
 pass.
+
+## Owner-boundary diagnosis
+
+The source declarations and package construction agree; this is not a theme
+schema or constructor mismatch. `load_theme_package` constructs a complete
+`ResolvedThemePackage` and returns the named local `pkg`, while
+`load_default_theme_package` forwards that result across a module boundary.
+Named class values lower as `MirTypeKind.Struct`, but the native call/return
+path transports the result through the generic pointer/i64 ABI. Existing
+return-type recovery already has special handling for lost declared result
+types, so the first boundary to pin is MIR return/call-destination provenance,
+before changing Cranelift ABI code.
+
+The generated `aetheric_dark_theme_render_snapshot()` startup path is a
+fail-closed production bypass, not proof that this bug is fixed: it returns a
+direct aggregate literal and does not exercise the named-local package return
+or the cross-module wrapper.
+
+The minimal regression matrix must use two modules and project all three
+nontrivial fields (`snapshot`, `token_map`, and `widget_css_by_name`) after:
+
+1. a bare named-local tail expression;
+2. an explicit `return pkg`;
+3. a direct constructor tail; and
+4. `load_default_theme_package()` forwarding the package result.
+
+Inspect the HIR/MIR destination type and `Ret` operand in each row. A source
+workaround that defaults nil fields, adds raw runtime aliases, or further
+special-cases theme startup is explicitly rejected.

@@ -1,7 +1,7 @@
 # Aetheric host Web/GUI evidence
 
-Status: **production producer added; PASS blocked on canonical Electron
-ui_access adapter and an exact-current self-hosted binary.**
+Status: **production producer and canonical Electron UI-access adapter are
+implemented; live PASS is pending an exact-current native renderer build.**
 
 The only PASS input is a regular-file `aetheric-host-web-gui-v1` bundle from
 the production HTML/WebIR-to-DrawIR Electron route. It must retain resolved
@@ -24,11 +24,15 @@ The producer first resolves `aetheric_dark` through the production Simple
 package loader, generates the current WM HTML, renders that HTML through
 WebIR/DrawIR/Engine2D, and then captures the same file with Electron. Electron
 records computed CSS, animation frames, native pointer/key/text events, and a
-PNG. The canonical `ui_access` service does not yet register this standalone
-capture surface, so the proof deliberately remains `status=fail` with the
-tracked `electron-capture-surface-not-registered-with-canonical-ui-access` ABI
-gap rather than fabricating snapshot/action/history receipts.
+PNG. A narrow native driver invokes the canonical `run_ui_access_cli`; the
+Electron process serves its exact live DOM through the canonical
+snapshot/surface/find/act/history protocol. Every action is revision-bound and
+the proof retains both the request/result history and the post-action DOM
+state. The admission wrapper requires the CSS animation probe to be `true`, in
+addition to positive `performance.now()` and at least two animation frames.
 
 Before a proof can pass, the admission wrapper recomputes the current source
 revision, self-hosted binary SHA-256, and all three artifact SHA-256 values;
-all artifacts must be regular files beneath `BUILD_DIR`.
+all artifacts must be regular files beneath `BUILD_DIR`. The latest live
+producer attempt stops fail-closed while linking the native Simple renderer;
+no Electron capture or PASS is admitted from that partial run.
