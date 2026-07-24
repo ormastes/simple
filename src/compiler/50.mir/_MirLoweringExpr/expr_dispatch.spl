@@ -874,9 +874,10 @@ impl MirLowering:
         if base == nil or index == nil:
             self.error("empty HIR Index payload", Some(expr_value.span))
             return self.builder.emit_const_int(0)
-        self.lower_index_expr(base, index, expr_value.type_)
+        val has_result_hir_type = expr_value.has_type_ == true and expr_value.type_ != nil
+        self.lower_index_expr(base, index, has_result_hir_type, expr_value.type_)
 
-    me lower_index_expr(base: HirExpr, index: HirExpr, index_result_hir_type: HirType?) -> LocalId:
+    me lower_index_expr(base: HirExpr, index: HirExpr, has_index_result_hir_type: bool, index_result_hir_type: HirType) -> LocalId:
         # Bug (array-slice-index SIGSEGV, CONFLICT-FLAG: expr_dispatch.spl
         # is fenced, touched here per the fence rule's "CONFLICT-FLAG if
         # must touch" allowance): `a[1:3]` where `a` is a runtime array
@@ -917,7 +918,7 @@ impl MirLowering:
                     match resolved_dict_mir_type.kind:
                         case MirTypeKind.Dict(_, value_type): dict_result_type = value_type
                         case _: ()
-            if not has_dict_mir_type and base.has_type_:
+            if not has_dict_mir_type and base.has_type_ == true and base.type_ != nil:
                 match base.type_.kind:
                     case Dict(_, value_type):
                         dict_result_type = self.lower_type(value_type)
@@ -1021,10 +1022,8 @@ impl MirLowering:
                 case _: ()
         if (mir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and not result_type_from_base:
             result_type = self.bootstrap_text_type()
-        elif not result_type_from_base:
-            if val expr_type = index_result_hir_type:
-                if expr_type != nil:
-                    result_type = self.lower_type(expr_type)
+        elif not result_type_from_base and has_index_result_hir_type:
+            result_type = self.lower_type(index_result_hir_type)
         # Store-side refinement (mirror of the dict read above): an
         # empty `[]` literal fixes the element type at the i64 default;
         # a later `a.push(0.1)` / `a[i] = 0.1` heap-boxes, so decoding
@@ -2121,7 +2120,8 @@ impl MirLowering:
                 self.lower_dict_lit(entries)
 
             case Index(base, index):
-                self.lower_index_expr(base, index, expr_value.type_)
+                val has_index_result_type = expr_value.has_type_ == true and expr_value.type_ != nil
+                self.lower_index_expr(base, index, has_index_result_type, expr_value.type_)
 
             case SetLit(elements, _):
                 self.lower_set_lit(elements)

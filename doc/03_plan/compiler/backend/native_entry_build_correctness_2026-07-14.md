@@ -961,3 +961,22 @@ the shared binary — deploys require explicit user go-ahead).
   line-mapped debug candidate, then fix that single owner. Do not add a
   Cranelift special case, promote the fixture, or run LLVM/platform matrices
   until exact Cranelift builds and exits `33`.
+
+  V45 mapped the prior trap to `lower_type(index_result_hir_type)` followed by
+  `result_type.kind`. GDB showed the optional boundary transported a boxed
+  `Some(HirType)` wrapper rather than its payload. V46 replaced that boundary
+  with the HIR-native `has_type` plus raw `type_` pair and rebuilt
+  `4 compiled, 672 cached, 0 failed`, but exact Cranelift still exited `132`.
+  Its entry registers showed both missing metadata fields arriving as tagged
+  nil (`3`); direct truthiness treated that nonzero tag as true.
+
+  V47 normalized both Index call-site flags with `has_type_ == true` and
+  required `type_ != nil` before lowering metadata. It rebuilt `4/672/0`, but
+  exact Cranelift still exited `132` with `field access on nil receiver`.
+  The three-cycle cap stopped before mapping the new trap. These changes harden
+  the shared HIR boundary but do not complete Index.
+
+  Next fresh session, map the V47 trap address before editing. Fix only that
+  newly proven receiver, then rebuild once and require exact Cranelift exit
+  `33`. LLVM, mixed Return/tail, neighbor Dict-struct, and all platform
+  promotion remain gated.
