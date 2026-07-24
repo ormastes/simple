@@ -980,3 +980,31 @@ the shared binary — deploys require explicit user go-ahead).
   newly proven receiver, then rebuild once and require exact Cranelift exit
   `33`. LLVM, mixed Return/tail, neighbor Dict-struct, and all platform
   promotion remain gated.
+
+  V48 removed the remaining Optional transport around Index-owned MIR-local
+  type lookups. It rebuilt `6 compiled, 670 cached, 0 failed` and produced the
+  first executable, but that executable segfaulted in a raw Index GEP because
+  the call result had lost its declared Dict provenance.
+
+  Diagnostic V49 taught call-result lowering to consume the existing
+  `fn_return_types` registry and tag Dict/Array/Slice/Optional results. It
+  rebuilt `4/672/0`, but the exact fixture still segfaulted because neither
+  MIR module entry path populated the registry.
+
+  Diagnostic V50 populated that registry and rebuilt `5 compiled, 671 cached,
+  0 failed`. Exact Cranelift `dict_fn_value` then linked and ran instead of
+  crashing, but exited `23` rather than `33`. Assembly showed the Dict storing
+  raw `11` and `22`; readback decoded them as `1` and `22`. The common
+  `box_runtime_value` Optional type lookup had skipped integer tagging.
+
+  V49/V50 return-registry changes are rejected from the retained diff:
+  bootstrap assigns symbol ID `100` to every ordinary function, so an
+  ID-keyed registry silently overwrites unrelated return types. Only the V48
+  direct MIR-local lookup hardening remains.
+
+  The three-cycle cap stops here. Next fresh session, diagnose the wrong Dict
+  provenance by the resolved direct-call name or emitted MIR return type, not
+  the lossy bootstrap symbol ID. Apply the same explicit builder-local
+  type scan to `box_runtime_value`, then require exact Cranelift exit `33`
+  before LLVM, mixed Return/tail, Dict-struct, MCP/bootstrap sanity, or
+  platform promotion.
