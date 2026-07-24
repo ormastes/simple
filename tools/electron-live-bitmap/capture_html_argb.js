@@ -38,6 +38,10 @@ const auditSelectors = (process.env.ELECTRON_CAPTURE_AUDIT_SELECTORS || "")
 const auditOutputPath = process.env.ELECTRON_CAPTURE_AUDIT_OUTPUT || "";
 const geometryOutputPath = process.env.ELECTRON_CAPTURE_GEOMETRY_OUTPUT || "";
 const proofPath = process.env.ELECTRON_CAPTURE_PROOF_PATH || "";
+// Optional, product-specific observation emitted only for the generated
+// Aetheric WM page.  Keeping this opt-in preserves this capture tool as the
+// generic Chromium bitmap/event runner used by the other evidence lanes.
+const aethericObservationPath = process.env.ELECTRON_CAPTURE_AETHERIC_OBSERVATION_PATH || "";
 const remoteDebuggingPort = process.env.ELECTRON_CAPTURE_REMOTE_DEBUGGING_PORT || "";
 const contrastMinX100 = Number(process.env.ELECTRON_CAPTURE_CONTRAST_MIN_X100 || 450);
 const touchMinPx = Number(process.env.ELECTRON_CAPTURE_TOUCH_MIN_PX || 44);
@@ -340,6 +344,66 @@ async function collectEventProof(win) {
     status: focusPass && keyboardPass && inputPass && pointerPass && clickPass ? "pass" : "fail",
     reason: focusPass && keyboardPass && inputPass && pointerPass && clickPass ? "pass" : "event-contract-missing",
   };
+}
+
+async function collectAethericObservation(win) {
+  return win.webContents.executeJavaScript(`
+    (async () => {
+      const required = selector => document.querySelector(selector);
+      const focused = required('.wm-window.focused');
+      const inactive = required('.wm-window:not(.focused)');
+      const titlebar = focused && focused.querySelector('.wm-titlebar');
+      // .wm-title is intentionally the production titlebar text rule: it
+      // carries the package's 650 weight rather than inheriting body defaults.
+      const typography = focused && focused.querySelector('.wm-title');
+      if (!focused || !inactive || !titlebar || !typography) {
+        return {
+          status: 'fail',
+          reason: 'aetheric-required-production-selectors-missing',
+          focused_window_found: Boolean(focused),
+          inactive_window_found: Boolean(inactive),
+          titlebar_found: Boolean(titlebar),
+          typography_found: Boolean(typography)
+        };
+      }
+      const focusedStyle = window.getComputedStyle(focused);
+      const inactiveStyle = window.getComputedStyle(inactive);
+      const titlebarStyle = window.getComputedStyle(titlebar);
+      const typographyStyle = window.getComputedStyle(typography);
+      const start = performance.now();
+      let frames = 0;
+      await new Promise(resolve => {
+        const tick = () => {
+          frames += 1;
+          if (frames >= 2) resolve();
+          else requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+      });
+      const animationCount = document.getAnimations({ subtree: true }).length;
+      return {
+        status: animationCount > 0 && frames >= 2 ? 'pass' : 'fail',
+        reason: animationCount > 0 && frames >= 2 ? 'pass' : 'animation-or-raf-missing',
+        computed_window_background: focusedStyle.backgroundColor,
+        computed_window_border_color: focusedStyle.borderTopColor,
+        computed_window_border_radius: focusedStyle.borderTopLeftRadius,
+        computed_window_box_shadow: focusedStyle.boxShadow,
+        computed_titlebar_backdrop_filter: titlebarStyle.backdropFilter,
+        computed_titlebar_webkit_backdrop_filter: titlebarStyle.webkitBackdropFilter,
+        computed_typography_family: typographyStyle.fontFamily,
+        computed_typography_weight: typographyStyle.fontWeight,
+        computed_inactive_border: inactiveStyle.borderTopColor,
+        computed_active_border: focusedStyle.borderTopColor,
+        computed_active_shadow: focusedStyle.boxShadow,
+        performance_now_available: typeof performance.now === 'function',
+        performance_now_delta_ms: Math.max(1, Math.round(performance.now() - start)),
+        animation_frame_available: typeof requestAnimationFrame === 'function',
+        animation_frame_count: frames,
+        css_animation_probe: animationCount > 0,
+        css_animation_count: animationCount
+      };
+    })()
+  `);
 }
 
 function bitmapToLogicalArgb(image) {
@@ -834,6 +898,9 @@ async function main() {
   stage("before-event-proof");
   const eventProof = await collectEventProof(win);
   stage("after-event-proof");
+  stage("before-aetheric-observation");
+  const aethericObservation = aethericObservationPath ? await collectAethericObservation(win) : null;
+  stage("after-aetheric-observation");
   let image = null;
   if (useOffscreenPaint && latestPaintImage) {
     stage("using-offscreen-paint");
@@ -881,6 +948,7 @@ async function main() {
   if (audit) payload.audit = audit;
   if (geometry) payload.geometry = geometry;
   payload.event_proof = eventProof;
+  if (aethericObservation) payload.aetheric_observation = aethericObservation;
 
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
   stage("before-write-argb");
@@ -897,6 +965,10 @@ async function main() {
   if (geometry && geometryOutputPath) {
     fs.mkdirSync(path.dirname(geometryOutputPath), { recursive: true });
     fs.writeFileSync(geometryOutputPath, JSON.stringify(geometry, null, 2));
+  }
+  if (aethericObservationPath) {
+    fs.mkdirSync(path.dirname(aethericObservationPath), { recursive: true });
+    fs.writeFileSync(aethericObservationPath, JSON.stringify(aethericObservation, null, 2));
   }
   if (proofPath) {
     fs.mkdirSync(path.dirname(proofPath), { recursive: true });

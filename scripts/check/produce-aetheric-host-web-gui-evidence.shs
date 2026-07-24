@@ -1,0 +1,51 @@
+#!/bin/sh
+# Produce real Aetheric Web/GUI evidence.  The admission wrapper remains the
+# authority for PASS; this producer deliberately emits FAIL while the Electron
+# surface lacks a canonical ui_access adapter.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/aetheric-host-web-gui-evidence}"
+SIMPLE_BIN="${SIMPLE_BIN:-}"
+PROOF_PATH="${AETHERIC_HOST_WEB_GUI_PROOF:-$BUILD_DIR/aetheric-host-web-gui.env}"
+WIDTH="${AETHERIC_HOST_WEB_GUI_WIDTH:-960}"
+HEIGHT="${AETHERIC_HOST_WEB_GUI_HEIGHT:-640}"
+
+if [ -z "$SIMPLE_BIN" ] || [ ! -x "$SIMPLE_BIN" ]; then
+    echo "produce-aetheric-host-web-gui-evidence: SIMPLE_BIN must name an executable self-hosted binary" >&2
+    exit 2
+fi
+case "$SIMPLE_BIN" in *src/compiler_rust/*|src/compiler_rust/*)
+    echo "produce-aetheric-host-web-gui-evidence: Rust seed is forbidden" >&2
+    exit 2
+esac
+if ! "$SIMPLE_BIN" --version >/dev/null 2>&1; then
+    echo "produce-aetheric-host-web-gui-evidence: SIMPLE_BIN --version failed" >&2
+    exit 2
+fi
+
+mkdir -p "$BUILD_DIR"
+HTML_PATH="$BUILD_DIR/aetheric_dark_production.html"
+SOURCE_LOG="$BUILD_DIR/source-generation.log"
+SIMPLE_PIXELS="$BUILD_DIR/aetheric_dark_engine2d.argb.json"
+ELECTRON_PIXELS="$BUILD_DIR/aetheric_dark_electron.argb.json"
+SCREENSHOT="$BUILD_DIR/aetheric_dark_electron.png"
+OBSERVATION="$BUILD_DIR/aetheric_dark_electron_observation.json"
+REVISION="$(git rev-parse HEAD)"
+
+"$SIMPLE_BIN" run src/app/test/aetheric_host_web_gui_producer.spl "$HTML_PATH" >"$SOURCE_LOG"
+PIXEL_HTML="$HTML_PATH" PIXEL_W="$WIDTH" PIXEL_H="$HEIGHT" PIXEL_BACKEND="cpu_simd" PIXEL_OUT="$SIMPLE_PIXELS" \
+    "$SIMPLE_BIN" run tools/pixel_compare/render_simple_html.spl
+ELECTRON_CAPTURE_HTML="$HTML_PATH" ELECTRON_CAPTURE_WIDTH="$WIDTH" ELECTRON_CAPTURE_HEIGHT="$HEIGHT" \
+    ELECTRON_CAPTURE_OUTPUT="$ELECTRON_PIXELS" ELECTRON_CAPTURE_PNG_OUTPUT="$SCREENSHOT" \
+    ELECTRON_CAPTURE_AETHERIC_OBSERVATION_PATH="$OBSERVATION" ELECTRON_CAPTURE_SETTLE_MS=200 \
+    npx electron --no-sandbox --disable-gpu tools/electron-live-bitmap/capture_html_argb.js
+node tools/electron-live-bitmap/write_aetheric_host_web_gui_proof.js \
+    --source-log "$SOURCE_LOG" --simple-pixels "$SIMPLE_PIXELS" --electron-pixels "$ELECTRON_PIXELS" \
+    --observation "$OBSERVATION" --screenshot "$SCREENSHOT" --binary "$SIMPLE_BIN" \
+    --revision "$REVISION" --output "$PROOF_PATH"
+
+echo "aetheric_host_web_gui_producer_status=complete-with-ui-access-abi-gap"
+echo "aetheric_host_web_gui_proof=$PROOF_PATH"

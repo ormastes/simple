@@ -17,11 +17,29 @@ SNAPSHOT="src/lib/common/ui/generated/aetheric_dark_theme_snapshot.spl"
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 
+BUILD_DIR_CANONICAL="$(CDPATH= cd -- "$BUILD_DIR" && pwd -P)"
+CURRENT_REVISION="$(git rev-parse HEAD)"
+
 field() { sed -n "s/^$1=//p" "$PROOF_PATH" | tail -n 1; }
 regular_file() { [ -f "$1" ] && [ ! -L "$1" ]; }
 positive() { case "$1" in ''|*[!0-9]*) return 1 ;; *) [ "$1" -gt 0 ] ;; esac; }
 sha256() { [ "${#1}" -eq 64 ] && case "$1" in *[!0-9a-f]*) false ;; *) true ;; esac; }
 contains() { case "$1" in *"$2"*) return 0 ;; *) return 1 ;; esac; }
+sha256_file() {
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        sha256sum "$1" | awk '{print $1}'
+    fi
+}
+artifact_under_build_dir() {
+    candidate="$1"
+    case "$candidate" in /*) ;; *) candidate="$ROOT_DIR/$candidate" ;; esac
+    regular_file "$candidate" || return 1
+    artifact_dir="$(CDPATH= cd -- "$(dirname -- "$candidate")" && pwd -P)"
+    artifact_canonical="$artifact_dir/$(basename -- "$candidate")"
+    case "$artifact_canonical" in "$BUILD_DIR_CANONICAL"/*) return 0 ;; *) return 1 ;; esac
+}
 
 emit() {
     status="$1"; reason="$2"
@@ -67,7 +85,7 @@ fi
 
 expected_manifest="$(sed -n 's/.*source_manifest_sha256: "\([0-9a-f]*\)".*/\1/p' "$SNAPSHOT" | head -n 1)"
 expected_material="$(sed -n 's/.*material_sha256: "\([0-9a-f]*\)".*/\1/p' "$SNAPSHOT" | head -n 1)"
-required='schema status producer theme_id theme_source_manifest_sha256 theme_material_sha256 source_revision binary_sha256 backend capture_path pixel_artifact_path pixel_count pixel_checksum screenshot_path screenshot_nonblank_pixels ui_access_snapshot_status ui_access_surface_status ui_access_find_status ui_access_act_focus_status ui_access_act_pointer_down_status ui_access_act_pointer_up_status ui_access_act_keyboard_status ui_access_act_text_status ui_access_history_status post_action_semantic_state computed_window_background computed_window_border_color computed_window_border_radius computed_window_box_shadow computed_titlebar_backdrop_filter computed_titlebar_webkit_backdrop_filter computed_typography_family computed_typography_weight computed_inactive_border computed_active_border computed_active_shadow performance_now_available performance_now_delta_ms animation_frame_available animation_frame_count css_animation_probe blur_or_tolerance_used synthetic_fixture raw_source_execution compatibility_renderer'
+required='schema status producer theme_id theme_source_manifest_sha256 theme_material_sha256 source_revision binary_sha256 backend capture_path capture_sha256 pixel_artifact_path pixel_artifact_sha256 pixel_count pixel_checksum screenshot_path screenshot_sha256 screenshot_nonblank_pixels ui_access_snapshot_status ui_access_surface_status ui_access_find_status ui_access_act_focus_status ui_access_act_pointer_down_status ui_access_act_pointer_up_status ui_access_act_keyboard_status ui_access_act_text_status ui_access_history_status post_action_semantic_state computed_window_background computed_window_border_color computed_window_border_radius computed_window_box_shadow computed_titlebar_backdrop_filter computed_titlebar_webkit_backdrop_filter computed_typography_family computed_typography_weight computed_inactive_border computed_active_border computed_active_shadow performance_now_available performance_now_delta_ms animation_frame_available animation_frame_count css_animation_probe blur_or_tolerance_used synthetic_fixture raw_source_execution compatibility_renderer'
 for key in $required; do
     value="$(field "$key")"
     [ -n "$value" ] || { emit fail "missing-required-field:$key"; exit 1; }
@@ -79,9 +97,15 @@ done
 [ "$(field theme_id)" = aetheric_dark ] || { emit fail theme-id-mismatch; exit 1; }
 [ "$(field theme_source_manifest_sha256)" = "$expected_manifest" ] || { emit fail theme-manifest-mismatch; exit 1; }
 [ "$(field theme_material_sha256)" = "$expected_material" ] || { emit fail theme-material-mismatch; exit 1; }
+[ "$(field source_revision)" = "$CURRENT_REVISION" ] || { emit fail source-revision-mismatch; exit 1; }
 [ "$(field backend)" = engine2d ] || { emit fail backend-not-engine2d; exit 1; }
 sha256 "$(field binary_sha256)" && sha256 "$(field pixel_checksum)" || { emit fail invalid-binary-or-pixel-sha256; exit 1; }
-for path_key in capture_path pixel_artifact_path screenshot_path; do regular_file "$(field "$path_key")" || { emit fail "missing-or-linked-artifact:$path_key"; exit 1; }; done
+[ "$(field binary_sha256)" = "$(sha256_file "$SIMPLE_BIN")" ] || { emit fail binary-sha256-mismatch; exit 1; }
+for path_key in capture_path pixel_artifact_path screenshot_path; do artifact_under_build_dir "$(field "$path_key")" || { emit fail "artifact-outside-build-or-linked:$path_key"; exit 1; }; done
+[ "$(field capture_sha256)" = "$(sha256_file "$(field capture_path)")" ] || { emit fail capture-sha256-mismatch; exit 1; }
+[ "$(field pixel_artifact_sha256)" = "$(sha256_file "$(field pixel_artifact_path)")" ] || { emit fail pixel-artifact-sha256-mismatch; exit 1; }
+[ "$(field screenshot_sha256)" = "$(sha256_file "$(field screenshot_path)")" ] || { emit fail screenshot-sha256-mismatch; exit 1; }
+[ "$(field pixel_checksum)" = "$(field pixel_artifact_sha256)" ] || { emit fail pixel-checksum-mismatch; exit 1; }
 positive "$(field pixel_count)" && positive "$(field screenshot_nonblank_pixels)" || { emit fail blank-or-empty-pixels; exit 1; }
 
 [ "$(field computed_window_background)" = 'rgba(31, 31, 33, 0.8)' ] || { emit fail window-background-mismatch; exit 1; }
