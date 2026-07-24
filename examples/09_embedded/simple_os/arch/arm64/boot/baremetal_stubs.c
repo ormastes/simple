@@ -2284,6 +2284,9 @@ S1(rt_read_sysreg) S2(rt_write_sysreg)
 
 uint64_t g_fb_addr = 0;
 uint64_t g_fb_w = 0;
+static volatile uint64_t g_gui_simd_fill_hits = 0;
+static volatile uint64_t g_gui_simd_fill_chunks = 0;
+static volatile uint64_t g_gui_simd_fill_tail_pixels = 0;
 
 RuntimeValue rt_gui_set_fb(RuntimeValue addr, RuntimeValue w)
 {
@@ -2299,9 +2302,25 @@ RuntimeValue rt_gui_set_fb(RuntimeValue addr, RuntimeValue w)
 
 RuntimeValue rt_gui_hline(RuntimeValue y, RuntimeValue x, RuntimeValue count, RuntimeValue color) { (void)y;(void)x;(void)count;(void)color; return 0; }
 
+/*
+ * Read-only execution receipts for the compositor evidence adapter.  These
+ * values are written only by rt_gui_fill4's runtime-owned kernel; callers
+ * cannot manufacture a hit by selecting the NEON dispatch path.
+ */
+RuntimeValue rt_gui_simd_fill_hits(void) { return (RuntimeValue)g_gui_simd_fill_hits; }
+RuntimeValue rt_gui_simd_fill_chunks(void) { return (RuntimeValue)g_gui_simd_fill_chunks; }
+RuntimeValue rt_gui_simd_fill_tail_pixels(void) { return (RuntimeValue)g_gui_simd_fill_tail_pixels; }
+RuntimeValue rt_gui_simd_fill_enabled(void)
+{
+#if defined(__aarch64__)
+    return 1;
+#else
+    return 0;
+#endif
+}
+
 RuntimeValue rt_gui_fill4(RuntimeValue xy, RuntimeValue wh, RuntimeValue color, RuntimeValue u)
 {
-    /* Basic fill implementation for when glass_render.c is not linked */
     if (!g_fb_addr || !g_fb_w) { (void)xy;(void)wh;(void)color;(void)u; return 0; }
     uint32_t px = (uint32_t)((uint64_t)xy >> 32);
     uint32_t py = (uint32_t)((uint64_t)xy & 0xFFFFFFFF);
@@ -2309,15 +2328,46 @@ RuntimeValue rt_gui_fill4(RuntimeValue xy, RuntimeValue wh, RuntimeValue color, 
     uint32_t ph = (uint32_t)((uint64_t)wh & 0xFFFFFFFF);
     uint32_t c = (uint32_t)(uint64_t)color;
     volatile uint32_t *fb = (volatile uint32_t *)(uintptr_t)g_fb_addr;
-    for (uint32_t row = 0; row < ph; row++) {
-        for (uint32_t col = 0; col < pw; col++) {
-            uint32_t fx = px + col;
-            uint32_t fy = py + row;
-            if (fx < (uint32_t)g_fb_w && fy < 768) {
-                fb[fy * (uint32_t)g_fb_w + fx] = c;
-            }
+    uint64_t x_limit64 = (uint64_t)px + (uint64_t)pw;
+    uint64_t y_limit64 = (uint64_t)py + (uint64_t)ph;
+    uint32_t x_limit = x_limit64 < g_fb_w ? (uint32_t)x_limit64 : (uint32_t)g_fb_w;
+    uint32_t y_limit = y_limit64 < 768u ? (uint32_t)y_limit64 : 768u;
+    uint64_t call_chunks = 0;
+    uint64_t call_tail = 0;
+
+    if (px >= x_limit || py >= y_limit) return 0;
+    for (uint32_t row = py; row < y_limit; row++) {
+        volatile uint32_t *dst = fb + (uint64_t)row * g_fb_w + px;
+        uint32_t remaining = x_limit - px;
+#if defined(__aarch64__)
+        while (remaining >= 4u) {
+            /*
+             * AArch64 Advanced SIMD is architectural.  st1 permits an
+             * unaligned framebuffer address, unlike a C vector-pointer store
+             * whose alignment contract would be too strong for arbitrary x.
+             */
+            __asm__ volatile(
+                "dup v0.4s, %w1\n\t"
+                "st1 {v0.4s}, [%0]"
+                :
+                : "r" (dst), "r" (c)
+                : "v0", "memory");
+            dst += 4;
+            remaining -= 4u;
+            call_chunks++;
+        }
+#endif
+        while (remaining > 0u) {
+            *dst++ = c;
+            remaining--;
+            call_tail++;
         }
     }
+    if (call_chunks > 0) {
+        g_gui_simd_fill_hits++;
+        g_gui_simd_fill_chunks += call_chunks;
+    }
+    g_gui_simd_fill_tail_pixels += call_tail;
     return 0;
 }
 

@@ -16,6 +16,12 @@ use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
 use os.compositor.compositor.{Compositor}
 use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
 use os.compositor.engine2d_display.{create_fb_engine_sized}
+use os.compositor.engine2d_baremetal_core.{
+    baremetal_simd_fill_enabled,
+    baremetal_simd_fill_hits,
+    baremetal_simd_fill_chunks,
+    baremetal_simd_fill_tail_pixels
+}
 use os.compositor.engine2d_wm_frame_executor.{Engine2dWmFrameExecutor}
 use os.desktop.shell.{DesktopShell}
 use os.desktop.font_bootstrap.{simpleos_desktop_register_selected_fonts_from_vfs}
@@ -111,10 +117,21 @@ fn spl_start():
     if first_revision <= 0:
         uart_writeln("[desktop-gui-arm64] fatal reason=first-frame")
         return
+    val simd_enabled = baremetal_simd_fill_enabled()
+    val simd_hits = baremetal_simd_fill_hits()
+    val simd_chunks = baremetal_simd_fill_chunks()
+    val simd_tail_pixels = baremetal_simd_fill_tail_pixels()
+    if not simd_enabled or simd_hits == 0 or simd_chunks == 0:
+        uart_writeln("[engine2d-simd] fatal arch=aarch64 isa=neon reason=zero-runtime-receipt")
+        return
+    uart_writeln("[engine2d-simd] arch=aarch64 isa=neon enabled=1 fill_hits={simd_hits} fill_chunks={simd_chunks} fill_tail_pixels={simd_tail_pixels}")
+    uart_writeln("[backend2d-event-blocker] backend=simpleos-qemu-arm64 event_backend=pl011-uart unsupported=pointer-down,pointer-up,key-down,key-up")
+    uart_writeln("[desktop-gui] first-frame-rendered")
     uart_writeln("[desktop-gui-arm64] desktop-ready revision={first_revision}")
     uart_writeln("[desktop-gui-arm64] controls Tab=cycle 1/2/3=focus m=minimize w=close r=restore q=quit")
 
     var running = true
+    var event_count = 0
     while running:
         if uart_data_ready() == 1:
             val action = uart_char_to_action(uart_read_char())
@@ -155,6 +172,8 @@ fn spl_start():
                     pass
 
             if changed:
+                event_count = event_count + 1
+                uart_writeln("[backend2d-event-receipt] backend=simpleos-qemu-arm64 event_backend=pl011-uart event_sequence=character-action event_count={event_count}")
                 shell.compositor = input_compositor
                 val rendered_revision = shell.render_baremetal_frame(wm_frame_executor)
                 if rendered_revision <= 0:

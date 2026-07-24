@@ -8563,6 +8563,9 @@ static void fb_draw_text(uint32_t x, uint32_t y, const char *text, uint32_t fg, 
 
 uint64_t g_fb_addr = 0xFD000000;
 uint64_t g_fb_w = 1024;
+static volatile uint64_t g_gui_simd_fill_hits = 0;
+static volatile uint64_t g_gui_simd_fill_chunks = 0;
+static volatile uint64_t g_gui_simd_fill_tail_pixels = 0;
 
 static void serial_hex(uint64_t v) {
     char hex[] = "0123456789abcdef";
@@ -8614,6 +8617,18 @@ RuntimeValue rt_gui_hline(RuntimeValue y, RuntimeValue x, RuntimeValue count, Ru
     return 0;
 }
 
+RuntimeValue rt_gui_simd_fill_hits(void) { return (RuntimeValue)g_gui_simd_fill_hits; }
+RuntimeValue rt_gui_simd_fill_chunks(void) { return (RuntimeValue)g_gui_simd_fill_chunks; }
+RuntimeValue rt_gui_simd_fill_tail_pixels(void) { return (RuntimeValue)g_gui_simd_fill_tail_pixels; }
+RuntimeValue rt_gui_simd_fill_enabled(void)
+{
+#if defined(__x86_64__)
+    return 1;
+#else
+    return 0;
+#endif
+}
+
 /* 4-arg version: pack x|y into xy and w|h into wh (high 32 = first, low 32 = second) */
 RuntimeValue rt_gui_fill4(RuntimeValue xy, RuntimeValue wh, RuntimeValue color, RuntimeValue _unused)
 {
@@ -8623,12 +8638,37 @@ RuntimeValue rt_gui_fill4(RuntimeValue xy, RuntimeValue wh, RuntimeValue color, 
     uint32_t rw = (uint32_t)((uint64_t)wh >> 32);
     uint32_t rh = (uint32_t)((uint64_t)wh & 0xFFFFFFFF);
     uint32_t c = (uint32_t)(uint64_t)color;
+    uint64_t call_chunks = 0;
+    uint64_t call_tail = 0;
     for (uint32_t row = 0; row < rh; row++) {
-        uint64_t base = g_fb_addr + ((uint64_t)(ry + row) * g_fb_w + rx) * 4;
-        for (uint32_t col = 0; col < rw; col++) {
-            *(volatile uint32_t *)(uintptr_t)(base + col * 4) = c;
+        volatile uint32_t *dst = (volatile uint32_t *)(uintptr_t)
+            (g_fb_addr + ((uint64_t)(ry + row) * g_fb_w + rx) * 4);
+        uint32_t remaining = rw;
+#if defined(__x86_64__)
+        while (remaining >= 4u) {
+            __asm__ volatile(
+                "movd %1, %%xmm0\n\t"
+                "pshufd $0, %%xmm0, %%xmm0\n\t"
+                "movdqu %%xmm0, (%0)"
+                :
+                : "r" (dst), "r" (c)
+                : "xmm0", "memory");
+            dst += 4;
+            remaining -= 4u;
+            call_chunks++;
+        }
+#endif
+        while (remaining > 0u) {
+            *dst++ = c;
+            remaining--;
+            call_tail++;
         }
     }
+    if (call_chunks > 0) {
+        g_gui_simd_fill_hits++;
+        g_gui_simd_fill_chunks += call_chunks;
+    }
+    g_gui_simd_fill_tail_pixels += call_tail;
     return 0;
 }
 
