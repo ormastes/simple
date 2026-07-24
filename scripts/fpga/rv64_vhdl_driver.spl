@@ -16,7 +16,8 @@
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_dir_create(path: text) -> bool
 
-use std.hardware.fpga_linux._SocVhdlGen.top_testbench.{generate_soc_top_vhdl_rv64}
+use std.hardware.fpga_linux._SocVhdlGen.peripherals.{generate_wb_interconnect_vhdl_rv64}
+use std.hardware.fpga_linux._SocVhdlGen.top_testbench.{generate_soc_top_vhdl_rv64, generate_soc_top_vhdl_rv64_external_ddr}
 
 fn vhdl_header() -> text:
     "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\n"
@@ -531,65 +532,6 @@ fn gen_bootrom_stub() -> text:
     l = l + "end architecture rtl;\n"
     l
 
-fn gen_wb_interconnect_stub() -> text:
-    var l = vhdl_header()
-    l = l + "\nentity wb_interconnect is\n  port (\n"
-    l = l + "    m_adr   : in  std_logic_vector(63 downto 0);\n"
-    l = l + "    m_dat_o : in  std_logic_vector(63 downto 0);\n"
-    l = l + "    m_dat_i : out std_logic_vector(63 downto 0);\n"
-    l = l + "    m_we    : in  std_logic;\n"
-    l = l + "    m_sel   : in  std_logic_vector(7 downto 0);\n"
-    l = l + "    m_stb   : in  std_logic;\n"
-    l = l + "    m_cyc   : in  std_logic;\n"
-    l = l + "    m_ack   : out std_logic;\n"
-    l = l + "    s0_dat  : in  std_logic_vector(63 downto 0);\n"
-    l = l + "    s0_stb  : out std_logic;\n"
-    l = l + "    s1_dat  : in  std_logic_vector(63 downto 0);\n"
-    l = l + "    s1_stb  : out std_logic;\n"
-    l = l + "    s1_ack  : in  std_logic;\n"
-    l = l + "    s2_dat  : in  std_logic_vector(63 downto 0);\n"
-    l = l + "    s2_stb  : out std_logic;\n"
-    l = l + "    s2_ack  : in  std_logic;\n"
-    l = l + "    s3_dat  : in  std_logic_vector(63 downto 0);\n"
-    l = l + "    s3_stb  : out std_logic;\n"
-    l = l + "    s3_ack  : in  std_logic;\n"
-    l = l + "    s4_dat  : in  std_logic_vector(63 downto 0);\n"
-    l = l + "    s4_stb  : out std_logic;\n"
-    l = l + "    s4_ack  : in  std_logic\n"
-    l = l + "  );\nend entity wb_interconnect;\n\n"
-    l = l + "architecture rtl of wb_interconnect is\n"
-    l = l + "  signal sel_bootrom : std_logic;\n"
-    l = l + "  signal sel_clint   : std_logic;\n"
-    l = l + "  signal sel_plic    : std_logic;\n"
-    l = l + "  signal sel_uart    : std_logic;\n"
-    l = l + "  signal sel_ram     : std_logic;\n"
-    l = l + "begin\n"
-    l = l + "  sel_bootrom <= '1' when m_adr(31 downto 12) = x\"00001\" else '0';\n"
-    l = l + "  sel_clint   <= '1' when m_adr(31 downto 16) = x\"0200\" else '0';\n"
-    l = l + "  sel_plic    <= '1' when m_adr(31 downto 24) = x\"0C\" else '0';\n"
-    l = l + "  sel_uart    <= '1' when m_adr(31 downto 8) = x\"100000\" else '0';\n"
-    l = l + "  sel_ram     <= '1' when m_adr(31) = '1' else '0';\n"
-    l = l + "\n"
-    l = l + "  s0_stb <= m_stb and m_cyc and sel_bootrom;\n"
-    l = l + "  s1_stb <= m_stb and m_cyc and sel_clint;\n"
-    l = l + "  s2_stb <= m_stb and m_cyc and sel_plic;\n"
-    l = l + "  s3_stb <= m_stb and m_cyc and sel_uart;\n"
-    l = l + "  s4_stb <= m_stb and m_cyc and sel_ram;\n"
-    l = l + "\n"
-    l = l + "  m_dat_i <= s0_dat when sel_bootrom = '1' else\n"
-    l = l + "             s1_dat when sel_clint = '1' else\n"
-    l = l + "             s2_dat when sel_plic = '1' else\n"
-    l = l + "             s3_dat when sel_uart = '1' else\n"
-    l = l + "             s4_dat when sel_ram = '1' else\n"
-    l = l + "             (others => '0');\n"
-    l = l + "  m_ack <= (m_stb and m_cyc and sel_bootrom) or\n"
-    l = l + "           (s1_ack and sel_clint) or\n"
-    l = l + "           (s2_ack and sel_plic) or\n"
-    l = l + "           (s3_ack and sel_uart) or\n"
-    l = l + "           (s4_ack and sel_ram);\n"
-    l = l + "end architecture rtl;\n"
-    l
-
 fn write_vhd(out_dir: text, name: text, content: text) -> bool:
     val path = "{out_dir}/{name}.vhd"
     val ok = rt_file_write_text(path, content)
@@ -607,6 +549,7 @@ fn main():
     print("Generating soc_top_rv64.vhd...")
     val soc_top = generate_soc_top_vhdl_rv64()
     write_vhd(out_dir, "soc_top_rv64", soc_top)
+    write_vhd(out_dir, "soc_top_rv64_external_ddr", generate_soc_top_vhdl_rv64_external_ddr())
     write_vhd(out_dir, "soc_top_rv64_k26", gen_k26_top())
 
     # Per-module RTL-to-VHDL compilation: no compiler backend exists yet
@@ -632,8 +575,8 @@ fn main():
     write_vhd(out_dir, "uart", gen_uart_stub())
     write_vhd(out_dir, "ram", gen_ram_stub())
     write_vhd(out_dir, "bootrom", gen_bootrom_stub())
-    write_vhd(out_dir, "wb_interconnect", gen_wb_interconnect_stub())
+    write_vhd(out_dir, "wb_interconnect", generate_wb_interconnect_vhdl_rv64())
 
     val skipped_count = modules.length()
     print("")
-    print("Generated 9 VHDL files (soc tops + core + peripherals); {skipped_count} RTL module stubs SKIPPED (no compiler backend)")
+    print("Generated 10 VHDL files (soc tops + core + peripherals); {skipped_count} RTL module stubs SKIPPED (no compiler backend)")
