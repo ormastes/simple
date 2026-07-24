@@ -933,3 +933,65 @@ implementation
   segfaulted (exit `139`) on `src/compiler`, `src/lib`, MCP, LSP-MCP, and the
   MCP stdio integration spec. Direct-env working-tree guard, spec-layout zero,
   and `git diff --check` passed. This commit is a focused fix, not verify PASS.
+
+## 2026-07-24 continuation status
+
+Goal status: `implementation-blocked-stage4`.
+
+Current evidence requires artifacts and transcripts in this checkout:
+
+| Requirement | Current status | Authoritative boundary |
+|---|---|---|
+| Stage 4 prerequisite | BLOCKED | One guarded full-CLI build reached the 16 GiB cap after 103/1,314 files. |
+| REQ-001/002 RV64 web+DB | HISTORICAL PASS; CURRENT UNVERIFIED | The July 11 real HTTP and `codex-41` query evidence is credible, but the current stamped ELF, serial log, and DB transcript are absent. |
+| REQ-003 Clang | HISTORICAL PARTIAL; CURRENT FAIL | Filesystem Clang emitted a real x86-64 ELF object under OVMF; no in-guest link or linked-ELF execution passed. |
+| REQ-004/005 Simple roles | HISTORICAL PARTIAL; CURRENT FAIL | Later ring-3 filesystem interpreter evidence supersedes the earlier `rt_string_join` fault, but current payload/media are absent and compiler/loader compile-link-run proof never passed. |
+| REQ-006/007 loader provenance | SOURCE PASS; CURRENT LIVE UNVERIFIED | Source contracts reject preload/marker substitution; no current live image proves the complete goal. |
+
+The selected Stage 4 ownership boundary is one compact
+`ModuleSurfacesByName` index plus at most one ordinary full-body rich Module
+and retained trait-default subtrees. Frozen interfaces:
+
+- `ModuleSurface`
+- `ModuleSurfacesByName`
+- `module_surface_from_module`
+- `hirlowering_for_module`
+- `phase2:surface:file:released`
+
+The low-memory entry-closure flow is:
+
+1. Parse each source, install an independently owned compact surface, remove
+   the rich Module from retained compiler state, and emit the post-scope
+   release marker.
+2. Parse each source again, lower HIR against the complete surface index, and
+   remove its rich Module before continuing.
+3. Retain HIR for the existing MIR layout prepass and later phases.
+
+Required RED-to-GREEN gates before another Stage 4 build:
+
+- Surface extraction omits ordinary executable bodies while retaining
+  imports/exports, callable/type/enum/impl signatures, constant names, and
+  trait defaults.
+- A native forward-import fixture resolves a re-export, enum payload, and
+  imported trait default without source-order dependence.
+- The first 10 validated post-release real-closure markers average at most
+  25,000 retained heap objects/file under a pre-calibrated guarded run.
+
+After these pass: build incremental Stage 2/3, admit one guarded Stage 4, then
+reproduce RV64 web/DB, filesystem Simple, and finally extend filesystem Clang
+from object emission to in-guest link and execution. Do not start
+target/media/QEMU work before Stage 4 admission; existing historical runs are
+not current evidence.
+
+Cooperative review for this continuation:
+
+- Lower-model lanes: surface/resolver inventory, real-corpus slope gate,
+  RV64 web/DB history, Clang filesystem history, and Simple role history.
+- Merge owner: root Codex agent.
+- Final reviewer: highest-capability Codex reviewer before each broad merge
+  and any done mark.
+- Manual steps remain:
+  `step("Boot SimpleOS with filesystem-backed web and DB servers")`,
+  `step("Compile and execute a filesystem C program with Clang")`, and
+  `step("Launch the Simple compiler toolchain from the filesystem")`.
+- Temporary helpers must call `fail(...)`; placeholder passes are forbidden.

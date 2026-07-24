@@ -41,3 +41,74 @@ Date: 2026-07-11
 3. Real Clang/Simple payloads are not in a sufficiently large install image.
 4. No guest DB service handles a real create/write/read request.
 
+<!-- codex-research -->
+## 2026-07-24 current-state reconciliation
+
+The 2026-07-11 findings above are preserved as historical context. Later work
+revived real web/DB traffic and filesystem Simple interpretation, but this
+checkout contains none of the required current kernels, images, payloads, or
+QEMU transcripts. Current completion therefore differs from the strongest
+historical boundary:
+
+| Requirement | Strongest historical evidence | Current status |
+|---|---|---|
+| RV64 web + DB | One real QEMU boot answered `/health` and `/`, then completed `CREATE`/`INSERT`/`SELECT` with `codex-41`. | HISTORICAL PASS; CURRENT UNVERIFIED |
+| Filesystem Clang | OVMF-launched filesystem Clang emitted a valid x86-64 `ET_REL` object that was retrieved and host-linked/run. | HISTORICAL PARTIAL; CURRENT FAIL |
+| Filesystem Simple | A later ring-3 filesystem interpreter run read `/HELLO.SPL`, printed `Hello from SimpleOS`, and exited zero. | HISTORICAL PARTIAL; CURRENT FAIL |
+| Filesystem loader provenance | Source/unit contracts reject unkeyed preload and marker substitution. | SOURCE PASS; CURRENT LIVE UNVERIFIED |
+
+The later interpreter PASS supersedes the earlier `rt_string_join` failure as
+history, but it does not prove a current payload. Guest-native Simple
+compile/link/run and complete compiler/loader role execution have never passed.
+Filesystem Clang has never linked and executed its output inside the guest.
+
+The canonical current RV64 service proof remains:
+
+```text
+SERIAL_LOG=<artifacts>/serial.log DB_QUERY_LOG=<artifacts>/db_query.log sh scripts/qemu/qemu_rv64_http_test.shs --expect-http-only --with-storage --with-db
+sh scripts/qemu/check_simpleos_rv64_db_server.shs --artifacts <artifacts>
+```
+
+The wrapper sends real TCP requests and checks three HTTP 200 responses plus
+`OK CREATE`, `OK INSERT`, and `codex-41`. Generic filesystem-exec QEMU marker
+specs do not prove web or DB behavior.
+
+The strongest Clang history is commit `7cf0b6aec3a`; revival anchors include
+`aa9f7d1278`, `a5fdae0384`, and the current filesystem/server restorations
+`c2ef3b878b`, `e3a7c19530`, and `9c3d3a4680`. The target remains
+`x86_64-unknown-simpleos` with the SimpleOS sysroot, static runtime, and
+filesystem `PT_LOAD` streaming. The next live Clang proof must extend object
+emission to guest LLD linking and execution of the linked filesystem ELF.
+
+### Stage 4 prerequisite discovered on 2026-07-24
+
+No current target/image proof may start until an accepted pure-Simple Stage 4
+CLI exists. A fresh compiler-only candidate passed the 40-file synthetic memory
+gate at 136,196 KiB, but one guarded real full-CLI closure reached the 16 GiB
+cap after only 103 of 1,314 files. The retained owner is the complete set of
+rich parsed `Module` values held until batch HIR lowering, not the per-file
+flat parser scratch arenas.
+
+The reviewed minimum repair is a two-pass low-memory entry-closure pipeline:
+
+1. Parse each file and retain only an independently owned compact
+   `ModuleSurface` needed for imports, re-exports, callable/type/enum/impl
+   signatures, constants, and trait defaults.
+2. With every surface installed, parse one full Module at a time, lower it to
+   HIR, and remove the rich Module from retained compiler state.
+3. Retain HIR for the existing MIR layout prepass and later compilation.
+
+Per-module flat-arena snapshots, another deep AST copy, and source-order
+lowering were rejected: the flat bridge already deep-converts each Module, and
+HIR resolution requires a complete cross-module declaration surface.
+
+Before another Stage 4 attempt, require:
+
+- a surface-extraction unit proving ordinary bodies are absent;
+- a native forward re-export/enum/trait-default fixture;
+- 10 ordered post-release real-closure markers averaging at most 25,000
+  retained heap objects/file.
+
+After Stage 4 admission, reproduce RV64 web/DB first, filesystem Simple second,
+and filesystem Clang guest link/execute last. This order revives known working
+boundaries before extending the two incomplete toolchain lanes.
