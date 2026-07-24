@@ -176,6 +176,7 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             | "rt_set_args"
             | "rt_function_not_found"
             | "rt_string_new"
+            | "rt_string_new_literal"
             | "rt_string_data"
             | "rt_string_len"
             | "rt_string_bytes"

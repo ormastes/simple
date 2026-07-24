@@ -56,11 +56,15 @@ impl LlvmBackend {
     ) -> Result<(), CompileError> {
         let i64_type = self.runtime_int_type();
 
-        // Declare rt_string_new if not exists: fn(i64, i64) -> i64
+        // Declare rt_string_new_literal if not exists: fn(i64, i64) -> i64.
         // First arg is ptr-as-i64 (matching the tagged-value ABI).
-        let string_new = module.get_function("rt_string_new").unwrap_or_else(|| {
+        // Interned variant: this instruction re-executes per literal
+        // evaluation and the no-GC tier never frees, so per-eval
+        // rt_string_new leaked one registered heap string per execution
+        // (bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20).
+        let string_new = module.get_function("rt_string_new_literal").unwrap_or_else(|| {
             let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
-            module.add_function("rt_string_new", fn_type, None)
+            module.add_function("rt_string_new_literal", fn_type, None)
         });
 
         let builder = self.builder.borrow();

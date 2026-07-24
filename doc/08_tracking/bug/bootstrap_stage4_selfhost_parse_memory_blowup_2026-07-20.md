@@ -736,3 +736,117 @@ Next steps, in value order:
    `src/compiler/10.frontend/core/lexer.spl:191-207`) — fixes the TIME
    symptom incl. the 60s-timeout giant-literal files; validate via the
    normal dynload bootstrap + both guard scripts.
+
+## UPDATE 2026-07-24 (root-cause + fix lane): dominant mechanism FOUND at the
+## codegen layer — native codegen boxed every STRING-LITERAL EVALUATION
+## through rt_string_new. Fix = interned rt_string_new_literal, landed across
+## seed cranelift/LLVM codegen + .spl cranelift adapter + Rust/C runtimes.
+
+(This lands alongside — and answers — the macOS discriminator update above:
+its "next steps #1: lexeme interning could cut the footprint by an order of
+magnitude" is exactly what this fix implements, one layer lower.)
+
+### Root cause (confirmed by code + profile, not conjecture)
+The prior updates localized retention to `parse_module_body` (~6-10 objects
+per source char) but stopped at the arena layer. The actual mechanism is one
+layer down, in codegen, and explains the per-char scaling directly:
+
+- **Every evaluation of a text literal allocates a fresh, permanently
+  registered heap string.** Seed cranelift: `compile_const_string`
+  (`src/compiler_rust/compiler/src/codegen/instr/collections.rs:408`) emits
+  `rt_string_new(rodata_ptr, len)` inline — re-executed each time the literal
+  expression evaluates. Same per-eval boxing at string-literal PATTERN tests
+  (`codegen/instr/pattern.rs:48`) and fstring literal parts, and in the seed
+  LLVM backend (`codegen/llvm/functions/consts.rs:61`, `functions.rs:1173`,
+  `functions.rs:1866`). The .spl cranelift adapter has the identical shape
+  (`src/compiler/70.backend/backend/cranelift_codegen_adapter.spl:1029`).
+  On this no-GC tier nothing ever unregisters, so each execution leaks one
+  registered object.
+- The parser is literal-comparison saturated (`tok == "fn"`,
+  `case "NAME"`, keyword tables): a gdb sample profile of the deployed
+  self-hosted binary parsing the multifile guard corpus put **8/12 samples in
+  `rt_string_eq`** — dozens of literal comparisons per token, each also
+  boxing its literal operand → tens of registered objects per token ≈ the
+  measured ~8-9 objects/char, scaling with source size exactly as observed
+  (including the macOS run B per-file deltas above).
+- Fresh baseline (deployed `bin/release/x86_64-unknown-linux-gnu/simple`,
+  Jul 24, multifile guard corpus, identical 1,548-char files):
+  **~19,515 registered objects per file (~12.6/char)**, and per-file parse
+  time **growing 1.16s → 6.7s** across the first 28 identical files (the
+  guard script times out at 120s before finishing 40 files).
+
+### Fix landed (this session)
+1. **`rt_string_new_literal(ptr, len)`** — interned literal boxing keyed by
+   the literal's stable rodata `(address, len)`; returns one shared boxed
+   string for every evaluation of the same literal site. Added to the Rust
+   runtime (`runtime/src/value/collections.rs`, exported via `value/mod.rs` +
+   `lib.rs`, JIT/ELF symbol map `elf_utils.rs`, spec table
+   `runtime_sffi.rs`, codegen-root list `common_backend.rs` — REQUIRED, else
+   cranelift AOT panics `no entry found for key`) and to the C runtime
+   (`src/runtime/runtime_native.c` + `runtime.h`, 65,536-bucket chained
+   hash, spinlock, same idiom as the short-string cache). Static literal
+   data ONLY — never reusable heap buffers.
+2. **All literal-boxing call sites swapped** to the interned variant: seed
+   cranelift (const/pattern/fstring), seed LLVM (const/pattern/fstring),
+   .spl cranelift adapter const-Str; `stage4_symbol_closure.spl` contract
+   lists extended. One-time global initializers (backend_core.rs) left as-is
+   (they run once). The .spl LLVM text backend emits raw GEPs for consts (no
+   per-eval boxing at the const site) — its `box_runtime_value` path in MIR
+   lowering still uses rt_string_new because its operand is not provably a
+   literal; follow-up noted below.
+3. **Decl env-mirror contained** (the 07-20 "Secondary finding"):
+   `ast_decl_text_set` mirrored six fields (NAME/PARAM_NAMES/PARAM_TYPES/
+   TYPE_PARAMS/BODY/IMPL_TRAIT) into real `setenv()` env vars on EVERY run
+   that didn't set `SIMPLE_NATIVE_ARENA_DECLS=1` — including plain
+   native-build/test/LSP — plus a `rt_env_get_i64` environ scan per
+   getter/setter call. Now: non-bootstrap runs default to arena-preferred
+   (`ast_decl_arena_default()`, decl_nodes.spl); bootstrap lanes keep the
+   legacy default because interpreter lanes rely on the env store (module
+   vars may not persist under tree-walk interp — see stmt_env_mirror note);
+   the flag is slot-cached and refreshed per file (module_state.spl reset);
+   all 89 mirror call sites are wrapped in `if not ast_decl_prefer_arena():`
+   so join-heavy arguments are not even computed when the mirror is off.
+
+### Validation (2026-07-24, binaries built FROM the fixed source — per the
+### methodology pitfall, both gates below use freshly built artifacts)
+- **Probe gate (fixed seed, cranelift, core-c-bootstrap):** a 100,000-iteration
+  loop doing 3 text-literal comparisons per iteration (300,000 literal
+  evaluations) adds **4** registered objects total (pre-fix: one per
+  evaluation ≈ 300,000). Control loop allocating 2,000,000 genuinely dynamic
+  strings still registers each one, with flat per-batch time at 2M live
+  objects (registry insert is O(1); allocator cost is not live-count-bound).
+- **Multifile guard corpus** (`check-stage4-selfhost-parse-memory-multifile.shs`,
+  40 files × 1,548 chars, `SIMPLE_COMPILER_PHASE_PROFILE=1`):
+
+  | metric | baseline (deployed Jul-24 binary) | stage2 built from fixed source |
+  |---|---|---|
+  | registered objects/file | ~19,515 (~12.6/char) | **3,492 (~2.26/char)** |
+  | per-file parse time | 1.16s growing to 6.7s; **timed out** at 28/40 files | **flat 360–544ms**, all 40 files |
+
+- Stage2 build itself: 1,388 files compiled, 0 failed, 195s compile + 109s
+  link (seed lane, threads 8). `--version` + `run` sanity pass (run needs the
+  `simple_seed` sibling — pre-existing
+  cli_symlink_argv0_seed_sibling_lookup_2026-07-24, unrelated).
+- Stage2's own `native-build` emits objects through the .spl cranelift
+  adapter (interned path) but cannot LINK on this host ("Hosted native
+  linking is unsupported…") — pre-existing self-hosted link gap, fails
+  identically with the legacy env-store mode forced
+  (`SIMPLE_NATIVE_ARENA_DECLS=0` A/B), so not introduced here. The guard
+  script's own RSS sample (`error=no_rss_sample`) is a casualty of that same
+  pre-existing link failure; the registry/time data above comes from the
+  fully-completed parse phase.
+- Pre-existing, noted in passing: `rt_text_cmp_any` is missing from the
+  JIT symbol map (`elf_utils.rs`) → `run` JIT falls back to interpreter with
+  "unresolved external symbol 'rt_text_cmp_any'". Not introduced by this
+  change (`rt_string_new_literal` IS in the map).
+
+### Remaining ~2.26 objects/char (Stage 2/3 of the research plan — open)
+Dominated by `source_chars: [text]` (1 text object per char, leaked at
+CoreLexer retirement because `rt_array_free` frees only the outer buffer),
+then per-token texts and per-node arena inner arrays. See
+doc/01_research/compiler/parser/ast_memory_management_survey_2026-07-24.md
+for the staged plan and
+doc/00_llm_process/layer_expert/backend/skill.md for the codegen rules this
+fix introduces. Status: **partially fixed — dominant mechanism removed,
+5.6x objects/char reduction, per-file time flat; full-corpus stage4 lane
+re-run still pending.**

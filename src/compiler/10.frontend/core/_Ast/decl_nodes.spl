@@ -117,14 +117,50 @@ fn ast_decl_field_types_key(idx: i64) -> text:
 fn ast_decl_imports_key(idx: i64) -> text:
     "SIMPLE_BOOTSTRAP_DECL_IMPORTS_" + int_to_str(idx)
 
-fn ast_decl_env_mirror_enabled() -> bool:
-    rt_env_get_i64("SIMPLE_BOOTSTRAP", 0) == 1 and rt_env_get_i64("SIMPLE_NATIVE_ARENA_DECLS", 0) != 1
+# Arena-preferred is the DEFAULT (2026-07-24). The env-var store
+# (setenv/getenv per decl field) is a legacy fallback, opt-in via
+# SIMPLE_NATIVE_ARENA_DECLS=0. It was previously opt-OUT: six text fields
+# (NAME/PARAM_NAMES/PARAM_TYPES/TYPE_PARAMS/BODY/IMPL_TRAIT) were mirrored
+# into real process env vars on every run that didn't set the flag —
+# including plain native-build/test/LSP — costing a linear environ scan per
+# getter/setter call plus a libc setenv allocation leak per write (see
+# bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20.md "Secondary
+# finding"). The flat decl arenas are written unconditionally by every
+# constructor, so arena-preferred reads lose nothing.
+# The flag is cached in a slot: rt_env_get_i64 is itself an environ scan and
+# these gates sit on the per-decl-field hot path. Refreshed per file via
+# ast_decl_mode_slots_refresh() (same pattern as stmt_mode_slots_refresh).
+var ast_decl_mode_slot: [i64] = []
+
+fn ast_decl_arena_default() -> i64:
+    # Bootstrap lanes keep the legacy default (env store on unless the lane
+    # explicitly sets SIMPLE_NATIVE_ARENA_DECLS=1, as stage4 does): under a
+    # tree-walk interpreter, module-level arrays may not persist between
+    # calls, and the env store is the reliable store there (see the
+    # stmt_env_mirror_enabled compatibility note). Non-bootstrap runs
+    # (test/LSP/plain native-build) always execute compiled code where the
+    # arenas persist — they default to arena-preferred.
+    if rt_env_get_i64("SIMPLE_BOOTSTRAP", 0) == 1:
+        return 0
+    1
+
+fn ast_decl_mode_slots_refresh():
+    if ast_decl_mode_slot == nil or ast_decl_mode_slot.len() == 0:
+        ast_decl_mode_slot = [1]
+    ast_decl_mode_slot[0] = rt_env_get_i64("SIMPLE_NATIVE_ARENA_DECLS", ast_decl_arena_default())
 
 fn ast_decl_prefer_arena() -> bool:
-    rt_env_get_i64("SIMPLE_NATIVE_ARENA_DECLS", 0) == 1
+    if ast_decl_mode_slot != nil and ast_decl_mode_slot.len() > 0:
+        return ast_decl_mode_slot[0] == 1
+    # Interpreter module variables may not persist between calls — fall back
+    # to a direct env read (same compatibility note as stmt_env_mirror_enabled).
+    rt_env_get_i64("SIMPLE_NATIVE_ARENA_DECLS", ast_decl_arena_default()) == 1
+
+fn ast_decl_env_mirror_enabled() -> bool:
+    rt_env_get_i64("SIMPLE_BOOTSTRAP", 0) == 1 and not ast_decl_prefer_arena()
 
 fn ast_decl_direct_set(key: text, value: text):
-    if rt_env_get_i64("SIMPLE_NATIVE_ARENA_DECLS", 0) != 1:
+    if not ast_decl_prefer_arena():
         rt_env_set(key, value)
 
 fn ast_decl_i64_set(idx: i64, field: text, value: i64):
@@ -135,7 +171,9 @@ fn ast_decl_i64_get(idx: i64, field: text) -> i64:
     ast_parse_i64(rt_env_get(ast_decl_key(idx, field)) ?? "")
 
 fn ast_decl_text_set(idx: i64, field: text, value: text):
-    if rt_env_get_i64("SIMPLE_NATIVE_ARENA_DECLS", 0) != 1 and (field == "NAME" or field == "PARAM_NAMES" or field == "PARAM_TYPES" or field == "TYPE_PARAMS" or field == "BODY" or field == "IMPL_TRAIT" or ast_decl_env_mirror_enabled()):
+    if ast_decl_prefer_arena():
+        return
+    if field == "NAME" or field == "PARAM_NAMES" or field == "PARAM_TYPES" or field == "TYPE_PARAMS" or field == "BODY" or field == "IMPL_TRAIT" or ast_decl_env_mirror_enabled():
         rt_env_set(ast_decl_key(idx, field), value)
 
 fn ast_decl_text_get(idx: i64, field: text) -> text:
@@ -321,10 +359,11 @@ fn decl_alloc(tag: i64, span_id: i64) -> i64:
         decl_tag = []
     val idx = ast_decl_count_get()
     decl_ensure_slot(idx, tag, span_id)
-    ast_decl_i64_set(idx, "TAG", tag)
-    ast_decl_direct_set(ast_decl_tag_key(idx), int_to_str(tag))
-    ast_decl_i64_set(idx, "SPAN", span_id)
-    ast_decl_text_set(idx, "VIS", "private")
+    if not ast_decl_prefer_arena():
+        ast_decl_i64_set(idx, "TAG", tag)
+        ast_decl_direct_set(ast_decl_tag_key(idx), int_to_str(tag))
+        ast_decl_i64_set(idx, "SPAN", span_id)
+        ast_decl_text_set(idx, "VIS", "private")
     ast_decl_count_set(idx + 1)
     idx
 
@@ -332,17 +371,18 @@ fn decl_alloc(tag: i64, span_id: i64) -> i64:
 
 fn decl_fn(name: text, param_names: [text], param_types: [i64], ret_type: i64, body: [i64], is_async: i64, type_params: [text], span_id: i64) -> i64:
     val idx = decl_alloc(1, span_id)
-    ast_decl_direct_set(ast_decl_tag_key(idx), "1")
-    ast_decl_text_set(idx, "NAME", name)
-    ast_decl_direct_set(ast_decl_name_key(idx), name)
-    ast_decl_text_set(idx, "PARAM_NAMES", ast_text_list_join(param_names))
-    ast_decl_text_set(idx, "PARAM_TYPES", ast_i64_list_join(param_types))
-    ast_decl_i64_set(idx, "RET", ret_type)
-    ast_decl_direct_set(ast_decl_ret_key(idx), int_to_str(ret_type))
-    ast_decl_text_set(idx, "BODY", ast_i64_list_join(body))
-    ast_decl_direct_set(ast_decl_body_key(idx), ast_i64_list_join(body))
-    ast_decl_i64_set(idx, "ASYNC", is_async)
-    ast_decl_text_set(idx, "TYPE_PARAMS", ast_text_list_join(type_params))
+    if not ast_decl_prefer_arena():
+        ast_decl_direct_set(ast_decl_tag_key(idx), "1")
+        ast_decl_text_set(idx, "NAME", name)
+        ast_decl_direct_set(ast_decl_name_key(idx), name)
+        ast_decl_text_set(idx, "PARAM_NAMES", ast_text_list_join(param_names))
+        ast_decl_text_set(idx, "PARAM_TYPES", ast_i64_list_join(param_types))
+        ast_decl_i64_set(idx, "RET", ret_type)
+        ast_decl_direct_set(ast_decl_ret_key(idx), int_to_str(ret_type))
+        ast_decl_text_set(idx, "BODY", ast_i64_list_join(body))
+        ast_decl_direct_set(ast_decl_body_key(idx), ast_i64_list_join(body))
+        ast_decl_i64_set(idx, "ASYNC", is_async)
+        ast_decl_text_set(idx, "TYPE_PARAMS", ast_text_list_join(type_params))
     decl_name[idx] = name
     decl_param_names[idx] = param_names
     decl_param_types[idx] = param_types
@@ -355,14 +395,15 @@ fn decl_fn(name: text, param_names: [text], param_types: [i64], ret_type: i64, b
 
 fn decl_extern_fn(name: text, param_names: [text], param_types: [i64], ret_type: i64, type_params: [text], span_id: i64) -> i64:
     val idx = decl_alloc(2, span_id)
-    ast_decl_direct_set(ast_decl_tag_key(idx), "2")
-    ast_decl_text_set(idx, "NAME", name)
-    ast_decl_direct_set(ast_decl_name_key(idx), name)
-    ast_decl_text_set(idx, "PARAM_NAMES", ast_text_list_join(param_names))
-    ast_decl_text_set(idx, "PARAM_TYPES", ast_i64_list_join(param_types))
-    ast_decl_i64_set(idx, "RET", ret_type)
-    ast_decl_direct_set(ast_decl_ret_key(idx), int_to_str(ret_type))
-    ast_decl_text_set(idx, "TYPE_PARAMS", ast_text_list_join(type_params))
+    if not ast_decl_prefer_arena():
+        ast_decl_direct_set(ast_decl_tag_key(idx), "2")
+        ast_decl_text_set(idx, "NAME", name)
+        ast_decl_direct_set(ast_decl_name_key(idx), name)
+        ast_decl_text_set(idx, "PARAM_NAMES", ast_text_list_join(param_names))
+        ast_decl_text_set(idx, "PARAM_TYPES", ast_i64_list_join(param_types))
+        ast_decl_i64_set(idx, "RET", ret_type)
+        ast_decl_direct_set(ast_decl_ret_key(idx), int_to_str(ret_type))
+        ast_decl_text_set(idx, "TYPE_PARAMS", ast_text_list_join(type_params))
     decl_name[idx] = name
     decl_param_names[idx] = param_names
     decl_param_types[idx] = param_types
@@ -372,15 +413,16 @@ fn decl_extern_fn(name: text, param_names: [text], param_types: [i64], ret_type:
 
 fn decl_struct_def(name: text, field_names: [text], field_types: [i64], field_defaults: [i64], field_bits: [i64], span_id: i64) -> i64:
     val idx = decl_alloc(DECL_STRUCT, span_id)
-    ast_decl_direct_set(ast_decl_tag_key(idx), "3")
-    ast_decl_text_set(idx, "NAME", name)
-    ast_decl_direct_set(ast_decl_name_key(idx), name)
-    ast_decl_text_set(idx, "FIELD_NAMES", ast_text_list_join(field_names))
-    ast_decl_direct_set(ast_decl_field_names_key(idx), ast_text_list_join(field_names))
-    ast_decl_text_set(idx, "FIELD_TYPES", ast_i64_list_join(field_types))
-    ast_decl_direct_set(ast_decl_field_types_key(idx), ast_i64_list_join(field_types))
-    ast_decl_text_set(idx, "FIELD_DEFAULTS", ast_i64_list_join(field_defaults))
-    ast_decl_text_set(idx, "FIELD_BITS", ast_i64_list_join(field_bits))
+    if not ast_decl_prefer_arena():
+        ast_decl_direct_set(ast_decl_tag_key(idx), "3")
+        ast_decl_text_set(idx, "NAME", name)
+        ast_decl_direct_set(ast_decl_name_key(idx), name)
+        ast_decl_text_set(idx, "FIELD_NAMES", ast_text_list_join(field_names))
+        ast_decl_direct_set(ast_decl_field_names_key(idx), ast_text_list_join(field_names))
+        ast_decl_text_set(idx, "FIELD_TYPES", ast_i64_list_join(field_types))
+        ast_decl_direct_set(ast_decl_field_types_key(idx), ast_i64_list_join(field_types))
+        ast_decl_text_set(idx, "FIELD_DEFAULTS", ast_i64_list_join(field_defaults))
+        ast_decl_text_set(idx, "FIELD_BITS", ast_i64_list_join(field_bits))
     decl_name[idx] = name
     decl_field_names[idx] = field_names
     decl_field_types[idx] = field_types
@@ -432,12 +474,13 @@ fn decl_get_clocked_args(idx: i64) -> [text]:
 
 fn decl_val_binding(name: text, type_tag: i64, init_expr: i64, span_id: i64) -> i64:
     val idx = decl_alloc(DECL_VAL, span_id)
-    ast_decl_direct_set(ast_decl_tag_key(idx), "4")
-    ast_decl_text_set(idx, "NAME", name)
-    ast_decl_direct_set(ast_decl_name_key(idx), name)
-    ast_decl_i64_set(idx, "RET", type_tag)
-    ast_decl_text_set(idx, "BODY", int_to_str(init_expr))
-    ast_decl_direct_set(ast_decl_body_key(idx), int_to_str(init_expr))
+    if not ast_decl_prefer_arena():
+        ast_decl_direct_set(ast_decl_tag_key(idx), "4")
+        ast_decl_text_set(idx, "NAME", name)
+        ast_decl_direct_set(ast_decl_name_key(idx), name)
+        ast_decl_i64_set(idx, "RET", type_tag)
+        ast_decl_text_set(idx, "BODY", int_to_str(init_expr))
+        ast_decl_direct_set(ast_decl_body_key(idx), int_to_str(init_expr))
     decl_name[idx] = name
     decl_ret_type[idx] = type_tag
     decl_body_stmts[idx] = [init_expr]
@@ -446,13 +489,14 @@ fn decl_val_binding(name: text, type_tag: i64, init_expr: i64, span_id: i64) -> 
 
 fn decl_lazy_val_binding(name: text, type_tag: i64, init_expr: i64, span_id: i64) -> i64:
     val idx = decl_alloc(DECL_LAZY_VAL, span_id)
-    ast_decl_direct_set(ast_decl_tag_key(idx), "12")
-    ast_decl_text_set(idx, "NAME", name)
-    ast_decl_direct_set(ast_decl_name_key(idx), name)
-    ast_decl_i64_set(idx, "RET", type_tag)
-    ast_decl_text_set(idx, "BODY", int_to_str(init_expr))
-    ast_decl_direct_set(ast_decl_body_key(idx), int_to_str(init_expr))
-    ast_decl_i64_set(idx, "LAZY", 1)
+    if not ast_decl_prefer_arena():
+        ast_decl_direct_set(ast_decl_tag_key(idx), "12")
+        ast_decl_text_set(idx, "NAME", name)
+        ast_decl_direct_set(ast_decl_name_key(idx), name)
+        ast_decl_i64_set(idx, "RET", type_tag)
+        ast_decl_text_set(idx, "BODY", int_to_str(init_expr))
+        ast_decl_direct_set(ast_decl_body_key(idx), int_to_str(init_expr))
+        ast_decl_i64_set(idx, "LAZY", 1)
     decl_name[idx] = name
     decl_ret_type[idx] = type_tag
     decl_body_stmts[idx] = [init_expr]
@@ -462,12 +506,13 @@ fn decl_lazy_val_binding(name: text, type_tag: i64, init_expr: i64, span_id: i64
 
 fn decl_var_binding(name: text, type_tag: i64, init_expr: i64, span_id: i64) -> i64:
     val idx = decl_alloc(DECL_VAR, span_id)
-    ast_decl_direct_set(ast_decl_tag_key(idx), "5")
-    ast_decl_text_set(idx, "NAME", name)
-    ast_decl_direct_set(ast_decl_name_key(idx), name)
-    ast_decl_i64_set(idx, "RET", type_tag)
-    ast_decl_text_set(idx, "BODY", int_to_str(init_expr))
-    ast_decl_direct_set(ast_decl_body_key(idx), int_to_str(init_expr))
+    if not ast_decl_prefer_arena():
+        ast_decl_direct_set(ast_decl_tag_key(idx), "5")
+        ast_decl_text_set(idx, "NAME", name)
+        ast_decl_direct_set(ast_decl_name_key(idx), name)
+        ast_decl_i64_set(idx, "RET", type_tag)
+        ast_decl_text_set(idx, "BODY", int_to_str(init_expr))
+        ast_decl_direct_set(ast_decl_body_key(idx), int_to_str(init_expr))
     decl_name[idx] = name
     decl_ret_type[idx] = type_tag
     decl_body_stmts[idx] = [init_expr]
@@ -476,41 +521,45 @@ fn decl_var_binding(name: text, type_tag: i64, init_expr: i64, span_id: i64) -> 
 
 fn decl_use_import(module_path: text, imported_names: [text], span_id: i64) -> i64:
     val idx = decl_alloc(DECL_USE, span_id)
-    ast_decl_direct_set(ast_decl_tag_key(idx), "6")
-    ast_decl_text_set(idx, "NAME", module_path)
-    ast_decl_direct_set(ast_decl_name_key(idx), module_path)
-    ast_decl_text_set(idx, "IMPORTS", ast_text_list_join(imported_names))
-    ast_decl_direct_set(ast_decl_imports_key(idx), ast_text_list_join(imported_names))
+    if not ast_decl_prefer_arena():
+        ast_decl_direct_set(ast_decl_tag_key(idx), "6")
+        ast_decl_text_set(idx, "NAME", module_path)
+        ast_decl_direct_set(ast_decl_name_key(idx), module_path)
+        ast_decl_text_set(idx, "IMPORTS", ast_text_list_join(imported_names))
+        ast_decl_direct_set(ast_decl_imports_key(idx), ast_text_list_join(imported_names))
     decl_name[idx] = module_path
     decl_imports[idx] = imported_names
     idx
 
 fn decl_export_names(names: [text], span_id: i64) -> i64:
     val idx = decl_alloc(7, span_id)
-    ast_decl_direct_set(ast_decl_tag_key(idx), "7")
-    ast_decl_text_set(idx, "IMPORTS", ast_text_list_join(names))
-    ast_decl_direct_set(ast_decl_imports_key(idx), ast_text_list_join(names))
+    if not ast_decl_prefer_arena():
+        ast_decl_direct_set(ast_decl_tag_key(idx), "7")
+        ast_decl_text_set(idx, "IMPORTS", ast_text_list_join(names))
+        ast_decl_direct_set(ast_decl_imports_key(idx), ast_text_list_join(names))
     decl_imports[idx] = names
     idx
 
 fn decl_enum_def(name: text, variant_names: [text], span_id: i64) -> i64:
     val idx = decl_alloc(DECL_ENUM, span_id)
-    ast_decl_direct_set(ast_decl_tag_key(idx), "8")
-    ast_decl_text_set(idx, "NAME", name)
-    ast_decl_direct_set(ast_decl_name_key(idx), name)
-    ast_decl_text_set(idx, "FIELD_NAMES", ast_text_list_join(variant_names))
-    ast_decl_direct_set(ast_decl_field_names_key(idx), ast_text_list_join(variant_names))
+    if not ast_decl_prefer_arena():
+        ast_decl_direct_set(ast_decl_tag_key(idx), "8")
+        ast_decl_text_set(idx, "NAME", name)
+        ast_decl_direct_set(ast_decl_name_key(idx), name)
+        ast_decl_text_set(idx, "FIELD_NAMES", ast_text_list_join(variant_names))
+        ast_decl_direct_set(ast_decl_field_names_key(idx), ast_text_list_join(variant_names))
     decl_name[idx] = name
     decl_field_names[idx] = variant_names
     idx
 
 fn decl_impl_block(target_name: text, method_decl_ids: [i64], span_id: i64) -> i64:
     val idx = decl_alloc(DECL_IMPL, span_id)
-    ast_decl_direct_set(ast_decl_tag_key(idx), "9")
-    ast_decl_text_set(idx, "NAME", target_name)
-    ast_decl_direct_set(ast_decl_name_key(idx), target_name)
-    ast_decl_text_set(idx, "BODY", ast_i64_list_join(method_decl_ids))
-    ast_decl_direct_set(ast_decl_body_key(idx), ast_i64_list_join(method_decl_ids))
+    if not ast_decl_prefer_arena():
+        ast_decl_direct_set(ast_decl_tag_key(idx), "9")
+        ast_decl_text_set(idx, "NAME", target_name)
+        ast_decl_direct_set(ast_decl_name_key(idx), target_name)
+        ast_decl_text_set(idx, "BODY", ast_i64_list_join(method_decl_ids))
+        ast_decl_direct_set(ast_decl_body_key(idx), ast_i64_list_join(method_decl_ids))
     decl_name[idx] = target_name
     decl_body_stmts[idx] = method_decl_ids
     decl_body_stmts_flat[idx] = ast_i64_list_join(method_decl_ids)
@@ -522,7 +571,8 @@ fn decl_impl_block(target_name: text, method_decl_ids: [i64], span_id: i64) -> i
 fn decl_set_impl_trait(idx: i64, trait_name: text):
     if idx >= 0 and idx < decl_impl_trait.len():
         decl_impl_trait[idx] = trait_name
-    ast_decl_text_set(idx, "IMPL_TRAIT", trait_name)
+    if not ast_decl_prefer_arena():
+        ast_decl_text_set(idx, "IMPL_TRAIT", trait_name)
 
 fn decl_get_impl_trait(idx: i64) -> text:
     if ast_decl_prefer_arena():
@@ -542,9 +592,10 @@ fn decl_get_impl_trait(idx: i64) -> text:
 fn decl_set_trait(idx: i64, method_decl_ids: [i64]):
     if idx >= 0 and idx < decl_is_trait.len():
         decl_is_trait[idx] = 1
-    ast_decl_i64_set(idx, "IS_TRAIT", 1)
-    ast_decl_text_set(idx, "BODY", ast_i64_list_join(method_decl_ids))
-    ast_decl_direct_set(ast_decl_body_key(idx), ast_i64_list_join(method_decl_ids))
+    if not ast_decl_prefer_arena():
+        ast_decl_i64_set(idx, "IS_TRAIT", 1)
+        ast_decl_text_set(idx, "BODY", ast_i64_list_join(method_decl_ids))
+        ast_decl_direct_set(ast_decl_body_key(idx), ast_i64_list_join(method_decl_ids))
     if idx >= 0 and idx < decl_body_stmts.len():
         decl_body_stmts[idx] = method_decl_ids
     if idx >= 0 and idx < decl_body_stmts_flat.len():
@@ -571,7 +622,8 @@ fn decl_cli_def(name: text, field_names: [text], field_types: [i64], field_defau
     # imports[0] = top-level docstring text (if any),
     # imports[1..] = directives like "default:.repl", "file:.spl", "prefetch:true"
     val idx = decl_alloc(DECL_CLI, span_id)
-    ast_decl_direct_set(ast_decl_tag_key(idx), "13")
+    if not ast_decl_prefer_arena():
+        ast_decl_direct_set(ast_decl_tag_key(idx), "13")
     decl_name[idx] = name
     decl_field_names[idx] = field_names
     decl_field_types[idx] = field_types
@@ -585,7 +637,8 @@ fn decl_ce_block(builder_name: text, body_stmts: [i64], span_id: i64) -> i64:
     # ce NAME: block — builder_name = computation expression builder name,
     # body_stmts = list of statement indices in ce body
     val idx = decl_alloc(DECL_CE, span_id)
-    ast_decl_direct_set(ast_decl_tag_key(idx), "11")
+    if not ast_decl_prefer_arena():
+        ast_decl_direct_set(ast_decl_tag_key(idx), "11")
     decl_name[idx] = builder_name
     decl_body_stmts[idx] = body_stmts
     decl_body_stmts_flat[idx] = ast_i64_list_join(body_stmts)
@@ -595,7 +648,8 @@ fn decl_aop_advice(pointcut: text, handler: text, form: text, priority_text: tex
     # on pc{pointcut} use handler form [priority N]
     # name = handler, imports = [pointcut, form, priority_text]
     val idx = decl_alloc(DECL_AOP_ADVICE, span_id)
-    ast_decl_direct_set(ast_decl_tag_key(idx), "14")
+    if not ast_decl_prefer_arena():
+        ast_decl_direct_set(ast_decl_tag_key(idx), "14")
     decl_name[idx] = handler
     decl_imports[idx] = [pointcut, form, priority_text]
     idx
@@ -604,7 +658,8 @@ fn decl_di_binding(pointcut: text, implementation: text, span_id: i64) -> i64:
     # @inject pc{pointcut} implementation
     # name = implementation, imports[0] = pointcut
     val idx = decl_alloc(DECL_DI_BINDING, span_id)
-    ast_decl_direct_set(ast_decl_tag_key(idx), "15")
+    if not ast_decl_prefer_arena():
+        ast_decl_direct_set(ast_decl_tag_key(idx), "15")
     decl_name[idx] = implementation
     decl_imports[idx] = [pointcut]
     idx
@@ -613,7 +668,8 @@ fn decl_arch_rule(kind: text, pointcut: text, message: text, span_id: i64) -> i6
     # forbid/allow pc{pointcut} "message"
     # name = kind ("forbid"|"allow"), imports[0] = pointcut, imports[1] = message
     val idx = decl_alloc(DECL_ARCH_RULE, span_id)
-    ast_decl_direct_set(ast_decl_tag_key(idx), "16")
+    if not ast_decl_prefer_arena():
+        ast_decl_direct_set(ast_decl_tag_key(idx), "16")
     decl_name[idx] = kind
     decl_imports[idx] = [pointcut, message]
     idx
@@ -781,7 +837,8 @@ fn decl_get_field_defaults(idx: i64) -> [i64]:
 # default). Stored via the same decl text-field store the flat bridge reads
 # through flat_decl_field_text("PARAM_DEFAULTS").
 fn decl_set_param_defaults(idx: i64, defaults: [i64]):
-    ast_decl_text_set(idx, "PARAM_DEFAULTS", ast_i64_list_join(defaults))
+    if not ast_decl_prefer_arena():
+        ast_decl_text_set(idx, "PARAM_DEFAULTS", ast_i64_list_join(defaults))
 
 fn decl_get_param_defaults(idx: i64) -> [i64]:
     val env_value = ast_decl_text_get(idx, "PARAM_DEFAULTS")
@@ -872,7 +929,8 @@ fn decl_get_visibility_text(idx: i64) -> text:
     stored
 
 fn decl_set_visibility_text(idx: i64, visibility: text):
-    ast_decl_text_set(idx, "VIS", visibility)
+    if not ast_decl_prefer_arena():
+        ast_decl_text_set(idx, "VIS", visibility)
     decl_visibility[idx] = visibility
 
 fn decl_get_is_async(idx: i64) -> i64:
@@ -906,7 +964,8 @@ fn decl_get_type_params(idx: i64) -> [text]:
     decl_type_params[idx]
 
 fn decl_set_type_params(idx: i64, params: [text]):
-    ast_decl_text_set(idx, "TYPE_PARAMS", ast_text_list_join(params))
+    if not ast_decl_prefer_arena():
+        ast_decl_text_set(idx, "TYPE_PARAMS", ast_text_list_join(params))
     decl_type_params[idx] = params
 
 fn decl_get_type_param_constraints(idx: i64) -> [[text]]:
@@ -924,7 +983,8 @@ fn decl_set_type_param_constraint_mode(idx: i64, modes: [text]):
     decl_type_param_constraint_mode[idx] = modes
 
 fn decl_set_comptime(idx: i64):
-    ast_decl_i64_set(idx, "COMPTIME", 1)
+    if not ast_decl_prefer_arena():
+        ast_decl_i64_set(idx, "COMPTIME", 1)
     decl_is_comptime[idx] = 1
 
 fn decl_get_is_comptime(idx: i64) -> bool:
@@ -937,7 +997,8 @@ fn decl_get_is_comptime(idx: i64) -> bool:
     decl_is_comptime[idx] == 1
 
 fn decl_set_lazy(idx: i64):
-    ast_decl_i64_set(idx, "LAZY", 1)
+    if not ast_decl_prefer_arena():
+        ast_decl_i64_set(idx, "LAZY", 1)
     decl_is_lazy[idx] = 1
 
 fn decl_get_is_lazy(idx: i64) -> i64:
@@ -951,37 +1012,43 @@ fn decl_get_is_lazy(idx: i64) -> i64:
     decl_is_lazy[idx]
 
 fn decl_set_gpu_target_text(idx: i64, target: text):
-    ast_decl_text_set(idx, "GPU_TARGET", target)
+    if not ast_decl_prefer_arena():
+        ast_decl_text_set(idx, "GPU_TARGET", target)
 
 fn decl_get_gpu_target_text(idx: i64) -> text:
     ast_decl_text_get(idx, "GPU_TARGET")
 
 fn decl_set_gpu_target_arg_name_text(idx: i64, arg_name: text):
-    ast_decl_text_set(idx, "GPU_TARGET_ARG_NAME", arg_name)
+    if not ast_decl_prefer_arena():
+        ast_decl_text_set(idx, "GPU_TARGET_ARG_NAME", arg_name)
 
 fn decl_get_gpu_target_arg_name_text(idx: i64) -> text:
     ast_decl_text_get(idx, "GPU_TARGET_ARG_NAME")
 
 fn decl_set_gpu_backends_text(idx: i64, backends: text):
-    ast_decl_text_set(idx, "GPU_BACKENDS", backends)
+    if not ast_decl_prefer_arena():
+        ast_decl_text_set(idx, "GPU_BACKENDS", backends)
 
 fn decl_get_gpu_backends_text(idx: i64) -> text:
     ast_decl_text_get(idx, "GPU_BACKENDS")
 
 fn decl_set_unroll_factor(idx: i64, n: i64):
-    ast_decl_i64_set(idx, "UNROLL_FACTOR", n)
+    if not ast_decl_prefer_arena():
+        ast_decl_i64_set(idx, "UNROLL_FACTOR", n)
 
 fn decl_get_unroll_factor(idx: i64) -> i64:
     ast_decl_i64_get(idx, "UNROLL_FACTOR")
 
 fn decl_set_pipeline_ii(idx: i64, n: i64):
-    ast_decl_i64_set(idx, "PIPELINE_II", n)
+    if not ast_decl_prefer_arena():
+        ast_decl_i64_set(idx, "PIPELINE_II", n)
 
 fn decl_get_pipeline_ii(idx: i64) -> i64:
     ast_decl_i64_get(idx, "PIPELINE_II")
 
 fn decl_set_memory_banks(idx: i64, n: i64):
-    ast_decl_i64_set(idx, "MEMORY_BANKS", n)
+    if not ast_decl_prefer_arena():
+        ast_decl_i64_set(idx, "MEMORY_BANKS", n)
 
 fn decl_get_memory_banks(idx: i64) -> i64:
     ast_decl_i64_get(idx, "MEMORY_BANKS")

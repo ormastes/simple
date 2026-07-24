@@ -1171,10 +1171,13 @@ impl LlvmBackend {
                                 .build_ptr_to_int(str_ptr, i64_type, "str_ptr_int")
                                 .map_err(|e| format!("pattern ptrtoint: {e}"))?;
                             let str_len = i64_type.const_int(bytes.len() as u64, false);
-                            // rt_string_new(ptr, len) -> RuntimeValue
-                            let rt_string_new = module.get_function("rt_string_new").unwrap_or_else(|| {
+                            // rt_string_new_literal(ptr, len) -> RuntimeValue.
+                            // Interned: this pattern test re-executes per match
+                            // evaluation; per-eval rt_string_new leaked one
+                            // registered string per execution on the no-GC tier.
+                            let rt_string_new = module.get_function("rt_string_new_literal").unwrap_or_else(|| {
                                 let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
-                                module.add_function("rt_string_new", fn_type, None)
+                                module.add_function("rt_string_new_literal", fn_type, None)
                             });
                             let lit_str = builder
                                 .build_call(rt_string_new, &[str_ptr_int.into(), str_len.into()], "lit_str")
@@ -1905,9 +1908,16 @@ impl LlvmBackend {
                                 .build_ptr_to_int(str_ptr, i64_type, "fstr_ptr_int")
                                 .map_err(|e| crate::error::factory::llvm_build_failed("ptrtoint", &e))?;
                             let str_len = i64_type.const_int(s.len() as u64, false);
+                            // Interned: static fstring literal part re-executes
+                            // per format evaluation (no-GC tier, see
+                            // rt_string_new_literal).
+                            let lit_new = module.get_function("rt_string_new_literal").unwrap_or_else(|| {
+                                let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
+                                module.add_function("rt_string_new_literal", fn_type, None)
+                            });
                             let call = builder
-                                .build_call(string_new, &[str_ptr_int.into(), str_len.into()], "lit_str")
-                                .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_new", &e))?;
+                                .build_call(lit_new, &[str_ptr_int.into(), str_len.into()], "lit_str")
+                                .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_new_literal", &e))?;
                             call.try_as_basic_value()
                                 .left()
                                 .unwrap_or_else(|| i64_type.const_int(0, false).into())

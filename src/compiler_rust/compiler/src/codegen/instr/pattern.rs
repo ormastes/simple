@@ -45,8 +45,10 @@ pub(crate) fn compile_pattern_test<M: Module>(
                 // Create a runtime string from the literal and compare
                 match super::helpers::create_string_constant(ctx, builder, s) {
                     Ok((str_ptr, str_len)) => {
-                        // Allocate runtime string: rt_string_new(ptr, len) -> i64
-                        let lit_str = call_runtime_2(ctx, builder, "rt_string_new", str_ptr, str_len);
+                        // Interned literal box: this comparison re-executes per
+                        // pattern test; per-eval rt_string_new leaked one
+                        // registered string per execution on the no-GC tier.
+                        let lit_str = call_runtime_2(ctx, builder, "rt_string_new_literal", str_ptr, str_len);
                         // Compare: rt_string_eq(subject, lit) -> i64 (0 or 1)
                         let result = call_runtime_2(ctx, builder, "rt_string_eq", subject_val, lit_str);
                         builder.ins().ireduce(types::I8, result)

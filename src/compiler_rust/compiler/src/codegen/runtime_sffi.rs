@@ -357,6 +357,11 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // String operations
     // =========================================================================
     RuntimeFuncSpec::new("rt_string_new", &[I64, I64], &[I64]),
+    // Interned literal boxing: same ABI as rt_string_new, but caches by the
+    // literal's stable rodata (ptr, len) so repeated evaluations of the same
+    // literal site share one heap string instead of leaking one per execution
+    // (self-hosted parse retained ~9 objects/char via per-eval literal boxing).
+    RuntimeFuncSpec::new("rt_string_new_literal", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_concat", &[I64, I64], &[I64]),
     // ANY+ANY dynamic add: two RuntimeValue args, one RuntimeValue return (all
     // i64-sized). Emitted by MIR lowering for ANY-typed operands. Without this

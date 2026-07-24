@@ -181,6 +181,29 @@ Touched: `cranelift_codegen_adapter.spl`, `cranelift_runtime_imports.spl`,
 `mir_data.spl`, `switch_operators_calls.spl`, `driver_aot_output.spl`,
 `driver_build/incremental.spl`.
 
+## String-literal boxing is INTERNED (2026-07-24)
+
+Every text-literal evaluation used to emit `rt_string_new(rodata_ptr, len)` —
+one permanently-registered heap string per execution on the no-GC tier
+(~9 live objects per source char during self-hosted parse; 64GB stage4 wall).
+Literal sites now call **`rt_string_new_literal`** (interns by the literal's
+stable rodata `(ptr, len)`): seed cranelift `compile_const_string` /
+pattern-eq / fstring parts, seed LLVM equivalents, and the .spl adapter
+`cranelift_codegen_adapter.spl` const-Str. Rules:
+- New literal-boxing sites MUST use `rt_string_new_literal`, and MUST only
+  pass static rodata pointers — never reusable heap buffers.
+- New runtime symbols emitted by codegen itself (not referenced by user MIR)
+  must be added to `runtime_symbol_is_codegen_root` (common_backend.rs) or
+  cranelift AOT panics "no entry found for key"; also `elf_utils.rs` (JIT
+  map), `runtime_sffi.rs` (spec), lib.rs/value-mod exports, C runtime
+  `runtime_native.c` + `runtime.h`, and `stage4_symbol_closure.spl` lists.
+  (`rt_text_cmp_any` is currently MISSING from the JIT map — pre-existing,
+  makes `run` fall back to interpreter.)
+Validated: 300k literal evals → 4 registered objects (was ~300k); multifile
+parse 12.6 → 2.26 objects/char, per-file time flat (was quadratic).
+Details: [bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20](../../../08_tracking/bug/bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20.md),
+research: [ast_memory_management_survey_2026-07-24](../../../01_research/compiler/parser/ast_memory_management_survey_2026-07-24.md).
+
 ## Update Rule
 
 After backend regressions, FFI fixes, or linker changes, refresh this skill

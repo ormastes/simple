@@ -1471,6 +1471,60 @@ int64_t rt_string_new(const uint8_t* bytes, uint64_t len) {
         : rt_core_nil();
 }
 
+/* Interned boxing for compile-time string LITERALS only.
+ *
+ * Codegen emits one boxing call per literal *evaluation* and this runtime
+ * never frees strings, so a hot literal comparison (`tok == "fn"`) leaked one
+ * registered heap string per execution (~9 live objects per source char
+ * during self-hosted parse -- see
+ * doc/08_tracking/bug/bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20.md).
+ * Literal bytes live in rodata: (address, len) is immutable and stable for
+ * the process lifetime, so every evaluation of the same literal site can
+ * share one boxed string. Callers MUST only pass static literal data. */
+#define RT_LITERAL_INTERN_BUCKETS 65536u
+
+typedef struct RtLiteralInternNode {
+    const uint8_t* bytes;
+    uint64_t len;
+    int64_t value;
+    struct RtLiteralInternNode* next;
+} RtLiteralInternNode;
+
+static RtLiteralInternNode* rt_literal_intern_table[RT_LITERAL_INTERN_BUCKETS];
+static atomic_flag rt_literal_intern_lock = ATOMIC_FLAG_INIT;
+
+int64_t rt_string_new_literal(const uint8_t* bytes, uint64_t len) {
+    if (len <= 1) {
+        /* rt_string_new already returns process-wide cached values here. */
+        return rt_string_new(bytes, len);
+    }
+    uint64_t h = ((uint64_t)(uintptr_t)bytes) * 0x9E3779B97F4A7C15ull ^ len;
+    uint32_t bucket = (uint32_t)(h >> 32) & (RT_LITERAL_INTERN_BUCKETS - 1u);
+
+    while (atomic_flag_test_and_set_explicit(&rt_literal_intern_lock, memory_order_acquire)) { }
+    for (RtLiteralInternNode* node = rt_literal_intern_table[bucket]; node; node = node->next) {
+        if (node->bytes == bytes && node->len == len) {
+            int64_t cached = node->value;
+            atomic_flag_clear_explicit(&rt_literal_intern_lock, memory_order_release);
+            return cached;
+        }
+    }
+    atomic_flag_clear_explicit(&rt_literal_intern_lock, memory_order_release);
+
+    int64_t value = rt_string_new(bytes, len);
+    RtLiteralInternNode* node = (RtLiteralInternNode*)malloc(sizeof(RtLiteralInternNode));
+    if (!node) return value;
+    node->bytes = bytes;
+    node->len = len;
+    node->value = value;
+
+    while (atomic_flag_test_and_set_explicit(&rt_literal_intern_lock, memory_order_acquire)) { }
+    node->next = rt_literal_intern_table[bucket];
+    rt_literal_intern_table[bucket] = node;
+    atomic_flag_clear_explicit(&rt_literal_intern_lock, memory_order_release);
+    return value;
+}
+
 int64_t rt_string_len(int64_t string) {
     RtCoreString* s = rt_core_as_string(string);
     return s ? (int64_t)s->len : -1;

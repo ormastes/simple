@@ -617,6 +617,7 @@ pub use value::{
     rt_string_eq,
     rt_string_len,
     rt_string_new,
+    rt_string_new_literal,
     // Tuple operations
     rt_tuple_get,
     rt_tuple_len,

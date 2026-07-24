@@ -411,7 +411,13 @@ pub(crate) fn compile_const_string<M: Module>(
     dest: VReg,
     value: &str,
 ) -> InstrResult<()> {
-    let string_new_id = ctx.runtime_funcs["rt_string_new"];
+    // Literal boxing is interned: this instruction re-executes on every
+    // evaluation of the literal expression, and the no-GC tier never frees,
+    // so a per-eval rt_string_new leaked one registered heap string per
+    // execution (~9 live objects per source char during self-hosted parse —
+    // bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20). The rodata
+    // (ptr, len) is stable, so rt_string_new_literal returns one shared box.
+    let string_new_id = ctx.runtime_funcs["rt_string_new_literal"];
     let string_new_ref = ctx.module.declare_func_in_func(string_new_id, builder.func);
 
     let (ptr, len_val) = if value.is_empty() {
@@ -448,8 +454,12 @@ pub(crate) fn compile_fstring_format<M: Module>(
                 if s.is_empty() {
                     continue;
                 }
+                // Interned: static literal part, same rationale as
+                // compile_const_string above.
+                let lit_new_id = ctx.runtime_funcs["rt_string_new_literal"];
+                let lit_new_ref = ctx.module.declare_func_in_func(lit_new_id, builder.func);
                 let (ptr, len_val) = create_string_constant(ctx, builder, s)?;
-                let call = adapted_call(builder, string_new_ref, &[ptr, len_val]);
+                let call = adapted_call(builder, lit_new_ref, &[ptr, len_val]);
                 builder.inst_results(call)[0]
             }
             FStringPart::Expr(vreg) => {

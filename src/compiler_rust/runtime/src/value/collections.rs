@@ -1535,6 +1535,41 @@ pub extern "C" fn rt_tuple_free(tuple: RuntimeValue) {
 // String SFFI functions
 // ============================================================================
 
+/// Interned boxing for compile-time string LITERALS only.
+///
+/// Codegen emits one `rt_string_new` per literal *evaluation*, and this no-GC
+/// tier never frees, so a hot literal comparison (`tok == "fn"`) leaks one
+/// registered heap string per execution — measured ~9 live objects per source
+/// character during self-hosted parse
+/// (doc/08_tracking/bug/bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20.md).
+/// Literal bytes live in the binary's rodata: the (address, len) pair is
+/// immutable and stable for the process lifetime, so every evaluation of the
+/// same literal site can share a single boxed string. Callers MUST only pass
+/// static literal data (rodata) — never a reusable heap buffer, whose address
+/// could be recycled with different content.
+static STRING_LITERAL_INTERN: OnceLock<std::sync::Mutex<std::collections::HashMap<(usize, u64), u64>>> =
+    OnceLock::new();
+
+#[no_mangle]
+pub extern "C" fn rt_string_new_literal(bytes: *const u8, len: u64) -> RuntimeValue {
+    if len <= 1 {
+        // rt_string_new already returns process-wide cached values for these.
+        return rt_string_new(bytes, len);
+    }
+    let key = (bytes as usize, len);
+    let map = STRING_LITERAL_INTERN.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Ok(guard) = map.lock() {
+        if let Some(&raw) = guard.get(&key) {
+            return RuntimeValue::from_raw(raw);
+        }
+    }
+    let value = rt_string_new(bytes, len);
+    if let Ok(mut guard) = map.lock() {
+        guard.insert(key, value.to_raw());
+    }
+    value
+}
+
 /// Create a string from UTF-8 bytes
 ///
 /// # Safety

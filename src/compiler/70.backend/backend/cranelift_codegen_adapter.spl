@@ -1018,15 +1018,19 @@ fn cl_translate_const_value(ctx: i64, cl_module: i64, value: MirConstValue, type
                 case _: pass
             # String constants: place the literal's raw UTF-8 bytes in the
             # module's rodata (a Cranelift `data` object), materialize its
-            # address, then box (ptr, len) into a real heap-allocated `text`
-            # RuntimeValue via the runtime's own rt_string_new -- the same
-            # allocation/registration/hash path every other
-            # runtime-constructed string already goes through. See
-            # doc/08_tracking/bug/cranelift_direct_string_constant_null_pointer_2026-07-12.md.
+            # address, then box (ptr, len) into a tagged `text` RuntimeValue.
+            # Uses the INTERNED literal variant: this instruction re-executes
+            # on every evaluation of the literal expression and the no-GC
+            # tier never frees, so per-eval rt_string_new leaked one
+            # registered heap string per execution (~9 live objects per
+            # source char during self-hosted parse). The rodata (ptr, len)
+            # is stable, so rt_string_new_literal returns one shared box. See
+            # doc/08_tracking/bug/cranelift_direct_string_constant_null_pointer_2026-07-12.md
+            # and bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20.md.
             val data_id = cranelift_declare_string_data(cl_module, v)
             val ptr_val = cranelift_data_addr_in_func(ctx, data_id)
             val len_val = cranelift_iconst(ctx, CL_TYPE_I64, v.len())
-            val strnew_vreg = translate_runtime_import_call_i64(ctx, cl_module, "rt_string_new", [ptr_val, len_val])
+            val strnew_vreg = translate_runtime_import_call_i64(ctx, cl_module, "rt_string_new_literal", [ptr_val, len_val])
             return strnew_vreg
         case Zero:
             return cranelift_iconst(ctx, mir_type_to_cl(type_), 0)
