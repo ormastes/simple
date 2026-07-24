@@ -226,3 +226,36 @@ is historical.
   `doc/08_tracking/bug/native_primitive_to_i64_ufcs_collision_2026-07-24.md`;
   do not spend the final producer cycle before its native semantic fixture
   passes.
+
+## Review checkpoint — browser frame and aggregate returns
+
+- Commit `f43a30fc30` is present in `main`, but its production-frame claim is
+  **rejected pending correction**. It replays the Simple pixel artifact into a
+  canvas and compares an Electron raw bitmap to the same bytes, so it proves
+  replay rather than the production browser presentation path. The raw bitmap
+  comparison also assumes platform-specific BGRA ordering. Its event, payload,
+  latency, and CSS-animation checks remain useful, but its legacy opaque color
+  assertions are not glass-theme visual acceptance.
+- The correction must retain the real DOM font proof, exercise the canonical
+  browser presentation adapter on a separate surface, canonicalize captured
+  pixels through a portable format, bind executed probe and adapter source
+  hashes, and reject a same-size pixel mismatch. A highest-capability review
+  must accept the correction before the frame-binding row is admitted.
+- The first aggregate-return registry candidate (`d6f68cb9406b`) is rejected
+  and not integrated. Its bare-name/global `MirType` registry missed the actual
+  flat entry-closure path, confused `Named` classes with enums, aliases, and
+  custom primitives, retained callee-local `SymbolId` values across modules,
+  collided same-named functions, and never reset between builds.
+- The active aggregate correction must reset once per top-level build,
+  preregister every flat and non-flat module before entry lowering, key by the
+  canonical emitted qualified function identity, and resolve a stable declared
+  type descriptor through the caller symbol table and normal MIR type
+  lowering. Admission requires a native flat entry-closure fixture with aliased
+  imports, two same-named factories returning different aggregate types,
+  projected fields, a forwarded return, and a method, plus same-process A→B
+  reset evidence.
+- A separate root-worktree full-CLI build is active and is not authoritative
+  for this lane because its source state is unrelated and potentially dirty.
+  Do not deploy over live MCP. Start the isolated exact-current CLI build only
+  after the accepted compiler candidate is integrated and the unrelated build
+  releases the native-build resources.
