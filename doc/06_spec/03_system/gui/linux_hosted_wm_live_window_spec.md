@@ -110,9 +110,10 @@ identity=<selected pinned face>
 ```
 
 The event phase drives the real window with `xdotool`. Focus, pointer motion,
-button input, and keyboard Tab must appear in the winit event log. The
-production evidence command channel then snapshots the resulting compositor
-state. Internal maximize and restore commands must update the focused window,
+button input, and keyboard Tab must appear in the winit event log and in the
+production snapshot's key-down/up and pointer-move/down/up receipt. The last
+pointer receipt must equal the compositor coordinates. Internal maximize and
+restore commands must update the focused window,
 restore the exact pre-maximize window array, and advance the render revision.
 The retained env records exact baseline/input/move/maximize/restore nonces
 `1/2/3/4/5`, plus each phase's revision and frame checksum; the live gate rejects
@@ -314,6 +315,7 @@ val evidence = file_read(EVIDENCE_PATH)
 expect(evidence).to_contain("linux_hosted_wm_live_window_focus_status=pass")
 expect(evidence).to_contain("linux_hosted_wm_live_window_pointer_status=pass")
 expect(evidence).to_contain("linux_hosted_wm_live_window_keyboard_status=pass")
+expect(evidence).to_contain("linux_hosted_wm_live_window_input_receipt_status=pass")
 expect(evidence).to_contain("linux_hosted_wm_live_window_move_status=pass")
 expect(evidence).to_contain("linux_hosted_wm_live_window_maximize_status=pass")
 expect(evidence).to_contain("linux_hosted_wm_live_window_restore_status=pass")

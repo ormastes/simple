@@ -4,8 +4,10 @@
 use std.spec.*
 use common.ui.builder.{button, panel, text_widget, build_tree_with_title}
 use common.ui.widget.{UIEvent}
+use common.ui.draw_ir.{DRAW_IR_BACKEND_GPU}
 use common.ui.state.{init_state}
 use app.ui.browser.backend.{BrowserBackend}
+use app.ui.browser.app.{BrowserApp}
 
 extern fn rt_host_gpu_queue_reset()
 
@@ -35,3 +37,17 @@ describe "BrowserBackend host event roundtrip":
         expect(backend.last_input_event_host_gpu_backward_completed).to_be(true)
         expect(backend.last_artifact_queue_dispatch_status).to_equal("dispatched")
         expect(backend.last_artifact_queue_backend_handle).to_be_greater_than(0)
+
+    it "routes BrowserApp host input through the queued receipt before session dispatch":
+        val app_result = BrowserApp.new("test/03_system/gui/ui_browser/fixtures/hello.ui.sdn", 0, "software")
+        match app_result:
+            Err(e):
+                fail(e)
+            Ok(app):
+                val submitted = app.session.submit_widget_draw_ir(672, 448, DRAW_IR_BACKEND_GPU)
+                expect(submitted.composition_id).to_start_with("ui-session-")
+                app.handle_ui_event(UIEvent.Action("run"))
+                expect(app.backend.input_event_enqueued_count).to_equal(1)
+                expect(app.backend.input_event_polled_count).to_equal(1)
+                expect(app.backend.input_event_dispatched_count).to_equal(1)
+                expect(app.backend.last_input_event_roundtrip_status).to_equal("dispatched")

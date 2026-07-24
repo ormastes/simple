@@ -251,10 +251,18 @@ class BrowserApp:
             UIEvent.Quit:
                 self.running = false
             _:
-                self.next_draw_ir_input_key = self.next_draw_ir_input_key + 1
-                self.session.dispatch_draw_ir_event(self.session.current_draw_ir_event(
-                    "browser-input-{self.next_draw_ir_input_key}", event
-                ))
+                # Keep host input on the same backend queue/receipt path as
+                # the frame it causes; the session still rejects stale or
+                # replayed Draw IR identities before a dispatch is recorded.
+                self.backend.push_event(event)
+                val queued_events = self.backend.poll_events()
+                for queued_event in queued_events:
+                    self.next_draw_ir_input_key = self.next_draw_ir_input_key + 1
+                    val accepted = self.session.dispatch_draw_ir_event(self.session.current_draw_ir_event(
+                        "browser-input-{self.next_draw_ir_input_key}", queued_event
+                    ))
+                    if accepted:
+                        self.backend.record_event_dispatch(queued_event)
 
     me render_session_frame():
         val state = self.session.current_state()

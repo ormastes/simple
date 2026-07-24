@@ -117,12 +117,12 @@ SimpleOS QEMU WM paths, including honest SIMD and Vulkan backend evidence.
 
 | Route | Producer -> consumer | Carried identity | Positive oracle | Negative oracle | Evidence/status |
 |---|---|---|---|---|---|
-| 2D | `DrawIrText -> Engine2D.draw_text -> FontRenderer -> backend` | face, advances, composition, backend/readback | exact direct/DrawIR CPU parity plus requested SIMD/Vulkan rows | inconsistent advance count/width rejects before rendering | modern SSpec/manual; live run BLOCKED |
-| Web | `HTML -> WebIR -> DrawIrComposition -> Engine2D` | run ID, composition ID, face, pixel-artifact checksum, frame correlation | readable ARGB glyph artifact and focus/key/pointer/timing frame | stale ID rejects before Electron; only one same-ID invocation can claim final PASS | modern SSpec/manual; receipt creation BLOCKED |
-| GUI | `WidgetTree -> widget_tree_to_draw_ir -> Engine2D` | composition ID, scene key, target/source | visible `Ready -> ReadyZ` pixels and correlated input | replayed scene key remains unresolved | modern SSpec/manual; live window BLOCKED |
-| hosted WM | `SharedWmScene -> HostCompositor -> Engine2D` evidence route | command nonce, phase, revision, checksum | pinned glyph crop and focus/move/maximize/restore frames; compatibility fallback cannot qualify | non-increasing nonce is ignored and exact ACK identity is required | modern SSpec/manual; live hash/runtime BLOCKED |
-| x86 QEMU | `gui_entry_desktop -> WM -> Engine2D -> QMP` | guest font hash, input sequence, WM/frame generation | independent `pmemsave` glyph crop and correlated events | QMP disconnect, replay, corrupt crop, demo markers reject | modern SSpec/manual; current image build BLOCKED |
-| RV64 QEMU | `riscv64/gui_entry_desktop -> WM -> VirtIO/QMP` target route (font/input currently unwired) | RV64 font hash, IRQ/input sequence, WM/frame generation | RV64-only bottom-right glyph crop and input ordering | unavailable markers, corrupt crop, stale/out-of-order input reject | modern SSpec/manual; font/input wiring BLOCKED |
+| 2D | `DrawIrText -> Engine2D.draw_text -> FontRenderer -> backend` | face, advances, composition, backend/readback | exact direct/DrawIR CPU parity plus requested SIMD/Vulkan rows | inconsistent advance count/width rejects before rendering | exact Vulkan fence/device/readback promotion required; stale runner exits 139 |
+| Web | `HTML -> WebIR -> DrawIrComposition -> Engine2D -> Electron canvas` | run ID, composition ID, face, production pixel-artifact checksum, frame correlation | Electron BGRA crop byte-matches the authoritative 96x48 production artifact | stale/replayed ID or any byte/dimension mismatch rejects | source/validator/manual PASS; live receipt creation BLOCKED |
+| GUI | `WidgetTree -> widget_tree_to_draw_ir -> Engine2D` | session nonce, composition ID, revision, scene key, input key | visible `Ready -> ReadyZ` pixels and queued focus/key/pointer receipts | foreign session, stale revision, and replayed input key reject | production BrowserApp now uses backend queue/receipt; execution BLOCKED |
+| hosted WM | `SharedWmScene -> HostCompositor -> Engine2D` evidence route | command nonce, phase, revision, checksum, input receipt | pinned glyph crop and focus/move/maximize/restore frames; key/pointer receipt matches compositor state | non-increasing nonce is ignored and exact ACK/receipt identity is required | compile/evidence ABI repaired; live calibration/runtime BLOCKED |
+| x86 QEMU | `gui_entry_desktop -> WM -> Engine2D -> QMP` | guest font hash, input sequence, WM/frame generation | independent `pmemsave` glyph crop and correlated events | QMP disconnect, replay, corrupt crop, demo markers reject | contract current; fresh native build exits 139 before QEMU |
+| RV64 QEMU | `riscv64/gui_entry_desktop -> WM -> VirtIO/QMP` target route (font/input currently unwired) | scanout address/geometry/format/generation, scene revision; future font hash and IRQ/input sequence | RV64-only guest-addressed glyph crop and input ordering | zero/stale generation, unavailable markers, corrupt crop, stale/out-of-order input reject | scanout generation receipt source/self-test PASS; font/input/pmemsave BLOCKED |
 
 ## Phase
 dev-done
@@ -417,6 +417,28 @@ arch-done
   `--wm-font-input` mode, but the canonical entry truthfully reports missing
   guest font mounting and VirtIO input consumption. No current-source RV64 ELF
   or RV64-only crop hash was available, so no build or QEMU run was attempted.
+- PASS (source/static): the Web event gate now displays the exact production
+  WebIR-to-DrawIR ARGB artifact in its Electron WM canvas and the independent
+  validator requires byte-for-byte BGRA equality. The modern Web scenario and
+  manual require a 96x48, 18,432-byte bound capture and retain an explicit
+  unbound-frame rejection.
+- PASS (source/static): BrowserApp host input now traverses the BrowserBackend
+  enqueue/poll/dispatch receipt before UISession accepts the stamped frame
+  identity. A focused modern SSpec covers the production handoff; runtime
+  execution remains unclaimed.
+- PASS (source/static): hosted WM input evidence now carries key-down/up and
+  pointer-move/down/up receipts in the same snapshot and requires the last
+  pointer coordinates to match compositor state. The stale snapshot ABI was
+  repaired; live crop calibration still requires a fresh self-hosted binary.
+- PASS (source/static): the x86 QEMU contract assertions match the current
+  press/release nonce and pointer correlation protocol. One bounded live
+  attempt retained `build/test-artifacts/x86-simpleos-font-ac5-current/` and
+  failed before QEMU when the stale self-hosted native build exited 139.
+- PASS (source/self-test): RV64 display ownership now advances scanout
+  generation only after successful flush and publishes address, geometry,
+  BGRA8888 format, generation, and scene revision. Full AC-12 remains blocked
+  on VirtIO-BLK FAT32 font access, VirtIO input, and receipt-bound QMP
+  `pmemsave`; no crop hash is pinned.
 
 ## Phase
 implement-active
@@ -443,3 +465,8 @@ implement-active
   capture size, retained hashes, and monotonic keyboard/restore/pointer
   sequences. It no longer claims the separate drag/minimize/taskbar or 30-pair
   performance requirements, whose focused scenarios remain blocked.
+- review-fix: Bound Web Electron pixels to the authoritative production frame,
+  routed GUI input through the production backend receipt, restored hosted-WM
+  input receipt ABI, refreshed x86 correlation assertions, and added RV64
+  post-flush scanout generation receipts. Highest-capability merge review
+  remains required before sync; runtime/QEMU completion is still withheld.

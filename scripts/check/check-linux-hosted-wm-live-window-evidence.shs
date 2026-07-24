@@ -157,6 +157,7 @@ emit() {
         echo "linux_hosted_wm_live_window_focus_status=$focus_status"
         echo "linux_hosted_wm_live_window_pointer_status=$pointer_status"
         echo "linux_hosted_wm_live_window_keyboard_status=$keyboard_status"
+        echo "linux_hosted_wm_live_window_input_receipt_status=$input_receipt_status"
         echo "linux_hosted_wm_live_window_move_status=$move_status"
         echo "linux_hosted_wm_live_window_maximize_status=$maximize_status"
         echo "linux_hosted_wm_live_window_restore_status=$restore_status"
@@ -211,7 +212,7 @@ emit() {
         echo "- glyph crop: $GLYPH_RGB (${glyph_sha:--})"
         echo "- live window: $WINDOW_PNG"
         echo "- framebuffer: $CAPTURE_LIVE"
-        echo "- events: focus=$focus_status pointer=$pointer_status keyboard=$keyboard_status move=$move_status maximize=$maximize_status restore=$restore_status"
+        echo "- events: focus=$focus_status pointer=$pointer_status keyboard=$keyboard_status receipt=$input_receipt_status move=$move_status maximize=$maximize_status restore=$restore_status"
         echo "- frame correlation: $frame_status"
         echo "- retained nonce/revision/readback: baseline=1/$baseline_revision/$baseline_frame_checksum input=2/$input_revision/$input_frame_checksum move=3/$move_revision/$move_frame_checksum maximize=4/$max_revision/$maximize_frame_checksum restore=5/$restore_revision/$restore_frame_checksum"
         echo "- compatibility fallback: $fallback_status"
@@ -232,6 +233,7 @@ calibration_status=fail
 focus_status=fail
 pointer_status=fail
 keyboard_status=fail
+input_receipt_status=fail
 move_status=fail
 maximize_status=fail
 restore_status=fail
@@ -616,8 +618,18 @@ issue 2 snapshot && retain_phase input 2 snapshot-only "$INPUT_SNAPSHOT" "$INPUT
 input_focus="$(jq -r '.compositor.windows[] | select(.focused == true) | .id' "$SNAPSHOT_LIVE")"
 pointer_x="$(jq -r '.compositor.pointer_x' "$SNAPSHOT_LIVE")"
 pointer_y="$(jq -r '.compositor.pointer_y' "$SNAPSHOT_LIVE")"
-[ "$input_focus" != "$initial_focus" ] && keyboard_status=pass
-[ "$pointer_x" -gt 0 ] && [ "$pointer_y" -gt 0 ] && pointer_status=pass
+if jq -e '.input.receipt.key_down_count > 0 and
+          .input.receipt.key_up_count > 0 and
+          .input.receipt.pointer_move_count > 0 and
+          .input.receipt.pointer_button_down_count > 0 and
+          .input.receipt.pointer_button_up_count > 0 and
+          .input.receipt.last_pointer_x == .compositor.pointer_x and
+          .input.receipt.last_pointer_y == .compositor.pointer_y and
+          .input.receipt.last_pointer_button == 0' "$SNAPSHOT_LIVE" >/dev/null; then
+    input_receipt_status=pass
+fi
+[ "$input_focus" != "$initial_focus" ] && [ "$input_receipt_status" = pass ] && keyboard_status=pass
+[ "$pointer_x" -gt 0 ] && [ "$pointer_y" -gt 0 ] && [ "$input_receipt_status" = pass ] && pointer_status=pass
 focus_status=pass
 
 DISPLAY="$x_display" xdotool windowmove "$window_id" 80 60
@@ -676,7 +688,8 @@ evidence_except_glyph_complete() {
         && [ "$framebuffer_status" = pass ] && [ "$window_status" = pass ] \
         && [ "$calibration_status" = pass ] \
         && [ "$focus_status" = pass ] && [ "$pointer_status" = pass ] \
-        && [ "$keyboard_status" = pass ] && [ "$move_status" = pass ] \
+        && [ "$keyboard_status" = pass ] && [ "$input_receipt_status" = pass ] \
+        && [ "$move_status" = pass ] \
         && [ "$maximize_status" = pass ] && [ "$restore_status" = pass ] \
         && [ "$frame_status" = pass ] && [ "$fallback_status" = pass ]
 }

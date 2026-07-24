@@ -40,6 +40,11 @@ widget tree:
 4. submits the updated `ReadyZ` composition and retains all three framebuffer
    captures.
 
+In the hosted BrowserApp path, an accepted host event is first enqueued and
+polled by `BrowserBackend`; only then does the exact submitted UISession frame
+accept it and cause the backend dispatch receipt used by the following render.
+Rejected stale/replayed session input does not create a backend dispatch receipt.
+
 It uses the canonical `widget_tree_to_draw_ir_cpu`,
 `DrawIrComposition`, Engine2D Draw IR executor, and shared PPM encoder. It does
 not introduce a GUI-private font renderer, atlas, cache, or command collector.

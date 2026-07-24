@@ -46,16 +46,22 @@ Source:
    - The browser wrapper must consume that receipt and artifact before launch.
      It must fail when the run ID is omitted or differs from the receipt, or
      when either artifact is missing, malformed, or mismatched.
-10. **Correlate visible pixels and input with one frame identity**
-   - Retain a post-interaction `WEB` glyph crop. Its correlation ID includes
-     the caller run ID, authoritative Simple composition checksum, and event
-     count.
-11. **Reject disconnected stale or replayed evidence**
+10. **Bind the Electron frame to the production Web frame bytes**
+   - Render the receipt's 96×48 ARGB pixels into the Electron canvas, capture
+     that exact canvas frame, and require byte-for-byte BGRA equality with the
+     receipt artifact. The gate requires `production_web_frame_bound=true`,
+     `production_web_frame_binding_status=pass`, and exactly 18,432 captured
+     bytes; a correlation ID or matching metadata alone is insufficient.
+11. **Reject disconnected, stale, replayed, or unbound evidence**
     - Re-run the wrapper unchanged with a deliberately stale caller run ID and
       then with the same run ID and unchanged receipt. Both runs must exit
       nonzero with, respectively, `simple-web-font-run-id-mismatch`
-      and `simple-web-font-run-id-replayed`. The scenario does not rewrite or
-      self-stamp a receipt to make a replay appear fresh.
+      and `simple-web-font-run-id-replayed`. The validator's explicit negative
+      scenario, `test/03_system/check/wm_browser_event_routing_validator_spec.spl`,
+      changes the captured frame dimensions and requires
+      `event-routing-production-web-frame-not-bound` with binding status
+      `mismatch`. The scenario does not rewrite or self-stamp a receipt to
+      make a replay appear fresh.
 
 Freshness is fail-closed only when both stale and same-ID replay probes reject.
 After a PASS, the wrapper atomically creates a receipt-adjacent consumed-run
