@@ -21,6 +21,9 @@ seed rejection deterministic and cheap.
   `simple-bin-forbidden` evidence before any corpus specs run.
 - REQ-GUI-HARDENING-GATES-BIN-003: Failure evidence records selected Simple
   binary, source, status, and report path.
+- REQ-GUI-HARDENING-GATES-BIN-004: An executable that cannot interpret the
+  bounded startup probe produces `simple-bin-startup-failed` before corpus
+  specs run.
 
 ## Plan
 
@@ -31,6 +34,7 @@ seed rejection deterministic and cheap.
 3. Run the wrapper with `SIMPLE_BIN=src/compiler_rust/target/release/simple`.
 4. Confirm stdout reports `simple-bin-forbidden`.
 5. Confirm no corpus spec summary is created for the forbidden path.
+6. Run the wrapper with `/bin/false` and confirm startup admission fails.
 
 ## Design
 
@@ -66,8 +70,14 @@ describe "GUI hardening open gates Simple binary contract":
         expect(script).to_contain("\"build/bootstrap/stage3/simple\"")
         expect(script).to_contain("\"bin/simple\"")
         expect(script).to_contain("is_rust_seed_simple")
+        expect(script).to_contain("simple_binary_startup_usable")
+        expect(script).to_contain("SIMPLE_BOOTSTRAP_DRIVER=\"$resolved\"")
+        expect(script).to_contain("SIMPLE_BOOTSTRAP_DRIVER=\"$SIMPLE_BIN_RESOLVED\"")
+        expect(script).to_contain("timeout -k 2 \"$SIMPLE_STARTUP_TIMEOUT_SECONDS\"")
+        expect(script).to_contain("timeout -k 5 \"$timeout_seconds\"")
         expect(script).to_contain("SIMPLE_BIN_STATUS=forbidden")
-        expect(script).to_contain("export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS")
+        expect(script).to_contain("SIMPLE_BIN_STATUS=startup-failed")
+        expect(script).to_contain("export SIMPLE_BIN SIMPLE_BIN_RESOLVED SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS")
         expect(script).to_contain("gui_hardening_open_gates_simple_bin=$SIMPLE_BIN")
         expect(script).to_contain("gui_hardening_open_gates_simple_bin_source=$SIMPLE_BIN_SOURCE")
         expect(script).to_contain("gui_hardening_open_gates_simple_bin_status=$SIMPLE_BIN_STATUS")
@@ -87,5 +97,20 @@ describe "GUI hardening open gates Simple binary contract":
 
         val report = file_read(root + "/report.md")
         expect(report).to_contain("- reason=simple-bin-forbidden")
+        val (_ls_out, _ls_err, ls_code) = process_run("/bin/sh", ["-c", "test ! -f " + root + "/out/spec-summary.txt"])
+        expect(ls_code).to_equal(0)
+
+    it "rejects an executable that fails the bounded startup probe":
+        val root = "build/test-gui-hardening-open-gates-startup-failed"
+        val command = "rm -rf " + root + " && SIMPLE_BIN=/bin/false BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-gui-hardening-open-gates.shs > " + root + "/stdout.txt 2> " + root + "/stderr.txt || true"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        val output = file_read(root + "/stdout.txt")
+        expect(output).to_contain("gui_hardening_open_gates_status=fail")
+        expect(output).to_contain("gui_hardening_open_gates_reason=simple-bin-startup-failed")
+        expect(output).to_contain("gui_hardening_open_gates_simple_bin=/bin/false")
+        expect(output).to_contain("gui_hardening_open_gates_simple_bin_status=startup-failed")
+
         val (_ls_out, _ls_err, ls_code) = process_run("/bin/sh", ["-c", "test ! -f " + root + "/out/spec-summary.txt"])
         expect(ls_code).to_equal(0)

@@ -7,6 +7,8 @@ cd "$ROOT_DIR"
 BUILD_DIR="${BUILD_DIR:-build/gui_hardening_open_gates}"
 SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
 SIMPLE_BIN_STATUS=pass
+SIMPLE_STARTUP_PROBE="${SIMPLE_STARTUP_PROBE:-examples/01_getting_started/hello_native.spl}"
+SIMPLE_STARTUP_TIMEOUT_SECONDS="${SIMPLE_STARTUP_TIMEOUT_SECONDS:-10}"
 
 is_rust_seed_simple() {
     case "$1" in
@@ -15,8 +17,31 @@ is_rust_seed_simple() {
     esac
 }
 
+simple_binary_startup_usable() {
+    candidate="$1"
+    command -v timeout >/dev/null 2>&1 || return 1
+    resolved="$(readlink -f "$candidate" 2>/dev/null || true)"
+    [ -n "$resolved" ] || return 1
+    version="$(timeout -k 2 "$SIMPLE_STARTUP_TIMEOUT_SECONDS" "$candidate" --version 2>&1)" || return 1
+    [ -n "$version" ] || return 1
+    case "$(printf '%s' "$version" | tr '[:upper:]' '[:lower:]')" in
+        *rust-built*|*rust*seed*|*bootstrap*seed*) return 1 ;;
+    esac
+    output="$(
+        timeout -k 2 "$SIMPLE_STARTUP_TIMEOUT_SECONDS" \
+            env SIMPLE_LIB=src SIMPLE_BOOTSTRAP_DRIVER="$resolved" \
+            "$candidate" run "$SIMPLE_STARTUP_PROBE" --mode=interpreter 2>&1
+    )" || return 1
+    case "$(printf '%s' "$output" | tr '[:upper:]' '[:lower:]')" in
+        *rust-built*|*rust*seed*|*bootstrap*seed*) return 1 ;;
+    esac
+    [ "$(printf '%s\n' "$output" | tail -n 1)" = "Hello World" ]
+}
+
 if [ "${SIMPLE_BIN:-}" = "" ]; then
     SIMPLE_BIN_SOURCE="missing-self-hosted"
+    rejected_candidate=""
+    rejected_candidate_source=""
     for candidate in \
         "release"/*/simple \
         "bin/release"/*/simple \
@@ -25,29 +50,53 @@ if [ "${SIMPLE_BIN:-}" = "" ]; then
         "./bin/simple"
     do
         if [ -x "$candidate" ]; then
-            SIMPLE_BIN="$candidate"
-            SIMPLE_BIN_SOURCE="repo-self-hosted-fallback"
-            break
+            if simple_binary_startup_usable "$candidate"; then
+                SIMPLE_BIN="$candidate"
+                SIMPLE_BIN_SOURCE="repo-self-hosted-fallback"
+                SIMPLE_BIN_STATUS=pass
+                break
+            fi
+            if [ -z "$rejected_candidate" ]; then
+                rejected_candidate="$candidate"
+                rejected_candidate_source="repo-self-hosted-fallback-startup-failed"
+            fi
         fi
     done
     if [ "${SIMPLE_BIN:-}" = "" ] && [ "${ALLOW_PATH_SIMPLE_BIN:-0}" = "1" ] && command -v simple >/dev/null 2>&1; then
-        SIMPLE_BIN="$(command -v simple)"
-        SIMPLE_BIN_SOURCE="path-opt-in"
+        candidate="$(command -v simple)"
+        if simple_binary_startup_usable "$candidate"; then
+            SIMPLE_BIN="$candidate"
+            SIMPLE_BIN_SOURCE="path-opt-in"
+            SIMPLE_BIN_STATUS=pass
+        else
+            if [ -z "$rejected_candidate" ]; then
+                rejected_candidate="$candidate"
+                rejected_candidate_source="path-opt-in-startup-failed"
+            fi
+        fi
+    fi
+    if [ "${SIMPLE_BIN:-}" = "" ] && [ -n "$rejected_candidate" ]; then
+        SIMPLE_BIN="$rejected_candidate"
+        SIMPLE_BIN_SOURCE="$rejected_candidate_source"
+        SIMPLE_BIN_STATUS=startup-failed
     fi
 else
     SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+    if is_rust_seed_simple "$SIMPLE_BIN"; then
+        SIMPLE_BIN_STATUS=forbidden
+        SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-rust-seed-forbidden"
+    elif [ ! -x "$SIMPLE_BIN" ]; then
+        SIMPLE_BIN_STATUS=missing
+        SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-missing"
+    elif ! simple_binary_startup_usable "$SIMPLE_BIN"; then
+        SIMPLE_BIN_STATUS=startup-failed
+        SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-startup-failed"
+    fi
 fi
 SIMPLE_BIN="${SIMPLE_BIN:-}"
-if [ "$SIMPLE_BIN" = "" ]; then
-    SIMPLE_BIN_STATUS=missing
-elif is_rust_seed_simple "$SIMPLE_BIN"; then
-    SIMPLE_BIN_STATUS=forbidden
-    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-rust-seed-forbidden"
-elif [ ! -x "$SIMPLE_BIN" ]; then
-    SIMPLE_BIN_STATUS=missing
-    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-missing"
-fi
-export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
+[ "$SIMPLE_BIN" != "" ] || SIMPLE_BIN_STATUS=missing
+SIMPLE_BIN_RESOLVED="$(readlink -f "$SIMPLE_BIN" 2>/dev/null || true)"
+export SIMPLE_BIN SIMPLE_BIN_RESOLVED SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
 REPORT_PATH="${REPORT_PATH:-doc/09_report/gui_hardening_open_gates_$(date -u +%F).md}"
 REQUIRE_BROWSER_CORPUS="${REQUIRE_BROWSER_CORPUS:-0}"
 SPEC_TIMEOUT_SECONDS="${SPEC_TIMEOUT_SECONDS:-180}"
@@ -161,7 +210,7 @@ run_capture() {
         echo "fail"
         return 0
     fi
-    if timeout "$timeout_seconds" "$@" >"$out" 2>&1; then
+    if timeout -k 5 "$timeout_seconds" "$@" >"$out" 2>&1; then
         echo "pass"
     else
         echo "fail"
@@ -173,7 +222,7 @@ run_spec_capture() {
     label="$(printf '%s' "$spec" | tr '/.' '__')"
     out="$BUILD_DIR/$label.out"
     start="$(date -u +%s)"
-    status="$(run_capture "$label" "$SPEC_TIMEOUT_SECONDS" env SIMPLE_LIB=src REGEN_GOLDENS= "$SIMPLE_BIN" test "$spec" --mode=interpreter --clean --format json)"
+    status="$(run_capture "$label" "$SPEC_TIMEOUT_SECONDS" env SIMPLE_LIB=src SIMPLE_BOOTSTRAP_DRIVER="$SIMPLE_BIN_RESOLVED" REGEN_GOLDENS= "$SIMPLE_BIN" test "$spec" --mode=interpreter --clean --format json)"
     end="$(date -u +%s)"
     duration="$((end - start))"
     echo "- $spec: status=$status duration_seconds=$duration timeout_seconds=$SPEC_TIMEOUT_SECONDS log=$out" >>"$spec_summary"
@@ -183,7 +232,7 @@ run_spec_capture() {
 }
 
 standalone_timer_status="$(run_capture standalone_event_loop_set_timeout "$SPEC_TIMEOUT_SECONDS" \
-    env SIMPLE_LIB=src "$SIMPLE_BIN" run \
+    env SIMPLE_LIB=src SIMPLE_BOOTSTRAP_DRIVER="$SIMPLE_BIN_RESOLVED" "$SIMPLE_BIN" run \
     test/fixtures/browser/event_loop_set_timeout_standalone.spl --mode=interpreter)"
 standalone_timer_out="$BUILD_DIR/standalone_event_loop_set_timeout.out"
 if [ "$standalone_timer_status" = "pass" ] &&

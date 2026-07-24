@@ -2,6 +2,9 @@
 
 > The open-gates wrapper can launch multiple GUI browser/corpus SSpecs. This contract keeps that launcher on repo self-hosted Simple binaries and makes Rust seed rejection deterministic and cheap.
 
+> **Current result (2026-07-24):** source and direct shell admission checks pass;
+> full SSpec execution remains blocked by the unavailable self-hosted runner.
+
 <!-- sdn-diagram:id=gui_hardening_open_gates_simple_bin_spec.arch -->
 <details class="sdn-source">
 <summary>SDN source</summary>
@@ -27,7 +30,7 @@ gui_hardening_open_gates_simple_bin_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+| 3 | 3 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -41,13 +44,13 @@ The open-gates wrapper can launch multiple GUI browser/corpus SSpecs. This contr
 | Field | Value |
 |-------|-------|
 | Category | Other |
-| Status | Active |
+| Status | Blocked pending qualifying self-hosted execution |
 | Requirements | N/A |
 | Plan | doc/09_report/gui_renderdoc_feature_coverage_status_2026-06-27.md |
 | Design | doc/04_architecture/compiler/graphics/accelerated_shared_ui_backend_architecture.md |
 | Research | doc/01_research/ui/render_path/gui_web_2d_path_assessment_2026-06-12.md |
 | Source | `test/03_system/check/gui_hardening_open_gates_simple_bin_spec.spl` |
-| Updated | 2026-06-27 |
+| Updated | 2026-07-24 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -66,6 +69,9 @@ seed rejection deterministic and cheap.
   `simple-bin-forbidden` evidence before any corpus specs run.
 - REQ-GUI-HARDENING-GATES-BIN-003: Failure evidence records selected Simple
   binary, source, status, and report path.
+- REQ-GUI-HARDENING-GATES-BIN-004: An executable that cannot interpret the
+  bounded startup probe produces `simple-bin-startup-failed` before corpus
+  specs run.
 
 ## Plan
 
@@ -76,6 +82,7 @@ seed rejection deterministic and cheap.
 3. Run the wrapper with `SIMPLE_BIN=src/compiler_rust/target/release/simple`.
 4. Confirm stdout reports `simple-bin-forbidden`.
 5. Confirm no corpus spec summary is created for the forbidden path.
+6. Run the wrapper with `/bin/false` and confirm startup admission fails.
 
 ## Design
 
@@ -115,11 +122,40 @@ expect(script).to_contain("\"bin/release\"/*/simple")
 expect(script).to_contain("\"build/bootstrap/stage3/simple\"")
 expect(script).to_contain("\"bin/simple\"")
 expect(script).to_contain("is_rust_seed_simple")
+expect(script).to_contain("simple_binary_startup_usable")
+expect(script).to_contain("SIMPLE_BOOTSTRAP_DRIVER=\"$resolved\"")
+expect(script).to_contain("SIMPLE_BOOTSTRAP_DRIVER=\"$SIMPLE_BIN_RESOLVED\"")
+expect(script).to_contain("timeout -k 2 \"$SIMPLE_STARTUP_TIMEOUT_SECONDS\"")
+expect(script).to_contain("timeout -k 5 \"$timeout_seconds\"")
 expect(script).to_contain("SIMPLE_BIN_STATUS=forbidden")
-expect(script).to_contain("export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS")
+expect(script).to_contain("SIMPLE_BIN_STATUS=startup-failed")
+expect(script).to_contain("export SIMPLE_BIN SIMPLE_BIN_RESOLVED SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS")
 expect(script).to_contain("gui_hardening_open_gates_simple_bin=$SIMPLE_BIN")
 expect(script).to_contain("gui_hardening_open_gates_simple_bin_source=$SIMPLE_BIN_SOURCE")
 expect(script).to_contain("gui_hardening_open_gates_simple_bin_status=$SIMPLE_BIN_STATUS")
+```
+
+</details>
+
+#### rejects an executable that fails the bounded startup probe
+
+The wrapper is invoked with `/bin/false`, which is executable but cannot pass
+the required in-process `Hello World` interpreter probe. It must report
+`simple-bin-startup-failed` and must not create a corpus-spec summary.
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+val root = "build/test-gui-hardening-open-gates-startup-failed"
+val command = "rm -rf " + root + " && SIMPLE_BIN=/bin/false BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-gui-hardening-open-gates.shs > " + root + "/stdout.txt 2> " + root + "/stderr.txt || true"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+val output = file_read(root + "/stdout.txt")
+expect(output).to_contain("gui_hardening_open_gates_status=fail")
+expect(output).to_contain("gui_hardening_open_gates_reason=simple-bin-startup-failed")
+expect(output).to_contain("gui_hardening_open_gates_simple_bin=/bin/false")
+expect(output).to_contain("gui_hardening_open_gates_simple_bin_status=startup-failed")
 ```
 
 </details>
@@ -157,8 +193,8 @@ expect(ls_code).to_equal(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
+| Total scenarios | 3 |
+| Active scenarios | 3 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
