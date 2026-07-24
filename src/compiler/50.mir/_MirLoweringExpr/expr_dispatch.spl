@@ -2355,14 +2355,30 @@ impl MirLowering:
                 if val rv = value:
                     var br = self.builder
                     var result = self.lower_expr(rv)
-                    if val active_fn = self.builder.current_function:
-                        val declared_return = self.resolved_call_hir_return_type(active_fn.symbol)
-                        if val found_return = declared_return:
-                            match found_return.kind:
-                                case HirTypeKind.Optional(_):
-                                    result = self.ensure_option_handle(result, found_return)
-                                case _:
-                                    ()
+                    # MirBuilder.current_function is assigned via an EXPLICIT
+                    # `Some(MirFunction(...))` in begin_function, which on this
+                    # lane builds a real 3-word enum box [disc, type_hash,
+                    # payload] -- NOT the nullable-pointer shape most optionals
+                    # use. `if val x = ...` is parser-desugared to a raw bind +
+                    # `x != nil`, so it binds the BOX; reading `.symbol` off it
+                    # then loads the box's discriminant word (0x1_00000004) and
+                    # dereferences it -> SIGSEGV in every function that has an
+                    # explicit `return <expr>`. `match ... case Some(v)` is the
+                    # only shape that unboxes; it is what end_function
+                    # (mir_data.spl) already uses on this same producer.
+                    var cur_builder = self.builder
+                    var declared_return: HirType? = nil
+                    match cur_builder.current_function:
+                        case Some(active_fn):
+                            declared_return = self.resolved_call_hir_return_type(active_fn.symbol)
+                        case None:
+                            ()
+                    if val found_return = declared_return:
+                        match found_return.kind:
+                            case HirTypeKind.Optional(_):
+                                result = self.ensure_option_handle(result, found_return)
+                            case _:
+                                ()
                     br = self.builder
                     # Hoisted: `Some(call(...))` inline in argument position is
                     # the optional-in-argument miscompile class on the stage4
