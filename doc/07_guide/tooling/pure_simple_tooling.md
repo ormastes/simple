@@ -309,7 +309,8 @@ evidence boundary for the important pure-Simple tooling lanes:
   a file read/write. The production fix owner now matches the lightweight
   worker: sole `--help`/`-h` returns 0 and mixed help remains exit 2
   (`fd373e195b5`). Exact `--dry-run` remains
-  non-mutating. All fix owners now share source admission: directories,
+  non-mutating. `fmt` now rejects every conflicting pair of `--check`,
+  `--write`, and `--diff` before I/O (`119a57dd3be`). All fix owners now share source admission: directories,
   missing paths, and detectable read failures return exit 1 before rule
   evaluation or writes, while valid empty files remain clean no-ops; see the
   [fix source-admission report](../../08_tracking/bug/fix_directory_target_false_green_2026-07-24.md).
@@ -418,7 +419,9 @@ evidence boundary for the important pure-Simple tooling lanes:
 - **examples-check** — **Source status:** pure-Simple command routing is
   implemented and malformed command options now fail closed before discovery.
   Timeout is bounded to positive milliseconds-safe seconds; limit is bounded
-  nonnegative with only zero meaning unlimited (`b06cce875ca`).
+  nonnegative with only zero meaning unlimited (`b06cce875ca`). CLI dispatch
+  now removes only its owned argv prefix and preserves a literal target named
+  `examples-check` (`3c06d1d445c`, `b28f2a0beb6`).
   Its focused option contract passes through the temporary bootstrap
   interpreter. **Remaining bug/gap:** no fresh pure-Simple qualification evidence.
   **Next solution:** run one focused passing example and one failing example
@@ -428,6 +431,10 @@ evidence boundary for the important pure-Simple tooling lanes:
   before generation. Sole help returns 0, while mixed or repeated help returns
   exit 2 before filesystem mutation; see the
   [mixed-help report](../../08_tracking/bug/spipe_docgen_mixed_help_false_green_2026-07-24.md).
+  Explicit doc-format test runs now return internal-error exit 3 before a PASS
+  summary when automatic doc generation fails. The Rust bootstrap mirror keeps
+  the same behavior for one-shot and watch runs (`0a2d6ab1cff`,
+  `a08c64e8c6b`); its injected failing-child unit passed.
   **Remaining bug/gap:** no fresh qualification evidence.
   **Next solution:** generate one fixture document with the exact runtime and
   assert the expected output exists and is nonempty.
@@ -439,15 +446,25 @@ evidence boundary for the important pure-Simple tooling lanes:
   compilation or output mutation. Bootstrap and full-CLI owners also reject all
   removed hosted runtime-bundle aliases before build work; see the
   [runtime-bundle report](../../08_tracking/bug/native_build_removed_runtime_bundle_false_green_2026-07-24.md).
-  Compile/link failures preserve the prior requested output. **Remaining bug/gap:** the focused
+  Compile/link failures preserve the prior requested output. In-process
+  `--runtime-path` compatibility handling now restores both runtime-path
+  environment variables on every exit (`9e86b3a1c84`). **Remaining bug/gap:** the focused
   staging source-contract scenario passes, but the synchronized cached bootstrap
   closure remained CPU-bound for 900 seconds with no log or artifact and was
   terminated once. **Next solution:** instrument or bound entry-closure discovery,
   then resume the preserved cache and run the artifact once.
   A sole `--help`/`-h` succeeds; malformed invocations (including malformed
   `... --help`) fail with exit 2. `--emit-archive` remains active archive mode;
-  legacy `--linker-script`, `--runtime-path`, and `--no-incremental` remain
-  arity-checked compatibility no-ops in this pure-Simple path.
+  `--runtime-path` remains an arity-checked compatibility override, while
+  legacy `--linker-script` and `--no-incremental` remain compatibility no-ops
+  in this pure-Simple path.
+- **package manifest** — **Source status:** manifest creation writes through
+  the file facade directly instead of interpolating the working directory and
+  content through a shell, preserving quotes and closing command injection
+  (`cf56a5e87ed`). **Remaining bug/gap:** the focused pure-Simple runtime
+  contract currently reaches the separately tracked stale release-wrapper
+  SIGSEGV before execution; fresh Stage 4 qualification remains pending. See
+  the [startup normalization report](../../08_tracking/bug/native_selfhosted_run_segfault_startup_normalize_2026-07-24.md).
 - **latest full Stage 4 candidate (2026-07-23)** — candidate SHA
   `00431ce52f940722f52746a802011f7d33f35d4931738facee26c5c7b7917b31`
   passes delegated stream/status fidelity and the isolated official
