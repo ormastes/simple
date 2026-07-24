@@ -1,7 +1,8 @@
 # Native `--entry` Build Correctness — Status & Remaining (2026-07-14)
 
-Tracks the pure-Simple `native-build --entry` correctness campaign that feeds
-self-hosting **#138** (single-file native-build route). Goal: every construct
+Tracks native-build correctness, including the pure-Simple single-file
+positional route that feeds self-hosting **#138**. `--entry`/`--source` probes
+remain Rust-worker/native-smoke evidence, not self-hosted MIR receipts. Goal: every construct
 the native backend emits must equal the seed interpreter oracle, **or** be
 correct-by-construction where the oracle is provably broken. A loud build
 failure is **never** silently converted to a wrong answer.
@@ -33,10 +34,15 @@ failure is **never** silently converted to a wrong answer.
   platform matrix (macOS/Windows/FreeBSD/ARM/RISC-V), and full Stage4 QEMU
   execution remain pending as already recorded below.
 
-## Verification contract (unchanged, in force)
+## Verification contract (in force)
 
 - **Oracle:** `env -u SIMPLE_BOOTSTRAP bin/simple run p.spl` (seed interpreter).
-- **Native:** `env -u SIMPLE_BOOTSTRAP bin/simple native-build --entry p.spl -o out --clean`.
+- **Native smoke / Rust-worker:** `env -u SIMPLE_BOOTSTRAP bin/simple native-build --entry p.spl -o out --clean`.
+  This validates the selected native/runtime lane, not the pure-Simple bootstrap MIR route.
+- **Self-hosted single-file:** invoke the current Stage4 candidate with exactly
+  one bare positional `.spl` input, no `--entry` and no `--source`, for example
+  `SIMPLE_CORE_RUNTIME_PATH=/abs/libsimple_runtime.a STAGE4 native-build --backend cranelift --runtime-bundle simple-core --clean -o out p.spl`.
+  C5 is not credited until this positional form builds and the binary exits `42`.
 - **Gate 1 — matrix:** `scripts/check/native-smoke-matrix.shs` must report
   `native_smoke_matrix=true`: at least one selected case ran and every selected
   case passed, with zero FAIL/XFAIL/XPASS/codegen-fallback results.
@@ -602,7 +608,7 @@ the shared binary — deploys require explicit user go-ahead).
   aggregate forces collisions plus two Unicode widths and is scheduled on
   hosted LLVM/Cranelift, FreeBSD LLVM/Cranelift, AArch64/RISC-V64 execution,
   and ARM32/RISC-V32/Windows-ARM64 object gates; the simple-core smoke runs C5
-  against the pure runtime. The observed bare-metal text `.replace` sibling now
+  against the pure runtime as Rust-worker/native-smoke evidence. The observed bare-metal text `.replace` sibling now
   uses replace-all semantics on x86_64, x86_32, ARM32, ARM64, and both RISC-V64
   runtime owners; focused C behavior and the six-owner SSpec contract prevent
   first-match-only, zero-stub, or wrap-prone match bounds. The 32-bit owners
@@ -623,8 +629,9 @@ the shared binary — deploys require explicit user go-ahead).
   object lanes. ARM32 now builds that shared fixture directly and validates a
   nonempty ELF32 hard-float relocatable object; RV32 remains soft-float
   object-only.
-  A rebuilt self-hosted Cranelift C5 receipt now identifies the first failed
-  assertion as `65.chr() != "A"` (diagnostic exit `1`). The runtime returns the
+  Historical `--entry` Cranelift C5 receipts identified the first failed
+  assertion as `65.chr() != "A"` (diagnostic exit `1`); after route correction
+  these are Rust-worker evidence, not self-hosted receipts. The runtime returns the
   correct tagged text handle, but MIR recorded the call result as
   `MirType.i64()` and returned it without text conversion, so later equality
   and text methods took integer paths. Current source preserves that 64-bit
@@ -650,11 +657,28 @@ the shared binary — deploys require explicit user go-ahead).
   five unresolved stubs and segfaulted on `--version`, so it is rejected rather
   than credited. A later no-stub 675-file candidate is valid and runnable, but
   the prior `--entry` C5 commands are now classified as Rust-worker receipts:
-  the pure-Simple bootstrap route requires a positional `.spl` input. That true
-  route reaches MIR and currently stops first on C5's unannotated `CharOwner`,
-  where a malformed desugared layout presence/payload pair traps in
-  `compute_struct_layout`. Current HIR producers populate the pair explicitly,
-  and the chr MIR-type probe uses a Stage4-safe `?? MirType.unit()` fallback.
-  The focused contract passes 5/5; rebuilt positional C5 exit `42` remains
-  pending. See
+  the pure-Simple bootstrap route requires a positional `.spl` input. The
+  malformed `CharOwner` layout presence/payload pair that first blocked that
+  route is fixed in current source. The next positional C5 run exposed a
+  Stage4 struct-pattern shadowing fault in the MIR prescan walker:
+  `HirStmtKind.Expr` forwarded a nil payload and `HirExprKind.Block` could
+  accept an `If` payload. Current source now derives runtime discriminants for
+  `Expr`, `Let`, `Assign`, and statement `Block`, extracts each payload in an
+  isolated qualified arm with an explicit HIR type, and likewise predispatches
+  expression `Block`. The source contract pins all four statement payload
+  bindings and the expression block binding.
+
+  A no-stub incremental rebuild after that fix completed with `4 compiled,
+  671 cached, 0 failed`; its positional C5 run no longer crashed in prescan.
+  It reached MIR method lowering and failed loudly on unresolved `chr`,
+  `to_char`, and the downstream `char_code_at` call. Targeted invalidation of
+  the method-lowering object rebuilt and relinked a byte-identical compiler,
+  so another identical C5 run was correctly skipped. The remaining smallest
+  fix is to replace the fragile multi/OR `MethodResolution` classifier with
+  one derived runtime discriminant plus exact `Unresolved` and `FreeFunction`
+  booleans. Keep the existing integer-receiver and custom-owner gates; do not
+  add name-only fallbacks. Then rebuild that one module and require a fresh
+  positional no-stub C5 build (`1 compiled, 0 cached, 0 failed`) whose
+  executable exits `42`. Only after that receipt should the next bottom-up
+  item run: positional C9 `.parse_f64()` must exit `42`. See
   `native_chr_builtin_no_lowering_2026-07-18.md`.
