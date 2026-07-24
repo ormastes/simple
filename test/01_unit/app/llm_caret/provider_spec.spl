@@ -1,6 +1,8 @@
 # LLM Caret Provider Specification
+# codex-system-test
 
 use std.spec.*
+use app.io.mod.{env_get, env_set}
 use app.llm_caret.provider.{
     list_providers, is_valid_provider, new_llm_error,
     dispatch_send, dispatch_send_advanced
@@ -10,10 +12,12 @@ use app.llm_caret.mod.{
     llm_set_api_key, llm_set_base_url, llm_set_cli_path, llm_system,
     llm_provider, llm_model, llm_clear,
     llm_history_len, llm_history_role, llm_history_content,
-    llm_chat, llm_send, _build_messages_json
+    llm_chat, llm_send, _build_messages_json, _build_direct_messages_json
 }
 
 val MOCK_CLAUDE = "test/fixtures/llm_caret/mock_claude_cli.shs"
+
+extern fn rt_file_read_text(path: text) -> text?
 
 # ============================================================================
 # Tests
@@ -126,7 +130,7 @@ describe "Dummy Provider":
         expect(resp.error).to_contain("require claude_cli")
 
 describe "Provider Dispatch Failures":
-    it "should reject unknown and recognized but unavailable providers":
+    it "should reject unknown and misconfigured local providers":
         val unknown = dispatch_send(
             "unknown", "anything", "", "", "", "", "", "", 0, 0, "[]"
         )
@@ -139,7 +143,7 @@ describe "Provider Dispatch Failures":
         )
         expect(unavailable.is_error).to_be(true)
         expect(unavailable.provider).to_equal("local_torch")
-        expect(unavailable.error).to_contain("not implemented")
+        expect(unavailable.error).to_equal("model_path not configured")
 
     it "should reject remote providers without credentials before network access":
         val anthropic = dispatch_send(
@@ -168,7 +172,7 @@ describe "Provider Dispatch Failures":
         expect(resp.model).to_equal("sonnet")
         expect(resp.session_id).to_equal("advanced-session")
 
-describe "Public LLM State":
+describe "Uninitialized Public LLM State":
     it "should reject chat and direct send before initialization":
         expect(llm_history_len()).to_equal(0)
         expect(llm_chat("not initialized")).to_contain(
@@ -179,6 +183,160 @@ describe "Public LLM State":
         )
         expect(llm_history_len()).to_equal(0)
 
+describe "Production Provider Owners":
+    it "should normalize a missing Claude API key through direct and public dispatch":
+        step("Prepare provider dispatch inputs")
+        val old_key = env_get("ANTHROPIC_API_KEY") ?? ""
+        val key_cleared = env_set("ANTHROPIC_API_KEY", "")
+        llm_init("claude_api", "")
+        llm_set_api_key("")
+
+        step("Dispatch through the production owner")
+        val direct = dispatch_send(
+            "claude_api", "hello", "", "", "", "", "", "",
+            0, 0, "[{\"role\":\"user\",\"content\":\"hello\"}]"
+        )
+        val public = llm_send("hello")
+        llm_clear()
+        val key_restored = env_set("ANTHROPIC_API_KEY", old_key)
+
+        step("Check exact normalized response and ownership")
+        expect(key_cleared).to_be(true)
+        expect(key_restored).to_be(true)
+        expect(direct.content).to_equal("")
+        expect(direct.model).to_equal("")
+        expect(direct.provider).to_equal("claude_api")
+        expect(direct.session_id).to_equal("")
+        expect(direct.stop_reason).to_equal("error")
+        expect(direct.input_tokens).to_equal(0)
+        expect(direct.output_tokens).to_equal(0)
+        expect(direct.error).to_equal("ANTHROPIC_API_KEY not set")
+        expect(direct.is_error).to_be(true)
+        expect(direct.raw).to_equal("")
+        expect(public).to_equal("ERROR: ANTHROPIC_API_KEY not set")
+
+    it "should reset stale credentials and normalize a missing OpenAI API key":
+        step("Prepare provider dispatch inputs")
+        val old_key = env_get("OPENAI_API_KEY") ?? ""
+        val key_cleared = env_set("OPENAI_API_KEY", "")
+        llm_init("claude_api", "stale-model")
+        llm_set_api_key("stale-provider-key")
+        llm_set_base_url("https://stale-provider.invalid")
+        llm_init("openai", "")
+
+        step("Dispatch through the production owner")
+        val direct = dispatch_send(
+            "openai", "hello", "", "", "", "", "", "",
+            0, 0, "[{\"role\":\"user\",\"content\":\"hello\"}]"
+        )
+        val public = llm_send("hello")
+        llm_clear()
+        val key_restored = env_set("OPENAI_API_KEY", old_key)
+
+        step("Check exact normalized response and ownership")
+        expect(key_cleared).to_be(true)
+        expect(key_restored).to_be(true)
+        expect(direct.content).to_equal("")
+        expect(direct.model).to_equal("")
+        expect(direct.provider).to_equal("openai")
+        expect(direct.session_id).to_equal("")
+        expect(direct.stop_reason).to_equal("error")
+        expect(direct.input_tokens).to_equal(0)
+        expect(direct.output_tokens).to_equal(0)
+        expect(direct.error).to_equal("OPENAI_API_KEY not set")
+        expect(direct.is_error).to_be(true)
+        expect(direct.raw).to_equal("")
+        expect(public).to_equal("ERROR: OPENAI_API_KEY not set")
+
+    it "should normalize a missing local Torch model through direct and public dispatch":
+        step("Prepare provider dispatch inputs")
+        llm_init("local_torch", "")
+        llm_set_cli_path("")
+
+        step("Dispatch through the production owner")
+        val direct = dispatch_send(
+            "local_torch", "hello", "", "", "", "", "", "",
+            0, 0, "[]"
+        )
+        val public = llm_send("hello")
+
+        step("Check exact normalized response and ownership")
+        expect(direct.content).to_equal("")
+        expect(direct.model).to_equal("")
+        expect(direct.provider).to_equal("local_torch")
+        expect(direct.session_id).to_equal("")
+        expect(direct.stop_reason).to_equal("error")
+        expect(direct.input_tokens).to_equal(0)
+        expect(direct.output_tokens).to_equal(0)
+        expect(direct.error).to_equal("model_path not configured")
+        expect(direct.is_error).to_be(true)
+        expect(direct.raw).to_equal("")
+        expect(public).to_equal("ERROR: model_path not configured")
+        llm_clear()
+
+    it "should preserve dummy success and exact unknown-provider failures":
+        step("Prepare provider dispatch inputs")
+        llm_init("dummy", "dummy-hello")
+
+        step("Dispatch through the production owner")
+        val dummy = dispatch_send(
+            "dummy", "hello", "", "", "", "", "", "dummy-session",
+            0, 0, "[]"
+        )
+        val public = llm_send("hello")
+        val unknown = dispatch_send(
+            "unknown", "hello", "", "", "", "", "", "",
+            0, 0, "[]"
+        )
+
+        step("Check exact normalized response and ownership")
+        expect(dummy.content).to_equal("hello")
+        expect(dummy.model).to_equal("dummy-hello")
+        expect(dummy.provider).to_equal("dummy")
+        expect(dummy.session_id).to_equal("dummy-session")
+        expect(dummy.stop_reason).to_equal("end_turn")
+        expect(dummy.input_tokens).to_equal(0)
+        expect(dummy.output_tokens).to_equal(1)
+        expect(dummy.error).to_equal("")
+        expect(dummy.is_error).to_be(false)
+        expect(dummy.raw).to_equal("")
+        expect(public).to_equal("hello")
+        expect(unknown.provider).to_equal("unknown")
+        expect(unknown.session_id).to_equal("")
+        expect(unknown.stop_reason).to_equal("error")
+        expect(unknown.input_tokens).to_equal(0)
+        expect(unknown.output_tokens).to_equal(0)
+        expect(unknown.error).to_equal("unknown provider: unknown")
+        expect(unknown.is_error).to_be(true)
+        expect(unknown.raw).to_equal("")
+        llm_clear()
+
+    it "should keep transport and parsing in each production provider owner":
+        step("Prepare provider dispatch inputs")
+        val provider_path = "src/app/llm_caret/provider.spl"
+        val public_path = "src/app/llm_caret/mod.spl"
+
+        step("Dispatch through the production owner")
+        val provider_source = rt_file_read_text(provider_path) ?? ""
+        val public_source = rt_file_read_text(public_path) ?? ""
+
+        step("Check exact normalized response and ownership")
+        expect(provider_source.contains("http_request_raw")).to_be(false)
+        expect(provider_source.contains("with_retry")).to_be(false)
+        expect(provider_source.contains("fn _escape_json")).to_be(false)
+        expect(provider_source.contains("fn _extract_json")).to_be(false)
+        expect(provider_source.contains("fn _LB")).to_be(false)
+        expect(provider_source.contains("fn _RB")).to_be(false)
+        expect(provider_source.contains("fn _Q")).to_be(false)
+        expect(provider_source).to_contain("val resp = claude_api_send(")
+        expect(provider_source).to_contain("val resp = openai_send(")
+        expect(provider_source).to_contain("val resp = compat_send(")
+        expect(provider_source).to_contain("val resp = local_torch_send(")
+        expect(public_source.contains("http_request_raw")).to_be(false)
+        expect(public_source.contains("fn _send_")).to_be(false)
+        expect(public_source).to_contain("dispatch_send(")
+
+describe "Public LLM State":
     it "should serialize public history with escaped message content":
         llm_init("dummy", "dummy-hello")
         expect(llm_chat("say \"hi\"\nnext")).to_equal("hello")
@@ -186,13 +344,16 @@ describe "Public LLM State":
             "[{\"role\":\"user\",\"content\":\"say \\\"hi\\\"\\nnext\"}," +
             "{\"role\":\"assistant\",\"content\":\"hello\"}]"
         )
+        expect(_build_direct_messages_json("say \"hi\"\nnext")).to_equal(
+            "[{\"role\":\"user\",\"content\":\"say \\\"hi\\\"\\nnext\"}]"
+        )
         llm_clear()
 
     it "should reject unsupported providers through both public send routes":
         llm_init("unsupported", "none")
         val chat_response = llm_chat("hello")
         expect(chat_response).to_equal(
-            "ERROR: unsupported provider: unsupported"
+            "ERROR: unknown provider: unsupported"
         )
         expect(llm_history_len()).to_equal(1)
         expect(llm_history_role(0)).to_equal("user")
@@ -200,8 +361,8 @@ describe "Public LLM State":
 
         llm_init("unsupported", "none")
         val send_response = llm_send("hello")
-        expect(send_response).to_contain(
-            "llm_send only supports claude_cli and opencode_cli providers"
+        expect(send_response).to_equal(
+            "ERROR: unknown provider: unsupported"
         )
         expect(llm_history_len()).to_equal(0)
 

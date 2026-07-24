@@ -22,7 +22,7 @@ lane small.
 
 ## 2026-07-25 continuation findings
 
-The original bounded map now covers 25 direct Caret files, 7,487 LOC, and 516
+The original bounded map now covers 25 direct Caret files, 7,194 LOC, and 505
 declarations exactly. That result is still only a map.
 
 The separate Claude-full parts bin contains 848 source files and 349 specs.
@@ -36,14 +36,14 @@ The old direct-TUI gap list is stale: injected runtime tests now call
 `run_chat_plain`. The remaining live boundary is `production_caret_io` plus a
 provenance-checked cached Caret process.
 
-Highest-value direct gaps are shipped entry/provider transports first
-(`main`, OpenAI-compatible, Claude API, OpenAI API, config, OpenCode, local
-torch), then live TUI, bridge entry/transport callbacks, MCP result mapping,
-and remaining OAuth redaction/error/flow/step-up owners.
+Highest-value remaining gaps are the qualified cached entry/TUI process,
+injected success-response normalization, bridge entry/transport callbacks, MCP
+result mapping, and remaining OAuth redaction/error/flow/step-up owners.
 
-The current CLI round closes the static direct-owner gaps for injected
-`main` entry orchestration, OpenAI-compatible, Claude API, OpenAI API, and
-config file/API-key ownership. Both API sends retain retry semantics rather
-than collapsing them to one total network attempt. The next shipped CLI owners
-are OpenCode process/send behavior and local-torch cleanup; live TUI remains
-after those CLI owners.
+The current CLI rounds close the static direct-owner gaps for injected `main`
+entry orchestration, OpenAI-compatible, Claude API, OpenAI API, config
+file/API-key ownership, OpenCode process/send behavior, shell-free inline
+local-Torch execution, and normalized provider delegation. Both API sends retain retry semantics
+rather than collapsing them to one total network attempt. The remaining live
+shipped boundary is TUI production I/O through a qualified cached Caret; pure
+success-normalization and unset-safe environment seams remain test debt.

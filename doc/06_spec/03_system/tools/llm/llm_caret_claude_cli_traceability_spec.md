@@ -10,7 +10,7 @@ not proof that every function in the separate Claude-full parts bin works.
 
 Runtime execution and docgen remain blocked until a qualified self-hosted
 Simple runtime is deployed. The checker itself passed independently on
-2026-07-25 with 25/25 files, 7,487/7,487 LOC, and 516/516 declarations.
+2026-07-25 with 25/25 files, 7,194/7,194 LOC, and 505/505 declarations.
 
 ## Scope and claim boundary
 
@@ -118,11 +118,11 @@ expect(result.1).to_equal(0)
 expect(output).to_contain("llm_caret_source_files=25")
 expect(output).to_contain("llm_caret_mapped_files=25")
 expect(output).to_contain("llm_caret_mapping_percent=100")
-expect(output).to_contain("llm_caret_source_loc=7487")
-expect(output).to_contain("llm_caret_mapped_loc=7487")
+expect(output).to_contain("llm_caret_source_loc=7194")
+expect(output).to_contain("llm_caret_mapped_loc=7194")
 expect(output).to_contain("llm_caret_loc_mapping_percent=100")
-expect(output).to_contain("llm_caret_symbol_count=516")
-expect(output).to_contain("llm_caret_symbol_traced_count=516")
+expect(output).to_contain("llm_caret_symbol_count=505")
+expect(output).to_contain("llm_caret_symbol_traced_count=505")
 expect(output).to_contain("STATUS: PASS llm-caret-claude-cli-trace")
 ```
 

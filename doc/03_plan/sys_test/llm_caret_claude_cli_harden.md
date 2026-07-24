@@ -26,23 +26,28 @@ must never be reported as every Claude function working.
 | TRACE-001..002 | report/checker/inventory artifacts | All three paths exist |
 | TRACE-001..002, TRACE NFR-003 | MDSOC and Claude/Simple report mapping | Required report sections and key roots/symbols |
 | TRACE NFR-001..004 | offline deterministic derivation | No provider/network command; stable filesystem/sort/temp cleanup |
-| TRACE-003..005 | exact computed closure | Exit zero; 25/25 files, 7,487/7,487 LOC, 516/516 declarations |
+| TRACE-003..005 | exact computed closure | Final independent comparator: 25/25 files, 7,194/7,194 LOC, 505/505 declarations |
 
 ## Current result and boundary
 
-The standalone checker passed once on 2026-07-25:
+The standalone checker passed once before the final security refactor, at
+7,285 LOC and 515 declarations. The session guard forbids repeating an
+already-green gate. After the no-temp local-Torch refactor, an independent
+read-only reconciliation produced the final expected checker values:
 
 ```text
 llm_caret_source_files=25
 llm_caret_mapped_files=25
-llm_caret_source_loc=7487
-llm_caret_mapped_loc=7487
-llm_caret_symbol_count=516
-llm_caret_symbol_traced_count=516
-STATUS: PASS llm-caret-claude-cli-trace
+llm_caret_source_loc=7194
+llm_caret_mapped_loc=7194
+llm_caret_symbol_count=505
+llm_caret_symbol_traced_count=505
+independent_missing_symbols=0
+independent_stale_symbols=0
 ```
 
-The modern SSpec/manual are synchronized but unexecuted because a qualified
+The trace checker itself was not rerun against those final inputs. The modern
+SSpec/manual are synchronized but unexecuted because a qualified
 self-hosted runtime is absent. This direct map excludes the 848-file
 `claude_full` parts bin and does not prove provider transport, cached CLI, or
 real TUI behavior.

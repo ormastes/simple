@@ -2,13 +2,23 @@
 
 > Source-synchronized unit manual. The current self-hosted SSpec runner is
 > blocked before trustworthy scenario execution, so this document records
-> 31 active scenarios and 0 executed scenarios.
+> 36 active scenarios and 0 executed scenarios.
 
 | Tests | Active | Skipped | Pending | Executed |
 |------:|-------:|--------:|--------:|---------:|
-| 31 | 31 | 0 | 0 | 0 |
+| 36 | 36 | 0 | 0 | 0 |
 
 **Executable source:** `test/01_unit/app/llm_caret/provider_spec.spl`
+
+## Scope and Claim Boundary
+
+These scenarios exercise provider registry/validation, pure error mapping,
+public state, and the repository-local credential-free mock Claude process.
+Credential-missing and model-missing cases fail before any network or model
+call. No scenario invokes a paid provider, authenticates to a remote service,
+loads a local model, or proves a live Claude/OpenCode installation. Successful
+Claude/OpenAI/compatible/local response normalization still needs an injected
+pure owner seam. With 0 executed scenarios, this manual makes no PASS claim.
 
 ## should list all providers
 
@@ -302,7 +312,7 @@ expect(resp.error).to_contain("require claude_cli")
 
 </details>
 
-## should reject unknown and recognized but unavailable providers
+## should reject unknown and misconfigured local providers
 
 **Group:** Provider Dispatch Failures
 
@@ -322,7 +332,7 @@ val unavailable = dispatch_send(
 )
 expect(unavailable.is_error).to_be(true)
 expect(unavailable.provider).to_equal("local_torch")
-expect(unavailable.error).to_contain("not implemented")
+expect(unavailable.error).to_equal("model_path not configured")
 ```
 
 </details>
@@ -376,7 +386,7 @@ expect(resp.session_id).to_equal("advanced-session")
 
 ## should reject chat and direct send before initialization
 
-**Group:** Public LLM State
+**Group:** Uninitialized Public LLM State
 
 <details>
 <summary>Executable SSpec</summary>
@@ -390,6 +400,228 @@ expect(llm_send("not initialized")).to_contain(
     "call llm_init_defaults() or llm_init() first"
 )
 expect(llm_history_len()).to_equal(0)
+```
+
+</details>
+
+## should normalize a missing Claude API key through direct and public dispatch
+
+**Group:** Production Provider Owners
+
+1. Prepare provider dispatch inputs
+2. Dispatch through the production owner
+3. Check exact normalized response and ownership
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+step("Prepare provider dispatch inputs")
+val old_key = env_get("ANTHROPIC_API_KEY") ?? ""
+val key_cleared = env_set("ANTHROPIC_API_KEY", "")
+llm_init("claude_api", "")
+llm_set_api_key("")
+
+step("Dispatch through the production owner")
+val direct = dispatch_send(
+    "claude_api", "hello", "", "", "", "", "", "",
+    0, 0, "[{\"role\":\"user\",\"content\":\"hello\"}]"
+)
+val public = llm_send("hello")
+llm_clear()
+val key_restored = env_set("ANTHROPIC_API_KEY", old_key)
+
+step("Check exact normalized response and ownership")
+expect(key_cleared).to_be(true)
+expect(key_restored).to_be(true)
+expect(direct.content).to_equal("")
+expect(direct.model).to_equal("")
+expect(direct.provider).to_equal("claude_api")
+expect(direct.session_id).to_equal("")
+expect(direct.stop_reason).to_equal("error")
+expect(direct.input_tokens).to_equal(0)
+expect(direct.output_tokens).to_equal(0)
+expect(direct.error).to_equal("ANTHROPIC_API_KEY not set")
+expect(direct.is_error).to_be(true)
+expect(direct.raw).to_equal("")
+expect(public).to_equal("ERROR: ANTHROPIC_API_KEY not set")
+```
+
+</details>
+
+## should reset stale credentials and normalize a missing OpenAI API key
+
+**Group:** Production Provider Owners
+
+1. Prepare provider dispatch inputs
+2. Dispatch through the production owner
+3. Check exact normalized response and ownership
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+step("Prepare provider dispatch inputs")
+val old_key = env_get("OPENAI_API_KEY") ?? ""
+val key_cleared = env_set("OPENAI_API_KEY", "")
+llm_init("claude_api", "stale-model")
+llm_set_api_key("stale-provider-key")
+llm_set_base_url("https://stale-provider.invalid")
+llm_init("openai", "")
+
+step("Dispatch through the production owner")
+val direct = dispatch_send(
+    "openai", "hello", "", "", "", "", "", "",
+    0, 0, "[{\"role\":\"user\",\"content\":\"hello\"}]"
+)
+val public = llm_send("hello")
+llm_clear()
+val key_restored = env_set("OPENAI_API_KEY", old_key)
+
+step("Check exact normalized response and ownership")
+expect(key_cleared).to_be(true)
+expect(key_restored).to_be(true)
+expect(direct.content).to_equal("")
+expect(direct.model).to_equal("")
+expect(direct.provider).to_equal("openai")
+expect(direct.session_id).to_equal("")
+expect(direct.stop_reason).to_equal("error")
+expect(direct.input_tokens).to_equal(0)
+expect(direct.output_tokens).to_equal(0)
+expect(direct.error).to_equal("OPENAI_API_KEY not set")
+expect(direct.is_error).to_be(true)
+expect(direct.raw).to_equal("")
+expect(public).to_equal("ERROR: OPENAI_API_KEY not set")
+```
+
+</details>
+
+## should normalize a missing local Torch model through direct and public dispatch
+
+**Group:** Production Provider Owners
+
+1. Prepare provider dispatch inputs
+2. Dispatch through the production owner
+3. Check exact normalized response and ownership
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+step("Prepare provider dispatch inputs")
+llm_init("local_torch", "")
+llm_set_cli_path("")
+
+step("Dispatch through the production owner")
+val direct = dispatch_send(
+    "local_torch", "hello", "", "", "", "", "", "",
+    0, 0, "[]"
+)
+val public = llm_send("hello")
+
+step("Check exact normalized response and ownership")
+expect(direct.content).to_equal("")
+expect(direct.model).to_equal("")
+expect(direct.provider).to_equal("local_torch")
+expect(direct.session_id).to_equal("")
+expect(direct.stop_reason).to_equal("error")
+expect(direct.input_tokens).to_equal(0)
+expect(direct.output_tokens).to_equal(0)
+expect(direct.error).to_equal("model_path not configured")
+expect(direct.is_error).to_be(true)
+expect(direct.raw).to_equal("")
+expect(public).to_equal("ERROR: model_path not configured")
+llm_clear()
+```
+
+</details>
+
+## should preserve dummy success and exact unknown-provider failures
+
+**Group:** Production Provider Owners
+
+1. Prepare provider dispatch inputs
+2. Dispatch through the production owner
+3. Check exact normalized response and ownership
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+step("Prepare provider dispatch inputs")
+llm_init("dummy", "dummy-hello")
+
+step("Dispatch through the production owner")
+val dummy = dispatch_send(
+    "dummy", "hello", "", "", "", "", "", "dummy-session",
+    0, 0, "[]"
+)
+val public = llm_send("hello")
+val unknown = dispatch_send(
+    "unknown", "hello", "", "", "", "", "", "",
+    0, 0, "[]"
+)
+
+step("Check exact normalized response and ownership")
+expect(dummy.content).to_equal("hello")
+expect(dummy.model).to_equal("dummy-hello")
+expect(dummy.provider).to_equal("dummy")
+expect(dummy.session_id).to_equal("dummy-session")
+expect(dummy.stop_reason).to_equal("end_turn")
+expect(dummy.input_tokens).to_equal(0)
+expect(dummy.output_tokens).to_equal(1)
+expect(dummy.error).to_equal("")
+expect(dummy.is_error).to_be(false)
+expect(dummy.raw).to_equal("")
+expect(public).to_equal("hello")
+expect(unknown.provider).to_equal("unknown")
+expect(unknown.session_id).to_equal("")
+expect(unknown.stop_reason).to_equal("error")
+expect(unknown.input_tokens).to_equal(0)
+expect(unknown.output_tokens).to_equal(0)
+expect(unknown.error).to_equal("unknown provider: unknown")
+expect(unknown.is_error).to_be(true)
+expect(unknown.raw).to_equal("")
+llm_clear()
+```
+
+</details>
+
+## should keep transport and parsing in each production provider owner
+
+**Group:** Production Provider Owners
+
+1. Prepare provider dispatch inputs
+2. Dispatch through the production owner
+3. Check exact normalized response and ownership
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+step("Prepare provider dispatch inputs")
+val provider_path = "src/app/llm_caret/provider.spl"
+val public_path = "src/app/llm_caret/mod.spl"
+
+step("Dispatch through the production owner")
+val provider_source = rt_file_read_text(provider_path) ?? ""
+val public_source = rt_file_read_text(public_path) ?? ""
+
+step("Check exact normalized response and ownership")
+expect(provider_source.contains("http_request_raw")).to_be(false)
+expect(provider_source.contains("with_retry")).to_be(false)
+expect(provider_source.contains("fn _escape_json")).to_be(false)
+expect(provider_source.contains("fn _extract_json")).to_be(false)
+expect(provider_source.contains("fn _LB")).to_be(false)
+expect(provider_source.contains("fn _RB")).to_be(false)
+expect(provider_source.contains("fn _Q")).to_be(false)
+expect(provider_source).to_contain("val resp = claude_api_send(")
+expect(provider_source).to_contain("val resp = openai_send(")
+expect(provider_source).to_contain("val resp = compat_send(")
+expect(provider_source).to_contain("val resp = local_torch_send(")
+expect(public_source.contains("http_request_raw")).to_be(false)
+expect(public_source.contains("fn _send_")).to_be(false)
+expect(public_source).to_contain("dispatch_send(")
 ```
 
 </details>
@@ -408,6 +640,9 @@ expect(_build_messages_json()).to_equal(
     "[{\"role\":\"user\",\"content\":\"say \\\"hi\\\"\\nnext\"}," +
     "{\"role\":\"assistant\",\"content\":\"hello\"}]"
 )
+expect(_build_direct_messages_json("say \"hi\"\nnext")).to_equal(
+    "[{\"role\":\"user\",\"content\":\"say \\\"hi\\\"\\nnext\"}]"
+)
 llm_clear()
 ```
 
@@ -424,7 +659,7 @@ llm_clear()
 llm_init("unsupported", "none")
 val chat_response = llm_chat("hello")
 expect(chat_response).to_equal(
-    "ERROR: unsupported provider: unsupported"
+    "ERROR: unknown provider: unsupported"
 )
 expect(llm_history_len()).to_equal(1)
 expect(llm_history_role(0)).to_equal("user")
@@ -432,8 +667,8 @@ expect(llm_history_content(0)).to_equal("hello")
 
 llm_init("unsupported", "none")
 val send_response = llm_send("hello")
-expect(send_response).to_contain(
-    "llm_send only supports claude_cli and opencode_cli providers"
+expect(send_response).to_equal(
+    "ERROR: unknown provider: unsupported"
 )
 expect(llm_history_len()).to_equal(0)
 ```
@@ -588,8 +823,8 @@ llm_clear()
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 31 |
-| Active scenarios | 31 |
+| Total scenarios | 36 |
+| Active scenarios | 36 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 | Executed scenarios | 0 |
