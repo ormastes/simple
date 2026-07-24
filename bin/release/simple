@@ -8,4 +8,20 @@ if [ ! -x "$runtime" ]; then
   runtime="$repo_root/release/x86_64-unknown-linux-gnu/simple"
 fi
 chmod +x "$runtime" 2>/dev/null || true
+
+# Fork-bomb guard (2026-07-24, doc/08_tracking/bug/cli_compile_delegation_fork_bomb_wrapper_2026-07-24.md):
+# the full CLI's external-compile path (driver_public_compile.spl
+# aot_vhdl_file -> _run_compile_to_path -> find_simple_binary) resolves THIS
+# wrapper as the "external" compiler and spawns it recursively with no loop
+# guard — an unbounded self-delegation chain (observed ~35k processes, took
+# down a Vivado impl run via fork/RAM exhaustion). Every hop passes through
+# this wrapper, so a depth flag here terminates the chain: on the first
+# re-entry, exec the Rust seed (which really implements --backend=vhdl and
+# never delegates) instead of the self-hosted CLI.
+seed="$(cd "$script_dir/../.." && pwd)/src/compiler_rust/target/bootstrap/simple"
+if [ -n "${SIMPLE_WRAPPER_REENTERED:-}" ] && [ -x "$seed" ]; then
+  exec "$seed" "$@"
+fi
+export SIMPLE_WRAPPER_REENTERED=1
+
 exec "$runtime" "$@"
