@@ -1,0 +1,32 @@
+# Cranelift string literals passed to rt_string_new_literal must use stable
+# module data. The runtime interns by (address, length); stack addresses are
+# reused across functions and can alias unrelated literal contents.
+#
+# @cover src/compiler_rust/compiler/src/codegen/instr/helpers.rs
+# @cover src/compiler_rust/runtime/src/value/collections.rs
+
+use std.nogc_sync_mut.io.file_ops.{rt_file_read_text}
+
+describe "Cranelift string literal storage contract":
+    it "uses module data instead of reusable stack slots":
+        val helper_path = "src/compiler_rust/compiler/src/codegen/instr/helpers.rs"
+        val helper_source = rt_file_read_text(helper_path) ?? ""
+        val helper_start = helper_source.index_of("pub(crate) fn create_string_constant") ?? -1
+        val next_helper = helper_source.index_of("fn fnv1a_hash") ?? -1
+
+        expect(helper_start).to_be_greater_than(-1)
+        expect(next_helper).to_be_greater_than(helper_start)
+
+        val body = helper_source.substring(helper_start, next_helper)
+        expect(body).to_contain("declare_named_bytes(ctx, bytes)?")
+        expect(body).to_contain("declare_data_in_func(data_id, builder.func)")
+        expect(body).to_contain("global_value(types::I64, global)")
+        expect(body).to_not_contain("create_sized_stack_slot")
+        expect(body).to_not_contain("stack_addr")
+
+        val runtime_source = rt_file_read_text(
+            "src/compiler_rust/runtime/src/value/collections.rs"
+        ) ?? ""
+        expect(runtime_source).to_contain(
+            "Callers MUST only pass static literal data (rodata)"
+        )

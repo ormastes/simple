@@ -211,6 +211,46 @@ fn main() -> i64:
 }
 
 #[test]
+fn native_equal_length_literals_from_separate_functions_keep_distinct_storage() {
+    let code = r#"
+extern fn rt_string_eq(a: text, b: text) -> i64
+
+fn literal_val() -> text:
+    return "val"
+
+fn literal_pub() -> text:
+    return "pub"
+
+fn literal_receive() -> text:
+    return "receive"
+
+fn literal_newtype() -> text:
+    return "newtype"
+
+fn main() -> i64:
+    val value_val = literal_val()
+    val value_pub = literal_pub()
+    val value_receive = literal_receive()
+    val value_newtype = literal_newtype()
+    if rt_string_eq(value_val, "val") != 1:
+        return 1
+    if rt_string_eq(value_pub, "pub") != 1:
+        return 2
+    if rt_string_eq(value_receive, "receive") != 1:
+        return 3
+    if rt_string_eq(value_newtype, "newtype") != 1:
+        return 4
+    if rt_string_eq(value_val, value_pub) != 0:
+        return 5
+    if rt_string_eq(value_receive, value_newtype) != 0:
+        return 6
+    return 42
+"#;
+
+    assert_eq!(compile_native_and_run(code), 42);
+}
+
+#[test]
 #[ignore = "OPEN: Rust-seed native inlining corrupts false bool arguments; remove after the linked bug's single- and two-call probes pass"]
 fn native_bool_argument_false_survives_inlined_calls() {
     let code = r#"
