@@ -20,6 +20,10 @@ if [ "${1:-}" = --producer ]; then
     while [ "$i" -le "$limit" ]; do
         if [ "$mode" = malformed ] && [ "$i" -eq 2 ]; then
             printf '%s\n' "phase2:surface:file:released path=module_2.spl seq=2 heap_registry=bad"
+        elif [ "$mode" = invalid-seq ] && [ "$i" -eq 2 ]; then
+            printf '%s\n' "phase2:surface:file:released path=module_2.spl seq=bad heap_registry=101000"
+        elif [ "$mode" = out-of-order ] && [ "$i" -eq 2 ]; then
+            printf '%s\n' "phase2:surface:file:released path=module_2.spl seq=1 heap_registry=101000"
         else
             heap=$((100000 + (i - 1) * 1000))
             printf 'phase2:surface:file:released path=module_%s.spl seq=%s heap_registry=%s\n' "$i" "$i" "$heap"
@@ -71,5 +75,21 @@ if run_live malformed >"$tmp_dir/malformed.out" 2>&1; then
 fi
 grep -q 'invalid heap registry count' "$tmp_dir/malformed.out" ||
     fail "malformed producer failure was not diagnosed"
+
+if run_live invalid-seq >"$tmp_dir/invalid-seq.out" 2>&1; then
+    fail "invalid sequence producer unexpectedly passed"
+fi
+grep -q 'release markers must be ordered: reason=invalid-seq-field expected_seq=2' "$tmp_dir/invalid-seq.out" ||
+    fail "invalid sequence producer failure was not diagnosed"
+grep -Fq "raw_line='phase2:surface:file:released path=module_2.spl seq=bad heap_registry=101000'" "$tmp_dir/invalid-seq.out" ||
+    fail "invalid sequence producer did not report the rejected marker"
+
+if run_live out-of-order >"$tmp_dir/out-of-order.out" 2>&1; then
+    fail "out-of-order producer unexpectedly passed"
+fi
+grep -q 'release markers must be ordered: reason=sequence-mismatch expected_seq=2' "$tmp_dir/out-of-order.out" ||
+    fail "out-of-order producer failure was not diagnosed"
+grep -Fq "raw_line='phase2:surface:file:released path=module_2.spl seq=1 heap_registry=101000'" "$tmp_dir/out-of-order.out" ||
+    fail "out-of-order producer did not report the rejected marker"
 
 printf '%s\n' 'stage4 release slope checker self-test: PASS'

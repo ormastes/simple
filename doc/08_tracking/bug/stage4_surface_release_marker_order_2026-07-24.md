@@ -2,8 +2,8 @@
 
 ## Status
 
-Open. The live slope gate reaches the streaming marker parser but stops with
-`release markers must be ordered`.
+Open. Marker framing is fixed, but streaming builder state still loses surfaces
+before an alias is resolved.
 
 ## Reproduction
 
@@ -24,16 +24,27 @@ Required activation:
 - Stage-3 compiler build: 674 compiled, 0 failed.
 - Stage-3 canonical candidate frontend smoke: PASS.
 - Checker activation: enabled.
-- Final diagnostic: `release markers must be ordered`.
+- The original opaque ordering failure was two un-terminated `eprint` records
+  concatenated with a runtime error. Release records now end in one newline.
+- Self-hosted `Result` helper-method dispatch was replaced with exhaustive
+  matching.
+- `ModuleSurfaceBuilder` whole-struct return/assignment, assigned array `push`,
+  and an alias bounds guard were added.
+- Final diagnostic after those fixes:
+  `invalid physical module surface index for alias:
+  path=src/lib/nogc_async_mut/cli/log_modes.spl index=8 len=2`.
+- The producer emitted nine release records before the alias failure, while the
+  retained surface array contained only two entries.
 - No Stage-4 binary or bounded-slope PASS was produced.
 
-Earlier failures in the same bounded cycle were a wrong bootstrap entry and
-self-hosted generic `Result` method dispatch. Both were corrected before this
-failure.
+The checker self-test covers valid termination, early EOF, invalid heap, invalid
+sequence, and out-of-order sequence while proving process-group cleanup.
 
 ## Next step
 
-Capture the rejected marker and its expected sequence in the checker diagnostic
-without changing acceptance semantics, then determine whether the producer
-emits a malformed/interleaved line or restarts its sequence during worker
-handoff. Do not repeat the live build until that diagnostic is available.
+Add bounded state diagnostics around the unique-source helper input, post-add
+builder, caller match assignment, and post-`ast_reset` builder. Preserve the
+four-field release record. Use that single run to distinguish self-hosted
+`Result<ModuleSurfaceBuilder, text>` transport loss from `ast_reset` invalidating
+the surface array or retained AST-backed values. Do not repeat the current live
+command without that instrumentation.

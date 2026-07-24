@@ -19,15 +19,23 @@ activation_enabled() {
 validate_fixture() {
     awk '
 function bad(message) { print message > "/dev/stderr"; failed=1; exit 1 }
+function quoted_raw(raw, value) { value = raw; gsub(/\047/, "\047\\\\\047\047", value); return "\047" value "\047" }
+function bad_ordered(reason, expected) {
+    print "release markers must be ordered: reason=" reason " expected_seq=" expected " raw_line=" quoted_raw($0) > "/dev/stderr"
+    failed=1
+    exit 1
+}
 $1 == "phase2:surface:file:released" {
     if (count < 10) {
-        if (NF != 4 || $2 !~ /^path=.+/ || $3 !~ /^seq=[0-9]+$/) bad("release markers must be ordered")
+        if (NF != 4 || $1 != "phase2:surface:file:released") bad_ordered("field-count-or-prefix", count + 1)
+        if ($2 !~ /^path=.+/) bad_ordered("invalid-path-field", count + 1)
+        if ($3 !~ /^seq=[0-9]+$/) bad_ordered("invalid-seq-field", count + 1)
         if ($4 !~ /^heap_registry=[0-9]+$/) bad("invalid heap registry count")
         path = substr($2, 6)
         seq = substr($3, 5) + 0
         heap = substr($4, 15) + 0
         if (seen[path]++) bad("release marker path must be unique")
-        if (seq != count + 1) bad("release markers must be ordered")
+        if (seq != count + 1) bad_ordered("sequence-mismatch", count + 1)
         count++
         if (count == 1) first = heap
         if (count == 10) {
@@ -43,8 +51,20 @@ $1 == "phase2:surface:file:released" {
         printf "raced-marker-after-stop seq=%s path=%s\n", seq, path
     }
 }
+
 END { if (!failed && count < 10) { print "release stream ended before marker 10" > "/dev/stderr"; exit 1 } }
 ' "$fixture"
+}
+
+quote_raw_line() {
+    printf "'"
+    printf '%s' "$1" | sed "s/'/'\\\\''/g"
+    printf "'"
+}
+
+ordered_failure_message() {
+    printf 'release markers must be ordered: reason=%s expected_seq=%s raw_line=' "$1" "$2"
+    quote_raw_line "$3"
 }
 
 self_test=0
@@ -192,20 +212,23 @@ while IFS= read -r line || [ -n "$line" ]; do
             set -- $line
             if [ "$#" -ne 4 ] || [ "$1" != "phase2:surface:file:released" ]; then
                 stream_failed=1
-                stream_message="release markers must be ordered"
+                stream_message=$(ordered_failure_message field-count-or-prefix "$((marker_count + 1))" "$line")
                 start_bounded_stop
                 break
             fi
             case "$2" in path=?*) marker_path=${2#path=} ;; *)
-                stream_failed=1; stream_message="release markers must be ordered"; start_bounded_stop; break ;;
+                stream_failed=1; stream_message=$(ordered_failure_message invalid-path-field "$((marker_count + 1))" "$line"); start_bounded_stop; break ;;
             esac
-            case "$3" in seq=[0-9]*) marker_seq=${3#seq=} ;; *)
-                stream_failed=1; stream_message="release markers must be ordered"; start_bounded_stop; break ;;
+            case "$3" in seq=*) marker_seq=${3#seq=} ;; *)
+                stream_failed=1; stream_message=$(ordered_failure_message invalid-seq-field "$((marker_count + 1))" "$line"); start_bounded_stop; break ;;
             esac
-            case "$4" in heap_registry=[0-9]*) marker_heap=${4#heap_registry=} ;; *)
+            case "$marker_seq" in ''|*[!0-9]*)
+                stream_failed=1; stream_message=$(ordered_failure_message invalid-seq-field "$((marker_count + 1))" "$line"); start_bounded_stop; break ;;
+            esac
+            case "$4" in heap_registry=*) marker_heap=${4#heap_registry=} ;; *)
                 stream_failed=1; stream_message="invalid heap registry count"; start_bounded_stop; break ;;
             esac
-            case "$marker_seq:$marker_heap" in *[!0-9:]*)
+            case "$marker_heap" in ''|*[!0-9]*)
                 stream_failed=1; stream_message="invalid heap registry count"; start_bounded_stop; break ;;
             esac
             case "$seen_paths" in *"|$marker_path|"*)
@@ -214,7 +237,7 @@ while IFS= read -r line || [ -n "$line" ]; do
             expected_seq=$((marker_count + 1))
             if [ "$marker_seq" -ne "$expected_seq" ]; then
                 stream_failed=1
-                stream_message="release markers must be ordered"
+                stream_message=$(ordered_failure_message sequence-mismatch "$expected_seq" "$line")
                 start_bounded_stop
                 break
             fi
