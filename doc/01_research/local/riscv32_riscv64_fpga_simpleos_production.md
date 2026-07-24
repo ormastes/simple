@@ -233,3 +233,34 @@ models, VHDL backend, manifests, and board wrappers. It removes the parallel
 empty/string-emitted CPU path and integrates one architecture capability at a
 time through the real compiler. An external core such as VexRiscv can remain a
 differential oracle, but cannot satisfy the final “Simple-generated CPU” row.
+
+<!-- codex-research -->
+## 2026-07-24 Stage4 VHDL Metadata Transport Analysis
+
+The canonical RV32 probe built by the pure-Simple compiler reached VHDL catalog
+construction with 139 metadata row identities intact, including exact
+`lib.hardware.rv32i_rtl.protected_entry` rows for
+`core32_protected_product_entry`, `core32_protected_clocked_entry`, and
+`core32_product_cycle`, but still reported no hardware entry. This rules out
+AST capture and `CompileContext` row-array loss: the driver only publishes rows
+after `parse_vhdl_hardware_attrs(...).is_hardware` is true.
+
+The remaining transport record still mixed ABI-sensitive `bool` and enum
+values with text and arrays. This repeats the repository's documented Stage3
+aggregate/enum-payload failure class in
+`doc/08_tracking/bug/stage3_freestanding_struct_by_value_corrupts_pmm_2026-07-11.md`.
+It also carried a redundant `is_hardware` value even though row presence already
+means `@hardware` in both AST and HIR producers.
+
+Selected implementation contract:
+
+- a sidecar row exists only for a hardware function, so the catalog restores
+  `is_hardware = true` from row presence;
+- all remaining flags and enum variants cross the Stage4 boundary as validated
+  `i64` values;
+- generic and return metadata remain parallel text arrays with strict length
+  checks;
+- duplicate exact/normalized identities fail closed;
+- nested compiler metadata is reconstructed only inside the catalog;
+- trace mode records the primitive row flags, match result, root membership,
+  and recovered hardware classification.

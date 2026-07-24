@@ -14,7 +14,7 @@ use compiler.core.ast.{DECL_CE, decl_ce_block}
 use compiler.core.ast.{decl_fn, decl_extern_fn, decl_struct_def}
 use compiler.core.ast.{decl_val_binding, decl_lazy_val_binding, decl_var_binding}
 use compiler.core.ast.{decl_use_import, decl_export_names, decl_enum_def, decl_set_lazy}
-use compiler.core.ast.{decl_set_hardware, decl_set_clocked_args}
+use compiler.core.ast.{decl_set_hardware, decl_set_clocked_args, decl_set_vhdl_generic_args, decl_set_flatten_struct_output}
 use compiler.core.ast.{decl_impl_block}
 use compiler.core.ast.{decl_set_comptime}
 use compiler.core.ast.{decl_set_visibility_text}
@@ -265,13 +265,22 @@ fn parser_decorator_arg_text(raw: text) -> text:
             return raw.substring(1, raw.len() - 1)
     raw
 
-# Pending @hardware/@clocked annotations: they stack ahead of the fn decl
+# Pending VHDL annotations: they stack ahead of the fn decl
 # (each decorator is consumed by its own module-body loop iteration), so the
 # flags must survive until the fn itself is parsed.
 var PENDING_HARDWARE: i64 = 0
 var PENDING_CLOCKED_ARGS: [text] = []
+var PENDING_VHDL_GENERIC_ARGS: [i64] = []
+var PENDING_FLATTEN_STRUCT_OUTPUT: i64 = 0
+
+fn parser_reset_pending_vhdl_decorators():
+    PENDING_HARDWARE = 0
+    PENDING_CLOCKED_ARGS = []
+    PENDING_VHDL_GENERIC_ARGS = []
+    PENDING_FLATTEN_STRUCT_OUTPUT = 0
 
 fn parse_module_body():
+    parser_reset_pending_vhdl_decorators()
     for i in 0..100000:
         parser_skip_newlines_and_semicolons()
         if par_kind_get() == 190:
@@ -283,7 +292,13 @@ fn parse_module_body():
             parser_skip_newlines_and_semicolons()
             val visible_decl = parse_module_decl_with_visibility(i, parsed_visibility)
             if visible_decl >= 0:
+                if PENDING_HARDWARE == 1:
+                    decl_set_hardware(visible_decl, 1)
+                    decl_set_clocked_args(visible_decl, PENDING_CLOCKED_ARGS)
+                    decl_set_vhdl_generic_args(visible_decl, PENDING_VHDL_GENERIC_ARGS)
+                    decl_set_flatten_struct_output(visible_decl, PENDING_FLATTEN_STRUCT_OUTPUT)
                 module_add_decl(visible_decl)
+                parser_reset_pending_vhdl_decorators()
             continue
         if par_kind_get() == 182:
             # Stray dedent at module level -- skip it
@@ -294,6 +309,7 @@ fn parse_module_body():
             if par_kind_get() == 20:
                 val d = parse_fn_decl(1)  # 1 = is_async
                 module_add_decl(d)
+                parser_reset_pending_vhdl_decorators()
             else:
                 parser_error("expected 'fn' after 'async'")
         elif par_kind_get() == 20:
@@ -301,49 +317,61 @@ fn parse_module_body():
             if PENDING_HARDWARE == 1:
                 decl_set_hardware(d, 1)
                 decl_set_clocked_args(d, PENDING_CLOCKED_ARGS)
-                PENDING_HARDWARE = 0
-                PENDING_CLOCKED_ARGS = []
+                decl_set_vhdl_generic_args(d, PENDING_VHDL_GENERIC_ARGS)
+                decl_set_flatten_struct_output(d, PENDING_FLATTEN_STRUCT_OUTPUT)
             module_add_decl(d)
+            parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 34:
             # Module-level `me name(self: T, ...)` — parsed as a plain fn with
             # an explicit self param (parity with the Rust parser, which routes
             # top-level Me to parse_function).
             val me_d = parse_fn_decl(0)
             module_add_decl(me_d)
+            parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 25:
             parser_advance()
             val d = parse_extern_fn_decl()
             module_add_decl(d)
+            parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 23:
             val d = parse_struct_decl(false)
             module_add_decl(d)
+            parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 24:
             val d = parse_enum_decl()
             module_add_decl(d)
+            parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 31:
             # class is treated like struct (fields + methods) but keeps
             # reference semantics — see decl_set_is_value_type in parse_struct_decl.
             val d = parse_struct_decl(true)
             module_add_decl(d)
+            parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 32:
             val d = parse_impl_decl()
             module_add_decl(d)
+            parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 27:
             val d = parse_use_decl()
             module_add_decl(d)
+            parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 26:
             val d = parse_export_decl()
             module_add_decl(d)
+            parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 21:
             val d = parse_val_decl()
             module_add_decl(d)
+            parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 194:
             parser_advance()
             val d = parse_lazy_val_decl()
             module_add_decl(d)
+            parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 22:
             val d = parse_var_decl()
             module_add_decl(d)
+            parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 188:
             # const fn name(): or const binding: same as val/fn at module level
             val decl_start = lex_token_start_get()
@@ -355,6 +383,7 @@ fn parse_module_body():
                 val cfd = parse_fn_decl(0)
                 decl_set_comptime(cfd)
                 module_add_decl(cfd)
+                parser_reset_pending_vhdl_decorators()
             else:
                 val const_name = par_text_get()
                 parser_expect(6)
@@ -367,22 +396,27 @@ fn parse_module_body():
                 val decl_span = flat_span_new(decl_start, lex_token_start_get(), decl_line, decl_col)
                 val cd = decl_val_binding(const_name, const_type, const_init, decl_span)
                 module_add_decl(cd)
+                parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 40:
             val if_expr = parse_if_expr()
             val d = decl_val_binding("_if_" + int_to_str(i), -1, if_expr, -1)
             module_add_decl(d)
+            parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 45:
             val for_expr = parse_for_expr()
             val d = decl_val_binding("_for_" + int_to_str(i), -1, for_expr, -1)
             module_add_decl(d)
+            parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 46:
             val while_expr = parse_while_expr()
             val d = decl_val_binding("_while_" + int_to_str(i), -1, while_expr, -1)
             module_add_decl(d)
+            parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 28:
             # import X.{Y, Z} -- treat like use
             val d = parse_use_decl()
             module_add_decl(d)
+            parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 6 and par_text_get() == "mod":
             # `mod pkg.member` package-member declaration (260+ uses across
             # src/lib, e.g. std.common.json's `mod json.types`). Not a lexer
@@ -406,10 +440,12 @@ fn parse_module_body():
             if mod_last_seg != "":
                 val mod_d = decl_use_import("." + mod_last_seg, [], 0)
                 module_add_decl(mod_d)
+                parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 6 and is_domain_block_kind(par_text_get()) and current_ident_followed_by_lbrace():
             val block_kind = par_text_get()
             val d = parse_module_domain_block_decl(i, block_kind)
             module_add_decl(d)
+            parser_reset_pending_vhdl_decorators()
             parser_skip_newlines_and_semicolons()
         elif par_kind_get() == 33:
             # trait is parsed like struct (skip body), but must NOT
@@ -418,22 +454,27 @@ fn parse_module_body():
             # so collides with real `impl Trait for Struct` dispatch.
             val d = parse_struct_or_trait_decl(false, true)
             module_add_decl(d)
+            parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 196:
             # extend TypeName: adds methods to an existing type
             val d = parse_impl_decl()
             module_add_decl(d)
+            parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 209:
             val d = parse_bitfield_decl()
             module_add_decl(d)
+            parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 212:
             # cli Name: declarative arg parsing block
             val cli_d = parse_cli_decl()
             module_add_decl(cli_d)
+            parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 205:
             # ce NAME: computation expression block at module level
             parser_advance()
             val ce_d = parse_ce_decl()
             module_add_decl(ce_d)
+            parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 171:
             # Decorator: @gpu, @gpu_kernel, @simd, @bounds(...), @derive(Eq, Hash, Debug), etc.
             # Also: @allow(...), @inline, @no_gc, @tag:... and other file-level annotations
@@ -500,6 +541,12 @@ fn parse_module_body():
                         if par_kind_get() == 6:
                             PENDING_CLOCKED_ARGS.push(par_text_get())
                         parser_advance()
+                        if par_kind_get() == 160:
+                            parser_advance()
+                    elif decorator_name == "generic":
+                        PENDING_VHDL_GENERIC_ARGS.push(parse_expr())
+                        if par_kind_get() == 160:
+                            parser_advance()
                     else:
                         parser_advance()
                 parser_expect(141)
@@ -509,6 +556,11 @@ fn parse_module_body():
             elif decorator_name == "clocked":
                 # Args already collected into PENDING_CLOCKED_ARGS above.
                 pass_dn
+            elif decorator_name == "generic":
+                # Args already collected into PENDING_VHDL_GENERIC_ARGS above.
+                pass_dn
+            elif decorator_name == "flatten_struct_output":
+                PENDING_FLATTEN_STRUCT_OUTPUT = 1
             elif decorator_name == "gpu_kernel" or decorator_name == "gpu":
                 if par_kind_get() == 20 or par_kind_get() == 34:
                     val d = parse_fn_decl(0)
@@ -520,11 +572,13 @@ fn parse_module_body():
                     if gpu_backends_arg.len() > 0:
                         decl_set_gpu_backends_text(d, gpu_backends_arg)
                     module_add_decl(d)
+                    parser_reset_pending_vhdl_decorators()
             elif decorator_name == "simd":
                 if par_kind_get() == 20 or par_kind_get() == 34:
                     val d = parse_fn_decl(0)
                     decl_is_simd[d] = 1
                     module_add_decl(d)
+                    parser_reset_pending_vhdl_decorators()
             elif decorator_name == "packed":
                 if par_kind_get() == 23:
                     val d = parse_struct_decl(false)
@@ -536,6 +590,7 @@ fn parse_module_body():
                         pfi = pfi + 1
                     decl_is_packed[d] = 1
                     module_add_decl(d)
+                    parser_reset_pending_vhdl_decorators()
             elif decorator_name == "derive":
                 val is_class: bool = par_kind_get() == 31
                 val is_struct: bool = par_kind_get() == 23
@@ -545,6 +600,7 @@ fn parse_module_body():
                     module_add_decl(d)
                     # Generate derived trait method implementations
                     generate_derive_impls(d, derive_traits)
+                    parser_reset_pending_vhdl_decorators()
             else:
                 # Unknown annotation (e.g. @allow(...), @inline, @no_gc, @bounds(...), etc.)
                 # The annotation tokens have already been consumed above (@ + name + args).
@@ -576,6 +632,7 @@ fn parse_module_body():
             val nt_field_bits: [i64] = [-1]
             val nt_d = decl_struct_def(nt_name, nt_field_names, nt_field_types, nt_field_defaults, nt_field_bits, 0)
             module_add_decl(nt_d)
+            parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 198:
             # newtype Meters = i64 -- wrapper struct with single 'value' field
             # For numeric inner types, auto-derives __add__, __sub__, __mul__, __div__, __eq__, __lt__, __gt__
@@ -594,6 +651,7 @@ fn parse_module_body():
             val nt_field_bits: [i64] = [-1]
             val nt_d = decl_struct_def(nt_name, nt_field_names, nt_field_types, nt_field_defaults, nt_field_bits, 0)
             module_add_decl(nt_d)
+            parser_reset_pending_vhdl_decorators()
 
             # Check if inner type is numeric — auto-derive operator methods
             val inner_name = type_tag_name(inner_type)
@@ -707,6 +765,7 @@ fn parse_module_body():
             val asm_expr = parse_expr()
             val d = decl_val_binding("_asm_" + int_to_str(i), -1, asm_expr, -1)
             module_add_decl(d)
+            parser_reset_pending_vhdl_decorators()
             parser_skip_newlines_and_semicolons()
         elif par_kind_get() == 181:
             # Stray indent at module level -- skip it
@@ -715,16 +774,19 @@ fn parse_module_body():
             # on pc{...} use handler form [priority N]
             val d = parse_aop_advice_decl()
             module_add_decl(d)
+            parser_reset_pending_vhdl_decorators()
             parser_skip_newlines_and_semicolons()
         elif par_kind_get() == 217:
             # forbid pc{...} "message"
             val d = parse_arch_rule_decl("forbid")
             module_add_decl(d)
+            parser_reset_pending_vhdl_decorators()
             parser_skip_newlines_and_semicolons()
         elif par_kind_get() == 218:
             # allow pc{...} "message"
             val d = parse_arch_rule_decl("allow")
             module_add_decl(d)
+            parser_reset_pending_vhdl_decorators()
             parser_skip_newlines_and_semicolons()
         else:
             # Handle bare 'print' and 'from' at module level
@@ -771,6 +833,7 @@ fn parse_module_body():
                         parser_advance()
                     val fd = decl_use_import(from_path, from_names, 0)
                     module_add_decl(fd)
+                    parser_reset_pending_vhdl_decorators()
                     parser_skip_newlines_and_semicolons()
                 elif par_text_get() == "comptime":
                     # comptime val name = expr -- evaluated eagerly (treat like val)
@@ -778,10 +841,12 @@ fn parse_module_body():
                     if par_kind_get() == 21 or par_kind_get() == 22:
                         val d = parse_val_decl()
                         module_add_decl(d)
+                        parser_reset_pending_vhdl_decorators()
                     elif par_kind_get() == 20:
                         val ctfd = parse_fn_decl(0)
                         decl_set_comptime(ctfd)
                         module_add_decl(ctfd)
+                        parser_reset_pending_vhdl_decorators()
                     elif par_kind_get() == 161:
                         # comptime: block at module level -- wrap body stmts in an expr_block
                         parser_advance()
@@ -790,10 +855,12 @@ fn parse_module_body():
                         val ct_blk_expr = expr_block(ct_blk_body, ct_blk_unit, 0)
                         val ctbd = decl_val_binding("_ct_blk_" + int_to_str(i), -1, ct_blk_expr, -1)
                         module_add_decl(ctbd)
+                        parser_reset_pending_vhdl_decorators()
                     else:
                         val ct_expr = parse_expr()
                         val ctd = decl_val_binding("_ct_" + int_to_str(i), -1, ct_expr, -1)
                         module_add_decl(ctd)
+                        parser_reset_pending_vhdl_decorators()
                     parser_skip_newlines_and_semicolons()
                 elif par_text_get() == "print":
                     parser_warn_print_if_needed()
@@ -816,17 +883,20 @@ fn parse_module_body():
                         print_call = expr_call(callee1, args1, 0)
                     val d = decl_val_binding("_expr_" + int_to_str(i), -1, print_call, -1)
                     module_add_decl(d)
+                    parser_reset_pending_vhdl_decorators()
                     parser_skip_newlines_and_semicolons()
                 else:
                     val expression = parse_expr()
                     val d = decl_val_binding("_expr_" + int_to_str(i), -1, expression, -1)
                     module_add_decl(d)
+                    parser_reset_pending_vhdl_decorators()
                     parser_skip_newlines_and_semicolons()
             else:
                 # Module-level expression/statement
                 val expression = parse_expr()
                 val d = decl_val_binding("_expr_" + int_to_str(i), -1, expression, -1)
                 module_add_decl(d)
+                parser_reset_pending_vhdl_decorators()
                 parser_skip_newlines_and_semicolons()
 
 # ===== Exports =====

@@ -144,12 +144,33 @@ impl MirLowering:
             lambda_bindings: {},
             lambda_capture_snapshot: {},
             current_has_vhdl_metadata: false,
+            canonical_type_symbols: {},
+            next_canonical_type_symbol: 1000000000,
             global_symbol_ids: {},
             target_context: target_context
         )
 
     fn symbol_id_value(symbol: SymbolId) -> i64:
         symbol.id
+
+    me canonical_mir_type_symbol(symbol: SymbolId) -> SymbolId:
+        val symbol_info = self.symbols.get_symbol(symbol)
+        match symbol_info:
+            case Some(info):
+                val defining_module = match info.defining_module:
+                    case Some(value): value
+                    case None: ""
+                if defining_module == "":
+                    return symbol
+                val key = "{defining_module}.{info.name}"
+                if val id = self.canonical_type_symbols.get(key):
+                    return SymbolId(id: id)
+                val id = self.next_canonical_type_symbol
+                self.next_canonical_type_symbol = id + 1
+                self.canonical_type_symbols[key] = id
+                SymbolId(id: id)
+            case None:
+                symbol
 
     me register_enum_runtime_name(runtime_name: text, enum_name: text, span: Span?):
         val runtime_id = (hm_hash_text(runtime_name) % 2147483646) + 2
@@ -469,6 +490,7 @@ impl MirLowering:
 
     me lower_module(module: HirModule) -> MirModule:
         """Lower HIR module to MIR."""
+        self.symbols = module.symbols
         var function_names: [text] = []
         for func in module.functions.values():
             function_names.push(func.name)
@@ -1018,8 +1040,9 @@ impl MirLowering:
         var bldr = self.builder
         var module = bldr.module
         var types = module.types
-        types[struct_def.symbol] = MirTypeDef(
-            symbol: struct_def.symbol,
+        val canonical_symbol = self.canonical_mir_type_symbol(struct_def.symbol)
+        types[canonical_symbol] = MirTypeDef(
+            symbol: canonical_symbol,
             name: struct_def.name,
             kind: MirTypeDefKind.Struct(fields),
             is_export_c: false,
@@ -1061,8 +1084,9 @@ impl MirLowering:
         var bldr = self.builder
         var module = bldr.module
         var types = module.types
-        types[class_def.symbol] = MirTypeDef(
-            symbol: class_def.symbol,
+        val canonical_symbol = self.canonical_mir_type_symbol(class_def.symbol)
+        types[canonical_symbol] = MirTypeDef(
+            symbol: canonical_symbol,
             name: class_def.name,
             kind: MirTypeDefKind.Struct(fields),
             is_export_c: is_export_c,
