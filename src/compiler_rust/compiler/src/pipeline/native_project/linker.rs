@@ -611,15 +611,26 @@ impl NativeProjectBuilder {
         let live = temp_dir.join("stage4_live_entry.o");
         let cc = target_c_compiler(effective_target());
         let mut command = std::process::Command::new(&cc);
-        command.arg("-nostdlib").arg("-Wl,-r");
         #[cfg(target_os = "linux")]
         command
+            .arg("-nostdlib")
+            .arg("-Wl,-r")
             .arg("-no-pie")
             .arg("-Wl,--gc-sections")
             .arg("-Wl,-u,main")
             .arg("-Wl,-u,spl_main");
+        // ld64 rejects `-r` together with `-dead_strip`, and a non-stripped
+        // relocatable projection keeps runtime references from unreachable
+        // closure code (kernel port I/O, virtio, baremetal intrinsics) that no
+        // hosted provider can ever own. Use a dead-stripped trial link that
+        // tolerates dangling references instead; its undefined imports are
+        // exactly the live runtime requests.
         #[cfg(target_os = "macos")]
-        command.arg("-Wl,-u,_main").arg("-Wl,-u,_spl_main");
+        command
+            .arg("-Wl,-dead_strip")
+            .arg("-Wl,-undefined,dynamic_lookup")
+            .arg("-Wl,-u,_main")
+            .arg("-Wl,-u,_spl_main");
         let output = command
             .arg(format!("@{}", response.display()))
             .arg("-o")

@@ -20,6 +20,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../../runtime/runtime_db.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_memtrack.c");
     println!("cargo:rerun-if-changed=../../runtime/hosted_win32.c");
+    println!("cargo:rerun-if-changed=../../runtime/hosted_cocoa.c");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_DRIVER_HOOKS");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_RUNTIME_SYMBOL_TABLE");
 
@@ -146,6 +147,22 @@ fn compile_c_runtime_sources() {
         }
     }
     build.compile("runtime_sffi_c");
+
+    // hosted_cocoa.c is Objective-C behind a .c extension (real NSWindow path
+    // on __APPLE__). Compile it separately with the ObjC language flag so the
+    // staticlib carries real rt_cocoa_* providers on macOS; AppKit/Foundation
+    // are already in the platform framework link set.
+    if env::var("CARGO_CFG_TARGET_OS").unwrap_or_default() == "macos" {
+        let cocoa = runtime_c_dir.join("hosted_cocoa.c");
+        if cocoa.exists() {
+            let mut objc = cc::Build::new();
+            objc.opt_level(2).warnings(false).cargo_metadata(false);
+            objc.flag("-xobjective-c").file(cocoa);
+            objc.compile("runtime_sffi_objc");
+            println!("cargo:rustc-link-lib=static=runtime_sffi_objc");
+        }
+    }
+
     let out_dir = env::var("OUT_DIR").expect("OUT_DIR");
     println!("cargo:rustc-link-search=native={out_dir}");
     if env::var_os("CARGO_FEATURE_RUNTIME_SYMBOL_TABLE").is_some() {
