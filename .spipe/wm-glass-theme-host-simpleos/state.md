@@ -289,3 +289,16 @@ implementation-aggregate-return-source-accepted-runtime-proof-pending
   unavailable and uses the solid fallback rather than inventing colors.
   Focused specs are updated but not executed because the available Stage 3
   bootstrap artifact has no test/check command.
+- continuation-2026-07-25-typed-gradient: The snapshot material schema is now
+  v2 and carries package-owned WM gradient availability, two opaque stops, and
+  source CSS. Hosted package resolution selects only the final exact base
+  `.wm-window` cascade declaration, excludes focused/similarly named selectors,
+  accepts only Engine2D-equivalent default/180-degree/to-bottom two-stop
+  gradients, composites transparent stops over the explicit solid fallback,
+  and rejects unsupported directions or multi-stop reduction. The generated
+  Aetheric snapshot records stops `0xFF313132 -> 0xFF242426` and material SHA
+  `ef913cc358fd3662c1ba86941cf0c64d82b3e806bf3bd2dadd90bd23849266f4`.
+  WM body Draw IR emits the exact Engine2D packed-stop grammar; titlebars mark
+  the gradient `not-requested`. New Engine2D specs assert real gradient,
+  border, first-shadow, and rounded solid-fallback pixels. High review accepts
+  the source and tests; execution remains pending an exact-current full CLI.

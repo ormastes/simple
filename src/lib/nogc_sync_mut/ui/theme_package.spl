@@ -37,6 +37,15 @@ class ResolvedThemeGlassConfig:
     bg_top: u32
     bg_bottom: u32
 
+# A package-owned, Engine2D-compatible projection of the local `.wm-window`
+# background declaration. This is deliberately resolved while loading the
+# package; DrawIR consumers receive only typed values and never parse CSS.
+class ResolvedWmWindowGradient:
+    available: bool
+    start_rgba: u32
+    end_rgba: u32
+    source_css: text
+
 class ResolvedThemeIcon:
     role: text
     icon_id: text
@@ -149,9 +158,9 @@ fn load_theme_package(theme_id: text) -> ResolvedThemePackage:
     paths = _sorted_unique_paths(paths)
 
     val source_manifest_sha256 = _source_manifest_sha256(paths)
-    val material = _material_from_css(base_css, shape_css)
-    val material_sha256 = theme_material_sha256(material)
     val composed_css = "{shape_css}\n{family_widget_css}\n{base_css}\n{theme_widget_css}\n{icon_css}\n"
+    val material = _material_from_css(base_css, shape_css, composed_css)
+    val material_sha256 = theme_material_sha256(material)
     val snapshot = ThemeRenderSnapshot(
         id: resolved_id,
         family_id: family_id,
@@ -544,7 +553,7 @@ fn _glass_config_from_colors(colors: ResolvedThemeColors, shape_css: text) -> Re
         bg_bottom: colors.panel & 0x00FFFFFF
     )
 
-fn _material_from_css(base_css: text, shape_css: text) -> ThemeMaterialSemantics:
+fn _material_from_css(base_css: text, shape_css: text, composed_css: text) -> ThemeMaterialSemantics:
     val desktop = _argb_from_css(_css_var(base_css, "--app-bg", "#131315"), 0xFF131315)
     val window = _argb_from_css(_css_var(base_css, "--app-surface", "rgba(31,31,33,0.80)"), 0xCC1F1F21)
     val active_title = _argb_from_css(_css_var(base_css, "--app-surface-elevated", "rgba(42,42,44,0.88)"), 0xE02A2A2C)
@@ -556,6 +565,7 @@ fn _material_from_css(base_css: text, shape_css: text) -> ThemeMaterialSemantics
     val inactive_shadows = _shadow_layers(_css_var(shape_css, "--elevation-mid", "0 18px 46px rgba(0,0,0,0.34)"))
     val surface_alpha = (((window >> 24) & 0xFF).to_i64() * 1000 + 127) / 255
     val solid_fallback = 0xFF000000 | (window & 0x00FFFFFF)
+    val window_gradient = _wm_window_gradient_from_css(composed_css, solid_fallback)
     ThemeMaterialSemantics(
         desktop_fill_rgba: desktop,
         window_fill_rgba: window,
@@ -581,8 +591,154 @@ fn _material_from_css(base_css: text, shape_css: text) -> ThemeMaterialSemantics
         text_rgba: text_color,
         secondary_text_rgba: secondary_text,
         solid_fallback_rgba: solid_fallback,
-        fallback_contrast_milli: _argb_contrast_milli(text_color, solid_fallback)
+        fallback_contrast_milli: _argb_contrast_milli(text_color, solid_fallback),
+        window_gradient_available: window_gradient.available,
+        window_gradient_start_rgba: window_gradient.start_rgba,
+        window_gradient_end_rgba: window_gradient.end_rgba,
+        window_gradient_source_css: window_gradient.source_css
     )
+
+fn _selector_list_contains_exact(selector_list: text, target: text) -> bool:
+    for selector in selector_list.split(","):
+        if selector.trim() == target:
+            return true
+    false
+
+fn _wm_window_background_css(composed_css: text) -> text:
+    # Keep cascade order: the final exact `.wm-window` declaration wins.
+    # Focus/hover selectors are intentionally excluded because the typed
+    # material represents the base window surface rather than transient state.
+    var background = ""
+    for block in composed_css.split("}"):
+        val pieces = block.split("{")
+        if pieces.len() < 2:
+            continue
+        if not _selector_list_contains_exact(pieces[0], ".wm-window"):
+            continue
+        for declaration in pieces[1].split(";"):
+            val trimmed = declaration.trim()
+            if trimmed.starts_with("background:"):
+                background = trimmed["background:".len():].trim()
+    background
+
+fn _css_first_function_arguments(value: text, function_name: text) -> text:
+    val marker = "{function_name}("
+    val found = value.index_of(marker) ?? -1
+    if found < 0:
+        return ""
+    var index = found + marker.len()
+    var depth = 1
+    var out = ""
+    while index < value.len():
+        val ch = value.char_at(index)
+        if ch == "(":
+            depth = depth + 1
+            out = "{out}{ch}"
+        elif ch == ")":
+            depth = depth - 1
+            if depth == 0:
+                return out
+            out = "{out}{ch}"
+        else:
+            out = "{out}{ch}"
+        index = index + 1
+    ""
+
+fn _css_top_level_parts(value: text) -> [text]:
+    var out: [text] = []
+    var current = ""
+    var depth = 0
+    var index = 0
+    while index < value.len():
+        val ch = value.char_at(index)
+        if ch == "(":
+            depth = depth + 1
+            current = "{current}{ch}"
+        elif ch == ")":
+            if depth > 0:
+                depth = depth - 1
+            current = "{current}{ch}"
+        elif ch == "," and depth == 0:
+            out.push(current.trim())
+            current = ""
+        else:
+            current = "{current}{ch}"
+        index = index + 1
+    if current.trim() != "":
+        out.push(current.trim())
+    out
+
+fn _css_color_candidate(value: text, composed_css: text) -> text:
+    val trimmed = value.trim()
+    if not trimmed.starts_with("var("):
+        return trimmed
+    val args = _css_first_function_arguments(trimmed, "var")
+    if args == "":
+        return ""
+    val token = args.split(",")[0].trim()
+    _css_var(composed_css, token, "")
+
+fn _css_color_is_supported(value: text) -> bool:
+    val trimmed = value.trim()
+    (trimmed.starts_with("rgba(") and trimmed.ends_with(")")) or
+        (trimmed.starts_with("rgb(") and trimmed.ends_with(")")) or
+        (trimmed.starts_with("#") and (trimmed.len() == 4 or trimmed.len() == 7))
+
+fn _opaque_css_over(foreground: u32, opaque_background: u32) -> u32:
+    val alpha = (foreground >> 24) & 0xFF
+    if alpha == 0:
+        return opaque_background
+    if alpha == 255:
+        return 0xFF000000u32 | (foreground & 0x00FFFFFFu32)
+    val inverse = 255u32 - alpha
+    val fr = (foreground >> 16) & 0xFF
+    val fg = (foreground >> 8) & 0xFF
+    val fb = foreground & 0xFF
+    val br = (opaque_background >> 16) & 0xFF
+    val bg = (opaque_background >> 8) & 0xFF
+    val bb = opaque_background & 0xFF
+    val r = (fr * alpha + br * inverse + 127u32) / 255u32
+    val g = (fg * alpha + bg * inverse + 127u32) / 255u32
+    val b = (fb * alpha + bb * inverse + 127u32) / 255u32
+    0xFF000000u32 | (r << 16) | (g << 8) | b
+
+fn _wm_window_gradient_from_css(composed_css: text, solid_fallback: u32) -> ResolvedWmWindowGradient:
+    val background = _wm_window_background_css(composed_css)
+    val args = _css_first_function_arguments(background, "linear-gradient")
+    if args == "":
+        return ResolvedWmWindowGradient(available: false, start_rgba: solid_fallback, end_rgba: solid_fallback, source_css: "")
+    val parts = _css_top_level_parts(args)
+    var first_color = 0
+    if parts.len() > 0:
+        val direction = parts[0].trim().lower()
+        if direction.ends_with("deg") or direction.starts_with("to "):
+            if direction != "180deg" and direction != "to bottom":
+                return ResolvedWmWindowGradient(available: false, start_rgba: solid_fallback, end_rgba: solid_fallback, source_css: "linear-gradient({args})")
+            first_color = 1
+    var colors: [text] = []
+    var part_index = first_color
+    while part_index < parts.len():
+        val part = parts[part_index]
+        val candidate = _css_color_candidate(part, composed_css)
+        if _css_color_is_supported(candidate):
+            colors.push(candidate)
+        part_index = part_index + 1
+    # Engine2D's current contract is exactly two packed stops. Do not silently
+    # reduce multi-stop or unsupported CSS; retain the solid fallback instead.
+    if colors.len() != 2:
+        return ResolvedWmWindowGradient(available: false, start_rgba: solid_fallback, end_rgba: solid_fallback, source_css: "linear-gradient({args})")
+    val start = _opaque_css_over(_argb_from_css(colors[0], 0), solid_fallback)
+    val end = _opaque_css_over(_argb_from_css(colors[1], 0), solid_fallback)
+    ResolvedWmWindowGradient(
+        available: true,
+        start_rgba: start,
+        end_rgba: end,
+        source_css: "linear-gradient({args})"
+    )
+
+fn resolve_wm_window_gradient_for_css(composed_css: text, solid_fallback: u32) -> ResolvedWmWindowGradient:
+    """Resolve package CSS into Engine2D's typed vertical two-stop contract."""
+    _wm_window_gradient_from_css(composed_css, solid_fallback)
 
 fn _argb_luminance(color: u32) -> i64:
     val r = ((color >> 16) & 0xFF).to_i64()
@@ -831,8 +987,9 @@ fn render_theme_validation_report(issues: [ThemeValidationIssue]) -> text:
     lines.push("STATUS: FAIL ({issues.len()} failures, 0 warnings)")
     lines.join("\n")
 
-export ResolvedThemePackage, ResolvedThemeColors, ResolvedThemeGlassConfig, ResolvedThemeIcon, ThemeValidationIssue
+export ResolvedThemePackage, ResolvedThemeColors, ResolvedThemeGlassConfig, ResolvedWmWindowGradient, ResolvedThemeIcon, ThemeValidationIssue
 export default_theme_id, resolve_theme_alias, load_default_theme_package, load_theme_package
+export resolve_wm_window_gradient_for_css
 export invalidate_theme_package_cache, invalidate_all_theme_package_cache
 export resolved_theme_css, theme_ui_theme, theme_design_tokens, theme_numeric_colors, theme_glass_config, theme_icon_defaults
 export validate_default_theme_package, validate_theme_package, render_theme_validation_report

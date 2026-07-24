@@ -2,6 +2,7 @@ use std.spec.*
 use nogc_sync_mut.ui.theme_package.{
     default_theme_id,
     resolve_theme_alias,
+    resolve_wm_window_gradient_for_css,
     load_theme_package,
     invalidate_theme_package_cache,
     invalidate_all_theme_package_cache,
@@ -138,6 +139,35 @@ describe "Folder theme packages":
         expect(css).to_contain("Folder theme package")
         expect(css).to_contain("--app-background-image")
         expect(css).to_contain("0 0 40px var(--glass-accent)")
+
+    it "resolves only the final exact WM window vertical two-stop gradient":
+        val css = """
+        .wm-window.focused { background: linear-gradient(90deg, #ff0000, #00ff00); }
+        .wm-window-extra { background: linear-gradient(180deg, #ffffff, #ffffff); }
+        .wm-window { background: linear-gradient(180deg, #010203, #040506); }
+        .wm-window { background: linear-gradient(to bottom, rgba(255,255,255,0.5), rgba(255,0,0,0.25)); }
+        """
+        val gradient = resolve_wm_window_gradient_for_css(css, 0xff000000u32)
+
+        expect(gradient.available).to_be(true)
+        expect(gradient.start_rgba).to_equal(4286611584u32)
+        expect(gradient.end_rgba).to_equal(4282384384u32)
+        expect(gradient.source_css).to_contain("to bottom")
+
+    it "rejects unsupported WM gradient direction and multi-stop reduction":
+        val horizontal = resolve_wm_window_gradient_for_css(
+            ".wm-window { background: linear-gradient(90deg, #010203, #040506); }",
+            0xff111111u32
+        )
+        val multi = resolve_wm_window_gradient_for_css(
+            ".wm-window { background: linear-gradient(180deg, #010203, #040506, #070809); }",
+            0xff222222u32
+        )
+
+        expect(horizontal.available).to_be(false)
+        expect(horizontal.start_rgba).to_equal(0xff111111u32)
+        expect(multi.available).to_be(false)
+        expect(multi.end_rgba).to_equal(0xff222222u32)
 
     it "validates the checked-in theme package graph":
         val issues = validate_default_theme_package()
