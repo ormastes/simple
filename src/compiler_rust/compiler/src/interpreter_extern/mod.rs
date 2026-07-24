@@ -278,6 +278,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("memory_limit", memory::memory_limit);
     insert_simple!("memory_usage", memory::memory_usage);
     insert_simple!("memory_usage_percent", memory::memory_usage_percent);
+    insert_simple!("rt_heap_registry_count", memory::rt_heap_registry_count);
     insert_simple!("min", math::min);
     insert_simple!("__mock_policy_check", mock_policy::mock_policy_check);
     insert_simple!("__mock_policy_disable", mock_policy::mock_policy_disable);
@@ -2501,6 +2502,38 @@ mod tests {
     fn dispatch_registers_rt_cli_arg_count_and_at() {
         assert!(EXTERN_DISPATCH.contains_key("rt_cli_arg_count"));
         assert!(EXTERN_DISPATCH.contains_key("rt_cli_arg_at"));
+    }
+
+    #[test]
+    fn dispatch_registers_rt_heap_registry_count() {
+        assert!(EXTERN_DISPATCH.contains_key("rt_heap_registry_count"));
+
+        let mut header = simple_runtime::value::heap::HeapHeader::new(
+            simple_runtime::value::heap::HeapObjectType::String,
+            std::mem::size_of::<simple_runtime::value::heap::HeapHeader>() as u32,
+        );
+        simple_runtime::value::heap::register_heap_ptr(&mut header);
+
+        let mut env = Env::new();
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let enums = HashMap::new();
+        let impl_methods = HashMap::new();
+        let result = call_extern_function_with_values(
+            "rt_heap_registry_count",
+            &[],
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        );
+
+        simple_runtime::value::heap::unregister_heap_ptr(&mut header);
+        assert!(
+            matches!(result, Ok(Value::Int(count)) if count >= 1),
+            "rt_heap_registry_count() should observe a registered heap pointer: {result:?}"
+        );
     }
 
     #[test]

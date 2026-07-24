@@ -1073,3 +1073,32 @@ repro here), but the two specific, previously-characterized blockers named
 in this doc are resolved. Next owner: attempt the full redeploy closure
 build and characterize whatever wall it hits next with the same
 fast-repro-first discipline.
+
+## 2026-07-24 Current CI failure occurred before MIR
+
+GitHub Actions run `30074363315` bounded the current Linux LLVM Rust-seed
+worker and observed exit status 1 before MIR lowering began. The captured
+worker output was exactly:
+
+```text
+error: runtime bundle 'rust-hosted' was removed; use simple-core or core-c-bootstrap
+```
+
+The wrapper retained the command output locally at
+`build/bootstrap/logs/x86_64-unknown-linux-gnu/stage2-native-build.log`.
+Run `30074363315` predated the fail-only artifact upload, so it did not publish
+that log. Future Stage 2 failures retain the same path under
+`bootstrap-failure-logs-<github.sha>`. No Stage 3 log was produced because
+strict Stage 2 failure stopped the pipeline.
+
+Both manual bootstrap commands still requested the removed `rust-hosted`
+bundle. Stage 2 and Stage 3 now request the supported `core-c-bootstrap`
+bundle, matching the Stage 4 bootstrap contract. This diagnosis supersedes
+attributing an otherwise generic current `rc=1` to the historical empty-MIR
+failure without first reading the retained log. It removes this pre-MIR
+configuration error; it does **not** claim that Stage 2 now passes.
+
+The post-fix worker also passed the subsequently exposed
+`rt_heap_registry_count` dispatcher gap and reached parsing of the 383-source
+closure. Its next distinct failure is tracked in
+`bootstrap_stage2_interpreted_parser_empty_array_2026-07-24.md`.

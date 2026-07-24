@@ -1,7 +1,7 @@
 # Phase-profile tracing breaks every rv32 firmware build: `rt_heap_registry_count` missing from the seed
 
 - **Date:** 2026-07-20
-- **Status:** open
+- **Status:** resolved 2026-07-24
 - **Severity:** high (blocks **all** `fw_rv32` firmware builds on pristine
   sources — the scripts enable the triggering flag unconditionally)
 - **Area:** `src/compiler/80.driver/driver_log_helpers.spl:9,45`
@@ -92,3 +92,16 @@ the firmware scripts, so it fails builds nobody asked to profile.
 ## Related
 
 - `doc/08_tracking/bug/seed_emit_object_superlinear_hang_large_module_2026-07-20.md`
+
+## Resolution (2026-07-24)
+
+The runtime already exported `rt_heap_registry_count`, but the Rust
+interpreter extern dispatcher did not register a handler for interpreted
+compiler code. The dispatcher now forwards the call to the runtime and its
+test registers a real temporary heap pointer, proving that the handler returns
+the live registry count rather than a constant.
+
+After rebuilding the Rust bootstrap binary, the full Stage 2 worker passed
+this call and continued into parsing the 383-source closure. It next failed on
+the separate interpreted-parser issue tracked in
+`bootstrap_stage2_interpreted_parser_empty_array_2026-07-24.md`.

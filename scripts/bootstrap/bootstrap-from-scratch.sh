@@ -699,7 +699,7 @@ else
     "${seed_bin}" native-build \
     --target "${PLATFORM}" \
     --backend "${backend}" \
-    --runtime-bundle rust-hosted \
+    --runtime-bundle core-c-bootstrap \
     --source src/compiler --source src/app --source src/lib \
     --entry-closure \
     --threads "${jobs}" \
@@ -751,7 +751,7 @@ else
     "${stage2_bin}" native-build \
     --target "${PLATFORM}" \
     --backend "${backend}" \
-    --runtime-bundle rust-hosted \
+    --runtime-bundle core-c-bootstrap \
     --source src/compiler --source src/app --source src/lib \
     --entry-closure \
     --threads "${selfhost_jobs}" \

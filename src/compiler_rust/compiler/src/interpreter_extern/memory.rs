@@ -17,6 +17,11 @@ pub fn memory_usage(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(usage as i64))
 }
 
+/// Return the hosted runtime's live heap-registry entry count.
+pub fn rt_heap_registry_count(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(simple_runtime::value::heap::rt_heap_registry_count()))
+}
+
 /// Get memory limit in bytes (0 if unlimited)
 ///
 /// Callable from Simple as: `memory_limit()`
