@@ -1896,15 +1896,15 @@ int64_t rt_value_to_string(int64_t value) {
  * lived only in the Rust seed runtime, simd.rs), so any native binary whose
  * closure pulls std.simd (e.g. std.common.encoding.utf8's Utf8Provider) died
  * at link with `undefined symbol: rt_simd_detect_profile`.
- * ponytail: conservative scalar-tier answers — every std.simd consumer has a
- * pure-Simple scalar fallback; upgrade path = real cpuid/hwcap detection
- * mirroring runtime/src/value/simd.rs tier codes (0=scalar..8=wasm128). */
+ * Only the two symbols with no other C definition live here — the five
+ * rt_simd_has_* predicates are REAL cpuid/hwcap detection in
+ * runtime_simd_dispatch.c, which is in this same archive; defining stubs
+ * for them here made the stage4 archive core define each twice (link error
+ * "Stage4 archive core defines `rt_simd_has_avx` 2 times").
+ * ponytail: conservative scalar-tier answers for these two; upgrade path =
+ * route detect_profile through runtime_simd_dispatch.c's real detection
+ * (tier codes 0=scalar..8=wasm128 per runtime/src/value/simd.rs). */
 int64_t rt_simd_detect_profile(void) { return 0; }
-bool rt_simd_has_sse(void) { return false; }
-bool rt_simd_has_avx(void) { return false; }
-bool rt_simd_has_avx2(void) { return false; }
-bool rt_simd_has_neon(void) { return false; }
-bool rt_simd_has_rvv(void) { return false; }
 int64_t rt_simd_profile_name(void) {
     static const uint8_t scalar_name[] = "scalar";
     return rt_string_new(scalar_name, 6);
