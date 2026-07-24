@@ -297,11 +297,16 @@ evidence boundary for the important pure-Simple tooling lanes:
 - **native-build** — **Source status:** pure-Simple command routing and cached
   artifact path are implemented. Final artifacts now build in a process-unique
   sibling and publish by direct rename, so stale requested outputs cannot
-  satisfy a driver `Success` without a fresh artifact. Compile/link failures
-  preserve the prior requested output. **Remaining bug/gap:** the focused
+  satisfy a driver `Success` without a fresh artifact. Its option preflight
+  rejects unknown, missing, empty, option-looking, and invalid numeric option values before
+  compilation or output mutation. Compile/link failures preserve the prior requested output. **Remaining bug/gap:** the focused
   staging source-contract scenario passes, but no fresh behavioral build is
   qualified. **Next solution:** incrementally build one small entry closure
   with the exact fresh CLI, then run its artifact once.
+  A sole `--help`/`-h` succeeds; malformed invocations (including malformed
+  `... --help`) fail with exit 2. `--emit-archive` remains active archive mode;
+  legacy `--linker-script`, `--runtime-path`, and `--no-incremental` remain
+  arity-checked compatibility no-ops in this pure-Simple path.
 - **latest full Stage 4 candidate (2026-07-23)** — candidate SHA
   `00431ce52f940722f52746a802011f7d33f35d4931738facee26c5c7b7917b31`
   passes delegated stream/status fidelity and the isolated official

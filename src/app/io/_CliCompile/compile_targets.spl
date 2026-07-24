@@ -57,6 +57,139 @@ fn _cli_file_rename_impl(source: text, destination: text) -> bool:
 fn cli_native_build_is_entry_arg(arg: text) -> bool:
     arg == "--entry" or arg.starts_with("--entry=")
 
+fn cli_native_build_value_error(args: [text], index: i64, flag: text, positive_integer: bool) -> text:
+    if index + 1 >= args.len():
+        return "{flag} requires a value"
+    val value = args[index + 1]
+    if value == "":
+        return "{flag} requires a value"
+    if positive_integer:
+        if not cli_native_build_is_positive_decimal(value):
+            return "{flag} requires a positive integer"
+    elif value.starts_with("-"):
+        return "{flag} requires a value"
+    ""
+
+fn cli_native_build_inline_value_error(arg: text, prefix: text, flag: text, positive_integer: bool) -> text:
+    val value = arg.substring(prefix.len())
+    if value == "":
+        return "{flag} requires a value"
+    if positive_integer:
+        if not cli_native_build_is_positive_decimal(value):
+            return "{flag} requires a positive integer"
+    ""
+
+fn cli_native_build_is_positive_decimal(value: text) -> bool:
+    if value == "":
+        return false
+    for ch in value:
+        if ch < "0" or ch > "9":
+            return false
+    (value.to_i64() ?? 0) > 0
+
+fn cli_native_build_log_value_error(value: text) -> text:
+    if value != "on" and value != "off":
+        return "--log requires 'on' or 'off'"
+    ""
+
+# Reject malformed build invocations before they can reach the compiler or
+# publish an output. The compile loop below intentionally stays focused on
+# decoding already-valid options.
+fn cli_native_build_option_error(args: [text]) -> text:
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "native-build":
+            i = i + 1
+            continue
+        if arg == "--help" or arg == "-h" or arg == "--list-optimizations":
+            i = i + 1
+            continue
+        if arg == "--entry-closure" or arg == "--verbose" or arg == "-v" or arg == "--strip" or arg == "--emit-smf" or arg == "--emit-object" or arg == "--emit-archive" or arg == "--release" or arg == "--release-optimized" or arg == "--no-borrow-check" or arg == "--no-mangle" or arg == "--no-incremental" or arg == "--clean":
+            i = i + 1
+            continue
+        if arg == "--log":
+            val error = cli_native_build_value_error(args, i, arg, false)
+            if error != "":
+                return error
+            val log_error = cli_native_build_log_value_error(args[i + 1])
+            if log_error != "":
+                return log_error
+            i = i + 2
+            continue
+        if arg == "--backend" or arg == "--runtime-bundle" or arg == "--runtime-path" or arg == "--linker-script" or arg == "--entry" or arg == "--source" or arg == "-o" or arg == "--output" or arg == "--mode" or arg == "--build-mode" or arg == "--cache-dir" or arg == "--target" or arg == "--cpu" or arg == "--opt-level":
+            val error = cli_native_build_value_error(args, i, arg, false)
+            if error != "":
+                return error
+            i = i + 2
+            continue
+        if arg == "--threads" or arg == "--jobs" or arg == "-j" or arg == "--timeout":
+            val error = cli_native_build_value_error(args, i, arg, true)
+            if error != "":
+                return error
+            i = i + 2
+            continue
+        if arg.starts_with("--backend="):
+            val error = cli_native_build_inline_value_error(arg, "--backend=", "--backend", false)
+            if error != "": return error
+        elif arg.starts_with("--runtime-bundle="):
+            val error = cli_native_build_inline_value_error(arg, "--runtime-bundle=", "--runtime-bundle", false)
+            if error != "": return error
+        elif arg.starts_with("--runtime-path="):
+            val error = cli_native_build_inline_value_error(arg, "--runtime-path=", "--runtime-path", false)
+            if error != "": return error
+        elif arg.starts_with("--linker-script="):
+            val error = cli_native_build_inline_value_error(arg, "--linker-script=", "--linker-script", false)
+            if error != "": return error
+        elif arg.starts_with("--log="):
+            val error = cli_native_build_inline_value_error(arg, "--log=", "--log", false)
+            if error != "": return error
+            val log_error = cli_native_build_log_value_error(arg.substring("--log=".len()))
+            if log_error != "": return log_error
+        elif arg.starts_with("--entry="):
+            val error = cli_native_build_inline_value_error(arg, "--entry=", "--entry", false)
+            if error != "": return error
+        elif arg.starts_with("--source="):
+            val error = cli_native_build_inline_value_error(arg, "--source=", "--source", false)
+            if error != "": return error
+        elif arg.starts_with("--output="):
+            val error = cli_native_build_inline_value_error(arg, "--output=", "--output", false)
+            if error != "": return error
+        elif arg.starts_with("-o") and arg.len() > 2:
+            val error = cli_native_build_inline_value_error(arg, "-o", "-o", false)
+            if error != "": return error
+        elif arg.starts_with("--threads="):
+            val error = cli_native_build_inline_value_error(arg, "--threads=", "--threads", true)
+            if error != "": return error
+        elif arg.starts_with("--jobs="):
+            val error = cli_native_build_inline_value_error(arg, "--jobs=", "--jobs", true)
+            if error != "": return error
+        elif arg.starts_with("--timeout="):
+            val error = cli_native_build_inline_value_error(arg, "--timeout=", "--timeout", true)
+            if error != "": return error
+        elif arg.starts_with("--mode="):
+            val error = cli_native_build_inline_value_error(arg, "--mode=", "--mode", false)
+            if error != "": return error
+        elif arg.starts_with("--build-mode="):
+            val error = cli_native_build_inline_value_error(arg, "--build-mode=", "--build-mode", false)
+            if error != "": return error
+        elif arg.starts_with("--cache-dir="):
+            val error = cli_native_build_inline_value_error(arg, "--cache-dir=", "--cache-dir", false)
+            if error != "": return error
+        elif arg.starts_with("--target="):
+            val error = cli_native_build_inline_value_error(arg, "--target=", "--target", false)
+            if error != "": return error
+        elif arg.starts_with("--cpu="):
+            val error = cli_native_build_inline_value_error(arg, "--cpu=", "--cpu", false)
+            if error != "": return error
+        elif arg.starts_with("--opt-level="):
+            val error = cli_native_build_inline_value_error(arg, "--opt-level=", "--opt-level", false)
+            if error != "": return error
+        elif arg.starts_with("-"):
+            return "unknown option: {arg}"
+        i = i + 1
+    ""
+
 fn cli_native_build_add_bootstrap_input(options: CompileOptions, input_path: text) -> CompileOptions:
     var result = options
     val slot = result.bootstrap_input_count
@@ -593,6 +726,10 @@ fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
     result
 
 fn cli_native_build(args: [text]) -> i64:
+    val option_error = cli_native_build_option_error(args)
+    if option_error != "":
+        _cli_eprint("Error: {option_error}")
+        return 2
     # Check for --backend=llvm-lib flag to use pure Simple LLVM pipeline
     var backend = ""
     var backend_explicit = false
@@ -870,6 +1007,12 @@ fn cli_native_build(args: [text]) -> i64:
                 optimization_requested = true
             elif a == "--no-mangle":
                 no_mangle = true
+            elif a == "--timeout" or a == "--runtime-bundle" or a == "--runtime-path" or a == "--linker-script":
+                # The public wrapper consumes these values; consume them here
+                # too so compatibility options cannot reinterpret one as entry.
+                j = j + 1
+            elif a.starts_with("--timeout=") or a.starts_with("--runtime-bundle=") or a.starts_with("--runtime-path=") or a.starts_with("--linker-script=") or a == "--no-incremental":
+                pass
             elif a == "--clean":
                 # Ask the driver to wipe this build's cache scope before
                 # compiling. The driver consumes (clears) the flag, so it
