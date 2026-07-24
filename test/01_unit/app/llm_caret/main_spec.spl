@@ -17,6 +17,7 @@ use app.llm_caret.chat.{run_agent_loop}
 use app.llm_caret.main.{
     MainArgs, parse_main_args, build_model_response,
     main_configure, main_session_id, _slash_on_new, _slash_on_provider,
+    _slash_on_hidden_command,
     resolve_resume_backend, apply_resumed_session,
     proxy_handle, status_for_path,
     guard_request, bearer_ok, rate_limit_check, rate_limit_reset,
@@ -227,6 +228,29 @@ fn _fake_dispatch_ok(content: text, model: text) -> LLMResponse:
 
 fn _fake_dispatch_err(content: text, model: text) -> LLMResponse:
     new_llm_error("test", "upstream down")
+
+# ============================================================================
+describe "Hidden command inspection":
+    it "should inspect a real tool envelope without echoing its input":
+        val result = _slash_on_hidden_command(
+            "debug-tool-call",
+            "{\"type\":\"tool_use\",\"id\":\"call-1\",\"name\":\"bash\",\"input\":{\"command\":\"echo sk-ant-fixture-secret\"}}"
+        )
+        expect(result).to_contain("id=call-1")
+        expect(result).to_contain("name=bash")
+        expect(result).to_contain("input_bytes=")
+        expect(result.contains("sk-ant-fixture-secret")).to_be(false)
+
+    it "should reject missing, malformed, and unsupported hidden input":
+        expect(_slash_on_hidden_command("debug-tool-call", "")).to_contain(
+            "Usage:"
+        )
+        expect(_slash_on_hidden_command(
+            "debug-tool-call", "{\"type\":\"text\",\"text\":\"not a call\"}"
+        )).to_equal("No tool call envelope found.")
+        expect(_slash_on_hidden_command("other-hidden", "{}")).to_contain(
+            "not implemented"
+        )
 
 # ============================================================================
 describe "HTTP proxy pure core (proxy_handle)":

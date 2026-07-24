@@ -1,0 +1,98 @@
+# LLM Caret TUI renderer selection and raw-key decoding.
+#
+# These helpers are pure except for the bounded TERM lookup in caret_is_tty.
+# Keeping them outside chat_tui.spl makes the terminal policy and byte decoder
+# independently testable without a live terminal.
+
+use std.tui.widgets.input.{
+    InputWidget, input_insert_char, input_move_left, input_move_right,
+    input_move_home, input_move_end
+}
+use app.io.mod.{env_get}
+
+fn select_renderer_mode(ui_mode: text, is_tty: bool) -> text:
+    if ui_mode == "plain":
+        return "plain"
+    if ui_mode == "tui":
+        return "tui"
+    if is_tty:
+        return "tui"
+    "plain"
+
+# Best-effort tty probe. The explicit --plain/--tui entrypoint flags remain
+# authoritative because the current self-hosted runtime has no isatty extern.
+fn caret_is_tty() -> bool:
+    val term = env_get("TERM")
+    if term == nil or term == "" or term == "dumb":
+        return false
+    true
+
+struct RawKeyDecodeResult:
+    state: i64
+    key: text
+    printable_byte: i64
+
+fn _raw_key_decode(
+    state: i64, key: text, printable_byte: i64
+) -> RawKeyDecodeResult:
+    RawKeyDecodeResult(
+        state: state, key: key, printable_byte: printable_byte
+    )
+
+fn _ansi_final_key(b: i64) -> text:
+    if b == 65: return "up"
+    if b == 66: return "down"
+    if b == 67: return "right"
+    if b == 68: return "left"
+    if b == 70: return "end"
+    if b == 72: return "home"
+    ""
+
+# Pure byte-at-a-time ANSI decoder. State 0 is ordinary input, 1 is ESC,
+# 2 is CSI, 3/4/5 are numeric CSI home/end/other, and 6 is SS3. A lone ESC
+# never blocks: its next byte either advances a recognized sequence or is
+# swallowed, so sequence continuations cannot leak into the prompt.
+fn decode_raw_key_byte(state: i64, b: i64) -> RawKeyDecodeResult:
+    if b == 27:
+        return _raw_key_decode(1, "", -1)
+    if state == 0:
+        if b >= 32 and b <= 126:
+            return _raw_key_decode(0, "text", b)
+        return _raw_key_decode(0, "", -1)
+    if state == 1:
+        if b == 91: return _raw_key_decode(2, "", -1)
+        if b == 79: return _raw_key_decode(6, "", -1)
+        return _raw_key_decode(0, "", -1)
+    if state == 6:
+        return _raw_key_decode(0, _ansi_final_key(b), -1)
+    if state == 2:
+        val key = _ansi_final_key(b)
+        if key != "": return _raw_key_decode(0, key, -1)
+        if b == 49 or b == 55: return _raw_key_decode(3, "", -1)
+        if b == 52 or b == 56: return _raw_key_decode(4, "", -1)
+        if (b >= 48 and b <= 57) or b == 59:
+            return _raw_key_decode(5, "", -1)
+        return _raw_key_decode(0, "", -1)
+    if state == 3 or state == 4 or state == 5:
+        val key = _ansi_final_key(b)
+        if key != "": return _raw_key_decode(0, key, -1)
+        if b == 126:
+            if state == 3: return _raw_key_decode(0, "home", -1)
+            if state == 4: return _raw_key_decode(0, "end", -1)
+            return _raw_key_decode(0, "", -1)
+        if (b >= 48 and b <= 57) or b == 59:
+            return _raw_key_decode(state, "", -1)
+    _raw_key_decode(0, "", -1)
+
+fn apply_raw_key_decode(
+    input: InputWidget, decoded: RawKeyDecodeResult
+) -> InputWidget:
+    if decoded.key == "left": return input_move_left(input)
+    if decoded.key == "right": return input_move_right(input)
+    if decoded.key == "home": return input_move_home(input)
+    if decoded.key == "end": return input_move_end(input)
+    if decoded.printable_byte >= 0:
+        return input_insert_char(
+            input, (decoded.printable_byte as char).to_text()
+        )
+    input

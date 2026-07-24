@@ -32,8 +32,9 @@ use std.tui.terminal.*
 use std.tui.style.*
 use std.tui.widget.{Rect, make_rect, pad_or_truncate}
 use std.tui.widgets.box_widget.{BoxWidget, make_box_widget_with_content, box_render}
-use std.tui.widgets.input.{InputWidget, make_input_widget, input_insert_char,
-                            input_delete_back, input_clear, input_render}
+use std.tui.widgets.input.{
+    InputWidget, make_input_widget, input_delete_back, input_clear, input_render
+}
 
 use app.llm_caret.types.{Message, new_user_message}
 use app.llm_caret.interface_text.{caret_role_label, caret_turn_line}
@@ -41,7 +42,10 @@ use app.llm_caret.tools.{ToolCall, ToolResult, ModelResponse, PermissionPolicy}
 use app.llm_caret.chat.{AgentResult, run_agent_loop, run_agent_loop_rendered,
                         tool_call_status, tool_call_summary}
 use app.llm_caret.claude_full.commands.{findRootCommand, admitRootCommand}
-use app.io.mod.{env_get}
+use app.llm_caret.tui_input.{
+    select_renderer_mode, caret_is_tty, decode_raw_key_byte,
+    apply_raw_key_decode
+}
 
 extern fn rt_stdin_read_line() -> text
 
@@ -202,37 +206,6 @@ fn markdown_turn_lines(role: text, content: text) -> [StyledLine]:
             lines = lines + [make_line(inline_code_segments(bullet_indent(line), base_style))]
     lines
 
-# Renderer-seam selection. The explicit flag is the PRIMARY gate; "auto" (the
-# default) falls back to a tty probe.
-#   ui_mode == "plain" -> always plain print path
-#   ui_mode == "tui"   -> always the full-screen TUI
-#   ui_mode == "auto"  -> TUI on a tty, plain otherwise
-fn select_renderer_mode(ui_mode: text, is_tty: bool) -> text:
-    if ui_mode == "plain":
-        return "plain"
-    if ui_mode == "tui":
-        return "tui"
-    if is_tty:
-        return "tui"
-    "plain"
-
-# Best-effort tty probe. Checked for a real isatty extern before falling back
-# to this heuristic: src/compiler_rust/compiler/src/interpreter_native_io.rs
-# has `native_is_tty` (real libc::isatty) but it is NOT wired into the
-# EXTERN_DISPATCH table, so no `rt_*` name reaches Simple code - dead code in
-# the seed today. Wiring it is a Rust-seed + bootstrap change, out of this
-# module's scope (see doc/08_tracking/bug - file as: "native_is_tty defined
-# but unregistered, no isatty extern reachable from Simple"). Until then this
-# mirrors cli_output/progress.spl and gates on $TERM. LIMITATION: $TERM is
-# inherited even when stdout is piped, so "auto" can wrongly pick TUI under a
-# pipe with $TERM set - always pass an explicit --plain/--tui in CI/servers
-# (main.spl's --plain/--tui flags override this heuristic entirely).
-fn caret_is_tty() -> bool:
-    val term = env_get("TERM")
-    if term == nil or term == "" or term == "dumb":
-        return false
-    true
-
 # ============================================================================
 # Session hooks (DI seam into main.spl's runtime state + session.spl)
 # ============================================================================
@@ -320,7 +293,7 @@ fn _slash_status(message: text, provider: text, model: text, session: text) -> S
 # the caller (run_chat_tui/run_chat_plain) applies it. Unknown /commands are
 # reported back instead of being sent to the model (never silently forwarded).
 fn dispatch_slash(cmd: text, arg: text, hooks: SessionHooks) -> SlashResult:
-    if cmd == "help":
+    if cmd == "help" or cmd == "?":
         return _slash_msg(slash_help_text())
     if cmd == "exit" or cmd == "quit":
         return SlashResult(
@@ -328,7 +301,7 @@ fn dispatch_slash(cmd: text, arg: text, hooks: SessionHooks) -> SlashResult:
             replace_conv: false, loaded_messages: [], new_session_id: "",
             status_provider: "", status_model: "", status_session: ""
         )
-    if cmd == "new":
+    if cmd == "new" or cmd == "clear" or cmd == "reset":
         val new_id = hooks.on_new()
         return SlashResult(
             message: "started a new conversation", exit: false, new_conv: true,
@@ -370,9 +343,14 @@ fn dispatch_slash(cmd: text, arg: text, hooks: SessionHooks) -> SlashResult:
             return _slash_msg(
                 hooks.on_hidden_command(admitted.command.name, arg)
             )
-        return _slash_msg("Hidden command disabled: /" + cmd)
+        # Do not disclose hidden registry membership while its gate is off.
+        return _slash_msg("Unknown command: /" + cmd + " (try /help)")
     if root.found and not root.command.enabled:
         return _slash_msg("Command disabled: /" + cmd)
+    if root.found:
+        return _slash_msg(
+            "Command not implemented in Caret: /" + root.command.name
+        )
     _slash_msg("Unknown command: /" + cmd + " (try /help)")
 
 fn _replace_status_field(status: text, key: text, value: text) -> text:
@@ -585,24 +563,29 @@ fn _read_line(ui0: ChatTui) -> (ChatTui, text, i64):
     var done = false
     var result_text = ""
     var status = 1
+    var raw_key_state = 0
     while not done:
         _draw_frame(ui)
         val b = terminal_read_byte()
         if b < 0 or b == KEY_CTRL_C or b == KEY_CTRL_D:
             status = 1
             done = true
-        elif b == KEY_ENTER or b == 10:
+        elif raw_key_state == 0 and (b == KEY_ENTER or b == 10):
             result_text = ui.input.value
             status = 0
             done = true
-        elif b == KEY_BACKSPACE or b == 8:
+        elif raw_key_state == 0 and (b == KEY_BACKSPACE or b == 8):
             ui = _ui_set_input(ui, input_delete_back(ui.input))
-        elif b == 16:  # Ctrl-P: scroll toward older lines
+        elif raw_key_state == 0 and b == 16:  # Ctrl-P: scroll toward older lines
             scroll_page_up(tui_transcript_len(), _inner_height())
-        elif b == 14:  # Ctrl-N: scroll toward newer lines / resume auto-follow
+        elif raw_key_state == 0 and b == 14:  # Ctrl-N: scroll toward newer lines / resume auto-follow
             scroll_page_down(tui_transcript_len(), _inner_height())
-        elif b >= 32 and b <= 126:
-            ui = _ui_set_input(ui, input_insert_char(ui.input, (b as char).to_text()))
+        else:
+            val decoded = decode_raw_key_byte(raw_key_state, b)
+            raw_key_state = decoded.state
+            ui = _ui_set_input(
+                ui, apply_raw_key_decode(ui.input, decoded)
+            )
     (ui, result_text, status)
 
 # ============================================================================

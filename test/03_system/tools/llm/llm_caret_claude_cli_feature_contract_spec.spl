@@ -263,204 +263,6 @@ fn run_cli_case(case: CaretCliFeatureCase) -> CliResponse:
     parse_claude_json_response(case.raw_response)
 
 fn check_cli_result(case: CaretCliFeatureCase, response: CliResponse):
-    val args = build_claude_args(
-        case.prompt,
-        case.model,
-        "json",
-        case.system_prompt,
-        case.session_id,
-        case.max_turns,
-        case.max_tokens,
-        case.json_schema,
-        case.tools,
-        case.extra_args,
-        case.verbose
-    )
-    expect(args).to_contain("-p")
-    expect(args).to_contain(case.prompt)
-    expect(args).to_contain("--output-format")
-    expect(args).to_contain("json")
-    expect(args).to_contain("--max-turns")
-    expect(args).to_contain(case.max_turns.to_text())
-    var unsupported_count = 0
-    for arg in args:
-        if arg == "--max-tokens":
-            unsupported_count = unsupported_count + 1
-    expect(unsupported_count).to_equal(0)
-    if case.json_schema != "":
-        expect(args).to_contain("--json-schema")
-        expect(args).to_contain(case.json_schema)
-    if case.model != "":
-        expect(args).to_contain("--model")
-        expect(args).to_contain(case.model)
-    if case.system_prompt != "":
-        expect(args).to_contain("--system-prompt")
-        expect(args).to_contain(case.system_prompt)
-    if case.session_id != "":
-        expect(args).to_contain("--resume")
-        expect(args).to_contain(case.session_id)
-    for tool in case.tools:
-        expect(args).to_contain(tool)
-    if case.tools.len() > 0:
-        var allowed_tools_flags = 0
-        for arg in args:
-            if arg == "--allowedTools":
-                allowed_tools_flags = allowed_tools_flags + 1
-        expect(allowed_tools_flags).to_equal(1)
-    for arg in case.extra_args:
-        expect(args).to_contain(arg)
-    if case.verbose:
-        expect(args).to_contain("--verbose")
-    if case.name == "single-shot":
-        val stream_args = build_claude_stream_args(
-            case.prompt,
-            case.model,
-            case.system_prompt,
-            case.session_id,
-            case.max_turns
-        )
-        expect(stream_args).to_contain("stream-json")
-        expect(stream_args).to_contain("--verbose")
-
-        val init_event = parse_claude_stream_line(
-            "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"stream-session\",\"model\":\"claude-sonnet-4-6\"}"
-        )
-        expect(init_event.event_type).to_equal("system")
-        expect(init_event.session_id).to_equal("stream-session")
-
-        val assistant_event = parse_claude_stream_line(
-            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"streamed\"}],\"usage\":{\"input_tokens\":3,\"output_tokens\":1}},\"session_id\":\"stream-session\"}"
-        )
-        expect(assistant_event.event_type).to_equal("assistant")
-        expect(assistant_event.content).to_equal("streamed")
-
-        val result_event = parse_claude_stream_line(
-            "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"complete\",\"session_id\":\"stream-session\",\"usage\":{\"input_tokens\":3,\"output_tokens\":2}}"
-        )
-        expect(result_event.event_type).to_equal("result")
-        expect(result_event.content).to_equal("complete")
-        expect(result_event.output_tokens).to_equal(2)
-
-        val structured_event = parse_claude_stream_line(
-            "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"structured_output\":{\"answer\":42},\"session_id\":\"stream-session\"}"
-        )
-        expect(structured_event.event_type).to_equal("result")
-        expect(structured_event.content).to_equal("{\"answer\":42}")
-
-        val process_response = dispatch_send(
-            "claude_cli", "fixture-success", "sonnet", "", "", MOCK_CLAUDE,
-            "Be concise", "resume-1", 2, 4096, "[]"
-        )
-        expect(process_response.is_error).to_be(false)
-        expect(process_response.content).to_equal("fixture-ok")
-        expect(process_response.session_id).to_equal("resume-1")
-        expect(process_response.input_tokens).to_equal(11)
-        expect(process_response.output_tokens).to_equal(3)
-
-        val process_error = dispatch_send(
-            "claude_cli", "fixture-error", "sonnet", "", "", MOCK_CLAUDE,
-            "", "", 0, 4096, "[]"
-        )
-        expect(process_error.is_error).to_be(true)
-        expect(process_error.stop_reason).to_equal("error")
-        expect(process_error.error).to_contain("[REDACTED:")
-        expect(process_error.error.contains("sk-ant-fixture-secret")).to_be(false)
-
-        val advanced_process = dispatch_send_advanced(
-            "claude_cli", "fixture-advanced", "sonnet", "", "",
-            MOCK_CLAUDE, "", "", 0, 0, "[]",
-            "{\"type\":\"object\"}", ["Read"], ["--fixture-extra"]
-        )
-        expect(advanced_process.is_error).to_be(false)
-        expect(advanced_process.content).to_equal("advanced-ok")
-
-        val rejected_advanced = dispatch_send_advanced(
-            "dummy", "ignored", "", "", "", "", "", "", 0, 0, "[]",
-            "{\"type\":\"object\"}", [], []
-        )
-        expect(rejected_advanced.is_error).to_be(true)
-        expect(rejected_advanced.error).to_contain("require claude_cli")
-
-        val stream_events = claude_cli_stream(
-            MOCK_CLAUDE, "fixture-stream", "sonnet", "Be concise", "", 1
-        )
-        expect(stream_events.len()).to_equal(3)
-        expect(stream_events[0].event_type).to_equal("system")
-        expect(stream_events[0].session_id).to_equal("stream-session")
-        expect(stream_events[1].event_type).to_equal("assistant")
-        expect(stream_events[1].content).to_equal("streamed fixture")
-        expect(stream_events[2].event_type).to_equal("result")
-        expect(stream_events[2].content).to_equal("stream complete")
-        expect(stream_events[2].output_tokens).to_equal(3)
-
-        val stream_errors = claude_cli_stream(
-            MOCK_CLAUDE, "fixture-error", "sonnet", "", "", 1
-        )
-        expect(stream_errors.len()).to_equal(1)
-        expect(stream_errors[0].event_type).to_equal("error")
-        expect(stream_errors[0].content).to_contain("[REDACTED:")
-        expect(stream_errors[0].content.contains("sk-ant-fixture-secret")).to_be(false)
-
-        val empty_stream = claude_cli_stream(
-            MOCK_CLAUDE, "fixture-stream-empty", "sonnet", "", "", 1
-        )
-        expect(empty_stream.len()).to_equal(1)
-        expect(empty_stream[0].event_type).to_equal("error")
-        expect(empty_stream[0].content).to_contain("no valid stream events")
-
-        val malformed_stream = claude_cli_stream(
-            MOCK_CLAUDE, "fixture-stream-malformed", "sonnet", "", "", 1
-        )
-        expect(malformed_stream.len()).to_equal(1)
-        expect(malformed_stream[0].event_type).to_equal("error")
-        expect(malformed_stream[0].content).to_contain("no valid stream events")
-
-        val incomplete_stream = claude_cli_stream(
-            MOCK_CLAUDE, "fixture-stream-incomplete", "sonnet", "", "", 1
-        )
-        expect(incomplete_stream.len()).to_equal(2)
-        expect(incomplete_stream[1].event_type).to_equal("error")
-        expect(incomplete_stream[1].content).to_contain("before a terminal event")
-
-        val protocol_error = claude_cli_stream(
-            MOCK_CLAUDE, "fixture-stream-secret-error", "sonnet", "", "", 1
-        )
-        expect(protocol_error.len()).to_equal(1)
-        expect(protocol_error[0].stop_reason).to_equal("error")
-        expect(protocol_error[0].content.contains("sk-ant-fixture-secret")).to_be(false)
-
-        val provider_error = claude_cli_stream(
-            MOCK_CLAUDE, "fixture-stream-provider-error",
-            "sonnet", "", "", 1
-        )
-        expect(provider_error.len()).to_equal(1)
-        expect(provider_error[0].event_type).to_equal("error")
-        expect(provider_error[0].stop_reason).to_equal("error")
-        expect(provider_error[0].content).to_contain("provider overloaded")
-        expect(provider_error[0].content).to_contain("[REDACTED:")
-        expect(provider_error[0].content.contains("sk-ant-fixture-secret")).to_be(false)
-
-        llm_clear()
-        llm_init("claude_cli", "sonnet")
-        llm_set_cli_path(MOCK_CLAUDE)
-        llm_system("Be concise")
-        val public_response = llm_chat("fixture-success")
-        expect(public_response).to_equal("fixture-ok")
-        expect(llm_history_len()).to_equal(2)
-        expect(llm_history_role(0)).to_equal("user")
-        expect(llm_history_content(0)).to_equal("fixture-success")
-        expect(llm_history_role(1)).to_equal("assistant")
-        expect(llm_history_content(1)).to_equal("fixture-ok")
-        llm_clear()
-
-        llm_init("claude_cli", "sonnet")
-        llm_set_cli_path(MOCK_CLAUDE)
-        val public_error = llm_chat("fixture-error")
-        expect(public_error).to_start_with("ERROR: ")
-        expect(public_error).to_contain("[REDACTED:")
-        expect(public_error.contains("sk-ant-fixture-secret")).to_be(false)
-        expect(llm_history_len()).to_equal(1)
-        llm_clear()
     expect(response.content).to_equal(case.expected_content)
     expect(response.error).to_equal(case.expected_error)
     expect(response.is_error).to_be(case.expect_error)
@@ -513,8 +315,56 @@ describe "LLM caret Claude CLI feature contract":
             expect(cases.len()).to_equal(3)
             for case in cases:
                 step("Invoke the caret CLI provider")
+                val args = build_claude_args(
+                    case.prompt,
+                    case.model,
+                    "json",
+                    case.system_prompt,
+                    case.session_id,
+                    case.max_turns,
+                    case.max_tokens,
+                    case.json_schema,
+                    case.tools,
+                    case.extra_args,
+                    case.verbose
+                )
                 val response = run_cli_case(case)
                 step("Check the structured CLI response")
+                expect(args).to_contain("-p")
+                expect(args).to_contain(case.prompt)
+                expect(args).to_contain("--output-format")
+                expect(args).to_contain("json")
+                expect(args).to_contain("--max-turns")
+                expect(args).to_contain(case.max_turns.to_text())
+                var unsupported_count = 0
+                for arg in args:
+                    if arg == "--max-tokens":
+                        unsupported_count = unsupported_count + 1
+                expect(unsupported_count).to_equal(0)
+                if case.json_schema != "":
+                    expect(args).to_contain("--json-schema")
+                    expect(args).to_contain(case.json_schema)
+                if case.model != "":
+                    expect(args).to_contain("--model")
+                    expect(args).to_contain(case.model)
+                if case.system_prompt != "":
+                    expect(args).to_contain("--system-prompt")
+                    expect(args).to_contain(case.system_prompt)
+                if case.session_id != "":
+                    expect(args).to_contain("--resume")
+                    expect(args).to_contain(case.session_id)
+                for tool in case.tools:
+                    expect(args).to_contain(tool)
+                if case.tools.len() > 0:
+                    var allowed_tools_flags = 0
+                    for arg in args:
+                        if arg == "--allowedTools":
+                            allowed_tools_flags = allowed_tools_flags + 1
+                    expect(allowed_tools_flags).to_equal(1)
+                for arg in case.extra_args:
+                    expect(args).to_contain(arg)
+                if case.verbose:
+                    expect(args).to_contain("--verbose")
                 check_cli_result(case, response)
 
         it "should reject malformed and contract-free response envelopes":
@@ -545,6 +395,27 @@ describe "LLM caret Claude CLI feature contract":
             expect(empty_result.content).to_contain("missing result")
 
         it "should forward schema tools and extras through production dispatch":
+            step("Invoke baseline Claude CLI provider dispatch")
+            val baseline = dispatch_send(
+                "claude_cli", "fixture-success", "sonnet", "", "", MOCK_CLAUDE,
+                "Be concise", "resume-1", 2, 4096, "[]"
+            )
+            val baseline_error = dispatch_send(
+                "claude_cli", "fixture-error", "sonnet", "", "", MOCK_CLAUDE,
+                "", "", 0, 4096, "[]"
+            )
+
+            step("Check baseline dispatch and redaction")
+            expect(baseline.is_error).to_be(false)
+            expect(baseline.content).to_equal("fixture-ok")
+            expect(baseline.session_id).to_equal("resume-1")
+            expect(baseline.input_tokens).to_equal(11)
+            expect(baseline.output_tokens).to_equal(3)
+            expect(baseline_error.is_error).to_be(true)
+            expect(baseline_error.stop_reason).to_equal("error")
+            expect(baseline_error.error).to_contain("[REDACTED:")
+            expect(baseline_error.error.contains("sk-ant-fixture-secret")).to_be(false)
+
             step("Invoke advanced Claude CLI provider dispatch")
             val response = dispatch_send_advanced(
                 "claude_cli", "fixture-advanced", "sonnet", "", "",
@@ -565,6 +436,105 @@ describe "LLM caret Claude CLI feature contract":
             expect(rejected.error).to_contain("require claude_cli")
 
         it "should preserve and redact a provider stream error":
+            step("Build and parse valid stream envelopes")
+            val stream_args = build_claude_stream_args(
+                "stream prompt", "sonnet", "Be concise", "", 1
+            )
+            val init_event = parse_claude_stream_line(
+                "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"stream-session\",\"model\":\"claude-sonnet-4-6\"}"
+            )
+            val assistant_event = parse_claude_stream_line(
+                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"streamed\"}],\"usage\":{\"input_tokens\":3,\"output_tokens\":1}},\"session_id\":\"stream-session\"}"
+            )
+            val result_event = parse_claude_stream_line(
+                "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"complete\",\"session_id\":\"stream-session\",\"usage\":{\"input_tokens\":3,\"output_tokens\":2}}"
+            )
+            val structured_event = parse_claude_stream_line(
+                "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"structured_output\":{\"answer\":42},\"session_id\":\"stream-session\"}"
+            )
+
+            step("Check valid stream envelopes")
+            expect(stream_args).to_contain("stream-json")
+            expect(stream_args).to_contain("--verbose")
+            expect(init_event.event_type).to_equal("system")
+            expect(init_event.session_id).to_equal("stream-session")
+            expect(assistant_event.event_type).to_equal("assistant")
+            expect(assistant_event.content).to_equal("streamed")
+            expect(result_event.event_type).to_equal("result")
+            expect(result_event.content).to_equal("complete")
+            expect(result_event.output_tokens).to_equal(2)
+            expect(structured_event.event_type).to_equal("result")
+            expect(structured_event.content).to_equal("{\"answer\":42}")
+
+            step("Invoke complete and fail-closed stream fixtures")
+            val stream_events = claude_cli_stream(
+                MOCK_CLAUDE, "fixture-stream", "sonnet", "Be concise", "", 1
+            )
+            val stream_errors = claude_cli_stream(
+                MOCK_CLAUDE, "fixture-error", "sonnet", "", "", 1
+            )
+            val empty_stream = claude_cli_stream(
+                MOCK_CLAUDE, "fixture-stream-empty", "sonnet", "", "", 1
+            )
+            val malformed_stream = claude_cli_stream(
+                MOCK_CLAUDE, "fixture-stream-malformed", "sonnet", "", "", 1
+            )
+            val mixed_stream = claude_cli_stream(
+                MOCK_CLAUDE, "fixture-stream-malformed-then-result",
+                "sonnet", "", "", 1
+            )
+            val duplicate_terminal = claude_cli_stream(
+                MOCK_CLAUDE, "fixture-stream-duplicate-terminal",
+                "sonnet", "", "", 1
+            )
+            val stop_then_result = claude_cli_stream(
+                MOCK_CLAUDE, "fixture-stream-stop-then-result",
+                "sonnet", "", "", 1
+            )
+            val incomplete_stream = claude_cli_stream(
+                MOCK_CLAUDE, "fixture-stream-incomplete", "sonnet", "", "", 1
+            )
+            val protocol_error = claude_cli_stream(
+                MOCK_CLAUDE, "fixture-stream-secret-error", "sonnet", "", "", 1
+            )
+
+            step("Check stream completion and fail-closed errors")
+            expect(stream_events.len()).to_equal(3)
+            expect(stream_events[0].event_type).to_equal("system")
+            expect(stream_events[0].session_id).to_equal("stream-session")
+            expect(stream_events[1].event_type).to_equal("assistant")
+            expect(stream_events[1].content).to_equal("streamed fixture")
+            expect(stream_events[2].event_type).to_equal("result")
+            expect(stream_events[2].content).to_equal("stream complete")
+            expect(stream_events[2].output_tokens).to_equal(3)
+            expect(stream_errors.len()).to_equal(1)
+            expect(stream_errors[0].event_type).to_equal("error")
+            expect(stream_errors[0].content).to_contain("[REDACTED:")
+            expect(stream_errors[0].content.contains("sk-ant-fixture-secret")).to_be(false)
+            expect(empty_stream.len()).to_equal(1)
+            expect(empty_stream[0].event_type).to_equal("error")
+            expect(empty_stream[0].content).to_contain("no valid stream events")
+            expect(malformed_stream.len()).to_equal(1)
+            expect(malformed_stream[0].event_type).to_equal("error")
+            expect(malformed_stream[0].stop_reason).to_equal("invalid")
+            expect(malformed_stream[0].content).to_contain("invalid JSON")
+            expect(mixed_stream.len()).to_equal(1)
+            expect(mixed_stream[0].stop_reason).to_equal("invalid")
+            expect(mixed_stream[0].content).to_contain("invalid JSON")
+            expect(duplicate_terminal.len()).to_equal(1)
+            expect(duplicate_terminal[0].stop_reason).to_equal("invalid")
+            expect(duplicate_terminal[0].content).to_contain("after a terminal")
+            expect(stop_then_result.len()).to_equal(2)
+            expect(stop_then_result[0].event_type).to_equal("message_stop")
+            expect(stop_then_result[1].event_type).to_equal("result")
+            expect(stop_then_result[1].content).to_equal("complete")
+            expect(incomplete_stream.len()).to_equal(2)
+            expect(incomplete_stream[1].event_type).to_equal("error")
+            expect(incomplete_stream[1].content).to_contain("before a terminal event")
+            expect(protocol_error.len()).to_equal(1)
+            expect(protocol_error[0].stop_reason).to_equal("error")
+            expect(protocol_error[0].content.contains("sk-ant-fixture-secret")).to_be(false)
+
             step("Invoke the provider-error NDJSON fixture")
             val events = claude_cli_stream(
                 MOCK_CLAUDE, "fixture-stream-provider-error",
@@ -603,6 +573,13 @@ describe "LLM caret Claude CLI feature contract":
             )
             expect(malformed.is_error).to_be(true)
             expect(malformed.error).to_contain("invalid JSON")
+            val stderr_error = claude_cli_send(
+                MOCK_CLAUDE, "fixture-error", "sonnet",
+                "", "", 0, 0, "", [], []
+            )
+            expect(stderr_error.is_error).to_be(true)
+            expect(stderr_error.error).to_contain("[REDACTED:")
+            expect(stderr_error.error.contains("sk-ant-fixture-secret")).to_be(false)
             val missing = claude_cli_send(
                 "/definitely/missing/llm-caret-claude", "ignored", "",
                 "", "", 0, 0, "", [], []
@@ -623,7 +600,9 @@ describe "LLM caret Claude CLI feature contract":
             expect(response).to_equal("fixture-ok")
             expect(llm_history_len()).to_equal(2)
             expect(llm_history_role(0)).to_equal("user")
+            expect(llm_history_content(0)).to_equal("fixture-success")
             expect(llm_history_role(1)).to_equal("assistant")
+            expect(llm_history_content(1)).to_equal("fixture-ok")
             llm_clear()
 
             step("Invoke failing public Claude CLI chat")

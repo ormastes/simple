@@ -20,9 +20,9 @@ used to generate the full-parity matrices.
 
 | Evidence | Current finding | Authority |
 |---|---|---|
-| `src/app/llm_caret/*.spl` | 23 direct caret files; 6,609 LOC | Current-tree evidence |
+| `src/app/llm_caret/*.spl` | 24 direct caret files; 7,046 LOC | Current-tree evidence |
 | `doc/09_report/llm_caret_claude_cli_traceability.md` | Maps 13 files and 3,292 current LOC | Stale generated/manual mapping |
-| `scripts/check/check-llm-caret-claude-cli-trace.shs` | 23/23 files (100%); 6,840/6,840 LOC (100%); 464/464 file-qualified symbols; `STATUS: PASS` | Current computed gate |
+| `scripts/check/check-llm-caret-claude-cli-trace.shs` | 24/24 files (100%); 7,046/7,046 LOC (100%); 471/471 file-qualified symbols after the TUI seam split; `STATUS: PASS` | Current computed gate |
 | Full self-hosted CLI bootstrap | Stage 3 built; Stage 4 full-CLI native build was killed by signal 9; no candidate deployed | Current executable-test blocker; do not retry in this session |
 | `tmp/claude/claude-code-main/src` | Missing | Current-tree evidence |
 | Full-parity feature matrix | 599 rows, 1,902 historical source files, 512,685 historical LOC | Snapshot-derived evidence; cannot be refreshed against upstream now |
@@ -287,12 +287,14 @@ rejected by default and admitted only when enabled, while disabled commands
 remain rejected under every fixture. Retry backoff is capped after jitter and
 the configured retry timeout now prevents an over-budget sleep.
 
-The completion audit is still red. Current direct scope is 23 files / 6,609
+The completion audit is still red. Current direct scope is 24 files / 7,046
 LOC and the focused report recognizes only 13 files / 3,292 LOC.
-The trace checker also omits column-0 `pub fn` declarations. The historical
+The focused checker now covers all file-qualified declarations, including the
+raw-key decoder and parser validation helpers. The historical
 1,902-row full-parity matrix has 1,157 missing targets and 1,728 missing primary
-specs, and its upstream source tree is absent. The TUI spec is a deterministic
-component model, not a driven raw-terminal loop; no live capture is claimed.
+specs, and its upstream source tree is absent. The TUI spec covers the pure
+raw-key decoder and input-widget transition, but not a driven live PTY loop;
+no live capture is claimed.
 Experimental environment gates and several distributed hidden features are not
 yet part of the aggregate hidden map. These gaps prohibit a full Claude parity
 or production-ready PASS claim.

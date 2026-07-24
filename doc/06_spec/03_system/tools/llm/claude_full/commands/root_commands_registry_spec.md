@@ -44,7 +44,7 @@ Checks modern SSpec parity for the top-level slash command registry.
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/tools/llm/claude_full/commands/root_commands_registry_spec.spl` |
-| Updated | 2026-07-05 |
+| Updated | 2026-07-24 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Checks modern SSpec parity for the top-level slash command registry.
@@ -53,7 +53,7 @@ Checks modern SSpec parity for the top-level slash command registry.
 
 ### Claude full root commands registry
 
-#### contains known top-level commands
+#### should contain known top-level commands
 
 - Build the modeled registry
 
@@ -76,7 +76,7 @@ expect(names).to_contain("agents")
 
 </details>
 
-#### resolves slash names and aliases
+#### should resolve slash names and aliases
 
 - Resolve direct slash names
    - Expected: help.found is true
@@ -99,23 +99,23 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 step("Resolve direct slash names")
 val help = findRootCommand("/help")
-expect(help.found).to_equal(true)
+expect(help.found).to_be(true)
 expect(help.command.name).to_equal("help")
 expect(help.matchedAlias).to_equal("")
 
 step("Resolve aliases without slash prefixes")
 val reset = findRootCommand("reset")
-expect(reset.found).to_equal(true)
+expect(reset.found).to_be(true)
 expect(reset.command.name).to_equal("clear")
 expect(reset.matchedAlias).to_equal("reset")
 
 step("Report missing commands explicitly")
-expect(findRootCommand("/missing").found).to_equal(false)
+expect(findRootCommand("/missing").found).to_be(false)
 ```
 
 </details>
 
-#### models disabled and hidden command behavior
+#### should model disabled and hidden command behavior
 
 - Hidden commands resolve but are excluded from visible summaries
    - Expected: debug.found is true
@@ -136,23 +136,23 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 step("Hidden commands resolve but are excluded from visible summaries")
 val debug = findRootCommand("/debug-tool-call")
-expect(debug.found).to_equal(true)
-expect(debug.command.hidden).to_equal(true)
-expect(admitRootCommand("/debug-tool-call", false).found).to_equal(false)
-expect(admitRootCommand("/debug-tool-call", true).found).to_equal(true)
+expect(debug.found).to_be(true)
+expect(debug.command.hidden).to_be(true)
+expect(admitRootCommand("/debug-tool-call", false).found).to_be(false)
+expect(admitRootCommand("/debug-tool-call", true).found).to_be(true)
 expect(visibleRootCommandSummary()).to_contain("/help core")
 expect(visibleRootCommandSummary()).to_contain("/mcp integrations")
 
 step("Disabled commands resolve with disabled state")
 val remote = findRootCommand("/remote-setup")
-expect(remote.found).to_equal(true)
-expect(remote.command.enabled).to_equal(false)
-expect(admitRootCommand("/remote-setup", true).found).to_equal(false)
+expect(remote.found).to_be(true)
+expect(remote.command.enabled).to_be(false)
+expect(admitRootCommand("/remote-setup", true).found).to_be(false)
 ```
 
 </details>
 
-#### filters by category and exposes source lines
+#### should filter by category and expose source lines
 
 - Filter commands by category
    - Expected: core.len() equals `3`

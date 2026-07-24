@@ -1,9 +1,19 @@
 # LLM Caret Provider Specification
 
+use std.spec.*
 use app.llm_caret.provider.{
     list_providers, is_valid_provider, new_llm_error,
     dispatch_send, dispatch_send_advanced
 }
+use app.llm_caret.mod.{
+    llm_init_defaults, llm_init,
+    llm_set_api_key, llm_set_base_url, llm_set_cli_path, llm_system,
+    llm_provider, llm_model, llm_clear,
+    llm_history_len, llm_history_role, llm_history_content,
+    llm_chat, llm_send
+}
+
+val MOCK_CLAUDE = "test/fixtures/llm_caret/mock_claude_cli.shs"
 
 # ============================================================================
 # Tests
@@ -114,3 +124,100 @@ describe "Dummy Provider":
         expect(resp.is_error).to_be(true)
         expect(resp.provider).to_equal("dummy")
         expect(resp.error).to_contain("require claude_cli")
+
+describe "Public LLM State":
+    it "should reject chat and direct send before initialization":
+        expect(llm_history_len()).to_equal(0)
+        expect(llm_chat("not initialized")).to_contain(
+            "call llm_init_defaults() or llm_init() first"
+        )
+        expect(llm_send("not initialized")).to_contain(
+            "call llm_init_defaults() or llm_init() first"
+        )
+        expect(llm_history_len()).to_equal(0)
+
+    it "should reject unsupported providers through both public send routes":
+        llm_init("unsupported", "none")
+        val chat_response = llm_chat("hello")
+        expect(chat_response).to_equal(
+            "ERROR: unsupported provider: unsupported"
+        )
+        expect(llm_history_len()).to_equal(1)
+        expect(llm_history_role(0)).to_equal("user")
+        expect(llm_history_content(0)).to_equal("hello")
+
+        llm_init("unsupported", "none")
+        val send_response = llm_send("hello")
+        expect(send_response).to_contain(
+            "llm_send only supports claude_cli and opencode_cli providers"
+        )
+        expect(llm_history_len()).to_equal(0)
+
+    it "should keep API-only settings from altering Claude CLI requests":
+        llm_init("claude_cli", "sonnet")
+        llm_set_api_key("offline-key")
+        llm_set_base_url("http://offline.invalid")
+        llm_set_cli_path(MOCK_CLAUDE)
+        llm_system("Be concise")
+        expect(llm_send("fixture-success")).to_equal("fixture-ok")
+        expect(llm_provider()).to_equal("claude_cli")
+        expect(llm_model()).to_equal("sonnet")
+        llm_clear()
+
+    it "should reset public conversation state on initialization":
+        llm_init("claude_cli", "sonnet")
+        llm_set_cli_path(MOCK_CLAUDE)
+        llm_system("Be concise")
+        expect(llm_chat("fixture-success")).to_equal("fixture-ok")
+        expect(llm_history_len()).to_equal(2)
+
+        llm_system("stale system prompt")
+        llm_init("claude_cli", "sonnet")
+        llm_set_cli_path(MOCK_CLAUDE)
+        expect(llm_history_len()).to_equal(0)
+        expect(llm_send("fixture-no-system")).to_equal("no-system-ok")
+
+        llm_init("claude_cli", "sonnet")
+        llm_set_cli_path(MOCK_CLAUDE)
+        llm_system("Be concise")
+        expect(llm_send("fixture-success")).to_equal("fixture-ok")
+
+    it "should reuse a successful Claude session on the next public send":
+        llm_init("claude_cli", "sonnet")
+        llm_set_cli_path(MOCK_CLAUDE)
+        llm_system("Be concise")
+        expect(llm_send("fixture-success")).to_equal("fixture-ok")
+        expect(llm_send("fixture-requires-resume")).to_equal("resumed-ok")
+        llm_clear()
+
+    it "should clear history and provider session immediately":
+        llm_init("claude_cli", "sonnet")
+        llm_set_cli_path(MOCK_CLAUDE)
+        llm_system("Be concise")
+        expect(llm_chat("fixture-success")).to_equal("fixture-ok")
+        expect(llm_history_len()).to_equal(2)
+
+        llm_clear()
+        expect(llm_history_len()).to_equal(0)
+        expect(llm_history_role(-1)).to_equal("")
+        expect(llm_history_role(0)).to_equal("")
+        expect(llm_history_role(999)).to_equal("")
+        expect(llm_history_content(-1)).to_equal("")
+        expect(llm_history_content(0)).to_equal("")
+        expect(llm_history_content(999)).to_equal("")
+        expect(llm_send("fixture-success")).to_equal("fixture-ok")
+
+    it "should restore every safely observable public default":
+        llm_init("claude_cli", "sonnet")
+        llm_set_cli_path(MOCK_CLAUDE)
+        llm_system("Be concise")
+        expect(llm_chat("fixture-success")).to_equal("fixture-ok")
+        expect(llm_history_len()).to_equal(2)
+
+        llm_init_defaults()
+        expect(llm_provider()).to_equal("claude_cli")
+        expect(llm_model()).to_equal("")
+        expect(llm_history_len()).to_equal(0)
+        llm_set_cli_path(MOCK_CLAUDE)
+        expect(llm_send("fixture-no-system")).to_equal("no-system-ok")
+        llm_clear()

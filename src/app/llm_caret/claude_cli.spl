@@ -68,8 +68,16 @@ fn _json_usage_kinds_valid(object: any) -> bool:
     ]:
         if not _json_optional_kind(object, key, "number"):
             return false
+        if json_object_has(object, key):
+            val direct = json_to_number(json_object_get(object, key))
+            if direct < 0.0 or direct != direct.to_i64().to_f64():
+                return false
         if usage != nil and not _json_optional_kind(usage, key, "number"):
             return false
+        if usage != nil and json_object_has(usage, key):
+            val nested = json_to_number(json_object_get(usage, key))
+            if nested < 0.0 or nested != nested.to_i64().to_f64():
+                return false
     val message = json_object_get(object, "message")
     if message != nil:
         if json_get_type(message) != "object":
@@ -258,7 +266,7 @@ pub fn parse_claude_json_response(raw: text) -> CliResponse:
         )
     if not _json_usage_kinds_valid(parsed):
         return _invalid_cli_response(
-            raw, "claude CLI usage fields must be numeric"
+            raw, "claude CLI usage fields must be numeric, non-negative integers"
         )
     if not _json_text_fields_valid(
         parsed, ["model", "session_id", "stop_reason"]
@@ -345,7 +353,7 @@ pub fn parse_claude_stream_line(line: text) -> CliStreamEvent:
         )
     if not _json_usage_kinds_valid(parsed):
         return _invalid_stream_event(
-            "claude CLI stream usage fields must be numeric"
+            "claude CLI stream usage fields must be numeric, non-negative integers"
         )
     if not _json_text_fields_valid(
         parsed, ["session_id", "model", "stop_reason"]
@@ -365,6 +373,24 @@ pub fn parse_claude_stream_line(line: text) -> CliStreamEvent:
         return _invalid_stream_event(
             "claude CLI stream delta field must be an object"
         )
+    if etype == "assistant" and stream_message != nil:
+        val assistant_content = json_object_get(stream_message, "content")
+        if assistant_content != nil and json_get_type(assistant_content) != "array":
+            return _invalid_stream_event(
+                "claude CLI assistant content field must be an array"
+            )
+        if assistant_content != nil:
+            var block_index = 0
+            while block_index < json_array_length(assistant_content):
+                val block = json_array_get(assistant_content, block_index)
+                if (json_get_type(block) != "object" or
+                    not _json_optional_kind(block, "type", "string") or
+                    (_json_text(block, "type") == "text" and
+                     not _json_optional_kind(block, "text", "string"))):
+                    return _invalid_stream_event(
+                        "claude CLI assistant content blocks must be typed objects"
+                    )
+                block_index = block_index + 1
     var content_val = ""
     var sid = ""
     var mdl = ""
@@ -510,17 +536,31 @@ pub fn claude_cli_stream(cli_path: text, prompt: text, model: text, system_promp
         return events
     val lines = stdout.split("\n")
     var saw_event = false
-    var saw_terminal = false
+    var saw_message_stop = false
+    var saw_final = false
     for line in lines:
         if line.trim() != "":
             val evt = parse_claude_stream_line(line)
+            if evt.stop_reason == "invalid":
+                return [evt]
+            if saw_final:
+                return [_invalid_stream_event(
+                    "claude CLI stream emitted data after a terminal event"
+                )]
+            if (saw_message_stop and
+                evt.event_type != "result" and
+                evt.event_type != "error"):
+                return [_invalid_stream_event(
+                    "claude CLI stream emitted data after message_stop"
+                )]
             events = events + [evt]
-            if evt.event_type != "empty" and evt.stop_reason != "invalid":
+            if evt.event_type != "empty":
                 saw_event = true
-            if evt.event_type == "result" or
-               evt.event_type == "message_stop" or
-               (evt.event_type == "error" and evt.stop_reason == "error"):
-                saw_terminal = true
+            if evt.event_type == "message_stop":
+                saw_message_stop = true
+            elif (evt.event_type == "result" or
+                  (evt.event_type == "error" and evt.stop_reason == "error")):
+                saw_final = true
     if not saw_event:
         return [CliStreamEvent(
             event_type: "error",
@@ -531,7 +571,7 @@ pub fn claude_cli_stream(cli_path: text, prompt: text, model: text, system_promp
             input_tokens: 0,
             output_tokens: 0
         )]
-    if not saw_terminal:
+    if not saw_message_stop and not saw_final:
         events = events + [CliStreamEvent(
             event_type: "error",
             content: "claude CLI stream ended before a terminal event",

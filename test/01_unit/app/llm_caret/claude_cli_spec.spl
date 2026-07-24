@@ -291,6 +291,18 @@ describe "parse_claude_json_response - error":
         expect(resp.is_error).to_be(true)
         expect(resp.error).to_contain("must be numeric")
 
+    it "should reject negative and fractional usage counters":
+        val negative = parse_claude_json_response(
+            "{\"result\":\"x\",\"usage\":{\"input_tokens\":-1}}"
+        )
+        expect(negative.is_error).to_be(true)
+        expect(negative.error).to_contain("non-negative integers")
+        val fractional = parse_claude_json_response(
+            "{\"result\":\"x\",\"message\":{\"usage\":{\"output_tokens\":1.5}}}"
+        )
+        expect(fractional.is_error).to_be(true)
+        expect(fractional.error).to_contain("non-negative integers")
+
     it "should reject malformed nested message usage and metadata":
         val nested_usage = parse_claude_json_response(
             "{\"result\":\"x\",\"message\":{\"usage\":{\"output_tokens\":\"many\"}}}"
@@ -441,6 +453,51 @@ describe "parse_claude_stream_line":
         expect(evt.stop_reason).to_equal("end_turn")
         expect(evt.input_tokens).to_equal(20)
         expect(evt.output_tokens).to_equal(6)
+
+    it "should reject malformed stream result contracts":
+        val bad_flag = parse_claude_stream_line(
+            "{\"type\":\"result\",\"is_error\":\"false\",\"result\":\"done\"}"
+        )
+        expect(bad_flag.stop_reason).to_equal("invalid")
+        expect(bad_flag.content).to_contain("must be boolean")
+        val bad_result = parse_claude_stream_line(
+            "{\"type\":\"result\",\"is_error\":false,\"result\":42}"
+        )
+        expect(bad_result.stop_reason).to_equal("invalid")
+        expect(bad_result.content).to_contain("must be a string")
+
+    it "should default message stop and reject malformed stream metadata":
+        val stopped = parse_claude_stream_line(
+            "{\"type\":\"message_stop\"}"
+        )
+        expect(stopped.stop_reason).to_equal("end_turn")
+        val root_model = parse_claude_stream_line(
+            "{\"type\":\"system\",\"model\":42}"
+        )
+        expect(root_model.stop_reason).to_equal("invalid")
+        expect(root_model.content).to_contain("metadata fields")
+        val nested_model = parse_claude_stream_line(
+            "{\"type\":\"assistant\",\"message\":{\"model\":42,\"content\":[]}}"
+        )
+        expect(nested_model.stop_reason).to_equal("invalid")
+        expect(nested_model.content).to_contain("message model")
+
+    it "should reject malformed assistant content and usage values":
+        val scalar_content = parse_claude_stream_line(
+            "{\"type\":\"assistant\",\"message\":{\"content\":\"text\"}}"
+        )
+        expect(scalar_content.stop_reason).to_equal("invalid")
+        expect(scalar_content.content).to_contain("must be an array")
+        val bad_block = parse_claude_stream_line(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":42}]}}"
+        )
+        expect(bad_block.stop_reason).to_equal("invalid")
+        expect(bad_block.content).to_contain("typed objects")
+        val fractional_usage = parse_claude_stream_line(
+            "{\"type\":\"result\",\"is_error\":false,\"result\":\"done\",\"usage\":{\"output_tokens\":2.5}}"
+        )
+        expect(fractional_usage.stop_reason).to_equal("invalid")
+        expect(fractional_usage.content).to_contain("non-negative integers")
 
     it "should parse structured output from a Claude Code result envelope":
         val line = "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"structured_output\":{\"answer\":42,\"labels\":[\"a\",\"b\"]},\"session_id\":\"session-r\"}"

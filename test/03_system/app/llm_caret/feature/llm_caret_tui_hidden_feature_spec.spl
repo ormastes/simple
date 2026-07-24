@@ -15,7 +15,8 @@ terminal or paid provider. The scenarios drive the input widget model through
 gate, retry policy, Claude REPL error route, and production hidden-command
 dispatch/admission. Provider, model, resume, and new-conversation commands must
 refresh visible state; a new conversation must receive a fresh session ID. The
-raw-terminal key reader/frame timing is not claimed by this component spec.
+pure raw-key decoder and input-widget transition are covered; live PTY reads
+and terminal frame timing are not claimed by this component spec.
 
 **Requirement IDs:** REQ-LLM-CARET-FULL-003, REQ-LLM-CARET-FULL-006
 **Requirements:** doc/02_requirements/feature/llm_caret_claude_cli_full_parity.md
@@ -42,18 +43,20 @@ use std.tui.widgets.input.{input_insert_char}
 use app.io.mod.{dir_create_all, file_read, file_write}
 use app.llm_caret.types.{Message, new_user_message}
 use app.llm_caret.tools.{
-    ModelResponse, ToolCall, default_policy, new_model_text, new_model_tools,
+    ModelResponse, default_policy, new_model_text, new_model_tools,
     new_tool_call
 }
-use app.llm_caret.chat.{run_agent_loop_rendered}
 use app.llm_caret.chat_tui.{
     ChatTui, ProviderSwitchResult, SessionResumeResult, SessionHooks,
     make_chat_tui_with_status, dispatch_slash,
-    apply_slash_status, run_chat_tui_submission,
-    render_turn, tui_tool_renderer, tui_transcript_reset,
+    run_chat_tui_submission, tui_transcript_reset,
     tui_transcript_len, tui_transcript_line_text
 }
+use app.llm_caret.tui_input.{
+    decode_raw_key_byte, apply_raw_key_decode
+}
 use app.llm_caret.retry.{RetryPolicy, should_retry, effective_delay_ms}
+use app.llm_caret.main.{_slash_on_hidden_command}
 use app.llm_caret.claude_full.screens.REPL.{queryEventRoute}
 use app.llm_caret.claude_full.commands.{
     RootCommandLookup, findRootCommand, admitRootCommand, visibleRootCommands
@@ -62,6 +65,9 @@ use app.llm_caret.claude_full.commands.{
 val ARTIFACT_DIR: text = "build/test-artifacts/03_system/app/llm_caret/feature/llm_caret_tui_hidden_feature"
 val TUI_CAPTURE_PATH: text = ARTIFACT_DIR + "/caret_tui.txt"
 val WORKSPACE_ROOT: text = "build/tmp/llm_caret_tui_hidden_feature"
+var PERSIST_COUNT = 0
+var PERSIST_SESSION = ""
+var PERSIST_MESSAGES = 0
 
 struct CaretTuiFeatureCase:
     prompt: text
@@ -104,11 +110,13 @@ fn _resume_found(name: text) -> SessionResumeResult:
         provider: "claude_cli", model: "sonnet"
     )
 
-fn _persist_none(session_id: text, messages: [Message]):
-    ()
+fn _persist_record(session_id: text, messages: [Message]):
+    PERSIST_COUNT = PERSIST_COUNT + 1
+    PERSIST_SESSION = session_id
+    PERSIST_MESSAGES = messages.len()
 
 fn _hidden_command(name: text, arg: text) -> text:
-    "hidden command executed: " + name + " " + arg
+    _slash_on_hidden_command(name, arg)
 
 fn _hooks(session_id: text) -> SessionHooks:
     SessionHooks(
@@ -120,7 +128,7 @@ fn _hooks(session_id: text) -> SessionHooks:
         on_new: _new_session,
         on_resume: _resume_none,
         on_hidden_command: _hidden_command,
-        on_persist: _persist_none
+        on_persist: _persist_record
     )
 
 fn _hooks_with_resume(session_id: text) -> SessionHooks:
@@ -133,7 +141,7 @@ fn _hooks_with_resume(session_id: text) -> SessionHooks:
         on_new: _new_session,
         on_resume: _resume_found,
         on_hidden_command: _hidden_command,
-        on_persist: _persist_none
+        on_persist: _persist_record
     )
 
 fn _hooks_hidden(session_id: text) -> SessionHooks:
@@ -146,11 +154,14 @@ fn _hooks_hidden(session_id: text) -> SessionHooks:
         on_new: _new_session,
         on_resume: _resume_none,
         on_hidden_command: _hidden_command,
-        on_persist: _persist_none
+        on_persist: _persist_record
     )
 
 fn setup_tui_fixture(case: CaretTuiFeatureCase) -> ChatTui:
     tui_transcript_reset()
+    PERSIST_COUNT = 0
+    PERSIST_SESSION = ""
+    PERSIST_MESSAGES = 0
     val base = make_chat_tui_with_status(
         "llm_caret - " + case.provider,
         "provider=" + case.provider + " model=" + case.model + " session=" + case.session_id
@@ -191,6 +202,9 @@ fn check_tui_snapshot(snapshot: text, case: CaretTuiFeatureCase) -> text:
     expect(snapshot).to_contain("input=\n")
     expect(snapshot).to_contain("You: " + case.prompt)
     expect(snapshot).to_contain("Assistant: " + case.expected_reply)
+    expect(PERSIST_COUNT).to_equal(1)
+    expect(PERSIST_SESSION).to_equal(case.session_id)
+    expect(PERSIST_MESSAGES).to_equal(2)
     "matched"
 
 fn setup_hidden_feature_fixture(case: CaretHiddenFeatureCase) -> RootCommandLookup:
@@ -198,8 +212,8 @@ fn setup_hidden_feature_fixture(case: CaretHiddenFeatureCase) -> RootCommandLook
 
 fn check_hidden_feature_gate(case: CaretHiddenFeatureCase, lookup: RootCommandLookup) -> text:
     expect(lookup.found).to_be(true)
-    expect(lookup.command.enabled).to_equal(case.expected_enabled)
-    expect(lookup.command.hidden).to_equal(case.expected_hidden)
+    expect(lookup.command.enabled).to_be(case.expected_enabled)
+    expect(lookup.command.hidden).to_be(case.expected_hidden)
     expect(findRootCommand(case.alias).command.name).to_equal(lookup.command.name)
     var visible = false
     for command in visibleRootCommands():
@@ -233,7 +247,7 @@ describe "REQ-LLM-CARET-FULL-003: LLM Caret TUI visible behavior":
             provider: "dummy",
             model: "dummy-hello",
             session_id: "tui-session",
-            expected_reply: "hello"
+            expected_reply: "fixture-dummy-ok"
         )
 
         step("Open the caret TUI")
@@ -250,6 +264,27 @@ describe "REQ-LLM-CARET-FULL-003: LLM Caret TUI visible behavior":
         expect(file_write(TUI_CAPTURE_PATH, snapshot)).to_be(true)
         expect(file_read(TUI_CAPTURE_PATH)).to_equal(snapshot)
 
+    it "should apply raw terminal navigation without leaking escape bytes":
+        step("Open the caret TUI")
+        val ui = make_chat_tui_with_status(
+            "llm_caret - dummy",
+            "provider=dummy model=dummy-hello session=key-session"
+        )
+        var input = input_insert_char(ui.input, "a")
+        input = input_insert_char(input, "c")
+        var decoder_state = 0
+
+        step("Send a prompt through the visible input")
+        for b in [27, 91, 68, 98, 27, 91, 72, 62, 27, 91, 70, 33]:
+            val decoded = decode_raw_key_byte(decoder_state, b)
+            decoder_state = decoded.state
+            input = apply_raw_key_decode(input, decoded)
+
+        step("Check transcript and status")
+        expect(decoder_state).to_equal(0)
+        expect(input.value).to_equal(">abc!")
+        expect(input.value.contains("[")).to_be(false)
+
     it "should surface provider switching through the visible transcript":
         step("Open the caret TUI")
         tui_transcript_reset()
@@ -259,48 +294,71 @@ describe "REQ-LLM-CARET-FULL-003: LLM Caret TUI visible behavior":
         )
 
         step("Send a prompt through the visible input")
-        val switched = dispatch_slash("provider", "openai_compat", _hooks("tui-session"))
-        val refreshed = apply_slash_status(ui, switched)
-        render_turn("system", switched.message)
+        val switched = run_chat_tui_submission(
+            ui, [], "tui-session", "/provider openai_compat",
+            default_policy(WORKSPACE_ROOT), _tui_fixture_model,
+            _hooks("tui-session")
+        )
 
         step("Check transcript and status")
-        expect(refreshed.status).to_contain("provider=openai_compat")
-        expect(refreshed.title).to_equal("llm_caret - openai_compat")
-        expect(switched.exit).to_be(false)
+        expect(switched.ui.status).to_contain("provider=openai_compat")
+        expect(switched.ui.title).to_equal("llm_caret - openai_compat")
+        expect(switched.running).to_be(true)
+        expect(switched.submitted_to_model).to_be(false)
         expect(tui_transcript_line_text(0)).to_equal("System: provider set to openai_compat")
 
-        val resumed = dispatch_slash(
-            "resume", "tui-session", _hooks_with_resume("seed-session")
+        val resumed = run_chat_tui_submission(
+            switched.ui, switched.conversation, switched.session_id,
+            "/resume tui-session", default_policy(WORKSPACE_ROOT),
+            _tui_fixture_model, _hooks_with_resume("seed-session")
         )
-        val resumed_ui = apply_slash_status(refreshed, resumed)
-        expect(resumed_ui.status).to_contain("session=tui-session")
+        expect(resumed.ui.status).to_contain("session=tui-session")
+        expect(resumed.conversation.len()).to_equal(1)
+        expect(tui_transcript_line_text(0)).to_equal("You: restored")
+        expect(tui_transcript_line_text(1)).to_equal(
+            "System: resumed session tui-session"
+        )
 
-        val started = dispatch_slash("new", "", _hooks("tui-session"))
-        val started_ui = apply_slash_status(resumed_ui, started)
-        expect(started.new_conv).to_be(true)
-        expect(started.new_session_id).to_equal("new-session")
-        expect(started_ui.status).to_contain("session=new-session")
+        val started = run_chat_tui_submission(
+            resumed.ui, resumed.conversation, resumed.session_id, "/new",
+            default_policy(WORKSPACE_ROOT), _tui_fixture_model,
+            _hooks("tui-session")
+        )
+        expect(started.conversation.len()).to_equal(0)
+        expect(started.session_id).to_equal("new-session")
+        expect(started.ui.status).to_contain("session=new-session")
+        expect(tui_transcript_line_text(0)).to_equal(
+            "System: started a new conversation"
+        )
 
     it "should show permission-denied tool output without executing the command":
         step("Open the caret TUI")
         tui_transcript_reset()
+        PERSIST_COUNT = 0
         val policy = default_policy(WORKSPACE_ROOT)
+        val ui = make_chat_tui_with_status(
+            "llm_caret - dummy",
+            "provider=dummy model=dummy-hello session=permission-session"
+        )
 
         step("Send a prompt through the visible input")
-        val result = run_agent_loop_rendered(
-            policy,
-            [new_user_message("run a command")],
-            _permission_tool,
-            4,
-            tui_tool_renderer
+        val result = run_chat_tui_submission(
+            ui, [], "permission-session", "run a command",
+            policy, _permission_tool, _hooks("permission-session")
         )
 
         step("Check transcript and status")
-        expect(result.tool_calls_made).to_equal(1)
-        expect(result.stopped_reason).to_equal("end_turn")
-        expect(tui_transcript_len()).to_equal(1)
-        expect(tui_transcript_line_text(0)).to_contain("tool bash [error]")
-        expect(tui_transcript_line_text(0)).to_contain("permission")
+        expect(result.submitted_to_model).to_be(true)
+        expect(PERSIST_COUNT).to_equal(1)
+        expect(PERSIST_SESSION).to_equal("permission-session")
+        expect(result.conversation.len()).to_be_greater_than(2)
+        expect(tui_transcript_len()).to_equal(3)
+        expect(tui_transcript_line_text(0)).to_equal("You: run a command")
+        expect(tui_transcript_line_text(1)).to_contain("tool bash [error]")
+        expect(tui_transcript_line_text(1)).to_contain("permission")
+        expect(tui_transcript_line_text(2)).to_equal(
+            "Assistant: permission handled"
+        )
 
     it "should expose bounded retry decisions and the terminal error route":
         val policy = RetryPolicy(
@@ -341,13 +399,18 @@ describe "REQ-LLM-CARET-FULL-006: LLM Caret hidden-feature gate":
         val rejected = dispatch_slash(
             "debug-tool-call", "call-1", _hooks("hidden-session")
         )
-        expect(rejected.message).to_contain("Hidden command disabled")
+        val unknown = dispatch_slash(
+            "not-registered", "", _hooks("hidden-session")
+        )
+        expect(rejected.message).to_equal(unknown.message)
         val executed = dispatch_slash(
-            "debug-tool-call", "call-1", _hooks_hidden("hidden-session")
+            "debug-tool-call",
+            "{\"type\":\"tool_use\",\"id\":\"call-1\",\"name\":\"bash\",\"input\":{\"command\":\"echo sk-ant-fixture-secret\"}}",
+            _hooks_hidden("hidden-session")
         )
-        expect(executed.message).to_equal(
-            "hidden command executed: debug-tool-call call-1"
-        )
+        expect(executed.message).to_contain("id=call-1")
+        expect(executed.message).to_contain("name=bash")
+        expect(executed.message.contains("sk-ant-fixture-secret")).to_be(false)
 
     it "should reject disabled commands even when hidden features are enabled":
         step("Enable the hidden-feature fixture")

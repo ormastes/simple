@@ -18,7 +18,7 @@ use app.llm_caret.chat.{AgentResult, run_agent_loop, run_agent_loop_rendered}
 use app.llm_caret.chat_tui.{
     ChatTui, make_chat_tui, make_chat_tui_with_status,
     format_turn_line, format_tool_line, tui_role_label,
-    tui_role_style, tui_tool_style, select_renderer_mode,
+    tui_role_style, tui_tool_style,
     render_turn, render_tool_call, tui_tool_renderer,
     tui_transcript_reset, tui_transcript_len, tui_transcript_line_text,
     ProviderSwitchResult, SessionResumeResult, SessionHooks, SlashResult,
@@ -26,6 +26,9 @@ use app.llm_caret.chat_tui.{
     apply_slash_status, run_chat_tui_submission,
     is_fence_line, bullet_indent, inline_code_segments, markdown_turn_lines,
     visible_window, is_scrolled, scroll_page_up, scroll_page_down
+}
+use app.llm_caret.tui_input.{
+    select_renderer_mode, decode_raw_key_byte
 }
 use std.tui.style.{Style, COLOR_CYAN, COLOR_GREEN, COLOR_RED, COLOR_YELLOW, tui_default_style}
 
@@ -290,6 +293,45 @@ fn _test_hooks_hidden() -> SessionHooks:
 fn _submission_response(messages: [Message]) -> ModelResponse:
     new_model_text("submission reply")
 
+fn _decode_raw_bytes(bytes: [i64]) -> (text, text):
+    var state = 0
+    var keys: [text] = []
+    var printable = ""
+    for b in bytes:
+        val decoded = decode_raw_key_byte(state, b)
+        state = decoded.state
+        if decoded.key != "" and decoded.key != "text":
+            keys.push(decoded.key)
+        if decoded.printable_byte >= 0:
+            printable = printable + (decoded.printable_byte as char).to_text()
+    (keys.join(","), printable)
+
+describe "ANSI raw-key decoding":
+    it "should decode CSI and SS3 arrows without leaking printable bytes":
+        expect(_decode_raw_bytes([27, 91, 65])).to_equal(("up", ""))
+        expect(_decode_raw_bytes([27, 91, 66])).to_equal(("down", ""))
+        expect(_decode_raw_bytes([27, 91, 67])).to_equal(("right", ""))
+        expect(_decode_raw_bytes([27, 91, 68])).to_equal(("left", ""))
+        expect(_decode_raw_bytes([27, 79, 67])).to_equal(("right", ""))
+
+    it "should decode direct and numeric home and end sequences":
+        expect(_decode_raw_bytes([27, 91, 72])).to_equal(("home", ""))
+        expect(_decode_raw_bytes([27, 91, 70])).to_equal(("end", ""))
+        expect(_decode_raw_bytes([27, 91, 49, 126])).to_equal(("home", ""))
+        expect(_decode_raw_bytes([27, 91, 52, 126])).to_equal(("end", ""))
+        expect(_decode_raw_bytes([27, 91, 55, 126])).to_equal(("home", ""))
+        expect(_decode_raw_bytes([27, 91, 56, 126])).to_equal(("end", ""))
+
+    it "should swallow modified and unknown ANSI sequences":
+        expect(_decode_raw_bytes([27, 91, 49, 59, 53, 68])).to_equal(
+            ("left", "")
+        )
+        expect(_decode_raw_bytes([27, 91, 51, 126])).to_equal(("", ""))
+        expect(_decode_raw_bytes([27, 120])).to_equal(("", ""))
+
+    it "should preserve ordinary printable input after a completed sequence":
+        expect(_decode_raw_bytes([27, 91, 67, 120])).to_equal(("right", "x"))
+
 describe "Slash command parsing":
     it "should recognize lines starting with /":
         assert_true(is_slash_command("/help"))
@@ -428,7 +470,8 @@ describe "Slash command dispatch":
         val rejected = dispatch_slash(
             "debug-tool-call", "call-1", _test_hooks()
         )
-        expect(rejected.message).to_contain("Hidden command disabled")
+        val unknown = dispatch_slash("not-registered", "", _test_hooks())
+        expect(rejected.message).to_equal(unknown.message)
         val admitted = dispatch_slash(
             "debug-tool-call", "call-1", _test_hooks_hidden()
         )
@@ -441,6 +484,20 @@ describe "Slash command dispatch":
             "remote-setup", "", _test_hooks_hidden()
         )
         expect(result.message).to_contain("Command disabled")
+
+    it "should support help and conversation-reset aliases":
+        expect(dispatch_slash("?", "", _test_hooks()).message).to_equal(
+            slash_help_text()
+        )
+        expect(dispatch_slash("clear", "", _test_hooks()).new_conv).to_be(true)
+        expect(dispatch_slash("reset", "", _test_hooks()).new_conv).to_be(true)
+
+    it "should distinguish recognized registry commands from unknown input":
+        val known = dispatch_slash("config", "", _test_hooks())
+        val unknown = dispatch_slash("not-registered", "", _test_hooks())
+        expect(known.message).to_contain("not implemented in Caret")
+        expect(known.message).to_contain("/config")
+        expect(known.message == unknown.message).to_be(false)
 
 describe "TUI submission state transition":
     it "should run a model turn through the production submission path":
