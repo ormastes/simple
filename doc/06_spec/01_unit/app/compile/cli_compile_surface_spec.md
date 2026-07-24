@@ -28,7 +28,7 @@ cli_compile_surface_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 10 | 10 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -159,20 +159,43 @@ expect(result.1.contains("missing_input.spl")).to_equal(false)
 
 </details>
 
-#### native-build delegated cli path accepts stable delegated runtime-bundle aliases
+#### native-build rejects removed runtime-bundle aliases before build work
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val aliases = ["core-c", "runtime", "rust-hosted", "hosted", "all"]
+val aliases = ["hosted", "rust-hosted", "rust_hosted", "hosted-runtime", "rust-runtime", "all"]
 for lane in aliases:
-    val result = run_cli(["native-build", "--runtime-bundle=" + lane, "--entry", "missing_input.spl"])
-    expect(result.2 != 0).to_equal(true)
-    expect(result.1.contains("invalid --runtime-bundle")).to_equal(false)
+    val inline = run_cli(["native-build", "--runtime-bundle=" + lane, "--entry", "missing_input.spl"])
+    val split = run_cli(["native-build", "--runtime-bundle", lane, "--entry", "missing_input.spl"])
+    expect(inline.2).to_equal(1)
+    expect(split.2).to_equal(1)
+    expect(inline.1).to_contain("was removed; use simple-core or core-c-bootstrap")
+    expect(split.1).to_contain("was removed; use simple-core or core-c-bootstrap")
+    expect(inline.1.contains("missing_input.spl")).to_equal(false)
+    expect(split.1.contains("missing_input.spl")).to_equal(false)
+
+val repeated = run_cli(["native-build", "--runtime-bundle=simple-core", "--runtime-bundle=all", "--entry", "missing_input.spl"])
+expect(repeated.2).to_equal(1)
+expect(repeated.1).to_contain("was removed; use simple-core or core-c-bootstrap")
+```
+
+</details>
+
+#### native-build help before a removed bundle remains informational
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+val result = run_cli(["native-build", "--help", "--runtime-bundle=all"])
+expect(result.2).to_equal(0)
+expect(result.0).to_contain("Simple Native Build")
+expect(result.1.contains("was removed")).to_equal(false)
 ```
 
 </details>
@@ -238,8 +261,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

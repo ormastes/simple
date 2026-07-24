@@ -391,7 +391,10 @@ evidence boundary for the important pure-Simple tooling lanes:
   sibling and publish by direct rename, so stale requested outputs cannot
   satisfy a driver `Success` without a fresh artifact. Its option preflight
   rejects unknown, missing, empty, option-looking, and invalid numeric option values before
-  compilation or output mutation. Compile/link failures preserve the prior requested output. **Remaining bug/gap:** the focused
+  compilation or output mutation. Bootstrap and full-CLI owners also reject all
+  removed hosted runtime-bundle aliases before build work; see the
+  [runtime-bundle report](../../08_tracking/bug/native_build_removed_runtime_bundle_false_green_2026-07-24.md).
+  Compile/link failures preserve the prior requested output. **Remaining bug/gap:** the focused
   staging source-contract scenario passes, but no fresh behavioral build is
   qualified. **Next solution:** incrementally build one small entry closure
   with the exact fresh CLI, then run its artifact once.

@@ -88,6 +88,30 @@ fn native_build_has_entry_closure(args: [text]) -> i64:
             return 1
     0
 
+fn native_build_runtime_bundle_is_removed(bundle: text) -> i64:
+    if bundle == "hosted" or bundle == "rust-hosted" or bundle == "rust_hosted":
+        return 1
+    if bundle == "hosted-runtime" or bundle == "rust-runtime" or bundle == "all":
+        return 1
+    0
+
+fn native_build_policy_action_from_args(args: [text], i: i64) -> text:
+    if i >= args.len():
+        return ""
+    val arg = args[i]
+    if arg == "--help" or arg == "-h" or arg == "--list-optimizations":
+        return arg
+    if arg == "--runtime-bundle" and i + 1 < args.len():
+        val bundle = args[i + 1]
+        if native_build_runtime_bundle_is_removed(bundle) == 1:
+            return bundle
+        return native_build_policy_action_from_args(args, i + 2)
+    if arg.starts_with("--runtime-bundle="):
+        val bundle = arg.substring(17)
+        if native_build_runtime_bundle_is_removed(bundle) == 1:
+            return bundle
+    native_build_policy_action_from_args(args, i + 1)
+
 fn run_rt_native_build(args: [text]) -> i64:
     val has_entry_closure = native_build_has_entry_closure(args)
     val old_entry_closure = env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")
@@ -177,6 +201,12 @@ fn native_build_no_borrow_check_from_args(args: [text], i: i64) -> bool:
 # rt_native_build FFI seed. The in-process failure surfaces loudly; it never
 # silently retries the seed.
 fn run_native_build_bootstrap(args: [text]) -> i64:
+    val removed_bundle = native_build_policy_action_from_args(args, 0)
+    if removed_bundle == "--help" or removed_bundle == "-h" or removed_bundle == "--list-optimizations":
+        return run_rt_native_build(args)
+    if removed_bundle != "":
+        print "Error: runtime bundle '{removed_bundle}' was removed; use simple-core or core-c-bootstrap"
+        return 1
     val mode = native_build_mode_from_args(args, 0)
     if mode != "" and mode != "dynload" and mode != "one-binary":
         print "Error: invalid --mode '{mode}' (expected dynload or one-binary)"
