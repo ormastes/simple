@@ -322,3 +322,11 @@ implementation-milestone-0-in-progress
   the pure-Simple core parser. The focused two-field parser regression passes
   and proves the annotation no longer consumes or reclassifies the next field.
   No Stage 4 deployment or RTL qualification is claimed.
+- K26 DDR bridge progress 2026-07-24: Simple now emits a synthesizable,
+  one-outstanding WB64-to-128-bit-AXI-HP bridge with independent AW/W
+  backpressure, correct lower/upper byte lanes, aligned narrow-beat addresses,
+  AXI error propagation, and a Wishbone release state that prevents duplicate
+  requests. High-capability review found and drove the address/release fixes.
+  The bridge is included in the RV64 bundle manifest, but the K26 top still
+  lacks the PS block design and does not instantiate the external-DDR SoC;
+  behavioral GHDL and board DDR qualification therefore remain open.
