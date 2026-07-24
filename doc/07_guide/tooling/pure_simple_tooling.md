@@ -347,6 +347,11 @@ evidence boundary for the important pure-Simple tooling lanes:
   is pushed. Direct server admission now rejects residual/tail arguments before
   entering stdio; help/version/probe are accepted only when shared-log cleaning
   leaves them as the sole server argument (`2d1a6a7afd7`).
+  Active VCS and read-only query handlers now pass request fields through one
+  bounded argv owner instead of interpolating them into a shell. Diagnostics
+  and CLI-passthrough handlers still require the same migration, so MCP is not
+  yet shell-injection hardened; see the
+  [public-field injection report](../../08_tracking/bug/mcp_public_field_shell_injection_2026-07-24.md).
   **Strongest current evidence:** `1035de83f1`, `2d1a6a7afd7`, and the wrapper
   contract above. **Remaining bug/gap:** a fresh Stage 4 native full-MCP
   handshake has not yet been captured as qualification evidence. **Next

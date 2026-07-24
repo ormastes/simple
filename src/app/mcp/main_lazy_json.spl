@@ -2,6 +2,7 @@
 # Extracted from main_lazy.spl
 
 use std.io_runtime.{env_get, process_run, file_read, file_write}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
 
 # --- Safe string helpers (workaround for 2-arg substring bug) ---
 
@@ -394,7 +395,7 @@ export LB, RB, Q, jp, js, jo1, jo2, jo3, jo4, make_tool_result, make_tool_error
 export extract_json_string, extract_json_value, make_error_response, log_level_to_int
 export first_n_chars
 export make_json_result, make_error, extract_field, escape_json
-export top_level_item_count, shell_cmd, _slice_text
+export top_level_item_count, shell_cmd, mcp_run_argv, strip_ansi, _slice_text
 
 # --- Shell helper ---
 # Uses process_run (returns an anonymous (text, text, i64) tuple). Destructuring
@@ -421,15 +422,32 @@ fn _get_shell() -> text:
     _mcp_detect_shell()
 
 fn strip_ansi(s: text) -> text:
-    val shell = _get_shell()
-    if shell == "cmd":
-        # No ANSI stripping needed on Windows cmd
-        return s
-    val e_result = process_run(shell, ["-c", r"printf '\033'"])
-    val e_out = e_result.0
-    if e_out == "" or not s.contains(e_out):
-        return s
-    s.replace(e_out, "")
+    var parts: [text] = []
+    var escape_state = 0
+    for ch in s:
+        if escape_state == 1:
+            if ch == "[":
+                escape_state = 2
+            elif ch == "\033" or ch == "\x1b":
+                escape_state = 1
+            else:
+                escape_state = 0
+                parts.push(ch)
+            continue
+        if escape_state == 2:
+            if ch == "\033" or ch == "\x1b":
+                escape_state = 1
+            elif ch >= "@" and ch <= "~":
+                escape_state = 0
+            elif ch < " " or ch > "?":
+                escape_state = 0
+                parts.push(ch)
+            continue
+        if ch == "\033" or ch == "\x1b":
+            escape_state = 1
+            continue
+        parts.push(ch)
+    parts.join("")
 
 fn _strip_timeout_prefix(command: text) -> text:
     """Strip Unix 'timeout N' prefix for cmd.exe compatibility.
@@ -472,6 +490,15 @@ fn shell_cmd(command: text) -> (text, i64):
     if stdout != "":
         stdout = strip_ansi(stdout)
     (stdout, code)
+
+# Run a fixed executable with literal arguments.  Keep this beside shell_cmd so
+# callers handling public fields do not accidentally rebuild a shell command.
+fn mcp_run_argv(binary: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, i64):
+    val result = process_run_bounded(binary, args, timeout_ms, max_output_bytes)
+    var output = result.0 + result.1
+    if output != "":
+        output = strip_ansi(output)
+    (output, result.2)
 
 fn text_byte_len(s: text) -> i64:
     s.len()

@@ -12,10 +12,10 @@
 # `main()` (server never starts). The context pack is generated via a `bin/simple
 # context` subprocess below instead. See
 # doc/08_tracking/bug/mcp_source_mode_large_import_graph_2026-06-23.md
-use std.nogc_sync_mut.io.process_ops.{process_run_timeout}
 use app.ponytail.audit.{ponytail_audit, ponytail_simplification_report}
-use std.io_runtime.{env_get, file_exists}
+use std.io_runtime.{env_get, file_exists, file_read}
 use std.string_core.{char_from_code}
+use .main_lazy_json.{mcp_run_argv}
 
 fn _mcp_json_escape(value: text) -> text:
     var out = ""
@@ -36,6 +36,23 @@ fn _mcp_json_escape(value: text) -> text:
             # filed: doc/08_tracking/bug/text_static_method_hir_lowering_2026-07-23.md
             out = out + char_from_code(ch)
         i = i + 1
+    out
+
+fn _mcp_first_lines(value: text, maximum: i64) -> text:
+    var out = ""
+    var count: i64 = 0
+    var has_more = false
+    for line in value.split("\n"):
+        if count >= maximum:
+            if line != "" or not value.ends_with("\n"):
+                has_more = true
+            break
+        if count > 0:
+            out = out + "\n"
+        out = out + line
+        count = count + 1
+    if out != "" and (has_more or value.ends_with("\n")):
+        out = out + "\n"
     out
 
 fn _render_ponytail_mcp(path: text, mode: text, report: text, format: text) -> text:
@@ -98,7 +115,6 @@ fn handle_simple_dependencies(id: text, body: text) -> text:
     val depth = extract_field(body, "depth")
     val format_str = extract_field(body, "format")
 
-    var cmd = ""
     if file != "":
         # Read file in-process and extract imports (no subprocess needed)
         val source = file_read(file)
@@ -125,10 +141,12 @@ fn handle_simple_dependencies(id: text, body: text) -> text:
         if module_name.ends_with(".mod"):
             module_name = first_n_chars(module_name, module_name.len() - 4)
 
-        # Single grep for reverse dependencies
+        # One literal-argv grep for reverse dependencies.  The bounded helper
+        # replaces the old shell `head` cap without interpreting module names.
         var rev_out = ""
         var _u3: i64 = 0
-        (rev_out, _u3) = shell_cmd("timeout 15 grep -rn 'use.*" + module_name + "\\|import.*" + module_name + "' src/ --include='*.spl' 2>/dev/null | head -30")
+        (rev_out, _u3) = mcp_run_argv("grep", ["-r", "-n", "--include=*.spl", "--", "use.*" + module_name + "\\|import.*" + module_name, "src/"], 15000, 262144)
+        rev_out = _mcp_first_lines(rev_out, 30)
 
         var out_parts: [text] = []
         out_parts.push("-- simple_dependencies file=" + file + " --\n")
@@ -175,15 +193,23 @@ fn handle_simple_api_diff(id: text, body: text) -> text:
     if revision != "":
         rev = revision
 
-    # Get current public API (fn, class, struct, enum, export)
-    var current_api = ""
-    var _u: i64 = 0
-    (current_api, _u) = shell_cmd("timeout 10 grep -n '^fn \\|^class \\|^struct \\|^enum \\|^export ' " + file + " 2>/dev/null")
+    # Read current API in-process.  Public MCP fields must not become shell
+    # syntax, even when callers pass quotes or command separators.
+    val current_source = file_read(file)
+    val current_api = _mcp_public_api_lines(current_source)
 
-    # Get previous version API
+    # Git accepts REV:PATH as one literal argv element; extract its API here
+    # rather than piping it through grep.
     var prev_api = ""
+    var previous_declarations: [text] = []
     var prev_exit: i64 = 0
-    (prev_api, prev_exit) = shell_cmd("timeout 10 git show " + rev + ":" + file + " 2>/dev/null | grep -n '^fn \\|^class \\|^struct \\|^enum \\|^export '")
+    var previous_source = ""
+    (previous_source, prev_exit) = mcp_run_argv(
+        "git", ["show", "--end-of-options", rev + ":" + file], 10000, 262144)
+    if prev_exit == 0:
+        prev_api = _mcp_public_api_lines(previous_source)
+        previous_declarations = _mcp_public_api_declarations(previous_source)
+    val current_declarations = _mcp_public_api_declarations(current_source)
 
     var out_parts: [text] = []
     out_parts.push("-- simple_api_diff file=" + file + " revision=" + rev + " --\n")
@@ -201,17 +227,42 @@ fn handle_simple_api_diff(id: text, body: text) -> text:
         out_parts.push("\n--- Current API ---\n")
         out_parts.push(current_api)
 
-        # Show unified diff of API lines
-        var diff_out = ""
-        var _u2: i64 = 0
-        (diff_out, _u2) = shell_cmd("timeout 10 diff <(git show " + rev + ":" + file + " 2>/dev/null | grep '^fn \\|^class \\|^struct \\|^enum \\|^export ') <(grep '^fn \\|^class \\|^struct \\|^enum \\|^export ' " + file + " 2>/dev/null) 2>/dev/null")
-        if diff_out.trim() != "":
+        if previous_declarations.join("\n") != current_declarations.join("\n"):
             out_parts.push("\n--- API Changes ---\n")
-            out_parts.push(diff_out)
+            out_parts.push(_mcp_public_api_change_details(
+                previous_declarations, current_declarations))
         else:
             out_parts.push("\n(no API changes)\n")
 
     make_tool_result(id, out_parts.join(""))
+
+fn _mcp_public_api_lines(source: text) -> text:
+    var out = ""
+    var line_number = 0
+    for line in source.split("\n"):
+        line_number = line_number + 1
+        if line.starts_with("fn ") or line.starts_with("class ") or line.starts_with("struct ") or line.starts_with("enum ") or line.starts_with("export "):
+            out = out + str(line_number) + ":" + line + "\n"
+    out
+
+fn _mcp_public_api_declarations(source: text) -> [text]:
+    var declarations: [text] = []
+    for line in source.split("\n"):
+        if line.starts_with("fn ") or line.starts_with("class ") or line.starts_with("struct ") or line.starts_with("enum ") or line.starts_with("export "):
+            declarations.push(line)
+    declarations
+
+fn _mcp_public_api_change_details(previous: [text], current: [text]) -> text:
+    var changes: [text] = []
+    for line in previous:
+        if not current.contains(line):
+            changes.push("- " + line)
+    for line in current:
+        if not previous.contains(line):
+            changes.push("+ " + line)
+    if changes.len() == 0:
+        return "(declaration order changed)\n"
+    changes.join("\n") + "\n"
 
 # simple_context — Context pack for AI/docs
 fn handle_simple_context(id: text, body: text) -> text:
@@ -280,9 +331,10 @@ fn handle_simple_context(id: text, body: text) -> text:
         ctx_args.push("--db=" + db_path)
     if source_filter != "":
         ctx_args.push("--source-filter=" + source_filter)
-    val (ctx_out, ctx_err, ctx_exit) = process_run_timeout(_mcp_find_simple_binary(), ctx_args, 15000)
-    if ctx_exit == 0 and ctx_out != "":
-        out_parts.push(ctx_out)
+    val (ctx_output, ctx_exit) = mcp_run_argv(
+        _mcp_find_simple_binary(), ctx_args, 15000, 1048576)
+    if ctx_exit == 0 and ctx_output != "":
+        out_parts.push(ctx_output)
     else:
         out_parts.push("(context pack unavailable: exit " + str(ctx_exit) + ")\n")
     out_parts.push("\n")
@@ -290,8 +342,8 @@ fn handle_simple_context(id: text, body: text) -> text:
     # 4. Diagnostics
     if not sourceless_sql_query:
         out_parts.push("\n--- Diagnostics ---\n")
-        val (check_stdout, check_stderr, check_exit) = process_run_timeout(_mcp_find_simple_binary(), ["check", file], 10000)
-        val check_out = check_stdout + check_stderr
+        val (check_out, check_exit) = mcp_run_argv(
+            _mcp_find_simple_binary(), ["check", file], 10000, 1048576)
         if check_exit == 0:
             out_parts.push("clean (no errors)\n")
         else:
@@ -383,36 +435,34 @@ fn _simple_pipe_search_text(query: text, kind: text, scope: text, file: text) ->
     elif scope == "app":
         search_dir = "src/app/"
 
-    var cmd = ""
+    var pattern = query
     if kind == "fn" or kind == "function":
-        cmd = "timeout 15 rg -n --glob '*.spl' '^ *fn " + query + "' " + search_dir + " 2>/dev/null | head -51"
+        pattern = "^ *fn " + query
     elif kind == "class":
-        cmd = "timeout 15 rg -n --glob '*.spl' '^ *class " + query + "' " + search_dir + " 2>/dev/null | head -51"
+        pattern = "^ *class " + query
     elif kind == "struct":
-        cmd = "timeout 15 rg -n --glob '*.spl' '^ *struct " + query + "' " + search_dir + " 2>/dev/null | head -51"
+        pattern = "^ *struct " + query
     elif kind == "enum":
-        cmd = "timeout 15 rg -n --glob '*.spl' '^ *enum " + query + "' " + search_dir + " 2>/dev/null | head -51"
+        pattern = "^ *enum " + query
     elif kind == "import" or kind == "use":
-        cmd = "timeout 15 rg -n --glob '*.spl' 'use.*" + query + "|import.*" + query + "' " + search_dir + " 2>/dev/null | head -51"
+        pattern = "use.*" + query + "|import.*" + query
     elif kind == "type":
-        cmd = "timeout 15 rg -n --glob '*.spl' '^ *(type|alias|class|struct|enum) " + query + "' " + search_dir + " 2>/dev/null | head -51"
-    else:
-        cmd = "timeout 15 rg -n --glob '*.spl' '" + query + "' " + search_dir + " 2>/dev/null | head -51"
+        pattern = "^ *(type|alias|class|struct|enum) " + query
 
+    var args = ["-n", "--glob", "*.spl", "--", pattern, search_dir]
     if file != "":
-        cmd = "timeout 10 rg -n '" + query + "' " + file + " 2>/dev/null | head -51"
+        args = ["-n", "--", query, file]
 
     var out = ""
     var _u: i64 = 0
-    (out, _u) = shell_cmd(cmd)
-    out
+    (out, _u) = mcp_run_argv("rg", args, 15000, 262144)
+    _mcp_first_lines(out, 51)
 
 fn _simple_pipe_workspace_symbols(query: text, kind: text, requester: text) -> text:
     var effective_requester = requester
     if effective_requester == "":
         effective_requester = "src/"
-    var cmd = "timeout 20 " + _mcp_find_simple_binary() + " run src/app/cli/query.spl lsp-workspace-symbols-json --query " + query + " --requester " + effective_requester + " 2>&1"
-    val (out, exit_code) = shell_cmd(cmd)
+    val (out, exit_code) = mcp_run_argv(_mcp_find_simple_binary(), ["run", "src/app/cli/query.spl", "lsp-workspace-symbols-json", "--query", query, "--requester", effective_requester], 20000, 262144)
     var result = "-- simple_pipe lsp workspace_symbols exit=" + str(exit_code)
     if kind != "":
         result = result + " kind=" + kind
@@ -429,8 +479,9 @@ fn _simple_pipe_context_sql_query(query: text, db_path: text, source_filter: tex
         args.push("--json")
     else:
         args.push("--text")
-    val (out, err, exit_code) = process_run_timeout(_mcp_find_simple_binary(), args, 15000)
-    "-- simple_pipe codebase db exit=" + str(exit_code) + " --\n" + out + err
+    val (out, exit_code) = mcp_run_argv(
+        _mcp_find_simple_binary(), args, 15000, 1048576)
+    "-- simple_pipe codebase db exit=" + str(exit_code) + " --\n" + out
 
 fn handle_simple_pipe_codebase(id: text, body: text) -> text:
     val query = extract_field(body, "query")
@@ -512,30 +563,28 @@ fn handle_simple_search(id: text, body: text) -> text:
     elif scope == "app":
         search_dir = "src/app/"
 
-    var cmd = ""
+    var pattern = query
     if kind == "fn" or kind == "function":
-        cmd = "timeout 15 grep -rn '^fn " + query + "\\|^ *fn " + query + "' " + search_dir + " --include='*.spl' 2>/dev/null | head -50"
+        pattern = "^fn " + query + "\\|^ *fn " + query
     elif kind == "class":
-        cmd = "timeout 15 grep -rn '^class " + query + "\\|^ *class " + query + "' " + search_dir + " --include='*.spl' 2>/dev/null | head -50"
+        pattern = "^class " + query + "\\|^ *class " + query
     elif kind == "struct":
-        cmd = "timeout 15 grep -rn '^struct " + query + "\\|^ *struct " + query + "' " + search_dir + " --include='*.spl' 2>/dev/null | head -50"
+        pattern = "^struct " + query + "\\|^ *struct " + query
     elif kind == "enum":
-        cmd = "timeout 15 grep -rn '^enum " + query + "\\|^ *enum " + query + "' " + search_dir + " --include='*.spl' 2>/dev/null | head -50"
+        pattern = "^enum " + query + "\\|^ *enum " + query
     elif kind == "import" or kind == "use":
-        cmd = "timeout 15 grep -rn 'use.*" + query + "\\|import.*" + query + "' " + search_dir + " --include='*.spl' 2>/dev/null | head -50"
+        pattern = "use.*" + query + "\\|import.*" + query
     elif kind == "type":
-        cmd = "timeout 15 grep -rn '^type " + query + "\\|^alias " + query + "\\|^class " + query + "\\|^struct " + query + "\\|^enum " + query + "' " + search_dir + " --include='*.spl' 2>/dev/null | head -50"
-    else:
-        # General search
-        cmd = "timeout 15 grep -rn '" + query + "' " + search_dir + " --include='*.spl' 2>/dev/null | head -50"
+        pattern = "^type " + query + "\\|^alias " + query + "\\|^class " + query + "\\|^struct " + query + "\\|^enum " + query
 
+    var args = ["-r", "-n", "--include=*.spl", "--", pattern, search_dir]
     if file != "":
-        # Restrict to specific file
-        cmd = "timeout 10 grep -n '" + query + "' " + file + " 2>/dev/null | head -50"
+        args = ["-n", "--", query, file]
 
     var out = ""
     var _u: i64 = 0
-    (out, _u) = shell_cmd(cmd)
+    (out, _u) = mcp_run_argv("grep", args, 15000, 262144)
+    out = _mcp_first_lines(out, 50)
 
     var out_parts: [text] = []
     out_parts.push("-- simple_search query=" + query)
@@ -554,3 +603,4 @@ fn handle_simple_search(id: text, body: text) -> text:
 export handle_simple_dependencies
 export handle_simple_pipe
 export handle_simple_search
+export _mcp_public_api_change_details
