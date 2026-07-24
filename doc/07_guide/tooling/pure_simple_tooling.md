@@ -385,7 +385,10 @@ evidence boundary for the important pure-Simple tooling lanes:
   before serve (`2d1a6a7afd7`). All non-diagnostic query children now share a
   10-second, 1-MiB-per-stream bounded owner; diagnostics retains its separate
   opt-in bounded path. The owner remains outside shared JSON helpers so Serial
-  MCP does not inherit the process closure. **Strongest current evidence:**
+  MCP does not inherit the process closure. Every nonzero child result now
+  carries the wrapper's `command failed with exit code N` marker even when the
+  child emitted stderr/stdout, so native admission cannot mistake output-bearing
+  failures for valid symbols (`65061648042`). **Strongest current evidence:**
   `2d1a6a7afd7` covers admission/log grammar, while `8401b5ebfd` requires
   correlated initialize/list/symbol probes and fails closed. **Remaining bug/gap:** no
   fresh Stage 4 native artifact has completed that admission. **Next
