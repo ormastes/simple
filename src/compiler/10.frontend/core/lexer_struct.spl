@@ -277,6 +277,233 @@ impl CoreLexer:
             else:
                 break
 
+    # Surface parsing only needs to find the first following peer declaration.
+    # Scan on local state so an uncertain body falls back to token parsing.
+    me skip_surface_indented_body() -> bool:
+        val parent: i64 = self.indent_stack[self.indent_stack.len() - 1]
+        val entry_paren_depth: i64 = self.paren_depth
+        val n: i64 = self.source_chars.len()
+        var p: i64 = self.pos
+        var ln: i64 = self.line
+        var cl: i64 = self.col
+        var line_start: bool = self.at_line_start
+        var saw_body: bool = false
+        var depth: i64 = 0
+        var quote: text = ""
+        var triple: bool = false
+        var raw: bool = false
+        var escaped: bool = false
+        var word_start: i64 = -1
+        var word_len: i64 = 0
+        var rhs: bool = false
+        while p < n:
+            if quote != "":
+                val sc = self.source_chars[p]
+                if triple and sc == quote and p + 2 < n and self.source_chars[p + 1] == quote and self.source_chars[p + 2] == quote:
+                    p = p + 3
+                    cl = cl + 3
+                    quote = ""
+                    triple = false
+                    raw = false
+                    escaped = false
+                elif not triple and sc == "\n":
+                    return false
+                elif escaped and not triple:
+                    if sc == "\n":
+                        return false
+                    escaped = false
+                    p = p + 1
+                    if sc == "\n":
+                        ln = ln + 1
+                        cl = 1
+                    else:
+                        cl = cl + 1
+                elif sc == "\\" and not raw and not triple:
+                    escaped = true
+                    p = p + 1
+                    cl = cl + 1
+                elif sc == "{" and not raw and not triple and p + 1 < n and self.source_chars[p + 1] != "\"" and self.source_chars[p + 1] != "'":
+                    var q: i64 = p + 1
+                    var qdepth: i64 = 1
+                    var qquote: text = ""
+                    var qescape: bool = false
+                    while q < n and qdepth > 0:
+                        val qc = self.source_chars[q]
+                        if qc == "\n":
+                            break
+                        if qquote != "":
+                            if qescape:
+                                qescape = false
+                            elif qc == "\\":
+                                qescape = true
+                            elif qc == qquote:
+                                qquote = ""
+                        elif qc == "\"" or qc == "'":
+                            qquote = qc
+                        elif qc == "{":
+                            qdepth = qdepth + 1
+                        elif qc == "}":
+                            qdepth = qdepth - 1
+                        q = q + 1
+                    if qdepth == 0:
+                        while p < q:
+                            val ic = self.source_chars[p]
+                            p = p + 1
+                            if ic == "\n":
+                                ln = ln + 1
+                                cl = 1
+                            else:
+                                cl = cl + 1
+                    else:
+                        p = p + 1
+                        cl = cl + 1
+                elif sc == quote and not triple:
+                    quote = ""
+                    raw = false
+                    p = p + 1
+                    cl = cl + 1
+                else:
+                    p = p + 1
+                    if sc == "\n":
+                        ln = ln + 1
+                        cl = 1
+                    else:
+                        cl = cl + 1
+                continue
+            if line_start and depth > 0:
+                line_start = false
+            if line_start and depth == 0:
+                val line_pos = p
+                val continued = rhs
+                var indent: i64 = 0
+                while p < n and (self.source_chars[p] == " " or self.source_chars[p] == "\t" or self.source_chars[p] == "\r"):
+                    if self.source_chars[p] == " ":
+                        indent = indent + 1
+                    elif self.source_chars[p] == "\t":
+                        indent = indent + 4
+                    p = p + 1
+                    cl = cl + 1
+                if p >= n:
+                    break
+                if self.source_chars[p] == "\n":
+                    p = p + 1
+                    ln = ln + 1
+                    cl = 1
+                    line_start = true
+                    continue
+                if self.source_chars[p] == "#":
+                    while p < n and self.source_chars[p] != "\n":
+                        p = p + 1
+                        cl = cl + 1
+                    continue
+                if not saw_body:
+                    if indent <= parent:
+                        return false
+                    saw_body = true
+                elif indent <= parent and not continued and self.source_chars[p] != "." and self.source_chars[p] != "|":
+                    self.pos = line_pos
+                    self.line = ln
+                    self.col = 1
+                    self.at_line_start = true
+                    self.paren_depth = entry_paren_depth
+                    self.pending_dedents = 0
+                    return true
+                line_start = false
+                rhs = false
+            val c = self.source_chars[p]
+            if c == "\r":
+                p = p + 1
+                cl = cl + 1
+            elif c == "\n":
+                p = p + 1
+                ln = ln + 1
+                cl = 1
+                line_start = true
+                if word_len == 2:
+                    rhs = rhs or (self.source_chars[word_start] == "i" and self.source_chars[word_start + 1] == "n")
+                elif word_len == 3:
+                    rhs = rhs or ((self.source_chars[word_start] == "a" and self.source_chars[word_start + 1] == "n" and self.source_chars[word_start + 2] == "d") or (self.source_chars[word_start] == "o" and self.source_chars[word_start + 1] == "r"))
+                word_start = -1
+                word_len = 0
+            elif c == "\"" or c == "'":
+                quote = c
+                triple = p + 2 < n and self.source_chars[p + 1] == c and self.source_chars[p + 2] == c
+                raw = false
+                p = p + (if triple then 3 else 1)
+                cl = cl + (if triple then 3 else 1)
+                rhs = false
+                word_start = -1
+                word_len = 0
+            elif c == "r" and p + 1 < n and self.source_chars[p + 1] == "\"":
+                quote = "\""
+                triple = p + 3 < n and self.source_chars[p + 2] == "\"" and self.source_chars[p + 3] == "\""
+                raw = true
+                p = p + (if triple then 4 else 2)
+                cl = cl + (if triple then 4 else 2)
+                rhs = false
+                word_start = -1
+                word_len = 0
+            elif c == "(" or c == "[" or c == "{":
+                depth = depth + 1
+                p = p + 1
+                cl = cl + 1
+                rhs = false
+                word_start = -1
+                word_len = 0
+            elif c == ")" or c == "]" or c == "}":
+                if depth > 0:
+                    depth = depth - 1
+                p = p + 1
+                cl = cl + 1
+                rhs = false
+                word_start = -1
+                word_len = 0
+            elif c == "#":
+                if word_len == 2:
+                    rhs = rhs or (self.source_chars[word_start] == "i" and self.source_chars[word_start + 1] == "n")
+                elif word_len == 3:
+                    rhs = rhs or ((self.source_chars[word_start] == "a" and self.source_chars[word_start + 1] == "n" and self.source_chars[word_start + 2] == "d") or (self.source_chars[word_start] == "o" and self.source_chars[word_start + 1] == "r"))
+                word_start = -1
+                word_len = 0
+                while p < n and self.source_chars[p] != "\n":
+                    p = p + 1
+                    cl = cl + 1
+            else:
+                if c == "=" or c == "+" or c == "-" or c == "*" or c == "/" or c == "%" or c == "<" or c == ">" or c == "&" or c == "|" or c == "^" or c == "?" or c == "." or c == "!" or c == ":":
+                    var punct_end: i64 = p
+                    while punct_end < n and (self.source_chars[punct_end] == "=" or self.source_chars[punct_end] == "+" or self.source_chars[punct_end] == "-" or self.source_chars[punct_end] == "*" or self.source_chars[punct_end] == "/" or self.source_chars[punct_end] == "%" or self.source_chars[punct_end] == "<" or self.source_chars[punct_end] == ">" or self.source_chars[punct_end] == "&" or self.source_chars[punct_end] == "|" or self.source_chars[punct_end] == "^" or self.source_chars[punct_end] == "?" or self.source_chars[punct_end] == "." or self.source_chars[punct_end] == "!" or self.source_chars[punct_end] == ":"):
+                        punct_end = punct_end + 1
+                    if punct_end - p >= 3:
+                        return false
+                val alpha = is_alpha(c) or is_digit(c) or c == "_"
+                if alpha:
+                    if word_len == 0:
+                        word_start = p
+                    word_len = word_len + 1
+                    rhs = false
+                elif c == " " or c == "\t":
+                    if word_len == 2:
+                        rhs = self.source_chars[word_start] == "i" and self.source_chars[word_start + 1] == "n"
+                    elif word_len == 3:
+                        rhs = (self.source_chars[word_start] == "a" and self.source_chars[word_start + 1] == "n" and self.source_chars[word_start + 2] == "d") or (self.source_chars[word_start] == "o" and self.source_chars[word_start + 1] == "r")
+                    word_start = -1
+                    word_len = 0
+                else:
+                    rhs = (c == "=" and not (p + 1 < n and self.source_chars[p + 1] == ">")) or c == "+" or c == "*" or (c == "/" and not ((p + 1 < n and self.source_chars[p + 1] == "/") or (p > 0 and self.source_chars[p - 1] == "/"))) or c == "%" or c == "<" or c == "&" or c == "|" or c == "^" or c == "," or (c == "?" and ((p + 1 < n and self.source_chars[p + 1] == "?") or (p > 0 and self.source_chars[p - 1] == "?"))) or (c == "-" and not (p + 1 < n and self.source_chars[p + 1] == ">")) or (c == ">" and not (p > 0 and (self.source_chars[p - 1] == "-" or self.source_chars[p - 1] == "=")))
+                    word_start = -1
+                    word_len = 0
+                p = p + 1
+                cl = cl + 1
+        if quote != "" or depth != 0 or not saw_body:
+            return false
+        self.pos = p
+        self.line = ln
+        self.col = cl
+        self.at_line_start = true
+        self.paren_depth = entry_paren_depth
+        self.pending_dedents = 0
+        true
+
     # ----- Number Scanning -----
 
     me scan_number():
@@ -285,21 +512,20 @@ impl CoreLexer:
         val start_col: i64 = self.col
         self.cur_start = start
         var is_float: bool = false
-        val src: [text] = self.source_chars
-        val src_len: i64 = src.len()
+        val src_len: i64 = self.source_chars.len()
         var pos: i64 = self.pos
 
         # Check for hex, binary, octal prefix
-        val first: text = if pos < src_len then src[pos] else ""
+        val first: text = if pos < src_len then self.source_chars[pos] else ""
         if first == "0":
-            val second: text = if pos + 1 < src_len then src[pos + 1] else ""
+            val second: text = if pos + 1 < src_len then self.source_chars[pos + 1] else ""
             if second == "x":
                 # Hex literal
                 pos = pos + 2
                 for i in 0..64:
                     if pos >= src_len:
                         break
-                    val hc: text = src[pos]
+                    val hc: text = self.source_chars[pos]
                     if hc == "_":
                         pos = pos + 1
                     elif is_hex_digit(hc):
@@ -312,17 +538,17 @@ impl CoreLexer:
                 var hex_suffix: text = ""
                 var has_hex_suffix: bool = false
                 val hxlen: i64 = pos - start
-                val after_hex: text = if pos < src_len then src[pos] else ""
+                val after_hex: text = if pos < src_len then self.source_chars[pos] else ""
                 if is_alpha(after_hex):
                     has_hex_suffix = true
-                    if hxlen > 0 and src[pos - 1] == "_":
+                    if hxlen > 0 and self.source_chars[pos - 1] == "_":
                         if not self.discard_token_text:
                             num_text = num_text[0:num_text.len() - 1]
                     var hsuf_start: i64 = pos
                     for si in 0..1000:
                         if pos >= src_len:
                             break
-                        if is_ident_char(src[pos]):
+                        if is_ident_char(self.source_chars[pos]):
                             pos = pos + 1
                         else:
                             break
@@ -356,7 +582,7 @@ impl CoreLexer:
                 for i in 0..64:
                     if pos >= src_len:
                         break
-                    val bc: text = src[pos]
+                    val bc: text = self.source_chars[pos]
                     val is_bin: bool = bc == "0"
                     val is_bin1: bool = bc == "1"
                     val is_under: bool = bc == "_"
@@ -379,7 +605,7 @@ impl CoreLexer:
                 for i in 0..64:
                     if pos >= src_len:
                         break
-                    val oc: text = src[pos]
+                    val oc: text = self.source_chars[pos]
                     val is_oct: bool = is_digit(oc)
                     val is_under: bool = oc == "_"
                     val valid: bool = is_oct or is_under
@@ -399,7 +625,7 @@ impl CoreLexer:
         for i in 0..100:
             if pos >= src_len:
                 break
-            val dc: text = src[pos]
+            val dc: text = self.source_chars[pos]
             val is_d: bool = is_digit(dc)
             val is_u: bool = dc == "_"
             val valid: bool = is_d or is_u
@@ -409,8 +635,8 @@ impl CoreLexer:
                 break
 
         # Check for float
-        val maybe_dot: text = if pos < src_len then src[pos] else ""
-        val after_dot: text = if pos + 1 < src_len then src[pos + 1] else ""
+        val maybe_dot: text = if pos < src_len then self.source_chars[pos] else ""
+        val after_dot: text = if pos + 1 < src_len then self.source_chars[pos + 1] else ""
         val dot_then_digit: bool = maybe_dot == "."
         if dot_then_digit:
             val is_next_dig: bool = is_digit(after_dot)
@@ -420,7 +646,7 @@ impl CoreLexer:
                 for i in 0..100:
                     if pos >= src_len:
                         break
-                    val fc: text = src[pos]
+                    val fc: text = self.source_chars[pos]
                     val is_fd: bool = is_digit(fc)
                     val is_fu: bool = fc == "_"
                     val fvalid: bool = is_fd or is_fu
@@ -430,14 +656,14 @@ impl CoreLexer:
                         break
 
         # Check for exponent
-        val exp_c: text = if pos < src_len then src[pos] else ""
+        val exp_c: text = if pos < src_len then self.source_chars[pos] else ""
         val is_exp_e: bool = exp_c == "e"
         val is_exp_E: bool = exp_c == "E"
         val has_exp: bool = is_exp_e or is_exp_E
         if has_exp:
             is_float = true
             pos = pos + 1
-            val sign: text = if pos < src_len then src[pos] else ""
+            val sign: text = if pos < src_len then self.source_chars[pos] else ""
             val is_plus: bool = sign == "+"
             val is_minus: bool = sign == "-"
             val has_sign: bool = is_plus or is_minus
@@ -446,7 +672,7 @@ impl CoreLexer:
             for i in 0..100:
                 if pos >= src_len:
                     break
-                val ec: text = src[pos]
+                val ec: text = self.source_chars[pos]
                 if is_digit(ec):
                     pos = pos + 1
                 else:
@@ -461,16 +687,16 @@ impl CoreLexer:
         # alpha follower. Suffix travels via the CORE_TOKEN_SUFFIX env channel.
         var suffix: text = ""
         val nlen: i64 = pos - start
-        val next_ch: text = if pos < src_len then src[pos] else ""
+        val next_ch: text = if pos < src_len then self.source_chars[pos] else ""
         if is_alpha(next_ch):
-            if nlen > 0 and src[pos - 1] == "_":
+            if nlen > 0 and self.source_chars[pos - 1] == "_":
                 if not self.discard_token_text:
                     num_text = num_text[0:num_text.len() - 1]
             var suf_start: i64 = pos
             for i in 0..1000:
                 if pos >= src_len:
                     break
-                if is_ident_char(src[pos]):
+                if is_ident_char(self.source_chars[pos]):
                     pos = pos + 1
                 else:
                     break
@@ -855,14 +1081,13 @@ impl CoreLexer:
         val start_line: i64 = self.line
         val start_col: i64 = self.col
         self.cur_start = start
-        val src: [text] = self.source_chars
-        val src_len: i64 = src.len()
+        val src_len: i64 = self.source_chars.len()
         var pos: i64 = self.pos
 
         for i in 0..1000:
             if pos >= src_len:
                 break
-            val c: text = src[pos]
+            val c: text = self.source_chars[pos]
             if is_ident_char(c):
                 pos = pos + 1
             else:
@@ -877,17 +1102,17 @@ impl CoreLexer:
             # Surface parsing only needs layout plus RHS-continuation keywords.
             # Keep raw strings and `in`/`and`/`or` exact without allocating text.
             val ident_len: i64 = pos - start
-            val is_raw: bool = ident_len == 1 and src[start] == "r"
-            val next_ch: text = if pos < src_len then src[pos] else ""
+            val is_raw: bool = ident_len == 1 and self.source_chars[start] == "r"
+            val next_ch: text = if pos < src_len then self.source_chars[pos] else ""
             if is_raw and next_ch == "\"":
                 self.scan_raw_string(start_line, start_col)
                 return
             var kw_kind: i64 = 6
-            if ident_len == 2 and src[start] == "i" and src[start + 1] == "n":
+            if ident_len == 2 and self.source_chars[start] == "i" and self.source_chars[start + 1] == "n":
                 kw_kind = TOK_KW_IN
-            elif ident_len == 3 and src[start] == "a" and src[start + 1] == "n" and src[start + 2] == "d":
+            elif ident_len == 3 and self.source_chars[start] == "a" and self.source_chars[start + 1] == "n" and self.source_chars[start + 2] == "d":
                 kw_kind = TOK_KW_AND
-            elif ident_len == 2 and src[start] == "o" and src[start + 1] == "r":
+            elif ident_len == 2 and self.source_chars[start] == "o" and self.source_chars[start + 1] == "r":
                 kw_kind = TOK_KW_OR
             self.make_token(kw_kind, "", start_line, start_col)
             return
@@ -897,7 +1122,7 @@ impl CoreLexer:
         # Matches Rust seed scan_raw_double_string semantics: read until closing "
         # (cannot span newlines). Emits kind 3 (StringLit) with raw content.
         if ident_text == "r":
-            val next_ch: text = if pos < src_len then src[pos] else ""
+            val next_ch: text = if pos < src_len then self.source_chars[pos] else ""
             if next_ch == "\"":
                 self.scan_raw_string(start_line, start_col)
                 return
@@ -1053,6 +1278,7 @@ impl CoreLexer:
             self.skip_spaces()
 
         if self.at_end():
+            self.cur_start = self.pos
             # Emit pending dedents for remaining indentation
             val slen: i64 = self.indent_stack.len()
             if slen > 1:

@@ -1,0 +1,160 @@
+use std.spec
+use compiler.core.ast.{ast_reset, module_get_decls, decl_get_name}
+use compiler.core.parser.{parser_init_with_path, parser_has_errors}
+use compiler.core.parser_decls.{parse_module_body}
+use compiler.frontend.core.lexer.{lex_init, lex_next, lex_next_discard_text, lex_skip_surface_indented_body}
+use compiler.frontend.core.lexer.{lex_token_text, lex_token_line, lex_token_col, lex_token_start_get, lex_token_end_get, lex_snapshot_save}
+use app.io.env_ops.{env_get, env_set}
+use std.io_runtime.{file_read}
+
+fn surface_skip_result(source: text, reference: text) -> ([text], bool, [i64], [text]):
+    val saved = env_get("SIMPLE_SURFACE_TOKEN_SKIP_REFERENCE") ?? ""
+    env_set("SIMPLE_SURFACE_TOKEN_SKIP_REFERENCE", reference)
+    ast_reset()
+    parser_init_with_path(source, "surface_skip_raw_spec.spl")
+    parse_module_body(true)
+    var names: [text] = []
+    for decl in module_get_decls():
+        names.push(decl_get_name(decl))
+    val has_errors = parser_has_errors()
+    val (state, texts) = lex_snapshot_save()
+    env_set("SIMPLE_SURFACE_TOKEN_SKIP_REFERENCE", saved)
+    (names, has_errors, state, texts)
+
+fn surface_skip_names(source: text, reference: text) -> ([text], bool):
+    val (names, has_errors, state, texts) = surface_skip_result(source, reference)
+    (names, has_errors)
+
+fn surface_skip_next_state(source: text, reference: bool) -> ([i64], [text]):
+    lex_init(source)
+    var kind = 0
+    while kind != 180:
+        kind = lex_next()
+    if reference:
+        var depth = 0
+        while depth >= 0:
+            kind = lex_next_discard_text()
+            if kind == 181:
+                depth = depth + 1
+            elif kind == 182:
+                depth = depth - 1
+            if depth == 0 and kind == 182:
+                kind = lex_next()
+                break
+    else:
+        expect(lex_skip_surface_indented_body()).to_equal(true)
+        kind = lex_next()
+    val (state, texts) = lex_snapshot_save()
+    state.push(kind)
+    state.push(lex_token_line())
+    state.push(lex_token_col())
+    state.push(lex_token_start_get())
+    state.push(lex_token_end_get())
+    texts.push(lex_token_text())
+    (state, texts)
+
+describe "surface raw body skip":
+    it "matches reference parsing for the real architecture checker":
+        val source = file_read("src/app/cli/arch_check.spl")
+        val (fast_names, fast_errors, fast_state, fast_texts) = surface_skip_result(source, "")
+        val (reference_names, reference_errors, reference_state, reference_texts) = surface_skip_result(source, "1")
+        val expected_names = [
+            "app.io.mod", "std.io_runtime", "ArchRule", "FileImports", "ArchViolation",
+            "_str_trim", "_parse_pattern_list", "_parse_string_value", "_parse_arch_block",
+            "_module_path_from_init_file", "_infer_dimension_from_file", "_infer_dimension_from_import",
+            "_dim_allows_import", "_arch_explicitly_allows", "_transform_allows_entity_import",
+            "scan_arch_rules", "_parse_imports_from_content", "scan_imports", "_match_pattern",
+            "_is_import_allowed", "_file_is_under_module", "check_arch", "run_arch_check"
+        ]
+        expect(fast_errors).to_be(false)
+        expect(reference_errors).to_be(false)
+        expect(fast_names).to_equal(expected_names)
+        expect(fast_names).to_equal(reference_names)
+        expect(fast_state).to_equal(reference_state)
+        expect(fast_texts).to_equal(reference_texts)
+
+    it "parses the C backend surfaces without unsupported conditional imports":
+        val paths = [
+            "src/compiler/70.backend/backend/c_codegen_adapter.spl",
+            "src/compiler/70.backend/backend/c_backend_stubs.spl",
+            "src/compiler/70.backend/backend/compile_c_entry.spl"
+        ]
+        val expected_imports = [
+            "compiler.backend.c_backend",
+            "compiler.backend.c_type_mapper",
+            "c_backend"
+        ]
+        for i in 0..paths.len():
+            val source = file_read(paths[i])
+            val (fast_names, fast_errors, fast_state, fast_texts) = surface_skip_result(source, "")
+            val (reference_names, reference_errors, reference_state, reference_texts) = surface_skip_result(source, "1")
+            expect(fast_errors).to_be(false)
+            expect(reference_errors).to_be(false)
+            expect(fast_names).to_contain(expected_imports[i])
+            expect(fast_names).to_equal(reference_names)
+            expect(fast_state).to_equal(reference_state)
+            expect(fast_texts).to_equal(reference_texts)
+
+    it "matches token skipping across strings, continuations, dedents, and one-line bodies":
+        val source = (
+            "fn hazards():\r\n" +
+            "\tval text = \"# fake " + "{" + "call(\"}\") } Ω\"\r\n" +
+            "\tval raw = r\"# fake ([{ Ω\"\r\n" +
+            "\tval triple = \"\"\"\n# fake dedent\n\"\"\"\n" +
+            "\tval grouped = (\n0\n)\n" +
+            "\tval chained = left in\n0\n" +
+            "\tval chained2 = left and\n0\n" +
+            "\tval chained3 = left or\n0\n" +
+            "\tval added = 1 + # fake \"([\n0\n" +
+            "\tval nested = if true:\n\t\tif true:\n\t\t\t0\n\t\t0\n\t0\n" +
+            ".continuation()\n" +
+            "| alternative\n" +
+            "fn after_hazards(): 0\n" +
+            "fn last():\n    0\n"
+        )
+        val (fast_names, fast_errors) = surface_skip_names(source, "")
+        val (reference_names, reference_errors) = surface_skip_names(source, "1")
+        expect(fast_errors).to_equal(reference_errors)
+        expect(fast_names).to_equal(reference_names)
+        expect(fast_names).to_equal(["hazards", "after_hazards", "last"])
+
+    it "leaves the following token and lexer snapshot identical":
+        val source = "fn f():\n\tval raw = r\"# fake ([ Ω\"\n\tval x = 1 + # fake \"([\n0\nfn after(): 0\n"
+        val (fast_state, fast_texts) = surface_skip_next_state(source, false)
+        val (reference_state, reference_texts) = surface_skip_next_state(source, true)
+        expect(fast_state).to_equal(reference_state)
+        expect(fast_texts).to_equal(reference_texts)
+
+    it "matches a slash-comment error before the following peer declaration":
+        val source = "fn f():\n    val x = 1 // bad\nfn after(): 0\n"
+        val (fast_names, fast_errors) = surface_skip_names(source, "")
+        val (reference_names, reference_errors) = surface_skip_names(source, "1")
+        val (fast_state, fast_texts) = surface_skip_next_state(source, false)
+        val (reference_state, reference_texts) = surface_skip_next_state(source, true)
+        expect(fast_errors).to_equal(reference_errors)
+        expect(fast_names).to_equal(reference_names)
+        expect(fast_state).to_equal(reference_state)
+        expect(fast_texts).to_equal(reference_texts)
+
+    it "falls back to token skipping for ambiguous punctuation and escaped newlines":
+        for source in [
+            "fn f():\n    val x = 1 /// bad\nfn after(): 0\n",
+            "fn f():\n    val x = ???\nfn after(): 0\n",
+            "fn f():\n    val x = 1 ==> 2\nfn after(): 0\n",
+            "fn f():\n    val x = \"escaped\\\nnewline\"\nfn after(): 0\n"
+        ]:
+            val (fast_names, fast_errors) = surface_skip_names(source, "")
+            val (reference_names, reference_errors) = surface_skip_names(source, "1")
+            expect(fast_errors).to_equal(reference_errors)
+            expect(fast_names).to_equal(reference_names)
+
+    it "falls back unchanged for malformed ordinary raw and triple strings":
+        for source in [
+            "fn broken():\n    val text = \"unterminated\nfn after(): 0\n",
+            "fn broken():\n    val text = r\"unterminated\nfn after(): 0\n",
+            "fn broken():\n    val text = \"\"\"unterminated\nfn after(): 0\n"
+        ]:
+            val (fast_names, fast_errors) = surface_skip_names(source, "")
+            val (reference_names, reference_errors) = surface_skip_names(source, "1")
+            expect(fast_errors).to_equal(reference_errors)
+            expect(fast_names).to_equal(reference_names)
