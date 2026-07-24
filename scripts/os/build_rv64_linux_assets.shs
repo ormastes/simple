@@ -5,8 +5,8 @@ set -eu
 # (src/lib/hardware/soc_rtl/). Produces, into build/os/rv64_soc/:
 #
 #   soc_virt.dtb      device tree blob (from examples/.../riscv64/soc_virt.dts)
-#   initramfs.cpio.gz tiny initramfs with a hand-built static /init that
-#                     prints "SIMPLE-RV64-INIT OK" (marker for boot proof)
+#   initramfs.cpio.gz marker initramfs by default, or a real BusyBox serial
+#                     login/shell/ls rootfs with --terminal
 #   fw_jump.bin       OpenSBI fw_jump (pinned v1.4) built for this memory map
 #   Image             Linux kernel (pinned) — ONLY if --kernel and toolchain+net
 #   manifest.txt      load-address manifest (always written, always honest:
@@ -21,27 +21,34 @@ set -eu
 #   sh scripts/os/build_rv64_linux_assets.shs            # dtb + initramfs + manifest
 #   sh scripts/os/build_rv64_linux_assets.shs --opensbi  # + build OpenSBI fw_jump
 #   sh scripts/os/build_rv64_linux_assets.shs --kernel   # + fetch/build Linux (slow)
+#   sh scripts/os/build_rv64_linux_assets.shs --terminal # real serial login rootfs
 #   sh scripts/os/build_rv64_linux_assets.shs --all      # everything
 #
 # Pins (override via env):
 #   OPENSBI_TAG   default v1.4
 #   LINUX_TAG     default v6.6  (longterm; rv64 defconfig boots on plic0/clint0)
+#   BUSYBOX_TAG   default 1_36_1
 #   CROSS         default riscv64-linux-gnu-  (needs gcc for initramfs/opensbi)
+#   BUSYBOX_CROSS soft-float lp64 BusyBox toolchain prefix (defaults to CROSS)
 
 REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 OUT="$REPO_ROOT/build/os/rv64_soc"
 DTS="$REPO_ROOT/examples/09_embedded/simple_os/arch/riscv64/soc_virt.dts"
 OPENSBI_TAG="${OPENSBI_TAG:-v1.4}"
 LINUX_TAG="${LINUX_TAG:-v6.6}"
+BUSYBOX_TAG="${BUSYBOX_TAG:-1_36_1}"
 CROSS="${CROSS:-riscv64-linux-gnu-}"
+BUSYBOX_CROSS="${BUSYBOX_CROSS:-$CROSS}"
 
 DO_OPENSBI=0
 DO_KERNEL=0
+DO_TERMINAL=0
 for a in "$@"; do
   case "$a" in
     --opensbi) DO_OPENSBI=1 ;;
     --kernel)  DO_KERNEL=1 ;;
-    --all)     DO_OPENSBI=1; DO_KERNEL=1 ;;
+    --terminal) DO_TERMINAL=1 ;;
+    --all)     DO_OPENSBI=1; DO_KERNEL=1; DO_TERMINAL=1 ;;
     *) echo "unknown arg: $a" >&2; exit 2 ;;
   esac
 done
@@ -57,26 +64,64 @@ else
   note "SKIP dtb: dtc not installed (apt install device-tree-compiler)"
 fi
 
-# --- 2. initramfs with hand-built marker init + /dev/console device node ----
-# Freestanding (no libc, raw syscalls), -march=rv64imac -mabi=lp64: the SoC
-# core has NO F/D extensions, so a default hard-float (lp64d) glibc init
-# would trap on the first FP instruction.
-#
-# The initramfs also needs a static /dev/console char device (major 5, minor
-# 1) — without it the kernel's early console_on_rootfs() open("/dev/console")
-# fails and prints "Warning: unable to open an initial console." `cpio`/mknod
-# can create device nodes, but doing so needs either root or a cpio built with
-# raw-device support; instead we hand-assemble the newc cpio bytes directly.
-# The newc format is plain ASCII hex: a 6-byte magic "070701" followed by 13
-# 8-hex-digit fields (ino, mode, uid, gid, nlink, mtime, filesize, devmajor,
-# devminor, rdevmajor, rdevminor, namesize, check), then the NUL-terminated
-# name, then the whole header+name padded to a 4-byte boundary (and, for
-# regular files, the data likewise padded to 4 bytes). A char device just
-# needs mode = S_IFCHR (0020000 octal) | permission bits and rdevmajor/minor
-# set — no file data.
+# --- 2. initramfs ------------------------------------------------------------
+# Default: tiny freestanding marker. --terminal: pinned static BusyBox with
+# real init/getty/login/sh/ls and a deterministic root fixture.
 if command -v "${CROSS}gcc" >/dev/null 2>&1; then
   W=$(mktemp -d)
-  cat > "$W/init.c" <<'EOF'
+  ROOT="$W/rootfs"
+  mkdir -p "$ROOT"
+
+  if [ "$DO_TERMINAL" = 1 ]; then
+    BB="$OUT/busybox-src"
+    [ -d "$BB/.git" ] || git clone --depth 1 --branch "$BUSYBOX_TAG" \
+        https://git.busybox.net/busybox "$BB"
+    make -C "$BB" distclean >/dev/null
+    make -C "$BB" ARCH=riscv CROSS_COMPILE="$BUSYBOX_CROSS" defconfig >/dev/null
+    sed -i 's/^# CONFIG_STATIC is not set$/CONFIG_STATIC=y/' "$BB/.config"
+    sed -i 's/^CONFIG_TC=y$/# CONFIG_TC is not set/' "$BB/.config"
+    make -C "$BB" ARCH=riscv CROSS_COMPILE="$BUSYBOX_CROSS" -j"$(nproc)" >/dev/null
+    if "${BUSYBOX_CROSS}readelf" -h "$BB/busybox" | grep -q 'double-float ABI'; then
+      echo "ERROR: terminal BusyBox is lp64d; provide BUSYBOX_CROSS for an RV64IMAC/lp64 soft-float toolchain" >&2
+      exit 2
+    fi
+    make -C "$BB" ARCH=riscv CROSS_COMPILE="$BUSYBOX_CROSS" \
+        CONFIG_PREFIX="$ROOT" install >/dev/null
+
+    mkdir -p "$ROOT/etc" "$ROOT/proc" "$ROOT/sys" "$ROOT/root" "$ROOT/tmp"
+    chmod 1777 "$ROOT/tmp"
+    ln -sf bin/busybox "$ROOT/init"
+    cat > "$ROOT/etc/inittab" <<'EOF'
+::sysinit:/bin/mount -t proc proc /proc
+::sysinit:/bin/mount -t sysfs sysfs /sys
+ttyS0::respawn:/sbin/getty -L 115200 ttyS0 vt100
+::ctrlaltdel:/sbin/reboot
+::shutdown:/bin/umount -a -r
+EOF
+    cat > "$ROOT/etc/passwd" <<'EOF'
+root::0:0:root:/root:/bin/sh
+EOF
+    cat > "$ROOT/etc/group" <<'EOF'
+root:x:0:
+EOF
+    cat > "$ROOT/etc/securetty" <<'EOF'
+console
+ttyS0
+EOF
+    cat > "$ROOT/etc/profile" <<'EOF'
+export HOME=/root
+export PATH=/sbin:/bin:/usr/sbin:/usr/bin
+export PS1='simple-riscv# '
+echo SIMPLE_RISCV_LINUX_LOGIN_OK
+EOF
+    cat > "$ROOT/etc/issue" <<'EOF'
+Simple RISC-V Linux
+EOF
+    : > "$ROOT/SIMPLE_RISCV_LINUX_LOGIN_LS_PASS"
+    (cd "$ROOT" && find . -print0 | cpio --null -o -H newc --owner=0:0 2>/dev/null) \
+        > "$W/base.cpio"
+  else
+    cat > "$W/init.c" <<'EOF'
 static long sys3(long n, long a, long b, long c) {
     register long a7 __asm__("a7") = n;
     register long a0 __asm__("a0") = a;
@@ -94,12 +139,13 @@ void _start(void) {
     }
 }
 EOF
-  "${CROSS}gcc" -static -nostdlib -ffreestanding -march=rv64imac -mabi=lp64 \
-      -Os -o "$W/init" "$W/init.c"
+    "${CROSS}gcc" -static -nostdlib -ffreestanding -march=rv64imac -mabi=lp64 \
+        -Os -o "$ROOT/init" "$W/init.c"
+    (cd "$ROOT" && echo init | cpio -o -H newc --owner=0:0 2>/dev/null) \
+        > "$W/base.cpio"
+  fi
 
-  # newc_entry: print one raw newc header+name (+ NUL, + pad to 4 bytes).
-  # Args: ino mode uid gid nlink mtime filesize devmajor devminor rdevmajor
-  #       rdevminor name
+  # Add device nodes without requiring root.
   newc_entry() {
     ino=$1; mode=$2; uid=$3; gid=$4; nlink=$5; mtime=$6; filesize=$7
     devmajor=$8; devminor=$9; shift 9; rdevmajor=$1; rdevminor=$2; name=$3
@@ -111,25 +157,23 @@ EOF
     [ "$pad" -gt 0 ] && head -c "$pad" /dev/zero
   }
 
-  # Build the init-file entry with plain cpio, then splice in a "dev" dir +
-  # a /dev/console char-device (5,1) entry before a single final TRAILER!!!
-  # (dropping cpio's own trailer, whose newc size is the fixed
-  # 110-byte-header + "TRAILER!!!\0" (11 bytes) padded to 124).
-  ( cd "$W" && echo init | cpio -o -H newc --owner=0:0 2>/dev/null ) > "$W/base.cpio"
-  # cpio pads its whole output to a 512-byte block, so the trailer is NOT
-  # simply "last 124 bytes" — locate the trailer entry's actual header start
-  # (110 bytes before the literal "TRAILER!!!" name) instead of assuming size.
-  trailer_name_off=$(grep -abo 'TRAILER!!!' "$W/base.cpio" | head -1 | cut -d: -f1)
+  trailer_name_off=$(grep -abo 'TRAILER!!!' "$W/base.cpio" | tail -1 | cut -d: -f1)
   head -c "$((trailer_name_off - 110))" "$W/base.cpio" > "$W/spliced.cpio"
   {
     cat "$W/spliced.cpio"
-    newc_entry 2 16877 0 0 1 0 0 0 0 0 0 "dev"           # mode 040755 (dir, S_IFDIR)
-    newc_entry 3 8592  0 0 1 0 0 0 0 5 1 "dev/console"   # mode 020620 (S_IFCHR|0620)
+    newc_entry 2 16877 0 0 1 0 0 0 0 0 0 "dev"
+    newc_entry 3 8592 0 0 1 0 0 0 0 5 1 "dev/console"
+    newc_entry 4 8630 0 0 1 0 0 0 0 1 3 "dev/null"
+    newc_entry 5 8576 0 0 1 0 0 0 0 4 64 "dev/ttyS0"
     newc_entry 0 0 0 0 1 0 0 0 0 0 0 "TRAILER!!!"
   } > "$W/initramfs.cpio"
   gzip -9 -c "$W/initramfs.cpio" > "$OUT/initramfs.cpio.gz"
   rm -rf "$W"
-  note "initramfs built: $OUT/initramfs.cpio.gz (static rv64 /init marker + /dev/console char 5:1)"
+  if [ "$DO_TERMINAL" = 1 ]; then
+    note "initramfs built: $OUT/initramfs.cpio.gz (BusyBox $BUSYBOX_TAG serial login + ls fixture)"
+  else
+    note "initramfs built: $OUT/initramfs.cpio.gz (static rv64 marker)"
+  fi
 else
   note "SKIP initramfs: ${CROSS}gcc not installed"
 fi
@@ -169,7 +213,15 @@ if [ "$DO_KERNEL" = 1 ]; then
 fi
 
 # --- 5. Manifest (always, honest) -------------------------------------------
-stat_of() { if [ -f "$1" ]; then echo "BUILT ($(wc -c < "$1") bytes)"; else echo "MISSING"; fi; }
+stat_of() {
+  if [ -f "$1" ]; then
+    echo "BUILT ($(wc -c < "$1") bytes, sha256=$(sha256sum "$1" | awk '{print $1}'))"
+  else
+    echo "MISSING"
+  fi
+}
+INITRAMFS_MODE="marker"
+[ "$DO_TERMINAL" = 1 ] && INITRAMFS_MODE="busybox-$BUSYBOX_TAG-terminal"
 cat > "$OUT/manifest.txt" <<EOF
 # RV64 SoC boot-asset manifest — $(date -u +%Y-%m-%dT%H:%M:%SZ)
 # Load addresses fixed by src/lib/hardware/soc_rtl/bootrom.spl (bootrom_read64):
@@ -179,7 +231,7 @@ cat > "$OUT/manifest.txt" <<EOF
 0x80000000    fw_jump.bin          $(stat_of "$OUT/fw_jump.bin")   # OpenSBI $OPENSBI_TAG, FW_JUMP
 0x80200000    Image                $(stat_of "$OUT/Image")   # Linux $LINUX_TAG rv64 defconfig
 0x88000000    soc_virt.dtb         $(stat_of "$OUT/soc_virt.dtb")   # from soc_virt.dts
-(initrd)      initramfs.cpio.gz    $(stat_of "$OUT/initramfs.cpio.gz")   # load anywhere in RAM above kernel; pass via /chosen linux,initrd-start/end
+(initrd)      initramfs.cpio.gz    $(stat_of "$OUT/initramfs.cpio.gz")   # $INITRAMFS_MODE; load above kernel and advertise in /chosen
 #
 # DTB TODO(laneN-clock): clock-frequency/timebase are the 25 MHz candidate;
 # update soc_virt.dts and rebuild when Lane N lands the real PL clock.
