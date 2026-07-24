@@ -1,0 +1,343 @@
+# @cover src/app/llm_caret/chat_tui.spl 35%
+# @cover src/app/llm_caret/provider.spl 10%
+# @cover src/app/llm_caret/retry.spl 15%
+# @cover src/app/llm_caret/claude_full/screens/REPL.spl 10%
+# @cover src/app/llm_caret/claude_full/commands.spl 15%
+# codex-system-test
+"""
+# LLM Caret TUI and Hidden-Feature System Spec
+
+## Overview
+
+Exercises deterministic Caret TUI component seams without a live terminal or
+paid provider. The scenarios drive the input widget model, dummy provider,
+transcript renderer, permission gate, retry policy, Claude REPL error route,
+and hidden root-command admission gate. Provider, model, resume, and
+new-conversation commands must refresh visible state; a new conversation must
+receive a fresh session ID. The actual raw-terminal input/draw loop is not
+claimed by this component spec.
+
+**Requirement IDs:** REQ-LLM-CARET-FULL-003, REQ-LLM-CARET-FULL-006
+**Requirements:** doc/02_requirements/feature/llm_caret_claude_cli_full_parity.md
+**Plan:** doc/03_plan/sys_test/llm_caret_tui_hidden_feature.md
+**Design:** doc/05_design/llm_caret_claude_cli_full_parity.md
+**Research:** doc/01_research/local/llm_caret_claude_cli_harden.md
+**TUI Captures:** build/test-artifacts/03_system/app/llm_caret/feature/llm_caret_tui_hidden_feature/caret_tui.txt
+
+The SGTTI assertion is a source-boundary gate only. It proves the production
+Caret entrypoint and TUI implementation do not import or construct the debug
+surface; this spec does not claim a live PTY screenshot or terminal pixel proof.
+
+## Syntax
+
+The frozen `CaretTuiFeatureCase` and `CaretHiddenFeatureCase` fixtures keep the
+visible-state and hidden-gate expectations explicit. Scenarios use only the
+dummy provider and injected model responses; no paid API or user credential is
+read.
+"""
+# @evidence-display: embed_tui
+
+use std.spec.*
+use std.tui.widgets.input.{input_insert_char}
+use app.io.mod.{dir_create_all, file_read, file_write}
+use app.llm_caret.types.{Message, new_user_message}
+use app.llm_caret.tools.{
+    ModelResponse, ToolCall, default_policy, new_model_text, new_model_tools,
+    new_tool_call
+}
+use app.llm_caret.chat.{run_agent_loop_rendered}
+use app.llm_caret.chat_tui.{
+    ChatTui, ProviderSwitchResult, SessionResumeResult, SessionHooks,
+    make_chat_tui_with_status, dispatch_slash,
+    apply_slash_status, run_chat_tui_submission,
+    render_turn, tui_tool_renderer, tui_transcript_reset,
+    tui_transcript_len, tui_transcript_line_text
+}
+use app.llm_caret.retry.{RetryPolicy, should_retry, effective_delay_ms}
+use app.llm_caret.claude_full.screens.REPL.{queryEventRoute}
+use app.llm_caret.claude_full.commands.{
+    RootCommandLookup, findRootCommand, admitRootCommand, visibleRootCommands
+}
+
+val ARTIFACT_DIR: text = "build/test-artifacts/03_system/app/llm_caret/feature/llm_caret_tui_hidden_feature"
+val TUI_CAPTURE_PATH: text = ARTIFACT_DIR + "/caret_tui.txt"
+val WORKSPACE_ROOT: text = "build/tmp/llm_caret_tui_hidden_feature"
+
+struct CaretTuiFeatureCase:
+    prompt: text
+    provider: text
+    model: text
+    session_id: text
+    expected_reply: text
+
+struct CaretHiddenFeatureCase:
+    command: text
+    alias: text
+    expected_enabled: bool
+    expected_hidden: bool
+
+fn _noop_model(name: text) -> text:
+    "model set to " + name
+
+fn _provider_status(name: text) -> ProviderSwitchResult:
+    ProviderSwitchResult(
+        accepted: true, message: "provider set to " + name,
+        provider: name, model: "sonnet"
+    )
+
+fn _session_list() -> text:
+    "session-1"
+
+fn _new_session() -> text:
+    "new-session"
+
+fn _resume_none(name: text) -> SessionResumeResult:
+    SessionResumeResult(
+        found: false, message: "session not found: " + name,
+        messages: [], session_id: "", provider: "", model: ""
+    )
+
+fn _resume_found(name: text) -> SessionResumeResult:
+    SessionResumeResult(
+        found: true, message: "resumed session " + name,
+        messages: [new_user_message("restored")], session_id: name,
+        provider: "claude_cli", model: "sonnet"
+    )
+
+fn _persist_none(session_id: text, messages: [Message]):
+    ()
+
+fn _hooks(session_id: text) -> SessionHooks:
+    SessionHooks(
+        session_id: session_id,
+        on_model: _noop_model,
+        on_provider: _provider_status,
+        on_sessions: _session_list,
+        on_new: _new_session,
+        on_resume: _resume_none,
+        on_persist: _persist_none
+    )
+
+fn _hooks_with_resume(session_id: text) -> SessionHooks:
+    SessionHooks(
+        session_id: session_id,
+        on_model: _noop_model,
+        on_provider: _provider_status,
+        on_sessions: _session_list,
+        on_new: _new_session,
+        on_resume: _resume_found,
+        on_persist: _persist_none
+    )
+
+fn setup_tui_fixture(case: CaretTuiFeatureCase) -> ChatTui:
+    tui_transcript_reset()
+    val base = make_chat_tui_with_status(
+        "llm_caret - " + case.provider,
+        "provider=" + case.provider + " model=" + case.model + " session=" + case.session_id
+    )
+    var input = base.input
+    var i = 0
+    while i < case.prompt.len():
+        input = input_insert_char(input, case.prompt[i].to_text())
+        i = i + 1
+    ChatTui(title: base.title, hint: base.hint, input: input, status: base.status)
+
+fn _tui_fixture_model(messages: [Message]) -> ModelResponse:
+    new_model_text("fixture-dummy-ok")
+
+fn run_tui_action(case: CaretTuiFeatureCase, ui: ChatTui) -> text:
+    val transition = run_chat_tui_submission(
+        ui, [], case.session_id, ui.input.value,
+        default_policy(WORKSPACE_ROOT), _tui_fixture_model,
+        _hooks(case.session_id)
+    )
+    transition.ui.title + "\n" + transition.ui.status + "\n" +
+        "conversation=" + transition.conversation.len().to_text() + "\n" +
+        "submitted=" + transition.submitted_to_model.to_text() + "\n" +
+        "input=" + transition.ui.input.value + "\n" +
+        tui_transcript_line_text(0) + "\n" +
+        tui_transcript_line_text(1) + "\n"
+
+fn check_tui_snapshot(snapshot: text, case: CaretTuiFeatureCase) -> text:
+    expect(snapshot).to_start_with("llm_caret - " + case.provider)
+    expect(snapshot).to_contain("provider=" + case.provider)
+    expect(snapshot).to_contain("model=" + case.model)
+    expect(snapshot).to_contain("session=" + case.session_id)
+    expect(snapshot).to_contain("conversation=2")
+    expect(snapshot).to_contain("submitted=true")
+    expect(snapshot).to_contain("input=\n")
+    expect(snapshot).to_contain("You: " + case.prompt)
+    expect(snapshot).to_contain("Assistant: " + case.expected_reply)
+    "matched"
+
+fn setup_hidden_feature_fixture(case: CaretHiddenFeatureCase) -> RootCommandLookup:
+    admitRootCommand(case.command, true)
+
+fn check_hidden_feature_gate(case: CaretHiddenFeatureCase, lookup: RootCommandLookup) -> text:
+    expect(lookup.found).to_equal(true)
+    expect(lookup.command.enabled).to_equal(case.expected_enabled)
+    expect(lookup.command.hidden).to_equal(case.expected_hidden)
+    expect(findRootCommand(case.alias).command.name).to_equal(lookup.command.name)
+    var visible = false
+    for command in visibleRootCommands():
+        if command.name == lookup.command.name:
+            visible = true
+    expect(visible).to_equal(false)
+    "hidden"
+
+fn _permission_tool(messages: [Message]) -> ModelResponse:
+    if messages.len() <= 1:
+        return new_model_tools(
+            "",
+            [new_tool_call("permission-1", "bash", "{\"command\":\"echo denied\"}")]
+        )
+    new_model_text("permission handled")
+
+fn _source_excludes_sgtti(path: text) -> text:
+    val source = file_read(path)
+    if source == "":
+        return "missing-source"
+    if source.contains("std.ui_test.sgtti"):
+        return "imports-sgtti"
+    if source.contains("SgttiTestDriver"):
+        return "constructs-sgtti-driver"
+    "excluded"
+
+describe "REQ-LLM-CARET-FULL-003: LLM Caret TUI visible behavior":
+    it "should accept visible input and render provider transcript and status":
+        val case = CaretTuiFeatureCase(
+            prompt: "hello caret",
+            provider: "dummy",
+            model: "dummy-hello",
+            session_id: "tui-session",
+            expected_reply: "hello"
+        )
+
+        step("Open the caret TUI")
+        val ui = setup_tui_fixture(case)
+        expect(ui.input.value).to_equal(case.prompt)
+
+        step("Send a prompt through the visible input")
+        val snapshot = run_tui_action(case, ui)
+        expect(tui_transcript_len()).to_equal(2)
+
+        step("Check transcript and status")
+        expect(check_tui_snapshot(snapshot, case)).to_equal("matched")
+        expect(dir_create_all(ARTIFACT_DIR)).to_equal(true)
+        expect(file_write(TUI_CAPTURE_PATH, snapshot)).to_equal(true)
+        expect(file_read(TUI_CAPTURE_PATH)).to_equal(snapshot)
+
+    it "should surface provider switching through the visible transcript":
+        step("Open the caret TUI")
+        tui_transcript_reset()
+        val ui = make_chat_tui_with_status(
+            "llm_caret - dummy",
+            "provider=dummy model=dummy-hello session=tui-session"
+        )
+
+        step("Send a prompt through the visible input")
+        val switched = dispatch_slash("provider", "openai_compat", _hooks("tui-session"))
+        val refreshed = apply_slash_status(ui, switched)
+        render_turn("system", switched.message)
+
+        step("Check transcript and status")
+        expect(refreshed.status).to_contain("provider=openai_compat")
+        expect(refreshed.title).to_equal("llm_caret - openai_compat")
+        expect(switched.exit).to_equal(false)
+        expect(tui_transcript_line_text(0)).to_equal("System: provider set to openai_compat")
+
+        val resumed = dispatch_slash(
+            "resume", "tui-session", _hooks_with_resume("seed-session")
+        )
+        val resumed_ui = apply_slash_status(refreshed, resumed)
+        expect(resumed_ui.status).to_contain("session=tui-session")
+
+        val started = dispatch_slash("new", "", _hooks("tui-session"))
+        val started_ui = apply_slash_status(resumed_ui, started)
+        expect(started.new_conv).to_be(true)
+        expect(started.new_session_id).to_equal("new-session")
+        expect(started_ui.status).to_contain("session=new-session")
+
+    it "should show permission-denied tool output without executing the command":
+        step("Open the caret TUI")
+        tui_transcript_reset()
+        val policy = default_policy(WORKSPACE_ROOT)
+
+        step("Send a prompt through the visible input")
+        val result = run_agent_loop_rendered(
+            policy,
+            [new_user_message("run a command")],
+            _permission_tool,
+            4,
+            tui_tool_renderer
+        )
+
+        step("Check transcript and status")
+        expect(result.tool_calls_made).to_equal(1)
+        expect(result.stopped_reason).to_equal("end_turn")
+        expect(tui_transcript_len()).to_equal(1)
+        expect(tui_transcript_line_text(0)).to_contain("tool bash [error]")
+        expect(tui_transcript_line_text(0)).to_contain("permission")
+
+    it "should expose bounded retry decisions and the terminal error route":
+        val policy = RetryPolicy(
+            max_attempts: 4,
+            base_delay_ms: 10,
+            max_delay_ms: 100,
+            timeout_ms: 1000
+        )
+
+        step("Open the caret TUI")
+        expect(queryEventRoute("error", false, false)).to_equal("show query error")
+
+        step("Send a prompt through the visible input")
+        expect(should_retry(429, 1, policy)).to_equal(true)
+        expect(should_retry(503, 3, policy)).to_equal(true)
+        expect(should_retry(503, 4, policy)).to_equal(false)
+        expect(should_retry(400, 1, policy)).to_equal(false)
+
+        step("Check transcript and status")
+        expect(effective_delay_ms(1, policy, 75)).to_equal(75)
+        expect(effective_delay_ms(1, policy, 1000)).to_equal(100)
+
+describe "REQ-LLM-CARET-FULL-006: LLM Caret hidden-feature gate":
+    it "should resolve the hidden debug command while excluding it from visible commands":
+        val case = CaretHiddenFeatureCase(
+            command: "/debug-tool-call",
+            alias: "debug_tool_call",
+            expected_enabled: true,
+            expected_hidden: true
+        )
+
+        step("Enable the hidden-feature fixture")
+        val lookup = setup_hidden_feature_fixture(case)
+
+        step("Check the hidden-feature gate")
+        expect(check_hidden_feature_gate(case, lookup)).to_equal("hidden")
+        expect(admitRootCommand(case.command, false).found).to_be(false)
+
+    it "should reject disabled commands even when hidden features are enabled":
+        step("Enable the hidden-feature fixture")
+        val metadata = findRootCommand("/remote-setup")
+        val admitted = admitRootCommand("/remote-setup", true)
+
+        step("Check the hidden-feature gate")
+        expect(metadata.found).to_be(true)
+        expect(metadata.command.enabled).to_be(false)
+        expect(admitted.found).to_be(false)
+
+    it "should keep SGTTI out of the normal Caret product and TUI entrypoints":
+        val case = CaretHiddenFeatureCase(
+            command: "/debug-tool-call",
+            alias: "debug_tool_call",
+            expected_enabled: true,
+            expected_hidden: true
+        )
+
+        step("Enable the hidden-feature fixture")
+        val lookup = setup_hidden_feature_fixture(case)
+        expect(lookup.command.hidden).to_equal(true)
+
+        step("Check the hidden-feature gate")
+        expect(_source_excludes_sgtti("src/app/llm_caret/main.spl")).to_equal("excluded")
+        expect(_source_excludes_sgtti("src/app/llm_caret/chat_tui.spl")).to_equal("excluded")

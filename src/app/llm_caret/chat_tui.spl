@@ -236,14 +236,27 @@ fn caret_is_tty() -> bool:
 # Session hooks (DI seam into main.spl's runtime state + session.spl)
 # ============================================================================
 
-# `on_resume` returns (found, message, messages): found=false means "no such
-# saved session" (message carries the reason, messages is empty).
+struct ProviderSwitchResult:
+    accepted: bool
+    message: text
+    provider: text
+    model: text
+
+struct SessionResumeResult:
+    found: bool
+    message: text
+    messages: [Message]
+    session_id: text
+    provider: text
+    model: text
+
 struct SessionHooks:
     session_id: text
     on_model: fn(text) -> text
-    on_provider: fn(text) -> text
+    on_provider: fn(text) -> ProviderSwitchResult
     on_sessions: fn() -> text
-    on_resume: fn(text) -> (bool, text, [Message])
+    on_new: fn() -> text
+    on_resume: fn(text) -> SessionResumeResult
     on_persist: fn(text, [Message])
 
 # ============================================================================
@@ -282,9 +295,23 @@ struct SlashResult:
     replace_conv: bool
     loaded_messages: [Message]
     new_session_id: text
+    status_provider: text
+    status_model: text
+    status_session: text
 
 fn _slash_msg(message: text) -> SlashResult:
-    SlashResult(message: message, exit: false, new_conv: false, replace_conv: false, loaded_messages: [], new_session_id: "")
+    SlashResult(
+        message: message, exit: false, new_conv: false,
+        replace_conv: false, loaded_messages: [], new_session_id: "",
+        status_provider: "", status_model: "", status_session: ""
+    )
+
+fn _slash_status(message: text, provider: text, model: text, session: text) -> SlashResult:
+    SlashResult(
+        message: message, exit: false, new_conv: false,
+        replace_conv: false, loaded_messages: [], new_session_id: "",
+        status_provider: provider, status_model: model, status_session: session
+    )
 
 # Every /command's effect is expressed purely in the returned SlashResult;
 # the caller (run_chat_tui/run_chat_plain) applies it. Unknown /commands are
@@ -293,28 +320,87 @@ fn dispatch_slash(cmd: text, arg: text, hooks: SessionHooks) -> SlashResult:
     if cmd == "help":
         return _slash_msg(slash_help_text())
     if cmd == "exit" or cmd == "quit":
-        return SlashResult(message: "", exit: true, new_conv: false, replace_conv: false, loaded_messages: [], new_session_id: "")
+        return SlashResult(
+            message: "", exit: true, new_conv: false,
+            replace_conv: false, loaded_messages: [], new_session_id: "",
+            status_provider: "", status_model: "", status_session: ""
+        )
     if cmd == "new":
-        return SlashResult(message: "started a new conversation", exit: false, new_conv: true, replace_conv: false, loaded_messages: [], new_session_id: "")
+        val new_id = hooks.on_new()
+        return SlashResult(
+            message: "started a new conversation", exit: false, new_conv: true,
+            replace_conv: false, loaded_messages: [],
+            new_session_id: new_id,
+            status_provider: "", status_model: "", status_session: new_id
+        )
     if cmd == "model":
         if arg == "":
             return _slash_msg("Usage: /model <name>")
-        return _slash_msg(hooks.on_model(arg))
+        return _slash_status(hooks.on_model(arg), "", arg, "")
     if cmd == "provider":
         if arg == "":
             return _slash_msg("Usage: /provider <name>")
-        return _slash_msg(hooks.on_provider(arg))
+        val changed = hooks.on_provider(arg)
+        if changed.accepted:
+            return _slash_status(
+                changed.message, changed.provider, changed.model, ""
+            )
+        return _slash_msg(changed.message)
     if cmd == "sessions":
         return _slash_msg(hooks.on_sessions())
     if cmd == "resume":
         if arg == "":
             return _slash_msg("Usage: /resume <session_id>")
-        val (found, msg, messages) = hooks.on_resume(arg)
-        var new_id = ""
-        if found:
-            new_id = arg
-        return SlashResult(message: msg, exit: false, new_conv: false, replace_conv: found, loaded_messages: messages, new_session_id: new_id)
+        val resumed = hooks.on_resume(arg)
+        return SlashResult(
+            message: resumed.message, exit: false, new_conv: false,
+            replace_conv: resumed.found, loaded_messages: resumed.messages,
+            new_session_id: resumed.session_id,
+            status_provider: if resumed.found: resumed.provider else: "",
+            status_model: if resumed.found: resumed.model else: "",
+            status_session: if resumed.found: resumed.session_id else: ""
+        )
     _slash_msg("Unknown command: /" + cmd + " (try /help)")
+
+fn _replace_status_field(status: text, key: text, value: text) -> text:
+    val prefix = key + "="
+    val fields = status.split(" ")
+    var updated: [text] = []
+    var replaced = false
+    for field in fields:
+        if field.starts_with(prefix):
+            updated.push(prefix + value)
+            replaced = true
+        elif field != "":
+            updated.push(field)
+    if not replaced:
+        updated.push(prefix + value)
+    updated.join(" ")
+
+fn apply_slash_status(ui: ChatTui, result: SlashResult) -> ChatTui:
+    if result.status_provider == "" and result.status_model == "" and
+       result.status_session == "":
+        return ui
+    var title = ui.title
+    var status = ui.status
+    if result.status_provider != "":
+        if title.starts_with("llm_caret - "):
+            title = "llm_caret - " + result.status_provider
+        status = _replace_status_field(
+            status, "provider", result.status_provider
+        )
+    if result.status_model != "":
+        status = _replace_status_field(status, "model", result.status_model)
+    if result.status_session != "":
+        status = _replace_status_field(
+            status, "session", result.status_session
+        )
+    ChatTui(
+        title: title,
+        hint: ui.hint,
+        input: ui.input,
+        status: status
+    )
 
 # ============================================================================
 # Transcript state ops
@@ -523,12 +609,77 @@ fn _render_history(conv: [Message]):
 fn _apply_slash(result: SlashResult, conv: [Message], session_id: text) -> ([Message], text):
     if result.new_conv:
         tui_transcript_reset()
-        return ([], session_id)
+        return ([], result.new_session_id)
     if result.replace_conv:
         tui_transcript_reset()
         _render_history(result.loaded_messages)
         return (result.loaded_messages, result.new_session_id)
     (conv, session_id)
+
+struct ChatSubmissionResult:
+    ui: ChatTui
+    conversation: [Message]
+    session_id: text
+    running: bool
+    submitted_to_model: bool
+
+# Deterministic production state transition for one submitted TUI line. The
+# terminal loop owns key reading/frame timing; this function owns the actual
+# command/model/history/persistence behavior and is directly system-testable.
+fn run_chat_tui_submission(
+    ui0: ChatTui,
+    conv0: [Message],
+    session_id0: text,
+    submitted: text,
+    policy: PermissionPolicy,
+    responder: fn([Message]) -> ModelResponse,
+    hooks: SessionHooks
+) -> ChatSubmissionResult:
+    var ui = ui0
+    var conv = conv0
+    var session_id = session_id0
+    var running = true
+    var submitted_to_model = false
+    val trimmed = submitted.trim()
+    if trimmed == "/exit" or trimmed == "/quit":
+        running = false
+    elif trimmed == "":
+        ui = _ui_set_input(ui, input_clear(ui.input))
+    elif is_slash_command(trimmed):
+        val (cmd, arg) = parse_slash_command(trimmed)
+        val result = dispatch_slash(cmd, arg, hooks)
+        ui = apply_slash_status(ui, result)
+        if result.exit:
+            running = false
+        else:
+            val applied = _apply_slash(result, conv, session_id)
+            conv = applied.0
+            session_id = applied.1
+            # Render after a /new reset or /resume history restore so the
+            # visible confirmation is not immediately erased.
+            if result.message != "":
+                render_turn("system", result.message)
+        ui = _ui_set_input(ui, input_clear(ui.input))
+    else:
+        SCROLL_TOP = -1
+        render_turn("user", trimmed)
+        conv = conv + [new_user_message(trimmed)]
+        TURN_COUNT = TURN_COUNT + 1
+        val result = run_agent_loop_rendered(
+            policy, conv, responder, 25, tui_tool_renderer
+        )
+        conv = result.final_transcript
+        render_turn("assistant", result.final_text)
+        hooks.on_persist(session_id, conv)
+        ui = _ui_set_input(ui, input_clear(ui.input))
+        submitted_to_model = true
+    ChatSubmissionResult(
+        ui: ui,
+        conversation: conv,
+        session_id: session_id,
+        running: running,
+        submitted_to_model: submitted_to_model
+    )
 
 # The full-screen interactive chat loop. Sets up the alt screen + raw mode per
 # editor/tui_shell.spl, reads a prompt, runs one agent turn (threading the
@@ -570,35 +721,21 @@ fn run_chat_tui(ui0: ChatTui, policy: PermissionPolicy, responder: fn([Message])
             running = false
         else:
             val trimmed = submitted.trim()
-            if trimmed == "/exit" or trimmed == "/quit":
-                running = false
-            elif trimmed == "":
-                ui = _ui_set_input(ui, input_clear(ui.input))
-            elif is_slash_command(trimmed):
-                val (cmd, arg) = parse_slash_command(trimmed)
-                val result = dispatch_slash(cmd, arg, hooks)
-                if result.message != "":
-                    render_turn("system", result.message)
-                if result.exit:
-                    running = false
-                else:
-                    val applied = _apply_slash(result, conv, session_id)
-                    conv = applied.0
-                    session_id = applied.1
-                ui = _ui_set_input(ui, input_clear(ui.input))
-            else:
-                SCROLL_TOP = -1  # a message the user just sent should snap to the tail
-                render_turn("user", trimmed)
-                conv = conv + [new_user_message(trimmed)]
-                TURN_COUNT = TURN_COUNT + 1
+            val model_turn = trimmed != "" and
+                trimmed != "/exit" and trimmed != "/quit" and
+                not is_slash_command(trimmed)
+            if model_turn:
                 AWAITING_RESPONSE = true
                 _draw_frame(ui)
-                val result = run_agent_loop_rendered(policy, conv, responder, 25, tui_tool_renderer)
+            val transition = run_chat_tui_submission(
+                ui, conv, session_id, submitted, policy, responder, hooks
+            )
+            if model_turn:
                 AWAITING_RESPONSE = false
-                conv = result.final_transcript
-                render_turn("assistant", result.final_text)
-                hooks.on_persist(session_id, conv)
-                ui = _ui_set_input(ui, input_clear(ui.input))
+            ui = transition.ui
+            conv = transition.conversation
+            session_id = transition.session_id
+            running = transition.running
     terminal_show_cursor()
     terminal_exit_raw_mode()
     terminal_exit_alt_screen()
@@ -628,6 +765,7 @@ fn run_chat_plain(policy: PermissionPolicy, responder: fn([Message]) -> ModelRes
                 running = false
             elif result.new_conv:
                 conv = []
+                session_id = result.new_session_id
             elif result.replace_conv:
                 conv = result.loaded_messages
                 session_id = result.new_session_id

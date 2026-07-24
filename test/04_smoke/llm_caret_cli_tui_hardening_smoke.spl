@@ -1,0 +1,136 @@
+# Offline native smoke for the production LLM Caret CLI and TUI seams.
+# The executable fixture never accesses the network or starts Claude.
+
+use app.llm_caret.claude_cli.{
+    build_claude_args, build_claude_stream_args, parse_claude_stream_line
+}
+use app.llm_caret.provider.{dispatch_send}
+use app.llm_caret.chat_tui.{
+    ChatTui, ProviderSwitchResult, SessionResumeResult, SessionHooks,
+    make_chat_tui_with_status, dispatch_slash,
+    apply_slash_status
+}
+use app.llm_caret.types.{Message, new_user_message}
+
+val MOCK_CLAUDE = "test/fixtures/llm_caret/mock_claude_cli.shs"
+
+fn _has_arg(args: [text], expected: text) -> bool:
+    for arg in args:
+        if arg == expected:
+            return true
+    false
+
+fn _model(name: text) -> text:
+    "model set to " + name
+
+fn _provider(name: text) -> ProviderSwitchResult:
+    ProviderSwitchResult(
+        accepted: true, message: "provider set to " + name,
+        provider: name, model: "sonnet"
+    )
+
+fn _sessions() -> text:
+    "session-a"
+
+fn _new_session() -> text:
+    "session-new"
+
+fn _resume(id: text) -> SessionResumeResult:
+    SessionResumeResult(
+        found: true, message: "resumed " + id,
+        messages: [new_user_message("restored")], session_id: id,
+        provider: "claude_cli", model: "sonnet"
+    )
+
+fn _persist(session_id: text, messages: [Message]):
+    ()
+
+fn _hooks() -> SessionHooks:
+    SessionHooks(
+        session_id: "session-old",
+        on_model: _model,
+        on_provider: _provider,
+        on_sessions: _sessions,
+        on_new: _new_session,
+        on_resume: _resume,
+        on_persist: _persist
+    )
+
+fn main() -> i64:
+    val args = build_claude_args(
+        "fixture-success", "sonnet", "json", "Be concise", "resume-1",
+        2, 4096, "", ["Read", "Glob"], [], false
+    )
+    if _has_arg(args, "--max-tokens"):
+        print "FAIL: removed --max-tokens reached production arguments"
+        return 1
+    var allowed_tools_flags = 0
+    for arg in args:
+        if arg == "--allowedTools":
+            allowed_tools_flags = allowed_tools_flags + 1
+    if allowed_tools_flags != 1:
+        print "FAIL: allowed tools must use one variadic flag"
+        return 1
+
+    val stream_args = build_claude_stream_args(
+        "fixture-success", "sonnet", "", "", 1
+    )
+    if not _has_arg(stream_args, "--verbose"):
+        print "FAIL: stream-json requires --verbose"
+        return 1
+
+    val assistant = parse_claude_stream_line(
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"streamed\"}],\"usage\":{\"input_tokens\":3,\"output_tokens\":1}},\"session_id\":\"stream-session\"}"
+    )
+    if assistant.content != "streamed" or assistant.output_tokens != 1:
+        print "FAIL: Claude Code assistant envelope was not parsed"
+        return 1
+
+    val response = dispatch_send(
+        "claude_cli", "fixture-success", "sonnet", "", "", MOCK_CLAUDE,
+        "Be concise", "resume-1", 2, 4096, "[]"
+    )
+    if response.is_error or response.content != "fixture-ok":
+        print "FAIL: production Claude CLI dispatch failed"
+        return 1
+
+    val process_error = dispatch_send(
+        "claude_cli", "fixture-error", "sonnet", "", "", MOCK_CLAUDE,
+        "", "", 0, 4096, "[]"
+    )
+    if not process_error.is_error:
+        print "FAIL: subprocess error was accepted"
+        return 1
+    if process_error.error.contains("sk-ant-fixture-secret"):
+        print "FAIL: subprocess secret was not redacted"
+        return 1
+
+    val ui = make_chat_tui_with_status(
+        "llm_caret - dummy",
+        "provider=dummy model=dummy-hello session=session-old"
+    )
+    val switched = apply_slash_status(
+        ui, dispatch_slash("provider", "claude_cli", _hooks())
+    )
+    if not switched.status.contains("provider=claude_cli"):
+        print "FAIL: provider status remained stale"
+        return 1
+
+    val resumed = apply_slash_status(
+        switched, dispatch_slash("resume", "session-resumed", _hooks())
+    )
+    if not resumed.status.contains("session=session-resumed"):
+        print "FAIL: resume status remained stale"
+        return 1
+
+    val started = dispatch_slash("new", "", _hooks())
+    val new_ui = apply_slash_status(resumed, started)
+    if started.new_session_id != "session-new":
+        print "FAIL: new conversation reused the old session"
+        return 1
+    if not new_ui.status.contains("session=session-new"):
+        print "FAIL: new session status remained stale"
+        return 1
+
+    print "llm caret CLI/TUI hardening smoke: PASS"
+    0

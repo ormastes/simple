@@ -12,7 +12,7 @@
 # without any I/O. `with_retry` is the only impure piece — it sleeps between
 # attempts and invokes the caller-supplied closure.
 
-use app.io.mod.{rt_sleep_ms, env_get}
+use app.io.mod.{rt_sleep_ms, env_get, current_time_ms}
 use app.llm_caret.json_helpers.{json_parse_int}
 
 # ============================================================================
@@ -91,8 +91,8 @@ fn _jitter_ms(attempt: i64, policy: RetryPolicy) -> i64:
         return 0
     (attempt * 37) % (spread + 1)
 
-# Exponential backoff: base * 2^(attempt-1), capped at max_delay_ms, plus
-# deterministic jitter. `attempt` is 1-indexed (the attempt that just failed).
+# Exponential backoff: base * 2^(attempt-1), plus deterministic jitter, with
+# the final delay capped at max_delay_ms. `attempt` is 1-indexed.
 fn backoff_delay_ms(attempt: i64, policy: RetryPolicy) -> i64:
     var a = attempt
     if a < 1:
@@ -107,7 +107,10 @@ fn backoff_delay_ms(attempt: i64, policy: RetryPolicy) -> i64:
         i = i + 1
     if delay > policy.max_delay_ms:
         delay = policy.max_delay_ms
-    delay + _jitter_ms(attempt, policy)
+    var final_delay = delay + _jitter_ms(attempt, policy)
+    if final_delay > policy.max_delay_ms:
+        final_delay = policy.max_delay_ms
+    final_delay
 
 # Effective delay before the next attempt: honors a server-supplied
 # Retry-After value (in ms) when positive, otherwise falls back to the
@@ -129,6 +132,7 @@ fn effective_delay_ms(attempt: i64, policy: RetryPolicy, retry_after_ms: i64) ->
 # connection-level failure (status is meaningless / <= 0 by convention).
 # `retry_after_ms` should be 0 when the caller has no Retry-After hint.
 fn with_retry(policy: RetryPolicy, call: fn(i64) -> (i64, text, text, i64)) -> RetryOutcome:
+    val started_at_ms = current_time_ms()
     var attempt = 1
     while true:
         val result = call(attempt)
@@ -145,6 +149,14 @@ fn with_retry(policy: RetryPolicy, call: fn(i64) -> (i64, text, text, i64)) -> R
                 attempts: attempt
             )
         val delay = effective_delay_ms(attempt, policy, retry_after_ms)
+        val elapsed_ms = current_time_ms() - started_at_ms
+        if policy.timeout_ms > 0 and elapsed_ms + delay > policy.timeout_ms:
+            return RetryOutcome(
+                status: status,
+                body: body,
+                error: if err != "": err else: "retry timeout exceeded",
+                attempts: attempt
+            )
         rt_sleep_ms(delay)
         attempt = attempt + 1
     # unreachable, but keeps the type checker satisfied

@@ -222,6 +222,7 @@ fn codegen_struct_init_field_get_set() {
             dest: obj,
             type_id: TypeId::I64,
             struct_name: None,
+            vtable_symbol: None,
             struct_size: 8,
             field_offsets: vec![0],
             field_types: vec![TypeId::I64],
@@ -230,6 +231,8 @@ fn codegen_struct_init_field_get_set() {
         block.instructions.push(MirInst::FieldGet {
             dest: got,
             object: obj,
+            owner_name: None,
+            owner_has_vtable: None,
             byte_offset: 0,
             field_type: TypeId::I64,
         });
@@ -239,6 +242,8 @@ fn codegen_struct_init_field_get_set() {
         });
         block.instructions.push(MirInst::FieldSet {
             object: obj,
+            owner_name: None,
+            owner_has_vtable: None,
             byte_offset: 0,
             field_type: TypeId::I64,
             value: newval,
@@ -268,6 +273,7 @@ fn codegen_struct_field_get_native_types() {
             dest: obj,
             type_id: TypeId::I64,
             struct_name: None,
+            vtable_symbol: None,
             struct_size: 16,
             field_offsets: vec![0, 8],
             field_types: vec![TypeId::I32, TypeId::F64],
@@ -276,12 +282,16 @@ fn codegen_struct_field_get_native_types() {
         block.instructions.push(MirInst::FieldGet {
             dest: got_int,
             object: obj,
+            owner_name: None,
+            owner_has_vtable: None,
             byte_offset: 0,
             field_type: TypeId::I32,
         });
         block.instructions.push(MirInst::FieldGet {
             dest: got_float,
             object: obj,
+            owner_name: None,
+            owner_has_vtable: None,
             byte_offset: 8,
             field_type: TypeId::F64,
         });

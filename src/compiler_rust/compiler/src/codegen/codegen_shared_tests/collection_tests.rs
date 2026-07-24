@@ -139,6 +139,7 @@ shared_test!(shared_struct_init_field_ops, |f: &mut MirFunction| {
         dest: obj,
         type_id: TypeId::I64,
         struct_name: None,
+        vtable_symbol: None,
         struct_size: 8,
         field_offsets: vec![0],
         field_types: vec![TypeId::I64],
@@ -147,6 +148,8 @@ shared_test!(shared_struct_init_field_ops, |f: &mut MirFunction| {
     block.instructions.push(MirInst::FieldGet {
         dest: got,
         object: obj,
+        owner_name: None,
+        owner_has_vtable: None,
         byte_offset: 0,
         field_type: TypeId::I64,
     });
@@ -156,6 +159,8 @@ shared_test!(shared_struct_init_field_ops, |f: &mut MirFunction| {
     });
     block.instructions.push(MirInst::FieldSet {
         object: obj,
+        owner_name: None,
+        owner_has_vtable: None,
         byte_offset: 0,
         field_type: TypeId::I64,
         value: newval,

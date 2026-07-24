@@ -25,22 +25,22 @@ remote-control bridge, OAuth, or full agent orchestration.
 
 | Simple source file | LOC | Claude source match | Role |
 |---|---:|---|---|
-| `src/app/llm_caret/chat.spl` | 138 | `src/assistant/sessionHistory.ts`, `src/bootstrap/state.ts` | conversation history and message JSON |
-| `src/app/llm_caret/claude_api.spl` | 242 | `src/QueryEngine.ts`, `src/entrypoints/sdk/coreSchemas.ts` | Anthropic Messages request/response |
-| `src/app/llm_caret/claude_cli.spl` | 328 | `src/entrypoints/cli.tsx`, `src/QueryEngine.ts` | non-interactive Claude CLI argv and JSON/stream parsing |
-| `src/app/llm_caret/config.spl` | 227 | `src/bootstrap/state.ts`, `src/constants/product.ts` | defaults and provider config |
-| `src/app/llm_caret/json_helpers.spl` | 196 | Simple-only shared helper | local JSON helper caret utility |
+| `src/app/llm_caret/chat.spl` | 227 | `src/assistant/sessionHistory.ts`, `src/bootstrap/state.ts` | conversation history and message JSON |
+| `src/app/llm_caret/claude_api.spl` | 241 | `src/QueryEngine.ts`, `src/entrypoints/sdk/coreSchemas.ts` | Anthropic Messages request/response |
+| `src/app/llm_caret/claude_cli.spl` | 414 | `src/entrypoints/cli.tsx`, `src/QueryEngine.ts` | non-interactive Claude CLI argv and typed JSON/stream parsing |
+| `src/app/llm_caret/config.spl` | 228 | `src/bootstrap/state.ts`, `src/constants/product.ts` | defaults and provider config |
+| `src/app/llm_caret/json_helpers.spl` | 250 | Simple-only shared helper | local JSON helper caret utility |
 | `src/app/llm_caret/local_torch.spl` | 98 | Simple-only provider extension | local model provider outside Claude parity |
-| `src/app/llm_caret/mod.spl` | 398 | `src/QueryEngine.ts`, `src/bootstrap/state.ts` | public API, state, provider dispatch |
-| `src/app/llm_caret/openai_api.spl` | 261 | `src/entrypoints/sdk/coreSchemas.ts` | OpenAI-compatible provider extension |
-| `src/app/llm_caret/openai_compat.spl` | 206 | `src/entrypoints/sdk/coreSchemas.ts` | local/OpenAI-compatible endpoint provider |
+| `src/app/llm_caret/mod.spl` | 400 | `src/QueryEngine.ts`, `src/bootstrap/state.ts` | public API, state, provider dispatch |
+| `src/app/llm_caret/openai_api.spl` | 260 | `src/entrypoints/sdk/coreSchemas.ts` | OpenAI-compatible provider extension |
+| `src/app/llm_caret/openai_compat.spl` | 203 | `src/entrypoints/sdk/coreSchemas.ts` | local/OpenAI-compatible endpoint provider |
 | `src/app/llm_caret/opencode_cli.spl` | 149 | Simple-only Claude-like CLI provider | OpenCode adapter with Claude-like response shape |
-| `src/app/llm_caret/provider.spl` | 419 | `src/Tool.ts`, `src/constants/tools.ts`, `src/entrypoints/sdk/coreSchemas.ts` | provider registry and normalized response |
+| `src/app/llm_caret/provider.spl` | 398 | `src/Tool.ts`, `src/constants/tools.ts`, `src/entrypoints/sdk/coreSchemas.ts` | provider registry and normalized response |
 | `src/app/llm_caret/server.spl` | 199 | `src/entrypoints/mcp.ts`, `src/entrypoints/sdk/coreSchemas.ts` | compatibility HTTP/MCP-like response surface |
 | `src/app/llm_caret/types.spl` | 225 | `src/entrypoints/sdk/coreSchemas.ts`, `src/types/logs.ts` | request/response/event/config records |
 
-Mapped files: 13/13 = 100%, above the required 80%.
-Mapped LOC: 3086/3086 = 100%, above the required 80%.
+Mapped files: 13/23 = 56%, below the required 80%.
+Mapped LOC: 3292/6609 = 50%, below the required 80%.
 
 ## Function Trace
 
@@ -48,7 +48,7 @@ Mapped LOC: 3086/3086 = 100%, above the required 80%.
 |---|---|
 | `chat.spl` | `chat_clear`, `chat_set_system_prompt`, `chat_add_message`, `chat_truncate`, `chat_build_messages_json`, `chat_last_content`, `chat_last_role` |
 | `claude_api.spl` | `ApiResponse`, `build_claude_api_body`, `build_claude_api_headers`, `build_single_message_json`, `parse_claude_api_response`, `claude_api_send` |
-| `claude_cli.spl` | `CliResponse`, `CliStreamEvent`, `build_claude_args`, `build_claude_args_simple`, `parse_claude_json_response`, `parse_claude_stream_line`, `claude_cli_send`, `claude_cli_stream` |
+| `claude_cli.spl` | `CliResponse`, `CliStreamEvent`, typed JSON helpers, `build_claude_args`, `build_claude_stream_args`, `parse_claude_json_response`, `parse_claude_stream_line`, `claude_cli_send`, `claude_cli_stream` |
 | `config.spl` | `config_loaded`, `config_default_provider`, provider default getters, config parsing helpers |
 | `json_helpers.spl` | `escape_json_text`, `jo1`-`jo6`, `ja`, `extract_json_string`, `extract_json_value`, `extract_json_int`, `extract_json_bool`, `extract_nested_string`, `build_message_json`, `build_messages_json` |
 | `local_torch.spl` | `LocalResponse`, `build_torch_script`, `local_torch_send` |
@@ -70,7 +70,7 @@ must appear as a backticked `kind:name` token.
 |---|---|
 | `src/app/llm_caret/chat.spl` | `fn:_LB`, `fn:_RB`, `fn:_Q`, `fn:_escape_json`, `fn:chat_clear`, `fn:chat_set_system_prompt`, `fn:chat_get_system_prompt`, `fn:chat_set_max_history`, `fn:chat_add_message`, `fn:chat_add_user`, `fn:chat_add_assistant`, `fn:chat_history_len`, `fn:chat_get_role`, `fn:chat_get_content`, `fn:chat_truncate`, `fn:chat_build_messages_json`, `fn:chat_last_content`, `fn:chat_last_role` |
 | `src/app/llm_caret/claude_api.spl` | `extern:rt_http_request`, `fn:_LB`, `fn:_RB`, `fn:_Q`, `fn:_unwrap_idx`, `fn:_escape_json`, `fn:_extract_json_string`, `fn:_extract_json_value`, `fn:_extract_json_int`, `struct:ApiResponse`, `fn:build_claude_api_body`, `fn:build_claude_api_headers`, `fn:build_single_message_json`, `fn:parse_claude_api_response`, `fn:claude_api_send` |
-| `src/app/llm_caret/claude_cli.spl` | `fn:_LB`, `fn:_RB`, `fn:_Q`, `fn:_unwrap_idx`, `fn:_escape_json`, `fn:_extract_json_string`, `fn:_extract_json_value`, `fn:_extract_json_int`, `fn:_extract_json_bool`, `struct:CliResponse`, `struct:CliStreamEvent`, `fn:build_claude_args`, `fn:build_claude_args_simple`, `fn:parse_claude_json_response`, `fn:parse_claude_stream_line`, `fn:claude_cli_send`, `fn:claude_cli_stream` |
+| `src/app/llm_caret/claude_cli.spl` | `fn:_json_text`, `fn:_json_i64`, `fn:_json_bool`, `fn:_json_raw`, `fn:_json_usage_i64`, `fn:_json_message_field`, `fn:_json_message_usage_i64`, `fn:_json_message_content`, `struct:CliResponse`, `struct:CliStreamEvent`, `fn:_invalid_cli_response`, `fn:build_claude_args`, `fn:build_claude_args_simple`, `fn:build_claude_stream_args`, `fn:parse_claude_json_response`, `fn:parse_claude_stream_line`, `fn:claude_cli_send`, `fn:claude_cli_stream` |
 | `src/app/llm_caret/config.spl` | `extern:rt_file_read_text`, `fn:config_loaded`, `fn:config_default_provider`, `fn:config_history_file`, `fn:config_max_history`, `fn:config_claude_cli_path`, `fn:config_claude_cli_model`, `fn:config_opencode_cli_path`, `fn:config_opencode_cli_model`, `fn:config_claude_api_key`, `fn:config_claude_api_base_url`, `fn:config_claude_api_model`, `fn:config_openai_api_key`, `fn:config_openai_base_url`, `fn:config_openai_model`, `fn:config_compat_base_url`, `fn:config_compat_model`, `fn:config_compat_api_key`, `fn:config_local_model_path`, `fn:config_local_python_path`, `fn:load_config`, `fn:parse_config_text`, `fn:_unwrap_idx_cfg`, `fn:_apply_config`, `fn:load_defaults`, `fn:reset_config` |
 | `src/app/llm_caret/json_helpers.spl` | `fn:escape_json_text`, `fn:jo1`, `fn:jo2`, `fn:jo3`, `fn:jo4`, `fn:jo5`, `fn:jo6`, `fn:ja`, `fn:_unwrap_idx`, `fn:extract_json_string`, `fn:extract_json_value`, `fn:extract_json_int`, `fn:extract_json_bool`, `fn:extract_nested_string`, `fn:build_message_json`, `fn:build_messages_json` |
 | `src/app/llm_caret/local_torch.spl` | `extern:rt_file_write_text`, `extern:rt_file_read_text`, `extern:rt_file_delete`, `extern:rt_time_now_unix_micros`, `struct:LocalResponse`, `fn:build_torch_script`, `fn:local_torch_send` |

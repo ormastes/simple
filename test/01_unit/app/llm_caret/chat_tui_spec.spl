@@ -16,13 +16,14 @@ use app.llm_caret.tools.{
 }
 use app.llm_caret.chat.{AgentResult, run_agent_loop, run_agent_loop_rendered}
 use app.llm_caret.chat_tui.{
-    ChatTui, make_chat_tui,
+    ChatTui, make_chat_tui, make_chat_tui_with_status,
     format_turn_line, format_tool_line, tui_role_label,
     tui_role_style, tui_tool_style, select_renderer_mode,
     render_turn, render_tool_call, tui_tool_renderer,
     tui_transcript_reset, tui_transcript_len, tui_transcript_line_text,
-    SessionHooks, SlashResult,
+    ProviderSwitchResult, SessionResumeResult, SessionHooks, SlashResult,
     is_slash_command, parse_slash_command, slash_help_text, dispatch_slash,
+    apply_slash_status, run_chat_tui_submission,
     is_fence_line, bullet_indent, inline_code_segments, markdown_turn_lines,
     visible_window, is_scrolled, scroll_page_up, scroll_page_down
 }
@@ -41,56 +42,56 @@ fn _one_tool(msgs: [Message]) -> ModelResponse:
 
 # ============================================================================
 describe "TUI pure formatting":
-    it "labels user and assistant turns distinctly":
+    it "should labels user and assistant turns distinctly":
         expect(tui_role_label("user")).to_equal("You")
         expect(tui_role_label("assistant")).to_equal("Assistant")
 
-    it "formats a turn line with its role label":
+    it "should formats a turn line with its role label":
         expect(format_turn_line("user", "hello")).to_equal("You: hello")
         expect(format_turn_line("assistant", "hi")).to_equal("Assistant: hi")
 
-    it "styles user vs assistant turns differently":
+    it "should styles user vs assistant turns differently":
         val us = tui_role_style("user")
         val asst = tui_role_style("assistant")
         expect(us.fg).to_equal(COLOR_CYAN)
         expect(asst.fg).to_equal(COLOR_GREEN)
         assert_true(us.fg != asst.fg)
 
-    it "formats a tool-call line":
+    it "should formats a tool-call line":
         expect(format_tool_line("bash", "ok", "output")).to_equal("  -> tool bash [ok]: output")
 
-    it "styles error tool lines red and ok tool lines yellow":
+    it "should styles error tool lines red and ok tool lines yellow":
         expect(tui_tool_style("error").fg).to_equal(COLOR_RED)
         expect(tui_tool_style("ok").fg).to_equal(COLOR_YELLOW)
 
 describe "Renderer-seam selection":
-    it "explicit plain flag forces plain even on a tty":
+    it "should explicit plain flag forces plain even on a tty":
         expect(select_renderer_mode("plain", true)).to_equal("plain")
 
-    it "explicit tui flag forces tui even without a tty":
+    it "should explicit tui flag forces tui even without a tty":
         expect(select_renderer_mode("tui", false)).to_equal("tui")
 
-    it "auto picks tui on a tty":
+    it "should auto picks tui on a tty":
         expect(select_renderer_mode("auto", true)).to_equal("tui")
 
-    it "auto falls back to plain when not a tty":
+    it "should auto falls back to plain when not a tty":
         expect(select_renderer_mode("auto", false)).to_equal("plain")
 
 describe "Transcript rendering":
-    it "appends a styled user turn to the transcript":
+    it "should appends a styled user turn to the transcript":
         tui_transcript_reset()
         render_turn("user", "hi there")
         expect(tui_transcript_len()).to_equal(1)
         expect(tui_transcript_line_text(0)).to_equal("You: hi there")
 
-    it "appends a styled tool-call line to the transcript":
+    it "should appends a styled tool-call line to the transcript":
         tui_transcript_reset()
         render_tool_call("bash", "ok", "42")
         expect(tui_transcript_len()).to_equal(1)
         expect(tui_transcript_line_text(0)).to_contain("tool bash [ok]")
 
 describe "Agent-loop renderer seam":
-    it "routes tool calls through render_tool_call in TUI mode":
+    it "should routes tool calls through render_tool_call in TUI mode":
         tui_transcript_reset()
         val p = default_policy(WS_ROOT)
         val result = run_agent_loop_rendered(p, [new_user_message("go")], _one_tool, 25, tui_tool_renderer)
@@ -99,14 +100,14 @@ describe "Agent-loop renderer seam":
         expect(tui_transcript_line_text(0)).to_contain("tool bash")
         expect(tui_transcript_line_text(0)).to_contain("[error]")
 
-    it "leaves the TUI transcript untouched on the plain print path":
+    it "should leaves the TUI transcript untouched on the plain print path":
         tui_transcript_reset()
         val p = default_policy(WS_ROOT)
         val result = run_agent_loop(p, [new_user_message("go")], _one_tool, 25)
         expect(result.tool_calls_made).to_equal(1)
         expect(tui_transcript_len()).to_equal(0)
 
-    it "threads tool_result turns back into final_transcript (M2 fix)":
+    it "should threads tool_result turns back into final_transcript (M2 fix)":
         val p = default_policy(WS_ROOT)
         val result = run_agent_loop(p, [new_user_message("go")], _one_tool, 25)
         # initial user turn + tool_result turn + final assistant turn = 3.
@@ -120,43 +121,43 @@ describe "Agent-loop renderer seam":
 # Markdown-lite rendering (M3)
 # ============================================================================
 describe "Markdown-lite rendering":
-    it "renders a plain single-line turn exactly as format_turn_line would":
+    it "should renders a plain single-line turn exactly as format_turn_line would":
         tui_transcript_reset()
         render_turn("assistant", "hi")
         expect(tui_transcript_len()).to_equal(1)
         expect(tui_transcript_line_text(0)).to_equal("Assistant: hi")
 
-    it "splits multi-line content into one transcript line per source line":
+    it "should splits multi-line content into one transcript line per source line":
         tui_transcript_reset()
         render_turn("assistant", "line one\nline two")
         expect(tui_transcript_len()).to_equal(2)
         expect(tui_transcript_line_text(0)).to_equal("Assistant: line one")
         expect(tui_transcript_line_text(1)).to_equal("line two")
 
-    it "detects fenced code block markers":
+    it "should detects fenced code block markers":
         assert_true(is_fence_line("```"))
         assert_true(is_fence_line("```python"))
         assert_false(is_fence_line("plain text"))
 
-    it "indents bullet lines and leaves others untouched":
+    it "should indents bullet lines and leaves others untouched":
         expect(bullet_indent("- item")).to_equal("  - item")
         expect(bullet_indent("* item")).to_equal("  * item")
         expect(bullet_indent("plain")).to_equal("plain")
 
-    it "renders a fenced code block dim with indentation preserved":
+    it "should renders a fenced code block dim with indentation preserved":
         tui_transcript_reset()
         render_turn("assistant", "```\n  indented code\n```")
         expect(tui_transcript_len()).to_equal(3)
         expect(tui_transcript_line_text(1)).to_equal("  indented code")
 
-    it "splits inline code spans into separate segments":
+    it "should splits inline code spans into separate segments":
         val segs = inline_code_segments("run `cmd` now", tui_default_style())
         expect(segs.len()).to_equal(3)
         expect(segs[0].content).to_equal("run ")
         expect(segs[1].content).to_equal("cmd")
         expect(segs[2].content).to_equal(" now")
 
-    it "markdown_turn_lines prefixes only the first line with the role label":
+    it "should markdown_turn_lines prefixes only the first line with the role label":
         val lines = markdown_turn_lines("user", "a\nb")
         expect(lines.len()).to_equal(2)
 
@@ -164,31 +165,31 @@ describe "Markdown-lite rendering":
 # Scrollback (M3)
 # ============================================================================
 describe "Scrollback window (visible_window)":
-    it "auto-follow (-1) shows the tail when content exceeds the viewport":
+    it "should auto-follow (-1) shows the tail when content exceeds the viewport":
         val (start, end) = visible_window(10, 4, -1)
         expect(start).to_equal(6)
         expect(end).to_equal(10)
 
-    it "auto-follow shows everything when content fits the viewport":
+    it "should auto-follow shows everything when content fits the viewport":
         val (start, end) = visible_window(3, 4, -1)
         expect(start).to_equal(0)
         expect(end).to_equal(3)
 
-    it "a fixed scroll_top clamps to the valid range":
+    it "should a fixed scroll_top clamps to the valid range":
         val (start, end) = visible_window(10, 4, 100)
         expect(start).to_equal(6)
 
-    it "a fixed scroll_top of 0 shows the very top":
+    it "should a fixed scroll_top of 0 shows the very top":
         val (start, end) = visible_window(10, 4, 0)
         expect(start).to_equal(0)
         expect(end).to_equal(4)
 
 describe "Scroll paging (Ctrl-P/Ctrl-N)":
-    it "is not scrolled by default":
+    it "should is not scrolled by default":
         tui_transcript_reset()
         assert_false(is_scrolled())
 
-    it "pages up away from auto-follow, and enough pages down resume it":
+    it "should pages up away from auto-follow, and enough pages down resume it":
         tui_transcript_reset()
         var i = 0
         while i < 20:
@@ -214,92 +215,251 @@ fn _noop_persist(session_id: text, msgs: [Message]):
 fn _hooks_model(name: text) -> text:
     "model set to " + name
 
-fn _hooks_provider(name: text) -> text:
-    "provider set to " + name
+fn _hooks_provider(name: text) -> ProviderSwitchResult:
+    ProviderSwitchResult(
+        accepted: true, message: "provider set to " + name,
+        provider: name, model: "gpt-4o"
+    )
+
+fn _hooks_provider_reject(name: text) -> ProviderSwitchResult:
+    ProviderSwitchResult(
+        accepted: false, message: "unknown provider: " + name,
+        provider: "dummy", model: "dummy-hello"
+    )
 
 fn _hooks_sessions() -> text:
     "Sessions:\n  s1\n  s2"
 
-fn _hooks_resume_found(id: text) -> (bool, text, [Message]):
-    (true, "resumed " + id, [new_user_message("restored")])
+fn _hooks_new() -> text:
+    "s-new"
 
-fn _hooks_resume_missing(id: text) -> (bool, text, [Message]):
-    (false, "no saved session '" + id + "'", [])
+fn _hooks_resume_found(id: text) -> SessionResumeResult:
+    SessionResumeResult(
+        found: true, message: "resumed " + id,
+        messages: [new_user_message("restored")], session_id: id,
+        provider: "claude_cli", model: "sonnet"
+    )
+
+fn _hooks_resume_missing(id: text) -> SessionResumeResult:
+    SessionResumeResult(
+        found: false, message: "no saved session '" + id + "'",
+        messages: [], session_id: "", provider: "", model: ""
+    )
 
 fn _test_hooks() -> SessionHooks:
     SessionHooks(
         session_id: "s0", on_model: _hooks_model, on_provider: _hooks_provider,
-        on_sessions: _hooks_sessions, on_resume: _hooks_resume_found, on_persist: _noop_persist
+        on_sessions: _hooks_sessions, on_new: _hooks_new,
+        on_resume: _hooks_resume_found, on_persist: _noop_persist
     )
 
 fn _test_hooks_missing() -> SessionHooks:
     SessionHooks(
         session_id: "s0", on_model: _hooks_model, on_provider: _hooks_provider,
-        on_sessions: _hooks_sessions, on_resume: _hooks_resume_missing, on_persist: _noop_persist
+        on_sessions: _hooks_sessions, on_new: _hooks_new,
+        on_resume: _hooks_resume_missing, on_persist: _noop_persist
     )
 
+fn _test_hooks_provider_reject() -> SessionHooks:
+    SessionHooks(
+        session_id: "s0", on_model: _hooks_model,
+        on_provider: _hooks_provider_reject,
+        on_sessions: _hooks_sessions, on_new: _hooks_new,
+        on_resume: _hooks_resume_found,
+        on_persist: _noop_persist
+    )
+
+fn _submission_response(messages: [Message]) -> ModelResponse:
+    new_model_text("submission reply")
+
 describe "Slash command parsing":
-    it "recognizes lines starting with /":
+    it "should recognizes lines starting with /":
         assert_true(is_slash_command("/help"))
         assert_false(is_slash_command("hello"))
 
-    it "splits a command and its argument":
+    it "should splits a command and its argument":
         val (cmd, arg) = parse_slash_command("/model gpt-4o")
         expect(cmd).to_equal("model")
         expect(arg).to_equal("gpt-4o")
 
-    it "splits a command with no argument":
+    it "should splits a command with no argument":
         val (cmd, arg) = parse_slash_command("/help")
         expect(cmd).to_equal("help")
         expect(arg).to_equal("")
 
 describe "Slash command dispatch":
-    it "/help returns the help text":
+    it "should /help returns the help text":
         val r = dispatch_slash("help", "", _test_hooks())
         expect(r.message).to_contain("/model <name>")
 
-    it "/exit sets exit=true":
+    it "should /exit sets exit=true":
         val r = dispatch_slash("exit", "", _test_hooks())
         assert_true(r.exit)
 
-    it "/quit is an alias for /exit":
+    it "should /quit is an alias for /exit":
         val r = dispatch_slash("quit", "", _test_hooks())
         assert_true(r.exit)
 
-    it "/new clears the conversation":
+    it "should /new clears the conversation":
         val r = dispatch_slash("new", "", _test_hooks())
         assert_true(r.new_conv)
+        expect(r.new_session_id).to_equal("s-new")
+        expect(r.status_session).to_equal("s-new")
 
-    it "/model with no argument is a usage error":
+    it "should applies a new conversation session to visible TUI status":
+        val ui = make_chat_tui_with_status(
+            "llm_caret - dummy",
+            "provider=dummy model=dummy-hello session=s0"
+        )
+        val result = dispatch_slash("new", "", _test_hooks())
+        val new_ui = apply_slash_status(ui, result)
+        expect(new_ui.status).to_equal(
+            "provider=dummy model=dummy-hello session=s-new"
+        )
+
+    it "should /model with no argument is a usage error":
         val r = dispatch_slash("model", "", _test_hooks())
         expect(r.message).to_contain("Usage")
 
-    it "/model <name> calls hooks.on_model":
+    it "should /model <name> calls hooks.on_model":
         val r = dispatch_slash("model", "gpt-4o", _test_hooks())
         expect(r.message).to_equal("model set to gpt-4o")
+        expect(r.status_model).to_equal("gpt-4o")
 
-    it "/provider <name> calls hooks.on_provider":
+    it "should /provider <name> calls hooks.on_provider":
         val r = dispatch_slash("provider", "openai", _test_hooks())
         expect(r.message).to_equal("provider set to openai")
+        expect(r.status_provider).to_equal("openai")
+        expect(r.status_model).to_equal("gpt-4o")
 
-    it "/sessions calls hooks.on_sessions":
+    it "should does not refresh visible status after a rejected provider":
+        val ui = make_chat_tui_with_status(
+            "llm_caret - dummy",
+            "provider=dummy model=dummy-hello session=s0"
+        )
+        val result = dispatch_slash(
+            "provider", "missing", _test_hooks_provider_reject()
+        )
+        val unchanged = apply_slash_status(ui, result)
+        expect(result.message).to_equal("unknown provider: missing")
+        expect(result.status_provider).to_equal("")
+        expect(unchanged.status).to_equal(ui.status)
+        expect(unchanged.title).to_equal(ui.title)
+
+    it "should applies provider and model changes to visible TUI status":
+        val ui = make_chat_tui_with_status(
+            "llm_caret - dummy",
+            "provider=dummy model=dummy-hello session=s0"
+        )
+        val provider_result = dispatch_slash(
+            "provider", "openai", _test_hooks()
+        )
+        val provider_ui = apply_slash_status(ui, provider_result)
+        expect(provider_ui.title).to_equal("llm_caret - openai")
+        expect(provider_ui.status).to_equal(
+            "provider=openai model=gpt-4o session=s0"
+        )
+
+        val model_result = dispatch_slash(
+            "model", "gpt-4o", _test_hooks()
+        )
+        val model_ui = apply_slash_status(provider_ui, model_result)
+        expect(model_ui.status).to_equal(
+            "provider=openai model=gpt-4o session=s0"
+        )
+
+    it "should /sessions calls hooks.on_sessions":
         val r = dispatch_slash("sessions", "", _test_hooks())
         expect(r.message).to_contain("s1")
 
-    it "/resume <id> found: replaces the conversation":
+    it "should /resume <id> found: replaces the conversation":
         val r = dispatch_slash("resume", "abc", _test_hooks())
         assert_true(r.replace_conv)
         expect(r.new_session_id).to_equal("abc")
+        expect(r.status_session).to_equal("abc")
+        expect(r.status_provider).to_equal("claude_cli")
+        expect(r.status_model).to_equal("sonnet")
         expect(r.loaded_messages.len()).to_equal(1)
 
-    it "/resume <id> not found: reports it, does not replace":
+    it "should applies a resumed session to visible TUI status":
+        val ui = make_chat_tui_with_status(
+            "llm_caret - dummy",
+            "provider=dummy model=dummy-hello session=s0"
+        )
+        val result = dispatch_slash("resume", "abc", _test_hooks())
+        val resumed_ui = apply_slash_status(ui, result)
+        expect(resumed_ui.title).to_equal("llm_caret - claude_cli")
+        expect(resumed_ui.status).to_equal(
+            "provider=claude_cli model=sonnet session=abc"
+        )
+
+    it "should /resume <id> not found: reports it, does not replace":
         val r = dispatch_slash("resume", "missing-id", _test_hooks_missing())
         assert_false(r.replace_conv)
         expect(r.message).to_contain("no saved session")
+        expect(r.status_session).to_equal("")
 
-    it "unknown /commands are reported, never silently sent to the model":
+    it "should unknown /commands are reported, never silently sent to the model":
         val r = dispatch_slash("bogus", "", _test_hooks())
         expect(r.message).to_contain("Unknown command")
         assert_false(r.exit)
         assert_false(r.new_conv)
         assert_false(r.replace_conv)
+
+describe "TUI submission state transition":
+    it "should run a model turn through the production submission path":
+        tui_transcript_reset()
+        val ui = make_chat_tui_with_status(
+            "llm_caret - dummy",
+            "provider=dummy model=dummy-hello session=s0"
+        )
+        val result = run_chat_tui_submission(
+            ui, [], "s0", "hello", default_policy("build/tmp/caret-tui-unit"),
+            _submission_response, _test_hooks()
+        )
+        expect(result.running).to_be(true)
+        expect(result.submitted_to_model).to_be(true)
+        expect(result.conversation.len()).to_equal(2)
+        expect(result.ui.input.value).to_equal("")
+        expect(tui_transcript_line_text(0)).to_equal("You: hello")
+        expect(tui_transcript_line_text(1)).to_equal(
+            "Assistant: submission reply"
+        )
+
+    it "should keep the new-session confirmation after transcript reset":
+        tui_transcript_reset()
+        render_turn("user", "old conversation")
+        val ui = make_chat_tui_with_status(
+            "llm_caret - dummy",
+            "provider=dummy model=dummy-hello session=s0"
+        )
+        val result = run_chat_tui_submission(
+            ui, [new_user_message("old conversation")], "s0", "/new",
+            default_policy("build/tmp/caret-tui-unit"),
+            _submission_response, _test_hooks()
+        )
+        expect(result.session_id).to_equal("s-new")
+        expect(result.conversation.len()).to_equal(0)
+        expect(tui_transcript_len()).to_equal(1)
+        expect(tui_transcript_line_text(0)).to_equal(
+            "System: started a new conversation"
+        )
+
+    it "should restore provider model session history and confirmation together":
+        tui_transcript_reset()
+        val ui = make_chat_tui_with_status(
+            "llm_caret - dummy",
+            "provider=dummy model=dummy-hello session=s0"
+        )
+        val result = run_chat_tui_submission(
+            ui, [], "s0", "/resume abc",
+            default_policy("build/tmp/caret-tui-unit"),
+            _submission_response, _test_hooks()
+        )
+        expect(result.session_id).to_equal("abc")
+        expect(result.ui.title).to_equal("llm_caret - claude_cli")
+        expect(result.ui.status).to_equal(
+            "provider=claude_cli model=sonnet session=abc"
+        )
+        expect(tui_transcript_line_text(0)).to_equal("You: restored")
+        expect(tui_transcript_line_text(1)).to_equal("System: resumed abc")

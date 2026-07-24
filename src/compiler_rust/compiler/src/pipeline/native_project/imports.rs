@@ -19,6 +19,14 @@ pub(crate) struct ImportMapResult {
     /// to distinguish real cross-module vtable dispatch from unsupported
     /// duck-typed calls.
     pub trait_impls: std::collections::HashMap<String, Vec<String>>,
+    /// Collision-free native owners whose object layout includes a vtable
+    /// header. Keys use the same `module_prefix__Type` identity as native
+    /// symbols and are therefore safe across duplicate bare type names.
+    pub vtable_type_owners: std::collections::HashSet<String>,
+    /// Primary externally linkable vtable symbol for each qualified owner.
+    /// First source-order trait implementation wins, matching object
+    /// construction's existing primary-vtable rule.
+    pub vtable_symbols: std::collections::HashMap<String, String>,
     /// Global struct definitions: struct_name -> field names (in order).
     pub struct_defs: std::collections::HashMap<String, Vec<(String, simple_parser::Type)>>,
     /// Duplicate global struct/class definitions keyed by bare type name.
@@ -242,6 +250,9 @@ pub(crate) fn build_import_map(
     let mut data_exports: HashSet<String> = HashSet::new();
     let mut fn_arities: HashMap<String, usize> = HashMap::new();
     let mut trait_impls: HashMap<String, Vec<String>> = HashMap::new();
+    let mut vtable_type_owners: HashSet<String> = HashSet::new();
+    let mut vtable_symbols: HashMap<String, String> = HashMap::new();
+    let mut pending_vtable_impls: Vec<(String, String, String)> = Vec::new();
     // Bare function name -> declared return type. This includes primitive
     // returns: losing `u64` here turns native comparisons into mixed ANY/scalar
     // operations whose tagged ABI differs from raw machine integers.
@@ -500,6 +511,11 @@ pub(crate) fn build_import_map(
                                 if !implementations.iter().any(|candidate| candidate == type_name) {
                                     implementations.push(type_name.to_string());
                                 }
+                                pending_vtable_impls.push((
+                                    prefix.clone(),
+                                    type_name.to_string(),
+                                    trait_name.clone(),
+                                ));
                             }
                             for m in &imp.methods {
                                 if !m.body.statements.is_empty() {
@@ -719,6 +735,36 @@ pub(crate) fn build_import_map(
         }
     }
 
+    // Resolve trait-impl target ownership after every class/struct definition
+    // has been scanned. Split `impl Trait for Type` files are common, so the
+    // impl file's module prefix is not necessarily the concrete type owner.
+    for (impl_prefix, type_name, trait_name) in pending_vtable_impls {
+        let suffix = format!("__{type_name}");
+        let mut candidates: Vec<String> = raw_to_mangled
+            .get(&type_name)
+            .into_iter()
+            .flatten()
+            .filter(|candidate| candidate.ends_with(&suffix) && data_exports.contains(candidate.as_str()))
+            .cloned()
+            .collect();
+        candidates.sort();
+        candidates.dedup();
+        let local_candidate = format!("{impl_prefix}__{type_name}");
+        let owner = if candidates.iter().any(|candidate| candidate == &local_candidate) {
+            local_candidate
+        } else if candidates.len() == 1 {
+            candidates.remove(0)
+        } else {
+            // Preserve legacy ownership for unresolved/generic impl targets;
+            // ambiguous imported construction remains fail-closed later.
+            local_candidate
+        };
+        vtable_type_owners.insert(owner.clone());
+        vtable_symbols
+            .entry(owner.clone())
+            .or_insert_with(|| sanitize_mangled(format!("__vtable__{owner}__for__{trait_name}")));
+    }
+
     // Hardcode critical logging symbols
     let logger_debug = sanitize_mangled("compiler__common__config__Logger.debug".to_string());
     map.entry("Logger.debug".to_string())
@@ -774,6 +820,8 @@ pub(crate) fn build_import_map(
         all_mangled: raw_to_mangled,
         re_exports,
         trait_impls,
+        vtable_type_owners,
+        vtable_symbols,
         struct_defs,
         duplicate_struct_defs,
         enum_defs,

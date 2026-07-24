@@ -2493,12 +2493,28 @@ mod vulkan_dlopen {
     unsafe impl Send for ShadercFns {}
     unsafe impl Sync for ShadercFns {}
 
+    #[cfg(target_os = "macos")]
+    pub(super) fn vulkan_library_candidates() -> &'static [&'static str] {
+        &[
+            "libvulkan.1.dylib",
+            "libvulkan.dylib",
+            "/opt/homebrew/lib/libvulkan.1.dylib",
+            "/opt/homebrew/lib/libvulkan.dylib",
+            "/usr/local/lib/libvulkan.1.dylib",
+            "/usr/local/lib/libvulkan.dylib",
+        ]
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub(super) fn vulkan_library_candidates() -> &'static [&'static str] {
+        &["libvulkan.so.1", "libvulkan.so"]
+    }
+
     pub fn load_vulkan() -> Option<VkFns> {
         unsafe {
             #[cfg(unix)]
             {
-                let names = &["libvulkan.so.1", "libvulkan.so"];
-                let handle = names.iter().find_map(|name| {
+                let handle = vulkan_library_candidates().iter().find_map(|name| {
                     let n = CString::new(*name).ok()?;
                     let h = libc::dlopen(n.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL);
                     if h.is_null() {
@@ -2724,6 +2740,22 @@ pub fn rt_vulkan_is_available_fn(_args: &[Value]) -> Result<Value, CompileError>
     Ok(Value::Int(if check_vulkan_available() { 1 } else { 0 }))
 }
 
+const VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR: u32 = 0x0000_0001;
+
+fn vulkan_instance_portability_config() -> (u32, Vec<CString>) {
+    #[cfg(target_os = "macos")]
+    {
+        (
+            VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR,
+            vec![CString::new("VK_KHR_portability_enumeration").expect("static Vulkan extension name")],
+        )
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        (0, Vec::new())
+    }
+}
+
 /// `rt_opengl_is_available() -> i64`
 /// The interpreter has no headless GL context support; report unavailable so
 /// OpenGLBackend.init() bails before touching the other rt_opengl_* externs
@@ -2753,6 +2785,13 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
     };
     unsafe {
         let app_name = std::ffi::CString::new("simple").unwrap();
+        let (instance_flags, instance_extension_names) = vulkan_instance_portability_config();
+        let instance_extension_ptrs: Vec<_> = instance_extension_names.iter().map(|name| name.as_ptr()).collect();
+        let instance_extension_ptr = if instance_extension_ptrs.is_empty() {
+            ptr::null()
+        } else {
+            instance_extension_ptrs.as_ptr()
+        };
         let app_info = VkApplicationInfo {
             s_type: 0,
             p_next: ptr::null(),
@@ -2765,12 +2804,12 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
         let create_info = VkInstanceCreateInfo {
             s_type: 1,
             p_next: ptr::null(),
-            flags: 0,
+            flags: instance_flags,
             p_application_info: &app_info,
             enabled_layer_count: 0,
             pp_enabled_layer_names: ptr::null(),
-            enabled_extension_count: 0,
-            pp_enabled_extension_names: ptr::null(),
+            enabled_extension_count: instance_extension_ptrs.len() as u32,
+            pp_enabled_extension_names: instance_extension_ptr,
         };
         let mut instance: VkInstance = ptr::null_mut();
         if (fns.create_instance)(&create_info, ptr::null(), &mut instance) != VK_SUCCESS {
@@ -2892,6 +2931,30 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(1))
 }
 
+#[cfg(test)]
+mod vulkan_instance_portability_tests {
+    use super::*;
+
+    #[test]
+    fn instance_portability_matches_host_contract() {
+        let (flags, extensions) = vulkan_instance_portability_config();
+        #[cfg(target_os = "macos")]
+        {
+            assert!(vulkan_dlopen::vulkan_library_candidates()
+                .iter()
+                .any(|name| name.ends_with("libvulkan.1.dylib")));
+            assert_eq!(flags, VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR);
+            assert_eq!(extensions.len(), 1);
+            assert_eq!(extensions[0].to_str().unwrap(), "VK_KHR_portability_enumeration");
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert_eq!(flags, 0);
+            assert!(extensions.is_empty());
+        }
+    }
+}
+
 /// `rt_vulkan_shutdown()`
 pub fn rt_vulkan_shutdown_fn(_args: &[Value]) -> Result<Value, CompileError> {
     use vulkan_dlopen::{VK_STATE, VK_SUCCESS};
@@ -2940,7 +3003,9 @@ pub fn rt_vulkan_shutdown_fn(_args: &[Value]) -> Result<Value, CompileError> {
             (f.destroy_instance)(st.instance, ptr::null());
         }
     }
-    Ok(Value::Int(0))
+    // Match the native runtime ABI: a completed (including idempotent)
+    // shutdown is success. The wait-idle failure path above remains false.
+    Ok(Value::Int(1))
 }
 
 /// `rt_vulkan_device_count() -> i64`
@@ -3227,6 +3292,10 @@ pub fn rt_vulkan_free_buffer_fn(args: &[Value]) -> Result<Value, CompileError> {
                     (s.fns.destroy_buffer)(s.device, e.buffer, ptr::null());
                     (s.fns.free_memory)(s.device, e.memory, ptr::null());
                 }
+                // Match the native runtime ABI: true means this call owned and
+                // completed the resource release. Image-composite provenance
+                // requires this receipt before it can remain device-backed.
+                return Ok(Value::Int(1));
             }
         }
     }

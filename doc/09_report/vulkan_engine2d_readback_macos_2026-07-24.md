@@ -1,0 +1,271 @@
+# Vulkan Engine2D Readback Evidence
+
+- status: fail
+- reason: evidence-program-failed
+- spec status: not_run
+- probe status: Unavailable
+- available: false
+- backend: 
+- present exercised: false
+- readback exercised: false
+- clear status: not_run
+- clear pixels: 
+- clear expected checksum: 
+- clear actual checksum: 
+- clear mismatches: 
+- clear expected pixels: 
+- clear actual pixels: 
+- rect status: not_run
+- rect pixels: 
+- rect expected checksum: 
+- rect actual checksum: 
+- rect mismatches: 
+- rect expected pixels: 
+- rect actual pixels: 
+- blur/tolerance used: false
+- vulkan strict exit code: 
+- cpu/vulkan parity exit code: 
+
+## Raw Evidence
+- vulkan_engine2d_readback_status=fail
+- vulkan_engine2d_readback_reason=evidence-program-failed
+- vulkan_engine2d_readback_spec_status=not_run
+- vulkan_engine2d_readback_probe_status=Unavailable
+- vulkan_engine2d_readback_available=false
+- vulkan_engine2d_readback_backend_name=
+- vulkan_engine2d_readback_present_exercised=false
+- vulkan_engine2d_readback_readback_exercised=false
+- vulkan_engine2d_readback_clear_status=not_run
+- vulkan_engine2d_readback_clear_pixels=
+- vulkan_engine2d_readback_clear_expected_checksum=
+- vulkan_engine2d_readback_clear_actual_checksum=
+- vulkan_engine2d_readback_clear_mismatches=
+- vulkan_engine2d_readback_clear_expected_pixels_path=
+- vulkan_engine2d_readback_clear_actual_pixels_path=
+- vulkan_engine2d_readback_rect_status=not_run
+- vulkan_engine2d_readback_rect_pixels=
+- vulkan_engine2d_readback_rect_expected_checksum=
+- vulkan_engine2d_readback_rect_actual_checksum=
+- vulkan_engine2d_readback_rect_mismatches=
+- vulkan_engine2d_readback_rect_expected_pixels_path=
+- vulkan_engine2d_readback_rect_actual_pixels_path=
+- vulkan_engine2d_readback_blur_or_tolerance_used=false
+- vulkan_engine2d_readback_vulkan_strict_exit_code=
+- vulkan_engine2d_readback_cpu_vulkan_parity_exit_code=
+- vulkan_engine2d_readback_evidence_log=/Users/ormastes/simple/build/vulkan-engine2d-readback-macos-2026-07-24/evidence.log
+- vulkan_engine2d_readback_vulkan_strict_log=/Users/ormastes/simple/build/vulkan-engine2d-readback-macos-2026-07-24/vulkan_strict.json
+- vulkan_engine2d_readback_cpu_vulkan_parity_log=/Users/ormastes/simple/build/vulkan-engine2d-readback-macos-2026-07-24/engine2d_cpu_vulkan_parity.json
+
+## Evidence Log
+- evidence_program=engine2d_vulkan_readback
+- vulkan_probe_status=Unavailable
+- vulkan_probe_available=false
+- vulkan_probe_diagnostic=requested=vulkan;selected=vulkan;status=Unavailable;api=vulkan;gate=vulkan_runtime;shader=spirv;compute=false;graphics=false;present=false;reason=Vulkan shared session initialization failed: 1
+- vulkan_available=false
+- present_exercised=false
+- readback_exercised=false
+- clear_status=not_run
+- rect_status=not_run
+- evidence_status=fail
+- overall=fail
+- WARNING: this Rust-built Simple binary is a bootstrap seed only; do not use it as the normal tool.
+- Build and use the pure-Simple bin/simple instead.
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/common/string_core.spl:89:44
+-    |
+-  89 |     while i < slen and is_whitespace_char(s[i]):
+-    |                                            ^
+- 
+- Use angle brackets: s<...> instead of s[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/time_ops.spl:7:1
+-    |
+-   7 | export use std.nogc_async_mut.io.time_ops.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/nogc_sync_mut/text_layout/font_advance_layout.spl:15:49
+-    |
+-  15 |     if low < byte_offsets.len() and byte_offsets[low] == byte_offset:
+-    |                                                 ^
+- 
+- Use angle brackets: byte_offsets<...> instead of byte_offsets[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_vulkan.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_vulkan.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/vulkan_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.vulkan_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/platform.spl:3:1
+-    |
+-   3 | export use nogc_sync_mut.platform.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/nogc_sync_mut/path.spl:158:31
+-    |
+- 158 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+- 
+- Use angle brackets: pp<...> instead of pp[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /Users/ormastes/simple/src/lib/nogc_sync_mut/gpu/engine2d/sffi_directx.spl:6:1
+-    |
+-   6 | #[runtime_intrinsics]
+-    | ^
+- 
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_opencl.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_opencl.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/backend_metal_runtime_ops.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+- 
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+- 
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /Users/ormastes/simple/src/lib/nogc_sync_mut/io/metal_ptr.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+- 
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/metal_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.metal_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/env/platform.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.env.platform.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/nogc_async_mut/path.spl:158:31
+-    |
+- 158 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+- 
+- Use angle brackets: pp<...> instead of pp[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_rocm.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_rocm.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/backend_rocm_runtime_ops.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+- 
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/oneapi_ffi.spl:3:1
+-    |
+-   3 | export use std.gc_async_mut.io.oneapi_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/oneapi_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.oneapi_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/host_ops.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+- 
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/env_ops.spl:7:1
+-    |
+-   7 | export use std.nogc_async_mut.io.env_ops.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/process_ops.spl:7:1
+-    |
+-   7 | export use std.nogc_async_mut.io.process_ops.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module

@@ -12,7 +12,6 @@ use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.mir.mir_lowering_types.{MirLowering, MirError}
-use std.alloc.sffi.{rt_dict_contains}
 
 extern fn rt_enum_discriminant(value: HirStmtKind) -> i64
 
@@ -116,9 +115,9 @@ impl MirLowering:
             # recursively expanded: their back-edge stays shared until the
             # The pre-MIR value-layout validator rejects direct cyclic value
             # structs; keep the guard defensive for malformed/stale HIR.
-            if nested_name != "" and not rt_dict_contains(self.class_type_names, nested_name) and not copy_chain.contains(nested_name):
+            if nested_name != "" and not self.class_type_names.contains(nested_name) and not copy_chain.contains(nested_name):
                 nested_symbol = self.symbols.lookup_or_invalid(nested_name)
-                if nested_symbol.is_valid() and rt_dict_contains(self.struct_field_order, nested_name):
+                if nested_symbol.is_valid() and self.struct_field_order.contains(nested_name):
                     field_type = MirType(kind: MirTypeKind.Struct(nested_symbol))
                     copy_nested = true
 
@@ -192,9 +191,9 @@ impl MirLowering:
         if struct_sym == nil or not init_is_place:
             return nil
         val struct_type_name = struct_sym ?? ""
-        if struct_type_name == "" or rt_dict_contains(self.class_type_names, struct_type_name):
+        if struct_type_name == "" or self.class_type_names.contains(struct_type_name):
             return nil
-        if not rt_dict_contains(self.struct_field_order, struct_type_name):
+        if not self.struct_field_order.contains(struct_type_name):
             return nil
         val init_type = self.local_mir_type_of(init_local) ?? MirType.i64()
         val struct_symbol_id: SymbolId? = match init_type.kind:
@@ -335,9 +334,9 @@ impl MirLowering:
         b_exit.switch_to_block(exit_block)
         self.builder = b_exit
 
-        if rt_dict_contains(self.nil_locals, init_local.id):
+        if self.nil_locals.contains(init_local.id):
             self.nil_locals[result_arr.id] = true
-        if rt_dict_contains(self.local_hir_types, init_local.id):
+        if self.local_hir_types.contains(init_local.id):
             self.local_hir_types[result_arr.id] = self.local_hir_types[init_local.id]
         val ael_sym = self.array_element_struct_syms.get(init_local.id)
         if ael_sym != nil:
@@ -574,17 +573,17 @@ impl MirLowering:
                                 val local = b.new_local(nil, effective_type, LocalKind.Var)
                                 self.builder = b
                                 self.bind_local(symbol_value_id, local)
-                                if rt_dict_contains(self.runtime_array_locals, init_local.id):
+                                if self.runtime_array_locals.contains(init_local.id):
                                     self.runtime_array_locals[local.id] = true
-                                if rt_dict_contains(self.runtime_dict_locals, init_local.id):
+                                if self.runtime_dict_locals.contains(init_local.id):
                                     self.runtime_dict_locals[local.id] = true
-                                if rt_dict_contains(self.runtime_value_locals, init_local.id):
+                                if self.runtime_value_locals.contains(init_local.id):
                                     self.runtime_value_locals[local.id] = true
-                                if rt_dict_contains(self.option_value_locals, init_local.id):
+                                if self.option_value_locals.contains(init_local.id):
                                     self.option_value_locals[local.id] = true
-                                if rt_dict_contains(self.nil_locals, init_local.id):
+                                if self.nil_locals.contains(init_local.id):
                                     self.nil_locals[local.id] = true
-                                if rt_dict_contains(self.local_hir_types, init_local.id):
+                                if self.local_hir_types.contains(init_local.id):
                                     self.local_hir_types[local.id] = self.local_hir_types[init_local.id]
                                 else:
                                     match let_type:
@@ -777,15 +776,15 @@ impl MirLowering:
                                 val local = b.new_local(nil, effective_type, LocalKind.Var)
                                 self.builder = b
                                 self.bind_local(symbol_id, local)
-                                if has_init and rt_dict_contains(self.runtime_array_locals, init_local.id):
+                                if has_init and self.runtime_array_locals.contains(init_local.id):
                                     self.runtime_array_locals[local.id] = true
-                                if has_init and rt_dict_contains(self.runtime_dict_locals, init_local.id):
+                                if has_init and self.runtime_dict_locals.contains(init_local.id):
                                     self.runtime_dict_locals[local.id] = true
-                                if has_init and rt_dict_contains(self.runtime_value_locals, init_local.id):
+                                if has_init and self.runtime_value_locals.contains(init_local.id):
                                     self.runtime_value_locals[local.id] = true
-                                if has_init and rt_dict_contains(self.nil_locals, init_local.id):
+                                if has_init and self.nil_locals.contains(init_local.id):
                                     self.nil_locals[local.id] = true
-                                if has_init and rt_dict_contains(self.local_hir_types, init_local.id):
+                                if has_init and self.local_hir_types.contains(init_local.id):
                                     self.local_hir_types[local.id] = self.local_hir_types[init_local.id]
                                 elif has_init:
                                     match type_:
@@ -828,7 +827,7 @@ impl MirLowering:
         (shared by the `Var` and `NamedVar` lvalue cases)."""
         if symbol_id < 0:
             self.error("assignment target has no resolved symbol", Some(span))
-        elif rt_dict_contains(self.global_symbol_ids, symbol_id) and self.find_global_static(symbol_id).?:
+        elif self.global_symbol_ids.contains(symbol_id) and self.find_global_static(symbol_id).?:
             # mutglobal2 lane (module-level `var` mutation end-to-end, see
             # scratchpad/mutglobal_plan.md + scratchpad/mutglobal2 report):
             # `g = ...` / `g += ...` where `g` is a module-level `var`
@@ -911,7 +910,7 @@ impl MirLowering:
                 self.local_hir_types = self.local_hir_types.remove(local.id)
             else:
                 var assigned_value = value_local
-                if rt_dict_contains(self.local_hir_types, local.id):
+                if self.local_hir_types.contains(local.id):
                     val declared_type = self.local_hir_types[local.id]
                     match declared_type.kind:
                         case HirTypeKind.Optional(_):
@@ -921,27 +920,27 @@ impl MirLowering:
                 var b = self.builder
                 b.emit_copy(local, assigned_value)
                 self.builder = b
-                if rt_dict_contains(self.runtime_value_locals, assigned_value.id):
+                if self.runtime_value_locals.contains(assigned_value.id):
                     self.runtime_value_locals[local.id] = true
                 else:
                     self.runtime_value_locals = self.runtime_value_locals.remove(local.id)
-                if rt_dict_contains(self.option_value_locals, assigned_value.id):
+                if self.option_value_locals.contains(assigned_value.id):
                     self.option_value_locals[local.id] = true
                 else:
                     self.option_value_locals = self.option_value_locals.remove(local.id)
-                if rt_dict_contains(self.runtime_array_locals, assigned_value.id):
+                if self.runtime_array_locals.contains(assigned_value.id):
                     self.runtime_array_locals[local.id] = true
                 else:
                     self.runtime_array_locals = self.runtime_array_locals.remove(local.id)
-                if rt_dict_contains(self.runtime_dict_locals, assigned_value.id):
+                if self.runtime_dict_locals.contains(assigned_value.id):
                     self.runtime_dict_locals[local.id] = true
                 else:
                     self.runtime_dict_locals = self.runtime_dict_locals.remove(local.id)
-                if rt_dict_contains(self.nil_locals, assigned_value.id):
+                if self.nil_locals.contains(assigned_value.id):
                     self.nil_locals[local.id] = true
                 else:
                     self.nil_locals = self.nil_locals.remove(local.id)
-                if rt_dict_contains(self.local_hir_types, assigned_value.id):
+                if self.local_hir_types.contains(assigned_value.id):
                     self.local_hir_types[local.id] = self.local_hir_types[assigned_value.id]
                 else:
                     self.local_hir_types = self.local_hir_types.remove(local.id)
@@ -951,7 +950,7 @@ impl MirLowering:
                 # array_element_struct_syms forward the same way
                 # runtime_array_locals does above, or a reassigned
                 # array-of-structs variable loses its element struct name.
-                if rt_dict_contains(self.array_element_struct_syms, assigned_value.id):
+                if self.array_element_struct_syms.contains(assigned_value.id):
                     self.array_element_struct_syms[local.id] = self.array_element_struct_syms[assigned_value.id]
                 else:
                     self.array_element_struct_syms = self.array_element_struct_syms.remove(local.id)
@@ -985,7 +984,7 @@ impl MirLowering:
                 var assigned_field_value = value_local
                 val field_owner = self.resolve_base_struct_name(base, receiver)
                 if val owner_name = field_owner:
-                    if rt_dict_contains(self.struct_field_hir_type, owner_name):
+                    if self.struct_field_hir_type.contains(owner_name):
                         val field_types = self.struct_field_hir_type[owner_name]
                         if field_index >= 0 and field_index < field_types.len():
                             val declared_field_type = field_types[field_index]
@@ -1061,7 +1060,7 @@ impl MirLowering:
         val sym_id = self.bitfield_type_sym_for(base, base_local)
         if sym_id < 0:
             return nil
-        if not rt_dict_contains(self.bitfield_map, sym_id):
+        if not self.bitfield_map.contains(sym_id):
             return nil
 
         val fields = self.bitfield_map[sym_id]
@@ -1226,7 +1225,7 @@ impl MirLowering:
                                 if val found_candidate_type = candidate_type:
                                     match found_candidate_type.kind:
                                         case MirTypeKind.I64:
-                                            if rt_dict_contains(self.local_hir_types, candidate.id):
+                                            if self.local_hir_types.contains(candidate.id):
                                                 val semantic_type = self.local_hir_types[candidate.id]
                                                 match semantic_type.kind:
                                                     case HirTypeKind.Float(_):
@@ -1654,7 +1653,7 @@ impl MirLowering:
         # index-read path `arr[i]` already reads element type off
         # `base_mir_type.kind` (see expr_dispatch.spl `case Index`). Mirror
         # that here so `for x in arr` and `arr[i]` agree on the element type.
-        if rt_dict_contains(self.local_hir_types, collection_local.id):
+        if self.local_hir_types.contains(collection_local.id):
             val collection_hir_type = self.local_hir_types[collection_local.id]
             match collection_hir_type.kind:
                 case HirTypeKind.Array(elem_t, _) | HirTypeKind.Slice(elem_t):

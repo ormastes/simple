@@ -421,6 +421,11 @@ pub enum MirInst {
         /// simpleos_native_build_field_defaults_and_boxed_trait_dispatch_2026-07-16
         /// Symptom B.
         struct_name: Option<String>,
+        /// Qualified provider-owned vtable data symbol for an imported
+        /// vtable-bearing type. Native-project qualification fills this after
+        /// MIR lowering; local construction continues to use the backend's
+        /// `struct_name -> DataId` map.
+        vtable_symbol: Option<String>,
         /// Total struct size in bytes (for allocation)
         struct_size: u32,
         /// Byte offsets for each field (for direct stores)
@@ -435,6 +440,15 @@ pub enum MirInst {
     FieldGet {
         dest: VReg,
         object: VReg,
+        /// Collision-free receiver owner name when known. Imported modules
+        /// allocate independent numeric TypeIds, so codegen must not use the
+        /// receiver TypeId alone to decide whether a trait vtable header is
+        /// present.
+        owner_name: Option<String>,
+        /// Authoritative project-wide vtable-layout decision for a named
+        /// owner. Importing modules do not emit the provider's vtable object,
+        /// so their local codegen maps cannot rediscover this fact.
+        owner_has_vtable: Option<bool>,
         /// Byte offset from object pointer (computed at compile time)
         byte_offset: u32,
         /// Field type (for correct load instruction)
@@ -444,6 +458,10 @@ pub enum MirInst {
     /// Set a field on an object (zero-cost: pointer arithmetic + store)
     FieldSet {
         object: VReg,
+        /// Collision-free receiver owner name when known.
+        owner_name: Option<String>,
+        /// Authoritative project-wide vtable-layout decision when known.
+        owner_has_vtable: Option<bool>,
         /// Byte offset from object pointer (computed at compile time)
         byte_offset: u32,
         /// Field type (for correct store instruction)

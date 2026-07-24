@@ -1,0 +1,132 @@
+#!/bin/sh
+
+prompt=
+model=
+system_prompt=
+session_id=
+max_turns=
+output_format=
+verbose=false
+json_schema=
+allowed_tool=
+fixture_extra=false
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -p)
+            shift
+            prompt=${1-}
+            ;;
+        --model)
+            shift
+            model=${1-}
+            ;;
+        --system-prompt)
+            shift
+            system_prompt=${1-}
+            ;;
+        --resume)
+            shift
+            session_id=${1-}
+            ;;
+        --max-turns)
+            shift
+            max_turns=${1-}
+            ;;
+        --output-format)
+            shift
+            output_format=${1-}
+            ;;
+        --verbose)
+            verbose=true
+            ;;
+        --json-schema)
+            shift
+            json_schema=${1-}
+            ;;
+        --allowedTools|--allowed-tools)
+            shift
+            allowed_tool=${1-}
+            ;;
+        --fixture-extra)
+            fixture_extra=true
+            ;;
+        --max-tokens)
+            printf '%s\n' 'unsupported --max-tokens reached mock CLI' >&2
+            exit 64
+            ;;
+    esac
+    shift
+done
+
+if [ "$output_format" != "json" ] && [ "$output_format" != "stream-json" ]; then
+    printf '%s\n' 'expected json or stream-json output format' >&2
+    exit 65
+fi
+
+if [ "$prompt" = "fixture-error" ]; then
+    printf '%s\n' 'authorization failed for sk-ant-fixture-secret' >&2
+    exit 7
+fi
+
+if [ "$output_format" = "stream-json" ]; then
+    if [ "$verbose" != "true" ]; then
+        printf '%s\n' 'stream-json requires --verbose' >&2
+        exit 68
+    fi
+    if [ "$prompt" = "fixture-stream-empty" ]; then
+        exit 0
+    fi
+    if [ "$prompt" = "fixture-stream-malformed" ]; then
+        printf '%s\n' 'not-json'
+        exit 0
+    fi
+    if [ "$prompt" = "fixture-stream-incomplete" ]; then
+        printf '%s\n' '{"type":"system","subtype":"init","session_id":"stream-session","model":"sonnet"}'
+        exit 0
+    fi
+    if [ "$prompt" = "fixture-stream-secret-error" ]; then
+        printf '%s\n' '{"type":"result","is_error":true,"result":"failed sk-ant-fixture-secret","session_id":"stream-session"}'
+        exit 0
+    fi
+    if [ "$prompt" = "fixture-stream-provider-error" ]; then
+        printf '%s\n' '{"type":"error","error":{"message":"provider overloaded sk-ant-fixture-secret"}}'
+        exit 0
+    fi
+    if [ "$prompt" != "fixture-stream" ] ||
+       [ "$model" != "sonnet" ] ||
+       [ "$system_prompt" != "Be concise" ]; then
+        printf '%s\n' 'unexpected stream arguments' >&2
+        exit 69
+    fi
+    printf '%s\n' '{"type":"system","subtype":"init","session_id":"stream-session","model":"sonnet"}'
+    printf '%s\n' '{"type":"assistant","message":{"model":"sonnet","content":[{"type":"text","text":"streamed fixture"}],"usage":{"input_tokens":9,"output_tokens":2}},"session_id":"stream-session"}'
+    printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"stream complete","session_id":"stream-session","stop_reason":"end_turn","usage":{"input_tokens":9,"output_tokens":3}}'
+    exit 0
+fi
+
+if [ "$prompt" = "fixture-advanced" ]; then
+    if [ "$json_schema" != '{"type":"object"}' ] ||
+       [ "$allowed_tool" != "Read" ] ||
+       [ "$fixture_extra" != "true" ]; then
+        printf '%s\n' 'advanced CLI arguments were not forwarded' >&2
+        exit 70
+    fi
+    printf '%s\n' '{"result":"advanced-ok","model":"sonnet","session_id":"advanced-session","is_error":false}'
+    exit 0
+fi
+
+if [ "$prompt" != "fixture-success" ] ||
+   [ "$model" != "sonnet" ] ||
+   [ "$system_prompt" != "Be concise" ]; then
+    printf '%s\n' 'unexpected production CLI arguments' >&2
+    exit 66
+fi
+
+if [ -n "$session_id" ] &&
+   { [ "$session_id" != "resume-1" ] || [ "$max_turns" != "2" ]; }; then
+    printf '%s\n' 'unexpected resume arguments' >&2
+    exit 67
+fi
+
+printf '%s\n' '{"result":"fixture-ok","model":"sonnet","session_id":"resume-1","stop_reason":"end_turn","input_tokens_used":11,"output_tokens_used":3,"is_error":false}'

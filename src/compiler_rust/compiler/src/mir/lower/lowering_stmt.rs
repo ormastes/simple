@@ -276,9 +276,9 @@ impl<'a> MirLowerer<'a> {
                 match &target.kind {
                     // Field assignment: obj.field = value -> FieldSet (or rt_tuple_set for tuples)
                     HirExprKind::FieldAccess { receiver, field_index } => {
+                        let receiver_ty = self.recover_receiver_type(receiver).unwrap_or(receiver.ty);
                         let receiver_reg = self.lower_expr(receiver)?;
                         let field_index = *field_index;
-                        let receiver_ty = receiver.ty;
 
                         if let Some(HirType::Bitfield { fields, .. }) =
                             self.type_registry.and_then(|tr| tr.get(receiver_ty))
@@ -391,11 +391,20 @@ impl<'a> MirLowerer<'a> {
                             })?;
                         } else {
                             let byte_offset = (field_index as u32) * 8;
+                            let owner_name = self
+                                .type_registry
+                                .and_then(|registry| registry.get_type_name(receiver_ty))
+                                .map(str::to_owned);
+                            // Native-project lowering replaces this with an
+                            // authoritative module-qualified layout decision.
+                            let owner_has_vtable = None;
 
                             self.with_func(|func, current_block| {
                                 let block = func.block_mut(current_block).unwrap();
                                 block.instructions.push(MirInst::FieldSet {
                                     object: receiver_reg,
+                                    owner_name,
+                                    owner_has_vtable,
                                     byte_offset,
                                     field_type: ty,
                                     value: val_reg,

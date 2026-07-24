@@ -715,6 +715,8 @@ fn direct_field_set() {
         let block = f.block_mut(mir::BlockId(0)).unwrap();
         block.instructions.push(MirInst::FieldSet {
             object,
+            owner_name: None,
+            owner_has_vtable: None,
             byte_offset: 0,
             field_type: hir::TypeId::I64,
             value,

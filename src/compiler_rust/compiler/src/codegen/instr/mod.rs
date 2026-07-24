@@ -283,13 +283,26 @@ fn looks_like_const_data_name(name: &str) -> bool {
 /// `vtable_type_ids` map so constructor writes and field reads can never
 /// disagree. When the receiver's static type is unknown (not in `vreg_types`)
 /// or has no vtable, the offset is returned unchanged.
-fn effective_field_offset<M: Module>(ctx: &InstrContext<'_, M>, object: VReg, byte_offset: u32) -> u32 {
-    if let Some(&type_id) = ctx.vreg_types.get(&object) {
-        if ctx.vtable_type_ids.contains_key(&type_id) {
-            return byte_offset + 8;
-        }
+fn effective_field_offset<M: Module>(
+    ctx: &InstrContext<'_, M>,
+    object: VReg,
+    owner_name: Option<&str>,
+    owner_has_vtable: Option<bool>,
+    byte_offset: u32,
+) -> u32 {
+    let has_vtable = match owner_has_vtable {
+        Some(has_vtable) => has_vtable,
+        None if owner_name.is_some() => ctx.vtable_data_ids.contains_key(owner_name.unwrap()),
+        None => ctx
+            .vreg_types
+            .get(&object)
+            .is_some_and(|type_id| ctx.vtable_type_ids.contains_key(type_id)),
+    };
+    if has_vtable {
+        byte_offset + 8
+    } else {
+        byte_offset
     }
-    byte_offset
 }
 
 pub fn compile_instruction<M: Module>(
@@ -742,6 +755,7 @@ pub fn compile_instruction<M: Module>(
             dest,
             type_id,
             struct_name,
+            vtable_symbol,
             struct_size,
             field_offsets,
             field_types,
@@ -802,11 +816,23 @@ pub fn compile_instruction<M: Module>(
                 // because the RenderBackend vtable it needed had been silently
                 // overwritten by an unrelated Engine2DExtended vtable sharing
                 // the same colliding `type_id`).
-                let vtable_data_id = struct_name
-                    .as_deref()
-                    .and_then(|name| ctx.vtable_data_ids.get(name))
-                    .copied()
-                    .or_else(|| ctx.vtable_type_ids.get(type_id).copied());
+                let mut vtable_data_id = match struct_name.as_deref() {
+                    Some(name) => ctx.vtable_data_ids.get(name).copied(),
+                    None => ctx.vtable_type_ids.get(type_id).copied(),
+                };
+                if vtable_data_id.is_none() {
+                    if let Some(symbol) = vtable_symbol.as_deref() {
+                        vtable_data_id = Some(
+                            ctx.module
+                                .declare_data(symbol, Linkage::Import, false, false)
+                                .map_err(|e| {
+                                    format!(
+                                        "failed to declare imported vtable data `{symbol}`: {e}"
+                                    )
+                                })?,
+                        );
+                    }
+                }
                 // If has_vtable, field offsets from MIR are 0,8,16,... but must be +8 at codegen
                 let shifted_offsets: Vec<u32>;
                 let effective_offsets = if vtable_data_id.is_some() {
@@ -837,6 +863,8 @@ pub fn compile_instruction<M: Module>(
         MirInst::FieldGet {
             dest,
             object,
+            owner_name,
+            owner_has_vtable,
             byte_offset,
             field_type,
         } => {
@@ -846,17 +874,31 @@ pub fn compile_instruction<M: Module>(
             // on `vtable_type_ids`); field access must apply the identical shift or
             // it reads the vtable slot as field 0 (a truncated pointer, not the
             // field). Keyed on the same authoritative set so the two never disagree.
-            let off = effective_field_offset(ctx, *object, *byte_offset);
+            let off = effective_field_offset(
+                ctx,
+                *object,
+                owner_name.as_deref(),
+                *owner_has_vtable,
+                *byte_offset,
+            );
             compile_field_get(ctx, builder, *dest, *object, off as usize, *field_type)?;
         }
 
         MirInst::FieldSet {
             object,
+            owner_name,
+            owner_has_vtable,
             byte_offset,
             field_type,
             value,
         } => {
-            let off = effective_field_offset(ctx, *object, *byte_offset);
+            let off = effective_field_offset(
+                ctx,
+                *object,
+                owner_name.as_deref(),
+                *owner_has_vtable,
+                *byte_offset,
+            );
             compile_field_set(ctx, builder, *object, off as usize, *field_type, *value)?;
         }
 

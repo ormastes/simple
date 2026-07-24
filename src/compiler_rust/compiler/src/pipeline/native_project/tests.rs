@@ -3679,6 +3679,40 @@ fn test_build_import_map_records_cross_module_trait_implementations() {
 }
 
 #[test]
+fn test_build_import_map_anchors_split_trait_impl_vtable_to_type_definition() {
+    let temp = tempfile::tempdir().unwrap();
+    let src_root = temp.path().join("project/src");
+    let lib_root = src_root.join("lib");
+    let class_path = lib_root.join("backend/translator/class_def.spl");
+    let impl_path = lib_root.join("backend/translator/core_codegen.spl");
+    std::fs::create_dir_all(class_path.parent().unwrap()).unwrap();
+    std::fs::write(&class_path, "class Translator:\n    width: i64\n").unwrap();
+    std::fs::write(
+        &impl_path,
+        "trait TextCodegen:\n    fn emit() -> text\n\nimpl TextCodegen for Translator:\n    fn emit() -> text:\n        \"ok\"\n",
+    )
+    .unwrap();
+
+    let file_sources = vec![
+        (class_path.clone(), std::fs::read_to_string(&class_path).unwrap()),
+        (impl_path.clone(), std::fs::read_to_string(&impl_path).unwrap()),
+    ];
+    let result = super::imports::build_import_map(&file_sources, std::slice::from_ref(&lib_root), &src_root);
+    let owner = format!(
+        "{}__Translator",
+        module_prefix_from_path(&class_path, &src_root)
+    );
+    assert!(result.vtable_type_owners.contains(&owner));
+    assert_eq!(
+        result.vtable_symbols.get(&owner),
+        Some(&format!("__vtable__{owner}__for__TextCodegen"))
+    );
+    assert!(!result
+        .vtable_type_owners
+        .contains(&format!("{}__Translator", module_prefix_from_path(&impl_path, &src_root))));
+}
+
+#[test]
 fn test_build_import_map_records_optional_struct_return_types() {
     let temp = tempfile::tempdir().unwrap();
     let src_root = temp.path().join("project/src");
@@ -4342,6 +4376,8 @@ int main(void) { app_call(); return 0; }
         all_mangled: std::sync::Arc::new(all_mangled),
         re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
         trait_impls: std::sync::Arc::new(std::collections::HashMap::new()),
+        vtable_type_owners: std::sync::Arc::new(std::collections::HashSet::new()),
+        vtable_symbols: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -4452,6 +4488,8 @@ void __module_init_security_registry(void) {
         all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
         re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
         trait_impls: std::sync::Arc::new(std::collections::HashMap::new()),
+        vtable_type_owners: std::sync::Arc::new(std::collections::HashSet::new()),
+        vtable_symbols: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -4590,6 +4628,8 @@ int main(int argc, char** argv) {
         all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
         re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
         trait_impls: std::sync::Arc::new(std::collections::HashMap::new()),
+        vtable_type_owners: std::sync::Arc::new(std::collections::HashSet::new()),
+        vtable_symbols: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -4695,6 +4735,8 @@ int main(void) {
         all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
         re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
         trait_impls: std::sync::Arc::new(std::collections::HashMap::new()),
+        vtable_type_owners: std::sync::Arc::new(std::collections::HashSet::new()),
+        vtable_symbols: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -4763,6 +4805,8 @@ int main(void) {
         all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
         re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
         trait_impls: std::sync::Arc::new(std::collections::HashMap::new()),
+        vtable_type_owners: std::sync::Arc::new(std::collections::HashSet::new()),
+        vtable_symbols: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -4825,6 +4869,8 @@ int main(void) { return (int)run_check(); }
         all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
         re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
         trait_impls: std::sync::Arc::new(std::collections::HashMap::new()),
+        vtable_type_owners: std::sync::Arc::new(std::collections::HashSet::new()),
+        vtable_symbols: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -5541,6 +5587,8 @@ fn test_freestanding_weak_boot_alias_uses_strong_simple_suffix_match() {
         all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
         re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
         trait_impls: std::sync::Arc::new(std::collections::HashMap::new()),
+        vtable_type_owners: std::sync::Arc::new(std::collections::HashSet::new()),
+        vtable_symbols: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -6204,6 +6252,8 @@ fn empty_import_map_result() -> imports::ImportMapResult {
         all_mangled: std::collections::HashMap::new(),
         re_exports: std::collections::HashMap::new(),
         trait_impls: std::collections::HashMap::new(),
+        vtable_type_owners: std::collections::HashSet::new(),
+        vtable_symbols: std::collections::HashMap::new(),
         struct_defs: std::collections::HashMap::new(),
         duplicate_struct_defs: std::collections::HashMap::new(),
         enum_defs: std::collections::HashMap::new(),
@@ -6227,10 +6277,20 @@ fn test_cross_module_layout_fingerprint_sensitivity_and_stability() {
     a.fn_arities.insert("alpha".to_string(), 2);
     a.fn_arities.insert("beta".to_string(), 0);
     a.data_exports.insert("SOME_CONST".to_string());
+    a.vtable_type_owners.insert("provider__Owned".to_string());
+    a.vtable_symbols.insert(
+        "provider__Owned".to_string(),
+        "__vtable__provider__Owned__for__Marker".to_string(),
+    );
 
     let mut b = empty_import_map_result();
     // Insert in a different order.
     b.data_exports.insert("SOME_CONST".to_string());
+    b.vtable_type_owners.insert("provider__Owned".to_string());
+    b.vtable_symbols.insert(
+        "provider__Owned".to_string(),
+        "__vtable__provider__Owned__for__Marker".to_string(),
+    );
     b.fn_arities.insert("beta".to_string(), 0);
     b.fn_arities.insert("alpha".to_string(), 2);
 
@@ -6248,6 +6308,24 @@ fn test_cross_module_layout_fingerprint_sensitivity_and_stability() {
         cross_module_layout_fingerprint(&b),
         cross_module_layout_fingerprint(&c),
         "an arity change must change the cross-module layout fingerprint"
+    );
+
+    let before_header_change = cross_module_layout_fingerprint(&c);
+    c.vtable_type_owners.insert("provider__OtherOwned".to_string());
+    assert_ne!(
+        before_header_change,
+        cross_module_layout_fingerprint(&c),
+        "a native object-header layout change must change the cross-module fingerprint"
+    );
+    let before_symbol_change = cross_module_layout_fingerprint(&c);
+    c.vtable_symbols.insert(
+        "provider__Owned".to_string(),
+        "__vtable__provider__Owned__for__OtherMarker".to_string(),
+    );
+    assert_ne!(
+        before_symbol_change,
+        cross_module_layout_fingerprint(&c),
+        "an externally linked vtable symbol change must invalidate dependent objects"
     );
 }
 

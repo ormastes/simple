@@ -455,6 +455,49 @@ fn exercise_css_text_owner() -> bool:
 }
 
 #[test]
+fn field_access_carries_collision_free_owner_identity() {
+    let mir = compile_to_mir(
+        r#"class OwnedFields:
+    width: i64
+    height: i64
+
+fn read_then_write(mut owner: OwnedFields) -> i64:
+    val before = owner.width
+    owner.height = before
+    owner.height
+"#,
+    )
+    .unwrap();
+
+    let owners: Vec<(Option<&str>, Option<bool>)> = mir
+        .functions
+        .iter()
+        .flat_map(|function| function.blocks.iter())
+        .flat_map(|block| block.instructions.iter())
+        .filter_map(|instruction| match instruction {
+            MirInst::FieldGet {
+                owner_name,
+                owner_has_vtable,
+                ..
+            }
+            | MirInst::FieldSet {
+                owner_name,
+                owner_has_vtable,
+                ..
+            } => Some((owner_name.as_deref(), *owner_has_vtable)),
+            _ => None,
+        })
+        .collect();
+    assert!(!owners.is_empty(), "expected direct field get/set instructions");
+    assert!(
+        owners
+            .iter()
+            .all(|owner| *owner == (Some("OwnedFields"), None)),
+        "field owner identity was lost: {owners:?}"
+    );
+}
+
+#[test]
 fn direct_call_boxes_integer_args_for_any_params() {
     let mir =
         compile_to_mir("fn add(a: Any, b: Any) -> Any:\n    return a + b\n\nfn test() -> Any:\n    return add(1, 2)\n")

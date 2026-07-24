@@ -144,6 +144,7 @@ impl<'a> MirLowerer<'a> {
                 dest,
                 type_id: ty,
                 struct_name: type_name.clone(),
+                vtable_symbol: None,
                 struct_size,
                 field_offsets,
                 field_types,
@@ -159,8 +160,8 @@ impl<'a> MirLowerer<'a> {
         field_index: usize,
         expr_ty: TypeId,
     ) -> MirLowerResult<VReg> {
+        let receiver_ty = self.recover_receiver_type(receiver).unwrap_or(receiver.ty);
         let receiver_reg = self.lower_expr(receiver)?;
-        let receiver_ty = receiver.ty;
 
         // Check if the receiver is a tuple type — tuples are opaque runtime
         // objects accessed via rt_tuple_get, not flat structs. Labeled tuples
@@ -249,6 +250,13 @@ impl<'a> MirLowerer<'a> {
         } else {
             // Struct field access — direct memory load at byte offset
             let byte_offset = (field_index as u32) * 8;
+            let owner_name = self
+                .type_registry
+                .and_then(|registry| registry.get_type_name(receiver_ty))
+                .map(str::to_owned);
+            // Native-project lowering replaces this with an authoritative
+            // collision-free module-qualified layout decision.
+            let owner_has_vtable = None;
 
             self.with_func(|func, current_block| {
                 let dest = func.new_vreg();
@@ -256,6 +264,8 @@ impl<'a> MirLowerer<'a> {
                 block.instructions.push(MirInst::FieldGet {
                     dest,
                     object: receiver_reg,
+                    owner_name,
+                    owner_has_vtable,
                     byte_offset,
                     field_type: expr_ty,
                 });

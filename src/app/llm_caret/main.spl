@@ -49,7 +49,13 @@ use app.llm_caret.provider.{LLMResponse, dispatch_send, is_valid_provider, list_
 use app.llm_caret.tools.{PermissionPolicy, ModelResponse,
     default_policy, allow_all_policy, parse_tool_use_blocks, new_model_text, new_model_tools}
 use app.llm_caret.types.{Message}
-use app.llm_caret.chat_tui.{make_chat_tui_with_status, caret_chat, SessionHooks}
+use app.llm_caret.chat_tui.{
+    make_chat_tui_with_status,
+    caret_chat,
+    ProviderSwitchResult,
+    SessionResumeResult,
+    SessionHooks
+}
 use app.llm_caret.json_helpers.{build_message_json, ja}
 use app.llm_caret.server.{handle_route, build_error_response,
     build_chat_completion_response, build_anthropic_response,
@@ -217,9 +223,7 @@ fn _effective_provider(args: MainArgs) -> text:
         return config_default_provider()
     "claude_cli"
 
-fn _effective_model(provider: text, args: MainArgs) -> text:
-    if args.model != "":
-        return args.model
+fn _default_model(provider: text) -> text:
     if provider == "dummy":
         return "dummy-hello"
     if provider == "claude_cli":
@@ -233,6 +237,43 @@ fn _effective_model(provider: text, args: MainArgs) -> text:
     if provider == "openai_compat":
         return config_compat_model()
     ""
+
+fn _effective_model(provider: text, args: MainArgs) -> text:
+    if args.model != "":
+        return args.model
+    _default_model(provider)
+
+struct ResumeBackend:
+    provider: text
+    model: text
+    reuse_provider_session: bool
+
+fn resolve_resume_backend(
+    requested_provider: text,
+    requested_model: text,
+    saved_provider: text,
+    saved_model: text
+) -> ResumeBackend:
+    val provider = if requested_provider == "":
+        saved_provider
+    else:
+        requested_provider
+    val normalized_saved_model = if saved_model == "":
+        _default_model(saved_provider)
+    else:
+        saved_model
+    val model = if requested_model != "":
+        requested_model
+    elif provider == saved_provider:
+        normalized_saved_model
+    else:
+        _default_model(provider)
+    ResumeBackend(
+        provider: provider,
+        model: model,
+        reuse_provider_session:
+            provider == saved_provider and model == normalized_saved_model
+    )
 
 fn _effective_cli_path(provider: text) -> text:
     if provider == "claude_cli":
@@ -707,11 +748,27 @@ fn _slash_on_model(name: text) -> text:
     RT_MODEL = name
     "model set to " + name
 
-fn _slash_on_provider(name: text) -> text:
+fn _slash_on_provider(name: text) -> ProviderSwitchResult:
     if not is_valid_provider(name):
-        return "unknown provider: " + name + " (valid: " + list_providers().join(", ") + ")"
+        return ProviderSwitchResult(
+            accepted: false,
+            message: "unknown provider: " + name + " (valid: " +
+                list_providers().join(", ") + ")",
+            provider: RT_PROVIDER,
+            model: RT_MODEL
+        )
     RT_PROVIDER = name
-    "provider set to " + name
+    RT_MODEL = _default_model(name)
+    RT_API_KEY = _effective_api_key(name)
+    RT_BASE_URL = _effective_base_url(name)
+    RT_CLI_PATH = _effective_cli_path(name)
+    RT_SESSION_ID = ""
+    ProviderSwitchResult(
+        accepted: true,
+        message: "provider set to " + name,
+        provider: name,
+        model: RT_MODEL
+    )
 
 fn _slash_on_sessions() -> text:
     val ids = list_session_ids()
@@ -719,14 +776,46 @@ fn _slash_on_sessions() -> text:
         return "No saved sessions."
     "Sessions:\n  " + ids.join("\n  ")
 
-fn _slash_on_resume(id: text) -> (bool, text, [Message]):
+fn _slash_on_new() -> text:
+    RT_SESSION_ID = ""
+    gen_session_id()
+
+fn _slash_on_resume(id: text) -> SessionResumeResult:
     val loaded = load_session(id)
     match loaded:
         Some(sess):
+            if not is_valid_provider(sess.provider):
+                return SessionResumeResult(
+                    found: false,
+                    message: "saved session '" + id +
+                        "' has unknown provider '" + sess.provider + "'",
+                    messages: [], session_id: "",
+                    provider: "", model: ""
+                )
+            RT_PROVIDER = sess.provider
+            RT_MODEL = if sess.model == "":
+                _default_model(sess.provider)
+            else:
+                sess.model
+            RT_API_KEY = _effective_api_key(RT_PROVIDER)
+            RT_BASE_URL = _effective_base_url(RT_PROVIDER)
+            RT_CLI_PATH = _effective_cli_path(RT_PROVIDER)
             RT_SESSION_ID = sess.provider_session_id
-            return (true, "resumed session " + id, sess.messages)
+            return SessionResumeResult(
+                found: true,
+                message: "resumed session " + id,
+                messages: sess.messages,
+                session_id: sess.id,
+                provider: RT_PROVIDER,
+                model: RT_MODEL
+            )
         nil:
-            return (false, "no saved session '" + id + "'", [])
+            return SessionResumeResult(
+                found: false,
+                message: "no saved session '" + id + "'",
+                messages: [], session_id: "",
+                provider: "", model: ""
+            )
 
 fn _on_persist(session_id: text, conv: [Message]):
     save_session(Session(
@@ -741,6 +830,7 @@ fn _build_session_hooks(active_session_id: text) -> SessionHooks:
         on_model: _slash_on_model,
         on_provider: _slash_on_provider,
         on_sessions: _slash_on_sessions,
+        on_new: _slash_on_new,
         on_resume: _slash_on_resume,
         on_persist: _on_persist
     )
@@ -770,20 +860,20 @@ fn main() -> i64:
             print "Error: {err}"
             return 2
 
-    val provider = _effective_provider(args)
+    var provider = _effective_provider(args)
     if not is_valid_provider(provider):
         print "Error: unknown provider '{provider}'"
         print "Valid providers: {list_providers().join(", ")}"
         return 2
 
-    val model = _effective_model(provider, args)
-    val api_key = _effective_api_key(provider)
-    val base_url = _effective_base_url(provider)
-    val cli_path = _effective_cli_path(provider)
+    var model = _effective_model(provider, args)
     val workspace_root = _resolve_workspace(args)
     val policy = _build_policy(args, workspace_root)
 
     if args.server_mode:
+        val api_key = _effective_api_key(provider)
+        val base_url = _effective_base_url(provider)
+        val cli_path = _effective_cli_path(provider)
         main_configure(provider, model, api_key, base_url, cli_path, args.system_prompt, "", 0)
         run_server(_effective_port(args))
         return 0
@@ -795,13 +885,25 @@ fn main() -> i64:
         val loaded = load_session(args.resume_id)
         match loaded:
             Some(sess):
+                val backend = resolve_resume_backend(
+                    args.provider, args.model, sess.provider, sess.model
+                )
+                provider = backend.provider
+                model = backend.model
+                if not is_valid_provider(provider):
+                    print "Error: saved session has unknown provider '{provider}'"
+                    return 2
                 active_session_id = sess.id
-                provider_session_id = sess.provider_session_id
+                if backend.reuse_provider_session:
+                    provider_session_id = sess.provider_session_id
                 conv = sess.messages
             nil:
                 print "Error: no saved session '{args.resume_id}'"
                 return 2
 
+    val api_key = _effective_api_key(provider)
+    val base_url = _effective_base_url(provider)
+    val cli_path = _effective_cli_path(provider)
     main_configure(provider, model, api_key, base_url, cli_path, args.system_prompt, provider_session_id, 0)
 
     if args.ui_mode == "metal_gui":

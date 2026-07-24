@@ -921,6 +921,7 @@ impl LlvmBackend {
                 object,
                 byte_offset,
                 field_type,
+                ..
             } => {
                 self.compile_field_get(*dest, *object, *byte_offset, field_type, vreg_map, builder)?;
             }
@@ -929,6 +930,7 @@ impl LlvmBackend {
                 byte_offset,
                 field_type,
                 value,
+                ..
             } => {
                 self.compile_field_set(*object, *byte_offset, field_type, *value, vreg_map, builder)?;
             }

@@ -1432,9 +1432,9 @@ impl<M: Module> CodegenBackend<M> {
     /// `compile_struct_init` can write the vtable_ptr at offset 0.
     fn emit_vtable_data_objects(
         &mut self,
-        vtable_impls: &[(crate::hir::TypeId, String, String, Vec<Option<String>>)],
+        vtable_impls: &[(crate::hir::TypeId, String, String, Vec<Option<String>>, bool)],
     ) -> BackendResult<()> {
-        for (struct_type_id, struct_name, vtable_sym, method_fns) in vtable_impls {
+        for (struct_type_id, struct_name, vtable_sym, method_fns, export_symbol) in vtable_impls {
             // `method_fns` is INDEXED BY CANONICAL TRAIT VTABLE SLOT (index i ==
             // slot i, see MirModule::vtable_impls doc comment) — NOT compacted to
             // only the methods this impl overrides. `n` is therefore
@@ -1443,15 +1443,24 @@ impl<M: Module> CodegenBackend<M> {
             // to a filtered/compacted count — that reintroduces an out-of-bounds
             // read for any later-slot method (bug
             // simpleos_native_build_entry_closure_codegen_defects C8, 2026-07-17).
-            let n = method_fns.len();
-            if n == 0 {
-                continue;
-            }
+            // Every trait implementation changes the concrete object ABI by
+            // adding the vtable header, even an empty marker trait or an impl
+            // with no callable slots. Emit one zero slot in that case so
+            // StructInit and FieldGet/FieldSet cannot disagree about whether
+            // the header exists.
+            let n = method_fns.len().max(1);
 
-            // Declare the vtable data object (local, read-only, not thread-local)
+            // Only native-project qualification makes this symbol globally
+            // unique and requests external relocation visibility. JIT and
+            // other single-module paths retain local linkage.
+            let linkage = if *export_symbol {
+                Linkage::Export
+            } else {
+                Linkage::Local
+            };
             let data_id = self
                 .module
-                .declare_data(vtable_sym, Linkage::Local, false, false)
+                .declare_data(vtable_sym, linkage, false, false)
                 .map_err(|e| BackendError::ModuleError(e.to_string()))?;
 
             let mut data_desc = cranelift_module::DataDescription::new();

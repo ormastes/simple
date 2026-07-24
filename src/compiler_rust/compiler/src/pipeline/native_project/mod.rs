@@ -191,6 +191,10 @@ pub(crate) struct ModuleImports {
     pub re_exports: std::sync::Arc<std::collections::HashMap<String, std::collections::HashMap<String, String>>>,
     /// Project-wide trait implementations used to validate virtual dispatch.
     pub trait_impls: std::sync::Arc<std::collections::HashMap<String, Vec<String>>>,
+    /// Collision-free `module_prefix__Type` owners that carry a vtable header.
+    pub vtable_type_owners: std::sync::Arc<std::collections::HashSet<String>>,
+    /// Qualified owner → externally linkable primary vtable symbol.
+    pub vtable_symbols: std::sync::Arc<std::collections::HashMap<String, String>>,
     /// Global struct definitions: struct_name -> [(field_name, field_type_name)].
     /// Shared across all compilation units for consistent cross-module field offsets.
     pub struct_defs: std::sync::Arc<std::collections::HashMap<String, Vec<(String, simple_parser::Type)>>>,
@@ -266,7 +270,7 @@ pub struct NativeBuildConfig {
     pub clean: bool,
     /// Disable name mangling for cross-module resolution (default: false = mangling enabled).
     pub no_mangle: bool,
-    /// Codegen backend: "llvm" (default) or "cranelift".
+    /// Codegen backend: "cranelift" (default) or "llvm".
     /// LLVM produces correct cross-module struct field access; Cranelift has
     /// a known FieldGet offset bug for fields at byte_offset > 0.
     pub backend: String,
@@ -317,7 +321,10 @@ impl Default for NativeBuildConfig {
             cache_dir: None,
             clean: false,
             no_mangle: false,
-            backend: if cfg!(feature = "llvm") { "llvm" } else { "cranelift" }.to_string(),
+            // Cranelift owns the qualified native object/vtable ABI. LLVM
+            // remains explicit until it implements equivalent layout and
+            // external-vtable relocation support.
+            backend: "cranelift".to_string(),
             runtime_path: None,
             runtime_bundle: "auto".to_string(),
             entry_closure: false,
@@ -682,6 +689,8 @@ impl NativeProjectBuilder {
                 all_mangled: std::sync::Arc::new(result.all_mangled),
                 re_exports: std::sync::Arc::new(result.re_exports),
                 trait_impls: std::sync::Arc::new(result.trait_impls),
+                vtable_type_owners: std::sync::Arc::new(result.vtable_type_owners),
+                vtable_symbols: std::sync::Arc::new(result.vtable_symbols),
                 struct_defs: std::sync::Arc::new(result.struct_defs),
                 duplicate_struct_defs: std::sync::Arc::new(result.duplicate_struct_defs),
                 enum_defs: std::sync::Arc::new(result.enum_defs),
@@ -699,6 +708,8 @@ impl NativeProjectBuilder {
                 all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
                 re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
                 trait_impls: std::sync::Arc::new(std::collections::HashMap::new()),
+                vtable_type_owners: std::sync::Arc::new(std::collections::HashSet::new()),
+                vtable_symbols: std::sync::Arc::new(std::collections::HashMap::new()),
                 struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
                 duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
                 enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -1331,6 +1342,12 @@ pub(crate) fn cross_module_layout_fingerprint(result: &imports::ImportMapResult)
     }
     for (k, v) in result.trait_impls.iter() {
         fp = fold_unordered(fp, hash_one(&(k, v)));
+    }
+    for owner in result.vtable_type_owners.iter() {
+        fp = fold_unordered(fp, hash_one(&("vtable-owner", owner)));
+    }
+    for (owner, symbol) in result.vtable_symbols.iter() {
+        fp = fold_unordered(fp, hash_one(&("vtable-symbol", owner, symbol)));
     }
     for (k, v) in result.struct_defs.iter() {
         fp = fold_unordered(fp, hash_one(&(k, format!("{v:?}"))));

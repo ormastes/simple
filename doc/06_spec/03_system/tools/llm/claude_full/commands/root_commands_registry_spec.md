@@ -120,15 +120,17 @@ expect(findRootCommand("/missing").found).to_equal(false)
 - Hidden commands resolve but are excluded from visible summaries
    - Expected: debug.found is true
    - Expected: debug.command.hidden is true
+   - Expected: hidden admission is false by default and true with the fixture
 - Disabled commands resolve with disabled state
    - Expected: remote.found is true
    - Expected: remote.command.enabled is false
+   - Expected: disabled admission remains false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -136,6 +138,8 @@ step("Hidden commands resolve but are excluded from visible summaries")
 val debug = findRootCommand("/debug-tool-call")
 expect(debug.found).to_equal(true)
 expect(debug.command.hidden).to_equal(true)
+expect(admitRootCommand("/debug-tool-call", false).found).to_equal(false)
+expect(admitRootCommand("/debug-tool-call", true).found).to_equal(true)
 expect(visibleRootCommandSummary()).to_contain("/help core")
 expect(visibleRootCommandSummary()).to_contain("/mcp integrations")
 
@@ -143,6 +147,7 @@ step("Disabled commands resolve with disabled state")
 val remote = findRootCommand("/remote-setup")
 expect(remote.found).to_equal(true)
 expect(remote.command.enabled).to_equal(false)
+expect(admitRootCommand("/remote-setup", true).found).to_equal(false)
 ```
 
 </details>

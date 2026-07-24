@@ -15,7 +15,8 @@ use app.llm_caret.tools.{ModelResponse, default_policy}
 use app.llm_caret.chat.{run_agent_loop}
 use app.llm_caret.main.{
     MainArgs, parse_main_args, build_model_response,
-    main_configure, main_session_id,
+    main_configure, main_session_id, _slash_on_new, _slash_on_provider,
+    resolve_resume_backend,
     proxy_handle, status_for_path,
     guard_request, bearer_ok, rate_limit_check, rate_limit_reset,
     build_error_response
@@ -32,82 +33,121 @@ fn _llm_ok(content: text, raw: text) -> LLMResponse:
 
 # ============================================================================
 describe "parse_main_args":
-    it "defaults to auto ui mode, claude_cli-less provider, no server":
+    it "should defaults to auto ui mode, claude_cli-less provider, no server":
         val a = parse_main_args([])
         expect(a.provider).to_equal("")
         expect(a.ui_mode).to_equal("auto")
-        expect(a.server_mode).to_equal(false)
-        expect(a.help).to_equal(false)
+        expect(a.server_mode).to_be(false)
+        expect(a.help).to_be(false)
         expect(a.unknown).to_equal("")
 
-    it "parses --provider and --model (space form)":
+    it "should parses --provider and --model (space form)":
         val a = parse_main_args(["--provider", "claude_api", "--model", "claude-opus-4-20250514"])
         expect(a.provider).to_equal("claude_api")
         expect(a.model).to_equal("claude-opus-4-20250514")
 
-    it "parses --provider= and --model= (equals form)":
+    it "should parses --provider= and --model= (equals form)":
         val a = parse_main_args(["--provider=openai", "--model=gpt-4o"])
         expect(a.provider).to_equal("openai")
         expect(a.model).to_equal("gpt-4o")
 
-    it "parses --plain and --tui":
+    it "should parses --plain and --tui":
         expect(parse_main_args(["--plain"]).ui_mode).to_equal("plain")
         expect(parse_main_args(["--tui"]).ui_mode).to_equal("tui")
 
-    it "parses --gui and one-shot --prompt":
+    it "should parses --gui and one-shot --prompt":
         val a = parse_main_args(["--gui", "--prompt", "hi"])
         expect(a.ui_mode).to_equal("gui")
         expect(a.prompt).to_equal("hi")
 
-    it "parses Electron and pure-Simple Metal GUI modes":
+    it "should parses Electron and pure-Simple Metal GUI modes":
         expect(parse_main_args(["--electron"]).ui_mode).to_equal("electron")
         val metal = parse_main_args(["--metal-gui", "--prompt", "test"])
         expect(metal.ui_mode).to_equal("metal_gui")
         expect(metal.prompt).to_equal("test")
 
-    it "parses --server and --port":
+    it "should parses --server and --port":
         val a = parse_main_args(["--server", "--port", "9000"])
-        expect(a.server_mode).to_equal(true)
+        expect(a.server_mode).to_be(true)
         expect(a.port).to_equal(9000)
 
-    it "parses --port= form":
+    it "should parses --port= form":
         expect(parse_main_args(["--port=1234"]).port).to_equal(1234)
 
-    it "parses --resume, --config, --system, --workspace":
+    it "should parses --resume, --config, --system, --workspace":
         val a = parse_main_args(["--resume", "sess-9", "--config", "cfg.sdn", "--system", "be nice", "--workspace", "/tmp/ws"])
         expect(a.resume_id).to_equal("sess-9")
         expect(a.config_path).to_equal("cfg.sdn")
         expect(a.system_prompt).to_equal("be nice")
         expect(a.workspace_root).to_equal("/tmp/ws")
 
-    it "parses --dangerously-allow-all":
-        expect(parse_main_args(["--dangerously-allow-all"]).allow_all).to_equal(true)
+    it "should parses --dangerously-allow-all":
+        expect(parse_main_args(["--dangerously-allow-all"]).allow_all).to_be(true)
 
-    it "parses -h/--help":
-        expect(parse_main_args(["-h"]).help).to_equal(true)
-        expect(parse_main_args(["--help"]).help).to_equal(true)
+    it "should parses -h/--help":
+        expect(parse_main_args(["-h"]).help).to_be(true)
+        expect(parse_main_args(["--help"]).help).to_be(true)
 
-    it "records the first unrecognized flag":
+    it "should records the first unrecognized flag":
         val a = parse_main_args(["--bogus-flag", "--another"])
         expect(a.unknown).to_equal("--bogus-flag")
 
 describe "main_configure / main_session_id":
-    it "round-trips the session id set by main_configure":
+    it "should round-trips the session id set by main_configure":
         main_configure("claude_cli", "m", "", "", "claude", "", "seeded-session", 0)
         expect(main_session_id()).to_equal("seeded-session")
 
+    it "should clears the provider session for a new conversation":
+        main_configure("claude_cli", "sonnet", "", "", "claude", "", "provider-session", 0)
+        val new_id = _slash_on_new()
+        expect(new_id.starts_with("sess-")).to_be(true)
+        expect(main_session_id()).to_equal("")
+
+    it "should refreshes provider defaults and clears a foreign provider session":
+        main_configure("claude_cli", "sonnet", "", "", "claude", "", "provider-session", 0)
+        val changed = _slash_on_provider("dummy")
+        expect(changed.accepted).to_be(true)
+        expect(changed.provider).to_equal("dummy")
+        expect(changed.model).to_equal("dummy-hello")
+        expect(main_session_id()).to_equal("")
+
+describe "resume backend resolution":
+    it "should restore the saved provider model and provider session by default":
+        val backend = resolve_resume_backend("", "", "claude_cli", "sonnet")
+        expect(backend.provider).to_equal("claude_cli")
+        expect(backend.model).to_equal("sonnet")
+        expect(backend.reuse_provider_session).to_be(true)
+
+    it "should use the overridden provider default instead of the saved model":
+        val backend = resolve_resume_backend("dummy", "", "claude_cli", "sonnet")
+        expect(backend.provider).to_equal("dummy")
+        expect(backend.model).to_equal("dummy-hello")
+        expect(backend.reuse_provider_session).to_be(false)
+
+    it "should normalize a legacy empty saved model before session reuse":
+        val backend = resolve_resume_backend("", "", "dummy", "")
+        expect(backend.model).to_equal("dummy-hello")
+        expect(backend.reuse_provider_session).to_be(true)
+
+    it "should discard the provider session when the model is overridden":
+        val backend = resolve_resume_backend(
+            "", "different-model", "claude_cli", "sonnet"
+        )
+        expect(backend.model).to_equal("different-model")
+        expect(backend.reuse_provider_session).to_be(false)
+
 describe "build_model_response":
-    it "maps a plain-text response with no tool_use blocks":
+    it "should maps a plain-text response with no tool_use blocks":
         val mr = build_model_response(_llm_ok("hello there", "{}"))
         expect(mr.text).to_equal("hello there")
         expect(mr.tool_calls.len()).to_equal(0)
 
-    it "maps an error response to an ERROR-prefixed text turn":
+    it "should maps an error response to an ERROR-prefixed text turn":
         val mr = build_model_response(new_llm_error("test", "boom"))
         expect(mr.text).to_contain("ERROR: boom")
         expect(mr.tool_calls.len()).to_equal(0)
 
-    it "extracts a tool_use block from the raw wire response":
+    it "should extracts a tool_use block from the raw wire response":
         val raw = "{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"bash\",\"input\":{\"command\":\"echo hi\"}}"
         val mr = build_model_response(_llm_ok("", raw))
         expect(mr.tool_calls.len()).to_equal(1)
@@ -132,7 +172,7 @@ fn _scripted_responder(msgs: [Message]) -> ModelResponse:
     build_model_response(_llm_ok("final answer", "{}"))
 
 describe "scripted plain-mode conversation (end-to-end via chat.run_agent_loop)":
-    it "runs a scripted 2-turn tool-call conversation to completion":
+    it "should runs a scripted 2-turn tool-call conversation to completion":
         SCRIPT_TURN = 0
         val p = default_policy(WS_ROOT)
         val result = run_agent_loop(p, [new_user_message("do the thing")], _scripted_responder, 10)
@@ -151,40 +191,40 @@ fn _fake_dispatch_err(content: text, model: text) -> LLMResponse:
 
 # ============================================================================
 describe "HTTP proxy pure core (proxy_handle)":
-    it "health and models routes return 200":
+    it "should health and models routes return 200":
         expect(status_for_path("/v1/health")).to_equal(200)
         expect(status_for_path("/v1/models")).to_equal(200)
 
-    it "unknown routes return 404":
+    it "should unknown routes return 404":
         expect(status_for_path("/nope")).to_equal(404)
 
-    it "GET /v1/health is routed through proxy_handle end to end":
+    it "should GET /v1/health is routed through proxy_handle end to end":
         val (code, body) = proxy_handle("GET", "/v1/health", "", _fake_dispatch_ok)
         expect(code).to_equal(200)
         expect(body).to_contain("ok")
 
-    it "GET on an unknown path is a 404 through proxy_handle":
+    it "should GET on an unknown path is a 404 through proxy_handle":
         val (code, body) = proxy_handle("GET", "/nope", "", _fake_dispatch_ok)
         expect(code).to_equal(404)
 
-    it "chat completions with empty content is a 400":
+    it "should chat completions with empty content is a 400":
         val (code, body) = proxy_handle("POST", "/v1/chat/completions", "", _fake_dispatch_ok)
         expect(code).to_equal(400)
         expect(body).to_contain("messages required")
 
-    it "chat completions dispatches and returns 200 on success":
+    it "should chat completions dispatches and returns 200 on success":
         val body_in = "{\"content\":\"hi\"}"
         val (code, body) = proxy_handle("POST", "/v1/chat/completions", body_in, _fake_dispatch_ok)
         expect(code).to_equal(200)
         expect(body).to_contain("echo: hi")
 
-    it "chat completions returns 502 when the backend errors":
+    it "should chat completions returns 502 when the backend errors":
         val body_in = "{\"content\":\"hi\"}"
         val (code, body) = proxy_handle("POST", "/v1/chat/completions", body_in, _fake_dispatch_err)
         expect(code).to_equal(502)
         expect(body).to_contain("upstream down")
 
-    it "/v1/messages dispatches through the anthropic-shaped response":
+    it "should /v1/messages dispatches through the anthropic-shaped response":
         val body_in = "{\"content\":\"hi\"}"
         val (code, body) = proxy_handle("POST", "/v1/messages", body_in, _fake_dispatch_ok)
         expect(code).to_equal(200)
@@ -192,29 +232,29 @@ describe "HTTP proxy pure core (proxy_handle)":
 
 # ============================================================================
 describe "Server hardening (guard_request)":
-    it "bearer_ok always allows when no token is required":
+    it "should bearer_ok always allows when no token is required":
         assert_true(bearer_ok("", ""))
         assert_true(bearer_ok("garbage", ""))
 
-    it "bearer_ok rejects a missing/garbage header when a token is required":
+    it "should bearer_ok rejects a missing/garbage header when a token is required":
         assert_false(bearer_ok("", "secret"))
         assert_false(bearer_ok("Bearer wrong", "secret"))
 
-    it "bearer_ok accepts the exact configured token":
+    it "should bearer_ok accepts the exact configured token":
         assert_true(bearer_ok("Bearer secret", "secret"))
 
-    it "guard_request returns 401 without a token when one is required":
+    it "should guard_request returns 401 without a token when one is required":
         rate_limit_reset()
         val (allowed, code, body) = guard_request("", "{}", "secret", "client-a", 1000)
         assert_false(allowed)
         expect(code).to_equal(401)
 
-    it "guard_request allows a matching bearer token":
+    it "should guard_request allows a matching bearer token":
         rate_limit_reset()
         val (allowed, code, body) = guard_request("Bearer secret", "{}", "secret", "client-b", 1000)
         assert_true(allowed)
 
-    it "guard_request rejects an oversized body with 413":
+    it "should guard_request rejects an oversized body with 413":
         rate_limit_reset()
         # Double up to exceed MAX_BODY_BYTES (1_000_000) in O(log n) instead
         # of an O(n) append loop - a naive 100k-iteration `+=` loop over a
@@ -226,7 +266,7 @@ describe "Server hardening (guard_request)":
         assert_false(allowed)
         expect(code).to_equal(413)
 
-    it "rate_limit_check allows the first N requests then rejects the N+1th":
+    it "should rate_limit_check allows the first N requests then rejects the N+1th":
         rate_limit_reset()
         var i = 0
         var last_ok = true
@@ -237,7 +277,7 @@ describe "Server hardening (guard_request)":
         val over_limit = rate_limit_check("client-rl", 1000)
         assert_false(over_limit)
 
-    it "rate_limit_check resets after the window elapses":
+    it "should rate_limit_check resets after the window elapses":
         rate_limit_reset()
         var i = 0
         while i < 60:

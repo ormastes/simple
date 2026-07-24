@@ -335,23 +335,48 @@ is_rust_seed_simple() {
             return 0
             ;;
     esac
+    # Installed/copied seed binaries may no longer live under
+    # `src/compiler_rust`. The Rust driver identifies itself as `Simple v...`;
+    # the production self-hosted CLI identifies itself as `Simple Language`.
+    seed_version="$("$1" --version 2>/dev/null || true)"
+    case "$seed_version" in
+        "Simple v"*)
+            return 0
+            ;;
+    esac
     return 1
 }
 
 if [ -z "${SIMPLE_BIN+pinned}" ]; then
-    for candidate in \
-        "release/x86_64-unknown-linux-gnu/simple" \
-        "release/aarch64-unknown-linux-gnu/simple" \
-        "release/aarch64-apple-darwin/simple" \
-        "release/x86_64-apple-darwin/simple" \
-        "bin/release/x86_64-unknown-linux-gnu/simple" \
-        "bin/release/aarch64-unknown-linux-gnu/simple" \
-        "bin/release/aarch64-apple-darwin/simple" \
-        "bin/release/x86_64-apple-darwin/simple" \
-        "bootstrap/stage3/x86_64-unknown-linux-gnu/simple"; do
-        if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+    if [ -x "bin/simple" ] && ! is_rust_seed_simple "bin/simple"; then
+        simple_bin="bin/simple"
+        simple_bin_selection_reason="repo-bin-canonical-self-hosted"
+    fi
+    # Only consider binaries executable by this host. The former generic list
+    # selected the checked-in x86_64 Linux release first on arm64 macOS, where
+    # `--version` necessarily failed with exit 126 and blocked every Vulkan
+    # evidence lane even though a native self-hosted binary was available.
+    case "$UNAME_S:$UNAME_M" in
+        Darwin:arm64|Darwin:aarch64)
+            host_simple_candidates="release/aarch64-apple-darwin/simple bin/release/aarch64-apple-darwin/simple"
+            ;;
+        Darwin:x86_64)
+            host_simple_candidates="release/x86_64-apple-darwin/simple bin/release/x86_64-apple-darwin/simple"
+            ;;
+        Linux:arm64|Linux:aarch64)
+            host_simple_candidates="release/aarch64-unknown-linux-gnu/simple bin/release/aarch64-unknown-linux-gnu/simple"
+            ;;
+        Linux:x86_64)
+            host_simple_candidates="release/x86_64-unknown-linux-gnu/simple bin/release/x86_64-unknown-linux-gnu/simple bootstrap/stage3/x86_64-unknown-linux-gnu/simple"
+            ;;
+        *)
+            host_simple_candidates=""
+            ;;
+    esac
+    for candidate in $host_simple_candidates; do
+        if [ -z "$simple_bin" ] && [ -n "$candidate" ] && [ -x "$candidate" ] && ! is_rust_seed_simple "$candidate"; then
             simple_bin="$candidate"
-            simple_bin_selection_reason="self-hosted-release"
+            simple_bin_selection_reason="self-hosted-release-host-native"
             break
         fi
     done
@@ -390,7 +415,7 @@ if [ -z "${SIMPLE_BIN+pinned}" ]; then
             "bin/release/aarch64-apple-darwin/simple" \
             "bin/release/x86_64-apple-darwin/simple" \
             "$simple_bin"; do
-            if binary_has_macos_vulkan_loader_paths "$candidate"; then
+            if binary_has_macos_vulkan_loader_paths "$candidate" && ! is_rust_seed_simple "$candidate"; then
                 simple_bin="$candidate"
                 simple_bin_selection_reason="self-hosted-macos-vulkan-loader-paths-present"
                 break

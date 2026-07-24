@@ -6,7 +6,7 @@
 use std.gpu.engine2d.engine.{Engine2D}
 use std.io.window_winit.{WinitInput, winit_loop_new, winit_loop_free, winit_window_new, winit_window_free, winit_present_rgba, winit_poll_input}
 use std.nogc_sync_mut.concurrent.thread.{thread_sleep}
-use std.io_runtime.{env_get}
+use std.io_runtime.{env_get, file_write}
 
 # Design-space reference dimensions (scaling denominators). The gallery is
 # authored at 800x600 and scaled up to the resolved render resolution.
@@ -31,6 +31,8 @@ val PURPLE: u32 = 0xFFA855F7u32
 # small rung (e.g. SHOWCASE_RESOLUTION=320x240).
 val SHOWCASE_RESOLUTION_ENV: text = "SHOWCASE_RESOLUTION"
 val SHOWCASE_DPI_ENV: text = "SHOWCASE_DPI"
+val GUI_EVENT_EVIDENCE_ENV: text = "SIMPLE_GUI_EVENT_EVIDENCE_PATH"
+val GUI_EXIT_AFTER_INTERACTION_ENV: text = "SIMPLE_GUI_EXIT_AFTER_INTERACTION"
 
 class ShowcaseSize:
     width: i32
@@ -243,6 +245,23 @@ fn semantic_sample_differences(pixels: [u32], rw: i32, rh: i32) -> i32:
         i = i + 1
     differences
 
+fn write_gui_event_evidence(path: text, backend: text, source: text, backend_handle: i64,
+                            initial_checksum: i64, interaction_checksum: i64,
+                            keyboard_events: i64, pointer_events: i64,
+                            click_events: i64, interaction_revision: i64) -> bool:
+    if path == "":
+        return true
+    file_write(path,
+        "graphics_2d_event_backend={backend}\n" +
+        "graphics_2d_event_source={source}\n" +
+        "graphics_2d_event_backend_handle={backend_handle}\n" +
+        "graphics_2d_event_initial_checksum={initial_checksum}\n" +
+        "graphics_2d_event_interaction_checksum={interaction_checksum}\n" +
+        "graphics_2d_event_keyboard_events={keyboard_events}\n" +
+        "graphics_2d_event_pointer_events={pointer_events}\n" +
+        "graphics_2d_event_click_events={click_events}\n" +
+        "graphics_2d_event_interaction_revision={interaction_revision}\n")
+
 fn run_graphics_2d_showcase(gui: bool, backend: text) -> i64:
     val size = resolve_showcase_dimensions()
     val render_w = size.width
@@ -251,8 +270,11 @@ fn run_graphics_2d_showcase(gui: bool, backend: text) -> i64:
     var engine = if backend == "software": Engine2D.create_offscreen(render_w, render_h) else: Engine2D.create_with_backend_fast(render_w, render_h, backend)
     val actual = engine.backend_name()
     engine = draw_showcase(engine, render_w, render_h, dpi)
-    engine.present()
+    # Read the exact dirty device frame before present refreshes the backend's
+    # host cache. The following present still exercises the production path,
+    # while this receipt retains the originating Vulkan/Metal handle.
     val readback = engine.read_pixels_with_source()
+    engine.present()
     var nonzero = 0
     for pixel in readback.pixels:
         if pixel != 0u32:
@@ -263,6 +285,7 @@ fn run_graphics_2d_showcase(gui: bool, backend: text) -> i64:
     print "graphics_2d_backend={actual}"
     print "graphics_2d_source={readback.source}"
     print "graphics_2d_backend_handle={readback.backend_handle}"
+    print "graphics_2d_vulkan_fallback_reason={engine.vulkan_cpu_fallback_reason()}"
     print "graphics_2d_checksum={readback.checksum}"
     print "graphics_2d_nonzero={nonzero}"
     print "graphics_2d_semantic_differences={semantic_differences}"
@@ -292,10 +315,64 @@ fn run_graphics_2d_showcase(gui: bool, backend: text) -> i64:
         return 1
     val packed = pack_rgb(readback.pixels)
     winit_present_rgba(win, render_w.to_i64(), render_h.to_i64(), packed)
+    val event_evidence_path = env_get(GUI_EVENT_EVIDENCE_ENV) ?? ""
+    val exit_after_interaction = (env_get(GUI_EXIT_AFTER_INTERACTION_ENV) ?? "") == "1"
+    var keyboard_events: i64 = 0
+    var pointer_events: i64 = 0
+    var click_events: i64 = 0
+    var interaction_revision: i64 = 0
+    var interaction_checksum = readback.checksum
+    if not write_gui_event_evidence(
+            event_evidence_path, actual, readback.source, readback.backend_handle,
+            readback.checksum, interaction_checksum, keyboard_events,
+            pointer_events, click_events, interaction_revision):
+        winit_window_free(win)
+        winit_loop_free(lp)
+        engine.shutdown()
+        return 1
     var running = true
     while running:
         val input = winit_poll_input(lp)
         running = not should_close(input)
+        val keyboard_delta = input.keys.len().to_i64()
+        val pointer_delta = input.mouse_moves
+        val click_delta = input.click_buttons.len().to_i64()
+        keyboard_events = keyboard_events + keyboard_delta
+        pointer_events = pointer_events + pointer_delta
+        click_events = click_events + click_delta
+        if keyboard_delta > 0 or pointer_delta > 0 or click_delta > 0:
+            interaction_revision = interaction_revision + 1
+            val marker_color = if interaction_revision % 2 == 0: GREEN else: RED
+            engine.draw_rect_filled(
+                sx(610, render_w), sy(495, render_h),
+                sx(165, render_w), sy(70, render_h), marker_color)
+            engine.draw_text(
+                sx(625, render_w), sy(515, render_h),
+                "INPUT {interaction_revision}", WHITE, sd(14, render_w, dpi))
+            val interaction_readback = engine.read_pixels_with_source()
+            engine.present()
+            interaction_checksum = interaction_readback.checksum
+            val interaction_packed = pack_rgb(interaction_readback.pixels)
+            winit_present_rgba(
+                win, render_w.to_i64(), render_h.to_i64(), interaction_packed)
+            if (interaction_readback.source != readback.source or
+                    interaction_readback.backend_handle != readback.backend_handle or
+                    interaction_checksum == readback.checksum or
+                    not write_gui_event_evidence(
+                        event_evidence_path, actual, interaction_readback.source,
+                        interaction_readback.backend_handle, readback.checksum,
+                        interaction_checksum, keyboard_events, pointer_events,
+                        click_events, interaction_revision)):
+                running = false
+                winit_window_free(win)
+                winit_loop_free(lp)
+                engine.shutdown()
+                return 1
+            print "graphics_2d_event_revision={interaction_revision}"
+            print "graphics_2d_event_checksum={interaction_checksum}"
+            if (exit_after_interaction and keyboard_events > 0 and
+                    pointer_events > 0 and click_events > 0):
+                running = false
         thread_sleep(16)
     winit_window_free(win)
     winit_loop_free(lp)

@@ -9,92 +9,87 @@
 
 use app.io.mod.{process_run}
 use app.llm_caret.redact.{redact}
-use app.llm_caret.json_helpers.{json_find, json_parse_int}
+use std.common.json.parser.{json_parse}
+use std.common.json.object_ops.{json_object_get, json_object_has}
+use std.common.json.array_ops.{json_array_get, json_array_length}
+use std.common.json.serializer.{json_serialize}
+use std.common.json.types.{
+    json_get_type,
+    json_to_boolean,
+    json_to_number,
+    json_to_string
+}
 
-# ============================================================================
-# JSON helpers (inlined to avoid import issues)
-# ============================================================================
+fn _json_text(object: any, key: text) -> text:
+    val value = json_to_string(json_object_get(object, key))
+    if value == nil: "" else: value
 
-fn _LB() -> text:
-    (123 as char).to_text()
+fn _json_i64(object: any, key: text) -> i64:
+    val value = json_to_number(json_object_get(object, key))
+    if value == nil: 0 else: value as i64
 
-fn _RB() -> text:
-    (125 as char).to_text()
+fn _json_bool(object: any, key: text) -> bool:
+    val value = json_to_boolean(json_object_get(object, key))
+    if value == nil: false else: value
 
-fn _Q() -> text:
-    "\""
-
-fn _escape_json(s: text) -> text:
-    var result = ""
-    var i = 0
-    while i < s.len():
-        val ch = s[i]
-        if ch == "\\":
-            result = result + "\\\\"
-        elif ch == "\"":
-            result = result + "\\\""
-        elif ch == "\n":
-            result = result + "\\n"
-        elif ch == "\r":
-            result = result + "\\r"
-        elif ch == "\t":
-            result = result + "\\t"
-        else:
-            result = result + ch
-        i = i + 1
-    result
-
-fn _extract_json_string(json: text, key: text) -> text:
-    val quote = "\""
-    val search = quote + key + quote + ":"
-    val idx = json_find(json, search)
-    if idx < 0:
+fn _json_raw(object: any, key: text) -> text:
+    val value = json_object_get(object, key)
+    if value == nil:
         return ""
-    val slen = search.len()
-    val start = idx + slen
-    val after = json.substring(start)
-    val trimmed = after.trim()
-    if trimmed.starts_with(quote):
-        val rest = trimmed.substring(1)
-        var end = 0
-        var escaped = false
-        while end < rest.len():
-            val ch = rest[end]
-            if escaped:
-                escaped = false
-            elif ch == "\\":
-                escaped = true
-            elif ch == "\"":
-                return rest.substring(0, end)
-            end = end + 1
-    ""
+    json_serialize(value)
 
-fn _extract_json_value(json: text, key: text) -> text:
-    val search = _Q() + key + _Q() + ":"
-    val idx = json_find(json, search)
-    if idx < 0:
-        return "null"
-    val slen = search.len()
-    val start = idx + slen
-    val after = json.substring(start)
-    val trimmed = after.trim()
-    var end = 0
-    while end < trimmed.len():
-        val ch = trimmed[end]
-        if ch == "," or ch == _RB() or ch == "]":
-            break
-        end = end + 1
-    trimmed.substring(0, end).trim()
+fn _json_optional_kind(object: any, key: text, expected: text) -> bool:
+    if not json_object_has(object, key):
+        return true
+    json_get_type(json_object_get(object, key)) == expected
 
-fn _extract_json_int(json: text, key: text) -> i64:
-    val raw = _extract_json_value(json, key)
-    if raw == "null" or raw == "":
-        return 0
-    json_parse_int(raw)
+fn _json_usage_kinds_valid(object: any) -> bool:
+    val usage = json_object_get(object, "usage")
+    if usage != nil and json_get_type(usage) != "object":
+        return false
+    for key in [
+        "input_tokens", "output_tokens",
+        "input_tokens_used", "output_tokens_used"
+    ]:
+        if not _json_optional_kind(object, key, "number"):
+            return false
+        if usage != nil and not _json_optional_kind(usage, key, "number"):
+            return false
+    true
 
-fn _extract_json_bool(json: text, key: text) -> bool:
-    val raw = _extract_json_value(json, key)
-    raw == "true"
+fn _json_usage_i64(object: any, key: text) -> i64:
+    val direct = _json_i64(object, key)
+    if direct != 0:
+        return direct
+    _json_i64(json_object_get(object, "usage"), key)
+
+fn _json_message_field(object: any, key: text) -> text:
+    val direct = _json_text(object, key)
+    if direct != "":
+        return direct
+    _json_text(json_object_get(object, "message"), key)
+
+fn _json_message_usage_i64(object: any, key: text) -> i64:
+    val direct = _json_usage_i64(object, key)
+    if direct != 0:
+        return direct
+    _json_i64(json_object_get(json_object_get(object, "message"), "usage"), key)
+
+fn _json_message_content(object: any) -> text:
+    val message = json_object_get(object, "message")
+    val content = json_object_get(message, "content")
+    if json_get_type(content) != "array":
+        return _json_text(object, "text")
+    var parts: [text] = []
+    var i = 0
+    while i < json_array_length(content):
+        val block = json_array_get(content, i)
+        if _json_text(block, "type") == "text":
+            val value = _json_text(block, "text")
+            if value != "":
+                parts = parts + [value]
+        i = i + 1
+    parts.join("")
 
 # ============================================================================
 # Response struct (inline for import safety)
@@ -119,6 +114,45 @@ struct CliStreamEvent:
     stop_reason: text
     input_tokens: i64
     output_tokens: i64
+
+fn _invalid_cli_response(raw: text, reason: text) -> CliResponse:
+    CliResponse(
+        content: "",
+        model: "",
+        session_id: "",
+        stop_reason: "error",
+        input_tokens: 0,
+        output_tokens: 0,
+        error: reason,
+        is_error: true,
+        raw: redact(raw)
+    )
+
+fn _invalid_stream_event(reason: text) -> CliStreamEvent:
+    CliStreamEvent(
+        event_type: "error",
+        content: reason,
+        session_id: "",
+        model: "",
+        stop_reason: "invalid",
+        input_tokens: 0,
+        output_tokens: 0
+    )
+
+fn _supported_stream_type(event_type: text) -> bool:
+    event_type == "content_block_start" or
+    event_type == "content_block_delta" or
+    event_type == "content_block_stop" or
+    event_type == "message_start" or
+    event_type == "message_delta" or
+    event_type == "message_stop" or
+    event_type == "ping" or
+    event_type == "system" or
+    event_type == "assistant" or
+    event_type == "user" or
+    event_type == "result" or
+    event_type == "error" or
+    event_type == "rate_limit_event"
 
 # ============================================================================
 # Pure Function: build_claude_args
@@ -145,15 +179,21 @@ pub fn build_claude_args(prompt: text, model: text, output_format: text, system_
     # Max turns
     if max_turns > 0:
         args = args + ["--max-turns", max_turns.to_text()]
-    # Max tokens (via extra args since claude CLI uses --max-tokens for some versions)
-    if max_tokens > 0:
-        args = args + ["--max-tokens", max_tokens.to_text()]
+    # max_tokens is retained in this API for provider-config compatibility.
+    # Current Claude Code does not expose --max-tokens; callers targeting an
+    # older/custom CLI may opt in explicitly through extra_args.
     # JSON schema
     if json_schema != "":
         args = args + ["--json-schema", json_schema]
-    # Tools
+    # Tools: Claude Code exposes one variadic option, so emit the flag once
+    # followed by every configured tool.
+    var emitted_tools = false
     for tool in tools:
-        args = args + ["--allowedTools", tool]
+        if tool != "":
+            if not emitted_tools:
+                args = args + ["--allowedTools"]
+                emitted_tools = true
+            args = args + [tool]
     # Verbose
     if verbose:
         args = args + ["--verbose"]
@@ -167,44 +207,60 @@ pub fn build_claude_args(prompt: text, model: text, output_format: text, system_
 fn build_claude_args_simple(prompt: text) -> [text]:
     build_claude_args(prompt, "", "", "", "", 0, 0, "", [], [], false)
 
+pub fn build_claude_stream_args(prompt: text, model: text, system_prompt: text, session_id: text, max_turns: i64) -> [text]:
+    # Current Claude Code requires verbose mode for stream-json output.
+    build_claude_args(prompt, model, "stream-json", system_prompt, session_id, max_turns, 0, "", [], [], true)
+
 # ============================================================================
 # Pure Function: parse_claude_json_response
 # ============================================================================
 
 pub fn parse_claude_json_response(raw: text) -> CliResponse:
     if raw.trim() == "":
-        return CliResponse(
-            content: "",
-            model: "",
-            session_id: "",
-            stop_reason: "",
-            input_tokens: 0,
-            output_tokens: 0,
-            error: "empty response",
-            is_error: true,
-            raw: ""
+        return _invalid_cli_response("", "empty response")
+    val parsed = json_parse(raw)
+    if parsed == nil or json_get_type(parsed) != "object":
+        return _invalid_cli_response(raw, "invalid JSON response from claude CLI")
+
+    val has_result = json_object_has(parsed, "result")
+    val has_structured = json_object_has(parsed, "structured_output")
+    if has_result and not _json_optional_kind(parsed, "result", "string"):
+        return _invalid_cli_response(
+            raw, "claude CLI result field must be a string"
         )
-    # Extract fields from JSON output
-    val result_text = _extract_json_string(raw, "result")
-    val model_text = _extract_json_string(raw, "model")
-    val session = _extract_json_string(raw, "session_id")
-    val is_err = _extract_json_bool(raw, "is_error")
-    val stop = _extract_json_string(raw, "stop_reason")
-    val in_tok = _extract_json_int(raw, "input_tokens")
-    val out_tok = _extract_json_int(raw, "output_tokens")
-    # Handle usage sub-object for tokens
-    var final_in_tok = in_tok
-    var final_out_tok = out_tok
-    if in_tok == 0:
-        final_in_tok = _extract_json_int(raw, "input_tokens_used")
-    if out_tok == 0:
-        final_out_tok = _extract_json_int(raw, "output_tokens_used")
+    if not _json_optional_kind(parsed, "is_error", "boolean"):
+        return _invalid_cli_response(
+            raw, "claude CLI is_error field must be boolean"
+        )
+    if not _json_usage_kinds_valid(parsed):
+        return _invalid_cli_response(
+            raw, "claude CLI usage fields must be numeric"
+        )
+    val is_err = _json_bool(parsed, "is_error")
+    if not has_result and not has_structured and not is_err:
+        return _invalid_cli_response(raw, "claude CLI response is missing result")
+
+    var result_text = _json_text(parsed, "result")
+    if result_text == "" and has_structured:
+        result_text = _json_raw(parsed, "structured_output")
+    val model_text = _json_message_field(parsed, "model")
+    val session = _json_text(parsed, "session_id")
+    var final_in_tok = _json_usage_i64(parsed, "input_tokens")
+    var final_out_tok = _json_usage_i64(parsed, "output_tokens")
+    if final_in_tok == 0:
+        final_in_tok = _json_usage_i64(parsed, "input_tokens_used")
+    if final_out_tok == 0:
+        final_out_tok = _json_usage_i64(parsed, "output_tokens_used")
     var error_text = ""
     if is_err:
         error_text = result_text
         if error_text == "":
-            error_text = _extract_json_string(raw, "error")
-    var final_stop = stop
+            error_text = _json_text(parsed, "error")
+        if error_text == "":
+            error_text = _json_text(json_object_get(parsed, "error"), "message")
+        if error_text == "":
+            error_text = "claude CLI returned an error"
+    var final_stop = _json_text(parsed, "stop_reason")
     if final_stop == "":
         final_stop = "end_turn"
     if is_err:
@@ -213,7 +269,7 @@ pub fn parse_claude_json_response(raw: text) -> CliResponse:
     # raw CLI output echoed back for debugging) -- never from fields used
     # only internally for further parsing (already extracted above).
     CliResponse(
-        content: result_text,
+        content: if is_err: "" else: result_text,
         model: model_text,
         session_id: session,
         stop_reason: final_stop,
@@ -240,7 +296,20 @@ pub fn parse_claude_stream_line(line: text) -> CliStreamEvent:
             input_tokens: 0,
             output_tokens: 0
         )
-    val etype = _extract_json_string(trimmed, "type")
+    val parsed = json_parse(trimmed)
+    if parsed == nil or json_get_type(parsed) != "object":
+        return _invalid_stream_event("invalid JSON in claude CLI stream")
+    val etype = _json_text(parsed, "type")
+    if etype == "":
+        return _invalid_stream_event("claude CLI stream event is missing type")
+    if not _supported_stream_type(etype):
+        return _invalid_stream_event(
+            "unsupported claude CLI stream event type: " + etype
+        )
+    if not _json_usage_kinds_valid(parsed):
+        return _invalid_stream_event(
+            "claude CLI stream usage fields must be numeric"
+        )
     var content_val = ""
     var sid = ""
     var mdl = ""
@@ -248,25 +317,70 @@ pub fn parse_claude_stream_line(line: text) -> CliStreamEvent:
     var in_tok = 0
     var out_tok = 0
     if etype == "content_block_delta":
-        content_val = _extract_json_string(trimmed, "text")
+        val delta = json_object_get(parsed, "delta")
+        content_val = _json_text(delta, "text")
+        if content_val == "":
+            content_val = _json_text(delta, "partial_json")
     elif etype == "message_stop":
-        stop_val = _extract_json_string(trimmed, "stop_reason")
+        stop_val = _json_text(parsed, "stop_reason")
         if stop_val == "":
             stop_val = "end_turn"
     elif etype == "message_start":
-        mdl = _extract_json_string(trimmed, "model")
-        sid = _extract_json_string(trimmed, "session_id")
-    var final_etype = etype
-    if final_etype == "":
-        # Fallback: check for "result" field (final summary line)
-        val has_result = _extract_json_string(trimmed, "result")
-        if has_result != "":
-            final_etype = "result"
-            content_val = has_result
-        else:
-            final_etype = "unknown"
+        mdl = _json_message_field(parsed, "model")
+        sid = _json_text(parsed, "session_id")
+        in_tok = _json_message_usage_i64(parsed, "input_tokens")
+        out_tok = _json_message_usage_i64(parsed, "output_tokens")
+    elif etype == "message_delta":
+        stop_val = _json_text(json_object_get(parsed, "delta"), "stop_reason")
+        out_tok = _json_usage_i64(parsed, "output_tokens")
+    elif etype == "system":
+        # Claude Code stream-json init envelope.
+        sid = _json_text(parsed, "session_id")
+        mdl = _json_text(parsed, "model")
+    elif etype == "assistant":
+        # Claude Code stream-json assistant envelope. Aggregate all text
+        # blocks; tool-use details are delivered by their dedicated events.
+        content_val = _json_message_content(parsed)
+        sid = _json_text(parsed, "session_id")
+        mdl = _json_message_field(parsed, "model")
+        in_tok = _json_message_usage_i64(parsed, "input_tokens")
+        out_tok = _json_message_usage_i64(parsed, "output_tokens")
+    elif etype == "result":
+        # Claude Code final envelope.
+        if not _json_optional_kind(parsed, "is_error", "boolean"):
+            return _invalid_stream_event(
+                "claude CLI result is_error field must be boolean"
+            )
+        if json_object_has(parsed, "result") and
+           not _json_optional_kind(parsed, "result", "string"):
+            return _invalid_stream_event(
+                "claude CLI result field must be a string"
+            )
+        val result_is_error = _json_bool(parsed, "is_error")
+        if not json_object_has(parsed, "result") and
+           not json_object_has(parsed, "structured_output") and
+           not result_is_error:
+            return _invalid_stream_event(
+                "claude CLI result event is missing result"
+            )
+        content_val = _json_text(parsed, "result")
+        if content_val == "" and json_object_has(parsed, "structured_output"):
+            content_val = _json_raw(parsed, "structured_output")
+        sid = _json_text(parsed, "session_id")
+        mdl = _json_message_field(parsed, "model")
+        stop_val = _json_text(parsed, "stop_reason")
+        in_tok = _json_usage_i64(parsed, "input_tokens")
+        out_tok = _json_usage_i64(parsed, "output_tokens")
+        if result_is_error:
+            content_val = redact(content_val)
+            stop_val = "error"
+    elif etype == "error":
+        content_val = redact(_json_text(json_object_get(parsed, "error"), "message"))
+        if content_val == "":
+            content_val = "claude CLI stream error"
+        stop_val = "error"
     CliStreamEvent(
-        event_type: final_etype,
+        event_type: etype,
         content: content_val,
         session_id: sid,
         model: mdl,
@@ -279,7 +393,7 @@ pub fn parse_claude_stream_line(line: text) -> CliStreamEvent:
 # Impure Function: claude_cli_send
 # ============================================================================
 
-fn claude_cli_send(cli_path: text, prompt: text, model: text, system_prompt: text, session_id: text, max_turns: i64, max_tokens: i64, json_schema: text, tools: [text], extra_args: [text]) -> CliResponse:
+pub fn claude_cli_send(cli_path: text, prompt: text, model: text, system_prompt: text, session_id: text, max_turns: i64, max_tokens: i64, json_schema: text, tools: [text], extra_args: [text]) -> CliResponse:
     val args = build_claude_args(prompt, model, "json", system_prompt, session_id, max_turns, max_tokens, json_schema, tools, extra_args, false)
     val result = process_run(cli_path, args)
     val stdout = result.0 ?? ""
@@ -305,8 +419,8 @@ fn claude_cli_send(cli_path: text, prompt: text, model: text, system_prompt: tex
     parse_claude_json_response(stdout)
 
 # Stream execution: returns list of parsed NDJSON events
-fn claude_cli_stream(cli_path: text, prompt: text, model: text, system_prompt: text, session_id: text, max_turns: i64) -> [CliStreamEvent]:
-    val args = build_claude_args(prompt, model, "stream-json", system_prompt, session_id, max_turns, 0, "", [], [], false)
+pub fn claude_cli_stream(cli_path: text, prompt: text, model: text, system_prompt: text, session_id: text, max_turns: i64) -> [CliStreamEvent]:
+    val args = build_claude_stream_args(prompt, model, system_prompt, session_id, max_turns)
     val result = process_run(cli_path, args)
     val stdout = result.0 ?? ""
     val stderr = result.1 ?? ""
@@ -327,8 +441,36 @@ fn claude_cli_stream(cli_path: text, prompt: text, model: text, system_prompt: t
         )]
         return events
     val lines = stdout.split("\n")
+    var saw_event = false
+    var saw_terminal = false
     for line in lines:
         if line.trim() != "":
             val evt = parse_claude_stream_line(line)
             events = events + [evt]
+            if evt.event_type != "empty" and evt.stop_reason != "invalid":
+                saw_event = true
+            if evt.event_type == "result" or
+               evt.event_type == "message_stop" or
+               (evt.event_type == "error" and evt.stop_reason == "error"):
+                saw_terminal = true
+    if not saw_event:
+        return [CliStreamEvent(
+            event_type: "error",
+            content: "claude CLI returned no valid stream events",
+            session_id: "",
+            model: "",
+            stop_reason: "error",
+            input_tokens: 0,
+            output_tokens: 0
+        )]
+    if not saw_terminal:
+        events = events + [CliStreamEvent(
+            event_type: "error",
+            content: "claude CLI stream ended before a terminal event",
+            session_id: "",
+            model: "",
+            stop_reason: "error",
+            input_tokens: 0,
+            output_tokens: 0
+        )]
     events

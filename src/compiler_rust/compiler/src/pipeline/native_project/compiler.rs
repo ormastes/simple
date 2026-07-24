@@ -463,6 +463,17 @@ pub(crate) fn compile_file_to_object(
     let mut mir = crate::mir::lower_to_mir_with_global_trait_impls(&hir, imports.trait_impls.as_ref())
         .map_err(|e| format!("{}: mir: {e}", file_path.display()))?;
     let module_prefix = module_prefix_from_path(file_path, source_root);
+    qualify_native_struct_layouts(
+        &mut mir,
+        &module_prefix,
+        &use_map,
+        imports.import_map.as_ref(),
+        imports.ambiguous_names.as_ref(),
+        imports.all_mangled.as_ref(),
+        imports.vtable_type_owners.as_ref(),
+        imports.vtable_symbols.as_ref(),
+    )
+    .map_err(|e| format!("{}: {e}", file_path.display()))?;
     let enum_runtime_module_name = enum_runtime_module_name_from_path(file_path, enum_runtime_root);
     qualify_enum_runtime_names(
         &mut mir,
@@ -582,6 +593,32 @@ pub(crate) fn compile_file_to_object(
     let use_llvm = backend == "llvm";
 
     if use_llvm {
+        let requires_vtable_object_abi = !mir.vtable_impls.is_empty()
+            || mir.functions.iter().any(|function| {
+                function.blocks.iter().any(|block| {
+                    block.instructions.iter().any(|instruction| {
+                        matches!(
+                            instruction,
+                            crate::mir::MirInst::StructInit {
+                                vtable_symbol: Some(_),
+                                ..
+                            } | crate::mir::MirInst::FieldGet {
+                                owner_has_vtable: Some(true),
+                                ..
+                            } | crate::mir::MirInst::FieldSet {
+                                owner_has_vtable: Some(true),
+                                ..
+                            }
+                        )
+                    })
+                })
+            });
+        if requires_vtable_object_abi {
+            return Err(format!(
+                "{}: LLVM native-project backend does not yet implement qualified vtable object layout; use Cranelift",
+                file_path.display()
+            ));
+        }
         #[cfg(feature = "llvm")]
         {
             use crate::codegen::backend_trait::NativeBackend;
@@ -1229,4 +1266,155 @@ mod bootstrap_rewrite_tests {
         );
         assert!(out.contains("dict[k]\n"), "got: {out}");
     }
+}
+fn qualify_native_struct_layouts(
+    mir: &mut crate::mir::MirModule,
+    module_prefix: &str,
+    use_map: &std::collections::HashMap<String, String>,
+    import_map: &std::collections::HashMap<String, String>,
+    ambiguous_names: &std::collections::HashSet<String>,
+    all_mangled: &std::collections::HashMap<String, Vec<String>>,
+    vtable_type_owners: &std::collections::HashSet<String>,
+    vtable_symbols: &std::collections::HashMap<String, String>,
+) -> Result<(), String> {
+    use crate::mir::MirInst;
+
+    let local_names = mir.local_globals.clone();
+    let resolve_exact_owner = |name: &str| -> Option<(String, bool)> {
+        if local_names.contains(name) {
+            return Some((format!("{module_prefix}__{name}"), true));
+        }
+        if let Some(owner) = use_map.get(name) {
+            return Some((owner.clone(), false));
+        }
+        import_map
+            .get(name)
+            .cloned()
+            .map(|owner| (owner, false))
+    };
+
+    // The backend's local vtable map and local StructInit must use the same
+    // collision-free owner key as imported field accesses. Exported data names
+    // include that owner so independently compiled providers cannot collide.
+    for (_, owner_name, vtable_symbol, _, export_symbol) in &mut mir.vtable_impls {
+        let bare_owner = owner_name.clone();
+        let (owner, _) = resolve_exact_owner(&bare_owner).ok_or_else(|| {
+            format!("native object layout: unresolved local vtable owner `{bare_owner}`")
+        })?;
+        let trait_name = vtable_symbol
+            .rsplit_once("__for__")
+            .map(|(_, trait_name)| trait_name)
+            .ok_or_else(|| format!("native object layout: malformed vtable symbol `{vtable_symbol}`"))?;
+        *vtable_symbol = format!("__vtable__{owner}__for__{trait_name}").replace('.', "_dot_");
+        *owner_name = owner;
+        *export_symbol = true;
+    }
+    let emitted_vtables: std::collections::HashSet<(String, String)> = mir
+        .vtable_impls
+        .iter()
+        .map(|(_, owner, symbol, _, _)| (owner.clone(), symbol.clone()))
+        .collect();
+
+    for function in &mut mir.functions {
+        for block in &mut function.blocks {
+            for instruction in &mut block.instructions {
+                match instruction {
+                    MirInst::StructInit {
+                        struct_name: Some(name),
+                        vtable_symbol,
+                        ..
+                    } => {
+                        if let Some((owner, _)) = resolve_exact_owner(name) {
+                            if vtable_type_owners.contains(&owner) {
+                                let selected_symbol = vtable_symbols.get(&owner).cloned().ok_or_else(|| {
+                                    format!(
+                                        "native object layout: vtable-bearing type `{name}` has no provider vtable symbol"
+                                    )
+                                })?;
+                                if !emitted_vtables.contains(&(owner.clone(), selected_symbol.clone())) {
+                                    *vtable_symbol = Some(selected_symbol);
+                                }
+                            }
+                            *name = owner;
+                        } else if ambiguous_names.contains(name) {
+                            let suffix = format!("__{name}");
+                            let mut owners: Vec<String> = all_mangled
+                                .get(name)
+                                .into_iter()
+                                .flatten()
+                                .filter(|candidate| candidate.ends_with(&suffix))
+                                .cloned()
+                                .collect();
+                            owners.sort();
+                            owners.dedup();
+                            if owners.len() > 1 {
+                                return Err(format!(
+                                    "native object layout: ambiguous constructor `{name}` has multiple providers; import it from an explicit module"
+                                ));
+                            }
+                        }
+                    }
+                    MirInst::FieldGet {
+                        owner_name: Some(name),
+                        owner_has_vtable,
+                        ..
+                    }
+                    | MirInst::FieldSet {
+                        owner_name: Some(name),
+                        owner_has_vtable,
+                        ..
+                    } => {
+                        if let Some((owner, _)) = resolve_exact_owner(name) {
+                            *owner_has_vtable = Some(vtable_type_owners.contains(&owner));
+                            *name = owner;
+                        } else if ambiguous_names.contains(name) {
+                            let suffix = format!("__{name}");
+                            let mut candidate_layouts: Vec<bool> = all_mangled
+                                .get(name)
+                                .into_iter()
+                                .flatten()
+                                .filter(|candidate| candidate.ends_with(&suffix))
+                                .map(|candidate| vtable_type_owners.contains(candidate))
+                                .collect();
+                            candidate_layouts.sort_unstable();
+                            candidate_layouts.dedup();
+                            match candidate_layouts.as_slice() {
+                                [has_vtable] => *owner_has_vtable = Some(*has_vtable),
+                                _ => {
+                                    return Err(format!(
+                                        "native object layout: ambiguous owner `{name}` has incompatible header layouts; import it from an explicit module"
+                                    ));
+                                }
+                            }
+                        } else {
+                            // The project-wide scan is exhaustive for trait
+                            // implementations. An unresolved builtin/generic
+                            // owner therefore has no native object header.
+                            *owner_has_vtable = Some(false);
+                        }
+                    }
+                    MirInst::FieldGet {
+                        owner_name: None,
+                        owner_has_vtable,
+                        ..
+                    }
+                    | MirInst::FieldSet {
+                        owner_name: None,
+                        owner_has_vtable,
+                        ..
+                    } => {
+                        // Do not fall back to the per-module numeric TypeId in
+                        // whole-project native codegen. Erased/ANY accesses
+                        // have no proof of a header; preserve legacy raw layout
+                        // while making the decision authoritative and
+                        // collision-free.
+                        *owner_has_vtable = Some(false);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    Ok(())
 }

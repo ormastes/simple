@@ -211,6 +211,7 @@ class VulkanBackend:
     initialized: bool
     dirty: bool                  # True when GPU has changes not yet copied to host
     cpu_fallback_used: bool      # Sticky conservative provenance for this backend lifetime
+    cpu_fallback_reason: text    # First transition reason; empty while device-only
     completion_unknown: bool    # True when dependent Vulkan work may still be in flight
     session: VulkanSession       # Shared session (null-like when not session-owned)
     owns_session: bool           # True when this backend must release the session
@@ -264,6 +265,7 @@ class VulkanBackend:
             initialized: false,
             dirty: false,
             cpu_fallback_used: false,
+            cpu_fallback_reason: "",
             completion_unknown: false,
             session: VulkanSession.create(),
             owns_session: false,
@@ -313,10 +315,12 @@ impl Engine2DExtended for VulkanBackend:
             device_name: "", device_type: "", driver_identity: ""
         )
 
-    # Phase 1 fallback: pre-fill a cell via the compute `rect_filled`.
+    # Rasterize glyph coverage on the CPU, then perform the framebuffer write
+    # through the fenced Vulkan image-composite path. CPU glyph generation is
+    # analogous to preparing a texture; it does not make the final framebuffer
+    # a CPU mirror when the device composite succeeds.
     me draw_text_bg(x: i32, y: i32, text_val: text, fg: u32, bg: u32, font_size: i32):
         if self.completion_unknown: return
-        self.cpu_fallback_used = true
         if not self.initialized:
             self.dirty = true
             return
@@ -415,7 +419,15 @@ impl RenderBackend for VulkanBackend:
         self.clip_enabled = false
         self.initialized = true
         self.dirty = false
+        self.cpu_fallback_used = false
+        self.cpu_fallback_reason = ""
         true
+
+    me mark_cpu_fallback(reason: text):
+        """Record the first operation that forced host framebuffer mutation."""
+        if not self.cpu_fallback_used:
+            self.cpu_fallback_reason = reason
+        self.cpu_fallback_used = true
 
     me mark_completion_unknown():
         self.completion_unknown = true
@@ -502,7 +514,7 @@ impl RenderBackend for VulkanBackend:
         if dispatched > 0:
             self.dirty = true
         else:
-            self.cpu_fallback_used = true
+            self.mark_cpu_fallback("clear-dispatch-failed")
             if dispatched < 0:
                 self.completion_unknown = true
             elif self.initialized and self.d_framebuffer > 0:
@@ -522,7 +534,7 @@ impl RenderBackend for VulkanBackend:
             if pixel_count <= 0:
                 return
             if pixel_count > 2147483647:
-                self.cpu_fallback_used = true
+                self.mark_cpu_fallback("alpha-rect-size-overflow")
                 return
             val pixels: [u32] = [color; w * h]
             self.draw_image_blend(x, y, w, h, pixels)
@@ -534,7 +546,7 @@ impl RenderBackend for VulkanBackend:
         if dispatched > 0:
             self.dirty = true
         else:
-            self.cpu_fallback_used = true
+            self.mark_cpu_fallback("rect-dispatch-failed")
             if dispatched < 0:
                 self.completion_unknown = true
             elif self.initialized and self.d_framebuffer > 0:
@@ -610,10 +622,13 @@ impl RenderBackend for VulkanBackend:
 
     me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
         if self.completion_unknown: return
-        # Text rendering on GPU is complex; fall back to CPU-side rendering
-        # then upload the affected region. For production, a glyph atlas
-        # texture would be uploaded and sampled by a kernel.
-        self._gpu_draw_text_fallback(x, y, text_val, color, font_size)
+        if not self.initialized:
+            self.dirty = true
+            return
+        val text_buf = text_blit_buffer(text_val, color, 0x00000000u32, font_size)
+        if text_buf.is_empty():
+            return
+        self.draw_image_blend(x, y, text_buf.width, text_buf.height, text_buf.pixels)
 
     me _draw_image_composite_native(x: i32, y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32], opacity_milli: i32, composite_mode: i32, require_wholly_bounded: bool) -> i64:
         if self.completion_unknown or not self.initialized or self.d_framebuffer <= 0 or self.pipe_blit <= 0:
@@ -662,7 +677,7 @@ impl RenderBackend for VulkanBackend:
         if dispatched > 0:
             self.dirty = true
             if dispatched == VK_DISPATCH_COMPLETED_INELIGIBLE:
-                self.cpu_fallback_used = true
+                self.mark_cpu_fallback("image-composite-cleanup-ineligible")
         dispatched
 
     me _draw_image_native(x: i32, y: i32, w: i32, h: i32, pixels: [u32]) -> i64:
@@ -688,7 +703,7 @@ impl RenderBackend for VulkanBackend:
         val status = self._draw_image_blend_native(x, y, w, h, pixels, opacity_milli)
         if status == 1:
             return true
-        self.cpu_fallback_used = true
+        self.mark_cpu_fallback("checked-image-blend-failed")
         if status < 0:
             self.completion_unknown = true
         false
@@ -699,10 +714,10 @@ impl RenderBackend for VulkanBackend:
         if native_status > 0:
             return
         if native_status < 0:
-            self.cpu_fallback_used = true
+            self.mark_cpu_fallback("image-copy-completion-unknown")
             self.completion_unknown = true
             return
-        self.cpu_fallback_used = true
+        self.mark_cpu_fallback("image-copy-host-fallback")
         if self.dirty:
             val fb_size = _i64(self.w) * _i64(self.h) * 4
             val fb_bytes = vulkan_sffi_read_buffer_bytes(self.d_framebuffer, fb_size, 0)
@@ -841,6 +856,37 @@ impl RenderBackend for VulkanBackend:
 
     me draw_gradient_rect_h(x: i32, y: i32, w: i32, h: i32, left_color: u32, right_color: u32):
         if self.completion_unknown: return
+        if self.mask_buf.len() > 0 and w > 0 and h > 0:
+            var pixels: [u32] = [0u32; w * h]
+            var py = 0
+            while py < h:
+                var px = 0
+                while px < w:
+                    val denom = if w > 1: w - 1 else: 1
+                    val rr = color_r(left_color) + (color_r(right_color) - color_r(left_color)) * px / denom
+                    val gg = color_g(left_color) + (color_g(right_color) - color_g(left_color)) * px / denom
+                    val bb = color_b(left_color) + (color_b(right_color) - color_b(left_color)) * px / denom
+                    val aa = color_a(left_color) + (color_a(right_color) - color_a(left_color)) * px / denom
+                    val dx = x + px
+                    val dy = y + py
+                    val mask_index = dy * self.mask_w + dx
+                    if (dx >= 0 and dy >= 0 and mask_index >= 0 and
+                            mask_index < self.mask_buf.len() and
+                            self.mask_buf[mask_index] != 0u8):
+                        pixels[py * w + px] = rgba(rr, gg, bb, aa)
+                    px = px + 1
+                py = py + 1
+            val saved_mask = self.mask_buf
+            val saved_mask_w = self.mask_w
+            val saved_mask_h = self.mask_h
+            self.mask_buf = []
+            self.mask_w = 0
+            self.mask_h = 0
+            self.draw_image_blend(x, y, w, h, pixels)
+            self.mask_buf = saved_mask
+            self.mask_w = saved_mask_w
+            self.mask_h = saved_mask_h
+            return
         emu_draw_gradient_rect_h(self, x, y, w, h, left_color, right_color)
 
     me draw_radial_gradient(cx: i32, cy: i32, r: i32, center_color: u32, edge_color: u32):
@@ -857,10 +903,10 @@ impl RenderBackend for VulkanBackend:
         if native_status > 0:
             return
         if native_status < 0:
-            self.cpu_fallback_used = true
+            self.mark_cpu_fallback("image-blend-completion-unknown")
             self.completion_unknown = true
             return
-        self.cpu_fallback_used = true
+        self.mark_cpu_fallback("image-blend-host-fallback")
         emu_draw_image_blend(self, x, y, w, h, pixels)
 
     me draw_image_scaled(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]):
@@ -871,10 +917,10 @@ impl RenderBackend for VulkanBackend:
         if native_status > 0:
             return
         if native_status < 0:
-            self.cpu_fallback_used = true
+            self.mark_cpu_fallback("scaled-image-completion-unknown")
             self.completion_unknown = true
             return
-        self.cpu_fallback_used = true
+        self.mark_cpu_fallback("scaled-image-host-fallback")
         emu_draw_image_scaled(self, dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
 
     me draw_image_scaled_blend(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]):
@@ -885,10 +931,10 @@ impl RenderBackend for VulkanBackend:
         if native_status > 0:
             return
         if native_status < 0:
-            self.cpu_fallback_used = true
+            self.mark_cpu_fallback("scaled-image-blend-completion-unknown")
             self.completion_unknown = true
             return
-        self.cpu_fallback_used = true
+        self.mark_cpu_fallback("scaled-image-blend-host-fallback")
         emu_draw_image_scaled_blend(self, dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
 
     me draw_triangle_outline(x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32, thickness: i32):
@@ -905,7 +951,6 @@ impl RenderBackend for VulkanBackend:
 
     me draw_image_transform(dst_x: i32, dst_y: i32, src_w: i32, src_h: i32, a: i32, b: i32, c: i32, d: i32, tx: i32, ty: i32, pixels: [u32]):
         if self.completion_unknown: return
-        self.cpu_fallback_used = true
         emu_draw_image_transform(self, dst_x, dst_y, src_w, src_h, a, b, c, d, tx, ty, pixels)
 
     me draw_rect_blend_mode(x: i32, y: i32, w: i32, h: i32, color: u32, mode: i32):

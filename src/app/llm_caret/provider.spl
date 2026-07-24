@@ -4,6 +4,7 @@
 # Uses if/elif routing (no dynamic dispatch).
 
 use app.io.mod.{process_run}
+use app.llm_caret.claude_cli.{claude_cli_send}
 use app.llm_caret.opencode_cli.{opencode_cli_send}
 use app.llm_caret.retry.{retry_policy_from_env, with_retry}
 use app.llm_caret.json_helpers.{json_find, json_parse_int}
@@ -153,8 +154,36 @@ fn is_valid_provider(provider: text) -> bool:
 # ============================================================================
 
 fn dispatch_send(provider: text, prompt: text, model: text, api_key: text, base_url: text, cli_path: text, system_prompt: text, session_id: text, max_turns: i64, max_tokens: i64, messages_json: text) -> LLMResponse:
+    dispatch_send_advanced(
+        provider, prompt, model, api_key, base_url, cli_path,
+        system_prompt, session_id, max_turns, max_tokens, messages_json,
+        "", [], []
+    )
+
+fn dispatch_send_advanced(
+    provider: text,
+    prompt: text,
+    model: text,
+    api_key: text,
+    base_url: text,
+    cli_path: text,
+    system_prompt: text,
+    session_id: text,
+    max_turns: i64,
+    max_tokens: i64,
+    messages_json: text,
+    json_schema: text,
+    tools: [text],
+    extra_args: [text]
+) -> LLMResponse:
     if not is_valid_provider(provider):
         return new_llm_error(provider, "unknown provider: " + provider)
+    if provider != "claude_cli" and
+       (json_schema != "" or tools.len() > 0 or extra_args.len() > 0):
+        return new_llm_error(
+            provider,
+            "schema, tools, and extra CLI arguments require claude_cli"
+        )
 
     if provider == "dummy":
         return LLMResponse(
@@ -170,7 +199,10 @@ fn dispatch_send(provider: text, prompt: text, model: text, api_key: text, base_
             raw: ""
         )
     elif provider == "claude_cli":
-        return _dispatch_claude_cli(cli_path, prompt, model, system_prompt, session_id, max_turns, max_tokens)
+        return _dispatch_claude_cli(
+            cli_path, prompt, model, system_prompt, session_id,
+            max_turns, max_tokens, json_schema, tools, extra_args
+        )
     elif provider == "opencode_cli":
         return _dispatch_opencode_cli(cli_path, prompt, model, session_id)
     elif provider == "claude_api":
@@ -201,67 +233,36 @@ fn _dispatch_opencode_cli(cli_path: text, prompt: text, model: text, session_id:
 # Claude CLI dispatch
 # ============================================================================
 
-fn _build_cli_args(prompt: text, model: text, system_prompt: text, session_id: text, max_turns: i64, max_tokens: i64) -> [text]:
-    var args: [text] = []
-    args = args + ["-p", prompt]
-    args = args + ["--output-format", "json"]
-    if model != "":
-        args = args + ["--model", model]
-    if system_prompt != "":
-        args = args + ["--system-prompt", system_prompt]
-    if session_id != "":
-        args = args + ["--resume", session_id]
-    if max_turns > 0:
-        args = args + ["--max-turns", max_turns.to_text()]
-    if max_tokens > 0:
-        args = args + ["--max-tokens", max_tokens.to_text()]
-    args
-
-fn _dispatch_claude_cli(cli_path: text, prompt: text, model: text, system_prompt: text, session_id: text, max_turns: i64, max_tokens: i64) -> LLMResponse:
+fn _dispatch_claude_cli(
+    cli_path: text,
+    prompt: text,
+    model: text,
+    system_prompt: text,
+    session_id: text,
+    max_turns: i64,
+    max_tokens: i64,
+    json_schema: text,
+    tools: [text],
+    extra_args: [text]
+) -> LLMResponse:
     var path = cli_path
     if path == "":
         path = "claude"
-    val args = _build_cli_args(prompt, model, system_prompt, session_id, max_turns, max_tokens)
-    val result = process_run(path, args)
-    val stdout = result.0 ?? ""
-    val stderr = result.1 ?? ""
-    val exit_code = result.2
-    if exit_code != 0:
-        var err_msg = "claude CLI exited with code " + exit_code.to_text()
-        if stderr != "":
-            err_msg = err_msg + ": " + stderr
-        return new_llm_error("claude_cli", err_msg)
-    # Parse JSON response
-    val content = _extract_json_string(stdout, "result")
-    val resp_model = _extract_json_string(stdout, "model")
-    val sess = _extract_json_string(stdout, "session_id")
-    val is_err = _extract_json_bool(stdout, "is_error")
-    val in_tok = _extract_json_int(stdout, "input_tokens")
-    val out_tok = _extract_json_int(stdout, "output_tokens")
-    if is_err:
-        return LLMResponse(
-            content: "",
-            model: resp_model,
-            provider: "claude_cli",
-            session_id: sess,
-            stop_reason: "error",
-            input_tokens: in_tok,
-            output_tokens: out_tok,
-            error: content,
-            is_error: true,
-            raw: stdout
-        )
+    val resp = claude_cli_send(
+        path, prompt, model, system_prompt, session_id, max_turns, max_tokens,
+        json_schema, tools, extra_args
+    )
     LLMResponse(
-        content: content,
-        model: resp_model,
+        content: resp.content,
+        model: resp.model,
         provider: "claude_cli",
-        session_id: sess,
-        stop_reason: "end_turn",
-        input_tokens: in_tok,
-        output_tokens: out_tok,
-        error: "",
-        is_error: false,
-        raw: stdout
+        session_id: resp.session_id,
+        stop_reason: resp.stop_reason,
+        input_tokens: resp.input_tokens,
+        output_tokens: resp.output_tokens,
+        error: resp.error,
+        is_error: resp.is_error,
+        raw: resp.raw
     )
 
 # ============================================================================

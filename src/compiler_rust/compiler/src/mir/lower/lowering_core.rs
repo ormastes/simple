@@ -1454,6 +1454,7 @@ impl<'a> MirLowerer<'a> {
                             hir_impl.type_name.clone(),
                             vtable_sym,
                             method_fns,
+                            false,
                         ));
                     }
                 }

@@ -1560,6 +1560,7 @@ fn codegen_text_eq_uses_string_eq_not_native_eq() {
             dest: object,
             type_id: TypeId::I64,
             struct_name: None,
+            vtable_symbol: None,
             struct_size: 16,
             field_offsets: vec![0, 8],
             field_types: vec![TypeId::STRING, TypeId::STRING],
@@ -1568,12 +1569,16 @@ fn codegen_text_eq_uses_string_eq_not_native_eq() {
         block.instructions.push(MirInst::FieldGet {
             dest: left,
             object,
+            owner_name: None,
+            owner_has_vtable: None,
             byte_offset: 0,
             field_type: TypeId::STRING,
         });
         block.instructions.push(MirInst::FieldGet {
             dest: right,
             object,
+            owner_name: None,
+            owner_has_vtable: None,
             byte_offset: 8,
             field_type: TypeId::STRING,
         });

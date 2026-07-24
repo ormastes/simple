@@ -41,9 +41,15 @@ done
 # Locate a GUI-enabled driver (contains the winit runtime).
 gui_bin=""
 for c in \
-  "$repo_root/src/compiler_rust/target/gui/debug/simple" \
-  "$repo_root/src/compiler_rust/target/gui/release/simple"; do
-  if [[ -x "$c" ]] && LC_ALL=C grep -aq "rt_winit_event_loop_new" "$c"; then gui_bin="$c"; break; fi
+  "$repo_root/src/compiler_rust/target/gui/release/simple" \
+  "$repo_root/src/compiler_rust/target/gui/debug/simple"; do
+  # Release linking may strip the raw extern symbol name even though the GUI
+  # feature and embedded window module are present. Accept either marker.
+  if [[ -x "$c" ]] && LC_ALL=C grep -aq \
+      -e "rt_winit_event_loop_new" -e "window_winitmodule.smf" "$c"; then
+    gui_bin="$c"
+    break
+  fi
 done
 if [[ -z "$gui_bin" ]]; then
   echo "error: no GUI-enabled driver found." >&2
@@ -72,9 +78,19 @@ cat > "$app/Contents/Info.plist" <<PLIST
     <key>SIMPLE_GUI</key><string>1</string>
     <key>SIMPLE_EXECUTION_MODE</key><string>interpret</string>
     <key>SIMPLE_LIB</key><string>${SIMPLE_LIB:-$repo_root/src}</string>
-    <key>SIMPLE_TIMEOUT_SECONDS</key><string>${SIMPLE_TIMEOUT_SECONDS:-120}</string>
+    <!-- GUI sessions are intentionally long-lived. A positive example timeout
+         makes the driver fork an unregistered child, which cannot own an Aqua
+         window. Callers that launch a compiled non-example artifact may still
+         opt into a bounded timeout explicitly. -->
+    <key>SIMPLE_TIMEOUT_SECONDS</key><string>${SIMPLE_TIMEOUT_SECONDS:-0}</string>
     <key>SIMPLE_EVT_LOG</key><string>${SIMPLE_EVT_LOG:-}</string>
     <key>SIMPLE_GUI_EVENT_EVIDENCE_PATH</key><string>${SIMPLE_GUI_EVENT_EVIDENCE_PATH:-}</string>
+    <key>SIMPLE_GUI_BACKEND</key><string>${SIMPLE_GUI_BACKEND:-}</string>
+    <key>SIMPLE_GUI_EXIT_AFTER_INTERACTION</key><string>${SIMPLE_GUI_EXIT_AFTER_INTERACTION:-}</string>
+    <key>SHOWCASE_RESOLUTION</key><string>${SHOWCASE_RESOLUTION:-}</string>
+    <key>SHOWCASE_DPI</key><string>${SHOWCASE_DPI:-}</string>
+    <key>VK_ICD_FILENAMES</key><string>${VK_ICD_FILENAMES:-}</string>
+    <key>DYLD_LIBRARY_PATH</key><string>${DYLD_LIBRARY_PATH:-}</string>
   </dict>
 </dict>
 </plist>
@@ -83,9 +99,9 @@ PLIST
 echo "launching $program as $app ..."
 echo "app stdout: $app/../launch.out  stderr: $app/../launch.err"
 if [[ "${#program_args[@]}" -gt 0 ]]; then
-  open -n --stdout "$app/../launch.out" --stderr "$app/../launch.err" "$app" --args run "$program" "${program_args[@]}"
+  open -n --stdout "$app/../launch.out" --stderr "$app/../launch.err" "$app" --args run "$program" --no-daemon "${program_args[@]}"
 else
-  open -n --stdout "$app/../launch.out" --stderr "$app/../launch.err" "$app" --args run "$program"
+  open -n --stdout "$app/../launch.out" --stderr "$app/../launch.err" "$app" --args run "$program" --no-daemon
 fi
 
 if [[ "${SIMPLE_GUI_RUN_SKIP_NUDGE:-0}" = "1" ]]; then

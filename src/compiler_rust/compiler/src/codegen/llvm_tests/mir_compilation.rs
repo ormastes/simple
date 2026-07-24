@@ -258,6 +258,8 @@ fn test_mir_method_call_static_struct_receiver_ir() {
     method.blocks[0].instructions.push(MirInst::FieldGet {
         dest: field,
         object: recv_val,
+        owner_name: None,
+        owner_has_vtable: None,
         byte_offset: 0,
         field_type: T::I64,
     });

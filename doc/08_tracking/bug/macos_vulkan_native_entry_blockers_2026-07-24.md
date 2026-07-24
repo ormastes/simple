@@ -174,3 +174,81 @@ Three bounded canonical Engine2D launch cycles were used:
 Per the mandatory three-cycle guard, no further Engine2D retry was made.
 Vulkan readback/render capture and event evidence remain unproven, so web,
 GUI, WM, Metal, and QEMU checks must not yet be treated as reached.
+
+## Update — canonical macOS wrapper and interpreter entry audit
+
+The host environment is ready: `vulkaninfo --summary` reports Apple M4 through
+MoltenVK. Two wrapper defects were repaired:
+
+- default discovery no longer selects the checked-in x86_64 Linux executable
+  on arm64 macOS;
+- copied Rust seed releases are rejected and canonical pure-Simple
+  `bin/simple` is preferred;
+- the Engine2D runner now uses `simple run <source> --mode=interpreter`, so the
+  mode flag is consumed by the CLI rather than passed to the application.
+
+After those repairs the canonical probe reaches the intended interpreter path
+without the former arm64 Cranelift branch-range panic. Its current terminal
+evidence is:
+
+```text
+vulkan_probe_status=Unavailable
+vulkan_probe_diagnostic=...Vulkan shared session initialization failed: 1
+```
+
+The remaining cause is specific and independent of the already-repaired
+feature-built native runtime. The classic interpreter implementation in
+`src/compiler_rust/compiler/src/interpreter_extern/gpu.rs` creates a Vulkan
+instance with zero extensions and zero flags. On macOS/MoltenVK it must enable
+`VK_KHR_portability_enumeration` and set
+`VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR`, matching
+`runtime/src/vulkan/instance.rs`. This session reached its three-cycle limit,
+so that provider change and the next Engine2D launch are deferred to the next
+bounded verification session rather than retried here.
+
+## Update — interpreter provider and headless Engine2D PASS; full showcase provenance blocked
+
+The classic interpreter now loads the Darwin Vulkan dylibs, enables the
+MoltenVK portability-enumeration contract, and returns the native ABI success
+value from an idempotent shutdown. The provider probe reports one Apple M4
+device. The canonical headless Engine2D gate also passes exact clear/rectangle
+readback and CPU/Vulkan parity:
+
+```text
+vulkan_probe_status=Initialized
+backend_name=vulkan
+clear_mismatches=0
+rect_mismatches=0
+present_exercised=true
+readback_exercised=true
+overall=pass
+```
+
+The live macOS GUI path exposed and repaired three separate startup issues:
+
+1. release GUI binaries may strip the raw `rt_winit_event_loop_new` symbol, so
+   the launcher also recognizes the embedded `window_winitmodule.smf` marker;
+2. the launcher now prefers release over debug GUI drivers and forwards the
+   backend, resolution, MoltenVK, and event-evidence environment;
+3. source examples must use `SIMPLE_TIMEOUT_SECONDS=0`; a positive examples
+   timeout forks an unregistered child that cannot own an Aqua window.
+
+The full showcase now reaches rendering with the requested Vulkan backend, but
+its strict readback still reports:
+
+```text
+graphics_2d_requested_backend=vulkan
+graphics_2d_backend=vulkan
+graphics_2d_source=cpu_fallback
+graphics_2d_backend_handle=0
+graphics_2d_semantic_differences=4
+```
+
+Text and transformed-image staging were moved onto fenced Vulkan compositing,
+and masked horizontal gradients now pre-mask their source before Vulkan
+src-over compositing. A remaining operation still sets the backend's sticky
+`cpu_fallback_used` flag. Because all three bounded live cycles were consumed,
+the next session must isolate the first remaining fallback transition with
+per-operation provenance before another full live launch. Window capture and
+keyboard/pointer/click evidence remain blocked behind that strict device
+readback gate; web, GUI widgets, WM, Metal, and QEMU were not started.

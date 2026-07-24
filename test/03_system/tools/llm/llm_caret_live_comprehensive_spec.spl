@@ -5,10 +5,7 @@
 # COST: ~$1-2 per full run (uses real Claude API)
 # RUNTIME: ~2-3 minutes for all tests
 #
-# Run with: CLAUDECODE= bin/simple test test/system/llm_caret_live_comprehensive_spec.spl
-#
-# NOTE: Simple test runner in interpreter mode does NOT execute it blocks.
-#       This file is structured for manual execution or future compiled mode.
+# Run with: CLAUDECODE= bin/simple test test/03_system/tools/llm/llm_caret_live_comprehensive_spec.spl
 #
 # Tests verify:
 #   1. Single-shot responses (5 tests)
@@ -18,9 +15,114 @@
 #   5. Shopping list state tracking (5 turns, 4 tests)
 #   6. Edge cases (2 tests)
 
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-extern fn rt_env_set(key: text, value: text)
-extern fn rt_env_get(key: text) -> text
+"""
+# LLM Caret Comprehensive Live Integration Specification
+
+**Requirement IDs:** REQ-LLM-CARET-FULL-003
+**Category:** Tooling
+**Status:** Offline fixture by default; long live execution is double opt-in
+**Requirements:** doc/02_requirements/feature/llm_caret_claude_cli_full_parity.md
+**Research:** doc/01_research/local/llm_caret_claude_cli_harden.md
+**Plan:** doc/03_plan/sys_test/llm_caret_claude_cli_harden.md
+**Design:** doc/05_design/llm_caret_claude_cli_harden.md
+
+## Overview
+
+This comprehensive suite extends the bounded CLI contract with deterministic
+single-shot, system-prompt, six-turn resume, tutor, state-tracking, repetition,
+and exact-phrase scenarios.
+
+All scenarios execute offline by default. Paid single-shot calls require
+`SIMPLE_LLM_COMPREHENSIVE_LIVE=1`. Paid long-conversation calls additionally
+require `SIMPLE_LLM_LONG_LIVE=1`.
+
+## Syntax
+
+```bash
+bin/simple test test/03_system/tools/llm/llm_caret_live_comprehensive_spec.spl --mode=interpreter
+SIMPLE_LLM_COMPREHENSIVE_LIVE=1 SIMPLE_LLM_LONG_LIVE=1 bin/simple test test/03_system/tools/llm/llm_caret_live_comprehensive_spec.spl --mode=interpreter
+```
+
+## Safety Gates
+
+The two live controls are independent:
+
+- comprehensive live enables ordinary provider calls;
+- long live enables multi-turn provider calls;
+- long scenarios remain deterministic unless both are enabled;
+- no scenario uses a placeholder pass;
+- no scenario treats a disabled live gate as success evidence.
+
+## Section 1: Single Shot
+
+The suite checks:
+
+- exact marker text;
+- deterministic arithmetic;
+- provider identity;
+- session identity;
+- positive token usage.
+
+## Section 2: System Prompt
+
+The suite checks:
+
+- pirate persona adherence;
+- CSV-only formatting.
+
+## Section 3: Six-Turn Resume
+
+One session establishes `ORBIT-73`, then five resumed turns must recall it.
+Every turn checks the process result and structured content.
+
+## Section 4: Code Tutor
+
+Five resumed turns build an explanation of immutable and mutable values. The
+middle and summary turns must retain both concepts.
+
+## Section 5: Mutable State
+
+Five resumed turns create a shopping list, remove bread, add tea, and confirm
+the final list. The final state must contain apples, coffee, and tea while
+excluding bread.
+
+## Section 6: Edge Cases
+
+The suite counts exactly five `PLATYPUS` occurrences and checks an exact phrase
+request contains the complete normalized phrase.
+
+## Failure Handling
+
+Each subprocess result exposes stdout, stderr, and exit code. A nonzero exit or
+missing structured field fails the scenario. Conversation scenarios reuse the
+first returned session identifier.
+
+## Evidence Boundary
+
+The offline path proves deterministic orchestration and assertions. The
+double-opt-in live path additionally proves authenticated remote conversation
+resume. Neither path replaces full TUI interaction evidence.
+
+## Execution Modes
+
+Offline mode is the required continuous-integration path because it is stable,
+free, and independent of account state.
+
+Comprehensive live mode is an operator diagnostic for ordinary prompts.
+
+Long live mode is an operator diagnostic for session-resume behavior.
+
+Operators must retain the exact environment gates in captured evidence so an
+offline fixture pass is never mislabeled as remote-provider evidence.
+
+## Manual Policy
+
+Every scenario is visible in the generated manual as an advanced slow scenario.
+Long scenarios are executable and folded; there are no skip-only helpers.
+"""
+
+use std.spec.*
+use std.io_runtime.{env_get, env_set, process_run}
 
 # ============================================================================
 # JSON helpers (inlined)
@@ -82,7 +184,7 @@ fn _extract_json_int(json: text, key: text) -> i64:
 # ============================================================================
 
 fn _run_comprehensive_live() -> bool:
-    val flag = rt_env_get("SIMPLE_LLM_COMPREHENSIVE_LIVE") ?? ""
+    val flag = env_get("SIMPLE_LLM_COMPREHENSIVE_LIVE") ?? ""
     flag == "1" or flag == "true"
 
 fn _mock_claude_result(prompt: text) -> text:
@@ -104,6 +206,24 @@ fn _mock_claude_result(prompt: text) -> text:
         return "PLATYPUS PLATYPUS PLATYPUS PLATYPUS PLATYPUS"
     if prompt.contains("hello world test"):
         return "hello world test"
+    if prompt.contains("ORBIT-73") or prompt.contains("project code"):
+        return "ORBIT-73"
+    if prompt.contains("immutable value"):
+        return "An immutable value cannot be reassigned after creation."
+    if prompt.contains("mutable value"):
+        return "A mutable value can be updated after creation."
+    if prompt.contains("compare immutable and mutable"):
+        return "Immutable values stay fixed; mutable values can be updated."
+    if prompt.contains("tutor summary"):
+        return "Immutable values stay fixed. Mutable values can be updated."
+    if prompt.contains("remove bread"):
+        return "apples, coffee"
+    if prompt.contains("add tea"):
+        return "apples, coffee, tea"
+    if prompt.contains("final list"):
+        return "apples, coffee, tea"
+    if prompt.contains("shopping list"):
+        return "apples, bread, coffee"
     "ok"
 
 fn _mock_claude(prompt: text) -> (text, text, i64):
@@ -116,7 +236,7 @@ fn call_claude(prompt: text, system_prompt: text, session_id: text, max_turns: i
         return _mock_claude(prompt)
 
     # Unset CLAUDECODE to allow claude CLI to run
-    rt_env_set("CLAUDECODE", "")
+    env_set("CLAUDECODE", "")
 
     var args: [text] = []
     args = args + ["-p", prompt]
@@ -129,18 +249,19 @@ fn call_claude(prompt: text, system_prompt: text, session_id: text, max_turns: i
     if session_id != "":
         args = args + ["--resume", session_id]
 
-    rt_process_run("claude", args)
+    process_run("claude", args)
 
 fn call_claude_simple(prompt: text) -> (text, text, i64):
     call_claude(prompt, "", "", 1)
 
 fn _run_long_live() -> bool:
-    val flag = rt_env_get("SIMPLE_LLM_LONG_LIVE") ?? ""
+    val flag = env_get("SIMPLE_LLM_LONG_LIVE") ?? ""
     flag == "1" or flag == "true"
 
-fn _skip_long_live(section: text):
-    print "  [SKIP] {section}: set SIMPLE_LLM_LONG_LIVE=1 to run long live conversation checks"
-    expect(_run_long_live()).to_equal(false)
+fn call_long_claude(prompt: text, system_prompt: text, session_id: text, max_turns: i64) -> (text, text, i64):
+    if _run_comprehensive_live() and _run_long_live():
+        return call_claude(prompt, system_prompt, session_id, max_turns)
+    _mock_claude(prompt)
 
 # ============================================================================
 # Tests - Section 1: Single-shot responses
@@ -150,7 +271,8 @@ describe "LLM Caret Live Comprehensive Integration":
 
     describe "Section 1: Single-shot responses":
 
-        slow_it "returns exact text in response":
+        slow_it "should return exact text in the response":
+            step("Invoke the provider with an exact-text prompt")
             val result = call_claude_simple("Reply with exactly: HELLO_SIMPLE")
             val stdout = result.0 ?? ""
             val exit_code = result.2
@@ -159,17 +281,19 @@ describe "LLM Caret Live Comprehensive Integration":
 
             val content = _extract_json_string(stdout, "result")
             print "  [MANUAL] Content: {content}"
-            expect(content.contains("HELLO_SIMPLE")).to_equal(true)
+            expect(content).to_contain("HELLO_SIMPLE")
 
-        slow_it "handles simple math":
+        slow_it "should handle simple math":
+            step("Invoke the provider with deterministic arithmetic")
             val result = call_claude_simple("What is 2 + 2? Reply with ONLY the number.")
             val stdout = result.0 ?? ""
             val content = _extract_json_string(stdout, "result")
 
             print "  [MANUAL] Math result: {content}"
-            expect(content.contains("4")).to_equal(true)
+            expect(content).to_contain("4")
 
-        slow_it "returns model name":
+        slow_it "should return a model name":
+            step("Inspect structured provider identity")
             val result = call_claude_simple("Say hi")
             val stdout = result.0 ?? ""
             val model = _extract_json_string(stdout, "model")
@@ -178,17 +302,19 @@ describe "LLM Caret Live Comprehensive Integration":
 
             print "  [MANUAL] Model: {model}"
             val has_identity = model.len() > 0 or content.len() > 0 or session_id.len() > 0
-            expect(has_identity).to_equal(true)
+            expect(has_identity).to_be(true)
 
-        slow_it "returns session_id for tracking":
+        slow_it "should return a session_id for tracking":
+            step("Inspect the structured session identifier")
             val result = call_claude_simple("Say hello")
             val stdout = result.0 ?? ""
             val session_id = _extract_json_string(stdout, "session_id")
 
             print "  [MANUAL] Session ID: {session_id}"
-            expect(session_id.len() > 0).to_equal(true)
+            expect(session_id.len()).to_be_greater_than(0)
 
-        slow_it "reports token usage":
+        slow_it "should report token usage":
+            step("Inspect structured token usage")
             val result = call_claude_simple("Say ok")
             val stdout = result.0 ?? ""
             val in_tok = _extract_json_int(stdout, "input_tokens")
@@ -196,7 +322,7 @@ describe "LLM Caret Live Comprehensive Integration":
             val total = in_tok + out_tok
 
             print "  [MANUAL] Tokens: in={in_tok}, out={out_tok}, total={total}"
-            expect(total > 0).to_equal(true)
+            expect(total).to_be_greater_than(0)
 
     # ========================================================================
     # Section 2: System prompt adherence
@@ -204,7 +330,8 @@ describe "LLM Caret Live Comprehensive Integration":
 
     describe "Section 2: System prompt adherence":
 
-        slow_it "follows pirate persona system prompt":
+        slow_it "should follow a pirate persona system prompt":
+            step("Invoke the provider with a persona system prompt")
             val result = call_claude(
                 "What are you?",
                 "You are a pirate named CaptainBytes. Always speak in pirate dialect. Every response MUST include 'Arrr!'",
@@ -216,9 +343,10 @@ describe "LLM Caret Live Comprehensive Integration":
             val lower = content.lower()
 
             print "  [MANUAL] Pirate response: {content}"
-            expect(lower.contains("arr")).to_equal(true)
+            expect(lower).to_contain("arr")
 
-        slow_it "follows CSV format constraint":
+        slow_it "should follow a CSV format constraint":
+            step("Invoke the provider with a CSV-only system prompt")
             val result = call_claude(
                 "List 3 fruits",
                 "You MUST respond in CSV format only. No explanations, just comma-separated values on a single line.",
@@ -229,7 +357,7 @@ describe "LLM Caret Live Comprehensive Integration":
             val content = _extract_json_string(stdout, "result")
 
             print "  [MANUAL] CSV response: {content}"
-            expect(content.contains(",")).to_equal(true)
+            expect(content).to_contain(",")
 
     # ========================================================================
     # Section 3: Multi-turn conversation (6 turns)
@@ -237,8 +365,26 @@ describe "LLM Caret Live Comprehensive Integration":
 
     describe "Section 3: Multi-turn conversation (6 turns)":
 
-        slow_it "maintains context across 6 turns with session resume":
-            _skip_long_live("6-turn context resume")
+        slow_it "should maintain context across 6 turns with session resume":
+            step("Resume one deterministic conversation across six turns")
+            val first = call_long_claude("Remember project code ORBIT-73.", "", "", 1)
+            expect(first.2).to_equal(0)
+            val first_json = first.0 ?? ""
+            val session_id = _extract_json_string(first_json, "session_id")
+            expect(session_id.len()).to_be_greater_than(0)
+
+            var turn = 2
+            while turn <= 6:
+                val result = call_long_claude(
+                    "Turn {turn}: what is the project code? Reply only with it.",
+                    "",
+                    session_id,
+                    1
+                )
+                expect(result.2).to_equal(0)
+                val content = _extract_json_string(result.0 ?? "", "result")
+                expect(content).to_contain("ORBIT-73")
+                turn = turn + 1
 
     # ========================================================================
     # Section 4: Code tutor session (5 turns)
@@ -246,8 +392,25 @@ describe "LLM Caret Live Comprehensive Integration":
 
     describe "Section 4: Code tutor session (5 turns)":
 
-        slow_it "progressive code Q&A with context building":
-            _skip_long_live("code tutor session")
+        slow_it "should build a progressive code tutor explanation":
+            step("Resume one deterministic tutor conversation across five turns")
+            val first = call_long_claude("Explain an immutable value in one sentence.", "", "", 1)
+            expect(first.2).to_equal(0)
+            val session_id = _extract_json_string(first.0 ?? "", "session_id")
+            expect(session_id.len()).to_be_greater_than(0)
+
+            val second = call_long_claude("Explain a mutable value in one sentence.", "", session_id, 1)
+            expect(_extract_json_string(second.0 ?? "", "result").lower()).to_contain("mutable")
+            val third = call_long_claude("Now compare immutable and mutable values.", "", session_id, 1)
+            val comparison = _extract_json_string(third.0 ?? "", "result").lower()
+            expect(comparison).to_contain("immutable")
+            expect(comparison).to_contain("mutable")
+            val fourth = call_long_claude("Give a tutor summary using both terms.", "", session_id, 1)
+            val summary = _extract_json_string(fourth.0 ?? "", "result").lower()
+            expect(summary).to_contain("immutable")
+            expect(summary).to_contain("mutable")
+            val fifth = call_long_claude("Repeat the tutor summary concisely.", "", session_id, 1)
+            expect(fifth.2).to_equal(0)
 
     # ========================================================================
     # Section 5: Shopping list state tracking (5 turns)
@@ -255,8 +418,29 @@ describe "LLM Caret Live Comprehensive Integration":
 
     describe "Section 5: Shopping list state tracking (5 turns)":
 
-        slow_it "maintains mutable state across conversation":
-            _skip_long_live("shopping list state tracking")
+        slow_it "should maintain mutable shopping-list state":
+            step("Resume one deterministic stateful conversation across five turns")
+            val first = call_long_claude("Start a shopping list with apples, bread, and coffee.", "", "", 1)
+            expect(first.2).to_equal(0)
+            val session_id = _extract_json_string(first.0 ?? "", "session_id")
+            expect(session_id.len()).to_be_greater_than(0)
+
+            val second = call_long_claude("From the shopping list remove bread.", "", session_id, 1)
+            val after_remove = _extract_json_string(second.0 ?? "", "result").lower()
+            expect(after_remove).to_contain("apples")
+            expect(after_remove).to_contain("coffee")
+            expect(after_remove.contains("bread")).to_be(false)
+
+            val third = call_long_claude("To the shopping list add tea.", "", session_id, 1)
+            expect(_extract_json_string(third.0 ?? "", "result").lower()).to_contain("tea")
+            val fourth = call_long_claude("Return the final list.", "", session_id, 1)
+            val final_list = _extract_json_string(fourth.0 ?? "", "result").lower()
+            expect(final_list).to_contain("apples")
+            expect(final_list).to_contain("coffee")
+            expect(final_list).to_contain("tea")
+            expect(final_list.contains("bread")).to_be(false)
+            val fifth = call_long_claude("Confirm the final list remains unchanged.", "", session_id, 1)
+            expect(fifth.2).to_equal(0)
 
     # ========================================================================
     # Section 6: Edge cases
@@ -264,7 +448,8 @@ describe "LLM Caret Live Comprehensive Integration":
 
     describe "Section 6: Edge cases":
 
-        slow_it "handles repetition requests":
+        slow_it "should handle repetition requests":
+            step("Ask for an exact repetition count")
             val result = call_claude_simple("Repeat PLATYPUS exactly 5 times separated by spaces. Nothing else.")
             val stdout = result.0 ?? ""
             val content = _extract_json_string(stdout, "result")
@@ -283,13 +468,14 @@ describe "LLM Caret Live Comprehensive Integration":
                     break
 
             print "  [EDGE] Repetition count: {count}, content: {content}"
-            expect(upper.contains("PLATYPUS")).to_equal(true)
+            expect(count).to_equal(5)
 
-        slow_it "handles exact phrase requests":
+        slow_it "should handle exact phrase requests":
+            step("Ask for an exact phrase")
             val result = call_claude_simple("Reply with exactly: hello world test")
             val stdout = result.0 ?? ""
             val content = _extract_json_string(stdout, "result")
             val lower = content.lower()
 
             print "  [EDGE] Exact phrase: {content}"
-            expect(lower.contains("hello")).to_equal(true)
+            expect(lower).to_contain("hello world test")

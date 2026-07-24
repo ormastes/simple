@@ -10,7 +10,8 @@
 #   val response = llm_chat("Hello!")
 #   print response
 
-use app.io.mod.{env_get, process_run}
+use app.io.mod.{env_get}
+use app.llm_caret.claude_cli.{claude_cli_send}
 use app.llm_caret.opencode_cli.{opencode_cli_send}
 use app.llm_caret.json_helpers.{json_find, json_parse_int}
 use std.nogc_sync_mut.io.http_sffi.{http_request_raw}
@@ -270,35 +271,15 @@ fn llm_chat(user_msg: text) -> text:
 # ============================================================================
 
 fn _send_claude_cli(prompt: text) -> (text, text):
-    var args: [text] = []
-    args = args + ["-p", prompt]
-    args = args + ["--output-format", "json"]
-    if LLM_MODEL != "":
-        args = args + ["--model", LLM_MODEL]
-    if LLM_SYSTEM_PROMPT != "":
-        args = args + ["--system-prompt", LLM_SYSTEM_PROMPT]
-    if LLM_SESSION_ID != "":
-        args = args + ["--resume", LLM_SESSION_ID]
-    if LLM_MAX_TURNS > 0:
-        args = args + ["--max-turns", LLM_MAX_TURNS.to_text()]
-    val result = process_run(LLM_CLI_PATH, args)
-    val stdout = result.0 ?? ""
-    val stderr = result.1 ?? ""
-    val exit_code = result.2
-    if exit_code != 0:
-        var err = "claude CLI error (code " + exit_code.to_text() + ")"
-        if stderr != "":
-            err = err + ": " + stderr
-        return ("", err)
-    # Parse JSON
-    val content = _extract_json_string(stdout, "result")
-    val sess = _extract_json_string(stdout, "session_id")
-    val is_err = _extract_json_bool(stdout, "is_error")
-    if sess != "":
-        LLM_SESSION_ID = sess
-    if is_err:
-        return ("", content)
-    (content, "")
+    val resp = claude_cli_send(
+        LLM_CLI_PATH, prompt, LLM_MODEL, LLM_SYSTEM_PROMPT, LLM_SESSION_ID,
+        LLM_MAX_TURNS, 0, "", [], []
+    )
+    if resp.session_id != "":
+        LLM_SESSION_ID = resp.session_id
+    if resp.is_error:
+        return ("", resp.error)
+    (resp.content, "")
 
 fn _send_opencode_cli(prompt: text) -> (text, text):
     val resp = opencode_cli_send(LLM_CLI_PATH, prompt, LLM_MODEL, LLM_SESSION_ID, "", [])

@@ -165,6 +165,7 @@ pub fn dispatch_instruction<E: CodegenEmitter>(emitter: &mut E, inst: &MirInst) 
             dest,
             type_id: _,
             struct_name: _,
+            vtable_symbol: _,
             struct_size,
             field_offsets,
             field_types,
@@ -175,12 +176,14 @@ pub fn dispatch_instruction<E: CodegenEmitter>(emitter: &mut E, inst: &MirInst) 
             object,
             byte_offset,
             field_type,
+            ..
         } => emitter.emit_field_get(*dest, *object, *byte_offset as usize, *field_type),
         MirInst::FieldSet {
             object,
             byte_offset,
             field_type,
             value,
+            ..
         } => emitter.emit_field_set(*object, *byte_offset as usize, *field_type, *value),
 
         // =====================================================================

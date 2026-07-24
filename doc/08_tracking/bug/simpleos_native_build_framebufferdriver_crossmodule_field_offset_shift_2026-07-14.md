@@ -463,3 +463,28 @@ The remaining compiler root is that `StructInit` can key vtable layout by the
 collision-free `struct_name`, while `effective_field_offset()` still relies on
 per-module numeric `TypeId`. A two-module native regression and owner identity
 on `FieldGet`/`FieldSet` remain required before this family is closed.
+
+## 2026-07-24 — qualified native object ABI implemented; bootstrap follow-up remains
+
+Native-project MIR now carries collision-free `module_prefix__Type` ownership
+and an authoritative header decision on direct field access. Imported direct
+construction relocates a qualified provider-owned vtable symbol; only qualified
+native-project symbols are exported, while JIT/non-native vtables remain local.
+Marker/zero-slot trait implementations emit an eight-byte vtable object so
+construction and field offsets agree.
+
+Focused evidence passed:
+
+- provider-factory cross-module field reads/writes:
+  `CROSSMODULE_VTABLE_FIELD_OWNER_PASS`
+- imported direct construction and vtable relocation:
+  `DIRECT_IMPORTED_VTABLE_INIT_PASS`
+- Rust compiler test/check gates, including cross-module layout fingerprinting
+
+The third and final bootstrap attempt reduced Stage 2 to one split-definition
+case: `MirToLlvm` is declared in `class_def.spl` while its trait impl is in
+`core_codegen.spl`. The import scan has since been corrected to anchor vtable
+ownership to the unique class/struct definition rather than the impl file, with
+a focused regression test. Per the session retry cap, the full bootstrap was
+not run a fourth time. Fresh Stage 3, MCP native smoke, hosted WM evidence, and
+QEMU evidence therefore remain required before closing this bug.

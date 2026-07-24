@@ -209,10 +209,10 @@ impl<'a> MirLowerer<'a> {
                         .iter()
                         .enumerate()
                         .find(|(_, (n, _))| n == method)
-                        .map(|(i, (_, fty))| (i, *fty)),
+                        .map(|(i, (_, fty))| (t, i, *fty)),
                     _ => None,
                 });
-            if let Some((field_index, field_ty)) = field_hit {
+            if let Some((owner_ty, field_index, field_ty)) = field_hit {
                 let field_signature = match registry.get(field_ty) {
                     Some(HirType::Function { params, ret }) => Some((params.clone(), *ret)),
                     _ => None,
@@ -228,6 +228,13 @@ impl<'a> MirLowerer<'a> {
                             }
                         }
                     }
+                    let owner_name = self
+                        .type_registry
+                        .and_then(|registry| registry.get_type_name(owner_ty))
+                        .map(str::to_owned);
+                    // Native-project lowering replaces this with an
+                    // authoritative module-qualified layout decision.
+                    let owner_has_vtable = None;
                     return self.with_func(|func, current_block| {
                         let fval = func.new_vreg();
                         let dest = func.new_vreg();
@@ -235,6 +242,8 @@ impl<'a> MirLowerer<'a> {
                         block.instructions.push(MirInst::FieldGet {
                             dest: fval,
                             object: receiver_reg,
+                            owner_name,
+                            owner_has_vtable,
                             byte_offset: (field_index as u32) * 8,
                             field_type: field_ty,
                         });
