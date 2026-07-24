@@ -169,8 +169,11 @@ evidence boundary for the important pure-Simple tooling lanes:
   pushed. A request write/rename failure cleans artifacts and returns nonzero
   before polling. Positive-timeout hosted capture now waits for pipe EOF or the
   caller deadline instead of truncating delayed descendant output after two
-  seconds. **Strongest current evidence:** `eceddfd31d`, `7a011de61f`,
-  `f5440b77fa`, and `bd9de761c11`, plus the zero-executed regression in
+  seconds. Session-daemon response polling now derives its clock-rollback
+  backstop from the requested timeout instead of silently truncating every
+  120/300/600-second request at 60 seconds (`fa5625c2cda`).
+  **Strongest current evidence:** `eceddfd31d`, `7a011de61f`,
+  `f5440b77fa`, `bd9de761c11`, and the timeout-boundary contract, plus the zero-executed regression in
   [the tracked report](../../08_tracking/bug/test_runner_zero_executed_single_file_greenwash_2026-07-17.md).
   The bounded-capture root fix and evidence are recorded in
   [the delayed-output report](../../08_tracking/bug/stage4_test_runner_bounded_capture_empty_2026-07-23.md).
@@ -231,13 +234,18 @@ evidence boundary for the important pure-Simple tooling lanes:
   one fresh Stage 4 candidate, run each focused regression once, then run the
   aggregate essential-tools gate. The `run` wrapper now consumes shared log
   options only before the entry file and preserves every post-file program
-  token (including `--`) unchanged; its focused source contract awaits the
-  same fresh Stage 4 candidate.
+  token (including `--`) unchanged. Internal `--test-result-file=` evidence is
+  consumed only before the first separator, so the identical post-`--` token
+  reaches the target literally (`872810dcbe1`); its focused runtime contract
+  awaits the same fresh Stage 4 candidate.
 - **verify** — **Source status:** the public verification CLI now validates its
   grammar before worker dispatch. Unknown, bare/empty `--files`, duplicate, and
   conflicting scope options return exit 2 rather than silently falling back to
   changed-file or empty PASS scope; status/list/check/regenerate reject tails,
-  and help is valid only by itself. `--all` supplies Git-tracked project files
+  and help is valid only by itself. Explicit nonexistent `--files` and
+  positional paths now return exit 2 before report construction or writes,
+  while default changed/deleted-file discovery remains valid (`95f20070d50`).
+  `--all` supplies Git-tracked project files
   to the tooling gate rather than the current diff, so a clean checkout cannot
   skip tooling-sensitive paths while claiming full-project scope. Visible-debt
   and quality-candidate scans now distinguish `rg` exit 1 (no matches) from
@@ -245,9 +253,12 @@ evidence boundary for the important pure-Simple tooling lanes:
   [scanner report](../../08_tracking/bug/verify_rg_scanner_failure_false_green_2026-07-24.md).
   **Strongest current evidence:** the focused contracts in
   `test/01_unit/app/verify_cli_option_validation_contract_check.spl` and
-  `test/01_unit/app/verify_all_scope_contract_check.spl`.
+  `test/01_unit/app/verify_all_scope_contract_check.spl`, plus the missing-file
+  integration contract.
   **Remaining bug/gap:** fresh Stage 4 runtime qualification is pending; see
   [the verify option report](../../08_tracking/bug/verify_cli_option_false_green_2026-07-23.md).
+  **Next solution:** run the missing-file and scope contracts once through the
+  exact fresh Stage 4 CLI and confirm the rejected path writes no report.
 - **lint** — **Source status:** parser-backed ARG001/ARG002, COLL001-COLL008,
   STUB001/STUB002, and module-level W0404 wide-public CLI parity are implemented; W0404 reports at
   line 1, honors `visibility_boundary`, and suppresses `__init__.spl`/`mod.spl` facades.
@@ -279,6 +290,9 @@ evidence boundary for the important pure-Simple tooling lanes:
   changing the first diagnostic spelling. The focused CLI contract and
   essential-tools gate cover nested dirty input. Ordinary lint startup keeps
   the theme-package validator lazy; only `config/themes/**` targets load it.
+  The essential gate captures lint JSONL stdout separately, rejects any stderr,
+  and applies the same boundary to deny and invalid-profile probes
+  (`d3a153e5d06`).
   See the
   [directory-target report](../../08_tracking/bug/lint_directory_target_opaque_failure_2026-07-24.md).
   **Remaining
@@ -292,7 +306,9 @@ evidence boundary for the important pure-Simple tooling lanes:
   malformed fmt options return exit 2 before a file read/write/output; help
   returns 0 only when used alone, while mixed help fails closed
   (`a974dddfec6`); invalid or empty fix options return exit 2 before
-  a file read/write; exact `--dry-run` remains
+  a file read/write. The production fix owner now matches the lightweight
+  worker: sole `--help`/`-h` returns 0 and mixed help remains exit 2
+  (`fd373e195b5`). Exact `--dry-run` remains
   non-mutating. All fix owners now share source admission: directories,
   missing paths, and detectable read failures return exit 1 before rule
   evaluation or writes, while valid empty files remain clean no-ops; see the
@@ -387,7 +403,9 @@ evidence boundary for the important pure-Simple tooling lanes:
   dependency trigger from being dropped silently. Duplicate-check admission
   parses each complete JSON document, self-tests malformed/trailing rejection,
   and requires the exact two-file, two-occurrence, five-line fixture structure
-  for both token and cosine modes.
+  for both token and cosine modes. Lint JSON admission now validates stdout-only
+  JSONL and rejects nonempty stderr for both deny and invalid-profile probes,
+  closing the former merged-stream false green (`d3a153e5d06`).
   **Strongest current evidence:**
   the portability contract exercises seed-signature rejection before any tool probe;
   `scripts/check/check-bootstrap-essential-tools-smoke.shs` remains required by
