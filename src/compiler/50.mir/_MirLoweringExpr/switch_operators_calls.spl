@@ -395,6 +395,7 @@ impl MirLowering:
                 self.error("match default binding has no resolved symbol", nil)
             else:
                 self.local_map[default_symbol.id] = scrut_local
+                self.bind_local(default_symbol.id, scrut_local)
         val def_result = self.lower_block_expected(default_body, expected_type)
         var b_d2 = self.builder
         # Same post-terminator guard as the arm loop above.
@@ -515,6 +516,7 @@ impl MirLowering:
                 self.error("match default binding has no resolved symbol", nil)
             else:
                 self.local_map[default_symbol.id] = scrut_local
+                self.bind_local(default_symbol.id, scrut_local)
         val def_result = self.lower_block_expected(default_body, expected_type)
         var b_def = self.builder
         # Same post-terminator guard as the arm loop above.
@@ -1274,6 +1276,12 @@ impl MirLowering:
                         val found_payload_type = payload_hir_type ?? HirType(kind: HirTypeKind.Error, span: scrutinee.span)
                         bound_payload = self.enum_payload_value(pl, self.lower_type(found_payload_type))
                     self.local_map[bind_syms[0].id] = bound_payload
+                    # 033d79338a1 switched identifier resolution to find_local
+                    # (local_symbol_ids/values via bind_local); enum-match
+                    # binding sites still wrote only local_map, so arm bodies
+                    # saw "undefined variable" for the bound payload. Mirror the
+                    # write into the new binding store.
+                    self.bind_local(bind_syms[0].id, bound_payload)
                     var result_payload_is_text = false
                     if result_payload_type != nil:
                         val payload_type = result_payload_type ?? HirType(kind: HirTypeKind.Error, span: scrutinee.span)
@@ -1317,6 +1325,7 @@ impl MirLowering:
                         self.builder = bp_text
                         if val text_local = text_res:
                             self.local_map[bind_syms[0].id] = text_local
+                            self.bind_local(bind_syms[0].id, text_local)
                     elif payload_struct != nil and payload_struct != "":
                         self.struct_value_syms[bound_payload.id] = payload_struct ?? ""
             elif bind_syms.len() >= 1:
@@ -1363,8 +1372,10 @@ impl MirLowering:
                             self.builder = bp_ttext
                             if val ttext_local = ttext_res:
                                 self.local_map[bind_syms[fi].id] = ttext_local
+                                self.bind_local(bind_syms[fi].id, ttext_local)
                         else:
                             self.local_map[bind_syms[fi].id] = gl
+                            self.bind_local(bind_syms[fi].id, gl)
                     fi = fi + 1
             val arm_result = self.lower_block_expected(enum_bodies[ci], expected_type)
             var b_arm2 = self.builder
