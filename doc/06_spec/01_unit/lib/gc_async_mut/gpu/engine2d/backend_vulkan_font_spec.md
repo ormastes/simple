@@ -1,31 +1,29 @@
 # Vulkan Font Atlas Composite Specification
 
-> Manually synchronized on 2026-07-13 because the self-hosted Simple/docgen
-> lane is blocked. This is reviewed source evidence, not native execution.
+The 22 active scenarios cover the frozen 13-word parameter ABI, bounded
+dispatch, atlas replacement, deterministic checksums, exact packed-pixel
+parity, artifact admission, cache identity, batch validation, session
+ownership, and idempotent cleanup.
 
-The 22 active scenarios cover the frozen parameter ABI, bounded dispatch,
-atlas replacement, checksums, exact packed-pixel equality, promotion classification, full atlas upload,
-session lifecycle, artifact validation, batch validation, and idempotent shared
-session cleanup.
+The embedded compute artifact is generated from semantics revision 2:
 
-The portable checker separates candidate compilation, artifact validation, and
-pin admission. It records semantics revision 2, runs the selected Vulkan
-compiler and `spirv-val` through bounded timeouts, and retains a validated new
-candidate with `pinned_verified=false` until tracked pins are independently
-updated. The embedded revision-1 SPIR-V remains unchanged and rejected by the
-runtime semantics gate.
+- GLSL SHA-256:
+  `ee0e8a35748553891fc82013b09e96abf569072630fed0333e469f20cc1c1162`
+- SPIR-V SHA-256:
+  `ca5a3d644e5d4dd1c3b6d453be4db252f8ed7b9d65b78e2f7ae37c17769dc55d`
+- Target environment: Vulkan 1.1
+- Entry point: `main`
 
-Stage promotion additionally requires retained precompiled artifact identity,
-`main` plus program version, batch/payload identity, positive fused queue/device,
-fence-observation, readback, and CPU-oracle timing, observed handles, changed
-device pixels rather than opaque background pixels, and exact checksum/parity.
+Runtime admission recomputes the complete SPIR-V byte hash and rejects a
+different artifact before consulting the retained pipeline cache. Structural
+batch, destination, atlas, quad, and packed-parameter validation happens before
+accelerated-device and fence admission, so unsupported or malformed input
+cannot be mislabeled as a missing-hardware condition.
 
-An active backend rejects session replacement before dimensions or incoming
-session validation, retaining its atlas and reference ownership unchanged. A
-fresh backend rejects invalid dimensions before retaining a session. The
-one-entry font pipeline cache accepts only the same mode-prefixed SHA-256
-artifact identity; another valid SPIR-V artifact fails closed without replacing
-the retained shader or pipeline. Complete device/fence/readback evidence becomes
-promotion-ready only for `precompiled-spirv`; runtime GLSL remains diagnostic.
+Promotion requires a precompiled artifact, retained device and driver identity,
+an accelerated Vulkan device, fenced submission and cleanup, complete buffer
+handles, positive device/readback timing, nonblank changed pixels, and exact
+CPU-oracle parity. Runtime GLSL remains diagnostic and cannot be promoted.
 
-Source: `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font_spec.spl`
+Source:
+`test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font_spec.spl`

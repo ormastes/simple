@@ -8,16 +8,52 @@ BUILD_DIR="${BUILD_DIR:-build/tmp/macos_vulkan_2d_live_evidence}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/macos_vulkan_2d_live_evidence_$(date -u +%F).md}"
 SAMPLE="${MACOS_VULKAN_2D_SAMPLE:-examples/06_io/ui/graphics_2d_showcase_gui.spl}"
 TIMEOUT_SECS="${MACOS_VULKAN_2D_TIMEOUT_SECS:-90}"
+REQUESTED_RESOLUTION="${SHOWCASE_RESOLUTION:-4k}"
+REQUESTED_DPI="${SHOWCASE_DPI:-300}"
+case "$REQUESTED_RESOLUTION" in
+    4k|4K) EXPECTED_WIDTH=3840; EXPECTED_HEIGHT=2160 ;;
+    8k|8K) EXPECTED_WIDTH=7680; EXPECTED_HEIGHT=4320 ;;
+    *x*) EXPECTED_WIDTH="${REQUESTED_RESOLUTION%x*}"; EXPECTED_HEIGHT="${REQUESTED_RESOLUTION#*x}" ;;
+    *) EXPECTED_WIDTH=0; EXPECTED_HEIGHT=0 ;;
+esac
 ICD_PATH="${VK_ICD_FILENAMES:-/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json}"
 EVENTS="$BUILD_DIR/events.env"
+VALIDATED_EVENTS="$BUILD_DIR/events.validated.env"
 LAUNCHER_LOG="$BUILD_DIR/launcher.log"
 WINDOW_ENV="$BUILD_DIR/window.env"
 BEFORE_PNG="$BUILD_DIR/before.png"
 AFTER_PNG="$BUILD_DIR/after.png"
 EVIDENCE_ENV="$BUILD_DIR/evidence.env"
+PINNED_SPIRV="$BUILD_DIR/font-atlas-composite.spv"
+SPIRV_SOURCE="src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font_spirv.spl"
+EXISTING_GUI_PIDS="$BUILD_DIR/existing-simplegui.pids"
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
-rm -f "$EVENTS" "$LAUNCHER_LOG" "$WINDOW_ENV" "$BEFORE_PNG" "$AFTER_PNG" "$EVIDENCE_ENV"
+rm -f "$EVENTS" "$VALIDATED_EVENTS" "$LAUNCHER_LOG" "$WINDOW_ENV" \
+    "$BEFORE_PNG" "$AFTER_PNG" "$EVIDENCE_ENV" "$PINNED_SPIRV"
+pgrep -x SimpleGui >"$EXISTING_GUI_PIDS" 2>/dev/null || true
+
+app_pid=""
+cleanup() {
+    [ -n "$app_pid" ] || return 0
+    osascript - "$app_pid" >/dev/null 2>&1 <<'OSA' || true
+on run argv
+  set targetPid to (item 1 of argv) as integer
+  tell application "System Events"
+    repeat with proc in (processes whose unix id is targetPid)
+      tell proc
+        set frontmost to true
+        keystroke "q"
+      end tell
+    end repeat
+  end tell
+end run
+OSA
+    if kill -0 "$app_pid" 2>/dev/null; then
+        kill "$app_pid" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT HUP INT TERM
 
 fail() {
     reason="$1"
@@ -34,6 +70,24 @@ value_of() {
     key="$1"
     file="$2"
     sed -n "s/^${key}=//p" "$file" | tail -n 1
+}
+
+sha256_file() {
+    shasum -a 256 "$1" | awk '{print $1}'
+}
+
+sha256_valid() {
+    case "$1" in
+        *[!0-9a-f]*|"") return 1 ;;
+        *) [ "${#1}" -eq 64 ] ;;
+    esac
+}
+
+absolute_path() {
+    case "$1" in
+        /*) printf '%s\n' "$1" ;;
+        *) printf '%s/%s\n' "$ROOT_DIR" "$1" ;;
+    esac
 }
 
 file_bytes() {
@@ -64,8 +118,9 @@ write_report() {
         echo
         echo "- Before interaction: \`$BEFORE_PNG\`"
         echo "- After interaction: \`$AFTER_PNG\`"
-        echo "- Event receipt: \`$EVENTS\`"
+        echo "- Event receipt: \`$VALIDATED_EVENTS\`"
         echo "- Launcher log: \`$LAUNCHER_LOG\`"
+        echo "- Validated SPIR-V: \`$PINNED_SPIRV\`"
     } >"$REPORT_PATH"
 }
 
@@ -87,37 +142,67 @@ fi
 if ! command -v cliclick >/dev/null 2>&1; then
     fail "cliclick-missing"
 fi
+if ! command -v spirv-val >/dev/null 2>&1; then
+    fail "spirv-val-missing"
+fi
+case "$EXPECTED_WIDTH:$EXPECTED_HEIGHT:$REQUESTED_DPI" in
+    *[!0-9:]*|0:*|*:0:*|*:*:0) fail "invalid-resolution-or-dpi" ;;
+esac
+
+# Extract exactly the generated u8 arrays, hash them against the pinned source
+# constant, and run the independent Khronos validator. A header-only magic
+# check or a self-reported application field is not SPIR-V proof.
+perl -e 'while (<>) { while (/([0-9]+)u8/g) { print pack("C", $1) } }' \
+    "$SPIRV_SOURCE" >"$PINNED_SPIRV"
+expected_spirv_sha256="$(sed -n 's/^val FONT_ATLAS_COMPOSITE_VULKAN_SPIRV_SHA256: text = "\([0-9a-f]*\)"/\1/p' "$SPIRV_SOURCE")"
+actual_spirv_sha256="$(sha256_file "$PINNED_SPIRV")"
+sha256_valid "$expected_spirv_sha256" || fail "pinned-spirv-hash-invalid"
+[ "$actual_spirv_sha256" = "$expected_spirv_sha256" ] || fail "pinned-spirv-hash-mismatch"
+spirv-val --target-env vulkan1.1 "$PINNED_SPIRV" || fail "pinned-spirv-validation-failed"
 
 SIMPLE_GUI_RUN_SKIP_NUDGE=1 \
 SIMPLE_GUI_BACKEND=vulkan \
 SIMPLE_GUI_EXIT_AFTER_INTERACTION=0 \
-SIMPLE_GUI_EVENT_EVIDENCE_PATH="$ROOT_DIR/$EVENTS" \
-SHOWCASE_RESOLUTION="${SHOWCASE_RESOLUTION:-320x240}" \
-SHOWCASE_DPI="${SHOWCASE_DPI:-96}" \
+SIMPLE_GUI_EVENT_EVIDENCE_PATH="$(absolute_path "$EVENTS")" \
+SHOWCASE_RESOLUTION="$REQUESTED_RESOLUTION" \
+SHOWCASE_DPI="$REQUESTED_DPI" \
 VK_ICD_FILENAMES="$ICD_PATH" \
 DYLD_LIBRARY_PATH="${DYLD_LIBRARY_PATH:-/opt/homebrew/lib}" \
     scripts/gui/macos-gui-run.shs "$SAMPLE" >"$LAUNCHER_LOG" 2>&1 ||
     fail "launcher-failed"
 
+pid_deadline=$(($(date +%s) + 15))
+while [ "$(date +%s)" -lt "$pid_deadline" ]; do
+    candidate_pid="$(pgrep -x SimpleGui 2>/dev/null | sort -n | tail -n 1 || true)"
+    if [ -n "$candidate_pid" ] &&
+            ! grep -Fxq "$candidate_pid" "$EXISTING_GUI_PIDS"; then
+        app_pid="$candidate_pid"
+        break
+    fi
+    sleep 1
+done
+[ -n "$app_pid" ] || fail "launcher-pid-not-found"
+
 deadline=$(($(date +%s) + TIMEOUT_SECS))
 while [ "$(date +%s)" -lt "$deadline" ]; do
-    if osascript >"$WINDOW_ENV" 2>/dev/null <<'OSA'; then
+    if osascript - "$app_pid" >"$WINDOW_ENV" 2>/dev/null <<'OSA'; then
+on run argv
+set targetPid to (item 1 of argv) as integer
 tell application "System Events"
-  repeat with proc in (processes whose name is "SimpleGui")
-    tell proc
-      if (count of windows) > 0 then
-        set position of window 1 to {200, 120}
-        set frontmost to true
-        delay 0.3
-        set p to position of window 1
-        set s to size of window 1
-        set AppleScript's text item delimiters to ","
-        return (item 1 of p as text) & "," & (item 2 of p as text) & "," & (item 1 of s as text) & "," & (item 2 of s as text)
-      end if
-    end tell
-  end repeat
+  set matches to (processes whose unix id is targetPid)
+  if (count of matches) = 0 then error "SimpleGui process not ready"
+  tell item 1 of matches
+    if (count of windows) = 0 then error "SimpleGui window not ready"
+    set position of window 1 to {200, 120}
+    set frontmost to true
+    delay 0.3
+    set p to position of window 1
+    set s to size of window 1
+    set AppleScript's text item delimiters to ","
+    return (targetPid as text) & "," & (item 1 of p as text) & "," & (item 2 of p as text) & "," & (item 1 of s as text) & "," & (item 2 of s as text)
+  end tell
 end tell
-error "SimpleGui window not ready"
+end run
 OSA
         break
     fi
@@ -127,37 +212,51 @@ done
 if [ ! -s "$WINDOW_ENV" ]; then
     fail "window-not-found"
 fi
-window_rect="$(tr -d '\r\n ' <"$WINDOW_ENV")"
-case "$window_rect" in
-    *,*,*,*) ;;
+window_record="$(tr -d '\r\n ' <"$WINDOW_ENV")"
+case "$window_record" in
+    *,*,*,*,*) ;;
     *) fail "invalid-window-rect" ;;
 esac
+
+old_ifs=$IFS
+IFS=,
+set -- $window_record
+IFS=$old_ifs
+app_pid="${1:-}"
+window_x="${2:-0}"
+window_y="${3:-0}"
+window_w="${4:-0}"
+window_h="${5:-0}"
+case "$app_pid" in
+    ""|*[!0-9]*) fail "invalid-window-pid" ;;
+esac
+window_rect="$window_x,$window_y,$window_w,$window_h"
 
 if ! screencapture -x -R"$window_rect" "$BEFORE_PNG"; then
     fail "before-capture-failed"
 fi
 
-old_ifs=$IFS
-IFS=,
-set -- $window_rect
-IFS=$old_ifs
-window_x="${1:-0}"
-window_y="${2:-0}"
 click_x=$((window_x + 150))
 click_y=$((window_y + 140))
 
-cliclick "m:${click_x},${click_y}" "c:."
-osascript >/dev/null <<'OSA'
+# Deliver the frozen sequence explicitly. The application must independently
+# return the same ordered backend receipt before this wrapper can pass.
+cliclick "m:${click_x},${click_y}" "dd:." "du:."
+osascript - "$app_pid" >/dev/null <<'OSA'
+on run argv
+set targetPid to (item 1 of argv) as integer
 tell application "System Events"
-  repeat with proc in (processes whose name is "SimpleGui")
+  repeat with proc in (processes whose unix id is targetPid)
     tell proc
       set frontmost to true
-      keystroke "g"
+      key down "g"
+      key up "g"
       return true
     end tell
   end repeat
 end tell
 error "SimpleGui input target missing"
+end run
 OSA
 
 event_deadline=$(($(date +%s) + 15))
@@ -166,12 +265,16 @@ while [ "$(date +%s)" -lt "$event_deadline" ]; do
     pointer="$(value_of graphics_2d_event_pointer_events "$EVENTS")"
     clicks="$(value_of graphics_2d_event_click_events "$EVENTS")"
     revision="$(value_of graphics_2d_event_interaction_revision "$EVENTS")"
+    event_sequence="$(value_of event_sequence "$EVENTS")"
+    event_count="$(value_of event_count "$EVENTS")"
+    event_backend="$(value_of event_backend "$EVENTS")"
     keyboard="${keyboard:-0}"
     pointer="${pointer:-0}"
     clicks="${clicks:-0}"
     revision="${revision:-0}"
     if [ "$keyboard" -gt 0 ] && [ "$pointer" -gt 0 ] &&
-            [ "$clicks" -gt 0 ] && [ "$revision" -gt 0 ]; then
+            [ "$clicks" -gt 0 ] && [ "$revision" -gt 0 ] &&
+            [ -n "$event_sequence" ]; then
         break
     fi
     sleep 1
@@ -180,6 +283,10 @@ done
 [ "${keyboard:-0}" -gt 0 ] || fail "keyboard-event-missing"
 [ "${pointer:-0}" -gt 0 ] || fail "pointer-event-missing"
 [ "${clicks:-0}" -gt 0 ] || fail "click-event-missing"
+[ "$event_sequence" = "focus,pointer_down,pointer_up,key_down,key_up" ] ||
+    fail "ordered-event-receipt-missing"
+[ "${event_count:-0}" -eq 5 ] || fail "event-count-mismatch"
+[ "$event_backend" = "vulkan" ] || fail "event-backend-mismatch"
 
 source="$(value_of graphics_2d_event_source "$EVENTS")"
 handle="$(value_of graphics_2d_event_backend_handle "$EVENTS")"
@@ -193,9 +300,11 @@ interaction_checksum="$(value_of graphics_2d_event_interaction_checksum "$EVENTS
 
 # Pin again immediately before the post-input capture so another activation
 # cannot relocate or cover the evidence window.
-osascript >/dev/null <<'OSA'
+osascript - "$app_pid" >/dev/null <<'OSA'
+on run argv
+set targetPid to (item 1 of argv) as integer
 tell application "System Events"
-  repeat with proc in (processes whose name is "SimpleGui")
+  repeat with proc in (processes whose unix id is targetPid)
     tell proc
       set position of window 1 to {200, 120}
       set frontmost to true
@@ -204,6 +313,7 @@ tell application "System Events"
   end repeat
 end tell
 error "SimpleGui post-input window missing"
+end run
 OSA
 sleep 1
 if ! screencapture -x -R"$window_rect" "$AFTER_PNG"; then
@@ -227,16 +337,77 @@ for expected in \
     grep -q "^${expected}$" "$launch_stdout" || fail "renderer-provenance-missing"
 done
 renderer_handle="$(value_of graphics_2d_backend_handle "$launch_stdout")"
+renderer_source="$(value_of graphics_2d_source "$launch_stdout")"
+renderer_checksum="$(value_of graphics_2d_checksum "$launch_stdout")"
 fallback_reason="$(value_of graphics_2d_vulkan_fallback_reason "$launch_stdout")"
+renderer_dimensions="$(value_of graphics_2d_dimensions "$launch_stdout")"
+renderer_dpi="$(value_of graphics_2d_dpi "$launch_stdout")"
+font_loaded="$(value_of graphics_2d_font_loaded "$launch_stdout")"
+font_expected_identity="$(value_of graphics_2d_font_expected_identity "$launch_stdout")"
+font_identity="$(value_of graphics_2d_font_identity "$launch_stdout")"
+font_cold_rasterizations="$(value_of graphics_2d_font_cold_rasterizations "$launch_stdout")"
+font_warm_rasterizations="$(value_of graphics_2d_font_warm_rasterizations "$launch_stdout")"
+font_warm_hits="$(value_of graphics_2d_font_warm_hits "$launch_stdout")"
+font_execution_target="$(value_of graphics_2d_font_execution_target "$launch_stdout")"
+font_backend_attempt_succeeded="$(value_of graphics_2d_font_backend_attempt_succeeded "$launch_stdout")"
 [ "${renderer_handle:-0}" -gt 0 ] || fail "renderer-handle-missing"
+[ "$source" = "$renderer_source" ] || fail "event-source-receipt-mismatch"
+[ "$handle" = "$renderer_handle" ] || fail "event-handle-receipt-mismatch"
+[ "$initial_checksum" = "$renderer_checksum" ] || fail "event-checksum-receipt-mismatch"
 [ -z "$fallback_reason" ] || fail "renderer-cpu-fallback"
+[ "$renderer_dimensions" = "${EXPECTED_WIDTH}x${EXPECTED_HEIGHT}" ] ||
+    fail "renderer-dimensions-mismatch"
+[ "$renderer_dpi" = "$REQUESTED_DPI" ] || fail "renderer-dpi-mismatch"
+[ "$font_loaded" = "true" ] || fail "vector-font-not-loaded"
+[ -n "$font_expected_identity" ] || fail "vector-font-expected-identity-missing"
+[ "$font_identity" = "$font_expected_identity" ] || fail "vector-font-identity-mismatch"
+[ "${font_cold_rasterizations:-0}" -gt 0 ] || fail "vector-font-cold-rasterization-missing"
+[ "${font_warm_rasterizations:--1}" -eq 0 ] || fail "vector-font-warm-rerasterized"
+[ "${font_warm_hits:-0}" -gt 0 ] || fail "vector-font-warm-cache-hit-missing"
+[ "$font_execution_target" = "vulkan" ] || fail "vector-font-execution-target-mismatch"
+[ "$font_backend_attempt_succeeded" = "true" ] || fail "vector-font-backend-attempt-failed"
+
+# Frozen shared adapter evidence. The capture must be the application's durable
+# framebuffer artifact, not this wrapper's compositor screenshot.
+adapter_backend="$(value_of backend "$EVENTS")"
+adapter_target="$(value_of target "$EVENTS")"
+adapter_width="$(value_of width "$EVENTS")"
+adapter_height="$(value_of height "$EVENTS")"
+adapter_dpi="$(value_of dpi "$EVENTS")"
+pixel_sha256="$(value_of pixel_sha256 "$EVENTS")"
+non_background_bounds="$(value_of non_background_bounds "$EVENTS")"
+capture_path="$(value_of capture_path "$EVENTS")"
+source_revision="$(value_of source_revision "$EVENTS")"
+[ "$adapter_backend" = "vulkan" ] || fail "adapter-backend-mismatch"
+[ -n "$adapter_target" ] || fail "adapter-target-missing"
+[ "$adapter_width" = "$EXPECTED_WIDTH" ] || fail "adapter-width-mismatch"
+[ "$adapter_height" = "$EXPECTED_HEIGHT" ] || fail "adapter-height-mismatch"
+[ "$adapter_dpi" = "$REQUESTED_DPI" ] || fail "adapter-dpi-mismatch"
+sha256_valid "$pixel_sha256" || fail "pixel-sha256-invalid"
+[ -n "$capture_path" ] || fail "durable-capture-path-missing"
+capture_path="$(absolute_path "$capture_path")"
+[ -s "$capture_path" ] || fail "durable-capture-missing"
+[ "$(sha256_file "$capture_path")" = "$pixel_sha256" ] || fail "durable-capture-hash-mismatch"
+[ "$(head -c 2 "$capture_path")" = "P6" ] || fail "durable-capture-not-ppm"
+case "$non_background_bounds" in
+    ""|0,0,0,0) fail "non-background-bounds-missing" ;;
+esac
+case "$source_revision" in
+    ""|*[!0-9a-f]*) fail "source-revision-invalid" ;;
+esac
+
+cp "$EVENTS" "$VALIDATED_EVENTS"
 
 {
-    echo "macos_vulkan_2d_live_status=pass"
+        echo "macos_vulkan_2d_live_status=pass"
     echo "macos_vulkan_2d_live_reason=pass"
     echo "macos_vulkan_2d_live_backend=vulkan"
     echo "macos_vulkan_2d_live_source=$source"
     echo "macos_vulkan_2d_live_backend_handle=$handle"
+    echo "macos_vulkan_2d_live_dimensions=$renderer_dimensions"
+    echo "macos_vulkan_2d_live_dpi=$renderer_dpi"
+    echo "macos_vulkan_2d_live_spirv_sha256=$actual_spirv_sha256"
+    echo "macos_vulkan_2d_live_font_identity=$font_identity"
     echo "macos_vulkan_2d_live_initial_checksum=$initial_checksum"
     echo "macos_vulkan_2d_live_interaction_checksum=$interaction_checksum"
     echo "macos_vulkan_2d_live_keyboard_events=$keyboard"
@@ -250,21 +421,25 @@ fallback_reason="$(value_of graphics_2d_vulkan_fallback_reason "$launch_stdout")
     echo "macos_vulkan_2d_live_after_bytes=$after_bytes"
     echo "macos_vulkan_2d_live_before_cksum=$before_cksum"
     echo "macos_vulkan_2d_live_after_cksum=$after_cksum"
+    echo "backend=$adapter_backend"
+    echo "target=$adapter_target"
+    echo "width=$adapter_width"
+    echo "height=$adapter_height"
+    echo "dpi=$adapter_dpi"
+    echo "pixel_sha256=$pixel_sha256"
+    echo "non_background_bounds=$non_background_bounds"
+    echo "event_sequence=$event_sequence"
+    echo "event_count=$event_count"
+    echo "event_backend=$event_backend"
+    echo "capture_path=$capture_path"
+    echo "source_revision=$source_revision"
 } >"$EVIDENCE_ENV"
 write_report
 
 # Q closes through the application's own event route after evidence is durable.
-osascript >/dev/null 2>&1 <<'OSA' || true
-tell application "System Events"
-  repeat with proc in (processes whose name is "SimpleGui")
-    tell proc
-      set frontmost to true
-      keystroke "q"
-      return true
-    end tell
-  end repeat
-end tell
-OSA
+cleanup
+app_pid=""
+trap - EXIT HUP INT TERM
 
 echo "macOS Vulkan 2D live evidence: PASS"
 echo "report=$REPORT_PATH"
