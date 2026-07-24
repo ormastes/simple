@@ -8,7 +8,7 @@
 # unknown-flag fail-closed behavior on the REAL module.
 
 use std.test_runner.test_runner_args.{parse_test_args, parse_mode_str}
-use std.test_runner.test_runner_types.{TestExecutionMode, execution_mode_to_string}
+use std.test_runner.test_runner_types.{TestExecutionMode, TestRunResult, execution_mode_to_string, test_empty_selection_is_success, classify_test_run_result, test_run_outcome_exit_code}
 
 describe "test_runner_args flag parsing (hardening)":
     context "sdoctest flags":
@@ -81,10 +81,28 @@ describe "test_runner_args flag parsing (hardening)":
         it "takes the first non-flag token as the path":
             val options = parse_test_args(["first/path", "second/path"])
             expect(options.path).to_equal("first/path")
+            expect(options.path_explicit).to_equal(true)
 
         it "defaults to test/ when no path token is given":
             val options = parse_test_args([])
             expect(options.path).to_equal("test/")
+            expect(options.path_explicit).to_equal(false)
+
+        it "remembers an explicit default-looking test path":
+            val options = parse_test_args(["test/"])
+            expect(options.path).to_equal("test/")
+            expect(options.path_explicit).to_equal(true)
+
+        it "fails an explicit empty spec selection but preserves query and doctest lanes":
+            val implicit = parse_test_args([])
+            val explicit = parse_test_args(["missing_spec.spl"])
+            val listed = parse_test_args(["missing_spec.spl", "--list"])
+            val doctest = parse_test_args(["green.spl", "--spl-doctest"])
+            val empty = TestRunResult(files: [], total_passed: 0, total_failed: 0, total_skipped: 0, total_pending: 0, total_timed_out: 0, total_duration_ms: 0, total_setup_ms: 0, total_cached: 0)
+            expect(test_run_outcome_exit_code(classify_test_run_result(empty, test_empty_selection_is_success(implicit)))).to_equal(0)
+            expect(test_run_outcome_exit_code(classify_test_run_result(empty, test_empty_selection_is_success(explicit)))).to_equal(4)
+            expect(test_run_outcome_exit_code(classify_test_run_result(empty, test_empty_selection_is_success(listed)))).to_equal(0)
+            expect(test_run_outcome_exit_code(classify_test_run_result(empty, test_empty_selection_is_success(doctest)))).to_equal(0)
 
     context "deliberate-red: malformed / unknown input":
         it "ignores an unrecognized long flag instead of crashing or misrouting it as a path":
