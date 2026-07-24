@@ -1490,6 +1490,40 @@ fn project_stage4_archive_closure(
             #[cfg(not(target_os = "macos"))]
             closure_cmd.arg(format!("-Wl,--undefined={symbol}"));
         }
+        // The current Apple linker ignores `-u`-seeded archive extraction in
+        // `-r` mode: members defining the requested roots never load and the
+        // roots come out with 0 definitions. Seed the closure with a real
+        // reference object instead; its own array symbol is not in `requested`
+        // so the localization pass below demotes it like any other non-root.
+        #[cfg(target_os = "macos")]
+        {
+            let refs_c = temp_dir.join(format!("{stem}_refs.c"));
+            let refs_o = temp_dir.join(format!("{stem}_refs.o"));
+            let mut source = String::new();
+            for symbol in &requested {
+                source.push_str(&format!("extern void {symbol}(void);\n"));
+            }
+            source.push_str("void *__stage4_projection_refs[] = {\n");
+            for symbol in &requested {
+                source.push_str(&format!("    (void *){symbol},\n"));
+            }
+            source.push_str("};\n");
+            std::fs::write(&refs_c, source)
+                .map_err(|err| format!("failed to write Stage4 projection reference source: {err}"))?;
+            let refs_status = std::process::Command::new(&cc)
+                .arg("-c")
+                .arg("-ffunction-sections")
+                .arg("-fdata-sections")
+                .arg(&refs_c)
+                .arg("-o")
+                .arg(&refs_o)
+                .status()
+                .map_err(|err| format!("failed to compile Stage4 projection reference object: {err}"))?;
+            if !refs_status.success() {
+                return Err("Stage4 projection reference object compilation failed".to_string());
+            }
+            closure_cmd.arg(&refs_o);
+        }
         #[cfg(target_os = "linux")]
         closure_cmd.arg("-Wl,--start-group");
         for archive in inputs {
