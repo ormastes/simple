@@ -343,3 +343,28 @@ implementation-milestone-0-in-progress
   AXI interface. AXI LOCK is not accepted as proof of contended RISC-V atomic
   correctness. GHDL behavior, Vivado PS-DDR integration, FPGA execution, and
   Linux terminal `login`/`ls` evidence remain required.
+- correction 2026-07-24: the product DDR window is now 256 MiB
+  (`0x80000000..0x8fffffff`) and the shared bridge translates it to reserved PS
+  DDR (`0x40000000..0x4fffffff`). The candidate Vivado flow now owns a
+  ZynqMP/SmartConnect block design for both XLENs; this supersedes the preceding
+  internal-RAM/no-BD observations but remains unqualified until GHDL and Vivado
+  run on compiler-emitted product artifacts.
+- RV32 product progress 2026-07-24: the canonical generator now compiles
+  `rv32i_rtl/protected_entry.spl`, requires
+  `core32_protected_product_entry`, emits the existing WB64 adapter, shared
+  CLINT/PLIC/UART/interconnect, external-DDR SoC, AXI bridge, and RV32 K26 PL
+  top, and has no handwritten/template fallback. RV32 and RV64 board scripts
+  now reuse one parameterized PS-DDR build. Shell syntax passes; actual
+  generation and GHDL remain pending the live Stage 4 build.
+- Linux media progress 2026-07-24: the default RV64 marker initramfs and DTB
+  build passes. The latest 866-byte initramfs produced two-cell `/chosen`
+  addresses `0x0:0x88200000..0x0:0x88200362` (exclusive end). Repeated outputs
+  exposed non-reproducible archive metadata; sorted input, owner-zero metadata,
+  normalized mtimes, `cpio --reproducible`, and `gzip -n` are staged but not
+  rerun after the three-cycle cap. Pinned OpenSBI/Linux and the soft-float
+  BusyBox terminal image remain missing, so no boot/login claim is made.
+- acceptance hardening 2026-07-24: both dual-arch preflight rows now require
+  compiler-product/PS-DDR RTL, a clean XSDB DDR load, and a directional
+  board-origin login/shell/`ls /` transcript containing the deterministic root
+  fixture. Legacy preload and ILA marker evidence remains diagnostic and cannot
+  pass the physical run row.
