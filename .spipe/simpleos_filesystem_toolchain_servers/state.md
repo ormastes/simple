@@ -1051,3 +1051,19 @@ cached, 0 failed, output SHA-256
 `--version` reports `simple-bootstrap 1.0.0-beta`, and the canonical
 `candidate_frontend_smoke` passes. This admits the groundwork for the streaming
 slice; it is not Stage4 memory or SimpleOS/QEMU evidence.
+
+### 2026-07-24 Stage4 cycle-cap handoff
+
+The parser slice in `6baf92c173` is accepted and pushed. Full-CLI cycle 3
+reached `src/compiler/10.frontend/core/__init__.spl:111` and rejected canonical
+`pub mod ast`. The current automatic continuation is the same logical session,
+so the three-cycle cap remains exhausted: no further patch, RED/GREEN, rebuild,
+target/media, or QEMU run is authorized here. History shows `d0ae311284` added
+consume-only visible child-module parsing and its regression, `e6fa51c872`
+removed both, and `448317ea5d` later added the distinct private dotted
+`mod pkg.member` sibling-import path. A fresh scoped session must restore only
+the visible pub-mod regression/consume branch, preserve private dotted
+lowering, run one focused RED/GREEN, rebuild/admit one bootstrap candidate,
+then attempt one fresh-cache full CLI. Web/DB, Clang, and Simple filesystem live
+proofs remain gated on Stage4 admission; current stamped payload/media/log
+artifacts are absent.
