@@ -5,23 +5,21 @@
 - Linux current-main pure-Simple Stage 2/3 dynload: PASS from a clean cache on
   2026-07-25. LLVM virtual dispatch, PTX float-bit formatting, ELF relocation
   values, and `rt_dict_insert -> rt_dict_set` lowering are covered.
-- FreeBSD 14.3 QEMU smoke: PASS.
+- Historical FreeBSD 14.3 QEMU smoke: PASS. The canonical full lane now uses
+  supported FreeBSD 14.4.
 - Rust `simple-runtime` and `simple-compiler` host checks: PASS.
-- Native macOS and Windows verification is active in GitHub Actions. Run
-  `30146430121` covers Intel/Apple Silicon macOS and Windows MSVC; run
-  `30146474227` now requires strict Stage 2/3 dynload bootstrap for both MSVC
-  and MinGW with `SIMPLE_NO_STUB_FALLBACK=1`.
-- A 2026-07-11 full FreeBSD cycle booted the pristine guest and reached `sshd`,
-  but cloud-init requested a reboot as the old 600-second budget expired. The
-  checker now monitors QEMU during SSH waits and defaults to 900 seconds; one
-  final full run remains pending after the three-cycle cap resets.
-- A two-module production-consumer probe rebuilt dynload artifacts but exposed
-  a real launcher boundary failure. The pure-Simple CLI delegates `.smf`
-  execution to the Rust seed, while `dynsmf_session` validates artifacts and
-  records synthetic handles without executing refreshed module behavior.
-  Watcher artifacts also live under `build/smf`, while the startup manifest
-  names `build/dynsmf`. Consumer dispatch remains blocked on real
-  loader/runtime ownership, not missing test assertions.
+- Native macOS and Windows verification is active in GitHub Actions. Windows
+  run `30148705502` is non-cancelling; isolated multiplatform run
+  `30149462707` covers Intel/Apple Silicon macOS and both Windows backends.
+- FreeBSD run `30147237924` proved the previous shell user-data disabled
+  firstboot jobs too late. Commits `05796f7883b0` and `d3f77e847aa1` select
+  supported 14.4 and write per-service `rc.conf.d` flags through early
+  cloud-config. Current full run `30149458196` is queued.
+- Commit `d3f77e847aa1` routes production `.smf` execution through the real
+  loader, resolves `main`, and calls its executable address without the Rust
+  delegate. Commit `1c8b26de9b48` adds a real cache reuse/mutation/launcher
+  identity scenario and fixes the watcher fallback import cycle. Terminal CI
+  evidence remains required before closing the consumer row.
 
 ## Remaining Work
 
@@ -63,10 +61,9 @@
    hit for unchanged modules, and execute the changed behavior through the
    production launcher without replacing the monolithic CLI.
 
-   Current blocker: reproduce and fix production `.smf` file dispatch. Keep
-   the integration spec out of release gates until it launches the real
-   refreshed artifact and can assert behavior, cache hits, and unchanged
-   launcher identity without mocks or source-text checks.
+   Implementation is complete. Run the real integration scenario and retain
+   it as a release gate only after it proves changed behavior, cache reuse, and
+   unchanged launcher identity without mocks or source-text checks.
 
 5. After all native-host gates pass, update the status report, close TODO rows,
    and run the normal verify/release process. Do not use a Rust seed fallback as
