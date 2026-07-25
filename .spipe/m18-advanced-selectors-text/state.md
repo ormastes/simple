@@ -224,3 +224,12 @@ Committed and pushed to origin/main as `71a236acf8`.
 - 2-research: Found fallback renderer pipeline (browser_renderer.spl:524-580), 6 reusable modules, 7 requirements drafted
 - 3-arch: Designed 2 modules (1 modified, 1 new), 8 decisions, 6 public API functions, no circular deps; all 7 REQs covered
 - 4-spec: Created 1 spec file with 8 total specs (2 AC-1, 3 AC-2, 1 AC-3, 2 AC-4), 100% AC coverage for AC-1 through AC-4; all specs fail today (no impl exists)
+
+## 2026-07-25 supersession
+
+The extracted `html_fallback_renderer.spl` later became unreachable: it had no
+in-tree caller or exported entry point, while production browser rendering had
+moved to semantic layout → Draw IR → Engine2D. It was retired rather than
+retaining a second renderer whose text path painted rectangle placeholders.
+The M18 selector/text requirements remain owned by the canonical browser
+layout and WPT surfaces.

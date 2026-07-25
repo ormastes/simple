@@ -2,6 +2,11 @@
 
 ## Status: 8/8 tasks done
 
+**Superseded 2026-07-25:** the private fallback module described below had no
+remaining caller/export and was retired. Production ownership is now the
+canonical semantic browser layout → Draw IR → Engine2D route; the historical
+implementation and verification record below is retained for traceability.
+
 Follow-up: glass comparison feature-gap reporting now treats `::before` and
 `::after` as supported, matching the implemented fallback renderer behavior.
 

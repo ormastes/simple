@@ -50,6 +50,7 @@ font atlas or its owning GPU pipeline.
    - Expected: ink_result.pixels.len() equals `32 * 24`
 - Check the production Simple Browser uses the same DrawIR route
    - Expected: host_web_source does not contain `simple_web_engine2d_render_html_pixels(html, width, height, backend_name)`
+   - Expected: the unreachable private rectangle-glyph HTML fallback source does not exist
    - Expected: gui_host_source does not contain `browser_backend_collect_widget_draw_ir_commands`
    - Expected: gui_host_source does not contain `browser_backend_dispatch_prepared_draw_ir`
    - Expected: gui_host_source does not contain `web_render_artifact_with_runtime_dispatch_payload`
@@ -59,7 +60,7 @@ font atlas or its owning GPU pipeline.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 79 lines folded for reproduction.
+Runnable source: 80 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -104,6 +105,7 @@ expect(host_web_source).to_contain("simple_web_layout_render_html_readback_engin
 expect(host_web_source.contains("simple_web_engine2d_render_html_pixels(html, width, height, backend_name)")).to_equal(false)
 val host_draw_ir_source = rt_file_read_text("src/lib/gc_async_mut/gpu/browser_engine/simple_web_layout_engine2d_fast.spl")
 expect(host_draw_ir_source).to_contain("if result.skipped_command_count != 0:")
+expect(rt_file_exists("src/lib/gc_async_mut/gpu/browser_engine/html_fallback_renderer.spl")).to_equal(false)
 val gui_host_source = rt_file_read_text("src/app/ui.browser/backend.spl")
 expect(gui_host_source).to_contain("widget_tree_to_draw_ir(root_node, self.width, self.height, DRAW_IR_BACKEND_GPU)")
 expect(gui_host_source).to_contain("web_render_draw_ir_request_to_pixel_artifact(req, composition, self.gpu_backend_name)")
