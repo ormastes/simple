@@ -696,3 +696,14 @@ the shared binary — deploys require explicit user go-ahead).
   known stale argv0/delegation path and then failed before assertions while
   configuring its structured-result environment, so positional C5 exit `42`
   remains the next execution gate; C9 is still gated.
+
+  Two bounded cache-preserving LLVM Stage4 attempts then stopped before object
+  emission. The foreground attempt was terminated at phase-two parse +627s by
+  the tool-session lifetime. A detached second attempt advanced to
+  `var_reassign_ssa.spl` at +439s, then ended without an artifact while other
+  long-lived native workers had created severe process pressure. Neither run
+  emitted a compiler diagnostic or stub fallback, and neither changed the
+  shared object cache. No third attempt is permitted in that environment:
+  resume only after the unrelated workers drain, using the preserved cache and
+  a separately bounded process. Positional C5 exit `42` remains unproven; C9
+  must not run yet.
