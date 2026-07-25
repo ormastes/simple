@@ -109,6 +109,26 @@ fn sync_owned_captured_globals(func: &FunctionDef, local_env: &Env, outer_env: &
         }
         changed
     });
+    // Mirror mutated owned globals into the shared flat MODULE_GLOBALS. Deferred
+    // lazy imports keep each module's globals in MODULE_GLOBALS_BY_OWNER, but a
+    // cross-module read of an *imported/exported* global (e.g. the AST arena
+    // `expr_tag` defined in compiler.core.ast_expr and read from the desugar and
+    // MIR modules) resolves a bare identifier through the flat MODULE_GLOBALS
+    // fallback. That flat entry is only seeded with the owner's *initial* value
+    // at module-load time, so subsequent growth of an exported array was invisible
+    // across the module boundary and indexing it read length 0 -> "array index out
+    // of bounds". Keeping the flat map in step with the owner map restores the
+    // shared-global liveness the pre-defer flat model had, while per-owner reads
+    // (env / MODULE_GLOBALS_BY_OWNER) still take precedence so same-named private
+    // globals stay isolated.
+    if !changed.is_empty() {
+        MODULE_GLOBALS.with(|cell| {
+            let mut globals = cell.borrow_mut();
+            for (name, value) in &changed {
+                globals.insert(name.clone(), value.clone());
+            }
+        });
+    }
     let caller_has_same_owner =
         CURRENT_EXEC_MODULE.with(|cell| cell.borrow().as_ref().is_some_and(|current| current == &owner));
     if caller_has_same_owner {
