@@ -2,7 +2,7 @@
 
 - contract_version: 2
 - status: fail
-- reason: build-failed
+- reason: no-runnable-pure-simple-compiler
 - elf: build/os/simpleos_riscv64_display_smoke.elf
 - serial_log: (not produced — QEMU never launched)
 - scanout_ppm: (not produced)
@@ -26,109 +26,106 @@
 - wm_font_input_mode: 0
 - wm_font_input_contract_version: 1
 
-## Verdict
+## Verdict (retry, after coordinator's dash `test -s /dev/stdin` fix landed)
 
-BLOCKED (not a display/rendering FAIL — the ELF was never produced, so QEMU
-was never launched and no QMP scanout capture was attempted). This is
-distinct from a genuine `missing-elf` probe result: the earlier probe never
-even tried to build; this run tried to build 3 times and root-caused why the
-build phase itself cannot complete in this environment.
+BLOCKED. Not a display/rendering FAIL — the ELF still was never produced,
+QEMU was never launched, no QMP scanout capture was attempted. This report
+makes no scanout claim, real or zero-as-pass.
 
-## What changed since the earlier "missing-elf" run
+## Retry status: media-phase gate PASSED, build now blocked one phase further
 
-The prior probe (doc/09_report/rv64_display_smoke_qmp_evidence_*.md lineage)
-never invoked `bin/simple os build --scenario=riscv64-display-smoke` at all
-— the ELF file was simply absent. This run **did** invoke the build 3 times
-(the session's build-attempt cap) and got past the earlier "mtools missing"
-symptom, but hit a second, deeper blocker in the same media-provisioning
-phase. The ELF (kernel binary) itself was never reached because
-`bin/simple os build --scenario=riscv64-display-smoke` fails during the
-**disk-media phase** (`ensure_riscv64_desktop_disk_image`), before the
-kernel/ELF compile step runs.
-
-## Root cause (two layered defects, both in the FAT32-media verification path)
-
-1. **Environment gap (worked around, not a code bug):** `mtools`
-   (`mtype`/`mdir`) is not installed via apt on this host (`dpkg -l | grep
-   mtools` → not installed; `apt-cache policy mtools` shows only a candidate,
-   no installed version) and there is no repo-managed unprivileged fallback
-   invoked automatically. A previously-built local mtools exists at
-   `/tmp/simple-mtools/root/usr/bin/{mtype,mdir,...}` (leftover from an
-   earlier session/build). I symlinked those binaries into
-   `~/.local/bin` (already on default `$PATH`, no sudo needed, no repo files
-   touched) so `command -v mtype` / `command -v mdir` now succeed for any
-   subprocess spawned by `bin/simple`.
-
-2. **Real code defect (the actual blocker, NOT fixed — scope is probe/build,
-   not editing production gate logic without authorization):**
-   `_desktop_disk_image_has_required_fonts()` in
-   `src/os/_QemuRunner/scenario_exec.spl` (around line 288-306) verifies each
-   extracted font file is non-empty with the idiom:
+1. Confirmed the coordinator's fix is present:
+   `grep -c 'test -s /dev/stdin' src/os/_QemuRunner/scenario_exec.spl` → `0`.
+   Both sites now use `mtype ... | grep -qa .`, matching the idiom already
+   used at lines 85-88 of that file.
+2. Re-ran `bin/simple os build --scenario=riscv64-display-smoke` with the
+   `~/.local/bin` mtools symlinks from the first pass still in place (kept,
+   per instructions, as an environment dependency note rather than a repo
+   change). Result: the media/font-projection gate that failed 3/3 times
+   last round now **passes** —
+   `[ensure_riscv64_desktop_disk_image]` no longer prints "desktop font
+   projection is incomplete"; the build advances past `phase=media` into
+   `phase=build`.
+3. The build then fails at a **new, later, unrelated phase**:
    ```
-   mtype -i "{img_path}" ::/SYS/FONTS/{font_name} 2>/dev/null | test -s /dev/stdin
+   [scenario][riscv64-display-smoke] phase=build target=build/os/simpleos_riscv64_display_smoke.elf
+   [build][riscv64] phase=tooling FAILED: no runnable pure-Simple compiler
+   [scenario][riscv64-display-smoke] phase=build FAILED target=build/os/simpleos_riscv64_display_smoke.elf
    ```
-   run under `/bin/sh -c "..."`. On this host `/bin/sh` is `dash`
-   (`readlink -f /bin/sh` → `/usr/bin/dash`). `test -s /dev/stdin` stats a
-   pipe's `st_size`, which is always reported as 0 for a FIFO/pipe under
-   POSIX — so `test -s` on a piped `/dev/stdin` **always evaluates false**,
-   regardless of how much data actually flowed through the pipe. This is
-   independently reproducible outside the Simple runtime:
-   ```
-   $ /bin/sh -c 'mtype -i img ::/SYS/FONTS/NSANSSC 2>/dev/null | test -s /dev/stdin; echo rc=$?'
-   rc=1
-   ```
-   even though `mtype -i img ::/SYS/FONTS/NSANSSC` on its own produces
-   17,772,300 bytes of real font data (verified by hand: `mtype ... | wc -c`
-   → 17772300). So `_desktop_disk_image_has_required_fonts()` reports
-   "incomplete" for **every** correctly-populated riscv64 desktop disk image
-   on any dash-based `/bin/sh` (stock on Ubuntu/Debian), which is why
-   `ensure_riscv64_desktop_disk_image()` prints
-   `[ensure_riscv64_desktop_disk_image] desktop font projection is
-   incomplete` and `bin/simple os build --scenario=riscv64-display-smoke`
-   fails at `phase=media` every time — confirmed 3/3 attempts, identical
-   failure, despite the on-disk image (`build/os/fat32-riscv64-desktop.img`,
-   134,217,728 bytes) manually verified to contain all 16 required font
-   files plus `NOTICES.MD`, and correctly lacking `::/SYS/APPS` and
-   `::/SIMPLE.ELF` (the fs-exec-payload rejection checks also pass).
 
-   I did **not** patch `scenario_exec.spl` — that changes gate logic outside
-   this lane's authorized scope (build ELF + run probe) and the task
-   explicitly forbids weakening gates; a `test -s /dev/stdin`-in-a-pipe fix
-   is arguably a correctness fix rather than a weakening, but it's still a
-   change to shared production verification code that deserves its own
-   reviewed change, not a drive-by inside a probe-evidence task.
+## Root cause of the new blocker (pre-existing, already tracked — not introduced by this session)
 
-## Bug to file
+`no runnable pure-Simple compiler` comes from `_find_simple_binary_for_target()`
+in `src/os/_QemuRunner/os_build_run.spl`, which requires every candidate binary
+(`release/x86_64-unknown-linux-gnu/simple`, `bin/simple`, ...) to pass
+`_simple_binary_is_valid()` → `_candidate_frontend_smoke()`: a real
+`native-build --backend cranelift --runtime-bundle core-c-bootstrap --mode
+one-binary` of the fixture `scripts/check/cert/redeploy_gate/fixtures/p2_add.spl`,
+then running the produced binary and checking it prints `5`.
 
-`_desktop_disk_image_has_required_fonts()` /
-`_desktop_disk_image_has_required_manifests()`-style checks in
-`src/os/_QemuRunner/scenario_exec.spl` use `<cmd> | test -s /dev/stdin` to
-test "did this piped command produce output" — broken under dash (stock
-Ubuntu `/bin/sh`) because pipe `stat()` reports size 0. Same idiom should be
-audited across scenario_exec.spl / scenario_disks.spl. Suggested fix
-direction: replace with `[ -n "$(cmd)" ]` or check exit status +
-byte-count via a temp file, not `test -s /dev/stdin` after a pipe.
+Reproduced directly, deterministically (2/2 tries), independent of the RV64
+scenario:
 
-## Attempts (3/3, cap reached)
+```
+$ release/x86_64-unknown-linux-gnu/simple native-build --backend cranelift \
+    --runtime-bundle core-c-bootstrap --entry-closure \
+    --entry scripts/check/cert/redeploy_gate/fixtures/p2_add.spl \
+    --cache-dir <tmp>/cache --mode one-binary --output <tmp>/p2_add
+Segmentation fault (exit 139)
+```
 
-1. `bin/simple os build --scenario=riscv64-display-smoke` (no PATH change) —
-   failed at `phase=media`, "desktop font projection is incomplete"
-   (mtools missing from PATH at that point).
-2. Same command with `mtools` PATH-exported in the same shell — failed
-   identically (env inheritance confirmed fine via a `process_run_timeout`
-   probe script, so PATH was not actually the residual blocker for this
-   attempt — the dash `test -s /dev/stdin` defect was already present
-   underneath).
-3. Same command with mtools symlinked persistently into `~/.local/bin` —
-   failed identically. Root-caused per above; STOPPING per the 3-attempt
-   cap rather than patching production verification logic.
+GDB backtrace:
+```
+SIGSEGV in __strlen_avx2
+  <- __add_to_environ(name="SIMPLE_OS_LOG_MODE", value=0x12 <invalid>, ...)
+  <- rt_env_set
+  <- io.cli_ops.env_set
+  <- io___CliCompile__compile_targets__cli_native_build
+  <- cli___CliMain__main_and_help__main
+  <- spl_main -> main
+```
+
+This is not a bug I found fresh — it is the exact, already-filed defect in
+`doc/08_tracking/bug/deployed_selfhost_env_set_miscompile_segv_2026-07-14.md`:
+the tracked `release/x86_64-unknown-linux-gnu/simple` artifact (unchanged
+SHA-256 lineage since 2026-07-14, last reconfirmed still-broken 2026-07-23)
+has a **stale two-argument `rt_env_set` ABI linked in**, while current source
+(`runtime_native.c`, callers) uses the four-argument `(key_ptr, key_len,
+value_ptr, value_len)` ABI. Any `env_set()` call — `check`, `test --help`,
+and now `native-build`'s own admission probe — forwards the wrong register as
+the value pointer and glibc `strlen()`s garbage. `bin/simple` is a symlink to
+this same artifact, so every candidate in `_find_simple_binary_for_target()`
+fails identically; there is no working "runnable pure-Simple compiler" on
+this host to build the RV64 kernel with.
+
+The documented required fix is a full self-hosted redeploy from a strict
+Stage 2/3/4 pure-Simple bootstrap (doc's "Required fix and gate" section) —
+which this lane is explicitly forbidden from running (`Do NOT run a stage4
+bootstrap or full bin/simple build bootstrap — peaks near 65GB and trips a
+64GB kill cap`). I did not attempt a bootstrap, did not fall back to the Rust
+seed as a substitute build path (forbidden by project rules — "don't fall
+back to the seed"), and did not patch runtime ABI code — all out of scope
+for a probe/build lane and would not be a real fix without the redeploy this
+bug requires.
+
+## Attempts this retry (fresh 3-cycle cap, 1 of 3 used)
+
+1. `bin/simple os build --scenario=riscv64-display-smoke` — media phase now
+   passes (coordinator's fix confirmed effective); fails at `phase=build`
+   with "no runnable pure-Simple compiler". Root-caused via 2 direct
+   reproductions + 1 GDB backtrace of the admission-probe fixture build
+   (diagnostic, not counted against the build-attempt cap). Stopping here:
+   the blocker is deterministic, pre-existing, already tracked, and its
+   documented fix (full bootstrap redeploy) is out of this lane's scope.
 
 ## What is/isn't evidence
 
-- `build/os/fat32-riscv64-desktop.img` — present, 134,217,728 bytes, manually
-  verified complete (all 16 fonts + NOTICES.MD present; SYS/APPS and
-  SIMPLE.ELF correctly absent).
+- `build/os/fat32-riscv64-desktop.img` — present, valid, gate now passes
+  cleanly (media phase fix confirmed working end-to-end this retry).
 - `build/os/simpleos_riscv64_display_smoke.elf` — still absent. No QEMU
-  session was ever started. No serial log, no QMP scanout, no
-  width/height/stride/nonblack/palette evidence exists for this run — this
-  report does **not** claim any scanout numbers, real or zero-as-pass.
+  session was started. No serial log, no QMP scanout, no
+  width/height/stride/nonblack/palette evidence exists for this run.
+- Environment note (not a repo change): `~/.local/bin/{mtype,mdir,...}` are
+  symlinked to a pre-existing local mtools build at
+  `/tmp/simple-mtools/root/usr/bin/` for this host/session, since `mtools`
+  is not apt-installed here. Kept in place per instructions.
