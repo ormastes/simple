@@ -123,3 +123,13 @@ The LSP wrapper still exits 1: both existing Darwin native candidates fail the
 real-call probe, then source fallback reaches the stale deployed compiler and
 reports `unknown extern function: rt_cli_arg_count`. A fresh Stage 4 deploy is
 therefore still required before the current LSP source can be verified.
+
+## 2026-07-25 source-mode cwd hardening
+
+`simple-lsp-mcp` source mode now resolves child query binaries from
+`SIMPLE_LIB=/repo/src` when `SIMPLE_BINARY` is unset and the current working
+directory is not the repository root. This keeps `lsp_definition`,
+`lsp_symbols`, completions, and related bounded child queries from falling back
+to a missing relative `bin/simple` in jj side workspaces or clients that launch
+the server from another cwd. Focused regression:
+`test/01_unit/app/simple_lsp_mcp/lsp_command_bounded_spec.spl`.
