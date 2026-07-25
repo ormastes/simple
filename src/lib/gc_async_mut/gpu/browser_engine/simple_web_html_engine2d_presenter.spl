@@ -98,7 +98,27 @@ fn _dirty_bounds(truth: [u32], gpu: [u32], width: i32, height: i32) -> _DirtyRec
 
 fn _extract_subimage(src: [u32], src_width: i32, rect: _DirtyRect) -> [u32]:
     val zero = 0 as u32
-    var out: [u32] = [zero; rect.w * rect.h]
+    if src_width <= 0 or rect.w <= 0 or rect.h <= 0 or rect.x < 0 or rect.y < 0:
+        return []
+    val src_len_i64 = src.len().to_i64()
+    val src_width_i64 = src_width.to_i64()
+    val src_height_i64 = if src_width_i64 == 0: 0 else: src_len_i64 / src_width_i64
+    if src_height_i64 <= 0 or src_len_i64 != src_height_i64 * src_width_i64:
+        return []
+    val rect_end_x = rect.x.to_i64() + rect.w.to_i64()
+    val rect_end_y = rect.y.to_i64() + rect.h.to_i64()
+    val rect_x = rect.x.to_i64()
+    val rect_y = rect.y.to_i64()
+    if rect_x >= src_width_i64:
+        return []
+    if rect_y >= src_height_i64:
+        return []
+    if rect_end_x > src_width_i64 or rect_end_y > src_height_i64:
+        return []
+    val rect_area_i64 = rect.w.to_i64() * rect.h.to_i64()
+    if rect_area_i64 <= 0 or rect_area_i64 > src_len_i64:
+        return []
+    var out: [u32] = [zero; rect_area_i64.to_i32()]
     var ry: i32 = 0
     while ry < rect.h:
         val src_row = (rect.y + ry) * src_width + rect.x
@@ -265,9 +285,10 @@ fn present_gpu_paint_readback(frame: WebGpuPaintFrame, backend_name: text, base:
             var blit_pixels: i32 = 0
             if dirty.valid:
                 val sub = _extract_subimage(frame.fb, width, dirty)
-                engine.draw_image(dirty.x, dirty.y, dirty.w, dirty.h, sub)
-                blit_count = 1
-                blit_pixels = dirty.w * dirty.h
+                if sub.len() == dirty.w * dirty.h:
+                    engine.draw_image(dirty.x, dirty.y, dirty.w, dirty.h, sub)
+                    blit_count = 1
+                    blit_pixels = dirty.w * dirty.h
             val out = engine.read_pixels_with_source()
             val gpu_backend_used = not _backend_is_cpu(out.source.trim().lower())
             print "[web-gpu-paint] backend={backend_name} dispatch rect={rect_count} gradient=0 blit={blit_count} blit_pixels={blit_pixels} readback_source={out.source} gpu_backend_used={gpu_backend_used} pixels={out.pixels.len()}"
