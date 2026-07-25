@@ -695,6 +695,10 @@ else
   # stage-2 build error must not abort the whole pipeline.
   stage2_bin="${output_dir}/stage2/${PLATFORM}/simple${exe_suffix}"
   stage3_bin="${output_dir}/stage3/${PLATFORM}/simple${exe_suffix}"
+  native_verbose_arg=""
+  if [ "${verbose}" -eq 1 ]; then
+    native_verbose_arg="--verbose"
+  fi
   rm -f "${stage2_bin}" "${stage3_bin}"
   set +e
   env RUST_LOG="${RUST_LOG:-error}" \
@@ -710,6 +714,7 @@ else
     --source src/compiler --source src/app --source src/lib \
     --entry-closure \
     --threads "${jobs}" \
+    ${native_verbose_arg} \
     --cache-dir "${native_cache_dir}" \
     --mode "${bootstrap_mode}" \
     --entry src/app/cli/bootstrap_main.spl \
