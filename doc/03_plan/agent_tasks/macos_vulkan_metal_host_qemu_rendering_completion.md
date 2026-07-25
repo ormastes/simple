@@ -421,7 +421,7 @@ same failure.
   fresh session. The helper/producer bundle remains local and uncommitted until
   a real Stage3 manifest is produced and verified.
 - The independent provider micro-probe is now implemented without Engine2D,
-  winit, or a window. Its focused contract passes 2/2, but the canonical
+  winit, or a window. Its focused source contract passes 2/2, but the canonical
   self-hosted compiler stopped its only native build attempt with
   `Illegal instruction: 4` / `field access on nil receiver`. Do not rerun the
   exhausted full-live Vulkan command or substitute the Rust seed. Resume the

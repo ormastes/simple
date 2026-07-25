@@ -51,9 +51,9 @@ probe opens one explicitly supplied provider dylib and directly resolves:
 - `rt_vulkan_get_last_error`
 - `rt_vulkan_shutdown`
 
-The checker also records the canonical provider path, provider SHA-256, and
-dyld library resolution. It does not construct `VulkanBackend`, start
-Engine2D, use winit, or launch a window.
+The checker requires a trusted compiler manifest binding the canonical path and
+SHA-256, and records bounded, hashed provider/build/probe evidence. It does
+not construct `VulkanBackend`, start Engine2D, use winit, or launch a window.
 
 The focused source contract passed 2/2. The only allowed native execution
 attempt did not reach the provider: the canonical self-hosted compiler exited
@@ -63,6 +63,8 @@ with `Illegal instruction: 4`, and its retained build log contains:
 runtime error: field access on nil receiver
 ```
 
-Therefore provider availability, device count, dyld resolution, and provider
-error remain unobserved in this run. No Rust seed fallback and no exhausted
-full-live Vulkan command were used.
+`DynLib.call0` only exposes an i64 ABI, while the resolved
+`rt_vulkan_get_last_error` symbol returns text. The probe therefore reports a
+blocked dynamic-text ABI instead of unsafely calling it. Provider availability,
+device count, dyld resolution, and provider error remain unobserved in this
+run. No Rust seed fallback and no exhausted full-live Vulkan command were used.
