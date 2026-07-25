@@ -143,7 +143,11 @@ fn _cli_current_exe_path() -> text:
     # `bin/simple test` never delegates). See
     # doc/08_tracking/bug/cli_symlink_argv0_seed_sibling_lookup_2026-07-24.md.
     if not _cli_is_windows_platform():
-        val self_exe = rt_process_run("readlink", ["-f", "/proc/self/exe"])
+        # /proc/self/exe must be read from the CHILD's view of US: a bare
+        # `readlink -f /proc/self/exe` resolves the readlink binary itself
+        # (/usr/bin/readlink), whose seed sibling /usr/bin/simple_seed never
+        # exists -> fall through to `bin/simple` -> infinite self-delegation.
+        val self_exe = rt_process_run("sh", ["-c", "readlink -f /proc/$PPID/exe"])
         if self_exe.2 == 0:
             val self_path = self_exe.0.trim()
             if self_path.len() > 0:
@@ -236,9 +240,15 @@ pub fn _cli_driver_binary() -> text:
                 if not _cli_is_current_exe(seed_sibling):
                     return seed_sibling
             else:
+                # Prefer repo-local seed for local-stage4 workflows when available.
                 val repo_seed = _cli_repo_seed_path()
                 if repo_seed.len() > 0:
                     return repo_seed
+                # If there is no seed sibling and we are not in a release-with-seed
+                # setup, delegating to `bin/simple` can recurse into this same
+                # binary (bootstrap loop).
+                if not exe_path.contains("/bin/release/"):
+                    return ""
                 _cli_eprint("simple: seed sibling not found, skipping delegation: {seed_sibling}")
 
     val ext = if _cli_is_windows_platform(): ".exe" else: ""

@@ -13,6 +13,8 @@ LAUNCH_LOG="$BUILD_DIR/launch.log"
 WINDOWED_CAPTURE="$BUILD_DIR/windowed.ppm"
 FULLSCREEN_CAPTURE="$BUILD_DIR/fullscreen.ppm"
 RESTORED_CAPTURE="$BUILD_DIR/restored.ppm"
+FONT_REGION_PATH="$BUILD_DIR/font-region.rgb"
+FONT_REGION_CORRUPT_COPY_PATH="$BUILD_DIR/font-region-corrupt.rgb"
 WINDOWED_SNAPSHOT="$BUILD_DIR/windowed.scene.json"
 FULLSCREEN_SNAPSHOT="$BUILD_DIR/fullscreen.scene.json"
 RESTORED_SNAPSHOT="$BUILD_DIR/restored.scene.json"
@@ -31,6 +33,9 @@ SPL_WINIT_LIB="${SIMPLE_WM_WINIT_LIB:-$ROOT_DIR/build/sffi/libspl_winit.$RUNTIME
 SIMPLE_RUNTIME_DYLIB="${SIMPLE_WM_RUNTIME_DYLIB:-$ROOT_DIR/build/sffi/libsimple_runtime_wm.$RUNTIME_DYLIB_EXT}"
 SIMPLE_RUNTIME_C_DYLIB="${SIMPLE_WM_RUNTIME_C_DYLIB:-$ROOT_DIR/build/sffi/libsimple_runtime_c_wm.$RUNTIME_DYLIB_EXT}"
 DRIVER_TIMEOUT_SECS="${WM_EVIDENCE_TIMEOUT_SECS:-20}"
+FONT_REGION_W="${WM_HOST_FONT_REGION_W:-56}"
+FONT_REGION_H="${WM_HOST_FONT_REGION_H:-48}"
+FONT_REGION_CHECK="${WM_HOST_FONT_REGION_CHECK:-optional}"
 REQUESTED_GUI_BACKEND="$(printf '%s' "${SIMPLE_GUI_BACKEND:-}" | tr '[:upper:]' '[:lower:]')"
 VULKAN_EVIDENCE_REQUIRED=false
 if [ "$REQUESTED_GUI_BACKEND" = vulkan ]; then
@@ -41,10 +46,22 @@ SIMPLE_BIN_STATUS=unchecked
 SIMPLE_BIN_RESOLVED=""
 SIMPLE_BIN_VERSION=""
 SIMPLE_BIN_SHA256=""
+font_provenance_status=not-run
+font_identity=""
+font_target=""
+font_provenance_reason="not-run"
+font_region_crop_status="not-run"
+font_region_crop_bytes=0
+font_region_crop_sha256=""
+font_region_corrupt_copy_status="not-run"
+font_region_corrupt_copy_bytes=0
+font_region_corrupt_copy_sha256=""
+font_region_crop_reason=""
 
 mkdir -p "$BUILD_DIR" "$ARTIFACT_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$EVIDENCE_ENV" "$REPORT_PATH" "$LAUNCH_LOG" \
     "$WINDOWED_CAPTURE" "$FULLSCREEN_CAPTURE" "$RESTORED_CAPTURE" \
+    "$FONT_REGION_PATH" "$FONT_REGION_CORRUPT_COPY_PATH" \
     "$WINDOWED_SNAPSHOT" "$FULLSCREEN_SNAPSHOT" "$RESTORED_SNAPSHOT" \
     "$COMMAND_PATH"
 
@@ -66,6 +83,10 @@ sha256_file() {
     else
         printf 'unavailable\n'
     fi
+}
+
+file_byte_count() {
+    stat -c%s "$1" 2>/dev/null || stat -f%z "$1" 2>/dev/null || printf 0
 }
 
 is_rust_seed_path() {
@@ -107,6 +128,19 @@ emit_failure() {
         echo "wm_production_fullscreen_native_artifact=$(artifact_status "$NATIVE_BIN")"
         echo "wm_production_fullscreen_requested_gui_backend=$REQUESTED_GUI_BACKEND"
         echo "wm_production_fullscreen_vulkan_evidence_required=$VULKAN_EVIDENCE_REQUIRED"
+        echo "wm_production_fullscreen_font_provenance_status=$font_provenance_status"
+        echo "wm_production_fullscreen_font_identity=$font_identity"
+        echo "wm_production_fullscreen_font_target=$font_target"
+        echo "wm_production_fullscreen_font_provenance_reason=$font_provenance_reason"
+        echo "wm_production_fullscreen_font_region_crop_status=$font_region_crop_status"
+        echo "wm_production_fullscreen_font_region_crop_rgb=$FONT_REGION_PATH"
+        echo "wm_production_fullscreen_font_region_crop_bytes=$font_region_crop_bytes"
+        echo "wm_production_fullscreen_font_region_crop_sha256=$font_region_crop_sha256"
+        echo "wm_production_fullscreen_font_region_corrupt_copy=$FONT_REGION_CORRUPT_COPY_PATH"
+        echo "wm_production_fullscreen_font_region_corrupt_copy_bytes=$font_region_corrupt_copy_bytes"
+        echo "wm_production_fullscreen_font_region_corrupt_copy_sha256=$font_region_corrupt_copy_sha256"
+        echo "wm_production_fullscreen_font_region_crop_reason=$font_region_crop_reason"
+        echo "wm_production_fullscreen_font_region_corrupt_copy_status=$font_region_corrupt_copy_status"
     } >"$EVIDENCE_ENV"
     {
         echo "# Production Host WM Fullscreen Evidence"
@@ -375,6 +409,37 @@ ppm_engine2d_checksum() {
         print "$checksum\n";
     ' "$1"
 }
+extract_font_region_rgb() {
+    source_image="$1"
+    target_image="$2"
+    capture_w="$3"
+    capture_h="$4"
+    perl -e '
+        use strict;
+        use warnings;
+        my ($source, $target, $capture_w, $capture_h, $crop_w, $crop_h) = @ARGV;
+        my $x = $capture_w - $crop_w;
+        my $y = $capture_h - $crop_h;
+        exit 2 if $x < 0 || $y < 0;
+        open my $in, "<:raw", $source or exit 3;
+        local $/;
+        my $data = <$in> // "";
+        $data =~ /\\AP6\\r?\\n(\\d+) (\\d+)\\r?\\n255\\r?\\n/s or exit 4;
+        my ($width, $height) = ($1, $2);
+        exit 5 if $width != $capture_w || $height != $capture_h;
+        my $pixels = substr($data, $+[0]);
+        exit 6 if length($pixels) != $width * $height * 3;
+        my $output = "";
+        for (my $yy = 0; $yy < $crop_h; $yy++) {
+            my $offset = (($y + $yy) * $width + $x) * 3;
+            my $slice = substr($pixels, $offset, $crop_w * 3);
+            exit 7 if length($slice) != $crop_w * 3;
+            $output .= $slice;
+        }
+        open my $out, ">:raw", $target or exit 8;
+        print {$out} $output;
+    ' "$source_image" "$target_image" "$capture_w" "$capture_h" "$FONT_REGION_W" "$FONT_REGION_H"
+}
 
 if wait_for '.schema == "simple-wm-production-evidence-v1" and .input.nonce == 0 and .input.phase == "presented"'; then
     :
@@ -456,6 +521,64 @@ if grep -Eq '^\[hosted-wm\] content-provenance-rejected|backend=native-safe-fall
     fail_live content-provenance-rejected
 fi
 
+content_frame_line="$(grep -E '^\\[hosted-wm\\] frame-presented ' "$LAUNCH_LOG" | tail -n 1 || true)"
+content_ack_line="$(grep -E '^\\[hosted-wm\\] evidence-ack nonce=11 ' "$LAUNCH_LOG" | tail -n 1 || true)"
+if [ -n "$content_frame_line" ]; then
+    font_identity="$(marker_field "$content_frame_line" identity)"
+    font_target="$(marker_field "$content_frame_line" target)"
+fi
+if [ -z "$font_identity" ] && [ -n "$content_ack_line" ]; then
+    font_identity="$(marker_field "$content_ack_line" identity)"
+    font_target="$(marker_field "$content_ack_line" target)"
+fi
+if [ -z "$font_identity" ]; then
+    font_provenance_status=unavailable
+    font_provenance_reason=font-provenance-missing
+elif [ "$font_identity" = "bitmap-default" ]; then
+    font_provenance_status=fail
+    font_provenance_reason=font-provenance-default
+else
+    font_provenance_status=pass
+    font_provenance_reason=pass
+fi
+
+if [ "$font_provenance_status" = pass ] && [ "$FONT_REGION_CHECK" = required ]; then
+    fullscreen_w="$(jq -r '.surface.width // 0' "$FULLSCREEN_SNAPSHOT")"
+    fullscreen_h="$(jq -r '.surface.height // 0' "$FULLSCREEN_SNAPSHOT")"
+    if [ "$fullscreen_w" -gt 0 ] && [ "$fullscreen_h" -gt 0 ]; then
+        if extract_font_region_rgb "$FULLSCREEN_CAPTURE" "$FONT_REGION_PATH" "$fullscreen_w" "$fullscreen_h"; then
+            font_region_crop_status=pass
+            font_region_crop_bytes="$(file_byte_count "$FONT_REGION_PATH")"
+            font_region_crop_sha256="$(sha256_file "$FONT_REGION_PATH")"
+            if cp "$FONT_REGION_PATH" "$FONT_REGION_CORRUPT_COPY_PATH" && \
+                perl -e 'use strict; my $path = $ARGV[0]; open my $in, "+<:raw", $path or exit 1; my $byte; my $read = sysread($in, $byte, 1); exit 2 if $read != 1; seek($in, 0, 0) or exit 3; my $v = ord($byte); $v = ($v + 1) % 256; print {$in} chr($v);' "$FONT_REGION_CORRUPT_COPY_PATH"; then
+                font_region_corrupt_copy_status=pass
+                font_region_corrupt_copy_bytes="$(file_byte_count "$FONT_REGION_CORRUPT_COPY_PATH")"
+                font_region_corrupt_copy_sha256="$(sha256_file "$FONT_REGION_CORRUPT_COPY_PATH")"
+            else
+                font_region_corrupt_copy_status=fail
+            fi
+            if [ "$font_region_crop_bytes" != "$font_region_corrupt_copy_bytes" ] || \
+                [ "$font_region_corrupt_copy_sha256" = "$font_region_crop_sha256" ]; then
+                font_region_corrupt_copy_status=fail
+                font_region_crop_reason=font-corrupt-copy-mismatch
+            fi
+        else
+            font_region_crop_status=fail
+            font_region_crop_reason=font-region-crop-failed
+        fi
+    else
+        font_region_crop_status=unsupported-platform
+        font_region_crop_reason=font-region-size-unavailable
+    fi
+elif [ "$FONT_REGION_CHECK" = required ]; then
+    font_region_crop_status=unavailable
+    font_region_crop_reason=font-provenance-failed
+else
+    font_region_crop_status=not-run
+    font_region_crop_reason=font-region-check-disabled
+fi
+
 verified_backend=simple-2d-winit-buffer
 verified_source=presented-pixel-buffer
 verified_backend_handle=0
@@ -503,6 +626,19 @@ trap - EXIT INT TERM
     echo "wm_production_fullscreen_same_frame_readback=$verified_same_frame_readback"
     echo "wm_production_fullscreen_readback_checksum=$verified_readback_checksum"
     echo "wm_production_fullscreen_presented_checksum=$verified_presented_checksum"
+    echo "wm_production_fullscreen_font_provenance_status=$font_provenance_status"
+    echo "wm_production_fullscreen_font_identity=$font_identity"
+    echo "wm_production_fullscreen_font_target=$font_target"
+    echo "wm_production_fullscreen_font_provenance_reason=$font_provenance_reason"
+    echo "wm_production_fullscreen_font_region_crop_status=$font_region_crop_status"
+    echo "wm_production_fullscreen_font_region_crop_rgb=$FONT_REGION_PATH"
+    echo "wm_production_fullscreen_font_region_crop_bytes=$font_region_crop_bytes"
+    echo "wm_production_fullscreen_font_region_crop_sha256=$font_region_crop_sha256"
+    echo "wm_production_fullscreen_font_region_corrupt_copy=$FONT_REGION_CORRUPT_COPY_PATH"
+    echo "wm_production_fullscreen_font_region_corrupt_copy_bytes=$font_region_corrupt_copy_bytes"
+    echo "wm_production_fullscreen_font_region_corrupt_copy_sha256=$font_region_corrupt_copy_sha256"
+    echo "wm_production_fullscreen_font_region_crop_reason=$font_region_crop_reason"
+    echo "wm_production_fullscreen_font_region_corrupt_copy_status=$font_region_corrupt_copy_status"
     echo "wm_production_fullscreen_content_provenance=$content_provenance_marker"
     echo "wm_production_fullscreen_theme_source_manifest_sha256=$EXPECTED_THEME_SOURCE_MANIFEST_SHA256"
     echo "wm_production_fullscreen_internal_maximize_hook=verified"
@@ -521,6 +657,9 @@ trap - EXIT INT TERM
     echo "- backend handle: $verified_backend_handle"
     echo "- same-frame checksum: $verified_same_frame_readback ($verified_readback_checksum / $verified_presented_checksum)"
     echo "- content provenance: $content_provenance_marker"
+    echo "- font provenance: status=$font_provenance_status identity=$font_identity target=$font_target"
+    echo "- font region crop: status=$font_region_crop_status ($font_region_crop_bytes bytes, $font_region_crop_sha256)"
+    echo "- font corrupt copy: status=$font_region_corrupt_copy_status ($font_region_corrupt_copy_bytes bytes)"
     echo "- fullscreen/restore: ${fullscreen_elapsed}ms / ${restored_elapsed}ms"
     echo "- internal interactions: focus, drag, minimize, taskbar restore"
     echo "- internal maximize/restore: verified exact"

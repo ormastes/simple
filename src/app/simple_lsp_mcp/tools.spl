@@ -10,9 +10,14 @@ use std.io_runtime.{process_run}
 # doc/08_tracking/bug/mcp_source_mode_large_import_graph_2026-06-23.md
 use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
 
-val LSP_DIAGNOSTICS_OUTPUT_CAPTURE_BYTES: i64 = 1024 * 1024
-val LSP_COMMAND_TIMEOUT_MS: i64 = 10000
-val LSP_COMMAND_OUTPUT_CAPTURE_BYTES: i64 = 1024 * 1024
+fn lsp_diagnostics_output_capture_bytes() -> i64:
+    1024 * 1024
+
+fn lsp_command_timeout_ms() -> i64:
+    10000
+
+fn lsp_command_output_capture_bytes() -> i64:
+    1024 * 1024
 
 fn lsp_query_path() -> text:
     "src/lib/nogc_sync_mut/lsp/lsp_query.spl"
@@ -29,7 +34,7 @@ fn command_failure(code: i64, stderr: text, stdout: text) -> text:
 
 fn run_command_text(binary: text, args: [text]) -> text:
     val (stdout, stderr, code) = process_run_bounded(
-        binary, args, LSP_COMMAND_TIMEOUT_MS, LSP_COMMAND_OUTPUT_CAPTURE_BYTES)
+        binary, args, lsp_command_timeout_ms(), lsp_command_output_capture_bytes())
     val clean = clean_command_output(stdout)
     if code == 0:
         return clean
@@ -52,24 +57,11 @@ fn run_lsp_diagnostics(file: text) -> text:
     # Spawning it from inside the interpreted LSP server (source mode) deadlocks
     # the no-GC interpreter's process_run wait (zombie child + parent stuck in
     # futex_wait) — a Rust-runtime bug, not fixable from .spl. To avoid hanging
-    # the whole server, diagnostics is gated: it is skipped unless explicitly
-    # enabled with SIMPLE_LSP_ENABLE_DIAGNOSTICS=1 (safe only for a native build
-    # whose tools/call actually works — currently none does). The other 10 LSP
-    # tools run a plain script via process_run and are unaffected.
+    # diagnostics is intentionally disabled by default due the known deadlock
+    # path when `simple check` is spawned from this process. Returning a
+    # guidance message is safer than running the child process here.
     # See doc/08_tracking/bug/lsp_mcp_native_arg_extract_and_source_diagnostics_deadlock_2026-06-18.md
-    val enabled = env_get("SIMPLE_LSP_ENABLE_DIAGNOSTICS") ?? ""
-    if enabled != "1":
-        return "diagnostics unavailable in source mode (process_run deadlocks on the `simple check` subcommand spawn). Run `simple check " + file + "` directly, or set SIMPLE_LSP_ENABLE_DIAGNOSTICS=1 on a working native build."
-    val (stdout, stderr, code) = process_run_bounded(
-        find_simple_binary(),
-        ["check", file],
-        10000,
-        LSP_DIAGNOSTICS_OUTPUT_CAPTURE_BYTES
-    )
-    val clean = clean_command_output(stdout)
-    if code == 0:
-        return clean
-    command_failure(code, stderr, clean)
+    return "diagnostics unavailable: spawning `simple check` from MCP source process is unsafe (can deadlock). Run `simple check " + file + "` directly."
 
 fn lsp_parse_diag_line(line: text) -> text:
     # Parses: path:line:col: error/warning: message

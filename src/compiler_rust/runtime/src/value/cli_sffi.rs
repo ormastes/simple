@@ -218,6 +218,13 @@ fn simple_binary_path() -> std::path::PathBuf {
         }
     }
 
+    if let Ok(current) = std::env::current_exe() {
+        let sibling = sibling_seed_path(&current);
+        if sibling != current && sibling.is_file() {
+            return sibling;
+        }
+    }
+
     let bootstrap = std::path::PathBuf::from("src/compiler_rust/target/bootstrap/simple");
     if bootstrap.is_file() {
         return bootstrap;
@@ -234,6 +241,10 @@ fn simple_binary_path() -> std::path::PathBuf {
     }
 
     std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("simple"))
+}
+
+fn sibling_seed_path(executable: &std::path::Path) -> std::path::PathBuf {
+    executable.with_file_name(format!("simple_seed{}", std::env::consts::EXE_SUFFIX))
 }
 
 const DELEGATE_DEPTH_ENV: &str = "SIMPLE_DELEGATE_DEPTH";
@@ -488,7 +499,7 @@ fn run_tests_with_args(arg_strings: &[String], gc_log: u8, gc_off: u8) -> i64 {
 
 #[cfg(test)]
 mod test_process_arg_bridge_tests {
-    use super::test_args_from_process;
+    use super::{sibling_seed_path, test_args_from_process};
 
     #[no_mangle]
     extern "C" fn spl_arg_count() -> i64 {
@@ -521,6 +532,15 @@ mod test_process_arg_bridge_tests {
         assert_eq!(
             test_args_from_process(&process_args),
             ["focused_spec.spl"].map(String::from)
+        );
+    }
+
+    #[test]
+    fn resolves_the_deployed_sibling_seed() {
+        let executable = std::path::Path::new("/opt/simple/bin/release/target/simple");
+        assert_eq!(
+            sibling_seed_path(executable),
+            executable.with_file_name(format!("simple_seed{}", std::env::consts::EXE_SUFFIX))
         );
     }
 }

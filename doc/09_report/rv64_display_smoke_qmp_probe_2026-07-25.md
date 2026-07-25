@@ -1,0 +1,45 @@
+# RV64 Display-Smoke QMP Evidence
+
+- contract_version: 2
+- status: fail
+- reason: missing-elf
+- elf: build/os/simpleos_riscv64_display_smoke.elf
+- serial_log: build/os/rv64_display_smoke_probe_20260725/serial.log
+- scanout_ppm: build/os/rv64_display_smoke_probe_20260725/scanout.ppm
+- scanout_raw: build/os/rv64_display_smoke_probe_20260725/scanout.raw
+- ready: 0
+- lifecycle_markers: 0
+- width: 0
+- height: 0
+- stride: 0
+- present_revision: 0
+- scanout_address: 0
+- scanout_bpp: 0
+- scanout_format: 
+- scanout_generation: 0
+- scanout_scene_revision: 0
+- scanout_capture_size: 0
+- scanout_capture_origin: qemu-pmemsave
+- nonblack: 0
+- canonical_palette_witnesses: 0
+- canonical_palette_names: 
+- wm_font_input_mode: 1
+- wm_font_input_contract_version: 1
+- font_guest_path: /SYS/FONTS/NOTOSANS
+- font_asset: assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf
+- font_asset_bytes: 0
+- font_asset_sha256: 
+- font_region_rgb: build/os/rv64_display_smoke_probe_20260725/rv64-font-region.rgb
+- font_region_rgb_bytes: 0
+- font_region_rgb_sha256: 
+- font_region_expected_sha256: 
+- corrupt_crop_rejected: 0
+- input_host_nonce: 
+- input_baseline_seq: 0
+- keyboard_input_seq: 0
+- pointer_input_seq: 0
+- guest_font_marker: 0
+- unavailable_marker_seen: 0
+- keyboard_correlated: 0
+- pointer_correlated: 0
+- input_frame_changed: 0

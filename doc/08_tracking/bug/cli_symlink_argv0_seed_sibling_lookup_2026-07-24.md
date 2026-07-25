@@ -39,6 +39,19 @@ Do NOT hand-copy a seed to `bin/simple_seed` — it does not fix the empty-path
 lookup, and an untracked 31 MB binary in `bin/` risks being swept into a
 parallel session's whole-WC sync commit.
 
+## 2026-07-25 Verification
+
+The current Rust runner passes all 16 host-GPU queue examples in 310 ms.
+The deployed pure-Simple CLI still embeds the v0.8.1 subprocess runner: both
+the symlink and real executable paths recursively append the same spec path,
+reaching more than 1,800 processes before termination. Refreshing both seed
+artifacts is insufficient because the stale runner is linked into the
+pure-Simple executable. Rebuild and redeploy that executable before retrying.
+
+The runtime delegate resolver now prefers `simple_seed` beside the executable,
+matching the pure-Simple CLI resolver and avoiding unrelated repo seed drift
+after redeployment.
+
 ## Related
 
 - `smf_stub_shadowing_unresolved_describe_2026-07-24.md` (same symptom, different cause — check `.smf` stubs first)

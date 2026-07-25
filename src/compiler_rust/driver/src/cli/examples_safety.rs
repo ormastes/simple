@@ -35,7 +35,7 @@ fn examples_timeout_disabled() -> bool {
 }
 
 fn should_apply_examples_timeout(path: &Path) -> bool {
-    is_examples_path(path) && std::env::var_os("SIMPLE_TIMEOUT_SECONDS").is_none()
+    is_examples_path(path) && !examples_timeout_disabled()
 }
 
 fn should_isolate_example_process(path: &Path) -> bool {
