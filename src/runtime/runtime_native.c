@@ -848,10 +848,7 @@ static int rt_core_dict_put(RtCoreDict* d, int64_t key, int64_t value);
 static int rt_core_dict_has(RtCoreDict* d, int64_t key);
 static int rt_core_dict_del(RtCoreDict* d, int64_t key);
 
-static RtCoreString** rt_core_string_registry = NULL;
 static _Atomic size_t rt_core_heap_registry_count = 0;
-static size_t rt_core_string_registry_len = 0;
-static size_t rt_core_string_registry_cap = 0;
 static RtCoreString* rt_core_short_string_cache[257] = {0};
 static atomic_flag rt_core_short_string_cache_lock = ATOMIC_FLAG_INIT;
 static RtCoreArray** rt_core_array_registry = NULL;
@@ -865,24 +862,15 @@ static size_t rt_core_mutex_registry_len = 0;
 static size_t rt_core_mutex_registry_cap = 0;
 static atomic_flag rt_core_mutex_registry_lock = ATOMIC_FLAG_INIT;
 
-static void rt_core_register_string(RtCoreString* s) {
-    if (!s) return;
-    if (rt_core_string_registry_len == rt_core_string_registry_cap) {
-        size_t next_cap = rt_core_string_registry_cap == 0 ? 64 : rt_core_string_registry_cap * 2;
-        RtCoreString** next = (RtCoreString**)realloc(rt_core_string_registry, next_cap * sizeof(RtCoreString*));
-        if (!next) return;
-        rt_core_string_registry = next;
-        rt_core_string_registry_cap = next_cap;
-    }
-    rt_core_string_registry[rt_core_string_registry_len++] = s;
-    atomic_fetch_add_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
+static int rt_core_register_immortal_ptr(void* ptr);
+static int rt_core_is_registered_immortal_ptr(void* ptr);
+
+static int rt_core_register_string(RtCoreString* s) {
+    return rt_core_register_immortal_ptr(s);
 }
 
 static int rt_core_is_registered_string(RtCoreString* s) {
-    for (size_t i = 0; i < rt_core_string_registry_len; i++) {
-        if (rt_core_string_registry[i] == s) return 1;
-    }
-    return 0;
+    return rt_core_is_registered_immortal_ptr(s);
 }
 
 static void rt_core_register_array(RtCoreArray* array) {
@@ -1045,35 +1033,30 @@ static RtCoreClosure* rt_core_as_closure(int64_t value) {
 }
 
 /* ----------------------------------------------------------------------------
- * Heap-boxed float registry (O(1) discrimination).
+ * Immortal heap-pointer registry (O(1) discrimination).
  *
- * The existing string/enum/closure/mutex registries above are LINEAR SCANS,
- * fine because those objects are relatively few. Container floats are numerous,
- * so a linear registry would make float discrimination O(n) per check and the
- * whole program O(n^2). This is instead an open-addressing HashSet of registered
- * RtCoreFloat pointers: register-on-alloc, O(1) amortized membership. Membership
- * is a pure pointer comparison performed BEFORE any dereference, so a flat i64
- * that merely aliases RT_VALUE_TAG_HEAP (see the tag-collision SEGV note above
- * rt_core_register_enum) is never dereferenced -- it simply isn't a member.
+ * Strings and container floats are numerous, so linear membership scans make
+ * compiler workloads O(n^2). This open-addressing HashSet provides O(1)
+ * amortized membership. The pointer-only lookup happens before any dereference,
+ * so a flat i64 that merely aliases RT_VALUE_TAG_HEAP is rejected safely.
  *
- * Leak model: entries are never removed. Heap-floats live for the process
- * lifetime (no-GC: arrays/dicts free their backing buffer but not the tagged
- * element values), exactly like the transient short strings above, so their
- * addresses are never reused and stale-membership false positives cannot occur.
+ * Only objects with a leading `kind` field and process-lifetime allocation may
+ * enter this table. Strings and boxed floats are never removed, so their
+ * addresses cannot be reused into stale-membership false positives.
  * -------------------------------------------------------------------------- */
-static uintptr_t* rt_core_float_registry = NULL; /* open-addressing table, 0 = empty */
-static size_t rt_core_float_registry_cap = 0;    /* power of two, or 0 */
-static size_t rt_core_float_registry_len = 0;
-static atomic_flag rt_core_float_registry_lock = ATOMIC_FLAG_INIT;
+static uintptr_t* rt_core_immortal_registry = NULL; /* open-addressing table, 0 = empty */
+static size_t rt_core_immortal_registry_cap = 0;    /* power of two, or 0 */
+static size_t rt_core_immortal_registry_len = 0;
+static atomic_flag rt_core_immortal_registry_lock = ATOMIC_FLAG_INIT;
 
-static void rt_core_float_registry_acquire(void) {
-    while (atomic_flag_test_and_set_explicit(&rt_core_float_registry_lock, memory_order_acquire)) {}
+static void rt_core_immortal_registry_acquire(void) {
+    while (atomic_flag_test_and_set_explicit(&rt_core_immortal_registry_lock, memory_order_acquire)) {}
 }
-static void rt_core_float_registry_release(void) {
-    atomic_flag_clear_explicit(&rt_core_float_registry_lock, memory_order_release);
+static void rt_core_immortal_registry_release(void) {
+    atomic_flag_clear_explicit(&rt_core_immortal_registry_lock, memory_order_release);
 }
 
-static inline size_t rt_core_float_hash_ptr(uintptr_t p) {
+static inline size_t rt_core_immortal_hash_ptr(uintptr_t p) {
     uint64_t x = (uint64_t)p;
     x ^= x >> 33;
     x *= 0xff51afd7ed558ccdULL;
@@ -1082,69 +1065,80 @@ static inline size_t rt_core_float_hash_ptr(uintptr_t p) {
 }
 
 /* caller holds the lock; table has a free slot */
-static void rt_core_float_registry_insert_raw(uintptr_t p) {
-    size_t mask = rt_core_float_registry_cap - 1;
-    size_t i = rt_core_float_hash_ptr(p) & mask;
+static int rt_core_immortal_registry_insert_raw(uintptr_t p) {
+    size_t mask = rt_core_immortal_registry_cap - 1;
+    size_t i = rt_core_immortal_hash_ptr(p) & mask;
     for (;;) {
-        if (rt_core_float_registry[i] == 0) {
-            rt_core_float_registry[i] = p;
-            rt_core_float_registry_len++;
-            return;
+        if (rt_core_immortal_registry[i] == 0) {
+            rt_core_immortal_registry[i] = p;
+            rt_core_immortal_registry_len++;
+            return 1;
         }
-        if (rt_core_float_registry[i] == p) return; /* already present */
+        if (rt_core_immortal_registry[i] == p) return 0;
         i = (i + 1) & mask;
     }
 }
 
 /* caller holds the lock */
-static int rt_core_float_registry_grow(void) {
-    size_t new_cap = rt_core_float_registry_cap == 0 ? 256 : rt_core_float_registry_cap * 2;
+static int rt_core_immortal_registry_grow(void) {
+    size_t new_cap = rt_core_immortal_registry_cap == 0 ? 256 : rt_core_immortal_registry_cap * 2;
     if (new_cap > SIZE_MAX / sizeof(uintptr_t)) return 0;
     uintptr_t* fresh = (uintptr_t*)calloc(new_cap, sizeof(uintptr_t));
     if (!fresh) return 0;
-    uintptr_t* old = rt_core_float_registry;
-    size_t old_cap = rt_core_float_registry_cap;
-    rt_core_float_registry = fresh;
-    rt_core_float_registry_cap = new_cap;
-    rt_core_float_registry_len = 0;
+    uintptr_t* old = rt_core_immortal_registry;
+    size_t old_cap = rt_core_immortal_registry_cap;
+    rt_core_immortal_registry = fresh;
+    rt_core_immortal_registry_cap = new_cap;
+    rt_core_immortal_registry_len = 0;
     for (size_t i = 0; i < old_cap; i++) {
-        if (old[i] != 0) rt_core_float_registry_insert_raw(old[i]);
+        if (old[i] != 0) rt_core_immortal_registry_insert_raw(old[i]);
     }
     free(old);
     return 1;
 }
 
-static void rt_core_register_float(RtCoreFloat* f) {
-    if (!f) return;
-    rt_core_float_registry_acquire();
+static int rt_core_register_immortal_ptr(void* ptr) {
+    if (!ptr) return 0;
+    rt_core_immortal_registry_acquire();
     /* grow at 70% load */
-    if ((rt_core_float_registry_len + 1) * 10 >= rt_core_float_registry_cap * 7) {
-        if (!rt_core_float_registry_grow()) {
-            rt_core_float_registry_release();
-            return;
+    if ((rt_core_immortal_registry_len + 1) * 10 >= rt_core_immortal_registry_cap * 7) {
+        if (!rt_core_immortal_registry_grow()) {
+            rt_core_immortal_registry_release();
+            return 0;
         }
     }
-    rt_core_float_registry_insert_raw((uintptr_t)f);
-    atomic_fetch_add_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
-    rt_core_float_registry_release();
+    int inserted = rt_core_immortal_registry_insert_raw((uintptr_t)ptr);
+    if (inserted) {
+        atomic_fetch_add_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
+    }
+    rt_core_immortal_registry_release();
+    return 1;
 }
 
-static int rt_core_is_registered_float(RtCoreFloat* f) {
-    if (!f) return 0;
+static int rt_core_is_registered_immortal_ptr(void* ptr) {
+    if (!ptr) return 0;
     int found = 0;
-    rt_core_float_registry_acquire();
-    if (rt_core_float_registry_cap != 0) {
-        size_t mask = rt_core_float_registry_cap - 1;
-        size_t i = rt_core_float_hash_ptr((uintptr_t)f) & mask;
+    rt_core_immortal_registry_acquire();
+    if (rt_core_immortal_registry_cap != 0) {
+        size_t mask = rt_core_immortal_registry_cap - 1;
+        size_t i = rt_core_immortal_hash_ptr((uintptr_t)ptr) & mask;
         for (;;) {
-            uintptr_t e = rt_core_float_registry[i];
+            uintptr_t e = rt_core_immortal_registry[i];
             if (e == 0) break;
-            if (e == (uintptr_t)f) { found = 1; break; }
+            if (e == (uintptr_t)ptr) { found = 1; break; }
             i = (i + 1) & mask;
         }
     }
-    rt_core_float_registry_release();
+    rt_core_immortal_registry_release();
     return found;
+}
+
+static int rt_core_register_float(RtCoreFloat* f) {
+    return rt_core_register_immortal_ptr(f);
+}
+
+static int rt_core_is_registered_float(RtCoreFloat* f) {
+    return rt_core_is_registered_immortal_ptr(f);
 }
 
 /* Return the boxed RtCoreFloat if `value` is a registered heap-float, else NULL.
@@ -1446,7 +1440,10 @@ int64_t rt_value_float(int64_t raw_bits) {
     f->kind = RT_VALUE_HEAP_FLOAT;
     f->reserved = 0;
     memcpy(&f->value, &raw_bits, sizeof(f->value));
-    rt_core_register_float(f);
+    if (!rt_core_register_float(f)) {
+        free(f);
+        return (int64_t)(((uint64_t)raw_bits & ~RT_VALUE_TAG_MASK) | RT_VALUE_TAG_FLOAT);
+    }
     return (int64_t)(((uint64_t)(uintptr_t)f) | RT_VALUE_TAG_HEAP);
 }
 
@@ -1499,7 +1496,10 @@ static int64_t rt_string_new_uncached(const uint8_t* bytes, uint64_t len) {
         memcpy(s->data, bytes, (size_t)len);
     }
     s->data[len] = '\0';
-    rt_core_register_string(s);
+    if (!rt_core_register_string(s)) {
+        free(s);
+        return rt_core_nil();
+    }
     return (int64_t)(((uint64_t)(uintptr_t)s) | RT_VALUE_TAG_HEAP);
 }
 
@@ -1782,7 +1782,10 @@ int64_t rt_string_concat(int64_t left, int64_t right) {
     if (a->len > 0) memcpy(out->data, a->data, (size_t)a->len);
     if (b->len > 0) memcpy(out->data + a->len, b->data, (size_t)b->len);
     out->data[len] = '\0';
-    rt_core_register_string(out);
+    if (!rt_core_register_string(out)) {
+        free(out);
+        return rt_core_nil();
+    }
     return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
 }
 
@@ -2280,7 +2283,10 @@ int64_t rt_slice(int64_t value, int64_t start, int64_t end, int64_t step) {
         uint64_t out_i = 0;
         for (int64_t i = begin; i < finish; i += stride) out->data[out_i++] = s->data[i];
         out->data[out_len] = '\0';
-        rt_core_register_string(out);
+        if (!rt_core_register_string(out)) {
+            free(out);
+            return rt_core_nil();
+        }
         return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
     }
     return rt_string_new((const uint8_t*)s->data + begin, (uint64_t)(finish - begin));
@@ -2428,7 +2434,10 @@ static int64_t rt_string_ascii_case(int64_t value, int to_lower) {
         out->data[i] = ch;
     }
     out->data[s->len] = '\0';
-    rt_core_register_string(out);
+    if (!rt_core_register_string(out)) {
+        free(out);
+        return rt_core_nil();
+    }
     return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
 }
 
@@ -2522,7 +2531,10 @@ int64_t rt_string_join(int64_t array_value, int64_t separator) {
         }
     }
     out->data[total] = '\0';
-    rt_core_register_string(out);
+    if (!rt_core_register_string(out)) {
+        free(out);
+        return rt_core_nil();
+    }
     return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
 }
 
@@ -2562,7 +2574,10 @@ int64_t rt_array_join_any(int64_t array_value, int64_t separator) {
         }
     }
     out->data[total] = '\0';
-    rt_core_register_string(out);
+    if (!rt_core_register_string(out)) {
+        free(out);
+        return rt_core_nil();
+    }
     return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
 }
 
@@ -2655,7 +2670,10 @@ int64_t rt_string_replace(int64_t value, int64_t old_value, int64_t new_value) {
         }
     }
     out->data[out_len] = '\0';
-    rt_core_register_string(out);
+    if (!rt_core_register_string(out)) {
+        free(out);
+        return rt_core_nil();
+    }
     return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
 }
 
@@ -3187,7 +3205,10 @@ int64_t rt_strcat_tagged(int64_t a, int64_t b) {
     if (left_len > 0) memcpy(out->data, left, left_len);
     if (right_len > 0) memcpy(out->data + left_len, right, right_len);
     out->data[total] = '\0';
-    rt_core_register_string(out);
+    if (!rt_core_register_string(out)) {
+        free(out);
+        return rt_core_nil();
+    }
     return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
 }
 

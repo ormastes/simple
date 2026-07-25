@@ -1099,3 +1099,25 @@ Validate with `evict_probe.spl`-style before/after `heap_registry` deltas
 Repro artifact: `evict_probe.spl` (reproduces the above numbers in <10s,
 no corpus/bootstrap needed) — see session bundle
 `stage4_memory_rootcause.md` for the exact source and build command.
+
+## UPDATE 2026-07-25: remove linear string-registry lookup from the parse path
+
+A fresh generation-2 attempt established a second scaling factor. With one
+197-character source and about 1,400 registered heap objects, phase 2 parsed in
+7ms. After loading the 908-source compiler closure, the first files parsed at
+roughly 10–50 seconds each with about 433,000 objects already registered.
+`runtime_native.c` validated every tagged string by linearly scanning the entire
+string registry, making frequent text operations scale with all prior
+allocations.
+
+The existing open-addressed boxed-float registry is now the shared registry for
+process-lifetime strings and floats. Membership remains a pointer-only check
+before the caller reads the common leading `kind`; registration is locked,
+amortized O(1), and allocation failure frees the new object (boxed floats retain
+their existing inline fallback). Arrays remain on their deletion-aware registry.
+
+`clang -fsyntax-only` and the focused hosted C runtime contract pass. A
+source-matched generation-1 benchmark remains pending: the current upstream
+full-CLI link fails first on unrelated missing `io__env_ops`,
+`io__time_ops`, and `io__dir_ops` compatibility aliases. Do not credit the
+multi-file performance gate or full Stage4 until that link regression is fixed.
