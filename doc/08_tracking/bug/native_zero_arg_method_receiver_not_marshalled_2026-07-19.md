@@ -1,7 +1,7 @@
 # Native codegen: investigate target-only zero-arg method receiver corruption
 
 - **ID:** native_zero_arg_method_receiver_not_marshalled_2026-07-19
-- **Status:** OPEN (the current source-level receiver-omission diagnosis is refuted; reproduce below the MIR boundary)
+- **Status:** FIX CANDIDATE (refreshed hosted AArch64 disassembly verified; wider native matrix pending)
 - **Severity:** high on the affected kernel path; no evidence of a universal method-call defect
 - **Lane:** native-build (cranelift, x86_64-unknown-none, --entry-closure --mode dynload)
 
@@ -43,6 +43,46 @@ failing artifact before assigning a code owner.
 `backend_rocm.spl:277` — `batch.material_supported()` has the same source shape
 and remains worth exercising on its real target. It is not evidence by itself
 that hosted or common call lowering is defective.
+
+## Hosted AArch64 reproduction (2026-07-25)
+
+The self-hosted Stage 3 Cranelift compiler reproduced the defect in the
+production HTML/Draw IR renderer on macOS arm64. In
+`_engine2d_draw_ir_adv_composition_with_images`, adjacent calls to
+`eng.font_execution_target()` and
+`eng.vulkan_font_performance_evidence()` were emitted without reloading `eng`
+into `x0`. The first getter returned the empty-text value `0`; LLDB then
+stopped at the second getter with `x0=0`. Caller disassembly shows the two
+indirect branches at offsets `+632` and `+680` with no receiver move between
+them. The second getter trapped at its nil-receiver guard or loaded a
+text-shaped invalid address, depending on backend/register state.
+
+The same current binary failed with a five-rectangle HTML fixture on
+`cpu_simd` and with the production Aetheric HTML on `software`, ruling out the
+SIMD implementation, gradients, and the WM runtime-provider link as the root
+cause. A diagnostic direct-field substitution passed the former crash point,
+but it is intentionally not retained: Draw IR continues to call the canonical
+Engine2D getters, and the fix belongs at receiver argument construction.
+
+The source helper was semantically receiver-first, but it initialized the
+generic operand array with a one-element literal. In the affected self-hosted
+compiler that literal can become an empty runtime array, so the MIR `Call`
+reaches backend lowering with zero arguments even though the source helper
+looks correct. Both receiver-first helpers now start with `[]` and explicitly
+push `mir_operand_copy(receiver_local)`; the unresolved cross-module recovery
+path does the same for `unresolved_receiver_local`.
+
+A refreshed hosted AArch64 Stage 3 compiler built from this change emits
+`mov x0, x22` immediately before both focused getter calls. The same receiver
+is preserved across the optional field write and the text-returning first
+getter, proving that the explicit push changes the emitted call ABI. The first
+version of the fixture still exited 132 only because its final
+`evidence.?.marker` assertion exposed a separate ExistsCheck defect:
+`rt_is_some(evidence)` returned an `i1`, and native code then used that boolean
+as the struct field receiver. That defect is tracked separately; the receiver
+regression now checks the returned optional handle for non-nil, which is enough
+to prove the second getter received the correct object. Promotion from FIX
+CANDIDATE still requires the focused fixture on hosted arm64 plus x86/ARM QEMU.
 
 ## Workaround (landed)
 Inline the method body at the call site (plain field loads + calls that
