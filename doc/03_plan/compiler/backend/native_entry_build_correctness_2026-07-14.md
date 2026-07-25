@@ -1113,3 +1113,12 @@ the shared binary — deploys require explicit user go-ahead).
   and the case remains pending until a later bounded run. Both parity and
   native-matrix gates now reject a missing `SIMPLE_BINARY` once, before
   generating cases, instead of reporting misleading per-case compiler bugs.
+
+  Entry-closure triage found a second CLI import parser still materializing
+  every source line and admitting fake `use` declarations from docstrings.
+  The CLI now delegates use/import/export-use discovery to the driver's shared
+  byte scanner; only guarded `mod` and `export member.*` sibling syntax uses a
+  compatibility line scan. Executable scanner assertions and a CLI source
+  contract pin the behavior. The deployed pure-Simple tool segfaulted before
+  the focused tests, optimizer, and source check could report results, so no
+  performance or behavioral receipt is claimed this session.

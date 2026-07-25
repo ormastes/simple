@@ -154,3 +154,21 @@ change.
 - `test/01_unit/app/cli_native_build_main_contract_spec.spl` updated to
   assert the new implementation (and the absence of the old O(n²) patterns)
   instead of the old (buggy) structure it previously locked in.
+
+## 2026-07-25 shared scanner follow-up
+
+The CLI closure walker still split every source into lines and maintained a
+second import parser. Besides retaining whole-file allocation on the hot path,
+that parser treated `use` text inside docstrings as a real dependency.
+
+Use/import/export-use discovery now delegates to the compiler driver's shared
+byte scanner. A guarded sibling scanner retains `mod` and
+`export member.*` compatibility while skipping comments and docstrings. The
+CLI's duplicate `_nb_module_path_from_use` parser and unconditional line split
+are removed. Focused scanner assertions cover real and fake sibling
+declarations, and the CLI source contract pins delegation.
+
+The deployed pure-Simple tool segfaulted before the focused tests, optimizer,
+or source check could report results. No seed substitution or retry was made;
+the earlier 456 ms receipt remains historical evidence, not performance credit
+for this follow-up.
