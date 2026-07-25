@@ -47,21 +47,30 @@ src/compiler_rust/target/debug/simple native-build <file>.spl \
 
 | input | result |
 |---|---|
-| `fn main(): print "hi"` | **rc=0**, prints `hi` |
-| `extern fn rt_heap_registry_count() -> i64` + `fn main() -> i64` + `val` | rc=1, no functions |
-| externs + `fn main() -> i64` + `var`/loops | rc=1, no functions |
+| `triv.spl` — `fn main(): print "hi"` | **rc=0**, prints `hi` |
+| `varA.spl` — `fn main() -> i64`, NO extern | **rc=0**, prints `A` |
+| `varB.spl` — module-level `extern fn`, main with no return type | *pending at time of writing* |
+| `ctrl_probe.spl` — extern + `fn main() -> i64` + `val` | rc=1, no functions |
+| `free_probe.spl` — externs + `fn main() -> i64` + `var`/loops | rc=1, no functions |
 
 ## Next step — discriminate before bisecting
 
-Two single-variable probes are checked in under `probes/freeprobe/`:
-- `varA.spl` — `fn main() -> i64` and NO extern (isolates the return type)
-- `varB.spl` — a module-level `extern fn` and `fn main()` with NO return type
-  (isolates the extern declaration)
+**A return-typed `main` is RULED OUT** — `varA.spl` builds and runs. The prime
+remaining suspect is the module-level `extern fn` declaration, isolated by
+`varB.spl`.
 
-Run both with the flags above. Whichever fails localises the defect. Only if
-BOTH pass should the seed be bisected, reverting these in order and rebuilding
-between each: `runtime_sffi.rs` (`RuntimeFuncSpec`), `elf_utils.rs`,
-`interpreter_extern/{mod,sffi_string}.rs`, `runtime/src/value/mod.rs`.
+- If `varB` FAILS: the trigger is a module-level `extern fn` under
+  `--entry-closure`. Look first at how extern declarations are collected into
+  the module's MIR function list — a module whose only items are externs plus
+  `main` apparently ends up with zero functions.
+- If `varB` PASSES: neither feature alone is sufficient; the trigger is the
+  COMBINATION (extern + return-typed main, or the local `val`). Add one variable
+  at a time from `varB` toward `ctrl_probe`.
+
+Only if that whole ladder passes should the seed be bisected, reverting in
+order and rebuilding between each: `runtime_sffi.rs` (`RuntimeFuncSpec`),
+`elf_utils.rs`, `interpreter_extern/{mod,sffi_string}.rs`,
+`runtime/src/value/mod.rs`.
 
 Also rule out working-copy `src/compiler/**` edits from parallel sessions
 (`cuda_backend.spl`, `contracts.spl` were dirty at the time) and the
