@@ -2288,6 +2288,8 @@ uint64_t g_fb_w = 0;
 static volatile uint64_t g_gui_simd_fill_hits = 0;
 static volatile uint64_t g_gui_simd_fill_chunks = 0;
 static volatile uint64_t g_gui_simd_fill_tail_pixels = 0;
+static volatile uint64_t g_gui_simd_fill_scalar_parity_checks = 0;
+static volatile uint64_t g_gui_simd_fill_scalar_parity_failures = 0;
 
 RuntimeValue rt_gui_set_fb(RuntimeValue addr, RuntimeValue w)
 {
@@ -2311,6 +2313,11 @@ RuntimeValue rt_gui_hline(RuntimeValue y, RuntimeValue x, RuntimeValue count, Ru
 RuntimeValue rt_gui_simd_fill_hits(void) { return (RuntimeValue)g_gui_simd_fill_hits; }
 RuntimeValue rt_gui_simd_fill_chunks(void) { return (RuntimeValue)g_gui_simd_fill_chunks; }
 RuntimeValue rt_gui_simd_fill_tail_pixels(void) { return (RuntimeValue)g_gui_simd_fill_tail_pixels; }
+RuntimeValue rt_gui_simd_fill_scalar_parity(void)
+{
+    return g_gui_simd_fill_scalar_parity_checks > 0
+        && g_gui_simd_fill_scalar_parity_failures == 0;
+}
 RuntimeValue rt_gui_simd_fill_enabled(void)
 {
 #if defined(__aarch64__)
@@ -2318,6 +2325,12 @@ RuntimeValue rt_gui_simd_fill_enabled(void)
 #else
     return 0;
 #endif
+}
+
+static void rt_gui_scalar_fill4(uint32_t dst[4], uint32_t color)
+{
+    for (uint32_t i = 0; i < 4u; i++)
+        dst[i] = color;
 }
 
 RuntimeValue rt_gui_fill4(RuntimeValue xy, RuntimeValue wh, RuntimeValue color, RuntimeValue u)
@@ -2342,6 +2355,8 @@ RuntimeValue rt_gui_fill4(RuntimeValue xy, RuntimeValue wh, RuntimeValue color, 
         uint32_t remaining = x_limit - px;
 #if defined(__aarch64__)
         while (remaining >= 4u) {
+            uint32_t scalar_reference[4];
+            rt_gui_scalar_fill4(scalar_reference, c);
             /*
              * AArch64 Advanced SIMD is architectural.  st1 permits an
              * unaligned framebuffer address, unlike a C vector-pointer store
@@ -2353,6 +2368,11 @@ RuntimeValue rt_gui_fill4(RuntimeValue xy, RuntimeValue wh, RuntimeValue color, 
                 :
                 : "r" (dst), "r" (c)
                 : "v0", "memory");
+            for (uint32_t i = 0; i < 4u; i++) {
+                if (dst[i] != scalar_reference[i])
+                    g_gui_simd_fill_scalar_parity_failures++;
+            }
+            g_gui_simd_fill_scalar_parity_checks++;
             dst += 4;
             remaining -= 4u;
             call_chunks++;

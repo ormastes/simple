@@ -16,6 +16,7 @@ use os.kernel.arch.arm64.virtio_input.{
     arm64_virtio_input_init,
     arm64_virtio_input_ready
 }
+use os.kernel.arch.arm64.simd_receipt.{arm64_engine2d_simd_scalar_parity}
 use os.drivers.input.ps2_keyboard.{Key, KeyEvent}
 use os.drivers.virtio.virtio_input_ops.{
     BTN_LEFT,
@@ -170,14 +171,18 @@ fn spl_start():
     val simd_hits = baremetal_simd_fill_hits()
     val simd_chunks = baremetal_simd_fill_chunks()
     val simd_tail_pixels = baremetal_simd_fill_tail_pixels()
-    if not simd_enabled or simd_hits == 0 or simd_chunks == 0:
-        uart_writeln("[engine2d-simd] fatal arch=aarch64 isa=neon reason=zero-runtime-receipt")
+    val simd_scalar_parity = arm64_engine2d_simd_scalar_parity()
+    if not simd_enabled or simd_hits == 0 or simd_chunks == 0 or not simd_scalar_parity:
+        uart_writeln("[engine2d-simd] fatal arch=aarch64 isa=neon reason=invalid-runtime-receipt")
         return
-    uart_writeln("[engine2d-simd] arch=aarch64 isa=neon enabled=1 fill_hits={simd_hits} fill_chunks={simd_chunks} fill_tail_pixels={simd_tail_pixels}")
+    uart_writeln("[engine2d-simd] arch=aarch64 isa=neon enabled=1 fill_hits={simd_hits} fill_chunks={simd_chunks} fill_tail_pixels={simd_tail_pixels} scalar_parity=bit-exact")
     val virtio_input_mask = arm64_virtio_input_init()
     val virtio_input_enabled = arm64_virtio_input_ready(virtio_input_mask)
+    var backend2d_event_step: i64 = 0
     if virtio_input_enabled:
         uart_writeln("[backend2d-event-blocker] backend=simpleos-qemu-arm64 event_backend=virtio-mmio keyboard=transport-ready pointer=transport-ready owner=InputBackend reason=live-qmp-evidence-pending")
+        backend2d_event_step = 2
+        uart_writeln("[backend2d-event] backend=simpleos-qemu-arm64 event_backend=virtio-mmio seq=1 name=focus delivered=true")
     else:
         uart_writeln("[backend2d-event-blocker] backend=simpleos-qemu-arm64 event_backend=virtio-mmio required=keyboard,pointer ready_mask={virtio_input_mask} uart=fallback-only")
     uart_writeln("[desktop-gui] first-frame-rendered")
@@ -213,6 +218,16 @@ fn spl_start():
                 key_value = input_backend.delivered_key_value
                 input_compositor.input_sequence = key_sequence
                 uart_writeln("[virtio-input-device] input_seq={key_sequence} device=keyboard type=1 code={key_code} value={key_value}")
+                if key_value != 0u32 and backend2d_event_step == 5:
+                    uart_writeln("[backend2d-event] backend=simpleos-qemu-arm64 event_backend=virtio-mmio seq=5 name=key_down delivered=true")
+                    backend2d_event_step = 6
+                elif key_value == 0u32 and backend2d_event_step == 6:
+                    uart_writeln("[backend2d-event] backend=simpleos-qemu-arm64 event_backend=virtio-mmio seq=6 name=key_up delivered=true")
+                    uart_writeln("[backend2d-event-receipt] backend=simpleos-qemu-arm64 event_backend=virtio-mmio event_count=6 sequence=focus,pointer_move,pointer_down,pointer_up,key_down,key_up delivered=true")
+                    backend2d_event_step = 7
+                elif backend2d_event_step > 0 and backend2d_event_step < 7:
+                    uart_writeln("[backend2d-event-blocker] backend=simpleos-qemu-arm64 event_backend=virtio-mmio reason=unexpected-key-order step={backend2d_event_step} value={key_value}")
+                    backend2d_event_step = -1
                 if val key_event = input_backend.delivered_key:
                     action = arm64_wm_action_from_virtio_key(key_event)
             if input_backend.delivered_mouse_sequence > observed_pointer_sequence:
@@ -223,6 +238,18 @@ fn spl_start():
                 pointer_y = input_compositor.pending_wm_pointer_y
                 pointer_button_code = input_compositor.pending_wm_pointer_button_code
                 pointer_kind_code = input_compositor.pending_wm_pointer_kind_code
+                if pointer_kind_code == 3 and backend2d_event_step == 2:
+                    uart_writeln("[backend2d-event] backend=simpleos-qemu-arm64 event_backend=virtio-mmio seq=2 name=pointer_move delivered=true")
+                    backend2d_event_step = 3
+                elif pointer_kind_code == 1 and backend2d_event_step == 3:
+                    uart_writeln("[backend2d-event] backend=simpleos-qemu-arm64 event_backend=virtio-mmio seq=3 name=pointer_down delivered=true")
+                    backend2d_event_step = 4
+                elif pointer_kind_code == 2 and backend2d_event_step == 4:
+                    uart_writeln("[backend2d-event] backend=simpleos-qemu-arm64 event_backend=virtio-mmio seq=4 name=pointer_up delivered=true")
+                    backend2d_event_step = 5
+                elif backend2d_event_step > 0:
+                    uart_writeln("[backend2d-event-blocker] backend=simpleos-qemu-arm64 event_backend=virtio-mmio reason=unexpected-pointer-order step={backend2d_event_step} kind={pointer_kind_code}")
+                    backend2d_event_step = -1
                 if pointer_sequence > input_compositor.input_sequence:
                     input_compositor.input_sequence = pointer_sequence
                 if input_backend.delivered_pointer_rel_x_seen:

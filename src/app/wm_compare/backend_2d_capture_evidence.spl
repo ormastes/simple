@@ -7,10 +7,20 @@ pub struct Backend2dEventReceipt:
     injected: bool
     delivered: bool
     ordered: bool
+    delivery_source: text
+
+pub struct Backend2dExecutionReceipt:
+    provenance: text
+    identity: text
+    cpu_fallback_used: bool
+    simd_hits: i64
+    simd_chunks: i64
+    scalar_parity: bool
 
 pub struct Backend2dCaptureEvidence:
     backend: text
     target: text
+    scene_id: text
     width: i64
     height: i64
     dpi: i64
@@ -19,6 +29,7 @@ pub struct Backend2dCaptureEvidence:
     events: Backend2dEventReceipt
     capture_path: text
     source_revision: text
+    execution: Backend2dExecutionReceipt
 
 pub struct Backend2dCaptureComparison:
     reference_backend: text
@@ -26,6 +37,7 @@ pub struct Backend2dCaptureComparison:
     reference_status: text
     candidate_status: text
     dimensions_match: bool
+    metadata_match: bool
     events_match: bool
     revisions_match: bool
     pixels_exact: bool
@@ -88,26 +100,44 @@ fn _backend_2d_bounds_valid(value: text, width: i64, height: i64) -> bool:
         x + w <= width and y + h <= height
 
 pub fn backend_2d_event_receipt(backend: text, injected: bool,
-                                delivered: bool) -> Backend2dEventReceipt:
+                                delivered: bool,
+                                delivery_source: text) -> Backend2dEventReceipt:
     Backend2dEventReceipt(
         sequence: BACKEND_2D_EVENT_SEQUENCE,
         count: 6,
         backend: backend,
         injected: injected,
         delivered: delivered,
-        ordered: injected and delivered
+        ordered: injected and delivered,
+        delivery_source: delivery_source
     )
 
-pub fn backend_2d_capture_evidence(backend: text, target: text,
+pub fn backend_2d_execution_receipt(
+    provenance: text, identity: text, cpu_fallback_used: bool,
+    simd_hits: i64, simd_chunks: i64,
+    scalar_parity: bool
+) -> Backend2dExecutionReceipt:
+    Backend2dExecutionReceipt(
+        provenance: provenance,
+        identity: identity,
+        cpu_fallback_used: cpu_fallback_used,
+        simd_hits: simd_hits,
+        simd_chunks: simd_chunks,
+        scalar_parity: scalar_parity
+    )
+
+pub fn backend_2d_capture_evidence(backend: text, target: text, scene_id: text,
                                    width: i64, height: i64, dpi: i64,
                                    pixel_sha256: text,
                                    non_background_bounds: text,
                                    events: Backend2dEventReceipt,
                                    capture_path: text,
-                                   source_revision: text) -> Backend2dCaptureEvidence:
+                                   source_revision: text,
+                                   execution: Backend2dExecutionReceipt) -> Backend2dCaptureEvidence:
     Backend2dCaptureEvidence(
         backend: backend,
         target: target,
+        scene_id: scene_id,
         width: width,
         height: height,
         dpi: dpi,
@@ -115,7 +145,8 @@ pub fn backend_2d_capture_evidence(backend: text, target: text,
         non_background_bounds: non_background_bounds,
         events: events,
         capture_path: capture_path,
-        source_revision: source_revision
+        source_revision: source_revision,
+        execution: execution
     )
 
 pub fn backend_2d_validate_capture(evidence: Backend2dCaptureEvidence) -> text:
@@ -123,6 +154,8 @@ pub fn backend_2d_validate_capture(evidence: Backend2dCaptureEvidence) -> text:
         return "unknown_backend"
     if evidence.target == "":
         return "missing_target"
+    if evidence.scene_id == "":
+        return "missing_scene_id"
     if evidence.width <= 0 or evidence.height <= 0:
         return "invalid_dimensions"
     if evidence.dpi <= 0:
@@ -144,11 +177,28 @@ pub fn backend_2d_validate_capture(evidence: Backend2dCaptureEvidence) -> text:
         return "events_not_delivered"
     if not evidence.events.ordered:
         return "events_not_ordered"
+    if evidence.events.delivery_source == "" or
+       evidence.events.delivery_source == "qmp":
+        return "invalid_event_delivery_source"
     if not evidence.capture_path.ends_with(".ppm") and
        not evidence.capture_path.ends_with(".png"):
         return "invalid_capture_path"
     if not _backend_2d_revision_valid(evidence.source_revision):
         return "invalid_source_revision"
+    if evidence.execution.cpu_fallback_used:
+        return "cpu_fallback_used"
+    val gpu_backend = evidence.backend == "metal" or evidence.backend == "vulkan"
+    if gpu_backend and evidence.execution.provenance != "device_readback":
+        return "missing_device_readback"
+    if gpu_backend and evidence.execution.identity == "":
+        return "missing_device_identity"
+    if not gpu_backend and evidence.execution.provenance != "native_simd":
+        return "missing_native_simd"
+    if not gpu_backend and (evidence.execution.simd_hits <= 0 or
+                            evidence.execution.simd_chunks <= 0):
+        return "missing_simd_counters"
+    if not gpu_backend and not evidence.execution.scalar_parity:
+        return "scalar_parity_failed"
     "accepted"
 
 pub fn backend_2d_compare_capture(reference: Backend2dCaptureEvidence,
@@ -161,6 +211,8 @@ pub fn backend_2d_compare_capture(reference: Backend2dCaptureEvidence,
     val candidate_status = backend_2d_validate_capture(candidate)
     val dimensions_match = reference.width == candidate.width and
         reference.height == candidate.height
+    val metadata_match = reference.scene_id == candidate.scene_id and
+        reference.dpi == candidate.dpi
     val events_match = reference.events.sequence == candidate.events.sequence and
         reference.events.count == candidate.events.count
     val revisions_match = reference.source_revision == candidate.source_revision
@@ -172,6 +224,8 @@ pub fn backend_2d_compare_capture(reference: Backend2dCaptureEvidence,
         reason = "candidate_" + candidate_status
     elif not dimensions_match:
         reason = "dimension_mismatch"
+    elif not metadata_match:
+        reason = "metadata_mismatch"
     elif not events_match:
         reason = "event_mismatch"
     elif not revisions_match:
@@ -195,6 +249,7 @@ pub fn backend_2d_compare_capture(reference: Backend2dCaptureEvidence,
         reference_status: reference_status,
         candidate_status: candidate_status,
         dimensions_match: dimensions_match,
+        metadata_match: metadata_match,
         events_match: events_match,
         revisions_match: revisions_match,
         pixels_exact: pixels_exact,

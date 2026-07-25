@@ -26,11 +26,11 @@ coordinates are fixed and scaled once to physical pixels.
 
 ## Evidence
 
-Every lane emits backend, target, dimensions, DPI, pixel SHA-256,
-non-background bounds, ordered event receipt, capture path, and source
-revision. GPU adapters additionally retain device/readback receipts. SIMD
-adapters retain feature, hit/chunk counters, and scalar-parity receipts in
-their backend-specific evidence.
+Every lane emits backend, target, scene ID, dimensions, DPI, pixel SHA-256,
+non-background bounds, ordered event receipt with its target-side delivery
+source, capture path, source revision, and execution provenance. GPU adapters
+retain device/readback identity and reject CPU fallback. SIMD adapters retain
+feature identity, hit/chunk counters, and scalar-parity receipts.
 
 ## Comparison
 

@@ -29,6 +29,10 @@ Injection without a target-side delivery receipt fails.
 Write a durable PPM or PNG and record dimensions, DPI, SHA-256,
 non-background bounds, capture path, and source revision.
 
+The record also carries the frozen scene ID and execution receipt. GPU lanes
+must name a device-backed readback identity and report no CPU fallback. SIMD
+lanes must report positive native hit/chunk counters and scalar bit parity.
+
 ### 5. compare evidence
 
 Validate every record, compare exact dimensions and event order, then report
