@@ -70,6 +70,12 @@ UI/TUI, GUI, and WM runtime evidence gates.
 - Parallel parsing is unsafe while lexer/parser state remains module-global.
 - Existing pre-parse cache mode does not bypass `parse_all_impl()` and cannot
   accelerate the first cold build.
+- The unused `SIMPLE_NATIVE_BUILD_SKIP_PRE_PARSE` prototype was removed on
+  2026-07-25. It checked SHB freshness (and SMF freshness for combined output)
+  but only checked native cache-record existence; it did not prove that native
+  outputs existed or belonged to the exact backend/target/compiler/source
+  scope, parser-confirmed facade/alias object set, and final link. It therefore
+  could not safely authorize a link bypass.
 
 ## Required fix and acceptance
 

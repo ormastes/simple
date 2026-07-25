@@ -1035,6 +1035,17 @@ the shared binary — deploys require explicit user go-ahead).
   Unsupported typed or mutable payload bindings fail closed. The positive
   Simple spec covers both the matched payload and fallback paths.
 
+  A follow-up cache audit rejected the dormant
+  `SIMPLE_NATIVE_BUILD_SKIP_PRE_PARSE` prototype: it set an unread config flag
+  after checking record existence only, while compilation still performed the
+  full parse/HIR/MIR pipeline. The prototype is removed and the cache policy
+  test pins its absence. Whole-closure invalidation after a compiler or source
+  change remains deliberate because native entries persist empty dependency
+  lists and no final-link manifest. Do not weaken that scope; a future true
+  warm-start bypass first needs a versioned final-link manifest with the exact
+  compiler/backend/target/option/source fingerprint and deduplicated object
+  set.
+
   A bootstrap seed rebuilt with both the alias and grammar fixes passed the
   former 16-second discovery failure and emitted no parser/link diagnostics,
   but the final full-CLI attempt hit its 15-minute cap at sustained 100% CPU
