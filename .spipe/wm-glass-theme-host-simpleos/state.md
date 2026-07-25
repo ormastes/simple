@@ -324,3 +324,21 @@ implementation-blocked-native-to-i64-and-exact-current-live-evidence
   route passed high review, but its exact Stage4 capsule was killed with
   exit 137 before producing an executable, so ARM QEMU was not launched.
   Parallel agents own the x86 provenance and host nil-receiver diagnoses.
+- continuation-2026-07-25-bounded-runtime-results: The reviewed scalar x86
+  material predicate correction is pushed through `fd935c8d9a`; it snapshots
+  wide aggregates, avoids nil `trim/lower` dispatch for the exact WM contract,
+  remains fail-closed, and emits one rejection receipt per render invocation.
+  Its final behavioral execution was not repeated after the three-cycle cap.
+  The preceding canonical x86 run built 663 files and booted a current admitted
+  kernel, but still rejected content provenance before capture or input
+  injection; no x86 screenshot, SIMD receipt, or event claim is made. A minimal
+  host CPU-SIMD probe renders/presents/reads back successfully and then faults
+  at the nullable zero-argument
+  `vulkan_font_performance_evidence()` getter; three scoped fixes did not
+  converge, so no speculative host patch was retained. The ARM compatibility
+  import fix is pushed as `a750d8413e`, but the final exact focused build then
+  reached a second retained-Stage3 grammar blocker at the tuple-pattern loop in
+  `cuda_backend.spl:562`. ARM cycle 3/3 produced no artifact, therefore QEMU
+  was not launched. The backend capture comparison remains fail-closed:
+  Vulkan and Metal compile, standalone NEON has 18/192 composite mismatches,
+  and no backend currently has comparable live capture plus event evidence.
