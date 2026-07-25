@@ -50,7 +50,7 @@ use compiler.core.ast.{decl_set_visibility_text}
 use compiler.core.ast.{decl_is_gpu_kernel, decl_is_simd, decl_is_packed, decl_derives}
 use compiler.core.ast.{decl_get_name, decl_get_fields, decl_get_derives, decl_set_derives}
 use compiler.core.ast.{module_set_path, module_add_decl}
-use compiler.frontend.core.lexer.{lex_pos_get, lex_pos_set, lex_line_get, lex_line_set, lex_col_get, lex_col_set, lex_token_start_get}
+use compiler.frontend.core.lexer.{lex_pos_get, lex_pos_set, lex_line_get, lex_line_set, lex_col_get, lex_col_set, lex_token_start_get, lex_token_end_get}
 use compiler.frontend.core.lexer.{lex_source_char_at, lex_source_len, lex_source_slice}
 use compiler.frontend.core.lexer.{lex_snapshot_save, lex_snapshot_restore}
 use compiler.core.types.{TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_BOOL, TYPE_VOID, flat_span_new}
@@ -142,6 +142,51 @@ fn current_ident_followed_by_lbrace() -> bool:
             pos = pos + 1
             continue
         return ch == "{"
+    false
+
+fn is_ident_start_char(ch: text) -> bool:
+    (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or ch == "_"
+
+fn is_ident_char(ch: text) -> bool:
+    is_ident_start_char(ch) or (ch >= "0" and ch <= "9")
+
+# Soft-keyword lookahead for the `cli Name:` declarative arg-parsing block.
+# "cli" is NOT a reserved word at the lexer level (it must still work as a
+# plain identifier, e.g. `fn cli(): ...`), so the module-body dispatcher
+# only treats it as the start of a cli decl when the current identifier is
+# exactly "cli" AND raw source lookahead finds: whitespace, an identifier
+# (the block name), optional trailing whitespace, then ':'. Any other shape
+# (`cli(`, `cli =`, `cli.foo`, `cli` alone at EOL, ...) is left as a normal
+# identifier for the generic statement/expression parser.
+fn current_ident_is_cli_decl() -> bool:
+    # NOTE: lex_pos_get() (the legacy dict-backed "pos" state) is not kept in
+    # sync by the hot tokenizer loop, so it reads back stale/zero here.
+    # lex_token_end_get() is the array-backed slot lex_next() actually
+    # updates on every call, and gives the true offset right after the
+    # current ("cli") token — use that instead.
+    var pos = lex_token_end_get()
+    val source_len = lex_source_len()
+    # Require at least one space/tab before the block name.
+    var saw_space = false
+    while pos < source_len:
+        val ch = lex_source_char_at(pos)
+        if ch == " " or ch == "\t":
+            saw_space = true
+            pos = pos + 1
+            continue
+        break
+    if not saw_space or pos >= source_len:
+        return false
+    if not is_ident_start_char(lex_source_char_at(pos)):
+        return false
+    while pos < source_len and is_ident_char(lex_source_char_at(pos)):
+        pos = pos + 1
+    while pos < source_len:
+        val ch2 = lex_source_char_at(pos)
+        if ch2 == " " or ch2 == "\t" or ch2 == "\r":
+            pos = pos + 1
+            continue
+        return ch2 == ":"
     false
 
 fn parse_raw_domain_block_advance_lexer(start_pos: i64, end_pos: i64):
