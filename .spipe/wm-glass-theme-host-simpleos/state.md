@@ -366,3 +366,29 @@ implementation-blocked-native-to-i64-and-exact-current-live-evidence
   loses linker stderr, and crashes with corrupted HIR state. Next resume must
   repair/admit the pure positional runtime-link/one-binary route, then rebuild
   current main with fresh caches before any host or QEMU evidence run.
+- continuation-2026-07-26-pure-runtime-capsule-and-receiver-gate: The
+  synthetic bridge's positional Cranelift route is now admitted through a
+  reproducible current-source C-runtime capsule rather than the stale
+  bootstrap runtime archive. At source `4e1ddd3afe`, Apple clang 17 compiled
+  the canonical 15 hosted runtime sources; the source-list fingerprint is
+  `16e6153aefabbaa93fbe32e071308543a7e64ea884677874b3448ee783acf5ab`
+  and the reviewed composite archive SHA-256 is
+  `02775039b26c80ad5858976ad0761ab331cd6454bee202b6dfb3a25310a19d85`.
+  A refutable `val ... else` fixture linked and ran with exit 0 through the
+  pure positional path. Two current-main compiler promotion attempts were
+  then killed with exit 137 before producing an artifact. The second attempt
+  used one worker and requested low-memory mode, but trace inspection proved
+  that the historical positional bootstrap driver ignores that CLI flag when
+  constructing `CompileOptions`; it died near 1.6 million heap-registry
+  entries. The final permitted promotion attempt is deferred until a
+  pure-built bootstrap-only bridge variant explicitly enables
+  `options.low_memory`.
+
+  The immutable receiver investigation found no further production change is
+  justified beyond the already-pushed `fd21c765f2`: its three receiver-vector
+  paths preserve the implicit receiver without changing `fn` mutability.
+  High review rejected an initial false-positive fixture, then accepted the
+  corrected cross-module zero- and one-explicit-argument receiver regression.
+  That test is pushed as `7554bc6ff1`. Host and QEMU live evidence remain
+  open until the current compiler promotion succeeds; no screenshot, input,
+  Vulkan, Metal, or SIMD parity claim is added by this checkpoint.
