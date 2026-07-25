@@ -158,9 +158,6 @@ jobs:
             backend: cranelift
           - os: windows-latest
             name: Windows x86_64
-            backend: llvm
-          - os: windows-latest
-            name: Windows x86_64
             backend: cranelift
     runs-on: ${{ matrix.os }}
     name: Native — ${{ matrix.name }} (${{ matrix.backend }})
@@ -212,11 +209,6 @@ jobs:
           vcpkg install freetype:x64-windows
           "RUSTFLAGS=-L native=$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/lib" >> $env:GITHUB_ENV
           "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin" >> $env:GITHUB_PATH
-          if ("${{ matrix.backend }}" -eq "llvm") {
-            choco install llvm --version=18.1.8 -y --no-progress --allow-downgrade
-            "LLVM_SYS_180_PREFIX=C:\Program Files\LLVM" >> $env:GITHUB_ENV
-            "C:\Program Files\LLVM\bin" >> $env:GITHUB_PATH
-          }
 
       - name: Cache Cargo
         uses: actions/cache@v4
@@ -316,9 +308,6 @@ jobs:
         shell: bash
         run: |
           seed="src/compiler_rust/target/bootstrap/simple"
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            seed="${seed}.exe"
-          fi
           test -x "$seed"
           SIMPLE_BINARY="$seed" \
             NATIVE_PARITY_CASES=crossmodule_result_u8 \
@@ -331,24 +320,12 @@ jobs:
         run: cargo test --workspace --lib
 
       - name: Validate hosted Stage4 dynload provider archive
-        if: (runner.os == 'Linux' || runner.os == 'macOS' || runner.os == 'Windows') && matrix.backend == 'llvm'
+        if: (runner.os == 'Linux' || runner.os == 'macOS') && matrix.backend == 'llvm'
         shell: bash
         run: |
           stage3="$(find build/bootstrap/stage3 -type f \( -name simple -o -name simple.exe \) -print -quit)"
           test -n "$stage3"
           chmod +x "$stage3"
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            command -v clang >/dev/null 2>&1
-            command -v llvm-ar >/dev/null 2>&1
-            command -v llvm-nm >/dev/null 2>&1
-            command -v llvm-objdump >/dev/null 2>&1
-            compiler_target=$(clang --print-target-triple)
-            case "$compiler_target" in
-              x86_64-*-windows-msvc*) ;;
-              *) printf '%s\n' "unexpected Windows clang target: $compiler_target" >&2; exit 1 ;;
-            esac
-            export CC=clang AR=llvm-ar SIMPLE_NM=llvm-nm SIMPLE_OBJDUMP=llvm-objdump SIMPLE_WINDOWS_ABI=msvc
-          fi
           SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_BINARY="$stage3" sh scripts/check/check-stage4-hosted-dynload-provider-archive.shs
 
       - name: Run standalone browser mutation control
@@ -428,7 +405,7 @@ jobs:
             sh scripts/check/check-native-seed-parity.shs
 
       - name: Run non-Linux strict dynload parity
-        if: runner.os != 'Linux' && matrix.backend == 'llvm'
+        if: runner.os == 'macOS' && matrix.backend == 'llvm'
         shell: bash
         run: |
           stage3="$(find build/bootstrap/stage3 -type f \( -name simple -o -name simple.exe \) -print -quit)"
@@ -441,7 +418,7 @@ jobs:
             sh scripts/check/check-native-seed-parity.shs
 
       - name: Run strict selected native parity
-        if: runner.os != 'Linux' && matrix.backend == 'llvm'
+        if: runner.os == 'macOS' && matrix.backend == 'llvm'
         shell: bash
         run: |
           stage3="$(find build/bootstrap/stage3 -type f \( -name simple -o -name simple.exe \) -print -quit)"
@@ -453,50 +430,8 @@ jobs:
             PARITY_WORK_DIR="build/check/native-selected-parity" \
             sh scripts/check/check-native-seed-parity.shs
 
-      - name: Run Windows ARM64 default-LLVM COFF object gate
-        if: runner.os == 'Windows' && matrix.backend == 'llvm'
-        shell: bash
-        run: |
-          stage3="$(find build/bootstrap/stage3 -type f -name simple.exe -print -quit)"
-          test -n "$stage3"
-          command -v llvm-readobj >/dev/null
-          mkdir -p build/check/windows-arm64
-          arm64_obj=build/check/windows-arm64/p2_add.obj
-          rm -rf build/check/windows-arm64/cache "$arm64_obj"
-          SIMPLE_RUNTIME_PATH="$PWD/src/compiler_rust/target/bootstrap" \
-            SIMPLE_NO_STUB_FALLBACK=1 "$stage3" native-build \
-            --target aarch64-pc-windows-msvc --emit-object --entry-closure \
-            --entry scripts/check/cert/redeploy_gate/fixtures/p2_add.spl \
-            --cache-dir build/check/windows-arm64/cache \
-            --output "$arm64_obj"
-          test -s "$arm64_obj"
-          header="$(llvm-readobj --file-headers "$arm64_obj")"
-          [[ "$header" == *"Format: COFF-ARM64"* ]]
-          [[ "$header" == *"Machine: IMAGE_FILE_MACHINE_ARM64 (0xAA64)"* ]]
-          chr_obj=build/check/windows-arm64/crossmodule-result-u8.obj
-          rm -rf build/check/windows-arm64/crossmodule-result-u8-cache "$chr_obj"
-          SIMPLE_RUNTIME_PATH="$PWD/src/compiler_rust/target/bootstrap" \
-            SIMPLE_NO_STUB_FALLBACK=1 "$stage3" native-build \
-            --target aarch64-pc-windows-msvc --emit-object --entry-closure \
-            --source test/fixtures --source src/lib \
-            --entry test/fixtures/native_crossmodule_result_u8/main.spl \
-            --cache-dir build/check/windows-arm64/crossmodule-result-u8-cache \
-            --output "$chr_obj"
-          test -s "$chr_obj"
-          chr_relocations="$(llvm-readobj --relocations "$chr_obj")"
-          [[ "$chr_relocations" == *"rt_char_from_code"* ]]
-          SIMPLE_BIN="$stage3" BUILD_DIR=build/check/windows-arm64/option-try-llvm \
-            sh scripts/check/check-native-option-try-target-fail.shs \
-            aarch64-pc-windows-msvc llvm
-          for obj in build/check/windows-arm64/option-try-llvm/*.o; do
-            test -s "$obj"
-            option_header="$(llvm-readobj --file-headers "$obj")"
-            [[ "$option_header" == *"Format: COFF-ARM64"* ]]
-            [[ "$option_header" == *"Machine: IMAGE_FILE_MACHINE_ARM64 (0xAA64)"* ]]
-          done
-
-      - name: Run Windows ARM64 explicit-Cranelift COFF object gate
-        if: runner.os == 'Windows' && matrix.backend == 'llvm'
+      - name: Run Windows ARM64 Cranelift COFF object gate
+        if: runner.os == 'Windows' && matrix.backend == 'cranelift'
         shell: bash
         run: |
           stage3="$(find build/bootstrap/stage3 -type f -name simple.exe -print -quit)"

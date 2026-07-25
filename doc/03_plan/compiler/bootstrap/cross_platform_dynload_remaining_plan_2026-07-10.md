@@ -8,13 +8,18 @@
 - Historical FreeBSD 14.3 QEMU smoke: PASS. The canonical full lane now uses
   supported FreeBSD 14.4.
 - Rust `simple-runtime` and `simple-compiler` host checks: PASS.
-- Native macOS and Windows verification is active in GitHub Actions. Windows
-  run `30148705502` is non-cancelling; isolated multiplatform run
-  `30149462707` covers Intel/Apple Silicon macOS and both Windows backends.
-- FreeBSD run `30147237924` proved the previous shell user-data disabled
-  firstboot jobs too late. Commits `05796f7883b0` and `d3f77e847aa1` select
-  supported 14.4 and write per-service `rc.conf.d` flags through early
-  cloud-config. Current full run `30149458196` is queued.
+- Native macOS and Windows verification remains unresolved. Windows run
+  `30151387951` proved Chocolatey LLVM 18 does not ship the `llvm-config`
+  required by `llvm-sys`; strict Windows LLVM is therefore not a supported
+  bootstrap lane. Multiplatform run `30152376592` also failed Windows LLVM seed
+  setup, Windows Cranelift Stage 2 linking, and both native macOS bootstrap
+  variants before terminal platform evidence.
+- Windows bootstrap now uses Cranelift only. Linux and both macOS architectures
+  retain LLVM and Cranelift gates.
+- FreeBSD run `30154805541` reached the canonical full bootstrap with KVM and
+  failed at `rust-seed-build` with exit 101. The guest log was not retained.
+  The QEMU wrapper now copies bounded bootstrap failure logs to
+  `build/freebsd/bootstrap-logs`; terminal Stage 3 evidence remains open.
 - Commit `d3f77e847aa1` routes production `.smf` execution through the real
   loader, resolves `main`, and calls its executable address without the Rust
   delegate. Commit `1c8b26de9b48` adds a real cache reuse/mutation/launcher
@@ -42,15 +47,17 @@
    Acceptance: LLVM major matches, Homebrew libraries resolve, Stage 2/3 pass,
    and the explicit full CLI passes `-c 'print(1+1)'`.
 
-3. Run native Windows verification for MSVC and MinGW/UCRT:
+3. Run native Windows Cranelift verification for MSVC and MinGW/UCRT:
 
    ```bat
-   scripts\bootstrap\bootstrap-windows.cmd --full-bootstrap --mode=dynload --no-mcp
-   scripts\bootstrap\bootstrap-windows.cmd --full-cli --mode=dynload --no-mcp
+   scripts\bootstrap\bootstrap-windows.cmd --backend=cranelift --full-bootstrap --mode=dynload --no-mcp
+   scripts\bootstrap\bootstrap-windows.cmd --backend=cranelift --full-cli --mode=dynload --no-mcp
    ```
 
    Acceptance: correct target triple, `.exe`/`.lib` artifacts, WFFI DLL symbol
-   lookup, Stage 2/3 pass, and explicit full CLI smoke.
+   lookup, Stage 2/3 pass, and explicit full CLI smoke. This remains open after
+   run `30152376592`; do not restore a Windows LLVM gate until a pinned,
+   compatible provider includes `llvm-config`, libraries, and the matching ABI.
 
 4. Prove the deployed dynload consumer boundary. The current fast path avoids
    Stage 4 and produces staged/cache artifacts; it must not claim hot deployment

@@ -35,12 +35,9 @@ fn main() {
     let runtime_symbol_table = env::var_os("CARGO_FEATURE_RUNTIME_SYMBOL_TABLE").is_some();
     let runtime_regex = env::var_os("CARGO_FEATURE_RUNTIME_REGEX").is_some();
 
-    // Symbols owned by simple-native-all must not be retained through this
-    // crate's static runtime table.
+    // Symbols provided by simple-native-all when driver-hooks is active.
     let driver_hooks = env::var_os("CARGO_FEATURE_DRIVER_HOOKS").is_some();
-    let native_all_provider = env::var_os("CARGO_FEATURE_NATIVE_ALL_PROVIDER").is_some();
     const DRIVER_HOOK_SYMBOLS: &[&str] = &["rt_cli_run_file"];
-    const NATIVE_ALL_SYMBOLS: &[&str] = &["spl_str_ptr"];
 
     let mut seen = HashSet::new();
     let mut symbols = Vec::new();
@@ -87,9 +84,7 @@ fn main() {
     generated.push_str("    unsafe extern \"C\" {\n");
     for symbol in &symbols {
         if defined_symbols.contains(symbol) {
-            if (driver_hooks && DRIVER_HOOK_SYMBOLS.contains(&symbol.as_str()))
-                || (native_all_provider && NATIVE_ALL_SYMBOLS.contains(&symbol.as_str()))
-            {
+            if driver_hooks && DRIVER_HOOK_SYMBOLS.contains(&symbol.as_str()) {
                 continue;
             }
             let alias = runtime_symbol_alias(symbol);
@@ -102,9 +97,7 @@ fn main() {
     generated.push_str("pub static RUNTIME_SYMBOL_ENTRIES: &[RuntimeSymbolEntry] = &[\n");
     for symbol in &symbols {
         if defined_symbols.contains(symbol) {
-            if (driver_hooks && DRIVER_HOOK_SYMBOLS.contains(&symbol.as_str()))
-                || (native_all_provider && NATIVE_ALL_SYMBOLS.contains(&symbol.as_str()))
-            {
+            if driver_hooks && DRIVER_HOOK_SYMBOLS.contains(&symbol.as_str()) {
                 continue;
             }
             let alias = runtime_symbol_alias(symbol);

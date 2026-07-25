@@ -255,6 +255,7 @@ require_qemu_alive() {
 printf '[6/7] SSH connectivity\n'
 
 SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=5 -i ${SSH_PRIVATE_KEY} -p ${QEMU_PORT}"
+SCP_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=5 -i ${SSH_PRIVATE_KEY} -P ${QEMU_PORT}"
 SSH_CMD="ssh ${SSH_OPTS} ${QEMU_USER}@localhost"
 ROOT_SSH_CMD="ssh ${SSH_OPTS} root@localhost"
 SSH_TIMEOUT="$QEMU_SSH_TIMEOUT"
@@ -316,6 +317,24 @@ elif $SSH_CMD "command -v doas" >/dev/null 2>&1; then
 else
     fail "No root/sudo/doas available (root SSH timed out, no sudo/doas)"
 fi
+
+copy_guest_bootstrap_logs() {
+    host_log_dir="${ROOT_DIR}/build/freebsd/bootstrap-logs"
+    rm -rf "$host_log_dir"
+    mkdir -p "$host_log_dir"
+    if scp ${SCP_OPTS} \
+        "${VM_USER}@localhost:${VM_HOME}/simple/build/bootstrap/logs/." \
+        "${host_log_dir}/" 2>/dev/null; then
+        info "Bootstrap failure logs preserved: ${host_log_dir}"
+        find "$host_log_dir" -type f -name '*.log' | sort | tail -4 |
+            while IFS= read -r log; do
+                info "Last 40 lines of ${log}:"
+                tail -40 "$log" >&2
+            done
+    else
+        info "No guest bootstrap logs could be retrieved"
+    fi
+}
 
 # ── Smoke / Full ───────────────────────────────────────────────────────
 printf '[7/7] Bootstrap (%s)\n' "$MODE"
@@ -402,8 +421,7 @@ else
 
     info "Running canonical full bootstrap in VM..."
     if ! $VM_SSH "cd ${VM_HOME}/simple && sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --mode=dynload --no-mcp --jobs=2"; then
-        $VM_SSH "tail -80 ${VM_HOME}/simple/build/bootstrap/logs/x86_64-unknown-freebsd/rust-seed-build.log 2>/dev/null || true" >&2 || true
-        $VM_SSH "tail -80 ${VM_HOME}/simple/build/bootstrap/logs/x86_64-unknown-freebsd/stage2-native-build.log 2>/dev/null || true" >&2 || true
+        copy_guest_bootstrap_logs
         fail "Canonical FreeBSD bootstrap failed"
     fi
     STAGE_BIN="${VM_HOME}/simple/build/bootstrap/stage3/x86_64-unknown-freebsd/simple"
@@ -498,7 +516,6 @@ else
     # Retrieve binary
     FREEBSD_BIN_DIR="${ROOT_DIR}/bin/release/freebsd-x86_64"
     mkdir -p "$FREEBSD_BIN_DIR"
-    SCP_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=5 -i ${SSH_PRIVATE_KEY} -P ${QEMU_PORT}"
     scp ${SCP_OPTS} \
         "${VM_USER}@localhost:${STAGE_BIN}" \
         "${FREEBSD_BIN_DIR}/simple" 2>/dev/null || fail "Failed to retrieve binary"

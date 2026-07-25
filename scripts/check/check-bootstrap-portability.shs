@@ -34,7 +34,7 @@ grep -Fq 'brew install coreutils freetype zstd' .github/workflows/rust-bootstrap
 grep -Fq 'LIBRARY_PATH=$(brew --prefix freetype)/lib:$(brew --prefix zstd)/lib:' .github/workflows/rust-bootstrap-multiplatform.yml || fail "macOS Homebrew library path missing"
 grep -Fq 'clang-18 lld-18 llvm-18-dev libfreetype6-dev libunwind-dev' .github/workflows/rust-bootstrap-multiplatform.yml || fail "Linux bootstrap linker dependency missing"
 grep -q '^backend="llvm"$' scripts/bootstrap/bootstrap-from-scratch.sh || fail "bootstrap default backend is not LLVM"
-grep -Fq 'simple-runtime = { path = "../runtime", features = ["runtime-symbol-table"] }' src/compiler_rust/native_all/Cargo.toml || fail "native-all runtime symbol table is disabled"
+grep -Fq 'simple-runtime = { path = "../runtime", features = ["runtime-symbol-table", "native-all-provider"] }' src/compiler_rust/native_all/Cargo.toml || fail "native-all runtime symbol table is disabled"
 grep -Fq 'run_logged rust-runtime-nolto-build env CARGO_PROFILE_BOOTSTRAP_LTO=off cargo build --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-runtime --features runtime-symbol-table' scripts/bootstrap/bootstrap-from-scratch.sh || fail "bootstrap runtime symbol-table rebuild missing"
 if grep -F 'rust-runtime-nolto-build' scripts/bootstrap/bootstrap-from-scratch.sh | grep -Fq '${llvm_features}'; then
   fail "bootstrap forwards compiler backend features into simple-runtime"
@@ -115,8 +115,10 @@ multiplatform=.github/workflows/rust-bootstrap-multiplatform.yml
 freebsd_workflow=.github/workflows/freebsd-build.yml
 windows_workflow=.github/workflows/windows-build.yml
 grep -Fq "group: \${{ github.workflow }}-\${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}" "${freebsd_workflow}" || fail "manual FreeBSD runs are not isolated"
-grep -Fq 'choco install llvm --version=18.1.8 -y --no-progress --allow-downgrade' "${windows_workflow}" || fail "Windows strict bootstrap does not install LLVM 18"
-grep -Fq 'LLVM_SYS_180_PREFIX: C:/Program Files/LLVM' "${windows_workflow}" || fail "Windows strict bootstrap lacks the LLVM 18 build prefix"
+grep -Fq -- '--backend=cranelift' "${windows_workflow}" || fail "Windows strict bootstrap does not select Cranelift"
+if grep -Eq 'choco install llvm|LLVM_SYS_180_PREFIX|--backend=llvm' "${windows_workflow}"; then
+  fail "Windows workflow still provisions or selects unsupported LLVM"
+fi
 matrix_backends_for() {
   awk -v name="$1" '
     {
@@ -130,13 +132,15 @@ matrix_backends_for() {
     }
   ' "${multiplatform}" | LC_ALL=C sort | tr '\n' ' '
 }
-for platform_name in "Linux x86_64" "macOS aarch64" "macOS x86_64" "Windows x86_64"; do
+for platform_name in "Linux x86_64" "macOS aarch64" "macOS x86_64"; do
   [ "$(matrix_backends_for "${platform_name}")" = "cranelift llvm " ] ||
     fail "multiplatform backend pair missing: ${platform_name}"
 done
+[ "$(matrix_backends_for "Windows x86_64")" = "cranelift " ] ||
+  fail "Windows multiplatform lane must use supported Cranelift only"
 grep -q 'os: macos-15-intel' "${multiplatform}" || fail "active macOS Intel runner missing"
 [ "$(grep -c "scripts/setup/platform-detect.shs" "${multiplatform}")" -eq 2 ] || fail "platform detection trigger missing"
-[ "$(grep -Fc "scripts/check/cert/redeploy_gate/fixtures/p2_add.spl" "${multiplatform}")" -eq 4 ] || fail "stage fixture triggers or Windows ARM64 use missing"
+[ "$(grep -Fc "scripts/check/cert/redeploy_gate/fixtures/p2_add.spl" "${multiplatform}")" -eq 3 ] || fail "stage fixture triggers or Windows ARM64 use missing"
 [ "$(grep -c "scripts/check/check-llvm-simd-row-native-arch.shs" "${multiplatform}")" -eq 3 ] || fail "native architecture gate wiring missing"
 [ "$(grep -Fc "scripts/check/check-stage4-hosted-dynload-provider-archive.shs" "${multiplatform}")" -eq 4 ] || fail "hosted and MinGW Stage4 dynload checker triggers or wiring missing"
 [ "$(grep -Fc "scripts/check/validate_stage4_hosted_dynload_provider_archive.spl" "${multiplatform}")" -eq 2 ] || fail "hosted Stage4 dynload validator triggers missing"
@@ -170,7 +174,9 @@ grep -Fq 'sh scripts/check/native-smoke-matrix.shs' "${multiplatform}" || fail "
 grep -Fq 'sh scripts/check/check-llvm-simd-row-native-arch.shs' "${multiplatform}" || fail "native architecture execution wiring missing"
 grep -Fq 'CRANELIFT_CROSS_EXECUTE=1 SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_BIN="$compiler"' "${multiplatform}" || fail "Cranelift cross-execution wiring missing"
 grep -Fq 'sh scripts/check/check-cranelift-aot-aggregate-cross.shs' "${multiplatform}" || fail "Cranelift cross-execution gate missing"
-grep -Fq 'choco install llvm --version=18.1.8 -y --no-progress --allow-downgrade' "${multiplatform}" || fail "Windows LLVM install cannot replace an incompatible preinstalled version"
+if grep -Eq 'choco install llvm|Get-ChildItem .*llvm-config' "${multiplatform}"; then
+  fail "multiplatform workflow still provisions unsupported Windows LLVM"
+fi
 grep -Fq 'run: sh scripts/check/check-bootstrap-portability.shs' "${multiplatform}" || fail "bootstrap portability contracts are not executed in CI"
 grep -Fq "group: \${{ github.workflow }}-\${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}" "${multiplatform}" || fail "manual bootstrap concurrency is not run-isolated"
 grep -Fq "cancel-in-progress: \${{ github.event_name != 'workflow_dispatch' }}" "${multiplatform}" || fail "manual bootstrap runs remain cancellable"
@@ -182,18 +188,9 @@ inside && /^      - (name:|uses:)/ { exit }
 inside { print }
 ' "${multiplatform}")
 for required in \
-  "if: (runner.os == 'Linux' || runner.os == 'macOS' || runner.os == 'Windows') && matrix.backend == 'llvm'" \
+  "if: (runner.os == 'Linux' || runner.os == 'macOS') && matrix.backend == 'llvm'" \
   'stage3="$(find build/bootstrap/stage3 -type f \( -name simple -o -name simple.exe \) -print -quit)"' \
   'test -n "$stage3"' \
-  'if [ "$RUNNER_OS" = "Windows" ]; then' \
-  'command -v clang >/dev/null 2>&1' \
-  'command -v llvm-ar >/dev/null 2>&1' \
-  'command -v llvm-nm >/dev/null 2>&1' \
-  'command -v llvm-objdump >/dev/null 2>&1' \
-  'compiler_target=$(clang --print-target-triple)' \
-  'x86_64-*-windows-msvc*) ;;' \
-  '*) printf '\''%s\n'\'' "unexpected Windows clang target: $compiler_target" >&2; exit 1 ;;' \
-  'export CC=clang AR=llvm-ar SIMPLE_NM=llvm-nm SIMPLE_OBJDUMP=llvm-objdump SIMPLE_WINDOWS_ABI=msvc' \
   'SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_BINARY="$stage3" sh scripts/check/check-stage4-hosted-dynload-provider-archive.shs'; do
   printf '%s\n' "${dynload_archive_body}" | grep -Fq -- "${required}" || fail "hosted Stage4 dynload archive gate missing: ${required}"
 done
@@ -310,49 +307,14 @@ done
 if printf '%s\n' "${mingw_dynload_archive_body}" | grep -Eq 'continue-on-error:[[:space:]]*true|\|\|[[:space:]]*true|bin/release|src/compiler_rust/target|SIMPLE_RUNTIME_PATH|--backend'; then
   fail "MinGW Stage4 dynload archive proof is optional, uses fallback tooling, or overrides the fresh staged compiler backend"
 fi
-windows_arm64_body=$(awk '
-$0 == "      - name: Run Windows ARM64 default-LLVM COFF object gate" { inside=1; print; next }
-inside && /^      - (name:|uses:)/ { exit }
-inside { print }
-' "${multiplatform}")
-[ -n "${windows_arm64_body}" ] || fail "Windows ARM64 object gate missing"
-for required in \
-  "if: runner.os == 'Windows' && matrix.backend == 'llvm'" \
-  'stage3="$(find build/bootstrap/stage3' \
-  'test -n "$stage3"' \
-  'SIMPLE_RUNTIME_PATH="$PWD/src/compiler_rust/target/bootstrap"' \
-  'SIMPLE_NO_STUB_FALLBACK=1 "$stage3" native-build' \
-  '--target aarch64-pc-windows-msvc' \
-  '--emit-object' \
-  '--entry scripts/check/cert/redeploy_gate/fixtures/p2_add.spl' \
-  'test -s "$arm64_obj"' \
-  'llvm-readobj --file-headers "$arm64_obj"' \
-  'Format: COFF-ARM64' \
-  'Machine: IMAGE_FILE_MACHINE_ARM64 (0xAA64)' \
-  '--entry test/fixtures/native_crossmodule_result_u8/main.spl' \
-  'test -s "$chr_obj"' \
-  '[[ "$chr_relocations" == *"rt_char_from_code"* ]]' \
-  'sh scripts/check/check-native-option-try-target-fail.shs' \
-  'aarch64-pc-windows-msvc llvm' \
-  'for obj in build/check/windows-arm64/option-try-llvm/*.o; do' \
-  'option_header="$(llvm-readobj --file-headers "$obj")"' \
-  '[[ "$option_header" == *"Format: COFF-ARM64"* ]]' \
-  '[[ "$option_header" == *"Machine: IMAGE_FILE_MACHINE_ARM64 (0xAA64)"* ]]'; do
-  printf '%s\n' "${windows_arm64_body}" | grep -Fq -- "${required}" || fail "Windows ARM64 gate missing: ${required}"
-done
-[ "$(printf '%s\n' "${windows_arm64_body}" | grep -Fc -- '--target aarch64-pc-windows-msvc')" -eq 2 ] || fail "Windows ARM64 target must cover scalar and cross-module objects"
-[ "$(printf '%s\n' "${windows_arm64_body}" | grep -Fc -- '--emit-object')" -eq 2 ] || fail "Windows ARM64 emit-object must cover scalar and cross-module objects"
-if printf '%s\n' "${windows_arm64_body}" | grep -Eq -- '--backend([=[:space:]]|$)|NATIVE_SMOKE_BACKEND|continue-on-error:[[:space:]]*true|\|\|[[:space:]]*true|bin/release/'; then
-  fail "Windows ARM64 gate is explicit-backend, optional, or has fallback tooling"
-fi
 windows_arm64_cranelift_body=$(awk '
-$0 == "      - name: Run Windows ARM64 explicit-Cranelift COFF object gate" { inside=1; print; next }
+$0 == "      - name: Run Windows ARM64 Cranelift COFF object gate" { inside=1; print; next }
 inside && /^      - (name:|uses:)/ { exit }
 inside { print }
 ' "${multiplatform}")
-[ -n "${windows_arm64_cranelift_body}" ] || fail "Windows ARM64 explicit-Cranelift object gate missing"
+[ -n "${windows_arm64_cranelift_body}" ] || fail "Windows ARM64 Cranelift object gate missing"
 for required in \
-  "if: runner.os == 'Windows' && matrix.backend == 'llvm'" \
+  "if: runner.os == 'Windows' && matrix.backend == 'cranelift'" \
   'stage3="$(find build/bootstrap/stage3' \
   'test -n "$stage3"' \
   'SIMPLE_RUNTIME_PATH="$PWD/src/compiler_rust/target/bootstrap"' \
@@ -624,8 +586,6 @@ seed_enum_parity_body=$(sed -n '/- name: Run Rust-seed custom enum identity pari
 for required in \
   "if: matrix.backend == 'llvm'" \
   'seed="src/compiler_rust/target/bootstrap/simple"' \
-  'if [ "$RUNNER_OS" = "Windows" ]; then' \
-  'seed="${seed}.exe"' \
   'test -x "$seed"' \
   'SIMPLE_BINARY="$seed"' \
   'NATIVE_PARITY_CASES=crossmodule_result_u8' \
@@ -658,9 +618,9 @@ done
 if printf '%s\n' "${option_parity_body}" | grep -Eq '^[[:space:]]*if:|continue-on-error:[[:space:]]*true|\|\|[[:space:]]*true'; then
   fail "hosted Option parity gate is optional"
 fi
-selected_parity_body=$(sed -n '/- name: Run strict selected native parity/,/- name: Run Windows ARM64 default-LLVM COFF object gate/p' "${multiplatform}")
+selected_parity_body=$(sed -n '/- name: Run strict selected native parity/,/- name: Run Windows ARM64 Cranelift COFF object gate/p' "${multiplatform}")
 for required in \
-  "if: runner.os != 'Linux' && matrix.backend == 'llvm'" \
+  "if: runner.os == 'macOS' && matrix.backend == 'llvm'" \
   'SIMPLE_BINARY="$stage3"' \
   'NATIVE_PARITY_CASES="bare_main class_array_field_mutation class_array_param_field_mutation nested_struct_value_copy result_unwrap text_ordering text_bracket_index text_for_iteration raw_string_interpolation_contract new_keyword_identifier bool_array_element_interp mixed_numeric_comparison mixed_unsigned_float_comparison mixed_signed_unsigned_ordering unsigned_div_rem_shift method_owner_dispatch option_is_none_map array_map_text crossmodule_result_u8"' \
   'NATIVE_PARITY_FAIL_ON_XFAIL=1' \
@@ -684,7 +644,7 @@ if printf '%s\n' "${full_parity_body}" | grep -Eq 'NATIVE_PARITY_CASES|continue-
 fi
 dynload_parity_body=$(sed -n '/- name: Run non-Linux strict dynload parity/,/- name: Run strict selected native parity/p' "${multiplatform}")
 for required in \
-  "if: runner.os != 'Linux' && matrix.backend == 'llvm'" \
+  "if: runner.os == 'macOS' && matrix.backend == 'llvm'" \
   'SIMPLE_BINARY="$stage3"' \
   'NATIVE_PARITY_CASES=dynload_tagged_text' \
   'NATIVE_PARITY_FAIL_ON_XFAIL=1' \

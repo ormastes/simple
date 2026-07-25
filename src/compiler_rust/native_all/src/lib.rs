@@ -1254,11 +1254,6 @@ pub extern "C" fn spl_println(val: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn spl_str_ptr(val: i64) -> i64 {
-    rt_string_data(to_rv(val)) as i64
-}
-
-#[no_mangle]
 pub extern "C" fn spl_eprint(val: i64) -> i64 {
     if let Some(s) = stub_extract_path(val) {
         eprint!("{}", s);
