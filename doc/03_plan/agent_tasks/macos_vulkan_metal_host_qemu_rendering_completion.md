@@ -203,6 +203,46 @@ same failure.
 10. Commit only the isolated verified lane, fetch/rebase linearly onto
     `main@origin`, apply the file-count guard, set `main`, and push.
 
+### 2026-07-25 Pure-Compiler and Evidence Checkpoint
+
+- MoltenVK and the macOS Vulkan loader remain installed and enumerate Apple M4.
+- Pushed `e1950d5fff9f`: batched deterministic source attestation plus bounded
+  native-build diagnostics.
+- Pushed `fab839240d9e`: Vulkan-web raw focus/blur reduction, strict event
+  revision ordering, and post-render 24pt-at-300-DPI Bungee batch evidence.
+  This is a reviewed source checkpoint, not a live Vulkan PASS. The final
+  contract run stopped at 9/10 for a stale source-text assertion; that exact
+  assertion was corrected without another run because the three-cycle cap was
+  reached.
+- The deployed `bin/simple` still identifies itself as Rust-seed-backed for
+  normal commands. An isolated clean normal bootstrap refused stale
+  seed/backfill inputs. Another local lane produced a pure-Simple Stage 3
+  compiler, while its full Stage 4 CLI build was killed during the 547 KiB
+  `src/app/ui.web/html.spl` parse after roughly 263 seconds.
+- The pure-Simple Stage 3 compiler built the Vulkan 2D harness closure
+  successfully: 211/211 modules, then a cached rebuild linked in 11.4 seconds.
+  The decisive link fix was to omit `--runtime-path build/sffi`; that override
+  prevented `--runtime-bundle core-c-bootstrap` from adding the required
+  `runtime_native` archive. The resulting binary is diagnostic only because
+  the Stage 3 compiler lacks a canonical bootstrap provenance manifest and the
+  production builder still admits only the deployed release compiler.
+- Before the next Vulkan run, update and review the production builder so the
+  core-C runtime bundle is not shadowed by `--runtime-path`. Recover a
+  manifest-attested pure-Simple compiler at the canonical path; do not weaken
+  compiler provenance to admit an arbitrary binary.
+- The ARM64 QMP/RAMFB source lane now has a proposed attested build producer,
+  exact artifact/source/HEAD validation, real QMP injection, and guest visual
+  commit correlation, but it is not mergeable yet. Final review found two
+  fail-closed defects in
+  `scripts/check/lib/simpleos-arm64-guest-source-fingerprint.shs`: failed
+  `git status` and failed enumeration/sort/hash commands can be mistaken for a
+  clean/complete snapshot inside a caller-tested shell function. The
+  three-cycle cap is exhausted; fix these in a fresh session, then implement
+  the missing guest `[ramfb-visual-commit]` producer before any QEMU PASS.
+- Dedicated like-for-like Metal web/widget live wrappers still do not exist.
+  Vulkan 2D must pass before Vulkan web/GUI/WM live gates and before starting
+  Metal or QEMU acceptance runs.
+
 ## Required Evidence and Documentation
 
 - `doc/04_architecture/shared_multilingual_gpu_fonts.md`
