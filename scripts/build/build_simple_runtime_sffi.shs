@@ -16,12 +16,15 @@ case "$(uname -s)" in
   *) EXT="dll" ;;
 esac
 
-(cd "$CRATE_ROOT" && cargo build -p simple-runtime --release --features runtime-symbol-table)
+(cd "$CRATE_ROOT" && cargo build -p simple-runtime --release --features runtime-symbol-table,vulkan)
 
 mkdir -p "$OUT_DIR"
 SRC="$CRATE_ROOT/target/release/libsimple_runtime.$EXT"
 DST="$OUT_DIR/libsimple_runtime_wm.$EXT"
 cp "$SRC" "$DST.new"
+if [ "$(uname -s)" = Darwin ]; then
+  install_name_tool -id "@rpath/libsimple_runtime_wm.dylib" "$DST.new"
+fi
 mv "$DST.new" "$DST"
 echo "[build_simple_runtime_sffi] staged: $DST"
 
@@ -33,7 +36,9 @@ fi
 C_DST="$OUT_DIR/libsimple_runtime_c_wm.$EXT"
 case "$(uname -s)" in
   Darwin)
-    cc -dynamiclib -Wl,-undefined,dynamic_lookup -Wl,-force_load,"$C_ARCHIVE" -o "$C_DST.new" -lm
+    cc -dynamiclib -Wl,-undefined,dynamic_lookup \
+      -Wl,-install_name,@rpath/libsimple_runtime_c_wm.dylib \
+      -Wl,-force_load,"$C_ARCHIVE" -o "$C_DST.new" -lm
     ;;
   Linux|FreeBSD)
     cc -shared -Wl,--whole-archive "$C_ARCHIVE" -Wl,--no-whole-archive -o "$C_DST.new" -lm
