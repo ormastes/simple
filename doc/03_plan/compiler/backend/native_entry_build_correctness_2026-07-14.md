@@ -686,3 +686,13 @@ the shared binary — deploys require explicit user go-ahead).
   after a fresh positional C5 executable exits `42` should the next bottom-up
   item run, positional C9 `.parse_f64()` with exit `42`. See
   `native_chr_builtin_no_lowering_2026-07-18.md`.
+
+  The 2026-07-25 bottom-up audit found that `bf7a6fc3d9c` had overwritten the
+  proven tagged-text bridge from `5d2ef45f6a5c`: `.chr()` decoded its tagged
+  result into a raw C pointer before the `let`, losing embedded-NUL length and
+  runtime-value provenance. Current source restores the typed MIR copy plus
+  `runtime_value_locals` and HIR `Str` registration. Higher-level review
+  accepted the one-file root fix. The focused Simple test launcher reached the
+  known stale argv0/delegation path and then failed before assertions while
+  configuring its structured-result environment, so positional C5 exit `42`
+  remains the next execution gate; C9 is still gated.
