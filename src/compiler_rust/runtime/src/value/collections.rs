@@ -20,6 +20,23 @@ use simple_simd::{active_simd_tier, SimdTier};
 
 thread_local! {
     static U8_ARRAY_SCRATCH: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    static TRANSIENT_ARRAY_SCOPE: RefCell<Option<TransientArrayScope>> = const { RefCell::new(None) };
+}
+
+struct TransientArrayScope {
+    paused: bool,
+    arrays: Vec<RuntimeValue>,
+}
+
+fn track_transient_array(value: RuntimeValue) -> RuntimeValue {
+    TRANSIENT_ARRAY_SCOPE.with(|slot| {
+        if let Some(scope) = slot.borrow_mut().as_mut() {
+            if !scope.paused {
+                scope.arrays.push(value);
+            }
+        }
+    });
+    value
 }
 
 // ============================================================================
@@ -412,7 +429,7 @@ pub extern "C" fn rt_array_new(capacity: u64) -> RuntimeValue {
         (*ptr).capacity = capacity;
         (*ptr).data = data;
 
-        RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader)
+        track_transient_array(RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader))
     }
 }
 
@@ -443,7 +460,7 @@ fn rt_array_new_uninit(capacity: u64) -> RuntimeValue {
         (*ptr).capacity = capacity;
         (*ptr).data = data;
 
-        RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader)
+        track_transient_array(RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader))
     }
 }
 
@@ -484,7 +501,7 @@ pub extern "C" fn rt_byte_array_new(capacity: u64) -> RuntimeValue {
         (*ptr).capacity = capacity;
         (*ptr).data = data;
 
-        RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader)
+        track_transient_array(RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader))
     }
 }
 
@@ -1408,6 +1425,47 @@ pub extern "C" fn rt_array_clear(array: RuntimeValue) -> bool {
         (*arr).len = 0;
         true
     }
+}
+
+/// Reclaim flat-parser scratch arrays after conversion creates owned frontend
+/// values. Each parser thread owns at most one scope.
+#[no_mangle]
+pub extern "C" fn rt_transient_array_scope_begin() -> bool {
+    TRANSIENT_ARRAY_SCOPE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_some() {
+            return false;
+        }
+        *slot = Some(TransientArrayScope {
+            paused: false,
+            arrays: Vec::new(),
+        });
+        true
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn rt_transient_array_scope_pause() -> bool {
+    TRANSIENT_ARRAY_SCOPE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(scope) = slot.as_mut() else {
+            return false;
+        };
+        scope.paused = true;
+        true
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn rt_transient_array_scope_end() -> bool {
+    let scope = TRANSIENT_ARRAY_SCOPE.with(|slot| slot.borrow_mut().take());
+    let Some(scope) = scope else {
+        return false;
+    };
+    for array in scope.arrays {
+        rt_array_free(array);
+    }
+    true
 }
 
 /// Create an array from a slice of RuntimeValues

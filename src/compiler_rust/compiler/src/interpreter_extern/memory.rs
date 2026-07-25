@@ -22,6 +22,23 @@ pub fn rt_heap_registry_count(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(simple_runtime::value::heap::rt_heap_registry_count()))
 }
 
+/// Dispatch a hosted-runtime transient parser-array scope operation.
+pub fn rt_transient_array_scope_begin(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Bool(
+        simple_runtime::value::rt_transient_array_scope_begin(),
+    ))
+}
+
+pub fn rt_transient_array_scope_pause(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Bool(
+        simple_runtime::value::rt_transient_array_scope_pause(),
+    ))
+}
+
+pub fn rt_transient_array_scope_end(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Bool(simple_runtime::value::rt_transient_array_scope_end()))
+}
+
 /// Get memory limit in bytes (0 if unlimited)
 ///
 /// Callable from Simple as: `memory_limit()`

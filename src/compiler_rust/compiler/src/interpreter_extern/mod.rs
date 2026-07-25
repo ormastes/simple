@@ -279,6 +279,18 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("memory_usage", memory::memory_usage);
     insert_simple!("memory_usage_percent", memory::memory_usage_percent);
     insert_simple!("rt_heap_registry_count", memory::rt_heap_registry_count);
+    insert_simple!(
+        "rt_transient_array_scope_begin",
+        memory::rt_transient_array_scope_begin
+    );
+    insert_simple!(
+        "rt_transient_array_scope_pause",
+        memory::rt_transient_array_scope_pause
+    );
+    insert_simple!(
+        "rt_transient_array_scope_end",
+        memory::rt_transient_array_scope_end
+    );
     insert_simple!("min", math::min);
     insert_simple!("__mock_policy_check", mock_policy::mock_policy_check);
     insert_simple!("__mock_policy_disable", mock_policy::mock_policy_disable);
@@ -2544,6 +2556,17 @@ mod tests {
             matches!(result, Ok(Value::Int(count)) if count >= 1),
             "rt_heap_registry_count() should observe a registered heap pointer: {result:?}"
         );
+    }
+
+    #[test]
+    fn dispatch_registers_transient_array_scope_hooks() {
+        for name in [
+            "rt_transient_array_scope_begin",
+            "rt_transient_array_scope_pause",
+            "rt_transient_array_scope_end",
+        ] {
+            assert!(EXTERN_DISPATCH.contains_key(name));
+        }
     }
 
     #[test]

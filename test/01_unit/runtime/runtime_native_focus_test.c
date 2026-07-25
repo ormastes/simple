@@ -7,6 +7,7 @@
 #include <time.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
@@ -69,6 +70,21 @@ static int walk_contains(SplArray* paths, const char* expected) {
         if (actual && strcmp(actual, expected) == 0) return 1;
     }
     return 0;
+}
+
+static void* transient_scope_worker(void* unused) {
+    (void)unused;
+    for (int i = 0; i < 64; i++) {
+        assert(rt_transient_array_scope_begin() == 1);
+        SplArray* transient = rt_array_new(0);
+        assert(rt_array_push(transient, i));
+        assert(rt_transient_array_scope_pause() == 1);
+        SplArray* permanent = rt_array_new(0);
+        assert(rt_transient_array_scope_end() == 1);
+        assert(rt_array_push(permanent, i));
+        rt_array_free(permanent);
+    }
+    return NULL;
 }
 
 int main(void) {
@@ -243,6 +259,35 @@ int main(void) {
     assert(rt_string_len(registered_text) == 19);
     rt_array_free(registered_array);
     assert(rt_heap_registry_count() == before_shallow_free - 1);
+
+    int64_t before_transient_scope = rt_heap_registry_count();
+    SplArray* permanent_before_scope = rt_array_new(0);
+    assert(rt_transient_array_scope_begin() == 1);
+    assert(rt_transient_array_scope_begin() == 0);
+    SplArray* transient_a = rt_array_new(0);
+    SplArray* transient_b = rt_array_new(0);
+    assert(rt_array_push(transient_a, 11));
+    assert(rt_array_push(transient_b, 22));
+    assert(rt_transient_array_scope_pause() == 1);
+    SplArray* permanent_while_paused = rt_array_new(0);
+    assert(rt_heap_registry_count() == before_transient_scope + 4);
+    assert(rt_transient_array_scope_end() == 1);
+    assert(rt_transient_array_scope_end() == 0);
+    assert(rt_heap_registry_count() == before_transient_scope + 2);
+    assert(rt_array_push(permanent_before_scope, 33));
+    assert(rt_array_push(permanent_while_paused, 44));
+    rt_array_free(permanent_before_scope);
+    rt_array_free(permanent_while_paused);
+    assert(rt_heap_registry_count() == before_transient_scope);
+
+    pthread_t scope_threads[4];
+    for (int i = 0; i < 4; i++) {
+        assert(pthread_create(&scope_threads[i], NULL, transient_scope_worker, NULL) == 0);
+    }
+    for (int i = 0; i < 4; i++) {
+        assert(pthread_join(scope_threads[i], NULL) == 0);
+    }
+    assert(rt_heap_registry_count() == before_transient_scope);
 
     SplArray* allocated = rt_bytes_alloc(4);
     assert(allocated != NULL);

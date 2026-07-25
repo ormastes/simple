@@ -126,6 +126,9 @@ pub const CORE_REQUIRED_RUNTIME_SYMBOLS: &[&str] = &[
     "rt_value_as_int",
     "rt_array_new",
     "rt_array_free",
+    "rt_transient_array_scope_begin",
+    "rt_transient_array_scope_pause",
+    "rt_transient_array_scope_end",
     "rt_byte_array_new",
     "rt_byte_array_new_len",
     "rt_array_get",
@@ -371,6 +374,9 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_aop_invoke_around",
     "rt_aop_proceed",
     "rt_heap_registry_count",
+    "rt_transient_array_scope_begin",
+    "rt_transient_array_scope_pause",
+    "rt_transient_array_scope_end",
     // Array operations
     "rt_array_new",
     "rt_byte_array_new",
@@ -2057,6 +2063,9 @@ mod tests {
         assert!(RUNTIME_SYMBOL_NAMES.len() > 10);
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_array_new"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_heap_registry_count"));
+        assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_transient_array_scope_begin"));
+        assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_transient_array_scope_pause"));
+        assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_transient_array_scope_end"));
         assert_eq!(symbol_tier_of("rt_heap_registry_count"), RuntimeSymbolTier::Sys);
         assert_eq!(
             symbol_class_of("rt_heap_registry_count"),
@@ -2086,6 +2095,18 @@ mod tests {
     fn test_symbol_classification_marks_core_abi_and_hosted_symbols() {
         assert_eq!(symbol_class_of("rt_alloc"), RuntimeSymbolClass::CoreRequired);
         assert_eq!(symbol_class_of("rt_array_free"), RuntimeSymbolClass::CoreRequired);
+        assert_eq!(
+            symbol_class_of("rt_transient_array_scope_begin"),
+            RuntimeSymbolClass::CoreRequired
+        );
+        assert_eq!(
+            symbol_class_of("rt_transient_array_scope_pause"),
+            RuntimeSymbolClass::CoreRequired
+        );
+        assert_eq!(
+            symbol_class_of("rt_transient_array_scope_end"),
+            RuntimeSymbolClass::CoreRequired
+        );
         assert_eq!(symbol_class_of("rt_byte_array_new"), RuntimeSymbolClass::CoreRequired);
         assert_eq!(symbol_class_of("rt_stdout_flush"), RuntimeSymbolClass::CoreRequired);
         assert_eq!(

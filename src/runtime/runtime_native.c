@@ -779,7 +779,8 @@ typedef struct RtCoreString {
 typedef struct RtCoreArray {
     uint8_t kind;
     uint8_t flags;
-    uint8_t reserved[6];
+    uint16_t reserved;
+    uint32_t transient_scope_id;
     int64_t len;
     int64_t cap;
     void* data;
@@ -854,6 +855,11 @@ static atomic_flag rt_core_short_string_cache_lock = ATOMIC_FLAG_INIT;
 static RtCoreArray** rt_core_array_registry = NULL;
 static size_t rt_core_array_registry_len = 0;
 static size_t rt_core_array_registry_cap = 0;
+static atomic_flag rt_core_array_registry_lock = ATOMIC_FLAG_INIT;
+static _Atomic uint32_t rt_core_transient_array_scope_next_id = 1;
+static _Thread_local uint32_t rt_core_transient_array_scope_id = 0;
+static _Thread_local int rt_core_transient_array_scope_active = 0;
+static _Thread_local int rt_core_transient_array_scope_paused = 0;
 static RtCoreEnum** rt_core_enum_registry = NULL;
 static size_t rt_core_enum_registry_len = 0;
 static size_t rt_core_enum_registry_cap = 0;
@@ -873,35 +879,62 @@ static int rt_core_is_registered_string(RtCoreString* s) {
     return rt_core_is_registered_immortal_ptr(s);
 }
 
+static void rt_core_array_registry_acquire(void) {
+    while (atomic_flag_test_and_set_explicit(&rt_core_array_registry_lock, memory_order_acquire)) {}
+}
+
+static void rt_core_array_registry_release(void) {
+    atomic_flag_clear_explicit(&rt_core_array_registry_lock, memory_order_release);
+}
+
 static void rt_core_register_array(RtCoreArray* array) {
     if (!array) return;
+    array->transient_scope_id =
+        rt_core_transient_array_scope_active && !rt_core_transient_array_scope_paused
+            ? rt_core_transient_array_scope_id
+            : 0;
+    rt_core_array_registry_acquire();
     if (rt_core_array_registry_len == rt_core_array_registry_cap) {
         size_t next_cap = rt_core_array_registry_cap == 0 ? 64 : rt_core_array_registry_cap * 2;
         RtCoreArray** next =
             (RtCoreArray**)realloc(rt_core_array_registry, next_cap * sizeof(RtCoreArray*));
-        if (!next) return;
+        if (!next) {
+            rt_core_array_registry_release();
+            return;
+        }
         rt_core_array_registry = next;
         rt_core_array_registry_cap = next_cap;
     }
     rt_core_array_registry[rt_core_array_registry_len++] = array;
     atomic_fetch_add_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
+    rt_core_array_registry_release();
 }
 
 static int rt_core_is_registered_array(RtCoreArray* array) {
+    int found = 0;
+    rt_core_array_registry_acquire();
     for (size_t i = 0; i < rt_core_array_registry_len; i++) {
-        if (rt_core_array_registry[i] == array) return 1;
+        if (rt_core_array_registry[i] == array) {
+            found = 1;
+            break;
+        }
     }
-    return 0;
+    rt_core_array_registry_release();
+    return found;
 }
 
 static int rt_core_unregister_array(RtCoreArray* array) {
+    int found = 0;
+    rt_core_array_registry_acquire();
     for (size_t i = 0; i < rt_core_array_registry_len; i++) {
         if (rt_core_array_registry[i] != array) continue;
         rt_core_array_registry[i] = rt_core_array_registry[--rt_core_array_registry_len];
         atomic_fetch_sub_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
-        return 1;
+        found = 1;
+        break;
     }
-    return 0;
+    rt_core_array_registry_release();
+    return found;
 }
 
 static void rt_core_register_mutex(RtCoreMutex* mutex) {
@@ -980,6 +1013,58 @@ static atomic_flag rt_core_closure_registry_lock = ATOMIC_FLAG_INIT;
 
 int64_t rt_heap_registry_count(void) {
     return (int64_t)atomic_load_explicit(&rt_core_heap_registry_count, memory_order_relaxed);
+}
+
+int8_t rt_transient_array_scope_begin(void) {
+    if (rt_core_transient_array_scope_active) return 0;
+    uint32_t next_id =
+        atomic_load_explicit(&rt_core_transient_array_scope_next_id, memory_order_relaxed);
+    while (next_id != 0) {
+        uint32_t successor = next_id == UINT32_MAX ? 0 : next_id + 1;
+        if (atomic_compare_exchange_weak_explicit(
+                &rt_core_transient_array_scope_next_id, &next_id, successor,
+                memory_order_relaxed, memory_order_relaxed)) {
+            break;
+        }
+    }
+    if (next_id == 0) return 0;
+    rt_core_transient_array_scope_id = next_id;
+    rt_core_transient_array_scope_active = 1;
+    rt_core_transient_array_scope_paused = 0;
+    return 1;
+}
+
+int8_t rt_transient_array_scope_pause(void) {
+    if (!rt_core_transient_array_scope_active) return 0;
+    rt_core_transient_array_scope_paused = 1;
+    return 1;
+}
+
+int8_t rt_transient_array_scope_end(void) {
+    if (!rt_core_transient_array_scope_active) return 0;
+    const uint32_t scope_id = rt_core_transient_array_scope_id;
+    rt_core_transient_array_scope_active = 0;
+    rt_core_transient_array_scope_paused = 0;
+
+    size_t write_idx = 0;
+    size_t freed = 0;
+    rt_core_array_registry_acquire();
+    for (size_t read_idx = 0; read_idx < rt_core_array_registry_len; read_idx++) {
+        RtCoreArray* array = rt_core_array_registry[read_idx];
+        if (array && array->transient_scope_id == scope_id) {
+            free(array->data);
+            free(array);
+            freed++;
+        } else {
+            rt_core_array_registry[write_idx++] = array;
+        }
+    }
+    rt_core_array_registry_len = write_idx;
+    if (freed > 0) {
+        atomic_fetch_sub_explicit(&rt_core_heap_registry_count, freed, memory_order_relaxed);
+    }
+    rt_core_array_registry_release();
+    return 1;
 }
 
 static void rt_core_closure_registry_acquire(void) {

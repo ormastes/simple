@@ -24,11 +24,15 @@ use compiler.core.types.{span_start, span_end, span_line, span_col, span_is_vali
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types_expr.*
 use compiler.frontend.parser_types_expr.{ComprehensionClause, ComprehensionKind, GpuLaunchConfig}
+use compiler.frontend.desugar.collection_desugar.{desugar_collections}
 use compiler.frontend.lexer_types.{Span}
 use compiler.common.dependency.visibility.{Visibility}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 extern fn rt_env_get(key: text) -> text
 extern fn rt_env_set(key: text, value: text)
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_transient_array_scope_end() -> bool
 
 fn flat_module_env_get(key: text) -> text:
     rt_env_get(key) ?? ""
@@ -522,7 +526,7 @@ fn flat_ast_to_module(path: text) -> Module:
             ))
         elif tag_text == "7":
             val export_items = decl_get_imports(idx)
-            exports.push(Export(items: export_items, span: span))
+            exports.push(Export(items: flat_copy_text_list(export_items), span: span))
         elif tag_text == "14":
             val aop_data = decl_get_imports(idx)
             var aop_pointcut = ""
@@ -639,14 +643,20 @@ fn parse_and_build_module(source: text, path: text) -> Module:
     val saved_lex_path = rt_env_get("SIMPLE_BOOTSTRAP_LEX_PATH") ?? ""
     reset_all_pools()
     parser_init_with_path(source, path)
+    val transient_scope = rt_transient_array_scope_begin()
     parse_module_body()
+    desugar_collections(0, 0)
     if parser_has_errors():
         val errors = parser_get_errors()
         var ei = 0
         while ei < errors.len():
             print "  {errors[ei]}"
             ei = ei + 1
+    if transient_scope:
+        val _paused = rt_transient_array_scope_pause()
     val built_module = flat_ast_to_module(path)
+    if transient_scope:
+        val _ended = rt_transient_array_scope_end()
     rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", saved_lex_source)
     rt_env_set("SIMPLE_BOOTSTRAP_LEX_PATH", saved_lex_path)
     parser_lex_source_gen_bump()

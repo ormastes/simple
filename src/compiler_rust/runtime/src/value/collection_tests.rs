@@ -1985,3 +1985,18 @@ fn test_byte_array_bytes_supports_packed_and_tagged_storage() {
     assert!(super::byte_array_bytes(bytes).is_none());
     unsafe { (*array).len = 0 };
 }
+
+#[test]
+fn transient_array_scope_reclaims_only_pre_pause_arrays() {
+    assert!(super::rt_transient_array_scope_begin());
+    assert!(!super::rt_transient_array_scope_begin());
+    let transient = rt_array_new(0);
+    assert!(super::rt_transient_array_scope_pause());
+    let permanent = rt_array_new(0);
+    assert!(super::rt_transient_array_scope_end());
+    assert!(!super::rt_transient_array_scope_end());
+
+    assert!(!crate::value::heap::is_registered_heap_ptr(transient.as_heap_ptr()));
+    assert!(crate::value::heap::is_registered_heap_ptr(permanent.as_heap_ptr()));
+    rt_array_free(permanent);
+}
