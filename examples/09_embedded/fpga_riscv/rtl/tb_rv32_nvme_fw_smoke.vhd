@@ -83,9 +83,14 @@ begin
   end process;
 
   -- Timeout guard: firmware must reach the marker well within this window.
+  -- The full self-test firmware completes and prints the PASS marker at
+  -- ~1.2425 ms of sim time on the rv32 soft-core (measured, matches QEMU's
+  -- "ALL RV32 NVME FW CHECKS PASS" on the identical BRAM ELF). The previous
+  -- 1 ms bound guillotined the run mid-selftest and produced a false FAIL;
+  -- 2 ms leaves comfortable margin over the real completion time.
   process
   begin
-    wait for 1 ms;
+    wait for 2 ms;
     if not done then
       report "RV32_NVME_FW_STUCK pc=0x" & to_hstring(debug_pc)
         & " ins=0x" & to_hstring(debug_ins)
