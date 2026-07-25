@@ -75,6 +75,39 @@ Optionally also lower the bridge/frame defaults for CI, but that is a mitigation
 requires a seed rebuild, which invalidates cached objects for concurrent
 sessions — coordinate before doing it.
 
+## Second cause found 2026-07-25: a 10s in-process watchdog, and it misreports its own limit
+
+Bypassing the isolation re-exec with `SIMPLE_EXAMPLE_ISOLATED_CHILD=1` makes
+output stream (169,612 lines vs 2) but the run still dies:
+
+```
+[watchdog] wall-clock timeout (10s) exceeded
+[watchdog] crash report: .simple/logs/crash_<pid>.log
+error: timeout: execution exceeded 0 second limit
+```
+
+So there are **two** independent kills on this path, and fixing only the
+buffering does not make the cell runnable:
+
+1. the isolation wrapper's buffer-then-dump (above), and
+2. a **10-second default in-process watchdog**, against a
+   `run_headless_capture` whose bridge+frame waits budget ~8 minutes
+   (300000ms + 180000ms). It cannot finish, ever, at the default.
+
+**Correct invocation** for this lane: set `SIMPLE_TIMEOUT_SECONDS` (e.g. 900),
+which both raises the watchdog and disables the isolation re-exec
+(`examples_safety.rs:38,42` — `examples_timeout_disabled()` keys off exactly this
+variable).
+
+**Bug within the bug — the limit is misreported.** The watchdog says `(10s)` but
+the surfaced error says `exceeded 0 second limit`
+(`src/compiler/00.common/error.spl:257`, `src/compiler_rust/compiler/src/error.rs:514`,
+both interpolating a `secs`/`timeout_secs` that arrives as **0**). Reading "0
+second limit" suggests a zero/misconfigured limit rather than the real 10s
+default, which sends a reader looking in the wrong place. The watchdog's own
+value and the value passed into the error type are not the same variable — they
+should be, or the error should not claim a number it does not have.
+
 ## Secondary observation (separate issue, not filed here)
 
 The streamed log is dominated by repeated `info: Common mistake detected`
