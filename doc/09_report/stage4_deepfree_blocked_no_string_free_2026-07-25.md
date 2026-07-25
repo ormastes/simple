@@ -1,4 +1,21 @@
-> **Orchestrator verification (2026-07-25).** All three blocking claims confirmed
+> **Current status — superseded 2026-07-26.** The historical claim that
+> `rt_string_free` did not exist is no longer true: the runtime now exposes a
+> registry-checked primitive which refuses shared or already-unregistered
+> strings. Phase 2 now has a deliberately narrow owner boundary: after all
+> frontend parsing, it clears lexer globals that retain the active source,
+> invokes `rt_string_free` for every `SourceFile.content` handle, counts only
+> successful unregister-and-free returns, and then replaces source metadata.
+> This is not a general AST/HIR deep-free facility. `evict_ast()` and
+> `evict_hir()` remain shallow metadata eviction because copied RuntimeValue
+> aliases in those graphs are not ownership-safe.
+>
+> The native Stage4 execution/memory ceiling remains unproved here. The update
+> has bounded unit evidence only; it deliberately does not claim a full Stage4
+> run, cross-runtime parity, or a measured RSS reduction.
+
+> **Historical orchestrator verification (2026-07-25).** The following was
+> accurate before the runtime primitive landed, but its missing-primitive
+> conclusion is superseded by the status above.
 > independently:
 > - `src/compiler_rust/runtime/src/value/core.rs`: `#[derive(Clone, Copy)]` on
 >   `pub struct RuntimeValue(pub(crate) u64)` — every text/array/struct assignment
