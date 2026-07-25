@@ -396,6 +396,15 @@ same failure.
   `SIMPLE_BOOTSTRAP=1`, `bootstrap_main.spl`, and native-all. Produce a fresh
   canonical Stage3 and manifest with the standard bootstrap script before the
   next live Vulkan run; never backfill or synthesize provenance.
+- The next canonical producer ran through its silent fingerprint phase, then
+  failed because provenance path discovery treated vendored
+  `block`'s absent `test_utils` dev-dependency as a production input. A scoped
+  classifier change now ignores only dev-dependency sections while keeping
+  missing normal/build/workspace/patch paths fail-closed, with positive and
+  negative fixtures added locally. The broader provenance self-test still
+  returns failure without a diagnostic after the bounded repair cycle, so
+  these provenance-helper edits remain uncommitted and the producer must not
+  be retried again in this session.
 
 ## Required Evidence and Documentation
 
