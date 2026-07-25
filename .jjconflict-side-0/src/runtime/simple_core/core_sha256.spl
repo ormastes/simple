@@ -1,0 +1,176 @@
+# Pure-Simple SHA-256 file hashing for the compiler runtime ABI.
+
+extern fn malloc(size: i64) -> i64
+extern fn free(ptr: i64)
+extern fn open(path: i64, flags: i64) -> i64
+extern fn read(fd: i64, ptr: i64, count: i64) -> i64
+extern fn close(fd: i64) -> i64
+extern fn lseek(fd: i64, offset: i64, whence: i64) -> i64
+extern fn spl_load_u8(ptr: i64, offset: i64) -> i64
+extern fn spl_store_u8(ptr: i64, offset: i64, value: i64)
+extern fn rt_string_new(bytes: i64, len: i64) -> i64
+extern fn fs_copy_cstr(ptr: i64, len: i64) -> i64
+extern fn rt_array_free(array: i64)
+
+fn sha256_rotr32(value: i64, shift: i64) -> i64:
+    val word = value & 4294967295
+    ((word >> shift) | (word << (32 - shift))) & 4294967295
+
+fn sha256_constants() -> [i64]:
+    [
+        1116352408, 1899447441, 3049323471, 3921009573,
+         961987163, 1508970993, 2453635748, 2870763221,
+        3624381080,  310598401,  607225278, 1426881987,
+        1925078388, 2162078206, 2614888103, 3248222580,
+        3835390401, 4022224774,  264347078,  604807628,
+         770255983, 1249150122, 1555081692, 1996064986,
+        2554220882, 2821834349, 2952996808, 3210313671,
+        3336571891, 3584528711,  113926993,  338241895,
+         666307205,  773529912, 1294757372, 1396182291,
+        1695183700, 1986661051, 2177026350, 2456956037,
+        2730485921, 2820302411, 3259730800, 3345764771,
+        3516065817, 3600352804, 4094571909,  275423344,
+         430227734,  506948616,  659060556,  883997877,
+         958139571, 1322822218, 1537002063, 1747873779,
+        1955562222, 2024104815, 2227730452, 2361852424,
+        2428436474, 2756734187, 3204031479, 3329325298
+    ]
+
+fn sha256_padded_byte(data: i64, data_len: i64, total_len: i64, index: i64) -> i64:
+    if index < data_len:
+        return spl_load_u8(data, index)
+    if index == data_len:
+        return 128
+    if index >= total_len - 8:
+        val byte_from_lsb = total_len - 1 - index
+        if byte_from_lsb == 0:
+            return (data_len << 3) & 255
+        return (data_len >> (byte_from_lsb * 8 - 3)) & 255
+    0
+
+fn sha256_hex_digit(nibble: i64) -> i64:
+    if nibble < 10: 48 + nibble else: 87 + nibble
+
+# ponytail: hashes one whole file in memory; stream blocks if compiler inputs exceed the runtime memory budget.
+pub fn rt_file_hash_sha256(path_ptr: i64, path_len: i64) -> i64:
+    val path = fs_copy_cstr(path_ptr, path_len)
+    if path < 1:
+        return 3
+    val fd = open(path, 0)
+    free(path)
+    if fd < 0:
+        return 3
+    val data_len = lseek(fd, 0, 2)
+    if data_len < 0 or data_len > 1152921504606846975:
+        close(fd)
+        return 3
+    lseek(fd, 0, 0)
+    var data = 0
+    if data_len > 0:
+        data = malloc(data_len)
+        if data < 1:
+            close(fd)
+            return 3
+        var loaded = 0
+        while loaded < data_len:
+            val count = read(fd, data + loaded, data_len - loaded)
+            if count <= 0:
+                free(data)
+                close(fd)
+                return 3
+            loaded = loaded + count
+    close(fd)
+
+    val constants = sha256_constants()
+    var words: [i64] = []
+    var zero_i = 0
+    while zero_i < 64:
+        words.push(0)
+        zero_i = zero_i + 1
+
+    var h0 = 1779033703
+    var h1 = 3144134277
+    var h2 = 1013904242
+    var h3 = 2773480762
+    var h4 = 1359893119
+    var h5 = 2600822924
+    var h6 =  528734635
+    var h7 = 1541459225
+    val mask32 = 4294967295
+    val total_len = ((data_len + 8) / 64 + 1) * 64
+    var block = 0
+    while block < total_len:
+        var wi = 0
+        while wi < 16:
+            val base = block + wi * 4
+            val b0 = sha256_padded_byte(data, data_len, total_len, base)
+            val b1 = sha256_padded_byte(data, data_len, total_len, base + 1)
+            val b2 = sha256_padded_byte(data, data_len, total_len, base + 2)
+            val b3 = sha256_padded_byte(data, data_len, total_len, base + 3)
+            words[wi] = (b0 * 16777216) + (b1 * 65536) + (b2 * 256) + b3
+            wi = wi + 1
+        wi = 16
+        while wi < 64:
+            val w15 = words[wi - 15]
+            val w2 = words[wi - 2]
+            val s0 = (sha256_rotr32(w15, 7) ^ sha256_rotr32(w15, 18) ^ (w15 >> 3)) & mask32
+            val s1 = (sha256_rotr32(w2, 17) ^ sha256_rotr32(w2, 19) ^ (w2 >> 10)) & mask32
+            words[wi] = (words[wi - 16] + s0 + words[wi - 7] + s1) & mask32
+            wi = wi + 1
+
+        var a = h0
+        var b = h1
+        var c = h2
+        var d = h3
+        var e = h4
+        var f = h5
+        var g = h6
+        var hh = h7
+        var round = 0
+        while round < 64:
+            val big_s1 = (sha256_rotr32(e, 6) ^ sha256_rotr32(e, 11) ^ sha256_rotr32(e, 25)) & mask32
+            val choose = ((e & f) ^ ((e ^ mask32) & g)) & mask32
+            val temp1 = (hh + big_s1 + choose + constants[round] + words[round]) & mask32
+            val big_s0 = (sha256_rotr32(a, 2) ^ sha256_rotr32(a, 13) ^ sha256_rotr32(a, 22)) & mask32
+            val majority = ((a & b) ^ (a & c) ^ (b & c)) & mask32
+            val temp2 = (big_s0 + majority) & mask32
+            hh = g
+            g = f
+            f = e
+            e = (d + temp1) & mask32
+            d = c
+            c = b
+            b = a
+            a = (temp1 + temp2) & mask32
+            round = round + 1
+        h0 = (h0 + a) & mask32
+        h1 = (h1 + b) & mask32
+        h2 = (h2 + c) & mask32
+        h3 = (h3 + d) & mask32
+        h4 = (h4 + e) & mask32
+        h5 = (h5 + f) & mask32
+        h6 = (h6 + g) & mask32
+        h7 = (h7 + hh) & mask32
+        block = block + 64
+    if data > 0:
+        free(data)
+    rt_array_free(constants)
+    rt_array_free(words)
+
+    val output = malloc(64)
+    if output < 1:
+        return 3
+    val hash_words = [h0, h1, h2, h3, h4, h5, h6, h7]
+    var out_i = 0
+    while out_i < 8:
+        val word = hash_words[out_i]
+        var shift = 28
+        while shift >= 0:
+            val nibble = (word >> shift) & 15
+            spl_store_u8(output, out_i * 8 + (28 - shift) / 4, sha256_hex_digit(nibble))
+            shift = shift - 4
+        out_i = out_i + 1
+    val result = rt_string_new(output, 64)
+    rt_array_free(hash_words)
+    free(output)
+    result

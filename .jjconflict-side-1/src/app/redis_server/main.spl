@@ -1,0 +1,68 @@
+"""
+# Redis Server entry point
+
+Launches the pure-Simple RESP key/value server so a real `redis-benchmark` or
+`memtier_benchmark` can be run against it.
+
+## Run
+
+```bash
+bin/simple run src/app/redis_server/main.spl          # binds 127.0.0.1:6399
+REDIS_HOST=0.0.0.0 REDIS_PORT=6399 bin/simple run src/app/redis_server/main.spl
+```
+
+Then, from another shell:
+
+```bash
+redis-benchmark -h 127.0.0.1 -p 6399 -t set,get,incr -n 100000 -q
+redis-cli -h 127.0.0.1 -p 6399 ping
+```
+
+Default bind is 127.0.0.1:6399 (port 6399 avoids clashing with a real redis
+on 6379).
+"""
+
+use std.nogc_sync_mut.redis.server.{RedisServer}
+use app.io.env_ops.{env_get as redis_env_get}
+
+fn main():
+    val host = redis_host()
+    val port = redis_port()
+    print("simple redis-server (RESP) listening on {host}:{port}")
+    var server = RedisServer.create()
+    val r = server.run(host, port)
+    match r:
+        case Ok(_):
+            print("server stopped")
+        case Err(e):
+            print("server error: {e.message}")
+
+fn redis_host() -> text:
+    val h = redis_env_get("REDIS_HOST") ?? ""
+    if h.len() > 0:
+        return h
+    "127.0.0.1"
+
+fn redis_port() -> i64:
+    val p = redis_env_get("REDIS_PORT") ?? ""
+    if p.len() > 0:
+        val parsed = parse_port(p)
+        if parsed > 0:
+            return parsed
+    6399
+
+fn parse_port(s: text) -> i64:
+    val bytes = rt_text_to_bytes(s)
+    if bytes.len() == 0:
+        return -1
+    var acc = 0
+    var i = 0
+    while i < bytes.len():
+        val b = bytes[i]
+        if b < 48 or b > 57:
+            return -1
+        acc = acc * 10 + (b - 48)
+        i = i + 1
+    acc
+
+extern fn rt_text_to_bytes(s: text) -> [u8]

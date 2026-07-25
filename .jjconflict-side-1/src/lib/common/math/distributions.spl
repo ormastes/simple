@@ -1,0 +1,396 @@
+# Probability distribution kernels — pure functions.
+#
+# Extracted from the inline probability-distribution kernels in
+# src/app/office/sheets/formula.spl (NORM.DIST/INV, T.DIST/INV, CHISQ.DIST/INV,
+# F.DIST/INV, BETA.DIST/INV, GAMMA.DIST/INV, BINOM.DIST, POISSON.DIST,
+# EXPON.DIST, HYPGEOM.DIST, NEGBINOM.DIST, WEIBULL.DIST, LOGNORM.DIST/INV).
+# formula.spl is left untouched (read-only reference); this module is the
+# reusable stdlib home for the same distribution-level logic.
+#
+# Import path: use std.math.distributions.{norm_cdf, norm_inv, ...}
+#
+# De-duplication: the gamma/beta/erf/combinatorics NUMERIC KERNELS
+# (gamma_ln, incomplete_beta, incomplete_gamma_p, combin, ...) live in the
+# sibling module `special.spl` (src/lib/common/math/special.spl) and are
+# imported from there — this file contains ONLY distribution-level
+# composition (CDF/PDF/inverse formulas built on top of those kernels), never
+# a second copy of the gamma/beta/erf internals. Several inverses that
+# formula.spl computes via bisection (T.INV, F.INV) are instead derived here
+# as an exact closed-form algebraic rearrangement of the same
+# incomplete-beta relationship, using `special.spl`'s
+# incomplete_beta_inv — this avoids duplicating a second numeric
+# root-finder next to the one special.spl already provides, while producing
+# the same value special.spl's own bisection would (see each function's
+# docstring for the derivation).
+#
+# What stays local: `_exp_f64`/`_ln_f64`/`_sqrt_f64` (Taylor/Newton kernels)
+# and a tiny nonnegative/negative-integer-exponent `_ipow_f64`. These are
+# NOT part of special.spl's public API (its own copies are private, kept
+# for the same reason: they must work under the interpreter without a
+# bootstrap rebuild, unlike the SFFI math_exp/math_pow in math.spl). Every
+# other module in this family (special.spl included) duplicates this same
+# small set of primitives rather than share them — see special.spl's own
+# "Internal building blocks" section, which does the same thing for the
+# same reason.
+#
+# NaN convention: invalid domain input returns NaN (via inf - inf) instead of an Excel
+# #ERR string, since there is no CellValue wrapper here. 0.0 is kept where
+# formula.spl itself returns 0.0 (e.g. sub-support pdf/pmf points), matching
+# its internal convention.
+
+use std.math.special.{erf, incomplete_beta, incomplete_beta_inv, incomplete_gamma_p, incomplete_gamma_p_inv, combin}
+
+val _LN2: f64 = 0.6931471805599453
+val _SQRT2: f64 = 1.4142135623730951
+val _SQRT_2PI: f64 = 2.5066282746310002
+
+fn _nan() -> f64:
+    """NaN sentinel for invalid-domain results."""
+    var big = 1.0e308
+    val inf = big * 10.0
+    inf - inf
+
+# --- Interpreter-safe low-level primitives (not special-function kernels;
+# see module docstring for why these stay local instead of importing) ---
+
+fn _exp_f64(x: f64) -> f64:
+    """e^x via argument halving + Taylor series, squared back up."""
+    var v = x
+    var squarings = 0
+    while v > 0.5 or v < -0.5:
+        v = v / 2.0
+        squarings = squarings + 1
+    var term = 1.0
+    var sum = 1.0
+    var n = 1
+    while n <= 18:
+        term = term * v / n.to_f64()
+        sum = sum + term
+        n = n + 1
+    while squarings > 0:
+        sum = sum * sum
+        squarings = squarings - 1
+    sum
+
+fn _ln_f64(x: f64) -> f64:
+    """Natural log via binary normalization + atanh series. x must be > 0."""
+    var m = x
+    var e = 0
+    while m >= 2.0:
+        m = m / 2.0
+        e = e + 1
+    while m < 1.0:
+        m = m * 2.0
+        e = e - 1
+    val z = (m - 1.0) / (m + 1.0)
+    val z2 = z * z
+    var term = z
+    var sum = 0.0
+    var k = 1
+    while k <= 30:
+        sum = sum + term / k.to_f64()
+        term = term * z2
+        k = k + 2
+    e.to_f64() * _LN2 + 2.0 * sum
+
+fn _sqrt_f64(x: f64) -> f64:
+    """Square root via Newton's method. Assumes x >= 0."""
+    if x == 0.0:
+        return 0.0
+    var g = x
+    var i = 0
+    while i < 40:
+        g = 0.5 * (g + (x / g))
+        i = i + 1
+    g
+
+fn _ipow_f64(base: f64, n: i64) -> f64:
+    """base^n for integer n (any sign, base may be 0 — 0^0 = 1.0). Distinct
+    from special.spl's `powf` (which is base^exp for real exp via ln/exp and
+    returns 0.0 for base <= 0.0 regardless of exp) because the pmf callers
+    here need the integer-exponent identity 0^0 = 1, e.g. poisson_pmf(0, 0)."""
+    if n == 0:
+        return 1.0
+    var result = 1.0
+    var neg = false
+    var e = n
+    if e < 0:
+        neg = true
+        e = 0 - e
+    var i: i64 = 0
+    while i < e:
+        result = result * base
+        i = i + 1
+    if neg:
+        return 1.0 / result
+    result
+
+# =====================================================================
+# Public API
+# =====================================================================
+
+# --- Normal ---
+
+pub fn norm_pdf(x: f64, mean: f64, sd: f64) -> f64:
+    """Normal density at x. Domain: sd > 0, else NaN."""
+    if sd <= 0.0:
+        return _nan()
+    val z = (x - mean) / sd
+    _exp_f64(0.0 - z * z / 2.0) / (sd * _SQRT_2PI)
+
+pub fn norm_cdf(x: f64, mean: f64, sd: f64) -> f64:
+    """Normal CDF at x, via special.spl's erf: CDF(z) = 0.5*(1+erf(z/sqrt2)).
+    Domain: sd > 0, else NaN."""
+    if sd <= 0.0:
+        return _nan()
+    val z = (x - mean) / sd
+    0.5 * (1.0 + erf(z / _SQRT2))
+
+pub fn norm_inv(p: f64, mean: f64, sd: f64) -> f64:
+    """Inverse normal CDF via Acklam's rational approximation (not a
+    gamma/beta/erf kernel — no equivalent in special.spl). Domain: sd > 0,
+    0 < p < 1, else NaN."""
+    if sd <= 0.0 or p <= 0.0 or p >= 1.0:
+        return _nan()
+    mean + sd * _norm_inv_std(p)
+
+fn _norm_inv_std(p: f64) -> f64:
+    """Inverse standard normal CDF via Acklam's rational approximation (0 < p < 1)."""
+    val plow = 0.02425
+    val phigh = 1.0 - plow
+    if p < plow:
+        val q = _sqrt_f64(0.0 - 2.0 * _ln_f64(p))
+        val num = ((((-7.784894002430293e-03 * q - 3.223964580411365e-01) * q - 2.400758277161838e+00) * q - 2.549732539343734e+00) * q + 4.374664141464968e+00) * q + 2.938163982698783e+00
+        val den = (((7.784695709041462e-03 * q + 3.224671290700398e-01) * q + 2.445134137142996e+00) * q + 3.754408661907416e+00) * q + 1.0
+        return num / den
+    if p <= phigh:
+        val q = p - 0.5
+        val r = q * q
+        val num = (((((-3.969683028665376e+01 * r + 2.209460984245205e+02) * r - 2.759285104469687e+02) * r + 1.383577518672690e+02) * r - 3.066479806614716e+01) * r + 2.506628277459239e+00) * q
+        val den = ((((-5.447609879822406e+01 * r + 1.615858368580409e+02) * r - 1.556989798598866e+02) * r + 6.680131188771972e+01) * r - 1.328068155288572e+01) * r + 1.0
+        return num / den
+    val qh = _sqrt_f64(0.0 - 2.0 * _ln_f64(1.0 - p))
+    val numh = ((((-7.784894002430293e-03 * qh - 3.223964580411365e-01) * qh - 2.400758277161838e+00) * qh - 2.549732539343734e+00) * qh + 4.374664141464968e+00) * qh + 2.938163982698783e+00
+    val denh = (((7.784695709041462e-03 * qh + 3.224671290700398e-01) * qh + 2.445134137142996e+00) * qh + 3.754408661907416e+00) * qh + 1.0
+    0.0 - numh / denh
+
+# --- Student's t ---
+#
+# t_cdf/t_cdf_2t compose special.spl's incomplete_beta directly (same
+# relation as formula.spl's `_t_2t_area`: two-tailed area
+# P(|T|>x) = I_{df/(df+x^2)}(df/2, 1/2)).
+#
+# t_inv is an exact closed-form inversion of that same relation rather than
+# formula.spl's bisection (`_t_inv_2t`): solving w = df/(df+x^2) for x gives
+# x = sqrt(df*(1-w)/w), where w = incomplete_beta_inv(df/2, 1/2, alpha).
+
+pub fn t_cdf(x: f64, df: f64) -> f64:
+    """Student-t left-tail CDF. Domain: df >= 1, else NaN."""
+    if df < 1.0:
+        return _nan()
+    val ib = incomplete_beta(df / 2.0, 0.5, df / (df + x * x))
+    if x >= 0.0: 1.0 - 0.5 * ib else: 0.5 * ib
+
+pub fn t_cdf_2t(x: f64, df: f64) -> f64:
+    """Two-tailed Student-t area P(|T|>x) (the `tails` helper the inline
+    T.DIST.2T/TDIST cases use). Domain: df >= 1, x >= 0, else NaN."""
+    if df < 1.0 or x < 0.0:
+        return _nan()
+    incomplete_beta(df / 2.0, 0.5, df / (df + x * x))
+
+pub fn t_inv(p: f64, df: f64) -> f64:
+    """Inverse Student-t left-tail CDF. Domain: df >= 1, 0 < p < 1, else NaN."""
+    if df < 1.0 or p <= 0.0 or p >= 1.0:
+        return _nan()
+    if p == 0.5:
+        return 0.0
+    val q = if p > 0.5: 1.0 - p else: p
+    val alpha = 2.0 * q
+    val w = incomplete_beta_inv(df / 2.0, 0.5, alpha)
+    val tm = _sqrt_f64(df * (1.0 - w) / w)
+    if p > 0.5: tm else: 0.0 - tm
+
+# --- Chi-squared ---
+
+pub fn chisq_cdf(x: f64, df: f64) -> f64:
+    """Chi-squared left-tail CDF. Domain: df >= 1, x >= 0, else NaN."""
+    if df < 1.0 or x < 0.0:
+        return _nan()
+    incomplete_gamma_p(df / 2.0, x / 2.0)
+
+pub fn chisq_inv(p: f64, df: f64) -> f64:
+    """Inverse chi-squared left-tail CDF. Domain: df >= 1, 0 < p < 1, else NaN."""
+    if df < 1.0 or p <= 0.0 or p >= 1.0:
+        return _nan()
+    2.0 * incomplete_gamma_p_inv(df / 2.0, p)
+
+# --- F distribution ---
+#
+# f_cdf composes incomplete_beta directly (formula.spl's `_f_cdf`:
+# I_{d1*x/(d1*x+d2)}(d1/2, d2/2)). f_inv is an exact closed-form inversion
+# instead of formula.spl's bisection (`_f_inv_left`): solving
+# y = d1*x/(d1*x+d2) for x gives x = y*d2 / (d1*(1-y)), where
+# y = incomplete_beta_inv(d1/2, d2/2, p).
+
+pub fn f_cdf(x: f64, d1: f64, d2: f64) -> f64:
+    """Snedecor F left-tail CDF. Domain: d1 >= 1, d2 >= 1, x >= 0, else NaN."""
+    if d1 < 1.0 or d2 < 1.0 or x < 0.0:
+        return _nan()
+    incomplete_beta(d1 / 2.0, d2 / 2.0, d1 * x / (d1 * x + d2))
+
+pub fn f_inv(p: f64, d1: f64, d2: f64) -> f64:
+    """Inverse Snedecor F left-tail CDF. Domain: d1 >= 1, d2 >= 1, 0 < p < 1, else NaN."""
+    if d1 < 1.0 or d2 < 1.0 or p <= 0.0 or p >= 1.0:
+        return _nan()
+    val y = incomplete_beta_inv(d1 / 2.0, d2 / 2.0, p)
+    y * d2 / (d1 * (1.0 - y))
+
+# --- Beta ---
+
+pub fn beta_cdf(x: f64, a: f64, b: f64) -> f64:
+    """Beta CDF on [0,1] (standard beta, no lo/hi rescale). Domain: a>0, b>0, else NaN."""
+    if a <= 0.0 or b <= 0.0:
+        return _nan()
+    incomplete_beta(a, b, x)
+
+pub fn beta_inv(p: f64, a: f64, b: f64) -> f64:
+    """Inverse beta CDF on [0,1]. Domain: a>0, b>0, 0<p<1, else NaN."""
+    if a <= 0.0 or b <= 0.0 or p <= 0.0 or p >= 1.0:
+        return _nan()
+    incomplete_beta_inv(a, b, p)
+
+# --- Gamma ---
+
+pub fn gamma_cdf(x: f64, shape: f64, scale: f64) -> f64:
+    """Gamma CDF (shape/scale parameterization). Domain: shape>0, scale>0, x>=0, else NaN."""
+    if shape <= 0.0 or scale <= 0.0 or x < 0.0:
+        return _nan()
+    incomplete_gamma_p(shape, x / scale)
+
+pub fn gamma_inv(p: f64, shape: f64, scale: f64) -> f64:
+    """Inverse gamma CDF. Domain: shape>0, scale>0, 0<p<1, else NaN."""
+    if shape <= 0.0 or scale <= 0.0 or p <= 0.0 or p >= 1.0:
+        return _nan()
+    scale * incomplete_gamma_p_inv(shape, p)
+
+# --- Binomial ---
+
+pub fn binom_pmf(k: i64, n: i64, p: f64) -> f64:
+    """Binomial pmf P(X=k), via special.spl's combin() for C(n,k). Domain: 0<=k<=n<=170, 0<=p<=1, else NaN."""
+    if k < 0 or n < 0 or k > n or n > 170 or p < 0.0 or p > 1.0:
+        return _nan()
+    combin(n, k) * _ipow_f64(p, k) * _ipow_f64(1.0 - p, n - k)
+
+pub fn binom_cdf(k: i64, n: i64, p: f64) -> f64:
+    """Binomial CDF P(X<=k). Domain: 0<=k<=n<=170, 0<=p<=1, else NaN."""
+    if k < 0 or n < 0 or k > n or n > 170 or p < 0.0 or p > 1.0:
+        return _nan()
+    var cdf = 0.0
+    var kk: i64 = 0
+    while kk <= k:
+        cdf = cdf + combin(n, kk) * _ipow_f64(p, kk) * _ipow_f64(1.0 - p, n - kk)
+        kk = kk + 1
+    cdf
+
+# --- Poisson ---
+
+pub fn poisson_pmf(k: i64, lambda: f64) -> f64:
+    """Poisson pmf P(X=k). Domain: k>=0, 0<=lambda, k<=170, else NaN."""
+    if k < 0 or lambda < 0.0 or k > 170:
+        return _nan()
+    _exp_f64(0.0 - lambda) * _ipow_f64(lambda, k) / _factorial_local(k)
+
+pub fn poisson_cdf(k: i64, lambda: f64) -> f64:
+    """Poisson CDF P(X<=k). Domain: k>=0, 0<=lambda, k<=170, else NaN."""
+    if k < 0 or lambda < 0.0 or k > 170:
+        return _nan()
+    var cdf = 0.0
+    var kk: i64 = 0
+    while kk <= k:
+        cdf = cdf + _exp_f64(0.0 - lambda) * _ipow_f64(lambda, kk) / _factorial_local(kk)
+        kk = kk + 1
+    cdf
+
+fn _factorial_local(n: i64) -> f64:
+    """k! via direct product 2..n (n <= 170, same bound the dispatcher
+    enforces). Arithmetic glue, not a gamma/beta kernel — special.spl's
+    combin()/factorial() are ratios shaped for combinatorics call sites
+    (binom/negbinom/hypgeom above), not a bare n! this shape can reuse
+    without adding an extra division only to multiply back out."""
+    var out = 1.0
+    var i: i64 = 2
+    while i <= n:
+        out = out * i.to_f64()
+        i = i + 1
+    out
+
+# --- Exponential ---
+
+pub fn expon_cdf(x: f64, lambda: f64) -> f64:
+    """Exponential CDF. Domain: lambda>0, x>=0, else NaN."""
+    if lambda <= 0.0 or x < 0.0:
+        return _nan()
+    1.0 - _exp_f64(0.0 - lambda * x)
+
+# --- Hypergeometric ---
+
+pub fn hypgeom_pmf(k: i64, draws: i64, success: i64, pop: i64) -> f64:
+    """Hypergeometric pmf P(X=k): k successes in `draws` draws from `pop`
+    items with `success` total successes, via special.spl's combin().
+    Domain matches HYPGEOMDIST's bounds (0<=k<=draws<=pop, 0<=success<=pop,
+    draws-k<=pop-success, pop<=170), else NaN."""
+    if (k < 0 or draws < 0 or success < 0 or pop < 0 or k > draws or k > success or
+        draws > pop or success > pop or draws - k > pop - success or pop > 170):
+        return _nan()
+    combin(success, k) * combin(pop - success, draws - k) / combin(pop, draws)
+
+# --- Negative binomial ---
+
+pub fn negbinom_pmf(f: i64, s: i64, p: f64) -> f64:
+    """Negative binomial pmf P(F=f) for s successes with per-trial
+    probability p, via special.spl's combin() for C(f+s-1, f).
+    Domain: f>=0, s>=1, 0<=p<=1, f+s-1<=170, else NaN."""
+    if f < 0 or s < 1 or p < 0.0 or p > 1.0 or f + s - 1 > 170:
+        return _nan()
+    combin(f + s - 1, f) * _ipow_f64(p, s) * _ipow_f64(1.0 - p, f)
+
+# --- Weibull ---
+
+pub fn weibull_cdf(x: f64, shape: f64, scale: f64) -> f64:
+    """Weibull CDF. Domain: shape>0, scale>0, x>=0, else NaN."""
+    if shape <= 0.0 or scale <= 0.0 or x < 0.0:
+        return _nan()
+    val ratio = x / scale
+    val powa = if x == 0.0: 0.0 else: _exp_f64(shape * _ln_f64(ratio))
+    1.0 - _exp_f64(0.0 - powa)
+
+pub fn weibull_pdf(x: f64, shape: f64, scale: f64) -> f64:
+    """Weibull PDF: (shape/scale)·(x/scale)^(shape−1)·exp(−(x/scale)^shape).
+    Domain: shape>0, scale>0, x>=0, else NaN."""
+    if shape <= 0.0 or scale <= 0.0 or x < 0.0:
+        return _nan()
+    if x == 0.0:
+        return 0.0
+    val ratio = x / scale
+    val power_term = _exp_f64((shape - 1.0) * _ln_f64(ratio))
+    val exp_term = _exp_f64(0.0 - _exp_f64(shape * _ln_f64(ratio)))
+    (shape / scale) * power_term * exp_term
+
+# --- Log-normal ---
+
+pub fn lognorm_cdf(x: f64, mean: f64, sd: f64) -> f64:
+    """Log-normal CDF, via special.spl's erf (same composition as norm_cdf,
+    applied to ln(x)). Domain: sd>0, x>0, else NaN."""
+    if sd <= 0.0 or x <= 0.0:
+        return _nan()
+    0.5 * (1.0 + erf((_ln_f64(x) - mean) / (sd * _SQRT2)))
+
+pub fn lognorm_inv(p: f64, mean: f64, sd: f64) -> f64:
+    """Inverse log-normal CDF. NOTE: formula.spl has no LOGNORM.INV/LOGNORMINV
+    case (gap — not found during extraction); this is derived compositionally
+    from the standard identity LOGNORM.INV(p) = exp(mean + sd*NORM.S.INV(p)),
+    reusing the _norm_inv_std helper above rather than copied from an inline
+    implementation. Domain: sd>0, 0<p<1, else NaN."""
+    if sd <= 0.0 or p <= 0.0 or p >= 1.0:
+        return _nan()
+    _exp_f64(mean + sd * _norm_inv_std(p))

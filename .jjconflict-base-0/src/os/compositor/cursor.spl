@@ -1,0 +1,294 @@
+# Compositor Cursor Model — shape/hotspot pipeline + arrow bitmap
+#
+# Grows the former CursorState stub into a real cursor model without adding a
+# rendering backend. Provides:
+#   * CursorShape enum + per-shape hotspot offset table
+#   * CursorState.shape + set_shape/with_shape transitions
+#   * cursor_bitmap(shape) -> [u32] per-pixel coverage (Arrow + IBeam real,
+#     others fall back to Arrow — see ponytail ceiling below)
+#   * cursor_rect(state) -> damage rect for the WM damage path to invalidate
+#   * legacy 12x19 arrow row-encoding (get_cursor_bitmap/get_cursor_mask) kept
+#     for the PS/2 mouse driver + compositor consumers.
+#
+# Consumed by:
+#   * src/os/compositor/mod.spl / compositor.spl — CursorState, draw_cursor
+#   * src/os/drivers/input/ps2_mouse (spec) — default_cursor_state, bitmap/mask
+
+val CURSOR_WIDTH: i32 = 12
+val CURSOR_HEIGHT: i32 = 19
+
+# Shape codes. Stored on CursorState as an i32 (not the enum directly): the
+# interpreter leaves an enum-typed *default* field uninitialized, so existing
+# CursorState(x,y,visible,hotspot_x,hotspot_y) constructors — which omit the
+# shape — rely on a plain i32 default of 0 (= Arrow) instead.
+val SHAPE_ARROW: i32 = 0
+val SHAPE_IBEAM: i32 = 1
+val SHAPE_HAND: i32 = 2
+val SHAPE_RESIZE_H: i32 = 3
+val SHAPE_RESIZE_V: i32 = 4
+val SHAPE_RESIZE_NWSE: i32 = 5
+val SHAPE_RESIZE_NESW: i32 = 6
+val SHAPE_WAIT: i32 = 7
+
+enum CursorShape:
+    """Logical cursor shapes the compositor can present."""
+    Arrow
+    IBeam
+    Hand
+    ResizeH
+    ResizeV
+    ResizeNWSE
+    ResizeNESW
+    Wait
+
+fn cursor_shape_code(shape: CursorShape) -> i32:
+    match shape:
+        CursorShape.Arrow: SHAPE_ARROW
+        CursorShape.IBeam: SHAPE_IBEAM
+        CursorShape.Hand: SHAPE_HAND
+        CursorShape.ResizeH: SHAPE_RESIZE_H
+        CursorShape.ResizeV: SHAPE_RESIZE_V
+        CursorShape.ResizeNWSE: SHAPE_RESIZE_NWSE
+        CursorShape.ResizeNESW: SHAPE_RESIZE_NESW
+        CursorShape.Wait: SHAPE_WAIT
+
+fn cursor_shape_from_code(code: i32) -> CursorShape:
+    if code == SHAPE_IBEAM:
+        return CursorShape.IBeam
+    if code == SHAPE_HAND:
+        return CursorShape.Hand
+    if code == SHAPE_RESIZE_H:
+        return CursorShape.ResizeH
+    if code == SHAPE_RESIZE_V:
+        return CursorShape.ResizeV
+    if code == SHAPE_RESIZE_NWSE:
+        return CursorShape.ResizeNWSE
+    if code == SHAPE_RESIZE_NESW:
+        return CursorShape.ResizeNESW
+    if code == SHAPE_WAIT:
+        return CursorShape.Wait
+    CursorShape.Arrow
+
+# -- Hotspot offset table ----------------------------------------------------
+
+struct CursorHotspot:
+    x: i32
+    y: i32
+
+fn cursor_hotspot(shape: CursorShape) -> CursorHotspot:
+    """Per-shape hotspot offset (the pixel within the bitmap that tracks the
+    pointer position). Arrow points from its top-left tip; the resize/IBeam
+    shapes point from their centers."""
+    match shape:
+        CursorShape.Arrow: CursorHotspot(x: 0, y: 0)
+        CursorShape.IBeam: CursorHotspot(x: 5, y: 9)
+        CursorShape.Hand: CursorHotspot(x: 5, y: 0)
+        CursorShape.ResizeH: CursorHotspot(x: 5, y: 9)
+        CursorShape.ResizeV: CursorHotspot(x: 5, y: 9)
+        CursorShape.ResizeNWSE: CursorHotspot(x: 5, y: 9)
+        CursorShape.ResizeNESW: CursorHotspot(x: 5, y: 9)
+        CursorShape.Wait: CursorHotspot(x: 5, y: 9)
+
+# -- CursorState -------------------------------------------------------------
+
+class CursorState:
+    x: i32
+    y: i32
+    visible: bool
+    hotspot_x: i32
+    hotspot_y: i32
+    shape: i32 = 0
+
+impl CursorState:
+    fn shape_of(self) -> CursorShape:
+        """Return the current shape as a CursorShape enum."""
+        cursor_shape_from_code(self.shape)
+
+    me set_shape(shape: CursorShape):
+        """Transition to a new shape in place, updating the hotspot offset."""
+        val hs = cursor_hotspot(shape)
+        self.shape = cursor_shape_code(shape)
+        self.hotspot_x = hs.x
+        self.hotspot_y = hs.y
+
+    fn with_shape(self, shape: CursorShape) -> CursorState:
+        """Return a copy carrying `shape` and its hotspot; position preserved."""
+        val hs = cursor_hotspot(shape)
+        CursorState(
+            x: self.x, y: self.y, visible: self.visible,
+            hotspot_x: hs.x, hotspot_y: hs.y,
+            shape: cursor_shape_code(shape)
+        )
+
+fn cursor_shape(state: CursorState) -> CursorShape:
+    """Free-function accessor mirroring CursorState.shape_of()."""
+    cursor_shape_from_code(state.shape)
+
+fn default_cursor_state() -> CursorState:
+    """Arrow cursor at the origin, visible, hotspot at the tip."""
+    CursorState(x: 0, y: 0, visible: true, hotspot_x: 0, hotspot_y: 0, shape: SHAPE_ARROW)
+
+# -- Damage rect -------------------------------------------------------------
+
+struct CursorRect:
+    x: i32
+    y: i32
+    w: i32
+    h: i32
+
+fn cursor_rect(state: CursorState) -> CursorRect:
+    """Damage rect the WM must invalidate when the cursor moves: the bitmap
+    origin (position minus hotspot) plus the fixed cursor extent."""
+    CursorRect(
+        x: state.x - state.hotspot_x,
+        y: state.y - state.hotspot_y,
+        w: CURSOR_WIDTH,
+        h: CURSOR_HEIGHT
+    )
+
+# -- Bitmap tables -----------------------------------------------------------
+# 12-wide rows, 'X' = filled pixel, MSB (bit 11) = leftmost pixel.
+
+fn _arrow_rows() -> [text]:
+    [
+        "X...........",
+        "XX..........",
+        "XXX.........",
+        "XXXX........",
+        "XXXXX.......",
+        "XXXXXX......",
+        "XXXXXXX.....",
+        "XXXXXXXX....",
+        "XXXXXXXXX...",
+        "XXXXXXXXXX..",
+        "XXXXXXXXXXX.",
+        "XXXXXXX.....",
+        "XXX.XXX.....",
+        "XX..XXX.....",
+        "X....XXX....",
+        ".....XXX....",
+        "......XXX...",
+        "......XXX...",
+        ".......XX..."
+    ]
+
+fn _ibeam_rows() -> [text]:
+    [
+        "....XXXX....",
+        ".....XX.....",
+        ".....XX.....",
+        ".....XX.....",
+        ".....XX.....",
+        ".....XX.....",
+        ".....XX.....",
+        ".....XX.....",
+        ".....XX.....",
+        ".....XX.....",
+        ".....XX.....",
+        ".....XX.....",
+        ".....XX.....",
+        ".....XX.....",
+        ".....XX.....",
+        ".....XX.....",
+        ".....XX.....",
+        ".....XX.....",
+        "....XXXX...."
+    ]
+
+fn _shape_rows(shape: CursorShape) -> [text]:
+    match shape:
+        CursorShape.Arrow: _arrow_rows()
+        CursorShape.IBeam: _ibeam_rows()
+        # ponytail: only Arrow + IBeam have real bitmaps today; Hand / the
+        # four Resize shapes / Wait fall back to the Arrow glyph. Add real
+        # bitmaps here when a shape actually needs to render distinctly.
+        _: _arrow_rows()
+
+fn _row_bits(s: text) -> u32:
+    """Encode a 12-char 'X'/'.' row into a 12-bit int (MSB = leftmost).
+
+    Indexes with substring rather than `for ch in s` — iterating a text value
+    yields an unusable str element in the interpreter."""
+    var v: u32 = 0
+    var p: i32 = 0
+    while p < CURSOR_WIDTH:
+        if s.substring(p, p + 1) == "X":
+            v = v | ((1 as u32) << (CURSOR_WIDTH - 1 - p))
+        p = p + 1
+    v
+
+fn _mask_row(v: u32) -> u32:
+    """Dilate a bitmap row into its opaque mask: solid fill from the left edge
+    up to one pixel past the row's rightmost set pixel."""
+    var rightmost: i32 = -1
+    var p: i32 = 0
+    while p < CURSOR_WIDTH:
+        if ((v >> (CURSOR_WIDTH - 1 - p)) & 1) == 1:
+            rightmost = p
+        p = p + 1
+    if rightmost < 0:
+        return 0
+    var fill_to = rightmost + 1
+    if fill_to >= CURSOR_WIDTH:
+        fill_to = CURSOR_WIDTH - 1
+    var out: u32 = 0
+    var q: i32 = 0
+    while q <= fill_to:
+        out = out | ((1 as u32) << (CURSOR_WIDTH - 1 - q))
+        q = q + 1
+    out
+
+fn get_cursor_bitmap() -> [u32]:
+    """Legacy row-encoded Arrow bitmap: 19 rows of 12-bit ints (MSB=left)."""
+    var out: [u32] = []
+    for row in _arrow_rows():
+        out = out.push(_row_bits(row))
+    out
+
+fn get_cursor_mask() -> [u32]:
+    """Row-encoded Arrow opaque mask: dilated one pixel past the bitmap."""
+    var out: [u32] = []
+    for row in _arrow_rows():
+        out = out.push(_mask_row(_row_bits(row)))
+    out
+
+fn cursor_bitmap(shape: CursorShape) -> [u32]:
+    """Per-pixel ARGB coverage for `shape`: CURSOR_WIDTH*CURSOR_HEIGHT entries,
+    0xFFFFFFFF where filled and 0 elsewhere, so the compositor can composite
+    it directly. Arrow + IBeam are real; other shapes reuse Arrow."""
+    var out: [u32] = []
+    for row in _shape_rows(shape):
+        var p: i32 = 0
+        while p < CURSOR_WIDTH:
+            if row.substring(p, p + 1) == "X":
+                out = out.push(0xFFFFFFFF as u32)
+            else:
+                out = out.push(0 as u32)
+            p = p + 1
+    out
+
+# -- Compositing -------------------------------------------------------------
+
+fn draw_cursor(fb: [u32], fb_w: i32, fb_h: i32, state: CursorState) -> [u32]:
+    """Blit the cursor's per-pixel bitmap into framebuffer `fb` at the cursor
+    origin (position minus hotspot), clipped to the framebuffer. Returns the
+    updated buffer (arrays are value types — return-the-object pattern)."""
+    if not state.visible:
+        return fb
+    val bmp = cursor_bitmap(cursor_shape(state))
+    val ox = state.x - state.hotspot_x
+    val oy = state.y - state.hotspot_y
+    var out = fb
+    var row: i32 = 0
+    while row < CURSOR_HEIGHT:
+        var col: i32 = 0
+        while col < CURSOR_WIDTH:
+            val px = bmp[row * CURSOR_WIDTH + col]
+            if px != 0:
+                val sx = ox + col
+                val sy = oy + row
+                if sx >= 0 and sy >= 0 and sx < fb_w and sy < fb_h:
+                    out[sy * fb_w + sx] = px
+            col = col + 1
+        row = row + 1
+    out

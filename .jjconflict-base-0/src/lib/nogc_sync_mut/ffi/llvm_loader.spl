@@ -1,0 +1,159 @@
+# LLVM FFI — Library loading, cached FFI dispatch, and array helpers.
+#
+# Imported by llvm.spl (hub) and all llvm_*.spl subsystem files.
+
+use std.ffi.dynamic.{DynLib}
+
+# ============================================================================
+# Memory helpers for C API interop
+# ============================================================================
+
+extern fn rt_alloc(size: i64) -> i64
+extern fn rt_free(ptr: i64)
+extern fn rt_memset(dest: i64, value: i64, len: i64) -> i64
+extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
+extern fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64
+extern fn rt_file_read_bytes(path: text) -> [u8]
+extern fn rt_memcpy(dest: i64, src: i64, len: i64)
+extern fn rt_bytes_from_raw(ptr: i64, len: i64) -> [u8]
+
+# FFI primitives for cached calls
+extern fn spl_dlsym(handle: i64, name: text) -> i64
+extern fn spl_wffi_call_i64(fptr: i64, args: [i64], nargs: i64) -> i64
+
+# ============================================================================
+# Module state
+# ============================================================================
+
+var _llvm_lib: DynLib? = nil
+var _llvm_initialized: bool = false
+var _targets_initialized: bool = false
+var _fptr_cache: {text: i64} = {}
+
+# ============================================================================
+# Library loading
+# ============================================================================
+
+extern fn rt_env_get(key: text) -> text
+
+fn llvm_load() -> bool:
+    if _llvm_initialized:
+        return _llvm_lib.?
+    _llvm_initialized = true
+
+    # Check SIMPLE_LLVM_PATH env var first (all platforms)
+    val env_path = rt_env_get("SIMPLE_LLVM_PATH")
+    if env_path != nil and env_path != "":
+        val lib = DynLib.load(env_path)
+        if lib.?:
+            _llvm_lib = lib
+            return true
+
+    val paths = [
+        # Windows: MSVC distribution (LLVM-C.dll is the C API DLL)
+        "LLVM-C.dll",
+        # Windows: MinGW distribution (libLLVM-NN.dll)
+        "libLLVM-18.dll", "libLLVM-17.dll", "libLLVM-19.dll",
+        "libLLVM.dll", "LLVM.dll",
+        # Linux system paths (dlopen searches ld.so.conf paths)
+        "libLLVM-18.so", "libLLVM-18.so.1",
+        "libLLVM-17.so", "libLLVM-17.so.1",
+        "libLLVM-19.so", "libLLVM-19.so.1",
+        "libLLVM.so",
+        # macOS: short names (works if DYLD_LIBRARY_PATH is set)
+        "libLLVM-18.dylib", "libLLVM-17.dylib", "libLLVM.dylib",
+        # macOS Homebrew: Apple Silicon (arm64)
+        "/opt/homebrew/opt/llvm/lib/libLLVM.dylib",
+        "/opt/homebrew/opt/llvm@18/lib/libLLVM.dylib",
+        "/opt/homebrew/opt/llvm@17/lib/libLLVM.dylib",
+        # macOS Homebrew: Intel (x86_64)
+        "/usr/local/opt/llvm/lib/libLLVM.dylib",
+        "/usr/local/opt/llvm@18/lib/libLLVM.dylib",
+        "/usr/local/opt/llvm@17/lib/libLLVM.dylib"
+    ]
+    for path in paths:
+        val lib = DynLib.load(path)
+        if lib.?:
+            _llvm_lib = lib
+            return true
+    false
+
+fn llvm_available() -> bool:
+    llvm_load()
+
+fn llvm_lib() -> DynLib:
+    val lib = _llvm_lib
+    if lib.?:
+        lib
+    else:
+        DynLib(handle: 0, path: "")
+
+# ============================================================================
+# Cached FFI calls — dlsym results cached in _fptr_cache dict
+# ============================================================================
+
+fn _llvm_resolve(name: text) -> i64:
+    if rt_env_get("SIMPLE_BOOTSTRAP_NO_LLVM_FPTR_CACHE") == "1":
+        val uncached_lib = llvm_lib()
+        return spl_dlsym(uncached_lib.handle, name)
+    val cached = _fptr_cache[name]
+    if cached != nil:
+        return cached
+    val lib = llvm_lib()
+    val fptr = spl_dlsym(lib.handle, name)
+    _fptr_cache[name] = fptr
+    fptr
+
+fn _lc0(name: text) -> i64:
+    spl_wffi_call_i64(_llvm_resolve(name), [], 0)
+
+fn _lc1(name: text, a0: i64) -> i64:
+    spl_wffi_call_i64(_llvm_resolve(name), [a0], 1)
+
+# reason: positional ffi llvm API
+fn _lc2(name: text, a0: i64, a1: i64) -> i64:
+    spl_wffi_call_i64(_llvm_resolve(name), [a0, a1], 2)
+
+# reason: positional ffi llvm API
+fn _lc3(name: text, a0: i64, a1: i64, a2: i64) -> i64:
+    spl_wffi_call_i64(_llvm_resolve(name), [a0, a1, a2], 3)
+
+# reason: positional ffi llvm API
+fn _lc4(name: text, a0: i64, a1: i64, a2: i64, a3: i64) -> i64:
+    spl_wffi_call_i64(_llvm_resolve(name), [a0, a1, a2, a3], 4)
+
+fn _lcn(name: text, args: [i64]) -> i64:
+    spl_wffi_call_i64(_llvm_resolve(name), args, args.len())
+
+# ============================================================================
+# Helper: build contiguous i64 array for C API
+# ============================================================================
+
+# Scratch buffer for small arrays (avoids alloc/free for <= 8 elements)
+var _scratch_buf: i64 = 0
+
+fn _ensure_scratch() -> i64:
+    if _scratch_buf == 0:
+        _scratch_buf = rt_alloc(64)
+    _scratch_buf
+
+fn llvm_make_array(values: [i64]) -> i64:
+    val n = values.len()
+    if n == 0:
+        return 0
+    # Use scratch buffer for small arrays (up to 8 elements)
+    if n <= 8:
+        val buf = _ensure_scratch()
+        for i in 0..n:
+            rt_ptr_write_i64(buf, i * 8, values[i])
+        return buf
+    val ptr = rt_alloc(n * 8)
+    for i in 0..n:
+        rt_ptr_write_i64(ptr, i * 8, values[i])
+    ptr
+
+fn llvm_free_array(ptr: i64):
+    if ptr != 0 and ptr != _scratch_buf:
+        rt_free(ptr)
+
+export rt_alloc, rt_free, rt_ptr_write_i64, rt_ptr_read_i64

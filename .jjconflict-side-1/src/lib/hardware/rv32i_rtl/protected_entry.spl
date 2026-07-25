@@ -1,0 +1,128 @@
+# Compiler-owned clocked boundary for the canonical protected RV32 core.
+# State storage and bus composition stay typed; no RAM, queue, or generated RTL
+# source is hidden in this adapter.
+
+use std.hardware.rv32i_rtl.protected_core.{CoreProtectedState32, Core32CycleResult}
+use std.hardware.rv32i_rtl.protected_core.CORE32_WFI
+use std.hardware.rv32i_rtl.protected_core.{core32_init, core32_reset_result, core32_cycle}
+use std.hardware.rv32i_rtl.protected_core.{core32_set_pending_interrupts, core32_set_supervisor_pending_interrupts, core32_set_time_value}
+
+struct Core32ProductPorts:
+    bus_valid: bool
+    bus_addr: u64 @bits(34)
+    bus_size: u32
+    bus_write: bool
+    bus_wdata: u32
+    bus_is_pte: bool
+    bus_atomic: bool
+    bus_lock: bool
+    rvfi_valid: bool
+    rvfi_order: i64
+    rvfi_insn: u32
+    rvfi_trap: bool
+    rvfi_halt: bool
+    rvfi_intr: bool
+    rvfi_mode: u32 @bits(2)
+    rvfi_ixl: u32 @bits(2)
+    rvfi_rs1_addr: u32 @bits(5)
+    rvfi_rs2_addr: u32 @bits(5)
+    rvfi_rs1_rdata: u32
+    rvfi_rs2_rdata: u32
+    rvfi_rd_addr: u32 @bits(5)
+    rvfi_rd_wdata: u32
+    rvfi_pc_rdata: u32
+    rvfi_pc_wdata: u32
+    rvfi_mem_addr: u32
+    rvfi_mem_rmask: u32 @bits(4)
+    rvfi_mem_wmask: u32 @bits(4)
+    rvfi_mem_rdata: u32
+    rvfi_mem_wdata: u32
+
+# One product hart owns this state. The transition entry below remains usable
+# for typed composition and tests.
+# ponytail: one hart; introduce explicit instance state when multi-hart RTL exists.
+# The product entry's explicit reset branch initializes the VHDL state signal.
+var _core32_product_state = core32_init(0)
+var _core32_product_intr_pending = false
+
+@hardware
+@clocked(clk, reset_n)
+fn core32_protected_clocked_entry(clk: bool, reset_n: bool,
+                                  state: CoreProtectedState32,
+                                  request_ready: bool,
+                                  response_valid: bool,
+                                  response_error: bool,
+                                  response_data: u32) -> Core32CycleResult:
+    core32_cycle(state, request_ready, response_valid, response_error,
+        response_data)
+
+@hardware
+fn core32_product_cycle(state: CoreProtectedState32,
+                        msip: bool, mtip: bool, meip: bool,
+                        stip: bool, seip: bool, time_value: i64,
+                        request_ready: bool, response_valid: bool,
+                        response_error: bool, response_data: u32) -> Core32CycleResult:
+    var sampled = core32_set_pending_interrupts(state, msip, mtip, meip)
+    sampled = core32_set_supervisor_pending_interrupts(sampled, stip, seip)
+    sampled = core32_set_time_value(sampled, time_value)
+    core32_cycle(sampled, request_ready, response_valid, response_error,
+        response_data)
+
+@hardware
+@flatten_struct_output
+@clocked(clk, none)
+fn core32_protected_product_entry(clk: bool, reset_n: bool, reset_vec: u32,
+                                  msip: bool, mtip: bool, meip: bool,
+                                  stip: bool, seip: bool, time_value: i64,
+                                  request_ready: bool,
+                                  response_valid: bool,
+                                  response_error: bool,
+                                  response_data: u32) -> Core32ProductPorts:
+    var result = core32_reset_result(reset_vec)
+    var rvfi_mode: u32 = 3
+    var rvfi_intr = false
+    if not reset_n:
+        _core32_product_state = result.state
+        _core32_product_intr_pending = false
+    else:
+        rvfi_mode = _core32_product_state.privilege
+        result = core32_product_cycle(_core32_product_state,
+            msip, mtip, meip, stip, seip, time_value,
+            request_ready, response_valid, response_error, response_data)
+        rvfi_intr = _core32_product_intr_pending and result.rvfi.rvfi_valid
+        val took_interrupt = (result.rvfi.rvfi_valid and not result.rvfi.rvfi_trap and
+            result.state.core.pc != result.rvfi.rvfi_pc_wdata) or
+            (_core32_product_state.pipeline_phase == CORE32_WFI and not result.rvfi.rvfi_valid and
+             result.state.core.pc != _core32_product_state.core.pc)
+        var next_intr = _core32_product_intr_pending
+        if result.rvfi.rvfi_valid:
+            next_intr = false
+        if took_interrupt:
+            next_intr = true
+        _core32_product_intr_pending = next_intr
+        _core32_product_state = result.state
+    Core32ProductPorts(bus_valid: result.bus_valid, bus_addr: result.bus_addr as u64,
+     bus_size: result.bus_size, bus_write: result.bus_write,
+     bus_wdata: result.bus_wdata, bus_is_pte: result.bus_is_pte,
+     bus_atomic: result.bus_lock, bus_lock: result.bus_lock,
+     rvfi_valid: result.rvfi.rvfi_valid, rvfi_order: result.rvfi.rvfi_order,
+     rvfi_insn: result.rvfi.rvfi_insn, rvfi_trap: result.rvfi.rvfi_trap,
+     rvfi_halt: result.state.core.halt, rvfi_intr: rvfi_intr,
+     rvfi_mode: rvfi_mode, rvfi_ixl: 1,
+     rvfi_rs1_addr: result.rvfi.rvfi_rs1_addr,
+     rvfi_rs2_addr: result.rvfi.rvfi_rs2_addr,
+     rvfi_rs1_rdata: result.rvfi.rvfi_rs1_rdata,
+     rvfi_rs2_rdata: result.rvfi.rvfi_rs2_rdata,
+     rvfi_rd_addr: result.rvfi.rvfi_rd_addr,
+     rvfi_rd_wdata: result.rvfi.rvfi_rd_wdata,
+     rvfi_pc_rdata: result.rvfi.rvfi_pc_rdata,
+     rvfi_pc_wdata: result.rvfi.rvfi_pc_wdata,
+     rvfi_mem_addr: result.rvfi.rvfi_mem_addr,
+     rvfi_mem_rmask: result.rvfi.rvfi_mem_rmask,
+     rvfi_mem_wmask: result.rvfi.rvfi_mem_wmask,
+     rvfi_mem_rdata: result.rvfi.rvfi_mem_rdata,
+     rvfi_mem_wdata: result.rvfi.rvfi_mem_wdata)
+
+export core32_protected_clocked_entry
+export core32_protected_product_entry
+export Core32ProductPorts

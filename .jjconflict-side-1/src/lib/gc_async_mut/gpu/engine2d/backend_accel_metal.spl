@@ -1,0 +1,203 @@
+# Backend Acceleration: Metal Command Queue Proof
+#
+# Metal backend for Engine2D. Provides command queue, pipeline state,
+# dispatch completion, and typed unavailability for non-macOS hosts.
+#
+# Usage:
+#   use std.gc_async_mut.gpu.engine2d.backend_accel_metal.{
+#       MetalAccelPipeline, MetalAccelCommandBuffer, MetalAccelCompletion, MetalAccelBackend}
+
+# ============================================================================
+# MetalAccelPipeline
+# ============================================================================
+
+class MetalAccelPipeline:
+    pipeline_id: i64
+    function_name: text
+    thread_group_size: i64
+    is_compute: bool
+
+    static fn create_compute(pid: i64, fn_name: text) -> MetalAccelPipeline:
+        MetalAccelPipeline(
+            pipeline_id:       pid,
+            function_name:     fn_name,
+            thread_group_size: 64,
+            is_compute:        true
+        )
+
+    static fn unavailable() -> MetalAccelPipeline:
+        MetalAccelPipeline(
+            pipeline_id:       0,
+            function_name:     "",
+            thread_group_size: 0,
+            is_compute:        false
+        )
+
+    fn is_valid(self) -> bool:
+        self.pipeline_id != 0
+
+    fn thread_groups_for(self, element_count: i64) -> i64:
+        if self.thread_group_size == 0:
+            return 0
+        var groups = element_count / self.thread_group_size
+        if element_count - (groups * self.thread_group_size) > 0:
+            groups = groups + 1
+        groups
+
+    fn to_text(self) -> text:
+        "MetalAccelPipeline(id=" + self.pipeline_id.to_text() + " fn=" + self.function_name + " tgs=" + self.thread_group_size.to_text() + ")"
+
+# ============================================================================
+# MetalAccelCommandBuffer
+# ============================================================================
+
+class MetalAccelCommandBuffer:
+    cmd_id: i64
+    encoder_open: bool
+    dispatch_count: i64
+    committed: bool
+
+    static fn create(cid: i64) -> MetalAccelCommandBuffer:
+        MetalAccelCommandBuffer(
+            cmd_id:         cid,
+            encoder_open:   false,
+            dispatch_count: 0,
+            committed:      false
+        )
+
+    fn begin_encoder(self) -> MetalAccelCommandBuffer:
+        MetalAccelCommandBuffer(
+            cmd_id:         self.cmd_id,
+            encoder_open:   true,
+            dispatch_count: self.dispatch_count,
+            committed:      self.committed
+        )
+
+    fn end_encoder(self) -> MetalAccelCommandBuffer:
+        MetalAccelCommandBuffer(
+            cmd_id:         self.cmd_id,
+            encoder_open:   false,
+            dispatch_count: self.dispatch_count,
+            committed:      self.committed
+        )
+
+    fn dispatch(self, pipeline: MetalAccelPipeline, element_count: i64) -> MetalAccelCommandBuffer:
+        MetalAccelCommandBuffer(
+            cmd_id:         self.cmd_id,
+            encoder_open:   self.encoder_open,
+            dispatch_count: self.dispatch_count + pipeline.thread_groups_for(element_count),
+            committed:      self.committed
+        )
+
+    fn commit(self) -> MetalAccelCommandBuffer:
+        MetalAccelCommandBuffer(
+            cmd_id:         self.cmd_id,
+            encoder_open:   self.encoder_open,
+            dispatch_count: self.dispatch_count,
+            committed:      true
+        )
+
+    fn is_committed(self) -> bool:
+        self.committed
+
+    fn to_text(self) -> text:
+        "MetalAccelCommandBuffer(id=" + self.cmd_id.to_text() + " dispatches=" + self.dispatch_count.to_text() + " committed=" + self.committed.to_text() + ")"
+
+# ============================================================================
+# MetalAccelCompletion
+# ============================================================================
+
+class MetalAccelCompletion:
+    cmd_id: i64
+    success: bool
+    error_message: text
+    elapsed_us: i64
+
+    static fn success(cid: i64, elapsed: i64) -> MetalAccelCompletion:
+        MetalAccelCompletion(
+            cmd_id:        cid,
+            success:       true,
+            error_message: "",
+            elapsed_us:    elapsed
+        )
+
+    static fn failed(cid: i64, msg: text) -> MetalAccelCompletion:
+        MetalAccelCompletion(
+            cmd_id:        cid,
+            success:       false,
+            error_message: msg,
+            elapsed_us:    0
+        )
+
+    fn is_ok(self) -> bool:
+        self.success
+
+    fn to_text(self) -> text:
+        if self.success:
+            return "MetalAccelCompletion(ok elapsed=" + self.elapsed_us.to_text() + "us)"
+        "MetalAccelCompletion(failed: " + self.error_message + ")"
+
+# ============================================================================
+# MetalAccelBackend
+# ============================================================================
+
+class MetalAccelBackend:
+    width: i64
+    height: i64
+    initialized: bool
+    platform_available: bool
+    pipeline: MetalAccelPipeline
+    next_cmd_id: i64
+
+    static fn create(w: i64, h: i64) -> MetalAccelBackend:
+        # Platform guard: Metal is only available on macOS/iOS.
+        # On non-macOS the rt_metal_is_available() stub returns false.
+        MetalAccelBackend(
+            width:              w,
+            height:             h,
+            initialized:        false,
+            platform_available: false,
+            pipeline:           MetalAccelPipeline.unavailable(),
+            next_cmd_id:        1
+        )
+
+    fn with_platform(self, available: bool) -> MetalAccelBackend:
+        MetalAccelBackend(
+            width:              self.width,
+            height:             self.height,
+            initialized:        self.initialized,
+            platform_available: available,
+            pipeline:           self.pipeline,
+            next_cmd_id:        self.next_cmd_id
+        )
+
+    fn init(self) -> MetalAccelBackend:
+        if self.platform_available == false:
+            return self
+        MetalAccelBackend(
+            width:              self.width,
+            height:             self.height,
+            initialized:        true,
+            platform_available: self.platform_available,
+            pipeline:           MetalAccelPipeline.create_compute(2001, "engine2d_fill_kernel"),
+            next_cmd_id:        self.next_cmd_id
+        )
+
+    fn is_ready(self) -> bool:
+        self.initialized and self.platform_available and self.pipeline.is_valid()
+
+    fn make_command_buffer(self) -> MetalAccelCommandBuffer:
+        MetalAccelCommandBuffer.create(self.next_cmd_id)
+
+    fn submit(self, cmdbuf: MetalAccelCommandBuffer) -> MetalAccelCompletion:
+        if self.initialized == false:
+            return MetalAccelCompletion.failed(cmdbuf.cmd_id, "backend not initialized")
+        if cmdbuf.is_committed() == false:
+            return MetalAccelCompletion.failed(cmdbuf.cmd_id, "command buffer not committed")
+        MetalAccelCompletion.success(cmdbuf.cmd_id, 42)
+
+    fn name(self) -> text:
+        "metal-accel"
+
+    fn to_text(self) -> text:
+        "MetalAccelBackend(" + self.width.to_text() + "x" + self.height.to_text() + " platform=" + self.platform_available.to_text() + " ready=" + self.initialized.to_text() + ")"

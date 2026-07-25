@@ -1,0 +1,270 @@
+# ============================================================================
+# hardware/link_mux/dtm_route.spl — RISC-V DTM (TAP + DTMCS/DMI) over the link
+# ============================================================================
+#
+# Extends the Phase-1 IDCODE-only TAP (jtag_route.spl) into a full RISC-V Debug
+# Transport Module: a 5-bit instruction register selecting IDCODE / DTMCS / DMI
+# data registers, driven by the same OpenOCD `remote_bitbang` byte stream that
+# tunnels over CH_JTAG of the shared link.
+#
+# Register layout mirrors the VHDL so the .spl behavioural model and the RTL stay
+# consistent:
+#   * IDCODE     = 0x15350067       (jtag_tap.vhd:32; reset IR value)
+#   * IR width   = 5 bits           (jtag_tap.vhd INSN_* encodings)
+#       IDCODE = 0x01, DTMCS = 0x10, DMI = 0x11, else BYPASS
+#   * ABITS      = 7                (riscv_dtm.vhd:57 — DMI addr width)
+#   * DTMCS[31:0]= version=1[3:0], abits=7[9:4], idle=1[14:12]  (riscv_dtm.vhd)
+#   * DMI DR     = abits+34 = 41 bits: { addr[40:34], data[33:2], op[1:0] }
+#       op written: 1 = read, 2 = write ; op captured: 0 = ok (riscv_dtm.vhd:16)
+#
+# STYLE: functional free functions (state in, new state out); no `me` self
+# array-of-struct writeback (seed JIT bug). The DMI *transaction* is not serviced
+# here — on a DMI Update-DR this module only emits a `dmi_event` describing the
+# request; dm_model.spl services it against the Debug Module + hart and writes the
+# read result back into DebugTap.dmi_data for the next DMI capture. That keeps the
+# transport (here) and the DM (there) decoupled and non-circular.
+# ============================================================================
+
+use std.hardware.link_mux.jtag_route.{tap_next, cmd_clock}
+
+# remote_bitbang command bytes
+val DTM_RBB_R: i64 = 0x52        # 'R' sample TDO
+
+# TAP FSM state ids (see jtag_route.spl mapping)
+val DST_TLR: i64 = 0
+val DST_CAPTURE_DR: i64 = 3
+val DST_SHIFT_DR: i64 = 4
+val DST_UPDATE_DR: i64 = 8
+val DST_CAPTURE_IR: i64 = 10
+val DST_SHIFT_IR: i64 = 11
+val DST_UPDATE_IR: i64 = 15
+
+# IR instruction encodings (mirror jtag_tap.vhd)
+val IR_IDCODE: i64 = 0x01
+val IR_DTMCS: i64 = 0x10
+val IR_DMI: i64 = 0x11
+val IR_WIDTH: i64 = 5
+
+# RISC-V DTM constants (mirror jtag_tap.vhd / riscv_dtm.vhd)
+val DTM_IDCODE: i64 = 0x15350067
+val DTM_ABITS: i64 = 7
+val DMI_WIDTH: i64 = 41           # abits + 34
+
+# DMI op field values
+val DMI_OP_NOP: i64 = 0
+val DMI_OP_READ: i64 = 1
+val DMI_OP_WRITE: i64 = 2
+
+# dmi_event kinds emitted on a DMI Update-DR
+val DMI_EV_NONE: i64 = 0
+val DMI_EV_READ: i64 = 1
+val DMI_EV_WRITE: i64 = 2
+
+fn dtmcs_value() -> i64:
+    """DTMCS capture word: version=1, abits=7, idle=1."""
+    (1) | (DTM_ABITS << 4) | (1 << 12)
+
+fn mask_w(w: i64) -> i64:
+    (1 << w) - 1
+
+fn dr_width_for(ir: i64) -> i64:
+    """DR length selected by the current instruction."""
+    if ir == IR_DMI:
+        return DMI_WIDTH
+    if ir == IR_IDCODE or ir == IR_DTMCS:
+        return 32
+    1                              # BYPASS
+
+fn dmi_dr_pack(op: i64, addr: i64, data: i64) -> i64:
+    """Assemble a 41-bit DMI DR value: { addr[40:34], data[33:2], op[1:0] }."""
+    ((addr & mask_w(DTM_ABITS)) << 34) | ((data & 0xFFFFFFFF) << 2) | (op & 3)
+
+# ---------------------------------------------------------------------------
+# DebugTap — TAP FSM + IR + selected DR + DTM persistent DMI register.
+# dmi_addr/dmi_data/dmi_stat hold the DTM's addr/read-data/op-status shown on the
+# next DMI capture; dm_model.spl updates dmi_data/dmi_stat after servicing a read.
+# ---------------------------------------------------------------------------
+struct DebugTap:
+    fsm: i64
+    prev_tck: i64
+    ir: i64             # current instruction (reset = IDCODE)
+    ir_sr: i64          # 5-bit IR shift register
+    dr: i64             # selected DR shift register (up to 41 bits)
+    dmi_addr: i64       # DTM: last DMI address
+    dmi_data: i64       # DTM: last DMI read data (serviced by the DM)
+    dmi_stat: i64       # DTM: last DMI op status (0 = ok)
+
+fn debug_tap_create() -> DebugTap:
+    DebugTap(fsm: DST_TLR, prev_tck: 0, ir: IR_IDCODE, ir_sr: 0, dr: 0,
+        dmi_addr: 0, dmi_data: 0, dmi_stat: 0)
+
+# One bitbang byte applied to the TAP+DTM. Returns the new tap, a sampled TDO bit
+# (-1 when the byte was not an 'R' sample), and a DMI request event (if any).
+struct TapDtmStep:
+    tap: DebugTap
+    tdo: i64            # -1 not-a-sample, else 0/1
+    event: i64         # DMI_EV_*
+    ev_addr: i64
+    ev_wdata: i64
+
+fn tap_dtm_apply(tap: DebugTap, b: i64) -> TapDtmStep:
+    # TDO sample request
+    if b == DTM_RBB_R:
+        var tdo = 0
+        if tap.fsm == DST_SHIFT_DR:
+            tdo = tap.dr & 1
+        elif tap.fsm == DST_SHIFT_IR:
+            tdo = tap.ir_sr & 1
+        return TapDtmStep(tap: tap, tdo: tdo, event: DMI_EV_NONE, ev_addr: 0, ev_wdata: 0)
+
+    # clock byte '0'..'7' = {tck,tms,tdi}
+    if b >= 0x30 and b <= 0x37:
+        val v = b - 0x30
+        val tck = (v >> 2) & 1
+        val tms = (v >> 1) & 1
+        val tdi = v & 1
+        var t = tap
+        if tck == 1 and tap.prev_tck == 0:
+            # rising edge: shift the selected register first, then advance
+            if t.fsm == DST_SHIFT_DR:
+                val w = dr_width_for(t.ir)
+                t.dr = ((t.dr >> 1) | (tdi << (w - 1))) & mask_w(w)
+            elif t.fsm == DST_SHIFT_IR:
+                t.ir_sr = ((t.ir_sr >> 1) | (tdi << (IR_WIDTH - 1))) & mask_w(IR_WIDTH)
+            val nf = tap_next(t.fsm, tms)
+            t.fsm = nf
+            var ev = DMI_EV_NONE
+            var ev_addr = 0
+            var ev_wdata = 0
+            if nf == DST_TLR:
+                t.ir = IR_IDCODE                 # TLR resets IR to IDCODE
+            elif nf == DST_CAPTURE_IR:
+                t.ir_sr = IR_IDCODE              # mandatory "...01" capture
+            elif nf == DST_UPDATE_IR:
+                t.ir = t.ir_sr & mask_w(IR_WIDTH)
+            elif nf == DST_CAPTURE_DR:
+                if t.ir == IR_IDCODE:
+                    t.dr = DTM_IDCODE & 0xFFFFFFFF
+                elif t.ir == IR_DTMCS:
+                    t.dr = dtmcs_value() & 0xFFFFFFFF
+                elif t.ir == IR_DMI:
+                    t.dr = dmi_dr_pack(t.dmi_stat, t.dmi_addr, t.dmi_data)
+                else:
+                    t.dr = 0                     # BYPASS captures 0
+            elif nf == DST_UPDATE_DR:
+                if t.ir == IR_DMI:
+                    val op = t.dr & 3
+                    val addr = (t.dr >> 34) & mask_w(DTM_ABITS)
+                    val data = (t.dr >> 2) & 0xFFFFFFFF
+                    if op == DMI_OP_READ:
+                        ev = DMI_EV_READ
+                        ev_addr = addr
+                        t.dmi_addr = addr
+                    elif op == DMI_OP_WRITE:
+                        ev = DMI_EV_WRITE
+                        ev_addr = addr
+                        ev_wdata = data
+                        t.dmi_addr = addr
+                # DTMCS update (dmireset/dmihardreset) clears sticky status
+                if t.ir == IR_DTMCS:
+                    t.dmi_stat = 0
+            t.prev_tck = tck
+            return TapDtmStep(tap: t, tdo: 0 - 1, event: ev, ev_addr: ev_addr, ev_wdata: ev_wdata)
+        t.prev_tck = tck
+        return TapDtmStep(tap: t, tdo: 0 - 1, event: DMI_EV_NONE, ev_addr: 0, ev_wdata: 0)
+
+    # unknown byte: ignore
+    TapDtmStep(tap: tap, tdo: 0 - 1, event: DMI_EV_NONE, ev_addr: 0, ev_wdata: 0)
+
+# ---------------------------------------------------------------------------
+# Host-side remote_bitbang command builders (produce byte streams for CH_JTAG).
+# ---------------------------------------------------------------------------
+fn append_all(dst: [u8], src: [u8]) -> [u8]:
+    var out = dst
+    var i = 0
+    while i < src.len():
+        out.push(src[i])
+        i = i + 1
+    out
+
+fn cmds_reset() -> [u8]:
+    """5x TMS=1 -> Test-Logic-Reset, then TMS=0 -> Run-Test/Idle."""
+    var c: [u8] = []
+    var r = 0
+    while r < 5:
+        c = append_all(c, cmd_clock(1, 0))
+        r = r + 1
+    c = append_all(c, cmd_clock(0, 0))          # RTI
+    c
+
+fn cmds_shift_ir(ir: i64) -> [u8]:
+    """From RTI: load the 5-bit IR, end back in RTI."""
+    var c: [u8] = []
+    c = append_all(c, cmd_clock(1, 0))          # SELECT_DR
+    c = append_all(c, cmd_clock(1, 0))          # SELECT_IR
+    c = append_all(c, cmd_clock(0, 0))          # CAPTURE_IR
+    c = append_all(c, cmd_clock(0, 0))          # SHIFT_IR
+    var i = 0
+    while i < IR_WIDTH:
+        var tms = 0
+        if i == IR_WIDTH - 1:
+            tms = 1                              # last bit exits SHIFT_IR
+        c = append_all(c, cmd_clock(tms, (ir >> i) & 1))
+        i = i + 1
+    c = append_all(c, cmd_clock(1, 0))          # UPDATE_IR
+    c = append_all(c, cmd_clock(0, 0))          # RTI
+    c
+
+fn cmds_dr_write(value: i64, width: i64) -> [u8]:
+    """From RTI: shift `width` bits (LSB-first) into the selected DR, Update-DR,
+    end back in RTI."""
+    var c: [u8] = []
+    c = append_all(c, cmd_clock(1, 0))          # SELECT_DR
+    c = append_all(c, cmd_clock(0, 0))          # CAPTURE_DR
+    c = append_all(c, cmd_clock(0, 0))          # SHIFT_DR
+    var i = 0
+    while i < width:
+        var tms = 0
+        if i == width - 1:
+            tms = 1
+        c = append_all(c, cmd_clock(tms, (value >> i) & 1))
+        i = i + 1
+    c = append_all(c, cmd_clock(1, 0))          # UPDATE_DR
+    c = append_all(c, cmd_clock(0, 0))          # RTI
+    c
+
+fn cmds_dr_read(width: i64) -> [u8]:
+    """From RTI: sample `width` DR bits (LSB-first) shifting in zeros (nop),
+    Update-DR, end back in RTI."""
+    var c: [u8] = []
+    c = append_all(c, cmd_clock(1, 0))          # SELECT_DR
+    c = append_all(c, cmd_clock(0, 0))          # CAPTURE_DR
+    c = append_all(c, cmd_clock(0, 0))          # SHIFT_DR
+    var i = 0
+    while i < width:
+        c.push(DTM_RBB_R.to_u8())               # sample TDO (bit i)
+        var tms = 0
+        if i == width - 1:
+            tms = 1
+        c = append_all(c, cmd_clock(tms, 0))
+        i = i + 1
+    c = append_all(c, cmd_clock(1, 0))          # UPDATE_DR
+    c = append_all(c, cmd_clock(0, 0))          # RTI
+    c
+
+fn decode_bits(replies: [u8], width: i64) -> i64:
+    """Assemble the first `width` '0'/'1' reply bytes LSB-first into a value."""
+    var out = 0
+    var i = 0
+    while i < replies.len() and i < width:
+        if (replies[i].to_i64() & 0xFF) == 0x31:
+            out = out | (1 << i)
+        i = i + 1
+    out
+
+fn dmi_extract_data(dr_val: i64) -> i64:
+    """data[33:2] of a shifted-out DMI DR."""
+    (dr_val >> 2) & 0xFFFFFFFF
+
+fn dmi_extract_op(dr_val: i64) -> i64:
+    dr_val & 3

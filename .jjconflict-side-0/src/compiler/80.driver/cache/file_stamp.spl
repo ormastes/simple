@@ -1,0 +1,113 @@
+# File Stamp Index — hybrid size+mtime stamp over SHA-256 content identity
+#
+# Phase 1 of the Option-C global cache plan: standalone module, NOT wired
+# into any load path yet. Mirrors the Lean model
+# (src/verification/cache_identity/src/CacheIdentity/Model.lean — FileStamp /
+# StampValid): a stamp is valid exactly when its recorded SHA still matches
+# the file's bytes. Mode C's fast path trusts a size+mtime-valid stamp;
+# mode A (strict) always recomputes and cross-checks the recorded SHA —
+# divergence is counted and recorded, never hidden.
+#
+# Plan: doc/03_plan/compiler/cache/global_cas_interpreter_cache_option_c_plan_2026-07-24.md
+#
+# mtime granularity: rt_file_stat returns mtime in whole SECONDS (see
+# runtime_sffi.rs "path_ptr, path_len -> i64 (mtime seconds)"), hence the
+# field is named mtime_s. A same-size rewrite within the same second is the
+# known stamp ceiling — exactly what strict mode exists to catch.
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_size(path: text) -> i64
+extern fn rt_file_stat(path: text) -> i64
+extern fn rt_file_hash_sha256(path: text) -> text
+
+# ============================================================================
+# Stamp
+# ============================================================================
+
+struct FileStamp:
+    """size+mtime identity of a file plus the SHA-256 recorded when stamped."""
+    path: text
+    size: i64
+    mtime_s: i64        # mtime in whole seconds (rt_file_stat granularity)
+    content_sha: text   # SHA-256 hex of the bytes at stamp time
+
+fn file_stamp_take(path: text) -> FileStamp?:
+    """Stat + SHA-256 `path` into a stamp. nil when the file does not exist."""
+    if not rt_file_exists(path):
+        return nil
+    _file_stamp_measure(path)
+
+fn file_stamp_check(stamp: FileStamp) -> bool:
+    """Fast path: true iff current size+mtime match the stamp. No read, no hash."""
+    if not rt_file_exists(stamp.path):
+        return false
+    (rt_file_size(stamp.path) == stamp.size and
+     rt_file_stat(stamp.path) == stamp.mtime_s)
+
+fn _file_stamp_measure(path: text) -> FileStamp?:
+    """Option-C torn-read guard: stat before read, hash, stat after; retry
+    once when size/mtime changed mid-read; accept the retry's measurement."""
+    var attempt = 0
+    while attempt < 2:
+        val size_before = rt_file_size(path)
+        val mtime_before = rt_file_stat(path)
+        val sha = rt_file_hash_sha256(path)
+        val size_after = rt_file_size(path)
+        val mtime_after = rt_file_stat(path)
+        if (size_before == size_after and
+            mtime_before == mtime_after):
+            return Some(FileStamp(path: path, size: size_after,
+                                  mtime_s: mtime_after, content_sha: sha))
+        attempt = attempt + 1
+    # Still torn after the retry: hash once more and pair the result with the
+    # post-hash identity — coherent-enough best effort for a file being
+    # rewritten under us.
+    val sha_final = rt_file_hash_sha256(path)
+    Some(FileStamp(path: path, size: rt_file_size(path),
+                   mtime_s: rt_file_stat(path), content_sha: sha_final))
+
+# ============================================================================
+# Stamp index (value type — functions return the updated index)
+# ============================================================================
+
+struct StampIndex:
+    """Path -> stamp map with observability counters."""
+    stamps: {text: FileStamp}
+    hits: i64             # stamp-valid fast-path reuses (no hash)
+    rehashes: i64         # full content hashes performed
+    divergences: i64      # strict-mode recorded-sha != fresh-sha events
+    divergent_paths: [text]
+
+fn stamp_index_new() -> StampIndex:
+    StampIndex(stamps: {}, hits: 0, rehashes: 0, divergences: 0,
+               divergent_paths: [])
+
+fn file_sha_via_stamp(index: StampIndex, path: text, strict: bool) -> (text, StampIndex, bool):
+    """C/A bridge. Returns (sha, updated index, reused).
+
+    Non-strict (mode C): a size+mtime-valid stamp answers from its recorded
+    SHA without reading the file (reused=true). Otherwise rehash with the
+    torn-read guard, store the fresh stamp, reused=false.
+
+    Strict (mode A): ALWAYS rehash; when a stamp exists and its recorded SHA
+    differs from the fresh SHA, count the divergence and record the path so
+    callers can surface it. Missing file -> ("", index, false)."""
+    var idx = index
+    if not rt_file_exists(path):
+        return ("", idx, false)
+    val has_stamp = idx.stamps.contains_key(path)
+    if not strict and has_stamp:
+        val recorded: FileStamp = idx.stamps[path]
+        if file_stamp_check(recorded):
+            idx.hits = idx.hits + 1
+            return (recorded.content_sha, idx, true)
+    if val fresh = _file_stamp_measure(path):
+        idx.rehashes = idx.rehashes + 1
+        if strict and has_stamp:
+            val recorded: FileStamp = idx.stamps[path]
+            if recorded.content_sha != fresh.content_sha:
+                idx.divergences = idx.divergences + 1
+                idx.divergent_paths = idx.divergent_paths.push(path)
+        idx.stamps[path] = fresh
+        return (fresh.content_sha, idx, false)
+    ("", idx, false)

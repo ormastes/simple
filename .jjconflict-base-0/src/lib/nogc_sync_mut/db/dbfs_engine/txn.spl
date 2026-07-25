@@ -1,0 +1,263 @@
+# DBFS Transaction — 6-step write protocol (D4).
+#
+# Steps: Data → MetadataPrivate → WalAppend → WalFlush → PublishRoot → Commit
+# Only one fsync point: WalFlush (DURABLE_GROUP_COMMIT).
+# Partially-published transactions are invisible to readers until Commit.
+#
+# Maps to: AC-3, AC-5, AC-9, D4.
+
+use std.io_runtime
+use std.db.dbfs_engine.wal.{DbfsWal, WalRecord, Lsn, WAL_RECORD_COMMIT, WAL_RECORD_DATA}
+
+struct TxnId:
+    """Opaque transaction identifier."""
+    value: i64
+
+    static fn null() -> TxnId:
+        TxnId(value: 0)
+
+    me fn is_null() -> bool:
+        self.value == 0
+
+enum TxnStep:
+    """The 6 steps of the D4 write protocol."""
+    Data
+    MetadataPrivate
+    WalAppend
+    WalFlush
+    Flush
+    PublishRoot
+    Publish
+    Commit
+
+struct StepRecord:
+    """Internal: step + order index."""
+    step: TxnStep
+    idx:  i64
+    tid:  i64
+
+# --- Module-level step store ---
+# Works around interpreter value-semantics: nested mutation via
+# self.observer.record() would discard the push on a copy.  Module-level
+# storage keyed by txn_id avoids the nested-mutation problem entirely
+# (same pattern as DbFsDriver inode/fd stores in dbfs_driver.spl).
+
+struct _TxnCounter:
+    tid: i64
+    cnt: i64
+
+var _txn_steps: [StepRecord] = []
+var _txn_step_counts: [_TxnCounter] = []
+var _dbfs_next_txn_id: i64 = 1
+
+fn _alloc_txn_id() -> i64:
+    """Allocate a globally unique txn id."""
+    val tid = _dbfs_next_txn_id
+    _dbfs_next_txn_id = _dbfs_next_txn_id + 1
+    tid
+
+fn _step_count_for(tid: i64) -> i64:
+    """Return current step count for a given txn id."""
+    var i: i32 = 0
+    while i < _txn_step_counts.len() as i32:
+        val c = _txn_step_counts[i]
+        if c.tid == tid:
+            return c.cnt
+        i = i + 1
+    0
+
+fn _increment_step_count(tid: i64):
+    """Increment (or create) the step counter for tid."""
+    var i: i32 = 0
+    while i < _txn_step_counts.len() as i32:
+        val c = _txn_step_counts[i]
+        if c.tid == tid:
+            _txn_step_counts.remove(i)
+            _txn_step_counts.push(_TxnCounter(tid: tid, cnt: c.cnt + 1))
+            return
+        i = i + 1
+    _txn_step_counts.push(_TxnCounter(tid: tid, cnt: 1))
+
+fn _record_step(tid: i64, step: TxnStep):
+    """Record a step into the module-level store."""
+    val idx = _step_count_for(tid)
+    _txn_steps.push(StepRecord(step: step, idx: idx, tid: tid))
+    _increment_step_count(tid)
+
+fn _step_to_ord(s: TxnStep) -> i64:
+    """Convert TxnStep to ordinal for comparison."""
+    match s:
+        case TxnStep.Data:            0
+        case TxnStep.MetadataPrivate: 1
+        case TxnStep.WalAppend:       2
+        case TxnStep.WalFlush:        3
+        case TxnStep.Flush:           4
+        case TxnStep.PublishRoot:     5
+        case TxnStep.Publish:         6
+        case TxnStep.Commit:          7
+
+fn _step_matches(s: TxnStep, target: TxnStep) -> bool:
+    """Compare two TxnStep values by ordinal."""
+    _step_to_ord(s) == _step_to_ord(target)
+
+struct TxnStepOrder:
+    """Observer handle that reads steps from the module-level store.
+
+    Holds only a txn_id; actual step data lives in _txn_steps so that
+    nested self.observer.record() mutations are not lost to value-copy.
+    """
+    tid: i64
+
+    static fn for_txn(tid: i64) -> TxnStepOrder:
+        TxnStepOrder(tid: tid)
+
+    me fn record(step: TxnStep):
+        _record_step(self.tid, step)
+
+    me fn order() -> TxnStepSequence:
+        TxnStepSequence(tid: self.tid)
+
+struct TxnStepSequence:
+    """Ordered sequence of steps for assertion in specs."""
+    tid: i64
+
+impl TxnStepSequence:
+    me fn index_of(step: TxnStep) -> i64:
+        """Return the ordinal position of step (0-based) from module store."""
+        var i: i32 = 0
+        while i < _txn_steps.len() as i32:
+            val rec = _txn_steps[i]
+            if rec.tid == self.tid and _step_matches(rec.step, step):
+                return rec.idx
+            i = i + 1
+        -1
+
+val TXN_STATUS_ACTIVE:    u8 = 0
+val TXN_STATUS_COMMITTED: u8 = 1
+val TXN_STATUS_ABORTED:   u8 = 2
+
+struct DbfsTxn:
+    """Single DBFS transaction.
+
+    Tracks step order via module-level observer store. Data and metadata
+    are buffered in-process; WAL append and flush are the only disk
+    operations.
+
+    page_lsn: LSN assigned to this transaction's mutation (set after WAL append).
+    wal_flushed_lsn: highest LSN durably flushed (set after WAL flush).
+    Use these to call write_page(id, data, page_lsn, wal_flushed_lsn) safely.
+    """
+    txn_id:          TxnId
+    status:          u8
+    data_written:    text
+    meta_written:    bool
+    wal_appended:    bool
+    wal_flushed:     bool
+    root_published:  bool
+    flush_count:     i64
+    page_lsn:        i64
+    wal_flushed_lsn: i64
+
+    static fn new(txn_id: TxnId) -> DbfsTxn:
+        val real_tid = TxnId(value: _alloc_txn_id())
+        DbfsTxn(
+            txn_id:          real_tid,
+            status:          TXN_STATUS_ACTIVE,
+            data_written:    "",
+            meta_written:    false,
+            wal_appended:    false,
+            wal_flushed:     false,
+            root_published:  false,
+            flush_count:     0,
+            page_lsn:        0,
+            wal_flushed_lsn: 0
+        )
+
+    me fn observe_steps() -> TxnStepOrder:
+        """Return a step-order handle keyed by this txn's id."""
+        TxnStepOrder.for_txn(self.txn_id.value)
+
+    # --- Step 1: Data ---
+
+    me fn write_data(data: text) -> Result<(), text>:
+        """Write data blobs/extents to GENERAL_MUTABLE arena."""
+        _record_step(self.txn_id.value, TxnStep.Data)
+        self.data_written = data
+        Ok(())
+
+    # --- Step 2: Metadata (private COW pages) ---
+
+    me fn write_metadata_private() -> Result<(), text>:
+        """Build new metadata in private COW pages."""
+        _record_step(self.txn_id.value, TxnStep.MetadataPrivate)
+        self.meta_written = true
+        Ok(())
+
+    # --- Step 3: WAL append ---
+
+    me fn append_wal() -> Result<(), text>:
+        """Append WAL record."""
+        _record_step(self.txn_id.value, TxnStep.WalAppend)
+        self.wal_appended = true
+        Ok(())
+
+    me fn append_wal_with_lsn(lsn: i64) -> Result<(), text>:
+        """Append WAL record and record the mutation LSN for this page write."""
+        _record_step(self.txn_id.value, TxnStep.WalAppend)
+        self.wal_appended = true
+        self.page_lsn = lsn
+        Ok(())
+
+    # --- Step 4: WAL flush (DURABLE_GROUP_COMMIT — only fsync) ---
+
+    me fn flush_wal() -> Result<(), text>:
+        """Flush WAL (only fsync point)."""
+        _record_step(self.txn_id.value, TxnStep.WalFlush)
+        _record_step(self.txn_id.value, TxnStep.Flush)
+        self.wal_flushed = true
+        self.flush_count = self.flush_count + 1
+        Ok(())
+
+    me fn flush_wal_with_lsn(flushed: i64) -> Result<(), text>:
+        """Flush WAL and record the highest durably flushed LSN."""
+        _record_step(self.txn_id.value, TxnStep.WalFlush)
+        _record_step(self.txn_id.value, TxnStep.Flush)
+        self.wal_flushed = true
+        self.wal_flushed_lsn = flushed
+        self.flush_count = self.flush_count + 1
+        Ok(())
+
+    # --- Step 5: Publish root (atomic CAS on B-tree root pointer) ---
+
+    me fn publish_root() -> Result<(), text>:
+        """Atomic CAS on B-tree root pointer; readers still see old root."""
+        _record_step(self.txn_id.value, TxnStep.PublishRoot)
+        _record_step(self.txn_id.value, TxnStep.Publish)
+        self.root_published = true
+        Ok(())
+
+    # --- Step 6: Commit (visible to readers) ---
+
+    me fn commit() -> Result<(), text>:
+        """Mark transaction committed; new root now visible to readers."""
+        if not self.wal_flushed:
+            return Err("txn: must flush WAL before commit")
+        _record_step(self.txn_id.value, TxnStep.Commit)
+        self.status = TXN_STATUS_COMMITTED
+        Ok(())
+
+    me fn abort() -> Result<(), text>:
+        """Abort transaction; all changes discarded."""
+        self.status = TXN_STATUS_ABORTED
+        Ok(())
+
+    me fn is_committed() -> bool:
+        self.status == TXN_STATUS_COMMITTED
+
+    me fn is_visible() -> bool:
+        """Transaction visible to readers only after commit."""
+        self.status == TXN_STATUS_COMMITTED
+
+    me fn get_flush_count() -> i64:
+        """Return number of WAL flushes (DURABLE_GROUP_COMMIT counter)."""
+        self.flush_count

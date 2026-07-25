@@ -1,0 +1,82 @@
+"""
+# Claude Full AgentsMenu Component
+
+Checks modeled open-close state, selection, filtering, action summaries, and source helpers.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.components.agents.AgentsMenu.{AgentsMenuItem, AgentsMenuState, AgentsMenuModel, sampleAgentsMenuItems, createAgentsMenu, openAgentsMenu, visibleAgentsMenuItems, filterAgentsMenuItems, sortAgentsMenuItems, findAgentsMenuItemById, selectNextAgentsMenuItem, selectPreviousAgentsMenuItem, renderAgentsMenu, agentsMenuActionSummary, agentsMenuSourceDisplayName, agentsMenuSourceOptions, agentsMenuModeledSourceFile, agentsMenuModeledSourceHelper, agentsMenuModeledMenuHook, agentsMenuModeledActionCount, agentsMenuSourceLinesModeled}
+
+describe "Claude full AgentsMenu component":
+    it "opens closes toggles and normalizes selection":
+        step("Create closed menu and open it")
+        val items = sampleAgentsMenuItems()
+        val closed = createAgentsMenu(items)
+        expect(closed.state.isOpen).to_equal(false)
+        expect(closed.render()).to_equal("Agents menu closed")
+
+        val opened = closed.open()
+        expect(opened.state.isOpen).to_equal(true)
+        expect(opened.state.selectedId).to_equal("docs")
+        expect(opened.state.lastAction).to_equal("open")
+        expect(opened.close().state.isOpen).to_equal(false)
+        expect(opened.toggle().state.isOpen).to_equal(false)
+        expect(closed.toggle().state.isOpen).to_equal(true)
+
+    it "filters by query and source":
+        step("Search matches description, tools, and source filters")
+        val items = sampleAgentsMenuItems()
+        expect(filterAgentsMenuItems(items, "test plans", "user").len()).to_equal(1)
+        expect(filterAgentsMenuItems(items, "Write", "builtin")[0].id).to_equal("docs")
+        expect(filterAgentsMenuItems(items, "sonnet", "all").len()).to_equal(2)
+
+        val model = openAgentsMenu(items).filter("release", "built-in")
+        val visible = model.visibleItems()
+        expect(visible.len()).to_equal(1)
+        expect(visible[0].name).to_equal("Docs")
+        expect(model.state.selectedId).to_equal("docs")
+
+    it "sorts and moves selection with wrapping":
+        step("Sort by name/id and select next previous")
+        val items = [
+            AgentsMenuItem.new("z", "Zeta", "last", "project", "sonnet", true, []),
+            AgentsMenuItem.new("a", "Alpha", "first", "user", "haiku", true, []),
+            AgentsMenuItem.new("m", "Middle", "middle", "builtin", "sonnet", false, [])
+        ]
+        val sorted = sortAgentsMenuItems(items)
+        expect(sorted[0].id).to_equal("a")
+        expect(sorted[1].id).to_equal("m")
+        expect(sorted[2].id).to_equal("z")
+        val state = AgentsMenuState.new(true, "", "all", "m", "")
+        expect(selectNextAgentsMenuItem(items, state).selectedId).to_equal("z")
+        expect(selectPreviousAgentsMenuItem(items, state).selectedId).to_equal("a")
+        expect(findAgentsMenuItemById(items, "missing")).to_be_nil()
+
+    it "renders menu rows empty states and action summaries":
+        step("Render selected row and action text")
+        val items = sampleAgentsMenuItems()
+        val opened = openAgentsMenu(items).select("review")
+        val output = opened.render()
+        expect(output).to_contain("Agents menu 3/3")
+        expect(output).to_contain("> Review [Project] enabled")
+        expect(output).to_contain("sonnet")
+        expect(opened.actionSummary()).to_equal("select review | run enabled | edit enabled")
+        expect(agentsMenuActionSummary(items[2])).to_equal("select docs | run disabled | edit enabled")
+
+        val empty = renderAgentsMenu(items, AgentsMenuState.new(true, "missing", "project", "", "filter"))
+        expect(empty).to_contain("No agents match search \"missing\" and source Project")
+        expect(renderAgentsMenu([], AgentsMenuState.new(true, "", "all", "", "open"))).to_equal("No agents configured")
+
+    it "exports source helper parity":
+        step("Pin source labels and upstream helper names")
+        expect(agentsMenuSourceDisplayName("built-in")).to_equal("Built-in")
+        expect(agentsMenuSourceDisplayName("project")).to_equal("Project")
+        expect(agentsMenuSourceOptions()).to_contain("all")
+        expect(agentsMenuSourceOptions()).to_contain("project")
+        expect(agentsMenuSourceOptions()).to_contain("user")
+        expect(agentsMenuSourceOptions()).to_contain("builtin")
+        expect(agentsMenuModeledSourceFile()).to_equal("src/components/agents/AgentsMenu.tsx")
+        expect(agentsMenuModeledSourceHelper()).to_equal("getAgentDefinitionsWithOverrides")
+        expect(agentsMenuModeledMenuHook()).to_equal("useAgentsMenu")
+        expect(agentsMenuModeledActionCount()).to_equal(3)
+        expect(agentsMenuSourceLinesModeled()).to_equal(799)

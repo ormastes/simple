@@ -1,0 +1,129 @@
+# Regression for doc/08_tracking/bug/mir_runtime_call_origin_ambiguity_2026-07-17.md:
+# MIR represents a source-level named call and a compiler-synthesized
+# runtime-helper call with the same string-shaped callee operand. A module
+# that BOTH defines a local `rt_array_new`/`rt_array_push` AND builds a
+# function-valued array literal (which lowers to a hardcoded
+# `rt_array_new`/`rt_array_push` call, see aggregate_intrinsics.spl) needs
+# both interpretations to coexist: the explicit source call must reach the
+# local body, while the array-literal allocation must reach the real
+# runtime. Before the fix this collided into a single, type-conflicting
+# LLVM global (`declare ptr @rt_array_new(i64)` vs a locally-defined
+# `define i64 @rt_array_new(...)` for the fixture's own body) -- invalid
+# IR that `llc` would reject outright.
+#
+# See test/fixtures/compiler/native_runtime_generic_call_origin_collision_repro.spl
+# for the source-level repro this mirrors at the MIR level (native-build's
+# CLI path could not be exercised in the session that authored this fix --
+# unrelated pre-existing breakage; this spec drives the same LLVM backend
+# module (compiler.backend.MirToLlvm) directly).
+#
+# Does NOT cover `.push()`/`.map()`/`.filter()` -- those emit an ORDINARY
+# MirInstKind.Call, byte-identical in shape to a genuine source call, so
+# they still collide with a same-named local body. Closing that gap was
+# attempted (a reserved marker prefix at the four compiler-generated
+# construction sites) and reverted: the marker is emitted into MIR every
+# backend consumes, but only LLVM/Cranelift were taught to strip it,
+# which would have broken ordinary `.push()` on the interpreter/C/native
+# backends. See mir_call_ownership.spl's "KNOWN OPEN GAP" note.
+
+use compiler.backend.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.*
+
+fn i64t() -> MirType:
+    MirType.i64()
+
+fn mk_fn(sym: i64, name: text, params: [MirType], locals: [MirLocal], insts: [MirInst], ret: MirOperand?) -> MirFunction:
+    MirFunction(
+        symbol: SymbolId(id: sym),
+        name: name,
+        signature: MirSignature(params: params, return_type: i64t(), is_variadic: false),
+        locals: locals,
+        blocks: [MirBlock(id: BlockId.entry(), label: Some("entry"), instructions: insts, terminator: MirTerminator.Ret(ret))],
+        entry_block: BlockId.entry(),
+        span: Span.empty(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: false,
+        gpu_target: "",
+        gpu_backend_order: "",
+        is_export_c: false,
+        export_name: "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false
+    )
+
+fn arg_local(id: i64, index: i64) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: Some("a{id}"), type_: i64t(), kind: LocalKind.Arg(index), is_ghost: false)
+
+fn temp_local(id: i64) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: Some("t{id}"), type_: i64t(), kind: LocalKind.Temp, is_ghost: false)
+
+fn const_ret_fn(sym: i64, name: text, params: [MirType], param_locals: [MirLocal], ret_id: i64, ret_value: i64) -> MirFunction:
+    val insts: [MirInst] = [MirInst(kind: MirInstKind.Const(LocalId(id: ret_id), MirConstValue.Int(ret_value), i64t()), span: nil)]
+    mk_fn(sym, name, params, param_locals.push(temp_local(ret_id)), insts, Some(mir_operand_copy(LocalId(id: ret_id))))
+
+fn func_ref(name: text, nparams: i64) -> MirOperand:
+    var ps: [MirType] = []
+    var i = 0
+    while i < nparams:
+        ps = ps.push(i64t())
+        i = i + 1
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(name), MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: ps, return_type: i64t(), is_variadic: false)))))
+
+fn int_arg(v: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(v), i64t()))
+
+fn build_module() -> MirModule:
+    # Local bodies whose bare names collide with the compiler-owned
+    # rt_array_new/rt_array_push runtime helpers.
+    val local_new = const_ret_fn(1, "rt_array_new", [i64t()], [arg_local(0, 0)], 1, 99)
+    val local_push = const_ret_fn(2, "rt_array_push", [i64t(), i64t()], [arg_local(0, 0), arg_local(1, 1)], 2, 98)
+
+    # main:
+    #   %l10 = rt_array_new(0)            -- ordinary SOURCE call
+    #   %l11 = Aggregate(Array, [7, 8])   -- array-literal lowering (hardcoded
+    #                                        runtime call, outside Call/MirOperand)
+    val dest = LocalId(id: 10)
+    val call = MirInst(kind: MirInstKind.Call(Some(dest), func_ref("rt_array_new", 1), [int_arg(0)]), span: nil)
+    val agg_dest = LocalId(id: 11)
+    val agg = MirInst(kind: MirInstKind.Aggregate(agg_dest, AggregateKind.Array(i64t()), [int_arg(7), int_arg(8)]), span: nil)
+    val main_fn = mk_fn(3, "main", [], [temp_local(10), temp_local(11)], [call, agg], Some(mir_operand_copy(dest)))
+
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[local_new.symbol] = local_new
+    functions[local_push.symbol] = local_push
+    functions[main_fn.symbol] = main_fn
+    MirModule(name: "test.llvm.runtime_call_origin", functions: functions, statics: {}, constants: {}, types: {})
+
+describe "LLVM runtime call origin (rt_array_new/rt_array_push collision)":
+    it "keeps the static runtime declare unambiguous by mangling the colliding local body":
+        val translator = MirToLlvm.create("test.llvm.runtime_call_origin", CodegenTarget.X86_64, nil)
+        val output = translator.translate_module(build_module())
+        expect(output).to_contain("declare ptr @rt_array_new(i64)")
+        expect(output).to_contain("declare i8 @rt_array_push(ptr, i64)")
+        expect(output.contains("define i64 @rt_array_new(")).to_equal(false)
+        expect(output.contains("define i64 @rt_array_push(")).to_equal(false)
+        expect(output).to_contain("define i64 @__simple_local_rt_array_new(")
+        expect(output).to_contain("define i64 @__simple_local_rt_array_push(")
+
+    it "resolves an ordinary source call to the mangled local body, not the runtime import":
+        val translator = MirToLlvm.create("test.llvm.runtime_call_origin", CodegenTarget.X86_64, nil)
+        val output = translator.translate_module(build_module())
+        expect(output).to_contain("call i64 @__simple_local_rt_array_new(i64 0)")
+
+    it "keeps the array-literal lowering on the real runtime symbol despite the collision":
+        val translator = MirToLlvm.create("test.llvm.runtime_call_origin", CodegenTarget.X86_64, nil)
+        val output = translator.translate_module(build_module())
+        expect(output).to_contain("call ptr @rt_array_new(i64 2)")
+        expect(output).to_contain("call i8 @rt_array_push(ptr")

@@ -1,0 +1,86 @@
+# # `simple fmt` / `simple doc-coverage` CLI Contract (pure-Simple, seed-only)
+#
+# System-level contract test for the two runnable pure-Simple entry points
+# established 2026-07-17 while the whole-compiler self-hosted redeploy is
+# blocked (see
+# doc/08_tracking/bug/host_toolchain_seed_pinned_lint_fmt_doccov_unrunnable_2026-07-17.md):
+#
+#   - fmt:          src/compiler/90.tools/formatter/main.spl
+#                   (module compiler.tools.formatter), run directly as
+#                   `<seed> run <entry.spl> <file> [--check|--write|--diff]`
+#                   -- NOT `<seed> fmt ...`, which the seed's own top-level
+#                   subcommand routing fails closed on
+#                   ("rt_cli_run_fmt is not supported in interpreter mode").
+#   - doc-coverage: src/app/stats/doc_coverage_dynamic.spl
+#                   (module app.stats.doc_coverage_dynamic), run directly as
+#                   `<seed> run <entry.spl> <path> [--missing|--format=...]`
+#                   -- NOT `<seed> doc-coverage ...`, which the seed treats
+#                   as an unknown subcommand (script-path lookup failure).
+#
+# Uses app.io.cli_ops._cli_process_run (a pub facade, not a raw rt_* extern)
+# to spawn the seed as a subprocess, matching test/03_system/app/
+# lint_cli_contract_spec.spl's established pattern (process_run from
+# app.io.mod taints the *whole spec file's own* exit code under the seed
+# interpreter -- see the bug doc above).
+
+use app.io.cli_ops.{_cli_process_run}
+
+val SIMPLE_SEED = "src/compiler_rust/target/release/simple"
+val FMT_ENTRY = "src/compiler/90.tools/formatter/main.spl"
+val DOC_COVERAGE_ENTRY = "src/app/stats/doc_coverage_dynamic.spl"
+val FMT_FIXTURE = "test/fixtures/fmt/unformatted.spl"
+val DOC_COVERAGE_FIXTURE_DIR = "test/fixtures/doc_coverage"
+val SCRATCH = "/tmp/fmt_doccov_contract_spec_scratch.spl"
+
+describe "simple fmt CLI contract (pure-Simple standalone entry)":
+    """The pure-Simple formatter entry point must exit nonzero on --check
+    against a file with real formatting violations, exit 0 and rewrite the
+    file on --write, then report already-formatted on a re-check, and be
+    idempotent (byte-identical) on a second --write."""
+
+    it "exits nonzero on --check against a file with real violations":
+        val (stdout, stderr, code) = _cli_process_run(SIMPLE_SEED, ["run", FMT_ENTRY, FMT_FIXTURE, "--check"])
+        assert_not_equal(code, 0)
+        assert_contains(stdout, "needs formatting")
+
+    it "writes, then reports formatted on re-check, and is idempotent on a second write":
+        val setup = _cli_process_run("cp", [FMT_FIXTURE, SCRATCH])
+        assert_equal(setup.2, 0)
+
+        val (write_out, write_err, write_code) = _cli_process_run(SIMPLE_SEED, ["run", FMT_ENTRY, SCRATCH, "--write"])
+        assert_equal(write_code, 0)
+        assert_contains(write_out, "OK Formatted")
+
+        val (check_out, check_err, check_code) = _cli_process_run(SIMPLE_SEED, ["run", FMT_ENTRY, SCRATCH, "--check"])
+        assert_equal(check_code, 0)
+        assert_contains(check_out, "is formatted")
+
+        val scratch_after_write1 = SCRATCH + ".after1"
+        val snapshot = _cli_process_run("cp", [SCRATCH, scratch_after_write1])
+        assert_equal(snapshot.2, 0)
+
+        val (write2_out, write2_err, write2_code) = _cli_process_run(SIMPLE_SEED, ["run", FMT_ENTRY, SCRATCH, "--write"])
+        assert_equal(write2_code, 0)
+
+        val idempotence_check = _cli_process_run("diff", [scratch_after_write1, SCRATCH])
+        assert_equal(idempotence_check.2, 0)
+
+describe "simple doc-coverage CLI contract (pure-Simple standalone entry)":
+    """The pure-Simple doc-coverage entry point's --missing mode must name
+    the undocumented public function in the fixture and must NOT list the
+    documented one (regression guard for the 2026-07-17 fix -- --missing
+    previously listed every `pub fn` match unconditionally)."""
+
+    it "reports the undocumented pub fn and exits 0":
+        val (stdout, stderr, code) = _cli_process_run(SIMPLE_SEED, ["run", DOC_COVERAGE_ENTRY, DOC_COVERAGE_FIXTURE_DIR, "--missing"])
+        assert_equal(code, 0)
+        assert_contains(stdout, "orphan_fn")
+
+    it "does not list the already-documented pub fn as missing":
+        # `orphan_fn` and `documented_thing` deliberately share no substring
+        # with each other, so this check cannot pass vacuously: if
+        # print_missing regresses to listing every `pub fn` match again (the
+        # 2026-07-17 bug), "documented_thing" reappears in stdout and this
+        # example genuinely fails.
+        val (stdout, stderr, code) = _cli_process_run(SIMPLE_SEED, ["run", DOC_COVERAGE_ENTRY, DOC_COVERAGE_FIXTURE_DIR, "--missing"])
+        assert_false(stdout.contains("documented_thing"))

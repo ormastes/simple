@@ -1,0 +1,286 @@
+# widget_hit.spl — Pointer/scroll/key routing over a laid-out widget tree.
+#
+# The `event.spl` hub only handled keyboard/focus/action events; real pointer
+# routing lived solely in the WM layer (window_scene.spl). This module brings
+# the same hit-test-then-dispatch model down to the widget tree: a pointer
+# event is mapped to the topmost widget rect under it, then dispatched as a
+# state change (hover / pressed / checked / focus / scroll offset) written to
+# the process-local widget prop store. A re-conversion through widget_draw_ir
+# then shows the updated frame.
+#
+# Coordinates are framebuffer pixels (origin top-left), matching compute_layout
+# and the Draw-IR renderer.
+
+use common.ui.layout.{compute_layout, find_rect}
+use common.ui.widget.{WidgetNode, WidgetRect}
+
+struct HitResult:
+    id: text
+    found: bool
+
+fn _contains(rect: WidgetRect, px: i32, py: i32) -> bool:
+    (px >= rect.x and px < rect.x + rect.w
+     and py >= rect.y and py < rect.y + rect.h)
+
+# Topmost widget under (px, py): the LAST rect in draw order (deepest / latest
+# sibling) that contains the point. Mirrors window_scene's top-of-stack pick.
+fn widget_hit_test(root: WidgetNode, w: i32, h: i32, px: i32, py: i32) -> HitResult:
+    _hit_test_rects(compute_layout(root, 0, 0, w, h), px, py)
+
+# Same hit-test, over an already-computed layout. Lets callers that need to
+# hit-test the same tree more than once per event (e.g. press + click) share
+# one compute_layout() pass instead of recomputing it for each call.
+fn _hit_test_rects(rects: [WidgetRect], px: i32, py: i32) -> HitResult:
+    var best = ""
+    for rect in rects:
+        if _contains(rect, px, py):
+            best = rect.id
+    HitResult(id: best, found: best != "")
+
+# Deepest scroll-kind widget under the point (scroll target for wheel events).
+fn widget_scroll_hit(root: WidgetNode, w: i32, h: i32, px: i32, py: i32) -> text:
+    val rects = compute_layout(root, 0, 0, w, h)
+    var best = ""
+    for rect in rects:
+        if _contains(rect, px, py):
+            val node = WidgetNode(id: rect.id)
+            if node.kind_name() == "scroll":
+                best = rect.id
+    best
+
+fn _kind_of(id: text) -> text:
+    WidgetNode(id: id).kind_name()
+
+# =========================================================================
+# Dispatch reducers — mutate the shared widget prop store.
+# =========================================================================
+
+# Press feedback: mark the hit button pressed (for a "pressed" render frame).
+#
+# `layout`: an optional precomputed compute_layout() result. When the caller
+# already has one (e.g. dispatching press + click for the same pointer event),
+# pass it here to skip re-running layout. Left empty ("not provided"), this
+# computes its own layout exactly as before.
+fn widget_set_pressed(root: WidgetNode, w: i32, h: i32, px: i32, py: i32, layout: [WidgetRect] = []) -> text:
+    val rects = if layout.len() > 0: layout else: compute_layout(root, 0, 0, w, h)
+    val hit = _hit_test_rects(rects, px, py)
+    if hit.found and _kind_of(hit.id) == "button":
+        WidgetNode(id: hit.id).set_prop("ui_pressed", "true")
+        return hit.id
+    ""
+
+# Release: clear pressed state on every button.
+fn widget_clear_pressed(root: WidgetNode):
+    for id in root.collect_ids():
+        if id != "" and _kind_of(id) == "button":
+            WidgetNode(id: id).set_prop("ui_pressed", "false")
+
+# Hover: mark the hit widget hovered, clear hover on all others.
+fn widget_dispatch_hover(root: WidgetNode, w: i32, h: i32, px: i32, py: i32) -> text:
+    val hit = widget_hit_test(root, w, h, px, py)
+    for id in root.collect_ids():
+        if id != "":
+            var flag = "false"
+            if hit.found and id == hit.id:
+                flag = "true"
+            WidgetNode(id: id).set_prop("ui_hover", flag)
+    hit.id
+
+# Click: toggle checkbox `checked`, focus text inputs (single-focus), return
+# the hit widget id (empty when nothing was hit).
+#
+# `layout`: optional precomputed compute_layout() result — see widget_set_pressed.
+fn widget_dispatch_click(root: WidgetNode, w: i32, h: i32, px: i32, py: i32, layout: [WidgetRect] = []) -> text:
+    val rects = if layout.len() > 0: layout else: compute_layout(root, 0, 0, w, h)
+    val hit = _hit_test_rects(rects, px, py)
+    if not hit.found:
+        return ""
+    val kind = _kind_of(hit.id)
+    if kind == "checkbox":
+        val node = WidgetNode(id: hit.id)
+        var next = "true"
+        if node.get_prop("checked") == "true":
+            next = "false"
+        node.set_prop("checked", next)
+    if kind == "input" or kind == "textfield":
+        for id in root.collect_ids():
+            if id != "":
+                var flag = "false"
+                if id == hit.id:
+                    flag = "true"
+                WidgetNode(id: id).set_prop("ui_focus", flag)
+    hit.id
+
+# Scroll: route to the scroll container under the point and advance its
+# offset. Positive `dy` moves content up (reveals lower rows); clamped to
+# [0, content_height - viewport_height].
+fn widget_dispatch_scroll(root: WidgetNode, w: i32, h: i32, px: i32, py: i32, dy: i32) -> text:
+    val target = widget_scroll_hit(root, w, h, px, py)
+    if target == "":
+        return ""
+    val rects = compute_layout(root, 0, 0, w, h)
+    val node = WidgetNode(id: target)
+    var srect_h = 0
+    var srect_y = 0
+    match find_rect(rects, target):
+        case Some(sr):
+            srect_h = sr.h
+            srect_y = sr.y
+        case _:
+            return ""
+    # Content extent = furthest descendant bottom below the scroll top.
+    var content_bottom = srect_y
+    for id in node.collect_ids():
+        if id != target:
+            match find_rect(rects, id):
+                case Some(cr):
+                    val bottom = cr.y + cr.h
+                    if bottom > content_bottom:
+                        content_bottom = bottom
+                case _:
+                    pass
+    var max_off = (content_bottom - srect_y) - srect_h
+    if max_off < 0:
+        max_off = 0
+    var offset = _prop_int_of(node, "scroll_offset") + dy
+    if offset < 0:
+        offset = 0
+    if offset > max_off:
+        offset = max_off
+    node.set_prop("scroll_offset", "{offset}")
+    target
+
+# Number of Unicode characters in `s`. Counts via the char-based `char_at`,
+# which returns "" once the index passes the last character. Byte-based
+# `slice`/`len` cannot be used to split on a caret that counts characters.
+fn _nchars(s: text) -> i32:
+    var n = 0
+    while s.char_at(n.to_i64()) != "":
+        n = n + 1
+    n
+
+# Characters [a, b) of `s` by CHARACTER index, clamped to [0, char_count].
+fn _char_slice(s: text, a: i32, b: i32) -> text:
+    var lo = a
+    if lo < 0:
+        lo = 0
+    if b <= lo:
+        return ""
+    var out = ""
+    var i = lo
+    while i < b:
+        val ch = s.char_at(i.to_i64())
+        if ch == "":
+            return out
+        out = out + ch
+        i = i + 1
+    out
+
+# Current caret CHARACTER index for the focused node, clamped to [0, len].
+# Absent/invalid `caret` prop defaults to end-of-text (append position).
+fn _caret_of(node: WidgetNode, nchars: i32) -> i32:
+    val raw = node.get_prop("caret")
+    if raw == "":
+        return nchars
+    var c = raw.to_int() ?? nchars.to_i64()
+    if c < 0:
+        return 0
+    if c > nchars.to_i64():
+        return nchars
+    c.to_i32()
+
+# Key event to the focused input, editing at a true caret index. Printable
+# single chars insert AT the caret; "backspace" deletes the char before it,
+# "delete" the char at it; "left"/"right"/"home"/"end" move it. `value` and
+# `caret` (a CHARACTER index) are both updated. Selection/shift are not
+# delivered through this host key path, so this is caret editing without
+# selection; the pure model (widget_interact_model.on_key_mod) carries the
+# spec-tested selection ops for when shift plumbing lands.
+fn widget_dispatch_key(focused_id: text, key: text):
+    if focused_id == "":
+        return
+    val kind = _kind_of(focused_id)
+    if kind != "input" and kind != "textfield":
+        return
+    val node = WidgetNode(id: focused_id)
+    val value = node.get_prop("value")
+    val n = _nchars(value)
+    val caret = _caret_of(node, n)
+    if key == "left":
+        if caret > 0:
+            node.set_prop("caret", "{caret - 1}")
+        return
+    if key == "right":
+        if caret < n:
+            node.set_prop("caret", "{caret + 1}")
+        return
+    if key == "home":
+        node.set_prop("caret", "0")
+        return
+    if key == "end":
+        node.set_prop("caret", "{n}")
+        return
+    if key == "backspace":
+        if caret > 0:
+            val cut = _char_slice(value, 0, caret - 1) + _char_slice(value, caret, n)
+            node.set_prop("value", cut)
+            node.set_prop("caret", "{caret - 1}")
+        return
+    if key == "delete":
+        if caret < n:
+            val cut = _char_slice(value, 0, caret) + _char_slice(value, caret + 1, n)
+            node.set_prop("value", cut)
+            node.set_prop("caret", "{caret}")
+        return
+    if _nchars(key) == 1:
+        val joined = _char_slice(value, 0, caret) + key + _char_slice(value, caret, n)
+        node.set_prop("value", joined)
+        node.set_prop("caret", "{caret + 1}")
+
+fn _prop_int_of(node: WidgetNode, key: text) -> i32:
+    val raw = node.get_prop(key)
+    if raw == "":
+        return 0
+    raw.to_int() ?? 0
+
+# =========================================================================
+# IME composition (CJK/accented input via a host input-method editor).
+# =========================================================================
+
+# Composition update: shows the in-progress preedit string WITHOUT touching
+# `value`/`caret` — the host IME can still cancel or keep revising it. Stored
+# as a `preedit` prop so a renderer can show it (e.g. underlined at the
+# caret) separately from the committed text.
+fn widget_dispatch_composition_update(focused_id: text, preedit: text):
+    if focused_id == "":
+        return
+    val kind = _kind_of(focused_id)
+    if kind != "input" and kind != "textfield":
+        return
+    WidgetNode(id: focused_id).set_prop("preedit", preedit)
+
+# Composition commit: inserts the full composed STRING at the caret
+# (char-indexed via _char_slice/_nchars, same as widget_dispatch_key's
+# single-char path but for a multi-char string) and clears any preedit —
+# the composition is done, so nothing is left showing as "in progress".
+fn widget_dispatch_composition_commit(focused_id: text, committed: text):
+    if focused_id == "":
+        return
+    val kind = _kind_of(focused_id)
+    if kind != "input" and kind != "textfield":
+        return
+    val node = WidgetNode(id: focused_id)
+    node.set_prop("preedit", "")
+    if committed == "":
+        return
+    val value = node.get_prop("value")
+    val n = _nchars(value)
+    val caret = _caret_of(node, n)
+    val joined = _char_slice(value, 0, caret) + committed + _char_slice(value, caret, n)
+    node.set_prop("value", joined)
+    node.set_prop("caret", "{caret + _nchars(committed)}")
+
+export HitResult, widget_hit_test, widget_scroll_hit
+export widget_set_pressed, widget_clear_pressed, widget_dispatch_hover
+export widget_dispatch_click, widget_dispatch_scroll, widget_dispatch_key
+export widget_dispatch_composition_update, widget_dispatch_composition_commit

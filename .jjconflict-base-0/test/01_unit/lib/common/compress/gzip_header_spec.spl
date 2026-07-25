@@ -1,0 +1,89 @@
+use std.spec
+use std.nogc_sync_mut.compression.gzip.header.{gzip_header_parse, gzip_header_size, gzip_footer_parse, gzip_footer_validate}
+use std.nogc_sync_mut.compression.gzip.crc.{crc32_calculate}
+
+fn check(condition: bool):
+    expect condition == true
+
+fn _append_header_crc(header: [u8]) -> [u8]:
+    var result = header
+    val hcrc = crc32_calculate(header) & 0xFFFF
+    result.push((hcrc & 0xFF).to_u8())
+    result.push(((hcrc >> 8) & 0xFF).to_u8())
+    result
+
+describe "gzip header validation":
+    it "rejects reserved header flags":
+        var data: [u8] = [
+            0x1Fu8, 0x8Bu8, 0x08u8, 0x20u8,
+            0x00u8, 0x00u8, 0x00u8, 0x00u8,
+            0x00u8, 0x03u8
+        ]
+        val parsed = gzip_header_parse(data)
+        check(parsed == nil)
+
+    it "rejects truncated extra field payload":
+        var data: [u8] = [
+            0x1Fu8, 0x8Bu8, 0x08u8, 0x04u8,
+            0x00u8, 0x00u8, 0x00u8, 0x00u8,
+            0x00u8, 0x03u8,
+            0x04u8, 0x00u8,
+            0x41u8
+        ]
+        val parsed = gzip_header_parse(data)
+        check(parsed == nil)
+
+    it "accepts a valid header crc":
+        var data: [u8] = [
+            0x1Fu8, 0x8Bu8, 0x08u8, 0x02u8,
+            0x00u8, 0x00u8, 0x00u8, 0x00u8,
+            0x00u8, 0x03u8
+        ]
+        data = _append_header_crc(data)
+        val parsed = gzip_header_parse(data)
+        check(parsed != nil)
+
+    it "rejects a mismatched header crc":
+        var data: [u8] = [
+            0x1Fu8, 0x8Bu8, 0x08u8, 0x02u8,
+            0x00u8, 0x00u8, 0x00u8, 0x00u8,
+            0x00u8, 0x03u8
+        ]
+        data = _append_header_crc(data)
+        data[10] = data[10] ^ 0x01u8
+        val parsed = gzip_header_parse(data)
+        check(parsed == nil)
+
+    it "rejects truncated header crc":
+        var data: [u8] = [
+            0x1Fu8, 0x8Bu8, 0x08u8, 0x02u8,
+            0x00u8, 0x00u8, 0x00u8, 0x00u8,
+            0x00u8, 0x03u8,
+            0x00u8
+        ]
+        val parsed = gzip_header_parse(data)
+        check(parsed == nil)
+
+    it "rejects negative footer offsets":
+        var data: [u8] = [
+            0x00u8, 0x00u8, 0x00u8, 0x00u8,
+            0x00u8, 0x00u8, 0x00u8, 0x00u8
+        ]
+        val parsed = gzip_footer_parse(data, -1)
+        check(parsed == nil)
+
+    it "treats malformed parsed header info as size zero":
+        var header_info: [i64] = [0]
+        val size = gzip_header_size(header_info)
+        check(size == 0)
+
+    it "rejects malformed parsed footer info":
+        var footer_info: [i64] = [0]
+        var data: [u8] = []
+        val valid = gzip_footer_validate(footer_info, data, 0)
+        check(valid == false)
+
+    it "rejects nil footer payloads":
+        var footer_info: [i64] = [0, 0]
+        val valid = gzip_footer_validate(footer_info, nil, 0)
+        check(valid == false)

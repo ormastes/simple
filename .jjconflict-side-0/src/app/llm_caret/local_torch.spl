@@ -1,0 +1,90 @@
+# LLM Caret - Local Torch Model
+#
+# Runs local HuggingFace transformers model via Python subprocess.
+# Passes one generated script as an exact argv entry; no shell or temp files.
+
+use app.io.mod.{process_run}
+
+# ============================================================================
+# Response struct
+# ============================================================================
+
+struct LocalResponse:
+    content: text
+    model: text
+    error: text
+    is_error: bool
+
+# ============================================================================
+# Python script generation
+# ============================================================================
+
+fn python_single_quoted(value: text) -> text:
+    var escaped = value.replace("\\", "\\\\")
+    escaped = escaped.replace("'", "\\'")
+    escaped = escaped.replace("\n", "\\n")
+    escaped = escaped.replace("\r", "\\r")
+    escaped = escaped.replace("\t", "\\t")
+    "'" + escaped + "'"
+
+fn build_torch_script(model_path: text, prompt: text, max_tokens: i64) -> text:
+    var tokens = max_tokens
+    if tokens <= 0:
+        tokens = 256
+    val quoted_model = python_single_quoted(model_path)
+    val quoted_prompt = python_single_quoted(prompt)
+    var script = "import sys\n"
+    script = script + "try:\n"
+    script = script + "    from transformers import AutoModelForCausalLM, AutoTokenizer\n"
+    script = script + "    import torch\n"
+    script = script + "    prompt = " + quoted_prompt + "\n"
+    script = script + "    tokenizer = AutoTokenizer.from_pretrained(" + quoted_model + ")\n"
+    script = script + "    model = AutoModelForCausalLM.from_pretrained(" + quoted_model + ", torch_dtype=torch.float16, device_map='auto')\n"
+    script = script + "    inputs = tokenizer(prompt, return_tensors='pt').to(model.device)\n"
+    script = script + "    with torch.no_grad():\n"
+    script = script + "        outputs = model.generate(**inputs, max_new_tokens=" + tokens.to_text() + ")\n"
+    script = script + "    result = tokenizer.decode(outputs[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True)\n"
+    script = script + "    sys.stdout.write(result)\n"
+    script = script + "except Exception as e:\n"
+    script = script + "    sys.stderr.write(str(e))\n"
+    script = script + "    sys.exit(1)\n"
+    script
+
+# ============================================================================
+# Send request via Python subprocess
+# ============================================================================
+
+fn complete_local_torch_exchange(model_path: text, output: text, stderr: text, exit_code: i64) -> LocalResponse:
+    if exit_code != 0:
+        var detail = stderr
+        if detail == "":
+            detail = "process exited with code " + exit_code.to_text()
+        return LocalResponse(
+            content: "",
+            model: model_path,
+            error: "Python error: " + detail,
+            is_error: true
+        )
+    LocalResponse(
+        content: output,
+        model: model_path,
+        error: "",
+        is_error: false
+    )
+
+fn local_torch_send(python_path: text, model_path: text, prompt: text, max_tokens: i64) -> LocalResponse:
+    if model_path == "":
+        return LocalResponse(
+            content: "",
+            model: "",
+            error: "model_path not configured",
+            is_error: true
+        )
+    val script = build_torch_script(model_path, prompt, max_tokens)
+    var py = python_path
+    if py == "":
+        py = "python3"
+    val result = process_run(py, ["-c", script])
+    complete_local_torch_exchange(
+        model_path, result.0 ?? "", result.1 ?? "", result.2
+    )

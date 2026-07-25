@@ -1,0 +1,32 @@
+# SimpleOS log setup — wires the active MachineProfile's serial config
+# into the log library at kernel boot time.
+#
+# Keeping this out of the log library itself avoids a cycle:
+# machine_profile.spl does not import the log lib; the log lib does not
+# import machine_profile.spl.
+
+use os.kernel.log.klog_api.{
+    log_init, log_set_device,
+    LOG_INFO, TARGET_DEVICE,
+    LOG_DEV_KIND_COM1, LOG_DEV_KIND_PL011, LOG_DEV_KIND_NS16550
+}
+use os.machine_profile.{MachineProfile}
+
+fn log_kind_from_text(kind: text) -> i32:
+    if kind == "com1":    return LOG_DEV_KIND_COM1
+    if kind == "pl011":   return LOG_DEV_KIND_PL011
+    if kind == "ns16550": return LOG_DEV_KIND_NS16550
+    0
+
+fn log_set_device_from_profile(profile: MachineProfile):
+    """Apply the profile's qemu_serial_kind + qemu_serial_base to the log lib.
+    Safe to call after log_init; takes effect on the next log_* call."""
+    val kind = log_kind_from_text(profile.qemu_serial_kind)
+    log_set_device(kind, profile.qemu_serial_base)
+
+fn log_boot_init(profile: MachineProfile):
+    """Kernel-boot one-liner: init log lib + point serial at the profile's UART.
+    Call as the first two statements of any kernel entry that uses log_info
+    / log_raw_println (ie everything except the minimal kernel_entry.spl path)."""
+    log_init(LOG_INFO, TARGET_DEVICE)
+    log_set_device_from_profile(profile)

@@ -1,0 +1,212 @@
+diff --git a/src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl b/src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl
+index 74445087f9d..c704a2d3647 100644
+--- a/src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl
++++ b/src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl
+@@ -192,7 +192,24 @@ impl HirLowering:
+             ))
+         var pi = 0
+         while pi < fn_params.len():
+-            params = params.push(self.lower_param(fn_params[pi]))
++            var lowered_param = self.lower_param(fn_params[pi])
++            # Bug #156: an EXPLICITLY-written `self` receiver (`fn value(self)`)
++            # carries no type annotation, so lower_param types it as Infer.
++            # Downstream MIR keys both struct field reads (`self.v`) and the
++            # method-chain return-type threading on a Named parameter type, so
++            # without the impl's self type here method resolution/field access
++            # on the native-build path fails. Thread the same self type the
++            # implicit-self synthesis above uses onto the explicit `self` param.
++            if fn_params[pi].name == "self" and self.current_method_self_type.?:
++                lowered_param = HirParam(
++                    symbol: lowered_param.symbol,
++                    name: "self",
++                    type_: self.current_method_self_type.unwrap(),
++                    has_default: lowered_param.has_default,
++                    default: lowered_param.default,
++                    span: lowered_param.span
++                )
++            params = params.push(lowered_param)
+             pi = pi + 1
+         if bootstrap_diag:
+             eprint("[hir-lower] lower_function:params {fn_.name}")
+diff --git a/src/compiler/50.mir/_MirLowering/module_lowering.spl b/src/compiler/50.mir/_MirLowering/module_lowering.spl
+index 5d19f5e4c7f..195552fdf7f 100644
+--- a/src/compiler/50.mir/_MirLowering/module_lowering.spl
++++ b/src/compiler/50.mir/_MirLowering/module_lowering.spl
+@@ -68,6 +68,7 @@ impl MirLowering:
+             bitfield_value_syms: {},
+             struct_field_order: {},
+             struct_value_syms: {},
++            struct_method_syms: {},
+             runtime_array_locals: {},
+             runtime_dict_locals: {},
+             runtime_value_locals: {},
+@@ -359,6 +360,39 @@ impl MirLowering:
+         if not self.enum_variant_index.has("Result"):
+             self.enum_variant_index["Result"] = ["Ok", "Err"]
+ 
++        # Bug #156: build the "StructName::method" -> method-SymbolId registry
++        # from the module's impl blocks. HIR lowering registers each impl method
++        # under only its BARE name ("value"), and the native-build --entry path
++        # runs no type-aware resolver, so a MethodCall arrives at MIR as
++        # Unresolved with no way to recover WHICH type's method to call. The
++        # impl block carries exactly that association (impl type + methods dict),
++        # so record it here for lower_method_call's struct-method resolution.
++        #
++        # Reset to a fresh Dict first: several MirLowering construction sites
++        # (driver_pipeline.spl's direct-field `MirLowering(...)` literals) omit
++        # newer fields, which default to nil -- a field-assign of an empty Dict
++        # here guarantees the index-assigns below never hit "index assign to
++        # field of type nil" regardless of how this instance was built.
++        self.struct_method_syms = {}
++        var impl_idx = 0
++        while impl_idx < module.impls.len():
++            val impl_ = module.impls[impl_idx]
++            var impl_type_name = ""
++            match impl_.type_.kind:
++                case Named(impl_type_symbol, _):
++                    val impl_type_sym = self.symbols.get_symbol(impl_type_symbol)
++                    if impl_type_sym != nil:
++                        impl_type_name = impl_type_sym.name
++                case _: ()
++            if impl_type_name != "":
++                val method_names = impl_.methods.keys()
++                var mni = 0
++                while mni < method_names.len():
++                    val mname = method_names[mni]
++                    self.struct_method_syms["{impl_type_name}::{mname}"] = impl_.methods[mname]
++                    mni = mni + 1
++            impl_idx = impl_idx + 1
++
+         val class_values = module.classes.values()
+         var ci = 0
+         while ci < class_values.len():
+diff --git a/src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl b/src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl
+index 6b3c7f668f3..a92a6478167 100644
+--- a/src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl
++++ b/src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl
+@@ -523,6 +523,79 @@ impl MirLowering:
+                     wb_kind = 2
+                 case _: ()
+ 
++        # Bug #156: user-defined struct/enum instance methods on the
++        # native-build `--entry` path. On that path HIR type inference never
++        # runs, so `receiver.type_` is nil and every MethodCall reaches MIR
++        # lowering with `resolution == Unresolved` (HIR lowering hard-codes
++        # Unresolved -- see expressions.spl -- and the only resolver pass,
++        # resolve_methods, uses an intentionally EMPTY SymbolTable that can
++        # never resolve an instance method). The pre-existing `case Unresolved`
++        # arm below then errors with "unresolved method call: <name>" for ANY
++        # struct method -- a 0-hop `c.value()` as much as a 3+-hop
++        # `c.inc().inc().inc().value()`.
++        #
++        # But the information needed IS present at MIR time: the receiver
++        # local's *lowered* MIR type is `Struct(sym)`/`Enum(sym)` (a struct
++        # literal lowers via emit_aggregate with that type; a chained hop's
++        # result carries its callee's declared return type via
++        # resolved_call_return_type, so `c.inc()` yields a Counter-typed local
++        # that the next hop reads -- this is exactly the receiver-type threading
++        # that keeps multi-hop chains working), and `self.symbols` holds the
++        # method under the `Type::method` qualified name. Resolve it here and
++        # emit the identical call the InstanceMethod arm below emits.
++        #
++        # `push` is excluded so the array-`push` builtin below still owns it
++        # (arrays lower to Array MIR type, never Struct, so this block would
++        # skip them anyway -- the guard just makes the single-lowering
++        # invariant obvious: when this block lowers the receiver and finds no
++        # struct method, control falls to `case Unresolved` which, for a
++        # non-`push` method, takes the error path and never re-lowers).
++        if resolution_is_unresolved and method != "push":
++            # The receiver local (already lowered for Index/Field mutating
++            # receivers as wb_receiver; lowered once here otherwise -- see the
++            # `method != "push"` single-lowering note above).
++            var struct_recv_local: LocalId = wb_receiver
++            if wb_kind == 0:
++                struct_recv_local = self.lower_expr(receiver)
++            # Recover the receiver's struct NAME. Because this path has no expr
++            # type-inference, the Struct(sym) MIR type carries a placeholder
++            # SymbolId (id 0) and is useless for lookup; the authoritative
++            # source is struct_value_syms -- the same local->struct-name map a
++            # `p.x` field read uses (populated for struct constructs at
++            # lower_struct_construct and for typed params at lower_function),
++            # which we extend below to the call's own result so the NEXT hop of
++            # a chain resolves too.
++            val recv_struct_name = self.struct_value_syms.get(struct_recv_local.id) ?? ""
++            val si_method_key = "{recv_struct_name}::{method}"
++            if recv_struct_name != "" and self.struct_method_syms.has(si_method_key):
++                val si_method_id = self.struct_method_syms[si_method_key]
++                var si_arg_operands: [MirOperand] = [mir_operand_copy(struct_recv_local)]
++                for si_arg in args:
++                    val si_arg_local = self.lower_expr(si_arg.value)
++                    si_arg_operands = si_arg_operands.push(mir_operand_copy(si_arg_local))
++                val si_method_operand = self.symbol_to_operand(si_method_id)
++                val si_return_type = self.resolved_call_return_type(si_method_id)
++                var si_b = self.builder
++                val si_result = si_b.emit_call(si_method_operand, si_arg_operands, si_return_type)
++                self.builder = si_b
++                var si_wb_value = struct_recv_local
++                if val si_result_local = si_result:
++                    si_wb_value = si_result_local
++                self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, si_wb_value)
++                if val si_result_local = si_result:
++                    # Thread the callee's return struct type onto the result
++                    # local so a chained `.m()` on the result resolves too.
++                    val si_ret_name = self.method_return_struct_name(si_method_id)
++                    if si_ret_name != "":
++                        self.struct_value_syms[si_result_local.id] = si_ret_name
++                    return si_result_local
++                else:
++                    var si_b2 = self.builder
++                    val si_temp = si_b2.new_temp(MirType.i64())
++                    si_b2.emit_const(si_temp, MirConstValue.Int(0), MirType.i64())
++                    self.builder = si_b2
++                    return si_temp
++
+         match resolution:
+             case InstanceMethod(type_id, method_id):
+                 # Direct method call on type
+@@ -916,6 +989,25 @@ impl MirLowering:
+             return "rt_native_build"
+         ""
+ 
++    me method_return_struct_name(method_id: SymbolId) -> text:
++        """Bug #156: the declared return-type struct name of a resolved
++        instance method, or "" when it does not return a known struct. Used to
++        thread a self-returning method's result struct type across method-chain
++        hops on the type-inference-free native-build path (mirrors how
++        lower_function seeds struct_value_syms from Named parameter types)."""
++        val method_sym = self.symbols.get_symbol(method_id)
++        if method_sym != nil and method_sym.type_ != nil:
++            match method_sym.type_.kind:
++                case HirTypeKind.Function(_, ret, _):
++                    match ret.kind:
++                        case Named(ret_type_symbol, _):
++                            val ret_sym = self.symbols.get_symbol(ret_type_symbol)
++                            if ret_sym != nil and self.struct_field_order.has(ret_sym.name):
++                                return ret_sym.name
++                        case _: ()
++                case _: ()
++        ""
++
+     me symbol_to_operand(symbol: SymbolId) -> MirOperand:
+         """Convert a symbol to a function pointer operand."""
+         # Look up function name from symbol table for direct calls
+diff --git a/src/compiler/50.mir/mir_lowering_types.spl b/src/compiler/50.mir/mir_lowering_types.spl
+index f4ea1603282..b779c037301 100644
+--- a/src/compiler/50.mir/mir_lowering_types.spl
++++ b/src/compiler/50.mir/mir_lowering_types.spl
+@@ -40,6 +40,15 @@ struct MirLowering:
+     # type-inference, so a bare `p` Var carries no `.type_` and resolve_field_index
+     # cannot recover the struct's field ordering otherwise.
+     struct_value_syms: Dict<i64, text>
++    # "StructName::method" -> the method's function SymbolId. Bug #156: built
++    # from module.impls at lower_module start because the native-build --entry
++    # path runs no method-resolution pass with type info -- every MethodCall
++    # reaches MIR as MethodResolution.Unresolved. This registry lets MIR resolve
++    # a user struct/enum instance method from the receiver's recovered struct
++    # NAME (struct_value_syms) + the method name, emitting the same direct call
++    # the InstanceMethod arm emits. Name-keyed (not symbol-id-keyed) for the
++    # same symbol_id_value(-1) interpreter landmine as struct_field_order.
++    struct_method_syms: Dict<text, SymbolId>
+     # MIR local ID -> true, for locals holding a runtime array value. Explicit
+     # id-keyed set (mirrors struct_value_syms) because the native flat-bridge
+     # path does not reliably thread the local's Array/Slice MIR type, so the

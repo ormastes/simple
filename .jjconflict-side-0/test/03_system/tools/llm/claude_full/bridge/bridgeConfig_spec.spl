@@ -1,0 +1,91 @@
+"""
+# Claude Full Bridge Config
+
+Mirrors `bridge/bridgeConfig.ts`, the shared bridge auth and URL resolver for
+ant-only development overrides with OAuth/config fallbacks.
+
+## Overview
+
+This parity slice covers the tiny but security-sensitive bridge resolver used
+before bridge API calls are made. The source exposes two override getters and
+two fallback getters. Overrides are valid only when `USER_TYPE` is `ant`;
+otherwise token resolution falls back to OAuth tokens and base URL resolution
+falls back to the production OAuth config.
+
+## Requirements
+
+**Requirements:** N/A - parity matrix slice for Claude full bridgeConfig.
+**Plan:** N/A - owned single-file parity slice.
+**Design:** N/A - direct mirror of `tmp/claude/claude-code-main/src/bridge/bridgeConfig.ts`.
+**Research:** N/A - source file supplied by parity matrix.
+
+## Examples
+
+Ant development:
+
+- `USER_TYPE=ant`
+- `CLAUDE_BRIDGE_OAUTH_TOKEN=dev-token`
+- `CLAUDE_BRIDGE_BASE_URL=http://localhost:8787`
+- access token resolves to `dev-token`
+- base URL resolves to `http://localhost:8787`
+
+Normal user:
+
+- `USER_TYPE=customer`
+- bridge override-shaped values are ignored
+- access token resolves to OAuth token
+- base URL resolves to OAuth config `BASE_API_URL`
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.bridge.bridgeConfig.{bridgeConfigContextNew, getBridgeTokenOverrideFrom, getBridgeBaseUrlOverrideFrom, getBridgeAccessTokenFrom, getBridgeBaseUrlFrom}
+
+describe "Claude full bridge config":
+    it "should expose ant-only token and base URL overrides":
+        step("Create an ant bridge context with both CLAUDE_BRIDGE overrides")
+        val ctx = bridgeConfigContextNew(
+            "ant",
+            "dev-token",
+            "http://localhost:8787",
+            "oauth-token",
+            "https://api.anthropic.com"
+        )
+
+        step("Resolve override getters before OAuth/config fallbacks")
+        expect(getBridgeTokenOverrideFrom(ctx).?).to_equal(true)
+        expect(getBridgeTokenOverrideFrom(ctx).unwrap()).to_equal("dev-token")
+        expect(getBridgeBaseUrlOverrideFrom(ctx).?).to_equal(true)
+        expect(getBridgeBaseUrlOverrideFrom(ctx).unwrap()).to_equal("http://localhost:8787")
+        expect(getBridgeAccessTokenFrom(ctx).unwrap()).to_equal("dev-token")
+        expect(getBridgeBaseUrlFrom(ctx)).to_equal("http://localhost:8787")
+
+    it "should ignore bridge overrides for non-ant users":
+        step("Create a normal user context that still has override-shaped values")
+        val ctx = bridgeConfigContextNew(
+            "customer",
+            "dev-token",
+            "http://localhost:8787",
+            "oauth-token",
+            "https://api.anthropic.com"
+        )
+
+        step("Fall through to OAuth tokens and production config")
+        expect(getBridgeTokenOverrideFrom(ctx).?).to_equal(false)
+        expect(getBridgeBaseUrlOverrideFrom(ctx).?).to_equal(false)
+        expect(getBridgeAccessTokenFrom(ctx).unwrap()).to_equal("oauth-token")
+        expect(getBridgeBaseUrlFrom(ctx)).to_equal("https://api.anthropic.com")
+
+    it "should model logged-out token absence while always returning a base URL":
+        step("Create an ant context without override or OAuth tokens")
+        val ctx = bridgeConfigContextNew(
+            "ant",
+            "",
+            "",
+            "",
+            "https://console.anthropic.com/api"
+        )
+
+        step("Report missing access token and preserve config base URL")
+        expect(getBridgeTokenOverrideFrom(ctx).?).to_equal(false)
+        expect(getBridgeAccessTokenFrom(ctx).?).to_equal(false)
+        expect(getBridgeBaseUrlFrom(ctx)).to_equal("https://console.anthropic.com/api")

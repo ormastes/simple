@@ -1,0 +1,198 @@
+# Graphical Backend Capture Specification
+
+> <details>
+
+<!-- sdn-diagram:id=graphical_backend_capture_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=graphical_backend_capture_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+graphical_backend_capture_spec -> std
+graphical_backend_capture_spec -> app
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=graphical_backend_capture_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 4 | 4 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# Graphical Backend Capture Specification
+
+## Scenarios
+
+### graphical backend capture facade
+
+#### captures browser-rendered pixels through the shared BackendCapture shape
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val capture = capture_with_backend(_html(), 32, 24, "software")
+expect(capture.success).to_equal(true)
+expect(capture.backend_name).to_equal("software")
+expect(capture.width).to_equal(32)
+expect(capture.height).to_equal(24)
+expect(capture.pixels.len()).to_equal(32 * 24)
+expect(capture.pixel_checksum).to_be_greater_than(0)
+expect(capture.unique_sampled_colors).to_be_greater_than(0)
+expect(capture.elapsed_us).to_be_greater_than(-1)
+```
+
+</details>
+
+#### captures Engine2D readback pixels for a canonical filled-rect case
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val capture = capture_engine2d_filled_rect(
+    16,
+    12,
+    "cpu",
+    0xFFFFFFFFu32,
+    0xFF2563EBu32
+)
+expect(capture.success).to_equal(true)
+expect(capture.pixels.len()).to_equal(16 * 12)
+expect(capture.pixel_checksum).to_be_greater_than(0)
+expect(capture.non_background_pixels).to_be_greater_than(0)
+expect(capture.non_background_pixels).to_be_less_than(16 * 12)
+expect(capture.unique_sampled_colors).to_be_greater_than(1)
+```
+
+</details>
+
+#### feeds shared captures into the wm_compare graphical equality report
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 45 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val first = capture_engine2d_filled_rect(
+    16,
+    12,
+    "cpu",
+    0xFFFFFFFFu32,
+    0xFF2563EBu32
+)
+val second = capture_engine2d_filled_rect(
+    16,
+    12,
+    "cpu",
+    0xFFFFFFFFu32,
+    0xFF2563EBu32
+)
+val geometry = surface_geometry(16, 12, first.width, first.height, 1.0, "srgb")
+val scenario = render_case(
+    "engine2d_filled_rect",
+    16,
+    12,
+    "#ffffff",
+    ["clear", "filled_rect"],
+    "strict"
+)
+val expected = graphical_capture(
+    "2d:" + first.backend_name,
+    "render_target",
+    first.pixels,
+    geometry,
+    first.success,
+    first.error
+)
+val actual = graphical_capture(
+    "2d:" + second.backend_name,
+    "render_target",
+    second.pixels,
+    geometry,
+    second.success,
+    second.error
+)
+val report = graphical_equality_compare(scenario, expected, actual)
+expect(report.pixel_status).to_equal("exact_match")
+expect(report.accepted).to_equal(true)
+val sdn = graphical_equality_report_sdn(report)
+expect(sdn).to_contain("engine2d_filled_rect")
+expect(sdn).to_contain("expected_backend: \"2d:cpu\"")
+```
+
+</details>
+
+#### records bounded performance evidence for repeated Engine2D captures
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val perf = benchmark_engine2d_filled_rect_capture(16, 12, "cpu", 8)
+expect(perf.success).to_equal(true)
+expect(perf.backend_name).to_equal("cpu")
+expect(perf.iterations).to_equal(8)
+expect(perf.pixels_per_iteration).to_equal(16 * 12)
+expect(perf.aggregate_checksum).to_be_greater_than(0)
+expect(perf.total_us).to_be_greater_than(-1)
+val sdn = backend_capture_perf_report_sdn(perf)
+expect(sdn).to_contain("backend_capture_perf_report")
+expect(sdn).to_contain("iterations: 8")
+expect(sdn).to_contain("pixels_per_iteration: 192")
+```
+
+</details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Other |
+| Status | Active |
+| Source | `test/02_integration/rendering/graphical_backend_capture_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering:
+- graphical backend capture facade
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 4 |
+| Active scenarios | 4 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>

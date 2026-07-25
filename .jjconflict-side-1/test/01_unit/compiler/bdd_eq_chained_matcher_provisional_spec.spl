@@ -1,0 +1,49 @@
+# Regression spec: `expect(a == b)` / `expect(a != b)` comparison-form
+# subjects must let a chained `.to_be()`/`.to_equal()` matcher be
+# authoritative, not eagerly hard-fail the example before the matcher runs.
+#
+# Surface bug: pre-fix, `expect(a == b).to_be(false)` with a != b (so the
+# comparison is false and the matcher SHOULD pass) still false-reddened the
+# whole example. The Eq/NotEq arm of the interpreter's `expect` BDD
+# intrinsic (src/compiler_rust/compiler/src/interpreter_call/bdd.rs, inside
+# the "expect" case of eval_bdd_builtin) latched a HARD BDD_EXPECT_FAILED on
+# any `==`/`!=` mismatch before the chained matcher even ran — and a
+# passing matcher never clears a hard failure, only a PROVISIONAL one. The
+# sibling ordered-comparison arm (`<`, `<=`, `>`, `>=`) already carried this
+# exact fix (see its "PROVISIONAL failure, never a hard one" comment); the
+# Eq/NotEq arm was left hard, an incomplete prior fix.
+#
+# First observed via
+# test/01_unit/lib/common/gpu/font_atlas_composite_identity_spec.spl, whose
+# "is stable, target-aware, collision-safe, and fail-closed" and
+# "keeps the six native font targets distinct" examples both rely on
+# `expect(x == y).to_be(false)` over distinct keys and false-reddened before
+# this fix — NOT because any imported function returned an empty/wrong
+# value (the 141-char identity keys were computed correctly on both sides),
+# but because the BDD intrinsic's own pass/fail state machine discarded the
+# passing chained-matcher verdict.
+#
+# Acceptance:
+#   - all five chained-matcher cases below PASS
+#   - "bare equality mismatch deliberate-fail RED" still FAILS: a bare
+#     `expect a == b` with no chained matcher is still the only place that
+#     can catch that mismatch, and must keep doing so.
+
+describe "expect() Eq/NotEq comparison-form defers to a chained matcher":
+    it "chained to_be(false) passes when the equality comparison is false":
+        expect(1 == 2).to_be(false)
+
+    it "chained to_be(true) passes when the equality comparison is true":
+        expect(1 == 1).to_be(true)
+
+    it "chained to_be(false) passes when the inequality comparison is false":
+        expect(1 != 1).to_be(false)
+
+    it "chained to_be(true) passes when the inequality comparison is true":
+        expect(1 != 2).to_be(true)
+
+    it "chained to_equal(false) passes on a text mismatch comparison":
+        expect("a" == "b").to_equal(false)
+
+    it "bare equality mismatch deliberate-fail RED":
+        expect 1 == 2

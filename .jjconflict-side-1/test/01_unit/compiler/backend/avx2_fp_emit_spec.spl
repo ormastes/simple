@@ -1,0 +1,322 @@
+# test/unit/compiler/backend/avx2_fp_emit_spec.spl
+#
+# Byte-level golden tests for AVX2 YMM floating-point instruction emit functions.
+# Verifies emit_vaddps_ymm, emit_vsubps_ymm, emit_vmulps_ymm, emit_vdivps_ymm,
+# emit_vmaxps_ymm, emit_vminps_ymm, emit_vsqrtps_ymm, emit_vrsqrtps_ymm
+# produce exact Intel SDM byte sequences.
+#
+# All goldens derived from VEX-3 encoding formula and cross-checked:
+#   Byte 0: 0xC4 (3-byte VEX escape)
+#   Byte 1: ~R ~X ~B mmmmm  (225=0xE1 for 0F map, register-register)
+#   Byte 2: W ~vvvv L pp    (W=0, L=1 YMM, pp=00 PS; formula: (15-vvvv)*8+4)
+#   Byte 4: ModRM direct    (192 + reg%8*8 + rm%8)
+#
+# Note: llvm-mc may emit 2-byte VEX (C5h) for all-low-register ops; these
+# tests always verify the 3-byte (C4h) form the emitter produces.
+#
+# Reference: Intel SDM Vol 2C VADDPS/VSUBPS/VMULPS/VDIVPS/VMAXPS/VMINPS/VSQRTPS/VRSQRTPS;
+#            Intel SDM Vol 2A §2.3.5 (VEX prefix).
+
+import std.spec
+
+use compiler.backend.backend.native.encode_x86_64_avx2_fp.{
+    emit_vaddps_ymm,
+    emit_vsubps_ymm,
+    emit_vmulps_ymm,
+    emit_vdivps_ymm,
+    emit_vmaxps_ymm,
+    emit_vminps_ymm,
+    emit_vsqrtps_ymm,
+    emit_vrsqrtps_ymm
+}
+
+# ============================================================================
+# VADDPS — VEX.256.0F.WIG 58 /r
+# emit_vaddps_ymm(rd, rn, rm): rn→vvvv, rd→ModRM.reg, rm→ModRM.rm
+# ============================================================================
+
+describe "AVX2 FP emit_vaddps_ymm ymm0 ymm0 ymm0 golden":
+    # vaddps ymm0, ymm0, ymm0 → [0xC4, 0xE1, 0x7C, 0x58, 0xC0]
+    # byte1: ~R=1,~X=1,~B=1,mmmmm=1 → 225
+    # byte2: W=0,~vvvv=15(rn=0),L=1,pp=00 → 15*8+4=124
+    # ModRM: mod=11,reg=0,rm=0 → 192
+    it "emits 5 bytes":
+        val result = emit_vaddps_ymm(0, 0, 0)
+        expect result.len() == 5
+
+    it "byte0 is VEX 3-byte escape 0xC4":
+        val result = emit_vaddps_ymm(0, 0, 0)
+        expect result[0] == 196
+
+    it "byte1 is 0xE1 (~R=1 ~X=1 ~B=1 mmmmm=1)":
+        val result = emit_vaddps_ymm(0, 0, 0)
+        expect result[1] == 225
+
+    it "byte2 is 0x7C (W=0 ~vvvv=15 L=1 pp=00)":
+        val result = emit_vaddps_ymm(0, 0, 0)
+        expect result[2] == 124
+
+    it "byte3 is opcode 0x58":
+        val result = emit_vaddps_ymm(0, 0, 0)
+        expect result[3] == 88
+
+    it "byte4 is ModRM 0xC0 (mod=11 reg=0 rm=0)":
+        val result = emit_vaddps_ymm(0, 0, 0)
+        expect result[4] == 192
+
+describe "AVX2 FP emit_vaddps_ymm ymm3 ymm5 ymm7":
+    # vaddps ymm3, ymm5, ymm7 → [0xC4, 0xE1, 0x54, 0x58, 0xDF]
+    # byte2: W=0,~vvvv=10(rn=5),L=1,pp=00 → 10*8+4=84
+    # ModRM: mod=11,reg=3,rm=7 → 192+3*8+7=223
+    it "byte2 is 0x54 (W=0 ~vvvv=10 L=1 pp=00)":
+        val result = emit_vaddps_ymm(3, 5, 7)
+        expect result[2] == 84
+
+    it "byte3 is opcode 0x58":
+        val result = emit_vaddps_ymm(3, 5, 7)
+        expect result[3] == 88
+
+    it "byte4 is ModRM 0xDF (mod=11 reg=3 rm=7)":
+        val result = emit_vaddps_ymm(3, 5, 7)
+        expect result[4] == 223
+
+# ============================================================================
+# VSUBPS — VEX.256.0F.WIG 5C /r
+# ============================================================================
+
+describe "AVX2 FP emit_vsubps_ymm ymm0 ymm0 ymm0 golden":
+    # vsubps ymm0, ymm0, ymm0 → [0xC4, 0xE1, 0x7C, 0x5C, 0xC0]
+    it "emits 5 bytes":
+        val result = emit_vsubps_ymm(0, 0, 0)
+        expect result.len() == 5
+
+    it "byte0 is 0xC4":
+        val result = emit_vsubps_ymm(0, 0, 0)
+        expect result[0] == 196
+
+    it "byte2 is 0x7C (W=0 ~vvvv=15 L=1 pp=00)":
+        val result = emit_vsubps_ymm(0, 0, 0)
+        expect result[2] == 124
+
+    it "byte3 is opcode 0x5C":
+        val result = emit_vsubps_ymm(0, 0, 0)
+        expect result[3] == 92
+
+    it "byte4 is ModRM 0xC0":
+        val result = emit_vsubps_ymm(0, 0, 0)
+        expect result[4] == 192
+
+describe "AVX2 FP emit_vsubps_ymm ymm2 ymm3 ymm4":
+    # vsubps ymm2, ymm3, ymm4 → [0xC4, 0xE1, 0x64, 0x5C, 0xD4]
+    # byte2: ~vvvv=(15-3)=12,L=1,pp=00 → 12*8+4=100
+    # ModRM: mod=11,reg=2,rm=4 → 192+2*8+4=212
+    it "byte2 is 0x64 (W=0 ~vvvv=12 L=1 pp=00)":
+        val result = emit_vsubps_ymm(2, 3, 4)
+        expect result[2] == 100
+
+    it "byte4 is ModRM 0xD4 (mod=11 reg=2 rm=4)":
+        val result = emit_vsubps_ymm(2, 3, 4)
+        expect result[4] == 212
+
+# ============================================================================
+# VMULPS — VEX.256.0F.WIG 59 /r
+# ============================================================================
+
+describe "AVX2 FP emit_vmulps_ymm ymm0 ymm0 ymm0 golden":
+    # vmulps ymm0, ymm0, ymm0 → [0xC4, 0xE1, 0x7C, 0x59, 0xC0]
+    it "emits 5 bytes":
+        val result = emit_vmulps_ymm(0, 0, 0)
+        expect result.len() == 5
+
+    it "byte3 is opcode 0x59":
+        val result = emit_vmulps_ymm(0, 0, 0)
+        expect result[3] == 89
+
+    it "byte4 is ModRM 0xC0":
+        val result = emit_vmulps_ymm(0, 0, 0)
+        expect result[4] == 192
+
+describe "AVX2 FP emit_vmulps_ymm ymm1 ymm2 ymm3":
+    # vmulps ymm1, ymm2, ymm3 → [0xC4, 0xE1, 0x6C, 0x59, 0xCB]
+    # byte2: ~vvvv=(15-2)=13,L=1,pp=00 → 13*8+4=108
+    # ModRM: mod=11,reg=1,rm=3 → 192+1*8+3=203
+    it "byte2 is 0x6C (W=0 ~vvvv=13 L=1 pp=00)":
+        val result = emit_vmulps_ymm(1, 2, 3)
+        expect result[2] == 108
+
+    it "byte4 is ModRM 0xCB (mod=11 reg=1 rm=3)":
+        val result = emit_vmulps_ymm(1, 2, 3)
+        expect result[4] == 203
+
+# ============================================================================
+# VDIVPS — VEX.256.0F.WIG 5E /r
+# ============================================================================
+
+describe "AVX2 FP emit_vdivps_ymm ymm0 ymm0 ymm0 golden":
+    # vdivps ymm0, ymm0, ymm0 → [0xC4, 0xE1, 0x7C, 0x5E, 0xC0]
+    it "emits 5 bytes":
+        val result = emit_vdivps_ymm(0, 0, 0)
+        expect result.len() == 5
+
+    it "byte3 is opcode 0x5E":
+        val result = emit_vdivps_ymm(0, 0, 0)
+        expect result[3] == 94
+
+    it "byte4 is ModRM 0xC0":
+        val result = emit_vdivps_ymm(0, 0, 0)
+        expect result[4] == 192
+
+describe "AVX2 FP emit_vdivps_ymm ymm4 ymm5 ymm6":
+    # vdivps ymm4, ymm5, ymm6 → [0xC4, 0xE1, 0x54, 0x5E, 0xE6]
+    # byte2: ~vvvv=(15-5)=10,L=1,pp=00 → 10*8+4=84
+    # ModRM: mod=11,reg=4,rm=6 → 192+4*8+6=230
+    it "byte2 is 0x54 (W=0 ~vvvv=10 L=1 pp=00)":
+        val result = emit_vdivps_ymm(4, 5, 6)
+        expect result[2] == 84
+
+    it "byte4 is ModRM 0xE6 (mod=11 reg=4 rm=6)":
+        val result = emit_vdivps_ymm(4, 5, 6)
+        expect result[4] == 230
+
+# ============================================================================
+# VMAXPS — VEX.256.0F.WIG 5F /r
+# ============================================================================
+
+describe "AVX2 FP emit_vmaxps_ymm ymm0 ymm0 ymm0 golden":
+    # vmaxps ymm0, ymm0, ymm0 → [0xC4, 0xE1, 0x7C, 0x5F, 0xC0]
+    it "emits 5 bytes":
+        val result = emit_vmaxps_ymm(0, 0, 0)
+        expect result.len() == 5
+
+    it "byte3 is opcode 0x5F":
+        val result = emit_vmaxps_ymm(0, 0, 0)
+        expect result[3] == 95
+
+    it "byte4 is ModRM 0xC0":
+        val result = emit_vmaxps_ymm(0, 0, 0)
+        expect result[4] == 192
+
+describe "AVX2 FP emit_vmaxps_ymm ymm1 ymm3 ymm5":
+    # vmaxps ymm1, ymm3, ymm5 → [0xC4, 0xE1, 0x64, 0x5F, 0xCD]
+    # byte2: ~vvvv=(15-3)=12,L=1,pp=00 → 12*8+4=100
+    # ModRM: mod=11,reg=1,rm=5 → 192+1*8+5=205
+    it "byte2 is 0x64 (W=0 ~vvvv=12 L=1 pp=00)":
+        val result = emit_vmaxps_ymm(1, 3, 5)
+        expect result[2] == 100
+
+    it "byte4 is ModRM 0xCD (mod=11 reg=1 rm=5)":
+        val result = emit_vmaxps_ymm(1, 3, 5)
+        expect result[4] == 205
+
+# ============================================================================
+# VMINPS — VEX.256.0F.WIG 5D /r
+# ============================================================================
+
+describe "AVX2 FP emit_vminps_ymm ymm0 ymm0 ymm0 golden":
+    # vminps ymm0, ymm0, ymm0 → [0xC4, 0xE1, 0x7C, 0x5D, 0xC0]
+    it "emits 5 bytes":
+        val result = emit_vminps_ymm(0, 0, 0)
+        expect result.len() == 5
+
+    it "byte3 is opcode 0x5D":
+        val result = emit_vminps_ymm(0, 0, 0)
+        expect result[3] == 93
+
+    it "byte4 is ModRM 0xC0":
+        val result = emit_vminps_ymm(0, 0, 0)
+        expect result[4] == 192
+
+describe "AVX2 FP emit_vminps_ymm ymm2 ymm4 ymm6":
+    # vminps ymm2, ymm4, ymm6 → [0xC4, 0xE1, 0x5C, 0x5D, 0xD6]
+    # byte2: ~vvvv=(15-4)=11,L=1,pp=00 → 11*8+4=92
+    # ModRM: mod=11,reg=2,rm=6 → 192+2*8+6=214
+    it "byte2 is 0x5C (W=0 ~vvvv=11 L=1 pp=00)":
+        val result = emit_vminps_ymm(2, 4, 6)
+        expect result[2] == 92
+
+    it "byte4 is ModRM 0xD6 (mod=11 reg=2 rm=6)":
+        val result = emit_vminps_ymm(2, 4, 6)
+        expect result[4] == 214
+
+# ============================================================================
+# VSQRTPS — VEX.256.0F.WIG 51 /r  (2-operand, vvvv=1111)
+# emit_vsqrtps_ymm(rd, rm): vvvv=1111 (rn=0 → 15-0=15)
+# ============================================================================
+
+describe "AVX2 FP emit_vsqrtps_ymm ymm0 ymm0 golden":
+    # vsqrtps ymm0, ymm0 → [0xC4, 0xE1, 0x7C, 0x51, 0xC0]
+    # byte2: vvvv=1111(rn=0) → 15*8+4=124
+    it "emits 5 bytes":
+        val result = emit_vsqrtps_ymm(0, 0)
+        expect result.len() == 5
+
+    it "byte0 is 0xC4":
+        val result = emit_vsqrtps_ymm(0, 0)
+        expect result[0] == 196
+
+    it "byte1 is 0xE1 (~R=1 ~X=1 ~B=1 mmmmm=1)":
+        val result = emit_vsqrtps_ymm(0, 0)
+        expect result[1] == 225
+
+    it "byte2 is 0x7C (W=0 ~vvvv=1111 L=1 pp=00)":
+        val result = emit_vsqrtps_ymm(0, 0)
+        expect result[2] == 124
+
+    it "byte3 is opcode 0x51":
+        val result = emit_vsqrtps_ymm(0, 0)
+        expect result[3] == 81
+
+    it "byte4 is ModRM 0xC0 (mod=11 reg=0 rm=0)":
+        val result = emit_vsqrtps_ymm(0, 0)
+        expect result[4] == 192
+
+describe "AVX2 FP emit_vsqrtps_ymm ymm3 ymm5":
+    # vsqrtps ymm3, ymm5 → [0xC4, 0xE1, 0x7C, 0x51, 0xDD]
+    # byte2: vvvv=1111 (rn=0 always) → 124
+    # ModRM: mod=11,reg=3,rm=5 → 192+3*8+5=221
+    it "byte2 is 0x7C (vvvv=1111 always for vsqrtps)":
+        val result = emit_vsqrtps_ymm(3, 5)
+        expect result[2] == 124
+
+    it "byte4 is ModRM 0xDD (mod=11 reg=3 rm=5)":
+        val result = emit_vsqrtps_ymm(3, 5)
+        expect result[4] == 221
+
+# ============================================================================
+# VRSQRTPS — VEX.256.0F.WIG 52 /r  (2-operand, vvvv=1111)
+# emit_vrsqrtps_ymm(rd, rm): vvvv=1111 (rn=0 → 15-0=15)
+# ============================================================================
+
+describe "AVX2 FP emit_vrsqrtps_ymm ymm0 ymm0 golden":
+    # vrsqrtps ymm0, ymm0 → [0xC4, 0xE1, 0x7C, 0x52, 0xC0]
+    it "emits 5 bytes":
+        val result = emit_vrsqrtps_ymm(0, 0)
+        expect result.len() == 5
+
+    it "byte0 is 0xC4":
+        val result = emit_vrsqrtps_ymm(0, 0)
+        expect result[0] == 196
+
+    it "byte2 is 0x7C (W=0 ~vvvv=1111 L=1 pp=00)":
+        val result = emit_vrsqrtps_ymm(0, 0)
+        expect result[2] == 124
+
+    it "byte3 is opcode 0x52":
+        val result = emit_vrsqrtps_ymm(0, 0)
+        expect result[3] == 82
+
+    it "byte4 is ModRM 0xC0":
+        val result = emit_vrsqrtps_ymm(0, 0)
+        expect result[4] == 192
+
+describe "AVX2 FP emit_vrsqrtps_ymm ymm4 ymm6":
+    # vrsqrtps ymm4, ymm6 → [0xC4, 0xE1, 0x7C, 0x52, 0xE6]
+    # byte2: vvvv=1111 (rn=0 always) → 124
+    # ModRM: mod=11,reg=4,rm=6 → 192+4*8+6=230
+    it "byte2 is 0x7C (vvvv=1111 always for vrsqrtps)":
+        val result = emit_vrsqrtps_ymm(4, 6)
+        expect result[2] == 124
+
+    it "byte4 is ModRM 0xE6 (mod=11 reg=4 rm=6)":
+        val result = emit_vrsqrtps_ymm(4, 6)
+        expect result[4] == 230

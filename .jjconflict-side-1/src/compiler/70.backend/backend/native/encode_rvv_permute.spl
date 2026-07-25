@@ -1,0 +1,132 @@
+# src/compiler/70.backend/backend/native/encode_rvv_permute.spl
+#
+# RVV v1.0 Permutation / Slide Byte-Emit Encoder — Pure Simple
+#
+# Produces exact 4-byte little-endian instruction words for RISC-V Vector
+# slide and gather/scatter permutation instructions.
+#
+# Reference: RISC-V Vector Extension v1.0 §17 (Vector Permutation Instructions)
+#
+# Instruction format (all OP-V, 32-bit, opcode 0x57):
+#   bits[31:26] = funct6
+#   bit[25]     = vm   (1=unmasked)
+#   bits[24:20] = vs2
+#   bits[19:15] = rs1/vs1
+#   bits[14:12] = funct3  (OPIVV=0, OPIVX=4, OPMVX=6)
+#   bits[11:7]  = vd
+#   bits[6:0]   = opcode 0x57
+#
+# funct6/funct3 values (RVV v1.0 §17):
+#   vslideup.vx   funct6=14 (001110)  funct3=OPIVX=4  vm=1
+#   vslidedown.vx funct6=15 (001111)  funct3=OPIVX=4  vm=1
+#   vrgather.vv   funct6=12 (001100)  funct3=OPIVV=0  vm=1
+#   vrgather.vx   funct6=12 (001100)  funct3=OPIVX=4  vm=1
+#   vslide1up.vx  funct6=14 (001110)  funct3=OPMVX=6  vm=1
+#   vslide1down.vx funct6=15 (001111)  funct3=OPMVX=6  vm=1
+#
+# Encoding convention: multiplication/division only (avoids negative-bit-op
+# hazards in interpreter mode). Consistent with encode_rvv_zvk.spl and
+# encode_rvv_misc.spl.
+# Return type: [i64] (4 bytes, little-endian).
+#
+# ALL byte goldens derived from RVV v1.0 §17 spec + manual derivation formula
+# (llvm-mc unavailable on build host).
+
+# ============================================================================
+# Internal helpers (independent copy; encode_rvv_zvk.spl is a separate module)
+# ============================================================================
+
+fn _rvv_perm_word_to_le4(word: i64) -> [i64]:
+    """
+    Convert a 32-bit instruction word to 4 little-endian bytes.
+    Uses division/modulo to avoid negative bit-op hazards in interpreter.
+    """
+    var w = word
+    if w < 0:
+        w = w + 4294967296
+    val b0 = w % 256
+    val b1 = (w / 256) % 256
+    val b2 = (w / 65536) % 256
+    val b3 = (w / 16777216) % 256
+    [b0, b1, b2, b3]
+
+fn _rvv_perm_encode(funct6: i64, vm: i64, vs2: i64, rs1_vs1: i64, funct3: i64, vd: i64) -> [i64]:
+    """
+    Encode an OP-V instruction (opcode=0x57=87) with parameterised funct3.
+
+    funct6:   6-bit function code (bits[31:26])
+    vm:       1=unmasked (bit[25])
+    vs2:      source register 2 (bits[24:20])
+    rs1_vs1:  scalar GPR or vector source register (bits[19:15])
+    funct3:   OPIVV=0, OPIVX=4, OPMVX=6 (bits[14:12])
+    vd:       destination register (bits[11:7])
+    """
+    val word = (funct6 * 67108864) + (vm * 33554432) + (vs2 * 1048576) + (rs1_vs1 * 32768) + (funct3 * 4096) + (vd * 128) + 87
+    _rvv_perm_word_to_le4(word)
+
+# ============================================================================
+# Slide instructions (RVV v1.0 §17.3)
+# ============================================================================
+
+"""Emit vslideup.vx vd, vs2, rs1 — slide elements up by rs1 positions.
+
+# RVV v1.0 §17.3.1 vslideup; funct6=14 (001110); OPIVX funct3=4; vm=1
+# Canonical (v0, v0, x0): LE [0x57, 0x40, 0x00, 0x3A]
+"""
+fn emit_rvv_vslideup_vx(vd: i64, vs2: i64, rs1: i64) -> [i64]:
+    _rvv_perm_encode(14, 1, vs2 % 32, rs1 % 32, 4, vd % 32)
+
+"""Emit vslidedown.vx vd, vs2, rs1 — slide elements down by rs1 positions.
+
+# RVV v1.0 §17.3.2 vslidedown; funct6=15 (001111); OPIVX funct3=4; vm=1
+# Canonical (v0, v0, x0): LE [0x57, 0x40, 0x00, 0x3E]
+"""
+fn emit_rvv_vslidedown_vx(vd: i64, vs2: i64, rs1: i64) -> [i64]:
+    _rvv_perm_encode(15, 1, vs2 % 32, rs1 % 32, 4, vd % 32)
+
+"""Emit vslide1up.vx vd, vs2, rs1 — slide up by 1, insert rs1 at bottom.
+
+# RVV v1.0 §17.3.3 vslide1up; funct6=14 (001110); OPMVX funct3=6; vm=1
+# Canonical (v0, v0, x0): LE [0x57, 0x60, 0x00, 0x3A]
+"""
+fn emit_rvv_vslide1up_vx(vd: i64, vs2: i64, rs1: i64) -> [i64]:
+    _rvv_perm_encode(14, 1, vs2 % 32, rs1 % 32, 6, vd % 32)
+
+"""Emit vslide1down.vx vd, vs2, rs1 — slide down by 1, insert rs1 at top.
+
+# RVV v1.0 §17.3.4 vslide1down; funct6=15 (001111); OPMVX funct3=6; vm=1
+# Canonical (v0, v0, x0): LE [0x57, 0x60, 0x00, 0x3E]
+"""
+fn emit_rvv_vslide1down_vx(vd: i64, vs2: i64, rs1: i64) -> [i64]:
+    _rvv_perm_encode(15, 1, vs2 % 32, rs1 % 32, 6, vd % 32)
+
+# ============================================================================
+# Gather instructions (RVV v1.0 §17.4)
+# ============================================================================
+
+"""Emit vrgather.vv vd, vs2, vs1 — gather elements by index vector.
+
+# RVV v1.0 §17.4 vrgather.vv; funct6=12 (001100); OPIVV funct3=0; vm=1
+# Canonical (v0, v0, v0): LE [0x57, 0x00, 0x00, 0x32]
+"""
+fn emit_rvv_vrgather_vv(vd: i64, vs2: i64, vs1: i64) -> [i64]:
+    _rvv_perm_encode(12, 1, vs2 % 32, vs1 % 32, 0, vd % 32)
+
+"""Emit vrgather.vx vd, vs2, rs1 — broadcast element at index rs1.
+
+# RVV v1.0 §17.4 vrgather.vx; funct6=12 (001100); OPIVX funct3=4; vm=1
+# Canonical (v0, v0, x0): LE [0x57, 0x40, 0x00, 0x32]
+"""
+fn emit_rvv_vrgather_vx(vd: i64, vs2: i64, rs1: i64) -> [i64]:
+    _rvv_perm_encode(12, 1, vs2 % 32, rs1 % 32, 4, vd % 32)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export emit_rvv_vslideup_vx
+export emit_rvv_vslidedown_vx
+export emit_rvv_vslide1up_vx
+export emit_rvv_vslide1down_vx
+export emit_rvv_vrgather_vv
+export emit_rvv_vrgather_vx

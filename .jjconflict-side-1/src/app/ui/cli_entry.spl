@@ -1,0 +1,199 @@
+# Simple UI - Minimal CLI Entry
+#
+# A narrow entrypoint for `simple ui ...` dispatch from the unified Simple CLI.
+# This keeps argument parsing simple and avoids the direct-script fallback logic
+# used by src/app/ui/main.spl.
+
+use app.ui.detect.{detect_gui_backend}
+use app.ui.backend_loader.{run_ui_backend_dyn, run_ui_render_dyn}
+use app.ui.backend_entry_args.{parse_ui_port_or_default}
+use app.ui.access_cli.{run_ui_access_cli}
+use app.io.cli_ops.{cli_get_args}
+use std.nogc_sync_mut.io.file_ops.{file_exists}
+
+pub fn run_ui_cli_entry() -> i64:
+    val parsed = parse_ui_cli()
+    val arg_count = parsed.0
+    val mode = parsed.1
+    val file_path = parsed.2
+    val port = parsed.3
+    val access_db_path = parsed.4
+
+    if arg_count == 0:
+        print_usage()
+        return 1
+
+    if mode == "-h" or mode == "--help":
+        print_usage()
+        return 0
+
+    if ui_access_mode(mode):
+        return run_ui_access_cli(collect_ui_access_args(), port, access_db_path)
+
+    if mode == "tui":
+        if arg_count < 2:
+            print "Error: tui mode requires a .ui.sdn file path"
+            return 1
+        return run_ui_backend_dyn("tui", file_path, port, access_db_path)
+
+    if mode == "tauri":
+        if arg_count < 2:
+            print "Error: tauri mode requires a .ui.sdn file path"
+            return 1
+        return run_ui_backend_dyn("tauri", file_path, port, access_db_path)
+
+    if mode == "web":
+        if arg_count < 2:
+            print "Error: web mode requires a .ui.sdn file path"
+            return 1
+        return run_ui_backend_dyn("web", file_path, port, access_db_path)
+
+    if mode == "electron":
+        if arg_count < 2:
+            print "Error: electron mode requires a .ui.sdn file path"
+            return 1
+        return run_ui_backend_dyn("electron", file_path, port, access_db_path)
+
+    if mode == "browser":
+        if arg_count < 2:
+            print "Error: browser mode requires a .ui.sdn file path"
+            return 1
+        return run_ui_backend_dyn("browser", file_path, port, access_db_path)
+
+    if mode == "tui_web":
+        if arg_count < 2:
+            print "Error: tui_web mode requires a .ui.sdn file path"
+            return 1
+        return run_ui_backend_dyn("tui_web", file_path, port, access_db_path)
+
+    if mode == "headless" or mode == "none":
+        if arg_count < 2:
+            print "Error: headless mode requires a .ui.sdn file path"
+            return 1
+        return run_ui_backend_dyn("headless", file_path, port, access_db_path)
+
+    if mode == "gui" or mode == "desktop":
+        if arg_count < 2:
+            print "Error: gui mode requires a .ui.sdn file path"
+            return 1
+        return run_ui_backend_dyn(detect_gui_backend(), file_path, port, access_db_path)
+
+    if mode == "render":
+        return run_ui_render_dyn(collect_render_args())
+
+    if file_exists(mode):
+        return run_detected_backend(backend: detect_gui_backend(), file_path: mode, port: 3000, access_db_path: access_db_path)
+
+    print "Error: Unknown mode '{mode}'. Use 'tui', 'web', 'tauri', 'electron', 'browser', 'render', or 'headless'."
+    print_usage()
+    return 1
+
+fn main() -> i64:
+    run_ui_cli_entry()
+
+fn parse_ui_cli() -> (i64, text, text, i32, text):
+    val raw_args = cli_get_args()
+    var found_ui = false
+    var arg_count = 0
+    var mode = ""
+    var file_path = ""
+    var port = 3000
+    var access_db_path = ""
+    var prev_was_port = false
+    var prev_was_access_db = false
+    for arg in raw_args:
+        if not found_ui:
+            if arg == "ui":
+                found_ui = true
+            continue
+
+        if prev_was_port:
+            port = parse_ui_port_or_default(arg, port)
+            prev_was_port = false
+            continue
+        elif prev_was_access_db:
+            access_db_path = arg
+            prev_was_access_db = false
+            continue
+        elif arg == "--port":
+            prev_was_port = true
+            continue
+        elif arg.starts_with("--port="):
+            port = parse_ui_port_or_default(arg[7:], port)
+            continue
+        elif arg == "--ui-access-db":
+            prev_was_access_db = true
+            continue
+        elif arg.starts_with("--ui-access-db="):
+            access_db_path = arg[15:]
+            continue
+
+        if arg_count == 0:
+            mode = arg
+        elif arg_count == 1:
+            file_path = arg
+
+        arg_count = arg_count + 1
+    return (arg_count, mode, file_path, port, access_db_path)
+
+fn run_detected_backend(backend: text, file_path: text, port: i32, access_db_path: text) -> i64:
+    run_ui_backend_dyn(backend, file_path, port, access_db_path)
+
+fn collect_render_args() -> [text]:
+    val raw_args = cli_get_args()
+    var result: [text] = ["render"]
+    var found_render = false
+    for arg in raw_args:
+        if found_render:
+            result = result.push(arg)
+        elif arg == "render":
+            found_render = true
+    return result
+
+fn ui_access_mode(mode: text) -> bool:
+    mode == "windows" or mode == "snapshot" or mode == "surface" or mode == "find" or mode == "act" or mode == "history"
+
+fn collect_ui_access_args() -> [text]:
+    val raw_args = cli_get_args()
+    var result: [text] = []
+    var found_ui = false
+    for arg in raw_args:
+        if found_ui:
+            result = result.push(arg)
+        elif arg == "ui":
+            found_ui = true
+    result
+
+fn print_usage():
+    print "Simple UI Renderer"
+    print ""
+    print "Usage:"
+    print "  simple ui <file.ui.sdn>                      Auto-detect backend (default)"
+    print "  simple ui tui <file.ui.sdn>                  TUI mode (terminal)"
+    print "  simple ui tauri <file.ui.sdn> [--port N]     Tauri desktop mode"
+    print "  simple ui web <file.ui.sdn> [--port N]       Web GUI mode"
+    print "  simple ui electron <file.ui.sdn> [--port N]  Electron desktop mode"
+    print "  simple ui browser <file.ui.sdn> [--port N]   Browser engine mode (GPU/software)"
+    print "  simple ui gui <file.ui.sdn> [--port N]       Auto-detect GUI backend"
+    print "  simple ui tui_web <file.ui.sdn> [--port N]   TUI + web hybrid mode"
+    print "  simple ui headless <file.ui.sdn>             Headless mode (testing/CI)"
+    print "  simple ui render [file] [options]             Export render (text/html)"
+    print "  simple ui windows [--port N] [--json]         List live GUI/TUI surfaces"
+    print "  simple ui snapshot [--port N] [--json]        Capture the live semantic UI"
+    print "  simple ui surface <id> [--port N] [--json]    Inspect one live surface"
+    print "  simple ui find [selectors] [--json]           Find live semantic nodes"
+    print "  simple ui act --canonical ID --action NAME --revision N  Run one observed semantic action"
+    print "  simple ui history [--surface ID] [--count N]  Read bounded access history"
+    print ""
+    print "Render options:"
+    print "  --format text|html|both   Output format (default: text)"
+    print "  --adapter NAME            App adapter (dashboard, llm_dashboard, word, sheets, ...)"
+    print "  --mode MODE               Adapter-specific mode"
+    print "  --theme NAME              Theme name (default: dark)"
+    print "  --width N                 Viewport width (default: 80)"
+    print "  --height N                Viewport height (default: 24)"
+    print "  --output PATH, -o PATH    Write exported render to a file"
+    print "  --ui-access-db PATH       Override persisted UI access store path"
+    print "  --json                    Emit one simple.access/v1 JSON envelope"
+    print "  --timeout MS              Finite access timeout (max 30000)"
+    print "  --demo                    Use built-in demo asset"

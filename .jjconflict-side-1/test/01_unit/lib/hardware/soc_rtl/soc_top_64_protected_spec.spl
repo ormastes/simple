@@ -1,0 +1,120 @@
+use std.spipe.*
+use std.hardware.rv64gc_rtl.*
+use std.hardware.soc_rtl.*
+use std.hardware.soc_rtl.soc_top_64.{soc64_accept_core_request, soc64_uart_push_rx}
+
+fn protected_request(soc: SocTop64State, valid: bool, addr: i64, size: u32,
+                     write: bool, data: i64, atomic: bool) -> Core64CycleResult:
+    Core64CycleResult(state: soc.core, bus_valid: valid, bus_addr: addr,
+        bus_size: size, bus_write: write, bus_wdata: data, bus_is_pte: false,
+        bus_atomic: atomic, rvfi: core64_rvfi_invalid(soc.core.rvfi_order))
+
+describe "RV64 protected SoC bus":
+    it "consumes a preinitialized DTB response on the next clock":
+        var soc = soc_top_64_sim_preload_dtb(soc_top_64_protected_init())
+        soc.core.pc = 0x8800_0000
+        val issued = soc_top_64_protected_tick(soc)
+        expect(issued.protected_response_valid).to_be(true)
+        expect(issued.protected_response_error).to_be(false)
+        expect(issued.protected_response_data).to_equal(0x0DD0)
+        val consumed = soc_top_64_protected_tick(issued)
+        expect(consumed.protected_response_valid).to_be(false)
+
+    it "connects the protected core fetch to the RV64 boot ROM":
+        val soc = soc_top_64_init(0x1000)
+        val requested = soc_top_64_protected_tick(soc)
+
+        expect(soc.core.atomic_bus_exclusive).to_be(true)
+        expect(requested.protected_response_valid).to_be(true)
+        expect(requested.protected_response_error).to_be(false)
+        expect(requested.protected_response_data).to_equal(0x0137)
+        expect(soc_top_64_protected_tick(requested).protected_response_valid).to_be(false)
+
+    it "preserves byte and halfword address lanes and sizes":
+        val soc = soc_top_64_init(0x1000)
+        val byte_0 = soc64_accept_core_request(soc,
+            protected_request(soc, true, 0x1000, 1, false, 0, false))
+        val byte_1 = soc64_accept_core_request(soc,
+            protected_request(soc, true, 0x1001, 1, false, 0, false))
+        val half_1 = soc64_accept_core_request(soc,
+            protected_request(soc, true, 0x1002, 2, false, 0, false))
+        val half_write = soc64_accept_core_request(soc,
+            protected_request(soc, true, 0x8000_0002, 2, true, 0xABCD, false))
+        val byte_write = soc64_accept_core_request(half_write,
+            protected_request(half_write, true, 0x8000_0001, 1, true, 0xEF, false))
+
+        expect(byte_0.protected_response_data).to_equal(0x37)
+        expect(byte_1.protected_response_data).to_equal(0x01)
+        expect(half_1.protected_response_data).to_equal(0x8010)
+        expect(ram64_read(byte_write.ram, 0, 8)).to_equal(0xABCD_EF00)
+
+    it "applies UART read and write effects once per valid request":
+        val soc = soc_top_64_init(0x1000)
+        val write_req = protected_request(soc, true, 0x1000_0000, 1, true, 65, false)
+        val written = soc64_accept_core_request(soc, write_req)
+        val idle = protected_request(written, false, 0, 1, false, 0, false)
+        val not_repeated = soc64_accept_core_request(written, idle)
+        var with_rx = soc64_uart_push_rx(not_repeated, 66)
+        with_rx = soc64_uart_push_rx(with_rx, 67)
+        val read = soc64_accept_core_request(with_rx,
+            protected_request(with_rx, true, 0x1000_0000, 1, false, 0, false))
+
+        expect(not_repeated.uart_tx.len()).to_equal(1)
+        expect(not_repeated.uart_tx[0]).to_equal(65)
+        expect(read.protected_response_data).to_equal(66)
+        expect(read.uart_rx.len()).to_equal(1)
+        expect(read.uart_rx[0]).to_equal(67)
+
+    it "delivers CLINT and PLIC interrupt levels to the protected core":
+        var soc = soc_top_64_init(0x1000)
+        soc.clint.mtimecmp_lo = 1
+        soc.clint.mtimecmp_hi = 0
+        soc.plic = plic_mmio_write(soc.plic, 9 * 4, 1)
+        soc.plic = plic_mmio_write(soc.plic, PLIC_ENABLE_OFF, 1 << 9)
+        soc.plic = plic_set_pending(soc.plic, 9, true)
+        val delivered = soc_top_64_protected_tick(soc)
+
+        expect(delivered.core.csr_m.mip & MIP_MTIP_MASK).to_equal(MIP_MTIP_MASK)
+        expect(delivered.core.csr_m.mip & MIP_MEIP_MASK).to_equal(MIP_MEIP_MASK)
+
+    it "errors on unmapped and unqualified atomic requests":
+        val soc = soc_top_64_sim_preload_dtb(soc_top_64_protected_init())
+        val unmapped = soc64_accept_core_request(soc,
+            protected_request(soc, true, 0x4000_0000, 4, false, 0, false))
+        val atomic_ram = soc64_accept_core_request(soc,
+            protected_request(soc, true, 0x8000_0000, 8, true, 0x1234, true))
+        var shared = soc
+        shared.core.atomic_bus_exclusive = false
+        val rejected = soc64_accept_core_request(shared,
+            protected_request(shared, true, 0x8000_0000, 8, true, 0x5678, true))
+        val atomic_mmio = soc64_accept_core_request(soc,
+            protected_request(soc, true, 0x1000_0000, 4, true, 1, true))
+        val bootrom_write = soc64_accept_core_request(soc,
+            protected_request(soc, true, 0x1000, 4, true, 1, false))
+        val dtb_write = soc64_accept_core_request(soc,
+            protected_request(soc, true, 0x8800_0000, 4, true, 1, false))
+        val dtb_read = soc64_accept_core_request(soc,
+            protected_request(soc, true, 0x8800_0000, 4, false, 0, false))
+
+        expect(unmapped.protected_response_error).to_be(true)
+        expect(atomic_ram.protected_response_error).to_be(false)
+        expect(ram64_read(atomic_ram.ram, 0, 8)).to_equal(0x1234)
+        expect(rejected.protected_response_error).to_be(true)
+        expect(ram64_read(rejected.ram, 0, 8)).to_equal(0)
+        expect(atomic_mmio.protected_response_error).to_be(true)
+        expect(bootrom_write.protected_response_error).to_be(true)
+        expect(dtb_write.protected_response_error).to_be(true)
+        expect(dtb_write.protected_response_valid).to_be(true)
+        expect(dtb_read.protected_response_valid).to_be(true)
+        expect(dtb_read.protected_response_error).to_be(false)
+        expect(dtb_read.protected_response_data).to_equal(0xEDFE0DD0)
+        expect(dtb_write.ram.size).to_equal(0x1000_0000)
+        expect(ram64_read(dtb_write.ram, 0x0800_0000, 4)).to_equal(
+            ram64_read(soc.ram, 0x0800_0000, 4))
+        expect(atomic_mmio.uart_tx.len()).to_equal(0)
+
+    it "publishes the protected memory owners through the RV64 package":
+        expect(memory64_reset().phase).to_equal(0)
+        expect(pmp64_entries_reset().cfg_0).to_equal(0)
+        expect(sv39_is_canonical(0x1000)).to_be(true)
+        expect(core64_init_single_master(0x1000).atomic_bus_exclusive).to_be(true)

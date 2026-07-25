@@ -1,0 +1,140 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+# Configuration
+SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
+DRIVER="src/app/test/browser_interaction_capture.spl"
+ORACLE="src/app/test/gui_readability_oracle.spl"
+# Interpreter glyph paint is slow: the 4-render capture takes ~4.5 min.
+DRIVER_TIMEOUT_SECS="${SIMPLE_BROWSER_INTERACTION_TIMEOUT_SECS:-600}"
+ORACLE_TIMEOUT_SECS=120
+WORK_DIR="${SIMPLE_BROWSER_INTERACTION_WORK_DIR:-build/browser-interaction}"
+EVIDENCE_LOG="$WORK_DIR/evidence.log"
+ENV_PATH="$WORK_DIR/evidence.env"
+
+have() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+run_with_timeout() {
+    secs="$1"
+    shift
+    if have timeout; then
+        timeout "$secs" "$@"
+    else
+        "$@"
+    fi
+}
+
+emit_file_status() {
+    key="$1"
+    path="$2"
+    if [ -s "$path" ]; then
+        echo "$key=$path"
+    else
+        echo "$key="
+    fi
+}
+
+mkdir -p "$WORK_DIR"
+rm -f "$EVIDENCE_LOG" "$ENV_PATH"
+
+echo "check=browser_interaction"
+echo "simple_bin=$SIMPLE_BIN"
+echo "driver=$DRIVER"
+
+if [ ! -x "$SIMPLE_BIN" ]; then
+    echo "overall=fail"
+    echo "error=missing_executable:$SIMPLE_BIN"
+    exit 1
+fi
+if [ ! -f "$DRIVER" ]; then
+    echo "overall=fail"
+    echo "error=missing_driver:$DRIVER"
+    exit 1
+fi
+if [ ! -f "$ORACLE" ]; then
+    echo "overall=fail"
+    echo "error=missing_oracle:$ORACLE"
+    exit 1
+fi
+
+all_pass=true
+{
+    echo "check=browser_interaction"
+
+    # ---- Capture driver: scroll (G2.4) + low-res text renders (G2.3) ----
+    # Offscreen only — the pure-Simple web layout renderer never opens a display.
+    set +e
+    run_with_timeout "$DRIVER_TIMEOUT_SECS" env \
+        DISPLAY="" \
+        SIMPLE_GUI=0 \
+        "$SIMPLE_BIN" run "$DRIVER" >"$WORK_DIR/capture.log" 2>&1
+    driver_exit=$?
+    set -e
+    echo "driver_exit=$driver_exit"
+
+    # Forward the driver's key=value evidence lines (drops compiler warnings).
+    grep -E '^[a-z0-9_]+=' "$WORK_DIR/capture.log" || true
+
+    if [ "$driver_exit" -ne 0 ]; then
+        all_pass=false
+        echo "driver_status=fail"
+    elif ! grep -q '^capture_overall=pass$' "$WORK_DIR/capture.log"; then
+        all_pass=false
+        echo "driver_status=fail"
+    else
+        echo "driver_status=pass"
+    fi
+    emit_file_status "capture_log" "$WORK_DIR/capture.log"
+
+    # ---- Readability oracle over the low-res text captures (G2.3) ----
+    for res in 640x480 800x600; do
+        ppm="$WORK_DIR/lowres_${res}.ppm"
+        oracle_log="$WORK_DIR/oracle_${res}.log"
+        if [ -s "$ppm" ]; then
+            set +e
+            run_with_timeout "$ORACLE_TIMEOUT_SECS" \
+                "$SIMPLE_BIN" run "$ORACLE" "$ppm" >"$oracle_log" 2>&1
+            oracle_exit=$?
+            set -e
+            if [ "$oracle_exit" -eq 0 ] && grep -q '^overall=pass$' "$oracle_log"; then
+                echo "lowres_${res}_status=pass"
+            else
+                echo "lowres_${res}_status=fail"
+                all_pass=false
+            fi
+            echo "lowres_${res}_oracle_exit=$oracle_exit"
+            emit_file_status "lowres_${res}_oracle_log" "$oracle_log"
+        else
+            echo "lowres_${res}_status=unavailable"
+            echo "lowres_${res}_reason=ppm_not_created"
+            all_pass=false
+        fi
+        emit_file_status "lowres_${res}_ppm_file" "$ppm"
+    done
+
+    emit_file_status "scroll_ppm_offset0_file" "$WORK_DIR/scroll_offset0.ppm"
+    emit_file_status "scroll_ppm_offset120_file" "$WORK_DIR/scroll_offset120.ppm"
+
+    # ---- Link-click navigation (G2.4) ----
+    # The capture driver emits link_click_* lines (hit-test -> href resolve ->
+    # back/forward history + before/after framebuffers); forwarded above.
+    emit_file_status "nav_ppm_a_initial_file" "$WORK_DIR/nav_a_initial.ppm"
+    emit_file_status "nav_ppm_b_after_click_file" "$WORK_DIR/nav_b_after_click.ppm"
+    emit_file_status "nav_ppm_a_after_back_file" "$WORK_DIR/nav_a_after_back.ppm"
+    emit_file_status "nav_ppm_b_after_forward_file" "$WORK_DIR/nav_b_after_forward.ppm"
+
+    if [ "$all_pass" = "true" ]; then
+        echo "overall=pass"
+    else
+        echo "overall=fail"
+    fi
+} 2>&1 | tee "$EVIDENCE_LOG"
+
+cp "$EVIDENCE_LOG" "$ENV_PATH" || true
+echo "evidence_log=$EVIDENCE_LOG"
+grep -q '^overall=pass$' "$EVIDENCE_LOG"

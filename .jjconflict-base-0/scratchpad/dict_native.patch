@@ -1,0 +1,37 @@
+diff --git a/src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl b/src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl
+index 87391318ff9..53c735216f2 100644
+--- a/src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl
++++ b/src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl
+@@ -209,7 +209,31 @@ impl MirLowering:
+                         # a proxy for "no type info" and excluded the identical
+                         # normal-path gap, so it now keys directly off
+                         # `resolution == Unresolved` instead.
+-                        len_symbol = "rt_len"
++                        #
++                        # Dict follow-up: rt_len's runtime fallback (rt_len in
++                        # runtime_native.c) only special-cases tagged strings
++                        # and array pointers -- a dict handle matches neither
++                        # `rt_core_as_string` nor `rt_core_as_array`, so it
++                        # falls through to a hardcoded 0 (`Dict.len()` silently
++                        # returning 0 natively, never loud). There is no HIR
++                        # static type available here to route straight to
++                        # `rt_dict_len` (same root gap as above), but the
++                        # MIR-lowering layer independently tracks dict-ness per
++                        # local in `runtime_dict_locals` (populated at every
++                        # dict-literal/assignment site -- see
++                        # `lower_dict_literal` and mir_lowering_stmts.spl's var
++                        # decl/reassign propagation), keyed off the lowered
++                        # local id rather than the HIR type. Lower the receiver
++                        # now (instead of after this match) so that map can be
++                        # consulted, and prefer the already-linked, already
++                        # backend-declared `rt_dict_len` runtime symbol over
++                        # the generic accessor when it says so.
++                        receiver_local = self.lower_expr(receiver)
++                        receiver_lowered = true
++                        if self.runtime_dict_locals.has(receiver_local.id):
++                            len_symbol = "rt_dict_len"
++                        else:
++                            len_symbol = "rt_len"
+                     case _: ()
+             if len_symbol != "":
+                 if not receiver_lowered:

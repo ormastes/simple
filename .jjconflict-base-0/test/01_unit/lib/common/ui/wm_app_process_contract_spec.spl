@@ -1,0 +1,93 @@
+use std.spec.*
+use std.io_runtime.{file_read}
+use common.ui.wm_app_process_contract.{
+    WM_APP_MODE_CLIENT,
+    WM_APP_MODE_ENV,
+    WM_BRIDGE_FILE_ENV,
+    WM_CLIENT_HOLD_ENV,
+    WM_EVENT_FILE_ENV,
+    WM_FRAME_FILE_ENV,
+    WM_FRAME_SEQ_FILE_ENV,
+    WIDGET_SHOWCASE_APP_ID,
+    WIDGET_SHOWCASE_APP_SOURCE,
+    WIDGET_SHOWCASE_TITLE,
+    wm_app_mode_is_client,
+    wm_fs_app_event,
+    wm_fs_app_event_decode,
+    wm_fs_app_event_encode,
+    wm_fs_app_event_seq_path,
+    wm_fs_bridge_decode,
+    wm_fs_bridge_encode,
+    wm_widget_showcase_bridge_request,
+    wm_widget_showcase_bridge_request_sized,
+    wm_widget_showcase_client_env,
+    wm_widget_showcase_event_path,
+    wm_widget_showcase_frame_seq_path,
+}
+
+val CONTRACT_SOURCE: text = "src/lib/common/ui/wm_app_process_contract.spl"
+
+fn contract_src() -> text:
+    file_read(CONTRACT_SOURCE)
+
+describe "WM app process contract":
+
+    it "names the widget showcase source file as the executable app identity":
+        expect(WIDGET_SHOWCASE_APP_SOURCE).to_equal("examples/06_io/ui/widget_showcase_gui.spl")
+        expect(WIDGET_SHOWCASE_APP_ID).to_equal("/examples/widget-showcase")
+        expect(WIDGET_SHOWCASE_TITLE).to_equal("Widget Showcase")
+
+    it "distinguishes native launch from WM client launch by mode":
+        expect(wm_app_mode_is_client(WM_APP_MODE_CLIENT)).to_equal(true)
+        expect(wm_app_mode_is_client("")).to_equal(false)
+        expect(wm_app_mode_is_client("native")).to_equal(false)
+
+    it "round-trips the filesystem child bridge request":
+        val req = wm_widget_showcase_bridge_request(1234, "build/tmp/showcase.ppm")
+        val encoded = wm_fs_bridge_encode(req)
+        val decoded = wm_fs_bridge_decode(encoded)
+        expect(decoded.kind).to_equal("create_window")
+        expect(decoded.source_path).to_equal(WIDGET_SHOWCASE_APP_SOURCE)
+        expect(decoded.app_id).to_equal(WIDGET_SHOWCASE_APP_ID)
+        expect(decoded.title).to_equal(WIDGET_SHOWCASE_TITLE)
+        expect(decoded.pid).to_equal(1234)
+        expect(decoded.frame_path).to_equal("build/tmp/showcase.ppm")
+        expect(decoded.event_path).to_equal("build/tmp/showcase.ppm.event")
+        expect(decoded.frame_seq_path).to_equal("build/tmp/showcase.ppm.seq")
+        expect(decoded.content).to_contain(WIDGET_SHOWCASE_APP_SOURCE)
+
+    it "supports explicit WM child window sizing for scaled frame bridges":
+        val req = wm_widget_showcase_bridge_request_sized(22, "scaled.ppm", 268, 362)
+        expect(req.window_w).to_equal(268)
+        expect(req.window_h).to_equal(362)
+        expect(req.frame_path).to_equal("scaled.ppm")
+
+    it "builds the child environment used by host and simple-os launchers":
+        val env = wm_widget_showcase_client_env("bridge.sdn", "frame.ppm")
+        expect(env[WM_APP_MODE_ENV]).to_equal(WM_APP_MODE_CLIENT)
+        expect(env[WM_BRIDGE_FILE_ENV]).to_equal("bridge.sdn")
+        expect(env[WM_FRAME_FILE_ENV]).to_equal("frame.ppm")
+        expect(env[WM_EVENT_FILE_ENV]).to_equal("frame.ppm.event")
+        expect(env[WM_FRAME_SEQ_FILE_ENV]).to_equal("frame.ppm.seq")
+        expect(env[WM_CLIENT_HOLD_ENV]).to_equal("1")
+
+    # codex-system-test
+    it "declares child-content pointer input on the shared filesystem bridge":
+        val ev = wm_fs_app_event(7, "down", 32, 44, 0, true)
+        val decoded = wm_fs_app_event_decode(wm_fs_app_event_encode(ev))
+        expect(decoded.seq).to_equal(7)
+        expect(decoded.kind).to_equal("down")
+        expect(decoded.x).to_equal(32)
+        expect(decoded.y).to_equal(44)
+        expect(decoded.button).to_equal(0)
+        expect(decoded.pressed).to_equal(true)
+
+    # codex-system-test
+    it "tracks child frame sequence updates through the bridge request":
+        val req = wm_widget_showcase_bridge_request(5, "child.ppm")
+        expect(req.event_path).to_equal(wm_widget_showcase_event_path("child.ppm"))
+        expect(req.frame_seq_path).to_equal(wm_widget_showcase_frame_seq_path("child.ppm"))
+        expect(wm_fs_app_event_seq_path(req.event_path, 3)).to_equal("child.ppm.event.3")
+        val decoded = wm_fs_bridge_decode(wm_fs_bridge_encode(req))
+        expect(decoded.event_path).to_equal("child.ppm.event")
+        expect(decoded.frame_seq_path).to_equal("child.ppm.seq")

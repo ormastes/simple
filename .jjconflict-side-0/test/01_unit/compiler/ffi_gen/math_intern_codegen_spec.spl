@@ -1,0 +1,200 @@
+"""
+# Math intern codegen specification
+#
+# Verifies that the FFI generator produces correct Rust interpreter_extern
+# code for math.spl specs, including both inline (integer) and FFI-delegated
+# (float) functions.
+"""
+
+use compiler.tools.ffi_gen.intern_codegen (InternFnSpec, InternParamSpec, generate_fn_wrapper, generate_module, generate_dispatch_entries)
+
+# ============================================================================
+# Helper: build a spec with inline expression
+# ============================================================================
+
+fn make_inline_spec(name: text, params: [InternParamSpec], return_type: text, doc: text, inline_expr: text) -> InternFnSpec:
+    InternFnSpec(
+        name: name, category: "math",
+        params: params, return_type: return_type,
+        runtime_fn: "", doc: doc,
+        inline_expr: inline_expr
+    )
+
+fn make_ffi_spec(name: text, params: [InternParamSpec], return_type: text, doc: text, runtime_fn: text) -> InternFnSpec:
+    InternFnSpec(
+        name: name, category: "math",
+        params: params, return_type: return_type,
+        runtime_fn: runtime_fn, doc: doc,
+        inline_expr: ""
+    )
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "math intern codegen":
+
+    # ------------------------------------------------------------------
+    # Inline expression (integer math)
+    # ------------------------------------------------------------------
+
+    it "generates inline abs wrapper":
+        val spec = make_inline_spec(
+            "abs",
+            [InternParamSpec(name: "n", value_type: "i64")],
+            "i64", "Absolute value of an integer", "n.abs()"
+        )
+        val code = generate_fn_wrapper(spec)
+        # Should contain the inline expression, NOT ffi_abs()
+        expect(code.contains("n.abs()")).to_equal(true)
+        expect(code.contains("ffi_abs")).to_equal(false)
+        # Should extract the parameter as i64
+        expect(code.contains("as_int()")).to_equal(true)
+        # Should wrap result in Value::Int
+        expect(code.contains("Value::Int")).to_equal(true)
+        # Should have the doc comment
+        expect(code.contains("Absolute value")).to_equal(true)
+
+    it "generates inline min wrapper with two params":
+        val spec = make_inline_spec(
+            "min",
+            [InternParamSpec(name: "a", value_type: "i64"), InternParamSpec(name: "b", value_type: "i64")],
+            "i64", "Minimum of two integers", "a.min(b)"
+        )
+        val code = generate_fn_wrapper(spec)
+        expect(code.contains("a.min(b)")).to_equal(true)
+        expect(code.contains("ffi_min")).to_equal(false)
+        # Two params: should use .get(0) and .get(1)
+        expect(code.contains(".get(0)")).to_equal(true)
+        expect(code.contains(".get(1)")).to_equal(true)
+
+    it "generates inline pow wrapper with cast":
+        val spec = make_inline_spec(
+            "pow",
+            [InternParamSpec(name: "base", value_type: "i64"), InternParamSpec(name: "exp", value_type: "i64")],
+            "i64", "Power function", "base.pow(exp as u32)"
+        )
+        val code = generate_fn_wrapper(spec)
+        expect(code.contains("base.pow(exp as u32)")).to_equal(true)
+
+    it "generates inline identity for floor":
+        val spec = make_inline_spec(
+            "floor",
+            [InternParamSpec(name: "n", value_type: "i64")],
+            "i64", "Floor (identity for integers)", "n"
+        )
+        val code = generate_fn_wrapper(spec)
+        expect(code.contains("Ok(Value::Int(n))")).to_equal(true)
+
+    # ------------------------------------------------------------------
+    # FFI-delegated (float math)
+    # ------------------------------------------------------------------
+
+    it "generates FFI-delegated rt_math_sin wrapper":
+        val spec = make_ffi_spec(
+            "rt_math_sin",
+            [InternParamSpec(name: "x", value_type: "f64")],
+            "f64", "Sine (radians)", "rt_math_sin"
+        )
+        val code = generate_fn_wrapper(spec)
+        expect(code.contains("ffi_rt_math_sin(x)")).to_equal(true)
+        expect(code.contains("Value::Float")).to_equal(true)
+        expect(code.contains("as_float()")).to_equal(true)
+
+    it "generates FFI-delegated rt_math_atan2 wrapper":
+        val spec = make_ffi_spec(
+            "rt_math_atan2",
+            [InternParamSpec(name: "y", value_type: "f64"), InternParamSpec(name: "x", value_type: "f64")],
+            "f64", "Two-argument arc tangent", "rt_math_atan2"
+        )
+        val code = generate_fn_wrapper(spec)
+        expect(code.contains("ffi_rt_math_atan2(y, x)")).to_equal(true)
+
+    it "generates FFI-delegated rt_math_nan zero-arg wrapper":
+        val spec = make_ffi_spec(
+            "rt_math_nan", [], "f64", "Returns IEEE 754 NaN", "rt_math_nan"
+        )
+        val code = generate_fn_wrapper(spec)
+        expect(code.contains("ffi_rt_math_nan()")).to_equal(true)
+
+    it "generates FFI-delegated bool return for rt_math_is_nan":
+        val spec = make_ffi_spec(
+            "rt_math_is_nan",
+            [InternParamSpec(name: "x", value_type: "f64")],
+            "bool", "Check if value is NaN", "rt_math_is_nan"
+        )
+        val code = generate_fn_wrapper(spec)
+        expect(code.contains("Value::Bool")).to_equal(true)
+        expect(code.contains("ffi_rt_math_is_nan(x)")).to_equal(true)
+
+    # ------------------------------------------------------------------
+    # Full module generation
+    # ------------------------------------------------------------------
+
+    it "generates module with mixed inline and FFI functions":
+        var specs: [InternFnSpec] = []
+        specs.push(make_inline_spec(
+            "abs",
+            [InternParamSpec(name: "n", value_type: "i64")],
+            "i64", "Absolute value", "n.abs()"
+        ))
+        specs.push(make_ffi_spec(
+            "rt_math_sin",
+            [InternParamSpec(name: "x", value_type: "f64")],
+            "f64", "Sine", "rt_math_sin"
+        ))
+
+        val module_code = generate_module("math", specs)
+        # Module header
+        expect(module_code.contains("Auto-generated interpreter extern wrappers for math")).to_equal(true)
+        # Imports: should have rt_math_sin but NOT abs
+        expect(module_code.contains("rt_math_sin as ffi_rt_math_sin")).to_equal(true)
+        expect(module_code.contains("abs as ffi_abs")).to_equal(false)
+        # Both functions should be present
+        expect(module_code.contains("pub fn abs(")).to_equal(true)
+        expect(module_code.contains("pub fn rt_math_sin_fn(")).to_equal(true)
+        # Inline expr in abs
+        expect(module_code.contains("n.abs()")).to_equal(true)
+        # FFI call in rt_math_sin
+        expect(module_code.contains("ffi_rt_math_sin(x)")).to_equal(true)
+
+    it "skips FFI import block when all specs are inline":
+        var specs: [InternFnSpec] = []
+        specs.push(make_inline_spec(
+            "abs",
+            [InternParamSpec(name: "n", value_type: "i64")],
+            "i64", "Absolute value", "n.abs()"
+        ))
+        specs.push(make_inline_spec(
+            "min",
+            [InternParamSpec(name: "a", value_type: "i64"), InternParamSpec(name: "b", value_type: "i64")],
+            "i64", "Minimum", "a.min(b)"
+        ))
+
+        val module_code = generate_module("math", specs)
+        # Should NOT have the runtime import block
+        expect(module_code.contains("use simple_runtime")).to_equal(false)
+        # But should still have error imports
+        expect(module_code.contains("use crate::error")).to_equal(true)
+        expect(module_code.contains("use crate::value::Value")).to_equal(true)
+
+    # ------------------------------------------------------------------
+    # Dispatch entries
+    # ------------------------------------------------------------------
+
+    it "generates correct dispatch entries":
+        var specs: [InternFnSpec] = []
+        specs.push(make_inline_spec(
+            "abs",
+            [InternParamSpec(name: "n", value_type: "i64")],
+            "i64", "Absolute value", "n.abs()"
+        ))
+        specs.push(make_ffi_spec(
+            "rt_math_sin",
+            [InternParamSpec(name: "x", value_type: "f64")],
+            "f64", "Sine", "rt_math_sin"
+        ))
+
+        val dispatch = generate_dispatch_entries(specs)
+        expect(dispatch.contains("\"abs\" => math::abs(&evaluated)")).to_equal(true)
+        expect(dispatch.contains("\"rt_math_sin\" => math::rt_math_sin_fn(&evaluated)")).to_equal(true)

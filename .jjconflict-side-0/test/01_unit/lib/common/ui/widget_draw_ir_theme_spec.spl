@@ -1,0 +1,87 @@
+use std.spec.*
+use common.ui.builder.{button, panel}
+use common.ui.draw_ir.{DrawIrComposition, DRAW_IR_BACKEND_CPU}
+use common.ui.theme_render_snapshot.{
+    ThemeMaterialSemantics,
+    ThemeRenderSnapshot,
+    theme_material_sha256
+}
+use common.ui.widget_draw_ir.{widget_tree_to_draw_ir_with_theme}
+
+fn _theme_snapshot(
+    id: text,
+    background: u32,
+    foreground: u32,
+    accent: u32,
+    surface: u32,
+    hover: u32,
+    pressed: u32,
+    border: u32
+) -> ThemeRenderSnapshot:
+    val material = ThemeMaterialSemantics(
+        desktop_fill_rgba: background,
+        window_fill_rgba: surface,
+        active_title_fill_rgba: hover,
+        inactive_title_fill_rgba: pressed,
+        surface_alpha_milli: 800,
+        backdrop_blur_px: 24,
+        backdrop_saturation_milli: 1700,
+        border_width_px: 1,
+        border_rgba: border,
+        corner_radius_px: 12,
+        active_shadows: [],
+        inactive_shadows: [],
+        font_family: "sans",
+        font_size_px: 14,
+        font_weight: 500,
+        text_rgba: foreground,
+        secondary_text_rgba: foreground,
+        solid_fallback_rgba: surface,
+        fallback_contrast_milli: 4500
+    )
+    ThemeRenderSnapshot(
+        id: id,
+        family_id: "test",
+        source_reference: "test/{id}",
+        source_manifest_sha256: "manifest-{id}",
+        material_sha256: theme_material_sha256(material),
+        composed_css: ":root " + "{" + "}",
+        background_rgba: background,
+        foreground_rgba: foreground,
+        accent_rgba: accent,
+        material: material
+    )
+
+fn _command_color(composition: DrawIrComposition, component_id: text) -> u32:
+    for batch in composition.batches:
+        for command in batch.commands:
+            if command.component_id == component_id:
+                return command.color
+    0u32
+
+describe "widget Draw IR semantic theme handoff":
+
+    it "projects the selected snapshot surface and accent into the same widget tree":
+        val root = panel("theme-panel", "", [button("theme-button", "", "activate")])
+        val first = _theme_snapshot("first", 0xff010203u32, 0xfff0f1f2u32, 0xff123456u32, 0xff202122u32, 0xff303132u32, 0xff404142u32, 0xff505152u32)
+        val second = _theme_snapshot("second", 0xff111213u32, 0xffe0e1e2u32, 0xffabcdefu32, 0xff606162u32, 0xff707172u32, 0xff808182u32, 0xff909192u32)
+
+        val first_draw = widget_tree_to_draw_ir_with_theme(root, 160, 80, DRAW_IR_BACKEND_CPU, first)
+        val second_draw = widget_tree_to_draw_ir_with_theme(root, 160, 80, DRAW_IR_BACKEND_CPU, second)
+
+        expect(_command_color(first_draw, "theme-panel")).to_equal(first.material.window_fill_rgba)
+        expect(_command_color(second_draw, "theme-panel")).to_equal(second.material.window_fill_rgba)
+        expect(_command_color(first_draw, "theme-button")).to_equal(first.accent_rgba)
+        expect(_command_color(second_draw, "theme-button")).to_equal(second.accent_rgba)
+        expect(_command_color(first_draw, "theme-button") != _command_color(second_draw, "theme-button")).to_equal(true)
+
+    it "uses existing hover and pressed widget state as semantic theme roles":
+        val snapshot = _theme_snapshot("states", 0xff010203u32, 0xfff0f1f2u32, 0xff123456u32, 0xff202122u32, 0xff303132u32, 0xff404142u32, 0xff505152u32)
+        val hovered = button("hover-button", "", "activate").set_prop("ui_hover", "true")
+        val pressed = button("pressed-button", "", "activate").set_prop("ui_pressed", "true")
+        val root = panel("state-panel", "", [hovered, pressed])
+
+        val draw = widget_tree_to_draw_ir_with_theme(root, 160, 100, DRAW_IR_BACKEND_CPU, snapshot)
+
+        expect(_command_color(draw, "hover-button")).to_equal(snapshot.material.active_title_fill_rgba)
+        expect(_command_color(draw, "pressed-button")).to_equal(snapshot.material.inactive_title_fill_rgba)

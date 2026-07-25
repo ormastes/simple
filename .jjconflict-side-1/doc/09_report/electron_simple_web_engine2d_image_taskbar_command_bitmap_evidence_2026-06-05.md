@@ -1,0 +1,188 @@
+# Electron Simple Web Engine2D Bitmap Evidence
+
+- status: pass
+- reason: pass
+- scene: simple-web-engine2d-image-taskbar-command
+- dimensions: 96x64
+- Simple checksum: 26296152649728
+- Electron checksum: 26296152649728
+- Simple weighted checksum: 80792557145241600
+- Electron weighted checksum: 80792557145241600
+- mismatch count: 0
+- blur/tolerance used: false
+- Electron frame us: 32294
+- expected ARGB path: build/electron_simple_web_engine2d_image_taskbar_command_bitmap_evidence/expected-argb.json
+- captured ARGB path: build/electron_simple_web_engine2d_image_taskbar_command_bitmap_evidence/electron-argb.json
+- captured ARGB written: true
+
+## Raw Evidence
+- electron_simple_web_engine2d_status=pass
+- electron_simple_web_engine2d_reason=pass
+- electron_simple_web_engine2d_scene=simple-web-engine2d-image-taskbar-command
+- electron_simple_web_engine2d_width=96
+- electron_simple_web_engine2d_height=64
+- electron_simple_web_engine2d_iterations=5
+- electron_simple_web_engine2d_simple_checksum=26296152649728
+- electron_simple_web_engine2d_electron_checksum=26296152649728
+- electron_simple_web_engine2d_simple_weighted_checksum=80792557145241600
+- electron_simple_web_engine2d_electron_weighted_checksum=80792557145241600
+- electron_simple_web_engine2d_mismatch_count=0
+- electron_simple_web_engine2d_blur_or_tolerance_used=false
+- electron_simple_web_engine2d_electron_frame_us=32294
+- electron_simple_web_engine2d_expected_argb_path=build/electron_simple_web_engine2d_image_taskbar_command_bitmap_evidence/expected-argb.json
+- electron_simple_web_engine2d_captured_argb_path=build/electron_simple_web_engine2d_image_taskbar_command_bitmap_evidence/electron-argb.json
+- electron_simple_web_engine2d_captured_argb_written=true
+- electron_simple_web_engine2d_exit_code=0
+
+## Simple Output
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3198:47
+-    |
+- 3198 |             while x + run_w < width and pixels[y * width + x + run_w] == color:
+-    |                                               ^
+- 
+- Use angle brackets: pixels<...> instead of pixels[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_opencl.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_opencl.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:138:31
+-    |
+- 138 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+- 
+- Use angle brackets: pp<...> instead of pp[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/oneapi_ffi.spl:3:1
+-    |
+-   3 | export use std.gc_async_mut.io.oneapi_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/oneapi_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.oneapi_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Unknown type: any
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3198:47
+-    |
+- 3198 |             while x + run_w < width and pixels[y * width + x + run_w] == color:
+-    |                                               ^
+- 
+- Use angle brackets: pixels<...> instead of pixels[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_opencl.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_opencl.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:138:31
+-    |
+- 138 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+- 
+- Use angle brackets: pp<...> instead of pp[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/oneapi_ffi.spl:3:1
+-    |
+-   3 | export use std.gc_async_mut.io.oneapi_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/oneapi_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.oneapi_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_provider' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_cuda' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.sffi.dynamic' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_opencl' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_kernels' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.opengl_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.env.types' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.rocm_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.oneapi_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- simple_status=pass
+- simple_reason=pass
+- renderer=pure-simple-web-engine2d
+- scene=simple-web-engine2d-image-taskbar-command
+- width=96
+- height=64
+- checksum=26296152649728
+- weighted_checksum=80792557145241600
+- expected_argb_path=build/electron_simple_web_engine2d_image_taskbar_command_bitmap_evidence/expected-argb.json
+- blur_or_tolerance_used=false
+- simple_status=pass
+- simple_reason=pass
+- renderer=pure-simple-web-engine2d
+- scene=simple-web-engine2d-image-taskbar-command
+- width=96
+- height=64
+- checksum=26296152649728
+- weighted_checksum=80792557145241600
+- expected_argb_path=build/electron_simple_web_engine2d_image_taskbar_command_bitmap_evidence/expected-argb.json
+- blur_or_tolerance_used=false
+
+## Electron Output
+- renderer=electron-live-capture-page
+- scene=simple-web-engine2d-image-taskbar-command
+- width=96
+- height=64
+- iterations=5
+- checksum=26296152649728
+- expected_checksum=26296152649728
+- weighted_checksum=80792557145241600
+- expected_weighted_checksum=80792557145241600
+- mismatch_count=0
+- frame_us=32294
+- capture_native_width=96
+- capture_native_height=64
+- capture_downsampled=false
+- captured_argb_path=build/electron_simple_web_engine2d_image_taskbar_command_bitmap_evidence/electron-argb.json
+- captured_argb_written=true
+- generated_gui_text_normalization_pixels=0
+- blur_or_tolerance_used=false

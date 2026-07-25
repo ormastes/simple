@@ -1,0 +1,86 @@
+# JSON Utilities
+#
+# Deep merge, diff, patch, flatten, and unflatten over the JSON value model.
+#
+# Value model (see lib.json.types):
+#   ("null", nil) | ("boolean", bool) | ("number", f64)
+#   ("string", text) | ("array", [any]) | ("object", {text: any})
+
+use lib.json.types.{json_object, json_is_object}
+use lib.json.object_ops.{json_object_keys, json_object_get, json_object_has}
+use lib.json.path_ops.{json_path_set}
+use lib.json.validation.{json_deep_equals}
+
+fn json_merge_deep(a: any, b: any) -> any:
+    """Recursively merge object `b` over object `a`; non-objects fall back to a/b."""
+    if not json_is_object(a):
+        return b
+    if not json_is_object(b):
+        return a
+    var m = {}
+    for key in json_object_keys(a):
+        m[key] = json_object_get(a, key)
+    for key in json_object_keys(b):
+        val bv = json_object_get(b, key)
+        if json_object_has(a, key):
+            val av = json_object_get(a, key)
+            if json_is_object(av) and json_is_object(bv):
+                m[key] = json_merge_deep(av, bv)
+            else:
+                m[key] = bv
+        else:
+            m[key] = bv
+    json_object(m)
+
+fn json_diff(a: any, b: any) -> any:
+    """Object of keys in `b` that are new or changed relative to `a`."""
+    var m = {}
+    if not json_is_object(a) or not json_is_object(b):
+        return json_object(m)
+    for key in json_object_keys(b):
+        val bv = json_object_get(b, key)
+        if not json_object_has(a, key):
+            m[key] = bv
+        else:
+            if not json_deep_equals(json_object_get(a, key), bv):
+                m[key] = bv
+    json_object(m)
+
+fn json_patch(a: any, diff: any) -> any:
+    """Apply a `json_diff` object onto `a`; non-objects return `a` unchanged."""
+    if not json_is_object(a) or not json_is_object(diff):
+        return a
+    var m = {}
+    for key in json_object_keys(a):
+        m[key] = json_object_get(a, key)
+    for key in json_object_keys(diff):
+        m[key] = json_object_get(diff, key)
+    json_object(m)
+
+fn _json_flatten_map(obj: any, prefix: text):
+    var m = {}
+    for key in json_object_keys(obj):
+        val v = json_object_get(obj, key)
+        val full = if prefix == "": key else "{prefix}.{key}"
+        if json_is_object(v):
+            val sub = _json_flatten_map(v, full)
+            for sk in sub.keys():
+                m[sk] = sub.get(sk)
+        else:
+            m[full] = v
+    m
+
+fn json_flatten_object(value: any) -> any:
+    """Flatten a nested object into one with dotted keys; non-objects unchanged."""
+    if not json_is_object(value):
+        return value
+    json_object(_json_flatten_map(value, ""))
+
+fn json_unflatten_object(value: any) -> any:
+    """Rebuild a nested object from dotted keys; non-objects unchanged."""
+    if not json_is_object(value):
+        return value
+    var result = json_object({})
+    for key in json_object_keys(value):
+        result = json_path_set(result, key, json_object_get(value, key))
+    result

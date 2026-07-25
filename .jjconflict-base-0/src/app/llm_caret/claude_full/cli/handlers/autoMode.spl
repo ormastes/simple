@@ -1,0 +1,185 @@
+class AutoModeRules:
+    permit: [text]
+    soft_deny: [text]
+    environment: [text]
+
+impl AutoModeRules:
+    static fn new(permit: [text], soft_deny: [text], environment: [text]) -> AutoModeRules:
+        AutoModeRules(permit: permit, soft_deny: soft_deny, environment: environment)
+
+    static fn empty() -> AutoModeRules:
+        AutoModeRules(permit: [], soft_deny: [], environment: [])
+
+    me hasCustomRules() -> bool:
+        me.permit.len() > 0 or me.soft_deny.len() > 0 or me.environment.len() > 0
+
+class AutoModeCritiqueResult:
+    stdout: text
+    stderr: text
+    exitCode: i64
+    model: text
+    querySource: text
+    system: text
+    userMessage: text
+
+impl AutoModeCritiqueResult:
+    static fn ok(stdout: text, model: text, userMessage: text) -> AutoModeCritiqueResult:
+        AutoModeCritiqueResult(stdout: stdout, stderr: "", exitCode: 0, model: model, querySource: "auto_mode_critique", system: critiqueSystemPrompt(), userMessage: userMessage)
+
+    static fn failed(stderr: text) -> AutoModeCritiqueResult:
+        AutoModeCritiqueResult(stdout: "", stderr: stderr, exitCode: 1, model: "", querySource: "auto_mode_critique", system: critiqueSystemPrompt(), userMessage: "")
+
+fn autoModeDefaultsHandler(defaults: AutoModeRules) -> text:
+    writeRules(defaults)
+
+fn autoModeConfigHandler(config: AutoModeRules?, defaults: AutoModeRules) -> text:
+    val rules = config ?? defaults
+    writeRules(mergeAutoModeRules(rules, defaults))
+
+fn mergeAutoModeRules(config: AutoModeRules, defaults: AutoModeRules) -> AutoModeRules:
+    AutoModeRules.new(
+        ifTextList(config.permit.len() > 0, config.permit, defaults.permit),
+        ifTextList(config.soft_deny.len() > 0, config.soft_deny, defaults.soft_deny),
+        ifTextList(config.environment.len() > 0, config.environment, defaults.environment)
+    )
+
+fn autoModeCritiqueHandler(config: AutoModeRules, defaults: AutoModeRules, modelOption: text, mainModel: text, sideQuerySucceeds: bool, sideQueryText: text) -> AutoModeCritiqueResult:
+    if not config.hasCustomRules():
+        return AutoModeCritiqueResult.ok(noCustomRulesMessage(), "", "")
+    val model = if modelOption != "": parseUserSpecifiedModel(modelOption) else: mainModel
+    val message = critiqueUserMessage(buildDefaultExternalSystemPrompt(), formatAllRulesForCritique(config, defaults))
+    if not sideQuerySucceeds:
+        return AutoModeCritiqueResult.failed("Failed to analyze rules: side query failed\n")
+    if sideQueryText == "":
+        return AutoModeCritiqueResult.ok("No critique was generated. Please try again.\n", model, message)
+    AutoModeCritiqueResult.ok("Analyzing your auto mode rules...\n\n" + sideQueryText + "\n", model, message)
+
+fn writeRules(rules: AutoModeRules) -> text:
+    "{\"allow\":" + jsonArray(rules.permit) + ",\"soft_deny\":" + jsonArray(rules.soft_deny) + ",\"environment\":" + jsonArray(rules.environment) + "}\n"
+
+fn jsonArray(values: [text]) -> text:
+    var out = "["
+    var i = 0
+    while i < values.len():
+        if i > 0:
+            out = out + ","
+        out = out + "\"" + values[i] + "\""
+        i = i + 1
+    out + "]"
+
+fn formatRulesForCritique(section: text, userRules: [text], defaultRules: [text]) -> text:
+    if userRules.len() == 0:
+        return ""
+    "## " + section + " (custom rules replacing defaults)\nCustom:\n" + bulletList(userRules) + "\n\nDefaults being replaced:\n" + bulletList(defaultRules) + "\n\n"
+
+fn formatAllRulesForCritique(config: AutoModeRules, defaults: AutoModeRules) -> text:
+    formatRulesForCritique("allow", config.permit, defaults.permit) + formatRulesForCritique("soft_deny", config.soft_deny, defaults.soft_deny) + formatRulesForCritique("environment", config.environment, defaults.environment)
+
+fn bulletList(values: [text]) -> text:
+    var out = ""
+    var i = 0
+    while i < values.len():
+        if i > 0:
+            out = out + "\n"
+        out = out + "- " + values[i]
+        i = i + 1
+    out
+
+fn critiqueUserMessage(classifierPrompt: text, userRulesSummary: text) -> text:
+    "Here is the full classifier system prompt that the auto mode classifier receives:\n\n<classifier_system_prompt>\n" + classifierPrompt + "\n</classifier_system_prompt>\n\nHere are the user's custom rules that REPLACE the corresponding default sections:\n\n" + userRulesSummary + "\nPlease critique these custom rules."
+
+fn noCustomRulesMessage() -> text:
+    "No custom auto mode rules found.\n\nAdd rules to your settings file under autoMode.{allow, soft_deny, environment}.\nRun `claude auto-mode defaults` to see the default rules for reference.\n"
+
+fn critiqueSystemPrompt() -> text:
+    "You are an expert reviewer of auto mode classifier rules for Claude Code."
+
+fn buildDefaultExternalSystemPrompt() -> text:
+    "default external classifier system prompt"
+
+fn parseUserSpecifiedModel(model: text) -> text:
+    "parsed:" + model
+
+fn ifTextList(condition: bool, yes: [text], no: [text]) -> [text]:
+    if condition: yes else: no
+
+fn defaultsCommandName() -> text:
+    "defaults"
+
+fn configCommandName() -> text:
+    "config"
+
+fn critiqueCommandName() -> text:
+    "critique"
+
+fn sideQuerySource() -> text:
+    "auto_mode_critique"
+
+fn critiqueMaxTokens() -> i64:
+    4096
+
+fn skipSystemPromptPrefix() -> bool:
+    true
+
+fn permitSectionName() -> text:
+    "allow"
+
+fn softDenySectionName() -> text:
+    "soft_deny"
+
+fn environmentSectionName() -> text:
+    "environment"
+
+fn replaceSemantics() -> text:
+    "non-empty user section replaces defaults entirely"
+
+fn noCritiqueGeneratedMessage() -> text:
+    "No critique was generated. Please try again.\n"
+
+fn analyzingMessage() -> text:
+    "Analyzing your auto mode rules...\n\n"
+
+fn failedAnalyzePrefix() -> text:
+    "Failed to analyze rules: "
+
+fn userSettingsPathHint() -> text:
+    "autoMode.{allow, soft_deny, environment}"
+
+fn defaultRulesReferenceCommand() -> text:
+    "claude auto-mode defaults"
+
+fn classifierPromptTag() -> text:
+    "classifier_system_prompt"
+
+fn critiqueEvaluatesClarity() -> bool:
+    true
+
+fn critiqueEvaluatesCompleteness() -> bool:
+    true
+
+fn critiqueEvaluatesConflicts() -> bool:
+    true
+
+fn critiqueEvaluatesActionability() -> bool:
+    true
+
+fn critiqueTone() -> text:
+    "concise and constructive"
+
+fn permitMeaning() -> text:
+    "Actions the classifier should auto-approve"
+
+fn softDenyMeaning() -> text:
+    "Actions the classifier should block"
+
+fn environmentMeaning() -> text:
+    "Context about the user's setup"
+
+fn jsonIndentSpaces() -> i64:
+    2
+
+fn commandDynamicallyImported() -> bool:
+    true
+
+fn rulesCritiqueRole() -> text:
+    "expert reviewer"

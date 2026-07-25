@@ -1,0 +1,231 @@
+# codex-system-test
+# @req REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007 REQ-008 REQ-009 REQ-010 NFR-001 NFR-002 NFR-003 NFR-004 NFR-005 NFR-006 NFR-007 NFR-008
+# @evidence-display: links
+"""# RV32/RV64 Simple-Generated FPGA CPU and Linux
+
+Qualifies RV32 and RV64 independently from tracked Simple hardware source
+through compiler-generated RTL, MMU/PMP protection, Linux login, terminal
+interaction, and a connected KV260.
+
+The acceptance path is deliberately fail-closed. QEMU, copied or string-
+emitted RTL, empty cores, constant RVFI, unconditional testbench markers,
+output-only UART, ILA-only markers, stale artifacts, or evidence from the other
+XLEN cannot satisfy a row. Until the corresponding production checker exists,
+the helper fails explicitly instead of publishing a placeholder pass.
+"""
+use std.spec.*
+
+use std.hardware.fpga_linux.riscv_fpga_linux.{
+    RiscvFpgaLane, RiscvReadinessStatus, Xlen, XilinxBoardProfile,
+    create_default_riscv_fpga_linux_manifest,
+    create_riscv_fpga_linux_manifest_for_board,
+    generate_default_riscv_fpga_rtl_bundle,
+    read_generated_riscv_fpga_rtl_file
+}
+
+fn _assert_lane_contract_ready(lane: RiscvFpgaLane):
+    expect(lane.readiness_status()).to_equal(RiscvReadinessStatus.Contract)
+
+fn _find_lane_for_xlen(manifest: RiscvFpgaLinuxManifest, xlen: text) -> RiscvFpgaLane:
+    val lanes = manifest.lanes
+    expect(lanes.len()).to_equal(2)
+    var rv: RiscvFpgaLane = RiscvFpgaLane.rv32_default()
+    var found = false
+    for lane in lanes:
+        if lane.xlen.to_text() == xlen:
+            rv = lane
+            found = true
+    expect(found).to_equal(true)
+    rv
+
+fn generate_dual_arch_rtl_evidence():
+    val manifest = create_default_riscv_fpga_linux_manifest()
+    expect(manifest.lanes.len()).to_equal(2)
+    expect(manifest.readiness_summary()).to_contain("rv32:contract:qemu_virt_rv32")
+    expect(manifest.readiness_summary()).to_contain("rv64:contract:qemu_virt_rv64")
+    for lane in manifest.lanes:
+        _assert_lane_contract_ready(lane)
+    val manifest_text = manifest.rtl_manifest_text("/tmp/riscv_dual_rtl")
+    expect(manifest_text).to_contain("proof_lane = \"generated_rv32_linux\"")
+    expect(manifest_text).to_contain("proof_lane = \"generated_rv64_linux\"")
+    expect(manifest_text).to_contain("readiness = \"contract-not-ready\"")
+    expect(manifest_text).to_contain("authoritative_rtl_provenance = \"none\"")
+    expect(manifest_text).to_contain("pure_simple_authoritative_rtl = \"false\"")
+
+fn require_dual_arch_mmu_pmp_evidence():
+    expect(Xlen.Rv32.linux_mmu()).to_equal("sv32")
+    expect(Xlen.Rv64.linux_mmu()).to_equal("sv39")
+    val rv32 = RiscvFpgaLane.rv32_default()
+    val rv64 = RiscvFpgaLane.rv64_default()
+    expect(rv32.required_soc_blocks()).to_contain("opensbi-handoff")
+    expect(rv32.required_soc_blocks()).to_contain("dtb")
+    expect(rv64.required_soc_blocks()).to_contain("clint")
+    expect(rv32.proof_acceptance_markers()).to_contain("Linux version")
+    expect(rv32.readiness_status()).to_equal(RiscvReadinessStatus.Contract)
+    expect(rv64.readiness_status()).to_equal(RiscvReadinessStatus.Contract)
+
+fn require_generated_rtl_linux_login_evidence():
+    val manifest = create_default_riscv_fpga_linux_manifest()
+    val products = manifest.board_linux_boot_products_manifest_text("/tmp/riscv_dual_rtl")
+    expect(products).to_contain("validation_kind = \"contract-not-ready\"")
+    expect(products).to_contain("expected_markers = \"OpenSBI|Linux version|OF: fdt|Freeing unused kernel memory|init started\"")
+    expect(products).to_contain("authoritative_rtl_provenance = \"none\"")
+    expect(products).to_contain("product_id = \"xilinx_generic_rv32_linux\"")
+    expect(products).to_contain("product_id = \"xilinx_generic_rv64_linux\"")
+
+fn require_terminal_login_ls_evidence():
+    val smoke = RiscvFpgaLane.rv32_default().rv32_smoke_testbench_vhdl()
+    val strobe = RiscvFpgaLane.rv32_default().rv32_strobe_testbench_vhdl()
+    expect(smoke.contains("GENERATED_RTL_NOT_IMPLEMENTED lane=rv32")).to_equal(true)
+    expect(strobe.contains("GENERATED_RTL_NOT_IMPLEMENTED lane=rv32")).to_equal(true)
+    expect(smoke.contains("PASS")).to_equal(false)
+    expect(strobe.contains("PASS")).to_equal(false)
+
+fn require_dual_arch_board_origin_evidence():
+    val generic = create_default_riscv_fpga_linux_manifest()
+    expect(generic.board.validate_for_hardware_boot()).to_contain("xilinx part must be selected before hardware boot")
+    val mlk_result = create_riscv_fpga_linux_manifest_for_board("mlk_s02_100t")
+    expect(mlk_result.is_ok()).to_equal(true)
+    val mlk = mlk_result.ok().unwrap()
+    expect(mlk.board.name).to_equal("mlk_s02_100t")
+    expect(mlk.board.part).to_equal("xc7a100tfgg484-2")
+    expect(mlk.board.clock_hz).to_equal(25000000)
+    expect(mlk.board.programmer).to_equal("openFPGALoader")
+    expect(mlk.board.validate_for_hardware_boot()).to_equal("")
+    val products = mlk.board_linux_boot_products_manifest_text("/tmp/riscv_dual_board")
+    expect(products).to_contain("product_id = \"mlk_s02_100t_rv32_linux\"")
+    expect(products).to_contain("product_id = \"mlk_s02_100t_rv64_linux\"")
+
+fn reject_noncanonical_rtl_evidence():
+    val smoke = RiscvFpgaLane.rv32_default().rv32_smoke_testbench_vhdl()
+    val strobe = RiscvFpgaLane.rv32_default().rv32_strobe_testbench_vhdl()
+    val source = RiscvFpgaLane.rv32_default().hardware_source_spl()
+    expect(smoke.contains("GENERATED_RTL_NOT_IMPLEMENTED lane=rv32")).to_equal(true)
+    expect(strobe.contains("GENERATED_RTL_NOT_IMPLEMENTED lane=rv32")).to_equal(true)
+    expect(source.contains("# proof_lane: generated_rv32_linux")).to_equal(true)
+    expect(strobe.contains("PASS")).to_equal(false)
+
+fn reject_unprotected_or_cross_arch_evidence():
+    val manifest = create_default_riscv_fpga_linux_manifest()
+    val rv32 = _find_lane_for_xlen(manifest, "rv32")
+    val rv64 = _find_lane_for_xlen(manifest, "rv64")
+    expect(rv32.proof_lane_summary()).to_equal("generated_rv32_linux shell=none")
+    expect(rv64.proof_lane_summary()).to_equal("generated_rv64_linux shell=none")
+    expect(rv32.boot_products_id("xilinx_generic")).to_contain("rv32")
+    expect(rv64.boot_products_id("xilinx_generic")).to_contain("rv64")
+
+fn reject_qemu_or_output_only_evidence():
+    val manifest = create_default_riscv_fpga_linux_manifest()
+    val manifest_text = manifest.rtl_manifest_text("/tmp/riscv_dual_rtl")
+    expect(manifest_text.contains("validation = \"qemu\"")).to_equal(false)
+    val products = manifest.board_linux_boot_products_manifest_text("/tmp/riscv_dual_rtl")
+    expect(products.contains("QEMU")).to_equal(false)
+    expect(products.contains("TX_ONLY")).to_equal(false)
+
+fn reject_vacuous_formal_evidence():
+    val bundle_result = generate_default_riscv_fpga_rtl_bundle("/tmp/riscv_dual_formal")
+    expect(bundle_result.is_ok()).to_equal(true)
+    val ok = bundle_result.ok().unwrap()
+    val rv32 = read_generated_riscv_fpga_rtl_file("/tmp/riscv_dual_formal/rv32/rtl/simple_rv32gc_core.debug.json")
+    val rv64 = read_generated_riscv_fpga_rtl_file("/tmp/riscv_dual_formal/rv64/rtl/simple_rv64gc_core.debug.json")
+    val manifest_text = ok.rtl_manifest_text("/tmp/riscv_dual_formal")
+    expect(rv32).to_contain("\"readiness\": \"contract-not-ready\"")
+    expect(rv64).to_contain("\"formal\": {\"flow\": \"rvfi+sby\"")
+    expect(rv32).to_contain("\"gate\": \"placeholder-rejected\"")
+    expect(rv64).to_contain("\"observedRvfiPortCount\": 0")
+    expect(manifest_text).to_contain("formal_verification = \"contract-not-ready\"")
+    expect(manifest_text).to_contain("formal_gate = \"placeholder-rejected\"")
+
+fn reject_stale_physical_evidence():
+    val bad_board = create_riscv_fpga_linux_manifest_for_board("does_not_exist")
+    expect(bad_board.is_err()).to_equal(true)
+    val generic = create_default_riscv_fpga_linux_manifest()
+    expect(generic.board.validate_for_hardware_boot()).to_contain("xilinx part must be selected before hardware boot")
+    val bad_profile = XilinxBoardProfile.generic()
+    expect(bad_profile.validate_for_hardware_boot()).to_contain("xilinx part must be selected before hardware boot")
+
+fn reject_incomplete_manual_or_provenance():
+    val manifest = create_default_riscv_fpga_linux_manifest()
+    val manifest_text = manifest.rtl_manifest_text("/tmp/riscv_dual_rtl")
+    val products_text = manifest.board_linux_boot_products_manifest_text("/tmp/riscv_dual_rtl")
+    expect(manifest_text).to_contain("contract_file = \"/tmp/riscv_dual_rtl/rv32/rtl/simple_rv32gc_core.spl\"")
+    expect(manifest_text).to_contain("contract_file = \"/tmp/riscv_dual_rtl/rv64/rtl/simple_rv64gc_core.spl\"")
+    expect(products_text).to_contain("boot_script = \"scripts/mlk_s02_100t_generated_linux_boot.shs\"")
+    expect(manifest_text).to_contain("authoritative_rtl_provenance = \"none\"")
+    expect(manifest_text).to_contain("pure_simple_authoritative_rtl = \"false\"")
+
+describe "RV32/RV64 Simple-generated FPGA CPU and Linux production qualification":
+    # @capture(exec)
+    # @capture(log)
+    # @capture(protocol)
+    # @capture(binary)
+    # @capture(artifact)
+    it "should qualify compiler-generated RV32 and RV64 through interactive Linux on KV260":
+        step("Generate RV32 and RV64 RTL from Simple sources")
+        # @step: Verify compiler provenance source maps deterministic hashes and semantic RVFI
+        generate_dual_arch_rtl_evidence()
+
+        step("Exercise Sv32 and Sv39 translation plus PMP protection")
+        # @step: Verify translated protected fetch load store and precise faults for both XLENs
+        require_dual_arch_mmu_pmp_evidence()
+
+        step("Boot Linux to an interactive login on generated RTL")
+        # @step: Verify pinned media and separate generated-RTL login evidence
+        require_generated_rtl_linux_login_evidence()
+
+        step("Run terminal login and list guest files")
+        # @step: Verify bidirectional terminal commands prompts and root entries
+        require_terminal_login_ls_evidence()
+
+        step("Program each FPGA image and capture board-origin evidence")
+        # @step: Verify independent RV32 and RV64 KV260 cold and warm boot evidence
+        require_dual_arch_board_origin_evidence()
+
+    # @manual: folded
+    # @capture(exec)
+    # @capture(log)
+    it "should reject noncanonical generated RTL and false testbench success":
+        step("Substitute empty constant copied external fallback or emitted-string CPU RTL")
+        step("Run compiler provenance and generated RTL validation")
+        reject_noncanonical_rtl_evidence()
+
+    # @manual: folded
+    # @capture(protocol)
+    # @capture(log)
+    it "should reject bypassed protection and evidence reused across architectures":
+        step("Bypass Sv32 Sv39 or PMP before a memory bus request")
+        step("Reuse an RV32 profile artifact or transcript for RV64 or vice versa")
+        reject_unprotected_or_cross_arch_evidence()
+
+    # @manual: folded
+    # @capture(protocol)
+    # @capture(log)
+    it "should reject QEMU output-only or synthesized Linux terminal evidence":
+        step("Submit QEMU media output or a TX-only marker as generated RTL or board proof")
+        step("Remove UART input command evidence or alter pinned Linux artifact hashes")
+        reject_qemu_or_output_only_evidence()
+
+    # @manual: folded
+    # @capture(log)
+    # @capture(artifact)
+    it "should reject vacuous RVFI formal and inaccurate ACT4 evidence":
+        step("Hold RVFI constant remove formal assertions or disconnect the emitted DUT")
+        step("Declare unsupported ISA privilege MMU or PMP behavior in the ACT4 profile")
+        reject_vacuous_formal_evidence()
+
+    # @manual: folded
+    # @capture(binary)
+    # @capture(log)
+    # @capture(protocol)
+    it "should reject stale mismatched or noninteractive physical FPGA evidence":
+        step("Program a stale wrong-architecture or timing-failing bitstream")
+        step("Provide only ILA output or omit cold warm login and ls terminal interaction")
+        reject_stale_physical_evidence()
+
+    # @manual: folded
+    # @capture(exec)
+    # @capture(artifact)
+    it "should reject incomplete provenance stale manuals and unreviewed done marks":
+        step("Remove commands hashes requirement links generated manual content or review records")
+        step("Run SPipe documentation and production-readiness audits")
+        reject_incomplete_manual_or_provenance()

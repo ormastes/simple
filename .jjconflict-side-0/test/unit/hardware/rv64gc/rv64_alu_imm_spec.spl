@@ -1,0 +1,145 @@
+"""
+# RV64 ALU Immediate + System Instruction Tests
+
+**Feature IDs:** #RV64-ALU-IMM-001
+**Category:** Hardware
+**Difficulty:** 2/5
+**Status:** Draft
+
+## Overview
+
+Unit tests for immediate ALU variants: SLTI, SLTIU, XORI, ORI, ANDI,
+and system instructions: ECALL, EBREAK, FENCE, AUIPC.
+Also covers ADDIW, SLLIW, SRLIW, SRAIW (immediate W-variants).
+"""
+
+import std.spec
+
+use hardware.rv64gc.core.rv64_execute.{alu_execute, alu_execute_word}
+use hardware.rv64gc.core.rv64_decode.{decode_opcode, decode_imm_i, decode_imm_u}
+use hardware.rv64gc.pkg.rv64_types_pkg.*
+use hardware.rv64gc.pkg.rv64_isa_pkg.*
+
+describe "SLTI (Set Less Than Immediate — signed)":
+    it "SLTI: 5 < 10 = 1":
+        expect(alu_execute(AluOp.Slt, 5, 10)).to_equal(1)
+
+    it "SLTI: 10 < 5 = 0":
+        expect(alu_execute(AluOp.Slt, 10, 5)).to_equal(0)
+
+    it "SLTI: -1 < 0 = 1 (signed)":
+        expect(alu_execute(AluOp.Slt, -1, 0)).to_equal(1)
+
+    it "SLTI: 0 < -1 = 0 (signed)":
+        expect(alu_execute(AluOp.Slt, 0, -1)).to_equal(0)
+
+    it "SLTI: equal values = 0":
+        expect(alu_execute(AluOp.Slt, 42, 42)).to_equal(0)
+
+describe "SLTIU (Set Less Than Immediate — unsigned)":
+    it "SLTIU: 5 < 10 = 1":
+        expect(alu_execute(AluOp.Sltu, 5, 10)).to_equal(1)
+
+    it "SLTIU: 0xFFFFFFFFFFFFFFFF > 5 unsigned":
+        expect(alu_execute(AluOp.Sltu, 5, 0xFFFFFFFFFFFFFFFF)).to_equal(1)
+
+    it "SLTIU: SEQZ pattern (rs1 < 1)":
+        expect(alu_execute(AluOp.Sltu, 0, 1)).to_equal(1)
+        expect(alu_execute(AluOp.Sltu, 1, 1)).to_equal(0)
+
+describe "XORI":
+    it "XORI: basic XOR with immediate":
+        expect(alu_execute(AluOp.Xor, 0xFF, 0x0F)).to_equal(0xF0)
+
+    it "XORI: NOT pattern (XOR with -1)":
+        expect(alu_execute(AluOp.Xor, 0xDEADBEEF, 0xFFFFFFFFFFFFFFFF)).to_equal(0xFFFFFFFF21524110)
+
+    it "XORI: XOR with 0 is identity":
+        expect(alu_execute(AluOp.Xor, 42, 0)).to_equal(42)
+
+describe "ORI":
+    it "ORI: basic OR with immediate":
+        expect(alu_execute(AluOp.Or, 0xF0, 0x0F)).to_equal(0xFF)
+
+    it "ORI: OR with 0 is identity":
+        expect(alu_execute(AluOp.Or, 42, 0)).to_equal(42)
+
+    it "ORI: OR with all bits set":
+        expect(alu_execute(AluOp.Or, 0, 0xFFFFFFFFFFFFFFFF)).to_equal(0xFFFFFFFFFFFFFFFF)
+
+describe "ANDI":
+    it "ANDI: basic AND with immediate":
+        expect(alu_execute(AluOp.And, 0xFF, 0x0F)).to_equal(0x0F)
+
+    it "ANDI: AND with 0 is zero":
+        expect(alu_execute(AluOp.And, 42, 0)).to_equal(0)
+
+    it "ANDI: AND with -1 is identity":
+        expect(alu_execute(AluOp.And, 42, 0xFFFFFFFFFFFFFFFF)).to_equal(42)
+
+describe "ADDIW (Add Immediate Word)":
+    it "ADDIW: basic addition":
+        expect(alu_execute_word(AluOp.Addw, 0, 100)).to_equal(100)
+
+    it "ADDIW: wraps at 32 bits":
+        expect(alu_execute_word(AluOp.Addw, 0x7FFFFFFF, 1)).to_equal(0xFFFFFFFF80000000)
+
+    it "ADDIW: negative immediate":
+        expect(alu_execute_word(AluOp.Addw, 10, -3)).to_equal(7)
+
+describe "SLLIW (Shift Left Logical Immediate Word)":
+    it "SLLIW: basic shift":
+        expect(alu_execute_word(AluOp.Sllw, 1, 4)).to_equal(16)
+
+    it "SLLIW: shift into sign bit":
+        expect(alu_execute_word(AluOp.Sllw, 1, 31)).to_equal(0xFFFFFFFF80000000)
+
+describe "SRLIW (Shift Right Logical Immediate Word)":
+    it "SRLIW: basic shift":
+        expect(alu_execute_word(AluOp.Srlw, 16, 4)).to_equal(1)
+
+    it "SRLIW: does not sign-extend within 32-bit":
+        expect(alu_execute_word(AluOp.Srlw, 0x80000000, 31)).to_equal(1)
+
+describe "SRAIW (Shift Right Arithmetic Immediate Word)":
+    it "SRAIW: positive value":
+        expect(alu_execute_word(AluOp.Sraw, 16, 4)).to_equal(1)
+
+    it "SRAIW: negative value fills with sign":
+        expect(alu_execute_word(AluOp.Sraw, 0x80000000, 1)).to_equal(0xFFFFFFFFC0000000)
+
+describe "AUIPC":
+    """
+    ## Add Upper Immediate to PC
+
+    AUIPC rd, imm: rd = PC + (imm << 12)
+    """
+
+    it "AUIPC: PC + upper immediate":
+        val pc: i64 = 0x80001000
+        val imm = decode_imm_u(0x00001517)  # AUIPC x10, 1
+        val result = pc + imm
+        expect(result).to_equal(0x80002000)
+
+    it "AUIPC: PC + 0":
+        val pc: i64 = 0x80001000
+        val result = pc + 0
+        expect(result).to_equal(0x80001000)
+
+describe "System Instructions":
+    it "ECALL: opcode is SYSTEM (0x73)":
+        val instr: i64 = 0x00000073  # ECALL
+        expect(decode_opcode(instr)).to_equal(OP_SYSTEM)
+
+    it "EBREAK: opcode is SYSTEM with imm=1":
+        val instr: i64 = 0x00100073  # EBREAK
+        expect(decode_opcode(instr)).to_equal(OP_SYSTEM)
+        expect(decode_imm_i(instr)).to_equal(1)
+
+    it "FENCE: opcode is MISC_MEM (0x0F)":
+        val instr: i64 = 0x0FF0000F  # FENCE iorw, iorw
+        expect(decode_opcode(instr)).to_equal(OP_MISC_MEM)
+
+    it "FENCE.I: opcode is MISC_MEM with funct3=1":
+        val instr: i64 = 0x0000100F  # FENCE.I
+        expect(decode_opcode(instr)).to_equal(OP_MISC_MEM)

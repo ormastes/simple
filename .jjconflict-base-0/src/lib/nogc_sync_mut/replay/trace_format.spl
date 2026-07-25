@@ -1,0 +1,243 @@
+# SReplay — Unified Trace Format
+#
+# Cross-track package format shared by all 6 replay backends
+# (qemu, process, kernel, semantic, container, vm).
+# Provides manifest, index, and package abstractions for
+# reading/writing trace directories.
+
+use std.io.{shell}
+use std.nogc_sync_mut.replay.types.{Arch, Endian, TargetDesc}
+
+# ============================================================================
+# Trace Manifest
+# ============================================================================
+
+struct TraceManifest:
+    magic: text           # "SRPL"
+    version: i32
+    arch: text            # "riscv32", "x86_64", etc.
+    pointer_bits: i32     # 32 or 64
+    endian: text          # "little" or "big"
+    replay_mode: text     # "qemu", "process", "kernel", "semantic", "container", "vm"
+    event_count: i64
+    checkpoint_count: i32
+    created_at: i64
+
+impl TraceManifest:
+    static fn create(arch: text, mode: text) -> TraceManifest:
+        val arch_enum = Arch.from_text(arch)
+        val pbits = arch_enum.pointer_bits()
+        TraceManifest(
+            magic: "SRPL",
+            version: 1,
+            arch: arch,
+            pointer_bits: pbits,
+            endian: "little",
+            replay_mode: mode,
+            event_count: 0,
+            checkpoint_count: 0,
+            created_at: 0
+        )
+
+    fn to_sdn() -> text:
+        var lines: [text] = []
+        lines.push("trace:")
+        lines.push("  format: \"simple-replay-trace\"")
+        lines.push("  magic: \"{self.magic}\"")
+        lines.push("  version: {self.version}")
+        lines.push("")
+        lines.push("target:")
+        lines.push("  arch: \"{self.arch}\"")
+        lines.push("  pointer_bits: {self.pointer_bits}")
+        lines.push("  endian: \"{self.endian}\"")
+        lines.push("")
+        lines.push("replay:")
+        lines.push("  mode: \"{self.replay_mode}\"")
+        lines.push("")
+        lines.push("stats:")
+        lines.push("  event_count: {self.event_count}")
+        lines.push("  checkpoint_count: {self.checkpoint_count}")
+        lines.push("  created_at: {self.created_at}")
+        lines.join("\n")
+
+# ============================================================================
+# Trace Index
+# ============================================================================
+
+struct TraceIndexEntry:
+    key: i64              # address, source line hash, or object ID
+    event_id: i64
+    kind: text            # "memory_write", "source_line", "object_history", "schedule"
+
+impl TraceIndexEntry:
+    static fn create(key: i64, event_id: i64, kind: text) -> TraceIndexEntry:
+        TraceIndexEntry(key: key, event_id: event_id, kind: kind)
+
+struct TraceIndex:
+    entry_count: i64
+    entries: [TraceIndexEntry]
+
+impl TraceIndex:
+    static fn create() -> TraceIndex:
+        TraceIndex(entry_count: 0, entries: [])
+
+    me fn add(entry: TraceIndexEntry):
+        self.entries.push(entry)
+        self.entry_count = self.entries.len()
+
+    fn lookup(key: i64) -> [TraceIndexEntry]:
+        var results: [TraceIndexEntry] = []
+        for e in self.entries:
+            if e.key == key:
+                results.push(e)
+        results
+
+# ============================================================================
+# Trace Package
+# ============================================================================
+
+class TracePackage:
+    manifest: TraceManifest
+    base_dir: text
+    _checkpoint_ids: [i32]
+    _event_data: [i32]
+
+    static fn create(base_dir: text, mode: text, arch: text) -> TracePackage:
+        val m = TraceManifest.create(arch, mode)
+        TracePackage(
+            manifest: m,
+            base_dir: base_dir,
+            _checkpoint_ids: [],
+            _event_data: []
+        )
+
+    me fn write_manifest() -> Result<text, text>:
+        val dir = self.base_dir
+        val mkdir_result = shell("mkdir -p '{dir}'")
+        if mkdir_result.exit_code != 0:
+            return Err("failed to create trace directory: {dir}")
+        val manifest_path = "{dir}/manifest.sdn"
+        val sdn_content = self.manifest.to_sdn()
+        val write_result = shell("cat > '{manifest_path}' << 'SREPLAY_EOF'\n{sdn_content}\nSREPLAY_EOF")
+        if write_result.exit_code != 0:
+            return Err("failed to write manifest: {manifest_path}")
+        Ok(manifest_path)
+
+    static fn read_manifest(base_dir: text) -> Result<TraceManifest, text>:
+        val manifest_path = "{base_dir}/manifest.sdn"
+        val cat_result = shell("cat '{manifest_path}' 2>/dev/null")
+        if cat_result.exit_code != 0:
+            return Err("manifest not found: {manifest_path}")
+        var arch_val = "x86_64"
+        var mode_val = "qemu"
+        var version_val = 1
+        var event_count_val: i64 = 0
+        var checkpoint_count_val = 0
+        for line in cat_result.stdout.split("\n"):
+            val trimmed = line.trim()
+            if trimmed.starts_with("arch:"):
+                arch_val = trimmed.replace("arch:", "").trim().replace("\"", "")
+            elif trimmed.starts_with("mode:"):
+                mode_val = trimmed.replace("mode:", "").trim().replace("\"", "")
+            elif trimmed.starts_with("version:"):
+                version_val = trimmed.replace("version:", "").trim().to_i32()
+            elif trimmed.starts_with("event_count:"):
+                event_count_val = trimmed.replace("event_count:", "").trim().to_i64()
+            elif trimmed.starts_with("checkpoint_count:"):
+                checkpoint_count_val = trimmed.replace("checkpoint_count:", "").trim().to_i32()
+        var m = TraceManifest.create(arch_val, mode_val)
+        m.version = version_val
+        m.event_count = event_count_val
+        m.checkpoint_count = checkpoint_count_val
+        Ok(m)
+
+    me fn add_checkpoint(id: i32, data: [i32]) -> Result<text, text>:
+        val dir = self.base_dir
+        val mkdir_result = shell("mkdir -p '{dir}/checkpoints'")
+        if mkdir_result.exit_code != 0:
+            return Err("failed to create checkpoints directory")
+        val cp_path = "{dir}/checkpoints/cp_{id}.bin"
+        var hex_parts: [text] = []
+        for b in data:
+            val hi = hex_digit(b / 16)
+            val lo = hex_digit(b % 16)
+            hex_parts.push(hi)
+            hex_parts.push(lo)
+        val hex_str = hex_parts.join("")
+        if hex_str.len() > 0:
+            val write_result = shell("echo -n '{hex_str}' | xxd -r -p > '{cp_path}'")
+            if write_result.exit_code != 0:
+                return Err("failed to write checkpoint: {cp_path}")
+        else:
+            shell("touch '{cp_path}'")
+        self._checkpoint_ids.push(id)
+        self.manifest.checkpoint_count = self._checkpoint_ids.len() as i32
+        Ok(cp_path)
+
+    me fn add_events(events: [i32]) -> Result<text, text>:
+        val dir = self.base_dir
+        val events_path = "{dir}/events.bin"
+        for b in events:
+            self._event_data.push(b)
+        # Each event is 80 bytes
+        self.manifest.event_count = (self._event_data.len() / 80) as i64
+        var hex_parts: [text] = []
+        for b in self._event_data:
+            val hi = hex_digit(b / 16)
+            val lo = hex_digit(b % 16)
+            hex_parts.push(hi)
+            hex_parts.push(lo)
+        val hex_str = hex_parts.join("")
+        if hex_str.len() > 0:
+            val mkdir_result = shell("mkdir -p '{dir}'")
+            if mkdir_result.exit_code != 0:
+                return Err("failed to create trace directory")
+            val write_result = shell("echo -n '{hex_str}' | xxd -r -p > '{events_path}'")
+            if write_result.exit_code != 0:
+                return Err("failed to write events: {events_path}")
+        Ok(events_path)
+
+    fn list_checkpoints() -> [text]:
+        var result: [text] = []
+        for id in self._checkpoint_ids:
+            result.push("{self.base_dir}/checkpoints/cp_{id}.bin")
+        result
+
+    fn event_count() -> i64:
+        self.manifest.event_count
+
+    fn summary() -> text:
+        var lines: [text] = []
+        lines.push("TracePackage:")
+        lines.push("  dir: {self.base_dir}")
+        lines.push("  arch: {self.manifest.arch}")
+        lines.push("  mode: {self.manifest.replay_mode}")
+        lines.push("  pointer_bits: {self.manifest.pointer_bits}")
+        lines.push("  endian: {self.manifest.endian}")
+        lines.push("  events: {self.manifest.event_count}")
+        lines.push("  checkpoints: {self.manifest.checkpoint_count}")
+        lines.join("\n")
+
+# ============================================================================
+# Hex helper (matches event_log.spl)
+# ============================================================================
+
+fn hex_digit(v: i32) -> text:
+    match v:
+        0: "0"
+        1: "1"
+        2: "2"
+        3: "3"
+        4: "4"
+        5: "5"
+        6: "6"
+        7: "7"
+        8: "8"
+        9: "9"
+        10: "a"
+        11: "b"
+        12: "c"
+        13: "d"
+        14: "e"
+        15: "f"
+        _: "0"

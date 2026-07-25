@@ -1,0 +1,207 @@
+#![allow(REQC001)]
+#![allow(REQC004)]
+# WebSocket utility helpers: byte encoding, string slicing, header parsing.
+# Used by ws_frame_codec.spl, ws_handshake.spl, and ws_crypto.spl.
+
+use std.common.string_core.{char_from_code}
+use std.js.types.pair.{Pair}
+use std.gc_async_mut.gpu.browser_engine.net.h1_client.{net_ascii_lower, net_ascii_lower_char}
+
+# --- Byte encoding helpers ---
+
+fn encode_byte(value: i64) -> text:
+    # Encode a single byte (0-255) as a one-character text.
+    val clamped = if value < 0 then 0 else if value > 255 then 255 else value
+    _ws_byte_to_char(clamped)
+
+fn decode_byte_val(data: text, pos: i64) -> i64:
+    # Decode a single byte from text at the given position as an integer (0-255).
+    if pos < 0 or pos >= data.length():
+        return 0
+    val ch = ws_substring(data, pos, pos + 1)
+    _ws_char_to_byte(ch)
+
+fn _ws_byte_to_char(value: i64) -> text:
+    if value == 0: return "\0"
+    if value == 1: return "\x01"
+    if value == 2: return "\x02"
+    if value == 3: return "\x03"
+    if value == 4: return "\x04"
+    if value == 5: return "\x05"
+    if value == 6: return "\x06"
+    if value == 7: return "\x07"
+    if value == 8: return "\x08"
+    if value == 9: return "\t"
+    if value == 10: return "\n"
+    if value == 13: return "\r"
+    if value == 32: return " "
+    if value >= 33 and value <= 47:
+        val chars = "!\"#$%&'()*+,-./"
+        return ws_substring(chars, value - 33, value - 32)
+    if value >= 48 and value <= 57:
+        val chars = "0123456789"
+        return ws_substring(chars, value - 48, value - 47)
+    if value >= 58 and value <= 64:
+        val chars = ":;<=>?@"
+        return ws_substring(chars, value - 58, value - 57)
+    if value >= 65 and value <= 90:
+        val chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        return ws_substring(chars, value - 65, value - 64)
+    if value >= 91 and value <= 96:
+        val chars = "[\\]^_`"
+        return ws_substring(chars, value - 91, value - 90)
+    if value >= 97 and value <= 122:
+        val chars = "abcdefghijklmnopqrstuvwxyz"
+        return ws_substring(chars, value - 97, value - 96)
+    if value >= 123 and value <= 126:
+        val chars = "{|}~"
+        return ws_substring(chars, value - 123, value - 122)
+    if value == 127: return "\x7F"
+    if value == 128: return "\x80"
+    if value == 129: return "\x81"
+    if value == 130: return "\x82"
+    if value == 254: return "\xFE"
+    if value == 255: return "\xFF"
+    if value >= 0 and value <= 255:
+        return char_from_code(value)
+    "�"
+
+fn _ws_char_to_byte(ch: text) -> i64:
+    if ch.length() == 0: return 0
+    if ch == "\0": return 0
+    if ch == "\x01": return 1
+    if ch == "\x02": return 2
+    if ch == "\x03": return 3
+    if ch == "\x04": return 4
+    if ch == "\x05": return 5
+    if ch == "\x06": return 6
+    if ch == "\x07": return 7
+    if ch == "\x08": return 8
+    if ch == "\t": return 9
+    if ch == "\n": return 10
+    if ch == "\r": return 13
+    if ch == " ": return 32
+    if ch == "\x7F": return 127
+    if ch == "\x80": return 128
+    if ch == "\x81": return 129
+    if ch == "\x82": return 130
+    if ch == "\xFE": return 254
+    if ch == "\xFF": return 255
+    # Search printable ASCII range
+    val printable = "!\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    var i = 0
+    while i < printable.length():
+        if ws_substring(printable, i, i + 1) == ch:
+            return 33 + i
+        i = i + 1
+    val code = ch.char_code_at(0)
+    if code >= 0 and code <= 255:
+        return code
+    0
+
+fn ws_substring(s: text, start: i64, end: i64) -> text:
+    var result = ""
+    var i = if start < 0: 0 else: start
+    val limit = if end > s.len(): s.len() else: end
+    while i < limit:
+        result = result + s[i]
+        i = i + 1
+    result
+
+# --- String utilities ---
+
+fn join_text(items: [text], sep: text) -> text:
+    # Join a list of strings with a separator.
+    var result = ""
+    var i = 0
+    for item in items:
+        if i > 0:
+            result = result + sep
+        result = result + item
+        i = i + 1
+    result
+
+fn find_char_pos(s: text, ch: text) -> i64:
+    # Find the index of the first occurrence of ch in s.
+    var i = 0
+    while i < s.len():
+        if s[i] == ch:
+            return i
+        i = i + 1
+    -1
+
+fn split_crlf(s: text) -> [text]:
+    # Split a string by \r\n line endings.
+    var lines: [text] = []
+    var start = 0
+    var i = 0
+    while i < s.len() - 1:
+        if decode_byte_val(s, i) == 13 and decode_byte_val(s, i + 1) == 10:
+            lines.push(ws_substring(s, start, i))
+            start = i + 2
+            i = i + 2
+        else:
+            i = i + 1
+    if start < s.len():
+        lines.push(ws_substring(s, start, s.len()))
+    lines
+
+fn split_response_header_body(raw: text) -> Pair<text, text>:
+    # Split an HTTP response into header section and body at \r\n\r\n.
+    var i = 0
+    while i < raw.len() - 3:
+        if (decode_byte_val(raw, i) == 13 and decode_byte_val(raw, i + 1) == 10
+            and decode_byte_val(raw, i + 2) == 13 and decode_byte_val(raw, i + 3) == 10):
+            val headers = ws_substring(raw, 0, i)
+            val body = ws_substring(raw, i + 4, raw.len())
+            return Pair(headers, body)
+        i = i + 1
+    Pair(raw, "")
+
+# --- Header parsing ---
+
+fn find_header(headers: [Pair<text, text>], name: text) -> text?:
+    # Find the first header value matching the given name (case-insensitive).
+    val name_lower = net_ascii_lower(name)
+    for header in headers:
+        if net_ascii_lower(header.first) == name_lower:
+            return header.second
+    nil
+
+fn find_header_in_lines(lines: [text], name: text) -> text?:
+    val name_lower = net_ascii_lower(name)
+    var i = 1
+    while i < lines.len():
+        val parsed = parse_header_line(lines.get(i))
+        match parsed:
+            Some(header):
+                if net_ascii_lower(header.first) == name_lower:
+                    return header.second
+            None:
+                pass_dn
+        i = i + 1
+    nil
+
+fn parse_header_line(line: text) -> Pair<text, text>?:
+    # Parse a single header line: "Name: value"
+    val colon_pos = find_char_pos(line, ":")
+    if colon_pos < 0:
+        return nil
+    val name = ws_substring(line, 0, colon_pos).trim()
+    var value = ""
+    if colon_pos + 1 < line.len():
+        value = ws_substring(line, colon_pos + 1, line.len()).trim()
+    if name.len() == 0:
+        return nil
+    Pair(name, value)
+
+# --- Port helper ---
+
+fn get_ws_port(url_scheme: text, url_port: i64) -> i64:
+    # Determine the port for a WebSocket URL.
+    # Default: 80 for ws://, 443 for wss://
+    if url_port > 0:
+        return url_port
+    if url_scheme == "wss":
+        return 443
+    80

@@ -1,0 +1,89 @@
+"""
+# Claude Full Compact Command
+
+Mirrors `tmp/claude/claude-code-main/src/commands/compact` for compact command
+metadata, call-path routing, display text, cache params, and error mapping.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.commands.compact.index.{compactCommand, compactIndexSourceLinesModeled}
+use app.llm_caret.claude_full.commands.compact.compact.{CompactContext, CompactHookResult, CompactReactiveOutcome, buildCompactDisplayText, callCompact, compactErrorIncompleteResponse, compactErrorNotEnoughMessages, compactErrorUserAbort, compactSourceLinesModeled, compactViaReactive, getCompactCacheSharingParams, mergeHookInstructions}
+
+describe "Claude full compact command":
+    it "matches command descriptor metadata":
+        val enabled = compactCommand(false)
+        expect(enabled.typeName).to_equal("local")
+        expect(enabled.name).to_equal("compact")
+        expect(enabled.description).to_contain("Clear conversation history")
+        expect(enabled.enabled).to_equal(true)
+        expect(enabled.supportsNonInteractive).to_equal(true)
+        expect(enabled.argumentHint).to_equal("<optional custom summarization instructions>")
+        expect(enabled.loadPath).to_equal("./compact.js")
+
+        val disabled = compactCommand(true)
+        expect(disabled.enabled).to_equal(false)
+        expect(compactIndexSourceLinesModeled()).to_equal(15)
+
+    it "routes empty, session-memory, and traditional compaction paths":
+        val base = CompactContext.new(3, "  summarize tersely  ", false, false, false, false, 2, "manual note", "upgrade tip", "compact", "agent-1", ["/repo/extra"], ["Read"], "sonnet", ["mcp"], "", "")
+        val empty = callCompact(CompactContext.new(0, "", false, false, false, false, 0, "", "", "compact", "agent", [], [], "", [], "", ""))
+        expect(empty.errorMessage).to_equal("No messages to compact")
+
+        val sessionMemory = callCompact(CompactContext.new(4, "   ", false, false, true, false, 4, "", "", "compact", "agent-1", [], [], "sonnet", [], "", ""))
+        expect(sessionMemory.path).to_equal("session-memory")
+        expect(sessionMemory.userContextCacheCleared).to_equal(true)
+        expect(sessionMemory.postCleanupRan).to_equal(true)
+        expect(sessionMemory.promptCacheBreakNotified).to_equal(true)
+        expect(sessionMemory.postCompactionMarked).to_equal(true)
+        expect(sessionMemory.warningSuppressed).to_equal(true)
+        expect(sessionMemory.lastSummarizedMessageIdReset).to_equal(false)
+
+        val traditional = callCompact(base)
+        expect(traditional.path).to_equal("traditional")
+        expect(traditional.customInstructions).to_equal("summarize tersely")
+        expect(traditional.messagesForCompact).to_equal(2)
+        expect(traditional.cacheParamsBuilt).to_equal(true)
+        expect(traditional.lastSummarizedMessageIdReset).to_equal(true)
+        expect(traditional.displayText).to_contain("(Ctrl+O to see full summary)")
+        expect(traditional.displayText).to_contain("manual note")
+        expect(traditional.displayText).to_contain("upgrade tip")
+
+    it "models reactive progress, hook merge, and error mapping":
+        val context = CompactContext.new(5, "user instruction", true, false, false, true, 5, "", "", "compact", "agent-1", [], ["Read"], "sonnet", [], "", "")
+        val ok = compactViaReactive(context, CompactHookResult.new("hook instruction", "pre note"), CompactReactiveOutcome.ok("post note"))
+        expect(ok.path).to_equal("reactive")
+        expect(ok.preHooksExecuted).to_equal(true)
+        expect(ok.cacheParamsBuilt).to_equal(true)
+        expect(ok.responseLengthReset).to_equal(true)
+        expect(ok.streamMode).to_equal("requesting")
+        expect(ok.sdkStatus).to_equal("")
+        expect(ok.customInstructions).to_equal("user instruction\nhook instruction")
+        expect(ok.displayText).to_contain("pre note")
+        expect(ok.displayText).to_contain("post note")
+        expect(ok.progressEvents).to_contain("hooks_start")
+        expect(ok.progressEvents).to_contain("compact_start")
+        expect(ok.progressEvents).to_contain("compact_end")
+
+        val tooFew = compactViaReactive(context, CompactHookResult.new("", ""), CompactReactiveOutcome.failed("too_few_groups"))
+        expect(tooFew.errorMessage).to_equal(compactErrorNotEnoughMessages())
+        val aborted = compactViaReactive(context, CompactHookResult.new("", ""), CompactReactiveOutcome.failed("aborted"))
+        expect(aborted.errorMessage).to_equal(compactErrorUserAbort())
+        val exhausted = compactViaReactive(context, CompactHookResult.new("", ""), CompactReactiveOutcome.failed("exhausted"))
+        expect(exhausted.errorMessage).to_equal(compactErrorIncompleteResponse())
+
+    it "builds display text and cache sharing params":
+        expect(buildCompactDisplayText(true, "", "")).to_equal("Compacted ")
+        expect(buildCompactDisplayText(false, "summary", "")).to_contain("(Ctrl+O to see full summary)")
+        expect(mergeHookInstructions("one", "two")).to_equal("one\ntwo")
+
+        val context = CompactContext.new(6, "", false, false, false, false, 4, "", "", "compact", "agent-2", ["/repo/a", "/repo/b"], ["Read", "Write"], "opus", ["mcp-a"], "", "append")
+        val params = getCompactCacheSharingParams(context, 4)
+        expect(params.systemPrompt).to_equal("default:opus\nappend")
+        expect(params.userContext).to_equal("user-context")
+        expect(params.systemContext).to_equal("system-context")
+        expect(params.toolUseContextAgentId).to_equal("agent-2")
+        expect(params.forkContextMessages).to_equal(4)
+        expect(params.tools).to_contain("Read")
+        expect(params.mcpClients).to_contain("mcp-a")
+        expect(params.additionalWorkingDirectories).to_contain("/repo/b")
+        expect(compactSourceLinesModeled()).to_equal(287)

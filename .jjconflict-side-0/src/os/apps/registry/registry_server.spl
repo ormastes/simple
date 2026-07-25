@@ -1,0 +1,593 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Package Registry Server — HTTP Package Hosting
+# MDSOC: feature dimension, apps layer
+#
+# Lightweight HTTP server for hosting SimpleOS packages.
+# Serves package index, .spk files, and provides search/upload/download APIs.
+#
+# Endpoints:
+#   GET  /index.sdn                    — Full package index
+#   GET  /packages/<name>/<version>    — Download .spk file
+#   GET  /search?q=<query>             — Search packages
+#   GET  /info/<name>                  — Package metadata
+#   POST /publish                      — Upload new package (authenticated)
+#   POST /yank/<name>/<version>        — Yank a version (authenticated)
+#
+# Storage layout on disk:
+#   <data-dir>/
+#     index.sdn                        — Package index (all versions)
+#     packages/
+#       <name>/
+#         <name>-<version>-<arch>.spk  — Package archives
+#         manifest.sdn                 — Latest manifest
+#     auth/
+#       tokens.sdn                     — API tokens
+
+use os.tools.pkg.pkg_format.{
+    ExtendedManifest, PkgArch, PackageType,
+    parse_extended_manifest, serialize_extended_manifest,
+    spk_filename, pkg_arch_to_text, package_type_to_text
+}
+use os.tools.pkg.pkg_manifest.{PackageManifest, PackageVersion, parse_manifest, serialize_manifest}
+use os.userlib.fs.{read_text, write_text, stat, readdir, mkdir}
+
+# === Server Configuration ===
+
+struct RegistryConfig:
+    data_dir: text          # Root data directory
+    bind_addr: text         # Listen address (default: 0.0.0.0)
+    port: u16               # Listen port (default: 8080)
+    server_name: text       # Display name
+    require_auth: bool      # Require tokens for publish/yank
+
+fn default_registry_config() -> RegistryConfig:
+    RegistryConfig(
+        data_dir: "/var/lib/pkg-registry",
+        bind_addr: "0.0.0.0",
+        port: 8080,
+        server_name: "SimpleOS Package Registry",
+        require_auth: true
+    )
+
+# === Package Index ===
+
+struct IndexEntry:
+    name: text
+    version: text
+    arch: text
+    pkg_type: text
+    description: text
+    checksum: text
+    yanked: bool
+
+struct PackageIndex:
+    entries: [IndexEntry]
+
+fn load_index(data_dir: text) -> PackageIndex:
+    """Load the package index from disk."""
+    val path = "{data_dir}/index.sdn"
+    val content = read_text(path)
+    if content == "":
+        return PackageIndex(entries: [])
+
+    var entries: [IndexEntry] = []
+    val sections = content.split("[entry]")
+    for section in sections:
+        val trimmed = section.trim()
+        if trimmed == "":
+            pass_dn
+        else:
+            val entry = _parse_index_entry(trimmed)
+            if entry.name != "":
+                entries.push(entry)
+
+    return PackageIndex(entries: entries)
+
+fn save_index(data_dir: text, index: PackageIndex) -> Result<bool, text>:
+    """Save the package index to disk."""
+    var content = "# SimpleOS Package Registry Index\n"
+    content = content + "# Auto-generated — do not edit manually\n\n"
+
+    for entry in index.entries:
+        content = content + "[entry]\n"
+        content = content + "name = \"{entry.name}\"\n"
+        content = content + "version = \"{entry.version}\"\n"
+        content = content + "arch = \"{entry.arch}\"\n"
+        content = content + "type = \"{entry.pkg_type}\"\n"
+        content = content + "description = \"{entry.description}\"\n"
+        content = content + "checksum = \"{entry.checksum}\"\n"
+        if entry.yanked:
+            content = content + "yanked = true\n"
+        content = content + "\n"
+
+    write_text("{data_dir}/index.sdn", content)
+    return Result.Ok(true)
+
+# === Registry Server ===
+
+class RegistryServer:
+    config: RegistryConfig
+    index: PackageIndex
+
+impl RegistryServer:
+    static fn new(config: RegistryConfig) -> RegistryServer:
+        RegistryServer(config: config, index: PackageIndex(entries: []))
+
+    me init() -> Result<bool, text>:
+        """Initialize registry: create directories, load index."""
+        mkdir(self.config.data_dir)
+        mkdir("{self.config.data_dir}/packages")
+        mkdir("{self.config.data_dir}/auth")
+        self.index = load_index(self.config.data_dir)
+        print "Registry initialized: {self.index.entries.len()} packages indexed"
+        return Result.Ok(true)
+
+    me publish(spk_data: text, manifest: ExtendedManifest, token: text) -> Result<bool, text>:
+        """Publish a new package version."""
+        # Authenticate
+        if self.config.require_auth:
+            val auth_result = self._check_auth(token)
+            if val Err(e) = auth_result:
+                return Result.Err("Authentication failed: {e}")
+
+        val name = manifest.base.name
+        val version = manifest.base.version.to_text()
+        val arch = pkg_arch_to_text(manifest.arch)
+
+        # Check for duplicate
+        for entry in self.index.entries:
+            if entry.name == name and entry.version == version and entry.arch == arch:
+                return Result.Err("Version {version} of {name} ({arch}) already exists")
+
+        # Store .spk file
+        val pkg_dir = "{self.config.data_dir}/packages/{name}"
+        mkdir(pkg_dir)
+        val filename = spk_filename(manifest.base.name, manifest.base.version, manifest.arch)
+        write_text("{pkg_dir}/{filename}", spk_data)
+
+        # Store manifest
+        val manifest_content = serialize_extended_manifest(manifest)
+        write_text("{pkg_dir}/manifest.sdn", manifest_content)
+
+        # Add to index
+        val entry = IndexEntry(
+            name: name,
+            version: version,
+            arch: arch,
+            pkg_type: package_type_to_text(manifest.pkg_type),
+            description: manifest.base.description,
+            checksum: manifest.base.checksum,
+            yanked: false
+        )
+        self.index.entries.push(entry)
+
+        # Save index
+        val save_result = save_index(self.config.data_dir, self.index)
+        if val Err(e) = save_result:
+            return Result.Err("Failed to save index: {e}")
+
+        print "Published: {name} {version} ({arch})"
+        return Result.Ok(true)
+
+    me yank(name: text, version: text, token: text) -> Result<bool, text>:
+        """Yank (soft-delete) a package version. The .spk stays but is hidden from installs."""
+        if self.config.require_auth:
+            val auth_result = self._check_auth(token)
+            if val Err(e) = auth_result:
+                return Result.Err("Authentication failed: {e}")
+
+        var found = false
+        var i = 0
+        while i < self.index.entries.len():
+            if self.index.entries[i].name == name and self.index.entries[i].version == version:
+                self.index.entries[i].yanked = true
+                found = true
+            i = i + 1
+
+        if found == false:
+            return Result.Err("Package not found: {name} {version}")
+
+        val save_result = save_index(self.config.data_dir, self.index)
+        if val Err(e) = save_result:
+            return Result.Err("Failed to save index: {e}")
+
+        print "Yanked: {name} {version}"
+        return Result.Ok(true)
+
+    fn search(query: text) -> [IndexEntry]:
+        """Search packages by name or description."""
+        var results: [IndexEntry] = []
+        val lower_q = query.to_lower()
+        for entry in self.index.entries:
+            if entry.yanked:
+                pass_dn
+            else:
+                val name_match = entry.name.to_lower().contains(lower_q)
+                val desc_match = entry.description.to_lower().contains(lower_q)
+                if name_match or desc_match:
+                    results.push(entry)
+        return results
+
+    fn info(name: text) -> [IndexEntry]:
+        """Get all versions of a package."""
+        var results: [IndexEntry] = []
+        for entry in self.index.entries:
+            if entry.name == name:
+                results.push(entry)
+        return results
+
+    fn get_package_path(name: text, version: text, arch: text) -> text?:
+        """Get filesystem path to a .spk file."""
+        for entry in self.index.entries:
+            if entry.name == name and entry.version == version and entry.arch == arch:
+                if entry.yanked:
+                    return nil
+                val ver_result = PackageVersion.parse(version)
+                if val Err(_) = ver_result:
+                    return nil
+                val ver = ver_result.unwrap()
+                val arch_result = os.tools.pkg.pkg_format.pkg_arch_from_text(arch)
+                if val Err(_) = arch_result:
+                    return nil
+                val pkg_arch = arch_result.unwrap()
+                val filename = spk_filename(name, ver, pkg_arch)
+                return "{self.config.data_dir}/packages/{name}/{filename}"
+        return nil
+
+    fn list_all() -> [IndexEntry]:
+        """List all non-yanked packages (latest version only)."""
+        var latest: [IndexEntry] = []
+        var seen: [text] = []
+        # Iterate backwards to get latest versions first
+        var i = self.index.entries.len() - 1
+        while i >= 0:
+            val entry = self.index.entries[i]
+            if entry.yanked == false:
+                var already_seen = false
+                for s in seen:
+                    if s == entry.name:
+                        already_seen = true
+                        break
+                if already_seen == false:
+                    latest.push(entry)
+                    seen.push(entry.name)
+            i = i - 1
+        return latest
+
+    fn _check_auth(token: text) -> Result<bool, text>:
+        """Validate an API token."""
+        if token == "":
+            return Result.Err("No token provided")
+        val tokens_content = read_text("{self.config.data_dir}/auth/tokens.sdn")
+        if tokens_content == "":
+            return Result.Err("No tokens configured")
+        if tokens_content.contains(token):
+            return Result.Ok(true)
+        return Result.Err("Invalid token")
+
+# === HTTP Request Handler ===
+
+struct HttpRequest:
+    method: text        # GET, POST
+    path: text          # /index.sdn, /packages/foo/1.0.0
+    query: text         # q=search_term
+    body: text          # POST body
+    auth_token: text    # Authorization header value
+
+struct HttpResponse:
+    status: i32         # 200, 404, 401, 500
+    content_type: text  # text/plain, application/sdn
+    body: text
+
+fn handle_request(server: RegistryServer, req: HttpRequest) -> HttpResponse:
+    """Route and handle an HTTP request."""
+    if req.method == "GET":
+        if req.path == "/index.sdn":
+            val content = read_text("{server.config.data_dir}/index.sdn")
+            return HttpResponse(status: 200, content_type: "application/sdn", body: content)
+
+        else if req.path == "/health":
+            return HttpResponse(status: 200, content_type: "text/plain", body: "ok")
+
+        else if req.path.starts_with("/search"):
+            val query = _extract_query_param(req.query, "q")
+            val results = server.search(query)
+            val body = _format_search_results(results)
+            return HttpResponse(status: 200, content_type: "application/sdn", body: body)
+
+        else if req.path.starts_with("/info/"):
+            val name = req.path.slice(6, req.path.len())
+            val versions = server.info(name)
+            if versions.len() == 0:
+                return HttpResponse(status: 404, content_type: "text/plain", body: "Package not found: {name}")
+            val body = _format_search_results(versions)
+            return HttpResponse(status: 200, content_type: "application/sdn", body: body)
+
+        else if req.path.starts_with("/packages/"):
+            # Parse /packages/<name>/<version>
+            val path_parts = req.path.slice(10, req.path.len()).split("/")
+            if path_parts.len() >= 2:
+                val name = path_parts[0]
+                val version = path_parts[1]
+                val arch = if path_parts.len() >= 3: path_parts[2] else: "any"
+                val pkg_path = server.get_package_path(name, version, arch)
+                if val Some(p) = pkg_path:
+                    val content = read_text(p)
+                    return HttpResponse(status: 200, content_type: "application/octet-stream", body: content)
+                else:
+                    return HttpResponse(status: 404, content_type: "text/plain", body: "Package not found")
+
+        else if req.path == "/list":
+            val all = server.list_all()
+            val body = _format_search_results(all)
+            return HttpResponse(status: 200, content_type: "application/sdn", body: body)
+
+    else if req.method == "POST":
+        if req.path == "/publish":
+            # Parse manifest from body (first section before archive data)
+            val manifest_result = parse_extended_manifest(req.body)
+            if val Err(e) = manifest_result:
+                return HttpResponse(status: 400, content_type: "text/plain", body: "Invalid manifest: {e}")
+            var manifest = manifest_result.unwrap()
+
+            val pub_result = server.publish(req.body, manifest, req.auth_token)
+            if val Ok(_) = pub_result:
+                return HttpResponse(status: 201, content_type: "text/plain", body: "Published")
+            else if val Err(e) = pub_result:
+                return HttpResponse(status: 400, content_type: "text/plain", body: e)
+
+        else if req.path.starts_with("/yank/"):
+            val path_parts = req.path.slice(6, req.path.len()).split("/")
+            if path_parts.len() >= 2:
+                val name = path_parts[0]
+                val version = path_parts[1]
+                val yank_result = server.yank(name, version, req.auth_token)
+                if val Ok(_) = yank_result:
+                    return HttpResponse(status: 200, content_type: "text/plain", body: "Yanked")
+                else if val Err(e) = yank_result:
+                    return HttpResponse(status: 400, content_type: "text/plain", body: e)
+
+    return HttpResponse(status: 404, content_type: "text/plain", body: "Not Found")
+
+# === CLI Entry Point ===
+
+fn _print_registry_usage():
+    print "Usage: registry-server <command> [OPTIONS]"
+    print ""
+    print "Commands:"
+    print "  start            Start the package registry server"
+    print "  init             Initialize a new registry data directory"
+    print "  add-token TOKEN  Add an API token for publish/yank"
+    print "  reindex          Rebuild the package index from .spk files"
+    print "  list             List all packages in the registry"
+    print ""
+    print "Options:"
+    print "  --data=DIR       Data directory (default: /var/lib/pkg-registry)"
+    print "  --port=PORT      Listen port (default: 8080)"
+    print "  --no-auth        Disable authentication for publish/yank"
+    print "  -h               Show this help"
+
+fn run_registry(args: [text]) -> i32:
+    for arg in args:
+        if arg == "-h":
+            _print_registry_usage()
+            return 0
+
+    if args.len() < 1:
+        _print_registry_usage()
+        return 1
+
+    # Parse options
+    var config = default_registry_config()
+    for arg in args:
+        if arg.starts_with("--data="):
+            config.data_dir = arg.slice(7, arg.len())
+        else if arg.starts_with("--port="):
+            config.port = arg.slice(7, arg.len()).to_u16()
+        else if arg == "--no-auth":
+            config.require_auth = false
+
+    val command = args[0]
+
+    if command == "init":
+        return _cmd_init(config)
+
+    else if command == "start":
+        return _cmd_start(config)
+
+    else if command == "add-token":
+        if args.len() < 2:
+            print "Usage: registry-server add-token TOKEN"
+            return 1
+        return _cmd_add_token(config, args[1])
+
+    else if command == "reindex":
+        return _cmd_reindex(config)
+
+    else if command == "list":
+        return _cmd_list_packages(config)
+
+    else:
+        print "Unknown command: {command}"
+        _print_registry_usage()
+        return 1
+
+fn _cmd_init(config: RegistryConfig) -> i32:
+    """Initialize a new registry."""
+    print "Initializing registry at: {config.data_dir}"
+    mkdir(config.data_dir)
+    mkdir("{config.data_dir}/packages")
+    mkdir("{config.data_dir}/auth")
+
+    # Create empty index
+    write_text("{config.data_dir}/index.sdn", "# SimpleOS Package Registry Index\n")
+
+    # Create empty token file
+    write_text("{config.data_dir}/auth/tokens.sdn", "# API tokens (one per line)\n")
+
+    print "Registry initialized."
+    return 0
+
+fn _cmd_start(config: RegistryConfig) -> i32:
+    """Start the registry server."""
+    var server = RegistryServer.new(config)
+    val init_result = server.init()
+    if val Err(e) = init_result:
+        print "Error initializing registry: {e}"
+        return 1
+
+    print "{config.server_name}"
+    print "Listening on {config.bind_addr}:{config.port}"
+    print "Data directory: {config.data_dir}"
+    print ""
+    print "Endpoints:"
+    print "  GET  /index.sdn              — Package index"
+    print "  GET  /packages/<name>/<ver>   — Download package"
+    print "  GET  /search?q=<query>        — Search packages"
+    print "  GET  /info/<name>             — Package info"
+    print "  GET  /list                    — List all packages"
+    print "  POST /publish                 — Publish package"
+    print "  POST /yank/<name>/<ver>       — Yank version"
+    print ""
+    print "Press Ctrl+C to stop."
+
+    # Event loop — process incoming HTTP requests
+    # In the real implementation, this uses the HTTP server from std.http
+    # For now, we run a polling loop that checks for incoming connections
+    _serve_loop(server)
+    return 0
+
+fn _cmd_add_token(config: RegistryConfig, token: text) -> i32:
+    """Add an API token."""
+    val path = "{config.data_dir}/auth/tokens.sdn"
+    val existing = read_text(path)
+    write_text(path, existing + "{token}\n")
+    print "Token added."
+    return 0
+
+fn _cmd_reindex(config: RegistryConfig) -> i32:
+    """Rebuild index from .spk files on disk."""
+    print "Rebuilding index..."
+    val pkg_dir = "{config.data_dir}/packages"
+    val packages = readdir(pkg_dir)
+    var count = 0
+
+    var index = PackageIndex(entries: [])
+    for pkg_name in packages:
+        val manifest_path = "{pkg_dir}/{pkg_name}/manifest.sdn"
+        val content = read_text(manifest_path)
+        if content != "":
+            val result = parse_extended_manifest(content)
+            if val Ok(manifest) = result:
+                val entry = IndexEntry(
+                    name: manifest.base.name,
+                    version: manifest.base.version.to_text(),
+                    arch: pkg_arch_to_text(manifest.arch),
+                    pkg_type: package_type_to_text(manifest.pkg_type),
+                    description: manifest.base.description,
+                    checksum: manifest.base.checksum,
+                    yanked: false
+                )
+                index.entries.push(entry)
+                count = count + 1
+
+    val save_result = save_index(config.data_dir, index)
+    if val Err(e) = save_result:
+        print "Error saving index: {e}"
+        return 1
+
+    print "Indexed {count} packages."
+    return 0
+
+fn _cmd_list_packages(config: RegistryConfig) -> i32:
+    """List all packages in the registry."""
+    val index = load_index(config.data_dir)
+    if index.entries.len() == 0:
+        print "No packages in registry."
+        return 0
+
+    print "Packages:"
+    for entry in index.entries:
+        var status = ""
+        if entry.yanked:
+            status = " (yanked)"
+        print "  {entry.name}\t{entry.version}\t{entry.arch}\t{entry.pkg_type}\t{entry.description}{status}"
+    return 0
+
+# === Internal Helpers ===
+
+fn _serve_loop(server: RegistryServer):
+    """Main server event loop — placeholder for HTTP accept/dispatch."""
+    # In production, this would use the HTTP server framework:
+    #   val listener = tcp_listen(server.config.bind_addr, server.config.port)
+    #   while true:
+    #       val conn = listener.accept()
+    #       val req = parse_http_request(conn)
+    #       val resp = handle_request(server, req)
+    #       send_http_response(conn, resp)
+    pass_todo("HTTP server event loop — requires std.http.server integration")
+
+fn _parse_index_entry(section: text) -> IndexEntry:
+    """Parse a single [entry] section."""
+    var name = ""
+    var version = ""
+    var arch = "any"
+    var pkg_type = "app"
+    var description = ""
+    var checksum = ""
+    var yanked = false
+
+    val lines = section.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("name"):
+            name = _extract_val(trimmed)
+        else if trimmed.starts_with("version"):
+            version = _extract_val(trimmed)
+        else if trimmed.starts_with("arch"):
+            arch = _extract_val(trimmed)
+        else if trimmed.starts_with("type"):
+            pkg_type = _extract_val(trimmed)
+        else if trimmed.starts_with("description"):
+            description = _extract_val(trimmed)
+        else if trimmed.starts_with("checksum"):
+            checksum = _extract_val(trimmed)
+        else if trimmed.starts_with("yanked"):
+            yanked = _extract_val(trimmed) == "true"
+
+    return IndexEntry(name: name, version: version, arch: arch, pkg_type: pkg_type, description: description, checksum: checksum, yanked: yanked)
+
+fn _extract_val(line: text) -> text:
+    val eq_idx = line.index_of("=")
+    if eq_idx < 0:
+        return ""
+    var value = line.slice(eq_idx + 1, line.len()).trim()
+    if value.starts_with("\""):
+        value = value.slice(1, value.len())
+    if value.ends_with("\""):
+        value = value.slice(0, value.len() - 1)
+    return value
+
+fn _extract_query_param(query: text, param: text) -> text:
+    """Extract a query parameter value from 'key=value&key2=value2'."""
+    val parts = query.split("&")
+    for part in parts:
+        val kv = part.split("=")
+        if kv.len() == 2 and kv[0] == param:
+            return kv[1]
+    return ""
+
+fn _format_search_results(entries: [IndexEntry]) -> text:
+    """Format search results as SDN."""
+    var out = ""
+    for entry in entries:
+        out = out + "[entry]\n"
+        out = out + "name = \"{entry.name}\"\n"
+        out = out + "version = \"{entry.version}\"\n"
+        out = out + "arch = \"{entry.arch}\"\n"
+        out = out + "type = \"{entry.pkg_type}\"\n"
+        out = out + "description = \"{entry.description}\"\n"
+        if entry.yanked:
+            out = out + "yanked = true\n"
+        out = out + "\n"
+    return out

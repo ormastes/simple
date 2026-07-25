@@ -1,0 +1,29 @@
+//! Lint checker — thin dispatcher that re-exports LintChecker from submodules.
+//!
+//! #![skip_todo]
+
+#[path = "checker_core.rs"]
+mod checker_core;
+
+#[path = "checker_annotations.rs"]
+mod checker_annotations;
+
+#[path = "checker_types.rs"]
+mod checker_types;
+
+#[path = "checker_spipe.rs"]
+mod checker_spipe;
+
+#[path = "checker_args.rs"]
+mod checker_args;
+
+#[path = "checker_resources.rs"]
+mod checker_resources;
+
+#[path = "checker_deterministic.rs"]
+mod checker_deterministic;
+
+#[path = "checker_names.rs"]
+mod checker_names;
+
+pub use checker_core::LintChecker;

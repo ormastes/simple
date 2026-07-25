@@ -1,0 +1,221 @@
+# @tag: gpu, rendering, engine2d, backend, matrix
+# @cover src/lib/gc_async_mut/gpu/engine2d/engine.spl 30%
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_probe.spl 40%
+# @cover src/lib/gc_async_mut/gpu/engine2d/helpers_availability.spl 40%
+
+# Engine2D backend matrix — host detection + capability-gated honest matrix.
+#
+# Verifies on the CURRENT host:
+#   1. detect_best_backend() / list_backends() detection is coherent,
+#   2. alias canonicalization (d3d11/dx12 -> directx, cpu-simd family -> cpu_simd),
+#   3. for each matrix backend (metal, vulkan, directx, cpu_simd, software, cpu):
+#      Initialized  => strict-create MUST succeed and a filled-rect readback MUST
+#                      match the SoftwareBackend oracle (center=red, corner=bg),
+#      otherwise    => the probe must be COHERENTLY unavailable
+#                      (available=false, non-empty unavailable-reason,
+#                      absent from list_backends()),
+#   4. the scalar cpu lane (and software when Initialized) is a hard PASS on
+#      every host — no capability gate excuses it.
+#
+# One `print("backend <name>: <status>")` line per matrix backend puts the
+# actual host matrix in the run log. Nothing is skipped silently: a backend
+# that list_backends() claims but strict-create cannot deliver is a FAILURE.
+
+use std.spec.*
+use std.gpu.engine2d.engine.{Engine2D}
+use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus, backend_status_text}
+use std.gpu.engine2d.backend_software.{SoftwareBackend}
+use std.gpu.engine2d.color.{rgb, color_r, color_g, color_b}
+use std.gpu.engine2d.helpers_availability.{
+    backend_canonical_name, backend_default_priority_order,
+    backend_is_hardware, backend_unavailable_reason
+}
+use std.gpu.engine2d.renderer_select.{renderer_priority_order}
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+fn contains_name(names: [text], want: text) -> bool:
+    var found = false
+    var i = 0
+    val n = names.len()
+    while i < n:
+        if names[i] == want:
+            found = true
+        i = i + 1
+    found
+
+# Absolute pixel oracle: the same clear+fill_rect ops on a fresh
+# SoftwareBackend surface (the honest scalar rasterizer). The engine readback
+# must match the oracle channel-for-channel at a drawn center point and an
+# untouched background corner, AND both must equal the known fixed colors
+# (red / black) so an oracle bug cannot self-confirm.
+fn rect_readback_matches_oracle(px: [u32], width: i32, label: text) -> bool:
+    var sw = SoftwareBackend.create()
+    sw.init(width, width)
+    sw.draw_rect_filled(4, 4, 8, 8, rgb(255, 0, 0))
+    val oracle = sw.read_pixels()
+    val ci = (8 * width + 8) as i64
+    val center = px[ci]
+    val corner = px[0]
+    val ocenter = oracle[ci]
+    val ocorner = oracle[0]
+    val center_ok = (color_r(center) == color_r(ocenter) and
+        color_g(center) == color_g(ocenter) and
+        color_b(center) == color_b(ocenter) and
+        color_r(center) == 255 and color_g(center) == 0 and color_b(center) == 0)
+    val corner_ok = (color_r(corner) == color_r(ocorner) and
+        color_g(corner) == color_g(ocorner) and
+        color_b(corner) == color_b(ocorner) and
+        color_r(corner) == 0 and color_g(corner) == 0 and color_b(corner) == 0)
+    if not center_ok:
+        print("readback center mismatch for {label}")
+    if not corner_ok:
+        print("readback corner mismatch for {label}")
+    (center_ok and corner_ok)
+
+# Strict-create a backend, draw one filled rect, verify readback vs oracle.
+# val-combination style, NO var reassign after me-method calls — the seed
+# interpreter spuriously consts such locals under the sspec runner:
+# doc/08_tracking/bug/interp_var_reassign_const_after_me_method_in_spec_2026-07-21.md
+fn strict_render_ok(name: text) -> bool:
+    val created = Engine2D.create_with_backend_strict(16, 16, name)
+    if created.is_ok():
+        var eng = created.unwrap()
+        eng.clear(rgb(0, 0, 0))
+        eng.draw_rect_filled(4, 4, 8, 8, rgb(255, 0, 0))
+        val px = eng.read_pixels()
+        val matched = rect_readback_matches_oracle(px, 16, name)
+        eng.shutdown()
+        matched
+    else:
+        val err = created.unwrap_err()
+        val why = err.reason
+        print("strict-create FAILED for {name}: {why}")
+        false
+
+# One honest matrix entry:
+#   Initialized  -> must be listed AND strict-create+render+readback must pass.
+#   anything else -> available must be false, list_backends() must not claim
+#                    it, and backend_unavailable_reason() must be non-empty.
+fn matrix_entry_coherent(name: text) -> bool:
+    # val-combination style — see strict_render_ok's comment for the interp
+    # const-misclassification bug this sidesteps.
+    val probe = Engine2D.probe_backend(4, 4, name)
+    val st = backend_status_text(probe.status)
+    val why = probe.reason
+    print("backend {name}: {st} ({why})")
+    val listed = contains_name(Engine2D.list_backends(), name)
+    if probe.status == BackendStatus.Initialized:
+        if not listed:
+            print("INCOHERENT: {name} probes Initialized but list_backends omits it")
+        val rendered = strict_render_ok(name)
+        (listed and rendered)
+    else:
+        if probe.available:
+            print("INCOHERENT: {name} status={st} but available=true")
+        if listed:
+            print("INCOHERENT: list_backends claims {name} but probe status={st}")
+        val hint = backend_unavailable_reason(name)
+        if hint.len() == 0:
+            print("INCOHERENT: empty unavailable-reason for {name}")
+        ((not probe.available) and (not listed) and hint.len() > 0)
+
+# ---------------------------------------------------------------------------
+# 1. Host backend detection
+# ---------------------------------------------------------------------------
+
+describe "Engine2D backend matrix — host detection":
+
+    it "detect_best_backend returns a canonical name from the renderer priority order":
+        val best = Engine2D.detect_best_backend()
+        print("detected best backend: {best}")
+        assert_true(best.len() > 0)
+        val canon = backend_canonical_name(best)
+        assert_true(contains_name(renderer_priority_order(), canon))
+
+    it "list_backends is non-empty and always contains the cpu scalar fallback":
+        val avail = Engine2D.list_backends()
+        assert_true(avail.len() > 0)
+        assert_true(contains_name(avail, "cpu"))
+
+    it "every listed backend name is already canonical":
+        val avail = Engine2D.list_backends()
+        val n = avail.len()
+        var i = 0
+        var all_canonical = true
+        while i < n:
+            val name = avail[i]
+            if backend_canonical_name(name) != name:
+                print("non-canonical listed backend: {name}")
+                all_canonical = false
+            i = i + 1
+        assert_true(all_canonical)
+
+# ---------------------------------------------------------------------------
+# 2. Alias canonicalization
+# ---------------------------------------------------------------------------
+
+describe "Engine2D backend matrix — alias canonicalization":
+
+    it "directx family aliases canonicalize to directx":
+        expect(backend_canonical_name("d3d11")).to_equal("directx")
+        expect(backend_canonical_name("d3d12")).to_equal("directx")
+        expect(backend_canonical_name("dx11")).to_equal("directx")
+        expect(backend_canonical_name("dx12")).to_equal("directx")
+
+    it "cpu-simd family aliases canonicalize to cpu_simd":
+        expect(backend_canonical_name("cpu-simd")).to_equal("cpu_simd")
+        expect(backend_canonical_name("simd_cpu")).to_equal("cpu_simd")
+        expect(backend_canonical_name("simd-cpu")).to_equal("cpu_simd")
+
+    it "canonical matrix names map to themselves":
+        expect(backend_canonical_name("metal")).to_equal("metal")
+        expect(backend_canonical_name("vulkan")).to_equal("vulkan")
+        expect(backend_canonical_name("directx")).to_equal("directx")
+        expect(backend_canonical_name("cpu_simd")).to_equal("cpu_simd")
+        expect(backend_canonical_name("software")).to_equal("software")
+        expect(backend_canonical_name("cpu")).to_equal("cpu")
+
+# ---------------------------------------------------------------------------
+# 3. Backend matrix — capability-gated but honest
+# ---------------------------------------------------------------------------
+
+describe "Engine2D backend matrix — per-backend coherence":
+
+    it "metal initializes+renders or is coherently unavailable":
+        assert_true(matrix_entry_coherent("metal"))
+
+    it "vulkan initializes+renders or is coherently unavailable":
+        assert_true(matrix_entry_coherent("vulkan"))
+
+    it "directx initializes+renders or is coherently unavailable":
+        assert_true(matrix_entry_coherent("directx"))
+
+    it "cpu_simd initializes+renders or is coherently unavailable":
+        assert_true(matrix_entry_coherent("cpu_simd"))
+
+    it "software initializes+renders or is coherently unavailable":
+        assert_true(matrix_entry_coherent("software"))
+
+    it "cpu initializes+renders or is coherently unavailable":
+        assert_true(matrix_entry_coherent("cpu"))
+
+# ---------------------------------------------------------------------------
+# 4. Guaranteed CPU lanes — hard PASS on every host
+# ---------------------------------------------------------------------------
+
+describe "Engine2D backend matrix — guaranteed CPU lanes":
+
+    it "cpu strict-create + fill + readback works on any host":
+        assert_true(strict_render_ok("cpu"))
+
+    it "software strict-create + fill + readback works when its probe reports Initialized":
+        val probe = Engine2D.probe_backend(4, 4, "software")
+        if probe.status == BackendStatus.Initialized:
+            assert_true(strict_render_ok("software"))
+        else:
+            # software must never be half-available
+            assert_false(probe.available)
+            assert_true(backend_unavailable_reason("software").len() > 0)

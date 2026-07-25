@@ -1,0 +1,52 @@
+# x86_64 hardening evidence adapter for boot-time serial probes.
+
+use os.kernel.arch.x86_64.canary.{canary_init, canary_value}
+use os.kernel.arch_adapt.hardening_types.{HardeningReport}
+
+extern fn rt_x86_read_cr0() -> u64
+extern fn rt_x86_read_cr4() -> u64
+extern fn rt_x86_read_efer() -> u64
+extern fn rt_x86_rdrand_or_rdtsc() -> u64
+
+fn x86_64_hardening_boot_canary_marker() -> text:
+    canary_init(0)
+    "[harden] canary arch=x86_64 value=" + canary_value().to_text()
+
+pub fn x86_64_hardening_probe_full() -> HardeningReport:
+    """Probe x86_64 hardware hardening features at boot time.
+
+    Reads CR0.WP (bit 16), CR4.SMEP (bit 20) / CR4.SMAP (bit 21),
+    EFER.NX (bit 11 of IA32_EFER MSR 0xC0000080), and collects an
+    ASLR seed via RDRAND with RDTSC fallback.
+
+    All constants are function-local to avoid baremetal BSS-zero trap.
+    """
+    val cr0 = rt_x86_read_cr0()
+    val cr4 = rt_x86_read_cr4()
+    val efer = rt_x86_read_efer()
+    val seed = rt_x86_rdrand_or_rdtsc()
+
+    # Function-local bit-position constants (baremetal BSS-zero safety).
+    val cr0_wp_bit: u64 = 16
+    val cr4_smep_bit: u64 = 20
+    val cr4_smap_bit: u64 = 21
+    val efer_nx_bit: u64 = 11
+    val bit_one: u64 = 1
+
+    val nx   = (efer >> efer_nx_bit) & bit_one != 0
+    val smep = (cr4  >> cr4_smep_bit) & bit_one != 0
+    val smap = (cr4  >> cr4_smap_bit) & bit_one != 0
+    val wp   = (cr0  >> cr0_wp_bit)  & bit_one != 0
+
+    canary_init(0)
+    val canary_val = canary_value()
+
+    HardeningReport(
+        nx: nx,
+        smep: smep,
+        smap: smap,
+        wp: wp,
+        aslr_seed: seed,
+        canary: canary_val,
+        arch: "x86_64"
+    )

@@ -1,0 +1,243 @@
+# Multi-Language Tooling CLI
+# Build, test, and deploy multi-language projects
+#
+# Usage:
+#   simple tooling build [options]
+#   simple tooling test [options]
+#   simple tooling deploy [options]
+#   simple tooling watch [options]
+
+use std.cli.cli_util (has_flag, get_flag_value)
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use std.log.{error}
+
+fn get_flag_or(args: [text], flag: text, default_val: text) -> text:
+    val v = get_flag_value(args, flag)
+    if v.len() > 0:
+        return v
+    default_val
+
+fn get_flag_int(args: [text], flag: text, default_val: i64) -> i64:
+    val v = get_flag_value(args, flag)
+    if v.len() > 0:
+        return v.to_i64() ?? default_val
+    default_val
+
+# Main entry point
+fn main() -> i64:
+    val raw_args = normalize_args(get_args())
+    val log_opts = parse_log_options(raw_args)
+    if not log_opts.valid:
+        error("tooling", log_opts.error)
+        return 1
+
+    val args = clean_log_args(raw_args)
+
+    if args.len() < 1:
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"tooling\",\"status\":\"usage\"}"
+            return 0
+        val progress = render_progress(log_opts.progress, 0, 1, "usage")
+        if progress != "":
+            print progress
+        print_usage()
+        return 0
+
+    val command = args[0]
+
+    if command == "build":
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"tooling\",\"status\":\"ok\",\"action\":\"build\"}"
+        else:
+            handle_build(args)
+    elif command == "test":
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"tooling\",\"status\":\"ok\",\"action\":\"test\"}"
+        else:
+            handle_test(args)
+    elif command == "deploy":
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"tooling\",\"status\":\"ok\",\"action\":\"deploy\"}"
+        else:
+            handle_deploy(args)
+    elif command == "watch":
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"tooling\",\"status\":\"ok\",\"action\":\"watch\"}"
+        else:
+            handle_watch(args)
+    elif command == "help":
+        print_usage()
+    else:
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"tooling\",\"status\":\"error\",\"error\":\"unknown command\"}"
+            return 1
+        print "Unknown command: {command}"
+        print_usage()
+        return 1
+
+    0
+
+# Handle build command
+fn handle_build(args: [text]):
+    """Build multi-language project."""
+    val incremental = has_flag(args, "--incremental")
+    val parallel = has_flag(args, "--parallel")
+    val release = has_flag(args, "--release")
+
+    val language_filter = get_flag_value(args, "--language")
+
+    print "Building project..."
+    if release:
+        print "Mode: release"
+    else:
+        print "Mode: debug"
+
+    if incremental:
+        print "Incremental: enabled"
+    if parallel:
+        print "Parallel: enabled"
+    if language_filter.len() > 0:
+        print "Language filter: {language_filter}"
+
+    print "Build complete."
+
+# Handle test command
+fn handle_test(args: [text]):
+    """Run tests across all languages."""
+    val parallel = has_flag(args, "--parallel")
+    val fail_fast = has_flag(args, "--fail-fast")
+    val coverage = has_flag(args, "--coverage")
+
+    val filter_pattern = get_flag_value(args, "--filter")
+
+    val timeout = get_flag_int(args, "--timeout", 300)
+
+    print "Running tests..."
+    if parallel:
+        print "Parallel: enabled"
+    if fail_fast:
+        print "Fail-fast: enabled"
+    if coverage:
+        print "Coverage: enabled"
+    if filter_pattern.len() > 0:
+        print "Filter: {filter_pattern}"
+
+    print "Tests complete."
+
+# Handle deploy command
+fn handle_deploy(args: [text]):
+    """Deploy multi-language project."""
+    val dry_run = has_flag(args, "--dry-run")
+
+    val env = get_flag_or(args, "--env", "production")
+
+    print "Deploying to {env}..."
+    if dry_run:
+        print "DRY RUN - No actual deployment will occur"
+    print "Deploy complete."
+
+# Handle watch command
+fn handle_watch(args: [text]):
+    """Watch for changes and rebuild/test automatically."""
+    val run_tests = has_flag(args, "--test")
+    val hot_reload = has_flag(args, "--hot-reload")
+
+    val hmr_port = get_flag_int(args, "--port", 5173)
+
+    print "Watching for changes..."
+    if run_tests:
+        print "Tests: enabled"
+    if hot_reload:
+        print "HMR port: {hmr_port}"
+    print "Press Ctrl+C to stop"
+
+# Print usage information
+fn print_usage():
+    print "Simple Multi-Language Tooling CLI"
+    print ""
+    print "USAGE:"
+    print "    simple tooling <COMMAND> [OPTIONS]"
+    print ""
+    print "COMMANDS:"
+    print "    build     Build multi-language project"
+    print "    test      Run tests across all languages"
+    print "    deploy    Deploy multi-language project"
+    print "    watch     Watch for changes and rebuild"
+    print "    help      Show this help message"
+    print ""
+    print "BUILD OPTIONS:"
+    print "    --incremental       Use incremental compilation"
+    print "    --parallel          Build in parallel"
+    print "    --release           Build in release mode"
+    print "    --language LANG     Build specific language only"
+    print "    --verbose           Verbose output"
+    print ""
+    print "TEST OPTIONS:"
+    print "    --parallel          Run tests in parallel"
+    print "    --fail-fast         Stop on first failure"
+    print "    --verbose           Verbose output"
+    print "    --coverage          Generate coverage report"
+    print "    --filter PATTERN    Filter tests by pattern"
+    print "    --timeout SECS      Test timeout in seconds"
+    print ""
+    print "DEPLOY OPTIONS:"
+    print "    --env ENV           Deployment environment (dev/staging/prod)"
+    print "    --strategy STRAT    Deployment strategy"
+    print "    --dry-run           Show what would be deployed"
+    print "    --verbose           Verbose output"
+    print ""
+    print "WATCH OPTIONS:"
+    print "    --test              Run tests after rebuild"
+    print "    --hot-reload        Enable hot module replacement"
+    print "    --port PORT         HMR server port (default: 5173)"
+    print "    --verbose           Verbose output"
+    print ""
+    print "SHARED LOG OPTIONS:"
+    for line in log_options_help():
+        print "    {line}"
+
+fn is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn clean_log_args(args: [text]) -> [text]:
+    var cleaned: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if is_log_option(arg):
+            if arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+                i = i + 1
+        else:
+            cleaned.push(arg)
+        i = i + 1
+    cleaned
+
+fn normalize_args(all_args: [text]) -> [text]:
+    var args: [text] = []
+    var found_tooling = false
+    var i = 0
+    while i < all_args.len():
+        if found_tooling:
+            args.push(all_args[i])
+        elif all_args[i] == "tooling":
+            found_tooling = true
+        i = i + 1
+    if found_tooling:
+        return args
+
+    var start_idx = 0
+    i = 0
+    while i < all_args.len():
+        if all_args[i].ends_with("/app/tooling/main.spl") or all_args[i] == "src/app/tooling/main.spl":
+            start_idx = i + 1
+        i = i + 1
+    i = start_idx
+    while i < all_args.len():
+        args.push(all_args[i])
+        i = i + 1
+    args

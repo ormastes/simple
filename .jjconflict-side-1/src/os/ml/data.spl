@@ -1,0 +1,277 @@
+# GPU Data Loading Utilities
+#
+# Dataset abstraction and batched data loading for GPU-accelerated
+# training pipelines. Supports shuffled iteration with deterministic
+# Fisher-Yates + LCG pseudo-random permutation.
+#
+# Usage:
+#   use os.ml.data.{Dataset, TensorDataset, DataLoader}
+
+use os.ml.gpu_tensor.{GpuTensor}
+
+# ============================================================================
+# Dataset Trait
+# ============================================================================
+
+trait Dataset:
+    """Abstract dataset interface for GPU training."""
+    fn len() -> i64
+    fn get(idx: i64) -> (GpuTensor, GpuTensor)
+
+# ============================================================================
+# TensorDataset
+# ============================================================================
+
+class TensorDataset:
+    """In-memory dataset backed by flattened host arrays.
+
+    Stores inputs and targets as flat [f64] arrays on the host.
+    Each sample is sliced according to input_shape / target_shape
+    and uploaded to GPU on demand.
+
+    Example:
+        val ds = TensorDataset.from_arrays(
+            inputs: [1.0, 2.0, 3.0, 4.0],
+            targets: [0.0, 1.0],
+            input_shape: [2],
+            target_shape: [1]
+        )
+        # ds.len() == 2
+    """
+
+    inputs: [f64]
+    targets: [f64]
+    input_shape: [i64]
+    target_shape: [i64]
+    count: i64
+
+    static fn from_arrays(inputs: [f64], targets: [f64], input_shape: [i64], target_shape: [i64]) -> TensorDataset:
+        """Create a TensorDataset from flat host arrays.
+
+        Args:
+            inputs: Flattened input data (all samples concatenated)
+            targets: Flattened target data (all samples concatenated)
+            input_shape: Shape of a single input sample
+            target_shape: Shape of a single target sample
+
+        Returns:
+            TensorDataset with computed sample count
+        """
+        # Compute elements per sample
+        var input_numel: i64 = 1
+        for dim in input_shape:
+            input_numel = input_numel * dim
+
+        val sample_count = inputs.len() / input_numel
+
+        TensorDataset(
+            inputs: inputs,
+            targets: targets,
+            input_shape: input_shape,
+            target_shape: target_shape,
+            count: sample_count
+        )
+
+    fn len() -> i64:
+        self.count
+
+    fn get(idx: i64) -> (GpuTensor, GpuTensor):
+        """Get a single (input, target) sample uploaded to GPU.
+
+        Args:
+            idx: Sample index in [0, len())
+
+        Returns:
+            Tuple of (input_tensor, target_tensor) on GPU
+        """
+        # Compute input slice
+        var input_numel: i64 = 1
+        for dim in self.input_shape:
+            input_numel = input_numel * dim
+
+        var target_numel: i64 = 1
+        for dim in self.target_shape:
+            target_numel = target_numel * dim
+
+        val input_start = idx * input_numel
+        val target_start = idx * target_numel
+
+        # Slice host data for this sample
+        var input_data: [f64] = []
+        var i = 0
+        while i < input_numel:
+            input_data.push(self.inputs[input_start + i])
+            i = i + 1
+
+        var target_data: [f64] = []
+        i = 0
+        while i < target_numel:
+            target_data.push(self.targets[target_start + i])
+            i = i + 1
+
+        # Upload to GPU
+        val input_tensor = GpuTensor.from_host(input_data, self.input_shape)
+        val target_tensor = GpuTensor.from_host(target_data, self.target_shape)
+
+        (input_tensor, target_tensor)
+
+# ============================================================================
+# DataLoader
+# ============================================================================
+
+class DataLoader:
+    """Batched data loader with optional shuffling.
+
+    Iterates over a TensorDataset in fixed-size batches,
+    optionally shuffling sample order each epoch using
+    Fisher-Yates + LCG for deterministic reproducibility.
+
+    Example:
+        val loader = DataLoader.new(dataset, batch_size: 32, shuffle: true)
+        while loader.has_next():
+            val (x, y) = loader.next_batch()
+            # ... training step ...
+        loader.reset()
+    """
+
+    dataset: TensorDataset
+    batch_size: i64
+    shuffle: bool
+    current_idx: i64
+    indices: [i64]
+
+    static fn new(dataset: TensorDataset, batch_size: i64, shuffle: bool) -> DataLoader:
+        """Create a new DataLoader.
+
+        Args:
+            dataset: Source TensorDataset
+            batch_size: Number of samples per batch
+            shuffle: Whether to shuffle indices each reset
+
+        Returns:
+            DataLoader ready for iteration
+        """
+        val n = dataset.len()
+        var idx_list: [i64] = []
+        var i = 0
+        while i < n:
+            idx_list.push(i)
+            i = i + 1
+
+        var loader = DataLoader(
+            dataset: dataset,
+            batch_size: batch_size,
+            shuffle: shuffle,
+            current_idx: 0,
+            indices: idx_list
+        )
+
+        if shuffle:
+            loader.shuffle_indices()
+
+        loader
+
+    fn reset():
+        """Reset iterator to beginning and reshuffle if enabled."""
+        self.current_idx = 0
+        if self.shuffle:
+            self.shuffle_indices()
+
+    fn has_next() -> bool:
+        """Check if more batches remain in this epoch."""
+        self.current_idx < self.dataset.len()
+
+    fn next_batch() -> (GpuTensor, GpuTensor):
+        """Fetch the next batch as concatenated GPU tensors.
+
+        Concatenates batch_size samples along the first axis.
+        The last batch may be smaller if dataset length is not
+        evenly divisible by batch_size.
+
+        Returns:
+            Tuple of (batch_inputs, batch_targets) on GPU
+        """
+        var input_numel: i64 = 1
+        for dim in self.dataset.input_shape:
+            input_numel = input_numel * dim
+
+        var target_numel: i64 = 1
+        for dim in self.dataset.target_shape:
+            target_numel = target_numel * dim
+
+        val n = self.dataset.len()
+        var end = self.current_idx + self.batch_size
+        if end > n:
+            end = n
+
+        val actual_batch_size = end - self.current_idx
+
+        # Gather batch data on host
+        var batch_inputs: [f64] = []
+        var batch_targets: [f64] = []
+
+        var b = self.current_idx
+        while b < end:
+            val sample_idx = self.indices[b]
+
+            # Copy input slice
+            val input_start = sample_idx * input_numel
+            var i = 0
+            while i < input_numel:
+                batch_inputs.push(self.dataset.inputs[input_start + i])
+                i = i + 1
+
+            # Copy target slice
+            val target_start = sample_idx * target_numel
+            i = 0
+            while i < target_numel:
+                batch_targets.push(self.dataset.targets[target_start + i])
+                i = i + 1
+
+            b = b + 1
+
+        self.current_idx = end
+
+        # Build batch shape: [batch_size, ...per_sample_shape]
+        var input_batch_shape: [i64] = [actual_batch_size]
+        for dim in self.dataset.input_shape:
+            input_batch_shape.push(dim)
+
+        var target_batch_shape: [i64] = [actual_batch_size]
+        for dim in self.dataset.target_shape:
+            target_batch_shape.push(dim)
+
+        # Upload batches to GPU
+        val input_tensor = GpuTensor.from_host(batch_inputs, input_batch_shape)
+        val target_tensor = GpuTensor.from_host(batch_targets, target_batch_shape)
+
+        (input_tensor, target_tensor)
+
+    fn num_batches() -> i64:
+        """Total number of batches in one epoch."""
+        val n = self.dataset.len()
+        val full = n / self.batch_size
+        if n % self.batch_size > 0:
+            full + 1
+        else:
+            full
+
+    # Internal: Fisher-Yates shuffle with LCG
+    fn shuffle_indices():
+        """Shuffle index array in-place using deterministic LCG."""
+        val a: i64 = 1103515245
+        val c: i64 = 12345
+        val m: i64 = 2147483648
+        var seed: i64 = self.dataset.len() * 7 + 42
+
+        var i = self.indices.len() - 1
+        while i > 0:
+            seed = (a * seed + c) % m
+            val j = seed % (i + 1)
+
+            # Swap
+            val temp = self.indices[i]
+            self.indices[i] = self.indices[j]
+            self.indices[j] = temp
+
+            i = i - 1

@@ -1,0 +1,201 @@
+# UTF-32 Encoding / Decoding Tests
+#
+# Tests for src/lib/common/encoding/utf32.spl
+# Covers: utf32_encode_one, utf32_decode_one, utf32_encode_all,
+#         utf32_decode_all, utf32_to_bytes_le, utf32_to_bytes_be,
+#         utf32_from_bytes_le, utf32_from_bytes_be,
+#         utf32_to_utf8, utf8_to_utf32
+
+use std.common.encoding.utf32.{
+    utf32_encode_one, utf32_decode_one,
+    utf32_encode_all, utf32_decode_all,
+    utf32_to_bytes_le, utf32_to_bytes_be,
+    utf32_from_bytes_le, utf32_from_bytes_be,
+    utf32_to_utf8, utf8_to_utf32
+}
+use std.common.encoding.utf8.{utf8_encode_all, utf8_decode_all}
+
+# ============================================================================
+# utf32_encode_one / utf32_decode_one
+# ============================================================================
+
+describe "utf32_encode_one":
+    it "passes through valid codepoints":
+        expect(utf32_encode_one(0x41)).to_equal(0x41)
+        expect(utf32_encode_one(0xAC00)).to_equal(0xAC00)
+        expect(utf32_encode_one(0x1F600)).to_equal(0x1F600)
+        expect(utf32_encode_one(0x10FFFF)).to_equal(0x10FFFF)
+        expect(utf32_encode_one(0x00)).to_equal(0x00)
+
+    it "replaces surrogates with U+FFFD":
+        expect(utf32_encode_one(0xD800)).to_equal(0xFFFD)
+        expect(utf32_encode_one(0xDBFF)).to_equal(0xFFFD)
+        expect(utf32_encode_one(0xDC00)).to_equal(0xFFFD)
+        expect(utf32_encode_one(0xDFFF)).to_equal(0xFFFD)
+
+    it "replaces out-of-range with U+FFFD":
+        expect(utf32_encode_one(0x110000)).to_equal(0xFFFD)
+        expect(utf32_encode_one(-1)).to_equal(0xFFFD)
+
+describe "utf32_decode_one":
+    it "passes through valid values":
+        expect(utf32_decode_one(0x41)).to_equal(0x41)
+        expect(utf32_decode_one(0xAC00)).to_equal(0xAC00)
+        expect(utf32_decode_one(0x1F600)).to_equal(0x1F600)
+
+    it "replaces surrogates with U+FFFD":
+        expect(utf32_decode_one(0xD800)).to_equal(0xFFFD)
+
+    it "replaces out-of-range with U+FFFD":
+        expect(utf32_decode_one(0x110000)).to_equal(0xFFFD)
+
+# ============================================================================
+# utf32_encode_all / utf32_decode_all roundtrip
+# ============================================================================
+
+describe "utf32_encode_all and utf32_decode_all":
+    it "roundtrips valid codepoints":
+        val cps = [0x41, 0xAC00, 0x1F600, 0x4F60]
+        val encoded = utf32_encode_all(cps)
+        expect(encoded.len()).to_equal(4)
+        val decoded = utf32_decode_all(encoded)
+        expect(decoded).to_equal(cps)
+
+    it "roundtrips Korean":
+        val cps = [0xAC00, 0xB098, 0xB2E4]
+        val encoded = utf32_encode_all(cps)
+        val decoded = utf32_decode_all(encoded)
+        expect(decoded).to_equal(cps)
+
+    it "roundtrips Cyrillic":
+        val cps = [0x041F, 0x0440, 0x0438, 0x0432, 0x0435, 0x0442]
+        val encoded = utf32_encode_all(cps)
+        val decoded = utf32_decode_all(encoded)
+        expect(decoded).to_equal(cps)
+
+    it "handles empty input":
+        val encoded = utf32_encode_all([])
+        expect(encoded.len()).to_equal(0)
+        val decoded = utf32_decode_all([])
+        expect(decoded.len()).to_equal(0)
+
+    it "replaces invalid codepoints in bulk":
+        val mixed = [0x41, 0xD800, 0x42]
+        val encoded = utf32_encode_all(mixed)
+        expect(encoded[0]).to_equal(0x41)
+        expect(encoded[1]).to_equal(0xFFFD)
+        expect(encoded[2]).to_equal(0x42)
+
+# ============================================================================
+# UTF-32 LE/BE byte serialization
+# ============================================================================
+
+describe "utf32_to_bytes_le":
+    it "serializes as little-endian 4 bytes":
+        # U+0041 -> 41 00 00 00
+        val bytes = utf32_to_bytes_le([0x41])
+        expect(bytes.len()).to_equal(4)
+        expect(bytes[0]).to_equal(0x41)
+        expect(bytes[1]).to_equal(0x00)
+        expect(bytes[2]).to_equal(0x00)
+        expect(bytes[3]).to_equal(0x00)
+
+    it "serializes Hangul as little-endian":
+        # U+AC00 -> 00 AC 00 00
+        val bytes = utf32_to_bytes_le([0xAC00])
+        expect(bytes.len()).to_equal(4)
+        expect(bytes[0]).to_equal(0x00)
+        expect(bytes[1]).to_equal(0xAC)
+        expect(bytes[2]).to_equal(0x00)
+        expect(bytes[3]).to_equal(0x00)
+
+describe "utf32_to_bytes_be":
+    it "serializes as big-endian 4 bytes":
+        # U+0041 -> 00 00 00 41
+        val bytes = utf32_to_bytes_be([0x41])
+        expect(bytes.len()).to_equal(4)
+        expect(bytes[0]).to_equal(0x00)
+        expect(bytes[1]).to_equal(0x00)
+        expect(bytes[2]).to_equal(0x00)
+        expect(bytes[3]).to_equal(0x41)
+
+describe "utf32 bytes roundtrip":
+    it "roundtrips LE serialization":
+        val values = [0x41, 0xAC00, 0x1F600]
+        val bytes = utf32_to_bytes_le(values)
+        val restored = utf32_from_bytes_le(bytes)
+        expect(restored).to_equal(values)
+
+    it "roundtrips BE serialization":
+        val values = [0x41, 0xAC00, 0x1F600]
+        val bytes = utf32_to_bytes_be(values)
+        val restored = utf32_from_bytes_be(bytes)
+        expect(restored).to_equal(values)
+
+    it "replaces truncated LE byte sequence":
+        val restored = utf32_from_bytes_le([0x41, 0x00, 0x00, 0x00, 0x7A, 0x00])
+        expect(restored).to_equal([0x41, 0xFFFD])
+
+    it "replaces truncated BE byte sequence":
+        val restored = utf32_from_bytes_be([0x00, 0x00, 0x00, 0x41, 0x00, 0x7A])
+        expect(restored).to_equal([0x41, 0xFFFD])
+
+# ============================================================================
+# Cross-codec: UTF-32 <-> UTF-8
+# ============================================================================
+
+describe "utf32 to utf8 cross-codec":
+    it "converts ASCII":
+        val utf32_values = [0x48, 0x69]
+        val utf8_bytes = utf32_to_utf8(utf32_values)
+        expect(utf8_bytes).to_equal([0x48, 0x69])
+
+    it "converts Korean":
+        val utf32_values = [0xAC00]
+        val utf8_bytes = utf32_to_utf8(utf32_values)
+        expect(utf8_bytes.len()).to_equal(3)
+        expect(utf8_bytes[0]).to_equal(0xEA)
+        expect(utf8_bytes[1]).to_equal(0xB0)
+        expect(utf8_bytes[2]).to_equal(0x80)
+
+    it "converts emoji":
+        val utf32_values = [0x1F600]
+        val utf8_bytes = utf32_to_utf8(utf32_values)
+        expect(utf8_bytes.len()).to_equal(4)
+        expect(utf8_bytes[0]).to_equal(0xF0)
+        expect(utf8_bytes[1]).to_equal(0x9F)
+        expect(utf8_bytes[2]).to_equal(0x98)
+        expect(utf8_bytes[3]).to_equal(0x80)
+
+describe "utf8 to utf32 cross-codec":
+    it "converts ASCII":
+        val utf8_bytes = [0x48, 0x69]
+        val utf32_values = utf8_to_utf32(utf8_bytes)
+        expect(utf32_values).to_equal([0x48, 0x69])
+
+    it "converts Korean":
+        val utf8_bytes = [0xEA, 0xB0, 0x80]
+        val utf32_values = utf8_to_utf32(utf8_bytes)
+        expect(utf32_values.len()).to_equal(1)
+        expect(utf32_values[0]).to_equal(0xAC00)
+
+    it "roundtrips 12-language codepoints":
+        # One representative codepoint from each script
+        val cps = [
+            0x41,     # Latin A
+            0xE9,     # Latin e-acute
+            0xDF,     # German eszett
+            0x041F,   # Cyrillic Pe
+            0x0391,   # Greek Alpha
+            0x0645,   # Arabic Meem
+            0x05D0,   # Hebrew Alef
+            0x0928,   # Devanagari Na
+            0x0E01,   # Thai Ko Kai
+            0x01B0,   # Vietnamese u-horn
+            0x4F60,   # Chinese ni
+            0x3053,   # Japanese Hiragana ko
+            0xAC00    # Korean ga
+        ]
+        val utf8_bytes = utf32_to_utf8(cps)
+        val restored = utf8_to_utf32(utf8_bytes)
+        expect(restored).to_equal(cps)

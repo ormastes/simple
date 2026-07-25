@@ -1,0 +1,87 @@
+"""Engine2D-adjacent Overlap Detection Specification (Rect2)
+
+@tag: gpu, engine2d, overlap, rect, hit-testing
+
+Audit tranche (E2D-AUDIT, 2026-07-20): Engine2D itself has no rect-overlap or
+region-intersection API (grep of src/lib/gc_async_mut/gpu/engine2d/*.spl for
+`fn intersect|overlap|contains_point` returns nothing). The nearest usable
+primitive in the tree is `Rect2` (`src/lib/common/engine/rect.spl`,
+`common` tier, generic — not engine2d-specific), which the compositional
+overlap-detection scenarios below would have to be built on if Engine2D grew
+a dedicated API. This spec locks down `Rect2.intersects` / `.contains_point`
+edge-convention behavior since a 2D compositor's overlap/hit-test logic is
+only as correct as those two primitives.
+
+Both methods use a half-open convention throughout `Rect2`: `right()` /
+`bottom()` are exclusive bounds. This means edge-touching and corner-touching
+rectangles do NOT intersect, and a point exactly on the right or bottom edge
+is NOT contained. This spec asserts that convention explicitly so a future
+Engine2D-level overlap/hit-test API inherits it deliberately, not by
+accident.
+"""
+
+use std.spec.{describe, context, it, expect}
+use std.common.engine.rect.{Rect2}
+
+describe "Rect2 rect-rect intersection":
+    it "partially overlapping rects intersect":
+        val a = Rect2(x: 0.0, y: 0.0, width: 10.0, height: 10.0)
+        val b = Rect2(x: 5.0, y: 5.0, width: 10.0, height: 10.0)
+        expect(a.intersects(b)).to_equal(true)
+        expect(b.intersects(a)).to_equal(true)
+
+    it "one rect fully contained in another intersects":
+        val outer = Rect2(x: 0.0, y: 0.0, width: 20.0, height: 20.0)
+        val inner = Rect2(x: 5.0, y: 5.0, width: 2.0, height: 2.0)
+        expect(outer.intersects(inner)).to_equal(true)
+        expect(inner.intersects(outer)).to_equal(true)
+
+    it "disjoint rects (far apart) do not intersect":
+        val a = Rect2(x: 0.0, y: 0.0, width: 5.0, height: 5.0)
+        val b = Rect2(x: 100.0, y: 100.0, width: 5.0, height: 5.0)
+        expect(a.intersects(b)).to_equal(false)
+        expect(b.intersects(a)).to_equal(false)
+
+    it "edge-touching rects (shared vertical edge, half-open convention) do not intersect":
+        val a = Rect2(x: 0.0, y: 0.0, width: 10.0, height: 10.0)
+        val b = Rect2(x: 10.0, y: 0.0, width: 10.0, height: 10.0)
+        expect(a.intersects(b)).to_equal(false)
+        expect(b.intersects(a)).to_equal(false)
+
+    it "edge-touching rects (shared horizontal edge, half-open convention) do not intersect":
+        val a = Rect2(x: 0.0, y: 0.0, width: 10.0, height: 10.0)
+        val b = Rect2(x: 0.0, y: 10.0, width: 10.0, height: 10.0)
+        expect(a.intersects(b)).to_equal(false)
+        expect(b.intersects(a)).to_equal(false)
+
+    it "corner-touching rects do not intersect":
+        val a = Rect2(x: 0.0, y: 0.0, width: 10.0, height: 10.0)
+        val b = Rect2(x: 10.0, y: 10.0, width: 10.0, height: 10.0)
+        expect(a.intersects(b)).to_equal(false)
+        expect(b.intersects(a)).to_equal(false)
+
+    it "one-pixel overlap counts as intersecting":
+        val a = Rect2(x: 0.0, y: 0.0, width: 10.0, height: 10.0)
+        val b = Rect2(x: 9.0, y: 9.0, width: 10.0, height: 10.0)
+        expect(a.intersects(b)).to_equal(true)
+        expect(b.intersects(a)).to_equal(true)
+
+describe "Rect2 point containment":
+    it "point strictly inside is contained":
+        val r = Rect2(x: 0.0, y: 0.0, width: 10.0, height: 10.0)
+        expect(r.contains_point(5.0, 5.0)).to_equal(true)
+
+    it "point on the left/top edge is contained (inclusive)":
+        val r = Rect2(x: 0.0, y: 0.0, width: 10.0, height: 10.0)
+        expect(r.contains_point(0.0, 5.0)).to_equal(true)
+        expect(r.contains_point(5.0, 0.0)).to_equal(true)
+
+    it "point on the right/bottom edge is NOT contained (exclusive)":
+        val r = Rect2(x: 0.0, y: 0.0, width: 10.0, height: 10.0)
+        expect(r.contains_point(10.0, 5.0)).to_equal(false)
+        expect(r.contains_point(5.0, 10.0)).to_equal(false)
+
+    it "point fully outside is not contained":
+        val r = Rect2(x: 0.0, y: 0.0, width: 10.0, height: 10.0)
+        expect(r.contains_point(-1.0, 5.0)).to_equal(false)
+        expect(r.contains_point(50.0, 50.0)).to_equal(false)

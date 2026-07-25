@@ -1,0 +1,53 @@
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend}
+use std.io.window_winit.{WinitLoop, WinitWindow, winit_loop_new, winit_loop_free, winit_window_new, winit_window_free, winit_present_rgba, winit_poll_close_requested}
+use std.nogc_sync_mut.concurrent.thread.{thread_sleep}
+use std.io_runtime.{env_get, read_file, file_exists}
+
+val RW: i32 = 480
+val RH: i32 = 360
+val W: i32 = 480
+val H: i32 = 360
+
+fn pack_pixels(src: [u32]) -> [i64]:
+    var out: [i64] = [0; src.len()]
+    var i = 0
+    while i < src.len():
+        out[i] = src[i].to_i64() & 0xFFFFFF
+        i = i + 1
+    out
+
+fn main() -> i64:
+    val path = "/private/tmp/claude-501/-Users-ormastes-simple/f10f352f-2184-46d2-bf71-444e5c96b02f/scratchpad/simple_colored.html"
+    val html = read_file(path)
+    val pixels = simple_web_render_html_to_pixels_with_engine2d_backend(html, RW, RH, "cpu_simd")
+    print "[SLEEP] render_done px={pixels.len()}"
+    if env_get("SIMPLE_GUI") != "1":
+        return 0
+    val lp = winit_loop_new()
+    if not lp.is_valid:
+        return 0
+    val win = winit_window_new(lp, W.to_i64(), H.to_i64(), "gui_sleep_probe colored")
+    if not win.is_valid:
+        winit_loop_free(lp)
+        return 0
+    val packed = pack_pixels(pixels)
+    winit_present_rgba(win, RW.to_i64(), RH.to_i64(), packed)
+    print "[SLEEP] present_first_done"
+    var running = true
+    var frames = 0
+    while running and frames < 3000:
+        if winit_poll_close_requested(lp):
+            running = false
+        # Cached buffer is static: re-present only every ~15 frames to keep the
+        # surface composited, and idle 16ms between frames.
+        if frames % 15 == 0:
+            winit_present_rgba(win, RW.to_i64(), RH.to_i64(), packed)
+        thread_sleep(16)
+        frames = frames + 1
+        if frames % 60 == 0:
+            print "[SLEEP] frame {frames}"
+    print "[SLEEP] loop_exit frames={frames}"
+    winit_window_free(win)
+    winit_loop_free(lp)
+    0

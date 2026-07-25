@@ -1,0 +1,252 @@
+# codex-system-test
+"""
+# Claude Full MCP Client
+
+Checks deterministic MCP client owner behavior for cache isolation, connection
+classification and decisions, bounded batching, aggregation counts, and URL
+elicitation retry effects.
+
+Requirements: N/A. These scenarios are supporting Claude-full parts-bin
+evidence. They do not claim shipped CLI/TUI reachability, live MCP servers,
+network requests, process execution, wall-clock sleeps, or upstream-exact
+behavior while the pinned upstream source tree is absent.
+
+The synthetic `doRequest`, auto-classifier conversion, and reconnect string
+markers are intentionally excluded from acceptance evidence.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.services.mcp.client.*
+
+describe "Claude full MCP client":
+    describe "supporting error and cache owner behavior":
+        it "should preserve MCP client error identities":
+            step("Create authentication, session, and tool-call errors")
+            val auth = McpAuthError.new("srv", "needs auth")
+            val expired = McpSessionExpiredError.new("srv")
+            val tool = McpToolCallError_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS.new("bad", "safe bad", "meta")
+            expect(auth.name).to_equal("McpAuthError")
+            expect(auth.serverName).to_equal("srv")
+            expect(expired.name).to_equal("McpSessionExpiredError")
+            expect(expired.message).to_contain("session expired")
+            expect(tool.name).to_equal("McpToolCallError")
+            expect(tool.telemetryMessage).to_equal("safe bad")
+
+        it "should detect exact expired MCP session boundaries":
+            step("Classify HTTP and JSON-RPC session expiration inputs")
+            expect([
+                isMcpSessionExpiredError(404, -32001, ""),
+                isMcpSessionExpiredError(404, 0, "Session not found"),
+                isMcpSessionExpiredError(404, 0, "session not found"),
+                isMcpSessionExpiredError(500, -32001, "Session not found"),
+            ]).to_equal([true, true, false, false])
+
+        it "should isolate authentication cache state per server":
+            step("Set two server keys and update only one existing entry")
+            val cache = McpAuthCacheData.new()
+            setMcpAuthCacheEntry(cache, "alpha", true)
+            setMcpAuthCacheEntry(cache, "beta", false)
+            setMcpAuthCacheEntry(cache, "beta", true)
+            expect(cache.keys).to_equal(["alpha", "beta"])
+            expect(cache.values).to_equal([true, true])
+            expect(isMcpAuthCached(cache, "alpha")).to_equal(true)
+            expect(isMcpAuthCached(cache, "beta")).to_equal(true)
+            expect(isMcpAuthCached(cache, "gamma")).to_equal(false)
+
+        it "should clear authentication cache state without retaining keys":
+            step("Clear all keyed authentication cache entries")
+            val cache = McpAuthCacheData.new()
+            setMcpAuthCacheEntry(cache, "alpha", true)
+            setMcpAuthCacheEntry(cache, "beta", true)
+            val cleared = clearMcpAuthCache(cache)
+            expect(cleared.keys).to_equal([])
+            expect(cleared.values).to_equal([])
+            expect(isMcpAuthCached(cleared, "alpha")).to_equal(false)
+
+        it "should report remote authentication failure details":
+            step("Create a remote authentication failure for one server")
+            val failure = handleRemoteAuthFailure("remote-a", 401)
+            expect(failure.name).to_equal("McpAuthError")
+            expect(failure.serverName).to_equal("remote-a")
+            expect(failure.message).to_equal("Remote MCP authentication failed with status 401")
+
+    describe "supporting connection owner behavior":
+        it "should distinguish terminal and nonterminal connection failures":
+            step("Classify terminal startup failures and retryable or unknown failures")
+            val refused = classifyMcpConnectionError("connect ECONNREFUSED 127.0.0.1")
+            val missing = classifyMcpConnectionError("command not found")
+            val spawned = classifyMcpConnectionError("spawn failed")
+            val denied = classifyMcpConnectionError("permission denied")
+            val timeout = classifyMcpConnectionError("connection timeout")
+            val unknown = classifyMcpConnectionError("protocol response malformed")
+            expect([
+                refused.category,
+                missing.category,
+                spawned.category,
+                denied.category,
+                timeout.category,
+                unknown.category,
+            ]).to_equal([
+                "connection-refused",
+                "not-found",
+                "spawn-failure",
+                "permission-denied",
+                "timeout",
+                "unknown",
+            ])
+            expect([
+                isTerminalConnectionError("connect ECONNREFUSED 127.0.0.1"),
+                isTerminalConnectionError("command not found"),
+                isTerminalConnectionError("spawn failed"),
+                isTerminalConnectionError("permission denied"),
+                isTerminalConnectionError("connection timeout"),
+                isTerminalConnectionError("protocol response malformed"),
+            ]).to_equal([true, true, true, true, false, false])
+
+        it "should decide connected expired and disconnected client states":
+            step("Resolve the complete ensureConnectedClient state triad")
+            val connected = ensureConnectedClient("connected", "srv")
+            val expired = ensureConnectedClient("expired", "srv")
+            val disconnected = ensureConnectedClient("disconnected", "srv")
+            expect([
+                connected.state,
+                expired.state,
+                disconnected.state,
+            ]).to_equal(["connected", "expired", "disconnected"])
+            expect([
+                connected.action,
+                expired.action,
+                disconnected.action,
+            ]).to_equal(["reuse", "reject", "connect"])
+            expect([
+                connected.errorName,
+                expired.errorName,
+                disconnected.errorName,
+            ]).to_equal(["", "McpSessionExpiredError", ""])
+            expect([
+                connected.serverName,
+                expired.serverName,
+                disconnected.serverName,
+            ]).to_equal(["srv", "srv", "srv"])
+
+        it "should clear only the requested server connection cache":
+            step("Clear one exact server prefix while preserving neighboring names")
+            val remaining = clearServerCache(
+                ["alpha|http|one", "alpha-child|http|two", "beta|stdio|three"],
+                "alpha",
+            )
+            expect(remaining).to_equal(["alpha-child|http|two", "beta|stdio|three"])
+
+        it "should compare stable server configuration identity":
+            step("Compare matching and changed stable configuration fields")
+            val a = McpServerConfig.new("display-a", "http")
+            a.url = "https://a"
+            a.headers = ["x=1"]
+            val b = McpServerConfig.new("display-b", "http")
+            b.url = "https://a"
+            b.headers = ["x=1"]
+            val changed = McpServerConfig.new("display-a", "http")
+            changed.url = "https://b"
+            changed.headers = ["x=1"]
+            expect(areMcpConfigsEqual(a, b)).to_equal(true)
+            expect(areMcpConfigsEqual(a, changed)).to_equal(false)
+            expect(getServerCacheKey(a)).to_equal("display-a|http|https://a|")
+
+    describe "supporting batch and aggregation owner behavior":
+        it "should preserve item order and exact batch bounds":
+            step("Process five items through batches of two")
+            val trace = processBatchedTWithTrace(["a", "b", "c", "d", "e"], 2)
+            expect(trace.orderedItems).to_equal(["a", "b", "c", "d", "e"])
+            expect(trace.normalizedBatchSize).to_equal(2)
+            expect(trace.batchStarts).to_equal([0, 2, 4])
+            expect(trace.batchEnds).to_equal([2, 4, 5])
+            expect(processBatchedT(["a", "b", "c"], 2)).to_equal(["a", "b", "c"])
+
+        it "should bound empty oversized and nonpositive batches":
+            step("Normalize nonpositive batch size and avoid empty batch records")
+            val empty = processBatchedTWithTrace([], 3)
+            val oversized = processBatchedTWithTrace(["a", "b"], 10)
+            val nonpositive = processBatchedTWithTrace(["a", "b"], 0)
+            expect(empty.batchStarts).to_equal([])
+            expect(empty.batchEnds).to_equal([])
+            expect(oversized.batchStarts).to_equal([0])
+            expect(oversized.batchEnds).to_equal([2])
+            expect(nonpositive.normalizedBatchSize).to_equal(1)
+            expect(nonpositive.batchStarts).to_equal([0, 1])
+            expect(nonpositive.batchEnds).to_equal([1, 2])
+
+        it "should aggregate exact tool command and resource counts":
+            step("Aggregate distinct ordered MCP capability groups")
+            val result = getMcpToolsCommandsAndResources(
+                ["read", "write"],
+                ["compact"],
+                ["file://a", "file://b", "file://c"],
+            )
+            expect(result.tools).to_equal(["read", "write"])
+            expect(result.commands).to_equal(["compact"])
+            expect(result.resources).to_equal(["file://a", "file://b", "file://c"])
+            expect([
+                result.toolCount,
+                result.commandCount,
+                result.resourceCount,
+                result.totalCount,
+            ]).to_equal([2, 1, 3, 6])
+
+        it "should aggregate empty capability groups without phantom entries":
+            step("Aggregate three empty MCP capability groups")
+            val result = getMcpToolsCommandsAndResources([], [], [])
+            expect(result.tools).to_equal([])
+            expect(result.commands).to_equal([])
+            expect(result.resources).to_equal([])
+            expect(result.totalCount).to_equal(0)
+
+    describe "supporting elicitation and result owner behavior":
+        it "should retry URL elicitation exactly once":
+            step("Record an initial URL requirement and one successful retry")
+            val result = callMCPToolWithUrlElicitationRetry("open-url", true)
+            expect(result.toolName).to_equal("open-url")
+            expect(result.attemptCount).to_equal(2)
+            expect(result.retryCount).to_equal(1)
+            expect(result.attemptOutcomes).to_equal(["url-required", "ok"])
+            expect(result.finalOutcome).to_equal("ok")
+
+        it "should avoid URL elicitation retry after immediate success":
+            step("Record one successful tool attempt without elicitation")
+            val result = callMCPToolWithUrlElicitationRetry("read", false)
+            expect(result.toolName).to_equal("read")
+            expect(result.attemptCount).to_equal(1)
+            expect(result.retryCount).to_equal(0)
+            expect(result.attemptOutcomes).to_equal(["ok"])
+            expect(result.finalOutcome).to_equal("ok")
+
+        it "should transform MCP result content deterministically":
+            step("Convert binary content and preserve image classification")
+            val textBlock = MCPContentBlock.textBlock("hello")
+            val imageBlock = MCPContentBlock.image("abc", "image/png")
+            val result = transformMCPResult([textBlock, imageBlock], false)
+            expect(result.resultType).to_equal("image")
+            expect(result.summary).to_equal("hello\nimage")
+            expect(contentContainsImages(result.content)).to_equal(true)
+            val blob = MCPContentBlock(typeName: "blob", text: "", mimeType: "application/octet-stream", data: "xx")
+            expect(persistBlobToTextBlock(blob).text).to_equal("[binary blob saved]")
+
+        it "should redact authorization headers without changing other headers":
+            step("Redact authorization header values for logging")
+            val headers = wsHeadersForLogging(["Authorization=Bearer secret", "x=a"])
+            expect(headers).to_equal(["authorization=[REDACTED]", "x=a"])
+
+        it "should preserve deterministic timeout and inclusion policies":
+            step("Read defaults overrides and the per-server tool allow-list")
+            val config = McpServerConfig.new("srv", "stdio")
+            config.command = "node"
+            config.includeTools = ["read"]
+            expect([
+                getMcpToolTimeoutMs(""),
+                getMcpToolTimeoutMs("500"),
+                getConnectionTimeoutMs(""),
+                getMcpServerConnectionBatchSize(""),
+                getRemoteMcpServerConnectionBatchSize(""),
+            ]).to_equal([120000, 500, 30000, 5, 2])
+            expect(isLocalMcpServer(config)).to_equal(true)
+            expect(isIncludedMcpTool(config, "read")).to_equal(true)
+            expect(isIncludedMcpTool(config, "write")).to_equal(false)

@@ -1,0 +1,323 @@
+class CharPool:
+    strings: [text]
+    asciiCodes: [i64]
+    asciiIds: [i64]
+
+impl CharPool:
+    static fn new() -> CharPool:
+        CharPool(strings: [" ", ""], asciiCodes: [32], asciiIds: [0])
+
+    me intern(char: text) -> i64:
+        if char.len() == 1:
+            val code = char.char_code_at(0)
+            if code < 128:
+                val cached = me.asciiLookup(code)
+                if cached >= 0:
+                    return cached
+                val index = me.strings.len()
+                me.strings.push(char)
+                me.asciiCodes.push(code)
+                me.asciiIds.push(index)
+                return index
+        val existing = me.stringIndex(char)
+        if existing >= 0:
+            return existing
+        val index = me.strings.len()
+        me.strings.push(char)
+        index
+
+    me get(index: i64) -> text:
+        if index < 0 or index >= me.strings.len():
+            return " "
+        me.strings[index]
+
+    me asciiLookup(code: i64) -> i64:
+        var i = 0
+        while i < me.asciiCodes.len():
+            if me.asciiCodes[i] == code:
+                return me.asciiIds[i]
+            i = i + 1
+        -1
+
+    me stringIndex(value: text) -> i64:
+        var i = 0
+        while i < me.strings.len():
+            if me.strings[i] == value:
+                return i
+            i = i + 1
+        -1
+
+class HyperlinkPool:
+    strings: [text]
+
+impl HyperlinkPool:
+    static fn new() -> HyperlinkPool:
+        HyperlinkPool(strings: [""])
+
+    me intern(hyperlink: text) -> i64:
+        if hyperlink == "":
+            return 0
+        val existing = me.indexOf(hyperlink)
+        if existing >= 0:
+            return existing
+        val id = me.strings.len()
+        me.strings.push(hyperlink)
+        id
+
+    me get(id: i64) -> text:
+        if id <= 0 or id >= me.strings.len():
+            return ""
+        me.strings[id]
+
+    me indexOf(value: text) -> i64:
+        var i = 1
+        while i < me.strings.len():
+            if me.strings[i] == value:
+                return i
+            i = i + 1
+        -1
+
+class AnsiCode:
+    code: text
+    endCode: text
+
+impl AnsiCode:
+    static fn new(code: text, endCode: text) -> AnsiCode:
+        AnsiCode(code: code, endCode: endCode)
+
+class StylePool:
+    keys: [text]
+    styles: [[AnsiCode]]
+    transitionKeys: [text]
+    transitionValues: [text]
+    inverseBaseIds: [i64]
+    inverseStyleIds: [i64]
+    currentBaseIds: [i64]
+    currentStyleIds: [i64]
+    selectionBaseIds: [i64]
+    selectionStyleIds: [i64]
+    selectionBgCode: AnsiCode?
+    none: i64
+
+impl StylePool:
+    static fn new() -> StylePool:
+        val pool = StylePool(keys: [], styles: [], transitionKeys: [], transitionValues: [], inverseBaseIds: [], inverseStyleIds: [], currentBaseIds: [], currentStyleIds: [], selectionBaseIds: [], selectionStyleIds: [], selectionBgCode: nil, none: 0)
+        pool.none = pool.intern([])
+        pool
+
+    me intern(styles: [AnsiCode]) -> i64:
+        val key = styleKey(styles)
+        val existing = me.keyIndex(key)
+        if existing >= 0:
+            return existing
+        val rawId = me.styles.len()
+        me.keys.push(key)
+        me.styles.push(styles)
+        (rawId << 1) | visibleSpaceBit(styles)
+
+    me get(id: i64) -> [AnsiCode]:
+        val rawId = id >> 1
+        if rawId < 0 or rawId >= me.styles.len():
+            return []
+        me.styles[rawId]
+
+    me transition(fromId: i64, toId: i64) -> text:
+        if fromId == toId:
+            return ""
+        val key = fromId.to_text() + ":" + toId.to_text()
+        val cached = me.transitionIndex(key)
+        if cached >= 0:
+            return me.transitionValues[cached]
+        val value = transitionText(me.get(fromId), me.get(toId))
+        me.transitionKeys.push(key)
+        me.transitionValues.push(value)
+        value
+
+    me withInverse(baseId: i64) -> i64:
+        val cached = lookupCache(me.inverseBaseIds, me.inverseStyleIds, baseId)
+        if cached >= 0:
+            return cached
+        val baseCodes = me.get(baseId)
+        var id = baseId
+        if not hasEndCode(baseCodes, "\u001B[27m"):
+            id = me.intern(appendCode(baseCodes, inverseCode()))
+        me.inverseBaseIds.push(baseId)
+        me.inverseStyleIds.push(id)
+        id
+
+    me withCurrentMatch(baseId: i64) -> i64:
+        val cached = lookupCache(me.currentBaseIds, me.currentStyleIds, baseId)
+        if cached >= 0:
+            return cached
+        var codes = filterEndCodes(me.get(baseId), "\u001B[39m", "\u001B[49m")
+        codes.push(yellowFgCode())
+        if not hasEndCode(me.get(baseId), "\u001B[27m"):
+            codes.push(inverseCode())
+        if not hasEndCode(me.get(baseId), "\u001B[22m"):
+            codes.push(boldCode())
+        if not hasEndCode(me.get(baseId), "\u001B[24m"):
+            codes.push(underlineCode())
+        val id = me.intern(codes)
+        me.currentBaseIds.push(baseId)
+        me.currentStyleIds.push(id)
+        id
+
+    me setSelectionBg(bg: AnsiCode?) -> ():
+        if val Some(nextBg) = bg:
+            if val Some(current) = me.selectionBgCode:
+                if current.code == nextBg.code:
+                    return
+            me.selectionBgCode = Some(nextBg)
+        else:
+            if not me.selectionBgCode.?:
+                return
+            me.selectionBgCode = nil
+        me.selectionBaseIds = []
+        me.selectionStyleIds = []
+
+    me withSelectionBg(baseId: i64) -> i64:
+        if val Some(bg) = me.selectionBgCode:
+            val cached = lookupCache(me.selectionBaseIds, me.selectionStyleIds, baseId)
+            if cached >= 0:
+                return cached
+            var kept = filterEndCodes(me.get(baseId), "\u001B[49m", "\u001B[27m")
+            kept.push(bg)
+            val id = me.intern(kept)
+            me.selectionBaseIds.push(baseId)
+            me.selectionStyleIds.push(id)
+            return id
+        me.withInverse(baseId)
+
+    me keyIndex(key: text) -> i64:
+        var i = 0
+        while i < me.keys.len():
+            if me.keys[i] == key:
+                return i
+            i = i + 1
+        -1
+
+    me transitionIndex(key: text) -> i64:
+        var i = 0
+        while i < me.transitionKeys.len():
+            if me.transitionKeys[i] == key:
+                return i
+            i = i + 1
+        -1
+
+fn charPoolNew() -> CharPool:
+    CharPool.new()
+
+fn hyperlinkPoolNew() -> HyperlinkPool:
+    HyperlinkPool.new()
+
+fn stylePoolNew() -> StylePool:
+    StylePool.new()
+
+fn styleKey(styles: [AnsiCode]) -> text:
+    var out = ""
+    var i = 0
+    while i < styles.len():
+        if i > 0:
+            out = out + "\u0000"
+        out = out + styles[i].code
+        i = i + 1
+    out
+
+fn visibleSpaceBit(styles: [AnsiCode]) -> i64:
+    if hasVisibleSpaceEffect(styles):
+        return 1
+    0
+
+fn hasVisibleSpaceEffect(styles: [AnsiCode]) -> bool:
+    hasEndCode(styles, "\u001B[49m") or hasEndCode(styles, "\u001B[27m") or hasEndCode(styles, "\u001B[24m") or hasEndCode(styles, "\u001B[29m") or hasEndCode(styles, "\u001B[55m")
+
+fn hasEndCode(styles: [AnsiCode], endCode: text) -> bool:
+    var i = 0
+    while i < styles.len():
+        if styles[i].endCode == endCode:
+            return true
+        i = i + 1
+    false
+
+fn appendCode(styles: [AnsiCode], code: AnsiCode) -> [AnsiCode]:
+    var out: [AnsiCode] = []
+    var i = 0
+    while i < styles.len():
+        out.push(styles[i])
+        i = i + 1
+    out.push(code)
+    out
+
+fn filterEndCodes(styles: [AnsiCode], first: text, second: text) -> [AnsiCode]:
+    var out: [AnsiCode] = []
+    var i = 0
+    while i < styles.len():
+        if styles[i].endCode != first and styles[i].endCode != second:
+            out.push(styles[i])
+        i = i + 1
+    out
+
+fn lookupCache(keys: [i64], values: [i64], key: i64) -> i64:
+    var i = 0
+    while i < keys.len():
+        if keys[i] == key:
+            return values[i]
+        i = i + 1
+    -1
+
+fn transitionText(fromStyles: [AnsiCode], toStyles: [AnsiCode]) -> text:
+    styleKey(fromStyles) + "->" + styleKey(toStyles)
+
+fn inverseCode() -> AnsiCode:
+    AnsiCode.new("\u001B[7m", "\u001B[27m")
+
+fn boldCode() -> AnsiCode:
+    AnsiCode.new("\u001B[1m", "\u001B[22m")
+
+fn underlineCode() -> AnsiCode:
+    AnsiCode.new("\u001B[4m", "\u001B[24m")
+
+fn yellowFgCode() -> AnsiCode:
+    AnsiCode.new("\u001B[33m", "\u001B[39m")
+
+fn bgCode(code: text) -> AnsiCode:
+    AnsiCode.new(code, "\u001B[49m")
+
+fn fgCode(code: text) -> AnsiCode:
+    AnsiCode.new(code, "\u001B[39m")
+
+fn emptyCharIndex() -> i64:
+    0
+
+fn spacerCharIndex() -> i64:
+    1
+
+fn cellWidthNarrow() -> i64:
+    0
+
+fn cellWidthWide() -> i64:
+    1
+
+fn cellWidthSpacerTail() -> i64:
+    2
+
+fn cellWidthSpacerHead() -> i64:
+    3
+
+fn packWord1(styleId: i64, hyperlinkId: i64, width: i64) -> i64:
+    (styleId << 17) | (hyperlinkId << 2) | width
+
+fn screenPoolSourceLinesModeled() -> i64:
+    260
+
+# ponytail: this slice models the three missing pool classes; packed cells and diff rendering stay for the screen-renderer slice.
+# Source parity note: CharPool reserves index 0 for space and 1 for spacer empty string.
+# Source parity note: ASCII characters use a direct cache path before general string lookup.
+# Source parity note: HyperlinkPool reserves id 0 for no hyperlink.
+# Source parity note: StylePool encodes visible-on-space in bit 0 of the style id.
+# Source parity note: StylePool recovers raw style arrays by shifting id right one bit.
+# Source parity note: transitions are cached by from/to style id pair.
+# Source parity note: withInverse avoids stacking inverse if the base already has SGR 27 end code.
+# Source parity note: current search match filters fg/bg, adds yellow foreground, inverse, bold, and underline.
+# Source parity note: selection background clears cache when the configured background changes.
+# Source parity note: selection background strips prior bg and inverse while preserving foreground attributes.

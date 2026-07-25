@@ -1,0 +1,76 @@
+# Web-render surface compositing through a real Engine2D GPU backend.
+#
+# The legacy web pixel path (simple_web_engine2d_render_html_pixels) is a pure-CPU
+# HTML heuristic rasterizer; it threads a backend NAME through as a label but never
+# touches the GPU, so its "engine2d_backend" provenance is fabricated (see bug
+# web_render_gpu_backend_provenance_fabricated_2026-06-17).
+#
+# This module instead composites the web *scene* (the structured draw commands the
+# web renderer produces) through `Engine2D.create_requested_backend`, so the pixels
+# are genuinely produced by the selected backend — including the verified
+# Vulkan / Metal-on-Vulkan / DirectX-on-Vulkan backends — and the reported backend
+# name reflects what actually rendered (truthful provenance), not what was requested.
+#
+# Scope: the current SimpleWebRenderScene models the page background; richer
+# HTML->scene mapping (block boxes, text) is follow-up. The value here is a real,
+# verifiable GPU-backed web-render path with honest provenance across backends.
+
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    SimpleWebRenderScene,
+    SimpleWebSceneCommand,
+    simple_web_render_html_to_scene
+}
+
+class WebRenderEngine2DSurface:
+    pixels: [u32]
+    backend_name: text     # the ACTUAL backend that produced the pixels
+    width: i32
+    height: i32
+    rendered: bool         # false when no backend could be created
+
+# Default page background (opaque white) so every backend starts from an
+# identical, deterministic surface regardless of its framebuffer init state.
+val WEB_DEFAULT_BG: u32 = 0xFFFFFFFFu32
+val WEB_RENDER_ENGINE2D_MAX_PIXELS: i32 = 4194304
+
+# Opaque-alpha mask. A page background is opaque, and forcing alpha=0xFF makes
+# the fill a deterministic copy on every backend. (Backends diverge on alpha
+# blending of non-opaque fills — SoftwareBackend blends, VulkanBackend copies —
+# which is a separate concern; compositing the page background opaquely both
+# matches web semantics and keeps cross-backend output bit-identical.)
+fn _opaque(color: u32) -> u32:
+    color | 0xFF000000u32
+
+# Render an HTML page's scene through the requested Engine2D backend.
+# Returns the real backend name (e.g. "vulkan", "metal-on-vulkan",
+# "directx-on-vulkan", or "software"/"cpu" on fallback) so provenance is honest.
+pub fn web_render_html_via_engine2d(html: text, width: i32, height: i32, backend_name: text) -> WebRenderEngine2DSurface:
+    if width <= 0 or height <= 0:
+        return WebRenderEngine2DSurface(pixels: [], backend_name: "", width: width, height: height, rendered: false)
+    if width > WEB_RENDER_ENGINE2D_MAX_PIXELS / height:
+        return WebRenderEngine2DSurface(pixels: [], backend_name: "", width: width, height: height, rendered: false)
+    val scene = simple_web_render_html_to_scene(html, width, height)
+    val r = Engine2D.create_requested_backend(width, height, backend_name)
+    var eng = match r:
+        Ok(value):
+            value
+        Err(_e):
+            return WebRenderEngine2DSurface(pixels: [], backend_name: "", width: width, height: height, rendered: false)
+    # Replay inline: Engine2D draw ops are `me` methods that mutate the surface
+    # in place, so they must run on this `eng` binding (passing it to a helper
+    # would mutate a copy and leave this surface untouched).
+    eng.clear(WEB_DEFAULT_BG)
+    var i = 0
+    while i < scene.commands.len():
+        val cmd = scene.commands[i]
+        if cmd.kind == "fill_rect":
+            eng.draw_rect_filled(0, 0, width, height, _opaque(cmd.color))
+        i = i + 1
+    WebRenderEngine2DSurface(
+        pixels: eng.read_pixels(),
+        backend_name: eng.backend_name(),
+        width: width,
+        height: height,
+        rendered: true
+    )

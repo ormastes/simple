@@ -1,0 +1,208 @@
+# Engine2D backend lane contract.
+#
+# Drawing backends own framebuffer-visible primitive rendering. Processing
+# backends own compute/offload work that may prepare or transform draw data.
+
+use std.gpu.engine2d.helpers_availability.{backend_canonical_name, backend_canonical_priority, backend_default_priority_order, backend_full_preference_order, backend_preference_summary}
+
+val ENGINE2D_BACKEND_LANE_DRAWING: text = "drawing"
+val ENGINE2D_BACKEND_LANE_PROCESSING: text = "processing"
+val ENGINE2D_BACKEND_LANE_COMBINED: text = "combined"
+val ENGINE2D_HOST_GPU_LANE_HOST: text = "host"
+val ENGINE2D_HOST_GPU_LANE_GPU: text = "gpu"
+val ENGINE2D_HOST_GPU_EXEC_DIRECT: text = "direct"
+val ENGINE2D_HOST_GPU_EXEC_PACKET: text = "queue_packet"
+
+struct Engine2dBackendLane:
+    lane: text
+    backend_name: text
+    responsibility: text
+    owns_framebuffer: bool
+    owns_kernel_dispatch: bool
+    requires_readback: bool
+
+struct Engine2dBackendLanePlan:
+    drawing_backend: Engine2dBackendLane
+    processing_backend: Engine2dBackendLane
+    processing_required: bool
+    shared_device_preferred: bool
+    split_required: bool
+    fallback_reason: text
+
+struct Engine2dHostGpuLaneResult:
+    ok: bool
+    diagnostic: text
+    source_lane: text
+    target_lane: text
+    execution_kind: text
+    committed_on_host: bool
+    gpu_batched: bool
+    fallback_explicit: bool
+    estimated_packet_bytes: i64
+    max_packet_bytes: i64
+    baseline_ms: i64
+    estimated_ms: i64
+
+fn engine2d_drawing_backend_lane(backend_name: text) -> Engine2dBackendLane:
+    Engine2dBackendLane(
+        lane: ENGINE2D_BACKEND_LANE_DRAWING,
+        backend_name: backend_name,
+        responsibility: "primitive draw, framebuffer ownership, present, readback",
+        owns_framebuffer: true,
+        owns_kernel_dispatch: false,
+        requires_readback: true
+    )
+
+fn engine2d_processing_backend_lane(backend_name: text) -> Engine2dBackendLane:
+    Engine2dBackendLane(
+        lane: ENGINE2D_BACKEND_LANE_PROCESSING,
+        backend_name: backend_name,
+        responsibility: "compute kernels, generated artifacts, filters, offload, sync evidence",
+        owns_framebuffer: false,
+        owns_kernel_dispatch: true,
+        requires_readback: false
+    )
+
+fn engine2d_combined_backend_lane(backend_name: text) -> Engine2dBackendLane:
+    Engine2dBackendLane(
+        lane: ENGINE2D_BACKEND_LANE_COMBINED,
+        backend_name: backend_name,
+        responsibility: "drawing and processing on one backend/device",
+        owns_framebuffer: true,
+        owns_kernel_dispatch: true,
+        requires_readback: true
+    )
+
+fn engine2d_backend_lane_summary(lane: Engine2dBackendLane) -> text:
+    "lane={lane.lane};backend={lane.backend_name};framebuffer={lane.owns_framebuffer};kernels={lane.owns_kernel_dispatch};readback={lane.requires_readback}"
+
+fn engine2d_backend_lane_plan(drawing_backend_name: text, processing_backend_name: text, processing_required: bool, shared_device_preferred: bool) -> Engine2dBackendLanePlan:
+    val drawing = engine2d_drawing_backend_lane(drawing_backend_name)
+    val processing_name = if processing_backend_name == "": drawing_backend_name else: processing_backend_name
+    val processing = engine2d_processing_backend_lane(processing_name)
+    var split_required = processing_required and drawing_backend_name != processing_name
+    var fallback_reason = ""
+    if processing_required and processing_backend_name == "":
+        split_required = false
+        fallback_reason = "processing backend not specified; using drawing backend for combined fallback"
+    Engine2dBackendLanePlan(
+        drawing_backend: drawing,
+        processing_backend: processing,
+        processing_required: processing_required,
+        shared_device_preferred: shared_device_preferred,
+        split_required: split_required,
+        fallback_reason: fallback_reason
+    )
+
+fn engine2d_backend_lane_drawing_preference_order() -> [text]:
+    """Automatic drawing-lane probe order; explicit-native surfaces opt in separately."""
+    backend_default_priority_order()
+
+fn engine2d_backend_lane_full_preference_order() -> [text]:
+    """User-visible preference order including explicit platform-native surfaces."""
+    backend_full_preference_order()
+
+fn engine2d_backend_lane_preference_summary() -> text:
+    """Stable backend order summary for lane diagnostics and startup reports."""
+    backend_preference_summary()
+
+fn engine2d_backend_lane_preferred_candidate(candidates: [text], include_explicit_native: bool) -> text:
+    """Pick the first candidate using the shared native-first Engine2D order."""
+    var best_backend = ""
+    var best_priority = 100
+    for candidate in candidates:
+        val canonical = backend_canonical_name(candidate)
+        val priority = backend_canonical_priority(canonical)
+        val explicit_native = canonical == "baremetal" or canonical == "virtio_gpu"
+        if priority < 99 and (include_explicit_native or not explicit_native):
+            if priority < best_priority:
+                best_backend = canonical
+                best_priority = priority
+    best_backend
+
+fn engine2d_font_offload_backend_order() -> [text]:
+    """Processing-lane preference order for vector and bitmap font offload."""
+    ["metal", "cuda", "rocm", "qualcomm", "vulkan", "directx", "opencl", "opengl", "intel", "webgpu", "cpu_simd", "software", "cpu"]
+
+fn _engine2d_font_offload_backend_priority(canonical: text) -> i32:
+    val priority = backend_canonical_priority(canonical)
+    if priority < 0:
+        return 99
+    priority
+
+fn engine2d_backend_lane_preferred_font_offload_candidate(candidates: [text]) -> text:
+    """Pick a font offload backend without probing or reordering per glyph."""
+    var best_backend = ""
+    var best_priority = 100
+    for candidate in candidates:
+        val canonical = backend_canonical_name(candidate)
+        val priority = _engine2d_font_offload_backend_priority(canonical)
+        if priority < 99 and priority < best_priority:
+            best_backend = canonical
+            best_priority = priority
+    best_backend
+
+fn engine2d_operation_lane(operation: text) -> text:
+    if operation == "draw_ir" or operation == "primitive_draw" or operation == "present" or operation == "readback":
+        return ENGINE2D_BACKEND_LANE_DRAWING
+    if operation == "generated_kernel" or operation == "filter" or operation == "layout_compute" or operation == "simd_offload":
+        return ENGINE2D_BACKEND_LANE_PROCESSING
+    if operation == "font_offload" or operation == "font" or operation == "text_blit":
+        return ENGINE2D_BACKEND_LANE_PROCESSING
+    if operation == "vector_font" or operation == "vector_glyph" or operation == "glyph_raster" or operation == "glyph_blit":
+        return ENGINE2D_BACKEND_LANE_PROCESSING
+    if operation == "bitmap_font" or operation == "bitmap_glyph" or operation == "bitmap_glyph_raster" or operation == "glyph_bitmap_raster":
+        return ENGINE2D_BACKEND_LANE_PROCESSING
+    ENGINE2D_BACKEND_LANE_COMBINED
+
+fn _engine2d_host_gpu_lane_valid(lane: text) -> bool:
+    lane == ENGINE2D_HOST_GPU_LANE_HOST or lane == ENGINE2D_HOST_GPU_LANE_GPU
+
+fn _engine2d_host_gpu_execution_kind(source_lane: text, target_lane: text) -> text:
+    if source_lane == target_lane:
+        return ENGINE2D_HOST_GPU_EXEC_DIRECT
+    ENGINE2D_HOST_GPU_EXEC_PACKET
+
+fn _engine2d_host_gpu_is_batch_operation(operation: text) -> bool:
+    if operation == "draw_ir_delta" or operation == "display_graph_ir" or operation == "frame_batch":
+        return true
+    if operation == "dirty_tile_batch" or operation == "resource_batch" or operation == "animation_batch":
+        return true
+    if operation == "glyph_batch" or operation == "image_batch":
+        return true
+    false
+
+fn engine2d_host_gpu_lane_schedule(source_lane: text, target_lane: text, operation: text, estimated_packet_bytes: i64, max_packet_bytes: i64, mutates_host_semantics: bool, per_widget_dispatch: bool, strict_backend_available: bool, baseline_ms: i64) -> Engine2dHostGpuLaneResult:
+    """Validate and summarize a canonical target.later(...) host/gpu callback."""
+    val execution_kind = _engine2d_host_gpu_execution_kind(source_lane, target_lane)
+    val gpu_batched = target_lane == ENGINE2D_HOST_GPU_LANE_GPU and _engine2d_host_gpu_is_batch_operation(operation)
+    val fallback_explicit = target_lane == ENGINE2D_HOST_GPU_LANE_GPU and not strict_backend_available
+    val estimated_ms = baseline_ms
+    if not _engine2d_host_gpu_lane_valid(source_lane):
+        return Engine2dHostGpuLaneResult(ok: false, diagnostic: "invalid source lane", source_lane: source_lane, target_lane: target_lane, execution_kind: execution_kind, committed_on_host: false, gpu_batched: gpu_batched, fallback_explicit: fallback_explicit, estimated_packet_bytes: estimated_packet_bytes, max_packet_bytes: max_packet_bytes, baseline_ms: baseline_ms, estimated_ms: baseline_ms)
+    if not _engine2d_host_gpu_lane_valid(target_lane):
+        return Engine2dHostGpuLaneResult(ok: false, diagnostic: "invalid target lane", source_lane: source_lane, target_lane: target_lane, execution_kind: execution_kind, committed_on_host: false, gpu_batched: gpu_batched, fallback_explicit: fallback_explicit, estimated_packet_bytes: estimated_packet_bytes, max_packet_bytes: max_packet_bytes, baseline_ms: baseline_ms, estimated_ms: baseline_ms)
+    if estimated_packet_bytes > max_packet_bytes:
+        return Engine2dHostGpuLaneResult(ok: false, diagnostic: "packet estimate exceeds max_packet", source_lane: source_lane, target_lane: target_lane, execution_kind: execution_kind, committed_on_host: target_lane == ENGINE2D_HOST_GPU_LANE_HOST, gpu_batched: gpu_batched, fallback_explicit: fallback_explicit, estimated_packet_bytes: estimated_packet_bytes, max_packet_bytes: max_packet_bytes, baseline_ms: baseline_ms, estimated_ms: baseline_ms)
+    if target_lane == ENGINE2D_HOST_GPU_LANE_GPU and mutates_host_semantics:
+        return Engine2dHostGpuLaneResult(ok: false, diagnostic: "GPU lane cannot mutate host semantic state", source_lane: source_lane, target_lane: target_lane, execution_kind: execution_kind, committed_on_host: false, gpu_batched: gpu_batched, fallback_explicit: fallback_explicit, estimated_packet_bytes: estimated_packet_bytes, max_packet_bytes: max_packet_bytes, baseline_ms: baseline_ms, estimated_ms: baseline_ms)
+    if target_lane == ENGINE2D_HOST_GPU_LANE_GPU and per_widget_dispatch:
+        return Engine2dHostGpuLaneResult(ok: false, diagnostic: "per-widget GPU dispatch must be batched", source_lane: source_lane, target_lane: target_lane, execution_kind: execution_kind, committed_on_host: false, gpu_batched: gpu_batched, fallback_explicit: fallback_explicit, estimated_packet_bytes: estimated_packet_bytes, max_packet_bytes: max_packet_bytes, baseline_ms: baseline_ms, estimated_ms: baseline_ms)
+    if target_lane == ENGINE2D_HOST_GPU_LANE_GPU and not gpu_batched:
+        return Engine2dHostGpuLaneResult(ok: false, diagnostic: "GPU lane operation must be a coarse render/resource batch", source_lane: source_lane, target_lane: target_lane, execution_kind: execution_kind, committed_on_host: false, gpu_batched: gpu_batched, fallback_explicit: fallback_explicit, estimated_packet_bytes: estimated_packet_bytes, max_packet_bytes: max_packet_bytes, baseline_ms: baseline_ms, estimated_ms: baseline_ms)
+    Engine2dHostGpuLaneResult(ok: true, diagnostic: "", source_lane: source_lane, target_lane: target_lane, execution_kind: execution_kind, committed_on_host: target_lane == ENGINE2D_HOST_GPU_LANE_HOST, gpu_batched: gpu_batched, fallback_explicit: fallback_explicit, estimated_packet_bytes: estimated_packet_bytes, max_packet_bytes: max_packet_bytes, baseline_ms: baseline_ms, estimated_ms: estimated_ms)
+
+fn engine2d_host_gpu_lane_summary(result: Engine2dHostGpuLaneResult) -> text:
+    "ok={result.ok};source={result.source_lane};target={result.target_lane};exec={result.execution_kind};host_commit={result.committed_on_host};gpu_batched={result.gpu_batched};fallback={result.fallback_explicit};packet={result.estimated_packet_bytes}/{result.max_packet_bytes};baseline_ms={result.baseline_ms};estimated_ms={result.estimated_ms};diagnostic={result.diagnostic}"
+
+export ENGINE2D_BACKEND_LANE_DRAWING, ENGINE2D_BACKEND_LANE_PROCESSING, ENGINE2D_BACKEND_LANE_COMBINED
+export ENGINE2D_HOST_GPU_LANE_HOST, ENGINE2D_HOST_GPU_LANE_GPU
+export ENGINE2D_HOST_GPU_EXEC_DIRECT, ENGINE2D_HOST_GPU_EXEC_PACKET
+export Engine2dBackendLane, Engine2dBackendLanePlan
+export Engine2dHostGpuLaneResult
+export engine2d_drawing_backend_lane, engine2d_processing_backend_lane, engine2d_combined_backend_lane
+export engine2d_backend_lane_summary, engine2d_backend_lane_plan, engine2d_operation_lane
+export engine2d_backend_lane_drawing_preference_order, engine2d_backend_lane_full_preference_order
+export engine2d_backend_lane_preference_summary, engine2d_backend_lane_preferred_candidate
+export engine2d_font_offload_backend_order, engine2d_backend_lane_preferred_font_offload_candidate
+export engine2d_host_gpu_lane_schedule, engine2d_host_gpu_lane_summary

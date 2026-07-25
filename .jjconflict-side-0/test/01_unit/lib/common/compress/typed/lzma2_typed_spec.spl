@@ -1,0 +1,526 @@
+# ============================================================================
+# test/01_unit/lib/common/compress/typed/lzma2_typed_spec.spl
+#
+# Unit tests for lzma2_typed.spl (C4: typed LZMA2/XZ codec).
+#
+# Covers:
+#   1. LZMA2 uncompressed chunk round-trip
+#   2. LZMA2 chunk layout interop (known byte-sequence assertions)
+#   3. XZ frame magic / header / footer
+#   4. XZ encode → decode round-trip
+#   5. RangeCoder bit round-trip (encoder + decoder + probability update)
+#   6. Negative control (proves runner executes assertions)
+#
+# NOTE: Uses assert_equal / assert_true (NOT expect().to_equal) to avoid the
+# multi-describe silent-swallow bug
+# (interp_expect_to_equal_swallows_failures_multi_describe_2026-06-15).
+# Single top-level describe block with context blocks to stay safe.
+# ============================================================================
+
+use std.spec.{describe, context, it, assert_equal, assert_true}
+use lib.common.compress.typed.lzma2_typed.{
+    lzma2_compress_uncompressed,
+    lzma2_decompress,
+    xz_encode,
+    xz_decode,
+    xz_decode_check_magic,
+    xz_header_magic,
+    xz_footer_magic,
+    rc_encode_bits,
+    rc_decode_bits,
+    rc_prob_update,
+    rc_prob_init
+}
+use lib.common.bytes.span.{ByteSpan}
+use lib.common.bytes.checksum.{Crc32}
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+fn span_from_text(s: text) -> ByteSpan:
+    ByteSpan.new(s.bytes())
+
+fn spans_equal(a: ByteSpan, b: ByteSpan) -> bool:
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if a.get(i) != b.get(i):
+            return false
+        i = i + 1
+    true
+
+fn ints_equal(a: [i64], b: [i64]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+describe "lzma2_typed codec":
+
+    # -----------------------------------------------------------------------
+    # Negative control — must be first to prove runner fires
+    # -----------------------------------------------------------------------
+
+    context "negative control":
+        it "1+1==2 proves runner fires assertions":
+            assert_equal(1 + 1, 2)
+
+    # -----------------------------------------------------------------------
+    # C4.1 LZMA2 uncompressed chunk round-trip
+    # -----------------------------------------------------------------------
+
+    context "LZMA2 uncompressed round-trip: empty":
+        it "empty input compresses to single end-marker byte":
+            val input = ByteSpan.empty()
+            val compressed = lzma2_compress_uncompressed(input)
+            # Must be exactly [0x00]
+            assert_equal(compressed.len(), 1)
+            assert_equal(compressed.get(0).to_i64(), 0x00)
+
+        it "empty compress then decompress is empty":
+            val input = ByteSpan.empty()
+            val compressed = lzma2_compress_uncompressed(input)
+            val recovered = lzma2_decompress(compressed)
+            assert_true(recovered.is_empty())
+
+    context "LZMA2 uncompressed round-trip: short ASCII":
+        it "Hello compresses and decompresses correctly":
+            val input = span_from_text("Hello")
+            val compressed = lzma2_compress_uncompressed(input)
+            val recovered = lzma2_decompress(compressed)
+            val same = spans_equal(input, recovered)
+            assert_true(same)
+
+        it "Hello World round-trip":
+            val input = span_from_text("Hello, World!")
+            val compressed = lzma2_compress_uncompressed(input)
+            val recovered = lzma2_decompress(compressed)
+            val same = spans_equal(input, recovered)
+            assert_true(same)
+
+    context "LZMA2 uncompressed round-trip: binary data":
+        it "all-zero 256 bytes round-trip":
+            var raw: [u8] = []
+            var i = 0
+            while i < 256:
+                raw.push(0x00u8)
+                i = i + 1
+            val input = ByteSpan.new(raw)
+            val compressed = lzma2_compress_uncompressed(input)
+            val recovered = lzma2_decompress(compressed)
+            val same = spans_equal(input, recovered)
+            assert_true(same)
+
+        it "byte ramp 0..127 round-trip":
+            var raw: [u8] = []
+            var i = 0
+            while i < 128:
+                raw.push(i.to_u8())
+                i = i + 1
+            val input = ByteSpan.new(raw)
+            val compressed = lzma2_compress_uncompressed(input)
+            val recovered = lzma2_decompress(compressed)
+            val same = spans_equal(input, recovered)
+            assert_true(same)
+
+    # -----------------------------------------------------------------------
+    # C4.1 LZMA2 chunk layout interop (known-byte assertions)
+    # -----------------------------------------------------------------------
+
+    context "LZMA2 chunk layout interop":
+        it "single-byte A: control=0x01, size_field=0x0000, payload=0x41":
+            # 'A' = 0x41; chunk_sz=1, sz_field=0; big-endian: 0x00 0x00
+            # Expected bytes: [0x01, 0x00, 0x00, 0x41, 0x00]
+            #   ctrl=0x01 (first uncompressed), sz_hi=0x00, sz_lo=0x00, 'A', end=0x00
+            var raw: [u8] = [0x41u8]
+            val input = ByteSpan.new(raw)
+            val compressed = lzma2_compress_uncompressed(input)
+            assert_equal(compressed.len(), 5)
+            assert_equal(compressed.get(0).to_i64(), 0x01)
+            assert_equal(compressed.get(1).to_i64(), 0x00)
+            assert_equal(compressed.get(2).to_i64(), 0x00)
+            assert_equal(compressed.get(3).to_i64(), 0x41)
+            assert_equal(compressed.get(4).to_i64(), 0x00)
+
+        it "known LZMA2 uncompressed chunk sequence decodes correctly":
+            # Manually constructed LZMA2 uncompressed chunk for bytes [0x48, 0x69] = "Hi"
+            # [0x01, 0x00, 0x01, 0x48, 0x69, 0x00]
+            #   ctrl=0x01, sz_hi=0x00, sz_lo=0x01 → chunk_sz=2, payload=Hi, end=0x00
+            var chunk: [u8] = [0x01u8, 0x00u8, 0x01u8, 0x48u8, 0x69u8, 0x00u8]
+            val input_span = ByteSpan.new(chunk)
+            val decoded = lzma2_decompress(input_span)
+            assert_equal(decoded.len(), 2)
+            assert_equal(decoded.get(0).to_i64(), 0x48)
+            assert_equal(decoded.get(1).to_i64(), 0x69)
+
+        it "two uncompressed chunks decode to concatenated payload":
+            # Two chunks: [0x01, 0x00, 0x00, 0xAA] + [0x02, 0x00, 0x00, 0xBB] + [0x00]
+            var chunk: [u8] = [0x01u8, 0x00u8, 0x00u8, 0xAAu8,
+                                0x02u8, 0x00u8, 0x00u8, 0xBBu8,
+                                0x00u8]
+            val input_span = ByteSpan.new(chunk)
+            val decoded = lzma2_decompress(input_span)
+            assert_equal(decoded.len(), 2)
+            assert_equal(decoded.get(0).to_i64(), 0xAA)
+            assert_equal(decoded.get(1).to_i64(), 0xBB)
+
+        it "truncated uncompressed chunk decodes to empty":
+            var chunk: [u8] = [0x01u8, 0x00u8, 0x02u8, 0x41u8]
+            val decoded = lzma2_decompress(ByteSpan.new(chunk))
+            assert_true(decoded.is_empty())
+
+        it "unknown control after payload decodes to empty":
+            var chunk: [u8] = [0x01u8, 0x00u8, 0x00u8, 0x41u8, 0xFFu8]
+            val decoded = lzma2_decompress(ByteSpan.new(chunk))
+            assert_true(decoded.is_empty())
+
+        it "missing end marker decodes to empty":
+            var chunk: [u8] = [0x01u8, 0x00u8, 0x00u8, 0x41u8]
+            val decoded = lzma2_decompress(ByteSpan.new(chunk))
+            assert_true(decoded.is_empty())
+
+        it "trailing bytes after end marker decode to empty":
+            var chunk: [u8] = [0x00u8, 0x41u8]
+            val decoded = lzma2_decompress(ByteSpan.new(chunk))
+            assert_true(decoded.is_empty())
+
+        it "first chunk without dictionary reset decodes to empty":
+            var chunk: [u8] = [0x02u8, 0x00u8, 0x00u8, 0x41u8, 0x00u8]
+            val decoded = lzma2_decompress(ByteSpan.new(chunk))
+            assert_true(decoded.is_empty())
+
+    # -----------------------------------------------------------------------
+    # C4.2 XZ frame magic + header/footer assertions
+    # -----------------------------------------------------------------------
+
+    context "XZ frame magic":
+        it "xz_header_magic returns 6-byte FD377A585A00":
+            val magic = xz_header_magic()
+            assert_equal(magic.len(), 6)
+            assert_equal(magic[0].to_i64(), 0xFD)
+            assert_equal(magic[1].to_i64(), 0x37)
+            assert_equal(magic[2].to_i64(), 0x7A)
+            assert_equal(magic[3].to_i64(), 0x58)
+            assert_equal(magic[4].to_i64(), 0x5A)
+            assert_equal(magic[5].to_i64(), 0x00)
+
+        it "xz_footer_magic returns 2-byte 595A":
+            val magic = xz_footer_magic()
+            assert_equal(magic.len(), 2)
+            assert_equal(magic[0].to_i64(), 0x59)
+            assert_equal(magic[1].to_i64(), 0x5A)
+
+        it "xz_encode output starts with XZ header magic":
+            val input = span_from_text("Hi")
+            val frame = xz_encode(input)
+            assert_true(frame.len() > 8)
+            assert_equal(frame.get(0).to_i64(), 0xFD)
+            assert_equal(frame.get(1).to_i64(), 0x37)
+            assert_equal(frame.get(2).to_i64(), 0x7A)
+            assert_equal(frame.get(3).to_i64(), 0x58)
+            assert_equal(frame.get(4).to_i64(), 0x5A)
+            assert_equal(frame.get(5).to_i64(), 0x00)
+
+        it "xz_encode output ends with XZ footer magic 595A":
+            val input = span_from_text("Hi")
+            val frame = xz_encode(input)
+            val n = frame.len()
+            assert_equal(frame.get(n - 2).to_i64(), 0x59)
+            assert_equal(frame.get(n - 1).to_i64(), 0x5A)
+
+        it "xz_encode footer CRC covers backward size and stream flags":
+            val input = span_from_text("Hi")
+            val frame = xz_encode(input)
+            val n = frame.len()
+            val footer_start = n - 12
+            val footer_content = frame.slice(footer_start + 4, 6)
+            var crc = Crc32.new()
+            crc.update(footer_content)
+            val raw = crc.raw()
+            assert_equal(frame.get(footer_start).to_i64(), raw & 0xFF)
+            assert_equal(frame.get(footer_start + 1).to_i64(), (raw >> 8) & 0xFF)
+            assert_equal(frame.get(footer_start + 2).to_i64(), (raw >> 16) & 0xFF)
+            assert_equal(frame.get(footer_start + 3).to_i64(), (raw >> 24) & 0xFF)
+
+        it "xz_decode_check_magic passes for xz_encode output":
+            val input = span_from_text("Hello")
+            val frame = xz_encode(input)
+            val ok = xz_decode_check_magic(frame)
+            assert_true(ok)
+
+        it "xz_decode_check_magic fails for garbage":
+            var bad: [u8] = [0x00u8, 0x01u8, 0x02u8, 0x03u8, 0x04u8, 0x05u8, 0x06u8, 0x07u8]
+            val bad_span = ByteSpan.new(bad)
+            val ok = xz_decode_check_magic(bad_span)
+            assert_equal(ok, false)
+
+    # -----------------------------------------------------------------------
+    # C4.2 XZ round-trip
+    # -----------------------------------------------------------------------
+
+    context "XZ encode/decode round-trip":
+        it "empty input round-trip":
+            val input = ByteSpan.empty()
+            val frame = xz_encode(input)
+            val recovered = xz_decode(frame)
+            assert_true(recovered.is_empty())
+
+        it "Hello round-trip":
+            val input = span_from_text("Hello")
+            val frame = xz_encode(input)
+            val recovered = xz_decode(frame)
+            val same = spans_equal(input, recovered)
+            assert_true(same)
+
+        it "Hello World round-trip":
+            val input = span_from_text("Hello, World!")
+            val frame = xz_encode(input)
+            val recovered = xz_decode(frame)
+            val same = spans_equal(input, recovered)
+            assert_true(same)
+
+        it "binary byte ramp 0..63 round-trip":
+            var raw: [u8] = []
+            var i = 0
+            while i < 64:
+                raw.push(i.to_u8())
+                i = i + 1
+            val input = ByteSpan.new(raw)
+            val frame = xz_encode(input)
+            val recovered = xz_decode(frame)
+            val same = spans_equal(input, recovered)
+            assert_true(same)
+
+        it "non-none XZ stream flags decode to empty":
+            val input = span_from_text("Hi")
+            val frame = xz_encode(input)
+            var bad = frame.to_bytes()
+            bad[7] = 0x01u8
+            val recovered = xz_decode(ByteSpan.new(bad))
+            assert_true(recovered.is_empty())
+
+        it "corrupt XZ stream flag CRC decodes to empty":
+            val input = span_from_text("Hi")
+            val frame = xz_encode(input)
+            var bad = frame.to_bytes()
+            bad[8] = 0x00u8
+            val recovered = xz_decode(ByteSpan.new(bad))
+            assert_true(recovered.is_empty())
+
+        it "corrupt XZ block header CRC decodes to empty":
+            val input = span_from_text("Hi")
+            val frame = xz_encode(input)
+            var bad = frame.to_bytes()
+            bad[20] = 0x00u8
+            val recovered = xz_decode(ByteSpan.new(bad))
+            assert_true(recovered.is_empty())
+
+        it "unsupported XZ block filter id decodes to empty":
+            val input = span_from_text("Hi")
+            val frame = xz_encode(input)
+            var bad = frame.to_bytes()
+            bad[14] = 0x22u8
+            val bad_span = ByteSpan.new(bad)
+            val bh_content = bad_span.slice(12, 8)
+            var crc = Crc32.new()
+            crc.update(bh_content)
+            val raw = crc.raw()
+            bad[20] = (raw & 0xFF).to_u8()
+            bad[21] = ((raw >> 8) & 0xFF).to_u8()
+            bad[22] = ((raw >> 16) & 0xFF).to_u8()
+            bad[23] = ((raw >> 24) & 0xFF).to_u8()
+            val recovered = xz_decode(ByteSpan.new(bad))
+            assert_true(recovered.is_empty())
+
+        it "corrupt XZ index CRC decodes to empty":
+            val input = span_from_text("Hi")
+            val frame = xz_encode(input)
+            var bad = frame.to_bytes()
+            val crc_byte = bad.len() - 16
+            bad[crc_byte] = 0x00u8
+            val recovered = xz_decode(ByteSpan.new(bad))
+            assert_true(recovered.is_empty())
+
+        it "corrupt XZ footer CRC decodes to empty":
+            val input = span_from_text("Hi")
+            val frame = xz_encode(input)
+            var bad = frame.to_bytes()
+            val footer_start = bad.len() - 12
+            bad[footer_start] = (bad[footer_start].to_i64() ^ 0xFF).to_u8()
+            val recovered = xz_decode(ByteSpan.new(bad))
+            assert_true(recovered.is_empty())
+
+        it "corrupt XZ footer magic decodes to empty":
+            val input = span_from_text("Hi")
+            val frame = xz_encode(input)
+            var bad = frame.to_bytes()
+            bad[bad.len() - 1] = 0x00u8
+            val recovered = xz_decode(ByteSpan.new(bad))
+            assert_true(recovered.is_empty())
+
+        it "unsupported XZ index indicator decodes to empty":
+            val input = span_from_text("Hi")
+            val frame = xz_encode(input)
+            var bad = frame.to_bytes()
+            val footer_start = bad.len() - 12
+            val bw0 = bad[footer_start + 4].to_i64()
+            val bw1 = bad[footer_start + 5].to_i64()
+            val bw2 = bad[footer_start + 6].to_i64()
+            val bw3 = bad[footer_start + 7].to_i64()
+            val backward_sz = bw0 | (bw1 << 8) | (bw2 << 16) | (bw3 << 24)
+            val index_total = (backward_sz + 1) * 4
+            val index_start = footer_start - index_total
+            val index_content_len = index_total - 4
+            bad[index_start] = 0x01u8
+            val bad_span = ByteSpan.new(bad)
+            val index_content = bad_span.slice(index_start, index_content_len)
+            var crc = Crc32.new()
+            crc.update(index_content)
+            val raw = crc.raw()
+            val crc_start = index_start + index_content_len
+            bad[crc_start] = (raw & 0xFF).to_u8()
+            bad[crc_start + 1] = ((raw >> 8) & 0xFF).to_u8()
+            bad[crc_start + 2] = ((raw >> 16) & 0xFF).to_u8()
+            bad[crc_start + 3] = ((raw >> 24) & 0xFF).to_u8()
+            val recovered = xz_decode(ByteSpan.new(bad))
+            assert_true(recovered.is_empty())
+
+        it "mismatched XZ index uncompressed size decodes to empty":
+            val input = span_from_text("Hi")
+            val frame = xz_encode(input)
+            var bad = frame.to_bytes()
+            val footer_start = bad.len() - 12
+            val bw0 = bad[footer_start + 4].to_i64()
+            val bw1 = bad[footer_start + 5].to_i64()
+            val bw2 = bad[footer_start + 6].to_i64()
+            val bw3 = bad[footer_start + 7].to_i64()
+            val backward_sz = bw0 | (bw1 << 8) | (bw2 << 16) | (bw3 << 24)
+            val index_total = (backward_sz + 1) * 4
+            val index_start = footer_start - index_total
+            val index_content_len = index_total - 4
+            bad[index_start + 3] = 0x03u8
+            val bad_span = ByteSpan.new(bad)
+            val index_content = bad_span.slice(index_start, index_content_len)
+            var crc = Crc32.new()
+            crc.update(index_content)
+            val raw = crc.raw()
+            val crc_start = index_start + index_content_len
+            bad[crc_start] = (raw & 0xFF).to_u8()
+            bad[crc_start + 1] = ((raw >> 8) & 0xFF).to_u8()
+            bad[crc_start + 2] = ((raw >> 16) & 0xFF).to_u8()
+            bad[crc_start + 3] = ((raw >> 24) & 0xFF).to_u8()
+            val recovered = xz_decode(ByteSpan.new(bad))
+            assert_true(recovered.is_empty())
+
+    # -----------------------------------------------------------------------
+    # C4.3 RangeCoder bit round-trip
+    #
+    # Encode a known bit sequence with fixed starting probability rc_prob_init(),
+    # then decode and verify. This is a REAL round-trip test of the range coder
+    # arithmetic — not a mock. Both encoder and decoder apply the same
+    # probability update (rc_prob_update) symmetrically.
+    # -----------------------------------------------------------------------
+
+    context "RangeCoder probability update":
+        it "rc_prob_update bit=0 increases probability (toward 2048)":
+            val p = rc_prob_init()
+            val p2 = rc_prob_update(p, 0)
+            val increased = p2 > p
+            assert_true(increased)
+
+        it "rc_prob_update bit=1 decreases probability (toward 0)":
+            val p = rc_prob_init()
+            val p2 = rc_prob_update(p, 1)
+            val decreased = p2 < p
+            assert_true(decreased)
+
+        it "rc_prob_update converges toward 2048 for all-zero bits":
+            var p = rc_prob_init()
+            var i = 0
+            while i < 10:
+                p = rc_prob_update(p, 0)
+                i = i + 1
+            val gt_init = p > rc_prob_init()
+            assert_true(gt_init)
+
+        it "rc_prob_update converges toward 0 for all-one bits":
+            var p = rc_prob_init()
+            var i = 0
+            while i < 10:
+                p = rc_prob_update(p, 1)
+                i = i + 1
+            val lt_init = p < rc_prob_init()
+            assert_true(lt_init)
+
+    context "RangeCoder bit round-trip":
+        it "single bit 0 round-trip":
+            var bits: [i64] = [0]
+            val encoded = rc_encode_bits(bits, rc_prob_init())
+            val decoded = rc_decode_bits(encoded, 1, rc_prob_init())
+            assert_equal(decoded.len(), 1)
+            assert_equal(decoded[0], 0)
+
+        it "single bit 1 round-trip":
+            var bits: [i64] = [1]
+            val encoded = rc_encode_bits(bits, rc_prob_init())
+            val decoded = rc_decode_bits(encoded, 1, rc_prob_init())
+            assert_equal(decoded.len(), 1)
+            assert_equal(decoded[0], 1)
+
+        it "alternating bits 0,1,0,1,0,1 round-trip":
+            var bits: [i64] = [0, 1, 0, 1, 0, 1]
+            val encoded = rc_encode_bits(bits, rc_prob_init())
+            val decoded = rc_decode_bits(encoded, 6, rc_prob_init())
+            val same = ints_equal(decoded, bits)
+            assert_true(same)
+
+        it "all-zero 8 bits round-trip":
+            var bits: [i64] = [0, 0, 0, 0, 0, 0, 0, 0]
+            val encoded = rc_encode_bits(bits, rc_prob_init())
+            val decoded = rc_decode_bits(encoded, 8, rc_prob_init())
+            val same = ints_equal(decoded, bits)
+            assert_true(same)
+
+        it "all-one 8 bits round-trip":
+            var bits: [i64] = [1, 1, 1, 1, 1, 1, 1, 1]
+            val encoded = rc_encode_bits(bits, rc_prob_init())
+            val decoded = rc_decode_bits(encoded, 8, rc_prob_init())
+            val same = ints_equal(decoded, bits)
+            assert_true(same)
+
+        it "mixed 8-bit sequence round-trip":
+            # NOTE: The simplified range coder (no carry-propagation cache) is
+            # correct for sequences up to 8 bits with evolving probability.
+            # Longer sequences require full LZMA carry propagation — deferred to
+            # doc/08_tracking/bug/lzma_full_range_model_deferred_2026-06-15.md
+            var bits: [i64] = [1, 0, 1, 1, 0, 0, 1, 0]
+            val encoded = rc_encode_bits(bits, rc_prob_init())
+            val decoded = rc_decode_bits(encoded, 8, rc_prob_init())
+            val same = ints_equal(decoded, bits)
+            assert_true(same)
+
+        it "invalid initial probability fails closed before encoding":
+            var bits: [i64] = [0]
+            val encoded = rc_encode_bits(bits, 2048)
+            assert_true(encoded.is_empty())
+
+        it "invalid bit value fails closed before encoding":
+            var bits: [i64] = [2]
+            val encoded = rc_encode_bits(bits, rc_prob_init())
+            assert_true(encoded.is_empty())
+
+        it "invalid initial probability fails closed before decoding":
+            var raw: [u8] = [0x00u8, 0x00u8, 0x00u8, 0x00u8]
+            val decoded = rc_decode_bits(ByteSpan.new(raw), 1, 2048)
+            assert_equal(decoded.len(), 0)
+
+        it "negative decode count fails closed":
+            var raw: [u8] = [0x00u8, 0x00u8, 0x00u8, 0x00u8]
+            val decoded = rc_decode_bits(ByteSpan.new(raw), -1, rc_prob_init())
+            assert_equal(decoded.len(), 0)

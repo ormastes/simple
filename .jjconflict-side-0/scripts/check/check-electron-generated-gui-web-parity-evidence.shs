@@ -1,0 +1,556 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/electron_generated_gui_web_parity_evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/electron_generated_gui_web_parity_evidence_$(date -u +%F).md}"
+SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+SIMPLE_BIN_STATUS=pass
+
+is_rust_seed_simple() {
+    case "$1" in
+        src/compiler_rust/*|*/src/compiler_rust/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+if [ -z "${SIMPLE_BIN+x}" ]; then
+    SIMPLE_BIN_SOURCE="missing-self-hosted"
+    for candidate in \
+        "bin/simple" \
+        "./bin/simple" \
+        "release"/*/simple \
+        "bin/release"/*/simple \
+        "build/bootstrap/stage3/simple"
+    do
+        if [ -x "$candidate" ]; then
+            SIMPLE_BIN="$candidate"
+            SIMPLE_BIN_SOURCE="repo-self-hosted-fallback"
+            break
+        fi
+    done
+    if [ "${SIMPLE_BIN:-}" = "" ] && [ "${ALLOW_PATH_SIMPLE_BIN:-0}" = "1" ] && command -v simple >/dev/null 2>&1; then
+        SIMPLE_BIN="$(command -v simple)"
+        SIMPLE_BIN_SOURCE="path-opt-in"
+    fi
+else
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+fi
+SIMPLE_BIN="${SIMPLE_BIN:-}"
+if [ "$SIMPLE_BIN" = "" ]; then
+    SIMPLE_BIN_STATUS=missing
+elif is_rust_seed_simple "$SIMPLE_BIN"; then
+    SIMPLE_BIN_STATUS=forbidden
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-rust-seed-forbidden"
+elif [ ! -x "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN_STATUS=missing
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-missing"
+fi
+export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
+WIDTH="${ELECTRON_BITMAP_WIDTH:-96}"
+HEIGHT="${ELECTRON_BITMAP_HEIGHT:-72}"
+ITERATIONS="${ELECTRON_BITMAP_ITERATIONS:-3}"
+TIMEOUT_SECS="${ELECTRON_BITMAP_TIMEOUT_SECS:-60}"
+SCENE="${ELECTRON_BITMAP_SCENE:-generated-gui-widget-html}"
+SIMPLE_SRC="examples/06_io/ui/generated_gui_web_parity_expected.spl"
+SIMPLE_OUT="$BUILD_DIR/simple.out"
+HTML_PATH="$BUILD_DIR/generated-gui.html"
+EXPECTED_ARGB="$BUILD_DIR/simple-cpu-simd-expected-argb.json"
+CAPTURED_ARGB="$BUILD_DIR/electron-captured-argb.json"
+ELECTRON_OUT="$BUILD_DIR/electron.out"
+ELECTRON_PROOF="$BUILD_DIR/electron-proof.json"
+VALIDATED_ENV="$BUILD_DIR/electron-proof.validation.env"
+VALIDATOR="scripts/check/validate-electron-generated-gui-web-proof.js"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$SIMPLE_OUT" "$HTML_PATH" "$EXPECTED_ARGB" "$CAPTURED_ARGB" "$ELECTRON_OUT" "$ELECTRON_PROOF" "$VALIDATED_ENV" "$BUILD_DIR/evidence.env" "$REPORT_PATH"
+
+have() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+field_of() {
+    key="$1"
+    file="$2"
+    sed -n "s/^${key}=//p" "$file" | tail -n 1
+}
+
+field_of_env() {
+    key="$1"
+    file="$2"
+    if [ -s "$file" ]; then
+        sed -n "s/^${key}=//p" "$file" | tail -n 1
+    fi
+}
+
+num_at_least() {
+    value="$1"
+    min="$2"
+    case "$value" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$value" -ge "$min" ]
+}
+
+artifact_status_from_file_status() {
+    status="$1"
+    if [ "$status" = "pass" ]; then
+        echo pass
+    elif [ -z "$status" ] || [ "$status" = "unavailable" ]; then
+        echo unavailable
+    else
+        echo fail
+    fi
+}
+
+emit_unavailable() {
+    reason="$1"
+    {
+        echo "electron_generated_gui_web_status=unavailable"
+        echo "electron_generated_gui_web_reason=$reason"
+        echo "electron_generated_gui_web_scene=$SCENE"
+        echo "electron_generated_gui_web_simple_bin=$SIMPLE_BIN"
+        echo "electron_generated_gui_web_simple_bin_source=$SIMPLE_BIN_SOURCE"
+        echo "electron_generated_gui_web_simple_bin_status=$SIMPLE_BIN_STATUS"
+        echo "electron_generated_gui_web_proof_source="
+        echo "electron_generated_gui_web_proof_source_file_status="
+        echo "electron_generated_gui_web_proof_source_file_reason=not-run"
+        echo "electron_generated_gui_web_proof_source_artifact_status=unavailable"
+        echo "electron_generated_gui_web_proof_source_size_bytes="
+        echo "electron_generated_gui_web_proof_source_actual_size_bytes="
+        echo "electron_generated_gui_web_proof_symlink_status="
+        echo "electron_generated_gui_web_proof_hardlink_status="
+        echo "electron_generated_gui_web_captured_argb_symlink_status="
+        echo "electron_generated_gui_web_captured_argb_hardlink_status="
+        echo "electron_generated_gui_web_captured_argb_file_status="
+        echo "electron_generated_gui_web_captured_argb_file_reason=not-run"
+        echo "electron_generated_gui_web_captured_argb_artifact_status=unavailable"
+        echo "electron_generated_gui_web_width=$WIDTH"
+        echo "electron_generated_gui_web_height=$HEIGHT"
+    } >"$BUILD_DIR/evidence.env"
+    {
+        echo "# Electron Generated GUI Web Parity Evidence"
+        echo
+        echo "- status: unavailable"
+        echo "- reason: $reason"
+        echo "- scene: $SCENE"
+        echo "- proof source artifact:  / not-run / unavailable"
+        echo "- Electron captured ARGB artifact:  / not-run / unavailable"
+        echo
+        echo "## Raw Evidence"
+        sed 's/^/- /' "$BUILD_DIR/evidence.env"
+    } >"$REPORT_PATH"
+    cat "$BUILD_DIR/evidence.env"
+}
+
+for required in node npm; do
+    if ! have "$required"; then
+        emit_unavailable "missing-command:$required"
+        exit 1
+    fi
+done
+
+if [ "$SIMPLE_BIN_STATUS" != "pass" ]; then
+    emit_unavailable "simple-bin-$SIMPLE_BIN_STATUS"
+    exit 1
+fi
+
+if [ ! -f "$VALIDATOR" ]; then
+    emit_unavailable "missing-electron-proof-validator"
+    exit 1
+fi
+
+ELECTRON_BIN="${ELECTRON_BIN:-${SIMPLE_ELECTRON_BIN:-}}"
+if [ -n "$ELECTRON_BIN" ] && [ ! -x "$ELECTRON_BIN" ]; then
+    emit_unavailable "electron-bin-missing"
+    exit 1
+elif [ -x "tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron" ]; then
+    ELECTRON_BIN="tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
+elif [ -x "tools/electron-shell/node_modules/.bin/electron" ]; then
+    ELECTRON_BIN="tools/electron-shell/node_modules/.bin/electron"
+elif [ -x "tools/electron-shell/node_modules/electron/dist/electron" ]; then
+    ELECTRON_BIN="tools/electron-shell/node_modules/electron/dist/electron"
+fi
+
+if [ "$ELECTRON_BIN" = "" ]; then
+    emit_unavailable "missing-electron-dependency"
+    exit 1
+fi
+
+set +e
+ELECTRON_GENERATED_GUI_WIDTH="$WIDTH" ELECTRON_GENERATED_GUI_HEIGHT="$HEIGHT" ELECTRON_GENERATED_GUI_HTML_PATH="$HTML_PATH" ELECTRON_GENERATED_GUI_EXPECTED_ARGB_PATH="$EXPECTED_ARGB" \
+    SIMPLE_TIMEOUT_SECONDS="${SIMPLE_TIMEOUT_SECONDS:-60}" SIMPLE_LIB="${SIMPLE_LIB:-src}" "$SIMPLE_BIN" run "$SIMPLE_SRC" --mode=interpreter --clean >"$SIMPLE_OUT" 2>&1
+simple_code=$?
+set -e
+
+if [ "$simple_code" -ne 0 ]; then
+    emit_unavailable "simple-render-failed"
+    exit 1
+fi
+
+simple_status="$(field_of simple_status "$SIMPLE_OUT")"
+simple_checksum="$(field_of checksum "$SIMPLE_OUT")"
+simple_weighted="$(field_of weighted_checksum "$SIMPLE_OUT")"
+simple_blur="$(field_of blur_or_tolerance_used "$SIMPLE_OUT")"
+distinct_colors="$(field_of distinct_colors "$SIMPLE_OUT")"
+html_has_style="$(field_of html_has_style "$SIMPLE_OUT")"
+html_has_app_shell="$(field_of html_has_app_shell "$SIMPLE_OUT")"
+
+if [ "$simple_status" != "pass" ] || [ ! -s "$HTML_PATH" ] || [ ! -s "$EXPECTED_ARGB" ]; then
+    emit_unavailable "missing-simple-generated-artifacts"
+    exit 1
+fi
+if [ "$simple_blur" != "false" ]; then
+    emit_unavailable "simple-blur-or-tolerance-not-allowed"
+    exit 1
+fi
+
+set +e
+electron_code=0
+if have xvfb-run; then
+    ELECTRON_BITMAP_SCENE="$SCENE" ELECTRON_BITMAP_WIDTH="$WIDTH" ELECTRON_BITMAP_HEIGHT="$HEIGHT" ELECTRON_BITMAP_ITERATIONS="$ITERATIONS" ELECTRON_BITMAP_EXPECTED_CHECKSUM="$simple_checksum" ELECTRON_BITMAP_EXPECTED_WEIGHTED_CHECKSUM="$simple_weighted" ELECTRON_BITMAP_EXPECTED_ARGB_PATH="$EXPECTED_ARGB" ELECTRON_BITMAP_HTML_PATH="$HTML_PATH" ELECTRON_BITMAP_PROOF_PATH="$ELECTRON_PROOF" ELECTRON_BITMAP_CAPTURED_ARGB_PATH="$CAPTURED_ARGB" SIMPLE_ELECTRON_LIVE_BITMAP=1 \
+        xvfb-run -a --server-args="-screen 0 1280x720x24" \
+        "$ELECTRON_BIN" --force-device-scale-factor=1 --high-dpi-support=1 --force-color-profile=srgb --no-sandbox tools/electron-shell >"$ELECTRON_OUT" 2>&1 &
+else
+    ELECTRON_BITMAP_SCENE="$SCENE" ELECTRON_BITMAP_WIDTH="$WIDTH" ELECTRON_BITMAP_HEIGHT="$HEIGHT" ELECTRON_BITMAP_ITERATIONS="$ITERATIONS" ELECTRON_BITMAP_EXPECTED_CHECKSUM="$simple_checksum" ELECTRON_BITMAP_EXPECTED_WEIGHTED_CHECKSUM="$simple_weighted" ELECTRON_BITMAP_EXPECTED_ARGB_PATH="$EXPECTED_ARGB" ELECTRON_BITMAP_HTML_PATH="$HTML_PATH" ELECTRON_BITMAP_PROOF_PATH="$ELECTRON_PROOF" ELECTRON_BITMAP_CAPTURED_ARGB_PATH="$CAPTURED_ARGB" SIMPLE_ELECTRON_LIVE_BITMAP=1 \
+        "$ELECTRON_BIN" --force-device-scale-factor=1 --high-dpi-support=1 --force-color-profile=srgb --no-sandbox tools/electron-shell >"$ELECTRON_OUT" 2>&1 &
+fi
+electron_pid=$!
+elapsed=0
+while kill -0 "$electron_pid" >/dev/null 2>&1; do
+    if [ "$elapsed" -ge "$TIMEOUT_SECS" ]; then
+        kill "$electron_pid" >/dev/null 2>&1 || true
+        sleep 1
+        kill -9 "$electron_pid" >/dev/null 2>&1 || true
+        wait "$electron_pid" >/dev/null 2>&1 || true
+        electron_code=124
+        break
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+done
+if [ "$electron_code" -eq 0 ]; then
+    wait "$electron_pid"
+    electron_code=$?
+fi
+set -e
+
+if [ -f "$ELECTRON_PROOF" ]; then
+    set +e
+    node "$VALIDATOR" "$ELECTRON_PROOF" >"$VALIDATED_ENV"
+    validation_code=$?
+    set -e
+else
+    validation_code=1
+    {
+        echo "electron_generated_gui_web_validation_status=fail"
+        echo "electron_generated_gui_web_validation_reason=missing-electron-proof"
+        echo "electron_generated_gui_web_renderer="
+        echo "electron_generated_gui_web_proof_source="
+        echo "electron_generated_gui_web_proof_source_file_status="
+        echo "electron_generated_gui_web_proof_source_file_reason=not-run"
+        echo "electron_generated_gui_web_proof_source_artifact_status=fail"
+        echo "electron_generated_gui_web_proof_source_size_bytes="
+        echo "electron_generated_gui_web_proof_source_actual_size_bytes="
+        echo "electron_generated_gui_web_scene="
+        echo "electron_generated_gui_web_capture_backend="
+        echo "electron_generated_gui_web_compositor_mode="
+        echo "electron_generated_gui_web_browser_engine="
+        echo "electron_generated_gui_web_electron_user_agent="
+        echo "electron_generated_gui_web_electron_process_version="
+        echo "electron_generated_gui_web_chrome_process_version="
+        echo "electron_generated_gui_web_gpu_compositing="
+        echo "electron_generated_gui_web_gpu_rasterization="
+        echo "electron_generated_gui_web_simple_checksum=$simple_checksum"
+        echo "electron_generated_gui_web_electron_checksum="
+        echo "electron_generated_gui_web_simple_weighted_checksum=$simple_weighted"
+        echo "electron_generated_gui_web_electron_weighted_checksum="
+        echo "electron_generated_gui_web_mismatch_count="
+        echo "electron_generated_gui_web_blur_or_tolerance_used="
+        echo "electron_generated_gui_web_proof_iterations="
+        echo "electron_generated_gui_web_electron_frame_us="
+        echo "electron_generated_gui_web_estimated_fps_floor="
+        echo "electron_generated_gui_web_requested_width="
+        echo "electron_generated_gui_web_requested_height="
+        echo "electron_generated_gui_web_capture_native_width="
+        echo "electron_generated_gui_web_capture_native_height="
+        echo "electron_generated_gui_web_capture_downsampled="
+        echo "electron_generated_gui_web_captured_argb_path=$CAPTURED_ARGB"
+        echo "electron_generated_gui_web_captured_argb_written=false"
+        echo "electron_generated_gui_web_captured_argb_file_status=fail"
+        echo "electron_generated_gui_web_captured_argb_file_reason=not-run"
+        echo "electron_generated_gui_web_captured_argb_artifact_status=fail"
+        echo "electron_generated_gui_web_captured_argb_size_bytes="
+        echo "electron_generated_gui_web_captured_argb_format="
+        echo "electron_generated_gui_web_captured_argb_producer="
+        echo "electron_generated_gui_web_captured_argb_width="
+        echo "electron_generated_gui_web_captured_argb_height="
+        echo "electron_generated_gui_web_captured_argb_pixel_count=0"
+        echo "electron_generated_gui_web_captured_argb_nonzero_pixel_count=0"
+        echo "electron_generated_gui_web_captured_argb_checksum="
+        echo "electron_generated_gui_web_captured_argb_weighted_checksum="
+        echo "electron_generated_gui_web_text_normalization_pixels=0"
+    } >"$VALIDATED_ENV"
+fi
+cat "$VALIDATED_ENV"
+
+validation_status="$(field_of_env electron_generated_gui_web_validation_status "$VALIDATED_ENV")"
+validation_reason="$(field_of_env electron_generated_gui_web_validation_reason "$VALIDATED_ENV")"
+proof_renderer="$(field_of_env electron_generated_gui_web_renderer "$VALIDATED_ENV")"
+proof_source="$(field_of_env electron_generated_gui_web_proof_source "$VALIDATED_ENV")"
+proof_source_file_status="$(field_of_env electron_generated_gui_web_proof_source_file_status "$VALIDATED_ENV")"
+proof_source_file_reason="$(field_of_env electron_generated_gui_web_proof_source_file_reason "$VALIDATED_ENV")"
+if [ -z "$proof_source_file_reason" ]; then proof_source_file_reason="${proof_source_file_status:-not-run}"; fi
+proof_source_artifact_status="$(field_of_env electron_generated_gui_web_proof_source_artifact_status "$VALIDATED_ENV")"
+if [ -z "$proof_source_artifact_status" ]; then proof_source_artifact_status="$(artifact_status_from_file_status "$proof_source_file_status")"; fi
+proof_source_size_bytes="$(field_of_env electron_generated_gui_web_proof_source_size_bytes "$VALIDATED_ENV")"
+proof_source_actual_size_bytes="$(field_of_env electron_generated_gui_web_proof_source_actual_size_bytes "$VALIDATED_ENV")"
+proof_scene="$(field_of_env electron_generated_gui_web_scene "$VALIDATED_ENV")"
+capture_backend="$(field_of_env electron_generated_gui_web_capture_backend "$VALIDATED_ENV")"
+compositor_mode="$(field_of_env electron_generated_gui_web_compositor_mode "$VALIDATED_ENV")"
+browser_engine="$(field_of_env electron_generated_gui_web_browser_engine "$VALIDATED_ENV")"
+electron_user_agent="$(field_of_env electron_generated_gui_web_electron_user_agent "$VALIDATED_ENV")"
+electron_process_version="$(field_of_env electron_generated_gui_web_electron_process_version "$VALIDATED_ENV")"
+chrome_process_version="$(field_of_env electron_generated_gui_web_chrome_process_version "$VALIDATED_ENV")"
+gpu_compositing="$(field_of_env electron_generated_gui_web_gpu_compositing "$VALIDATED_ENV")"
+gpu_rasterization="$(field_of_env electron_generated_gui_web_gpu_rasterization "$VALIDATED_ENV")"
+electron_checksum="$(field_of_env electron_generated_gui_web_electron_checksum "$VALIDATED_ENV")"
+electron_weighted="$(field_of_env electron_generated_gui_web_electron_weighted_checksum "$VALIDATED_ENV")"
+mismatch_count="$(field_of_env electron_generated_gui_web_mismatch_count "$VALIDATED_ENV")"
+proof_iterations="$(field_of_env electron_generated_gui_web_proof_iterations "$VALIDATED_ENV")"
+electron_frame_us="$(field_of_env electron_generated_gui_web_electron_frame_us "$VALIDATED_ENV")"
+estimated_fps_floor="$(field_of_env electron_generated_gui_web_estimated_fps_floor "$VALIDATED_ENV")"
+requested_width="$(field_of_env electron_generated_gui_web_requested_width "$VALIDATED_ENV")"
+requested_height="$(field_of_env electron_generated_gui_web_requested_height "$VALIDATED_ENV")"
+capture_native_width="$(field_of_env electron_generated_gui_web_capture_native_width "$VALIDATED_ENV")"
+capture_native_height="$(field_of_env electron_generated_gui_web_capture_native_height "$VALIDATED_ENV")"
+capture_downsampled="$(field_of_env electron_generated_gui_web_capture_downsampled "$VALIDATED_ENV")"
+captured_argb_path="$(field_of_env electron_generated_gui_web_captured_argb_path "$VALIDATED_ENV")"
+captured_argb_written="$(field_of_env electron_generated_gui_web_captured_argb_written "$VALIDATED_ENV")"
+captured_argb_file_status="$(field_of_env electron_generated_gui_web_captured_argb_file_status "$VALIDATED_ENV")"
+captured_argb_file_reason="$(field_of_env electron_generated_gui_web_captured_argb_file_reason "$VALIDATED_ENV")"
+if [ -z "$captured_argb_file_reason" ]; then captured_argb_file_reason="${captured_argb_file_status:-not-run}"; fi
+captured_argb_artifact_status="$(field_of_env electron_generated_gui_web_captured_argb_artifact_status "$VALIDATED_ENV")"
+if [ -z "$captured_argb_artifact_status" ]; then captured_argb_artifact_status="$(artifact_status_from_file_status "$captured_argb_file_status")"; fi
+proof_symlink_status="$(field_of_env electron_generated_gui_web_proof_symlink_status "$VALIDATED_ENV")"
+proof_hardlink_status="$(field_of_env electron_generated_gui_web_proof_hardlink_status "$VALIDATED_ENV")"
+captured_argb_symlink_status="$(field_of_env electron_generated_gui_web_captured_argb_symlink_status "$VALIDATED_ENV")"
+captured_argb_hardlink_status="$(field_of_env electron_generated_gui_web_captured_argb_hardlink_status "$VALIDATED_ENV")"
+captured_argb_size_bytes="$(field_of_env electron_generated_gui_web_captured_argb_size_bytes "$VALIDATED_ENV")"
+captured_argb_format="$(field_of_env electron_generated_gui_web_captured_argb_format "$VALIDATED_ENV")"
+captured_argb_producer="$(field_of_env electron_generated_gui_web_captured_argb_producer "$VALIDATED_ENV")"
+captured_argb_width="$(field_of_env electron_generated_gui_web_captured_argb_width "$VALIDATED_ENV")"
+captured_argb_height="$(field_of_env electron_generated_gui_web_captured_argb_height "$VALIDATED_ENV")"
+captured_argb_pixel_count="$(field_of_env electron_generated_gui_web_captured_argb_pixel_count "$VALIDATED_ENV")"
+captured_argb_nonzero_pixel_count="$(field_of_env electron_generated_gui_web_captured_argb_nonzero_pixel_count "$VALIDATED_ENV")"
+captured_argb_checksum="$(field_of_env electron_generated_gui_web_captured_argb_checksum "$VALIDATED_ENV")"
+captured_argb_weighted_checksum="$(field_of_env electron_generated_gui_web_captured_argb_weighted_checksum "$VALIDATED_ENV")"
+generated_gui_text_normalization_pixels="$(field_of_env electron_generated_gui_web_text_normalization_pixels "$VALIDATED_ENV")"
+blur_used="$(field_of_env electron_generated_gui_web_blur_or_tolerance_used "$VALIDATED_ENV")"
+
+RESIDUAL_ENV="$BUILD_DIR/residual.env"
+if [ -s "$EXPECTED_ARGB" ] && [ -s "$CAPTURED_ARGB" ]; then
+    node - "$EXPECTED_ARGB" "$CAPTURED_ARGB" >"$RESIDUAL_ENV" <<'NODE'
+const fs = require("fs");
+const simple = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const electron = JSON.parse(fs.readFileSync(process.argv[3], "utf8"));
+const sp = Array.isArray(simple.pixels) ? simple.pixels : [];
+const ep = Array.isArray(electron.pixels) ? electron.pixels : [];
+const surfaces = new Set([
+  0xfff5f5f5, 0xffcbd5e1, 0xff0066cc, 0xff2563eb,
+  0xff64748b, 0xfff59e0b, 0xff22c55e
+]);
+const simpleText = new Set([0xff141418, 0xff0f172a]);
+let missingAntialias = 0;
+let simpleTextOverpaint = 0;
+let other = 0;
+const n = Math.min(sp.length, ep.length);
+for (let i = 0; i < n; i += 1) {
+  const sv = Number(sp[i]) >>> 0;
+  const ev = Number(ep[i]) >>> 0;
+  if (sv === ev) continue;
+  if (surfaces.has(sv) && !surfaces.has(ev)) missingAntialias += 1;
+  else if (simpleText.has(sv)) simpleTextOverpaint += 1;
+  else other += 1;
+}
+if (sp.length !== ep.length) other += Math.abs(sp.length - ep.length);
+console.log(`electron_generated_gui_web_missing_antialias_pixels=${missingAntialias}`);
+console.log(`electron_generated_gui_web_simple_text_overpaint_pixels=${simpleTextOverpaint}`);
+console.log(`electron_generated_gui_web_other_mismatch_pixels=${other}`);
+NODE
+else
+    {
+        echo "electron_generated_gui_web_missing_antialias_pixels="
+        echo "electron_generated_gui_web_simple_text_overpaint_pixels="
+        echo "electron_generated_gui_web_other_mismatch_pixels="
+    } >"$RESIDUAL_ENV"
+fi
+missing_antialias_pixels="$(field_of electron_generated_gui_web_missing_antialias_pixels "$RESIDUAL_ENV")"
+simple_text_overpaint_pixels="$(field_of electron_generated_gui_web_simple_text_overpaint_pixels "$RESIDUAL_ENV")"
+other_mismatch_pixels="$(field_of electron_generated_gui_web_other_mismatch_pixels "$RESIDUAL_ENV")"
+
+status=pass
+reason=pass
+watchdog_teardown=false
+if [ "$electron_code" -ne 0 ] && [ ! -f "$ELECTRON_PROOF" ]; then
+    status=unavailable
+    reason=electron-live-capture-failed
+elif [ "$validation_code" -ne 0 ] || [ "$validation_status" != "pass" ]; then
+    case "$validation_reason" in
+        checksum-mismatch|weighted-checksum-mismatch|pixel-mismatch|captured-argb-checksum-mismatch|captured-argb-weighted-checksum-mismatch)
+            status=divergent
+            ;;
+        *)
+            status=fail
+            ;;
+    esac
+    reason="${validation_reason:-electron-proof-validation-failed}"
+elif [ "$proof_source_file_status" != "pass" ] || [ "$proof_source_artifact_status" != "pass" ] || ! num_at_least "$proof_source_size_bytes" 1; then
+    status=fail
+    reason=proof-source-file-status-not-pass
+elif ! num_at_least "$proof_source_actual_size_bytes" 1 || [ "$proof_source_actual_size_bytes" != "$proof_source_size_bytes" ]; then
+    status=fail
+    reason=proof-source-size-mismatch
+elif [ ! -s "$CAPTURED_ARGB" ]; then
+    status=fail
+    reason=missing-captured-argb-file
+elif [ "$captured_argb_file_status" != "pass" ] || [ "$captured_argb_artifact_status" != "pass" ]; then
+    status=fail
+    reason=captured-argb-file-status-not-pass
+elif [ "$electron_code" -ne 0 ]; then
+    watchdog_teardown=true
+fi
+
+{
+    echo "electron_generated_gui_web_status=$status"
+    echo "electron_generated_gui_web_reason=$reason"
+    echo "electron_generated_gui_web_scene=$SCENE"
+    echo "electron_generated_gui_web_proof_renderer=${proof_renderer:-}"
+    echo "electron_generated_gui_web_proof_source=${proof_source:-}"
+    echo "electron_generated_gui_web_proof_source_file_status=${proof_source_file_status:-}"
+    echo "electron_generated_gui_web_proof_source_file_reason=${proof_source_file_reason:-}"
+    echo "electron_generated_gui_web_proof_source_artifact_status=${proof_source_artifact_status:-}"
+    echo "electron_generated_gui_web_proof_source_size_bytes=${proof_source_size_bytes:-}"
+    echo "electron_generated_gui_web_proof_source_actual_size_bytes=${proof_source_actual_size_bytes:-}"
+    echo "electron_generated_gui_web_proof_scene=${proof_scene:-}"
+    echo "electron_generated_gui_web_capture_backend=${capture_backend:-}"
+    echo "electron_generated_gui_web_compositor_mode=${compositor_mode:-}"
+    echo "electron_generated_gui_web_browser_engine=${browser_engine:-}"
+    echo "electron_generated_gui_web_electron_user_agent=${electron_user_agent:-}"
+    echo "electron_generated_gui_web_electron_process_version=${electron_process_version:-}"
+    echo "electron_generated_gui_web_chrome_process_version=${chrome_process_version:-}"
+    echo "electron_generated_gui_web_gpu_compositing=${gpu_compositing:-}"
+    echo "electron_generated_gui_web_gpu_rasterization=${gpu_rasterization:-}"
+    echo "electron_generated_gui_web_simple_bin=$SIMPLE_BIN"
+    echo "electron_generated_gui_web_simple_bin_source=$SIMPLE_BIN_SOURCE"
+    echo "electron_generated_gui_web_simple_bin_status=$SIMPLE_BIN_STATUS"
+    echo "electron_generated_gui_web_width=$WIDTH"
+    echo "electron_generated_gui_web_height=$HEIGHT"
+    echo "electron_generated_gui_web_iterations=$ITERATIONS"
+    echo "electron_generated_gui_web_html_has_style=${html_has_style:-}"
+    echo "electron_generated_gui_web_html_has_app_shell=${html_has_app_shell:-}"
+    echo "electron_generated_gui_web_distinct_simple_colors=${distinct_colors:-}"
+    echo "electron_generated_gui_web_validation_status=${validation_status:-}"
+    echo "electron_generated_gui_web_validation_reason=${validation_reason:-}"
+    echo "electron_generated_gui_web_simple_checksum=$simple_checksum"
+    echo "electron_generated_gui_web_electron_checksum=${electron_checksum:-0}"
+    echo "electron_generated_gui_web_simple_weighted_checksum=$simple_weighted"
+    echo "electron_generated_gui_web_electron_weighted_checksum=${electron_weighted:-0}"
+    echo "electron_generated_gui_web_mismatch_count=${mismatch_count:-}"
+    echo "electron_generated_gui_web_missing_antialias_pixels=${missing_antialias_pixels:-}"
+    echo "electron_generated_gui_web_simple_text_overpaint_pixels=${simple_text_overpaint_pixels:-}"
+    echo "electron_generated_gui_web_other_mismatch_pixels=${other_mismatch_pixels:-}"
+    echo "electron_generated_gui_web_blur_or_tolerance_used=${blur_used:-}"
+    echo "electron_generated_gui_web_proof_iterations=${proof_iterations:-}"
+    echo "electron_generated_gui_web_electron_frame_us=${electron_frame_us:-0}"
+    echo "electron_generated_gui_web_estimated_fps_floor=${estimated_fps_floor:-}"
+    echo "electron_generated_gui_web_requested_width=${requested_width:-}"
+    echo "electron_generated_gui_web_requested_height=${requested_height:-}"
+    echo "electron_generated_gui_web_capture_native_width=${capture_native_width:-}"
+    echo "electron_generated_gui_web_capture_native_height=${capture_native_height:-}"
+    echo "electron_generated_gui_web_capture_downsampled=${capture_downsampled:-}"
+    echo "electron_generated_gui_web_watchdog_teardown=$watchdog_teardown"
+    echo "electron_generated_gui_web_text_normalization_pixels=${generated_gui_text_normalization_pixels:-0}"
+    echo "electron_generated_gui_web_html_path=$HTML_PATH"
+    echo "electron_generated_gui_web_expected_argb_path=$EXPECTED_ARGB"
+    echo "electron_generated_gui_web_captured_argb_path=${captured_argb_path:-$CAPTURED_ARGB}"
+    echo "electron_generated_gui_web_captured_argb_written=${captured_argb_written:-}"
+    echo "electron_generated_gui_web_proof_symlink_status=${proof_symlink_status:-}"
+    echo "electron_generated_gui_web_proof_hardlink_status=${proof_hardlink_status:-}"
+    echo "electron_generated_gui_web_captured_argb_file_status=${captured_argb_file_status:-}"
+    echo "electron_generated_gui_web_captured_argb_file_reason=${captured_argb_file_reason:-}"
+    echo "electron_generated_gui_web_captured_argb_artifact_status=${captured_argb_artifact_status:-}"
+    echo "electron_generated_gui_web_captured_argb_symlink_status=${captured_argb_symlink_status:-}"
+    echo "electron_generated_gui_web_captured_argb_hardlink_status=${captured_argb_hardlink_status:-}"
+    echo "electron_generated_gui_web_captured_argb_size_bytes=${captured_argb_size_bytes:-}"
+    echo "electron_generated_gui_web_captured_argb_format=${captured_argb_format:-}"
+    echo "electron_generated_gui_web_captured_argb_producer=${captured_argb_producer:-}"
+    echo "electron_generated_gui_web_captured_argb_width=${captured_argb_width:-}"
+    echo "electron_generated_gui_web_captured_argb_height=${captured_argb_height:-}"
+    echo "electron_generated_gui_web_captured_argb_pixel_count=${captured_argb_pixel_count:-}"
+    echo "electron_generated_gui_web_captured_argb_nonzero_pixel_count=${captured_argb_nonzero_pixel_count:-}"
+    echo "electron_generated_gui_web_captured_argb_checksum=${captured_argb_checksum:-}"
+    echo "electron_generated_gui_web_captured_argb_weighted_checksum=${captured_argb_weighted_checksum:-}"
+    echo "electron_generated_gui_web_exit_code=$electron_code"
+} >"$BUILD_DIR/evidence.env"
+
+{
+    echo "# Electron Generated GUI Web Parity Evidence"
+    echo
+    echo "- status: $status"
+    echo "- reason: $reason"
+    echo "- scene: $SCENE"
+    echo "- proof renderer: ${proof_renderer:-}"
+    echo "- proof source: ${proof_source:-}"
+    echo "- proof source file status: ${proof_source_file_status:-}"
+    echo "- proof source file reason: ${proof_source_file_reason:-}"
+    echo "- proof source artifact status: ${proof_source_artifact_status:-}"
+    echo "- proof source artifact: ${proof_source_file_status:-} / ${proof_source_file_reason:-} / ${proof_source_artifact_status:-}"
+    echo "- proof source size bytes: ${proof_source_size_bytes:-}"
+    echo "- proof source actual size bytes: ${proof_source_actual_size_bytes:-}"
+    echo "- proof scene: ${proof_scene:-}"
+    echo "- capture backend: ${capture_backend:-}"
+    echo "- compositor mode: ${compositor_mode:-}"
+    echo "- browser engine: ${browser_engine:-}"
+    echo "- Electron user agent: ${electron_user_agent:-}"
+    echo "- Electron process version: ${electron_process_version:-}"
+    echo "- Chrome process version: ${chrome_process_version:-}"
+    echo "- GPU compositing: ${gpu_compositing:-}"
+    echo "- GPU rasterization: ${gpu_rasterization:-}"
+    echo "- dimensions: ${WIDTH}x${HEIGHT}"
+    echo "- generated HTML has style: ${html_has_style:-}"
+    echo "- generated HTML has app shell: ${html_has_app_shell:-}"
+    echo "- Simple distinct colors: ${distinct_colors:-}"
+    echo "- mismatch count: ${mismatch_count:-}"
+    echo "- missing antialias pixels: ${missing_antialias_pixels:-}"
+    echo "- Simple text overpaint pixels: ${simple_text_overpaint_pixels:-}"
+    echo "- other mismatch pixels: ${other_mismatch_pixels:-}"
+    echo "- blur/tolerance used: ${blur_used:-}"
+    echo "- proof iterations: ${proof_iterations:-}"
+    echo "- Electron frame us: ${electron_frame_us:-0}"
+    echo "- estimated FPS floor: ${estimated_fps_floor:-}"
+    echo "- capture native dimensions: ${capture_native_width:-}x${capture_native_height:-}"
+    echo "- capture downsampled: ${capture_downsampled:-}"
+    echo "- watchdog teardown: $watchdog_teardown"
+    echo "- text normalization pixels: ${generated_gui_text_normalization_pixels:-0}"
+    echo "- generated HTML path: $HTML_PATH"
+    echo "- Simple expected ARGB path: $EXPECTED_ARGB"
+    echo "- Electron captured ARGB path: ${captured_argb_path:-$CAPTURED_ARGB}"
+    echo "- Electron captured ARGB file status: ${captured_argb_file_status:-}"
+    echo "- Electron captured ARGB file reason: ${captured_argb_file_reason:-}"
+    echo "- Electron captured ARGB artifact status: ${captured_argb_artifact_status:-}"
+    echo "- Electron captured ARGB artifact: ${captured_argb_file_status:-} / ${captured_argb_file_reason:-} / ${captured_argb_artifact_status:-}"
+    echo "- Electron captured ARGB size bytes: ${captured_argb_size_bytes:-}"
+    echo "- Electron captured ARGB format: ${captured_argb_format:-}"
+    echo "- Electron captured ARGB producer: ${captured_argb_producer:-}"
+    echo "- Electron captured ARGB dimensions: ${captured_argb_width:-}x${captured_argb_height:-}"
+    echo "- Electron captured ARGB pixels: ${captured_argb_pixel_count:-} nonzero=${captured_argb_nonzero_pixel_count:-}"
+    echo
+    echo "## Raw Evidence"
+    sed 's/^/- /' "$BUILD_DIR/evidence.env"
+} >"$REPORT_PATH"
+
+cat "$BUILD_DIR/evidence.env"
+[ "$status" = "pass" ]

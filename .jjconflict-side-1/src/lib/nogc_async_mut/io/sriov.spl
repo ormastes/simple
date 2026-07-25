@@ -1,0 +1,85 @@
+"""
+# SR-IOV Capability Hooks
+
+Pure Simple model for discovering SR-IOV-capable physical functions and
+assigning virtual functions only when an isolation domain is present. Hardware
+enumeration code can populate these records from PCI config space; portable
+CI uses empty records and therefore stays disabled.
+"""
+
+val PCI_CAP_ID_SRIOV: u16 = 0x10
+
+struct SriovCapabilityRecord:
+    """One PCI capability record relevant to SR-IOV discovery."""
+    bdf_bus: u8
+    bdf_device: u8
+    bdf_function: u8
+    capability_id: u16
+    total_vfs: u16
+    first_vf_offset: u16
+    vf_stride: u16
+    iommu_domain_id: u32
+
+struct SriovPhysicalFunction:
+    """Discovered SR-IOV-capable physical function."""
+    bdf_bus: u8
+    bdf_device: u8
+    bdf_function: u8
+    total_vfs: u16
+    iommu_domain_id: u32
+
+struct SriovVfAssignment:
+    """Opt-in assignment result for one virtual function."""
+    assigned: bool
+    isolated: bool
+    pf_bus: u8
+    pf_device: u8
+    pf_function: u8
+    vf_index: u16
+    iommu_domain_id: u32
+    error: text
+
+fn sriov_scan_physical_functions(records: [SriovCapabilityRecord]) -> [SriovPhysicalFunction]:
+    """Return physical functions with a valid SR-IOV capability."""
+    var found: [SriovPhysicalFunction] = []
+    for rec in records:
+        if rec.capability_id == PCI_CAP_ID_SRIOV and rec.total_vfs > 0:
+            found.push(SriovPhysicalFunction(
+                bdf_bus: rec.bdf_bus,
+                bdf_device: rec.bdf_device,
+                bdf_function: rec.bdf_function,
+                total_vfs: rec.total_vfs,
+                iommu_domain_id: rec.iommu_domain_id
+            ))
+    found
+
+fn sriov_assign_vf(pf: SriovPhysicalFunction, vf_index: u16, opt_in: bool) -> SriovVfAssignment:
+    """Assign a VF only when explicitly requested and isolated."""
+    if not opt_in:
+        return sriov_assignment_error(pf, vf_index, "sriov assignment requires opt-in")
+    if vf_index >= pf.total_vfs:
+        return sriov_assignment_error(pf, vf_index, "vf index out of range")
+    if pf.iommu_domain_id == 0u32:
+        return sriov_assignment_error(pf, vf_index, "sriov assignment requires iommu isolation")
+    SriovVfAssignment(
+        assigned: true,
+        isolated: true,
+        pf_bus: pf.bdf_bus,
+        pf_device: pf.bdf_device,
+        pf_function: pf.bdf_function,
+        vf_index: vf_index,
+        iommu_domain_id: pf.iommu_domain_id,
+        error: ""
+    )
+
+fn sriov_assignment_error(pf: SriovPhysicalFunction, vf_index: u16, error: text) -> SriovVfAssignment:
+    SriovVfAssignment(
+        assigned: false,
+        isolated: false,
+        pf_bus: pf.bdf_bus,
+        pf_device: pf.bdf_device,
+        pf_function: pf.bdf_function,
+        vf_index: vf_index,
+        iommu_domain_id: pf.iommu_domain_id,
+        error: error
+    )

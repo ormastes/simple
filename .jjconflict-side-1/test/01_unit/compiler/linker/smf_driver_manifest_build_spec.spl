@@ -1,0 +1,49 @@
+use compiler.driver.smf_writer.{SmfBuildOptions, Target, generate_smf_with_options}
+
+fn le_u32(bytes: [u8], offset: i64) -> i64:
+    (bytes[offset] as i64) |
+    ((bytes[offset + 1] as i64) << 8) |
+    ((bytes[offset + 2] as i64) << 16) |
+    ((bytes[offset + 3] as i64) << 24)
+
+fn le_u64(bytes: [u8], offset: i64) -> i64:
+    (bytes[offset] as i64) |
+    ((bytes[offset + 1] as i64) << 8) |
+    ((bytes[offset + 2] as i64) << 16) |
+    ((bytes[offset + 3] as i64) << 24) |
+    ((bytes[offset + 4] as i64) << 32) |
+    ((bytes[offset + 5] as i64) << 40) |
+    ((bytes[offset + 6] as i64) << 48) |
+    ((bytes[offset + 7] as i64) << 56)
+
+fn find_byte(bytes: [u8], value: u8) -> i64:
+    var i: i64 = 0
+    while i < bytes.len():
+        if bytes[i] == value:
+            return i
+        i = i + 1
+    -1
+
+describe "SMF driver manifest build":
+    it "emits a .drv_manifest section when build options carry DRVS bytes":
+        var opts = SmfBuildOptions.create(Target.x86_64_unknown_linux_gnu())
+        opts.driver_manifest_bytes = [
+            0x53, 0x56, 0x52, 0x44,  # DRVS little endian
+            0, 0, 1, 0,              # kind, class, abi_rev
+            0, 0, 0, 0,              # vendor
+            0, 0, 0, 0               # device_count
+        ]
+
+        val smf = generate_smf_with_options([0xC3], opts)
+        val header = smf.len() - 128
+        val section_count = le_u32(smf, header + 16)
+        val section_table = le_u64(smf, header + 20)
+
+        expect(section_count).to_equal(2)
+        expect(find_byte(smf, 14)).to_be_greater_than(0)
+        expect(smf[section_table + 64]).to_equal(14)
+
+        val drv_offset = le_u64(smf, section_table + 64 + 8)
+        val drv_size = le_u64(smf, section_table + 64 + 16)
+        expect(drv_size).to_equal(16)
+        expect(le_u32(smf, drv_offset)).to_equal(0x44525653)

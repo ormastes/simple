@@ -1,0 +1,61 @@
+"""
+# Claude Full Agent File Utils
+
+Checks agent metadata filename derivation, safe paths, parsing, formatting,
+empty/error behavior, and source parity helpers.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.components.agents.agentFileUtils.*
+
+describe "Claude full agentFileUtils":
+    it "validates names, models, filenames, and safe paths":
+        step("Validate accepted and rejected names")
+        expect(isValidAgentName("review-bot")).to_equal(true)
+        expect(isValidAgentName("Review Bot")).to_equal(false)
+        expect(isValidAgentName("../review")).to_equal(false)
+        expect(isValidAgentModel("claude-sonnet-4")).to_equal(true)
+        expect(isValidAgentModel("../model")).to_equal(false)
+
+        step("Derive slugs and metadata paths")
+        expect(slugifyAgentName("Review Bot_v2")).to_equal("review-bot-v2")
+        expect(deriveAgentMetadataFilename("Review Bot_v2")).to_equal("review-bot-v2.md")
+        expect(agentMetadataPath("/repo/.claude/agents/", "Review Bot")).to_equal("/repo/.claude/agents/review-bot.md")
+
+        step("Reject traversal and non-markdown paths")
+        expect(isSafeAgentFilePath("/repo/.claude/agents", "/repo/.claude/agents/review-bot.md")).to_equal(true)
+        expect(isSafeAgentFilePath("/repo/.claude/agents", "/repo/.claude/agents/../secrets.md")).to_equal(false)
+        expect(isSafeAgentFilePath("/repo/.claude/agents", "/repo/.claude/agents/review-bot.txt")).to_equal(false)
+
+    it "parses and formats agent markdown":
+        step("Parse frontmatter and body")
+        val parsed = parseAgentFile("/repo/.claude/agents/review-bot.md", "---\nname: review-bot\ndescription: Reviews changes\nmodel: claude-sonnet-4\n---\nUse concise review notes.\n")
+        expect(parsed.ok).to_equal(true)
+        expect(parsed.metadata.name).to_equal("review-bot")
+        expect(parsed.metadata.description).to_equal("Reviews changes")
+        expect(parsed.metadata.model).to_equal("claude-sonnet-4")
+        expect(parsed.body).to_equal("Use concise review notes.")
+
+        step("Format metadata back to markdown")
+        val formatted = formatAgentFile(parsed.metadata, parsed.body)
+        expect(formatted).to_contain("name: review-bot")
+        expect(formatted).to_contain("description: Reviews changes")
+        expect(formatted).to_contain("model: claude-sonnet-4")
+        expect(formatted).to_end_with("Use concise review notes.\n")
+
+    it "returns errors for empty and malformed files":
+        step("Reject empty content")
+        val empty = parseAgentFile("/repo/.claude/agents/review-bot.md", "")
+        expect(empty.ok).to_equal(false)
+        expect(empty.error).to_equal("agent file is empty")
+
+        step("Reject unclosed frontmatter")
+        val malformed = parseAgentFile("/repo/.claude/agents/review-bot.md", "---\nname: review-bot\n")
+        expect(malformed.ok).to_equal(false)
+        expect(malformed.error).to_equal("frontmatter is not closed")
+
+    it "exports source parity helpers":
+        step("Check source helper output")
+        expect(agentFileSourceHelper("Review Bot")).to_equal("agentFileUtils:review-bot.md")
+        expect(agentFileUtilsSourceHelpersModeled()).to_equal("validation,slug,filename,path,parse,format,source")
+        expect(agentFileUtilsSourceLinesModeled()).to_be_greater_than(271)

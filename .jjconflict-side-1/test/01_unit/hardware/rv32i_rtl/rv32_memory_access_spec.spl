@@ -1,0 +1,114 @@
+use std.spec.*
+use std.hardware.rv32i_rtl.mmu_sv32.{mmu_create, mmu_set_satp}
+use std.hardware.rv32i_rtl.mmu_sv32.{ACCESS_FETCH, ACCESS_LOAD, ACCESS_STORE}
+use std.hardware.rv32i_rtl.mmu_sv32.{PRIV_S, PRIV_M}
+use std.hardware.rv32i_rtl.memory_access.{memory32_start, memory32_cycle}
+use std.hardware.rv32i_rtl.pmp_csr.pmp32_entries_reset
+
+fn pmp32_allow_all():
+    var pmp = pmp32_entries_reset()
+    pmp.cfg_0 = 0x1F
+    pmp.addr_0 = 0xFFFFFFFF
+    pmp
+
+describe "RV32 translated and protected memory frontend":
+    it "issues and completes a Bare M-mode instruction fetch":
+        val mmu = mmu_create()
+        val pmp = pmp32_entries_reset()
+        val state = memory32_start(mmu, pmp, 0x1000, ACCESS_FETCH, 4, PRIV_M, false, false, 0)
+        val request = memory32_cycle(state, mmu, pmp, false, false, false, 0)
+        expect(request.bus_valid).to_be(true)
+        expect(request.bus_addr).to_equal(0x1000)
+        expect(request.bus_size).to_equal(4)
+        expect(request.bus_write).to_be(false)
+        expect(request.bus_is_pte).to_be(false)
+        val done = memory32_cycle(request.state, request.mmu, pmp, true, true, false, 0x00000013)
+        expect(done.done).to_be(true)
+        expect(done.fault).to_be(false)
+        expect(done.read_data).to_equal(0x00000013)
+
+    it "suppresses a Bare S-mode load denied by final PMP":
+        val mmu = mmu_create()
+        val pmp = pmp32_entries_reset()
+        val state = memory32_start(mmu, pmp, 0x2000, ACCESS_LOAD, 4, PRIV_S, false, false, 0)
+        val denied = memory32_cycle(state, mmu, pmp, false, false, false, 0)
+        expect(denied.bus_valid).to_be(false)
+        expect(denied.done).to_be(true)
+        expect(denied.fault).to_be(true)
+        expect(denied.fault_cause).to_equal(5)
+        expect(denied.fault_tval).to_equal(0x2000)
+
+    it "suppresses a PMP-denied PTE read with the originating load tval":
+        val mmu = mmu_set_satp(mmu_create(), 0x80000100)
+        val pmp = pmp32_entries_reset()
+        val state = memory32_start(mmu, pmp, 0x00401000, ACCESS_LOAD, 4, PRIV_S, false, false, 0)
+        val denied = memory32_cycle(state, mmu, pmp, false, false, false, 0)
+        expect(denied.bus_valid).to_be(false)
+        expect(denied.done).to_be(true)
+        expect(denied.fault).to_be(true)
+        expect(denied.fault_cause).to_equal(5)
+        expect(denied.fault_tval).to_equal(0x00401000)
+
+    it "returns the Sv32 page fault without issuing a physical request":
+        val mmu = mmu_set_satp(mmu_create(), 0x80000100)
+        val pmp = pmp32_allow_all()
+        val state = memory32_start(mmu, pmp, 0x00401000, ACCESS_LOAD, 4, PRIV_S, false, false, 0)
+        val pte_request = memory32_cycle(state, mmu, pmp, true, false, false, 0)
+        expect(pte_request.bus_valid).to_be(true)
+        expect(pte_request.bus_is_pte).to_be(true)
+        expect(pte_request.bus_size).to_equal(4)
+        val page_fault = memory32_cycle(pte_request.state, pte_request.mmu, pmp, false, true, false, 0)
+        expect(page_fault.bus_valid).to_be(false)
+        expect(page_fault.done).to_be(true)
+        expect(page_fault.fault).to_be(true)
+        expect(page_fault.fault_cause).to_equal(13)
+        expect(page_fault.fault_tval).to_equal(0x00401000)
+
+    it "walks Sv32 then issues only the PMP-approved physical load":
+        val mmu = mmu_set_satp(mmu_create(), 0x80000100)
+        val pmp = pmp32_allow_all()
+        val state = memory32_start(mmu, pmp, 0x00401000, ACCESS_LOAD, 4, PRIV_S, false, false, 0)
+        val root_request = memory32_cycle(state, mmu, pmp, true, false, false, 0)
+        expect(root_request.bus_valid).to_be(true)
+        expect(root_request.bus_is_pte).to_be(true)
+        val after_root = memory32_cycle(root_request.state, root_request.mmu, pmp, false, true, false, 0x00080001)
+        expect(after_root.bus_valid).to_be(false)
+        val leaf_request = memory32_cycle(after_root.state, after_root.mmu, pmp, true, false, false, 0)
+        expect(leaf_request.bus_valid).to_be(true)
+        expect(leaf_request.bus_is_pte).to_be(true)
+        val after_leaf = memory32_cycle(leaf_request.state, leaf_request.mmu, pmp, false, true, false, 0x00020043)
+        expect(after_leaf.bus_valid).to_be(false)
+        val physical = memory32_cycle(after_leaf.state, after_leaf.mmu, pmp, false, false, false, 0)
+        expect(physical.bus_valid).to_be(true)
+        expect(physical.bus_is_pte).to_be(false)
+        expect(physical.bus_addr).to_equal(0x00080000)
+        expect(physical.bus_size).to_equal(4)
+
+    it "keeps a 34-bit translated physical address through the final PMP gate":
+        val mmu = mmu_set_satp(mmu_create(), 0x80000100)
+        val pmp = pmp32_allow_all()
+        val state = memory32_start(mmu, pmp, 0xFFFFFFFC, ACCESS_LOAD, 4, PRIV_S, false, false, 0)
+        val root_request = memory32_cycle(state, mmu, pmp, true, false, false, 0)
+        expect(root_request.bus_valid).to_be(true)
+        expect(root_request.bus_addr).to_equal(0x00100FFC)
+        val after_root = memory32_cycle(root_request.state, root_request.mmu, pmp, false, true, false, 0x00040401)
+        val leaf_request = memory32_cycle(after_root.state, after_root.mmu, pmp, true, false, false, 0)
+        expect(leaf_request.bus_valid).to_be(true)
+        expect(leaf_request.bus_addr).to_equal(0x00101FFC)
+        val after_leaf = memory32_cycle(leaf_request.state, leaf_request.mmu, pmp, false, true, false, 0xFFFFFCC3)
+        val physical = memory32_cycle(after_leaf.state, after_leaf.mmu, pmp, false, false, false, 0)
+        expect(physical.bus_valid).to_be(true)
+        expect(physical.bus_is_pte).to_be(false)
+        expect(physical.bus_addr).to_equal(0x3FFFFFFFC)
+        expect(physical.bus_size).to_equal(4)
+
+    it "raises a precise misaligned store before translation or bus issue":
+        val mmu = mmu_create()
+        val pmp = pmp32_allow_all()
+        val state = memory32_start(mmu, pmp, 0x1002, ACCESS_STORE, 4, PRIV_M, false, false, 0x55)
+        val fault = memory32_cycle(state, mmu, pmp, false, false, false, 0)
+        expect(fault.bus_valid).to_be(false)
+        expect(fault.done).to_be(true)
+        expect(fault.fault).to_be(true)
+        expect(fault.fault_cause).to_equal(6)
+        expect(fault.fault_tval).to_equal(0x1002)

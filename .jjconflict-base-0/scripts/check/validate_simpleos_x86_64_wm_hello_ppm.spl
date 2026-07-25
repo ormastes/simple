@@ -1,0 +1,233 @@
+# Validate the Hello app window lifecycle in x86_64 SimpleOS WM screendumps.
+#
+# Parses a P6 PPM captured over QMP from the glass WM desktop and asserts
+# concrete pixel evidence for the Hello window (window 3) region at its
+# boot-time geometry WIN3 = (700, 80) 300x200 (title bar 44px):
+#
+#   HELLO_MODE=open   — the Hello window is present: title-bar "Hello" text
+#                       ink, body "Hello, SimpleOS!" vector-text ink, and the
+#                       rose close-button dot must all be measurable.
+#   HELLO_MODE=closed — the Hello window is gone: the same regions must carry
+#                       no bright text ink and no rose button ink, and (when
+#                       HELLO_PPM_PREV points at the open shot) a large pixel
+#                       delta across the region proves the recomposite.
+#
+# Real counts are printed so the evidence is inspectable, not asserted blind.
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_file_read_bytes(path: text) -> [u8]?
+
+# Hello window geometry (must match wm_entry.spl WIN3_* + TITLE_BAR_H)
+val HX: i64 = 700
+val HY: i64 = 80
+val HW: i64 = 300
+val HH: i64 = 200
+val TITLE_H: i64 = 44
+
+struct PpmHeader:
+    magic: i64
+    width: i64
+    height: i64
+    max_value: i64
+    data_offset: i64
+    ok: bool
+
+struct NumParse:
+    value: i64
+    next: i64
+    ok: bool
+
+fn byte_at(data: [u8], idx: i64) -> i64:
+    if idx < 0 or idx >= data.len():
+        return 0
+    data[idx] as i64
+
+fn is_ws(b: i64) -> bool:
+    b == 32 or b == 9 or b == 10 or b == 13
+
+fn is_digit(b: i64) -> bool:
+    b >= 48 and b <= 57
+
+fn skip_ws_comments(data: [u8], pos: i64) -> i64:
+    var i = pos
+    var again = true
+    while again:
+        again = false
+        while i < data.len() and is_ws(byte_at(data, i)):
+            i = i + 1
+        if i < data.len() and byte_at(data, i) == 35:
+            while i < data.len() and byte_at(data, i) != 10 and byte_at(data, i) != 13:
+                i = i + 1
+            again = true
+    i
+
+fn parse_num(data: [u8], pos: i64) -> NumParse:
+    var i = skip_ws_comments(data, pos)
+    if i >= data.len() or not is_digit(byte_at(data, i)):
+        return NumParse(value: 0, next: i, ok: false)
+    var value: i64 = 0
+    while i < data.len() and is_digit(byte_at(data, i)):
+        value = (value * 10) + (byte_at(data, i) - 48)
+        i = i + 1
+    NumParse(value: value, next: i, ok: true)
+
+fn parse_header(data: [u8]) -> PpmHeader:
+    var pos = skip_ws_comments(data, 0)
+    if pos + 1 >= data.len() or byte_at(data, pos) != 80:
+        return PpmHeader(magic: 0, width: 0, height: 0, max_value: 0, data_offset: 0, ok: false)
+    val magic = byte_at(data, pos + 1)
+    if magic != 54:
+        return PpmHeader(magic: magic, width: 0, height: 0, max_value: 0, data_offset: 0, ok: false)
+    pos = pos + 2
+    val width = parse_num(data, pos)
+    if not width.ok:
+        return PpmHeader(magic: magic, width: 0, height: 0, max_value: 0, data_offset: 0, ok: false)
+    val height = parse_num(data, width.next)
+    if not height.ok:
+        return PpmHeader(magic: magic, width: 0, height: 0, max_value: 0, data_offset: 0, ok: false)
+    val maxv = parse_num(data, height.next)
+    if not maxv.ok:
+        return PpmHeader(magic: magic, width: 0, height: 0, max_value: 0, data_offset: 0, ok: false)
+    var data_offset = maxv.next
+    while data_offset < data.len() and is_ws(byte_at(data, data_offset)):
+        data_offset = data_offset + 1
+    PpmHeader(magic: magic, width: width.value, height: height.value, max_value: maxv.value, data_offset: data_offset, ok: true)
+
+# Count pixels with r,g,b all >= 180 (vector text ink is near-white ~0xF5F5F7
+# at alpha 240; the dark wallpaper/card never reaches this) in a rect.
+fn count_bright(data: [u8], off: i64, width: i64, x0: i64, y0: i64, w: i64, h: i64) -> i64:
+    var count: i64 = 0
+    var y = y0
+    while y < y0 + h:
+        var x = x0
+        while x < x0 + w:
+            val i = off + ((y * width + x) * 3)
+            if byte_at(data, i) >= 180 and byte_at(data, i + 1) >= 180 and byte_at(data, i + 2) >= 180:
+                count = count + 1
+            x = x + 1
+        y = y + 1
+    count
+
+# Count rose close-button pixels (BTN_CLOSE 0xFF6B8A at alpha 170 over the
+# title bar blends to roughly r~183 g~86 b~111): r>=150, g<=140, r-g>=60.
+fn count_rose(data: [u8], off: i64, width: i64, x0: i64, y0: i64, w: i64, h: i64) -> i64:
+    var count: i64 = 0
+    var y = y0
+    while y < y0 + h:
+        var x = x0
+        while x < x0 + w:
+            val i = off + ((y * width + x) * 3)
+            val r = byte_at(data, i)
+            val g = byte_at(data, i + 1)
+            if r >= 150 and g <= 140 and (r - g) >= 60:
+                count = count + 1
+            x = x + 1
+        y = y + 1
+    count
+
+# Sum-of-abs-diff > 30 pixel count between two shots over a rect.
+fn count_diff(a: [u8], aoff: i64, b: [u8], boff: i64, width: i64, x0: i64, y0: i64, w: i64, h: i64) -> i64:
+    var count: i64 = 0
+    var y = y0
+    while y < y0 + h:
+        var x = x0
+        while x < x0 + w:
+            val i = (y * width + x) * 3
+            var sad: i64 = 0
+            var c: i64 = 0
+            while c < 3:
+                val va = byte_at(a, aoff + i + c)
+                val vb = byte_at(b, boff + i + c)
+                if va > vb:
+                    sad = sad + (va - vb)
+                else:
+                    sad = sad + (vb - va)
+                c = c + 1
+            if sad > 30:
+                count = count + 1
+            x = x + 1
+        y = y + 1
+    count
+
+fn region_mean(data: [u8], off: i64, width: i64, x0: i64, y0: i64, w: i64, h: i64) -> text:
+    var sr: i64 = 0
+    var sg: i64 = 0
+    var sb: i64 = 0
+    var y = y0
+    while y < y0 + h:
+        var x = x0
+        while x < x0 + w:
+            val i = off + ((y * width + x) * 3)
+            sr = sr + byte_at(data, i)
+            sg = sg + byte_at(data, i + 1)
+            sb = sb + byte_at(data, i + 2)
+            x = x + 1
+        y = y + 1
+    val n = w * h
+    "rgb({(sr / n).to_string()},{(sg / n).to_string()},{(sb / n).to_string()})"
+
+fn load_ppm(path: text, label: text) -> PpmHeader:
+    val data = rt_file_read_bytes(path) ?? []
+    val header = parse_header(data)
+    if not header.ok or header.width != 1024 or header.height != 768 or header.max_value != 255:
+        print "hello_lifecycle_{label}_header=bad"
+        return PpmHeader(magic: 0, width: 0, height: 0, max_value: 0, data_offset: 0, ok: false)
+    if data.len() - header.data_offset < header.width * header.height * 3:
+        print "hello_lifecycle_{label}_pixels=truncated"
+        return PpmHeader(magic: 0, width: 0, height: 0, max_value: 0, data_offset: 0, ok: false)
+    header
+
+fn main() -> i32:
+    val path = rt_env_get("HELLO_PPM") ?? ""
+    val mode = rt_env_get("HELLO_MODE") ?? ""
+    val prev_path = rt_env_get("HELLO_PPM_PREV") ?? ""
+    if path == "" or (mode != "open" and mode != "closed"):
+        print "simpleos_x86_64_wm_hello_ppm_status=fail"
+        print "simpleos_x86_64_wm_hello_ppm_reason=need-HELLO_PPM-and-HELLO_MODE(open|closed)"
+        return 0
+    val data = rt_file_read_bytes(path) ?? []
+    val header = load_ppm(path, "shot")
+    if not header.ok:
+        print "simpleos_x86_64_wm_hello_ppm_status=fail"
+        print "simpleos_x86_64_wm_hello_ppm_reason=bad-ppm:{path}"
+        return 0
+    val off = header.data_offset
+    val w = header.width
+
+    # Region metrics (Hello window: title bar, body, close-button box)
+    val title_bright = count_bright(data, off, w, HX, HY, HW, TITLE_H)
+    val body_bright = count_bright(data, off, w, HX, HY + TITLE_H, HW, HH - TITLE_H)
+    val rose = count_rose(data, off, w, HX + 4, HY + 2, 16, 16)
+    val mean = region_mean(data, off, w, HX, HY, HW, HH)
+    print "hello_lifecycle_mode={mode}"
+    print "hello_lifecycle_title_bright={title_bright.to_string()}"
+    print "hello_lifecycle_body_bright={body_bright.to_string()}"
+    print "hello_lifecycle_closebtn_rose={rose.to_string()}"
+    print "hello_lifecycle_region_mean={mean}"
+
+    var diff_ok = true
+    if prev_path != "":
+        val prev = rt_file_read_bytes(prev_path) ?? []
+        val pheader = load_ppm(prev_path, "prev")
+        if not pheader.ok:
+            print "simpleos_x86_64_wm_hello_ppm_status=fail"
+            print "simpleos_x86_64_wm_hello_ppm_reason=bad-prev-ppm:{prev_path}"
+            return 0
+        val diff = count_diff(data, off, prev, pheader.data_offset, w, HX, HY, HW, HH)
+        print "hello_lifecycle_region_diff_px={diff.to_string()} (of {(HW * HH).to_string()})"
+        diff_ok = diff >= 20000
+
+    var status = "fail"
+    if mode == "open":
+        # Present: title text ink + body vector-text ink + rose close dot.
+        # Calibrated against a real capture: title=20, body=103, rose=48
+        # (18px antialiased vector strokes have thin >=180 cores).
+        if title_bright >= 12 and body_bright >= 60 and rose >= 12:
+            status = "pass"
+    else:
+        # Absent: no text ink, no rose dot, and (if prev given) a large
+        # recomposite delta across the former window region
+        if title_bright <= 10 and body_bright <= 10 and rose <= 3 and diff_ok:
+            status = "pass"
+    print "simpleos_x86_64_wm_hello_ppm_status={status}"
+    0

@@ -1,0 +1,53 @@
+# os_smf_workload.spl — standalone OS-domain workload, runnable in any mode.
+#
+# Self-times fs write/read throughput (the OS-domain representative op) and prints
+#     RESULT|<name>|<elapsed_us>|<iters>
+# An oracle (read length == written length) gates output: nothing is printed if the
+# workload didn't actually run correctly. os_bench_driver compiles this to SMF, runs
+# it, and parses these lines into mode="smf" rows.
+
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+
+fn _block_1kb() -> text:
+    val unit64 = "0123456789012345678901234567890123456789012345678901234567890123"
+    var s = ""
+    var i: i64 = 0
+    while i < 16:
+        s = s + unit64
+        i = i + 1
+    s
+
+fn _payload(kb: i64) -> text:
+    val blk = _block_1kb()
+    var s = ""
+    var i: i64 = 0
+    while i < kb:
+        s = s + blk
+        i = i + 1
+    s
+
+fn main():
+    val payload = _payload(10)
+    val path = "build/test-artifacts/os_smf_workload_probe.txt"
+    val iters: i64 = 20
+
+    val w0 = rt_time_now_unix_micros()
+    var wi: i64 = 0
+    while wi < iters:
+        val _ok = rt_file_write_text(path, payload)
+        wi = wi + 1
+    val w_us = rt_time_now_unix_micros() - w0
+
+    val r0 = rt_time_now_unix_micros()
+    var ri: i64 = 0
+    var last = ""
+    while ri < iters:
+        last = rt_file_read_text(path)
+        ri = ri + 1
+    val r_us = rt_time_now_unix_micros() - r0
+
+    if last.len() == payload.len():
+        print("RESULT|fs_write_10kb|{w_us}|20")
+        print("RESULT|fs_read_10kb|{r_us}|20")

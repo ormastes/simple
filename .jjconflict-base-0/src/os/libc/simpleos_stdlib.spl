@@ -1,0 +1,108 @@
+# SimpleOS libc — pure-Simple, musl-shaped stdlib core.
+#
+# Syscall-free subset of musl libc for numeric and array operations,
+# written in pure Simple (replaces the hand-written C in src/os/libc/simpleos_libc*.c).
+# Arrays are modeled as exact-length `[i64]`; functions that would mutate `src` in C
+# return a fresh array instead, to keep value semantics and avoid the interpreter's
+# lost-arg-mutation pitfall.
+#
+# Shared interface: libc_<fn> per .spipe/simpleos-alpine-harden-musl-busybox.
+
+# ---- numeric parse ---------------------------------------------------------
+
+fn libc_atol(s: [u8]) -> i64:
+    """Decimal parse with optional +/- sign and leading whitespace.
+    Stops at first non-digit, non-sign, non-space character (musl atol)."""
+    val n = s.len()
+    var i = 0
+    # Skip leading whitespace
+    while i < n and (s[i] == 32 or s[i] == 9 or s[i] == 10 or s[i] == 13 or s[i] == 11 or s[i] == 12):
+        i = i + 1
+    # Optional +/- sign
+    var sign = 1
+    if i < n and (s[i] == 43 or s[i] == 45):
+        if s[i] == 45:
+            sign = -1
+        i = i + 1
+    # Parse decimal digits
+    var acc = 0
+    while i < n:
+        val ch = s[i]
+        if ch >= 48 and ch <= 57:
+            acc = acc * 10 + (ch - 48)
+        else:
+            return sign * acc
+        i = i + 1
+    sign * acc
+
+# ---- absolute value --------------------------------------------------------
+
+fn libc_abs(x: i64) -> i64:
+    """Return absolute value of x (musl abs)."""
+    if x < 0:
+        -x
+    else:
+        x
+
+fn libc_labs(x: i64) -> i64:
+    """Return absolute value of x (musl labs, for i64 same as abs)."""
+    libc_abs(x)
+
+# ---- min / max -------------------------------------------------------------
+
+fn libc_max(a: i64, b: i64) -> i64:
+    """Return the greater of a and b."""
+    if a > b:
+        a
+    else:
+        b
+
+fn libc_min(a: i64, b: i64) -> i64:
+    """Return the lesser of a and b."""
+    if a < b:
+        a
+    else:
+        b
+
+# ---- binary search ---------------------------------------------------------
+
+fn libc_bsearch(haystack: [i64], target: i64) -> i64:
+    """Binary search on a sorted array. Returns the index if found, else -1.
+    Assumes haystack is in ascending order."""
+    var lo = 0
+    var hi = haystack.len()
+    while lo < hi:
+        val mid = lo + (hi - lo) / 2
+        val mid_val = haystack[mid]
+        if mid_val == target:
+            return mid
+        elif mid_val < target:
+            lo = mid + 1
+        else:
+            hi = mid
+    -1
+
+# ---- quicksort (value-returning) -------------------------------------------
+
+fn libc_qsort(a: [i64]) -> [i64]:
+    """Return a new ascending-sorted copy of array a (does not mutate a).
+    Uses insertion sort."""
+    # Create a copy to avoid mutating the input
+    var result: [i64] = []
+    var i = 0
+    while i < a.len():
+        result.push(a[i])
+        i = i + 1
+
+    # Insertion sort on the copy
+    var j = 1
+    while j < result.len():
+        val key = result[j]
+        var k = j - 1
+        while k >= 0 and result[k] > key:
+            result[k + 1] = result[k]
+            k = k - 1
+        result[k + 1] = key
+        j = j + 1
+
+    result

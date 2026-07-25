@@ -1,0 +1,183 @@
+diff --git a/src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl b/src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl
+index cd7a1ac89c3..ab652d0c14f 100644
+--- a/src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl
++++ b/src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl
+@@ -47,6 +47,26 @@ fn enum_pat_binding_sym(payload: HirPatternPayload?) -> SymbolId?:
+                 ()
+     nil
+ 
++fn enum_pat_binding_syms(payload: HirPatternPayload?) -> [SymbolId]:
++    """#164: all payload-binding symbols of `case Pair(a, b, ...):`, in
++    declared field order (empty for Unit variants; non-Binding sub-patterns,
++    e.g. wildcards, are skipped and simply left unbound)."""
++    var out: [SymbolId] = []
++    if payload.?:
++        match payload.unwrap():
++            case Tuple(patterns):
++                var i = 0
++                while i < patterns.len():
++                    match patterns[i].kind:
++                        case Binding(sym, _):
++                            out.push(sym)
++                        case _:
++                            ()
++                    i = i + 1
++            case _:
++                ()
++    out
++
+ # ============================================================================
+ # Expression Lowering
+ # ============================================================================
+@@ -635,9 +655,9 @@ impl MirLowering:
+         if val dl = disc_res:
+             disc_local = dl
+ 
+-        # Collect enum arms (disc, payload-binding symbol, body) + one default.
++        # Collect enum arms (disc, payload-binding symbols, body) + one default.
+         var enum_discs: [i64] = []
+-        var enum_binds: [SymbolId?] = []
++        var enum_binds: [[SymbolId]] = []
+         var enum_bodies: [HirBlock] = []
+         var has_default = false
+         var default_body = HirBlock(stmts: [], value: nil, span: scrutinee.span)
+@@ -677,7 +697,7 @@ impl MirLowering:
+                         else:
+                             self.error("enum match: unknown variant '{variant}' (no registered enum declares it)", Some(arm.pattern.span))
+                     enum_discs = enum_discs.push(d)
+-                    enum_binds = enum_binds.push(enum_pat_binding_sym(epayload))
++                    enum_binds = enum_binds.push(enum_pat_binding_syms(epayload))
+                     enum_bodies = enum_bodies.push(arm.body)
+                 case Wildcard:
+                     has_default = true
+@@ -706,8 +726,23 @@ impl MirLowering:
+             var b_arm = self.builder
+             b_arm.switch_to_block(arm_block)
+             self.builder = b_arm
+-            val bind_sym = enum_binds[ci]
+-            if bind_sym.?:
++            val bind_syms = enum_binds[ci]
++            if bind_syms.len() == 1:
++                # Single-field payload: byte-stable fast path, unchanged from
++                # before #164 -- the raw i64 payload IS the field value.
++                var bp = self.builder
++                val pf = MirOperand(kind: MirOperandKind.Const(
++                    MirConstValue.Str("rt_enum_payload"),
++                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
++                ))
++                val pr = bp.emit_call(pf, [mir_operand_copy(scrut_local)], MirType.i64())
++                self.builder = bp
++                if val pl = pr:
++                    self.local_map[bind_syms[0].id] = pl
++            elif bind_syms.len() > 1:
++                # #164 multi-field payload: the scalar payload slot holds a
++                # boxed rt_tuple (see box_tuple_payload); unbox each field by
++                # index via rt_tuple_get.
+                 var bp = self.builder
+                 val pf = MirOperand(kind: MirOperandKind.Const(
+                     MirConstValue.Str("rt_enum_payload"),
+@@ -715,8 +750,24 @@ impl MirLowering:
+                 ))
+                 val pr = bp.emit_call(pf, [mir_operand_copy(scrut_local)], MirType.i64())
+                 self.builder = bp
++                var tuple_local = LocalId(id: 0)
+                 if val pl = pr:
+-                    self.local_map[bind_sym.unwrap().id] = pl
++                    tuple_local = pl
++                var fi = 0
++                while fi < bind_syms.len():
++                    var bg = self.builder
++                    val idx_local = bg.emit_const_int(fi)
++                    self.builder = bg
++                    var bget = self.builder
++                    val gf = MirOperand(kind: MirOperandKind.Const(
++                        MirConstValue.Str("rt_tuple_get"),
++                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
++                    ))
++                    val gr = bget.emit_call(gf, [mir_operand_copy(tuple_local), mir_operand_copy(idx_local)], MirType.i64())
++                    self.builder = bget
++                    if val gl = gr:
++                        self.local_map[bind_syms[fi].id] = gl
++                    fi = fi + 1
+             val arm_result = self.lower_block(enum_bodies[ci])
+             var b_arm2 = self.builder
+             # Guard: if the arm body already terminated (e.g. `return r`), emit
+@@ -797,6 +848,45 @@ impl MirLowering:
+             return pl
+         res_local
+ 
++    me box_tuple_payload(values: [HirExpr]) -> LocalId:
++        """#164: box 2+ enum-constructor args into a heap tuple (rt_tuple_new
++        + rt_tuple_set per field) so the single scalar payload slot of
++        rt_enum_new can still carry them as one i64. The matching unbox
++        (rt_tuple_get per field) lives in lower_enum_match. 1-field payloads
++        never call this -- they keep the original raw-i64 fast path."""
++        var lowered: [LocalId] = []
++        var vi = 0
++        while vi < values.len():
++            lowered.push(self.lower_expr(values[vi]))
++            vi = vi + 1
++        var bn = self.builder
++        val n_local = bn.emit_const_int(lowered.len())
++        self.builder = bn
++        val new_func = MirOperand(kind: MirOperandKind.Const(
++            MirConstValue.Str("rt_tuple_new"),
++            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
++        ))
++        var bt = self.builder
++        val tuple_res = bt.emit_call(new_func, [mir_operand_copy(n_local)], MirType.i64())
++        self.builder = bt
++        var tuple_local = LocalId(id: 0)
++        if val tl = tuple_res:
++            tuple_local = tl
++        val set_func = MirOperand(kind: MirOperandKind.Const(
++            MirConstValue.Str("rt_tuple_set"),
++            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64(), MirType.i64()], return_type: MirType(kind: MirTypeKind.I8), is_variadic: false)))
++        ))
++        var si = 0
++        while si < lowered.len():
++            var bs = self.builder
++            val idx_local = bs.emit_const_int(si)
++            self.builder = bs
++            var bset = self.builder
++            bset.emit_call(set_func, [mir_operand_copy(tuple_local), mir_operand_copy(idx_local), mir_operand_copy(lowered[si])], MirType(kind: MirTypeKind.I8))
++            self.builder = bset
++            si = si + 1
++        tuple_local
++
+     me lower_enum_lit(type_: HirType, variant: text, payload: HirEnumPayload?) -> LocalId:
+         """Lower `Shape.Circle(7)` to `rt_enum_new(enum_id, discriminant, payload)`.
+         Discriminant = variant index (declared order). Payload = single i64 tuple
+@@ -824,9 +914,12 @@ impl MirLowering:
+         if payload.?:
+             match payload.unwrap():
+                 case Tuple(values):
+-                    if values.len() > 0:
++                    if values.len() == 1:
+                         payload_local = self.lower_expr(values[0])
+                         has_payload = true
++                    elif values.len() > 1:
++                        payload_local = self.box_tuple_payload(values)
++                        has_payload = true
+                 case _:
+                     ()
+         if not has_payload:
+@@ -856,8 +949,17 @@ impl MirLowering:
+         val disc_local = b.emit_const_int(disc)
+         self.builder = b
+         var payload_local = LocalId(id: 0)
+-        if args.len() > 0:
++        if args.len() == 1:
+             payload_local = self.lower_expr(args[0].value)
++        elif args.len() > 1:
++            # #164: 2+ constructor args -- box them into a heap tuple so the
++            # single scalar payload slot can still carry all of them.
++            var values: [HirExpr] = []
++            var ai = 0
++            while ai < args.len():
++                values.push(args[ai].value)
++                ai = ai + 1
++            payload_local = self.box_tuple_payload(values)
+         else:
+             var bz = self.builder
+             payload_local = bz.emit_const_int(0)

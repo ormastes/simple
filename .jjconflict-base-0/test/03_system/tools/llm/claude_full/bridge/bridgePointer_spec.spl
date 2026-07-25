@@ -1,0 +1,87 @@
+"""
+# Claude Full Bridge Pointer
+
+Mirrors crash-recovery bridge pointer path, validation, TTL, clearing, and worktree fanout behavior.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.bridge.bridgePointer.{BridgePointer, BridgePointerStore, getBridgePointerPath, sanitizeBridgePointerPath, bridgePointerSourceValid, nonNegativeAge, bridgePointerTtlMs, maxWorktreeFanout, bridgePointerFileName}
+
+describe "Claude full bridge pointer":
+    it "builds sanitized per-directory pointer paths":
+        step("Derive the projects-dir path used for crash recovery")
+        expect(bridgePointerFileName()).to_equal("bridge-pointer.json")
+        expect(getBridgePointerPath("/projects/", "/repo/main")).to_equal("/projects/-repo-main/bridge-pointer.json")
+        expect(sanitizeBridgePointerPath("C:\\repo work")).to_equal("C-repo-work")
+
+    it "writes and reads a fresh pointer with age":
+        step("Persist a standalone pointer and read it before TTL expiry")
+        val store = BridgePointerStore.new("/projects")
+        store.write("/repo", BridgePointer.new("cse_1", "env_1", "standalone"), 1000)
+        val read = store.read("/repo", 1500)
+        expect(read.found).to_equal(true)
+        expect(read.pointer.sessionId).to_equal("cse_1")
+        expect(read.pointer.environmentId).to_equal("env_1")
+        expect(read.pointer.sourceStandalone()).to_equal(true)
+        expect(read.ageMs).to_equal(500)
+        expect(store.count()).to_equal(1)
+
+    it "clears corrupt, invalid, and stale pointers":
+        step("Reject pointers that would keep re-prompting after backend GC")
+        val store = BridgePointerStore.new("/projects")
+        store.writeCorrupt("/corrupt", 1000)
+        val corrupt = store.read("/corrupt", 1100)
+        expect(corrupt.found).to_equal(false)
+        expect(corrupt.cleared).to_equal(true)
+        expect(corrupt.reason).to_equal("invalid-json")
+        store.writeInvalidSchema("/invalid", BridgePointer.new("cse_2", "env_2", "other"), 1000)
+        val invalid = store.read("/invalid", 1100)
+        expect(invalid.cleared).to_equal(true)
+        expect(invalid.reason).to_equal("invalid-schema")
+        store.write("/stale", BridgePointer.new("cse_3", "env_3", "repl"), 0)
+        val stale = store.read("/stale", bridgePointerTtlMs() + 1)
+        expect(stale.cleared).to_equal(true)
+        expect(stale.reason).to_equal("stale")
+        expect(store.count()).to_equal(0)
+
+    it "uses current directory fast path before worktree fanout":
+        step("Return the current directory pointer without scanning siblings")
+        val store = BridgePointerStore.new("/projects")
+        store.write("/repo", BridgePointer.new("cse_here", "env_here", "standalone"), 1000)
+        store.write("/repo-wt", BridgePointer.new("cse_other", "env_other", "repl"), 1400)
+        val result = store.readAcrossWorktrees("/repo", ["/repo", "/repo-wt"], 1500)
+        expect(result.found).to_equal(true)
+        expect(result.dir).to_equal("/repo")
+        expect(result.pointer.sessionId).to_equal("cse_here")
+        expect(result.ageMs).to_equal(500)
+
+    it "selects the freshest pointer across worktrees and caps fanout":
+        step("Fan out only when current directory misses")
+        val store = BridgePointerStore.new("/projects")
+        store.write("/old", BridgePointer.new("cse_old", "env_old", "repl"), 1000)
+        store.write("/fresh", BridgePointer.new("cse_fresh", "env_fresh", "repl"), 1900)
+        val found = store.readAcrossWorktrees("/missing", ["/missing", "/old", "/fresh"], 2000)
+        expect(found.found).to_equal(true)
+        expect(found.dir).to_equal("/fresh")
+        expect(found.pointer.sessionId).to_equal("cse_fresh")
+        expect(found.ageMs).to_equal(100)
+        val tooMany = store.readAcrossWorktrees("/missing", manyWorktrees(51), 2000)
+        expect(tooMany.found).to_equal(false)
+        expect(tooMany.skippedFanout).to_equal(true)
+        expect(maxWorktreeFanout()).to_equal(50)
+
+    it "validates source values and age calculation":
+        step("Expose small pure helpers used by read validation")
+        expect(bridgePointerSourceValid("standalone")).to_equal(true)
+        expect(bridgePointerSourceValid("repl")).to_equal(true)
+        expect(bridgePointerSourceValid("other")).to_equal(false)
+        expect(nonNegativeAge(100, 200)).to_equal(0)
+        expect(nonNegativeAge(300, 200)).to_equal(100)
+
+fn manyWorktrees(count: i64) -> [text]:
+    var result: [text] = []
+    var i = 0
+    while i < count:
+        result = result + ["/wt-" + i.to_text()]
+        i = i + 1
+    result

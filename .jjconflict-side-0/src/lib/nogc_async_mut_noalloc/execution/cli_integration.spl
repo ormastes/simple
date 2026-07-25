@@ -1,0 +1,224 @@
+# CLI Integration for Unified Execution
+# Adds --target flag support to test runner
+
+use std.execution.mod.{ExecutionConfig, TestExecutor, ExecutionResult, parse_target}
+use std.qemu.mod.QemuArch
+
+# CLI argument parser for execution targets
+class ExecutionArgs:
+    target: text                     # Target string (e.g., "local", "riscv32-qemu")
+    test_file: text                  # Test file to run
+    binary: text                     # Binary to execute (for remote targets)
+    gdb_port: i32                    # GDB port (default: 1234)
+    timeout_ms: i64                  # Execution timeout
+    verbose: bool                    # Verbose output
+
+impl ExecutionArgs:
+    # Parse from command-line arguments
+    static fn parse(args: [text]) -> Result<ExecutionArgs, text>:
+        var target = "local"
+        var test_file = ""
+        var binary = ""
+        var gdb_port = 1234
+        var timeout_ms: i64 = 30000
+        var verbose = false
+
+        var i = 0
+        while i < args.len():
+            val arg = args[i]
+
+            if arg == "--target":
+                if i + 1 < args.len():
+                    target = args[i + 1]
+                    i = i + 2
+                else:
+                    return Err("--target requires an argument")
+
+            elif arg == "--binary":
+                if i + 1 < args.len():
+                    binary = args[i + 1]
+                    i = i + 2
+                else:
+                    return Err("--binary requires an argument")
+
+            elif arg == "--gdb-port":
+                if i + 1 < args.len():
+                    # Parse port number
+                    val port_str = args[i + 1]
+                    gdb_port = parse_port(port_str)
+                    i = i + 2
+                else:
+                    return Err("--gdb-port requires an argument")
+
+            elif arg == "--timeout":
+                if i + 1 < args.len():
+                    val timeout_str = args[i + 1]
+                    timeout_ms = parse_timeout(timeout_str)
+                    i = i + 2
+                else:
+                    return Err("--timeout requires an argument")
+
+            elif arg == "--verbose" or arg == "-v":
+                verbose = true
+                i = i + 1
+
+            elif not arg.starts_with("-"):
+                # Positional argument - test file
+                if test_file.len() == 0:
+                    test_file = arg
+                i = i + 1
+
+            else:
+                return Err("unknown argument: {arg}")
+
+        if test_file.len() == 0:
+            return Err("no test file specified")
+
+        Ok(ExecutionArgs(
+            target: target,
+            test_file: test_file,
+            binary: binary,
+            gdb_port: gdb_port,
+            timeout_ms: timeout_ms,
+            verbose: verbose
+        ))
+
+    # Create execution config from args
+    fn to_execution_config() -> Result<ExecutionConfig, text>:
+        # Determine program path
+        val program = if self.binary.len() > 0:
+            self.binary
+        elif self.target == "local":
+            self.test_file
+        else:
+            # For remote targets, default to .elf version
+            self.test_file.replace(".spl", ".elf")
+
+        # Parse target string
+        val config = parse_target(self.target, program)?
+
+        # Apply custom settings
+        Ok(ExecutionConfig(
+            target: config.target,
+            program: config.program,
+            args: config.args,
+            host: config.host,
+            port: if self.gdb_port != 1234: self.gdb_port else: config.port,
+            clear_context: config.clear_context,
+            reload_program: config.reload_program,
+            execution_timeout_ms: if self.timeout_ms != 30000: self.timeout_ms else: config.execution_timeout_ms,
+            operation_timeout_ms: config.operation_timeout_ms
+        ))
+
+# Helper functions
+
+fn parse_port(s: text) -> i32:
+    var result: i32 = 0
+    for c in s:
+        val digit = char_to_digit(c)
+        if digit >= 0:
+            result = result * 10 + digit
+    result
+
+fn parse_timeout(s: text) -> i64:
+    var result: i64 = 0
+    for c in s:
+        val digit = char_to_digit(c)
+        if digit >= 0:
+            result = result * 10 + digit
+    result
+
+fn char_to_digit(c: text) -> i32:
+    match c:
+        "0": 0
+        "1": 1
+        "2": 2
+        "3": 3
+        "4": 4
+        "5": 5
+        "6": 6
+        "7": 7
+        "8": 8
+        "9": 9
+        _: -1
+
+# CLI execution runner
+fn run_with_cli_args(args: [text]) -> Result<ExecutionResult, text>:
+    # Parse arguments
+    val exec_args = ExecutionArgs.parse(args)?
+
+    if exec_args.verbose:
+        print("Execution configuration:")
+        print("  Target: {exec_args.target}")
+        print("  Test file: {exec_args.test_file}")
+        print("  Program: {exec_args.binary}")
+        print("  GDB port: {exec_args.gdb_port}")
+        print("  Timeout: {exec_args.timeout_ms}ms")
+
+    # Create execution config
+    val config = exec_args.to_execution_config()?
+
+    if exec_args.verbose:
+        print("\nStarting execution...")
+        print("  Config target: {config.target}")
+        print("  Config program: {config.program}")
+
+    # Create executor
+    val executor = TestExecutor.create(config)?
+
+    if exec_args.verbose:
+        print("  Executor initialized")
+
+    # Execute
+    val result = executor.execute()?
+
+    # Cleanup
+    executor.cleanup()
+
+    if exec_args.verbose:
+        print("\nExecution completed:")
+        print("  Success: {result.success}")
+        print("  Duration: {result.duration_ms}ms")
+        if result.output.len() > 0:
+            print("  Output: {result.output}")
+
+    Ok(result)
+
+# Example usage patterns
+
+# Pattern 1: Run locally
+fn example_local():
+    val args = ["test/my_spec.spl"]
+    val result = run_with_cli_args(args)?
+    Ok(result)
+
+# Pattern 2: Run on QEMU RISC-V 32
+fn example_qemu_riscv32():
+    val args = [
+        "--target", "riscv32-qemu",
+        "--binary", "test/my_test.elf",
+        "test/my_spec.spl"
+    ]
+    val result = run_with_cli_args(args)?
+    Ok(result)
+
+# Pattern 3: Run on QEMU x86_64 with custom port
+fn example_qemu_custom():
+    val args = [
+        "--target", "x86_64-qemu",
+        "--gdb-port", "5555",
+        "--timeout", "60000",
+        "--verbose",
+        "test/my_spec.spl"
+    ]
+    val result = run_with_cli_args(args)?
+    Ok(result)
+
+# Pattern 4: Run on custom remote target
+fn example_custom_target():
+    val args = [
+        "--target", "riscv32-qemu:localhost:9999",
+        "test/my_spec.spl"
+    ]
+    val result = run_with_cli_args(args)?
+    Ok(result)

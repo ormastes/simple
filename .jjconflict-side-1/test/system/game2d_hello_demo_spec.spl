@@ -1,0 +1,125 @@
+# @cover examples/game2d/hello/main.spl 80%
+# @cover src/lib/nogc_sync_mut/game2d/__init__.spl 60%
+# @cover src/lib/nogc_sync_mut/game2d/app/run.spl 60%
+"""
+# Game2D Hello-Demo (AC-1)
+
+`std.game2d` exposes an `App` trait with default no-op `load/update/fixed_update/draw`
+methods and a `run(app, title, size)` entry point. A 25-line example demo at
+`examples/game2d/hello/main.spl` must compile and use *only* `std.game2d`.
+
+Red-phase: trait/run impl missing; assertions on signature presence will fail.
+
+**Status:** Failing (no impl)
+"""
+
+use std.spec.{describe, it, expect}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+
+fn _read(path: text) -> text:
+    if rt_file_exists(path):
+        rt_file_read_text(path)
+    else:
+        ""
+
+fn _contains(s: text, needle: text) -> bool:
+    s.contains(needle)
+
+describe "Game2D Hello Demo (AC-1)":
+    """## AC-1 — App trait + run() entry + ≤25-line demo."""
+
+    describe "App trait declares default lifecycle methods":
+        it "src/lib/nogc_sync_mut/game2d/app/app.spl declares trait App":
+            val src = _read("src/lib/nogc_sync_mut/game2d/app/app.spl")
+            expect(_contains(src, "trait App")).to_equal(true)
+
+        it "App trait includes load/update/fixed_update/draw":
+            val src = _read("src/lib/nogc_sync_mut/game2d/app/app.spl")
+            expect(_contains(src, "fn load") and
+                   _contains(src, "fn update") and
+                   _contains(src, "fn fixed_update") and
+                   _contains(src, "fn draw")).to_equal(true)
+
+        it "edge case: trait detection requires literal `trait App`":
+            expect(_contains("class App:\n    var x: i32", "trait App")
+                ).to_equal(false)
+
+        it "error path: missing impl file does not crash spec":
+            val src = _read("src/lib/nogc_sync_mut/game2d/app/app.spl")
+            expect(src.len() >= 0).to_equal(true)
+
+    describe "run() entry point":
+        it "src/lib/nogc_sync_mut/game2d/app/run.spl declares fn run":
+            val src = _read("src/lib/nogc_sync_mut/game2d/app/run.spl")
+            expect(_contains(src, "fn run(")).to_equal(true)
+
+        it "run() takes title/size params (default-arg overload)":
+            val src = _read("src/lib/nogc_sync_mut/game2d/app/run.spl")
+            expect(_contains(src, "title:") and _contains(src, "GameConfig")
+                ).to_equal(true)
+
+        it "edge case: synthetic signature is detected":
+            val sample = "fn run(app: App, title: text = \"x\", w: i32 = 800, h: i32 = 600)"
+            expect(_contains(sample, "fn run(") and
+                   _contains(sample, "title:")).to_equal(true)
+
+    describe "examples/game2d/hello/main.spl":
+        it "exists at the canonical path":
+            expect(rt_file_exists("examples/game2d/hello/main.spl")
+                ).to_equal(true)
+
+        it "imports only std.game2d (no direct std.nogc_sync_mut.engine.*)":
+            val src = _read("examples/game2d/hello/main.spl")
+            expect(_contains(src,
+                "use std.nogc_sync_mut.engine.")).to_equal(false)
+
+        it "compiles via parse-only path (proxy: g.run is referenced)":
+            # Phase 5 must implement the demo; this assertion fails until then.
+            val src = _read("examples/game2d/hello/main.spl")
+            expect(_contains(src, "g.run") or _contains(src, "run(")
+                ).to_equal(true)
+
+        it "edge case: a 25-line synthetic demo would meet the budget":
+            val sample = "use std.game2d as g\nclass MyApp:\n    fn update(self, dt: f32): pass_dn\ng.run(MyApp())\n"
+            expect(sample.split("\n").len() as i64 <= 25).to_equal(true)
+
+        it "error path: empty file => parse-only assertion fails":
+            expect(_contains("", "g.run")).to_equal(false)
+
+    describe "parses without errors (Phase 5b gate)":
+        """### Protective gate caught by Phase 7 verifier (NO-GO 2026-04-25).
+
+        Asserts the demo uses the canonical structural-typing form and does
+        NOT use the broken `class X : g.App:` inheritance form (Simple has
+        no class inheritance — see `.claude/rules/language.md`)."""
+
+        it "demo uses structural App shape: class Game with required methods":
+            val src = _read("examples/game2d/hello/main.spl")
+            expect(_contains(src, "class Game") and
+                   _contains(src, "fn update(self") and
+                   _contains(src, "fn fixed_update(self") and
+                   _contains(src, "fn draw(self") and
+                   _contains(src, "fn load(self")).to_equal(true)
+
+        it "demo does NOT use the broken inheritance form `class X : g.App`":
+            val src = _read("examples/game2d/hello/main.spl")
+            expect(_contains(src, "class Game : g.App")).to_equal(false)
+
+        it "demo does NOT use the broken `: App` inheritance form either":
+            val src = _read("examples/game2d/hello/main.spl")
+            # `class Game:` is fine; `class Game : App` (with space) is not.
+            expect(_contains(src, "class Game : App") or
+                   _contains(src, "class Game: App") or
+                   _contains(src, "class Game : g.App") or
+                   _contains(src, "class Game: g.App")).to_equal(false)
+
+        it "demo invokes g.run with the sprite/window args":
+            val src = _read("examples/game2d/hello/main.spl")
+            expect(_contains(src, "g.run(") and _contains(src, "800")
+                ).to_equal(true)
+
+        it "edge case: detection rejects fabricated inheritance":
+            val bad = "use std.game2d as g\nclass Game : g.App:\n    fn update(self, dt: f32): pass\n"
+            expect(_contains(bad, "class Game : g.App")).to_equal(true)

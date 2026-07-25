@@ -1,0 +1,115 @@
+# @tag: web, renderer, backend, parity, metal
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer.spl 40%
+#
+# The Simple web renderer lowers HTML through Draw IR into Engine2D. This guards
+# requested backend names and software-equivalent fallback framebuffers.
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_engine2d_backend, simple_web_render_html_to_readback_with_engine2d_backend, simple_web_resolved_engine2d_backend_name}
+
+fn sample_html() -> text:
+    "<html><body><div class='wm-app-titlebar'>Title</div><div class='wm-app-content'>Body</div></body></html>"
+
+fn generic_layout_html() -> text:
+    "<html><head><style>.panel{background-color:#1d4ed8;width:28px;height:14px}.accent{background-color:#22c55e;width:12px;height:8px;margin-top:2px}</style></head><body><section class='panel'></section><div class='accent'></div></body></html>"
+
+fn pixels_equal(a: [u32], b: [u32]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+fn first_mismatch_index(a: [u32], b: [u32]) -> i32:
+    if a.len() != b.len():
+        return -2
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return i
+        i = i + 1
+    -1
+
+fn count_distinct(px: [u32]) -> i32:
+    var seen: [u32] = []
+    var i = 0
+    while i < px.len():
+        val c = px[i]
+        var found = false
+        var j = 0
+        while j < seen.len():
+            if seen[j] == c:
+                found = true
+            j = j + 1
+        if not found and seen.len() < 32:
+            seen.push(c)
+        i = i + 1
+    seen.len()
+
+describe "Simple web renderer 2D-backend parity":
+
+    context "invalid viewport":
+        it "fails closed before Engine2D creation":
+            expect(simple_web_render_html_to_pixels_with_engine2d_backend(sample_html(), 0, 32, "software").len()).to_equal(0)
+            val readback = simple_web_render_html_to_readback_with_engine2d_backend(sample_html(), 48, 0, "software")
+            expect(readback.pixels.len()).to_equal(0)
+            expect(readback.source).to_equal("unavailable")
+
+    context "framebuffer output":
+        it "software backend renders a full framebuffer with multiple colors":
+            val px = simple_web_render_html_to_pixels_with_engine2d_backend(sample_html(), 48, 32, "software")
+            expect(px.len()).to_equal(48 * 32)
+            expect(count_distinct(px)).to_be_greater_than(1)
+
+    context "cross-backend parity":
+        it "cpu-backed pixels match software-backed exactly":
+            val sw = simple_web_render_html_to_pixels_with_engine2d_backend(sample_html(), 48, 32, "software")
+            val cpu = simple_web_render_html_to_pixels_with_engine2d_backend(sample_html(), 48, 32, "cpu")
+            expect(pixels_equal(sw, cpu)).to_equal(true)
+
+        it "metal-backed pixels match software-backed exactly":
+            val sw = simple_web_render_html_to_pixels_with_engine2d_backend(sample_html(), 48, 32, "software")
+            val mt = simple_web_render_html_to_pixels_with_engine2d_backend(sample_html(), 48, 32, "metal")
+            expect(pixels_equal(sw, mt)).to_equal(true)
+
+        it "generic layout pixels stay identical for cpu":
+            val sw = simple_web_render_html_to_pixels_with_engine2d_backend(generic_layout_html(), 48, 32, "software")
+            val cpu = simple_web_render_html_to_pixels_with_engine2d_backend(generic_layout_html(), 48, 32, "cpu")
+            expect(first_mismatch_index(sw, cpu)).to_equal(-1)
+
+        it "generic layout pixels stay identical for cpu_simd":
+            val sw = simple_web_render_html_to_pixels_with_engine2d_backend(generic_layout_html(), 48, 32, "software")
+            val cpu_simd = simple_web_render_html_to_pixels_with_engine2d_backend(generic_layout_html(), 48, 32, "cpu_simd")
+            expect(first_mismatch_index(sw, cpu_simd)).to_equal(-1)
+
+        it "generic layout pixels stay identical for metal":
+            val sw = simple_web_render_html_to_pixels_with_engine2d_backend(generic_layout_html(), 48, 32, "software")
+            val metal = simple_web_render_html_to_pixels_with_engine2d_backend(generic_layout_html(), 48, 32, "metal")
+            expect(first_mismatch_index(sw, metal)).to_equal(-1)
+
+        it "generic layout pixels stay identical for cuda":
+            val sw = simple_web_render_html_to_pixels_with_engine2d_backend(generic_layout_html(), 48, 32, "software")
+            val cuda = simple_web_render_html_to_pixels_with_engine2d_backend(generic_layout_html(), 48, 32, "cuda")
+            expect(first_mismatch_index(sw, cuda)).to_equal(-1)
+
+        it "generic layout pixels stay identical for opencl":
+            val sw = simple_web_render_html_to_pixels_with_engine2d_backend(generic_layout_html(), 48, 32, "software")
+            val opencl = simple_web_render_html_to_pixels_with_engine2d_backend(generic_layout_html(), 48, 32, "opencl")
+            expect(first_mismatch_index(sw, opencl)).to_equal(-1)
+
+        it "generic layout pixels stay identical for vulkan":
+            val sw = simple_web_render_html_to_pixels_with_engine2d_backend(generic_layout_html(), 48, 32, "software")
+            val vulkan = simple_web_render_html_to_pixels_with_engine2d_backend(generic_layout_html(), 48, 32, "vulkan")
+            expect(first_mismatch_index(sw, vulkan)).to_equal(-1)
+
+    context "real backend selection":
+        it "preserves supported Engine2D backend names before renderer fallback":
+            expect(simple_web_resolved_engine2d_backend_name(48, 32, "cuda")).to_equal("cuda")
+            expect(simple_web_resolved_engine2d_backend_name(48, 32, "opencl")).to_equal("opencl")
+            expect(simple_web_resolved_engine2d_backend_name(48, 32, "vulkan")).to_equal("vulkan")
+            expect(simple_web_resolved_engine2d_backend_name(48, 32, "metal")).to_equal("metal")
+            expect(simple_web_resolved_engine2d_backend_name(48, 32, "cpu_simd")).to_equal("cpu_simd")
+            expect(simple_web_resolved_engine2d_backend_name(48, 32, "not-a-backend")).to_equal("software")

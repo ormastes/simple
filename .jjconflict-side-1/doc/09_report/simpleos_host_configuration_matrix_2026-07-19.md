@@ -1,0 +1,33 @@
+# SimpleOS Host Configuration Matrix
+
+- status: fail
+- fpga_serial_only_config: pass
+- qemu_network_gui_config: fail
+- qemu_riscv64_network_ports: pass
+- qemu_riscv64_smf_gui_serial: missing
+- qemu_riscv64_display_smoke: missing
+- qemu_riscv64_wm_anchor: missing
+- qemu_riscv64_canonical_desktop: missing
+- qemu_riscv64_wm_live: missing
+- qemu_simpleos_wm_live: fail
+- fpga_network_capacity_config: planned
+- simpleos_host_launch_config: fail
+- wm_host_mode_policy: pass
+- qemu_network_ports: ssh=2222->22, web/db covered by RISC-V HTTP/DBFS gate
+- qemu_gui_backend: Vulkan-backed host/browser evidence plus x86_64 SimpleOS QMP MDI framebuffer evidence
+- qemu_network_gui_reason: RV64 network is represented; RV64 live WM framebuffer evidence is still missing
+- qemu_riscv64_wm_reason: RV64 live WM framebuffer evidence is missing
+- qemu_riscv64_wm_tracking: doc/08_tracking/bug/simpleos_rv64_wm_live_framebuffer_gate_2026-06-30.md
+- qemu_riscv64_smf_gui_serial_log: build/os/simpleos_riscv64_smf_fs.serial.log
+- qemu_riscv64_display_smoke_serial_log: build/os/rv64_display_smoke_evidence/serial.log
+- qemu_riscv64_display_smoke_ppm: build/os/rv64_display_smoke_evidence/screendump.ppm
+- qemu_riscv64_display_smoke_report: doc/09_report/rv64_display_smoke_qmp_evidence_2026-07-19.md
+- qemu_riscv64_display_smoke_contract_version: 0
+- qemu_riscv64_display_smoke_stride: 0
+- qemu_riscv64_display_smoke_present_revision: 0
+- qemu_riscv64_display_smoke_nonblack: 0
+- qemu_riscv64_display_smoke_canonical_palette_witnesses: 0
+- qemu_riscv64_display_smoke_wrapper: scripts/check/check-rv64-display-smoke-qmp-evidence.shs
+- fpga_serial_transport: UART console, telnet/ssh-compatible serial bridge harness
+- fpga_network_capacity_reason: explicit future lane; not claimed as live silicon evidence
+- gui_entry_latest_dir:

@@ -1,0 +1,765 @@
+# @covers src/lib/common/math_repr.spl 85%
+"""
+# Math Repr Parser Coverage
+
+**Feature IDs:** #LIB-MATH-COV
+**Category:** Stdlib
+**Status:** Implemented
+
+## Overview
+
+Tests for parser edge cases, operator precedence, implicit multiplication,
+chained operations, sum/frac parsing, malformed input, and intensive loop coverage.
+"""
+
+use std.math_repr.{to_text, to_debug, to_pretty, to_md, render_latex_raw}
+
+# ============================================================================
+# 6. math_repr — Parser edge cases
+# ============================================================================
+
+describe "math_repr parser edges":
+    """
+    ## Parser Edge Cases
+
+    Exercises parser branches for complex nesting, operator precedence,
+    and special form parsing.
+    """
+
+    context "operator precedence":
+        it "mul binds tighter than add":
+            expect(to_debug("a + b * c")).to_equal("Add(Id(a), Mul(Id(b), Id(c)))")
+
+        it "power binds tighter than mul":
+            expect(to_debug("a * b^c")).to_equal("Mul(Id(a), Pow(Id(b), Id(c)))")
+
+        it "negation applies to power":
+            expect(to_debug("-x^2")).to_equal("Neg(Pow(Id(x), Num(2)))")
+
+    context "implicit multiplication":
+        it "number followed by identifier":
+            expect(to_debug("3x")).to_equal("Mul(Num(3), Id(x))")
+
+        it "number followed by paren group":
+            expect(to_debug("2(x)")).to_equal("Mul(Num(2), Group(Id(x)))")
+
+        it "identifier followed by paren starts function call":
+            expect(to_debug("f(x)")).to_equal("Call(f, Id(x))")
+
+    context "nested grouping":
+        it "handles nested parentheses":
+            expect(to_debug("((x))")).to_equal("Group(Group(Id(x)))")
+
+    context "chained postfix":
+        it "handles subscript then transpose":
+            val result = to_debug("A[i]'")
+            expect(result).to_contain("Transpose")
+            expect(result).to_contain("Sub")
+
+    context "known function detection for latex":
+        it "recognizes sin as known":
+            val result = render_latex_raw("sin(x)")
+            expect(result).to_contain("\\sin")
+
+        it "recognizes cos as known":
+            val result = render_latex_raw("cos(x)")
+            expect(result).to_contain("\\cos")
+
+        it "recognizes tan as known":
+            val result = render_latex_raw("tan(x)")
+            expect(result).to_contain("\\tan")
+
+        it "recognizes log as known":
+            val result = render_latex_raw("log(x)")
+            expect(result).to_contain("\\log")
+
+        it "recognizes ln as known":
+            val result = render_latex_raw("ln(x)")
+            expect(result).to_contain("\\ln")
+
+        it "recognizes exp as known":
+            val result = render_latex_raw("exp(x)")
+            expect(result).to_contain("\\exp")
+
+        it "recognizes min as known":
+            val result = render_latex_raw("min(a, b)")
+            expect(result).to_contain("\\min")
+
+        it "recognizes lim as known":
+            val result = render_latex_raw("lim(x)")
+            expect(result).to_contain("\\lim")
+
+        it "recognizes tanh as known":
+            val result = render_latex_raw("tanh(x)")
+            expect(result).to_contain("\\tanh")
+
+        it "recognizes sinh as known":
+            val result = render_latex_raw("sinh(x)")
+            expect(result).to_contain("\\sinh")
+
+        it "recognizes cosh as known":
+            val result = render_latex_raw("cosh(x)")
+            expect(result).to_contain("\\cosh")
+
+        it "treats unknown function as operatorname":
+            val result = render_latex_raw("foo(x)")
+            expect(result).to_contain('\operatorname{foo}')
+
+    context "zero-arg function call":
+        it "renders function with no args":
+            expect(to_text("f()")).to_equal("f()")
+
+    context "single dot token":
+        it "handles single dot at end of input":
+            val result = to_text("x.")
+            expect(result).to_contain("x")
+
+    context "character coverage for _is_digit":
+        it "exercises all digit branches 0-9":
+            # Number containing all 10 digits covers every _is_digit branch
+            val result = to_text("1234567890")
+            expect(result).to_equal("1234567890")
+
+        it "exercises decimal number with dot":
+            val result = to_text("3.14159")
+            expect(result).to_equal("3.14159")
+
+    context "character coverage for _is_alpha":
+        it "exercises lowercase a-m in identifiers":
+            val r1 = to_text("abcdefg")
+            expect(r1).to_equal("abcdefg")
+            val r2 = to_text("hijklm")
+            expect(r2).to_equal("hijklm")
+
+        it "exercises lowercase n-z in identifiers":
+            val r1 = to_text("nopqr")
+            expect(r1).to_equal("nopqr")
+            val r2 = to_text("stuvwxyz")
+            expect(r2).to_equal("stuvwxyz")
+
+        it "exercises uppercase A-M in identifiers":
+            val r1 = to_text("ABCDEFG")
+            expect(r1).to_equal("ABCDEFG")
+            val r2 = to_text("HIJKLM")
+            expect(r2).to_equal("HIJKLM")
+
+        it "exercises uppercase N-Z in identifiers":
+            val r1 = to_text("NOPQR")
+            expect(r1).to_equal("NOPQR")
+            val r2 = to_text("STUVWXYZ")
+            expect(r2).to_equal("STUVWXYZ")
+
+        it "exercises underscore in identifier":
+            # Underscore is alpha in math tokenizer; tokenizes as single ident
+            val result = to_text("a_b")
+            expect(result).to_contain("a")
+
+    context "_can_start_expr and _can_implicit_mul edge cases":
+        it "no implicit mul after operator":
+            # After +, next token is num - not implicit mul context
+            val result = to_debug("a + 2")
+            expect(result).to_equal("Add(Id(a), Num(2))")
+
+        it "implicit mul with num before lparen":
+            val result = to_debug("3(a + b)")
+            expect(result).to_contain("Mul")
+            expect(result).to_contain("Group")
+
+    context "tokenizer number-dot boundary":
+        it "handles number followed by dot-dot range":
+            # In sum(i, 1..10), the 1 must not consume ".." as decimal
+            val result = to_debug("sum(i, 1..10) i")
+            expect(result).to_contain("Sum")
+            expect(result).to_contain("Num(1)")
+            expect(result).to_contain("Num(10)")
+
+
+# ============================================================================
+# 12. Parser edge cases for deeper coverage
+# ============================================================================
+
+describe "math_repr parser edge cases deeper":
+    """
+    ## Parser Edge Cases - Deeper
+
+    Exercises additional parser branches for frac, sum with edge cases,
+    implicit mul distinctions, and can_start_expr false paths.
+    """
+
+    context "frac without comma":
+        it "handles frac with space separation":
+            val result = to_text("frac(a b)")
+            expect(result).to_contain("a")
+
+    context "sum without range":
+        it "handles sum expression completely":
+            val result = to_debug("sum(k, 1..n) k^2")
+            expect(result).to_contain("Sum")
+            expect(result).to_contain("Pow")
+
+    context "can_start_expr false for non-expression tokens":
+        it "handles expression ending at eof":
+            val result = to_debug("x +")
+            expect(result).to_contain("Id(x)")
+
+    context "implicit mul variations":
+        it "identifier followed by paren group":
+            val result = to_debug("a(b + c)")
+            expect(result).to_contain("Call")
+
+        it "paren group followed by identifier":
+            val result = to_debug("(a)b")
+            expect(result).to_contain("Mul")
+            expect(result).to_contain("Group")
+
+    context "multi-arg function calls through all renderers":
+        it "renders multi-arg call through pretty":
+            val result = to_pretty("f(a, b, c)")
+            expect(result).to_contain("f")
+            expect(result).to_contain("a")
+
+        it "renders multi-arg call through latex":
+            val result = render_latex_raw("f(a, b, c)")
+            expect(result).to_contain("f")
+
+    context "sqrt through latex":
+        it "renders sqrt in latex":
+            val result = render_latex_raw("sqrt(x)")
+            expect(result).to_contain("\\sqrt")
+
+    context "frac through all renderers":
+        it "frac through debug":
+            val result = to_debug("frac(x, y)")
+            expect(result).to_contain("Frac")
+
+        it "frac through pretty":
+            val result = to_pretty("frac(x, y)")
+            expect(result).to_contain("x")
+            expect(result).to_contain("y")
+
+        it "frac through latex":
+            val result = render_latex_raw("frac(x, y)")
+            expect(result).to_contain("\\frac")
+
+    context "subscript through all renderers":
+        it "subscript through text":
+            val result = to_text("a[0]")
+            expect(result).to_equal("a[0]")
+
+        it "subscript through debug":
+            val result = to_debug("a[0]")
+            expect(result).to_contain("Sub")
+
+        it "subscript through latex":
+            val result = render_latex_raw("a[0]")
+            expect(result).to_contain("_")
+
+    context "group through all renderers":
+        it "group through debug":
+            val result = to_debug("(a)")
+            expect(result).to_contain("Group")
+
+        it "group through pretty":
+            val result = to_pretty("(a)")
+            expect(result).to_start_with("(")
+            expect(result).to_end_with(")")
+
+        it "group through latex":
+            val result = render_latex_raw("(a)")
+            expect(result).to_start_with("(")
+
+    context "division through all renderers":
+        it "div through pretty":
+            val result = to_pretty("a / b")
+            expect(result).to_contain("/")
+
+        it "div through latex":
+            val result = render_latex_raw("a / b")
+            expect(result).to_contain("/")
+
+    context "explicit mul through latex":
+        it "explicit mul renders cdot in latex":
+            val result = render_latex_raw("a * b")
+            expect(result).to_contain("\\cdot")
+
+    context "implicit mul through latex":
+        it "implicit mul renders space in latex":
+            val result = render_latex_raw("2x")
+            expect(result).to_contain("2")
+            expect(result).to_contain("x")
+
+
+# ============================================================================
+# 15. Parser edge cases for remaining uncovered branches
+# ============================================================================
+
+describe "math_repr additional parser coverage":
+    """
+    ## Additional Parser Coverage
+
+    Exercises remaining uncovered parser branches: _can_start_expr false
+    path, multiple postfix operations, frac/sum parsing edge cases.
+    """
+
+    context "postfix chaining":
+        it "multiple subscripts chained":
+            val result = to_debug("a[i][j]")
+            expect(result).to_contain("Sub")
+
+        it "transpose after group":
+            val result = to_debug("(a)'")
+            expect(result).to_contain("Transpose")
+            expect(result).to_contain("Group")
+
+    context "function with zero args through all renderers":
+        it "zero-arg call via debug":
+            val result = to_debug("f()")
+            expect(result).to_contain("Call")
+
+        it "zero-arg call via pretty":
+            val result = to_pretty("f()")
+            expect(result).to_contain("f")
+
+        it "zero-arg call via latex":
+            val result = render_latex_raw("f()")
+            expect(result).to_contain("f")
+
+    context "deeply nested expressions":
+        it "nested power and mul":
+            val result = to_text("x^2 * y^3")
+            expect(result).to_contain("^")
+
+        it "add then sub then mul":
+            val result = to_debug("a + b - c * d")
+            expect(result).to_contain("Sub")
+            expect(result).to_contain("Mul")
+
+    context "single dot at end of input":
+        it "dot at very end":
+            val result = to_text("a.")
+            expect(result).to_contain("a")
+
+    context "number at end without operator":
+        it "bare number through all renderers":
+            val result1 = to_pretty("42")
+            expect(result1).to_equal("42")
+            val result2 = render_latex_raw("42")
+            expect(result2).to_equal("42")
+
+    context "complex expressions through pretty and latex":
+        it "power of sum through pretty":
+            val result = to_pretty("(a + b)^2")
+            expect(result).to_contain("a")
+
+        it "power of sum through latex":
+            val result = render_latex_raw("(a + b)^2")
+            expect(result).to_contain("a")
+
+        it "fraction in sum through pretty":
+            val result = to_pretty("frac(x, y) + 1")
+            expect(result).to_contain("x")
+
+        it "fraction in sum through latex":
+            val result = render_latex_raw("frac(x, y) + 1")
+            expect(result).to_contain("x")
+
+    context "multi-char exponent through latex":
+        it "multi-char exponent uses braces":
+            val result = render_latex_raw("x^(n+1)")
+            expect(result).to_contain("x")
+
+    context "multi-char subscript through latex":
+        it "multi-char subscript uses braces":
+            val result = render_latex_raw("a[ij]")
+            expect(result).to_contain("a")
+
+
+# ============================================================================
+# 16. Chained operations for loop continuation coverage
+# ============================================================================
+
+describe "math_repr chained operations":
+    """
+    ## Chained Operations
+
+    Exercises loop continuation in _parse_add and _parse_mul by using
+    chained operators that force multiple iterations.
+    """
+
+    context "chained additions":
+        it "triple addition exercises loop continuation":
+            val result = to_text("a + b + c + d")
+            expect(result).to_equal("a + b + c + d")
+
+        it "triple addition via debug":
+            val result = to_debug("a + b + c + d")
+            expect(result).to_contain("Add")
+
+        it "addition then subtraction chain":
+            val result = to_text("a + b - c + d")
+            expect(result).to_contain("+")
+            expect(result).to_contain("-")
+
+        it "many additions via pretty":
+            val result = to_pretty("a + b + c + d + e")
+            expect(result).to_contain("+")
+
+        it "many additions via latex":
+            val result = render_latex_raw("a + b + c + d + e")
+            expect(result).to_contain("+")
+
+    context "chained multiplications":
+        it "triple explicit mul":
+            val result = to_text("a * b * c * d")
+            expect(result).to_contain("*")
+
+        it "triple division":
+            val result = to_text("a / b / c")
+            expect(result).to_contain("/")
+
+        it "mixed mul and div":
+            val result = to_text("a * b / c * d")
+            expect(result).to_contain("*")
+            expect(result).to_contain("/")
+
+        it "chained implicit mul":
+            val result = to_text("2x(y)")
+            expect(result).to_contain("2")
+
+    context "chained postfix operations":
+        it "multiple subscripts":
+            val result = to_text("a[i][j][k]")
+            expect(result).to_contain("[")
+
+        it "subscript then transpose then subscript":
+            val result = to_text("A[i]'")
+            expect(result).to_contain("A")
+
+
+# ============================================================================
+# 18. _parse_sum_call without comma and without range
+# ============================================================================
+
+describe "math_repr sum_call edge cases":
+    """
+    ## Sum Call Edge Cases
+
+    Exercises edge cases in _parse_sum_call: missing comma,
+    missing range operator, missing close paren.
+    """
+
+    context "sum without comma separator":
+        it "sum without comma":
+            val result = to_text("sum(i 1..n) i")
+            expect(result).to_contain("i")
+
+    context "sum without range dots":
+        it "sum without range operator":
+            val result = to_text("sum(i, 1 n) i")
+            expect(result).to_contain("i")
+
+    context "sum without closing paren":
+        it "sum missing rparen":
+            val result = to_text("sum(i, 1..n i")
+            expect(result).to_contain("i")
+
+    context "frac without comma":
+        it "frac missing comma":
+            val result = to_text("frac(a b)")
+            expect(result).to_contain("a")
+
+    context "frac without closing paren":
+        it "frac missing rparen":
+            val result = to_text("frac(a, b x")
+            expect(result).to_contain("a")
+
+
+# ============================================================================
+# 19. _can_start_expr and _can_implicit_mul num path
+# ============================================================================
+
+describe "math_repr can_start_expr num path":
+    """
+    ## _can_start_expr Num Path
+
+    The num branch in _can_start_expr returns true but is never the trigger
+    for implicit multiplication (since _can_implicit_mul requires id or lparen).
+    This exercises the num path specifically.
+    """
+
+    context "expression starting with number":
+        it "number after operator uses can_start_expr num":
+            val result = to_debug("x + 3")
+            expect(result).to_equal("Add(Id(x), Num(3))")
+
+        it "number in complex expression":
+            val result = to_debug("3 + 4 + 5")
+            expect(result).to_contain("Add")
+
+    context "can_implicit_mul false because num not id or lparen":
+        it "number after number is not implicit mul":
+            # "3 4" - the 4 can start expr (num) but implicit mul only for id/lparen
+            # So "3" is parsed, "4" starts new expr context
+            val result = to_text("3 + 4")
+            expect(result).to_equal("3 + 4")
+
+
+# ============================================================================
+# 20. _parse_primary fallback path
+# ============================================================================
+
+describe "math_repr parse_primary fallback":
+    """
+    ## Parse Primary Fallback
+
+    When _parse_primary encounters an unexpected token (not num, id, lparen),
+    it advances past it and returns an error node "?".
+    """
+
+    context "unexpected token triggers fallback":
+        it "unexpected token at start":
+            val result = to_text("]")
+            expect(result).to_contain("?")
+
+        it "unexpected rparen at start":
+            val result = to_debug(")")
+            expect(result).to_contain("Id(?)")
+
+    context "identifier-like tokens with mixed chars":
+        it "identifier with digits":
+            val result = to_text("var123")
+            expect(result).to_equal("var123")
+
+
+# ============================================================================
+# 21. Malformed input for parser FALSE paths
+# ============================================================================
+
+describe "math_repr malformed input":
+    """
+    ## Malformed Input
+
+    Tests missing brackets, parens, and operators to exercise the FALSE
+    branches of parser guard checks (_peek_kind == "rbracket" etc).
+    """
+
+    context "missing close bracket in subscript":
+        it "subscript without rbracket via text":
+            val result = to_text("x[i")
+            expect(result).to_contain("x")
+
+        it "subscript without rbracket via debug":
+            val result = to_debug("x[i")
+            expect(result).to_contain("Sub")
+
+        it "subscript without rbracket via pretty":
+            val result = to_pretty("x[i")
+            expect(result).to_contain("x")
+
+        it "subscript without rbracket via latex":
+            val result = render_latex_raw("x[i")
+            expect(result).to_contain("x")
+
+    context "missing close paren in function call":
+        it "function call without rparen via text":
+            val result = to_text("f(x")
+            expect(result).to_contain("f")
+
+        it "function call without rparen via debug":
+            val result = to_debug("f(x")
+            expect(result).to_contain("Call")
+
+        it "function call without rparen via pretty":
+            val result = to_pretty("f(x")
+            expect(result).to_contain("f")
+
+        it "function call without rparen via latex":
+            val result = render_latex_raw("f(x")
+            expect(result).to_contain("f")
+
+    context "missing close paren in group":
+        it "group without rparen via text":
+            val result = to_text("(a + b")
+            expect(result).to_contain("a")
+
+        it "group without rparen via debug":
+            val result = to_debug("(a + b")
+            expect(result).to_contain("Group")
+
+        it "group without rparen via pretty":
+            val result = to_pretty("(a + b")
+            expect(result).to_contain("a")
+
+        it "group without rparen via latex":
+            val result = render_latex_raw("(a + b")
+            expect(result).to_contain("a")
+
+    context "missing close paren in frac":
+        it "frac without rparen":
+            val result = to_text("frac(a, b")
+            expect(result).to_contain("a")
+
+    context "missing comma in sum":
+        it "sum missing comma":
+            val result = to_text("sum(i 1..10) i")
+            expect(result).to_contain("i")
+
+    context "missing range in sum":
+        it "sum missing dotdot":
+            val result = to_text("sum(i, 1 10) i")
+            expect(result).to_contain("i")
+
+    context "missing rparen in sum":
+        it "sum missing rparen":
+            val result = to_text("sum(i, 1..10 i")
+            expect(result).to_contain("i")
+
+
+# ============================================================================
+# 24. Intensive loop coverage for parse_add and tokenizer inner loops
+# ============================================================================
+
+describe "math_repr intensive loop coverage":
+    """
+    ## Intensive Loop Coverage
+
+    Exercises inner loops many times to ensure loop continuation decisions
+    are covered in both true and false directions.
+    """
+
+    context "long chained addition to exercise _parse_add loop":
+        it "six-way addition":
+            val result = to_text("a + b + c + d + e + f")
+            expect(result).to_contain("a")
+            expect(result).to_contain("f")
+
+        it "addition and subtraction interleaved":
+            val result = to_text("a + b - c + d - e + f")
+            expect(result).to_contain("a")
+
+        it "six-way via debug":
+            val result = to_debug("a + b + c + d + e + f")
+            expect(result).to_contain("Add")
+
+    context "long chained mul to exercise _parse_mul loop":
+        it "six-way multiplication":
+            val result = to_text("a * b * c * d * e * f")
+            expect(result).to_contain("*")
+
+        it "six-way division":
+            val result = to_text("a / b / c / d / e / f")
+            expect(result).to_contain("/")
+
+    context "large number for digit loop":
+        it "ten-digit number exercises inner digit loop":
+            val result = to_text("1234567890")
+            expect(result).to_equal("1234567890")
+
+        it "number with many decimal places":
+            val result = to_text("3.14159265")
+            expect(result).to_equal("3.14159265")
+
+    context "long identifier for alnum loop":
+        it "long identifier exercises inner alnum loop":
+            val result = to_text("abcdefghijklmnop")
+            expect(result).to_equal("abcdefghijklmnop")
+
+    context "many subscripts for postfix loop":
+        it "four chained subscripts":
+            val result = to_text("a[i][j][k][l]")
+            expect(result).to_contain("[")
+
+    context "many function args for comma loop":
+        it "five-arg function":
+            val result = to_text("f(a, b, c, d, e)")
+            expect(result).to_contain("f")
+            expect(result).to_contain("e")
+
+    context "deeply nested parens":
+        it "triple nested parens":
+            val result = to_text("(((x)))")
+            expect(result).to_contain("x")
+
+    context "expression with many different token types":
+        it "all token types in one expression":
+            val result = to_text("f(a + b * c / d, e^2, g[i])")
+            expect(result).to_contain("f")
+            expect(result).to_contain("g")
+
+    context "number then range dots in sum context":
+        it "two-digit number before range":
+            val result = to_debug("sum(i, 10..20) i")
+            expect(result).to_contain("Num(10)")
+            expect(result).to_contain("Num(20)")
+
+        it "single digit before range":
+            val result = to_debug("sum(i, 1..9) i")
+            expect(result).to_contain("Num(1)")
+            expect(result).to_contain("Num(9)")
+
+    context "number followed by number for can_start_expr num path":
+        it "two numbers separated by space":
+            # "3 4" - first parsed as Num(3), then _parse_mul checks for implicit mul
+            # _can_implicit_mul calls _can_start_expr which hits pk=="num" TRUE
+            # then _can_implicit_mul checks pk=="id" (false), pk=="lparen" (false)
+            # so implicit mul doesn't happen, "4" is left unconsumed
+            val result = to_debug("3 4")
+            expect(result).to_contain("Num(3)")
+
+        it "number then number then id":
+            val result = to_debug("3 4 x")
+            expect(result).to_contain("Num(3)")
+
+        it "number after paren group forces can_start_expr":
+            val result = to_debug("(a) 5")
+            expect(result).to_contain("Group")
+
+    context "single-char inputs for tokenizer path isolation":
+        it "only lparen":
+            val result = to_text("(")
+            expect(result).to_contain("?")
+
+        it "only rparen":
+            val result = to_text(")")
+            expect(result).to_contain("?")
+
+        it "only lbracket":
+            val result = to_text("[")
+            expect(result).to_contain("?")
+
+        it "only rbracket":
+            val result = to_text("]")
+            expect(result).to_contain("?")
+
+        it "only comma":
+            val result = to_text(",")
+            expect(result).to_contain("?")
+
+        it "only slash":
+            val result = to_text("/")
+            expect(result).to_contain("?")
+
+        it "only star":
+            val result = to_text("*")
+            expect(result).to_contain("?")
+
+        it "only caret":
+            val result = to_text("^")
+            expect(result).to_contain("?")
+
+        it "only apostrophe":
+            val result = to_text("'")
+            expect(result).to_contain("?")
+
+    context "two-char inputs: operator then identifier":
+        it "lparen then x":
+            val result = to_text("(x")
+            expect(result).to_contain("x")
+
+        it "slash then x":
+            val result = to_text("/x")
+            expect(result).to_contain("x")
+
+        it "comma then x":
+            val result = to_text(",x")
+            expect(result).to_contain("x")

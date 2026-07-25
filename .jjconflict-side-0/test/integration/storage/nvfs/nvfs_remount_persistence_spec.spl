@@ -1,0 +1,102 @@
+# NVFS Remount Persistence Specification
+#
+# Verifies AC-4: data written through NVMe-backed arenas survives a simulated
+# remount by reading raw sectors from the same block device.
+#
+# Run: bin/simple test test/integration/storage/nvfs/nvfs_remount_persistence_spec.spl
+
+use std.spec
+use std.fs_driver.nvfs_arena.{
+    arena_create_nvme_impl, arena_append_impl, arena_readv_impl,
+    arena_total_bytes_impl,
+    nvfs_arena_set_block_device, nvfs_raw_write_sector, nvfs_raw_read_sector
+}
+use std.fs_driver.nvfs_superblock.{
+    nvfs_superblock_set_device, nvfs_superblock_format_disk,
+    nvfs_superblock_probe_disk, nvfs_superblock_read_from_disk,
+    NVFS_MAGIC, NVFS_VERSION
+}
+use os.port.cached_raw_image_block_device.{CachedRawImageBlockDevice}
+
+extern fn rt_bytes_alloc(len: i64) -> [u8]
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+
+fn _make_device() -> CachedRawImageBlockDevice:
+    val root = "/tmp/nvfs_remount_spec"
+    val _ = rt_dir_create_all(root)
+    val img = rt_bytes_alloc(65536)
+    val _ = rt_file_write_bytes(root + "/disk.img", img)
+    val r = CachedRawImageBlockDevice.from_bytes(root + "/disk.img", img, 512u32)
+    r.unwrap()
+
+describe "NVFS remount persistence — data survives across mount cycles":
+
+    it "superblock survives format then re-read":
+        var dev = _make_device()
+        nvfs_arena_set_block_device(dev)
+        nvfs_superblock_set_device(dev)
+        val fmt_ok = nvfs_superblock_format_disk(0xCAFEu64, 0xBABEu64)
+        expect(fmt_ok).to_equal(true)
+        val probe_ok = nvfs_superblock_probe_disk()
+        expect(probe_ok).to_equal(true)
+        val sb = nvfs_superblock_read_from_disk()
+        expect(sb.valid).to_equal(true)
+        expect(sb.uuid_hi).to_equal(0xCAFEu64)
+        expect(sb.uuid_lo).to_equal(0xBABEu64)
+        expect(sb.mount_generation).to_equal(1u64)
+
+    it "arena data written to NVMe sectors can be read back via raw sector read":
+        var dev = _make_device()
+        nvfs_arena_set_block_device(dev)
+        val aid = arena_create_nvme_impl(0, 4096, 4, 32)
+        expect(aid > 0).to_equal(true)
+        val data: [u8] = [0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 0x04]
+        val w = arena_append_impl(aid, data, 0)
+        expect(w).to_equal(8)
+        val raw = nvfs_raw_read_sector(5u64)
+        expect(raw.len() >= 8).to_equal(true)
+        expect(raw[0]).to_equal(0xDE)
+        expect(raw[1]).to_equal(0xAD)
+        expect(raw[2]).to_equal(0xBE)
+        expect(raw[3]).to_equal(0xEF)
+        expect(raw[4]).to_equal(0x01)
+        expect(raw[7]).to_equal(0x04)
+
+    it "full write-read cycle: format superblock + write arena + read both back":
+        var dev = _make_device()
+        nvfs_arena_set_block_device(dev)
+        nvfs_superblock_set_device(dev)
+        val fmt_ok = nvfs_superblock_format_disk(0x1111u64, 0x2222u64)
+        expect(fmt_ok).to_equal(true)
+        val aid = arena_create_nvme_impl(0, 4096, 8, 16)
+        expect(aid > 0).to_equal(true)
+        val payload: [u8] = [0x41, 0x42, 0x43, 0x44, 0x45]
+        val w = arena_append_impl(aid, payload, 0)
+        expect(w).to_equal(5)
+        val sb = nvfs_superblock_read_from_disk()
+        expect(sb.valid).to_equal(true)
+        expect(sb.uuid_hi).to_equal(0x1111u64)
+        val arena_data = arena_readv_impl(aid, 0, 5)
+        expect(arena_data.len() as i64).to_equal(5)
+        expect(arena_data[0]).to_equal(0x41)
+        expect(arena_data[4]).to_equal(0x45)
+
+    it "multiple arena writes persist across reads":
+        var dev = _make_device()
+        nvfs_arena_set_block_device(dev)
+        val aid = arena_create_nvme_impl(0, 4096, 16, 16)
+        expect(aid > 0).to_equal(true)
+        val d1: [u8] = [0x10, 0x20, 0x30]
+        val w1 = arena_append_impl(aid, d1, 0)
+        expect(w1).to_equal(3)
+        val d2: [u8] = [0x40, 0x50]
+        val w2 = arena_append_impl(aid, d2, 0)
+        expect(w2).to_equal(2)
+        expect(arena_total_bytes_impl(aid)).to_equal(5)
+        val raw = nvfs_raw_read_sector(17u64)
+        expect(raw[0]).to_equal(0x10)
+        expect(raw[1]).to_equal(0x20)
+        expect(raw[2]).to_equal(0x30)
+        expect(raw[3]).to_equal(0x40)
+        expect(raw[4]).to_equal(0x50)

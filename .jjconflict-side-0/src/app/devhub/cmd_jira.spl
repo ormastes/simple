@@ -1,0 +1,346 @@
+# ITF CLI — Jira commands (acli backend)
+#
+# Subcommands: view, search, create
+# Delegates to acli via adapter_jira
+
+use app.devhub.config.{ItfConfig, load_config, resolve_auth_token}
+use app.devhub.auth.{check_jira_auth}
+use app.devhub.adapter_jira.{jira_view_issue, jira_search, jira_create_issue, jira_update_issue, jira_add_comment, jira_transition_issue, JiraIssue}
+use app.devhub.adapter_jira_curl.{JiraClient, jira_curl_update_issue, jira_curl_add_comment, jira_curl_list_transitions, jira_curl_transition_issue}
+use app.devhub.flags.{_extract_flag, _has_flag, _positional_args}
+use app.devhub.output.{print_error, print_success, print_info, print_table_dynamic, colorize_state, relative_time, format_json_output, wants_json, should_use_color, set_no_pager}
+use app.ui.render.ansi.{ansi_bold, ansi_reset, ansi_dim, ansi_cyan}
+
+
+fn handle_jira(args: [text]) -> i64:
+    """Dispatch jira subcommands."""
+    if args.len() == 0:
+        _print_jira_help()
+        return 0
+
+    val action = args[0]
+    val action_args = if args.len() > 1: args[1:] else: []
+
+    match action:
+        "view":
+            _jira_view(action_args)
+        "search":
+            _jira_search(action_args)
+        "create":
+            _jira_create(action_args)
+        "update":
+            _jira_update(action_args)
+        "comment":
+            _jira_comment(action_args)
+        "transition":
+            _jira_transition(action_args)
+        "-h" | "--help" | "help":
+            _print_jira_help()
+            0
+        _:
+            print_error("unknown jira command: {action}")
+            _print_jira_help()
+            1
+
+
+fn _jira_view(args: [text]) -> i64:
+    """View a Jira issue. Usage: itf jira view <KEY> [--json]"""
+    val config = load_config()
+    val positionals = _positional_args(args)
+    if positionals.len() == 0:
+        print_error("issue key required. Usage: itf jira view <KEY>")
+        return 1
+
+    val key = positionals[0]
+    val (success, issue, raw_json) = jira_view_issue(config, key)
+    if not success:
+        print_error(raw_json)
+        return 1
+
+    if wants_json(args):
+        print format_json_output(raw_json, args)
+        return 0
+
+    # Text display
+    val use_color = should_use_color()
+    if use_color:
+        print "{ansi_bold()}{issue.key}: {issue.summary}{ansi_reset()}"
+        print "{ansi_dim()}Status: {issue.status} | Type: {issue.issue_type} | Priority: {issue.priority}{ansi_reset()}"
+    else:
+        print "{issue.key}: {issue.summary}"
+        print "Status: {issue.status} | Type: {issue.issue_type} | Priority: {issue.priority}"
+
+    if issue.assignee != "":
+        print "Assignee: {issue.assignee}"
+    if issue.description != "":
+        print ""
+        print issue.description
+
+    0
+
+
+fn _jira_search(args: [text]) -> i64:
+    """Search Jira issues. Usage: itf jira search <JQL> [--fields F] [--limit N] [--json] [--no-pager]"""
+    set_no_pager(_has_flag(args, "--no-pager"))
+    val config = load_config()
+    val positionals = _positional_args(args)
+    if positionals.len() == 0:
+        print_error("JQL query required. Usage: itf jira search <JQL>")
+        return 1
+
+    val jql = positionals[0]
+    val fields = _extract_flag(args, "--fields", "")
+    val limit_str = _extract_flag(args, "--limit", "25")
+    var limit = 25
+    if limit_str != "25":
+        var n = 0
+        for ch in limit_str:
+            if ch >= "0" and ch <= "9":
+                n = n * 10 + (ch.to_i64() - "0".to_i64())
+        if n > 0:
+            limit = n
+
+    val (success, issues, raw_json) = jira_search(config, jql, fields, limit)
+    if not success:
+        print_error(raw_json)
+        return 1
+
+    if wants_json(args):
+        print format_json_output(raw_json, args)
+        return 0
+
+    if issues.len() == 0:
+        print "No issues found."
+        return 0
+
+    var rows: [[text]] = []
+    for issue in issues:
+        val status = colorize_state(issue.status)
+        val assignee = if issue.assignee != "": issue.assignee else: "(unassigned)"
+        val updated = if issue.updated != "": relative_time(issue.updated) else: ""
+        rows.push([issue.key, status, assignee, _truncate(issue.summary, 60), updated])
+    print_table_dynamic(["KEY", "STATUS", "ASSIGNEE", "SUMMARY", "UPDATED"], rows)
+
+    0
+
+
+fn _jira_create(args: [text]) -> i64:
+    """Create a Jira issue. Usage: itf jira create --project P --summary S [--type T] [--description D]"""
+    val config = load_config()
+    val project = _extract_flag(args, "--project", "")
+    val summary = _extract_flag(args, "--summary", "")
+    val issue_type = _extract_flag(args, "--type", "")
+    val description = _extract_flag(args, "--description", "")
+
+    if project == "":
+        print_error("--project required. Usage: itf jira create --project P --summary S")
+        return 1
+    if summary == "":
+        print_error("--summary required.")
+        return 1
+
+    val (success, key, raw) = jira_create_issue(config, project, summary, issue_type, description)
+    if not success:
+        print_error("failed to create issue: {raw}")
+        return 1
+
+    if wants_json(args):
+        print raw
+        return 0
+
+    print_success("Issue created: {key}")
+    0
+
+
+fn _jira_curl_configured(config: ItfConfig) -> bool:
+    """True if the REST v3 curl-fallback path (adapter_jira_curl) has enough
+    config to run: jira.url, jira.email, and a jira auth token."""
+    config.jira_url != "" and config.jira_email != "" and resolve_auth_token(config, "jira") != ""
+
+
+fn _jira_curl_client(config: ItfConfig) -> JiraClient:
+    """Build a JiraClient from ItfConfig for the curl-fallback path."""
+    JiraClient(
+        base_url: config.jira_url,
+        email: config.jira_email,
+        api_token: resolve_auth_token(config, "jira"),
+        curl_path: "curl",
+    )
+
+
+fn _jira_update(args: [text]) -> i64:
+    """Update an issue's summary/description. Usage:
+    itf jira update <KEY> [--summary S] [--description D]
+
+    Tries acli first (acli jira workitem edit); acli's mutation verb
+    surface isn't documented anywhere reachable from this repo, so on any
+    acli failure this falls back to the REST v3 curl path
+    (adapter_jira_curl.spl) when jira curl credentials are configured.
+    """
+    val config = load_config()
+    val positionals = _positional_args(args)
+    if positionals.len() == 0:
+        print_error("issue key required. Usage: itf jira update <KEY> [--summary S] [--description D]")
+        return 1
+    val key = positionals[0]
+    val summary = _extract_flag(args, "--summary", "")
+    val description = _extract_flag(args, "--description", "")
+    if summary == "" and description == "":
+        print_error("nothing to update: provide --summary and/or --description")
+        return 1
+
+    val (acli_ok, acli_err) = jira_update_issue(config, key, summary, description)
+    if acli_ok:
+        print_success("Updated {key}")
+        return 0
+
+    if _jira_curl_configured(config):
+        val client = _jira_curl_client(config)
+        val (ok, err) = jira_curl_update_issue(client, key, summary, description)
+        if ok:
+            print_success("Updated {key}")
+            return 0
+        print_error("update failed (acli: {acli_err}; curl: {err})")
+        return 1
+
+    print_error("update failed: {acli_err}")
+    1
+
+
+fn _jira_comment(args: [text]) -> i64:
+    """Add a comment to an issue. Usage: itf jira comment <KEY> --body TEXT
+
+    acli-first with the same REST v3 curl fallback as `update` — see its
+    docstring for why.
+    """
+    val config = load_config()
+    val positionals = _positional_args(args)
+    if positionals.len() == 0:
+        print_error("issue key required. Usage: itf jira comment <KEY> --body TEXT")
+        return 1
+    val key = positionals[0]
+    val body = _extract_flag(args, "--body", "")
+    if body == "":
+        print_error("--body TEXT required")
+        return 1
+
+    val (acli_ok, acli_err) = jira_add_comment(config, key, body)
+    if acli_ok:
+        print_success("Comment added to {key}")
+        return 0
+
+    if _jira_curl_configured(config):
+        val client = _jira_curl_client(config)
+        val (ok, err) = jira_curl_add_comment(client, key, body)
+        if ok:
+            print_success("Comment added to {key}")
+            return 0
+        print_error("comment failed (acli: {acli_err}; curl: {err})")
+        return 1
+
+    print_error("comment failed: {acli_err}")
+    1
+
+
+fn _jira_transition(args: [text]) -> i64:
+    """Move an issue through its workflow. Usage:
+    itf jira transition <KEY> <STATUS_NAME>
+    itf jira transition <KEY> --id ID
+
+    Tries acli (`acli jira workitem transition ... --status`) first. On
+    failure, falls back to the REST v3 curl path when configured: with
+    `--id` the numeric transition id is used directly; with a status name,
+    GET .../transitions is queried first to resolve the name (case
+    -insensitive) to its id — a real Jira workflow's available transitions
+    depend on the issue's current status, so the name must be one of those.
+    """
+    val config = load_config()
+    val positionals = _positional_args(args)
+    if positionals.len() == 0:
+        print_error("issue key required. Usage: itf jira transition <KEY> <STATUS_NAME|--id ID>")
+        return 1
+    val key = positionals[0]
+    val explicit_id = _extract_flag(args, "--id", "")
+    val status_name = if positionals.len() > 1: positionals[1] else: ""
+    val status_or_id = if explicit_id != "": explicit_id else: status_name
+    if status_or_id == "":
+        print_error("a target status name or --id ID is required")
+        return 1
+
+    val (acli_ok, acli_err) = jira_transition_issue(config, key, status_or_id)
+    if acli_ok:
+        print_success("Transitioned {key} -> {status_or_id}")
+        return 0
+
+    if not _jira_curl_configured(config):
+        print_error("transition failed: {acli_err}")
+        return 1
+
+    val client = _jira_curl_client(config)
+    if explicit_id != "":
+        val (ok, err) = jira_curl_transition_issue(client, key, explicit_id)
+        if ok:
+            print_success("Transitioned {key} -> {explicit_id}")
+            return 0
+        print_error("transition failed (acli: {acli_err}; curl: {err})")
+        return 1
+
+    val (list_ok, transitions, list_err) = jira_curl_list_transitions(client, key)
+    if not list_ok:
+        print_error("transition failed (acli: {acli_err}; curl: could not list transitions: {list_err})")
+        return 1
+    var resolved_id = ""
+    val wanted = status_name.lower()
+    for t in transitions:
+        if t.name.lower() == wanted:
+            resolved_id = t.id
+    if resolved_id == "":
+        var names: [text] = []
+        for t in transitions:
+            names = names + [t.name]
+        print_error("no transition named '{status_name}' from the current status. Available: {names.join(", ")}")
+        return 1
+    val (ok, err) = jira_curl_transition_issue(client, key, resolved_id)
+    if ok:
+        print_success("Transitioned {key} -> {status_name}")
+        return 0
+    print_error("transition failed: {err}")
+    1
+
+
+fn _truncate(s: text, max_len: i64) -> text:
+    """Truncate text with ellipsis."""
+    if s.len() <= max_len:
+        return s
+    s[0:max_len - 3] + "..."
+
+
+fn _print_jira_help():
+    """Print jira subcommand help."""
+    print "Usage: itf jira <command> [flags]"
+    print ""
+    print "Commands:"
+    print "  view        View a Jira issue"
+    print "  search      Search issues with JQL"
+    print "  create      Create a new issue"
+    print "  update      Update summary/description (--summary, --description)"
+    print "  comment     Add a comment (--body)"
+    print "  transition  Move an issue to a new status (name or --id)"
+    print ""
+    print "Common flags:"
+    print "  --json          Output as JSON"
+    print "  --jq EXPR       Filter JSON output"
+    print "  --fields F      Select output fields"
+    print "  --limit N       Max results (default: 25)"
+    print "  --project P     Jira project key"
+    print "  --type T        Issue type (Task, Bug, Story, etc.)"
+    print ""
+    print "update/comment/transition try acli first, then fall back to the"
+    print "REST v3 curl path when jira.url + jira.email + a jira auth token"
+    print "are configured (itf auth login --jira --url U --user E --token T)."
+    print ""
+    print "Examples:"
+    print "  itf jira update PROJ-1 --summary \"New title\""
+    print "  itf jira comment PROJ-1 --body \"status update\""
+    print "  itf jira transition PROJ-1 \"In Progress\""
+    print "  itf jira transition PROJ-1 --id 31"

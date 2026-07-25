@@ -1,0 +1,298 @@
+"""Slide GUI view + presenter session spec.
+
+slide_gui_view(deck, slide_index) renders ONE slide of a deck (the [Slide]
+list deck_format.spl's parse_deck returns) as a GUI widget tree -- title +
+bullets as text widgets (bullets indented per nesting level), tables/images
+as honest placeholder text lines -- plus a plain-text pipe-separated dump:
+"slide|<index+1>/<total>|<title>" first, then one line per element
+("bullet|<level>|<text>", "text|<text>", "table|<rows>x<cols>",
+"image|<alt>"). An out-of-range slide index fails closed with an
+"error|bad-index" line instead of crashing.
+
+SlideGuiSession navigates the deck: slide_session_next/prev clamp at the
+ends, slide_session_goto is 1-based and fails closed (last_error
+"bad-index") on out-of-range targets, and slide_gui_step maps presenter
+keys: "n"/"right"/"space" next, "p"/"left" prev, single digits "1".."9"
+goto, "q"/"ctrl_c"/"eof" quit.
+
+The live presenter loop (`office slides-gui-live`, interactive.spl's
+run_slides_gui_live) feeds decode_key_byte key names through the pure
+slides_live_map_key translation before slide_gui_step: right -> "n",
+left -> "p", a decoded space (" " or "space") -> "n", n/p/digits/quit keys
+pass through, anything else -> "" (no step).
+"""
+
+use std.spec
+use app.office.slides.slide.{Slide, SlideElement, SlideElementKind, blank_slide, add_text_box, add_slide_element}
+use app.office.gui.{slide_gui_view, slide_session_new, slide_session_next, slide_session_prev, slide_session_goto, slide_gui_step}
+use app.office.interactive.{slides_live_map_key}
+
+fn _titled_slide(id: text, title: text) -> Slide:
+    var s = blank_slide(id)
+    s = add_text_box(s, "title", title, 60, 60, 840, 120)
+    s
+
+fn _bullets_slide() -> Slide:
+    var s = _titled_slide("s2", "Agenda")
+    s = add_text_box(s, "bullet0_1", "First point", 60, 220, 840, 80)
+    s = add_text_box(s, "bullet1_2", "Nested detail", 60, 310, 840, 80)
+    s = add_text_box(s, "bullet0_3", "Second point", 60, 400, 840, 80)
+    s
+
+fn _table_slide() -> Slide:
+    var s = _titled_slide("s3", "Results")
+    val tel = SlideElement(
+        id: "table1",
+        kind: SlideElementKind.TableEl(rows: "| Region | Sales |\n| --- | --- |\n| East | 10 |\n| West | 20 |"),
+        x: 60, y: 220,
+        width: 840, height: 80
+    )
+    s = add_slide_element(s, tel)
+    s
+
+fn _image_slide() -> Slide:
+    var s = _titled_slide("s4", "Diagram")
+    val iel = SlideElement(
+        id: "image1",
+        kind: SlideElementKind.ImageEl(src: "missing_diagram.png", alt: "architecture"),
+        x: 60, y: 220,
+        width: 840, height: 80
+    )
+    s = add_slide_element(s, iel)
+    s
+
+fn _demo_deck() -> [Slide]:
+    # 4 slides: title-only, bullets (2 levels), table, image.
+    var deck: [Slide] = []
+    deck.push(_titled_slide("s1", "Intro"))
+    deck.push(_bullets_slide())
+    deck.push(_table_slide())
+    deck.push(_image_slide())
+    deck
+
+describe "slide_gui_view: header line":
+    """The dump always starts with slide|<index+1>/<total>|<title>."""
+
+    it "the first line carries the 1-based slide number, total, and title":
+        val deck = _demo_deck()
+        val view = slide_gui_view(deck, 0)
+        val lines = view.text_dump.split("\n")
+        expect(lines[0]).to_equal("slide|1/4|Intro")
+
+    it "a later slide's header carries its own 1-based position":
+        val deck = _demo_deck()
+        val view = slide_gui_view(deck, 2)
+        val lines = view.text_dump.split("\n")
+        expect(lines[0]).to_equal("slide|3/4|Results")
+
+describe "slide_gui_view: bullets":
+    """Each bullet element contributes one bullet|<level>|<text> line, in
+    slide order, with the nesting level from its bullet<level>_<n> id."""
+
+    it "bullets render one line each with their nesting level, in order":
+        val deck = _demo_deck()
+        val view = slide_gui_view(deck, 1)
+        val lines = view.text_dump.split("\n")
+        expect(lines[0]).to_equal("slide|2/4|Agenda")
+        expect(lines[1]).to_equal("bullet|0|First point")
+        expect(lines[2]).to_equal("bullet|1|Nested detail")
+        expect(lines[3]).to_equal("bullet|0|Second point")
+
+describe "slide_gui_view: plain body text":
+    """A non-bullet body text box renders as a text|<content> line."""
+
+    it "a body text box renders its content on a text| line":
+        var s = _titled_slide("s1", "Notes")
+        s = add_text_box(s, "body1", "Plain body line", 60, 220, 840, 80)
+        var deck: [Slide] = []
+        deck.push(s)
+        val view = slide_gui_view(deck, 0)
+        val lines = view.text_dump.split("\n")
+        expect(lines[0]).to_equal("slide|1/1|Notes")
+        expect(lines[1]).to_equal("text|Plain body line")
+
+describe "slide_gui_view: table placeholder":
+    """Table elements render as an honest table|<rows>x<cols> placeholder
+    (rows = non-separator markdown lines, cols = first row's cell count) --
+    the GUI widget path has no table rendering for slides today."""
+
+    it "a table element renders as table|<rows>x<cols>":
+        val deck = _demo_deck()
+        val view = slide_gui_view(deck, 2)
+        val lines = view.text_dump.split("\n")
+        expect(lines[1]).to_equal("table|3x2")
+
+describe "slide_gui_view: image placeholder":
+    """Image elements render as an honest image|<alt> placeholder -- the GUI
+    widget path decodes no bitmaps."""
+
+    it "an image element renders its alt text on an image| line":
+        val deck = _demo_deck()
+        val view = slide_gui_view(deck, 3)
+        val lines = view.text_dump.split("\n")
+        expect(lines[1]).to_equal("image|architecture")
+
+describe "slide_gui_view: bad index fails closed":
+    """An out-of-range slide index produces an error line, no crash."""
+
+    it "an index past the deck end produces error|bad-index":
+        val deck = _demo_deck()
+        val view = slide_gui_view(deck, 9)
+        expect(view.text_dump).to_contain("error|bad-index")
+
+    it "a negative index produces error|bad-index":
+        val deck = _demo_deck()
+        val view = slide_gui_view(deck, -1)
+        expect(view.text_dump).to_contain("error|bad-index")
+
+describe "SlideGuiSession: next/prev clamp":
+    """next advances one slide and clamps at the last; prev steps back one
+    and clamps at the first -- edge clamps are silent (last_error clears)."""
+
+    it "next advances and clamps at the last slide":
+        val deck = _demo_deck()
+        var session = slide_session_new(deck)
+        expect(session.current_index).to_equal(0)
+        session = slide_session_next(session)
+        expect(session.current_index).to_equal(1)
+        session = slide_session_next(session)
+        session = slide_session_next(session)
+        expect(session.current_index).to_equal(3)
+        session = slide_session_next(session)
+        expect(session.current_index).to_equal(3)
+        expect(session.last_error).to_equal("")
+
+    it "prev at the first slide clamps to the first slide":
+        val deck = _demo_deck()
+        var session = slide_session_new(deck)
+        session = slide_session_prev(session)
+        expect(session.current_index).to_equal(0)
+        expect(session.last_error).to_equal("")
+
+describe "SlideGuiSession: goto":
+    """goto is 1-based; out-of-range targets leave the session unchanged
+    except last_error = "bad-index" (fail-closed)."""
+
+    it "goto jumps to the 1-based slide and clears last_error":
+        val deck = _demo_deck()
+        var session = slide_session_new(deck)
+        session = slide_session_goto(session, 3)
+        expect(session.current_index).to_equal(2)
+        expect(session.last_error).to_equal("")
+
+    it "goto past the deck end leaves the index unchanged and records bad-index":
+        val deck = _demo_deck()
+        var session = slide_session_new(deck)
+        session = slide_session_goto(session, 9)
+        expect(session.current_index).to_equal(0)
+        expect(session.last_error).to_equal("bad-index")
+
+    it "goto 0 is out of range for a 1-based target":
+        val deck = _demo_deck()
+        var session = slide_session_new(deck)
+        session = slide_session_goto(session, 0)
+        expect(session.current_index).to_equal(0)
+        expect(session.last_error).to_equal("bad-index")
+
+describe "slide_gui_step: key mapping":
+    """n/right/space advance, p/left step back, digits goto, q/ctrl_c/eof
+    quit with the session unchanged, unknown keys are a no-op."""
+
+    it "n, right, and space each advance one slide":
+        val deck = _demo_deck()
+        var session = slide_session_new(deck)
+        var res = slide_gui_step(session, "n")
+        session = res.session
+        expect(session.current_index).to_equal(1)
+        res = slide_gui_step(session, "right")
+        session = res.session
+        expect(session.current_index).to_equal(2)
+        res = slide_gui_step(session, "space")
+        session = res.session
+        expect(session.current_index).to_equal(3)
+        assert_false(res.quit)
+
+    it "p and left each step back one slide":
+        val deck = _demo_deck()
+        var session = slide_session_new(deck)
+        session = slide_session_goto(session, 3)
+        var res = slide_gui_step(session, "p")
+        session = res.session
+        expect(session.current_index).to_equal(1)
+        res = slide_gui_step(session, "left")
+        session = res.session
+        expect(session.current_index).to_equal(0)
+        assert_false(res.quit)
+
+    it "a digit key jumps to that 1-based slide":
+        val deck = _demo_deck()
+        var session = slide_session_new(deck)
+        var res = slide_gui_step(session, "4")
+        session = res.session
+        expect(session.current_index).to_equal(3)
+        assert_false(res.quit)
+
+    it "an out-of-range digit key fails closed with bad-index":
+        val deck = _demo_deck()
+        var session = slide_session_new(deck)
+        var res = slide_gui_step(session, "9")
+        session = res.session
+        expect(session.current_index).to_equal(0)
+        expect(session.last_error).to_equal("bad-index")
+        assert_false(res.quit)
+
+    it "q, ctrl_c, and eof signal quit with the session unchanged":
+        val deck = _demo_deck()
+        var session = slide_session_new(deck)
+        session = slide_session_goto(session, 2)
+        val res_q = slide_gui_step(session, "q")
+        assert_true(res_q.quit)
+        expect(res_q.session.current_index).to_equal(1)
+        val res_c = slide_gui_step(session, "ctrl_c")
+        assert_true(res_c.quit)
+        val res_e = slide_gui_step(session, "eof")
+        assert_true(res_e.quit)
+        expect(res_e.session.current_index).to_equal(1)
+
+    it "an unknown key is a no-op":
+        val deck = _demo_deck()
+        var session = slide_session_new(deck)
+        val res = slide_gui_step(session, "z")
+        expect(res.session.current_index).to_equal(0)
+        assert_false(res.quit)
+
+describe "live presenter step":
+    """slides_live_map_key translates decode_key_byte's key names into
+    slide_gui_step's presenter keys for the run_slides_gui_live loop:
+    right -> n, left -> p, decoded space -> n, digits and n/p/quit keys
+    pass through, everything else -> "" (no step, no redraw)."""
+
+    it "right maps to n (next)":
+        expect(slides_live_map_key("right")).to_equal("n")
+
+    it "left maps to p (prev)":
+        expect(slides_live_map_key("left")).to_equal("p")
+
+    it "a decoded space (the ' ' printable byte 32) maps to n":
+        expect(slides_live_map_key(" ")).to_equal("n")
+
+    it "the canonical space name also maps to n":
+        expect(slides_live_map_key("space")).to_equal("n")
+
+    it "a digit passes through for 1-based goto":
+        expect(slides_live_map_key("3")).to_equal("3")
+
+    it "n and p pass through unchanged":
+        expect(slides_live_map_key("n")).to_equal("n")
+        expect(slides_live_map_key("p")).to_equal("p")
+
+    it "q, ctrl_c, and eof pass through as quit keys":
+        expect(slides_live_map_key("q")).to_equal("q")
+        expect(slides_live_map_key("ctrl_c")).to_equal("ctrl_c")
+        expect(slides_live_map_key("eof")).to_equal("eof")
+
+    it "unknown keys map to the empty no-step key":
+        expect(slides_live_map_key("z")).to_equal("")
+        expect(slides_live_map_key("escape")).to_equal("")
+        expect(slides_live_map_key("0")).to_equal("")
+        expect(slides_live_map_key("")).to_equal("")

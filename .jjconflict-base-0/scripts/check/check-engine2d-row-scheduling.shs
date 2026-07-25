@@ -1,0 +1,97 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+cc_bin="${CC:-cc}"
+extra_cflags="${ENGINE2D_SIMD_C_KERNELS_CFLAGS:-}"
+runner="${ENGINE2D_SIMD_C_KERNELS_RUNNER:-}"
+
+cat >"$tmp/check.c" <<'EOF'
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+
+#include "runtime_simd_dispatch.c"
+
+SplArray* rt_array_new_uninit(int64_t cap) {
+    SplArray *a = calloc(1, sizeof(*a));
+    if (a != NULL && cap > 0) a->items = (SplValue*)malloc((size_t)cap * sizeof(int64_t));
+    a->cap = cap;
+    return a;
+}
+
+int64_t rt_array_header_ptr(SplArray* a) { return (int64_t)(intptr_t)a; }
+int8_t rt_array_set_len_known(int64_t header, int64_t len) {
+    ((SplArray*)(intptr_t)header)->len = len;
+    return 1;
+}
+int64_t rt_array_data_ptr(SplArray* a) { return (int64_t)(intptr_t)a->items; }
+
+static double now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
+}
+
+static double benchmark_fill(int64_t width, int64_t height, int64_t workers) {
+    double start = now_ms();
+    SplArray *pixels = rt_engine2d_simd_fill_rows_u32(
+        width, height, 0xff102030, workers);
+    double elapsed = now_ms() - start;
+    int64_t *data = (int64_t*)pixels->items;
+    const int64_t expected = (int64_t)((uint64_t)0xff102030 << 3);
+    if (data[0] != expected || data[pixels->len - 1] != expected) exit(5);
+    free(pixels->items);
+    free(pixels);
+    return elapsed;
+}
+
+int main(void) {
+    const int64_t expected[][2] = {
+        {0, 5}, {5, 10}, {10, 15}, {15, 20},
+        {20, 25}, {25, 29}, {29, 33}, {33, 37}
+    };
+    for (int run = 0; run < 10; run++) {
+        int64_t previous_end = 0;
+        for (int64_t worker = 0; worker < 8; worker++) {
+            int64_t begin = -1;
+            int64_t end = -1;
+            engine2d_partition_rows(37, 8, worker, &begin, &end);
+            if (begin != expected[worker][0] || end != expected[worker][1] ||
+                begin != previous_end || begin >= end) {
+                return 1;
+            }
+            previous_end = end;
+        }
+        if (previous_end != 37) return 2;
+
+        SplArray *pixels = rt_engine2d_simd_fill_rows_u32(
+            13, 37, 0x80102030, 8);
+        if (pixels == NULL || pixels->len != 481) return 3;
+        int64_t *data = (int64_t*)pixels->items;
+        const int64_t expected_pixel = (int64_t)((uint64_t)0x80102030 << 3);
+        for (int64_t i = 0; i < pixels->len; i++) {
+            if (data[i] != expected_pixel) return 4;
+        }
+        free(pixels->items);
+        free(pixels);
+    }
+    if (getenv("ENGINE2D_ROW_SCHEDULING_SKIP_PERF") == NULL) {
+        printf("engine2d_fill_4k_serial_ms=%.3f\n", benchmark_fill(3840, 2160, 1));
+        printf("engine2d_fill_4k_parallel_ms=%.3f\n", benchmark_fill(3840, 2160, 8));
+        printf("engine2d_fill_8k_serial_ms=%.3f\n", benchmark_fill(7680, 4320, 1));
+        printf("engine2d_fill_8k_parallel_ms=%.3f\n", benchmark_fill(7680, 4320, 8));
+    }
+    puts("engine2d_row_scheduling=true");
+    return 0;
+}
+EOF
+
+# shellcheck disable=SC2086
+$cc_bin $extra_cflags -std=gnu11 -O2 -ffunction-sections -fdata-sections -I"$root/src/runtime" \
+    "$tmp/check.c" -Wl,--gc-sections -pthread -ldl -o "$tmp/check"
+# shellcheck disable=SC2086
+$runner "$tmp/check"

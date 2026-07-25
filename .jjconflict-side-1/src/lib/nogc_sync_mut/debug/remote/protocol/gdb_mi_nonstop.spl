@@ -1,0 +1,87 @@
+# GDB MI Non-Stop Mode Controller
+# Enables per-thread control via GDB non-stop mode.
+# Non-stop mode allows some threads to run while others are stopped.
+
+use std.nogc_sync_mut.debug.remote.protocol.gdb_mi.GdbMiClient
+
+# Controller for GDB non-stop mode (per-thread execution control)
+class GdbMiNonStopController:
+    client: GdbMiClient
+    enabled: bool
+
+impl GdbMiNonStopController:
+    # Enable non-stop mode on the GDB session.
+    # Sends: -gdb-set non-stop on
+    # Sends: -gdb-set target-async on
+    static fn enable(client: GdbMiClient) -> Result<GdbMiNonStopController, text>:
+        client.send_command("gdb-set non-stop on")?
+        client.send_command("gdb-set target-async on")?
+        Ok(GdbMiNonStopController(client: client, enabled: true))
+
+    # Disable non-stop mode.
+    # Sends: -gdb-set non-stop off
+    me disable() -> Result<text, text>:
+        self.client.send_command("gdb-set non-stop off")?
+        self.enabled = false
+        Ok("non-stop mode disabled")
+
+    # Check whether non-stop mode is currently enabled.
+    fn is_enabled() -> bool:
+        self.enabled
+
+    # Interrupt a specific thread.
+    # Sends: -exec-interrupt --thread {thread_id}
+    me interrupt_thread(thread_id: i32) -> Result<text, text>:
+        val cmd = GdbMiNonStopController.build_thread_interrupt_cmd(thread_id)
+        self.client.send_command(cmd)?
+        Ok("thread {thread_id} interrupted")
+
+    # Continue a specific thread.
+    # Sends: -exec-continue --thread {thread_id}
+    me continue_thread(thread_id: i32) -> Result<text, text>:
+        val cmd = GdbMiNonStopController.build_thread_continue_cmd(thread_id)
+        self.client.send_command(cmd)?
+        Ok("thread {thread_id} continued")
+
+    # List IDs of currently running threads.
+    # Sends: -thread-info, parses output for running threads.
+    me list_running_threads() -> Result<[i32], text>:
+        val data = self.client.send_command("thread-info")?
+        var running: [i32] = []
+        val threads_raw = data.get("threads") ?? "[]"
+        # Parse thread records and filter for state=running
+        val parts = threads_raw.split("id=")
+        for part in parts:
+            if part.contains("state=\"running\""):
+                val id_end = part.find(",") ?? part.find("}")  ?? part.len()
+                val id_str = part[0:id_end].replace("\"", "").trim()
+                val id = id_str.parse_int() ?? -1
+                if id > 0:
+                    running.push(id)
+        Ok(running)
+
+    # Stop all threads.
+    # Sends: -exec-interrupt --all
+    me stop_all_threads() -> Result<text, text>:
+        self.client.send_command("exec-interrupt --all")?
+        Ok("all threads stopped")
+
+    # --- Static command builders (for testing without live GDB) ---
+
+    static fn build_thread_interrupt_cmd(thread_id: i32) -> text:
+        "exec-interrupt --thread {thread_id}"
+
+    static fn build_thread_continue_cmd(thread_id: i32) -> text:
+        "exec-continue --thread {thread_id}"
+
+    static fn build_enable_nonstop_cmd() -> text:
+        "gdb-set non-stop on"
+
+    static fn build_enable_async_cmd() -> text:
+        "gdb-set target-async on"
+
+    static fn build_disable_nonstop_cmd() -> text:
+        "gdb-set non-stop off"
+
+    static fn build_stop_all_cmd() -> text:
+        "exec-interrupt --all"

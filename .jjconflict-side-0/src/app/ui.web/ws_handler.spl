@@ -1,0 +1,226 @@
+# WebSocket Handler
+#
+# Handles WebSocket upgrade handshake and message processing
+# for the web UI renderer.
+
+use app.ui.web.tls_serve_loop.{ConnStream}
+use app.ui.web.origin_guard.{OriginGuard, AuthError}
+use app.ui.web.auth_params.{ui_web_extract_bearer, ui_web_ws_response_protocol}
+use app.ui.web.session_token.{verify}
+# Local SHA-1/base64 helpers wrap runtime hooks to avoid as_bytes() interpreter limitation.
+extern fn rt_sha1_new() -> i64
+extern fn rt_sha1_write(handle: i64, data: text) -> i64
+extern fn rt_sha1_finish_base64(handle: i64) -> text
+extern fn rt_sha1_free(handle: i64)
+extern fn rt_text_to_bytes(s: text) -> [u8]
+extern fn rt_time_ms() -> u64
+
+fn ui_web_ws_time_ms() -> u64:
+    rt_time_ms()
+
+fn ui_web_ws_text_to_bytes(s: text) -> [u8]:
+    rt_text_to_bytes(s)
+
+fn ui_web_ws_sha1_new() -> i64:
+    rt_sha1_new()
+
+fn ui_web_ws_sha1_write(handle: i64, data: text) -> i64:
+    rt_sha1_write(handle, data)
+
+fn ui_web_ws_sha1_finish_base64(handle: i64) -> text:
+    rt_sha1_finish_base64(handle)
+
+fn ui_web_ws_sha1_free(handle: i64):
+    rt_sha1_free(handle)
+
+# =========================================================================
+# WebSocket Upgrade
+# =========================================================================
+
+val WS_MAGIC: text = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+fn _header_value(headers: text, name: text) -> text:
+    val target = "{name.lower()}:"
+    val lines = headers.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.lower().starts_with(target):
+            return trimmed.slice(target.len(), trimmed.len()).trim()
+    return ""
+
+fn _connection_has_upgrade(headers: text) -> bool:
+    val value = _header_value(headers, "connection")
+    for part in value.split(","):
+        if part.trim().lower() == "upgrade":
+            return true
+    return false
+
+fn is_ws_upgrade_request(headers: text) -> bool:
+    return _header_value(headers, "upgrade").lower() == "websocket" and _connection_has_upgrade(headers)
+
+fn ui_web_ws_upgrade_method_allowed(method: text) -> bool:
+    return method == "GET"
+
+fn ui_web_ws_upgrade_path_allowed(path: text) -> bool:
+    var route = path
+    val query_idx = path.find("?")
+    if query_idx >= 0:
+        route = path.slice(0, query_idx)
+    return route == "/ui/ws"
+
+fn handle_ws_upgrade(stream: ConnStream, path: text, headers: text, guard: OriginGuard, secret: text):
+    """Handle WebSocket upgrade handshake with origin + token gate.
+
+    Checks Origin header against the allowlist and verifies the bearer token
+    before completing the WebSocket handshake. On failure writes 403 and returns."""
+    # --- Security gate ---
+    val origin_result = guard.check(headers)
+    match origin_result:
+        Err(_):
+            stream.write_all("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+            return
+        Ok(origin):
+            # Extract bearer token from header/subprotocol first; query tokens require explicit compatibility opt-in.
+            val bearer = _extract_bearer(headers, path)
+            if bearer == "":
+                stream.write_all("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+                return
+            val now = ui_web_ws_time_ms()
+            val tok_result = verify(bearer, origin, secret, now)
+            match tok_result:
+                Err(_):
+                    stream.write_all("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+                    return
+                Ok(_):
+                    pass_do_nothing("token verified; continue with WebSocket handshake")
+
+    # --- Proceed with handshake ---
+    # Extract Sec-WebSocket-Key from headers
+    val key = extract_ws_key(headers)
+    if key == "":
+        return
+
+    # Compute accept hash
+    val accept = compute_ws_accept(key)
+
+    # Send upgrade response
+    var response = "HTTP/1.1 101 Switching Protocols\r\n"
+    response = "{response}Upgrade: websocket\r\n"
+    response = "{response}Connection: Upgrade\r\n"
+    response = "{response}Sec-WebSocket-Accept: {accept}\r\n"
+    val protocol = ui_web_ws_response_protocol(headers)
+    if protocol != "":
+        response = "{response}Sec-WebSocket-Protocol: {protocol}\r\n"
+    response = "{response}\r\n"
+    stream.write_all(response)
+    # The WebRuntimeAdapter sends the initial snapshot via send_snapshot()
+
+fn handle_ws_wm_upgrade(stream: ConnStream, path: text, headers: text, guard: OriginGuard, secret: text):
+    """Compatibility WM upgrade entrypoint.
+
+    WM mode now shares the guarded WebSocket upgrade flow, but callers still
+    import `handle_ws_wm_upgrade` as the stable entrypoint name."""
+    handle_ws_upgrade(stream, path, headers, guard, secret)
+
+fn extract_ws_key(headers: text) -> text:
+    """Extract the Sec-WebSocket-Key from headers."""
+    return _header_value(headers, "sec-websocket-key")
+
+fn compute_ws_accept(key: text) -> text:
+    """Compute the Sec-WebSocket-Accept value.
+    WebSocket spec requires: base64(SHA-1(key + magic)).
+    Uses runtime functions directly to avoid as_bytes() interpreter limitation."""
+    val combined = key + WS_MAGIC
+    val handle = ui_web_ws_sha1_new()
+    ui_web_ws_sha1_write(handle, combined)
+    val result = ui_web_ws_sha1_finish_base64(handle)
+    ui_web_ws_sha1_free(handle)
+    return result
+
+# =========================================================================
+# WebSocket Frame Operations
+# =========================================================================
+
+fn send_ws_text(stream: ConnStream, message: text) -> bool:
+    """Send a text frame over WebSocket as raw bytes.
+
+    Browser clients validate RFC6455 frame bytes strictly; `write_text()`
+    corrupts the 0x81 frame header because it encodes the header as text.
+    """
+    val payload = ui_web_ws_text_to_bytes(message)
+    val len = payload.len()
+    var frame: [u8] = [0x81u8]
+
+    if len < 126:
+        frame.push(len.to_u8())
+    elif len < 65536:
+        frame.push(126u8)
+        frame.push(((len / 256) & 0xFF).to_u8())
+        frame.push((len & 0xFF).to_u8())
+    else:
+        frame.push(127u8)
+        frame.push(0u8)
+        frame.push(0u8)
+        frame.push(0u8)
+        frame.push(0u8)
+        frame.push(((len / 16777216) & 0xFF).to_u8())
+        frame.push(((len / 65536) & 0xFF).to_u8())
+        frame.push(((len / 256) & 0xFF).to_u8())
+        frame.push((len & 0xFF).to_u8())
+
+    frame = frame + payload
+    match stream.write_all_bytes(frame):
+        Err(_):
+            return false
+        Ok(()):
+            return true
+
+fn send_ws_close(stream: ConnStream, code: i64, reason: text) -> bool:
+    """Send a WebSocket close frame with status code and reason."""
+    val reason_bytes = ui_web_ws_text_to_bytes(reason)
+    val reason_len = reason_bytes.len()
+    val payload_len = 2 + reason_len
+    var frame: [u8] = [0x88u8]
+    if payload_len < 126:
+        frame.push(payload_len.to_u8())
+    else:
+        frame.push(126u8)
+        frame.push(((payload_len / 256) & 0xFF).to_u8())
+        frame.push((payload_len & 0xFF).to_u8())
+    frame.push(((code / 256) & 0xFF).to_u8())
+    frame.push((code & 0xFF).to_u8())
+    frame = frame + reason_bytes
+    match stream.write_all_bytes(frame):
+        Err(_):
+            return false
+        Ok(()):
+            return true
+
+fn escape_json_string(value: text) -> text:
+    var result = ""
+    for ch in value.split(""):
+        if ch == "":
+            pass_dn
+        elif ch == "\\":
+            result = result + "\\\\"
+        elif ch == "\"":
+            result = result + "\\\""
+        elif ch == "\n":
+            result = result + "\\n"
+        elif ch == "\r":
+            result = result + "\\r"
+        elif ch == "\t":
+            result = result + "\\t"
+        else:
+            result = result + ch
+    result
+
+# =========================================================================
+# Bearer Token Extraction Helper
+# =========================================================================
+
+fn _extract_bearer(headers: text, path: text) -> text:
+    """Extract bearer token from header/subprotocol first; query tokens require explicit compatibility opt-in."""
+    return ui_web_extract_bearer(headers, path)
+
+export extract_ws_key, compute_ws_accept, send_ws_text, send_ws_close, escape_json_string

@@ -1,0 +1,35 @@
+use app.io.mod (process_run)
+
+fn _run_manifest_safety_script(script: text) -> text:
+    val (out, err, code) = process_run("/bin/sh", ["-c", script])
+    "{out}{err}\nexit={code}\n"
+
+describe "scv manifest safety":
+    it "rejects corrupt chunks before exporting manifests":
+        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-manifest-corrupt-chunk.XXXXXX)\nprintf 'base\\n' > \"$TMP/a.txt\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nOUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot)\nCOMMIT=$(printf '%s\\n' \"$OUT\" | awk '{print $2}')\nTREE=$(grep '^tree: ' \".scv/objects/commits/$COMMIT.sdn\" | awk '{print $2}')\nCHUNK=$(awk -F'|' 'NR==1 {print $3}' \".scv/objects/trees/$TREE.sdn\")\nprintf 'evil\\n' > \".scv/objects/chunks/$CHUNK.blob\"\nset +e\nBAD=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" export-manifest export.sdn)\nBAD_CODE=$?\nset -e\nprintf '%s\\nbad_code=%s\\n' \"$BAD\" \"$BAD_CODE\"\ntest \"$BAD_CODE\" -ne 0\ntest ! -e export.sdn\n"
+        val out = _run_manifest_safety_script(script)
+        expect(out).to_contain("ERROR corrupt chunk: sha256_")
+        expect(out).to_contain("bad_code=1")
+        expect(out).to_contain("exit=0")
+
+    it "rejects manifest file rows with extra fields":
+        val script = "set -eu\nREPO=$(pwd)\nSRC=$(mktemp -d /tmp/scv-manifest-extra-src.XXXXXX)\nDST=$(mktemp -d /tmp/scv-manifest-extra-dst.XXXXXX)\nprintf 'payload\\n' > \"$SRC/a.txt\"\ncd \"$SRC\"\nCHUNK=sha256_$(sha256sum a.txt | cut -d ' ' -f1)\nprintf 'format: scv-export-manifest-v1\\nfiles:\\nfile|a.txt|%s|8|extra\\n' \"$CHUNK\" > bad.sdn\ncd \"$DST\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nset +e\nBAD=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" import-manifest \"$SRC/bad.sdn\" \"$SRC\")\nBAD_CODE=$?\nset -e\nprintf '%s\\nbad_code=%s\\n' \"$BAD\" \"$BAD_CODE\"\ntest \"$BAD_CODE\" -ne 0\n"
+        val out = _run_manifest_safety_script(script)
+        expect(out).to_contain("ERROR bad manifest file line: file|a.txt|sha256_")
+        expect(out).to_contain("bad_code=1")
+        expect(out).to_contain("exit=0")
+
+    it "rejects duplicate manifest paths during import":
+        val script = "set -eu\nREPO=$(pwd)\nSRC=$(mktemp -d /tmp/scv-manifest-dup-src.XXXXXX)\nDST=$(mktemp -d /tmp/scv-manifest-dup-dst.XXXXXX)\nprintf 'payload\\n' > \"$SRC/a.txt\"\ncd \"$SRC\"\nCHUNK=sha256_$(sha256sum a.txt | cut -d ' ' -f1)\nprintf 'format: scv-export-manifest-v1\\nfiles:\\nfile|a.txt|%s|8\\nfile|a.txt|%s|8\\n' \"$CHUNK\" \"$CHUNK\" > bad.sdn\ncd \"$DST\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nset +e\nBAD=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" import-manifest \"$SRC/bad.sdn\" \"$SRC\")\nBAD_CODE=$?\nset -e\nprintf '%s\\nbad_code=%s\\n' \"$BAD\" \"$BAD_CODE\"\ntest \"$BAD_CODE\" -ne 0\n"
+        val out = _run_manifest_safety_script(script)
+        expect(out).to_contain("ERROR duplicate manifest path: a.txt")
+        expect(out).to_contain("bad_code=1")
+        expect(out).to_contain("exit=0")
+
+    it "rejects reserved metadata paths during import":
+        val script = "set -eu\nREPO=$(pwd)\nSRC=$(mktemp -d /tmp/scv-manifest-reserved-src.XXXXXX)\nDST=$(mktemp -d /tmp/scv-manifest-reserved-dst.XXXXXX)\nmkdir -p \"$SRC/.scv\"\nprintf 'payload\\n' > \"$SRC/.scv/HEAD_OP\"\ncd \"$SRC\"\nCHUNK=sha256_$(sha256sum .scv/HEAD_OP | cut -d ' ' -f1)\nprintf 'format: scv-export-manifest-v1\\nfiles:\\nfile|.scv/HEAD_OP|%s|8\\n' \"$CHUNK\" > bad.sdn\ncd \"$DST\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nHEAD_BEFORE=$(cat .scv/HEAD_OP)\nset +e\nBAD=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" import-manifest \"$SRC/bad.sdn\" \"$SRC\")\nBAD_CODE=$?\nset -e\nHEAD_AFTER=$(cat .scv/HEAD_OP)\nprintf '%s\\nbad_code=%s\\nhead_same=%s\\n' \"$BAD\" \"$BAD_CODE\" \"$([ \"$HEAD_BEFORE\" = \"$HEAD_AFTER\" ] && printf yes || printf no)\"\ntest \"$BAD_CODE\" -ne 0\ntest \"$HEAD_BEFORE\" = \"$HEAD_AFTER\"\n"
+        val out = _run_manifest_safety_script(script)
+        expect(out).to_contain("ERROR unsafe manifest path: .scv/HEAD_OP")
+        expect(out).to_contain("bad_code=1")
+        expect(out).to_contain("head_same=yes")
+        expect(out).to_contain("exit=0")

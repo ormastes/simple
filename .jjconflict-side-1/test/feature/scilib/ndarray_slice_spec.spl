@@ -1,0 +1,283 @@
+# @cover src/lib/nogc_sync_mut/ndarray/slice.spl 80%
+"""
+# NDArray Slicing Specification
+
+**Feature IDs:** scilib-ndarray-slice
+**Category:** Stdlib
+**Difficulty:** 3/5
+**Status:** Draft
+**Plan:** doc/03_plan/agent_tasks/scilib_port_ndarray.md
+**Design:** doc/05_design/scilib_port_architecture.md
+
+## Overview
+
+NDArray<T> slicing — `Slice.new(start, stop, step)` typed wrapper, view
+semantics, negative indices, multi-dim slicing. Slices carry shape, stride, and
+offset metadata and share backing storage.
+
+Tasks covered: T-NDARRAY-14 (basic slice), T-NDARRAY-24 (strided view, v1.1
+— specs MARKED in preamble but assertions are concrete; they FAIL until v1.1
+ships, per `feedback_no_coverups` no skip()).
+
+## Behavior
+
+- `a.slice(Slice.new(start, stop, step))` — half-open range, 1-D
+- `a.slice_2d(Slice.new(...), Slice.new(...))` — 2-D row+col slice
+- Negative `start`/`stop` count from the end (NumPy parity)
+- returns a strided VIEW (zero-copy metadata adjustment)
+
+## Implementation Notes
+
+The view contract is intentionally observable through metadata: layout,
+strides, and offsets change while the data arrays are reused.
+"""
+
+use std.spipe.*
+use std.ndarray.*
+
+
+# ============================================================================
+# Test Group 1: Basic 1-D slicing
+# ============================================================================
+
+describe "NDArray 1-D slicing":
+    """
+    ## 1-D slice
+
+    `a.slice(Slice.new(start, stop, step))` mirrors `a[start:stop:step]`.
+    Half-open: `stop` is exclusive.
+    """
+
+    context "simple range":
+        it "returns a[1:3] for length-5 array":
+            val a = array([Float64.new(10.0), Float64.new(20.0), Float64.new(30.0),
+                           Float64.new(40.0), Float64.new(50.0)])
+            val r = a.slice(Slice.new(Index.new(1), Index.new(3), Index.new(1)))
+            expect(r.len()).to_equal(Index.new(2))
+            expect(r.get(Index.new(0))).to_equal(Float64.new(20.0))
+            expect(r.get(Index.new(1))).to_equal(Float64.new(30.0))
+
+    context "step > 1":
+        it "returns a[0:5:2] (every-other element)":
+            val a = array([Float64.new(0.0), Float64.new(1.0), Float64.new(2.0),
+                           Float64.new(3.0), Float64.new(4.0)])
+            val r = a.slice(Slice.new(Index.new(0), Index.new(5), Index.new(2)))
+            expect(r.len()).to_equal(Index.new(3))
+            expect(r.get(Index.new(0))).to_equal(Float64.new(0.0))
+            expect(r.get(Index.new(1))).to_equal(Float64.new(2.0))
+            expect(r.get(Index.new(2))).to_equal(Float64.new(4.0))
+
+    context "negative bounds":
+        it "treats Index.new(-1) as 'last element'":
+            val a = array([Float64.new(10.0), Float64.new(20.0), Float64.new(30.0)])
+            expect(a.get(Index.new(-1))).to_equal(Float64.new(30.0))
+            expect(a.get(Index.new(-2))).to_equal(Float64.new(20.0))
+
+        it "returns a[-2:] (last two elements)":
+            val a = array([Float64.new(1.0), Float64.new(2.0), Float64.new(3.0), Float64.new(4.0)])
+            val r = a.slice(Slice.new(Index.new(-2), Index.new(4), Index.new(1)))
+            expect(r.len()).to_equal(Index.new(2))
+            expect(r.get(Index.new(0))).to_equal(Float64.new(3.0))
+            expect(r.get(Index.new(1))).to_equal(Float64.new(4.0))
+
+    context "empty slice":
+        it "returns a length-0 array for slice(2, 2)":
+            val a = array([Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)])
+            val r = a.slice(Slice.new(Index.new(2), Index.new(2), Index.new(1)))
+            expect(r.len()).to_equal(Index.new(0))
+
+
+# ============================================================================
+# Test Group 2: 2-D slicing
+# ============================================================================
+
+describe "NDArray 2-D slicing":
+    """
+    ## 2-D slice
+
+    `slice_2d(rows, cols)` mirrors `a[r0:r1, c0:c1]`.
+    """
+
+    it "returns a 2x2 sub-block of a 3x3 matrix":
+        # 3x3:  1 2 3
+        #       4 5 6
+        #       7 8 9
+        val flat = [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0),
+                    Float64.new(4.0), Float64.new(5.0), Float64.new(6.0),
+                    Float64.new(7.0), Float64.new(8.0), Float64.new(9.0)]
+        val a = array(flat).reshape(Shape.new([Index.new(3), Index.new(3)]))
+        val r = a.slice_2d(Slice.new(Index.new(0), Index.new(2), Index.new(1)),
+                           Slice.new(Index.new(0), Index.new(2), Index.new(1)))
+        expect(r.shape).to_equal(Shape.new([Index.new(2), Index.new(2)]))
+        expect(r.get_at([Index.new(0), Index.new(0)])).to_equal(Float64.new(1.0))
+        expect(r.get_at([Index.new(0), Index.new(1)])).to_equal(Float64.new(2.0))
+        expect(r.get_at([Index.new(1), Index.new(0)])).to_equal(Float64.new(4.0))
+        expect(r.get_at([Index.new(1), Index.new(1)])).to_equal(Float64.new(5.0))
+
+    it "selects a single column as a 3x1 slice":
+        val flat = [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0),
+                    Float64.new(4.0), Float64.new(5.0), Float64.new(6.0),
+                    Float64.new(7.0), Float64.new(8.0), Float64.new(9.0)]
+        val a = array(flat).reshape(Shape.new([Index.new(3), Index.new(3)]))
+        val r = a.slice_2d(Slice.new(Index.new(0), Index.new(3), Index.new(1)),
+                           Slice.new(Index.new(2), Index.new(3), Index.new(1)))
+        expect(r.shape).to_equal(Shape.new([Index.new(3), Index.new(1)]))
+        expect(r.get_at([Index.new(0), Index.new(0)])).to_equal(Float64.new(3.0))
+        expect(r.get_at([Index.new(1), Index.new(0)])).to_equal(Float64.new(6.0))
+        expect(r.get_at([Index.new(2), Index.new(0)])).to_equal(Float64.new(9.0))
+
+
+# ============================================================================
+# Test Group 3: View-vs-copy invariants
+# ============================================================================
+
+describe "NDArray slice view invariants":
+    """
+    ## async-NoGC view contract
+
+    The async-NoGC SciLib core uses stride-carrying views for slice and
+    transpose. View creation is metadata-only: same storage, adjusted shape,
+    stride, and offset.
+    """
+
+    it "slice keeps shared storage and updates metadata only":
+        val a = array([Float64.new(1.0), Float64.new(2.0), Float64.new(3.0), Float64.new(4.0)])
+        val s = a.slice(Slice.new(Index.new(1), Index.new(3), Index.new(1)))
+        expect(s.get(Index.new(0))).to_equal(Float64.new(2.0))
+        expect(s.get(Index.new(1))).to_equal(Float64.new(3.0))
+        expect(s.layout).to_equal(Layout.Strided)
+        expect(s.offset).to_equal(Index.new(1))
+        expect(s.strides).to_equal(Stride.new([Index.new(1)]))
+        expect(s.data_f64.len()).to_equal(a.data_f64.len())
+
+    it "stepped 1-D slice is a strided view":
+        val a = array([Float64.new(0.0), Float64.new(1.0), Float64.new(2.0),
+                       Float64.new(3.0), Float64.new(4.0)])
+        val s = a.slice(Slice.new(Index.new(0), Index.new(5), Index.new(2)))
+        expect(s.layout).to_equal(Layout.Strided)
+        expect(s.offset).to_equal(Index.new(0))
+        expect(s.strides).to_equal(Stride.new([Index.new(2)]))
+        expect(s.get(Index.new(2))).to_equal(Float64.new(4.0))
+        expect(s.data_f64.len()).to_equal(a.data_f64.len())
+
+    it "negative-step slice is a reverse strided view":
+        val a = array([Float64.new(0.0), Float64.new(1.0), Float64.new(2.0),
+                       Float64.new(3.0), Float64.new(4.0)])
+        val s = a.slice(Slice.new(Index.new(4), Index.new(0), Index.new(-2)))
+        expect(s.layout).to_equal(Layout.Strided)
+        expect(s.offset).to_equal(Index.new(4))
+        expect(s.strides).to_equal(Stride.new([Index.new(-2)]))
+        expect(s.get(Index.new(0))).to_equal(Float64.new(4.0))
+        expect(s.get(Index.new(1))).to_equal(Float64.new(2.0))
+        expect(s.data_f64.len()).to_equal(a.data_f64.len())
+
+    it "chained 1-D slices compose offset and stride":
+        val a = array([Float64.new(0.0), Float64.new(1.0), Float64.new(2.0),
+                       Float64.new(3.0), Float64.new(4.0), Float64.new(5.0)])
+        val s = a.slice(Slice.new(Index.new(1), Index.new(6), Index.new(2)))
+        val t = s.slice(Slice.new(Index.new(1), Index.new(2), Index.new(1)))
+        expect(t.layout).to_equal(Layout.Strided)
+        expect(t.offset).to_equal(Index.new(3))
+        expect(t.strides).to_equal(Stride.new([Index.new(2)]))
+        expect(t.get(Index.new(0))).to_equal(Float64.new(3.0))
+        expect(t.data_f64.len()).to_equal(a.data_f64.len())
+
+    it "non-origin 2-D slice keeps parent storage and composed offset":
+        val flat = [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0),
+                    Float64.new(4.0), Float64.new(5.0), Float64.new(6.0),
+                    Float64.new(7.0), Float64.new(8.0), Float64.new(9.0)]
+        val a = array(flat).reshape(Shape.new([Index.new(3), Index.new(3)]))
+        val s = a.slice_2d(Slice.new(Index.new(1), Index.new(3), Index.new(1)),
+                           Slice.new(Index.new(1), Index.new(3), Index.new(1)))
+        expect(s.layout).to_equal(Layout.Strided)
+        expect(s.offset).to_equal(Index.new(4))
+        expect(s.strides).to_equal(Stride.new([Index.new(3), Index.new(1)]))
+        expect(s.get_at([Index.new(0), Index.new(0)])).to_equal(Float64.new(5.0))
+        expect(s.get_at([Index.new(1), Index.new(1)])).to_equal(Float64.new(9.0))
+        expect(s.data_f64.len()).to_equal(a.data_f64.len())
+
+    it "row view is metadata-only and keeps row-major stride":
+        val flat = [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0),
+                    Float64.new(4.0), Float64.new(5.0), Float64.new(6.0),
+                    Float64.new(7.0), Float64.new(8.0), Float64.new(9.0)]
+        val a = array(flat).reshape(Shape.new([Index.new(3), Index.new(3)]))
+        val r = a.row(Index.new(1))
+        expect(r.shape).to_equal(Shape.new([Index.new(3)]))
+        expect(r.layout).to_equal(Layout.Strided)
+        expect(r.offset).to_equal(Index.new(3))
+        expect(r.strides).to_equal(Stride.new([Index.new(1)]))
+        expect(r.get(Index.new(0))).to_equal(Float64.new(4.0))
+        expect(r.get(Index.new(2))).to_equal(Float64.new(6.0))
+        expect(r.data_f64.len()).to_equal(a.data_f64.len())
+
+    it "column slice is metadata-only and carries non-contiguous stride":
+        val flat = [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0),
+                    Float64.new(4.0), Float64.new(5.0), Float64.new(6.0),
+                    Float64.new(7.0), Float64.new(8.0), Float64.new(9.0)]
+        val a = array(flat).reshape(Shape.new([Index.new(3), Index.new(3)]))
+        val c = a.column(Index.new(1))
+        expect(c.shape).to_equal(Shape.new([Index.new(3), Index.new(1)]))
+        expect(c.layout).to_equal(Layout.Strided)
+        expect(c.offset).to_equal(Index.new(1))
+        expect(c.strides).to_equal(Stride.new([Index.new(3), Index.new(1)]))
+        expect(c.get_at([Index.new(0), Index.new(0)])).to_equal(Float64.new(2.0))
+        expect(c.get_at([Index.new(2), Index.new(0)])).to_equal(Float64.new(8.0))
+        expect(c.data_f64.len()).to_equal(a.data_f64.len())
+
+    it "row and column from a sliced matrix compose view metadata":
+        val flat = [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0),
+                    Float64.new(4.0), Float64.new(5.0), Float64.new(6.0),
+                    Float64.new(7.0), Float64.new(8.0), Float64.new(9.0)]
+        val a = array(flat).reshape(Shape.new([Index.new(3), Index.new(3)]))
+        val s = a.slice_2d(Slice.new(Index.new(1), Index.new(3), Index.new(1)),
+                           Slice.new(Index.new(1), Index.new(3), Index.new(1)))
+        val row = s.row(Index.new(1))
+        val col = s.column(Index.new(0))
+        expect(row.offset).to_equal(Index.new(7))
+        expect(row.strides).to_equal(Stride.new([Index.new(1)]))
+        expect(row.get(Index.new(1))).to_equal(Float64.new(9.0))
+        expect(row.data_f64.len()).to_equal(a.data_f64.len())
+        expect(col.offset).to_equal(Index.new(4))
+        expect(col.strides).to_equal(Stride.new([Index.new(3), Index.new(1)]))
+        expect(col.get_at([Index.new(1), Index.new(0)])).to_equal(Float64.new(8.0))
+        expect(col.data_f64.len()).to_equal(a.data_f64.len())
+
+    it "to_contiguous materializes strided I64 views":
+        val a = array_i64([Int64.new(1), Int64.new(2), Int64.new(3),
+                           Int64.new(4), Int64.new(5)])
+        val s = a.slice(Slice.new(Index.new(0), Index.new(5), Index.new(2)))
+        val dense = s.to_contiguous()
+        expect(dense.layout).to_equal(Layout.RowMajor)
+        expect(dense.offset).to_equal(Index.new(0))
+        expect(dense.strides).to_equal(Stride.new([Index.new(1)]))
+        expect(dense.data_i64.len()).to_equal(3)
+        expect(dense.get(Index.new(0))).to_equal(Int64.new(1))
+        expect(dense.get(Index.new(2))).to_equal(Int64.new(5))
+
+    it "to_contiguous materializes strided Bool views":
+        val a = array_bool([Bool.new(true), Bool.new(false), Bool.new(true),
+                            Bool.new(false)])
+        val s = a.slice(Slice.new(Index.new(0), Index.new(4), Index.new(2)))
+        val dense = s.to_contiguous()
+        expect(dense.layout).to_equal(Layout.RowMajor)
+        expect(dense.offset).to_equal(Index.new(0))
+        expect(dense.strides).to_equal(Stride.new([Index.new(1)]))
+        expect(dense.data_bool.len()).to_equal(2)
+        expect(dense.get_bool_at([Index.new(0)])).to_equal(Bool.new(true))
+        expect(dense.get_bool_at([Index.new(1)])).to_equal(Bool.new(true))
+
+
+# ============================================================================
+# Test Group 4: Error paths
+# ============================================================================
+
+describe "NDArray slice error paths":
+    it "returns an error for step=0":
+        val a = array([Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)])
+        val r = a.try_slice(Slice.new(Index.new(0), Index.new(3), Index.new(0)))
+        expect(r.is_err()).to_equal(true)
+
+    it "returns an error for stop > len":
+        val a = array([Float64.new(1.0), Float64.new(2.0)])
+        val r = a.try_slice(Slice.new(Index.new(0), Index.new(5), Index.new(1)))
+        expect(r.is_err()).to_equal(true)

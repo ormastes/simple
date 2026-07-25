@@ -1,0 +1,122 @@
+## wm_bridge/taskbar bucket source contracts.
+##
+## The direct runtime-oriented version of this file currently trips multiple
+## post-example semantic failures in the runner for this import surface,
+## including a trailing `cannot convert dict to int` teardown error. The live
+## dispatch paths are still exercised by the focused passing specs in
+## `ui_routes_test.spl` and `taskbar_runtime_test.spl`.
+
+use std.spipe.*
+
+extern fn rt_file_read_text(path: text) -> text
+
+val WM_BRIDGE_PATH = "src/app/ui.web/wm_bridge.spl"
+val TASKBAR_RUNTIME_PATH = "src/app/ui.web/taskbar_runtime.spl"
+val TASKBAR_RUNTIME_PART1_PATH = "src/app/ui.web/_HostTaskbarRuntime/host_taskbar_runtime.spl"
+val TASKBAR_RUNTIME_PART2_PATH = "src/app/ui.web/_HostTaskbarRuntime/mode_and_layout_helpers.spl"
+val HOST_ADAPTER_CONTRACT_PATH = "src/app/ui.web/host_adapter_contract.spl"
+val WM_JS_PATH = "src/app/ui.web/wm.js"
+
+fn _read_source(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+fn _read_taskbar_runtime_source() -> text:
+    _read_source(TASKBAR_RUNTIME_PATH) + _read_source(TASKBAR_RUNTIME_PART1_PATH) + _read_source(TASKBAR_RUNTIME_PART2_PATH)
+
+describe "wm_bridge window command contracts":
+    it "creates host surfaces as SimpleWeb bindings":
+        val source = _read_source(WM_BRIDGE_PATH)
+        expect(source).to_contain("\"create\":")
+        expect(source).to_contain("bind_window_surface_with_kind(eff_id, eff_id, 0u64, \"host.window\", eff_title, UI_SURFACE_KIND_SIMPLE_WEB)")
+        expect(source).to_contain("self.session.set_active_surface(eff_id)")
+
+    it "resolves window_id_hint through the surface registry":
+        val source = _read_source(WM_BRIDGE_PATH)
+        expect(source).to_contain("val hinted = _extract_text_field(payload_json, \"window_id_hint\")")
+        expect(source).to_contain("val by_window = session.window_surfaces.for_window(hinted)")
+        expect(source).to_contain("by_window.surface_id")
+
+    it "applies move resize and title updates back into the surface tree":
+        val source = _read_source(WM_BRIDGE_PATH)
+        expect(source).to_contain("set_surface_widget_prop(surface_id, root_id, \"x\", ")
+        expect(source).to_contain("set_surface_widget_prop(surface_id, root_id, \"y\", ")
+        expect(source).to_contain("set_surface_widget_prop(surface_id, root_id, \"width\", ")
+        expect(source).to_contain("set_surface_widget_prop(surface_id, root_id, \"height\", ")
+        expect(source).to_contain("set_surface_widget_prop(surface_id, root_id, \"title\", title)")
+        expect(source).to_contain("update_window_surface_title(surface_id, title)")
+
+describe "wm_bridge input contracts":
+    it "writes text_input payloads through to the target widget value":
+        val source = _read_source(WM_BRIDGE_PATH)
+        expect(source).to_contain("if kind == \"text_input\":")
+        expect(source).to_contain("self.session.set_active_surface(surface_id)")
+        expect(source).to_contain("self.session.set_surface_widget_value(surface_id, widget_id, value)")
+
+    it "browser bridge forwards canonical widget pointer and text input events":
+        val source = _read_source(WM_JS_PATH)
+        expect(source).to_contain("document.addEventListener('pointerdown'")
+        expect(source).to_contain("document.addEventListener('pointerup'")
+        expect(source).to_contain("document.addEventListener('pointermove'")
+        expect(source).to_contain("document.addEventListener('input'")
+        expect(source).to_contain("const widget = e.target.closest('[data-canonical-id]')")
+        expect(source).to_contain("const hash = cid.indexOf('#')")
+        expect(source).to_contain("kind: 'pointer_down'")
+        expect(source).to_contain("kind: 'pointer_up'")
+        expect(source).to_contain("kind: 'pointer_move'")
+        expect(source).to_contain("kind: 'text_input'")
+        expect(source).to_contain("text: e.target.value ?? e.data ?? ''")
+
+    it "browser bridge routes MDI titlebar drag into focus and move commands":
+        val source = _read_source(WM_JS_PATH)
+        expect(source).to_contain("_onTitlebarMousedown(e, winEl)")
+        expect(source).to_contain("if (e.target.closest('.wm-traffic-lights')) return;")
+        expect(source).to_contain("this._sendWindowCmd('focus'")
+        expect(source).to_contain("this.dragState = {")
+        expect(source).to_contain("_onMousemove(e)")
+        expect(source).to_contain("_onMouseup(e)")
+        expect(source).to_contain("this._sendWindowCmd('move'")
+        expect(source).to_contain("window_id_hint: ds.surfaceId")
+        expect(source).to_contain("x: Math.round(newX)")
+        expect(source).to_contain("y: Math.round(newY)")
+
+    it "browser bridge routes titlebar buttons and title command input":
+        val source = _read_source(WM_JS_PATH)
+        expect(source).to_contain("const btn = e.target.closest('.wm-traffic-lights button')")
+        expect(source).to_contain("this._markTrafficCommandFeedback(btn, action)")
+        expect(source).to_contain("if      (action === 'close')    this._sendWindowCmd('close', commandPayload)")
+        expect(source).to_contain("else if (action === 'minimize') this._sendWindowCmd('minimize', commandPayload)")
+        expect(source).to_contain("else if (action === 'maximize') this._sendWindowCmd('maximize', commandPayload)")
+        expect(source).to_contain("_makeTitleCommandInput(payload = {})")
+        expect(source).to_contain("input.className = 'wm-title-input wm-command-bar'")
+        expect(source).to_contain("input.addEventListener('input', () => this._showTitleCommandSuggestions(input, true))")
+        expect(source).to_contain("this._sendWindowCmd('title_command'")
+        expect(source).to_contain("window_id_hint: win?.dataset.surfaceId || win?.dataset.canonicalId || ''")
+
+describe "wm_bridge native host feedback contracts":
+    it "routes native feedback through sync taskbar helpers and client actions through queued helpers":
+        val bridge_source = _read_source(WM_BRIDGE_PATH)
+        expect(bridge_source).to_contain("val native_feedback = _extract_text_field(payload_json, \"source\") == HOST_NATIVE_EVENT_SOURCE")
+        expect(bridge_source).to_contain("host_taskbar_runtime_sync_focus(self.session, surface_id)")
+        expect(bridge_source).to_contain("host_taskbar_runtime_focus(self.session, surface_id)")
+        expect(bridge_source).to_contain("host_taskbar_runtime_sync_minimize(self.session, surface_id)")
+        expect(bridge_source).to_contain("host_taskbar_runtime_minimize(self.session, surface_id)")
+        expect(bridge_source).to_contain("host_taskbar_runtime_sync_close(self.session, surface_id)")
+        expect(bridge_source).to_contain("host_taskbar_runtime_close(self.session, surface_id)")
+
+    it "keeps taskbar runtime focus minimize title and geometry sync behavior aligned":
+        val taskbar_source = _read_taskbar_runtime_source()
+        expect(taskbar_source).to_contain("fn host_taskbar_runtime_sync_focus(session: UISession, surface_id: text) -> Result<Unit, text>:")
+        expect(taskbar_source).to_contain("session.set_active_surface(surface_id)")
+        expect(taskbar_source).to_contain("fn host_taskbar_runtime_sync_minimize(session: UISession, surface_id: text) -> Result<Unit, text>:")
+        expect(taskbar_source).to_contain("rt.minimized_surface_ids = rt.minimized_surface_ids.push(surface_id)")
+        expect(taskbar_source).to_contain("fn host_taskbar_runtime_sync_move(session: UISession, surface_id: text, x: i32, y: i32) -> Result<Unit, text>:")
+        expect(taskbar_source).to_contain("fn host_taskbar_runtime_sync_resize(session: UISession, surface_id: text, width: i32, height: i32) -> Result<Unit, text>:")
+        expect(taskbar_source).to_contain("fn host_taskbar_runtime_sync_set_title(session: UISession, surface_id: text, title: text) -> Result<Unit, text>:")
+        expect(taskbar_source).to_contain("session.update_window_surface_title(surface_id, title)")
+
+    it "uses the native_event host adapter marker in feedback payloads":
+        val adapter_source = _read_source(HOST_ADAPTER_CONTRACT_PATH)
+        expect(adapter_source).to_contain("val HOST_NATIVE_EVENT_SOURCE: text = \"native_event\"")
+        expect(adapter_source).to_contain("val base = ")
+        expect(adapter_source).to_contain("window_id_hint")
+        expect(adapter_source).to_contain("HOST_NATIVE_EVENT_SOURCE")

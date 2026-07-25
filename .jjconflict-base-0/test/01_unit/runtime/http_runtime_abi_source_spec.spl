@@ -1,0 +1,48 @@
+extern fn rt_file_read_text(path: text) -> text
+
+fn http_abi_source(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+describe "native HTTP runtime ABI ownership":
+    it "keeps the tuple-handle GET owner beside request and download":
+        val legacy = http_abi_source("src/runtime/runtime.c")
+        val native = http_abi_source("src/runtime/runtime_native.c")
+        val header = http_abi_source("src/runtime/runtime.h")
+
+        expect(legacy.contains("rt_http_get(")).to_equal(false)
+        expect(native).to_contain("int64_t rt_http_get(int64_t url_value)")
+        expect(header).to_contain("int64_t  rt_http_get(int64_t url);")
+
+    it "routes text-header clients through the canonical array adapter":
+        var clients = http_abi_source("src/app/llm_caret/provider.spl")
+        clients = clients + http_abi_source("src/app/llm_caret/mod.spl")
+        clients = clients + http_abi_source("src/app/llm_caret/openai_compat.spl")
+        clients = clients + http_abi_source("src/app/llm_caret/openai_api.spl")
+        clients = clients + http_abi_source("src/app/llm_caret/claude_api.spl")
+        clients = clients + http_abi_source("src/app/llm_caret/server.spl")
+        val js = http_abi_source("src/lib/nogc_sync_mut/js/engine/interpreter.spl")
+        val service = http_abi_source("src/app/test_daemon/adapters/service_adapter.spl")
+
+        expect(clients).to_contain("http_request_raw")
+        expect(js).to_contain("http_request_raw")
+        expect(clients.contains("extern fn rt_http_request")).to_equal(false)
+        expect(clients.contains("rt_http_request(")).to_equal(false)
+        expect(js.contains("extern fn rt_http_request")).to_equal(false)
+        expect(js.contains("rt_http_request(")).to_equal(false)
+        expect(service.contains("rt_http_get(url: text) -> {text: text}")).to_equal(false)
+
+    it "keeps seed-library reload on the tuple-handle ABI":
+        val reload = http_abi_source("src/compiler_rust/lib/std/src/tooling/watch/reload.spl")
+
+        expect(reload).to_contain("fn _rt_http_get(url: text) -> (i64, text, text)")
+        expect(reload).to_contain("_rt_http_get(url).1")
+        expect(reload.contains("_rt_http_get(url.ptr(), url.len())")).to_equal(false)
+
+    it "names raw-C-string generator compatibility separately":
+        val compiler_spec = http_abi_source("src/compiler/90.tools/sffi_gen/specs/net_mod.spl")
+        val app_spec = http_abi_source("src/app/ffi_gen.specs/net_mod.spl")
+
+        expect(compiler_spec).to_contain("rt_http_get_cstr")
+        expect(app_spec).to_contain("rt_http_get_cstr")
+        expect(compiler_spec.contains("unsafe_extern_c(\"rt_http_get\",")).to_equal(false)
+        expect(app_spec.contains("unsafe_extern_c(\"rt_http_get\",")).to_equal(false)

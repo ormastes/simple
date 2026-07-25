@@ -1,0 +1,210 @@
+# smux_dashboard.spl — Dashboard adapter for the smux terminal multiplexer.
+#
+# Provides session overview, pane layout info, and status bar data for
+# consumption by the SimpleOS desktop dashboard and the web_dashboard adapter.
+# No imports from tmux lib — all data comes from the native smux API layer.
+#
+# MDSOC: pure data-transform module; no side-effects beyond reading _svc state.
+
+use os.apps.smux.api.{
+    smux_list_sessions,
+    smux_list_windows,
+    smux_list_panes,
+    smux_capture
+}
+use os.apps.smux.contract.{MuxSession, MuxWindow, MuxPane, MuxCapture}
+
+# =========================================================================
+# Session overview
+# =========================================================================
+
+# DashSessionRow — one row in the session table shown by the dashboard.
+class DashSessionRow:
+    session_id: text
+    session_name: text
+    window_count: int
+    pane_count: int
+    is_attached: bool
+
+    me to_text() -> text:
+        val att = if self.is_attached: "attached" else: "detached"
+        return self.session_name + " (" + att + ") w=" + self.window_count.to_text() + " p=" + self.pane_count.to_text()
+
+    static fn from_session(s: MuxSession, win_count: int, pane_count: int) -> DashSessionRow:
+        return DashSessionRow(
+            session_id: s.id,
+            session_name: s.name,
+            window_count: win_count,
+            pane_count: pane_count,
+            is_attached: s.is_attached
+        )
+
+# smux_dashboard_sessions — returns one DashSessionRow per live session.
+pub fn smux_dashboard_sessions() -> [DashSessionRow]:
+    val sessions = smux_list_sessions()
+    var rows: [DashSessionRow] = []
+    var i = 0
+    while i < sessions.len():
+        val s = sessions[i]
+        val windows = smux_list_windows(s.id)
+        var total_panes = 0
+        var wi = 0
+        while wi < windows.len():
+            val panes = smux_list_panes(s.id, windows[wi].id)
+            total_panes = total_panes + panes.len()
+            wi = wi + 1
+        rows.push(DashSessionRow.from_session(s, windows.len(), total_panes))
+        i = i + 1
+    return rows
+
+# =========================================================================
+# Pane layout info
+# =========================================================================
+
+# DashPaneInfo — layout descriptor for a single pane, suitable for rendering.
+class DashPaneInfo:
+    pane_id: text
+    window_id: text
+    session_id: text
+    width: int
+    height: int
+    is_active: bool
+    preview_line: text
+
+    me geometry_text() -> text:
+        return self.width.to_text() + "x" + self.height.to_text()
+
+    me to_text() -> text:
+        val active_flag = if self.is_active: "*" else: " "
+        return active_flag + "pane[" + self.pane_id + "] " + self.geometry_text() + " > " + self.preview_line
+
+    static fn from_pane(p: MuxPane, preview: text) -> DashPaneInfo:
+        return DashPaneInfo(
+            pane_id: p.id,
+            window_id: p.window_id,
+            session_id: p.session_id,
+            width: p.width,
+            height: p.height,
+            is_active: p.is_active,
+            preview_line: preview
+        )
+
+# smux_dashboard_pane_layout — returns pane layout info for a session/window pair.
+pub fn smux_dashboard_pane_layout(session_id: text, window_id: text) -> [DashPaneInfo]:
+    val panes = smux_list_panes(session_id, window_id)
+    var infos: [DashPaneInfo] = []
+    var i = 0
+    while i < panes.len():
+        val p = panes[i]
+        val cap = smux_capture(session_id, window_id, p.id, 1)
+        val preview = if cap.content == "": "" else: cap.content
+        infos.push(DashPaneInfo.from_pane(p, preview))
+        i = i + 1
+    return infos
+
+# =========================================================================
+# Status bar data
+# =========================================================================
+
+# DashStatusBar — status bar fields consumed by the desktop shell status strip.
+class DashStatusBar:
+    session_count: int
+    active_session_name: text
+    active_window_name: text
+    active_pane_geometry: text
+    has_attached: bool
+
+    me to_text() -> text:
+        return "[smux " + self.session_count.to_text() + "s] " + self.active_session_name + ":" + self.active_window_name + " " + self.active_pane_geometry
+
+    static fn empty() -> DashStatusBar:
+        return DashStatusBar(
+            session_count: 0,
+            active_session_name: "",
+            active_window_name: "",
+            active_pane_geometry: "",
+            has_attached: false
+        )
+
+    static fn build(session_count: int, sname: text, wname: text, geom: text, attached: bool) -> DashStatusBar:
+        return DashStatusBar(
+            session_count: session_count,
+            active_session_name: sname,
+            active_window_name: wname,
+            active_pane_geometry: geom,
+            has_attached: attached
+        )
+
+# smux_dashboard_status_bar — aggregates live smux state into a status bar snapshot.
+pub fn smux_dashboard_status_bar() -> DashStatusBar:
+    val sessions = smux_list_sessions()
+    val count = sessions.len()
+    if count == 0:
+        return DashStatusBar.empty()
+
+    # Pick the first attached session, or fall back to index 0.
+    var chosen_idx = 0
+    var i = 0
+    while i < count:
+        val s = sessions[i]
+        if s.is_attached:
+            chosen_idx = i
+        i = i + 1
+
+    val chosen = sessions[chosen_idx]
+    val windows = smux_list_windows(chosen.id)
+    if windows.len() == 0:
+        return DashStatusBar.build(count, chosen.name, "", "", chosen.is_attached)
+
+    # Active window: first with is_active, else first.
+    var active_win_idx = 0
+    var wi = 0
+    while wi < windows.len():
+        if windows[wi].is_active:
+            active_win_idx = wi
+        wi = wi + 1
+    val active_win = windows[active_win_idx]
+
+    val panes = smux_list_panes(chosen.id, active_win.id)
+    var geom = ""
+    if panes.len() > 0:
+        val ap = panes[0]
+        geom = ap.width.to_text() + "x" + ap.height.to_text()
+
+    return DashStatusBar.build(count, chosen.name, active_win.name, geom, chosen.is_attached)
+
+# =========================================================================
+# Attach / detach helpers (wires into resize handling)
+# =========================================================================
+
+# DashAttachResult — result of a dashboard attach request.
+class DashAttachResult:
+    ok: bool
+    session_id: text
+    error_msg: text
+
+    me to_text() -> text:
+        if self.ok:
+            return "attached:" + self.session_id
+        return "error:" + self.error_msg
+
+    static fn success(sid: text) -> DashAttachResult:
+        return DashAttachResult(ok: true, session_id: sid, error_msg: "")
+
+    static fn failure(msg: text) -> DashAttachResult:
+        return DashAttachResult(ok: false, session_id: "", error_msg: msg)
+
+# smux_dashboard_attach — dashboard-level attach: confirms session exists.
+pub fn smux_dashboard_attach(session_name: text) -> DashAttachResult:
+    val sessions = smux_list_sessions()
+    var i = 0
+    while i < sessions.len():
+        val s = sessions[i]
+        if s.name == session_name:
+            return DashAttachResult.success(s.id)
+        i = i + 1
+    return DashAttachResult.failure("session not found: " + session_name)
+
+# smux_dashboard_resize_hint — returns a resize descriptor text for logging/status.
+pub fn smux_dashboard_resize_hint(session_id: text, window_id: text, pane_id: text, cols: int, rows: int) -> text:
+    return "resize " + session_id + "/" + window_id + "/" + pane_id + " -> " + cols.to_text() + "x" + rows.to_text()

@@ -1,0 +1,140 @@
+"""Word document HTML render spec.
+
+Verifies that `render_block_html` / `render_document_html` render a rich-text
+document as styled HTML using the shared office style resolver — the
+"MS-Word-level expressive" slice of the LibreOffice suite. Each block's kind
+maps to a resolver style tag (paragraph, heading_1..3, quote, code_block) and
+gets the Word-level default styling inlined, the same theme the markdown and
+slide surfaces use.
+
+Assertions are over the produced HTML string and use enum→tag mapping (no
+numeric interpolation), so they run cleanly on the test runner.
+"""
+
+use std.spec
+use app.office.word.html_render.{render_block_html, render_document_html}
+use common.rich_text.attributed_text.{DocBlock, BlockKind, TextSpan, InlineStyle, RichDocument, CommentDef, RevisionDef}
+
+fn _block(kind: BlockKind, body: text) -> DocBlock:
+    DocBlock(kind: kind, spans: [TextSpan(text: body, style: InlineStyle.Normal, link_url: "", footnote_id: "", comment_id: "", revision_id: "")])
+
+describe "word HTML render: block styling from the shared theme":
+    """Each block kind renders as a styled <div> whose class and inline CSS come
+    from the office style resolver."""
+
+    it "renders a Heading1 as a bold 2em div.heading_1":
+        val html = render_block_html(_block(BlockKind.Heading1, "Title"), [], [])
+        expect(html).to_contain("class=\"heading_1\"")
+        expect(html).to_contain("font-size: 2em;")
+        expect(html).to_contain("font-weight: bold;")
+        expect(html).to_contain(">Title</div>")
+
+    it "renders a Paragraph with the resolver line-height":
+        val html = render_block_html(_block(BlockKind.Paragraph, "Body text"), [], [])
+        expect(html).to_contain("class=\"paragraph\"")
+        expect(html).to_contain("line-height: 1.5;")
+        expect(html).to_contain(">Body text</div>")
+
+    it "renders a Quote with an italic border-left style":
+        val html = render_block_html(_block(BlockKind.Quote, "Quoted"), [], [])
+        expect(html).to_contain("class=\"quote\"")
+        expect(html).to_contain("font-style: italic;")
+        expect(html).to_contain("border-left: 4px solid #cccccc;")
+
+    it "HTML-escapes block content so documents cannot inject markup":
+        val html = render_block_html(_block(BlockKind.Paragraph, "<script>alert(1)</script> & \"x\""), [], [])
+        expect(html).to_contain("&lt;script&gt;")
+        expect(html).to_contain("&amp; &quot;x&quot;")
+        expect(html.contains("<script>")).to_be(false)
+
+describe "word HTML render: tables and images":
+    """Consecutive |cell| paragraphs render as one table; ![alt](src) as <img>."""
+
+    it "renders consecutive table-row paragraphs as one styled table":
+        val doc = RichDocument(title: "T", blocks: [
+            _block(BlockKind.Paragraph, "| Name | Qty |"),
+            _block(BlockKind.Paragraph, "|---|---|"),
+            _block(BlockKind.Paragraph, "| Apples | 4 |")
+        ], comments: [], revisions: [])
+        val html = render_document_html(doc)
+        expect(html).to_contain("<table")
+        expect(html).to_contain(">Name</th>")
+        expect(html).to_contain(">Apples</td>")
+
+    it "renders an image paragraph as an img tag and escapes alt":
+        val doc = RichDocument(title: "I", blocks: [_block(BlockKind.Paragraph, "![a <b>](pic.png)")], comments: [], revisions: [])
+        val html = render_document_html(doc)
+        expect(html).to_contain("<img src=\"pic.png\"")
+        expect(html).to_contain("alt=\"a &lt;b&gt;\"")
+
+    it "refuses img srcs containing quote or angle characters":
+        val doc = RichDocument(title: "I", blocks: [_block(BlockKind.Paragraph, "![x](j\"onerror.png)")], comments: [], revisions: [])
+        val html = render_document_html(doc)
+        expect(html.contains("<img")).to_be(false)
+
+describe "word HTML render: whole document":
+    """A document renders as a styled <article> wrapping each block."""
+
+    it "wraps blocks in a document article":
+        val doc = RichDocument(title: "Doc", blocks: [_block(BlockKind.Heading1, "H"), _block(BlockKind.Paragraph, "P")], comments: [], revisions: [])
+        val html = render_document_html(doc)
+        expect(html).to_start_with("<article class=\"document\">")
+        expect(html).to_end_with("</article>")
+        expect(html).to_contain("class=\"heading_1\"")
+        expect(html).to_contain("class=\"paragraph\"")
+
+describe "word HTML render: ordered lists":
+    """Consecutive OrderedItem blocks render as one real <ol><li> list."""
+
+    it "renders consecutive OrderedItem blocks as one <ol> with <li> items":
+        val doc = RichDocument(title: "OL", blocks: [
+            _block(BlockKind.OrderedItem, "First"),
+            _block(BlockKind.OrderedItem, "Second"),
+            _block(BlockKind.OrderedItem, "Third")
+        ], comments: [], revisions: [])
+        val html = render_document_html(doc)
+        expect(html).to_contain("<ol><li>First</li><li>Second</li><li>Third</li></ol>")
+
+describe "word HTML render: comments":
+    """A commented span gets a dotted underline + the comment in a title
+    attribute; the document ends with a trailing comments section listing
+    every author: text."""
+
+    it "renders a commented span with a dotted underline and title attribute":
+        val span = TextSpan(text: "flagged text", style: InlineStyle.Normal, link_url: "", footnote_id: "", comment_id: "1", revision_id: "")
+        val doc = RichDocument(title: "C", blocks: [DocBlock(kind: BlockKind.Paragraph, spans: [span])], comments: [CommentDef(id: "1", author: "Alice", text: "please check this")], revisions: [])
+        val html = render_document_html(doc)
+        expect(html).to_contain("border-bottom: 1px dotted #888;")
+        expect(html).to_contain("title=\"Alice: please check this\"")
+        expect(html).to_contain(">flagged text</span>")
+
+    it "lists every comment in a trailing comments section":
+        val span = TextSpan(text: "x", style: InlineStyle.Normal, link_url: "", footnote_id: "", comment_id: "1", revision_id: "")
+        val doc = RichDocument(title: "C", blocks: [DocBlock(kind: BlockKind.Paragraph, spans: [span])], comments: [CommentDef(id: "1", author: "Bob", text: "a note")], revisions: [])
+        val html = render_document_html(doc)
+        expect(html).to_contain("<div class=\"comments\"><ul>")
+        expect(html).to_contain("<li>Bob: a note</li>")
+        expect(html).to_end_with("</article>")
+
+describe "word HTML render: track changes":
+    """An insert-revision span renders as <ins> (underline); a delete-revision
+    span renders as <del> (strikethrough); both carry a data-author
+    attribute looked up by revision_id into RichDocument.revisions."""
+
+    it "renders an insert-revision span as <ins> with a data-author attribute":
+        val span = TextSpan(text: "added text", style: InlineStyle.Normal, link_url: "", footnote_id: "", comment_id: "", revision_id: "1")
+        val doc = RichDocument(title: "R", blocks: [DocBlock(kind: BlockKind.Paragraph, spans: [span])], comments: [], revisions: [RevisionDef(id: "1", author: "Alice", kind: "insert", timestamp_text: "")])
+        val html = render_document_html(doc)
+        expect(html).to_contain("<ins")
+        expect(html).to_contain("text-decoration: underline;")
+        expect(html).to_contain("data-author=\"Alice\"")
+        expect(html).to_contain(">added text</ins>")
+
+    it "renders a delete-revision span as <del> with a data-author attribute":
+        val span = TextSpan(text: "removed text", style: InlineStyle.Normal, link_url: "", footnote_id: "", comment_id: "", revision_id: "2")
+        val doc = RichDocument(title: "R", blocks: [DocBlock(kind: BlockKind.Paragraph, spans: [span])], comments: [], revisions: [RevisionDef(id: "2", author: "Bob", kind: "delete", timestamp_text: "")])
+        val html = render_document_html(doc)
+        expect(html).to_contain("<del")
+        expect(html).to_contain("text-decoration: line-through;")
+        expect(html).to_contain("data-author=\"Bob\"")
+        expect(html).to_contain(">removed text</del>")

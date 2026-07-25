@@ -1,0 +1,131 @@
+# W2-5 Regression Spec — Task Error Surfacing (H1 + H3)
+#
+# Verifies:
+#   - HostScheduler has TaskDeathRecord struct and death_records bookkeeping
+#   - HostScheduler.last_death_reason() / death_count() are queryable
+#   - HostScheduler.mark_task_error() wires error text onto a task
+#   - HostRuntime.run_result_task / drain_result_errors surface Err to handle
+#   - task_identity stamp (current_unified_task_key) returns scheduler-task key
+#     while a task is being polled (foundation for death-reason tagging)
+#
+# Note: Direct scheduler task execution (schedule + run_one) fails in interpreter
+# mode because `schedule()` internally references TaskState.Pending which is in
+# the std.async_core virtual module (unresolvable from test context).
+# Structural/API tests use source-text inspection.
+# Behavioural tests use APIs that are pure-Simple and interpreter-safe.
+
+use std.spec.*
+use std.async_host.scheduler.{HostScheduler}
+use std.async_host.task_identity.{enter_scheduler_task_id, exit_scheduler_task_id, current_unified_task_key, current_scheduler_task_key}
+
+# ============================================================================
+# Structural API — source-text inspection
+# ============================================================================
+
+describe "HostScheduler death-reason API (W2-5 structural)":
+    extern fn rt_file_read_text(path: text) -> text
+
+    fn sched_src() -> text:
+        rt_file_read_text("src/lib/nogc_async_mut/async_host/scheduler.spl") ?? ""
+
+    fn runtime_src() -> text:
+        rt_file_read_text("src/lib/nogc_async_mut/async_host/runtime.spl") ?? ""
+
+    it "TaskDeathRecord struct exists with required fields":
+        val src = sched_src()
+        expect(src.contains("struct TaskDeathRecord")).to_equal(true)
+        expect(src.contains("task_key: text")).to_equal(true)
+        expect(src.contains("task_id: usize")).to_equal(true)
+        expect(src.contains("reason: text")).to_equal(true)
+
+    it "HostScheduler has death_records field":
+        val src = sched_src()
+        expect(src.contains("death_records: [TaskDeathRecord]")).to_equal(true)
+
+    it "HostTask has task_error field":
+        val src = sched_src()
+        expect(src.contains("task_error: text")).to_equal(true)
+
+    it "last_death_reason accessor exists":
+        val src = sched_src()
+        expect(src.contains("fn last_death_reason() -> text")).to_equal(true)
+
+    it "death_count accessor exists":
+        val src = sched_src()
+        expect(src.contains("fn death_count() -> usize")).to_equal(true)
+
+    it "mark_task_error method exists":
+        val src = sched_src()
+        expect(src.contains("me mark_task_error(task_id: usize, error_text: text)")).to_equal(true)
+
+    it "death record is pushed on task completion with non-empty task_error":
+        val src = sched_src()
+        expect(src.contains("self.death_records = self.death_records.push(rec)")).to_equal(true)
+
+    it "current_unified_task_key stamps death records":
+        val src = sched_src()
+        expect(src.contains("current_unified_task_key")).to_equal(true)
+
+    it "run_result_task surfaces Err to handle (H3)":
+        val src = runtime_src()
+        expect(src.contains("me run_result_task<T>")).to_equal(true)
+        expect(src.contains("fn() -> Result<T, text>")).to_equal(true)
+
+    it "drain_result_errors populates AsyncError.JoinError":
+        val src = runtime_src()
+        expect(src.contains("AsyncError.JoinError")).to_equal(true)
+        expect(src.contains("me drain_result_errors<T>")).to_equal(true)
+
+# ============================================================================
+# Behavioural — death_count and last_death_reason on fresh scheduler
+# ============================================================================
+
+describe "HostScheduler death bookkeeping (W2-5 behavioural)":
+    it "fresh scheduler has zero death_count":
+        val sched = HostScheduler.new(1)
+        expect(sched.death_count()).to_equal(0)
+
+    it "last_death_reason on fresh scheduler is empty string":
+        val sched = HostScheduler.new(1)
+        val reason = sched.last_death_reason()
+        expect(reason).to_equal("")
+
+    it "death_records starts empty":
+        val sched = HostScheduler.new(1)
+        expect(sched.death_records.is_empty()).to_equal(true)
+
+    it "mark_task_error on non-existent task is a no-op (no crash, no death record)":
+        var sched = HostScheduler.new(1)
+        sched.mark_task_error(999, "phantom-error")
+        expect(sched.death_count()).to_equal(0)
+        expect(sched.last_death_reason()).to_equal("")
+
+# ============================================================================
+# Behavioural — task_identity tagging (foundation for death reason stamps)
+# ============================================================================
+
+describe "Task identity stamp for death reasons (W2-5 behavioural)":
+    it "scheduler-task key is available while scheduler task is active":
+        val prev = enter_scheduler_task_id(101)
+        val key = current_unified_task_key("fallback")
+        exit_scheduler_task_id(prev)
+        expect(key).to_equal("scheduler-task-101")
+
+    it "current_scheduler_task_key returns fallback when no task active":
+        val key = current_scheduler_task_key("no-active-task")
+        expect(key).to_equal("no-active-task")
+
+    it "death reason key matches the task id entered":
+        val prev = enter_scheduler_task_id(42)
+        val key = current_unified_task_key("ignored-fallback")
+        exit_scheduler_task_id(prev)
+        expect(key).to_equal("scheduler-task-42")
+
+    it "sibling task identity not affected after first task exits":
+        val prev_a = enter_scheduler_task_id(1)
+        exit_scheduler_task_id(prev_a)
+        val prev_b = enter_scheduler_task_id(2)
+        val key = current_unified_task_key("fb")
+        exit_scheduler_task_id(prev_b)
+        # sibling task B completed; its key was scheduler-task-2
+        expect(key).to_equal("scheduler-task-2")

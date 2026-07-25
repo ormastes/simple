@@ -1,0 +1,562 @@
+# Extension Host
+#
+# Two-phase extension loading: index SDN manifests on startup,
+# activate on demand when activation events fire.
+
+use std.editor.extensions.api.*
+use std.editor.extensions.manifest.*
+use std.editor.extensions.builtin.spl_language.*
+use std.editor.extensions.builtin.md_language.*
+use std.editor.core.path_text.*
+use std.io_runtime.{dir_walk}
+
+struct ExtensionEntry:
+    manifest: ExtensionManifest
+    path: text
+    active: bool
+
+fn extension_entry_is_active(entry: ExtensionEntry) -> bool:
+    entry.active
+
+fn extension_entry_manifest_name(entry: ExtensionEntry) -> text:
+    entry.manifest.name
+
+fn extension_entry_matches_activation(entry: ExtensionEntry, event: text) -> bool:
+    for activation_event in entry.manifest.activation_events:
+        if activation_event == event or activation_event == "*":
+            return true
+    false
+
+fn _extension_host_is_manifest_path(path: text) -> bool:
+    val parts = path.split("/")
+    if parts.len() == 0:
+        return false
+    parts[parts.len() - 1] == "extension.sdn"
+
+fn extension_host_graph_language_manifest() -> ExtensionManifest:
+    ExtensionManifest(
+        name: "sdn-graph-language",
+        version: "1.0.0",
+        main: "",
+        activation_events: ["onLanguage:sdn-graph"],
+        contributes_commands: [
+            ExtensionCommand(id: "graph.render", title: "Render SDN Graph"),
+            ExtensionCommand(id: "graph.showCanonical", title: "Show Canonical SDN Graph")
+        ],
+        contributes_languages: [
+            ExtensionLanguage(id: "sdn-graph", extensions: [".graph.sdn", ".sdngraph"])
+        ],
+        contributes_debug_adapters: [],
+        contributes_themes: [],
+        contributes_keybindings: []
+    )
+
+class ExtensionHost:
+    extensions: [ExtensionEntry]
+    command_registry: [ExtensionCommandEntry]
+    language_registry: [ExtensionLanguageEntry]
+    debug_adapter_registry: [ExtensionDebugAdapterEntry]
+    context_registry: [ExtensionContextEntry]
+    event_log: [ExtensionEventRecord]
+    invocation_queue: [ExtensionCommandInvocation]
+    runtime_policy: ExtensionRuntimePolicy
+    runtime_dispatch_log: [ExtensionRuntimeDispatchRecord]
+
+struct ExtensionCommandEntry:
+    extension_name: text
+    command: ExtensionCommand
+
+fn extension_command_entry_name(entry: ExtensionCommandEntry) -> text:
+    entry.extension_name
+
+fn extension_command_entry_command_id(entry: ExtensionCommandEntry) -> text:
+    entry.command.id
+
+struct ExtensionLanguageEntry:
+    extension_name: text
+    language: ExtensionLanguage
+
+struct ExtensionDebugAdapterEntry:
+    extension_name: text
+    adapter: ExtensionDebugAdapter
+
+fn extension_debug_adapter_id(entry: ExtensionDebugAdapterEntry) -> text:
+    entry.adapter.id
+
+fn extension_debug_adapter_program(entry: ExtensionDebugAdapterEntry) -> text:
+    entry.adapter.program
+
+struct ExtensionContextEntry:
+    extension_name: text
+    context: ExtensionContext
+
+struct ExtensionEventRecord:
+    event: text
+    payload: text
+    delivered_count: i64
+
+struct ExtensionCommandInvocation:
+    id: i64
+    extension_name: text
+    command_id: text
+    payload: text
+    status: text
+
+fn extension_command_invocation_command_id(invocation: ExtensionCommandInvocation) -> text:
+    invocation.command_id
+
+struct ExtensionRuntimePolicy:
+    enabled: bool
+    allow_external_process: bool
+    allowed_roots: [text]
+
+struct ExtensionRuntimeDispatchRecord:
+    invocation_id: i64
+    extension_name: text
+    command_id: text
+    main: text
+    status: text
+    reason: text
+
+impl ExtensionHost:
+
+    static fn new() -> ExtensionHost:
+        ExtensionHost(
+            extensions: [],
+            command_registry: [],
+            language_registry: [],
+            debug_adapter_registry: [],
+            context_registry: [],
+            event_log: [],
+            invocation_queue: [],
+            runtime_policy: extension_runtime_policy_default(),
+            runtime_dispatch_log: []
+        )
+
+    me index_extension(path: text):
+        val manifest = extension_manifest_load(path + "/extension.sdn")
+        me.register_manifest(manifest, path)
+
+    me discover_extensions(roots: [text]) -> i64:
+        var indexed = 0
+        for root in roots:
+            val files = dir_walk(root)
+            for file in files:
+                if _extension_host_is_manifest_path(file):
+                    val extension_dir = editor_dirname(file)
+                    val before_count = me.extensions.len()
+                    me.index_extension(extension_dir)
+                    if me.extensions.len() > before_count:
+                        indexed = indexed + 1
+        indexed
+
+    me register_manifest(manifest: ExtensionManifest, path: text):
+        if manifest.name == "":
+            return
+        var i = 0
+        while i < me.extensions.len():
+            if me.extensions[i].manifest.name == manifest.name:
+                val was_active = me.extensions[i].active
+                me._unregister_contributions(manifest.name)
+                me.extensions[i] = ExtensionEntry(
+                    manifest: manifest,
+                    path: path,
+                    active: was_active
+                )
+                if was_active:
+                    me._register_context(manifest, path)
+                    me._register_contributions(manifest)
+                return
+            i = i + 1
+        me.extensions.push(ExtensionEntry(
+            manifest: manifest,
+            path: path,
+            active: false
+        ))
+
+    me activate(name: text) -> bool:
+        var i = 0
+        while i < me.extensions.len():
+            if me.extensions[i].manifest.name == name and not me.extensions[i].active:
+                var entry = me.extensions[i]
+                entry.active = true
+                me.extensions[i] = entry
+                me._register_context(entry.manifest, entry.path)
+                me._register_contributions(entry.manifest)
+                return true
+            i = i + 1
+        false
+
+    me activate_event(event: text) -> i64:
+        var activated = 0
+        var i = 0
+        while i < me.extensions.len():
+            val entry = me.extensions[i]
+            if not extension_entry_is_active(entry):
+                if extension_entry_matches_activation(entry, event):
+                    if me.activate(extension_entry_manifest_name(entry)):
+                        activated = activated + 1
+            i = i + 1
+        activated
+
+    me activate_language(language_id: text) -> i64:
+        me.activate_event("onLanguage:" + language_id)
+
+    me activate_command(command_id: text) -> i64:
+        me.activate_event("onCommand:" + command_id)
+
+    me emit_event(event: text, payload: text) -> i64:
+        var delivered = 0
+        for entry in me.context_registry:
+            if extension_context_is_subscribed(entry.context, event):
+                delivered = delivered + 1
+        me.event_log.push(ExtensionEventRecord(
+            event: event,
+            payload: payload,
+            delivered_count: delivered
+        ))
+        delivered
+
+    me subscribe(extension_name: text, event: text) -> bool:
+        var i = 0
+        while i < me.context_registry.len():
+            if me.context_registry[i].extension_name == extension_name:
+                var entry = me.context_registry[i]
+                entry.context = extension_context_subscribe(entry.context, event)
+                me.context_registry[i] = entry
+                return true
+            i = i + 1
+        false
+
+    me set_workspace_state(extension_name: text, key: text, value: text) -> bool:
+        var i = 0
+        while i < me.context_registry.len():
+            if me.context_registry[i].extension_name == extension_name:
+                var entry = me.context_registry[i]
+                entry.context = extension_context_set_state(entry.context, key, value)
+                me.context_registry[i] = entry
+                return true
+            i = i + 1
+        false
+
+    fn get_workspace_state(extension_name: text, key: text) -> text:
+        val ctx = me.find_context(extension_name)
+        extension_context_get_state(ctx, key)
+
+    me dispatch_external_command(command_id: text, payload: text) -> ExtensionCommandInvocation:
+        me.activate_command(command_id)
+        val entry = me.find_command(command_id)
+        if entry.command.id == "":
+            return ExtensionCommandInvocation(
+                id: -1,
+                extension_name: "",
+                command_id: command_id,
+                payload: payload,
+                status: "missing"
+            )
+        val next_id = me.invocation_queue.len()
+        val invocation = ExtensionCommandInvocation(
+            id: next_id,
+            extension_name: entry.extension_name,
+            command_id: command_id,
+            payload: payload,
+            status: "pending-runtime"
+        )
+        me.invocation_queue.push(invocation)
+        invocation
+
+    me set_runtime_policy(policy: ExtensionRuntimePolicy):
+        me.runtime_policy = policy
+
+    me drain_invocation_queue() -> i64:
+        var drained = 0
+        var next_queue: [ExtensionCommandInvocation] = []
+        var i = 0
+        while i < me.invocation_queue.len():
+            var invocation = me.invocation_queue[i]
+            if invocation.status == "pending-runtime":
+                val record = me._dispatch_runtime_invocation(invocation)
+                me.runtime_dispatch_log.push(record)
+                invocation.status = record.status
+                drained = drained + 1
+            next_queue.push(invocation)
+            i = i + 1
+        me.invocation_queue = next_queue
+        drained
+
+    fn runtime_dispatch_count() -> i64:
+        me.runtime_dispatch_log.len()
+
+    fn last_runtime_dispatch() -> ExtensionRuntimeDispatchRecord:
+        if me.runtime_dispatch_log.len() == 0:
+            return ExtensionRuntimeDispatchRecord(
+                invocation_id: -1,
+                extension_name: "",
+                command_id: "",
+                main: "",
+                status: "none",
+                reason: ""
+            )
+        me.runtime_dispatch_log[me.runtime_dispatch_log.len() - 1]
+
+    fn pending_invocation_count() -> i64:
+        me.invocation_queue.len()
+
+    fn last_invocation() -> ExtensionCommandInvocation:
+        if me.invocation_queue.len() == 0:
+            return ExtensionCommandInvocation(
+                id: -1,
+                extension_name: "",
+                command_id: "",
+                payload: "",
+                status: "none"
+            )
+        me.invocation_queue[me.invocation_queue.len() - 1]
+
+    fn _dispatch_runtime_invocation(invocation: ExtensionCommandInvocation) -> ExtensionRuntimeDispatchRecord:
+        val entry = me.find_extension(invocation.extension_name)
+        if entry.manifest.name == "":
+            return ExtensionRuntimeDispatchRecord(
+                invocation_id: invocation.id,
+                extension_name: invocation.extension_name,
+                command_id: invocation.command_id,
+                main: "",
+                status: "missing-extension",
+                reason: "extension not indexed"
+            )
+        if entry.manifest.main == "":
+            return ExtensionRuntimeDispatchRecord(
+                invocation_id: invocation.id,
+                extension_name: invocation.extension_name,
+                command_id: invocation.command_id,
+                main: "",
+                status: "blocked-runtime",
+                reason: "manifest has no main"
+            )
+        if not me.runtime_policy.enabled:
+            return ExtensionRuntimeDispatchRecord(
+                invocation_id: invocation.id,
+                extension_name: invocation.extension_name,
+                command_id: invocation.command_id,
+                main: entry.path + "/" + entry.manifest.main,
+                status: "blocked-runtime",
+                reason: "runtime disabled"
+            )
+        if not me._runtime_path_allowed(entry.path):
+            return ExtensionRuntimeDispatchRecord(
+                invocation_id: invocation.id,
+                extension_name: invocation.extension_name,
+                command_id: invocation.command_id,
+                main: entry.path + "/" + entry.manifest.main,
+                status: "blocked-runtime",
+                reason: "extension root not allowed"
+            )
+        if not me.runtime_policy.allow_external_process:
+            return ExtensionRuntimeDispatchRecord(
+                invocation_id: invocation.id,
+                extension_name: invocation.extension_name,
+                command_id: invocation.command_id,
+                main: entry.path + "/" + entry.manifest.main,
+                status: "ready-sandbox",
+                reason: "sandbox runner required"
+            )
+        ExtensionRuntimeDispatchRecord(
+            invocation_id: invocation.id,
+            extension_name: invocation.extension_name,
+            command_id: invocation.command_id,
+            main: entry.path + "/" + entry.manifest.main,
+            status: "ready-external-process",
+            reason: "external process runner required"
+        )
+
+    fn _runtime_path_allowed(path: text) -> bool:
+        if me.runtime_policy.allowed_roots.len() == 0:
+            return false
+        for root in me.runtime_policy.allowed_roots:
+            if root != "" and path.starts_with(root):
+                return true
+        false
+
+    me deactivate(name: text) -> bool:
+        var i = 0
+        while i < me.extensions.len():
+            if me.extensions[i].manifest.name == name and me.extensions[i].active:
+                var entry = me.extensions[i]
+                entry.active = false
+                me.extensions[i] = entry
+                me._unregister_contributions(entry.manifest.name)
+                me._unregister_context(entry.manifest.name)
+                return true
+            i = i + 1
+        false
+
+    fn find_extension(name: text) -> ExtensionEntry:
+        for entry in me.extensions:
+            if entry.manifest.name == name:
+                return entry
+        ExtensionEntry(
+            manifest: ExtensionManifest(
+                name: "", version: "", main: "",
+                activation_events: [],
+                contributes_commands: [],
+                contributes_languages: [],
+                contributes_debug_adapters: [],
+                contributes_themes: [],
+                contributes_keybindings: []
+            ),
+            path: "",
+            active: false
+        )
+
+    fn is_active(name: text) -> bool:
+        val entry = me.find_extension(name)
+        entry.active
+
+    fn extension_count() -> i64:
+        me.extensions.len()
+
+    fn active_count() -> i64:
+        var count = 0
+        for entry in me.extensions:
+            if entry.active:
+                count = count + 1
+        count
+
+    fn find_context(name: text) -> ExtensionContext:
+        for entry in me.context_registry:
+            if entry.extension_name == name:
+                return entry.context
+        extension_context_new("", "")
+
+    fn event_count() -> i64:
+        me.event_log.len()
+
+    fn find_command(command_id: text) -> ExtensionCommandEntry:
+        for entry in me.command_registry:
+            if entry.command.id == command_id:
+                return entry
+        ExtensionCommandEntry(
+            extension_name: "",
+            command: ExtensionCommand(id: "", title: "")
+        )
+
+    fn command_registered(command_id: text) -> bool:
+        val entry = me.find_command(command_id)
+        entry.command.id != ""
+
+    fn find_language_for_ext(file_ext: text) -> text:
+        for entry in me.language_registry:
+            for ext in entry.language.extensions:
+                if ext == file_ext:
+                    return entry.language.id
+        ""
+
+    fn find_debug_adapter(adapter_id: text) -> ExtensionDebugAdapterEntry:
+        for entry in me.debug_adapter_registry:
+            if entry.adapter.id == adapter_id:
+                return entry
+        ExtensionDebugAdapterEntry(
+            extension_name: "",
+            adapter: ExtensionDebugAdapter(id: "", label: "", program: "")
+        )
+
+    fn debug_adapter_registered(adapter_id: text) -> bool:
+        val entry = me.find_debug_adapter(adapter_id)
+        entry.adapter.id != ""
+
+    me _register_contributions(manifest: ExtensionManifest):
+        for cmd in manifest.contributes_commands:
+            me.command_registry.push(ExtensionCommandEntry(
+                extension_name: manifest.name,
+                command: cmd
+            ))
+        for lang in manifest.contributes_languages:
+            me.language_registry.push(ExtensionLanguageEntry(
+                extension_name: manifest.name,
+                language: lang
+            ))
+        for adapter in manifest.contributes_debug_adapters:
+            me.debug_adapter_registry.push(ExtensionDebugAdapterEntry(
+                extension_name: manifest.name,
+                adapter: adapter
+            ))
+
+    me _register_context(manifest: ExtensionManifest, path: text):
+        me._unregister_context(manifest.name)
+        var ctx = extension_context_new(path, manifest.name)
+        for activation_event in manifest.activation_events:
+            ctx = extension_context_subscribe(ctx, activation_event)
+        me.context_registry.push(ExtensionContextEntry(
+            extension_name: manifest.name,
+            context: ctx
+        ))
+
+    me _unregister_contributions(name: text):
+        var new_cmds: [ExtensionCommandEntry] = []
+        for entry in me.command_registry:
+            if entry.extension_name != name:
+                new_cmds.push(entry)
+        me.command_registry = new_cmds
+        var new_langs: [ExtensionLanguageEntry] = []
+        for entry in me.language_registry:
+            if entry.extension_name != name:
+                new_langs.push(entry)
+        me.language_registry = new_langs
+        var new_adapters: [ExtensionDebugAdapterEntry] = []
+        for entry in me.debug_adapter_registry:
+            if entry.extension_name != name:
+                new_adapters.push(entry)
+        me.debug_adapter_registry = new_adapters
+
+    me _unregister_context(name: text):
+        var new_contexts: [ExtensionContextEntry] = []
+        for entry in me.context_registry:
+            if entry.extension_name != name:
+                new_contexts.push(entry)
+        me.context_registry = new_contexts
+
+fn extension_contribute_highlighting(host: ExtensionHost, language_id: text, line: text) -> text:
+    line
+
+fn extension_contribute_completions(host: ExtensionHost, language_id: text, prefix: text) -> [text]:
+    if language_id == "simple":
+        return extension_simple_keyword_completions(prefix)
+    var empty: [text] = []
+    empty
+
+fn extension_simple_keyword_completions(prefix: text) -> [text]:
+    val keywords = ["fn", "val", "var", "if", "else", "while", "for", "return", "struct", "class", "enum", "use"]
+    var result: [text] = []
+    for keyword in keywords:
+        if prefix == "" or keyword.starts_with(prefix):
+            result.push(keyword)
+    result
+
+fn extension_runtime_policy_default() -> ExtensionRuntimePolicy:
+    ExtensionRuntimePolicy(
+        enabled: false,
+        allow_external_process: false,
+        allowed_roots: []
+    )
+
+fn extension_runtime_policy_sandboxed(allowed_roots: [text]) -> ExtensionRuntimePolicy:
+    ExtensionRuntimePolicy(
+        enabled: true,
+        allow_external_process: false,
+        allowed_roots: allowed_roots
+    )
+
+fn extension_runtime_policy_external_process(allowed_roots: [text]) -> ExtensionRuntimePolicy:
+    ExtensionRuntimePolicy(
+        enabled: true,
+        allow_external_process: true,
+        allowed_roots: allowed_roots
+    )
+
+fn extension_host_with_builtins() -> ExtensionHost:
+    val host = ExtensionHost.new()
+    host.register_manifest(spl_language_manifest(), "<builtin>")
+    host.register_manifest(md_language_manifest(), "<builtin>")
+    host.register_manifest(extension_host_graph_language_manifest(), "<builtin>")
+    host.activate_event("*")
+    host

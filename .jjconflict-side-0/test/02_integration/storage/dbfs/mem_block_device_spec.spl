@@ -1,0 +1,80 @@
+# @cover src/lib/nogc_sync_mut/fs_driver/mem_block_device.spl
+
+"""
+MemBlockDevice Specification
+
+Verifies MemBlockDevice implements BlockDevice with in-memory sector storage:
+  new, sector_size, read_sector, write_sector round-trip, bytes, write_to_file
+"""
+# Run: bin/simple test test/integration/storage/dbfs/mem_block_device_spec.spl
+
+use std.spec
+use std.fs_driver.mem_block_device.{MemBlockDevice}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_size(path: text) -> i64
+
+describe "MemBlockDevice — construction":
+
+    it "AC-2: new creates device with correct sector_count":
+        # Arrange / Act
+        val dev = MemBlockDevice.new(128u64, 512u32)
+        # Assert — sector_count accessor (fails until impl exists)
+        expect(dev.sector_count()).to_equal(128u64)
+
+    it "AC-2: new creates device with correct sector_size":
+        val dev = MemBlockDevice.new(64u64, 512u32)
+        expect(dev.sector_size()).to_equal(512u32)
+
+    it "AC-2: bytes() length equals sector_count * sector_size":
+        val dev = MemBlockDevice.new(4u64, 512u32)
+        val b = dev.bytes()
+        expect(b.len()).to_equal(2048)
+
+describe "MemBlockDevice — read_sector / write_sector round-trip":
+
+    it "AC-2: write_sector then read_sector preserves all bytes":
+        val dev = MemBlockDevice.new(8u64, 512u32)
+        var sector = dev.read_sector(0u64).unwrap()
+        # Write a known pattern
+        sector[0] = 0xDBu8
+        sector[1] = 0xFSu8
+        sector[511] = 0xA5u8
+        val ok = dev.write_sector(0u64, sector)
+        expect(ok.is_ok()).to_equal(true)
+        val back = dev.read_sector(0u64).unwrap()
+        expect(back[0]).to_equal(0xDBu8)
+        expect(back[511]).to_equal(0xA5u8)
+
+    it "AC-2: write to sector 3 does not corrupt sector 0":
+        val dev = MemBlockDevice.new(8u64, 512u32)
+        var s0 = dev.read_sector(0u64).unwrap()
+        s0[0] = 0x11u8
+        val _ = dev.write_sector(0u64, s0)
+        var s3 = dev.read_sector(3u64).unwrap()
+        s3[0] = 0x22u8
+        val _ = dev.write_sector(3u64, s3)
+        val check0 = dev.read_sector(0u64).unwrap()
+        expect(check0[0]).to_equal(0x11u8)
+        val check3 = dev.read_sector(3u64).unwrap()
+        expect(check3[0]).to_equal(0x22u8)
+
+    it "AC-2: read_sector out of range returns error":
+        val dev = MemBlockDevice.new(4u64, 512u32)
+        val result = dev.read_sector(99u64)
+        expect(result.is_ok()).to_equal(false)
+
+describe "MemBlockDevice — write_to_file":
+
+    it "AC-2: write_to_file creates file at the given path":
+        val dev = MemBlockDevice.new(4u64, 512u32)
+        val path = "/tmp/mem_block_device_spec_test.img"
+        val result = dev.write_to_file(path)
+        expect(result.is_ok()).to_equal(true)
+        expect(rt_file_exists(path)).to_equal(true)
+
+    it "AC-2: write_to_file produces file of correct size":
+        val dev = MemBlockDevice.new(4u64, 512u32)
+        val path = "/tmp/mem_block_device_spec_size_test.img"
+        val _ = dev.write_to_file(path)
+        expect(rt_file_size(path)).to_equal(2048)

@@ -1,0 +1,346 @@
+# Retry and backoff utilities
+# Pure Simple implementations for retry logic
+
+use super.math_utils.{min_i32, pow_i32}
+
+# =====================================
+# Retry Configuration
+# =====================================
+
+# Retry strategy
+enum RetryStrategy:
+    FixedDelay(i32)           # Fixed delay in ms
+    LinearBackoff(i32, i32)   # Start ms, increment ms
+    ExponentialBackoff(i32, i32)  # Base ms, max ms
+    NoRetry
+
+# Retry result
+enum RetryResult<T, E>:
+    Success(T)
+    Failed(E, i32)  # Final error and attempt count
+
+# Retry configuration
+struct RetryConfig:
+    max_attempts: i32
+    strategy: RetryStrategy
+    timeout_ms: i32
+
+impl RetryConfig:
+    # Create default retry config (3 attempts, exponential backoff)
+    static fn default() -> RetryConfig:
+        RetryConfig(
+            max_attempts: 3,
+            strategy: RetryStrategy.ExponentialBackoff(100, 5000),
+            timeout_ms: 30000
+        )
+
+    # Create with fixed delay
+    static fn fixed_delay(attempts: i32, delay_ms: i32) -> RetryConfig:
+        RetryConfig(
+            max_attempts: attempts,
+            strategy: RetryStrategy.FixedDelay(delay_ms),
+            timeout_ms: delay_ms * attempts + 1000
+        )
+
+    # Create with linear backoff
+    static fn linear_backoff(attempts: i32, start_ms: i32, increment_ms: i32) -> RetryConfig:
+        RetryConfig(
+            max_attempts: attempts,
+            strategy: RetryStrategy.LinearBackoff(start_ms, increment_ms),
+            timeout_ms: start_ms * attempts + increment_ms * (attempts * (attempts - 1)) / 2
+        )
+
+    # Create with exponential backoff
+    static fn exponential_backoff(attempts: i32, base_ms: i32, max_ms: i32) -> RetryConfig:
+        RetryConfig(
+            max_attempts: attempts,
+            strategy: RetryStrategy.ExponentialBackoff(base_ms, max_ms),
+            timeout_ms: max_ms * attempts
+        )
+
+    # No retry (fail immediately)
+    static fn no_retry() -> RetryConfig:
+        RetryConfig(
+            max_attempts: 1,
+            strategy: RetryStrategy.NoRetry,
+            timeout_ms: 0
+        )
+
+# =====================================
+# Delay Calculation
+# =====================================
+
+# Calculate delay for attempt number
+fn calculate_delay(strategy: RetryStrategy, attempt: i32) -> i32:
+    match strategy:
+        case RetryStrategy.NoRetry:
+            return 0
+
+        case RetryStrategy.FixedDelay(delay):
+            return delay
+
+        case RetryStrategy.LinearBackoff(start, increment):
+            return start + (attempt - 1) * increment
+
+        case RetryStrategy.ExponentialBackoff(base, max_delay):
+            # 2^(attempt-1) * base
+            val multiplier = pow_i32(2, (attempt - 1) as u32)
+            val delay = base * multiplier
+            return min_i32(delay, max_delay)
+
+# =====================================
+# Retry Logic (Simulated)
+# =====================================
+
+# Note: These are planning/calculation utilities
+# Actual retry execution would need async/await or sleep()
+
+# Calculate all retry delays for a strategy
+fn calculate_retry_schedule(config: RetryConfig) -> List<i32>:
+    var delays = []
+
+    for attempt in 1..config.max_attempts:
+        val delay = calculate_delay(config.strategy, attempt)
+        delays.push(delay)
+
+    delays
+
+# Calculate total retry time
+fn calculate_total_retry_time(config: RetryConfig) -> i32:
+    val schedule = calculate_retry_schedule(config)
+    var total = 0
+
+    for delay in schedule:
+        total = total + delay
+
+    total
+
+# =====================================
+# Retry Predicates
+# =====================================
+
+# Should retry based on error type (predicate)
+fn should_retry_error<E>(error: E, predicate: fn(E) -> bool) -> bool:
+    predicate(error)
+
+# Common retry predicates for HTTP-like errors
+fn is_transient_error(status_code: i32) -> bool:
+    # Retry on 5xx server errors and 429 rate limit
+    status_code >= 500 or status_code == 429
+
+fn is_network_error(error_type: text) -> bool:
+    error_type.contains("timeout") or
+    error_type.contains("connection") or
+    error_type.contains("network")
+
+# =====================================
+# Circuit Breaker State
+# =====================================
+
+enum CircuitState:
+    Closed       # Normal operation
+    Open         # Failing, reject requests
+    HalfOpen     # Testing if recovered
+
+struct CircuitBreaker:
+    state: CircuitState
+    failure_count: i32
+    failure_threshold: i32
+    success_count: i32
+    success_threshold: i32
+    last_failure_time: i32  # Timestamp (simulated)
+
+impl CircuitBreaker:
+    # Create new circuit breaker
+    static fn new(failure_threshold: i32, success_threshold: i32) -> CircuitBreaker:
+        CircuitBreaker(
+            state: CircuitState.Closed,
+            failure_count: 0,
+            failure_threshold: failure_threshold,
+            success_count: 0,
+            success_threshold: success_threshold,
+            last_failure_time: 0
+        )
+
+    # Record success
+    me on_success():
+        match self.state:
+            case CircuitState.Closed:
+                self.failure_count = 0
+
+            case CircuitState.HalfOpen:
+                self.success_count = self.success_count + 1
+                if self.success_count >= self.success_threshold:
+                    self.state = CircuitState.Closed
+                    self.failure_count = 0
+                    self.success_count = 0
+
+            case CircuitState.Open:
+                pass  # Ignore in open state
+
+    # Record failure
+    me on_failure(timestamp: i32):
+        match self.state:
+            case CircuitState.Closed:
+                self.failure_count = self.failure_count + 1
+                if self.failure_count >= self.failure_threshold:
+                    self.state = CircuitState.Open
+                    self.last_failure_time = timestamp
+
+            case CircuitState.HalfOpen:
+                self.state = CircuitState.Open
+                self.last_failure_time = timestamp
+                self.success_count = 0
+
+            case CircuitState.Open:
+                self.last_failure_time = timestamp
+
+    # Check if can attempt
+    fn can_attempt(current_time: i32, timeout_ms: i32) -> bool:
+        match self.state:
+            case CircuitState.Closed:
+                return true
+
+            case CircuitState.HalfOpen:
+                return true
+
+            case CircuitState.Open:
+                # Try to transition to half-open after timeout
+                val elapsed = current_time - self.last_failure_time
+                return elapsed >= timeout_ms
+
+    # Try to transition to half-open
+    me try_half_open(current_time: i32, timeout_ms: i32):
+        match self.state:
+            case CircuitState.Open:
+                val elapsed = current_time - self.last_failure_time
+                if elapsed >= timeout_ms:
+                    self.state = CircuitState.HalfOpen
+                    self.success_count = 0
+
+            case _:
+                pass
+
+# =====================================
+# Rate Limiting
+# =====================================
+
+struct RateLimiter:
+    max_requests: i32
+    window_ms: i32
+    request_count: i32
+    window_start: i32
+
+impl RateLimiter:
+    # Create new rate limiter
+    static fn new(max_requests: i32, window_ms: i32) -> RateLimiter:
+        RateLimiter(
+            max_requests: max_requests,
+            window_ms: window_ms,
+            request_count: 0,
+            window_start: 0
+        )
+
+    # Check if request is allowed
+    fn is_allowed(current_time: i32) -> bool:
+        self.request_count < self.max_requests
+
+    # Record a request
+    me record_request(current_time: i32):
+        # Check if we need to reset window
+        val elapsed = current_time - self.window_start
+        if elapsed >= self.window_ms:
+            self.request_count = 1
+            self.window_start = current_time
+        else:
+            self.request_count = self.request_count + 1
+
+    # Calculate delay until next allowed request
+    fn delay_until_allowed(current_time: i32) -> i32:
+        if self.request_count < self.max_requests:
+            return 0
+
+        val elapsed = current_time - self.window_start
+        val remaining = self.window_ms - elapsed
+
+        if remaining <= 0:
+            return 0
+
+        remaining
+
+# =====================================
+# Timeout Utilities
+# =====================================
+
+# Check if operation has timed out
+fn is_timed_out(start_time: i32, current_time: i32, timeout_ms: i32) -> bool:
+    val elapsed = current_time - start_time
+    elapsed >= timeout_ms
+
+# Calculate remaining time
+fn remaining_time(start_time: i32, current_time: i32, timeout_ms: i32) -> i32:
+    val elapsed = current_time - start_time
+    val remaining = timeout_ms - elapsed
+
+    if remaining < 0:
+        return 0
+
+    remaining
+
+# =====================================
+# Retry Statistics
+# =====================================
+
+struct RetryStats:
+    total_attempts: i32
+    successful_attempts: i32
+    failed_attempts: i32
+    total_delay_ms: i32
+    max_delay_ms: i32
+    avg_delay_ms: i32
+
+impl RetryStats:
+    # Create empty stats
+    static fn new() -> RetryStats:
+        RetryStats(
+            total_attempts: 0,
+            successful_attempts: 0,
+            failed_attempts: 0,
+            total_delay_ms: 0,
+            max_delay_ms: 0,
+            avg_delay_ms: 0
+        )
+
+    # Record successful attempt
+    me record_success(delay_ms: i32):
+        self.total_attempts = self.total_attempts + 1
+        self.successful_attempts = self.successful_attempts + 1
+        self.total_delay_ms = self.total_delay_ms + delay_ms
+        self.update_stats(delay_ms)
+
+    # Record failed attempt
+    me record_failure(delay_ms: i32):
+        self.total_attempts = self.total_attempts + 1
+        self.failed_attempts = self.failed_attempts + 1
+        self.total_delay_ms = self.total_delay_ms + delay_ms
+        self.update_stats(delay_ms)
+
+    # Update derived stats
+    me update_stats(delay_ms: i32):
+        if delay_ms > self.max_delay_ms:
+            self.max_delay_ms = delay_ms
+
+        if self.total_attempts > 0:
+            self.avg_delay_ms = self.total_delay_ms / self.total_attempts
+
+    # Get success rate
+    fn success_rate() -> f64:
+        if self.total_attempts == 0:
+            return 0.0
+
+        (self.successful_attempts as f64) / (self.total_attempts as f64) * 100.0
+
+    # Format stats as string
+    fn summary() -> text:
+        val success_pct = self.success_rate()
+        "Retry Stats: {self.total_attempts} total, {self.successful_attempts} success ({success_pct}%), avg delay {self.avg_delay_ms}ms"

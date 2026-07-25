@@ -1,0 +1,124 @@
+# Doc Coverage Threshold Calculator
+#
+# Calculate coverage metrics per scope and compare to thresholds.
+
+use app.doc_coverage.thresholds.types.{
+    ThresholdConfig,
+    ScopeCoverage,
+    threshold_config_get,
+    scope_coverage_create
+}
+
+fn calculate_scope_coverage(
+    all_files: [text],
+    covered_files: [text],
+    config: ThresholdConfig
+) -> [ScopeCoverage]:
+    # Group files by scope
+    val scopes = extract_scopes(all_files)
+
+    var results = []
+    var scope_idx = 0
+    val scope_count = scopes.len()
+
+    while scope_idx < scope_count:
+        val scope = scopes[scope_idx]
+
+        # Filter files by scope
+        val scope_all = filter_by_scope(all_files, scope)
+        val scope_covered = filter_by_scope(covered_files, scope)
+
+        # Calculate missing items
+        val missing = find_missing_items(scope_all, scope_covered)
+
+        # Get threshold for this scope
+        val threshold = threshold_config_get(config, scope)
+
+        # Create coverage result
+        val total = scope_all.len()
+        val covered = scope_covered.len()
+        val cov = scope_coverage_create(scope, threshold, total, covered, missing)
+
+        results = results + ([cov])
+        scope_idx = scope_idx + 1
+
+    return results
+
+fn extract_scopes(files: [text]) -> [text]:
+    # Extract unique scope prefixes from file paths
+    # Example: src/std/string.spl -> src/std/
+    #          src/core/lexer.spl -> src/core/
+
+    var scopes = []
+    var idx = 0
+    val file_count = files.len()
+
+    while idx < file_count:
+        val file = files[idx]
+        val scope = get_scope_prefix(file)
+
+        # Add scope if not already present
+        if scope.len() > 0:
+            val already_added = list_contains(scopes, scope)
+            if not already_added:
+                scopes = scopes + ([scope])
+
+        idx = idx + 1
+
+    return scopes
+
+fn get_scope_prefix(file_path: text) -> text:
+    # Extract scope prefix (e.g., "src/std/", "src/core/")
+    # Rules:
+    # - Must start with "src/"
+    # - Take first 2 path components
+
+    if not file_path.starts_with("src/"):
+        return ""
+
+    val parts = file_path.split("/")
+    if parts.len() < 2:
+        return ""
+
+    val scope = "{parts[0]}/{parts[1]}/"
+    return scope
+
+fn filter_by_scope(files: [text], scope: text) -> [text]:
+    # Return files matching scope prefix
+    var result = []
+    var idx = 0
+    val file_count = files.len()
+
+    while idx < file_count:
+        val file = files[idx]
+        if file.starts_with(scope):
+            result = result + ([file])
+        idx = idx + 1
+
+    return result
+
+fn find_missing_items(all_items: [text], covered_items: [text]) -> [text]:
+    # Find items in all_items that are NOT in covered_items
+    var missing = []
+    var idx = 0
+    val total = all_items.len()
+
+    while idx < total:
+        val item = all_items[idx]
+        val is_covered = list_contains(covered_items, item)
+        if not is_covered:
+            missing = missing + ([item])
+        idx = idx + 1
+
+    return missing
+
+fn list_contains(items: [text], target: text) -> bool:
+    var idx = 0
+    val count = items.len()
+    while idx < count:
+        if items[idx] == target:
+            return true
+        idx = idx + 1
+    return false
+
+export calculate_scope_coverage

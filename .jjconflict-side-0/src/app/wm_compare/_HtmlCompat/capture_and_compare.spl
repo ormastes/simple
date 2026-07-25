@@ -1,0 +1,710 @@
+# HTML-compat compare — CaptureResult + image compare/profile/catalog
+use app.wm_compare.html_compat.*
+# HTML Compat — Phase 2 Chrome ↔ Simple HTML/CSS Pixel Equivalence
+#
+# Incrementally captures the same HTML fixture from two render sources:
+#   A  checked-in Electron / Chromium golden PPMs
+#   B  Simple Browser Engine (BrowserRenderer.render_html_to_pixels)
+#
+# Renders at 320x240. Iterates fixtures in order (00..03 + 10..17 layered on
+# top of 02_block_boxes.html) and stops at the first divergent fixture.
+#
+# Output:
+#   test/09_baselines/html_compat/<id>/chrome.ppm
+#   test/09_baselines/html_compat/<id>/simple.ppm
+#   test/09_baselines/html_compat/<id>/diff_chrome_vs_simple.ppm  (on mismatch)
+#   test/09_baselines/html_compat/<id>/report.sdn
+#
+# Usage:
+#   bin/simple run src/app/wm_compare/html_compat.spl
+#   bin/simple run src/app/wm_compare/html_compat.spl --only=02_block_boxes
+#   bin/simple run src/app/wm_compare/html_compat.spl --update-baseline
+#   bin/simple run src/app/wm_compare/html_compat.spl --skip-simple
+
+use std.cli.cli_util.{get_cli_args}
+use std.nogc_sync_mut.sffi.io.{
+    file_write_text,
+    dir_create_all}
+use common.string_builder.{StringBuilder}
+use app.io.mod.{process_run_timeout}
+
+use std.io_runtime.{file_read, file_read_bytes, file_exists, env_get}
+use app.io.env_ops.{cwd as app_cwd}
+
+# Use the app process facade rather than declaring raw runtime process externs
+# in this leaf harness.
+# NOTE: We do NOT use std.common.image.ppm_decode here. Its
+# `decode_ppm_to_argb` calls `data.len().to_i32()`, which crashes under
+# the bootstrap interpreter ("method `to_i32` not found on type i64").
+# We inline a minimal P6 decoder below using `as i32` casts.
+class CaptureResult:
+    pixels: [u32]
+    width: i32
+    height: i32
+    backend_name: text
+    success: bool
+    error: text
+
+fn capture_error(backend_name: text, width: i32, height: i32, error: text) -> CaptureResult:
+    CaptureResult(
+        pixels: [],
+        width: width,
+        height: height,
+        backend_name: backend_name,
+        success: false,
+        error: error
+    )
+
+struct ComparisonResult:
+    different_pixels: i64
+    match_percentage: i64
+    max_channel_diff: i32
+
+struct PerceptualResult:
+    match_percentage: i64
+
+struct ToleranceProfile:
+    default_yiq_threshold: i32
+
+fn profile_strict() -> ToleranceProfile:
+    ToleranceProfile(default_yiq_threshold: 0)
+
+fn profile_text_tolerant() -> ToleranceProfile:
+    ToleranceProfile(default_yiq_threshold: 16)
+
+fn _abs_i32(v: i32) -> i32:
+    if v < 0: -v else: v
+
+fn _channel_diff(a: u32, b: u32, shift: i32) -> i32:
+    val av = ((a >> shift) & 0xFF) as i32
+    val bv = ((b >> shift) & 0xFF) as i32
+    _abs_i32(av - bv)
+
+fn _max_rgb_diff(a: u32, b: u32) -> i32:
+    val rd = _channel_diff(a, b, 16)
+    val gd = _channel_diff(a, b, 8)
+    val bd = _channel_diff(a, b, 0)
+    var m = rd
+    if gd > m:
+        m = gd
+    if bd > m:
+        m = bd
+    m
+
+fn compare_exact(a: [u32], b: [u32], width: i32, height: i32) -> ComparisonResult:
+    if width <= 0 or height <= 0:
+        return ComparisonResult(
+            different_pixels: 1,
+            match_percentage: 0,
+            max_channel_diff: 255
+        )
+    val total = width * height
+    var different: i64 = 0
+    var max_diff: i32 = 0
+    if a.len() != total or b.len() != total:
+        return ComparisonResult(
+            different_pixels: total as i64,
+            match_percentage: 0,
+            max_channel_diff: 255
+        )
+    var i = 0
+    while i < total and i < a.len() and i < b.len():
+        if a[i] != b[i]:
+            different = different + 1
+            val d = _max_rgb_diff(a[i], b[i])
+            if d > max_diff:
+                max_diff = d
+        i = i + 1
+    val same = (total as i64) - different
+    val pct = if total > 0: (same * 10000) / (total as i64) else: 0
+    ComparisonResult(
+        different_pixels: different,
+        match_percentage: pct,
+        max_channel_diff: max_diff
+    )
+
+fn compare_perceptual(a: [u32], b: [u32], width: i32, height: i32,
+                      threshold: i32, _include_alpha: bool) -> PerceptualResult:
+    if width <= 0 or height <= 0:
+        return PerceptualResult(match_percentage: 0)
+    val total = width * height
+    if a.len() != total or b.len() != total:
+        return PerceptualResult(match_percentage: 0)
+    var matched: i64 = 0
+    var i = 0
+    while i < total and i < a.len() and i < b.len():
+        if _max_rgb_diff(a[i], b[i]) <= threshold:
+            matched = matched + 1
+        i = i + 1
+    val pct = if total > 0: (matched * 10000) / (total as i64) else: 0
+    PerceptualResult(match_percentage: pct)
+
+fn generate_diff_image(a: [u32], b: [u32], width: i32, height: i32) -> [u32]:
+    val total = width * height
+    var pixels: [u32] = []
+    var i = 0
+    while i < total:
+        var same = false
+        if i < a.len() and i < b.len():
+            val av = a[i]
+            val bv = b[i]
+            same = av == bv
+        if same:
+            pixels.push(0xFF00AA00u32)
+        else:
+            pixels.push(0xFFFF0000u32)
+        i = i + 1
+    pixels
+
+# ============================================================================
+# Fixture Catalog
+# ============================================================================
+
+struct Fixture:
+    """One Phase 2 fixture: a stable id, an HTML file, an optional CSS file."""
+    id: text
+    html_path: text
+    css_path: text       # "" if no CSS
+    strict: bool         # true => use profile_strict; false => text_tolerant
+
+fn build_catalog() -> [Fixture]:
+    """Build the ordered Phase 2 fixture catalog.
+
+    Order matters: the harness stops at the first divergent fixture, so
+    earlier entries gate later entries (CSS layers gate themselves on
+    02_block_boxes.html).
+    """
+    val base = "test/fixtures/html_compat"
+    var fixtures: [Fixture] = []
+
+    # CSS-less fixtures: strict match expected
+    fixtures = fixtures + [Fixture(
+        id: "00_text_only",
+        html_path: "{base}/00_text_only.html",
+        css_path: "",
+        strict: false
+    )]
+    fixtures = fixtures + [Fixture(
+        id: "01_inline_text",
+        html_path: "{base}/01_inline_text.html",
+        css_path: "",
+        strict: false
+    )]
+    fixtures = fixtures + [Fixture(
+        id: "02_block_boxes",
+        html_path: "{base}/02_block_boxes.html",
+        css_path: "",
+        strict: false
+    )]
+    fixtures = fixtures + [Fixture(
+        id: "03_list",
+        html_path: "{base}/03_list.html",
+        css_path: "",
+        strict: false
+    )]
+    fixtures = fixtures + [Fixture(
+        id: "04_button",
+        html_path: "{base}/04_button.html",
+        css_path: "",
+        strict: false
+    )]
+    fixtures = fixtures + [Fixture(
+        id: "05_text_input",
+        html_path: "{base}/05_text_input.html",
+        css_path: "",
+        strict: false
+    )]
+    fixtures = fixtures + [Fixture(
+        id: "06_card_panel",
+        html_path: "{base}/06_card_panel.html",
+        css_path: "",
+        strict: false
+    )]
+    fixtures = fixtures + [Fixture(
+        id: "07_scrollable_list",
+        html_path: "{base}/07_scrollable_list.html",
+        css_path: "",
+        strict: false
+    )]
+
+    # CSS layers on top of 02_block_boxes.html: text_tolerant for AA
+    val css_layers: [text] = [
+        "10_colors", "11_font_size", "12_padding", "13_margin",
+        "14_border", "15_background", "16_flex_row", "17_flex_col"
+    ]
+    for layer in css_layers:
+        fixtures = fixtures + [Fixture(
+            id: layer,
+            html_path: "{base}/02_block_boxes.html",
+            css_path: "{base}/{layer}.css",
+            strict: false
+        )]
+
+    val flex_fixtures: [text] = [
+        "18_flex_grow_weights",
+        "19_flex_shrink_weights",
+        "20_flex_basis_override",
+        "21_flex_wrap_basic",
+        "22_flex_align_items_baseline",
+        "23_flex_wrap_align_content_center",
+        "24_flex_wrap_reverse_basic",
+        "25_flex_justify_space_between",
+        "26_flex_gap_basic",
+        "27_absolute_position_basic",
+        "28_display_contents_basic",
+        "29_box_sizing_border_box",
+        "30_min_max_width_basic",
+        "31_flex_align_items_center",
+        "32_flex_align_items_flex_end",
+        "33_flex_justify_flex_end",
+        "34_flex_justify_center",
+        "35_flex_align_items_stretch",
+        "36_flex_align_self_flex_end",
+        "37_flex_gap_justify_center",
+        "38_flex_gap_space_between",
+        "39_flex_gap_flex_end",
+        "40_flex_column_gap_justify_center",
+        "41_flex_column_gap_space_between",
+        "42_flex_column_gap_flex_end",
+        "43_flex_column_align_items_center",
+        "44_flex_column_align_items_flex_end",
+        "45_flex_column_align_self_flex_end",
+        "46_flex_column_align_items_stretch",
+        "47_flex_column_align_self_center",
+        "48_flex_column_align_self_stretch",
+        "49_flex_column_justify_space_around",
+        "50_flex_row_justify_space_around",
+        "51_flex_row_justify_space_evenly",
+        "52_flex_column_justify_space_evenly",
+        "53_flex_wrap_align_content_flex_end",
+        "54_flex_wrap_align_content_space_between",
+        "55_flex_wrap_align_content_space_around",
+        "56_flex_wrap_align_content_space_evenly",
+        "57_flex_wrap_gap_basic",
+        "58_flex_wrap_axis_gap_basic",
+        "59_flex_column_axis_gap_basic",
+        "60_flex_align_self_mixed_overrides",
+        "61_flex_gap_space_around",
+        "62_flex_column_gap_space_around",
+        "63_flex_wrap_gap_align_content_space_between",
+        "64_flex_wrap_gap_align_content_space_around",
+        "65_flex_wrap_gap_align_content_space_evenly",
+        "66_flex_wrap_gap_align_content_flex_end",
+        "67_flex_wrap_gap_align_content_center",
+        "68_flex_wrap_gap_align_content_stretch",
+        "69_flex_wrap_gap_align_content_flex_start",
+        "70_flex_wrap_gap_align_content_normal",
+        "71_flex_wrap_gap_align_content_end",
+        "72_flex_wrap_gap_align_content_start",
+        "73_flex_wrap_gap_align_content_unsafe_center",
+        "74_flex_gap_justify_unsafe_center",
+        "75_flex_gap_justify_unsafe_center_overflow",
+        "76_flex_gap_justify_unsafe_center_no_shrink_overflow",
+        "77_flex_gap_justify_safe_center_no_shrink_overflow",
+        "78_flex_column_gap_justify_unsafe_center_no_shrink_overflow",
+        "79_flex_column_gap_justify_safe_center_no_shrink_overflow",
+        "80_flex_gap_justify_end",
+        "81_flex_column_gap_justify_end",
+        "82_flex_gap_align_items_end",
+        "83_flex_auto_margin_align_center",
+        "84_flex_column_auto_margin_align_center",
+        "85_flex_cross_auto_margin_top",
+        "86_flex_row_cross_auto_margin_align_center",
+        "87_flex_row_cross_auto_margin_both_override_end",
+        "88_flex_order_basic",
+        "89_percent_content_box_padding",
+        "90_absolute_inset_stretch",
+        "91_percent_margin_basic",
+        "92_percent_height_definite_parent",
+        "93_flex_percent_height_cross_axis",
+        "94_flex_column_percent_height_main_axis",
+        "95_absolute_percent_height_basic",
+        "96_absolute_percent_height_bottom"
+    ]
+    for flex_fixture in flex_fixtures:
+        fixtures = fixtures + [Fixture(
+            id: flex_fixture,
+            html_path: "{base}/{flex_fixture}.html",
+            css_path: "",
+            strict: false
+        )]
+
+    fixtures
+
+# ============================================================================
+# CLI Options
+# ============================================================================
+
+struct HtmlCompatOpts:
+    """Parsed CLI options."""
+    only: text                # if non-empty: run just this fixture id
+    update_baseline: bool
+    skip_simple: bool         # only capture Chrome (source A)
+    simple_timeout_ms: i64
+    width: i32
+    height: i32
+    help: bool
+
+fn default_opts() -> HtmlCompatOpts:
+    HtmlCompatOpts(
+        only: "",
+        update_baseline: false,
+        skip_simple: false,
+        simple_timeout_ms: 20000,
+        width: 320,
+        height: 240,
+        help: false
+    )
+
+fn _parse_kv(arg: text, key: text) -> text:
+    """Return value from `--key=value`, or empty string if no match."""
+    val prefix = key + "="
+    if arg.starts_with(prefix):
+        return arg.substring(prefix.len())
+    ""
+
+fn parse_opts(args: [text]) -> HtmlCompatOpts:
+    var opts = default_opts()
+    for arg in args:
+        if arg == "-h" or arg == "--help":
+            opts.help = true
+        elif arg == "--update-baseline":
+            opts.update_baseline = true
+        elif arg == "--skip-simple":
+            opts.skip_simple = true
+        else:
+            val v_only = _parse_kv(arg, "--only")
+            if v_only != "":
+                opts.only = v_only
+            else:
+                val v_w = _parse_kv(arg, "--width")
+                if v_w != "":
+                    opts.width = v_w.to_i32()
+                else:
+                    val v_h = _parse_kv(arg, "--height")
+                    if v_h != "":
+                        opts.height = v_h.to_i32()
+                    else:
+                        val v_simple_timeout = _parse_kv(arg, "--simple-timeout-ms")
+                        if v_simple_timeout != "":
+                            opts.simple_timeout_ms = v_simple_timeout.to_i64()
+    opts
+
+fn print_help():
+    print "Usage: simple run src/app/wm_compare/html_compat.spl [options]"
+    print ""
+    print "Phase 2 Chrome <-> Simple HTML/CSS pixel equivalence harness."
+    print "Iterates fixtures and stops at the first divergent one."
+    print ""
+    print "Options:"
+    print "  --only=<fixture_id>   Run only this fixture (e.g. 02_block_boxes)"
+    print "  --update-baseline     Recapture Chromium and overwrite chrome.ppm"
+    print "  --skip-simple         With --update-baseline, regenerate Chromium only"
+    print "  --simple-timeout-ms=<n>"
+    print "                       Bound Simple source-B render in a child process (default 20000)"
+    print "  --width=<n>           Capture width (default 320)"
+    print "  --height=<n>          Capture height (default 240)"
+    print "  -h, --help            Show this help"
+
+# ============================================================================
+# HTML Combination
+# ============================================================================
+
+fn load_combined_html(fixture: Fixture) -> text:
+    """Load the fixture HTML and inject the CSS file (if any) into <head>.
+
+    Both Chrome and the Simple browser engine receive the same combined
+    string so any divergence is purely a render-pipeline difference, not
+    a fixture mismatch.
+    """
+    val html = file_read(fixture.html_path)
+    if fixture.css_path == "":
+        return html
+
+    val css = file_read(fixture.css_path)
+    val style_tag = "<style>\n" + css + "</style>\n</head>"
+
+    # Inject before </head>. All fixture HTML files have exactly one
+    # `</head>` so a literal replace is deterministic.
+    html.replace("</head>", style_tag)
+
+# ============================================================================
+# Capture: Source A (Chromium golden or Electron regeneration)
+# ============================================================================
+
+fn capture_chrome(html: text, width: i32, height: i32) -> CaptureResult:
+    """Capture HTML via the maintained Electron live-bitmap Chromium path.
+
+    Inlined version of `capture_electron` that avoids the
+    `val (out, err, exit_code) = shell(...)` struct destructure that
+    crashes under the bootstrap interpreter.
+    """
+    if html.len() == 0:
+        return capture_error("electron", width, height, "Empty HTML provided")
+
+    val html_path = "/tmp/html_compat_input.html"
+    val argb_json_path = "/tmp/html_compat_output_argb.json"
+    val ppm_path = chrome_capture_temp_ppm_path()
+
+    val write_ok = file_write_text(html_path, html)
+    if not write_ok:
+        return capture_error("electron", width, height, "Failed to write HTML temp file")
+
+    # Use absolute paths and explicit cwd via /bin/sh -c.
+    val w_str = "{width}"
+    val h_str = "{height}"
+    val display = env_get("DISPLAY")
+    if display == "":
+        return capture_error(
+            "electron", width, height,
+            "missing DISPLAY; run under xvfb-run or provide a display for Electron live-bitmap capture")
+    else:
+        var cmd = "ELECTRON_CAPTURE_HTML=" + html_path +
+            " ELECTRON_CAPTURE_WIDTH=" + w_str +
+            " ELECTRON_CAPTURE_HEIGHT=" + h_str +
+            " ELECTRON_CAPTURE_OUTPUT=" + argb_json_path +
+            " ELECTRON_DISABLE_SANDBOX=1 timeout 60s npm --prefix tools/electron-shell exec -- electron --no-sandbox --disable-gpu tools/electron-live-bitmap/capture_html_argb.js" +
+            " && node tools/pixel_compare/argb_json_to_ppm.js " + argb_json_path + " " + ppm_path
+        val (stdout, stderr, exit_code) = process_run_timeout("/bin/sh", ["-c", cmd], 60000)
+
+        if exit_code == -1:
+            return capture_error("electron", width, height, "Electron live-bitmap capture timed out after 60000 ms")
+        if exit_code == 124:
+            return capture_error("electron", width, height, "Electron live-bitmap capture timed out after shell timeout 60s")
+        if exit_code != 0:
+            return capture_error("electron", width, height, "Electron live-bitmap capture failed: {stderr}")
+
+    val ppm_data: [u8] = file_read_bytes(ppm_path) ?? []
+    if ppm_data.len() == 0:
+        return capture_error("electron", width, height, "Failed to read PPM output file")
+
+    val img = decode_ppm_local(ppm_data)
+    if not img.ok:
+        return capture_error("electron", width, height, "PPM decode failed: {img.error}")
+    return CaptureResult(
+        pixels: img.pixels,
+        width: img.width,
+        height: img.height,
+        backend_name: "electron",
+        success: true,
+        error: ""
+    )
+
+fn chrome_capture_temp_ppm_path() -> text:
+    "/tmp/html_compat_output.ppm"
+
+fn load_chrome_golden(fixture: Fixture, width: i32, height: i32) -> CaptureResult:
+    """Load the checked-in Chromium PPM golden for a fixture."""
+    val path = chrome_ppm_path(fixture.id)
+    if not file_exists(path):
+        return capture_error("chromium_golden", width, height, "missing Chromium golden: {path}")
+    val ppm_data: [u8] = file_read_bytes(path) ?? []
+    if ppm_data.len() == 0:
+        return capture_error("chromium_golden", width, height, "empty Chromium golden: {path}")
+    val img = decode_ppm_local(ppm_data)
+    if not img.ok:
+        return capture_error("chromium_golden", width, height, "PPM decode failed for {path}: {img.error}")
+    if img.width != width or img.height != height:
+        return capture_error("chromium_golden", width, height, "Chromium golden viewport mismatch: {img.width}x{img.height}, expected {width}x{height}")
+    CaptureResult(
+        pixels: img.pixels,
+        width: img.width,
+        height: img.height,
+        backend_name: "chromium_golden",
+        success: true,
+        error: ""
+    )
+
+fn load_ppm_capture(path: text, backend_name: text, width: i32, height: i32) -> CaptureResult:
+    """Load a PPM capture from an explicit path and validate the viewport."""
+    if not file_exists(path):
+        return capture_error(backend_name, width, height, "missing PPM capture: {path}")
+    val ppm_data: [u8] = file_read_bytes(path) ?? []
+    if ppm_data.len() == 0:
+        return capture_error(backend_name, width, height, "empty PPM capture: {path}")
+    val img = decode_ppm_local(ppm_data)
+    if not img.ok:
+        return capture_error(backend_name, width, height, "PPM decode failed for {path}: {img.error}")
+    if img.width != width or img.height != height:
+        return capture_error(backend_name, width, height, "PPM viewport mismatch: {img.width}x{img.height}, expected {width}x{height}")
+    CaptureResult(
+        pixels: img.pixels,
+        width: img.width,
+        height: img.height,
+        backend_name: backend_name,
+        success: true,
+        error: ""
+    )
+
+# ============================================================================
+# Capture: Source B (Simple Browser Engine)
+# ============================================================================
+
+fn _simple_capture_input_path(fixture_id: text) -> text:
+    "/tmp/simple_html_compat_{fixture_id}.html"
+
+fn _simple_capture_output_path(fixture_id: text) -> text:
+    "/tmp/simple_html_compat_{fixture_id}.ppm"
+
+fn _simple_capture_candidate_runnable(candidate: text) -> bool:
+    if candidate == "":
+        return false
+    val (_stdout, _stderr, exit_code) = process_run_timeout(candidate, ["--version"], 2000)
+    exit_code == 0
+
+fn _simple_capture_select_candidate(candidate: text) -> text:
+    if candidate == "":
+        return ""
+    if not file_exists(candidate):
+        return ""
+    if _simple_capture_candidate_runnable(candidate):
+        return candidate
+    ""
+
+fn _simple_capture_binary_path() -> text:
+    val configured = env_get("SIMPLE_BINARY")
+    if _simple_capture_candidate_runnable(configured):
+        return configured
+    val configured_bin = env_get("SIMPLE_BIN")
+    if _simple_capture_candidate_runnable(configured_bin):
+        return configured_bin
+
+    val cwd = app_cwd()
+    val local_bin = _simple_capture_select_candidate(cwd + "/bin/simple")
+    if local_bin != "":
+        return local_bin
+    val local_release_arch = _simple_capture_select_candidate(cwd + "/bin/release/x86_64-unknown-linux-gnu/simple")
+    if local_release_arch != "":
+        return local_release_arch
+    val local_release_linux = _simple_capture_select_candidate(cwd + "/bin/release/linux-x86_64/simple")
+    if local_release_linux != "":
+        return local_release_linux
+    val local_compiler_release = _simple_capture_select_candidate(cwd + "/src/compiler_rust/target/release/simple")
+    if local_compiler_release != "":
+        return local_compiler_release
+    ""
+
+fn capture_simple(fixture_id: text, html: text, width: i32, height: i32, timeout_ms: i64) -> CaptureResult:
+    """Capture HTML via the Simple browser engine in a bounded child process."""
+    val html_path = _simple_capture_input_path(fixture_id)
+    val ppm_path = _simple_capture_output_path(fixture_id)
+    if not file_write_text(html_path, html):
+        return capture_error(
+            "simple_browser_engine", width, height,
+            "failed to write child input html: {html_path}")
+
+    val simple_bin = _simple_capture_binary_path()
+    if simple_bin == "":
+        return capture_error(
+            "simple_browser_engine", width, height,
+            "no runnable Simple binary found for source B child; set SIMPLE_BINARY to the active runtime")
+    val worker_path = "src/app/wm_compare/simple_html_capture_worker.spl"
+    val args = [
+        "run", worker_path,
+        "--html=" + html_path,
+        "--out=" + ppm_path,
+        "--width=" + width.to_string(),
+        "--height=" + height.to_string()
+    ]
+    val (stdout, stderr, exit_code) = process_run_timeout(simple_bin, args, timeout_ms)
+    if exit_code == -1:
+        return capture_error(
+            "simple_browser_engine", width, height,
+            "timed out after {timeout_ms} ms while rendering source B in child process")
+    if exit_code != 0:
+        var detail = stderr
+        if detail == "":
+            detail = stdout
+        if detail == "":
+            detail = "exit_code={exit_code}"
+        return capture_error(
+            "simple_browser_engine", width, height,
+            "child render failed: {detail}")
+
+    val ppm_data: [u8] = file_read_bytes(ppm_path) ?? []
+    if ppm_data.len() == 0:
+        return capture_error(
+            "simple_browser_engine", width, height,
+            "child render succeeded but wrote no ppm: {ppm_path}")
+
+    val img = decode_ppm_local(ppm_data)
+    if not img.ok:
+        return capture_error(
+            "simple_browser_engine", width, height,
+            "child ppm decode failed: {img.error}")
+    if img.width != width or img.height != height:
+        return capture_error(
+            "simple_browser_engine", width, height,
+            "child ppm dimensions {img.width}x{img.height}, expected {width}x{height}")
+
+    CaptureResult(
+        pixels: img.pixels,
+        width: img.width,
+        height: img.height,
+        backend_name: "simple_browser_engine",
+        success: true,
+        error: ""
+    )
+
+# ============================================================================
+# Filesystem Layout
+# ============================================================================
+
+fn baseline_dir(id: text) -> text:
+    "test/09_baselines/html_compat/{id}"
+
+fn chrome_ppm_path(id: text) -> text:
+    "{baseline_dir(id)}/chrome.ppm"
+
+fn simple_ppm_path(id: text) -> text:
+    "{baseline_dir(id)}/simple.ppm"
+
+fn diff_ppm_path(id: text) -> text:
+    "{baseline_dir(id)}/diff_chrome_vs_simple.ppm"
+
+fn report_sdn_path(id: text) -> text:
+    "{baseline_dir(id)}/report.sdn"
+
+# ============================================================================
+# Local PPM P6 Decoder (interpreter-bug-safe)
+# ============================================================================
+
+struct LocalPpm:
+    """Minimal in-harness PPM decoded image."""
+    width: i32
+    height: i32
+    pixels: [u32]
+    ok: bool
+    error: text
+
+fn _local_ppm_err(msg: text) -> LocalPpm:
+    LocalPpm(width: 0, height: 0, pixels: [], ok: false, error: msg)
+
+fn _read_int_at(data: [u8], start: i32) -> (i32, i32):
+    """Read a non-negative ASCII decimal integer from `data` starting at
+    `start`, skipping leading whitespace and `#`-comments. Returns
+    (value, next_pos). next_pos points one past the last digit byte."""
+    var i = start
+    val n: i32 = data.len() as i32
+    # skip ws + comments
+    while i < n:
+        val b: i32 = data[i] as i32
+        if b == 32 or b == 10 or b == 13 or b == 9:
+            i = i + 1
+        elif b == 35:
+            while i < n:
+                val comment_byte = data[i] as i32
+                if comment_byte == 10:
+                    break
+                i = i + 1
+        else:
+            break
+    var v: i32 = 0
+    while i < n:
+        val c: i32 = data[i] as i32
+        if c >= 48 and c <= 57:
+            v = v * 10 + (c - 48)
+            i = i + 1
+        else:
+            break
+    (v, i)

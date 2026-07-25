@@ -1,0 +1,95 @@
+#!/bin/sh
+# Regression guard for doc/08_tracking/bug/bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20.md
+#
+# That bug: the self-hosted (pure-Simple, cranelift-compiled) compiler's own
+# lexer/parser costs grow super-linearly in a single file's size (measured:
+# 200 funcs/12KB -> 1.5s/85MB; 500 funcs/31KB -> 6.4s/175MB; 1000 funcs/62KB
+# -> 31s/340MB -- time ratio ~size^2.3, i.e. quadratic-or-worse, while RSS
+# tracks size roughly linearly per file). Across the real ~1777-file stage-4
+# closure this shows up as a multi-GB-per-file RSS climb that killed a real
+# build at 64GB/403 files. See the bug doc's "leading hypothesis" section for
+# the full writeup, including why a full multi-file closure repro was judged
+# too expensive to embed in a fast check (~5-6s/file sequential, confirmed in
+# a sibling investigation) and why this guard instead targets the CONFIRMED
+# single-file mechanism (super-linear time/size, roughly-linear RSS/size) by
+# generating one large synthetic file and watching both wall time and peak
+# RSS. It does not, by itself, prove multi-file accumulation is fixed or
+# still broken -- widen FILE_COUNT below (see TODO) once that dynamic is
+# independently isolated (this bug doc's "next step" is compiling a fresh
+# stage3 with `rt_heap_registry_count()` in every phase-log line, to tell
+# live-object retention apart from allocator high-water-mark churn).
+#
+# Ceilings are calibrated off the stage3 binary measurement above with
+# generous headroom (not a tight perf budget -- this is a defect-class
+# tripwire, not a benchmark). Override via env for local tuning.
+set -eu
+
+ROOT="${STAGE4_PARSE_MEM_ROOT:-build/check-stage4-parse-memory}"
+FUNCS="${STAGE4_PARSE_MEM_FUNCS:-500}"
+TIME_MAX_S="${STAGE4_PARSE_MEM_TIME_MAX_S:-60}"
+RSS_MAX_KIB="${STAGE4_PARSE_MEM_RSS_MAX_KIB:-524288}"
+# TODO(next session): once bin/simple's ad-hoc `native-build --entry <file>`
+# path is healthy again (currently errors on even a trivial `fn main() ->
+# i64: 0` entry with "function expects 2 argument(s), but more were
+# provided" -- reproduced 2026-07-20, unrelated to this bug, not
+# investigated further here), drop this override and always use bin/simple
+# per repo convention (.claude/rules/bootstrap.md: default tooling is the
+# self-hosted binary, not the seed).
+SIMPLE_BIN="${STAGE4_PARSE_MEM_BINARY:-bin/simple}"
+
+case "$FUNCS" in ''|*[!0-9]*) echo "error=invalid_funcs"; exit 2 ;; esac
+[ "$FUNCS" -gt 0 ] || { echo "error=invalid_funcs"; exit 2; }
+[ -x /usr/bin/time ] || { echo "error=gnu_time_required"; exit 2; }
+command -v timeout >/dev/null 2>&1 || { echo "error=timeout_required"; exit 2; }
+[ -x "$SIMPLE_BIN" ] || { echo "error=binary_missing:$SIMPLE_BIN"; exit 2; }
+
+rm -rf "$ROOT"
+mkdir -p "$ROOT"
+gen="$ROOT/gen.spl"
+: > "$gen"
+i=0
+while [ "$i" -lt "$FUNCS" ]; do
+  printf 'fn parsemem_guard_f_%d() -> i64:\n    val a = %d\n    val b = %d\n    a + b\n\n' "$i" "$i" "$i" >>"$gen"
+  i=$((i + 1))
+done
+printf 'fn main() -> i64:\n    0\n' >>"$gen"
+
+set +e
+# --source <dir> --entry-closure is required, not cosmetic: without an
+# explicit --source scope, native-build's import resolver falls back to
+# scanning from the repo root and hangs for minutes on a full checkout
+# (reproduced 2026-07-20 -- confirmed via a >30s hang with no output at all,
+# vs. 1.5s total with --source added; matches the redundant-directory-scan
+# perf bug in doc/08_tracking/bug/flat_bridge_type_index_across_ast_reset_2026-07-12.md).
+/usr/bin/time -f "%M" -o "$ROOT/max-rss-kib" \
+  timeout "$TIME_MAX_S" "$SIMPLE_BIN" native-build --source "$ROOT" --entry "$gen" --entry-closure \
+    --backend cranelift --mode one-binary \
+    --cache-dir "$ROOT/cache" -o "$ROOT/out" \
+    >"$ROOT/output.log" 2>"$ROOT/error.log"
+status=$?
+set -e
+
+if [ "$status" -eq 124 ]; then
+  echo "error=timed_out_after_${TIME_MAX_S}s (per-file superlinear-parse regression signature -- see doc/08_tracking/bug/bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20.md)"
+  tail -n 20 "$ROOT/error.log" || true
+  exit 1
+fi
+
+max_rss_kib="$(sed -n '1p' "$ROOT/max-rss-kib" 2>/dev/null || echo 0)"
+case "$max_rss_kib" in ''|*[!0-9]*) max_rss_kib=0 ;; esac
+[ "$max_rss_kib" -gt 0 ] || { echo "error=no_rss_sample"; cat "$ROOT/error.log" || true; exit 2; }
+
+if [ "$status" -ne 0 ]; then
+  echo "error=native_build_failed:$status (peak_rss_kib=$max_rss_kib -- if this is a compile error unrelated to memory/time, the guard's synthetic entry may need updating, not the ceilings)"
+  tail -n 20 "$ROOT/error.log" || true
+  exit 1
+fi
+
+[ "$max_rss_kib" -lt "$RSS_MAX_KIB" ] || {
+  echo "error=peak_rss_kib:$max_rss_kib exceeds ceiling $RSS_MAX_KIB"
+  exit 1
+}
+
+echo "stage4_parse_memory_funcs=$FUNCS"
+echo "stage4_parse_memory_max_rss_kib=$max_rss_kib"
+echo "stage4_parse_memory_status=pass"

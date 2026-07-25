@@ -1,0 +1,159 @@
+# Collection Optimization — facade
+#
+# Re-exports from collection_opt_core.spl and collection_opt_patterns.spl.
+# See those files for pattern implementations.
+
+use compiler.mir.mir_data.*
+use compiler.mir.mir.*
+use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
+use compiler.mir_opt.mir_opt.loop_detect.{LoopInfo, LoopDetector}
+use compiler.mir_opt.mir_opt.pattern.rule_engine.{
+    OptimizationRuleProvider, OptimizerProviderKind, OptimizerRuleLookupKind,
+    optimization_rule_provider_builtin_with_contract
+}
+
+export use compiler.mir_opt.mir_opt.collection_opt_core.{
+    CollectionOptimization, PURE_METHODS
+}
+export use compiler.mir_opt.mir_opt.collection_opt_patterns.{
+    colopt_optimize_concat_in_loop, colopt_optimize_concat_all_blocks,
+    colopt_hoist_pure_calls,
+    colopt_is_hoistable_scalar_inst, colopt_operand_invariant,
+    colopt_is_hoistable_runtime_metadata_read
+}
+
+# ============================================================================
+# Extension impl — me-methods that fix cross-module mutation propagation
+# TODO(interpreter): free fn(self: Class, ...) calls across module boundaries
+#   lose field mutations on self. Same body as a me-method propagates correctly.
+# ============================================================================
+
+impl CollectionOptimization:
+    me optimize_function(func: MirFunction) -> MirFunction:
+        self.detector.detect_loops(func)
+        var optimized_blocks = func.blocks
+        if self.detector.loops.len() > 0:
+            for loop_info in self.detector.loops:
+                optimized_blocks = colopt_optimize_concat_in_loop(self, optimized_blocks, loop_info, func)
+                optimized_blocks = self.hoist_pure_calls(optimized_blocks, loop_info)
+        optimized_blocks = colopt_optimize_concat_all_blocks(self, optimized_blocks, func)
+        optimized_blocks = self.canonicalize_collection_len_queries(optimized_blocks)
+        optimized_blocks = self.canonicalize_collection_pure_queries(optimized_blocks)
+        optimized_blocks = self.specialize_typed_array_index_gets(optimized_blocks, func)
+        optimized_blocks = self.elide_dead_append_only_capacity_arrays(optimized_blocks)
+        var result = func
+        result.blocks = optimized_blocks
+        result
+
+    me hoist_pure_calls(blocks: [MirBlock], loop_info: LoopInfo) -> [MirBlock]:
+        var loop_set = {}
+        loop_set[loop_info.header.id] = true
+        for bid in loop_info.body:
+            loop_set[bid.id] = true
+        var loop_defs: Dict<i64, bool> = {}
+        for block in blocks:
+            if loop_set.has(block.id.id):
+                for inst in block.instructions:
+                    val dest = self.inst_dest(inst)
+                    if dest.?:
+                        val found_dest = dest
+                        loop_defs[found_dest.id] = true
+        val loop_has_mutation = self.loop_has_collection_state_mutation(blocks, loop_set)
+        var to_hoist: [MirInst] = []
+        var hoisted_ids: Dict<i64, bool> = {}
+        for block in blocks:
+            if loop_set.has(block.id.id):
+                for inst in block.instructions:
+                    if self.is_hoistable_loop_invariant_inst(inst, loop_defs, hoisted_ids, loop_has_mutation):
+                        to_hoist.push(inst)
+                        val dest = self.inst_dest(inst)
+                        if dest.?:
+                            val found_dest = dest
+                            hoisted_ids[found_dest.id] = true
+        if to_hoist.len() == 0:
+            return blocks
+        self.calls_hoisted = self.calls_hoisted + to_hoist.len()
+        var new_blocks: [MirBlock] = []
+        var inserted = false
+        for block in blocks:
+            if block.id.id == loop_info.header.id and not inserted:
+                var new_insts: [MirInst] = []
+                for h in to_hoist:
+                    new_insts.push(h)
+                for inst in block.instructions:
+                    if not self.inst_in_list(inst, to_hoist):
+                        new_insts.push(inst)
+                new_blocks.push(MirBlock(
+                    id: block.id, label: block.label,
+                    instructions: new_insts, terminator: block.terminator
+                ))
+                inserted = true
+            elif loop_set.has(block.id.id):
+                var kept: [MirInst] = []
+                for inst in block.instructions:
+                    if not self.inst_in_list(inst, to_hoist):
+                        kept.push(inst)
+                new_blocks.push(MirBlock(
+                    id: block.id, label: block.label,
+                    instructions: kept, terminator: block.terminator
+                ))
+            else:
+                new_blocks.push(block)
+        new_blocks
+
+    fn loop_has_collection_state_mutation(blocks: [MirBlock], loop_set: Dict<i64, bool>) -> bool:
+        for block in blocks:
+            if loop_set.has(block.id.id):
+                for inst in block.instructions:
+                    if self.inst_may_mutate_collection_state(inst):
+                        return true
+        false
+
+    me is_hoistable_loop_invariant_inst(inst: MirInst, loop_defs: Dict<i64, bool>, hoisted: Dict<i64, bool>, loop_has_mutation: bool) -> bool:
+        if self.is_hoistable_pure_call(inst, loop_defs, hoisted, loop_has_mutation):
+            return true
+        if colopt_is_hoistable_scalar_inst(inst, loop_defs, hoisted):
+            self.scalar_ops_hoisted = self.scalar_ops_hoisted + 1
+            return true
+        false
+
+    fn is_hoistable_pure_call(inst: MirInst, loop_defs: Dict<i64, bool>, hoisted: Dict<i64, bool>, loop_has_mutation: bool) -> bool:
+        match inst.kind:
+            case Call(dest, func, args):
+                val fname = self.get_func_name(func)
+                if not self.is_pure_method(fname):
+                    if loop_has_mutation or not colopt_is_hoistable_runtime_metadata_read(fname):
+                        return false
+                if not dest.?:
+                    return false
+                for arg in args:
+                    if not colopt_operand_invariant(arg, loop_defs, hoisted):
+                        return false
+                true
+            case _: false
+
+# ============================================================================
+# Factory Functions
+# ============================================================================
+
+fn create_collection_opt_pass() -> CollectionOptimization:
+    CollectionOptimization.new()
+
+fn collection_optimization_provider() -> OptimizationRuleProvider:
+    """Built-in provider for pure Simple collection/list/map/set optimization."""
+    optimization_rule_provider_builtin_with_contract(
+        "simple.opt.collection.loop_access",
+        OptimizerProviderKind.Mir,
+        OptimizerRuleLookupKind.PipelinePass,
+        true,
+        ["typed_mir", "loop_bounds", "collection_layout"],
+        ["canonical_collection_loops", "hoisted_collection_queries", "append_fusion", "runtime_collection_read_cse", "loop_invariant_scalar_ops"],
+        "pure"
+    )
+
+fn collection_opt_run_on_function(collection_pass: CollectionOptimization, func: MirFunction) -> MirFunction:
+    collection_pass.optimize_function(func)
+
+# ============================================================================
+# Exports
+# ============================================================================

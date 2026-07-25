@@ -1,0 +1,297 @@
+"""
+# Container + Multi-Tenant Specification (OCap Privilege — S5/S6)
+
+**Feature IDs:** #OS-OCAP-S5 #OS-OCAP-S6
+**Category:** Runtime / Security
+**Difficulty:** 4/5
+**Status:** Implemented
+**Plan:** doc/04_architecture/os/security/ocap_privilege_architecture.md (§P4, §17-19)
+**Design:** doc/01_research/os/security/session_subprivilege_hierarchy_research.md
+
+## Overview
+
+S5 — a **Container** is the shape of a CSpace (cspace + sub-budget + label
+namespace) owned by EXACTLY ONE session. It captures the owner session's epoch,
+so a session teardown (epoch bump) revokes every container it owns in O(1): a
+container cap dies with its session. Cross-session cowork uses **escrow_cap** —
+the "scheduler-LLM hands ticketing-LLM a one-shot create-ticket cap" flow: a
+SINGLE-USE cap minted into the RECEIVER's arena (bound to the receiver's epoch),
+consumed on first use, and MONOTONIC (never exceeds the sender's current).
+
+S6 — a **multi-tenant tree** System → Tenant → User with DISJOINT arenas +
+per-node budget quota. A Tenant's User children cannot see or exceed the Tenant
+ceiling (structural, by capability designation — not ACL); teardown of a Tenant
+cascades to all its descendants via the session_teardown DFS epoch bump; a child
+can never be funded above its parent's budget.
+
+The gate asserts:
+  - a container's cspace ⊆ its owner session (and a wider cspace is rejected);
+  - a container dies the instant its owner session is torn down;
+  - an escrow cap is single-use (a second consume is denied);
+  - an escrow cap is monotonic (a cap the sender does not hold is rejected);
+  - two Tenants have disjoint arenas (Tenant-A's User cannot reach Tenant-B caps);
+  - a Tenant's child cannot exceed the Tenant ceiling (fail closed);
+  - Tenant teardown cascades to ALL descendants (and not to sibling tenants);
+  - per-node budget quota is enforced (a child cannot exceed the parent budget).
+"""
+
+use std.spec.{describe, it, expect}
+use os.kernel.types.task_types.{TaskId}
+use os.kernel.types.capability_types.{CapabilityToken, CapabilityKind, CapabilitySet}
+use os.kernel.types.session_types.{Session, SessionKind, capset_subset, Container, EscrowCap}
+use os.kernel.ipc.capability.{CapabilityManager}
+
+# ============================================================================
+# Fixtures
+# ============================================================================
+
+fn _fr(prefix: text) -> CapabilityKind:
+    CapabilityKind.FileRead(path_prefix: prefix)
+
+fn _fw(prefix: text) -> CapabilityKind:
+    CapabilityKind.FileWrite(path_prefix: prefix)
+
+fn _spawn() -> CapabilityKind:
+    CapabilityKind.ProcessSpawn
+
+fn _netraw() -> CapabilityKind:
+    CapabilityKind.NetRaw
+
+fn _tok(kind: CapabilityKind, generation: u64, tid: u64) -> CapabilityToken:
+    CapabilityToken(kind: kind, generation: generation, owner: 7u64, token_id: tid, parent_token_id: 0u64, depth: 2)
+
+fn root_caps() -> CapabilitySet:
+    """Broad root-of-trust authority: read + write anywhere + spawn (NO NetRaw)."""
+    CapabilitySet(caps: [_tok(_fr("/"), 1u64, 10u64), _tok(_fw("/"), 2u64, 11u64), _tok(_spawn(), 3u64, 12u64)], is_pledged: true)
+
+fn caps1(kind: CapabilityKind, generation: u64, tid: u64) -> CapabilitySet:
+    """A single-token pledged set."""
+    CapabilitySet(caps: [_tok(kind, generation, tid)], is_pledged: true)
+
+fn sealed_of(o: Session?) -> bool:
+    if o == nil:
+        return false
+    val s = o
+    s.sealed
+
+fn budget_of(o: Session?) -> u64:
+    if o == nil:
+        return 0u64
+    val s = o
+    s.budget
+
+# ============================================================================
+# S5 Group 1 — Container: cspace ⊆ owner session
+# ============================================================================
+
+describe "container: cspace is bounded by the owner session":
+    """A container can never see wider authority than the session that owns it."""
+
+    it "accepts a container whose cspace is within the owner's current":
+        var mgr = CapabilityManager.new()
+        val sys = mgr.open_system("system", root_caps(), 1000u64)
+        val c_opt = mgr.create_container(sys.id, caps1(_fr("/data"), 20u64, 30u64), 500u64, ["data"])
+        expect(c_opt != nil).to_equal(true)
+
+    it "the container's cspace IS a subset of the owner session current":
+        var mgr = CapabilityManager.new()
+        val sys = mgr.open_system("system", root_caps(), 1000u64)
+        val c_opt = mgr.create_container(sys.id, caps1(_fr("/data"), 20u64, 30u64), 500u64, ["data"])
+        expect(c_opt != nil).to_equal(true)
+        val c = c_opt
+        expect(capset_subset(c.cspace, sys.current)).to_equal(true)
+
+    it "REJECTS a container whose cspace exceeds the owner (NetRaw not held)":
+        var mgr = CapabilityManager.new()
+        val sys = mgr.open_system("system", root_caps(), 1000u64)
+        val c_opt = mgr.create_container(sys.id, caps1(_netraw(), 20u64, 30u64), 100u64, ["raw"])
+        expect(c_opt).to_equal(nil)
+
+    it "REJECTS a container whose budget exceeds the owner's budget (quota)":
+        var mgr = CapabilityManager.new()
+        val sys = mgr.open_system("system", root_caps(), 1000u64)
+        val c_opt = mgr.create_container(sys.id, caps1(_fr("/data"), 20u64, 30u64), 2000u64, ["data"])
+        expect(c_opt).to_equal(nil)
+
+    it "REJECTS an ambient-full cspace under a concrete owner (vacuous-subset escalation)":
+        # An ambient-full cspace (is_pledged:false + zero tokens) authorizes
+        # EVERYTHING; capset_subset must not vacuously accept it under a narrow
+        # owner (same OCap escalation class as create_child_session). Closed at
+        # root in session_types.capset_subset.
+        var mgr = CapabilityManager.new()
+        val sys = mgr.open_system("system", root_caps(), 1000u64)
+        val c_opt = mgr.create_container(sys.id, CapabilitySet.full(), 100u64, ["all"])
+        expect(c_opt).to_equal(nil)
+
+# ============================================================================
+# S5 Group 2 — Container dies on owner session teardown
+# ============================================================================
+
+describe "container: dies with its owning session (epoch-bound)":
+    """A container inherits the owner session's epoch; teardown revokes it O(1)."""
+
+    it "container is live before teardown and dead after owner teardown":
+        var mgr = CapabilityManager.new()
+        val sys = mgr.open_system("system", root_caps(), 1000u64)
+        val c_opt = mgr.create_container(sys.id, caps1(_fr("/data"), 20u64, 30u64), 500u64, ["data"])
+        expect(c_opt != nil).to_equal(true)
+        val c = c_opt
+        expect(mgr.container_live(c)).to_equal(true)
+        mgr.session_teardown(sys)
+        expect(mgr.container_live(c)).to_equal(false)
+
+# ============================================================================
+# S5 Group 3 — Escrow: single-use + monotonic cross-session cowork
+# ============================================================================
+
+describe "escrow_cap: single-use, monotonic cross-session cap hand-off":
+    """A scheduler session hands a ticketing session a one-shot create-ticket cap."""
+
+    it "escrow into the receiver succeeds when the sender holds the cap":
+        var mgr = CapabilityManager.new()
+        val sched = mgr.login("scheduler", caps1(_fw("/tickets"), 40u64, 50u64))
+        val ticket = mgr.login("ticketing", caps1(_fr("/tickets"), 41u64, 51u64))
+        val e_opt = mgr.escrow_cap(sched.id, ticket.id, _tok(_fw("/tickets"), 60u64, 70u64))
+        expect(e_opt != nil).to_equal(true)
+
+    it "the escrow cap is single-use: first consume returns it, second is DENIED":
+        var mgr = CapabilityManager.new()
+        val sched = mgr.login("scheduler", caps1(_fw("/tickets"), 40u64, 50u64))
+        val ticket = mgr.login("ticketing", caps1(_fr("/tickets"), 41u64, 51u64))
+        val e_opt = mgr.escrow_cap(sched.id, ticket.id, _tok(_fw("/tickets"), 60u64, 70u64))
+        expect(e_opt != nil).to_equal(true)
+        val e = e_opt
+        val first = mgr.consume_escrow(e.id, ticket.id)
+        expect(first != nil).to_equal(true)
+        val second = mgr.consume_escrow(e.id, ticket.id)
+        expect(second).to_equal(nil)
+
+    it "escrow is MONOTONIC: a kind the sender does not hold is rejected":
+        var mgr = CapabilityManager.new()
+        val sched = mgr.login("scheduler", caps1(_fw("/tickets"), 40u64, 50u64))
+        val ticket = mgr.login("ticketing", caps1(_fr("/tickets"), 41u64, 51u64))
+        val e_opt = mgr.escrow_cap(sched.id, ticket.id, _tok(_netraw(), 60u64, 70u64))
+        expect(e_opt).to_equal(nil)
+
+    it "escrow CANNOT exceed the sender: a wider path than the sender holds is rejected":
+        var mgr = CapabilityManager.new()
+        # sender holds only /tickets write; escrowing write on "/" (wider) is denied
+        val sched = mgr.login("scheduler", caps1(_fw("/tickets"), 40u64, 50u64))
+        val ticket = mgr.login("ticketing", caps1(_fr("/tickets"), 41u64, 51u64))
+        val e_opt = mgr.escrow_cap(sched.id, ticket.id, _tok(_fw("/"), 60u64, 70u64))
+        expect(e_opt).to_equal(nil)
+
+    it "a wrong receiver cannot consume the escrow":
+        var mgr = CapabilityManager.new()
+        val sched = mgr.login("scheduler", caps1(_fw("/tickets"), 40u64, 50u64))
+        val ticket = mgr.login("ticketing", caps1(_fr("/tickets"), 41u64, 51u64))
+        val e_opt = mgr.escrow_cap(sched.id, ticket.id, _tok(_fw("/tickets"), 60u64, 70u64))
+        expect(e_opt != nil).to_equal(true)
+        val e = e_opt
+        val wrong = mgr.consume_escrow(e.id, sched.id)
+        expect(wrong).to_equal(nil)
+
+    it "the escrow dies with the receiver: consume denied after receiver teardown":
+        var mgr = CapabilityManager.new()
+        val sched = mgr.login("scheduler", caps1(_fw("/tickets"), 40u64, 50u64))
+        val ticket = mgr.login("ticketing", caps1(_fr("/tickets"), 41u64, 51u64))
+        val e_opt = mgr.escrow_cap(sched.id, ticket.id, _tok(_fw("/tickets"), 60u64, 70u64))
+        expect(e_opt != nil).to_equal(true)
+        val e = e_opt
+        mgr.session_teardown(ticket)
+        val after = mgr.consume_escrow(e.id, ticket.id)
+        expect(after).to_equal(nil)
+
+# ============================================================================
+# S6 Group 4 — Multi-tenant tree: disjoint arenas
+# ============================================================================
+
+describe "multi-tenant: two tenants have disjoint arenas":
+    """Isolation is structural (by capability designation), not by ACL."""
+
+    it "Tenant-A's User can reach Tenant-A caps but NOT Tenant-B caps":
+        var mgr = CapabilityManager.new()
+        val sys = mgr.open_system("system", root_caps(), 1000u64)
+        val ta_opt = mgr.create_child_quota(sys.id, SessionKind.Tenant, "acme", caps1(_fr("/tenantA"), 100u64, 110u64), caps1(_fr("/tenantA"), 100u64, 110u64), 400u64)
+        val tb_opt = mgr.create_child_quota(sys.id, SessionKind.Tenant, "globex", caps1(_fr("/tenantB"), 101u64, 111u64), caps1(_fr("/tenantB"), 101u64, 111u64), 400u64)
+        expect(ta_opt != nil).to_equal(true)
+        expect(tb_opt != nil).to_equal(true)
+        val ta = ta_opt
+        val ua_opt = mgr.create_child_quota(ta.id, SessionKind.User, "alice", caps1(_fr("/tenantA"), 102u64, 112u64), caps1(_fr("/tenantA"), 102u64, 112u64), 200u64)
+        expect(ua_opt != nil).to_equal(true)
+        val ua = ua_opt
+        expect(ua.current.has(_fr("/tenantA"))).to_equal(true)
+        expect(ua.current.has(_fr("/tenantB"))).to_equal(false)
+
+# ============================================================================
+# S6 Group 5 — Tenant ceiling bounds its children
+# ============================================================================
+
+describe "multi-tenant: a child cannot exceed the Tenant ceiling":
+    """ceiling(child) ⊆ current(parent) — fail closed."""
+
+    it "REJECTS a User whose ceiling is wider than the Tenant's current":
+        var mgr = CapabilityManager.new()
+        val sys = mgr.open_system("system", root_caps(), 1000u64)
+        val ta_opt = mgr.create_child_quota(sys.id, SessionKind.Tenant, "acme", caps1(_fr("/tenantA"), 100u64, 110u64), caps1(_fr("/tenantA"), 100u64, 110u64), 400u64)
+        expect(ta_opt != nil).to_equal(true)
+        val ta = ta_opt
+        # A User asking for read on "/" (wider than the tenant's "/tenantA") is denied.
+        val over_opt = mgr.create_child_quota(ta.id, SessionKind.User, "alice", caps1(_fr("/"), 103u64, 113u64), caps1(_fr("/"), 103u64, 113u64), 100u64)
+        expect(over_opt).to_equal(nil)
+
+# ============================================================================
+# S6 Group 6 — Per-node budget quota
+# ============================================================================
+
+describe "multi-tenant: per-node budget quota (child budget <= parent)":
+    """A child can never be funded above its parent's budget."""
+
+    it "REJECTS a child whose budget exceeds the parent budget":
+        var mgr = CapabilityManager.new()
+        val sys = mgr.open_system("system", root_caps(), 1000u64)
+        val ta_opt = mgr.create_child_quota(sys.id, SessionKind.Tenant, "acme", caps1(_fr("/tenantA"), 100u64, 110u64), caps1(_fr("/tenantA"), 100u64, 110u64), 400u64)
+        expect(ta_opt != nil).to_equal(true)
+        val ta = ta_opt
+        val over_opt = mgr.create_child_quota(ta.id, SessionKind.User, "alice", caps1(_fr("/tenantA"), 104u64, 114u64), caps1(_fr("/tenantA"), 104u64, 114u64), 500u64)
+        expect(over_opt).to_equal(nil)
+
+    it "ACCEPTS a child whose budget is within the parent budget":
+        var mgr = CapabilityManager.new()
+        val sys = mgr.open_system("system", root_caps(), 1000u64)
+        val ta_opt = mgr.create_child_quota(sys.id, SessionKind.Tenant, "acme", caps1(_fr("/tenantA"), 100u64, 110u64), caps1(_fr("/tenantA"), 100u64, 110u64), 400u64)
+        expect(ta_opt != nil).to_equal(true)
+        val ta = ta_opt
+        val ok_opt = mgr.create_child_quota(ta.id, SessionKind.User, "alice", caps1(_fr("/tenantA"), 105u64, 115u64), caps1(_fr("/tenantA"), 105u64, 115u64), 300u64)
+        expect(ok_opt != nil).to_equal(true)
+
+# ============================================================================
+# S6 Group 7 — Tenant teardown cascades to all descendants
+# ============================================================================
+
+describe "multi-tenant: Tenant teardown cascades to all descendants":
+    """Tearing down a Tenant seals its Users/SubRoles and kills their bound caps,
+    but never touches a sibling tenant."""
+
+    it "a User bound cap is dead and the User session sealed after Tenant teardown":
+        var mgr = CapabilityManager.new()
+        val sys = mgr.open_system("system", root_caps(), 1000u64)
+        val ta_opt = mgr.create_child_quota(sys.id, SessionKind.Tenant, "acme", caps1(_fr("/tenantA"), 100u64, 110u64), caps1(_fr("/tenantA"), 100u64, 110u64), 400u64)
+        val tb_opt = mgr.create_child_quota(sys.id, SessionKind.Tenant, "globex", caps1(_fr("/tenantB"), 101u64, 111u64), caps1(_fr("/tenantB"), 101u64, 111u64), 400u64)
+        expect(ta_opt != nil).to_equal(true)
+        expect(tb_opt != nil).to_equal(true)
+        val ta = ta_opt
+        val tb = tb_opt
+        val ua_opt = mgr.create_child_quota(ta.id, SessionKind.User, "alice", caps1(_fr("/tenantA"), 102u64, 112u64), caps1(_fr("/tenantA"), 102u64, 112u64), 200u64)
+        expect(ua_opt != nil).to_equal(true)
+        val ua = ua_opt
+        val alice_task = TaskId(id: 77)
+        mgr.install_sandbox_capability_set(alice_task, ua.current)
+        mgr.bind_task_to_session(alice_task, ua.id)
+        expect(mgr.check(alice_task, _fr("/tenantA"))).to_equal(true)
+        mgr.session_teardown(ta)
+        expect(mgr.check(alice_task, _fr("/tenantA"))).to_equal(false)
+        expect(sealed_of(mgr.session_of(ua.id))).to_equal(true)
+        expect(sealed_of(mgr.session_of(ta.id))).to_equal(true)
+        # Disjoint: the sibling tenant is untouched.
+        expect(sealed_of(mgr.session_of(tb.id))).to_equal(false)

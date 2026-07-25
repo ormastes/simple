@@ -1,0 +1,140 @@
+# UI Window-Surface Registry
+#
+# Runtime-only mapping between top-level window identifiers and UI surfaces.
+# This is the authoritative in-process source for window metadata enrichment
+# used by the UI access protocol. Persisted UI access snapshots should not use
+# the runtime window IDs as durable identity.
+
+pub val UI_SURFACE_KIND_LEGACY: text = "Legacy"
+pub val UI_SURFACE_KIND_SIMPLE_WEB: text = "SimpleWeb"
+pub val UI_SURFACE_KIND_ELECTRON: text = "Electron"
+pub val UI_SURFACE_KIND_TAURI: text = "Tauri"
+pub val UI_SURFACE_KIND_HEADLESS: text = "Headless"
+
+fn ui_surface_kind_is_native_host(surface_kind: text) -> bool:
+    """Return true when a surface kind is backed by host-native windows."""
+    surface_kind == UI_SURFACE_KIND_ELECTRON or surface_kind == UI_SURFACE_KIND_TAURI
+
+fn ui_surface_kind_supports_embedded_surface(surface_kind: text) -> bool:
+    surface_kind == UI_SURFACE_KIND_LEGACY or surface_kind == UI_SURFACE_KIND_SIMPLE_WEB
+
+fn ui_surface_kind_supports_headless_session(surface_kind: text) -> bool:
+    surface_kind == UI_SURFACE_KIND_HEADLESS
+
+struct UiWindowSurfaceBinding:
+    surface_id: text
+    window_id: text
+    process_id: u64
+    app_id: text
+    title: text
+    surface_kind: text   # UI_SURFACE_KIND_*
+
+class UiWindowSurfaceRegistry:
+    bindings: [UiWindowSurfaceBinding]
+
+impl UiWindowSurfaceRegistry:
+    static fn new() -> UiWindowSurfaceRegistry:
+        UiWindowSurfaceRegistry(bindings: [])
+
+    me bind(window_id: text, surface_id: text, process_id: u64, app_id: text, title: text):
+        """Bind with default legacy surface kind — preserves pre-Wave-1 callers."""
+        self.bind_with_kind(window_id, surface_id, process_id, app_id, title, UI_SURFACE_KIND_LEGACY)
+
+    me bind_with_kind(window_id: text, surface_id: text, process_id: u64, app_id: text, title: text, surface_kind: text):
+        """Bind with an explicit UI_SURFACE_KIND_* value."""
+        var keep_count = 0
+        for entry in self.bindings:
+            if entry.surface_id == surface_id or entry.window_id == window_id:
+                pass_dn
+            else:
+                keep_count = keep_count + 1
+        val new_entry = UiWindowSurfaceBinding(
+            surface_id: surface_id,
+            window_id: window_id,
+            process_id: process_id,
+            app_id: app_id,
+            title: title,
+            surface_kind: surface_kind
+        )
+        var filtered: [UiWindowSurfaceBinding] = [new_entry; keep_count + 1]
+        var write_idx = 0
+        for entry in self.bindings:
+            if entry.surface_id == surface_id or entry.window_id == window_id:
+                pass_dn
+            else:
+                filtered[write_idx] = entry
+                write_idx = write_idx + 1
+        filtered[keep_count] = new_entry
+        self.bindings = filtered
+
+    me clear_surface(surface_id: text):
+        var keep_count = 0
+        for entry in self.bindings:
+            if entry.surface_id == surface_id:
+                pass_dn
+            else:
+                keep_count = keep_count + 1
+        if keep_count == 0:
+            self.bindings = []
+            return
+        var filtered: [UiWindowSurfaceBinding] = [self.bindings[0]; keep_count]
+        var write_idx = 0
+        for entry in self.bindings:
+            if entry.surface_id == surface_id:
+                pass_dn
+            else:
+                filtered[write_idx] = entry
+                write_idx = write_idx + 1
+        self.bindings = filtered
+
+    me clear_window(window_id: text):
+        var keep_count = 0
+        for entry in self.bindings:
+            if entry.window_id == window_id:
+                pass_dn
+            else:
+                keep_count = keep_count + 1
+        if keep_count == 0:
+            self.bindings = []
+            return
+        var filtered: [UiWindowSurfaceBinding] = [self.bindings[0]; keep_count]
+        var write_idx = 0
+        for entry in self.bindings:
+            if entry.window_id == window_id:
+                pass_dn
+            else:
+                filtered[write_idx] = entry
+                write_idx = write_idx + 1
+        self.bindings = filtered
+
+    fn for_surface(surface_id: text) -> UiWindowSurfaceBinding?:
+        for entry in self.bindings:
+            if entry.surface_id == surface_id:
+                return entry
+        return nil
+
+    fn for_window(window_id: text) -> UiWindowSurfaceBinding?:
+        for entry in self.bindings:
+            if entry.window_id == window_id:
+                return entry
+        return nil
+
+    fn window_id_for_surface(surface_id: text) -> text:
+        val entry = self.for_surface(surface_id)
+        if entry == nil:
+            return ""
+        return entry.window_id
+
+    fn surface_kind_for_surface(surface_id: text) -> text:
+        val entry = self.for_surface(surface_id)
+        if entry == nil:
+            return ""
+        return entry.surface_kind
+
+    fn len() -> i32:
+        self.bindings.len()
+
+fn new_ui_window_surface_registry() -> UiWindowSurfaceRegistry:
+    UiWindowSurfaceRegistry.new()
+
+export UI_SURFACE_KIND_ELECTRON, UI_SURFACE_KIND_HEADLESS, UI_SURFACE_KIND_LEGACY, UI_SURFACE_KIND_SIMPLE_WEB, UI_SURFACE_KIND_TAURI

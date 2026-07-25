@@ -1,0 +1,42 @@
+"""Vulkan mapped-buffer byte readback integration coverage.
+
+Uses the real Vulkan SFFI provider when a loader is available. The positive
+path proves an exact byte upload/readback at a nonzero offset, while the bounds
+path proves that a request extending beyond the allocation returns no bytes.
+"""
+
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
+    vulkan_sffi_is_available,
+    vulkan_sffi_init,
+    vulkan_sffi_shutdown,
+    vulkan_sffi_alloc_buffer,
+    vulkan_sffi_free_buffer,
+    vulkan_sffi_copy_to_buffer,
+    vulkan_sffi_read_buffer_bytes
+}
+
+describe "Vulkan exact mapped-buffer byte readback":
+    it "round-trips an upload at a nonzero offset and rejects an OOB read":
+        step("Initialize a real Vulkan provider when the host exposes one")
+        if not vulkan_sffi_is_available():
+            expect(vulkan_sffi_read_buffer_bytes(0, 4, 0)).to_equal([])
+        else:
+            expect(vulkan_sffi_init()).to_be(true)
+
+            step("Upload exact bytes at a nonzero buffer offset")
+            val buffer = vulkan_sffi_alloc_buffer(16, 0x80)
+            expect(buffer).to_be_greater_than(0)
+            val payload: [u8] = [0u8, 1u8, 127u8, 128u8, 254u8, 255u8]
+            expect(vulkan_sffi_copy_to_buffer(buffer, payload, 5)).to_be(true)
+
+            step("Read back exactly the uploaded byte range")
+            val readback = vulkan_sffi_read_buffer_bytes(buffer, payload.len(), 5)
+            expect(readback).to_equal(payload)
+
+            step("Reject a read whose range extends beyond the allocation")
+            expect(vulkan_sffi_read_buffer_bytes(buffer, 4, 14)).to_equal([])
+
+            step("Release the buffer and Vulkan provider")
+            expect(vulkan_sffi_free_buffer(buffer)).to_be(true)
+            expect(vulkan_sffi_shutdown()).to_be(true)

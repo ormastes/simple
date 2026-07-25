@@ -1,0 +1,96 @@
+# test/perf/bench/heavy_field_bench.spl
+#
+# Run: bin/simple run test/perf/bench/heavy_field_bench.spl
+
+use std.io_runtime
+use std.time_utils.{rt_time_now_nanos}
+
+class HeavyState:
+    count: i32
+    total: i32
+    max_val: i32
+    min_val: i32
+    sum: i64
+    avg: i64
+    last_key: i64
+    access_counter: i64
+    hit_count: i32
+    miss_count: i32
+
+    static fn new() -> HeavyState:
+        HeavyState(
+            count: 0, total: 0, max_val: 0, min_val: 0,
+            sum: 0, avg: 0, last_key: 0, access_counter: 0,
+            hit_count: 0, miss_count: 0
+        )
+
+    me fn record_hit(key: i64):
+        self.access_counter = self.access_counter + 1
+        self.last_key = key
+        self.hit_count = self.hit_count + 1
+        self.count = self.count + 1
+        self.total = self.total + 1
+
+    me fn record_miss(key: i64):
+        self.access_counter = self.access_counter + 1
+        self.last_key = key
+        self.miss_count = self.miss_count + 1
+        self.count = self.count + 1
+        self.total = self.total + 1
+
+    me fn update_stats(v: i32):
+        self.sum = self.sum + v
+        if v > self.max_val:
+            self.max_val = v
+        if v < self.min_val:
+            self.min_val = v
+        self.count = self.count + 1
+
+    me fn reset_counters():
+        self.hit_count = 0
+        self.miss_count = 0
+        self.access_counter = 0
+
+fn main():
+    print("=== Heavy Field Mutation Benchmark ===")
+
+    val iterations = 50000
+
+    # Bench 1: 5-field mutation per call (simulates cache hit)
+    var s = HeavyState.new()
+    val t0 = rt_time_now_nanos()
+    var i = 0
+    while i < iterations:
+        s.record_hit(i)
+        i = i + 1
+    val t1 = rt_time_now_nanos()
+    print("record_hit (5 mutations/call):")
+    print(t1 - t0)
+
+    # Bench 2: mixed operations (hit + miss + stats)
+    var s2 = HeavyState.new()
+    val t2 = rt_time_now_nanos()
+    i = 0
+    while i < iterations:
+        s2.record_hit(i)
+        s2.record_miss(i + 1)
+        s2.update_stats(i)
+        i = i + 1
+    val t3 = rt_time_now_nanos()
+    print("mixed 3 methods (14 mutations/iter):")
+    print(t3 - t2)
+
+    # Bench 3: reset cycle (hit N times, reset, repeat)
+    var s3 = HeavyState.new()
+    val t4 = rt_time_now_nanos()
+    i = 0
+    while i < iterations:
+        s3.record_hit(i)
+        if i % 100 == 0:
+            s3.reset_counters()
+        i = i + 1
+    val t5 = rt_time_now_nanos()
+    print("hit+periodic_reset:")
+    print(t5 - t4)
+
+    print("=== Done ===")

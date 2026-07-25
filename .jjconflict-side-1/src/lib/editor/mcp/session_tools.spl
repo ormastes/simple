@@ -1,0 +1,51 @@
+# Editor MCP Session Tools
+#
+# Small runtime-neutral MCP command subset over EditSession. App-level MCP
+# servers own JSON-RPC transport and argument decoding.
+
+use std.editor.core.session.{EditSession}
+
+struct EditorMcpSessionResult:
+    ok: bool
+    content: text
+
+class EditorMcpSessionBridge:
+    session: EditSession
+
+    static fn new() -> EditorMcpSessionBridge:
+        EditorMcpSessionBridge(session: EditSession.new())
+
+    me dispatch(tool_name: text, args: [text]) -> EditorMcpSessionResult:
+        if tool_name == "editor.open_file":
+            if args.len() == 0 or args[0] == "":
+                return EditorMcpSessionResult(ok: false, content: "missing path argument")
+            me.session.open_file(args[0])
+            return EditorMcpSessionResult(ok: true, content: "opened {args[0]}")
+
+        if tool_name == "editor.read_buffer":
+            if me.session.documents.len() == 0:
+                return EditorMcpSessionResult(ok: false, content: "no active buffer")
+            val buffer = me.session.active_buffer()
+            return EditorMcpSessionResult(ok: true, content: buffer.to_text())
+
+        if tool_name == "editor.list_open_files":
+            var listing = ""
+            var i = 0
+            while i < me.session.documents.len():
+                val doc = me.session.documents[i]
+                listing = listing + doc.path()
+                if i + 1 < me.session.documents.len():
+                    listing = listing + "\n"
+                i = i + 1
+            return EditorMcpSessionResult(ok: true, content: listing)
+
+        EditorMcpSessionResult(ok: false, content: "unsupported editor MCP tool: {tool_name}")
+
+fn editor_mcp_session_tool_supported(name: text) -> bool:
+    name == "editor.open_file" or
+    name == "editor.read_buffer" or
+    name == "editor.list_open_files"
+
+fn editor_mcp_session_dispatch(session: EditSession, tool_name: text, args: [text]) -> EditorMcpSessionResult:
+    var bridge = EditorMcpSessionBridge(session: session)
+    bridge.dispatch(tool_name, args)

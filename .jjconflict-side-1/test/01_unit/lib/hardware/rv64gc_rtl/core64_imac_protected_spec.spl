@@ -1,0 +1,165 @@
+use std.spec
+use std.hardware.rv64gc_rtl.imac_core.core64_imac_init
+use std.hardware.rv64gc_rtl.imac_types.{CoreImacState64, CORE64_WFI}
+use std.hardware.rv64gc_rtl.imac_helpers.core64_imac_csr_access
+use std.hardware.rv64gc_rtl.imac_protected_core.{core64_imac_cycle, core64_imac_init_single_master}
+use std.hardware.rv64gc_rtl.imac_protected_core.core64_imac_reset_result
+use std.hardware.rv64gc_rtl.regfile.regfile64_read
+use std.hardware.rv64gc_rtl.csr.{MSTATUS_FS_MASK, MSTATUS_SD_MASK, MSTATUS_MIE_MASK}
+use std.hardware.rv64gc_rtl.csr.MIP_MTIP_MASK
+use std.hardware.rv64gc_rtl.csr_s.SSTATUS_SIE_MASK_64
+use std.hardware.rv64gc_rtl.rvfi_base.rvfi64_check_traces
+
+val RESET_PC: i64 = 0x8000_0000
+val MISA_FD: i64 = (1 << 5) | (1 << 3)
+
+fn execute_from(state: CoreImacState64, instruction: i64):
+    val low = core64_imac_cycle(state, false, false,
+        false, false, false, 0, true, true, false, instruction & 0xFFFF)
+    core64_imac_cycle(low.state, false, false, false, false, false, 0,
+        true, true, false, (instruction >> 16) & 0xFFFF)
+
+fn execute(instruction: i64):
+    execute_from(core64_imac_init(RESET_PC), instruction)
+
+fn respond(state: CoreImacState64, data: i64):
+    core64_imac_cycle(state, false, false, false, false, false, 0,
+        true, true, false, data)
+
+describe "protected RV64IMAC synthesis root":
+    it "resets with MISA F/D clear and FS Off":
+        val state = core64_imac_init_single_master(RESET_PC)
+        expect(state.csr_m.misa & MISA_FD).to_equal(0)
+        expect(state.atomic_bus_exclusive).to_equal(true)
+        expect(state.csr_m.mstatus & (MSTATUS_FS_MASK | MSTATUS_SD_MASK)).to_equal(0)
+        expect(state.csr_s.sstatus & (MSTATUS_FS_MASK | MSTATUS_SD_MASK)).to_equal(0)
+
+    it "reset initializes without issuing a bus request or ticking counters":
+        val reset = core64_imac_reset_result(RESET_PC)
+        expect(reset.bus_valid).to_equal(false)
+        expect(reset.rvfi.rvfi_valid).to_equal(false)
+        expect(reset.state.csr_m.mcycle).to_equal(0)
+        expect(reset.state.csr_m.minstret).to_equal(0)
+
+    it "keeps FS Off when software writes mstatus or sstatus":
+        val state = core64_imac_init(RESET_PC)
+        val machine = core64_imac_csr_access(state, 0x300,
+            MSTATUS_FS_MASK | MSTATUS_SD_MASK, 1)
+        val supervisor = core64_imac_csr_access(state, 0x100,
+            MSTATUS_FS_MASK | MSTATUS_SD_MASK, 1)
+        expect(machine.valid).to_equal(true)
+        expect(machine.csr_m.mstatus & (MSTATUS_FS_MASK | MSTATUS_SD_MASK)).to_equal(0)
+        expect(supervisor.valid).to_equal(true)
+        expect(supervisor.csr_m.mstatus & (MSTATUS_FS_MASK | MSTATUS_SD_MASK)).to_equal(0)
+        expect(supervisor.csr_s.sstatus & (MSTATUS_FS_MASK | MSTATUS_SD_MASK)).to_equal(0)
+
+    it "retires integer work but traps FP and reserved M encodings":
+        val addi = execute(0x00500093)
+        val fp_move = execute(0xF20080D3)
+        val fp_csr = execute(0x001020F3)
+        val reserved_mulw = execute(0x0200103B)
+        expect(regfile64_read(addi.state.rf, 1, 0).rs1_data).to_equal(5)
+        expect(addi.state.csr_m.minstret).to_equal(1)
+        expect(fp_move.state.csr_m.mcause).to_equal(2)
+        expect(fp_move.state.csr_m.minstret).to_equal(0)
+        expect(fp_csr.state.csr_m.mcause).to_equal(2)
+        expect(fp_csr.state.csr_m.minstret).to_equal(0)
+        expect(reserved_mulw.state.csr_m.mcause).to_equal(2)
+        expect(reserved_mulw.state.csr_m.minstret).to_equal(0)
+
+    it "rejects WFI in U mode":
+        var user = core64_imac_init_single_master(RESET_PC)
+        user.priv_mode = 0
+        user.csr_m.mtvec = 0x1000
+        val low = respond(user, 0x0073)
+        val high = respond(low.state, 0x1050)
+        expect(high.state.csr_m.mcause).to_equal(2)
+        expect(high.state.csr_m.minstret).to_equal(0)
+
+    it "samples machine and delegated supervisor interrupt levels":
+        var machine = core64_imac_init_single_master(RESET_PC)
+        machine.csr_m.mtvec = 0x1000
+        machine.csr_m.mstatus = MSTATUS_MIE_MASK
+        machine.csr_m.mie = MIP_MTIP_MASK
+        val mtimer = core64_imac_cycle(machine, false, true, false, false,
+            false, 77, true, true, false, 0x0001)
+        expect(mtimer.rvfi.rvfi_valid).to_equal(false)
+        expect(mtimer.state.pc).to_equal(0x1000)
+        expect(mtimer.state.csr_m.mepc).to_equal(RESET_PC)
+        expect(mtimer.state.csr_m.mcause & 0xFF).to_equal(7)
+        expect(mtimer.state.time_value).to_equal(77)
+
+        var supervisor = core64_imac_init_single_master(RESET_PC)
+        supervisor.priv_mode = 1
+        supervisor.csr_s.stvec = 0x2000
+        supervisor.csr_m.mideleg = 1 << 5
+        supervisor.csr_s.sie = 1 << 5
+        supervisor.csr_s.sstatus = SSTATUS_SIE_MASK_64
+        val stimer = core64_imac_cycle(supervisor, false, false, false, true,
+            false, 88, true, true, false, 0x0001)
+        expect(stimer.rvfi.rvfi_valid).to_equal(false)
+        expect(stimer.state.priv_mode).to_equal(1)
+        expect(stimer.state.pc).to_equal(0x2000)
+        expect(stimer.state.csr_s.sepc).to_equal(RESET_PC)
+        expect(stimer.state.csr_s.scause & 0xFF).to_equal(5)
+        expect(stimer.state.csr_s.sip & (1 << 5)).to_equal(1 << 5)
+
+        var parked = core64_imac_init_single_master(RESET_PC)
+        parked.priv_mode = 1
+        parked.pipeline_phase = CORE64_WFI
+        parked.wfi_wait = true
+        parked.csr_s.stvec = 0x3000
+        parked.csr_m.mideleg = 1 << 9
+        parked.csr_s.sie = 1 << 9
+        parked.csr_s.sstatus = SSTATUS_SIE_MASK_64
+        val sexternal = core64_imac_cycle(parked, false, false, false, false,
+            true, 99, false, false, false, 0)
+        expect(sexternal.state.pc).to_equal(0x3000)
+        expect(sexternal.state.csr_s.scause & 0xFF).to_equal(9)
+        expect(sexternal.state.wfi_wait).to_equal(false)
+
+    it "gates counter aliases and writes machine counters":
+        var state = core64_imac_init_single_master(RESET_PC)
+        state.csr_m.mcycle = 0x123
+        state.csr_m.minstret = 0x45
+        state.time_value = 0x678
+        state.priv_mode = 1
+        expect(core64_imac_csr_access(state, 0xC00, 0, 2).valid).to_equal(false)
+        state.csr_ext.mcounteren = 7
+        expect(core64_imac_csr_access(state, 0xC00, 0, 2).old_value).to_equal(0x123)
+        expect(core64_imac_csr_access(state, 0xC01, 0, 2).old_value).to_equal(0x678)
+        expect(core64_imac_csr_access(state, 0xC02, 0, 2).old_value).to_equal(0x45)
+        state.priv_mode = 0
+        expect(core64_imac_csr_access(state, 0xC01, 0, 2).valid).to_equal(false)
+        state.csr_ext.scounteren = 7
+        expect(core64_imac_csr_access(state, 0xC01, 0, 2).valid).to_equal(true)
+        expect(core64_imac_csr_access(state, 0xC00, 1, 1).valid).to_equal(false)
+        state.priv_mode = 3
+        val cycle_write = core64_imac_csr_access(state, 0xB00, 9, 1)
+        val instret_write = core64_imac_csr_access(state, 0xB02, 10, 1)
+        expect(cycle_write.csr_m.mcycle).to_equal(9)
+        expect(instret_write.csr_m.minstret).to_equal(10)
+
+        val seeded = execute(0x00A00093) # addi x1, x0, 10
+        val retired_write = execute_from(seeded.state, 0xB0209073) # csrw minstret, x1
+        expect(retired_write.state.csr_m.minstret).to_equal(10)
+
+    it "marks the first handler instruction without emitting an IRQ event":
+        val retired = execute(0x00500093)
+        var armed = retired.state
+        armed.csr_m.mtvec = 0x1000
+        armed.csr_m.mstatus = MSTATUS_MIE_MASK
+        armed.csr_m.mie = MIP_MTIP_MASK
+        val transition = core64_imac_cycle(armed, false, true, false, false,
+            false, 0, true, true, false, 0x0001)
+        expect(transition.rvfi.rvfi_valid).to_equal(false)
+        expect(transition.state.rvfi_intr_pending).to_equal(true)
+        expect(transition.state.csr_m.mepc).to_equal(RESET_PC + 4)
+        val handler_low = respond(transition.state, 0x0093)
+        val handler_high = respond(handler_low.state, 0x0010)
+        expect(handler_high.rvfi.rvfi_valid).to_equal(true)
+        expect(handler_high.rvfi.rvfi_intr).to_equal(true)
+        expect(handler_high.rvfi.rvfi_pc_rdata).to_equal(0x1000)
+        expect(handler_high.rvfi.rvfi_pc_wdata).to_equal(0x1004)
+        expect(handler_high.state.rvfi_intr_pending).to_equal(false)
+        expect(rvfi64_check_traces([retired.rvfi, handler_high.rvfi]).len()).to_equal(0)

@@ -1,0 +1,114 @@
+"""
+Lowering-module selection for portable SIMD/FP.
+
+Selects among scalar_fallback, x86_avx, riscv_fd, and riscv_v lowering
+strategies. scalar_fp, vector_simd, and target_lowering are independently
+toggleable. Emits diagnostics when a requested family is unavailable.
+"""
+
+# ============================================================================
+# LoweringFamily — which lowering strategy to use
+# ============================================================================
+
+enum LoweringFamily:
+    scalar_fallback
+    x86_sse2
+    x86_avx
+    riscv_fd
+    riscv_v
+    unsupported
+
+fn lowering_family_name(fam: LoweringFamily) -> text:
+    """Human-readable name for a lowering family."""
+    match fam:
+        case LoweringFamily.scalar_fallback: return "scalar_fallback"
+        case LoweringFamily.x86_sse2: return "x86_sse2"
+        case LoweringFamily.x86_avx: return "x86_avx"
+        case LoweringFamily.riscv_fd: return "riscv_fd"
+        case LoweringFamily.riscv_v: return "riscv_v"
+        case LoweringFamily.unsupported: return "unsupported"
+        case _: return "unknown"
+
+# ============================================================================
+# LoweringConfig — independently toggleable scalar_fp / vector_simd flags
+# ============================================================================
+
+"""
+Lowering configuration: independently toggleable scalar_fp and vector_simd.
+"""
+struct LoweringConfig:
+    enable_scalar_fp: bool
+    enable_vector_simd: bool
+    enable_target_lowering: bool
+
+impl LoweringConfig:
+    static fn all_enabled() -> LoweringConfig:
+        """Enable all lowering tiers."""
+        LoweringConfig(enable_scalar_fp: true, enable_vector_simd: true, enable_target_lowering: true)
+
+    static fn scalar_only() -> LoweringConfig:
+        """Scalar FP only, no SIMD."""
+        LoweringConfig(enable_scalar_fp: true, enable_vector_simd: false, enable_target_lowering: false)
+
+    static fn no_fp() -> LoweringConfig:
+        """Integer only: disable both scalar FP and SIMD."""
+        LoweringConfig(enable_scalar_fp: false, enable_vector_simd: false, enable_target_lowering: false)
+
+    fn any_enabled() -> bool:
+        """True if at least one lowering tier is enabled."""
+        self.enable_scalar_fp == true or self.enable_vector_simd == true or self.enable_target_lowering == true
+
+# ============================================================================
+# LoweringSelection — result of selecting a lowering strategy
+# ============================================================================
+
+"""
+Result of lowering strategy selection for a target arch+config pair.
+"""
+struct LoweringSelection:
+    arch: text
+    chosen_family: LoweringFamily
+    scalar_fp_active: bool
+    vector_simd_active: bool
+    diagnostic: text
+
+impl LoweringSelection:
+    static fn select(arch: text, has_float: bool, has_simd: bool, needs_probe: bool, cfg: LoweringConfig) -> LoweringSelection:
+        """
+        Select the best lowering family for arch given capability flags and config.
+        Emits a diagnostic when a requested tier is unavailable.
+        """
+        val fp_active = cfg.enable_scalar_fp == true and has_float == true
+        val simd_active = cfg.enable_vector_simd == true and has_simd == true
+
+        val fam = if arch == "x86_64" and simd_active == true and needs_probe == false:
+                      LoweringFamily.x86_avx
+                  elif arch == "x86_64" and simd_active == true:
+                      LoweringFamily.x86_sse2
+                  elif arch == "riscv64" and simd_active == true:
+                      LoweringFamily.riscv_v
+                  elif arch == "riscv64" and fp_active == true:
+                      LoweringFamily.riscv_fd
+                  elif arch == "riscv32" and fp_active == false:
+                      LoweringFamily.scalar_fallback
+                  elif fp_active == true or simd_active == true:
+                      LoweringFamily.scalar_fallback
+                  else:
+                      LoweringFamily.scalar_fallback
+
+        val diag = if cfg.enable_vector_simd == true and has_simd == false:
+                       "vector_simd requested but unavailable for " + arch + "; falling back"
+                   elif cfg.enable_scalar_fp == true and has_float == false:
+                       "scalar_fp requested but no hardware FP on " + arch + "; integer-only mode"
+                   else:
+                       "ok"
+
+        LoweringSelection(arch: arch, chosen_family: fam, scalar_fp_active: fp_active, vector_simd_active: simd_active, diagnostic: diag)
+
+    fn is_ok() -> bool:
+        """True when no fallback diagnostic was emitted."""
+        self.diagnostic == "ok"
+
+    fn family_name() -> text:
+        """Lowering family name string."""
+        lowering_family_name(self.chosen_family)

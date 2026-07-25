@@ -1,0 +1,58 @@
+# Regression coverage for the CLI compile-delegation fork bomb.
+#
+# `compile --backend=vhdl` (and other AOT/jit/check paths) fall back to
+# spawning an external `simple` binary resolved by `find_simple_binary()`.
+# When that binary is a wrapper for THIS SAME CLI, the child repeats the
+# exact same delegation and forks again, unbounded (~35k leaked processes
+# observed). See
+# doc/08_tracking/bug/cli_compile_delegation_fork_bomb_wrapper_2026-07-24.md.
+#
+# This spec exercises the pure decision core directly (no process spawning),
+# so the guard logic is verifiable without touching the filesystem or
+# forking anything.
+
+use compiler.driver.driver_public_shared.{
+    compile_delegation_guard_decision,
+    compile_delegation_guard_message,
+    is_same_binary_path
+}
+
+fn check(condition: bool):
+    expect condition == true
+
+describe "compile delegation guard (fork-bomb regression)":
+    it "blocks when the delegation marker is already set by a parent in the chain":
+        val result = compile_delegation_guard_decision(
+            "backend=vhdl", "1", "bin/release/simple",
+            "/opt/simple/bin/release/x86_64-unknown-linux-gnu/simple"
+        )
+        check(result != "")
+        check(result.contains("compile delegation loop detected"))
+        check(result.contains("backend=vhdl"))
+
+    it "blocks when the resolved external binary is this same running executable":
+        val result = compile_delegation_guard_decision(
+            "native", "",
+            "/opt/simple/bin/release/x86_64-unknown-linux-gnu/simple",
+            "/opt/simple/bin/release/x86_64-unknown-linux-gnu/simple"
+        )
+        check(result != "")
+        check(result.contains("native"))
+
+    it "allows a legitimate delegation to a distinct external binary with no marker set":
+        val result = compile_delegation_guard_decision(
+            "backend=c", "",
+            "src/compiler_rust/target/bootstrap/simple",
+            "/opt/simple/bin/release/x86_64-unknown-linux-gnu/simple"
+        )
+        expect result == ""
+
+    it "treats a relative resolved path ending in the current exe's basename as the same binary":
+        check(is_same_binary_path("bin/simple", "/opt/simple/bin/simple"))
+        check(is_same_binary_path("/opt/simple/bin/simple", "bin/simple"))
+        check(not is_same_binary_path("bin/simple", "/opt/simple/bin/other_simple"))
+        check(not is_same_binary_path("", "/opt/simple/bin/simple"))
+
+    it "builds a clear, actionable error message":
+        val msg = compile_delegation_guard_message("backend=vhdl")
+        expect msg == "compile delegation loop detected: external fallback resolves to this same CLI; backend=vhdl not supported in-process"

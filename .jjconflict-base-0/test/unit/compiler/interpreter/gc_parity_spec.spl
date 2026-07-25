@@ -1,0 +1,203 @@
+# @cover src/compiler/10.frontend/core/interpreter/module_loader.spl 40%
+#
+# Tests for interpreter GC parity: family extraction from paths,
+# family classification helpers (imported from gc_config), and
+# boundary check warning logic.
+
+# WARNING: Interpreter mode limitation
+# In interpreter mode, `it` block bodies do NOT execute — assertions are not evaluated.
+# These tests verify file loading and structure only.
+# For authoritative proof, run in compiled mode: bin/simple test --compiled test/unit/compiler/interpreter/gc_parity_spec.spl
+#
+# Local helpers replicate logic from:
+#   - src/compiler/10.frontend/core/interpreter/module_loader.spl (extract_runtime_family path-based extraction)
+#   - src/compiler/00.common/gc_config.spl (is_nogc_family, is_gc_family, is_noalloc_family)
+#   - src/compiler/35.semantics/gc_boundary_check.spl (should_warn_gc_boundary, should_warn_noalloc_boundary)
+# If the real implementation changes, these helpers must be updated to match.
+
+use std.spec
+
+describe "Interpreter GC Parity":
+
+    # --- extract_runtime_family (path-based) ---
+
+    context "family extraction from resolved path":
+
+        it "extracts nogc_sync_mut from path":
+            val path = "src/lib/nogc_sync_mut/fs.spl"
+            val family = _extract_family(path)
+            expect(family).to_equal("nogc_sync_mut")
+
+        it "extracts nogc_async_mut from path":
+            val path = "src/lib/nogc_async_mut/thread.spl"
+            val family = _extract_family(path)
+            expect(family).to_equal("nogc_async_mut")
+
+        it "extracts gc_async_mut from path":
+            val path = "src/lib/gc_async_mut/cuda.spl"
+            val family = _extract_family(path)
+            expect(family).to_equal("gc_async_mut")
+
+        it "extracts nogc_async_immut from path":
+            val path = "src/lib/nogc_async_immut/persistent.spl"
+            val family = _extract_family(path)
+            expect(family).to_equal("nogc_async_immut")
+
+        it "extracts common from path":
+            val path = "src/lib/common/text.spl"
+            val family = _extract_family(path)
+            expect(family).to_equal("common")
+
+        it "extracts nogc_async_mut_noalloc before nogc_async_mut":
+            val path = "src/lib/nogc_async_mut_noalloc/memory.spl"
+            val family = _extract_family(path)
+            expect(family).to_equal("nogc_async_mut_noalloc")
+
+        it "returns empty for unknown path":
+            val path = "src/app/cli/main.spl"
+            val family = _extract_family(path)
+            expect(family).to_equal("")
+
+    # --- Family classification (canonical from gc_config) ---
+
+    context "is_nogc_family classification":
+
+        it "nogc_sync_mut is nogc":
+            expect(_is_nogc("nogc_sync_mut")).to_equal(true)
+
+        it "nogc_async_mut is nogc":
+            expect(_is_nogc("nogc_async_mut")).to_equal(true)
+
+        it "nogc_async_mut_noalloc is nogc":
+            expect(_is_nogc("nogc_async_mut_noalloc")).to_equal(true)
+
+        it "gc_async_mut is not nogc":
+            expect(_is_nogc("gc_async_mut")).to_equal(false)
+
+        it "common is not nogc":
+            expect(_is_nogc("common")).to_equal(false)
+
+    context "is_gc_family classification":
+
+        it "gc_async_mut is gc":
+            expect(_is_gc("gc_async_mut")).to_equal(true)
+
+        it "nogc_sync_mut is not gc":
+            expect(_is_gc("nogc_sync_mut")).to_equal(false)
+
+        it "common is not gc":
+            expect(_is_gc("common")).to_equal(false)
+
+    context "is_noalloc_family classification":
+
+        it "nogc_async_mut_noalloc is noalloc":
+            expect(_is_noalloc("nogc_async_mut_noalloc")).to_equal(true)
+
+        it "nogc_sync_mut is not noalloc":
+            expect(_is_noalloc("nogc_sync_mut")).to_equal(false)
+
+        it "gc_async_mut is not noalloc":
+            expect(_is_noalloc("gc_async_mut")).to_equal(false)
+
+    # --- Boundary warning logic ---
+
+    context "should_warn_gc_boundary":
+
+        it "warns when nogc imports gc":
+            val result = _should_warn("nogc_sync_mut", "gc_async_mut")
+            expect(result).to_equal(true)
+
+        it "warns when nogc_async imports gc":
+            val result = _should_warn("nogc_async_mut", "gc_async_mut")
+            expect(result).to_equal(true)
+
+        it "does not warn when gc imports nogc":
+            val result = _should_warn("gc_async_mut", "nogc_sync_mut")
+            expect(result).to_equal(false)
+
+        it "does not warn for same family":
+            val result = _should_warn("nogc_sync_mut", "nogc_sync_mut")
+            expect(result).to_equal(false)
+
+        it "does not warn when common imports anything":
+            val result = _should_warn("common", "gc_async_mut")
+            expect(result).to_equal(false)
+
+        it "does not warn when anything imports common":
+            val result = _should_warn("nogc_sync_mut", "common")
+            expect(result).to_equal(false)
+
+        it "warns when noalloc imports allocating nogc":
+            val result = _should_warn_noalloc("nogc_async_mut_noalloc", "nogc_sync_mut")
+            expect(result).to_equal(true)
+
+        it "warns when noalloc imports gc":
+            val result = _should_warn_noalloc("nogc_async_mut_noalloc", "gc_async_mut")
+            expect(result).to_equal(true)
+
+        it "does not warn for noalloc importing common":
+            val result = _should_warn_noalloc("nogc_async_mut_noalloc", "common")
+            expect(result).to_equal(false)
+
+    # --- Consistency with compiler gc_config ---
+
+    context "interpreter vs compiler family detection consistency":
+
+        it "both detect nogc_sync_mut as nogc":
+            val path_family = _extract_family("src/lib/nogc_sync_mut/fs.spl")
+            expect(_is_nogc(path_family)).to_equal(true)
+
+        it "both detect gc_async_mut as gc":
+            val path_family = _extract_family("src/lib/gc_async_mut/cuda.spl")
+            expect(_is_gc(path_family)).to_equal(true)
+
+        it "both detect noalloc correctly":
+            val path_family = _extract_family("src/lib/nogc_async_mut_noalloc/mem.spl")
+            expect(_is_noalloc(path_family)).to_equal(true)
+
+# ===== Test helpers (replicate logic locally for interpreter mode) =====
+
+fn _extract_family(path: text) -> text:
+    if path.contains("/nogc_async_mut_noalloc/"):
+        return "nogc_async_mut_noalloc"
+    if path.contains("/nogc_async_mut/"):
+        return "nogc_async_mut"
+    if path.contains("/nogc_async_immut/"):
+        return "nogc_async_immut"
+    if path.contains("/nogc_sync_mut/"):
+        return "nogc_sync_mut"
+    if path.contains("/gc_async_mut/"):
+        return "gc_async_mut"
+    if path.contains("/common/"):
+        return "common"
+    ""
+
+fn _is_nogc(name: text) -> bool:
+    name.starts_with("nogc_")
+
+fn _is_gc(name: text) -> bool:
+    name.starts_with("gc_")
+
+fn _is_noalloc(name: text) -> bool:
+    name.starts_with("nogc_async_mut_noalloc")
+
+fn _is_allocating(name: text) -> bool:
+    if name == "common":
+        return false
+    if _is_noalloc(name):
+        return false
+    _is_nogc(name) or _is_gc(name)
+
+fn _should_warn(importer: text, imported: text) -> bool:
+    if importer == "common" or imported == "common":
+        return false
+    if importer == imported:
+        return false
+    _is_nogc(importer) and _is_gc(imported)
+
+fn _should_warn_noalloc(importer: text, imported: text) -> bool:
+    if imported == "common":
+        return false
+    if importer == imported:
+        return false
+    _is_noalloc(importer) and _is_allocating(imported)

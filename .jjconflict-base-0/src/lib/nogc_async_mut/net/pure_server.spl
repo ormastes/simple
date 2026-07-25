@@ -1,0 +1,277 @@
+# Pure Simple SSH/HTTPS server release routing policy.
+#
+# Keep this policy aligned with `nogc_sync_mut/net/pure_server.spl`.
+
+enum PureServerMode:
+    Alpha
+    Beta
+    Release
+
+enum PureServerHostTarget:
+    HostedLinux
+    SimpleOS
+
+enum PureServerProtocol:
+    SSH
+    HTTPS
+
+struct PureServerHostAccessCaps:
+    target: PureServerHostTarget
+    can_accept_tcp: bool
+    can_read_write_tcp: bool
+    can_load_files: bool
+    can_get_entropy: bool
+    can_spawn_process: bool
+
+struct PureServerRouteDecision:
+    protocol: PureServerProtocol
+    mode: PureServerMode
+    target: PureServerHostTarget
+    uses_simple_protocol: bool
+    allows_native_protocol_bypass: bool
+    host_access_summary: text
+
+struct PureServerHostAccessAdapter:
+    name: text
+    target: PureServerHostTarget
+    caps: PureServerHostAccessCaps
+    uses_native_protocol_bypass: bool
+    description: text
+
+struct PureServerPreflight:
+    protocol: PureServerProtocol
+    target: PureServerHostTarget
+    adapter_name: text
+    release_ready: bool
+    uses_simple_protocol: bool
+    reason: text
+
+struct PureServerHttpsReleasePlan:
+    target: PureServerHostTarget
+    adapter_name: text
+    release_ready: bool
+    uses_simple_protocol: bool
+    tls_stage: text
+    http_stage: text
+    response_wire_preview: text
+    reason: text
+
+struct PureServerSshReleasePlan:
+    target: PureServerHostTarget
+    adapter_name: text
+    release_ready: bool
+    uses_simple_protocol: bool
+    version_exchange_stage: text
+    kex_stage: text
+    auth_stage: text
+    channel_stage: text
+    command_stage: text
+    reason: text
+
+fn pure_server_mode_from_text(raw: text) -> Result<PureServerMode, text>:
+    if raw == "alpha":
+        return Ok(PureServerMode.Alpha)
+    if raw == "beta":
+        return Ok(PureServerMode.Beta)
+    if raw == "release" or raw == "normal":
+        return Ok(PureServerMode.Release)
+    Err("unknown pure server mode: {raw}")
+
+fn pure_server_mode_name(mode: PureServerMode) -> text:
+    match mode:
+        case PureServerMode.Alpha: "alpha"
+        case PureServerMode.Beta: "beta"
+        case PureServerMode.Release: "release"
+
+fn pure_server_protocol_name(protocol: PureServerProtocol) -> text:
+    match protocol:
+        case PureServerProtocol.SSH: "ssh"
+        case PureServerProtocol.HTTPS: "https"
+
+fn pure_server_target_name(target: PureServerHostTarget) -> text:
+    match target:
+        case PureServerHostTarget.HostedLinux: "hosted-linux"
+        case PureServerHostTarget.SimpleOS: "simpleos"
+
+fn pure_server_hosted_linux_caps() -> PureServerHostAccessCaps:
+    PureServerHostAccessCaps(
+        target: PureServerHostTarget.HostedLinux,
+        can_accept_tcp: true,
+        can_read_write_tcp: true,
+        can_load_files: true,
+        can_get_entropy: true,
+        can_spawn_process: true
+    )
+
+fn pure_server_simpleos_caps() -> PureServerHostAccessCaps:
+    PureServerHostAccessCaps(
+        target: PureServerHostTarget.SimpleOS,
+        can_accept_tcp: true,
+        can_read_write_tcp: true,
+        can_load_files: true,
+        can_get_entropy: true,
+        can_spawn_process: true
+    )
+
+fn pure_server_hosted_linux_adapter() -> PureServerHostAccessAdapter:
+    PureServerHostAccessAdapter(
+        name: "hosted-linux-rt-host-access",
+        target: PureServerHostTarget.HostedLinux,
+        caps: pure_server_hosted_linux_caps(),
+        uses_native_protocol_bypass: false,
+        description: "Hosted Linux adapter may use runtime TCP, file, entropy, and process host access but not native SSH/TLS protocol wrappers"
+    )
+
+fn pure_server_simpleos_adapter() -> PureServerHostAccessAdapter:
+    PureServerHostAccessAdapter(
+        name: "simpleos-kernel-host-access",
+        target: PureServerHostTarget.SimpleOS,
+        caps: pure_server_simpleos_caps(),
+        uses_native_protocol_bypass: false,
+        description: "SimpleOS adapter may use kernel TCP, file, entropy, and process services but not native SSH/TLS protocol wrappers"
+    )
+
+fn pure_server_validate_adapter(protocol: PureServerProtocol, adapter: PureServerHostAccessAdapter) -> Result<bool, text>:
+    if adapter.uses_native_protocol_bypass:
+        return Err("{pure_server_protocol_name(protocol)} release adapter cannot use native protocol bypass")
+    pure_server_validate_host_access(protocol, adapter.caps)
+
+fn pure_server_caps_summary(caps: PureServerHostAccessCaps) -> text:
+    "target={pure_server_target_name(caps.target)} tcp_accept={caps.can_accept_tcp} tcp_rw={caps.can_read_write_tcp} files={caps.can_load_files} entropy={caps.can_get_entropy} process={caps.can_spawn_process}"
+
+fn pure_server_validate_host_access(protocol: PureServerProtocol, caps: PureServerHostAccessCaps) -> Result<bool, text>:
+    if not caps.can_accept_tcp:
+        return Err("{pure_server_protocol_name(protocol)} requires tcp accept host access")
+    if not caps.can_read_write_tcp:
+        return Err("{pure_server_protocol_name(protocol)} requires tcp read/write host access")
+    if not caps.can_get_entropy:
+        return Err("{pure_server_protocol_name(protocol)} requires entropy host access")
+    if protocol == PureServerProtocol.SSH and not caps.can_spawn_process:
+        return Err("ssh requires process execution host access")
+    if protocol == PureServerProtocol.HTTPS and not caps.can_load_files:
+        return Err("https requires certificate/key file host access")
+    Ok(true)
+
+fn pure_server_route_decision(protocol: PureServerProtocol, mode: PureServerMode, caps: PureServerHostAccessCaps) -> Result<PureServerRouteDecision, text>:
+    val valid = pure_server_validate_host_access(protocol, caps)
+    if valid.is_err():
+        return Err(valid.err().unwrap())
+    val allows_bypass = mode == PureServerMode.Alpha or mode == PureServerMode.Beta
+    Ok(PureServerRouteDecision(
+        protocol: protocol,
+        mode: mode,
+        target: caps.target,
+        uses_simple_protocol: true,
+        allows_native_protocol_bypass: allows_bypass,
+        host_access_summary: pure_server_caps_summary(caps)
+    ))
+
+fn pure_server_release_route(protocol: PureServerProtocol, caps: PureServerHostAccessCaps) -> Result<PureServerRouteDecision, text>:
+    pure_server_route_decision(protocol, PureServerMode.Release, caps)
+
+fn pure_server_release_route_for_adapter(protocol: PureServerProtocol, adapter: PureServerHostAccessAdapter) -> Result<PureServerRouteDecision, text>:
+    val valid = pure_server_validate_adapter(protocol, adapter)
+    if valid.is_err():
+        return Err(valid.err().unwrap())
+    pure_server_release_route(protocol, adapter.caps)
+
+fn pure_server_release_preflight(protocol: PureServerProtocol, adapter: PureServerHostAccessAdapter) -> PureServerPreflight:
+    val route = pure_server_release_route_for_adapter(protocol, adapter)
+    if route.is_err():
+        return PureServerPreflight(
+            protocol: protocol,
+            target: adapter.target,
+            adapter_name: adapter.name,
+            release_ready: false,
+            uses_simple_protocol: false,
+            reason: route.err().unwrap()
+        )
+    val decision = route.unwrap()
+    PureServerPreflight(
+        protocol: protocol,
+        target: adapter.target,
+        adapter_name: adapter.name,
+        release_ready: true,
+        uses_simple_protocol: decision.uses_simple_protocol,
+        reason: "release preflight ok"
+    )
+
+fn pure_server_hosted_linux_ssh_preflight() -> PureServerPreflight:
+    pure_server_release_preflight(PureServerProtocol.SSH, pure_server_hosted_linux_adapter())
+
+fn pure_server_hosted_linux_https_preflight() -> PureServerPreflight:
+    pure_server_release_preflight(PureServerProtocol.HTTPS, pure_server_hosted_linux_adapter())
+
+fn pure_server_simpleos_ssh_preflight() -> PureServerPreflight:
+    pure_server_release_preflight(PureServerProtocol.SSH, pure_server_simpleos_adapter())
+
+fn pure_server_simpleos_https_preflight() -> PureServerPreflight:
+    pure_server_release_preflight(PureServerProtocol.HTTPS, pure_server_simpleos_adapter())
+
+fn pure_server_https_release_response_wire(body: text) -> text:
+    val body_len = body.len()
+    "HTTP/1.1 200 OK\r\nContent-Length: {body_len}\r\nConnection: close\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n{body}"
+
+fn pure_server_https_release_plan(adapter: PureServerHostAccessAdapter, body: text) -> PureServerHttpsReleasePlan:
+    val preflight = pure_server_release_preflight(PureServerProtocol.HTTPS, adapter)
+    if not preflight.release_ready:
+        return PureServerHttpsReleasePlan(
+            target: adapter.target,
+            adapter_name: adapter.name,
+            release_ready: false,
+            uses_simple_protocol: false,
+            tls_stage: "blocked",
+            http_stage: "blocked",
+            response_wire_preview: "",
+            reason: preflight.reason
+        )
+    PureServerHttpsReleasePlan(
+        target: adapter.target,
+        adapter_name: adapter.name,
+        release_ready: true,
+        uses_simple_protocol: true,
+        tls_stage: "simple-tls12-server",
+        http_stage: "simple-http-response",
+        response_wire_preview: pure_server_https_release_response_wire(body),
+        reason: "https release plan ok"
+    )
+
+fn pure_server_hosted_linux_https_release_plan(body: text) -> PureServerHttpsReleasePlan:
+    pure_server_https_release_plan(pure_server_hosted_linux_adapter(), body)
+
+fn pure_server_simpleos_https_release_plan(body: text) -> PureServerHttpsReleasePlan:
+    pure_server_https_release_plan(pure_server_simpleos_adapter(), body)
+
+fn pure_server_ssh_release_plan(adapter: PureServerHostAccessAdapter) -> PureServerSshReleasePlan:
+    val preflight = pure_server_release_preflight(PureServerProtocol.SSH, adapter)
+    if not preflight.release_ready:
+        return PureServerSshReleasePlan(
+            target: adapter.target,
+            adapter_name: adapter.name,
+            release_ready: false,
+            uses_simple_protocol: false,
+            version_exchange_stage: "blocked",
+            kex_stage: "blocked",
+            auth_stage: "blocked",
+            channel_stage: "blocked",
+            command_stage: "blocked",
+            reason: preflight.reason
+        )
+    PureServerSshReleasePlan(
+        target: adapter.target,
+        adapter_name: adapter.name,
+        release_ready: true,
+        uses_simple_protocol: true,
+        version_exchange_stage: "simple-ssh-version-exchange",
+        kex_stage: "simple-ssh-kex",
+        auth_stage: "simple-ssh-auth",
+        channel_stage: "simple-ssh-channel",
+        command_stage: "simple-host-process-exec",
+        reason: "ssh release plan ok"
+    )
+
+fn pure_server_hosted_linux_ssh_release_plan() -> PureServerSshReleasePlan:
+    pure_server_ssh_release_plan(pure_server_hosted_linux_adapter())
+
+fn pure_server_simpleos_ssh_release_plan() -> PureServerSshReleasePlan:
+    pure_server_ssh_release_plan(pure_server_simpleos_adapter())

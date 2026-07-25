@@ -1,0 +1,77 @@
+# Core-safe in-process VHDL compiler entry.
+#
+# Usage:
+#   simple-vhdl <source.spl> [-o <output.vhd>]
+
+extern fn rt_cli_get_args() -> [text]
+extern fn rt_env_set(key: text, value: text) -> bool
+
+use compiler.common.driver_core_types.{
+    CompileMode, compile_result_is_success, compile_result_errors,
+    driver_core_compile_options_default, compileoptions_normalize_mir_optimization}
+use compiler.driver.driver.{
+    compiler_driver_create, compiler_driver_run_vhdl}
+
+fn vhdl_entry_default_output(source: text) -> text:
+    if source.ends_with(".spl"):
+        return source.substring(0, source.len() - 4) + ".vhd"
+    source + ".vhd"
+
+fn vhdl_entry_usage(exit_code: i64) -> i64:
+    print "Usage: simple-vhdl <source.spl> [-o <output.vhd>]"
+    exit_code
+
+fn main() -> i64:
+    val args = rt_cli_get_args() ?? []
+    var source = ""
+    var output = ""
+    var i = 1
+    while i < args.len():
+        val arg = args[i]
+        if arg.ends_with("vhdl_compile_entry.spl"):
+            i = i + 1
+        elif arg == "compile" or arg == "vhdl-compile" or arg == "--backend=vhdl":
+            i = i + 1
+        elif arg == "--backend" and i + 1 < args.len() and args[i + 1] == "vhdl":
+            i = i + 2
+        elif arg == "-o" or arg == "--output":
+            if i + 1 >= args.len():
+                return vhdl_entry_usage(2)
+            output = args[i + 1]
+            i = i + 2
+        elif arg.starts_with("--output="):
+            output = arg.substring(9)
+            i = i + 1
+        elif arg == "-h" or arg == "--help":
+            return vhdl_entry_usage(0)
+        elif arg.starts_with("-") or source != "":
+            return vhdl_entry_usage(2)
+        else:
+            source = arg
+            i = i + 1
+
+    if source == "":
+        return vhdl_entry_usage(2)
+    if output == "":
+        output = vhdl_entry_default_output(source)
+
+    if not rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY", source):
+        print "error: failed to select VHDL entry closure"
+        return 1
+    if not rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "0"):
+        print "error: failed to initialize VHDL entry closure"
+        return 1
+
+    var options = driver_core_compile_options_default()
+    options.input_files = [source]
+    options.mode = CompileMode.Aot
+    options.output_file = Some(output)
+    options.backend = "vhdl"
+    options = compileoptions_normalize_mir_optimization(options)
+    val result = compiler_driver_run_vhdl(compiler_driver_create(options))
+    if compile_result_is_success(result):
+        print "Output: {output}"
+        return 0
+    for error in compile_result_errors(result):
+        print "error: {error}"
+    1

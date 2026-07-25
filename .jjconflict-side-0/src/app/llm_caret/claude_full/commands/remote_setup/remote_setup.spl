@@ -1,0 +1,78 @@
+"""
+Underscore import surface for remote-setup parity.
+"""
+
+class RemoteSetupState:
+    signedIn: bool
+    tokenInput: text
+    tokenImported: bool
+    existingEnvironmentCount: i64
+    createdEnvironment: bool
+    networkFailure: bool
+
+impl RemoteSetupState:
+    static fn new(signedIn: bool, tokenInput: text, tokenImported: bool, existingEnvironmentCount: i64, createdEnvironment: bool, networkFailure: bool) -> RemoteSetupState:
+        RemoteSetupState(signedIn: signedIn, tokenInput: tokenInput, tokenImported: tokenImported, existingEnvironmentCount: existingEnvironmentCount, createdEnvironment: createdEnvironment, networkFailure: networkFailure)
+
+class RemoteSetupResult:
+    ok: bool
+    stepName: text
+    message: text
+    shouldOpenCode: bool
+
+impl RemoteSetupResult:
+    static fn new(ok: bool, stepName: text, message: text, shouldOpenCode: bool) -> RemoteSetupResult:
+        RemoteSetupResult(ok: ok, stepName: stepName, message: message, shouldOpenCode: shouldOpenCode)
+
+fn remoteSetupCommandName() -> text: "remote-setup"
+fn remoteSetupCommandDescription() -> text: "Set up Claude Code remote development"
+fn remoteSetupCommandArgumentHint() -> text: "[github-token]"
+fn remoteSetupLoadPath() -> text: "./remote-setup.js"
+fn remoteSetupRequiresSignin(state: RemoteSetupState) -> bool: not state.signedIn
+fn remoteSetupHasGithubToken(state: RemoteSetupState) -> bool: state.tokenInput.trim() != ""
+fn remoteSetupShouldImportGithubToken(state: RemoteSetupState) -> bool: state.signedIn and remoteSetupHasGithubToken(state) and not state.tokenImported
+fn remoteSetupShouldCreateEnvironment(state: RemoteSetupState) -> bool: state.signedIn and state.existingEnvironmentCount == 0 and not state.createdEnvironment
+
+fn remoteSetupNextStep(state: RemoteSetupState) -> text:
+    if remoteSetupRequiresSignin(state):
+        return "signin"
+    if remoteSetupShouldImportGithubToken(state):
+        return "import-github-token"
+    if remoteSetupShouldCreateEnvironment(state):
+        return "create-default-environment"
+    "open-code"
+
+fn remoteSetupCodeUrl(baseUrl: text) -> text:
+    val trimmed = baseUrl.trim()
+    if trimmed.ends_with("/"):
+        return trimmed.slice(0, trimmed.len() - 1) + "/code"
+    trimmed + "/code"
+
+fn remoteSetupTokenHelpText() -> text: "Paste a GitHub token to enable repository access, or skip token import."
+fn remoteSetupEnvironmentHelpText() -> text: "Claude creates a default cloud environment when none exists."
+fn remoteSetupSuccessMessage(codeUrl: text) -> text: "Remote setup complete. Open " + remoteSetupCodeUrl(codeUrl)
+
+fn callRemoteSetup(state: RemoteSetupState, baseUrl: text) -> RemoteSetupResult:
+    if state.networkFailure:
+        return RemoteSetupResult.new(false, "network", "Remote setup failed: network error", false)
+    val step = remoteSetupNextStep(state)
+    if step == "signin":
+        return RemoteSetupResult.new(false, step, "Sign in to Claude before remote setup.", false)
+    if step == "import-github-token":
+        return RemoteSetupResult.new(false, step, remoteSetupTokenHelpText(), false)
+    if step == "create-default-environment":
+        return RemoteSetupResult.new(false, step, remoteSetupEnvironmentHelpText(), false)
+    RemoteSetupResult.new(true, step, remoteSetupSuccessMessage(baseUrl), true)
+
+fn remoteSetupStatusLabel(state: RemoteSetupState) -> text:
+    val step = remoteSetupNextStep(state)
+    if step == "signin":
+        return "Sign in required"
+    if step == "import-github-token":
+        return "GitHub token import"
+    if step == "create-default-environment":
+        return "Create default environment"
+    "Ready"
+
+fn remoteSetupSourceLinesModeled() -> i64:
+    186

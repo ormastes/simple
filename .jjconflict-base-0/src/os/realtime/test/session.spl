@@ -1,0 +1,209 @@
+# RTOS Test Session — shared QEMU session with checkpoint-based isolation.
+#
+# Two modes:
+#   1. SessionReset: full QEMU restart between tests (slow, safe)
+#   2. SessionCheckpoint: checkpoint/restore between tests (fast, shares HW init)
+#
+# Tests that share a session avoid re-initializing QEMU + GDB + RTOS boot
+# (~2-5s overhead per test). Instead, checkpoint at "kernel ready" state
+# and restore between tests (~10ms via JTAG or QEMU snapshot).
+#
+# Compatible with replay: record first run, verify replay on subsequent.
+
+use std.qemu.mod (QemuArch)
+
+val SESSION_RESET: i32 = 0
+val SESSION_CHECKPOINT: i32 = 1
+
+class RtosTestConfig:
+    """Configuration for an RTOS test run."""
+    arch: i32
+    replay_mode: i32
+    session_mode: i32
+    timeout_ms: i64
+    chaos_seed: u64
+    fuzz_iterations: i32
+    fuzz_enabled: bool
+    checkpoint_id: i32
+
+    static fn default_fast() -> RtosTestConfig:
+        """Default for normal unit tests: replay off, no session sharing, 5s timeout."""
+        RtosTestConfig(
+            arch: 0,
+            replay_mode: RTOS_REPLAY_OFF,
+            session_mode: SESSION_RESET,
+            timeout_ms: 5000,
+            chaos_seed: 0u64,
+            fuzz_iterations: 0,
+            fuzz_enabled: false,
+            checkpoint_id: 0
+        )
+
+    static fn default_session() -> RtosTestConfig:
+        """Default for session tests: checkpoint-based, replay=Record, 10s timeout."""
+        RtosTestConfig(
+            arch: 0,
+            replay_mode: RTOS_REPLAY_RECORD,
+            session_mode: SESSION_CHECKPOINT,
+            timeout_ms: 10000,
+            chaos_seed: 0u64,
+            fuzz_iterations: 0,
+            fuzz_enabled: false,
+            checkpoint_id: 1
+        )
+
+    static fn default_fuzz() -> RtosTestConfig:
+        """Default for fuzz/long-run: chaos mode, 100 iterations, 60s timeout."""
+        RtosTestConfig(
+            arch: 0,
+            replay_mode: RTOS_REPLAY_CHAOS,
+            session_mode: SESSION_CHECKPOINT,
+            timeout_ms: 60000,
+            chaos_seed: 42u64,
+            fuzz_iterations: 100,
+            fuzz_enabled: true,
+            checkpoint_id: 1
+        )
+
+class RtosTestSession:
+    """Manages a QEMU instance for multiple RTOS tests with shared state."""
+    config: RtosTestConfig
+    binary_path: text
+    gdb_port: i32
+    running: bool
+    test_count: i32
+    pass_count: i32
+    fail_count: i32
+    checkpoint_saved: bool
+
+    static fn create(binary_path: text, config: RtosTestConfig) -> RtosTestSession:
+        RtosTestSession(
+            config: config,
+            binary_path: binary_path,
+            gdb_port: 1234,
+            running: false,
+            test_count: 0,
+            pass_count: 0,
+            fail_count: 0,
+            checkpoint_saved: false
+        )
+
+    me start() -> bool:
+        """Start QEMU session and boot RTOS to 'kernel ready' state."""
+        if self.running:
+            return true
+
+        # Set replay mode before boot
+        rtos_replay_set_mode(self.config.replay_mode)
+
+        if self.config.replay_mode == RTOS_REPLAY_CHAOS:
+            rng_seed(self.config.chaos_seed)
+
+        self.running = true
+        self.test_count = 0
+        self.pass_count = 0
+        self.fail_count = 0
+        true
+
+    me prepare_test():
+        """Prepare for next test. Either restore checkpoint or reset."""
+        if self.config.session_mode == SESSION_CHECKPOINT:
+            if self.checkpoint_saved:
+                rtos_checkpoint_restore(self.config.checkpoint_id)
+            else:
+                # First test: save checkpoint after boot
+                rtos_checkpoint_save(self.config.checkpoint_id)
+                self.checkpoint_saved = true
+        # SESSION_RESET: caller handles QEMU restart
+
+    me record_result(passed: bool):
+        """Record test result."""
+        self.test_count = self.test_count + 1
+        if passed:
+            self.pass_count = self.pass_count + 1
+        else:
+            self.fail_count = self.fail_count + 1
+
+    me stop():
+        """Stop session, reset replay mode."""
+        rtos_replay_set_mode(RTOS_REPLAY_OFF)
+        self.running = false
+
+    fn summary() -> text:
+        """Return test summary string."""
+        "{self.pass_count}/{self.test_count} passed, {self.fail_count} failed"
+
+class RtosTestResult:
+    """Result of a single RTOS test."""
+    name: text
+    passed: bool
+    message: text
+    tick_at_end: u64
+    replay_events: i64
+    divergences: i32
+
+    static fn pass(name: text, tick: u64, events: i64) -> RtosTestResult:
+        RtosTestResult(
+            name: name,
+            passed: true,
+            message: "ok",
+            tick_at_end: tick,
+            replay_events: events,
+            divergences: 0
+        )
+
+    static fn fail(name: text, msg: text, tick: u64) -> RtosTestResult:
+        RtosTestResult(
+            name: name,
+            passed: false,
+            message: msg,
+            tick_at_end: tick,
+            replay_events: 0,
+            divergences: 0
+        )
+
+fn run_rtos_test(session: RtosTestSession, name: text, test_fn: fn() -> bool) -> RtosTestResult:
+    """Run a single test within a session. Handles checkpoint + replay."""
+    session.prepare_test()
+
+    rr_reset_divergences()
+
+    val passed = test_fn()
+    val tick = sched_get_tick()
+    val events = rr_event_count()
+    val divs = rr_divergence_count()
+
+    session.record_result(passed)
+
+    if passed:
+        var result = RtosTestResult.pass(name, tick, events)
+        result.divergences = divs
+        result
+    else:
+        RtosTestResult.fail(name, "test returned false", tick)
+
+fn run_rtos_fuzz(session: RtosTestSession, name: text, test_fn: fn() -> bool) -> [RtosTestResult]:
+    """Run a test multiple times with different chaos seeds. Default off."""
+    var results: [RtosTestResult] = []
+    if not session.config.fuzz_enabled:
+        val result = run_rtos_test(session, name, test_fn)
+        results.push(result)
+        return results
+
+    var i = 0
+    while i < session.config.fuzz_iterations:
+        val seed = session.config.chaos_seed + i.to_u64()
+        rng_seed(seed)
+        rtos_replay_set_mode(RTOS_REPLAY_CHAOS)
+
+        val iter_name = "{name}[seed={seed}]"
+        val result = run_rtos_test(session, iter_name, test_fn)
+        results.push(result)
+
+        if not result.passed:
+            # On first failure, save checkpoint for reproduction
+            rtos_checkpoint_save(100 + i)
+
+        i = i + 1
+
+    results

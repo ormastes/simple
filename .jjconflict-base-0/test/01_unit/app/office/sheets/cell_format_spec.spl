@@ -1,0 +1,176 @@
+"""Office sheets cell number-format and styling spec.
+
+Comprehensive tests for per-cell number formats and bold/bg/fg styling.
+Tests formats_set/formats_get round-trip, format_cell_display's Excel
+number-format subset, format_cell_css, and the render_sheet_html_formatted
+render path (number format + style css + conditional-format rules).
+"""
+
+use std.spec
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.cell_format.{
+    FormatSpec, SheetFormats, default_format_spec, empty_sheet_formats,
+    formats_set, formats_get, format_cell_display, format_cell_css
+}
+use app.office.sheets.cond_format.{CondRule}
+use app.office.render_adapter.{render_sheet_html_formatted}
+
+describe "formats_set / formats_get: round-trip":
+    """Setting and reading back a per-cell format via the parallel-array
+    SheetFormats container."""
+
+    it "returns the general/default spec for a cell with no format set":
+        val formats = empty_sheet_formats()
+        val spec = formats_get(formats, "A1")
+        expect(spec.num_fmt).to_equal("")
+        expect(spec.bold).to_equal(false)
+        expect(spec.bg).to_equal("")
+        expect(spec.fg).to_equal("")
+
+    it "round-trips a set format":
+        var formats = empty_sheet_formats()
+        formats = formats_set(formats, "B2", FormatSpec(num_fmt: "0.00", bold: true, bg: "#ffe4b5", fg: "#7a2e00"))
+        val spec = formats_get(formats, "B2")
+        expect(spec.num_fmt).to_equal("0.00")
+        expect(spec.bold).to_equal(true)
+        expect(spec.bg).to_equal("#ffe4b5")
+        expect(spec.fg).to_equal("#7a2e00")
+
+    it "is case-insensitive on the cell reference":
+        var formats = empty_sheet_formats()
+        formats = formats_set(formats, "c3", FormatSpec(num_fmt: "0%", bold: false, bg: "", fg: ""))
+        val spec = formats_get(formats, "C3")
+        expect(spec.num_fmt).to_equal("0%")
+
+    it "overwrites an existing entry in place instead of appending":
+        var formats = empty_sheet_formats()
+        formats = formats_set(formats, "A1", FormatSpec(num_fmt: "0.00", bold: false, bg: "", fg: ""))
+        formats = formats_set(formats, "A1", FormatSpec(num_fmt: "0", bold: true, bg: "", fg: ""))
+        expect(formats.keys.len()).to_equal(1)
+        val spec = formats_get(formats, "A1")
+        expect(spec.num_fmt).to_equal("0")
+        expect(spec.bold).to_equal(true)
+
+    it "keeps distinct entries for distinct cells":
+        var formats = empty_sheet_formats()
+        formats = formats_set(formats, "A1", FormatSpec(num_fmt: "0.00", bold: false, bg: "", fg: ""))
+        formats = formats_set(formats, "A2", FormatSpec(num_fmt: "0%", bold: false, bg: "", fg: ""))
+        expect(formats.keys.len()).to_equal(2)
+        expect(formats_get(formats, "A1").num_fmt).to_equal("0.00")
+        expect(formats_get(formats, "A2").num_fmt).to_equal("0%")
+
+describe "format_cell_display: number formats":
+    """Excel TEXT()-style number format subset applied to numeric cells."""
+
+    it "formats with two fixed decimals":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "1234.567")
+        var formats = empty_sheet_formats()
+        formats = formats_set(formats, "A1", FormatSpec(num_fmt: "0.00", bold: false, bg: "", fg: ""))
+        # 1234.567 * 100 = 123456.7 -> round half up -> 123457 -> 1234.57
+        val display = format_cell_display(sheet, formats, "A1")
+        expect(display).to_equal("1234.57")
+
+    it "formats with thousands grouping and two decimals":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A2", "1234567.89")
+        var formats = empty_sheet_formats()
+        formats = formats_set(formats, "A2", FormatSpec(num_fmt: "#,##0.00", bold: false, bg: "", fg: ""))
+        val display = format_cell_display(sheet, formats, "A2")
+        expect(display).to_equal("1,234,567.89")
+
+    it "formats a percentage with one decimal":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A3", "0.4567")
+        var formats = empty_sheet_formats()
+        formats = formats_set(formats, "A3", FormatSpec(num_fmt: "0.0%", bold: false, bg: "", fg: ""))
+        # 0.4567 * 100 = 45.67 -> round half up to 1 decimal -> 45.7%
+        val display = format_cell_display(sheet, formats, "A3")
+        expect(display).to_equal("45.7%")
+
+    it "formats an Excel date serial as yyyy-mm-dd":
+        var sheet = Sheet.new("S1")
+        # Serial 46206 = days_from_civil(2026,7,3) [20637] + 25569 = 2026-07-03
+        sheet.set_value("A4", "46206")
+        var formats = empty_sheet_formats()
+        formats = formats_set(formats, "A4", FormatSpec(num_fmt: "yyyy-mm-dd", bold: false, bg: "", fg: ""))
+        val display = format_cell_display(sheet, formats, "A4")
+        expect(display).to_equal("2026-07-03")
+
+    it "falls back to the sheet's default general display when unformatted":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A5", "42")
+        val formats = empty_sheet_formats()
+        val display = format_cell_display(sheet, formats, "A5")
+        expect(display).to_equal("42")
+
+    it "falls back to general display for text cells even with a num_fmt set":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A6", "hello")
+        var formats = empty_sheet_formats()
+        formats = formats_set(formats, "A6", FormatSpec(num_fmt: "0.00", bold: false, bg: "", fg: ""))
+        val display = format_cell_display(sheet, formats, "A6")
+        expect(display).to_equal("hello")
+
+describe "format_cell_css: bold/bg/fg styling":
+    """Inline CSS fragment generation, only present properties emitted."""
+
+    it "returns empty css for the default (unset) spec":
+        val formats = empty_sheet_formats()
+        val css = format_cell_css(formats, "A1")
+        expect(css).to_equal("")
+
+    it "emits bold only":
+        var formats = empty_sheet_formats()
+        formats = formats_set(formats, "A1", FormatSpec(num_fmt: "", bold: true, bg: "", fg: ""))
+        val css = format_cell_css(formats, "A1")
+        expect(css).to_equal("font-weight:bold")
+
+    it "emits bold, background, and color in order, exact string":
+        var formats = empty_sheet_formats()
+        formats = formats_set(formats, "A1", FormatSpec(num_fmt: "", bold: true, bg: "#ffe4b5", fg: "#7a2e00"))
+        val css = format_cell_css(formats, "A1")
+        expect(css).to_equal("font-weight:bold;background:#ffe4b5;color:#7a2e00")
+
+    it "emits only background when bold is false and fg is unset":
+        var formats = empty_sheet_formats()
+        formats = formats_set(formats, "A1", FormatSpec(num_fmt: "", bold: false, bg: "#d1fae5", fg: ""))
+        val css = format_cell_css(formats, "A1")
+        expect(css).to_equal("background:#d1fae5")
+
+describe "render_sheet_html_formatted: number format + style css + cond-format rules":
+    """The combined render path: formatted number display, static style css,
+    and conditional-format rule css merged in (winning on conflict)."""
+
+    it "renders a formatted number and its bold/bg style into the cell's td":
+        # A1 is the bold "header" row per the grid convention (render_sheet_html*
+        # treats the first data row as a header); put the formatted value on A2
+        # so it's rendered as a real <td> data cell.
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "Amount")
+        sheet.set_value("A2", "1234.567")
+        var formats = empty_sheet_formats()
+        formats = formats_set(formats, "A2", FormatSpec(num_fmt: "0.00", bold: true, bg: "#ffe4b5", fg: ""))
+        val html = render_sheet_html_formatted(sheet, formats, [])
+        expect(html).to_contain("1234.57")
+        expect(html).to_contain("font-weight:bold;background:#ffe4b5")
+
+    it "merges conditional-format css after the static format css":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "Amount")
+        sheet.set_value("A2", "150")
+        var formats = empty_sheet_formats()
+        formats = formats_set(formats, "A2", FormatSpec(num_fmt: "0.00", bold: false, bg: "#111111", fg: ""))
+        val rule = CondRule(range: "A2:A10", kind: "cell_value", criteria: ">100", n: 0, css: "background:#fde7e9")
+        val html = render_sheet_html_formatted(sheet, formats, [rule])
+        expect(html).to_contain("150.00")
+        # static bg first, cond-format bg appended after (wins on conflict)
+        expect(html).to_contain("background:#111111;background:#fde7e9")
+
+    it "renders an unformatted cell with plain display and no extra style":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "Amount")
+        sheet.set_value("A2", "42")
+        val formats = empty_sheet_formats()
+        val html = render_sheet_html_formatted(sheet, formats, [])
+        expect(html).to_contain("<td style=\"border: 1px solid #d0d7de; padding: 6px 12px;\">42</td>")

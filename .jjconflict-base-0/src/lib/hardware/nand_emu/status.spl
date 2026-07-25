@@ -1,0 +1,77 @@
+# ============================================================================
+# nand_emu — Status registers (70h / F1h / 7Bh)
+# ============================================================================
+#
+# Assembles the datasheet status bytes from decoded NeStatus flags (doc §1.4):
+#   70h: I/O0 pass/fail (0=pass), I/O6 ready/busy (1=ready), I/O7 WP (1=enabled).
+#   F1h: I/O0 chip P/F, I/O1 plane0 P/F, I/O2 plane1 P/F, I/O6, I/O7.
+#   7Bh (copy-back): I/O0 P/F, I/O1 EDC error, I/O2 EDC validity, I/O6, I/O7.
+#   After reset with WP high the status register reads C0h.
+#
+# Source: doc/01_research/hardware/nand_emu/nand_emu_fpga_riscv_emulator.md §1.4
+# ============================================================================
+
+use std.hardware.nand_emu.nand_types.NeStatus
+
+# ----------------------------------------------------------------------------
+# Post-reset status (doc §1.4 / §7.2) — IMPLEMENTED.
+# ----------------------------------------------------------------------------
+
+pub fn ne_status_after_reset(wp_high: bool) -> i64:
+    """Status byte immediately after FFh reset (doc §1.4 / §7.2):
+    C0h when WP is high (ready + WP enabled), 40h when WP is low."""
+    if wp_high:
+        0xC0
+    else:
+        0x40
+
+# ----------------------------------------------------------------------------
+# Register assembly (doc §1.4) — IMPLEMENTED.
+# ----------------------------------------------------------------------------
+#
+# Bit numbering is the datasheet's I/O pin numbering (doc §1.4):
+#   I/O0 = bit0, I/O1 = bit1, I/O2 = bit2, I/O6 = bit6, I/O7 = bit7.
+# Polarity is fixed by ne_status_after_reset (already implemented, doc §1.4):
+# a ready chip with WP high (write enabled) reads C0h = bit7|bit6, and a ready
+# chip with WP low (protected) reads 40h = bit6 only. That pins down:
+#   bit0 = 1 when FAIL (0 = pass),      driven by !st.pass
+#   bit6 = 1 when READY (0 = busy),     driven by st.ready
+#   bit7 = 1 when WP ENABLED (write ok, 0 = protected), driven by st.wp_enabled
+# 7Bh I/O2 polarity is pinned down by doc §7.2/§8 scenario 13: sub-sector
+# random data input before copy-back drives "I/O2 = 0 (invalid)", so
+# bit2 = 1 when VALID, 0 when invalidated — driven directly by st.edc_valid.
+# I/O1 "EDC error" / plane P/F bits follow the same fail-is-1 polarity as I/O0.
+# ----------------------------------------------------------------------------
+
+pub fn ne_status_70(st: NeStatus) -> i64:
+    """Assemble the 70h status byte from flags (doc §1.4):
+    bit0 = !pass, bit6 = ready, bit7 = wp_enabled."""
+    var b = 0
+    if !st.pass:
+        b = b | 0x01
+    if st.ready:
+        b = b | 0x40
+    if st.wp_enabled:
+        b = b | 0x80
+    b
+
+pub fn ne_status_f1(st: NeStatus) -> i64:
+    """Assemble the F1h status byte (doc §1.4): chip P/F on I/O0 (as 70h),
+    plus plane0 P/F on I/O1 and plane1 P/F on I/O2, same ready/WP bits."""
+    var b = ne_status_70(st)
+    if !st.plane0_pass:
+        b = b | 0x02
+    if !st.plane1_pass:
+        b = b | 0x04
+    b
+
+pub fn ne_status_7b(st: NeStatus) -> i64:
+    """Assemble the 7Bh EDC status byte (doc §1.4 / §8 scenario 13):
+    I/O0 P/F (as 70h), I/O1 = 1 on EDC error, I/O2 = 1 when EDC is VALID
+    (0 = invalidated by a sub-sector random data input before copy-back)."""
+    var b = ne_status_70(st)
+    if st.edc_error:
+        b = b | 0x02
+    if st.edc_valid:
+        b = b | 0x04
+    b

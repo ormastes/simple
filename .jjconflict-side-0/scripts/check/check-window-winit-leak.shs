@@ -1,0 +1,126 @@
+#!/bin/sh
+set -eu
+
+# check-window-winit-leak.shs — genuine leak/perf gate for the std.io.window_winit
+# present+poll loop. Pairs with test/02_integration/rendering/window_winit_wrapper_spec.spl
+# (which only covers the is_valid guards).
+#
+# Why a separate gate: winit_poll_close_requested DRAINS and FREES every pending
+# event each frame. The runtime never reclaims polled events on its own, so a
+# non-draining poll would leak the global event map — but that only manifests
+# against a LIVE event loop (the --features gui driver), which the plain test
+# binary lacks. Asserting leak-freedom from stubbed externs would be a false
+# green; instead we run the real loop and watch RSS.
+#
+# Absolute oracles (so a no-op/crash cannot pass as success):
+#   A. PRODUCER RAN  — the present loop actually executed. Discriminator: SURVIVAL.
+#      Every non-loop outcome exits in <5s — extern-missing aborts immediately,
+#      window-creation failure / no-GUI returns early. So surviving >= MIN_SAMPLES
+#      samples across a >10s window proves the process reached and stayed in the
+#      `while running` present+poll loop. A small CPU floor (> MIN_CPU%, fractional)
+#      additionally excludes a hard freeze. (A killed process never flushes stdout,
+#      so a banner grep would be unreliable; survival is the robust proof. Note the
+#      loop is NOT CPU-bound — present blocks on a response channel — so it idles
+#      near ~0.8%, which is why the floor is fractional, not a busy-loop threshold.)
+#   B. NO LEAK       — (maxRSS - minRSS)/minRSS <= MAX_GROWTH_PCT across samples.
+#      A per-event leak climbs monotonically over thousands of frames.
+#
+# Usage:
+#   sh scripts/check/check-window-winit-leak.shs [app.spl]
+# Env knobs:
+#   WINIT_LEAK_APP        default: examples/06_io/ui/engine2d_cpu_simd_gui.spl
+#   WINIT_LEAK_SAMPLES    default: 8   (RSS samples)
+#   WINIT_LEAK_INTERVAL   default: 4   (seconds between samples)
+#   WINIT_LEAK_MAX_PCT    default: 8   (max allowed RSS growth %)
+#   WINIT_LEAK_MIN_CPU    default: 0.1 (min peak %cpu liveness floor, fractional)
+#
+# Exit codes: 0 = PASS (producer ran, no leak), 1 = FAIL (crash or leak),
+#             2 = SKIP/INCONCLUSIVE (no gui driver) — loud, never silent-green.
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+APP="${WINIT_LEAK_APP:-${1:-examples/06_io/ui/engine2d_cpu_simd_gui.spl}}"
+SAMPLES="${WINIT_LEAK_SAMPLES:-8}"
+INTERVAL="${WINIT_LEAK_INTERVAL:-4}"
+MAX_PCT="${WINIT_LEAK_MAX_PCT:-8}"
+MIN_CPU="${WINIT_LEAK_MIN_CPU:-0.1}"
+MIN_SAMPLES=$(( SAMPLES > 3 ? SAMPLES - 2 : SAMPLES ))
+
+if [ ! -f "$APP" ]; then
+  echo "FAIL: app not found: $APP" >&2
+  exit 1
+fi
+
+# Locate a GUI-enabled driver (must contain the winit runtime).
+GUI_BIN=""
+for c in \
+  "$ROOT_DIR/src/compiler_rust/target/gui/debug/simple" \
+  "$ROOT_DIR/src/compiler_rust/target/gui/release/simple"; do
+  if [ -x "$c" ] && LC_ALL=C grep -aq "rt_winit_event_loop_new" "$c"; then GUI_BIN="$c"; break; fi
+done
+if [ -z "$GUI_BIN" ]; then
+  echo "SKIP: no GUI-enabled driver (build: cd src/compiler_rust && CARGO_TARGET_DIR=target/gui cargo build -p simple-driver --features gui)" >&2
+  echo "SKIP is INCONCLUSIVE, not PASS." >&2
+  exit 2
+fi
+
+LOG="$(mktemp)"
+RUN_SECS=$(( SAMPLES * INTERVAL + INTERVAL + 10 ))
+
+echo "window_winit leak gate: app=$APP driver=$GUI_BIN samples=$SAMPLES interval=${INTERVAL}s max_growth=${MAX_PCT}%"
+
+SIMPLE_GUI=1 SIMPLE_GUI_RUN_SKIP_NUDGE=1 SIMPLE_TIMEOUT_SECONDS="$RUN_SECS" \
+  SIMPLE_LIB="$ROOT_DIR/src" "$GUI_BIN" run "$APP" >"$LOG" 2>&1 &
+PID=$!
+
+# Let the render + window creation settle before first sample.
+sleep "$INTERVAL"
+
+MIN=""; MAX=""; GOT=0; PEAK_CPU="0.0"
+i=1
+while [ "$i" -le "$SAMPLES" ]; do
+  LINE="$(ps -o rss=,%cpu= -p "$PID" 2>/dev/null || true)"
+  RSS="$(echo "$LINE" | awk '{print $1}')"
+  CPU="$(echo "$LINE" | awk '{print $2}')"
+  if [ -n "$RSS" ]; then
+    GOT=$(( GOT + 1 ))
+    [ -z "$MIN" ] && MIN="$RSS"
+    [ -z "$MAX" ] && MAX="$RSS"
+    [ "$RSS" -lt "$MIN" ] && MIN="$RSS"
+    [ "$RSS" -gt "$MAX" ] && MAX="$RSS"
+    # Track the fractional peak %cpu (awk float compare).
+    PEAK_CPU="$(awk -v a="$CPU" -v b="$PEAK_CPU" 'BEGIN{print (a+0>b+0)?a:b}')"
+    echo "  sample $i: rss_kb=$RSS cpu=${CPU}%"
+  else
+    echo "  sample $i: <process gone>"
+  fi
+  i=$(( i + 1 ))
+  [ "$i" -le "$SAMPLES" ] && sleep "$INTERVAL"
+done
+
+kill "$PID" 2>/dev/null || true
+wait "$PID" 2>/dev/null || true
+
+# Oracle A: producer ran (survived past every <5s failure path + not frozen).
+CPU_OK="$(awk -v a="$PEAK_CPU" -v b="$MIN_CPU" 'BEGIN{print (a+0>b+0)?1:0}')"
+echo "oracle A (producer ran): live_samples=$GOT/$SAMPLES (need >=$MIN_SAMPLES) peak_cpu=${PEAK_CPU}% (need >${MIN_CPU}%)"
+if [ "$GOT" -lt "$MIN_SAMPLES" ] || [ "$CPU_OK" -ne 1 ]; then
+  echo "FAIL: present loop did not run (startup crash, extern-missing, or frozen), so flatness is meaningless." >&2
+  echo "--- driver log tail ---" >&2
+  grep -vE "gc-warning|JIT comp|memory-guard" "$LOG" | tail -8 >&2
+  rm -f "$LOG"
+  exit 1
+fi
+
+# Oracle B: no leak (bounded RSS growth).
+GROWTH=$(( (MAX - MIN) * 100 / MIN ))
+echo "oracle B (no leak): min_kb=$MIN max_kb=$MAX growth=${GROWTH}% (limit ${MAX_PCT}%)"
+rm -f "$LOG"
+if [ "$GROWTH" -gt "$MAX_PCT" ]; then
+  echo "FAIL: RSS grew ${GROWTH}% over ${SAMPLES} samples — possible event-map leak." >&2
+  exit 1
+fi
+
+echo "PASS: present loop ran and RSS held within ${MAX_PCT}% — no leak detected."
+exit 0

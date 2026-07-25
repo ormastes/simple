@@ -1,0 +1,104 @@
+# @cover src/lib/common/math/noise.spl 90%
+"""
+# Seeded Noise (Perlin/fBm)
+
+**Feature IDs:** #scene-map-gen-noise
+**Category:** Stdlib / Procedural Generation
+**Status:** Implemented
+
+## Overview
+
+`std.common.math.noise` provides seeded, pure gradient (Perlin) noise and
+fractal Brownian motion (fBm) for procedural scene/map generation (heightmaps,
+etc.). The permutation table (`Perm`) is built once from a seed via an
+internal hash — sampling never touches shared mutable state, so results only
+depend on the seed and the coordinates queried, never on call order.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| `Perm` | Seeded permutation table, built once via `perm_new(seed)` |
+| Lattice zero | `noise2`/`noise3` are exactly `0.0` at every integer coordinate |
+| `fbm2` | Sum of octaves of `noise2` at increasing frequency, decreasing amplitude, normalized |
+| KAT | Known-answer test — an exact constant pinned from one reference run |
+"""
+
+use std.spec.*
+use std.common.math.noise.{Perm, perm_new, noise2, noise3, fbm2}
+
+val EPS: f64 = 1.0e-9
+
+fn _abs(x: f64) -> f64:
+    if x < 0.0: 0.0 - x else: x
+
+describe "noise2":
+    it "returns exactly 0.0 at every integer lattice point":
+        step("Sample noise2 across a 7x7 grid of integer coordinates")
+        val p = perm_new(42)
+        var all_zero = true
+        var i: i64 = -3
+        while i <= 3:
+            var j: i64 = -3
+            while j <= 3:
+                if noise2(p, i as f64, j as f64) != 0.0:
+                    all_zero = false
+                j = j + 1
+            i = i + 1
+
+        step("Then every lattice sample is exactly zero")
+        assert_true(all_zero)
+
+    it "is bounded in [-1, 1] over a sampled grid":
+        step("Sample noise2 at 400 non-lattice points")
+        val p = perm_new(7)
+        var in_range = true
+        var i: i64 = 0
+        while i < 20:
+            var j: i64 = 0
+            while j < 20:
+                val v = noise2(p, (i as f64) * 0.37 + 0.11, (j as f64) * 0.29 + 0.07)
+                if (v < -1.0 or v > 1.0):
+                    in_range = false
+                j = j + 1
+            i = i + 1
+
+        step("Then every sample stays within [-1, 1]")
+        assert_true(in_range)
+
+    it "is seed-deterministic: same seed always yields the pinned constant":
+        step("Sample fbm2 at a fixed non-lattice coordinate for seed 42")
+        val p = perm_new(42)
+        val v = fbm2(p, 3.5, 7.25, 4, 2.0, 0.5)
+
+        step("Then it matches the recorded KAT constant exactly")
+        expect(v).to_equal(0.11953125)
+
+    it "diverges across seeds":
+        step("Sample fbm2 at the same coordinate for seeds 42 and 43")
+        val v42 = fbm2(perm_new(42), 3.5, 7.25, 4, 2.0, 0.5)
+        val v43 = fbm2(perm_new(43), 3.5, 7.25, 4, 2.0, 0.5)
+
+        step("Then the two seeds produce clearly different values")
+        assert_true(_abs(v42 - v43) > 0.01)
+
+
+describe "noise3":
+    it "returns exactly 0.0 at every integer lattice point":
+        step("Sample noise3 across a small cube of integer coordinates")
+        val p = perm_new(9)
+        var all_zero = true
+        var i: i64 = 0
+        while i <= 2:
+            var j: i64 = 0
+            while j <= 2:
+                var k: i64 = 0
+                while k <= 2:
+                    if noise3(p, i as f64, j as f64, k as f64) != 0.0:
+                        all_zero = false
+                    k = k + 1
+                j = j + 1
+            i = i + 1
+
+        step("Then every lattice sample is exactly zero")
+        assert_true(all_zero)

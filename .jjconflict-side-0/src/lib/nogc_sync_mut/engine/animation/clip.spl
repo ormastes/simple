@@ -1,0 +1,101 @@
+# Skeletal Animation — Animation Clips
+#
+# Keyframe-based animation tracks per bone. Each BoneTrack stores
+# time-sorted keyframes and supports sampling with linear interpolation.
+
+use std.nogc_sync_mut.engine.animation.skeleton.{BoneTransform}
+
+# --------------------------------------------------------------------------
+# Keyframe — single transform at a point in time
+# --------------------------------------------------------------------------
+
+struct Keyframe:
+    time: f64
+    transform: BoneTransform
+
+# --------------------------------------------------------------------------
+# BoneTrack — keyframe sequence for one bone
+# --------------------------------------------------------------------------
+
+struct BoneTrack:
+    bone_index: i32
+    keyframes: [Keyframe]
+
+impl BoneTrack:
+    static fn new(bone_index: i32) -> BoneTrack:
+        BoneTrack(
+            bone_index: bone_index,
+            keyframes: []
+        )
+
+    me add_keyframe(time: f64, transform: BoneTransform):
+        val kf = Keyframe(time: time, transform: transform)
+        self.keyframes.push(kf)
+
+    fn sample(time: f64) -> BoneTransform:
+        val count = self.keyframes.len()
+        if count == 0:
+            return BoneTransform.identity()
+
+        # Before first keyframe
+        val first = self.keyframes[0]
+        if time <= first.time:
+            return first.transform
+
+        # After last keyframe
+        val last = self.keyframes[count - 1]
+        if time >= last.time:
+            return last.transform
+
+        # Find surrounding keyframes and lerp
+        var i = 0
+        while i < count - 1:
+            val kf_a = self.keyframes[i]
+            val kf_b = self.keyframes[i + 1]
+            if time >= kf_a.time:
+                if time <= kf_b.time:
+                    val span = kf_b.time - kf_a.time
+                    if span <= 0.0:
+                        return kf_a.transform
+                    val t = (time - kf_a.time) / span
+                    return kf_a.transform.lerp_to(kf_b.transform, t)
+            i = i + 1
+
+        last.transform
+
+    fn keyframe_count() -> i32:
+        self.keyframes.len()
+
+# --------------------------------------------------------------------------
+# AnimationClipData — collection of bone tracks
+# --------------------------------------------------------------------------
+
+struct AnimationClipData:
+    name: text
+    tracks: [BoneTrack]
+    duration: f64
+    looping: bool
+
+impl AnimationClipData:
+    static fn new(name: text, duration: f64, looping: bool) -> AnimationClipData:
+        AnimationClipData(
+            name: name,
+            tracks: [],
+            duration: duration,
+            looping: looping
+        )
+
+    me add_track(track: BoneTrack):
+        self.tracks.push(track)
+
+    fn track_count() -> i32:
+        self.tracks.len()
+
+    fn get_track(bone_index: i32) -> BoneTrack?:
+        var i = 0
+        while i < self.tracks.len():
+            val t = self.tracks[i]
+            if t.bone_index == bone_index:
+                return t
+            i = i + 1
+        nil

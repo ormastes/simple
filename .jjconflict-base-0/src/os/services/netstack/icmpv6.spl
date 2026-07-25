@@ -1,0 +1,292 @@
+# ICMPv6 + Neighbor Discovery -- RFC 4443 / RFC 4861
+#
+# MDSOC: feature dimension, network layer.
+# ICMPv6 common header: type(1) code(1) checksum(2), then message body.
+# The checksum covers the IPv6 PSEUDO-HEADER + the ICMPv6 message
+# (NOT the v4 message-only algorithm) -- see ipv6_pseudo_checksum.
+#
+# Neighbor Discovery (RFC 4861) messages:
+#   Router Solicitation   (133)
+#   Router Advertisement  (134)
+#   Neighbor Solicitation (135)
+#   Neighbor Advertisement(136)
+# Each carries a list of NdOption TLVs (type, len-in-8-octet-units, value).
+
+use std.common.net.byte_cursor.{ByteReader, ByteWriter}
+use std.common.net.addr.{Ipv6Addr}
+use os.services.netstack.ipv6.{ipv6_pseudo_checksum, NEXT_HEADER_ICMPV6}
+
+# ============================================================================
+# ICMPv6 type constants (integer, NOT a payload enum).
+# ============================================================================
+
+val ICMPV6_DEST_UNREACH: u8 = 1
+val ICMPV6_PACKET_TOO_BIG: u8 = 2
+val ICMPV6_TIME_EXCEEDED: u8 = 3
+val ICMPV6_PARAM_PROBLEM: u8 = 4
+val ICMPV6_ECHO_REQUEST: u8 = 128
+val ICMPV6_ECHO_REPLY: u8 = 129
+val ICMPV6_MLD_QUERY: u8 = 130
+val ICMPV6_MLD_REPORT: u8 = 131
+val ICMPV6_MLD_DONE: u8 = 132
+val ICMPV6_ROUTER_SOLICIT: u8 = 133
+val ICMPV6_ROUTER_ADVERT: u8 = 134
+val ICMPV6_NEIGHBOR_SOLICIT: u8 = 135
+val ICMPV6_NEIGHBOR_ADVERT: u8 = 136
+val ICMPV6_REDIRECT: u8 = 137
+val ICMPV6_MLDV2_REPORT: u8 = 143
+
+# Neighbor Discovery option types (RFC 4861 §4.6).
+val ND_OPT_SOURCE_LLA: u8 = 1
+val ND_OPT_TARGET_LLA: u8 = 2
+val ND_OPT_PREFIX_INFO: u8 = 3
+val ND_OPT_REDIRECT_HDR: u8 = 4
+val ND_OPT_MTU: u8 = 5
+
+# Router Advertisement flag bits (in the flags byte).
+val RA_FLAG_MANAGED: u8 = 0x80    # M
+val RA_FLAG_OTHER: u8 = 0x40      # O
+
+# Neighbor Advertisement flag bits (in the 32-bit flags word).
+val NA_FLAG_ROUTER: u32 = 0x80000000     # R
+val NA_FLAG_SOLICITED: u32 = 0x40000000  # S
+val NA_FLAG_OVERRIDE: u32 = 0x20000000   # O
+
+# ============================================================================
+# Icmpv6Header -- common 4-byte preamble
+# ============================================================================
+
+struct Icmpv6Header:
+    """ICMPv6 common header: type(1) code(1) checksum(2)."""
+    type_: u8
+    code: u8
+    checksum: u16
+
+# ============================================================================
+# Neighbor Discovery option (TLV)
+#   type(1) length(1, in 8-octet units incl. the 2-byte header) value(...)
+# ============================================================================
+
+struct NdOption:
+    """A Neighbor Discovery option in type/length/value form."""
+    type_: u8
+    length: u8        # total option length in 8-octet units (incl. these 2 bytes)
+    value: [u8]       # the (length*8 - 2) value bytes
+
+# ============================================================================
+# ND message bodies (each carries an option list)
+# ============================================================================
+
+struct NdRouterSolicit:
+    """Router Solicitation (type 133)."""
+    reserved: u32
+    options: [NdOption]
+
+struct NdRouterAdvert:
+    """Router Advertisement (type 134)."""
+    cur_hop_limit: u8
+    flags: u8                 # M(0x80) O(0x40)
+    router_lifetime: u16
+    reachable_time: u32
+    retrans_timer: u32
+    options: [NdOption]
+
+struct NdNeighborSolicit:
+    """Neighbor Solicitation (type 135)."""
+    reserved: u32
+    target: Ipv6Addr
+    options: [NdOption]
+
+struct NdNeighborAdvert:
+    """Neighbor Advertisement (type 136)."""
+    flags: u32                # R(0x80000000) S(0x40000000) O(0x20000000)
+    target: Ipv6Addr
+    options: [NdOption]
+
+# ============================================================================
+# Option codec
+# ============================================================================
+
+fn nd_option_build(opt: NdOption) -> [u8]:
+    """Serialize one ND option (type, length, value). Caller supplies a value
+    already padded so total length is a multiple of 8 octets."""
+    var w = ByteWriter.new()
+    w.write_u8(opt.type_)
+    w.write_u8(opt.length)
+    w.write_bytes(opt.value)
+    w.to_bytes()
+
+# Parse a list of ND options from `data` (the bytes after a message body).
+fn nd_options_parse(data: [u8]) -> Result<[NdOption], text>:
+    var out: [NdOption] = []
+    var off: u64 = 0
+    while off < data.len():
+        if off + 2 > data.len():
+            return Err("ND option truncated header")
+        val type_ = data[off]
+        val length = data[off + 1]
+        if length == 0:
+            return Err("ND option length 0 is invalid")
+        val total: u64 = length.to_u64() * 8
+        if off + total > data.len():
+            return Err("ND option truncated value")
+        var value: [u8] = []
+        var i: u64 = off + 2
+        val end: u64 = off + total
+        while i < end:
+            value.push(data[i])
+            i = i + 1
+        out.push(NdOption(type_: type_, length: length, value: value))
+        off = off + total
+    Ok(out)
+
+fn nd_options_build(opts: [NdOption]) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < opts.len():
+        val ob = nd_option_build(opts[i])
+        var j: u64 = 0
+        while j < ob.len():
+            out.push(ob[j])
+            j = j + 1
+        i = i + 1
+    out
+
+# ============================================================================
+# ICMPv6 header parse/build (raw, checksum-as-stored)
+# ============================================================================
+
+fn icmpv6_parse_header(data: [u8]) -> Result<Icmpv6Header, text>:
+    if data.len() < 4:
+        return Err("ICMPv6 header too short: {data.len()} < 4")
+    var r = ByteReader.new(data)
+    val type_ = r.read_u8()?
+    val code = r.read_u8()?
+    val checksum = r.read_u16()?
+    Ok(Icmpv6Header(type_: type_, code: code, checksum: checksum))
+
+# ============================================================================
+# ND message build -- emit the FULL ICMPv6 message bytes (header + body) with
+# the checksum field left zero. Use icmpv6_finalize_checksum to fill it.
+# ============================================================================
+
+fn icmpv6_build_router_solicit(m: NdRouterSolicit) -> [u8]:
+    var w = ByteWriter.new()
+    w.write_u8(ICMPV6_ROUTER_SOLICIT)
+    w.write_u8(0)
+    w.write_u16(0)                 # checksum placeholder
+    w.write_u32(m.reserved)
+    w.write_bytes(nd_options_build(m.options))
+    w.to_bytes()
+
+fn icmpv6_build_router_advert(m: NdRouterAdvert) -> [u8]:
+    var w = ByteWriter.new()
+    w.write_u8(ICMPV6_ROUTER_ADVERT)
+    w.write_u8(0)
+    w.write_u16(0)                 # checksum placeholder
+    w.write_u8(m.cur_hop_limit)
+    w.write_u8(m.flags)
+    w.write_u16(m.router_lifetime)
+    w.write_u32(m.reachable_time)
+    w.write_u32(m.retrans_timer)
+    w.write_bytes(nd_options_build(m.options))
+    w.to_bytes()
+
+fn icmpv6_build_neighbor_solicit(m: NdNeighborSolicit) -> [u8]:
+    var w = ByteWriter.new()
+    w.write_u8(ICMPV6_NEIGHBOR_SOLICIT)
+    w.write_u8(0)
+    w.write_u16(0)                 # checksum placeholder
+    w.write_u32(m.reserved)
+    w.write_bytes(m.target.to_bytes())
+    w.write_bytes(nd_options_build(m.options))
+    w.to_bytes()
+
+fn icmpv6_build_neighbor_advert(m: NdNeighborAdvert) -> [u8]:
+    var w = ByteWriter.new()
+    w.write_u8(ICMPV6_NEIGHBOR_ADVERT)
+    w.write_u8(0)
+    w.write_u16(0)                 # checksum placeholder
+    w.write_u32(m.flags)
+    w.write_bytes(m.target.to_bytes())
+    w.write_bytes(nd_options_build(m.options))
+    w.to_bytes()
+
+# ============================================================================
+# ND message parse (body after the 4-byte ICMPv6 header)
+# ============================================================================
+
+fn icmpv6_parse_router_solicit(data: [u8]) -> Result<NdRouterSolicit, text>:
+    if data.len() < 8:
+        return Err("RouterSolicit too short")
+    var r = ByteReader.new(data)
+    val _hdr = r.read_u32()?       # type/code/checksum
+    val reserved = r.read_u32()?
+    val rest = r.read_bytes(data.len() - 8)?
+    val opts = nd_options_parse(rest)?
+    Ok(NdRouterSolicit(reserved: reserved, options: opts))
+
+fn icmpv6_parse_router_advert(data: [u8]) -> Result<NdRouterAdvert, text>:
+    if data.len() < 16:
+        return Err("RouterAdvert too short")
+    var r = ByteReader.new(data)
+    val _hdr = r.read_u32()?
+    val cur_hop_limit = r.read_u8()?
+    val flags = r.read_u8()?
+    val router_lifetime = r.read_u16()?
+    val reachable_time = r.read_u32()?
+    val retrans_timer = r.read_u32()?
+    val rest = r.read_bytes(data.len() - 16)?
+    val opts = nd_options_parse(rest)?
+    Ok(NdRouterAdvert(
+        cur_hop_limit: cur_hop_limit, flags: flags,
+        router_lifetime: router_lifetime, reachable_time: reachable_time,
+        retrans_timer: retrans_timer, options: opts))
+
+fn icmpv6_parse_neighbor_solicit(data: [u8]) -> Result<NdNeighborSolicit, text>:
+    if data.len() < 24:
+        return Err("NeighborSolicit too short")
+    var r = ByteReader.new(data)
+    val _hdr = r.read_u32()?
+    val reserved = r.read_u32()?
+    val target_bytes = r.read_bytes(16)?
+    val target = Ipv6Addr.from_bytes(target_bytes)?
+    val rest = r.read_bytes(data.len() - 24)?
+    val opts = nd_options_parse(rest)?
+    Ok(NdNeighborSolicit(reserved: reserved, target: target, options: opts))
+
+fn icmpv6_parse_neighbor_advert(data: [u8]) -> Result<NdNeighborAdvert, text>:
+    if data.len() < 24:
+        return Err("NeighborAdvert too short")
+    var r = ByteReader.new(data)
+    val _hdr = r.read_u32()?
+    val flags = r.read_u32()?
+    val target_bytes = r.read_bytes(16)?
+    val target = Ipv6Addr.from_bytes(target_bytes)?
+    val rest = r.read_bytes(data.len() - 24)?
+    val opts = nd_options_parse(rest)?
+    Ok(NdNeighborAdvert(flags: flags, target: target, options: opts))
+
+# ============================================================================
+# Checksum: compute over the IPv6 pseudo-header + the full ICMPv6 message,
+# then splice the 16-bit result into bytes 2..3 of the message.
+# ============================================================================
+
+fn icmpv6_compute_checksum(src: Ipv6Addr, dst: Ipv6Addr, message: [u8]) -> u16:
+    """ICMPv6 checksum (RFC 4443) = pseudo-header checksum with next_header=58."""
+    ipv6_pseudo_checksum(src, dst, NEXT_HEADER_ICMPV6, message)
+
+fn icmpv6_finalize_checksum(src: Ipv6Addr, dst: Ipv6Addr, message: [u8]) -> [u8]:
+    """Return a copy of `message` with the checksum field (bytes 2,3) filled."""
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < message.len():
+        out.push(message[i])
+        i = i + 1
+    # zero the checksum field first so it does not contribute to the sum
+    out[2] = 0
+    out[3] = 0
+    val c = ipv6_pseudo_checksum(src, dst, NEXT_HEADER_ICMPV6, out)
+    out[2] = ((c >> 8) & 0xFF).to_u8()
+    out[3] = (c & 0xFF).to_u8()
+    out

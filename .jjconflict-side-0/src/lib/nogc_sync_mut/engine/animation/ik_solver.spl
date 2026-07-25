@@ -1,0 +1,207 @@
+# Animation — FABRIK Inverse Kinematics Solver
+#
+# Forward And Backward Reaching Inverse Kinematics for 2D bone chains.
+# Uses Newton's method sqrt (5 iterations) for distance calculations.
+
+# --------------------------------------------------------------------------
+# Local sqrt helper — Newton's method, 5 iterations
+# --------------------------------------------------------------------------
+
+fn ik_sqrt(n: f64) -> f64:
+    if n <= 0.0:
+        return 0.0
+    var x = n * 0.5
+    if n < 1.0:
+        x = 1.0
+    var i = 0
+    while i < 5:
+        x = 0.5 * (x + n / x)
+        i = i + 1
+    x
+
+# --------------------------------------------------------------------------
+# IKJoint — a joint in the IK chain
+# --------------------------------------------------------------------------
+
+struct IKJoint:
+    x: f64
+    y: f64
+    bone_length: f64
+
+# --------------------------------------------------------------------------
+# IKTarget — target position for the end effector
+# --------------------------------------------------------------------------
+
+struct IKTarget:
+    x: f64
+    y: f64
+
+# --------------------------------------------------------------------------
+# IKChain — FABRIK IK solver
+# --------------------------------------------------------------------------
+
+class IKChain:
+    joints: [IKJoint]
+    tolerance: f64
+    max_iterations: i32
+
+impl IKChain:
+    static fn new(tolerance: f64, max_iterations: i32) -> IKChain:
+        IKChain(
+            joints: [],
+            tolerance: tolerance,
+            max_iterations: max_iterations
+        )
+
+    me add_joint(x: f64, y: f64, bone_length: f64):
+        val joint = IKJoint(x: x, y: y, bone_length: bone_length)
+        self.joints.push(joint)
+
+    fn joint_count() -> i32:
+        self.joints.len()
+
+    fn get_joint(index: i32) -> IKJoint?:
+        if index < 0:
+            return nil
+        if index >= self.joints.len():
+            return nil
+        self.joints[index]
+
+    fn total_chain_length() -> f64:
+        var sum = 0.0
+        var i = 0
+        # bone_length on last joint is unused; sum joints[0..n-2]
+        val count = self.joints.len() - 1
+        while i < count:
+            sum = sum + self.joints[i].bone_length
+            i = i + 1
+        sum
+
+    fn end_effector_x() -> f64:
+        val n = self.joints.len()
+        if n == 0:
+            return 0.0
+        self.joints[n - 1].x
+
+    fn end_effector_y() -> f64:
+        val n = self.joints.len()
+        if n == 0:
+            return 0.0
+        self.joints[n - 1].y
+
+    me reset(positions: [IKJoint]):
+        var i = 0
+        while i < positions.len():
+            if i < self.joints.len():
+                self.joints[i] = IKJoint(
+                    x: positions[i].x,
+                    y: positions[i].y,
+                    bone_length: self.joints[i].bone_length
+                )
+            i = i + 1
+
+    me solve(target_x: f64, target_y: f64) -> bool:
+        val n = self.joints.len()
+        if n < 2:
+            return false
+
+        # Save root position
+        val root_x = self.joints[0].x
+        val root_y = self.joints[0].y
+
+        # Check if target is reachable
+        val chain_len = self.total_chain_length()
+        val dx_root = target_x - root_x
+        val dy_root = target_y - root_y
+        val dist_to_target = ik_sqrt(dx_root * dx_root + dy_root * dy_root)
+
+        if dist_to_target > chain_len:
+            # Target unreachable — stretch toward it
+            var i = 0
+            while i < n - 1:
+                val cur = self.joints[i]
+                val dx = target_x - cur.x
+                val dy = target_y - cur.y
+                val d = ik_sqrt(dx * dx + dy * dy)
+                if d > 0.0001:
+                    val ratio = cur.bone_length / d
+                    val new_x = cur.x + dx * ratio
+                    val new_y = cur.y + dy * ratio
+                    val next_j = self.joints[i + 1]
+                    self.joints[i + 1] = IKJoint(
+                        x: new_x,
+                        y: new_y,
+                        bone_length: next_j.bone_length
+                    )
+                i = i + 1
+            return false
+
+        # FABRIK iteration
+        var iteration = 0
+        while iteration < self.max_iterations:
+            # Check convergence
+            val end_j = self.joints[n - 1]
+            val ex = end_j.x - target_x
+            val ey = end_j.y - target_y
+            val err = ik_sqrt(ex * ex + ey * ey)
+            if err < self.tolerance:
+                return true
+
+            # Forward pass: end effector to root
+            # Move last joint to target
+            val last = self.joints[n - 1]
+            self.joints[n - 1] = IKJoint(
+                x: target_x,
+                y: target_y,
+                bone_length: last.bone_length
+            )
+            var i_fwd = n - 2
+            while i_fwd >= 0:
+                val cur = self.joints[i_fwd]
+                val next = self.joints[i_fwd + 1]
+                val dx = cur.x - next.x
+                val dy = cur.y - next.y
+                val d = ik_sqrt(dx * dx + dy * dy)
+                if d > 0.0001:
+                    val bone_len = cur.bone_length
+                    val ratio = bone_len / d
+                    self.joints[i_fwd] = IKJoint(
+                        x: next.x + dx * ratio,
+                        y: next.y + dy * ratio,
+                        bone_length: cur.bone_length
+                    )
+                i_fwd = i_fwd - 1
+
+            # Backward pass: root to end effector
+            # Restore root position
+            val root_j = self.joints[0]
+            self.joints[0] = IKJoint(
+                x: root_x,
+                y: root_y,
+                bone_length: root_j.bone_length
+            )
+            var i_bwd = 0
+            while i_bwd < n - 1:
+                val cur = self.joints[i_bwd]
+                val next = self.joints[i_bwd + 1]
+                val dx = next.x - cur.x
+                val dy = next.y - cur.y
+                val d = ik_sqrt(dx * dx + dy * dy)
+                if d > 0.0001:
+                    val bone_len = cur.bone_length
+                    val ratio = bone_len / d
+                    self.joints[i_bwd + 1] = IKJoint(
+                        x: cur.x + dx * ratio,
+                        y: cur.y + dy * ratio,
+                        bone_length: next.bone_length
+                    )
+                i_bwd = i_bwd + 1
+
+            iteration = iteration + 1
+
+        # Check final convergence
+        val final_end = self.joints[n - 1]
+        val fx = final_end.x - target_x
+        val fy = final_end.y - target_y
+        val final_err = ik_sqrt(fx * fx + fy * fy)
+        final_err < self.tolerance

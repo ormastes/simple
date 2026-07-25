@@ -1,0 +1,85 @@
+MCP stdio smoke transcript — 2026-07-17
+========================================
+
+STATUS: NOT GREEN end-to-end via the live stdio process. Blocked by a filed,
+out-of-scope seed (Rust interpreter) defect — see
+doc/08_tracking/bug/mcp_stdio_smoke_seed_flat_registry_len_i64_2026-07-17.md.
+The three round-trips below are captured two ways: (A) the real process-level
+invocation (currently blocked), and (B) the equivalent in-process logic
+verified directly (green) via test/01_unit/app/mcp/tool_dispatch_spec.spl and
+test/01_unit/app/mcp/mcp_tools_list_json_spec.spl, proving the dispatch/tool
+logic itself is correct — only the seed's stdio process path is broken.
+
+Command (per task ground truth):
+  timeout 90 src/compiler_rust/target/release/simple run src/app/mcp/main.spl --stdio
+
+--------------------------------------------------------------------------
+(A) Process-level (live stdio) — CURRENT RESULT: crash before any response
+--------------------------------------------------------------------------
+
+Request sent (Content omitted framing not required — main.spl also accepts
+bare newline-delimited JSON):
+  {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"probe","version":"0.0.1"}}}
+
+Exit code: 1
+stdout: (empty)
+stderr (tail, real error only — deprecation/lint noise elided):
+  [gc-warning] Higher-layer module 'nogc_sync_mut.mcp_sdk.server.method_detect' ...
+  [gc-warning] Higher-layer module 'nogc_sync_mut.mcp_sdk.core.json' ...
+  error: semantic: method `len` not found on type `i64` (receiver value: 6444963152801)
+
+The crash happens inside _mcp_extract_id()/extract_id() on the very first
+request, before initialize's response, tools/list, or any tool call is ever
+reached — so requests 2 (tools/list) and 3 (a tool call) cannot be exercised
+end-to-end via the live process at all right now. Confirmed identical on:
+  - src/compiler_rust/target/release/simple (default interpret mode)
+  - src/compiler_rust/target/release/simple (SIMPLE_EXECUTION_MODE=compile)
+  - src/compiler_rust/target/bootstrap/simple
+
+Fixed in this session (does not resolve the crash above, but is a real,
+separate fix): main.spl previously rejected the --stdio flag itself
+(`[error] mcp: Unknown mcp option: --stdio`, exit 1) before ever reaching the
+crash. `--stdio` is now a recognized no-op (stdio framing is the server's
+only transport already) and falls through to the serve loop.
+
+--------------------------------------------------------------------------
+(B) In-process logic (bypasses the broken stdio serve loop) — GREEN
+--------------------------------------------------------------------------
+
+These exercise the exact same request-handling logic (dispatch_tool,
+extract_id/make_json_result, the tools/list builder) directly through the
+interpreter, without spawning the stdio process, and all pass:
+
+1) "initialize"-equivalent (extract_id + make_json_result), standalone,
+   confirmed working in isolation (only breaks when combined with the full
+   main.spl import closure — see the bug doc):
+     extract_id('{"jsonrpc":"2.0","id":1,...}') == "1"  -> id=1 (exit 0)
+
+2) "tools/list"-equivalent: test/01_unit/app/mcp/mcp_tools_list_json_spec.spl
+   — _mcp_static_tools_result() returns a well-formed, balanced JSON object
+   shaped {"tools":[...]}, tool_count > 100, includes simple_check/
+   simple_run/simple_commit and the play_wm_text_* tools. PASS (pre-existing
+   spec, re-verified in this session's context).
+
+3) "tools/call"-equivalent (dispatch_tool), a known cheap in-process tool
+   (debug_list_sessions) and an unknown tool:
+
+   dispatch_tool("1", "debug_list_sessions", "{}") =>
+     {"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"[]"}],
+     "structuredContent":{"inferredType":"array","shape":"array<unknown>"}}}
+
+   dispatch_tool("2", "no_such_tool_xyz", "{}") =>
+     {"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text",
+     "text":"ERROR -32601: Unknown tool: no_such_tool_xyz"}],"isError":true,
+     "structuredContent":{"code":-32601,"message":"Unknown tool: no_such_tool_xyz"}}}
+
+   Both verified via test/01_unit/app/mcp/tool_dispatch_spec.spl (3 examples,
+   0 failures, EXIT=0 against src/compiler_rust/target/release/simple).
+
+--------------------------------------------------------------------------
+Fixture consumer
+--------------------------------------------------------------------------
+
+test/03_system/app/mcp/mcp_stdio_contract_spec.spl exercises path (A) end to
+end (real process spawn) and is expected to go green automatically once the
+seed defect above is fixed — it is intentionally not skipped/xfailed.

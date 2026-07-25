@@ -1,0 +1,87 @@
+# ITF CLI — shared retry/backoff helper.
+#
+# Bounded exponential backoff with jitter, reused by adapter_minio (5xx +
+# transport errors) and the jira/github paths (429 rate-limit). 4xx (other
+# than 429) is never retried — those are client errors that won't change on
+# resend.
+#
+# Note: adapter_bitbucket.bb_should_retry / adapter_outlook._outlook_should_retry
+# sketch the same status-classification shape but are never wired into an
+# actual sleep-and-resend loop (dead scaffolding, not a working retry). This
+# module is the first real, invoked implementation; those adapters are
+# untouched (out of scope here) but could adopt it later.
+
+use std.nogc_sync_mut.io.process_ops.{process_run}
+use std.common.random_pure.{randint}
+
+
+val ITF_RETRY_MAX_ATTEMPTS = 3
+val ITF_RETRY_BASE_SECS = 2  # exponential: 2, 4, 8 seconds
+
+
+fn itf_should_retry(status: i64, transport_err: text) -> bool:
+    """True if this response is worth retrying.
+
+    Retries: transport-level failures (status==0 with a non-empty error),
+    429 (rate limited), and 5xx. Never retries other 4xx — the request
+    itself needs to change, not just be resent.
+    """
+    if transport_err != "":
+        return true
+    if status == 429:
+        return true
+    status >= 500 and status < 600
+
+
+fn _parse_retry_after_secs(s: text) -> i64:
+    """Parse a numeric Retry-After header value (seconds form only).
+
+    Retry-After can also be an HTTP-date; that form isn't parsed here and
+    falls back to exponential backoff (returns 0).
+    """
+    if s == "":
+        return 0
+    var n: i64 = 0
+    var i = 0
+    while i < s.len():
+        val c = s.char_code_at(i)
+        if c < 48 or c > 57:
+            return 0
+        n = n * 10 + (c - 48)
+        i = i + 1
+    n
+
+
+fn itf_retry_backoff_secs(attempt: i64, retry_after_header: text) -> i64:
+    """Seconds to sleep before retry `attempt` (0-based, i.e. the sleep
+    before the 2nd/3rd try). Honors a numeric Retry-After if present;
+    otherwise 2/4/8s exponential, plus up to 1s of jitter to avoid a
+    thundering herd when several callers retry at once."""
+    val from_header = _parse_retry_after_secs(retry_after_header)
+    val base = if from_header > 0:
+        from_header
+    else:
+        var secs = ITF_RETRY_BASE_SECS
+        var i = 0
+        while i < attempt:
+            secs = secs * 2
+            i = i + 1
+        secs
+    base + randint(0, 1)
+
+
+fn itf_retry_wait(attempt: i64, retry_after_header: text):
+    """Sleep the backoff duration for retry `attempt` (0-based).
+
+    BUG (found 2026-07-19, filed for the runtime owner — out of scope to fix
+    here): `std.nogc_sync_mut.sffi.system.sleep_secs` calls `rt_sleep_secs`,
+    which is not registered in this self-hosted binary's extern dispatch
+    table ("semantic: unknown extern function: rt_sleep_secs" at runtime,
+    not compile time — every existing caller of sleep_secs in this codebase
+    is dead code that never actually invokes it, e.g. adapter_outlook.spl's
+    `val _ = sleep_secs  # keep import live until the retry loop is wired`).
+    We route around it with a `sleep` subprocess instead, which does not
+    depend on that extern.
+    """
+    val secs = itf_retry_backoff_secs(attempt, retry_after_header)
+    val _ = process_run("sleep", ["{secs}"])

@@ -1,0 +1,135 @@
+# GPU Kernel Launch API (NoGC Async)
+#
+# Provides kernel launch types and functions for GPU compute.
+# Uses raw i64 handles (no wrapper types) — matches NoGC philosophy.
+
+# CUDA kernel launch FFI
+extern fn rt_cuda_init() -> i64
+extern fn rt_cuda_module_load(path: text) -> i64
+extern fn rt_cuda_module_load_data(ptx: text) -> i64
+extern fn rt_cuda_module_unload(module: i64) -> i64
+extern fn rt_cuda_launch_kernel(module: i64, func_name: text, gx: i64, gy: i64, gz: i64, bx: i64, by: i64, bz: i64, args: i64) -> i64
+extern fn rt_cuda_sync() -> i64
+extern fn rt_cuda_get_error_string(error_code: i64) -> text
+
+# ============================================================================
+# GPU Error
+# ============================================================================
+
+struct GpuError:
+    """GPU operation error."""
+    code: i64
+    message: text
+
+    static fn from_code(code: i64) -> GpuError:
+        GpuError(code: code, message: rt_cuda_get_error_string(code))
+
+    fn to_text() -> text:
+        "GpuError({self.code}): {self.message}"
+
+# ============================================================================
+# GPU Module - Compiled Kernel Container
+# ============================================================================
+
+struct GpuModule:
+    """Handle to a loaded GPU module (compiled PTX)."""
+    handle: i64
+
+    static fn load_ptx(ptx_code: text) -> Result<GpuModule, GpuError>:
+        """Load a GPU module from PTX source string."""
+        val handle = rt_cuda_module_load_data(ptx_code)
+        if handle < 0:
+            return Err(GpuError.from_code(handle))
+        Ok(GpuModule(handle: handle))
+
+    static fn load_file(path: text) -> Result<GpuModule, GpuError>:
+        """Load a GPU module from a file path."""
+        val handle = rt_cuda_module_load(path)
+        if handle < 0:
+            return Err(GpuError.from_code(handle))
+        Ok(GpuModule(handle: handle))
+
+    fn unload() -> Result<(), GpuError>:
+        """Unload this GPU module."""
+        val result = rt_cuda_module_unload(self.handle)
+        if result < 0:
+            return Err(GpuError.from_code(result))
+        Ok(())
+
+# ============================================================================
+# Launch Configuration
+# ============================================================================
+
+struct GpuLaunchConfig:
+    """Configuration for launching a GPU kernel."""
+    grid_x: i64
+    grid_y: i64
+    grid_z: i64
+    block_x: i64
+    block_y: i64
+    block_z: i64
+
+    static fn simple(num_blocks: i64, threads_per_block: i64) -> GpuLaunchConfig:
+        """Create a 1D launch configuration."""
+        GpuLaunchConfig(
+            grid_x: num_blocks,
+            grid_y: 1,
+            grid_z: 1,
+            block_x: threads_per_block,
+            block_y: 1,
+            block_z: 1
+        )
+
+    static fn grid_2d(grid_x: i64, grid_y: i64, block_x: i64, block_y: i64) -> GpuLaunchConfig:
+        """Create a 2D launch configuration."""
+        GpuLaunchConfig(
+            grid_x: grid_x,
+            grid_y: grid_y,
+            grid_z: 1,
+            block_x: block_x,
+            block_y: block_y,
+            block_z: 1
+        )
+
+    static fn grid_3d(grid_x: i64, grid_y: i64, grid_z: i64, block_x: i64, block_y: i64, block_z: i64) -> GpuLaunchConfig:
+        """Create a 3D launch configuration."""
+        GpuLaunchConfig(
+            grid_x: grid_x,
+            grid_y: grid_y,
+            grid_z: grid_z,
+            block_x: block_x,
+            block_y: block_y,
+            block_z: block_z
+        )
+
+    fn total_threads() -> i64:
+        """Get total number of threads."""
+        self.grid_x * self.grid_y * self.grid_z * self.block_x * self.block_y * self.block_z
+
+# ============================================================================
+# Kernel Launch Function
+# ============================================================================
+
+fn gpu_launch(module: GpuModule, func_name: text, config: GpuLaunchConfig, args_ptr: i64) -> Result<(), GpuError>:
+    """Launch a GPU kernel with the given configuration."""
+    val result = rt_cuda_launch_kernel(
+        module.handle,
+        func_name,
+        config.grid_x,
+        config.grid_y,
+        config.grid_z,
+        config.block_x,
+        config.block_y,
+        config.block_z,
+        args_ptr
+    )
+    if result < 0:
+        return Err(GpuError.from_code(result))
+    Ok(())
+
+fn gpu_sync() -> Result<(), GpuError>:
+    """Synchronize the device — wait for all pending operations."""
+    val result = rt_cuda_sync()
+    if result < 0:
+        return Err(GpuError.from_code(result))
+    Ok(())

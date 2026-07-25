@@ -1,0 +1,157 @@
+# Diagram Render Adapter
+#
+# Bridges the diagram app to the shared UI render contract.
+# Produces RenderResult (text and/or html) from profile events,
+# rendering sequence, class, and architecture diagrams.
+
+use app.ui.render.types.{RenderConfig, RenderResult}
+use app.ui.render.ansi.{RESET, BOLD, DIM, CYAN, GREEN, YELLOW}
+use app.ui.render.html.{html_page, html_card, html_grid, css_dark_theme}
+use app.ui.render.fmt.{fmt_number}
+
+use app.diagram.main.{ProfileEvent, parse_profile_events,
+    generate_sequence_diagram, generate_class_diagram, generate_arch_diagram}
+
+# =========================================================================
+# Main Render Entry Point
+# =========================================================================
+
+fn render_diagram(config: RenderConfig, events: [ProfileEvent]) -> RenderResult:
+    """Render diagram output via the shared render contract.
+
+    config.mode selects diagram type: "seq", "class", "arch", or "all".
+    config.format selects output: "text", "html", or "both".
+    """
+    val mode = if config.mode == "render": "all" else: config.mode
+    val fmt = config.format
+
+    var text_out = ""
+    var html_out = ""
+
+    if fmt == "text" or fmt == "both":
+        text_out = render_text(events, mode)
+
+    if fmt == "html" or fmt == "both":
+        html_out = render_html(events, mode, config)
+
+    val meta: Dict<text, text> = {
+        "adapter": "diagram",
+        "mode": mode,
+        "format": fmt,
+        "event_count": "{events.len()}"
+    }
+
+    return RenderResult(
+        format: fmt,
+        text_output: text_out,
+        html_output: html_out,
+        metadata: meta,
+        warnings: []
+    )
+
+# =========================================================================
+# Text Rendering
+# =========================================================================
+
+fn render_text(events: [ProfileEvent], mode: text) -> text:
+    """Render diagrams as text with ANSI formatting."""
+    var lines: [text] = []
+
+    lines.push("{BOLD}Diagram Generator{RESET}")
+    lines.push("Events: {fmt_number(events.len())}")
+    lines.push("")
+
+    if mode == "seq" or mode == "all":
+        lines.push("{BOLD}{CYAN}Sequence Diagram{RESET}")
+        lines.push("")
+        val seq = generate_sequence_diagram(events, true, true, true)
+        lines.push(seq)
+        lines.push("")
+
+    if mode == "class" or mode == "all":
+        lines.push("{BOLD}{GREEN}Class Diagram{RESET}")
+        lines.push("")
+        val cls = generate_class_diagram(events)
+        lines.push(cls)
+        lines.push("")
+
+    if mode == "arch" or mode == "all":
+        lines.push("{BOLD}{YELLOW}Architecture Diagram{RESET}")
+        lines.push("")
+        val arch = generate_arch_diagram(events)
+        lines.push(arch)
+        lines.push("")
+
+    lines.join("\n")
+
+# =========================================================================
+# HTML Rendering
+# =========================================================================
+
+fn render_html(events: [ProfileEvent], mode: text, config: RenderConfig) -> text:
+    """Render diagrams as an HTML page with styled cards."""
+    var cards: [text] = []
+
+    if mode == "seq" or mode == "all":
+        val seq = generate_sequence_diagram(events, true, true, true)
+        cards.push(_diagram_card("Sequence Diagram", seq, "#58a6ff"))
+
+    if mode == "class" or mode == "all":
+        val cls = generate_class_diagram(events)
+        cards.push(_diagram_card("Class Diagram", cls, "#3fb950"))
+
+    if mode == "arch" or mode == "all":
+        val arch = generate_arch_diagram(events)
+        cards.push(_diagram_card("Architecture Diagram", arch, "#d29922"))
+
+    val cards_html = cards.join("\n")
+
+    var h = ""
+    h = "{h}{_html_head("Simple Diagram Viewer")}"
+    h = "{h}<body>\n<div class=\"container\">\n"
+    h = "{h}<h1>Diagram Viewer</h1>\n"
+    h = "{h}<p class=\"sub\">Generated from {events.len()} profile events</p>\n"
+    h = "{h}<div class=\"diagram-grid\">\n{cards_html}\n</div>\n"
+    h = "{h}</div>\n</body>\n</html>\n"
+    h
+
+fn _diagram_card(title: text, content: text, accent: text) -> text:
+    """Render a single diagram in an HTML card with a pre block."""
+    var h = ""
+    h = "{h}<div class=\"card\">"
+    h = "{h}<h3 style=\"color:{accent}\">{title}</h3>"
+    h = "{h}<pre class=\"diagram-pre\">{_html_escape(content)}</pre>"
+    h = "{h}</div>"
+    h
+
+# =========================================================================
+# HTML Helpers
+# =========================================================================
+
+fn _html_head(title: text) -> text:
+    var h = ""
+    h = "{h}<!DOCTYPE html>\n<html>\n<head>\n"
+    h = "{h}  <meta charset=\"utf-8\">\n"
+    h = "{h}  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
+    h = "{h}  <title>{title}</title>\n"
+    h = "{h}  <style>\n"
+    h = "{h}    body { font-family: system-ui, sans-serif; margin: 0; padding: 20px; background: #0d1117; color: #c9d1d9; }\n"
+    h = "{h}    .container { max-width: 1200px; margin: 0 auto; }\n"
+    h = "{h}    h1 { color: #58a6ff; }\n"
+    h = "{h}    .sub { color: #8b949e; margin-bottom: 16px; }\n"
+    h = "{h}    .card { background: #161b22; padding: 20px; margin: 12px 0; border-radius: 8px; border: 1px solid #30363d; }\n"
+    h = "{h}    .card h3 { margin-top: 0; }\n"
+    h = "{h}    .diagram-grid { display: grid; gap: 16px; }\n"
+    h = "{h}    .diagram-pre { background: #0d1117; padding: 16px; border-radius: 6px; overflow-x: auto; font-size: 13px; line-height: 1.5; border: 1px solid #21262d; }\n"
+    h = "{h}  </style>\n"
+    h = "{h}</head>\n"
+    h
+
+fn _html_escape(s: text) -> text:
+    """Escape HTML special characters."""
+    var result = s
+    result = result.replace("&", "&amp;")
+    result = result.replace("<", "&lt;")
+    result = result.replace(">", "&gt;")
+    result = result.replace("\"", "&quot;")
+    result

@@ -1,0 +1,226 @@
+"""Calc Excel-365 lookup + array-manipulation spec.
+
+Scalar lookups (XLOOKUP/XMATCH/LOOKUP) evaluate through the scalar formula path
+and cache a single display value. Array-manipulation functions
+(CHOOSECOLS/CHOOSEROWS/TAKE/DROP/VSTACK/HSTACK/TOCOL/TOROW) evaluate to a 2D
+grid: the top-left value stays in the formula's own cell and the rest spills into
+the adjacent rectangle. Every expected value below is hand-computed against
+Excel semantics.
+"""
+
+use std.spec
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.cell.{cell_display_text}
+use app.office.file_formats.{recalculate_formula_cells}
+
+fn _disp(sh: Sheet, ref: text) -> text:
+    """Display text of one cell."""
+    cell_display_text(sh.get_cell(ref))
+
+fn _grid(sh: Sheet) -> Sheet:
+    """Seed the shared 2x3 source grid H1:J2 = [[1,2,3],[4,5,6]] out of the way
+    of A/B/C spill targets, and return the sheet (aggregates copy)."""
+    var s = sh
+    s.set_value("H1", "1")
+    s.set_value("I1", "2")
+    s.set_value("J1", "3")
+    s.set_value("H2", "4")
+    s.set_value("I2", "5")
+    s.set_value("J2", "6")
+    s
+
+fn _labels(sh: Sheet) -> Sheet:
+    """Seed A1:A3 = apple/banana/cherry, B1:B3 = 10/20/30 for lookups."""
+    var s = sh
+    s.set_value("A1", "apple")
+    s.set_value("A2", "banana")
+    s.set_value("A3", "cherry")
+    s.set_value("B1", "10")
+    s.set_value("B2", "20")
+    s.set_value("B3", "30")
+    s
+
+describe "Calc Excel-365 lookups — scalar":
+    it "XLOOKUP finds an exact needle and returns the aligned value":
+        var sh = Sheet.new("s")
+        sh = _labels(sh)
+        sh.set_value("D1", "=XLOOKUP(\"banana\",A1:A3,B1:B3)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_equal("20")
+
+    it "XLOOKUP returns the if_not_found value when absent":
+        var sh = Sheet.new("s")
+        sh = _labels(sh)
+        sh.set_value("D1", "=XLOOKUP(\"kiwi\",A1:A3,B1:B3,\"none\")")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_equal("none")
+
+    it "XLOOKUP with no if_not_found yields an error when absent":
+        var sh = Sheet.new("s")
+        sh = _labels(sh)
+        sh.set_value("D1", "=XLOOKUP(\"kiwi\",A1:A3,B1:B3)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_contain("#ERR")
+
+    it "XMATCH returns the 1-based position of an exact match":
+        var sh = Sheet.new("s")
+        sh = _labels(sh)
+        sh.set_value("D1", "=XMATCH(\"cherry\",A1:A3)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_equal("3")
+
+    it "XMATCH yields an error when the needle is absent":
+        var sh = Sheet.new("s")
+        sh = _labels(sh)
+        sh.set_value("D1", "=XMATCH(\"kiwi\",A1:A3)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_contain("#ERR")
+
+    it "LOOKUP returns the result aligned to the largest value <= needle":
+        var sh = Sheet.new("s")
+        sh = _labels(sh)
+        sh.set_value("D1", "=LOOKUP(25,B1:B3,A1:A3)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_equal("banana")
+
+    it "LOOKUP errors when the needle precedes the first value":
+        var sh = Sheet.new("s")
+        sh = _labels(sh)
+        sh.set_value("D1", "=LOOKUP(5,B1:B3,A1:A3)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_contain("#ERR")
+
+describe "Calc Excel-365 array manipulation — spill":
+    it "CHOOSECOLS keeps the named columns in order":
+        var sh = Sheet.new("s")
+        sh = _grid(sh)
+        sh.set_value("A1", "=CHOOSECOLS(H1:J2,1,3)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "A1")).to_equal("1")
+        expect(_disp(sh, "B1")).to_equal("3")
+        expect(_disp(sh, "A2")).to_equal("4")
+        expect(_disp(sh, "B2")).to_equal("6")
+
+    it "CHOOSEROWS with a negative index takes the last row":
+        var sh = Sheet.new("s")
+        sh = _grid(sh)
+        sh.set_value("A1", "=CHOOSEROWS(H1:J2,-1)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "A1")).to_equal("4")
+        expect(_disp(sh, "B1")).to_equal("5")
+        expect(_disp(sh, "C1")).to_equal("6")
+
+    it "CHOOSECOLS fails closed with #ERR on an out-of-range index":
+        var sh = Sheet.new("s")
+        sh = _grid(sh)
+        sh.set_value("A1", "=CHOOSECOLS(H1:J2,9)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "A1")).to_equal("#ERR")
+
+    it "TAKE keeps the first rows and columns":
+        var sh = Sheet.new("s")
+        sh = _grid(sh)
+        sh.set_value("A1", "=TAKE(H1:J2,1,2)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "A1")).to_equal("1")
+        expect(_disp(sh, "B1")).to_equal("2")
+        expect(_disp(sh, "A2")).to_equal("")
+
+    it "TAKE with a negative row count takes from the end":
+        var sh = Sheet.new("s")
+        sh = _grid(sh)
+        sh.set_value("A1", "=TAKE(H1:J2,-1)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "A1")).to_equal("4")
+        expect(_disp(sh, "B1")).to_equal("5")
+        expect(_disp(sh, "C1")).to_equal("6")
+
+    it "TAKE fails closed with #ERR on a zero count":
+        var sh = Sheet.new("s")
+        sh = _grid(sh)
+        sh.set_value("A1", "=TAKE(H1:J2,0)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "A1")).to_equal("#ERR")
+
+    it "DROP removes the first row":
+        var sh = Sheet.new("s")
+        sh = _grid(sh)
+        sh.set_value("A1", "=DROP(H1:J2,1)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "A1")).to_equal("4")
+        expect(_disp(sh, "B1")).to_equal("5")
+        expect(_disp(sh, "C1")).to_equal("6")
+        expect(_disp(sh, "A2")).to_equal("")
+
+    it "DROP fails closed with #ERR when it would remove every row":
+        var sh = Sheet.new("s")
+        sh = _grid(sh)
+        sh.set_value("A1", "=DROP(H1:J2,2)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "A1")).to_equal("#ERR")
+
+    it "VSTACK stacks vertically and pads ragged widths with #N/A":
+        var sh = Sheet.new("s")
+        sh.set_value("H1", "1")
+        sh.set_value("I1", "2")
+        sh.set_value("H2", "4")
+        sh.set_value("I2", "5")
+        sh.set_value("J2", "6")
+        sh.set_value("A1", "=VSTACK(H1:I1,H2:J2)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "A1")).to_equal("1")
+        expect(_disp(sh, "B1")).to_equal("2")
+        expect(_disp(sh, "C1")).to_equal("#N/A")
+        expect(_disp(sh, "A2")).to_equal("4")
+        expect(_disp(sh, "B2")).to_equal("5")
+        expect(_disp(sh, "C2")).to_equal("6")
+
+    it "HSTACK places grids side by side":
+        var sh = Sheet.new("s")
+        sh.set_value("H1", "1")
+        sh.set_value("H2", "4")
+        sh.set_value("I1", "2")
+        sh.set_value("I2", "5")
+        sh.set_value("A1", "=HSTACK(H1:H2,I1:I2)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "A1")).to_equal("1")
+        expect(_disp(sh, "B1")).to_equal("2")
+        expect(_disp(sh, "A2")).to_equal("4")
+        expect(_disp(sh, "B2")).to_equal("5")
+
+    it "TOCOL flattens the grid row-major into one column":
+        var sh = Sheet.new("s")
+        sh = _grid(sh)
+        sh.set_value("A1", "=TOCOL(H1:J2)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "A1")).to_equal("1")
+        expect(_disp(sh, "A2")).to_equal("2")
+        expect(_disp(sh, "A3")).to_equal("3")
+        expect(_disp(sh, "A4")).to_equal("4")
+        expect(_disp(sh, "A5")).to_equal("5")
+        expect(_disp(sh, "A6")).to_equal("6")
+
+    it "TOROW flattens the grid row-major into one row":
+        var sh = Sheet.new("s")
+        sh = _grid(sh)
+        sh.set_value("A1", "=TOROW(H1:J2)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "A1")).to_equal("1")
+        expect(_disp(sh, "B1")).to_equal("2")
+        expect(_disp(sh, "C1")).to_equal("3")
+        expect(_disp(sh, "D1")).to_equal("4")
+        expect(_disp(sh, "E1")).to_equal("5")
+        expect(_disp(sh, "F1")).to_equal("6")
+
+    it "spill for an array function is idempotent":
+        var sh = Sheet.new("s")
+        sh = _grid(sh)
+        sh.set_value("A1", "=TOCOL(H1:J2)")
+        sh = recalculate_formula_cells(sh)
+        val a1 = _disp(sh, "A1")
+        val a6 = _disp(sh, "A6")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "A1")).to_equal(a1)
+        expect(_disp(sh, "A6")).to_equal(a6)
+        expect(_disp(sh, "A1")).to_equal("1")
+        expect(_disp(sh, "A6")).to_equal("6")
