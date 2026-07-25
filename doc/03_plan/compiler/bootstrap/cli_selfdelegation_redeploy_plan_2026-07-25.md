@@ -1,6 +1,6 @@
 # Plan — CLI self-delegation fix → redeploy
 
-**Date:** 2026-07-25 · **Status:** source fixes landed at `6cf217f0febb`; redeploy outstanding
+**Date:** 2026-07-25 · **Status:** source fixes landed (`6cf217f0febb`, superseded by `0531ca8ce266`); redeploy outstanding
 
 ## Why this plan exists
 
@@ -23,7 +23,7 @@ passing test.
 |---|---|---|---|
 | 1 | Redeploy the self-hosted CLI | seed regression `d312b8e4253` | dedicated bootstrap session |
 | 2 | Execute the regression spec | #1 | follows #1 |
-| 3 | Repoint or retire the dead `_cli_resolve_symlink` guard | decision | needs a call |
+| ~~3~~ | ~~Dead `_cli_resolve_symlink` guard~~ | — | **done** `0531ca8ce266` |
 | 4 | Stale-WC clobber exposure | ongoing parallel sessions | standing hazard |
 
 ### 1. Redeploy (the blocker for everything else)
@@ -48,14 +48,40 @@ does, the unblock is a lowercase `claude` token in argv[0], not an env var.
 
 - `bin/simple run <any .spl>` terminates (the loop is gone)
 - `bin/simple test test/01_unit/app/io/cli_argv0_resolution_spec.spl` — the
-  "resolves our own exe, not the spawned readlink helper" case actually runs
+  "resolves our own exe, not the spawned readlink helper" and "establishes its
+  own identity in-process" cases actually run
+- The fork-bomb guard bites: `_cli_is_current_exe("bin/simple")` must be **true**
+  when running as `bin/release/<triple>/simple`. This is the check that was
+  silently disarmed; a redeploy that leaves it false has not fixed anything.
 - `bin/simple lint <file>` — confirms the `field access on nil receiver`
   symptom was stale-binary only. The source fix is already in place
   (`src/compiler/55.borrow/borrow_check/nll.spl:392,404` use
   `borrowset_active_list(...)`; zero `.active_borrows()` calls remain), so a
   recurrence after redeploy means a *different* defect.
 
-### 3. Dead assertion — needs a decision
+### 3. Dead assertion — RESOLVED 2026-07-25 (`0531ca8ce266`)
+
+**Verdict: dropped fix, not a stale guard. The assertion was right; the code had
+regressed past it.** Restoring `_cli_resolve_symlink` made all nine of the
+spec's source-text assertions pass again.
+
+`_cli_is_current_exe` compares a delegation candidate against our real exe.
+`bin/simple` is a symlink to `bin/release/<triple>/simple`, so with the
+candidate left unresolved the comparison never matched — the fork-bomb guard
+was reporting "that isn't me" about itself and waving the delegation through.
+It was the second line of defence against the very loop this plan exists for,
+and it had been silently disarmed since 2026-07-24.
+
+This also **superseded the `$PPID` shell-out** from `6cf217f0febb`.
+`_cli_resolve_symlink` wraps `rt_path_absolute` = `std::fs::canonicalize`,
+called **in-process**, so `/proc/self/exe` resolves to our own binary with no
+spawn at all — no PPID hop to be off by a level, and the helper-basename
+denylist became dead code and was removed. Verified by probe:
+`rt_path_absolute("/proc/self/exe")` → the running binary;
+`rt_path_absolute("bin/simple")` → its symlink target. All four sites converted;
+zero shell-out identity reads remain in `src/`. No new Rust extern was needed.
+
+<details><summary>Original framing (kept — the reasoning is why the answer wasn't obvious)</summary>
 
 `test/01_unit/app/io/cli_argv0_resolution_spec.spl:41` asserts the source
 contains `val resolved = _cli_resolve_symlink(path)`. That function exists
@@ -71,6 +97,8 @@ Two readings, and they lead opposite ways:
 
 Interpreter mode does not execute `it` bodies, so this may not be *failing*
 today; it is dead either way. Do not guess — resolve against the 07-11 bug doc.
+
+</details>
 
 ### 4. Standing hazard — stale WC reverts landed fixes
 
