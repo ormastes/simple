@@ -7,15 +7,21 @@
   values, and `rt_dict_insert -> rt_dict_set` lowering are covered.
 - FreeBSD 14.3 QEMU smoke: PASS.
 - Rust `simple-runtime` and `simple-compiler` host checks: PASS.
-- Portable macOS/Windows paths are implemented but not executed on native
-  hosts.
+- Native macOS and Windows verification is active in GitHub Actions. Run
+  `30146430121` covers Intel/Apple Silicon macOS and Windows MSVC; run
+  `30146474227` now requires strict Stage 2/3 dynload bootstrap for both MSVC
+  and MinGW with `SIMPLE_NO_STUB_FALLBACK=1`.
 - A 2026-07-11 full FreeBSD cycle booted the pristine guest and reached `sshd`,
   but cloud-init requested a reboot as the old 600-second budget expired. The
   checker now monitors QEMU during SSH waits and defaults to 900 seconds; one
   final full run remains pending after the three-cycle cap resets.
 - A two-module production-consumer probe rebuilt dynload artifacts but exposed
-  a real `bin/simple <main.smf>` `file not found` failure. Consumer dispatch is
-  blocked on loader/runtime ownership, not missing test assertions.
+  a real launcher boundary failure. The pure-Simple CLI delegates `.smf`
+  execution to the Rust seed, while `dynsmf_session` validates artifacts and
+  records synthetic handles without executing refreshed module behavior.
+  Watcher artifacts also live under `build/smf`, while the startup manifest
+  names `build/dynsmf`. Consumer dispatch remains blocked on real
+  loader/runtime ownership, not missing test assertions.
 
 ## Remaining Work
 

@@ -101,5 +101,16 @@ sh scripts/check/check-freebsd-bootstrap-qemu.shs --full
 - The FreeBSD checker now defaults to 8 GiB, selects the matching SSH private
   key, grows and verifies guest root space, preserves package command status,
   and requests guest shutdown before force cleanup.
-- FreeBSD full, native macOS/Windows, and the production dynload consumer
-  remain open.
+- GitHub run `30146430112` owns the fresh canonical FreeBSD full pass. Run
+  `30146430121` owns native Intel/Apple Silicon macOS and Windows MSVC
+  bootstrap evidence.
+- Commit `744bcf9be648` upgrades the Windows workflow from optional Stage 2
+  compilation to strict Stage 2/3 dynload bootstrap for both MSVC and MinGW;
+  run `30146474227` owns that evidence.
+- Production consumer tracing confirmed that the current pure-Simple CLI
+  delegates `.smf` execution to the Rust seed. `dynsmf_session` only validates
+  artifact bytes and records handles; it does not execute refreshed module
+  behavior. The watcher and startup manifest also disagree on `build/smf`
+  versus `build/dynsmf` ownership. TODO 533 remains open until one canonical
+  cache/loader path executes changed behavior without seed fallback or
+  launcher replacement.
