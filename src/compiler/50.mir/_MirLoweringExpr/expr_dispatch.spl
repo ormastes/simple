@@ -185,7 +185,7 @@ impl MirLowering:
                     val element_name = element_types[field_idx]
                     if element_name != "":
                         self.runtime_array_locals[result.id] = true
-                        self.runtime_value_locals[result.id] = true
+                        self.mark_runtime_value_local(result.id)
                         if element_name != "__runtime_array__":
                             self.array_element_struct_syms[result.id] = element_name
 
@@ -229,19 +229,15 @@ impl MirLowering:
 
     fn local_enum_type_id(local: LocalId) -> i64:
         """Return the declared enum symbol id for a proven enum local."""
-        if not self.local_hir_types.contains(local.id):
-            return -1
-        val hir_type = self.local_hir_types[local.id]
-        if hir_type == nil:
-            return -1
-        match hir_type.kind:
-            case HirTypeKind.Named(symbol, _):
-                val enum_symbol = self.symbols.get_symbol_raw(symbol.id)
-                if val found_enum_symbol = enum_symbol:
-                    if self.enum_variant_index.contains(found_enum_symbol.name):
-                        return symbol.id
-            case _:
-                ()
+        if val hir_type = self.find_local_hir_type(local.id):
+            match hir_type.kind:
+                case HirTypeKind.Named(symbol, _):
+                    val enum_symbol = self.symbols.get_symbol_raw(symbol.id)
+                    if val found_enum_symbol = enum_symbol:
+                        if self.enum_variant_index.contains(found_enum_symbol.name):
+                            return symbol.id
+                case _:
+                    ()
         -1
 
     fn local_is_float(local: LocalId) -> bool:
@@ -335,9 +331,9 @@ impl MirLowering:
             var nil_builder = self.builder
             val tagged_nil = nil_builder.emit_const_int(3)
             self.builder = nil_builder
-            self.runtime_value_locals[tagged_nil.id] = true
+            self.mark_runtime_value_local(tagged_nil.id)
             return tagged_nil
-        if self.runtime_value_locals.contains(local.id) or self.runtime_array_locals.contains(local.id) or self.runtime_dict_locals.contains(local.id):
+        if self.is_runtime_value_local(local.id) or self.runtime_array_locals.contains(local.id) or self.runtime_dict_locals.contains(local.id):
             return local
         if self.local_is_str(local):
             val strlen = MirOperand(kind: MirOperandKind.Const(
@@ -356,7 +352,7 @@ impl MirLowering:
                 val tagged = nb.emit_call(string_new, [mir_operand_copy(local), mir_operand_copy(length)], MirType.i64())
                 self.builder = nb
                 if val value = tagged:
-                    self.runtime_value_locals[value.id] = true
+                    self.mark_runtime_value_local(value.id)
                     return value
             return local
         val type_ = self.local_mir_type_of(local)
@@ -404,7 +400,7 @@ impl MirLowering:
                 local
         self.builder = b
         if boxed.id != local.id:
-            self.runtime_value_locals[boxed.id] = true
+            self.mark_runtime_value_local(boxed.id)
         boxed
 
     # Record the f64/f32 type of a value stored into a container whose
@@ -497,14 +493,14 @@ impl MirLowering:
             val typed = b.new_temp(result_type)
             b.emit_copy(typed, raw)
             self.runtime_array_locals[typed.id] = true
-            self.runtime_value_locals[typed.id] = true
+            self.mark_runtime_value_local(typed.id)
             self.builder = b
             return typed
         if disc == rt_enum_discriminant(MirTypeKind.Dict(MirType.i64(), MirType.i64())):
             val typed = b.new_temp(result_type)
             b.emit_copy(typed, raw)
             self.runtime_dict_locals[typed.id] = true
-            self.runtime_value_locals[typed.id] = true
+            self.mark_runtime_value_local(typed.id)
             self.builder = b
             return typed
         if self.mir_type_is_str(result_type):
@@ -528,7 +524,7 @@ impl MirLowering:
             if val cstr_local = cstr_res:
                 return cstr_local
             return raw
-        self.runtime_value_locals[raw.id] = true
+        self.mark_runtime_value_local(raw.id)
         self.builder = b
         raw
 
@@ -792,11 +788,11 @@ impl MirLowering:
     me remember_call_hir_return(local: LocalId, symbol: SymbolId):
         val return_type = self.resolved_call_hir_return_type(symbol)
         if val found_type = return_type:
-            self.local_hir_types[local.id] = found_type
+            self.remember_local_hir_type(local.id, found_type)
             match found_type.kind:
                 case HirTypeKind.Optional(_):
                     self.option_value_locals[local.id] = true
-                    self.runtime_value_locals[local.id] = true
+                    self.mark_runtime_value_local(local.id)
                 case _:
                     ()
 
@@ -1035,8 +1031,8 @@ impl MirLowering:
                     result_type = value_type
                     result_type_from_base = true
                 case _: ()
-        if not result_type_from_base and self.local_hir_types.contains(base_local.id):
-            val base_hir_type = self.local_hir_types[base_local.id]
+        if not result_type_from_base and self.find_local_hir_type(base_local.id) != nil:
+            val base_hir_type = self.find_local_hir_type(base_local.id) ?? HirType(kind: HirTypeKind.Error, span: base.span)
             match base_hir_type.kind:
                 case HirTypeKind.Array(element_type, _) | HirTypeKind.Slice(element_type):
                     result_type = self.lower_type(element_type)
@@ -1087,7 +1083,7 @@ impl MirLowering:
                 else:
                     result_type
                 if has_real_struct_name:
-                    self.runtime_value_locals[getter_local.id] = true
+                    self.mark_runtime_value_local(getter_local.id)
                 val decoded_elem = self.decode_runtime_value(getter_local, decode_type)
                 # Bug (array-of-structs field misread): propagate the
                 # array's known element struct name onto THIS decoded
@@ -1163,7 +1159,7 @@ impl MirLowering:
                     if (field_name == "len" or field_name == "length") and self.local_is_str(base_local):
                         var len_src = base_local
                         var len_func_name = "rt_string_len"
-                        if not self.runtime_value_locals.contains(base_local.id):
+                        if not self.is_runtime_value_local(base_local.id):
                             val len_cstr_op = MirOperand(kind: MirOperandKind.Const(
                                 MirConstValue.Str("rt_interp_cstr"),
                                 MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
@@ -1240,11 +1236,11 @@ impl MirLowering:
                             val field_types = self.struct_field_hir_type[field_owner]
                             if field_idx >= 0 and field_idx < field_types.len():
                                 val declared_field_type = field_types[field_idx]
-                                self.local_hir_types[field_result.id] = declared_field_type
+                                self.remember_local_hir_type(field_result.id, declared_field_type)
                                 match declared_field_type.kind:
                                     case HirTypeKind.Optional(_):
                                         self.option_value_locals[field_result.id] = true
-                                        self.runtime_value_locals[field_result.id] = true
+                                        self.mark_runtime_value_local(field_result.id)
                                     case _:
                                         ()
                     return field_result
@@ -1893,7 +1889,7 @@ impl MirLowering:
                             self.builder = b_array_cat
                             if val array_cat_local = array_cat_res:
                                 self.runtime_array_locals[array_cat_local.id] = true
-                                self.runtime_value_locals[array_cat_local.id] = true
+                                self.mark_runtime_value_local(array_cat_local.id)
                                 val left_elem_syms = self.array_element_struct_syms.get(left_local.id)
                                 if left_elem_syms != nil:
                                     val les = left_elem_syms ?? ""
@@ -2101,11 +2097,11 @@ impl MirLowering:
                             right_binop = b.emit_cast(mir_operand_copy(right_binop), left_binop_type)
                         elif comparison and left_i64 and right_narrow_int:
                             left_binop = b.emit_cast(mir_operand_copy(left_binop), right_binop_type)
-                        if comparison and self.runtime_value_locals.contains(left_binop.id) and self.nil_locals.contains(right_binop.id):
+                        if comparison and self.is_runtime_value_local(left_binop.id) and self.nil_locals.contains(right_binop.id):
                             self.builder = b
                             right_binop = self.box_runtime_value(right_binop)
                             b = self.builder
-                        elif comparison and self.nil_locals.contains(left_binop.id) and self.runtime_value_locals.contains(right_binop.id):
+                        elif comparison and self.nil_locals.contains(left_binop.id) and self.is_runtime_value_local(right_binop.id):
                             self.builder = b
                             left_binop = self.box_runtime_value(left_binop)
                             b = self.builder
@@ -2228,7 +2224,7 @@ impl MirLowering:
                 b_left.switch_to_block(then_block)
                 self.builder = b_left
                 var left_value = self.option_payload_or_self(left_local)
-                if self.runtime_value_locals.contains(left_local.id) and not self.option_value_locals.contains(left_local.id):
+                if self.is_runtime_value_local(left_local.id) and not self.option_value_locals.contains(left_local.id):
                     left_value = self.decode_runtime_value(left_local, result_type)
                 else:
                     left_value = self.enum_payload_value(left_value, result_type)
@@ -2244,7 +2240,7 @@ impl MirLowering:
                 var right_value = right_local
                 val right_terminated = self.builder.current_block_has_explicit_terminator()
                 if not right_terminated:
-                    val right_runtime = self.runtime_value_locals.contains(right_local.id)
+                    val right_runtime = self.is_runtime_value_local(right_local.id)
                     if right_runtime:
                         right_value = self.decode_runtime_value(right_local, result_type)
                     b_right = self.builder
@@ -2261,8 +2257,8 @@ impl MirLowering:
                     if nc_right_fallback_sym != nil:
                         result_struct_name = nc_right_fallback_sym ?? ""
 
-                if self.runtime_value_locals.contains(left_value.id) or (not right_terminated and self.runtime_value_locals.contains(right_value.id)):
-                    self.runtime_value_locals[result_local.id] = true
+                if self.is_runtime_value_local(left_value.id) or (not right_terminated and self.is_runtime_value_local(right_value.id)):
+                    self.mark_runtime_value_local(result_local.id)
                 if self.runtime_array_locals.contains(left_value.id) or (not right_terminated and self.runtime_array_locals.contains(right_value.id)):
                     self.runtime_array_locals[result_local.id] = true
                 if self.runtime_dict_locals.contains(left_value.id) or (not right_terminated and self.runtime_dict_locals.contains(right_value.id)):
@@ -2370,7 +2366,7 @@ impl MirLowering:
                 b_then.switch_to_block(then_block)
                 self.builder = b_then
                 var some_value = self.option_payload_or_self(base_local)
-                if self.runtime_value_locals.contains(base_local.id) and not self.option_value_locals.contains(base_local.id):
+                if self.is_runtime_value_local(base_local.id) and not self.option_value_locals.contains(base_local.id):
                     some_value = self.decode_runtime_value(base_local, result_type)
                 else:
                     some_value = self.enum_payload_value(some_value, result_type)
@@ -2394,8 +2390,8 @@ impl MirLowering:
                 b_else.terminate_goto(merge_block)
                 self.builder = b_else
 
-                if self.runtime_value_locals.contains(some_value.id):
-                    self.runtime_value_locals[result_local.id] = true
+                if self.is_runtime_value_local(some_value.id):
+                    self.mark_runtime_value_local(result_local.id)
                 if self.runtime_array_locals.contains(some_value.id):
                     self.runtime_array_locals[result_local.id] = true
                 if self.runtime_dict_locals.contains(some_value.id):
@@ -2526,7 +2522,7 @@ impl MirLowering:
                 if (field_name == "len" or field_name == "length") and self.local_is_str(base_local):
                     var fa_len_src = base_local
                     var fa_len_func_name = "rt_string_len"
-                    if not self.runtime_value_locals.contains(base_local.id):
+                    if not self.is_runtime_value_local(base_local.id):
                         val fa_cstr_op = MirOperand(kind: MirOperandKind.Const(
                             MirConstValue.Str("rt_interp_cstr"),
                             MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))

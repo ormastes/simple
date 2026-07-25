@@ -284,7 +284,7 @@ impl MirLowering:
         val result_arr = new_call ?? b_new.new_temp(effective_type)
         self.builder = b_new
         self.runtime_array_locals[result_arr.id] = true
-        self.runtime_value_locals[result_arr.id] = true
+        self.mark_runtime_value_local(result_arr.id)
 
         var b_init = self.builder
         val counter = b_init.new_local(nil, loop_ty, LocalKind.Var)
@@ -342,8 +342,8 @@ impl MirLowering:
 
         if self.nil_locals.contains(init_local.id):
             self.nil_locals[result_arr.id] = true
-        if self.local_hir_types.contains(init_local.id):
-            self.local_hir_types[result_arr.id] = self.local_hir_types[init_local.id]
+        if val init_hir_type = self.find_local_hir_type(init_local.id):
+            self.remember_local_hir_type(result_arr.id, init_hir_type)
         val ael_sym = self.array_element_struct_syms.get(init_local.id)
         if ael_sym != nil:
             val ael_name = ael_sym ?? ""
@@ -583,18 +583,18 @@ impl MirLowering:
                                     self.runtime_array_locals[local.id] = true
                                 if self.runtime_dict_locals.contains(init_local.id):
                                     self.runtime_dict_locals[local.id] = true
-                                if self.runtime_value_locals.contains(init_local.id):
-                                    self.runtime_value_locals[local.id] = true
+                                if self.is_runtime_value_local(init_local.id):
+                                    self.mark_runtime_value_local(local.id)
                                 if self.option_value_locals.contains(init_local.id):
                                     self.option_value_locals[local.id] = true
                                 if self.nil_locals.contains(init_local.id):
                                     self.nil_locals[local.id] = true
-                                if self.local_hir_types.contains(init_local.id):
-                                    self.local_hir_types[local.id] = self.local_hir_types[init_local.id]
+                                if val init_hir_type = self.find_local_hir_type(init_local.id):
+                                    self.remember_local_hir_type(local.id, init_hir_type)
                                 else:
                                     match let_type:
                                         case Some(declared_type):
-                                            self.local_hir_types[local.id] = declared_type
+                                            self.remember_local_hir_type(local.id, declared_type)
                                         case nil:
                                             ()
                                 # Bug (array-of-structs field misread), CONFLICT-FLAG
@@ -739,18 +739,19 @@ impl MirLowering:
                                     self.runtime_array_locals[local.id] = true
                                 if has_init and self.runtime_dict_locals.contains(init_local.id):
                                     self.runtime_dict_locals[local.id] = true
-                                if has_init and self.runtime_value_locals.contains(init_local.id):
-                                    self.runtime_value_locals[local.id] = true
+                                if has_init and self.is_runtime_value_local(init_local.id):
+                                    self.mark_runtime_value_local(local.id)
                                 if has_init and self.nil_locals.contains(init_local.id):
                                     self.nil_locals[local.id] = true
-                                if has_init and self.local_hir_types.contains(init_local.id):
-                                    self.local_hir_types[local.id] = self.local_hir_types[init_local.id]
-                                elif has_init:
-                                    match type_:
-                                        case Some(declared_type):
-                                            self.local_hir_types[local.id] = declared_type
-                                        case nil:
-                                            ()
+                                if has_init:
+                                    if val init_hir_type = self.find_local_hir_type(init_local.id):
+                                        self.remember_local_hir_type(local.id, init_hir_type)
+                                    else:
+                                        match type_:
+                                            case Some(declared_type):
+                                                self.remember_local_hir_type(local.id, declared_type)
+                                            case nil:
+                                                ()
                                 # Bug (array-of-structs field misread), CONFLICT-FLAG
                                 # (mir_lowering_stmts.spl is fenced): mirror the same
                                 # array_element_struct_syms propagation as the other
@@ -861,16 +862,15 @@ impl MirLowering:
                 val result = b.emit_binop(mir_op, current, new_val, MirType.i64())
                 b.emit_copy(local, result)
                 self.builder = b
-                self.runtime_value_locals = self.runtime_value_locals.remove(local.id)
+                self.unmark_runtime_value_local(local.id)
                 self.option_value_locals = self.option_value_locals.remove(local.id)
                 self.nil_locals = self.nil_locals.remove(local.id)
                 self.runtime_array_locals = self.runtime_array_locals.remove(local.id)
                 self.runtime_dict_locals = self.runtime_dict_locals.remove(local.id)
-                self.local_hir_types = self.local_hir_types.remove(local.id)
+                self.forget_local_hir_type(local.id)
             else:
                 var assigned_value = value_local
-                if self.local_hir_types.contains(local.id):
-                    val declared_type = self.local_hir_types[local.id]
+                if val declared_type = self.find_local_hir_type(local.id):
                     match declared_type.kind:
                         case HirTypeKind.Optional(_):
                             assigned_value = self.ensure_option_handle(value_local, declared_type)
@@ -879,10 +879,10 @@ impl MirLowering:
                 var b = self.builder
                 b.emit_copy(local, assigned_value)
                 self.builder = b
-                if self.runtime_value_locals.contains(assigned_value.id):
-                    self.runtime_value_locals[local.id] = true
+                if self.is_runtime_value_local(assigned_value.id):
+                    self.mark_runtime_value_local(local.id)
                 else:
-                    self.runtime_value_locals = self.runtime_value_locals.remove(local.id)
+                    self.unmark_runtime_value_local(local.id)
                 if self.option_value_locals.contains(assigned_value.id):
                     self.option_value_locals[local.id] = true
                 else:
@@ -899,10 +899,10 @@ impl MirLowering:
                     self.nil_locals[local.id] = true
                 else:
                     self.nil_locals = self.nil_locals.remove(local.id)
-                if self.local_hir_types.contains(assigned_value.id):
-                    self.local_hir_types[local.id] = self.local_hir_types[assigned_value.id]
+                if val assigned_hir_type = self.find_local_hir_type(assigned_value.id):
+                    self.remember_local_hir_type(local.id, assigned_hir_type)
                 else:
-                    self.local_hir_types = self.local_hir_types.remove(local.id)
+                    self.forget_local_hir_type(local.id)
                 # Bug (array-of-structs field misread), CONFLICT-FLAG
                 # (mir_lowering_stmts.spl is fenced): a `var`-reassignment
                 # (`pts = pts.push(...)`, etc.) must carry
@@ -1184,8 +1184,7 @@ impl MirLowering:
                                 if val found_candidate_type = candidate_type:
                                     match found_candidate_type.kind:
                                         case MirTypeKind.I64:
-                                            if self.local_hir_types.contains(candidate.id):
-                                                val semantic_type = self.local_hir_types[candidate.id]
+                                            if val semantic_type = self.find_local_hir_type(candidate.id):
                                                 match semantic_type.kind:
                                                     case HirTypeKind.Float(_):
                                                         if_val_symbol_id = symbol.id
@@ -1289,11 +1288,11 @@ impl MirLowering:
         self.builder = b6
 
         if val found_expected = expected_type:
-            self.local_hir_types[result.id] = found_expected
+            self.remember_local_hir_type(result.id, found_expected)
             match found_expected.kind:
                 case HirTypeKind.Optional(_):
                     self.option_value_locals[result.id] = true
-                    self.runtime_value_locals[result.id] = true
+                    self.mark_runtime_value_local(result.id)
                 case _:
                     ()
 
@@ -1612,8 +1611,7 @@ impl MirLowering:
         # index-read path `arr[i]` already reads element type off
         # `base_mir_type.kind` (see expr_dispatch.spl `case Index`). Mirror
         # that here so `for x in arr` and `arr[i]` agree on the element type.
-        if self.local_hir_types.contains(collection_local.id):
-            val collection_hir_type = self.local_hir_types[collection_local.id]
+        if val collection_hir_type = self.find_local_hir_type(collection_local.id):
             match collection_hir_type.kind:
                 case HirTypeKind.Array(elem_t, _) | HirTypeKind.Slice(elem_t):
                     element_type = self.lower_type(elem_t)
@@ -1800,7 +1798,7 @@ impl MirLowering:
         else:
             element_type
         if for_has_real_struct_name:
-            self.runtime_value_locals[elem_local.id] = true
+            self.mark_runtime_value_local(elem_local.id)
         val decoded_elem = self.decode_runtime_value(elem_local, decode_elem_type)
 
         # Bind loop variable to the (decoded) element

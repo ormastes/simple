@@ -84,7 +84,7 @@ impl MirLowering:
         e.g. `val s = "hello world"; s.starts_with("hello")`, made
         rt_string_starts_with's rt_core_as_string(receiver) check fail and
         silently return false always)."""
-        if self.runtime_value_locals.contains(value_local.id) and self.local_is_str(value_local):
+        if self.is_runtime_value_local(value_local.id) and self.local_is_str(value_local):
             return value_local
         val ets_cstr_op = MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Str("rt_interp_cstr"),
@@ -286,7 +286,7 @@ impl MirLowering:
         self.builder = b_lines_done
         self.runtime_array_locals[lines_local.id] = true
         val line_hir_type = HirType(kind: HirTypeKind.Str, span: receiver.span)
-        self.local_hir_types[lines_local.id] = HirType(kind: HirTypeKind.Array(line_hir_type, nil), span: receiver.span)
+        self.remember_local_hir_type(lines_local.id, HirType(kind: HirTypeKind.Array(line_hir_type, nil), span: receiver.span))
         lines_local
 
     me result_ok_hir_type(receiver: HirExpr) -> HirType?:
@@ -320,8 +320,7 @@ impl MirLowering:
         val declared = self.option_inner_hir_type(receiver)
         if declared != nil:
             return declared
-        if self.local_hir_types.contains(local.id):
-            val local_type = self.local_hir_types[local.id]
+        if val local_type = self.find_local_hir_type(local.id):
             match local_type.kind:
                 case HirTypeKind.Optional(inner_type): return Some(inner_type)
                 case _: ()
@@ -336,13 +335,12 @@ impl MirLowering:
 
     me option_map_value_hir_type(local: LocalId, span: Span) -> HirType?:
         """Recover the primitive type needed to decode an Option.map result."""
-        if self.local_hir_types.contains(local.id):
-            val known = self.local_hir_types[local.id]
+        if val known = self.find_local_hir_type(local.id):
             match known.kind:
                 case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char | HirTypeKind.Str:
                     return Some(known)
                 case _: ()
-        if self.struct_value_syms.contains(local.id) or self.runtime_array_locals.contains(local.id) or self.runtime_dict_locals.contains(local.id) or self.runtime_value_locals.contains(local.id):
+        if self.struct_value_syms.contains(local.id) or self.runtime_array_locals.contains(local.id) or self.runtime_dict_locals.contains(local.id) or self.is_runtime_value_local(local.id):
             return nil
         if val type_ = self.local_mir_type_of(local):
             # NOTE: each arm returns directly (rather than yielding a value
@@ -512,7 +510,7 @@ impl MirLowering:
         if default_expr != nil:
             val fallback_expr = default_expr ?? HirExpr(kind: HirExprKind.NilLit, type_: nil, span: receiver.span)
             var fallback = self.lower_expr(fallback_expr)
-            if is_text and self.runtime_value_locals.contains(fallback.id):
+            if is_text and self.is_runtime_value_local(fallback.id):
                 fallback = self.decode_runtime_value(fallback, result_type)
             b_err = self.builder
             b_err.emit_copy(result_local, fallback)
@@ -533,7 +531,7 @@ impl MirLowering:
         self.builder = b_merge
         if result_struct_name != "":
             self.struct_value_syms[result_local.id] = result_struct_name
-            self.local_hir_types[result_local.id] = payload_type
+            self.remember_local_hir_type(result_local.id, payload_type)
         result_local
 
     me lower_method_call(receiver: HirExpr, method: text, args: [HirCallArg], resolution: MethodResolution) -> LocalId:
@@ -627,8 +625,8 @@ impl MirLowering:
                 # stale ByteSpan (or another same-named custom method) steal
                 # `text.starts_with`/`ends_with`/`contains`.
                 predicate_receiver_is_text = self.local_is_str(prelowered_method_receiver)
-                if not predicate_receiver_is_text and self.local_hir_types.contains(prelowered_method_receiver.id):
-                    val predicate_hir_type = self.local_hir_types[prelowered_method_receiver.id]
+                if not predicate_receiver_is_text and self.find_local_hir_type(prelowered_method_receiver.id) != nil:
+                    val predicate_hir_type = self.find_local_hir_type(prelowered_method_receiver.id) ?? HirType(kind: HirTypeKind.Error, span: receiver.span)
                     match predicate_hir_type.kind:
                         case HirTypeKind.Str: predicate_receiver_is_text = true
                         case _: ()
@@ -765,7 +763,7 @@ impl MirLowering:
             var some_val_uw = self.option_payload_or_self(receiver_local)
             if unwrap_is_text:
                 some_val_uw = self.option_text_value(some_val_uw, unwrap_result_type)
-            elif self.runtime_value_locals.contains(receiver_local.id) and not self.option_value_locals.contains(receiver_local.id):
+            elif self.is_runtime_value_local(receiver_local.id) and not self.option_value_locals.contains(receiver_local.id):
                 some_val_uw = self.decode_runtime_value(receiver_local, unwrap_result_type)
             elif unwrap_is_bool:
                 some_val_uw = self.option_bool_value(some_val_uw)
@@ -789,8 +787,8 @@ impl MirLowering:
             b_none_uw.terminate_goto(merge_block_uw)
             self.builder = b_none_uw
 
-            if self.runtime_value_locals.contains(some_val_uw.id):
-                self.runtime_value_locals[result_local_uw.id] = true
+            if self.is_runtime_value_local(some_val_uw.id):
+                self.mark_runtime_value_local(result_local_uw.id)
 
             var b_merge_uw = self.builder
             b_merge_uw.switch_to_block(merge_block_uw)
@@ -859,7 +857,7 @@ impl MirLowering:
             var some_val_uo = self.option_payload_or_self(receiver_local)
             if uo_is_text:
                 some_val_uo = self.option_text_value(some_val_uo, uo_result_type)
-            elif self.runtime_value_locals.contains(receiver_local.id) and not self.option_value_locals.contains(receiver_local.id):
+            elif self.is_runtime_value_local(receiver_local.id) and not self.option_value_locals.contains(receiver_local.id):
                 some_val_uo = self.decode_runtime_value(receiver_local, uo_result_type)
             elif uo_is_bool:
                 # Bare `some_bool.unwrap_or(default)` (no `.map()` in
@@ -883,15 +881,15 @@ impl MirLowering:
             var default_val_uo = default_local_uo
             if uo_is_text:
                 default_val_uo = self.option_text_value(default_local_uo, uo_result_type)
-            elif self.runtime_value_locals.contains(default_local_uo.id):
+            elif self.is_runtime_value_local(default_local_uo.id):
                 default_val_uo = self.decode_runtime_value(default_local_uo, uo_result_type)
             b_none_uo = self.builder
             b_none_uo.emit_copy(result_local_uo, default_val_uo)
             b_none_uo.terminate_goto(merge_block_uo)
             self.builder = b_none_uo
 
-            if self.runtime_value_locals.contains(some_val_uo.id) or self.runtime_value_locals.contains(default_val_uo.id):
-                self.runtime_value_locals[result_local_uo.id] = true
+            if self.is_runtime_value_local(some_val_uo.id) or self.is_runtime_value_local(default_val_uo.id):
+                self.mark_runtime_value_local(result_local_uo.id)
 
             var b_merge_uo = self.builder
             b_merge_uo.switch_to_block(merge_block_uo)
@@ -947,7 +945,7 @@ impl MirLowering:
                         match map_inner_type.kind:
                             case MirTypeKind.Bool: map_inner_is_bool = true
                             case _: ()
-                        if self.runtime_value_locals.contains(receiver_local.id) and not self.option_value_locals.contains(receiver_local.id):
+                        if self.is_runtime_value_local(receiver_local.id) and not self.option_value_locals.contains(receiver_local.id):
                             some_val_map = self.decode_runtime_value(receiver_local, map_inner_type)
                         elif map_inner_is_bool:
                             # `Option<bool>` receiver: see option_bool_value's
@@ -995,9 +993,9 @@ impl MirLowering:
                         var b_merge_map = self.builder
                         b_merge_map.switch_to_block(merge_block_map)
                         self.builder = b_merge_map
-                        self.runtime_value_locals[result_local_map.id] = true
+                        self.mark_runtime_value_local(result_local_map.id)
                         self.option_value_locals[result_local_map.id] = true
-                        self.local_hir_types[result_local_map.id] = mapped_option_type
+                        self.remember_local_hir_type(result_local_map.id, mapped_option_type)
                         return result_local_map
                     case _: ()
 
@@ -1221,7 +1219,7 @@ impl MirLowering:
                 b_dict_typed.emit_copy(dict_keys_typed, result_local)
                 self.builder = b_dict_typed
                 self.runtime_array_locals[dict_keys_typed.id] = true
-                self.runtime_value_locals[dict_keys_typed.id] = true
+                self.mark_runtime_value_local(dict_keys_typed.id)
                 return dict_keys_typed
             return receiver_local
 
@@ -1592,8 +1590,8 @@ impl MirLowering:
                 chr_receiver_is_runtime_int = true
             case _: ()
         var chr_receiver_is_local_int = false
-        if has_prelowered_method_receiver and self.local_hir_types.contains(prelowered_method_receiver.id):
-            val chr_local_type = self.local_hir_types[prelowered_method_receiver.id]
+        if has_prelowered_method_receiver and self.find_local_hir_type(prelowered_method_receiver.id) != nil:
+            val chr_local_type = self.find_local_hir_type(prelowered_method_receiver.id) ?? HirType(kind: HirTypeKind.Error, span: receiver.span)
             match chr_local_type.kind:
                 case HirTypeKind.Int(_, _): chr_receiver_is_local_int = true
                 case _: ()
@@ -1619,8 +1617,8 @@ impl MirLowering:
                 val chr_text = b_chr_typed.new_temp(chr_text_type)
                 b_chr_typed.emit_copy(chr_text, chr_local)
                 self.builder = b_chr_typed
-                self.runtime_value_locals[chr_text.id] = true
-                self.local_hir_types[chr_text.id] = HirType(kind: HirTypeKind.Str, span: receiver.span)
+                self.mark_runtime_value_local(chr_text.id)
+                self.remember_local_hir_type(chr_text.id, HirType(kind: HirTypeKind.Str, span: receiver.span))
                 return chr_text
             return chr_receiver
 
@@ -1965,18 +1963,18 @@ impl MirLowering:
                 if ts_res.?:
                     val ts_local = ts_res ?? ts_recv
                     if method == "parse_f64":
-                        self.runtime_value_locals[ts_local.id] = true
+                        self.mark_runtime_value_local(ts_local.id)
                         val float_type = HirType(kind: HirTypeKind.Float(64), span: receiver.span)
-                        self.local_hir_types[ts_local.id] = HirType(
+                        self.remember_local_hir_type(ts_local.id, HirType(
                             kind: HirTypeKind.Optional(float_type),
                             span: receiver.span
-                        )
+                        ))
                     # rt_string_split returns a tagged rt_array handle; flag it
                     # so downstream indexing/for-in routes through rt_array_get.
                     if method == "split":
                         self.runtime_array_locals[ts_local.id] = true
                         val split_hir_type = HirType(kind: HirTypeKind.Str, span: receiver.span)
-                        self.local_hir_types[ts_local.id] = HirType(kind: HirTypeKind.Array(split_hir_type, nil), span: receiver.span)
+                        self.remember_local_hir_type(ts_local.id, HirType(kind: HirTypeKind.Array(split_hir_type, nil), span: receiver.span))
                     return ts_local
                 return ts_recv
 
@@ -2058,7 +2056,7 @@ impl MirLowering:
                         self.builder = wb_b
                         if val value = loaded:
                             wb_receiver = value
-                            self.runtime_value_locals[value.id] = true
+                            self.mark_runtime_value_local(value.id)
                     else:
                         var wb_b = self.builder
                         val wb_ptr = wb_b.emit_gep(
@@ -2300,8 +2298,8 @@ impl MirLowering:
                 # Its index and result are raw i64 values; boxing either side
                 # recreates the native 88 -> 11 tag-shift corruption.
                 var char_code_receiver_is_text = self.local_is_str(unresolved_receiver_local)
-                if not char_code_receiver_is_text and self.local_hir_types.contains(unresolved_receiver_local.id):
-                    val char_code_receiver_hir_type = self.local_hir_types[unresolved_receiver_local.id]
+                if not char_code_receiver_is_text and self.find_local_hir_type(unresolved_receiver_local.id) != nil:
+                    val char_code_receiver_hir_type = self.find_local_hir_type(unresolved_receiver_local.id) ?? HirType(kind: HirTypeKind.Error, span: receiver.span)
                     match char_code_receiver_hir_type.kind:
                         case HirTypeKind.Str: char_code_receiver_is_text = true
                         case _: ()
@@ -2761,7 +2759,7 @@ impl MirLowering:
             array_type
         )
         self.runtime_array_locals[arr_local.id] = true
-        self.runtime_value_locals[arr_local.id] = true
+        self.mark_runtime_value_local(arr_local.id)
         if elem_struct_name != "":
             self.array_element_struct_syms[arr_local.id] = elem_struct_name
         arr_local
@@ -2841,7 +2839,7 @@ impl MirLowering:
             b_typed.emit_copy(typed, dict_local)
             self.builder = b_typed
             self.runtime_dict_locals[typed.id] = true
-            self.runtime_value_locals[typed.id] = true
+            self.mark_runtime_value_local(typed.id)
             return typed
         # rt_dict_new always returns a local; fall back to a const 0 handle only
         # if the call somehow produced no result, to keep this total.
@@ -2916,7 +2914,7 @@ impl MirLowering:
         self.builder = b
         val result_local = result ?? self.builder.new_temp(array_type)
         self.runtime_array_locals[result_local.id] = true
-        self.runtime_value_locals[result_local.id] = true
+        self.mark_runtime_value_local(result_local.id)
         result_local
 
     me rt_array_len_operand() -> MirOperand:
@@ -2974,7 +2972,7 @@ impl MirLowering:
         val result_arr = new_call ?? b_new.new_temp(array_type)
         self.builder = b_new
         self.runtime_array_locals[result_arr.id] = true
-        self.runtime_value_locals[result_arr.id] = true
+        self.mark_runtime_value_local(result_arr.id)
 
         var b_init = self.builder
         val counter = b_init.new_local(nil, loop_ty, LocalKind.Var)
@@ -3038,7 +3036,7 @@ impl MirLowering:
         b_exit.emit_copy(typed_result_arr, result_arr)
         self.builder = b_exit
         self.runtime_array_locals[typed_result_arr.id] = true
-        self.runtime_value_locals[typed_result_arr.id] = true
+        self.mark_runtime_value_local(typed_result_arr.id)
         typed_result_arr
 
     me lower_array_filter(arr: LocalId, lam_op: MirOperand) -> LocalId:
@@ -3070,7 +3068,7 @@ impl MirLowering:
         val result_arr = new_call ?? b_new.new_temp(array_type)
         self.builder = b_new
         self.runtime_array_locals[result_arr.id] = true
-        self.runtime_value_locals[result_arr.id] = true
+        self.mark_runtime_value_local(result_arr.id)
 
         var b_init = self.builder
         val counter = b_init.new_local(nil, loop_ty, LocalKind.Var)

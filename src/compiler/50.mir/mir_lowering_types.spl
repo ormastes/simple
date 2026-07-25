@@ -24,7 +24,10 @@ struct MirLowering:
     local_symbol_ids: [i64]
     local_symbol_values: [LocalId]
     # MIR local ID -> declared HIR value type for erased generic call results.
-    local_hir_types: Dict<i64, HirType>
+    # Parallel arrays are authoritative for the same Stage4 reason as
+    # local_symbol_ids/local_symbol_values above.
+    local_hir_type_ids: [i64]
+    local_hir_type_values: [HirType]
     # Function symbol ID -> declared HIR return type, recorded straight from
     # the HirFunction declarations in a lower_module pre-pass. The symbol
     # table's type_ for fn symbols is NOT reliably a Function(...) kind on
@@ -205,7 +208,7 @@ struct MirLowering:
     # existing role for nested single-struct field chains.
     array_element_struct_syms: Dict<i64, text>
     # MIR locals whose i64 bits already use the tagged RuntimeValue ABI.
-    runtime_value_locals: Dict<i64, bool>
+    runtime_value_local_ids: [i64]
     # MIR locals that hold the canonical Option enum handle (enum id 1).
     # Kept separate from runtime_value_locals so other enum/boxed handles are
     # never mistaken for Option and an existing Option is not double-wrapped.
@@ -295,6 +298,63 @@ impl MirLowering:
                 return self.local_symbol_values[i]
             i = i - 1
         LocalId(id: -1)
+
+    me remember_local_hir_type(local_id: i64, type_: HirType):
+        var ids = self.local_hir_type_ids
+        var values = self.local_hir_type_values
+        var i = 0
+        while i < ids.len():
+            if ids[i] == local_id:
+                values[i] = type_
+                self.local_hir_type_values = values
+                return
+            i = i + 1
+        ids.push(local_id)
+        values.push(type_)
+        self.local_hir_type_ids = ids
+        self.local_hir_type_values = values
+
+    fn find_local_hir_type(local_id: i64) -> HirType?:
+        var i = self.local_hir_type_ids.len() - 1
+        while i >= 0:
+            if self.local_hir_type_ids[i] == local_id:
+                return Some(self.local_hir_type_values[i])
+            i = i - 1
+        nil
+
+    me forget_local_hir_type(local_id: i64):
+        var ids: [i64] = []
+        var values: [HirType] = []
+        var i = 0
+        while i < self.local_hir_type_ids.len():
+            if self.local_hir_type_ids[i] != local_id:
+                ids.push(self.local_hir_type_ids[i])
+                values.push(self.local_hir_type_values[i])
+            i = i + 1
+        self.local_hir_type_ids = ids
+        self.local_hir_type_values = values
+
+    me mark_runtime_value_local(local_id: i64):
+        if self.is_runtime_value_local(local_id):
+            return
+        var ids = self.runtime_value_local_ids
+        ids.push(local_id)
+        self.runtime_value_local_ids = ids
+
+    fn is_runtime_value_local(local_id: i64) -> bool:
+        var i = self.runtime_value_local_ids.len() - 1
+        while i >= 0:
+            if self.runtime_value_local_ids[i] == local_id:
+                return true
+            i = i - 1
+        false
+
+    me unmark_runtime_value_local(local_id: i64):
+        var ids: [i64] = []
+        for id in self.runtime_value_local_ids:
+            if id != local_id:
+                ids.push(id)
+        self.runtime_value_local_ids = ids
 
 struct MirError:
     """MIR lowering error."""

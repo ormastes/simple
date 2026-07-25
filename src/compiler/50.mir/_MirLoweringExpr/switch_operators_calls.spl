@@ -194,8 +194,8 @@ impl MirLowering:
     me ensure_option_handle(local: LocalId, option_type: HirType) -> LocalId:
         """Promote a typed Optional value to the canonical enum-id-1 handle."""
         if self.option_value_locals.has(local.id):
-            self.runtime_value_locals[local.id] = true
-            self.local_hir_types[local.id] = option_type
+            self.mark_runtime_value_local(local.id)
+            self.remember_local_hir_type(local.id, option_type)
             return local
         # Nil and the valid raw i64 payload 3 share the same bits. Only the
         # lowering provenance can distinguish them; never guess at runtime.
@@ -241,8 +241,8 @@ impl MirLowering:
         if val raw = result:
             val tagged = self.tag_enum_construct_result(raw)
             self.option_value_locals[tagged.id] = true
-            self.runtime_value_locals[tagged.id] = true
-            self.local_hir_types[tagged.id] = option_type
+            self.mark_runtime_value_local(tagged.id)
+            self.remember_local_hir_type(tagged.id, option_type)
             return tagged
         local
 
@@ -255,7 +255,7 @@ impl MirLowering:
             match return_type.kind:
                 case MirTypeKind.Array(_, _) | MirTypeKind.Slice(_):
                     self.runtime_array_locals[dest.id] = true
-                    self.runtime_value_locals[dest.id] = true
+                    self.mark_runtime_value_local(dest.id)
                 case MirTypeKind.Struct(struct_symbol):
                     # A direct call whose declared return type is a Named
                     # struct (`fn make() -> P: ...`) yields a struct value
@@ -427,11 +427,11 @@ impl MirLowering:
         self.builder = b_m
 
         if val found_expected = expected_type:
-            self.local_hir_types[result.id] = found_expected
+            self.remember_local_hir_type(result.id, found_expected)
             match found_expected.kind:
                 case HirTypeKind.Optional(_):
                     self.option_value_locals[result.id] = true
-                    self.runtime_value_locals[result.id] = true
+                    self.mark_runtime_value_local(result.id)
                 case _:
                     ()
 
@@ -547,11 +547,11 @@ impl MirLowering:
         self.builder = b_m
 
         if val found_expected = expected_type:
-            self.local_hir_types[result.id] = found_expected
+            self.remember_local_hir_type(result.id, found_expected)
             match found_expected.kind:
                 case HirTypeKind.Optional(_):
                     self.option_value_locals[result.id] = true
-                    self.runtime_value_locals[result.id] = true
+                    self.mark_runtime_value_local(result.id)
                 case _:
                     ()
 
@@ -1028,8 +1028,8 @@ impl MirLowering:
                             case _: return Some(found_type)
                 if self.local_map.has(symbol.id):
                     val local = self.local_map[symbol.id]
-                    if self.local_hir_types.has(local.id):
-                        return Some(self.local_hir_types[local.id])
+                    if val local_type = self.find_local_hir_type(local.id):
+                        return Some(local_type)
             case NamedVar(symbol, _):
                 val sym = self.symbols.get_symbol_raw(symbol.id)
                 if val found = sym:
@@ -1041,8 +1041,8 @@ impl MirLowering:
                             case _: return Some(found_type)
                 if self.local_map.has(symbol.id):
                     val local = self.local_map[symbol.id]
-                    if self.local_hir_types.has(local.id):
-                        return Some(self.local_hir_types[local.id])
+                    if val local_type = self.find_local_hir_type(local.id):
+                        return Some(local_type)
             case Call(callee, _, _):
                 val callee_type = self.enum_match_expr_type(callee)
                 if callee_type != nil:
@@ -1118,8 +1118,8 @@ impl MirLowering:
                         return found_rs.type_
                 if self.local_map.has(rsym.id):
                     val rlocal = self.local_map[rsym.id]
-                    if self.local_hir_types.has(rlocal.id):
-                        return Some(self.local_hir_types[rlocal.id])
+                    if val local_type = self.find_local_hir_type(rlocal.id):
+                        return Some(local_type)
             case NamedVar(rsym, _):
                 val rs = self.symbols.get_symbol_raw(rsym.id)
                 if val found_rs = rs:
@@ -1127,8 +1127,8 @@ impl MirLowering:
                         return found_rs.type_
                 if self.local_map.has(rsym.id):
                     val rlocal = self.local_map[rsym.id]
-                    if self.local_hir_types.has(rlocal.id):
-                        return Some(self.local_hir_types[rlocal.id])
+                    if val local_type = self.find_local_hir_type(rlocal.id):
+                        return Some(local_type)
             case _: ()
         nil
 
@@ -1441,11 +1441,11 @@ impl MirLowering:
             b_m.set_local_type(result, inferred_ty)
         self.builder = b_m
         if val found_expected = expected_type:
-            self.local_hir_types[result.id] = found_expected
+            self.remember_local_hir_type(result.id, found_expected)
             match found_expected.kind:
                 case HirTypeKind.Optional(_):
                     self.option_value_locals[result.id] = true
-                    self.runtime_value_locals[result.id] = true
+                    self.mark_runtime_value_local(result.id)
                 case _:
                     ()
         result
@@ -1619,7 +1619,7 @@ impl MirLowering:
                         case HirTypeKind.Str:
                             payload_local = self.option_text_value(raw_payload_local, self.bootstrap_text_type())
                         case _:
-                            if self.runtime_value_locals.has(raw_payload_local.id):
+                            if self.is_runtime_value_local(raw_payload_local.id):
                                 payload_local = self.decode_runtime_value(raw_payload_local, self.lower_type(inner))
                             else:
                                 payload_local = self.enum_payload_value(raw_payload_local, self.lower_type(inner))
@@ -1773,7 +1773,7 @@ impl MirLowering:
         self.builder = b2
         if val r = result:
             val tagged = self.tag_enum_construct_result(r)
-            self.local_hir_types[tagged.id] = type_
+            self.remember_local_hir_type(tagged.id, type_)
             if enum_name == "Option":
                 self.option_value_locals[tagged.id] = true
             return tagged
@@ -1813,7 +1813,7 @@ impl MirLowering:
         val typed = b.new_temp(MirType(kind: MirTypeKind.Opaque("enum")))
         b.emit_copy(typed, r)
         self.builder = b
-        self.runtime_value_locals[typed.id] = true
+        self.mark_runtime_value_local(typed.id)
         typed
 
     me lower_enum_construct_named(enum_name: text, variant: text, args: [HirCallArg]) -> LocalId:
@@ -1882,10 +1882,10 @@ impl MirLowering:
                 if val enum_symbol_id = enum_symbol:
                     val enum_definition = self.symbols.get_symbol_raw(enum_symbol_id.id)
                     if val found_enum_definition = enum_definition:
-                        self.local_hir_types[tagged.id] = HirType(
+                        self.remember_local_hir_type(tagged.id, HirType(
                             kind: HirTypeKind.Named(enum_symbol_id, []),
                             span: found_enum_definition.span
-                        )
+                        ))
             return tagged
         payload_local
 
