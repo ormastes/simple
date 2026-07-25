@@ -1,0 +1,62 @@
+use common.ui.draw_ir.{
+    draw_ir_batch,
+    draw_ir_composition,
+    draw_ir_embedding_config,
+    draw_ir_rect
+}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
+    engine2d_draw_ir_adv_composition
+}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+
+fn main() -> i64:
+    val width = 8
+    val height = 8
+    val embedding = draw_ir_embedding_config(
+        "cpu-simd-native-probe",
+        "root",
+        0,
+        0,
+        width,
+        height,
+        0,
+        1000,
+        true
+    )
+    val command = draw_ir_rect("background", 0, 0, width, height, 0xFF123456u32)
+    val batch = draw_ir_batch("root", "cpu", embedding, [command])
+    val composition = draw_ir_composition(
+        "cpu-simd-native-probe",
+        "cpu-simd-native-probe",
+        "cpu",
+        [batch]
+    )
+
+    var engine = Engine2D.create_with_backend_fast(width, height, "cpu_simd")
+    if engine.backend_name() != "cpu_simd":
+        print("cpu_simd_draw_ir_native_status=fail-backend")
+        return 1
+    engine.clear(0u32)
+    val result = engine2d_draw_ir_adv_composition(engine, composition, true)
+    engine.shutdown()
+
+    if result.rendered_command_count != 1:
+        print("cpu_simd_draw_ir_native_status=fail-rendered")
+        return 2
+    if result.pixels.len() != width * height:
+        print("cpu_simd_draw_ir_native_status=fail-pixels")
+        return 3
+    if result.pixels[0] != 0xFF123456u32:
+        print("cpu_simd_draw_ir_native_status=fail-color")
+        return 4
+    # Reaching the post-frame execution target proves the Engine2D
+    # introspection receiver survived the preceding font-owner update. The
+    # Draw IR route also evaluates the nullable Vulkan evidence immediately
+    # before returning this result; its presence is backend/capability data and
+    # is deliberately not synthesized by this CPU-SIMD probe.
+    if result.font_execution_target == "":
+        print("cpu_simd_draw_ir_native_status=fail-font-target")
+        return 5
+
+    print("cpu_simd_draw_ir_native_status=pass")
+    0
