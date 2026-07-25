@@ -1,7 +1,7 @@
 # macOS Vulkan 2D Live Evidence
 
 - status: fail
-- reason: runtime-provider-missing
+- reason: launched-process-missing
 - selected driver: `/Users/ormastes/simple/build/macos_vulkan_2d_live_harness_local`
 - selected driver kind: pure-simple-native-output
 - runtime receipt: `/Users/ormastes/simple/build/tmp/macos_vulkan_2d_live_evidence/runtime_receipt.env`
@@ -15,7 +15,7 @@
 
 ```text
 macos_vulkan_2d_live_status=fail
-macos_vulkan_2d_live_reason=runtime-provider-missing
+macos_vulkan_2d_live_reason=launched-process-missing
 macos_vulkan_2d_live_driver_kind=pure-simple-native-output
 macos_vulkan_2d_live_driver_path=/Users/ormastes/simple/build/macos_vulkan_2d_live_harness_local
 ```
