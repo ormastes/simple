@@ -1,3 +1,25 @@
+> **CORRECTION 2026-07-25 (appended after publication).** This run does NOT
+> measure the interning fix, and any reading of it as evidence against
+> `571bb8f8be35` is wrong.
+>
+> The seed used was built from `906b85d1420` (07-22 05:50), which PREDATES the
+> interning fix (07-24 10:59). Verified: `strings -a … | grep -c
+> rt_string_new_literal` = **0** on both the staged seed and the stage3 binary it
+> produced. The 111 GiB peak is therefore UNFIXED behaviour, consistent with the
+> ~101GB unfixed baseline. Interning remains UNMEASURED at stage4 scale.
+>
+> The real finding is different and more useful: **the documented workaround-seed
+> recipe is self-defeating.** Regression `d312b8e4253` is 07-24 06:59; interning is
+> 07-24 10:59. Any seed new enough to carry interning also carries the d312
+> regression, and any seed old enough to dodge d312 lacks interning. The two
+> requirements were mutually exclusive in the commit history.
+>
+> The way out is that d312 was fixed on 07-25 by `5d9e9b7251b` (04:30) and
+> `07adf0c25f4` (06:32), both on main. A seed built from **current main tip** should
+> carry BOTH fixes. That is the configuration to retry — not the old workaround
+> seed. Verify `grep -c rt_string_new_literal > 0` on the built seed before
+> trusting any memory number from it.
+
 # Phase 1 Redeploy Report — self-hosted `bin/simple` (Lane 1)
 
 verdict: FAIL — earlyoom killed Stage 4 (full-CLI link) before deploy; no new binary produced.
