@@ -1,0 +1,181 @@
+"""
+# Refutable Let-Else Binding Specification
+
+**Feature IDs:** #1002
+**Category:** Language
+**Status:** Implemented
+
+## Overview
+
+Tests for the refutable `val <pattern> = expr else: <block>` binding. When the
+subject matches the refutable pattern, the inner value is bound in the
+*enclosing* scope and execution continues past the statement. When it does not
+match, the `else` block runs and MUST diverge (`return`/`break`/`continue`/
+`panic`).
+
+## Syntax
+
+```simple
+val Some(x) = opt else:
+    return          # else must diverge
+
+use(x)              # x is bound in the enclosing scope from here on
+```
+
+## Key Behaviors
+
+- Match binds the payload in the enclosing scope, then falls through.
+- No-match runs the `else` block, which diverges out of the enclosing scope.
+- Works for `Some`, `Ok`, `Err`, and single-binding custom enum variants.
+- Sequential let-else bindings compose in one function body.
+
+## Compile-Error Cases (NOT runtime-assertable here; documented for coverage)
+
+These forms are rejected by the compiler and therefore cannot be exercised as
+runnable `it` blocks (sspec cannot assert compile-failure inline). Each is a
+separate negative case the implementation MUST reject:
+
+1. Bare refutable binding without `else`:
+       val Some(x) = opt          # ERROR: requires an else: clause
+2. Non-diverging `else` block (falls through):
+       val Some(x) = opt else:
+           print("missing")       # ERROR: else block must diverge
+3. Irrefutable bindings stay legal WITHOUT else (must still COMPILE):
+       val x = e                  # ok, no else needed
+       val (a, b) = pair          # ok, no else needed
+"""
+
+use std.spec
+
+
+# ============================================================================
+# Custom enum with a single-binding variant (exercises non-stdlib patterns)
+# ============================================================================
+
+enum Boxed:
+    Full(i64)
+    Empty
+
+
+# ============================================================================
+# Helpers exercising the refutable let-else binding
+# ============================================================================
+
+# Behaviors 1 & 2: match binds and continues; no-match runs the diverging else.
+fn extract_or_sentinel(opt: Option<i64>) -> i64:
+    val Some(x) = opt else:
+        return -1
+    return x
+
+# Behavior 4: Result Ok payload bound, Err runs the else.
+fn unwrap_ok_or_sentinel(res: Result<i64, text>) -> i64:
+    val Ok(v) = res else:
+        return -999
+    return v
+
+# Behavior 5: bound variable is usable for the REST of the enclosing block.
+fn compute_after_binding(opt: Option<i64>) -> i64:
+    val Some(base) = opt else:
+        return 0
+    val doubled = base * 2
+    val adjusted = doubled + 1
+    return adjusted
+
+# Behavior 6: sequential/nested let-else bindings in one function.
+fn add_two(a: Option<i64>, b: Option<i64>) -> i64:
+    val Some(x) = a else:
+        return -1
+    val Some(y) = b else:
+        return -2
+    return x + y
+
+# Behavior 3: else with `break` inside a loop.
+fn sum_until_none(items: List<Option<i64>>) -> i64:
+    var total = 0
+    for item in items:
+        val Some(x) = item else:
+            break
+        total = total + x
+    return total
+
+# Custom single-binding enum variant with let-else.
+fn open_or_sentinel(box: Boxed) -> i64:
+    val Full(n) = box else:
+        return -7
+    return n
+
+
+# ============================================================================
+# Primary Scenarios
+# ============================================================================
+
+describe "Refutable Let-Else Binding":
+    # ## Matching binds and continues
+    #
+    # A matching subject binds its payload in the enclosing scope and execution
+    # continues past the let-else statement.
+
+    it "binds the payload and continues when the pattern matches":
+        expect extract_or_sentinel(Some(42)) == 42
+
+    it "runs the diverging else and returns the sentinel on no match":
+        expect extract_or_sentinel(None) == -1
+
+    # ## Result subjects
+    #
+    # The binding works over Result, binding Ok payloads and diverging on Err.
+
+    it "binds the Ok payload of a Result":
+        expect unwrap_ok_or_sentinel(Ok(7)) == 7
+
+    it "runs the else when the Result is Err":
+        expect unwrap_ok_or_sentinel(Err("boom")) == -999
+
+    # ## Enclosing-scope binding
+    #
+    # The bound variable is visible to every subsequent statement in the block,
+    # proving it lands in the enclosing scope rather than a nested one.
+
+    it "makes the bound variable usable for the rest of the enclosing block":
+        expect compute_after_binding(Some(10)) == 21
+
+    it "still diverges before the rest of the block when there is no match":
+        expect compute_after_binding(None) == 0
+
+    # ## Sequential let-else bindings
+    #
+    # Multiple let-else bindings compose in a single function body, each with its
+    # own diverging else.
+
+    it "composes two sequential bindings when both match":
+        expect add_two(Some(3), Some(4)) == 7
+
+    it "diverges from the first binding when the first subject is None":
+        expect add_two(None, Some(4)) == -1
+
+    it "diverges from the second binding when the second subject is None":
+        expect add_two(Some(3), None) == -2
+
+    # ## else with break inside a loop
+    #
+    # A non-matching subject inside a loop can `break`; the loop stops exactly at
+    # the first no-match and later elements are not processed.
+
+    it "breaks out of the loop at the first non-matching element":
+        val items = [Some(1), Some(2), None, Some(99)]
+        expect sum_until_none(items) == 3
+
+    it "consumes the whole loop when every element matches":
+        val items = [Some(1), Some(2), Some(3)]
+        expect sum_until_none(items) == 6
+
+    # ## Custom single-binding enum variants
+    #
+    # The binding is not special-cased to stdlib types; a user enum variant with
+    # one payload works the same way.
+
+    it "binds a custom enum variant payload when it matches":
+        expect open_or_sentinel(Full(11)) == 11
+
+    it "runs the else for a non-matching custom enum variant":
+        expect open_or_sentinel(Empty) == -7
