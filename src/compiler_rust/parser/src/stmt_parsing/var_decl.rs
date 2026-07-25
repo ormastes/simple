@@ -7,6 +7,19 @@ use crate::expressions::placeholder::force_transform_placeholder_lambda;
 use crate::parser_impl::core::Parser;
 use crate::token::{Span, TokenKind};
 
+// The fallback of a refutable `val Ctor(x) = e else:` must diverge so the
+// binding is guaranteed after the statement.
+fn block_diverges(block: &Block) -> bool {
+    block.statements.iter().any(node_diverges)
+}
+
+fn node_diverges(node: &Node) -> bool {
+    match node {
+        Node::Return(_) | Node::Break(_) | Node::Continue(_) => true,
+        _ => false,
+    }
+}
+
 impl Parser<'_> {
     // === Variable Declarations ===
 
@@ -191,6 +204,99 @@ impl Parser<'_> {
         let mut pattern = self.parse_pattern()?;
         let ty = self.parse_optional_type_annotation()?;
         let (value, is_suspend) = self.parse_optional_assignment_with_suspend()?;
+
+        // Refutable let-else: `val Ctor(x) = value else: <diverging block>`.
+        // Desugar to a match so the binding is available only after success.
+        if let Pattern::Enum { payload, .. } = &pattern {
+            if ty.is_some() {
+                return Err(ParseError::contextual_error(
+                    "val binding",
+                    "type annotations on refutable let-else bindings are not supported; annotate the initializer or use a nested `match`",
+                    start_span,
+                ));
+            }
+            let has_else = self.check(&TokenKind::Else) || self.check(&TokenKind::ElseColon);
+            if !has_else {
+                return Err(ParseError::contextual_error(
+                    "val binding",
+                    "refutable pattern in a val binding requires an `else:` clause that diverges (return/break/continue); use `if val ... = e:` to bind conditionally instead",
+                    start_span,
+                ));
+            }
+            let bind_name = match payload {
+                Some(patterns) if patterns.len() == 1 => match &patterns[0] {
+                    Pattern::Identifier(name) => name.clone(),
+                    _ => {
+                        return Err(ParseError::contextual_error(
+                            "val binding",
+                            "refutable let-else currently supports a single binding name (e.g. `val Some(x) = opt else:`); use a nested `match` for multi-field patterns",
+                            start_span,
+                        ))
+                    }
+                },
+                _ => {
+                    return Err(ParseError::contextual_error(
+                        "val binding",
+                        "refutable let-else currently supports a single binding name (e.g. `val Some(x) = opt else:`); use a nested `match` for multi-field patterns",
+                        start_span,
+                    ))
+                }
+            };
+            let value_expr = value.ok_or_else(|| {
+                ParseError::contextual_error(
+                    "val binding",
+                    "refutable let-else requires an initializer: `val Some(x) = <expr> else: ...`",
+                    start_span,
+                )
+            })?;
+            if self.check(&TokenKind::ElseColon) {
+                self.advance();
+            } else {
+                self.advance();
+                self.expect(&TokenKind::Colon)?;
+            }
+            let else_block = self.parse_inline_or_block()?;
+            if !block_diverges(&else_block) {
+                return Err(ParseError::contextual_error(
+                    "val binding",
+                    "the `else:` block of a refutable let-else must diverge — end it with return/break/continue so the bound value is guaranteed; it can currently fall through",
+                    start_span,
+                ));
+            }
+            let bind_arm = MatchArm {
+                span: start_span,
+                pattern: pattern.clone(),
+                guard: None,
+                body: Block {
+                    span: start_span,
+                    statements: vec![Node::Expression(Expr::Identifier(bind_name.clone()))],
+                },
+            };
+            let else_arm = MatchArm {
+                span: start_span,
+                pattern: Pattern::Wildcard,
+                guard: None,
+                body: else_block,
+            };
+            return Ok(Node::Let(LetStmt {
+                span: Span::new(
+                    start_span.start,
+                    self.previous.span.end,
+                    start_span.line,
+                    start_span.column,
+                ),
+                pattern: Pattern::Identifier(bind_name),
+                ty: None,
+                value: Some(Expr::Match {
+                    subject: Box::new(value_expr),
+                    arms: vec![bind_arm, else_arm],
+                }),
+                mutability,
+                storage_class,
+                is_ghost,
+                is_suspend,
+            }));
+        }
 
         // Wrap pattern in Pattern::Typed if there's a type annotation
         // This provides the typed pattern that tests and code expect
@@ -1464,6 +1570,34 @@ impl Parser<'_> {
 #[cfg(test)]
 mod tests {
     use crate::Parser;
+
+    #[test]
+    fn refutable_val_else_requires_divergence() {
+        let mut valid = Parser::new(
+            "fn unwrap_or_zero(value: i64?) -> i64:\n    val Some(inner) = value else: return 0\n    return inner\n",
+        );
+        assert!(valid.parse().is_ok());
+
+        let mut fallthrough = Parser::new(
+            "fn invalid(value: i64?) -> i64:\n    val Some(inner) = value else: pass\n    return inner\n",
+        );
+        assert!(fallthrough.parse().is_err());
+
+        let mut shadowable_call = Parser::new(
+            "fn invalid(value: i64?) -> i64:\n    val Some(inner) = value else: fatal(\"not guaranteed\")\n    return inner\n",
+        );
+        assert!(shadowable_call.parse().is_err());
+
+        let mut typed = Parser::new(
+            "fn invalid(value: i64?) -> i64:\n    val Some(inner): i64 = value else: return 0\n    return inner\n",
+        );
+        assert!(typed.parse().is_err());
+
+        let mut mutable_payload = Parser::new(
+            "fn invalid(value: i64?) -> i64:\n    val Some(mut inner) = value else: return 0\n    return inner\n",
+        );
+        assert!(mutable_payload.parse().is_err());
+    }
 
     #[test]
     fn test_parse_extern_class() {

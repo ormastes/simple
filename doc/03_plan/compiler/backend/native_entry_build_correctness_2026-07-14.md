@@ -1024,3 +1024,21 @@ the shared binary — deploys require explicit user go-ahead).
   guessing by leaf, and handles leading object-format underscores exact-first.
   Focused unit tests pass; rebuild the bootstrap seed before retrying the full
   CLI link and generation-2 performance receipt.
+
+  That rebuilt seed then exposed a lost half of the refutable-let-else feature:
+  current stdlib sources use `val Some(x) = e else:`, and the pure parser
+  supports it, but the Rust parser change from historical commit
+  `6d94927c0b96` was absent from current main. The seed parser support is
+  restored with focused tests. Review also found and fixed a shared safety bug:
+  shadowable `panic`/`fatal`/`abort` calls (and pure `pass/todo`) no longer count
+  as guaranteed divergence; only syntactic `return`/`break`/`continue` do.
+  Unsupported typed or mutable payload bindings fail closed. The positive
+  Simple spec covers both the matched payload and fallback paths.
+
+  A bootstrap seed rebuilt with both the alias and grammar fixes passed the
+  former 16-second discovery failure and emitted no parser/link diagnostics,
+  but the final full-CLI attempt hit its 15-minute cap at sustained 100% CPU
+  and about 515 MiB RSS without producing an artifact. The three-attempt cap is
+  exhausted for this lane; do not retry unchanged. Generation-1,
+  generation-2, staged F64, and C9 remain uncredited. The next session should
+  inspect the warm native-cache miss/compile profile before another full build.

@@ -51,7 +51,7 @@ use compiler.core.ast.{STMT_GPU_LAUNCH, stmt_gpu_launch}
 use compiler.core.ast.{arm_new, arm_new_with_binding, arm_new_with_binding_and_rationale}
 use compiler.core.ast.{elif_new}
 # Refutable let-else divergence check (see parse_refutable_val_else_stmt):
-use compiler.core.ast.{EXPR_RETURN, EXPR_BREAK, EXPR_CONTINUE, EXPR_PASS_TODO}
+use compiler.core.ast.{EXPR_RETURN, EXPR_BREAK, EXPR_CONTINUE}
 use compiler.core.ast.{STMT_RETURN, STMT_BREAK, STMT_CONTINUE, STMT_EXPR}
 use compiler.core.ast.{stmt_tag, stmt_expr}
 use compiler.core.types.{TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_BOOL, TYPE_VOID}
@@ -602,18 +602,6 @@ fn parse_statement() -> i64:
 # require an `else:` block that DIVERGES so the bound value is guaranteed;
 # irrefutable bindings (plain name / tuple) keep the bare form.
 
-fn expr_is_diverging_call(e: i64) -> bool:
-    # A call to a known never-returning builtin counts as divergence.
-    if e < 0:
-        return false
-    if expr_get_tag(e) != EXPR_CALL:
-        return false
-    val callee = expr_get_left(e)
-    if callee < 0 or expr_get_tag(callee) != EXPR_IDENT:
-        return false
-    val n = expr_get_str(callee)
-    n == "panic" or n == "abort" or n == "exit" or n == "fatal" or n == "unreachable"
-
 fn stmt_diverges(s: i64) -> bool:
     if s < 0:
         return false
@@ -624,14 +612,12 @@ fn stmt_diverges(s: i64) -> bool:
         val e = stmt_expr[s]
         if e >= 0:
             val et = expr_get_tag(e)
-            if et == EXPR_RETURN or et == EXPR_BREAK or et == EXPR_CONTINUE or et == EXPR_PASS_TODO:
-                return true
-            if expr_is_diverging_call(e):
+            if et == EXPR_RETURN or et == EXPR_BREAK or et == EXPR_CONTINUE:
                 return true
     # ponytail: if/match/infinite-loop divergence is not recognized here, so an
     # else block built solely from those is conservatively rejected (safe: it
     # only ever rejects, never wrongly accepts a fall-through). End such blocks
-    # with an explicit return/break/continue/panic. Upgrade path: recurse into
+    # with an explicit return/break/continue. Upgrade path: recurse into
     # STMT_IF (both branches) / STMT_MATCH (all arms) / `while true` (no break).
     false
 
@@ -668,14 +654,14 @@ fn parse_refutable_val_else_stmt(ctor_name: text) -> i64:
     # Mandatory diverging else.
     parser_skip_newlines()
     if par_kind_get() != TOK_KW_ELSE:
-        parser_error("refutable pattern `{ctor_name}(...)` in a val binding requires an `else:` clause that diverges (return/break/continue/panic). Use `if val {ctor_name}(...) = e:` to bind conditionally instead.")
+        parser_error("refutable pattern `{ctor_name}(...)` in a val binding requires an `else:` clause that diverges (return/break/continue). Use `if val {ctor_name}(...) = e:` to bind conditionally instead.")
         return stmt_expr_stmt(expr_unit(0), 0)
     parser_advance()            # consume 'else'
     parser_expect(TOK_COLON)    # consume ':'
     val else_body = parse_block()
 
     if not refutable_else_block_diverges(else_body):
-        parser_error("the `else:` block of `val {ctor_name}(...) = ... else:` must diverge — end it with return/break/continue/panic so the bound value is guaranteed. It can currently fall through, which would leave the binding unset.")
+        parser_error("the `else:` block of `val {ctor_name}(...) = ... else:` must diverge — end it with return/break/continue so the bound value is guaranteed. It can currently fall through, which would leave the binding unset.")
 
     # Single-binding patterns only (covers Some/Ok/Err — 100% of stdlib usage).
     # ponytail: multi-field via nested match; add a tuple desugar if needed.
