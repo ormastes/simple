@@ -18,6 +18,8 @@ WINDOW_ENV="$BUILD_DIR/window.env"
 BEFORE_PNG="$BUILD_DIR/before.png"
 AFTER_PNG="$BUILD_DIR/after.png"
 EVIDENCE_ENV="$BUILD_DIR/evidence.env"
+CHILD_STDOUT="$BUILD_DIR/child.stdout"
+CHILD_STDERR="$BUILD_DIR/child.stderr"
 launch_stdout=""
 launch_stderr=""
 launch_app_bundle=""
@@ -30,7 +32,8 @@ case "$HTML_SAMPLE" in
 esac
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
-rm -f "$EVENTS" "$LAUNCHER_LOG" "$WINDOW_ENV" "$BEFORE_PNG" "$AFTER_PNG" "$EVIDENCE_ENV"
+rm -f "$EVENTS" "$LAUNCHER_LOG" "$WINDOW_ENV" "$BEFORE_PNG" "$AFTER_PNG" "$EVIDENCE_ENV" \
+    "$CHILD_STDOUT" "$CHILD_STDERR"
 
 app_pid=""
 peak_rss_kb=0
@@ -69,11 +72,22 @@ write_report() {
         echo "- After interaction: \`$AFTER_PNG\`"
         echo "- Event receipt: \`$EVENTS\`"
         echo "- Launcher log: \`$LAUNCHER_LOG\`"
+        if [ -f "$CHILD_STDOUT" ]; then
+            echo "- Preserved child stdout: \`$CHILD_STDOUT\`"
+        else
+            echo "- Preserved child stdout: unavailable"
+        fi
+        if [ -f "$CHILD_STDERR" ]; then
+            echo "- Preserved child stderr: \`$CHILD_STDERR\`"
+        else
+            echo "- Preserved child stderr: unavailable"
+        fi
     } >"$REPORT_PATH"
 }
 
 fail() {
     reason="$1"
+    preserve_child_logs || true
     {
         echo "macos_vulkan_web_live_status=fail"
         echo "macos_vulkan_web_live_reason=$reason"
@@ -82,6 +96,14 @@ fail() {
         if [ -n "$child_exit_cause" ]; then
             echo "macos_vulkan_web_live_child_exit_cause=$child_exit_cause"
         fi
+        echo "macos_vulkan_web_live_child_stdout=$CHILD_STDOUT"
+        echo "macos_vulkan_web_live_child_stdout_present=$(file_present "$CHILD_STDOUT")"
+        echo "macos_vulkan_web_live_child_stdout_bytes=$(file_bytes "$CHILD_STDOUT")"
+        echo "macos_vulkan_web_live_child_stdout_cksum=$(file_cksum "$CHILD_STDOUT")"
+        echo "macos_vulkan_web_live_child_stderr=$CHILD_STDERR"
+        echo "macos_vulkan_web_live_child_stderr_present=$(file_present "$CHILD_STDERR")"
+        echo "macos_vulkan_web_live_child_stderr_bytes=$(file_bytes "$CHILD_STDERR")"
+        echo "macos_vulkan_web_live_child_stderr_cksum=$(file_cksum "$CHILD_STDERR")"
     } >"$EVIDENCE_ENV"
     write_report
     echo "macOS Vulkan web live evidence: FAIL ($reason)" >&2
@@ -121,9 +143,38 @@ file_cksum() {
     fi
 }
 
+file_present() {
+    if [ -f "$1" ]; then
+        echo 1
+    else
+        echo 0
+    fi
+}
+
+parse_launcher_paths() {
+    launch_stdout="$(sed -n 's/^app stdout: \(.*\)  stderr:.*/\1/p' \
+        "$LAUNCHER_LOG" | tail -n 1)"
+    launch_stderr="$(sed -n 's/^app stdout: .*  stderr: \(.*\)$/\1/p' \
+        "$LAUNCHER_LOG" | tail -n 1)"
+    launch_app_bundle="$(sed -n 's/^launching .* as \(.*\) \.\.\.$/\1/p' \
+        "$LAUNCHER_LOG" | tail -n 1)"
+}
+
+preserve_child_logs() {
+    preserve_failed=0
+    if [ -n "$launch_stdout" ] && [ -f "$launch_stdout" ]; then
+        cp "$launch_stdout" "$CHILD_STDOUT" || preserve_failed=1
+    fi
+    if [ -n "$launch_stderr" ] && [ -f "$launch_stderr" ]; then
+        cp "$launch_stderr" "$CHILD_STDERR" || preserve_failed=1
+    fi
+    return "$preserve_failed"
+}
+
 capture_child_exit_cause() {
     child_exit_cause=""
-    for child_log in "$launch_stderr" "$launch_stdout"; do
+    for child_log in "$CHILD_STDERR" "$CHILD_STDOUT" \
+            "$launch_stderr" "$launch_stdout"; do
         [ -n "$child_log" ] && [ -f "$child_log" ] || continue
         child_exit_cause="$(
             grep -E '^(error:|fatal:|panic:)' "$child_log" 2>/dev/null |
@@ -141,7 +192,8 @@ capture_child_exit_cause() {
 }
 
 child_logs_have_terminal_failure() {
-    for child_log in "$launch_stderr" "$launch_stdout"; do
+    for child_log in "$CHILD_STDERR" "$CHILD_STDOUT" \
+            "$launch_stderr" "$launch_stdout"; do
         [ -n "$child_log" ] && [ -f "$child_log" ] || continue
         grep -Eq '^(error:|fatal:|panic:)' "$child_log" 2>/dev/null && return 0
     done
@@ -250,7 +302,7 @@ if ! command -v cliclick >/dev/null 2>&1; then
     fail "cliclick-missing"
 fi
 
-SIMPLE_GUI_RUN_SKIP_NUDGE=1 \
+if ! SIMPLE_GUI_RUN_SKIP_NUDGE=1 \
 SIMPLE_GUI_BACKEND=vulkan \
 SIMPLE_GUI_EXIT_AFTER_INTERACTION=0 \
 SIMPLE_GUI_EVENT_EVIDENCE_PATH="$ROOT_DIR/$EVENTS" \
@@ -259,15 +311,14 @@ SHOWCASE_RESOLUTION="${SHOWCASE_RESOLUTION:-320x240}" \
 SHOWCASE_DPI="$REQUESTED_DPI" \
 VK_ICD_FILENAMES="$ICD_PATH" \
 DYLD_LIBRARY_PATH="${DYLD_LIBRARY_PATH:-/opt/homebrew/lib}" \
-    scripts/gui/macos-gui-run.shs "$SAMPLE" >"$LAUNCHER_LOG" 2>&1 ||
+    scripts/gui/macos-gui-run.shs "$SAMPLE" >"$LAUNCHER_LOG" 2>&1; then
+    parse_launcher_paths
+    preserve_child_logs || true
+    capture_child_exit_cause
     fail "launcher-failed"
+fi
 
-launch_stdout="$(sed -n 's/^app stdout: \(.*\)  stderr:.*/\1/p' \
-    "$LAUNCHER_LOG" | tail -n 1)"
-launch_stderr="$(sed -n 's/^app stdout: .*  stderr: \(.*\)$/\1/p' \
-    "$LAUNCHER_LOG" | tail -n 1)"
-launch_app_bundle="$(sed -n 's/^launching .* as \(.*\) \.\.\.$/\1/p' \
-    "$LAUNCHER_LOG" | tail -n 1)"
+parse_launcher_paths
 [ -n "$launch_stdout" ] || fail "launch-stdout-path-missing"
 [ -n "$launch_stderr" ] || fail "launch-stderr-path-missing"
 [ -n "$launch_app_bundle" ] || fail "launch-app-bundle-path-missing"
@@ -634,6 +685,7 @@ event_font_nonblank="$(
 [ "$(value_of web_standards_event_font_focus_receipt_revision "$EVENTS")" = "$focus_receipt_revision" ] ||
     fail "event-vector-font-focus-revision-mismatch"
 
+preserve_child_logs || fail "child-log-preservation-failed"
 {
     echo "macos_vulkan_web_live_status=pass"
     echo "macos_vulkan_web_live_reason=pass"
@@ -697,6 +749,14 @@ event_font_nonblank="$(
     echo "macos_vulkan_web_live_after_bytes=$after_bytes"
     echo "macos_vulkan_web_live_before_cksum=$before_cksum"
     echo "macos_vulkan_web_live_after_cksum=$after_cksum"
+    echo "macos_vulkan_web_live_child_stdout=$CHILD_STDOUT"
+    echo "macos_vulkan_web_live_child_stdout_present=$(file_present "$CHILD_STDOUT")"
+    echo "macos_vulkan_web_live_child_stdout_bytes=$(file_bytes "$CHILD_STDOUT")"
+    echo "macos_vulkan_web_live_child_stdout_cksum=$(file_cksum "$CHILD_STDOUT")"
+    echo "macos_vulkan_web_live_child_stderr=$CHILD_STDERR"
+    echo "macos_vulkan_web_live_child_stderr_present=$(file_present "$CHILD_STDERR")"
+    echo "macos_vulkan_web_live_child_stderr_bytes=$(file_bytes "$CHILD_STDERR")"
+    echo "macos_vulkan_web_live_child_stderr_cksum=$(file_cksum "$CHILD_STDERR")"
 } >"$EVIDENCE_ENV"
 write_report
 
