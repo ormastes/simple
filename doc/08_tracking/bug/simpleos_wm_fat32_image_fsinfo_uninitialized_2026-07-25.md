@@ -1,7 +1,7 @@
 # SimpleOS-WM cell: staged FAT32 image fails `fsck.fat` — FSInfo sector never initialized; gate also treats fsck warnings as failures
 
 - **ID:** simpleos_wm_fat32_image_fsinfo_uninitialized_2026-07-25
-- **Status:** OPEN — characterised, not fixed
+- **Status:** RESOLVED — `fsck.fat` exits 0 on the staged image (`37cda4b`)
 - **Severity:** medium — blocks the `SimpleOS-WM × QEMU` showcase-matrix cell at
   the disk-staging stage (the stage *after* the kernel build + ELF admission,
   both of which now pass)
@@ -118,23 +118,61 @@ Also: FSInfo `free_count`/`next_free` now carry real values instead of
 `TODO(simpleos-steam-staging)` — their staging was never wired, and the
 compiler's own unused-variable warnings had been pointing at it.
 
-### Still OPEN
+### RESOLVED — fsck now exits 0 with zero findings
 
-- **52 orphaned clusters (212,992 bytes).** `Reclaimed 52 unused clusters`.
-  **Pre-existing, source not located.** An earlier note in this investigation
-  wrongly attributed ~52 of the original 54 to a guard bug in the `*_alias`
-  allocation added here; removing the 2 steam orphans took 54 → 52, and the
-  alias guard change did not move it, so the 52 were never from this session.
-  Not found by scanning `int X_cluster = alloc_clusters(...)` (only 58 of 87
-  call sites match that shape — the rest are array-element allocations inside
-  loops, e.g. `font_clusters[i]`).
-- **`Free cluster summary wrong (17595 vs 17647)`** — off by exactly 52. This is
-  a *consequence* of the leak: the computation derives usage from
-  `g_next_cluster`, which counts orphaned clusters as used. Fixing the leak
-  fixes this number; do not "fix" it by hardcoding fsck's figure.
-- **32,731 clusters < FAT32 minimum 65,525** — warning only. Correcting it means
-  changing cluster size or image geometry, which the kernel's FAT driver and
-  other consumers depend on. Deliberately untouched.
+A parallel session took the fixes above and added the piece this investigation
+had explicitly declined to attempt: **dynamic geometry selection**. Measured on
+the merged builder at `37cda4b`:
+
+```
+fsck.fat -n <img> >/dev/null 2>&1; echo $?   ->  0
+105 files, 60309/130546 clusters
+```
+
+No warnings, no reclaimed clusters, no free-count mismatch. All three items
+previously listed here as open are gone, and none of them needed to be chased
+individually:
+
+- **52 orphaned clusters** — gone. Never located by source scanning, and did not
+  need to be: they were an artifact of the fixed `SECTORS_PER_CLUSTER = 8`
+  geometry. Time spent hunting individual `alloc_clusters` call sites was wasted
+  effort against a symptom.
+- **`Free cluster summary wrong`** — gone, exactly as predicted: it was a
+  consequence of the leak, not an independent defect.
+- **32,731 clusters < 65,525** — **fixed, not worked around.** This doc had
+  called it "deliberately untouched" on the grounds that changing cluster size
+  would disturb the kernel FAT driver. That judgement was too conservative.
+  `geometry_for_cluster_size()` now searches candidates {64,32,16,8,4,2,1} for
+  the largest cluster size still yielding >= `FAT32_MIN_DATA_CLUSTERS`, and
+  `reserve_clusters()` bounds-checks against the resulting FAT extent. The image
+  now reports 130,546 clusters and is spec-conformant.
+
+The merged builder also supersedes three fixes recorded above with cleaner
+forms: `write_directory()` replaces the hand-rolled `/TMP` `memcpy`, a shared
+`write_fat32_fsinfo()` serves both sector 1 and the sector-7 backup, and the
+`steam_*` clusters are **wired into real directory entries** rather than deleted
+— so the `TODO(simpleos-steam-staging)` is discharged, not deferred.
+
+### Landmine: this file was pushed as a jj conflict commit
+
+Commit `857e26b0cbc` (the FAT32 fix) was pushed while
+`scripts/os/make_os_disk.c` was still 2-sided-conflicted. jj encodes a
+conflicted commit in git as a tree containing only `.jjconflict-base-0/`,
+`.jjconflict-side-0/`, `.jjconflict-side-1/` — **no real files at all**. The
+FPGA commit stacked on top and inherited it, so `main` on GitHub had an empty
+tree across two commits until `37cda4b` restored it.
+
+`jj st` showed the conflict locally; the push was not blocked. The pre-push
+guard in `.claude/rules/vcs.md` exists for exactly this and was not run. Check
+before every push:
+
+```sh
+git ls-tree --name-only <tip> | grep '^\.jjconflict' && echo "DO NOT PUSH"
+```
+
+Note that `git cat-file -p <sha>:<path>` on such a commit reports *"exists on
+disk, but not in <sha>"* — which reads like a missing file, not a broken tree.
+`git ls-tree` on the commit is what makes the real cause obvious.
 
 ### Method note (cost real time twice)
 
