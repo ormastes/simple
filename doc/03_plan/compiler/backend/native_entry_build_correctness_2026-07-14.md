@@ -774,3 +774,28 @@ the shared binary — deploys require explicit user go-ahead).
   0 failed`, SHA-256
   `02b5a88088b77a5644b9c921963d63984bb5688d712463f9bf5bc732c06ff1e2`.
   Credit C9 only when its positional executable exits `42`.
+
+  The next bounded session's trace output recorded that provenance evidence.
+  Immediately
+  after each `rt_string_to_float` call, the compiled Stage4 trace reported
+  result locals `19`, `25`, `31`, and `37`, but both
+  `runtime_value_locals.contains(id)` and `local_hir_types.contains(id)` were
+  false. A second diagnostic showed direct Boolean Dict reads can return true
+  while method-form `.contains` returns false, but direct HirType indexing then
+  trapped on a nil receiver; this did not prove a valid metadata entry.
+  Replacing the C9-critical metadata checks with explicit `rt_dict_contains`
+  rebuilt successfully (`6 compiled, 1387 cached, 0 failed`, candidate
+  SHA-256
+  `2b4be288d623be41e18bff3d8a43260d0ac5d674191dfeb2cc19bd81ae1ea8f0`)
+  but positional C9 still failed all four `.unwrap_or` calls unresolved. That
+  ineffective source change and all temporary tracing were reverted.
+
+  This session again reached C9's three-cycle cap; make no further C9 source
+  change in this session. In a fresh bounded session, the next evidence
+  boundary is the producer extraction itself: replace only
+  `if val ts_local = ts_res` in the text-method call result with the established
+  positive-presence plus coalesce form (`if ts_res.?` followed by
+  `ts_res ?? fallback`), then trace the assigned metadata before changing any
+  propagation or Option logic. This is the same struct-optional payload-loss
+  class that blocked C5 implicit tails. Credit C9 only after the positional
+  executable exits `42`.
