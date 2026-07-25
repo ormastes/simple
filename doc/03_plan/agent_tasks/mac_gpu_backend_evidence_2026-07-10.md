@@ -245,9 +245,15 @@ Owner-global repair detail after the 2026-07-25 three-cycle cap:
 2. The focused module-global suite passed 14/14.
 3. The bounded Stage 2 worker produced the source-matched 20 MB bootstrap
    artifact with 679 compiled, 0 failed, and passed bootstrap sanity.
-4. Continue with one Stage 3 self-host verification, then the canonical
+4. The first Stage 3 self-host attempt used that exact artifact for eight
+   minutes at one full CPU core. It populated all 679 cache entries but timed
+   out before linking, emitted no binary, and its buffered log stayed empty.
+   Do not count this as a pass.
+5. Resume once with
+   `build/mini_cache_todo580_stage3_owner_provenance`; use a longer bounded
+   deadline and require a binary plus bootstrap sanity before the canonical
    full-CLI redeploy and essential-tools smoke.
-5. Keep TODO 582 separate: fresh unflattened export dictionaries still need
+6. Keep TODO 582 separate: fresh unflattened export dictionaries still need
    owner metadata attached to the exact returned `Arc<Dict>`.
 
 ### Agent B: Linux CUDA and Vulkan evidence
