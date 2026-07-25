@@ -268,3 +268,12 @@ implementation-blocked-native-to-i64-and-exact-current-live-evidence
   were rejected and removed. The three-cycle cap is exhausted; exact-current
   host and QEMU launches remain blocked, with the retained cache and next
   inspection point recorded in the bug tracker.
+- continuation-2026-07-25-to-i64-native-trace: Retained Mach-O disassembly
+  proves `ReceiverProbe.next_u8` returns `0xff` and is immediately followed by
+  a call to imported `LogLevel.to_i64`; rc=4 is dispatch failure, not numeric
+  extension. Three pure-Simple Stage-3 candidates covering declared result
+  propagation, pre-UFCS Infer guarding, bootstrap embedded-symbol lookup, and
+  unresolved integer recovery all emitted the identical bad call. All
+  compiler candidates were rejected and removed at the hard cycle cap. The
+  semantic fixture and exact next native-entry HIR/MIR instrumentation point
+  remain recorded; production host/QEMU evidence is still blocked.

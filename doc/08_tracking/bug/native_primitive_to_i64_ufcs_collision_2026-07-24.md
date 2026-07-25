@@ -94,3 +94,32 @@ rejected and removed because they did not satisfy the semantic fixture.
 The three-cycle cap is exhausted. Resume by inspecting the emitted
 HIR/MIR/LLVM for `probe.next_u8().to_i64()` from the retained isolated cache
 `build/wm-to-i64-bootstrap/native_cache`; do not retry the same cast guards.
+
+Grammar note from the 2026-07-25 resolver repair: the bootstrap discovery
+parser rejects an assignment whose expression begins on the following line
+(`Unexpected token: expected expression, found Newline`). Keep the numeric
+conversion-name predicate on the assignment line until that grammar gap has
+its own focused parser fix.
+
+## 2026-07-25 native-entry disassembly and rejected root-fix series
+
+The retained Mach-O binaries prove this is wrong method dispatch, not integer
+extension. Immediately after `ReceiverProbe.next_u8` returns `0xff`,
+`_spl_main` loads and calls
+`_nogc_async_mut__failsafe__core__LogLevel_dot_to_i64`, then compares that
+result with `0xff` and returns fixture code 4.
+
+Three coordinated candidates were built through verified pure-Simple Stage 3:
+
+1. declared Call/MethodCall result propagation plus unresolved integer MIR
+   recovery;
+2. an Infer numeric-conversion guard before UFCS;
+3. embedded-symbol lookup across bootstrap-rekeyed impl functions.
+
+All three produced the identical call sequence and fixture code 4. The final
+verified Stage 3 hash was
+`0562527f550b52334422d943cdd426cf0d095eac56e10679728080574228529a`.
+Every candidate compiler change was removed. The next session must add a
+targeted trace inside the native-entry/flat-HIR pipeline and retain its
+HIR/MIR artifact; do not retry semantic-resolver or post-owner cast guards
+without proving that path executes for this entry.
