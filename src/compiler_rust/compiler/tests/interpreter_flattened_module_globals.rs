@@ -5,11 +5,10 @@ use std::fs;
 use tempfile::tempdir;
 
 fn evaluate_loaded(main_path: &std::path::Path) -> i32 {
-    let module = simple_compiler::pipeline::module_loader::load_module_with_imports(
-        main_path,
-        &mut HashSet::new(),
-    )
-    .unwrap();
+    interpreter::clear_module_cache();
+    interpreter::clear_interpreter_state();
+    let module =
+        simple_compiler::pipeline::module_loader::load_module_with_imports(main_path, &mut HashSet::new()).unwrap();
     interpreter::set_current_file(Some(main_path.to_path_buf()));
     let result = interpreter::evaluate_module(&module.items);
     interpreter::set_current_file(None);
@@ -23,6 +22,12 @@ fn evaluate_unflattened(main_path: &std::path::Path) -> i32 {
     let result = interpreter::evaluate_module(&module.items);
     interpreter::set_current_file(None);
     result.unwrap()
+}
+
+fn evaluate_unflattened_clean(main_path: &std::path::Path) -> i32 {
+    interpreter::clear_module_cache();
+    interpreter::clear_interpreter_state();
+    evaluate_unflattened(main_path)
 }
 
 #[test]
@@ -41,7 +46,7 @@ fn imported_functions_share_live_module_globals() {
     )
     .unwrap();
 
-    assert_eq!(evaluate_unflattened(&main_path), 1);
+    assert_eq!(evaluate_unflattened_clean(&main_path), 1);
 }
 
 #[test]
@@ -79,7 +84,7 @@ fn nested_local_shadow_reveals_latest_owner_global() {
     )
     .unwrap();
 
-    assert_eq!(evaluate_unflattened(&main_path), 77);
+    assert_eq!(evaluate_unflattened_clean(&main_path), 77);
 }
 
 #[test]
@@ -98,7 +103,7 @@ fn nested_shadow_preserves_prior_write_and_same_value_nested_write() {
     )
     .unwrap();
 
-    assert_eq!(evaluate_unflattened(&main_path), 700);
+    assert_eq!(evaluate_unflattened_clean(&main_path), 700);
 }
 
 #[test]
@@ -117,7 +122,7 @@ fn tuple_shadow_reveals_latest_owner_global() {
     )
     .unwrap();
 
-    assert_eq!(evaluate_unflattened(&main_path), 88);
+    assert_eq!(evaluate_unflattened_clean(&main_path), 88);
 }
 
 #[test]
@@ -136,7 +141,7 @@ fn imported_static_method_preserves_module_owner() {
     )
     .unwrap();
 
-    assert_eq!(evaluate_unflattened(&main_path), 99);
+    assert_eq!(evaluate_unflattened_clean(&main_path), 99);
 }
 
 #[test]

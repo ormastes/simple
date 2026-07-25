@@ -230,12 +230,11 @@ Shared rules:
 ### Agent A: bootstrap closure and deployment
 
 1. Start from TODO 580 and the entry-closure no-object-progress bug report.
-2. Run the direct worker with closure tracing and a fresh isolated cache.
-   Compare against the baseline: 75 visited files in 180 seconds, zero objects.
-3. Keep the 16-bucket change only if closure reaches driver start materially
-   faster and emits objects. Otherwise revert only that change and profile the
-   two bucket-add helpers.
-4. Run focused source contracts once, build the candidate, then run the
+2. Treat entry closure as resolved: the retained cycle-3 log reaches all 396
+   files and `Driver start`. Do not repeat the bucket/profile cycle.
+3. Resume the bounded worker at the Stage 2 owner-global repair. Require
+   phase-2 completion and an artifact; declaration progress alone is not PASS.
+4. Build the candidate, then run the
    canonical redeploy gate and post-swap `-c 'print(1+1)'` smoke.
 5. Do not unlock GPU evidence until every deployment gate passes.
 

@@ -1,5 +1,7 @@
 # Bootstrap `bootstrap_main` native build makes no object progress
 
+- **Status:** resolved for entry closure; downstream bootstrap remains open
+
 ## Observed
 
 On 2026-07-23, the bootstrap-only Rust seed ran this no-stub shard for more
@@ -47,6 +49,29 @@ before it can spawn the worker. Evidence:
 The blocker has moved from parent-entry graph loading to the worker process
 itself producing no progress/output before the timeout.
 
+## 2026-07-25 resolution
+
+The pre-object entry-closure stall was caused by two costs in dependency
+discovery:
+
+- copy-on-write text buckets were used as a set/cache;
+- every source line was trimmed and parsed even when it could not contain a
+  dependency declaration.
+
+The implementation now reuses the mutable `HashSet`/`HashMap` collections and
+prefilters lines for `use `, `mod `, `import `, or `export ` before parsing.
+Representative source scans improved by 28-58x. The isolated closure probe
+completed all 396 files in 42.39 seconds, and the bounded direct worker reached
+`Entry closure files: 396` and `Driver start`.
+The retained cycle-3 worker log proves the latter progress markers; the
+42.39-second isolated timing was observed interactively and has no retained
+timing log.
+
+The closure blocker is resolved. The worker then exposed the separate
+Stage 2 interpreter failure tracked in
+`bootstrap_stage2_interpreted_parser_empty_array_2026-07-24.md`; no pure-Simple
+CLI artifact has been admitted yet.
+
 ## Expected
 
 The shard should either emit cached objects/its executable or fail with a
@@ -54,6 +79,6 @@ specific diagnostic within the bootstrap verification window.
 
 ## Follow-up
 
-Profile the entry-closure/HIR-to-MIR phase before object emission and add a
-phase-progress timeout diagnostic. Reuse the command above with its isolated
-cache; do not disable `SIMPLE_NO_STUB_FALLBACK`.
+Continue from the Stage 2 interpreter bug. Reuse the bounded worker command
+with its isolated cache and keep `SIMPLE_NO_STUB_FALLBACK=1`; do not repeat the
+now-resolved entry-closure profiling cycle.

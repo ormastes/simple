@@ -1,7 +1,7 @@
 # Bug: Stage 2 interpreted parser indexes an empty array
 
 - **Date:** 2026-07-24
-- **Status:** open
+- **Status:** open; unsafe candidate rejected by review
 - **Severity:** high
 - **Area:** Rust-seed interpreter / pure-Simple frontend
 
@@ -56,8 +56,38 @@ codegen and failed at the native link instead:
 /usr/bin/ld: cannot find -lunwind: No such file or directory
 ```
 
-Therefore this interpreted-parser failure remains reproducible in the local
-trace diagnostic, but it is not the current GitHub admission blocker. Three
-bounded local fix/probe cycles did not remove it; no speculative arena-owner
-change was retained. The CI blocker is handled separately by installing
-`libunwind-dev` before both pure-Simple workflow builds.
+At that point this interpreted-parser failure remained reproducible in the
+local trace diagnostic, but it was not the current GitHub admission blocker.
+The CI blocker was handled separately by installing `libunwind-dev` before
+both pure-Simple workflow builds.
+
+## 2026-07-25 repair investigation
+
+The failure was a stale owner-local snapshot of a growing module-global array.
+Deferred imports could retain the empty owner value while the flattened shared
+global had already grown. A candidate that preferred a live shared array over
+an empty owner snapshot advanced the one-input probe through declarations
+0-13 without the original bounds error.
+
+Evidence:
+
+- the flattened growing-module-global integration test passed;
+- the release Rust seed rebuilt successfully with LLVM enabled;
+- a one-input `CompilerDriver` probe no longer produced the index-10/length-0
+  error and advanced monotonically through declarations 0-13.
+
+Highest-capability review rejected that candidate because the flat
+`MODULE_GLOBALS` map has no owner provenance and can contain another module's
+same-named array. The unsafe fallback and its synthetic unit test were not
+retained. The narrower non-owned-global fallback remains, along with the
+integration regression and test-state isolation.
+
+The bounded probe was externally terminated before phase 2 completed, and its
+binary included the rejected candidate. Implement an owner-provenance-safe
+lookup, then require a fresh bounded worker to produce the pure-Simple CLI
+artifact before marking bootstrap or GPU evidence complete.
+
+The focused regression must include two modules with the same global name and
+prove that a non-empty value from one owner cannot replace the other's empty
+value. It must also cover the transitive imported-array path that triggered the
+parser failure.
