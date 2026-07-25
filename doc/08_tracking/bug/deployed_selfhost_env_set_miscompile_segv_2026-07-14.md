@@ -290,3 +290,20 @@ The scoped run explicitly forbids `--full-bootstrap`, so do not bypass or
 rewrite the stamp. A fresh seed/runtime/backfill build outside this pure-Simple
 lane is required before the incremental Stage 2–4 pipeline can produce the
 candidate needed for the existing `rt_env_set` admission probe.
+
+## 2026-07-25 release-wrapper trust guard
+
+A concurrent/manual artifact placed a Rust bootstrap seed at the release
+launcher's preferred executable path. The full candidate admission helper
+would reject its identity, but the launcher previously trusted any executable
+at that path and dispatched normal tooling to the seed.
+
+`bin/release/simple` now runs a five-second identity probe and rejects empty,
+failed, Rust-seed, or debug identities before normal dispatch. The explicit
+re-entry seed delegation used by the VHDL recursion guard remains unchanged.
+The wrapper integration test covers pure argument forwarding, seed rejection
+without payload execution, and a missing runtime.
+
+This prevents an invalid artifact from masquerading as production tooling. It
+does not repair the tracked stale `rt_env_set` ABI or replace the required
+fresh Stage4 build, full candidate admission, and atomic deployment.

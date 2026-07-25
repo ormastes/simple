@@ -15,6 +15,12 @@ that users should build/use the pure-Simple `bin/simple` instead. Bootstrap
 internals may suppress that warning with `SIMPLE_BOOTSTRAP=1`; normal users
 should see it when they run `src/compiler_rust/target/bootstrap/simple`.
 
+The tracked `bin/release/simple` launcher performs a bounded identity probe
+before normal dispatch and rejects empty, Rust-seed, or debug identities. This
+is a fail-closed identity screen, not candidate admission: bootstrap deployment must
+still pass the full environment-ABI and native-build gates before installing a
+pure-Simple runtime.
+
 When a migrated tool is slow, flaky, or resource-heavy, fix the pure Simple
 implementation in `src/compiler`, `src/lib`, or `src/app`, or record a concrete
 bug. Do not re-enable a Rust escape hatch.

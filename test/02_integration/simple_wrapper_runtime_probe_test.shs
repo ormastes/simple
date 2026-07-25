@@ -41,6 +41,33 @@ SH
     chmod +x "$path"
 }
 
+make_seed_runtime() {
+    path="$1"
+    cat > "$path" <<'SH'
+#!/bin/sh
+if [ "${1:-}" = "--version" ]; then
+    echo "WARNING: this Rust-built Simple binary is a bootstrap seed only"
+    exit 0
+fi
+echo "seed payload must not execute"
+exit 99
+SH
+    chmod +x "$path"
+}
+
+make_empty_identity_runtime() {
+    path="$1"
+    cat > "$path" <<'SH'
+#!/bin/sh
+if [ "${1:-}" = "--version" ]; then
+    exit 0
+fi
+echo "empty-identity payload must not execute"
+exit 99
+SH
+    chmod +x "$path"
+}
+
 cp bin/sj "$TMP_ROOT/bin/sj"
 cp bin/simple-interp "$TMP_ROOT/bin/simple-interp"
 chmod +x "$TMP_ROOT/bin/sj" "$TMP_ROOT/bin/simple-interp"
@@ -65,6 +92,48 @@ esac
 case "$INTERP_OUT" in
     *"arg1=--probe"* ) ;;
     *) fail "simple-interp did not pass through arguments" ;;
+esac
+
+cp bin/release/simple "$TMP_ROOT/bin/release/simple"
+chmod +x "$TMP_ROOT/bin/release/simple"
+
+RELEASE_OUT="$($TMP_ROOT/bin/release/simple --probe 'two words' 2>&1)" || fail "release wrapper rejected pure runtime"
+case "$RELEASE_OUT" in
+    *"arg1=--probe"*"arg2=two words"* ) ;;
+    *) fail "release wrapper did not preserve arguments" ;;
+esac
+
+make_seed_runtime "$TMP_ROOT/bin/release/x86_64-unknown-linux-gnu/simple"
+if SEED_OUT="$($TMP_ROOT/bin/release/simple --probe 2>&1)"; then
+    fail "release wrapper accepted Rust seed"
+fi
+case "$SEED_OUT" in
+    *"refusing non-production Simple runtime"* ) ;;
+    *) fail "release wrapper seed rejection was unclear" ;;
+esac
+case "$SEED_OUT" in
+    *"seed payload must not execute"* ) fail "release wrapper executed seed payload" ;;
+esac
+
+make_empty_identity_runtime "$TMP_ROOT/bin/release/x86_64-unknown-linux-gnu/simple"
+if EMPTY_OUT="$($TMP_ROOT/bin/release/simple --probe 2>&1)"; then
+    fail "release wrapper accepted empty identity"
+fi
+case "$EMPTY_OUT" in
+    *"returned an empty identity"* ) ;;
+    *) fail "release wrapper empty-identity rejection was unclear" ;;
+esac
+case "$EMPTY_OUT" in
+    *"empty-identity payload must not execute"* ) fail "release wrapper executed empty-identity payload" ;;
+esac
+
+rm "$TMP_ROOT/bin/release/x86_64-unknown-linux-gnu/simple"
+if MISSING_OUT="$($TMP_ROOT/bin/release/simple --probe 2>&1)"; then
+    fail "release wrapper accepted missing runtime"
+fi
+case "$MISSING_OUT" in
+    *"failed its bounded identity probe"* ) ;;
+    *) fail "release wrapper missing-runtime rejection was unclear" ;;
 esac
 
 echo "simple_wrapper_runtime_probe=true"

@@ -1122,3 +1122,13 @@ the shared binary — deploys require explicit user go-ahead).
   contract pin the behavior. The deployed pure-Simple tool segfaulted before
   the focused tests, optimizer, and source check could report results, so no
   performance or behavioral receipt is claimed this session.
+
+  GDB then confirmed the deployed pure CLI's known stale `rt_env_set` ABI:
+  `SIMPLE_BOOTSTRAP_EXPR_COUNT` reached libc with its 27-byte key length as the
+  value pointer. Current Simple callers already stringify every environment
+  value, and the existing full-candidate admission probes the four-argument
+  ABI. A concurrent/manual Rust seed nevertheless occupied the release
+  launcher's preferred path, bypassing admission. The tracked launcher now
+  performs a bounded identity check and rejects seed/debug artifacts before
+  normal dispatch; its integration test covers forwarding, seed rejection,
+  and missing-runtime failure. A fresh admitted Stage4 redeploy remains open.
