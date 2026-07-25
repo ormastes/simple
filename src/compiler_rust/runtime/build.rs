@@ -22,6 +22,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../../runtime/hosted_win32.c");
     println!("cargo:rerun-if-changed=../../runtime/hosted_cocoa.c");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_DRIVER_HOOKS");
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_NATIVE_ALL_PROVIDER");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_RUNTIME_SYMBOL_TABLE");
 
     compile_c_runtime_sources();
@@ -34,12 +35,12 @@ fn main() {
     let runtime_symbol_table = env::var_os("CARGO_FEATURE_RUNTIME_SYMBOL_TABLE").is_some();
     let runtime_regex = env::var_os("CARGO_FEATURE_RUNTIME_REGEX").is_some();
 
-    // Symbols provided by simple-native-all (not the runtime stub) when driver-hooks is active.
-    // Under driver-hooks, the runtime stub is cfg-gated out; the real C symbol lives in native_all.
-    // We still emit the symbol-table entry, but use a #[link_name] alias so that simple-driver
-    // (which does NOT link native_all) compiles without an unresolved-symbol error.
+    // Symbols owned by simple-native-all must not be retained through this
+    // crate's static runtime table.
     let driver_hooks = env::var_os("CARGO_FEATURE_DRIVER_HOOKS").is_some();
+    let native_all_provider = env::var_os("CARGO_FEATURE_NATIVE_ALL_PROVIDER").is_some();
     const DRIVER_HOOK_SYMBOLS: &[&str] = &["rt_cli_run_file"];
+    const NATIVE_ALL_SYMBOLS: &[&str] = &["spl_str_ptr"];
 
     let mut seen = HashSet::new();
     let mut symbols = Vec::new();
@@ -86,9 +87,9 @@ fn main() {
     generated.push_str("    unsafe extern \"C\" {\n");
     for symbol in &symbols {
         if defined_symbols.contains(symbol) {
-            if driver_hooks && DRIVER_HOOK_SYMBOLS.contains(&symbol.as_str()) {
-                // Under driver-hooks, native_all owns the real C symbol; skip the unconditional
-                // link-name reference here to avoid an unresolved-symbol error in simple-driver.
+            if (driver_hooks && DRIVER_HOOK_SYMBOLS.contains(&symbol.as_str()))
+                || (native_all_provider && NATIVE_ALL_SYMBOLS.contains(&symbol.as_str()))
+            {
                 continue;
             }
             let alias = runtime_symbol_alias(symbol);
@@ -101,9 +102,9 @@ fn main() {
     generated.push_str("pub static RUNTIME_SYMBOL_ENTRIES: &[RuntimeSymbolEntry] = &[\n");
     for symbol in &symbols {
         if defined_symbols.contains(symbol) {
-            if driver_hooks && DRIVER_HOOK_SYMBOLS.contains(&symbol.as_str()) {
-                // Omit from the static table; native_all registers the real symbol separately
-                // when it links in (it owns the #[no_mangle] definition).
+            if (driver_hooks && DRIVER_HOOK_SYMBOLS.contains(&symbol.as_str()))
+                || (native_all_provider && NATIVE_ALL_SYMBOLS.contains(&symbol.as_str()))
+            {
                 continue;
             }
             let alias = runtime_symbol_alias(symbol);
@@ -121,6 +122,7 @@ fn compile_c_runtime_sources() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let runtime_c_dir = manifest_dir.join("../../runtime");
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let native_all_provider = env::var_os("CARGO_FEATURE_NATIVE_ALL_PROVIDER").is_some();
     let mut c_sources = vec![
         "runtime_memory.c",
         "runtime_time.c",
@@ -135,7 +137,7 @@ fn compile_c_runtime_sources() {
         "runtime_font.c",
         "runtime_memtrack.c",
     ];
-    if target_os != "windows" {
+    if target_os != "windows" && !native_all_provider {
         c_sources.push("hosted_win32.c");
     }
 
@@ -226,11 +228,17 @@ fn collect_defined_runtime_symbols(
         }
     }
 
-    collect_c_runtime_exports(c_root, target_os, &mut exported);
+    let native_all_provider = env::var_os("CARGO_FEATURE_NATIVE_ALL_PROVIDER").is_some();
+    collect_c_runtime_exports(c_root, target_os, native_all_provider, &mut exported);
     exported
 }
 
-fn collect_c_runtime_exports(root: &Path, target_os: &str, exported: &mut HashSet<String>) {
+fn collect_c_runtime_exports(
+    root: &Path,
+    target_os: &str,
+    native_all_provider: bool,
+    exported: &mut HashSet<String>,
+) {
     const LINKED_C_SOURCES: &[&str] = &[
         "runtime_memory.c",
         "runtime_time.c",
@@ -247,7 +255,7 @@ fn collect_c_runtime_exports(root: &Path, target_os: &str, exported: &mut HashSe
         "hosted_win32.c",
     ];
     for source in LINKED_C_SOURCES {
-        if target_os == "windows" && *source == "hosted_win32.c" {
+        if *source == "hosted_win32.c" && (target_os == "windows" || native_all_provider) {
             continue;
         }
         let path = root.join(source);
