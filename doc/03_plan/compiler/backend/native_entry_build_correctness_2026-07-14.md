@@ -1132,3 +1132,13 @@ the shared binary — deploys require explicit user go-ahead).
   performs a bounded identity check and rejects seed/debug artifacts before
   normal dispatch; its integration test covers forwarding, seed rejection,
   and missing-runtime failure. A fresh admitted Stage4 redeploy remains open.
+
+  Platform CI truthfulness was tightened again. The legacy
+  `cross-platform.yml` and reusable `simple-llvm-cross.yml` workflows were
+  retired: they used checked-in artifacts or handwritten LLVM IR and masked
+  missing platform execution. Release no longer depends on that false gate,
+  and the README badge points to the canonical strict bootstrap matrix.
+  `baremetal-tests.yml` now preserves only its real Cortex-M33 C-shim QEMU
+  smoke; it grants no Simple ARM32 compiler credit. The portability contract
+  rejects restoration of the retired workflows or optional phantom jobs.
+  Windows x86_64 hosted default-LLVM execution remains the genuine matrix gap.

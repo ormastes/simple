@@ -35,6 +35,13 @@ and instead produce target-correct relocatable objects where supported.
 OpenBSD and NetBSD are excluded from completion until a VM/hosted runtime lane
 exists; header compilation alone is not runtime evidence.
 
+The Cortex-M33 workflow is a strict C-shim QEMU board smoke only. It does not
+prove Simple compiler/native-build ARM32 support; that evidence remains the
+LLVM ELF32 ARM object gate above. Legacy `cross-platform.yml` and
+`simple-llvm-cross.yml` workflows were retired because they used checked-in
+artifacts or handwritten LLVM IR, masked failures, and produced no
+target-correct Simple receipt.
+
 ## Shared checker contract
 
 - `platform_case(name, description, writer, expected_exit, xfail)`
@@ -83,3 +90,4 @@ candidate succeeds.
 | REQ-PLAT-002, 003, 005 | `scripts/check/check-cranelift-aot-aggregate-cross.shs` | Cranelift AArch64/RV64 and 32-bit rejection |
 | REQ-PLAT-002, 003 | `scripts/check/native-target-assertions.shs` | Shared fail-closed primitives |
 | REQ-PLAT-001–005 | `test/01_unit/os/native_build_compiler_provenance_spec.spl` | Source-contract regression |
+| Board smoke only | `.github/workflows/baremetal-tests.yml` | Strict Cortex-M33 C-shim QEMU smoke; no Simple ARM32 credit |

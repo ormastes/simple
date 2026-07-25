@@ -2,7 +2,7 @@
 
 [![Production Ready](https://img.shields.io/badge/status-production%20ready-brightgreen)](doc/archive/release/PRODUCTION_READY_SUMMARY.md)
 [![Tests](https://img.shields.io/badge/tests-4067%2F4067%20passing-brightgreen)](doc/09_report/session/full_test_suite_results_2026-02-14.md)
-[![LLVM Cross](https://github.com/ormastes/simple/actions/workflows/simple-llvm-cross.yml/badge.svg)](.github/workflows/simple-llvm-cross.yml)
+[![Multiplatform Bootstrap](https://github.com/ormastes/simple/actions/workflows/rust-bootstrap-multiplatform.yml/badge.svg)](.github/workflows/rust-bootstrap-multiplatform.yml)
 [![License](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](LICENSE)
 
 Simple is a self-hosted language and toolchain that combines a readable Python-like surface with compiler-integrated testing, documentation, architecture rules, and baremetal-oriented execution paths.
