@@ -136,3 +136,13 @@ segfaults while checking the changed compiler files, and the concurrently built
 Stage4 artifact is still being replaced by its owner. Do not use the Rust seed
 as acceptance evidence; rerun `check-simple-core-runtime-smoke.shs` with a
 stable rebuilt pure-Simple compiler.
+
+## 2026-07-25 merge-regression repair
+
+A later merge dropped the pure-Simple driver archive branch, Cranelift
+`--no-mangle` handling, and symbol-mode cache isolation while leaving the CLI
+flags and source contract behind. The implementation has been restored from the
+reviewed archive change. Focused contracts pass 13/13 for native-build and 2/2
+for the SimpleOS launcher; the test-runner result predicates also pass 34/34.
+The full archive smoke remains gated on a source-matched rebuilt pure-Simple
+CLI.
