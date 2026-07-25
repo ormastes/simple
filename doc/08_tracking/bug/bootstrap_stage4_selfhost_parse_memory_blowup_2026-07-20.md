@@ -1000,3 +1000,102 @@ session on the box. Before running the canonical Stage4 command, read this
 doc's tail first. If a bounded repeat is genuinely needed, cap it
 (`systemd-run --scope -p MemoryMax=40G`, or `ulimit -v`) so the experiment dies
 before the host does, instead of relying on someone watching a sampler.
+
+## UPDATE 2026-07-25 (this session): eviction itself is a memory-reclamation
+## NO-OP on this runtime, regardless of granularity — confirmed with a
+## controlled in-process probe, not inference
+
+This session did not re-run full Stage4 (peak ~111GB confirmed by a fresh
+controlled measurement on worktree HEAD `1ddf2a2b87f`, both with interning
+present (`grep rt_string_new_literal` = 4) and absent — interning does not
+move the peak, matching this doc's own "not the dominant contributor for
+Stage4" pattern once you account for full-corpus retention below). Instead of
+another full/near-full run, this session isolated and answered the one
+question every prior update in this doc left open: **does the existing
+`--low-memory` eviction path (`evict_sources()`/`evict_ast()`/`evict_hir()`,
+`driver_types.spl:166-187`) actually reduce the live `heap_registry` count
+when it runs, independent of whether it runs per-file or per-corpus?**
+
+### Root cause (confirmed by code + a controlled micro-probe)
+
+`evict_sources()` (`driver_types.spl:166-174`) does:
+```
+me evict_sources():
+    var metadata: [SourceFile] = []
+    for source in self.sources:
+        metadata = metadata.push(SourceFile(path: source.path, content: "", module_name: source.module_name))
+    self.sources = metadata
+```
+`evict_ast()` (line 177-178) is `self.modules = {}`. Both **build a fresh
+replacement container and reassign** — they never call any free/unregister
+primitive (`rt_string_free`, `rt_array_free`, `unregister_heap_ptr`) on the
+discarded old container or its elements. `heap.rs`'s own doc comment (already
+cited earlier in this doc) says objects on this tier "stay registered for the
+process lifetime" unless something **explicitly** frees them — dropping the
+last reference is not enough; this runtime has neither GC nor refcounting.
+So by construction, `evict_sources()`/`evict_ast()` cannot reduce RSS or
+`heap_registry` no matter where in the pipeline they are called from —
+per-file or per-corpus granularity is irrelevant, because neither shape frees
+anything.
+
+**Direct proof** (`evict_probe.spl`, self-contained, no driver/CLI
+involvement — isolates the eviction *pattern* itself from the rest of the
+pipeline): built and run via the existing self-hosted Stage3 binary
+(`build/bootstrap/stage3/x86_64-unknown-linux-gnu/simple`, cranelift,
+`core-c-bootstrap`, confirmed interning-bearing via
+`strings -a … | grep -c rt_string_new_literal` = 5):
+```
+before=0 after_fill=10002 after_evict=10004 delta_fill=10002 delta_evict=2
+```
+Filling an array with 5,000 dynamic strings registers +10,002 heap objects
+(≈2/string — array growth + string). Then performing **exactly** the
+`evict_sources()` pattern — building a fresh same-shape replacement array and
+reassigning over the old one (dropping the last reference to all 5,000
+strings and the old array) — adds only **+2** registered objects (the new
+container's own allocation) and removes **zero**. The discarded 5,000
+strings + old array stay in `heap_registry` (and resident in RSS) forever.
+This directly answers the open question the 2026-07-20/24/25 updates above
+left unresolved ("why hasn't a fix landed") one level earlier than they were
+looking: **even a hypothetically-perfect per-file eviction rewrite would
+still show ~0% RSS improvement with today's `evict_*` implementations**,
+because the defect is not "eviction runs too late" (granularity) — it's
+"eviction never frees" (mechanism). The per-file-granularity fix proposed in
+the 2026-07-20 update (and the fingerprint hazard that blocked it — now
+independently confirmed MOOT: `native_sources_fingerprint` is computed once
+in phase 1 at `driver.spl:332` from the un-evicted `self.ctx.sources` and
+cached, then read back by value at `driver_aot_output.spl:331-334` — no
+later recompute from possibly-evicted content) is real and worth doing, but
+it is not sufficient by itself.
+
+### Why no fix was attempted this session (same reasoning class as 07-20's)
+
+A real fix needs an application-level free primitive that takes a `text`/
+`[text]`/`Dict` *value* (not a raw sffi pointer) and safely deep-frees it.
+Searched for one: `rt_array_free`/`rt_string_free` externs exist only in
+low-level SFFI/codegen-internal contexts (`70.backend/sffi_minimal.spl`
+operates on raw `i64` pointers from `rt_file_read_text`-style FFI calls, not
+on ordinary `text` values; `rt_array_free` call sites are all inside codegen
+backends emitting IR, not callable from driver-tier `.spl`). Building one
+requires (a) a safe way to extract a heap pointer from an ordinary `text`/
+array `RuntimeValue` at the application level, (b) recursing into element
+frees for `[text]` (the existing `rt_array_free` frees only the outer
+buffer, per `collections.rs:1438-1454`, cited earlier in this doc), and (c)
+resolving the still-open aliasing question from the 2026-07-24 update
+("leans ALIASED, not conclusively resolved" — whether `text` assignment
+across the arena-getter → converter → `Function`/`Module` boundary copies or
+shares the backing buffer). Freeing `source.content` specifically looks safe
+under `--low-memory` (the one known post-phase-2 reader, the phase-3 HIR
+reparse fallback at `driver.spl:948-957`, is itself gated
+`not self.ctx.options.low_memory`), but freeing AST-node text fields is not
+proven safe without answering (c) first. Given this doc's own three prior
+sessions declined the same patch for the same reason, and the mission's
+three-cycle-per-stage budget, this session did not force it either — but the
+target is now sharper than before: **add a value-level deep-free primitive
+first (scoped to `text` and `[text]`, validated against the alias question),
+then re-attempt the per-file `evict_sources()` granularity fix on top of it.
+Validate with `evict_probe.spl`-style before/after `heap_registry` deltas
+(cheap, no corpus needed) before spending a multi-file or full-Stage4 run.**
+
+Repro artifact: `evict_probe.spl` (reproduces the above numbers in <10s,
+no corpus/bootstrap needed) — see session bundle
+`stage4_memory_rootcause.md` for the exact source and build command.
