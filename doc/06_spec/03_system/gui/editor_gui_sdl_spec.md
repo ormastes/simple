@@ -27,7 +27,7 @@ editor_gui_sdl_spec
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 18 | 18 | 0 | 0 |
+| 19 | 19 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -106,6 +106,41 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val src = rt_file_read_text("src/lib/editor/70.backend/gui_sdl_bridge.spl") ?? ""
 expect (src).contains("fn gui_sdl_present_frame(")
+```
+
+</details>
+
+#### legacy SDL GUI font route source contract uses Draw IR and closes Engine2D
+
+1. require default selected-font metrics and glyph metadata in the GUI producer
+2. require text commands in a DrawIrComposition
+3. require Engine2D shutdown, zero skipped commands, and ARGB-to-RGBA conversion
+4. reject the former rectangle-placeholder source path
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val src = file_read_text("src/lib/editor/70.backend/gui_sdl_bridge.spl") ?? ""
+expect (src).contains("fn gui_sdl_frame_draw_ir(")
+expect (src).contains("resolve_font_metrics(candidate.family")
+expect (src).contains("simpleos_default_font_asset_candidate()")
+expect (src).contains("metrics.identity")
+expect (src).contains("metrics.glyph_run")
+expect (src).contains("draw_ir_text_resolved_font(")
+expect (src).contains("draw_ir_text_shaped_font(")
+expect (src).contains("Engine2D.create_offscreen(")
+expect (src).contains("engine2d_draw_ir_adv_composition(")
+expect (src).contains("engine.shutdown()")
+expect (src).contains("result.skipped_command_count != 0")
+expect (src).contains("color_r(pixel).to_i64()")
+expect (src).contains("color_a(pixel).to_i64()")
+expect (src).contains("_sdl_engine_pixels(result.pixels)")
+expect (src).contains("placeholder glyph").to_equal(false)
+expect (src).contains("_sdl_fill_rect(").to_equal(false)
 ```
 
 </details>
@@ -413,7 +448,7 @@ expect (src).contains("gui_shell_run_sdl(session)")
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/gui/editor_gui_sdl_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-25 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -425,8 +460,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 18 |
-| Active scenarios | 18 |
+| Total scenarios | 19 |
+| Active scenarios | 19 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

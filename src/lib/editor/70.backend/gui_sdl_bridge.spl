@@ -3,9 +3,9 @@
 # Simple-language SDL bridge for the editor GUI shell.
 # Uses editor-facing rt_sdl_* extern aliases backed by the runtime SDL implementation.
 #
-# Rendering model: software framebuffer ([i64] packed RGBA pixels)
-# presented via rt_sdl_present_rgba. Text rendering fills colored
-# rectangles as placeholder glyphs (no font rasteriser in runtime).
+# Rendering model: canonical Engine2D software framebuffer converted to
+# [i64] packed RGBA pixels for rt_sdl_present_rgba. Text therefore shares
+# Engine2D's selected vector face and bitmap fallback with GUI/Web/WM/2D.
 #
 # Pixel format: R*16777216 + G*65536 + B*256 + A  (each channel 0-255)
 #
@@ -13,6 +13,25 @@
 #   0=none 1=quit 2=keydown 3=keyup
 #   4=mousemotion 5=mousedown 6=mouseup 7=mousewheel
 #   8=windowevent 9=textinput
+
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{engine2d_draw_ir_adv_composition}
+use std.gc_async_mut.gpu.engine2d.color.{rgba, color_r, color_g, color_b, color_a}
+use std.common.ui.draw_ir.{
+    DRAW_IR_BACKEND_CPU,
+    DrawIrCommand,
+    DrawIrComposition,
+    draw_ir_batch_with_source,
+    draw_ir_composition,
+    draw_ir_embedding_config,
+    draw_ir_rect,
+    draw_ir_source_gui_ast,
+    draw_ir_text,
+    draw_ir_text_resolved_font,
+    draw_ir_text_shaped_font
+}
+use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics}
+use std.common.encoding.font_registry.{simpleos_default_font_asset_candidate}
 
 # ============================================================
 # Tier 1: Extern Declarations (Raw SFFI to the runtime SDL backend)
@@ -62,34 +81,15 @@ extern fn rt_sdl_clear_quit()
 fn _sdl_pack_rgba(r: i64, g: i64, b: i64, a: i64) -> i64:
     r * 16777216 + g * 65536 + b * 256 + a
 
-# Fill a framebuffer slice with a solid color.
-fn _sdl_fill(fb: [i64], color: i64, count: i64):
-    var idx: i64 = 0
-    while idx < count:
-        fb[idx] = color
-        idx = idx + 1
-
-# Fill a rectangular region of the framebuffer with a color.
-fn _sdl_fill_rect(fb: [i64], fb_w: i64, x: i64, y: i64, rw: i64, rh: i64, color: i64):
-    var row: i64 = 0
-    while row < rh:
-        var col: i64 = 0
-        while col < rw:
-            val px = (y + row) * fb_w + (x + col)
-            if px >= 0 and px < fb.len():
-                fb[px] = color
-            col = col + 1
-        row = row + 1
-
-# Allocate a zeroed [i64] framebuffer of width*height pixels.
-fn _sdl_alloc_fb(w: i64, h: i64) -> [i64]:
-    var buf: [i64] = []
-    val total = w * h
-    var i: i64 = 0
-    while i < total:
-        buf.push(0)
-        i = i + 1
-    buf
+# Convert canonical Engine2D ARGB pixels to the SDL bridge's packed RGBA.
+fn _sdl_engine_pixels(pixels: [u32]) -> [i64]:
+    var converted: [i64] = []
+    for pixel in pixels:
+        converted.push(_sdl_pack_rgba(
+            color_r(pixel).to_i64(), color_g(pixel).to_i64(),
+            color_b(pixel).to_i64(), color_a(pixel).to_i64()
+        ))
+    converted
 
 # ============================================================
 # Public API
@@ -108,26 +108,49 @@ fn gui_sdl_shutdown(window: i64):
     rt_sdl_destroy_window(window)
     rt_sdl_quit()
 
-# Render a list of plain-text lines into the framebuffer starting at (x, y).
-# Each character cell is approximated as a 8x14 colored rectangle so that
-# the layout is visible even without a font rasteriser in the runtime.
-# A full font/glyph implementation would replace _sdl_fill_rect with a
-# proper bitmapped text call once rt_sdl_draw_text is available.
-fn gui_sdl_render_text_block(fb: [i64], fb_w: i64, lines: [text], x: i64, y: i64, line_height: i64, fg: i64):
-    val char_w: i64 = 8
+fn _sdl_text_command(component_id: text, x: i32, y: i32, value: text, color: u32, font_size: i32) -> DrawIrCommand:
+    val candidate = simpleos_default_font_asset_candidate()
+    val metrics = resolve_font_metrics(candidate.family, value, font_size)
+    if not metrics.valid:
+        return draw_ir_text(component_id, x, y, value, color)
+    if metrics.shaping_required:
+        return draw_ir_text_shaped_font(component_id, x, y, value, color, metrics.family, metrics.identity, metrics.advances, metrics.width, metrics.line_height, font_size, metrics.glyph_run)
+    draw_ir_text_resolved_font(component_id, x, y, value, color, metrics.family, metrics.identity, metrics.advances, metrics.width, metrics.line_height, font_size)
+
+# Append plain-text lines to the legacy GUI's canonical Draw IR scene.
+fn gui_sdl_render_text_block(commands: [DrawIrCommand], lines: [text], component_prefix: text, x: i32, y: i32, line_height: i32, fg: u32) -> [DrawIrCommand]:
+    var result = commands
     var row: i64 = 0
     while row < lines.len():
-        val line = lines[row]
-        val cell_y = y + row * line_height
-        # Render each character as a narrow rectangle (placeholder glyph).
-        var col: i64 = 0
-        while col < line.len():
-            val cell_x = x + col * char_w
-            # Non-space characters get a foreground-colored rect.
-            if line.char_at(col) != " ":
-                _sdl_fill_rect(fb, fb_w, cell_x, cell_y, char_w - 1, line_height - 2, fg)
-            col = col + 1
+        result.push(_sdl_text_command("{component_prefix}:{row}", x, y + row.to_i32() * line_height, lines[row], fg, line_height - 2))
         row = row + 1
+    result
+
+fn gui_sdl_frame_draw_ir(frame: GuiFrame, w: i32, h: i32) -> DrawIrComposition:
+    val bg   = rgba(30, 30, 30, 255)
+    val fg   = rgba(220, 220, 220, 255)
+    val hdr  = rgba(50, 50, 80, 255)
+    val stat = rgba(40, 60, 40, 255)
+    val line_h: i32 = 16
+    val tab_h:  i32 = 20
+    val tree_w: i32 = 200
+    val stat_h: i32 = 20
+    val stat_y = h - stat_h
+
+    var commands: [DrawIrCommand] = [
+        draw_ir_rect("editor-sdl:background", 0, 0, w, h, bg),
+        draw_ir_rect("editor-sdl:tab-background", 0, 0, w, tab_h, hdr),
+        draw_ir_rect("editor-sdl:status-background", 0, stat_y, w, stat_h, stat)
+    ]
+    commands = gui_sdl_render_text_block(commands, [frame.tab_bar_html], "editor-sdl:tab", 4, 2, line_h, fg)
+    commands = gui_sdl_render_text_block(commands, [frame.file_tree_html], "editor-sdl:tree", 4, tab_h + 2, line_h, fg)
+    commands = gui_sdl_render_text_block(commands, [frame.editor_html], "editor-sdl:editor", tree_w + 4, tab_h + 2, line_h, fg)
+    commands = gui_sdl_render_text_block(commands, [frame.status_html], "editor-sdl:status", 4, stat_y + 2, line_h, fg)
+
+    val embedding = draw_ir_embedding_config("editor-sdl", "", 0, 0, w, h, 0, 1000, true)
+    val source = draw_ir_source_gui_ast("editor-sdl", "editor-sdl", "1")
+    val batch = draw_ir_batch_with_source("editor-sdl:batch", DRAW_IR_BACKEND_CPU, embedding, commands, source)
+    draw_ir_composition("editor-sdl:composition", "editor-sdl:scene", DRAW_IR_BACKEND_CPU, [batch])
 
 # Clear the window to a background color, render each section of the
 # GuiFrame as plain text rows, then present the completed framebuffer.
@@ -136,44 +159,15 @@ fn gui_sdl_present_frame(window: i64, frame: GuiFrame) -> bool:
         return false
     val w = rt_sdl_get_window_width(window)
     val h = rt_sdl_get_window_height(window)
-    if w <= 0 or h <= 0:
+    if w <= 0 or h <= 0 or w > 2147483647 or h > 2147483647:
         return false
 
-    var fb = _sdl_alloc_fb(w, h)
-
-    # Background: dark grey
-    val bg   = _sdl_pack_rgba(30, 30, 30, 255)
-    val fg   = _sdl_pack_rgba(220, 220, 220, 255)
-    val hdr  = _sdl_pack_rgba(50, 50, 80, 255)
-    val stat = _sdl_pack_rgba(40, 60, 40, 255)
-
-    _sdl_fill(fb, bg, w * h)
-
-    val line_h: i64 = 16
-    val tab_h:  i64 = 20
-    val tree_w: i64 = 200
-    val stat_h: i64 = 20
-
-    # Tab bar strip (top)
-    _sdl_fill_rect(fb, w, 0, 0, w, tab_h, hdr)
-    val tab_lines: [text] = [frame.tab_bar_html]
-    gui_sdl_render_text_block(fb, w, tab_lines, 4, 2, line_h, fg)
-
-    # File tree strip (left)
-    val tree_lines: [text] = [frame.file_tree_html]
-    gui_sdl_render_text_block(fb, w, tree_lines, 4, tab_h + 2, line_h, fg)
-
-    # Editor area (right of file tree)
-    val editor_lines: [text] = [frame.editor_html]
-    gui_sdl_render_text_block(fb, w, editor_lines, tree_w + 4, tab_h + 2, line_h, fg)
-
-    # Status bar strip (bottom)
-    val stat_y = h - stat_h
-    _sdl_fill_rect(fb, w, 0, stat_y, w, stat_h, stat)
-    val stat_lines: [text] = [frame.status_html]
-    gui_sdl_render_text_block(fb, w, stat_lines, 4, stat_y + 2, line_h, fg)
-
-    rt_sdl_present_rgba(window, fb, w, h)
+    var engine = Engine2D.create_offscreen(w.to_i32(), h.to_i32())
+    val result = engine2d_draw_ir_adv_composition(engine, gui_sdl_frame_draw_ir(frame, w.to_i32(), h.to_i32()), false)
+    engine.shutdown()
+    if result.skipped_command_count != 0 or result.pixels.len() != w * h:
+        return false
+    rt_sdl_present_rgba(window, _sdl_engine_pixels(result.pixels), w, h)
 
 # Poll one SDL event and translate it to a GuiEvent.
 fn gui_sdl_poll() -> GuiEvent:
