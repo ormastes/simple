@@ -54,9 +54,19 @@ stale PASS artifact.
 > self-hosted binary. Before trusting or attributing test/run evidence: run
 > `<binary> --version` and check for the seed warning banner, and `readlink -f`
 > the path. A seed banner + old mtime means findings apply to the SEED, not the
-> self-hosted compiler — attribute accordingly. Known failure mode: universal
-> single-file `simple test` hang on a stale seed (see
-> `doc/08_tracking/bug/deployed_seed_test_runner_init_hang_2026-07-17.md`).
+> self-hosted compiler — attribute accordingly. Known failure modes, both of
+> which present as a HANG with no output (not a test failure):
+> 1. universal single-file `simple test` hang on a stale seed (see
+>    `doc/08_tracking/bug/deployed_seed_test_runner_init_hang_2026-07-17.md`);
+> 2. **self-delegation loop** on binaries built between 2026-07-24 and
+>    `0531ca8ce266` — the CLI resolved its own identity by shelling out to
+>    `readlink -f /proc/self/exe`, which returns the HELPER (`/usr/bin/readlink`),
+>    so it delegated to `bin/simple` = itself forever. Tell it apart from a real
+>    hang by letting stderr through instead of piping to `tail`: the loop floods
+>    `seed sibling not found, skipping delegation: /usr/bin/simple_seed`. A bare
+>    `timeout ... | tail -N` hides it and it reads as a silent hang. Drive
+>    `bin/release/<triple>/simple_seed` until redeploy. See
+>    `doc/08_tracking/bug/cli_symlink_argv0_seed_sibling_lookup_2026-07-24.md`.
 
 The SPipe dev entrypoint lives at:
 

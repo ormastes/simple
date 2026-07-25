@@ -125,11 +125,22 @@ the env var points to the correct seed target.
    (`seed sibling not found, skipping delegation` = it's missing → in-process
    fallback fails `unresolved name: describe`). Every deploy must ship the
    pair. Recovery: copy a known-good `{simple, simple_seed}` pair from a clean
-   worktree's `build/bootstrap/full/<triple>/` to a scratch dir. Invoke the
-   REAL binary path, not the `bin/simple` symlink — pre-fix deployed binaries
-   derive exe path from argv[0] and skip delegation under the symlink
-   (`cli_symlink_argv0_seed_sibling_lookup_2026-07-24.md`; source fix =
-   `/proc/self/exe` in `_cli_current_exe_path`, active after next redeploy).
+   worktree's `build/bootstrap/full/<triple>/` to a scratch dir.
+   See `cli_symlink_argv0_seed_sibling_lookup_2026-07-24.md`.
+   **Exe identity must be resolved IN-PROCESS.** `_cli_current_exe_path` now
+   canonicalizes `/proc/self/exe` via `rt_path_absolute`
+   (`std::fs::canonicalize`). Never shell out for it: a `/proc/self` read done
+   by a spawned helper describes the HELPER, so `readlink -f /proc/self/exe`
+   returned `/usr/bin/readlink` — its seed sibling `/usr/bin/simple_seed` never
+   exists, so the CLI fell through to delegate to `bin/simple` = itself and
+   `bin/simple run` became an unbounded fork bomb (2026-07-25, `0531ca8ce266`).
+   The same commit restored `_cli_resolve_symlink` on the *candidate* side of
+   `_cli_is_current_exe`: `bin/simple` is a symlink, so an unresolved candidate
+   never matches our real exe and the fork-bomb guard silently passes.
+   **Binaries deployed before `0531ca8ce266` self-delegate no matter which path
+   invokes them** — identity does not depend on argv[0] in those builds, so the
+   old "invoke the REAL path, not the symlink" workaround does not help. Drive
+   `simple_seed` directly until redeploy.
 5. **Stale untracked `.smf` stubs poison module resolution tree-wide** —
    symptom is identical to a deploy clobber (every spec fails
    `unresolved name: describe`). `find src test -name '*.smf'` must be empty;

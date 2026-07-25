@@ -1072,11 +1072,21 @@ Almost never a std.spec regression. Check, in order:
    stderr is the tell). Restore the sibling, or copy a known-good
    `{simple, simple_seed}` pair from a clean worktree's
    `build/bootstrap/full/<triple>/` to a scratch dir and run from repo root.
-   **Invoke the real path** (`bin/release/<triple>/simple test ...`), not the
-   `bin/simple` symlink — deployed binaries built before the
-   `/proc/self/exe` fix resolve the exe path from argv[0] and skip
-   delegation with an empty sibling path under the symlink. See
-   `doc/08_tracking/bug/cli_symlink_argv0_seed_sibling_lookup_2026-07-24.md`.
+   Which invocation path helps depends on how old the binary is:
+   - Built **before** the 2026-07-24 fix: exe path comes from argv[0], so
+     **invoke the real path** (`bin/release/<triple>/simple test ...`), not the
+     `bin/simple` symlink — under the symlink the sibling path comes out empty
+     and delegation is skipped.
+   - Built **between 2026-07-24 and `0531ca8ce266`**: identity was read by
+     shelling out to `readlink -f /proc/self/exe`, which resolves the *helper*
+     (`/usr/bin/readlink`). Its sibling `/usr/bin/simple_seed` never exists, so
+     the CLI delegates to `bin/simple` = itself and **loops forever** — a hang
+     with no output, not a test failure. No invocation path avoids this;
+     drive `bin/release/<triple>/simple_seed` directly instead.
+   - Built **at or after `0531ca8ce266`**: identity is canonicalized in-process
+     (`rt_path_absolute("/proc/self/exe")`); either path works.
+
+   See `doc/08_tracking/bug/cli_symlink_argv0_seed_sibling_lookup_2026-07-24.md`.
 3. **Spec file outside the repo tree.** Module root is the spec file's
    directory; a spec under `/tmp` fails `module path segment 'std' not
    found`. Keep probes inside the repo (e.g. `build/`).
