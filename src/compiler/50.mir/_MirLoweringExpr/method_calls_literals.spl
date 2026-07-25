@@ -23,6 +23,7 @@ use compiler.backend.gpu_intrinsics.{is_gpu_intrinsic}
 # cannot resolve it — declare the runtime extern directly.
 extern fn rt_dict_contains(dict: i64, key: Any) -> bool
 extern fn rt_env_get(key: text) -> text
+extern fn rt_enum_discriminant(value: Any) -> i64
 
 # ============================================================================
 # Expression Lowering
@@ -549,9 +550,10 @@ impl MirLowering:
         mutation because the receiver is loaded as a value copy into a
         temporary (pure-Simple equivalent of Rust seed bug #28).
         """
-        val resolution_is_unresolved = match resolution:
-            case Unresolved: true
-            case _: false
+        val resolution_disc = rt_enum_discriminant(resolution)
+        val resolution_is_unresolved = resolution_disc == rt_enum_discriminant(MethodResolution.Unresolved)
+        val resolution_is_free_function = resolution_disc == rt_enum_discriminant(MethodResolution.FreeFunction(SymbolId(id: -1)))
+        val resolution_is_instance_method = resolution_disc == rt_enum_discriminant(MethodResolution.InstanceMethod(SymbolId(id: -1), SymbolId(id: -1)))
         var result_ok_type: HirType? = nil
         var result_err_type: HirType? = nil
         if method == "unwrap" or method == "unwrap_or":
@@ -610,9 +612,7 @@ impl MirLowering:
         # stale aggregate-owner shape seen in the freestanding CSS failure.
         # Trait/UFCS/free-function methods keep their explicit resolution, and
         # static methods have no value receiver to pre-lower.
-        val predicate_owner_recovery_allowed = match resolution:
-            case Unresolved | InstanceMethod(_, _): true
-            case _: false
+        val predicate_owner_recovery_allowed = resolution_is_unresolved or resolution_is_instance_method
         if predicate_method_shape and predicate_owner_recovery_allowed:
             val static_predicate_key = "static::{static_receiver_name}::{method}"
             if resolution_is_unresolved and static_receiver_name != "" and self.struct_method_syms.contains(static_predicate_key):
@@ -642,22 +642,29 @@ impl MirLowering:
         # that owner before the primitive fallback below.
         var chr_has_custom_owner = false
         val chr_method_shape = (method == "chr" or method == "to_char") and args.len() == 0
-        val chr_primitive_resolution_allowed = match resolution:
-            case Unresolved | FreeFunction(_): true
-            case _: false
-        if resolution_is_unresolved and chr_method_shape:
+        val chr_primitive_resolution_allowed = resolution_is_unresolved or resolution_is_free_function
+        if chr_method_shape and chr_primitive_resolution_allowed:
             val static_chr_key = "static::{static_receiver_name}::{method}"
             if static_receiver_name != "" and self.struct_method_syms.contains(static_chr_key):
                 chr_has_custom_owner = true
             else:
                 var declared_chr_owner = ""
-                if val chr_receiver_type = receiver.type_:
-                    match chr_receiver_type.kind:
-                        case HirTypeKind.Named(chr_owner_symbol, _):
-                            if val chr_owner_definition = self.symbols.get_symbol_raw(chr_owner_symbol.id):
-                                declared_chr_owner = chr_owner_definition.name
-                        case _: ()
+                val chr_receiver_type = self.receiver_declared_type(receiver)
+                if chr_receiver_type != nil:
+                    val found_chr_receiver_type = chr_receiver_type ?? HirType(kind: HirTypeKind.Error, span: receiver.span)
+                    val named_disc = rt_enum_discriminant(HirTypeKind.Named(SymbolId(id: -1), []))
+                    if rt_enum_discriminant(found_chr_receiver_type.kind) == named_disc:
+                        match found_chr_receiver_type.kind:
+                            case HirTypeKind.Named(chr_owner_symbol, _):
+                                val chr_owner_definition = self.symbols.get_symbol_raw(chr_owner_symbol.id)
+                                if chr_owner_definition != nil:
+                                    declared_chr_owner = chr_owner_definition.name
+                            case _: ()
                 if declared_chr_owner != "" and self.struct_method_syms.contains("{declared_chr_owner}::{method}"):
+                    if not has_prelowered_method_receiver:
+                        prelowered_method_receiver = self.lower_expr(receiver)
+                        has_prelowered_method_receiver = true
+                    self.struct_value_syms[prelowered_method_receiver.id] = declared_chr_owner
                     chr_has_custom_owner = true
                 else:
                     if not has_prelowered_method_receiver:
@@ -1366,64 +1373,12 @@ impl MirLowering:
             if len_symbol != "":
                 if not receiver_lowered:
                     receiver_local = self.lower_expr(receiver)
-                if len_symbol == "rt_len" and self.runtime_value_locals.contains(receiver_local.id) and self.local_is_str(receiver_local):
-                    len_symbol = "rt_string_len"
-                # rt_len (unlike rt_dict_len) expects a tagged heap-string
-                # handle for the string case (it probes via
-                # rt_core_as_string, which only recognizes RT_VALUE_TAG_HEAP
-                # values). A raw char* (Opaque "str": a bare string literal,
-                # an interpolation/rt_interp_cstr result, or any other
-                # untagged text producer) is not tagged and silently returns
-                # 0 -- e.g. `val s = "hello"; s.len()` or
-                # `"hi {name}".len()` printed 0 instead of the real length,
-                # while `("a"+"b").len()` worked because rt_string_concat's
-                # result is already tagged.
-                #
-                # Fix attempt #1 (REVERTED): unconditionally re-tag the
-                # receiver via tag_str_local_if_raw before calling rt_len.
-                # tag_str_local_if_raw decides "is this raw" purely from the
-                # STATIC MIR type (Opaque "str"), which cannot distinguish an
-                # already-tagged runtime string (e.g. a concat/replace
-                # result) from a genuinely-raw literal -- both share the same
-                # MIR type. Re-running rt_strlen+rt_string_new on an
-                # ALREADY-tagged value reads the RtCoreString header bytes as
-                # if they were string content (same failure mode documented
-                # in expr_dispatch.spl's `.len` field-access fix: "strlen
-                # stops 3 bytes in at the header's reserved-field NUL"),
-                # which regressed `("foo"+"bar"+"baz").len()` from 9 to 3.
-                #
-                # Correct fix: mirror the `.len` (no-parens, HirExprKind.Field)
-                # routing in expr_dispatch.spl, which already solves this
-                # exact tagged-or-raw ambiguity by coercing through
-                # rt_interp_cstr (a RUNTIME check: unwraps an already-tagged
-                # string to its data buffer, or passes an already-raw char*
-                # straight through) and then rt_strlen on the normalized
-                # buffer -- safe regardless of the receiver's actual runtime
-                # tag state. Only do this when the receiver is not a known
-                # array local (runtime_array_locals): arrays must keep going
-                # through plain rt_len, since rt_interp_cstr/rt_strlen would
-                # misinterpret raw array memory as a C string.
+                # rt_string_len distinguishes tagged strings from raw text at
+                # runtime. Tagged strings use their stored byte length (and
+                # preserve embedded NUL); raw literals fall back to strlen.
+                # Known arrays retain rt_len.
                 if len_symbol == "rt_len" and not self.runtime_array_locals.contains(receiver_local.id):
-                    val lc_cstr_op = MirOperand(kind: MirOperandKind.Const(
-                        MirConstValue.Str("rt_interp_cstr"),
-                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
-                    ))
-                    var b_lc_cstr = self.builder
-                    val lc_cstr_res = b_lc_cstr.emit_call(lc_cstr_op, [mir_operand_copy(receiver_local)], MirType(kind: MirTypeKind.Opaque("str")))
-                    self.builder = b_lc_cstr
-                    var lc_buf = receiver_local
-                    if val lc_cstr_local = lc_cstr_res:
-                        lc_buf = lc_cstr_local
-                    val lc_strlen_op = MirOperand(kind: MirOperandKind.Const(
-                        MirConstValue.Str("rt_strlen"),
-                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
-                    ))
-                    var b_lc_strlen = self.builder
-                    val lc_strlen_res = b_lc_strlen.emit_call(lc_strlen_op, [mir_operand_copy(lc_buf)], MirType.i64())
-                    self.builder = b_lc_strlen
-                    if val lc_strlen_local = lc_strlen_res:
-                        return lc_strlen_local
-                    return lc_buf
+                    len_symbol = "rt_string_len"
                 val func_operand = MirOperand(kind: MirOperandKind.Const(
                     MirConstValue.Str(len_symbol),
                     MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
@@ -2185,14 +2140,21 @@ impl MirLowering:
                     temp
 
             case FreeFunction(func_id):
-                val arg_operands = if wb_kind != 0:
-                    self.build_args_from_receiver(wb_receiver, args)
+                val free_receiver = if wb_kind != 0:
+                    wb_receiver
                 else if has_prelowered_method_receiver:
-                    self.build_args_from_receiver(prelowered_method_receiver, args)
+                    prelowered_method_receiver
                 else:
-                    self.lower_receiver_and_args(receiver, args)
-                val func_operand = self.symbol_to_operand(func_id)
-                val return_type = self.resolved_call_return_type(func_id)
+                    self.lower_expr(receiver)
+                val arg_operands = self.build_args_from_receiver(free_receiver, args)
+                var selected_func_id = func_id
+                val free_owner = self.struct_value_syms.get(free_receiver.id)
+                if chr_method_shape and chr_has_custom_owner and free_owner != nil and free_owner != "":
+                    val owner_method_key = "{free_owner}::{method}"
+                    if self.struct_method_syms.contains(owner_method_key):
+                        selected_func_id = self.struct_method_syms[owner_method_key]
+                val func_operand = self.symbol_to_operand(selected_func_id)
+                val return_type = self.resolved_call_return_type(selected_func_id)
                 var b = self.builder
                 val result = b.emit_call(func_operand, arg_operands, return_type)
                 self.builder = b
@@ -2201,7 +2163,7 @@ impl MirLowering:
                     wb_value = result_local
                 self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, wb_value)
                 if val result_local = result:
-                    self.remember_call_hir_return(result_local, func_id)
+                    self.remember_call_hir_return(result_local, selected_func_id)
                     result_local
                 else:
                     var b2 = self.builder

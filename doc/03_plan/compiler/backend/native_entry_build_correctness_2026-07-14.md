@@ -722,3 +722,41 @@ the shared binary — deploys require explicit user go-ahead).
   three-cycle cap. The next session must inspect why the existing integer
   builtin classifier is not selected in this exact current candidate; C5 exit
   `42` and C9 remain pending.
+
+  The next bounded session restored the proven discriminator-based
+  `MethodResolution` classifier and declared-owner bridge that a later
+  overwrite had removed. Its first incremental candidate completed with
+  `15 compiled, 664 cached, 0 failed`; primitive `chr`/`to_char` then built
+  and ran through the embedded-NUL assertion, exiting `5` instead of failing
+  unresolved. Binary inspection proved that `nul.len()` still called
+  `rt_interp_cstr` plus `rt_strlen`, which necessarily truncates embedded NUL.
+  A provenance-only retry (`4 compiled, 675 cached, 0 failed`) reproduced exit
+  `5`, proving static MIR/HIR markers are not a sufficient Stage4 boundary.
+  The final fix moves tagged-or-raw discrimination into the existing
+  `rt_string_len` ABI: tagged strings use their stored byte length, while raw
+  literals use `strlen`; known arrays retain `rt_len`. The final compiler
+  candidate SHA-256 is
+  `094e130efbc878d29e8cfecb6df6bda77167593705d123ccfe236b23b517ab5f`
+  (`4 compiled, 675 cached, 0 failed`). A fresh 18-part pure-Simple Cranelift
+  runtime archive built successfully. Positional C5 now passes primitive
+  ASCII/BMP/astral conversion, embedded NUL length/codepoint, and all invalid
+  scalar checks, then exits `10` at `owner.chr()`.
+
+  This session has reached its three-cycle cap. The remaining C5 item is only
+  declared custom-owner dispatch; diagnose why the restored
+  `struct_value_syms` owner bridge is not selected before another fix. C9
+  remains gated until positional C5 exits `42`.
+
+  The following bounded session proved the owner bridge was selected and found
+  the actual shared fault one layer later: Stage4 dropped struct-valued
+  implicit method tails when extracting an optional MIR local with `if val`.
+  Hoisting the established `result ?? LocalId(id: 0)` form into function
+  lowering fixed both `CharOwner` methods. The incremental candidate completed
+  with `4 compiled, 675 cached, 0 failed`; positional C5 built without warnings
+  and the executable exited `42`. C5 is complete.
+
+  Positional C9 then reached MIR lowering and failed loudly on both
+  `.unwrap_or` calls. Parallel source/history traces confirmed the existing
+  `parse_f64` nullable provenance is intact. C9 remains pending; its proposed
+  optional-control fix was split from this validated C5 change until a
+  positional executable can prove exit `42`.

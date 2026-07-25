@@ -1558,7 +1558,8 @@ int64_t rt_string_new_literal(const uint8_t* bytes, uint64_t len) {
 
 int64_t rt_string_len(int64_t string) {
     RtCoreString* s = rt_core_as_string(string);
-    return s ? (int64_t)s->len : -1;
+    if (s) return (int64_t)s->len;
+    return string >= 0x10000 ? (int64_t)strlen((const char*)(uintptr_t)string) : -1;
 }
 
 const uint8_t* rt_string_data(int64_t string) {
