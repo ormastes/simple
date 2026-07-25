@@ -72,3 +72,74 @@ so a free-call fix is left to whoever owns the follow-up (same shape fix as
 `evict_sources()`: call `rt_array_free`/`rt_string_free`/`rt_dict_free` — once
 those primitives are proven safe for shared-Dict values — before/at the
 reassignment or `.delete()` call).
+
+---
+
+## ADDENDUM 2026-07-25 — all three sites re-examined: NONE are safe to patch
+
+Follow-up investigation after `rt_string_free` landed (`d55fe0c67d6`). Outcome:
+**no patches applied.** Two independent blockers, plus a correction to this
+report.
+
+### The type gate rules out most of it before aliasing even matters
+
+`rt_string_free` → `rt_core_as_string` (`runtime_native.c:1363-1371`) returns
+NULL unless `s->kind == RT_VALUE_HEAP_STRING`. The evicted values are:
+
+| site | evicted value type | outcome |
+|---|---|---|
+| fat32_cache `_evict_one()` | `[u8]`, `[u32]`, `[u8]`, `DirEntry` | refused (not a string) |
+| glyph_cache LRU | `GlyphBitmap` (holds `pixels: [u8]`) | refused |
+| module_resolver `clear_cache()` | `text` — **only in-scope site** | see below |
+
+There is no proven-safe deep `rt_array_free`, so the array/class sites are not
+merely unproven — they are not expressible with today's primitives.
+
+### Aliasing blocks the one in-scope site independently
+
+`resolution.spl:58` stores `resolution_cache[cache_key] = Some(resolved.path)`
+and line 59 immediately does `return Ok(resolved)`. `ResolvedModule.path` is a
+direct field copy (`types.spl:268-275`) and `RuntimeValue` is `Copy` over a u64,
+so the cache entry and `resolved.path` are the SAME pointer, and `resolved`
+escapes to the caller. Repeated at 70/87/101/124/137/149. The hit path (39-42)
+re-exports the cached string into a new `ResolvedModule` on every hit.
+
+A keys-only variant was considered and rejected: `ModuleResolver` is a `struct`,
+so value copies share the Dict pointer; `rt_core_dict_put` keeps the FIRST key
+on collision (so a stored key's provenance is not determinable); and it would
+reclaim keys while values still leak.
+
+### CORRECTION to this report's own blast-radius claim
+
+The glyph cache at `src/lib/skia/feature/glyph_cache/cache.spl` was described
+above as high blast radius. That is **misattributed** — it has NO production
+caller; its only reference is `test/01_unit/lib/skia/glyph_cache_spec.spl`
+(verified: no non-self references under `src/`). The hot-path glyph cache is a
+different class, `src/lib/nogc_sync_mut/text_layout/font_renderer.spl:378`.
+
+Likewise `clear_cache()` has **zero callers** — exported at `__init__.spl:14`,
+never invoked (verified: the only textual match elsewhere is a comment in an
+unrelated `dns/resolver.spl`). It cannot currently be exercised at all.
+
+### Verification is blocked regardless
+
+`rt_string_free` is not yet callable from `.spl`: the deployed seed predates
+`d55fe0c67d6`, so the interpreter raises `unknown extern function:
+rt_string_free (E1002)` and returns 0 even for a uniquely-owned value. This is
+the standing "extern additions need a bootstrap rebuild" rule.
+
+The native lane is separately broken — see
+`doc/08_tracking/bug/native_build_mir_module_has_no_functions_2026-07-25.md`.
+Corroborating datum: this investigation's native-build attempts failed with
+`unknown extern function: rt_transient_array_scope_begin`, reproduced on the
+PRE-EXISTING `assets/evict_probe_2026-07-25.spl`, i.e. not probe-induced. That
+is consistent with the isolated finding there that a module-level `extern fn`
+is currently mishandled.
+
+**Conclusion: leaving all three leaks in place is the correct action today.** An
+unproven free on a no-GC runtime where every assignment aliases is memory
+corruption — strictly worse than the leak. Fixing these needs (a) a bootstrap
+redeploy so the primitive is callable, (b) the native-build extern defect fixed,
+and (c) for the array/class sites, a deep `rt_array_free` that does not exist.
+
+Fixture added: `assets/string_free_semantics_probe_2026-07-25.spl`.
