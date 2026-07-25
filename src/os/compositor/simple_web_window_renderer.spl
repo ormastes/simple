@@ -6,8 +6,9 @@
 use os.compositor.display_backend_core.{CompositorBackend}
 use common.ui.web_render_api.{WEB_RENDER_TARGET_SIMPLE_WEB, WebRenderArtifact, WebRenderRequest, web_render_full_html}
 use common.ui.window_scene.{WM_CONTENT_ORIGIN_SIMPLE_WEB, WmContentFrame, wm_content_frame_checksum}
-use nogc_sync_mut.ui.theme_package.{load_theme_package, resolved_theme_css}
+use nogc_sync_mut.ui.theme_package.{default_theme_id, load_theme_package, resolved_theme_css}
 use common.ui.wm_chrome_theme.{
+    active_wm_theme_render_snapshot,
     active_theme_composed_css,
     active_theme_solid_fallback_rgba,
     active_theme_source_fingerprint,
@@ -16,7 +17,16 @@ use common.ui.wm_chrome_theme.{
 use os.compositor.web_render_surface.{compositor_render_html_artifact, compositor_render_request_artifact}
 use std.gc_async_mut.ui.web_render_pixel_backend.{WebRenderPixelArtifactCache}
 
-val HOST_WM_DEFAULT_THEME_ID: text = "aetheric_dark"
+fn _active_or_default_wm_theme_id() -> text:
+    # Compatibility render entrypoints are still used by the freestanding
+    # shared-MDI and Compositor paths. They must follow the snapshot installed
+    # before desktop construction, rather than silently reverting only web
+    # client areas to the package default.
+    if val snapshot = active_wm_theme_render_snapshot():
+        return snapshot.id
+    # This fallback preserves standalone renderer callers that do not own a
+    # WM bootstrap yet.
+    default_theme_id()
 
 fn _theme_hex_digit(value: u32) -> text:
     "0123456789ABCDEF".char_at(value.to_i64())
@@ -98,7 +108,7 @@ fn simple_web_content_revision_with_theme(theme: text, title: text, body_html: t
 # Source-compatible default-theme entrypoint used by existing compositor
 # callers. Theme-aware callers can select the explicit variant above.
 fn simple_web_content_revision(title: text, body_html: text, width: i32, height: i32, scroll_y: i32) -> i64:
-    simple_web_content_revision_with_theme(HOST_WM_DEFAULT_THEME_ID, title, body_html, width, height, scroll_y)
+    simple_web_content_revision_with_theme(_active_or_default_wm_theme_id(), title, body_html, width, height, scroll_y)
 
 fn simple_web_html_pixel_artifact(html: text, cw: i32, ch: i32) -> WebRenderArtifact:
     val req = WebRenderRequest.html(WEB_RENDER_TARGET_SIMPLE_WEB, "", html, "", "", cw, ch).with_pixel_output()
@@ -114,7 +124,7 @@ fn render_simple_web_html_content(backend: CompositorBackend, cx: i32, cy: i32, 
 fn render_simple_web_content(backend: CompositorBackend, title: text, cx: i32, cy: i32, cw: i32, ch: i32, body_html: text):
     if cw <= 0 or ch <= 0:
         return
-    val req = simple_web_content_render_request_with_theme(HOST_WM_DEFAULT_THEME_ID, title, body_html, cw, ch).with_pixel_output()
+    val req = simple_web_content_render_request_with_theme(_active_or_default_wm_theme_id(), title, body_html, cw, ch).with_pixel_output()
     val artifact = compositor_render_request_artifact(req)
     blit_simple_web_pixels(backend, cx, cy, cw, ch, artifact.pixels)
 
