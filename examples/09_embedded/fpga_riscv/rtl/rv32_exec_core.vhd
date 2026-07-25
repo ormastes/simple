@@ -179,9 +179,15 @@ architecture rtl of rv32_exec_core is
   function c_lw_imm(h : std_logic_vector(15 downto 0)) return unsigned is
     variable imm : unsigned(6 downto 0) := (others => '0');
   begin
-    imm(5) := h(5);
-    imm(4 downto 2) := unsigned(h(12 downto 10));
-    imm(6) := h(6);
+    -- RVC CL/CS-format word offset (C.LW / C.SW):
+    --   imm[5:3] = inst[12:10], imm[2] = inst[6], imm[6] = inst[5].
+    -- The earlier mapping mis-placed the fields (imm[5]:=inst[5],
+    -- imm[4:2]:=inst[12:10], imm[6]:=inst[6]), decoding C.LW s0,4(s1) as
+    -- offset 0x40 instead of 0x4 -> loads/stores hit the wrong word
+    -- (GHDL vs QEMU divergence at pc 0x80002580 reading 0x80008E04).
+    imm(5 downto 3) := unsigned(h(12 downto 10));
+    imm(2) := h(6);
+    imm(6) := h(5);
     return resize(imm, 32);
   end function;
 
