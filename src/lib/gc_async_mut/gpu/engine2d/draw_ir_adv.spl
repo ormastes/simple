@@ -42,6 +42,18 @@ struct Engine2dDrawIrAdvResult:
     backend_handle: i64
     device_identity: i64
     readback_checksum: i64
+    # Post-execution font evidence copied from the Engine2D/FontRenderer and,
+    # for Vulkan, its completed FontRenderBatch device receipt. Transient
+    # atlas/cache payloads remain owned by Engine2D and never enter Draw IR.
+    font_identity: text = ""
+    font_execution_target: text = ""
+    font_batch_identity: text = ""
+    font_readback_source: text = ""
+    font_device_checksum: i64 = 0
+    font_oracle_checksum: i64 = 0
+    font_readback_nonblank_pixels: i64 = 0
+    font_device_executed: bool = false
+    font_promotion_ready: bool = false
 
 struct Engine2dResolvedDrawIrImage:
     image_uri: text
@@ -822,7 +834,22 @@ fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: 
     var readback = engine2d_readback([], "not_requested")
     if readback_frame:
         readback = eng.read_pixels_with_source()
-    val result = _engine2d_draw_ir_result_from_composition_plan_with_unsupported(plan, rendered, skipped, unsupported_kinds, readback)
+    var result = _engine2d_draw_ir_result_from_composition_plan_with_unsupported(
+        plan, rendered, skipped, unsupported_kinds, readback)
+    val rendered_fonts = eng.fonts()
+    result.font_identity = rendered_fonts.current_font_identity()
+    eng.font_renderer = rendered_fonts
+    result.font_execution_target = eng.font_execution_target()
+    val vulkan_font = eng.vulkan_font_performance_evidence()
+    if vulkan_font != nil:
+        val evidence = vulkan_font.?
+        result.font_batch_identity = evidence.batch_identity
+        result.font_readback_source = evidence.readback_source
+        result.font_device_checksum = evidence.device_checksum
+        result.font_oracle_checksum = evidence.oracle_checksum
+        result.font_readback_nonblank_pixels = evidence.readback_nonblank_pixels
+        result.font_device_executed = evidence.device_executed
+        result.font_promotion_ready = evidence.promotion_ready
     result
 
 export Engine2dDrawIrAdvResult

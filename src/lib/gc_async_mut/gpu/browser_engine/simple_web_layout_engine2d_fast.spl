@@ -17,22 +17,78 @@ use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{Engine2dDrawIrAdvResult, engine2d
 use std.gc_async_mut.gpu.engine2d.backend.{Engine2DReadback, engine2d_readback}
 use std.gc_async_mut.gpu.engine2d.backend_probe.{BackendStatus}
 use common.ui.web_render_api.{WebRenderMaterialFallbackProvenance}
+use common.ui.draw_ir.{DrawIrComposition}
 
 class SimpleWebLayoutEngine2DExecutionResult:
     render: Engine2dDrawIrAdvResult
     material_fallback: WebRenderMaterialFallbackProvenance
+    vector_font_identity: text
+    vector_font_pixel_size: i32
+    vector_font_execution_target: text
+    vector_font_batch_identity: text
+    vector_font_readback_source: text
+    vector_font_device_checksum: i64
+    vector_font_oracle_checksum: i64
+    vector_font_readback_nonblank_pixels: i64
+    vector_font_device_executed: bool
+    vector_font_promotion_ready: bool
 
 class SimpleWebLayoutEngine2DReadbackResult:
     readback: Engine2DReadback
     material_fallback: WebRenderMaterialFallbackProvenance
+    vector_font_identity: text
+    vector_font_pixel_size: i32
+    vector_font_execution_target: text
+    vector_font_batch_identity: text
+    vector_font_readback_source: text
+    vector_font_device_checksum: i64
+    vector_font_oracle_checksum: i64
+    vector_font_readback_nonblank_pixels: i64
+    vector_font_device_executed: bool
+    vector_font_promotion_ready: bool
+
+struct SimpleWebVectorFontEvidence:
+    identity: text
+    pixel_size: i32
+
+fn _simple_web_vector_font_evidence(composition: DrawIrComposition) -> SimpleWebVectorFontEvidence:
+    for batch in composition.batches:
+        for command in batch.commands:
+            if command.kind == "text" and
+                    command.text_value.contains("Simple Web 300 DPI"):
+                var identity = ""
+                var pixel_size = 0
+                for prop in command.computed_style:
+                    if prop.key == "font-identity":
+                        identity = prop.value
+                    elif prop.key == "font-size":
+                        val parsed = prop.value.to_i64()
+                        if parsed != nil and parsed > 0:
+                            pixel_size = parsed.to_i32()
+                return SimpleWebVectorFontEvidence(
+                    identity: identity, pixel_size: pixel_size)
+    SimpleWebVectorFontEvidence(identity: "", pixel_size: 0)
 
 fn _simple_web_layout_render_html_engine2d_execution(html: text, width: i32, height: i32, backend_name: text) -> SimpleWebLayoutEngine2DExecutionResult:
     val layout_result = simple_web_layout_render_html_draw_ir_result(html, width, height)
+    val vector_font = _simple_web_vector_font_evidence(layout_result.composition)
     var engine = Engine2D.create_with_backend_fast(width, height, backend_name)
     engine.clear(0u32)
     val render = engine2d_draw_ir_adv_composition(engine, layout_result.composition, true)
     engine.shutdown()
-    SimpleWebLayoutEngine2DExecutionResult(render: render, material_fallback: layout_result.material_fallback)
+    SimpleWebLayoutEngine2DExecutionResult(
+        render: render, material_fallback: layout_result.material_fallback,
+        vector_font_identity: render.font_identity,
+        vector_font_pixel_size: vector_font.pixel_size,
+        vector_font_execution_target: render.font_execution_target,
+        vector_font_batch_identity: render.font_batch_identity,
+        vector_font_readback_source: render.font_readback_source,
+        vector_font_device_checksum: render.font_device_checksum,
+        vector_font_oracle_checksum: render.font_oracle_checksum,
+        vector_font_readback_nonblank_pixels:
+            render.font_readback_nonblank_pixels,
+        vector_font_device_executed: render.font_device_executed,
+        vector_font_promotion_ready: render.font_promotion_ready)
 
 # Render `html` to a flat ARGB [u32] framebuffer through the layout Draw IR on an
 # Engine2D in native-only fast mode. On Metal this is GPU-rendered with a
@@ -58,19 +114,49 @@ pub fn simple_web_layout_render_html_readback_engine2d_result(html: text, width:
     if width <= 0 or height <= 0:
         return SimpleWebLayoutEngine2DReadbackResult(
             readback: engine2d_readback([], "unavailable"),
-            material_fallback: WebRenderMaterialFallbackProvenance.none()
+            material_fallback: WebRenderMaterialFallbackProvenance.none(),
+            vector_font_identity: "", vector_font_pixel_size: 0,
+            vector_font_execution_target: "", vector_font_batch_identity: "",
+            vector_font_readback_source: "", vector_font_device_checksum: 0,
+            vector_font_oracle_checksum: 0,
+            vector_font_readback_nonblank_pixels: 0,
+            vector_font_device_executed: false,
+            vector_font_promotion_ready: false
         )
     val execution = _simple_web_layout_render_html_engine2d_execution(html, width, height, backend_name)
     if execution.render.skipped_command_count != 0:
         return SimpleWebLayoutEngine2DReadbackResult(
             readback: engine2d_readback([], "unavailable"),
-            material_fallback: execution.material_fallback
+            material_fallback: execution.material_fallback,
+            vector_font_identity: execution.vector_font_identity,
+            vector_font_pixel_size: execution.vector_font_pixel_size,
+            vector_font_execution_target: execution.vector_font_execution_target,
+            vector_font_batch_identity: execution.vector_font_batch_identity,
+            vector_font_readback_source: execution.vector_font_readback_source,
+            vector_font_device_checksum: execution.vector_font_device_checksum,
+            vector_font_oracle_checksum: execution.vector_font_oracle_checksum,
+            vector_font_readback_nonblank_pixels:
+                execution.vector_font_readback_nonblank_pixels,
+            vector_font_device_executed: execution.vector_font_device_executed,
+            vector_font_promotion_ready: execution.vector_font_promotion_ready
         )
     val pixel_count = execution.render.pixels.len().to_i64()
     val readback = Engine2DReadback(pixels: execution.render.pixels, source: execution.render.readback_source,
         backend_handle: execution.render.backend_handle, device_identity: execution.render.device_identity,
         pixel_count: pixel_count, checksum: execution.render.readback_checksum)
-    SimpleWebLayoutEngine2DReadbackResult(readback: readback, material_fallback: execution.material_fallback)
+    SimpleWebLayoutEngine2DReadbackResult(
+        readback: readback, material_fallback: execution.material_fallback,
+        vector_font_identity: execution.vector_font_identity,
+        vector_font_pixel_size: execution.vector_font_pixel_size,
+        vector_font_execution_target: execution.vector_font_execution_target,
+        vector_font_batch_identity: execution.vector_font_batch_identity,
+        vector_font_readback_source: execution.vector_font_readback_source,
+        vector_font_device_checksum: execution.vector_font_device_checksum,
+        vector_font_oracle_checksum: execution.vector_font_oracle_checksum,
+        vector_font_readback_nonblank_pixels:
+            execution.vector_font_readback_nonblank_pixels,
+        vector_font_device_executed: execution.vector_font_device_executed,
+        vector_font_promotion_ready: execution.vector_font_promotion_ready)
 
 pub fn simple_web_layout_render_html_readback_engine2d(html: text, width: i32, height: i32, backend_name: text) -> Engine2DReadback:
     simple_web_layout_render_html_readback_engine2d_result(html, width, height, backend_name).readback
