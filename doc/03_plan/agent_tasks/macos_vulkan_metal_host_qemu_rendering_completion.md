@@ -14,6 +14,43 @@ Updated: 2026-07-24
   - re-run native-process-lifecycle checks (`launched-process-missing`, PID identity, event sequence, font cache transitions).
   - refresh SimpleOS QEMU ARM SIMD rendering evidence after host lanes close.
 
+### 2026-07-25 Current Vulkan 2D checkpoint
+
+- Host Vulkan installation is healthy: MoltenVK 1.4.1, Vulkan loader/tools
+  1.4.350.1, validation layer 1.4.350, and Apple M4 device enumeration pass.
+- The shared Vulkan/Metal live harness now:
+  - renders one full-target 3840x2160 `DrawIrComposition` through the parent
+    Engine2D, preserving the selected Bungee `FontRenderer`;
+  - derives 100 physical pixels from 24 points at 300 DPI and embeds/verifies
+    300x300 DPI PNG metadata;
+  - maps the observed native winit focus event through
+    `UIEvent.FocusEvent -> process_event -> UIState`, then derives the DrawIR
+    action accent from that state;
+  - records ordered pointer/key delivery separately without claiming an
+    unimplemented UI-state reduction;
+  - emits stage-specific failure receipts, exact provider hashes, repository
+    revision, and a backend-independent shared-scene fingerprint.
+- A fail-closed Vulkan/Metal aggregate now requires equal metadata, provider
+  hashes, font metrics, DrawIR identity/count/readback, semantic mutation,
+  ordered events, bounds, and raw PPM pixels with mismatch count 0, maximum
+  channel delta 0, and tolerance 0. Behavioral tests cover semantic mismatch
+  and evidence/output alias rejection.
+- Native binaries are no longer admitted merely because they are under
+  `build/`. `build-macos-gpu-2d-live-native.shs` must build the canonical
+  output and atomically bind compiler, sources, providers, arguments, output,
+  and hashes in a verified manifest.
+- Current blocker: the canonical Vulkan native build resolved the earlier
+  module-root error after moving the shared fixture beside the live harness,
+  but both the cold and cached/four-thread builds exceeded the bounded
+  180-second verification window without producing an output or manifest.
+  The three-cycle cap is exhausted for this session. Therefore no current
+  Vulkan device-readback/window/event PASS exists, and web/GUI/WM/Metal live
+  lanes remain gated.
+- Generated manuals for the new DrawIR fixture and parity contract/behavior
+  specs remain pending. The available release binary identifies itself as a
+  Rust bootstrap seed during `spipe-docgen`; its generated output was rejected
+  and removed rather than accepted as pure-Simple verification evidence.
+
 ## Goal
 
 Prove equivalent Simple 2D, web, GUI, vector-font, and event behavior through

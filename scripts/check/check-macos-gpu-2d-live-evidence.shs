@@ -15,6 +15,7 @@ BUILD_DIR="${BUILD_DIR:-build/tmp/macos_${BACKEND}_2d_live_evidence}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/macos_${BACKEND}_2d_live_evidence_$(date -u +%F).md}"
 HARNESS="$ROOT_DIR/test/02_integration/rendering/macos_${BACKEND}_2d_live_harness.spl"
 SHARED_HARNESS="$ROOT_DIR/test/02_integration/rendering/macos_gpu_2d_live_harness.spl"
+FIXTURE_SOURCE="$ROOT_DIR/test/02_integration/rendering/macos_gpu_2d_draw_ir_event_fixture.spl"
 BACKEND_SOURCE="$ROOT_DIR/src/lib/gc_async_mut/gpu/engine2d/backend_${BACKEND}.spl"
 CAPTURE_PPM="$BUILD_DIR/${BACKEND}_3840x2160_300dpi.ppm"
 CAPTURE_PNG="$BUILD_DIR/${BACKEND}_3840x2160_300dpi.png"
@@ -27,8 +28,10 @@ LAUNCH_OUT="$BUILD_DIR/launch.out"
 LAUNCH_ERR="$BUILD_DIR/launch.err"
 WINDOW_RECORD="$BUILD_DIR/window.env"
 TIMEOUT_SECS="${GPU_2D_LIVE_TIMEOUT_SECS:-420}"
-SELECTED_DRIVER_PATH="${GPU_2D_LIVE_NATIVE_BIN:-}"
-SELECTED_DRIVER_KIND="pure-simple-native-output"
+BUILD_HELPER="$ROOT_DIR/scripts/check/build-macos-gpu-2d-live-native.shs"
+TRUSTED_BUILD_MANIFEST="$ROOT_DIR/build/macos_gpu_2d_live_native/$BACKEND/trusted-build.env"
+SELECTED_DRIVER_PATH=""
+SELECTED_DRIVER_KIND="trusted-self-hosted-native-output"
 SPL_WINIT_LIB="${GPU_2D_LIVE_WINIT_LIB:-$ROOT_DIR/build/sffi/libspl_winit.dylib}"
 SIMPLE_RUNTIME_DYLIB="${GPU_2D_LIVE_RUNTIME_DYLIB:-$ROOT_DIR/build/sffi/libsimple_runtime_wm.dylib}"
 SIMPLE_RUNTIME_C_DYLIB="${GPU_2D_LIVE_RUNTIME_C_DYLIB:-$ROOT_DIR/build/sffi/libsimple_runtime_c_wm.dylib}"
@@ -109,6 +112,7 @@ write_report() {
         echo "- reason: $reason"
         echo "- selected driver: \`$SELECTED_DRIVER_PATH\`"
         echo "- selected driver kind: $SELECTED_DRIVER_KIND"
+        echo "- trusted build manifest: \`$TRUSTED_BUILD_MANIFEST\`"
         echo "- runtime receipt: \`$RECEIPT\`"
         echo "- 4K/300-DPI framebuffer: \`$CAPTURE_PNG\`"
         echo "- exact window before input: \`$WINDOW_BEFORE_PNG\`"
@@ -141,6 +145,7 @@ fail() {
         echo "${PREFIX}_reason=$reason"
         echo "${PREFIX}_driver_kind=$SELECTED_DRIVER_KIND"
         echo "${PREFIX}_driver_path=$SELECTED_DRIVER_PATH"
+        echo "${PREFIX}_trusted_build_manifest=$TRUSTED_BUILD_MANIFEST"
     } >"$EVIDENCE"
     write_report fail "$reason"
     echo "macOS $BACKEND_TITLE 2D live evidence: FAIL ($reason)" >&2
@@ -149,6 +154,16 @@ fail() {
 
 require_launched_process() {
     if ! kill -0 "$app_pid" 2>/dev/null; then
+        # The harness writes a stage-specific failure receipt immediately
+        # before returning.  LaunchServices can reap the process before that
+        # small file becomes visible to this polling shell, so allow only a
+        # short, bounded publication grace period.  A missing receipt after
+        # the grace period remains a hard launched-process failure.
+        receipt_grace=0
+        while [ "$receipt_grace" -lt 10 ] && [ ! -s "$RECEIPT" ]; do
+            sleep 0.1
+            receipt_grace=$((receipt_grace + 1))
+        done
         if [ -s "$RECEIPT" ] &&
                 [ "$(value_of gpu_2d_live_status "$RECEIPT")" = "fail" ]; then
             receipt_reason="$(value_of gpu_2d_live_reason "$RECEIPT")"
@@ -187,31 +202,53 @@ file_cksum() {
 [ "$(uname -s)" = "Darwin" ] || fail "requires-macos"
 [ -f "$HARNESS" ] || fail "harness-missing"
 [ -f "$SHARED_HARNESS" ] || fail "shared-harness-missing"
+[ -f "$FIXTURE_SOURCE" ] || fail "shared-scene-fixture-missing"
 [ -f "$BACKEND_SOURCE" ] || fail "backend-source-missing"
+[ -x "$BUILD_HELPER" ] || fail "trusted-native-build-helper-missing"
+[ -z "${GPU_2D_LIVE_NATIVE_BIN:-}" ] || fail "arbitrary-native-driver-supplied"
 command -v osascript >/dev/null 2>&1 || fail "osascript-missing"
 command -v screencapture >/dev/null 2>&1 || fail "screencapture-missing"
 command -v cliclick >/dev/null 2>&1 || fail "cliclick-missing"
 command -v sips >/dev/null 2>&1 || fail "sips-missing"
 
-# This gate admits only an explicitly supplied pure-Simple native harness.
-# A Rust seed, source interpreter fallback, or executable outside the owned
-# build tree cannot satisfy production GPU evidence.
-[ -n "$SELECTED_DRIVER_PATH" ] || fail "admissible-native-driver-required"
-[ -x "$SELECTED_DRIVER_PATH" ] || fail "admissible-native-driver-missing"
-case "$SELECTED_DRIVER_PATH" in
-    "$ROOT_DIR"/build/*) ;;
-    *) fail "native-driver-outside-owned-build-tree" ;;
-esac
+# Do not admit an executable from the caller.  The verifier re-derives every
+# source/provider/compiler/output binding from the canonical self-hosted build
+# manifest and prints the sole output path that may be launched.
+trusted_manifest_result="$(
+    GPU_2D_LIVE_WINIT_LIB="$SPL_WINIT_LIB" \
+    GPU_2D_LIVE_RUNTIME_DYLIB="$SIMPLE_RUNTIME_DYLIB" \
+    GPU_2D_LIVE_RUNTIME_C_DYLIB="$SIMPLE_RUNTIME_C_DYLIB" \
+    sh "$BUILD_HELPER" --verify "$BACKEND" "$TRUSTED_BUILD_MANIFEST"
+)" || fail "trusted-build-manifest-invalid"
+[ "$(printf '%s\n' "$trusted_manifest_result" | sed -n 's/^trusted_build_manifest_status=//p')" = pass ] ||
+    fail "trusted-build-manifest-status-invalid"
+SELECTED_DRIVER_PATH="$(printf '%s\n' "$trusted_manifest_result" |
+    sed -n 's/^trusted_build_manifest_output_path=//p')"
+[ -n "$SELECTED_DRIVER_PATH" ] || fail "trusted-build-output-missing"
+[ "$(printf '%s\n' "$trusted_manifest_result" |
+    sed -n '/^trusted_build_manifest_output_path=/p' | wc -l | tr -d ' ')" = 1 ] ||
+    fail "trusted-build-output-not-singular"
+[ -x "$SELECTED_DRIVER_PATH" ] || fail "trusted-build-output-not-executable"
+driver_manifest_sha256="$(shasum -a 256 "$TRUSTED_BUILD_MANIFEST" | awk '{print $1}')"
 for provider in "$SPL_WINIT_LIB" "$SIMPLE_RUNTIME_DYLIB" "$SIMPLE_RUNTIME_C_DYLIB"; do
     [ -s "$provider" ] || fail "runtime-provider-missing"
     otool -L "$SELECTED_DRIVER_PATH" |
         grep -Fq "@rpath/$(basename -- "$provider")" ||
         fail "runtime-provider-not-linked"
 done
+winit_provider_sha256="$(shasum -a 256 "$SPL_WINIT_LIB" | awk '{print $1}')"
+simple_runtime_provider_sha256="$(shasum -a 256 "$SIMPLE_RUNTIME_DYLIB" | awk '{print $1}')"
+simple_runtime_c_provider_sha256="$(shasum -a 256 "$SIMPLE_RUNTIME_C_DYLIB" | awk '{print $1}')"
 otool -l "$SELECTED_DRIVER_PATH" |
     grep -Fq "$(dirname -- "$SIMPLE_RUNTIME_DYLIB")" ||
     fail "runtime-provider-rpath-missing"
 if [ "$BACKEND" = vulkan ]; then
+    nm -u "$SELECTED_DRIVER_PATH" |
+        grep -Fq "_rt_vulkan_init" ||
+        fail "native-driver-without-vulkan"
+    nm -u "$SELECTED_DRIVER_PATH" |
+        grep -Fq "_rt_vulkan_compile_spirv" ||
+        fail "native-driver-without-vulkan"
     LC_ALL=C grep -aFq "Vulkan device not initialised" "$SIMPLE_RUNTIME_DYLIB" ||
         fail "vulkan-runtime-provider-stub"
     nm -gU "$SIMPLE_RUNTIME_DYLIB" |
@@ -223,10 +260,16 @@ if [ "$BACKEND" = vulkan ]; then
 fi
 
 driver_sha256="$(shasum -a 256 "$SELECTED_DRIVER_PATH" | awk '{print $1}')"
-source_revision="$(printf '%s\n' "$(git rev-parse HEAD)" \
+repo_revision="$(git rev-parse HEAD)"
+shared_scene_fingerprint="$(cat "$SHARED_HARNESS" "$FIXTURE_SOURCE" |
+    shasum -a 256 | awk '{print $1}')"
+source_revision="$(printf '%s\n' "$repo_revision" \
     "$(git hash-object "$HARNESS")" "$(git hash-object "$SHARED_HARNESS")" \
-    "$(git hash-object "$BACKEND_SOURCE")" "$driver_sha256" |
-    shasum -a 256 | awk '{print substr($1,1,40)}')"
+    "$(git hash-object "$FIXTURE_SOURCE")" \
+    "$(git hash-object "$BACKEND_SOURCE")" "$driver_sha256" \
+    "$winit_provider_sha256" "$simple_runtime_provider_sha256" \
+    "$simple_runtime_c_provider_sha256" |
+    shasum -a 256 | awk '{print $1}')"
 
 # LaunchServices reports canonical /private/var paths while mktemp may return
 # the /var symlink spelling.  Canonicalize before deriving the exact executable
@@ -259,6 +302,8 @@ cat >"$app/Contents/Info.plist" <<PLIST
     <key>GPU_2D_LIVE_CAPTURE_PATH</key><string>$CAPTURE_PPM</string>
     <key>GPU_2D_LIVE_RECEIPT_PATH</key><string>$RECEIPT</string>
     <key>GPU_2D_LIVE_READY_PATH</key><string>$READY</string>
+    <key>GPU_2D_LIVE_REPO_REVISION</key><string>$repo_revision</string>
+    <key>GPU_2D_LIVE_SHARED_SCENE_FINGERPRINT</key><string>$shared_scene_fingerprint</string>
     <key>GPU_2D_LIVE_SOURCE_REVISION</key><string>$source_revision</string>
     <key>GPU_2D_LIVE_HOLD</key><string>1</string>
   </dict>
@@ -411,6 +456,10 @@ after_window_cksum="$(file_cksum "$WINDOW_AFTER_PNG")"
     fail "height-mismatch"
 [ "$(value_of gpu_2d_live_dpi "$RECEIPT")" = "300" ] ||
     fail "dpi-mismatch"
+[ "$(value_of gpu_2d_live_repo_revision "$RECEIPT")" = "$repo_revision" ] ||
+    fail "repo-revision-mismatch"
+[ "$(value_of gpu_2d_live_shared_scene_fingerprint "$RECEIPT")" = \
+    "$shared_scene_fingerprint" ] || fail "shared-scene-fingerprint-mismatch"
 [ "$(value_of gpu_2d_live_source_revision "$RECEIPT")" = "$source_revision" ] ||
     fail "source-revision-mismatch"
 [ "$(value_of gpu_2d_live_event_sequence "$RECEIPT")" = \
@@ -420,6 +469,47 @@ after_window_cksum="$(file_cksum "$WINDOW_AFTER_PNG")"
     fail "event-count-mismatch"
 [ "$(value_of gpu_2d_live_event_backend "$RECEIPT")" = "$BACKEND" ] ||
     fail "event-backend-mismatch"
+[ "$(value_of gpu_2d_live_draw_ir_composition_id "$RECEIPT")" = \
+    "macos-gpu-2d-frozen-composition-v1" ] ||
+    fail "shared-draw-ir-composition-mismatch"
+[ "$(value_of gpu_2d_live_draw_ir_scene_key "$RECEIPT")" = \
+    "macos-gpu-2d-frozen-scene-v1" ] ||
+    fail "shared-draw-ir-scene-mismatch"
+[ "$(value_of gpu_2d_live_draw_ir_rendered_commands "$RECEIPT")" = "5" ] ||
+    fail "shared-draw-ir-render-count-mismatch"
+[ "$(value_of gpu_2d_live_draw_ir_skipped_commands "$RECEIPT")" = "0" ] ||
+    fail "shared-draw-ir-command-skipped"
+[ "$(value_of gpu_2d_live_draw_ir_fallback_required "$RECEIPT")" = "false" ] ||
+    fail "shared-draw-ir-fallback-required"
+[ -z "$(value_of gpu_2d_live_draw_ir_fallback_reason "$RECEIPT")" ] ||
+    fail "shared-draw-ir-unsupported-command"
+[ "$(value_of gpu_2d_live_draw_ir_readback_source "$RECEIPT")" = \
+    "device_readback" ] || fail "shared-draw-ir-device-readback-missing"
+draw_ir_checksum="$(value_of gpu_2d_live_draw_ir_readback_checksum "$RECEIPT")"
+positive_integer "$draw_ir_checksum" || fail "shared-draw-ir-checksum-missing"
+[ "$(value_of gpu_2d_live_semantic_event "$RECEIPT")" = \
+    "focus" ] || fail "semantic-event-mismatch"
+[ "$(value_of gpu_2d_live_semantic_before_focus "$RECEIPT")" = \
+    "macos-gpu-2d-root" ] || fail "semantic-before-focus-mismatch"
+[ "$(value_of gpu_2d_live_semantic_after_focus "$RECEIPT")" = \
+    "macos-gpu-2d-action" ] || fail "semantic-after-focus-mismatch"
+[ "$(value_of gpu_2d_live_semantic_changed "$RECEIPT")" = "true" ] ||
+    fail "semantic-mutation-missing"
+[ "$(value_of gpu_2d_live_semantic_native_focus_reduced "$RECEIPT")" = "true" ] ||
+    fail "native-focus-not-reduced"
+[ "$(value_of gpu_2d_live_semantic_raw_winit_reduced "$RECEIPT")" = "true" ] ||
+    fail "raw-winit-focus-not-reduced"
+[ "$(value_of gpu_2d_live_semantic_pointer_key_delivery "$RECEIPT")" = \
+    "observed" ] || fail "pointer-key-delivery-not-observed"
+[ "$(value_of gpu_2d_live_semantic_correlation "$RECEIPT")" = \
+    "native-focus-reduced;pointer-key-delivery-observed" ] ||
+    fail "semantic-correlation-mismatch"
+semantic_before_accent="$(value_of gpu_2d_live_semantic_before_accent "$RECEIPT")"
+semantic_after_accent="$(value_of gpu_2d_live_semantic_after_accent "$RECEIPT")"
+positive_integer "$semantic_before_accent" || fail "semantic-before-accent-missing"
+positive_integer "$semantic_after_accent" || fail "semantic-after-accent-missing"
+[ "$semantic_before_accent" != "$semantic_after_accent" ] ||
+    fail "semantic-accent-unchanged"
 [ "$(value_of gpu_2d_live_font_loaded "$RECEIPT")" = "true" ] ||
     fail "vector-font-not-loaded"
 font_expected_identity="$(value_of gpu_2d_live_font_expected_identity "$RECEIPT")"
@@ -429,6 +519,17 @@ font_identity="$(value_of gpu_2d_live_font_identity "$RECEIPT")"
     fail "vector-font-identity-mismatch"
 [ "$(value_of gpu_2d_live_font_warm_rasterizations "$RECEIPT")" = "0" ] ||
     fail "vector-font-warm-rerasterized"
+font_point_size="$(value_of gpu_2d_live_font_point_size "$RECEIPT")"
+font_dpi="$(value_of gpu_2d_live_font_dpi "$RECEIPT")"
+font_pixel_size="$(value_of gpu_2d_live_font_pixel_size "$RECEIPT")"
+positive_integer "$font_point_size" || fail "vector-font-point-size-missing"
+positive_integer "$font_dpi" || fail "vector-font-dpi-missing"
+positive_integer "$font_pixel_size" || fail "vector-font-pixel-size-missing"
+[ "$font_point_size" = "24" ] && [ "$font_dpi" = "300" ] ||
+    fail "vector-font-dpi-input-mismatch"
+expected_font_pixel_size=$(((font_point_size * font_dpi + 36) / 72))
+[ "$font_pixel_size" = "$expected_font_pixel_size" ] ||
+    fail "vector-font-dpi-formula-mismatch"
 [ "$(value_of gpu_2d_live_font_execution_target "$RECEIPT")" = "$BACKEND" ] ||
     fail "vector-font-not-executed-on-backend"
 font_attempts="$(value_of gpu_2d_live_font_execution_attempts "$RECEIPT")"
@@ -468,12 +569,22 @@ esac
 sips -s format png "$CAPTURE_PPM" --out "$CAPTURE_PNG" >/dev/null ||
     fail "png-conversion-failed"
 [ -s "$CAPTURE_PNG" ] || fail "png-conversion-empty"
+sips -s dpiWidth 300 -s dpiHeight 300 "$CAPTURE_PNG" >/dev/null ||
+    fail "png-dpi-write-failed"
 png_width="$(sips -g pixelWidth "$CAPTURE_PNG" |
     awk '/pixelWidth:/{print $2}')"
 png_height="$(sips -g pixelHeight "$CAPTURE_PNG" |
     awk '/pixelHeight:/{print $2}')"
 [ "$png_width" = "3840" ] && [ "$png_height" = "2160" ] ||
     fail "png-dimensions-mismatch"
+png_dpi_width="$(sips -g dpiWidth "$CAPTURE_PNG" |
+    awk '/dpiWidth:/{printf "%.0f\n", $2; found=1} END {if (!found) exit 1}')" ||
+    fail "png-dpi-mismatch"
+png_dpi_height="$(sips -g dpiHeight "$CAPTURE_PNG" |
+    awk '/dpiHeight:/{printf "%.0f\n", $2; found=1} END {if (!found) exit 1}')" ||
+    fail "png-dpi-mismatch"
+[ "$png_dpi_width" = "300" ] && [ "$png_dpi_height" = "300" ] ||
+    fail "png-dpi-mismatch"
 
 {
     echo "${PREFIX}_status=pass"
@@ -481,7 +592,14 @@ png_height="$(sips -g pixelHeight "$CAPTURE_PNG" |
     echo "${PREFIX}_driver_kind=$SELECTED_DRIVER_KIND"
     echo "${PREFIX}_driver_path=$SELECTED_DRIVER_PATH"
     echo "${PREFIX}_driver_sha256=$driver_sha256"
+    echo "${PREFIX}_trusted_build_manifest=$TRUSTED_BUILD_MANIFEST"
+    echo "${PREFIX}_trusted_build_manifest_sha256=$driver_manifest_sha256"
+    echo "${PREFIX}_winit_provider_sha256=$winit_provider_sha256"
+    echo "${PREFIX}_simple_runtime_provider_sha256=$simple_runtime_provider_sha256"
+    echo "${PREFIX}_simple_runtime_c_provider_sha256=$simple_runtime_c_provider_sha256"
     echo "${PREFIX}_backend=$BACKEND"
+    echo "${PREFIX}_repo_revision=$repo_revision"
+    echo "${PREFIX}_shared_scene_fingerprint=$shared_scene_fingerprint"
     echo "${PREFIX}_source=device_readback"
     echo "${PREFIX}_backend_handle=$backend_handle"
     echo "${PREFIX}_initial_checksum=$initial_checksum"
@@ -489,17 +607,36 @@ png_height="$(sips -g pixelHeight "$CAPTURE_PNG" |
     echo "${PREFIX}_width=3840"
     echo "${PREFIX}_height=2160"
     echo "${PREFIX}_dpi=300"
+    echo "${PREFIX}_png_dpi_width=$png_dpi_width"
+    echo "${PREFIX}_png_dpi_height=$png_dpi_height"
     echo "${PREFIX}_pixel_sha256=$pixel_sha256"
     echo "${PREFIX}_non_background_bounds=$non_background_bounds"
     echo "${PREFIX}_event_sequence=focus,pointer_move,pointer_down,pointer_up,key_down,key_up"
     echo "${PREFIX}_event_count=6"
     echo "${PREFIX}_event_backend=$BACKEND"
+    echo "${PREFIX}_draw_ir_composition_id=macos-gpu-2d-frozen-composition-v1"
+    echo "${PREFIX}_draw_ir_scene_key=macos-gpu-2d-frozen-scene-v1"
+    echo "${PREFIX}_draw_ir_rendered_commands=5"
+    echo "${PREFIX}_draw_ir_skipped_commands=0"
+    echo "${PREFIX}_draw_ir_readback_checksum=$draw_ir_checksum"
+    echo "${PREFIX}_semantic_event=focus"
+    echo "${PREFIX}_semantic_before_focus=macos-gpu-2d-root"
+    echo "${PREFIX}_semantic_after_focus=macos-gpu-2d-action"
+    echo "${PREFIX}_semantic_before_accent=$semantic_before_accent"
+    echo "${PREFIX}_semantic_after_accent=$semantic_after_accent"
+    echo "${PREFIX}_semantic_changed=true"
+    echo "${PREFIX}_semantic_native_focus_reduced=true"
+    echo "${PREFIX}_semantic_raw_winit_reduced=true"
+    echo "${PREFIX}_semantic_pointer_key_delivery=observed"
     echo "${PREFIX}_font_loaded=true"
     echo "${PREFIX}_font_expected_identity=$font_expected_identity"
     echo "${PREFIX}_font_identity=$font_identity"
     echo "${PREFIX}_font_cold_rasterizations=$font_cold"
     echo "${PREFIX}_font_warm_rasterizations=0"
     echo "${PREFIX}_font_warm_hits=$font_hits"
+    echo "${PREFIX}_font_point_size=$font_point_size"
+    echo "${PREFIX}_font_dpi=$font_dpi"
+    echo "${PREFIX}_font_pixel_size=$font_pixel_size"
     echo "${PREFIX}_font_execution_target=$BACKEND"
     echo "${PREFIX}_source_revision=$source_revision"
     echo "${PREFIX}_pid=$app_pid"
@@ -518,11 +655,36 @@ png_height="$(sips -g pixelHeight "$CAPTURE_PNG" |
     echo "width=3840"
     echo "height=2160"
     echo "dpi=300"
+    echo "font_point_size=$font_point_size"
+    echo "font_dpi=$font_dpi"
+    echo "font_pixel_size=$font_pixel_size"
+    echo "winit_provider_sha256=$winit_provider_sha256"
+    echo "simple_runtime_provider_sha256=$simple_runtime_provider_sha256"
+    echo "simple_runtime_c_provider_sha256=$simple_runtime_c_provider_sha256"
+    echo "trusted_build_manifest=$TRUSTED_BUILD_MANIFEST"
+    echo "trusted_build_manifest_sha256=$driver_manifest_sha256"
     echo "pixel_sha256=$pixel_sha256"
     echo "non_background_bounds=$non_background_bounds"
     echo "event_sequence=focus,pointer_move,pointer_down,pointer_up,key_down,key_up"
     echo "event_count=6"
     echo "event_backend=$BACKEND"
+    echo "repo_revision=$repo_revision"
+    echo "shared_scene_fingerprint=$shared_scene_fingerprint"
+    echo "draw_ir_composition_id=macos-gpu-2d-frozen-composition-v1"
+    echo "draw_ir_scene_key=macos-gpu-2d-frozen-scene-v1"
+    echo "draw_ir_rendered_commands=5"
+    echo "draw_ir_skipped_commands=0"
+    echo "draw_ir_readback_checksum=$draw_ir_checksum"
+    echo "semantic_event=focus"
+    echo "semantic_before_focus=macos-gpu-2d-root"
+    echo "semantic_after_focus=macos-gpu-2d-action"
+    echo "semantic_before_accent=$semantic_before_accent"
+    echo "semantic_after_accent=$semantic_after_accent"
+    echo "semantic_changed=true"
+    echo "semantic_native_focus_reduced=true"
+    echo "semantic_raw_winit_reduced=true"
+    echo "semantic_pointer_key_delivery=observed"
+    echo "semantic_correlation=native-focus-reduced;pointer-key-delivery-observed"
     echo "capture_path=$CAPTURE_PPM"
     echo "source_revision=$source_revision"
 } >"$EVIDENCE"
